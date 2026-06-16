@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 700" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+  <rect width="1100" height="700" fill="#FAFBFD"/>
+
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif">
+    <text x="50" y="48" font-size="13" letter-spacing="2.5" fill="#0176D3" font-weight="700">DEMO · sfi.why_cant_user_see_record</text>
+    <text x="50" y="80" font-size="26" font-weight="700" fill="#181818">The #1 admin support ticket, answered as a cascade.</text>
+    <text x="50" y="108" font-size="14" fill="#706E6B">OWD → permission grants → role hierarchy → owner rules → criteria rules → manual / sets / teams.</text>
+  </g>
+
+  <g transform="translate(50,140)">
+    <rect width="1000" height="510" rx="10" fill="#0B1426"/>
+    <circle cx="22" cy="22" r="6" fill="#FF5F57"/>
+    <circle cx="42" cy="22" r="6" fill="#FEBC2E"/>
+    <circle cx="62" cy="22" r="6" fill="#28C840"/>
+    <text x="500" y="27" text-anchor="middle" font-size="12" fill="#7E8FAA">claude  ·  sfi mcp  ·  org-kb @ 2026-05-28</text>
+    <line x1="0" y1="46" x2="1000" y2="46" stroke="#1F3556"/>
+
+    <g font-size="13.5" transform="translate(28,76)">
+      <text fill="#7FCBFF" font-weight="700">you</text>
+      <text x="0" y="22" fill="#E6EEF8">jcortez@acme.com says she can't see Opportunity 0065j00000XyZab. Why?</text>
+
+      <text y="60" fill="#FFA967" font-weight="700">claude</text>
+      <text x="0" y="82" fill="#9BB3D1">→ sfi.why_cant_user_see_record({ userId: ..., recordId: ... })</text>
+
+      <g transform="translate(0,108)" fill="#E6EEF8">
+        <text fill="#FF8A8A" font-weight="700">verdict: restricted</text>
+        <text x="0" y="22" fill="#7E8FAA">8-stage cascade · stopped at stage 4</text>
+
+        <!-- cascade stages -->
+        <g transform="translate(0,52)">
+          <text fill="#A4D4A4" font-weight="700">1 ·</text>     <text x="32" fill="#E6EEF8">OWD on Opportunity</text>          <text x="320" fill="#A4D4A4">Private</text>          <text x="500" fill="#7E8FAA">continue</text>
+          <text y="22" fill="#A4D4A4" font-weight="700">2 ·</text> <text x="32" y="22" fill="#E6EEF8">Profile object access</text>     <text x="320" y="22" fill="#A4D4A4">Read on Opportunity</text> <text x="500" y="22" fill="#7E8FAA">continue</text>
+          <text y="44" fill="#A4D4A4" font-weight="700">3 ·</text> <text x="32" y="44" fill="#E6EEF8">Perm-set object access</text>    <text x="320" y="44" fill="#A4D4A4">no relevant grants</text>  <text x="500" y="44" fill="#7E8FAA">continue</text>
+          <text y="66" fill="#FF8A8A" font-weight="700">4 ·</text> <text x="32" y="66" fill="#E6EEF8">Role hierarchy</text>            <text x="320" y="66" fill="#FF8A8A">user role does NOT roll up to owner</text>
+          <text y="88" fill="#7E8FAA" font-weight="700">5 ·</text> <text x="32" y="88" fill="#7E8FAA">Owner sharing rules</text>     <text x="320" y="88" fill="#7E8FAA">no rule matches</text>
+          <text y="110" fill="#FFD580" font-weight="700">6 ·</text> <text x="32" y="110" fill="#E6EEF8">Criteria sharing rules</text> <text x="320" y="110" fill="#FFD580">unknown</text> <text x="400" y="110" fill="#7E8FAA">(needs record data)</text>
+          <text y="132" fill="#FFD580" font-weight="700">7 ·</text> <text x="32" y="132" fill="#E6EEF8">Manual sharing</text>          <text x="320" y="132" fill="#FFD580">unknown</text>
+          <text y="154" fill="#FFD580" font-weight="700">8 ·</text> <text x="32" y="154" fill="#E6EEF8">Account teams</text>           <text x="320" y="154" fill="#FFD580">unknown</text>
+        </g>
+
+        <!-- why -->
+        <g transform="translate(0,290)">
+          <text fill="#7FCBFF" font-weight="700">why</text>
+          <text y="22" fill="#E6EEF8">Record owner sits under role <tspan fill="#FFD580">Western Region/Enterprise Lead</tspan>.</text>
+          <text y="40" fill="#E6EEF8">User sits under role <tspan fill="#FFD580">East/Mid-Market</tspan>. No common ancestor.</text>
+
+          <text y="68" fill="#7FCBFF" font-weight="700">what would unblock</text>
+          <text y="88" fill="#E6EEF8">• grant her the perm set <tspan fill="#A4D4A4">Enterprise_Opps_Read</tspan>, OR</text>
+          <text y="106" fill="#E6EEF8">• move her under role <tspan fill="#A4D4A4">All_Enterprise_Sales</tspan>, OR</text>
+          <text y="124" fill="#E6EEF8">• reassign record owner</text>
+        </g>
+
+        <text x="0" y="430" fill="#9BB3D1" font-style="italic">3 stages returned `unknown` — those need record-level checks the vault won't run.</text>
+      </g>
+    </g>
+  </g>
+</svg>

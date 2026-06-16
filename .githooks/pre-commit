@@ -1,0 +1,32 @@
+#!/bin/sh
+# pre-commit — block private-org identifiers from entering git history.
+#
+# Scans the STAGED changes against the maintainer blocklist in
+# scripts/forbidden-names.local.json (gitignored). If that file is absent
+# (a fresh clone, a contributor without the blocklist) only the generic
+# structural check runs — which is correct for a public-clean tree.
+#
+# Enabled via `core.hooksPath .githooks`, set by `scripts/install-hooks.mjs`
+# on `pnpm install` (the `prepare` script). Emergency bypass for a genuine
+# false positive only: git commit --no-verify
+ROOT="$(git rev-parse --show-toplevel)" || exit 0
+cd "$ROOT" || exit 0
+
+STAGED="$(git diff --cached --name-only --diff-filter=ACM)"
+if [ -z "$STAGED" ]; then
+  exit 0
+fi
+
+# Null-delimited so paths with spaces survive; scan only staged paths.
+git diff --cached --name-only --diff-filter=ACM -z \
+  | xargs -0 node scripts/scan-org-leaks.mjs --strict --paths
+status=$?
+
+if [ "$status" -ne 0 ]; then
+  echo ""
+  echo "✖ pre-commit: a private-org identifier was found in your staged changes (see above)."
+  echo "  Remove the flagged term(s) before committing."
+  echo "  If — and only if — it is a genuine false positive: git commit --no-verify"
+  exit 1
+fi
+exit 0

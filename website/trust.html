@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+ <meta charset="utf-8">
+ <meta name="viewport" content="width=device-width, initial-scale=1">
+
+ <title>Quality &amp; trust - how sf-intelligence is tested and kept honest</title>
+ <meta name="description" content="How to trust sf-intelligence: ~3,500 automated tests across 9 packages, a full CI gate (typecheck, lint, unit, integration, e2e, evaluation, scale, SAST, and an org-data leak scan), a per-answer trust model (provenance, confidence, completeness), adversarial QA against real Salesforce orgs, and explicit boundaries.">
+ <link rel="canonical" href="https://salesforce-intelligence.pages.dev/trust.html">
+ <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
+ <meta name="author" content="sf-intelligence">
+ <meta name="theme-color" content="#05070A">
+
+ <meta property="og:type" content="website">
+ <meta property="og:site_name" content="sf-intelligence">
+ <meta property="og:title" content="Quality &amp; trust - how sf-intelligence is tested">
+ <meta property="og:description" content="~3,500 automated tests, a full CI gate, a per-answer trust model, adversarial QA against real Salesforce orgs, and explicit boundaries. How to trust the answers.">
+ <meta property="og:url" content="https://salesforce-intelligence.pages.dev/trust.html">
+ <meta property="og:image" content="https://salesforce-intelligence.pages.dev/assets/img/og-image.png">
+ <meta property="og:image:width" content="1200">
+ <meta property="og:image:height" content="630">
+ <meta property="og:image:alt" content="sf-intelligence product card">
+ <meta name="twitter:card" content="summary_large_image">
+ <meta name="twitter:title" content="Quality &amp; trust - sf-intelligence">
+ <meta name="twitter:description" content="How sf-intelligence is tested and kept honest: ~3,500 tests, full CI gate, trust model, adversarial QA.">
+ <meta name="twitter:image" content="https://salesforce-intelligence.pages.dev/assets/img/og-image.png">
+
+ <link rel="icon" href="/assets/img/favicon.svg" type="image/svg+xml">
+ <link rel="icon" href="/assets/img/favicon-32.png" sizes="32x32" type="image/png">
+ <link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
+ <link rel="manifest" href="/site.webmanifest">
+ <link rel="preconnect" href="https://fonts.googleapis.com">
+ <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+ <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=VT323&display=swap">
+ <link rel="stylesheet" href="/assets/css/style.css">
+
+ <script type="application/ld+json">
+ {
+ "@context": "https://schema.org",
+ "@type": "BreadcrumbList",
+ "itemListElement": [
+ { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://salesforce-intelligence.pages.dev/" },
+ { "@type": "ListItem", "position": 2, "name": "Quality & trust", "item": "https://salesforce-intelligence.pages.dev/trust.html" }
+ ]
+ }
+ </script>
+</head>
+<body>
+ <a class="skip" href="#main">Skip to content</a>
+
+ <header class="site-header">
+ <div class="container nav">
+ <a class="brand" href="/" aria-label="sf-intelligence home"><span class="mk">&gt;_</span>&nbsp;sf-intelligence</a>
+ <nav aria-label="Primary">
+ <ul class="nav-links">
+ <li><a href="/capabilities.html">capabilities</a></li>
+ <li><a href="/tools.html">tools</a></li>
+ <li><a href="/trust.html">trust</a></li>
+ <li><a href="/getting-started.html">get-started</a></li>
+ <li><a href="/faq.html">faq</a></li>
+ </ul>
+ </nav>
+ <div class="nav-cta">
+ <a class="btn btn-ghost" href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">npm</a>
+ <a class="btn btn-solid" href="/#install">install</a>
+ <button class="nav-toggle" aria-label="Open menu" aria-controls="mobile-menu" aria-expanded="false">menu</button>
+ </div>
+ </div>
+ <div class="container">
+ <div id="mobile-menu" class="mobile-menu">
+ <ul>
+ <li><a href="/capabilities.html">capabilities</a></li>
+ <li><a href="/tools.html">tools</a></li>
+ <li><a href="/trust.html">trust</a></li>
+ <li><a href="/getting-started.html">get-started</a></li>
+ <li><a href="/faq.html">faq</a></li>
+ </ul>
+ <a class="btn btn-solid" href="/#install" style="width:100%; justify-content:center;">install</a>
+ </div>
+ </div>
+ </header>
+
+ <main id="main">
+ <section class="subhero">
+ <div class="container">
+ <nav class="crumbs" aria-label="Breadcrumb"><a href="/">home</a><span>/</span>trust</nav>
+ <h1 class="screen-type">How to trust the answers</h1>
+ <p>An AI that talks confidently about your Salesforce org is easy to build. One you can <em>trust</em> is not. Here is exactly how sf-intelligence earns it - the test suite, the CI gate every change must pass, the per-answer trust labels, and the boundaries it refuses to cross.</p>
+ </div>
+ </section>
+
+ <!-- headline numbers -->
+ <section class="stats" aria-label="Quality at a glance" style="padding:0;">
+ <div class="container stats-grid">
+ <div class="stat"><div class="num">3,500+</div><div class="label">automated tests</div></div>
+ <div class="stat"><div class="num">9</div><div class="label">tested packages</div></div>
+ <div class="stat"><div class="num">11</div><div class="label">CI gates per change</div></div>
+ <div class="stat"><div class="num">0</div><div class="label">org-data in the repo</div></div>
+ </div>
+ </section>
+
+ <!-- 1. test coverage -->
+ <section id="tests">
+ <div class="container">
+ <p class="sec-label">automated testing</p>
+ <h2 class="head screen-type">~3,500 tests across the stack</h2>
+ <p class="sec-intro">Every layer of the product has its own test suite - from the metadata extractors and the dependency-graph engine to the 171 MCP tools and the CLI. These run on every change.</p>
+ <article class="card" style="margin-top:26px;">
+ <!--PKGTABLE:start (regenerated by recalibrate.mjs - do not hand-edit)-->
+ <div class="toollist">
+ <div class="row"><div class="tn">mcp</div><div class="td">The 171 read-only tools + router + grounding layer - <strong>≈2,059</strong> cases across 180 files.</div></div>
+ <div class="row"><div class="tn">extractors</div><div class="td">Metadata parsing for every Salesforce component type - <strong>≈735</strong> cases.</div></div>
+ <div class="row"><div class="tn">cli</div><div class="td">The <span class="mono">sfi</span> command-line tool - <strong>≈202</strong> cases.</div></div>
+ <div class="row"><div class="tn">graph</div><div class="td">The DuckDB dependency-graph engine - <strong>≈159</strong> cases.</div></div>
+ <div class="row"><div class="tn">parsers</div><div class="td">Formula / SOQL / source tokenizers - <strong>≈112</strong> cases.</div></div>
+ <div class="row"><div class="tn">patterns</div><div class="td">Heuristic recognizers (PII, naming, code quality) - <strong>≈107</strong> cases.</div></div>
+ <div class="row"><div class="tn">renderers</div><div class="td">Markdown vault rendering - <strong>≈78</strong> cases.</div></div>
+ <div class="row"><div class="tn">vault</div><div class="td">Vault layout, manifest, freshness - <strong>≈77</strong> cases.</div></div>
+ <div class="row"><div class="tn">tooling-api</div><div class="td">Optional Tooling-API enrichment - <strong>≈49</strong> cases.</div></div>
+ </div>
+ <!--PKGTABLE:end-->
+ </article>
+ <p class="muted" style="margin-top:14px; font-size:.86rem;">Plus <strong>7 integration suites</strong> that drive the real MCP server end-to-end - including post-refresh <em>golden</em> tests, a fixed reference-question set, and deep smoke tests.</p>
+ </div>
+ </section>
+
+ <!-- 2. CI gate -->
+ <section id="ci" style="border-top:1px solid var(--line); border-bottom:1px solid var(--line); background:var(--screen);">
+ <div class="container">
+ <p class="sec-label">the ship gate</p>
+ <h2 class="head screen-type">Nothing ships unless all of this is green</h2>
+ <p class="sec-intro">Every change runs the full gate in CI. A single red check blocks the release.</p>
+ <div class="grid cols-2" style="margin-top:24px; gap:10px 32px;">
+ <div class="bound"><span class="mk">✓</span><div><b>Type-check</b><p>Strict TypeScript across every package.</p></div></div>
+ <div class="bound"><span class="mk">✓</span><div><b>Lint</b><p>ESLint, including import-order rules.</p></div></div>
+ <div class="bound"><span class="mk">✓</span><div><b>~3,500 unit tests</b><p>Every package suite must pass.</p></div></div>
+ <div class="bound"><span class="mk">✓</span><div><b>Integration + golden tests</b><p>The real MCP server, end-to-end.</p></div></div>
+ <div class="bound"><span class="mk">✓</span><div><b>End-to-end smoke</b><p>The server boots and answers over stdio.</p></div></div>
+ <div class="bound"><span class="mk">✓</span><div><b>Natural-language regression</b><p>A large question set is routed and checked, not just plumbing.</p></div></div>
+ <div class="bound"><span class="mk">✓</span><div><b>Analytical correctness eval</b><p>Answers are checked for the right verdict, not just a response.</p></div></div>
+ <div class="bound"><span class="mk">✓</span><div><b>Scale benchmarks</b><p>Import / refresh / resolve budgets enforced (below).</p></div></div>
+ <div class="bound"><span class="mk">✓</span><div><b>SAST</b><p>Static application security scanning.</p></div></div>
+ <div class="bound"><span class="mk">✓</span><div><b>Release guard</b><p>Validates the exact shipping set before publish.</p></div></div>
+ <div class="bound"><span class="mk">✓</span><div><b>Org-data leak scan</b><p>Fails the build if any real org identifier is found in the shipping set.</p></div></div>
+ </div>
+ </div>
+ </section>
+
+ <!-- 3. trust model -->
+ <section id="trust-model">
+ <div class="container">
+ <p class="sec-label">per-answer trust</p>
+ <h2 class="head screen-type">Every answer is labelled</h2>
+ <p class="sec-intro">Testing keeps the code correct. These labels keep each <em>answer</em> honest - you always know where it came from, how it was derived, and how complete the evidence was.</p>
+ <div class="trust-cols" style="margin-top:28px;">
+ <div class="trust-col">
+ <h3>confidence</h3>
+ <div class="tag-row"><span class="badge high">declared</span><span class="desc">Salesforce states it directly - highest trust.</span></div>
+ <div class="tag-row"><span class="badge mid">parsed</span><span class="desc">From AST/XML parsing of source - high trust.</span></div>
+ <div class="tag-row"><span class="badge low">heuristic</span><span class="desc">Regex / token analysis - spot-check it.</span></div>
+ </div>
+ <div class="trust-col">
+ <h3>provenance</h3>
+ <div class="tag-row"><span class="badge mid">offline_snapshot</span><span class="desc">The last refresh's local vault - the default.</span></div>
+ <div class="tag-row"><span class="badge mid">live_org</span><span class="desc">An opt-in, capped, read-only SOQL read.</span></div>
+ <div class="tag-row"><span class="badge mid">hybrid</span><span class="desc">Fuses vault + live, discloses both.</span></div>
+ </div>
+ <div class="trust-col">
+ <h3>completeness</h3>
+ <div class="tag-row"><span class="badge high">complete</span><span class="desc">Every needed family was modeled.</span></div>
+ <div class="tag-row"><span class="badge low">partial</span><span class="desc">A dependency wasn't retrieved - "not checked", not "none".</span></div>
+ <div class="tag-row"><span class="badge mid">unknown</span><span class="desc">Coverage couldn't be determined.</span></div>
+ </div>
+ </div>
+ </div>
+ </section>
+
+ <!-- 4. scale + adversarial -->
+ <section id="scale">
+ <div class="container">
+ <div class="grid cols-2" style="gap:40px; align-items:start;">
+ <div>
+ <p class="sec-label">tested at scale</p>
+ <h2 class="head screen-type" style="font-size:clamp(1.7rem,4vw,2.4rem);">Budgets, gated in CI</h2>
+ <div class="bound"><span class="mk">▸</span><div><b>Graph import</b><p>10,000 nodes in under 90 seconds.</p></div></div>
+ <div class="bound"><span class="mk">▸</span><div><b>Full refresh</b><p>1,000 object + field files in under 10 minutes.</p></div></div>
+ <div class="bound"><span class="mk">▸</span><div><b>Resolve</b><p>p95 under 2 seconds on the CI vault.</p></div></div>
+ </div>
+ <div>
+ <p class="sec-label">adversarial QA</p>
+ <h2 class="head screen-type" style="font-size:clamp(1.7rem,4vw,2.4rem);">Tested on real orgs</h2>
+ <p class="sec-intro">Beyond synthetic fixtures, the product is exercised against <strong>real production Salesforce orgs</strong> with a deliberately adversarial, failure-finding QA pass - not happy-path validation. Bugs found on real metadata are fixed and turned into regression tests so they stay fixed.</p>
+ <p class="muted" style="font-size:.9rem;">No customer org data is published or shipped - see the leak scan above.</p>
+ </div>
+ </div>
+ </div>
+ </section>
+
+ <!-- 5. honesty -->
+ <section id="boundaries" style="border-top:1px solid var(--line); background:var(--screen);">
+ <div class="container">
+ <p class="sec-label">the honest part</p>
+ <h2 class="head screen-type">What testing can't promise</h2>
+ <p class="sec-intro">Trust also means stating the limits plainly.</p>
+ <div class="grid cols-2" style="margin-top:22px; gap:8px 32px;">
+ <div class="bound"><span class="mk">!</span><div><b>Heuristic findings can be wrong.</b><p>Anything labelled <span class="mono">heuristic</span> (the Apex scanner, name-pattern detection) may have false positives. Spot-check before acting.</p></div></div>
+ <div class="bound"><span class="mk">!</span><div><b>Static analysis has blind spots.</b><p>Dynamic SOQL and reflective Apex are invisible - "no references found" means "no static evidence", not "definitely unused".</p></div></div>
+ <div class="bound"><span class="mk">!</span><div><b>Answers are as fresh as your last refresh.</b><p>The vault is a snapshot. <span class="mono">health_check</span> tells you when it's stale.</p></div></div>
+ <div class="bound"><span class="mk">!</span><div><b>It's read-only by design.</b><p>No write path means no accidental changes - and no claim to fix anything for you.</p></div></div>
+ </div>
+ </div>
+ </section>
+
+ <section>
+ <div class="container">
+ <div class="cta-box">
+ <h2 class="screen-type">Trust, but verify.</h2>
+ <p>Every claim above is in the source-available repo and runs in CI. Point it at your own org and check the answers against reality.</p>
+ <div class="cta-actions">
+ <a class="btn btn-solid" href="/getting-started.html">get started</a>
+ <a class="btn btn-ghost" href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">view on npm</a>
+ </div>
+ </div>
+ </div>
+ </section>
+ </main>
+
+ <footer class="site-footer">
+ <div class="container">
+ <div class="footer-grid">
+ <div class="footer-about">
+ <a class="brand" href="/" style="margin-bottom:12px;"><span class="mk">&gt;_</span>&nbsp;sf-intelligence</a>
+ <p>An offline, read-only, MCP-first knowledge base for one Salesforce org. Answers grounded in real metadata - never a guess.</p>
+ </div>
+ <div><h4>product</h4><ul><li><a href="/capabilities.html">capabilities</a></li><li><a href="/tools.html">all tools</a></li><li><a href="/trust.html">quality &amp; trust</a></li><li><a href="/#install">install</a></li></ul></div>
+ <div><h4>docs</h4><ul><li><a href="/getting-started.html">getting started</a></li><li><a href="/configuration.html">configuration</a></li><li><a href="/faq.html">faq</a></li><li><a href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">npm package</a></li></ul></div>
+ <div><h4>about</h4><ul><li><a href="/faq.html#privacy">privacy</a></li><li><a href="/licensing.html">license</a></li></ul></div>
+ </div>
+ <div class="footer-bottom">
+ <span><span class="ok">●</span> © <span id="year">2026</span> sf-intelligence - all systems offline</span>
+ <span>MIT + Commons Clause · built for Salesforce teams</span>
+ </div>
+ </div>
+ </footer>
+
+ <script src="/assets/js/main.js" defer></script>
+</body>
+</html>

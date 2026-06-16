@@ -1,0 +1,2 @@
+# DuckDB is built in CI via `pnpm eval:build-ci-vault`; do not commit binaries.
+org-kb/graph/

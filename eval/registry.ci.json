@@ -1,0 +1,7 @@
+{
+  "vaults": {
+    "ci": {
+      "path": "eval/fixtures/ci-vault/org-kb"
+    }
+  }
+}

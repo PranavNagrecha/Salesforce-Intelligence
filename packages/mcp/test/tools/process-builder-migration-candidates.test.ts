@@ -1,0 +1,307 @@
+/// <reference types="vitest/globals" />
+
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import type {
+  Edge,
+  ExtractionResult,
+  Node,
+  VaultManifest,
+} from '@sf-intelligence/contracts';
+import {
+  closeGraph,
+  importExtractionResults,
+  openGraph,
+  type GraphStore,
+} from '@sf-intelligence/graph';
+
+import type { Context } from '../../src/server.js';
+import {
+  processBuilderMigrationCandidatesHandler,
+  processBuilderMigrationCandidatesInputSchema,
+} from '../../src/tools/process-builder-migration-candidates.js';
+
+const FIXTURE_MANIFEST: VaultManifest = {
+  version: '0.1.0',
+  refreshedAt: '2026-05-27T14:33:08Z',
+  sourceOrg: 'me@example.com',
+  components: { Flow: 2, WorkflowRule: 3, ApprovalProcess: 1 },
+  edges: {},
+  sourceTreeHash: 'sha256:fixture',
+};
+
+const makeNode = (overrides: Partial<Node> & Pick<Node, 'id'>): Node => ({
+  type: 'Flow',
+  apiName: 'Anonymous',
+  label: null,
+  parentId: null,
+  sourcePath: 'unused.xml',
+  lastModifiedDate: null,
+  lastModifiedBy: null,
+  apiVersion: null,
+  properties: {},
+  ...overrides,
+});
+
+const makeEdge = (
+  overrides: Partial<Edge> & Pick<Edge, 'fromId' | 'toId' | 'edgeType'>,
+): Edge => ({
+  confidence: 'declared',
+  source: 'unit-test',
+  properties: {},
+  ...overrides,
+});
+
+const PB_LEAD = 'Flow:Lead_Score_Update';
+const PB_AUTOLAUNCH = 'Flow:NotAProcessBuilder';
+const WR_SIMPLE = 'WorkflowRule:Account.Notify_On_Industry_Change';
+const WR_COMPLEX = 'WorkflowRule:Opportunity.Discount_Approval_Trigger';
+const WR_INACTIVE = 'WorkflowRule:Account.OldInactive';
+const AP_APPROVAL = 'ApprovalProcess:Opportunity.BigDeal';
+
+const seed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: PB_LEAD,
+      type: 'Flow',
+      apiName: 'Lead_Score_Update',
+      properties: {
+        processType: 'Workflow',
+        active: true,
+        decisionCount: 3,
+        actionCount: 2,
+        timeTriggerCount: 0,
+      },
+    }),
+    makeNode({
+      id: PB_AUTOLAUNCH,
+      type: 'Flow',
+      apiName: 'NotAProcessBuilder',
+      properties: {
+        processType: 'AutoLaunchedFlow',
+        active: true,
+      },
+    }),
+    makeNode({
+      id: WR_SIMPLE,
+      type: 'WorkflowRule',
+      apiName: 'Account.Notify_On_Industry_Change',
+      properties: {
+        active: true,
+        triggerType: 'onCreateOnly',
+        criteriaItemCount: 1,
+        conditions: [
+          {
+            kind: 'criteria',
+            conditionContextId:
+              'ConditionalContext:WorkflowRule:Account.Notify_On_Industry_Change.condition-0',
+            expression: 'Industry equals Technology',
+            fieldRefs: ['CustomField:Account.Industry'],
+          },
+        ],
+        timeTriggerCount: 0,
+        fieldUpdateCount: 0,
+      },
+    }),
+    makeNode({
+      id: WR_COMPLEX,
+      type: 'WorkflowRule',
+      apiName: 'Opportunity.Discount_Approval_Trigger',
+      properties: {
+        active: true,
+        triggerType: 'onAllChanges',
+        criteriaItemCount: 3,
+        conditions: [
+          {
+            kind: 'criteria',
+            conditionContextId:
+              'ConditionalContext:WorkflowRule:Opportunity.Discount_Approval_Trigger.condition-0',
+            expression: 'A equals 1 AND B equals 2 AND C equals 3',
+            fieldRefs: [
+              'CustomField:Opportunity.A',
+              'CustomField:Opportunity.B',
+              'CustomField:Opportunity.C',
+            ],
+          },
+        ],
+        timeTriggerCount: 1,
+        fieldUpdateCount: 2,
+        outboundMessageCount: 0,
+        taskCreationCount: 0,
+      },
+    }),
+    makeNode({
+      id: WR_INACTIVE,
+      type: 'WorkflowRule',
+      apiName: 'Account.OldInactive',
+      properties: {
+        active: false,
+        triggerType: 'onCreateOnly',
+        criteriaItemCount: 0,
+        conditions: [],
+      },
+    }),
+    makeNode({
+      id: AP_APPROVAL,
+      type: 'ApprovalProcess',
+      apiName: 'Opportunity.BigDeal',
+      properties: { active: true, stepCount: 2 },
+    }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: PB_LEAD,
+      toId: 'CustomField:Lead.Score__c',
+      edgeType: 'writesTo',
+    }),
+    makeEdge({
+      fromId: WR_SIMPLE,
+      toId: 'EmailTemplate:Notify',
+      edgeType: 'sendsEmail',
+    }),
+  ],
+};
+
+let tempDir: string;
+let store: GraphStore;
+let ctx: Context;
+
+beforeAll(async () => {
+  tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-pbmc-'));
+  const dbPath = join(tempDir, 'pbmc.db');
+  const opened = await openGraph(dbPath);
+  if (!opened.ok) throw new Error(opened.error.message);
+  store = opened.value;
+  const imported = await importExtractionResults(store, [seed]);
+  if (!imported.ok) throw new Error(imported.error.message);
+  ctx = { vaultRoot: tempDir, manifest: FIXTURE_MANIFEST, graph: store };
+});
+
+afterAll(async () => {
+  await closeGraph(store);
+  rmSync(tempDir, { recursive: true, force: true });
+});
+
+describe('processBuilderMigrationCandidatesHandler', () => {
+  it('lists active Process Builders only when processType=Workflow', async () => {
+    const result = await processBuilderMigrationCandidatesHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const pbIds = result.value.data.processBuilders.map((p) => p.id);
+    expect(pbIds).toContain(PB_LEAD);
+    expect(pbIds).not.toContain(PB_AUTOLAUNCH);
+  });
+
+  it('classifies a 3-decision PB as complex due to decisionCount >= 3', async () => {
+    const result = await processBuilderMigrationCandidatesHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const pb = result.value.data.processBuilders.find((p) => p.id === PB_LEAD);
+    expect(pb?.complexity).toBe('complex');
+  });
+
+  it('classifies a single-criterion WR as simple', async () => {
+    const result = await processBuilderMigrationCandidatesHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const wr = result.value.data.workflowRules.find((w) => w.id === WR_SIMPLE);
+    expect(wr?.complexity).toBe('simple');
+  });
+
+  it('classifies a multi-criterion, time-trigger WR as complex', async () => {
+    const result = await processBuilderMigrationCandidatesHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const wr = result.value.data.workflowRules.find((w) => w.id === WR_COMPLEX);
+    expect(wr?.complexity).toBe('complex');
+  });
+
+  it('excludes inactive rules by default (activeOnly: true)', async () => {
+    const result = await processBuilderMigrationCandidatesHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.workflowRules.map((w) => w.id);
+    expect(ids).not.toContain(WR_INACTIVE);
+  });
+
+  it('includes inactive rules when activeOnly=false', async () => {
+    const result = await processBuilderMigrationCandidatesHandler(ctx, {
+      activeOnly: false,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.workflowRules.map((w) => w.id);
+    expect(ids).toContain(WR_INACTIVE);
+  });
+
+  it('emits the retirement-deadline notes verbatim', async () => {
+    const result = await processBuilderMigrationCandidatesHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(
+      result.value.data.summary.processBuilderRetirementDeadlineNote,
+    ).toMatch(/Process Builders are deprecated/);
+    expect(
+      result.value.data.summary.workflowRuleRetirementDeadlineNote,
+    ).toMatch(/WorkflowRules are deprecated/);
+  });
+
+  it('emits the verbatim "migration tool not bundled" boundary disclosure', async () => {
+    const result = await processBuilderMigrationCandidatesHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.boundaries.join(' ')).toMatch(
+      /migration tool itself .*does not run here/,
+    );
+  });
+
+  it('sorts WRs by complexity by default (simple first)', async () => {
+    const result = await processBuilderMigrationCandidatesHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const wrs = result.value.data.workflowRules;
+    expect(wrs[0]?.complexity).toBe('simple');
+  });
+
+  it('surfaces ApprovalProcess candidates when includeApprovalProcesses is true (default)', async () => {
+    const result = await processBuilderMigrationCandidatesHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.approvalProcesses.map((a) => a.id);
+    expect(ids).toContain(AP_APPROVAL);
+  });
+
+  it('excludes ApprovalProcesses when includeApprovalProcesses=false', async () => {
+    const result = await processBuilderMigrationCandidatesHandler(ctx, {
+      includeApprovalProcesses: false,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.approvalProcesses.length).toBe(0);
+  });
+});
+
+describe('processBuilderMigrationCandidatesInputSchema', () => {
+  it('accepts empty input', () => {
+    expect(
+      processBuilderMigrationCandidatesInputSchema.safeParse({}).success,
+    ).toBe(true);
+  });
+
+  it('rejects invalid sortBy', () => {
+    expect(
+      processBuilderMigrationCandidatesInputSchema.safeParse({
+        sortBy: 'invalid',
+      }).success,
+    ).toBe(false);
+  });
+
+  it('rejects limit above 500', () => {
+    expect(
+      processBuilderMigrationCandidatesInputSchema.safeParse({ limit: 501 })
+        .success,
+    ).toBe(false);
+  });
+});

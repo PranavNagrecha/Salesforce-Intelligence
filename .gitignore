@@ -1,0 +1,68 @@
+# Local build-loop state lives in Intelligence Layer/.sfi/local/ (see LOOP_STATE.md)
+LOOP_STATE.json
+
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+.env
+.env.local
+coverage/
+.vitest-cache/
+
+# User-specific generated vault. Created by /sfi-init + /sfi-refresh on the
+# end user's own org. Never committed: it contains org-specific metadata,
+# a DuckDB binary, and absolute local paths (privacy + repo-bloat). Each
+# user builds their own. Test fixtures live under packages/*/test, not here.
+org-kb/
+
+# Maintainer's real eval golden cases (reference your private org components).
+# Never committed; the shipped cases.example.json shows the format.
+eval/cases.local.json
+
+# Staged skill rewrites awaiting human review/apply. Skill files under
+# .claude/skills/ cannot be auto-edited in auto-mode, so proposed updates land
+# here for a maintainer to review and copy across. Never shipped.
+skill-updates/
+
+# Maintainer QA harness — transcripts, batteries, revalidation scripts tied to
+# private org vaults. Excluded from public release via RELEASE_EXCLUDE; do not
+# commit fresh runs (may contain org paths and component names).
+packages/mcp/qa-transcript*.json
+packages/mcp/qa-revalidate*.json
+packages/mcp/qa-roster*.json
+packages/cli/qa-*.json
+
+# pnpm content-addressable store (local build cache; never commit)
+.pnpm-store/
+
+# Integration smoke reports (generated unless SFI_WRITE_SMOKE_REPORT=1)
+tests/integration/*-report.md
+
+# End-user MCP journey campaign outputs. The scenario bank is committed; raw
+# transcripts stay local because they can contain org-specific names and paths.
+eval/end-user-results*.json
+eval/end-user-transcripts/
+
+# Maintainer-only privacy-guard name list (real private-org identifiers).
+# The guard reads it locally; it must never be committed.
+scripts/forbidden-names.local.json
+
+# Maintainer-only tests/scripts that reference real private-org metadata.
+# They are harness-gated (need real-org fixtures not in this repo, so CI skips
+# them) and stay on the maintainer's machine. Keeping them out of the repo lets
+# the whole tree be public-clean without a separate snapshot step.
+scripts/r3-wave-smoke.ts
+packages/extractors/test/custom-field.test.ts
+packages/extractors/test/custom-tab.test.ts
+packages/extractors/test/group.test.ts
+packages/extractors/test/omni-integration-procedure.test.ts
+packages/extractors/test/validation-rule.test.ts
+tests/integration/buyer-smoke.test.ts
+tests/integration/reference-questions.test.ts
+# Real-org smoke tests + their generated reports (filenames vary by org alias).
+tests/integration/deep-smoke*.test.ts
+tests/integration/*-smoke-*-report.md
+
+# Local maintainer reference (contains org blocklist terms) — never commit
+docs/plans/CLAUDE-CODE-MASTER-PROMPT.md

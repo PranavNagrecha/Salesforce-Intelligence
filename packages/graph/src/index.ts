@@ -1,0 +1,116 @@
+/**
+ * @sf-intelligence/graph
+ *
+ * The graph layer for `org-kb/`. v0.1 ships the DuckDB schema, the open/close
+ * lifecycle, and migration plumbing; Phase D's remaining graph-* tasks add
+ * the import pipeline that ingests the Markdown corpus into nodes/edges and
+ * the query API consumed by the MCP tools. This barrel is the single public
+ * surface.
+ */
+
+export {
+  canonicalizeApexCallEdgeTargets,
+  IMPORT_BATCH_SIZE,
+  importExtractionResults,
+} from './import.js';
+export type { ImportCounts } from './import.js';
+export {
+  applyChangeSet,
+  changeSetSize,
+  computeChangeSet,
+  INCREMENTAL_DELTA_CAP,
+} from './apply-change-set.js';
+export type { ApplyCounts, ChangeSet, EdgeKey } from './apply-change-set.js';
+export { runMigrations } from './migrations.js';
+export {
+  contributorsSummary,
+  countNodesByType,
+  danglingTargetSummary,
+  freshnessSummary,
+  getNodeById,
+  getSubgraph,
+  listChildren,
+  listEdges,
+  listNodeIdentities,
+  listNodesByType,
+  searchNodes,
+} from './queries.js';
+export type {
+  Contributor,
+  ContributorsSummary,
+  DanglingTargetGroup,
+  FreshnessEntry,
+  FreshnessSummary,
+  ListEdgesOptions,
+  ListNodesOptions,
+  NodeIdentity,
+  SearchHit,
+  SearchNodesOptions,
+  Subgraph,
+} from './queries.js';
+export {
+  classifyPhantom,
+  managedNamespaceOf,
+  type CoverageStatus,
+} from './phantom-classify.js';
+export {
+  computePhantomBucketSummary,
+  type PhantomBucketSummary,
+  type PhantomCoverageLookup,
+} from './phantom-bucket-summary.js';
+export { fleetResolve } from './fleet.js';
+export {
+  ACTIVE_HOLDERS_COMPLETE_SUBJECT,
+  writeFacts,
+  readFacts,
+  copyFacts,
+  replaceFactsForMetricSource,
+  clearFacts,
+  isFactFresh,
+  type Fact,
+  type ReadFactsOptions,
+} from './facts.js';
+export type {
+  FleetTopCandidate,
+  FleetVaultRef,
+  FleetVaultResult,
+} from './fleet.js';
+export {
+  buildResolveIndex,
+  gatherCandidates,
+  getResolveIndex,
+  persistResolveIndexArtifact,
+  resolveIndexPathForGraph,
+  tryLoadResolveIndexArtifact,
+  writeResolveIndexArtifact,
+} from './resolve-index.js';
+export type {
+  GetResolveIndexOptions,
+  IndexedNode,
+  PersistedResolveIndex,
+  ResolveIndex,
+} from './resolve-index.js';
+export { resolveComponents } from './resolve.js';
+export type {
+  MatchKind,
+  ResolveCandidate,
+  ResolveDisposition,
+  ResolveOptions,
+  ResolveResult,
+} from './resolve.js';
+export { initSchema, SCHEMA_DDL } from './schema.js';
+export {
+  closeGraph,
+  isLockConflict,
+  lockConflictMessage,
+  openGraph,
+  openGraphReadOnly,
+} from './store.js';
+export type { GraphError, GraphStore } from './store.js';
+export {
+  expandSynonyms,
+  jaroWinkler,
+  STOP_WORDS,
+  tokenizeIdentifier,
+  tokenizeText,
+} from './tokenize.js';

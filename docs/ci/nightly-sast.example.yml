@@ -1,0 +1,67 @@
+# Nightly org-health gate — TEMPLATE.
+#
+# Copy to `.github/workflows/nightly-sast.yml` in YOUR Salesforce org repo to
+# turn sf-intelligence into a proactive, autonomous guard: every night it
+# refreshes the vault from the org, runs the SAST gate, and opens a GitHub
+# issue when critical findings appear (new SOQL injection, SOQL/DML-in-loop,
+# …). Value delivered with zero prompts — the "safe autonomy" pattern, with a
+# human in the loop only at the issue it files.
+#
+# It lives under docs/ (not .github/workflows/) on purpose: it needs org auth
+# and would fail if it ran in THIS repo. Move it once you've set the secret.
+#
+# Prerequisite: a repo secret SFDX_AUTH_URL — from `sf org display --verbose
+# --json` (the sfdxAuthUrl field) for a least-privilege integration user.
+
+name: nightly-sast
+
+on:
+  schedule:
+    - cron: '0 7 * * *' # 07:00 UTC daily
+  workflow_dispatch: {}
+
+jobs:
+  nightly-sast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r build
+
+      # --- org-specific: authenticate + refresh the vault (adapt to your org) ---
+      - name: Authenticate to the org
+        run: |
+          printf '%s' "${{ secrets.SFDX_AUTH_URL }}" > /tmp/auth.url
+          npx --yes @salesforce/cli org login sfdx-url \
+            --sfdx-url-file /tmp/auth.url --alias target --set-default
+      - name: Refresh the vault
+        run: node packages/cli/bin/sfi.js refresh --target-org target
+
+      # --- turnkey: gate on critical findings, open an issue on failure ---
+      - name: SAST gate (critical only — ratchet down as the org cleans up)
+        id: sast
+        env:
+          SAST_FAIL_ON: critical
+        run: pnpm sast org-kb
+
+      - name: Open an issue when the gate fails
+        if: failure() && steps.sast.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "Nightly SAST gate failed: critical findings" \
+            --label "security" \
+            --body "The nightly sf-intelligence SAST gate found **critical** issues (e.g. SOQL injection, SOQL/DML-in-loop). Open the workflow run for the full finding list with canonical ids and line numbers, then triage."

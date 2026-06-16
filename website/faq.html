@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+ <meta charset="utf-8">
+ <meta name="viewport" content="width=device-width, initial-scale=1">
+
+ <title>FAQ - sf-intelligence, the offline Salesforce knowledge base</title>
+ <meta name="description" content="Frequently asked questions about sf-intelligence: is it read-only, does it send my org data anywhere, what's the difference between offline and live planes, how does it differ from asking a chatbot, and how do I keep the vault fresh.">
+ <link rel="canonical" href="https://salesforce-intelligence.pages.dev/faq.html">
+ <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
+ <meta name="author" content="sf-intelligence">
+ <meta name="theme-color" content="#05070A">
+
+ <meta property="og:type" content="website">
+ <meta property="og:site_name" content="sf-intelligence">
+ <meta property="og:title" content="FAQ - sf-intelligence">
+ <meta property="og:description" content="Is it read-only? Does it send my org data anywhere? Offline vs live planes, and how it differs from a chatbot.">
+ <meta property="og:url" content="https://salesforce-intelligence.pages.dev/faq.html">
+ <meta property="og:image" content="https://salesforce-intelligence.pages.dev/assets/img/og-image.png">
+ <meta property="og:image:width" content="1200">
+ <meta property="og:image:height" content="630">
+ <meta property="og:image:alt" content="sf-intelligence product card">
+ <meta name="twitter:card" content="summary_large_image">
+ <meta name="twitter:title" content="FAQ - sf-intelligence">
+ <meta name="twitter:description" content="Privacy, scope, and how sf-intelligence works.">
+ <meta name="twitter:image" content="https://salesforce-intelligence.pages.dev/assets/img/og-image.png">
+
+ <link rel="icon" href="/assets/img/favicon.svg" type="image/svg+xml">
+ <link rel="icon" href="/assets/img/favicon-32.png" sizes="32x32" type="image/png">
+ <link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
+ <link rel="manifest" href="/site.webmanifest">
+ <link rel="preconnect" href="https://fonts.googleapis.com">
+ <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+ <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=VT323&display=swap">
+ <link rel="stylesheet" href="/assets/css/style.css">
+
+ <script type="application/ld+json">
+ {
+ "@context": "https://schema.org",
+ "@type": "BreadcrumbList",
+ "itemListElement": [
+ { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://salesforce-intelligence.pages.dev/" },
+ { "@type": "ListItem", "position": 2, "name": "FAQ", "item": "https://salesforce-intelligence.pages.dev/faq.html" }
+ ]
+ }
+ </script>
+ <script type="application/ld+json">
+ {
+ "@context": "https://schema.org",
+ "@type": "FAQPage",
+ "mainEntity": [
+ { "@type": "Question", "name": "Does sf-intelligence write to or change my Salesforce org?", "acceptedAnswer": { "@type": "Answer", "text": "No. It is read-only and has no write path. The first refresh runs sf project retrieve, which only reads metadata. No tool deploys, edits, or deletes anything in your org." } },
+ { "@type": "Question", "name": "Does it send my org data to the cloud or to an AI provider?", "acceptedAnswer": { "@type": "Answer", "text": "Vault answers make no network calls. The metadata index lives on your machine in an org-kb/ directory, and the MCP server reads those local files to answer. The only time it talks to Salesforce is during a refresh (to retrieve metadata) or when you explicitly enable the opt-in, read-only live plane for record counts and samples." } },
+ { "@type": "Question", "name": "How is this different from just asking ChatGPT or Claude about Salesforce?", "acceptedAnswer": { "@type": "Answer", "text": "A general model answers from generic Salesforce training data, which is often wrong for your specific org. sf-intelligence answers only from the metadata you actually retrieved, cites every component with its canonical ID, and asks a clarifying question when a name is ambiguous instead of guessing." } },
+ { "@type": "Question", "name": "What is the difference between the offline and live planes?", "acceptedAnswer": { "@type": "Answer", "text": "The offline plane answers from your last refresh's local vault - schema, dependencies, permissions, source - and is the default. The live plane runs capped, read-only SOQL against the connected org for record-level facts like counts and samples, and is off until you grant consent once per org. Hybrid answers fuse both and disclose each provenance." } },
+ { "@type": "Question", "name": "Can it tell me how many records are in an object?", "acceptedAnswer": { "@type": "Answer", "text": "Only with the live plane enabled. The offline vault stores schema and source, not rows, so record-level questions need a read-only live query (sfi.live_count) or a direct sf data query against the org." } },
+ { "@type": "Question", "name": "How much does sf-intelligence cost?", "acceptedAnswer": { "@type": "Answer", "text": "It is free and source-available under the MIT + Commons Clause license, distributed on npm as sf-intelligence." } },
+ { "@type": "Question", "name": "What do I need to run it?", "acceptedAnswer": { "@type": "Answer", "text": "Node.js 20 or newer and an authenticated Salesforce CLI (sf) pointed at the org you want to index. It runs in Claude Code, Claude Desktop, or any MCP client." } },
+ { "@type": "Question", "name": "Are its answers always correct?", "acceptedAnswer": { "@type": "Answer", "text": "Answers are grounded in real metadata, but each is tagged so you know how much to trust it. Confidence is declared, parsed, or heuristic; heuristic findings from the regex Apex scanner can have false positives and should be spot-checked. It also performs static analysis, so dynamic SOQL and reflective Apex are invisible - a 'no references found' result means 'no static evidence', not 'definitely unused'." } },
+ { "@type": "Question", "name": "How do I keep the answers up to date?", "acceptedAnswer": { "@type": "Answer", "text": "Run sfi refresh (or /sfi-refresh in Claude Code) after you deploy changes to the org. sfi.health_check reports whether the vault is healthy, degraded, or unhealthy and tells you when a rebuild is due." } }
+ ]
+ }
+ </script>
+</head>
+<body>
+ <a class="skip" href="#main">Skip to content</a>
+
+ <header class="site-header">
+ <div class="container nav">
+ <a class="brand" href="/" aria-label="sf-intelligence home"><span class="mk">&gt;_</span>&nbsp;sf-intelligence</a>
+ <nav aria-label="Primary">
+ <ul class="nav-links">
+ <li><a href="/capabilities.html">capabilities</a></li><li><a href="/tools.html">tools</a></li>
+ <li><a href="/#how">how-it-works</a></li>
+ <li><a href="/trust.html">trust</a></li>
+ <li><a href="/getting-started.html">get-started</a></li>
+ <li><a href="/faq.html">faq</a></li>
+ </ul>
+ </nav>
+ <div class="nav-cta">
+ <a class="btn btn-ghost" href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">npm</a>
+ <a class="btn btn-solid" href="/#install">install</a>
+ <button class="nav-toggle" aria-label="Open menu" aria-controls="mobile-menu" aria-expanded="false">menu</button>
+ </div>
+ </div>
+ <div class="container">
+ <div id="mobile-menu" class="mobile-menu">
+ <ul>
+ <li><a href="/capabilities.html">capabilities</a></li><li><a href="/tools.html">tools</a></li>
+ <li><a href="/#how">how-it-works</a></li>
+ <li><a href="/trust.html">trust</a></li>
+ <li><a href="/getting-started.html">get-started</a></li>
+ <li><a href="/faq.html">faq</a></li>
+ </ul>
+ <a class="btn btn-solid" href="/#install" style="width:100%; justify-content:center;">install</a>
+ </div>
+ </div>
+ </header>
+
+ <main id="main">
+ <section class="subhero">
+ <div class="container">
+ <nav class="crumbs" aria-label="Breadcrumb"><a href="/">home</a><span>/</span>faq</nav>
+ <h1 class="screen-type">Salesforce knowledge base - FAQ</h1>
+ <p>The questions people ask before they point sf-intelligence at a production Salesforce org.</p>
+ </div>
+ </section>
+
+ <section>
+ <div class="container" style="max-width:820px;">
+
+ <details class="faq-item" id="write" open>
+ <summary>Does it write to or change my Salesforce org?</summary>
+ <div class="answer"><p><strong>No.</strong> It is read-only and has no write path. The first refresh runs <code>sf project retrieve</code>, which only reads metadata. No tool deploys, edits, or deletes anything in your org.</p></div>
+ </details>
+
+ <details class="faq-item" id="privacy">
+ <summary>Does it send my org data to the cloud or to an AI provider?</summary>
+ <div class="answer"><p>Vault answers make <strong>no network calls</strong>. The metadata index lives on your machine in an <code>org-kb/</code> directory, and the MCP server reads those local files to answer. The only times it talks to Salesforce are during a refresh (to retrieve metadata) or when you explicitly enable the opt-in, read-only live plane for record counts and samples. What you index stays yours.</p></div>
+ </details>
+
+ <details class="faq-item" id="vs-chatbot">
+ <summary>How is this different from asking ChatGPT or Claude about Salesforce?</summary>
+ <div class="answer"><p>A general model answers from generic Salesforce training data, which is often wrong for <em>your</em> org. sf-intelligence answers only from the metadata you actually retrieved, cites every component with its canonical ID (like <code>CustomField:Account.Industry__c</code>), and asks a clarifying question when a name is ambiguous instead of guessing.</p></div>
+ </details>
+
+ <details class="faq-item" id="planes">
+ <summary>What is the difference between the offline and live planes?</summary>
+ <div class="answer"><p>The <strong>offline</strong> plane answers from your last refresh's local vault - schema, dependencies, permissions, source - and is the default. The <strong>live</strong> plane runs capped, read-only SOQL against the connected org for record-level facts like counts and samples, and is off until you grant consent once per org. <strong>Hybrid</strong> answers fuse both and disclose each provenance. Live answers never silently backfill a stale vault claim.</p></div>
+ </details>
+
+ <details class="faq-item" id="records">
+ <summary>Can it tell me how many records are in an object?</summary>
+ <div class="answer"><p>Only with the live plane enabled. The offline vault stores schema and source, not rows, so record-level questions need a read-only live query (<code>sfi.live_count</code>) or a direct <code>sf data query</code> against the org.</p></div>
+ </details>
+
+ <details class="faq-item" id="cost">
+ <summary>How much does it cost?</summary>
+ <div class="answer"><p>Free and source-available under the <a href="/licensing.html">MIT + Commons Clause</a> license, distributed on npm as <code>sf-intelligence</code>.</p></div>
+ </details>
+
+ <details class="faq-item" id="requirements">
+ <summary>What do I need to run it?</summary>
+ <div class="answer"><p><a href="https://nodejs.org" rel="noopener">Node.js 20+</a> and an authenticated <a href="https://developer.salesforce.com/tools/salesforcecli" rel="noopener">Salesforce CLI</a> (<code>sf</code>) pointed at the org you want to index. It runs in Claude Code, Claude Desktop, or any MCP client. See the <a href="/getting-started.html">getting-started guide</a>.</p></div>
+ </details>
+
+ <details class="faq-item" id="accuracy">
+ <summary>Are its answers always correct?</summary>
+ <div class="answer"><p>Answers are grounded in real metadata, but each is tagged so you know how much to trust it. Confidence is <code>declared</code>, <code>parsed</code>, or <code>heuristic</code> - heuristic findings from the regex Apex scanner can have false positives and should be spot-checked. It also performs static analysis, so dynamic SOQL and reflective Apex are invisible: a “no references found” result means “no static evidence”, not “definitely unused”.</p></div>
+ </details>
+
+ <details class="faq-item" id="fresh">
+ <summary>How do I keep the answers up to date?</summary>
+ <div class="answer"><p>Run <code>sfi refresh</code> (or <code>/sfi-refresh</code> in Claude Code) after you deploy changes. <code>sfi.health_check</code> reports whether the vault is <code>healthy</code>, <code>degraded</code>, or <code>unhealthy</code> and tells you when a rebuild is due.</p></div>
+ </details>
+
+ <div style="padding-top:42px;">
+ <div class="cta-box">
+ <h2 class="screen-type">Still have a question?</h2>
+ <p>The getting-started guide covers setup end to end, and the capability map shows everything it can answer.</p>
+ <div class="cta-actions">
+ <a class="btn btn-solid" href="/getting-started.html">getting started</a>
+ <a class="btn btn-ghost" href="/capabilities.html">capabilities</a>
+ </div>
+ </div>
+ </div>
+ </div>
+ </section>
+ </main>
+
+ <footer class="site-footer">
+ <div class="container">
+ <div class="footer-grid">
+ <div class="footer-about">
+ <a class="brand" href="/" style="margin-bottom:12px;"><span class="mk">&gt;_</span>&nbsp;sf-intelligence</a>
+ <p>An offline, read-only, MCP-first knowledge base for one Salesforce org. Answers grounded in real metadata - never a guess.</p>
+ </div>
+ <div><h4>product</h4><ul><li><a href="/capabilities.html">capabilities</a></li><li><a href="/tools.html">tools</a></li><li><a href="/#how">how it works</a></li><li><a href="/trust.html">trust</a></li><li><a href="/#install">install</a></li></ul></div>
+ <div><h4>docs</h4><ul><li><a href="/getting-started.html">getting started</a></li><li><a href="/configuration.html">configuration</a></li><li><a href="/faq.html">faq</a></li><li><a href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">npm package</a></li></ul></div>
+ <div><h4>about</h4><ul><li><a href="/faq.html#privacy">privacy</a></li><li><a href="/licensing.html">license</a></li></ul></div>
+ </div>
+ <div class="footer-bottom">
+ <span><span class="ok">●</span> © <span id="year">2026</span> sf-intelligence - all systems offline</span>
+ <span>MIT + Commons Clause · built for Salesforce teams</span>
+ </div>
+ </div>
+ </footer>
+
+ <script src="/assets/js/main.js" defer></script>
+</body>
+</html>

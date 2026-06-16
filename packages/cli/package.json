@@ -1,0 +1,66 @@
+{
+  "name": "sf-intelligence",
+  "version": "0.1.11",
+  "description": "Offline-first, MCP-first knowledge base for a Salesforce org. Ask about your org's metadata, dependencies, permissions, and automation \u2014 grounded in real retrieved metadata. Ships the sfi CLI and an MCP server.",
+  "license": "SEE LICENSE IN LICENSE",
+  "homepage": "https://salesforce-intelligence.pages.dev",
+  "keywords": [
+    "salesforce",
+    "mcp",
+    "model-context-protocol",
+    "cli",
+    "metadata",
+    "knowledge-base",
+    "sfdx",
+    "apex",
+    "salesforce-cli"
+  ],
+  "type": "module",
+  "bin": {
+    "sfi": "./bin/sfi.js"
+  },
+  "main": "./dist/index.js",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js"
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist/index.js",
+    "bin",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc --build && node build.mjs",
+    "test": "vitest run",
+    "prepublishOnly": "node ../../scripts/prepublish-check.mjs"
+  },
+  "dependencies": {
+    "@duckdb/node-api": "1.5.3-r.2",
+    "@inquirer/prompts": "^7.0.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "commander": "^12.0.0",
+    "fast-xml-parser": "^4.4.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@sf-intelligence/contracts": "workspace:*",
+    "@sf-intelligence/core": "workspace:*",
+    "@sf-intelligence/extractors": "workspace:*",
+    "@sf-intelligence/graph": "workspace:*",
+    "@sf-intelligence/mcp": "workspace:*",
+    "@sf-intelligence/parsers": "workspace:*",
+    "@sf-intelligence/patterns": "workspace:*",
+    "@sf-intelligence/renderers": "workspace:*",
+    "@sf-intelligence/tooling-api": "workspace:*",
+    "@sf-intelligence/vault": "workspace:*",
+    "esbuild": "^0.28.0",
+    "vitest": "^1.6.0"
+  }
+}

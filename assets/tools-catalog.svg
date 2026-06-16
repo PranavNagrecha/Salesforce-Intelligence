@@ -1,0 +1,163 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 980" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif">
+  <rect width="1200" height="980" fill="#FAFBFD"/>
+
+  <text x="60" y="56" font-size="13" letter-spacing="2.5" fill="#0176D3" font-weight="700">THE 88 TOOLS</text>
+  <text x="60" y="92" font-size="30" font-weight="700" fill="#181818">Organized by what you'd ask, not how the code is structured.</text>
+
+  <!-- Group helper styles -->
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5">
+
+    <!-- Field forensics -->
+    <g transform="translate(60,150)">
+      <rect width="350" height="220" rx="10" fill="#FFFFFF" stroke="#D8E3F0"/>
+      <rect x="0" y="0" width="350" height="6" rx="3" fill="#0176D3"/>
+      <text x="18" y="34" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="14" font-weight="700" fill="#181818">Field forensics</text>
+      <text x="18" y="50" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11" fill="#706E6B">"What does this field do, where, and why?"</text>
+      <g transform="translate(18,76)" fill="#0F2238">
+        <text>sfi.field_360</text>
+        <text y="20">sfi.field_lineage</text>
+        <text y="40">sfi.field_provenance</text>
+        <text y="60">sfi.find_field_anywhere</text>
+        <text y="80">sfi.field_meaning</text>
+        <text y="100">sfi.field_access_audit</text>
+        <text y="120">sfi.field_mapping_between_objects</text>
+      </g>
+    </g>
+
+    <!-- Why / Investigation -->
+    <g transform="translate(425,150)">
+      <rect width="350" height="220" rx="10" fill="#FFFFFF" stroke="#D8E3F0"/>
+      <rect x="0" y="0" width="350" height="6" rx="3" fill="#FE9339"/>
+      <text x="18" y="34" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="14" font-weight="700" fill="#181818">Why · Investigation</text>
+      <text x="18" y="50" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11" fill="#706E6B">"Why did this happen / why can't the user…"</text>
+      <g transform="translate(18,76)" fill="#0F2238">
+        <text>sfi.why_cant_user_see_record</text>
+        <text y="20">sfi.why_field_changed</text>
+        <text y="40">sfi.what_happens_on_save</text>
+        <text y="60">sfi.order_of_execution</text>
+        <text y="80">sfi.layout_for_user</text>
+      </g>
+    </g>
+
+    <!-- Impact / What-if -->
+    <g transform="translate(790,150)">
+      <rect width="350" height="220" rx="10" fill="#FFFFFF" stroke="#D8E3F0"/>
+      <rect x="0" y="0" width="350" height="6" rx="3" fill="#BA0517"/>
+      <text x="18" y="34" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="14" font-weight="700" fill="#181818">Impact &amp; what-if</text>
+      <text x="18" y="50" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11" fill="#706E6B">"What breaks if I change this?"</text>
+      <g transform="translate(18,76)" fill="#0F2238">
+        <text>sfi.get_impact</text>
+        <text y="20">sfi.safe_to_delete_field</text>
+        <text y="40">sfi.what_if_change_field_type</text>
+        <text y="60">sfi.what_if_make_field_required</text>
+        <text y="80">sfi.what_if_remove_picklist_value</text>
+        <text y="100">sfi.what_if_disable_trigger</text>
+        <text y="120">sfi.what_if_deactivate_flow</text>
+        <text y="140">sfi.what_if_merge_profiles · _split_profile</text>
+      </g>
+    </g>
+
+    <!-- Code understanding -->
+    <g transform="translate(60,395)">
+      <rect width="350" height="220" rx="10" fill="#FFFFFF" stroke="#D8E3F0"/>
+      <rect x="0" y="0" width="350" height="6" rx="3" fill="#2E844A"/>
+      <text x="18" y="34" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="14" font-weight="700" fill="#181818">Code understanding</text>
+      <text x="18" y="50" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11" fill="#706E6B">"Explain this. Where does it go?"</text>
+      <g transform="translate(18,76)" fill="#0F2238">
+        <text>sfi.explain_apex_method</text>
+        <text y="20">sfi.explain_flow</text>
+        <text y="40">sfi.explain_formula</text>
+        <text y="60">sfi.explain_field</text>
+        <text y="80">sfi.call_graph</text>
+        <text y="100">sfi.method_reachability</text>
+        <text y="120">sfi.downstream_effects</text>
+      </g>
+    </g>
+
+    <!-- Code quality -->
+    <g transform="translate(425,395)">
+      <rect width="350" height="220" rx="10" fill="#FFFFFF" stroke="#D8E3F0"/>
+      <rect x="0" y="0" width="350" height="6" rx="3" fill="#5A2B82"/>
+      <text x="18" y="34" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="14" font-weight="700" fill="#181818">Code quality &amp; risk</text>
+      <text x="18" y="50" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11" fill="#706E6B">"Where are the smells, the gaps, the risks?"</text>
+      <g transform="translate(18,76)" fill="#0F2238">
+        <text>sfi.code_quality_audit</text>
+        <text y="20">sfi.governor_limit_risks</text>
+        <text y="40">sfi.crud_fls_audit</text>
+        <text y="60">sfi.find_hardcoded_values</text>
+        <text y="80">sfi.find_hardcoded_values_anywhere</text>
+        <text y="100">sfi.test_coverage_gaps</text>
+        <text y="120">sfi.meaningful_test_audit</text>
+      </g>
+    </g>
+
+    <!-- Hygiene -->
+    <g transform="translate(790,395)">
+      <rect width="350" height="220" rx="10" fill="#FFFFFF" stroke="#D8E3F0"/>
+      <rect x="0" y="0" width="350" height="6" rx="3" fill="#0B7477"/>
+      <text x="18" y="34" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="14" font-weight="700" fill="#181818">Hygiene &amp; tech debt</text>
+      <text x="18" y="50" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11" fill="#706E6B">"What's unused or stale?"</text>
+      <g transform="translate(18,76)" fill="#0F2238">
+        <text>sfi.find_dead_code</text>
+        <text y="20">sfi.unused_components</text>
+        <text y="40">sfi.unused_fields_deep</text>
+        <text y="60">sfi.unassigned_permission_sets</text>
+        <text y="80">sfi.empty_queues_and_groups</text>
+        <text y="100">sfi.process_builder_migration_candidates</text>
+        <text y="120">sfi.tech_debt_score</text>
+      </g>
+    </g>
+
+    <!-- Sharing / Compliance -->
+    <g transform="translate(60,640)">
+      <rect width="350" height="220" rx="10" fill="#FFFFFF" stroke="#D8E3F0"/>
+      <rect x="0" y="0" width="350" height="6" rx="3" fill="#9D3C13"/>
+      <text x="18" y="34" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="14" font-weight="700" fill="#181818">Sharing · Security · PII</text>
+      <text x="18" y="50" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11" fill="#706E6B">"Who sees what, and where's the sensitive data?"</text>
+      <g transform="translate(18,76)" fill="#0F2238">
+        <text>sfi.why_cant_user_see_record</text>
+        <text y="20">sfi.pii_inventory</text>
+        <text y="40">sfi.field_access_audit</text>
+        <text y="60">sfi.generate_compliance_report</text>
+        <text y="80">sfi.generate_sharing_summary</text>
+      </g>
+    </g>
+
+    <!-- Integration / Async -->
+    <g transform="translate(425,640)">
+      <rect width="350" height="220" rx="10" fill="#FFFFFF" stroke="#D8E3F0"/>
+      <rect x="0" y="0" width="350" height="6" rx="3" fill="#1F8FFF"/>
+      <text x="18" y="34" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="14" font-weight="700" fill="#181818">Integration · Async · Events</text>
+      <text x="18" y="50" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11" fill="#706E6B">"What flows in, out, async, by event?"</text>
+      <g transform="translate(18,76)" fill="#0F2238">
+        <text>sfi.integration_map</text>
+        <text y="20">sfi.endpoint_catalog</text>
+        <text y="40">sfi.event_subscribers</text>
+        <text y="60">sfi.cdc_subscribers</text>
+        <text y="80">sfi.outbound_message_catalog</text>
+        <text y="100">sfi.scheduled_job_catalog</text>
+        <text y="120">sfi.async_chain_depth</text>
+      </g>
+    </g>
+
+    <!-- Org understanding -->
+    <g transform="translate(790,640)">
+      <rect width="350" height="220" rx="10" fill="#FFFFFF" stroke="#D8E3F0"/>
+      <rect x="0" y="0" width="350" height="6" rx="3" fill="#444E5E"/>
+      <text x="18" y="34" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="14" font-weight="700" fill="#181818">Org understanding · Docs</text>
+      <text x="18" y="50" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11" fill="#706E6B">"Give me a tour. Generate a handbook."</text>
+      <g transform="translate(18,76)" fill="#0F2238">
+        <text>sfi.org_overview</text>
+        <text y="20">sfi.domain_clusters</text>
+        <text y="40">sfi.generate_architecture_overview</text>
+        <text y="60">sfi.generate_admin_handbook</text>
+        <text y="80">sfi.generate_data_dictionary</text>
+        <text y="100">sfi.generate_onboarding_doc</text>
+        <text y="120">sfi.compare_components · _vaults · _profile · _object</text>
+      </g>
+    </g>
+  </g>
+
+  <text x="60" y="920" font-size="12.5" fill="#706E6B">+ 30 more across CPQ, freshness, semantic disambiguation, dead-code, find-anywhere, naming-conventions, record lookup (CMDT/Custom Settings), and graph primitives.</text>
+  <text x="60" y="945" font-size="12.5" fill="#706E6B">Every tool returns structured payloads · cites canonical IDs · labels confidence as <tspan font-weight="700" fill="#2E844A">declared</tspan> / <tspan font-weight="700" fill="#FE9339">parsed</tspan> / <tspan font-weight="700" fill="#BA0517">heuristic</tspan>.</text>
+</svg>

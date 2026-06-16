@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 520" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#0176D3"/>
+    </marker>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#F4F7FB"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="520" fill="#FAFBFD"/>
+
+  <text x="60" y="56" font-size="13" letter-spacing="2.5" fill="#0176D3" font-weight="700">HOW IT WORKS</text>
+  <text x="60" y="92" font-size="30" font-weight="700" fill="#181818">From one retrieve to every question, offline.</text>
+
+  <!-- Stage 1: Salesforce org -->
+  <g transform="translate(60,160)">
+    <rect width="220" height="240" rx="14" fill="url(#card)" stroke="#D8E3F0" stroke-width="1.5"/>
+    <text x="22" y="40" font-size="13" font-weight="700" fill="#706E6B" letter-spacing="1.5">STAGE 1</text>
+    <text x="22" y="74" font-size="20" font-weight="700" fill="#181818">Your org</text>
+
+    <g transform="translate(22,100)" font-size="13" fill="#444">
+      <text>Apex / Flow / Profiles /</text>
+      <text y="22">Permission Sets /</text>
+      <text y="44">Validation Rules /</text>
+      <text y="66">Layouts / LWC / Aura /</text>
+      <text y="88">Workflow / Approval /</text>
+      <text y="110">CPQ / and 18 more</text>
+    </g>
+  </g>
+
+  <!-- Stage 2: Refresh -->
+  <g transform="translate(330,160)">
+    <rect width="220" height="240" rx="14" fill="url(#card)" stroke="#D8E3F0" stroke-width="1.5"/>
+    <text x="22" y="40" font-size="13" font-weight="700" fill="#706E6B" letter-spacing="1.5">STAGE 2</text>
+    <text x="22" y="74" font-size="20" font-weight="700" fill="#181818">/sfi-refresh</text>
+
+    <g transform="translate(22,100)" font-size="13" fill="#444">
+      <text>1. sf project retrieve</text>
+      <text y="22">2. 25+ extractors run</text>
+      <text y="44">3. Edges inferred at</text>
+      <text y="66" x="14">declared / parsed /</text>
+      <text y="88" x="14">heuristic confidence</text>
+      <text y="110">4. Byte-stable render</text>
+    </g>
+  </g>
+
+  <!-- Stage 3: Vault -->
+  <g transform="translate(600,160)">
+    <rect width="220" height="240" rx="14" fill="url(#card)" stroke="#D8E3F0" stroke-width="1.5"/>
+    <text x="22" y="40" font-size="13" font-weight="700" fill="#706E6B" letter-spacing="1.5">STAGE 3</text>
+    <text x="22" y="74" font-size="20" font-weight="700" fill="#181818">Local vault</text>
+
+    <g transform="translate(22,100)" font-size="13" fill="#444">
+      <text>org-kb/components/</text>
+      <text y="22" font-size="11.5" fill="#706E6B">Markdown, Obsidian-readable</text>
+      <text y="50">org-kb/graph/org-kb.db</text>
+      <text y="72" font-size="11.5" fill="#706E6B">DuckDB graph store</text>
+      <text y="100">org-kb/source/</text>
+      <text y="122" font-size="11.5" fill="#706E6B">Raw retrieve, cold storage</text>
+    </g>
+  </g>
+
+  <!-- Stage 4: MCP + AI -->
+  <g transform="translate(870,160)">
+    <rect width="270" height="240" rx="14" fill="#0F2238" stroke="#1F3556" stroke-width="1.5"/>
+    <text x="22" y="40" font-size="13" font-weight="700" fill="#7FCBFF" letter-spacing="1.5">STAGE 4</text>
+    <text x="22" y="74" font-size="20" font-weight="700" fill="#FFFFFF">Any MCP client</text>
+
+    <g transform="translate(22,100)" font-size="13" fill="#C9D8EA">
+      <text>Claude Code</text>
+      <text y="22">Claude Desktop</text>
+      <text y="44">Cursor</text>
+      <text y="66">— or anything that</text>
+      <text y="88">speaks MCP over stdio</text>
+    </g>
+
+    <g transform="translate(22,200)">
+      <rect width="226" height="28" rx="14" fill="#0176D3"/>
+      <text x="113" y="19" text-anchor="middle" font-size="12" font-weight="600" fill="#FFFFFF">88 sfi.* tools available</text>
+    </g>
+  </g>
+
+  <!-- Arrows -->
+  <g stroke="#0176D3" stroke-width="2" fill="none">
+    <line x1="284" y1="280" x2="326" y2="280" marker-end="url(#arrow)"/>
+    <line x1="554" y1="280" x2="596" y2="280" marker-end="url(#arrow)"/>
+    <line x1="824" y1="280" x2="866" y2="280" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- Footer callouts -->
+  <g transform="translate(60,440)" font-size="13" fill="#444">
+    <g>
+      <circle cx="6" cy="6" r="6" fill="#2E844A"/>
+      <text x="20" y="11" font-weight="600" fill="#181818">No live API calls during conversation</text>
+    </g>
+    <g transform="translate(330,0)">
+      <circle cx="6" cy="6" r="6" fill="#2E844A"/>
+      <text x="20" y="11" font-weight="600" fill="#181818">Byte-identical vault for unchanged orgs</text>
+    </g>
+    <g transform="translate(660,0)">
+      <circle cx="6" cy="6" r="6" fill="#2E844A"/>
+      <text x="20" y="11" font-weight="600" fill="#181818">Every edge carries a confidence label</text>
+    </g>
+    <g transform="translate(60,32)">
+      <circle cx="6" cy="6" r="6" fill="#FE9339"/>
+      <text x="20" y="11" font-weight="600" fill="#181818">Read-only by design</text>
+    </g>
+    <g transform="translate(330,32)">
+      <circle cx="6" cy="6" r="6" fill="#FE9339"/>
+      <text x="20" y="11" font-weight="600" fill="#181818">No record-level data, ever</text>
+    </g>
+    <g transform="translate(660,32)">
+      <circle cx="6" cy="6" r="6" fill="#FE9339"/>
+      <text x="20" y="11" font-weight="600" fill="#181818">Refreshes produce reviewable git diffs</text>
+    </g>
+  </g>
+</svg>

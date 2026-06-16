@@ -1,0 +1,469 @@
+/**
+ * Handler for the `sfi.call_graph` MCP tool.
+ *
+ * The v2.7 R2 call-graph walker. Answers the developer's "what does
+ * this class call (or who calls it)?" question by walking `callsApex`
+ * edges from a root ApexClass / ApexTrigger node out to `maxDepth`
+ * hops in the requested direction.
+ *
+ * **Direction semantics**:
+ *   - `'downstream'`: walk OUTGOING `callsApex` edges. Answers "what
+ *     does X call?" — the targets of the root's `callsApex` edges, and
+ *     their targets, recursively.
+ *   - `'upstream'`: walk INCOMING `callsApex` edges. Answers "what
+ *     calls X?" — the sources of incoming `callsApex` edges, and their
+ *     sources, recursively.
+ *   - `'both'`: union of the two walks. Each direction is bounded by
+ *     `maxDepth` independently, and the merged result deduplicates
+ *     nodes/edges that one direction's walk reproduced via the other.
+ *
+ * **Granularity (v2.7 honesty boundary)**: this is a CLASS-level walk.
+ * If `ApexClass:A.foo()` calls `ApexClass:B.bar()` and `A.baz()` calls
+ * `B.qux()`, the v2.7 graph sees one `A -> B` edge with no method
+ * partition. The `disclosure` field carries the verbatim promise of
+ * method-level granularity in v2.7.1.
+ *
+ * **Cycle detection**: the visited set is keyed by node id, so a
+ * cycle `A -> B -> A` is detected when the second hop tries to
+ * re-enter `A`. The output's `cycleDetected: boolean` reports whether
+ * the BFS observed any back-edge during the walk.
+ *
+ * Implementation notes:
+ *   - BFS over `callsApex` edges only — other edge types are not
+ *     walked. The caller wants the call chain, not the dependency
+ *     surface; `sfi.get_impact` and `sfi.get_subgraph` cover the
+ *     broader query.
+ *   - Node identity is established at insertion time; the `depth`
+ *     label is the first depth at which a node was discovered (the
+ *     shortest-path distance from the root in hop count).
+ *   - Edge identity is `(fromId, toId, edgeType, source)` to dedupe
+ *     edges that both the upstream and downstream walks observed.
+ *   - Unknown rootId is NOT an error — the BFS finds no edges and the
+ *     response carries `{ nodes: [rootNode-or-missing], edges: [],
+ *     cycleDetected: false, maxDepthReached: 0 }`. This mirrors
+ *     `sfi.get_impact`'s tolerance for unknown ids.
+ *   - The prefix validation only rejects ids that are NEITHER
+ *     `ApexClass:` NOR `ApexTrigger:` — those are not call-graph
+ *     candidates by construction. CustomObject / Flow / etc. surface
+ *     as `invalid-query`.
+ */
+
+import type {
+  ComponentId,
+  ComponentType,
+  ConfidenceLevel,
+  McpError,
+  McpResponse,
+} from '@sf-intelligence/contracts';
+import { err, ok, type Result } from '@sf-intelligence/core';
+import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import { z } from 'zod';
+
+import type { Context } from '../server.js';
+
+import { coercePrefix } from './coerce-id.js';
+import { mergeInputAliases } from './input-aliases.js';
+
+/** Inclusive upper bound on `maxDepth`. */
+const CALL_GRAPH_MAX_DEPTH = 5;
+/** Default `maxDepth` when the caller omits it. */
+const CALL_GRAPH_DEFAULT_DEPTH = 3;
+
+/** Canonical id prefixes the tool accepts. */
+const APEX_CLASS_PREFIX = 'ApexClass:';
+const APEX_TRIGGER_PREFIX = 'ApexTrigger:';
+
+/**
+ * Verbatim honesty-axis disclosure surfaced in every response. Frozen so the
+ * test suite can assert the exact string. P4-C5: each `callsApex` edge now
+ * carries `methods` — the target-class methods the source invokes — and the
+ * optional `method` filter uses them. The caller-side method (WHICH method of
+ * the source does the calling) is still not partitioned: that needs full AST
+ * analysis, so the edges remain `heuristic`.
+ */
+const CALL_GRAPH_DISCLOSURE =
+  'call_graph surfaces method-level call TARGETS: each callsApex edge lists `methods` — the methods of the target class the source invokes (heuristic, from the Apex scanner) — and the optional `method` filter narrows the root\'s direct callers/callees to edges involving that method. The CALLER-side method (which method of the source does the calling) is NOT partitioned; that needs full AST analysis. Edges remain at-least-one-call between two classes.';
+
+/**
+ * Zod schema for the `sfi.call_graph` tool input.
+ *
+ *   - `rootId`: required, non-empty string. Must start with
+ *     `ApexClass:` or `ApexTrigger:`; non-matching prefixes surface
+ *     as `invalid-query` at the handler boundary.
+ *   - `direction`: optional enum (`downstream` / `upstream` / `both`). Defaults to `'both'`.
+ *   - `maxDepth`: optional integer in `[1, 5]`. Defaults to 3.
+ *   - `method`: optional. When set, the root's DIRECT edges are narrowed to
+ *     those whose `methods` include it — e.g. `direction: 'upstream'` +
+ *     `method: 'deleteRecord'` answers "who calls Root.deleteRecord". Applies
+ *     only at the root hop; deeper hops are unfiltered (their methods belong
+ *     to a different target).
+ */
+const callGraphInputBaseSchema = z.object({
+  rootId: z.string().min(1),
+  direction: z.enum(['downstream', 'upstream', 'both']).optional().default('both'),
+  maxDepth: z.number().int().min(1).max(CALL_GRAPH_MAX_DEPTH).optional(),
+  method: z.string().min(1).optional(),
+});
+
+export const callGraphInputSchema = z.preprocess(
+  (raw) => mergeInputAliases(raw, [{ canonical: 'rootId', aliases: ['componentId'] }]),
+  callGraphInputBaseSchema,
+);
+
+/** Parsed input shape. */
+export type CallGraphInput = z.infer<typeof callGraphInputSchema>;
+
+/** One node in the walk result. `depth` is the shortest-path hop count from root. */
+export interface CallGraphNode {
+  readonly id: ComponentId;
+  readonly type: ComponentType;
+  readonly apiName: string;
+  readonly depth: number;
+}
+
+/**
+ * One edge in the walk result. `fromDepth` is the depth at which the
+ * edge was traversed (the depth of the `fromId` for downstream walks,
+ * or the depth of the `toId` for upstream walks).
+ */
+export interface CallGraphEdge {
+  readonly fromId: ComponentId;
+  readonly toId: ComponentId;
+  readonly fromDepth: number;
+  readonly source: string;
+  readonly confidence: ConfidenceLevel;
+  /**
+   * P4-C5: the methods of the TARGET class (`toId`) the source (`fromId`)
+   * invokes, sorted. Empty when the edge carries no method evidence (a Flow/
+   * declared caller, or a pre-P4-C5 vault with neither `methods` nor
+   * `methodName`). This is target-method granularity, not caller-method.
+   */
+  readonly methods: readonly string[];
+}
+
+/** Payload wrapped inside the `McpResponse` envelope on success. */
+export interface CallGraphOutput {
+  readonly rootId: ComponentId;
+  readonly direction: 'downstream' | 'upstream' | 'both';
+  readonly nodes: readonly CallGraphNode[];
+  readonly edges: readonly CallGraphEdge[];
+  readonly cycleDetected: boolean;
+  readonly maxDepthReached: number;
+  readonly disclosure: string;
+}
+
+/**
+ * Validate the prefix. Returns `true` when the id starts with
+ * `ApexClass:` or `ApexTrigger:`.
+ */
+const isApexCallable = (id: string): boolean =>
+  id.startsWith(APEX_CLASS_PREFIX) || id.startsWith(APEX_TRIGGER_PREFIX);
+
+/** Composite key for edge deduplication across walk directions. */
+const edgeKey = (e: CallGraphEdge): string =>
+  `${e.fromId}\0${e.toId}\0${e.source}`;
+
+/**
+ * Read the target methods a `callsApex` edge represents (P4-C5). Prefers the
+ * `methods` array; falls back to the scalar `methodName` for vaults refreshed
+ * before P4-C5. Returns `[]` when the edge carries no method evidence (a
+ * Flow/declared caller, or an old vault with neither). Always sorted + deduped.
+ */
+const edgeMethods = (edge: {
+  readonly properties: Readonly<Record<string, unknown>>;
+}): readonly string[] => {
+  const m = edge.properties['methods'];
+  if (Array.isArray(m)) {
+    const strs = m.filter((x): x is string => typeof x === 'string');
+    return [...new Set(strs)].sort();
+  }
+  const scalar = edge.properties['methodName'];
+  return typeof scalar === 'string' && scalar.length > 0 ? [scalar] : [];
+};
+
+/**
+ * Detect a directed cycle in the bounded subgraph the BFS collected.
+ *
+ * The BFS labels nodes by shortest-path depth, so a node reached by two
+ * distinct paths (a diamond / shared callee — e.g. two batch classes that
+ * both call one helper) is *re-discovered*. Re-discovery is NOT a cycle: a
+ * cycle requires a back-edge into a node still on the active path. Flagging
+ * every re-discovery is a false positive (the same bug fixed in
+ * `async-chain-depth`).
+ *
+ * This runs an iterative gray/black DFS over the collected edges in the
+ * direction the walk traversed (`out`: follow `fromId → toId`; `in`: follow
+ * `toId → fromId`, the reverse graph — whose cycles correspond one-to-one
+ * with the forward graph's), flagging a cycle only on a back-edge into a
+ * GRAY (on-stack) ancestor. BLACK (fully-explored) targets are
+ * cross/forward edges, not cycles. Bounded naturally: only edges the
+ * depth-limited BFS collected are considered.
+ */
+const detectCycle = (
+  rootId: ComponentId,
+  edges: readonly CallGraphEdge[],
+  direction: 'in' | 'out',
+): boolean => {
+  const adjacency = new Map<ComponentId, ComponentId[]>();
+  for (const edge of edges) {
+    const from = direction === 'out' ? edge.fromId : edge.toId;
+    const to = direction === 'out' ? edge.toId : edge.fromId;
+    const list = adjacency.get(from);
+    if (list) list.push(to);
+    else adjacency.set(from, [to]);
+  }
+  const GRAY = 1;
+  const BLACK = 2;
+  const color = new Map<ComponentId, number>([[rootId, GRAY]]);
+  const stack: { node: ComponentId; neighbors: ComponentId[]; index: number }[] =
+    [{ node: rootId, neighbors: adjacency.get(rootId) ?? [], index: 0 }];
+  while (stack.length > 0) {
+    const frame = stack[stack.length - 1];
+    if (frame === undefined) break;
+    if (frame.index >= frame.neighbors.length) {
+      color.set(frame.node, BLACK);
+      stack.pop();
+      continue;
+    }
+    const next = frame.neighbors[frame.index];
+    frame.index += 1;
+    if (next === undefined) continue;
+    const c = color.get(next);
+    if (c === GRAY) return true; // back-edge into on-stack ancestor → cycle
+    if (c === undefined) {
+      color.set(next, GRAY);
+      stack.push({
+        node: next,
+        neighbors: adjacency.get(next) ?? [],
+        index: 0,
+      });
+    }
+    // c === BLACK → already fully explored; cross/forward edge, not a cycle.
+  }
+  return false;
+};
+
+/**
+ * One BFS walk over `callsApex` edges in a fixed direction. Returns the
+ * map of discovered nodes (id → depth), the list of traversed edges, and
+ * whether a cycle (back-edge into a visited id) was observed.
+ *
+ * `direction === 'in'` walks INCOMING edges (upstream); the `fromId` of
+ * each edge is the unvisited frontier candidate. `direction === 'out'`
+ * walks OUTGOING edges (downstream); the `toId` is the frontier
+ * candidate.
+ */
+const walkOneDirection = async (
+  ctx: Context,
+  rootId: ComponentId,
+  direction: 'in' | 'out',
+  maxDepth: number,
+  /** P4-C5: when set, filter the root's DIRECT edges to those calling it. */
+  method: string | undefined,
+): Promise<
+  Result<
+    {
+      discovered: Map<ComponentId, number>;
+      edges: CallGraphEdge[];
+      cycleDetected: boolean;
+      depthReached: number;
+    },
+    string
+  >
+> => {
+  const discovered = new Map<ComponentId, number>();
+  discovered.set(rootId, 0);
+  const edges: CallGraphEdge[] = [];
+  let depthReached = 0;
+
+  let frontier: ComponentId[] = [rootId];
+  for (let depth = 0; depth < maxDepth && frontier.length > 0; depth += 1) {
+    const next: ComponentId[] = [];
+    for (const nodeId of frontier) {
+      const r = await listEdges(ctx.graph, nodeId, {
+        direction,
+        edgeType: 'callsApex',
+      });
+      if (!r.ok) return err(r.error.message);
+      for (const edge of r.value) {
+        const methods = edgeMethods(edge);
+        // P4-C5 method filter: narrow ONLY the root's direct edges to those
+        // whose target methods include the queried method (e.g. "who calls
+        // Root.deleteRecord"). Deeper hops are unfiltered — their methods
+        // belong to a different target class, so the root method is irrelevant.
+        if (nodeId === rootId && method !== undefined && !methods.includes(method)) {
+          continue;
+        }
+        const neighbor =
+          direction === 'out' ? edge.toId : edge.fromId;
+        // For downstream, fromDepth is the depth of `fromId` (current).
+        // For upstream, fromDepth is still the depth of the edge's
+        // source `fromId`. Since upstream walks INCOMING edges, the
+        // depth of `fromId` is `depth + 1` (one hop further from the
+        // root than the current node). The depth label is on the
+        // edge's origin in both cases — preserves "edge originates at
+        // fromDepth" semantics regardless of walk direction.
+        const fromDepth =
+          direction === 'out' ? depth : depth + 1;
+        edges.push({
+          fromId: edge.fromId,
+          toId: edge.toId,
+          fromDepth,
+          source: edge.source,
+          confidence: edge.confidence,
+          methods,
+        });
+        // Re-discovering an already-seen node means it was reached by a
+        // second path (a diamond / shared callee) — NOT a cycle. Skip
+        // re-expansion; cycle detection runs once below over the collected
+        // edges, distinguishing a back-edge from a re-convergence.
+        if (discovered.has(neighbor)) {
+          continue;
+        }
+        discovered.set(neighbor, depth + 1);
+        depthReached = Math.max(depthReached, depth + 1);
+        next.push(neighbor);
+      }
+    }
+    frontier = next;
+  }
+  const cycleDetected = detectCycle(rootId, edges, direction);
+  return ok({ discovered, edges, cycleDetected, depthReached });
+};
+
+/**
+ * Resolve every discovered id into a `CallGraphNode`. Missing rows are
+ * dropped silently (sparse-graph tolerance, same as `find-code-usages`).
+ */
+const resolveNodes = async (
+  ctx: Context,
+  discovered: ReadonlyMap<ComponentId, number>,
+): Promise<Result<CallGraphNode[], string>> => {
+  const out: CallGraphNode[] = [];
+  for (const [id, depth] of discovered) {
+    const r = await getNodeById(ctx.graph, id);
+    if (!r.ok) return err(r.error.message);
+    if (r.value === null) continue;
+    out.push({
+      id,
+      type: r.value.type,
+      apiName: r.value.apiName,
+      depth,
+    });
+  }
+  return ok(out);
+};
+
+/** Deterministic comparator: depth ASC then id ASC. */
+const compareNodes = (a: CallGraphNode, b: CallGraphNode): number => {
+  if (a.depth !== b.depth) return a.depth - b.depth;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+};
+
+/** Deterministic edge comparator: fromDepth ASC, fromId, toId, source. */
+const compareEdges = (a: CallGraphEdge, b: CallGraphEdge): number => {
+  if (a.fromDepth !== b.fromDepth) return a.fromDepth - b.fromDepth;
+  if (a.fromId !== b.fromId) return a.fromId < b.fromId ? -1 : 1;
+  if (a.toId !== b.toId) return a.toId < b.toId ? -1 : 1;
+  if (a.source !== b.source) return a.source < b.source ? -1 : 1;
+  return 0;
+};
+
+/**
+ * The `sfi.call_graph` MCP tool. Walks `callsApex` edges from a root
+ * ApexClass / ApexTrigger up to `maxDepth` hops in the requested
+ * direction; returns the structured tree with depth labels per node
+ * plus a class-granularity disclosure.
+ *
+ * @example
+ *   const r = await callGraphHandler(ctx, {
+ *     rootId: 'ApexClass:OrderService',
+ *     direction: 'downstream',
+ *     maxDepth: 3,
+ *   });
+ *   if (r.ok) console.log(r.value.data.nodes.length);
+ */
+export const callGraphHandler = async (
+  ctx: Context,
+  input: CallGraphInput,
+): Promise<Result<McpResponse<CallGraphOutput>, McpError>> => {
+  const coercedRootId = coercePrefix(input.rootId, [
+    APEX_CLASS_PREFIX,
+    APEX_TRIGGER_PREFIX,
+  ]);
+  if (!isApexCallable(coercedRootId)) {
+    return err({
+      kind: 'invalid-query',
+      message: `rootId must be an ApexClass/ApexTrigger id (e.g. '${APEX_CLASS_PREFIX}Foo') or a bare class name (e.g. 'Foo'); got '${input.rootId}'`,
+      path: 'rootId',
+    });
+  }
+  const rootId = coercedRootId as ComponentId;
+  const maxDepth = input.maxDepth ?? CALL_GRAPH_DEFAULT_DEPTH;
+
+  const directions: ('in' | 'out')[] =
+    input.direction === 'downstream'
+      ? ['out']
+      : input.direction === 'upstream'
+        ? ['in']
+        : ['out', 'in'];
+
+  const mergedDiscovered = new Map<ComponentId, number>();
+  mergedDiscovered.set(rootId, 0);
+  const seenEdges = new Set<string>();
+  const mergedEdges: CallGraphEdge[] = [];
+  let cycleDetected = false;
+  let maxDepthReached = 0;
+
+  for (const dir of directions) {
+    const res = await walkOneDirection(ctx, rootId, dir, maxDepth, input.method);
+    if (!res.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${res.error}`,
+      });
+    }
+    if (res.value.cycleDetected) cycleDetected = true;
+    maxDepthReached = Math.max(maxDepthReached, res.value.depthReached);
+    for (const [id, depth] of res.value.discovered) {
+      const existing = mergedDiscovered.get(id);
+      if (existing === undefined || depth < existing) {
+        mergedDiscovered.set(id, depth);
+      }
+    }
+    for (const edge of res.value.edges) {
+      const key = edgeKey(edge);
+      if (!seenEdges.has(key)) {
+        seenEdges.add(key);
+        mergedEdges.push(edge);
+      }
+    }
+  }
+
+  const nodesRes = await resolveNodes(ctx, mergedDiscovered);
+  if (!nodesRes.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${nodesRes.error}`,
+    });
+  }
+
+  const sortedNodes = [...nodesRes.value].sort(compareNodes);
+  const sortedEdges = [...mergedEdges].sort(compareEdges);
+
+  return ok({
+    data: {
+      rootId,
+      direction: input.direction,
+      nodes: sortedNodes,
+      edges: sortedEdges,
+      cycleDetected,
+      maxDepthReached,
+      disclosure: CALL_GRAPH_DISCLOSURE,
+    },
+    vaultState: {
+      sourceTreeHash: ctx.manifest.sourceTreeHash,
+      refreshedAt: ctx.manifest.refreshedAt,
+    },
+  });
+};

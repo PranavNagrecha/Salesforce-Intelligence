@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 580" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif">
+  <rect width="1200" height="580" fill="#FAFBFD"/>
+
+  <text x="60" y="56" font-size="13" letter-spacing="2.5" fill="#0176D3" font-weight="700">WHY IT MATTERS</text>
+  <text x="60" y="92" font-size="30" font-weight="700" fill="#181818">The same question, two different worlds.</text>
+
+  <!-- BEFORE -->
+  <g transform="translate(60,150)">
+    <rect width="540" height="380" rx="14" fill="#FFFFFF" stroke="#E8DDD6" stroke-width="1.5"/>
+    <rect x="0" y="0" width="540" height="46" rx="14" fill="#FCE9DF"/>
+    <rect x="0" y="32" width="540" height="14" fill="#FCE9DF"/>
+    <text x="22" y="30" font-size="13" letter-spacing="2" font-weight="700" fill="#9D3C13">WITHOUT SFINTELLIGENCE</text>
+
+    <text x="22" y="80" font-size="17" font-weight="700" fill="#181818">"Is it safe to delete Account.Customer_Segment__c?"</text>
+
+    <g transform="translate(22,110)" font-size="13.5" fill="#5A4A3F">
+      <text>1. Open Schema Builder, screenshot the field.</text>
+      <text y="26">2. Search all Apex classes for the literal string. Hope nothing's dynamic.</text>
+      <text y="52">3. Open every Flow that touches Account. Click through each element.</text>
+      <text y="78">4. Check every validation rule, then every formula on every object.</text>
+      <text y="104">5. Page through Process Builder, then Workflow Rules.</text>
+      <text y="130">6. Open every page layout. Then every LWC. Then every email template.</text>
+      <text y="156">7. Ask in #salesforce-help on Slack. Wait. Get conflicting answers.</text>
+      <text y="182">8. Deploy to sandbox. Find what breaks. Repeat.</text>
+    </g>
+
+    <g transform="translate(22,322)">
+      <text font-size="13" font-weight="700" fill="#9D3C13">~4 hours</text>
+      <text x="80" font-size="13" fill="#706E6B">· still uncertain · still missing dynamic refs</text>
+    </g>
+  </g>
+
+  <!-- AFTER -->
+  <g transform="translate(620,150)">
+    <rect width="540" height="380" rx="14" fill="#FFFFFF" stroke="#CCE0D6" stroke-width="1.5"/>
+    <rect x="0" y="0" width="540" height="46" rx="14" fill="#DCEFE3"/>
+    <rect x="0" y="32" width="540" height="14" fill="#DCEFE3"/>
+    <text x="22" y="30" font-size="13" letter-spacing="2" font-weight="700" fill="#1E5934">WITH SFINTELLIGENCE</text>
+
+    <text x="22" y="80" font-size="17" font-weight="700" fill="#181818">Same question.</text>
+
+    <g transform="translate(22,108)" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13.5">
+      <text fill="#7E8FAA">you   ›</text>
+      <text x="64" fill="#181818">safe to delete Account.Customer_Segment__c?</text>
+
+      <text y="32" fill="#7E8FAA">claude ›</text>
+      <text x="64" y="32" fill="#181818">sfi.safe_to_delete_field({...})</text>
+
+      <g transform="translate(0,68)" fill="#1E5934" font-weight="700">
+        <text>verdict: NO — 19 dependents block deletion</text>
+      </g>
+      <g transform="translate(0,96)" fill="#181818">
+        <text>· 5 writers (2 Flows, 2 Apex, 1 Workflow)</text>
+        <text y="20">· 12 readers (3 Apex, 2 Flows, 4 Layouts, 2 LWC, 1 EmailTemplate)</text>
+        <text y="40">· 1 integration: REST /apexrest/account-sync/*</text>
+        <text y="60">· 1 Marketo sync via NamedCredential:MarketoREST</text>
+      </g>
+      <g transform="translate(0,202)" fill="#5A4A3F" font-size="12" font-style="italic">
+        <text>heuristic Apex matches need a spot-check before removal.</text>
+      </g>
+    </g>
+
+    <g transform="translate(22,322)">
+      <text font-size="13" font-weight="700" fill="#1E5934">~6 seconds</text>
+      <text x="90" font-size="13" fill="#706E6B">· cited · confidence-labelled · auditable</text>
+    </g>
+  </g>
+</svg>
