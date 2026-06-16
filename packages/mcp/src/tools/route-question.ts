@@ -122,6 +122,15 @@ export const routeQuestionInputSchema = z.object({
     clarificationId: z.string().min(1),
     selection: z.string().min(1),
   }).optional(),
+  /**
+   * CAE-04 output mode — shapes how the host LLM should answer and which candidate
+   * tools to favor. 'ask' = a quick grounded answer (the default behavior);
+   * 'plan' = an ordered change plan (favors the what_if_* / impact tools);
+   * 'assessment' = a full evaluation (favors the *_risk_report / readiness /
+   * coverage tools). When set, toolCandidates + a mode-specific guidance line are
+   * always attached, regardless of the deterministic route's confidence.
+   */
+  mode: z.enum(['ask', 'plan', 'assessment']).optional(),
 });
 
 export type RouteQuestionInput = z.infer<typeof routeQuestionInputSchema>;
@@ -472,6 +481,57 @@ const mixedInventoryAndStoragePlan = (
   ];
 };
 
+/** CAE-04: the tool families each output mode favors when reranking the funnel. */
+const PLAN_FAMILY = /^sfi\.(what_if_|get_impact|safe_to_delete|downstream_effects|tests_for_change|field_lineage)/;
+const ASSESSMENT_FAMILY =
+  /(_risk_report$|^sfi\.release_readiness|^sfi\.promotion_readiness|^sfi\.coverage_report|^sfi\.tech_debt_score|^sfi\.governor_limit_risks|^sfi\.crud_fls_audit)/;
+
+/** Stable-rerank the funnel candidates so the requested mode's family leads. */
+const rerankForMode = (
+  cands: readonly ToolCandidate[],
+  mode: RouteQuestionInput['mode'],
+): ToolCandidate[] => {
+  if (mode === undefined || mode === 'ask') return cands.slice(0, 8);
+  const fam = mode === 'plan' ? PLAN_FAMILY : ASSESSMENT_FAMILY;
+  const lead = cands.filter((c) => fam.test(c.tool));
+  const rest = cands.filter((c) => !fam.test(c.tool));
+  return [...lead, ...rest].slice(0, 8);
+};
+
+/** CAE-02/04: the planner contract, tailored to the requested output mode. */
+const guidanceForMode = (mode: RouteQuestionInput['mode']): string => {
+  const tail =
+    ' The candidates are an advisory shortlist, not a route — YOU pick. Resolve any ' +
+    'named component first, ground the final answer with sfi.synthesize_answer, and ' +
+    'never answer from a tool name alone.';
+  switch (mode) {
+    case 'plan':
+      return (
+        'PLAN mode: produce an ORDERED change plan. Favor the what_if_* / get_impact / ' +
+        'safe_to_delete candidates, sequence them by dependency, and present numbered steps, ' +
+        'each with its risk.' + tail
+      );
+    case 'assessment':
+      return (
+        'ASSESSMENT mode: produce a full EVALUATION. Favor the *_risk_report / readiness / ' +
+        'coverage candidates, run them, and present findings with severity + recommended actions.' +
+        tail
+      );
+    case 'ask':
+      return (
+        'ASK mode: answer concisely. Pick the candidate(s) that most directly answer, run ' +
+        'them, and synthesize ONE short grounded answer.' + tail
+      );
+    default:
+      return (
+        'These toolCandidates are an advisory shortlist, not a route — YOU decide. Plan: ' +
+        'read the question → resolve any named component with sfi.resolve → pick the tool(s) to ' +
+        'run from the candidates (sequence them if compound) → run them → ground the answer with ' +
+        'sfi.synthesize_answer. Never answer from a tool name alone.'
+      );
+  }
+};
+
 export const routeQuestionHandler = async (
   ctx: Context,
   input: RouteQuestionInput,
@@ -713,24 +773,21 @@ export const routeQuestionHandler = async (
             : { tool: 'sfi.run_analysis', args: { name: tool, args } };
         })
       : undefined;
-  // CAE-01/02 semantic funnel: surface meaning-ranked candidate tools for the
-  // host LLM whenever the deterministic router is UNSURE — it gave up
-  // (`unrouted`) OR matched only weakly (`confidence: 'low'`). Advisor, not a
-  // route — offline TF-IDF over the capability map.
-  const toolCandidates =
-    route.intent === 'unrouted' || route.confidence === 'low'
-      ? semanticCandidates(input.question, 8)
-      : [];
-  // CAE-02 planner contract: when the funnel speaks, tell the host LLM the loop
-  // it owns — the candidates are an advisory shortlist, the LLM does the deciding.
-  const guidance =
-    toolCandidates.length > 0
-      ? 'These toolCandidates are an advisory shortlist, not a route — YOU decide. ' +
-        'Plan: read the question → resolve any named component with sfi.resolve → ' +
-        'pick the tool(s) to run from the candidates (sequence them if the question ' +
-        'is compound) → run them → ground the answer with sfi.synthesize_answer. ' +
-        'Never answer from a tool name alone.'
-      : undefined;
+  // CAE-01/02/04 semantic funnel: surface meaning-ranked candidate tools for the
+  // host LLM when the deterministic router is UNSURE (`unrouted`/low-conf) OR when
+  // an explicit output mode (CAE-04) is requested. Advisor, not a route — offline
+  // TF-IDF over the capability map; a mode reranks the candidates toward its family.
+  const wantCandidates =
+    input.mode !== undefined ||
+    route.intent === 'unrouted' ||
+    route.confidence === 'low';
+  const toolCandidates = wantCandidates
+    ? rerankForMode(
+        semanticCandidates(input.question, input.mode !== undefined ? 12 : 8),
+        input.mode,
+      )
+    : [];
+  const guidance = toolCandidates.length > 0 ? guidanceForMode(input.mode) : undefined;
   return ok({
     data: {
       route,
