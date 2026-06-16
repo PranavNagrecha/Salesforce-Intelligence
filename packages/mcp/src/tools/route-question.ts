@@ -188,6 +188,13 @@ export interface RouteQuestionOutput {
    * map; no neural model, no network.
    */
   readonly toolCandidates?: readonly ToolCandidate[];
+  /**
+   * CAE-02 planner contract: present alongside `toolCandidates`. States the loop
+   * the host LLM owns — the candidates advise, the LLM decides: read question →
+   * `sfi.resolve` named components → pick/sequence tools from the candidates →
+   * run → `sfi.synthesize_answer` grounds.
+   */
+  readonly guidance?: string;
 }
 
 const routeTrust = (): TrustSummary => ({
@@ -706,11 +713,24 @@ export const routeQuestionHandler = async (
             : { tool: 'sfi.run_analysis', args: { name: tool, args } };
         })
       : undefined;
-  // CAE-01 semantic funnel: when the deterministic router could not place the
-  // question, surface meaning-ranked candidate tools for the host LLM to choose
-  // from. Advisor, not a route — offline TF-IDF over the capability map.
+  // CAE-01/02 semantic funnel: surface meaning-ranked candidate tools for the
+  // host LLM whenever the deterministic router is UNSURE — it gave up
+  // (`unrouted`) OR matched only weakly (`confidence: 'low'`). Advisor, not a
+  // route — offline TF-IDF over the capability map.
   const toolCandidates =
-    route.intent === 'unrouted' ? semanticCandidates(input.question, 8) : [];
+    route.intent === 'unrouted' || route.confidence === 'low'
+      ? semanticCandidates(input.question, 8)
+      : [];
+  // CAE-02 planner contract: when the funnel speaks, tell the host LLM the loop
+  // it owns — the candidates are an advisory shortlist, the LLM does the deciding.
+  const guidance =
+    toolCandidates.length > 0
+      ? 'These toolCandidates are an advisory shortlist, not a route — YOU decide. ' +
+        'Plan: read the question → resolve any named component with sfi.resolve → ' +
+        'pick the tool(s) to run from the candidates (sequence them if the question ' +
+        'is compound) → run them → ground the answer with sfi.synthesize_answer. ' +
+        'Never answer from a tool name alone.'
+      : undefined;
   return ok({
     data: {
       route,
@@ -726,6 +746,7 @@ export const routeQuestionHandler = async (
           : renderRouteMarkdown(route),
       trust: routeTrust(),
       ...(toolCandidates.length > 0 ? { toolCandidates } : {}),
+      ...(guidance !== undefined ? { guidance } : {}),
       ...(invoke !== undefined ? { invoke } : {}),
     },
     vaultState: {
