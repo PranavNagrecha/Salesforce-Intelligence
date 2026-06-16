@@ -14,6 +14,34 @@ docs brought back in sync with shipped reality), and the bug hunter
 (adversarial batteries, an agent-eval gate, and ratcheted eval minimums).
 Entries accrue below as changes land.
 
+### Funnel recall ratchet ~80% → ~90% (CAE-05)
+
+- **Funnel recall@8 lifted from ~80% to ~90%** (103/115 on the labeled gold-set)
+  via a small, bounded **per-tool keyword overlay** — funnel-internal, NOT
+  user-facing. A handful of tools whose name + description don't echo how people
+  phrase the question: most importantly `list_components` (the generic "enumerate
+  every X" tool, which shared no words with "what omniscripts do we have" /
+  "approval process steps"), plus `who_can_access_object`, `live_sample`,
+  `governor_limit_risks`, `live_folder_access`, `live_group_count`,
+  `what_if_change_method_signature`, etc. The `router-recall` gate floor is raised
+  to 87% and its baseline re-recorded at 103/115. Remaining misses are mostly
+  single-label artifacts (the funnel surfaces a valid alternative — e.g. a
+  resolve/find tool) or the one empty-token meta-question "what can you do". This
+  ratchet brings the funnel close to the bar for safely deleting the regex engine
+  (CAE-03b, still user-gated).
+- **New harness eval: funnel generalization on ~1000 FRESH questions** — a far
+  harder, harder-to-overfit bar than the 115-question gold-set. It generates real
+  Salesforce-user questions across admin/dev/architect/business/live personas with
+  phrasings deliberately unlike the gold-set, each tagged with the tool family it
+  should reach, and reports recall@8 (deterministic, vault-independent, wired into
+  the gate). It immediately earned its keep: it showed the tuned 90% gold-set
+  number was optimistic — the funnel actually generalized at **~75%**. Adding
+  **intent-verb synonyms** (touches/relies/falls-over → impact, dump/inventory →
+  list, blow → governor-limit) — which transfer to unseen phrasings, unlike
+  tool-specific keywords — lifted fresh-question recall to **~81%** while holding
+  the gold-set at 90% (no overfit). This generalization eval, not the gold-set, is
+  now the real bar for the funnel.
+
 ### Funnel recall lift + validation net (CAE-03a)
 
 - **Funnel recall lifted from ~59% to ~80%** on the labeled router gold-set. The

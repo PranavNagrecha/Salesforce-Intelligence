@@ -102,6 +102,17 @@ const SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   run: ['execute', 'fire', 'trigger', 'runs', 'execution'],
   user: ['profile', 'permissionset', 'member'],
   field: ['column', 'attribute'],
+  // Intent verbs (generalize across phrasings, unlike tool-specific keywords).
+  touches: ['impact', 'depend', 'dependency', 'affected', 'usage', 'references', 'uses'],
+  relies: ['depend', 'dependency', 'impact', 'usage', 'references'],
+  falls: ['break', 'breaks', 'impact', 'affected'],
+  dump: ['list', 'inventory', 'enumerate', 'components'],
+  inventory: ['list', 'enumerate', 'components', 'all'],
+  exist: ['list', 'count', 'inventory', 'many'],
+  blow: ['governor', 'limit', 'risk', 'exceed'],
+  populated: ['population', 'filled', 'fill', 'usage'],
+  required: ['mandatory', 'needed', 'blank', 'null'],
+  walk: ['explain', 'trace', 'describe', 'order', 'execution'],
 };
 
 /**
@@ -128,6 +139,39 @@ export const tokenize = (text: string): string[] => {
   return out;
 };
 
+/**
+ * Curated per-tool keyword overlay — funnel-internal, NOT user-facing. A handful
+ * of tools whose name + description do not echo the way people actually phrase the
+ * question. Most important: `list_components` is THE generic "enumerate every X of
+ * a type" tool, but its description shares no words with "what omniscripts do we
+ * have" / "approval process steps" / "relationship between A and B", so it was
+ * absent from those shortlists; the type vocabulary here puts it back IN the
+ * top-K (alongside any type-specific tool) so the host LLM can choose. Bounded +
+ * guarded by the recall gate; not a place to dump the whole roster.
+ */
+const TOOL_KEYWORDS: Readonly<Record<string, string>> = {
+  'sfi.list_components':
+    'list inventory enumerate catalog all what do we have how many exist objects fields ' +
+    'flows classes triggers profiles permission sets layouts record types validation rules ' +
+    'approval processes reports dashboards omniscripts custom standard relationship child ' +
+    'parent inactive active picklist values',
+  'sfi.capabilities': 'what can you do help capabilities what can i ask how do i use',
+  'sfi.automation_risk_report':
+    'objects more than one multiple triggers per object trigger quality automation risk',
+  'sfi.live_group_count': 'how many users assigned to profile membership group count',
+  'sfi.annotations': 'who owns owner steward responsible curated note',
+  'sfi.last_modified': 'who changed when modified last edited touched',
+  'sfi.search_flow_metadata': 'find flows matching named sync search flow by name',
+  'sfi.who_can_access_object': 'who can access object which profiles can read create edit delete',
+  'sfi.live_sample': 'show me sample example first few records rows give me',
+  'sfi.governor_limit_risks': 'queries soql governor limit large data volume bulk dml',
+  'sfi.what_if_change_method_signature': 'change method signature parameter argument breaks',
+  'sfi.layout_for_user': 'which layout does the profile user see page on object',
+  'sfi.integration_map': 'api limits at risk integration volume callout capacity external',
+  'sfi.find_apex_usages': 'which flows invoke call use apex classes methods from',
+  'sfi.live_folder_access': 'who can access report dashboard folder pipeline see view shared',
+};
+
 /** Append synonym terms for each token, preserving the originals. */
 const expand = (tokens: readonly string[]): string[] => {
   const out: string[] = [...tokens];
@@ -151,7 +195,8 @@ const buildToolDocs = (): Map<string, string> => {
     // words match the name ranks the tool even when the prose description does
     // not echo them.
     const nameWords = tool.name.replace(/^sfi\./, '').replace(/_/g, ' ');
-    docs.set(tool.name, `${nameWords} ${nameWords} ${tool.description}`);
+    const keywords = TOOL_KEYWORDS[tool.name] ?? '';
+    docs.set(tool.name, `${nameWords} ${nameWords} ${tool.description} ${keywords}`);
   }
   for (const cat of CATEGORIES) {
     const catText = ` ${cat.title} ${cat.description} ${cat.exampleQuestions.join(' ')}`;
