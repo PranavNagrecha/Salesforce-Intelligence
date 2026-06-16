@@ -666,4 +666,35 @@ describe('core-profile gateway envelopes (P13-GW-router-envelope)', () => {
     expect('toolCandidates' in r.value.data).toBe(false);
     expect('guidance' in r.value.data).toBe(false);
   });
+
+  it('mode=plan attaches candidates led by the plan family, even on a routed question (CAE-04)', async () => {
+    const r = await routeQuestionHandler(ctx, {
+      question: 'what breaks if I delete the Status field on Payment',
+      logGap: false,
+      mode: 'plan',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const tools = (r.value.data.toolCandidates ?? []).map((c) => c.tool);
+    expect(tools.length).toBeGreaterThan(0);
+    expect(r.value.data.guidance).toContain('PLAN mode');
+    const planFamily = /^sfi\.(what_if_|get_impact|safe_to_delete|downstream_effects|field_lineage|tests_for_change)/;
+    expect(tools.some((t) => planFamily.test(t))).toBe(true);
+    expect(planFamily.test(tools[0]!)).toBe(true); // the family leads
+  });
+
+  it('mode=assessment yields assessment guidance + candidates (CAE-04)', async () => {
+    const r = await routeQuestionHandler(ctx, { question: 'how risky is this org', logGap: false, mode: 'assessment' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.guidance).toContain('ASSESSMENT mode');
+    expect((r.value.data.toolCandidates ?? []).length).toBeGreaterThan(0);
+  });
+
+  it('mode=ask yields concise-ask guidance (CAE-04)', async () => {
+    const r = await routeQuestionHandler(ctx, { question: 'what fields are on Account', logGap: false, mode: 'ask' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.guidance).toContain('ASK mode');
+  });
 });

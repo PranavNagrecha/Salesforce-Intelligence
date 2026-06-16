@@ -14,6 +14,19 @@ docs brought back in sync with shipped reality), and the bug hunter
 (adversarial batteries, an agent-eval gate, and ratcheted eval minimums).
 Entries accrue below as changes land.
 
+### Ask / Plan / Assessment output modes (CAE-04)
+
+- **`sfi.route_question` gains an optional `mode` ('ask' | 'plan' | 'assessment')**
+  that tailors how the host LLM should answer and reranks the funnel candidates
+  toward that mode's tool family. **Plan** mode favors the `what_if_*` / `get_impact`
+  / `safe_to_delete` tools and asks for an ordered, dependency-sequenced change plan
+  with per-step risk; **Assessment** favors the `*_risk_report` / `release_readiness`
+  / `coverage` tools and asks for findings + severity + recommended actions; **Ask**
+  is a quick grounded answer. When a mode is set, `toolCandidates` + a mode-specific
+  `guidance` line are always attached (regardless of route confidence), so the same
+  question can be answered three ways. dx0-parity UX, built on the funnel. Guards:
+  `route-question.test.ts` (each mode's guidance + the plan-family-leads rerank).
+
 ### Funnel recall ratchet ~80% → ~90% (CAE-05)
 
 - **Funnel recall@8 lifted from ~80% to ~90%** (103/115 on the labeled gold-set)
