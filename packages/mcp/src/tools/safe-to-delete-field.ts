@@ -1,0 +1,854 @@
+/**
+ * Handler for the `sfi.safe_to_delete_field` MCP tool.
+ *
+ * The v2.0b headline tool — the buyer-facing answer to admin #4 on the
+ * top-10 questions list: "is it safe to delete this field?". Composes
+ * every incoming dependency edge into a verdict-weighted reasoning
+ * chain a caller can either render verbatim or summarise.
+ *
+ * The tool is a pure composition over existing graph queries: one
+ * `getNodeById(fieldId)` (to verify the field exists) followed by one
+ * `listEdges(fieldId, { direction: 'in' })` (to enumerate every
+ * incoming dependency). Each incoming edge gets classified into a
+ * category + verdict pair based on the source node's type and the
+ * edge's type; the per-category reasoning is then aggregated into a
+ * single overall verdict.
+ *
+ * Per-category classification table:
+ *
+ *   | Source node type             | Edge type   | Category    | Per-edge verdict |
+ *   |------------------------------|-------------|-------------|------------------|
+ *   | ApexClass / ApexTrigger      | readsFrom   | apex        | risky            |
+ *   | Flow                         | readsFrom   | flow        | blocking         |
+ *   | ApexClass / ApexTrigger      | writesTo    | apex        | blocking         |
+ *   | Flow                         | writesTo    | flow        | blocking         |
+ *   | WorkflowRule                 | writesTo    | workflow    | blocking         |
+ *   | (any other source)           | writesTo    | unknown     | blocking         |
+ *   | ValidationRule               | references  | validation  | blocking         |
+ *   | (formula-tokenizer source)   | references  | formula     | blocking         |
+ *   | Layout                       | usedInLayout| layout      | review           |
+ *   | VisualforcePage              | references  | frontend    | risky            |
+ *   | VisualforceComponent         | references  | frontend    | risky            |
+ *   | LightningComponentBundle     | readsFrom   | frontend    | risky            |
+ *   | LightningComponentBundle     | writesTo    | frontend    | risky            |
+ *   | AuraDefinitionBundle         | readsFrom   | frontend    | risky            |
+ *   | AuraDefinitionBundle         | writesTo    | frontend    | risky            |
+ *   | QuickAction                  | references  | layout      | risky            |
+ *   | (any other edge)             | *           | unknown     | risky            |
+ *
+ * **Aggregate verdict**:
+ *   - `safe` if there are NO incoming edges at all (and coverage is complete).
+ *   - `review` if coverage is incomplete and the graph would otherwise be `safe`
+ *     — means "not proven safe"; treat as **not permission to delete**.
+ *   - `blocking` if ANY reason carries `blocking`.
+ *   - `risky` if no `blocking` but at least one non-unknown `risky`.
+ *   - `unknown` if every reason is in the `unknown` category.
+ *
+ * **Honesty axis** (per the v2.0b spec): the tool does NOT consult the
+ * Tooling API for runtime dependency confirmation (that capability is
+ * deferred to v1.7+'s `dependsOnFromApi` enrichment). It does NOT
+ * surface false positives from heuristic scanners (Apex regex scanner,
+ * LWC field-access scanner) with declared confidence — the verdict
+ * `risky` literally means "the scanner flagged a reference; spot-check
+ * before deleting", whereas `blocking` means "the metadata declaration
+ * IS a hard dependency the platform will refuse to drop". The
+ * developer always gets the full referrer list (capped at 5 examples
+ * per category to keep the response small) so they can verify
+ * heuristic matches by hand.
+ *
+ * Implementation notes:
+ *   - `fieldId` is required to start with `CustomField:`. Other prefixes
+ *     return `invalid-query` at the handler boundary. Zod cannot
+ *     express the prefix constraint, so the check lives here.
+ *   - A field id with no node AND no inbound references resolves to
+ *     `component-not-found` (phantom-aware). A standard or managed-package
+ *     field with no node of its own but referenced by dependency/permission
+ *     edges is NOT an error: it returns a `review` verdict (not proven safe —
+ *     a not-modeled field can't be assessed and a standard field can't be
+ *     deleted anyway) (B12).
+ *   - For each incoming edge, `getNodeById(edge.fromId)` resolves the
+ *     referrer's identity (`type`, `apiName`). Sparse-graph misses are
+ *     dropped silently — matches the tolerance every other composition
+ *     tool uses.
+ *   - The full referrer list is available via `sfi.get_impact`; the
+ *     per-category `examples` array here is capped at 5 (sorted by id
+ *     ASC) so the response stays compact for the headline-summary
+ *     persona.
+ *   - Categories are emitted in a stable order
+ *     (`apex, flow, workflow, validation, layout, formula, integration,
+ *     permission, sharing, frontend, unknown`) so consumer fixtures see
+ *     the same shape across runs.
+ */
+
+import type {
+  ComponentId,
+  ComponentType,
+  Edge,
+  McpError,
+  McpResponse,
+  Node,
+  TrustSummary,
+} from '@sf-intelligence/contracts';
+import { err, ok, type Result } from '@sf-intelligence/core';
+import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import { summarizeCoverage } from '@sf-intelligence/vault';
+import { z } from 'zod';
+
+import { mdTable } from '../answer-render.js';
+import type { Context } from '../server.js';
+
+import { readFactBlock, type FactsBlock } from './facts-block.js';
+import { fieldNotFoundError } from './field-not-found-suggest.js';
+import { phantomAwareNotFoundMessage } from './phantom-node.js';
+import {
+  REPORT_DASHBOARD_USAGE_CAVEAT,
+  reportDashboardUsage,
+} from './report-dashboard-usage.js';
+import { resolveToFieldOrSuggest } from './resolve-field-or-suggest.js';
+
+/** Canonical id prefix for the CustomField node type. */
+const CUSTOM_FIELD_PREFIX = 'CustomField:';
+
+/**
+ * Maximum number of example referrers surfaced per category in the
+ * response. Callers wanting the full list should use
+ * `sfi.get_impact` — the cap here keeps the headline-summary response
+ * compact for chat UIs.
+ */
+const EXAMPLES_PER_CATEGORY_LIMIT = 5;
+
+/**
+ * The categories the v2.0b reasoning chain recognises. Stable order
+ * keeps consumer fixtures deterministic across runs. `unknown` is the
+ * fall-through bucket for incoming edges whose source-node type +
+ * edge-type combination is not in the classification table.
+ */
+const CATEGORY_ORDER = [
+  'apex',
+  'flow',
+  'workflow',
+  'validation',
+  'layout',
+  'formula',
+  'integration',
+  'permission',
+  'sharing',
+  'analytics',
+  'ui',
+  'frontend',
+  'unknown',
+] as const;
+
+/** One of the recognised reasoning categories. */
+type ReasonCategory = (typeof CATEGORY_ORDER)[number];
+
+/** One of the per-edge or aggregate verdicts the tool emits. */
+type Verdict = 'safe' | 'review' | 'risky' | 'blocking' | 'unknown';
+
+const FIELD_DELETION_REQUIRED_COVERAGE = [
+  'CustomField',
+  'ValidationRule',
+  'Flow',
+  'ApexClass',
+  'ApexTrigger',
+  'Layout',
+  'LightningComponentBundle',
+  'AuraDefinitionBundle',
+  'VisualforcePage',
+  'VisualforceComponent',
+  'QuickAction',
+  'WorkflowRule',
+  'SharingRule',
+  'Report',
+  'Dashboard',
+  'ListView',
+  'ReportType',
+  'FlexiPage',
+] as const;
+
+/**
+ * Source-name marker used by the formula-tokenizer extractor. The
+ * v0.2 formula tokenizer emits incoming `references` edges to fields
+ * with `source: 'formula-tokenizer'`; that marker distinguishes a
+ * formula reference (always `blocking` — the formula will not
+ * compile without the field) from a generic metadata-dependency
+ * reference of the same edge type.
+ */
+const FORMULA_TOKENIZER_SOURCE = 'formula-tokenizer';
+
+/**
+ * Zod schema for the `sfi.safe_to_delete_field` tool input.
+ *
+ *   - `fieldId`: required, non-empty string. The canonical CustomField
+ *     id (`CustomField:{Object}.{Field}`). Non-`CustomField:` prefixes
+ *     surface as `invalid-query` from the handler; unknown but
+ *     well-formed ids surface as `component-not-found`.
+ */
+export const safeToDeleteFieldInputSchema = z.object({
+  fieldId: z.string().min(1),
+  /**
+   * `'checklist'` adds a `checklist` field (P8-destructive-checklist): a
+   * "before you delete X" Markdown checklist rendered from the verdict +
+   * reasoning, with the coverageCaveat surfaced FIRST. Default `'json'`
+   * returns only the structured reasoning.
+   */
+  format: z.enum(['json', 'checklist']).optional(),
+});
+
+/** Parsed input shape, inferred from `safeToDeleteFieldInputSchema`. */
+export type SafeToDeleteFieldInput = z.infer<
+  typeof safeToDeleteFieldInputSchema
+>;
+
+/**
+ * One example referrer surfaced inside a category's `examples` array.
+ * Combines the source node's identity so a caller can render
+ * "Validation Rule X depends on this field" without a follow-up
+ * round-trip.
+ */
+export interface SafeToDeleteFieldExample {
+  readonly id: ComponentId;
+  readonly type: ComponentType;
+  readonly apiName: string;
+}
+
+/**
+ * One per-category entry in the reasoning chain. `count` is the total
+ * number of referrers in this category (may exceed `examples.length`
+ * when truncated by `EXAMPLES_PER_CATEGORY_LIMIT`); `examples` is the
+ * compact sample callers display directly. `note` is a single
+ * plain-English sentence explaining what the category means and what
+ * a verdict of `blocking` / `risky` should signal to the caller.
+ */
+export interface SafeToDeleteFieldReason {
+  readonly category: ReasonCategory;
+  readonly verdict: Verdict;
+  readonly count: number;
+  readonly examples: readonly SafeToDeleteFieldExample[];
+  readonly note: string;
+}
+
+/** Payload wrapped inside the `McpResponse` envelope on success. */
+export interface SafeToDeleteFieldOutput {
+  readonly fieldId: ComponentId;
+  readonly verdict: Verdict;
+  readonly reasoning: readonly SafeToDeleteFieldReason[];
+  readonly coverageCaveat?: CoverageCaveat;
+  readonly trust: TrustSummary;
+  /** Present only when `format: 'checklist'` (P8-destructive-checklist). */
+  readonly checklist?: string;
+  /**
+   * P13-FACTS-consumers: captured fill rate for this field (`data_snapshot`),
+   * when one exists. CONTEXT ONLY — the verdict above is computed purely from
+   * the metadata graph and NEVER moves toward safe because of a sampled
+   * observation (adversarial unit pins this).
+   */
+  readonly dataShape?: FactsBlock;
+  /**
+   * Profile / PermissionSet FLS grants on this field (access, not usage).
+   * Excluded from `reasoning` — aligns with `unused_fields_deep`.
+   */
+  readonly flsGrantCount?: number;
+}
+
+export interface CoverageCaveat {
+  readonly status: 'partial' | 'unknown';
+  readonly missingCoverage: readonly string[];
+  readonly message: string;
+}
+
+/**
+ * Classify one incoming edge into a (category, verdict) pair. The
+ * `null` return signals "this edge does not contribute to the
+ * reasoning chain" — used today only when the referrer node went
+ * missing (sparse-graph case); every other edge is materialised so
+ * the caller sees the full coverage.
+ */
+const classifyEdge = (
+  edge: Edge,
+  fromNode: Node,
+): { category: ReasonCategory; verdict: Verdict } => {
+  const fromType = fromNode.type;
+  // Special-case the formula-tokenizer references first — the
+  // edgeType (`references`) overlaps with validation rules and
+  // frontend components, but the `source` marker is the source of
+  // truth for what the formula tokenizer extracted.
+  if (
+    edge.edgeType === 'references' &&
+    edge.source === FORMULA_TOKENIZER_SOURCE
+  ) {
+    return { category: 'formula', verdict: 'blocking' };
+  }
+  switch (edge.edgeType) {
+    case 'readsFrom':
+      if (fromType === 'ApexClass' || fromType === 'ApexTrigger') {
+        return { category: 'apex', verdict: 'risky' };
+      }
+      if (fromType === 'Flow') {
+        return { category: 'flow', verdict: 'blocking' };
+      }
+      if (
+        fromType === 'LightningComponentBundle' ||
+        fromType === 'AuraDefinitionBundle'
+      ) {
+        return { category: 'frontend', verdict: 'risky' };
+      }
+      return { category: 'unknown', verdict: 'risky' };
+    case 'writesTo':
+      if (fromType === 'ApexClass' || fromType === 'ApexTrigger') {
+        return { category: 'apex', verdict: 'blocking' };
+      }
+      if (fromType === 'Flow') {
+        return { category: 'flow', verdict: 'blocking' };
+      }
+      if (fromType === 'WorkflowRule') {
+        return { category: 'workflow', verdict: 'blocking' };
+      }
+      if (
+        fromType === 'LightningComponentBundle' ||
+        fromType === 'AuraDefinitionBundle'
+      ) {
+        return { category: 'frontend', verdict: 'risky' };
+      }
+      return { category: 'unknown', verdict: 'blocking' };
+    case 'references':
+      if (fromType === 'ValidationRule') {
+        return { category: 'validation', verdict: 'blocking' };
+      }
+      if (
+        fromType === 'VisualforcePage' ||
+        fromType === 'VisualforceComponent'
+      ) {
+        return { category: 'frontend', verdict: 'risky' };
+      }
+      if (fromType === 'QuickAction') {
+        return { category: 'layout', verdict: 'risky' };
+      }
+      if (
+        fromType === 'Report' ||
+        fromType === 'Dashboard' ||
+        fromType === 'ListView' ||
+        fromType === 'ReportType'
+      ) {
+        return { category: 'analytics', verdict: 'blocking' };
+      }
+      if (fromType === 'FlexiPage') {
+        return { category: 'ui', verdict: 'blocking' };
+      }
+      if (
+        fromType === 'RestrictionRule' ||
+        fromType === 'ScopingRule'
+      ) {
+        return { category: 'sharing', verdict: 'blocking' };
+      }
+      return { category: 'unknown', verdict: 'risky' };
+    case 'usedInLayout':
+      // A field on a page layout is auto-removed when the field is deleted —
+      // Salesforce does NOT block the delete and nothing breaks (the layout
+      // keeps working; users just no longer see the field). A UI heads-up
+      // ('review'), not 'blocking' — consistent with the grantedBy case below,
+      // which applies the same "platform auto-handles it, nothing breaks" logic.
+      return { category: 'layout', verdict: 'review' };
+    case 'grantedBy':
+      // FLS grant (Profile / PermissionSet → field). Deleting the field removes
+      // these grants automatically; the platform does NOT block the delete and
+      // nothing breaks, so this is informational, not a risk. (`parentOf`, the
+      // structural object→field ownership edge, is filtered out before this.)
+      return { category: 'permission', verdict: 'review' };
+    default:
+      return { category: 'unknown', verdict: 'risky' };
+  }
+};
+
+/**
+ * Per-category notes shown to the caller. Each note describes the
+ * dependency kind in one sentence and (where relevant) flags the
+ * heuristic-confidence boundary so the caller knows when a `risky`
+ * verdict means "spot-check before deleting" vs. "definitely
+ * depended on".
+ */
+const CATEGORY_NOTES: Readonly<Record<ReasonCategory, string>> = Object.freeze(
+  {
+    apex: 'Apex classes and triggers reference this field. Heuristic-confidence matches (apex-scanner regex) may include false positives in dynamic SOQL or reflective access; spot-check before deleting.',
+    flow: 'Flow definitions read or write this field. The Flow XML names the field literally; deleting the field will break the Flow at runtime.',
+    workflow:
+      'A WorkflowRule field-update action writes this field. The action will fail at runtime if the field is removed.',
+    validation:
+      'A Validation Rule formula references this field. The Validation Rule will fail to compile if the field is removed.',
+    layout:
+      'This field is placed on one or more page layouts (deleting the field auto-removes it from them — Salesforce does not block the delete and the layouts keep working, but users of those layouts will no longer see the field) or referenced by a QuickAction (whose create/edit form is affected). Review the UI impact before deleting.',
+    formula:
+      'Another formula field references this field via its formula tokenizer. The referencing formula will fail to compile if this field is removed.',
+    integration:
+      'An integration surface (external data source, external service) references this field. Removing it may break the outbound or inbound contract.',
+    permission:
+      'A Profile or Permission Set grants access to this field. Removing the field will drop the permission grant but is not blocked.',
+    sharing:
+      'A SharingRule, Restriction Rule, or Scoping Rule criterion references this field. Deleting the field will break the rule.',
+    analytics:
+      'A Report, Dashboard, List View, or Report Type references this field. Removing the field will break the analytics surface at runtime.',
+    ui:
+      'A Lightning page (FlexiPage) references this field. Removing the field will leave the page with a broken element.',
+    frontend:
+      'A Lightning Web Component, Aura bundle, Visualforce page, or Visualforce component references this field. Heuristic-confidence matches (LWC/Aura scanners) may include false positives; spot-check the bundle source before deleting.',
+    unknown:
+      'An incoming dependency edge was found whose source/type combination is not in the v2.0b classification table. Review the impact via sfi.get_impact before deleting.',
+  },
+);
+
+/**
+ * Comparator for the deterministic example sort. `id` ASC matches the
+ * convention every other enumeration-style tool in this package uses.
+ */
+const compareExamples = (
+  a: SafeToDeleteFieldExample,
+  b: SafeToDeleteFieldExample,
+): number => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+
+/**
+ * Build the reasoning array from the per-category accumulators. Each
+ * category in `CATEGORY_ORDER` that has at least one referrer emits a
+ * single reason; categories with no referrers are dropped so the
+ * response stays compact. Per-category verdict precedence is
+ * `blocking > risky > unknown` — the worst per-edge verdict in the
+ * category determines what the category reports.
+ */
+const buildReasoning = (
+  buckets: Map<ReasonCategory, {
+    verdict: Verdict;
+    examples: SafeToDeleteFieldExample[];
+    count: number;
+  }>,
+): readonly SafeToDeleteFieldReason[] => {
+  const out: SafeToDeleteFieldReason[] = [];
+  for (const category of CATEGORY_ORDER) {
+    const bucket = buckets.get(category);
+    if (bucket === undefined) continue;
+    const sortedExamples = [...bucket.examples]
+      .sort(compareExamples)
+      .slice(0, EXAMPLES_PER_CATEGORY_LIMIT);
+    out.push({
+      category,
+      verdict: bucket.verdict,
+      count: bucket.count,
+      examples: sortedExamples,
+      note: CATEGORY_NOTES[category],
+    });
+  }
+  return out;
+};
+
+/**
+ * Promote `current` to the worse of `(current, next)` using the
+ * `blocking > risky > review > unknown > safe` precedence. Used inside each
+ * per-category accumulator so the category's verdict reflects the
+ * worst incoming edge it saw.
+ */
+const promoteVerdict = (current: Verdict, next: Verdict): Verdict => {
+  if (current === 'blocking' || next === 'blocking') return 'blocking';
+  if (current === 'risky' || next === 'risky') return 'risky';
+  if (current === 'review' || next === 'review') return 'review';
+  if (current === 'unknown' || next === 'unknown') return 'unknown';
+  return 'safe';
+};
+
+/**
+ * Aggregate the per-category verdicts into the headline answer.
+ *   - empty reasoning → `safe` (no incoming edges at all).
+ *   - any `blocking` → `blocking`.
+ *   - any non-`unknown` `risky` → `risky`.
+ *   - every reason is `unknown`-category → `unknown`.
+ */
+const aggregateVerdict = (
+  reasoning: readonly SafeToDeleteFieldReason[],
+): Verdict => {
+  if (reasoning.length === 0) return 'safe';
+  let sawNonUnknownRisky = false;
+  let sawUnknownRisky = false;
+  let sawOnlyUnknown = true;
+  let sawReview = false;
+  for (const r of reasoning) {
+    if (r.verdict === 'blocking') return 'blocking';
+    if (r.category !== 'unknown') sawOnlyUnknown = false;
+    if (r.verdict === 'risky') {
+      if (r.category !== 'unknown') sawNonUnknownRisky = true;
+      else sawUnknownRisky = true;
+    }
+    if (r.verdict === 'review') sawReview = true;
+  }
+  if (sawNonUnknownRisky) return 'risky';
+  if (sawOnlyUnknown) return 'unknown';
+  // An unknown-category risky reference still warrants a spot-check, so it
+  // keeps precedence over review.
+  if (sawUnknownRisky) return 'risky';
+  // A 'review' reason (a page-layout placement or an FLS grant — the platform
+  // auto-handles it on delete and nothing breaks) is a heads-up, not a risk.
+  // Without this branch it fell through to the 'risky' default below, which
+  // mis-reported every layout-only / FLS-only field as risky.
+  if (sawReview) return 'review';
+  return 'risky';
+};
+
+const buildCoverageCaveat = (
+  ctx: Context,
+): CoverageCaveat | undefined => {
+  const coverage = summarizeCoverage(ctx.manifest, FIELD_DELETION_REQUIRED_COVERAGE);
+  if (coverage.status === 'complete') return undefined;
+  const missingCoverage = coverage.missingCoverage.length > 0
+    ? coverage.missingCoverage
+    : [...FIELD_DELETION_REQUIRED_COVERAGE];
+  return {
+    status: coverage.status === 'partial' ? 'partial' : 'unknown',
+    missingCoverage,
+    message:
+      `Deletion safety cannot be confirmed because the vault has incomplete coverage for: ${missingCoverage.join(', ')}. Treat absence of dependencies in those families as "not checked", not "none".`,
+  };
+};
+
+const applyCoverageToVerdict = (
+  verdict: Verdict,
+  caveat: CoverageCaveat | undefined,
+): Verdict => {
+  if (caveat === undefined) return verdict;
+  return verdict === 'safe' ? 'review' : verdict;
+};
+
+/**
+ * The `sfi.safe_to_delete_field` MCP tool. Returns a confidence-
+ * weighted verdict for a CustomField deletion, citing every incoming
+ * dependency the graph holds. See the module JSDoc for the
+ * classification table and the honesty-axis design.
+ *
+ * @example
+ *   const r = await safeToDeleteFieldHandler(ctx, {
+ *     fieldId: 'CustomField:Account.Industry__c',
+ *   });
+ *   if (r.ok) console.log(r.value.data.verdict);
+ */
+/** Severity order for the delete checklist — resolve the most severe first. */
+const VERDICT_ORDER: Record<Verdict, number> = {
+  blocking: 0,
+  risky: 1,
+  review: 2,
+  unknown: 3,
+  safe: 4,
+};
+
+/**
+ * Render a "before you delete X" Markdown checklist (P8-destructive-checklist)
+ * from a safe-to-delete result. The coverageCaveat is surfaced FIRST (never
+ * footnoted) per the vault-coverage-honesty rule; removal steps are ordered
+ * most-severe-first. PROPOSES a checklist — it never deletes or writes.
+ */
+export const renderDeleteChecklist = (out: SafeToDeleteFieldOutput): string => {
+  const lines: string[] = [`## Before you delete \`${out.fieldId}\``, ''];
+  if (out.coverageCaveat !== undefined) {
+    lines.push(
+      `> ⚠️ **Coverage caveat (${out.coverageCaveat.status}):** ${out.coverageCaveat.message}`,
+      '',
+    );
+  }
+  lines.push(`**Verdict: ${out.verdict.toUpperCase()}**`, '');
+  const ordered = [...out.reasoning].sort(
+    (a, b) => VERDICT_ORDER[a.verdict] - VERDICT_ORDER[b.verdict],
+  );
+  if (ordered.length === 0) {
+    lines.push('No inbound dependencies found — nothing to resolve before deleting.');
+  } else {
+    lines.push('### Resolve these before deleting (most severe first)');
+    for (const r of ordered) {
+      lines.push(`- [ ] **${r.category}** (${r.count}) — ${r.note}`);
+    }
+    lines.push(
+      '',
+      mdTable(
+        ['Category', 'Severity', 'Count', 'Examples'],
+        ordered.map((r) => [
+          r.category,
+          r.verdict,
+          r.count,
+          r.examples.map((e) => e.id).join(', ') || '—',
+        ]),
+      ),
+    );
+  }
+  lines.push(
+    '',
+    "_Proposed from the vault's last refresh — verify against your org before deleting. This never deploys or modifies the org._",
+  );
+  return lines.join('\n');
+};
+
+const coreSafeToDeleteFieldHandler = async (
+  ctx: Context,
+  input: SafeToDeleteFieldInput,
+): Promise<Result<McpResponse<SafeToDeleteFieldOutput>, McpError>> => {
+  // FLD-02: graceful object→field routing.
+  const suggestionResult = await resolveToFieldOrSuggest(ctx, input.fieldId);
+  if (!suggestionResult.ok) return suggestionResult;
+  if (suggestionResult.value !== null) {
+    return ok(
+      suggestionResult.value as unknown as McpResponse<SafeToDeleteFieldOutput>,
+    );
+  }
+
+  if (!input.fieldId.startsWith(CUSTOM_FIELD_PREFIX)) {
+    return err({
+      kind: 'invalid-query',
+      message: `fieldId must start with '${CUSTOM_FIELD_PREFIX}'; got '${input.fieldId}'`,
+      path: 'fieldId',
+    });
+  }
+
+  const fieldId = input.fieldId as ComponentId;
+
+  const nodeResult = await getNodeById(ctx.graph, fieldId);
+  if (!nodeResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${nodeResult.error.message}`,
+    });
+  }
+  if (nodeResult.value === null) {
+    // B12: a standard field (Contact.Email) or managed-package field is often
+    // not modeled as its own node. If it is referenced (dependency / permission
+    // edges exist), don't return a silent component-not-found — return a
+    // `review` verdict (NOT proven safe): a not-modeled field can't be assessed
+    // from its absent definition, and a standard field can't be deleted via
+    // metadata anyway. Only a field with NO inbound references is genuinely
+    // unknown (a typo / wrong id).
+    const inboundResult = await listEdges(ctx.graph, fieldId, {
+      direction: 'in',
+    });
+    if (!inboundResult.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${inboundResult.error.message}`,
+      });
+    }
+    if (inboundResult.value.length === 0) {
+      return err(
+        await fieldNotFoundError(
+          ctx,
+          fieldId,
+          await phantomAwareNotFoundMessage(ctx, fieldId, 'CustomField'),
+        ),
+      );
+    }
+    return ok({
+      data: {
+        fieldId,
+        verdict: 'review',
+        reasoning: [
+          {
+            category: 'unknown',
+            verdict: 'review',
+            count: inboundResult.value.length,
+            examples: [],
+            note:
+              `This field's own definition was not retrieved into the vault — ` +
+              `standard fields and managed-package fields are not modeled. It is ` +
+              `referenced by ${inboundResult.value.length} component(s)/grant(s). ` +
+              `NOT proven safe to delete: a standard field cannot be deleted via ` +
+              `metadata, and a not-modeled field cannot be fully assessed. Run ` +
+              `\`sfi refresh\` if it should be retrievable, or treat it as external.`,
+          },
+        ],
+        trust: {
+          provenance: 'offline_snapshot',
+          confidence: 'declared',
+          freshness: { snapshotRefreshedAt: ctx.manifest.refreshedAt },
+          completeness: { status: 'partial' },
+          limitations: [
+            "The field's own definition is not in the vault (standard or managed-package field); this verdict is based on inbound references only.",
+          ],
+        },
+      },
+      vaultState: {
+        sourceTreeHash: ctx.manifest.sourceTreeHash,
+        refreshedAt: ctx.manifest.refreshedAt,
+      },
+    });
+  }
+
+  // A platform system/audit field (synthesized into the vault for reference,
+  // e.g. CreatedById/SystemModstamp on a standard object) is Salesforce-owned
+  // and cannot be deleted at all — short-circuit to a blocking verdict rather
+  // than reasoning over its (absent) dependency edges.
+  if (nodeResult.value.properties['system'] === true) {
+    return ok({
+      data: {
+        fieldId,
+        verdict: 'blocking',
+        reasoning: [
+          {
+            category: 'unknown',
+            verdict: 'blocking',
+            count: 1,
+            examples: [],
+            note: 'This is a platform-managed system/audit field (e.g. CreatedDate, OwnerId, SystemModstamp). Salesforce owns it — it cannot be deleted. (It is synthesized into the vault as a reference anchor, not a custom field.)',
+          },
+        ],
+        trust: {
+          provenance: 'offline_snapshot',
+          confidence: 'declared',
+          freshness: { snapshotRefreshedAt: ctx.manifest.refreshedAt },
+          completeness: { status: 'complete' },
+          limitations: [
+            'System fields are platform-guaranteed; this verdict does not depend on dependency-edge coverage.',
+          ],
+        },
+      },
+      vaultState: {
+        sourceTreeHash: ctx.manifest.sourceTreeHash,
+        refreshedAt: ctx.manifest.refreshedAt,
+      },
+    });
+  }
+
+  const edgesResult = await listEdges(ctx.graph, fieldId, {
+    direction: 'in',
+  });
+  if (!edgesResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${edgesResult.error.message}`,
+    });
+  }
+
+  const buckets = new Map<
+    ReasonCategory,
+    { verdict: Verdict; examples: SafeToDeleteFieldExample[]; count: number }
+  >();
+
+  let flsGrantCount = 0;
+  for (const edge of edgesResult.value) {
+    // `parentOf` is the structural object→field ownership edge: the parent
+    // object OWNS the field, it does not depend on it, so deleting the field
+    // never affects the parent. Skip it so the field's own parent object does
+    // not show up as a (risky) deletion dependency.
+    if (edge.edgeType === 'parentOf') continue;
+    // `grantedBy` is FLS access (Profile / PermissionSet), not usage — same
+    // exclusion as `unused_fields_deep` / `find_dead_code`. Grants drop
+    // automatically when the field is deleted; they are not deletion blockers.
+    if (edge.edgeType === 'grantedBy') {
+      flsGrantCount += 1;
+      continue;
+    }
+    const fromResult = await getNodeById(ctx.graph, edge.fromId);
+    if (!fromResult.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${fromResult.error.message}`,
+      });
+    }
+    const fromNode = fromResult.value;
+    if (fromNode === null) {
+      // Sparse-graph case: the edge points at an id the graph has no
+      // node row for. Drop silently — matches the tolerance every
+      // other composition tool uses.
+      continue;
+    }
+    const { category, verdict } = classifyEdge(edge, fromNode);
+    const existing = buckets.get(category);
+    if (existing === undefined) {
+      buckets.set(category, {
+        verdict,
+        examples: [
+          {
+            id: fromNode.id,
+            type: fromNode.type,
+            apiName: fromNode.apiName,
+          },
+        ],
+        count: 1,
+      });
+    } else {
+      existing.verdict = promoteVerdict(existing.verdict, verdict);
+      existing.count += 1;
+      existing.examples.push({
+        id: fromNode.id,
+        type: fromNode.type,
+        apiName: fromNode.apiName,
+      });
+    }
+  }
+
+  // Report / Dashboard usage is folded onto the field as a property (no per-report
+  // node/edge — see foldReportDashboardUsageIntoFields), so the edge walk above
+  // can't see it. Inject it as an `analytics` (blocking) reason so a field used
+  // only in a report column / dashboard component never reads as `safe`.
+  const rdUsage = reportDashboardUsage(nodeResult.value);
+  if (rdUsage.usedInReport || rdUsage.usedInDashboard) {
+    const existing = buckets.get('analytics');
+    const added = (rdUsage.usedInReport ? 1 : 0) + (rdUsage.usedInDashboard ? 1 : 0);
+    buckets.set('analytics', {
+      verdict: 'blocking',
+      examples: existing?.examples ?? [],
+      count: (existing?.count ?? 0) + added,
+    });
+  }
+
+  const reasoning = buildReasoning(buckets);
+  const coverageCaveat = buildCoverageCaveat(ctx);
+  const verdict = applyCoverageToVerdict(aggregateVerdict(reasoning), coverageCaveat);
+
+  const dataShape = await readFactBlock(ctx, fieldId, 'fillRate');
+
+  return ok({
+    data: {
+      fieldId,
+      verdict,
+      ...(dataShape !== undefined ? { dataShape } : {}),
+      reasoning,
+      ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
+      ...(flsGrantCount > 0 ? { flsGrantCount } : {}),
+      trust: {
+        provenance: 'offline_snapshot',
+        confidence: reasoning.some((r) => r.verdict === 'risky') ? 'heuristic' : 'declared',
+        freshness: { snapshotRefreshedAt: ctx.manifest.refreshedAt },
+        completeness: {
+          status: coverageCaveat === undefined ? 'complete' : coverageCaveat.status,
+          ...(coverageCaveat !== undefined
+            ? { missingCoverage: coverageCaveat.missingCoverage }
+            : {}),
+        },
+        limitations: [
+          'Dependency evidence comes from the last offline vault refresh. Dynamic SOQL, reflective Apex, and runtime metadata access remain invisible to static analysis.',
+          REPORT_DASHBOARD_USAGE_CAVEAT,
+          ...(flsGrantCount > 0
+            ? [
+                `${flsGrantCount} Profile/PermissionSet FLS grant(s) exist on this field (access, not usage) — excluded from the verdict; see \`sfi.field_access_audit\` or \`sfi.unused_fields_deep\`. Deleting the field drops grants automatically.`,
+              ]
+            : []),
+          ...(coverageCaveat !== undefined ? [coverageCaveat.message] : []),
+        ],
+      },
+    },
+    vaultState: {
+      sourceTreeHash: ctx.manifest.sourceTreeHash,
+      refreshedAt: ctx.manifest.refreshedAt,
+    },
+  });
+};
+
+/**
+ * P8-destructive-checklist: thin wrapper over the core handler. When
+ * `format: 'checklist'`, it renders the Markdown delete checklist onto the
+ * result via post-processing — so every verdict path (main / system-field /
+ * not-modeled) carries it without touching the individual return sites.
+ */
+export const safeToDeleteFieldHandler = async (
+  ctx: Context,
+  input: SafeToDeleteFieldInput,
+): Promise<Result<McpResponse<SafeToDeleteFieldOutput>, McpError>> => {
+  const result = await coreSafeToDeleteFieldHandler(ctx, input);
+  if (!result.ok || input.format !== 'checklist') return result;
+  return ok({
+    ...result.value,
+    data: {
+      ...result.value.data,
+      checklist: renderDeleteChecklist(result.value.data),
+    },
+  });
+};

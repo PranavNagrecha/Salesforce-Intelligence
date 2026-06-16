@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" font-family="ui-monospace, 'JetBrains Mono', SFMono-Regular, Menlo, monospace">
+  <defs>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="3" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="630" fill="#05070A"/>
+  <!-- scanlines -->
+  <g fill="#0C140E" opacity="0.5">
+    <g id="sl"></g>
+  </g>
+  <g fill="#0B130D">
+    <rect x="0" y="0" width="1200" height="2"/>
+  </g>
+  <!-- generate scanlines via repeated rects -->
+  <g fill="#0A110C" opacity="0.55">
+    <rect x="0" y="6"   width="1200" height="2"/><rect x="0" y="14"  width="1200" height="2"/>
+    <rect x="0" y="22"  width="1200" height="2"/><rect x="0" y="30"  width="1200" height="2"/>
+    <rect x="0" y="38"  width="1200" height="2"/><rect x="0" y="46"  width="1200" height="2"/>
+    <rect x="0" y="54"  width="1200" height="2"/><rect x="0" y="62"  width="1200" height="2"/>
+    <rect x="0" y="70"  width="1200" height="2"/><rect x="0" y="78"  width="1200" height="2"/>
+    <rect x="0" y="86"  width="1200" height="2"/><rect x="0" y="94"  width="1200" height="2"/>
+    <rect x="0" y="540" width="1200" height="2"/><rect x="0" y="548" width="1200" height="2"/>
+    <rect x="0" y="556" width="1200" height="2"/><rect x="0" y="564" width="1200" height="2"/>
+    <rect x="0" y="572" width="1200" height="2"/><rect x="0" y="580" width="1200" height="2"/>
+    <rect x="0" y="588" width="1200" height="2"/><rect x="0" y="596" width="1200" height="2"/>
+  </g>
+  <!-- vignette -->
+  <rect width="1200" height="630" fill="url(#vg)"/>
+  <radialGradient id="vg" cx="0.5" cy="0.42" r="0.75">
+    <stop offset="55%" stop-color="#000000" stop-opacity="0"/>
+    <stop offset="100%" stop-color="#000000" stop-opacity="0.55"/>
+  </radialGradient>
+
+  <!-- brand line -->
+  <text x="80" y="96" fill="#3DF07A" font-size="30" font-weight="700" filter="url(#glow)">&gt;_ sf-intelligence</text>
+  <text x="320" y="96" fill="#5E8A6E" font-size="22"> -  read-only · offline-first · MCP-native</text>
+
+  <!-- headline (VT323-ish look via heavy mono) -->
+  <text x="78" y="232" fill="#E9FCEF" font-size="104" font-weight="700" letter-spacing="2" filter="url(#glow)">ASK YOUR ORG.</text>
+  <text x="78" y="338" fill="#E9FCEF" font-size="104" font-weight="700" letter-spacing="2" filter="url(#glow)">GET THE <tspan fill="#3DF07A">TRUTH</tspan>.</text>
+  <rect x="710" y="300" width="34" height="78" fill="#3DF07A" filter="url(#glow)"/>
+
+  <text x="80" y="404" fill="#B6E9C4" font-size="28">One retrieve, then every answer is grounded in your org's real metadata.</text>
+
+  <!-- status chips -->
+  <g font-size="24">
+    <g transform="translate(80,452)">
+      <rect width="150" height="52" rx="4" fill="#0A0F0C" stroke="#1C3326"/>
+      <text x="22" y="34" fill="#3DF07A" font-weight="700">171</text><text x="68" y="34" fill="#5E8A6E">tools</text>
+    </g>
+    <g transform="translate(246,452)">
+      <rect width="150" height="52" rx="4" fill="#0A0F0C" stroke="#1C3326"/>
+      <text x="22" y="34" fill="#3DF07A" font-weight="700">0</text><text x="44" y="34" fill="#5E8A6E">writes</text>
+    </g>
+    <g transform="translate(412,452)">
+      <rect width="200" height="52" rx="4" fill="#0A0F0C" stroke="#1C3326"/>
+      <text x="22" y="34" fill="#3DF07A" font-weight="700">100%</text><text x="92" y="34" fill="#5E8A6E">offline</text>
+    </g>
+    <g transform="translate(628,452)">
+      <rect width="150" height="52" rx="4" fill="#0A0F0C" stroke="#1C3326"/>
+      <text x="22" y="34" fill="#5E8A6E">MIT + CC</text>
+    </g>
+  </g>
+
+  <!-- small terminal pane, lower-right -->
+  <g transform="translate(820,150)">
+    <rect width="300" height="340" rx="6" fill="#0A0F0C" stroke="#1C3326"/>
+    <rect width="300" height="34" rx="6" fill="#0C1410"/>
+    <circle cx="22" cy="17" r="5" fill="#FF6060"/><circle cx="40" cy="17" r="5" fill="#FFC24B"/><circle cx="58" cy="17" r="5" fill="#3DF07A"/>
+    <text x="22" y="74" fill="#E9FCEF" font-size="17">$ where's the emale</text>
+    <text x="22" y="98" fill="#E9FCEF" font-size="17">  field?</text>
+    <text x="22" y="134" fill="#B6E9C4" font-size="16">◆ 3 matches  -  pick:</text>
+    <text x="34" y="160" fill="#3DF07A" font-size="15">· Email__c (Account)</text>
+    <text x="34" y="182" fill="#3DF07A" font-size="15">· Email__c (Contact)</text>
+    <text x="34" y="204" fill="#3DF07A" font-size="15">· Alt_Email__c (Lead)</text>
+    <text x="22" y="244" fill="#E9FCEF" font-size="16">$ delete contact one?</text>
+    <text x="22" y="276" fill="#3DF07A" font-size="15">▸ 3 refs found</text>
+    <text x="22" y="300" fill="#5E8A6E" font-size="13">[offline_snapshot]</text>
+    <rect x="22" y="318" width="12" height="18" fill="#3DF07A"/>
+  </g>
+</svg>

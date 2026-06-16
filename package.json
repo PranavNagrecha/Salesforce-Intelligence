@@ -1,0 +1,59 @@
+{
+  "name": "sf-intelligence",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Offline-first hybrid MCP knowledge base for a Salesforce org.",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PranavNagrecha/Salesforce-Intelligence.git"
+  },
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "prepare": "node scripts/install-hooks.mjs",
+    "tsc": "pnpm -r --workspace-concurrency=1 exec tsc",
+    "lint": "ESLINT_USE_FLAT_CONFIG=false eslint . --ext .ts",
+    "test": "pnpm -r test && pnpm test:integration",
+    "test:integration": "vitest run --config tests/integration/vitest.config.ts",
+    "test:integration:gate": "vitest run --config tests/integration/vitest.config.ts end-to-end.test.ts reference-questions.test.ts deep-smoke.test.ts post-refresh-golden.test.ts snapshot-trend.test.ts",
+    "test:golden": "vitest run --config tests/integration/vitest.config.ts post-refresh-golden.test.ts",
+    "build": "pnpm -r build",
+    "eval": "node eval/run.mjs",
+    "eval:build-ci-vault": "pnpm -r build && node eval/scripts/build-ci-vault.mjs",
+    "eval:analytical": "pnpm --filter @sf-intelligence/mcp build && node eval/run-analytical.mjs",
+    "eval:scale": "pnpm --filter @sf-intelligence/graph build && node eval/benchmark-scale.mjs",
+    "eval:scale:import": "pnpm --filter @sf-intelligence/graph test test/scale-import.test.ts",
+    "eval:routing-gate": "pnpm --filter @sf-intelligence/mcp build && NL_ROUTING_ONLY=1 node eval/nl-harness.mjs",
+    "v4-gate": "bash scripts/v4-done-gate.sh",
+    "e2e": "node packages/mcp/e2e-smoke.mjs",
+    "onboard:smoke": "node packages/mcp/onboard-smoke.mjs",
+    "check:slash-parity": "node scripts/check-slash-parity.mjs",
+    "check:response-consistency": "node scripts/check-response-consistency.mjs",
+    "guard": "node scripts/release-guard.mjs",
+    "scan:leaks": "node scripts/scan-org-leaks.mjs --strict",
+    "scan:leaks:history": "node scripts/scan-org-leaks.mjs --git-history --strict",
+    "qa:commit-gate": "node ../sf-intelligence-qa/scripts/commit-gate.mjs",
+    "product-surface": "node scripts/product-surface.mjs",
+    "snapshot": "node scripts/release-snapshot.mjs",
+    "release": "pnpm -r build && pnpm -r publish --access public",
+    "sast": "node scripts/sast-gate.mjs",
+    "fleet": "node scripts/fleet-find.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.7",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "eslint": "^9.0.0",
+    "eslint-plugin-import": "^2.29.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}

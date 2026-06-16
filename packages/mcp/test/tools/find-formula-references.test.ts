@@ -1,0 +1,285 @@
+/// <reference types="vitest/globals" />
+
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import type {
+  Edge,
+  ExtractionResult,
+  Node,
+  VaultManifest,
+} from '@sf-intelligence/contracts';
+import {
+  closeGraph,
+  importExtractionResults,
+  openGraph,
+  type GraphStore,
+} from '@sf-intelligence/graph';
+
+import type { Context } from '../../src/server.js';
+import {
+  findFormulaReferencesHandler,
+  findFormulaReferencesInputSchema,
+} from '../../src/tools/find-formula-references.js';
+
+const FIXTURE_MANIFEST: VaultManifest = {
+  version: '0.1.0',
+  refreshedAt: '2026-05-27T14:33:08Z',
+  sourceOrg: 'me@example.com',
+  components: {
+    CustomObject: 1,
+    CustomField: 1,
+    ValidationRule: 2,
+  },
+  edges: { parentOf: 1, references: 2 },
+  sourceTreeHash: 'sha256:fixture',
+};
+
+const makeNode = (overrides: Partial<Node> & Pick<Node, 'id'>): Node => ({
+  type: 'CustomObject',
+  apiName: 'Account',
+  label: 'Account',
+  parentId: null,
+  sourcePath: 'objects/Account/Account.object-meta.xml',
+  lastModifiedDate: null,
+  lastModifiedBy: null,
+  apiVersion: null,
+  properties: {},
+  ...overrides,
+});
+
+const makeEdge = (
+  overrides: Partial<Edge> & Pick<Edge, 'fromId' | 'toId'>,
+): Edge => ({
+  edgeType: 'references',
+  confidence: 'parsed',
+  source: 'formula-tokenizer',
+  properties: {},
+  ...overrides,
+});
+
+// Scenario:
+//   - Industry__c is the target field.
+//   - Two validation rules reference it via formula-tokenizer references
+//     edges (those are the rows the tool must return).
+//   - Account is the parent (parentOf edge) — must NOT appear; parentOf
+//     is a different edge type from references.
+//   - DanglingVR is the source of a references edge to a node id that
+//     does not exist in `nodes` — exercises the sparse-graph path that
+//     resolveReferencer takes when getNodeById returns null.
+const seed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: 'CustomObject:Account',
+      apiName: 'Account',
+      label: 'Account',
+    }),
+    makeNode({
+      id: 'CustomField:Account.Industry__c',
+      type: 'CustomField',
+      apiName: 'Industry__c',
+      label: 'Industry',
+      parentId: 'CustomObject:Account',
+      sourcePath: 'objects/Account/fields/Industry__c.field-meta.xml',
+    }),
+    makeNode({
+      id: 'ValidationRule:Account.AlphaVR',
+      type: 'ValidationRule',
+      apiName: 'AlphaVR',
+      label: 'AlphaVR',
+      parentId: 'CustomObject:Account',
+      sourcePath:
+        'objects/Account/validationRules/AlphaVR.validationRule-meta.xml',
+    }),
+    makeNode({
+      id: 'ValidationRule:Account.BetaVR',
+      type: 'ValidationRule',
+      apiName: 'BetaVR',
+      label: 'BetaVR',
+      parentId: 'CustomObject:Account',
+      sourcePath:
+        'objects/Account/validationRules/BetaVR.validationRule-meta.xml',
+    }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: 'CustomObject:Account',
+      toId: 'CustomField:Account.Industry__c',
+      edgeType: 'parentOf',
+      confidence: 'declared',
+      source: 'extractor:custom-object',
+      properties: {},
+    }),
+    makeEdge({
+      fromId: 'ValidationRule:Account.AlphaVR',
+      toId: 'CustomField:Account.Industry__c',
+      edgeType: 'references',
+      confidence: 'parsed',
+      source: 'formula-tokenizer',
+      properties: { tokenizedFromField: 'errorConditionFormula', formulaLength: 42 },
+    }),
+    makeEdge({
+      fromId: 'ValidationRule:Account.BetaVR',
+      toId: 'CustomField:Account.Industry__c',
+      edgeType: 'references',
+      confidence: 'parsed',
+      source: 'formula-tokenizer',
+      properties: { tokenizedFromField: 'errorConditionFormula', formulaLength: 64 },
+    }),
+  ],
+};
+
+let tempDir: string;
+let store: GraphStore;
+let ctx: Context;
+
+beforeAll(async () => {
+  tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-find-formula-references-'));
+  const dbPath = join(tempDir, 'find-formula-references.db');
+  const opened = await openGraph(dbPath);
+  if (!opened.ok) {
+    throw new Error(`openGraph failed: ${opened.error.message}`);
+  }
+  store = opened.value;
+  const imported = await importExtractionResults(store, [seed]);
+  if (!imported.ok) {
+    throw new Error(`seed import failed: ${imported.error.message}`);
+  }
+  ctx = {
+    vaultRoot: tempDir,
+    manifest: FIXTURE_MANIFEST,
+    graph: store,
+  };
+});
+
+afterAll(async () => {
+  await closeGraph(store);
+  rmSync(tempDir, { recursive: true, force: true });
+});
+
+describe('findFormulaReferencesHandler', () => {
+  it('returns only the references edges, ignoring the parentOf edge', async () => {
+    const result = await findFormulaReferencesHandler(ctx, {
+      fieldId: 'CustomField:Account.Industry__c',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.referencers.length).toBe(2);
+    const ids = result.value.data.referencers.map((r) => r.id);
+    expect(ids).toContain('ValidationRule:Account.AlphaVR');
+    expect(ids).toContain('ValidationRule:Account.BetaVR');
+    // parentOf must not appear.
+    expect(ids).not.toContain('CustomObject:Account');
+    expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
+    expect(result.value.vaultState.refreshedAt).toBe('2026-05-27T14:33:08Z');
+  });
+
+  it('sorts referencers by id ascending', async () => {
+    const result = await findFormulaReferencesHandler(ctx, {
+      fieldId: 'CustomField:Account.Industry__c',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.referencers.map((r) => r.id);
+    // 'AlphaVR' < 'BetaVR' lexicographically.
+    expect(ids).toEqual([
+      'ValidationRule:Account.AlphaVR',
+      'ValidationRule:Account.BetaVR',
+    ]);
+  });
+
+  it('surfaces the edge source and properties (not the node ones)', async () => {
+    const result = await findFormulaReferencesHandler(ctx, {
+      fieldId: 'CustomField:Account.Industry__c',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const alpha = result.value.data.referencers.find(
+      (r) => r.id === 'ValidationRule:Account.AlphaVR',
+    );
+    expect(alpha).toBeDefined();
+    if (alpha === undefined) return;
+    expect(alpha.type).toBe('ValidationRule');
+    expect(alpha.apiName).toBe('AlphaVR');
+    expect(alpha.source).toBe('formula-tokenizer');
+    // The edge's properties block flows through verbatim — the test
+    // pins the exact keys the formula tokenizer ships.
+    expect(alpha.properties).toEqual({
+      tokenizedFromField: 'errorConditionFormula',
+      formulaLength: 42,
+    });
+  });
+
+  it('honors the limit parameter', async () => {
+    const result = await findFormulaReferencesHandler(ctx, {
+      fieldId: 'CustomField:Account.Industry__c',
+      limit: 1,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.referencers.length).toBe(1);
+    // Limit is applied AFTER sorting; the smallest id survives.
+    expect(result.value.data.referencers[0]!.id).toBe(
+      'ValidationRule:Account.AlphaVR',
+    );
+  });
+
+  it('returns an empty list for a field with no references', async () => {
+    const result = await findFormulaReferencesHandler(ctx, {
+      fieldId: 'CustomField:Account.UnreferencedField__c',
+    });
+    // Unknown ids resolve to an empty list — the graph cannot
+    // distinguish "field absent" from "field present but unreferenced".
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.referencers.length).toBe(0);
+    expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
+  });
+});
+
+describe('findFormulaReferencesInputSchema', () => {
+  it('accepts a minimal well-formed input', () => {
+    const parsed = findFormulaReferencesInputSchema.safeParse({
+      fieldId: 'CustomField:Account.Industry__c',
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('accepts limit at the upper bound (500)', () => {
+    const parsed = findFormulaReferencesInputSchema.safeParse({
+      fieldId: 'CustomField:Account.Industry__c',
+      limit: 500,
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('rejects limit greater than 500', () => {
+    const parsed = findFormulaReferencesInputSchema.safeParse({
+      fieldId: 'CustomField:Account.Industry__c',
+      limit: 501,
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it('rejects limit=0', () => {
+    const parsed = findFormulaReferencesInputSchema.safeParse({
+      fieldId: 'CustomField:Account.Industry__c',
+      limit: 0,
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it('rejects a non-integer limit', () => {
+    const parsed = findFormulaReferencesInputSchema.safeParse({
+      fieldId: 'CustomField:Account.Industry__c',
+      limit: 1.5,
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it('rejects an empty fieldId string', () => {
+    const parsed = findFormulaReferencesInputSchema.safeParse({ fieldId: '' });
+    expect(parsed.success).toBe(false);
+  });
+});

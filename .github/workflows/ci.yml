@@ -1,0 +1,82 @@
+name: CI
+
+# v4.0 regression gate — matches scripts/v4-done-gate.sh (minus integration tests).
+# Integration tests require maintainer vaults; run locally with `pnpm test`.
+
+on:
+  push:
+    branches: [main, 'release/**']
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    env:
+      EVAL_STRICT: '1'
+      SF_INTELLIGENCE_REGISTRY_PATH: eval/registry.ci.json
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so the org-leak scan can check past commits
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      # Fail fast, before install/build, if a private-org identifier slipped
+      # into the tree or git history. The blocklist of real org terms is kept
+      # out of the repo; CI materializes it from the ORG_LEAK_BLOCKLIST secret
+      # (absent on fork PRs, where only the generic structural check runs).
+      - name: Org-leak scan (tree + git history)
+        env:
+          ORG_LEAK_BLOCKLIST: ${{ secrets.ORG_LEAK_BLOCKLIST }}
+        run: |
+          if [ -n "$ORG_LEAK_BLOCKLIST" ]; then
+            printf '%s' "$ORG_LEAK_BLOCKLIST" > scripts/forbidden-names.local.json
+          fi
+          node scripts/scan-org-leaks.mjs --strict
+          node scripts/scan-org-leaks.mjs --git-history --strict
+          rm -f scripts/forbidden-names.local.json
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (all packages)
+        run: pnpm -r build
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Unit tests
+        run: pnpm -r test
+
+      - name: NL routing gate (front-door router → real tools, deterministic)
+        run: pnpm eval:routing-gate
+
+      - name: Release privacy guard
+        run: pnpm guard
+
+      - name: End-to-end MCP smoke
+        run: pnpm e2e
+
+      - name: Build CI eval vault
+        run: pnpm eval:build-ci-vault
+
+      - name: Retrieval eval (golden queries)
+        run: pnpm eval
+
+      - name: Analytical eval (verdict + trust gates)
+        run: pnpm eval:analytical
+
+      - name: Scale gate (resolve latency budget)
+        run: pnpm eval:scale
+
+      - name: Scale gate (10k batched import budget)
+        run: pnpm eval:scale:import

@@ -1,0 +1,756 @@
+import { readFile } from 'node:fs/promises';
+
+import type {
+  Edge,
+  ExtractionResult,
+  ExtractorError,
+  Node,
+  Result,
+} from '@sf-intelligence/contracts';
+import { err, ok } from '@sf-intelligence/core';
+import { XMLParser, XMLValidator } from 'fast-xml-parser';
+
+import {
+  extractConditions,
+  type ConditionSource,
+  type CriteriaItem,
+} from './condition-extractor.js';
+import { deriveComponentApiName } from './path-utils.js';
+
+const WORKFLOW_FILE_SUFFIX = '.workflow-meta.xml';
+const ROOT_ELEMENT = 'Workflow';
+const EXTRACTOR_SOURCE = 'workflow-rule-extractor';
+
+const ALLOWED_TRIGGER_TYPES = [
+  'onCreateOnly',
+  'onCreateOrTriggeringUpdate',
+  'onAllChanges',
+  'onCreateOrAllChanges',
+] as const;
+type TriggerType = (typeof ALLOWED_TRIGGER_TYPES)[number];
+
+/**
+ * Variant table for `<rules><actions>` per `WorkflowRule.md`. Each
+ * `<actions>` entry pairs a `<name>` with a `<type>` discriminator; the
+ * type selects a target-id prefix and an edge type. `Send` is the
+ * deprecated legacy variant — the doc explicitly tells the extractor to
+ * skip it.
+ */
+interface ActionVariantSpec {
+  /** Target id prefix (e.g., `WorkflowAlert`, `ApexClass`). */
+  readonly idPrefix: string;
+  /** Whether the target id is scoped by the parent object name. */
+  readonly scopedByObject: boolean;
+  /** Edge type emitted for this action variant. */
+  readonly edgeType: 'references' | 'callsApex';
+}
+
+const ACTION_VARIANT_TABLE: Readonly<Record<string, ActionVariantSpec>> = {
+  Alert: {
+    idPrefix: 'WorkflowAlert',
+    scopedByObject: true,
+    edgeType: 'references',
+  },
+  FieldUpdate: {
+    idPrefix: 'WorkflowFieldUpdate',
+    scopedByObject: true,
+    edgeType: 'references',
+  },
+  Task: {
+    idPrefix: 'WorkflowTask',
+    scopedByObject: true,
+    edgeType: 'references',
+  },
+  OutboundMessage: {
+    idPrefix: 'OutboundMessage',
+    scopedByObject: true,
+    edgeType: 'references',
+  },
+  Apex: {
+    idPrefix: 'ApexClass',
+    scopedByObject: false,
+    edgeType: 'callsApex',
+  },
+  FlowAction: {
+    idPrefix: 'Flow',
+    scopedByObject: false,
+    edgeType: 'references',
+  },
+};
+
+/**
+ * Unwrap a possibly-array single-occurrence XML child. fast-xml-parser
+ * returns an array when an element appears multiple times and a
+ * scalar/object otherwise.
+ */
+const unwrapSingle = (value: unknown): unknown =>
+  Array.isArray(value) ? value[0] : value;
+
+/**
+ * Normalize a fast-xml-parser child into an array. Returns `[]` for
+ * undefined/null, the value itself when already an array, or a
+ * single-element array otherwise.
+ */
+const toArray = (value: unknown): unknown[] => {
+  if (value === undefined || value === null) return [];
+  return Array.isArray(value) ? value : [value];
+};
+
+/**
+ * Coerce an XML scalar to a boolean. Salesforce-style booleans serialise
+ * as the lowercase string `'true'` or `'false'`.
+ */
+const coerceBoolean = (value: unknown): boolean => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') return value.toLowerCase() === 'true';
+  return false;
+};
+
+/** Return `<element>` value as a string, or `null` when absent/empty. */
+const optionalString = (
+  obj: Record<string, unknown>,
+  key: string,
+): string | null => {
+  const raw = unwrapSingle(obj[key]);
+  if (raw === undefined || raw === null || raw === '') return null;
+  return String(raw);
+};
+
+/**
+ * Read and strictly-validate a file as XML. fast-xml-parser's `parse()`
+ * is permissive (it silently truncates on mismatched tags), so we
+ * validate first to surface malformed input as `parse-error` rather than
+ * a misleading partial extraction.
+ */
+const readAndValidateXml = async (
+  path: string,
+): Promise<Result<string, ExtractorError>> => {
+  let xmlText: string;
+  try {
+    xmlText = await readFile(path, 'utf-8');
+  } catch (cause: unknown) {
+    if (
+      typeof cause === 'object' &&
+      cause !== null &&
+      (cause as { code?: string }).code === 'ENOENT'
+    ) {
+      return err({ kind: 'file-not-found', path, message: 'file not found' });
+    }
+    return err({
+      kind: 'parse-error',
+      path,
+      message: cause instanceof Error ? cause.message : String(cause),
+      cause,
+    });
+  }
+
+  const validation = XMLValidator.validate(xmlText);
+  if (validation !== true) {
+    return err({ kind: 'parse-error', path, message: validation.err.msg });
+  }
+  return ok(xmlText);
+};
+
+/**
+ * Locate and validate the `<Workflow>` root. Per `WorkflowRule.md`, a
+ * file with a `<Workflow>` root but zero `<rules>` children is a
+ * documented happy path — the extractor yields zero nodes and zero
+ * edges. A missing `<Workflow>` key is the only malformed case here.
+ */
+const validateRoot = (
+  parsed: Record<string, unknown>,
+  path: string,
+): Result<Record<string, unknown>, ExtractorError> => {
+  if (!(ROOT_ELEMENT in parsed)) {
+    return err({
+      kind: 'malformed-input',
+      path,
+      message: `expected <${ROOT_ELEMENT}> root`,
+    });
+  }
+  const root = unwrapSingle(parsed[ROOT_ELEMENT]);
+  if (typeof root === 'object' && root !== null) {
+    return ok(root as Record<string, unknown>);
+  }
+  // `<Workflow/>` / `<Workflow></Workflow>` — empty but valid.
+  if (root === '' || root === null || root === undefined) {
+    return ok({});
+  }
+  return err({
+    kind: 'malformed-input',
+    path,
+    message: `expected <${ROOT_ELEMENT}> root`,
+  });
+};
+
+/**
+ * Build a name -> template lookup from the file's `<alerts>` collection.
+ * Each entry maps a `WorkflowAlert` `<fullName>` to its `<template>`
+ * value (used by `sendsEmail` resolution for `Alert` actions).
+ *
+ * Alerts without a `<fullName>` are silently skipped — they're not
+ * addressable by name, so they cannot be referenced by a rule. Alerts
+ * without a `<template>` are included with `null` so the caller can
+ * distinguish "alert exists but has no template" from "alert not found".
+ */
+const buildAlertTemplateMap = (
+  rootObj: Record<string, unknown>,
+): Readonly<Map<string, string | null>> => {
+  const result = new Map<string, string | null>();
+  for (const raw of toArray(rootObj['alerts'])) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const alert = raw as Record<string, unknown>;
+    const fullNameRaw = unwrapSingle(alert['fullName']);
+    if (fullNameRaw === undefined || fullNameRaw === null || fullNameRaw === '') {
+      continue;
+    }
+    const templateRaw = unwrapSingle(alert['template']);
+    const template =
+      templateRaw === undefined || templateRaw === null || templateRaw === ''
+        ? null
+        : String(templateRaw);
+    result.set(String(fullNameRaw), template);
+  }
+  return result;
+};
+
+/**
+ * v2.8 — promote each `<outboundMessages>` child to a real
+ * `OutboundMessage` Node. Pre-v2.8 these references dangled by design
+ * (per `WorkflowRule.md` § "outboundMessages"); v2.8 promotes them so
+ * the integration catalog tools (`sfi.outbound_message_catalog`,
+ * `sfi.endpoint_catalog`) can enumerate outbound destinations
+ * alongside RemoteSiteSetting and NamedCredential.
+ *
+ * One Node per `<outboundMessages>` entry. Entries lacking a
+ * `<fullName>` are silently skipped — they're not addressable by name,
+ * so a consuming rule cannot reference them. Each Node carries:
+ *
+ *   - `name`: the entry's `<fullName>` verbatim.
+ *   - `endpointUrl`: the `<endpointUrl>` (string or null).
+ *   - `includeSessionId`: the `<includeSessionId>` boolean (default false).
+ *   - `useDeadLetterQueue`: the `<useDeadLetterQueue>` boolean (default false).
+ *   - `integrationUser`: the `<integrationUser>` (string or null).
+ *   - `fields`: the per-entry `<fields>` collection as a string array.
+ *
+ * The parent edge is the existing `parentOf` from
+ * `CustomObject:{ObjectApiName}` mirroring the v1.0 CustomField pattern;
+ * no new EdgeType is introduced. Edges are emitted by the caller to keep
+ * this helper a pure node-emitter (parallel to `buildAlertTemplateMap`).
+ */
+const buildOutboundMessageNodes = (
+  rootObj: Record<string, unknown>,
+  objectApiName: string,
+  parentId: string,
+  path: string,
+): { readonly nodes: readonly Node[]; readonly edges: readonly Edge[] } => {
+  const nodes: Node[] = [];
+  const edges: Edge[] = [];
+  for (const raw of toArray(rootObj['outboundMessages'])) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const om = raw as Record<string, unknown>;
+    const fullNameRaw = unwrapSingle(om['fullName']);
+    if (
+      fullNameRaw === undefined ||
+      fullNameRaw === null ||
+      fullNameRaw === ''
+    ) {
+      continue;
+    }
+    const name = String(fullNameRaw);
+    const omId = `OutboundMessage:${objectApiName}.${name}`;
+    const fieldsRaw = toArray(om['fields']);
+    const fields = fieldsRaw
+      .map((entry) =>
+        entry === undefined || entry === null || entry === ''
+          ? null
+          : String(entry),
+      )
+      .filter((entry): entry is string => entry !== null);
+    nodes.push({
+      id: omId,
+      type: 'OutboundMessage',
+      apiName: `${objectApiName}.${name}`,
+      label: name,
+      parentId,
+      sourcePath: path,
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {
+        name,
+        endpointUrl: optionalString(om, 'endpointUrl'),
+        includeSessionId: coerceBoolean(unwrapSingle(om['includeSessionId'])),
+        useDeadLetterQueue: coerceBoolean(
+          unwrapSingle(om['useDeadLetterQueue']),
+        ),
+        integrationUser: optionalString(om, 'integrationUser'),
+        fields,
+      },
+    });
+    edges.push({
+      fromId: parentId,
+      toId: omId,
+      edgeType: 'parentOf',
+      confidence: 'declared',
+      source: EXTRACTOR_SOURCE,
+      properties: {},
+    });
+  }
+  return { nodes, edges };
+};
+
+/**
+ * Convert a slash-separated EmailTemplate reference (e.g.,
+ * `Sales/WelcomeEmail`) to its canonical id form (`Sales.WelcomeEmail`).
+ * Salesforce stores template paths with `/` between folder and name; the
+ * canonical id uses `.` as the scope separator. Templates that don't
+ * carry a folder (deprecated unfiled-public templates) retain their
+ * single-segment name.
+ */
+const templateRefToCanonicalTail = (templateRef: string): string =>
+  templateRef.includes('/') ? templateRef.replace(/\//g, '.') : templateRef;
+
+/** Required per-rule scalars surfaced by `validateRuleRequired`. */
+interface RequiredRuleFields {
+  readonly fullName: string;
+  readonly active: boolean;
+  readonly triggerType: TriggerType;
+}
+
+/**
+ * Validate the required-once scalars on a `<rules>` child per
+ * `WorkflowRule.md`. Field order matches the error-cases table.
+ */
+const validateRuleRequired = (
+  rule: Record<string, unknown>,
+  path: string,
+): Result<RequiredRuleFields, ExtractorError> => {
+  const fullNameRaw = unwrapSingle(rule['fullName']);
+  if (
+    fullNameRaw === undefined ||
+    fullNameRaw === null ||
+    fullNameRaw === ''
+  ) {
+    return err({
+      kind: 'malformed-input',
+      path,
+      message: 'missing required element: <fullName>',
+    });
+  }
+  const activeRaw = unwrapSingle(rule['active']);
+  if (activeRaw === undefined || activeRaw === null || activeRaw === '') {
+    return err({
+      kind: 'malformed-input',
+      path,
+      message: 'missing required element: <active>',
+    });
+  }
+  const triggerTypeRaw = unwrapSingle(rule['triggerType']);
+  if (
+    triggerTypeRaw === undefined ||
+    triggerTypeRaw === null ||
+    triggerTypeRaw === ''
+  ) {
+    return err({
+      kind: 'malformed-input',
+      path,
+      message: 'missing required element: <triggerType>',
+    });
+  }
+  const triggerTypeValue = String(triggerTypeRaw);
+  if (!ALLOWED_TRIGGER_TYPES.includes(triggerTypeValue as TriggerType)) {
+    return err({
+      kind: 'malformed-input',
+      path,
+      message: `invalid triggerType: ${triggerTypeValue}`,
+    });
+  }
+  return ok({
+    fullName: String(fullNameRaw),
+    active: coerceBoolean(activeRaw),
+    triggerType: triggerTypeValue as TriggerType,
+  });
+};
+
+/** A resolved `<actions>` entry: name + type pair. */
+interface ResolvedAction {
+  readonly name: string;
+  readonly type: string;
+}
+
+/**
+ * Resolve a single `<actions>` child of a rule. Both `<name>` and
+ * `<type>` are required (per the error-cases table); `<type>` values
+ * outside the variant table are returned verbatim and filtered later
+ * (the `Send` deprecated variant is one such case).
+ */
+const resolveAction = (
+  actionRaw: unknown,
+  path: string,
+): Result<ResolvedAction, ExtractorError> => {
+  if (typeof actionRaw !== 'object' || actionRaw === null) {
+    return err({
+      kind: 'malformed-input',
+      path,
+      message: 'missing required element: <name>',
+    });
+  }
+  const action = actionRaw as Record<string, unknown>;
+  const nameRaw = unwrapSingle(action['name']);
+  if (nameRaw === undefined || nameRaw === null || nameRaw === '') {
+    return err({
+      kind: 'malformed-input',
+      path,
+      message: 'missing required element: <name>',
+    });
+  }
+  const typeRaw = unwrapSingle(action['type']);
+  if (typeRaw === undefined || typeRaw === null || typeRaw === '') {
+    return err({
+      kind: 'malformed-input',
+      path,
+      message: 'missing required element: <type>',
+    });
+  }
+  return ok({ name: String(nameRaw), type: String(typeRaw) });
+};
+
+/**
+ * Emit edges for a single resolved action, applying the variant table
+ * and the dedup key set. Returns the edges to append. Skips deprecated
+ * `Send` and any other unknown variant per the doc.
+ */
+const edgesForAction = (
+  action: ResolvedAction,
+  ruleId: string,
+  objectApiName: string,
+  alertTemplateMap: Readonly<Map<string, string | null>>,
+  seen: Set<string>,
+): readonly Edge[] => {
+  // `Send` is the deprecated variant: silently ignored.
+  if (action.type === 'Send') return [];
+  const spec = ACTION_VARIANT_TABLE[action.type];
+  // Unknown variant: silently skipped (the doc says only explicitly
+  // listed variants produce edges; unrecognised names are scaffolding).
+  if (spec === undefined) return [];
+
+  const targetTail = spec.scopedByObject
+    ? `${objectApiName}.${action.name}`
+    : action.name;
+  const targetId = `${spec.idPrefix}:${targetTail}`;
+  const dedupKey = `${spec.edgeType}|${targetId}`;
+
+  const out: Edge[] = [];
+  if (!seen.has(dedupKey)) {
+    seen.add(dedupKey);
+    if (spec.edgeType === 'callsApex') {
+      out.push({
+        fromId: ruleId,
+        toId: targetId,
+        edgeType: 'callsApex',
+        confidence: 'declared',
+        source: EXTRACTOR_SOURCE,
+        properties: {},
+      });
+    } else {
+      out.push({
+        fromId: ruleId,
+        toId: targetId,
+        edgeType: 'references',
+        confidence: 'declared',
+        source: EXTRACTOR_SOURCE,
+        properties: { actionType: action.type },
+      });
+    }
+  }
+
+  // Alert actions additionally emit `sendsEmail` to the EmailTemplate
+  // named by the alert's `<template>`, when the alert is present in
+  // this file's `<alerts>` collection AND the alert has a non-null
+  // template. Missing or template-less alerts produce no `sendsEmail`.
+  if (action.type === 'Alert') {
+    const template = alertTemplateMap.get(action.name);
+    if (template !== undefined && template !== null) {
+      const tail = templateRefToCanonicalTail(template);
+      const emailId = `EmailTemplate:${tail}`;
+      const emailDedupKey = `sendsEmail|${emailId}`;
+      if (!seen.has(emailDedupKey)) {
+        seen.add(emailDedupKey);
+        out.push({
+          fromId: ruleId,
+          toId: emailId,
+          edgeType: 'sendsEmail',
+          confidence: 'declared',
+          source: EXTRACTOR_SOURCE,
+          properties: { viaAlert: action.name },
+        });
+      }
+    }
+  }
+  return out;
+};
+
+/**
+ * Parse a single `<criteriaItems>` element into the helper's
+ * `CriteriaItem` shape. Required `<field>` / `<operation>` per the
+ * vendored WorkflowRule.md; the `<value>` may be empty (modelled as
+ * `null` in the helper) for unary tests.
+ */
+const parseCriteriaItem = (raw: unknown): CriteriaItem | null => {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const obj = raw as Record<string, unknown>;
+  const fieldRaw = unwrapSingle(obj['field']);
+  if (fieldRaw === undefined || fieldRaw === null || fieldRaw === '') {
+    return null;
+  }
+  const operationRaw = unwrapSingle(obj['operation']);
+  if (operationRaw === undefined || operationRaw === null || operationRaw === '') {
+    return null;
+  }
+  const valueRaw = unwrapSingle(obj['value']);
+  const value =
+    valueRaw === undefined || valueRaw === null || valueRaw === ''
+      ? null
+      : String(valueRaw);
+  return {
+    field: String(fieldRaw),
+    operation: String(operationRaw),
+    value,
+  };
+};
+
+/**
+ * Build the per-rule list of `ConditionSource` entries per the v2.0a
+ * spec. A WorkflowRule emits at most ONE condition surface (either
+ * the `<formula>` or the `<criteriaItems>` array). When the rule has
+ * NEITHER a formula NOR criteria items, the returned list is empty
+ * and the v2.0a layer produces no ConditionalContext (the lifecycle
+ * narrator treats an empty `properties.conditions[]` as "always
+ * fires").
+ */
+const collectWorkflowRuleConditionSources = (
+  rule: Record<string, unknown>,
+): readonly ConditionSource[] => {
+  const formula = optionalString(rule, 'formula');
+  if (formula !== null && formula.length > 0) {
+    return [{ kind: 'formula', expression: formula }];
+  }
+  const items: CriteriaItem[] = [];
+  for (const raw of toArray(rule['criteriaItems'])) {
+    const parsed = parseCriteriaItem(raw);
+    if (parsed !== null) items.push(parsed);
+  }
+  if (items.length === 0) return [];
+  const booleanFilter = optionalString(rule, 'booleanFilter');
+  return [{ kind: 'criteria', items, booleanFilter }];
+};
+
+/**
+ * The shape `buildRule` returns on success: the rule's primary node,
+ * its outgoing/incoming edges (including the v2.0a `firesWhen` edges
+ * appended at the tail), and the new ConditionalContext nodes the
+ * v2.0a extension emits alongside the rule. The caller (the top-level
+ * extractor) concatenates `conditionNodes` into the result's `nodes`
+ * array.
+ */
+interface BuiltRule {
+  readonly node: Node;
+  readonly edges: readonly Edge[];
+  readonly conditionNodes: readonly Node[];
+}
+
+/**
+ * Build a single `<rules>` child into its node + edges (plus any v2.0a
+ * ConditionalContext nodes synthesised from its condition surface).
+ */
+const buildRule = (
+  rule: Record<string, unknown>,
+  objectApiName: string,
+  parentId: string,
+  alertTemplateMap: Readonly<Map<string, string | null>>,
+  path: string,
+): Result<BuiltRule, ExtractorError> => {
+  const required = validateRuleRequired(rule, path);
+  if (!required.ok) return required;
+  const { fullName, active, triggerType } = required.value;
+
+  const ruleId = `WorkflowRule:${objectApiName}.${fullName}`;
+  const actions: ResolvedAction[] = [];
+  for (const actionRaw of toArray(rule['actions'])) {
+    const resolved = resolveAction(actionRaw, path);
+    if (!resolved.ok) return resolved;
+    actions.push(resolved.value);
+  }
+
+  // v2.0a — Conditional Context extraction. Build the per-rule
+  // condition surface (one formula OR one criteria block; see
+  // `ConditionalContextSemantics.md` §"WorkflowRule conditions") and
+  // synthesise the ConditionalContext nodes + firesWhen edges. The
+  // `conditionsMirror` is mirrored onto the rule's
+  // `properties.conditions[]` per the documented property mirror.
+  const conditionSources = collectWorkflowRuleConditionSources(rule);
+  const { conditionNodes, firesWhenEdges, conditionsMirror } =
+    extractConditions({
+      parentId: ruleId,
+      sources: conditionSources,
+      parentSourcePath: path,
+      parentObjectApiName: objectApiName,
+    });
+
+  const node: Node = {
+    id: ruleId,
+    type: 'WorkflowRule',
+    apiName: `${objectApiName}.${fullName}`,
+    label: fullName,
+    parentId,
+    sourcePath: path,
+    lastModifiedDate: null,
+    lastModifiedBy: null,
+    apiVersion: null,
+    properties: {
+      active,
+      triggerType,
+      description: optionalString(rule, 'description'),
+      formula: optionalString(rule, 'formula'),
+      booleanFilter: optionalString(rule, 'booleanFilter'),
+      criteriaItemCount: toArray(rule['criteriaItems']).length,
+      actionCount: actions.length,
+      conditions: conditionsMirror,
+    },
+  };
+
+  const edges: Edge[] = [
+    {
+      fromId: parentId,
+      toId: ruleId,
+      edgeType: 'parentOf',
+      confidence: 'declared',
+      source: EXTRACTOR_SOURCE,
+      properties: {},
+    },
+    {
+      fromId: ruleId,
+      toId: parentId,
+      edgeType: 'triggersOn',
+      confidence: 'declared',
+      source: EXTRACTOR_SOURCE,
+      properties: { triggerType },
+    },
+  ];
+  const seen = new Set<string>();
+  for (const action of actions) {
+    edges.push(
+      ...edgesForAction(action, ruleId, objectApiName, alertTemplateMap, seen),
+    );
+  }
+  edges.push(...firesWhenEdges);
+  return ok({ node, edges, conditionNodes });
+};
+
+/**
+ * Extract `WorkflowRule` Nodes and Edges from a single Salesforce
+ * `*.workflow-meta.xml` file.
+ *
+ * Reads the file, parses it as XML, validates the `<Workflow>` root per
+ * the vendored `WorkflowRule.md` spec, and returns an `ExtractionResult`
+ * containing one `'WorkflowRule'` Node per `<rules>` child. The
+ * `<Workflow>` container itself produces no node — only the rules do.
+ *
+ * For each rule the extractor emits `parentOf` from
+ * `CustomObject:{ObjectApiName}` to the rule, `triggersOn` from the rule
+ * back to the object, plus per-action edges per the variant table.
+ * `Alert` actions emit two edges: a `references` to
+ * `WorkflowAlert:{ObjectApiName}.{name}` AND a `sendsEmail` to
+ * `EmailTemplate:{Folder}.{Name}` when the named alert's `<template>`
+ * resolves inside this file. `Apex` actions emit `callsApex` (no
+ * `references`); `FlowAction` emits `references` to `Flow:{name}` (no
+ * object scope, per the variant table); the deprecated `Send` variant
+ * and any unknown action type are silently ignored. Duplicate
+ * `(rule, target, edgeType)` triples within a single rule are
+ * deduplicated.
+ *
+ * `<alerts>`, `<fieldUpdates>`, `<tasks>`, and `<outboundMessages>`
+ * collections under the root are not promoted to nodes — they appear
+ * only as dangling-by-design `references` targets named by consuming
+ * rules. A file with `<Workflow>` root but zero `<rules>` children is
+ * the documented happy path for objects whose action scaffolding
+ * outlives its consuming rules; it yields zero nodes and zero edges.
+ *
+ * Returns an `ExtractorError` for any of the documented failure modes:
+ * `file-not-found`, `parse-error`, or `malformed-input` (wrong root,
+ * missing `<fullName>` / `<active>` / `<triggerType>` on a rule,
+ * invalid `<triggerType>` value, or `<actions>` missing `<name>` /
+ * `<type>`).
+ *
+ * @example
+ *   const result = await extractWorkflowRule(
+ *     'tests/fixtures/synthetic-v1.3/workflows/Account.workflow-meta.xml',
+ *   );
+ *   if (result.ok) {
+ *     console.log(result.value.nodes[0]!.id);
+ *     // => 'WorkflowRule:Account.Notify_Sales_On_New_Tier1'
+ *   }
+ */
+export const extractWorkflowRule = async (
+  path: string,
+): Promise<Result<ExtractionResult, ExtractorError>> => {
+  const xmlResult = await readAndValidateXml(path);
+  if (!xmlResult.ok) return xmlResult;
+
+  // Local trusted disk content; XXE not a concern. Default 1000 is too
+  // tight for production-scale Workflow XML.
+  const parser = new XMLParser({
+    ignoreAttributes: true,
+    parseTagValue: false,
+    trimValues: true,
+    processEntities: { maxTotalExpansions: 10000 },
+  });
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = parser.parse(xmlResult.value) as Record<string, unknown>;
+  } catch (cause: unknown) {
+    return err({
+      kind: 'parse-error',
+      path,
+      message: cause instanceof Error ? cause.message : String(cause),
+      cause,
+    });
+  }
+
+  const rootResult = validateRoot(parsed, path);
+  if (!rootResult.ok) return rootResult;
+  const rootObj = rootResult.value;
+
+  const objectApiName = deriveComponentApiName(path, WORKFLOW_FILE_SUFFIX);
+  const parentId = `CustomObject:${objectApiName}`;
+  const alertTemplateMap = buildAlertTemplateMap(rootObj);
+
+  const rules = toArray(rootObj['rules']).filter(
+    (r): r is Record<string, unknown> => typeof r === 'object' && r !== null,
+  );
+
+  const nodes: Node[] = [];
+  const edges: Edge[] = [];
+  for (const rule of rules) {
+    const built = buildRule(rule, objectApiName, parentId, alertTemplateMap, path);
+    if (!built.ok) return built;
+    nodes.push(built.value.node);
+    // v2.0a — emit the per-rule ConditionalContext nodes alongside
+    // the rule node so they're discoverable by `sfi.list_components`
+    // / `sfi.get_edges`.
+    nodes.push(...built.value.conditionNodes);
+    edges.push(...built.value.edges);
+  }
+  // v2.8 — promote `<outboundMessages>` entries to OutboundMessage
+  // nodes. These were dangling-by-design references in v1.3; v2.8
+  // captures them so the integration-catalog tools can enumerate
+  // outbound destinations alongside RemoteSiteSetting and
+  // NamedCredential. Emission happens regardless of whether the
+  // file has any `<rules>` — a workflow file with only
+  // `<outboundMessages>` is a documented orphan-collection happy path.
+  const om = buildOutboundMessageNodes(rootObj, objectApiName, parentId, path);
+  nodes.push(...om.nodes);
+  edges.push(...om.edges);
+  return ok({ nodes, edges });
+};

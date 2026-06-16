@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+ <meta charset="utf-8">
+ <meta name="viewport" content="width=device-width, initial-scale=1">
+
+ <title>All 171 tools - sf-intelligence Salesforce MCP tool reference</title>
+ <meta name="description" content="The complete reference for all 171 read-only sf-intelligence tools for a Salesforce org - search, explain, impact &amp; dependency analysis, permissions, code quality, integrations, OmniStudio, documentation, health, cross-org, and live data - each with what it does.">
+ <link rel="canonical" href="https://salesforce-intelligence.pages.dev/tools.html">
+ <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
+ <meta name="author" content="sf-intelligence">
+ <meta name="theme-color" content="#05070A">
+
+ <meta property="og:type" content="website">
+ <meta property="og:site_name" content="sf-intelligence">
+ <meta property="og:title" content="All 171 tools - sf-intelligence Salesforce MCP tool reference">
+ <meta property="og:description" content="Every read-only sf-intelligence tool for a Salesforce org, grouped by function, each with what it does.">
+ <meta property="og:url" content="https://salesforce-intelligence.pages.dev/tools.html">
+ <meta property="og:image" content="https://salesforce-intelligence.pages.dev/assets/img/og-image.png">
+ <meta property="og:image:width" content="1200">
+ <meta property="og:image:height" content="630">
+ <meta property="og:image:alt" content="sf-intelligence product card">
+ <meta name="twitter:card" content="summary_large_image">
+ <meta name="twitter:title" content="All 171 tools - sf-intelligence">
+ <meta name="twitter:description" content="The complete Salesforce MCP tool reference, each with what it does.">
+ <meta name="twitter:image" content="https://salesforce-intelligence.pages.dev/assets/img/og-image.png">
+
+ <link rel="icon" href="/assets/img/favicon.svg" type="image/svg+xml">
+ <link rel="icon" href="/assets/img/favicon-32.png" sizes="32x32" type="image/png">
+ <link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
+ <link rel="manifest" href="/site.webmanifest">
+ <link rel="preconnect" href="https://fonts.googleapis.com">
+ <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+ <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=VT323&display=swap">
+ <link rel="stylesheet" href="/assets/css/style.css">
+
+ <script type="application/ld+json">
+ {
+ "@context": "https://schema.org",
+ "@type": "BreadcrumbList",
+ "itemListElement": [
+ { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://salesforce-intelligence.pages.dev/" },
+ { "@type": "ListItem", "position": 2, "name": "Capabilities", "item": "https://salesforce-intelligence.pages.dev/capabilities.html" },
+ { "@type": "ListItem", "position": 3, "name": "All tools", "item": "https://salesforce-intelligence.pages.dev/tools.html" }
+ ]
+ }
+ </script>
+</head>
+<body>
+ <a class="skip" href="#main">Skip to content</a>
+
+ <header class="site-header">
+ <div class="container nav">
+ <a class="brand" href="/" aria-label="sf-intelligence home"><span class="mk">&gt;_</span>&nbsp;sf-intelligence</a>
+ <nav aria-label="Primary">
+ <ul class="nav-links">
+ <li><a href="/capabilities.html">capabilities</a></li>
+ <li><a href="/tools.html">tools</a></li>
+ <li><a href="/trust.html">trust</a></li>
+ <li><a href="/getting-started.html">get-started</a></li>
+ <li><a href="/faq.html">faq</a></li>
+ </ul>
+ </nav>
+ <div class="nav-cta">
+ <a class="btn btn-ghost" href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">npm</a>
+ <a class="btn btn-solid" href="/#install">install</a>
+ <button class="nav-toggle" aria-label="Open menu" aria-controls="mobile-menu" aria-expanded="false">menu</button>
+ </div>
+ </div>
+ <div class="container">
+ <div id="mobile-menu" class="mobile-menu">
+ <ul>
+ <li><a href="/capabilities.html">capabilities</a></li>
+ <li><a href="/tools.html">tools</a></li>
+ <li><a href="/trust.html">trust</a></li>
+ <li><a href="/getting-started.html">get-started</a></li>
+ <li><a href="/faq.html">faq</a></li>
+ </ul>
+ <a class="btn btn-solid" href="/#install" style="width:100%; justify-content:center;">install</a>
+ </div>
+ </div>
+ </header>
+
+ <main id="main">
+ <section class="subhero">
+ <div class="container">
+ <nav class="crumbs" aria-label="Breadcrumb"><a href="/">home</a><span>/</span><a href="/capabilities.html">capabilities</a><span>/</span>tools</nav>
+ <h1 class="screen-type">All 171 Salesforce tools</h1>
+ <p>The complete reference for every read-only tool sf-intelligence exposes for a Salesforce org - grouped by function, each with what it does. You never call these by name; the router picks them from your plain-language question. They are listed here for transparency and so AI assistants can cite them accurately.</p>
+ </div>
+ </section>
+
+ <section>
+ <div class="container">
+ <article class="card" style="margin-bottom:18px;">
+ <h2 style="font-family:var(--mono); font-size:1.15rem; color:var(--fg-strong); margin-bottom:4px;">Orientation &amp; routing <span class="muted" style="font-size:.8rem;">· 6</span></h2>
+ <div class="toollist">
+ <div class="row"><div class="tn">sfi.resolve</div><div class="td">Typo-tolerant resolver: messy/misspelled text -&gt; ranked candidate components with a disposition (exact|ambiguous|none) + per-candidate evidence.</div></div>
+ <div class="row"><div class="tn">sfi.capabilities</div><div class="td">Product self-description: what this knowledge base can answer.</div></div>
+ <div class="row"><div class="tn">sfi.synthesize_answer</div><div class="td">Answer-layer grounding pass: turns the JSON returned by prior sfi.* tool call(s) into a structured, citation-grounded answer skeleton - `summary`, `bullets` (head…</div></div>
+ <div class="row"><div class="tn">sfi.route_question</div><div class="td">Front-door router: map a plain-language question to the plane that answers it (vault | live | hybrid | unknown) and the ordered sfi.* tools to call - so the user…</div></div>
+ <div class="row"><div class="tn">sfi.guidance</div><div class="td">General Salesforce best-practice guidance - the `knowledge` plane for greenfield / New-Org questions that have NO org-specific answer (Flow vs Apex, order of exec…</div></div>
+ <div class="row"><div class="tn">sfi.disambiguate_concepts</div><div class="td">v2.9 vocabulary + semantic-disambiguation tier - the 'is `Status` the same as `Stage` here?' surface.</div></div>
+ </div>
+ </article>
+ <article class="card" style="margin-bottom:18px;">
+ <h2 style="font-family:var(--mono); font-size:1.15rem; color:var(--fg-strong); margin-bottom:4px;">Search &amp; find <span class="muted" style="font-size:.8rem;">· 17</span></h2>
+ <div class="toollist">
+ <div class="row"><div class="tn">sfi.search_components</div><div class="td">Free-text search across vault components.</div></div>
+ <div class="row"><div class="tn">sfi.get_component</div><div class="td">Fetch a single component by canonical id.</div></div>
+ <div class="row"><div class="tn">sfi.list_components</div><div class="td">List components of a given type (optionally narrowed by parentId), sorted by id.</div></div>
+ <div class="row"><div class="tn">sfi.search_apex_source</div><div class="td">Search the vaulted Apex source for matches.</div></div>
+ <div class="row"><div class="tn">sfi.search_flow_metadata</div><div class="td">Search the vaulted Flow metadata XML for matches.</div></div>
+ <div class="row"><div class="tn">sfi.find_formula_references</div><div class="td">List the incoming `references` edges to a field with the source nodes and edge-level metadata (e.g., formula tokenizer properties).</div></div>
+ <div class="row"><div class="tn">sfi.find_apex_usages</div><div class="td">List the Apex source files (classes and triggers) that read, write, or call into a component.</div></div>
+ <div class="row"><div class="tn">sfi.find_code_usages</div><div class="td">List the code source files (ApexClass, ApexTrigger, LightningComponentBundle, AuraDefinitionBundle, VisualforcePage, VisualforceComponent) that read, write, call,…</div></div>
+ <div class="row"><div class="tn">sfi.lookup_record</div><div class="td">Given a CustomMetadataRecord or CustomSettingRecord canonical id (e.g., `CustomMetadataRecord:Marketo_Api_Setting__mdt.Default`), return the record's label, prote…</div></div>
+ <div class="row"><div class="tn">sfi.find_dependency_cycles</div><div class="td">Architect tool: find cyclic dependency clusters in the org's Apex.</div></div>
+ <div class="row"><div class="tn">sfi.find_hardcoded_values</div><div class="td">'find me hardcoded IDs / emails / usernames / endpoint URLs / sandbox-test-data' surface.</div></div>
+ <div class="row"><div class="tn">sfi.find_field_anywhere</div><div class="td">v2.2 universal-search surface - answers 'where is this field used anywhere in the org?' for one CustomField id, passed as `targetId` or its alias `fieldId` (field…</div></div>
+ <div class="row"><div class="tn">sfi.find_semantic_field</div><div class="td">v2.2 semantic-discovery surface - answers 'do we already have a field for X?'.</div></div>
+ <div class="row"><div class="tn">sfi.find_hardcoded_values_anywhere</div><div class="td">v2.2 cross-corpus hardcoded-value surface - extends v2.1's `sfi.find_hardcoded_values` (Apex-only) with formula expressions (CustomField.formula), ValidationRule.…</div></div>
+ <div class="row"><div class="tn">sfi.find_clone_patterns</div><div class="td">Structural clone-detection surface.</div></div>
+ <div class="row"><div class="tn">sfi.find_dead_code</div><div class="td">v2.2 cross-cutting dead-code surface - composes v2.7 `method_reachability` verdict, entry-point taxonomy (REST / Aura / Invocable / Queueable / Batchable / Schedu…</div></div>
+ <div class="row"><div class="tn">sfi.find_component_usages</div><div class="td">The universal "where is this component used?" answer for ANY canonical component type (`componentId`) - one entry point instead of fanning out across find_field_a…</div></div>
+ </div>
+ </article>
+ <article class="card" style="margin-bottom:18px;">
+ <h2 style="font-family:var(--mono); font-size:1.15rem; color:var(--fg-strong); margin-bottom:4px;">Explain &amp; understand <span class="muted" style="font-size:.8rem;">· 8</span></h2>
+ <div class="toollist">
+ <div class="row"><div class="tn">sfi.explain_field</div><div class="td">Given a CustomField canonical id (e.g., `CustomField:Account.Industry` or `CustomField:Marketo_Api_Setting__mdt.Number_Of_Retries__c`), return the field's label,…</div></div>
+ <div class="row"><div class="tn">sfi.what_happens_on_save</div><div class="td">Produce the documented Salesforce order-of-execution (SOE) instantiated for THIS org and the given DML event on the target object.</div></div>
+ <div class="row"><div class="tn">sfi.order_of_execution</div><div class="td">Emit the generic Salesforce order-of-execution (SOE) tree instantiated for THIS org's target object across every supported DML event (insert / update / delete / u…</div></div>
+ <div class="row"><div class="tn">sfi.explain_flow</div><div class="td">Given a Flow canonical id (`Flow:{ApiName}`), return a structured narrative payload that the caller (Claude / an explainer skill) composes into a natural-language…</div></div>
+ <div class="row"><div class="tn">sfi.explain_apex_method</div><div class="td">Given an ApexClass or ApexTrigger canonical id (`ApexClass:{ClassName}` or `ApexTrigger:{TriggerName}`), return a structured narrative payload for the explainer.</div></div>
+ <div class="row"><div class="tn">sfi.explain_formula</div><div class="td">Tokenize a Salesforce formula expression and return a structured narrative payload for the explainer.</div></div>
+ <div class="row"><div class="tn">sfi.field_meaning</div><div class="td">v2.9 vocabulary + semantic-disambiguation tier - the 'what does this field actually mean in our org?' surface.</div></div>
+ <div class="row"><div class="tn">sfi.field_provenance</div><div class="td">v2.9 vocabulary + semantic-disambiguation tier - the 'is this field manually entered or automated?' surface.</div></div>
+ </div>
+ </article>
+ <article class="card" style="margin-bottom:18px;">
+ <h2 style="font-family:var(--mono); font-size:1.15rem; color:var(--fg-strong); margin-bottom:4px;">Impact, dependencies &amp; what-if <span class="muted" style="font-size:.8rem;">· 24</span></h2>
+ <div class="toollist">
+ <div class="row"><div class="tn">sfi.get_edges</div><div class="td">List edges incident to a node, optionally filtered by direction, edge type, and confidence.</div></div>
+ <div class="row"><div class="tn">sfi.get_subgraph</div><div class="td">BFS from a root component, up to `hops` (max 3).</div></div>
+ <div class="row"><div class="tn">sfi.get_impact</div><div class="td">BFS over incoming edges from a component, up to `hops` (max 3).</div></div>
+ <div class="row"><div class="tn">sfi.blast_radius_live</div><div class="td">P6-blast-radius-live (HYBRID ⭐): fuse the static impact graph with LIVE record magnitude - "what breaks if I change/remove X, and how much is at stake?".</div></div>
+ <div class="row"><div class="tn">sfi.safe_to_delete_field</div><div class="td">Given a CustomField canonical id (`CustomField:{Object}.{Field}`), composes every incoming dependency edge into a confidence-weighted deletion verdict: `safe` (no…</div></div>
+ <div class="row"><div class="tn">sfi.field_change_advisor</div><div class="td">Decision-support tool: before changing a field, see the whole blast radius in one briefing.</div></div>
+ <div class="row"><div class="tn">sfi.what_if_change_field_value</div><div class="td">Value-change impact (Data Steward / Identity &amp; Integration lens): given a CustomField `fieldId`, what breaks if its stored VALUE changes - NOT its schema (use wha…</div></div>
+ <div class="row"><div class="tn">sfi.value_change_audit</div><div class="td">Batch value-change audit (Data Steward lens): given an `object` and optionally a list of `fields`, risk-ranks the impact of changing each field's stored VALUE - t…</div></div>
+ <div class="row"><div class="tn">sfi.why_field_changed</div><div class="td">Trace every writer to a CustomField.</div></div>
+ <div class="row"><div class="tn">sfi.what_if_change_field_type</div><div class="td">v2.3 R2a what-if tool: given a CustomField canonical id (`CustomField:{Object}.{Field}`) and a proposed new field type, returns the structured impact across every…</div></div>
+ <div class="row"><div class="tn">sfi.what_if_remove_picklist_value</div><div class="td">v2.3 R2a what-if tool: given a Picklist or MultiselectPicklist CustomField id (`CustomField:{Object}.{Field}`) and a value to remove, returns the structured impac…</div></div>
+ <div class="row"><div class="tn">sfi.what_if_make_field_required</div><div class="td">v2.3 R2a what-if tool: given a CustomField id (`CustomField:{Object}.{Field}`), walks the parent object's write paths and flags incomplete writes that would fail…</div></div>
+ <div class="row"><div class="tn">sfi.what_if_deactivate_flow</div><div class="td">v2.3 R2b component-level what-if tool: given a Flow canonical id (`Flow:{ApiName}`), enumerates the downstream impact of deactivating the Flow by walking every ou…</div></div>
+ <div class="row"><div class="tn">sfi.what_if_disable_trigger</div><div class="td">v2.3 R2b component-level what-if tool: given an ApexTrigger canonical id (`ApexTrigger:{Name}`), enumerates the downstream impact of disabling the trigger by walk…</div></div>
+ <div class="row"><div class="tn">sfi.what_if_change_method_signature</div><div class="td">v2.3 R2b component-level what-if tool: given an ApexClass id (`ApexClass:{Name}`), a method name, and an optional new signature string, enumerates every direct ca…</div></div>
+ <div class="row"><div class="tn">sfi.what_if_merge_profiles</div><div class="td">v2.3 R2c profile what-if tool: given two Profile canonical ids (`Profile:{Name}`), walks both profiles' grants and visibility settings, groups them by `(settingTy…</div></div>
+ <div class="row"><div class="tn">sfi.what_if_split_profile</div><div class="td">v2.3 R2c profile what-if tool: given a Profile id (`Profile:{Name}`) and an ordered array of target PermissionSet ids (`PermissionSet:{Name}`), proposes a per-gra…</div></div>
+ <div class="row"><div class="tn">sfi.call_graph</div><div class="td">Deep code tool: given a root `ApexClass:` or `ApexTrigger:` id and a `direction` (`'downstream' | 'upstream' | 'both'`), BFS over `callsApex` edges up to `maxDept…</div></div>
+ <div class="row"><div class="tn">sfi.downstream_effects</div><div class="td">v2.7 R2 deep code tool: given an `ApexClass:` or `ApexTrigger:` id, walks downstream `callsApex` BFS (capped at `maxDepth`, default 3, max 5) then for every reach…</div></div>
+ <div class="row"><div class="tn">sfi.method_reachability</div><div class="td">v2.7 R2 deep code tool: given an `ApexClass:` or `ApexTrigger:` id, walks upstream `callsApex` BFS (capped at depth 3) and classifies the reachable upstream set a…</div></div>
+ <div class="row"><div class="tn">sfi.tests_for_change</div><div class="td">Smart test selection (test-impact analysis): given `changedComponents` (1..500 ApexClass / ApexTrigger ids or bare class names), returns the MINIMAL set of test c…</div></div>
+ <div class="row"><div class="tn">sfi.package_impact</div><div class="td">Managed-package boundary surface - 'what does the {namespace} package touch, and what of MINE breaks if I uninstall/upgrade it?'.</div></div>
+ <div class="row"><div class="tn">sfi.field_360</div><div class="td">v3.0 unified field-forensics synthesis tool.</div></div>
+ <div class="row"><div class="tn">sfi.field_lineage</div><div class="td">v3.0 provenance + downstream-effects walker.</div></div>
+ </div>
+ </article>
+ <article class="card" style="margin-bottom:18px;">
+ <h2 style="font-family:var(--mono); font-size:1.15rem; color:var(--fg-strong); margin-bottom:4px;">Permissions, sharing &amp; access <span class="muted" style="font-size:.8rem;">· 8</span></h2>
+ <div class="toollist">
+ <div class="row"><div class="tn">sfi.permission_risk_report</div><div class="td">Ranked permission-risk report, leading with OVER-PRIVILEGE read straight from the extracted profile / permission-set metadata: every Profile or PermissionSet that…</div></div>
+ <div class="row"><div class="tn">sfi.effective_permissions</div><div class="td">Compute a user's EFFECTIVE access - the UNION of a profile + assigned permission sets, max-wins, with each permission attributed to the container(s) that grant it.</div></div>
+ <div class="row"><div class="tn">sfi.why_cant_user_see_record</div><div class="td">Walk the Salesforce sharing cascade (OWD → PermissionGrant → SystemPermission → RoleHierarchy → OwnerSharingRule → CriteriaSharingRule → RestrictionRule → Scoping…</div></div>
+ <div class="row"><div class="tn">sfi.layout_for_user</div><div class="td">Walk the Salesforce layout-routing cascade (ProfileLookup → LayoutAssignment → RecordTypeResolution) for a given object, optional record type, and profile.</div></div>
+ <div class="row"><div class="tn">sfi.field_access_audit</div><div class="td">Given a CustomField canonical id (`CustomField:{Object}.{Field}`), cross-walk every Profile and PermissionSet that grants access to the field via incoming `grante…</div></div>
+ <div class="row"><div class="tn">sfi.unassigned_permission_sets</div><div class="td">v2.4 hygiene tool: list PermissionSets unassigned to users.</div></div>
+ <div class="row"><div class="tn">sfi.crud_fls_audit</div><div class="td">v2.1 R3 CRUD/FLS enforcement audit.</div></div>
+ <div class="row"><div class="tn">sfi.generate_sharing_summary</div><div class="td">v2.5 documentation-generation tier: composes a structured markdown sharing summary covering every CustomObject's OWD (`properties.sharingModel`), the SharingRules…</div></div>
+ </div>
+ </article>
+ <article class="card" style="margin-bottom:18px;">
+ <h2 style="font-family:var(--mono); font-size:1.15rem; color:var(--fg-strong); margin-bottom:4px;">Code &amp; quality <span class="muted" style="font-size:.8rem;">· 8</span></h2>
+ <div class="toollist">
+ <div class="row"><div class="tn">sfi.apex_test_coverage</div><div class="td">Developer tool: map test-class references to the Apex they exercise.</div></div>
+ <div class="row"><div class="tn">sfi.apex_build_advisor</div><div class="td">Decision-support tool: before a developer writes Apex, brief them on what the org's existing Apex teaches.</div></div>
+ <div class="row"><div class="tn">sfi.process_builder_migration_candidates</div><div class="td">v2.4 legacy-automation tool: list active Process Builder (Flow with `processType: 'Workflow'`), WorkflowRule, and ApprovalProcess nodes as migration candidates wi…</div></div>
+ <div class="row"><div class="tn">sfi.code_quality_audit</div><div class="td">v2.1 R3 general-purpose code-quality entry point.</div></div>
+ <div class="row"><div class="tn">sfi.governor_limit_risks</div><div class="td">v2.1 R3 Apex-specific narrowing for governor-limit-relevant patterns - the performance/scale subset of the v2.1 quality catalog.</div></div>
+ <div class="row"><div class="tn">sfi.test_coverage_gaps</div><div class="td">v2.1 R3 test-coverage-gap surface.</div></div>
+ <div class="row"><div class="tn">sfi.test_coverage_for_method</div><div class="td">Deep code tool: given an `ApexClass:` or `ApexTrigger:` id and an optional `methodName`, walks upstream `callsApex` + `dispatchesAsync` BFS (capped at depth 3) an…</div></div>
+ <div class="row"><div class="tn">sfi.meaningful_test_audit</div><div class="td">v2.7 R2 deep code tool: lists every ApexClass with `properties.isTest === true` with a heuristic assertion-meaningfulness score.</div></div>
+ </div>
+ </article>
+ <article class="card" style="margin-bottom:18px;">
+ <h2 style="font-family:var(--mono); font-size:1.15rem; color:var(--fg-strong); margin-bottom:4px;">Automation, integrations &amp; events <span class="muted" style="font-size:.8rem;">· 9</span></h2>
+ <div class="toollist">
+ <div class="row"><div class="tn">sfi.automation_risk_report</div><div class="td">Ranked automation risks: Process Builder migration candidates and governor-limit findings.</div></div>
+ <div class="row"><div class="tn">sfi.integration_map</div><div class="td">Return a structured topology of the org's integration surfaces: AuthProviders, NamedCredentials, RemoteSiteSettings, CspTrustedSites, ExternalDataSources, Externa…</div></div>
+ <div class="row"><div class="tn">sfi.event_subscribers</div><div class="td">Given a Platform Event id (`CustomObject:{ApiName}__e`), list every subscriber (ApexTrigger, ApexClass, Flow) that emits an incoming `listensTo` edge into the event.</div></div>
+ <div class="row"><div class="tn">sfi.automation_build_advisor</div><div class="td">Decision-support tool: before an admin/architect builds automation on an object, brief them on what already runs there and the org-specific risks of adding more.</div></div>
+ <div class="row"><div class="tn">sfi.cdc_subscribers</div><div class="td">v2.8 async-deep-tier surface: given an optional `sObjectFilter` (e.g., 'Account', 'Order__c'), enumerate every ApexTrigger, ApexClass, and Flow that emits an inco…</div></div>
+ <div class="row"><div class="tn">sfi.async_chain_depth</div><div class="td">v2.8 async-deep-tier walker: given an ApexClass canonical id (`ApexClass:{Name}`), walks the transitive async chain via outgoing `dispatchesAsync` edges, capped a…</div></div>
+ <div class="row"><div class="tn">sfi.scheduled_job_catalog</div><div class="td">v2.8 async-deep-tier surface: returns one entry per ApexClass with `properties.isSchedulable === true`, with the per-class `scheduledByCalls` array surfaced from…</div></div>
+ <div class="row"><div class="tn">sfi.outbound_message_catalog</div><div class="td">v2.8 async-deep-tier surface: returns one entry per OutboundMessage node (the v2.8 promotion of the v1.3 dangling-by-design `&lt;outboundMessages&gt;` references) with…</div></div>
+ <div class="row"><div class="tn">sfi.endpoint_catalog</div><div class="td">v2.8 async-deep-tier composite: returns every URL / endpoint participating in an integration in one structured response, split four ways - `inboundApis` (from v1.…</div></div>
+ </div>
+ </article>
+ <article class="card" style="margin-bottom:18px;">
+ <h2 style="font-family:var(--mono); font-size:1.15rem; color:var(--fg-strong); margin-bottom:4px;">Industries - OmniStudio &amp; CPQ <span class="muted" style="font-size:.8rem;">· 8</span></h2>
+ <div class="toollist">
+ <div class="row"><div class="tn">sfi.cpq_rule_chain</div><div class="td">v2.6a R2 CPQ-specialist tool: given a CpqProductRule or CpqPriceRule canonical id, returns the chain of rules of the same type sharing the same parent CustomObjec…</div></div>
+ <div class="row"><div class="tn">sfi.cpq_quote_template_breakdown</div><div class="td">v2.6a R2 CPQ-specialist tool: given a CpqQuoteTemplate canonical id, returns the template's top-level configuration (`templateContentReference` from the `SBQQ__Te…</div></div>
+ <div class="row"><div class="tn">sfi.cpq_dependency_map</div><div class="td">v2.6a R2 CPQ-specialist tool: walks the values mirror of every requested CPQ-typed node and surfaces every string-encoded `SBQQ__`-prefixed field reference as a h…</div></div>
+ <div class="row"><div class="tn">sfi.datatransform_field_map</div><div class="td">v3.2 OmniStudio tool: given an OmniDataTransform canonical id (`OmniDataTransform:{Name}_{VersionNumber}`), returns the DataRaptor's source-to-target field mappin…</div></div>
+ <div class="row"><div class="tn">sfi.decision_table_browse</div><div class="td">v3.2 OmniStudio tool: given a DecisionTable canonical id (`DecisionTable:{SetupName}`), returns the table's parameter shape - `dataSourceType` (`CsvUpload` | `SOb…</div></div>
+ <div class="row"><div class="tn">sfi.integration_procedure_chain</div><div class="td">v3.2 R3b OmniStudio composer tool: given an OmniIntegrationProcedure canonical id, returns the IP's identity metadata (`omniProcessKey`, `versionNumber`, `subType…</div></div>
+ <div class="row"><div class="tn">sfi.omniscript_flow</div><div class="td">v3.2 OmniStudio tool: given an OmniScript canonical id (`OmniScript:{ApiName}`), returns the parsed step sequence (the `&lt;omniProcessElements&gt;` children walked rec…</div></div>
+ <div class="row"><div class="tn">sfi.omniuicard_widget_breakdown</div><div class="td">v3.2 OmniStudio tool: given an OmniUiCard canonical id (`OmniUiCard:{ApiName}`), returns the FlexCard's identity metadata (`omniUiCardType`, `authorName`, `versio…</div></div>
+ </div>
+ </article>
+ <article class="card" style="margin-bottom:18px;">
+ <h2 style="font-family:var(--mono); font-size:1.15rem; color:var(--fg-strong); margin-bottom:4px;">Documentation generators <span class="muted" style="font-size:.8rem;">· 9</span></h2>
+ <div class="toollist">
+ <div class="row"><div class="tn">sfi.get_naming_convention_report</div><div class="td">Return the naming-convention pattern observations, optionally scoped to a glob.</div></div>
+ <div class="row"><div class="tn">sfi.org_overview</div><div class="td">Return a structured org-tour snapshot - the buyer-priority #9 headline answer for the new-to-this-org persona.</div></div>
+ <div class="row"><div class="tn">sfi.domain_clusters</div><div class="td">Cluster the org's CustomObject + ApexClass + Flow nodes into SUGGESTED domain groupings using a greedy shared-edge-density algorithm.</div></div>
+ <div class="row"><div class="tn">sfi.generate_data_dictionary</div><div class="td">v2.5 documentation-generation tier: given a CustomObject (the `objectId` accepts either the canonical id `CustomObject:{ApiName}` or a bare object api name like `…</div></div>
+ <div class="row"><div class="tn">sfi.generate_admin_handbook</div><div class="td">v2.5 documentation-generation tier: composes a structured markdown admin handbook covering the org's purpose, main objects, automation summary, permission structu…</div></div>
+ <div class="row"><div class="tn">sfi.generate_architecture_overview</div><div class="td">v2.5 documentation-generation tier: composes a 3-4 page architecture document chaining `sfi.org_overview` + `sfi.domain_clusters` + `sfi.integration_map`.</div></div>
+ <div class="row"><div class="tn">sfi.generate_compliance_report</div><div class="td">v2.5 documentation-generation tier: composes a structured markdown compliance report chaining `sfi.pii_inventory` + `sfi.field_access_audit` (per top-PII-field, c…</div></div>
+ <div class="row"><div class="tn">sfi.generate_onboarding_doc</div><div class="td">v2.5 documentation-generation tier: composes a structured markdown new-admin / new-developer tour chaining `sfi.generate_admin_handbook` + `sfi.generate_architect…</div></div>
+ <div class="row"><div class="tn">sfi.field_mapping_between_objects</div><div class="td">v3.1 Q174 honesty-anchor tool: given a single vault alias and TWO CustomObject api-names, returns a heuristic field pairing for migration mapping (the Lead-vs-Con…</div></div>
+ </div>
+ </article>
+ <article class="card" style="margin-bottom:18px;">
+ <h2 style="font-family:var(--mono); font-size:1.15rem; color:var(--fg-strong); margin-bottom:4px;">Health, freshness &amp; audit <span class="muted" style="font-size:.8rem;">· 23</span></h2>
+ <div class="toollist">
+ <div class="row"><div class="tn">sfi.org_pulse</div><div class="td">Org pulse for the current vault: freshness coverage (how many components carry a known lastModifiedDate, the coverage %, and the oldest/newest components) plus th…</div></div>
+ <div class="row"><div class="tn">sfi.get_manifest</div><div class="td">Return the current vault manifest (org-kb/meta/manifest.json) verbatim.</div></div>
+ <div class="row"><div class="tn">sfi.coverage_report</div><div class="td">Report the vault's self-assessed metadata coverage: covered, partial, not-modeled, and - during a staged refresh - pending families (queued by the in-progress tie…</div></div>
+ <div class="row"><div class="tn">sfi.retrieve_blindspot_report</div><div class="td">Retrieve blind spots: components REFERENCED by retrieved automation / code / config but ABSENT from the vault (their edge targets resolve to no node - the last re…</div></div>
+ <div class="row"><div class="tn">sfi.health_check</div><div class="td">Report self-assessed server health, render consistency, and coverage completeness, plus a freshness block (vault age, a stale flag, the most recent refresh's chan…</div></div>
+ <div class="row"><div class="tn">sfi.baseline_acknowledge</div><div class="td">Acknowledge a heuristic finding so SAST tools suppress it across refreshes (stored in org-kb/meta/baseline.json).</div></div>
+ <div class="row"><div class="tn">sfi.baseline_status</div><div class="td">List suppressed finding fingerprints and per-tool counts from the vault baseline file.</div></div>
+ <div class="row"><div class="tn">sfi.org_risk_report</div><div class="td">Deterministic org risk synthesis: health, tech debt, and coverage gaps ranked with trust metadata.</div></div>
+ <div class="row"><div class="tn">sfi.field_cleanup_candidates</div><div class="td">Ranked unused-field cleanup candidates composed from sfi.unused_fields_deep.</div></div>
+ <div class="row"><div class="tn">sfi.release_readiness_report</div><div class="td">Release readiness gate composed from org risk and coverage completeness.</div></div>
+ <div class="row"><div class="tn">sfi.unused_components</div><div class="td">Scan the vault for components with no incoming USAGE edges (excluding the parentOf containment edge and grantedBy access grants - a Profile / PermissionSet granti…</div></div>
+ <div class="row"><div class="tn">sfi.what_changed_since_refresh</div><div class="td">P5-what-changed: 'since my last refresh, which component TYPES changed?'.</div></div>
+ <div class="row"><div class="tn">sfi.org_history</div><div class="td">Continuous-learning store: the org's refresh timeline.</div></div>
+ <div class="row"><div class="tn">sfi.diff_snapshots</div><div class="td">Compare two captured vault snapshots and report the structural diff.</div></div>
+ <div class="row"><div class="tn">sfi.churn</div><div class="td">Compare two persisted snapshots and return added/removed/modified counts plus top churn ids.</div></div>
+ <div class="row"><div class="tn">sfi.trend</div><div class="td">Timeline of persisted snapshot captures (component/edge counts per label).</div></div>
+ <div class="row"><div class="tn">sfi.pii_inventory</div><div class="td">Enumerate every CustomField in the vault, classify each with the v2.0d `pii-detection` recognizer (which inspects API name, declared data type, and description te…</div></div>
+ <div class="row"><div class="tn">sfi.changed_since</div><div class="td">Enumerate every vault node whose `lastModifiedDate` is at or after `since` (ISO 8601 - date-only `YYYY-MM-DD` or full UTC timestamp).</div></div>
+ <div class="row"><div class="tn">sfi.last_modified</div><div class="td">Given a canonical componentId (e.g., `ApexClass:AccountController`, `CustomField:Account.Industry`, `Flow:Lead_Nurture`), return the component's freshness fields:…</div></div>
+ <div class="row"><div class="tn">sfi.unused_fields_deep</div><div class="td">v2.4 deep-hygiene tool: given an optional parentObjectFilter (CustomObject ApiName, e.g.</div></div>
+ <div class="row"><div class="tn">sfi.empty_queues_and_groups</div><div class="td">v2.4 hygiene tool: list Queue and Group nodes with zero members.</div></div>
+ <div class="row"><div class="tn">sfi.tech_debt_score</div><div class="td">v2.4 composite: aggregate the v2.0b unused_components, v2.4 unused_fields_deep / process_builder_migration_candidates / unassigned_permission_sets / empty_queues_…</div></div>
+ <div class="row"><div class="tn">sfi.promotion_readiness</div><div class="td">Promotion readiness: a focused lens on compare_vaults(sandbox → prod).</div></div>
+ </div>
+ </article>
+ <article class="card" style="margin-bottom:18px;">
+ <h2 style="font-family:var(--mono); font-size:1.15rem; color:var(--fg-strong); margin-bottom:4px;">Cross-org &amp; fleet <span class="muted" style="font-size:.8rem;">· 6</span></h2>
+ <div class="toollist">
+ <div class="row"><div class="tn">sfi.fleet_find</div><div class="td">Cross-vault resolve: which of your REGISTERED orgs contains the thing you mean.</div></div>
+ <div class="row"><div class="tn">sfi.fleet_drift_ranking</div><div class="td">Fleet ops: of every REGISTERED vault, which is most behind its live org - i.e.</div></div>
+ <div class="row"><div class="tn">sfi.compare_components</div><div class="td">Compare two live-graph components by canonical id, returning the structural diff.</div></div>
+ <div class="row"><div class="tn">sfi.compare_vaults</div><div class="td">v3.1 cross-org tool: given two registered vault aliases, returns a structured diff identifying `added` (in B only), `removed` (in A only), and `shapeModified` (in…</div></div>
+ <div class="row"><div class="tn">sfi.compare_object_across_vaults</div><div class="td">v3.1 cross-org tool: given a CustomObject api-name and two registered vault aliases, returns the field-by-field diff - `addedFields` (in B only), `removedFields`…</div></div>
+ <div class="row"><div class="tn">sfi.compare_profile_across_vaults</div><div class="td">v3.1 cross-org tool: given a Profile name and two registered vault aliases, returns per-grant-category drift - `grantDiffs.objectPermissions`, `.fieldPermissions`…</div></div>
+ </div>
+ </article>
+ <article class="card" style="margin-bottom:18px;">
+ <h2 style="font-family:var(--mono); font-size:1.15rem; color:var(--fg-strong); margin-bottom:4px;">Live org data (opt-in) <span class="muted" style="font-size:.8rem;">· 24</span></h2>
+ <div class="toollist">
+ <div class="row"><div class="tn">sfi.live_describe</div><div class="td">Opt-in live org: describe an sObject via Salesforce CLI.</div></div>
+ <div class="row"><div class="tn">sfi.live_stale_check</div><div class="td">Opt-in live org (P5-stale-detection): "is the org AHEAD of the vault?".</div></div>
+ <div class="row"><div class="tn">sfi.live_count</div><div class="td">Opt-in live org: count records.</div></div>
+ <div class="row"><div class="tn">sfi.live_sample</div><div class="td">Opt-in live org: run SOQL with a hard row cap (default + max 200).</div></div>
+ <div class="row"><div class="tn">sfi.live_field_population</div><div class="td">Opt-in live org: population rate for one field (total vs null counts).</div></div>
+ <div class="row"><div class="tn">sfi.live_group_count</div><div class="td">Opt-in live org: value distribution - COUNT grouped by one field on any object (e.g.</div></div>
+ <div class="row"><div class="tn">sfi.live_stale_records</div><div class="td">Opt-in live org: records on any object not touched in N days (default LastModifiedDate).</div></div>
+ <div class="row"><div class="tn">sfi.live_recent_activity</div><div class="td">Opt-in live org: records created or modified in the last N days on any object.</div></div>
+ <div class="row"><div class="tn">sfi.live_aggregate</div><div class="td">Opt-in live org: MIN/MAX/AVG/SUM on one numeric field for any object.</div></div>
+ <div class="row"><div class="tn">sfi.live_duplicate_check</div><div class="td">Opt-in live org: find duplicate values on one field (GROUP BY + HAVING COUNT &gt; 1).</div></div>
+ <div class="row"><div class="tn">sfi.live_owner_breakdown</div><div class="td">Opt-in live org: record counts by OwnerId with User/Queue names resolved.</div></div>
+ <div class="row"><div class="tn">sfi.live_storage_by_object</div><div class="td">Opt-in live org: record counts across objects via the Salesforce recordCount REST API - top N by volume, optional objectApiNames filter.</div></div>
+ <div class="row"><div class="tn">sfi.live_org_limits</div><div class="td">Opt-in live org: current org governor limits via REST.</div></div>
+ <div class="row"><div class="tn">sfi.live_inactive_users</div><div class="td">Opt-in live org: active users who haven't logged in within N days (default 30) or never have - the license-reclamation / dormant-account question.</div></div>
+ <div class="row"><div class="tn">sfi.live_license_usage</div><div class="td">Opt-in live org: license / cost optimization.</div></div>
+ <div class="row"><div class="tn">sfi.live_consent</div><div class="td">Manage one-time, per-org consent for the read-only live plane.</div></div>
+ <div class="row"><div class="tn">sfi.live_report_usage</div><div class="td">Opt-in live org: stale/unused reports via Report.LastRunDate - total vs not-run-in-N-days.</div></div>
+ <div class="row"><div class="tn">sfi.live_folder_access</div><div class="td">Opt-in live org: folder inventory and access types (Report/Dashboard/Email/Document).</div></div>
+ <div class="row"><div class="tn">sfi.live_email_template_usage</div><div class="td">Opt-in live org: email template usage, Classic vs Lightning classification, and migration candidates.</div></div>
+ <div class="row"><div class="tn">sfi.live_org_health</div><div class="td">Opt-in live org: operational health snapshot - failed/pending async jobs, paused flow interviews, governor limits at risk.</div></div>
+ <div class="row"><div class="tn">sfi.live_automation_fired</div><div class="td">P6-live-automation-fired (HYBRID, HEURISTIC): does this record-triggered automation actually run in production? Given an ApexTrigger / record-triggered Flow / Wor…</div></div>
+ <div class="row"><div class="tn">sfi.live_picklist_usage</div><div class="td">P6-live-picklist-usage (HYBRID): which picklist VALUES are actually used in production.</div></div>
+ <div class="row"><div class="tn">sfi.live_budget</div><div class="td">P6-live-budget-guard: disclose this session's live-query budget and result-cache state.</div></div>
+ <div class="row"><div class="tn">sfi.live_drift_check</div><div class="td">Offline↔live contradiction detection (requires the opt-in live plane).</div></div>
+ </div>
+ </article>
+ <article class="card" style="margin-bottom:18px;">
+ <h2 style="font-family:var(--mono); font-size:1.15rem; color:var(--fg-strong); margin-bottom:4px;">Other tools <span class="muted" style="font-size:.8rem;">· 21</span></h2>
+ <div class="toollist">
+ <div class="row"><div class="tn">sfi.list_analyses</div><div class="td">Catalog gateway: the paginated index of EVERY analysis this server can run - name, one-line summary, and a coarse category (core / search / what-if / documentatio…</div></div>
+ <div class="row"><div class="tn">sfi.describe_analysis</div><div class="td">Catalog gateway: ONE analysis's full description + JSON input schema, fetched on demand (`name`, with or without the `sfi.` prefix).</div></div>
+ <div class="row"><div class="tn">sfi.run_analysis</div><div class="td">Catalog gateway: execute any analysis by `name` with `args` (an object, or a JSON-encoded string of one - a known client quirk handled defensively).</div></div>
+ <div class="row"><div class="tn">sfi.org_card</div><div class="td">Serve the refresh-time ORG CARD - the ≤16KB orientation snapshot to load BEFORE your first question: identity &amp; freshness, coverage and blind spots up front, scal…</div></div>
+ <div class="row"><div class="tn">sfi.who_can_run</div><div class="td">The REVERSE of `sfi.user_ability`: given a `Flow:X` (`componentId`), which Profiles / PermissionSets grant RUN access to it (from the `flowAccess` `grantedBy` edges).</div></div>
+ <div class="row"><div class="tn">sfi.who_can_access_object</div><div class="td">The REVERSE of `sfi.why_cant_user_see_record`: given a `CustomObject:X` (`componentId`), ENUMERATE which profiles / permission sets / roles / groups statically ga…</div></div>
+ <div class="row"><div class="tn">sfi.user_ability</div><div class="td">"What can this Profile / PermissionSet RUN or DO?" - beyond record CRUD (which `object_access_audit` / `why_cant_user_see_record` cover).</div></div>
+ <div class="row"><div class="tn">sfi.lightning_pages</div><div class="td">Lightning record pages (FlexiPage), both directions.</div></div>
+ <div class="row"><div class="tn">sfi.list_view_sharing</div><div class="td">"Who is this list view shared with?" - a list view's `&lt;sharedTo&gt;` visibility scope (the groups/roles it shows up for in the list-view picker), now captured at ext…</div></div>
+ <div class="row"><div class="tn">sfi.app_access</div><div class="td">Given a `CustomApplication` (`componentId`, e.g.</div></div>
+ <div class="row"><div class="tn">sfi.tab_availability</div><div class="td">Given a `Profile:X` or `PermissionSet:X` (`componentId`), list the tabs it can see: each row carries the `tab`, the verbatim `visibility` enum (`DefaultOn`/`Defau…</div></div>
+ <div class="row"><div class="tn">sfi.lifecycle_process</div><div class="td">"What happens when {Object}.{field} becomes {value}?" - a value / stage LIFECYCLE view, not a bare DML-event view.</div></div>
+ <div class="row"><div class="tn">sfi.layout_assignments</div><div class="td">The REVERSE of `sfi.layout_for_user`: given a page Layout canonical id (`componentId`, e.g.</div></div>
+ <div class="row"><div class="tn">sfi.export_manifest</div><div class="td">Group a set of canonical component ids into a well-formed `package.xml` snippet (P8-manifest-export) a human can hand to Gearset / Copado / `sf project deploy`.</div></div>
+ <div class="row"><div class="tn">sfi.object_access_audit</div><div class="td">Given a CustomObject canonical id (`CustomObject:{ApiName}`), enumerate every Profile and PermissionSet that grants OBJECT-level access via incoming `grantedBy` e…</div></div>
+ <div class="row"><div class="tn">sfi.recordtype_availability</div><div class="td">Given a Profile or PermissionSet canonical id (`Profile:{Name}` / `PermissionSet:{Name}`), report which record types the user can CREATE / see, grouped by object,…</div></div>
+ <div class="row"><div class="tn">sfi.installed_package_catalog</div><div class="td">Answer "what packages are installed in this org?" from the `InstalledPackage` metadata the refresh extracts (`installedPackages/&lt;namespace&gt;.installedPackage-meta.…</div></div>
+ <div class="row"><div class="tn">sfi.annotations</div><div class="td">Read the curated annotations overlay (`meta/annotations.jsonl`): ownership, lifecycle status (e.g.</div></div>
+ <div class="row"><div class="tn">sfi.propose_annotation</div><div class="td">Record an AI-PROPOSED annotation (owner / status / glossary / domain / note) for a component.</div></div>
+ <div class="row"><div class="tn">sfi.component_history</div><div class="td">The component's change timeline from the vault's OWN git history (`sfi vault git enable`): `git log --follow` over its source file - one entry per source-changing…</div></div>
+ <div class="row"><div class="tn">sfi.component_as_of</div><div class="td">The component AS IT WAS at a git ref in the vault's own history: `git show &lt;ref&gt;:&lt;sourcePath&gt;` re-run through the SAME extractor the refresh uses for that type →…</div></div>
+ </div>
+ </article>
+ <p class="muted center" style="margin-top:24px; font-size:.84rem;">171 tools registered in this build. Grouping is by function for readability; some tools span more than one area. Generated from the product's tool registry.</p>
+ <div style="padding-top:38px;">
+ <div class="cta-box">
+ <h2 class="screen-type">See it in action</h2>
+ <p>You don't memorize these - you ask in plain language and the router runs the right ones.</p>
+ <div class="cta-actions">
+ <a class="btn btn-solid" href="/getting-started.html">get started</a>
+ <a class="btn btn-ghost" href="/capabilities.html">capability overview</a>
+ </div>
+ </div>
+ </div>
+ </div>
+ </section>
+ </main>
+
+ <footer class="site-footer">
+ <div class="container">
+ <div class="footer-grid">
+ <div class="footer-about">
+ <a class="brand" href="/" style="margin-bottom:12px;"><span class="mk">&gt;_</span>&nbsp;sf-intelligence</a>
+ <p>An offline, read-only, MCP-first knowledge base for one Salesforce org. Answers grounded in real metadata - never a guess.</p>
+ </div>
+ <div><h4>product</h4><ul><li><a href="/capabilities.html">capabilities</a></li><li><a href="/tools.html">all tools</a></li><li><a href="/trust.html">quality &amp; trust</a></li><li><a href="/#install">install</a></li></ul></div>
+ <div><h4>docs</h4><ul><li><a href="/getting-started.html">getting started</a></li><li><a href="/configuration.html">configuration</a></li><li><a href="/faq.html">faq</a></li><li><a href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">npm package</a></li></ul></div>
+ <div><h4>about</h4><ul><li><a href="/faq.html#privacy">privacy</a></li><li><a href="/licensing.html">license</a></li></ul></div>
+ </div>
+ <div class="footer-bottom">
+ <span><span class="ok">●</span> © <span id="year">2026</span> sf-intelligence - all systems offline</span>
+ <span>MIT + Commons Clause · built for Salesforce teams</span>
+ </div>
+ </div>
+ </footer>
+
+ <script src="/assets/js/main.js" defer></script>
+</body>
+</html>

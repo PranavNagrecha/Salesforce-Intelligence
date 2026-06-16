@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 700" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+  <rect width="1100" height="700" fill="#FAFBFD"/>
+
+  <!-- caption -->
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif">
+    <text x="50" y="48" font-size="13" letter-spacing="2.5" fill="#0176D3" font-weight="700">DEMO · sfi.field_360</text>
+    <text x="50" y="80" font-size="26" font-weight="700" fill="#181818">Everything about one field, in one payload.</text>
+    <text x="50" y="108" font-size="14" fill="#706E6B">Composes freshness · quality · PII · reachability · security · integration tagging.</text>
+  </g>
+
+  <!-- terminal frame -->
+  <g transform="translate(50,140)">
+    <rect width="1000" height="510" rx="10" fill="#0B1426"/>
+    <!-- traffic lights -->
+    <circle cx="22" cy="22" r="6" fill="#FF5F57"/>
+    <circle cx="42" cy="22" r="6" fill="#FEBC2E"/>
+    <circle cx="62" cy="22" r="6" fill="#28C840"/>
+    <text x="500" y="27" text-anchor="middle" font-size="12" fill="#7E8FAA">claude  ·  sfi mcp  ·  org-kb @ 2026-05-28</text>
+    <line x1="0" y1="46" x2="1000" y2="46" stroke="#1F3556"/>
+
+    <!-- conversation -->
+    <g font-size="13.5" transform="translate(28,76)">
+      <!-- user -->
+      <text fill="#7FCBFF" font-weight="700">you</text>
+      <text x="0" y="22" fill="#E6EEF8">Tell me everything about Account.Customer_Segment__c.</text>
+
+      <!-- assistant -->
+      <text y="60" fill="#FFA967" font-weight="700">claude</text>
+      <text x="0" y="82" fill="#9BB3D1">→ calling sfi.field_360({ fieldId: "CustomField:Account.Customer_Segment__c" })</text>
+
+      <!-- response -->
+      <g transform="translate(0,108)" fill="#E6EEF8">
+        <text fill="#7FCBFF" font-weight="700">Account.Customer_Segment__c</text>
+        <text x="0" y="22" fill="#7E8FAA">Picklist · 3 values · Salesforce-managed</text>
+
+        <text x="0" y="52" fill="#A4D4A4" font-weight="700">writers (5)</text>
+        <text x="0" y="72" fill="#E6EEF8">  Flow:Account_Segmentation_v3       <tspan fill="#A4D4A4">parsed</tspan>  fires on update when Industry changes</text>
+        <text x="0" y="90" fill="#E6EEF8">  Flow:Lead_Conversion_Mapper        <tspan fill="#A4D4A4">parsed</tspan>  fires on insert from converted Lead</text>
+        <text x="0" y="108" fill="#E6EEF8">  ApexClass:AccountTriggerHandler     <tspan fill="#FFD580">heuristic</tspan>  line 247 inside if (acc.AnnualRevenue &gt; 1M)</text>
+        <text x="0" y="126" fill="#E6EEF8">  ApexClass:RenewalBatchProcessor     <tspan fill="#FFD580">heuristic</tspan>  line 89 inside Database.update loop</text>
+        <text x="0" y="144" fill="#E6EEF8">  WorkflowFieldUpdate:Tier_Auto_Bump  <tspan fill="#A4D4A4">declared</tspan>  fires when stage=Closed Won</text>
+
+        <text x="0" y="172" fill="#FFD580" font-weight="700">readers (12)</text>
+        <text x="0" y="192" fill="#E6EEF8">  3 Apex classes · 2 Flows · 4 Layouts · 1 Email template · 2 LWC bundles</text>
+
+        <text x="0" y="220" fill="#FF8A8A" font-weight="700">sensitivity</text>
+        <text x="0" y="240" fill="#E6EEF8">  PII: <tspan fill="#FF8A8A">no</tspan>   ·   business-critical: <tspan fill="#FFD580">yes</tspan> (drives renewal pricing)</text>
+        <text x="0" y="258" fill="#E6EEF8">  access: 47 users via 3 profiles + 4 perm sets · 1 perm set group</text>
+
+        <text x="0" y="286" fill="#7FCBFF" font-weight="700">integration surface</text>
+        <text x="0" y="306" fill="#E6EEF8">  exposes:    REST → /services/apexrest/account-sync/* (declared)</text>
+        <text x="0" y="324" fill="#E6EEF8">  flows out:  Marketo sync via NamedCredential:MarketoREST</text>
+
+        <text x="0" y="352" fill="#9BB3D1" font-style="italic">freshness: enriched (Tooling API). Last modified 2026-04-12 by S.Patel.</text>
+      </g>
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,106 @@
+{
+  "ci": [
+    {
+      "tool": "sfi.coverage_report",
+      "args": {},
+      "expectCoverageKnown": true,
+      "caseClass": "coverage",
+      "note": "coverage manifest present"
+    },
+    {
+      "tool": "sfi.safe_to_delete_field",
+      "args": { "fieldId": "CustomField:Account.Industry" },
+      "expectVerdict": "blocking",
+      "caseClass": "destructive-blocker",
+      "note": "report references field via bare-column extraction path"
+    },
+    {
+      "tool": "sfi.safe_to_delete_field",
+      "args": { "fieldId": "CustomField:Payment__c.Amount__c" },
+      "expectVerdict": "safe",
+      "caseClass": "destructive-safe-control",
+      "note": "no incoming dependency edges in ci vault"
+    },
+    {
+      "tool": "sfi.why_cant_user_see_record",
+      "args": {
+        "componentId": "CustomObject:Account",
+        "userContext": { "profileId": "Profile:Standard User" }
+      },
+      "expectVerdict": "restricted",
+      "expectReasoningStage": "RestrictionRule",
+      "caseClass": "visibility-honesty",
+      "note": "object-CRUD hard gate (bug 21): the supplied profile has no Account read grant and no View/Modify-All, so object access is definitively denied — the restriction-rule unknown (still surfaced in reasoning) cannot grant access. Verdict is restricted, not unknown."
+    },
+    {
+      "tool": "sfi.layout_for_user",
+      "args": {
+        "objectApiName": "Account",
+        "profileId": "Profile:Standard User"
+      },
+      "expectUiSurface": "lightning-flexipage",
+      "expectFlexiPageId": "FlexiPage:Account_Record_Page",
+      "caseClass": "layout",
+      "note": "FlexiPage surfaced for Lightning org"
+    },
+    {
+      "tool": "sfi.org_risk_report",
+      "args": { "limit": 5 },
+      "expectTrustProvenance": "offline_snapshot",
+      "expectDeterministic": true,
+      "caseClass": "synthesis",
+      "note": "synthesis offline and stable ordering"
+    },
+    {
+      "tool": "sfi.tech_debt_score",
+      "args": {},
+      "expectHasData": true,
+      "caseClass": "analytical",
+      "note": "tech debt composition returns data"
+    },
+    {
+      "tool": "sfi.governor_limit_risks",
+      "args": { "limit": 10 },
+      "expectHasData": true,
+      "caseClass": "analytical",
+      "note": "governor scan returns data"
+    },
+    {
+      "tool": "sfi.unused_fields_deep",
+      "args": { "parentObjectFilter": "Account" },
+      "expectHasData": true,
+      "expectTrustCompleteness": true,
+      "caseClass": "analytical",
+      "note": "unused fields deep returns trust block"
+    },
+    {
+      "tool": "sfi.live_count",
+      "args": { "soql": "SELECT COUNT() FROM Account" },
+      "expectErrorKind": "invalid-query",
+      "caseClass": "live-gate",
+      "note": "live plane disabled by default"
+    },
+    {
+      "tool": "sfi.baseline_status",
+      "args": {},
+      "expectHasData": true,
+      "caseClass": "baseline",
+      "note": "baseline readable"
+    },
+    {
+      "tool": "sfi.trend",
+      "args": {},
+      "expectHasData": true,
+      "caseClass": "longitudinal",
+      "note": "trend readable (may be empty points)"
+    },
+    {
+      "tool": "sfi.capabilities",
+      "args": {},
+      "expectMinToolCount": 100,
+      "expectIntelligencePlaneIds": ["offline", "live", "hybrid"],
+      "caseClass": "roster",
+      "note": "roster scale + hybrid routing planes"
+    }
+  ]
+}

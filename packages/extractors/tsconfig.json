@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "."
+  },
+  "include": ["src", "test"],
+  "references": [
+    { "path": "../contracts" },
+    { "path": "../core" },
+    { "path": "../parsers" },
+    { "path": "../patterns" }
+  ]
+}

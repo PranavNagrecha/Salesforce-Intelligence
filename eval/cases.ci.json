@@ -1,0 +1,7 @@
+{
+  "ci": [
+    { "query": "paymnet", "expectTopMatches": "Payment", "note": "typo tolerance" },
+    { "query": "acount", "expectTopMatches": "Account", "note": "typo tolerance" },
+    { "query": "zzzqqq xkcd", "expectDisposition": "none", "note": "gibberish must not guess" }
+  ]
+}

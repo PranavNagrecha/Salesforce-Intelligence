@@ -1,0 +1,443 @@
+/**
+ * Handler for the `sfi.governor_limit_risks` MCP tool.
+ *
+ * The v2.1 Apex-specific narrowing for governor-limit-relevant
+ * patterns — the "performance / scale" subset of the v2.1 quality
+ * recognizer catalog. Composes over the `properties.qualityIssues[]`
+ * arrays the v2.1 `code-quality-patterns` recognizer family populates
+ * for every ApexClass / ApexTrigger node at extraction time; filters
+ * those findings down to the three rules in the governor-limit
+ * subset, groups them by class, and (when the parent class is the
+ * target of an incoming `callsApex` edge from an ApexTrigger) surfaces
+ * the trigger as additional context.
+ *
+ * **Governor-limit rule subset** — the three rules below are the
+ * governor-limit-relevant slice of the v2.1 catalog
+ * (`ApexQualitySemantics.md` §§ 1, 2, 12):
+ *   - `soql-in-loop` — SOQL inside a loop body. Risks the
+ *     100-SOQL-per-transaction governor limit.
+ *   - `dml-in-loop` — DML inside a loop body. Risks the
+ *     150-DML-per-transaction governor limit.
+ *   - `database-upsert-no-options` — `Database.upsert(...)` called
+ *     without options. Risks partial-failure silent-success.
+ *
+ * **Trigger-context surface** — when an ApexClass with one of the
+ * three rules above is the target of an incoming `callsApex` edge
+ * from an `ApexTrigger:*` node, the response carries that trigger
+ * as `triggerContext`: the class's findings should be treated as
+ * even higher priority because the trigger's per-DML invocation
+ * multiplies the limit risk. Multiple trigger callers surface as a
+ * sorted-ASC list; classes with no trigger caller surface
+ * `triggerContext: []`.
+ *
+ * **Honesty axis** (mirroring v2.1 R3 §4 disclosures):
+ *   - Pattern recognition is heuristic — every finding carries
+ *     `confidence: 'heuristic'`. Static SOQL/DML inside a static
+ *     method called from a loop is invisible to the scanner;
+ *     reflective access (`Database.query('SELECT ...')`) is stripped
+ *     before pattern passes. The `boundaries` array makes this
+ *     verbatim.
+ *   - Trigger context is heuristic-confidence — the `callsApex` edge
+ *     itself can be `parsed` (declared by Flow / LWC `apex:` imports)
+ *     or `heuristic` (apex-scanner inference). The tool does not
+ *     surface the per-edge confidence on the trigger-context list;
+ *     callers wanting that detail should use `sfi.find_apex_usages`.
+ *
+ * Implementation notes:
+ *   - Walks both `ApexClass` and `ApexTrigger` ComponentTypes; the
+ *     `database-upsert-no-options` rule fires on either, while the
+ *     two `-in-loop` rules fire on both class bodies and trigger
+ *     bodies.
+ *   - `limit` defaults to 100 and is capped at 500 by Zod. The slice
+ *     is over CLASSES, not individual findings, so a class with 7
+ *     SOQL-in-loop findings counts as 1 entry in the limit budget.
+ *   - The response is sorted by class id ASC inside each ApexClass /
+ *     ApexTrigger grouping; per-finding ordering inside a class
+ *     follows the recognizer's source-position sort.
+ */
+
+import type {
+  ComponentId,
+  ComponentType,
+  Edge,
+  McpError,
+  McpResponse,
+  Node,
+} from '@sf-intelligence/contracts';
+import { err, ok, type Result } from '@sf-intelligence/core';
+import { listEdges, listNodesByType } from '@sf-intelligence/graph';
+import { z } from 'zod';
+
+import type { Context } from '../server.js';
+
+import { partitionByBaseline } from './finding-suppression.js';
+import { soundnessFromDynamicApexIds, type Soundness } from './soundness.js';
+
+const GOVERNOR_LIMIT_TOOL = 'sfi.governor_limit_risks';
+
+/** Inclusive upper bound on `limit`. */
+const GOVERNOR_LIMIT_MAX_LIMIT = 500;
+/** Default `limit`. */
+const GOVERNOR_LIMIT_DEFAULT_LIMIT = 100;
+/** Per-type cap matching `listNodesByType`'s default. */
+const LIST_PAGE_SIZE = 500;
+
+/**
+ * The three rule ids in the v2.1 governor-limit subset. A hard
+ * mapping inside the tool; the broader catalog access is via
+ * `sfi.code_quality_audit`.
+ */
+const GOVERNOR_LIMIT_RULES: ReadonlySet<string> = new Set([
+  'soql-in-loop',
+  'dml-in-loop',
+  'database-upsert-no-options',
+]);
+
+/** ComponentTypes the governor-limit subset can fire on. */
+const SCANNED_TYPES: readonly ComponentType[] = [
+  'ApexClass',
+  'ApexTrigger',
+];
+
+/** The five-tier severity scale used by the v2.1 catalog. */
+type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info';
+
+const SEVERITY_SET: ReadonlySet<string> = new Set([
+  'critical',
+  'high',
+  'medium',
+  'low',
+  'info',
+]);
+
+/** Verbatim governor-limit boundary disclosure. */
+const GOVERNOR_LIMIT_HEURISTIC_DISCLOSURE =
+  'pattern recognition is heuristic — every finding carries confidence: heuristic. Static SOQL / DML inside a static method called from a loop is invisible to the scanner; dynamic SOQL strings (Database.query(...)) are stripped before pattern passes.';
+const GOVERNOR_LIMIT_TRIGGER_CONTEXT_DISCLOSURE =
+  'trigger-context callers are listed when the class is the target of an incoming callsApex edge from an ApexTrigger. The per-edge confidence is NOT surfaced in this tool; use sfi.find_apex_usages for the per-edge detail.';
+
+/**
+ * Zod schema for the `sfi.governor_limit_risks` tool input.
+ *
+ *   - `limit`: optional integer in `[1, 500]`. Defaults to 100 inside
+ *     the handler. The slice is over classes, not individual findings.
+ */
+export const governorLimitRisksInputSchema = z.object({
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(GOVERNOR_LIMIT_MAX_LIMIT)
+    .optional(),
+});
+
+/** Parsed input shape. */
+export type GovernorLimitRisksInput = z.infer<
+  typeof governorLimitRisksInputSchema
+>;
+
+/** One finding inside a per-class entry. */
+export interface GovernorLimitRiskFinding {
+  readonly rule: string;
+  readonly severity: Severity;
+  readonly location: string;
+  readonly explanation: string;
+}
+
+/** One per-class entry. */
+export interface GovernorLimitRisksClassEntry {
+  readonly componentId: ComponentId;
+  readonly type: ComponentType;
+  readonly apiName: string;
+  readonly risks: readonly GovernorLimitRiskFinding[];
+  /**
+   * ApexTriggers whose `callsApex` edge targets this class. Empty
+   * array when no trigger caller exists. Sorted by id ASC.
+   */
+  readonly triggerContext: readonly ComponentId[];
+  /**
+   * P4-graph-sast: the entry-point PATHS that reach this risky class, each an
+   * ordered `[entryPoint, ..., thisClass]` list walked backwards over incoming
+   * `callsApex` edges to an ApexTrigger / Flow entry point (or the top of the
+   * Apex chain). So a governor-limit finding cites WHERE it runs from — e.g.
+   * `[ApexTrigger:AccountTrigger, ApexClass:AccountHandler, thisClass]` — not
+   * just the class in isolation. Bounded (depth 6, 12 paths); cycle-safe.
+   */
+  readonly entryPaths: readonly (readonly ComponentId[])[];
+}
+
+/** Output payload. */
+export interface GovernorLimitRisksOutput {
+  readonly classes: readonly GovernorLimitRisksClassEntry[];
+  /** Per-class entry count BEFORE the `limit` slice. */
+  readonly totalClassCount: number;
+  /** Total findings across all classes (FULL, pre-slice). */
+  readonly totalRiskCount: number;
+  /** Risks acknowledged in org-kb/meta/baseline.json (excluded from classes). */
+  readonly suppressedRiskCount: number;
+  /** Per-rule counter across the FULL matched set. */
+  readonly byRule: Readonly<Record<string, number>>;
+  /** Verbatim honesty disclosures; empty when nothing matched. */
+  readonly boundaries: readonly string[];
+  /** True when the class-level slice was trimmed to `limit`. */
+  readonly truncated: boolean;
+  /** Static-analysis blind spots: `complete: false` when a scanned class uses dynamic Apex. */
+  readonly soundness: Soundness;
+}
+
+interface QualityIssueLike {
+  readonly rule: string;
+  readonly severity: Severity;
+  readonly location: string;
+  readonly explanation: string;
+}
+
+const coerceIssue = (raw: unknown): QualityIssueLike | null => {
+  if (raw === null || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+  const rule = obj['rule'];
+  const severity = obj['severity'];
+  const location = obj['location'];
+  const explanation = obj['explanation'];
+  if (
+    typeof rule !== 'string' ||
+    typeof severity !== 'string' ||
+    typeof location !== 'string' ||
+    typeof explanation !== 'string'
+  ) {
+    return null;
+  }
+  if (!SEVERITY_SET.has(severity)) return null;
+  return {
+    rule,
+    severity: severity as Severity,
+    location,
+    explanation,
+  };
+};
+
+/** Comparator for the per-class slice: id ASC. */
+const compareClassById = (
+  a: GovernorLimitRisksClassEntry,
+  b: GovernorLimitRisksClassEntry,
+): number => (a.componentId < b.componentId ? -1 : a.componentId > b.componentId ? 1 : 0);
+
+/**
+ * Collect the ApexTrigger ids whose outgoing `callsApex` edges target
+ * the given class id. Returns an empty array when the class has no
+ * incoming `callsApex` from a trigger.
+ */
+const collectTriggerCallers = async (
+  ctx: Context,
+  classId: ComponentId,
+): Promise<Result<readonly ComponentId[], string>> => {
+  const r = await listEdges(ctx.graph, classId, {
+    direction: 'in',
+    edgeType: 'callsApex',
+  });
+  if (!r.ok) return err(r.error.message);
+  const callers: ComponentId[] = [];
+  for (const edge of r.value as readonly Edge[]) {
+    if (edge.fromId.startsWith('ApexTrigger:')) callers.push(edge.fromId);
+  }
+  return ok([...callers].sort());
+};
+
+/** Bounds for the P4-graph-sast entry-path walk. */
+const ENTRY_PATH_MAX_DEPTH = 6;
+const ENTRY_PATH_MAX_PATHS = 12;
+
+/**
+ * Walk backwards over incoming `callsApex` edges from `classId` to collect the
+ * entry-point PATHS that reach it (P4-graph-sast). Each path is ordered
+ * `[entryPoint, ..., classId]`. A path terminates at an ApexTrigger / Flow
+ * (recognised entry points) or at the top of the Apex chain (a class with no
+ * caller — itself a potential entry point such as a REST / Batchable class).
+ * Bounded by depth and path count; the `trail` membership test makes it
+ * cycle-safe.
+ */
+const collectEntryPaths = async (
+  ctx: Context,
+  classId: ComponentId,
+): Promise<Result<readonly (readonly ComponentId[])[], string>> => {
+  const paths: ComponentId[][] = [];
+  let errored: string | null = null;
+
+  // `trail` is class-first: [classId, caller, callerOfCaller, ...].
+  const walk = async (
+    node: ComponentId,
+    trail: readonly ComponentId[],
+  ): Promise<void> => {
+    if (errored !== null || paths.length >= ENTRY_PATH_MAX_PATHS) return;
+    if (trail.length >= ENTRY_PATH_MAX_DEPTH) {
+      paths.push([...trail].reverse());
+      return;
+    }
+    const r = await listEdges(ctx.graph, node, {
+      direction: 'in',
+      edgeType: 'callsApex',
+    });
+    if (!r.ok) {
+      errored = r.error.message;
+      return;
+    }
+    const callers = [
+      ...new Set(
+        (r.value as readonly Edge[])
+          .map((e) => e.fromId)
+          .filter((id) => !trail.includes(id)),
+      ),
+    ].sort();
+    if (callers.length === 0) {
+      // Top of the chain — `node` is itself the entry point.
+      paths.push([...trail].reverse());
+      return;
+    }
+    for (const from of callers) {
+      if (paths.length >= ENTRY_PATH_MAX_PATHS) break;
+      if (from.startsWith('ApexTrigger:') || from.startsWith('Flow:')) {
+        paths.push([...trail, from].reverse());
+      } else {
+        await walk(from, [...trail, from]);
+      }
+    }
+  };
+
+  await walk(classId, [classId]);
+  if (errored !== null) return err(errored);
+  const seen = new Set<string>();
+  const out: ComponentId[][] = [];
+  for (const p of paths) {
+    const k = p.join('>');
+    if (!seen.has(k)) {
+      seen.add(k);
+      out.push(p);
+    }
+  }
+  out.sort((a, b) => (a.join('>') < b.join('>') ? -1 : 1));
+  return ok(out.slice(0, ENTRY_PATH_MAX_PATHS));
+};
+
+/**
+ * The `sfi.governor_limit_risks` MCP tool. Composes over the v2.1
+ * `qualityIssues` property mirror for ApexClass / ApexTrigger nodes
+ * and narrows to the three governor-limit-relevant rules. See the
+ * module JSDoc for the rule subset, the trigger-context surface, and
+ * the honesty boundaries.
+ *
+ * @example
+ *   const r = await governorLimitRisksHandler(ctx, {});
+ *   if (r.ok) console.log(r.value.data.totalRiskCount);
+ */
+export const governorLimitRisksHandler = async (
+  ctx: Context,
+  input: GovernorLimitRisksInput,
+): Promise<Result<McpResponse<GovernorLimitRisksOutput>, McpError>> => {
+  const limit = input.limit ?? GOVERNOR_LIMIT_DEFAULT_LIMIT;
+
+  const perClass = new Map<ComponentId, GovernorLimitRisksClassEntry>();
+  const byRule: Record<string, number> = {};
+  // Classes whose governor-risk scan is undermined by dynamic Apex (a SOQL/DML
+  // hidden inside a Database.query string is invisible to the static recognizer).
+  const dynamicApexIds = new Set<ComponentId>();
+  let totalRiskCount = 0;
+  let suppressedRiskCount = 0;
+
+  for (const type of SCANNED_TYPES) {
+    const nodesResult = await listNodesByType(ctx.graph, type, {
+      limit: LIST_PAGE_SIZE,
+    });
+    if (!nodesResult.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${nodesResult.error.message}`,
+      });
+    }
+    for (const node of nodesResult.value) {
+      const raw = (node as Node).properties['qualityIssues'];
+      if (!Array.isArray(raw)) continue;
+      const risks: GovernorLimitRiskFinding[] = [];
+      for (const rawIssue of raw) {
+        const issue = coerceIssue(rawIssue);
+        if (issue === null) continue;
+        if (issue.rule === 'dynamic-apex') dynamicApexIds.add(node.id);
+        if (!GOVERNOR_LIMIT_RULES.has(issue.rule)) continue;
+        risks.push({
+          rule: issue.rule,
+          severity: issue.severity,
+          location: issue.location,
+          explanation: issue.explanation,
+        });
+      }
+      const partitioned = await partitionByBaseline(
+        ctx,
+        GOVERNOR_LIMIT_TOOL,
+        node.id,
+        risks,
+      );
+      suppressedRiskCount += partitioned.suppressedCount;
+      for (const issue of partitioned.active) {
+        byRule[issue.rule] = (byRule[issue.rule] ?? 0) + 1;
+        totalRiskCount += 1;
+      }
+      if (partitioned.active.length === 0) continue;
+
+      // Resolve trigger context for ApexClass entries only.
+      // ApexTriggers' own qualityIssues are reported in-place; an
+      // ApexTrigger doesn't have a "trigger caller" upstream.
+      let triggerContext: readonly ComponentId[] = [];
+      let entryPaths: readonly (readonly ComponentId[])[] = [];
+      if (node.type === 'ApexClass') {
+        const tcRes = await collectTriggerCallers(ctx, node.id);
+        if (!tcRes.ok) {
+          return err({ kind: 'internal', message: tcRes.error });
+        }
+        triggerContext = tcRes.value;
+        // P4-graph-sast: the entry-point paths that reach this risky class.
+        const epRes = await collectEntryPaths(ctx, node.id);
+        if (!epRes.ok) {
+          return err({ kind: 'internal', message: epRes.error });
+        }
+        entryPaths = epRes.value;
+      }
+
+      perClass.set(node.id, {
+        componentId: node.id,
+        type: node.type,
+        apiName: node.apiName,
+        risks: [...partitioned.active],
+        triggerContext,
+        entryPaths,
+      });
+    }
+  }
+
+  const classes = [...perClass.values()].sort(compareClassById);
+  const truncated = classes.length > limit;
+  const slice = classes.slice(0, limit);
+
+  const boundaries: string[] =
+    classes.length === 0
+      ? []
+      : [
+          GOVERNOR_LIMIT_HEURISTIC_DISCLOSURE,
+          GOVERNOR_LIMIT_TRIGGER_CONTEXT_DISCLOSURE,
+        ];
+
+  return ok({
+    data: {
+      classes: slice,
+      totalClassCount: classes.length,
+      totalRiskCount,
+      suppressedRiskCount,
+      byRule,
+      boundaries,
+      truncated,
+      soundness: soundnessFromDynamicApexIds([...dynamicApexIds]),
+    },
+    vaultState: {
+      sourceTreeHash: ctx.manifest.sourceTreeHash,
+      refreshedAt: ctx.manifest.refreshedAt,
+    },
+  });
+};

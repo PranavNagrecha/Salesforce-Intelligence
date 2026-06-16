@@ -1,0 +1,454 @@
+/**
+ * Handler for the `sfi.health_check` MCP tool.
+ *
+ * Diagnostic — never fails the JSON-RPC dispatch. Instead it inspects
+ * the live server state and reports a structured triage payload:
+ *   1. Does the vault root exist on disk?
+ *   2. Is the graph store still queryable? (probe via a 1-row
+ *      `listNodesByType` against `CustomObject`.)
+ *   3. Does the on-disk source tree still hash to the value recorded
+ *      in the manifest? (Skipped when `source/` is absent — typical
+ *      for a fresh clone where the source tree is gitignored.)
+ *
+ * Result aggregation:
+ *   - `unhealthy` if the graph probe failed: clients cannot rely on
+ *     any subsequent tool call.
+ *   - `degraded` if the graph is fine but at least one issue surfaced
+ *     (stale hash, missing source/, vault dir missing).
+ *   - `healthy` if nothing is wrong.
+ *
+ * Beyond the pass/fail verdict, the payload carries a `freshness` block: the
+ * vault's age in days, a `stale` flag (age >= a one-week threshold), what the
+ * most recent refresh changed (from the history store), and a human `nudge`.
+ * The nudge is the offline "yellow flag" so a host never narrates a stale
+ * snapshot as current — it is advisory and never changes `status`.
+ */
+
+import { existsSync } from 'node:fs';
+import { stat } from 'node:fs/promises';
+import { join } from 'node:path';
+
+import type {
+  ComponentType,
+  McpError,
+  McpResponse,
+} from '@sf-intelligence/contracts';
+import { ok, type Result } from '@sf-intelligence/core';
+import { listNodesByType } from '@sf-intelligence/graph';
+import {
+  computeSourceTreeHash,
+  readSkippedDirectories,
+  summarizeCoverage,
+  type CoverageSummary,
+} from '@sf-intelligence/vault';
+import { z } from 'zod';
+
+import {
+  loadRefreshHistory,
+  summarizeRecentActivity,
+} from '../history-store.js';
+import type { Context } from '../server.js';
+
+/**
+ * Age (in whole days) at or above which `health_check` flags the vault as
+ * `stale` and emits a freshness nudge. Picked at 7 so a vault refreshed
+ * within the last week stays quiet (no false alarm on an actively-maintained
+ * vault), while a vault left untouched for a week or more surfaces a yellow
+ * flag. The flag is advisory: it never changes `status` (an old vault is not
+ * a broken vault), it only populates `freshness.nudge`.
+ */
+const STALE_AGE_DAYS = 7;
+
+/** Milliseconds in one day, for the freshness age calculation. */
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/**
+ * File-count threshold above which a non-empty `skippedDirectories`
+ * map flips `health_check` from `healthy` to `degraded`. Picked at
+ * 100 so trivial unknowns (a stray `.DS_Store`, a one-off custom
+ * directory the admin added by mistake) don't trip the indicator,
+ * while real coverage gaps (OmniStudio's hundreds of `omniProcesses`
+ * files; thousands of FSL Industries files) reliably do.
+ */
+const SKIPPED_FILES_DEGRADED_THRESHOLD = 100;
+
+/**
+ * Zod schema for the `sfi.health_check` tool input. The tool takes no
+ * arguments; the schema exists only so `dispatchTool`'s `runTool` helper
+ * rejects extraneous fields with the standard `invalid-query` envelope.
+ */
+export const healthCheckInputSchema = z.object({});
+
+/** Parsed input shape, inferred from `healthCheckInputSchema`. */
+export type HealthCheckInput = z.infer<typeof healthCheckInputSchema>;
+
+/**
+ * The triage payload returned on success.
+ *
+ *   - `status`: aggregate verdict, derived from `checks`.
+ *   - `issues`: human-readable list of every detected problem. Empty
+ *     when `status === 'healthy'`. Order matches the check sequence
+ *     so clients can render a stable list.
+ *   - `checks`: per-check booleans for programmatic consumers.
+ *     `sourceHashMatches` is nullable because it's skipped when
+ *     `source/` is missing (common in fresh clones). `uncoveredTypesOk`
+ *     becomes `false` when the manifest's skip-counter records more
+ *     than `SKIPPED_FILES_DEGRADED_THRESHOLD` files in unknown
+ *     directories (architectural-bug-fix observability).
+ *   - `reason`: structured cause when `status === 'degraded'`. Empty
+ *     string in the healthy / unhealthy paths. Currently a single
+ *     enumerant — `"uncovered-types-detected"` — surfaces the
+ *     skip-counter degradation; pre-existing degradations
+ *     (stale-hash / missing source / missing vault dir) leave
+ *     `reason` empty, matching their `issues` strings.
+ */
+export interface HealthCheckOutput {
+  readonly status: 'healthy' | 'degraded' | 'unhealthy';
+  readonly issues: readonly string[];
+  readonly checks: Readonly<{
+    readonly vaultExists: boolean;
+    readonly graphReadable: boolean;
+    readonly sourceHashMatches: boolean | null;
+    readonly uncoveredTypesOk: boolean;
+    /**
+     * Whether the rendered vault is consistent with the graph. `false`
+     * when the graph holds MORE nodes of some type than the manifest
+     * recorded at render time — a partially-rendered vault (e.g. built by
+     * older code) where components resolve but have no `.md` file, so
+     * `get_component` fails with "vault file missing". A fresh
+     * `/sfi-refresh` re-renders everything.
+     */
+    readonly renderComplete: boolean;
+  }>;
+  readonly coverage: CoverageSummary;
+  readonly reason?: 'uncovered-types-detected';
+  /**
+   * Vault freshness — the yellow flag for stale answers. Always present.
+   *
+   * `health_check` is OFFLINE: it cannot know what changed in the live org
+   * since the last refresh. What it CAN report honestly is (a) how old the
+   * vault is, and (b) what the most recent refresh changed (from the
+   * continuous-learning history store). It reports those and, when the vault
+   * is old or the local source drifted, emits a `nudge` so a host never
+   * narrates a stale snapshot as if it were current. To detect actual
+   * org-side drift, the nudge points at `sfi.live_drift_check`.
+   */
+  readonly freshness: HealthFreshness;
+  /**
+   * Whether local vault git history is enabled (`org-kb/.git`). Advisory —
+   * never changes `status`.
+   */
+  readonly vaultHistory: {
+    readonly enabled: boolean;
+    readonly enableHint: string | null;
+  };
+}
+
+/** The freshness sub-report of {@link HealthCheckOutput}. */
+export interface HealthFreshness {
+  /** ISO timestamp the vault was last refreshed (from the manifest). */
+  readonly refreshedAt: string;
+  /**
+   * Whole days between `refreshedAt` and now (floored). `null` when
+   * `refreshedAt` is missing or unparseable — never a fabricated 0.
+   */
+  readonly ageDays: number | null;
+  /**
+   * `true` when `ageDays >= STALE_AGE_DAYS`. A yellow flag, not a failure:
+   * `status` is left unchanged. `false` when fresh or age is unknown.
+   */
+  readonly stale: boolean;
+  /**
+   * What the MOST RECENT refresh changed, from the history store
+   * (`meta/history.jsonl`). `available: false` for a vault with no recorded
+   * history (refreshed once, or before the store shipped). This is "changed
+   * AT the last refresh", NOT "changed in the org SINCE" — the offline vault
+   * cannot know the latter without `live_drift_check`.
+   */
+  readonly lastRefresh: {
+    readonly available: boolean;
+    /** Count of component-type deltas (sum of |added−removed| per type). */
+    readonly componentsChanged: number;
+  };
+  /**
+   * Human-readable yellow flag, or `null` when the vault is fresh and the
+   * source has not drifted. Never asserts anything about the live org.
+   */
+  readonly nudge: string | null;
+}
+
+/**
+ * Build the freshness sub-report. Pure given `manifest`, the history summary,
+ * the source-hash check result, and `now`. Extracted so the age threshold and
+ * nudge wording have a single home and are unit-testable with a fixed clock.
+ */
+const buildFreshness = (
+  ctx: Context,
+  now: number,
+  sourceHashMatches: boolean | null,
+  recent: ReturnType<typeof summarizeRecentActivity>,
+): HealthFreshness => {
+  const refreshedAt = ctx.manifest.refreshedAt;
+  const refreshedMs = Date.parse(refreshedAt);
+  const ageDays = Number.isNaN(refreshedMs)
+    ? null
+    : Math.max(0, Math.floor((now - refreshedMs) / MS_PER_DAY));
+  const stale = ageDays !== null && ageDays >= STALE_AGE_DAYS;
+
+  const componentsChanged = Object.values(recent.lastRefreshComponentDeltas).reduce(
+    (sum, n) => sum + Math.abs(n),
+    0,
+  );
+
+  // Build the nudge from whichever staleness signals fired. Each clause is
+  // honest about its scope: age and source-drift are offline facts; org-side
+  // drift is explicitly deferred to live_drift_check.
+  const clauses: string[] = [];
+  if (stale && ageDays !== null) {
+    clauses.push(
+      `Vault last refreshed ${refreshedAt} (${ageDays} day${ageDays === 1 ? '' : 's'} ago); answers reflect that snapshot. The org may have changed since — run \`/sfi-refresh\`, or \`sfi.live_stale_check\` for the REAL count of components modified in the org since this refresh (and \`sfi.live_drift_check\` to compare one object's fields against the live org).`,
+    );
+  }
+  if (sourceHashMatches === false) {
+    clauses.push(
+      'Local source has drifted from the vault (source-tree hash mismatch); run `sfi refresh --no-pull` to rebuild from the current source.',
+    );
+  }
+  const nudge = clauses.length > 0 ? clauses.join(' ') : null;
+
+  return {
+    refreshedAt,
+    ageDays,
+    stale,
+    lastRefresh: { available: recent.available, componentsChanged },
+    nudge,
+  };
+};
+
+/**
+ * Probe the graph store with the cheapest read available: list at most
+ * one `CustomObject` row. Returns whether the probe succeeded plus any
+ * issue string to surface to the user. Catches synchronous throws so a
+ * disposed store (closed connection, etc.) still produces a structured
+ * report rather than crashing the dispatch loop.
+ */
+const probeGraph = async (
+  ctx: Context,
+): Promise<{ readable: boolean; issue: string | null }> => {
+  try {
+    const result = await listNodesByType(ctx.graph, 'CustomObject', { limit: 1 });
+    if (!result.ok) {
+      return { readable: false, issue: `graph query failed: ${result.error.message}` };
+    }
+    return { readable: true, issue: null };
+  } catch (e) {
+    return {
+      readable: false,
+      issue: `graph query exception: ${(e as Error).message}`,
+    };
+  }
+};
+
+/**
+ * Compare the on-disk source tree against the manifest's recorded hash.
+ * Returns the per-check tri-state plus any issue string:
+ *   - `match === true`:    hashes agree.
+ *   - `match === false`:   hashes disagree; vault is stale.
+ *   - `match === null`:    source/ is absent or unreadable; skipped.
+ */
+const probeSourceHash = async (
+  ctx: Context,
+): Promise<{ match: boolean | null; issue: string | null }> => {
+  const sourcePath = join(ctx.vaultRoot, 'source');
+  try {
+    await stat(sourcePath);
+  } catch {
+    return {
+      match: null,
+      issue: 'source/ directory missing — cannot verify freshness',
+    };
+  }
+
+  const hashResult = await computeSourceTreeHash(sourcePath);
+  if (!hashResult.ok) {
+    return {
+      match: null,
+      issue: `hash computation failed: ${hashResult.error.message}`,
+    };
+  }
+  if (hashResult.value !== ctx.manifest.sourceTreeHash) {
+    return {
+      match: false,
+      issue: 'source-tree hash mismatch (vault is stale; run sfi refresh)',
+    };
+  }
+  return { match: true, issue: null };
+};
+
+/**
+ * Detect a graph/vault render desync. The graph is the source of truth; the
+ * `.md` files under `components/` are a cache written at render time, and the
+ * manifest records how many of each type were rendered. If the graph holds
+ * MORE nodes of some type than the manifest records, the vault is partially
+ * rendered: the resolver (which reads the graph) will offer candidates whose
+ * file was never written, and `get_component` then fails with "vault file
+ * missing". This happens when a vault was built by older/interrupted code; a
+ * fresh `/sfi-refresh` re-renders everything.
+ *
+ * The probe is cheap — one indexed `LIMIT 1 OFFSET <recorded-count>` query
+ * per recorded type, short-circuiting on the first desync. It only flags
+ * positive counts (a type recorded as 0 is skipped: an empty placeholder
+ * manifest must not read as a desync).
+ */
+const probeRenderComplete = async (
+  ctx: Context,
+): Promise<{ complete: boolean; issue: string | null }> => {
+  const recorded = ctx.manifest.components ?? {};
+  for (const [type, count] of Object.entries(recorded)) {
+    if (typeof count !== 'number' || count <= 0) continue;
+    let probe;
+    try {
+      probe = await listNodesByType(ctx.graph, type as ComponentType, {
+        limit: 1,
+        offset: count,
+      });
+    } catch {
+      // A malformed type string must not crash the diagnostic probe.
+      continue;
+    }
+    if (probe.ok && probe.value.length > 0) {
+      return {
+        complete: false,
+        issue: `vault appears partially rendered: the graph holds more \`${type}\` nodes than the manifest records (${count}). Some components will resolve but have no vault file. Run \`/sfi-refresh\` to re-render the vault.`,
+      };
+    }
+  }
+  return { complete: true, issue: null };
+};
+
+/**
+ * The `sfi.health_check` MCP tool. Runs three diagnostic probes and
+ * returns an aggregated `HealthCheckOutput`. Never returns `err`; the
+ * `Result<..., McpError>` signature exists only so the handler shares the
+ * `runTool` dispatch shape with the other tools, and `McpError` is
+ * unreachable on this path.
+ *
+ * @example
+ *   const r = await healthCheckHandler(ctx, {});
+ *   if (r.ok && r.value.data.status !== 'healthy') {
+ *     console.warn(r.value.data.issues.join('\n'));
+ *   }
+ */
+export const healthCheckHandler = async (
+  ctx: Context,
+  _input: HealthCheckInput,
+  now: number = Date.now(),
+): Promise<Result<McpResponse<HealthCheckOutput>, McpError>> => {
+  const issues: string[] = [];
+
+  const vaultExists = existsSync(ctx.vaultRoot);
+  if (!vaultExists) issues.push('vault directory missing');
+
+  const graphProbe = await probeGraph(ctx);
+  if (graphProbe.issue !== null) issues.push(graphProbe.issue);
+
+  const hashProbe = await probeSourceHash(ctx);
+  if (hashProbe.issue !== null) issues.push(hashProbe.issue);
+
+  const renderProbe = await probeRenderComplete(ctx);
+  if (renderProbe.issue !== null) issues.push(renderProbe.issue);
+
+  // Architectural-bug-fix observability: read the skip-counter the
+  // refresh walker wrote into the manifest. A non-empty map above the
+  // threshold flips the verdict to `degraded` so MCP clients can warn
+  // the user that the vault is missing coverage for whichever
+  // ComponentTypes the dispatcher didn't recognise. Vaults built
+  // before the counter shipped read back as an empty map, so older
+  // manifests never trip this branch.
+  const skipped = readSkippedDirectories(ctx.manifest);
+  const skippedFileCount = Object.values(skipped).reduce((sum, n) => sum + n, 0);
+  const uncoveredTypesOk = skippedFileCount <= SKIPPED_FILES_DEGRADED_THRESHOLD;
+  let uncoveredReason: HealthCheckOutput['reason'];
+  if (!uncoveredTypesOk) {
+    const dirCount = Object.keys(skipped).length;
+    issues.push(
+      `vault skipped ${skippedFileCount} files in ${dirCount} unknown ${dirCount === 1 ? 'directory' : 'directories'} during refresh — run \`sfi status --skipped\` for the full list`,
+    );
+    uncoveredReason = 'uncovered-types-detected';
+  }
+
+  const coverage = summarizeCoverage(ctx.manifest);
+  if (!coverage.coverageKnown) {
+    issues.push(
+      'manifest missing coverage metadata — run `/sfi-refresh` or `sfi refresh --no-pull` to recompute from existing source',
+    );
+  } else if (coverage.partialTypes.length > 0) {
+    issues.push(
+      `vault coverage is partial for requested metadata: ${coverage.partialTypes.join(', ')}`,
+    );
+  }
+
+  // P13-STAGED-tiers: a staged refresh is mid-build. Degraded with explicit
+  // tier progress, so consumers qualify every answer until the final tier
+  // clears the marker.
+  const staged = ctx.manifest.staged;
+  if (staged !== undefined) {
+    issues.push(
+      `staged build in progress (building tier ${staged.tier}/${staged.totalTiers}) — ${staged.pendingTypes.length} metadata type(s) still queued; absence claims about queued types are unreliable until the build completes`,
+    );
+  }
+
+  const status: HealthCheckOutput['status'] = !graphProbe.readable
+    ? 'unhealthy'
+    : issues.length > 0
+      ? 'degraded'
+      : 'healthy';
+
+  const checks: HealthCheckOutput['checks'] = {
+    vaultExists,
+    graphReadable: graphProbe.readable,
+    sourceHashMatches: hashProbe.match,
+    uncoveredTypesOk,
+    renderComplete: renderProbe.complete,
+  };
+
+  // Freshness nudge: read the continuous-learning history store best-effort
+  // (a missing/corrupt log must never fail the diagnostic), then derive the
+  // age-based yellow flag. Additive — it never alters `status` or `checks`.
+  let recent;
+  try {
+    recent = summarizeRecentActivity(await loadRefreshHistory(ctx.vaultRoot));
+  } catch {
+    recent = summarizeRecentActivity({
+      chronological: [],
+      refreshCount: 0,
+      firstRefreshedAt: null,
+      lastRefreshedAt: null,
+      netComponentChange: null,
+    });
+  }
+  const freshness = buildFreshness(ctx, now, hashProbe.match, recent);
+
+  const vaultHistoryEnabled = existsSync(join(ctx.vaultRoot, '.git'));
+
+  return ok({
+    data: {
+      status,
+      issues,
+      checks,
+      coverage,
+      freshness,
+      vaultHistory: {
+        enabled: vaultHistoryEnabled,
+        enableHint: vaultHistoryEnabled
+          ? null
+          : 'Run `sfi vault git enable` once for `sfi.component_history` / `sfi.component_as_of`.',
+      },
+      ...(uncoveredReason !== undefined ? { reason: uncoveredReason } : {}),
+    },
+    vaultState: {
+      sourceTreeHash: ctx.manifest.sourceTreeHash,
+      refreshedAt: ctx.manifest.refreshedAt,
+    },
+  });
+};

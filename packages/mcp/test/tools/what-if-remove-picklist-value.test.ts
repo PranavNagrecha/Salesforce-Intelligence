@@ -1,0 +1,452 @@
+/// <reference types="vitest/globals" />
+
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import type {
+  CoverageEntry,
+  Edge,
+  ExtractionResult,
+  Node,
+  VaultManifest,
+} from '@sf-intelligence/contracts';
+import {
+  closeGraph,
+  importExtractionResults,
+  openGraph,
+  type GraphStore,
+} from '@sf-intelligence/graph';
+
+import type { Context } from '../../src/server.js';
+import {
+  whatIfRemovePicklistValueHandler,
+  whatIfRemovePicklistValueInputSchema,
+} from '../../src/tools/what-if-remove-picklist-value.js';
+
+const completeCoverage = (types: readonly string[]): readonly CoverageEntry[] =>
+  types.map((type) => ({
+    type,
+    requested: true,
+    retrieved: 1,
+    errored: false,
+    neverModeled: false,
+  }));
+
+const FIXTURE_MANIFEST: VaultManifest = {
+  version: '0.1.0',
+  refreshedAt: '2026-05-27T14:33:08Z',
+  sourceOrg: 'me@example.com',
+  components: { CustomObject: 1, CustomField: 2 },
+  edges: { parentOf: 2, references: 2, firesWhen: 1 },
+  sourceTreeHash: 'sha256:fixture',
+  coverageComputedAt: '2026-05-29T12:00:00.000Z',
+  coverage: completeCoverage([
+    'CustomField',
+    'ValidationRule',
+    'Flow',
+    'ApexClass',
+    'ApexTrigger',
+    'WorkflowRule',
+    'ConditionalContext',
+    'Report',
+    'Dashboard',
+    'ListView',
+    'FlexiPage',
+  ]),
+};
+
+const makeNode = (overrides: Partial<Node> & Pick<Node, 'id'>): Node => ({
+  type: 'CustomObject',
+  apiName: 'Account',
+  label: null,
+  parentId: null,
+  sourcePath: 'unused.xml',
+  lastModifiedDate: null,
+  lastModifiedBy: null,
+  apiVersion: null,
+  properties: {},
+  ...overrides,
+});
+
+const makeEdge = (
+  overrides: Partial<Edge> & Pick<Edge, 'fromId' | 'toId' | 'edgeType'>,
+): Edge => ({
+  confidence: 'declared',
+  source: 'unit-test',
+  properties: {},
+  ...overrides,
+});
+
+const ACCOUNT_OBJ = 'CustomObject:Account';
+const PICK_FIELD = 'CustomField:Account.Industry';
+const TEXT_FIELD = 'CustomField:Account.NotPicklist';
+const VR_ID = 'ValidationRule:Account.Tech_Special';
+const VR_NO_MATCH_ID = 'ValidationRule:Account.OtherCheck';
+const FLOW_ID = 'Flow:SetIndustry';
+const FLOW_COND_ID =
+  'ConditionalContext:Flow:SetIndustry.condition-0';
+const APEX_ID = 'ApexClass:IndustryService';
+const APEX_NO_MATCH_ID = 'ApexClass:UnrelatedService';
+
+const seed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: ACCOUNT_OBJ, apiName: 'Account' }),
+    makeNode({
+      id: PICK_FIELD,
+      type: 'CustomField',
+      apiName: 'Industry',
+      parentId: ACCOUNT_OBJ,
+      properties: { dataType: 'Picklist' },
+    }),
+    makeNode({
+      id: TEXT_FIELD,
+      type: 'CustomField',
+      apiName: 'NotPicklist',
+      parentId: ACCOUNT_OBJ,
+      properties: { dataType: 'Text' },
+    }),
+    makeNode({
+      id: VR_ID,
+      type: 'ValidationRule',
+      apiName: 'Account.Tech_Special',
+      parentId: ACCOUNT_OBJ,
+      properties: {
+        // Formula references the value 'Tech' as a literal.
+        errorConditionFormula: "ISPICKVAL(Industry, 'Tech')",
+      },
+    }),
+    makeNode({
+      id: VR_NO_MATCH_ID,
+      type: 'ValidationRule',
+      apiName: 'Account.OtherCheck',
+      parentId: ACCOUNT_OBJ,
+      properties: {
+        errorConditionFormula: "ISPICKVAL(Industry, 'Finance')",
+      },
+    }),
+    makeNode({
+      id: FLOW_ID,
+      type: 'Flow',
+      apiName: 'SetIndustry',
+    }),
+    makeNode({
+      id: FLOW_COND_ID,
+      type: 'ConditionalContext',
+      apiName: 'Flow:SetIndustry.condition-0',
+      parentId: FLOW_ID,
+      properties: {
+        kind: 'flow-decision',
+        expression: "Industry == 'Tech'",
+        fieldRefs: [PICK_FIELD],
+      },
+    }),
+    makeNode({
+      id: APEX_ID,
+      type: 'ApexClass',
+      apiName: 'IndustryService',
+      properties: {
+        stringLiterals: ["'Tech'", "'Other'"],
+      },
+    }),
+    makeNode({
+      id: APEX_NO_MATCH_ID,
+      type: 'ApexClass',
+      apiName: 'UnrelatedService',
+      properties: {
+        stringLiterals: ["'Hello'"],
+      },
+    }),
+  ],
+  edges: [
+    makeEdge({ fromId: ACCOUNT_OBJ, toId: PICK_FIELD, edgeType: 'parentOf' }),
+    makeEdge({ fromId: ACCOUNT_OBJ, toId: TEXT_FIELD, edgeType: 'parentOf' }),
+    // VR with the literal references the field.
+    makeEdge({
+      fromId: VR_ID,
+      toId: PICK_FIELD,
+      edgeType: 'references',
+      source: 'validation-rule-extractor',
+    }),
+    // VR without the literal also references the field (no match).
+    makeEdge({
+      fromId: VR_NO_MATCH_ID,
+      toId: PICK_FIELD,
+      edgeType: 'references',
+      source: 'validation-rule-extractor',
+    }),
+    // Flow + firesWhen routing through a ConditionalContext.
+    makeEdge({
+      fromId: FLOW_ID,
+      toId: PICK_FIELD,
+      edgeType: 'readsFrom',
+      source: 'flow-extractor',
+      confidence: 'parsed',
+    }),
+    makeEdge({
+      fromId: FLOW_ID,
+      toId: FLOW_COND_ID,
+      edgeType: 'firesWhen',
+    }),
+    // Apex class with the literal reads from the field.
+    makeEdge({
+      fromId: APEX_ID,
+      toId: PICK_FIELD,
+      edgeType: 'readsFrom',
+      source: 'apex-scanner',
+      confidence: 'heuristic',
+    }),
+    // Apex class without the literal also reads from the field (no match).
+    makeEdge({
+      fromId: APEX_NO_MATCH_ID,
+      toId: PICK_FIELD,
+      edgeType: 'readsFrom',
+      source: 'apex-scanner',
+      confidence: 'heuristic',
+    }),
+  ],
+};
+
+let tempDir: string;
+let store: GraphStore;
+let ctx: Context;
+
+beforeAll(async () => {
+  tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-wi-rpv-'));
+  const dbPath = join(tempDir, 'wi-rpv.db');
+  const opened = await openGraph(dbPath);
+  if (!opened.ok) {
+    throw new Error(`openGraph failed: ${opened.error.message}`);
+  }
+  store = opened.value;
+  const imported = await importExtractionResults(store, [seed]);
+  if (!imported.ok) {
+    throw new Error(`seed import failed: ${imported.error.message}`);
+  }
+  ctx = {
+    vaultRoot: tempDir,
+    manifest: FIXTURE_MANIFEST,
+    graph: store,
+  };
+});
+
+afterAll(async () => {
+  await closeGraph(store);
+  rmSync(tempDir, { recursive: true, force: true });
+});
+
+describe('whatIfRemovePicklistValueHandler', () => {
+  it('rejects a non-CustomField prefix with invalid-query', async () => {
+    const result = await whatIfRemovePicklistValueHandler(ctx, {
+      fieldId: 'Flow:NotAField',
+      value: 'Tech',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+    expect(result.error.path).toBe('fieldId');
+  });
+
+  it('returns component-not-found for an unknown CustomField id', async () => {
+    const result = await whatIfRemovePicklistValueHandler(ctx, {
+      fieldId: 'CustomField:Account.DoesNotExist',
+      value: 'Tech',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('component-not-found');
+  });
+
+  it('rejects a non-Picklist field with invalid-query', async () => {
+    const result = await whatIfRemovePicklistValueHandler(ctx, {
+      fieldId: TEXT_FIELD,
+      value: 'Tech',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+  });
+
+  it('surfaces ValidationRule whose formula contains the literal value', async () => {
+    const result = await whatIfRemovePicklistValueHandler(ctx, {
+      fieldId: PICK_FIELD,
+      value: 'Tech',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.impacts.map((i) => i.componentId);
+    expect(ids).toContain(VR_ID);
+  });
+
+  it('skips ValidationRule whose formula does NOT contain the value', async () => {
+    const result = await whatIfRemovePicklistValueHandler(ctx, {
+      fieldId: PICK_FIELD,
+      value: 'Tech',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.impacts.map((i) => i.componentId);
+    expect(ids).not.toContain(VR_NO_MATCH_ID);
+  });
+
+  it('surfaces Flow whose firesWhen ConditionalContext references the value', async () => {
+    const result = await whatIfRemovePicklistValueHandler(ctx, {
+      fieldId: PICK_FIELD,
+      value: 'Tech',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.impacts.map((i) => i.componentId);
+    expect(ids).toContain(FLOW_ID);
+  });
+
+  it('surfaces ApexClass with the literal in its stringLiterals AND a readsFrom edge', async () => {
+    const result = await whatIfRemovePicklistValueHandler(ctx, {
+      fieldId: PICK_FIELD,
+      value: 'Tech',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.impacts.map((i) => i.componentId);
+    expect(ids).toContain(APEX_ID);
+  });
+
+  it('skips ApexClass whose stringLiterals do not contain the value', async () => {
+    const result = await whatIfRemovePicklistValueHandler(ctx, {
+      fieldId: PICK_FIELD,
+      value: 'Tech',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.impacts.map((i) => i.componentId);
+    expect(ids).not.toContain(APEX_NO_MATCH_ID);
+  });
+
+  it('classifies categories correctly per source type', async () => {
+    const result = await whatIfRemovePicklistValueHandler(ctx, {
+      fieldId: PICK_FIELD,
+      value: 'Tech',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const byId = new Map(
+      result.value.data.impacts.map((i) => [i.componentId, i]),
+    );
+    expect(byId.get(VR_ID)?.category).toBe('metadata-blocker');
+    expect(byId.get(FLOW_ID)?.category).toBe('metadata-blocker');
+    expect(byId.get(APEX_ID)?.category).toBe('code-needs-update');
+  });
+
+  it('aggregates verdict as blocking when a metadata-blocker is present', async () => {
+    const result = await whatIfRemovePicklistValueHandler(ctx, {
+      fieldId: PICK_FIELD,
+      value: 'Tech',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.verdict).toBe('blocking');
+    expect(result.value.data.compatibility).toBe('breaking');
+  });
+
+  it('returns review/safe when no impacts match (unknown value)', async () => {
+    const result = await whatIfRemovePicklistValueHandler(ctx, {
+      fieldId: PICK_FIELD,
+      value: 'NotAValueAnywhere',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.impacts.length).toBe(0);
+    expect(result.value.data.compatibility).toBe('review');
+    expect(result.value.data.verdict).toBe('safe');
+  });
+
+  it('sorts impacts by componentId ASC for deterministic output', async () => {
+    const result = await whatIfRemovePicklistValueHandler(ctx, {
+      fieldId: PICK_FIELD,
+      value: 'Tech',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.impacts.map((i) => i.componentId);
+    const sorted = [...ids].sort();
+    expect(ids).toEqual(sorted);
+  });
+
+  it('carries the verbatim boundary disclosure', async () => {
+    const result = await whatIfRemovePicklistValueHandler(ctx, {
+      fieldId: PICK_FIELD,
+      value: 'Tech',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.disclosure).toContain('Variable-based picklist comparisons');
+    expect(result.value.data.disclosure).toContain('obj.get');
+  });
+
+  it('echoes fieldId and value in the response', async () => {
+    const result = await whatIfRemovePicklistValueHandler(ctx, {
+      fieldId: PICK_FIELD,
+      value: 'Tech',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.fieldId).toBe(PICK_FIELD);
+    expect(result.value.data.value).toBe('Tech');
+    expect(result.value.data.fieldType).toBe('Picklist');
+  });
+
+  // Regression lock: the extractor writes the field's data type under
+  // `properties.dataType`, not `properties.type`. Reading the wrong key
+  // resolved every field's type to '' / 'Unknown', so the picklist guard
+  // rejected real picklists with a bogus "has type 'Unknown'" error. The
+  // fixtures above seed `dataType`, matching real vault output.
+  it('resolves the picklist type from properties.dataType (not "Unknown")', async () => {
+    const result = await whatIfRemovePicklistValueHandler(ctx, {
+      fieldId: PICK_FIELD,
+      value: 'Tech',
+    });
+    // A real Picklist must pass the guard, not be rejected as 'Unknown'.
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.fieldType).toBe('Picklist');
+  });
+
+  it('reports the real resolved type in the non-Picklist rejection message', async () => {
+    const result = await whatIfRemovePicklistValueHandler(ctx, {
+      fieldId: TEXT_FIELD,
+      value: 'Tech',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+    // The message must name the resolved type ('Text' from dataType),
+    // not the pre-fix 'Unknown' that the wrong property key produced.
+    expect(result.error.message).toContain("has type 'Text'");
+  });
+});
+
+describe('whatIfRemovePicklistValueInputSchema', () => {
+  it('accepts a well-formed input', () => {
+    const parsed = whatIfRemovePicklistValueInputSchema.safeParse({
+      fieldId: 'CustomField:Account.Industry',
+      value: 'Tech',
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('rejects an empty fieldId', () => {
+    const parsed = whatIfRemovePicklistValueInputSchema.safeParse({
+      fieldId: '',
+      value: 'Tech',
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it('rejects an empty value', () => {
+    const parsed = whatIfRemovePicklistValueInputSchema.safeParse({
+      fieldId: 'CustomField:Account.Industry',
+      value: '',
+    });
+    expect(parsed.success).toBe(false);
+  });
+});

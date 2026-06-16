@@ -1,0 +1,371 @@
+/// <reference types="vitest/globals" />
+
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+
+import type { Edge, Node } from '@sf-intelligence/contracts';
+
+import { renderComponentMarkdown } from '../src/component-markdown.js';
+import { serializeFrontmatter } from '../src/yaml-frontmatter.js';
+
+import { findHarnessRoot, itHarness } from './harness-root.js';
+
+// The harness root (which holds `tests/fixtures` and `tests/golden`) is
+// located by walking up from vitest's cwd; null in the published product copy.
+const HARNESS_ROOT = findHarnessRoot() ?? '';
+const FIXTURE_PATH_REL = 'tests/fixtures/render-input/CustomObject_CustomerProject__c.json';
+const GOLDEN_PATH_REL = 'tests/golden/renderer-component-markdown/CustomObject_CustomerProject__c.md';
+
+interface Fixture {
+  readonly node: Node;
+  readonly edges: readonly Edge[];
+}
+
+describe('renderComponentMarkdown', () => {
+  itHarness('matches the golden for the CustomerProject__c fixture byte-for-byte', async () => {
+    const fixture = JSON.parse(
+      await readFile(resolve(HARNESS_ROOT, FIXTURE_PATH_REL), 'utf-8'),
+    ) as Fixture;
+    const golden = await readFile(resolve(HARNESS_ROOT, GOLDEN_PATH_REL), 'utf-8');
+
+    const result = renderComponentMarkdown(fixture.node, fixture.edges);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const fullOutput =
+      '---\n' +
+      serializeFrontmatter(result.value.frontmatter) +
+      '\n---\n\n' +
+      result.value.body +
+      '\n';
+
+    expect(fullOutput).toBe(golden);
+  });
+
+  it('returns the canonical output path for a top-level CustomObject', () => {
+    const node: Node = {
+      id: 'CustomObject:Foo__c',
+      type: 'CustomObject',
+      apiName: 'Foo__c',
+      label: 'Foo',
+      parentId: null,
+      sourcePath: 'objects/Foo__c/Foo__c.object-meta.xml',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {},
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.path).toBe('components/CustomObject/Foo__c.md');
+  });
+
+  it('expands parentId colon into a path segment for child components', () => {
+    const node: Node = {
+      id: 'CustomField:Account.Industry__c',
+      type: 'CustomField',
+      apiName: 'Industry__c',
+      label: 'Industry',
+      parentId: 'CustomObject:Account',
+      sourcePath: 'objects/Account/fields/Industry__c.field-meta.xml',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: { dataType: 'Text' },
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.path).toBe('components/CustomField/CustomObject/Account/Industry__c.md');
+  });
+
+  it('omits the description block (and its surrounding blank line) when description is absent', () => {
+    const node: Node = {
+      id: 'CustomObject:Bare__c',
+      type: 'CustomObject',
+      apiName: 'Bare__c',
+      label: 'Bare',
+      parentId: null,
+      sourcePath: 'objects/Bare__c/Bare__c.object-meta.xml',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      // No `description` key — block should be omitted entirely.
+      properties: { sharingModel: 'ReadWrite' },
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Exactly one blank line between the Type line and `## Properties`.
+    expect(result.value.body).toContain('**Type:** CustomObject\n\n## Properties');
+    // No description text leaks into output.
+    expect(result.value.body).not.toContain('description');
+  });
+
+  it('also omits the description block when description is an empty string', () => {
+    const node: Node = {
+      id: 'CustomObject:Empty__c',
+      type: 'CustomObject',
+      apiName: 'Empty__c',
+      label: 'Empty',
+      parentId: null,
+      sourcePath: 'x',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: { description: '' },
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.body).toContain('**Type:** CustomObject\n\n## Properties');
+  });
+
+  it('falls back to apiName for the heading when label is null', () => {
+    const node: Node = {
+      id: 'CustomObject:NoLabel__c',
+      type: 'CustomObject',
+      apiName: 'NoLabel__c',
+      label: null,
+      parentId: null,
+      sourcePath: 'x',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {},
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.body.startsWith('# NoLabel__c\n')).toBe(true);
+  });
+
+  it('keeps a multi-line / pipe-containing formula property from breaking the Properties table', () => {
+    // Regression: a CustomField `formula` is routinely multi-line and uses the
+    // `||` operator. Rendered raw, its newlines end the table row and its pipes
+    // split the columns, corrupting the Markdown table.
+    const node: Node = {
+      id: 'CustomField:Account.Risk__c',
+      type: 'CustomField',
+      apiName: 'Risk__c',
+      label: 'Risk',
+      parentId: 'CustomObject:Account',
+      sourcePath: 'x',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: { formula: "IF(\n  A__c || B__c,\n  'High', 'Low'\n)" },
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const formulaRow = result.value.body
+      .split('\n')
+      .find((line) => line.startsWith('| formula |'));
+    expect(formulaRow).toBeDefined();
+    // The whole multi-line formula collapsed onto the single table row (its
+    // tail is present, and the row is terminated by a trailing pipe).
+    expect(formulaRow).toContain("'Low'");
+    expect(formulaRow?.endsWith('|')).toBe(true);
+    // The `||` OR operator is pipe-escaped, not left as bare column delimiters.
+    expect(formulaRow).toContain('\\|\\|');
+    expect(formulaRow).not.toContain(' || ');
+  });
+
+  it('names the source endpoint for incoming edges (not the rendered node itself)', () => {
+    // Regression: previously the renderer hardcoded `toId` as the cell value,
+    // so an incoming edge where `toId === thisNode.id` dumped the node's own
+    // id into the table. After the fix, incoming edges name `fromId`.
+    const node: Node = {
+      id: 'CustomObject:Project__c',
+      type: 'CustomObject',
+      apiName: 'Project__c',
+      label: 'Degree Program',
+      parentId: null,
+      sourcePath: 'x',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {},
+    };
+    const edge: Edge = {
+      fromId: 'PermissionSet:Foo',
+      toId: 'CustomObject:Project__c',
+      edgeType: 'grantedBy',
+      confidence: 'declared',
+      source: 'permission-set-extractor',
+      properties: {},
+    };
+    const result = renderComponentMarkdown(node, [edge]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.body).toContain('### grantedBy (incoming, 1)');
+    expect(result.value.body).toContain('| Source | Confidence | Producer |');
+    expect(result.value.body).toContain('| `PermissionSet:Foo` | declared | permission-set-extractor |');
+    // Self-id must NOT appear as a row value.
+    expect(result.value.body).not.toMatch(/\|\s*`CustomObject:Project__c`\s*\|\s*declared/);
+  });
+
+  it('names the target endpoint for outgoing edges', () => {
+    const node: Node = {
+      id: 'CustomObject:Account',
+      type: 'CustomObject',
+      apiName: 'Account',
+      label: 'Account',
+      parentId: null,
+      sourcePath: 'x',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {},
+    };
+    const edge: Edge = {
+      fromId: 'CustomObject:Account',
+      toId: 'CustomField:Account.Industry__c',
+      edgeType: 'parentOf',
+      confidence: 'declared',
+      source: 'custom-object-extractor',
+      properties: {},
+    };
+    const result = renderComponentMarkdown(node, [edge]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.body).toContain('### parentOf (outgoing, 1)');
+    expect(result.value.body).toContain('| Target | Confidence | Producer |');
+    expect(result.value.body).toContain('| `CustomField:Account.Industry__c` | declared | custom-object-extractor |');
+    // Self-id must NOT appear as a row value.
+    expect(result.value.body).not.toMatch(/\|\s*`CustomObject:Account`\s*\|\s*declared/);
+  });
+
+  it('emits both incoming and outgoing subsections when a node has mixed-direction edges of the same type', () => {
+    const node: Node = {
+      id: 'CustomObject:Account',
+      type: 'CustomObject',
+      apiName: 'Account',
+      label: 'Account',
+      parentId: null,
+      sourcePath: 'x',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {},
+    };
+    const edges: readonly Edge[] = [
+      {
+        fromId: 'ApexClass:AccountReader',
+        toId: 'CustomObject:Account',
+        edgeType: 'references',
+        confidence: 'parsed',
+        source: 'apex-ast-extractor',
+        properties: {},
+      },
+      {
+        fromId: 'CustomObject:Account',
+        toId: 'CustomField:Account.Industry__c',
+        edgeType: 'references',
+        confidence: 'declared',
+        source: 'custom-object-extractor',
+        properties: {},
+      },
+    ];
+    const result = renderComponentMarkdown(node, edges);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.body).toContain('### references (incoming, 1)');
+    expect(result.value.body).toContain('### references (outgoing, 1)');
+    // Incoming row names fromId (ApexClass).
+    expect(result.value.body).toContain('| `ApexClass:AccountReader` | parsed | apex-ast-extractor |');
+    // Outgoing row names toId (CustomField).
+    expect(result.value.body).toContain('| `CustomField:Account.Industry__c` | declared | custom-object-extractor |');
+    // Incoming subsection appears before outgoing (by document order).
+    const inIdx = result.value.body.indexOf('### references (incoming');
+    const outIdx = result.value.body.indexOf('### references (outgoing');
+    expect(inIdx).toBeGreaterThan(-1);
+    expect(outIdx).toBeGreaterThan(inIdx);
+  });
+
+  it('reproduces the smoke-test bug fix: 5 incoming grantedBy edges name 5 distinct PermissionSet sources', () => {
+    // Synthetic node mirroring the real CustomObject:Project__c symptom:
+    // before the fix, all 5 rows showed the node's own id; after the fix, the
+    // 5 PermissionSet ids appear and the self-id does not.
+    const node: Node = {
+      id: 'CustomObject:Project__c',
+      type: 'CustomObject',
+      apiName: 'Project__c',
+      label: 'Degree Program',
+      parentId: null,
+      sourcePath: 'x',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {},
+    };
+    const psIds = [
+      'PermissionSet:Advisor_Access',
+      'PermissionSet:Faculty_Access',
+      'PermissionSet:Registrar_Access',
+      'PermissionSet:Student_Read',
+      'Profile:Standard_User',
+    ];
+    const edges: readonly Edge[] = psIds.map((fromId) => ({
+      fromId,
+      toId: 'CustomObject:Project__c',
+      edgeType: 'grantedBy',
+      confidence: 'declared',
+      source: 'permission-set-extractor',
+      properties: {},
+    }));
+    const result = renderComponentMarkdown(node, edges);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.body).toContain('### grantedBy (incoming, 5)');
+    // No outgoing subsection emitted (count is 0).
+    expect(result.value.body).not.toContain('### grantedBy (outgoing');
+    for (const id of psIds) {
+      expect(result.value.body).toContain(`| \`${id}\` | declared | permission-set-extractor |`);
+    }
+    // The node's own id must NOT appear as a table-row value.
+    expect(result.value.body).not.toMatch(/\|\s*`CustomObject:Project__c`\s*\|\s*declared/);
+  });
+
+  it('renders picklistValues (an array property) as a YAML block sequence in the frontmatter', () => {
+    // CustomField extractor emits `picklistValues: string[]` for picklist
+    // fields. Before the yaml-frontmatter array fix the renderer threw on
+    // this shape; the assertion below pins the post-fix behaviour: the
+    // array appears as `- value` lines indented under the owning key inside
+    // the `properties:` map.
+    const node: Node = {
+      id: 'CustomField:Account.Status__c',
+      type: 'CustomField',
+      apiName: 'Status__c',
+      label: 'Status',
+      parentId: 'CustomObject:Account',
+      sourcePath: 'objects/Account/fields/Status__c.field-meta.xml',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {
+        dataType: 'Picklist',
+        picklistValues: ['Open', 'In Progress', 'Closed'],
+      },
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const fullOutput =
+      '---\n' +
+      serializeFrontmatter(result.value.frontmatter) +
+      '\n---\n\n' +
+      result.value.body +
+      '\n';
+
+    // The picklist values appear in the frontmatter, indented one level
+    // deeper than `picklistValues:` inside the `properties:` map. Plain
+    // spaces don't force quoting; insertion order is preserved.
+    expect(fullOutput).toContain(
+      'properties:\n  dataType: Picklist\n  picklistValues:\n    - Open\n    - In Progress\n    - Closed\n',
+    );
+  });
+});

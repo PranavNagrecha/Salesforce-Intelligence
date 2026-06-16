@@ -1,0 +1,47 @@
+{
+  "name": "@sf-intelligence/parsers",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Source parsers (Apex scanner, formula tokenizer, frontend scanner).",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PranavNagrecha/Salesforce-Intelligence.git",
+    "directory": "packages/parsers"
+  },
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    },
+    "./apex-ast": {
+      "types": "./dist/src/apex-ast-edges.d.ts",
+      "import": "./dist/src/apex-ast-edges.js"
+    },
+    "./apex-ast-spike": {
+      "types": "./dist/src/apex-ast-spike.d.ts",
+      "import": "./dist/src/apex-ast-spike.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist/src"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@apexdevtools/apex-parser": "5.0.0",
+    "@sf-intelligence/contracts": "workspace:*",
+    "@sf-intelligence/core": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0"
+  }
+}

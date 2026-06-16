@@ -1,0 +1,38 @@
+{
+  "name": "@sf-intelligence/renderers",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Markdown vault renderers for graph nodes and edges.",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PranavNagrecha/Salesforce-Intelligence.git",
+    "directory": "packages/renderers"
+  },
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist/src"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@sf-intelligence/contracts": "workspace:*",
+    "@sf-intelligence/core": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0"
+  }
+}

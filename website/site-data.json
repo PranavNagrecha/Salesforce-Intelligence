@@ -1,0 +1,80 @@
+{
+  "generatedAt": "2026-06-10T15:29:27.567Z",
+  "toolCount": 171,
+  "skillCount": 25,
+  "commandCount": 4,
+  "componentTypeCount": 73,
+  "edgeTypeCount": 22,
+  "tests": {
+    "packages": [
+      {
+        "name": "mcp",
+        "files": 180,
+        "cases": 2059
+      },
+      {
+        "name": "extractors",
+        "files": 61,
+        "cases": 735
+      },
+      {
+        "name": "cli",
+        "files": 29,
+        "cases": 202
+      },
+      {
+        "name": "graph",
+        "files": 16,
+        "cases": 159
+      },
+      {
+        "name": "parsers",
+        "files": 4,
+        "cases": 112
+      },
+      {
+        "name": "patterns",
+        "files": 3,
+        "cases": 107
+      },
+      {
+        "name": "renderers",
+        "files": 6,
+        "cases": 78
+      },
+      {
+        "name": "vault",
+        "files": 8,
+        "cases": 77
+      },
+      {
+        "name": "tooling-api",
+        "files": 4,
+        "cases": 49
+      }
+    ],
+    "totalCases": 3578,
+    "totalFiles": 311,
+    "packageCount": 9
+  },
+  "integrationSuiteCount": 7,
+  "gates": [
+    "Type-check",
+    "Lint",
+    "Unit tests",
+    "Integration + golden tests",
+    "End-to-end smoke",
+    "Natural-language regression",
+    "Analytical correctness eval",
+    "Scale benchmarks",
+    "SAST",
+    "Release guard",
+    "Org-data leak scan"
+  ],
+  "gateCount": 11,
+  "scaleBudgets": {
+    "graphImport": "10,000 nodes in under 90 seconds",
+    "fullRefresh": "1,000 object + field files in under 10 minutes",
+    "resolve": "p95 under 2 seconds on the CI vault"
+  }
+}

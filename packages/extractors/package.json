@@ -1,0 +1,42 @@
+{
+  "name": "@sf-intelligence/extractors",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Metadata extractors that produce graph nodes and edges from DX source.",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PranavNagrecha/Salesforce-Intelligence.git",
+    "directory": "packages/extractors"
+  },
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist/src"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@sf-intelligence/contracts": "workspace:*",
+    "@sf-intelligence/core": "workspace:*",
+    "@sf-intelligence/parsers": "workspace:*",
+    "@sf-intelligence/patterns": "workspace:*",
+    "fast-xml-parser": "^4.4.0"
+  },
+  "devDependencies": {
+    "eslint-import-resolver-typescript": "^3.6.3",
+    "vitest": "^1.6.0"
+  }
+}

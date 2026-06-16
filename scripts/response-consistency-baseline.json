@@ -1,0 +1,100 @@
+{
+  "canonicalKey": "componentId",
+  "allowed": {
+    "parentId": [
+      "sfi.list_components",
+      "sfi.resolve"
+    ],
+    "id": [
+      "sfi.get_component"
+    ],
+    "nodeId": [
+      "sfi.get_edges"
+    ],
+    "rootId": [
+      "sfi.async_chain_depth",
+      "sfi.call_graph",
+      "sfi.get_subgraph"
+    ],
+    "fieldId": [
+      "sfi.explain_field",
+      "sfi.explain_formula",
+      "sfi.field_360",
+      "sfi.field_access_audit",
+      "sfi.field_change_advisor",
+      "sfi.field_lineage",
+      "sfi.field_meaning",
+      "sfi.field_provenance",
+      "sfi.find_field_anywhere",
+      "sfi.find_formula_references",
+      "sfi.live_picklist_usage",
+      "sfi.safe_to_delete_field",
+      "sfi.what_if_change_field_type",
+      "sfi.what_if_change_field_value",
+      "sfi.what_if_make_field_required",
+      "sfi.what_if_remove_picklist_value",
+      "sfi.why_field_changed"
+    ],
+    "objectId": [
+      "sfi.field_cleanup_candidates",
+      "sfi.find_dead_code",
+      "sfi.generate_data_dictionary",
+      "sfi.pii_inventory",
+      "sfi.unused_fields_deep"
+    ],
+    "targetId": [
+      "sfi.find_apex_usages",
+      "sfi.find_code_usages",
+      "sfi.find_field_anywhere"
+    ],
+    "profileId": [
+      "sfi.effective_permissions",
+      "sfi.layout_for_user",
+      "sfi.what_if_split_profile"
+    ],
+    "recordTypeId": [
+      "sfi.layout_for_user",
+      "sfi.what_happens_on_save"
+    ],
+    "eventId": [
+      "sfi.event_subscribers"
+    ],
+    "recordId": [
+      "sfi.lookup_record"
+    ],
+    "flowId": [
+      "sfi.explain_flow",
+      "sfi.what_if_deactivate_flow"
+    ],
+    "triggerId": [
+      "sfi.what_if_disable_trigger"
+    ],
+    "rootApexClassId": [
+      "sfi.async_chain_depth"
+    ],
+    "ruleId": [
+      "sfi.cpq_rule_chain"
+    ],
+    "templateId": [
+      "sfi.cpq_quote_template_breakdown"
+    ],
+    "cpqComponentId": [
+      "sfi.cpq_dependency_map"
+    ],
+    "dataTransformId": [
+      "sfi.datatransform_field_map"
+    ],
+    "decisionTableId": [
+      "sfi.decision_table_browse"
+    ],
+    "integrationProcedureId": [
+      "sfi.integration_procedure_chain"
+    ],
+    "omniScriptId": [
+      "sfi.omniscript_flow"
+    ],
+    "omniUiCardId": [
+      "sfi.omniuicard_widget_breakdown"
+    ]
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "_comment": "Copy to cases.local.json and edit for YOUR registered vaults. Keyed by vault name (as registered); each case asserts the resolver lands on a known component. cases.local.json is gitignored so your org's component names never get committed.",
+  "demo": [
+    { "query": "paymnet", "expectTopMatches": "Payment", "note": "1-char typo is tolerated" },
+    { "query": "acount", "expectTopMatches": "Account", "note": "typo is tolerated" },
+    { "query": "customer adress", "expectTopMatches": "Address", "note": "filler + a misspelled field" },
+    { "query": "zzzqqq xkcd", "expectDisposition": "none", "note": "gibberish resolves to none, never a fabricated guess" },
+    { "query": "zzzqqq nothing", "expectDisposition": "none", "note": "regression: common words like 'nothing' fuzzy-match short api-names (~note) ~0.81; must stay below NONE_THRESHOLD, never a junk ambiguous list" }
+  ]
+}

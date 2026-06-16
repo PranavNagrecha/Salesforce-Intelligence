@@ -1,0 +1,87 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/PranavNagrecha/Salesforce-Intelligence/blob/main/docs/schemas/ps-diff.schema.json",
+  "title": "PsDiff",
+  "description": "Deploy-tool-friendly Permission-Set / Profile grant diff emitted by sfi.compare_components when format='ps-diff' (P8-draft-ps-diff). Reshaped from the base fieldDiffs + edgeDiffs. PROPOSES a diff for a human to feed Gearset/Copado; it never deploys or writes to the org.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "idA", "idB", "bothPermissionLike", "changes", "summary", "disclosure"],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "description": "Version of this schema the payload conforms to."
+    },
+    "idA": {
+      "type": "string",
+      "description": "Canonical id of the first component (the 'A' side)."
+    },
+    "idB": {
+      "type": "string",
+      "description": "Canonical id of the second component (the 'B' side)."
+    },
+    "bothPermissionLike": {
+      "type": "boolean",
+      "description": "True when both ids are a PermissionSet or Profile (the intended inputs)."
+    },
+    "changes": {
+      "type": "array",
+      "description": "Every reshaped grant/setting change between A and B.",
+      "items": { "$ref": "#/definitions/change" }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["added", "removed", "changed", "byCategory"],
+      "properties": {
+        "added": { "type": "integer" },
+        "removed": { "type": "integer" },
+        "changed": { "type": "integer" },
+        "byCategory": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["category", "added", "removed", "changed"],
+            "properties": {
+              "category": { "type": "string" },
+              "added": { "type": "integer" },
+              "removed": { "type": "integer" },
+              "changed": { "type": "integer" }
+            }
+          }
+        }
+      }
+    },
+    "disclosure": {
+      "type": "string",
+      "description": "Verbatim boundary disclosure (notes the read-edit level-change blind spot)."
+    }
+  },
+  "definitions": {
+    "change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "key", "change"],
+      "properties": {
+        "category": {
+          "type": "string",
+          "description": "objectPermissions | fieldPermissions | classAccesses | userPermissions | metadata | otherGrants | <other property segment>."
+        },
+        "key": {
+          "type": "string",
+          "description": "Granted component id, user-permission name, or property path."
+        },
+        "change": {
+          "type": "string",
+          "enum": ["added", "removed", "changed"]
+        },
+        "valueA": {
+          "description": "Prior value; present for change='changed' or 'removed'."
+        },
+        "valueB": {
+          "description": "New value; present for change='changed' or 'added'."
+        }
+      }
+    }
+  }
+}

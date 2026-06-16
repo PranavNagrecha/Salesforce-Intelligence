@@ -1,0 +1,714 @@
+import { readFile } from 'node:fs/promises';
+
+import type {
+  Edge,
+  ExtractionResult,
+  ExtractorError,
+  Node,
+  Result,
+} from '@sf-intelligence/contracts';
+import { err, ok } from '@sf-intelligence/core';
+import { XMLParser, XMLValidator } from 'fast-xml-parser';
+
+import {
+  extractConditions,
+  type ConditionSource,
+  type CriteriaItem,
+} from './condition-extractor.js';
+import { deriveDotSplitObjectAndApiName } from './path-utils.js';
+
+const APPROVAL_PROCESS_FILE_SUFFIX = '.approvalProcess-meta.xml';
+const ROOT_ELEMENT = 'ApprovalProcess';
+const EXTRACTOR_SOURCE = 'approval-process-extractor';
+
+/**
+ * Variant table for the `<approver><type>` discriminator per
+ * `ApprovalProcess.md`. Each entry resolves to a target-id prefix; some
+ * variants are scoped by the parent object (field references) and some
+ * are not (Role, Group, Queue, User — global namespaces). Extra
+ * properties may be attached (e.g., `includeSubordinates` for
+ * `roleSubordinates`).
+ */
+interface ApproverVariantSpec {
+  readonly idPrefix: string;
+  readonly scopedByObject: boolean;
+  readonly extraProps: Readonly<Record<string, unknown>>;
+}
+
+const APPROVER_VARIANT_TABLE: Readonly<Record<string, ApproverVariantSpec>> = {
+  user: { idPrefix: 'User', scopedByObject: false, extraProps: {} },
+  userHierarchyField: {
+    idPrefix: 'CustomField',
+    scopedByObject: true,
+    extraProps: {},
+  },
+  relatedUserField: {
+    idPrefix: 'CustomField',
+    scopedByObject: true,
+    extraProps: {},
+  },
+  role: { idPrefix: 'Role', scopedByObject: false, extraProps: {} },
+  roleSubordinates: {
+    idPrefix: 'Role',
+    scopedByObject: false,
+    extraProps: { includeSubordinates: true },
+  },
+  group: { idPrefix: 'Group', scopedByObject: false, extraProps: {} },
+  queue: { idPrefix: 'Queue', scopedByObject: false, extraProps: {} },
+};
+
+/**
+ * Approver types that may legitimately carry NO `<name>`: a hierarchy approver
+ * can be the built-in standard Manager field with no explicit field name. There
+ * is then no component to reference, so the approver is skipped (no edge) rather
+ * than failing the whole ApprovalProcess extraction — the node + `stepCount`
+ * must survive. (A hierarchy approver WITH a `<name>` still emits its
+ * `CustomField` edge through the normal path.)
+ */
+const NAME_OPTIONAL_APPROVER_TYPES: ReadonlySet<string> = new Set([
+  'userHierarchyField',
+  'relatedUserField',
+  'adhoc',
+]);
+
+/**
+ * Variant table for hook `<action>` types — identical shape to the
+ * WorkflowRule `<actions>` variant table (per the spec's pointer to
+ * `WorkflowRule.md`'s table). Hook actions emit edges with `hookType`
+ * in `properties` so consumers can distinguish initial-submission from
+ * final-approval from final-rejection from recall hooks.
+ */
+interface HookActionVariantSpec {
+  readonly idPrefix: string;
+  readonly scopedByObject: boolean;
+  readonly edgeType: 'references' | 'callsApex';
+}
+
+const HOOK_ACTION_VARIANT_TABLE: Readonly<Record<string, HookActionVariantSpec>> = {
+  Alert: {
+    idPrefix: 'WorkflowAlert',
+    scopedByObject: true,
+    edgeType: 'references',
+  },
+  FieldUpdate: {
+    idPrefix: 'WorkflowFieldUpdate',
+    scopedByObject: true,
+    edgeType: 'references',
+  },
+  Task: {
+    idPrefix: 'WorkflowTask',
+    scopedByObject: true,
+    edgeType: 'references',
+  },
+  OutboundMessage: {
+    idPrefix: 'OutboundMessage',
+    scopedByObject: true,
+    edgeType: 'references',
+  },
+  Apex: {
+    idPrefix: 'ApexClass',
+    scopedByObject: false,
+    edgeType: 'callsApex',
+  },
+  FlowAction: {
+    idPrefix: 'Flow',
+    scopedByObject: false,
+    edgeType: 'references',
+  },
+};
+
+type HookType =
+  | 'initialSubmission'
+  | 'finalApproval'
+  | 'finalRejection'
+  | 'recall';
+
+/** The XML element name → hookType pairs walked in order, per the spec. */
+const HOOK_LIST_NAMES: readonly { readonly element: string; readonly hookType: HookType }[] = [
+  { element: 'initialSubmissionActions', hookType: 'initialSubmission' },
+  { element: 'finalApprovalActions', hookType: 'finalApproval' },
+  { element: 'finalRejectionActions', hookType: 'finalRejection' },
+  { element: 'recallActions', hookType: 'recall' },
+];
+
+/**
+ * Unwrap a possibly-array single-occurrence XML child.
+ */
+const unwrapSingle = (value: unknown): unknown =>
+  Array.isArray(value) ? value[0] : value;
+
+/**
+ * Normalize a fast-xml-parser child into an array.
+ */
+const toArray = (value: unknown): unknown[] => {
+  if (value === undefined || value === null) return [];
+  return Array.isArray(value) ? value : [value];
+};
+
+/**
+ * Coerce an XML scalar to a boolean. Salesforce-style booleans serialise
+ * as the lowercase string `'true'` / `'false'`.
+ */
+const coerceBoolean = (value: unknown): boolean => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') return value.toLowerCase() === 'true';
+  return false;
+};
+
+/** Return `<element>` value as a string, or `null` when absent/empty. */
+const optionalString = (
+  obj: Record<string, unknown>,
+  key: string,
+): string | null => {
+  const raw = unwrapSingle(obj[key]);
+  if (raw === undefined || raw === null || raw === '') return null;
+  return String(raw);
+};
+
+/**
+ * Read and strictly-validate a file as XML. fast-xml-parser's `parse()`
+ * is permissive (it silently truncates on mismatched tags), so we
+ * validate first to surface malformed input as `parse-error` rather than
+ * a misleading partial extraction.
+ */
+const readAndValidateXml = async (
+  path: string,
+): Promise<Result<string, ExtractorError>> => {
+  let xmlText: string;
+  try {
+    xmlText = await readFile(path, 'utf-8');
+  } catch (cause: unknown) {
+    if (
+      typeof cause === 'object' &&
+      cause !== null &&
+      (cause as { code?: string }).code === 'ENOENT'
+    ) {
+      return err({ kind: 'file-not-found', path, message: 'file not found' });
+    }
+    return err({
+      kind: 'parse-error',
+      path,
+      message: cause instanceof Error ? cause.message : String(cause),
+      cause,
+    });
+  }
+
+  const validation = XMLValidator.validate(xmlText);
+  if (validation !== true) {
+    return err({ kind: 'parse-error', path, message: validation.err.msg });
+  }
+  return ok(xmlText);
+};
+
+/**
+ * Locate the `<ApprovalProcess>` root and verify the required `<label>`
+ * and `<active>` elements. Field order matches the error-cases table.
+ */
+const validateRoot = (
+  parsed: Record<string, unknown>,
+  path: string,
+): Result<Record<string, unknown>, ExtractorError> => {
+  const root = unwrapSingle(parsed[ROOT_ELEMENT]);
+  if (typeof root !== 'object' || root === null) {
+    return err({
+      kind: 'malformed-input',
+      path,
+      message: `expected <${ROOT_ELEMENT}> root`,
+    });
+  }
+  const rootObj = root as Record<string, unknown>;
+  if (unwrapSingle(rootObj['label']) === undefined) {
+    return err({
+      kind: 'malformed-input',
+      path,
+      message: 'missing required element: <label>',
+    });
+  }
+  if (unwrapSingle(rootObj['active']) === undefined) {
+    return err({
+      kind: 'malformed-input',
+      path,
+      message: 'missing required element: <active>',
+    });
+  }
+  return ok(rootObj);
+};
+
+/**
+ * Convert a slash-separated EmailTemplate reference (e.g.,
+ * `Sales/ApprovalNeeded`) to its canonical id form
+ * (`Sales.ApprovalNeeded`). Unfiled-public templates without a folder
+ * retain their single-segment name.
+ */
+const templateRefToCanonicalTail = (templateRef: string): string =>
+  templateRef.includes('/') ? templateRef.replace(/\//g, '.') : templateRef;
+
+/** A resolved `<approver>` element. */
+interface ResolvedApprover {
+  readonly name: string;
+  readonly type: string;
+}
+
+/** A resolved hook `<action>` element. */
+interface ResolvedHookAction {
+  readonly name: string;
+  readonly type: string;
+}
+
+/**
+ * Validate and resolve a single `<approver>` child. Both `<name>` and
+ * `<type>` are required per the error-cases table; `<type>` values
+ * outside the variant table return `malformed-input`.
+ */
+const resolveApprover = (
+  approverRaw: unknown,
+  path: string,
+): Result<ResolvedApprover | null, ExtractorError> => {
+  if (typeof approverRaw !== 'object' || approverRaw === null) {
+    return err({
+      kind: 'malformed-input',
+      path,
+      message: 'missing required element: <name>',
+    });
+  }
+  const approver = approverRaw as Record<string, unknown>;
+  const nameRaw = unwrapSingle(approver['name']);
+  if (nameRaw === undefined || nameRaw === null || nameRaw === '') {
+    // A name-less hierarchy approver is the implicit standard Manager field —
+    // no named component to reference, so skip it (the node + stepCount stay).
+    const typePeek = unwrapSingle(approver['type']);
+    if (
+      typeof typePeek === 'string' &&
+      NAME_OPTIONAL_APPROVER_TYPES.has(typePeek)
+    ) {
+      return ok(null);
+    }
+    return err({
+      kind: 'malformed-input',
+      path,
+      message: 'missing required element: <name>',
+    });
+  }
+  const typeRaw = unwrapSingle(approver['type']);
+  if (typeRaw === undefined || typeRaw === null || typeRaw === '') {
+    return err({
+      kind: 'malformed-input',
+      path,
+      message: 'missing required element: <type>',
+    });
+  }
+  const typeValue = String(typeRaw);
+  if (!(typeValue in APPROVER_VARIANT_TABLE)) {
+    return err({
+      kind: 'malformed-input',
+      path,
+      message: `invalid approver type: ${typeValue}`,
+    });
+  }
+  return ok({ name: String(nameRaw), type: typeValue });
+};
+
+/**
+ * Validate and resolve a hook `<action>` element. Both `<name>` and
+ * `<type>` are required; unknown types are returned verbatim and
+ * filtered later (silently skipped per the variant-table policy from
+ * WorkflowRule).
+ */
+const resolveHookAction = (
+  actionRaw: unknown,
+): Result<ResolvedHookAction | null, ExtractorError> => {
+  if (typeof actionRaw !== 'object' || actionRaw === null) {
+    return ok(null);
+  }
+  const action = actionRaw as Record<string, unknown>;
+  const nameRaw = unwrapSingle(action['name']);
+  if (nameRaw === undefined || nameRaw === null || nameRaw === '') {
+    return ok(null);
+  }
+  const typeRaw = unwrapSingle(action['type']);
+  if (typeRaw === undefined || typeRaw === null || typeRaw === '') {
+    return ok(null);
+  }
+  return ok({ name: String(nameRaw), type: String(typeRaw) });
+};
+
+/** Build a `references` edge for an approver entry. */
+const approverEdge = (
+  approver: ResolvedApprover,
+  processId: string,
+  objectApiName: string,
+  stepIndex: number,
+): Edge => {
+  const spec = APPROVER_VARIANT_TABLE[approver.type]!;
+  const targetTail = spec.scopedByObject
+    ? `${objectApiName}.${approver.name}`
+    : approver.name;
+  const targetId = `${spec.idPrefix}:${targetTail}`;
+  return {
+    fromId: processId,
+    toId: targetId,
+    edgeType: 'references',
+    confidence: 'declared',
+    source: EXTRACTOR_SOURCE,
+    properties: {
+      stepIndex,
+      approverType: approver.type,
+      ...spec.extraProps,
+    },
+  };
+};
+
+/**
+ * Walk one approval-steps entry, validating the assigned-approver
+ * sub-tree, the optional `<notificationTemplate>`, and emitting the
+ * required edges.
+ */
+const stepEdges = (
+  stepRaw: unknown,
+  stepIndex: number,
+  processId: string,
+  objectApiName: string,
+  path: string,
+): Result<readonly Edge[], ExtractorError> => {
+  if (typeof stepRaw !== 'object' || stepRaw === null) {
+    return ok([]);
+  }
+  const step = stepRaw as Record<string, unknown>;
+  const edges: Edge[] = [];
+
+  const assigned = unwrapSingle(step['assignedApprover']);
+  if (typeof assigned === 'object' && assigned !== null) {
+    const approvers = toArray(
+      (assigned as Record<string, unknown>)['approver'],
+    );
+    for (const approverRaw of approvers) {
+      const resolved = resolveApprover(approverRaw, path);
+      if (!resolved.ok) return resolved;
+      // null = a name-less hierarchy approver (implicit Manager) with no named
+      // target — skip the edge, keep walking.
+      if (resolved.value === null) continue;
+      edges.push(
+        approverEdge(resolved.value, processId, objectApiName, stepIndex),
+      );
+    }
+  }
+
+  const notificationTemplate = optionalString(step, 'notificationTemplate');
+  if (notificationTemplate !== null) {
+    edges.push({
+      fromId: processId,
+      toId: `EmailTemplate:${templateRefToCanonicalTail(notificationTemplate)}`,
+      edgeType: 'sendsEmail',
+      confidence: 'declared',
+      source: EXTRACTOR_SOURCE,
+      properties: { stepIndex, role: 'notification' },
+    });
+  }
+
+  return ok(edges);
+};
+
+/**
+ * Walk one hook list, validating each `<action>` and emitting the
+ * variant-table edges with `hookType` in properties.
+ */
+const hookListEdges = (
+  rootObj: Record<string, unknown>,
+  hookElement: string,
+  hookType: HookType,
+  processId: string,
+  objectApiName: string,
+  _path: string,
+): Result<readonly Edge[], ExtractorError> => {
+  const hookContainerRaw = unwrapSingle(rootObj[hookElement]);
+  if (typeof hookContainerRaw !== 'object' || hookContainerRaw === null) {
+    return ok([]);
+  }
+  const hookContainer = hookContainerRaw as Record<string, unknown>;
+  const actionRaws = toArray(hookContainer['action']);
+  const edges: Edge[] = [];
+  for (const actionRaw of actionRaws) {
+    const resolved = resolveHookAction(actionRaw);
+    if (!resolved.ok) return resolved;
+    if (resolved.value === null) continue;
+    const { name, type } = resolved.value;
+    if (type === 'Send') continue;
+    const spec = HOOK_ACTION_VARIANT_TABLE[type];
+    // Unknown variant: silently skipped.
+    if (spec === undefined) continue;
+    const targetTail = spec.scopedByObject
+      ? `${objectApiName}.${name}`
+      : name;
+    const targetId = `${spec.idPrefix}:${targetTail}`;
+    if (spec.edgeType === 'callsApex') {
+      edges.push({
+        fromId: processId,
+        toId: targetId,
+        edgeType: 'callsApex',
+        confidence: 'declared',
+        source: EXTRACTOR_SOURCE,
+        properties: { hookType },
+      });
+    } else {
+      edges.push({
+        fromId: processId,
+        toId: targetId,
+        edgeType: 'references',
+        confidence: 'declared',
+        source: EXTRACTOR_SOURCE,
+        properties: { hookType, actionType: type },
+      });
+    }
+  }
+  return ok(edges);
+};
+
+/**
+ * Extract `ApprovalProcess` Node and Edges from a single Salesforce
+ * `*.approvalProcess-meta.xml` file.
+ *
+ * Reads the file, parses it as XML, validates the `<ApprovalProcess>`
+ * root per the vendored `ApprovalProcess.md` spec, and returns an
+ * `ExtractionResult` containing one `'ApprovalProcess'` Node and one
+ * `parentOf` edge from `CustomObject:{ObjectApiName}`.
+ *
+ * The canonical ID derives from the filename — `{ObjectApiName}` and
+ * `{ProcessName}` are split on the first dot. Each `<approvalStep>`
+ * entry contributes one `references` edge per `<approver>` (the
+ * approver chain), preserving step order via the `stepIndex`
+ * property. A step's optional `<notificationTemplate>` emits a
+ * `sendsEmail` edge with `role: 'notification'`. The top-level
+ * `<emailTemplate>` (when present) emits a `sendsEmail` edge with
+ * `role: 'default'`. The four hook lists
+ * (`<initialSubmissionActions>`, `<finalApprovalActions>`,
+ * `<finalRejectionActions>`, `<recallActions>`) each contribute their
+ * `<action>` children to the edge set with `hookType` set to the
+ * originating hook name and the WorkflowRule variant-table edge
+ * shapes (`callsApex` for `Apex`, `references` for everything else;
+ * `Send` and unknown types silently skipped).
+ *
+ * Approver references are dangling-by-design for `user` (User nodes
+ * are not extracted in v1.3) and `userHierarchyField` /
+ * `relatedUserField` when the named field is outside the extracted
+ * set; `role` / `group` / `queue` typically resolve to v1.1 nodes.
+ *
+ * Returns an `ExtractorError` for any documented failure mode:
+ * `file-not-found`, `parse-error`, or `malformed-input` (filename not
+ * splittable on a dot, wrong root, missing required element, or an
+ * `<approver>` with an invalid `<type>`).
+ *
+ * @example
+ *   const result = await extractApprovalProcess(
+ *     'tests/fixtures/synthetic-v1.3/approvalProcesses/Opportunity.Discount_Approval.approvalProcess-meta.xml',
+ *   );
+ *   if (result.ok) {
+ *     console.log(result.value.nodes[0]!.id);
+ *     // => 'ApprovalProcess:Opportunity.Discount_Approval'
+ *   }
+ */
+export const extractApprovalProcess = async (
+  path: string,
+): Promise<Result<ExtractionResult, ExtractorError>> => {
+  const pathParts = deriveDotSplitObjectAndApiName(
+    path,
+    APPROVAL_PROCESS_FILE_SUFFIX,
+  );
+  if (pathParts === null) {
+    return err({
+      kind: 'malformed-input',
+      path,
+      message: 'cannot split filename into object and process name',
+    });
+  }
+  const { objectApiName, apiName: processName } = pathParts;
+
+  const xmlResult = await readAndValidateXml(path);
+  if (!xmlResult.ok) return xmlResult;
+
+  // Local trusted disk content; XXE not a concern. Default 1000 is too
+  // tight for production-scale ApprovalProcess XML.
+  const parser = new XMLParser({
+    ignoreAttributes: true,
+    parseTagValue: false,
+    trimValues: true,
+    processEntities: { maxTotalExpansions: 10000 },
+  });
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = parser.parse(xmlResult.value) as Record<string, unknown>;
+  } catch (cause: unknown) {
+    return err({
+      kind: 'parse-error',
+      path,
+      message: cause instanceof Error ? cause.message : String(cause),
+      cause,
+    });
+  }
+
+  const rootResult = validateRoot(parsed, path);
+  if (!rootResult.ok) return rootResult;
+  const rootObj = rootResult.value;
+
+  const processId = `ApprovalProcess:${objectApiName}.${processName}`;
+  const parentId = `CustomObject:${objectApiName}`;
+
+  const label = String(unwrapSingle(rootObj['label']));
+  const active = coerceBoolean(unwrapSingle(rootObj['active']));
+
+  const entryCriteriaRaw = unwrapSingle(rootObj['entryCriteria']);
+  const entryCriteria =
+    typeof entryCriteriaRaw === 'object' && entryCriteriaRaw !== null
+      ? (entryCriteriaRaw as Record<string, unknown>)
+      : null;
+  const entryCriteriaFormula =
+    entryCriteria === null ? null : optionalString(entryCriteria, 'formula');
+  const entryCriteriaItemCount =
+    entryCriteria === null
+      ? 0
+      : toArray(entryCriteria['criteriaItems']).length;
+
+  // The Metadata API element is `<approvalStep>` (singular, repeated once per
+  // step) — NOT `<approvalSteps>`. Reading the plural key silently yielded
+  // `stepCount: 0` and zero approver edges on every real org (NI-2). Prefer the
+  // canonical singular; keep the plural as a defensive fallback.
+  const steps = toArray(rootObj['approvalStep'] ?? rootObj['approvalSteps']);
+
+  // v2.0a — A top-level `<entryCriteria>` block is the firing
+  // condition for the process as a whole. Per
+  // `ConditionalContextSemantics.md` §"ApprovalProcess conditions",
+  // we extract ONLY the top-level entry (per-step entry criteria are
+  // deferred to a future v2.0a+ extension). The shape mirrors
+  // WorkflowRule — either a `<formula>` OR a `<criteriaItems>` block,
+  // mutually exclusive in practice. When neither is present, no
+  // ConditionalContext is emitted.
+  const entryConditionSources: ConditionSource[] = [];
+  if (entryCriteria !== null) {
+    if (entryCriteriaFormula !== null && entryCriteriaFormula.length > 0) {
+      entryConditionSources.push({
+        kind: 'formula',
+        expression: entryCriteriaFormula,
+      });
+    } else if (entryCriteriaItemCount > 0) {
+      const items: CriteriaItem[] = [];
+      for (const raw of toArray(entryCriteria['criteriaItems'])) {
+        if (typeof raw !== 'object' || raw === null) continue;
+        const obj = raw as Record<string, unknown>;
+        const fieldRaw = unwrapSingle(obj['field']);
+        if (fieldRaw === undefined || fieldRaw === null || fieldRaw === '') {
+          continue;
+        }
+        const operationRaw = unwrapSingle(obj['operation']);
+        if (
+          operationRaw === undefined ||
+          operationRaw === null ||
+          operationRaw === ''
+        ) {
+          continue;
+        }
+        const valueRaw = unwrapSingle(obj['value']);
+        items.push({
+          field: String(fieldRaw),
+          operation: String(operationRaw),
+          value:
+            valueRaw === undefined || valueRaw === null || valueRaw === ''
+              ? null
+              : String(valueRaw),
+        });
+      }
+      if (items.length > 0) {
+        entryConditionSources.push({
+          kind: 'criteria',
+          items,
+          booleanFilter: optionalString(entryCriteria, 'booleanFilter'),
+        });
+      }
+    }
+  }
+  const { conditionNodes, firesWhenEdges, conditionsMirror } =
+    extractConditions({
+      parentId: processId,
+      sources: entryConditionSources,
+      parentSourcePath: path,
+      parentObjectApiName: objectApiName,
+    });
+
+  const node: Node = {
+    id: processId,
+    type: 'ApprovalProcess',
+    apiName: `${objectApiName}.${processName}`,
+    label,
+    parentId,
+    sourcePath: path,
+    lastModifiedDate: null,
+    lastModifiedBy: null,
+    apiVersion: null,
+    properties: {
+      active,
+      description: optionalString(rootObj, 'description'),
+      recordEditability: optionalString(rootObj, 'recordEditability'),
+      enableMobileDeviceAccess: coerceBoolean(
+        unwrapSingle(rootObj['enableMobileDeviceAccess']),
+      ),
+      nextAutomaticApprover: optionalString(rootObj, 'nextAutomaticApprover'),
+      defaultEmailTemplate: optionalString(rootObj, 'emailTemplate'),
+      entryCriteriaFormula,
+      entryCriteriaItemCount,
+      stepCount: steps.length,
+      conditions: conditionsMirror,
+    },
+  };
+
+  const edges: Edge[] = [
+    {
+      fromId: parentId,
+      toId: processId,
+      edgeType: 'parentOf',
+      confidence: 'declared',
+      source: EXTRACTOR_SOURCE,
+      properties: {},
+    },
+  ];
+
+  for (let stepIndex = 0; stepIndex < steps.length; stepIndex += 1) {
+    const stepResult = stepEdges(
+      steps[stepIndex],
+      stepIndex,
+      processId,
+      objectApiName,
+      path,
+    );
+    if (!stepResult.ok) return stepResult;
+    edges.push(...stepResult.value);
+  }
+
+  const defaultEmail = optionalString(rootObj, 'emailTemplate');
+  if (defaultEmail !== null) {
+    edges.push({
+      fromId: processId,
+      toId: `EmailTemplate:${templateRefToCanonicalTail(defaultEmail)}`,
+      edgeType: 'sendsEmail',
+      confidence: 'declared',
+      source: EXTRACTOR_SOURCE,
+      properties: { role: 'default' },
+    });
+  }
+
+  for (const hook of HOOK_LIST_NAMES) {
+    const hookResult = hookListEdges(
+      rootObj,
+      hook.element,
+      hook.hookType,
+      processId,
+      objectApiName,
+      path,
+    );
+    if (!hookResult.ok) return hookResult;
+    edges.push(...hookResult.value);
+  }
+
+  // v2.0a — Append the firesWhen edges and the synthetic
+  // ConditionalContext nodes (if any).
+  edges.push(...firesWhenEdges);
+
+  return ok({ nodes: [node, ...conditionNodes], edges });
+};

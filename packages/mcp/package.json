@@ -1,0 +1,47 @@
+{
+  "name": "@sf-intelligence/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP server and sfi.* tool handlers for sf-intelligence.",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PranavNagrecha/Salesforce-Intelligence.git",
+    "directory": "packages/mcp"
+  },
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist/src"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@sf-intelligence/contracts": "workspace:*",
+    "@sf-intelligence/core": "workspace:*",
+    "@sf-intelligence/extractors": "workspace:*",
+    "@sf-intelligence/graph": "workspace:*",
+    "@sf-intelligence/parsers": "workspace:*",
+    "@sf-intelligence/patterns": "workspace:*",
+    "@sf-intelligence/tooling-api": "workspace:*",
+    "@sf-intelligence/vault": "workspace:*",
+    "fast-xml-parser": "^4.4.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0"
+  }
+}

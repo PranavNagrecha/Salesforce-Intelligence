@@ -1,0 +1,542 @@
+/// <reference types="vitest/globals" />
+
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import type {
+  Edge,
+  ExtractionResult,
+  Node,
+  VaultManifest,
+} from '@sf-intelligence/contracts';
+import {
+  closeGraph,
+  importExtractionResults,
+  openGraph,
+  type GraphStore,
+} from '@sf-intelligence/graph';
+
+import type { Context } from '../../src/server.js';
+import { FIELD_360_Q165_DISCLOSURE } from '../../src/tools/field-360.js';
+import {
+  fieldLineageHandler,
+  fieldLineageInputSchema,
+} from '../../src/tools/field-lineage.js';
+
+const FIXTURE_MANIFEST: VaultManifest = {
+  version: '3.0.0',
+  refreshedAt: '2026-05-28T12:00:00Z',
+  sourceOrg: 'me@example.com',
+  components: {},
+  edges: {},
+  sourceTreeHash: 'sha256:field-lineage-fixture',
+};
+
+const makeNode = (overrides: Partial<Node> & Pick<Node, 'id' | 'type'>): Node => ({
+  apiName: 'Default',
+  label: null,
+  parentId: null,
+  sourcePath: 'fixture.xml',
+  lastModifiedDate: null,
+  lastModifiedBy: null,
+  apiVersion: null,
+  properties: {},
+  ...overrides,
+});
+
+const makeEdge = (
+  overrides: Partial<Edge> & Pick<Edge, 'fromId' | 'toId' | 'edgeType'>,
+): Edge => ({
+  confidence: 'declared',
+  source: 'fixture',
+  properties: {},
+  ...overrides,
+});
+
+// Upstream chain per PLAN-v3.0 §7 Q162:
+//
+//   Account.Customer_Segment__c  (target)
+//     <- LeadConverter.cls writes it
+//        <- LeadConverter reads Lead.Lead_Score__c
+//           <- LeadScoreCalculator.cls writes Lead.Lead_Score__c
+//              <- LeadScoreCalculator reads Lead.LastModifiedDate
+//                 (Lead.LastModifiedDate is v2.9 source-of-truth — terminal)
+//
+// We model this by writesTo chains: a writer A whose writer chain
+// includes a CustomField B at depth 2 must produce a `writesTo` edge
+// from A to itself's target B for the walk to find. The simplest
+// shape that exercises depth-3 + source-of-truth termination is two
+// CustomField hops backed by writesTo edges.
+const TARGET = 'CustomField:Account.Customer_Segment__c';
+const upstreamSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: TARGET,
+      type: 'CustomField',
+      apiName: 'Customer_Segment__c',
+      parentId: 'CustomObject:Account',
+    }),
+    makeNode({
+      id: 'CustomField:Lead.Lead_Score__c',
+      type: 'CustomField',
+      apiName: 'Lead_Score__c',
+    }),
+    makeNode({
+      id: 'CustomField:Lead.LastModifiedDate',
+      type: 'CustomField',
+      apiName: 'LastModifiedDate',
+      // The v2.9 source-of-truth marker terminates the upstream walk.
+      properties: { isSourceOfTruth: true },
+    }),
+    makeNode({
+      id: 'ApexClass:LeadConverter',
+      type: 'ApexClass',
+      apiName: 'LeadConverter',
+    }),
+    // A formula field and its source, to exercise formula-source upstream
+    // provenance (an OUTGOING `references` edge, not an incoming writesTo).
+    makeNode({
+      id: 'CustomField:Account.Earnings__c',
+      type: 'CustomField',
+      apiName: 'Earnings__c',
+      parentId: 'CustomObject:Account',
+    }),
+    makeNode({
+      id: 'CustomField:Account.Base_Amount__c',
+      type: 'CustomField',
+      apiName: 'Base_Amount__c',
+      parentId: 'CustomObject:Account',
+    }),
+  ],
+  edges: [
+    // Apex writes the target — depth 1.
+    makeEdge({
+      fromId: 'ApexClass:LeadConverter',
+      toId: TARGET,
+      edgeType: 'writesTo',
+      confidence: 'heuristic',
+      source: 'apex-scanner',
+    }),
+    // Lead.Lead_Score__c also writes the target (depth 1 - parallel).
+    makeEdge({
+      fromId: 'CustomField:Lead.Lead_Score__c',
+      toId: TARGET,
+      edgeType: 'writesTo',
+      confidence: 'parsed',
+      source: 'formula-tokenizer',
+    }),
+    // Lead.LastModifiedDate writes Lead.Lead_Score__c (depth 2;
+    // source-of-truth field — terminal).
+    makeEdge({
+      fromId: 'CustomField:Lead.LastModifiedDate',
+      toId: 'CustomField:Lead.Lead_Score__c',
+      edgeType: 'writesTo',
+      confidence: 'declared',
+      source: 'formula-tokenizer',
+    }),
+    // Earnings__c is a FORMULA computed from Base_Amount__c — an OUTGOING
+    // `references` edge. Earnings__c upstream must surface Base_Amount__c as
+    // a formula-source; Base_Amount__c downstream surfaces Earnings__c as a
+    // formula-recompute (the cross-direction mirror that was inconsistent).
+    makeEdge({
+      fromId: 'CustomField:Account.Earnings__c',
+      toId: 'CustomField:Account.Base_Amount__c',
+      edgeType: 'references',
+      confidence: 'parsed',
+      source: 'formula-tokenizer',
+    }),
+  ],
+};
+
+// Downstream chain per PLAN-v3.0 §7 Q163:
+//
+//   Lead.Lead_Score__c  (target)
+//     -> ApexClass:LeadConverter.shouldConvert() — if-clause (firesWhen)
+//     -> Flow:Lead_Routing_Flow — decision-branch (firesWhen)
+//     -> WorkflowRule:Lead.NotifyOwner — workflow-fire (references)
+//     -> OutboundMessage:Lead.MarketoSync — integration-outbound
+//
+// Each consumer carries an incoming edge into the target.
+const downstreamTarget = 'CustomField:Lead.Lead_Score__c';
+const downstreamSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: downstreamTarget,
+      type: 'CustomField',
+      apiName: 'Lead_Score__c',
+    }),
+    makeNode({
+      id: 'ConditionalContext:Flow:Lead_Routing_Flow.condition-0',
+      type: 'ConditionalContext',
+      apiName: 'Lead_Routing_Flow.condition-0',
+    }),
+    makeNode({
+      id: 'Flow:Lead_Routing_Flow',
+      type: 'Flow',
+      apiName: 'Lead_Routing_Flow',
+    }),
+    makeNode({
+      id: 'WorkflowRule:Lead.NotifyOwner',
+      type: 'WorkflowRule',
+      apiName: 'Lead.NotifyOwner',
+    }),
+    makeNode({
+      id: 'OutboundMessage:Lead.MarketoSync',
+      type: 'OutboundMessage',
+      apiName: 'Lead.MarketoSync',
+    }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: 'ConditionalContext:Flow:Lead_Routing_Flow.condition-0',
+      toId: downstreamTarget,
+      edgeType: 'firesWhen',
+      confidence: 'parsed',
+      source: 'flow-extractor',
+      properties: { expression: 'Lead_Score__c > 50' },
+    }),
+    makeEdge({
+      fromId: 'WorkflowRule:Lead.NotifyOwner',
+      toId: downstreamTarget,
+      edgeType: 'references',
+      confidence: 'declared',
+      source: 'workflow-rule-extractor',
+    }),
+    makeEdge({
+      fromId: 'OutboundMessage:Lead.MarketoSync',
+      toId: downstreamTarget,
+      edgeType: 'references',
+      confidence: 'declared',
+      source: 'workflow-rule-extractor',
+    }),
+  ],
+};
+
+let upstreamDir: string;
+let upstreamStore: GraphStore;
+let upstreamCtx: Context;
+
+let downstreamDir: string;
+let downstreamStore: GraphStore;
+let downstreamCtx: Context;
+
+beforeAll(async () => {
+  upstreamDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-field-lineage-up-'));
+  let opened = await openGraph(join(upstreamDir, 'up.db'));
+  expect(opened.ok).toBe(true);
+  if (!opened.ok) throw new Error('openGraph upstream failed');
+  upstreamStore = opened.value;
+  const imp = await importExtractionResults(upstreamStore, [upstreamSeed]);
+  expect(imp.ok).toBe(true);
+  if (!imp.ok) throw new Error('import upstream failed');
+  upstreamCtx = {
+    vaultRoot: upstreamDir,
+    manifest: FIXTURE_MANIFEST,
+    graph: upstreamStore,
+  };
+
+  downstreamDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-field-lineage-down-'));
+  opened = await openGraph(join(downstreamDir, 'down.db'));
+  expect(opened.ok).toBe(true);
+  if (!opened.ok) throw new Error('openGraph downstream failed');
+  downstreamStore = opened.value;
+  const imp2 = await importExtractionResults(downstreamStore, [downstreamSeed]);
+  expect(imp2.ok).toBe(true);
+  if (!imp2.ok) throw new Error('import downstream failed');
+  downstreamCtx = {
+    vaultRoot: downstreamDir,
+    manifest: FIXTURE_MANIFEST,
+    graph: downstreamStore,
+  };
+});
+
+afterAll(async () => {
+  await closeGraph(upstreamStore);
+  await closeGraph(downstreamStore);
+  rmSync(upstreamDir, { recursive: true, force: true });
+  rmSync(downstreamDir, { recursive: true, force: true });
+});
+
+describe('fieldLineageHandler upstream (Q162)', () => {
+  it('walks upstream writers and terminates at source-of-truth fields', async () => {
+    const result = await fieldLineageHandler(upstreamCtx, {
+      fieldId: TARGET,
+      direction: 'upstream',
+      maxDepth: 3,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.value.data;
+    expect(out.upstream).toBeDefined();
+    if (out.upstream === undefined) return;
+    // Depth-1 writers: ApexClass:LeadConverter and CustomField:Lead.Lead_Score__c.
+    const depth1 = out.upstream.sources.filter((s) => s.depth === 1);
+    expect(depth1.length).toBe(2);
+    const ids = depth1.map((s) => s.sourceId);
+    expect(ids).toContain('ApexClass:LeadConverter');
+    expect(ids).toContain('CustomField:Lead.Lead_Score__c');
+    // Depth-2: Lead.LastModifiedDate (source-of-truth).
+    const depth2 = out.upstream.sources.filter((s) => s.depth === 2);
+    const sotEntry = depth2.find(
+      (s) => s.sourceId === 'CustomField:Lead.LastModifiedDate',
+    );
+    expect(sotEntry).toBeDefined();
+    if (!sotEntry) return;
+    expect(sotEntry.sourceKind).toBe('source-of-truth-field');
+    expect(sotEntry.isSourceOfTruth).toBe(true);
+    expect(out.upstream.sourceOfTruthCount).toBe(1);
+  });
+
+  it('surfaces formula-source upstream and stays consistent with downstream', async () => {
+    // Earnings__c is a formula computed from Base_Amount__c. Upstream of the
+    // formula must surface Base_Amount__c as a formula-source — previously []
+    // because the walk only followed incoming writesTo, never the formula's
+    // OUTGOING references edge.
+    const up = await fieldLineageHandler(upstreamCtx, {
+      fieldId: 'CustomField:Account.Earnings__c',
+      direction: 'upstream',
+    });
+    expect(up.ok).toBe(true);
+    if (!up.ok) return;
+    const base = (up.value.data.upstream?.sources ?? []).find(
+      (s) => s.sourceId === 'CustomField:Account.Base_Amount__c',
+    );
+    expect(base).toBeDefined();
+    expect(base?.sourceKind).toBe('formula-source');
+
+    // Cross-direction mirror: Base_Amount__c downstream lists Earnings__c as a
+    // formula-recompute. The two directions must agree about the relationship.
+    const down = await fieldLineageHandler(upstreamCtx, {
+      fieldId: 'CustomField:Account.Base_Amount__c',
+      direction: 'downstream',
+    });
+    expect(down.ok).toBe(true);
+    if (!down.ok) return;
+    const earnings = (down.value.data.downstream?.effects ?? []).find(
+      (e) => e.effectId === 'CustomField:Account.Earnings__c',
+    );
+    expect(earnings).toBeDefined();
+    expect(earnings?.effectKind).toBe('formula-recompute');
+  });
+
+  it('records reachableVia paths for depth>1 sources', async () => {
+    const result = await fieldLineageHandler(upstreamCtx, {
+      fieldId: TARGET,
+      direction: 'upstream',
+      maxDepth: 3,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.value.data;
+    if (out.upstream === undefined) return;
+    const depth2 = out.upstream.sources.find((s) => s.depth === 2);
+    expect(depth2).toBeDefined();
+    if (!depth2) return;
+    // The reachableVia chain records the intermediate hops between the
+    // root and the depth-2 source.
+    expect(depth2.reachableVia.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('truncates at maxDepth and reports truncatedAtDepth', async () => {
+    const result = await fieldLineageHandler(upstreamCtx, {
+      fieldId: TARGET,
+      direction: 'upstream',
+      maxDepth: 1,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.value.data;
+    if (out.upstream === undefined) return;
+    // depth-1 sources should still surface; depth-2 should NOT.
+    expect(out.upstream.sources.every((s) => s.depth === 1)).toBe(true);
+    expect(out.upstream.truncatedAtDepth).toBe(1);
+  });
+});
+
+describe('fieldLineageHandler downstream (Q163)', () => {
+  it('walks downstream effects across kinds with firesWhen literals', async () => {
+    const result = await fieldLineageHandler(downstreamCtx, {
+      fieldId: downstreamTarget,
+      direction: 'downstream',
+      maxDepth: 2,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.value.data;
+    expect(out.downstream).toBeDefined();
+    if (out.downstream === undefined) return;
+    const kinds = out.downstream.effects.map((e) => e.effectKind);
+    // The fixture surfaces flow-decision-branch (firesWhen),
+    // workflow-fire (references from WorkflowRule), and
+    // integration-outbound (OutboundMessage). The walk MUST surface
+    // each kind verbatim.
+    expect(kinds).toContain('flow-decision-branch');
+    expect(kinds).toContain('workflow-fire');
+    expect(kinds).toContain('integration-outbound');
+    // The firesWhen string is preserved for the flow-decision-branch
+    // effect — the renderer surfaces the literal condition for review.
+    const decision = out.downstream.effects.find(
+      (e) => e.effectKind === 'flow-decision-branch',
+    );
+    expect(decision).toBeDefined();
+    if (!decision) return;
+    expect(decision.firesWhen).toBe('Lead_Score__c > 50');
+  });
+
+  it('honors includeFiresWhen: false to suppress conditional walks', async () => {
+    const result = await fieldLineageHandler(downstreamCtx, {
+      fieldId: downstreamTarget,
+      direction: 'downstream',
+      maxDepth: 2,
+      includeFiresWhen: false,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.value.data;
+    if (out.downstream === undefined) return;
+    // When firesWhen is disabled, flow-decision-branch effects derived
+    // from the firesWhen edge type vanish; workflow-fire (references
+    // from WorkflowRule) remains.
+    const kinds = out.downstream.effects.map((e) => e.effectKind);
+    expect(kinds).not.toContain('flow-decision-branch');
+    expect(kinds).toContain('workflow-fire');
+  });
+});
+
+describe('fieldLineageHandler honesty axis', () => {
+  it('surfaces the verbatim Q165 disclosure on every response', async () => {
+    const result = await fieldLineageHandler(upstreamCtx, {
+      fieldId: TARGET,
+      direction: 'upstream',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.boundaries).toContain(
+      FIELD_360_Q165_DISCLOSURE,
+    );
+    expect(result.value.data.dataNotAvailable).toEqual([
+      'list-view-filters',
+      'reports',
+      'dashboards',
+    ]);
+  });
+
+  it('returns invalid-query for non-CustomField ids', async () => {
+    const result = await fieldLineageHandler(upstreamCtx, {
+      fieldId: 'Flow:NotAField',
+      direction: 'upstream',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+  });
+
+  it('returns component-not-found for unknown CustomField ids', async () => {
+    const result = await fieldLineageHandler(upstreamCtx, {
+      fieldId: 'CustomField:Account.NoSuchField__c',
+      direction: 'upstream',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('component-not-found');
+  });
+});
+
+describe('fieldLineageInputSchema', () => {
+  it('rejects an unknown direction', () => {
+    const parsed = fieldLineageInputSchema.safeParse({
+      fieldId: 'CustomField:Account.Industry__c',
+      direction: 'sideways',
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it('rejects maxDepth above the hard cap', () => {
+    const parsed = fieldLineageInputSchema.safeParse({
+      fieldId: 'CustomField:Account.Industry__c',
+      direction: 'upstream',
+      maxDepth: 6,
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it('accepts a minimal well-formed input', () => {
+    const parsed = fieldLineageInputSchema.safeParse({
+      fieldId: 'CustomField:Account.Industry__c',
+      direction: 'both',
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('defaults direction to both when omitted (TSB-12)', () => {
+    const parsed = fieldLineageInputSchema.safeParse({
+      fieldId: 'CustomField:Account.Industry__c',
+    });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.direction).toBe('both');
+  });
+});
+
+describe('fieldLineageHandler: cross-object formula chain depth (P4-formula-chains)', () => {
+  let dir2: string;
+  let store2: GraphStore;
+  let ctx2: Context;
+
+  beforeAll(async () => {
+    dir2 = mkdtempSync(join(tmpdir(), 'sfi-mcp-fl-formula-'));
+    const opened = await openGraph(join(dir2, 'fl.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    store2 = opened.value;
+    const fld = (id: string, parent: string): Node =>
+      makeNode({ id, type: 'CustomField', apiName: id.split('.').pop() ?? id, parentId: parent });
+    const ref = (from: string, to: string): Edge =>
+      makeEdge({ fromId: from, toId: to, edgeType: 'references', confidence: 'parsed', source: 'formula-tokenizer' });
+    // Chain: Opportunity.Total__c (formula) -> Account.Earnings__c (formula, OTHER
+    // object) -> Account.Base_Amount__c. Upstream from Total__c is a 2-hop,
+    // cross-object formula-reference cascade.
+    const seed2: ExtractionResult = {
+      nodes: [
+        fld('CustomField:Opportunity.Total__c', 'CustomObject:Opportunity'),
+        fld('CustomField:Account.Earnings__c', 'CustomObject:Account'),
+        fld('CustomField:Account.Base_Amount__c', 'CustomObject:Account'),
+      ],
+      edges: [
+        ref('CustomField:Opportunity.Total__c', 'CustomField:Account.Earnings__c'),
+        ref('CustomField:Account.Earnings__c', 'CustomField:Account.Base_Amount__c'),
+      ],
+    };
+    const imp = await importExtractionResults(store2, [seed2]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    ctx2 = { vaultRoot: dir2, manifest: FIXTURE_MANIFEST, graph: store2 };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store2);
+    rmSync(dir2, { recursive: true, force: true });
+  });
+
+  it('reports formulaChain depth >= 2 and crossesObject for a chained cross-object formula', async () => {
+    const r = await fieldLineageHandler(ctx2, {
+      fieldId: 'CustomField:Opportunity.Total__c',
+      direction: 'upstream',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const fc = r.value.data.upstream?.formulaChain;
+    expect(fc?.maxDepth).toBeGreaterThanOrEqual(2);
+    expect(fc?.crossesObject).toBe(true);
+  });
+
+  it('a single-hop same-object formula reports depth 1 and crossesObject false', async () => {
+    const r = await fieldLineageHandler(ctx2, {
+      fieldId: 'CustomField:Account.Earnings__c',
+      direction: 'upstream',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const fc = r.value.data.upstream?.formulaChain;
+    expect(fc?.maxDepth).toBe(1);
+    expect(fc?.crossesObject).toBe(false);
+  });
+});

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "sf-intelligence": {
+      "command": "node",
+      "args": ["packages/cli/bin/sfi.js", "mcp"]
+    }
+  }
+}

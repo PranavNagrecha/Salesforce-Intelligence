@@ -1,0 +1,47 @@
+{
+  "ci": [
+    {
+      "tool": "sfi.coverage_report",
+      "args": {},
+      "expectCoverageKnown": true,
+      "note": "Q181 — coverage honesty surface"
+    },
+    {
+      "tool": "sfi.safe_to_delete_field",
+      "args": { "fieldId": "CustomField:Account.Industry" },
+      "expectVerdict": "review",
+      "expectCoverageCaveat": true,
+      "note": "Q182 — fail-closed under partial coverage"
+    },
+    {
+      "tool": "sfi.org_risk_report",
+      "args": { "limit": 10 },
+      "expectTrustProvenance": "offline_snapshot",
+      "note": "Q183 — synthesis stays offline"
+    },
+    {
+      "tool": "sfi.live_count",
+      "args": { "soql": "SELECT COUNT() FROM Account" },
+      "expectErrorKind": "invalid-query",
+      "note": "Q184 — live plane disabled by default"
+    },
+    {
+      "tool": "sfi.trend",
+      "args": {},
+      "note": "Q185 — trend returns without error"
+    },
+    {
+      "tool": "sfi.baseline_status",
+      "args": {},
+      "note": "Q186 — baseline readable"
+    }
+  ],
+  "*": [
+    {
+      "tool": "sfi.capabilities",
+      "args": {},
+      "expectMinToolCount": 95,
+      "note": "Q187 — runs on first registered vault; tool roster scale"
+    }
+  ]
+}
