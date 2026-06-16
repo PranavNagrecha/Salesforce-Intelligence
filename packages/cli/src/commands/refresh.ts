@@ -2334,21 +2334,27 @@ interface SfRetrieveResult {
 }
 
 /**
- * Classify a `sf project retrieve` failure. A `global` cause (auth, network, no
- * DX project, no target-org) afflicts every type equally, so splitting the
- * manifest would only multiply the same failure — the fallback attributes it to
- * the whole batch and stops. A `per-type` cause (`INVALID_TYPE`, an entity the
- * org rejects) is isolated by splitting until the culprit stands alone.
+ * Classify a `sf project retrieve` failure. A `global` cause (auth, no DX
+ * project, no target-org) cannot be fixed by retrieving fewer types, so the
+ * fallback attributes it to the whole batch and stops. Everything else is
+ * `per-type` and splittable: `INVALID_TYPE` / an entity the org rejects (split
+ * until the culprit stands alone) AND a transient network/timeout error — which
+ * on a large multi-type batch is usually load-induced, so splitting shrinks the
+ * batch until it lands instead of aborting the whole refresh.
  *
  * @example classifyRetrieveError('ERROR: INVALID_TYPE: Cannot use OmniScript') // 'per-type'
+ * @example classifyRetrieveError('socket hang up') // 'per-type' (split — smaller batches land)
  * @example classifyRetrieveError('No authorization information found') // 'global'
  */
 export const classifyRetrieveError = (message: string): 'global' | 'per-type' => {
+  // Only causes that retrieving FEWER types cannot fix are terminal-'global'.
+  // Network/timeout is deliberately absent: a big combined retrieve that times
+  // out usually succeeds once split into smaller batches, so it must be
+  // splittable, not fatal (the bug that aborted refresh on large real orgs).
   const GLOBAL_SIGNALS: readonly RegExp[] = [
     /no authorization|not authorized|no auth information|expired access\/refresh token|invalid[_ ]grant/i,
     /org ?login|sfdx[_ ]?login|requires? you to (?:re-?)?authenticate|session expired/i,
     /does not contain a valid salesforce dx project/i,
-    /enotfound|etimedout|econnrefused|enetunreach|getaddrinfo|socket hang up|network error|unable to connect|connection timed out/i,
     /no default (?:environment|org)|no target-?org|no org configured|requires a target org/i,
   ];
   return GLOBAL_SIGNALS.some((re) => re.test(message)) ? 'global' : 'per-type';
@@ -2362,8 +2368,21 @@ export const splitTypeBatch = (
   return [types.slice(0, mid), types.slice(mid)];
 };
 
-/** First line of a (possibly multi-line) sf error, trimmed for compact display. */
-const firstErrorLine = (error: string): string => (error.split('\n')[0] ?? error).trim();
+/**
+ * The most informative line of a (possibly multi-line) sf error. Node wraps a
+ * non-zero exit as `Command failed: <cmd>` on line 0 and prints the real cause
+ * (`Error (UnsafeFilepathError): …`, a timeout, an `INVALID_TYPE`) below it — so
+ * line 0 alone hides every actionable failure (the gap that kept a real retrieve
+ * bug invisible). Prefer a line that names the error; fall back to the first
+ * non-`Command failed:` line, then the raw first line.
+ */
+const salientErrorLine = (error: string): string => {
+  const lines = error.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
+  const named = lines.find((l) => /^Error\b|Error \(|^ERROR\b|UnsafeFilepathError|INVALID_TYPE/.test(l));
+  if (named !== undefined) return named;
+  const nonWrapper = lines.find((l) => !l.startsWith('Command failed:'));
+  return nonWrapper ?? lines[0] ?? error.trim();
+};
 
 /**
  * Render retrieve failures for a user-facing message. When every type failed for
@@ -2374,7 +2393,7 @@ export const summarizeRetrieveFailures = (
   failures: readonly RetrieveTypeFailure[],
 ): string => {
   if (failures.length === 0) return '';
-  const uniqueReasons = new Set(failures.map((f) => firstErrorLine(f.error)));
+  const uniqueReasons = new Set(failures.map((f) => salientErrorLine(f.error)));
   if (uniqueReasons.size === 1) {
     const [reason] = [...uniqueReasons];
     const [first] = failures;
@@ -2382,7 +2401,7 @@ export const summarizeRetrieveFailures = (
       ? `${first.type}: ${reason}`
       : (reason ?? '');
   }
-  return failures.map((f) => `${f.type} (${firstErrorLine(f.error)})`).join('; ');
+  return failures.map((f) => `${f.type} (${salientErrorLine(f.error)})`).join('; ');
 };
 
 /** Retrieve a batch of types: returns the reconcile `deletedCount`, or the sf error. */
@@ -2398,14 +2417,16 @@ export interface RetrieveFallbackOutcome {
 }
 
 /**
- * Retrieve `allTypes`, degrading gracefully when one type poisons the manifest.
- * The first attempt is the full set (the common case — one sf call). On failure
- * it binary-splits to isolate the bad type(s), keeping every type that lands and
- * recording each that does not, so a single rejected OmniStudio/PSS type yields a
- * partial vault instead of aborting the whole refresh. A `global` failure
- * (auth/network) is not split — it is attributed to the batch and the recursion
- * stops, so a dead org costs one call, not `2N-1`. The sf shelling is injected as
- * `retrieveBatch`, keeping this decision logic pure and unit-testable.
+ * Retrieve `allTypes`, degrading gracefully when one type poisons the manifest
+ * OR when the full set is too large to retrieve in a single call. The first
+ * attempt is the full set (the common case — one sf call). On failure it
+ * binary-splits to isolate the bad type(s) — or, for a load-induced timeout, to
+ * shrink the batch until it lands — keeping every type that succeeds and
+ * recording each that does not, so a rejected type or an oversized batch yields a
+ * partial vault instead of aborting the whole refresh. Only a `global` failure
+ * (auth / no DX project / no target-org) is not split, since splitting cannot fix
+ * it — so a dead-auth org costs one call, not `2N-1`. The sf shelling is injected
+ * as `retrieveBatch`, keeping this decision logic pure and unit-testable.
  */
 export const retrieveWithFallback = async (
   allTypes: readonly ComponentType[],
@@ -2450,22 +2471,40 @@ const retrieveTypeBatch = async (
   // even when several batches start within the same millisecond.
   const stamp = `${Date.now()}-${types.length}-${types[0] ?? 'batch'}`;
   const manifestPath = join(tmpdir(), `sfi-refresh-package-${stamp}.xml`);
-  const retrieveDir = join(tmpdir(), `sfi-retrieve-${stamp}`);
+  // Retrieve into a fresh throwaway SFDX project — NOT a bare `--output-dir` run
+  // from the vault. A bare temp output-dir run from the vault inherits the vault's
+  // `.sf` source tracking, which reconciles the retrieved files against stale temp
+  // paths and fails the WHOLE retrieve (`UnsafeFilepathError`, or
+  // `MetadataTransferError: … does not contain a valid Salesforce DX project`) on
+  // large multi-type batches — the bug that aborted refresh on real orgs. A
+  // self-contained throwaway project (its own sfdx-project.json + an existing
+  // package dir, with `sf` run from inside it) has clean tracking and a valid
+  // project root, so the big combined retrieve lands. The retrieved source sits at
+  // `${pkgDir}/main/default/…`, structurally identical to the old `--output-dir`
+  // tree, so the reconcile/sync below are unchanged.
+  const projectDir = join(tmpdir(), `sfi-retrieve-${stamp}`);
+  const pkgDir = join(projectDir, 'force-app');
+  await mkdir(pkgDir, { recursive: true });
+  await writeFile(
+    join(projectDir, 'sfdx-project.json'),
+    `{"packageDirectories":[{"path":"force-app","default":true}],"sourceApiVersion":"${SF_API_VERSION}"}\n`,
+    'utf8',
+  );
   await writeFile(manifestPath, buildPackageXml(types), 'utf8');
   try {
     await execAsync(
-      `sf project retrieve start --manifest "${manifestPath}" --target-org "${targetOrg}" --output-dir "${retrieveDir}"`,
-      { maxBuffer: SF_MAX_BUFFER },
+      `sf project retrieve start --manifest "${manifestPath}" --target-org "${targetOrg}"`,
+      { maxBuffer: SF_MAX_BUFFER, cwd: projectDir },
     );
-    const reconcile = await reconcileSourceDeletions(sourceDir, retrieveDir, new Set(types));
-    await syncAuthoritativeRetrieveIntoSource(sourceDir, retrieveDir);
+    const reconcile = await reconcileSourceDeletions(sourceDir, pkgDir, new Set(types));
+    await syncAuthoritativeRetrieveIntoSource(sourceDir, pkgDir);
     return ok({ deletedCount: reconcile.deletedCount });
   } catch (cause) {
     return err(cause instanceof Error ? cause.message : String(cause));
   } finally {
-    // Best-effort: temp manifests accumulated forever (one per refresh).
+    // Best-effort: the manifest + the whole throwaway project tree.
     await rm(manifestPath, { force: true }).catch(() => {});
-    await rm(retrieveDir, { recursive: true, force: true }).catch(() => {});
+    await rm(projectDir, { recursive: true, force: true }).catch(() => {});
   }
 };
 
@@ -3001,7 +3040,7 @@ export const formatRefreshSummary = (result: RefreshResult): string => {
     lines.push(
       '',
       `Partial retrieve — ${result.retrieveFailures.length} metadata type(s) skipped (the org may have rejected them; the vault is built from what landed):`,
-      ...result.retrieveFailures.map((f) => `  ${f.type}: ${firstErrorLine(f.error)}`),
+      ...result.retrieveFailures.map((f) => `  ${f.type}: ${salientErrorLine(f.error)}`),
     );
   }
   if (result.fatalError !== undefined) {

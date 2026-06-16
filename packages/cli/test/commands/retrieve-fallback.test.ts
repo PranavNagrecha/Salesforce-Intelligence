@@ -67,11 +67,19 @@ describe('classifyRetrieveError', () => {
     expect(classifyRetrieveError('Cannot retrieve DecisionTable')).toBe('per-type');
   });
 
-  it('treats auth / network / project errors as global', () => {
+  it('treats auth / project / org-config errors as global (splitting cannot fix them)', () => {
     expect(classifyRetrieveError('No authorization information found for org')).toBe('global');
     expect(classifyRetrieveError('This directory does not contain a valid Salesforce DX project')).toBe('global');
-    expect(classifyRetrieveError('getaddrinfo ENOTFOUND login.salesforce.com')).toBe('global');
     expect(classifyRetrieveError('expired access/refresh token')).toBe('global');
+    expect(classifyRetrieveError('No default org found; this command requires a target org')).toBe('global');
+  });
+
+  it('treats transient network/timeout errors as per-type so a big batch splits instead of aborting', () => {
+    // Regression: a load-induced timeout on the full combined retrieve used to be
+    // classified 'global' and aborted the whole refresh on large real orgs.
+    expect(classifyRetrieveError('getaddrinfo ENOTFOUND login.salesforce.com')).toBe('per-type');
+    expect(classifyRetrieveError('socket hang up')).toBe('per-type');
+    expect(classifyRetrieveError('Client network socket disconnected; connection timed out')).toBe('per-type');
   });
 });
 
@@ -105,6 +113,25 @@ describe('retrieveWithFallback', () => {
     expect(out.succeeded).toEqual([]);
     expect(out.failures.length).toBe(TYPES.length);
     expect(calls.length).toBe(1); // global short-circuit: no 2N-1 hammering
+  });
+
+  it('splits a load-induced timeout until batches are small enough to land (the real bug)', async () => {
+    // Any batch larger than 2 types "times out"; smaller batches succeed. The old
+    // behavior classified the timeout 'global' and returned zero types; the fix
+    // must split the oversized batch until every type lands.
+    const calls: ComponentType[][] = [];
+    const fn = async (
+      types: readonly ComponentType[],
+    ): Promise<Result<{ readonly deletedCount: number }, string>> => {
+      calls.push([...types]);
+      return types.length > 2
+        ? err('Client network socket disconnected before secure TLS connection was established; socket hang up')
+        : ok({ deletedCount: types.length });
+    };
+    const out = await retrieveWithFallback(TYPES, fn);
+    expect([...out.succeeded].sort()).toEqual([...TYPES].sort());
+    expect(out.failures).toEqual([]);
+    expect(calls.length).toBeGreaterThan(1); // it split rather than aborting on the timeout
   });
 
   it('returns all-failed when every type is independently bad', async () => {
@@ -146,6 +173,20 @@ describe('summarizeRetrieveFailures', () => {
       { type: 'Flow' as ComponentType, error: 'first line\nstack trace\nmore noise' },
     ];
     expect(summarizeRetrieveFailures(f)).toBe('Flow: first line');
+  });
+
+  it('surfaces the real sf error beneath the "Command failed" wrapper (the swallowed cause)', () => {
+    const f: RetrieveTypeFailure[] = [
+      {
+        type: 'ApexClass' as ComponentType,
+        error:
+          'Command failed: sf project retrieve start --manifest /tmp/x.xml --target-org Foo\n' +
+          'Error (UnsafeFilepathError): The filepath "../x.cls" contains unsafe character sequences',
+      },
+    ];
+    expect(summarizeRetrieveFailures(f)).toBe(
+      'ApexClass: Error (UnsafeFilepathError): The filepath "../x.cls" contains unsafe character sequences',
+    );
   });
 });
 
