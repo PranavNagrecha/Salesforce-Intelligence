@@ -8,11 +8,13 @@ const names = (q: string, k?: number): string[] =>
   semanticCandidates(q, k).map((c) => c.tool);
 
 describe('tokenize', () => {
-  it('lowercases, strips punctuation, drops stopwords and 1-char tokens', () => {
-    expect(tokenize("Where is the Payment_Status__c field?")).toEqual([
-      'payment_status__c',
-      'field',
-    ]);
+  it('lowercases, splits snake_case, drops stopwords and 1-char tokens', () => {
+    const t = tokenize("Where is the Payment_Status__c field?");
+    expect(t).toContain('payment'); // snake_case split
+    expect(t).toContain('status');
+    expect(t).toContain('field');
+    expect(t).not.toContain('the'); // stopword
+    expect(t).not.toContain('c'); // 1-char dropped (from __c)
   });
 
   it('returns nothing for a stopword-only / empty question', () => {

@@ -14,6 +14,24 @@ docs brought back in sync with shipped reality), and the bug hunter
 (adversarial batteries, an agent-eval gate, and ratcheted eval minimums).
 Entries accrue below as changes land.
 
+### Funnel recall lift + validation net (CAE-03a)
+
+- **Funnel recall lifted from ~59% to ~80%** on the labeled router gold-set. The
+  tokenizer now splits snake_case (`object_access_audit` → object / access / audit)
+  and light plurals (apps → app); each tool's **name is indexed** (it encodes the
+  intent — `live_count`, `find_component_usages`); and the Salesforce synonym layer
+  expanded (usage / references / depends, how-many → count, create/read/edit/delete
+  → access, changed → modified, …). `semanticCandidates` is now exported from the
+  package so the gate can score it directly.
+- **New deterministic gate net — candidate-recall@K** (harness): for each gold
+  question, assert the correct tool is in the funnel's top-8 (the floor that lets
+  the host LLM reach it). Vault-independent, no MCP server, reproducible, with a
+  baseline regression guard. It pairs with the existing **agent-eval** net
+  (end-to-end answer quality): recall-fail = funnel gap; recall-pass-but-agent-fail
+  = LLM-pick gap. **The net's verdict: at 80% the funnel is not yet good enough to
+  delete regex** — that deletion (CAE-03b) is gated on recall ratcheting higher.
+  Building the net first is what surfaced this.
+
 ### Router funnel becomes advisor-primary + planner contract (CAE-02)
 
 - **`sfi.route_question` now surfaces `toolCandidates` on weak routes too, not

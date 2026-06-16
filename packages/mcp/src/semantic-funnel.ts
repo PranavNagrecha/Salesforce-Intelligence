@@ -52,32 +52,81 @@ const STOPWORDS: ReadonlySet<string> = new Set([
  * one-directional-per-entry to avoid washing out the signal.
  */
 const SYNONYMS: Readonly<Record<string, readonly string[]>> = {
-  access: ['permission', 'permissions', 'sharing', 'visibility', 'visible', 'see', 'view', 'grant'],
-  permission: ['access', 'grant', 'profile', 'permissionset'],
-  see: ['access', 'visibility', 'visible', 'sharing'],
-  edit: ['modify', 'write', 'update', 'change', 'editable'],
-  modify: ['edit', 'write', 'change'],
-  delete: ['remove', 'deletion', 'deletable'],
+  // permissions / access / sharing
+  access: ['permission', 'permissions', 'sharing', 'visibility', 'visible', 'crud', 'grant'],
+  permission: ['access', 'permissions', 'grant', 'profile', 'permissionset', 'effective'],
+  permissions: ['permission', 'access', 'effective', 'profile'],
+  see: ['access', 'visibility', 'visible', 'sharing', 'view'],
+  visible: ['access', 'visibility', 'see', 'sharing'],
+  create: ['access', 'crud', 'object', 'insert'],
+  read: ['access', 'crud', 'view'],
+  edit: ['access', 'crud', 'modify', 'write', 'update', 'editable'],
+  modify: ['edit', 'write', 'change', 'access'],
+  delete: ['access', 'crud', 'remove', 'deletion', 'deletable'],
   remove: ['delete', 'deletion'],
-  user: ['profile', 'permissionset', 'member', 'people'],
-  field: ['column', 'attribute'],
-  object: ['sobject', 'table', 'entity'],
+  admin: ['permission', 'permissions', 'modify', 'view', 'risk', 'effective'],
+  profile: ['permission', 'permissions', 'permissionset', 'effective'],
+  // usage / dependency / impact
+  references: ['usage', 'usages', 'used', 'reference', 'depends', 'uses', 'find'],
+  reference: ['usage', 'usages', 'references', 'used'],
+  referenced: ['usage', 'usages', 'references', 'used'],
+  used: ['usage', 'usages', 'references', 'uses', 'find'],
+  uses: ['usage', 'usages', 'used'],
+  depends: ['dependency', 'usage', 'usages', 'impact', 'depend', 'references'],
+  depend: ['dependency', 'usage', 'depends', 'impact'],
   break: ['impact', 'depend', 'dependency', 'breaks', 'affected'],
-  run: ['execute', 'fire', 'trigger', 'runs', 'execution'],
+  // schema / enumeration
+  objects: ['object', 'sobject', 'components', 'schema', 'list'],
+  object: ['sobject', 'table', 'entity', 'components'],
+  fields: ['field', 'columns', 'components', 'list'],
+  list: ['components', 'enumerate', 'inventory'],
+  relationship: ['lookup', 'child', 'parent', 'schema', 'related'],
+  child: ['lookup', 'relationship', 'parent', 'components'],
+  // counts / live records
+  how: ['count', 'many', 'number'],
+  many: ['count', 'number'],
+  show: ['sample', 'records'],
+  sample: ['records', 'show'],
+  // change / audit / freshness
+  changed: ['modified', 'change', 'history', 'audit'],
+  change: ['modified', 'history', 'changed'],
+  fresh: ['health', 'stale', 'freshness', 'vault', 'current'],
+  stale: ['fresh', 'freshness', 'health', 'outdated', 'current'],
+  inactive: ['active', 'disabled', 'draft', 'obsolete'],
+  // meaning / docs / misc
+  help: ['meaning', 'explain', 'description', 'text'],
+  meaning: ['explain', 'field', 'help'],
   doc: ['document', 'documentation', 'handbook', 'overview'],
+  compare: ['diff', 'difference', 'across'],
   pii: ['sensitive', 'personal', 'compliance', 'privacy'],
-  stale: ['fresh', 'freshness', 'outdated', 'current'],
-  count: ['how', 'many', 'number'],
+  run: ['execute', 'fire', 'trigger', 'runs', 'execution'],
+  user: ['profile', 'permissionset', 'member'],
+  field: ['column', 'attribute'],
 };
 
-/** Lowercase, fold apostrophes, split on non-word chars, drop stopwords + 1-char tokens. */
-export const tokenize = (text: string): string[] =>
-  text
+/**
+ * Lowercase, fold apostrophes, split on non-word chars AND underscores (so
+ * snake_case tool names and field api-names break into their words —
+ * `object_access_audit` → object, access, audit; `Payment_Status__c` → payment,
+ * status), drop stopwords + 1-char tokens.
+ */
+export const tokenize = (text: string): string[] => {
+  const raw = text
     .toLowerCase()
     .replace(/[‘’ʼ']/g, "'")
-    .replace(/[^a-z0-9_]+/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
     .split(/\s+/)
     .filter((t) => t.length > 1 && !STOPWORDS.has(t));
+  // Light plural stem (keep BOTH): apps→app, objects→object, fields→field, so a
+  // plural question matches a singular tool name/description and vice-versa.
+  // Applied to query and corpus alike, so the two stay consistent.
+  const out: string[] = [];
+  for (const t of raw) {
+    out.push(t);
+    if (t.length > 3 && t.endsWith('s') && !t.endsWith('ss')) out.push(t.slice(0, -1));
+  }
+  return out;
+};
 
 /** Append synonym terms for each token, preserving the originals. */
 const expand = (tokens: readonly string[]): string[] => {
@@ -96,7 +145,14 @@ const expand = (tokens: readonly string[]): string[] => {
  */
 const buildToolDocs = (): Map<string, string> => {
   const docs = new Map<string, string>();
-  for (const tool of V01_TOOLS) docs.set(tool.name, tool.description);
+  for (const tool of V01_TOOLS) {
+    // The tool NAME encodes the intent (object_access_audit, live_count,
+    // find_component_usages). Weight it by repeating it, so a question whose
+    // words match the name ranks the tool even when the prose description does
+    // not echo them.
+    const nameWords = tool.name.replace(/^sfi\./, '').replace(/_/g, ' ');
+    docs.set(tool.name, `${nameWords} ${nameWords} ${tool.description}`);
+  }
   for (const cat of CATEGORIES) {
     const catText = ` ${cat.title} ${cat.description} ${cat.exampleQuestions.join(' ')}`;
     for (const toolName of cat.tools) {

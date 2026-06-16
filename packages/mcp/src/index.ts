@@ -46,3 +46,5 @@ export type { RunningHttpServer, ServeHttpOptions } from './serve-http.js';
 export type { Context, ServerError } from './server.js';
 export { V01_TOOLS, dispatchTool, registerTools } from './tools/index.js';
 export type { ToolDefinition } from './tools/index.js';
+export { semanticCandidates } from './semantic-funnel.js';
+export type { ToolCandidate } from './semantic-funnel.js';
