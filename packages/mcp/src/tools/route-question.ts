@@ -27,6 +27,7 @@ import {
   routeForSelectedIntent,
   type RouteResult,
 } from '../intent-router.js';
+import { semanticCandidates, type ToolCandidate } from '../semantic-funnel.js';
 import type { Context } from '../server.js';
 
 import { resolveGlossaryAlias } from './resolve.js';
@@ -179,6 +180,14 @@ export interface RouteQuestionOutput {
    * and the response is unchanged.
    */
   readonly invoke?: readonly RouteInvocation[];
+  /**
+   * CAE-01 semantic FUNNEL: meaning-ranked candidate tools for the host LLM to
+   * choose from, present ONLY when the deterministic router could not place the
+   * question (`route.intent === 'unrouted'`). The LLM reads these and picks the
+   * tools to run — an advisor, not a route. Offline TF-IDF over the capability
+   * map; no neural model, no network.
+   */
+  readonly toolCandidates?: readonly ToolCandidate[];
 }
 
 const routeTrust = (): TrustSummary => ({
@@ -697,6 +706,11 @@ export const routeQuestionHandler = async (
             : { tool: 'sfi.run_analysis', args: { name: tool, args } };
         })
       : undefined;
+  // CAE-01 semantic funnel: when the deterministic router could not place the
+  // question, surface meaning-ranked candidate tools for the host LLM to choose
+  // from. Advisor, not a route — offline TF-IDF over the capability map.
+  const toolCandidates =
+    route.intent === 'unrouted' ? semanticCandidates(input.question, 8) : [];
   return ok({
     data: {
       route,
@@ -704,8 +718,14 @@ export const routeQuestionHandler = async (
       ...(entityEvidence !== undefined ? { entityEvidence } : {}),
       ...(clarificationResolution !== undefined ? { clarificationResolution } : {}),
       gapLogged: logged !== null,
-      rendered: renderRouteMarkdown(route),
+      rendered:
+        toolCandidates.length > 0
+          ? `${renderRouteMarkdown(route)}\n\n**Candidate tools (ranked by meaning — you pick, then run):** ${toolCandidates
+              .map((c) => c.tool)
+              .join(', ')}`
+          : renderRouteMarkdown(route),
       trust: routeTrust(),
+      ...(toolCandidates.length > 0 ? { toolCandidates } : {}),
       ...(invoke !== undefined ? { invoke } : {}),
     },
     vaultState: {
