@@ -14,6 +14,26 @@ docs brought back in sync with shipped reality), and the bug hunter
 (adversarial batteries, an agent-eval gate, and ratcheted eval minimums).
 Entries accrue below as changes land.
 
+### Refresh resilience: isolated retrieve + visible errors (real-org bug)
+
+- **`sfi refresh` now retrieves into an isolated throwaway SFDX project instead of
+  a bare temp `--output-dir`.** Run from inside the vault, `sf project retrieve`
+  inherited the vault's `.sf` source tracking, which on a large multi-type retrieve
+  reconciled against stale temp paths and failed the ENTIRE pull —
+  `UnsafeFilepathError`, or `MetadataTransferError: … does not contain a valid
+  Salesforce DX project`. Refresh now retrieves into a fresh per-batch project (its
+  own `sfdx-project.json` + package directory, with `sf` run from inside it), so
+  source tracking cannot bleed across runs and the combined retrieve lands.
+  Verified by a full with-pull refresh on four real orgs (4.6k–8.2k components).
+- **The real `sf` error is surfaced instead of `Command failed`.** Retrieve
+  failures collapsed to Node's generic `Command failed: <cmd>` wrapper, hiding the
+  actual cause; the salient `sf` line (e.g. `Error (UnsafeFilepathError): …`,
+  `INVALID_TYPE`) is now shown. Guard: `retrieve-fallback.test.ts`.
+- **A transient network/timeout on a multi-type retrieve now binary-splits instead
+  of aborting.** Only auth / no-DX-project / no-target-org failures are terminal; a
+  load-induced timeout shrinks the batch until it lands. Guard:
+  `retrieve-fallback.test.ts`.
+
 ### What-if impact completeness & truncation honesty (bugs 13, 14)
 
 - **`what_if_change_field_type` discloses forward-compatible references it
