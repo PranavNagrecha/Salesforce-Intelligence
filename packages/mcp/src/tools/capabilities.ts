@@ -183,7 +183,7 @@ const TRUST_GLOSSARY: TrustGlossary = {
  * verbatim. Adding a tool to a category here is cheap; the headline count
  * stays honest via the live registry regardless.
  */
-const CATEGORIES: readonly CapabilityCategory[] = [
+export const CATEGORIES: readonly CapabilityCategory[] = [
   {
     id: 'find',
     title: 'Find & identify components',

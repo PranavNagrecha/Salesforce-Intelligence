@@ -626,4 +626,40 @@ describe('core-profile gateway envelopes (P13-GW-router-envelope)', () => {
     if (!r.ok) return;
     expect('invoke' in r.value.data).toBe(false);
   });
+
+  it('attaches semantic toolCandidates when the question is unrouted (CAE-01 funnel)', async () => {
+    const r = await routeQuestionHandler(ctx, {
+      question: 'where does Pranav have access to',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.route.intent).toBe('unrouted');
+    const candidates = r.value.data.toolCandidates ?? [];
+    expect(candidates.length).toBeGreaterThan(0);
+    const tools = candidates.map((c) => c.tool);
+    expect(
+      tools.some((t) =>
+        [
+          'sfi.why_cant_user_see_record',
+          'sfi.field_access_audit',
+          'sfi.crud_fls_audit',
+          'sfi.generate_sharing_summary',
+          'sfi.unassigned_permission_sets',
+        ].includes(t),
+      ),
+    ).toBe(true);
+    // The rendered markdown surfaces them too, so a prose-reading host sees them.
+    expect(r.value.data.rendered).toContain('Candidate tools');
+  });
+
+  it('omits toolCandidates for gibberish (no false candidates)', async () => {
+    const r = await routeQuestionHandler(ctx, {
+      question: 'zxqw plkj vbnm',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect('toolCandidates' in r.value.data).toBe(false);
+  });
 });

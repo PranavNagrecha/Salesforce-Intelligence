@@ -14,6 +14,24 @@ docs brought back in sync with shipped reality), and the bug hunter
 (adversarial batteries, an agent-eval gate, and ratcheted eval minimums).
 Entries accrue below as changes land.
 
+### Semantic router funnel — candidates for unrouted questions (CAE-01)
+
+- **`sfi.route_question` now returns `toolCandidates` when it cannot place a
+  question.** The deterministic router used to give up on any phrasing it had no
+  rule for (`intent: 'unrouted'`) — e.g. "where does <user> have access to". It
+  now attaches a meaning-ranked shortlist of candidate tools: an **offline TF-IDF
+  index** over the capability map (each tool's description + the example questions
+  of the capability categories it belongs to), cosine-ranked, with a small
+  Salesforce synonym layer (access ↔ permission / sharing / visibility). **No
+  neural model is bundled and no network is used** — fully offline, deterministic,
+  zero added package weight. The shortlist is an **advisor for the host LLM to
+  choose from, not a route**, so an unrouted question still reaches the right
+  tools; the rendered markdown surfaces the candidates too. This is the funnel of
+  the Design-B conversational answer engine; the regex engine is unchanged here
+  and slated for removal in a later step. Guards: `semantic-funnel.test.ts`
+  (recall@8 incl. the access case, gibberish → none, determinism) +
+  `route-question.test.ts` wiring cases.
+
 ### Refresh resilience: isolated retrieve + visible errors (real-org bug)
 
 - **`sfi refresh` now retrieves into an isolated throwaway SFDX project instead of
