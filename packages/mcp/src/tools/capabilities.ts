@@ -544,7 +544,7 @@ const ROUTING_GUIDANCE: ConversationalGuidance = {
   onAmbiguous:
     'On ambiguous resolution, clarify the component first. If the user wants live data and live is disabled, say so and offer to enable it once with sfi.live_consent { grant: true } (read-only) — do not guess from the vault.',
   onNone:
-    'On none, offer /sfi-refresh for metadata gaps. For live-record questions when offline, name sfi.live_count or sfi.live_sample and the consent requirement — never invent counts. On a route_question unknown, say the capability is not built yet (the gap is logged) rather than fabricating.',
+    'On none, offer /sfi-refresh for metadata gaps. For live-record questions when offline, name sfi.live_count or sfi.live_sample and the consent requirement — never invent counts. When route_question returns toolCandidates (no rule placed the question, or it matched only weakly), follow its `guidance`: those candidates are an advisory shortlist — pick the right tool(s) from them, resolve any named component, run them, then synthesize. Do NOT say the capability is unbuilt when candidates are offered. Only a true unknown with NO candidates means the capability is not built yet (the gap is logged).',
   groundAnswer:
     'Run the routed tools, then synthesize ONE answer from their output via sfi.synthesize_answer { question, draft }. It returns hallucinatedIds — any canonical id you wrote that no tool returned. Strip those before answering; cite only ids the tools produced, with their provenance.',
 };

@@ -14,6 +14,23 @@ docs brought back in sync with shipped reality), and the bug hunter
 (adversarial batteries, an agent-eval gate, and ratcheted eval minimums).
 Entries accrue below as changes land.
 
+### Router funnel becomes advisor-primary + planner contract (CAE-02)
+
+- **`sfi.route_question` now surfaces `toolCandidates` on weak routes too, not
+  only `unrouted`.** Whenever the deterministic router is unsure
+  (`confidence: 'low'`), the host LLM gets the funnel's meaning-ranked shortlist —
+  so a question that *barely* matched a rule still gets a second, semantic
+  opinion to plan from.
+- **A `guidance` field states the loop the LLM owns.** Alongside `toolCandidates`,
+  the response now carries a one-line planner contract: *the candidates are an
+  advisory shortlist, not a route — read them → `sfi.resolve` named components →
+  pick/sequence the tool(s) → run → ground with `sfi.synthesize_answer`.* The
+  capability map's routing guidance is updated to match (it previously told hosts
+  to say "capability not built" exactly when candidates are now offered). Regex is
+  still in place (it is removed in CAE-03); this only changes how the funnel's
+  advice is presented. Guards: `route-question.test.ts` (guidance present with
+  candidates, absent for gibberish).
+
 ### Semantic router funnel — candidates for unrouted questions (CAE-01)
 
 - **`sfi.route_question` now returns `toolCandidates` when it cannot place a

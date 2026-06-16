@@ -651,9 +651,12 @@ describe('core-profile gateway envelopes (P13-GW-router-envelope)', () => {
     ).toBe(true);
     // The rendered markdown surfaces them too, so a prose-reading host sees them.
     expect(r.value.data.rendered).toContain('Candidate tools');
+    // CAE-02 planner contract travels with the candidates.
+    expect(r.value.data.guidance).toContain('sfi.synthesize_answer');
+    expect(r.value.data.guidance).toContain('YOU decide');
   });
 
-  it('omits toolCandidates for gibberish (no false candidates)', async () => {
+  it('omits toolCandidates and guidance for gibberish (no false candidates)', async () => {
     const r = await routeQuestionHandler(ctx, {
       question: 'zxqw plkj vbnm',
       logGap: false,
@@ -661,5 +664,6 @@ describe('core-profile gateway envelopes (P13-GW-router-envelope)', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect('toolCandidates' in r.value.data).toBe(false);
+    expect('guidance' in r.value.data).toBe(false);
   });
 });
