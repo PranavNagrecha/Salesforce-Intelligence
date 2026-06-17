@@ -190,16 +190,17 @@ export interface RouteQuestionOutput {
    */
   readonly invoke?: readonly RouteInvocation[];
   /**
-   * CAE-01 semantic FUNNEL: meaning-ranked candidate tools for the host LLM to
-   * choose from, present ONLY when the deterministic router could not place the
-   * question (`route.intent === 'unrouted'`). The LLM reads these and picks the
-   * tools to run — an advisor, not a route. Offline TF-IDF over the capability
-   * map; no neural model, no network.
+   * CAE-03b semantic FUNNEL (PRIMARY in the default hybrid mode): meaning-ranked
+   * candidate tools the host LLM chooses from. Present for EVERY routable question
+   * — the regex `route` is demoted to a non-authoritative hint. Omitted only when
+   * the funnel finds nothing (gibberish) or under `SFI_ROUTER_MODE=offline`, where
+   * the deterministic route is authoritative (Design A). Offline TF-IDF over the
+   * capability map; no neural model, no network.
    */
   readonly toolCandidates?: readonly ToolCandidate[];
   /**
    * CAE-02 planner contract: present alongside `toolCandidates`. States the loop
-   * the host LLM owns — the candidates advise, the LLM decides: read question →
+   * the host LLM owns — the candidates are primary, the LLM decides: read question →
    * `sfi.resolve` named components → pick/sequence tools from the candidates →
    * run → `sfi.synthesize_answer` grounds.
    */
@@ -212,7 +213,7 @@ const routeTrust = (): TrustSummary => ({
   freshness: {},
   completeness: { status: 'complete' },
   limitations: [
-    'Routing is a deterministic heuristic over the question text — it suggests tools, it does not answer. A short, otherwise-unroutable phrase that names a real vault component is rescued to sfi.resolve (a vault lookup), so that one path also consults the vault. Resolve any named component and confirm the plane before trusting an answer.',
+    'In the default hybrid mode the meaning-ranked toolCandidates are PRIMARY and the host LLM decides which to run; the deterministic route is a non-authoritative hint, not the answer (SFI_ROUTER_MODE=offline makes the route authoritative for no-LLM hosts). A short phrase that merely names a real vault component is rescued to sfi.resolve so that path also consults the vault. Resolve any named component and confirm the plane before trusting an answer.',
   ],
 });
 
@@ -524,13 +525,27 @@ const guidanceForMode = (mode: RouteQuestionInput['mode']): string => {
       );
     default:
       return (
-        'These toolCandidates are an advisory shortlist, not a route — YOU decide. Plan: ' +
-        'read the question → resolve any named component with sfi.resolve → pick the tool(s) to ' +
-        'run from the candidates (sequence them if compound) → run them → ground the answer with ' +
-        'sfi.synthesize_answer. Never answer from a tool name alone.'
+        'These toolCandidates are the meaning-ranked shortlist — they are PRIMARY and YOU decide. ' +
+        'A deterministic `route` is also attached, but only as a HINT (a suggested tool order plus ' +
+        'any resolved entity ids / suggestedArgs) — never follow it blindly. Plan: read the question → ' +
+        'resolve any named component with sfi.resolve → pick the tool(s) to run from the candidates ' +
+        '(sequence them if compound) → run them → ground the answer with sfi.synthesize_answer. ' +
+        'Never answer from a tool name alone.'
       );
   }
 };
+
+/**
+ * CAE-03b router mode. The default `hybrid` is Design B: the semantic FUNNEL is
+ * primary — every routable question carries candidates + guidance and the host
+ * LLM decides; the regex route rides along only as a non-authoritative hint.
+ * `SFI_ROUTER_MODE=offline` restores the deterministic Design A route (regex
+ * authoritative, no candidates, no guidance) for no-LLM / CI / air-gapped hosts.
+ * The regex engine is never deleted — it is the offline fallback and the hint.
+ */
+type RouterMode = 'hybrid' | 'offline';
+const routerMode = (): RouterMode =>
+  (process.env.SFI_ROUTER_MODE ?? '').trim().toLowerCase() === 'offline' ? 'offline' : 'hybrid';
 
 export const routeQuestionHandler = async (
   ctx: Context,
@@ -773,14 +788,13 @@ export const routeQuestionHandler = async (
             : { tool: 'sfi.run_analysis', args: { name: tool, args } };
         })
       : undefined;
-  // CAE-01/02/04 semantic funnel: surface meaning-ranked candidate tools for the
-  // host LLM when the deterministic router is UNSURE (`unrouted`/low-conf) OR when
-  // an explicit output mode (CAE-04) is requested. Advisor, not a route — offline
-  // TF-IDF over the capability map; a mode reranks the candidates toward its family.
-  const wantCandidates =
-    input.mode !== undefined ||
-    route.intent === 'unrouted' ||
-    route.confidence === 'low';
+  // CAE-03b semantic funnel is PRIMARY: in the default HYBRID mode, surface the
+  // meaning-ranked candidates + guidance for EVERY routable question and let the
+  // host LLM decide — the regex `route` rides along only as a non-authoritative
+  // hint. SFI_ROUTER_MODE=offline suppresses candidates and returns the
+  // deterministic route alone (Design A, for no-LLM / CI / air-gapped hosts).
+  // Offline TF-IDF over the capability map; a mode reranks toward its family.
+  const wantCandidates = routerMode() === 'hybrid';
   const toolCandidates = wantCandidates
     ? rerankForMode(
         semanticCandidates(input.question, input.mode !== undefined ? 12 : 8),
@@ -797,7 +811,7 @@ export const routeQuestionHandler = async (
       gapLogged: logged !== null,
       rendered:
         toolCandidates.length > 0
-          ? `${renderRouteMarkdown(route)}\n\n**Candidate tools (ranked by meaning — you pick, then run):** ${toolCandidates
+          ? `${renderRouteMarkdown(route)}\n\n**Candidate tools (the shortlist — ranked by meaning; the route above is only a hint). You pick, then run:** ${toolCandidates
               .map((c) => c.tool)
               .join(', ')}`
           : renderRouteMarkdown(route),

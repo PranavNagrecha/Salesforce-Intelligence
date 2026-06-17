@@ -60,10 +60,14 @@ slash commands.
 ## Start here: route the question
 
 For any non-trivial question, call **`sfi.route_question`** FIRST (pass the
-user's plain-language question verbatim). It returns the plane that answers it
-(`vault` | `live` | `hybrid` | `unknown`), the ordered `sfi.*` `tools` to run,
-`needsResolve` (resolve a named component first?), `liveRequired` (is the live
-plane needed?), and a `gap` when no dedicated tool exists yet. Then orchestrate:
+user's plain-language question verbatim). In the default hybrid mode it returns
+a meaning-ranked **`toolCandidates`** shortlist (which YOU pick from) and a
+**`guidance`** planner line, plus a suggested plane (`vault` | `live` | `hybrid`
+| `unknown`) and a regex `route` as a HINT (`tools`, `needsResolve` — resolve a
+named component first?, `liveRequired` — is the live plane needed?, and a `gap`
+when no dedicated tool exists). YOU decide which candidate(s) to run; the `route`
+informs, it does not command. (`SFI_ROUTER_MODE=offline` omits candidates and
+makes the route authoritative for no-LLM hosts.) Then orchestrate:
 
 1. **Freshness** — first org-touching turn → `sfi.health_check` (Step 1 below).
 2. **Resolve** — if `needsResolve`, run `sfi.resolve` and act on its disposition
@@ -72,9 +76,10 @@ plane needed?), and a `gap` when no dedicated tool exists yet. Then orchestrate:
    the vault. Offer to enable it once: `sfi.live_consent { grant: true }`
    (read-only, persists per org). Proceed live only after consent /
    `SFI_LIVE_PLANE_ENABLED=1` / `liveEnabled: true`.
-4. **Execute** — call the returned `tools` in order. On `plane: 'unknown'` (or a
-   `gap`), say the capability isn't built yet — the question is logged — and
-   offer the closest thing. Never fabricate.
+4. **Execute** — pick the tool(s) from the `toolCandidates` (or follow the route
+   hint when it agrees) and call them. When neither the candidates nor the route
+   place the question (`plane: 'unknown'` or a `gap`), say the capability isn't
+   built yet — the question is logged — and offer the closest thing. Never fabricate.
 5. **Render** — when a tool result carries a **`rendered`** field (live answers,
    `resolve`, `org_overview`, `route_question`), use it as the prose/table
    answer and keep the provenance + freshness stamp it carries.
