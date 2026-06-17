@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-06-10T15:29:27.567Z",
+  "generatedAt": "2026-06-17T14:25:04.855Z",
   "toolCount": 171,
   "skillCount": 25,
   "commandCount": 4,
@@ -9,33 +9,33 @@
     "packages": [
       {
         "name": "mcp",
-        "files": 180,
-        "cases": 2059
+        "files": 187,
+        "cases": 2197
       },
       {
         "name": "extractors",
-        "files": 61,
-        "cases": 735
+        "files": 63,
+        "cases": 752
       },
       {
         "name": "cli",
-        "files": 29,
-        "cases": 202
+        "files": 32,
+        "cases": 246
       },
       {
         "name": "graph",
-        "files": 16,
-        "cases": 159
+        "files": 19,
+        "cases": 169
       },
       {
         "name": "parsers",
         "files": 4,
-        "cases": 112
+        "cases": 122
       },
       {
         "name": "patterns",
         "files": 3,
-        "cases": 107
+        "cases": 110
       },
       {
         "name": "renderers",
@@ -53,8 +53,8 @@
         "cases": 49
       }
     ],
-    "totalCases": 3578,
-    "totalFiles": 311,
+    "totalCases": 3800,
+    "totalFiles": 326,
     "packageCount": 9
   },
   "integrationSuiteCount": 7,

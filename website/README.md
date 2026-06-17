@@ -3,7 +3,7 @@
 A self-contained static website for the `sf-intelligence` product. No build step,
 no framework, no dependencies — just HTML, one CSS file, and a tiny progressive-
 enhancement JS file. Designed to be **fully indexable by Google** and friendly to
-AI answer engines, and to deploy to **GitHub Pages** with zero configuration.
+AI answer engines, and to deploy to **Cloudflare Pages** (or any static host) with zero configuration.
 
 > This repo intentionally ships **no Salesforce org data and no product source code** —
 > only marketing/docs content. Keep it that way: build it independently of the
@@ -32,12 +32,12 @@ index.html            Landing page (hero, features, how-it-works, trust, install
 capabilities.html     Full capability map (the 8 areas + live plane)
 getting-started.html  Install + first-run guide (HowTo structured data)
 faq.html              FAQ (FAQPage structured data for rich results)
-404.html              Custom not-found page (served by GitHub Pages)
+404.html              Custom not-found page (served by the static host)
 robots.txt            Allows all crawlers + AI bots; points to the sitemap
 sitemap.xml           All four indexable pages
 site.webmanifest      PWA manifest
 llms.txt              Summary for AI / answer-engine crawlers (GEO)
-.nojekyll             Tells GitHub Pages to skip Jekyll and serve files as-is
+.nojekyll             Legacy static-host marker (harmless; unused on Cloudflare)
 assets/css/style.css  The single stylesheet — Terminal/Phosphor theme (VT323 + JetBrains Mono)
 assets/js/main.js     Copy buttons, mobile nav, 404 path echo (site works without it)
 assets/img/           Favicon, OG image, and the brand SVG diagrams
@@ -108,8 +108,8 @@ node recalibrate.mjs                  # regenerate tools.html + llms-full.txt wi
 This site lives inside the **private** product repo at `website/`. Cloudflare Pages serves
 **only the Root directory you point it at**, so the product code/history is never published.
 
-1. Cloudflare dashboard → **Workers & Pages → Create → Pages → Connect to Git** → pick the
-   private `Salesforce-Intelligence` repo (Cloudflare's GitHub app can read private repos).
+1. Cloudflare dashboard → **Workers & Pages → Create → Pages → Connect to Git** → pick this
+   private repo (Cloudflare's Git integration can read private repos).
 2. Build settings:
    - **Production branch:** `main` — a stable branch, **not** `release/*`
    - **Framework preset:** None · **Build command:** *(empty)* · **Build output directory:** `/`

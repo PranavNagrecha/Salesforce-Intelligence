@@ -213,7 +213,7 @@
  <p>Curated meaning the org cannot carry - <code>owner</code>, <code>status</code> (e.g. deprecated), glossary synonyms, <code>domain</code>, <code>note</code> - event-sourced and surviving every refresh. Humans write via <code>sfi annotate</code>; AI proposes via <code>sfi.propose_annotation</code> (always <code>confirmed: false</code>). Consumers serve annotations with provenance <code>annotation</code> - never <code>offline_snapshot</code>. Orphans (annotated IDs whose component left the graph) surface in the refresh pulse and <code>sfi annotate orphans</code>.</p>
 
  <h2 id="gaps">Question-gap log (local telemetry)</h2>
- <p>When routing cannot answer a question, the intent router may append a gap record <strong>locally</strong> - never sent to the network - so the library grows toward what people actually ask.</p>
+ <p>When routing cannot answer a question, the router may append a gap record <strong>locally</strong> - never sent to the network - so the library grows toward what people actually ask.</p>
  <table class="doc-table">
  <thead><tr><th>Variable / path</th><th>Default</th><th>Purpose</th></tr></thead>
  <tbody>
