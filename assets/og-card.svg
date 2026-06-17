@@ -32,11 +32,11 @@
 
     <g transform="translate(0,290)" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">
       <text fill="#7E8FAA">›</text>
-      <text x="22" fill="#E6EEF8">88 tools · 25+ component types · 17 edge types</text>
+      <text x="22" fill="#E6EEF8">170+ tools · 50+ component types · 20+ edge types</text>
     </g>
   </g>
 
   <g transform="translate(1020,80)" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5E7395">
-    <text>github.com/your/sf-intelligence</text>
+    <text>github.com/PranavNagrecha/Salesforce-Intelligence</text>
   </g>
 </svg>
