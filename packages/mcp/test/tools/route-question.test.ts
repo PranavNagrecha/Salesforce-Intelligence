@@ -697,4 +697,47 @@ describe('core-profile gateway envelopes (P13-GW-router-envelope)', () => {
     if (!r.ok) return;
     expect(r.value.data.guidance).toContain('ASK mode');
   });
+
+  // CAE-03b: the funnel is PRIMARY in the default hybrid mode — candidates +
+  // guidance ride with EVERY routable question, including a confident route, and
+  // the regex route is demoted to a non-authoritative hint.
+  it('attaches candidates + guidance even on a confidently-routed question (CAE-03b hybrid)', async () => {
+    const r = await routeQuestionHandler(ctx, {
+      question: 'What happens when an Account is updated?',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // The regex still routes it (the hint) — it is NOT unrouted...
+    expect(r.value.data.route.intent).not.toBe('unrouted');
+    // ...yet the funnel candidates are surfaced anyway, as the primary output.
+    expect((r.value.data.toolCandidates ?? []).length).toBeGreaterThan(0);
+    expect(r.value.data.guidance).toContain('YOU decide');
+    expect(r.value.data.rendered).toContain('Candidate tools');
+  });
+
+  // CAE-03b: SFI_ROUTER_MODE=offline is the deterministic Design-A fallback for
+  // no-LLM / CI / air-gapped hosts — the regex route is authoritative and the
+  // funnel candidates are omitted (even when a mode is requested).
+  it('SFI_ROUTER_MODE=offline omits candidates + guidance (CAE-03b deterministic fallback)', async () => {
+    const prev = process.env.SFI_ROUTER_MODE;
+    process.env.SFI_ROUTER_MODE = 'offline';
+    try {
+      const r = await routeQuestionHandler(ctx, {
+        question: 'where does Pranav have access to',
+        logGap: false,
+        mode: 'plan',
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      // The deterministic route is still returned (authoritative)...
+      expect(r.value.data.route).toBeDefined();
+      // ...but no funnel candidates / guidance, even with a mode set.
+      expect('toolCandidates' in r.value.data).toBe(false);
+      expect('guidance' in r.value.data).toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env.SFI_ROUTER_MODE;
+      else process.env.SFI_ROUTER_MODE = prev;
+    }
+  });
 });

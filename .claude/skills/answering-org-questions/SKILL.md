@@ -28,14 +28,15 @@ evidence in the vault" — NEVER "nothing uses this".
 ## Overview
 
 This skill is the conversational interface to the `sf-intelligence`
-vault. The flow: **call `sfi.route_question` first** — it maps the user's
-plain-language question to the plane (`vault` | `live` | `hybrid` |
-`unknown`) and the ordered `sfi.*` tools that answer it — then **resolve**
-any named component, **check live consent** if the route needs the live
-plane, **execute** the tools, and **use the `rendered` field** when a tool
-returns one. Do not improvise tool choice from feel; `route_question` is the
-map, and the seven-intent table below is the manual fallback and the detail
-for executing each route. Always cite canonical component IDs in the answer.
+vault. The flow: **call `sfi.route_question` first** — in the default hybrid
+mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick
+from) plus a suggested plane (`vault` | `live` | `hybrid` | `unknown`) and a
+regex `route` as a HINT — then **pick the tool(s)** from the candidates,
+**resolve** any named component, **check live consent** if the live plane is
+needed, **execute** the tools, and **use the `rendered` field** when a tool
+returns one. Pick from the candidates rather than from feel; the `route` is a
+hint, not a command, and the seven-intent table below is the detail for
+executing each route. Always cite canonical component IDs in the answer.
 
 The vault is the source of truth. The user is asking about *their* org,
 not a generic Salesforce org. General Salesforce knowledge tells you

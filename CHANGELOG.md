@@ -14,6 +14,22 @@ docs brought back in sync with shipped reality), and the bug hunter
 (adversarial batteries, an agent-eval gate, and ratcheted eval minimums).
 Entries accrue below as changes land.
 
+### Funnel-primary routing; regex demoted to a hint (CAE-03b)
+
+- **`sfi.route_question` now leads with the semantic funnel.** In the default
+  hybrid mode it attaches `toolCandidates` (the meaning-ranked shortlist) + a
+  `guidance` planner line to **every** routable question — not just `unrouted` /
+  low-confidence ones — and the host LLM decides which tool(s) to run. The
+  deterministic regex `route` still travels with the response but is now a
+  **non-authoritative hint** (suggested tool order, resolved entity, suggestedArgs),
+  not the answer.
+- **New `SFI_ROUTER_MODE=offline`** restores the deterministic Design-A route for
+  no-LLM / CI / air-gapped hosts: the regex route is authoritative and candidates
+  are omitted. Default (unset) is `hybrid`.
+- The regex engine is **kept, not deleted** — it backs both the hint and the
+  offline fallback — so all existing routing gates stay green. Tool description,
+  server instructions, and trust limitations updated to match.
+
 ### Ask / Plan / Assessment output modes (CAE-04)
 
 - **`sfi.route_question` gains an optional `mode` ('ask' | 'plan' | 'assessment')**
