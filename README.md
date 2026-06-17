@@ -2,6 +2,13 @@
   <img src="assets/hero.svg" alt="SfIntelligence — an intelligence layer for your Salesforce org" width="100%">
 </p>
 
+<p align="center">
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT%20%2B%20Commons%20Clause-blue.svg" alt="License: MIT + Commons Clause"></a>
+  <a href="https://www.npmjs.com/package/sf-intelligence"><img src="https://img.shields.io/npm/v/sf-intelligence.svg?color=cb3837&label=npm" alt="npm version"></a>
+  <img src="https://img.shields.io/badge/node-%E2%89%A520-339933.svg" alt="Node.js >= 20">
+  <img src="https://img.shields.io/badge/status-read--only%20%26%20offline-2ea44f.svg" alt="Read-only and offline-first">
+</p>
+
 # sf-intelligence
 
 Ask questions about your Salesforce org in plain language — and get answers
@@ -46,15 +53,52 @@ score is string similarity, not proof. **Source grep tools** (`sfi.search_apex_s
 `sfi.search_flow_metadata`) walk the vaulted `source/` tree from your last
 refresh — run `/sfi-refresh` before trusting an empty grep result.
 
-Under the hood a deterministic **router** (`sfi.route_question`) maps each
-question to the plane that answers it — the **offline vault** (metadata,
-dependencies, permissions), the **live org** (counts, samples, limits, inactive
-users — read-only, opt-in), or a **hybrid** of both (e.g. "is this field
-*actually* populated?") — and to the exact tools to run, so you never type a
-tool name. Every answer is stamped with its provenance (`offline_snapshot`,
-`live_org`, or `hybrid`) and freshness. When the product has no tool for
-something yet, it **says so and logs the gap** rather than guessing — so the
-library grows toward what people actually ask.
+Under the hood a semantic **router** (`sfi.route_question`) reads each question
+and returns a **meaning-ranked shortlist** of the `sfi.*` tools that can answer
+it — so your AI host picks and runs them without you ever typing a tool name. It
+runs fully **offline** (a small TF-IDF model over the tool catalog — no network,
+no embeddings service) and it **advises rather than dictates**: the host LLM sees
+the shortlist plus a short planner contract and decides which tools to run, in
+what order. The router also tags each question with the plane that answers it —
+the **offline vault** (metadata, dependencies, permissions), the **live org**
+(counts, samples, limits, inactive users — read-only, opt-in), or a **hybrid** of
+both (e.g. "is this field *actually* populated?"). Every answer is stamped with
+its provenance (`offline_snapshot`, `live_org`, or `hybrid`) and freshness. When
+nothing fits, it **says so and logs the gap** rather than guessing — so the
+library grows toward what people actually ask. (A deterministic, no-LLM routing
+mode is available via `SFI_ROUTER_MODE=offline` for CI / air-gapped hosts.)
+
+## How it works
+
+One read-only **refresh** turns your org into a local vault; from then on every
+question is answered **offline** — your AI host asks the router for a shortlist,
+picks the tools, runs them against the vault, and grounds the answer. The host
+decides; the router only advises.
+
+```mermaid
+flowchart TB
+    subgraph REFRESH["Refresh — once, and whenever the org changes"]
+        direction LR
+        ORG[("Salesforce org")] -->|"sf project retrieve (read-only)"| SRC["source/ raw metadata"]
+        SRC -->|"extract + parse Apex / Flow / XML"| VAULT[("Local vault<br/>Markdown + DuckDB graph")]
+    end
+
+    subgraph ASK["Ask — every question, offline by default"]
+        direction TB
+        Q["Your question<br/>(plain language)"] --> HOST["Host LLM<br/>(Claude, etc.)"]
+        HOST -->|"1 · route_question"| FUNNEL["Semantic funnel<br/>offline TF-IDF — no network"]
+        FUNNEL -->|"toolCandidates + guidance<br/>(ranked shortlist — advises)"| HOST
+        HOST -->|"2 · picks and runs"| TOOLS["sfi.* tools"]
+        TOOLS -->|"3 · read"| VAULT
+        TOOLS -.->|"opt-in, read-only, capped"| LIVE[("Live org")]
+        TOOLS -->|"4 · synthesize_answer"| ANS["Grounded answer<br/>+ provenance + freshness<br/>+ cited canonical ids"]
+    end
+```
+
+Every box on the **Ask** path runs on your machine; the dotted edge to the live
+org is the only one that can touch Salesforce, and only after you opt in. The
+deterministic `SFI_ROUTER_MODE=offline` mode collapses step 1 to a single routed
+plan for hosts with no LLM in the loop.
 
 ## What you can ask
 

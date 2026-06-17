@@ -63,8 +63,8 @@
     <text y="56" font-size="52" font-weight="700" fill="#FFFFFF">An intelligence layer</text>
     <text y="112" font-size="52" font-weight="700" fill="#FFFFFF">for your Salesforce org.</text>
 
-    <text y="168" font-size="18" fill="#9BB3D1">88 MCP tools. 17 edge types. 25+ component types.</text>
-    <text y="194" font-size="18" fill="#9BB3D1">Offline, read-only, deterministic. MIT + Commons Clause.</text>
+    <text y="168" font-size="18" fill="#9BB3D1">170+ MCP tools. 20+ edge types. 50+ component types.</text>
+    <text y="194" font-size="18" fill="#9BB3D1">Offline, read-only, grounded. MIT + Commons Clause.</text>
 
     <g transform="translate(0,230)">
       <rect width="220" height="44" rx="22" fill="url(#accent)"/>

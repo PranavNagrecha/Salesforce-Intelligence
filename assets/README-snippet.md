@@ -17,7 +17,7 @@
 
 <p align="center">
   <b>An offline, MCP-first knowledge base for one Salesforce org.</b><br>
-  139 tools · 72 component types · 20 edge types · MIT + Commons Clause
+  170+ tools · 50+ component types · 20+ edge types · MIT + Commons Clause
 </p>
 
 <p align="center">
@@ -65,7 +65,7 @@ record-level data, no network.
 ## What you can ask
 
 <p align="center">
-  <img src="assets/tools-catalog.svg" alt="The 139 tools, organized by what you'd ask" width="100%">
+  <img src="assets/tools-catalog.svg" alt="The full tool catalog, organized by what you'd ask" width="100%">
 </p>
 
 ### Three demos
