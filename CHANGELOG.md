@@ -3,7 +3,17 @@
 All notable changes to **sf-intelligence** are documented here. This project
 adheres to [Semantic Versioning](https://semver.org).
 
-## [0.1.10] (unreleased)
+## [0.1.12] — 2026-06-17
+
+Headline: **funnel-primary routing (CAE)**. `sfi.route_question` now leads with an
+offline semantic funnel — it surfaces a meaning-ranked shortlist of the `sfi.*`
+tools that answer a question and the host LLM picks which to run; the deterministic
+regex route is demoted to a non-authoritative hint. `SFI_ROUTER_MODE=offline`
+restores the fully deterministic route for no-LLM / CI / air-gapped hosts. Adds the
+`mode` ('ask' | 'plan' | 'assessment') output shaping. README refreshed with an
+architecture diagram and accurate stats. See the detailed entries below.
+
+## [0.1.10]
 
 Development line for the gap-closure milestone: close every pre-existing
 product gap so the first public release is correct, routable, and honestly
