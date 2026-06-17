@@ -102,7 +102,7 @@
  <tr><td><strong>Dependency graph</strong></td><td>Yes - DuckDB, confidence-tagged edges</td><td>No dedicated graph</td></tr>
  <tr><td><strong>Impact / blast radius</strong></td><td>Core feature</td><td>Not a focus</td></tr>
  <tr><td><strong>Permission tracing</strong></td><td>Yes - FLS, sharing cascade</td><td>Limited</td></tr>
- <tr><td><strong>Plain-language routing</strong></td><td>Deterministic intent router</td><td>Tool-per-task model</td></tr>
+ <tr><td><strong>Plain-language routing</strong></td><td>Semantic router, host LLM picks the tools</td><td>Tool-per-task model</td></tr>
  <tr><td><strong>Cost</strong></td><td>Free</td><td>Free (official)</td></tr>
  <tr><td><strong>npm package</strong></td><td><code>sf-intelligence</code></td><td><code>@salesforce/mcp</code> (via Salesforce CLI)</td></tr>
  </tbody>
@@ -128,7 +128,7 @@
  <h2 id="both">Use both together</h2>
  <p>A common pattern: use sf-intelligence to <strong>understand</strong> the blast radius and permissions landscape, then use the DX MCP Server to <strong>implement</strong> the change. Register both MCP servers in the same Claude Code or Cursor project - they do not conflict.</p>
 
- <div class="callout"><p><strong>Disclaimer:</strong> This comparison is based on publicly documented capabilities as of 2026. Salesforce's official MCP offerings evolve - verify current feature sets on <a href="https://github.com/salesforcecli/mcp" rel="noopener">salesforcecli/mcp</a>. sf-intelligence is not affiliated with Salesforce.</p></div>
+ <div class="callout"><p><strong>Disclaimer:</strong> This comparison is based on publicly documented capabilities as of 2026. Salesforce's official MCP offerings evolve - verify current feature sets in Salesforce's official documentation. sf-intelligence is not affiliated with Salesforce.</p></div>
 
  <div style="padding-top:36px;">
  <div class="cta-box">

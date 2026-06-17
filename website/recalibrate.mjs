@@ -291,7 +291,7 @@ const toolsHtml = `<!DOCTYPE html>
       <div class="container">
         <nav class="crumbs" aria-label="Breadcrumb"><a href="/">home</a><span>/</span><a href="/capabilities.html">capabilities</a><span>/</span>tools</nav>
         <h1 class="screen-type">All ${N} Salesforce tools</h1>
-        <p>The complete reference for every read-only tool sf-intelligence exposes for a Salesforce org  -  grouped by function, each with what it does. You never call these by name; the router picks them from your plain-language question. They are listed here for transparency and so AI assistants can cite them accurately.</p>
+        <p>The complete reference for every read-only tool sf-intelligence exposes for a Salesforce org  -  grouped by function, each with what it does. You never call these by name; an offline semantic router surfaces a ranked shortlist for each plain-language question and your AI host picks which to run. They are listed here for transparency and so AI assistants can cite them accurately.</p>
       </div>
     </section>
 
@@ -302,7 +302,7 @@ ${bodyCards}
         <div style="padding-top:38px;">
           <div class="cta-box">
             <h2 class="screen-type">See it in action</h2>
-            <p>You don't memorize these  -  you ask in plain language and the router runs the right ones.</p>
+            <p>You don't memorize these  -  you ask in plain language, the router surfaces the right shortlist, and your AI host runs them.</p>
             <div class="cta-actions">
               <a class="btn btn-solid" href="/getting-started.html">get started</a>
               <a class="btn btn-ghost" href="/capabilities.html">capability overview</a>
@@ -400,7 +400,7 @@ patch("trust.html", [
  * 5. regenerate llms-full.txt from the (now-patched) llms.txt + the catalog
  * ======================================================================= */
 const llms = fs.readFileSync(path.join(SITE, "llms.txt"), "utf8").trimEnd();
-let cat = `\n\n## All tools (${N})\n\nEvery read-only tool, grouped by function. You never call these by name  -  a router maps a plain-language question to the right ones.\n`;
+let cat = `\n\n## All tools (${N})\n\nEvery read-only tool, grouped by function. You never call these by name  -  an offline semantic router surfaces a ranked shortlist and your AI host picks which to run.\n`;
 for (const [label, arr] of sections) {
   cat += `\n### ${label} (${arr.length})\n\n`;
   cat += arr.map((t) => `- \`${t.name}\`  -  ${oneLine(t.description)}`).join("\n") + "\n";
