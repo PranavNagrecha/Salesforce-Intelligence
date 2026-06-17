@@ -424,5 +424,8 @@ describe('domainClustersHandler — per-cluster member cap (oversize fix)', () =
       await closeGraph(s);
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+    // CI runs this 50-node clique through community detection on a constrained
+    // runner; the default 5s timeout occasionally trips and the DuckDB native
+    // binding then aborts the whole worker (exit 134). 30s gives ample headroom.
+  }, 30_000);
 });
