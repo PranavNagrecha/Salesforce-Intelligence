@@ -1,5 +1,10 @@
-# Local build-loop state lives in Intelligence Layer/.sfi/local/ (see LOOP_STATE.md)
+# Internal build-loop / planning / release-process artifacts — kept OUT of the
+# public product repo (the live build-loop state lives in Intelligence Layer/.sfi/local/).
 LOOP_STATE.json
+/BACKLOG.md
+/LOOP_STATE.md
+/docs/reports/release-*.md
+website/SEO-STRATEGY.md
 
 node_modules/
 dist/

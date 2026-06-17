@@ -29,20 +29,6 @@ Claude Code plugin.
 
 ---
 
-## Build workflow
-
-**Session handoff (gitignored):** [`.sfi/local/HANDOFF.md`](../../.sfi/local/HANDOFF.md). Root [`HANDOFF.md`](../../HANDOFF.md) is a pointer only.
-
-**Commands:** [`START-HERE.md`](../../START-HERE.md).
-
-| Doc | What it covers |
-| --- | --- |
-| [`BUILD-CONTRACT.md`](../../BUILD-CONTRACT.md) | One backlog, one gate, one loop |
-| [`BACKLOG.md`](../../BACKLOG.md) | Ordered work list |
-| [`.sfi/local/LOOP_STATE.json`](../../.sfi/local/LOOP_STATE.json) | Minimal machine state (gitignored; see [LOOP_STATE.md](../LOOP_STATE.md)) |
-
----
-
 ## Contributing and security
 
 | Doc | What it covers |
