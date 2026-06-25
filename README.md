@@ -5,6 +5,7 @@
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT%20%2B%20Commons%20Clause-blue.svg" alt="License: MIT + Commons Clause"></a>
   <a href="https://www.npmjs.com/package/sf-intelligence"><img src="https://img.shields.io/npm/v/sf-intelligence.svg?color=cb3837&label=npm" alt="npm version"></a>
+  <a href="https://github.com/PranavNagrecha/Salesforce-Intelligence/actions/workflows/ci.yml"><img src="https://github.com/PranavNagrecha/Salesforce-Intelligence/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/node-%E2%89%A520-339933.svg" alt="Node.js >= 20">
   <img src="https://img.shields.io/badge/status-read--only%20%26%20offline-2ea44f.svg" alt="Read-only and offline-first">
 </p>
