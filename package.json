@@ -39,6 +39,7 @@
     "guard": "node scripts/release-guard.mjs",
     "scan:leaks": "node scripts/scan-org-leaks.mjs --strict",
     "scan:leaks:history": "node scripts/scan-org-leaks.mjs --git-history --strict",
+    "check:public-interface": "node scripts/check-public-interface.mjs",
     "qa:commit-gate": "node ../sf-intelligence-qa/scripts/commit-gate.mjs",
     "product-surface": "node scripts/product-surface.mjs",
     "snapshot": "node scripts/release-snapshot.mjs",
