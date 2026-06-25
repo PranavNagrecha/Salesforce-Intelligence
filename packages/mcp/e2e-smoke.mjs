@@ -13,7 +13,7 @@
  * Exit 0 = all assertions pass, 1 = a failure.
  */
 
-import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -251,6 +251,35 @@ await b.client.close().catch(() => {});
 check('server refuses to start without a vault', !connected);
 check('no-vault message is actionable (mentions `sfi init`)', b.getStderr().includes('sfi init'), b.getStderr().trim().slice(0, 120));
 rmSync(emptyDir, { recursive: true, force: true });
+
+// === Scenario 3: the SHIPPED demo vault — the public no-org front door (P21-DEMO-ci-eval) ===
+// Proves the committed examples/demo-vault (synthetic "Verdant Energy" org) is queryable over
+// the real MCP protocol, so every CI run / gate exercises the public demo on PUBLIC data — never
+// a real org. This is the public-data counterpart to the maintainer-only real-vault tool-smoke.
+console.log('\n# shipped demo vault (examples/demo-vault)');
+const demoVault = join(here, '..', '..', 'examples', 'demo-vault');
+if (!existsSync(join(demoVault, 'graph', 'graph.duckdb'))) {
+  check('shipped demo vault is present (examples/demo-vault/graph/graph.duckdb)', false, 'missing — run the demo build');
+} else {
+  const demoTransport = new StdioClientTransport({
+    command: 'node',
+    args: [BIN, 'mcp', '--vault', demoVault],
+    cwd: join(here, '..', '..'),
+    stderr: 'pipe',
+  });
+  const demoClient = new Client({ name: 'e2e-demo', version: '1' }, { capabilities: {} });
+  try {
+    await demoClient.connect(demoTransport);
+    const list = await callText(demoClient, 'sfi.list_components', { type: 'CustomObject' });
+    check('demo vault serves the synthetic schema (Project__c)', list.includes('Project__c'), list.slice(0, 100));
+    const res = await callText(demoClient, 'sfi.resolve', { query: 'paymnet' });
+    check('demo vault resolves a typo (paymnet -> Payment__c)', res.includes('Payment__c'), res.slice(0, 100));
+  } catch (e) {
+    check('demo-vault scenario ran', false, e.message);
+  } finally {
+    await demoClient.close().catch(() => {});
+  }
+}
 
 console.log(`\n${failures === 0 ? 'OK' : 'FAILED'} — ${failures} failure(s)`);
 process.exit(failures === 0 ? 0 : 1);
