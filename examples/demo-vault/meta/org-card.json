@@ -1,0 +1,145 @@
+{
+  "generatedAt": "2026-06-25T15:19:46.650Z",
+  "sourceTreeHash": "ec3078be5664a9ac51be30123be8bbf4b2747acc85fbd99aa38f2c22e45e8824",
+  "refreshedAt": "2026-06-25T15:19:46.650Z",
+  "kind": "org-card",
+  "targetOrg": "demo-org",
+  "totals": {
+    "components": 113,
+    "edges": 322
+  },
+  "componentCounts": {
+    "CustomField": 63,
+    "CustomObject": 13,
+    "Role": 6,
+    "ApexClass": 5,
+    "Profile": 3,
+    "ValidationRule": 3,
+    "Flow": 2,
+    "Group": 2,
+    "Layout": 2,
+    "PermissionSet": 2,
+    "Queue": 2,
+    "RecordType": 2,
+    "SharingRule": 2,
+    "ApexTrigger": 1,
+    "ApprovalProcess": 1,
+    "OmniDataTransform": 1,
+    "OmniIntegrationProcedure": 1,
+    "OmniScript": 1,
+    "WorkflowRule": 1
+  },
+  "coverage": {
+    "status": "complete",
+    "coveredTypeCount": 64,
+    "partialTypes": [],
+    "notModeledTypes": [],
+    "erroredTypes": []
+  },
+  "topObjects": [
+    {
+      "id": "CustomObject:Project__c",
+      "inboundRefs": 17
+    },
+    {
+      "id": "CustomObject:Installation__c",
+      "inboundRefs": 5
+    },
+    {
+      "id": "CustomObject:Invoice__c",
+      "inboundRefs": 5
+    },
+    {
+      "id": "CustomObject:Battery__c",
+      "inboundRefs": 4
+    },
+    {
+      "id": "CustomObject:Incentive__c",
+      "inboundRefs": 4
+    },
+    {
+      "id": "CustomObject:Permit__c",
+      "inboundRefs": 4
+    },
+    {
+      "id": "CustomObject:Solar_Panel__c",
+      "inboundRefs": 4
+    },
+    {
+      "id": "CustomObject:Service_Visit__c",
+      "inboundRefs": 3
+    },
+    {
+      "id": "CustomObject:Site_Survey__c",
+      "inboundRefs": 3
+    },
+    {
+      "id": "CustomObject:Warranty_Claim__c",
+      "inboundRefs": 3
+    },
+    {
+      "id": "CustomObject:Payment__c",
+      "inboundRefs": 2
+    },
+    {
+      "id": "CustomObject:Equipment_Allocation__c",
+      "inboundRefs": 1
+    },
+    {
+      "id": "CustomObject:SBQQ__ProductRule__c",
+      "inboundRefs": 0
+    }
+  ],
+  "objectScanCount": 13,
+  "automation": [
+    {
+      "type": "Flow",
+      "total": 2,
+      "active": 2
+    },
+    {
+      "type": "ApexTrigger",
+      "total": 1,
+      "active": 1
+    },
+    {
+      "type": "WorkflowRule",
+      "total": 1,
+      "active": 1
+    },
+    {
+      "type": "ApprovalProcess",
+      "total": 1,
+      "active": 1
+    }
+  ],
+  "permissions": {
+    "profileCount": 3,
+    "permissionSetCount": 2,
+    "godModeContainers": 0,
+    "godModeScanCount": 5
+  },
+  "integrations": {},
+  "naming": [
+    {
+      "pattern": "Custom fields on Invoice__c use PascalCase naming (4 of 6 fields)",
+      "matching": 4,
+      "total": 6
+    },
+    {
+      "pattern": "Custom fields on Service_Visit__c use PascalCase naming (4 of 5 fields)",
+      "matching": 4,
+      "total": 5
+    },
+    {
+      "pattern": "Custom fields on Equipment_Allocation__c use PascalCase naming (3 of 5 fields)",
+      "matching": 3,
+      "total": 5
+    },
+    {
+      "pattern": "Custom fields on Permit__c use PascalCase naming (3 of 5 fields)",
+      "matching": 3,
+      "total": 5
+    }
+  ]
+}

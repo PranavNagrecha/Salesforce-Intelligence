@@ -5,6 +5,7 @@
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT%20%2B%20Commons%20Clause-blue.svg" alt="License: MIT + Commons Clause"></a>
   <a href="https://www.npmjs.com/package/sf-intelligence"><img src="https://img.shields.io/npm/v/sf-intelligence.svg?color=cb3837&label=npm" alt="npm version"></a>
+  <a href="https://github.com/PranavNagrecha/Salesforce-Intelligence/actions/workflows/ci.yml"><img src="https://github.com/PranavNagrecha/Salesforce-Intelligence/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/node-%E2%89%A520-339933.svg" alt="Node.js >= 20">
   <img src="https://img.shields.io/badge/status-read--only%20%26%20offline-2ea44f.svg" alt="Read-only and offline-first">
 </p>
@@ -202,6 +203,28 @@ rather than papering over the gap with general Salesforce knowledge:
   - **Resolve:** p95 under 2s on the CI vault (`pnpm eval:scale`, `SCALE_BUDGET_MS`).
   Very large production orgs may still need narrowed retrieves or multiple vaults.
 
+## Try it now — no Salesforce org needed
+
+Want to see it work before pointing it at your own org? One command serves a
+built-in **synthetic demo org** ("Verdant Energy," a fictional solar installer)
+over MCP — fully offline, no auth, no `sf` CLI:
+
+```bash
+# Register the demo server with Claude Code (or any MCP client):
+claude mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo
+```
+
+Then ask it things like:
+
+> - *What happens when I save a Project?*
+> - *What breaks if I delete `Invoice__c.Amount__c`?*
+> - *Why can't an Installer see an Invoice?*
+> - *Which Apex has governor-limit risk?*
+
+The first run builds the demo vault in a few seconds (cached under
+`~/.sf-intelligence/demo`); every run after is instant. Nothing leaves your
+machine. When you're ready for your real org, follow **Install** below.
+
 ## Install
 
 `sf-intelligence` is distributed on npm as `sf-intelligence` — an MCP
@@ -377,7 +400,12 @@ multiple orgs. Share it (or just describe the gap) at
 
 ## License
 
-`sf-intelligence` is licensed under [MIT + Commons Clause](./LICENSE).
+`sf-intelligence` is licensed under the **MIT License with the [Commons Clause](./LICENSE)** (see also [`NOTICE`](./NOTICE)). In plain English:
+
+- ✅ **Free to use for any purpose — including at work, inside a company.** Evaluate, study, modify, self-host for your own use, fork, redistribute, and contribute — all free.
+- 🚫 **You may not _Sell_ it without a commercial license** — i.e. provide it to third parties, for a fee, as a product or service whose value derives substantially from the Software. That includes offering it (or a hosted / SaaS / derivative version) as a paid product or service, reselling it or paid access to it, or charging for hosting/support whose value derives substantially from it.
+
+For a commercial ("Sell") license, contact **pranav.sfintelligence@gmail.com**. _(Plain-English summary; the [LICENSE](./LICENSE) controls. Not legal advice.)_
 
 ## Documentation
 

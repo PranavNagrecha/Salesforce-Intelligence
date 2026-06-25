@@ -1,16 +1,33 @@
 {
   "name": "sf-intelligence",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Offline-first, MCP-first knowledge base for a Salesforce org. Ask about your org's metadata, dependencies, permissions, and automation \u2014 grounded in real retrieved metadata. Ships the sfi CLI and an MCP server.",
   "license": "SEE LICENSE IN LICENSE",
   "homepage": "https://salesforce-intelligence.pages.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PranavNagrecha/Salesforce-Intelligence.git"
+  },
+  "bugs": {
+    "url": "https://github.com/PranavNagrecha/Salesforce-Intelligence/issues"
+  },
+  "mcpName": "io.github.pranavnagrecha/sf-intelligence",
   "keywords": [
     "salesforce",
+    "salesforce-metadata",
     "mcp",
+    "mcp-server",
     "model-context-protocol",
+    "claude",
+    "claude-code",
+    "cursor",
+    "cline",
+    "ai-agent",
+    "llm",
     "cli",
     "metadata",
     "knowledge-base",
+    "offline",
     "sfdx",
     "apex",
     "salesforce-cli"
@@ -34,7 +51,9 @@
   "files": [
     "dist/index.js",
     "bin",
-    "README.md"
+    "README.md",
+    "server.json",
+    "demo-source"
   ],
   "scripts": {
     "build": "tsc --build && node build.mjs",

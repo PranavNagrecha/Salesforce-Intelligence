@@ -7,6 +7,7 @@ on:
   push:
     branches: [main, 'release/**']
   pull_request:
+  workflow_dispatch:
 
 jobs:
   build-test:
@@ -44,6 +45,9 @@ jobs:
           node scripts/scan-org-leaks.mjs --strict
           node scripts/scan-org-leaks.mjs --git-history --strict
           rm -f scripts/forbidden-names.local.json
+
+      - name: Public-interface guard (CI/eval reference only in-repo synthetic vaults)
+        run: node scripts/check-public-interface.mjs
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

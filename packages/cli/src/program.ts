@@ -5,6 +5,7 @@ import { Command } from 'commander';
 
 import { registerAnnotateCommand } from './commands/annotate.js';
 import { registerCompareVaultsCommand } from './commands/compare-vaults.js';
+import { registerDemoCommand } from './commands/demo.js';
 import { registerDoctorCommand } from './commands/doctor.js';
 import { registerFeedbackCommand } from './commands/feedback.js';
 import { registerInitCommand } from './commands/init.js';
@@ -76,6 +77,7 @@ export const createProgram = (): Command => {
   registerVaultCommand(program);
   registerDoctorCommand(program);
   registerMcpCommand(program);
+  registerDemoCommand(program);
   registerServeCommand(program);
   registerSelftestCommand(program);
   registerFeedbackCommand(program);

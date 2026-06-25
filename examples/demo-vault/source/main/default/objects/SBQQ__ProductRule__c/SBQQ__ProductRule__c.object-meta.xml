@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <deploymentStatus>Deployed</deploymentStatus>
+    <description>CPQ product rule stub (synthetic) — present so the SBQQ__ heuristic CPQ detector fires for the demo org.</description>
+    <enableActivities>false</enableActivities>
+    <enableHistory>false</enableHistory>
+    <enableReports>true</enableReports>
+    <label>Product Rule</label>
+    <nameField>
+        <label>Product Rule Name</label>
+        <type>Text</type>
+    </nameField>
+    <pluralLabel>Product Rules</pluralLabel>
+    <sharingModel>ReadWrite</sharingModel>
+    <visibility>Public</visibility>
+</CustomObject>

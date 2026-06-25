@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Role xmlns="http://soap.sforce.com/2006/04/metadata">
+    <name>Ops Manager</name>
+    <parentRole>Ops_Director</parentRole>
+    <caseAccessLevel>Edit</caseAccessLevel>
+    <contactAccessLevel>Edit</contactAccessLevel>
+    <opportunityAccessLevel>Read</opportunityAccessLevel>
+    <mayForecastManagerShare>false</mayForecastManagerShare>
+    <description>Schedules and oversees installation crews.</description>
+</Role>
