@@ -112,4 +112,38 @@ describe('coverageReportHandler', () => {
     expect(result.value.data.pending).toEqual([]);
     expect(result.value.data.stagedBuild).toBeUndefined();
   });
+
+  // C2 / Systemic #1: coverage_report used to self-contradict — its `partial[]`
+  // partition listed every requested-but-empty (retrieved:0) type while its
+  // `summary` (from summarizeCoverage) reported the vault "complete" and counted
+  // those same types as covered. The fix puts summarizeCoverage's coveredTypes
+  // filter in lockstep with partitionCoverage (both require retrieved>0), so
+  // summary now AGREES with partial[].
+  it('summary agrees with partial[] for a requested-but-empty type (no self-contradiction, C2)', async () => {
+    const emptyCtx: Context = {
+      ...ctx,
+      manifest: {
+        ...manifest,
+        coverage: [
+          { type: 'CustomObject', requested: true, retrieved: 2, errored: false, neverModeled: false },
+          // requested but retrieve pulled NOTHING — no error, modeled type.
+          { type: 'SharingRule', requested: true, retrieved: 0, errored: false, neverModeled: false },
+        ],
+      },
+    };
+    const result = await coverageReportHandler(emptyCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    // partitionCoverage classifies the empty type as partial...
+    expect(data.partial.map((e) => e.type)).toContain('SharingRule');
+    expect(data.covered.map((e) => e.type)).not.toContain('SharingRule');
+    // ...and the summary now AGREES (was 'complete' + coveredTypes incl. it).
+    expect(data.summary.status).toBe('partial');
+    expect(data.summary.coveredTypes).not.toContain('SharingRule');
+    expect(data.summary.partialTypes).toContain('SharingRule');
+    expect(data.summary.missingCoverage).toContain('SharingRule');
+    // trust.completeness mirrors the summary status (line 103).
+    expect(data.trust.completeness.status).toBe('partial');
+  });
 });

@@ -186,4 +186,43 @@ describe('whoCanAccessObjectHandler', () => {
     expect(r.value.data.hasMore).toBe(true);
     expect(r.value.data.truncated).toBe(true);
   });
+
+  // C2 / Systemic #1: an empty (or even non-empty) sharing-rule granter list is
+  // byte-identical whether the object has no sharing rules or the SharingRule
+  // type was never retrieved. When manifest coverage marks SharingRule
+  // requested-but-empty, a blindSpot must disclose that sharing-rule grants
+  // could not be enumerated — IN ADDITION to the static BLIND_SPOTS.
+  it('adds a SharingRule-not-retrieved blindSpot when SharingRule coverage is requested-but-empty (C2)', async () => {
+    const covCtx: Context = {
+      ...ctx,
+      manifest: {
+        ...MANIFEST,
+        coverage: [
+          { type: 'CustomObject', requested: true, retrieved: 1, errored: false, neverModeled: false },
+          { type: 'SharingRule', requested: true, retrieved: 0, errored: false, neverModeled: false },
+        ],
+      },
+    };
+    const r = await whoCanAccessObjectHandler(covCtx, { componentId: OBJ });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(
+      r.value.data.blindSpots.some((s) => /SharingRule.*not retrieved/i.test(s)),
+    ).toBe(true);
+    expect(r.value.data.blindSpots.some((s) => /not checked/i.test(s))).toBe(true);
+    // In ADDITION to the static blind spots, never replacing them.
+    expect(r.value.data.blindSpots.some((s) => s.includes('ownership'))).toBe(true);
+  });
+
+  // Regression guard: a pre-v4 manifest (no coverage array) must NOT emit the
+  // SharingRule-not-retrieved blindSpot — coverageKnown is false, so legacy
+  // vaults stay quiet (only the static BLIND_SPOTS are present).
+  it('does NOT add the SharingRule blindSpot for a legacy manifest with no coverage array', async () => {
+    const r = await whoCanAccessObjectHandler(ctx, { componentId: OBJ });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(
+      r.value.data.blindSpots.some((s) => /SharingRule.*not retrieved/i.test(s)),
+    ).toBe(false);
+  });
 });

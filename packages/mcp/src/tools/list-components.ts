@@ -364,7 +364,7 @@ export const listComponentsHandler = async (
         `No \`${input.type}\` in the vault — this type is NOT modeled by the current build, so its absence means "not analyzed", never "none in the org".`;
     } else if (cov.missingCoverage.includes(input.type)) {
       retrievalHint =
-        `No \`${input.type}\` retrieved into this vault — the last refresh did not pull this type (a scoped or errored retrieve). Run \`/sfi-refresh\` (widen \`--types\` to include ${input.type}) before concluding the org has none.`;
+        `No \`${input.type}\` retrieved into this vault — the last refresh did not pull this type (a scoped, errored, or empty retrieve that returned zero rows). A requested-but-empty retrieve is byte-identical to "the org has none", so this is reported as "not retrieved", not proof of absence. Run \`/sfi-refresh\` (widen \`--types\` to include ${input.type}) before concluding the org has none.`;
     } else {
       const parentApi =
         input.parentId !== undefined ? objectApiNameFromParentId(input.parentId) : null;

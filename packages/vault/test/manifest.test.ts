@@ -318,7 +318,13 @@ describe('coverage fields (enterprise trust contract)', () => {
     expect(summary.missingCoverage).toEqual(['Flow', 'Report']);
   });
 
-  it('treats requested empty types as covered when not errored', () => {
+  it('treats a requested empty type as NOT-RETRIEVED (partial), never complete (C2)', () => {
+    // C2 / Systemic #1: a type that was requested but whose retrieve pulled
+    // NOTHING (`retrieved: 0`, no error) is byte-identical on disk to "the org
+    // genuinely has none of this type". The coverage data model cannot prove
+    // "confirmed zero" vs "silently dropped", so the honest classification is
+    // partial / not-confirmed — never a false "complete" + covered. (Used to
+    // assert the bug: status 'complete', coveredTypes including the empty type.)
     const manifest: ExtendedVaultManifest = {
       ...sampleManifest(),
       coverage: [
@@ -340,8 +346,60 @@ describe('coverage fields (enterprise trust contract)', () => {
     };
 
     const summary = summarizeCoverage(manifest, ['CustomObject', 'Report']);
-    expect(summary.status).toBe('complete');
-    expect(summary.coveredTypes).toEqual(['CustomObject', 'Report']);
+    expect(summary.status).toBe('partial');
+    expect(summary.coveredTypes).toEqual(['CustomObject']);
+    expect(summary.partialTypes).toEqual(['Report']);
+    expect(summary.notModeledTypes).toEqual([]);
+    expect(summary.missingCoverage).toContain('Report');
+  });
+
+  it('marks the live-repro shape (CustomObject covered, Role/SharingRule/LWC/Aura retrieved:0) as partial (C2)', () => {
+    // The verified live repro: a vault with Roles/sharing-rules/LWC/Aura ON
+    // DISK whose coverage rows nonetheless show retrieved:0 must NOT report
+    // "complete". Each empty modeled family flows into partial + missingCoverage
+    // and stays OUT of notModeledTypes (guards the a4 I3 notModeled-set check).
+    const manifest: ExtendedVaultManifest = {
+      ...sampleManifest(),
+      coverage: [
+        { type: 'CustomObject', requested: true, retrieved: 47, errored: false, neverModeled: false },
+        { type: 'Role', requested: true, retrieved: 0, errored: false, neverModeled: false },
+        { type: 'SharingRule', requested: true, retrieved: 0, errored: false, neverModeled: false },
+        { type: 'LightningComponentBundle', requested: true, retrieved: 0, errored: false, neverModeled: false },
+        { type: 'AuraDefinitionBundle', requested: true, retrieved: 0, errored: false, neverModeled: false },
+      ],
+    };
+
+    const summary = summarizeCoverage(manifest, [
+      'CustomObject',
+      'Role',
+      'SharingRule',
+      'LightningComponentBundle',
+      'AuraDefinitionBundle',
+    ]);
+    expect(summary.status).toBe('partial');
+    expect(summary.coveredTypes).toEqual(['CustomObject']);
+    expect([...summary.partialTypes].sort()).toEqual([
+      'AuraDefinitionBundle',
+      'LightningComponentBundle',
+      'Role',
+      'SharingRule',
+    ]);
+    expect(summary.notModeledTypes).toEqual([]);
+    for (const t of ['Role', 'SharingRule', 'LightningComponentBundle', 'AuraDefinitionBundle']) {
+      expect(summary.missingCoverage).toContain(t);
+    }
+  });
+
+  it('returns status "unknown" (never complete or partial) when the manifest has no coverage array (back-compat)', () => {
+    // Pre-v4 manifests carry no `coverage` array. summarizeCoverage must NOT
+    // fabricate covered/partial rows for them: a missing field can never become
+    // a false "complete", and the new emptyTypes bucket must not invent spurious
+    // partial rows. backfillCoverageInMemory only ever synthesizes retrieved>0
+    // rows, so a raw (un-backfilled) manifest stays `unknown`.
+    const summary = summarizeCoverage(sampleManifest(), ['CustomObject', 'Report']);
+    expect(summary.coverageKnown).toBe(false);
+    expect(summary.status).toBe('unknown');
+    expect(summary.coveredTypes).toEqual([]);
     expect(summary.partialTypes).toEqual([]);
   });
 
