@@ -1,4 +1,4 @@
-import { exec } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -17,13 +17,26 @@ import {
 import { Command } from 'commander';
 
 import { FEEDBACK_ISSUES_URL } from './feedback.js';
+import { ORG_ALIAS_RE } from './org-alias.js';
 import {
   DEFAULT_STALE_AGE_DAYS,
   formatAge,
   isStaleByAge,
 } from './status.js';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+
+/**
+ * Per-call timeout for doctor's `sf` probes (`--version`, `org display`), so a
+ * hung/wedged `sf` (e.g. an auth prompt) cannot hang `sfi doctor` forever
+ * (CR-01 / H8). Shares the `SFI_SF_QUERY_TIMEOUT_MS` knob with refresh so an
+ * operator sets one value (2 min default). On timeout the child is sent
+ * `SIGTERM` so `sf` can clean up.
+ */
+const SF_DOCTOR_TIMEOUT_MS = (() => {
+  const n = Number(process.env['SFI_SF_QUERY_TIMEOUT_MS']);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 120_000;
+})();
 
 /** Default vault root, relative to CWD. Mirrors init/status. */
 const DEFAULT_VAULT_ROOT = 'org-kb';
@@ -58,8 +71,12 @@ export const isLegacySfdxToolbelt = (versionLine: string): boolean =>
 /** Human-readable `major.minor.patch`. */
 const formatVersion = (v: readonly [number, number, number]): string => v.join('.');
 
-/** Injectable shell runner so tests can drive `doctor` without spawning `sf`. */
-export type DoctorExec = (cmd: string) => Promise<{ stdout: string }>;
+/**
+ * Injectable `sf` runner so tests can drive `doctor` without spawning `sf`.
+ * Argv-shaped (binary + args, NOT a single shell string) so the `targetOrg`
+ * read from the vault config is never interpreted by a shell (CR-01 / C1).
+ */
+export type DoctorExec = (binary: string, args: readonly string[]) => Promise<{ stdout: string }>;
 
 /** One diagnostic line. `fix` is the actionable next step when not `pass`. */
 export interface DoctorCheck {
@@ -133,12 +150,19 @@ const pathExists = async (p: string): Promise<boolean> => {
   }
 };
 
-/** Read `targetOrg` from the vault config, or null if unreadable. */
+/**
+ * Read `targetOrg` from the vault config, or null if unreadable / absent / not
+ * a valid org alias. The `ORG_ALIAS_RE` gate is defense in depth (CR-01 / C1):
+ * a poisoned config value never reaches the `sf org display` probe; the
+ * existing "no targetOrg" branch fires instead.
+ */
 const readTargetOrg = async (configPath: string): Promise<string | null> => {
   try {
     const raw = await readFile(configPath, 'utf8');
     const parsed = JSON.parse(raw) as { targetOrg?: unknown };
-    return typeof parsed.targetOrg === 'string' ? parsed.targetOrg : null;
+    return typeof parsed.targetOrg === 'string' && ORG_ALIAS_RE.test(parsed.targetOrg)
+      ? parsed.targetOrg
+      : null;
   } catch {
     return null;
   }
@@ -156,7 +180,14 @@ const readTargetOrg = async (configPath: string): Promise<string | null> => {
  *   if (!r.healthy) process.exitCode = 1;
  */
 export const runDoctor = async (opts: RunDoctorOptions): Promise<DoctorReport> => {
-  const run = opts.exec ?? ((cmd: string) => execAsync(cmd, { maxBuffer: 64 * 1024 * 1024 }));
+  const run =
+    opts.exec ??
+    ((binary: string, args: readonly string[]) =>
+      execFileAsync(binary, [...args], {
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: SF_DOCTOR_TIMEOUT_MS,
+        killSignal: 'SIGTERM',
+      }));
   const checks: DoctorCheck[] = [];
   const vaultRoot = resolve(opts.cwd, DEFAULT_VAULT_ROOT);
   const paths = vaultPaths(vaultRoot);
@@ -171,15 +202,17 @@ export const runDoctor = async (opts: RunDoctorOptions): Promise<DoctorReport> =
   let sfDetail: string | null = null;
   let sfOnPath = false;
   try {
-    const { stdout } = await run('sf --version');
+    const { stdout } = await run('sf', ['--version']);
     sfDetail = stdout.trim().split('\n')[0] ?? 'installed';
     sfOnPath = true;
   } catch {
     for (const abs of SF_FALLBACK_PATHS) {
       try {
-        const { stdout } = await run(`"${abs}" --version`);
+        const { stdout } = await run(abs, ['--version']);
         sfDetail = stdout.trim().split('\n')[0] ?? 'installed';
-        sfBin = `"${abs}"`;
+        // Store the BARE absolute path — `run` spawns it as the execFile binary,
+        // so a quoted form would ENOENT (no shell to strip the quotes).
+        sfBin = abs;
         break;
       } catch {
         // keep probing the next location
@@ -243,7 +276,7 @@ export const runDoctor = async (opts: RunDoctorOptions): Promise<DoctorReport> =
     });
   } else {
     try {
-      const { stdout } = await run(`${sfBin} org display --target-org "${targetOrg}" --json`);
+      const { stdout } = await run(sfBin, ['org', 'display', '--target-org', targetOrg, '--json']);
       const parsed = JSON.parse(stdout) as { result?: { connectedStatus?: string; username?: string } };
       const status = parsed.result?.connectedStatus;
       if (status === 'Connected') {

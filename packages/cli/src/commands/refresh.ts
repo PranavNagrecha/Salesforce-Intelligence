@@ -1,4 +1,4 @@
-import { exec } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { appendFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -88,10 +88,11 @@ import {
   syncAuthoritativeRetrieveIntoSource,
 } from '../source-reconcile.js';
 
+import { ORG_ALIAS_RE, validateOrgAlias } from './org-alias.js';
 import { assessRefreshSize } from './refresh-preflight.js';
 import { runSnapshotCreate } from './snapshot.js';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 /** Default Salesforce metadata API version stamped into the generated package.xml. */
 const SF_API_VERSION = '62.0';
 
@@ -614,6 +615,12 @@ export const runRefresh = async (opts: RunRefreshOptions): Promise<RefreshResult
   if (!configResult.ok) return failed(started, configResult.error, []);
   const paths = vaultPaths(configResult.value.vaultRoot);
   const targetOrg = opts.targetOrg ?? configResult.value.targetOrg;
+  // Defense in depth (CR-01 / C1): the `--target-org` flag bypasses config.json
+  // (which loadVaultConfig already gates), so validate the flag override too.
+  if (opts.targetOrg !== undefined) {
+    const aliasCheck = validateOrgAlias(opts.targetOrg);
+    if (!aliasCheck.ok) return failed(started, aliasCheck.error, []);
+  }
 
   const requestedTypes = parseTypeFilter(opts.types);
   const progress = opts.onProgress ?? (() => {});
@@ -2013,6 +2020,12 @@ export const loadVaultConfig = async (cwd: string): Promise<Result<VaultConfig, 
   if (typeof parsed.targetOrg !== 'string' || parsed.targetOrg.length === 0) {
     return err(`Vault config missing 'targetOrg': ${configPath}`);
   }
+  // Defense in depth (CR-01 / C1): this is the single chokepoint every refresh
+  // path reads `targetOrg` through, so reject a poisoned alias here before it
+  // can reach any `sf` call — even though the exec sites are now shell-free.
+  if (!ORG_ALIAS_RE.test(parsed.targetOrg)) {
+    return err(`Vault config 'targetOrg' is not a valid org alias: ${configPath}`);
+  }
   const vaultRoot = typeof parsed.vaultRoot === 'string' && parsed.vaultRoot.length > 0
     ? parsed.vaultRoot
     : resolve(cwd, 'org-kb');
@@ -2068,6 +2081,51 @@ const toApiName = (type: ComponentType): string => METADATA_API_NAME[type] ?? ty
 
 /** Stdout ceiling for `sf` shellouts. Retrieve tables and the metadata-types describe both grow with org size. */
 const SF_MAX_BUFFER = 256 * 1024 * 1024;
+
+/**
+ * Per-call timeout for a `sf project retrieve start`. Generous (10 min default)
+ * because a full retrieve on a large org legitimately runs several minutes
+ * (the refresh itself warns "this can take several minutes"). On timeout the
+ * child is sent `SIGTERM` (graceful — lets `sf` clean up) so a hung/wedged
+ * retrieve can never block a refresh or the unattended watch daemon forever
+ * (CR-01 / H8). Override with `SFI_SF_RETRIEVE_TIMEOUT_MS`.
+ */
+const SF_RETRIEVE_TIMEOUT_MS = (() => {
+  const n = Number(process.env['SFI_SF_RETRIEVE_TIMEOUT_MS']);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 600_000;
+})();
+
+/**
+ * Per-call timeout for a `sf data query` / `sf org list metadata-types`
+ * describe (2 min default). These are short read-only calls; a hung one must
+ * not wedge the refresh (CR-01 / H8). Override with `SFI_SF_QUERY_TIMEOUT_MS`.
+ */
+const SF_QUERY_TIMEOUT_MS = (() => {
+  const n = Number(process.env['SFI_SF_QUERY_TIMEOUT_MS']);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 120_000;
+})();
+
+/**
+ * The shell-free `sf` runner. Spawns the `sf` binary directly with an argv
+ * array via `execFile` (NOT `exec`), so no value — including a `targetOrg` read
+ * from `--target-org`/`config.json` — is ever interpreted by a shell (CR-01 /
+ * C1): a metacharacter alias is one inert argv element, never executed. Every
+ * `sf` call in this module routes through here. `exec` is injectable so tests
+ * can assert the argv shape without spawning `sf`.
+ *
+ * @example runSf(['org', 'list', '--json'], { timeout: SF_QUERY_TIMEOUT_MS })
+ */
+export const runSf = (
+  args: readonly string[],
+  options: { readonly maxBuffer?: number; readonly cwd?: string; readonly timeout: number },
+  exec: typeof execFileAsync = execFileAsync,
+): Promise<{ stdout: string; stderr: string }> =>
+  exec('sf', [...args], {
+    maxBuffer: options.maxBuffer ?? SF_MAX_BUFFER,
+    timeout: options.timeout,
+    killSignal: 'SIGTERM',
+    ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+  });
 
 /**
  * Standard objects retrieved by explicit name. A `CustomObject` manifest with
@@ -2259,9 +2317,9 @@ const buildPackageXml = (types: readonly ComponentType[]): string =>
  */
 const getOrgSupportedTypes = async (targetOrg: string): Promise<ReadonlySet<string> | null> => {
   try {
-    const { stdout } = await execAsync(
-      `sf org list metadata-types --target-org "${targetOrg}" --json`,
-      { maxBuffer: SF_MAX_BUFFER },
+    const { stdout } = await runSf(
+      ['org', 'list', 'metadata-types', '--target-org', targetOrg, '--json'],
+      { maxBuffer: SF_MAX_BUFFER, timeout: SF_QUERY_TIMEOUT_MS },
     );
     const parsed = JSON.parse(stdout) as {
       result?: { metadataObjects?: ReadonlyArray<{ xmlName?: string; childXmlNames?: readonly string[] }> };
@@ -2492,9 +2550,9 @@ const retrieveTypeBatch = async (
   );
   await writeFile(manifestPath, buildPackageXml(types), 'utf8');
   try {
-    await execAsync(
-      `sf project retrieve start --manifest "${manifestPath}" --target-org "${targetOrg}"`,
-      { maxBuffer: SF_MAX_BUFFER, cwd: projectDir },
+    await runSf(
+      ['project', 'retrieve', 'start', '--manifest', manifestPath, '--target-org', targetOrg],
+      { maxBuffer: SF_MAX_BUFFER, cwd: projectDir, timeout: SF_RETRIEVE_TIMEOUT_MS },
     );
     const reconcile = await reconcileSourceDeletions(sourceDir, pkgDir, new Set(types));
     await syncAuthoritativeRetrieveIntoSource(sourceDir, pkgDir);
@@ -2593,9 +2651,9 @@ const runSfRetrieveObjects = async (
   const manifestPath = join(tmpdir(), `sfi-refresh-expand-${Date.now()}.xml`);
   await writeFile(manifestPath, manifest, 'utf8');
   try {
-    await execAsync(
-      `sf project retrieve start --manifest "${manifestPath}" --target-org "${targetOrg}" --output-dir "${sourceDir}"`,
-      { maxBuffer: SF_MAX_BUFFER },
+    await runSf(
+      ['project', 'retrieve', 'start', '--manifest', manifestPath, '--target-org', targetOrg, '--output-dir', sourceDir],
+      { maxBuffer: SF_MAX_BUFFER, timeout: SF_RETRIEVE_TIMEOUT_MS },
     );
     return ok(undefined);
   } catch (cause) {
@@ -2783,9 +2841,9 @@ const runSfRetrieveFolderedReports = async (
   const soql = async (
     query: string,
   ): Promise<readonly Record<string, unknown>[]> => {
-    const { stdout } = await execAsync(
-      `sf data query --query "${query}" --target-org "${targetOrg}" --json`,
-      { maxBuffer: SF_MAX_BUFFER },
+    const { stdout } = await runSf(
+      ['data', 'query', '--query', query, '--target-org', targetOrg, '--json'],
+      { maxBuffer: SF_MAX_BUFFER, timeout: SF_QUERY_TIMEOUT_MS },
     );
     const parsed = JSON.parse(stdout) as {
       result?: { records?: readonly Record<string, unknown>[] };
@@ -2829,9 +2887,9 @@ const runSfRetrieveFolderedReports = async (
   const manifestPath = join(tmpdir(), `sfi-refresh-reports-${Date.now()}.xml`);
   await writeFile(manifestPath, manifest, 'utf8');
   try {
-    await execAsync(
-      `sf project retrieve start --manifest "${manifestPath}" --target-org "${targetOrg}" --output-dir "${sourceDir}"`,
-      { maxBuffer: SF_MAX_BUFFER },
+    await runSf(
+      ['project', 'retrieve', 'start', '--manifest', manifestPath, '--target-org', targetOrg, '--output-dir', sourceDir],
+      { maxBuffer: SF_MAX_BUFFER, timeout: SF_RETRIEVE_TIMEOUT_MS },
     );
     return ok({ reports, dashboards });
   } catch (cause) {
@@ -2878,9 +2936,9 @@ export const runSfRetrieveSmartReports = async (
   >
 > => {
   const soql = async (query: string): Promise<readonly Record<string, unknown>[]> => {
-    const { stdout } = await execAsync(
-      `sf data query --query "${query}" --target-org "${targetOrg}" --json`,
-      { maxBuffer: SF_MAX_BUFFER },
+    const { stdout } = await runSf(
+      ['data', 'query', '--query', query, '--target-org', targetOrg, '--json'],
+      { maxBuffer: SF_MAX_BUFFER, timeout: SF_QUERY_TIMEOUT_MS },
     );
     const parsed = JSON.parse(stdout) as {
       result?: { records?: readonly Record<string, unknown>[]; totalSize?: number };
@@ -2889,9 +2947,9 @@ export const runSfRetrieveSmartReports = async (
   };
   const count = async (query: string): Promise<number> => {
     try {
-      const { stdout } = await execAsync(
-        `sf data query --query "${query}" --target-org "${targetOrg}" --json`,
-        { maxBuffer: SF_MAX_BUFFER },
+      const { stdout } = await runSf(
+        ['data', 'query', '--query', query, '--target-org', targetOrg, '--json'],
+        { maxBuffer: SF_MAX_BUFFER, timeout: SF_QUERY_TIMEOUT_MS },
       );
       const parsed = JSON.parse(stdout) as { result?: { totalSize?: number } };
       return parsed.result?.totalSize ?? 0;
@@ -2945,9 +3003,9 @@ export const runSfRetrieveSmartReports = async (
   const manifestPath = join(tmpdir(), `sfi-refresh-smart-reports-${Date.now()}.xml`);
   await writeFile(manifestPath, manifestXml, 'utf8');
   try {
-    await execAsync(
-      `sf project retrieve start --manifest "${manifestPath}" --target-org "${targetOrg}" --output-dir "${sourceDir}"`,
-      { maxBuffer: SF_MAX_BUFFER },
+    await runSf(
+      ['project', 'retrieve', 'start', '--manifest', manifestPath, '--target-org', targetOrg, '--output-dir', sourceDir],
+      { maxBuffer: SF_MAX_BUFFER, timeout: SF_RETRIEVE_TIMEOUT_MS },
     );
     // Requested-vs-landed: membership check against the freshly-pulled tree
     // (raw file counts would be inflated by files from earlier pulls).
@@ -3336,6 +3394,12 @@ export const runDemandRetrieve = async (opts: {
   if (!configResult.ok) return { status: 'failed', ...empty, message: configResult.error };
   const paths = vaultPaths(configResult.value.vaultRoot);
   const targetOrg = opts.targetOrg ?? configResult.value.targetOrg;
+  // Defense in depth (CR-01 / C1): validate the `--target-org` flag override,
+  // which bypasses the config.json check in loadVaultConfig.
+  if (opts.targetOrg !== undefined) {
+    const aliasCheck = validateOrgAlias(opts.targetOrg);
+    if (!aliasCheck.ok) return { status: 'failed', ...empty, message: aliasCheck.error };
+  }
 
   const manifestResult = await loadManifest(paths.root);
   if (!manifestResult.ok) {

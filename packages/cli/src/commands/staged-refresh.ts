@@ -42,6 +42,7 @@ import {
 import { readCliPackageVersion } from '../package-version.js';
 import { SUPPORTED_TYPES } from '../refresh-pipeline.js';
 
+import { validateOrgAlias } from './org-alias.js';
 import { loadVaultConfig, runRefresh, type RefreshResult } from './refresh.js';
 
 /**
@@ -338,6 +339,16 @@ export const runStagedRefresh = async (
   const vaultRoot = configResult.value.vaultRoot;
   const paths = vaultPaths(vaultRoot);
   const targetOrg = opts.targetOrg ?? configResult.value.targetOrg;
+  // Defense in depth (CR-01 / C1): validate the `--target-org` flag override
+  // here so a malicious alias fails BEFORE captureSkeletonCounts (T0) runs,
+  // not only later inside runRefresh. The config branch is gated in
+  // loadVaultConfig above.
+  if (opts.targetOrg !== undefined) {
+    const aliasCheck = validateOrgAlias(opts.targetOrg);
+    if (!aliasCheck.ok) {
+      return { result: failedResult(aliasCheck.error), tiersRun: [], tiersSkipped: [] };
+    }
+  }
   const plan = stagedTierPlan();
   const totalTiers = opts.withReports === true ? 4 : 3;
 
