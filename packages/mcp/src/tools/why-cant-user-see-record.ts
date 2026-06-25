@@ -21,26 +21,51 @@
  * VISIBLE record type (a `RecordType` stage reads `recordTypeVisibilities`).
  * The record-type gate is ANDed onto the permission gate.
  *
+ * **The two-plane access model.** Seeing a record requires BOTH planes:
+ *   (A) object-level READ CRUD (from the profile UNION any assigned permission
+ *       set, or system View/Modify All Data), AND
+ *   (B) record-level access (OWD-public, ownership, a sharing grant, or a
+ *       View/Modify-All bypass).
+ * Missing object Read => NOT visible, full stop, regardless of OWD. Plain
+ * object Edit/Delete is NOT a record-visibility grant — it satisfies plane A
+ * (Edit/Delete imply Read) but on a Private object never grants plane B. FLS
+ * (field-level security) is irrelevant to record VISIBILITY and never enters
+ * the verdict.
+ *
  * The cascade, in this exact order:
+ *
+ *   0. **Object-Read precondition (plane A)** — evaluated in the handler BEFORE
+ *      any record-visibility verdict. `hasObjectReadAccess` checks whether the
+ *      profile-UNION-permsets set holds any object Read CRUD
+ *      (`allowRead`/`allowEdit`/`allowDelete`/`allowCreate`/`viewAllRecords`/
+ *      `modifyAllRecords`) or system `ViewAllData`/`ModifyAllData`. When a
+ *      profile or permission set was supplied and the precondition is NOT met,
+ *      the handler returns `restricted` immediately (the ONLY precondition-
+ *      driven `restricted`). A role/group-only context cannot decide object
+ *      perms, so the gate is skipped and the cascade runs to an honest answer.
  *
  *   1. **OWD** (Organization-Wide Default) — read `componentId`'s
  *      `properties.sharingModel`.
- *        - rank ≥ the operation's requirement → `visible`. No further
- *          restriction is possible; the cascade short-circuits and the
- *          reasoning array contains only the OWD step. (e.g. `Read` visible for
- *          read; `ReadWrite` for edit; `FullAccess` for delete.)
+ *        - public (rank ≥ the operation's requirement) → OWD step `visible`.
+ *          This `visible` only survives to the aggregate once the object-Read
+ *          precondition (step 0) passed — a public OWD with zero object
+ *          permission already returned `restricted`. (e.g. `Read` for read;
+ *          `ReadWrite` for edit; `FullAccess` for delete.)
  *        - a recognised OWD below the requirement (`Private`, or `Read` for an
  *          edit check, etc.) → `restricted`. Continue the cascade; downstream
  *          grants / ownership / Modify-All can grant access back.
- *        - `null` (custom metadata, custom setting, etc.) → `unknown`.
- *          Stop the cascade and return `unknown` overall.
+ *        - `null` / unrecognised (custom metadata, custom setting, etc.) →
+ *          `unknown`. Stop the cascade and return `unknown` overall.
  *
  *   2. **PermissionGrant** — examine incoming `grantedBy` edges to
  *      `componentId` from every id in
- *      `userContext.profileId` + `userContext.permissionSetIds`. If any
- *      grants read-or-better access (`allowRead`, `viewAllRecords`,
- *      `modifyAllRecords`), the verdict is `visible` and overrides
- *      OWD-restricted (Modify-All-Data style). These are OBJECT-level perms.
+ *      `userContext.profileId` + `userContext.permissionSetIds`. Reports
+ *      `visible` ONLY for a record-sharing BYPASS — object "View All"
+ *      (`viewAllRecords`, read) or "Modify All" (`modifyAllRecords`, any
+ *      level). Plain object CRUD (`allowRead`/`allowEdit`/`allowDelete`)
+ *      satisfies the plane-A precondition but NOT plane B on a Private object,
+ *      so it reports `restricted` here (record visibility then depends on the
+ *      OWD-public path or a sharing grant). These are OBJECT-level perms.
  *
  *   2a. **SystemPermission** — the org-wide `ViewAllData` / `ModifyAllData`
  *      system permissions (read from a Profile / PermissionSet's
@@ -81,15 +106,19 @@
  *      the tail so callers can show admins what was NOT modeled and
  *      recommend a manual check.
  *
- * **Aggregate verdict**:
- *   - `visible` if any step before a hard-restriction is `visible`
- *     (PermissionGrant overrides OWD; OwnerSharingRule overrides
- *     RoleHierarchy).
- *   - `restricted` if OWD is restricted, PermissionGrant doesn't
- *     override, every owner sharing rule misses, and no remaining
- *     stage is `unknown` *before* a `visible`.
- *   - `unknown` if OWD is `unknown`, OR if no step is `visible` and
- *     any step in the deciding chain is `unknown`.
+ * **Aggregate verdict** (after the object-Read precondition has already passed
+ * or is undecidable):
+ *   - `visible` if any step is `visible` (a View/Modify-All bypass, a public
+ *     OWD on top of the satisfied precondition, an OwnerSharingRule match, or
+ *     System god-mode).
+ *   - `unknown` if no step is `visible` and any step is `unknown` — the honesty
+ *     axis: on a Private/ControlledByParent object where object Read is present
+ *     but no modeled bypass or grant exists, unmodeled manual sharing / teams /
+ *     sets (and, for ControlledByParent, the master object's sharing) could
+ *     still grant access, so prefer `unknown` over a wrong `restricted`.
+ *   - `restricted` only when every step is `restricted`, OR (the precondition
+ *     path) when a profile/permset was supplied with no object Read — in which
+ *     case the handler returned `restricted` before this aggregate ran.
  *
  * **Honesty axis**: this tool never fabricates. Stages whose verdict
  * the v1.1 metadata model cannot decide (criteria filters, manual
@@ -179,20 +208,49 @@ const owdRank = (sharingModel: string): number | null => {
 };
 
 /**
- * Does a `grantedBy` object-permission edge satisfy `level`? Read needs
- * `allowRead` (or View/Modify-All); edit needs `allowEdit` (or Modify-All);
- * delete needs `allowDelete` (or Modify-All). `modifyAllRecords` (object
- * "Modify All") satisfies every level; `viewAllRecords` satisfies read only.
+ * Does a `grantedBy` object-permission edge satisfy the object-level READ
+ * PRECONDITION? To SEE a record at all a user needs object Read CRUD; in
+ * Salesforce object Edit, Delete, and Create each IMPLY Read (you cannot enable
+ * any of them without Read), and View All / Modify All records both subsume it.
+ * This is plane A — the object precondition — NOT a record-visibility grant
+ * (that is plane B, see `grantSatisfiesRecordVisible`). Plain object CRUD here
+ * only means "IF the user can reach the record, they may act on it"; whether
+ * they can reach a Private record is decided by OWD + sharing on top.
  */
-const grantSatisfiesLevel = (edge: Edge, level: AccessLevel): boolean => {
+const grantSatisfiesObjectRead = (edge: Edge): boolean => {
+  const p = edge.properties;
+  return (
+    p['allowRead'] === true ||
+    p['allowEdit'] === true ||
+    p['allowDelete'] === true ||
+    p['allowCreate'] === true ||
+    p['viewAllRecords'] === true ||
+    p['modifyAllRecords'] === true
+  );
+};
+
+/**
+ * Does a `grantedBy` object-permission edge grant RECORD VISIBILITY (plane B)
+ * for `level` — i.e. does it BYPASS record sharing? Only the object "View All" /
+ * "Modify All" records bypasses do: `modifyAllRecords` (object "Modify All")
+ * reads/edits/deletes every record at every level; `viewAllRecords` (object
+ * "View All") reads every record (read only). Plain `allowRead` / `allowEdit` /
+ * `allowDelete` are object CRUD — they satisfy the object precondition (plane A)
+ * but on a Private object they do NOT grant record access; that comes from OWD
+ * or a sharing grant. Mirrors `who_can_access_object`'s scope model
+ * (viewAll/modifyAll = `all-records`; plain read/edit = `shared-records`).
+ *
+ * `create` is OFF the record-visibility ladder (you don't need to access an
+ * existing record to create one); the create branch evaluates `allowCreate`
+ * directly, so create never reaches this predicate.
+ */
+const grantSatisfiesRecordVisible = (edge: Edge, level: AccessLevel): boolean => {
   const p = edge.properties;
   if (p['modifyAllRecords'] === true) return true;
-  if (level === 'read') {
-    return p['allowRead'] === true || p['viewAllRecords'] === true;
-  }
-  if (level === 'edit') return p['allowEdit'] === true;
-  if (level === 'create') return p['allowCreate'] === true;
-  return p['allowDelete'] === true; // delete
+  if (level === 'read') return p['viewAllRecords'] === true;
+  // edit / delete: only object "Modify All" records bypasses sharing. View All
+  // is read-only, and plain allowEdit/allowDelete are precondition-only.
+  return false;
 };
 
 /**
@@ -389,7 +447,7 @@ const evaluateOWD = (
     return step(
       'OWD',
       'visible',
-      `OWD '${sharingModel}' grants ${level} access to all records`,
+      `OWD '${sharingModel}' grants ${level} access to all records (given the user has object ${level} permission — checked separately as the object-Read precondition)`,
     );
   }
   // The OWD does not grant THIS operation org-wide (e.g. a Read OWD for an edit
@@ -403,13 +461,28 @@ const evaluateOWD = (
 };
 
 /**
- * Evaluate the PermissionGrant stage by enumerating incoming
- * `grantedBy` edges to `componentId` from the user's
- * `profileId`+`permissionSetIds`. The first grant that satisfies the requested
- * `level` (read / edit / delete — see `grantSatisfiesLevel`) flips the verdict
- * to `visible`; if none match, the verdict is `restricted` (with a reason that
- * names the granters that were inspected, so the admin can see which permission
- * containers the user actually has).
+ * Evaluate the PermissionGrant stage by enumerating incoming `grantedBy` edges
+ * to `componentId` from the user's `profileId`+`permissionSetIds`.
+ *
+ * For the record-visibility cascade (`read` / `edit` / `delete`) this reports
+ * `visible` ONLY when a grant BYPASSES record sharing — object "View All" /
+ * "Modify All" records (`grantSatisfiesRecordVisible`). A grant that carries
+ * only plain object CRUD (`allowRead` / `allowEdit` / `allowDelete`) satisfies
+ * the object precondition (plane A, evaluated separately in
+ * `hasObjectReadAccess`) but does NOT by itself make a Private record visible —
+ * on a Private object that comes from OWD or a sharing grant — so it reports
+ * `restricted` here, with a reason that distinguishes "object CRUD present,
+ * record visibility depends on OWD/sharing" from "View/Modify All grants all
+ * records".
+ *
+ * For `create` the predicate is `allowCreate` (or object Modify All) directly —
+ * create is off the record-sharing ladder, so the bypass narrowing does not
+ * apply; the create branch depends on a plain `allowCreate` grant reading as
+ * `visible`.
+ *
+ * When no grant matches, the verdict is `restricted` with a reason naming the
+ * granters that were inspected, so the admin can see which permission containers
+ * the user actually has.
  */
 const evaluatePermissionGrants = async (
   ctx: Context,
@@ -441,18 +514,37 @@ const evaluatePermissionGrants = async (
   }
   const granterSet: ReadonlySet<string> = new Set(granterIds);
   const granting: string[] = [];
+  // Track granters that hold plain object CRUD (precondition only) but no
+  // record-visibility bypass, so the `restricted` reason can be precise.
+  let anyObjectCrud = false;
   for (const edge of edgesResult.value) {
     if (!granterSet.has(edge.fromId)) continue;
-    if (grantSatisfiesLevel(edge, level)) {
+    const recordVisible =
+      level === 'create'
+        ? edge.properties['allowCreate'] === true ||
+          edge.properties['modifyAllRecords'] === true
+        : grantSatisfiesRecordVisible(edge, level);
+    if (recordVisible) {
       granting.push(edge.fromId);
+    } else if (grantSatisfiesObjectRead(edge)) {
+      anyObjectCrud = true;
     }
   }
   if (granting.length > 0) {
+    const detail =
+      level === 'create'
+        ? `${level} object permission granted by: ${granting.join(', ')}`
+        : `object View All / Modify All grants ${level} access to all records: ${granting.join(', ')}`;
+    return ok(step('PermissionGrant', 'visible', detail));
+  }
+  if (anyObjectCrud) {
+    // Object CRUD present (the precondition is met) but no View/Modify All
+    // bypass — on a Private object record visibility depends on OWD/sharing.
     return ok(
       step(
         'PermissionGrant',
-        'visible',
-        `${level} object permission granted by: ${granting.join(', ')}`,
+        'restricted',
+        `object ${level} permission present on the supplied granters but record visibility depends on OWD / sharing (no object View All / Modify All): ${granterIds.join(', ')}`,
       ),
     );
   }
@@ -463,6 +555,67 @@ const evaluatePermissionGrants = async (
       `no ${level} grant from supplied granters: ${granterIds.join(', ')}`,
     ),
   );
+};
+
+/**
+ * Plane A — the OBJECT-READ PRECONDITION. To SEE a record at all a user needs
+ * object-level Read CRUD, drawn from the profile UNION any assigned permission
+ * set. This is satisfied by:
+ *   - any object `grantedBy` edge that implies object Read
+ *     (`grantSatisfiesObjectRead`: allowRead / allowEdit / allowDelete /
+ *     allowCreate / viewAllRecords / modifyAllRecords — Edit/Delete/Create all
+ *     imply Read in Salesforce); OR
+ *   - the system perms `ViewAllData` / `ModifyAllData` on a granter node (these
+ *     read every record of every object, so they also satisfy the object-read
+ *     precondition).
+ *
+ * Returns `false` when neither path is present — the user has NO object Read,
+ * so no OWD value and no record-level sharing can make the record visible
+ * (record sharing layers on TOP of object access; it never confers it).
+ *
+ * FLS note: this reads ONLY the object's own incoming `grantedBy` edges
+ * (`direction: 'in'`, `edgeType: 'grantedBy'` on the CustomObject id). FLS
+ * grants target CustomField ids, never the CustomObject, so field-level
+ * security can never leak into the record-visibility precondition.
+ */
+const hasObjectReadAccess = async (
+  ctx: Context,
+  componentId: ComponentId,
+  userContext: UserContext,
+): Promise<Result<boolean, string>> => {
+  const granterIds: string[] = [];
+  if (userContext.profileId !== undefined) granterIds.push(userContext.profileId);
+  if (userContext.permissionSetIds !== undefined) {
+    granterIds.push(...userContext.permissionSetIds);
+  }
+  if (granterIds.length === 0) return ok(false);
+  const granterSet: ReadonlySet<string> = new Set(granterIds);
+
+  // Object-level grants: incoming `grantedBy` edges on the CustomObject.
+  const edgesResult = await listEdges(ctx.graph, componentId, {
+    direction: 'in',
+    edgeType: 'grantedBy',
+  });
+  if (!edgesResult.ok) return err(edgesResult.error.message);
+  for (const edge of edgesResult.value) {
+    if (!granterSet.has(edge.fromId)) continue;
+    if (grantSatisfiesObjectRead(edge)) return ok(true);
+  }
+
+  // System View All Data / Modify All Data also satisfies the object-read
+  // precondition (they read every record of every object).
+  for (const id of granterIds) {
+    const nodeResult = await getNodeById(ctx.graph, id as ComponentId);
+    if (!nodeResult.ok) return err(nodeResult.error.message);
+    const node = nodeResult.value;
+    if (node === null) continue;
+    const perms = node.properties['userPermissions'];
+    if (!Array.isArray(perms)) continue;
+    if (perms.includes('ViewAllData') || perms.includes('ModifyAllData')) {
+      return ok(true);
+    }
+  }
+  return ok(false);
 };
 
 /**
@@ -974,57 +1127,47 @@ const UNKNOWN_TAIL: readonly AccessReasoningStep[] = Object.freeze([
 ]);
 
 /**
- * Aggregate the cascade into a single verdict. The first `visible`
- * step in cascade order wins; a `restricted` OWD without a `visible`
- * downstream falls through to `restricted`; any `unknown` in the
- * deciding chain (no `visible` step before it) demotes the answer to
- * `unknown` per the honesty axis.
+ * Aggregate the cascade into a single verdict. The first `visible` step in
+ * cascade order wins; otherwise any `unknown` in the chain demotes the answer to
+ * `unknown` per the honesty axis; only a chain that is uniformly `restricted`
+ * yields `restricted`.
  *
- * Object-level CRUD hard gate (the read/edit/delete cascade): object
- * Read/Edit/Delete permission is a PRE-CONDITION for record access.
- * Record-level sharing — OWD, role hierarchy, sharing rules, territory,
- * manual shares, sharing sets, account teams — can only grant record
- * VISIBILITY on top of an existing object permission; it can NEVER grant
- * the object permission itself. So when the modeled object-permission
- * stages (`PermissionGrant` + `SystemPermission`) BOTH definitively deny,
- * the downstream record-level `unknown` stages cannot change the outcome:
- * the answer is `restricted`, not `unknown`. (Permission-set groups and
- * any permission sets not supplied in `userContext` remain a manual-verify
- * caveat in the reasoning chain — they are the only un-modeled path to the
- * object permission.)
+ * The two-plane access model: seeing a record needs BOTH (A) object-level Read
+ * CRUD and (B) record-level access. Plane A — the object-Read PRECONDITION — is
+ * checked by the handler BEFORE this function runs: when a profile or permission
+ * set was supplied and the precondition is unmet, the handler returns
+ * `restricted` early (the only place a precondition-driven `restricted` is
+ * emitted), so this function never sees that case. By the time it runs either
+ * (i) object Read is present, or (ii) object perms are undecidable (a
+ * role/group-only context with no profile/permset).
+ *
+ * Therefore the OLD object-CRUD hard gate is GONE: object Read is no longer
+ * inferred from `PermissionGrant === 'restricted'`. After the H2 split a
+ * `PermissionGrant === 'restricted'` step means "object access present but no
+ * record-visibility bypass" — NOT "no object access". So on a Private /
+ * ControlledByParent object where object Read IS present but no modeled bypass
+ * or sharing grant exists, the unknown tail (manual sharing / teams / sets /
+ * the parent object's sharing for ControlledByParent) legitimately demotes the
+ * answer to `unknown` — "we cannot see a grant" is NOT "the user definitely
+ * cannot see it".
  */
 const aggregateVerdict = (
   steps: readonly AccessReasoningStep[],
-  profileAnchored: boolean,
 ): 'visible' | 'restricted' | 'unknown' => {
-  // First, any visible step grants access (PermissionGrant overrides
-  // OWD, OwnerSharingRule overrides RoleHierarchy, etc.).
+  // First, any visible step grants access (PermissionGrant override, OWD public,
+  // OwnerSharingRule match, System god-mode, etc.).
   for (const s of steps) {
     if (s.verdict === 'visible') return 'visible';
   }
-  // Object-CRUD hard gate: object permission is denied by every modeled
-  // object-level stage, so no record-level sharing can grant access. Only
-  // valid when a PROFILE was supplied — a user has exactly one profile whose
-  // object permissions are fixed, so its `restricted` is a definitive denial.
-  // A role/group/permission-set-only context makes PermissionGrant /
-  // SystemPermission report `restricted` merely because no profile was given
-  // (an unknown, not a denial), so the gate must not fire there.
-  const stageVerdict = (stage: AccessReasoningStep['stage']) =>
-    steps.find((s) => s.stage === stage)?.verdict;
-  if (
-    profileAnchored &&
-    stageVerdict('PermissionGrant') === 'restricted' &&
-    stageVerdict('SystemPermission') === 'restricted'
-  ) {
-    return 'restricted';
-  }
-  // No visible step and object access not definitively denied. If any
-  // step is unknown, the answer is unknown — the honesty axis: prefer
-  // "I don't know" over a wrong `restricted`.
+  // No visible step. The object-Read precondition is already satisfied (or
+  // undecidable) by the time we get here, so any `unknown` in the chain makes
+  // the honest answer `unknown` — prefer "I don't know" over a wrong
+  // `restricted` (the load-bearing honesty axis: unmodeled manual sharing /
+  // teams / sets / ControlledByParent's master sharing could still grant it).
   for (const s of steps) {
     if (s.verdict === 'unknown') return 'unknown';
   }
-  // Every step is restricted; the cascade exhausted every path.
+  // Every step is restricted; the cascade exhausted every modeled path.
   return 'restricted';
 };
 
@@ -1400,11 +1543,16 @@ export const whyCantUserSeeRecordHandler = async (
     });
   }
 
-  // Stage 1: OWD. Short-circuit on visible (no further restriction
-  // possible) and on unknown (the entity variant has no OWD; we
-  // can't reason past this).
+  // Stage 1: OWD. Classify the org-wide default. A null/unrecognised OWD is the
+  // ONLY OWD short-circuit: the entity variant has no OWD and we cannot reason
+  // past it, so return `unknown` with the single OWD step. A PUBLIC OWD
+  // (Read/ReadWrite/FullAccess) no longer short-circuits to `visible` here — the
+  // object-Read PRECONDITION (plane A) must be confirmed FIRST. A public OWD
+  // alone, with zero object permission, does NOT make a record visible; that was
+  // the H1 bug. The OWD's `visible` verdict only survives to the aggregate when
+  // the precondition (checked just below) passed.
   const owdStep = evaluateOWD(nodeResult.value, level);
-  if (owdStep.verdict !== 'restricted') {
+  if (owdStep.verdict === 'unknown') {
     return ok({
       data: { verdict: owdStep.verdict, reasoning: [owdStep] },
       vaultState: {
@@ -1416,10 +1564,51 @@ export const whyCantUserSeeRecordHandler = async (
 
   // Coerce bare apiNames in the userContext to canonical ids so a caller can
   // pass `profileId: 'Admin'` (not just 'Profile:Admin'). Built only after the
-  // OWD short-circuit so a visible/unknown OWD skips the group graph lookups.
-  // Verdict-preserving (see coerceUserContext): the coerced verdict equals the
-  // equivalent prefixed-id verdict.
+  // OWD-unknown short-circuit so a null/unrecognised OWD skips the group graph
+  // lookups. Verdict-preserving (see coerceUserContext): the coerced verdict
+  // equals the equivalent prefixed-id verdict.
   const userContext = await coerceUserContext(ctx, input.userContext);
+
+  // Plane A — the OBJECT-READ PRECONDITION. To SEE a record at all the user
+  // needs object Read CRUD (from the profile UNION any assigned permission set)
+  // or system View/Modify All Data. Missing object Read => NOT visible, full
+  // stop, regardless of OWD (kills H1: a zero-permission user is no longer told
+  // they can see any Public-Read object). Honesty nuance: object perms are only
+  // decidable when a profile or permission set was supplied — a role/group-only
+  // context cannot decide them, so we do NOT hard-deny there; the cascade runs
+  // and the answer can stay an honest `unknown` (mirrors the old profileAnchored
+  // nuance). FLS never enters this: it reads only object-level grantedBy edges.
+  const profileOrPermSetSupplied =
+    userContext.profileId !== undefined ||
+    (userContext.permissionSetIds !== undefined &&
+      userContext.permissionSetIds.length > 0);
+  if (profileOrPermSetSupplied) {
+    const objectReadResult = await hasObjectReadAccess(ctx, componentId, userContext);
+    if (!objectReadResult.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${objectReadResult.error}`,
+      });
+    }
+    if (!objectReadResult.value) {
+      return ok({
+        data: {
+          verdict: 'restricted',
+          reasoning: [
+            step(
+              'PermissionGrant',
+              'restricted',
+              'no object Read permission on the supplied profile / permission sets — object Read is a precondition for record access, so no OWD value or sharing grant can make the record visible',
+            ),
+          ],
+        },
+        vaultState: {
+          sourceTreeHash: ctx.manifest.sourceTreeHash,
+          refreshedAt: ctx.manifest.refreshedAt,
+        },
+      });
+    }
+  }
 
   const reasoning: AccessReasoningStep[] = [owdStep];
 
@@ -1531,7 +1720,7 @@ export const whyCantUserSeeRecordHandler = async (
 
   return ok({
     data: {
-      verdict: aggregateVerdict(reasoning, userContext.profileId !== undefined),
+      verdict: aggregateVerdict(reasoning),
       reasoning,
     },
     vaultState: {
