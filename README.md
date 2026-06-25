@@ -400,7 +400,12 @@ multiple orgs. Share it (or just describe the gap) at
 
 ## License
 
-`sf-intelligence` is licensed under [MIT + Commons Clause](./LICENSE).
+`sf-intelligence` is licensed under the **MIT License with the [Commons Clause](./LICENSE)** (see also [`NOTICE`](./NOTICE)). In plain English:
+
+- ✅ **Free to use for any purpose — including at work, inside a company.** Evaluate, study, modify, self-host for your own use, fork, redistribute, and contribute — all free.
+- 🚫 **You may not _Sell_ it without a commercial license** — i.e. provide it to third parties, for a fee, as a product or service whose value derives substantially from the Software. That includes offering it (or a hosted / SaaS / derivative version) as a paid product or service, reselling it or paid access to it, or charging for hosting/support whose value derives substantially from it.
+
+For a commercial ("Sell") license, contact **pranav.sfintelligence@gmail.com**. _(Plain-English summary; the [LICENSE](./LICENSE) controls. Not legal advice.)_
 
 ## Documentation
 
