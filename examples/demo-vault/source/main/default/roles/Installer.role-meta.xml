@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Role xmlns="http://soap.sforce.com/2006/04/metadata">
+    <name>Installer</name>
+    <parentRole>Ops_Manager</parentRole>
+    <caseAccessLevel>None</caseAccessLevel>
+    <contactAccessLevel>Read</contactAccessLevel>
+    <opportunityAccessLevel>None</opportunityAccessLevel>
+    <mayForecastManagerShare>false</mayForecastManagerShare>
+    <description>Field technician installing panels and batteries.</description>
+</Role>

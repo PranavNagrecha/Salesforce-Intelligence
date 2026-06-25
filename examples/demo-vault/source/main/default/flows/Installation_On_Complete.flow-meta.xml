@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>61.0</apiVersion>
+    <description>When an Installation is Completed, log an Inspection Service Visit and mark the parent Project Complete.</description>
+    <label>Installation On Complete</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <interviewLabel>Installation On Complete {!$Flow.CurrentDateTime}</interviewLabel>
+    <environments>Default</environments>
+    <start>
+        <locationX>176</locationX>
+        <locationY>0</locationY>
+        <connector>
+            <targetReference>Create_Service_Visit</targetReference>
+        </connector>
+        <object>Installation__c</object>
+        <recordTriggerType>CreateAndUpdate</recordTriggerType>
+        <triggerType>RecordAfterSave</triggerType>
+        <filterLogic>and</filterLogic>
+        <filters>
+            <field>Status__c</field>
+            <operator>EqualTo</operator>
+            <value>
+                <stringValue>Completed</stringValue>
+            </value>
+        </filters>
+    </start>
+    <recordCreates>
+        <name>Create_Service_Visit</name>
+        <label>Create Service Visit</label>
+        <locationX>176</locationX>
+        <locationY>134</locationY>
+        <connector>
+            <targetReference>Update_Parent_Project</targetReference>
+        </connector>
+        <inputAssignments>
+            <field>Installation__c</field>
+            <value>
+                <elementReference>$Record.Id</elementReference>
+            </value>
+        </inputAssignments>
+        <inputAssignments>
+            <field>Reason__c</field>
+            <value>
+                <stringValue>Inspection</stringValue>
+            </value>
+        </inputAssignments>
+        <object>Service_Visit__c</object>
+        <storeOutputAutomatically>true</storeOutputAutomatically>
+    </recordCreates>
+    <recordUpdates>
+        <name>Update_Parent_Project</name>
+        <label>Update Parent Project</label>
+        <locationX>176</locationX>
+        <locationY>254</locationY>
+        <filterLogic>and</filterLogic>
+        <filters>
+            <field>Id</field>
+            <operator>EqualTo</operator>
+            <value>
+                <elementReference>$Record.Project__c</elementReference>
+            </value>
+        </filters>
+        <inputAssignments>
+            <field>Status__c</field>
+            <value>
+                <stringValue>Complete</stringValue>
+            </value>
+        </inputAssignments>
+        <object>Project__c</object>
+    </recordUpdates>
+</Flow>

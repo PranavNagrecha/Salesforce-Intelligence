@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Role xmlns="http://soap.sforce.com/2006/04/metadata">
+    <name>Sales Rep</name>
+    <parentRole>Sales_Manager</parentRole>
+    <caseAccessLevel>Read</caseAccessLevel>
+    <contactAccessLevel>Edit</contactAccessLevel>
+    <opportunityAccessLevel>Edit</opportunityAccessLevel>
+    <mayForecastManagerShare>false</mayForecastManagerShare>
+    <description>Sells residential solar and battery systems.</description>
+</Role>

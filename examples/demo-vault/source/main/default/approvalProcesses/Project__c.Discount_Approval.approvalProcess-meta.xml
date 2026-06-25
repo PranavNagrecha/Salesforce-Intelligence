@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ApprovalProcess xmlns="http://soap.sforce.com/2006/04/metadata">
+    <active>true</active>
+    <allowRecall>true</allowRecall>
+    <allowedSubmitters>
+        <type>owner</type>
+    </allowedSubmitters>
+    <approvalStep>
+        <name>step_1_manager</name>
+        <label>Manager Approval</label>
+        <assignedApprover>
+            <approver>
+                <type>userHierarchyField</type>
+            </approver>
+            <whenMultipleApprovers>FirstResponse</whenMultipleApprovers>
+        </assignedApprover>
+        <allowDelegate>false</allowDelegate>
+    </approvalStep>
+    <description>High-value Projects (Contract Value over 50,000) require manager approval before proceeding.</description>
+    <enableMobileDeviceAccess>false</enableMobileDeviceAccess>
+    <entryCriteria>
+        <criteriaItems>
+            <field>Project__c.Contract_Value__c</field>
+            <operation>greaterThan</operation>
+            <value>50000</value>
+        </criteriaItems>
+    </entryCriteria>
+    <label>Discount Approval</label>
+    <recordEditability>AdminOnly</recordEditability>
+    <showApprovalHistory>true</showApprovalHistory>
+</ApprovalProcess>

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Crew_Lead__c</fullName>
+    <label>Crew Lead</label>
+    <type>Lookup</type>
+    <referenceTo>User</referenceTo>
+    <relationshipLabel>Installations</relationshipLabel>
+    <relationshipName>Installations</relationshipName>
+    <required>false</required>
+</CustomField>
