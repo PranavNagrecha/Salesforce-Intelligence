@@ -271,14 +271,41 @@ export const summarizeCoverage = (
     };
   }
 
-  // A `pending` row (P13-STAGED-tiers: queued by an in-progress staged build)
-  // must NEVER count as covered — "requested, zero retrieved, no error" only
-  // means "org has none" when the retrieve actually ran. Routing pending rows
-  // into partial/missingCoverage keeps absence-claim caveats firing mid-build.
+  // A type only counts as covered when the retrieve actually LANDED rows
+  // (`retrieved > 0`). A `pending` row (P13-STAGED-tiers: queued by an
+  // in-progress staged build) and a requested-but-empty row (retrieved === 0)
+  // must NEVER count as covered: the coverage data model cannot distinguish
+  // "retrieve confirmed the org has zero of this type" from "retrieve ran but
+  // silently pulled nothing / dropped the members" — both persist the
+  // identical {requested:true, retrieved:0, errored:false, neverModeled:false}
+  // row. The honest reading is therefore "not confirmed", so those rows are
+  // routed into partial/missingCoverage (below) and keep absence-claim caveats
+  // firing rather than reporting a false "complete"/"none in the org".
   const coveredTypes = filtered
     .filter(
       (entry) =>
         entry.requested &&
+        entry.retrieved > 0 &&
+        !entry.errored &&
+        !entry.neverModeled &&
+        entry.pending !== true,
+    )
+    .map((entry) => entry.type);
+  // Requested, non-errored, non-pending, modeled types that retrieved ZERO
+  // rows. Mirrors `coverage-report.ts` `partitionCoverage`, which already
+  // classifies `retrieved === 0` as partial — keeping summarizeCoverage in
+  // lockstep is what stops coverage_report from self-contradicting (summary
+  // said "complete" while its own `partial[]` listed these zero-retrieved
+  // types). Disjoint from the errored/pending branch below (the `!errored &&
+  // pending !== true` guards), so the union into `partialTypes` never
+  // double-counts. Distinct from `neverModeled` (no extractor) and
+  // `notRequested` (scoped-out), so the three honesty states stay separate and
+  // the a4 I3 notModeled-set cross-check is unaffected.
+  const emptyTypes = filtered
+    .filter(
+      (entry) =>
+        entry.requested &&
+        entry.retrieved === 0 &&
         !entry.errored &&
         !entry.neverModeled &&
         entry.pending !== true,
@@ -288,11 +315,15 @@ export const summarizeCoverage = (
   // never modeled belongs ONLY in notModeledTypes. Including it here too made
   // health_check report the same type as both partial AND not-modeled (and
   // triple-counted it into missingCoverage). A "partial" type is one that was
-  // requested and errored during retrieve — or is still queued by a staged
-  // build — but is a modeled type either way.
-  const partialTypes = filtered
-    .filter((entry) => (entry.errored || entry.pending === true) && !entry.neverModeled)
-    .map((entry) => entry.type);
+  // requested and errored during retrieve — is still queued by a staged
+  // build — or was requested but retrieved nothing (`emptyTypes`) — but is a
+  // modeled type in every case.
+  const partialTypes = [
+    ...filtered
+      .filter((entry) => (entry.errored || entry.pending === true) && !entry.neverModeled)
+      .map((entry) => entry.type),
+    ...emptyTypes,
+  ];
   const notModeledTypes = filtered
     .filter((entry) => entry.neverModeled)
     .map((entry) => entry.type);

@@ -37,6 +37,7 @@ import {
   listEdges,
   listNodesByType,
 } from '@sf-intelligence/graph';
+import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -139,8 +140,17 @@ interface ObjectSharing {
 
 /**
  * Render the per-object H2 section.
+ *
+ * `sharingRuleNotRetrieved` is set when the manifest reports the SharingRule
+ * type was requested but retrieved nothing (or errored / was scoped out) — an
+ * empty rules table then means "not retrieved", NOT "this object has no sharing
+ * rules" (the C2 lie). When SharingRule coverage is confirmed (or unknown on a
+ * pre-v4 vault), the empty case keeps its original "_(no sharing rules)_".
  */
-const renderObjectSection = (entry: ObjectSharing): string => {
+const renderObjectSection = (
+  entry: ObjectSharing,
+  sharingRuleNotRetrieved: boolean,
+): string => {
   const label = entry.object.label ?? entry.object.apiName;
   const lines: string[] = [
     `## ${escapeCell(label)} (\`${entry.object.apiName}\`)`,
@@ -153,7 +163,11 @@ const renderObjectSection = (entry: ObjectSharing): string => {
     '',
   ];
   if (entry.sharingRules.length === 0) {
-    lines.push('_(no sharing rules)_');
+    lines.push(
+      sharingRuleNotRetrieved
+        ? '_(SharingRule not retrieved — the last refresh did not pull this type into the vault, so this is **not checked**, not "no sharing rules". Run `sfi refresh` including SharingRule.)_'
+        : '_(no sharing rules)_',
+    );
   } else {
     lines.push('| Rule | Type | Access Level | Criteria |');
     lines.push('| --- | --- | --- | --- |');
@@ -180,12 +194,17 @@ const renderObjectSection = (entry: ObjectSharing): string => {
  * Walks each role's `properties.parentRoleId` to draw edges. An empty
  * role population surfaces a disclosure.
  */
-const renderRoleHierarchySection = (roles: readonly Node[]): string => {
+const renderRoleHierarchySection = (
+  roles: readonly Node[],
+  roleNotRetrieved: boolean,
+): string => {
   if (roles.length === 0) {
     return [
       '## Role Hierarchy',
       '',
-      '_(no Role nodes extracted — role-hierarchy data depends on v1.1 sharing extractors having processed `roles/` metadata)_',
+      roleNotRetrieved
+        ? '_(Role type not retrieved — the last refresh did not pull `Role` into the vault, so the role hierarchy is **not checked**, not "no roles". Run `sfi refresh` including Role.)_'
+        : '_(no Role nodes extracted — role-hierarchy data depends on v1.1 sharing extractors having processed `roles/` metadata)_',
     ].join('\n');
   }
   const lines: string[] = ['## Role Hierarchy', '', '```mermaid', 'graph TD'];
@@ -349,6 +368,21 @@ export const generateSharingSummaryHandler = async (
     a.object.apiName < b.object.apiName ? -1 : a.object.apiName > b.object.apiName ? 1 : 0,
   );
 
+  // C2: distinguish "the org has no sharing rules / roles" from "the SharingRule
+  // / Role type was never retrieved into this vault". An empty graph result for
+  // either is otherwise byte-identical, so consult manifest coverage. Only fires
+  // when coverage is KNOWN (a v4+ vault carries a coverage array); a pre-v4 vault
+  // has `coverageKnown: false`, so the original "no sharing rules / no roles"
+  // wording is kept — legacy vaults don't suddenly emit "not retrieved" noise
+  // (mirrors `buildEnumerationCoverageCaveat`'s `!coverage.coverageKnown` guard).
+  const sharingRuleCoverage = summarizeCoverage(ctx.manifest, ['SharingRule']);
+  const sharingRuleNotRetrieved =
+    sharingRuleCoverage.coverageKnown &&
+    sharingRuleCoverage.missingCoverage.includes('SharingRule');
+  const roleCoverage = summarizeCoverage(ctx.manifest, ['Role']);
+  const roleNotRetrieved =
+    roleCoverage.coverageKnown && roleCoverage.missingCoverage.includes('Role');
+
   const sourceTreeHash = ctx.manifest.sourceTreeHash;
   const refreshedAt = ctx.manifest.refreshedAt;
   const generatedAt = new Date().toISOString();
@@ -357,7 +391,9 @@ export const generateSharingSummaryHandler = async (
 
   const objectSections =
     sortedEntries.length > 0
-      ? sortedEntries.map(renderObjectSection).join('\n\n')
+      ? sortedEntries
+          .map((entry) => renderObjectSection(entry, sharingRuleNotRetrieved))
+          .join('\n\n')
       : targetMissing !== undefined
         ? `> ⚠️ **\`${targetMissing.id}\` is referenced by ${targetMissing.referencedBy.toString()} component(s) in this org ` +
           '(e.g. lookup fields, permission-set grants, or code) but its own CustomObject definition was never ' +
@@ -378,7 +414,7 @@ export const generateSharingSummaryHandler = async (
     '',
     objectSections,
     '',
-    renderRoleHierarchySection(rolesResult.value),
+    renderRoleHierarchySection(rolesResult.value, roleNotRetrieved),
     '',
     renderFooter(
       refreshedAt,
@@ -404,6 +440,21 @@ export const generateSharingSummaryHandler = async (
   if (targetMissing !== undefined) {
     boundaries.push(
       `targetMissing: \`${targetMissing.id}\` is a phantom — referenced by ${targetMissing.referencedBy.toString()} component(s) but not retrieved; its sharing/FLS could not be computed. Refresh to retrieve it (B29).`,
+    );
+  }
+  // C2: when the SharingRule / Role type itself was not retrieved, every empty
+  // sharing-rule table and the role hierarchy are "not checked", not "none". The
+  // UNMODELED_SHARING_DIMENSIONS_DISCLOSURE above covers territory / teams /
+  // manual sharing — NOT "the SharingRule type was not pulled at all", which is
+  // exactly the gap the C2 bug exploited.
+  if (sharingRuleNotRetrieved) {
+    boundaries.push(
+      'SharingRule coverage gap: the `SharingRule` type was NOT retrieved into this vault (the last refresh did not pull it — a scoped, errored, or empty retrieve). Every "no sharing rules" above is therefore **not checked**, never proof an object has no sharing rules. Run `sfi refresh` including SharingRule, then re-run this tool.',
+    );
+  }
+  if (roleNotRetrieved) {
+    boundaries.push(
+      'Role coverage gap: the `Role` type was NOT retrieved into this vault, so the role hierarchy is **not checked**, never "no roles". Run `sfi refresh` including Role, then re-run this tool.',
     );
   }
 

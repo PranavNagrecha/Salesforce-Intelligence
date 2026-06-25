@@ -41,6 +41,7 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges, listNodesByType } from '@sf-intelligence/graph';
+import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -302,6 +303,21 @@ export const whoCanAccessObjectHandler = async (
     }
   }
 
+  // C2: an empty `granters` set for the sharing-rule paths is byte-identical
+  // whether the object genuinely has no sharing rules or the SharingRule type
+  // was never retrieved into this vault. `scanTruncated` only fires when the
+  // scan HIT the per-type cap — never for a non-executed / empty retrieve — so
+  // it does not cover this case. Consult manifest coverage and add a blind spot
+  // when SharingRule was requested-but-empty / errored / scoped out, so the
+  // (possibly empty) granter list is never read as the complete static access
+  // model. Only when coverage is KNOWN (v4+ vault): a pre-v4 vault has no
+  // coverage array, so we stay silent rather than emit spurious noise (mirrors
+  // `buildEnumerationCoverageCaveat`'s `!coverage.coverageKnown` guard).
+  const sharingRuleCoverage = summarizeCoverage(ctx.manifest, ['SharingRule']);
+  const sharingRuleNotRetrieved =
+    sharingRuleCoverage.coverageKnown &&
+    sharingRuleCoverage.missingCoverage.includes('SharingRule');
+
   granters.sort((a, b) => {
     if (a.granterId !== b.granterId) return a.granterId < b.granterId ? -1 : 1;
     return a.via < b.via ? -1 : a.via > b.via ? 1 : 0;
@@ -327,6 +343,20 @@ export const whoCanAccessObjectHandler = async (
     .filter((id) => id.startsWith('Profile:') || id.startsWith('PermissionSet:'));
   const dataShape = await readActiveHoldersFor(ctx, containerIds as never);
 
+  const blindSpots: string[] = [...BLIND_SPOTS];
+  if (restrictionRules.length > 0) {
+    blindSpots.push(
+      `Active restriction rule(s) on this object (${restrictionRules
+        .map((r) => r.id)
+        .join(', ')}) FILTER records for users matching each rule's user criteria — any granter row here, including View/Modify All Data, can be narrowed at runtime. Use why_cant_user_see_record for a per-user verdict.`,
+    );
+  }
+  if (sharingRuleNotRetrieved) {
+    blindSpots.push(
+      'Sharing-rule grants could not be enumerated because the `SharingRule` type was NOT retrieved into this vault (a scoped, errored, or empty retrieve). Any owner / criteria sharing-rule paths are **not checked**, never "none" — the listed granters are NOT the complete static access model. Run `sfi refresh` including SharingRule.',
+    );
+  }
+
   return ok({
     data: {
       componentId,
@@ -342,15 +372,7 @@ export const whoCanAccessObjectHandler = async (
       scanTruncated,
       confidence: 'declared',
       ...(dataShape !== undefined ? { dataShape } : {}),
-      blindSpots:
-        restrictionRules.length > 0
-          ? [
-              ...BLIND_SPOTS,
-              `Active restriction rule(s) on this object (${restrictionRules
-                .map((r) => r.id)
-                .join(', ')}) FILTER records for users matching each rule's user criteria — any granter row here, including View/Modify All Data, can be narrowed at runtime. Use why_cant_user_see_record for a per-user verdict.`,
-            ]
-          : BLIND_SPOTS,
+      blindSpots,
       boundaryNote: `${owdNote} Declared static view (object permissions + sharing-rule targets + system god-mode); record-level paths are in blindSpots.${pageNote}${scanNote}`,
     },
     vaultState: {

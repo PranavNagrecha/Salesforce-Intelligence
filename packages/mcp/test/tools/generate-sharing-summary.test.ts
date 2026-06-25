@@ -377,3 +377,124 @@ describe('generateSharingSummaryHandler (phantom CustomObject — B29)', () => {
     );
   });
 });
+
+// C2 / Systemic #1: when the SharingRule / Role TYPE itself was requested but
+// retrieved nothing, an empty per-object rules table and an empty role
+// hierarchy mean "not retrieved", NOT "this object has no sharing rules / no
+// roles". The graph has an Account object but ZERO SharingRule / Role nodes,
+// and the manifest coverage marks both types requested-but-empty.
+describe('generateSharingSummaryHandler (SharingRule / Role not retrieved — C2)', () => {
+  let store: GraphStore;
+  let ctx: Context;
+
+  // Manifest WITH a coverage array so coverageKnown is true; SharingRule and
+  // Role are requested-but-empty (retrieved:0) — the C2 repro shape.
+  const COVERAGE_GAP_MANIFEST: VaultManifest = {
+    ...FIXTURE_MANIFEST,
+    coverage: [
+      { type: 'CustomObject', requested: true, retrieved: 1, errored: false, neverModeled: false },
+      { type: 'SharingRule', requested: true, retrieved: 0, errored: false, neverModeled: false },
+      { type: 'Role', requested: true, retrieved: 0, errored: false, neverModeled: false },
+    ],
+  };
+
+  // Object exists, but NO SharingRule / Role nodes were retrieved.
+  const gapSeed: ExtractionResult = {
+    nodes: [
+      makeNode({
+        id: 'CustomObject:Account',
+        type: 'CustomObject',
+        apiName: 'Account',
+        label: 'Account',
+        properties: { sharingModel: 'Private' },
+      }),
+    ],
+    edges: [],
+  };
+
+  beforeAll(async () => {
+    const built = await makeFreshCtx('coverage-gap.db');
+    store = built.store;
+    ctx = { ...built.ctx, manifest: COVERAGE_GAP_MANIFEST };
+    const imported = await importExtractionResults(store, [gapSeed]);
+    if (!imported.ok)
+      throw new Error(`coverage-gap seed import failed: ${imported.error.message}`);
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  it('renders "SharingRule not retrieved" instead of "(no sharing rules)" for an object with zero rules', async () => {
+    const result = await generateSharingSummaryHandler(ctx, { objectFilter: 'Account' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.data.document.body;
+    expect(body).toContain('SharingRule not retrieved');
+    expect(body).not.toContain('_(no sharing rules)_');
+  });
+
+  it('pushes a SharingRule coverage-gap boundary (not just the UNMODELED dimensions disclosure)', async () => {
+    const result = await generateSharingSummaryHandler(ctx, { objectFilter: 'Account' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const b = result.value.data.document.boundaries.join('\n');
+    expect(b).toContain('SharingRule coverage gap');
+    expect(b).toMatch(/not checked/i);
+  });
+
+  it('renders "Role type not retrieved" and pushes a Role coverage-gap boundary', async () => {
+    const result = await generateSharingSummaryHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const doc = result.value.data.document;
+    expect(doc.body).toContain('Role type not retrieved');
+    expect(doc.body).not.toContain('no Role nodes extracted');
+    expect(doc.boundaries.join('\n')).toContain('Role coverage gap');
+  });
+});
+
+// Regression guard: a pre-v4 manifest with NO coverage array must NOT suddenly
+// emit "not retrieved" noise — coverageKnown is false, so the original
+// "(no sharing rules)" / "no Role nodes extracted" wording is kept.
+describe('generateSharingSummaryHandler (legacy manifest, no coverage array)', () => {
+  let store: GraphStore;
+  let ctx: Context;
+
+  const legacySeed: ExtractionResult = {
+    nodes: [
+      makeNode({
+        id: 'CustomObject:Account',
+        type: 'CustomObject',
+        apiName: 'Account',
+        label: 'Account',
+        properties: { sharingModel: 'Private' },
+      }),
+    ],
+    edges: [],
+  };
+
+  beforeAll(async () => {
+    const built = await makeFreshCtx('legacy-no-coverage.db');
+    store = built.store;
+    // FIXTURE_MANIFEST carries NO `coverage` array → coverageKnown false.
+    ctx = built.ctx;
+    const imported = await importExtractionResults(store, [legacySeed]);
+    if (!imported.ok)
+      throw new Error(`legacy seed import failed: ${imported.error.message}`);
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  it('keeps "(no sharing rules)" and does NOT emit a coverage-gap boundary', async () => {
+    const result = await generateSharingSummaryHandler(ctx, { objectFilter: 'Account' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const doc = result.value.data.document;
+    expect(doc.body).toContain('_(no sharing rules)_');
+    expect(doc.body).not.toContain('SharingRule not retrieved');
+    expect(doc.boundaries.join('\n')).not.toContain('SharingRule coverage gap');
+  });
+});

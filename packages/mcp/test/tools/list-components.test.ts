@@ -260,7 +260,9 @@ describe('listComponentsHandler retrievalHint (FRESH-02)', () => {
   const COVERAGE_MANIFEST = {
     ...FIXTURE_MANIFEST,
     coverage: [
-      // retrieved this type, found none → "none in the org"
+      // requested but retrieve pulled nothing → "not retrieved / not checked"
+      // (C2: byte-identical to "confirmed none in org", so the honest reading
+      // is "not retrieved" — never silently "none in the org").
       { type: 'StaticResource', requested: true, retrieved: 0, errored: false, neverModeled: false },
       // a scoped refresh never pulled this type → "not retrieved"
       { type: 'Report', requested: false, retrieved: 0, errored: false, neverModeled: false },
@@ -289,15 +291,21 @@ describe('listComponentsHandler retrievalHint (FRESH-02)', () => {
     expect(r.value.data.retrievalHint).not.toContain('none in the org');
   });
 
-  it('says "none in the org" when the type was retrieved but empty', async () => {
+  it('says "not retrieved — /sfi-refresh" (NOT "none in the org") when a requested type retrieved zero rows (C2)', async () => {
+    // C2 / Systemic #1: requested + retrieved:0 is byte-identical to "the org
+    // genuinely has none of this type", so list_components must NOT assert
+    // "retrieved X and found none — this is none in the org". The coverage fix
+    // routes the requested-but-empty type into missingCoverage, so the honest
+    // "did not pull this type, run /sfi-refresh" hint fires instead. (Used to
+    // assert the bug: retrievalHint contained "none in the org".)
     const covCtx: Context = { ...ctx, manifest: COVERAGE_MANIFEST };
     const r = await listComponentsHandler(covCtx, { type: 'StaticResource' });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.components).toHaveLength(0);
-    expect(r.value.data.retrievalHint).toContain('none in the org');
-    // The none-in-org branch must NOT nudge a refresh (nothing to re-pull).
-    expect(r.value.data.retrievalHint).not.toContain('/sfi-refresh');
+    expect(r.value.data.retrievalHint).not.toContain('none in the org');
+    expect(r.value.data.retrievalHint).toContain('/sfi-refresh');
+    expect(r.value.data.retrievalHint).toContain('did not pull');
   });
 
   it('says "not retrieved — /sfi-refresh" when a scoped refresh skipped the type', async () => {
