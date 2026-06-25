@@ -17,6 +17,7 @@
  * absolute local path, or a registry vault `path` outside the allowed in-repo
  * public roots. Run: `pnpm check:public-interface`.
  */
+import { execSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 
 /** Public CI/eval config files: the wiring that decides which vault CI runs on. */
@@ -31,6 +32,19 @@ const CONFIG_FILES = [
 const ALLOWED_PATH_PREFIXES = ['eval/fixtures/', 'examples/demo-vault', 'org-kb'];
 
 const ABSOLUTE_LOCAL_PATH = /\/(Users|home|private|var\/folders)\//;
+
+// Raster images can carry org data (e.g. a Salesforce screenshot) that the
+// text scanner can't read, so the leak guard skips binaries. Allowlist the
+// known-safe site assets; any OTHER tracked raster must be human-confirmed
+// (add it here) — this catches an accidentally-committed real-org screenshot.
+const RASTER_IMAGE = /\.(png|jpe?g|gif|webp|bmp|tiff?)$/i;
+const ALLOWED_RASTER_IMAGES = new Set([
+  'website/assets/img/apple-touch-icon.png',
+  'website/assets/img/favicon-32.png',
+  'website/assets/img/icon-192.png',
+  'website/assets/img/icon-512.png',
+  'website/assets/img/og-image.png',
+]);
 
 const violations = [];
 
@@ -59,8 +73,22 @@ for (const file of CONFIG_FILES) {
     });
 }
 
+// Flag any tracked raster image that isn't an allowlisted site asset.
+try {
+  const tracked = execSync('git ls-files', { encoding: 'utf8' }).split('\n').filter(Boolean);
+  for (const f of tracked) {
+    if (RASTER_IMAGE.test(f) && !ALLOWED_RASTER_IMAGES.has(f)) {
+      violations.push(
+        `${f}  raster image not in the allowlist — a screenshot can leak org data the text scanner can't read. If this image is synthetic/leak-safe, add it to ALLOWED_RASTER_IMAGES in scripts/check-public-interface.mjs.`,
+      );
+    }
+  }
+} catch {
+  // Not a git work tree (e.g. a clean-room npm pack) — skip the image check.
+}
+
 if (violations.length > 0) {
-  console.error(`check-public-interface: ${violations.length} violation(s) — public CI/eval must reference only in-repo synthetic vaults:`);
+  console.error(`check-public-interface: ${violations.length} violation(s) — public artifacts must stay leak-safe (in-repo synthetic vaults only; no unvetted raster images):`);
   for (const v of violations) console.error(`  ${v}`);
   console.error(
     '\nThe maintainer real-org vaults live OUTSIDE this repo; public CI / eval / demo must never point at them. ' +
