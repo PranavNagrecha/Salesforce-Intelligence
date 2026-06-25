@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-06-17T14:25:04.855Z",
+  "generatedAt": "2026-06-25T16:52:48.979Z",
   "toolCount": 171,
   "skillCount": 25,
   "commandCount": 4,
@@ -19,8 +19,8 @@
       },
       {
         "name": "cli",
-        "files": 32,
-        "cases": 246
+        "files": 33,
+        "cases": 248
       },
       {
         "name": "graph",
@@ -53,8 +53,8 @@
         "cases": 49
       }
     ],
-    "totalCases": 3800,
-    "totalFiles": 326,
+    "totalCases": 3802,
+    "totalFiles": 327,
     "packageCount": 9
   },
   "integrationSuiteCount": 7,
