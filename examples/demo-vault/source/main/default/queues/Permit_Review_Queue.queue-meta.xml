@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Queue xmlns="http://soap.sforce.com/2006/04/metadata">
+    <name>Permit Review Queue</name>
+    <doesSendEmailToMembers>false</doesSendEmailToMembers>
+    <description>Permits awaiting jurisdiction review.</description>
+    <queueSobject>
+        <sobjectType>Permit__c</sobjectType>
+    </queueSobject>
+</Queue>

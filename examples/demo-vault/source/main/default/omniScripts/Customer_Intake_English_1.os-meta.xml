@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OmniScript xmlns="http://soap.sforce.com/2006/04/metadata">
+    <elementTypeComponentMapping>{&quot;ElementTypeToHTMLTemplateList&quot;:[]}</elementTypeComponentMapping>
+    <isActive>true</isActive>
+    <isIntegrationProcedure>false</isIntegrationProcedure>
+    <isManagedUsingStdDesigner>false</isManagedUsingStdDesigner>
+    <isMetadataCacheDisabled>false</isMetadataCacheDisabled>
+    <isOmniScriptEmbeddable>true</isOmniScriptEmbeddable>
+    <isTestProcedure>false</isTestProcedure>
+    <isWebCompEnabled>true</isWebCompEnabled>
+    <language>English</language>
+    <name>Customer Intake</name>
+    <omniProcessElements>
+        <isActive>true</isActive>
+        <isOmniScriptEmbeddable>false</isOmniScriptEmbeddable>
+        <level>0.0</level>
+        <name>HomeownerStep</name>
+        <omniProcessVersionNumber>0.0</omniProcessVersionNumber>
+        <propertySetConfig>{&quot;label&quot;:&quot;Homeowner Details&quot;,&quot;allowSaveForLater&quot;:true}</propertySetConfig>
+        <sequenceNumber>0.0</sequenceNumber>
+        <type>Step</type>
+    </omniProcessElements>
+    <omniProcessElements>
+        <isActive>true</isActive>
+        <isOmniScriptEmbeddable>false</isOmniScriptEmbeddable>
+        <level>0.0</level>
+        <name>RoofStep</name>
+        <omniProcessVersionNumber>0.0</omniProcessVersionNumber>
+        <propertySetConfig>{&quot;label&quot;:&quot;Roof &amp; Shading&quot;,&quot;allowSaveForLater&quot;:true}</propertySetConfig>
+        <sequenceNumber>1.0</sequenceNumber>
+        <type>Step</type>
+    </omniProcessElements>
+    <omniProcessElements>
+        <isActive>true</isActive>
+        <isOmniScriptEmbeddable>false</isOmniScriptEmbeddable>
+        <level>0.0</level>
+        <name>extractAccount</name>
+        <omniProcessVersionNumber>0.0</omniProcessVersionNumber>
+        <propertySetConfig>{&quot;label&quot;:&quot;Extract Account&quot;,&quot;bundle&quot;:&quot;Quote_To_Project_Map&quot;,&quot;ignoreCache&quot;:false}</propertySetConfig>
+        <sequenceNumber>2.0</sequenceNumber>
+        <type>DataRaptor Extract Action</type>
+    </omniProcessElements>
+    <omniProcessElements>
+        <isActive>true</isActive>
+        <isOmniScriptEmbeddable>false</isOmniScriptEmbeddable>
+        <level>0.0</level>
+        <name>provisionProject</name>
+        <omniProcessVersionNumber>0.0</omniProcessVersionNumber>
+        <propertySetConfig>{&quot;label&quot;:&quot;Provision Project&quot;,&quot;integrationProcedureKey&quot;:&quot;Project_Provision&quot;,&quot;remoteTimeout&quot;:30000}</propertySetConfig>
+        <sequenceNumber>3.0</sequenceNumber>
+        <type>Integration Procedure Action</type>
+    </omniProcessElements>
+    <omniProcessElements>
+        <isActive>true</isActive>
+        <isOmniScriptEmbeddable>false</isOmniScriptEmbeddable>
+        <level>0.0</level>
+        <name>goToConfirmation</name>
+        <omniProcessVersionNumber>0.0</omniProcessVersionNumber>
+        <propertySetConfig>{&quot;label&quot;:&quot;Go to Confirmation&quot;,&quot;targetType&quot;:&quot;Web Page&quot;,&quot;targetUrl&quot;:&quot;/s/intake-complete&quot;}</propertySetConfig>
+        <sequenceNumber>4.0</sequenceNumber>
+        <type>Navigate Action</type>
+    </omniProcessElements>
+    <omniProcessType>OmniScript</omniProcessType>
+    <propertySetConfig>{&quot;allowSaveForLater&quot;:true,&quot;enableKnowledge&quot;:false,&quot;currentLanguage&quot;:&quot;en_US&quot;,&quot;scrollBehavior&quot;:&quot;auto&quot;,&quot;stepChartPlacement&quot;:&quot;right&quot;}</propertySetConfig>
+    <subType>Intake</subType>
+    <type>Customer</type>
+    <uniqueName>Customer_Intake_English_1</uniqueName>
+    <versionNumber>1.0</versionNumber>
+</OmniScript>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ValidationRule xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Complete_Requires_Permit</fullName>
+    <active>true</active>
+    <description>A project cannot be marked Complete unless its permit has been approved.</description>
+    <errorConditionFormula>ISPICKVAL(Status__c,"Complete") &amp;&amp; NOT(Permit_Approved__c)</errorConditionFormula>
+    <errorDisplayField>Status__c</errorDisplayField>
+    <errorMessage>You cannot set Status to Complete until the permit is approved (Permit Approved must be checked).</errorMessage>
+</ValidationRule>

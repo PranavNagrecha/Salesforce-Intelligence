@@ -3,6 +3,34 @@
 All notable changes to **sf-intelligence** are documented here. This project
 adheres to [Semantic Versioning](https://semver.org).
 
+## [0.1.13] — 2026-06-25
+
+Headline: **try it with no Salesforce org.** A new `sfi demo` command builds and serves a
+bundled synthetic "Verdant Energy" org over MCP — `npx -y sf-intelligence demo` is a full,
+offline, zero-setup trial. Plus registry-readiness, a clarified license, and a measured moat.
+
+### Added
+- **`sfi demo`** — builds the bundled synthetic org into a cached vault on first run
+  (`~/.sf-intelligence/demo`) and serves it read-only over MCP; no org, no `sf` CLI required.
+- A committed, queryable synthetic demo vault (`examples/demo-vault`) + curated demo
+  questions (`examples/demo-questions.md`).
+- npm registry metadata: `mcpName` + a `server.json` MCP-registry manifest + `repository` /
+  `bugs` URLs + agent-era keywords (claude, claude-code, cursor, cline, mcp-server, ai-agent).
+- A `workflow_dispatch` trigger + a CI status badge.
+
+### Changed
+- **License clarified** to the canonical Commons Clause: free to use (including at work);
+  a commercial license is only needed to *Sell* it (resell / host / SaaS / support-for-fee).
+  Plain-English `NOTICE` added; README + website updated. (Previously read as noncommercial-only.)
+
+### Engineering & trust
+- **Scale certified to 50,000 components** (import 40.5 s, resolve ~73 ms/query;
+  `pnpm eval:scale:cert`, `docs/reports/scale-certification.md`).
+- **SAST accuracy measured** on a labeled synthetic corpus: 100% precision / 90% recall
+  (`pnpm eval:sast-accuracy`, `docs/reports/sast-accuracy-report.md`).
+- New CI + pre-commit "public-interface" guard: public artifacts may reference only in-repo
+  synthetic vaults, and no un-allowlisted raster images (screenshot-leak defense).
+
 ## [0.1.12] — 2026-06-17
 
 Headline: **funnel-primary routing (CAE)**. `sfi.route_question` now leads with an

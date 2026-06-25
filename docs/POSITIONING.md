@@ -190,11 +190,13 @@ every response.
   tool doesn't know whether a runtime record satisfies them. This is why every
   code-quality and what-if finding is tagged `heuristic` and asks to be
   spot-checked. False positives (and silent false negatives) are expected.
-- **Scale is tested to ~10,000 components for import** (batched transactions;
-  see `packages/graph/test/scale-import.test.ts` and `pnpm eval:scale:import`).
-  Resolve latency on real vaults (~2–3k nodes) is sub-second; very large orgs
-  may still need metadata-type-scoped refreshes. Commercial incumbents routinely
-  handle far bigger orgs.
+- **Scale: certified to 50,000 components** (import 40.5 s, resolve ~73 ms/query;
+  `pnpm eval:scale:cert`, full report in `docs/reports/scale-certification.md`), on top
+  of the 10,000-component import budget that gates every CI build
+  (`packages/graph/test/scale-import.test.ts`). The graph is not the bottleneck at
+  enterprise scale; the upstream `sf project retrieve` + extraction is. Orgs past ~50k
+  modeled components should scope the refresh by metadata type (`sfi refresh --types …`)
+  rather than pull everything at once.
 - **Accuracy depends on the user keeping the vault fresh.** Everything is
   served from the last `sf project retrieve`. If the org changed after the last
   refresh, answers are stale — and a confidently stated stale answer is worse
@@ -224,8 +226,10 @@ every response.
   engine with a smaller catalog and a higher false-positive surface on CRUD/FLS.
 - **You need a polished, collaborative, hosted documentation portal** that
   non-technical stakeholders click through. Use Elements.cloud or Sonar/Salto.
-- **You run a very large org (well past ~2k components) and need it to just
-  work.** The commercial tools are built for that scale today; this isn't yet.
+- **You run a *very* large org (well past ~50k components) and need every metadata
+  type pulled at once with zero setup.** The graph is certified to 50k components, but
+  the upstream retrieve/extract on the largest orgs benefits from scoped refreshes; the
+  commercial tools ingest everything at that scale out of the box.
 - **You can't or won't use Claude Code / an MCP client.** The entire interface
   is an MCP server driven from Claude Code. No client, no product.
 

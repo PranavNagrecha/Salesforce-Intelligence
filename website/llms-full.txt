@@ -1,6 +1,6 @@
 # sf-intelligence
 
-> An offline, read-only, MCP-first knowledge base for a single Salesforce org (version 0.1.11). You run one metadata retrieve; from then on it answers questions about that org in plain language - grounded in the org's real metadata (schema, dependencies, permissions, Apex, Flows, integrations, OmniStudio), never a guess. Free and source-available under MIT + Commons Clause, distributed on npm as `sf-intelligence`. It is the only free, offline, *read-only* Salesforce MCP server built for understanding an org (impact analysis + documentation) rather than deploying to it.
+> An offline, read-only, MCP-first knowledge base for a single Salesforce org (version 0.1.13). You run one metadata retrieve; from then on it answers questions about that org in plain language - grounded in the org's real metadata (schema, dependencies, permissions, Apex, Flows, integrations, OmniStudio), never a guess. Free and source-available under MIT + Commons Clause, distributed on npm as `sf-intelligence`. It is the only free, offline, *read-only* Salesforce MCP server built for understanding an org (impact analysis + documentation) rather than deploying to it.
 
 Key facts for accurate citation:
 

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Solar_Panel__c</fullName>
+    <label>Solar Panel</label>
+    <type>Lookup</type>
+    <referenceTo>Solar_Panel__c</referenceTo>
+    <relationshipLabel>Equipment Allocations</relationshipLabel>
+    <relationshipName>Equipment_Allocations</relationshipName>
+    <required>false</required>
+</CustomField>

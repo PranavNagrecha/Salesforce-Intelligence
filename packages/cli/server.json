@@ -1,0 +1,32 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.pranavnagrecha/sf-intelligence",
+  "description": "Offline, read-only MCP knowledge base for a Salesforce org. Ask in plain language about schema, fields, Apex, Flows, permissions & sharing, integrations, OmniStudio, dependency/impact analysis, and code quality — grounded in the org's real retrieved metadata, never a guess. Private by design: answers are served from a local vault with no network egress.",
+  "status": "active",
+  "repository": {
+    "url": "https://github.com/PranavNagrecha/Salesforce-Intelligence",
+    "source": "github"
+  },
+  "version": "0.1.13",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "sf-intelligence",
+      "version": "0.1.13",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeHint": "npx",
+      "runtimeArguments": [
+        {
+          "type": "positional",
+          "value": "mcp",
+          "valueHint": "subcommand",
+          "isRequired": true,
+          "description": "Run the MCP server backing the local org-kb vault."
+        }
+      ]
+    }
+  ]
+}

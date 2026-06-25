@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <deploymentStatus>Deployed</deploymentStatus>
+    <description>A field service visit to a completed installation (inspection, repair, warranty, or upgrade).</description>
+    <enableActivities>true</enableActivities>
+    <enableHistory>false</enableHistory>
+    <enableReports>true</enableReports>
+    <label>Service Visit</label>
+    <nameField>
+        <displayFormat>SV-{00000}</displayFormat>
+        <label>Service Visit Number</label>
+        <type>AutoNumber</type>
+    </nameField>
+    <pluralLabel>Service Visits</pluralLabel>
+    <sharingModel>Private</sharingModel>
+    <visibility>Public</visibility>
+</CustomObject>

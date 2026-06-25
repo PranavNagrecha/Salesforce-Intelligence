@@ -5,6 +5,9 @@ LOOP_STATE.json
 /LOOP_STATE.md
 /docs/reports/release-*.md
 website/SEO-STRATEGY.md
+# Launch/marketing drafts (registry submissions, video script, HN/Reddit/blog posts).
+# Local working playbook — not product content; kept out of the public repo.
+/docs/launch/
 
 node_modules/
 dist/
@@ -14,6 +17,10 @@ dist/
 .env.local
 coverage/
 .vitest-cache/
+
+# Built demo source copy: build.mjs copies examples/demo-vault/source here so the
+# published npm package ships it (via package.json "files"). Not committed.
+packages/cli/demo-source/
 
 # User-specific generated vault. Created by /sfi-init + /sfi-refresh on the
 # end user's own org. Never committed: it contains org-specific metadata,

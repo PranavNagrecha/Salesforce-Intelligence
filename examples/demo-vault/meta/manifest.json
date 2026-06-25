@@ -1,0 +1,508 @@
+{
+  "apexAst": {
+    "filesParsed": 6,
+    "parseErrors": 0
+  },
+  "components": {
+    "ApexClass": 5,
+    "ApexTrigger": 1,
+    "ApprovalProcess": 1,
+    "CustomField": 63,
+    "CustomObject": 13,
+    "Flow": 2,
+    "Group": 2,
+    "Layout": 2,
+    "OmniDataTransform": 1,
+    "OmniIntegrationProcedure": 1,
+    "OmniScript": 1,
+    "PermissionSet": 2,
+    "Profile": 3,
+    "Queue": 2,
+    "RecordType": 2,
+    "Role": 6,
+    "SharingRule": 2,
+    "ValidationRule": 3,
+    "WorkflowRule": 1
+  },
+  "coverage": [
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 5,
+      "type": "ApexClass"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 1,
+      "type": "ApexTrigger"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 1,
+      "type": "ApprovalProcess"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "AssignmentRule"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "AuraDefinitionBundle"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "AuthProvider"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "AutoResponseRule"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "BusinessProcess"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "CompactLayout"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "ConnectedApp"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "CspTrustedSite"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "CustomApplication"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 63,
+      "type": "CustomField"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "CustomLabel"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "CustomMetadataRecord"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 13,
+      "type": "CustomObject"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "CustomSettingRecord"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "CustomTab"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "Dashboard"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "DecisionTable"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "DuplicateRule"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "EmailTemplate"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "EscalationRule"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "ExternalDataSource"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "ExternalService"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "FieldSet"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "FlexiPage"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 2,
+      "type": "Flow"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "GlobalValueSet"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 2,
+      "type": "Group"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "Index"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "InstalledPackage"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 2,
+      "type": "Layout"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "Letterhead"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "LightningComponentBundle"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "ListView"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "MatchingRule"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "MutingPermissionSet"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "NamedCredential"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "NetworkAccess"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 1,
+      "type": "OmniDataTransform"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 1,
+      "type": "OmniIntegrationProcedure"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 1,
+      "type": "OmniScript"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "OmniUiCard"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "PathAssistant"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 2,
+      "type": "PermissionSet"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "PermissionSetGroup"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 3,
+      "type": "Profile"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 2,
+      "type": "Queue"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "QuickAction"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 2,
+      "type": "RecordType"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "RemoteSiteSetting"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "Report"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "ReportType"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "RestrictionRule"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 6,
+      "type": "Role"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "ScopingRule"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 2,
+      "type": "SharingRule"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "StaticResource"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 3,
+      "type": "ValidationRule"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "VisualforceComponent"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "VisualforcePage"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "WebLink"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 1,
+      "type": "WorkflowRule"
+    }
+  ],
+  "coverageComputedAt": "2026-06-25T15:19:46.650Z",
+  "edges": {
+    "callsApex": 2,
+    "dispatchesOmniAction": 4,
+    "firesWhen": 5,
+    "grantedBy": 134,
+    "inheritsFrom": 4,
+    "lookupTo": 16,
+    "parentOf": 73,
+    "readsFrom": 27,
+    "references": 20,
+    "sharedWith": 4,
+    "triggersOn": 4,
+    "usedInLayout": 18,
+    "writesTo": 11
+  },
+  "phantomSummary": {
+    "buckets": {
+      "automation-critical": 6,
+      "blindspot-manifest": 1,
+      "standard-field-phantom": 6,
+      "unknown": 5
+    },
+    "computedAt": "2026-06-25T15:19:46.650Z",
+    "distinctPhantoms": 18
+  },
+  "refreshedAt": "2026-06-25T15:19:46.650Z",
+  "skippedDirectories": {},
+  "sourceOrg": "demo-org",
+  "sourceTreeHash": "ec3078be5664a9ac51be30123be8bbf4b2747acc85fbd99aa38f2c22e45e8824",
+  "version": "0.1.12"
+}
