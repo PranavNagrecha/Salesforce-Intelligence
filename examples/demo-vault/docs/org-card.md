@@ -11,7 +11,8 @@ Offline snapshot of one Salesforce org. Source-tree hash `ec3078be5664a9ac51be30
 
 ## Coverage & blind spots
 
-Coverage status: **complete** — 64 metadata families retrieved.
+Coverage status: **partial** — 19 metadata families retrieved.
+- Partial (retrieved with errors/limits): AssignmentRule, AuraDefinitionBundle, AuthProvider, AutoResponseRule, BusinessProcess, CompactLayout, ConnectedApp, CspTrustedSite, CustomApplication, CustomLabel, CustomMetadataRecord, CustomSettingRecord, CustomTab, Dashboard, DecisionTable, DuplicateRule, EmailTemplate, EscalationRule, ExternalDataSource, ExternalService, FieldSet, FlexiPage, GlobalValueSet, Index, InstalledPackage, Letterhead, LightningComponentBundle, ListView, MatchingRule, MutingPermissionSet, NamedCredential, NetworkAccess, OmniUiCard, PathAssistant, PermissionSetGroup, QuickAction, RemoteSiteSetting, Report, ReportType, RestrictionRule, ScopingRule, StaticResource, VisualforceComponent, VisualforcePage, WebLink
 
 ## Scale
 
