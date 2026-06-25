@@ -34,7 +34,8 @@
   "files": [
     "dist/index.js",
     "bin",
-    "README.md"
+    "README.md",
+    "demo-source"
   ],
   "scripts": {
     "build": "tsc --build && node build.mjs",

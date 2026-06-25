@@ -15,6 +15,10 @@ dist/
 coverage/
 .vitest-cache/
 
+# Built demo source copy: build.mjs copies examples/demo-vault/source here so the
+# published npm package ships it (via package.json "files"). Not committed.
+packages/cli/demo-source/
+
 # User-specific generated vault. Created by /sfi-init + /sfi-refresh on the
 # end user's own org. Never committed: it contains org-specific metadata,
 # a DuckDB binary, and absolute local paths (privacy + repo-bloat). Each

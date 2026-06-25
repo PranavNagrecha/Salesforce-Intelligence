@@ -202,6 +202,28 @@ rather than papering over the gap with general Salesforce knowledge:
   - **Resolve:** p95 under 2s on the CI vault (`pnpm eval:scale`, `SCALE_BUDGET_MS`).
   Very large production orgs may still need narrowed retrieves or multiple vaults.
 
+## Try it now — no Salesforce org needed
+
+Want to see it work before pointing it at your own org? One command serves a
+built-in **synthetic demo org** ("Verdant Energy," a fictional solar installer)
+over MCP — fully offline, no auth, no `sf` CLI:
+
+```bash
+# Register the demo server with Claude Code (or any MCP client):
+claude mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo
+```
+
+Then ask it things like:
+
+> - *What happens when I save a Project?*
+> - *What breaks if I delete `Invoice__c.Amount__c`?*
+> - *Why can't an Installer see an Invoice?*
+> - *Which Apex has governor-limit risk?*
+
+The first run builds the demo vault in a few seconds (cached under
+`~/.sf-intelligence/demo`); every run after is instant. Nothing leaves your
+machine. When you're ready for your real org, follow **Install** below.
+
 ## Install
 
 `sf-intelligence` is distributed on npm as `sf-intelligence` — an MCP
