@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>61.0</apiVersion>
+    <description>When a Project is approved, create a Permit record (Submitted) linked back to the Project.</description>
+    <label>Project On Approve</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <interviewLabel>Project On Approve {!$Flow.CurrentDateTime}</interviewLabel>
+    <environments>Default</environments>
+    <start>
+        <locationX>176</locationX>
+        <locationY>0</locationY>
+        <connector>
+            <targetReference>Create_Permit</targetReference>
+        </connector>
+        <object>Project__c</object>
+        <recordTriggerType>CreateAndUpdate</recordTriggerType>
+        <triggerType>RecordAfterSave</triggerType>
+        <filterLogic>and</filterLogic>
+        <filters>
+            <field>Status__c</field>
+            <operator>EqualTo</operator>
+            <value>
+                <stringValue>Approved</stringValue>
+            </value>
+        </filters>
+    </start>
+    <recordCreates>
+        <name>Create_Permit</name>
+        <label>Create Permit</label>
+        <locationX>176</locationX>
+        <locationY>134</locationY>
+        <inputAssignments>
+            <field>Project__c</field>
+            <value>
+                <elementReference>$Record.Id</elementReference>
+            </value>
+        </inputAssignments>
+        <inputAssignments>
+            <field>Status__c</field>
+            <value>
+                <stringValue>Submitted</stringValue>
+            </value>
+        </inputAssignments>
+        <object>Permit__c</object>
+        <storeOutputAutomatically>true</storeOutputAutomatically>
+    </recordCreates>
+</Flow>
