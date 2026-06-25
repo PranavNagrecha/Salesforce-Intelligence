@@ -1,0 +1,50 @@
+{
+  "_about": "Labeled synthetic Apex corpus for measuring the heuristic SAST recognizers' false-positive / false-negative rates. Every snippet is invented (no real org). `shouldFire` is the ground-truth label for the case's target `rule`. Cases deliberately include FP-traps (looks like a hit but isn't) and FN-blindspots (a real issue the documented heuristic boundary misses — dynamic SOQL, cross-method, etc.) so the measured number is honest, not gamed. Expand freely. Measure: `node eval/sast-accuracy.mjs`.",
+  "cases": [
+    { "id": "soql-loop-pos-literal", "rule": "soql-in-loop", "shouldFire": true, "kind": "positive",
+      "source": "public class A { void f(List<Account> accts){ for (Account a : accts){ List<Contact> cs = [SELECT Id FROM Contact WHERE AccountId = :a.Id]; } } }" },
+    { "id": "soql-loop-pos-while", "rule": "soql-in-loop", "shouldFire": true, "kind": "positive",
+      "source": "public class A { void f(){ Integer i=0; while (i<10){ Account a = [SELECT Id FROM Account LIMIT 1]; i++; } } }" },
+    { "id": "soql-loop-neg-bulkified", "rule": "soql-in-loop", "shouldFire": false, "kind": "negative",
+      "source": "public class A { void f(Set<Id> ids){ List<Contact> cs = [SELECT Id FROM Contact WHERE AccountId IN :ids]; for (Contact c : cs){ c.LastName='x'; } } }" },
+    { "id": "soql-loop-neg-comment-trap", "rule": "soql-in-loop", "shouldFire": false, "kind": "fp-trap",
+      "source": "public class A { void f(List<Account> accts){ for (Account a : accts){ // [SELECT Id FROM Contact] used to be here\n a.Name='x'; } } }" },
+    { "id": "soql-loop-neg-string-trap", "rule": "soql-in-loop", "shouldFire": false, "kind": "fp-trap",
+      "source": "public class A { void f(List<Account> accts){ for (Account a : accts){ String note = 'for SELECT Id FROM Contact'; } } }" },
+    { "id": "soql-loop-pos-dynamic", "rule": "soql-in-loop", "shouldFire": true, "kind": "positive",
+      "source": "public class A { void f(List<Account> accts){ for (Account a : accts){ List<SObject> r = Database.query('SELECT Id FROM Contact WHERE AccountId = \\'' + a.Id + '\\''); } } }" },
+
+    { "id": "dml-loop-pos", "rule": "dml-in-loop", "shouldFire": true, "kind": "positive",
+      "source": "public class A { void f(List<Account> accts){ for (Account a : accts){ update a; } } }" },
+    { "id": "dml-loop-neg", "rule": "dml-in-loop", "shouldFire": false, "kind": "negative",
+      "source": "public class A { void f(List<Account> accts){ for (Account a : accts){ a.Name='x'; } update accts; } }" },
+
+    { "id": "hardcoded-id-pos-15", "rule": "hardcoded-id", "shouldFire": true, "kind": "positive",
+      "source": "public class A { Id rec = '001000000000abc'; }" },
+    { "id": "hardcoded-id-pos-18", "rule": "hardcoded-id", "shouldFire": true, "kind": "positive",
+      "source": "public class A { Id rec = '0011x00000AbCdEAAB'; }" },
+    { "id": "hardcoded-id-neg-text", "rule": "hardcoded-id", "shouldFire": false, "kind": "negative",
+      "source": "public class A { String greeting = 'hello there friend'; }" },
+    { "id": "hardcoded-id-neg-short", "rule": "hardcoded-id", "shouldFire": false, "kind": "fp-trap",
+      "source": "public class A { String code = 'ABC123'; }" },
+
+    { "id": "hardcoded-email-pos", "rule": "hardcoded-email", "shouldFire": true, "kind": "positive",
+      "source": "public class A { String to = 'admin@example.com'; }" },
+    { "id": "hardcoded-email-neg", "rule": "hardcoded-email", "shouldFire": false, "kind": "negative",
+      "source": "public class A { String label = 'Contact Owner'; }" },
+
+    { "id": "crud-pos-insert", "rule": "missing-crud-check", "shouldFire": true, "kind": "positive",
+      "source": "public class A { public void save(Account a){ insert a; } }" },
+    { "id": "crud-neg-guarded", "rule": "missing-crud-check", "shouldFire": false, "kind": "negative",
+      "source": "public class A { public void save(Account a){ if (Schema.sObjectType.Account.isCreateable()){ insert a; } } }" },
+    { "id": "crud-fn-helper", "rule": "missing-crud-check", "shouldFire": true, "kind": "fn-blindspot",
+      "source": "public class A { public void save(Account a){ SecurityUtil.doInsert(a); } }" },
+
+    { "id": "fls-pos-query", "rule": "missing-fls-check", "shouldFire": true, "kind": "positive",
+      "source": "public class A { public List<Account> f(){ return [SELECT Industry FROM Account]; } }" },
+    { "id": "fls-neg-enforced", "rule": "missing-fls-check", "shouldFire": false, "kind": "negative",
+      "source": "public class A { public List<Account> f(){ return [SELECT Industry FROM Account WITH SECURITY_ENFORCED]; } }" },
+    { "id": "fls-neg-usermode", "rule": "missing-fls-check", "shouldFire": false, "kind": "negative",
+      "source": "public class A { public List<Account> f(){ return [SELECT Industry FROM Account WITH USER_MODE]; } }" }
+  ]
+}
