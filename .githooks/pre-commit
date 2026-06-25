@@ -29,4 +29,15 @@ if [ "$status" -ne 0 ]; then
   echo "  If — and only if — it is a genuine false positive: git commit --no-verify"
   exit 1
 fi
+
+# Public-interface guard (Phase 21 / WS-E3): the public CI + eval config must wire
+# only to in-repo synthetic vaults — never the maintainer's real org vaults at the
+# workspace root. Fast + cross-referential, so it runs on every commit.
+node scripts/check-public-interface.mjs
+if [ "$?" -ne 0 ]; then
+  echo ""
+  echo "✖ pre-commit: public CI/eval config references a non-public vault (see above)."
+  echo "  If — and only if — it is a genuine false positive: git commit --no-verify"
+  exit 1
+fi
 exit 0
