@@ -1,6 +1,6 @@
 {
   "name": "sf-intelligence",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "Offline-first, MCP-first knowledge base for a Salesforce org. Ask about your org's metadata, dependencies, permissions, and automation \u2014 grounded in real retrieved metadata. Ships the sfi CLI and an MCP server.",
   "license": "SEE LICENSE IN LICENSE",
   "homepage": "https://salesforce-intelligence.pages.dev",
@@ -11,7 +11,7 @@
   "bugs": {
     "url": "https://github.com/PranavNagrecha/Salesforce-Intelligence/issues"
   },
-  "mcpName": "io.github.pranavnagrecha/sf-intelligence",
+  "mcpName": "io.github.PranavNagrecha/sf-intelligence",
   "keywords": [
     "salesforce",
     "salesforce-metadata",

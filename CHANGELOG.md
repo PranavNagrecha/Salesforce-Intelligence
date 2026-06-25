@@ -3,6 +3,17 @@
 All notable changes to **sf-intelligence** are documented here. This project
 adheres to [Semantic Versioning](https://semver.org).
 
+## [0.1.14] — 2026-06-25
+
+Headline: **listed on the official MCP Registry.** A metadata-only patch that corrects the
+`mcpName` namespace casing so `sf-intelligence` validates and lists on the official Model
+Context Protocol registry (and the directories that mirror it). No product behavior changes.
+
+### Changed
+- `mcpName` / `server.json` namespace corrected to the exact GitHub-login case
+  (`io.github.PranavNagrecha/sf-intelligence`) — the registry reads it case-sensitively.
+- `server.json` description shortened to the registry's 100-character limit.
+
 ## [0.1.13] — 2026-06-25
 
 Headline: **try it with no Salesforce org.** A new `sfi demo` command builds and serves a
