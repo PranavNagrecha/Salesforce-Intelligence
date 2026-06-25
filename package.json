@@ -30,6 +30,7 @@
     "eval:analytical": "pnpm --filter @sf-intelligence/mcp build && node eval/run-analytical.mjs",
     "eval:scale": "pnpm --filter @sf-intelligence/graph build && node eval/benchmark-scale.mjs",
     "eval:scale:import": "pnpm --filter @sf-intelligence/graph test test/scale-import.test.ts",
+    "eval:scale:cert": "pnpm --filter @sf-intelligence/graph build && node eval/scale-cert.mjs",
     "eval:routing-gate": "pnpm --filter @sf-intelligence/mcp build && NL_ROUTING_ONLY=1 node eval/nl-harness.mjs",
     "v4-gate": "bash scripts/v4-done-gate.sh",
     "e2e": "node packages/mcp/e2e-smoke.mjs",
