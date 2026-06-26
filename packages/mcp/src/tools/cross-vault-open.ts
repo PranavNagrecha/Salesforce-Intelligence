@@ -7,10 +7,15 @@
  * READ-ONLY — a shared DuckDB lock that coexists with a serving `sfi mcp`
  * server (P5/P7). The previous read-WRITE open (`openGraph`) took the exclusive
  * writer lock and so FAILED to compare a vault that was being served (or under
- * a concurrent refresh). Mirrors `server.ts#openServerGraph`: open read-only,
- * probe it, and fall back to a read-write open only when the read-only handle
- * can't answer (a missing file or a stale schema that needs migrating) — which
- * also surfaces the actionable `locked` error if a refresh holds the writer.
+ * a concurrent refresh).
+ *
+ * The read-only open ladder (probe, CR-19 schema-version self-heal, and the
+ * CR-19-amended best-effort lock-tolerant fallback that DEFERS an additive
+ * migration when the read-write re-open hits a held lock) is shared with
+ * `server.ts#openServerGraph` via the single {@link openGraphServeReadOnly}
+ * helper in the graph package — so these two near-identical open paths cannot
+ * drift apart. See that helper for the full rationale and additive-only safety
+ * argument.
  *
  * When `path` is the server's OWN vault, it reuses `ctx.graph` (already the
  * server's read-only handle) instead of opening a second one.
@@ -20,9 +25,7 @@ import type { McpError } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import {
   closeGraph,
-  listNodesByType,
-  openGraph,
-  openGraphReadOnly,
+  openGraphServeReadOnly,
   type GraphStore,
 } from '@sf-intelligence/graph';
 import { vaultPaths } from '@sf-intelligence/vault';
@@ -44,27 +47,13 @@ export const openVaultReadOnly = async (
   }
   const { graphDb } = vaultPaths(path);
 
-  const ro = await openGraphReadOnly(graphDb);
-  if (ro.ok) {
-    const probe = await listNodesByType(ro.value, 'CustomObject', { limit: 1 });
-    if (probe.ok) {
-      const store = ro.value;
-      return ok({ store, dispose: async () => closeGraph(store) });
-    }
-    // Opened read-only but unqueryable — a stale schema needing migration.
-    // Drop the read-only handle and let the read-write path migrate it.
-    await closeGraph(ro.value);
-  }
-
-  // No file yet, a stale schema, or a lock conflict — the read-write path
-  // creates/migrates, or surfaces the actionable `locked` error.
-  const rw = await openGraph(graphDb);
-  if (!rw.ok) {
+  const opened = await openGraphServeReadOnly(graphDb);
+  if (!opened.ok) {
     return err({
       kind: 'internal',
-      message: `failed to open graph for vault at ${path}: ${rw.error.message}`,
+      message: `failed to open graph for vault at ${path}: ${opened.error.message}`,
     });
   }
-  const store = rw.value;
+  const store = opened.value;
   return ok({ store, dispose: async () => closeGraph(store) });
 };
