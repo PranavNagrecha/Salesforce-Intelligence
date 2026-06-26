@@ -21,16 +21,24 @@ import {
   liveDuplicateCheckHandler,
   liveGroupCountHandler,
   liveInactiveUsersHandler,
+  liveLicenseUsageHandler,
   liveOrgHealthHandler,
+  liveOrgLimitsHandler,
   liveOwnerBreakdownHandler,
   liveRecentActivityHandler,
   liveReportUsageHandler,
   liveSampleHandler,
+  liveSecurityExposureHandler,
   liveStaleCheckHandler,
   liveStaleRecordsHandler,
   liveStorageByObjectHandler,
   redactSecrets,
 } from '../../src/tools/live-plane.js';
+import {
+  liveBudgetHandler,
+  liveBudgetStatus,
+  resetLiveSession,
+} from '../../src/tools/live-session.js';
 
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -58,6 +66,21 @@ beforeAll(() => {
 });
 afterAll(() => {
   delete process.env.SFI_CONSENT_PATH;
+});
+
+// CR-09: every live read now routes through the shared per-session budget +
+// result cache. Reset both before each test so (a) cumulative spend across the
+// file's many handler calls never trips budgetExceededError, and (b) a prior
+// test's cached result for a reused (org, SOQL) key cannot leak into the next.
+beforeEach(() => {
+  resetLiveSession();
+  delete process.env.SFI_LIVE_QUERY_BUDGET;
+  delete process.env.SFI_LIVE_CACHE_TTL_MS;
+});
+afterEach(() => {
+  resetLiveSession();
+  delete process.env.SFI_LIVE_QUERY_BUDGET;
+  delete process.env.SFI_LIVE_CACHE_TTL_MS;
 });
 
 describe('isLivePlaneEnabled', () => {
@@ -887,5 +910,220 @@ describe('liveStaleCheckHandler (P5-stale-detection)', () => {
     if (!r.ok) return;
     expect(r.value.data.erroredTypes).toContain('Flow');
     expect(r.value.data.checkedTypes).not.toContain('Flow');
+  });
+});
+
+// ===========================================================================
+// CR-09 (H9) — EVERY live read routes through the per-session query budget.
+// Before this fix only ~5 hybrid tools decremented the budget; ~20 single-shot
+// live_* tools bypassed it, so the marketed "cannot exhaust your org API limits"
+// safety was a half-truth and live_budget over-claimed. These tests pin the
+// safety property as TRUE: a previously-bypassing tool now spends budget by its
+// true query count, a cache hit costs 0, the budget fails closed, a mid-tool
+// budget stop is LEGIBLE, the REST sites count 1, the budget CHECK stays neutral,
+// and live_budget reports the true total across ALL tools.
+// ===========================================================================
+describe('CR-09 — live-plane budget routing (H9)', () => {
+  /** Counting `sf` mock for the SOQL/describe path; returns a fixed count. */
+  const countingExec = (
+    totalSize = 3,
+  ): { exec: ExecCommand; calls: () => number } => {
+    let calls = 0;
+    const exec: ExecCommand = async () => {
+      calls += 1;
+      return {
+        stdout: JSON.stringify({ result: { totalSize, records: [{ expr0: totalSize }] } }),
+        stderr: '',
+      };
+    };
+    return { exec, calls: () => calls };
+  };
+
+  /** owner_breakdown issues up to 4 queries: count, group-by-owner, User, Group. */
+  const ownerBreakdownExec = (): { exec: ExecCommand; calls: () => number } => {
+    let calls = 0;
+    const exec: ExecCommand = async (_b, args) => {
+      calls += 1;
+      const soql = soqlOf(args);
+      if (/count\(\)\s*from\s+account/i.test(soql)) {
+        return { stdout: JSON.stringify({ result: { totalSize: 50 } }), stderr: '' };
+      }
+      if (/group\s+by\s+ownerid/i.test(soql)) {
+        return {
+          stdout: JSON.stringify({
+            result: { records: [{ OwnerId: '005xx', cnt: 30 }, { OwnerId: '00Gyy', cnt: 20 }] },
+          }),
+          stderr: '',
+        };
+      }
+      if (/from\s+user/i.test(soql)) {
+        return { stdout: JSON.stringify({ result: { records: [{ Id: '005xx', Name: 'Alice' }] } }), stderr: '' };
+      }
+      if (/from\s+group/i.test(soql)) {
+        return { stdout: JSON.stringify({ result: { records: [{ Id: '00Gyy', Name: 'Queue' }] } }), stderr: '' };
+      }
+      return { stdout: JSON.stringify({ result: { records: [] } }), stderr: '' };
+    };
+    return { exec, calls: () => calls };
+  };
+
+  it('a previously-BYPASSING multi-query tool (owner_breakdown) now decrements by its true query count (4)', async () => {
+    const { exec, calls } = ownerBreakdownExec();
+    expect(liveBudgetStatus().remaining).toBe(50);
+    const r = await liveOwnerBreakdownHandler(ctx, { liveEnabled: true, objectApiName: 'Account' }, exec);
+    expect(r.ok).toBe(true);
+    // count + group-by + User + Group = 4 org queries, all budgeted.
+    expect(calls()).toBe(4);
+    expect(liveBudgetStatus().remaining).toBe(46);
+  });
+
+  it('a previously-BYPASSING single-query tool (live_count) now decrements by 1 (was stuck at 50)', async () => {
+    const { exec } = countingExec(7);
+    const r = await liveCountHandler(ctx, { liveEnabled: true, objectApiName: 'Account' }, exec);
+    expect(r.ok).toBe(true);
+    expect(liveBudgetStatus().remaining).toBe(49);
+  });
+
+  it('live_security_exposure decrements by its 5 signal queries', async () => {
+    const { exec, calls } = countingExec(2);
+    const r = await liveSecurityExposureHandler(ctx, { liveEnabled: true }, exec);
+    expect(r.ok).toBe(true);
+    expect(calls()).toBe(5);
+    expect(liveBudgetStatus().remaining).toBe(45);
+  });
+
+  it('live_inactive_users decrements by exactly 2 (count + detail) — no double-count, no residual bypass', async () => {
+    let calls = 0;
+    const exec: ExecCommand = async (_b, args) => {
+      calls += 1;
+      const soql = soqlOf(args);
+      if (/count\s*\(\s*\)/i.test(soql)) {
+        return { stdout: JSON.stringify({ result: { totalSize: 4 } }), stderr: '' };
+      }
+      return { stdout: JSON.stringify({ result: { records: [] } }), stderr: '' };
+    };
+    const r = await liveInactiveUsersHandler(ctx, { liveEnabled: true }, exec);
+    expect(r.ok).toBe(true);
+    expect(calls).toBe(2);
+    expect(liveBudgetStatus().remaining).toBe(48);
+  });
+
+  it('exceeding the budget fails closed with a clear "budget" error (owner_breakdown needs >2)', async () => {
+    process.env.SFI_LIVE_QUERY_BUDGET = '2';
+    const { exec } = ownerBreakdownExec();
+    // count(1) + group-by(2) succeed; the User name-resolution (3rd) is over budget.
+    const r = await liveOwnerBreakdownHandler(ctx, { liveEnabled: true, objectApiName: 'Account' }, exec);
+    // count + group-by both succeeded, so the tool returns ok BUT name-resolution
+    // hit the budget; the rendered output must NAME the budget rather than hide it.
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.rendered.toLowerCase()).toContain('budget');
+  });
+
+  it('a budget-exhausted single-query tool surfaces the budget error (hard fail when the FIRST query is over budget)', async () => {
+    process.env.SFI_LIVE_QUERY_BUDGET = '0';
+    const { exec } = countingExec();
+    const r = await liveCountHandler(ctx, { liveEnabled: true, objectApiName: 'Account' }, exec);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.message.toLowerCase()).toContain('budget');
+  });
+
+  it('security_exposure names the budget (not a bare null) when the budget runs out mid-tool', async () => {
+    process.env.SFI_LIVE_QUERY_BUDGET = '2';
+    const { exec } = countingExec(1);
+    const r = await liveSecurityExposureHandler(ctx, { liveEnabled: true }, exec);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // First 2 signals spend the budget; signals 3-5 are budget-stopped → a
+    // distinct boundary signal must name "budget", not silently report null.
+    expect(r.value.data.signals.some((s) => /budget/i.test(s))).toBe(true);
+  });
+
+  it('a cache hit costs 0 budget across the rerouted live_count path', async () => {
+    const { exec, calls } = countingExec(9);
+    const a = await liveCountHandler(ctx, { liveEnabled: true, objectApiName: 'Account' }, exec);
+    const b = await liveCountHandler(ctx, { liveEnabled: true, objectApiName: 'Account' }, exec);
+    expect(a.ok && b.ok).toBe(true);
+    // identical SOQL → second call served from cache → only ONE org query.
+    expect(calls()).toBe(1);
+    expect(liveBudgetStatus().remaining).toBe(49);
+  });
+
+  it('live_org_limits (REST) counts exactly 1 against the budget', async () => {
+    const authExec: ExecCommand = async () => ({
+      stdout: JSON.stringify({
+        status: 0,
+        result: { accessToken: 'tok', instanceUrl: 'https://x.my.salesforce.com', apiVersion: '67.0' },
+      }),
+      stderr: '',
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ DailyApiRequests: { Max: 15000, Remaining: 14990 } }) })));
+    const r = await liveOrgLimitsHandler(ctx, { liveEnabled: true }, authExec);
+    expect(r.ok).toBe(true);
+    expect(liveBudgetStatus().remaining).toBe(49);
+    vi.unstubAllGlobals();
+  });
+
+  it("live_budget's OWN org-headroom cross-check does NOT decrement the budget (budget-neutral invariant)", async () => {
+    const exec: ExecCommand = async () => ({
+      stdout: JSON.stringify({ result: [{ name: 'DailyApiRequests', max: 15000, remaining: 14990 }] }),
+      stderr: '',
+    });
+    const before = liveBudgetStatus().remaining;
+    const r = await liveBudgetHandler(ctx, { liveEnabled: true }, exec);
+    expect(r.ok).toBe(true);
+    // A budget CHECK must never spend budget.
+    expect(liveBudgetStatus().remaining).toBe(before);
+  });
+
+  it('live_budget reports the TRUE used/remaining total spent across a MIX of live tools', async () => {
+    const { exec } = countingExec(1);
+    await liveCountHandler(ctx, { liveEnabled: true, objectApiName: 'Account' }, exec); // 1
+    await liveSecurityExposureHandler(ctx, { liveEnabled: true }, exec);                // 5 → 6 total
+    const r = await liveBudgetHandler(ctx, {}, exec); // budget read (no headroom call without access)
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.budget.used).toBe(6);
+    expect(r.value.data.budget.remaining).toBe(r.value.data.budget.limit - 6);
+  });
+
+  it('every rerouted live_* handler still fails CLOSED without consent — the throwing exec is never reached', async () => {
+    const prev = process.env.SFI_LIVE_PLANE_ENABLED;
+    delete process.env.SFI_LIVE_PLANE_ENABLED;
+    const throwExec: ExecCommand = async () => {
+      throw new Error('sf must NOT be spawned without consent — gateLive must block first');
+    };
+    type Call = readonly [string, () => Promise<{ ok: boolean; error?: { kind?: string } }>];
+    const calls: readonly Call[] = [
+      ['live_describe', () => liveDescribeHandler(ctx, { objectApiName: 'Account' }, throwExec)],
+      ['live_count', () => liveCountHandler(ctx, { objectApiName: 'Account' }, throwExec)],
+      ['live_sample', () => liveSampleHandler(ctx, { soql: 'SELECT Id FROM Account' }, throwExec)],
+      ['live_field_population', () => liveFieldPopulationHandler(ctx, { objectApiName: 'Account', fieldApiName: 'Industry' }, throwExec)],
+      ['live_inactive_users', () => liveInactiveUsersHandler(ctx, {}, throwExec)],
+      ['live_stale_check', () => liveStaleCheckHandler(ctx, {}, throwExec)],
+      ['live_group_count', () => liveGroupCountHandler(ctx, { objectApiName: 'Case', groupByField: 'Status' }, throwExec)],
+      ['live_stale_records', () => liveStaleRecordsHandler(ctx, { objectApiName: 'Account' }, throwExec)],
+      ['live_recent_activity', () => liveRecentActivityHandler(ctx, { objectApiName: 'Lead' }, throwExec)],
+      ['live_aggregate', () => liveAggregateHandler(ctx, { objectApiName: 'Opportunity', fieldApiName: 'Amount' }, throwExec)],
+      ['live_duplicate_check', () => liveDuplicateCheckHandler(ctx, { objectApiName: 'Contact', fieldApiName: 'Email' }, throwExec)],
+      ['live_owner_breakdown', () => liveOwnerBreakdownHandler(ctx, { objectApiName: 'Account' }, throwExec)],
+      ['live_report_usage', () => liveReportUsageHandler(ctx, {}, throwExec)],
+      ['live_folder_access', () => liveFolderAccessHandler(ctx, {}, throwExec)],
+      ['live_email_template_usage', () => liveEmailTemplateUsageHandler(ctx, {}, throwExec)],
+      ['live_org_health', () => liveOrgHealthHandler(ctx, {}, throwExec)],
+      ['live_security_exposure', () => liveSecurityExposureHandler(ctx, {}, throwExec)],
+      ['live_org_limits', () => liveOrgLimitsHandler(ctx, {}, throwExec)],
+      ['live_storage_by_object', () => liveStorageByObjectHandler(ctx, {}, throwExec)],
+      ['live_license_usage', () => liveLicenseUsageHandler(ctx, {}, throwExec)],
+    ];
+    for (const [name, run] of calls) {
+      const r = await run();
+      expect(r.ok, `${name} must fail closed without consent`).toBe(false);
+      if (!r.ok) expect(r.error?.kind, `${name} kind`).toBe('invalid-query');
+    }
+    // No budget was spent — gateLive returned before any read.
+    expect(liveBudgetStatus().used).toBe(0);
+    if (prev !== undefined) process.env.SFI_LIVE_PLANE_ENABLED = prev;
   });
 });

@@ -3,8 +3,22 @@
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 
 import { checkVaultStaleness } from '../../src/tools/live-plane.js';
+import { resetLiveSession } from '../../src/tools/live-session.js';
 
 const REFRESHED_AT = '2026-06-02T19:02:05.214Z';
+
+// CR-09: checkVaultStaleness now routes its per-type Tooling reads through the
+// shared per-session budget + result cache. Reset both before each test so the
+// budget never carries over and a prior test's cached count cannot serve a
+// later test that reuses the same (org, SOQL) key.
+beforeEach(() => {
+  resetLiveSession();
+  delete process.env.SFI_LIVE_QUERY_BUDGET;
+  delete process.env.SFI_LIVE_CACHE_TTL_MS;
+});
+afterEach(() => {
+  resetLiveSession();
+});
 
 /** Mock `sf` that reports a per-type modified count parsed from the SOQL. */
 const execWithCounts =
