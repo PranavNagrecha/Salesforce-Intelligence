@@ -685,9 +685,12 @@ const bfsExpand = async (
  * Self-contained-slice contract (CR-13): every returned edge has BOTH
  * endpoints in the returned node set — no edge dangles. A node-capped clip
  * drops edges to the omitted (clipped) nodes; under `includeUnresolved`, a
- * surfaced phantom edge's endpoint (which has no real node row) is added as a
- * minimal stub node carrying `properties.unresolved: true` so the edge stays
- * visible AND self-contained.
+ * surfaced GENUINE phantom edge's endpoint (a heuristic+`targetMissing` edge
+ * whose `toId` has no real node row) is added as a minimal stub node carrying
+ * `properties.unresolved: true` so the edge stays visible AND self-contained.
+ * RV2: stubs cover ONLY genuine phantom targets (never budget-clipped REAL
+ * nodes — those stay clipped and their edges are dropped), and the synthesized
+ * stub is always the edge `toId` (the phantom endpoint per import stamping).
  *
  * @example
  *   const r = await getSubgraph(store, 'CustomObject:Account', 1);
@@ -750,16 +753,26 @@ export const getSubgraph = async (
     const returnedIds = new Set(returnedNodes.map((n) => n.id));
     if (limits.includeUnresolved) {
       // The opt-in flag's whole purpose is to SURFACE phantom edges, so a node
-      // set that omits the phantom endpoint would gut the feature. Instead,
-      // keep the slice self-contained by synthesizing a stub boundary node for
-      // each edge endpoint that has no real row, marked `unresolved` so
+      // set that omits the phantom endpoint would gut the feature. Synthesize a
+      // stub boundary node for the phantom endpoint, marked `unresolved` so
       // consumers can disclose it.
+      //
+      // RV2: stub ONLY genuine phantom edges (`isHiddenUnresolved` = heuristic
+      // AND properties.targetMissing), NEVER budget-clipped REAL nodes. A hub
+      // that overflows SUBGRAPH_MAX_NODES leaves edges to clipped real leaves in
+      // `collectedEdges` (edges are budgeted to maxEdges independently of the
+      // node cap); stubbing every missing endpoint would mislabel those real
+      // nodes `unresolved:true` and push the node count past the cap. The
+      // clipped reals stay out and their edges are dropped by the returnedIds
+      // filter below, exactly as on the default (no-includeUnresolved) path. The
+      // phantom endpoint is ALWAYS the edge `toId`: import.ts stamps
+      // `targetMissing` solely from `edge.toId`, and a phantom edge's `fromId`
+      // is the real scanned class/trigger that always has a node row.
       for (const edge of collectedEdges) {
-        for (const endpoint of [edge.fromId, edge.toId]) {
-          if (!returnedIds.has(endpoint)) {
-            returnedIds.add(endpoint);
-            returnedNodes.push(makeUnresolvedStubNode(endpoint));
-          }
+        if (!isHiddenUnresolved(edge)) continue;
+        if (!returnedIds.has(edge.toId)) {
+          returnedIds.add(edge.toId);
+          returnedNodes.push(makeUnresolvedStubNode(edge.toId));
         }
       }
     }

@@ -586,6 +586,20 @@ describe('getSubgraph caps + unresolved-edge filtering', () => {
         confidence: 'heuristic',
         source: 'apex-scanner',
       }),
+      // RV2: a heuristic phantom edge FROM the over-budget Hub. HubPhantom is
+      // NOT added to `nodes`, so import stamps targetMissing → isHiddenUnresolved
+      // is true. Under includeUnresolved this is the ONLY endpoint that should be
+      // synthesized as an unresolved stub; the ~500 budget-clipped REAL
+      // CustomField leaves must NOT be. `to_id ASC` orders ApexClass:HubPhantom
+      // before CustomField:Hub.F0__c, so it is collected before the node budget
+      // is spent, keeping the exactly-one-unresolved assertion reachable.
+      makeEdge({
+        fromId: 'CustomObject:Hub',
+        toId: 'ApexClass:HubPhantom',
+        edgeType: 'callsApex',
+        confidence: 'heuristic',
+        source: 'apex-scanner',
+      }),
     ];
     for (let i = 0; i < LEAF_COUNT; i++) {
       const id = `CustomField:Hub.F${i}__c`;
@@ -750,6 +764,42 @@ describe('getSubgraph caps + unresolved-edge filtering', () => {
     expect(stub?.apiName).toBe('Phantom');
     expect(stub?.properties['unresolved']).toBe(true);
     // Full no-dangling invariant: every edge endpoint is a returned node.
+    for (const e of r.value.edges) {
+      expect(nodeIds.has(e.fromId)).toBe(true);
+      expect(nodeIds.has(e.toId)).toBe(true);
+    }
+  });
+
+  it('includeUnresolved on an over-budget hub stubs ONLY genuine phantoms, never budget-clipped real nodes (RV2)', async () => {
+    // RV2: pre-fix the stub loop synthesized a stub for EVERY collectedEdge
+    // endpoint missing from the returned node set. Because bfsExpand collects
+    // edges up to maxEdges=400 independently of the maxNodes=200 cap, edges to
+    // budget-clipped REAL CustomField leaves remained in collectedEdges with
+    // endpoints absent from the node set — they were mislabeled unresolved:true
+    // and pushed the node count past the 200 cap. The fix gates the stub loop on
+    // isHiddenUnresolved (heuristic AND targetMissing), so only the genuine
+    // phantom (ApexClass:HubPhantom) is stubbed; clipped real leaves stay out and
+    // their edges are dropped by the returnedIds filter, exactly like the default.
+    const r = await getSubgraph(capStore, 'CustomObject:Hub', 1, {
+      includeUnresolved: true,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Caps hold: node count never exceeds 200, edge count never exceeds 400.
+    expect(r.value.nodes.length).toBeLessThanOrEqual(SUBGRAPH_MAX_NODES);
+    expect(r.value.edges.length).toBeLessThanOrEqual(400);
+    // No real CustomField leaf is labeled unresolved.
+    for (const n of r.value.nodes) {
+      if (n.type === 'CustomField') {
+        expect(n.properties['unresolved']).not.toBe(true);
+      }
+    }
+    // Exactly one node is an unresolved stub, and it is the genuine phantom.
+    const unresolved = r.value.nodes.filter((n) => n.properties['unresolved'] === true);
+    expect(unresolved.length).toBe(1);
+    expect(unresolved[0]?.id).toBe('ApexClass:HubPhantom');
+    // Zero dangling: every edge endpoint is in the returned node id set.
+    const nodeIds = new Set(r.value.nodes.map((n) => n.id));
     for (const e of r.value.edges) {
       expect(nodeIds.has(e.fromId)).toBe(true);
       expect(nodeIds.has(e.toId)).toBe(true);
