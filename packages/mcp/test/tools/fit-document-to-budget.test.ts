@@ -9,6 +9,7 @@ import {
   renderFooter,
   splitBodyIntoSections,
 } from '../../src/tools/generate-data-dictionary.js';
+import { jsonResult } from '../../src/tools/index.js';
 
 /** The renderFooter block every generator emits as the LAST body element. */
 const FOOTER = renderFooter(
@@ -254,6 +255,64 @@ describe('fitDocumentToBudget', () => {
     // Never risk dropping content when there is no honesty footer to anchor on.
     expect(fitted).toBe(doc);
     expect(fitted.body).not.toContain('## Truncation Note');
+  });
+});
+
+// =============================================================================
+// RV4: the claimed H7 re-opening at a tiny SFI_MAX_RESPONSE_BYTES does NOT
+// exist. These guards verify the REAL safety property through the full
+// fit→jsonResult path (the plan-check's requiredChange), and pin the CR-08 /
+// 40 KB-default budget. They do NOT assert any 1536-byte body ceiling — a
+// realistic data-dictionary collapses to ~1670 B, OVER slimDataStrings' 1536
+// threshold, so that "always under 1536" invariant from the original diagnosis
+// is false. H7 still cannot re-open: at any cap small enough for slimDataStrings
+// to engage, the full envelope already exceeds the cap and jsonResult returns a
+// structured oversize error BEFORE it could return a footer-chopped body.
+// =============================================================================
+describe('RV4 — tiny SFI_MAX_RESPONSE_BYTES never silently chops the doc footer', () => {
+  const PRIOR = process.env['SFI_MAX_RESPONSE_BYTES'];
+  afterEach(() => {
+    if (PRIOR === undefined) delete process.env['SFI_MAX_RESPONSE_BYTES'];
+    else process.env['SFI_MAX_RESPONSE_BYTES'] = PRIOR;
+  });
+
+  it('FOOTER-NEVER-SILENTLY-CHOPPED: tiny cap → footer-intact doc OR a structured oversize error (no 1536 ceiling)', () => {
+    // Smallest realistic operator override (the global acceptance floor is 2000).
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '2500';
+    // An over-budget data-dictionary: many sections so the doc far exceeds 2500B.
+    const sections = Array.from({ length: 8 }, (_, i) => makeSection(i + 1, 4_000));
+    const doc = makeDoc(sections);
+
+    // Fit to the LIVE per-document budget, then run the REAL global guard.
+    const fitted = fitDocumentToBudget(doc, generatedDocByteBudget());
+    const out = jsonResult({ data: fitted });
+    const text = out.content[0]?.type === 'text' ? out.content[0].text : '';
+    const parsed = JSON.parse(text) as {
+      error?: { kind?: string };
+      data?: GeneratedDocument;
+    };
+
+    if (parsed.error !== undefined) {
+      // Branch A — the whole envelope is over the tiny cap, so the guard returns
+      // a clean structured oversize error (NOT a footer-destroyed doc).
+      expect(parsed.error.kind).toBe('oversize');
+    } else {
+      // Branch B — the body survived intact: the honesty footer is present AND
+      // the body was NOT silently chopped by slimDataStrings.
+      const out0 = parsed.data;
+      expect(out0?.body).toContain('## Boundaries');
+      expect(out0?.body).toContain('## How To Regenerate');
+      expect(out0?.body).toContain('Generated from offline vault');
+      expect(out0?.body).not.toContain('bytes trimmed]');
+    }
+  });
+
+  it('CR-08 / 40KB DEFAULT: generatedDocByteBudget() === 38976 with SFI_MAX_RESPONSE_BYTES unset', () => {
+    delete process.env['SFI_MAX_RESPONSE_BYTES'];
+    // 40_000 default minus the 1_024 envelope reserve, well above the 2_000
+    // floor — proving the floor value is irrelevant on the default path and no
+    // floor change can perturb the CR-08-tuned budget.
+    expect(generatedDocByteBudget()).toBe(38_976);
   });
 });
 

@@ -350,7 +350,18 @@ export const renderFooter = (
  */
 const GENERATED_DOC_ENVELOPE_RESERVE_BYTES = 1_024;
 
-/** Floor for the per-document byte budget — mirrors the global guard's 2_000 floor. */
+/**
+ * Floor for the per-document byte budget. RV4: this is NOT the global guard's
+ * floor — the global `2_000` (tools/index.ts `responseBudgetBytes`) is the
+ * SFI_MAX_RESPONSE_BYTES acceptance minimum (below which the error envelope
+ * itself wouldn't fit), a different concept that merely shares the value `2_000`.
+ * This floor only guards `generatedDocByteBudget` from targeting a negative or
+ * absurdly small budget when an operator sets a tiny SFI_MAX_RESPONSE_BYTES. At
+ * such a cap the generator collapses fully but the irreducible envelope still
+ * exceeds the cap, so `jsonResult` returns a structured `oversize` error rather
+ * than a footer-chopped doc — H7 cannot re-open. At the default 40 KB this floor
+ * is never selected (max(2_000, 38_976) = 38_976).
+ */
 const GENERATED_DOC_BUDGET_FLOOR_BYTES = 2_000;
 
 /**
