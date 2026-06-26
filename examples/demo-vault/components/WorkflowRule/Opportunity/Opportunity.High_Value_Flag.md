@@ -68,3 +68,9 @@ Flag opportunities over 100,000 for executive review (legacy workflow rule, kept
 | Target | Confidence | Producer |
 | --- | --- | --- |
 | `CustomObject:Opportunity` | declared | workflow-rule-extractor |
+
+### writesTo (outgoing, 1)
+
+| Target | Confidence | Producer |
+| --- | --- | --- |
+| `CustomField:Opportunity.Description` | parsed | workflow-rule-extractor |

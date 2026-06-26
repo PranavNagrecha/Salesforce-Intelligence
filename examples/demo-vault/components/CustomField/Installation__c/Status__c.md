@@ -16,10 +16,22 @@ properties:
   label: Status
   length: null
   picklistValues:
-    - Scheduled
-    - InProgress
-    - Completed
-    - Failed
+    - default: true
+      isActive: true
+      label: Scheduled
+      value: Scheduled
+    - default: false
+      isActive: true
+      label: InProgress
+      value: InProgress
+    - default: false
+      isActive: true
+      label: Completed
+      value: Completed
+    - default: false
+      isActive: true
+      label: Failed
+      value: Failed
   precision: null
   referenceTo: null
   relationshipName: null
@@ -46,7 +58,7 @@ type: CustomField
 | formula | `null` |
 | inlineHelpText | `null` |
 | length | `null` |
-| picklistValues | `Scheduled,InProgress,Completed,Failed` |
+| picklistValues | `Scheduled, InProgress, Completed, Failed` |
 | precision | `null` |
 | referenceTo | `null` |
 | relationshipName | `null` |

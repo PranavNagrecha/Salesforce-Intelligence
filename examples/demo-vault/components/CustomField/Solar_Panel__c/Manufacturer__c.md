@@ -16,9 +16,18 @@ properties:
   label: Manufacturer
   length: null
   picklistValues:
-    - SunGrid
-    - HelioMax
-    - Voltaic
+    - default: true
+      isActive: true
+      label: SunGrid
+      value: SunGrid
+    - default: false
+      isActive: true
+      label: HelioMax
+      value: HelioMax
+    - default: false
+      isActive: true
+      label: Voltaic
+      value: Voltaic
   precision: null
   referenceTo: null
   relationshipName: null
@@ -45,7 +54,7 @@ type: CustomField
 | formula | `null` |
 | inlineHelpText | `null` |
 | length | `null` |
-| picklistValues | `SunGrid,HelioMax,Voltaic` |
+| picklistValues | `SunGrid, HelioMax, Voltaic` |
 | precision | `null` |
 | referenceTo | `null` |
 | relationshipName | `null` |

@@ -16,8 +16,14 @@ properties:
   label: Manufacturer
   length: null
   picklistValues:
-    - PowerCell
-    - EnerStore
+    - default: true
+      isActive: true
+      label: PowerCell
+      value: PowerCell
+    - default: false
+      isActive: true
+      label: EnerStore
+      value: EnerStore
   precision: null
   referenceTo: null
   relationshipName: null
@@ -44,7 +50,7 @@ type: CustomField
 | formula | `null` |
 | inlineHelpText | `null` |
 | length | `null` |
-| picklistValues | `PowerCell,EnerStore` |
+| picklistValues | `PowerCell, EnerStore` |
 | precision | `null` |
 | referenceTo | `null` |
 | relationshipName | `null` |

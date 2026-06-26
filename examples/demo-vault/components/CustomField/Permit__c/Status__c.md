@@ -16,9 +16,18 @@ properties:
   label: Status
   length: null
   picklistValues:
-    - Submitted
-    - Approved
-    - Rejected
+    - default: true
+      isActive: true
+      label: Submitted
+      value: Submitted
+    - default: false
+      isActive: true
+      label: Approved
+      value: Approved
+    - default: false
+      isActive: true
+      label: Rejected
+      value: Rejected
   precision: null
   referenceTo: null
   relationshipName: null
@@ -45,7 +54,7 @@ type: CustomField
 | formula | `null` |
 | inlineHelpText | `null` |
 | length | `null` |
-| picklistValues | `Submitted,Approved,Rejected` |
+| picklistValues | `Submitted, Approved, Rejected` |
 | precision | `null` |
 | referenceTo | `null` |
 | relationshipName | `null` |

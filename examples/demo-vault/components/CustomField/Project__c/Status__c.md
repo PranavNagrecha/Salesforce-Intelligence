@@ -16,12 +16,30 @@ properties:
   label: Status
   length: null
   picklistValues:
-    - Draft
-    - Approved
-    - Permitting
-    - Installing
-    - Complete
-    - Cancelled
+    - default: true
+      isActive: true
+      label: Draft
+      value: Draft
+    - default: false
+      isActive: true
+      label: Approved
+      value: Approved
+    - default: false
+      isActive: true
+      label: Permitting
+      value: Permitting
+    - default: false
+      isActive: true
+      label: Installing
+      value: Installing
+    - default: false
+      isActive: true
+      label: Complete
+      value: Complete
+    - default: false
+      isActive: true
+      label: Cancelled
+      value: Cancelled
   precision: null
   referenceTo: null
   relationshipName: null
@@ -48,7 +66,7 @@ type: CustomField
 | formula | `null` |
 | inlineHelpText | `null` |
 | length | `null` |
-| picklistValues | `Draft,Approved,Permitting,Installing,Complete,Cancelled` |
+| picklistValues | `Draft, Approved, Permitting, Installing, Complete, Cancelled` |
 | precision | `null` |
 | referenceTo | `null` |
 | relationshipName | `null` |
