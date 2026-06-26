@@ -44,6 +44,8 @@ import {
   INHERITED_CONFIDENCE_DISCLOSURE,
   Q125_FRESHNESS_DISCLOSURE,
   STRUCTURAL_DISCLOSURE,
+  fitDocumentToBudget,
+  generatedDocByteBudget,
   renderFooter,
   type GeneratedDocument,
 } from './generate-data-dictionary.js';
@@ -475,17 +477,25 @@ export const generateSharingSummaryHandler = async (
     ...rolesResult.value.map((r) => r.id),
   ];
 
-  const document: GeneratedDocument = {
-    frontmatter: {
-      title,
-      generatedAt,
-      sourceTreeHash,
-      componentIds,
+  // CR-08: fit the assembled doc (with the already-mutated CR-02/CR-04
+  // `boundaries[]`) under the response budget BEFORE the global guard, so its
+  // slimDataStrings never 1024-cuts `document.body` and silently strips the
+  // honesty footer. `targetMissing` is a sibling DATA field (outside the
+  // GeneratedDocument) and is untouched by the helper.
+  const document: GeneratedDocument = fitDocumentToBudget(
+    {
+      frontmatter: {
+        title,
+        generatedAt,
+        sourceTreeHash,
+        componentIds,
+      },
+      body,
+      sectionConfidence,
+      boundaries,
     },
-    body,
-    sectionConfidence,
-    boundaries,
-  };
+    generatedDocByteBudget(),
+  );
 
   return ok({
     data: { document, ...(targetMissing !== undefined ? { targetMissing } : {}) },

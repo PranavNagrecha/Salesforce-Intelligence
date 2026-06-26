@@ -41,6 +41,8 @@ import {
   INHERITED_CONFIDENCE_DISCLOSURE,
   Q125_FRESHNESS_DISCLOSURE,
   STRUCTURAL_DISCLOSURE,
+  fitDocumentToBudget,
+  generatedDocByteBudget,
   renderFooter,
   type GeneratedDocument,
 } from './generate-data-dictionary.js';
@@ -438,17 +440,20 @@ export const generateAdminHandbookHandler = async (
     ...vfResult.value.map((n) => n.id),
   ];
 
-  const document: GeneratedDocument = {
-    frontmatter: {
-      title,
-      generatedAt,
-      sourceTreeHash,
-      componentIds,
+  const document: GeneratedDocument = fitDocumentToBudget(
+    {
+      frontmatter: {
+        title,
+        generatedAt,
+        sourceTreeHash,
+        componentIds,
+      },
+      body,
+      sectionConfidence,
+      boundaries,
     },
-    body,
-    sectionConfidence,
-    boundaries,
-  };
+    generatedDocByteBudget(),
+  );
 
   return ok({
     data: { document },

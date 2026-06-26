@@ -37,6 +37,8 @@ import {
   INHERITED_CONFIDENCE_DISCLOSURE,
   Q125_FRESHNESS_DISCLOSURE,
   STRUCTURAL_DISCLOSURE,
+  fitDocumentToBudget,
+  generatedDocByteBudget,
   renderFooter,
   type GeneratedDocument,
 } from './generate-data-dictionary.js';
@@ -281,23 +283,36 @@ export const generateArchitectureOverviewHandler = async (
     ]),
   ];
 
-  const document: GeneratedDocument = {
-    frontmatter: {
-      title,
-      generatedAt,
-      sourceTreeHash,
-      componentIds,
+  // CR-08: fit the assembled doc under the response budget BEFORE the global
+  // guard so its slimDataStrings never 1024-cuts `document.body` and strips the
+  // honesty footer. When `format: 'html'` the envelope ALSO carries the `html`
+  // string (roughly doubling the bytes), so fit against a halved budget — that
+  // way both `document.body` AND the html built from it stay under the global
+  // guard's reductionCap and neither is silently slimmed. The html is built
+  // from the FITTED body so the saved .html tracks the markdown exactly.
+  const budget = generatedDocByteBudget();
+  const document: GeneratedDocument = fitDocumentToBudget(
+    {
+      frontmatter: {
+        title,
+        generatedAt,
+        sourceTreeHash,
+        componentIds,
+      },
+      body,
+      sectionConfidence,
+      boundaries,
     },
-    body,
-    sectionConfidence,
-    boundaries,
-  };
+    input.format === 'html' ? Math.floor(budget / 2) : budget,
+  );
 
   // P11-artifacts-html: when asked, also render a self-contained HTML page so the
   // overview can be saved as a shareable `.html` artifact (mermaid diagrams and
   // all). The markdown `document` is always returned regardless of format.
   const html =
-    input.format === 'html' ? renderHtmlDocument(title, body) : undefined;
+    input.format === 'html'
+      ? renderHtmlDocument(title, document.body)
+      : undefined;
 
   return ok({
     data: html === undefined ? { document } : { document, html },
