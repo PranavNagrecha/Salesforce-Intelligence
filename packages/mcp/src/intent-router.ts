@@ -7,15 +7,18 @@
  * DETERMINISTIC, rule-based classifier (ordered shape rules, first match wins)
  * — not an LLM guess — so it is regression-testable and never fabricates a
  * route. When nothing matches, or a question needs a capability we have not
- * built yet, it returns `plane: 'unknown'` / a `gap`, logs it for the backlog,
- * and points at `sfi.resolve` / `sfi.capabilities` instead of pretending.
+ * built yet, it returns `plane: 'unknown'` / a `gap` and points at
+ * `sfi.resolve` / `sfi.capabilities` instead of pretending. The gap is appended
+ * to the local backlog only when the `route_question` caller explicitly opts in
+ * with `logGap: true` (privacy-first, off by default — CR-16).
  *
  * Coverage goal: the org has ~120 read-only tools spanning schema, automation,
  * order-of-execution, code quality, security/sharing, PII, integration,
  * cleanup, what-if impact, docs, change/diff, CPQ/OmniStudio, and the live
  * plane. This router's job is to EXPOSE that surface from natural language —
- * every family below routes to a real tool — and to honestly log the long tail
- * it does not yet cover so the library grows toward real demand.
+ * every family below routes to a real tool — and to honestly surface the long
+ * tail it does not yet cover (logged to the backlog only on explicit opt-in) so
+ * the library grows toward real demand.
  */
 
 import { appendFile, mkdir } from 'node:fs/promises';
