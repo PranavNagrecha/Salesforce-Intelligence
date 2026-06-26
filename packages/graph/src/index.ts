@@ -19,8 +19,9 @@ export {
   changeSetSize,
   computeChangeSet,
   INCREMENTAL_DELTA_CAP,
+  pruneStaleNodes,
 } from './apply-change-set.js';
-export type { ApplyCounts, ChangeSet, EdgeKey } from './apply-change-set.js';
+export type { ApplyCounts, ChangeSet, EdgeKey, PruneCounts } from './apply-change-set.js';
 export {
   CURRENT_SCHEMA_VERSION,
   needsMigration,

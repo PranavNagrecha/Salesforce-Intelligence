@@ -42,6 +42,7 @@ import {
   listNodesByType,
   openGraph,
   openGraphReadOnly,
+  pruneStaleNodes,
   type GraphStore,
 } from '@sf-intelligence/graph';
 import { dispatchTool, runSfJson, type Context as McpContext } from '@sf-intelligence/mcp';
@@ -1178,18 +1179,40 @@ const importGraph = async (
       return fullRebuild(store, results);
     }
     if (reconciledTypes !== undefined && reconciledTypes.size > 0) {
+      // Scoped/pruned WITH-PULL reconcile. The fresh rows of the reconciled
+      // type(s) are upserted by `importExtractionResults` first (its own per-batch
+      // transactions). Then prune ONLY the stale rows of those SAME reconciled
+      // types: `computeChangeSet({ pruneNodeTypes })` returns delete lists already
+      // type-scoped (a delete entry's node/edge endpoint type ∈ `reconciledTypes`),
+      // so a surviving, never-re-extracted type can never appear in them.
+      //
+      // CR-20: this prunes via `pruneStaleNodes` (chunked DELETE transactions),
+      // NOT `applyChangeSet`. `applyChangeSet`'s whole-graph post-apply self-check
+      // compares the GLOBAL row count to a reconciled-ONLY desired count, which is
+      // wrong for a partial reconcile — on any multi-type graph it tripped, rolled
+      // back, and orphaned the stale rows (and hard-failed this refresh). The
+      // chunked prune sidesteps that self-check and bounds memory per batch, so
+      // INCREMENTAL_DELTA_CAP is INFORMATIONAL on this branch only: an over-cap
+      // scoped prune still runs in full (never no-ops, never a whole-graph rebuild
+      // that would defeat the scope), because leaving orphans would corrupt the
+      // vault.
       const imported = await importExtractionResults(store, results);
       if (!imported.ok) return imported;
       const csResult = await computeChangeSet(store, results, { pruneNodeTypes: reconciledTypes });
       if (!csResult.ok) return csResult;
       const delta = changeSetSize(csResult.value);
       if (delta === 0) return imported;
-      const applied = await applyChangeSet(store, csResult.value);
-      if (!applied.ok) return applied;
+      if (delta > INCREMENTAL_DELTA_CAP) {
+        progress(
+          `Pulled reconcile: delta ${delta} rows exceeds cap ${INCREMENTAL_DELTA_CAP}; pruning in batches (scoped — full rebuild would defeat the scope).`,
+        );
+      }
+      const pruned = await pruneStaleNodes(store, csResult.value);
+      if (!pruned.ok) return pruned;
       progress(
-        `Pulled reconcile: dropped ${applied.value.nodesDeleted} stale node(s) for reconciled type(s).`,
+        `Pulled reconcile: dropped ${pruned.value.nodesDeleted} stale node(s) and ${pruned.value.edgesDeleted} stale edge(s) for reconciled type(s).`,
       );
-      return applied;
+      return imported;
     }
     return importExtractionResults(store, results);
   }
