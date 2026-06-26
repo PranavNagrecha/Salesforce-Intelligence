@@ -48,6 +48,7 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import {
+  countNodesByType,
   getNodeById,
   listEdges,
   listNodesByType,
@@ -66,6 +67,54 @@ import { assertSoqlIdentifier, checkVaultStaleness, resolveLiveAccess } from './
 import { liveCount } from './live-session.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import { resolveToFieldOrSuggest } from './resolve-field-or-suggest.js';
+import { nodeScanLimit } from './scan-cap.js';
+
+/**
+ * Hard ceiling on a single `listNodesByType` page. The graph layer rejects
+ * `limit > 500`, so each page request is clamped here; `nodeScanLimit()` is
+ * env-overridable (`SFI_NODE_SCAN_LIMIT`) so a test can drive the multi-page
+ * offset loop without seeding 500+ nodes.
+ */
+const PAGE_CAP = 500;
+const pageSize = (): number => Math.min(nodeScanLimit(), PAGE_CAP);
+
+/**
+ * Load EVERY node of a single ComponentType (optionally scoped to a `parentId`),
+ * paging to exhaustion rather than just the first 500. This drives the
+ * make-field-required SAFETY verdict: a create-path Flow / touching integration
+ * / layout that sorts past row 500 used to be silently skipped, yielding a false
+ * "safe" verdict (a SAFETY false-negative — the worst class for a what-if tool).
+ * `countNodesByType` is the loop's belt cross-check; the parentId-scoped variant
+ * uses no `countNodesByType` belt (count is type-wide, not parent-scoped) and
+ * relies on the short-page guard alone. The common case (under the cap) runs
+ * exactly one sub-cap page — byte-identical.
+ */
+const loadAllNodes = async (
+  ctx: Context,
+  type: ComponentType,
+  parentId?: ComponentId,
+): Promise<Result<readonly Node[], string>> => {
+  const limit = pageSize();
+  // Type-wide belt cross-check; omitted for a parentId-scoped scan since the
+  // count is over the whole type, not the scoped subset.
+  let total: number | null = null;
+  if (parentId === undefined) {
+    const totalRes = await countNodesByType(ctx.graph, type);
+    if (!totalRes.ok) return err(totalRes.error.message);
+    total = totalRes.value;
+  }
+  const all: Node[] = [];
+  for (let offset = 0; ; offset += limit) {
+    const opts =
+      parentId === undefined ? { limit, offset } : { limit, offset, parentId };
+    const page = await listNodesByType(ctx.graph, type, opts);
+    if (!page.ok) return err(page.error.message);
+    all.push(...page.value);
+    if (page.value.length < limit) break;
+    if (total !== null && all.length >= total) break;
+  }
+  return ok(all);
+};
 
 /** Canonical id prefix for the CustomField node type. */
 const CUSTOM_FIELD_PREFIX = 'CustomField:';
@@ -594,14 +643,11 @@ export const whatIfMakeFieldRequiredHandler = async (
   // Find every Layout whose parentId matches the parent object. For
   // each, check whether the layout displays the field; if not, emit a
   // configuration-only finding.
-  const layoutsResult = await listNodesByType(ctx.graph, 'Layout', {
-    parentId: parentObjectId,
-    limit: 500,
-  });
+  const layoutsResult = await loadAllNodes(ctx, 'Layout', parentObjectId);
   if (!layoutsResult.ok) {
     return err({
       kind: 'internal',
-      message: `graph query failed: ${layoutsResult.error.message}`,
+      message: `graph query failed: ${layoutsResult.error}`,
     });
   }
   for (const layout of layoutsResult.value) {
@@ -625,11 +671,11 @@ export const whatIfMakeFieldRequiredHandler = async (
   // whether the Flow writes to the target field. When it does not, the
   // Flow's create will fail at runtime under the new required-field
   // constraint.
-  const flowsResult = await listNodesByType(ctx.graph, 'Flow', { limit: 500 });
+  const flowsResult = await loadAllNodes(ctx, 'Flow');
   if (!flowsResult.ok) {
     return err({
       kind: 'internal',
-      message: `graph query failed: ${flowsResult.error.message}`,
+      message: `graph query failed: ${flowsResult.error}`,
     });
   }
   for (const flow of flowsResult.value) {
@@ -669,15 +715,11 @@ export const whatIfMakeFieldRequiredHandler = async (
   // integration extractor populates `references` edges; the boundary
   // disclosure covers the schema-detail gap.
   for (const integrationType of ['ExternalService', 'ExternalDataSource'] as const) {
-    const integrationsResult = await listNodesByType(
-      ctx.graph,
-      integrationType,
-      { limit: 500 },
-    );
+    const integrationsResult = await loadAllNodes(ctx, integrationType);
     if (!integrationsResult.ok) {
       return err({
         kind: 'internal',
-        message: `graph query failed: ${integrationsResult.error.message}`,
+        message: `graph query failed: ${integrationsResult.error}`,
       });
     }
     for (const integration of integrationsResult.value) {

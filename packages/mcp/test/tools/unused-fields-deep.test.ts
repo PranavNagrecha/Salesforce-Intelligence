@@ -633,3 +633,96 @@ describe('unusedFieldsDeepHandler — byte budget (oversize fix)', () => {
     }
   });
 });
+
+// =============================================================================
+// CR-12 — page-to-exhaustion. buildCorpora pages every corpus type (incl. the
+// high-cardinality CustomField driver and the cross-reference corpora) to
+// exhaustion, not just the first 500. The verdict is destructive: an unused
+// CustomField past the cap must still be enumerated, AND a field referenced
+// only by a corpus member (here a Layout) past the cap must NOT be wrongly
+// flagged unused (over-suppression). SFI_NODE_SCAN_LIMIT=2 drives multi-page.
+// =============================================================================
+describe('unusedFieldsDeepHandler — past-cap corpora completeness (CR-12 de-cap)', () => {
+  beforeEach(() => {
+    process.env['SFI_NODE_SCAN_LIMIT'] = '2';
+  });
+
+  afterEach(() => {
+    delete process.env['SFI_NODE_SCAN_LIMIT'];
+  });
+
+  it('enumerates an unused CustomField past the cap', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-ufd-pastcap-'));
+    const opened = await openGraph(join(dir, 'pastcap.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const s = opened.value;
+    try {
+      const acct = 'CustomObject:Account';
+      // 3 unused CustomFields. id-ASC: Aaa__c, Bbb__c, Zzz__c — with a cap of 2
+      // the single-page corpus dropped Zzz__c entirely.
+      const nodes: Node[] = [
+        makeNode({ id: acct, type: 'CustomObject', apiName: 'Account' }),
+        makeNode({ id: 'CustomField:Account.Aaa__c', apiName: 'Aaa__c', parentId: acct, properties: { dataType: 'Text' } }),
+        makeNode({ id: 'CustomField:Account.Bbb__c', apiName: 'Bbb__c', parentId: acct, properties: { dataType: 'Text' } }),
+        makeNode({ id: 'CustomField:Account.Zzz__c', apiName: 'Zzz__c', parentId: acct, properties: { dataType: 'Text' } }),
+      ];
+      const edges: Edge[] = [
+        makeEdge({ fromId: acct, toId: 'CustomField:Account.Aaa__c', edgeType: 'parentOf' }),
+        makeEdge({ fromId: acct, toId: 'CustomField:Account.Bbb__c', edgeType: 'parentOf' }),
+        makeEdge({ fromId: acct, toId: 'CustomField:Account.Zzz__c', edgeType: 'parentOf' }),
+      ];
+      const imp = await importExtractionResults(s, [{ nodes, edges }]);
+      if (!imp.ok) throw new Error(imp.error.message);
+      const localCtx: Context = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s };
+      const r = await unusedFieldsDeepHandler(localCtx, { limit: 500 });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const ids = r.value.data.fields.map((f) => f.id);
+      expect(ids).toContain('CustomField:Account.Zzz__c');
+      expect(ids).toContain('CustomField:Account.Aaa__c');
+    } finally {
+      await closeGraph(s);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does NOT flag a field referenced only by a Layout that sorts PAST the cap (no over-suppression)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-ufd-pastcap-layout-'));
+    const opened = await openGraph(join(dir, 'pastcap-layout.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const s = opened.value;
+    try {
+      const acct = 'CustomObject:Account';
+      // 3 Layouts; id-ASC: A_Layout, B_Layout, Z_Layout. With a cap of 2 the
+      // Z_Layout (which references RefByZLayout__c) was dropped from the corpus,
+      // so the field would be WRONGLY flagged unused (over-suppression).
+      const nodes: Node[] = [
+        makeNode({ id: acct, type: 'CustomObject', apiName: 'Account' }),
+        makeNode({ id: 'CustomField:Account.RefByZLayout__c', apiName: 'RefByZLayout__c', parentId: acct, properties: { dataType: 'Text' } }),
+        makeNode({ id: 'Layout:Account.A_Layout', type: 'Layout', apiName: 'Account.A_Layout', properties: { layoutSections: [] } }),
+        makeNode({ id: 'Layout:Account.B_Layout', type: 'Layout', apiName: 'Account.B_Layout', properties: { layoutSections: [] } }),
+        makeNode({
+          id: 'Layout:Account.Z_Layout',
+          type: 'Layout',
+          apiName: 'Account.Z_Layout',
+          properties: { layoutSections: [{ layoutItems: [{ field: 'RefByZLayout__c' }] }] },
+        }),
+      ];
+      const edges: Edge[] = [
+        makeEdge({ fromId: acct, toId: 'CustomField:Account.RefByZLayout__c', edgeType: 'parentOf' }),
+      ];
+      const imp = await importExtractionResults(s, [{ nodes, edges }]);
+      if (!imp.ok) throw new Error(imp.error.message);
+      const localCtx: Context = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s };
+      const r = await unusedFieldsDeepHandler(localCtx, { limit: 500 });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const ids = r.value.data.fields.map((f) => f.id);
+      // The field IS referenced (by the past-cap Z_Layout) → must NOT be unused.
+      expect(ids).not.toContain('CustomField:Account.RefByZLayout__c');
+    } finally {
+      await closeGraph(s);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

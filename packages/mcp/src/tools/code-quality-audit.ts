@@ -43,11 +43,13 @@
  *   - `severityFilter: 'all'` and an absent filter behave identically.
  *     The literal `'all'` is preserved in the input contract so the
  *     advertised JSON Schema can document the sentinel explicitly.
- *   - The per-type scan caps at `LIST_PAGE_SIZE` (500) per
+ *   - The per-type scan caps at `nodeScanLimit()` (500 by default) per
  *     `ComponentType` — matches the graph layer's default. A truly
  *     enormous org (more than 500 ApexClasses) will only see the first
- *     page; that's a v2.1 honesty boundary mirroring v2.0b
- *     `unused_components`.
+ *     page; when a type's scan saturates at the cap, a
+ *     `scanTruncationNote` is appended to `boundaries` naming the
+ *     truncated type so the verdict is not silently incomplete (the
+ *     v2.1 honesty boundary, now emitted at runtime).
  *   - `limit` defaults to 100 and is capped at 500 by Zod. The
  *     `totalCount` in the response reports the FULL unsorted matched
  *     count, not the trimmed slice — callers can render "showing X of
@@ -67,14 +69,13 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { nodeScanLimit, scanHitCap, scanTruncationNote } from './scan-cap.js';
+
 /** Inclusive upper bound on `limit`. Mirrors the enumeration-style tools. */
 const CODE_QUALITY_AUDIT_MAX_LIMIT = 500;
 
 /** Default `limit` when the caller omits it. */
 const CODE_QUALITY_AUDIT_DEFAULT_LIMIT = 100;
-
-/** Per-type cap matching `listNodesByType`'s default. */
-const LIST_PAGE_SIZE = 500;
 
 /**
  * The ComponentTypes the v2.1 quality recognizers populate. v2.1 R2
@@ -283,9 +284,16 @@ export const codeQualityAuditHandler = async (
 
   const collected: CodeQualityAuditIssue[] = [];
 
+  // Per-type scan saturation. A type whose page came back AT the fetch cap may
+  // have findings BEHIND it that this scan never examined. Fetch at
+  // `nodeScanLimit()` (not a hardcoded 500) so the disclosure tracks the ACTUAL
+  // fetch, mirroring `app_access`; `SFI_NODE_SCAN_LIMIT` can drive the truncated
+  // path in tests.
+  const truncatedTypes: string[] = [];
+  const scanLimit = nodeScanLimit();
   for (const type of QUALITY_SCANNED_TYPES) {
     const nodesResult = await listNodesByType(ctx.graph, type, {
-      limit: LIST_PAGE_SIZE,
+      limit: scanLimit,
     });
     if (!nodesResult.ok) {
       return err({
@@ -293,6 +301,7 @@ export const codeQualityAuditHandler = async (
         message: `graph query failed: ${nodesResult.error.message}`,
       });
     }
+    if (scanHitCap(nodesResult.value.length, scanLimit)) truncatedTypes.push(type);
     for (const node of nodesResult.value) {
       const raw = (node as Node).properties['qualityIssues'];
       if (!Array.isArray(raw)) continue;
@@ -344,6 +353,14 @@ export const codeQualityAuditHandler = async (
           DYNAMIC_BLIND_SPOT_DISCLOSURE,
           SEVERITY_CONSENSUS_DISCLOSURE,
         ];
+
+  // Truncation is meaningful EVEN with zero matched findings — findings may sit
+  // past the scan cap — so this append lives OUTSIDE the zero-findings gate
+  // above. (`truncated` is the OUTPUT-slice cursor; this is the INPUT-scan
+  // saturation, a separate honesty axis.)
+  if (truncatedTypes.length > 0) {
+    boundaries.push(scanTruncationNote(truncatedTypes));
+  }
 
   return ok({
     data: {

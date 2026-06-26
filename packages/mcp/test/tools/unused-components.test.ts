@@ -443,6 +443,66 @@ describe('unusedComponentsHandler — entry-point types', () => {
   });
 });
 
+// =============================================================================
+// CR-12 — page-to-exhaustion. scanType walks each type to the end, not just the
+// first page. The `unused` verdict is destructive and byType is a tally, so an
+// unused node sorted PAST the cap by id ASC used to be dropped (and byType
+// saturated at the cap). With SFI_NODE_SCAN_LIMIT=2 the offset loop walks
+// multiple pages. Uses a dedicated store so the shared exact-order assertions
+// stay intact.
+// =============================================================================
+describe('unusedComponentsHandler — past-cap byType + enumeration (CR-12 de-cap)', () => {
+  beforeEach(() => {
+    process.env['SFI_NODE_SCAN_LIMIT'] = '2';
+  });
+
+  afterEach(() => {
+    delete process.env['SFI_NODE_SCAN_LIMIT'];
+  });
+
+  it('enumerates an unused node past the cap and reports the FULL byType count', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-uc-pastcap-'));
+    const opened = await openGraph(join(dir, 'pastcap.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const s = opened.value;
+    try {
+      // 4 ApexClasses, all unused (no incoming edges). id-ASC: Aaa, Bbb, Ccc,
+      // Zzz — with a cap of 2 the single-page code saw only Aaa/Bbb, so Ccc/Zzz
+      // were dropped and byType saturated at 2.
+      const seed: ExtractionResult = {
+        nodes: [
+          makeNode({ id: 'ApexClass:Aaa', apiName: 'Aaa' }),
+          makeNode({ id: 'ApexClass:Bbb', apiName: 'Bbb' }),
+          makeNode({ id: 'ApexClass:Ccc', apiName: 'Ccc' }),
+          makeNode({ id: 'ApexClass:Zzz', apiName: 'Zzz' }),
+        ],
+        edges: [],
+      };
+      const imp = await importExtractionResults(s, [seed]);
+      if (!imp.ok) throw new Error(imp.error.message);
+      const localCtx: Context = {
+        vaultRoot: dir,
+        manifest: FIXTURE_MANIFEST,
+        graph: s,
+      };
+      const result = await unusedComponentsHandler(localCtx, {
+        types: ['ApexClass'],
+        limit: 50,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const ids = result.value.data.components.map((c) => c.id);
+      // The past-cap unused class must appear, and byType must be the FULL 4.
+      expect(ids).toContain('ApexClass:Zzz');
+      expect(ids).toContain('ApexClass:Ccc');
+      expect(result.value.data.byType['ApexClass']).toBe(4);
+    } finally {
+      await closeGraph(s);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('unusedComponentsInputSchema', () => {
   it('accepts an empty input (defaults applied at handler)', () => {
     const parsed = unusedComponentsInputSchema.safeParse({});

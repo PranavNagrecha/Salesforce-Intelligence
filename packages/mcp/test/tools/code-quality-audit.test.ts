@@ -227,6 +227,39 @@ describe('codeQualityAuditHandler', () => {
   });
 });
 
+// =============================================================================
+// CR-12 — input-scan saturation disclosure. The per-type scan caps at
+// `nodeScanLimit()`; when a type's page comes back AT the cap, findings may sit
+// BEHIND it, so a `scanTruncationNote` must be appended to `boundaries` naming
+// the truncated type. Mirrors app-access.test.ts (P12-HONESTY).
+// =============================================================================
+describe('codeQualityAuditHandler — input-scan truncation disclosure (CR-12)', () => {
+  it('does NOT emit a Scan-capped boundary under the default cap (byte-identical happy path)', async () => {
+    const r = await codeQualityAuditHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.boundaries.join(' ')).not.toMatch(/Scan capped/);
+  });
+
+  it('appends a Scan-capped boundary naming the truncated type when the scan hits the cap', async () => {
+    // The fixture has 4 ApexClasses; a cap of 1 forces the ApexClass scan to
+    // saturate, so risky classes past the cap were silently unexamined.
+    const prev = process.env['SFI_NODE_SCAN_LIMIT'];
+    process.env['SFI_NODE_SCAN_LIMIT'] = '1';
+    try {
+      const r = await codeQualityAuditHandler(ctx, {});
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const joined = r.value.data.boundaries.join(' ');
+      expect(joined).toMatch(/Scan capped at 1 nodes per type/);
+      expect(joined).toMatch(/ApexClass/);
+    } finally {
+      if (prev === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
+      else process.env['SFI_NODE_SCAN_LIMIT'] = prev;
+    }
+  });
+});
+
 describe('codeQualityAuditInputSchema', () => {
   it('accepts empty input', () => {
     expect(codeQualityAuditInputSchema.safeParse({}).success).toBe(true);

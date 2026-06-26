@@ -69,6 +69,7 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { partitionByBaseline } from './finding-suppression.js';
+import { nodeScanLimit, scanHitCap, scanTruncationNote } from './scan-cap.js';
 
 const CRUD_FLS_TOOL = 'sfi.crud_fls_audit';
 
@@ -76,8 +77,6 @@ const CRUD_FLS_TOOL = 'sfi.crud_fls_audit';
 const CRUD_FLS_MAX_LIMIT = 500;
 /** Default `limit`. */
 const CRUD_FLS_DEFAULT_LIMIT = 100;
-/** Per-type cap matching `listNodesByType`'s default. */
-const LIST_PAGE_SIZE = 500;
 
 /** The two rule ids in the CRUD/FLS subset. */
 const CRUD_FLS_RULES: ReadonlySet<string> = new Set([
@@ -318,9 +317,16 @@ export const crudFlsAuditHandler = async (
   let totalFindingCount = 0;
   let suppressedFindingCount = 0;
 
+  // Per-type scan saturation. A type whose page came back AT the fetch cap may
+  // have unchecked-CRUD/FLS classes BEHIND it that this scan never examined.
+  // Fetch at `nodeScanLimit()` (not a hardcoded 500) so the disclosure tracks
+  // the ACTUAL fetch, mirroring `app_access`; `SFI_NODE_SCAN_LIMIT` can drive
+  // the truncated path in tests.
+  const truncatedTypes: string[] = [];
+  const scanLimit = nodeScanLimit();
   for (const type of SCANNED_TYPES) {
     const nodesResult = await listNodesByType(ctx.graph, type, {
-      limit: LIST_PAGE_SIZE,
+      limit: scanLimit,
     });
     if (!nodesResult.ok) {
       return err({
@@ -328,6 +334,7 @@ export const crudFlsAuditHandler = async (
         message: `graph query failed: ${nodesResult.error.message}`,
       });
     }
+    if (scanHitCap(nodesResult.value.length, scanLimit)) truncatedTypes.push(type);
     for (const node of nodesResult.value) {
       const raw = (node as Node).properties['qualityIssues'];
       if (!Array.isArray(raw)) continue;
@@ -382,6 +389,14 @@ export const crudFlsAuditHandler = async (
           CROSS_METHOD_DATAFLOW_DISCLOSURE,
           DYNAMIC_SOQL_DISCLOSURE,
         ];
+
+  // Truncation is meaningful EVEN with zero in-scope findings — risky classes
+  // may sit past the scan cap — so this append lives OUTSIDE the zero-findings
+  // gate above. (`truncated` is the OUTPUT offset/limit cursor; this is the
+  // INPUT-scan saturation, a separate honesty axis.)
+  if (truncatedTypes.length > 0) {
+    boundaries.push(scanTruncationNote(truncatedTypes));
+  }
 
   return ok({
     data: {

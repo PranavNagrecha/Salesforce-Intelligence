@@ -87,7 +87,7 @@ import type {
   TrustSummary,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listEdges, listNodesByType } from '@sf-intelligence/graph';
+import { countNodesByType, listEdges, listNodesByType } from '@sf-intelligence/graph';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
@@ -95,6 +95,7 @@ import type { Context } from '../server.js';
 
 import { coercePrefix } from './coerce-id.js';
 import { offlineTrust } from './coverage-trust.js';
+import { nodeScanLimit } from './scan-cap.js';
 
 /** Metadata families exercised by the eight-tier unused-field cross-walk. */
 const UNUSED_FIELDS_DEEP_REQUIRED_COVERAGE = [
@@ -134,8 +135,16 @@ const UNUSED_FIELDS_DEEP_DEFAULT_LIMIT = 100;
 /** Keep the serialized response under the global ~45 KB MCP guard. Each entry
  *  carries the eight-tier detail, so the row `limit` alone can overflow. */
 const UNUSED_FIELDS_DEEP_BYTE_BUDGET = 36_000;
-/** Internal page-size cap on per-type `listNodesByType`. */
-const LIST_PAGE_SIZE = 500;
+/**
+ * Hard ceiling on a single `listNodesByType` page. The graph layer rejects
+ * `limit > 500`, so each page request is clamped here; `nodeScanLimit()` is
+ * env-overridable (`SFI_NODE_SCAN_LIMIT`) so a test can drive the multi-page
+ * offset loop without seeding 500+ nodes. `buildCorpora` pages each corpus type
+ * to EXHAUSTION so the cross-reference walk is complete (an incomplete referrer
+ * corpus would over-suppress, marking a referenced field "unused").
+ */
+const PAGE_CAP = 500;
+const pageSize = (): number => Math.min(nodeScanLimit(), PAGE_CAP);
 
 /**
  * The v1.4 frontend ComponentType set whose incoming `references`
@@ -365,10 +374,13 @@ interface ScanCorpora {
 }
 
 /**
- * Fetch every node in each of the cross-tier source types once. The
- * graph layer page-caps at 500 — if an org has more than 500 nodes of
- * a type the scan sees the first 500 only. Same honesty boundary
- * v2.0b's `unused_components` inherits.
+ * Fetch EVERY node in each of the cross-tier source types — paging each type to
+ * exhaustion, not just the first 500. The corpora drive a destructive "unused
+ * field" verdict (and the cross-reference corpora must be COMPLETE or a
+ * referenced field past row 500 would be wrongly suppressed as unused), so each
+ * type is walked fully. `countNodesByType` is the loop's belt cross-check; the
+ * common case (type under the cap) runs exactly one sub-cap page —
+ * byte-identical.
  */
 const buildCorpora = async (
   ctx: Context,
@@ -376,9 +388,17 @@ const buildCorpora = async (
   const fetchType = async (
     type: ComponentType,
   ): Promise<Result<readonly Node[], string>> => {
-    const r = await listNodesByType(ctx.graph, type, { limit: LIST_PAGE_SIZE });
-    if (!r.ok) return err(r.error.message);
-    return ok(r.value);
+    const total = await countNodesByType(ctx.graph, type);
+    if (!total.ok) return err(total.error.message);
+    const limit = pageSize();
+    const all: Node[] = [];
+    for (let offset = 0; ; offset += limit) {
+      const r = await listNodesByType(ctx.graph, type, { limit, offset });
+      if (!r.ok) return err(r.error.message);
+      all.push(...r.value);
+      if (r.value.length < limit || all.length >= total.value) break;
+    }
+    return ok(all);
   };
   const customFields = await fetchType('CustomField');
   if (!customFields.ok) return err(customFields.error);

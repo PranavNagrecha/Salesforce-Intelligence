@@ -205,6 +205,114 @@ describe('generateAdminHandbookHandler (seeded graph, admin default)', () => {
   });
 });
 
+// =============================================================================
+// CR-12 — TALLY de-cap. Per-section counts must come from countNodesByType
+// (exact COUNT(*)), not the capped list length. With SFI_NODE_SCAN_LIMIT=2 the
+// fetchNodes list saturates at 2, but the rendered counts must report the FULL
+// node count. Mirrors apex-test-coverage.test.ts past-cap pattern.
+// =============================================================================
+describe('generateAdminHandbookHandler — past-cap tally (CR-12 de-cap)', () => {
+  let store: GraphStore;
+  let ctx: Context;
+
+  // 4 ApexClasses + 1 Flow + 1 WorkflowRule. id-ASC puts ApexClass:D4 LAST, so
+  // a cap of 2 drops D3/D4 from the list — the tally must still report 4.
+  const pastCapSeed: ExtractionResult = {
+    nodes: [
+      makeNode({ id: 'ApexClass:D1', type: 'ApexClass', apiName: 'D1' }),
+      makeNode({ id: 'ApexClass:D2', type: 'ApexClass', apiName: 'D2' }),
+      makeNode({ id: 'ApexClass:D3', type: 'ApexClass', apiName: 'D3' }),
+      makeNode({ id: 'ApexClass:D4', type: 'ApexClass', apiName: 'D4' }),
+      makeNode({ id: 'Flow:F1', type: 'Flow', apiName: 'F1' }),
+      makeNode({
+        id: 'WorkflowRule:Account.WR1',
+        type: 'WorkflowRule',
+        apiName: 'Account.WR1',
+      }),
+    ],
+    edges: [],
+  };
+
+  beforeAll(async () => {
+    const built = await makeFreshCtx('past-cap.db');
+    store = built.store;
+    ctx = built.ctx;
+    const imported = await importExtractionResults(store, [pastCapSeed]);
+    if (!imported.ok) {
+      throw new Error(`seed import failed: ${imported.error.message}`);
+    }
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  beforeEach(() => {
+    process.env['SFI_NODE_SCAN_LIMIT'] = '2';
+  });
+
+  afterEach(() => {
+    delete process.env['SFI_NODE_SCAN_LIMIT'];
+  });
+
+  it('reports the FULL ApexClass count in Automation/Codebase, not the capped 2', async () => {
+    // BEFORE the fix: list saturates at 2, so the rendered counts read 2.
+    const result = await generateAdminHandbookHandler(ctx, {
+      personaFocus: 'developer',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.data.document.body;
+    // Codebase Footprint table renders `| ApexClass | 4 |` (exact COUNT(*)).
+    expect(body).toContain('| ApexClass | 4 |');
+    // Automation Summary renders `| ApexTrigger | 0 |` and `| Flow | 1 |`.
+    expect(body).toContain('| Flow | 1 |');
+    expect(body).toContain('| WorkflowRule | 1 |');
+  });
+
+  it('reports totalComponents from the exact COUNT(*), not the capped list sum', async () => {
+    const result = await generateAdminHandbookHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // 4 ApexClass + 1 Flow + 1 WorkflowRule = 6, not the capped 2/type sum.
+    expect(result.value.data.document.body).toContain(
+      'Total extracted components: 6',
+    );
+  });
+});
+
+describe('generateAdminHandbookHandler — sub-cap byte-identity (CR-12)', () => {
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    const built = await makeFreshCtx('byte-identity.db');
+    store = built.store;
+    ctx = built.ctx;
+    const imported = await importExtractionResults(store, [seed]);
+    if (!imported.ok) {
+      throw new Error(`seed import failed: ${imported.error.message}`);
+    }
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  it('reports the small fixture true counts (COUNT(*) == capped length when count < cap)', async () => {
+    const result = await generateAdminHandbookHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.data.document.body;
+    // seed: 2 CustomObject, 2 Profile, 1 PermissionSet, 2 ApexClass, 1 Flow,
+    // 1 WorkflowRule, 1 NamedCredential = 10 total.
+    expect(body).toContain('Total extracted components: 10');
+    expect(body).toContain('| Profile | 2 |');
+    expect(body).toContain('| PermissionSet | 1 |');
+    expect(body).toContain('| Flow | 1 |');
+  });
+});
+
 describe('generateAdminHandbookHandler (developer persona variation)', () => {
   let store: GraphStore;
   let ctx: Context;

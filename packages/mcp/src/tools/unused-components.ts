@@ -52,10 +52,11 @@
  *
  * Implementation notes:
  *   - The tool's per-instance work is bounded by the size of the
- *     curated default subset; each `listNodesByType` already paginates
- *     at 500 internally and the per-instance `listEdges` is a single
- *     indexed lookup. Worst-case, the response is dominated by the
- *     CustomField scan (one DuckDB round-trip per field).
+ *     curated default subset; each type is paged to EXHAUSTION (in
+ *     500-node pages) so a >500-of-a-type org is fully enumerated, and
+ *     the per-instance `listEdges` is a single indexed lookup.
+ *     Worst-case, the response is dominated by the CustomField scan
+ *     (one DuckDB round-trip per field).
  *   - Result truncation: per the contract, the `truncated` flag is
  *     true when the total unused-instance count exceeds `limit`. The
  *     emitted slice is sorted globally by (type, id ASC) and trimmed
@@ -70,10 +71,11 @@ import type {
   ComponentType,
   McpError,
   McpResponse,
+  Node,
   TrustSummary,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listEdges, listNodesByType } from '@sf-intelligence/graph';
+import { countNodesByType, listEdges, listNodesByType } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -83,6 +85,7 @@ import {
   offlineTrust,
   type CoverageCaveat,
 } from './coverage-trust.js';
+import { nodeScanLimit } from './scan-cap.js';
 
 /**
  * Inclusive upper bound on `limit`. Mirrors the `LIST_MAX_LIMIT`
@@ -95,14 +98,16 @@ const UNUSED_MAX_LIMIT = 500;
 const UNUSED_DEFAULT_LIMIT = 100;
 
 /**
- * Internal cap on the per-type `listNodesByType` page size. The graph
- * layer itself caps at 500 so this is a documentation knob; if a real
- * org has more than 500 ApexClasses or CustomFields per type, the
- * tool will only see the first 500. That's a known v2.0b honesty
- * boundary callers should know about — surfaced verbatim in the
- * per-type note.
+ * Hard ceiling on a single `listNodesByType` page. The graph layer rejects
+ * `limit > 500`, so each page request is clamped here; `nodeScanLimit()` is
+ * env-overridable (`SFI_NODE_SCAN_LIMIT`) so a test can drive the multi-page
+ * offset loop without seeding 500+ nodes. `scanType` pages this type to
+ * EXHAUSTION (not just the first 500), so an org with more than 500
+ * ApexClasses or CustomFields of a type is fully enumerated — the per-type
+ * `byType` count and the unused list are complete, not capped at 500.
  */
-const LIST_PAGE_SIZE = 500;
+const PAGE_CAP = 500;
+const pageSize = (): number => Math.min(nodeScanLimit(), PAGE_CAP);
 
 /**
  * The default set of ComponentTypes the tool scans when `types` is
@@ -439,16 +444,30 @@ const scanType = async (
   ctx: Context,
   type: ComponentType,
 ): Promise<Result<readonly UnusedComponent[], string>> => {
-  const nodesResult = await listNodesByType(ctx.graph, type, {
-    limit: LIST_PAGE_SIZE,
-  });
-  if (!nodesResult.ok) {
-    return err(nodesResult.error.message);
+  // Page this type to EXHAUSTION, not just the first 500. The `unused` verdict
+  // is destructive and `byType` is a tally; a single `listNodesByType` page
+  // caps at 500 (id ASC), so an org with > 500 of a type used to drop the tail
+  // — `byType[type]` saturated at 500 and the per-type unused enumeration was
+  // incomplete. `countNodesByType` is the loop's belt cross-check. The common
+  // case (type under the cap) runs exactly one sub-cap page — byte-identical.
+  const totalRes = await countNodesByType(ctx.graph, type);
+  if (!totalRes.ok) {
+    return err(totalRes.error.message);
+  }
+  const limit = pageSize();
+  const nodes: Node[] = [];
+  for (let offset = 0; ; offset += limit) {
+    const page = await listNodesByType(ctx.graph, type, { limit, offset });
+    if (!page.ok) {
+      return err(page.error.message);
+    }
+    nodes.push(...page.value);
+    if (page.value.length < limit || nodes.length >= totalRes.value) break;
   }
   const note = noteForType(type);
   const isEntryPoint = ENTRY_POINT_TYPES.has(type);
   const out: UnusedComponent[] = [];
-  for (const node of nodesResult.value) {
+  for (const node of nodes) {
     // Test-class exemption per the v2.0b spec.
     if (type === 'ApexClass' && isTestApexClass(node.properties)) {
       continue;
