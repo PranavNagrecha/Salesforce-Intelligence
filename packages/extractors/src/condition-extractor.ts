@@ -181,15 +181,18 @@ const joinCriteriaItems = (
     // We deliberately do not attempt to validate the combinator's
     // syntax — Salesforce already enforces its grammar at metadata
     // deploy time.
-    return rendered
-      .reduce<string>(
-        (acc, rendered, index) =>
-          acc.replace(
-            new RegExp(`\\b${index + 1}\\b`, 'g'),
-            `(${rendered})`,
-          ),
-        combinator,
-      );
+    //
+    // A SINGLE non-overlapping left-to-right pass substitutes every
+    // standalone index token from the ORIGINAL `rendered` array and
+    // never re-scans the replacement text, so a digit inside a
+    // rendered value (the `2` in `Amount > 2`) can never be mistaken
+    // for a later filter index (H11). `\b\d+\b` matches multi-digit
+    // indices (10, 11) as whole tokens; an out-of-range token has no
+    // matching item and is left literal.
+    return combinator.replace(/\b\d+\b/g, (token) => {
+      const item = rendered[Number(token) - 1];
+      return item === undefined ? token : `(${item})`;
+    });
   }
   return rendered.join(' AND ');
 };

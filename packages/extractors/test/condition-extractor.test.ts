@@ -124,6 +124,113 @@ describe('extractConditions', () => {
       );
     });
 
+    it('does not clobber a numeric criteria value that matches a later filter index (H11)', () => {
+      // Canonical corruptor: the value `2` in row 1 equals the index of
+      // row 2. The old iterative reduce re-scanned its own output, so
+      // substituting index `2` clobbered BOTH the trailing `2` token AND
+      // the `2` inside row 1's rendered value, producing the corrupted
+      // `(Account.AnnualRevenue greaterThan (Account.Status equals Open))
+      //  AND (Account.Status equals Open)`. The single non-overlapping
+      // pass leaves the value untouched.
+      const sources: ConditionSource[] = [
+        {
+          kind: 'criteria',
+          items: [
+            {
+              field: 'Account.AnnualRevenue',
+              operation: 'greaterThan',
+              value: '2',
+            },
+            { field: 'Account.Status', operation: 'equals', value: 'Open' },
+          ],
+          booleanFilter: '1 AND 2',
+        },
+      ];
+      const result = extractConditions({
+        parentId: PARENT_ID,
+        sources,
+        parentSourcePath: PARENT_SOURCE,
+        parentObjectApiName: PARENT_OBJECT,
+      });
+      expect(result.conditionNodes[0]!.properties.expression).toBe(
+        '(Account.AnnualRevenue greaterThan 2) AND (Account.Status equals Open)',
+      );
+    });
+
+    it('does not clobber a MULTI-DIGIT value that matches a multi-digit filter index (H11)', () => {
+      // Multi-digit corruptor: row 1's value `10` equals the index of
+      // row 10. The old reduce substituted index `10` into both the
+      // standalone `10` token AND the `10` inside row 1's value, yielding
+      // `(Score equals (TEN)) AND (TEN)`. The single non-overlapping pass
+      // keeps the value `10` literal.
+      const items = Array.from({ length: 10 }, (_, idx) =>
+        idx === 0
+          ? { field: 'Account.Score', operation: 'equals', value: '10' }
+          : {
+              field: `Account.F${idx + 1}`,
+              operation: 'equals',
+              value: idx === 9 ? 'TEN' : `v${idx + 1}`,
+            },
+      );
+      const result = extractConditions({
+        parentId: PARENT_ID,
+        sources: [{ kind: 'criteria', items, booleanFilter: '1 AND 10' }],
+        parentSourcePath: PARENT_SOURCE,
+        parentObjectApiName: PARENT_OBJECT,
+      });
+      const expression = result.conditionNodes[0]!.properties.expression as string;
+      expect(expression).toBe(
+        '(Account.Score equals 10) AND (Account.F10 equals TEN)',
+      );
+      // Guard against the doubly-substituted corruption form.
+      expect(expression).not.toContain('(Account.F10 equals TEN))');
+    });
+
+    it('substitutes nested-parenthesized index tokens correctly', () => {
+      const sources: ConditionSource[] = [
+        {
+          kind: 'criteria',
+          items: [
+            { field: 'Account.A', operation: 'equals', value: 'x' },
+            { field: 'Account.B', operation: 'equals', value: 'y' },
+            { field: 'Account.C', operation: 'equals', value: 'z' },
+          ],
+          booleanFilter: '(1 OR 2) AND 3',
+        },
+      ];
+      const result = extractConditions({
+        parentId: PARENT_ID,
+        sources,
+        parentSourcePath: PARENT_SOURCE,
+        parentObjectApiName: PARENT_OBJECT,
+      });
+      expect(result.conditionNodes[0]!.properties.expression).toBe(
+        '((Account.A equals x) OR (Account.B equals y)) AND (Account.C equals z)',
+      );
+    });
+
+    it('leaves an out-of-range index token literal (no throw, no "(undefined)")', () => {
+      const sources: ConditionSource[] = [
+        {
+          kind: 'criteria',
+          items: [
+            { field: 'Account.A', operation: 'equals', value: 'x' },
+            { field: 'Account.B', operation: 'equals', value: 'y' },
+          ],
+          booleanFilter: '1 AND 4',
+        },
+      ];
+      const result = extractConditions({
+        parentId: PARENT_ID,
+        sources,
+        parentSourcePath: PARENT_SOURCE,
+        parentObjectApiName: PARENT_OBJECT,
+      });
+      const expression = result.conditionNodes[0]!.properties.expression as string;
+      expect(expression).toBe('(Account.A equals x) AND 4');
+      expect(expression).not.toContain('(undefined)');
+    });
+
     it('preserves dotted field paths and scopes single-segment names by parent', () => {
       const sources: ConditionSource[] = [
         {
