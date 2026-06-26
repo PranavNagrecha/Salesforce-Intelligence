@@ -1,6 +1,6 @@
 /// <reference types="vitest/globals" />
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -739,5 +739,55 @@ describe('core-profile gateway envelopes (P13-GW-router-envelope)', () => {
       if (prev === undefined) delete process.env.SFI_ROUTER_MODE;
       else process.env.SFI_ROUTER_MODE = prev;
     }
+  });
+});
+
+describe('routeQuestionHandler — gap logging is privacy-first opt-in (CR-16b)', () => {
+  let gapDir: string;
+  let gapLogPath: string;
+  let priorEnv: string | undefined;
+
+  beforeEach(() => {
+    priorEnv = process.env.SFI_GAP_LOG_PATH;
+    gapDir = mkdtempSync(join(tmpdir(), 'sfi-route-gap-'));
+    gapLogPath = join(gapDir, 'question-gaps.jsonl');
+    process.env.SFI_GAP_LOG_PATH = gapLogPath;
+  });
+
+  afterEach(() => {
+    if (priorEnv === undefined) delete process.env.SFI_GAP_LOG_PATH;
+    else process.env.SFI_GAP_LOG_PATH = priorEnv;
+    rmSync(gapDir, { recursive: true, force: true });
+  });
+
+  it('does NOT write the gap log when logGap is omitted (privacy-first default off)', async () => {
+    const r = await routeQuestionHandler(ctx, { question: 'blorp glorp shmorp' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Precondition: this unrouted question really does carry a gap, so a write
+    // WOULD happen under the old opt-out default — making the test meaningful.
+    expect(r.value.data.route.gap).not.toBeNull();
+    // Privacy-first: nothing written, gapLogged false, file never created.
+    expect(r.value.data.gapLogged).toBe(false);
+    expect(existsSync(gapLogPath)).toBe(false);
+  });
+
+  it('writes the gap log only when the caller explicitly opts in with logGap:true', async () => {
+    const r = await routeQuestionHandler(ctx, {
+      question: 'blorp glorp shmorp',
+      logGap: true,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.route.gap).not.toBeNull();
+    expect(r.value.data.gapLogged).toBe(true);
+    expect(existsSync(gapLogPath)).toBe(true);
+    const lines = readFileSync(gapLogPath, 'utf8')
+      .trim()
+      .split('\n')
+      .filter((l) => l.length > 0);
+    expect(lines).toHaveLength(1);
+    const written = JSON.parse(lines[0] ?? '{}') as { question?: string };
+    expect(written.question).toBe('blorp glorp shmorp');
   });
 });

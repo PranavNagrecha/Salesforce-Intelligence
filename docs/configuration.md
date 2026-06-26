@@ -338,8 +338,11 @@ serializes, and it tells you exactly who holds the lock when it cannot proceed.
 
 ## Question gap log (product telemetry, local only)
 
-When routing cannot answer a question, the intent router may append a gap
-record locally — never sent to the network.
+When routing cannot answer a question, `sfi.route_question` can append a gap
+record locally — never sent to the network. This is **opt-in and off by
+default** (privacy-first, CR-16): the question text is written only when the
+caller passes `logGap: true`. With `logGap` omitted or `false`, nothing is
+written to disk and the response reports `gapLogged: false`.
 
 | Variable / path | Default | Purpose |
 | --- | --- | --- |

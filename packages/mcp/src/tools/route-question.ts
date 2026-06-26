@@ -5,7 +5,9 @@
  * `hybrid`/`unknown`) and ordered `sfi.*` tools that answer it, so a host can
  * route without the user ever typing a tool name. Read-only; it suggests a
  * route, it does not answer. When the question hits a gap (no good tool yet) it
- * logs it for the backlog rather than fabricating a capability.
+ * surfaces the gap rather than fabricating a capability; the question text is
+ * appended to the local backlog only when the caller explicitly passes
+ * `logGap: true` (privacy-first opt-in, off by default — CR-16).
  */
 
 import { createHash } from 'node:crypto';
@@ -112,7 +114,11 @@ const tryResolveFallback = async (
 export const routeQuestionInputSchema = z.object({
   /** The user's plain-language question. */
   question: z.string().min(1),
-  /** Append a gap entry to the local backlog when the route has one (default true). */
+  /**
+   * Opt in to appending a gap entry to the local backlog when the route has
+   * one. Privacy-first default false — the question text is written to disk only
+   * when this is explicitly true (CR-16).
+   */
   logGap: z.boolean().optional(),
   /**
    * Stateless response to a clarification previously returned for this exact
@@ -769,7 +775,7 @@ export const routeQuestionHandler = async (
   // Stamp the gap with this server's vault so `feedback export` can scope to
   // the current vault by default (P14-FEEDBACK-gaplog-scope).
   const logged =
-    input.logGap === false ? null : await logGapIfAny(route, undefined, ctx.vaultRoot);
+    input.logGap === true ? await logGapIfAny(route, undefined, ctx.vaultRoot) : null;
   // P13-GW-router-envelope: under the core profile the client only holds 18
   // schemas, so the route also carries EXECUTABLE calls — gateway envelopes
   // for non-core tools (run_analysis is byte-identical to a direct call).
