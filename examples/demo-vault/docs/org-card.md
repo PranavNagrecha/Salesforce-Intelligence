@@ -16,7 +16,7 @@ Coverage status: **partial** — 19 metadata families retrieved.
 
 ## Scale
 
-113 components, 322 dependency edges.
+113 components, 323 dependency edges.
 
 | Type | Count |
 | --- | --- |

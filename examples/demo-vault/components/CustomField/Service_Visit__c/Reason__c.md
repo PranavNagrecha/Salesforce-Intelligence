@@ -16,10 +16,22 @@ properties:
   label: Reason
   length: null
   picklistValues:
-    - Inspection
-    - Repair
-    - Warranty
-    - Upgrade
+    - default: false
+      isActive: true
+      label: Inspection
+      value: Inspection
+    - default: false
+      isActive: true
+      label: Repair
+      value: Repair
+    - default: false
+      isActive: true
+      label: Warranty
+      value: Warranty
+    - default: false
+      isActive: true
+      label: Upgrade
+      value: Upgrade
   precision: null
   referenceTo: null
   relationshipName: null
@@ -48,7 +60,7 @@ Why the service visit was performed.
 | formula | `null` |
 | inlineHelpText | `null` |
 | length | `null` |
-| picklistValues | `Inspection,Repair,Warranty,Upgrade` |
+| picklistValues | `Inspection, Repair, Warranty, Upgrade` |
 | precision | `null` |
 | referenceTo | `null` |
 | relationshipName | `null` |

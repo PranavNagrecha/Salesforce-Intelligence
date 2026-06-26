@@ -16,10 +16,22 @@ properties:
   label: Status
   length: null
   picklistValues:
-    - Open
-    - In_Review
-    - Approved
-    - Denied
+    - default: true
+      isActive: true
+      label: Open
+      value: Open
+    - default: false
+      isActive: true
+      label: In Review
+      value: In_Review
+    - default: false
+      isActive: true
+      label: Approved
+      value: Approved
+    - default: false
+      isActive: true
+      label: Denied
+      value: Denied
   precision: null
   referenceTo: null
   relationshipName: null
@@ -48,7 +60,7 @@ Review status of the warranty claim.
 | formula | `null` |
 | inlineHelpText | `null` |
 | length | `null` |
-| picklistValues | `Open,In_Review,Approved,Denied` |
+| picklistValues | `Open, In_Review, Approved, Denied` |
 | precision | `null` |
 | referenceTo | `null` |
 | relationshipName | `null` |

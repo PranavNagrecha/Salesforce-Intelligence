@@ -6,7 +6,7 @@
   "targetOrg": "demo-org",
   "totals": {
     "components": 113,
-    "edges": 322
+    "edges": 323
   },
   "componentCounts": {
     "CustomField": 63,

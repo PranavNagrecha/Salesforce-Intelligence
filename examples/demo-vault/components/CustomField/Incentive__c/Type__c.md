@@ -16,9 +16,18 @@ properties:
   label: Type
   length: null
   picklistValues:
-    - Federal_Tax_Credit
-    - State_Rebate
-    - Utility_Rebate
+    - default: true
+      isActive: true
+      label: Federal Tax Credit
+      value: Federal_Tax_Credit
+    - default: false
+      isActive: true
+      label: State Rebate
+      value: State_Rebate
+    - default: false
+      isActive: true
+      label: Utility Rebate
+      value: Utility_Rebate
   precision: null
   referenceTo: null
   relationshipName: null
@@ -45,7 +54,7 @@ type: CustomField
 | formula | `null` |
 | inlineHelpText | `null` |
 | length | `null` |
-| picklistValues | `Federal_Tax_Credit,State_Rebate,Utility_Rebate` |
+| picklistValues | `Federal_Tax_Credit, State_Rebate, Utility_Rebate` |
 | precision | `null` |
 | referenceTo | `null` |
 | relationshipName | `null` |
