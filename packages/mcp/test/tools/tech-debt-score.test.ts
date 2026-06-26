@@ -536,6 +536,82 @@ describe('techDebtScoreHandler — Q115 honesty anchor (extractor-not-run)', () 
   });
 });
 
+describe('techDebtScoreHandler — neverModified honesty (CR-16a)', () => {
+  let tempDir: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-tds-nm-'));
+    const opened = await openGraph(join(tempDir, 'tds-nm.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    store = opened.value;
+    // Seed nodes that carry a REAL lastModifiedDate so the freshness category is
+    // INCLUDED (not excluded). Several are >2y old, one is recent.
+    const threeYearsAgo = new Date(
+      Date.now() - 3 * 365 * 24 * 60 * 60 * 1000,
+    ).toISOString();
+    const recent = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const freshnessNodes: Node[] = [];
+    for (let i = 0; i < 4; i++) {
+      freshnessNodes.push(
+        makeNode({
+          id: `CustomField:Stale.Old${i}__c`,
+          type: 'CustomField',
+          apiName: `Old${i}__c`,
+          lastModifiedDate: threeYearsAgo,
+        }),
+      );
+    }
+    freshnessNodes.push(
+      makeNode({
+        id: 'CustomField:Stale.Fresh__c',
+        type: 'CustomField',
+        apiName: 'Fresh__c',
+        lastModifiedDate: recent,
+      }),
+    );
+    const imp = await importExtractionResults(store, [
+      { nodes: freshnessNodes, edges: [] },
+    ]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    ctx = { vaultRoot: tempDir, manifest: FIXTURE_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('reports componentsNeverModifiedSinceCreation as null (unknowable), not a fabricated 0', async () => {
+    const r = await techDebtScoreHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Freshness must be INCLUDED — we are exercising the data-present path so the
+    // null is because the metric is unknowable, not because the axis was dropped.
+    expect(
+      r.value.data.excludedCategories.map((e) => e.category),
+    ).not.toContain('freshness');
+    expect(
+      r.value.data.categories.freshness.details
+        .componentsNeverModifiedSinceCreation,
+    ).toBeNull();
+    // The honest sibling axes still compute real numbers from lastModifiedDate.
+    expect(
+      r.value.data.categories.freshness.details.componentsOlderThan2Years,
+    ).toBeGreaterThan(0);
+  });
+
+  it('emits an explicit not-available disclosure instead of a silent fake 0', async () => {
+    const r = await techDebtScoreHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.boundaries.join(' ')).toMatch(
+      /never modified since creation.*not available|does not capture a per-component createdDate/i,
+    );
+  });
+});
+
 describe('techDebtScoreHandler — unknown weight key refusal', () => {
   let tempDir: string;
   let store: GraphStore;
