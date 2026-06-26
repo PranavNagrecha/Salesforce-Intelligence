@@ -60,3 +60,53 @@ export const renderValueAsBacktickedString = (value: unknown): string => {
   const cell = text.replace(/\r\n|\r|\n/g, ' ').replace(/\|/g, '\\|');
   return `\`${cell}\``;
 };
+
+/**
+ * Escape free-text metadata interpolated into a Markdown HEADING line
+ * (`# ...`). Collapses newlines to a single space so a value cannot inject a
+ * second heading/block, and backslash-escapes the chars that break heading
+ * rendering: backtick (code-span), pipe (table), asterisk (emphasis), and a
+ * leading run of `#` (which would shift the heading level or inject a new one).
+ *
+ * Deliberately does NOT escape underscore — it is inert in a heading and
+ * escaping it would corrupt the ubiquitous api-name suffixes (`Foo__c`,
+ * `child__r`). Clean values (no special chars) are returned byte-identical.
+ */
+export const escapeMarkdownHeading = (text: string): string =>
+  text
+    .replace(/\r\n|\r|\n/g, ' ')
+    .replace(/[`|*]/g, (c) => `\\${c}`)
+    .replace(/^(#+)/, (m) => m.replace(/#/g, '\\#'));
+
+/**
+ * Escape free-text metadata interpolated INSIDE a backtick code span (e.g. the
+ * `**API Name:** \`...\`` line, or a Flow detail value). Collapses newlines and
+ * escapes ONLY the backtick — a stray backtick would close the span early and
+ * leak the tail into prose. Pipe/asterisk/hash are inert inside a code span, so
+ * escaping them would corrupt the value; they are left untouched. Clean values
+ * are returned byte-identical.
+ */
+export const escapeMarkdownInline = (text: string): string =>
+  text.replace(/\r\n|\r|\n/g, ' ').replace(/`/g, '\\`');
+
+/**
+ * Escape free-text metadata interpolated as a Markdown BLOCK (a description
+ * paragraph). Intentional newlines and inline prose are PRESERVED; only a
+ * line-LEADING structural char is backslash-escaped so a value cannot inject a
+ * heading (`#`), blockquote (`>`), table row / delimiter (`|`), list bullet
+ * (`-`/`*`/`+`), or code fence (```` ``` ````/`~~~`). Per-line so multi-line
+ * descriptions render as written. Clean prose is returned byte-identical.
+ */
+export const escapeMarkdownBlockText = (text: string): string =>
+  text
+    .split('\n')
+    .map((line) =>
+      line.replace(/^(\s*)([#>|]|[-*+](?=\s)|```|~~~)/, (_m, ws, tok) => {
+        const escaped =
+          tok === '```' || tok === '~~~'
+            ? `\\${tok[0]}${tok.slice(1)}`
+            : `\\${tok}`;
+        return `${ws}${escaped}`;
+      }),
+    )
+    .join('\n');

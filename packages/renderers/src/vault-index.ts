@@ -7,6 +7,8 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok } from '@sf-intelligence/core';
 
+import { escapeMarkdownInline } from './markdown-table.js';
+
 // The relative path of the index file under the vault root. Co-located with
 // the per-component directories so links in the body can be relative to the
 // index's own directory (`./{Type}/.../{apiName}.md`).
@@ -50,8 +52,12 @@ const buildLinkTarget = (node: Node): string => {
 
 // Display text for a node in the index — falls back to apiName when label
 // is null so the bullet is never blank. Mirrors the heading-fallback rule
-// in `component-markdown` (heading uses `label ?? apiName`).
-const renderNodeDisplayLabel = (node: Node): string => node.label ?? node.apiName;
+// in `component-markdown` (heading uses `label ?? apiName`). The label is
+// free-text metadata, so it is inline-escaped (CR-16c): a newline would
+// otherwise split the bullet and the trailing fragment could be parsed as a
+// new list item / heading / table row.
+const renderNodeDisplayLabel = (node: Node): string =>
+  escapeMarkdownInline(node.label ?? node.apiName);
 
 // Build the bullet line for one node. The link text is the canonical id in
 // backticks (so it survives copy-paste into other Markdown tools without

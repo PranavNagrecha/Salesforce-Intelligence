@@ -9,7 +9,12 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok } from '@sf-intelligence/core';
 
-import { renderValueAsBacktickedString } from './markdown-table.js';
+import {
+  escapeMarkdownBlockText,
+  escapeMarkdownHeading,
+  escapeMarkdownInline,
+  renderValueAsBacktickedString,
+} from './markdown-table.js';
 
 // `label` and `description` are shown in the heading/description paragraph;
 // the five trigger/status keys below are surfaced prominently in the Flow
@@ -46,7 +51,10 @@ const renderPropertiesTable = (
 // don't need to think about booleans or numbers here.
 const formatFlowDetailValue = (value: unknown): string => {
   if (value === null || value === undefined) return EM_DASH;
-  return `\`${String(value)}\``;
+  // Escape inside the code span so a backtick in a Flow detail value (status,
+  // processType, triggerObject/type, recordTriggerType) can't close it early
+  // and leak the tail into prose (CR-16c).
+  return `\`${escapeMarkdownInline(String(value))}\``;
 };
 
 const renderFlowDetailsSection = (
@@ -145,15 +153,21 @@ const renderEdgesSection = (thisNodeId: ComponentId, edges: readonly Edge[]): st
 
 const buildBody = (node: Node, edges: readonly Edge[]): string => {
   const blocks: string[] = [];
-  // Block 1: top heading.
-  blocks.push(`# ${node.label ?? node.apiName}`);
+  // Block 1: top heading. label/apiName are free-text metadata — escape so a
+  // newline or markdown special cannot inject structure (CR-16c). node.type is
+  // a closed enum and is left raw.
+  blocks.push(`# ${escapeMarkdownHeading(node.label ?? node.apiName)}`);
   // Block 2: API name + Type. Two trailing spaces on the API-name line
   // produce a Markdown line break, keeping both labels in one paragraph.
-  blocks.push(`**API Name:** \`${node.apiName}\`  \n**Type:** ${node.type}`);
-  // Block 3 (optional): description paragraph.
+  // apiName is escaped inside its code span so a backtick can't close it early.
+  blocks.push(
+    `**API Name:** \`${escapeMarkdownInline(node.apiName)}\`  \n**Type:** ${node.type}`,
+  );
+  // Block 3 (optional): description paragraph. Escape line-leading structural
+  // chars so the free-text prose cannot inject headings/tables/fences.
   const description = node.properties['description'];
   if (typeof description === 'string' && description.length > 0) {
-    blocks.push(description);
+    blocks.push(escapeMarkdownBlockText(description));
   }
   // Block 4: Flow details — the Flow-specific addition. Surfaces the four
   // identity-bearing fields (status, process type, trigger object/type,

@@ -404,3 +404,96 @@ describe('renderComponentMarkdown', () => {
     expect(picklistRow).toContain('Closed (inactive)');
   });
 });
+
+describe('renderComponentMarkdown — markdown injection / escaping (CR-16c)', () => {
+  it('neutralizes structure-breaking chars in label, apiName, and description', () => {
+    const node: Node = {
+      id: 'CustomObject:Evil__c',
+      type: 'CustomObject',
+      // Newline (would inject a 2nd heading line), leading hash (level shift),
+      // backtick (closes a span), pipe (table), asterisk (emphasis).
+      label: 'Evil\n# Injected\n`code` | *bold*',
+      apiName: 'Ev`il__c',
+      parentId: null,
+      sourcePath: 'x',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      // A line-leading hash, a pipe table row, and a code fence in the desc.
+      properties: {
+        description: '# Heading injection\n| col | injection |\n```js\nalert(1)\n```',
+      },
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.body;
+    const lines = body.split('\n');
+
+    // (a) Exactly one heading line — the newline in label was collapsed and the
+    // injected leading hash neutralized, so no spurious second `# ` heading.
+    const headingLines = lines.filter((l) => /^# /.test(l));
+    expect(headingLines).toHaveLength(1);
+
+    // (b) The API Name code span is not closed early by the backtick in apiName:
+    // the whole apiName stays inside the span (escaped backtick).
+    const apiLine = lines.find((l) => l.startsWith('**API Name:**'));
+    expect(apiLine).toBeDefined();
+    expect(apiLine).toContain('Ev\\`il__c');
+
+    // (c) No description line is parsed as a heading / table-delimiter / fence —
+    // the line-leading specials are backslash-escaped.
+    const descLine = lines.find((l) => l.includes('Heading injection'));
+    expect(descLine).toBeDefined();
+    expect(descLine?.startsWith('\\#')).toBe(true);
+    expect(lines.some((l) => l.startsWith('| col |'))).toBe(false);
+    expect(lines.some((l) => l.startsWith('```'))).toBe(false);
+  });
+
+  it('neutralizes a `| --- |` table-delimiter line inside a description (no GFM table injection)', () => {
+    const node: Node = {
+      id: 'CustomObject:Tbl__c',
+      type: 'CustomObject',
+      label: 'Tbl',
+      apiName: 'Tbl__c',
+      parentId: null,
+      sourcePath: 'x',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: { description: 'Header line\n| --- |\nMore prose' },
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const lines = result.value.body.split('\n');
+    // The delimiter row's leading pipe is escaped, so it cannot turn the
+    // preceding prose line into a GFM table.
+    expect(lines.some((l) => l === '| --- |')).toBe(false);
+    expect(lines.some((l) => l.startsWith('\\| --- |'))).toBe(true);
+  });
+
+  it('leaves a clean component byte-identical (no over-escaping)', () => {
+    const node: Node = {
+      id: 'CustomObject:CustomerProject__c',
+      type: 'CustomObject',
+      label: 'Degree Program',
+      apiName: 'Project__c',
+      parentId: null,
+      sourcePath: 'x',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: { description: 'Plain prose.' },
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.body;
+    expect(body).toContain('# Degree Program\n');
+    expect(body).toContain('**API Name:** `Project__c`');
+    expect(body).toContain('Plain prose.');
+    // No stray backslashes introduced into clean values.
+    expect(body).not.toContain('\\');
+  });
+});

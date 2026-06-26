@@ -306,3 +306,35 @@ describe('renderFlowMarkdown', () => {
     expect(body).not.toContain('description');
   });
 });
+
+describe('renderFlowMarkdown — markdown injection / escaping (CR-16c)', () => {
+  it('does not let a backtick in a Flow detail value close the code span early', () => {
+    const node = buildFlowNode({
+      apiName: 'EvilFlow',
+      label: 'Evil\nFlow',
+      properties: {
+        status: 'Ac`tive',
+        processType: 'AutoLaunchedFlow',
+        triggerObject: 'OA_Engagements__c',
+        triggerType: null,
+        recordTriggerType: null,
+      },
+    });
+    const result = renderFlowMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const lines = result.value.body.split('\n');
+
+    // Heading newline collapsed → exactly one `# ` heading line.
+    expect(lines.filter((l) => /^# /.test(l))).toHaveLength(1);
+
+    // The Status bullet's backtick is escaped so the inline span is intact on
+    // one line; the value tail is not leaked into prose.
+    const statusLine = lines.find((l) => l.startsWith('- **Status:**'));
+    expect(statusLine).toBeDefined();
+    expect(statusLine).toContain('Ac\\`tive');
+
+    // Clean detail values are untouched.
+    expect(result.value.body).toContain('- **Trigger object:** `OA_Engagements__c`');
+  });
+});
