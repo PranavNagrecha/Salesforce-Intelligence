@@ -214,6 +214,48 @@ const buildAlertTemplateMap = (
   return result;
 };
 
+/** A `<fieldUpdates>` entry's resolved target: the field it sets + the op. */
+interface FieldUpdateTarget {
+  /** The `<field>` API name the update sets (verbatim, or null if absent). */
+  readonly field: string | null;
+  /** The `<operation>` (Formula|Literal|Null|NextValue|PreviousValue). */
+  readonly operation: string | null;
+}
+
+/**
+ * Build a name -> target lookup from the file's `<fieldUpdates>`
+ * collection. Each entry maps a field-update `<fullName>` (the name a
+ * rule's `<actions><name>` references) to the `<field>` that update SETS
+ * and its `<operation>`. This is the same join `buildAlertTemplateMap`
+ * does for alert templates: the `<actions>` child of a rule carries only
+ * the field-update's NAME, never the target field — the target field lives
+ * here, in the sibling top-level `<fieldUpdates>` collection.
+ *
+ * Entries without a `<fullName>` are silently skipped — they're not
+ * addressable by name, so no rule can reference them. Entries without a
+ * `<field>` are included with `field: null` so the caller can distinguish
+ * "field-update exists but names no target" (emit no `writesTo`) from
+ * "field-update not found".
+ */
+const buildFieldUpdateTargetMap = (
+  rootObj: Record<string, unknown>,
+): Readonly<Map<string, FieldUpdateTarget>> => {
+  const result = new Map<string, FieldUpdateTarget>();
+  for (const raw of toArray(rootObj['fieldUpdates'])) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const fu = raw as Record<string, unknown>;
+    const fullNameRaw = unwrapSingle(fu['fullName']);
+    if (fullNameRaw === undefined || fullNameRaw === null || fullNameRaw === '') {
+      continue;
+    }
+    result.set(String(fullNameRaw), {
+      field: optionalString(fu, 'field'),
+      operation: optionalString(fu, 'operation'),
+    });
+  }
+  return result;
+};
+
 /**
  * v2.8 — promote each `<outboundMessages>` child to a real
  * `OutboundMessage` Node. Pre-v2.8 these references dangled by design
@@ -426,6 +468,7 @@ const edgesForAction = (
   ruleId: string,
   objectApiName: string,
   alertTemplateMap: Readonly<Map<string, string | null>>,
+  fieldUpdateMap: Readonly<Map<string, FieldUpdateTarget>>,
   seen: Set<string>,
 ): readonly Edge[] => {
   // `Send` is the deprecated variant: silently ignored.
@@ -462,6 +505,42 @@ const edgesForAction = (
         source: EXTRACTOR_SOURCE,
         properties: { actionType: action.type },
       });
+    }
+  }
+
+  // FieldUpdate actions additionally emit a FIELD-level `writesTo` edge
+  // to the CustomField the update SETS — mirroring `flow.ts`'s
+  // `buildInputAssignmentEdges`. This is KEEP-the-`references`-ADD-the-
+  // `writesTo`: the `references` above points at the
+  // `WorkflowFieldUpdate:{Object}.{name}` scaffolding node (which several
+  // consumers and the change-impact metadata-blocker branch rely on); the
+  // new `writesTo` points at the actual `CustomField:{Object}.{field}` so
+  // that field-change-impact tools see the WorkflowRule as a writer. The
+  // target field is NOT on the `<actions>` child (it carries only
+  // `<name>` == the field-update's `<fullName>`) — it lives in the sibling
+  // `<fieldUpdates>` collection, resolved via `fieldUpdateMap`. A bare
+  // same-object field name is object-scoped; a dotted name is taken
+  // verbatim (mirrors condition-extractor's field resolution). Confidence
+  // is `parsed` (the field name is read straight out of the XML), matching
+  // `flow.ts`.
+  if (action.type === 'FieldUpdate') {
+    const target = fieldUpdateMap.get(action.name);
+    if (target !== undefined && target.field !== null) {
+      const fieldTargetId = target.field.includes('.')
+        ? `CustomField:${target.field}`
+        : `CustomField:${objectApiName}.${target.field}`;
+      const writesToDedupKey = `writesTo|${fieldTargetId}`;
+      if (!seen.has(writesToDedupKey)) {
+        seen.add(writesToDedupKey);
+        out.push({
+          fromId: ruleId,
+          toId: fieldTargetId,
+          edgeType: 'writesTo',
+          confidence: 'parsed',
+          source: EXTRACTOR_SOURCE,
+          properties: { operation: target.operation },
+        });
+      }
     }
   }
 
@@ -569,6 +648,7 @@ const buildRule = (
   objectApiName: string,
   parentId: string,
   alertTemplateMap: Readonly<Map<string, string | null>>,
+  fieldUpdateMap: Readonly<Map<string, FieldUpdateTarget>>,
   path: string,
 ): Result<BuiltRule, ExtractorError> => {
   const required = validateRuleRequired(rule, path);
@@ -641,7 +721,14 @@ const buildRule = (
   const seen = new Set<string>();
   for (const action of actions) {
     edges.push(
-      ...edgesForAction(action, ruleId, objectApiName, alertTemplateMap, seen),
+      ...edgesForAction(
+        action,
+        ruleId,
+        objectApiName,
+        alertTemplateMap,
+        fieldUpdateMap,
+        seen,
+      ),
     );
   }
   edges.push(...firesWhenEdges);
@@ -663,19 +750,28 @@ const buildRule = (
  * `Alert` actions emit two edges: a `references` to
  * `WorkflowAlert:{ObjectApiName}.{name}` AND a `sendsEmail` to
  * `EmailTemplate:{Folder}.{Name}` when the named alert's `<template>`
- * resolves inside this file. `Apex` actions emit `callsApex` (no
- * `references`); `FlowAction` emits `references` to `Flow:{name}` (no
+ * resolves inside this file. `FieldUpdate` actions likewise emit two
+ * edges: the `references` to `WorkflowFieldUpdate:{ObjectApiName}.{name}`
+ * scaffolding node AND a FIELD-level `writesTo` to the
+ * `CustomField:{ObjectApiName}.{field}` the update SETS (the target field
+ * is read from this file's sibling `<fieldUpdates>` collection via
+ * {@link buildFieldUpdateTargetMap}, mirroring `flow.ts`'s
+ * `<inputAssignments>` writesTo edges). `Apex` actions emit `callsApex`
+ * (no `references`); `FlowAction` emits `references` to `Flow:{name}` (no
  * object scope, per the variant table); the deprecated `Send` variant
  * and any unknown action type are silently ignored. Duplicate
  * `(rule, target, edgeType)` triples within a single rule are
  * deduplicated.
  *
  * `<alerts>`, `<fieldUpdates>`, `<tasks>`, and `<outboundMessages>`
- * collections under the root are not promoted to nodes — they appear
+ * collections under the root are not promoted to NODES — they appear
  * only as dangling-by-design `references` targets named by consuming
- * rules. A file with `<Workflow>` root but zero `<rules>` children is
- * the documented happy path for objects whose action scaffolding
- * outlives its consuming rules; it yields zero nodes and zero edges.
+ * rules. The `<fieldUpdates>` collection is additionally CONSULTED (not
+ * promoted) to resolve each FieldUpdate action's target field for the
+ * field-level `writesTo` edge described above. A file with `<Workflow>`
+ * root but zero `<rules>` children is the documented happy path for
+ * objects whose action scaffolding outlives its consuming rules; it
+ * yields zero nodes and zero edges.
  *
  * Returns an `ExtractorError` for any of the documented failure modes:
  * `file-not-found`, `parse-error`, or `malformed-input` (wrong root,
@@ -725,6 +821,7 @@ export const extractWorkflowRule = async (
   const objectApiName = deriveComponentApiName(path, WORKFLOW_FILE_SUFFIX);
   const parentId = `CustomObject:${objectApiName}`;
   const alertTemplateMap = buildAlertTemplateMap(rootObj);
+  const fieldUpdateMap = buildFieldUpdateTargetMap(rootObj);
 
   const rules = toArray(rootObj['rules']).filter(
     (r): r is Record<string, unknown> => typeof r === 'object' && r !== null,
@@ -733,7 +830,14 @@ export const extractWorkflowRule = async (
   const nodes: Node[] = [];
   const edges: Edge[] = [];
   for (const rule of rules) {
-    const built = buildRule(rule, objectApiName, parentId, alertTemplateMap, path);
+    const built = buildRule(
+      rule,
+      objectApiName,
+      parentId,
+      alertTemplateMap,
+      fieldUpdateMap,
+      path,
+    );
     if (!built.ok) return built;
     nodes.push(built.value.node);
     // v2.0a — emit the per-rule ConditionalContext nodes alongside

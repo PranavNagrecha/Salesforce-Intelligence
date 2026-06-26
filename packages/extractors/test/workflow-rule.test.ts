@@ -266,6 +266,260 @@ describe('extractWorkflowRule', () => {
     });
   });
 
+  describe('CR-05 — FieldUpdate field-level writesTo edge', () => {
+    it('emits a field-level writesTo to the CustomField a FieldUpdate sets (KEEP references + ADD writesTo)', async () => {
+      // A rule's <actions><name> names a field-update; the target field
+      // lives in the sibling top-level <fieldUpdates> collection. The
+      // extractor must resolve the join and emit BOTH the existing
+      // `references` -> WorkflowFieldUpdate scaffolding node AND a new
+      // field-level `writesTo` -> CustomField:{Object}.{field}.
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>Set_Foo</fullName>
+    <field>Foo__c</field>
+    <name>Set Foo</name>
+    <operation>Literal</operation>
+  </fieldUpdates>
+  <rules>
+    <fullName>Set_Foo_Rule</fullName>
+    <actions>
+      <name>Set_Foo</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <active>true</active>
+    <triggerType>onAllChanges</triggerType>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        // The new field-level writesTo edge.
+        const writesTo = result.value.edges.filter(
+          (e) => e.edgeType === 'writesTo',
+        );
+        expect(writesTo).toHaveLength(1);
+        expect(writesTo[0]).toEqual({
+          fromId: 'WorkflowRule:Account.Set_Foo_Rule',
+          toId: 'CustomField:Account.Foo__c',
+          edgeType: 'writesTo',
+          confidence: 'parsed',
+          source: 'workflow-rule-extractor',
+          properties: { operation: 'Literal' },
+        });
+        // CO-EXISTENCE: the existing references edge to the scaffolding
+        // node is STILL present (KEEP + ADD contract). Exactly two
+        // FieldUpdate-derived edges from the rule.
+        const refs = result.value.edges.filter(
+          (e) => e.edgeType === 'references',
+        );
+        expect(refs).toHaveLength(1);
+        expect(refs[0]!.toId).toBe('WorkflowFieldUpdate:Account.Set_Foo');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('object-scopes a bare same-object field name (standard field)', async () => {
+      // A bare <field> (e.g. a standard field like Description) is
+      // object-scoped to the rule's object; a dangling/targetMissing
+      // edge to a not-modeled standard field is harmless by design.
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>Stamp_Desc</fullName>
+    <field>Description</field>
+    <operation>Formula</operation>
+  </fieldUpdates>
+  <rules>
+    <fullName>Stamp_Desc_Rule</fullName>
+    <actions>
+      <name>Stamp_Desc</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <active>true</active>
+    <triggerType>onCreateOnly</triggerType>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const writesTo = result.value.edges.filter(
+          (e) => e.edgeType === 'writesTo',
+        );
+        expect(writesTo).toHaveLength(1);
+        expect(writesTo[0]!.toId).toBe('CustomField:Account.Description');
+        expect(writesTo[0]!.properties).toEqual({ operation: 'Formula' });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('takes a dotted field name verbatim (does not double-scope)', async () => {
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>Set_Pkg</fullName>
+    <field>ns__Target__c.Bar__c</field>
+    <operation>Literal</operation>
+  </fieldUpdates>
+  <rules>
+    <fullName>Set_Pkg_Rule</fullName>
+    <actions>
+      <name>Set_Pkg</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <active>true</active>
+    <triggerType>onAllChanges</triggerType>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const writesTo = result.value.edges.filter(
+          (e) => e.edgeType === 'writesTo',
+        );
+        expect(writesTo).toHaveLength(1);
+        expect(writesTo[0]!.toId).toBe('CustomField:ns__Target__c.Bar__c');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits NO writesTo when the FieldUpdate has no matching <fieldUpdates> entry or no <field>', async () => {
+      // Two failure modes: (a) action names a field-update with no
+      // matching <fieldUpdates> entry; (b) the matching entry lacks a
+      // <field>. Both yield only the references edge, no writesTo —
+      // mirrors flow.ts skip-on-missing-field.
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>No_Field_FU</fullName>
+    <operation>Null</operation>
+  </fieldUpdates>
+  <rules>
+    <fullName>Missing_Rule</fullName>
+    <actions>
+      <name>Not_In_Collection</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <actions>
+      <name>No_Field_FU</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <active>true</active>
+    <triggerType>onAllChanges</triggerType>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(
+          result.value.edges.filter((e) => e.edgeType === 'writesTo'),
+        ).toHaveLength(0);
+        // The references edges to the scaffolding nodes still emit.
+        expect(
+          result.value.edges.filter((e) => e.edgeType === 'references'),
+        ).toHaveLength(2);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits ONE writesTo when a rule lists the same FieldUpdate twice (per-rule dedup)', async () => {
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>Set_Foo</fullName>
+    <field>Foo__c</field>
+    <operation>Literal</operation>
+  </fieldUpdates>
+  <rules>
+    <fullName>Dup_FU_Rule</fullName>
+    <actions>
+      <name>Set_Foo</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <actions>
+      <name>Set_Foo</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <active>true</active>
+    <triggerType>onAllChanges</triggerType>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(
+          result.value.edges.filter((e) => e.edgeType === 'writesTo'),
+        ).toHaveLength(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits two writesTo edges when two distinct rules reference the same fieldUpdate', async () => {
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>Set_Foo</fullName>
+    <field>Foo__c</field>
+    <operation>Literal</operation>
+  </fieldUpdates>
+  <rules>
+    <fullName>Rule_A</fullName>
+    <actions>
+      <name>Set_Foo</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <active>true</active>
+    <triggerType>onAllChanges</triggerType>
+  </rules>
+  <rules>
+    <fullName>Rule_B</fullName>
+    <actions>
+      <name>Set_Foo</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <active>true</active>
+    <triggerType>onAllChanges</triggerType>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const writesTo = result.value.edges.filter(
+          (e) => e.edgeType === 'writesTo',
+        );
+        expect(writesTo).toHaveLength(2);
+        const fromIds = writesTo.map((e) => e.fromId).sort();
+        expect(fromIds).toEqual([
+          'WorkflowRule:Account.Rule_A',
+          'WorkflowRule:Account.Rule_B',
+        ]);
+        // Both land on the same field.
+        expect(
+          writesTo.every((e) => e.toId === 'CustomField:Account.Foo__c'),
+        ).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('v2.8 — OutboundMessage promotion', () => {
     it('promotes each <outboundMessages> child to an OutboundMessage node + parentOf edge', async () => {
       const xml = `<?xml version="1.0"?>
