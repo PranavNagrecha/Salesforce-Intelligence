@@ -83,7 +83,48 @@ describe('GlobalValueSet-driven picklists (P14-USAGE-gvs-edge)', () => {
       expect(result.value.edges.some((e) => e.edgeType === 'usesValueSet')).toBe(false);
       // OMIT-when-null: inline picklists carry no valueSetName key at all.
       expect('valueSetName' in (result.value.nodes[0]?.properties ?? {})).toBe(false);
-      expect(result.value.nodes[0]?.properties['picklistValues']).toEqual(['Open', 'Closed']);
+      // H10: each value is the object shape {value,isActive,default?}. Both
+      // fixture values carry <default>false</default> but NO <isActive> and NO
+      // <label>, so both are active (absent <isActive> ⇒ true) with default:false
+      // and no label key.
+      expect(result.value.nodes[0]?.properties['picklistValues']).toEqual([
+        { value: 'Open', isActive: true, default: false },
+        { value: 'Closed', isActive: true, default: false },
+      ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('H10: marks a DEACTIVATED value isActive:false and keeps it (absent <isActive> ⇒ active)', async () => {
+    // Mirrors a real org's Evaluation_Type__c: active values omit <isActive>
+    // and carry <label>/<default>; the one deactivated value explicitly carries
+    // <isActive>false</isActive>. Inactive values are RETAINED, not dropped.
+    const inactiveXml = `<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Stage__c</fullName>
+    <label>Stage</label>
+    <type>Picklist</type>
+    <valueSet>
+        <restricted>true</restricted>
+        <valueSetDefinition>
+            <value><fullName>Open</fullName><default>true</default><label>Open</label></value>
+            <value><fullName>Cancelled</fullName><default>false</default><label>Cancelled</label><isActive>false</isActive></value>
+        </valueSetDefinition>
+    </valueSet>
+</CustomField>
+`;
+    const { dir, path } = await writeFieldXml('Account', 'Stage__c', inactiveXml);
+    try {
+      const result = await extractCustomField(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      // The active value (no <isActive>) is isActive:true; the deactivated
+      // value is RETAINED with isActive:false — listed-and-marked, not dropped.
+      expect(result.value.nodes[0]?.properties['picklistValues']).toEqual([
+        { value: 'Open', isActive: true, default: true, label: 'Open' },
+        { value: 'Cancelled', isActive: false, default: false, label: 'Cancelled' },
+      ]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

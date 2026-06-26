@@ -59,6 +59,7 @@ import type { Context } from '../server.js';
 
 import { fieldNotFoundError } from './field-not-found-suggest.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
+import { normalizePicklistValues } from './picklist-values.js';
 import { resolveToFieldOrSuggest } from './resolve-field-or-suggest.js';
 
 /** Canonical id prefix for the CustomField node type. */
@@ -90,6 +91,8 @@ const BOUNDARY_SEMANTIC_NAME_PATTERN =
   'Semantic category is name-pattern, not type-semantic — a field named Status__c with type DateTime is still categorized as status by name; check type alongside category.';
 const BOUNDARY_CLASSIFICATION_MISSING =
   'Vocabulary classifier has not run for this vault — sourceOfTruth and semanticCategory both default to unknown. Run `sfi refresh --rebuild-vocabulary` to populate them.';
+const BOUNDARY_INACTIVE_PICKLIST_VALUES =
+  'This picklist has inactive value(s) (isActive: false) — they are RETAINED but not selectable for new records; existing records may still hold them. They are listed-and-marked, not dropped.';
 
 /**
  * Zod schema for the `sfi.field_meaning` tool input.
@@ -143,6 +146,13 @@ export interface FieldMeaningClassification<T extends string> {
 export interface FieldMeaningPicklistValue {
   readonly value: string;
   readonly label: string;
+  /**
+   * H10: `false` marks a DEACTIVATED value — retained but not selectable for
+   * new records; existing records may still hold it. Bare-string entries on
+   * old vaults, and object entries with no `isActive`, normalize to `true`
+   * (active). Inactive values are LISTED-and-marked, never dropped.
+   */
+  readonly isActive: boolean;
 }
 
 /** Asymmetric incoming-edge counts per PLAN-v2.9 §4 output schema. */
@@ -235,35 +245,24 @@ const parentTypeApiName = (node: Node): string => {
 };
 
 /**
- * Project picklist values from `properties.picklistValues`. Each entry
- * may be a plain string or `{ value, label }`; both shapes normalize
- * to the contract output. Returns `null` when no picklist data exists,
- * preserving the "this is not a picklist" signal.
+ * Project picklist values from `properties.picklistValues` via the shared H10
+ * normalizer. Each entry may be a plain string (old vault ⇒ active value) or
+ * the object shape `{ value, isActive, label?, default? }` (re-extracted
+ * vault); both normalize to the contract output, carrying `isActive` honestly
+ * (absent / bare-string ⇒ `true`). Inactive values are LISTED-and-marked, not
+ * dropped — existing records may hold them. Returns `null` when no picklist
+ * data exists, preserving the "this is not a picklist" signal.
  */
 const readPicklistValues = (
   node: Node,
 ): readonly FieldMeaningPicklistValue[] | null => {
-  const raw = node.properties['picklistValues'];
-  if (!Array.isArray(raw) || raw.length === 0) return null;
-  const out: FieldMeaningPicklistValue[] = [];
-  for (const entry of raw) {
-    if (typeof entry === 'string') {
-      out.push({ value: entry, label: entry });
-      continue;
-    }
-    if (typeof entry !== 'object' || entry === null) continue;
-    const obj = entry as Record<string, unknown>;
-    const value =
-      typeof obj['value'] === 'string'
-        ? obj['value']
-        : typeof obj['fullName'] === 'string'
-          ? (obj['fullName'] as string)
-          : '';
-    if (value.length === 0) continue;
-    const label = typeof obj['label'] === 'string' ? obj['label'] : value;
-    out.push({ value, label });
-  }
-  return out.length === 0 ? null : out;
+  const normalized = normalizePicklistValues(node.properties['picklistValues']);
+  if (normalized === null || normalized.length === 0) return null;
+  return normalized.map((entry) => ({
+    value: entry.value,
+    label: entry.label ?? entry.value,
+    isActive: entry.isActive,
+  }));
 };
 
 /**
@@ -521,6 +520,8 @@ export const fieldMeaningHandler = async (
     return err({ kind: 'internal', message: similarResult.error });
   }
 
+  const picklistValues = readPicklistValues(node);
+
   const boundaries: string[] = [
     BOUNDARY_VOCABULARY_ORG_SPECIFIC,
     BOUNDARY_USAGE_STATIC_ONLY,
@@ -534,6 +535,9 @@ export const fieldMeaningHandler = async (
   if (!sourceOfTruthRead.populated && !semanticCategoryRead.populated) {
     boundaries.push(BOUNDARY_CLASSIFICATION_MISSING);
   }
+  if (picklistValues !== null && picklistValues.some((v) => !v.isActive)) {
+    boundaries.push(BOUNDARY_INACTIVE_PICKLIST_VALUES);
+  }
 
   return ok({
     data: {
@@ -544,7 +548,7 @@ export const fieldMeaningHandler = async (
       type: readFieldType(node),
       parentObjectId: node.parentId,
       parentObjectApiName: parentTypeApiName(node),
-      picklistValues: readPicklistValues(node),
+      picklistValues,
       usageFrequency: usageResult.value,
       sourceOfTruth: sourceOfTruthRead.classification,
       semanticCategory: semanticCategoryRead.classification,

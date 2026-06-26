@@ -368,4 +368,39 @@ describe('renderComponentMarkdown', () => {
       'properties:\n  dataType: Picklist\n  picklistValues:\n    - Open\n    - In Progress\n    - Closed\n',
     );
   });
+
+  it('H10: renders an object[] picklistValues body row human-readably (not [object Object]), marking inactive', () => {
+    // A re-extracted vault stores picklistValues as objects. String(value) on
+    // such an array yields `[object Object]` in the body Properties table;
+    // renderValueAsBacktickedString must instead join the value labels and
+    // suffix deactivated entries with (inactive).
+    const node: Node = {
+      id: 'CustomField:Account.Stage__c',
+      type: 'CustomField',
+      apiName: 'Stage__c',
+      label: 'Stage',
+      parentId: 'CustomObject:Account',
+      sourcePath: 'objects/Account/fields/Stage__c.field-meta.xml',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {
+        dataType: 'Picklist',
+        picklistValues: [
+          { value: 'Open', isActive: true },
+          { value: 'Closed', isActive: false },
+        ],
+      },
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const picklistRow = result.value.body
+      .split('\n')
+      .find((line) => line.startsWith('| picklistValues |'));
+    expect(picklistRow).toBeDefined();
+    expect(picklistRow).not.toContain('[object Object]');
+    expect(picklistRow).toContain('Open');
+    expect(picklistRow).toContain('Closed (inactive)');
+  });
 });

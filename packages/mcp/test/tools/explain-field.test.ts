@@ -114,6 +114,39 @@ const inlinePicklistFieldSeed: ExtractionResult = {
 };
 
 // =============================================================================
+// Seed 1b2 (H10): A re-extracted (NEW-vault) picklist storing the object shape
+// `{value,isActive,label?,default?}`, including one DEACTIVATED value. Verifies
+// the consumer LISTS-and-marks the inactive value (never drops, never reports
+// selectable). The object entries would be SILENTLY DROPPED by the old
+// `typeof === 'string'` filter → empty list — the H10 back-compat break.
+// =============================================================================
+
+const NEW_VAULT_PICKLIST_FIELD_ID = 'CustomField:Account.Stage__c';
+
+const newVaultPicklistFieldSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: NEW_VAULT_PICKLIST_FIELD_ID,
+      type: 'CustomField',
+      apiName: 'Stage__c',
+      label: 'Stage',
+      parentId: ACCOUNT_ID,
+      properties: {
+        label: 'Stage',
+        dataType: 'Picklist',
+        description: null,
+        required: false,
+        picklistValues: [
+          { value: 'Scheduled', isActive: true, label: 'Scheduled', default: true },
+          { value: 'Old', isActive: false, label: 'Old (retired)', default: false },
+        ],
+      },
+    }),
+  ],
+  edges: [],
+};
+
+// =============================================================================
 // Seed 1c: A GlobalValueSet-DRIVEN picklist (P14-USAGE-gvs-edge): inline
 // picklistValues null, but a usesValueSet edge leads to the GlobalValueSet
 // node carrying the declared values — explain_field follows it.
@@ -397,6 +430,7 @@ beforeAll(async () => {
   const imported = await importExtractionResults(store, [
     accountIndustrySeed,
     inlinePicklistFieldSeed,
+    newVaultPicklistFieldSeed,
     gvsDrivenFieldSeed,
     noDescriptionFieldSeed,
     formulaFieldSeed,
@@ -484,21 +518,40 @@ describe('explainFieldHandler', () => {
     expect(result.value.data.referenceTo).toBeNull();
   });
 
-  it('surfaces the declared picklistValues for an inline-value-set picklist field', async () => {
+  it('surfaces the declared picklistValues for an inline-value-set picklist field (H10 back-compat: bare-string OLD vault ⇒ active objects)', async () => {
+    // This seed stores the LEGACY bare-string shape (a pre-CR-10 vault). The
+    // normalizer must read it WITHOUT crashing or dropping, treating each
+    // string as an ACTIVE value — never silently emptying to [].
     const result = await explainFieldHandler(ctx, {
       fieldId: INLINE_PICKLIST_FIELD_ID,
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    // The declared value set, verbatim and in extractor order — the literal
-    // answer to "what values are in this picklist?".
+    // The declared value set, verbatim and in extractor order — each bare
+    // string normalized to {value, isActive: true} (H10).
     expect(result.value.data.picklistValues).toEqual([
-      'Scheduled',
-      'Completed',
-      'Cancelled',
-      'Sent',
+      { value: 'Scheduled', isActive: true },
+      { value: 'Completed', isActive: true },
+      { value: 'Cancelled', isActive: true },
+      { value: 'Sent', isActive: true },
     ]);
     // Inline values present → no "not inline" disclosure.
+    expect(result.value.data.picklistValuesNote).toBeUndefined();
+  });
+
+  it('H10: lists-and-marks an inactive value from a NEW-vault object[] picklist (not dropped, not selectable)', async () => {
+    const result = await explainFieldHandler(ctx, {
+      fieldId: NEW_VAULT_PICKLIST_FIELD_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Both values LISTED — the deactivated one carried with isActive:false,
+    // never dropped (existing records may hold it) and never presented as
+    // selectable. label/default carried through.
+    expect(result.value.data.picklistValues).toEqual([
+      { value: 'Scheduled', isActive: true, label: 'Scheduled', default: true },
+      { value: 'Old', isActive: false, label: 'Old (retired)', default: false },
+    ]);
     expect(result.value.data.picklistValuesNote).toBeUndefined();
   });
 
@@ -517,15 +570,23 @@ describe('explainFieldHandler', () => {
     expect(result.value.data.picklistValuesNote).toContain('not inline');
   });
 
-  it('resolves a GlobalValueSet-driven picklist through the usesValueSet edge (P14-USAGE-gvs-edge)', async () => {
+  it('resolves a GlobalValueSet-driven picklist through the usesValueSet edge (P14-USAGE-gvs-edge); H10: isActive UNVERIFIED note', async () => {
     const result = await explainFieldHandler(ctx, { fieldId: GVS_FIELD_ID });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    // The declared values come from the LINKED GlobalValueSet, cited by id.
-    expect(result.value.data.picklistValues).toEqual(['EMEA', 'APAC', 'AMER']);
+    // The declared values come from the LINKED GlobalValueSet, cited by id —
+    // each wrapped as {value, isActive: true} for shape uniformity (the GVS
+    // extractor does not yet carry per-value isActive — sibling H10).
+    expect(result.value.data.picklistValues).toEqual([
+      { value: 'EMEA', isActive: true },
+      { value: 'APAC', isActive: true },
+      { value: 'AMER', isActive: true },
+    ]);
     expect(result.value.data.picklistValuesSource).toBe(GVS_ID);
-    // Resolved → the "not inline" disclosure must NOT fire.
-    expect(result.value.data.picklistValuesNote).toBeUndefined();
+    // H10: GVS-resolved values report isActive UNVERIFIED → the note discloses
+    // that (the "not inline" note does NOT fire because the values resolved).
+    expect(result.value.data.picklistValuesNote).toContain('GlobalValueSet');
+    expect(result.value.data.picklistValuesNote).toContain('UNVERIFIED');
   });
 
   it('returns null picklistValues with NO note for a non-picklist field', async () => {
