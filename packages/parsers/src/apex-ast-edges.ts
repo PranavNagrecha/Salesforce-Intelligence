@@ -85,6 +85,26 @@ const findAll = (n: Ctx, want: string, out: Ctx[] = []): Ctx[] => {
   return out;
 };
 
+/**
+ * Walk `node` upward via the ANTLR `parentCtx` link until `pred` matches an
+ * ancestor (returned) or the walk crosses one of the `stopAt` rule names
+ * (returns null — the boundary's own node is checked first so a stop name can
+ * also be the match). Guards a missing parent link to avoid an infinite loop.
+ */
+const ancestorWhere = (
+  node: Ctx,
+  pred: (ctx: Ctx) => boolean,
+  stopAt: ReadonlySet<string> = new Set(),
+): Ctx | null => {
+  let cur: Ctx | undefined = node.parentCtx as Ctx | undefined;
+  while (cur !== undefined && cur !== null) {
+    if (pred(cur)) return cur;
+    if (stopAt.has(ctxName(cur))) return null;
+    cur = cur.parentCtx as Ctx | undefined;
+  }
+  return null;
+};
+
 class Collecting extends ApexErrorListener {
   public readonly errors: string[] = [];
   public apexSyntaxError(line: number, column: number, message: string): void {
@@ -183,13 +203,66 @@ export const extractApexAstEdges = (
   };
 
   // ---- SOQL (inline + constant-string) --------------------------------------
+  //
+  // Scope-aware, per-query-level attribution. A SOQL statement is a tree of
+  // query scopes — the outer Query plus any SubQuery nodes — and a SELECT-list
+  // field belongs to the NEAREST enclosing scope, keyed by THAT scope's FROM
+  // object, never the textually-first FROM. Three field classes are dropped
+  // (honest degradation — a heuristic parser cannot resolve them to a real
+  // sObject.field, so emitting a parsed-confidence edge would be a phantom):
+  //   1. FROM identifiers at any level (object/relationship names are not fields).
+  //   2. Every field of a CHILD-relationship subquery `(SELECT .. FROM Contacts)`
+  //      — its FROM names a relationship, not an sObject API name.
+  //   3. Every field of a polymorphic `TYPEOF .. END` clause — the WHEN tokens
+  //      are sObject type names and the THEN/ELSE fields belong to the
+  //      unresolvable polymorphic target.
+  // SEMI-JOIN subqueries `WHERE Id IN (SELECT .. FROM Contact)` keep their own
+  // scope (their FROM is a real sObject), so their fields attribute to that
+  // inner object, not the outer one. This mirrors the regex scanner's already-
+  // correct SOQL oracle (apex-scanner.ts collectSoqlFroms).
+  const FROM_OBJ = (scopeCtx: Ctx): string | undefined => {
+    // Direct grammar accessor returns this scope's OWN outermost FROM; fall
+    // back to a findAll filtered to NOT-under-a-nested-SubQuery for robustness
+    // on contexts where the accessor is unexpectedly absent.
+    const direct = scopeCtx.fromNameList?.() as Ctx | undefined;
+    const list =
+      direct ??
+      findAll(scopeCtx, 'FromNameList').find(
+        (fl) => (ancestorWhere(fl, (c) => ctxName(c) === 'SubQuery', new Set(['Query'])) ?? scopeCtx) === scopeCtx,
+      );
+    if (list === undefined || list === null) return undefined;
+    const txt = findAll(list, 'FieldName')[0]?.getText() as string | undefined;
+    return txt === undefined || txt.length === 0 ? undefined : txt;
+  };
+
   const soqlFrom = (queryCtx: Ctx): void => {
-    const fromList = findAll(queryCtx, 'FromNameList')[0];
-    const fromFns = fromList === undefined ? [] : findAll(fromList, 'FieldName');
-    const obj = fromFns[0]?.getText() as string | undefined;
-    if (obj === undefined) return;
+    const SCOPE = new Set(['Query', 'SubQuery']);
     for (const fn of findAll(queryCtx, 'FieldName')) {
-      if (fromFns.includes(fn)) continue;
+      // A FROM identifier (this field is itself inside a FromNameList) names an
+      // object/relationship, never a field — skip at every level.
+      if (ancestorWhere(fn, (c) => ctxName(c) === 'FromNameList', SCOPE) !== null) continue;
+      // Polymorphic TYPEOF: WHEN type names + THEN/ELSE target fields are
+      // unresolvable — drop the whole clause's fields.
+      if (ancestorWhere(fn, (c) => ctxName(c) === 'TypeOf', SCOPE) !== null) continue;
+      // Nearest enclosing scope: stop at the first SubQuery/Query boundary.
+      const scope = ancestorWhere(fn, (c) => SCOPE.has(ctxName(c))) ?? queryCtx;
+      if (ctxName(scope) === 'SubQuery') {
+        // A CHILD-relationship subquery (the clause directly enclosing it is a
+        // SELECT entry) cannot map its relationship FROM to an sObject — drop by
+        // STRUCTURE, regardless of whether the FROM token happens to look like
+        // an sObject. Only a subquery whose NEAREST enclosing clause is a WHERE
+        // is a semi-join over a real sObject. Stop at the parent SubQuery/Query
+        // boundary so a child-sub nested inside a semi-join's SELECT is not
+        // misread as a semi-join via the outer WHERE.
+        const semiJoin = ancestorWhere(
+          scope,
+          (c) => ctxName(c) === 'WhereClause',
+          new Set(['Query', 'SubQuery']),
+        );
+        if (semiJoin === null) continue;
+      }
+      const obj = FROM_OBJ(scope);
+      if (obj === undefined) continue;
       reads.add(`${obj}.${fn.getText()}`);
     }
   };
