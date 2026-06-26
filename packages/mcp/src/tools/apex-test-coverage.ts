@@ -27,13 +27,26 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges, listNodesByType } from '@sf-intelligence/graph';
+import {
+  countNodesByType,
+  getNodeById,
+  listEdges,
+  listNodesByType,
+} from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-/** Graph-layer page cap; documented honesty boundary if an org exceeds it. */
-const APEX_PAGE_SIZE = 500;
+import { nodeScanLimit } from './scan-cap.js';
+
+/**
+ * Hard ceiling on a single `listNodesByType` page. `nodeScanLimit()` is
+ * env-overridable (`SFI_NODE_SCAN_LIMIT`) so a test can drive the multi-page
+ * offset loop without seeding 500+ nodes, but it does NOT clamp at 500, and the
+ * graph layer rejects `limit > 500` — so every page request is clamped here.
+ */
+const PAGE_CAP = 500;
+const pageSize = (): number => Math.min(nodeScanLimit(), PAGE_CAP);
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
 
@@ -86,6 +99,34 @@ const BOUNDARIES: readonly string[] = Object.freeze([
 const isTest = (n: Node): boolean => n.properties['isTest'] === true;
 
 /**
+ * Load EVERY ApexClass node, not just the first page. `listNodesByType` caps a
+ * single page at 500 (id ASC), so an org with > 500 classes used to drop the
+ * tail — and a covering test sorted past the cap looked like it didn't exist,
+ * turning the deploy-gate verdict into a false "untested" (the H6 false
+ * negative). Page by `pageSize()` accumulating until a short page proves the
+ * type is exhausted, with `countNodesByType` as a belt cross-check. The common
+ * case (org under the cap) runs exactly one sub-cap page — byte-identical.
+ */
+const loadAllApexClasses = async (
+  ctx: Context,
+): Promise<Result<readonly Node[], string>> => {
+  const total = await countNodesByType(ctx.graph, 'ApexClass');
+  if (!total.ok) return err(total.error.message);
+  const limit = pageSize();
+  const all: Node[] = [];
+  for (let offset = 0; ; offset += limit) {
+    const page = await listNodesByType(ctx.graph, 'ApexClass', { limit, offset });
+    if (!page.ok) return err(page.error.message);
+    all.push(...page.value);
+    // Primary guard: a short page means the type is exhausted (id-ASC order
+    // guarantees forward progress). Count is a belt cross-check so a page that
+    // unexpectedly returns full cannot loop forever.
+    if (page.value.length < limit || all.length >= total.value) break;
+  }
+  return ok(all);
+};
+
+/**
  * Build a map from non-test ApexClass id → set of test-class ids that emit a
  * `callsApex` edge into it. One outgoing-edge query per test class.
  */
@@ -128,11 +169,22 @@ export const apexTestCoverageHandler = async (
   // key selects the single class instead of silently dropping to org-wide mode.
   const requestedClass = input.classApiName ?? input.apexClass;
 
-  const nodesResult = await listNodesByType(ctx.graph, 'ApexClass', { limit: APEX_PAGE_SIZE });
-  if (!nodesResult.ok) {
-    return err({ kind: 'internal', message: `graph query failed: ${nodesResult.error.message}` });
+  // Single-class mode: a bounded "does ANY test reference this class?" check via
+  // the UNCAPPED inbound `callsApex` edges of the one target. This never loads
+  // the roster and never depends on a capped scan, so the verdict is exact even
+  // when a covering test sorts past row 500 — removing the H6 false negative by
+  // construction (no truncated-scan / indeterminate state needed).
+  if (requestedClass !== undefined) {
+    return singleClass(ctx, requestedClass);
   }
-  const all = nodesResult.value;
+
+  // Org-wide mode: load EVERY ApexClass (not just the first page) so the
+  // untested-class backlog and counts cover the full org.
+  const rosterResult = await loadAllApexClasses(ctx);
+  if (!rosterResult.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${rosterResult.error}` });
+  }
+  const all = rosterResult.value;
   const tests = all.filter(isTest);
   const nonTests = all.filter((n) => !isTest(n));
   const nonTestIds = new Set<ComponentId>(nonTests.map((n) => n.id));
@@ -145,58 +197,96 @@ export const apexTestCoverageHandler = async (
 
   const classesWithRefs = [...nonTestIds].filter((id) => (coverage.get(id)?.size ?? 0) > 0);
   const classesWithoutRefs = [...nonTestIds].filter((id) => (coverage.get(id)?.size ?? 0) === 0);
-  const scanTruncated = all.length >= APEX_PAGE_SIZE;
 
-  const summary = {
-    testClasses: tests.length,
-    nonTestClasses: nonTests.length,
-    classesWithTestReferences: classesWithRefs.length,
-    classesWithoutTestReferences: classesWithoutRefs.length,
-    truncated: scanTruncated,
-  };
-
-  // Single-class mode.
-  if (requestedClass !== undefined) {
-    const targetId: ComponentId = `ApexClass:${requestedClass}`;
-    const node = await getNodeById(ctx.graph, targetId);
-    if (!node.ok) {
-      return err({ kind: 'internal', message: `graph query failed: ${node.error.message}` });
-    }
-    if (node.value === null) {
-      return err({
-        kind: 'component-not-found',
-        message: `no ApexClass matches \`${targetId}\` in this vault`,
-        path: targetId,
-      });
-    }
-    const coveringTests = [...(coverage.get(targetId) ?? new Set<ComponentId>())].sort((a, b) =>
-      a < b ? -1 : a > b ? 1 : 0,
-    );
-    return ok({
-      data: {
-        mode: 'single-class',
-        target: {
-          classApiName: requestedClass,
-          coveringTests,
-          status: coveringTests.length > 0 ? 'has-test-references' : 'no-test-references-found',
-        },
-        summary,
-        boundaries: BOUNDARIES,
-      },
-      vaultState: {
-        sourceTreeHash: ctx.manifest.sourceTreeHash,
-        refreshedAt: ctx.manifest.refreshedAt,
-      },
-    });
-  }
-
-  // Org-wide mode: the untested-class backlog.
-  const untestedClasses = [...classesWithoutRefs].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)).slice(0, limit);
+  // The offset loop exhausts the ApexClass type, so the SCAN dimension is
+  // honestly complete; the only remaining truncation is the explicit,
+  // caller-controlled `limit` slice on the output list below.
+  const untestedClasses = [...classesWithoutRefs]
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    .slice(0, limit);
   return ok({
     data: {
       mode: 'org-wide',
       untestedClasses,
-      summary: { ...summary, truncated: scanTruncated || classesWithoutRefs.length > limit },
+      summary: {
+        testClasses: tests.length,
+        nonTestClasses: nonTests.length,
+        classesWithTestReferences: classesWithRefs.length,
+        classesWithoutTestReferences: classesWithoutRefs.length,
+        truncated: classesWithoutRefs.length > limit,
+      },
+      boundaries: BOUNDARIES,
+    },
+    vaultState: {
+      sourceTreeHash: ctx.manifest.sourceTreeHash,
+      refreshedAt: ctx.manifest.refreshedAt,
+    },
+  });
+};
+
+/**
+ * Resolve the single-class verdict from the target's UNCAPPED inbound
+ * `callsApex` edges, keeping only sources that are themselves test classes
+ * (`isTest === true`). Bounded by one class's in-degree, so it is genuinely
+ * exhaustive and never off a truncated scan.
+ *
+ * Mirrors the old per-target Set semantics: the edge PK
+ * (from_id, to_id, edge_type, source) permits the SAME test→target pair from
+ * two extraction sources (e.g. declared vs the heuristic scanner) as two rows,
+ * so fromIds are deduped into a Set before being listed — a covering test
+ * appears exactly once.
+ */
+const singleClass = async (
+  ctx: Context,
+  requestedClass: string,
+): Promise<Result<McpResponse<ApexTestCoverageOutput>, McpError>> => {
+  const targetId: ComponentId = `ApexClass:${requestedClass}`;
+  const node = await getNodeById(ctx.graph, targetId);
+  if (!node.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${node.error.message}` });
+  }
+  if (node.value === null) {
+    return err({
+      kind: 'component-not-found',
+      message: `no ApexClass matches \`${targetId}\` in this vault`,
+      path: targetId,
+    });
+  }
+
+  const inbound = await listEdges(ctx.graph, targetId, { direction: 'in', edgeType: 'callsApex' });
+  if (!inbound.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${inbound.error.message}` });
+  }
+
+  const covering = new Set<ComponentId>();
+  for (const edge of inbound.value) {
+    if (covering.has(edge.fromId)) continue;
+    const source = await getNodeById(ctx.graph, edge.fromId);
+    if (!source.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${source.error.message}` });
+    }
+    // Inbound `callsApex` includes regular (non-test) callers; only a test
+    // caller counts as a covering test, else a non-test class that calls the
+    // target would be miscounted as coverage (a false positive).
+    if (source.value !== null && isTest(source.value)) covering.add(edge.fromId);
+  }
+  const coveringTests = [...covering].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+
+  return ok({
+    data: {
+      mode: 'single-class',
+      target: {
+        classApiName: requestedClass,
+        coveringTests,
+        status: coveringTests.length > 0 ? 'has-test-references' : 'no-test-references-found',
+      },
+      summary: {
+        testClasses: 0,
+        nonTestClasses: 0,
+        classesWithTestReferences: coveringTests.length > 0 ? 1 : 0,
+        classesWithoutTestReferences: coveringTests.length > 0 ? 0 : 1,
+        truncated: false,
+      },
       boundaries: BOUNDARIES,
     },
     vaultState: {
