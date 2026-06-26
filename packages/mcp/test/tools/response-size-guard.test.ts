@@ -1,12 +1,16 @@
 /// <reference types="vitest/globals" />
 
-import type { McpResponse } from '@sf-intelligence/contracts';
+import type { McpError, McpResponse } from '@sf-intelligence/contracts';
+import { err, ok } from '@sf-intelligence/core';
+import { z } from 'zod';
 
+import type { Context } from '../../src/server.js';
 import {
   MAX_RESPONSE_BYTES,
   RESPONSE_BUDGET_DEFAULT_BYTES,
   jsonResult,
   responseBudgetBytes,
+  runTool,
 } from '../../src/tools/index.js';
 
 /**
@@ -258,5 +262,103 @@ describe('jsonResult global response budget', () => {
       }
       expect(typeof parsed.estimatedPayloadBytes).toBe('number');
     }
+  });
+});
+
+/**
+ * Unit tests for `runTool`'s defensive try/catch (CR-14, Systemic #5). The
+ * sole tool-handler call site previously had NO try/catch: a thrown handler
+ * (a renderer that throws by design, a `JSON.stringify` TypeError on a
+ * BigInt/circular value, any unexpected error) escaped the
+ * structured-envelope + byte-budget contract and surfaced as a RAW, UNSIZED
+ * JSON-RPC error — crashing the turn, bypassing the size guard, and leaking
+ * the raw `error.message` (which can embed org content or a stack trace) to
+ * the client. The fix converts an escaped throw into a sized `internal`-kind
+ * envelope with a fixed generic message BEFORE the SDK ever sees it.
+ */
+describe('runTool defensive throw handling', () => {
+  // The handler is synthetic in these tests and never reads the Context, so a
+  // bare cast keeps the harness free of vault fixtures (mirrors server.test's
+  // `fakeCtx = {} as Context`).
+  const fakeCtx = {} as Context;
+  const emptySchema = z.object({}).passthrough();
+
+  it('converts a handler throw into a bounded internal-error envelope and leaks neither the message nor a stack', async () => {
+    const secret = 'org-secret-value erizzuto@example.edu';
+    const thrown = `boom ${secret}`;
+    // Before the fix this rejected (no try/catch) — asserting it resolves at
+    // all is itself a kill criterion.
+    const out = await runTool(fakeCtx, {}, emptySchema, async () => {
+      throw new Error(thrown);
+    });
+    const text = (out.content[0] as { readonly text: string }).text;
+    const parsed = JSON.parse(text) as {
+      readonly error: { readonly kind: string; readonly message: string };
+    };
+
+    // ok:false shape with a known, distinguishable kind.
+    expect(parsed.error.kind).toBe('internal');
+    // The client-facing message is the fixed generic literal.
+    expect(parsed.error.message).toBe(
+      'An internal error occurred while handling this tool. The server logged the details.',
+    );
+    // LEAK INVARIANTS: nothing from the throw reaches the client.
+    expect(text).not.toContain('boom');
+    expect(text).not.toContain('org-secret-value');
+    expect(text).not.toContain('erizzuto@example.edu');
+    expect(text).not.toContain(' at '); // no stack-frame markers
+    // Bounded by the same byte budget as every other envelope.
+    expect(bytesOf(text)).toBeLessThanOrEqual(responseBudgetBytes());
+  });
+
+  it('also catches a serialize throw (BigInt) the handler returns inside a successful Result', async () => {
+    // A handler can return a value `JSON.stringify` itself throws on
+    // (a BigInt). That throw originates inside `jsonResult`'s serialize step,
+    // which is INSIDE the try — so it must be caught too, not escape.
+    const out = await runTool(fakeCtx, {}, emptySchema, async () =>
+      ok({
+        data: { b: 10n },
+        vaultState: VAULT_STATE,
+      } as unknown as McpResponse<unknown>),
+    );
+    const text = (out.content[0] as { readonly text: string }).text;
+    const parsed = JSON.parse(text) as {
+      readonly error: { readonly kind: string };
+    };
+    expect(parsed.error.kind).toBe('internal');
+    expect(bytesOf(text)).toBeLessThanOrEqual(responseBudgetBytes());
+  });
+
+  it('leaves a normal ok response transparent (try wrapper changes nothing on the happy path)', async () => {
+    const body: McpResponse<{ readonly rows: readonly number[] }> = {
+      data: { rows: [1, 2, 3] },
+      vaultState: VAULT_STATE,
+    };
+    const out = await runTool(fakeCtx, {}, emptySchema, async () => ok(body));
+    const text = (out.content[0] as { readonly text: string }).text;
+    const parsed = JSON.parse(text) as {
+      readonly data: { readonly rows: readonly number[] };
+      readonly estimatedPayloadBytes: number;
+      readonly error?: unknown;
+    };
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.data.rows).toEqual([1, 2, 3]);
+    expect(typeof parsed.estimatedPayloadBytes).toBe('number');
+  });
+
+  it('does NOT double-wrap a structural err — a returned McpError keeps its own kind', async () => {
+    const out = await runTool(fakeCtx, {}, emptySchema, async () =>
+      err({
+        kind: 'component-not-found',
+        message: 'X',
+      } satisfies McpError),
+    );
+    const text = (out.content[0] as { readonly text: string }).text;
+    const parsed = JSON.parse(text) as {
+      readonly error: { readonly kind: string };
+    };
+    // The catch fires only on a THROW; a returned err flows the normal path.
+    expect(parsed.error.kind).toBe('component-not-found');
+    expect(parsed.error.kind).not.toBe('internal');
   });
 });

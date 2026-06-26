@@ -5851,8 +5851,24 @@ export const dispatchTool = async (
  * envelope. Centralising this kept the 10 `mcp-tool-*` tasks each a
  * single one-liner `case` rather than re-implementing the parse +
  * dispatch + serialize loop.
+ *
+ * It ALSO catches an UNEXPECTED throw from the handler (or from the
+ * serialize step inside `jsonResult` — e.g. a `JSON.stringify` TypeError on
+ * a BigInt/circular value) and returns a sized `internal`-kind error
+ * envelope routed through the SAME `jsonResult` byte budget, so an
+ * exception that would otherwise escape to the SDK as a raw, unsized
+ * JSON-RPC error (bypassing the structured-envelope + size-guard contract
+ * and potentially leaking org content or a stack trace in the message) is
+ * instead bounded and safe. The client-facing message is a fixed generic
+ * literal — never the throw's message — and the full error is logged to
+ * stderr only. A handler that RETURNS a structural `McpError` still flows
+ * the normal path and keeps its own kind (the catch fires only on a thrown
+ * exception, so a returned `err()` is never re-wrapped as `internal`).
+ *
+ * `runTool` is exported only so the response-size/leak unit tests can drive
+ * it directly with a synthetic throwing handler.
  */
-const runTool = async <S extends z.ZodTypeAny, T>(
+export const runTool = async <S extends z.ZodTypeAny, T>(
   ctx: Context,
   args: Readonly<Record<string, unknown>>,
   schema: S,
@@ -5876,12 +5892,33 @@ const runTool = async <S extends z.ZodTypeAny, T>(
       error: { kind: 'invalid-query', message },
     });
   }
-  const result = await handler(ctx, parsed.data);
-  return jsonResult(result.ok ? result.value : { error: result.error }, {
-    args: parsed.data as unknown as Readonly<Record<string, unknown>>,
-    knobs: narrowingKnobs(schema),
-    vaultRoot: ctx.vaultRoot,
-  });
+  try {
+    const result = await handler(ctx, parsed.data);
+    return jsonResult(result.ok ? result.value : { error: result.error }, {
+      args: parsed.data as unknown as Readonly<Record<string, unknown>>,
+      knobs: narrowingKnobs(schema),
+      vaultRoot: ctx.vaultRoot,
+    });
+  } catch (error) {
+    // An unexpected throw escaped the handler (or the serialize step). Log
+    // the FULL error (incl. stack, which may carry org content) to stderr
+    // for server-side debugging ONLY, then return a sized `internal`
+    // envelope whose client-facing message is a fixed literal — never the
+    // throw's message — so no raw stack or org value reaches the client.
+    // Routing through `jsonResult` keeps even this error under the byte
+    // budget. Do NOT interpolate `error`, `parsed.data`, `args`, or `ctx`.
+    console.error('sf-intelligence: runTool internal error in handler:', error);
+    return jsonResult(
+      {
+        error: {
+          kind: 'internal',
+          message:
+            'An internal error occurred while handling this tool. The server logged the details.',
+        },
+      },
+      { knobs: narrowingKnobs(schema) },
+    );
+  }
 };
 
 /**
