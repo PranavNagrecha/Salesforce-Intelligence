@@ -629,3 +629,79 @@ describe('techDebtScoreInputSchema', () => {
     ).toBe(true);
   });
 });
+
+// =============================================================================
+// CR-12 — page-to-exhaustion. The composite SCORE inspects per-node properties
+// (apiVersion, qualityIssues, lastModifiedDate) and must be computed over the
+// COMPLETE node set, not just the first page. With SFI_NODE_SCAN_LIMIT=2 the
+// loadAllNodes offset loop walks multiple pages; a deprecated/smelly class
+// sorted PAST the cap by id ASC used to be invisible, undercounting the score.
+// =============================================================================
+describe('techDebtScoreHandler — past-cap score completeness (CR-12 de-cap)', () => {
+  let tempDir: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  // id-ASC: Aaa, Bbb (modern, apiVersion 58) come first; the deprecated
+  // (apiVersion 30) Yyy/Zzz and the smelly Www sort LAST — past a cap of 2.
+  const pastCapSeed: ExtractionResult = {
+    nodes: [
+      makeNode({ id: 'ApexClass:Aaa', apiName: 'Aaa', apiVersion: 58 }),
+      makeNode({ id: 'ApexClass:Bbb', apiName: 'Bbb', apiVersion: 58 }),
+      makeNode({
+        id: 'ApexClass:Www',
+        apiName: 'Www',
+        apiVersion: 58,
+        properties: {
+          qualityIssues: [
+            { severity: 'critical', rule: 'soql-in-loop' },
+            { severity: 'high', rule: 'dml-in-loop' },
+          ],
+        },
+      }),
+      makeNode({ id: 'ApexClass:Yyy', apiName: 'Yyy', apiVersion: 30 }),
+      makeNode({ id: 'ApexClass:Zzz', apiName: 'Zzz', apiVersion: 30 }),
+    ],
+    edges: [],
+  };
+
+  beforeAll(async () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-tds-pastcap-'));
+    const opened = await openGraph(join(tempDir, 'tds-pastcap.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    store = opened.value;
+    const imp = await importExtractionResults(store, [pastCapSeed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    ctx = { vaultRoot: tempDir, manifest: FIXTURE_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    process.env['SFI_NODE_SCAN_LIMIT'] = '2';
+  });
+
+  afterEach(() => {
+    delete process.env['SFI_NODE_SCAN_LIMIT'];
+  });
+
+  it('counts deprecated API classes past the cap (apiVersions rawCount complete)', async () => {
+    // BEFORE the fix: single-page sees only Aaa/Bbb (both apiVersion 58) →
+    // below50 = 0. AFTER: the walk reaches Yyy/Zzz → below50 = 2.
+    const r = await techDebtScoreHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.categories.apiVersions.rawCount).toBe(2);
+  });
+
+  it('aggregates qualityIssues from a class past the cap (codeQuality rawCount complete)', async () => {
+    // Www (critical + high) sorts at position 3, past the cap of 2.
+    const r = await techDebtScoreHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.categories.codeQuality.rawCount).toBe(2);
+  });
+});

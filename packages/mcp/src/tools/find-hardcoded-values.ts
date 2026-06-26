@@ -69,12 +69,12 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { nodeScanLimit, scanHitCap, scanTruncationNote } from './scan-cap.js';
+
 /** Inclusive upper bound on `limit`. */
 const FIND_HARDCODED_MAX_LIMIT = 500;
 /** Default `limit`. */
 const FIND_HARDCODED_DEFAULT_LIMIT = 100;
-/** Per-type cap matching `listNodesByType`'s default. */
-const LIST_PAGE_SIZE = 500;
 
 /** Category-to-rule mapping for the hardcoded-literal rules. */
 const CATEGORY_TO_RULE: Readonly<
@@ -260,9 +260,16 @@ export const findHardcodedValuesHandler = async (
   const collected: HardcodedValueMatch[] = [];
   let sawTestClassFinding = false;
 
+  // Per-type scan saturation. A type whose page came back AT the fetch cap may
+  // have hardcoded-value findings BEHIND it that this scan never examined.
+  // Fetch at `nodeScanLimit()` (not a hardcoded 500) so the disclosure tracks
+  // the ACTUAL fetch, mirroring `app_access`; `SFI_NODE_SCAN_LIMIT` can drive
+  // the truncated path in tests.
+  const truncatedTypes: string[] = [];
+  const scanLimit = nodeScanLimit();
   for (const type of SCANNED_TYPES) {
     const nodesResult = await listNodesByType(ctx.graph, type, {
-      limit: LIST_PAGE_SIZE,
+      limit: scanLimit,
     });
     if (!nodesResult.ok) {
       return err({
@@ -270,6 +277,7 @@ export const findHardcodedValuesHandler = async (
         message: `graph query failed: ${nodesResult.error.message}`,
       });
     }
+    if (scanHitCap(nodesResult.value.length, scanLimit)) truncatedTypes.push(type);
     for (const node of nodesResult.value) {
       const raw = (node as Node).properties['qualityIssues'];
       if (!Array.isArray(raw)) continue;
@@ -315,6 +323,13 @@ export const findHardcodedValuesHandler = async (
     if (sawTestClassFinding) {
       boundaries.push(TEST_CLASS_REFUSAL_DISCLOSURE);
     }
+  }
+  // Truncation is meaningful EVEN with zero matched findings — findings may sit
+  // past the scan cap — so this append lives OUTSIDE the `sorted.length > 0`
+  // gate above. (`truncated` is the OUTPUT-slice cursor; this is the INPUT-scan
+  // saturation, a separate honesty axis.)
+  if (truncatedTypes.length > 0) {
+    boundaries.push(scanTruncationNote(truncatedTypes));
   }
 
   return ok({

@@ -578,3 +578,90 @@ describe('whatIfMakeFieldRequiredHandler — live null-rate (P6-required-field-w
     expect(r.value.data.trust.freshness.liveQueriedAt).toBeDefined();
   });
 });
+
+// =============================================================================
+// CR-12 — page-to-exhaustion (destructive SAFETY verdict). The Flow scan is
+// walked to exhaustion, not just the first page; a non-writing create-path Flow
+// sorted PAST the cap by id ASC used to be silently skipped → a false 'safe'
+// verdict (a SAFETY false-negative, the worst class for a what-if tool). With
+// SFI_NODE_SCAN_LIMIT=2 the loadAllNodes offset loop walks multiple Flow pages.
+// =============================================================================
+describe('whatIfMakeFieldRequiredHandler — past-cap Flow SAFETY (CR-12 de-cap)', () => {
+  let dir: string;
+  let s: GraphStore;
+  let pagedCtx: Context;
+
+  const acct = 'CustomObject:Account';
+  const targetField = 'CustomField:Account.Industry__c';
+  // id-ASC Flows: Aaa, Bbb (fillers, no create edges), then ZzzCreate LAST —
+  // past a cap of 2. ZzzCreate creates Account via an object-level recordCreate
+  // edge and does NOT set the target field → must be a metadata-blocker.
+  const pastCapSeed: ExtractionResult = {
+    nodes: [
+      makeNode({ id: acct, apiName: 'Account' }),
+      makeNode({
+        id: targetField,
+        type: 'CustomField',
+        apiName: 'Industry__c',
+        parentId: acct,
+        properties: { type: 'Text', required: false },
+      }),
+      makeNode({ id: 'Flow:AaaFiller', type: 'Flow', apiName: 'AaaFiller' }),
+      makeNode({ id: 'Flow:BbbFiller', type: 'Flow', apiName: 'BbbFiller' }),
+      makeNode({ id: 'Flow:ZzzCreateAccount', type: 'Flow', apiName: 'ZzzCreateAccount' }),
+    ],
+    edges: [
+      makeEdge({ fromId: acct, toId: targetField, edgeType: 'parentOf' }),
+      // ZzzCreateAccount creates Account (object-level recordCreate) but never
+      // writes the target field → the create will fail under a required field.
+      makeEdge({
+        fromId: 'Flow:ZzzCreateAccount',
+        toId: acct,
+        edgeType: 'writesTo',
+        source: 'flow-extractor',
+        confidence: 'parsed',
+        properties: { operation: 'recordCreate' },
+      }),
+    ],
+  };
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-wi-mfr-pastcap-'));
+    const opened = await openGraph(join(dir, 'wi-mfr-pastcap.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    s = opened.value;
+    const imported = await importExtractionResults(s, [pastCapSeed]);
+    if (!imported.ok) {
+      throw new Error(`seed import failed: ${imported.error.message}`);
+    }
+    pagedCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s };
+  });
+
+  afterAll(async () => {
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    process.env['SFI_NODE_SCAN_LIMIT'] = '2';
+  });
+
+  afterEach(() => {
+    delete process.env['SFI_NODE_SCAN_LIMIT'];
+  });
+
+  it('flags a non-writing create Flow sorted PAST the cap (the SAFETY false-negative)', async () => {
+    // BEFORE the fix: the first-2-Flow page (AaaFiller, BbbFiller) dropped
+    // ZzzCreateAccount, so the tool returned a false 'safe' verdict.
+    const r = await whatIfMakeFieldRequiredHandler(pagedCtx, {
+      fieldId: targetField,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const blocker = r.value.data.impacts.find(
+      (i) => i.componentId === 'Flow:ZzzCreateAccount',
+    );
+    expect(blocker?.category).toBe('metadata-blocker');
+    expect(r.value.data.verdict).toBe('blocking');
+  });
+});

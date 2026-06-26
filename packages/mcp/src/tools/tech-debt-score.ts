@@ -45,7 +45,7 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listNodesByType } from '@sf-intelligence/graph';
+import { countNodesByType, listNodesByType } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -57,6 +57,7 @@ import { findHardcodedValuesAnywhereHandler } from './find-hardcoded-values-anyw
 import {
   processBuilderMigrationCandidatesHandler,
 } from './process-builder-migration-candidates.js';
+import { nodeScanLimit } from './scan-cap.js';
 import {
   unassignedPermissionSetsHandler,
 } from './unassigned-permission-sets.js';
@@ -67,7 +68,42 @@ import {
   unusedFieldsDeepHandler,
 } from './unused-fields-deep.js';
 
-const LIST_PAGE_SIZE = 500;
+/**
+ * Hard ceiling on a single `listNodesByType` page. `nodeScanLimit()` is
+ * env-overridable (`SFI_NODE_SCAN_LIMIT`) so a test can drive the multi-page
+ * offset loop without seeding 500+ nodes, but it does NOT clamp at 500, and the
+ * graph layer rejects `limit > 500` — so every page request is clamped here.
+ */
+const PAGE_CAP = 500;
+const pageSize = (): number => Math.min(nodeScanLimit(), PAGE_CAP);
+
+/**
+ * Load EVERY node of a single ComponentType, not just the first page. The
+ * tech-debt composite SCORE inspects per-node properties (apiVersion,
+ * qualityIssues, lastModifiedDate) and must be computed over the COMPLETE set —
+ * a single `listNodesByType` page caps at 500 (id ASC), so an org with > 500 of
+ * a scanned type used to score off only the first page (a saturated, wrong
+ * composite). Page by `pageSize()` accumulating until a short page proves the
+ * type is exhausted, with `countNodesByType` as a belt cross-check so a page
+ * that unexpectedly returns full cannot loop forever. The common case (type
+ * under the cap) runs exactly one sub-cap page — byte-identical.
+ */
+const loadAllNodes = async (
+  ctx: Context,
+  type: ComponentType,
+): Promise<Result<readonly Node[], string>> => {
+  const total = await countNodesByType(ctx.graph, type);
+  if (!total.ok) return err(total.error.message);
+  const limit = pageSize();
+  const all: Node[] = [];
+  for (let offset = 0; ; offset += limit) {
+    const page = await listNodesByType(ctx.graph, type, { limit, offset });
+    if (!page.ok) return err(page.error.message);
+    all.push(...page.value);
+    if (page.value.length < limit || all.length >= total.value) break;
+  }
+  return ok(all);
+};
 
 /**
  * The default weighting scheme per PLAN-v2.4 §15. Weights are
@@ -303,10 +339,8 @@ const computeApiVersionDistribution = async (
     string
   >
 > => {
-  const r = await listNodesByType(ctx.graph, 'ApexClass', {
-    limit: LIST_PAGE_SIZE,
-  });
-  if (!r.ok) return err(r.error.message);
+  const r = await loadAllNodes(ctx, 'ApexClass');
+  if (!r.ok) return err(r.error);
   let below30 = 0;
   let below40 = 0;
   let below50 = 0;
@@ -344,11 +378,7 @@ const computeCodeQualityCounts = async (
 > => {
   const fetchType = async (
     type: ComponentType,
-  ): Promise<Result<readonly Node[], string>> => {
-    const r = await listNodesByType(ctx.graph, type, { limit: LIST_PAGE_SIZE });
-    if (!r.ok) return err(r.error.message);
-    return ok(r.value);
-  };
+  ): Promise<Result<readonly Node[], string>> => loadAllNodes(ctx, type);
   const cs = await fetchType('ApexClass');
   if (!cs.ok) return err(cs.error);
   const ts = await fetchType('ApexTrigger');
@@ -410,8 +440,8 @@ const computeFreshnessCounts = async (
   const oneYearAgo = Date.now() - 365 * 24 * 60 * 60 * 1000;
   const twoYearsAgo = Date.now() - 2 * 365 * 24 * 60 * 60 * 1000;
   for (const t of types) {
-    const r = await listNodesByType(ctx.graph, t, { limit: LIST_PAGE_SIZE });
-    if (!r.ok) return err(r.error.message);
+    const r = await loadAllNodes(ctx, t);
+    if (!r.ok) return err(r.error);
     for (const n of r.value) {
       if (n.lastModifiedDate === null) continue;
       any = true;

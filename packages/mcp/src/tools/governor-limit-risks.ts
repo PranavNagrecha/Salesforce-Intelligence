@@ -71,6 +71,7 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { partitionByBaseline } from './finding-suppression.js';
+import { nodeScanLimit, scanHitCap, scanTruncationNote } from './scan-cap.js';
 import { soundnessFromDynamicApexIds, type Soundness } from './soundness.js';
 
 const GOVERNOR_LIMIT_TOOL = 'sfi.governor_limit_risks';
@@ -79,8 +80,6 @@ const GOVERNOR_LIMIT_TOOL = 'sfi.governor_limit_risks';
 const GOVERNOR_LIMIT_MAX_LIMIT = 500;
 /** Default `limit`. */
 const GOVERNOR_LIMIT_DEFAULT_LIMIT = 100;
-/** Per-type cap matching `listNodesByType`'s default. */
-const LIST_PAGE_SIZE = 500;
 
 /**
  * The three rule ids in the v2.1 governor-limit subset. A hard
@@ -343,9 +342,16 @@ export const governorLimitRisksHandler = async (
   let totalRiskCount = 0;
   let suppressedRiskCount = 0;
 
+  // Per-type scan saturation. A type whose page came back AT the fetch cap may
+  // have risky classes BEHIND it that this scan never examined — the verdict is
+  // then silently incomplete, so disclose it. Fetch at `nodeScanLimit()` (not a
+  // hardcoded 500) so the disclosure tracks the ACTUAL fetch, mirroring
+  // `app_access`; `SFI_NODE_SCAN_LIMIT` can drive the truncated path in tests.
+  const truncatedTypes: string[] = [];
+  const scanLimit = nodeScanLimit();
   for (const type of SCANNED_TYPES) {
     const nodesResult = await listNodesByType(ctx.graph, type, {
-      limit: LIST_PAGE_SIZE,
+      limit: scanLimit,
     });
     if (!nodesResult.ok) {
       return err({
@@ -353,6 +359,7 @@ export const governorLimitRisksHandler = async (
         message: `graph query failed: ${nodesResult.error.message}`,
       });
     }
+    if (scanHitCap(nodesResult.value.length, scanLimit)) truncatedTypes.push(type);
     for (const node of nodesResult.value) {
       const raw = (node as Node).properties['qualityIssues'];
       if (!Array.isArray(raw)) continue;
@@ -423,6 +430,14 @@ export const governorLimitRisksHandler = async (
           GOVERNOR_LIMIT_HEURISTIC_DISCLOSURE,
           GOVERNOR_LIMIT_TRIGGER_CONTEXT_DISCLOSURE,
         ];
+
+  // Truncation is meaningful EVEN with zero in-scope findings — risky classes
+  // may sit past the scan cap — so this append lives OUTSIDE the zero-findings
+  // gate above. (`truncated` is the OUTPUT-slice cursor; this is the INPUT-scan
+  // saturation, a separate honesty axis.)
+  if (truncatedTypes.length > 0) {
+    boundaries.push(scanTruncationNote(truncatedTypes));
+  }
 
   return ok({
     data: {
