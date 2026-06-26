@@ -53,12 +53,18 @@ const seed: ExtractionResult = {
     node({ id: 'PermissionSet:Reader', type: 'PermissionSet', apiName: 'Reader' }),
     node({ id: 'Profile:God', type: 'Profile', apiName: 'God', properties: { userPermissions: ['ModifyAllData'] } }),
     node({ id: 'Profile:Viewer', type: 'Profile', apiName: 'Viewer', properties: { userPermissions: ['ViewAllData'] } }),
+    // CR-04: a grantor with object Delete and one with object Create — both
+    // dropped by the old exclusive else-if chain (Delete was NEVER read).
+    node({ id: 'Profile:Deleter', type: 'Profile', apiName: 'Deleter' }),
+    node({ id: 'PermissionSet:Creator', type: 'PermissionSet', apiName: 'Creator' }),
     node({ id: 'SharingRule:Deal__c.Share_To_Sales', type: 'SharingRule', apiName: 'Deal__c.Share_To_Sales', properties: { ruleType: 'owner', accessLevel: 'Edit', sObjectType: 'Deal__c' } }),
     node({ id: 'Group:Sales_Public', type: 'Group', apiName: 'Sales_Public' }),
   ],
   edges: [
     edge({ fromId: 'Profile:Admin', toId: OBJ, edgeType: 'grantedBy', properties: { allowRead: true, allowEdit: true, modifyAllRecords: true } }),
     edge({ fromId: 'PermissionSet:Reader', toId: OBJ, edgeType: 'grantedBy', properties: { allowRead: true } }),
+    edge({ fromId: 'Profile:Deleter', toId: OBJ, edgeType: 'grantedBy', properties: { allowRead: true, allowDelete: true } }),
+    edge({ fromId: 'PermissionSet:Creator', toId: OBJ, edgeType: 'grantedBy', properties: { allowCreate: true } }),
     edge({ fromId: 'SharingRule:Deal__c.Share_To_Sales', toId: 'Group:Sales_Public', edgeType: 'sharedWith' }),
   ],
 };
@@ -127,7 +133,7 @@ describe('whoCanAccessObjectHandler', () => {
     // Admin: object Modify All → access all, all-records.
     expect(byId.get('Profile:Admin|modify-all-object')?.access).toBe('all');
     // Reader PS: object Read → read, shared-records.
-    expect(byId.get('PermissionSet:Reader|object-permission')?.scope).toBe('shared-records');
+    expect(byId.get('PermissionSet:Reader|object-permission-read')?.scope).toBe('shared-records');
     // God profile: ModifyAllData system perm.
     expect(byId.get('Profile:God|system-modify-all-data')?.access).toBe('all');
     // Viewer profile: ViewAllData → read.
@@ -136,6 +142,43 @@ describe('whoCanAccessObjectHandler', () => {
     const group = byId.get('Group:Sales_Public|owner-sharing-rule');
     expect(group?.granterType).toBe('Group');
     expect(group?.access).toBe('edit');
+  });
+
+  // CR-04: Delete and Create capabilities are enumerated independently — the
+  // old exclusive else-if chain NEVER read allowDelete and subsumed allowCreate.
+  it('emits independent object-permission-delete and -create rows (CR-04)', async () => {
+    const r = await whoCanAccessObjectHandler(ctx, { componentId: OBJ });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const byId = new Map(r.value.data.granters.map((g) => [`${g.granterId}|${g.via}`, g]));
+    // Deleter: object Delete → its own row with access 'delete'.
+    expect(byId.get('Profile:Deleter|object-permission-delete')?.access).toBe('delete');
+    expect(byId.get('Profile:Deleter|object-permission-delete')?.scope).toBe('shared-records');
+    // Deleter also has Read → an independent read row (NOT subsumed).
+    expect(byId.get('Profile:Deleter|object-permission-read')?.access).toBe('read');
+    // Creator: object Create → its own row with access 'create'.
+    expect(byId.get('PermissionSet:Creator|object-permission-create')?.access).toBe('create');
+  });
+
+  // CR-04: a grantor with several capabilities (Admin: Read+Edit+Modify-All)
+  // emits MULTIPLE independently-addressable rows — the old chain hid the lower
+  // capabilities behind Modify-All.
+  it('emits independent read/edit rows for a grantor that also has Modify-All (CR-04)', async () => {
+    const r = await whoCanAccessObjectHandler(ctx, { componentId: OBJ });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const byId = new Map(r.value.data.granters.map((g) => [`${g.granterId}|${g.via}`, g]));
+    expect(byId.get('Profile:Admin|modify-all-object')?.access).toBe('all');
+    expect(byId.get('Profile:Admin|object-permission-edit')?.access).toBe('edit');
+    expect(byId.get('Profile:Admin|object-permission-read')?.access).toBe('read');
+    // summary.total (ROW count) exceeds summary.distinctGranters (ACTOR count).
+    expect(r.value.data.summary.total).toBeGreaterThan(r.value.data.summary.distinctGranters);
+    // The shared-records / all-records split stays scope-based and correct:
+    // Admin emits modify-all (all-records) + edit + read (shared-records);
+    // delete/create rows are shared-records too.
+    expect(r.value.data.summary.allRecordsAccess).toBeGreaterThanOrEqual(1);
+    expect(r.value.data.summary.sharedRecordsAccess).toBeGreaterThanOrEqual(1);
+    expect(r.value.data.boundaryNote).toContain('distinctGranters');
   });
 
   it('flags a public OWD as granting all internal users', async () => {

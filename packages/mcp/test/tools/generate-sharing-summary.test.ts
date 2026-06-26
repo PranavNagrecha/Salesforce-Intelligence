@@ -82,6 +82,7 @@ const seed: ExtractionResult = {
       parentId: 'CustomObject:Contact',
     }),
     makeNode({ id: 'Profile:Admin', type: 'Profile', apiName: 'Admin' }),
+    makeNode({ id: 'Profile:FlsOnly', type: 'Profile', apiName: 'FlsOnly' }),
     makeNode({ id: 'PermissionSet:Bonus', type: 'PermissionSet', apiName: 'Bonus' }),
     makeNode({
       id: 'Role:Executive',
@@ -118,15 +119,29 @@ const seed: ExtractionResult = {
       toId: 'CustomField:Contact.Title__c',
       edgeType: 'parentOf',
     }),
+    // CR-04: OBJECT-level CRUD grants — Profile:Admin reads, PermissionSet:Bonus
+    // edits — count toward the object tally. (Previously these pointed at a
+    // CustomField, conflating the FLS plane with object access.)
     makeEdge({
       fromId: 'Profile:Admin',
-      toId: 'CustomField:Account.Industry__c',
+      toId: 'CustomObject:Account',
       edgeType: 'grantedBy',
+      properties: { allowRead: true },
     }),
     makeEdge({
       fromId: 'PermissionSet:Bonus',
+      toId: 'CustomObject:Account',
+      edgeType: 'grantedBy',
+      properties: { allowEdit: true },
+    }),
+    // CR-04 negative: a grantor with ONLY a field-level (FLS) grant and NO
+    // object-CRUD edge must contribute 0 to the OBJECT tally. Profile:FlsOnly
+    // is FLS-only on a field — it should NOT be counted as an object grantor.
+    makeEdge({
+      fromId: 'Profile:FlsOnly',
       toId: 'CustomField:Account.Industry__c',
       edgeType: 'grantedBy',
+      properties: { readable: true },
     }),
   ],
 };
@@ -242,11 +257,14 @@ describe('generateSharingSummaryHandler (seeded graph)', () => {
     expect(body).toContain('Account.Industry = "Banking"');
   });
 
-  it('tallies profile and permission-set grants from grantedBy edges', async () => {
-    const result = await generateSharingSummaryHandler(ctx, {});
+  it('tallies OBJECT-level CRUD grants and EXCLUDES FLS-only grantors (CR-04)', async () => {
+    const result = await generateSharingSummaryHandler(ctx, { objectFilter: 'Account' });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const body = result.value.data.document.body;
+    // Account: Profile:Admin (allowRead) + PermissionSet:Bonus (allowEdit) =
+    // 1 profile + 1 permset. Profile:FlsOnly has only a CustomField FLS grant
+    // and NO object-CRUD edge → it must NOT be counted toward the object tally.
     expect(body).toContain('Profiles with grants:** 1');
     expect(body).toContain('PermissionSets with grants:** 1');
   });
