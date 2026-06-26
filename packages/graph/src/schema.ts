@@ -60,6 +60,15 @@ export const SCHEMA_DDL = {
   indexNodesParent: `CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(parent_id);`,
   indexEdgesFrom: `CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_id);`,
   indexEdgesTo: `CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_id);`,
+  // CR-19: schema-version ledger. A single-row table holds the integer
+  // schema version the vault was last migrated to, letting `runMigrations`
+  // apply only the steps newer than the stored version (and letting read
+  // paths detect version drift). One row, `id = 1`, enforced by the PK so a
+  // double-stamp upserts rather than duplicates.
+  schemaVersion: `CREATE TABLE IF NOT EXISTS schema_version (
+  id INTEGER PRIMARY KEY,
+  version INTEGER NOT NULL
+);`,
 } as const;
 
 // Ordered so the indexes only run after their parent tables exist. Doesn't
@@ -73,6 +82,8 @@ const SCHEMA_STATEMENTS: readonly string[] = [
   SCHEMA_DDL.indexNodesParent,
   SCHEMA_DDL.indexEdgesFrom,
   SCHEMA_DDL.indexEdgesTo,
+  // Appended last (CR-19) so the existing statements keep their order.
+  SCHEMA_DDL.schemaVersion,
 ];
 
 /**
