@@ -493,6 +493,70 @@ describe('field360Handler', () => {
     expect(result.value.data.fieldId).toBe(TARGET);
   });
 
+  it('CR-05 — surfaces a WorkflowRule field-update writer exactly once (no double-count)', async () => {
+    // The CR-05 extractor change emits a field-level `writesTo` from a
+    // WorkflowRule to the field its FieldUpdate sets. field_360 must show
+    // that rule ONCE in writers. It is NOT double-counted in automations:
+    // the rule's OTHER (pre-existing) edge is a `references` to the
+    // WorkflowFieldUpdate scaffolding node — NOT to this field — so the
+    // field's inbound walk never sees the rule via `references`. Here we
+    // model only the writesTo (the references edge points elsewhere), so
+    // writers has exactly one entry and automations is empty.
+    const localDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-f360-wf-'));
+    const opened = await openGraph(join(localDir, 'wf.db'));
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const localStore = opened.value;
+    const FIELD = 'CustomField:Account.Region__c';
+    const RULE = 'WorkflowRule:Account.Set_Region';
+    const imp = await importExtractionResults(localStore, [
+      {
+        nodes: [
+          makeNode({
+            id: FIELD,
+            type: 'CustomField',
+            apiName: 'Region__c',
+            label: 'Region',
+            parentId: 'CustomObject:Account',
+            properties: { dataType: 'Picklist' },
+          }),
+          makeNode({ id: RULE, type: 'WorkflowRule', apiName: 'Account.Set_Region' }),
+        ],
+        edges: [
+          makeEdge({
+            fromId: RULE,
+            toId: FIELD,
+            edgeType: 'writesTo',
+            confidence: 'parsed',
+            source: 'workflow-rule-extractor',
+            properties: { operation: 'Formula' },
+          }),
+        ],
+      },
+    ]);
+    expect(imp.ok).toBe(true);
+    if (!imp.ok) {
+      await closeGraph(localStore);
+      return;
+    }
+    const localCtx: Context = {
+      vaultRoot: localDir,
+      manifest: FIXTURE_MANIFEST,
+      graph: localStore,
+    };
+    const r = await field360Handler(localCtx, { fieldId: FIELD });
+    await closeGraph(localStore);
+    rmSync(localDir, { recursive: true, force: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const out = r.value.data;
+    expect(out.writers?.rows.length).toBe(1);
+    expect(out.writers?.rows[0]?.componentId).toBe(RULE);
+    expect(out.writers?.rows[0]?.source).toBe('workflow-rule-extractor');
+    // Not double-counted as an automation (no references edge to this field).
+    expect(out.automations?.rows.length ?? 0).toBe(0);
+  });
+
   it('caps section rows at maxRowsPerSection and reports truncatedAtN', async () => {
     const result = await field360Handler(ctx, {
       fieldId: TARGET,
