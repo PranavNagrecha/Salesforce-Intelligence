@@ -152,3 +152,46 @@ describe('getAuthFromSfCli — error paths', () => {
     expect(spawned).toBe(false);
   });
 });
+
+describe('nodeExecFile — un-timed auth shellout backstop (RV3 / H8)', () => {
+  const PRIOR = process.env['SFI_SF_EXEC_TIMEOUT_MS'];
+  afterEach(() => {
+    if (PRIOR === undefined) delete process.env['SFI_SF_EXEC_TIMEOUT_MS'];
+    else process.env['SFI_SF_EXEC_TIMEOUT_MS'] = PRIOR;
+    vi.resetModules();
+  });
+
+  it('kills a hung child and rejects with killed:true under a small timeout override', async () => {
+    // RV3: the default auth exec (`sf org display`) can wedge on an interactive
+    // re-prompt waiting on stdin. With a tiny override, the real nodeExecFile
+    // must SIGTERM a 60s child and reject — proving the refresh-path auth call
+    // (getAuthFromSfCli with no injected exec) can no longer block forever.
+    process.env['SFI_SF_EXEC_TIMEOUT_MS'] = '200';
+    vi.resetModules();
+    const { nodeExecFile } = await import('../src/auth.js');
+    const start = Date.now();
+    let rejected = false;
+    let killed = false;
+    try {
+      await nodeExecFile(process.execPath, ['-e', 'setTimeout(() => {}, 60000)']);
+    } catch (cause) {
+      rejected = true;
+      killed = (cause as { killed?: boolean }).killed === true;
+    }
+    expect(rejected).toBe(true);
+    expect(killed).toBe(true);
+    expect(Date.now() - start).toBeLessThan(5000);
+  });
+
+  it('lets a fast child complete under the generous default timeout', async () => {
+    // Guards that the backstop does not regress short legitimate calls.
+    delete process.env['SFI_SF_EXEC_TIMEOUT_MS'];
+    vi.resetModules();
+    const { nodeExecFile } = await import('../src/auth.js');
+    const { stdout } = await nodeExecFile(process.execPath, [
+      '-e',
+      'process.stdout.write("ok")',
+    ]);
+    expect(stdout.trim()).toBe('ok');
+  });
+});

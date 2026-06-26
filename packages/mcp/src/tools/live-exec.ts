@@ -35,8 +35,29 @@ import {
 
 import { formatSfCliFailure } from './input-aliases.js';
 
+/**
+ * Per-call timeout for every `sf` shellout that defaults to this leaf exec
+ * (RV3 / CR-01 follow-up / H8). The handlers here run only SHORT read-only ops —
+ * Tooling SELECTs, `sf org display`/auth, `sobject describe` — so a generous
+ * 10-min default backstop kills NO legitimate call yet caps a wedged process
+ * (e.g. an interactive `sf` auth re-prompt waiting on stdin). The slow
+ * `sf project retrieve` runs ONLY via refresh.ts `runSf` (already timed at
+ * 600s) and never through this helper, so it is unaffected. On timeout the
+ * child is sent `SIGTERM` (graceful) and `execFile` rejects with `killed:true`,
+ * which `runSfJson` already catches and reports as a redacted internal error.
+ * Override with `SFI_SF_EXEC_TIMEOUT_MS`.
+ */
+const SF_EXEC_TIMEOUT_MS = (() => {
+  const n = Number(process.env['SFI_SF_EXEC_TIMEOUT_MS']);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 600_000;
+})();
+
 export const nodeExecFile: ExecCommand = (binary, args) =>
-  promisify(execFile)(binary, [...args], { maxBuffer: 10 * 1024 * 1024 });
+  promisify(execFile)(binary, [...args], {
+    maxBuffer: 10 * 1024 * 1024,
+    timeout: SF_EXEC_TIMEOUT_MS,
+    killSignal: 'SIGTERM',
+  });
 
 /** Strip bearer tokens and long access-token-shaped strings from error text. */
 export const redactSecrets = (message: string): string =>
