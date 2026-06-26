@@ -11,8 +11,9 @@
  *   1. **OWD** — a public org-wide default (`Read` / `ReadWrite` /
  *      `FullAccess`) grants every internal user access to every record.
  *   2. **Object permissions** — Profiles / PermissionSets whose
- *      `grantedBy` edge to the object carries `allowRead` / `allowEdit`
- *      (records visible per OWD + sharing) or `viewAllRecords` /
+ *      `grantedBy` edge to the object carries `allowRead` / `allowCreate` /
+ *      `allowEdit` / `allowDelete` (records visible per OWD + sharing; each
+ *      CRUD bit enumerated independently per CR-04) or `viewAllRecords` /
  *      `modifyAllRecords` (ALL records of this object).
  *   3. **System god-mode** — `ViewAllData` / `ModifyAllData` on a profile
  *      or permission set (read / modify every record of every object).
@@ -81,9 +82,22 @@ export const whoCanAccessObjectInputSchema = z.preprocess((raw) => {
 
 export type WhoCanAccessObjectInput = z.infer<typeof whoCanAccessObjectInputSchema>;
 
-/** How a principal gains access to this object's records. */
+/**
+ * How a principal gains access to this object's records.
+ *
+ * CR-04: object CRUD capabilities (read / create / edit / delete) are
+ * ORTHOGONAL planes — a grantor can hold any combination, so each is enumerated
+ * independently with its OWN `via` value. Distinct `via` values keep the
+ * caller's `granterId|via` addressing collision-free (a grantor with both Read
+ * and Edit emits two rows that are individually addressable). `view-all-object`
+ * / `modify-all-object` are the object-level record-scope bypasses; the
+ * `system-*` pair is god-mode.
+ */
 export type AccessVia =
-  | 'object-permission'
+  | 'object-permission-read'
+  | 'object-permission-create'
+  | 'object-permission-edit'
+  | 'object-permission-delete'
   | 'view-all-object'
   | 'modify-all-object'
   | 'system-view-all-data'
@@ -97,8 +111,13 @@ export interface AccessGranter {
   readonly granterType: string;
   readonly granterLabel: string;
   readonly via: AccessVia;
-  /** The operation this path grants: `read`, `edit`, or `all` (incl. delete). */
-  readonly access: 'read' | 'edit' | 'all';
+  /**
+   * The operation this path grants. CR-04: `create` and `delete` are now
+   * enumerated independently (the old else-if chain dropped `delete` entirely
+   * and subsumed lower capabilities); `all` is reserved for the record-scope
+   * bypasses (View/Modify-All, god-mode).
+   */
+  readonly access: 'read' | 'create' | 'edit' | 'delete' | 'all';
   /** Whether the path reaches ALL records or only records visible per OWD/sharing. */
   readonly scope: 'all-records' | 'shared-records';
   readonly detail: string;
@@ -113,7 +132,10 @@ export interface WhoCanAccessObjectOutput {
   readonly owdGrantsAllInternalUsers: boolean;
   readonly granters: readonly AccessGranter[];
   readonly summary: {
+    /** ROW count — a grantor with multiple capability paths contributes >1 row. */
     readonly total: number;
+    /** DISTINCT principal count (unique `granterId`) — count ACTORS by this. */
+    readonly distinctGranters: number;
     readonly allRecordsAccess: number;
     readonly sharedRecordsAccess: number;
   };
@@ -231,14 +253,31 @@ export const whoCanAccessObjectHandler = async (
       granterType: grantor.type,
       granterLabel: grantor.label ?? grantor.apiName,
     };
+    // CR-04: object CRUD bits are ORTHOGONAL — evaluate each independently
+    // rather than in an exclusive else-if chain (the old chain dropped Delete
+    // entirely and let a higher capability subsume lower ones). A grantor with
+    // Read+Edit+Modify-All now emits multiple rows, each individually
+    // addressable by `granterId|via` (distinct `via` values). Mirrors
+    // object-access-audit.ts's per-capability filters.
+    // Record-scope bypasses (all-records) first:
     if (flag(p, 'modifyAllRecords')) {
       granters.push({ ...base, via: 'modify-all-object', access: 'all', scope: 'all-records', detail: 'object "Modify All" — read/edit/delete every record' });
-    } else if (flag(p, 'viewAllRecords')) {
+    }
+    if (flag(p, 'viewAllRecords')) {
       granters.push({ ...base, via: 'view-all-object', access: 'read', scope: 'all-records', detail: 'object "View All" — read every record' });
-    } else if (flag(p, 'allowEdit')) {
-      granters.push({ ...base, via: 'object-permission', access: 'edit', scope: 'shared-records', detail: 'object Edit — records visible via OWD + sharing' });
-    } else if (flag(p, 'allowRead')) {
-      granters.push({ ...base, via: 'object-permission', access: 'read', scope: 'shared-records', detail: 'object Read — records visible via OWD + sharing' });
+    }
+    // Object-permission CRUD bits (shared-records — gated by OWD + sharing):
+    if (flag(p, 'allowEdit')) {
+      granters.push({ ...base, via: 'object-permission-edit', access: 'edit', scope: 'shared-records', detail: 'object Edit — records visible via OWD + sharing' });
+    }
+    if (flag(p, 'allowRead')) {
+      granters.push({ ...base, via: 'object-permission-read', access: 'read', scope: 'shared-records', detail: 'object Read — records visible via OWD + sharing' });
+    }
+    if (flag(p, 'allowDelete')) {
+      granters.push({ ...base, via: 'object-permission-delete', access: 'delete', scope: 'shared-records', detail: 'object Delete — records visible via OWD + sharing' });
+    }
+    if (flag(p, 'allowCreate')) {
+      granters.push({ ...base, via: 'object-permission-create', access: 'create', scope: 'shared-records', detail: 'object Create — new records of this object' });
     }
   }
 
@@ -324,6 +363,10 @@ export const whoCanAccessObjectHandler = async (
   });
 
   const total = granters.length;
+  // CR-04: a grantor can now hold several independent capabilities, so it spans
+  // multiple rows. `total` is the ROW count; `distinctGranters` is the ACTOR
+  // count consumers should use when "how many principals" matters.
+  const distinctGranters = new Set(granters.map((g) => g.granterId)).size;
   const allRecordsAccess = granters.filter((g) => g.scope === 'all-records').length;
   const limit = input.limit ?? DEFAULT_LIMIT;
   const offset = input.offset ?? 0;
@@ -334,13 +377,23 @@ export const whoCanAccessObjectHandler = async (
   const owdNote = owdGrantsAllInternalUsers
     ? `OWD '${owd}' is PUBLIC — every internal user can ${owd === 'Read' ? 'read' : 'read and edit'} EVERY record of this object, beyond the principals listed.`
     : `OWD '${owd}' is private/controlled — record access flows only from the listed grants/rules plus ownership.`;
+  const multiRowNote =
+    total > distinctGranters
+      ? ` ${total} granter rows come from ${distinctGranters} distinct Profile/PermissionSet/role/group(s) — each independent capability (read/create/edit/delete + View/Modify-All) is its own row, so a principal can appear in several. Count ACTORS by \`summary.distinctGranters\`, not row count.`
+      : '';
   const pageNote = truncated ? ` Showing granters ${offset}–${offset + page.length} of ${total}; summary holds the complete counts. Page with offset/limit.` : '';
   const scanTruncated = truncatedTypes.length > 0;
   const scanNote = scanTruncated ? ` ${scanTruncationNote(truncatedTypes)}` : '';
 
-  const containerIds = page
-    .map((g) => g.granterId)
-    .filter((id) => id.startsWith('Profile:') || id.startsWith('PermissionSet:'));
+  // Dedup the holder-query ids: a grantor now spans multiple capability rows on
+  // a page, but its active-holder count is per-principal, so query it once.
+  const containerIds = [
+    ...new Set(
+      page
+        .map((g) => g.granterId)
+        .filter((id) => id.startsWith('Profile:') || id.startsWith('PermissionSet:')),
+    ),
+  ];
   const dataShape = await readActiveHoldersFor(ctx, containerIds as never);
 
   const blindSpots: string[] = [...BLIND_SPOTS];
@@ -364,7 +417,12 @@ export const whoCanAccessObjectHandler = async (
       owd,
       owdGrantsAllInternalUsers,
       granters: page,
-      summary: { total, allRecordsAccess, sharedRecordsAccess: total - allRecordsAccess },
+      summary: {
+        total,
+        distinctGranters,
+        allRecordsAccess,
+        sharedRecordsAccess: total - allRecordsAccess,
+      },
       limit,
       offset,
       hasMore,
@@ -373,7 +431,7 @@ export const whoCanAccessObjectHandler = async (
       confidence: 'declared',
       ...(dataShape !== undefined ? { dataShape } : {}),
       blindSpots,
-      boundaryNote: `${owdNote} Declared static view (object permissions + sharing-rule targets + system god-mode); record-level paths are in blindSpots.${pageNote}${scanNote}`,
+      boundaryNote: `${owdNote} Declared static view (object permissions + sharing-rule targets + system god-mode); record-level paths are in blindSpots.${multiRowNote}${pageNote}${scanNote}`,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

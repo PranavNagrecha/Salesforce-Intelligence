@@ -331,11 +331,123 @@ describe('detectCodeQualityIssues — missing-crud-check', () => {
     );
   });
 
-  it('does not flag when WITH SECURITY_ENFORCED is used upstream', () => {
+  // CR-04 #2: WITH SECURITY_ENFORCED is a SOQL READ/FLS-enforcement clause; it
+  // NEVER authorizes a DML write. A class that queries with it then writes is
+  // UNGATED for the write and MUST be flagged. (This FLIPS the prior, incorrect
+  // expectation that the read-only clause cleared the write.)
+  it('FLAGS a write after a SOQL WITH SECURITY_ENFORCED (read clause does not gate a write)', () => {
     const src = `public class Svc {
-      public static void run() {
+      public static void run(Id id) {
         Account a = [SELECT Id FROM Account WHERE Id = :id WITH SECURITY_ENFORCED];
         update a;
+      }
+    }`;
+    expect(rulesOf(run(src))).toContain('missing-crud-check');
+  });
+
+  // CR-04 #2: WITH USER_MODE on a SOQL is read-enforcement only and must NOT
+  // clear a later write.
+  it('FLAGS a write after a SOQL WITH USER_MODE (read clause does not gate a write)', () => {
+    const src = `public class Svc {
+      public static void run() {
+        List<Account> l = [SELECT Id FROM Account WITH USER_MODE];
+        delete l;
+      }
+    }`;
+    expect(rulesOf(run(src))).toContain('missing-crud-check');
+  });
+
+  // CR-04 #2: user-mode DML (`as user`) DOES enforce CRUD/FLS for the write and
+  // is a legitimate gate. (Before the fix this form did not even MATCH the DML
+  // pattern — a silent false negative; now it matches and is cleared.)
+  it('does not flag `insert x as user` (user-mode DML enforces CRUD/FLS)', () => {
+    const src = `public class Svc {
+      public static void create(Account a) { insert a as user; }
+    }`;
+    expect(rulesOf(run(src))).not.toContain('missing-crud-check');
+  });
+
+  it('does not flag `Database.insert(x, AccessLevel.USER_MODE)` (user-mode DML)', () => {
+    const src = `public class Svc {
+      public static void create(Account a) { Database.insert(a, AccessLevel.USER_MODE); }
+    }`;
+    expect(rulesOf(run(src))).not.toContain('missing-crud-check');
+  });
+
+  // `as system` runs in system mode and does NOT enforce CRUD/FLS — still flagged.
+  it('FLAGS `insert x as system` (system mode does not enforce CRUD/FLS)', () => {
+    const src = `public class Svc {
+      public static void create(Account a) { insert a as system; }
+    }`;
+    expect(rulesOf(run(src))).toContain('missing-crud-check');
+  });
+
+  // CR-04 #2: isAccessible() is a READ FLS check and must NOT clear a write.
+  it('FLAGS a write gated only by isAccessible() (read check does not gate a write)', () => {
+    const src = `public class Svc {
+      public static void run(Account a) {
+        if (Schema.sObjectType.Account.isAccessible()) { insert a; }
+      }
+    }`;
+    expect(rulesOf(run(src))).toContain('missing-crud-check');
+  });
+
+  it('does not flag a write gated by isCreateable() (write check gates a write)', () => {
+    const src = `public class Svc {
+      public static void run(Account a) {
+        if (Schema.sObjectType.Account.isCreateable()) { insert a; }
+      }
+    }`;
+    expect(rulesOf(run(src))).not.toContain('missing-crud-check');
+  });
+
+  // CR-04 #1: the hint scan is method/block-scoped — a CRUD check in method A
+  // must NOT clear an ungated DML in method B.
+  it('FLAGS an ungated DML in method B even when method A has a CRUD check (cross-method scoping)', () => {
+    const src = `public class Svc {
+      public static void gated(Account a) {
+        if (Schema.sObjectType.Account.isCreateable()) { insert a; }
+      }
+      public static void ungated(Account b) {
+        insert b;
+      }
+    }`;
+    const issues = run(src);
+    expect(rulesOf(issues)).toContain('missing-crud-check');
+    // Exactly the method-B insert is flagged (method A is gated).
+    expect(issues.filter((i) => i.rule === 'missing-crud-check')).toHaveLength(1);
+  });
+
+  // CR-04 #1: the dominant early-return/throw guard idiom (check at method top,
+  // not in the DML's block) still clears when it matches the resolved sObject.
+  it('does not flag a DML gated by an early-throw write-CRUD check at method top', () => {
+    const src = `public class Svc {
+      public static void run() {
+        Account acc = new Account();
+        if (!Schema.sObjectType.Account.isUpdateable()) { throw new AuraHandledException('no'); }
+        update acc;
+      }
+    }`;
+    expect(rulesOf(run(src))).not.toContain('missing-crud-check');
+  });
+
+  // CR-04 #1b: the in-scope CRUD check is for the WRONG sObject → still flagged.
+  it('FLAGS a DML whose in-scope CRUD check is for a DIFFERENT sObject', () => {
+    const src = `public class Svc {
+      public static void run() {
+        Account acc = new Account();
+        if (Schema.sObjectType.Contact.isCreateable()) { insert acc; }
+      }
+    }`;
+    expect(rulesOf(run(src))).toContain('missing-crud-check');
+  });
+
+  // CR-04 #1b: matching-sObject variant clears.
+  it('does not flag a DML whose in-scope CRUD check matches the resolved sObject', () => {
+    const src = `public class Svc {
+      public static void run() {
+        Account acc = new Account();
+        if (Schema.sObjectType.Account.isCreateable()) { insert acc; }
       }
     }`;
     expect(rulesOf(run(src))).not.toContain('missing-crud-check');

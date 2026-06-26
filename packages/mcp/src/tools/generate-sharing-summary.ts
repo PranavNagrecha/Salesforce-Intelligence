@@ -5,9 +5,9 @@
  * an optional `objectFilter` (api name string), emits a structured
  * markdown document covering every CustomObject's OWD (organization-
  * wide default), the SharingRules that apply to it, and the Profile /
- * PermissionSet grants that surface as incoming `grantedBy` edges to
- * the object's children. The Role hierarchy is rendered as a mermaid
- * diagram when Role nodes are present.
+ * PermissionSet OBJECT-level CRUD grants that surface as incoming
+ * `grantedBy` edges to the object itself. The Role hierarchy is rendered
+ * as a mermaid diagram when Role nodes are present.
  *
  * Input:
  *   - `objectFilter` (optional string): when supplied, narrows the
@@ -20,8 +20,10 @@
  * Honesty axis: per-object sharing details come from declared metadata
  * (`properties.sharingModel` on the CustomObject; the SharingRule nodes
  * extracted in v1.1). Profile / PermissionSet counts are tallied from
- * incoming `grantedBy` edges to the object's fields — a proxy for the
- * object-level grant since v1.1 stores per-component grants.
+ * the OBJECT's incoming `grantedBy` edges that carry an object-CRUD flag
+ * (allowCreate/Read/Edit/Delete or View/Modify-All). CR-04: field-level
+ * security (FLS) is a separate plane — it is NOT counted here; see
+ * `field_access_audit` for per-field grants.
  */
 
 import type {
@@ -32,11 +34,7 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import {
-  listChildren,
-  listEdges,
-  listNodesByType,
-} from '@sf-intelligence/graph';
+import { listEdges, listNodesByType } from '@sf-intelligence/graph';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
@@ -247,31 +245,50 @@ const buildSharingRulesIndex = (
 };
 
 /**
- * Tally the profile / perm-set grant counts for a single object. Walks
- * each child CustomField's incoming `grantedBy` edges and collects the
- * unique grantor ids by type.
+ * Tally the profile / perm-set OBJECT-LEVEL CRUD grant counts for a single
+ * object. Walks the OBJECT node's incoming `grantedBy` edges and counts only
+ * grantors carrying an object-CRUD flag (allowCreate/Read/Edit/Delete or
+ * View/Modify-All), deduped by grantor id.
+ *
+ * CR-04: object CRUD, field-level security (FLS), and record sharing are three
+ * orthogonal planes. The previous implementation walked each child
+ * CustomField's `grantedBy` edges and counted FLS grants toward this
+ * object-access tally — conflating two planes (and inflating the count via
+ * one grantor across many fields). FLS now belongs to `field_access_audit`;
+ * this counts object access only. Mirrors `object-access-audit.ts`'s
+ * object-CRUD edge read for cross-tool consistency.
  */
 const tallyGrants = async (
   ctx: Context,
-  fields: readonly Node[],
+  object: Node,
 ): Promise<Result<{ profiles: Set<ComponentId>; permSets: Set<ComponentId> }, McpError>> => {
   const profiles = new Set<ComponentId>();
   const permSets = new Set<ComponentId>();
-  for (const field of fields) {
-    const edgesResult = await listEdges(ctx.graph, field.id, {
-      direction: 'in',
-      edgeType: 'grantedBy',
+  const edgesResult = await listEdges(ctx.graph, object.id, {
+    direction: 'in',
+    edgeType: 'grantedBy',
+  });
+  if (!edgesResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${edgesResult.error.message}`,
     });
-    if (!edgesResult.ok) {
-      return err({
-        kind: 'internal',
-        message: `graph query failed: ${edgesResult.error.message}`,
-      });
-    }
-    for (const edge of edgesResult.value) {
-      if (edge.fromId.startsWith('Profile:')) profiles.add(edge.fromId);
-      else if (edge.fromId.startsWith('PermissionSet:')) permSets.add(edge.fromId);
-    }
+  }
+  for (const edge of edgesResult.value) {
+    const p = edge.properties;
+    const hasObjectCrud =
+      p['allowCreate'] === true ||
+      p['allowRead'] === true ||
+      p['allowEdit'] === true ||
+      p['allowDelete'] === true ||
+      p['viewAllRecords'] === true ||
+      p['modifyAllRecords'] === true;
+    // Belt-and-suspenders: the extractor drops all-false object-CRUD edges, but
+    // an FLS-only / structural edge that ever reaches the object node is a
+    // different plane and must not count here.
+    if (!hasObjectCrud) continue;
+    if (edge.fromId.startsWith('Profile:')) profiles.add(edge.fromId);
+    else if (edge.fromId.startsWith('PermissionSet:')) permSets.add(edge.fromId);
   }
   return ok({ profiles, permSets });
 };
@@ -343,15 +360,9 @@ export const generateSharingSummaryHandler = async (
   const sharingIndex = buildSharingRulesIndex(sharingRulesResult.value);
   const entries: ObjectSharing[] = [];
   for (const object of scanObjects) {
-    const childrenResult = await listChildren(ctx.graph, object.id);
-    if (!childrenResult.ok) {
-      return err({
-        kind: 'internal',
-        message: `graph query failed: ${childrenResult.error.message}`,
-      });
-    }
-    const fields = childrenResult.value.filter((c) => c.type === 'CustomField');
-    const grantsResult = await tallyGrants(ctx, fields);
+    // CR-04: count OBJECT-level CRUD grants (one edge query on the object),
+    // not field-level FLS grants (which conflated planes and inflated counts).
+    const grantsResult = await tallyGrants(ctx, object);
     if (!grantsResult.ok) return err(grantsResult.error);
     const owd = stringProp(object.properties, 'sharingModel', 'Unknown');
     const rules = sharingIndex.get(object.apiName) ?? [];
@@ -434,7 +445,7 @@ export const generateSharingSummaryHandler = async (
     Q125_FRESHNESS_DISCLOSURE.replace('{TIMESTAMP}', refreshedAt),
     INHERITED_CONFIDENCE_DISCLOSURE,
     STRUCTURAL_DISCLOSURE,
-    'Profile / PermissionSet grant counts are tallied from field-level `grantedBy` edges; object-level grant aggregation may include duplicate grantors when multiple fields share a grant.',
+    'Profile / PermissionSet "with grants" counts are OBJECT-level CRUD grants (incoming `grantedBy` edges on the object carrying allowCreate / allowRead / allowEdit / allowDelete or View / Modify-All), deduped by grantor. Field-level security (FLS) is a SEPARATE plane and is NOT counted here — use `field_access_audit` for per-field grants.',
     UNMODELED_SHARING_DIMENSIONS_DISCLOSURE,
   ];
   if (targetMissing !== undefined) {
