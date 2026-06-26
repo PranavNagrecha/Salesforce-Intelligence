@@ -14,6 +14,7 @@ import {
   getSubgraph,
   listChildren,
   listEdges,
+  listEdgesForNodes,
   listNodeIdentities,
   listNodesByType,
   searchNodes,
@@ -357,6 +358,173 @@ describe('listEdges', () => {
       'parentOf',
       'triggersOn',
     ]);
+  });
+});
+
+describe('listEdgesForNodes (CR-17 batched listEdges)', () => {
+  const sortEdges = (edges: readonly Edge[]): Edge[] =>
+    [...edges].sort((a, b) =>
+      a.toId !== b.toId
+        ? a.toId < b.toId
+          ? -1
+          : 1
+        : a.edgeType !== b.edgeType
+          ? a.edgeType < b.edgeType
+            ? -1
+            : 1
+          : a.fromId !== b.fromId
+            ? a.fromId < b.fromId
+              ? -1
+              : 1
+            : a.source !== b.source
+              ? a.source < b.source
+                ? -1
+                : 1
+              : 0,
+    );
+
+  it('partition per node equals per-id listEdges sets for every direction', async () => {
+    const ids: Edge['fromId'][] = [
+      'CustomObject:Account',
+      'CustomField:Account.Industry__c',
+      'CustomField:Account.Region__c',
+      'CustomObject:Opportunity',
+    ];
+    for (const direction of ['both', 'in', 'out'] as const) {
+      const batched = await listEdgesForNodes(store, ids, { direction });
+      expect(batched.ok).toBe(true);
+      if (!batched.ok) return;
+      for (const id of ids) {
+        const single = await listEdges(store, id, { direction });
+        expect(single.ok).toBe(true);
+        if (!single.ok) return;
+        const bucket = batched.value.get(id) ?? [];
+        // Same SET (order-independent), via the shared total sort.
+        expect(sortEdges(bucket)).toEqual(sortEdges(single.value));
+        // And the batched bucket is already in that defined total order.
+        expect([...bucket]).toEqual(sortEdges(bucket));
+      }
+    }
+  });
+
+  it('reproduces the union of per-edgeType listEdges calls (direction=in)', async () => {
+    const id = 'CustomField:Account.Industry__c';
+    const edgeTypes: Edge['edgeType'][] = ['parentOf', 'triggersOn'];
+    const batched = await listEdgesForNodes(store, [id], {
+      direction: 'in',
+      edgeTypes,
+    });
+    expect(batched.ok).toBe(true);
+    if (!batched.ok) return;
+    const union: Edge[] = [];
+    for (const edgeType of edgeTypes) {
+      const single = await listEdges(store, id, { direction: 'in', edgeType });
+      expect(single.ok).toBe(true);
+      if (!single.ok) return;
+      union.push(...single.value);
+    }
+    expect(sortEdges(batched.value.get(id) ?? [])).toEqual(sortEdges(union));
+  });
+
+  it('returns ok(empty map) on empty nodeIds without emitting invalid SQL', async () => {
+    const spy = vi.spyOn(store.connection, 'runAndReadAll');
+    const r = await listEdgesForNodes(store, []);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.size).toBe(0);
+    // No SQL is issued for an empty batch.
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('always keys every requested id, even those with no incident edges', async () => {
+    const r = await listEdgesForNodes(store, [
+      'CustomField:Account.Region__c',
+      'CustomField:DoesNotExist__c.Nope__c',
+    ]);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.has('CustomField:Account.Region__c')).toBe(true);
+    expect(r.value.has('CustomField:DoesNotExist__c.Nope__c')).toBe(true);
+    expect(r.value.get('CustomField:DoesNotExist__c.Nope__c')).toEqual([]);
+  });
+
+  it('issues exactly ONE query for an N-node batch (O(1), not O(N))', async () => {
+    const ids: Edge['fromId'][] = [
+      'CustomObject:Account',
+      'CustomObject:Opportunity',
+      'CustomObject:CustomerProject__c',
+      'CustomField:Account.Industry__c',
+    ];
+    // Baseline: the row-at-a-time approach issues one query per node.
+    const singleSpy = vi.spyOn(store.connection, 'runAndReadAll');
+    for (const id of ids) {
+      await listEdges(store, id, { direction: 'in' });
+    }
+    expect(singleSpy).toHaveBeenCalledTimes(ids.length);
+    singleSpy.mockRestore();
+    // Batched: one round-trip for the whole frontier.
+    const batchSpy = vi.spyOn(store.connection, 'runAndReadAll');
+    const r = await listEdgesForNodes(store, ids, { direction: 'in' });
+    expect(r.ok).toBe(true);
+    expect(batchSpy).toHaveBeenCalledTimes(1);
+    batchSpy.mockRestore();
+  });
+
+  it('direction=both buckets a self-loop once and a both-endpoints edge in both', async () => {
+    const loopDir = mkdtempSync(join(tmpdir(), 'sfi-graph-batch-loop-'));
+    const dbPath = join(loopDir, 'loop.db');
+    const instance = await DuckDBInstance.create(dbPath);
+    const connection = await instance.connect();
+    const initResult = await initSchema(connection);
+    expect(initResult.ok).toBe(true);
+    const localStore: GraphStore = { connection, instance };
+    const loopSeed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: 'ApexClass:A', type: 'ApexClass', apiName: 'A' }),
+        makeNode({ id: 'ApexClass:B', type: 'ApexClass', apiName: 'B' }),
+      ],
+      edges: [
+        // Self-loop on A (a class that calls itself).
+        makeEdge({
+          fromId: 'ApexClass:A',
+          toId: 'ApexClass:A',
+          edgeType: 'callsApex',
+          confidence: 'heuristic',
+          source: 'apex-scanner',
+        }),
+        // A -> B, both requested in the batch.
+        makeEdge({
+          fromId: 'ApexClass:A',
+          toId: 'ApexClass:B',
+          edgeType: 'callsApex',
+          confidence: 'heuristic',
+          source: 'apex-scanner',
+        }),
+      ],
+    };
+    const imported = await importExtractionResults(localStore, [loopSeed]);
+    expect(imported.ok).toBe(true);
+    const ids: Edge['fromId'][] = ['ApexClass:A', 'ApexClass:B'];
+    const batched = await listEdgesForNodes(localStore, ids, {
+      direction: 'both',
+    });
+    expect(batched.ok).toBe(true);
+    if (!batched.ok) return;
+    // Identity vs per-id listEdges (the contract that preserves behavior).
+    for (const id of ids) {
+      const single = await listEdges(localStore, id, { direction: 'both' });
+      expect(single.ok).toBe(true);
+      if (!single.ok) return;
+      expect(sortEdges(batched.value.get(id) ?? [])).toEqual(
+        sortEdges(single.value),
+      );
+    }
+    // A's bucket: self-loop (once) + A->B = 2 edges.
+    expect((batched.value.get('ApexClass:A') ?? []).length).toBe(2);
+    // B's bucket: just A->B = 1 edge.
+    expect((batched.value.get('ApexClass:B') ?? []).length).toBe(1);
+    rmSync(loopDir, { recursive: true, force: true });
   });
 });
 
