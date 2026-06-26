@@ -141,6 +141,16 @@ const WEIGHT_SCHEME_DISCLOSURE =
 const CODE_QUALITY_HEURISTIC_DISCLOSURE =
   'the codeQuality axis is derived from the heuristic Apex scanner (regex/token, not a real compiler), so its issue counts carry confidence: heuristic — they approximate code quality and may over- or under-count (dynamic dispatch, reflective access, and cross-method dataflow are invisible). Treat this axis’s contribution to the score as indicative, not exact.';
 
+/**
+ * Surfaced when the freshness axis is INCLUDED. The
+ * componentsNeverModifiedSinceCreation detail is always null because the vault
+ * does not capture a per-component createdDate (only lastModifiedDate is
+ * extracted/enriched) — so this honest boundary replaces what used to be a
+ * fabricated 0 (CR-16a).
+ */
+const NEVER_MODIFIED_UNAVAILABLE_DISCLOSURE =
+  'the "never modified since creation" count is not available — the vault does not capture a per-component createdDate (only lastModifiedDate is extracted/enriched), so this metric is reported as null rather than a fabricated 0.';
+
 /** Per-category scale factor — converts a raw count to a 0-100 contribution. */
 const SCALE_FACTORS: Readonly<Record<TechDebtCategory, number>> = Object.freeze({
   // 100 unused fields → contribution 100
@@ -406,9 +416,19 @@ const computeCodeQualityCounts = async (
 };
 
 /**
- * Compute the freshness category counts from `lastModifiedDate`
- * properties. When NO node carries non-null `lastModifiedDate` (v1.7
- * R2 hasn't run), returns null.
+ * Compute the freshness category counts from the `lastModifiedDate`
+ * node field. When NO node carries non-null `lastModifiedDate` (v1.7
+ * R2 / Tooling-API enrichment hasn't run), returns null.
+ *
+ * `neverModified` ("never modified since creation") is ALWAYS null/unknown:
+ * computing it requires a per-component `createdDate` to diff against
+ * `lastModifiedDate`, but no such datum exists in the vault/graph — the Node
+ * contract carries only `lastModifiedDate`/`lastModifiedBy`/`apiVersion` (no
+ * `createdDate`), and the Tooling-API enrichment never SELECTs `CreatedDate`.
+ * So only the `lastModifiedDate`-based axes (olderThan1Year/olderThan2Years)
+ * are real; per the honesty contract `neverModified` is reported as null, never
+ * a fabricated 0. (TODO: if a future enrichment adds `CreatedDate` to enrich.ts
+ * and a `createdDate` field to Node, this could become a real computed metric.)
  */
 const computeFreshnessCounts = async (
   ctx: Context,
@@ -417,7 +437,7 @@ const computeFreshnessCounts = async (
     | {
         readonly olderThan1Year: number;
         readonly olderThan2Years: number;
-        readonly neverModified: number;
+        readonly neverModified: null;
       }
     | null,
     string
@@ -436,7 +456,9 @@ const computeFreshnessCounts = async (
   let any = false;
   let olderThan1Year = 0;
   let olderThan2Years = 0;
-  const neverModified = 0;
+  // Always null/unknown: no per-component createdDate exists in the vault/graph
+  // to diff against lastModifiedDate (see JSDoc). Never a fabricated 0.
+  const neverModified = null;
   const oneYearAgo = Date.now() - 365 * 24 * 60 * 60 * 1000;
   const twoYearsAgo = Date.now() - 2 * 365 * 24 * 60 * 60 * 1000;
   for (const t of types) {
@@ -746,10 +768,11 @@ export const techDebtScoreHandler = async (
           'freshness',
           fr?.olderThan2Years ?? 0,
         ),
-        componentsNeverModifiedSinceCreation: detailWhenIncluded(
-          'freshness',
-          fr?.neverModified ?? 0,
-        ),
+        // Always null/unknown — "never modified since creation" needs a
+        // per-component createdDate that the vault/graph does not capture, so we
+        // report null (not measured) rather than a fabricated 0. Null in BOTH
+        // the data-present and freshness-excluded paths. (CR-16a)
+        componentsNeverModifiedSinceCreation: fr?.neverModified ?? null,
       },
     },
     apiVersions: {
@@ -810,6 +833,12 @@ export const techDebtScoreHandler = async (
   // not part of the score, so the disclosure would be misleading.
   if (codeQualityExtractorRan && !excludedSet.has('codeQuality')) {
     boundaries.push(CODE_QUALITY_HEURISTIC_DISCLOSURE);
+  }
+  // When freshness is INCLUDED, state honestly that the never-modified count is
+  // not available (no createdDate in the vault) rather than emit a fabricated 0.
+  // When freshness is excluded the extractor-not-run note already covers it.
+  if (freshnessExtractorRan && !excludedSet.has('freshness')) {
+    boundaries.push(NEVER_MODIFIED_UNAVAILABLE_DISCLOSURE);
   }
 
   // Hardcoded-Salesforce-ID debt, sourced from the dedicated recognizer so the
