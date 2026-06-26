@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { resetLiveSession } from '@sf-intelligence/mcp';
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 
 import { runStaleSweep, type StalenessSnapshot } from '../src/commands/stale-sweep.js';
@@ -19,6 +20,13 @@ import { runStaleSweep, type StalenessSnapshot } from '../src/commands/stale-swe
 let cwd: string;
 
 beforeEach(() => {
+  // CR-09 follow-up: the module-level live-query budget + result cache
+  // (live-session.ts) is process-global. checkVaultStaleness now routes its 15
+  // per-type reads through that budget, so without a reset the budget/cache would
+  // LEAK across these cases — a later test would hit the previous test's cached
+  // counts or run out of budget and falsely report drift. Reset before each case.
+  // (runStaleSweep also resets at its own start; this guards any pre-sweep state.)
+  resetLiveSession();
   cwd = mkdtempSync(join(tmpdir(), 'sfi-sweep-'));
   mkdirSync(join(cwd, 'org-kb', 'meta'), { recursive: true });
   writeFileSync(
@@ -110,6 +118,45 @@ describe('runStaleSweep', () => {
     expect(r.snapshot.vaultStale).toBe(false);
     expect(r.snapshot.driftCount).toBe(0);
     expect(r.snapshot.erroredTypes).toHaveLength(0);
+  });
+
+  it('daemon simulation: many per-type ticks in ONE process on a clean org all stay vaultStale:false', async () => {
+    // The watch daemon runs MANY ticks in a single process. Each tick's
+    // checkVaultStaleness issues 15 budgeted live queries; 15 * N would exhaust
+    // the per-session budget (default 50) after ~3 ticks, after which the
+    // remaining types land in erroredTypes and a CLEAN org would falsely report
+    // drift. This is the EXACT regression — runStaleSweep's per-sweep
+    // resetLiveSession() is what keeps every tick clean.
+    //
+    // Real daemon ticks are 15 MINUTES apart, so each tick is a FRESH org read —
+    // never a cache hit. We reproduce that here by disabling the live-result
+    // cache (TTL 0); otherwise the identical per-tick SOQL would be served from
+    // cache for free and never spend budget, masking the regression. With TTL 0
+    // every one of the 15 per-type reads spends a budget unit, so 10 ticks would
+    // demand 150 units against the 50-unit cap — only a per-tick reset survives.
+    const prevTtl = process.env['SFI_LIVE_CACHE_TTL_MS'];
+    process.env['SFI_LIVE_CACHE_TTL_MS'] = '0';
+    try {
+      const exec: ExecCommand = async (_bin, args) => {
+        const q = args.join(' ');
+        if (q.includes('SourceMember')) throw new Error('INVALID_TYPE'); // force per-type path
+        return sfOk({ totalSize: 0, records: [] }); // clean org: zero drift everywhere
+      };
+      for (let tick = 0; tick < 10; tick += 1) {
+        const r = await runStaleSweep({ cwd, exec, now: '2026-06-10T08:00:00.000Z' });
+        expect(r.ok).toBe(true);
+        if (!r.ok) return;
+        expect(r.snapshot.method, `tick ${tick}`).toBe('per-type');
+        expect(r.snapshot.vaultStale, `tick ${tick} must stay clean`).toBe(false);
+        expect(r.snapshot.driftCount, `tick ${tick}`).toBe(0);
+        // No type may be dropped to erroredTypes by a spent budget — all 15 checked.
+        expect(r.snapshot.erroredTypes, `tick ${tick}`).toHaveLength(0);
+        expect(r.snapshot.checkedTypes, `tick ${tick}`).toHaveLength(15);
+      }
+    } finally {
+      if (prevTtl === undefined) delete process.env['SFI_LIVE_CACHE_TTL_MS'];
+      else process.env['SFI_LIVE_CACHE_TTL_MS'] = prevTtl;
+    }
   });
 
   it('fails actionably without a vault', async () => {

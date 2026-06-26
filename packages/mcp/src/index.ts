@@ -25,6 +25,14 @@ export {
   STALE_CHECK_TYPES,
   type VaultStalenessResult,
 } from './tools/live-plane.js';
+// CR-09 follow-up: the per-session live-query budget/cache is an MCP-session
+// safety. A discrete, user-invoked drift sweep (`sfi stale-sweep`) and the watch
+// daemon's periodic tick must each run in a FRESH budget+cache scope so a single
+// 15-type sweep (<< the 50 budget) never trips the guard and the daemon does not
+// degrade across ticks (15 * N ticks would otherwise exhaust the process-level
+// budget and false-positive drift). The CLI calls this at the start of each
+// sweep. The MCP live_* tools keep their session budget untouched.
+export { resetLiveSession } from './tools/live-session.js';
 // Route-gap telemetry: the local question-gap log the router appends to when a
 // question hits a gap. `sfi doctor` reads it to report routeGap counts
 // (P12-ROUTER-confusion-report) — exported here so the CLI shares the canonical
