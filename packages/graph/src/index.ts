@@ -31,7 +31,9 @@ export {
   getSubgraph,
   listChildren,
   listEdges,
+  listEdgesForNodes,
   listNodeIdentities,
+  listNodesByIds,
   listNodesByType,
   searchNodes,
 } from './queries.js';
@@ -41,6 +43,7 @@ export type {
   DanglingTargetGroup,
   FreshnessEntry,
   FreshnessSummary,
+  ListEdgesForNodesOptions,
   ListEdgesOptions,
   ListNodesOptions,
   NodeIdentity,

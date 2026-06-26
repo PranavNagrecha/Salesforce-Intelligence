@@ -76,7 +76,7 @@ import {
   extractWorkflowRule,
 } from '@sf-intelligence/extractors';
 import {
-  listEdges,
+  listEdgesForNodes,
   listNodesByType,
   type GraphStore,
 } from '@sf-intelligence/graph';
@@ -1036,18 +1036,31 @@ export const renderVault = async (
       const page = nodesResult.value;
       if (page.length === 0) break;
       const nodes = [...page].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      // CR-17: fetch every incident edge for the whole page in ONE batched
+      // `listEdgesForNodes` query (direction='both', matching the old
+      // per-node `listEdges(node.id)`), instead of an N+1 loop of one
+      // `listEdges` per node. The helper partitions edges per node and sorts
+      // each bucket by the deterministic `(toId, edgeType, fromId, source)`
+      // total order, so `writeNodeDocument` gets a byte-stable input — the
+      // renderers' `renderEdgeSubsection` re-sorts only by endpointId, and
+      // this total order pins the otherwise-undefined intra-endpoint order.
+      const pageEdges = await listEdgesForNodes(
+        store,
+        nodes.map((n) => n.id),
+        { direction: 'both' },
+      );
+      if (!pageEdges.ok) {
+        throw new Error(`listEdgesForNodes(${type}) failed: ${pageEdges.error.message}`);
+      }
       for (const node of nodes) {
-        const edgesResult = await listEdges(store, node.id);
-        if (!edgesResult.ok) {
-          throw new Error(`listEdges(${node.id}) failed: ${edgesResult.error.message}`);
-        }
+        const nodeEdges = pageEdges.value.get(node.id) ?? [];
         // Count outgoing edges only; BOTH-direction listing would double-count.
-        for (const edge of edgesResult.value) {
+        for (const edge of nodeEdges) {
           if (edge.fromId === node.id) {
             edges[edge.edgeType] = (edges[edge.edgeType] ?? 0) + 1;
           }
         }
-        await writeNodeDocument(vaultRoot, node, edgesResult.value);
+        await writeNodeDocument(vaultRoot, node, nodeEdges);
         components[type] = (components[type] ?? 0) + 1;
         allNodes.push(node);
       }

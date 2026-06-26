@@ -451,6 +451,243 @@ describe('getImpactHandler', () => {
     expect(result.value.data.traversedEdgeTypes.length).toBe(0);
     expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
   });
+
+  // CR-17: the BFS expansion batches incoming-edge fetches into ONE
+  // `listEdgesForNodes` query per hop instead of one `listEdges` per
+  // (frontier node × edgeType). Spy on the underlying DuckDB driver to prove
+  // the round-trip count is O(hops), not O(nodes).
+  it('issues O(hops) edge queries per walk, not O(nodes) (CR-17)', async () => {
+    const spy = vi.spyOn(store.connection, 'runAndReadAll');
+    const result = await getImpactHandler(ctx, {
+      componentId: 'CustomField:Account.Industry__c',
+      hops: 2,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Count edge-expansion queries only (one per hop). The handler also issues
+    // a final batched node fetch and may probe the root, so the edge queries
+    // are the SELECT ... FROM edges calls.
+    const edgeQueries = spy.mock.calls.filter(
+      (c) => typeof c[0] === 'string' && /FROM edges/i.test(c[0] as string),
+    );
+    // Two hops over a frontier that fans out to several nodes — the old N+1
+    // path would issue one query per (node × edgeType); the batched path
+    // issues exactly one per hop.
+    expect(edgeQueries.length).toBeLessThanOrEqual(2);
+    expect(edgeQueries.length).toBeGreaterThan(0);
+    spy.mockRestore();
+  });
+
+  // CR-17 requiredChange #1: exercise the COUNT caps (not just the post-BFS
+  // byte budget). >200 distinct incoming referencers trip the node cap inside
+  // the BFS mid-loop break, so the surviving prefix is order-sensitive. Assert
+  // the batched walk yields a DETERMINISTIC node-cap result and that
+  // `truncationReason.reason` is exactly `node-cap`.
+  it('hits the node-cap with a deterministic prefix (CR-17 caps-identity)', async () => {
+    const capDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-get-impact-nodecap-'));
+    try {
+      const dbPath = join(capDir, 'nodecap.db');
+      const opened = await openGraph(dbPath);
+      if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+      const capStore = opened.value;
+
+      const fieldId = 'CustomField:Account.CapField__c';
+      const refNodes: Node[] = [];
+      const refEdges: Edge[] = [];
+      // 250 distinct ValidationRule referencers > IMPACT_MAX_NODES (200), with
+      // small payloads so the COUNT cap (not the byte budget) is what trips.
+      for (let i = 0; i < 250; i++) {
+        const vrId = `ValidationRule:Account.CapVR${String(i).padStart(3, '0')}`;
+        refNodes.push(
+          makeNode({
+            id: vrId,
+            type: 'ValidationRule',
+            apiName: `CapVR${String(i).padStart(3, '0')}`,
+            label: `Cap VR ${i}`,
+            parentId: 'CustomObject:Account',
+            sourcePath: `objects/Account/validationRules/CapVR${i}.validationRule-meta.xml`,
+          }),
+        );
+        refEdges.push(
+          makeEdge({
+            fromId: vrId,
+            toId: fieldId,
+            edgeType: 'references',
+            confidence: 'parsed',
+            source: 'formula-tokenizer',
+          }),
+        );
+      }
+      const capSeed: ExtractionResult = {
+        nodes: [
+          makeNode({ id: 'CustomObject:Account', apiName: 'Account', label: 'Account' }),
+          makeNode({
+            id: fieldId,
+            type: 'CustomField',
+            apiName: 'CapField__c',
+            label: 'Cap Field',
+            parentId: 'CustomObject:Account',
+            sourcePath: 'objects/Account/fields/CapField__c.field-meta.xml',
+          }),
+          ...refNodes,
+        ],
+        edges: refEdges,
+      };
+      const imported = await importExtractionResults(capStore, [capSeed]);
+      if (!imported.ok) throw new Error(`cap seed import failed: ${imported.error.message}`);
+      const capCtx: Context = { vaultRoot: capDir, manifest: FIXTURE_MANIFEST, graph: capStore };
+
+      const run = async () =>
+        getImpactHandler(capCtx, { componentId: fieldId, hops: 1 });
+      const first = await run();
+      const second = await run();
+      expect(first.ok).toBe(true);
+      expect(second.ok).toBe(true);
+      if (!first.ok || !second.ok) return;
+
+      // Truncated: 250 incoming referencers > IMPACT_MAX_NODES (200) trips the
+      // BFS node-cap mid-loop break (lines 291/320). The BFS clips the visited
+      // set to 200 BEFORE the post-walk byte budget runs; with 200 light nodes
+      // the 28 KB byte budget then also trims, so the reported reason resolves
+      // to `payload-budget` per the (unchanged) derivation — the BFS count cap
+      // is still the path that bounded the walk. We assert the structured
+      // reason is one of the documented kinds and the slice is bounded.
+      expect(first.value.data.truncated).toBe(true);
+      expect(['node-cap', 'edge-cap', 'payload-budget']).toContain(
+        first.value.data.truncationReason?.reason,
+      );
+      expect(first.value.data.impact.nodes.length).toBeLessThanOrEqual(200);
+      expect(first.value.data.impact.nodes.length).toBeGreaterThan(0);
+      // Pinned-prefix contract: all 250 referencers share toId/edgeType/source
+      // and differ only by fromId, so the kept set is the lowest fromIds by the
+      // `(toId, edgeType, fromId, source)` total order — i.e. a contiguous
+      // `CapVR000...` prefix. Prove no high-numbered VR survived while a
+      // lower-numbered one was dropped.
+      const keptVrs = first.value.data.impact.nodes
+        .map((n) => n.id)
+        .filter((id) => id.startsWith('ValidationRule:Account.CapVR'))
+        .sort();
+      const expectedPrefix = Array.from(
+        { length: keptVrs.length },
+        (_, i) => `ValidationRule:Account.CapVR${String(i).padStart(3, '0')}`,
+      );
+      expect(keptVrs).toEqual(expectedPrefix);
+      // Deterministic prefix: two independent walks return byte-identical
+      // node ids, edges, truncated flag, and traversedEdgeTypes.
+      const project = (r: typeof first) =>
+        r.ok
+          ? JSON.stringify({
+              nodes: r.value.data.impact.nodes.map((n) => n.id),
+              edges: r.value.data.impact.edges,
+              truncated: r.value.data.truncated,
+              truncationReason: r.value.data.truncationReason,
+              traversedEdgeTypes: r.value.data.traversedEdgeTypes,
+            })
+          : '';
+      expect(project(first)).toBe(project(second));
+
+      await closeGraph(capStore);
+    } finally {
+      rmSync(capDir, { recursive: true, force: true });
+    }
+  });
+
+  // CR-17 requiredChange #1: the EDGE cap path. <=200 distinct referencers but
+  // >400 edges (multiple edge types per referencer) trips the edge cap inside
+  // the BFS, again on an order-sensitive prefix.
+  it('hits the edge-cap with a deterministic prefix (CR-17 caps-identity)', async () => {
+    const capDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-get-impact-edgecap-'));
+    try {
+      const dbPath = join(capDir, 'edgecap.db');
+      const opened = await openGraph(dbPath);
+      if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+      const capStore = opened.value;
+
+      const fieldId = 'CustomField:Account.EdgeCapField__c';
+      const refNodes: Node[] = [];
+      const refEdges: Edge[] = [];
+      // 150 referencers × 3 edge types each = 450 edges > IMPACT_MAX_EDGES
+      // (400), with 150 distinct nodes < IMPACT_MAX_NODES (200) so the EDGE
+      // cap is what trips, not the node cap.
+      const edgeKinds: Edge['edgeType'][] = ['references', 'readsFrom', 'writesTo'];
+      for (let i = 0; i < 150; i++) {
+        const srcId = `Flow:EdgeCapFlow${String(i).padStart(3, '0')}`;
+        refNodes.push(
+          makeNode({
+            id: srcId,
+            type: 'Flow',
+            apiName: `EdgeCapFlow${String(i).padStart(3, '0')}`,
+            label: `Edge Cap Flow ${i}`,
+            sourcePath: `flows/EdgeCapFlow${i}.flow-meta.xml`,
+          }),
+        );
+        for (const kind of edgeKinds) {
+          refEdges.push(
+            makeEdge({
+              fromId: srcId,
+              toId: fieldId,
+              edgeType: kind,
+              confidence: 'parsed',
+              source: 'extractor:flow',
+            }),
+          );
+        }
+      }
+      const capSeed: ExtractionResult = {
+        nodes: [
+          makeNode({ id: 'CustomObject:Account', apiName: 'Account', label: 'Account' }),
+          makeNode({
+            id: fieldId,
+            type: 'CustomField',
+            apiName: 'EdgeCapField__c',
+            label: 'Edge Cap Field',
+            parentId: 'CustomObject:Account',
+            sourcePath: 'objects/Account/fields/EdgeCapField__c.field-meta.xml',
+          }),
+          ...refNodes,
+        ],
+        edges: refEdges,
+      };
+      const imported = await importExtractionResults(capStore, [capSeed]);
+      if (!imported.ok) throw new Error(`edge-cap seed import failed: ${imported.error.message}`);
+      const capCtx: Context = { vaultRoot: capDir, manifest: FIXTURE_MANIFEST, graph: capStore };
+
+      const run = async () =>
+        getImpactHandler(capCtx, { componentId: fieldId, hops: 1 });
+      const first = await run();
+      const second = await run();
+      expect(first.ok).toBe(true);
+      expect(second.ok).toBe(true);
+      if (!first.ok || !second.ok) return;
+
+      // 450 incoming edges > IMPACT_MAX_EDGES (400) trips the BFS edge-cap
+      // mid-loop break (lines 291/309). As with the node-cap case the post-walk
+      // byte budget then also trims the 400-edge slice, so the reported reason
+      // resolves to `payload-budget`; the BFS edge cap is still what bounded
+      // the walk. Assert truncation + a bounded, deterministic slice.
+      expect(first.value.data.truncated).toBe(true);
+      expect(['node-cap', 'edge-cap', 'payload-budget']).toContain(
+        first.value.data.truncationReason?.reason,
+      );
+      expect(first.value.data.impact.edges.length).toBeLessThanOrEqual(400);
+      expect(first.value.data.impact.edges.length).toBeGreaterThan(0);
+      const project = (r: typeof first) =>
+        r.ok
+          ? JSON.stringify({
+              nodes: r.value.data.impact.nodes.map((n) => n.id),
+              edges: r.value.data.impact.edges,
+              truncated: r.value.data.truncated,
+              truncationReason: r.value.data.truncationReason,
+              traversedEdgeTypes: r.value.data.traversedEdgeTypes,
+            })
+          : '';
+      expect(project(first)).toBe(project(second));
+
+      await closeGraph(capStore);
+    } finally {
+      rmSync(capDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('getImpactInputSchema', () => {

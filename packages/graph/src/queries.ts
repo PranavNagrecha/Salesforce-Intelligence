@@ -79,6 +79,18 @@ export interface ListEdgesOptions {
   readonly confidence?: ConfidenceLevel;
 }
 
+/** Options for `listEdgesForNodes` — the batched, multi-node `listEdges`. */
+export interface ListEdgesForNodesOptions {
+  /** Defaults to `'both'`, matching `listEdges`. */
+  readonly direction?: 'in' | 'out' | 'both';
+  /**
+   * When set, restrict to edges whose `edge_type` is in this list (a batched
+   * `edge_type IN (...)`). Reproduces the union of N per-`(node, edgeType)`
+   * `listEdges` calls in one round-trip. Omit for all edge types.
+   */
+  readonly edgeTypes?: readonly EdgeType[];
+}
+
 /** Options for `searchNodes`. */
 export interface SearchNodesOptions {
   readonly limit?: number;
@@ -204,6 +216,44 @@ export const getNodeById = async (
     return ok(rows.length === 0 ? null : rowToNode(rows[0] as Row));
   } catch (e) {
     return err(queryFailed('getNodeById', e));
+  }
+};
+
+/**
+ * Batched form of {@link getNodeById}: fetch the `Node` rows for every id in
+ * `ids` in ONE `WHERE id IN (...)` round-trip. Ids with no matching row are
+ * dropped from the result EXACTLY like the per-id `getNodeById` null-skip — so
+ * a caller iterating `ids` and dropping nulls gets the same node SET (the
+ * result is unordered; callers re-sort). An empty `ids` self-guards to
+ * `ok([])` rather than emitting an invalid `IN ()`. Duplicate ids collapse to
+ * one row (a node id is unique), matching a per-id loop that fetches the same
+ * row twice but produces a set.
+ *
+ * The N+1 batching primitive for `get_impact`'s `fetchNodes` (CR-17);
+ * `getNodeById` stays unchanged for its single-id callers.
+ *
+ * @example
+ *   const r = await listNodesByIds(store, ['CustomObject:Account']);
+ *   if (r.ok) console.log(r.value.length);
+ */
+export const listNodesByIds = async (
+  store: GraphStore,
+  ids: readonly ComponentId[],
+): Promise<Result<readonly Node[], GraphError>> => {
+  const uniqueIds = [...new Set(ids)];
+  if (uniqueIds.length === 0) {
+    return ok([]);
+  }
+  const placeholders = uniqueIds.map(() => '?').join(', ');
+  try {
+    const rows = await fetchRows(
+      store,
+      `SELECT ${NODE_COLUMNS} FROM nodes WHERE id IN (${placeholders})`,
+      [...uniqueIds],
+    );
+    return ok(rows.map(rowToNode));
+  } catch (e) {
+    return err(queryFailed('listNodesByIds', e));
   }
 };
 
@@ -407,6 +457,135 @@ export const listEdges = async (
     return ok(rows.map(rowToEdge));
   } catch (e) {
     return err(queryFailed('listEdges', e));
+  }
+};
+
+/**
+ * Total order over edges: `(to_id, edge_type, from_id, source)`. `listEdges`
+ * sorts only by `(to_id, edge_type)`, leaving the intra-group order
+ * DuckDB-unspecified; the batched `listEdgesForNodes` pins this FULL tiebreak
+ * so each per-node bucket is deterministic and reproducible across runs. The
+ * leading `(to_id, edge_type)` keys keep the prefix identical to `listEdges`
+ * for any group with at most one edge per `(to_id, edge_type)`; the
+ * `(from_id, source)` tiebreak only ever decides order WITHIN a same-endpoint
+ * group, which is exactly where `listEdges`' order was undefined.
+ */
+const compareEdgesByEndpoint = (a: Edge, b: Edge): number => {
+  if (a.toId !== b.toId) return a.toId < b.toId ? -1 : 1;
+  if (a.edgeType !== b.edgeType) return a.edgeType < b.edgeType ? -1 : 1;
+  if (a.fromId !== b.fromId) return a.fromId < b.fromId ? -1 : 1;
+  if (a.source !== b.source) return a.source < b.source ? -1 : 1;
+  return 0;
+};
+
+/**
+ * Batched, multi-node form of {@link listEdges}: fetch every edge incident to
+ * ANY id in `nodeIds` in ONE SQL round-trip, then partition the rows per node
+ * in memory. Returns a `Map` keyed by each requested id; a node with no
+ * incident edges maps to `[]`, and every requested id is always present as a
+ * key. Each bucket is sorted by the FULL `(to_id, edge_type, from_id, source)`
+ * total order (see {@link compareEdgesByEndpoint}) so the partition is
+ * deterministic — `listEdges`' `(to_id, edge_type)` sort left the intra-group
+ * order undefined.
+ *
+ * This is the N+1 batching primitive for CR-17: callers that previously ran
+ * `listEdges` once per frontier/page node (`get_impact`'s BFS,
+ * `renderVault`'s per-node render) issue O(1) queries per batch instead of
+ * O(nodes). `listEdges` itself is intentionally left unchanged for its ~84
+ * single-node callers.
+ *
+ * Semantics per `direction` mirror `listEdges`:
+ *   - `'both'` (default): an edge buckets under id X iff `from_id === X` OR
+ *     `to_id === X`. A self-loop or a within-batch edge whose BOTH endpoints
+ *     are requested appears in BOTH buckets — exactly as N separate
+ *     `listEdges(X)` calls would each return it.
+ *   - `'in'`: buckets under `to_id` only.
+ *   - `'out'`: buckets under `from_id` only.
+ *
+ * `edgeTypes` (optional) restricts to those types via a batched
+ * `edge_type IN (...)`, reproducing the union of N per-`(node, edgeType)`
+ * `listEdges` calls. An empty `nodeIds` self-guards to `ok(new Map())` without
+ * emitting an invalid `IN ()`; an empty `edgeTypes` array is treated as "no
+ * edge-type filter" (same as omitting it).
+ *
+ * @example
+ *   const r = await listEdgesForNodes(store, ['CustomObject:Account'], {
+ *     direction: 'in',
+ *   });
+ *   if (r.ok) for (const e of r.value.get('CustomObject:Account') ?? []) ...
+ */
+export const listEdgesForNodes = async (
+  store: GraphStore,
+  nodeIds: readonly ComponentId[],
+  options?: ListEdgesForNodesOptions,
+): Promise<Result<ReadonlyMap<ComponentId, readonly Edge[]>, GraphError>> => {
+  const direction = options?.direction ?? 'both';
+  // Always return a key for every requested id (de-duplicated; order of
+  // insertion follows first occurrence in `nodeIds`).
+  const buckets = new Map<ComponentId, Edge[]>();
+  for (const id of nodeIds) {
+    if (!buckets.has(id)) buckets.set(id, []);
+  }
+  // Self-guard: an empty placeholder list produces invalid `IN ()` SQL.
+  if (buckets.size === 0) {
+    return ok(buckets);
+  }
+  const uniqueIds = [...buckets.keys()];
+  const idPlaceholders = uniqueIds.map(() => '?').join(', ');
+  const params: DuckDBValue[] = [];
+  let where: string;
+  if (direction === 'out') {
+    where = `from_id IN (${idPlaceholders})`;
+    params.push(...uniqueIds);
+  } else if (direction === 'in') {
+    where = `to_id IN (${idPlaceholders})`;
+    params.push(...uniqueIds);
+  } else {
+    where = `(from_id IN (${idPlaceholders}) OR to_id IN (${idPlaceholders}))`;
+    params.push(...uniqueIds, ...uniqueIds);
+  }
+  const edgeTypes = options?.edgeTypes;
+  if (edgeTypes !== undefined && edgeTypes.length > 0) {
+    where += ` AND edge_type IN (${edgeTypes.map(() => '?').join(', ')})`;
+    params.push(...edgeTypes);
+  }
+  try {
+    const rows = await fetchRows(
+      store,
+      `SELECT ${EDGE_COLUMNS} FROM edges WHERE ${where}`,
+      params,
+    );
+    const requested = new Set(uniqueIds);
+    for (const row of rows) {
+      const edge = rowToEdge(row);
+      // Bucket under each requested endpoint the edge is incident to. With
+      // `direction !== 'both'` only one side can match a requested id, so an
+      // edge lands in exactly one bucket; with `'both'` a self-loop or a
+      // both-endpoints-requested edge lands in both, mirroring N separate
+      // `listEdges` calls.
+      if (
+        (direction === 'in' || direction === 'both') &&
+        requested.has(edge.toId)
+      ) {
+        buckets.get(edge.toId)!.push(edge);
+      }
+      if (
+        (direction === 'out' || direction === 'both') &&
+        requested.has(edge.fromId) &&
+        // Guard the both-direction self-loop: when fromId === toId the edge was
+        // already pushed under the `in`/both branch above; a single
+        // `listEdges(X)` call returns a self-loop ONCE, so don't double-count.
+        !(direction === 'both' && edge.fromId === edge.toId)
+      ) {
+        buckets.get(edge.fromId)!.push(edge);
+      }
+    }
+    for (const bucket of buckets.values()) {
+      bucket.sort(compareEdgesByEndpoint);
+    }
+    return ok(buckets);
+  } catch (e) {
+    return err(queryFailed('listEdgesForNodes', e));
   }
 };
 
