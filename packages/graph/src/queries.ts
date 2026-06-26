@@ -125,6 +125,36 @@ const queryFailed = (label: string, e: unknown): GraphError => ({
 });
 
 /**
+ * Synthesize a minimal boundary `Node` for a `getSubgraph` edge endpoint that
+ * has no real `nodes` row — used only under `includeUnresolved` so a surfaced
+ * phantom edge does not dangle against the returned node set (CR-13). The
+ * `type`/`apiName` are parsed best-effort from the canonical `Type:apiName`
+ * ComponentId by splitting on the FIRST `:` (the apiName itself may contain
+ * `.`, e.g. `CustomField:Account.Industry__c`). An id without a `:` falls back
+ * to the whole string as `apiName` and an empty `type` cast — the stub is
+ * always well-formed so the outer `try`/`catch` never turns a malformed
+ * phantom into a query-failed error. `properties.unresolved` lets consumers
+ * (and the MCP-layer disclosure) flag it as a stub, not a real component.
+ */
+const makeUnresolvedStubNode = (id: ComponentId): Node => {
+  const sep = id.indexOf(':');
+  const type = (sep > 0 ? id.slice(0, sep) : '') as ComponentType;
+  const apiName = sep >= 0 ? id.slice(sep + 1) : id;
+  return {
+    id,
+    type,
+    apiName,
+    label: null,
+    parentId: null,
+    sourcePath: '',
+    lastModifiedDate: null,
+    lastModifiedBy: null,
+    apiVersion: null,
+    properties: { unresolved: true },
+  };
+};
+
+/**
  * A heuristic edge whose target was tagged `targetMissing` at import — its
  * `to_id` resolves to no real node. These are the Apex scanner's phantoms
  * (`callsApex -> ApexClass:acc` from a local var, `readsFrom ->
@@ -652,6 +682,13 @@ const bfsExpand = async (
  * `truncated` flag is set. Heuristic phantom edges (`targetMissing`) are
  * omitted by default; pass `includeUnresolved: true` to surface them.
  *
+ * Self-contained-slice contract (CR-13): every returned edge has BOTH
+ * endpoints in the returned node set — no edge dangles. A node-capped clip
+ * drops edges to the omitted (clipped) nodes; under `includeUnresolved`, a
+ * surfaced phantom edge's endpoint (which has no real node row) is added as a
+ * minimal stub node carrying `properties.unresolved: true` so the edge stays
+ * visible AND self-contained.
+ *
  * @example
  *   const r = await getSubgraph(store, 'CustomObject:Account', 1);
  *   if (r.ok && r.value.truncated) console.warn('hub — partial slice');
@@ -703,14 +740,38 @@ export const getSubgraph = async (
       `SELECT ${NODE_COLUMNS} FROM nodes WHERE id IN (${placeholders})`,
       [...ids],
     );
-    const sortedNodes = nodeRows
-      .map(rowToNode)
-      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-    // Drop any edge whose endpoints aren't both visited, so a node-capped
-    // result never carries a dangling edge to a node it omitted. When
-    // un-truncated every endpoint was visited, so this is a no-op.
+    const returnedNodes: Node[] = nodeRows.map(rowToNode);
+    // CR-13 self-contained-slice contract: an edge must never point at a node
+    // absent from the returned node set. The dangling-edge guard must filter
+    // against the RETURNED nodes (`sortedNodes`), NOT the visited-id set — a
+    // visited id can lack a `nodes` row (node-capped clip, or an
+    // includeUnresolved phantom endpoint the scanner never imported), in which
+    // case filtering on `visitedNodes` would leave its edge dangling.
+    const returnedIds = new Set(returnedNodes.map((n) => n.id));
+    if (limits.includeUnresolved) {
+      // The opt-in flag's whole purpose is to SURFACE phantom edges, so a node
+      // set that omits the phantom endpoint would gut the feature. Instead,
+      // keep the slice self-contained by synthesizing a stub boundary node for
+      // each edge endpoint that has no real row, marked `unresolved` so
+      // consumers can disclose it.
+      for (const edge of collectedEdges) {
+        for (const endpoint of [edge.fromId, edge.toId]) {
+          if (!returnedIds.has(endpoint)) {
+            returnedIds.add(endpoint);
+            returnedNodes.push(makeUnresolvedStubNode(endpoint));
+          }
+        }
+      }
+    }
+    const sortedNodes = returnedNodes.sort((a, b) =>
+      a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
+    );
+    // Drop any edge whose endpoints aren't both in the RETURNED node set, so a
+    // node-capped result never carries a dangling edge to a node it omitted.
+    // When un-truncated (and, under includeUnresolved, after stub synthesis)
+    // every endpoint is a returned node, so this is a no-op.
     const edges = collectedEdges
-      .filter((e) => visitedNodes.has(e.fromId) && visitedNodes.has(e.toId))
+      .filter((e) => returnedIds.has(e.fromId) && returnedIds.has(e.toId))
       .sort(compareEdges);
     return ok({ nodes: sortedNodes, edges, truncated: state.truncated });
   } catch (e) {

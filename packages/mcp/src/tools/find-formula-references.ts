@@ -63,6 +63,12 @@ const FORMULA_REFS_DEFAULT_LIMIT = 50;
 export const findFormulaReferencesInputSchema = z.object({
   fieldId: z.string().min(1),
   limit: z.number().int().min(1).max(FORMULA_REFS_MAX_LIMIT).optional(),
+  /**
+   * Zero-based page offset (CR-13). Defaults to 0. Paired with `limit` so the
+   * caller can walk the FULL referencer set when the result is truncated — a
+   * blast-radius tool must never silently drop referencers.
+   */
+  offset: z.number().int().nonnegative().optional(),
 });
 
 /** Parsed input shape, inferred from `findFormulaReferencesInputSchema`. */
@@ -85,9 +91,37 @@ export interface FormulaReferencer {
   readonly properties: Readonly<Record<string, unknown>>;
 }
 
-/** Payload wrapped inside the `McpResponse` envelope on success. */
+/**
+ * Payload wrapped inside the `McpResponse` envelope on success.
+ *
+ * The pagination counters (`totalCount`/`offset`/`limit`/`hasMore`/
+ * `nextOffset`) and the truncation `note` are OPTIONAL because the
+ * graceful object→field suggestion early-return (`resolveToFieldOrSuggest`)
+ * casts a DIFFERENT suggestion envelope onto this type — it has no
+ * referencer list to page, so it carries none of these fields. The
+ * normal path always populates the counters; the suggestion path never
+ * does.
+ */
 export interface FindFormulaReferencesOutput {
+  /** The requested page of referencers (after sort + `offset`/`limit`). */
   readonly referencers: readonly FormulaReferencer[];
+  /**
+   * CR-13 truncation honesty: the TRUE total number of referencers BEFORE
+   * `offset`/`limit` paging (post sparse-graph-miss filtering — every
+   * returnable referencer, not a raw edge count). Greater than
+   * `referencers.length` means the page is a partial slice; `note` discloses it.
+   */
+  readonly totalCount?: number;
+  /** Zero-based offset of this page. */
+  readonly offset?: number;
+  /** Page size applied (the effective `limit`). */
+  readonly limit?: number;
+  /** True when more referencers remain past this page. */
+  readonly hasMore?: boolean;
+  /** Cursor for the next page, or `null` when the list is exhausted. */
+  readonly nextOffset?: number | null;
+  /** Present only when the page is truncated below the true total. */
+  readonly note?: string;
 }
 
 /**
@@ -121,8 +155,11 @@ const resolveReferencer = async (
 /**
  * The `sfi.find_formula_references` MCP tool. Returns the source nodes
  * of every incoming `references` edge to `fieldId`, enriched with the
- * edge's `source` and `properties`. Sorted by id ASC; truncated to
- * `limit` (default 50, max 500).
+ * edge's `source` and `properties`. Sorted by id ASC; PAGED by
+ * `offset`/`limit` (default limit 50, max 500) with
+ * `totalCount`/`hasMore`/`nextOffset` so a heavily-referenced field's
+ * full set is reachable rather than silently clipped — when the page is
+ * partial a truncation `note` is added (CR-13).
  *
  * @example
  *   const r = await findFormulaReferencesHandler(ctx, {
@@ -170,12 +207,33 @@ export const findFormulaReferencesHandler = async (
     }
   }
 
-  const sorted = referencers
-    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-    .slice(0, limit);
+  // CR-13: page after sorting so truncation is stable AND disclosed. `total`
+  // is the full pre-slice count of returnable referencers; the `note` (omitted
+  // when the page is complete, mirroring get_edges) discloses an incomplete page.
+  const ordered = referencers.sort((a, b) =>
+    a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
+  );
+  const total = ordered.length;
+  const offset = input.offset ?? 0;
+  const page = ordered.slice(offset, offset + limit);
+  const returned = offset + page.length;
+  const hasMore = returned < total;
+  const note = hasMore
+    ? `Showing ${page.length} of ${total} formula reference(s) (offset=${offset}). ` +
+      `MORE remain — advance with offset=${returned}. This list is INCOMPLETE; ` +
+      `do not treat it as the full blast radius.`
+    : undefined;
 
   return ok({
-    data: { referencers: sorted },
+    data: {
+      referencers: page,
+      totalCount: total,
+      offset,
+      limit,
+      hasMore,
+      nextOffset: hasMore ? returned : null,
+      ...(note !== undefined ? { note } : {}),
+    },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
       refreshedAt: ctx.manifest.refreshedAt,

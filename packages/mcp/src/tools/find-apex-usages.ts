@@ -106,6 +106,12 @@ const APEX_NODE_TYPES: ReadonlySet<ComponentType> = new Set([
 export const findApexUsagesInputSchema = z.object({
   targetId: z.string().min(1),
   limit: z.number().int().min(1).max(APEX_USAGES_MAX_LIMIT).optional(),
+  /**
+   * Zero-based page offset (CR-13). Defaults to 0. Paired with `limit` so the
+   * caller can walk the FULL usage set when the result is truncated — a
+   * blast-radius tool must never silently drop referrers.
+   */
+  offset: z.number().int().nonnegative().optional(),
   edgeTypes: z.array(z.enum(APEX_EDGE_TYPES)).optional(),
 });
 
@@ -131,9 +137,26 @@ export interface ApexUsage {
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface FindApexUsagesOutput {
+  /** The requested page of usages (after sort + `offset`/`limit`). */
   readonly usages: readonly ApexUsage[];
   /** §C3 honesty: heuristic-confidence + empty≠absent disclosure (never a silent empty). */
   readonly boundaries: readonly string[];
+  /**
+   * CR-13 truncation honesty: the TRUE total number of Apex usages matching the
+   * filters BEFORE `offset`/`limit` paging (post sparse-graph-miss and
+   * `edgeTypes` filtering — i.e. every returnable referrer, not a raw edge
+   * count). A `totalCount` greater than `usages.length` means the page is a
+   * partial slice; the truncation note in `boundaries[]` says so explicitly.
+   */
+  readonly totalCount: number;
+  /** Zero-based offset of this page. */
+  readonly offset: number;
+  /** Page size applied (the effective `limit`). */
+  readonly limit: number;
+  /** True when more usages remain past this page. */
+  readonly hasMore: boolean;
+  /** Cursor for the next page, or `null` when the list is exhausted. */
+  readonly nextOffset: number | null;
 }
 
 const APEX_USAGE_HEURISTIC_DISCLOSURE =
@@ -188,9 +211,12 @@ const resolveApexUsage = async (
  * The `sfi.find_apex_usages` MCP tool. Returns the Apex-source-only
  * incoming `readsFrom`/`writesTo`/`callsApex` edges to `targetId`,
  * each carrying the referrer node's identity and the edge's metadata.
- * Sorted by `(id, edgeType)` ASC; truncated to `limit` (default 50,
- * max 500). `edgeTypes` narrows to a subset; empty list yields an
- * empty result.
+ * Sorted by `(id, edgeType)` ASC; PAGED by `offset`/`limit` (default
+ * limit 50, max 500) with `totalCount`/`hasMore`/`nextOffset` so a
+ * heavily-used field's full blast radius is reachable rather than
+ * silently clipped — when the page is partial a truncation note is
+ * appended to `boundaries[]` (CR-13). `edgeTypes` narrows to a subset;
+ * empty list yields an empty result.
  *
  * @example
  *   const r = await findApexUsagesHandler(ctx, {
@@ -234,14 +260,38 @@ export const findApexUsagesHandler = async (
     }
   }
 
-  const sorted = usages.sort(compareUsages).slice(0, limit);
-  const boundaries =
-    sorted.length === 0
-      ? [APEX_USAGE_HEURISTIC_DISCLOSURE, APEX_USAGE_EMPTY_DISCLOSURE]
-      : [APEX_USAGE_HEURISTIC_DISCLOSURE];
+  // CR-13: page after sorting so truncation is stable AND disclosed. `total`
+  // is the full pre-slice count of returnable referrers — the honest blast
+  // radius — and the truncation note tells the caller the page is incomplete.
+  const ordered = usages.sort(compareUsages);
+  const total = ordered.length;
+  const offset = input.offset ?? 0;
+  const page = ordered.slice(offset, offset + limit);
+  const returned = offset + page.length;
+  const hasMore = returned < total;
+
+  const boundaries: string[] = [APEX_USAGE_HEURISTIC_DISCLOSURE];
+  if (total === 0) {
+    boundaries.push(APEX_USAGE_EMPTY_DISCLOSURE);
+  }
+  if (hasMore) {
+    boundaries.push(
+      `Showing ${page.length} of ${total} Apex usage(s) (offset=${offset}). ` +
+        `MORE remain — advance with offset=${returned}. This list is ` +
+        `INCOMPLETE; do not treat it as the full blast radius.`,
+    );
+  }
 
   return ok({
-    data: { usages: sorted, boundaries },
+    data: {
+      usages: page,
+      boundaries,
+      totalCount: total,
+      offset,
+      limit,
+      hasMore,
+      nextOffset: hasMore ? returned : null,
+    },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
       refreshedAt: ctx.manifest.refreshedAt,

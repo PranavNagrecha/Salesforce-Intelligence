@@ -225,6 +225,66 @@ describe('findFormulaReferencesHandler', () => {
     );
   });
 
+  // CR-13: truncation honesty. The same silent-slice dishonesty as
+  // find_apex_usages — a paged list must disclose the TRUE total + a truncation
+  // note + pagination cursors so the full set is reachable.
+  it('discloses the true total, hasMore, and a truncation note when paged below the referencer count', async () => {
+    const result = await findFormulaReferencesHandler(ctx, {
+      fieldId: 'CustomField:Account.Industry__c',
+      limit: 1,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    expect(data.referencers.length).toBe(1);
+    expect(data.totalCount).toBe(2);
+    expect(data.offset).toBe(0);
+    expect(data.limit).toBe(1);
+    expect(data.hasMore).toBe(true);
+    expect(data.nextOffset).toBe(1);
+    // The truncation note must be present and name the true total.
+    expect(data.note).toBeDefined();
+    expect(data.note).toContain('2');
+  });
+
+  it('pages the full referencer set and omits the note when exhausted (CR-13)', async () => {
+    const result = await findFormulaReferencesHandler(ctx, {
+      fieldId: 'CustomField:Account.Industry__c',
+      offset: 1,
+      limit: 1,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    // The second (and last) referencer.
+    expect(data.referencers.map((r) => r.id)).toEqual([
+      'ValidationRule:Account.BetaVR',
+    ]);
+    expect(data.totalCount).toBe(2);
+    expect(data.offset).toBe(1);
+    expect(data.hasMore).toBe(false);
+    expect(data.nextOffset).toBe(null);
+    // Byte-identical contained case: the `note` key is OMITTED, not undefined.
+    expect('note' in data).toBe(false);
+  });
+
+  it('leaves the fully-contained case byte-identical: counts present, no note (CR-13 guard)', async () => {
+    // Both referencers fit under the default limit → additive scalar fields
+    // only, `note` omitted entirely.
+    const result = await findFormulaReferencesHandler(ctx, {
+      fieldId: 'CustomField:Account.Industry__c',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    expect(data.referencers.length).toBe(2);
+    expect(data.totalCount).toBe(2);
+    expect(data.offset).toBe(0);
+    expect(data.hasMore).toBe(false);
+    expect(data.nextOffset).toBe(null);
+    expect('note' in data).toBe(false);
+  });
+
   it('returns an empty list for a field with no references', async () => {
     const result = await findFormulaReferencesHandler(ctx, {
       fieldId: 'CustomField:Account.UnreferencedField__c',
@@ -280,6 +340,22 @@ describe('findFormulaReferencesInputSchema', () => {
 
   it('rejects an empty fieldId string', () => {
     const parsed = findFormulaReferencesInputSchema.safeParse({ fieldId: '' });
+    expect(parsed.success).toBe(false);
+  });
+
+  it('accepts a non-negative offset (CR-13 pagination)', () => {
+    const parsed = findFormulaReferencesInputSchema.safeParse({
+      fieldId: 'CustomField:Account.Industry__c',
+      offset: 1,
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('rejects a negative offset', () => {
+    const parsed = findFormulaReferencesInputSchema.safeParse({
+      fieldId: 'CustomField:Account.Industry__c',
+      offset: -1,
+    });
     expect(parsed.success).toBe(false);
   });
 });
