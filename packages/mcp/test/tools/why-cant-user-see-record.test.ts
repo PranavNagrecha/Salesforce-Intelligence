@@ -1220,6 +1220,17 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(r.value.data.verdict).toBe('restricted');
     const grant = r.value.data.reasoning.find((s) => s.stage === 'PermissionGrant');
     expect(grant?.verdict).toBe('restricted');
+    // RV1: the reason must match the (correct) `restricted` verdict — it must
+    // say the user has no object Create permission, NOT claim create perm is
+    // present nor that record visibility DEPENDS ON OWD / sharing (create is
+    // never OWD-gated). The evaluateCreateAccess wrapper legitimately appends
+    // "...NOT by OWD / sharing..." to explain create is off the sharing ladder,
+    // so the load-bearing negative assertion is the absence of the buggy
+    // "permission present" claim and the "depends on OWD / sharing" dependence.
+    expect(grant?.reason).toMatch(/no object Create permission/i);
+    expect(grant?.reason).not.toMatch(/depends on OWD \/ sharing/);
+    expect(grant?.reason).not.toMatch(/create permission present/i);
+    expect(grant?.reason).not.toMatch(/View All \/ Modify All/);
   });
 
   it('create is unknown when the object has record types but no visibility data', async () => {

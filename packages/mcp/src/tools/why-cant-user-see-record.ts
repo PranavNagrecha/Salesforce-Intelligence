@@ -537,14 +537,32 @@ const evaluatePermissionGrants = async (
         : `object View All / Modify All grants ${level} access to all records: ${granting.join(', ')}`;
     return ok(step('PermissionGrant', 'visible', detail));
   }
-  if (anyObjectCrud) {
+  if (anyObjectCrud && level !== 'create') {
     // Object CRUD present (the precondition is met) but no View/Modify All
     // bypass — on a Private object record visibility depends on OWD/sharing.
+    // RV1: this branch is gated to read/edit/delete. For `create`, object
+    // CRUD does NOT imply the Create permission (the granter may hold Read/
+    // Edit/Delete but allowCreate:false), and create is never OWD/sharing-
+    // gated, so emitting an OWD-dependence reason would contradict the
+    // `restricted` verdict. The create-specific reason is emitted below.
     return ok(
       step(
         'PermissionGrant',
         'restricted',
         `object ${level} permission present on the supplied granters but record visibility depends on OWD / sharing (no object View All / Modify All): ${granterIds.join(', ')}`,
+      ),
+    );
+  }
+  if (level === 'create') {
+    // RV1: no granter holds object Create (`allowCreate`) or object/system
+    // Modify-All; create is gated solely by the Create permission, so the
+    // honest `restricted` reason names the missing Create permission rather
+    // than (incorrectly) invoking OWD / sharing.
+    return ok(
+      step(
+        'PermissionGrant',
+        'restricted',
+        `no object Create permission on the supplied granters: ${granterIds.join(', ')}`,
       ),
     );
   }
