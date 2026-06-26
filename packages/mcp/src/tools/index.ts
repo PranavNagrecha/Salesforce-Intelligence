@@ -44,6 +44,7 @@ import type { Result } from '@sf-intelligence/core';
 import type { z } from 'zod';
 
 import { auditToolCall } from '../audit.js';
+import { instrumentDispatch } from '../observability.js';
 import type { Context } from '../server.js';
 import { maybeReopenOnEpochChange } from '../server.js';
 
@@ -5969,7 +5970,12 @@ export const registerTools = (server: Server, ctx: Context): void => {
       Record<string, unknown>
     >;
     currentCtx = await maybeReopenOnEpochChange(currentCtx);
-    return dispatchTool(currentCtx, request.params.name, args);
+    // The only real `tools/call` seam — instrument HERE (not in dispatchTool,
+    // which recurses for run_analysis and is shared with CLI-internal calls,
+    // nor in runTool, which misses the unknown-tool early-return). Returns the
+    // CallToolResult unchanged; emits one metric only when SFI_METRICS_LOG set.
+    const name = request.params.name;
+    return instrumentDispatch(name, () => dispatchTool(currentCtx, name, args));
   });
 };
 

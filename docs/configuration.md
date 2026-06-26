@@ -238,6 +238,7 @@ daemon drains automatically with `--drain-demand-queue`.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `SF_INTELLIGENCE_AUDIT_LOG` | *(unset — no logging)* | Append-only JSONL path. Logs tool name, argument **keys only** (never values), vault hash, timestamp. Best-effort; never breaks tool calls. |
+| `SFI_METRICS_LOG` | *(unset — no metrics)* | Append-only JSONL path for opt-in per-call observability. One line per `tools/call` with tool name, `ok`/error, `durationMs`, serialized `payloadBytes`, and timestamp — never argument values or org content. Best-effort; never breaks tool calls. Zero overhead when unset (one env lookup, then silence). |
 
 Example:
 
