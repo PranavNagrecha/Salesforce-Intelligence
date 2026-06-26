@@ -69,6 +69,44 @@ export const REPLACE_EDGE_SQL = `INSERT OR REPLACE INTO edges (
   from_id, to_id, edge_type, confidence, source, properties_json
 ) VALUES (?, ?, ?, ?, ?, ?)`;
 
+/** Column count of a `nodes` row — the param-tuple width of {@link nodeRowParams}. */
+export const NODE_COLUMN_COUNT = 10;
+/** Column count of an `edges` row — the param-tuple width of {@link edgeRowParams}. */
+export const EDGE_COLUMN_COUNT = 6;
+
+/**
+ * Build a single multi-row `INSERT OR REPLACE` statement for `rowCount` rows of
+ * `columnCount` columns each, expanding the `(?, ?, ...)` value template once
+ * per row and joining with `, `. The caller binds the FLATTENED concatenation of
+ * each row's positional params, in row order, so DuckDB applies the rows
+ * left-to-right — preserving the same insertion order (and last-writer-wins /
+ * first-writer-wins dedup parity) as the row-at-a-time path.
+ *
+ * Used by the incremental `applyChangeSet` to collapse N per-row `connection.run`
+ * calls into one statement per chunk, inside the SAME single transaction (no
+ * per-chunk commit — that is the cold-import {@link commitBatched} pattern, which
+ * would BREAK applyChangeSet's all-or-nothing invariant).
+ *
+ * Param-ceiling note: DuckDB's prepared-statement bind list is a uint16, so a
+ * single statement tops out at 65535 params. At {@link IMPORT_BATCH_SIZE}=500
+ * that is 500×10=5000 node params / 500×6=3000 edge params — far under the
+ * ceiling. The safe row ceiling per statement is ~6553 nodes / ~10922 edges;
+ * keep the chunk size at IMPORT_BATCH_SIZE so this can never be approached.
+ */
+export const buildMultiRowUpsertSql = (
+  table: 'nodes' | 'edges',
+  columnCount: number,
+  rowCount: number,
+): string => {
+  const columns =
+    table === 'nodes'
+      ? 'id, type, api_name, label, parent_id, source_path, last_modified_date, last_modified_by, api_version, properties_json'
+      : 'from_id, to_id, edge_type, confidence, source, properties_json';
+  const rowTemplate = `(${new Array<string>(columnCount).fill('?').join(', ')})`;
+  const values = new Array<string>(rowCount).fill(rowTemplate).join(', ');
+  return `INSERT OR REPLACE INTO ${table} (${columns}) VALUES ${values}`;
+};
+
 /**
  * Stringify a value with deterministic key ordering at every depth.
  *
