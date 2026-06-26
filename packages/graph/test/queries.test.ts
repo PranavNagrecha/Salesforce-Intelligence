@@ -726,6 +726,35 @@ describe('getSubgraph caps + unresolved-edge filtering', () => {
     if (!r.ok) return;
     expect(r.value.edges.map((e) => e.toId)).toContain('ApexClass:Phantom');
   });
+
+  it('synthesizes a stub node for the phantom endpoint so no edge dangles (CR-13)', async () => {
+    // CR-13: a returned edge must never point at a node absent from the
+    // returned node set. The phantom endpoint (ApexClass:Phantom) has no
+    // `nodes` row, so before CR-13 the includeUnresolved edge dangled. The fix
+    // synthesizes a stub boundary node for it so the slice is self-contained.
+    const r = await getSubgraph(capStore, 'ApexClass:Caller', 1, {
+      includeUnresolved: true,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const nodeIds = new Set(r.value.nodes.map((n) => n.id));
+    // The phantom endpoint is now a returned node (a stub).
+    expect(nodeIds.has('ApexClass:Phantom')).toBe(true);
+    // The phantom edge is still present (the feature is preserved).
+    expect(r.value.edges.map((e) => e.toId)).toContain('ApexClass:Phantom');
+    // The stub is marked unresolved so consumers can disclose it, with type +
+    // apiName parsed from the ComponentId.
+    const stub = r.value.nodes.find((n) => n.id === 'ApexClass:Phantom');
+    expect(stub).toBeDefined();
+    expect(stub?.type).toBe('ApexClass');
+    expect(stub?.apiName).toBe('Phantom');
+    expect(stub?.properties['unresolved']).toBe(true);
+    // Full no-dangling invariant: every edge endpoint is a returned node.
+    for (const e of r.value.edges) {
+      expect(nodeIds.has(e.fromId)).toBe(true);
+      expect(nodeIds.has(e.toId)).toBe(true);
+    }
+  });
 });
 
 describe('listNodesByType propertyEquals filter (P4-interface-impl)', () => {

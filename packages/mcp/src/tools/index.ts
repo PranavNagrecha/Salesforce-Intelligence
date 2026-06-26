@@ -1397,6 +1397,7 @@ const FIND_FORMULA_REFERENCES_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     properties: {
       fieldId: { type: 'string', minLength: 1 },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
+      offset: { type: 'integer', minimum: 0 },
     },
     required: ['fieldId'],
   });
@@ -1415,6 +1416,7 @@ const FIND_APEX_USAGES_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     properties: {
       targetId: { type: 'string', minLength: 1 },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
+      offset: { type: 'integer', minimum: 0 },
       edgeTypes: {
         type: 'array',
         items: {
