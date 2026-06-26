@@ -212,3 +212,41 @@ describe('renderVaultIndex', () => {
     expect(body).not.toContain('./Profile/System Administrator.md');
   });
 });
+
+describe('renderVaultIndex — bullet label escaping (CR-16c)', () => {
+  it('keeps a newline in node.label from splitting the bullet or injecting a new one', () => {
+    const evil = buildNode({
+      id: 'CustomObject:Evil__c',
+      type: 'CustomObject',
+      apiName: 'Evil__c',
+      // Newline would split the bullet; the trailing fragment could be parsed
+      // as a new list item / heading / table row.
+      label: 'Evil\n- injected bullet',
+    });
+    const clean = buildNode({
+      id: 'CustomObject:Clean__c',
+      type: 'CustomObject',
+      apiName: 'Clean__c',
+      label: 'Clean Object',
+    });
+    const result = renderVaultIndex([evil, clean]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const lines = result.value.body.split('\n');
+
+    // Exactly two bullet lines (one per node) — the newline in the evil label
+    // did NOT inject a spurious third bullet.
+    const bullets = lines.filter((l) => l.startsWith('- ['));
+    expect(bullets).toHaveLength(2);
+
+    // The evil bullet stays a single line with the label tail collapsed onto it.
+    const evilBullet = bullets.find((l) => l.includes('CustomObject:Evil__c'));
+    expect(evilBullet).toBeDefined();
+    expect(evilBullet).toContain('Evil - injected bullet');
+
+    // The clean bullet is byte-identical to the un-escaped form.
+    expect(result.value.body).toContain(
+      '- [`CustomObject:Clean__c`](./CustomObject/Clean__c.md) — Clean Object',
+    );
+  });
+});
