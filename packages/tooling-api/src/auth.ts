@@ -80,9 +80,30 @@ export type ExecCommand = (
   args: readonly string[],
 ) => Promise<{ readonly stdout: string; readonly stderr: string }>;
 
+/**
+ * Per-call timeout for the `sf org display` auth shellout (RV3 / CR-01
+ * follow-up / H8). `sf org display` can wedge on an interactive auth re-prompt
+ * waiting on stdin; an un-timed `execFile` would block its callers forever —
+ * including the refresh-time auth path (runToolingApiEnrichment,
+ * data-shape-capture, staged-refresh) which calls `getAuthFromSfCli` with NO
+ * injected exec and so falls through to this default. The auth call is short, so
+ * the generous 10-min default backstop never clips a legitimate run yet caps a
+ * hang. On timeout the child is sent `SIGTERM` and `execFile` rejects with
+ * `killed:true`, surfaced as a `sf-cli-failed` AuthError. Override with
+ * `SFI_SF_EXEC_TIMEOUT_MS` (the same knob the MCP live-exec leaf reads, kept
+ * consistent across both `sf` exec leaves).
+ */
+const SF_EXEC_TIMEOUT_MS = (() => {
+  const n = Number(process.env['SFI_SF_EXEC_TIMEOUT_MS']);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 600_000;
+})();
+
 /** Node's built-in `execFile`, promisified — the production adapter. */
-const nodeExecFile: ExecCommand = (binary, args) =>
-  promisify(execFile)(binary, [...args]);
+export const nodeExecFile: ExecCommand = (binary, args) =>
+  promisify(execFile)(binary, [...args], {
+    timeout: SF_EXEC_TIMEOUT_MS,
+    killSignal: 'SIGTERM',
+  });
 
 /**
  * The shape `sf org display --target-org X --json` writes to stdout
