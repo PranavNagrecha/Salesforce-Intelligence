@@ -38,6 +38,7 @@ import { hybridTrust, type HybridStaleness } from './hybrid-trust.js';
 import { assertSoqlIdentifier, checkVaultStaleness, resolveLiveAccess } from './live-plane.js';
 import { runLiveQuery } from './live-session.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
+import { normalizePicklistValues } from './picklist-values.js';
 
 const PICKLIST_TYPES = new Set<string>(['Picklist', 'MultiselectPicklist']);
 const CUSTOM_FIELD_PREFIX = 'CustomField:';
@@ -92,9 +93,17 @@ const splitFieldId = (id: string): { object: string; field: string } | null => {
   return { object: scoped.slice(0, dot), field: scoped.slice(dot + 1) };
 };
 
+/**
+ * The field's DEFINED value strings, read via the shared H10 normalizer so both
+ * the legacy bare-string shape (old vaults) and the new object shape
+ * `{value,isActive,…}` (re-extracted vaults) yield the value set — the old
+ * `typeof === 'string'` filter emptied the defined set on a re-extracted vault.
+ * Both active and inactive defined values are returned (an inactive value can
+ * still appear in live data, so the cross-reference must know about it).
+ */
 const readDefinedValues = (node: Node): readonly string[] => {
-  const raw = node.properties['picklistValues'];
-  return Array.isArray(raw) ? raw.filter((v): v is string => typeof v === 'string') : [];
+  const normalized = normalizePicklistValues(node.properties['picklistValues']);
+  return normalized === null ? [] : normalized.map((entry) => entry.value);
 };
 
 const offlineTrust = (ctx: Context): TrustSummary => ({

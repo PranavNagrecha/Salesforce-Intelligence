@@ -81,12 +81,30 @@ const mapDescribeType = (raw: string | undefined): string => {
   return DESCRIBE_TYPE_MAP[key] ?? 'Unknown';
 };
 
+/**
+ * Read a stored field's picklist value strings, tolerating BOTH the legacy
+ * bare-string shape (old vaults) and the H10 object shape `{value,isActive,…}`
+ * (re-extracted vaults). A bare string is an ACTIVE value. Used only to decide
+ * whether a node already carries inline values — value strings suffice here, so
+ * active/inactive is not surfaced at this call site.
+ */
 const readPicklistValues = (
   props: Readonly<Record<string, unknown>>,
 ): readonly string[] | null => {
   const raw = props['picklistValues'];
   if (!Array.isArray(raw)) return null;
-  return raw.filter((entry): entry is string => typeof entry === 'string');
+  const out: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry === 'string') {
+      out.push(entry);
+      continue;
+    }
+    if (typeof entry === 'object' && entry !== null) {
+      const value = (entry as Record<string, unknown>)['value'];
+      if (typeof value === 'string') out.push(value);
+    }
+  }
+  return out;
 };
 
 const hasInlinePicklistValues = (node: Node): boolean => {
@@ -114,15 +132,37 @@ export const fieldNeedsDescribeEnrichment = (existing: Node): boolean => {
   return true;
 };
 
+/** One describe-derived picklist value, the H10 object shape the DX inline
+ * emitter (custom-field.ts) also produces, so both provenances converge on one
+ * graph contract. `label` is attached only when the describe row carried one. */
+interface DescribeExtractedPicklistValue {
+  readonly value: string;
+  readonly isActive: boolean;
+  readonly label?: string;
+}
+
 const extractDescribePicklistValues = (
   field: DescribeFieldRow,
-): readonly string[] | null => {
+): readonly DescribeExtractedPicklistValue[] | null => {
   const entries = field.picklistValues;
   if (entries === undefined || entries.length === 0) return null;
-  const values = entries
-    .filter((entry) => entry.active !== false)
-    .map((entry) => entry.value)
-    .filter((value): value is string => typeof value === 'string' && value.length > 0);
+  const values: DescribeExtractedPicklistValue[] = [];
+  for (const entry of entries) {
+    if (typeof entry.value !== 'string' || entry.value.length === 0) continue;
+    // H10: RETAIN inactive values (do not drop) so consumers can mark them
+    // not-selectable — existing records may hold them. The describe-API boolean
+    // is named `active` (active===false means inactive), so isActive maps as
+    // `entry.active !== false`. This is the DESCRIBE-path default direction;
+    // the DX inline path (custom-field.ts) instead defaults absent <isActive>
+    // to active. Both converge on {value,isActive,label?} but derive isActive
+    // from opposite-defaulting inputs — do NOT "unify" the two helpers.
+    const out: DescribeExtractedPicklistValue = {
+      value: entry.value,
+      isActive: entry.active !== false,
+      ...(typeof entry.label === 'string' ? { label: entry.label } : {}),
+    };
+    values.push(out);
+  }
   return values.length > 0 ? values : null;
 };
 

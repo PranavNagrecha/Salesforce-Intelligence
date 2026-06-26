@@ -69,10 +69,44 @@ describe('buildDescribeFieldExtraction — FLD-05', () => {
       existingById,
     );
     expect(result.nodes).toHaveLength(2);
-    expect(result.nodes[0]?.properties['picklistValues']).toEqual(['Technology']);
+    // H10: the describe path now RETAINS the inactive value (was dropped to
+    // ['Technology']) and emits the object shape — the active value is
+    // isActive:true, the deactivated one isActive:false (describe `active`
+    // maps to `isActive = active !== false`). Both provenances (DX inline +
+    // describe snapshot) converge on {value,isActive,label?}.
+    expect(result.nodes[0]?.properties['picklistValues']).toEqual([
+      { value: 'Technology', isActive: true },
+      { value: 'Retired', isActive: false },
+    ]);
     expect(result.nodes[0]?.properties['describeEnriched']).toBe(true);
     expect(result.edges).toHaveLength(1);
     expect(result.edges[0]?.toId).toBe('CustomField:Account.Phone');
+  });
+
+  it('H10: carries describe label onto the picklist value object when present', () => {
+    const existingById = new Map<string, Node>([
+      ['CustomField:Account.Industry', stubIndustryNode()],
+    ]);
+    const result = buildDescribeFieldExtraction(
+      'Account',
+      {
+        fields: [
+          {
+            name: 'Industry',
+            type: 'picklist',
+            picklistValues: [
+              { value: 'TECH', label: 'Technology', active: true },
+              { value: 'OLD', label: 'Old Value', active: false },
+            ],
+          },
+        ],
+      },
+      existingById,
+    );
+    expect(result.nodes[0]?.properties['picklistValues']).toEqual([
+      { value: 'TECH', isActive: true, label: 'Technology' },
+      { value: 'OLD', isActive: false, label: 'Old Value' },
+    ]);
   });
 
   it('skips fields already retrieved with inline picklist values', () => {

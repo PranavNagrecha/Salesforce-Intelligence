@@ -39,6 +39,10 @@ const baseNode = (o: Partial<Node> & Pick<Node, 'id' | 'type' | 'apiName'>): Nod
 
 const PICKLIST = 'CustomField:Case.Status__c';
 const TEXT_FIELD = 'CustomField:Case.Notes__c';
+// H10: a re-extracted (NEW-vault) picklist storing the object shape, including
+// one DEACTIVATED value. readDefinedValues must read .value off objects (the
+// old typeof==='string' filter emptied the defined set to []).
+const OBJ_PICKLIST = 'CustomField:Case.Stage__c';
 const seed: ExtractionResult = {
   nodes: [
     baseNode({ id: 'CustomObject:Case', type: 'CustomObject', apiName: 'Case' }),
@@ -48,6 +52,19 @@ const seed: ExtractionResult = {
       apiName: 'Status__c',
       parentId: 'CustomObject:Case',
       properties: { dataType: 'Picklist', picklistValues: ['New', 'Working', 'Escalated', 'Closed'] },
+    }),
+    baseNode({
+      id: OBJ_PICKLIST,
+      type: 'CustomField',
+      apiName: 'Stage__c',
+      parentId: 'CustomObject:Case',
+      properties: {
+        dataType: 'Picklist',
+        picklistValues: [
+          { value: 'Open', isActive: true },
+          { value: 'Retired', isActive: false },
+        ],
+      },
     }),
     baseNode({
       id: TEXT_FIELD,
@@ -130,6 +147,16 @@ describe('livePicklistUsageHandler (P6-live-picklist-usage)', () => {
     expect(r.value.data.usage).toBeNull();
     expect(r.value.data.definedValues).toEqual(['New', 'Working', 'Escalated', 'Closed']);
     expect(r.value.data.consentPresent).toBe(false);
+  });
+
+  it('H10: reads defined values off the NEW-vault object[] shape (would empty to [] under the old string filter)', async () => {
+    const r = await livePicklistUsageHandler(ctx, { fieldId: OBJ_PICKLIST }, liveExec);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Both the active and the inactive defined value strings surface — an
+    // inactive value can still appear in live data, so the cross-reference must
+    // know about it. The pre-fix typeof==='string' filter returned [].
+    expect(r.value.data.definedValues).toEqual(['Open', 'Retired']);
   });
 
   it('with consent fuses live usage with the defined value set', async () => {

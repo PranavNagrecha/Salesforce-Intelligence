@@ -99,6 +99,21 @@ const toBooleanWithDefault = (value: unknown): boolean =>
   coerceBoolean(unwrapSingle(value));
 
 /**
+ * Coerce a picklist `<value>`'s `<isActive>` element with a default of
+ * `true` — the INVERSE default of {@link toBooleanWithDefault}. Salesforce
+ * DX-source OMITS `<isActive>` for ACTIVE values and only writes
+ * `<isActive>false</isActive>` on a DEACTIVATED value, so an absent element
+ * means the value is selectable (active). Reusing the `false`-defaulting
+ * coercion here would mark every active value inactive on every real
+ * picklist (H10) — keep this helper separate and do NOT "unify" it with
+ * `toBooleanWithDefault`.
+ */
+const coerceIsActiveDefaultTrue = (value: unknown): boolean => {
+  const v = unwrapSingle(value);
+  return v === undefined ? true : coerceBoolean(v);
+};
+
+/**
  * Read and strictly-validate a file as XML. fast-xml-parser's `parse()`
  * is permissive (it silently truncates on mismatched tags), so we
  * validate first to surface malformed input as `parse-error` rather than
@@ -217,11 +232,32 @@ const derivePathParts = (
 };
 
 /**
+ * One inline picklist value as the vault stores it. `isActive` carries the
+ * honesty axis (H10): an INACTIVE value is RETAINED but no longer selectable
+ * for new records — existing records may still hold it — so consumers must
+ * list-and-mark inactive values, never drop them silently nor present them as
+ * selectable. `label` / `default` are present only when the source `<label>`
+ * / `<default>` element was, to avoid churning fields that never had them.
+ */
+export interface PicklistValue {
+  readonly value: string;
+  readonly isActive: boolean;
+  readonly label?: string;
+  readonly default?: boolean;
+}
+
+/**
  * Extract picklist values from a `<valueSet>` subtree, or `null` when
  * the structure is absent. Picklist values live at
- * `valueSet > valueSetDefinition > value > fullName`.
+ * `valueSet > valueSetDefinition > value`, each carrying `<fullName>` (the
+ * API value), `<label>`, `<default>`, and — only when DEACTIVATED —
+ * `<isActive>false</isActive>`. The emitted element is an object carrying
+ * `isActive` (H10): Salesforce DX OMITS `<isActive>` for active values, so an
+ * absent element defaults to `true` (selectable). Inactive values are EMITTED
+ * (not dropped) so consumers can mark them retained-but-not-selectable rather
+ * than reporting them as current or claiming they do not exist.
  */
-const extractPicklistValues = (rootObj: Record<string, unknown>): string[] | null => {
+const extractPicklistValues = (rootObj: Record<string, unknown>): PicklistValue[] | null => {
   const valueSet = unwrapSingle(rootObj['valueSet']);
   if (typeof valueSet !== 'object' || valueSet === null) return null;
   const definition = unwrapSingle((valueSet as Record<string, unknown>)['valueSetDefinition']);
@@ -229,7 +265,23 @@ const extractPicklistValues = (rootObj: Record<string, unknown>): string[] | nul
   const rawValues = (definition as Record<string, unknown>)['value'];
   if (rawValues === undefined) return [];
   const values = Array.isArray(rawValues) ? rawValues : [rawValues];
-  return values.map((entry) => String(unwrapSingle((entry as Record<string, unknown>)['fullName'])));
+  return values.map((raw) => {
+    const entry = raw as Record<string, unknown>;
+    const value = String(unwrapSingle(entry['fullName']));
+    const isActive = coerceIsActiveDefaultTrue(entry['isActive']);
+    const label = toNullableString(entry['label']);
+    const out: PicklistValue = { value, isActive };
+    // OMIT-when-null: only attach label/default when the source element was
+    // present, mirroring the valueSetName pattern so fields that never carried
+    // them do not gain new keys (avoids A7 / golden churn).
+    return {
+      ...out,
+      ...(label !== null ? { label } : {}),
+      ...(unwrapSingle(entry['default']) !== undefined
+        ? { default: toBooleanWithDefault(entry['default']) }
+        : {}),
+    };
+  });
 };
 
 /**

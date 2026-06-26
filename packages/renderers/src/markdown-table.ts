@@ -18,9 +18,45 @@
  * the surrounding Markdown table's row or columns. GFM renders a
  * backslash-escaped `\|` as a literal pipe even inside a code span.
  */
+/**
+ * True when `value` is an array of picklist-value objects (H10 shape:
+ * `{ value: string, isActive?: boolean, label?, default? }`). A bare `String()`
+ * on such an array renders `[object Object]` in the body Properties table, so
+ * it gets the human-readable join in {@link renderPicklistValues} instead.
+ */
+const isPicklistValueArray = (
+  value: unknown,
+): value is ReadonlyArray<Record<string, unknown>> =>
+  Array.isArray(value) &&
+  value.length > 0 &&
+  value.every(
+    (e) =>
+      typeof e === 'object' &&
+      e !== null &&
+      typeof (e as Record<string, unknown>)['value'] === 'string',
+  );
+
+/**
+ * Render an H10 picklist-value object array as a comma-joined value list,
+ * suffixing deactivated entries with `(inactive)` so a reader can tell which
+ * values are retained-but-not-selectable rather than current.
+ */
+const renderPicklistValues = (
+  entries: ReadonlyArray<Record<string, unknown>>,
+): string =>
+  entries
+    .map((e) => {
+      const v = String(e['value']);
+      return e['isActive'] === false ? `${v} (inactive)` : v;
+    })
+    .join(', ');
+
 export const renderValueAsBacktickedString = (value: unknown): string => {
   if (value === null) return '`null`';
   if (typeof value === 'boolean') return value ? '`true`' : '`false`';
-  const cell = String(value).replace(/\r\n|\r|\n/g, ' ').replace(/\|/g, '\\|');
+  const text = isPicklistValueArray(value)
+    ? renderPicklistValues(value)
+    : String(value);
+  const cell = text.replace(/\r\n|\r|\n/g, ' ').replace(/\|/g, '\\|');
   return `\`${cell}\``;
 };
