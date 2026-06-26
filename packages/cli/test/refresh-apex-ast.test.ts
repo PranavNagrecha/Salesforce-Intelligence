@@ -46,6 +46,21 @@ const WRAPPER = `public class Wrapper {
     Test.setMock(HttpCalloutMock.class, null);
   }
 }`;
+// CR-06 (H5): a child-relationship subquery. Outer fields belong to Account;
+// the child `(SELECT ... FROM Contacts)` names a RELATIONSHIP, not an sObject —
+// its fields and the relationship token must NOT mint parsed edges.
+const CHILDSUB = `public class ChildSub {
+  public void run() {
+    List<Account> rows = [SELECT Id, Name, (SELECT Email, FirstName FROM Contacts) FROM Account];
+  }
+}`;
+// CR-06 (H5b): a semi-join. Inner `(SELECT AccountId FROM Contact)` is a real
+// sObject scope — its fields key to Contact, NOT to the outer Account.
+const SEMIJOIN = `public class SemiJoin {
+  public void run() {
+    List<Account> rows = [SELECT Id, Name FROM Account WHERE Id IN (SELECT AccountId FROM Contact WHERE Email != null)];
+  }
+}`;
 
 const seed = async (): Promise<void> => {
   vaultRoot = join(cwd, 'org-kb');
@@ -64,6 +79,8 @@ const seed = async (): Promise<void> => {
     ['Callee', CALLEE],
     ['Broken', BROKEN],
     ['Wrapper', WRAPPER],
+    ['ChildSub', CHILDSUB],
+    ['SemiJoin', SEMIJOIN],
   ] as const) {
     await writeFile(join(dir, `${name}.cls`), body, 'utf8');
     await writeFile(join(dir, `${name}.cls-meta.xml`), meta, 'utf8');
@@ -168,8 +185,40 @@ describe('refresh apex-ast (DEFAULT ON — P13-AST-flip)', () => {
     const manifest = await loadManifest(vaultRoot);
     if (!manifest.ok) throw new Error('manifest unreadable');
     expect(manifest.value.apexAst?.parseErrors).toBe(1);
-    // Caller + Callee + Wrapper (the P14 typed-FP fixture) parse cleanly.
-    expect(manifest.value.apexAst?.filesParsed).toBe(3);
+    // Caller + Callee + Wrapper + ChildSub + SemiJoin parse cleanly (Broken fails).
+    expect(manifest.value.apexAst?.filesParsed).toBe(5);
+  });
+
+  it('SOQL subquery edges attribute to the right object; child-relationship + cross-scope phantoms are absent (CR-06 / H5)', async () => {
+    const r = await runRefresh({ cwd, noPull: true });
+    expect(r.status).toBe('success');
+    const opened = await openGraph(vaultPaths(vaultRoot).graphDb);
+    if (!opened.ok) throw new Error(opened.error.message);
+    try {
+      // child subquery: outer fields on Account, NO Contacts.* relationship edges
+      const childReader = await opened.value.connection.runAndReadAll(
+        "SELECT to_id FROM edges WHERE from_id = 'ApexClass:ChildSub' AND edge_type = 'readsFrom' ORDER BY to_id",
+      );
+      const child = (childReader.getRowObjectsJS() as unknown as readonly { to_id: string }[]).map((x) => x.to_id);
+      expect(child).toContain('CustomField:Account.Id');
+      expect(child).toContain('CustomField:Account.Name');
+      expect(child.some((t) => t.startsWith('CustomField:Contacts.'))).toBe(false);
+      expect(child).not.toContain('CustomField:Account.Email');
+
+      // semi-join: outer fields on Account, inner fields on Contact, no bleed
+      const semiReader = await opened.value.connection.runAndReadAll(
+        "SELECT to_id FROM edges WHERE from_id = 'ApexClass:SemiJoin' AND edge_type = 'readsFrom' ORDER BY to_id",
+      );
+      const semi = (semiReader.getRowObjectsJS() as unknown as readonly { to_id: string }[]).map((x) => x.to_id);
+      expect(semi).toContain('CustomField:Account.Id');
+      expect(semi).toContain('CustomField:Account.Name');
+      expect(semi).toContain('CustomField:Contact.AccountId');
+      expect(semi).toContain('CustomField:Contact.Email');
+      expect(semi).not.toContain('CustomField:Account.AccountId');
+      expect(semi).not.toContain('CustomField:Account.Email');
+    } finally {
+      await closeGraph(opened.value);
+    }
   });
 
   it('apexAst:false (--no-apex-ast) opts out: zero apex-ast rows and no manifest block', async () => {
