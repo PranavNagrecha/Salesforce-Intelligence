@@ -682,6 +682,120 @@ const controlledByParentSeed: ExtractionResult = {
   ],
 };
 
+// =============================================================================
+// CR-RV6 fixtures — operation-aware object-CRUD precondition.
+// The old precondition only ever checked object READ regardless of accessLevel,
+// so the FIRST cascade step (OWD) could win for an operation the user lacks the
+// CRUD for: a Read-only user on a ReadWriteTransfer OWD object was told they
+// could EDIT every record; an Edit-but-not-Delete user on a FullAccess OWD
+// object was told they could DELETE. Every prior fixture granted Read+Edit+
+// Delete together (e.g. EDITOR_PROFILE), which masked the bug.
+// =============================================================================
+
+// CR-RV6 #1 — READ-ONLY profile (allowRead:true, allowEdit/allowDelete:false,
+// no view/modify-all) on a PUBLIC Read/Write/Transfer OWD object. OWD
+// ReadWriteTransfer (rank 2) grants edit org-wide, so the FALSE-PERMISSIVE bug
+// made accessLevel:'edit' say "visible" even though the user holds only Read.
+const RV6_RWT_OBJ = 'CustomObject:Rv6RwtObj';
+const RV6_READONLY_PROFILE = 'Profile:Rv6ReadOnly';
+
+const rv6ReadOnlyOnRwtSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: RV6_RWT_OBJ,
+      apiName: 'Rv6RwtObj',
+      properties: { sharingModel: 'ReadWriteTransfer' },
+    }),
+    makeNode({ id: RV6_READONLY_PROFILE, type: 'Profile', apiName: 'Rv6ReadOnly' }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: RV6_READONLY_PROFILE,
+      toId: RV6_RWT_OBJ,
+      edgeType: 'grantedBy',
+      // Read ONLY — no Edit, no Delete, no record bypass. Edit/Delete must be
+      // demoted; read must stay visible.
+      properties: {
+        allowRead: true,
+        allowEdit: false,
+        allowDelete: false,
+        viewAllRecords: false,
+        modifyAllRecords: false,
+      },
+    }),
+  ],
+};
+
+// CR-RV6 #2 — FullAccess OWD object (none existed in the suite before) + a
+// profile with Read+Edit but NOT Delete. OWD FullAccess (rank 3) grants delete
+// org-wide, so the bug made accessLevel:'delete' say "visible" despite no
+// object Delete CRUD. accessLevel:'edit' on the SAME object must stay visible
+// (allowEdit present, FullAccess rank 3 >= edit rank 2) — the demotion is
+// delete-specific, not a blanket deny.
+const RV6_FULLACCESS_OBJ = 'CustomObject:Rv6FullAccessObj';
+const RV6_EDIT_NO_DELETE_PROFILE = 'Profile:Rv6EditNoDelete';
+
+const rv6FullAccessEditNoDeleteSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: RV6_FULLACCESS_OBJ,
+      apiName: 'Rv6FullAccessObj',
+      properties: { sharingModel: 'FullAccess' },
+    }),
+    makeNode({
+      id: RV6_EDIT_NO_DELETE_PROFILE,
+      type: 'Profile',
+      apiName: 'Rv6EditNoDelete',
+    }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: RV6_EDIT_NO_DELETE_PROFILE,
+      toId: RV6_FULLACCESS_OBJ,
+      edgeType: 'grantedBy',
+      properties: {
+        allowRead: true,
+        allowEdit: true,
+        allowDelete: false,
+        viewAllRecords: false,
+        modifyAllRecords: false,
+      },
+    }),
+  ],
+};
+
+// CR-RV6 #3 — grant-edge Modify-All variant: a PRIVATE object + a profile with
+// NO plain CRUD bits but modifyAllRecords:true (object "Modify All"). The new
+// write predicate's modifyAllRecords branch must satisfy the edit/delete
+// precondition even with allowRead/allowEdit/allowDelete all false, mirroring
+// hasObjectReadAccess's bypass handling.
+const RV6_MAREC_OBJ = 'CustomObject:Rv6ModifyAllRecObj';
+const RV6_MAREC_PROFILE = 'Profile:Rv6ModifyAllRec';
+
+const rv6ModifyAllRecordsGrantSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: RV6_MAREC_OBJ,
+      apiName: 'Rv6ModifyAllRecObj',
+      properties: { sharingModel: 'Private' },
+    }),
+    makeNode({ id: RV6_MAREC_PROFILE, type: 'Profile', apiName: 'Rv6ModifyAllRec' }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: RV6_MAREC_PROFILE,
+      toId: RV6_MAREC_OBJ,
+      edgeType: 'grantedBy',
+      properties: {
+        allowRead: false,
+        allowEdit: false,
+        allowDelete: false,
+        modifyAllRecords: true,
+      },
+    }),
+  ],
+};
+
 beforeAll(async () => {
   tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-why-cant-see-'));
   const dbPath = join(tempDir, 'why-cant-see.db');
@@ -710,6 +824,9 @@ beforeAll(async () => {
     privateCrudOnlySeed,
     privateViewAllSeed,
     controlledByParentSeed,
+    rv6ReadOnlyOnRwtSeed,
+    rv6FullAccessEditNoDeleteSeed,
+    rv6ModifyAllRecordsGrantSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -1145,7 +1262,15 @@ describe('whyCantUserSeeRecordHandler', () => {
   });
 
   it('ViewAllData grants read god-mode but NOT edit; ModifyAllData grants edit AND delete', async () => {
-    // ViewAllData is read-only.
+    // ViewAllData is read-only. CR-RV6: GOD_PROFILE holds ViewAllData but NO
+    // object Edit CRUD on GODMODE_OBJ, so for accessLevel:'edit' the now
+    // operation-aware precondition (systemPermsForLevel('edit') = ModifyAllData
+    // only) hard-stops at the precondition with `restricted` BEFORE the cascade
+    // — the SystemPermission stage is no longer reached (stronger than the old
+    // behavior, which let it through the read precondition then reported the
+    // SystemPermission step `restricted`). The load-bearing invariant — read
+    // god-mode but NOT edit — is preserved and the precondition reason names the
+    // missing object Edit.
     const vadEdit = await whyCantUserSeeRecordHandler(ctx, {
       componentId: GODMODE_OBJ,
       accessLevel: 'edit',
@@ -1153,9 +1278,24 @@ describe('whyCantUserSeeRecordHandler', () => {
     });
     expect(vadEdit.ok).toBe(true);
     if (!vadEdit.ok) return;
-    const sysVad = vadEdit.value.data.reasoning.find((s) => s.stage === 'SystemPermission');
-    expect(sysVad?.verdict).toBe('restricted');
+    expect(vadEdit.value.data.verdict).toBe('restricted');
+    const vadReasons = vadEdit.value.data.reasoning.map((s) => s.reason).join(' | ');
+    expect(vadReasons).toMatch(/no object Edit permission/i);
     expect(vadEdit.value.data.verdict).not.toBe('visible');
+
+    // Sanity: the SAME ViewAllData profile DOES grant read god-mode on the same
+    // Private object (the precondition passes for read, the SystemPermission
+    // stage visibles).
+    const vadRead = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: GODMODE_OBJ,
+      accessLevel: 'read',
+      userContext: { profileId: GOD_PROFILE },
+    });
+    expect(vadRead.ok).toBe(true);
+    if (!vadRead.ok) return;
+    expect(vadRead.value.data.verdict).toBe('visible');
+    const sysRead = vadRead.value.data.reasoning.find((s) => s.stage === 'SystemPermission');
+    expect(sysRead?.verdict).toBe('visible');
 
     // ModifyAllData is full god-mode → edit and delete both visible.
     for (const lvl of ['edit', 'delete'] as const) {
@@ -1271,6 +1411,123 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(r.value.data.verdict).toBe('visible');
     const sys = r.value.data.reasoning.find((s) => s.stage === 'SystemPermission');
     expect(sys?.verdict).toBe('visible');
+  });
+
+  // === CR-RV6: operation-aware object-CRUD precondition ======================
+  // The headline false-permissive class. Pre-fix the precondition only checked
+  // object READ regardless of accessLevel, so the OWD step (which visibles edit
+  // on a ReadWriteTransfer OWD and delete on a FullAccess OWD) won for an
+  // operation the user lacked the CRUD for.
+
+  it('CR-RV6: read-only profile on a ReadWriteTransfer OWD object is NOT visible for edit (false-permissive guard)', async () => {
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: RV6_RWT_OBJ,
+      accessLevel: 'edit',
+      userContext: { profileId: RV6_READONLY_PROFILE },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // PRE-FIX BUG: verdict was 'visible' — the tool told a read-only user they
+    // could EDIT every record on a ReadWriteTransfer OWD object.
+    expect(result.value.data.verdict).toBe('restricted');
+    // The precondition-failure reason must name the missing object EDIT bit, not
+    // object Read.
+    const reasons = result.value.data.reasoning.map((s) => s.reason).join(' | ');
+    expect(reasons).toMatch(/no object Edit permission/i);
+    expect(reasons).not.toMatch(/no object Read permission/i);
+  });
+
+  it('CR-RV6: that SAME read-only profile is STILL visible for read (no over-demotion regression)', async () => {
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: RV6_RWT_OBJ,
+      accessLevel: 'read',
+      userContext: { profileId: RV6_READONLY_PROFILE },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // allowRead satisfies the read precondition; OWD ReadWriteTransfer rank 2 >=
+    // read rank 1 → read stays visible.
+    expect(result.value.data.verdict).toBe('visible');
+  });
+
+  it('CR-RV6: Edit-but-not-Delete profile on a FullAccess OWD object is NOT visible for delete (false-permissive guard)', async () => {
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: RV6_FULLACCESS_OBJ,
+      accessLevel: 'delete',
+      userContext: { profileId: RV6_EDIT_NO_DELETE_PROFILE },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // PRE-FIX BUG: verdict was 'visible' — OWD FullAccess rank 3 >= delete rank
+    // 3, and the read-only precondition passed, so delete falsely visibled.
+    expect(result.value.data.verdict).toBe('restricted');
+    const reasons = result.value.data.reasoning.map((s) => s.reason).join(' | ');
+    expect(reasons).toMatch(/no object Delete permission/i);
+    expect(reasons).not.toMatch(/no object Read permission/i);
+  });
+
+  it('CR-RV6: that SAME Edit-but-not-Delete profile IS visible for edit on the FullAccess object (demotion is delete-specific)', async () => {
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: RV6_FULLACCESS_OBJ,
+      accessLevel: 'edit',
+      userContext: { profileId: RV6_EDIT_NO_DELETE_PROFILE },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // allowEdit present, FullAccess rank 3 >= edit rank 2 → edit visible.
+    expect(result.value.data.verdict).toBe('visible');
+  });
+
+  it('CR-RV6: true-positive preserved — Edit+Read profile on ReadWriteTransfer is visible for edit (regression guard for EDITOR_PROFILE)', async () => {
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: PUB_RWT_OBJ,
+      accessLevel: 'edit',
+      userContext: { profileId: EDITOR_PROFILE },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // EDITOR_PROFILE holds allowEdit:true; the operation-aware precondition must
+    // still ADMIT legitimate edits.
+    expect(result.value.data.verdict).toBe('visible');
+  });
+
+  it('CR-RV6: object Modify-All grant-edge satisfies the edit AND delete precondition with no plain CRUD bits', async () => {
+    for (const lvl of ['edit', 'delete'] as const) {
+      const result = await whyCantUserSeeRecordHandler(ctx, {
+        componentId: RV6_MAREC_OBJ,
+        accessLevel: lvl,
+        userContext: { profileId: RV6_MAREC_PROFILE },
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      // modifyAllRecords:true bypasses sharing for every level — the new write
+      // predicate's bypass branch must let the precondition pass (NOT hard-deny
+      // for missing allowEdit/allowDelete), then the PermissionGrant stage
+      // visibles via grantSatisfiesRecordVisible.
+      expect(result.value.data.verdict).toBe('visible');
+    }
+  });
+
+  it('CR-RV6: role/group-only context on a PRIVATE object stays unknown for edit (operation-aware precondition must NOT hard-deny)', async () => {
+    // The load-bearing honesty guard: with NO profileId / permissionSetIds object
+    // perms are UNDECIDABLE, so the operation-aware precondition is SKIPPED
+    // (profileOrPermSetSupplied is false) — it must NOT hard-deny. On a Private
+    // OWD object the OWD does not visible edit, the cascade runs through its
+    // unmodeled stages, and the answer is an honest `unknown` — NOT a hard
+    // `restricted`. (RV6_MAREC_OBJ is Private; its only grant edge is to a
+    // Profile, which the role-only context does not match, so no grant fires.)
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: RV6_MAREC_OBJ,
+      accessLevel: 'edit',
+      userContext: { roleId: 'Role:Whatever' },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.verdict).toBe('unknown');
+    // Specifically: the answer is NOT the precondition hard-deny.
+    expect(result.value.data.verdict).not.toBe('restricted');
+    const reasons = result.value.data.reasoning.map((s) => s.reason).join(' | ');
+    expect(reasons).not.toMatch(/no object Edit permission on the supplied profile/i);
   });
 });
 

@@ -34,15 +34,20 @@
  *
  * The cascade, in this exact order:
  *
- *   0. **Object-Read precondition (plane A)** — evaluated in the handler BEFORE
- *      any record-visibility verdict. `hasObjectReadAccess` checks whether the
- *      profile-UNION-permsets set holds any object Read CRUD
- *      (`allowRead`/`allowEdit`/`allowDelete`/`allowCreate`/`viewAllRecords`/
- *      `modifyAllRecords`) or system `ViewAllData`/`ModifyAllData`. When a
- *      profile or permission set was supplied and the precondition is NOT met,
- *      the handler returns `restricted` immediately (the ONLY precondition-
- *      driven `restricted`). A role/group-only context cannot decide object
- *      perms, so the gate is skipped and the cascade runs to an honest answer.
+ *   0. **Object-CRUD precondition (plane A, operation-aware)** — evaluated in
+ *      the handler BEFORE any record-visibility verdict. `hasObjectAccess(level)`
+ *      checks whether the profile-UNION-permsets set holds the object CRUD for
+ *      THIS operation: object Read for read; object Edit (or Modify All) for
+ *      edit; object Delete (or Modify All) for delete; plus the system perm that
+ *      covers the level (`ViewAllData`/`ModifyAllData` for read, `ModifyAllData`
+ *      only for edit/delete — View All Data is read-only). When a profile or
+ *      permission set was supplied and the precondition is NOT met, the handler
+ *      returns `restricted` immediately (the ONLY precondition-driven
+ *      `restricted`) — this kills both H1 (zero-perm user on a Public-Read OWD)
+ *      and CR-RV6 (Read-only user told they can EDIT a ReadWriteTransfer OWD
+ *      object / Edit-only user told they can DELETE a FullAccess OWD object). A
+ *      role/group-only context cannot decide object perms, so the gate is
+ *      skipped and the cascade runs to an honest answer.
  *
  *   1. **OWD** (Organization-Wide Default) — read `componentId`'s
  *      `properties.sharingModel`.
@@ -227,6 +232,37 @@ const grantSatisfiesObjectRead = (edge: Edge): boolean => {
     p['viewAllRecords'] === true ||
     p['modifyAllRecords'] === true
   );
+};
+
+/**
+ * CR-RV6: does a `grantedBy` object-permission edge satisfy the object-CRUD
+ * PRECONDITION for the requested OPERATION? The object precondition is
+ * operation-specific in Salesforce: to EDIT a record a user needs object Edit
+ * CRUD, to DELETE needs object Delete CRUD; plain object Read satisfies only the
+ * read precondition. View All / Modify All are a SEPARATE (record-sharing)
+ * plane, but they also subsume the relevant object precondition:
+ *   - edit  => allowEdit   OR object Modify All (modifyAllRecords)
+ *   - delete=> allowDelete OR object Modify All (modifyAllRecords)
+ *   - read  => the broader `grantSatisfiesObjectRead` (Edit/Delete/Create all
+ *     imply Read in Salesforce; View All also reads every record)
+ *
+ * CRITICAL (the false-permissive class CR-RV6 fixes): `viewAllRecords` (object
+ * "View All") is READ-ONLY — it must NOT satisfy the edit/delete precondition;
+ * and plain `allowRead` must NOT satisfy edit/delete. Mirrors the system-perm
+ * bypass encoded in `systemPermsForLevel` (ModifyAllData only for edit/delete).
+ *
+ * `create` is OFF this precondition (it has its own `allowCreate` path in the
+ * create branch) and never reaches `hasObjectAccess`, so it is not handled here.
+ */
+const grantSatisfiesObjectLevel = (edge: Edge, level: AccessLevel): boolean => {
+  const p = edge.properties;
+  if (level === 'read') return grantSatisfiesObjectRead(edge);
+  // edit / delete: the matching CRUD bit, or object Modify All (which both
+  // edits and deletes every record). View All / plain Read are read-only.
+  if (p['modifyAllRecords'] === true) return true;
+  if (level === 'edit') return p['allowEdit'] === true;
+  if (level === 'delete') return p['allowDelete'] === true;
+  return false;
 };
 
 /**
@@ -447,7 +483,11 @@ const evaluateOWD = (
     return step(
       'OWD',
       'visible',
-      `OWD '${sharingModel}' grants ${level} access to all records (given the user has object ${level} permission — checked separately as the object-Read precondition)`,
+      // RV11: the precondition is now operation-aware (hasObjectAccess(level)),
+      // so this claim is finally TRUE for edit/delete — and we name the actual
+      // bit checked (object ${level}), not the old "object-Read precondition"
+      // misnomer that lied for edit/delete.
+      `OWD '${sharingModel}' grants ${level} access to all records (given the user has object ${level} permission — checked separately as the object ${level} precondition)`,
     );
   }
   // The OWD does not grant THIS operation org-wide (e.g. a Read OWD for an edit
@@ -469,7 +509,7 @@ const evaluateOWD = (
  * "Modify All" records (`grantSatisfiesRecordVisible`). A grant that carries
  * only plain object CRUD (`allowRead` / `allowEdit` / `allowDelete`) satisfies
  * the object precondition (plane A, evaluated separately in
- * `hasObjectReadAccess`) but does NOT by itself make a Private record visible —
+ * `hasObjectAccess(level)`) but does NOT by itself make a Private record visible —
  * on a Private object that comes from OWD or a sharing grant — so it reports
  * `restricted` here, with a reason that distinguishes "object CRUD present,
  * record visibility depends on OWD/sharing" from "View/Modify All grants all
@@ -514,9 +554,13 @@ const evaluatePermissionGrants = async (
   }
   const granterSet: ReadonlySet<string> = new Set(granterIds);
   const granting: string[] = [];
-  // Track granters that hold plain object CRUD (precondition only) but no
-  // record-visibility bypass, so the `restricted` reason can be precise.
-  let anyObjectCrud = false;
+  // RV11: track granters that hold the OPERATION-LEVEL object CRUD (precondition
+  // only) but no record-visibility bypass, so the `restricted` reason names a
+  // bit ACTUALLY held — `grantSatisfiesObjectLevel(edge, level)` is the per-
+  // operation predicate (object Read for read, object Edit/Delete or Modify All
+  // for edit/delete), NOT the any-CRUD `grantSatisfiesObjectRead` which would
+  // claim "object edit permission present" for a Read-only granter.
+  let anyObjectLevelCrud = false;
   for (const edge of edgesResult.value) {
     if (!granterSet.has(edge.fromId)) continue;
     const recordVisible =
@@ -526,8 +570,8 @@ const evaluatePermissionGrants = async (
         : grantSatisfiesRecordVisible(edge, level);
     if (recordVisible) {
       granting.push(edge.fromId);
-    } else if (grantSatisfiesObjectRead(edge)) {
-      anyObjectCrud = true;
+    } else if (level !== 'create' && grantSatisfiesObjectLevel(edge, level)) {
+      anyObjectLevelCrud = true;
     }
   }
   if (granting.length > 0) {
@@ -537,7 +581,7 @@ const evaluatePermissionGrants = async (
         : `object View All / Modify All grants ${level} access to all records: ${granting.join(', ')}`;
     return ok(step('PermissionGrant', 'visible', detail));
   }
-  if (anyObjectCrud && level !== 'create') {
+  if (anyObjectLevelCrud && level !== 'create') {
     // Object CRUD present (the precondition is met) but no View/Modify All
     // bypass — on a Private object record visibility depends on OWD/sharing.
     // RV1: this branch is gated to read/edit/delete. For `create`, object
@@ -576,30 +620,40 @@ const evaluatePermissionGrants = async (
 };
 
 /**
- * Plane A — the OBJECT-READ PRECONDITION. To SEE a record at all a user needs
- * object-level Read CRUD, drawn from the profile UNION any assigned permission
- * set. This is satisfied by:
- *   - any object `grantedBy` edge that implies object Read
- *     (`grantSatisfiesObjectRead`: allowRead / allowEdit / allowDelete /
- *     allowCreate / viewAllRecords / modifyAllRecords — Edit/Delete/Create all
- *     imply Read in Salesforce); OR
- *   - the system perms `ViewAllData` / `ModifyAllData` on a granter node (these
- *     read every record of every object, so they also satisfy the object-read
+ * Plane A — the operation-aware OBJECT-CRUD PRECONDITION. To ACT on a record a
+ * user needs the object-level CRUD for THAT OPERATION, drawn from the profile
+ * UNION any assigned permission set:
+ *   - read   needs object Read   (Edit/Delete/Create all imply Read);
+ *   - edit   needs object Edit   (or object Modify All);
+ *   - delete needs object Delete (or object Modify All).
+ *
+ * CR-RV6: the precondition was previously READ-ONLY regardless of `level`, so a
+ * Read-only user passed the precondition for `edit`/`delete` and the FIRST
+ * cascade step (OWD) could then visible an operation the user had no CRUD for —
+ * a false-PERMISSIVE access answer. The precondition is now satisfied only by:
+ *   - an object `grantedBy` edge satisfying the per-level CRUD bit
+ *     (`grantSatisfiesObjectLevel`); OR
+ *   - the system perm that satisfies `level` (`systemPermsForLevel`:
+ *     ViewAllData OR ModifyAllData for read; ModifyAllData ONLY for edit/delete
+ *     — View All Data is read-only, so it must NOT pass the edit/delete
  *     precondition).
  *
- * Returns `false` when neither path is present — the user has NO object Read,
- * so no OWD value and no record-level sharing can make the record visible
- * (record sharing layers on TOP of object access; it never confers it).
+ * Returns `false` when neither path is present — the user lacks object CRUD for
+ * the operation, so no OWD value and no record-level sharing can make the record
+ * actionable (record sharing layers on TOP of object access; it never confers
+ * it). `create` is off this precondition (its own `allowCreate` path) and never
+ * calls this helper.
  *
  * FLS note: this reads ONLY the object's own incoming `grantedBy` edges
  * (`direction: 'in'`, `edgeType: 'grantedBy'` on the CustomObject id). FLS
  * grants target CustomField ids, never the CustomObject, so field-level
  * security can never leak into the record-visibility precondition.
  */
-const hasObjectReadAccess = async (
+const hasObjectAccess = async (
   ctx: Context,
   componentId: ComponentId,
   userContext: UserContext,
+  level: AccessLevel,
 ): Promise<Result<boolean, string>> => {
   const granterIds: string[] = [];
   if (userContext.profileId !== undefined) granterIds.push(userContext.profileId);
@@ -617,11 +671,14 @@ const hasObjectReadAccess = async (
   if (!edgesResult.ok) return err(edgesResult.error.message);
   for (const edge of edgesResult.value) {
     if (!granterSet.has(edge.fromId)) continue;
-    if (grantSatisfiesObjectRead(edge)) return ok(true);
+    if (grantSatisfiesObjectLevel(edge, level)) return ok(true);
   }
 
-  // System View All Data / Modify All Data also satisfies the object-read
-  // precondition (they read every record of every object).
+  // System View All Data / Modify All Data also satisfies the precondition for
+  // the levels they cover (read: View/Modify All Data; edit/delete: Modify All
+  // Data only). `systemPermsForLevel` already encodes the read-only nature of
+  // View All Data, so this branch can never let it pass the edit/delete gate.
+  const relevantPerms = systemPermsForLevel(level);
   for (const id of granterIds) {
     const nodeResult = await getNodeById(ctx.graph, id as ComponentId);
     if (!nodeResult.ok) return err(nodeResult.error.message);
@@ -629,7 +686,7 @@ const hasObjectReadAccess = async (
     if (node === null) continue;
     const perms = node.properties['userPermissions'];
     if (!Array.isArray(perms)) continue;
-    if (perms.includes('ViewAllData') || perms.includes('ModifyAllData')) {
+    if (relevantPerms.some((p) => perms.includes(p))) {
       return ok(true);
     }
   }
@@ -1587,28 +1644,39 @@ export const whyCantUserSeeRecordHandler = async (
   // equals the equivalent prefixed-id verdict.
   const userContext = await coerceUserContext(ctx, input.userContext);
 
-  // Plane A — the OBJECT-READ PRECONDITION. To SEE a record at all the user
-  // needs object Read CRUD (from the profile UNION any assigned permission set)
-  // or system View/Modify All Data. Missing object Read => NOT visible, full
-  // stop, regardless of OWD (kills H1: a zero-permission user is no longer told
-  // they can see any Public-Read object). Honesty nuance: object perms are only
-  // decidable when a profile or permission set was supplied — a role/group-only
-  // context cannot decide them, so we do NOT hard-deny there; the cascade runs
-  // and the answer can stay an honest `unknown` (mirrors the old profileAnchored
-  // nuance). FLS never enters this: it reads only object-level grantedBy edges.
+  // Plane A — the operation-aware OBJECT-CRUD PRECONDITION. To ACT on a record
+  // the user needs object CRUD for THIS OPERATION (from the profile UNION any
+  // assigned permission set): object Read for read, object Edit (or Modify All)
+  // for edit, object Delete (or Modify All) for delete. Missing the
+  // operation-level CRUD => NOT visible, full stop, regardless of OWD.
+  //   - kills H1: a zero-permission user is no longer told they can see any
+  //     Public-Read object; AND
+  //   - kills CR-RV6: a Read-only user is no longer told they can EDIT every
+  //     record on a ReadWriteTransfer OWD object (the OWD `visible` step can no
+  //     longer win for an operation the user lacks the CRUD for), and an
+  //     Edit-but-not-Delete user is no longer told they can DELETE on a
+  //     FullAccess OWD object.
+  // Honesty nuance: object perms are only decidable when a profile or permission
+  // set was supplied — a role/group-only context cannot decide them, so we do
+  // NOT hard-deny there; the cascade runs and the answer can stay an honest
+  // `unknown` (mirrors the old profileAnchored nuance). FLS never enters this:
+  // it reads only object-level grantedBy edges.
   const profileOrPermSetSupplied =
     userContext.profileId !== undefined ||
     (userContext.permissionSetIds !== undefined &&
       userContext.permissionSetIds.length > 0);
   if (profileOrPermSetSupplied) {
-    const objectReadResult = await hasObjectReadAccess(ctx, componentId, userContext);
-    if (!objectReadResult.ok) {
+    const objectAccessResult = await hasObjectAccess(ctx, componentId, userContext, level);
+    if (!objectAccessResult.ok) {
       return err({
         kind: 'internal',
-        message: `graph query failed: ${objectReadResult.error}`,
+        message: `graph query failed: ${objectAccessResult.error}`,
       });
     }
-    if (!objectReadResult.value) {
+    if (!objectAccessResult.value) {
+      // RV11: name the CRUD bit actually required for THIS operation, not Read.
+      const levelLabel =
+        level === 'read' ? 'Read' : level === 'edit' ? 'Edit' : 'Delete';
       return ok({
         data: {
           verdict: 'restricted',
@@ -1616,7 +1684,7 @@ export const whyCantUserSeeRecordHandler = async (
             step(
               'PermissionGrant',
               'restricted',
-              'no object Read permission on the supplied profile / permission sets — object Read is a precondition for record access, so no OWD value or sharing grant can make the record visible',
+              `no object ${levelLabel} permission on the supplied profile / permission sets — object ${levelLabel} is a precondition for record ${level}, so no OWD value or sharing grant can make the record ${level === 'read' ? 'visible' : level + 'able'}`,
             ),
           ],
         },
