@@ -264,6 +264,60 @@ describe('emptyQueuesAndGroupsHandler', () => {
   });
 });
 
+describe('emptyQueuesAndGroupsHandler — CR-22 cursor', () => {
+  it('whole-fits omits cursor block + scanTruncated (byte-identical golden)', async () => {
+    const r = await emptyQueuesAndGroupsHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect('nextCursor' in r.value.data).toBe(false);
+    expect('pageInfo' in r.value.data).toBe(false);
+    expect('otherSections' in r.value.data).toBe(false);
+    expect('scanTruncated' in r.value.data).toBe(false);
+    expect(r.value.data.truncated).toBe(false);
+  });
+
+  it('paging the queues list emits nextCursor + discloses groups', async () => {
+    const r = await emptyQueuesAndGroupsHandler(ctx, { limit: 1 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.queues.length).toBe(1);
+    expect(r.value.data.designatedList).toBe('queues');
+    expect(r.value.data.nextCursor).toBeDefined();
+    const others = r.value.data.otherSections ?? [];
+    expect(others.find((s) => s.listId === 'groups')?.totalCount).toBe(2);
+    // totals stay full.
+    expect(r.value.data.totalQueues).toBe(3);
+  });
+
+  it('resume walks the queues list with no dup/skip', async () => {
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < 6; i += 1) {
+      const r = await emptyQueuesAndGroupsHandler(ctx, {
+        limit: 1,
+        ...(cursor !== undefined ? { cursor } : {}),
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      for (const q of r.value.data.queues) seen.push(q.id);
+      cursor = r.value.data.nextCursor;
+      if (cursor === undefined) break;
+    }
+    expect(seen.sort()).toEqual([Q_LEGACY, Q_STALE, Q_UNKNOWN].sort());
+  });
+
+  it('rejects a cursor minted for a different type filter', async () => {
+    const p1 = await emptyQueuesAndGroupsHandler(ctx, { limit: 1 });
+    expect(p1.ok).toBe(true);
+    if (!p1.ok) return;
+    const cursor = p1.value.data.nextCursor!;
+    const stale = await emptyQueuesAndGroupsHandler(ctx, { type: 'Queue', limit: 1, cursor });
+    expect(stale.ok).toBe(false);
+    if (stale.ok) return;
+    expect(stale.error.kind).toBe('invalid-query');
+  });
+});
+
 describe('emptyQueuesAndGroupsInputSchema', () => {
   it('accepts empty input', () => {
     expect(emptyQueuesAndGroupsInputSchema.safeParse({}).success).toBe(true);

@@ -31,6 +31,7 @@ import type {
   Edge,
   McpError,
   McpResponse,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
@@ -39,6 +40,16 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { coercePrefix } from './coerce-id.js';
+import {
+  argsFingerprint,
+  decodeCursor,
+  paginateSection,
+  type PageableSection,
+  type SectionDisclosure,
+} from './page-cursor.js';
+
+/** Per-response byte budget for the paged section, leaving envelope headroom. */
+const EFFECTIVE_PERMS_BYTE_BUDGET = 38_000;
 
 /** Page size for the object-permission list (Admin grants on many objects). */
 const DEFAULT_LIMIT = 100;
@@ -61,6 +72,10 @@ export const effectivePermissionsInputSchema = z
     permissionSetIds: z.array(z.string().min(1)).optional(),
     limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
     offset: z.number().int().min(0).optional(),
+    // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+    // truncated page's `nextCursor`; carries the resume offset + which list
+    // (object | system) it advances. Omit = today's behavior.
+    cursor: z.string().min(1).optional(),
   })
   .refine(
     (i) => i.profileId !== undefined || (i.permissionSetIds !== undefined && i.permissionSetIds.length > 0),
@@ -105,6 +120,19 @@ export interface EffectivePermissionsOutput {
   readonly truncated: boolean;
   readonly confidence: 'declared';
   readonly disclosures: readonly string[];
+  /**
+   * CR-22 opaque continuation token, present ONLY on a truncated page (the
+   * designated list overflowed `limit` or the byte budget). Echo it back as
+   * `cursor` to resume; absent on a whole-fits page so the response is
+   * byte-identical to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata for the designated list; truncation only. */
+  readonly pageInfo?: PageInfo;
+  /** Which list the cursor advances (`'object'` | `'system'`); truncation only. */
+  readonly designatedList?: string;
+  /** The non-designated list(s), disclosed with their full counts; truncation only. */
+  readonly otherSections?: readonly SectionDisclosure[];
 }
 
 const PREFIX = {
@@ -230,10 +258,65 @@ export const effectivePermissionsHandler = async (
 
   const totalObjects = objectPermissions.length;
   const limit = input.limit ?? DEFAULT_LIMIT;
-  const offset = input.offset ?? 0;
-  const page = objectPermissions.slice(offset, offset + limit);
-  const hasMore = offset + page.length < totalObjects;
+
+  // CR-22 section cursor: page ONE designated list (object | system) and
+  // disclose the other honestly. objectPermissions is the largest + already
+  // paged list, so it is the default designated list; a resumed cursor's
+  // token.listId is fed back as designatedListId (paginateSection does NOT
+  // cross-check — the handler owns that binding, B0 note).
+  const TOOL = 'sfi.effective_permissions';
+  const fingerprint = argsFingerprint({
+    ...(input.profileId !== undefined ? { profileId: input.profileId } : {}),
+    ...(input.permissionSetIds !== undefined ? { permissionSetIds: input.permissionSetIds } : {}),
+  });
+  let designatedListId = 'object';
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+    if (decoded.value.listId !== undefined) designatedListId = decoded.value.listId;
+  }
+
+  const sections: readonly PageableSection<EffectiveObjectPerm | EffectiveSystemPerm>[] = [
+    { listId: 'object', items: objectPermissions },
+    { listId: 'system', items: systemPermissions },
+  ];
+  const pagedResult = paginateSection(sections, designatedListId, {
+    offset,
+    limit,
+    byteBudget: EFFECTIVE_PERMS_BYTE_BUDGET,
+    keyOf: (item) =>
+      'object' in item ? (item as EffectiveObjectPerm).object : (item as EffectiveSystemPerm).permission,
+    binding: { tool: TOOL, vaultHash: ctx.manifest.sourceTreeHash, argsFingerprint: fingerprint },
+  });
+  if (!pagedResult.ok) return err(pagedResult.error);
+  const paged = pagedResult.value;
+
+  // Emit both lists: the designated list shows its page; the non-designated
+  // list stays whole (today's shape). On a fresh/whole-fits call the
+  // designated list is 'object', so objectPermissions = its page and
+  // systemPermissions = full — byte-identical to pre-CR-22.
+  const objectPage =
+    designatedListId === 'object'
+      ? (paged.items as readonly EffectiveObjectPerm[])
+      : objectPermissions;
+  const systemPage =
+    designatedListId === 'system'
+      ? (paged.items as readonly EffectiveSystemPerm[])
+      : systemPermissions;
+
+  // Back-compat scalar fields: on the default (designated='object') path these
+  // are exactly pre-CR-22 — `hasMore` tracks the object page, `truncated` is
+  // `hasMore || offset>0`. When resuming INTO the system list these track the
+  // system page instead (the legacy fields describe the page being advanced).
+  const hasMore = paged.pageInfo.hasMore;
   const truncated = hasMore || offset > 0;
+  const emitCursor = paged.pageInfo.nextCursor !== null;
 
   const disclosures = [...BASE_DISCLOSURES];
   if (missingContainers.length > 0) {
@@ -243,15 +326,15 @@ export const effectivePermissionsHandler = async (
   }
   if (truncated) {
     disclosures.push(
-      `Object permissions paginated: showing ${offset}–${offset + page.length} of ${totalObjects}. summary holds the complete counts; page with offset/limit.`,
+      `Object permissions paginated: showing ${offset}–${offset + objectPage.length} of ${totalObjects}. summary holds the complete counts; page with offset/limit.`,
     );
   }
 
   return ok({
     data: {
       containers: presentContainers,
-      objectPermissions: page,
-      systemPermissions,
+      objectPermissions: objectPage,
+      systemPermissions: systemPage,
       summary: {
         objects: totalObjects,
         fieldsWithFls: fieldsWithFls.size,
@@ -264,6 +347,14 @@ export const effectivePermissionsHandler = async (
       truncated,
       confidence: 'declared',
       disclosures,
+      ...(emitCursor
+        ? {
+            nextCursor: paged.pageInfo.nextCursor as string,
+            pageInfo: paged.pageInfo,
+            designatedList: paged.listId,
+            otherSections: paged.otherSections,
+          }
+        : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

@@ -332,6 +332,79 @@ describe('diffSnapshotsHandler — limit + truncated', () => {
   });
 });
 
+describe('diffSnapshotsHandler — CR-22 section cursor', () => {
+  beforeAll(async () => {
+    const fromSnap = buildSnapshot('cur-from', [], []);
+    const toSnap = buildSnapshot(
+      'cur-to',
+      Array.from({ length: 5 }, (_, i) => ({
+        id: `CustomObject:C${i}`,
+        type: 'CustomObject',
+        apiName: `C${i}`,
+        propertiesHash: `h-${i}`,
+      })),
+      [],
+    );
+    expect((await saveSnapshot(tempDir, fromSnap)).ok).toBe(true);
+    expect((await saveSnapshot(tempDir, toSnap)).ok).toBe(true);
+  });
+
+  it('whole-fits omits cursor block (byte-identical golden)', async () => {
+    const r = await diffSnapshotsHandler(ctx, { fromLabel: 'cur-from', toLabel: 'cur-to' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect('nextCursor' in r.value.data).toBe(false);
+    expect('pageInfo' in r.value.data).toBe(false);
+    expect('otherSections' in r.value.data).toBe(false);
+    expect(r.value.data.added.length).toBe(5);
+    expect(r.value.data.truncated).toBe(false);
+  });
+
+  it('paging the largest list emits nextCursor + discloses the other two', async () => {
+    const r = await diffSnapshotsHandler(ctx, { fromLabel: 'cur-from', toLabel: 'cur-to', limit: 2 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.added.length).toBe(2);
+    expect(r.value.data.designatedList).toBe('added');
+    expect(r.value.data.nextCursor).toBeDefined();
+    const others = r.value.data.otherSections ?? [];
+    expect(others.map((s) => s.listId).sort()).toEqual(['modified', 'removed']);
+    for (const s of others) expect(s.totalCount).toBe(0);
+    expect(r.value.data.pageInfo?.totalCount).toBe(5);
+  });
+
+  it('resume advances offset within the same designated list (no dup/skip)', async () => {
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < 5; i += 1) {
+      const r = await diffSnapshotsHandler(ctx, {
+        fromLabel: 'cur-from',
+        toLabel: 'cur-to',
+        limit: 2,
+        ...(cursor !== undefined ? { cursor } : {}),
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      for (const c of r.value.data.added) seen.push(c.id);
+      cursor = r.value.data.nextCursor;
+      if (cursor === undefined) break;
+    }
+    expect(seen.sort()).toEqual(['CustomObject:C0', 'CustomObject:C1', 'CustomObject:C2', 'CustomObject:C3', 'CustomObject:C4']);
+  });
+
+  it('rejects a cursor minted for different labels', async () => {
+    const p1 = await diffSnapshotsHandler(ctx, { fromLabel: 'cur-from', toLabel: 'cur-to', limit: 2 });
+    expect(p1.ok).toBe(true);
+    if (!p1.ok) return;
+    const cursor = p1.value.data.nextCursor!;
+    // Reuse against a different toLabel (identical-a exists from earlier tests).
+    const stale = await diffSnapshotsHandler(ctx, { fromLabel: 'cur-from', toLabel: 'identical-a', limit: 2, cursor });
+    expect(stale.ok).toBe(false);
+    if (stale.ok) return;
+    expect(stale.error.kind).toBe('invalid-query');
+  });
+});
+
 describe('diffSnapshotsInputSchema', () => {
   it('accepts a minimal well-formed input', () => {
     const parsed = diffSnapshotsInputSchema.safeParse({

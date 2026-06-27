@@ -359,6 +359,80 @@ describe('findFieldAnywhereHandler', () => {
   });
 });
 
+describe('findFieldAnywhereHandler — CR-22 section cursor', () => {
+  it('whole-fits omits cursor block (byte-identical golden)', async () => {
+    const r = await findFieldAnywhereHandler(ctx, { targetId: FIELD_ID });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect('nextCursor' in r.value.data).toBe(false);
+    expect('pageInfo' in r.value.data).toBe(false);
+    expect('otherSections' in r.value.data).toBe(false);
+    expect(r.value.data.truncated).toBe(false);
+    // every group carries its full references on a whole-fits call.
+    const apex = r.value.data.groups.find((g) => g.componentType === 'ApexClass');
+    expect(apex?.references.length).toBe(3);
+  });
+
+  it('paging an overflowing section emits nextCursor + discloses the rest', async () => {
+    const r = await findFieldAnywhereHandler(ctx, { targetId: FIELD_ID, limit: 2 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.truncated).toBe(true);
+    expect(r.value.data.designatedList).toBe('ApexClass');
+    expect(r.value.data.nextCursor).toBeDefined();
+    const apex = r.value.data.groups.find((g) => g.componentType === 'ApexClass');
+    expect(apex?.references.length).toBe(2); // page
+    expect(apex?.count).toBe(3); // honest total
+    // non-designated sections carry empty references but their honest count.
+    const flow = r.value.data.groups.find((g) => g.componentType === 'Flow');
+    expect(flow?.references.length).toBe(0);
+    expect(flow?.count).toBe(1);
+    const others = r.value.data.otherSections ?? [];
+    expect(others.find((s) => s.listId === 'Flow')?.totalCount).toBe(1);
+  });
+
+  it('resume walks the designated ApexClass section then rolls forward', async () => {
+    // page1: ApexClass[0..1]. page2 resumes ApexClass[2], then exhausted →
+    // cursor rolls forward to the next non-empty section (Flow).
+    const page1 = await findFieldAnywhereHandler(ctx, { targetId: FIELD_ID, limit: 2 });
+    expect(page1.ok).toBe(true);
+    if (!page1.ok) return;
+    const apex1 = page1.value.data.groups.find((g) => g.componentType === 'ApexClass');
+    expect(apex1?.references.length).toBe(2);
+    const cursor = page1.value.data.nextCursor!;
+    const page2 = await findFieldAnywhereHandler(ctx, { targetId: FIELD_ID, limit: 2, cursor });
+    expect(page2.ok).toBe(true);
+    if (!page2.ok) return;
+    const apex2 = page2.value.data.groups.find((g) => g.componentType === 'ApexClass');
+    expect(apex2?.references.length).toBe(1); // the 3rd apex ref
+    // no dup across pages.
+    const ids = [
+      ...(apex1?.references ?? []),
+      ...(apex2?.references ?? []),
+    ].map((ref) => `${ref.componentId}|${ref.edgeType}|${ref.source}`);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids.length).toBe(3);
+    // cursor rolled forward to the next non-empty section.
+    expect(page2.value.data.designatedList).toBe('Flow');
+  });
+
+  it('rejects a cursor minted for a different field / componentTypes filter', async () => {
+    const p1 = await findFieldAnywhereHandler(ctx, { targetId: FIELD_ID, limit: 2 });
+    expect(p1.ok).toBe(true);
+    if (!p1.ok) return;
+    const cursor = p1.value.data.nextCursor!;
+    const stale = await findFieldAnywhereHandler(ctx, {
+      targetId: FIELD_ID,
+      limit: 2,
+      cursor,
+      componentTypes: ['ApexClass'],
+    });
+    expect(stale.ok).toBe(false);
+    if (stale.ok) return;
+    expect(stale.error.kind).toBe('invalid-query');
+  });
+});
+
 describe('findFieldAnywhereInputSchema', () => {
   it('accepts a valid CustomField id', () => {
     expect(

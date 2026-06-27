@@ -420,6 +420,24 @@ describe('domainClustersHandler — per-cluster member cap (oversize fix)', () =
       expect(big?.members.length).toBeLessThanOrEqual(40); // listed members capped
       expect(big?.membersTruncated).toBe(true);
       expect(Buffer.byteLength(JSON.stringify(d), 'utf8')).toBeLessThanOrEqual(45_000);
+
+      // CR-22: the over-cap cluster is paged — a nextCursor lets the caller
+      // resume PAST member 40 (previously unreachable). Round-trip it.
+      expect(d.nextCursor).toBeDefined();
+      expect(d.designatedList).toBe(big?.id);
+      const page1Ids = new Set((big?.members ?? []).map((m) => m.id));
+      const page2 = await domainClustersHandler(localCtx, {
+        minDensity: 0.1,
+        limit: 50,
+        cursor: d.nextCursor!,
+      });
+      expect(page2.ok).toBe(true);
+      if (!page2.ok) return;
+      const big2 = page2.value.data.clusters.find((c) => c.id === big?.id);
+      expect(big2).toBeDefined();
+      expect((big2?.members.length ?? 0)).toBeGreaterThan(0);
+      // No member appears on both pages (offset resume is dup-free).
+      for (const m of big2?.members ?? []) expect(page1Ids.has(m.id)).toBe(false);
     } finally {
       await closeGraph(s);
       rmSync(dir, { recursive: true, force: true });
@@ -427,5 +445,73 @@ describe('domainClustersHandler — per-cluster member cap (oversize fix)', () =
     // CI runs this 50-node clique through community detection on a constrained
     // runner; the default 5s timeout occasionally trips and the DuckDB native
     // binding then aborts the whole worker (exit 134). 30s gives ample headroom.
+  }, 30_000);
+
+  it('whole-fits (no cluster over 40) omits the cursor block (byte-identical golden)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-domain-wf-'));
+    const opened = await openGraph(join(dir, 'wf.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const s = opened.value;
+    try {
+      // A small dense cluster of 4 — well under the 40-member cap.
+      const ids = ['A', 'B', 'C', 'D'].map((x) => `CustomObject:Sm_${x}__c`);
+      const nodes: Node[] = ids.map((id) => makeNode({ id, type: 'CustomObject', apiName: id }));
+      const edges: Edge[] = [];
+      for (let i = 0; i < ids.length; i++) {
+        for (let j = i + 1; j < ids.length; j++) {
+          edges.push(makeEdge({ fromId: ids[i]!, toId: ids[j]!, edgeType: 'references' }));
+        }
+      }
+      const imp = await importExtractionResults(s, [{ nodes, edges }]);
+      if (!imp.ok) throw new Error(imp.error.message);
+      const localCtx: Context = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s };
+      const r = await domainClustersHandler(localCtx, { minDensity: 0.1 });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.value.data;
+      expect('nextCursor' in d).toBe(false);
+      expect('pageInfo' in d).toBe(false);
+      expect('otherSections' in d).toBe(false);
+      expect('candidateTruncated' in d).toBe(false);
+      expect(d.clusters[0]?.membersTruncated).toBe(false);
+    } finally {
+      await closeGraph(s);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it('rejects a cursor minted for a different minDensity', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-domain-stale-'));
+    const opened = await openGraph(join(dir, 'st.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const s = opened.value;
+    try {
+      const N = 50;
+      const nodes: Node[] = [];
+      const edges: Edge[] = [];
+      for (let i = 0; i < N; i++) {
+        nodes.push(makeNode({ id: `CustomObject:Sx_${i}__c`, type: 'CustomObject', apiName: `Sx_${i}__c` }));
+      }
+      for (let i = 0; i < N; i++) {
+        for (let j = i + 1; j < N; j++) {
+          edges.push(makeEdge({ fromId: `CustomObject:Sx_${i}__c`, toId: `CustomObject:Sx_${j}__c`, edgeType: 'references' }));
+        }
+      }
+      const imp = await importExtractionResults(s, [{ nodes, edges }]);
+      if (!imp.ok) throw new Error(imp.error.message);
+      const localCtx: Context = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s };
+      const p1 = await domainClustersHandler(localCtx, { minDensity: 0.1, limit: 50 });
+      expect(p1.ok).toBe(true);
+      if (!p1.ok) return;
+      const cursor = p1.value.data.nextCursor!;
+      expect(cursor).toBeDefined();
+      const stale = await domainClustersHandler(localCtx, { minDensity: 0.5, limit: 50, cursor });
+      expect(stale.ok).toBe(false);
+      if (stale.ok) return;
+      expect(stale.error.kind).toBe('invalid-query');
+    } finally {
+      await closeGraph(s);
+      rmSync(dir, { recursive: true, force: true });
+    }
   }, 30_000);
 });

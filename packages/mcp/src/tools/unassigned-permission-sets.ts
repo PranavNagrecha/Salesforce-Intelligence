@@ -43,14 +43,25 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listEdges, listNodesByType } from '@sf-intelligence/graph';
+import { countNodesByType, listEdges, listNodesByType } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
 import { readActiveHoldersFor, type HoldersShape } from './facts-block.js';
+import {
+  argsFingerprint,
+  decodeCursor,
+  paginateSection,
+  type PageableSection,
+  type SectionDisclosure,
+} from './page-cursor.js';
+
+/** Per-response byte budget for the designated list's page. */
+const UNASSIGNED_BYTE_BUDGET = 38_000;
 
 /** Inclusive upper bound on `limit`. */
 const UNASSIGNED_MAX_LIMIT = 500;
@@ -75,6 +86,10 @@ export const unassignedPermissionSetsInputSchema = z.object({
     .min(1)
     .max(UNASSIGNED_MAX_LIMIT)
     .optional(),
+  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // truncated page's `nextCursor`; carries the resume offset + which list
+  // (unassigned | orphanedFromComponents) it advances. Omit = today's behavior.
+  cursor: z.string().min(1).optional(),
 });
 
 export type UnassignedPermissionSetsInput = z.infer<
@@ -118,6 +133,27 @@ export interface UnassignedPermissionSetsOutput {
    * FACTUAL zero — the container had no active assignments at the stamp.
    */
   readonly dataShape?: HoldersShape;
+  /**
+   * CR-RV12: TRUE when the >500 node SCAN cap (LIST_PAGE_SIZE) silently dropped
+   * PermissionSet nodes BEFORE the lists/`totalScanned` were computed — so the
+   * answer covers only the first 500 PermissionSets. Present ONLY when actually
+   * true so a ≤500-PS org's golden does not move.
+   */
+  readonly scanTruncated?: boolean;
+  /** CR-RV12: the TRUE org-wide PermissionSet count (only when the scan was capped). */
+  readonly totalPermissionSets?: number;
+  /**
+   * CR-22 opaque continuation token, present ONLY when the designated list
+   * overflowed `limit`/the byte budget. Echo it back as `cursor` to resume;
+   * absent on a whole-fits page so the response is byte-identical.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata for the designated list; truncation only. */
+  readonly pageInfo?: PageInfo;
+  /** Which list the cursor advances; truncation only. */
+  readonly designatedList?: string;
+  /** The non-designated list, disclosed with its full count; truncation only. */
+  readonly otherSections?: readonly SectionDisclosure[];
 }
 
 /**
@@ -318,7 +354,19 @@ export const unassignedPermissionSetsHandler = async (
   const sortedOrphaned = [...orphanedFromComponents].sort(compareById);
   const truncatedUnassigned = sortedUnassigned.length > limit;
   const truncatedOrphaned = sortedOrphaned.length > limit;
+  // KEEP pre-CR-22 `truncated` semantics byte-for-byte; cursor block layered on top.
   const truncated = truncatedUnassigned || truncatedOrphaned;
+
+  // CR-RV12: the PermissionSet scan above is capped at LIST_PAGE_SIZE, so on a
+  // >500-PS org the lists AND `totalScanned` silently under-count. Compare the
+  // TRUE org-wide count against the cap; surface scanTruncated + totalPermissionSets
+  // ONLY when actually capped so a ≤500-PS org's golden does not move.
+  const psCountRes = await countNodesByType(ctx.graph, 'PermissionSet');
+  if (!psCountRes.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${psCountRes.error.message}` });
+  }
+  const totalPermissionSets = psCountRes.value;
+  const scanTruncated = totalPermissionSets > LIST_PAGE_SIZE;
 
   const summary =
     enrichmentStatus === 'tooling-api-fresh' ||
@@ -326,15 +374,62 @@ export const unassignedPermissionSetsHandler = async (
       ? `${sortedUnassigned.length} permission set(s) confirmed unassigned via Tooling API enrichment (${enrichmentStatus}).`
       : `tooling-api enrichment recommended — without it, ${unknownAssignmentCount} permission set(s) cannot have assignment status determined. The 'orphanedFromComponents' list shows those with no structural grant edges as a fallback signal.`;
 
+  // CR-22 section cursor: only ONE list is populated per enrichment path —
+  // `unassigned` in the tooling-api path, `orphanedFromComponents` in the
+  // structural-only path — so designate the populated one and disclose the
+  // other honestly. On resume the handler feeds token.listId back as
+  // designatedListId (paginateSection does NOT cross-check — B0 note).
+  const TOOL = 'sfi.unassigned_permission_sets';
+  const fingerprint = argsFingerprint({
+    includeManagedPackage: includeManaged,
+    includeMutingPermissionSets: includeMuting,
+  });
+  const toolingPath =
+    enrichmentStatus === 'tooling-api-fresh' || enrichmentStatus === 'tooling-api-stale';
+  let designatedListId = toolingPath ? 'unassigned' : 'orphanedFromComponents';
+  let offset = 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+    if (decoded.value.listId !== undefined) designatedListId = decoded.value.listId;
+  }
+
+  const sections: readonly PageableSection<UnassignedPermissionSetEntry>[] = [
+    { listId: 'unassigned', items: sortedUnassigned },
+    { listId: 'orphanedFromComponents', items: sortedOrphaned },
+  ];
+  const pagedResult = paginateSection(sections, designatedListId, {
+    offset,
+    limit,
+    byteBudget: UNASSIGNED_BYTE_BUDGET,
+    keyOf: (e) => e.id,
+    binding: { tool: TOOL, vaultHash: ctx.manifest.sourceTreeHash, argsFingerprint: fingerprint },
+  });
+  if (!pagedResult.ok) return err(pagedResult.error);
+  const paged = pagedResult.value;
+  const emitCursor = paged.pageInfo.nextCursor !== null;
+
+  const unassignedPage =
+    designatedListId === 'unassigned' ? paged.items : sortedUnassigned.slice(0, limit);
+  const orphanedPage =
+    designatedListId === 'orphanedFromComponents' ? paged.items : sortedOrphaned.slice(0, limit);
+
+  // dataShape reads the ids actually surfaced in BOTH emitted lists (same shape
+  // as pre-CR-22 on a whole-fits call).
   const dataShape = await readActiveHoldersFor(ctx, [
-    ...sortedUnassigned.slice(0, limit).map((e) => e.id),
-    ...sortedOrphaned.slice(0, limit).map((e) => e.id),
+    ...unassignedPage.map((e) => e.id),
+    ...orphanedPage.map((e) => e.id),
   ]);
 
   return ok({
     data: {
-      unassigned: sortedUnassigned.slice(0, limit),
-      orphanedFromComponents: sortedOrphaned.slice(0, limit),
+      unassigned: unassignedPage,
+      orphanedFromComponents: orphanedPage,
       unassignedCount: sortedUnassigned.length,
       unknownAssignmentCount,
       totalScanned: filtered.length,
@@ -343,6 +438,15 @@ export const unassignedPermissionSetsHandler = async (
       boundaries: BOUNDARIES,
       truncated,
       ...(dataShape !== undefined ? { dataShape } : {}),
+      ...(scanTruncated ? { scanTruncated: true, totalPermissionSets } : {}),
+      ...(emitCursor
+        ? {
+            nextCursor: paged.pageInfo.nextCursor as string,
+            pageInfo: paged.pageInfo,
+            designatedList: paged.listId,
+            otherSections: paged.otherSections,
+          }
+        : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

@@ -1510,6 +1510,8 @@ const EFFECTIVE_PERMISSIONS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       permissionSetIds: { type: 'array', items: { type: 'string', minLength: 1 } },
       limit: { type: 'number', minimum: 1, maximum: 200 },
       offset: { type: 'number', minimum: 0 },
+      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      cursor: { type: 'string', minLength: 1 },
     },
   });
 
@@ -1919,6 +1921,8 @@ const DIFF_SNAPSHOTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       fromLabel: { type: 'string', minLength: 1 },
       toLabel: { type: 'string', minLength: 1 },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
+      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      cursor: { type: 'string', minLength: 1 },
     },
     required: ['fromLabel', 'toLabel'],
   });
@@ -2060,6 +2064,8 @@ const FIELD_360_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
         enum: ['source', 'edge-type', 'confidence'],
       },
       maxRowsPerSection: { type: 'integer', minimum: 1, maximum: 200 },
+      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      cursor: { type: 'string', minLength: 1 },
     },
     required: ['fieldId'],
   });
@@ -2116,6 +2122,8 @@ const DOMAIN_CLUSTERS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     properties: {
       minDensity: { type: 'number', minimum: 0, maximum: 1 },
       limit: { type: 'integer', minimum: 1, maximum: 50 },
+      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      cursor: { type: 'string', minLength: 1 },
     },
   });
 
@@ -2413,6 +2421,8 @@ const PROCESS_BUILDER_MIGRATION_CANDIDATES_INPUT_SCHEMA: Readonly<
       enum: ['complexity', 'object', 'name'],
     },
     limit: { type: 'integer', minimum: 1, maximum: 500 },
+    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    cursor: { type: 'string', minLength: 1 },
   },
 });
 
@@ -2428,6 +2438,8 @@ const UNASSIGNED_PERMISSION_SETS_INPUT_SCHEMA: Readonly<
     includeManagedPackage: { type: 'boolean' },
     includeMutingPermissionSets: { type: 'boolean' },
     limit: { type: 'integer', minimum: 1, maximum: 500 },
+    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    cursor: { type: 'string', minLength: 1 },
   },
 });
 
@@ -2538,6 +2550,8 @@ const EMPTY_QUEUES_AND_GROUPS_INPUT_SCHEMA: Readonly<
     type: { type: 'string', enum: ['Queue', 'Group', 'both'] },
     includeManagedPackage: { type: 'boolean' },
     limit: { type: 'integer', minimum: 1, maximum: 500 },
+    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    cursor: { type: 'string', minLength: 1 },
   },
 });
 
@@ -2716,6 +2730,9 @@ const VALUE_CHANGE_AUDIT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       object: { type: 'string', minLength: 1 },
       fields: { type: 'array', items: { type: 'string' } },
       verbosity: { type: 'string', enum: ['summary', 'detail'] },
+      limit: { type: 'integer', minimum: 1, maximum: 200 },
+      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      cursor: { type: 'string', minLength: 1 },
     },
     required: ['object'],
     additionalProperties: false,
@@ -3283,6 +3300,8 @@ const FIND_FIELD_ANYWHERE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
         type: 'array',
         items: { type: 'string', minLength: 1 },
       },
+      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      cursor: { type: 'string', minLength: 1 },
     },
     anyOf: [{ required: ['targetId'] }, { required: ['fieldId'] }],
   });
@@ -4315,7 +4334,7 @@ export const V01_TOOLS: readonly ToolDefinition[] = [
   {
     name: 'sfi.diff_snapshots',
     description:
-      "Compare two captured vault snapshots and report the structural diff. `fromLabel` and `toLabel` name persisted snapshots under `{vaultRoot}/snapshots/`; the special value `'current'` for `toLabel` triggers a transient capture of the live graph (no persisted artefact). Returns `added` (ids in `to` but not `from`), `removed` (ids in `from` but not `to`), and `modified` (ids present in both whose canonicalized properties or structural identity changed). Each entry carries the component's `id`, `type`, and `apiName`. `summary` reports the full per-bucket counts; the emitted arrays are trimmed to `limit` (default 100, max 500) and `truncated` flips true when the total exceeds `limit`. Edges are NOT surfaced in the v2.0c output — re-query a specific component pair via `sfi.compare_components` for edge-level detail. `invalid-query` when either label is unknown.",
+      "Compare two captured vault snapshots and report the structural diff. `fromLabel` and `toLabel` name persisted snapshots under `{vaultRoot}/snapshots/`; the special value `'current'` for `toLabel` triggers a transient capture of the live graph (no persisted artefact). Returns `added` (ids in `to` but not `from`), `removed` (ids in `from` but not `to`), and `modified` (ids present in both whose canonicalized properties or structural identity changed). Each entry carries the component's `id`, `type`, and `apiName`. `summary` reports the full per-bucket counts; the emitted arrays are trimmed to `limit` (default 100, max 500) and `truncated` flips true when the total exceeds `limit`. When a diff is large, ONE list (the largest) is paged via `nextCursor`; the other two are disclosed by full count in `summary` + `otherSections` (echo `nextCursor` back as `cursor` to advance). Edges are NOT surfaced in the v2.0c output — re-query a specific component pair via `sfi.compare_components` for edge-level detail. `invalid-query` when either label is unknown.",
     inputSchema: DIFF_SNAPSHOTS_INPUT_SCHEMA,
   },
   {
@@ -4375,7 +4394,7 @@ export const V01_TOOLS: readonly ToolDefinition[] = [
   {
     name: 'sfi.domain_clusters',
     description:
-      "Cluster the org's CustomObject + ApexClass + Flow nodes into SUGGESTED domain groupings using a greedy shared-edge-density algorithm. Pairs candidate components, computes density as `|shared neighbors| / max(degree(A), degree(B))`, and groups candidates whose density meets the `minDensity` threshold (default 0.3, range [0.0, 1.0]). Each cluster is named after its highest-degree CustomObject (\"{ApiName}-centered domain (suggested grouping)\") so the heuristic provenance is visible in the label itself. Returns up to `limit` clusters (default 10, max 50), sorted by member count DESC, plus an `unclustered` count of candidates that didn't meet the density bar with anyone. Each cluster lists up to 40 `members` with the true `memberCount` + `membersTruncated` (so one large domain can't blow the response), and a per-response ~36 KB byte budget trims the cluster count further if needed (with a `note`) so the result never trips the global ~45 KB MCP response limit. Honesty axis (load-bearing): clusters are HEURISTIC — they reflect topology, not semantics. A real org's domain boundaries are decided by humans; this tool surfaces \"these components share many edges\" as a starting point for further investigation, never as a confirmed domain assignment.",
+      "Cluster the org's CustomObject + ApexClass + Flow nodes into SUGGESTED domain groupings using a greedy shared-edge-density algorithm. Pairs candidate components, computes density as `|shared neighbors| / max(degree(A), degree(B))`, and groups candidates whose density meets the `minDensity` threshold (default 0.3, range [0.0, 1.0]). Each cluster is named after its highest-degree CustomObject (\"{ApiName}-centered domain (suggested grouping)\") so the heuristic provenance is visible in the label itself. Returns up to `limit` clusters (default 10, max 50), sorted by member count DESC, plus an `unclustered` count of candidates that didn't meet the density bar with anyone. Each cluster lists up to 40 `members` with the true `memberCount` + `membersTruncated` (so one large domain can't blow the response), and a per-response ~36 KB byte budget trims the cluster count further if needed (with a `note`) so the result never trips the global ~45 KB MCP response limit. When a cluster has more than 40 members, that cluster is paged via `nextCursor` (echo it back as `cursor` to walk its members); `candidateTruncated` flags a >500-per-type candidate scan. Honesty axis (load-bearing): clusters are HEURISTIC — they reflect topology, not semantics. A real org's domain boundaries are decided by humans; this tool surfaces \"these components share many edges\" as a starting point for further investigation, never as a confirmed domain assignment.",
     inputSchema: DOMAIN_CLUSTERS_INPUT_SCHEMA,
   },
   {
@@ -4435,7 +4454,7 @@ export const V01_TOOLS: readonly ToolDefinition[] = [
   {
     name: 'sfi.process_builder_migration_candidates',
     description:
-      "v2.4 legacy-automation tool: list active Process Builder (Flow with `processType: 'Workflow'`), WorkflowRule, and ApprovalProcess nodes as migration candidates with per-rule complexity ('simple' / 'moderate' / 'complex') and a migration-notes paragraph. Defaults: `activeOnly: true` (inactive rules are deletion candidates surfaced by `sfi.unused_components`), `includeWorkflowRules: true`, `includeApprovalProcesses: true`, `sortBy: 'complexity'` (easy migrations first). Complexity is heuristic based on edge counts, criteria-item count, and time-trigger presence. Honesty axis (verbatim): the migration tool itself (Setup → Migrate to Flow) does not run here — this tool produces the inventory. Complexity classification may rank a single-decision rule as 'simple' even when its business logic requires manual rewrite.",
+      "v2.4 legacy-automation tool: list active Process Builder (Flow with `processType: 'Workflow'`), WorkflowRule, and ApprovalProcess nodes as migration candidates with per-rule complexity ('simple' / 'moderate' / 'complex') and a migration-notes paragraph. Defaults: `activeOnly: true` (inactive rules are deletion candidates surfaced by `sfi.unused_components`), `includeWorkflowRules: true`, `includeApprovalProcesses: true`, `sortBy: 'complexity'` (easy migrations first). Complexity is heuristic based on edge counts, criteria-item count, and time-trigger presence. Honesty axis (verbatim): the migration tool itself (Setup → Migrate to Flow) does not run here — this tool produces the inventory. Complexity classification may rank a single-decision rule as 'simple' even when its business logic requires manual rewrite. When a list is large, ONE list is paged via `nextCursor` and the other two are disclosed by full count + `otherSections`; `scanTruncated` flags a >500-node type scan.",
     inputSchema: PROCESS_BUILDER_MIGRATION_CANDIDATES_INPUT_SCHEMA,
   },
   {
@@ -4662,7 +4681,7 @@ export const V01_TOOLS: readonly ToolDefinition[] = [
   {
     name: 'sfi.find_field_anywhere',
     description:
-      "v2.2 universal-search surface — answers 'where is this field used anywhere in the org?' for one CustomField id, passed as `targetId` or its alias `fieldId` (field-tool-family parity). Walks every incoming non-parentOf edge to the field and groups the referrers by ComponentType: ApexClass / ApexTrigger reads/writes, Flow record-ops, Layout placements, ValidationRule formula refs, SharingRule criteria refs, etc. Each reference carries the referrer's identity, the edge type (`readsFrom` / `writesTo` / `references` / `usedInLayout`), the edge's source extractor, the stored confidence (`declared` for layout/formula edges, `heuristic` for apex-scanner/lwc-scanner edges), and the per-edge properties. Returns `byEdgeType` counts across the FULL set (not the truncated slice). Honesty axis (verbatim): dynamic SOQL strings, reflective field access (`obj.get('FieldName')`), and managed-package code are invisible to the graph edges this tool walks. Invalid prefix → `invalid-query`.",
+      "v2.2 universal-search surface — answers 'where is this field used anywhere in the org?' for one CustomField id, passed as `targetId` or its alias `fieldId` (field-tool-family parity). Walks every incoming non-parentOf edge to the field and groups the referrers by ComponentType: ApexClass / ApexTrigger reads/writes, Flow record-ops, Layout placements, ValidationRule formula refs, SharingRule criteria refs, etc. Each reference carries the referrer's identity, the edge type (`readsFrom` / `writesTo` / `references` / `usedInLayout`), the edge's source extractor, the stored confidence (`declared` for layout/formula edges, `heuristic` for apex-scanner/lwc-scanner edges), and the per-edge properties. Returns `byEdgeType` counts across the FULL set (not the truncated slice). When a ComponentType bucket overflows `limit`, that section is paged via `nextCursor` and the rest are disclosed by count + `otherSections` (echo `nextCursor` back as `cursor` to walk section-by-section). Honesty axis (verbatim): dynamic SOQL strings, reflective field access (`obj.get('FieldName')`), and managed-package code are invisible to the graph edges this tool walks. Invalid prefix → `invalid-query`.",
     inputSchema: FIND_FIELD_ANYWHERE_INPUT_SCHEMA,
   },
   {

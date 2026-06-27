@@ -141,6 +141,97 @@ describe('effectivePermissionsHandler', () => {
   });
 });
 
+describe('effectivePermissionsHandler — CR-22 section cursor', () => {
+  let dir: string;
+  let st: GraphStore;
+  let cx: Context;
+
+  // A PermissionSet granting read on FIVE objects so the object list can page.
+  const objs = ['Acct', 'Bus', 'Cse', 'Deal', 'Evt'];
+  const multiSeed: ExtractionResult = {
+    nodes: [
+      node({ id: 'PermissionSet:Many', type: 'PermissionSet', apiName: 'Many', properties: { userPermissions: ['ApiEnabled'] } }),
+      node({ id: 'PermissionSet:Other', type: 'PermissionSet', apiName: 'Other', properties: {} }),
+      ...objs.map((o) => node({ id: `CustomObject:${o}`, type: 'CustomObject', apiName: o })),
+    ],
+    edges: [
+      ...objs.map((o) =>
+        edge({ fromId: 'PermissionSet:Many', toId: `CustomObject:${o}`, edgeType: 'grantedBy', properties: { allowRead: true } }),
+      ),
+      edge({ fromId: 'PermissionSet:Other', toId: 'CustomObject:Acct', edgeType: 'grantedBy', properties: { allowRead: true } }),
+    ],
+  };
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-eff-perms-cursor-'));
+    const opened = await openGraph(join(dir, 'g.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    st = opened.value;
+    const imported = await importExtractionResults(st, [multiSeed]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    cx = { vaultRoot: dir, manifest: MANIFEST, graph: st };
+  });
+  afterAll(async () => {
+    await closeGraph(st);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('whole-fits omits cursor block (byte-identical golden)', async () => {
+    const r = await effectivePermissionsHandler(cx, { permissionSetIds: ['PermissionSet:Many'] });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect('nextCursor' in r.value.data).toBe(false);
+    expect('pageInfo' in r.value.data).toBe(false);
+    expect('otherSections' in r.value.data).toBe(false);
+    expect(r.value.data.truncated).toBe(false);
+    expect(r.value.data.objectPermissions.length).toBe(5);
+  });
+
+  it('paging the object list emits nextCursor + discloses the system list', async () => {
+    const r = await effectivePermissionsHandler(cx, { permissionSetIds: ['PermissionSet:Many'], limit: 2 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.objectPermissions.length).toBe(2);
+    expect(r.value.data.truncated).toBe(true);
+    expect(r.value.data.nextCursor).toBeDefined();
+    expect(r.value.data.designatedList).toBe('object');
+    const others = r.value.data.otherSections ?? [];
+    const sys = others.find((s) => s.listId === 'system');
+    expect(sys?.totalCount).toBe(1); // ApiEnabled
+    // summary still holds the full object count.
+    expect(r.value.data.summary.objects).toBe(5);
+  });
+
+  it('resume walks the object list with no dup/skip', async () => {
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < 5; i += 1) {
+      const r = await effectivePermissionsHandler(cx, {
+        permissionSetIds: ['PermissionSet:Many'],
+        limit: 2,
+        ...(cursor !== undefined ? { cursor } : {}),
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      for (const o of r.value.data.objectPermissions) seen.push(o.object);
+      cursor = r.value.data.nextCursor;
+      if (cursor === undefined) break;
+    }
+    expect([...seen].sort()).toEqual(objs.slice().sort());
+  });
+
+  it('rejects a cursor minted for different containers', async () => {
+    const p1 = await effectivePermissionsHandler(cx, { permissionSetIds: ['PermissionSet:Many'], limit: 2 });
+    expect(p1.ok).toBe(true);
+    if (!p1.ok) return;
+    const cursor = p1.value.data.nextCursor!;
+    const stale = await effectivePermissionsHandler(cx, { permissionSetIds: ['PermissionSet:Other'], cursor, limit: 2 });
+    expect(stale.ok).toBe(false);
+    if (stale.ok) return;
+    expect(stale.error.kind).toBe('invalid-query');
+  });
+});
+
 /** Assert the at-least-one-container refine without pulling zod in directly. */
 function effectivePermissionsInputSchemaSafe(input: unknown): boolean {
   return effectivePermissionsInputSchema.safeParse(input).success;
