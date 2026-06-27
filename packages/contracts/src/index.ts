@@ -768,3 +768,80 @@ export interface McpError {
    */
   readonly resolveSuggestions?: readonly ResolveSuggestion[];
 }
+
+// ============================================================================
+// Continuation-cursor pagination (CR-22)
+// ============================================================================
+
+/**
+ * Decoded shape of a CR-22 continuation cursor. The cursor is an OPAQUE,
+ * versioned, per-handler token: a caller receives `PageInfo.nextCursor` (a
+ * base64url string), treats it as a black box, and echoes it back on the next
+ * call. This is the post-decode struct the handler reasons over — never
+ * something a caller constructs by hand.
+ *
+ * A cursor is bound to ONE specific query: the tool that minted it (`t`), the
+ * vault it was minted against (`h` = `vaultState.sourceTreeHash`), and a
+ * fingerprint of the narrowing args (`q`). On resume the handler re-validates
+ * all three; ANY mismatch (different tool, refreshed vault, changed filters)
+ * means the cursor is stale and the caller must restart without it.
+ *
+ * The cursor is emitted ONLY when a page was truncated (over the byte budget OR
+ * over `limit`). A request with no cursor behaves exactly as today: offset 0,
+ * default limit — so adding a cursor never moves an in-budget golden response.
+ */
+export interface PageCursorToken {
+  /** Protocol version. Bumped if the encoding changes; a stale `v` is rejected. */
+  readonly v: number;
+  /** Tool name the cursor was minted for (e.g. `sfi.get_edges`). */
+  readonly t: string;
+  /** `sourceTreeHash` of the vault the cursor was minted against. */
+  readonly h: string;
+  /** Resume offset into the designated list (safe non-negative integer). */
+  readonly o: number;
+  /**
+   * Optional total-order tiebreak key (e.g. the last row's edge-PK / id) of the
+   * last item on the prior page. RESERVED for a future shift-tolerant resume —
+   * it is stamped onto the cursor but NOT yet consulted on resume (resume uses
+   * the `o` offset only). With offset-only resume, a front-deletion between
+   * pages can still skip/dup; `k` exists so a later batch can wire key-anchored
+   * resume without an encoding change. Validated as a string.
+   */
+  readonly k?: string;
+  /**
+   * Optional scan offset for tools that walk a capped node scan separately from
+   * the page offset (safe non-negative integer).
+   */
+  readonly s?: number;
+  /** Fingerprint of the query's narrowing args — guards against arg drift. */
+  readonly q?: string;
+  /**
+   * Optional list/section identifier for the multi-list and section-cursor
+   * variants (e.g. `'object'` vs `'system'`). Absent for a flat single list.
+   */
+  readonly listId?: string;
+}
+
+/**
+ * Pagination metadata a cursor-aware handler attaches to its `data` payload.
+ * `jsonResult` DETECTS this block (a `nextCursor`/`pageInfo`) and skips its own
+ * approximate `nextOffset` computation — the handler's cursor wins.
+ *
+ * `nextCursor` is present ONLY on a truncated page. When the list is exhausted
+ * it is `null` and `hasMore` is `false`, so a caller loops `while (hasMore)`.
+ * `limit`/`offset` remain on the payload for backward compatibility.
+ */
+export interface PageInfo {
+  /** Total items matching the query BEFORE paging (the designated list). */
+  readonly totalCount: number;
+  /** Items returned in THIS page. */
+  readonly returnedCount: number;
+  /** True when more items remain past this page. */
+  readonly hasMore: boolean;
+  /**
+   * Opaque continuation token to fetch the next page, or `null` when exhausted.
+   * Present ONLY on a truncated page; echo it back verbatim as the `cursor`
+   * input. A caller MUST NOT parse or construct it.
+   */
+  readonly nextCursor: string | null;
+}
