@@ -6,6 +6,7 @@ import {
   type HighFanoutBoundKind,
 } from '../src/oversize-enumeration.js';
 import type { ToolLike } from '../src/response-consistency.js';
+import { V01_TOOLS } from '../src/tools/index.js';
 
 const tool = (name: string, props: string[]): ToolLike => ({
   name,
@@ -78,5 +79,26 @@ describe('analyzeOversizeEnumeration', () => {
     expect(kinds.has('graph-payload-budget')).toBe(true);
     expect(kinds.has('handler-capped')).toBe(true);
     expect(kinds.has('global-response-budget')).toBe(true);
+  });
+
+  // CR-22 regression: the strengthened `paginated`-requires-a-resume-knob audit
+  // must pass against the REAL roster schemas, not only synthesized tools. The
+  // synthesized happy-path test above always stamps `offset`, so it gave false
+  // confidence while 22 real top-N truncators were mislabeled `paginated`. This
+  // pins the gate at the unit level (the qa harness checks the same thing with
+  // a real high-fanout org probe set).
+  it('every `paginated` inventory tool exposes a real resume knob in V01_TOOLS', () => {
+    const roster = new Map(V01_TOOLS.map((t) => [t.name, t]));
+    const offenders: string[] = [];
+    for (const [name, entry] of Object.entries(HIGH_FANOUT_INVENTORY)) {
+      if (entry.bound !== 'paginated') continue;
+      const props = roster.get(name)?.inputSchema?.properties ?? {};
+      const hasLimit = (props as Record<string, unknown>)['limit'] !== undefined;
+      const hasResume =
+        (props as Record<string, unknown>)['offset'] !== undefined ||
+        (props as Record<string, unknown>)['cursor'] !== undefined;
+      if (!hasLimit || !hasResume) offenders.push(name);
+    }
+    expect(offenders).toEqual([]);
   });
 });

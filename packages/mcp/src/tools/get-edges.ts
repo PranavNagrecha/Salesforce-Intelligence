@@ -20,12 +20,15 @@ import {
   type Edge,
   type McpError,
   type McpResponse,
+  type PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { listEdges } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
+
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 
 /**
  * The `ConfidenceLevel` values declared by `@sf-intelligence/contracts`.
@@ -81,6 +84,10 @@ export const getEdgesInputSchema = z.object({
   confidence: z.enum(CONFIDENCE_LEVELS).optional(),
   limit: z.number().int().positive().max(GET_EDGES_MAX_LIMIT).optional(),
   offset: z.number().int().nonnegative().optional(),
+  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // truncated page's `nextCursor`. When present it supplies the resume offset;
+  // omitting it = today's behavior (offset 0 / explicit `offset`).
+  cursor: z.string().min(1).optional(),
 });
 
 /** Parsed input shape, inferred from `getEdgesInputSchema`. */
@@ -94,8 +101,16 @@ export interface GetEdgesOutput {
   readonly totalCount: number;
   /** True when more edges remain past this page. */
   readonly hasMore: boolean;
-  /** Cursor for the next page, or `null` when the list is exhausted. */
+  /** Approximate next offset (legacy), or `null` when the list is exhausted. */
   readonly nextOffset: number | null;
+  /**
+   * CR-22 opaque continuation token, present ONLY when this page was truncated
+   * (over `limit` OR over the byte budget). Echo it back as `cursor` to resume.
+   * Absent on a whole-fits page so an in-budget response stays byte-identical.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
   /** Present only when the page was byte-trimmed below `limit` to fit the budget. */
   readonly note?: string;
 }
@@ -133,41 +148,61 @@ export const getEdgesHandler = async (
     });
   }
 
-  // Page the result so a hub node can't overflow the response. `listEdges`
-  // returns the full (filtered) list — capping it there would starve the
-  // analysis tools that depend on the complete edge set; the paging is a
-  // presentation concern, so it lives here.
-  const all = queryResult.value;
-  const total = all.length;
-  const offset = input.offset ?? 0;
-  const limit = input.limit ?? GET_EDGES_DEFAULT_LIMIT;
-  let page = all.slice(offset, offset + limit);
-
-  // Byte-budget backstop: even a limited page can exceed the budget when edges
-  // carry fat properties, so trim trailing edges until the slice fits.
-  let trimmed = false;
-  while (
-    page.length > 1 &&
-    Buffer.byteLength(JSON.stringify(page), 'utf8') > GET_EDGES_BYTE_BUDGET
-  ) {
-    page = page.slice(0, -1);
-    trimmed = true;
+  // Resolve the resume offset: an echoed CR-22 cursor wins over an explicit
+  // `offset`; ANY stale/forged cursor (wrong tool/vault/filters) is rejected
+  // with `invalid-query` rather than silently paging the wrong result set.
+  const fingerprint = argsFingerprint({
+    nodeId: input.nodeId,
+    ...(input.direction !== undefined ? { direction: input.direction } : {}),
+    ...(input.edgeType !== undefined ? { edgeType: input.edgeType } : {}),
+    ...(input.confidence !== undefined ? { confidence: input.confidence } : {}),
+  });
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: 'sfi.get_edges',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
   }
 
-  const returned = offset + page.length;
-  const hasMore = returned < total;
-  const note = trimmed
-    ? `Page byte-trimmed to ${page.length} of the requested ${limit} edge(s) to ` +
-      `stay under the ~45 KB MCP response limit. Advance with offset=${returned}, ` +
+  // Page the result so a hub node can't overflow the response. `listEdges`
+  // returns the full (filtered) list (now in a stable total order) — capping it
+  // there would starve the analysis tools that depend on the complete edge set;
+  // the paging is a presentation concern, so it lives here.
+  const limit = input.limit ?? GET_EDGES_DEFAULT_LIMIT;
+  const paged = paginateLegacy(queryResult.value, {
+    offset,
+    limit,
+    byteBudget: GET_EDGES_BYTE_BUDGET,
+    binding: {
+      tool: 'sfi.get_edges',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+
+  // The `note` (and `nextCursor`/`pageInfo`) are emitted ONLY on a byte-trimmed
+  // page, so an in-budget response is byte-identical to the pre-CR-22 shape.
+  const note = paged.byteTrimmed
+    ? `Page byte-trimmed to ${paged.items.length} of the requested ${limit} edge(s) to ` +
+      `stay under the ~45 KB MCP response limit. Advance with the returned nextCursor ` +
+      `(or offset=${paged.nextOffset ?? paged.totalCount}), ` +
       `or narrow with edgeType/direction/confidence.`
     : undefined;
+  // Emit the cursor block only when truncated (byte-trim OR over limit), i.e.
+  // exactly when `paginateLegacy` produced a non-null nextCursor.
+  const emitCursor = paged.nextCursor !== null;
 
   return ok({
     data: {
-      edges: page,
-      totalCount: total,
-      hasMore,
-      nextOffset: hasMore ? returned : null,
+      edges: paged.items,
+      totalCount: paged.totalCount,
+      hasMore: paged.hasMore,
+      nextOffset: paged.nextOffset,
+      ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
       ...(note !== undefined ? { note } : {}),
     },
     vaultState: {

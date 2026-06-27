@@ -28,6 +28,7 @@ import type {
   Edge,
   McpError,
   McpResponse,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
@@ -35,6 +36,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { resolveToFieldOrSuggest } from './resolve-field-or-suggest.js';
 
 /**
@@ -69,6 +71,11 @@ export const findFormulaReferencesInputSchema = z.object({
    * blast-radius tool must never silently drop referencers.
    */
   offset: z.number().int().nonnegative().optional(),
+  /**
+   * CR-22 continuation cursor: opaque token from a prior truncated page's
+   * `nextCursor`; supplies the resume offset. Omit for today's behavior.
+   */
+  cursor: z.string().min(1).optional(),
 });
 
 /** Parsed input shape, inferred from `findFormulaReferencesInputSchema`. */
@@ -118,8 +125,16 @@ export interface FindFormulaReferencesOutput {
   readonly limit?: number;
   /** True when more referencers remain past this page. */
   readonly hasMore?: boolean;
-  /** Cursor for the next page, or `null` when the list is exhausted. */
+  /** Approximate next offset (legacy), or `null` when the list is exhausted. */
   readonly nextOffset?: number | null;
+  /**
+   * CR-22 opaque continuation token, present ONLY when this page is truncated
+   * (more referencers remain). Echo it back as `cursor` to resume. Absent on a
+   * complete page so an in-budget response is byte-identical to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
   /** Present only when the page is truncated below the true total. */
   readonly note?: string;
 }
@@ -210,19 +225,54 @@ export const findFormulaReferencesHandler = async (
   // CR-13: page after sorting so truncation is stable AND disclosed. `total`
   // is the full pre-slice count of returnable referencers; the `note` (omitted
   // when the page is complete, mirroring get_edges) discloses an incomplete page.
-  const ordered = referencers.sort((a, b) =>
-    a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
-  );
-  const total = ordered.length;
-  const offset = input.offset ?? 0;
-  const page = ordered.slice(offset, offset + limit);
+  // TOTAL ORDER: `id` ASC then `source` ASC — a single `fromId` (= `id`) can
+  // hold more than one `references` edge to the same field, differing only by
+  // `source` (edge PK is (from_id,to_id,edge_type,source) with to_id/edge_type
+  // fixed here), so `source` is the unique final tiebreak CR-22 resume needs.
+  const ordered = referencers.sort((a, b) => {
+    if (a.id !== b.id) return a.id < b.id ? -1 : 1;
+    if (a.source !== b.source) return a.source < b.source ? -1 : 1;
+    return 0;
+  });
+
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset);
+  // a stale/forged cursor (changed fieldId, different tool, refreshed vault) is
+  // rejected with invalid-query.
+  const fingerprint = argsFingerprint({ fieldId: input.fieldId });
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: 'sfi.find_formula_references',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  // No per-handler byte budget (offset/limit only) — set an effectively-
+  // unbounded byteBudget so `paginate()` truncates only on `limit`, keeping the
+  // output byte-identical to the prior open-coded slice. Global guard backstops.
+  const paged = paginateLegacy(ordered, {
+    offset,
+    limit,
+    byteBudget: Number.MAX_SAFE_INTEGER,
+    binding: {
+      tool: 'sfi.find_formula_references',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const page = paged.items;
+  const total = paged.totalCount;
+  const hasMore = paged.hasMore;
   const returned = offset + page.length;
-  const hasMore = returned < total;
   const note = hasMore
     ? `Showing ${page.length} of ${total} formula reference(s) (offset=${offset}). ` +
       `MORE remain — advance with offset=${returned}. This list is INCOMPLETE; ` +
       `do not treat it as the full blast radius.`
     : undefined;
+  const emitCursor = paged.nextCursor !== null;
 
   return ok({
     data: {
@@ -232,6 +282,7 @@ export const findFormulaReferencesHandler = async (
       limit,
       hasMore,
       nextOffset: hasMore ? returned : null,
+      ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
       ...(note !== undefined ? { note } : {}),
     },
     vaultState: {

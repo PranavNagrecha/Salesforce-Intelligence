@@ -61,6 +61,7 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { listNodesByType } from '@sf-intelligence/graph';
@@ -69,6 +70,7 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { partitionByBaseline } from './finding-suppression.js';
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { nodeScanLimit, scanHitCap, scanTruncationNote } from './scan-cap.js';
 
 const CRUD_FLS_TOOL = 'sfi.crud_fls_audit';
@@ -134,6 +136,9 @@ export const crudFlsAuditInputSchema = z.object({
     .max(CRUD_FLS_MAX_LIMIT)
     .optional(),
   offset: z.number().int().min(0).optional(),
+  // CR-22 continuation cursor: opaque token from a prior truncated page's
+  // nextCursor; supplies the resume offset. Omit for today's behavior.
+  cursor: z.string().min(1).optional(),
 });
 
 /** Parsed input shape. */
@@ -186,6 +191,15 @@ export interface CrudFlsAuditOutput {
    */
   readonly nextOffset?: number;
   /**
+   * CR-22 opaque continuation token, present ONLY when this page is truncated
+   * (more classes remain — over `limit` OR byte-trimmed). Echo it back as
+   * `cursor` to resume. Absent on a complete page so an in-budget response is
+   * byte-identical to the pre-CR-22 shape.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
+  /**
    * Set when the class page was byte-trimmed below the global ~45 KB response
    * limit (fewer classes than `limit` despite more matching). Names the trim
    * and how to advance.
@@ -227,35 +241,12 @@ const trimEntryFindings = (
 };
 
 /**
- * Trim a class page to the largest sort-ordered prefix whose serialized size
- * fits `budgetBytes`. A fixed `limit` cannot bound bytes — a class with many
- * findings is large — so only a byte budget guarantees the response clears the
- * global guard. Always keeps at least one class (byte-trimming its findings if
- * that single class is itself oversized).
+ * NOTE: the per-page class byte-trim is now done by the shared `paginate()`
+ * pager (CR-22). `trimEntryFindings` is still used directly as the pager's
+ * `slimItem` forward-progress hook so a single oversized class has its nested
+ * `findings` trimmed (and `findingsTruncated` flagged) — behaviorally identical
+ * to the previous open-coded `fitClassesToBudget`.
  */
-const fitClassesToBudget = (
-  classes: readonly CrudFlsAuditClassEntry[],
-  budgetBytes: number,
-): {
-  readonly kept: readonly CrudFlsAuditClassEntry[];
-  readonly trimmed: boolean;
-} => {
-  const kept: CrudFlsAuditClassEntry[] = [];
-  let used = 0;
-  for (const entry of classes) {
-    const size = Buffer.byteLength(JSON.stringify(entry), 'utf8') + 1;
-    if (kept.length === 0 && size > budgetBytes) {
-      kept.push(trimEntryFindings(entry, budgetBytes));
-      return { kept, trimmed: true };
-    }
-    if (kept.length > 0 && used + size > budgetBytes) {
-      return { kept, trimmed: true };
-    }
-    kept.push(entry);
-    used += size;
-  }
-  return { kept, trimmed: false };
-};
 
 interface QualityIssueLike {
   readonly rule: string;
@@ -372,14 +363,45 @@ export const crudFlsAuditHandler = async (
   }
 
   const classes = [...perClass.values()].sort(compareClassById);
-  const offset = input.offset ?? 0;
-  const page = classes.slice(offset, offset + limit);
-  const { kept, trimmed } = fitClassesToBudget(
-    page,
-    CRUD_FLS_PAYLOAD_BUDGET_BYTES,
-  );
-  const returnedEnd = offset + kept.length;
-  const truncated = returnedEnd < classes.length;
+
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset);
+  // crud_fls_audit has no narrowing args beyond paging, so the fingerprint is
+  // over the empty arg set — a stale token (different tool / refreshed vault)
+  // is still rejected via the tool+vaultHash bind-check.
+  const fingerprint = argsFingerprint({});
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: 'sfi.crud_fls_audit',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  // The pre-byte-trim window size feeds the byte-identical note (`X of Y
+  // classes`). `paginate()` applies the SAME largest-prefix byte-trim the
+  // handler used to open-code (verified equivalent kept-set), and the
+  // `slimItem` hook reuses `trimEntryFindings` so a single oversized class has
+  // its nested `findings` trimmed (and `findingsTruncated` flagged) exactly as
+  // before.
+  const windowSize = classes.slice(offset, offset + limit).length;
+  const paged = paginateLegacy(classes, {
+    offset,
+    limit,
+    byteBudget: CRUD_FLS_PAYLOAD_BUDGET_BYTES,
+    slimItem: (entry) => trimEntryFindings(entry, CRUD_FLS_PAYLOAD_BUDGET_BYTES),
+    binding: {
+      tool: 'sfi.crud_fls_audit',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const kept = paged.items;
+  const trimmed = paged.byteTrimmed;
+  const truncated = paged.hasMore;
+  const emitCursor = paged.nextCursor !== null;
 
   const boundaries: string[] =
     classes.length === 0
@@ -409,11 +431,12 @@ export const crudFlsAuditHandler = async (
       limit,
       offset,
       truncated,
-      ...(truncated ? { nextOffset: returnedEnd } : {}),
+      ...(truncated ? { nextOffset: offset + kept.length } : {}),
+      ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
       ...(trimmed
         ? {
             note:
-              `Response trimmed to ${kept.length} of ${page.length} classes ` +
+              `Response trimmed to ${kept.length} of ${windowSize} classes ` +
               `(${classes.length} total) to stay under the ~45 KB MCP ` +
               `response limit. Advance with offset += ${kept.length} for the rest.`,
           }

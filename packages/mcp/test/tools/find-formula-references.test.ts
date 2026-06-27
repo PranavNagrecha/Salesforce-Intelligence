@@ -298,6 +298,63 @@ describe('findFormulaReferencesHandler', () => {
   });
 });
 
+describe('findFormulaReferencesHandler — CR-22 continuation cursor', () => {
+  const FIELD = 'CustomField:Account.Industry__c';
+
+  it('in-budget whole-fits call emits NO cursor/pageInfo (byte-identical)', async () => {
+    const result = await findFormulaReferencesHandler(ctx, { fieldId: FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect('nextCursor' in result.value.data).toBe(false);
+    expect('pageInfo' in result.value.data).toBe(false);
+  });
+
+  it('emits a cursor on a truncated page and resumes; pages concat with no gaps/dupes', async () => {
+    const first = await findFormulaReferencesHandler(ctx, { fieldId: FIELD, limit: 1 });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const d1 = first.value.data;
+    expect(d1.referencers.map((r) => r.id)).toEqual(['ValidationRule:Account.AlphaVR']);
+    expect(d1.hasMore).toBe(true);
+    expect(typeof d1.nextCursor).toBe('string');
+    expect(d1.pageInfo?.nextCursor).toBe(d1.nextCursor);
+
+    const second = await findFormulaReferencesHandler(ctx, {
+      fieldId: FIELD,
+      limit: 1,
+      cursor: d1.nextCursor as string,
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    const d2 = second.value.data;
+    expect(d2.referencers.map((r) => r.id)).toEqual(['ValidationRule:Account.BetaVR']);
+    expect(d2.hasMore).toBe(false);
+    expect('nextCursor' in d2).toBe(false);
+
+    const ids = [...d1.referencers, ...d2.referencers].map((r) => `${r.id}|${r.source}`);
+    expect(new Set(ids).size).toBe(2);
+  });
+
+  it('rejects a cursor minted for a different fieldId', async () => {
+    const first = await findFormulaReferencesHandler(ctx, { fieldId: FIELD, limit: 1 });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const replay = await findFormulaReferencesHandler(ctx, {
+      fieldId: 'CustomField:Account.UnreferencedField__c',
+      limit: 1,
+      cursor: first.value.data.nextCursor as string,
+    });
+    expect(replay.ok).toBe(false);
+    if (!replay.ok) expect(replay.error.kind).toBe('invalid-query');
+  });
+
+  it('rejects a malformed cursor', async () => {
+    const replay = await findFormulaReferencesHandler(ctx, { fieldId: FIELD, cursor: 'xxx' });
+    expect(replay.ok).toBe(false);
+    if (!replay.ok) expect(replay.error.kind).toBe('invalid-query');
+  });
+});
+
 describe('findFormulaReferencesInputSchema', () => {
   it('accepts a minimal well-formed input', () => {
     const parsed = findFormulaReferencesInputSchema.safeParse({

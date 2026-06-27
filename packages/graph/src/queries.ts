@@ -414,7 +414,18 @@ export const listChildren = async (
 /**
  * List edges incident to a node. `direction` defaults to `'both'`; can
  * be narrowed to `'in'` (to_id = nodeId) or `'out'` (from_id = nodeId).
- * Optional edgeType and confidence filters. Sorted by `(to_id, edge_type)`.
+ * Optional edgeType and confidence filters.
+ *
+ * Sorted by the FULL total order `(to_id, edge_type, from_id, source)` — the
+ * same order {@link compareEdgesByEndpoint} pins. The leading `(to_id,
+ * edge_type)` keys are unchanged, so any group with at most one edge per
+ * `(to_id, edge_type)` keeps its previous order byte-for-byte; the
+ * `(from_id, source)` tiebreak only ever decides order WITHIN a same-endpoint
+ * group, which was previously DuckDB-unspecified. CR-22: offset-resumed paging
+ * (`get_edges`) requires this unique final tiebreak so a resume cannot skip or
+ * duplicate an edge that shares `(to_id, edge_type)` with its neighbor. The
+ * `(from_id, source)` pair is unique per `(to_id, edge_type)` because the
+ * edges table PK is `(from_id, to_id, edge_type, source)`.
  *
  * @example
  *   const r = await listEdges(store, 'CustomObject:Account', {
@@ -451,7 +462,8 @@ export const listEdges = async (
   try {
     const rows = await fetchRows(
       store,
-      `SELECT ${EDGE_COLUMNS} FROM edges WHERE ${where} ORDER BY to_id ASC, edge_type ASC`,
+      `SELECT ${EDGE_COLUMNS} FROM edges WHERE ${where} ` +
+        `ORDER BY to_id ASC, edge_type ASC, from_id ASC, source ASC`,
       params,
     );
     return ok(rows.map(rowToEdge));
