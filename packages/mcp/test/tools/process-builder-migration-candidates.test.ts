@@ -281,6 +281,59 @@ describe('processBuilderMigrationCandidatesHandler', () => {
     if (!result.ok) return;
     expect(result.value.data.approvalProcesses.length).toBe(0);
   });
+
+  // ---- CR-22 cursor ----------------------------------------------------
+
+  it('whole-fits omits cursor block + scanTruncated (byte-identical golden)', async () => {
+    const result = await processBuilderMigrationCandidatesHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect('nextCursor' in result.value.data).toBe(false);
+    expect('pageInfo' in result.value.data).toBe(false);
+    expect('otherSections' in result.value.data).toBe(false);
+    expect('scanTruncated' in result.value.data).toBe(false);
+    expect(result.value.data.truncated).toBe(false);
+  });
+
+  it('paging the largest list (workflowRules) emits nextCursor + discloses the others', async () => {
+    const result = await processBuilderMigrationCandidatesHandler(ctx, { limit: 1 });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.designatedList).toBe('workflowRules');
+    expect(result.value.data.workflowRules.length).toBe(1);
+    expect(result.value.data.nextCursor).toBeDefined();
+    const others = result.value.data.otherSections ?? [];
+    expect(others.map((s) => s.listId).sort()).toEqual(['approvalProcesses', 'processBuilders']);
+    expect(result.value.data.totalWorkflowRules).toBe(2);
+  });
+
+  it('resume walks the designated list with no dup/skip', async () => {
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < 4; i += 1) {
+      const r = await processBuilderMigrationCandidatesHandler(ctx, {
+        limit: 1,
+        ...(cursor !== undefined ? { cursor } : {}),
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      for (const w of r.value.data.workflowRules) seen.push(w.id);
+      cursor = r.value.data.nextCursor;
+      if (cursor === undefined) break;
+    }
+    expect(seen.sort()).toEqual([WR_COMPLEX, WR_SIMPLE].sort());
+  });
+
+  it('rejects a cursor minted for a different sortBy', async () => {
+    const p1 = await processBuilderMigrationCandidatesHandler(ctx, { limit: 1 });
+    expect(p1.ok).toBe(true);
+    if (!p1.ok) return;
+    const cursor = p1.value.data.nextCursor!;
+    const stale = await processBuilderMigrationCandidatesHandler(ctx, { limit: 1, cursor, sortBy: 'name' });
+    expect(stale.ok).toBe(false);
+    if (stale.ok) return;
+    expect(stale.error.kind).toBe('invalid-query');
+  });
 });
 
 describe('processBuilderMigrationCandidatesInputSchema', () => {

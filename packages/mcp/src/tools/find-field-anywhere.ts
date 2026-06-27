@@ -69,6 +69,8 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageCursorToken,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
@@ -77,9 +79,21 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import {
+  argsFingerprint,
+  decodeCursor,
+  encodeCursor,
+  PAGE_CURSOR_VERSION,
+  paginateSection,
+  type PageableSection,
+  type SectionDisclosure,
+} from './page-cursor.js';
+import {
   REPORT_DASHBOARD_USAGE_CAVEAT,
   reportDashboardUsage,
 } from './report-dashboard-usage.js';
+
+/** Per-response byte budget for the designated section's page. */
+const FIND_FIELD_ANYWHERE_BYTE_BUDGET = 38_000;
 
 /** Canonical CustomField prefix. */
 const CUSTOM_FIELD_PREFIX = 'CustomField:';
@@ -121,6 +135,10 @@ export const findFieldAnywhereInputSchema = z.object({
     .max(FIND_FIELD_ANYWHERE_MAX_LIMIT)
     .optional(),
   componentTypes: z.array(z.string().min(1)).optional(),
+  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // truncated page's `nextCursor`; carries the resume offset + which
+  // ComponentType section it advances. Omit = today's behavior.
+  cursor: z.string().min(1).optional(),
 });
 
 /** Parsed input shape. */
@@ -154,6 +172,19 @@ export interface FindFieldAnywhereOutput {
   readonly byEdgeType: Readonly<Record<string, number>>;
   readonly boundaries: readonly string[];
   readonly truncated: boolean;
+  /**
+   * CR-22 opaque continuation token, present ONLY when truncated (the designated
+   * ComponentType section overflowed `limit`/the byte budget). Echo it back as
+   * `cursor` to resume; absent on a whole-fits page so the response is
+   * byte-identical to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata for the designated section; truncation only. */
+  readonly pageInfo?: PageInfo;
+  /** Which ComponentType section the cursor advances; truncation only. */
+  readonly designatedList?: string;
+  /** The non-paged ComponentType sections, with their full reference counts; truncation only. */
+  readonly otherSections?: readonly SectionDisclosure[];
 }
 
 const isCustomField = (id: string): boolean =>
@@ -189,13 +220,18 @@ const resolveReference = async (
 
 /**
  * Deterministic comparator inside one ComponentType bucket:
- * `componentId ASC`, then `edgeType ASC`.
+ * `componentId ASC`, then `edgeType ASC`, then `source ASC`. The final `source`
+ * tiebreak makes the order match the graph edge PK `(from_id, to_id, edge_type,
+ * source)` exactly — UNIQUE — so an offset-based section cursor resume can
+ * neither dup nor skip at a (componentId, edgeType) tie (two edges from one
+ * referrer with the same edgeType but different `source`).
  */
 const compareRefs = (a: FieldReference, b: FieldReference): number => {
   if (a.componentId !== b.componentId) {
     return a.componentId < b.componentId ? -1 : 1;
   }
   if (a.edgeType !== b.edgeType) return a.edgeType < b.edgeType ? -1 : 1;
+  if (a.source !== b.source) return a.source < b.source ? -1 : 1;
   return 0;
 };
 
@@ -268,8 +304,8 @@ export const findFieldAnywhereHandler = async (
     collected.push(resolved.value);
   }
 
-  // Group by ComponentType.
-  const byType = new Map<ComponentType, FieldReference[]>();
+  // Group by ComponentType (keyed as string so a cursor's `listId` indexes it).
+  const byType = new Map<string, FieldReference[]>();
   for (const ref of collected) {
     const arr = byType.get(ref.componentType);
     if (arr === undefined) {
@@ -279,30 +315,119 @@ export const findFieldAnywhereHandler = async (
     }
   }
 
-  // Sort within each group.
+  // Sort within each group to a UNIQUE total order (compareRefs ends in
+  // `source` — matches the edge PK — so section-offset resume is dup/skip-free).
   for (const arr of byType.values()) arr.sort(compareRefs);
 
-  // Apply `limit` across the total — preserve per-group sort order, then
-  // truncate as we walk groups in alphabetical order.
-  const sortedTypes = [...byType.keys()].sort();
-  const groups: ReferenceGroup[] = [];
-  let total = 0;
-  let truncated = false;
-  for (const type of sortedTypes) {
-    const refs = byType.get(type) ?? [];
-    if (total >= limit) {
-      truncated = true;
-      break;
-    }
-    const remaining = limit - total;
-    const slice = refs.slice(0, remaining);
-    if (slice.length < refs.length) truncated = true;
-    groups.push({
-      componentType: type,
-      references: slice,
-      count: refs.length,
+  // Stable section order: ComponentType label ASC (also the existing group
+  // order). Typed as string[] so a cursor's `listId` (string) can index it.
+  const sortedTypes: readonly string[] = [...byType.keys()].sort();
+
+  // CR-22 section cursor over the per-ComponentType buckets. `limit` is now the
+  // per-SECTION page size (was a cross-group running cap). On a whole-fits call
+  // (no cursor, every section ≤ limit) the response is byte-identical: every
+  // section is emitted with its full references and NO cursor block. When a
+  // section overflows, the DESIGNATED section is paged and the others are emitted
+  // with empty `references` (their `count` preserved) + disclosed via
+  // otherSections, so each is walkable section-by-section.
+  const TOOL = 'sfi.find_field_anywhere';
+  const fingerprint = argsFingerprint({
+    targetId,
+    ...(input.componentTypes !== undefined ? { componentTypes: input.componentTypes } : {}),
+  });
+
+  // A no-cursor call is "paged" only when at least one section exceeds `limit`.
+  const anyOverLimit = sortedTypes.some((t) => (byType.get(t) ?? []).length > limit);
+
+  let designatedListId: string | null = sortedTypes.length > 0 ? (sortedTypes[0] as string) : null;
+  let offset = 0;
+  let isPaged = anyOverLimit;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
     });
-    total += slice.length;
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+    if (decoded.value.listId !== undefined) designatedListId = decoded.value.listId;
+    isPaged = true;
+  }
+
+  const sections: readonly PageableSection<FieldReference>[] = sortedTypes.map((t) => ({
+    listId: t,
+    items: byType.get(t) ?? [],
+  }));
+
+  const groups: ReferenceGroup[] = [];
+  let truncated = false;
+  let cursorBlock:
+    | { nextCursor: string; pageInfo: PageInfo; designatedList: string; otherSections: readonly SectionDisclosure[] }
+    | undefined;
+
+  if (!isPaged || designatedListId === null) {
+    // Whole-fits: emit every section with its full references (today's shape).
+    for (const type of sortedTypes) {
+      const refs = byType.get(type) ?? [];
+      groups.push({ componentType: type as ComponentType, references: refs, count: refs.length });
+    }
+  } else {
+    // Truncated: page the designated section; emit the others with empty
+    // references but their honest count. paginateSection mints the
+    // continuation cursor for THIS section when it overflows.
+    const pagedResult = paginateSection(sections, designatedListId, {
+      offset,
+      limit,
+      byteBudget: FIND_FIELD_ANYWHERE_BYTE_BUDGET,
+      keyOf: (r) => `${r.componentId}|${r.edgeType}|${r.source}`,
+      binding: { tool: TOOL, vaultHash: ctx.manifest.sourceTreeHash, argsFingerprint: fingerprint },
+    });
+    if (!pagedResult.ok) return err(pagedResult.error);
+    const paged = pagedResult.value;
+    truncated = true;
+    for (const type of sortedTypes) {
+      const refs = byType.get(type) ?? [];
+      groups.push({
+        componentType: type as ComponentType,
+        references: type === designatedListId ? paged.items : [],
+        count: refs.length,
+      });
+    }
+    if (paged.pageInfo.nextCursor !== null) {
+      // The designated section still has more — resume it.
+      cursorBlock = {
+        nextCursor: paged.pageInfo.nextCursor,
+        pageInfo: paged.pageInfo,
+        designatedList: paged.listId,
+        otherSections: paged.otherSections,
+      };
+    } else {
+      // Designated section exhausted; roll the cursor forward to the NEXT
+      // non-empty section at offset 0 so the next call pages it (the whole
+      // nested result stays walkable section-by-section). No re-emit this call.
+      const idx = sortedTypes.indexOf(designatedListId);
+      const nextType = sortedTypes
+        .slice(idx + 1)
+        .find((t) => (byType.get(t) ?? []).length > 0);
+      if (nextType !== undefined) {
+        const token: PageCursorToken = {
+          v: PAGE_CURSOR_VERSION,
+          t: TOOL,
+          h: ctx.manifest.sourceTreeHash,
+          o: 0,
+          q: fingerprint,
+          listId: nextType,
+        };
+        cursorBlock = {
+          nextCursor: encodeCursor(token),
+          pageInfo: { ...paged.pageInfo, hasMore: true, nextCursor: encodeCursor(token) },
+          // The cursor now advances the NEXT section, so report that as the list
+          // it will page on resume.
+          designatedList: nextType,
+          otherSections: paged.otherSections,
+        };
+      }
+    }
   }
 
   // byEdgeType tally over the FULL collected set (not the truncated
@@ -349,6 +474,14 @@ export const findFieldAnywhereHandler = async (
       byEdgeType,
       boundaries,
       truncated,
+      ...(cursorBlock !== undefined
+        ? {
+            nextCursor: cursorBlock.nextCursor,
+            pageInfo: cursorBlock.pageInfo,
+            designatedList: cursorBlock.designatedList,
+            otherSections: cursorBlock.otherSections,
+          }
+        : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

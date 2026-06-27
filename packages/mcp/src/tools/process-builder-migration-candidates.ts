@@ -43,15 +43,28 @@
 
 import type {
   ComponentId,
+  ComponentType,
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listEdges, listNodesByType } from '@sf-intelligence/graph';
+import { countNodesByType, listEdges, listNodesByType } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
+
+import {
+  argsFingerprint,
+  decodeCursor,
+  paginateSection,
+  type PageableSection,
+  type SectionDisclosure,
+} from './page-cursor.js';
+
+/** Per-response byte budget for the designated list's page. */
+const PROCESS_BUILDER_BYTE_BUDGET = 38_000;
 
 /** Inclusive upper bound on `limit`. */
 const PROCESS_BUILDER_MAX_LIMIT = 500;
@@ -92,6 +105,10 @@ export const processBuilderMigrationCandidatesInputSchema = z.object({
     .min(1)
     .max(PROCESS_BUILDER_MAX_LIMIT)
     .optional(),
+  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // truncated page's `nextCursor`; carries the resume offset + which list it
+  // advances. Omit = today's behavior.
+  cursor: z.string().min(1).optional(),
 });
 
 export type ProcessBuilderMigrationCandidatesInput = z.infer<
@@ -164,6 +181,31 @@ export interface ProcessBuilderMigrationCandidatesOutput {
   };
   readonly boundaries: readonly string[];
   readonly truncated: boolean;
+  /**
+   * CR-RV12: TRUE when the >500 node SCAN cap (LIST_PAGE_SIZE) dropped Flow /
+   * WorkflowRule / ApprovalProcess nodes BEFORE filtering — so the lists and
+   * total* counts under-count that type. Present ONLY when actually true so a
+   * ≤500-node org's golden does not move.
+   */
+  readonly scanTruncated?: boolean;
+  /** CR-RV12: true org-wide counts per scanned type (only when a scan was capped). */
+  readonly trueTypeCounts?: {
+    readonly flows?: number;
+    readonly workflowRules?: number;
+    readonly approvalProcesses?: number;
+  };
+  /**
+   * CR-22 opaque continuation token, present ONLY when the designated list
+   * overflowed `limit`/the byte budget. Echo it back as `cursor` to resume;
+   * absent on a whole-fits page so the response is byte-identical.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata for the designated list; truncation only. */
+  readonly pageInfo?: PageInfo;
+  /** Which list the cursor advances; truncation only. */
+  readonly designatedList?: string;
+  /** The two non-designated lists, disclosed with their full counts; truncation only. */
+  readonly otherSections?: readonly SectionDisclosure[];
 }
 
 /**
@@ -292,22 +334,35 @@ const complexityRank: Readonly<Record<Complexity, number>> = Object.freeze({
   complex: 2,
 });
 
+/** Final tiebreak on the unique ComponentId so every per-list order is TOTAL —
+ *  apiName is NOT globally unique (id `Flow:Lead_Score_Update` vs apiName
+ *  `Lead_Score_Update`), so an offset cursor resume could dup/skip at an
+ *  equal-apiName boundary without this. */
+const compareById = <T extends { id: ComponentId }>(a: T, b: T): number =>
+  a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+
 const compareByComplexity = <
-  T extends { complexity: Complexity; apiName: string },
+  T extends { id: ComponentId; complexity: Complexity; apiName: string },
 >(
   a: T,
   b: T,
 ): number => {
   const diff = complexityRank[a.complexity] - complexityRank[b.complexity];
   if (diff !== 0) return diff;
-  return a.apiName < b.apiName ? -1 : a.apiName > b.apiName ? 1 : 0;
+  if (a.apiName !== b.apiName) return a.apiName < b.apiName ? -1 : 1;
+  return compareById(a, b);
 };
 
-const compareByApiName = <T extends { apiName: string }>(a: T, b: T): number =>
-  a.apiName < b.apiName ? -1 : a.apiName > b.apiName ? 1 : 0;
+const compareByApiName = <T extends { id: ComponentId; apiName: string }>(
+  a: T,
+  b: T,
+): number => {
+  if (a.apiName !== b.apiName) return a.apiName < b.apiName ? -1 : 1;
+  return compareById(a, b);
+};
 
 const compareByParent = <
-  T extends { parentObjectId: ComponentId | null; apiName: string },
+  T extends { id: ComponentId; parentObjectId: ComponentId | null; apiName: string },
 >(
   a: T,
   b: T,
@@ -320,6 +375,7 @@ const compareByParent = <
 
 const sortFor = <
   T extends {
+    id: ComponentId;
     complexity: Complexity;
     apiName: string;
     parentObjectId: ComponentId | null;
@@ -521,19 +577,104 @@ export const processBuilderMigrationCandidatesHandler = async (
   const sortedWrs = sortFor(workflowRules, sortBy);
   const sortedAps = sortFor(approvalProcesses, sortBy);
 
-  // Truncate the three lists independently — limit applies per list so
-  // a caller asking for the top-100 sees 100 per category rather than a
-  // global slice that crowds out one category.
+  // KEEP pre-CR-22 `truncated` semantics byte-for-byte (any list over limit);
+  // the cursor block is layered on top, emitted only when the designated list
+  // is actually paged.
   const truncatedPbs = sortedPbs.length > limit;
   const truncatedWrs = sortedWrs.length > limit;
   const truncatedAps = sortedAps.length > limit;
   const truncated = truncatedPbs || truncatedWrs || truncatedAps;
 
+  // CR-RV12: the per-type scans above are capped at LIST_PAGE_SIZE, so a
+  // >500-node type silently under-counts BEFORE filtering. Compare TRUE counts
+  // against the cap; surface scanTruncated + true counts ONLY for the scanned,
+  // capped types so a ≤500-node org's golden does not move.
+  const trueTypeCounts: { flows?: number; workflowRules?: number; approvalProcesses?: number } = {};
+  let scanTruncated = false;
+  const countType = async (type: ComponentType): Promise<Result<number, McpError>> => {
+    const c = await countNodesByType(ctx.graph, type);
+    if (!c.ok) return err({ kind: 'internal', message: `graph query failed: ${c.error.message}` });
+    return ok(c.value);
+  };
+  {
+    const c = await countType('Flow');
+    if (!c.ok) return err(c.error);
+    if (c.value > LIST_PAGE_SIZE) { scanTruncated = true; trueTypeCounts.flows = c.value; }
+  }
+  if (includeWorkflowRules) {
+    const c = await countType('WorkflowRule');
+    if (!c.ok) return err(c.error);
+    if (c.value > LIST_PAGE_SIZE) { scanTruncated = true; trueTypeCounts.workflowRules = c.value; }
+  }
+  if (includeApprovalProcesses) {
+    const c = await countType('ApprovalProcess');
+    if (!c.ok) return err(c.error);
+    if (c.value > LIST_PAGE_SIZE) { scanTruncated = true; trueTypeCounts.approvalProcesses = c.value; }
+  }
+
+  // CR-22 section cursor over the three lists in a STABLE order. Page the
+  // largest (most-likely-oversized) by default; on resume the handler feeds
+  // token.listId back as designatedListId (paginateSection does NOT cross-check).
+  const TOOL = 'sfi.process_builder_migration_candidates';
+  const fingerprint = argsFingerprint({
+    includeWorkflowRules,
+    includeApprovalProcesses,
+    activeOnly,
+    sortBy,
+  });
+  const sections: readonly PageableSection<
+    ProcessBuilderCandidate | WorkflowRuleCandidate | ApprovalProcessCandidate
+  >[] = [
+    { listId: 'processBuilders', items: sortedPbs },
+    { listId: 'workflowRules', items: sortedWrs },
+    { listId: 'approvalProcesses', items: sortedAps },
+  ];
+  // Default designated = largest by length, stable order tiebreak.
+  let designatedListId = 'processBuilders';
+  let best = sortedPbs.length;
+  if (sortedWrs.length > best) { designatedListId = 'workflowRules'; best = sortedWrs.length; }
+  if (sortedAps.length > best) { designatedListId = 'approvalProcesses'; best = sortedAps.length; }
+  let offset = 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+    if (decoded.value.listId !== undefined) designatedListId = decoded.value.listId;
+  }
+
+  const pagedResult = paginateSection(sections, designatedListId, {
+    offset,
+    limit,
+    byteBudget: PROCESS_BUILDER_BYTE_BUDGET,
+    keyOf: (c) => c.id,
+    binding: { tool: TOOL, vaultHash: ctx.manifest.sourceTreeHash, argsFingerprint: fingerprint },
+  });
+  if (!pagedResult.ok) return err(pagedResult.error);
+  const paged = pagedResult.value;
+  const emitCursor = paged.pageInfo.nextCursor !== null;
+
+  const pbPage =
+    designatedListId === 'processBuilders'
+      ? (paged.items as readonly ProcessBuilderCandidate[])
+      : sortedPbs.slice(0, limit);
+  const wrPage =
+    designatedListId === 'workflowRules'
+      ? (paged.items as readonly WorkflowRuleCandidate[])
+      : sortedWrs.slice(0, limit);
+  const apPage =
+    designatedListId === 'approvalProcesses'
+      ? (paged.items as readonly ApprovalProcessCandidate[])
+      : sortedAps.slice(0, limit);
+
   return ok({
     data: {
-      processBuilders: sortedPbs.slice(0, limit),
-      workflowRules: sortedWrs.slice(0, limit),
-      approvalProcesses: sortedAps.slice(0, limit),
+      processBuilders: pbPage,
+      workflowRules: wrPage,
+      approvalProcesses: apPage,
       totalProcessBuilders: sortedPbs.length,
       totalWorkflowRules: sortedWrs.length,
       totalApprovalProcesses: sortedAps.length,
@@ -543,6 +684,15 @@ export const processBuilderMigrationCandidatesHandler = async (
       },
       boundaries: BOUNDARIES,
       truncated,
+      ...(scanTruncated ? { scanTruncated: true, trueTypeCounts } : {}),
+      ...(emitCursor
+        ? {
+            nextCursor: paged.pageInfo.nextCursor as string,
+            pageInfo: paged.pageInfo,
+            designatedList: paged.listId,
+            otherSections: paged.otherSections,
+          }
+        : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

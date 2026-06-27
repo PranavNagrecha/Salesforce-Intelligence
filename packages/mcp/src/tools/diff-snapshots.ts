@@ -49,6 +49,7 @@ import type {
   EdgeType,
   McpError,
   McpResponse,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import type { GraphStore } from '@sf-intelligence/graph';
@@ -61,6 +62,17 @@ import {
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
+
+import {
+  argsFingerprint,
+  decodeCursor,
+  paginateSection,
+  type PageableSection,
+  type SectionDisclosure,
+} from './page-cursor.js';
+
+/** Per-response byte budget for the designated list's page. */
+const DIFF_SNAPSHOTS_BYTE_BUDGET = 38_000;
 
 /**
  * Inclusive upper bound on `limit`. Mirrors the cap convention every
@@ -99,6 +111,10 @@ export const diffSnapshotsInputSchema = z.object({
   fromLabel: z.string().min(1),
   toLabel: z.string().min(1),
   limit: z.number().int().min(1).max(DIFF_SNAPSHOTS_MAX_LIMIT).optional(),
+  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // truncated page's `nextCursor`; carries the resume offset + which list
+  // (added | removed | modified) it advances. Omit = today's behavior.
+  cursor: z.string().min(1).optional(),
 });
 
 /** Parsed input shape, inferred from `diffSnapshotsInputSchema`. */
@@ -132,6 +148,18 @@ export interface DiffSnapshotsOutput {
     readonly modifiedCount: number;
   };
   readonly truncated: boolean;
+  /**
+   * CR-22 opaque continuation token, present ONLY when the designated (largest)
+   * list overflowed `limit`/the byte budget. Echo it back as `cursor` to resume
+   * THAT list; absent on a whole-fits page so the response is byte-identical.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata for the designated list; truncation only. */
+  readonly pageInfo?: PageInfo;
+  /** Which list the cursor advances (`'added'` | `'removed'` | `'modified'`); truncation only. */
+  readonly designatedList?: string;
+  /** The two non-designated lists, disclosed with their full counts; truncation only. */
+  readonly otherSections?: readonly SectionDisclosure[];
 }
 
 /** Compact projection from a `SnapshotNode` to the response shape. */
@@ -365,13 +393,66 @@ export const diffSnapshotsHandler = async (
     }
   }
 
+  // id ASC is unique WITHIN each list (added/removed/modified are Map-keyed by
+  // id), so it is already a strict total order per list — safe for offset resume
+  // with no extra tiebreak.
   added.sort(compareComponents);
   removed.sort(compareComponents);
   modified.sort(compareComponents);
 
   const limit = input.limit ?? DIFF_SNAPSHOTS_DEFAULT_LIMIT;
   const totalCount = added.length + removed.length + modified.length;
+  // KEEP the pre-CR-22 `truncated` semantics (sum-vs-single-limit) byte-for-byte
+  // so the golden does not move; the cursor block is layered ON TOP, emitted only
+  // when the DESIGNATED list is actually paged.
   const truncated = totalCount > limit;
+
+  // CR-22 section cursor: page ONE designated list (the largest at request time)
+  // and disclose the others honestly. On resume the handler feeds token.listId
+  // back as designatedListId (paginateSection does NOT cross-check — B0 note).
+  const TOOL = 'sfi.diff_snapshots';
+  const fingerprint = argsFingerprint({ fromLabel: input.fromLabel, toLabel: input.toLabel });
+  const sections: readonly PageableSection<DiffSnapshotComponent>[] = [
+    { listId: 'added', items: added },
+    { listId: 'removed', items: removed },
+    { listId: 'modified', items: modified },
+  ];
+  // Default designated = largest by length (tiebreak added > removed > modified).
+  let designatedListId = 'added';
+  if (removed.length > added.length && removed.length >= modified.length) {
+    designatedListId = 'removed';
+  } else if (modified.length > added.length && modified.length > removed.length) {
+    designatedListId = 'modified';
+  }
+  let offset = 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+    if (decoded.value.listId !== undefined) designatedListId = decoded.value.listId;
+  }
+
+  const pagedResult = paginateSection(sections, designatedListId, {
+    offset,
+    limit,
+    byteBudget: DIFF_SNAPSHOTS_BYTE_BUDGET,
+    keyOf: (c) => c.id,
+    binding: { tool: TOOL, vaultHash: ctx.manifest.sourceTreeHash, argsFingerprint: fingerprint },
+  });
+  if (!pagedResult.ok) return err(pagedResult.error);
+  const paged = pagedResult.value;
+  const emitCursor = paged.pageInfo.nextCursor !== null;
+
+  // The designated list shows its (byte-budgeted) page; the non-designated two
+  // stay sliced-to-limit and disclosed via summary + otherSections. On a
+  // whole-fits call no list is byte-trimmed and the designated page == its
+  // slice(0,limit), so the three arrays are byte-identical to pre-CR-22.
+  const pageFor = (listId: string, full: readonly DiffSnapshotComponent[]): readonly DiffSnapshotComponent[] =>
+    listId === designatedListId ? paged.items : full.slice(0, limit);
 
   // The slice strategy: per-bucket trim proportional to the limit,
   // but never trim below the actual entry counts. The simple shape
@@ -381,15 +462,23 @@ export const diffSnapshotsHandler = async (
     data: {
       fromLabel: input.fromLabel,
       toLabel: input.toLabel,
-      added: added.slice(0, limit),
-      removed: removed.slice(0, limit),
-      modified: modified.slice(0, limit),
+      added: pageFor('added', added),
+      removed: pageFor('removed', removed),
+      modified: pageFor('modified', modified),
       summary: {
         addedCount: added.length,
         removedCount: removed.length,
         modifiedCount: modified.length,
       },
       truncated,
+      ...(emitCursor
+        ? {
+            nextCursor: paged.pageInfo.nextCursor as string,
+            pageInfo: paged.pageInfo,
+            designatedList: paged.listId,
+            otherSections: paged.otherSections,
+          }
+        : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

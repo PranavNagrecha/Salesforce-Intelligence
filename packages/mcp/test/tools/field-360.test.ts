@@ -704,6 +704,64 @@ describe('field360 risk classification', () => {
   });
 });
 
+describe('field360Handler — CR-22 section cursor', () => {
+  it('whole-fits omits cursor block (byte-identical golden)', async () => {
+    const r = await field360Handler(ctx, { fieldId: TARGET });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect('nextCursor' in r.value.data).toBe(false);
+    expect('pageInfo' in r.value.data).toBe(false);
+    expect('otherSections' in r.value.data).toBe(false);
+    // writers has 2 rows (an Apex class + a Flow); both present whole-fits.
+    expect(r.value.data.writers?.rows.length).toBe(2);
+    expect(r.value.data.writers?.truncatedAtN).toBeNull();
+  });
+
+  it('paging an over-cap section emits nextCursor + discloses the rest', async () => {
+    const r = await field360Handler(ctx, { fieldId: TARGET, maxRowsPerSection: 1 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // writers (2 rows) is the largest populated section → designated + paged.
+    expect(r.value.data.designatedList).toBe('writers');
+    expect(r.value.data.nextCursor).toBeDefined();
+    expect(r.value.data.writers?.rows.length).toBe(1);
+    expect(r.value.data.writers?.count).toBe(2);
+    const others = r.value.data.otherSections ?? [];
+    expect(others.some((s) => s.listId === 'readers')).toBe(true);
+  });
+
+  it('resume advances the designated section with no dup/skip', async () => {
+    const p1 = await field360Handler(ctx, { fieldId: TARGET, maxRowsPerSection: 1 });
+    expect(p1.ok).toBe(true);
+    if (!p1.ok) return;
+    const w1 = p1.value.data.writers?.rows ?? [];
+    const cursor = p1.value.data.nextCursor!;
+    const p2 = await field360Handler(ctx, { fieldId: TARGET, maxRowsPerSection: 1, cursor });
+    expect(p2.ok).toBe(true);
+    if (!p2.ok) return;
+    const w2 = p2.value.data.writers?.rows ?? [];
+    const ids = [...w1, ...w2].map((row) => `${row.componentId}|${row.edgeType}|${row.source}`);
+    expect(new Set(ids).size).toBe(ids.length); // no dup
+    expect(ids.length).toBe(2); // both writers walked
+  });
+
+  it('rejects a cursor minted for a different field / includeSections', async () => {
+    const p1 = await field360Handler(ctx, { fieldId: TARGET, maxRowsPerSection: 1 });
+    expect(p1.ok).toBe(true);
+    if (!p1.ok) return;
+    const cursor = p1.value.data.nextCursor!;
+    const stale = await field360Handler(ctx, {
+      fieldId: TARGET,
+      maxRowsPerSection: 1,
+      cursor,
+      includeSections: ['writers'],
+    });
+    expect(stale.ok).toBe(false);
+    if (stale.ok) return;
+    expect(stale.error.kind).toBe('invalid-query');
+  });
+});
+
 describe('field360InputSchema', () => {
   it('accepts a minimal well-formed input', () => {
     const parsed = field360InputSchema.safeParse({

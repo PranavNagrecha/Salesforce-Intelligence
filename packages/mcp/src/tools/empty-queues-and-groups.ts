@@ -33,12 +33,24 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listEdges, listNodesByType } from '@sf-intelligence/graph';
+import { countNodesByType, listEdges, listNodesByType } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
+
+import {
+  argsFingerprint,
+  decodeCursor,
+  paginateSection,
+  type PageableSection,
+  type SectionDisclosure,
+} from './page-cursor.js';
+
+/** Per-response byte budget for the designated list's page. */
+const EMPTY_QUEUES_BYTE_BUDGET = 38_000;
 
 /** Inclusive upper bound on `limit`. */
 const EMPTY_QUEUES_MAX_LIMIT = 500;
@@ -71,6 +83,10 @@ export const emptyQueuesAndGroupsInputSchema = z.object({
     .min(1)
     .max(EMPTY_QUEUES_MAX_LIMIT)
     .optional(),
+  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // truncated page's `nextCursor`; carries the resume offset + which list
+  // (queues | groups) it advances. Omit = today's behavior.
+  cursor: z.string().min(1).optional(),
 });
 
 export type EmptyQueuesAndGroupsInput = z.infer<
@@ -113,6 +129,29 @@ export interface EmptyQueuesAndGroupsOutput {
   readonly unknownMemberCountGroups: number;
   readonly boundaries: readonly string[];
   readonly truncated: boolean;
+  /**
+   * CR-RV12: TRUE when the >500 node SCAN cap (LIST_PAGE_SIZE) dropped Queue
+   * and/or Group nodes BEFORE emptiness was computed — so the lists (and totals)
+   * cover only the first 500 of that type. Present ONLY when actually true so a
+   * ≤500-node org's golden does not move.
+   */
+  readonly scanTruncated?: boolean;
+  /** CR-RV12: true org-wide Queue count (only when the Queue scan was capped). */
+  readonly totalQueueNodes?: number;
+  /** CR-RV12: true org-wide Group count (only when the Group scan was capped). */
+  readonly totalGroupNodes?: number;
+  /**
+   * CR-22 opaque continuation token, present ONLY when the designated list
+   * overflowed `limit`/the byte budget. Echo it back as `cursor` to resume;
+   * absent on a whole-fits page so the response is byte-identical.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata for the designated list; truncation only. */
+  readonly pageInfo?: PageInfo;
+  /** Which list the cursor advances (`'queues'` | `'groups'`); truncation only. */
+  readonly designatedList?: string;
+  /** The non-designated list, disclosed with its full count; truncation only. */
+  readonly otherSections?: readonly SectionDisclosure[];
 }
 
 /**
@@ -364,18 +403,104 @@ export const emptyQueuesAndGroupsHandler = async (
   const sortedGroups = [...groups].sort(compareGroupById);
   const truncatedQ = sortedQueues.length > limit;
   const truncatedG = sortedGroups.length > limit;
+  // KEEP the pre-CR-22 `truncated` semantics byte-for-byte; the cursor block is
+  // layered on top and emitted only when the designated list is actually paged.
   const truncated = truncatedQ || truncatedG;
+
+  // CR-RV12 honest SCAN-cap disclosure: the per-type scan above is capped at
+  // LIST_PAGE_SIZE, so on a >500-node org both the lists AND totalQueues/
+  // totalGroups silently under-count. Compare a TRUE count against the cap; when
+  // a scan saturated, surface scanTruncated + the true node counts. Emitted only
+  // when actually capped so a ≤500-node org's golden does not move.
+  let scanQueuesCapped = false;
+  let scanGroupsCapped = false;
+  let totalQueueNodes = 0;
+  let totalGroupNodes = 0;
+  if (typeFilter === 'Queue' || typeFilter === 'both') {
+    const c = await countNodesByType(ctx.graph, 'Queue');
+    if (!c.ok) return err({ kind: 'internal', message: `graph query failed: ${c.error.message}` });
+    totalQueueNodes = c.value;
+    scanQueuesCapped = c.value > LIST_PAGE_SIZE;
+  }
+  if (typeFilter === 'Group' || typeFilter === 'both') {
+    const c = await countNodesByType(ctx.graph, 'Group');
+    if (!c.ok) return err({ kind: 'internal', message: `graph query failed: ${c.error.message}` });
+    totalGroupNodes = c.value;
+    scanGroupsCapped = c.value > LIST_PAGE_SIZE;
+  }
+  const scanTruncated = scanQueuesCapped || scanGroupsCapped;
+
+  // CR-22 section cursor: page ONE designated list (queues by default; groups
+  // when type:'Group') and disclose the other honestly. On resume the handler
+  // feeds token.listId back as designatedListId (paginateSection does NOT
+  // cross-check — B0 note).
+  const TOOL = 'sfi.empty_queues_and_groups';
+  const fingerprint = argsFingerprint({
+    type: typeFilter,
+    includeManagedPackage: includeManaged,
+  });
+  let designatedListId = typeFilter === 'Group' ? 'groups' : 'queues';
+  let offset = 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+    if (decoded.value.listId !== undefined) designatedListId = decoded.value.listId;
+  }
+
+  const sections: readonly PageableSection<EmptyQueueEntry | EmptyGroupEntry>[] = [
+    { listId: 'queues', items: sortedQueues },
+    { listId: 'groups', items: sortedGroups },
+  ];
+  const pagedResult = paginateSection(sections, designatedListId, {
+    offset,
+    limit,
+    byteBudget: EMPTY_QUEUES_BYTE_BUDGET,
+    keyOf: (e) => e.id,
+    binding: { tool: TOOL, vaultHash: ctx.manifest.sourceTreeHash, argsFingerprint: fingerprint },
+  });
+  if (!pagedResult.ok) return err(pagedResult.error);
+  const paged = pagedResult.value;
+  const emitCursor = paged.pageInfo.nextCursor !== null;
+
+  const queuesPage =
+    designatedListId === 'queues'
+      ? (paged.items as readonly EmptyQueueEntry[])
+      : sortedQueues.slice(0, limit);
+  const groupsPage =
+    designatedListId === 'groups'
+      ? (paged.items as readonly EmptyGroupEntry[])
+      : sortedGroups.slice(0, limit);
 
   return ok({
     data: {
-      queues: sortedQueues.slice(0, limit),
-      groups: sortedGroups.slice(0, limit),
+      queues: queuesPage,
+      groups: groupsPage,
       totalQueues: sortedQueues.length,
       totalGroups: sortedGroups.length,
       unknownMemberCountQueues,
       unknownMemberCountGroups,
       boundaries: BOUNDARIES,
       truncated,
+      ...(scanTruncated
+        ? {
+            scanTruncated: true,
+            ...(scanQueuesCapped ? { totalQueueNodes } : {}),
+            ...(scanGroupsCapped ? { totalGroupNodes } : {}),
+          }
+        : {}),
+      ...(emitCursor
+        ? {
+            nextCursor: paged.pageInfo.nextCursor as string,
+            pageInfo: paged.pageInfo,
+            designatedList: paged.listId,
+            otherSections: paged.otherSections,
+          }
+        : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

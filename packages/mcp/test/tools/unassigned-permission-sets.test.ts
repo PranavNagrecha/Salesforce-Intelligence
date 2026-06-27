@@ -251,6 +251,57 @@ describe('unassignedPermissionSetsHandler — Scenario B (structural-only fallba
     const ids = r.value.data.orphanedFromComponents.map((u) => u.id);
     expect(ids).toContain(MUTING_PS);
   });
+
+  // ---- CR-22 cursor + CR-RV12 ----------------------------------------
+
+  it('whole-fits omits cursor block + scanTruncated (byte-identical golden)', async () => {
+    const r = await unassignedPermissionSetsHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect('nextCursor' in r.value.data).toBe(false);
+    expect('pageInfo' in r.value.data).toBe(false);
+    expect('otherSections' in r.value.data).toBe(false);
+    expect('scanTruncated' in r.value.data).toBe(false);
+  });
+
+  it('paging the populated (orphaned) list emits nextCursor + discloses the other', async () => {
+    const r = await unassignedPermissionSetsHandler(ctx, { limit: 1 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.orphanedFromComponents.length).toBe(1);
+    expect(r.value.data.designatedList).toBe('orphanedFromComponents');
+    expect(r.value.data.nextCursor).toBeDefined();
+    const others = r.value.data.otherSections ?? [];
+    expect(others.find((s) => s.listId === 'unassigned')?.totalCount).toBe(0);
+  });
+
+  it('resume walks the orphaned list with no dup/skip', async () => {
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < 4; i += 1) {
+      const r = await unassignedPermissionSetsHandler(ctx, {
+        limit: 1,
+        ...(cursor !== undefined ? { cursor } : {}),
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      for (const e of r.value.data.orphanedFromComponents) seen.push(e.id);
+      cursor = r.value.data.nextCursor;
+      if (cursor === undefined) break;
+    }
+    expect(seen.sort()).toEqual([MUTING_PS, ORPHANED_PS].sort());
+  });
+
+  it('rejects a cursor minted for a different filter', async () => {
+    const p1 = await unassignedPermissionSetsHandler(ctx, { limit: 1 });
+    expect(p1.ok).toBe(true);
+    if (!p1.ok) return;
+    const cursor = p1.value.data.nextCursor!;
+    const stale = await unassignedPermissionSetsHandler(ctx, { includeManagedPackage: true, limit: 1, cursor });
+    expect(stale.ok).toBe(false);
+    if (stale.ok) return;
+    expect(stale.error.kind).toBe('invalid-query');
+  });
 });
 
 describe('unassignedPermissionSetsInputSchema', () => {
