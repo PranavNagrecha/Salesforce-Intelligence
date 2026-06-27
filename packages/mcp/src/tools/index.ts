@@ -1461,6 +1461,8 @@ const FIND_CODE_USAGES_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     properties: {
       targetId: { type: 'string', minLength: 1 },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
+      offset: { type: 'integer', minimum: 0 },
+      cursor: { type: 'string', minLength: 1 },
       edgeTypes: {
         type: 'array',
         items: {
@@ -1895,6 +1897,8 @@ const UNUSED_COMPONENTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
         },
       },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
+      offset: { type: 'integer', minimum: 0 },
+      cursor: { type: 'string', minLength: 1 },
     },
   });
 
@@ -2188,6 +2192,8 @@ const CHANGED_SINCE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
         },
       },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
+      offset: { type: 'integer', minimum: 0 },
+      cursor: { type: 'string', minLength: 1 },
     },
     required: ['since'],
   });
@@ -2366,6 +2372,8 @@ const UNUSED_FIELDS_DEEP_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       excludeManagedPackage: { type: 'boolean' },
       excludeStandardFields: { type: 'boolean' },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
+      offset: { type: 'integer', minimum: 0 },
+      cursor: { type: 'string', minLength: 1 },
     },
   });
 
@@ -3298,6 +3306,8 @@ const FIND_SEMANTIC_FIELD_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       },
       limit: { type: 'integer', minimum: 1, maximum: 50 },
       minScore: { type: 'number', minimum: 0, maximum: 1 },
+      offset: { type: 'integer', minimum: 0 },
+      cursor: { type: 'string', minLength: 1 },
     },
     required: ['description'],
   });
@@ -3329,6 +3339,8 @@ const FIND_HARDCODED_VALUES_ANYWHERE_INPUT_SCHEMA: Readonly<
       },
     },
     limit: { type: 'integer', minimum: 1, maximum: 500 },
+    offset: { type: 'integer', minimum: 0 },
+    cursor: { type: 'string', minLength: 1 },
   },
 });
 
@@ -3372,6 +3384,8 @@ const FIND_DEAD_CODE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       },
       includeUncertain: { type: 'boolean' },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
+      offset: { type: 'integer', minimum: 0 },
+      cursor: { type: 'string', minLength: 1 },
     },
   });
 
@@ -3427,6 +3441,8 @@ const CPQ_DEPENDENCY_MAP_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     properties: {
       cpqComponentId: { type: 'string', minLength: 1 },
       limit: { type: 'integer', minimum: 1, maximum: 200 },
+      offset: { type: 'integer', minimum: 0 },
+      cursor: { type: 'string', minLength: 1 },
     },
   });
 
@@ -3674,6 +3690,8 @@ const FIND_DEPENDENCY_CYCLES_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     type: 'object',
     properties: {
       limit: { type: 'integer', minimum: 1, maximum: 200 },
+      offset: { type: 'integer', minimum: 0 },
+      cursor: { type: 'string', minLength: 1 },
     },
     additionalProperties: false,
   });
@@ -3688,7 +3706,10 @@ const APEX_TEST_COVERAGE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     type: 'object',
     properties: {
       classApiName: { type: 'string', minLength: 1 },
+      apexClass: { type: 'string', minLength: 1 },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
+      offset: { type: 'integer', minimum: 0 },
+      cursor: { type: 'string', minLength: 1 },
     },
     additionalProperties: false,
   });
@@ -4204,7 +4225,7 @@ export const V01_TOOLS: readonly ToolDefinition[] = [
   {
     name: 'sfi.find_code_usages',
     description:
-      "List the code source files (ApexClass, ApexTrigger, LightningComponentBundle, AuraDefinitionBundle, VisualforcePage, VisualforceComponent) that read, write, call, or reference a component. Strict superset of `sfi.find_apex_usages`: same Apex-source coverage plus the v1.4 frontend tier. Filters incoming `readsFrom`/`writesTo`/`callsApex`/`references` edges to those originating from one of the six code node types; optional `nodeTypes` narrows to a single producer (e.g., `['LightningComponentBundle']` for LWC-only). LWC apex-import callsApex edges are `declared`; LWC field reads, Aura field accesses, and VF field touches are `heuristic`; VF controller/extension references are `declared`. `boundaries[]` always carries the heuristic-scanner disclosure; an EMPTY result adds an explicit empty≠absent line (no code usages found is NOT proof nothing uses it — cross-check `find_component_usages`), never a silent empty.",
+      "List the code source files (ApexClass, ApexTrigger, LightningComponentBundle, AuraDefinitionBundle, VisualforcePage, VisualforceComponent) that read, write, call, or reference a component. Strict superset of `sfi.find_apex_usages`: same Apex-source coverage plus the v1.4 frontend tier. Filters incoming `readsFrom`/`writesTo`/`callsApex`/`references` edges to those originating from one of the six code node types; optional `nodeTypes` narrows to a single producer (e.g., `['LightningComponentBundle']` for LWC-only). LWC apex-import callsApex edges are `declared`; LWC field reads, Aura field accesses, and VF field touches are `heuristic`; VF controller/extension references are `declared`. `boundaries[]` always carries the heuristic-scanner disclosure; an EMPTY result adds an explicit empty≠absent line (no code usages found is NOT proof nothing uses it — cross-check `find_component_usages`), never a silent empty. A truncated page returns a `nextCursor` to resume.",
     inputSchema: FIND_CODE_USAGES_INPUT_SCHEMA,
   },
   {
@@ -4228,19 +4249,19 @@ export const V01_TOOLS: readonly ToolDefinition[] = [
   {
     name: 'sfi.unused_components',
     description:
-      "Scan the vault for components with no incoming USAGE edges (excluding the parentOf containment edge and grantedBy access grants — a Profile / PermissionSet granting access is not usage, so a component nobody references is still unused). Default `types` is a curated subset (CustomField, ApexClass, ApexTrigger, Flow, PermissionSet, Queue, Group, Role, EmailTemplate, Letterhead, GlobalValueSet, CustomLabel, StaticResource, ValidationRule, WorkflowRule); supply `types` to narrow. Test ApexClasses (properties.isTest === true) are NEVER flagged as unused. Each entry carries a per-type `invisibleReferencesNote` enumerating what the v1.x extractors cannot see (dynamic SOQL, reflective Apex, permission-set assignments, runtime callouts). `byType` carries the full per-type counts (not the truncated slice); `truncated` is true when the global slice was trimmed to `limit`. When any REFERRER family (Reports, Flows, layouts, LWC, …) has incomplete coverage — errored retrieve, scoped refresh, or an in-progress staged build — the response carries a `coverageCaveat` naming the families: \"unused\" then means \"no RETRIEVED metadata references it\", never proven absence.",
+      "Scan the vault for components with no incoming USAGE edges (excluding the parentOf containment edge and grantedBy access grants — a Profile / PermissionSet granting access is not usage, so a component nobody references is still unused). Default `types` is a curated subset (CustomField, ApexClass, ApexTrigger, Flow, PermissionSet, Queue, Group, Role, EmailTemplate, Letterhead, GlobalValueSet, CustomLabel, StaticResource, ValidationRule, WorkflowRule); supply `types` to narrow. Test ApexClasses (properties.isTest === true) are NEVER flagged as unused. Each entry carries a per-type `invisibleReferencesNote` enumerating what the v1.x extractors cannot see (dynamic SOQL, reflective Apex, permission-set assignments, runtime callouts). `byType` carries the full per-type counts (not the truncated slice); `truncated` is true when the global slice was trimmed to `limit`, and a truncated page returns a `nextCursor` to resume. When any REFERRER family (Reports, Flows, layouts, LWC, …) has incomplete coverage — errored retrieve, scoped refresh, or an in-progress staged build — the response carries a `coverageCaveat` naming the families: \"unused\" then means \"no RETRIEVED metadata references it\", never proven absence.",
     inputSchema: UNUSED_COMPONENTS_INPUT_SCHEMA,
   },
   {
     name: 'sfi.find_dependency_cycles',
     description:
-      "Architect tool: find cyclic dependency clusters in the org's Apex. Runs Tarjan's strongly-connected-components over `callsApex` edges among ApexClass + ApexTrigger nodes and returns every cyclic cluster (SCC of size > 1) plus self-recursive classes (size-1 SCCs with a self-edge), ordered by size descending. Each `cycles[]` entry carries the member component ids, the cluster `size`, and `selfRecursive`. `summary` reports apexNodesScanned, callsApexEdgesConsidered, cyclicClusters, largestClusterSize, and truncated. Honesty axis: `callsApex` is heuristic static analysis — dynamic dispatch (Type.forName, interface polymorphism) is invisible, so the reported set is a LOWER BOUND; a cluster means the listed components statically reference one another in a loop (investigate fragility / deploy-order / test-isolation), not proven runtime recursion. `limit` (default 50, max 200) caps the returned clusters.",
+      "Architect tool: find cyclic dependency clusters in the org's Apex. Runs Tarjan's strongly-connected-components over `callsApex` edges among ApexClass + ApexTrigger nodes and returns every cyclic cluster (SCC of size > 1) plus self-recursive classes (size-1 SCCs with a self-edge), ordered by size descending. Each `cycles[]` entry carries the member component ids, the cluster `size`, and `selfRecursive`. `summary` reports apexNodesScanned, callsApexEdgesConsidered, cyclicClusters, largestClusterSize, and truncated. Honesty axis: `callsApex` is heuristic static analysis — dynamic dispatch (Type.forName, interface polymorphism) is invisible, so the reported set is a LOWER BOUND; a cluster means the listed components statically reference one another in a loop (investigate fragility / deploy-order / test-isolation), not proven runtime recursion. `limit` (default 50, max 200) caps the returned clusters; a truncated page returns a `nextCursor` to resume.",
     inputSchema: FIND_DEPENDENCY_CYCLES_INPUT_SCHEMA,
   },
   {
     name: 'sfi.apex_test_coverage',
     description:
-      "Developer tool: map test-class references to the Apex they exercise. With `classApiName`, returns the test classes that statically reference it (`target.coveringTests`) and a `status` of has-test-references / no-test-references-found. Without it, returns the org-wide `untestedClasses` backlog — non-test ApexClasses with NO incoming `callsApex` from any test class (the gap behind the Salesforce 75%-coverage deploy gate). `summary` reports testClasses, nonTestClasses, classesWithTestReferences, classesWithoutTestReferences, truncated. Honesty axis: this is STATIC reference coverage, NOT runtime line-coverage % — a referencing test may not exercise every line and dynamic invocation is invisible, so 'untested' means 'no static test reference found', not proven zero coverage; the authoritative number comes from running the org's Apex tests. `limit` (default 100, max 500) caps the org-wide list.",
+      "Developer tool: map test-class references to the Apex they exercise. With `classApiName`, returns the test classes that statically reference it (`target.coveringTests`) and a `status` of has-test-references / no-test-references-found. Without it, returns the org-wide `untestedClasses` backlog — non-test ApexClasses with NO incoming `callsApex` from any test class (the gap behind the Salesforce 75%-coverage deploy gate). `summary` reports testClasses, nonTestClasses, classesWithTestReferences, classesWithoutTestReferences, truncated. Honesty axis: this is STATIC reference coverage, NOT runtime line-coverage % — a referencing test may not exercise every line and dynamic invocation is invisible, so 'untested' means 'no static test reference found', not proven zero coverage; the authoritative number comes from running the org's Apex tests. `limit` (default 100, max 500) caps the org-wide list; a truncated page returns a `nextCursor` to resume.",
     inputSchema: APEX_TEST_COVERAGE_INPUT_SCHEMA,
   },
   {
@@ -4360,7 +4381,7 @@ export const V01_TOOLS: readonly ToolDefinition[] = [
   {
     name: 'sfi.changed_since',
     description:
-      "Enumerate every vault node whose `lastModifiedDate` is at or after `since` (ISO 8601 — date-only `YYYY-MM-DD` or full UTC timestamp). Optional `types` narrows the scan; default scans every ComponentType. Optional `limit` (1-500, default 100) truncates the response. Each entry carries `id`, `type`, `apiName`, `lastModifiedDate`, and `lastModifiedBy: { id, name }`. The output's `unenrichedCount` reports how many nodes (within the requested types) carry `lastModifiedDate: null` — these are the nodes the offline DX-source extractor produced without freshness data. Honesty axis (load-bearing): a non-zero `unenrichedCount` means the answer is PARTIAL. Run `sfi refresh --with-tooling-api` to enrich the freshness fields via the v1.7 Tooling API integration; the tool remains fully functional against an un-enriched vault (returns `changed: []` plus the full `unenrichedCount` so consumers see the gap rather than assuming nothing has changed). The v1.7 R2 Tooling API enricher covers ApexClass, ApexTrigger, Flow, Layout, CustomField, and ValidationRule; future v1.7+ R3 expands coverage to the remaining types.",
+      "Enumerate every vault node whose `lastModifiedDate` is at or after `since` (ISO 8601 — date-only `YYYY-MM-DD` or full UTC timestamp). Optional `types` narrows the scan; default scans every ComponentType. Optional `limit` (1-500, default 100) truncates the response; a truncated page returns a `nextCursor` to resume. Each entry carries `id`, `type`, `apiName`, `lastModifiedDate`, and `lastModifiedBy: { id, name }`. The output's `unenrichedCount` reports how many nodes (within the requested types) carry `lastModifiedDate: null` — these are the nodes the offline DX-source extractor produced without freshness data. Honesty axis (load-bearing): a non-zero `unenrichedCount` means the answer is PARTIAL. Run `sfi refresh --with-tooling-api` to enrich the freshness fields via the v1.7 Tooling API integration; the tool remains fully functional against an un-enriched vault (returns `changed: []` plus the full `unenrichedCount` so consumers see the gap rather than assuming nothing has changed). The v1.7 R2 Tooling API enricher covers ApexClass, ApexTrigger, Flow, Layout, CustomField, and ValidationRule; future v1.7+ R3 expands coverage to the remaining types.",
     inputSchema: CHANGED_SINCE_INPUT_SCHEMA,
   },
   {
@@ -4408,7 +4429,7 @@ export const V01_TOOLS: readonly ToolDefinition[] = [
   {
     name: 'sfi.unused_fields_deep',
     description:
-      "v2.4 deep-hygiene tool: optional `objectId` narrows the scan to one CustomObject — accepts the canonical id (`CustomObject:Account`) or a bare api name (`Account`); without it the scan is org-wide. Legacy `parentObjectFilter` (bare api name) is still accepted for back-compat. Scans every CustomField in scope with an eight-tier cross-walk before flagging it as unused: (1) zero incoming usage edges (excluding parentOf containment and grantedBy FLS grants — access is not usage), (2) no formula-text reference in another CustomField / ValidationRule / WorkflowRule, (3) no layout placement (layoutSections + relatedLists), (4) no SOQL-string match in an ApexClass / ApexTrigger source byproduct, (5) no apex-scanner unresolvedFieldReferences match, (6) no incoming LWC/Aura/VF `references` edge, (7) no v2.0a ConditionalContext expression-text reference, (8) no v1.5 `exposes` integration edge. Returns per-field checks, a per-tier invisibility warning list, a confidence tier (`high` for clean+custom+non-managed; `low` for standard/managed), and a recommendedAction. `limit` (default 100, max 500) caps the rows; because each carries the full eight-tier detail, a per-response ~36 KB byte budget trims the page further when it would exceed the global ~45 KB MCP response limit (`truncated` + a `note`), while `totalCount` / `byParentObject` / `byConfidence` keep the UNFILTERED counts. Honesty axis (verbatim): dynamic SOQL, LWC dynamic field access, Apex reflective access, and runtime metadata references remain invisible — a 'high-confidence unused' flag means 'no static evidence of use', not 'definitely unused'.",
+      "v2.4 deep-hygiene tool: optional `objectId` narrows the scan to one CustomObject — accepts the canonical id (`CustomObject:Account`) or a bare api name (`Account`); without it the scan is org-wide. Legacy `parentObjectFilter` (bare api name) is still accepted for back-compat. Scans every CustomField in scope with an eight-tier cross-walk before flagging it as unused: (1) zero incoming usage edges (excluding parentOf containment and grantedBy FLS grants — access is not usage), (2) no formula-text reference in another CustomField / ValidationRule / WorkflowRule, (3) no layout placement (layoutSections + relatedLists), (4) no SOQL-string match in an ApexClass / ApexTrigger source byproduct, (5) no apex-scanner unresolvedFieldReferences match, (6) no incoming LWC/Aura/VF `references` edge, (7) no v2.0a ConditionalContext expression-text reference, (8) no v1.5 `exposes` integration edge. Returns per-field checks, a per-tier invisibility warning list, a confidence tier (`high` for clean+custom+non-managed; `low` for standard/managed), and a recommendedAction. `limit` (default 100, max 500) caps the rows; because each carries the full eight-tier detail, a per-response ~36 KB byte budget trims the page further when it would exceed the global ~45 KB MCP response limit (`truncated` + a `note`), while `totalCount` / `byParentObject` / `byConfidence` keep the UNFILTERED counts; a truncated page returns a `nextCursor` to resume. Honesty axis (verbatim): dynamic SOQL, LWC dynamic field access, Apex reflective access, and runtime metadata references remain invisible — a 'high-confidence unused' flag means 'no static evidence of use', not 'definitely unused'.",
     inputSchema: UNUSED_FIELDS_DEEP_INPUT_SCHEMA,
   },
   {
@@ -4647,13 +4668,13 @@ export const V01_TOOLS: readonly ToolDefinition[] = [
   {
     name: 'sfi.find_semantic_field',
     description:
-      "v2.2 semantic-discovery surface — answers 'do we already have a field for X?'. Takes a natural-language `description` and ranks CustomFields by token-overlap (Jaccard) between the query tokens and each field's combined apiName + label + description bag, tokenized per `SemanticSearchSemantics.md` § 'Tokenization rules' (suffix strip, namespace strip, underscore + CamelCase split, lowercase, length filter, stop-word filter). Returns the top `limit` matches above `minScore` (default 0.1). Each match carries `confidence: 'heuristic'` (Q95 enforcement at the type level), the score, the `matchedTokens` array, and the parent objectId. Optional `objectIds` narrows to fields on a subset of objects. The `boundaries` array surfaces the verbatim Q95 honesty anchor on every call: 'this is a similarity-ranked recommendation … verify the returned field's label and description before treating as the answer.'",
+      "v2.2 semantic-discovery surface — answers 'do we already have a field for X?'. Takes a natural-language `description` and ranks CustomFields by token-overlap (Jaccard) between the query tokens and each field's combined apiName + label + description bag, tokenized per `SemanticSearchSemantics.md` § 'Tokenization rules' (suffix strip, namespace strip, underscore + CamelCase split, lowercase, length filter, stop-word filter). Returns the top `limit` matches above `minScore` (default 0.1); a truncated page returns a `nextCursor` to resume. Each match carries `confidence: 'heuristic'` (Q95 enforcement at the type level), the score, the `matchedTokens` array, and the parent objectId. Optional `objectIds` narrows to fields on a subset of objects. The `boundaries` array surfaces the verbatim Q95 honesty anchor on every call: 'this is a similarity-ranked recommendation … verify the returned field's label and description before treating as the answer.'",
     inputSchema: FIND_SEMANTIC_FIELD_INPUT_SCHEMA,
   },
   {
     name: 'sfi.find_hardcoded_values_anywhere',
     description:
-      "v2.2 cross-corpus hardcoded-value surface — extends v2.1's `sfi.find_hardcoded_values` (Apex-only) with formula expressions (CustomField.formula), ValidationRule.errorConditionFormula, and WorkflowRule.formula. Supports exact-value mode (`value` specified — `confidence: 'declared'`), shape mode (`category` of `id`/`email`/`date`/`numeric` — `confidence: 'heuristic'`), and combined mode (both). `scope` narrows the searched corpora (default all four). Returns `byCategory` and `bySource` tallies across the FULL set. Honesty axes (verbatim): numeric category has very high false-positive rate (loop counters, indices, constants); ID category is filtered to a key-prefix allowlist; matches in `@isTest`-annotated classes may be intentional test fixtures. Must specify at least one of `value` or `category`.",
+      "v2.2 cross-corpus hardcoded-value surface — extends v2.1's `sfi.find_hardcoded_values` (Apex-only) with formula expressions (CustomField.formula), ValidationRule.errorConditionFormula, and WorkflowRule.formula. Supports exact-value mode (`value` specified — `confidence: 'declared'`), shape mode (`category` of `id`/`email`/`date`/`numeric` — `confidence: 'heuristic'`), and combined mode (both). `scope` narrows the searched corpora (default all four). Returns `byCategory` and `bySource` tallies across the FULL set. Honesty axes (verbatim): numeric category has very high false-positive rate (loop counters, indices, constants); ID category is filtered to a key-prefix allowlist; matches in `@isTest`-annotated classes may be intentional test fixtures. Must specify at least one of `value` or `category`. A truncated page returns a `nextCursor` to resume.",
     inputSchema: FIND_HARDCODED_VALUES_ANYWHERE_INPUT_SCHEMA,
   },
   {
@@ -4665,7 +4686,7 @@ export const V01_TOOLS: readonly ToolDefinition[] = [
   {
     name: 'sfi.find_dead_code',
     description:
-      "v2.2 cross-cutting dead-code surface — composes v2.7 `method_reachability` verdict, entry-point taxonomy (REST / Aura / Invocable / Queueable / Batchable / Schedulable / triggers), and zero-usage detection into a single cascade verdict per candidate: `definitely_dead` (zero incoming USAGE edges and not own entry point), `likely_dead` (test-class-only reach), `uncertain` (entry-point reach or own entry point). `parentOf` (structural) and `grantedBy` (Profile / PermissionSet access grants) edges are excluded — access is not usage, so a class nobody calls or a field nothing references is dead even when profiles grant access to it. Default `types` covers ApexClass / ApexTrigger / Flow / CustomField. `includeUncertain` (default false) suppresses the noisy uncertain bucket. Test classes (properties.isTest === true) are NEVER flagged as dead — they ARE entry points for the test-runner. Returns `byVerdict` and `byType` tallies across the FULL set; truncated slice flips `truncated: true`. Honesty axis (verbatim): dynamic dispatch, reflective invocation, framework wiring (TriggerHandler / fflib), and managed-package callers are invisible to the graph edges this tool walks. Carries a `soundness` envelope: `complete: false` with a `dynamic-apex` blind spot when a candidate class uses dynamic Apex — a class reached only reflectively will read as dead — so a `dead` verdict on a flagged class needs a human check before deletion. When any CALLER family (LWC, Aura, Flows, FlexiPages, Visualforce, …) has incomplete coverage — errored retrieve, scoped refresh, or an in-progress staged build — the response adds a `coverageCaveat` naming the families: an un-retrieved caller would fake death.",
+      "v2.2 cross-cutting dead-code surface — composes v2.7 `method_reachability` verdict, entry-point taxonomy (REST / Aura / Invocable / Queueable / Batchable / Schedulable / triggers), and zero-usage detection into a single cascade verdict per candidate: `definitely_dead` (zero incoming USAGE edges and not own entry point), `likely_dead` (test-class-only reach), `uncertain` (entry-point reach or own entry point). `parentOf` (structural) and `grantedBy` (Profile / PermissionSet access grants) edges are excluded — access is not usage, so a class nobody calls or a field nothing references is dead even when profiles grant access to it. Default `types` covers ApexClass / ApexTrigger / Flow / CustomField. `includeUncertain` (default false) suppresses the noisy uncertain bucket. Test classes (properties.isTest === true) are NEVER flagged as dead — they ARE entry points for the test-runner. Returns `byVerdict` and `byType` tallies across the FULL set; truncated slice flips `truncated: true` and a truncated page returns a `nextCursor` to resume. Honesty axis (verbatim): dynamic dispatch, reflective invocation, framework wiring (TriggerHandler / fflib), and managed-package callers are invisible to the graph edges this tool walks. Carries a `soundness` envelope: `complete: false` with a `dynamic-apex` blind spot when a candidate class uses dynamic Apex — a class reached only reflectively will read as dead — so a `dead` verdict on a flagged class needs a human check before deletion. When any CALLER family (LWC, Aura, Flows, FlexiPages, Visualforce, …) has incomplete coverage — errored retrieve, scoped refresh, or an in-progress staged build — the response adds a `coverageCaveat` naming the families: an un-retrieved caller would fake death.",
     inputSchema: FIND_DEAD_CODE_INPUT_SCHEMA,
   },
   {
@@ -4694,7 +4715,7 @@ export const V01_TOOLS: readonly ToolDefinition[] = [
   {
     name: 'sfi.cpq_dependency_map',
     description:
-      "v2.6a R2 CPQ-specialist tool: walks the values mirror of every requested CPQ-typed node and surfaces every string-encoded `SBQQ__`-prefixed field reference as a heuristic dependency entry. When `cpqComponentId` is provided, the walker scans only that one component; when omitted, it scans every CPQ-typed node in the vault up to `limit` per CPQ type (default 50, max 200). Each dependency entry carries `fromComponentId`, `fromComponentType`, `fromApiName`, the matched `referencedFieldToken`, and an `occurrenceCount`. Honesty axis (verbatim, surfaced ALWAYS): CPQ dependency mapping is heuristic — string-value scanning catches direct field references but misses formula-walked dependencies, numeric id references, and dynamic-dispatch resolutions. Use this output as a starting point for impact analysis, not as an authoritative dependency graph.",
+      "v2.6a R2 CPQ-specialist tool: walks the values mirror of every requested CPQ-typed node and surfaces every string-encoded `SBQQ__`-prefixed field reference as a heuristic dependency entry. When `cpqComponentId` is provided, the walker scans only that one component; when omitted, it scans every CPQ-typed node in the vault and pages the resulting dependency list by `limit` (default 50, max 200) — a truncated page returns a `nextCursor` to resume. Each dependency entry carries `fromComponentId`, `fromComponentType`, `fromApiName`, the matched `referencedFieldToken`, and an `occurrenceCount`. Honesty axis (verbatim, surfaced ALWAYS): CPQ dependency mapping is heuristic — string-value scanning catches direct field references but misses formula-walked dependencies, numeric id references, and dynamic-dispatch resolutions. Use this output as a starting point for impact analysis, not as an authoritative dependency graph.",
     inputSchema: CPQ_DEPENDENCY_MAP_INPUT_SCHEMA,
   },
   // v3.0 — unified field forensics synthesis tier (PLAN-v3.0).

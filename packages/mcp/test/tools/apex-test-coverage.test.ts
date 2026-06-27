@@ -225,6 +225,77 @@ describe('apexTestCoverageHandler — past-cap roster (de-cap)', () => {
       classesWithoutTestReferences: 4,
     });
   });
+
+  // CR-22 B4 — org-wide output cursor over the 4-untested-class list.
+  it('org-wide: a truncated page emits a cursor that resumes with no gaps or dupes', async () => {
+    const all = await apexTestCoverageHandler(pagedCtx, { limit: 500 });
+    expect(all.ok).toBe(true);
+    if (!all.ok) return;
+    const fullOrder = all.value.data.untestedClasses ?? [];
+    expect(fullOrder.length).toBe(4);
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const page: Awaited<ReturnType<typeof apexTestCoverageHandler>> =
+        await apexTestCoverageHandler(
+          pagedCtx,
+          cursor !== undefined ? { limit: 1, cursor } : { limit: 1 },
+        );
+      expect(page.ok).toBe(true);
+      if (!page.ok) return;
+      for (const id of page.value.data.untestedClasses ?? []) seen.push(id);
+      const nc = page.value.data.nextCursor;
+      if (nc === undefined) break;
+      cursor = nc;
+      guard += 1;
+      if (guard > 20) throw new Error('cursor did not terminate');
+    }
+    expect(seen).toEqual([...fullOrder]);
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+
+  it('org-wide: summary totals stay full-org across pages', async () => {
+    const page = await apexTestCoverageHandler(pagedCtx, { limit: 1 });
+    expect(page.ok).toBe(true);
+    if (!page.ok) return;
+    // Counts are computed pre-slice, so they remain the full-org totals.
+    expect(page.value.data.summary).toMatchObject({
+      testClasses: 1,
+      nonTestClasses: 5,
+      classesWithTestReferences: 1,
+      classesWithoutTestReferences: 4,
+    });
+    expect(page.value.data.summary.truncated).toBe(true);
+  });
+});
+
+// CR-22 B4 — single-class mode must NEVER emit a cursor; org-wide whole-fits
+// stays byte-identical.
+describe('apexTestCoverageHandler — output cursor (CR-22)', () => {
+  it('single-class mode never emits a cursor or paging fields', async () => {
+    const r = await apexTestCoverageHandler(ctx, { classApiName: 'SvcA' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data as unknown as Record<string, unknown>;
+    expect('limit' in d).toBe(false);
+    expect('offset' in d).toBe(false);
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+  });
+
+  it('org-wide whole-fits no-cursor call omits all paging fields', async () => {
+    const r = await apexTestCoverageHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data as unknown as Record<string, unknown>;
+    expect('limit' in d).toBe(false);
+    expect('offset' in d).toBe(false);
+    expect('nextOffset' in d).toBe(false);
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+  });
 });
 
 // A test class can emit the SAME callsApex edge into the target from two
@@ -282,5 +353,10 @@ describe('apexTestCoverageInputSchema', () => {
   });
   it('rejects limit above 500', () => {
     expect(apexTestCoverageInputSchema.safeParse({ limit: 501 }).success).toBe(false);
+  });
+  it('accepts offset and cursor (CR-22)', () => {
+    expect(
+      apexTestCoverageInputSchema.safeParse({ offset: 1, cursor: 'abc' }).success,
+    ).toBe(true);
   });
 });

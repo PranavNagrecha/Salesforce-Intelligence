@@ -422,4 +422,95 @@ describe('findSemanticFieldInputSchema', () => {
       }).success,
     ).toBe(false);
   });
+
+  it('accepts offset and cursor (CR-22)', () => {
+    expect(
+      findSemanticFieldInputSchema.safeParse({
+        description: 'x',
+        offset: 1,
+        cursor: 'abc',
+      }).success,
+    ).toBe(true);
+  });
+});
+
+// =============================================================================
+// CR-22 B4 — output cursor over the ranked match list + full CustomField scan.
+// A whole-fits no-cursor call is byte-identical; a truncated page resumes the
+// full set with no gaps / dupes across the score-tie boundary (componentId
+// tiebreak); totalCount stays the FULL count.
+// =============================================================================
+describe('findSemanticFieldHandler — output cursor (CR-22)', () => {
+  it('whole-fits no-cursor call omits all paging fields', async () => {
+    const r = await findSemanticFieldHandler(ctx, {
+      description: 'customer health',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data as unknown as Record<string, unknown>;
+    expect('limit' in d).toBe(false);
+    expect('offset' in d).toBe(false);
+    expect('nextOffset' in d).toBe(false);
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+  });
+
+  it('a truncated page emits a cursor that resumes with no gaps or dupes', async () => {
+    const all = await findSemanticFieldHandler(ctx, {
+      description: 'customer health',
+      minScore: 0,
+      limit: 50,
+    });
+    expect(all.ok).toBe(true);
+    if (!all.ok) return;
+    const fullOrder = all.value.data.matches.map((m) => m.componentId);
+    expect(fullOrder.length).toBeGreaterThan(2);
+    const fullTotal = all.value.data.totalCount;
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const page: Awaited<ReturnType<typeof findSemanticFieldHandler>> =
+        await findSemanticFieldHandler(
+          ctx,
+          cursor !== undefined
+            ? { description: 'customer health', minScore: 0, limit: 1, cursor }
+            : { description: 'customer health', minScore: 0, limit: 1 },
+        );
+      expect(page.ok).toBe(true);
+      if (!page.ok) return;
+      expect(page.value.data.totalCount).toBe(fullTotal);
+      for (const m of page.value.data.matches) seen.push(m.componentId);
+      const nc = page.value.data.nextCursor;
+      if (nc === undefined) break;
+      cursor = nc;
+      guard += 1;
+      if (guard > 50) throw new Error('cursor did not terminate');
+    }
+    expect(seen).toEqual(fullOrder);
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+
+  it('rejects a cursor minted for a different description / minScore', async () => {
+    const first = await findSemanticFieldHandler(ctx, {
+      description: 'customer health',
+      minScore: 0,
+      limit: 1,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const cursor = first.value.data.nextCursor;
+    expect(typeof cursor).toBe('string');
+    if (typeof cursor !== 'string') return;
+    // Different minScore → different fingerprint → rejected.
+    const replay = await findSemanticFieldHandler(ctx, {
+      description: 'customer health',
+      minScore: 0.5,
+      cursor,
+    });
+    expect(replay.ok).toBe(false);
+    if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
+  });
 });

@@ -598,4 +598,88 @@ describe('findCodeUsagesInputSchema', () => {
     });
     expect(parsed.success).toBe(true);
   });
+
+  it('accepts offset and cursor (CR-22)', () => {
+    expect(
+      findCodeUsagesInputSchema.safeParse({
+        targetId: FIELD_ID,
+        offset: 2,
+        cursor: 'abc',
+      }).success,
+    ).toBe(true);
+  });
+});
+
+// =============================================================================
+// CR-22 B4 — output cursor. find_code_usages emitted ONLY { usages, boundaries }
+// pre-CR-22, so paging fields are spread CONDITIONALLY (B3 shape, not B1's
+// always-on totalCount/hasMore). A whole-fits no-cursor call stays
+// byte-identical; a truncated page resumes the full set with no gaps / dupes.
+// =============================================================================
+describe('findCodeUsagesHandler — output cursor (CR-22)', () => {
+  it('whole-fits no-cursor call emits exactly { usages, boundaries }', async () => {
+    const r = await findCodeUsagesHandler(ctx, { targetId: FIELD_ID });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data as unknown as Record<string, unknown>;
+    expect(Object.keys(d).sort()).toEqual(['boundaries', 'usages']);
+  });
+
+  it('a truncated page emits a cursor that resumes with no gaps or dupes', async () => {
+    const all = await findCodeUsagesHandler(ctx, {
+      targetId: FIELD_ID,
+      limit: 500,
+    });
+    expect(all.ok).toBe(true);
+    if (!all.ok) return;
+    const fullOrder = all.value.data.usages.map(
+      (u) => `${u.id}|${u.edgeType}|${u.source}`,
+    );
+    expect(fullOrder.length).toBeGreaterThan(2);
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const page: Awaited<ReturnType<typeof findCodeUsagesHandler>> =
+        await findCodeUsagesHandler(
+          ctx,
+          cursor !== undefined
+            ? { targetId: FIELD_ID, limit: 2, cursor }
+            : { targetId: FIELD_ID, limit: 2 },
+        );
+      expect(page.ok).toBe(true);
+      if (!page.ok) return;
+      for (const u of page.value.data.usages) {
+        seen.push(`${u.id}|${u.edgeType}|${u.source}`);
+      }
+      const nc = page.value.data.nextCursor;
+      if (nc === undefined) break;
+      cursor = nc;
+      guard += 1;
+      if (guard > 50) throw new Error('cursor did not terminate');
+    }
+    expect(seen).toEqual(fullOrder);
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+
+  it('rejects a cursor minted for a different nodeTypes filter', async () => {
+    const first = await findCodeUsagesHandler(ctx, {
+      targetId: FIELD_ID,
+      limit: 1,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const cursor = first.value.data.nextCursor;
+    expect(typeof cursor).toBe('string');
+    if (typeof cursor !== 'string') return;
+    const replay = await findCodeUsagesHandler(ctx, {
+      targetId: FIELD_ID,
+      nodeTypes: ['LightningComponentBundle'],
+      cursor,
+    });
+    expect(replay.ok).toBe(false);
+    if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
+  });
 });

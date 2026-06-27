@@ -548,6 +548,87 @@ describe('unusedFieldsDeepInputSchema', () => {
       unusedFieldsDeepInputSchema.safeParse({ objectId: 'Account' }).success,
     ).toBe(true);
   });
+
+  it('accepts offset and cursor (CR-22)', () => {
+    expect(
+      unusedFieldsDeepInputSchema.safeParse({ offset: 1, cursor: 'abc' }).success,
+    ).toBe(true);
+  });
+});
+
+// =============================================================================
+// CR-22 B4 — output cursor + byte-trim preserved. A whole-fits no-cursor call
+// is byte-identical; a truncated page resumes the full set with no gaps / dupes;
+// totalCount/byParentObject/byConfidence stay UNFILTERED across pages.
+// =============================================================================
+describe('unusedFieldsDeepHandler — output cursor (CR-22)', () => {
+  it('whole-fits no-cursor call omits all paging fields', async () => {
+    const r = await unusedFieldsDeepHandler(ctx, { parentObjectFilter: 'Account' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data as unknown as Record<string, unknown>;
+    expect('limit' in d).toBe(false);
+    expect('offset' in d).toBe(false);
+    expect('nextOffset' in d).toBe(false);
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+    expect(d['truncated']).toBe(false);
+  });
+
+  it('a truncated page emits a cursor that resumes with no gaps or dupes', async () => {
+    const all = await unusedFieldsDeepHandler(ctx, {
+      parentObjectFilter: 'Account',
+      limit: 500,
+    });
+    expect(all.ok).toBe(true);
+    if (!all.ok) return;
+    const fullOrder = all.value.data.fields.map((f) => f.id);
+    // At least two unused Account fields → limit:1 forces a multi-page walk.
+    expect(fullOrder.length).toBeGreaterThanOrEqual(2);
+    const fullTotal = all.value.data.totalCount;
+    const fullByConfidence = all.value.data.byConfidence;
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const page: Awaited<ReturnType<typeof unusedFieldsDeepHandler>> =
+        await unusedFieldsDeepHandler(
+          ctx,
+          cursor !== undefined
+            ? { parentObjectFilter: 'Account', limit: 1, cursor }
+            : { parentObjectFilter: 'Account', limit: 1 },
+        );
+      expect(page.ok).toBe(true);
+      if (!page.ok) return;
+      // Counts stay full-set across pages.
+      expect(page.value.data.totalCount).toBe(fullTotal);
+      expect(page.value.data.byConfidence).toEqual(fullByConfidence);
+      for (const f of page.value.data.fields) seen.push(f.id);
+      const nc = page.value.data.nextCursor;
+      if (nc === undefined) break;
+      cursor = nc;
+      guard += 1;
+      if (guard > 50) throw new Error('cursor did not terminate');
+    }
+    expect(seen).toEqual(fullOrder);
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+
+  it('rejects a cursor minted for a different object scope', async () => {
+    const first = await unusedFieldsDeepHandler(ctx, {
+      parentObjectFilter: 'Account',
+      limit: 1,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const cursor = first.value.data.nextCursor;
+    if (typeof cursor !== 'string') return; // only meaningful when truncated
+    const replay = await unusedFieldsDeepHandler(ctx, { cursor });
+    expect(replay.ok).toBe(false);
+    if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
+  });
 });
 
 describe('unusedFieldsDeepHandler — FLD-01 objectId filtering', () => {
