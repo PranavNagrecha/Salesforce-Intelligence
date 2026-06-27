@@ -22,14 +22,20 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listNodesByType } from '@sf-intelligence/graph';
+import { getNodeById } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { clampedNodeScanLimit, scanTruncationNote } from './scan-cap.js';
+
+const CPQ_DEPENDENCY_MAP_TOOL = 'sfi.cpq_dependency_map';
 
 /**
  * The five CPQ ComponentTypes the tool scans. Mirrors the recognition
@@ -68,6 +74,10 @@ const DEPENDENCY_MAP_DISCLOSURE =
 export const cpqDependencyMapInputSchema = z.object({
   cpqComponentId: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
+  // CR-22: page cursor for walking the full dependency list when truncated
+  // (full-scan mode only; the single-component path is never paginated).
+  offset: z.number().int().min(0).optional(),
+  cursor: z.string().min(1).optional(),
 });
 
 /** Parsed input shape. */
@@ -94,6 +104,25 @@ export interface CpqDependencyMapOutput {
   readonly dependencies: readonly CpqDependencyEntry[];
   readonly truncated: boolean;
   readonly disclosure: string;
+  /**
+   * Page size applied to the `dependencies` list (full-scan mode only). Present
+   * ONLY on a PAGED response (`truncated` or a resumed `offset > 0`); omitted on
+   * a whole-fits no-cursor call so that response stays byte-identical to
+   * pre-CR-22.
+   */
+  readonly limit?: number;
+  /** Zero-based offset of the first returned dependency. Present only when paged (see `limit`). */
+  readonly offset?: number;
+  /** Offset to pass on the next call to fetch the following page. Present only when truncated. */
+  readonly nextOffset?: number;
+  /**
+   * CR-22 opaque continuation token, present ONLY when this page is truncated.
+   * Echo it back as `cursor` to resume. Absent on a complete page so an
+   * in-budget response is byte-identical to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
 }
 
 /**
@@ -176,15 +205,38 @@ const dependencyEntriesForNode = (
  *   const r = await cpqDependencyMapHandler(ctx, {});
  *   if (r.ok) console.log(r.value.data.dependencies.length);
  */
+/**
+ * Total-order comparator for the global dependency emission list:
+ * fromComponentId ASC, referencedFieldToken ASC, then occurrenceCount ASC.
+ *
+ * Per-node token de-dup (the `walkSbqqTokens` Map) already makes
+ * (fromComponentId, referencedFieldToken) unique today, so the order is
+ * effectively unique; occurrenceCount is a defensive final tiebreak so the
+ * order stays a STRICT TOTAL order even if a future change emits two rows with
+ * the same (fromComponentId, token) — a CR-22 offset resume then cannot dup or
+ * skip.
+ */
+const compareDependencies = (
+  a: CpqDependencyEntry,
+  b: CpqDependencyEntry,
+): number => {
+  if (a.fromComponentId !== b.fromComponentId) {
+    return a.fromComponentId < b.fromComponentId ? -1 : 1;
+  }
+  if (a.referencedFieldToken !== b.referencedFieldToken) {
+    return a.referencedFieldToken < b.referencedFieldToken ? -1 : 1;
+  }
+  return a.occurrenceCount - b.occurrenceCount;
+};
+
 export const cpqDependencyMapHandler = async (
   ctx: Context,
   input: CpqDependencyMapInput,
 ): Promise<Result<McpResponse<CpqDependencyMapOutput>, McpError>> => {
   const limit = input.limit ?? DEFAULT_LIMIT;
-  const dependencies: CpqDependencyEntry[] = [];
-  let scannedComponentCount = 0;
-  let truncated = false;
 
+  // --- Single-component path: scan exactly one node, no cap, no cursor. ---
+  // Left untouched (never paginates); the whole dependency list is emitted.
   if (input.cpqComponentId !== undefined) {
     if (!isCpqComponentId(input.cpqComponentId)) {
       return err({
@@ -193,10 +245,7 @@ export const cpqDependencyMapHandler = async (
         path: 'cpqComponentId',
       });
     }
-    const nodeResult = await getNodeById(
-      ctx.graph,
-      input.cpqComponentId,
-    );
+    const nodeResult = await getNodeById(ctx.graph, input.cpqComponentId);
     if (!nodeResult.ok) {
       return err({
         kind: 'internal',
@@ -218,51 +267,93 @@ export const cpqDependencyMapHandler = async (
         path: input.cpqComponentId,
       });
     }
-    scannedComponentCount = 1;
+    const dependencies = [...dependencyEntriesForNode(node)].sort(
+      compareDependencies,
+    );
+    return ok({
+      data: {
+        scannedComponentCount: 1,
+        dependencies,
+        truncated: false,
+        disclosure: DEPENDENCY_MAP_DISCLOSURE,
+      },
+      vaultState: {
+        sourceTreeHash: ctx.manifest.sourceTreeHash,
+        refreshedAt: ctx.manifest.refreshedAt,
+      },
+    });
+  }
+
+  // --- Full-scan path (CR-22 B4, Option A). ---
+  // Previously each CPQ type was scanned with a single capped
+  // `listNodesByType({ limit })` and `truncated` flipped on a per-type SCAN cap
+  // (nodes 51+/201+ silently dropped). Scan EVERY CPQ node window-by-window so
+  // the scan-tail bug vanishes, then page the OUTPUT `dependencies` list — so
+  // `limit` is now an OUTPUT page size and `truncated` is an OUTPUT-truncation
+  // signal. (A borderline org that hit exactly `limit` nodes of a CPQ type and
+  // reported truncated:true under the old per-type cap now reports the honest
+  // full scan; this is strictly more honest — see the design-check.)
+  const scan = await scanAllNodesOfTypes(ctx.graph, CPQ_NODE_TYPES);
+  if (!scan.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${scan.error.message}`,
+    });
+  }
+  const dependencies: CpqDependencyEntry[] = [];
+  for (const node of scan.value.nodes) {
     for (const entry of dependencyEntriesForNode(node)) {
       dependencies.push(entry);
     }
-  } else {
-    // Scan every CPQ-typed node up to `limit` per type. The per-type
-    // cap keeps the total work bounded; `truncated` flips true when
-    // any type's list returns exactly `limit` entries (a heuristic
-    // signal that more nodes exist).
-    for (const type of CPQ_NODE_TYPES) {
-      const listResult = await listNodesByType(ctx.graph, type, {
-        limit,
-      });
-      if (!listResult.ok) {
-        return err({
-          kind: 'internal',
-          message: `graph query failed: ${listResult.error.message}`,
-        });
-      }
-      const nodes = listResult.value;
-      scannedComponentCount += nodes.length;
-      if (nodes.length === limit) truncated = true;
-      for (const node of nodes) {
-        for (const entry of dependencyEntriesForNode(node)) {
-          dependencies.push(entry);
-        }
-      }
-    }
+  }
+  const sortedDependencies = dependencies.sort(compareDependencies);
+
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // The fingerprint covers `cpqComponentId` so a full-scan token can't replay
+  // against a single-component call and vice versa (full-scan mints it absent;
+  // single-component never mints one).
+  const fingerprint = argsFingerprint({});
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: CPQ_DEPENDENCY_MAP_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
   }
 
-  // Sort the global emission list by (fromComponentId, token) so
-  // identical inputs round-trip to byte-identical outputs.
-  const sortedDependencies = dependencies.sort((a, b) => {
-    if (a.fromComponentId !== b.fromComponentId) {
-      return a.fromComponentId < b.fromComponentId ? -1 : 1;
-    }
-    return a.referencedFieldToken < b.referencedFieldToken ? -1 : 1;
+  const paged = paginateLegacy(sortedDependencies, {
+    offset,
+    limit,
+    keyOf: (d) => `${d.fromComponentId}|${d.referencedFieldToken}`,
+    binding: {
+      tool: CPQ_DEPENDENCY_MAP_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
   });
+  const pageDeps = paged.items;
+  const truncated = paged.hasMore;
+  const emitCursor = paged.nextCursor !== null;
+  const isPaged = truncated || offset > 0;
+
+  const disclosure = scan.value.scanIncomplete
+    ? `${DEPENDENCY_MAP_DISCLOSURE} ${scanTruncationNote(scan.value.incompleteTypes, clampedNodeScanLimit())}`
+    : DEPENDENCY_MAP_DISCLOSURE;
 
   return ok({
     data: {
-      scannedComponentCount,
-      dependencies: sortedDependencies,
+      scannedComponentCount: scan.value.nodes.length,
+      dependencies: pageDeps,
       truncated,
-      disclosure: DEPENDENCY_MAP_DISCLOSURE,
+      disclosure,
+      ...(isPaged ? { limit, offset } : {}),
+      ...(truncated ? { nextOffset: offset + pageDeps.length } : {}),
+      ...(emitCursor
+        ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo }
+        : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

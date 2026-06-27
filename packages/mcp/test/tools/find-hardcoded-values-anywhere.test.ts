@@ -404,4 +404,92 @@ describe('findHardcodedValuesAnywhereInputSchema', () => {
       }).success,
     ).toBe(false);
   });
+
+  it('accepts offset and cursor (CR-22)', () => {
+    expect(
+      findHardcodedValuesAnywhereInputSchema.safeParse({
+        category: 'id',
+        offset: 1,
+        cursor: 'abc',
+      }).success,
+    ).toBe(true);
+  });
+});
+
+// =============================================================================
+// CR-22 B4 — output cursor + mandatory total-order tiebreak (category,
+// matchedValue, contextSnippet). A whole-fits no-cursor call is byte-identical;
+// a truncated page resumes the full set with no gaps / dupes even across the
+// per-node-constant-location tie clusters (formula/VR/WF).
+// =============================================================================
+describe('findHardcodedValuesAnywhereHandler — output cursor (CR-22)', () => {
+  it('whole-fits no-cursor call omits all paging fields', async () => {
+    const r = await findHardcodedValuesAnywhereHandler(ctx, {
+      value: 'United States',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data as unknown as Record<string, unknown>;
+    expect('limit' in d).toBe(false);
+    expect('offset' in d).toBe(false);
+    expect('nextOffset' in d).toBe(false);
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+    expect(d['truncated']).toBe(false);
+  });
+
+  it('a truncated page emits a cursor that resumes with no gaps or dupes', async () => {
+    const all = await findHardcodedValuesAnywhereHandler(ctx, {
+      value: 'United States',
+      limit: 500,
+    });
+    expect(all.ok).toBe(true);
+    if (!all.ok) return;
+    const key = (m: { componentId: string; source: string; location: string; category: string; matchedValue: string; contextSnippet: string }) =>
+      `${m.componentId}|${m.source}|${m.location}|${m.category}|${m.matchedValue}|${m.contextSnippet}`;
+    const fullOrder = all.value.data.matches.map(key);
+    expect(fullOrder.length).toBeGreaterThan(2);
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const page: Awaited<ReturnType<typeof findHardcodedValuesAnywhereHandler>> =
+        await findHardcodedValuesAnywhereHandler(
+          ctx,
+          cursor !== undefined
+            ? { value: 'United States', limit: 1, cursor }
+            : { value: 'United States', limit: 1 },
+        );
+      expect(page.ok).toBe(true);
+      if (!page.ok) return;
+      for (const m of page.value.data.matches) seen.push(key(m));
+      const nc = page.value.data.nextCursor;
+      if (nc === undefined) break;
+      cursor = nc;
+      guard += 1;
+      if (guard > 50) throw new Error('cursor did not terminate');
+    }
+    expect(seen).toEqual(fullOrder);
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+
+  it('rejects a cursor minted for a different value (argsFingerprint bind)', async () => {
+    const first = await findHardcodedValuesAnywhereHandler(ctx, {
+      value: 'United States',
+      limit: 1,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const cursor = first.value.data.nextCursor;
+    expect(typeof cursor).toBe('string');
+    if (typeof cursor !== 'string') return;
+    const replay = await findHardcodedValuesAnywhereHandler(ctx, {
+      value: 'Canada',
+      cursor,
+    });
+    expect(replay.ok).toBe(false);
+    if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
+  });
 });

@@ -72,6 +72,7 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
   TrustSummary,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
@@ -85,7 +86,10 @@ import {
   offlineTrust,
   type CoverageCaveat,
 } from './coverage-trust.js';
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { nodeScanLimit } from './scan-cap.js';
+
+const UNUSED_COMPONENTS_TOOL = 'sfi.unused_components';
 
 /**
  * Inclusive upper bound on `limit`. Mirrors the `LIST_MAX_LIMIT`
@@ -204,6 +208,9 @@ const COMPONENT_TYPES = [
 export const unusedComponentsInputSchema = z.object({
   types: z.array(z.enum(COMPONENT_TYPES)).optional(),
   limit: z.number().int().min(1).max(UNUSED_MAX_LIMIT).optional(),
+  // CR-22: page cursor for walking the full unused list when truncated.
+  offset: z.number().int().min(0).optional(),
+  cursor: z.string().min(1).optional(),
 });
 
 /** Parsed input shape, inferred from `unusedComponentsInputSchema`. */
@@ -232,6 +239,24 @@ export interface UnusedComponentsOutput {
   readonly byType: Readonly<Record<string, number>>;
   /** True when the global slice was trimmed to `limit`. */
   readonly truncated: boolean;
+  /**
+   * Page size applied to this response. Present ONLY on a PAGED response
+   * (`truncated` or a resumed `offset > 0`); omitted on a whole-fits no-cursor
+   * call so that response stays byte-identical to the pre-CR-22 shape.
+   */
+  readonly limit?: number;
+  /** Zero-based offset of the first returned component. Present only when paged (see `limit`). */
+  readonly offset?: number;
+  /** Offset to pass on the next call to fetch the following page. Present only when `truncated`. */
+  readonly nextOffset?: number;
+  /**
+   * CR-22 opaque continuation token, present ONLY when this page is truncated.
+   * Echo it back as `cursor` to resume. Absent on a complete page so an
+   * in-budget response is byte-identical to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
   /**
    * Present when a REFERRER family this absence claim depends on has
    * incomplete coverage (errored retrieve, scoped refresh, or a staged build
@@ -428,6 +453,11 @@ const compareById = (a: UnusedComponent, b: UnusedComponent): number =>
  * Comparator for the global slice sort. `type` ASC first, then `id`
  * ASC. Keeps a consistent per-type grouping in the global output so
  * callers can render the response without an extra group-by pass.
+ *
+ * This is already a STRICT TOTAL order (CR-22): `id` is the globally-unique
+ * ComponentId (e.g. `CustomField:Account.Industry__c`) and each id belongs to
+ * exactly one type, so (type ASC, id ASC) never ties two distinct rows. No
+ * additional tiebreak is needed for a dup-free / skip-free offset resume.
  */
 const compareGlobally = (a: UnusedComponent, b: UnusedComponent): number => {
   if (a.type !== b.type) return a.type < b.type ? -1 : 1;
@@ -531,8 +561,38 @@ export const unusedComponentsHandler = async (
   }
 
   const sorted = [...allUnused].sort(compareGlobally);
-  const truncated = sorted.length > limit;
-  const components = sorted.slice(0, limit);
+
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // The one narrowing arg is `types`; argsFingerprint binds the token to it so a
+  // token minted for one type set can't be replayed against another.
+  const fingerprint = argsFingerprint(
+    input.types !== undefined ? { types: input.types } : {},
+  );
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: UNUSED_COMPONENTS_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  const paged = paginateLegacy(sorted, {
+    offset,
+    limit,
+    keyOf: (c) => c.id,
+    binding: {
+      tool: UNUSED_COMPONENTS_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const components = paged.items;
+  const truncated = paged.hasMore;
+  const emitCursor = paged.nextCursor !== null;
+  const isPaged = truncated || offset > 0;
 
   // "Unused" is an absence claim: it is only as strong as the coverage of the
   // families that could hold the reference. Incomplete referrer coverage
@@ -549,6 +609,11 @@ export const unusedComponentsHandler = async (
       components,
       byType,
       truncated,
+      ...(isPaged ? { limit, offset } : {}),
+      ...(truncated ? { nextOffset: offset + components.length } : {}),
+      ...(emitCursor
+        ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo }
+        : {}),
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       trust: offlineTrust(
         ctx,

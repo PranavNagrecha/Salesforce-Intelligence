@@ -65,6 +65,7 @@ import type {
   ComponentType,
   McpError,
   McpResponse,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import type { GraphStore } from '@sf-intelligence/graph';
@@ -78,11 +79,14 @@ import {
   resolveObjectScopeParentId,
   toCustomObjectId,
 } from './input-aliases.js';
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { REPORT_DASHBOARD_USAGE_CAVEAT } from './report-dashboard-usage.js';
 import { soundnessFromIds, type Soundness } from './soundness.js';
 
 const MAX_LIMIT = 500;
 const DEFAULT_LIMIT = 100;
+
+const FIND_DEAD_CODE_TOOL = 'sfi.find_dead_code';
 
 const DEAD_CODE_DISCLOSURE =
   'dead-code detection is heuristic: dynamic dispatch (`Type.forName(...)`), reflective invocation, framework wiring (TriggerHandler / fflib base classes), and managed-package callers are invisible to the graph edges this tool walks. A class genuinely invoked at runtime via one of these mechanisms will surface as `definitely_dead` or `likely_dead`. Verify before deleting.';
@@ -114,6 +118,9 @@ const findDeadCodeInputBaseSchema = z.object({
     .optional(),
   includeUncertain: z.boolean().optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
+  // CR-22: page cursor for walking the full candidate list when truncated.
+  offset: z.number().int().min(0).optional(),
+  cursor: z.string().min(1).optional(),
 });
 
 /** Zod schema for `sfi.find_dead_code`. */
@@ -159,6 +166,24 @@ export interface FindDeadCodeOutput {
   readonly byType: Readonly<Record<string, number>>;
   readonly boundaries: readonly string[];
   readonly truncated: boolean;
+  /**
+   * Page size applied to this response. Present ONLY on a PAGED response
+   * (`truncated` or a resumed `offset > 0`); omitted on a whole-fits no-cursor
+   * call so that response stays byte-identical to the pre-CR-22 shape.
+   */
+  readonly limit?: number;
+  /** Zero-based offset of the first returned candidate. Present only when paged (see `limit`). */
+  readonly offset?: number;
+  /** Offset to pass on the next call to fetch the following page. Present only when `truncated`. */
+  readonly nextOffset?: number;
+  /**
+   * CR-22 opaque continuation token, present ONLY when this page is truncated
+   * (more candidates remain). Echo it back as `cursor` to resume. Absent on a
+   * complete page so an in-budget response is byte-identical to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
   /** Static-analysis blind spots: `complete: false` when a candidate class uses dynamic Apex. */
   readonly soundness: Soundness;
   /**
@@ -346,6 +371,15 @@ const fetchDeadCodeRows = async (
   }
 };
 
+/**
+ * Comparator: verdict rank ASC, componentType ASC, then componentId ASC.
+ *
+ * This is already a STRICT TOTAL order (CR-22): `componentId` is the node `id`
+ * the dead-code CTE groups by (`GROUP BY c.id` — one row per distinct node id),
+ * so every candidate has a unique componentId and the final key resolves all
+ * ties uniquely. The earlier verdict / componentType keys only coarsen. No
+ * additional tiebreak is required for a dup-free / skip-free offset resume.
+ */
 const compareCandidates = (
   a: DeadCodeCandidate,
   b: DeadCodeCandidate,
@@ -455,8 +489,46 @@ export const findDeadCodeHandler = async (
   }
 
   candidates.sort(compareCandidates);
-  const truncated = candidates.length > limit;
-  const slice = candidates.slice(0, limit);
+
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // The fingerprint covers every NARROWING arg — includeUncertain (it filters
+  // which candidates are in the list, line below `verdict === 'uncertain'`), the
+  // canonical objectId scope, and types — so a token minted for one narrowing
+  // set can't be replayed against another.
+  const fingerprint = argsFingerprint({
+    ...(objectScopeParentId !== undefined
+      ? { objectId: objectScopeParentId }
+      : {}),
+    types,
+    includeUncertain,
+  });
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: FIND_DEAD_CODE_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  const paged = paginateLegacy(candidates, {
+    offset,
+    limit,
+    keyOf: (c) => c.componentId,
+    binding: {
+      tool: FIND_DEAD_CODE_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const slice = paged.items;
+  const truncated = paged.hasMore;
+  const emitCursor = paged.nextCursor !== null;
+  // Paged when truncated OR resumed past 0; only then do we add paging fields,
+  // so a whole-fits no-cursor response stays byte-identical to pre-CR-22.
+  const isPaged = truncated || offset > 0;
 
   const byVerdict = {
     definitely_dead: 0,
@@ -511,6 +583,11 @@ export const findDeadCodeHandler = async (
       byType,
       boundaries,
       truncated,
+      ...(isPaged ? { limit, offset } : {}),
+      ...(truncated ? { nextOffset: offset + slice.length } : {}),
+      ...(emitCursor
+        ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo }
+        : {}),
       soundness,
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
     },

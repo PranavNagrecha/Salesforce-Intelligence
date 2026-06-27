@@ -42,12 +42,16 @@ import type {
   ComponentType,
   McpError,
   McpResponse,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listNodesByType } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
+
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { clampedNodeScanLimit, scanTruncationNote } from './scan-cap.js';
 
 /** Inclusive upper bound on `limit`. */
 const CHANGED_SINCE_MAX_LIMIT = 500;
@@ -55,8 +59,7 @@ const CHANGED_SINCE_MAX_LIMIT = 500;
 /** Default `limit` when the caller omits it. */
 const CHANGED_SINCE_DEFAULT_LIMIT = 100;
 
-/** Per-type page size — caps the per-type scan at the graph layer's max. */
-const LIST_PAGE_SIZE = 500;
+const CHANGED_SINCE_TOOL = 'sfi.changed_since';
 
 /**
  * Full superset of ComponentTypes for Zod validation. Mirrors the
@@ -131,6 +134,9 @@ export const changedSinceInputSchema = z.object({
   ),
   types: z.array(z.enum(COMPONENT_TYPES)).optional(),
   limit: z.number().int().min(1).max(CHANGED_SINCE_MAX_LIMIT).optional(),
+  // CR-22: page cursor for walking the full changed list when truncated.
+  offset: z.number().int().min(0).optional(),
+  cursor: z.string().min(1).optional(),
 });
 
 /** Parsed input shape, inferred from `changedSinceInputSchema`. */
@@ -162,6 +168,30 @@ export interface ChangedSinceOutput {
   readonly unenrichedCount: number;
   /** True when the response slice was trimmed to `limit`. */
   readonly truncated: boolean;
+  /**
+   * Honesty disclosure, present ONLY when a pathological type's full scan hit
+   * FULL_SCAN_MAX_NODES (so the enumeration may be incomplete). Absent on a
+   * normal full scan, keeping that response byte-identical to pre-CR-22.
+   */
+  readonly boundaries?: readonly string[];
+  /**
+   * Page size applied to this response. Present ONLY on a PAGED response
+   * (`truncated` or a resumed `offset > 0`); omitted on a whole-fits no-cursor
+   * call so that response stays byte-identical to the pre-CR-22 shape.
+   */
+  readonly limit?: number;
+  /** Zero-based offset of the first returned change. Present only when paged (see `limit`). */
+  readonly offset?: number;
+  /** Offset to pass on the next call to fetch the following page. Present only when `truncated`. */
+  readonly nextOffset?: number;
+  /**
+   * CR-22 opaque continuation token, present ONLY when this page is truncated.
+   * Echo it back as `cursor` to resume. Absent on a complete page so an
+   * in-budget response is byte-identical to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
 }
 
 /**
@@ -174,6 +204,14 @@ const normalizeSince = (raw: string): string => {
   return new Date(raw).toISOString();
 };
 
+/**
+ * Comparator: lastModifiedDate DESC, then id ASC.
+ *
+ * This is already a STRICT TOTAL order (CR-22): `id` is the unique node
+ * ComponentId, so no two distinct ChangedComponents compare equal — the id-ASC
+ * secondary key resolves every date tie uniquely. No further tiebreak is needed
+ * for a dup-free / skip-free offset resume.
+ */
 const compareByDateDescThenIdAsc = (a: ChangedComponent, b: ChangedComponent): number => {
   if (a.lastModifiedDate !== b.lastModifiedDate) {
     return a.lastModifiedDate < b.lastModifiedDate ? 1 : -1;
@@ -252,36 +290,78 @@ export const changedSinceHandler = async (
   const matched: ChangedComponent[] = [];
   let unenrichedCount = 0;
 
-  for (const type of types) {
-    const nodesResult = await listNodesByType(ctx.graph, type, {
-      limit: LIST_PAGE_SIZE,
+  // CR-22 B4: scan EVERY node of each requested type by paging the SQL OFFSET
+  // forward (window-by-window) so a type with >500 nodes (CustomField trivially)
+  // no longer silently drops nodes 501+ from BOTH `changed` and `unenrichedCount`
+  // — the admitted scan-tail bug. The scan completes inside this call, so the
+  // output list is then paged on the output axis below (no `s` scan cursor).
+  const scan = await scanAllNodesOfTypes(ctx.graph, types);
+  if (!scan.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${scan.error.message}`,
     });
-    if (!nodesResult.ok) {
-      return err({
-        kind: 'internal',
-        message: `graph query failed: ${nodesResult.error.message}`,
-      });
+  }
+  for (const node of scan.value.nodes) {
+    const date = extractLastModifiedDate(node.lastModifiedDate, node.properties);
+    if (date === null) {
+      unenrichedCount += 1;
+      continue;
     }
-    for (const node of nodesResult.value) {
-      const date = extractLastModifiedDate(node.lastModifiedDate, node.properties);
-      if (date === null) {
-        unenrichedCount += 1;
-        continue;
-      }
-      if (date < since) continue;
-      matched.push({
-        id: node.id,
-        type: node.type,
-        apiName: node.apiName,
-        lastModifiedDate: date,
-        lastModifiedBy: extractLastModifiedBy(node.lastModifiedBy, node.properties),
-      });
-    }
+    if (date < since) continue;
+    matched.push({
+      id: node.id,
+      type: node.type,
+      apiName: node.apiName,
+      lastModifiedDate: date,
+      lastModifiedBy: extractLastModifiedBy(node.lastModifiedBy, node.properties),
+    });
   }
 
   const sorted = [...matched].sort(compareByDateDescThenIdAsc);
-  const truncated = sorted.length > limit;
-  const changed = sorted.slice(0, limit);
+
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // The fingerprint covers the NARROWING args — the normalised `since` boundary
+  // and `types` — so a token minted for one query can't be replayed against
+  // another. (`since` is normalised so the same instant always fingerprints
+  // identically across calls.)
+  const fingerprint = argsFingerprint({
+    since,
+    ...(input.types !== undefined ? { types: input.types } : {}),
+  });
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: CHANGED_SINCE_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  const paged = paginateLegacy(sorted, {
+    offset,
+    limit,
+    keyOf: (c) => c.id,
+    binding: {
+      tool: CHANGED_SINCE_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const changed = paged.items;
+  const truncated = paged.hasMore;
+  const emitCursor = paged.nextCursor !== null;
+  const isPaged = truncated || offset > 0;
+
+  // A pathological type past FULL_SCAN_MAX_NODES leaves the scan incomplete;
+  // disclose it via the response envelope (the existing shape has no boundaries
+  // array, so surface it only when actually incomplete — a normal full scan
+  // leaves this absent and the response byte-identical).
+  const scanNote = scan.value.scanIncomplete
+    ? scanTruncationNote(scan.value.incompleteTypes, clampedNodeScanLimit())
+    : undefined;
 
   return ok({
     data: {
@@ -289,6 +369,12 @@ export const changedSinceHandler = async (
       changed,
       unenrichedCount,
       truncated,
+      ...(isPaged ? { limit, offset } : {}),
+      ...(truncated ? { nextOffset: offset + changed.length } : {}),
+      ...(emitCursor
+        ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo }
+        : {}),
+      ...(scanNote !== undefined ? { boundaries: [scanNote] } : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

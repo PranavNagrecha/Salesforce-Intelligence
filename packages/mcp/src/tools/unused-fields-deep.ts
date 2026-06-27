@@ -84,6 +84,7 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
   TrustSummary,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
@@ -95,7 +96,10 @@ import type { Context } from '../server.js';
 
 import { coercePrefix } from './coerce-id.js';
 import { offlineTrust } from './coverage-trust.js';
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { nodeScanLimit } from './scan-cap.js';
+
+const UNUSED_FIELDS_DEEP_TOOL = 'sfi.unused_fields_deep';
 
 /** Metadata families exercised by the eight-tier unused-field cross-walk. */
 const UNUSED_FIELDS_DEEP_REQUIRED_COVERAGE = [
@@ -205,6 +209,9 @@ export const unusedFieldsDeepInputSchema = z.object({
     .min(1)
     .max(UNUSED_FIELDS_DEEP_MAX_LIMIT)
     .optional(),
+  // CR-22: page cursor for walking the full unused-field list when truncated.
+  offset: z.number().int().min(0).optional(),
+  cursor: z.string().min(1).optional(),
 });
 
 export type UnusedFieldsDeepInput = z.infer<typeof unusedFieldsDeepInputSchema>;
@@ -248,6 +255,24 @@ export interface UnusedFieldsDeepOutput {
   readonly trust: TrustSummary;
   /** Present when the page was trimmed below `limit` to fit the response size. */
   readonly note?: string;
+  /**
+   * Page size applied to this response. Present ONLY on a PAGED response
+   * (`truncated` or a resumed `offset > 0`); omitted on a whole-fits no-cursor
+   * call so that response stays byte-identical to the pre-CR-22 shape.
+   */
+  readonly limit?: number;
+  /** Zero-based offset of the first returned field. Present only when paged (see `limit`). */
+  readonly offset?: number;
+  /** Offset to pass on the next call to fetch the following page. Present only when `truncated`. */
+  readonly nextOffset?: number;
+  /**
+   * CR-22 opaque continuation token, present ONLY when this page is truncated.
+   * Echo it back as `cursor` to resume. Absent on a complete page so an
+   * in-budget response is byte-identical to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
 }
 
 /**
@@ -700,6 +725,11 @@ const recommendedActionFor = (
 /**
  * Comparator for the deterministic per-field sort. `id` ASC so the
  * truncation point is stable across runs.
+ *
+ * This is already a STRICT TOTAL order (CR-22): `id` is the field's unique graph
+ * ComponentId (`CustomField:{Parent}.{Field}`), so no two distinct entries
+ * compare equal — id-ASC needs no additional tiebreak for a dup-free /
+ * skip-free offset resume.
  */
 const compareById = (a: UnusedFieldDeepEntry, b: UnusedFieldDeepEntry): number =>
   a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
@@ -880,41 +910,74 @@ export const unusedFieldsDeepHandler = async (
   }
   const trust = offlineTrust(ctx, completenessForUnusedFieldsDeep(ctx));
 
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // The fingerprint covers every NARROWING arg — the resolved object scope plus
+  // the two exclude flags — so a token can't replay across a different
+  // scope/flag set. argsFingerprint already strips limit/offset/cursor.
+  const fingerprint = argsFingerprint({
+    ...(parentObjectFilter !== undefined ? { parentObjectFilter } : {}),
+    excludeManaged,
+    excludeStandard,
+  });
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: UNUSED_FIELDS_DEEP_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
   // Each entry carries the full eight-tier detail, so even the row `limit` page
-  // can exceed the response guard (a real org overflowed at ~118 KB). Trim the
-  // page further until the serialized data fits the byte budget; `byParentObject`
-  // / `byConfidence` / `totalCount` keep the UNFILTERED counts so the trim never
-  // understates how many unused fields exist.
-  const build = (n: number): UnusedFieldsDeepOutput => {
-    const fields = sorted.slice(0, n);
-    const byteTrimmed = n < limit && n < sorted.length;
-    return {
+  // can exceed the response guard (a real org overflowed at ~118 KB). paginate
+  // does slice + byte-trim + forward-progress + nextCursor in one pass; pass the
+  // existing 36 KB byteBudget so the per-page trim stays equivalent.
+  // `byParentObject` / `byConfidence` / `totalCount` keep the UNFILTERED counts
+  // so the trim never understates how many unused fields exist.
+  const paged = paginateLegacy(sorted, {
+    offset,
+    limit,
+    byteBudget: UNUSED_FIELDS_DEEP_BYTE_BUDGET,
+    keyOf: (e) => e.id,
+    binding: {
+      tool: UNUSED_FIELDS_DEEP_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const fields = paged.items;
+  const truncated = paged.hasMore;
+  const emitCursor = paged.nextCursor !== null;
+  const isPaged = truncated || offset > 0;
+
+  // Preserve the pre-CR-22 byte-trim `note`: emitted when the page was trimmed
+  // BELOW the requested limit to fit the byte budget (not merely over-limit), so
+  // a byte-trimmed-but-not-over-limit response keeps its existing shape.
+  const byteTrimmedBelowLimit = paged.byteTrimmed && fields.length < limit;
+  const note = byteTrimmedBelowLimit
+    ? `Showing ${fields.length} of ${sorted.length} unused fields — trimmed below the ` +
+      `requested limit to fit the response size. Narrow with \`parentObjectFilter\` ` +
+      `or a lower \`limit\`, or page for more.`
+    : undefined;
+
+  return ok({
+    data: {
       fields,
       totalCount: sorted.length,
       byParentObject,
       byConfidence,
       boundaries: BOUNDARIES,
-      truncated: sorted.length > n,
+      truncated,
       trust,
-      ...(byteTrimmed
-        ? {
-            note:
-              `Showing ${n} of ${sorted.length} unused fields — trimmed below the ` +
-              `requested limit to fit the response size. Narrow with \`parentObjectFilter\` ` +
-              `or a lower \`limit\`, or page for more.`,
-          }
+      ...(note !== undefined ? { note } : {}),
+      ...(isPaged ? { limit, offset } : {}),
+      ...(truncated ? { nextOffset: offset + fields.length } : {}),
+      ...(emitCursor
+        ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo }
         : {}),
-    };
-  };
-  let n = Math.min(limit, sorted.length);
-  let data = build(n);
-  while (n > 1 && Buffer.byteLength(JSON.stringify(data), 'utf8') > UNUSED_FIELDS_DEEP_BYTE_BUDGET) {
-    n = Math.max(1, Math.floor(n * 0.8));
-    data = build(n);
-  }
-
-  return ok({
-    data,
+    },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
       refreshedAt: ctx.manifest.refreshedAt,

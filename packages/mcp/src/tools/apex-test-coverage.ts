@@ -25,6 +25,7 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import {
@@ -37,6 +38,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { nodeScanLimit } from './scan-cap.js';
 
 /**
@@ -49,6 +51,8 @@ const PAGE_CAP = 500;
 const pageSize = (): number => Math.min(nodeScanLimit(), PAGE_CAP);
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
+
+const APEX_TEST_COVERAGE_TOOL = 'sfi.apex_test_coverage';
 
 /**
  * Zod schema for the `sfi.apex_test_coverage` tool input.
@@ -65,6 +69,10 @@ export const apexTestCoverageInputSchema = z.object({
   classApiName: z.string().min(1).optional(),
   apexClass: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
+  // CR-22: page cursor for walking the full untested-class list (org-wide mode
+  // only) when truncated. Single-class mode never paginates.
+  offset: z.number().int().min(0).optional(),
+  cursor: z.string().min(1).optional(),
 });
 
 export type ApexTestCoverageInput = z.infer<typeof apexTestCoverageInputSchema>;
@@ -88,6 +96,24 @@ export interface ApexTestCoverageOutput {
     readonly truncated: boolean;
   };
   readonly boundaries: readonly string[];
+  /**
+   * Page size applied to the org-wide `untestedClasses` list. Present ONLY on a
+   * PAGED response (`truncated` or a resumed `offset > 0`); omitted on a
+   * whole-fits no-cursor call so that response stays byte-identical to pre-CR-22.
+   */
+  readonly limit?: number;
+  /** Zero-based offset of the first returned untested class. Present only when paged (see `limit`). */
+  readonly offset?: number;
+  /** Offset to pass on the next call to fetch the following page. Present only when truncated. */
+  readonly nextOffset?: number;
+  /**
+   * CR-22 opaque continuation token, present ONLY when the org-wide page is
+   * truncated. Echo it back as `cursor` to resume. Absent on a complete page so
+   * an in-budget response is byte-identical to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated org-wide page. */
+  readonly pageInfo?: PageInfo;
 }
 
 const BOUNDARIES: readonly string[] = Object.freeze([
@@ -200,10 +226,44 @@ export const apexTestCoverageHandler = async (
 
   // The offset loop exhausts the ApexClass type, so the SCAN dimension is
   // honestly complete; the only remaining truncation is the explicit,
-  // caller-controlled `limit` slice on the output list below.
-  const untestedClasses = [...classesWithoutRefs]
-    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
-    .slice(0, limit);
+  // caller-controlled `limit` slice on the output list below. `untestedClasses`
+  // is a list of UNIQUE ComponentIds (from `nonTestIds`, a Set), so the id-ASC
+  // sort is already a STRICT TOTAL order — no tiebreak needed for resume.
+  const sortedUntested = [...classesWithoutRefs].sort((a, b) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  );
+
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // Org-wide mode has NO narrowing arg (classApiName/apexClass select single-
+  // class mode), so the fingerprint is a constant — the cursor stays bound to
+  // tool + vaultHash. Mint a cursor ONLY in org-wide mode.
+  const fingerprint = argsFingerprint({});
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: APEX_TEST_COVERAGE_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  const paged = paginateLegacy(sortedUntested, {
+    offset,
+    limit,
+    keyOf: (id) => id,
+    binding: {
+      tool: APEX_TEST_COVERAGE_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const untestedClasses = paged.items;
+  const truncated = paged.hasMore;
+  const emitCursor = paged.nextCursor !== null;
+  const isPaged = truncated || offset > 0;
+
   return ok({
     data: {
       mode: 'org-wide',
@@ -213,9 +273,14 @@ export const apexTestCoverageHandler = async (
         nonTestClasses: nonTests.length,
         classesWithTestReferences: classesWithRefs.length,
         classesWithoutTestReferences: classesWithoutRefs.length,
-        truncated: classesWithoutRefs.length > limit,
+        truncated,
       },
       boundaries: BOUNDARIES,
+      ...(isPaged ? { limit, offset } : {}),
+      ...(truncated ? { nextOffset: offset + untestedClasses.length } : {}),
+      ...(emitCursor
+        ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo }
+        : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

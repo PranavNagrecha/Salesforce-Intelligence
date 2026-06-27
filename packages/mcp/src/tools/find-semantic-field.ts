@@ -90,14 +90,20 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { expandSynonyms, listNodesByType } from '@sf-intelligence/graph';
+import { expandSynonyms } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
 import { mergeInputAliases } from './input-aliases.js';
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { clampedNodeScanLimit, scanTruncationNote } from './scan-cap.js';
+
+const FIND_SEMANTIC_FIELD_TOOL = 'sfi.find_semantic_field';
 
 /** Inclusive upper bound on `limit`. */
 const SEMANTIC_FIELD_MAX_LIMIT = 50;
@@ -113,10 +119,6 @@ const SEMANTIC_FIELD_DEFAULT_MIN_SCORE = 0.1;
  * match ranks just below a literal match rather than equal to one.
  */
 const SYNONYM_SCORE = 0.9;
-/** Per-listNodesByType page size. */
-const FIELD_PAGE_SIZE = 500;
-/** Hard cap on pages walked — prevents pathological-org runaways. */
-const FIELD_MAX_PAGES = 20;
 
 /** Verbatim Q95 disclosure surfaced on every result. */
 const Q95_DISCLOSURE =
@@ -376,6 +378,9 @@ const findSemanticFieldInputBaseSchema = z.object({
     .max(SEMANTIC_FIELD_MAX_LIMIT)
     .optional(),
   minScore: z.number().min(0).max(1).optional(),
+  // CR-22: page cursor for walking the full ranked match list when truncated.
+  offset: z.number().int().min(0).optional(),
+  cursor: z.string().min(1).optional(),
 });
 
 export const findSemanticFieldInputSchema = z.preprocess(
@@ -408,6 +413,24 @@ export interface FindSemanticFieldOutput {
   readonly totalCount: number;
   readonly tokenizedQuery: readonly string[];
   readonly boundaries: readonly string[];
+  /**
+   * Page size applied to this response. Present ONLY on a PAGED response
+   * (`truncated` or a resumed `offset > 0`); omitted on a whole-fits no-cursor
+   * call so that response stays byte-identical to the pre-CR-22 shape.
+   */
+  readonly limit?: number;
+  /** Zero-based offset of the first returned match. Present only when paged (see `limit`). */
+  readonly offset?: number;
+  /** Offset to pass on the next call to fetch the following page. Present only when truncated. */
+  readonly nextOffset?: number;
+  /**
+   * CR-22 opaque continuation token, present ONLY when this page is truncated.
+   * Echo it back as `cursor` to resume. Absent on a complete page so an
+   * in-budget response is byte-identical to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
 }
 
 /**
@@ -454,59 +477,103 @@ export const findSemanticFieldHandler = async (
       ? new Set(input.objectIds)
       : null;
 
-  // Walk CustomFields page-by-page.
-  const scored: SemanticFieldMatch[] = [];
-  for (let page = 0; page < FIELD_MAX_PAGES; page += 1) {
-    const r = await listNodesByType(ctx.graph, 'CustomField', {
-      limit: FIELD_PAGE_SIZE,
-      offset: page * FIELD_PAGE_SIZE,
+  // CR-22 B4: scan EVERY CustomField by paging the SQL OFFSET forward (window-
+  // by-window) so fields past 10k are reachable — the old FIELD_PAGE_SIZE(500) x
+  // FIELD_MAX_PAGES(20) loop SILENTLY dropped fields past 10,000 from BOTH
+  // scoring and totalCount with no disclosure. objectFilter is applied post-scan
+  // exactly as before. The scan completes here; the ranked output is paged below.
+  const scan = await scanAllNodesOfTypes(ctx.graph, ['CustomField']);
+  if (!scan.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${scan.error.message}`,
     });
-    if (!r.ok) {
-      return err({
-        kind: 'internal',
-        message: `graph query failed: ${r.error.message}`,
-      });
+  }
+  const scored: SemanticFieldMatch[] = [];
+  for (const node of scan.value.nodes) {
+    if (objectFilter !== null && node.parentId !== null) {
+      if (!objectFilter.has(node.parentId)) continue;
+    } else if (objectFilter !== null && node.parentId === null) {
+      continue;
     }
-    if (r.value.length === 0) break;
-    for (const node of r.value) {
-      if (objectFilter !== null && node.parentId !== null) {
-        if (!objectFilter.has(node.parentId)) continue;
-      } else if (objectFilter !== null && node.parentId === null) {
-        continue;
-      }
-      const bag = fieldTokenBag(node);
-      const { score, intersection } = synonymJaccard(queryBag, bag);
-      if (score < minScore) continue;
-      const description = node.properties['description'];
-      scored.push({
-        componentId: node.id,
-        apiName: node.apiName,
-        label: node.label,
-        description:
-          typeof description === 'string' ? description : null,
-        objectId: node.parentId,
-        score,
-        matchedTokens: intersection.slice().sort(),
-        confidence: 'heuristic',
-      });
-    }
-    if (r.value.length < FIELD_PAGE_SIZE) break;
+    const bag = fieldTokenBag(node);
+    const { score, intersection } = synonymJaccard(queryBag, bag);
+    if (score < minScore) continue;
+    const description = node.properties['description'];
+    scored.push({
+      componentId: node.id,
+      apiName: node.apiName,
+      label: node.label,
+      description: typeof description === 'string' ? description : null,
+      objectId: node.parentId,
+      score,
+      matchedTokens: intersection.slice().sort(),
+      confidence: 'heuristic',
+    });
   }
 
-  // Rank: score DESC, then componentId ASC for determinism.
+  // Rank: score DESC, then componentId ASC for determinism. componentId is the
+  // unique field id, so (score DESC, componentId ASC) is a STRICT TOTAL order —
+  // the componentId-ASC tiebreak resolves any score tie uniquely, so a CR-22
+  // offset resume cannot dup or skip across a tie boundary.
   scored.sort((a, b) => {
     if (a.score !== b.score) return b.score - a.score;
     return a.componentId < b.componentId ? -1 : 1;
   });
 
-  const slice = scored.slice(0, limit);
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // The fingerprint covers the NARROWING args — the canonical description (after
+  // alias merge), objectIds, and minScore — so a token can't replay against a
+  // different query.
+  const fingerprint = argsFingerprint({
+    description: input.description,
+    ...(input.objectIds !== undefined ? { objectIds: input.objectIds } : {}),
+    ...(input.minScore !== undefined ? { minScore: input.minScore } : {}),
+  });
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: FIND_SEMANTIC_FIELD_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  const paged = paginateLegacy(scored, {
+    offset,
+    limit,
+    keyOf: (m) => m.componentId,
+    binding: {
+      tool: FIND_SEMANTIC_FIELD_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const slice = paged.items;
+  const truncated = paged.hasMore;
+  const emitCursor = paged.nextCursor !== null;
+  const isPaged = truncated || offset > 0;
+
+  const boundaries = [Q95_DISCLOSURE, SYNONYM_DISCLOSURE];
+  if (scan.value.scanIncomplete) {
+    boundaries.push(
+      scanTruncationNote(scan.value.incompleteTypes, clampedNodeScanLimit()),
+    );
+  }
 
   return ok({
     data: {
       matches: slice,
       totalCount: scored.length,
       tokenizedQuery: queryTokens,
-      boundaries: [Q95_DISCLOSURE, SYNONYM_DISCLOSURE],
+      boundaries,
+      ...(isPaged ? { limit, offset } : {}),
+      ...(truncated ? { nextOffset: offset + slice.length } : {}),
+      ...(emitCursor
+        ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo }
+        : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
