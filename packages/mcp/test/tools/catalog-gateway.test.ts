@@ -86,6 +86,68 @@ describe('sfi.list_analyses', () => {
     expect(r.value.data.analyses.every((a) => a.category === 'live')).toBe(true);
     expect(r.value.data.categories).toContain('what-if');
   });
+
+  describe('CR-22 continuation cursor', () => {
+    it('emits a nextCursor on a truncated page and resumes; pages concat with no gaps/dupes', async () => {
+      const first = await listAnalysesHandler(ctx, { limit: 20 });
+      expect(first.ok).toBe(true);
+      if (!first.ok) return;
+      const d1 = first.value.data;
+      expect(d1.analyses.length).toBe(20);
+      expect(typeof d1.nextCursor).toBe('string');
+      expect(d1.pageInfo?.nextCursor).toBe(d1.nextCursor);
+
+      const seen = new Set<string>(d1.analyses.map((a) => a.name));
+      let cursor = d1.nextCursor as string;
+      let guard = 0;
+      for (;;) {
+        const r = await listAnalysesHandler(ctx, { limit: 20, cursor });
+        expect(r.ok).toBe(true);
+        if (!r.ok) return;
+        const d = r.value.data;
+        for (const a of d.analyses) seen.add(a.name);
+        if (d.nextCursor === undefined) {
+          expect('nextCursor' in d).toBe(false);
+          break;
+        }
+        cursor = d.nextCursor;
+        if (++guard > 1000) throw new Error('cursor did not terminate');
+      }
+      // Every roster tool surfaced exactly once across the pages.
+      expect(seen.size).toBe(V01_TOOLS.length);
+    });
+
+    it('in-budget whole-fits call emits NO cursor/pageInfo (byte-identical)', async () => {
+      const r = await listAnalysesHandler(ctx, { limit: 200 });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      // 200 >= roster size in the fixture build? Guard: only assert when it fits.
+      if (r.value.data.analyses.length === r.value.data.total) {
+        expect('nextCursor' in r.value.data).toBe(false);
+        expect('pageInfo' in r.value.data).toBe(false);
+      }
+    });
+
+    it('rejects a cursor replayed against a different category filter', async () => {
+      const first = await listAnalysesHandler(ctx, { limit: 5 });
+      expect(first.ok).toBe(true);
+      if (!first.ok) return;
+      const cursor = first.value.data.nextCursor;
+      expect(typeof cursor).toBe('string');
+      const replay = await listAnalysesHandler(ctx, {
+        category: 'live',
+        cursor: cursor as string,
+      });
+      expect(replay.ok).toBe(false);
+      if (!replay.ok) expect(replay.error.kind).toBe('invalid-query');
+    });
+
+    it('rejects a malformed cursor', async () => {
+      const replay = await listAnalysesHandler(ctx, { cursor: 'not-a-cursor' });
+      expect(replay.ok).toBe(false);
+      if (!replay.ok) expect(replay.error.kind).toBe('invalid-query');
+    });
+  });
 });
 
 describe('sfi.describe_analysis', () => {

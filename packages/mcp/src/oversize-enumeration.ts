@@ -36,22 +36,16 @@ export interface HighFanoutInventoryEntry {
 export const HIGH_FANOUT_INVENTORY: Readonly<
   Record<string, HighFanoutInventoryEntry>
 > = Object.freeze({
-  // --- Paginated reverse lookups / graph lists (limit/offset/hasMore) ---
+  // --- Truly paginated: a `limit` page PLUS a resume knob (offset or CR-22
+  //     cursor) so the dropped tail is reachable. The strengthened `paginated`
+  //     audit requires this; a top-N truncator with no resume is classified
+  //     `handler-capped` below instead. CR-22 added an opaque `cursor` to the
+  //     B1 batch (get_edges, find_apex_usages, find_formula_references,
+  //     pii_inventory, crud_fls_audit, test_coverage_gaps). ---
   'sfi.list_components': { bound: 'paginated' },
-  'sfi.get_edges': { bound: 'paginated', note: 'default limit 200 + byte trim' },
-  'sfi.search_components': { bound: 'paginated' },
-  'sfi.search_apex_source': { bound: 'paginated' },
-  'sfi.search_flow_metadata': { bound: 'paginated' },
-  'sfi.find_apex_usages': { bound: 'paginated' },
-  'sfi.find_code_usages': { bound: 'paginated' },
-  'sfi.find_field_anywhere': { bound: 'paginated' },
-  'sfi.find_formula_references': { bound: 'paginated' },
-  'sfi.find_semantic_field': { bound: 'paginated' },
-  'sfi.find_hardcoded_values': { bound: 'paginated' },
-  'sfi.find_hardcoded_values_anywhere': { bound: 'paginated' },
-  'sfi.find_clone_patterns': { bound: 'paginated' },
-  'sfi.find_dead_code': { bound: 'paginated' },
-  'sfi.find_dependency_cycles': { bound: 'paginated' },
+  'sfi.get_edges': { bound: 'paginated', note: 'default limit 200 + byte trim + CR-22 cursor' },
+  'sfi.find_apex_usages': { bound: 'paginated', note: 'offset + CR-22 cursor' },
+  'sfi.find_formula_references': { bound: 'paginated', note: 'offset + CR-22 cursor' },
   'sfi.effective_permissions': { bound: 'paginated', note: 'Admin unions thousands of grants' },
   'sfi.who_can_run': { bound: 'paginated' },
   'sfi.who_can_access_object': { bound: 'paginated', note: 'Account ~70 granters' },
@@ -61,27 +55,45 @@ export const HIGH_FANOUT_INVENTORY: Readonly<
   'sfi.tab_availability': { bound: 'paginated', note: 'Admin ~59 tabs' },
   'sfi.lightning_pages': { bound: 'paginated' },
   'sfi.lifecycle_process': { bound: 'paginated' },
-  'sfi.integration_map': { bound: 'paginated' },
-  'sfi.event_subscribers': { bound: 'paginated' },
-  'sfi.pii_inventory': { bound: 'paginated' },
-  'sfi.changed_since': { bound: 'paginated' },
-  'sfi.diff_snapshots': { bound: 'paginated' },
-  'sfi.domain_clusters': { bound: 'paginated' },
-  'sfi.org_history': { bound: 'paginated' },
-  'sfi.unused_components': { bound: 'paginated' },
-  'sfi.unused_fields_deep': { bound: 'paginated' },
-  'sfi.test_coverage_gaps': { bound: 'paginated' },
-  'sfi.governor_limit_risks': { bound: 'paginated' },
-  'sfi.process_builder_migration_candidates': { bound: 'paginated' },
-  'sfi.empty_queues_and_groups': { bound: 'paginated' },
-  'sfi.unassigned_permission_sets': { bound: 'paginated' },
-  'sfi.crud_fls_audit': { bound: 'paginated' },
+  'sfi.pii_inventory': { bound: 'paginated', note: 'offset + byte trim + CR-22 cursor' },
+  'sfi.test_coverage_gaps': { bound: 'paginated', note: 'offset + byte trim + CR-22 cursor' },
+  'sfi.crud_fls_audit': { bound: 'paginated', note: 'offset + byte trim + CR-22 cursor' },
   'sfi.what_if_merge_profiles': { bound: 'paginated', note: 'Admin merge page-500 repro' },
   'sfi.what_if_split_profile': { bound: 'paginated' },
   'sfi.user_ability': { bound: 'paginated' },
-  'sfi.apex_test_coverage': { bound: 'paginated' },
-  'sfi.fleet_find': { bound: 'paginated' },
-  'sfi.cpq_dependency_map': { bound: 'paginated' },
+  // --- Top-N truncators: a `limit` caps the result but there is NO resume
+  //     (no offset/cursor to fetch the dropped tail). Tagged `handler-capped`
+  //     so the strengthened `paginated` audit (which requires a resume knob)
+  //     does not falsely pass them. Convert to a real cursor to promote back.
+  //     CR-22: the B0 audit-strengthening surfaced these as mislabeled (they
+  //     were tagged `paginated` but expose only `limit`); reclassified here so
+  //     the real-schema gate passes truthfully. ---
+  'sfi.search_components': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.search_apex_source': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.search_flow_metadata': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.find_code_usages': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.find_field_anywhere': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.find_semantic_field': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.find_hardcoded_values': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.find_hardcoded_values_anywhere': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.find_clone_patterns': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.integration_map': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.event_subscribers': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.diff_snapshots': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.domain_clusters': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.org_history': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.unused_components': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.unused_fields_deep': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.governor_limit_risks': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.process_builder_migration_candidates': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.empty_queues_and_groups': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.unassigned_permission_sets': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.apex_test_coverage': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.fleet_find': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.find_dead_code': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.changed_since': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.find_dependency_cycles': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.cpq_dependency_map': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
   // --- BFS traversals: hop/node/edge caps + graph-payload byte budget ---
   'sfi.get_subgraph': { bound: 'graph-payload-budget', note: 'hops + 200 nodes / 400 edges + byte trim' },
   'sfi.get_impact': { bound: 'graph-payload-budget', note: 'incoming-only BFS + same caps' },
@@ -148,6 +160,16 @@ export interface OversizeEnumerationReport {
 const hasLimitProperty = (tool: ToolLike): boolean =>
   tool.inputSchema?.properties?.limit !== undefined;
 
+/**
+ * A `paginated` tool must let the caller fetch the DROPPED tail — a `limit`
+ * alone is a top-N truncator, not real pagination. The resume knob is either
+ * classic `offset` or a CR-22 continuation `cursor`. A tool with `limit` but no
+ * resume knob belongs under `handler-capped`, not `paginated`.
+ */
+const hasResumeKnob = (tool: ToolLike): boolean =>
+  tool.inputSchema?.properties?.offset !== undefined ||
+  tool.inputSchema?.properties?.cursor !== undefined;
+
 const isLiveTool = (name: string): boolean => name.startsWith('sfi.live_');
 
 /**
@@ -177,6 +199,22 @@ export const analyzeOversizeEnumeration = (
         tool: name,
         message:
           `${name} is inventoried as paginated but its inputSchema lacks a \`limit\` property.`,
+      });
+    }
+    // Strengthened CR-22 audit: `paginated` MUST also expose a resume knob
+    // (`offset` or `cursor`), else it is a top-N truncator and should be
+    // tagged `handler-capped` (so the dropped tail isn't silently unreachable).
+    if (
+      entry.bound === 'paginated' &&
+      hasLimitProperty(tool) &&
+      !hasResumeKnob(tool)
+    ) {
+      violations.push({
+        tool: name,
+        message:
+          `${name} is inventoried as paginated but has no resume knob (\`offset\` or \`cursor\`) — ` +
+          `a \`limit\` alone is a top-N truncator with no way to fetch the dropped tail. ` +
+          `Add a cursor (CR-22) or reclassify as \`handler-capped\`.`,
       });
     }
     if (

@@ -524,4 +524,56 @@ describe('piiInventoryHandler — pagination + byte budget (B25)', () => {
     expect(truncated).toBe(true);
     expect(nextOffset).toBe(fields.length);
   });
+
+  // CR-22: the byte-trimmed page must carry an opaque continuation cursor and
+  // walking it must cover every field exactly once.
+  it('emits a nextCursor on the byte-trimmed page and walks the full inventory via cursor (no gaps/dupes)', async () => {
+    const seen = new Set<string>();
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const result = await piiInventoryHandler(
+        bulkCtx,
+        cursor === undefined ? {} : { cursor },
+      );
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const data = result.value.data;
+      for (const f of data.fields) seen.add(f.id);
+      if (!data.truncated) {
+        expect('nextCursor' in data).toBe(false);
+        break;
+      }
+      expect(typeof data.nextCursor).toBe('string');
+      expect(data.pageInfo?.nextCursor).toBe(data.nextCursor);
+      cursor = data.nextCursor as string;
+      if (++guard > 1000) throw new Error('cursor did not terminate');
+    }
+    expect(seen.size).toBe(BULK_COUNT);
+  });
+
+  it('rejects a cursor replayed against a different query (changed classification filter)', async () => {
+    const first = await piiInventoryHandler(bulkCtx, { limit: 5 });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const cursor = first.value.data.nextCursor;
+    expect(typeof cursor).toBe('string');
+    const replay = await piiInventoryHandler(bulkCtx, {
+      classification: 'sensitive',
+      cursor: cursor as string,
+    });
+    expect(replay.ok).toBe(false);
+    if (!replay.ok) expect(replay.error.kind).toBe('invalid-query');
+  });
+
+  it('in-budget whole-fits call emits NO cursor/pageInfo (byte-identical to pre-CR-22)', async () => {
+    // The non-bulk 15-field fixture (`ctx`) fits under the default limit and
+    // byte budget, so the response carries neither nextCursor nor pageInfo.
+    const result = await piiInventoryHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.truncated).toBe(false);
+    expect('nextCursor' in result.value.data).toBe(false);
+    expect('pageInfo' in result.value.data).toBe(false);
+  });
 });

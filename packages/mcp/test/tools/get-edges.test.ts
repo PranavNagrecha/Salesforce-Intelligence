@@ -261,6 +261,81 @@ describe('getEdgesHandler — pagination (P10-A2)', () => {
   });
 });
 
+describe('getEdgesHandler — CR-22 continuation cursor', () => {
+  it('in-budget whole-fits call emits NO cursor/pageInfo (byte-identical)', async () => {
+    const result = await getEdgesHandler(ctx, { nodeId: 'CustomObject:A' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    // The pre-CR-22 shape: no nextCursor, no pageInfo, no note keys at all.
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+    expect('note' in d).toBe(false);
+    expect(Object.keys(d).sort()).toEqual(['edges', 'hasMore', 'nextOffset', 'totalCount']);
+  });
+
+  it('a truncated (over-limit) page emits a nextCursor that resumes the next page', async () => {
+    const first = await getEdgesHandler(ctx, { nodeId: 'CustomObject:A', limit: 2 });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const d1 = first.value.data;
+    expect(d1.edges.length).toBe(2);
+    expect(d1.hasMore).toBe(true);
+    expect(d1.nextOffset).toBe(2);
+    expect(typeof d1.nextCursor).toBe('string');
+    expect(d1.pageInfo?.nextCursor).toBe(d1.nextCursor);
+
+    // Resume with the opaque cursor (no offset).
+    const second = await getEdgesHandler(ctx, {
+      nodeId: 'CustomObject:A',
+      limit: 2,
+      cursor: d1.nextCursor as string,
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    const d2 = second.value.data;
+    expect(d2.edges.length).toBe(1);
+    expect(d2.hasMore).toBe(false);
+    // No new cursor on the exhausted final page.
+    expect('nextCursor' in d2).toBe(false);
+
+    // The two pages concat to the full result with NO gaps/dupes.
+    const ids = (es: typeof d1.edges) =>
+      es.map((e) => `${e.fromId}|${e.toId}|${e.edgeType}|${e.source}`);
+    const combined = [...ids(d1.edges), ...ids(d2.edges)];
+    expect(new Set(combined).size).toBe(3); // no dupes
+    const full = await getEdgesHandler(ctx, { nodeId: 'CustomObject:A' });
+    if (!full.ok) return;
+    expect(combined.sort()).toEqual(ids(full.value.data.edges).sort()); // no gaps
+  });
+
+  it('rejects a cursor minted for a DIFFERENT query (changed filter)', async () => {
+    const first = await getEdgesHandler(ctx, { nodeId: 'CustomObject:A', limit: 2 });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const cursor = first.value.data.nextCursor as string;
+    // Replay the cursor against the same tool/vault but a NARROWED query
+    // (added an edgeType filter) → fingerprint mismatch → invalid-query.
+    const replay = await getEdgesHandler(ctx, {
+      nodeId: 'CustomObject:A',
+      limit: 2,
+      edgeType: 'parentOf',
+      cursor,
+    });
+    expect(replay.ok).toBe(false);
+    if (!replay.ok) expect(replay.error.kind).toBe('invalid-query');
+  });
+
+  it('rejects a malformed / forged cursor string', async () => {
+    const replay = await getEdgesHandler(ctx, {
+      nodeId: 'CustomObject:A',
+      cursor: 'not-a-real-cursor',
+    });
+    expect(replay.ok).toBe(false);
+    if (!replay.ok) expect(replay.error.kind).toBe('invalid-query');
+  });
+});
+
 describe('getEdgesInputSchema', () => {
   it('accepts a minimal well-formed input', () => {
     const parsed = getEdgesInputSchema.safeParse({ nodeId: 'CustomObject:A' });

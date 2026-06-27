@@ -496,6 +496,7 @@ import {
   packageImpactHandler,
   packageImpactInputSchema,
 } from './package-impact.js';
+import { hasHandlerCursor } from './page-cursor.js';
 import {
   piiInventoryHandler,
   piiInventoryInputSchema,
@@ -742,6 +743,8 @@ const LIST_ANALYSES_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.fre
     category: { type: 'string' },
     limit: { type: 'integer', minimum: 1, maximum: 200 },
     offset: { type: 'integer', minimum: 0 },
+    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    cursor: { type: 'string', minLength: 1 },
   },
 });
 
@@ -841,6 +844,8 @@ const GET_EDGES_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze(
     },
     limit: { type: 'integer', minimum: 1, maximum: 1000 },
     offset: { type: 'integer', minimum: 0 },
+    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    cursor: { type: 'string', minLength: 1 },
   },
   required: ['nodeId'],
 });
@@ -1399,6 +1404,8 @@ const FIND_FORMULA_REFERENCES_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       fieldId: { type: 'string', minLength: 1 },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
+      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      cursor: { type: 'string', minLength: 1 },
     },
     required: ['fieldId'],
   });
@@ -1418,6 +1425,8 @@ const FIND_APEX_USAGES_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       targetId: { type: 'string', minLength: 1 },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
+      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      cursor: { type: 'string', minLength: 1 },
       edgeTypes: {
         type: 'array',
         items: {
@@ -1935,6 +1944,8 @@ const PII_INVENTORY_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
+      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      cursor: { type: 'string', minLength: 1 },
     },
   });
 
@@ -2614,6 +2625,8 @@ const CRUD_FLS_AUDIT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     properties: {
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
+      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      cursor: { type: 'string', minLength: 1 },
     },
   });
 
@@ -2634,6 +2647,8 @@ const TEST_COVERAGE_GAPS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
+      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      cursor: { type: 'string', minLength: 1 },
     },
   });
 
@@ -6232,17 +6247,32 @@ export const jsonResult = (
     const args = narrowing?.args ?? {};
     const offset = args['offset'];
     const offsetShaped = 'offset' in args || typeof offset === 'number';
+    // CR-22 seam: a cursor-aware handler attaches its own `pageInfo`/`nextCursor`
+    // to `data`. When present, the handler's pagination is authoritative — do
+    // NOT overwrite it with this guard's approximate `nextOffset` (which the
+    // handler already accounted for). For UNCONVERTED offset tools the guard
+    // keeps the approximate `nextOffset` but adds an honest note that the
+    // dropped tail can't be resumed exactly.
+    const handlerPaginated = hasHandlerCursor(
+      (clone as { readonly data?: unknown }).data,
+    );
+    const emitApproxNextOffset =
+      dropped > 0 && offsetShaped && keptOfLargest !== null && !handlerPaginated;
     clone['responseBudget'] = {
       applied: true,
       ...(dropped > 0 ? { truncated: true, droppedCount: dropped } : {}),
-      ...(dropped > 0 && offsetShaped && keptOfLargest !== null
+      ...(emitApproxNextOffset
         ? {
             nextOffset:
               (typeof offset === 'number' ? offset : 0) + keptOfLargest,
           }
         : {}),
       ...(stringsSlimmed > 0 ? { stringsSlimmed } : {}),
-      note: 'Response exceeded the byte budget and was reduced to fit (lists tail-truncated, long strings trimmed). Narrow the query or page with limit/offset for complete rows.',
+      note: handlerPaginated
+        ? 'Response exceeded the byte budget and long strings were trimmed; use this tool’s own nextCursor to page (the handler’s pagination is authoritative).'
+        : emitApproxNextOffset
+          ? 'Response exceeded the byte budget and was reduced to fit (lists tail-truncated, long strings trimmed). The nextOffset is approximate — re-query from it for the dropped tail.'
+          : 'Response exceeded the byte budget and was reduced to fit (lists tail-truncated, long strings trimmed); the dropped tail cannot be resumed from this response — narrow the query or page with limit/offset for complete rows.',
     };
     const reduced = serialize(clone);
     if (fits(reduced)) return result(reduced);
@@ -6255,7 +6285,7 @@ export const jsonResult = (
 
 /** Input-schema keys that narrow a query — surfaced in oversize guidance. */
 const NARROWING_KNOB_RE =
-  /^(limit|offset|hops|maxDepth|maxBodyBytes|maxRowsPerSection|grepLimit|format|verbosity|scope|type|types|category|classification|direction)$|filter/i;
+  /^(limit|offset|cursor|hops|maxDepth|maxBodyBytes|maxRowsPerSection|grepLimit|format|verbosity|scope|type|types|category|classification|direction)$|filter/i;
 
 /** Extract narrowing knob names from a tool's Zod input schema (object schemas only). */
 const narrowingKnobs = (schema: z.ZodTypeAny): readonly string[] => {

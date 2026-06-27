@@ -207,6 +207,15 @@ describe('crudFlsAuditHandler', () => {
     expect(r.value.data.truncated).toBe(true);
   });
 
+  it('CR-22: in-budget whole-fits call emits NO cursor/pageInfo (byte-identical)', async () => {
+    const r = await crudFlsAuditHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.truncated).toBe(false);
+    expect('nextCursor' in r.value.data).toBe(false);
+    expect('pageInfo' in r.value.data).toBe(false);
+  });
+
   it('returns empty classes and empty boundaries when no class has CRUD/FLS findings', async () => {
     const localDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-cfa-empty-'));
     const opened = await openGraph(join(localDir, 'empty.db'));
@@ -385,6 +394,45 @@ describe('crudFlsAuditHandler — pagination + byte budget (B25)', () => {
     expect(d.classes.length).toBeLessThanOrEqual(5);
     expect(d.truncated).toBe(true);
     expect(d.nextOffset).toBe(d.classes.length);
+  });
+
+  // CR-22: the byte-trimmed page carries an opaque continuation cursor and
+  // walking it must cover every class exactly once with no gaps/dupes.
+  it('emits a nextCursor on the truncated page and walks every class once via cursor', async () => {
+    const seen = new Set<string>();
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const r = await crudFlsAuditHandler(
+        bulkCtx,
+        cursor === undefined ? {} : { cursor },
+      );
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.value.data;
+      for (const c of d.classes) seen.add(c.componentId);
+      if (!d.truncated) {
+        expect('nextCursor' in d).toBe(false);
+        break;
+      }
+      expect(typeof d.nextCursor).toBe('string');
+      expect(d.pageInfo?.nextCursor).toBe(d.nextCursor);
+      cursor = d.nextCursor as string;
+      if (++guard > 1000) throw new Error('cursor did not terminate');
+    }
+    expect(seen.size).toBe(BULK_CLASSES);
+  });
+
+  it('rejects a forged cursor minted for a different tool', async () => {
+    // Mint a token that decodes fine but names a different tool — the bind-check
+    // must reject it as invalid-query.
+    const forged = Buffer.from(
+      JSON.stringify({ v: 1, t: 'sfi.get_edges', h: FIXTURE_MANIFEST.sourceTreeHash, o: 5 }),
+      'utf8',
+    ).toString('base64url');
+    const r = await crudFlsAuditHandler(bulkCtx, { cursor: forged });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe('invalid-query');
   });
 
   it('byte-trims a single oversized class and flags findingsTruncated', async () => {

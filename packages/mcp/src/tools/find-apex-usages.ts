@@ -45,12 +45,15 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
+
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 
 /**
  * Inclusive upper bound on `limit`. Mirrors the
@@ -112,6 +115,11 @@ export const findApexUsagesInputSchema = z.object({
    * blast-radius tool must never silently drop referrers.
    */
   offset: z.number().int().nonnegative().optional(),
+  /**
+   * CR-22 continuation cursor: opaque token from a prior truncated page's
+   * `nextCursor`; supplies the resume offset. Omit for today's behavior.
+   */
+  cursor: z.string().min(1).optional(),
   edgeTypes: z.array(z.enum(APEX_EDGE_TYPES)).optional(),
 });
 
@@ -155,8 +163,16 @@ export interface FindApexUsagesOutput {
   readonly limit: number;
   /** True when more usages remain past this page. */
   readonly hasMore: boolean;
-  /** Cursor for the next page, or `null` when the list is exhausted. */
+  /** Approximate next offset (legacy), or `null` when the list is exhausted. */
   readonly nextOffset: number | null;
+  /**
+   * CR-22 opaque continuation token, present ONLY when this page is truncated
+   * (more usages remain). Echo it back as `cursor` to resume. Absent on a
+   * complete page so an in-budget response is byte-identical to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
 }
 
 const APEX_USAGE_HEURISTIC_DISCLOSURE =
@@ -165,14 +181,19 @@ const APEX_USAGE_EMPTY_DISCLOSURE =
   'No Apex usages found in the vault — NOT proof nothing uses it. The scanner is heuristic (dynamic/reflective invisible) and managed-package code is not retrieved. Cross-check `find_component_usages` before concluding it is unused.';
 
 /**
- * Deterministic comparator: `id` ASC, then `edgeType` ASC. The
- * tiebreaker handles the case where a single Apex class has multiple
- * incoming edge types to the same target (e.g., both `readsFrom` and
- * `writesTo` on the same field).
+ * Deterministic TOTAL-ORDER comparator: `id` ASC, `edgeType` ASC, then
+ * `source` ASC. The `(id, edgeType)` keys handle a single Apex class with
+ * multiple incoming edge types to the same target (e.g. both `readsFrom` and
+ * `writesTo` on the same field). The `source` tiebreak makes the order UNIQUE:
+ * the underlying edge PK is `(from_id, to_id, edge_type, source)`, and here
+ * `from_id` = `id`, `to_id` = the fixed `targetId`, `edge_type` = `edgeType`,
+ * so within a fixed `(id, edgeType)` only `source` can differ — adding it
+ * guarantees a unique final key so CR-22 offset resume cannot dup or skip.
  */
 const compareUsages = (a: ApexUsage, b: ApexUsage): number => {
   if (a.id !== b.id) return a.id < b.id ? -1 : 1;
   if (a.edgeType !== b.edgeType) return a.edgeType < b.edgeType ? -1 : 1;
+  if (a.source !== b.source) return a.source < b.source ? -1 : 1;
   return 0;
 };
 
@@ -264,11 +285,43 @@ export const findApexUsagesHandler = async (
   // is the full pre-slice count of returnable referrers — the honest blast
   // radius — and the truncation note tells the caller the page is incomplete.
   const ordered = usages.sort(compareUsages);
-  const total = ordered.length;
-  const offset = input.offset ?? 0;
-  const page = ordered.slice(offset, offset + limit);
+
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset);
+  // a stale/forged cursor (changed targetId/edgeTypes, different tool, or
+  // refreshed vault) is rejected with invalid-query.
+  const fingerprint = argsFingerprint({
+    targetId: input.targetId,
+    ...(input.edgeTypes !== undefined ? { edgeTypes: input.edgeTypes } : {}),
+  });
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: 'sfi.find_apex_usages',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  // This tool has no per-handler byte budget (offset/limit only) — keep that by
+  // setting an effectively-unbounded byteBudget, so `paginate()` only truncates
+  // on `limit` (byte-identical to the prior open-coded slice). The global
+  // jsonResult guard remains the byte backstop, as before.
+  const paged = paginateLegacy(ordered, {
+    offset,
+    limit,
+    byteBudget: Number.MAX_SAFE_INTEGER,
+    binding: {
+      tool: 'sfi.find_apex_usages',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const page = paged.items;
+  const total = paged.totalCount;
+  const hasMore = paged.hasMore;
   const returned = offset + page.length;
-  const hasMore = returned < total;
 
   const boundaries: string[] = [APEX_USAGE_HEURISTIC_DISCLOSURE];
   if (total === 0) {
@@ -281,6 +334,7 @@ export const findApexUsagesHandler = async (
         `INCOMPLETE; do not treat it as the full blast radius.`,
     );
   }
+  const emitCursor = paged.nextCursor !== null;
 
   return ok({
     data: {
@@ -291,6 +345,7 @@ export const findApexUsagesHandler = async (
       limit,
       hasMore,
       nextOffset: hasMore ? returned : null,
+      ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
