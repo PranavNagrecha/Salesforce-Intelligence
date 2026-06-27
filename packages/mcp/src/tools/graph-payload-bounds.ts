@@ -97,6 +97,12 @@ export const slimGraphNodes = (
  * rejected. We drop nodes from the tail of the id-sorted list — and any edge
  * that then dangles — until the serialized slice fits, always keeping the root
  * node. Returns the trimmed slice (re-sorted by id) and whether trimming ran.
+ *
+ * CR-RV7: dangling edges (referencing a node absent from the returned `nodes`)
+ * are dropped on BOTH paths — the under-budget early return AND the trim path —
+ * so no consumer can deref a node missing from the slice. This is the single
+ * chokepoint both `get_impact` and `get_subgraph` flow through, filtering
+ * against the FINAL returned node set, so the two tools cannot drift.
  */
 export const enforceGraphPayloadBudget = (
   rootId: ComponentId,
@@ -107,14 +113,36 @@ export const enforceGraphPayloadBudget = (
   readonly edges: readonly Edge[];
   readonly trimmed: boolean;
 } => {
-  if (estimateGraphPayloadBytes({ nodes, edges }) <= GRAPH_MAX_PAYLOAD_BYTES) {
-    return { nodes, edges, trimmed: false };
+  // CR-RV7 (mirrors CR-13's getSubgraph fix): drop DANGLING edges — those
+  // referencing a node absent from `nodes` — UNCONDITIONALLY, including on the
+  // under-budget early-return branch. The caller's edge list is sliced
+  // INDEPENDENTLY of its node list (e.g. `get-impact.ts` caps nodes and edges
+  // separately, and `fetchNodes`/`listNodesByIds` silently drops ids with no
+  // node row), so an edge can reference an id absent from the returned `nodes`.
+  // Filtering here — the single chokepoint both `get_impact` and `get_subgraph`
+  // flow through, against the FINAL `nodes` set (post-fetch, post-slim) — means
+  // a consumer can never deref a node missing from the slice. The trim path
+  // below already filters; this closes the early-return gap. Self-contained
+  // slices are unaffected (every edge with both endpoints in `nodes` is kept).
+  const allNodeIds = new Set(nodes.map((n) => n.id));
+  // The dangler-free edge set against the FULL `nodes`. Computed once and
+  // threaded into BOTH the early return and the trim path — the trim path then
+  // narrows it against `keptNodes` (a subset of `nodes`), so a dangler against
+  // `nodes` is necessarily a dangler against `keptNodes` and never re-appears.
+  const selfContainedEdges = edges.filter(
+    (e) => allNodeIds.has(e.fromId) && allNodeIds.has(e.toId),
+  );
+  if (
+    estimateGraphPayloadBytes({ nodes, edges: selfContainedEdges }) <=
+    GRAPH_MAX_PAYLOAD_BYTES
+  ) {
+    return { nodes, edges: selfContainedEdges, trimmed: false };
   }
   const byId = (a: Node, b: Node): number =>
     a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   const fits = (ns: readonly Node[]): boolean => {
     const ids = new Set(ns.map((n) => n.id));
-    const es = edges.filter((e) => ids.has(e.fromId) && ids.has(e.toId));
+    const es = selfContainedEdges.filter((e) => ids.has(e.fromId) && ids.has(e.toId));
     return (
       estimateGraphPayloadBytes({ nodes: ns, edges: es }) <=
       GRAPH_MAX_PAYLOAD_BYTES
@@ -128,7 +156,7 @@ export const enforceGraphPayloadBudget = (
   }
   const keptNodes = [...root, ...rest].sort(byId);
   const keptIds = new Set(keptNodes.map((n) => n.id));
-  const keptEdges = edges.filter(
+  const keptEdges = selfContainedEdges.filter(
     (e) => keptIds.has(e.fromId) && keptIds.has(e.toId),
   );
   return { nodes: keptNodes, edges: keptEdges, trimmed: true };

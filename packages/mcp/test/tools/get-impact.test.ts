@@ -688,6 +688,113 @@ describe('getImpactHandler', () => {
       rmSync(capDir, { recursive: true, force: true });
     }
   });
+
+  // CR-RV7: get_impact must never emit a DANGLING edge — one whose endpoint is
+  // absent from impact.nodes — on the under-budget EARLY-RETURN path (the trim
+  // path already filters; the early return did NOT). A consumer
+  // (e.g. blast_radius_live) derefs impact.nodes per edge, so a dangling edge is
+  // a crash / false-data class for the flagship access chain.
+  //
+  // Mechanism (b): an edge whose endpoint id has NO node row. The BFS adds the
+  // endpoint to visitedNodes (it appears in the incoming-edge table), but
+  // `fetchNodes`/`listNodesByIds` silently drops the row-less id, so the edge
+  // dangles unless `enforceGraphPayloadBudget` filters it. The slice is small
+  // (well under GRAPH_MAX_PAYLOAD_BYTES), so the budget takes the early return
+  // (trimmed:false) — exactly the path the fix must cover.
+  it('CR-RV7: drops an edge whose endpoint has no node row on the early-return path (0 dangling)', async () => {
+    const ghostDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-get-impact-ghost-'));
+    try {
+      const dbPath = join(ghostDir, 'ghost.db');
+      const opened = await openGraph(dbPath);
+      if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+      const ghostStore = opened.value;
+
+      const rootId = 'CustomField:Account.GhostHub__c';
+      // One real referencer (has a node row) + one GHOST referencer whose
+      // `fromId` is referenced ONLY as an edge endpoint and has NO node row.
+      const ghostSeed: ExtractionResult = {
+        nodes: [
+          makeNode({ id: 'CustomObject:Account', apiName: 'Account', label: 'Account' }),
+          makeNode({
+            id: rootId,
+            type: 'CustomField',
+            apiName: 'GhostHub__c',
+            label: 'Ghost Hub',
+            parentId: 'CustomObject:Account',
+            sourcePath: 'objects/Account/fields/GhostHub__c.field-meta.xml',
+          }),
+          makeNode({
+            id: 'ValidationRule:Account.RealVR',
+            type: 'ValidationRule',
+            apiName: 'RealVR',
+            label: 'Real VR',
+            parentId: 'CustomObject:Account',
+            sourcePath: 'objects/Account/validationRules/RealVR.validationRule-meta.xml',
+          }),
+        ],
+        edges: [
+          makeEdge({
+            fromId: 'ValidationRule:Account.RealVR',
+            toId: rootId,
+            edgeType: 'references',
+            confidence: 'parsed',
+            source: 'formula-tokenizer',
+          }),
+          // GHOST: fromId has no corresponding node row. The BFS still walks it
+          // (it is an incoming edge to the root), so collectedEdges holds it but
+          // fetchNodes drops the row-less id → the edge dangles unless filtered.
+          makeEdge({
+            fromId: 'ValidationRule:Account.GhostVR',
+            toId: rootId,
+            edgeType: 'references',
+            confidence: 'parsed',
+            source: 'formula-tokenizer',
+          }),
+        ],
+      };
+      const imported = await importExtractionResults(ghostStore, [ghostSeed]);
+      if (!imported.ok) throw new Error(`ghost seed import failed: ${imported.error.message}`);
+      const ghostCtx: Context = {
+        vaultRoot: ghostDir,
+        manifest: FIXTURE_MANIFEST,
+        graph: ghostStore,
+      };
+
+      const result = await getImpactHandler(ghostCtx, { componentId: rootId, hops: 1 });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+
+      // The slice is tiny, so the byte budget took the EARLY RETURN, not the
+      // trim path — this is precisely the branch the fix had to cover.
+      expect(result.value.data.truncated).toBe(false);
+
+      const ids = new Set(result.value.data.impact.nodes.map((n) => n.id));
+      // FAIL-BEFORE: the early-return path kept the GhostVR-endpoint edge even
+      // though GhostVR has no node row in impact.nodes → a dangling edge.
+      const dangling = result.value.data.impact.edges.filter(
+        (e) => !ids.has(e.fromId) || !ids.has(e.toId),
+      );
+      expect(dangling).toEqual([]);
+      // The row-less endpoint must not appear in any returned edge.
+      const refsGhost = result.value.data.impact.edges.some(
+        (e) => e.fromId === 'ValidationRule:Account.GhostVR' || e.toId === 'ValidationRule:Account.GhostVR',
+      );
+      expect(refsGhost).toBe(false);
+      // The legitimate self-contained edge survives.
+      expect(
+        result.value.data.impact.edges.some(
+          (e) => e.fromId === 'ValidationRule:Account.RealVR' && e.toId === rootId,
+        ),
+      ).toBe(true);
+      // Caps respected.
+      expect(result.value.data.impact.nodes.length).toBeLessThanOrEqual(200);
+      expect(result.value.data.impact.edges.length).toBeLessThanOrEqual(400);
+
+      await closeGraph(ghostStore);
+    } finally {
+      rmSync(ghostDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('getImpactInputSchema', () => {
