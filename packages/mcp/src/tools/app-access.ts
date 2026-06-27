@@ -14,26 +14,31 @@
 
 import type {
   ComponentId,
-  ComponentType,
   McpError,
   McpResponse,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges, listNodesByType } from '@sf-intelligence/graph';
+import { getNodeById, listEdges } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-import { nodeScanLimit, scanHitCap, scanTruncationNote } from './scan-cap.js';
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { clampedNodeScanLimit, scanTruncationNote } from './scan-cap.js';
 
 const APP_PREFIX = 'CustomApplication:';
 const DEFAULT_LIMIT = 120;
 const MAX_LIMIT = 250;
+const APP_ACCESS_TOOL = 'sfi.app_access';
 
 export const appAccessInputSchema = z.object({
   componentId: z.string().min(1),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
+  // CR-22 continuation cursor from a prior truncated page's nextCursor.
+  cursor: z.string().min(1).optional(),
 });
 
 export type AppAccessInput = z.infer<typeof appAccessInputSchema>;
@@ -66,10 +71,23 @@ export interface AppAccessOutput {
   readonly offset: number;
   readonly hasMore: boolean;
   readonly truncated: boolean;
-  /** True when a grantor scan hit the per-type node cap — the granter list may be incomplete. */
+  /**
+   * True only for a PATHOLOGICAL residual cap (a grantor scan past
+   * FULL_SCAN_MAX_NODES). The normal full multi-window scan reaches every
+   * Profile / PermissionSet (including 501+) and completes, so this is false
+   * for any real org.
+   */
   readonly scanTruncated: boolean;
   readonly confidence: 'declared';
   readonly boundaryNote: string;
+  /**
+   * CR-22 opaque continuation token, present ONLY when this page is truncated
+   * (more granters remain). Echo it back as `cursor` to resume. Absent on a
+   * complete page so an in-budget response is byte-identical to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
 }
 
 /**
@@ -150,51 +168,84 @@ export const appAccessHandler = async (
     })
     .map((e) => e.fromId);
 
-  // Who can open / defaults: scan Profiles + PermissionSets' applicationVisibilities.
+  // Who can open / defaults: CR-22 B3 full multi-window scan over Profiles +
+  // PermissionSets so a grantor on node 501+ is reachable (the single capped
+  // page used to drop the scan TAIL). The derived `canOpen` list is COMPLETE
+  // and paged on the output axis below; the scan completes inside this call.
   const canOpen: AppGranter[] = [];
   const defaultedBy: string[] = [];
   let anyGranterHadAppVis = false;
-  const scanLimit = nodeScanLimit();
-  const truncatedTypes: string[] = [];
-  for (const type of ['Profile', 'PermissionSet'] as const) {
-    const nodes = await listNodesByType(ctx.graph, type as ComponentType, { limit: scanLimit });
-    if (!nodes.ok) {
-      return err({ kind: 'internal', message: `graph query failed: ${nodes.error.message}` });
-    }
-    if (scanHitCap(nodes.value.length, scanLimit)) truncatedTypes.push(type);
-    for (const node of nodes.value) {
-      const raw = node.properties['applicationVisibilities'];
-      if (!Array.isArray(raw)) continue;
-      anyGranterHadAppVis = true;
-      for (const item of raw as RawAppVis[]) {
-        if (item.application !== appApiName) continue;
-        if (item.visible !== true) continue;
-        const isDefault = item.default === true;
-        canOpen.push({
-          granterId: node.id,
-          granterType: type,
-          granterLabel: node.label ?? node.apiName,
-          default: isDefault,
-        });
-        if (isDefault) defaultedBy.push(node.id);
-      }
+  const scan = await scanAllNodesOfTypes(ctx.graph, ['Profile', 'PermissionSet']);
+  if (!scan.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${scan.error.message}` });
+  }
+  for (const node of scan.value.nodes) {
+    const raw = node.properties['applicationVisibilities'];
+    if (!Array.isArray(raw)) continue;
+    anyGranterHadAppVis = true;
+    const granterType = node.id.startsWith('Profile:') ? 'Profile' : 'PermissionSet';
+    for (const item of raw as RawAppVis[]) {
+      if (item.application !== appApiName) continue;
+      if (item.visible !== true) continue;
+      const isDefault = item.default === true;
+      canOpen.push({
+        granterId: node.id,
+        granterType,
+        granterLabel: node.label ?? node.apiName,
+        default: isDefault,
+      });
+      if (isDefault) defaultedBy.push(node.id);
     }
   }
-  canOpen.sort((a, b) => (a.granterId < b.granterId ? -1 : a.granterId > b.granterId ? 1 : 0));
+  // CR-22: total-order tiebreak. granterId is the node id (unique per node), but
+  // a node could in theory list the app twice; granterType is the final
+  // distinguishing key so the order is a strict total order (dup/skip-proof).
+  canOpen.sort((a, b) => {
+    if (a.granterId !== b.granterId) return a.granterId < b.granterId ? -1 : 1;
+    return a.granterType < b.granterType ? -1 : a.granterType > b.granterType ? 1 : 0;
+  });
   defaultedBy.sort();
 
   const total = canOpen.length;
   const limit = input.limit ?? DEFAULT_LIMIT;
-  const offset = input.offset ?? 0;
-  const page = canOpen.slice(offset, offset + limit);
-  const hasMore = offset + page.length < total;
-  const truncated = hasMore || offset > 0;
 
-  const scanTruncated = truncatedTypes.length > 0;
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // The fingerprint covers the narrowing arg `componentId` (the app) so a token
+  // minted for one app can't be replayed against another.
+  const fingerprint = argsFingerprint({ componentId });
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: APP_ACCESS_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  const paged = paginateLegacy(canOpen, {
+    offset,
+    limit,
+    keyOf: (g) => `${g.granterId}|${g.granterType}`,
+    binding: {
+      tool: APP_ACCESS_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const page = paged.items;
+  const hasMore = paged.hasMore;
+  const truncated = hasMore || offset > 0;
+  const emitCursor = paged.nextCursor !== null;
+
+  const scanTruncated = scan.value.scanIncomplete;
   const baseNote = anyGranterHadAppVis
     ? 'Who-can-open is computed from profile/permission-set applicationVisibilities (`visible: true`); tab membership is the app definition. App access also depends on the user being ASSIGNED the profile/permission set (runtime, not modeled).'
     : 'No profile/permission set in this vault carries an extracted `applicationVisibilities` property — re-run `/sfi-refresh`; the who-can-open list is "not modeled", not a verified empty.';
-  const boundaryNote = scanTruncated ? `${baseNote} ${scanTruncationNote(truncatedTypes)}` : baseNote;
+  const boundaryNote = scanTruncated
+    ? `${baseNote} ${scanTruncationNote(scan.value.incompleteTypes, clampedNodeScanLimit())}`
+    : baseNote;
 
   return ok({
     data: {
@@ -212,6 +263,9 @@ export const appAccessHandler = async (
       scanTruncated,
       confidence: 'declared',
       boundaryNote,
+      ...(emitCursor
+        ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo }
+        : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

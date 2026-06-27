@@ -49,7 +49,7 @@ import type { Context } from '../server.js';
 
 import { readActiveHoldersFor, type HoldersShape } from './facts-block.js';
 import { mergeInputAliases, toCustomObjectId } from './input-aliases.js';
-import { nodeScanLimit, scanHitCap, scanTruncationNote } from './scan-cap.js';
+import { clampedNodeScanLimit, scanHitCap, scanTruncationNote } from './scan-cap.js';
 
 const CUSTOM_OBJECT_PREFIX = 'CustomObject:';
 /** Page size for the granter list (a public object can have hundreds). */
@@ -228,7 +228,12 @@ export const whoCanAccessObjectHandler = async (
       : '';
 
   const granters: AccessGranter[] = [];
-  const scanLimit = nodeScanLimit();
+  // CR-RV10: clamp to the graph's hard cap so an operator with
+  // SFI_NODE_SCAN_LIMIT > 500 gets a 500-row scan, not a hard `internal` error.
+  // (Full B3 two-axis conversion is DEFERRED for this tool — it merges THREE
+  // node types under one cursor and the SharingRule axis needs an
+  // object-FILTERED count that countNodesByType's type-only form can't give.)
+  const scanLimit = clampedNodeScanLimit();
   const truncatedTypes: string[] = [];
 
   // 1. Object permissions: incoming `grantedBy` edges from Profiles/PermSets.
@@ -383,7 +388,7 @@ export const whoCanAccessObjectHandler = async (
       : '';
   const pageNote = truncated ? ` Showing granters ${offset}–${offset + page.length} of ${total}; summary holds the complete counts. Page with offset/limit.` : '';
   const scanTruncated = truncatedTypes.length > 0;
-  const scanNote = scanTruncated ? ` ${scanTruncationNote(truncatedTypes)}` : '';
+  const scanNote = scanTruncated ? ` ${scanTruncationNote(truncatedTypes, scanLimit)}` : '';
 
   // Dedup the holder-query ids: a grantor now spans multiple capability rows on
   // a page, but its active-holder count is per-principal, so query it once.

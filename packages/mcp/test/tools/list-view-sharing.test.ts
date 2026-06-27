@@ -133,3 +133,61 @@ describe('listViewSharingHandler', () => {
     expect(r.value.data.boundaryNote).toContain('filterScope');
   });
 });
+
+// =============================================================================
+// CR-22 — output continuation cursor + honest scan disclosure. Object mode pages
+// the list-view rows via an opaque cursor (same-axis: the output offset IS the
+// SQL scan offset). The pre-CR-22 SILENT drop past the scan walk is now an
+// honest `scanTruncated` (only for a pathological object past SCAN_MAX, so not
+// reachable in a fixture). A whole-fits call is byte-identical.
+// =============================================================================
+describe('listViewSharingHandler — output cursor (CR-22)', () => {
+  it('a whole-fits call omits nextCursor/pageInfo/scanTruncated (byte-identical)', async () => {
+    const r = await listViewSharingHandler(ctx, { componentId: 'CustomObject:Account' });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data as unknown as Record<string, unknown>;
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+    expect('scanTruncated' in d).toBe(false);
+  });
+
+  it('a truncated page emits a cursor that resumes with no gaps or dupes', async () => {
+    const all = await listViewSharingHandler(ctx, { componentId: 'CustomObject:Account', limit: 120 });
+    expect(all.ok).toBe(true); if (!all.ok) return;
+    const fullOrder = all.value.data.listViews.map((v) => v.componentId);
+    expect(fullOrder.length).toBe(3);
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const page = await listViewSharingHandler(
+        ctx,
+        cursor !== undefined
+          ? { componentId: 'CustomObject:Account', limit: 1, cursor }
+          : { componentId: 'CustomObject:Account', limit: 1 },
+      );
+      expect(page.ok).toBe(true); if (!page.ok) return;
+      for (const v of page.value.data.listViews) seen.push(v.componentId);
+      // The summary stays WHOLE on every page.
+      expect(page.value.data.summary.listViews).toBe(3);
+      if (page.value.data.nextCursor === undefined) break;
+      cursor = page.value.data.nextCursor;
+      guard += 1;
+      if (guard > 20) throw new Error('cursor did not terminate');
+    }
+    expect(seen).toEqual(fullOrder);
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+
+  it('rejects a cursor minted for a DIFFERENT object (argsFingerprint bind)', async () => {
+    const first = await listViewSharingHandler(ctx, { componentId: 'CustomObject:Account', limit: 1 });
+    expect(first.ok).toBe(true); if (!first.ok) return;
+    const cursor = first.value.data.nextCursor;
+    expect(typeof cursor).toBe('string');
+    if (typeof cursor !== 'string') return;
+    const replay = await listViewSharingHandler(ctx, { componentId: 'CustomObject:Contact', cursor });
+    expect(replay.ok).toBe(false); if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
+  });
+});

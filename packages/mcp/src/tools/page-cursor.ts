@@ -534,6 +534,96 @@ export const argsFingerprint = (args: Readonly<Record<string, unknown>>): string
 };
 
 // ---------------------------------------------------------------------------
+// multi-type scan resume — the B3 scan axis (`s`) for capped node scans
+// ---------------------------------------------------------------------------
+
+/**
+ * A scan-axis plan for a B3 tool: ONE handler enumerates several node TYPES
+ * (e.g. `[ApexClass, ApexTrigger, Flow]`) under a single cursor, each scan
+ * capped by `listNodesByType`'s `limit`. The token carries ONE scalar `s`
+ * (see {@link PageCursorToken.s}); a multi-type scan must therefore encode
+ * BOTH "which type" and "how far into it" into that scalar.
+ *
+ * The chosen encoding is a FLAT GLOBAL scan offset across the types
+ * concatenated in their fixed declaration order:
+ *
+ *   global s = (Σ counts[0..typeIndex-1]) + withinTypeOffset
+ *
+ * Decoding `s` back to `(typeIndex, withinTypeOffset)` is deterministic GIVEN
+ * the per-type true counts (from `countNodesByType`). Those counts are stable
+ * for a fixed vault, and the cursor is bound to the vault hash (`h`), so a
+ * resumed `s` decodes to exactly the same position it was minted at — the scan
+ * neither dups nor skips at a type boundary. This is the property the
+ * design-check required before any multi-type B3 conversion.
+ *
+ * The scan is COMPLETE when `s >= Σ counts` (the global end). A tool advances
+ * the scan one window at a time: read the current type's window via
+ * `listNodesByType({ limit, offset: withinTypeOffset })`, derive output rows,
+ * and when the OUTPUT page is exhausted but the scan is not, mint a cursor
+ * carrying the next global `s` (the position just past the last scanned node).
+ */
+export interface ScanTypeCount {
+  /** The node ComponentType this entry counts (declaration order matters). */
+  readonly type: string;
+  /** The TRUE total of nodes of this type (from `countNodesByType`). */
+  readonly count: number;
+}
+
+/** A decoded scan position: which type, and the SQL offset within it. */
+export interface ScanPosition {
+  /** Index into the fixed type-order array; `>= length` means "scan complete". */
+  readonly typeIndex: number;
+  /** SQL `OFFSET` within `types[typeIndex]` (0 when at a type boundary). */
+  readonly withinTypeOffset: number;
+  /** True when `globalOffset >= Σ counts` — every type fully scanned. */
+  readonly complete: boolean;
+}
+
+/** The grand total of nodes across every scanned type (the scan-axis end). */
+export const totalScanCount = (counts: readonly ScanTypeCount[]): number =>
+  counts.reduce((sum, c) => sum + c.count, 0);
+
+/**
+ * Decode a flat global scan offset into `(typeIndex, withinTypeOffset)` against
+ * the per-type counts. Walks the types in order, subtracting each type's count
+ * until the offset lands inside a type (or runs past the end → `complete`). A
+ * negative or non-integer offset is clamped to 0 (defensive; the codec already
+ * range-validates `s`, but this never trusts an out-of-range scalar).
+ */
+export const decodeScanOffset = (
+  globalOffset: number,
+  counts: readonly ScanTypeCount[],
+): ScanPosition => {
+  let remaining =
+    Number.isInteger(globalOffset) && globalOffset > 0 ? globalOffset : 0;
+  for (let i = 0; i < counts.length; i += 1) {
+    const c = counts[i] as ScanTypeCount;
+    if (remaining < c.count) {
+      return { typeIndex: i, withinTypeOffset: remaining, complete: false };
+    }
+    remaining -= c.count;
+  }
+  return { typeIndex: counts.length, withinTypeOffset: 0, complete: true };
+};
+
+/**
+ * Encode `(typeIndex, withinTypeOffset)` back to a flat global scan offset —
+ * the inverse of {@link decodeScanOffset}. Used when a tool advances its scan
+ * window and needs the global `s` to stamp on the next cursor. A `typeIndex`
+ * at/after the end yields the grand total (a complete-scan sentinel).
+ */
+export const encodeScanOffset = (
+  typeIndex: number,
+  withinTypeOffset: number,
+  counts: readonly ScanTypeCount[],
+): number => {
+  if (typeIndex >= counts.length) return totalScanCount(counts);
+  let base = 0;
+  for (let i = 0; i < typeIndex; i += 1) base += (counts[i] as ScanTypeCount).count;
+  return base + Math.max(0, withinTypeOffset);
+};
+
+// ---------------------------------------------------------------------------
 // paginateLegacy — back-compat adapter for the B1 offset tools
 // ---------------------------------------------------------------------------
 

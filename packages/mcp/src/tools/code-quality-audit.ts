@@ -4,13 +4,16 @@
  * The v2.1 general-purpose entry point over the
  * `properties.qualityIssues[]` array that the v2.1
  * `code-quality-patterns` recognizer family populates at extraction
- * time. Composes one `listNodesByType` call per relevant
- * ComponentType (today: `ApexClass`; tomorrow's v2.1+ recognizer
- * extensions could add `ApexTrigger` and `Flow` so the scan walks
- * each family by default), reads each node's `qualityIssues[]`
- * property, applies optional severity / rule / per-class filters,
- * sorts the slice by severity DESC then id ASC, and returns the
- * limited list along with a per-severity / per-rule summary.
+ * time. CR-22 B3: scans EVERY node of each relevant ComponentType
+ * (`ApexClass` / `ApexTrigger` / `Flow`) by paging the graph SQL
+ * `OFFSET` forward window-by-window (`scanAllNodesOfTypes`), so
+ * findings on a node past the per-page scan cap (501+) are reachable
+ * rather than dropped, reads each node's `qualityIssues[]` property,
+ * applies optional severity / rule filters, sorts the FULL set by
+ * severity DESC then id ASC (then location / explanation tiebreaks
+ * for a strict total order), pages it on the output axis via the
+ * shared continuation cursor, and returns the page along with a
+ * per-severity / per-rule summary computed over the full matched set.
  *
  * **Composition recipe** — pure read-side composition over existing
  * graph queries and the recognizer's property mirror. No graph edges
@@ -43,17 +46,19 @@
  *   - `severityFilter: 'all'` and an absent filter behave identically.
  *     The literal `'all'` is preserved in the input contract so the
  *     advertised JSON Schema can document the sentinel explicitly.
- *   - The per-type scan caps at `nodeScanLimit()` (500 by default) per
- *     `ComponentType` — matches the graph layer's default. A truly
- *     enormous org (more than 500 ApexClasses) will only see the first
- *     page; when a type's scan saturates at the cap, a
- *     `scanTruncationNote` is appended to `boundaries` naming the
- *     truncated type so the verdict is not silently incomplete (the
- *     v2.1 honesty boundary, now emitted at runtime).
+ *   - CR-22 B3: the per-type scan WINDOWS the graph SQL `OFFSET` at
+ *     `clampedNodeScanLimit()` (≤500) per page until each type is
+ *     exhausted, so an org with more than 500 ApexClasses is scanned
+ *     in full (no dropped tail). `scanTruncated` / a `scanTruncationNote`
+ *     fire only for a pathological type past `FULL_SCAN_MAX_NODES`.
+ *     An operator setting `SFI_NODE_SCAN_LIMIT > 500` is clamped (no
+ *     hard error — CR-RV10).
  *   - `limit` defaults to 100 and is capped at 500 by Zod. The
  *     `totalCount` in the response reports the FULL unsorted matched
- *     count, not the trimmed slice — callers can render "showing X of
- *     Y findings" without a re-query.
+ *     count, not the paged slice — callers can render "showing X of Y
+ *     findings" without a re-query. A truncated page emits a `nextCursor`
+ *     to walk the rest; a whole-fits no-cursor page omits the paging
+ *     fields entirely (byte-identical to pre-CR-22).
  */
 
 import type {
@@ -62,14 +67,16 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listNodesByType } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-import { nodeScanLimit, scanHitCap, scanTruncationNote } from './scan-cap.js';
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { clampedNodeScanLimit, scanTruncationNote } from './scan-cap.js';
 
 /** Inclusive upper bound on `limit`. Mirrors the enumeration-style tools. */
 const CODE_QUALITY_AUDIT_MAX_LIMIT = 500;
@@ -149,7 +156,12 @@ export const codeQualityAuditInputSchema = z.object({
     .min(1)
     .max(CODE_QUALITY_AUDIT_MAX_LIMIT)
     .optional(),
+  // CR-22: page cursor for walking the full issue list when truncated.
+  offset: z.number().int().min(0).optional(),
+  cursor: z.string().min(1).optional(),
 });
+
+const CODE_QUALITY_AUDIT_TOOL = 'sfi.code_quality_audit';
 
 /** Parsed input shape. */
 export type CodeQualityAuditInput = z.infer<typeof codeQualityAuditInputSchema>;
@@ -189,6 +201,23 @@ export interface CodeQualityAuditOutput {
   readonly boundaries: readonly string[];
   /** True when the matched count exceeded `limit` and `issues` was sliced. */
   readonly truncated: boolean;
+  /**
+   * Page size applied. Present only on a PAGED response (`truncated` or a
+   * resumed `offset > 0`); omitted on a whole-fits no-cursor call so that
+   * response stays byte-identical to the pre-CR-22 shape.
+   */
+  readonly limit?: number;
+  /** Zero-based offset of the first returned issue. Present only when paged. */
+  readonly offset?: number;
+  /** Offset to pass on the next call to fetch the following page. Present only when `truncated`. */
+  readonly nextOffset?: number;
+  /**
+   * CR-22 opaque continuation token, present ONLY when this page is truncated.
+   * Echo it back as `cursor` to resume. Absent on a complete page.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
 }
 
 /**
@@ -232,8 +261,19 @@ const coerceIssue = (raw: unknown): QualityIssueLike | null => {
 };
 
 /**
- * Comparator: severity DESC (critical first), then componentId ASC,
- * then rule ASC. Stable across runs so fixtures don't flap.
+ * Comparator: severity DESC (critical first), then componentId ASC, then rule
+ * ASC, then location ASC, then explanation ASC. Stable across runs so fixtures
+ * don't flap.
+ *
+ * CR-22: the trailing `location` + `explanation` tiebreaks make the order a
+ * STRICT TOTAL order. A single class can carry MULTIPLE issues with the SAME
+ * rule + SAME severity (e.g. two `soql-in-loop` findings at different lines), so
+ * (severity, componentId, rule) alone returned 0 for them — an offset resume
+ * could dup or skip within that tie cluster. `location` distinguishes same-rule
+ * findings; `explanation` is the final distinguishing key. Because the FULL
+ * issue set is scanned and sorted BEFORE paging, the severity-first order is a
+ * complete total order over a fixed set (no incremental-scan merge), so paging
+ * it is dup/skip-proof.
  */
 const compareIssues = (
   a: CodeQualityAuditIssue,
@@ -246,8 +286,14 @@ const compareIssues = (
     return a.componentId < b.componentId ? -1 : 1;
   }
   if (a.rule !== b.rule) return a.rule < b.rule ? -1 : 1;
+  if (a.location !== b.location) return a.location < b.location ? -1 : 1;
+  if (a.explanation !== b.explanation) return a.explanation < b.explanation ? -1 : 1;
   return 0;
 };
+
+/** Stable total-order key for the cursor `k` field. */
+const issueKey = (i: CodeQualityAuditIssue): string =>
+  `${i.severity}|${i.componentId}|${i.rule}|${i.location}|${i.explanation}`;
 
 /** Build an empty per-severity counter. */
 const emptyBySeverity = (): Record<Severity, number> => ({
@@ -284,56 +330,46 @@ export const codeQualityAuditHandler = async (
 
   const collected: CodeQualityAuditIssue[] = [];
 
-  // Per-type scan saturation. A type whose page came back AT the fetch cap may
-  // have findings BEHIND it that this scan never examined. Fetch at
-  // `nodeScanLimit()` (not a hardcoded 500) so the disclosure tracks the ACTUAL
-  // fetch, mirroring `app_access`; `SFI_NODE_SCAN_LIMIT` can drive the truncated
-  // path in tests.
-  const truncatedTypes: string[] = [];
-  const scanLimit = nodeScanLimit();
-  for (const type of QUALITY_SCANNED_TYPES) {
-    const nodesResult = await listNodesByType(ctx.graph, type, {
-      limit: scanLimit,
-    });
-    if (!nodesResult.ok) {
-      return err({
-        kind: 'internal',
-        message: `graph query failed: ${nodesResult.error.message}`,
-      });
-    }
-    if (scanHitCap(nodesResult.value.length, scanLimit)) truncatedTypes.push(type);
-    for (const node of nodesResult.value) {
-      const raw = (node as Node).properties['qualityIssues'];
-      if (!Array.isArray(raw)) continue;
-      for (const rawIssue of raw) {
-        const issue = coerceIssue(rawIssue);
-        if (issue === null) continue;
-        if (
-          severityFilter !== 'all' &&
-          issue.severity !== severityFilter
-        ) {
-          continue;
-        }
-        if (ruleFilter !== null && !ruleFilter.has(issue.rule)) {
-          continue;
-        }
-        collected.push({
-          componentId: node.id,
-          type: node.type,
-          apiName: node.apiName,
-          rule: issue.rule,
-          severity: issue.severity,
-          location: issue.location,
-          explanation: issue.explanation,
-          confidence: 'heuristic',
-        });
+  // CR-22 B3: scan EVERY node of each quality type by paging the SQL OFFSET
+  // forward (window-by-window at the clamped cap) so findings on node 501+ are
+  // reachable — the single capped page used to drop the scan TAIL silently. The
+  // FULL issue set is then sorted (severity-first) and paged on the output axis
+  // below. Because the complete set is sorted BEFORE paging, the severity-first
+  // order is a true total order over a fixed set (no incremental-scan merge), so
+  // it is safe to page even though the sort is not scan-order.
+  const scan = await scanAllNodesOfTypes(ctx.graph, QUALITY_SCANNED_TYPES);
+  if (!scan.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${scan.error.message}` });
+  }
+  for (const node of scan.value.nodes) {
+    const raw = (node as Node).properties['qualityIssues'];
+    if (!Array.isArray(raw)) continue;
+    for (const rawIssue of raw) {
+      const issue = coerceIssue(rawIssue);
+      if (issue === null) continue;
+      if (
+        severityFilter !== 'all' &&
+        issue.severity !== severityFilter
+      ) {
+        continue;
       }
+      if (ruleFilter !== null && !ruleFilter.has(issue.rule)) {
+        continue;
+      }
+      collected.push({
+        componentId: node.id,
+        type: node.type,
+        apiName: node.apiName,
+        rule: issue.rule,
+        severity: issue.severity,
+        location: issue.location,
+        explanation: issue.explanation,
+        confidence: 'heuristic',
+      });
     }
   }
 
   const sorted = [...collected].sort(compareIssues);
-  const truncated = sorted.length > limit;
-  const slice = sorted.slice(0, limit);
 
   // Build summary aggregates from the FULL matched set, not the slice.
   const bySeverity = emptyBySeverity();
@@ -345,6 +381,38 @@ export const codeQualityAuditHandler = async (
     byType[issue.type] = (byType[issue.type] ?? 0) + 1;
   }
 
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // The fingerprint covers the narrowing args (severityFilter / ruleFilter) so a
+  // token can't be replayed against a different filter.
+  const fingerprintArgs: Record<string, unknown> = {};
+  if (input.severityFilter !== undefined) fingerprintArgs['severityFilter'] = input.severityFilter;
+  if (input.ruleFilter !== undefined) fingerprintArgs['ruleFilter'] = input.ruleFilter;
+  const fingerprint = argsFingerprint(fingerprintArgs);
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: CODE_QUALITY_AUDIT_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  const paged = paginateLegacy(sorted, {
+    offset,
+    limit,
+    keyOf: issueKey,
+    binding: {
+      tool: CODE_QUALITY_AUDIT_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const slice = paged.items;
+  const truncated = paged.hasMore;
+  const emitCursor = paged.nextCursor !== null;
+
   const boundaries: string[] =
     sorted.length === 0
       ? []
@@ -354,13 +422,18 @@ export const codeQualityAuditHandler = async (
           SEVERITY_CONSENSUS_DISCLOSURE,
         ];
 
-  // Truncation is meaningful EVEN with zero matched findings — findings may sit
-  // past the scan cap — so this append lives OUTSIDE the zero-findings gate
-  // above. (`truncated` is the OUTPUT-slice cursor; this is the INPUT-scan
-  // saturation, a separate honesty axis.)
-  if (truncatedTypes.length > 0) {
-    boundaries.push(scanTruncationNote(truncatedTypes));
+  // Residual scan-incompleteness only fires for a PATHOLOGICAL type past
+  // FULL_SCAN_MAX_NODES — the normal full scan reaches node 501+ and completes.
+  // Lives OUTSIDE the zero-findings gate because findings could be among the
+  // unscanned residual tail.
+  if (scan.value.scanIncomplete) {
+    boundaries.push(
+      scanTruncationNote(scan.value.incompleteTypes, clampedNodeScanLimit()),
+    );
   }
+
+  // Emit paging fields ONLY on a paged response (truncated OR resumed offset>0).
+  const isPaged = truncated || offset > 0;
 
   return ok({
     data: {
@@ -369,6 +442,11 @@ export const codeQualityAuditHandler = async (
       summary: { bySeverity, byRule, byType },
       boundaries,
       truncated,
+      ...(isPaged ? { limit, offset } : {}),
+      ...(truncated ? { nextOffset: offset + slice.length } : {}),
+      ...(emitCursor
+        ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo }
+        : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

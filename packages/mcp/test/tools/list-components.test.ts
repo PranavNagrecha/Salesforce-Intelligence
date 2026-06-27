@@ -369,6 +369,105 @@ describe('listComponentsHandler retrievalHint (FRESH-02)', () => {
   });
 });
 
+// =============================================================================
+// CR-22 — single-axis continuation cursor. list_components pages
+// listNodesByType DIRECTLY by SQL OFFSET, so `o` already IS the SQL offset (it
+// natively reaches node 501+); no separate scan axis. A truncated page emits an
+// opaque nextCursor + a TRUE total (countNodesByType); a whole-fits final page
+// is byte-identical.
+// =============================================================================
+describe('listComponentsHandler — continuation cursor (CR-22)', () => {
+  it('a final page (hasMore=false) omits nextCursor/pageInfo (byte-identical)', async () => {
+    // All 7 CustomFields fit in one default page → hasMore is false → no cursor.
+    const r = await listComponentsHandler(ctx, { type: 'CustomField' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.hasMore).toBe(false);
+    const d = r.value.data as unknown as Record<string, unknown>;
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+  });
+
+  it('a truncated page emits a cursor + TRUE total and resumes with no gaps or dupes', async () => {
+    const all = await listComponentsHandler(ctx, { type: 'CustomField', limit: 500 });
+    expect(all.ok).toBe(true);
+    if (!all.ok) return;
+    const fullOrder = all.value.data.components.map((c) => c.id);
+    expect(fullOrder.length).toBe(7);
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const page = await listComponentsHandler(
+        ctx,
+        cursor !== undefined ? { type: 'CustomField', limit: 2, cursor } : { type: 'CustomField', limit: 2 },
+      );
+      expect(page.ok).toBe(true);
+      if (!page.ok) return;
+      for (const c of page.value.data.components) seen.push(c.id);
+      // pageInfo (when present) carries the TRUE total of 7, not a capped length.
+      if (page.value.data.pageInfo !== undefined) {
+        expect(page.value.data.pageInfo.totalCount).toBe(7);
+      }
+      const nc = page.value.data.nextCursor;
+      if (nc === undefined) break;
+      cursor = nc;
+      guard += 1;
+      if (guard > 20) throw new Error('cursor did not terminate');
+    }
+    expect(seen).toEqual(fullOrder);
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+
+  it('TRUE total respects a parentId narrow (countNodesByType filtered)', async () => {
+    // Account has 5 CustomFields; a limit of 2 truncates and the pageInfo total
+    // must be the FILTERED 5, not the whole-type 7.
+    const r = await listComponentsHandler(ctx, {
+      type: 'CustomField',
+      parentId: 'CustomObject:Account',
+      limit: 2,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.hasMore).toBe(true);
+    expect(r.value.data.pageInfo?.totalCount).toBe(5);
+  });
+
+  it('rejects a cursor minted for a DIFFERENT type (argsFingerprint bind)', async () => {
+    const first = await listComponentsHandler(ctx, { type: 'CustomField', limit: 2 });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const cursor = first.value.data.nextCursor;
+    expect(typeof cursor).toBe('string');
+    if (typeof cursor !== 'string') return;
+    const replay = await listComponentsHandler(ctx, { type: 'CustomObject', cursor });
+    expect(replay.ok).toBe(false);
+    if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
+  });
+
+  it('rejects a cursor minted for a DIFFERENT parentId (argsFingerprint bind)', async () => {
+    const first = await listComponentsHandler(ctx, {
+      type: 'CustomField',
+      parentId: 'CustomObject:Account',
+      limit: 2,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const cursor = first.value.data.nextCursor;
+    if (typeof cursor !== 'string') return;
+    const replay = await listComponentsHandler(ctx, {
+      type: 'CustomField',
+      parentId: 'CustomObject:Opportunity',
+      cursor,
+    });
+    expect(replay.ok).toBe(false);
+    if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
+  });
+});
+
 describe('listComponentsInputSchema', () => {
   it('accepts a minimal well-formed input', () => {
     const parsed = listComponentsInputSchema.safeParse({ type: 'CustomField' });

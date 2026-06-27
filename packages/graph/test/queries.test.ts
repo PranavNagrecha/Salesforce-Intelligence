@@ -801,6 +801,25 @@ describe('getSubgraph caps + unresolved-edge filtering', () => {
     expect(r.value).toBeGreaterThan(500);
   });
 
+  it('countNodesByType honors a parentId narrow (CR-22 B3 filtered total)', async () => {
+    // All LEAF_COUNT CustomFields are children of CustomObject:Hub; a parent
+    // narrow must return that exact subset total (a true per-parent total for a
+    // filtered paginated enumeration), and a non-existent parent returns 0.
+    const r = await countNodesByType(capStore, 'CustomField', {
+      parentId: 'CustomObject:Hub',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value).toBe(LEAF_COUNT);
+
+    const none = await countNodesByType(capStore, 'CustomField', {
+      parentId: 'CustomObject:DoesNotExist',
+    });
+    expect(none.ok).toBe(true);
+    if (!none.ok) return;
+    expect(none.value).toBe(0);
+  });
+
   it('clips a hub subgraph at the node cap and flags truncated', async () => {
     const r = await getSubgraph(capStore, 'CustomObject:Hub', 1);
     expect(r.ok).toBe(true);

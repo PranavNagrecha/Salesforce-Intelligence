@@ -273,13 +273,15 @@ describe('findHardcodedValuesHandler', () => {
 });
 
 // =============================================================================
-// CR-12 — input-scan saturation disclosure. The per-type scan caps at
-// `nodeScanLimit()`; when a type's page comes back AT the cap, findings may sit
-// BEHIND it, so a `scanTruncationNote` must be appended to `boundaries` naming
-// the truncated type. This append is OUTSIDE the `sorted.length > 0` gate, so it
-// fires even with zero matched findings. Mirrors app-access.test.ts.
+// CR-12 / CR-22 B3 — the scan now WINDOWS past the per-type cap. Historically a
+// single capped listNodesByType page dropped the scan TAIL (node 501+ findings
+// unreachable). B3 pages the SQL OFFSET forward window-by-window until the type
+// is exhausted, so a low cap no longer makes the enumeration INCOMPLETE — it
+// just scans in smaller windows and still reaches every finding. The honest
+// `scanTruncated` disclosure now fires only for a pathological residual cap
+// (FULL_SCAN_MAX_NODES), never for a normal multi-class org.
 // =============================================================================
-describe('findHardcodedValuesHandler — input-scan truncation disclosure (CR-12)', () => {
+describe('findHardcodedValuesHandler — full multi-window scan (CR-22 B3)', () => {
   it('does NOT emit a Scan-capped boundary under the default cap (byte-identical happy path)', async () => {
     const r = await findHardcodedValuesHandler(ctx, {});
     expect(r.ok).toBe(true);
@@ -287,22 +289,109 @@ describe('findHardcodedValuesHandler — input-scan truncation disclosure (CR-12
     expect(r.value.data.boundaries.join(' ')).not.toMatch(/Scan capped/);
   });
 
-  it('appends a Scan-capped boundary naming the truncated type when the scan hits the cap', async () => {
-    // The fixture has multiple ApexClasses; a cap of 1 forces the ApexClass
-    // scan to saturate, so findings past the cap were silently unexamined.
+  it('FAIL-BEFORE/PASS-AFTER: a cap of 1 still reaches every finding by windowing the scan', async () => {
+    // Before B3 a cap of 1 fetched only the FIRST ApexClass (id ASC) and
+    // silently dropped the rest — findings on later classes were unreachable.
+    // After B3 the scan pages the SQL OFFSET forward, so all 5 findings are
+    // found regardless of the per-window cap.
     const prev = process.env['SFI_NODE_SCAN_LIMIT'];
     process.env['SFI_NODE_SCAN_LIMIT'] = '1';
     try {
-      const r = await findHardcodedValuesHandler(ctx, {});
+      const r = await findHardcodedValuesHandler(ctx, { limit: 500 });
       expect(r.ok).toBe(true);
       if (!r.ok) return;
-      const joined = r.value.data.boundaries.join(' ');
-      expect(joined).toMatch(/Scan capped at 1 nodes per type/);
-      expect(joined).toMatch(/ApexClass/);
+      // All 5 findings reached even though each window fetched only 1 node.
+      expect(r.value.data.totalCount).toBe(5);
+      // Findings live on EmailSvc — the LAST class in id-ASC order — proving the
+      // scan reached PAST the first window (the pre-B3 unreachable tail).
+      const componentIds = new Set(r.value.data.matches.map((m) => m.componentId));
+      expect(componentIds.has('ApexClass:EmailSvc')).toBe(true);
+      // The completed full scan does NOT claim INCOMPLETE.
+      expect(r.value.data.boundaries.join(' ')).not.toMatch(/Scan capped/);
     } finally {
       if (prev === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
       else process.env['SFI_NODE_SCAN_LIMIT'] = prev;
     }
+  });
+
+  it('a low cap does NOT hard-error (RV10 clamp; cap is windowed, not rejected)', async () => {
+    const prev = process.env['SFI_NODE_SCAN_LIMIT'];
+    process.env['SFI_NODE_SCAN_LIMIT'] = '600'; // > LIST_MAX_LIMIT(500)
+    try {
+      const r = await findHardcodedValuesHandler(ctx, {});
+      // Pre-RV10 this returned kind:'internal' (listNodesByType rejects >500).
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.totalCount).toBe(5);
+    } finally {
+      if (prev === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
+      else process.env['SFI_NODE_SCAN_LIMIT'] = prev;
+    }
+  });
+});
+
+// =============================================================================
+// CR-22 — output-axis cursor. A truncated page emits an opaque nextCursor that
+// resumes with no gaps / no dupes; a whole-fits no-cursor call is byte-identical
+// (no limit/offset/nextCursor/pageInfo fields).
+// =============================================================================
+describe('findHardcodedValuesHandler — output cursor (CR-22)', () => {
+  it('whole-fits no-cursor call omits all paging fields (byte-identical)', async () => {
+    const r = await findHardcodedValuesHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data as unknown as Record<string, unknown>;
+    expect('limit' in d).toBe(false);
+    expect('offset' in d).toBe(false);
+    expect('nextOffset' in d).toBe(false);
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+  });
+
+  it('a truncated page emits a cursor that resumes with no gaps or dupes', async () => {
+    const all = await findHardcodedValuesHandler(ctx, { limit: 500 });
+    expect(all.ok).toBe(true);
+    if (!all.ok) return;
+    const fullOrder = all.value.data.matches.map((m) => m.componentId + '|' + m.location + '|' + m.rule);
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const page: Awaited<ReturnType<typeof findHardcodedValuesHandler>> =
+        await findHardcodedValuesHandler(
+          ctx,
+          cursor !== undefined ? { limit: 2, cursor } : { limit: 2 },
+        );
+      expect(page.ok).toBe(true);
+      if (!page.ok) return;
+      for (const m of page.value.data.matches) {
+        seen.push(m.componentId + '|' + m.location + '|' + m.rule);
+      }
+      const nc = page.value.data.nextCursor;
+      if (nc === undefined) break;
+      cursor = nc;
+      guard += 1;
+      if (guard > 20) throw new Error('cursor did not terminate');
+    }
+    // The concatenated pages exactly reproduce the full ordered list.
+    expect(seen).toEqual(fullOrder);
+    // No duplicates.
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+
+  it('rejects a cursor minted for a DIFFERENT category (argsFingerprint bind)', async () => {
+    const first = await findHardcodedValuesHandler(ctx, { category: 'id', limit: 1 });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const cursor = first.value.data.nextCursor;
+    expect(typeof cursor).toBe('string');
+    if (typeof cursor !== 'string') return;
+    // Replay the id-cursor against the email category — must be rejected.
+    const replay = await findHardcodedValuesHandler(ctx, { category: 'email', cursor });
+    expect(replay.ok).toBe(false);
+    if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
   });
 });
 

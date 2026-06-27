@@ -469,13 +469,13 @@ describe('crudFlsAuditHandler — pagination + byte budget (B25)', () => {
 });
 
 // =============================================================================
-// CR-12 — input-scan saturation disclosure. The per-type scan caps at
-// `nodeScanLimit()`; when a type's page comes back AT the cap, unchecked-CRUD
-// classes may sit BEHIND it, so a `scanTruncationNote` must be appended to
-// `boundaries` naming the truncated type. Distinct from the OUTPUT offset/limit
-// `truncated` cursor. Mirrors app-access.test.ts (P12-HONESTY).
+// CR-22 B3 — the scan now WINDOWS past the per-type cap (was: drop the tail).
+// crud_fls_audit already had the OUTPUT cursor (B1); B3 adds the SCAN axis so a
+// low cap no longer makes the verdict INCOMPLETE — it scans in smaller windows
+// and still reaches every unchecked-CRUD class, including ones in the SECOND
+// scanned type. `scanTruncated` fires only for a pathological residual cap.
 // =============================================================================
-describe('crudFlsAuditHandler — input-scan truncation disclosure (CR-12)', () => {
+describe('crudFlsAuditHandler — full multi-window scan (CR-22 B3)', () => {
   it('does NOT emit a Scan-capped boundary under the default cap (byte-identical happy path)', async () => {
     const r = await crudFlsAuditHandler(ctx, {});
     expect(r.ok).toBe(true);
@@ -483,18 +483,36 @@ describe('crudFlsAuditHandler — input-scan truncation disclosure (CR-12)', () 
     expect(r.value.data.boundaries.join(' ')).not.toMatch(/Scan capped/);
   });
 
-  it('appends a Scan-capped boundary naming the truncated type when the scan hits the cap', async () => {
-    // The fixture has multiple ApexClasses; a cap of 1 forces the ApexClass
-    // scan to saturate, so risky classes past the cap were silently unexamined.
+  it('FAIL-BEFORE/PASS-AFTER: a cap of 1 still reaches risky classes in BOTH scanned types', async () => {
+    // Before B3 a cap of 1 fetched only the FIRST ApexClass and FIRST
+    // ApexTrigger and dropped the rest. After B3 the scan pages the SQL OFFSET
+    // forward per type, so BOTH risky entries are found — ApexClass:UnsafeSvc
+    // AND ApexTrigger:AccountTrigger (which lives in the SECOND scanned type).
     const prev = process.env['SFI_NODE_SCAN_LIMIT'];
     process.env['SFI_NODE_SCAN_LIMIT'] = '1';
+    try {
+      const r = await crudFlsAuditHandler(ctx, { limit: 500 });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.totalClassCount).toBe(2);
+      const ids = new Set(r.value.data.classes.map((c) => c.componentId));
+      expect(ids.has('ApexClass:UnsafeSvc')).toBe(true);
+      expect(ids.has('ApexTrigger:AccountTrigger')).toBe(true);
+      expect(r.value.data.boundaries.join(' ')).not.toMatch(/Scan capped/);
+    } finally {
+      if (prev === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
+      else process.env['SFI_NODE_SCAN_LIMIT'] = prev;
+    }
+  });
+
+  it('SFI_NODE_SCAN_LIMIT > 500 no longer hard-errors (RV10 clamp)', async () => {
+    const prev = process.env['SFI_NODE_SCAN_LIMIT'];
+    process.env['SFI_NODE_SCAN_LIMIT'] = '600';
     try {
       const r = await crudFlsAuditHandler(ctx, {});
       expect(r.ok).toBe(true);
       if (!r.ok) return;
-      const joined = r.value.data.boundaries.join(' ');
-      expect(joined).toMatch(/Scan capped at 1 nodes per type/);
-      expect(joined).toMatch(/ApexClass/);
+      expect(r.value.data.totalClassCount).toBe(2);
     } finally {
       if (prev === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
       else process.env['SFI_NODE_SCAN_LIMIT'] = prev;

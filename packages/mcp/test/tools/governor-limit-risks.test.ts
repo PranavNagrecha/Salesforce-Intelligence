@@ -311,12 +311,13 @@ describe('governorLimitRisksHandler', () => {
 });
 
 // =============================================================================
-// CR-12 — input-scan saturation disclosure. The per-type scan caps at
-// `nodeScanLimit()`; when a type's page comes back AT the cap, risky classes may
-// sit BEHIND it, so a `scanTruncationNote` must be appended to `boundaries`
-// naming the truncated type. Mirrors app-access.test.ts (P12-HONESTY).
+// CR-22 B3 — the scan now WINDOWS past the per-type cap (was: drop the tail).
+// A low cap no longer makes the verdict INCOMPLETE — it scans in smaller windows
+// and still reaches every risky class, including ones in the SECOND scanned type
+// (the pre-B3 unreachable tail). `scanTruncated` fires only for a pathological
+// residual cap (FULL_SCAN_MAX_NODES).
 // =============================================================================
-describe('governorLimitRisksHandler — input-scan truncation disclosure (CR-12)', () => {
+describe('governorLimitRisksHandler — full multi-window scan (CR-22 B3)', () => {
   it('does NOT emit a Scan-capped boundary under the default cap (byte-identical happy path)', async () => {
     const r = await governorLimitRisksHandler(ctx, {});
     expect(r.ok).toBe(true);
@@ -324,22 +325,89 @@ describe('governorLimitRisksHandler — input-scan truncation disclosure (CR-12)
     expect(r.value.data.boundaries.join(' ')).not.toMatch(/Scan capped/);
   });
 
-  it('appends a Scan-capped boundary naming the truncated type when the scan hits the cap', async () => {
-    // The fixture has multiple ApexClasses; a cap of 1 forces the ApexClass
-    // scan to saturate, so risky classes past the cap were silently unexamined.
+  it('FAIL-BEFORE/PASS-AFTER: a cap of 1 still reaches risky classes in BOTH scanned types', async () => {
+    // Before B3 a cap of 1 fetched only the FIRST ApexClass and FIRST
+    // ApexTrigger, silently dropping the rest — a risky class past either cap
+    // was unreachable. After B3 the scan pages the SQL OFFSET forward per type,
+    // so BOTH risky entries (ApexClass:DangerSvc + ApexTrigger:LoopTrigger,
+    // which lives in the SECOND scanned type) are found.
     const prev = process.env['SFI_NODE_SCAN_LIMIT'];
     process.env['SFI_NODE_SCAN_LIMIT'] = '1';
     try {
-      const r = await governorLimitRisksHandler(ctx, {});
+      const r = await governorLimitRisksHandler(ctx, { limit: 500 });
       expect(r.ok).toBe(true);
       if (!r.ok) return;
-      const joined = r.value.data.boundaries.join(' ');
-      expect(joined).toMatch(/Scan capped at 1 nodes per type/);
-      expect(joined).toMatch(/ApexClass/);
+      expect(r.value.data.totalClassCount).toBe(2);
+      const ids = new Set(r.value.data.classes.map((c) => c.componentId));
+      expect(ids.has('ApexClass:DangerSvc')).toBe(true);
+      expect(ids.has('ApexTrigger:LoopTrigger')).toBe(true);
+      // The completed full scan does NOT claim INCOMPLETE.
+      expect(r.value.data.boundaries.join(' ')).not.toMatch(/Scan capped/);
     } finally {
       if (prev === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
       else process.env['SFI_NODE_SCAN_LIMIT'] = prev;
     }
+  });
+
+  it('SFI_NODE_SCAN_LIMIT > 500 no longer hard-errors (RV10 clamp)', async () => {
+    const prev = process.env['SFI_NODE_SCAN_LIMIT'];
+    process.env['SFI_NODE_SCAN_LIMIT'] = '600';
+    try {
+      const r = await governorLimitRisksHandler(ctx, {});
+      // Pre-RV10 this returned kind:'internal' (listNodesByType rejects >500).
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.totalClassCount).toBe(2);
+    } finally {
+      if (prev === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
+      else process.env['SFI_NODE_SCAN_LIMIT'] = prev;
+    }
+  });
+});
+
+// =============================================================================
+// CR-22 — output-axis cursor. A truncated page emits an opaque nextCursor that
+// resumes with no gaps / no dupes; a whole-fits no-cursor call is byte-identical
+// (no limit/offset/nextCursor/pageInfo fields).
+// =============================================================================
+describe('governorLimitRisksHandler — output cursor (CR-22)', () => {
+  it('whole-fits no-cursor call omits all paging fields (byte-identical)', async () => {
+    const r = await governorLimitRisksHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data as unknown as Record<string, unknown>;
+    expect('limit' in d).toBe(false);
+    expect('offset' in d).toBe(false);
+    expect('nextOffset' in d).toBe(false);
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+  });
+
+  it('a truncated page emits a cursor that resumes with no gaps or dupes', async () => {
+    const all = await governorLimitRisksHandler(ctx, { limit: 500 });
+    expect(all.ok).toBe(true);
+    if (!all.ok) return;
+    const fullOrder = all.value.data.classes.map((c) => c.componentId);
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const page = await governorLimitRisksHandler(
+        ctx,
+        cursor !== undefined ? { limit: 1, cursor } : { limit: 1 },
+      );
+      expect(page.ok).toBe(true);
+      if (!page.ok) return;
+      for (const c of page.value.data.classes) seen.push(c.componentId);
+      const nc = page.value.data.nextCursor;
+      if (nc === undefined) break;
+      cursor = nc;
+      guard += 1;
+      if (guard > 20) throw new Error('cursor did not terminate');
+    }
+    expect(seen).toEqual(fullOrder);
+    expect(new Set(seen).size).toBe(seen.length);
   });
 });
 
