@@ -64,14 +64,14 @@ import type {
   PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listNodesByType } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
 import { partitionByBaseline } from './finding-suppression.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
-import { nodeScanLimit, scanHitCap, scanTruncationNote } from './scan-cap.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { clampedNodeScanLimit, scanTruncationNote } from './scan-cap.js';
 
 const CRUD_FLS_TOOL = 'sfi.crud_fls_audit';
 
@@ -308,58 +308,48 @@ export const crudFlsAuditHandler = async (
   let totalFindingCount = 0;
   let suppressedFindingCount = 0;
 
-  // Per-type scan saturation. A type whose page came back AT the fetch cap may
-  // have unchecked-CRUD/FLS classes BEHIND it that this scan never examined.
-  // Fetch at `nodeScanLimit()` (not a hardcoded 500) so the disclosure tracks
-  // the ACTUAL fetch, mirroring `app_access`; `SFI_NODE_SCAN_LIMIT` can drive
-  // the truncated path in tests.
-  const truncatedTypes: string[] = [];
-  const scanLimit = nodeScanLimit();
-  for (const type of SCANNED_TYPES) {
-    const nodesResult = await listNodesByType(ctx.graph, type, {
-      limit: scanLimit,
+  // CR-22 B3: scan EVERY ApexClass / ApexTrigger by paging the SQL OFFSET
+  // forward (window-by-window at the clamped cap) so unchecked-CRUD/FLS classes
+  // on node 501+ are reachable — the single capped page used to drop the scan
+  // TAIL silently. The output `classes` is then the COMPLETE list, paged by the
+  // existing output cursor below; the scan completes inside this call.
+  const scan = await scanAllNodesOfTypes(ctx.graph, SCANNED_TYPES);
+  if (!scan.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${scan.error.message}` });
+  }
+  for (const node of scan.value.nodes) {
+    const raw = (node as Node).properties['qualityIssues'];
+    if (!Array.isArray(raw)) continue;
+    const findings: CrudFlsAuditFinding[] = [];
+    for (const rawIssue of raw) {
+      const issue = coerceIssue(rawIssue);
+      if (issue === null) continue;
+      if (!CRUD_FLS_RULES.has(issue.rule)) continue;
+      findings.push({
+        rule: issue.rule as 'missing-crud-check' | 'missing-fls-check',
+        severity: issue.severity,
+        location: issue.location,
+        explanation: issue.explanation,
+      });
+    }
+    const partitioned = await partitionByBaseline(
+      ctx,
+      CRUD_FLS_TOOL,
+      node.id,
+      findings,
+    );
+    suppressedFindingCount += partitioned.suppressedCount;
+    for (const issue of partitioned.active) {
+      byRule[issue.rule] = (byRule[issue.rule] ?? 0) + 1;
+      totalFindingCount += 1;
+    }
+    if (partitioned.active.length === 0) continue;
+    perClass.set(node.id, {
+      componentId: node.id,
+      type: node.type,
+      apiName: node.apiName,
+      findings: [...partitioned.active],
     });
-    if (!nodesResult.ok) {
-      return err({
-        kind: 'internal',
-        message: `graph query failed: ${nodesResult.error.message}`,
-      });
-    }
-    if (scanHitCap(nodesResult.value.length, scanLimit)) truncatedTypes.push(type);
-    for (const node of nodesResult.value) {
-      const raw = (node as Node).properties['qualityIssues'];
-      if (!Array.isArray(raw)) continue;
-      const findings: CrudFlsAuditFinding[] = [];
-      for (const rawIssue of raw) {
-        const issue = coerceIssue(rawIssue);
-        if (issue === null) continue;
-        if (!CRUD_FLS_RULES.has(issue.rule)) continue;
-        findings.push({
-          rule: issue.rule as 'missing-crud-check' | 'missing-fls-check',
-          severity: issue.severity,
-          location: issue.location,
-          explanation: issue.explanation,
-        });
-      }
-      const partitioned = await partitionByBaseline(
-        ctx,
-        CRUD_FLS_TOOL,
-        node.id,
-        findings,
-      );
-      suppressedFindingCount += partitioned.suppressedCount;
-      for (const issue of partitioned.active) {
-        byRule[issue.rule] = (byRule[issue.rule] ?? 0) + 1;
-        totalFindingCount += 1;
-      }
-      if (partitioned.active.length === 0) continue;
-      perClass.set(node.id, {
-        componentId: node.id,
-        type: node.type,
-        apiName: node.apiName,
-        findings: [...partitioned.active],
-      });
-    }
   }
 
   const classes = [...perClass.values()].sort(compareClassById);
@@ -412,12 +402,15 @@ export const crudFlsAuditHandler = async (
           DYNAMIC_SOQL_DISCLOSURE,
         ];
 
-  // Truncation is meaningful EVEN with zero in-scope findings — risky classes
-  // may sit past the scan cap — so this append lives OUTSIDE the zero-findings
-  // gate above. (`truncated` is the OUTPUT offset/limit cursor; this is the
-  // INPUT-scan saturation, a separate honesty axis.)
-  if (truncatedTypes.length > 0) {
-    boundaries.push(scanTruncationNote(truncatedTypes));
+  // Residual scan-incompleteness only fires for a PATHOLOGICAL type past
+  // FULL_SCAN_MAX_NODES — the normal full multi-window scan reaches node 501+
+  // and completes. Lives OUTSIDE the zero-findings gate because risky classes
+  // could be among the unscanned residual tail. (`truncated` is the OUTPUT
+  // offset/limit cursor; this is the INPUT-scan saturation, a separate axis.)
+  if (scan.value.scanIncomplete) {
+    boundaries.push(
+      scanTruncationNote(scan.value.incompleteTypes, clampedNodeScanLimit()),
+    );
   }
 
   return ok({

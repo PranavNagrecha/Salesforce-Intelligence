@@ -147,6 +147,136 @@ describe('layoutAssignmentsHandler', () => {
   });
 });
 
+// CR-22 B3: the Profile scan now windows past the per-type cap. A profile that
+// assigns the layout but sorts PAST a low cap must still be reached (the pre-B3
+// scan-tail-unreachable bug), and the output list pages via an opaque cursor.
+describe('layoutAssignmentsHandler — full multi-window scan + cursor (CR-22 B3)', () => {
+  let b3Dir: string;
+  let b3Store: GraphStore;
+  let b3Ctx: Context;
+  // Three profiles assign the layout; in id-ASC order Z_Late sorts LAST, so a
+  // cap of 1 (pre-B3) would never fetch it. Each assigns a distinct record type
+  // so the rows are distinct.
+  const B3_LAYOUT = 'Layout:Account.Account Layout';
+
+  beforeAll(async () => {
+    b3Dir = mkdtempSync(join(tmpdir(), 'sfi-layout-assignments-b3-'));
+    const opened = await openGraph(join(b3Dir, 'g.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    b3Store = opened.value;
+    const imported = await importExtractionResults(b3Store, [
+      {
+        nodes: [
+          node({ id: B3_LAYOUT, type: 'Layout', apiName: 'Account.Account Layout', label: 'Account Layout' }),
+          node({
+            id: 'Profile:A_First',
+            type: 'Profile',
+            apiName: 'A_First',
+            properties: {
+              layoutAssignments: [{ layout: 'Account-Account Layout', recordType: 'Account.Alpha' }],
+            },
+          }),
+          node({
+            id: 'Profile:M_Mid',
+            type: 'Profile',
+            apiName: 'M_Mid',
+            properties: {
+              layoutAssignments: [{ layout: 'Account-Account Layout', recordType: 'Account.Mid' }],
+            },
+          }),
+          node({
+            id: 'Profile:Z_Late',
+            type: 'Profile',
+            apiName: 'Z_Late',
+            properties: {
+              layoutAssignments: [{ layout: 'Account-Account Layout', recordType: 'Account.Zeta' }],
+            },
+          }),
+        ],
+        edges: [],
+      } as ExtractionResult,
+    ]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    b3Ctx = { vaultRoot: b3Dir, manifest: MANIFEST, graph: b3Store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(b3Store);
+    rmSync(b3Dir, { recursive: true, force: true });
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: a cap of 1 still reaches a profile assigning the layout PAST the cap', async () => {
+    const prev = process.env['SFI_NODE_SCAN_LIMIT'];
+    process.env['SFI_NODE_SCAN_LIMIT'] = '1';
+    try {
+      const r = await layoutAssignmentsHandler(b3Ctx, { componentId: B3_LAYOUT, limit: 500 });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      // All 3 assignments reached even though each window fetched only 1 Profile.
+      expect(r.value.data.summary.assignments).toBe(3);
+      const profiles = new Set(r.value.data.assignments.map((a) => a.profileId));
+      // Z_Late sorts LAST in id ASC — proving the scan reached past window 1.
+      expect(profiles.has('Profile:Z_Late')).toBe(true);
+      expect(r.value.data.scanTruncated).toBe(false);
+      expect(r.value.data.boundaryNote).not.toMatch(/Scan capped/);
+    } finally {
+      if (prev === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
+      else process.env['SFI_NODE_SCAN_LIMIT'] = prev;
+    }
+  });
+
+  it('SFI_NODE_SCAN_LIMIT > 500 no longer hard-errors (RV10-style clamp while touched)', async () => {
+    const prev = process.env['SFI_NODE_SCAN_LIMIT'];
+    process.env['SFI_NODE_SCAN_LIMIT'] = '600';
+    try {
+      const r = await layoutAssignmentsHandler(b3Ctx, { componentId: B3_LAYOUT });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.summary.assignments).toBe(3);
+    } finally {
+      if (prev === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
+      else process.env['SFI_NODE_SCAN_LIMIT'] = prev;
+    }
+  });
+
+  it('whole-fits no-cursor call omits nextCursor/pageInfo (byte-identical)', async () => {
+    const r = await layoutAssignmentsHandler(b3Ctx, { componentId: B3_LAYOUT });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data as unknown as Record<string, unknown>;
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+  });
+
+  it('a truncated page emits a cursor that resumes with no gaps or dupes', async () => {
+    const all = await layoutAssignmentsHandler(b3Ctx, { componentId: B3_LAYOUT, limit: 500 });
+    expect(all.ok).toBe(true);
+    if (!all.ok) return;
+    const fullOrder = all.value.data.assignments.map((a) => `${a.profileId}|${a.recordType ?? ''}`);
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const page = await layoutAssignmentsHandler(
+        b3Ctx,
+        cursor !== undefined
+          ? { componentId: B3_LAYOUT, limit: 1, cursor }
+          : { componentId: B3_LAYOUT, limit: 1 },
+      );
+      expect(page.ok).toBe(true);
+      if (!page.ok) return;
+      for (const a of page.value.data.assignments) seen.push(`${a.profileId}|${a.recordType ?? ''}`);
+      if (page.value.data.nextCursor === undefined) break;
+      cursor = page.value.data.nextCursor;
+      guard += 1;
+      if (guard > 20) throw new Error('cursor did not terminate');
+    }
+    expect(seen).toEqual(fullOrder);
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+});
+
 // A vault where the layout exists but NO profile carries layoutAssignments —
 // the result must DISCLOSE "not modeled", not a confident empty list.
 describe('layoutAssignmentsHandler — extraction gap', () => {

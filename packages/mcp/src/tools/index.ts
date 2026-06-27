@@ -940,6 +940,8 @@ const LIST_COMPONENTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.f
     parentId: { type: 'string', minLength: 1 },
     limit: { type: 'integer', minimum: 1, maximum: 500 },
     offset: { type: 'integer', minimum: 0 },
+    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    cursor: { type: 'string', minLength: 1 },
     // P4-interface-impl: ApexClass async/interface/API boolean filters.
     isQueueable: { type: 'boolean' },
     isSchedulable: { type: 'boolean' },
@@ -1522,6 +1524,8 @@ const LIST_VIEW_SHARING_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       componentId: { type: 'string', minLength: 1 },
       limit: { type: 'number', minimum: 1, maximum: 120 },
       offset: { type: 'number', minimum: 0 },
+      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      cursor: { type: 'string', minLength: 1 },
     },
     required: ['componentId'],
   });
@@ -1615,6 +1619,8 @@ const LAYOUT_ASSIGNMENTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       componentId: { type: 'string', minLength: 1 },
       limit: { type: 'number', minimum: 1, maximum: 250 },
       offset: { type: 'number', minimum: 0 },
+      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      cursor: { type: 'string', minLength: 1 },
     },
     required: ['componentId'],
   });
@@ -1664,6 +1670,8 @@ const APP_ACCESS_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze
     componentId: { type: 'string', minLength: 1 },
     limit: { type: 'number', minimum: 1, maximum: 250 },
     offset: { type: 'number', minimum: 0 },
+    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    cursor: { type: 'string', minLength: 1 },
   },
   required: ['componentId'],
 });
@@ -2585,6 +2593,9 @@ const CODE_QUALITY_AUDIT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
         items: { type: 'string', minLength: 1 },
       },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
+      offset: { type: 'integer', minimum: 0 },
+      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      cursor: { type: 'string', minLength: 1 },
     },
   });
 
@@ -2600,6 +2611,9 @@ const GOVERNOR_LIMIT_RISKS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     type: 'object',
     properties: {
       limit: { type: 'integer', minimum: 1, maximum: 500 },
+      offset: { type: 'integer', minimum: 0 },
+      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      cursor: { type: 'string', minLength: 1 },
     },
   });
 
@@ -2619,6 +2633,9 @@ const FIND_HARDCODED_VALUES_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
         enum: ['id', 'email', 'username', 'url', 'sandbox-data'],
       },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
+      offset: { type: 'integer', minimum: 0 },
+      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      cursor: { type: 'string', minLength: 1 },
     },
   });
 
@@ -3833,7 +3850,7 @@ export const V01_TOOLS: readonly ToolDefinition[] = [
   {
     name: 'sfi.list_components',
     description:
-      'List components of a given type (optionally narrowed by parentId), sorted by id. Paginated via limit/offset; `hasMore` hints at additional pages. For `type: \'ApexClass\'`, optional boolean filters list interface/async/API implementers at the DB layer (correct pagination, not a post-filtered page): `isBatchable` / `isQueueable` / `isSchedulable` / `isRestResource` / `hasFutureMethod` / `hasInvocableMethod` / `hasAuraEnabledMethod` / `isTest` — e.g. `{ type: \'ApexClass\', isBatchable: true }` returns every Batchable class. When manifest coverage for the requested `type` is not `complete`, a structured `coverageCaveat` flags the inventory as potentially incomplete (scoped refresh, errored retrieve, not modeled) — including on non-empty pages. When the FIRST page is empty, a `retrievalHint` (FRESH-02) says WHY — "none in the org" (retrieved, none found) vs "not retrieved" (a scoped refresh skipped the type — run /sfi-refresh) vs "not modeled" — so an empty list is never a silent `[]` read as "the org has none". (The hint is suppressed when a boolean filter is active, since an empty filtered result is not a coverage gap.)',
+      'List components of a given type (optionally narrowed by parentId), sorted by id. Paginated via limit/offset; `hasMore` hints at additional pages (a truncated page returns a `nextCursor` to resume). For `type: \'ApexClass\'`, optional boolean filters list interface/async/API implementers at the DB layer (correct pagination, not a post-filtered page): `isBatchable` / `isQueueable` / `isSchedulable` / `isRestResource` / `hasFutureMethod` / `hasInvocableMethod` / `hasAuraEnabledMethod` / `isTest` — e.g. `{ type: \'ApexClass\', isBatchable: true }` returns every Batchable class. When manifest coverage for the requested `type` is not `complete`, a structured `coverageCaveat` flags the inventory as potentially incomplete (scoped refresh, errored retrieve, not modeled) — including on non-empty pages. When the FIRST page is empty, a `retrievalHint` (FRESH-02) says WHY — "none in the org" (retrieved, none found) vs "not retrieved" (a scoped refresh skipped the type — run /sfi-refresh) vs "not modeled" — so an empty list is never a silent `[]` read as "the org has none". (The hint is suppressed when a boolean filter is active, since an empty filtered result is not a coverage gap.)',
     inputSchema: LIST_COMPONENTS_INPUT_SCHEMA,
   },
   {
@@ -4421,19 +4438,19 @@ export const V01_TOOLS: readonly ToolDefinition[] = [
   {
     name: 'sfi.code_quality_audit',
     description:
-      "v2.1 R3 general-purpose code-quality entry point. Walks every ApexClass / ApexTrigger / Flow node, reads each node's `properties.qualityIssues[]` array (populated by the v2.1 `code-quality-patterns` recognizer family at extraction time), applies optional severity and rule filters, and returns the matching issues sorted by severity DESC then componentId ASC. Each issue carries `componentId` / `type` / `apiName` plus the recognizer's `rule` / `severity` / `location` / `explanation` / `confidence: 'heuristic'`. `summary` reports the FULL per-severity / per-rule / per-type counts (not the truncated slice). `severityFilter: 'all'` is the default; specific severities (`critical` / `high` / `medium` / `low` / `info`) narrow the slice. `ruleFilter: ['soql-in-loop', 'dml-in-loop']` narrows to specific rule ids. `limit` defaults to 100 (max 500); `truncated` flips true when matches exceed `limit`. Honesty axis (verbatim, surfaced in `boundaries[]` when at least one finding qualifies): pattern recognition is heuristic — false positives are expected; static recognition has dynamic blind spots (dynamic SOQL, reflective field access invisible) — the `dynamic-apex` info rule now FLAGS the classes that use those constructs so the blind spot is visible (impact/usage/dead-code results for them may be incomplete); severity is industry-consensus, not per-org overridable in v2.1.",
+      "v2.1 R3 general-purpose code-quality entry point. Walks every ApexClass / ApexTrigger / Flow node, reads each node's `properties.qualityIssues[]` array (populated by the v2.1 `code-quality-patterns` recognizer family at extraction time), applies optional severity and rule filters, and returns the matching issues sorted by severity DESC then componentId ASC. Each issue carries `componentId` / `type` / `apiName` plus the recognizer's `rule` / `severity` / `location` / `explanation` / `confidence: 'heuristic'`. `summary` reports the FULL per-severity / per-rule / per-type counts (not the truncated slice). `severityFilter: 'all'` is the default; specific severities (`critical` / `high` / `medium` / `low` / `info`) narrow the slice. `ruleFilter: ['soql-in-loop', 'dml-in-loop']` narrows to specific rule ids. `limit` defaults to 100 (max 500); `truncated` flips true when matches exceed `limit`. CR-22: a truncated page returns an opaque `nextCursor` (echo back as `cursor`) to walk the rest; the scan now windows past the per-type cap so findings on a node past 500 are reachable (not dropped). Honesty axis (verbatim, surfaced in `boundaries[]` when at least one finding qualifies): pattern recognition is heuristic — false positives are expected; static recognition has dynamic blind spots (dynamic SOQL, reflective field access invisible) — the `dynamic-apex` info rule now FLAGS the classes that use those constructs so the blind spot is visible (impact/usage/dead-code results for them may be incomplete); severity is industry-consensus, not per-org overridable in v2.1.",
     inputSchema: CODE_QUALITY_AUDIT_INPUT_SCHEMA,
   },
   {
     name: 'sfi.governor_limit_risks',
     description:
-      "v2.1 R3 Apex-specific narrowing for governor-limit-relevant patterns — the performance/scale subset of the v2.1 quality catalog. Walks every ApexClass / ApexTrigger node's `properties.qualityIssues[]`, filters to the three governor-limit rules (`soql-in-loop`, `dml-in-loop`, `database-upsert-no-options`), groups findings by class, and (when the class is the target of an incoming `callsApex` edge from an ApexTrigger) surfaces the trigger callers in `triggerContext`. Each class entry also carries `entryPaths` (P4-graph-sast): the entry-point PATHS that reach the risky class, each an ordered `[entryPoint, ..., thisClass]` walked backwards over incoming `callsApex` to an ApexTrigger / Flow (or the top of the Apex chain) — so a finding cites WHERE it runs from (e.g. a SOQL-in-loop reachable only from a test class is lower real-world risk than one on a trigger's hot path). Bounded (depth 6, 12 paths), cycle-safe. Each class entry carries its identity, a per-finding list, the trigger context, and the entry paths. `totalRiskCount` / `byRule` report the FULL pre-slice counts. `limit` defaults to 100 (max 500); the slice is over CLASSES, not individual findings. Honesty axis (verbatim, surfaced in `boundaries[]` when at least one finding qualifies): pattern recognition is heuristic — static SOQL/DML inside a static method called from a loop is invisible; trigger-context callers are listed without per-edge confidence (use sfi.find_apex_usages for the per-edge detail). Carries a `soundness` envelope: `complete: false` with a `dynamic-apex` blind spot when any scanned class uses dynamic Apex — a SOQL/DML hidden inside a `Database.query(...)` string is invisible to this static recognizer, so the risk list may be incomplete.",
+      "v2.1 R3 Apex-specific narrowing for governor-limit-relevant patterns — the performance/scale subset of the v2.1 quality catalog. Walks every ApexClass / ApexTrigger node's `properties.qualityIssues[]`, filters to the three governor-limit rules (`soql-in-loop`, `dml-in-loop`, `database-upsert-no-options`), groups findings by class, and (when the class is the target of an incoming `callsApex` edge from an ApexTrigger) surfaces the trigger callers in `triggerContext`. Each class entry also carries `entryPaths` (P4-graph-sast): the entry-point PATHS that reach the risky class, each an ordered `[entryPoint, ..., thisClass]` walked backwards over incoming `callsApex` to an ApexTrigger / Flow (or the top of the Apex chain) — so a finding cites WHERE it runs from (e.g. a SOQL-in-loop reachable only from a test class is lower real-world risk than one on a trigger's hot path). Bounded (depth 6, 12 paths), cycle-safe. Each class entry carries its identity, a per-finding list, the trigger context, and the entry paths. `totalRiskCount` / `byRule` report the FULL pre-slice counts. `limit` defaults to 100 (max 500); the slice is over CLASSES, not individual findings. CR-22: a truncated page returns an opaque `nextCursor` (echo back as `cursor`) to walk the rest; the scan now windows past the per-type cap so a risky class past node 500 is reachable (not dropped). Honesty axis (verbatim, surfaced in `boundaries[]` when at least one finding qualifies): pattern recognition is heuristic — static SOQL/DML inside a static method called from a loop is invisible; trigger-context callers are listed without per-edge confidence (use sfi.find_apex_usages for the per-edge detail). Carries a `soundness` envelope: `complete: false` with a `dynamic-apex` blind spot when any scanned class uses dynamic Apex — a SOQL/DML hidden inside a `Database.query(...)` string is invisible to this static recognizer, so the risk list may be incomplete.",
     inputSchema: GOVERNOR_LIMIT_RISKS_INPUT_SCHEMA,
   },
   {
     name: 'sfi.find_hardcoded_values',
     description:
-      "'find me hardcoded IDs / emails / usernames / endpoint URLs / sandbox-test-data' surface. Walks every ApexClass / ApexTrigger node's `properties.qualityIssues[]`, narrows to the five hardcoded-literal rules (`hardcoded-id`, `hardcoded-email`, `hardcoded-username`, `hardcoded-url`, `hardcoded-sandbox-test-data`), and emits each match with the parent component's identity plus the recognizer's `rule` / `severity` / `location` / `explanation` plus an `inTestClass: boolean` flag (true when the parent ApexClass has `properties.isTest === true`). Optional `category` ('id' / 'email' / 'username' / 'url' / 'sandbox-data') narrows to one literal family. The `hardcoded-url` rule is namespace/domain-aware: it flags external endpoint URLs baked into Apex (should be a Named Credential / Remote Site Setting) but SKIPS Salesforce platform domains (My Domain, Sites, Visualforce, the API host). `byCategory` reports the FULL per-category counts; `limit` defaults to 100 (max 500). Honesty axis (verbatim, surfaced in `boundaries[]` when at least one finding qualifies): pattern recognition is heuristic — managed-package embedded literals may surface as false positives; the refusal-pattern disclosure 'string literals inside @isTest classes that look like IDs may be intentional test fixtures' is appended verbatim when ANY surfaced match is in a test class. (Takes effect on ApexClass/ApexTrigger refreshed after this rule shipped.)",
+      "'find me hardcoded IDs / emails / usernames / endpoint URLs / sandbox-test-data' surface. Walks every ApexClass / ApexTrigger node's `properties.qualityIssues[]`, narrows to the five hardcoded-literal rules (`hardcoded-id`, `hardcoded-email`, `hardcoded-username`, `hardcoded-url`, `hardcoded-sandbox-test-data`), and emits each match with the parent component's identity plus the recognizer's `rule` / `severity` / `location` / `explanation` plus an `inTestClass: boolean` flag (true when the parent ApexClass has `properties.isTest === true`). Optional `category` ('id' / 'email' / 'username' / 'url' / 'sandbox-data') narrows to one literal family. The `hardcoded-url` rule is namespace/domain-aware: it flags external endpoint URLs baked into Apex (should be a Named Credential / Remote Site Setting) but SKIPS Salesforce platform domains (My Domain, Sites, Visualforce, the API host). `byCategory` reports the FULL per-category counts; `limit` defaults to 100 (max 500). CR-22: a truncated page returns an opaque `nextCursor` (echo back as `cursor`) to walk the rest; the scan now windows past the per-type cap so a finding on a node past 500 is reachable (not dropped). Honesty axis (verbatim, surfaced in `boundaries[]` when at least one finding qualifies): pattern recognition is heuristic — managed-package embedded literals may surface as false positives; the refusal-pattern disclosure 'string literals inside @isTest classes that look like IDs may be intentional test fixtures' is appended verbatim when ANY surfaced match is in a test class. (Takes effect on ApexClass/ApexTrigger refreshed after this rule shipped.)",
     inputSchema: FIND_HARDCODED_VALUES_INPUT_SCHEMA,
   },
   {

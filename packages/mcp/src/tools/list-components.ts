@@ -20,16 +20,20 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { STANDARD_OBJECT_FIELD_SNAPSHOT } from '@sf-intelligence/extractors';
-import { listNodesByType } from '@sf-intelligence/graph';
+import { countNodesByType, listNodesByType } from '@sf-intelligence/graph';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
 import { buildEnumerationCoverageCaveat, type CoverageCaveat } from './coverage-trust.js';
+import { argsFingerprint, decodeCursor, encodeCursor, PAGE_CURSOR_VERSION } from './page-cursor.js';
+
+const LIST_COMPONENTS_TOOL = 'sfi.list_components';
 
 const STANDARD_OBJECT_API_NAMES = new Set<string>(STANDARD_OBJECT_FIELD_SNAPSHOT);
 
@@ -230,6 +234,10 @@ export const listComponentsInputSchema = z.object({
   parentId: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(LIST_MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
+  // CR-22 continuation cursor from a prior page's nextCursor. `o` already IS the
+  // SQL offset (list_components pages listNodesByType directly), so this is a
+  // SINGLE-axis cursor — no separate scan offset.
+  cursor: z.string().min(1).optional(),
   // P4-interface-impl boolean filters (ApexClass only). String-coercing so a
   // host that stringifies the arg still works.
   isQueueable: coercedOptionalBoolean,
@@ -278,6 +286,21 @@ export interface ListComponentsOutput {
    * inventory is never read as authoritative when the vault is partial.
    */
   readonly coverageCaveat?: CoverageCaveat;
+  /**
+   * CR-22 opaque continuation token, present ONLY when more rows remain past
+   * this page (over `limit` OR byte-trimmed). Echo it back as `cursor` to
+   * resume. Absent on a final page so an in-budget response is byte-identical
+   * to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /**
+   * Cursor-aware pagination metadata, present ONLY when `nextCursor` is. Carries
+   * the TRUE `totalCount` (from countNodesByType) — but ONLY for the unfiltered
+   * `{type}` case; with a `parentId` or property filter the filtered total is
+   * also exact (countNodesByType applies the same WHERE narrows). `returnedCount`
+   * is this page's size; `hasMore` mirrors the legacy `hasMore`.
+   */
+  readonly pageInfo?: PageInfo;
 }
 
 /**
@@ -310,7 +333,33 @@ export const listComponentsHandler = async (
   }
 
   const limit = input.limit ?? LIST_DEFAULT_LIMIT;
-  const offset = input.offset ?? 0;
+
+  // CR-22: the narrowing args this cursor binds to (everything except the paging
+  // knobs limit/offset/cursor). A token can't be replayed against a different
+  // type / parentId / property filter.
+  const fingerprint = argsFingerprint({
+    type: input.type,
+    ...(input.parentId !== undefined ? { parentId: input.parentId } : {}),
+    ...Object.fromEntries(
+      APEX_BOOLEAN_FILTERS.flatMap((k) =>
+        input[k] !== undefined ? [[k, input[k]]] : [],
+      ),
+    ),
+  });
+
+  // Resolve the effective offset: an echoed cursor wins over an explicit offset.
+  // `o` already IS the SQL offset (this handler pages listNodesByType directly),
+  // so a resumed cursor reaches node 501+ natively — no separate scan axis.
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: LIST_COMPONENTS_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
 
   // P4-interface-impl: collect whichever async/interface boolean filters were
   // supplied into a single propertyEquals map for the DB-layer JSON filter.
@@ -384,6 +433,43 @@ export const listComponentsHandler = async (
 
   const coverageCaveat = buildEnumerationCoverageCaveat(ctx, input.type);
 
+  // CR-22: emit a continuation cursor ONLY when more rows remain (over `limit`
+  // OR byte-trimmed). The next offset is `offset + kept.length` — `o` IS the SQL
+  // offset, so the resumed page SQL-scans deeper (reaches node 501+ natively).
+  // A final page omits nextCursor/pageInfo, so an in-budget response is
+  // byte-identical to pre-CR-22.
+  let cursorFields: { readonly nextCursor: string; readonly pageInfo: PageInfo } | undefined;
+  if (hasMore) {
+    const nextOffset = offset + kept.length;
+    const nextCursor = encodeCursor({
+      v: PAGE_CURSOR_VERSION,
+      t: LIST_COMPONENTS_TOOL,
+      h: ctx.manifest.sourceTreeHash,
+      o: nextOffset,
+      ...(kept.length > 0 ? { k: (kept[kept.length - 1] as Node).id } : {}),
+      q: fingerprint,
+    });
+    // TRUE total via countNodesByType, applying the SAME narrows so the total is
+    // exact for the unfiltered AND the parentId / property-filtered cases (the
+    // count helper mirrors listNodesByType's WHERE clause). If the count query
+    // fails, fall back to a lower bound rather than failing the whole
+    // enumeration.
+    const totalRes = await countNodesByType(ctx.graph, input.type, {
+      ...(input.parentId !== undefined ? { parentId: input.parentId as ComponentId } : {}),
+      ...(hasPropertyFilter ? { propertyEquals } : {}),
+    });
+    const totalCount = totalRes.ok ? totalRes.value : offset + kept.length + 1;
+    cursorFields = {
+      nextCursor,
+      pageInfo: {
+        totalCount,
+        returnedCount: kept.length,
+        hasMore: true,
+        nextCursor,
+      },
+    };
+  }
+
   return ok({
     data: {
       components: kept,
@@ -401,6 +487,7 @@ export const listComponentsHandler = async (
               `with offset += ${kept.length} (or narrow via parentId) for the rest.`,
           }
         : {}),
+      ...(cursorFields !== undefined ? cursorFields : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

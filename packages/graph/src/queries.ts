@@ -72,6 +72,17 @@ export interface ListNodesOptions {
   readonly propertyEquals?: Readonly<Record<string, boolean>>;
 }
 
+/**
+ * Optional narrows for `countNodesByType` — the SAME WHERE-clause filters
+ * `listNodesByType` accepts (CR-22 B3), so a caller can get a TRUE total for a
+ * filtered enumeration (e.g. ListViews of ONE object, or every `isBatchable`
+ * ApexClass) rather than over-counting the whole type.
+ */
+export interface CountNodesOptions {
+  readonly parentId?: ComponentId;
+  readonly propertyEquals?: Readonly<Record<string, boolean>>;
+}
+
 /** Options for `listEdges`. */
 export interface ListEdgesOptions {
   readonly direction?: 'in' | 'out' | 'both';
@@ -312,20 +323,39 @@ export const listNodesByType = async (
  * per-type counts) must use this rather than measuring `listNodesByType(...).length`,
  * which saturates at 500 and under-reports large types.
  *
+ * CR-22 B3: accepts the SAME `parentId` / `propertyEquals` narrows as
+ * `listNodesByType`, so a TRUE total can back a FILTERED paginated enumeration
+ * (e.g. ListViews of one object, or `{type, isBatchable:true}`) instead of
+ * over-counting the whole type. With no options the SQL is unchanged (a bare
+ * `WHERE type = ?`), so existing callers are byte-identical.
+ *
  * @example
  *   const r = await countNodesByType(store, 'CustomField');
  *   if (r.ok) console.log(`${r.value} fields`);
+ *   const v = await countNodesByType(store, 'ListView', { parentId: 'CustomObject:Account' });
  */
 export const countNodesByType = async (
   store: GraphStore,
   type: ComponentType,
+  options?: CountNodesOptions,
 ): Promise<Result<number, GraphError>> => {
   try {
-    const rows = await fetchRows(
-      store,
-      `SELECT count(*)::INT AS n FROM nodes WHERE type = ?`,
-      [type],
-    );
+    const params: DuckDBValue[] = [type];
+    let sql = `SELECT count(*)::INT AS n FROM nodes WHERE type = ?`;
+    if (options?.parentId !== undefined) {
+      sql += ' AND parent_id = ?';
+      params.push(options.parentId);
+    }
+    // Same parameterised JSON-path filter as `listNodesByType` — key bound as
+    // `$.<key>`, never concatenated, so it cannot inject. An absent property is
+    // NULL, which fails `= 'true'` (correct "not a Batchable" semantics).
+    if (options?.propertyEquals !== undefined) {
+      for (const [key, value] of Object.entries(options.propertyEquals)) {
+        sql += ` AND json_extract_string(properties_json, ?) = ?`;
+        params.push(`$.${key}`, value ? 'true' : 'false');
+      }
+    }
+    const rows = await fetchRows(store, sql, params);
     return ok(Number((rows[0] as Row)['n']));
   } catch (e) {
     return err(queryFailed('countNodesByType', e));

@@ -7,12 +7,16 @@ import {
   DEFAULT_PAGE_LIMIT,
   MAX_CURSOR_RAW_BYTES,
   PAGE_CURSOR_VERSION,
+  type ScanTypeCount,
   decodeCursor,
+  decodeScanOffset,
   defaultItemSlim,
   encodeCursor,
+  encodeScanOffset,
   hasHandlerCursor,
   paginate,
   paginateSection,
+  totalScanCount,
 } from '../../src/tools/page-cursor.js';
 
 const TOOL = 'sfi.get_edges';
@@ -516,5 +520,132 @@ describe('hasHandlerCursor', () => {
     expect(hasHandlerCursor(null)).toBe(false);
     expect(hasHandlerCursor(42)).toBe(false);
     expect(hasHandlerCursor('s')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// multi-type scan-resume encoding (B3 scan axis) — the protocol gate
+// ---------------------------------------------------------------------------
+
+describe('decodeScanOffset / encodeScanOffset — multi-type scan resume', () => {
+  // Three types: ApexClass=600, ApexTrigger=10, Flow=50 (global span = 660).
+  const counts: readonly ScanTypeCount[] = [
+    { type: 'ApexClass', count: 600 },
+    { type: 'ApexTrigger', count: 10 },
+    { type: 'Flow', count: 50 },
+  ];
+
+  it('totalScanCount sums every type', () => {
+    expect(totalScanCount(counts)).toBe(660);
+  });
+
+  it('global offset 0 lands at the first type, offset 0', () => {
+    expect(decodeScanOffset(0, counts)).toEqual({
+      typeIndex: 0,
+      withinTypeOffset: 0,
+      complete: false,
+    });
+  });
+
+  it('decodes an offset inside the first type', () => {
+    expect(decodeScanOffset(500, counts)).toEqual({
+      typeIndex: 0,
+      withinTypeOffset: 500,
+      complete: false,
+    });
+  });
+
+  it('crosses a type boundary cleanly (no dup / no skip)', () => {
+    // 600 = exactly the first node of the SECOND type.
+    expect(decodeScanOffset(600, counts)).toEqual({
+      typeIndex: 1,
+      withinTypeOffset: 0,
+      complete: false,
+    });
+    // 605 = the 6th node of the second type.
+    expect(decodeScanOffset(605, counts)).toEqual({
+      typeIndex: 1,
+      withinTypeOffset: 5,
+      complete: false,
+    });
+    // 610 = exactly the first node of the THIRD type.
+    expect(decodeScanOffset(610, counts)).toEqual({
+      typeIndex: 2,
+      withinTypeOffset: 0,
+      complete: false,
+    });
+  });
+
+  it('marks the scan complete at and past the global end', () => {
+    expect(decodeScanOffset(660, counts)).toEqual({
+      typeIndex: counts.length,
+      withinTypeOffset: 0,
+      complete: true,
+    });
+    expect(decodeScanOffset(9999, counts).complete).toBe(true);
+  });
+
+  it('encodeScanOffset is the exact inverse of decodeScanOffset', () => {
+    for (const g of [0, 1, 599, 600, 609, 610, 659]) {
+      const pos = decodeScanOffset(g, counts);
+      expect(encodeScanOffset(pos.typeIndex, pos.withinTypeOffset, counts)).toBe(g);
+    }
+  });
+
+  it('encodeScanOffset of a past-end typeIndex is the grand total', () => {
+    expect(encodeScanOffset(counts.length, 0, counts)).toBe(660);
+    expect(encodeScanOffset(99, 0, counts)).toBe(660);
+  });
+
+  it('round-trips through the cursor token codec (s stays exact)', () => {
+    const g = 605;
+    const token = encodeCursor({
+      v: PAGE_CURSOR_VERSION,
+      t: 'sfi.code_quality_audit',
+      h: 'sha256:fixture',
+      o: 0,
+      s: g,
+    });
+    const decoded = decodeCursor(token, {
+      tool: 'sfi.code_quality_audit',
+      vaultHash: 'sha256:fixture',
+    });
+    expect(decoded.ok).toBe(true);
+    if (!decoded.ok) return;
+    expect(decoded.value.s).toBe(g);
+    expect(decodeScanOffset(decoded.value.s ?? 0, counts)).toEqual({
+      typeIndex: 1,
+      withinTypeOffset: 5,
+      complete: false,
+    });
+  });
+
+  it('clamps a negative / non-integer global offset to 0 (defensive)', () => {
+    expect(decodeScanOffset(-5, counts).withinTypeOffset).toBe(0);
+    expect(decodeScanOffset(3.7, counts).withinTypeOffset).toBe(0);
+  });
+
+  it('handles a single-type scan (degenerate multi-type)', () => {
+    const single: readonly ScanTypeCount[] = [{ type: 'Profile', count: 800 }];
+    expect(decodeScanOffset(500, single)).toEqual({
+      typeIndex: 0,
+      withinTypeOffset: 500,
+      complete: false,
+    });
+    expect(decodeScanOffset(800, single).complete).toBe(true);
+  });
+
+  it('skips an empty type without consuming offset', () => {
+    // Middle type has zero nodes — offset 600 must land at the THIRD type.
+    const withEmpty: readonly ScanTypeCount[] = [
+      { type: 'ApexClass', count: 600 },
+      { type: 'ApexTrigger', count: 0 },
+      { type: 'Flow', count: 50 },
+    ];
+    expect(decodeScanOffset(600, withEmpty)).toEqual({
+      typeIndex: 2,
+      withinTypeOffset: 0,
+      complete: false,
+    });
   });
 });

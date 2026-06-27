@@ -47,6 +47,7 @@ export {
 export type {
   Contributor,
   ContributorsSummary,
+  CountNodesOptions,
   DanglingTargetGroup,
   FreshnessEntry,
   FreshnessSummary,

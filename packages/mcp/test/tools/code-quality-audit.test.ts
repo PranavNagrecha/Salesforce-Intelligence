@@ -228,12 +228,14 @@ describe('codeQualityAuditHandler', () => {
 });
 
 // =============================================================================
-// CR-12 — input-scan saturation disclosure. The per-type scan caps at
-// `nodeScanLimit()`; when a type's page comes back AT the cap, findings may sit
-// BEHIND it, so a `scanTruncationNote` must be appended to `boundaries` naming
-// the truncated type. Mirrors app-access.test.ts (P12-HONESTY).
+// CR-22 B3 — the scan now WINDOWS past the per-type cap (was: drop the tail).
+// The FULL issue set is scanned then sorted (severity-first) BEFORE paging, so
+// the sort is a true total order over a fixed set even though it is not scan
+// order. A low cap no longer makes the verdict INCOMPLETE — it just scans in
+// smaller windows and still reaches every finding. `scanTruncated` fires only
+// for a pathological residual cap (FULL_SCAN_MAX_NODES).
 // =============================================================================
-describe('codeQualityAuditHandler — input-scan truncation disclosure (CR-12)', () => {
+describe('codeQualityAuditHandler — full multi-window scan (CR-22 B3)', () => {
   it('does NOT emit a Scan-capped boundary under the default cap (byte-identical happy path)', async () => {
     const r = await codeQualityAuditHandler(ctx, {});
     expect(r.ok).toBe(true);
@@ -241,22 +243,104 @@ describe('codeQualityAuditHandler — input-scan truncation disclosure (CR-12)',
     expect(r.value.data.boundaries.join(' ')).not.toMatch(/Scan capped/);
   });
 
-  it('appends a Scan-capped boundary naming the truncated type when the scan hits the cap', async () => {
-    // The fixture has 4 ApexClasses; a cap of 1 forces the ApexClass scan to
-    // saturate, so risky classes past the cap were silently unexamined.
+  it('FAIL-BEFORE/PASS-AFTER: a cap of 1 still reaches findings past the first node', async () => {
+    // Before B3 a cap of 1 fetched only the FIRST ApexClass (id ASC), silently
+    // dropping findings on later classes. After B3 the scan pages the SQL OFFSET
+    // forward, so all 4 findings — spread across CriticalCls + HighOnly — are
+    // reached. HighOnly sorts after CriticalCls in id order, so finding its
+    // issue proves the scan reached past the first window.
     const prev = process.env['SFI_NODE_SCAN_LIMIT'];
     process.env['SFI_NODE_SCAN_LIMIT'] = '1';
     try {
-      const r = await codeQualityAuditHandler(ctx, {});
+      const r = await codeQualityAuditHandler(ctx, { limit: 500 });
       expect(r.ok).toBe(true);
       if (!r.ok) return;
-      const joined = r.value.data.boundaries.join(' ');
-      expect(joined).toMatch(/Scan capped at 1 nodes per type/);
-      expect(joined).toMatch(/ApexClass/);
+      expect(r.value.data.totalCount).toBe(4);
+      const ids = new Set(r.value.data.issues.map((i) => i.componentId));
+      expect(ids.has('ApexClass:HighOnly')).toBe(true);
+      expect(r.value.data.boundaries.join(' ')).not.toMatch(/Scan capped/);
     } finally {
       if (prev === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
       else process.env['SFI_NODE_SCAN_LIMIT'] = prev;
     }
+  });
+
+  it('SFI_NODE_SCAN_LIMIT > 500 no longer hard-errors (RV10 clamp)', async () => {
+    const prev = process.env['SFI_NODE_SCAN_LIMIT'];
+    process.env['SFI_NODE_SCAN_LIMIT'] = '600';
+    try {
+      const r = await codeQualityAuditHandler(ctx, {});
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.totalCount).toBe(4);
+    } finally {
+      if (prev === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
+      else process.env['SFI_NODE_SCAN_LIMIT'] = prev;
+    }
+  });
+});
+
+// =============================================================================
+// CR-22 — output-axis cursor. A truncated page emits an opaque nextCursor that
+// resumes with no gaps / no dupes; a whole-fits no-cursor call is byte-identical.
+// =============================================================================
+describe('codeQualityAuditHandler — output cursor (CR-22)', () => {
+  it('whole-fits no-cursor call omits all paging fields (byte-identical)', async () => {
+    const r = await codeQualityAuditHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data as unknown as Record<string, unknown>;
+    expect('limit' in d).toBe(false);
+    expect('offset' in d).toBe(false);
+    expect('nextOffset' in d).toBe(false);
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+  });
+
+  it('a truncated page emits a cursor that resumes with no gaps or dupes (severity-first total order)', async () => {
+    const all = await codeQualityAuditHandler(ctx, { limit: 500 });
+    expect(all.ok).toBe(true);
+    if (!all.ok) return;
+    const fullOrder = all.value.data.issues.map(
+      (i) => `${i.severity}|${i.componentId}|${i.rule}|${i.location}`,
+    );
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const page = await codeQualityAuditHandler(
+        ctx,
+        cursor !== undefined ? { limit: 1, cursor } : { limit: 1 },
+      );
+      expect(page.ok).toBe(true);
+      if (!page.ok) return;
+      for (const i of page.value.data.issues) {
+        seen.push(`${i.severity}|${i.componentId}|${i.rule}|${i.location}`);
+      }
+      const nc = page.value.data.nextCursor;
+      if (nc === undefined) break;
+      cursor = nc;
+      guard += 1;
+      if (guard > 20) throw new Error('cursor did not terminate');
+    }
+    expect(seen).toEqual(fullOrder);
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+
+  it('rejects a cursor minted for a DIFFERENT severityFilter (argsFingerprint bind)', async () => {
+    const first = await codeQualityAuditHandler(ctx, { limit: 1 });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const cursor = first.value.data.nextCursor;
+    if (typeof cursor !== 'string') return; // only one finding fit → no cursor
+    const replay = await codeQualityAuditHandler(ctx, {
+      severityFilter: 'critical',
+      cursor,
+    });
+    expect(replay.ok).toBe(false);
+    if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
   });
 });
 
