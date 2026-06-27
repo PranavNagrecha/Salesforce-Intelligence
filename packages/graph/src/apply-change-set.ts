@@ -218,6 +218,17 @@ export const computeChangeSet = async (
   }
   const finalNodeIds = new Set<string>(desiredNodes.keys());
 
+  // CR-P3-1: the set of extractor `source`s that actually re-ran this reconcile,
+  // derived ONLY from the desired edges (an extractor that produced no results
+  // for this scoped pull contributes none). A static type→source map is NOT
+  // usable: sources are not 1:1 with types (flow-extractor spans
+  // Flow→{CustomObject,ApexClass,CustomField}; custom-field.ts emits parentOf
+  // with fromId=CustomObject but source=custom-field-extractor). Used below to
+  // preserve an absent-from-desired edge whose emitter did not re-run when both
+  // endpoints survive (the headline inbound-cross-extractor data-loss fix).
+  const reRanSources = new Set<string>();
+  for (const e of desiredEdges.values()) reRanSources.add(e.source);
+
   let currentNodeKeys: Map<string, string>;
   let currentEdges: Map<string, CurrentEdge>;
   try {
@@ -245,6 +256,9 @@ export const computeChangeSet = async (
     }
     deleteNodeIds.push(id);
   }
+  // CR-P3-1: set form of the just-computed node deletes, used by the edge loop's
+  // orphan clause to drop edges incident to a deleted node.
+  const deleteNodeSet = new Set<string>(deleteNodeIds);
 
   const upsertEdges: Edge[] = [];
   for (const [pk, edge] of desiredEdges) {
@@ -254,13 +268,30 @@ export const computeChangeSet = async (
   const deleteEdgeKeys: EdgeKey[] = [];
   for (const [pk, current] of currentEdges) {
     if (desiredEdges.has(pk)) continue;
+    // CR-P3-1 HYBRID criterion (scoped/pruned path only — gated on
+    // pruneNodeTypes set). Delete an absent-from-desired edge IFF (i) it is
+    // incident to a DELETED node, OR (ii) its emitting source RE-RAN this
+    // reconcile AND it touches a pruned type. The plain `touchesPrunedType`
+    // guard alone silently deleted an inbound cross-extractor edge (e.g.
+    // QuickAction:N→Flow:Y) on `sfi refresh --types Flow` even though both
+    // endpoints survived and its emitter never re-ran. The whole-graph
+    // (--incremental-graph) path leaves pruneNodeTypes undefined and is
+    // UNCHANGED: every absent edge is deleted there as before.
     if (pruneNodeTypes !== undefined) {
-      const fromType = componentTypeFromNodeId(current.edgeKey.fromId);
-      const toType = componentTypeFromNodeId(current.edgeKey.toId);
-      const touchesPrunedType =
-        (fromType !== null && pruneNodeTypes.has(fromType)) ||
-        (toType !== null && pruneNodeTypes.has(toType));
-      if (!touchesPrunedType) continue;
+      const { fromId, toId, source } = current.edgeKey;
+      const incidentToDeletedNode = deleteNodeSet.has(fromId) || deleteNodeSet.has(toId);
+      if (!incidentToDeletedNode) {
+        const fromType = componentTypeFromNodeId(fromId);
+        const toType = componentTypeFromNodeId(toId);
+        const touchesPrunedType =
+          (fromType !== null && pruneNodeTypes.has(fromType)) ||
+          (toType !== null && pruneNodeTypes.has(toType));
+        const sourceReRan = reRanSources.has(source);
+        // Preserve (req #1): not an orphan and not a genuinely-stale same-source
+        // edge. The type-gate conjunct neutralizes a source shared across types
+        // (e.g. vf-scanner over VisualforcePage + VisualforceComponent).
+        if (!(sourceReRan && touchesPrunedType)) continue;
+      }
     }
     deleteEdgeKeys.push(current.edgeKey);
   }
@@ -445,9 +476,12 @@ export interface PruneCounts {
  * entirely and only executes the already-type-scoped DELETEs:
  *   - `deleteNodeIds` holds only current nodes whose type ∈ `pruneNodeTypes` and
  *     that the reconcile no longer contains, so surviving types are never in it.
- *   - `deleteEdgeKeys` holds only edges with an endpoint type ∈ `pruneNodeTypes`
- *     and absent from desired, so it covers exactly the pruned nodes' orphan
- *     edges and never an edge between two surviving-type nodes.
+ *   - `deleteEdgeKeys` (CR-P3-1 hybrid criterion) holds an absent-from-desired
+ *     edge ONLY when it is incident to a deleted node OR its emitting source
+ *     re-ran this reconcile AND it touches a pruned type. So it covers the
+ *     pruned nodes' orphan edges and genuinely-stale same-source edges, but
+ *     NEVER an inbound cross-extractor edge whose emitter did not re-run while
+ *     both endpoints survive (the silent-data-loss class CR-P3-1 fixed).
  *
  * The DELETEs run in {@link IMPORT_BATCH_SIZE}-sized transactions (the proven
  * cold-import batched-commit pattern). That bounds the in-flight working set, so

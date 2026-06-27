@@ -232,3 +232,315 @@ describe('scoped prune — multi-type graph (CR-20 data-safety headline)', () =>
     expect([...after].sort()).toEqual([...before].sort());
   });
 });
+
+// CR-P3-1: silent inbound-cross-extractor-edge data loss on a scoped refresh.
+//
+// The OLD `deleteEdgeKeys` guard was `touchesPrunedType` ALONE. On a scoped
+// `sfi refresh --types Flow`, an inbound cross-extractor edge whose emitter did
+// NOT re-run (e.g. QuickAction:N -> Flow:Y, source quick-action-extractor) is
+// absent from `desiredEdges` (its extractor produced no results), touches Flow,
+// and was DELETED even though BOTH endpoints survive — silent permanent loss of
+// an inbound dependency edge. CR-20 `pruneStaleNodes` removed the self-check
+// that used to roll this back, so the loss now commits.
+//
+// The HYBRID criterion: with `pruneNodeTypes` set, delete an absent-from-desired
+// edge IFF (i) it is incident to a DELETED node, OR (ii) its source re-ran AND
+// it touches a pruned type. `reRanSources` is derived ONLY from `desiredEdges`,
+// so an edge from a non-reconciled emitter is preserved when both endpoints
+// survive.
+//
+// These cases use a DISTINCT `source` per emitter (NOT the default test source)
+// so they can distinguish the fix from the bug: the headline bug turns on the
+// emitting extractor NOT being in `reRanSources`, which only shows up when the
+// surviving-but-stale edge's source differs from the re-run extractor's source.
+describe('scoped prune — inbound cross-extractor edge preservation (CR-P3-1)', () => {
+  it('CASE A (req #1): inbound QuickAction->Flow edge into a SURVIVING Flow is PRESERVED', async () => {
+    const store = await makeStore();
+    // Graph: QuickAction:NewLead -> Flow:Welcome, emitted by quick-action-extractor.
+    await importInto(store, [
+      {
+        nodes: [node('QuickAction:NewLead'), node('Flow:Welcome')],
+        edges: [
+          edge('QuickAction:NewLead', 'Flow:Welcome', {
+            source: 'quick-action-extractor',
+          }),
+        ],
+      },
+    ]);
+
+    // Scoped `--types Flow`: the flow extractor re-emits Flow:Welcome ONLY (no
+    // edges). quick-action-extractor did NOT re-run, so its inbound edge is
+    // absent from desiredEdges, touches the pruned type Flow, yet BOTH endpoints
+    // survive → it MUST be preserved.
+    await scopedReconcile(
+      store,
+      [{ nodes: [node('Flow:Welcome')], edges: [] }],
+      new Set<ComponentType>(['Flow']),
+    );
+
+    const ids = await nodeIds(store);
+    const pks = await edgePks(store);
+    expect(ids.has('Flow:Welcome')).toBe(true);
+    expect(ids.has('QuickAction:NewLead')).toBe(true);
+    // The headline assertion: the inbound edge from a non-reconciled emitter
+    // into a surviving Flow node MUST survive (current code wrongly deletes it).
+    expect(pks.has('QuickAction:NewLead|Flow:Welcome|references|quick-action-extractor')).toBe(
+      true,
+    );
+  });
+
+  it('CASE B (req #2): genuinely-stale same-survivor edge the re-run extractor stopped emitting is DELETED', async () => {
+    const store = await makeStore();
+    // Flow:OrderSync -> CustomObject:Order (the soon-to-be-stale edge) plus a
+    // second flow-extractor edge to CustomObject:Product, both emitted by
+    // flow-extractor. Both endpoints of the stale edge survive.
+    await importInto(store, [
+      {
+        nodes: [
+          node('Flow:OrderSync'),
+          node('CustomObject:Order'),
+          node('CustomObject:Product'),
+        ],
+        edges: [
+          edge('Flow:OrderSync', 'CustomObject:Order', {
+            edgeType: 'writesTo',
+            source: 'flow-extractor',
+          }),
+          edge('Flow:OrderSync', 'CustomObject:Product', {
+            edgeType: 'writesTo',
+            source: 'flow-extractor',
+          }),
+        ],
+      },
+    ]);
+
+    // flow-extractor RE-RUNS (it re-emits Flow:OrderSync and at least one
+    // flow-extractor edge → flow-extractor ∈ reRanSources) but STOPS emitting
+    // the Order edge; both endpoints survive. The stale Order edge's source DID
+    // re-run and it touches the pruned type Flow → genuinely stale, MUST delete.
+    // The still-emitted Product edge proves the extractor really re-ran.
+    await scopedReconcile(
+      store,
+      [
+        {
+          nodes: [node('Flow:OrderSync')],
+          edges: [
+            edge('Flow:OrderSync', 'CustomObject:Product', {
+              edgeType: 'writesTo',
+              source: 'flow-extractor',
+            }),
+          ],
+        },
+      ],
+      new Set<ComponentType>(['Flow']),
+    );
+
+    const ids = await nodeIds(store);
+    const pks = await edgePks(store);
+    expect(ids.has('Flow:OrderSync')).toBe(true);
+    expect(ids.has('CustomObject:Order')).toBe(true);
+    expect(ids.has('CustomObject:Product')).toBe(true);
+    // The stale edge is deleted (source re-ran + touches pruned type Flow).
+    expect(pks.has('Flow:OrderSync|CustomObject:Order|writesTo|flow-extractor')).toBe(false);
+    // The still-emitted edge survives.
+    expect(pks.has('Flow:OrderSync|CustomObject:Product|writesTo|flow-extractor')).toBe(true);
+  });
+
+  it('CASE C (req #3): BOTH edges incident to a DELETED Flow node are removed (orphan clause)', async () => {
+    const store = await makeStore();
+    // Flow:Deprecated has an outbound flow-extractor edge AND an inbound
+    // quick-action-extractor edge.
+    await importInto(store, [
+      {
+        nodes: [
+          node('Flow:Deprecated'),
+          node('CustomObject:Account'),
+          node('QuickAction:Old'),
+        ],
+        edges: [
+          edge('Flow:Deprecated', 'CustomObject:Account', {
+            source: 'flow-extractor',
+          }),
+          edge('QuickAction:Old', 'Flow:Deprecated', {
+            source: 'quick-action-extractor',
+          }),
+        ],
+      },
+    ]);
+
+    // Reconcile Flow to a DIFFERENT node → Flow:Deprecated enters deleteNodeIds.
+    await scopedReconcile(
+      store,
+      [{ nodes: [node('Flow:Replacement')], edges: [] }],
+      new Set<ComponentType>(['Flow']),
+    );
+
+    const ids = await nodeIds(store);
+    const pks = await edgePks(store);
+    expect(ids.has('Flow:Deprecated')).toBe(false);
+    expect(ids.has('Flow:Replacement')).toBe(true);
+    expect(ids.has('CustomObject:Account')).toBe(true);
+    expect(ids.has('QuickAction:Old')).toBe(true);
+    // outbound edge from the deleted node — gone
+    expect(pks.has('Flow:Deprecated|CustomObject:Account|references|flow-extractor')).toBe(false);
+    // inbound edge from a NON-re-run emitter into the deleted node — also gone,
+    // because the orphan clause (i) fires regardless of source re-run.
+    expect(pks.has('QuickAction:Old|Flow:Deprecated|references|quick-action-extractor')).toBe(
+      false,
+    );
+  });
+
+  it('CASE D: an unrelated apex->object edge (no pruned-type endpoint) is NOT TOUCHED', async () => {
+    const store = await makeStore();
+    await importInto(store, [
+      {
+        nodes: [node('ApexClass:Handler'), node('CustomObject:Account')],
+        edges: [
+          edge('ApexClass:Handler', 'CustomObject:Account', {
+            source: 'apex-scanner',
+          }),
+        ],
+      },
+    ]);
+
+    // Reconcile re-emits only Flow:X; pruneNodeTypes={Flow}. The apex->object
+    // edge touches no pruned type → it must survive untouched.
+    await scopedReconcile(
+      store,
+      [{ nodes: [node('Flow:X')], edges: [] }],
+      new Set<ComponentType>(['Flow']),
+    );
+
+    const ids = await nodeIds(store);
+    const pks = await edgePks(store);
+    expect(ids.has('ApexClass:Handler')).toBe(true);
+    expect(ids.has('CustomObject:Account')).toBe(true);
+    expect(pks.has('ApexClass:Handler|CustomObject:Account|references|apex-scanner')).toBe(true);
+  });
+
+  it('CASE E (vf-scanner shared source): VfComponent-origin edge SURVIVES — type-gate blocks it', async () => {
+    const store = await makeStore();
+    // vf-scanner emits edges for BOTH VisualforcePage and VisualforceComponent.
+    // Seed a VfComponent-origin vf-scanner edge (the one that must survive) plus
+    // a VfPage-origin vf-scanner edge (so re-running VfPage proves vf-scanner is
+    // in reRanSources).
+    await importInto(store, [
+      {
+        nodes: [
+          node('VisualforcePage:P'),
+          node('VisualforceComponent:C'),
+          node('CustomObject:Account'),
+        ],
+        edges: [
+          edge('VisualforceComponent:C', 'CustomObject:Account', {
+            source: 'vf-scanner',
+          }),
+          edge('VisualforcePage:P', 'CustomObject:Account', {
+            source: 'vf-scanner',
+          }),
+        ],
+      },
+    ]);
+
+    // Scoped `--types VisualforcePage`: vf-scanner re-runs and re-emits the
+    // VfPage with >= 1 vf-scanner edge → vf-scanner ∈ reRanSources. The
+    // VfComponent-origin edge is absent from desired and its source DID re-run,
+    // BUT it touches no pruned type (VisualforceComponent ∉ {VisualforcePage}),
+    // so the type-gate conjunct preserves it.
+    await scopedReconcile(
+      store,
+      [
+        {
+          nodes: [node('VisualforcePage:P')],
+          edges: [
+            edge('VisualforcePage:P', 'CustomObject:Account', {
+              source: 'vf-scanner',
+            }),
+          ],
+        },
+      ],
+      new Set<ComponentType>(['VisualforcePage']),
+    );
+
+    const ids = await nodeIds(store);
+    const pks = await edgePks(store);
+    expect(ids.has('VisualforcePage:P')).toBe(true);
+    expect(ids.has('VisualforceComponent:C')).toBe(true);
+    expect(ids.has('CustomObject:Account')).toBe(true);
+    // The VfComponent-origin vf-scanner edge survives (type-gate: its endpoints
+    // are VisualforceComponent + CustomObject, neither is the pruned type).
+    expect(pks.has('VisualforceComponent:C|CustomObject:Account|references|vf-scanner')).toBe(
+      true,
+    );
+    // The re-emitted VfPage edge is present.
+    expect(pks.has('VisualforcePage:P|CustomObject:Account|references|vf-scanner')).toBe(true);
+  });
+
+  it('OVER-CAP composite: > IMPORT_BATCH_SIZE stale CASE-B edges dropped + one CASE-A inbound preserved', async () => {
+    const store = await makeStore();
+    // Survivors: one CustomObject the stale flow edges point at, plus the
+    // CASE-A QuickAction + its Flow.
+    const seedNodes: Node[] = [
+      node('CustomObject:Order'),
+      node('CustomObject:Product'),
+      node('QuickAction:NewLead'),
+      node('Flow:Welcome'),
+    ];
+    const seedEdges: Edge[] = [
+      // CASE-A inbound edge from a non-reconciled emitter (must be preserved).
+      edge('QuickAction:NewLead', 'Flow:Welcome', { source: 'quick-action-extractor' }),
+    ];
+    // > IMPORT_BATCH_SIZE stale outbound flow-extractor edges, both endpoints
+    // surviving (Flow:StaleN survives as a re-emitted node; Order survives).
+    const staleFlowCount = IMPORT_BATCH_SIZE * 2 + 13;
+    // The flow extractor RE-RUNS — it re-emits every Flow node plus at least one
+    // flow-extractor edge (so flow-extractor ∈ reRanSources), but STOPS emitting
+    // every stale writesTo→Order edge → all of those are genuinely stale CASE-B.
+    const reEmittedFlows: Node[] = [node('Flow:Welcome')];
+    const reEmittedFlowEdges: Edge[] = [
+      // One surviving flow-extractor edge proves the extractor really re-ran.
+      edge('Flow:Welcome', 'CustomObject:Product', {
+        edgeType: 'writesTo',
+        source: 'flow-extractor',
+      }),
+    ];
+    for (let i = 0; i < staleFlowCount; i += 1) {
+      seedNodes.push(node(`Flow:Stale${i}`));
+      seedEdges.push(
+        edge(`Flow:Stale${i}`, 'CustomObject:Order', {
+          edgeType: 'writesTo',
+          source: 'flow-extractor',
+        }),
+      );
+      reEmittedFlows.push(node(`Flow:Stale${i}`));
+    }
+    await importInto(store, [{ nodes: seedNodes, edges: seedEdges }]);
+
+    // Scoped Flow reconcile: re-emit all Flow nodes + the one survivor edge, so
+    // every stale flow-extractor writesTo→Order edge is dropped (CASE B), while
+    // the inbound quick-action-extractor edge (CASE A) is untouched and survives.
+    await scopedReconcile(
+      store,
+      [{ nodes: reEmittedFlows, edges: reEmittedFlowEdges }],
+      new Set<ComponentType>(['Flow']),
+    );
+
+    const ids = await nodeIds(store);
+    const pks = await edgePks(store);
+    expect(ids.has('CustomObject:Order')).toBe(true);
+    expect(ids.has('CustomObject:Product')).toBe(true);
+    expect(ids.has('QuickAction:NewLead')).toBe(true);
+    expect(ids.has('Flow:Welcome')).toBe(true);
+    // The survivor flow-extractor edge proves the extractor re-ran.
+    expect(pks.has('Flow:Welcome|CustomObject:Product|writesTo|flow-extractor')).toBe(true);
+    // The preserved CASE-A inbound edge survives across chunked prune batches.
+    expect(pks.has('QuickAction:NewLead|Flow:Welcome|references|quick-action-extractor')).toBe(
+      true,
+    );
+    // Every stale CASE-B outbound flow edge is dropped.
+    for (let i = 0; i < staleFlowCount; i += 1) {
+      expect(ids.has(`Flow:Stale${i}`)).toBe(true);
+      expect(pks.has(`Flow:Stale${i}|CustomObject:Order|writesTo|flow-extractor`)).toBe(false);
+    }
+  });
+});
