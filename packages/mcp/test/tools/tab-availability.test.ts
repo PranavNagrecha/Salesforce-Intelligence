@@ -78,3 +78,62 @@ describe('tabAvailabilityHandler', () => {
     expect(r.value.data.boundaryNote).toContain('not modeled');
   });
 });
+
+describe('tabAvailabilityHandler — CR-22 continuation cursor', () => {
+  it('in-budget whole-fits call emits NO cursor/pageInfo (byte-identical)', async () => {
+    const r = await tabAvailabilityHandler(ctx, { componentId: 'Profile:Admin' });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+    // truncated stays false on the first whole-fits page.
+    expect(d.truncated).toBe(false);
+    expect(d.hasMore).toBe(false);
+  });
+
+  it('a truncated (over-limit) page emits a nextCursor that resumes with no gaps/dupes', async () => {
+    const first = await tabAvailabilityHandler(ctx, { componentId: 'Profile:Admin', limit: 2 });
+    expect(first.ok).toBe(true); if (!first.ok) return;
+    const d1 = first.value.data;
+    expect(d1.tabs.length).toBe(2);
+    expect(d1.hasMore).toBe(true);
+    expect(typeof d1.nextCursor).toBe('string');
+    expect(d1.pageInfo?.nextCursor).toBe(d1.nextCursor);
+
+    const second = await tabAvailabilityHandler(ctx, {
+      componentId: 'Profile:Admin',
+      limit: 2,
+      cursor: d1.nextCursor as string,
+    });
+    expect(second.ok).toBe(true); if (!second.ok) return;
+    const d2 = second.value.data;
+    expect(d2.tabs.length).toBe(1);
+    expect(d2.hasMore).toBe(false);
+    expect('nextCursor' in d2).toBe(false);
+
+    const ids = (ts: typeof d1.tabs) => ts.map((t) => `${t.tab}|${t.visibility}`);
+    const combined = [...ids(d1.tabs), ...ids(d2.tabs)];
+    expect(new Set(combined).size).toBe(3); // no dupes
+    const full = await tabAvailabilityHandler(ctx, { componentId: 'Profile:Admin' });
+    if (!full.ok) return;
+    expect(combined.sort()).toEqual(ids(full.value.data.tabs).sort()); // no gaps
+  });
+
+  it('rejects a cursor minted for a DIFFERENT componentId', async () => {
+    const first = await tabAvailabilityHandler(ctx, { componentId: 'Profile:Admin', limit: 2 });
+    expect(first.ok).toBe(true); if (!first.ok) return;
+    const cursor = first.value.data.nextCursor as string;
+    const replay = await tabAvailabilityHandler(ctx, { componentId: 'Profile:Bare', cursor });
+    expect(replay.ok).toBe(false); if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
+  });
+
+  it('rejects a malformed / forged cursor string', async () => {
+    const replay = await tabAvailabilityHandler(ctx, {
+      componentId: 'Profile:Admin',
+      cursor: 'not-a-real-cursor',
+    });
+    expect(replay.ok).toBe(false); if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
+  });
+});

@@ -41,10 +41,19 @@ const seed: ExtractionResult = {
     } }),
     node({ id: 'PermissionSet:FlowRunner', type: 'PermissionSet', apiName: 'FlowRunner', properties: { userPermissions: [] } }),
     node({ id: 'Flow:Onboard_Contact', type: 'Flow', apiName: 'Onboard_Contact' }),
+    // A profile that grants run access to THREE flows — used to exercise the
+    // CR-22 cursor over the paged runnableFlows list.
+    node({ id: 'Profile:MultiFlow', type: 'Profile', apiName: 'MultiFlow', properties: { userPermissions: [] } }),
+    node({ id: 'Flow:Alpha', type: 'Flow', apiName: 'Alpha' }),
+    node({ id: 'Flow:Beta', type: 'Flow', apiName: 'Beta' }),
+    node({ id: 'Flow:Gamma', type: 'Flow', apiName: 'Gamma' }),
   ],
   edges: [
     edge({ fromId: 'Profile:Sales', toId: 'Flow:Onboard_Contact', edgeType: 'grantedBy', properties: { flowAccess: true } }),
     edge({ fromId: 'PermissionSet:FlowRunner', toId: 'Flow:Onboard_Contact', edgeType: 'grantedBy', properties: { flowAccess: true } }),
+    edge({ fromId: 'Profile:MultiFlow', toId: 'Flow:Alpha', edgeType: 'grantedBy', properties: { flowAccess: true } }),
+    edge({ fromId: 'Profile:MultiFlow', toId: 'Flow:Beta', edgeType: 'grantedBy', properties: { flowAccess: true } }),
+    edge({ fromId: 'Profile:MultiFlow', toId: 'Flow:Gamma', edgeType: 'grantedBy', properties: { flowAccess: true } }),
   ],
 };
 
@@ -86,5 +95,63 @@ describe('userAbilityHandler', () => {
   it('component-not-found for an unknown id', async () => {
     const r = await userAbilityHandler(ctx, { componentId: 'Profile:Ghost' });
     expect(r.ok).toBe(false); if (r.ok) return; expect(r.error.kind).toBe('component-not-found');
+  });
+});
+
+describe('userAbilityHandler — CR-22 continuation cursor', () => {
+  it('in-budget whole-fits call emits NO cursor/pageInfo (byte-identical)', async () => {
+    const r = await userAbilityHandler(ctx, { componentId: 'Profile:MultiFlow' });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.runnableFlows.length).toBe(3);
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+    expect(d.truncated).toBe(false);
+    expect(d.hasMore).toBe(false);
+    // The golden shape: runnableFlows stays a bare ComponentId[] string array.
+    expect(d.runnableFlows).toEqual(['Flow:Alpha', 'Flow:Beta', 'Flow:Gamma']);
+  });
+
+  it('a truncated (over-limit) page emits a nextCursor that resumes with no gaps/dupes', async () => {
+    const first = await userAbilityHandler(ctx, { componentId: 'Profile:MultiFlow', limit: 2 });
+    expect(first.ok).toBe(true); if (!first.ok) return;
+    const d1 = first.value.data;
+    expect(d1.runnableFlows.length).toBe(2);
+    expect(d1.hasMore).toBe(true);
+    expect(typeof d1.nextCursor).toBe('string');
+    expect(d1.pageInfo?.nextCursor).toBe(d1.nextCursor);
+
+    const second = await userAbilityHandler(ctx, {
+      componentId: 'Profile:MultiFlow',
+      limit: 2,
+      cursor: d1.nextCursor as string,
+    });
+    expect(second.ok).toBe(true); if (!second.ok) return;
+    const d2 = second.value.data;
+    expect(d2.runnableFlows.length).toBe(1);
+    expect(d2.hasMore).toBe(false);
+    expect('nextCursor' in d2).toBe(false);
+
+    const combined = [...d1.runnableFlows, ...d2.runnableFlows];
+    expect(new Set(combined).size).toBe(3); // no dupes
+    expect([...combined].sort()).toEqual(['Flow:Alpha', 'Flow:Beta', 'Flow:Gamma']); // no gaps
+  });
+
+  it('rejects a cursor minted for a DIFFERENT componentId', async () => {
+    const first = await userAbilityHandler(ctx, { componentId: 'Profile:MultiFlow', limit: 2 });
+    expect(first.ok).toBe(true); if (!first.ok) return;
+    const cursor = first.value.data.nextCursor as string;
+    const replay = await userAbilityHandler(ctx, { componentId: 'Profile:Sales', cursor });
+    expect(replay.ok).toBe(false); if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
+  });
+
+  it('rejects a malformed / forged cursor string', async () => {
+    const replay = await userAbilityHandler(ctx, {
+      componentId: 'Profile:MultiFlow',
+      cursor: 'not-a-real-cursor',
+    });
+    expect(replay.ok).toBe(false); if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
   });
 });

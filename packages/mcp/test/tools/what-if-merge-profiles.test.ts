@@ -490,6 +490,96 @@ describe('whatIfMergeProfilesHandler', () => {
   });
 });
 
+describe('whatIfMergeProfilesHandler — CR-22 continuation cursor', () => {
+  it('in-budget whole-fits call emits NO cursor/pageInfo (byte-identical)', async () => {
+    const result = await whatIfMergeProfilesHandler(ctx, {
+      profileIdA: PROFILE_A,
+      profileIdB: PROFILE_B,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+    expect(d.truncated).toBe(false);
+    expect(d.hasMore).toBe(false);
+    // The disclosure stays the plain DISCLOSURE on a non-truncated page.
+    expect(d.disclosure).not.toContain('Returning conflicts');
+  });
+
+  it('a truncated (limit 1) page cursors through the FULL conflict list with no gaps/dupes', async () => {
+    const full = await whatIfMergeProfilesHandler(ctx, {
+      profileIdA: PROFILE_A,
+      profileIdB: PROFILE_B,
+    });
+    expect(full.ok).toBe(true);
+    if (!full.ok) return;
+    const total = full.value.data.summary.conflicts;
+    expect(total).toBeGreaterThanOrEqual(2);
+    const fullKeys = full.value.data.conflicts.map((c) => `${c.settingType}|${c.settingId}`);
+
+    const collected: string[] = [];
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const r = await whatIfMergeProfilesHandler(ctx, {
+        profileIdA: PROFILE_A,
+        profileIdB: PROFILE_B,
+        limit: 1,
+        ...(cursor !== undefined ? { cursor } : {}),
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.value.data;
+      // rollups stay COMPLETE on every page (computed over the full list).
+      expect(d.summary.conflicts).toBe(total);
+      for (const c of d.conflicts) collected.push(`${c.settingType}|${c.settingId}`);
+      if (d.hasMore) {
+        expect(typeof d.nextCursor).toBe('string');
+        expect(d.pageInfo?.nextCursor).toBe(d.nextCursor);
+        cursor = d.nextCursor as string;
+      } else {
+        expect('nextCursor' in d).toBe(false);
+        break;
+      }
+      if (++guard > 200) throw new Error('cursor loop did not terminate');
+    }
+    expect(collected.length).toBe(total); // no gaps
+    expect(new Set(collected).size).toBe(total); // no dupes
+    expect(collected).toEqual(fullKeys); // identical order to the whole-list walk
+  });
+
+  it('rejects a cursor minted for a DIFFERENT profile pair', async () => {
+    const first = await whatIfMergeProfilesHandler(ctx, {
+      profileIdA: PROFILE_A,
+      profileIdB: PROFILE_B,
+      limit: 1,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const cursor = first.value.data.nextCursor as string;
+    const replay = await whatIfMergeProfilesHandler(ctx, {
+      profileIdA: PROFILE_C,
+      profileIdB: PROFILE_D,
+      cursor,
+    });
+    expect(replay.ok).toBe(false);
+    if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
+  });
+
+  it('rejects a malformed / forged cursor string', async () => {
+    const replay = await whatIfMergeProfilesHandler(ctx, {
+      profileIdA: PROFILE_A,
+      profileIdB: PROFILE_B,
+      cursor: 'not-a-real-cursor',
+    });
+    expect(replay.ok).toBe(false);
+    if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
+  });
+});
+
 describe('whatIfMergeProfilesInputSchema', () => {
   it('accepts two non-empty Profile-like strings', () => {
     const parsed = whatIfMergeProfilesInputSchema.safeParse({
