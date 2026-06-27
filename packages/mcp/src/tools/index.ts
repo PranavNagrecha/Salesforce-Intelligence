@@ -1536,6 +1536,8 @@ const WHO_CAN_RUN_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freez
     componentId: { type: 'string', minLength: 1 },
     limit: { type: 'number', minimum: 1, maximum: 500 },
     offset: { type: 'number', minimum: 0 },
+    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    cursor: { type: 'string', minLength: 1 },
   },
   required: ['componentId'],
 });
@@ -1628,6 +1630,8 @@ const USER_ABILITY_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.free
     componentId: { type: 'string', minLength: 1 },
     limit: { type: 'number', minimum: 1, maximum: 500 },
     offset: { type: 'number', minimum: 0 },
+    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    cursor: { type: 'string', minLength: 1 },
   },
   required: ['componentId'],
 });
@@ -1644,6 +1648,8 @@ const LIGHTNING_PAGES_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.f
     componentId: { type: 'string', minLength: 1 },
     limit: { type: 'number', minimum: 1, maximum: 250 },
     offset: { type: 'number', minimum: 0 },
+    // CR-22 continuation cursor (object mode): opaque token from a prior page's nextCursor.
+    cursor: { type: 'string', minLength: 1 },
   },
   required: ['componentId'],
 });
@@ -1673,6 +1679,8 @@ const TAB_AVAILABILITY_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.
     componentId: { type: 'string', minLength: 1 },
     limit: { type: 'number', minimum: 1, maximum: 500 },
     offset: { type: 'number', minimum: 0 },
+    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    cursor: { type: 'string', minLength: 1 },
   },
   required: ['componentId'],
 });
@@ -1693,6 +1701,8 @@ const LIFECYCLE_PROCESS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       event: { type: 'string', enum: ['insert', 'update'] },
       limit: { type: 'number', minimum: 1, maximum: 200 },
       offset: { type: 'number', minimum: 0 },
+      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      cursor: { type: 'string', minLength: 1 },
     },
     required: ['objectApiName'],
   });
@@ -2836,6 +2846,8 @@ const WHAT_IF_MERGE_PROFILES_INPUT_SCHEMA: Readonly<
     profileIdB: { type: 'string', minLength: 1 },
     limit: { type: 'integer', minimum: 1, maximum: 2000 },
     offset: { type: 'integer', minimum: 0 },
+    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    cursor: { type: 'string', minLength: 1 },
   },
   required: ['profileIdA', 'profileIdB'],
 });
@@ -2863,6 +2875,8 @@ const WHAT_IF_SPLIT_PROFILE_INPUT_SCHEMA: Readonly<
     },
     limit: { type: 'integer', minimum: 1, maximum: 2000 },
     offset: { type: 'integer', minimum: 0 },
+    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    cursor: { type: 'string', minLength: 1 },
   },
   required: ['profileId', 'targetPermSets'],
 });

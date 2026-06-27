@@ -372,6 +372,103 @@ describe('whatIfSplitProfileHandler', () => {
   });
 });
 
+describe('whatIfSplitProfileHandler — CR-22 continuation cursor', () => {
+  const TARGETS = [CSR_BASE_PS, CSR_EMAIL_PS, CSR_ACCOUNT_PS];
+
+  it('in-budget whole-fits call emits NO cursor/pageInfo (byte-identical)', async () => {
+    const result = await whatIfSplitProfileHandler(ctx, {
+      profileId: PROFILE_CSR,
+      targetPermSets: TARGETS,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+    expect(d.truncated).toBe(false);
+    expect(d.hasMore).toBe(false);
+    expect(d.disclosure).not.toContain('Returning assignments');
+  });
+
+  it('a truncated (limit 1) page cursors through the FULL assignment list with no gaps/dupes', async () => {
+    const full = await whatIfSplitProfileHandler(ctx, {
+      profileId: PROFILE_CSR,
+      targetPermSets: TARGETS,
+    });
+    expect(full.ok).toBe(true);
+    if (!full.ok) return;
+    const total = full.value.data.summary.assignedCount;
+    expect(total).toBeGreaterThanOrEqual(2);
+    const fullKeys = full.value.data.assignments.map(
+      (a) => `${a.settingType}|${a.settingId}|${a.targetPermSetId}`,
+    );
+
+    const collected: string[] = [];
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const r = await whatIfSplitProfileHandler(ctx, {
+        profileId: PROFILE_CSR,
+        targetPermSets: TARGETS,
+        limit: 1,
+        ...(cursor !== undefined ? { cursor } : {}),
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.value.data;
+      // byTarget rollup stays COMPLETE on every page.
+      expect(d.summary.assignedCount).toBe(total);
+      for (const a of d.assignments) {
+        collected.push(`${a.settingType}|${a.settingId}|${a.targetPermSetId}`);
+      }
+      if (d.hasMore) {
+        expect(typeof d.nextCursor).toBe('string');
+        expect(d.pageInfo?.nextCursor).toBe(d.nextCursor);
+        cursor = d.nextCursor as string;
+      } else {
+        expect('nextCursor' in d).toBe(false);
+        break;
+      }
+      if (++guard > 200) throw new Error('cursor loop did not terminate');
+    }
+    expect(collected.length).toBe(total); // no gaps
+    expect(new Set(collected).size).toBe(total); // no dupes
+    expect(collected).toEqual(fullKeys); // identical order to the whole-list walk
+  });
+
+  it('rejects a cursor minted for a DIFFERENT target order (fingerprint mismatch)', async () => {
+    const first = await whatIfSplitProfileHandler(ctx, {
+      profileId: PROFILE_CSR,
+      targetPermSets: TARGETS,
+      limit: 1,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const cursor = first.value.data.nextCursor as string;
+    // targetPermSets order is load-bearing → a reordered list is a different
+    // query → the fingerprint changes → the cursor stale-rejects.
+    const replay = await whatIfSplitProfileHandler(ctx, {
+      profileId: PROFILE_CSR,
+      targetPermSets: [CSR_EMAIL_PS, CSR_BASE_PS, CSR_ACCOUNT_PS],
+      cursor,
+    });
+    expect(replay.ok).toBe(false);
+    if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
+  });
+
+  it('rejects a malformed / forged cursor string', async () => {
+    const replay = await whatIfSplitProfileHandler(ctx, {
+      profileId: PROFILE_CSR,
+      targetPermSets: TARGETS,
+      cursor: 'not-a-real-cursor',
+    });
+    expect(replay.ok).toBe(false);
+    if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
+  });
+});
+
 describe('whatIfSplitProfileInputSchema', () => {
   it('accepts a valid profileId + non-empty targetPermSets array', () => {
     const parsed = whatIfSplitProfileInputSchema.safeParse({

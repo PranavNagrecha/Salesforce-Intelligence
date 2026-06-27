@@ -83,6 +83,7 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
   TrustSummary,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
@@ -96,6 +97,7 @@ import {
   type CoverageCaveat,
   type Verdict,
 } from './coverage-trust.js';
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 
 /** Canonical id prefix for the Profile node type. */
 const PROFILE_PREFIX = 'Profile:';
@@ -184,6 +186,15 @@ export interface WhatIfMergeProfilesOutput {
   readonly hasMore: boolean;
   /** True when the inlined `conflicts` is a partial page of the full list. */
   readonly truncated: boolean;
+  /**
+   * CR-22 opaque continuation token, present ONLY when the conflicts page was
+   * truncated (more conflicts remain past `limit`). Echo it back as `cursor` to
+   * resume. Absent on a whole-fits page so an in-budget response stays
+   * byte-identical.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
   readonly disclosure: string;
 }
 
@@ -232,6 +243,10 @@ export const whatIfMergeProfilesInputSchema = z.object({
   profileIdB: z.string().min(1),
   limit: z.number().int().min(1).max(MERGE_MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
+  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // truncated page's `nextCursor`. When present it supplies the resume offset;
+  // omitting it = today's behavior (offset 0 / explicit `offset`).
+  cursor: z.string().min(1).optional(),
 });
 
 /** Parsed input shape inferred from the Zod schema. */
@@ -866,10 +881,44 @@ export const whatIfMergeProfilesHandler = async (
 
   // Paginate the per-conflict detail (the bomb source on wide profiles).
   const limit = input.limit ?? MERGE_DEFAULT_LIMIT;
-  const offset = input.offset ?? 0;
-  const page = conflicts.slice(offset, offset + limit);
-  const hasMore = offset + page.length < conflicts.length;
+
+  // CR-22: resolve the resume offset — an echoed cursor wins over an explicit
+  // `offset`; a stale/forged cursor (changed profile pair, different tool, or
+  // refreshed vault) is rejected with `invalid-query`.
+  const fingerprint = argsFingerprint({ profileIdA, profileIdB });
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: 'sfi.what_if_merge_profiles',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  // No per-handler byte budget today (unbounded slice; the global jsonResult
+  // guard is the byte backstop). Keep that with an effectively-unbounded
+  // byteBudget so `paginate()` truncates ONLY on `limit` (byte-identical to the
+  // prior open-coded slice). The (settingType, settingId) composite is already
+  // a unique total order — each category comparator emits at most one conflict
+  // per key, and settingType disambiguates same-named keys across categories —
+  // so pass it as the cursor's keyOf (no extra tiebreak needed).
+  const paged = paginateLegacy(conflicts, {
+    offset,
+    limit,
+    byteBudget: Number.MAX_SAFE_INTEGER,
+    binding: {
+      tool: 'sfi.what_if_merge_profiles',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+    keyOf: (c) => `${c.settingType} ${c.settingId}`,
+  });
+  const page = paged.items;
+  const hasMore = paged.hasMore;
   const truncated = hasMore || offset > 0;
+  const emitCursor = paged.nextCursor !== null;
   const baseDisclosure = truncated
     ? `${DISCLOSURE} Returning conflicts ${offset}–${offset + page.length} of ${conflicts.length} (page size ${limit}); summary.byCategory / byPolicy hold the COMPLETE counts. Page through the rest with offset/limit.`
     : DISCLOSURE;
@@ -908,6 +957,7 @@ export const whatIfMergeProfilesHandler = async (
       offset,
       hasMore,
       truncated,
+      ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
       disclosure,
     },
     vaultState: {

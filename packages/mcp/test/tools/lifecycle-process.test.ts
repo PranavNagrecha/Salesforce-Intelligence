@@ -172,3 +172,84 @@ describe('lifecycleProcessHandler', () => {
     expect(r.ok).toBe(false);
   });
 });
+
+describe('lifecycleProcessHandler — CR-22 continuation cursor', () => {
+  it('in-budget whole-fits call emits NO cursor/pageInfo and no stepIndex on rows', async () => {
+    const r = await lifecycleProcessHandler(ctx, { objectApiName: 'Opportunity', event: 'update' });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+    expect(d.truncated).toBe(false);
+    expect(d.hasMore).toBe(false);
+    // The internal stepIndex tiebreak must never leak onto a process row.
+    for (const s of d.process) {
+      expect('stepIndex' in s).toBe(false);
+    }
+  });
+
+  it('a truncated (limit 1) page emits a nextCursor that resumes with no gaps/dupes', async () => {
+    const full = await lifecycleProcessHandler(ctx, { objectApiName: 'Opportunity', event: 'update' });
+    expect(full.ok).toBe(true); if (!full.ok) return;
+    const totalSteps = full.value.data.summary.totalSteps;
+    expect(totalSteps).toBeGreaterThanOrEqual(2);
+
+    const collected: string[] = [];
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const r = await lifecycleProcessHandler(ctx, {
+        objectApiName: 'Opportunity',
+        event: 'update',
+        limit: 1,
+        ...(cursor !== undefined ? { cursor } : {}),
+      });
+      expect(r.ok).toBe(true); if (!r.ok) return;
+      const d = r.value.data;
+      for (const s of d.process) collected.push(`${s.phase}|${s.componentId}`);
+      if (d.hasMore) {
+        expect(typeof d.nextCursor).toBe('string');
+        expect(d.pageInfo?.nextCursor).toBe(d.nextCursor);
+        cursor = d.nextCursor as string;
+      } else {
+        expect('nextCursor' in d).toBe(false);
+        break;
+      }
+      if (++guard > 50) throw new Error('cursor loop did not terminate');
+    }
+    expect(collected.length).toBe(totalSteps); // every step walked, no gaps
+    expect(new Set(collected).size).toBe(totalSteps); // no dupes
+
+    const fullIds = full.value.data.process.map((s) => `${s.phase}|${s.componentId}`);
+    expect(collected).toEqual(fullIds); // identical order to the whole-list walk
+  });
+
+  it('rejects a cursor minted for a DIFFERENT transition (changed field/value)', async () => {
+    const first = await lifecycleProcessHandler(ctx, {
+      objectApiName: 'Opportunity',
+      event: 'update',
+      limit: 1,
+    });
+    expect(first.ok).toBe(true); if (!first.ok) return;
+    const cursor = first.value.data.nextCursor as string;
+    const replay = await lifecycleProcessHandler(ctx, {
+      objectApiName: 'Opportunity',
+      event: 'update',
+      field: 'StageName',
+      value: 'Closed Won',
+      limit: 1,
+      cursor,
+    });
+    expect(replay.ok).toBe(false); if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
+  });
+
+  it('rejects a malformed / forged cursor string', async () => {
+    const replay = await lifecycleProcessHandler(ctx, {
+      objectApiName: 'Opportunity',
+      cursor: 'not-a-real-cursor',
+    });
+    expect(replay.ok).toBe(false); if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
+  });
+});
