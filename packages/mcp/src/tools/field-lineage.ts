@@ -678,7 +678,7 @@ export const fieldLineageHandler = async (
 
   const boundaries: string[] = [
     FIELD_360_Q165_DISCLOSURE,
-    'list view column refs are extracted as graph edges but are NOT composed into field_lineage sections',
+    'list view column AND filter field refs are extracted as graph edges (see field_360.listViews) but are NOT composed into field_lineage sections',
     reportDashboardBoundary,
     'conditions in firesWhen edges are listed but NOT EVALUATED — the tool does not know whether the runtime record satisfies them',
     `lineage walk depth-bounded at ${maxDepth} hops; deeper transitive provenance is NOT walked in this response`,

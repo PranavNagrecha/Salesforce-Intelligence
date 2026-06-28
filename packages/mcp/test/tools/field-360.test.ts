@@ -97,6 +97,13 @@ const REPORT_USED_FIELD = 'CustomField:Account.Report_Used__c';
 // column extraction) but pre-fix field_360 had no branch for it, so the edge was
 // dropped silently (appeared in NO section).
 const LIST_VIEW = 'ListView:Account.RecentSegments';
+// CR-CAP-13: a field used ONLY as a filter predicate (never a column) and a
+// field used as BOTH a column and a filter — to prove the merged-edge
+// referenceKind (`filterRef` / `columnAndFilter`) reaches field_360 rows.
+const FILTER_ONLY_FIELD = 'CustomField:Account.Filter_Only__c';
+const COMBO_FIELD = 'CustomField:Account.Combo__c';
+const FILTER_LIST_VIEW = 'ListView:Account.FilteredOnly';
+const COMBO_LIST_VIEW = 'ListView:Account.ComboView';
 const seed: ExtractionResult = {
   nodes: [
     makeNode({
@@ -195,6 +202,36 @@ const seed: ExtractionResult = {
       label: 'Recent Segments',
       parentId: 'CustomObject:Account',
     }),
+    // CR-CAP-13: a filter-only field + a both-column-and-filter field, each with
+    // its own ListView, to prove the merged-edge referenceKind reaches rows.
+    makeNode({
+      id: FILTER_ONLY_FIELD,
+      type: 'CustomField',
+      apiName: 'Filter_Only__c',
+      label: 'Filter Only',
+      parentId: 'CustomObject:Account',
+      properties: { dataType: 'Text' },
+    }),
+    makeNode({
+      id: COMBO_FIELD,
+      type: 'CustomField',
+      apiName: 'Combo__c',
+      label: 'Combo',
+      parentId: 'CustomObject:Account',
+      properties: { dataType: 'Text' },
+    }),
+    makeNode({
+      id: FILTER_LIST_VIEW,
+      type: 'ListView',
+      apiName: 'FilteredOnly',
+      parentId: 'CustomObject:Account',
+    }),
+    makeNode({
+      id: COMBO_LIST_VIEW,
+      type: 'ListView',
+      apiName: 'ComboView',
+      parentId: 'CustomObject:Account',
+    }),
   ],
   edges: [
     makeEdge({
@@ -282,6 +319,26 @@ const seed: ExtractionResult = {
       source: 'enterprise-metadata-extractor',
       properties: { referenceKind: 'fieldRef' },
     }),
+    // CR-CAP-13: a filter-only field surfaces in listViews tagged `filterRef`.
+    makeEdge({
+      fromId: FILTER_LIST_VIEW,
+      toId: FILTER_ONLY_FIELD,
+      edgeType: 'references',
+      confidence: 'heuristic',
+      source: 'enterprise-metadata-extractor',
+      properties: { referenceKind: 'filterRef' },
+    }),
+    // CR-CAP-13: a both-column-and-filter field is ONE merged `columnAndFilter`
+    // edge (the extractor never emits two `references` to the same field — the
+    // edge PK would collide), so field_360 shows exactly ONE row, not two.
+    makeEdge({
+      fromId: COMBO_LIST_VIEW,
+      toId: COMBO_FIELD,
+      edgeType: 'references',
+      confidence: 'heuristic',
+      source: 'enterprise-metadata-extractor',
+      properties: { referenceKind: 'columnAndFilter' },
+    }),
   ],
 };
 
@@ -361,6 +418,55 @@ describe('field360Handler', () => {
     expect(row?.properties['referenceKind']).toBe('fieldRef');
     // The per-section count reflects the listViews row too.
     expect(out.summary.perSectionCounts['listViews']).toBe(1);
+  });
+
+  it('CR-CAP-13 — a filter-ONLY field surfaces in listViews tagged filterRef', async () => {
+    // FAIL-BEFORE: a filter-only field was either tagged `fieldRef`
+    // (indistinguishable from a column) or, for a non-field token, minted a
+    // phantom; the consumer could not tell a filter from a column. After the
+    // extractor change the edge carries `referenceKind: 'filterRef'` and
+    // field_360 surfaces it as one labeled row.
+    const result = await field360Handler(ctx, { fieldId: FILTER_ONLY_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.value.data;
+    expect(out.listViews?.rows.length).toBe(1);
+    const row = out.listViews?.rows[0];
+    expect(row?.componentId).toBe(FILTER_LIST_VIEW);
+    expect(row?.componentType).toBe('ListView');
+    expect(row?.properties['referenceKind']).toBe('filterRef');
+    expect(out.summary.perSectionCounts['listViews']).toBe(1);
+  });
+
+  it('CR-CAP-13 — a column+filter field is ONE merged columnAndFilter row (no double-count)', async () => {
+    // The extractor merges column + filter into ONE edge (the edge PK
+    // (fromId,toId,edgeType,source) cannot hold two `references`), so field_360
+    // shows exactly ONE listViews row, not two — no double-count.
+    const result = await field360Handler(ctx, { fieldId: COMBO_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.value.data;
+    expect(out.listViews?.rows.length).toBe(1);
+    expect(out.listViews?.rows[0]?.properties['referenceKind']).toBe('columnAndFilter');
+    expect(out.summary.perSectionCounts['listViews']).toBe(1);
+  });
+
+  it('CR-CAP-13 — boundary distinguishes filter IDENTITY (composed) from predicate EVALUATION (unmodeled)', async () => {
+    const result = await field360Handler(ctx, { fieldId: FILTER_ONLY_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.value.data;
+    // Identity IS composed and the boundary names the three referenceKinds.
+    expect(
+      out.boundaries.some(
+        (b) =>
+          b.includes('filterRef') &&
+          b.includes('columnAndFilter') &&
+          b.includes('PREDICATE EVALUATION'),
+      ),
+    ).toBe(true);
+    // Predicate-evaluation gap still disclosed and NOT claimed as available.
+    expect(out.dataNotAvailable).toContain('list-view-filters');
   });
 
   it('CR-CAP-02 — drops the stale "NOT composed" boundary + Q165 list-view clause', async () => {
