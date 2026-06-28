@@ -474,6 +474,29 @@ const resolveAction = (
 };
 
 /**
+ * CR-RV13: malformed-leaf guard for a FieldUpdate's target `<field>`.
+ * Returns `false` for a `<field>` value that real Salesforce metadata never
+ * emits as a same-object FieldUpdate target but a hand-edited/corrupt file can,
+ * each of which would mint a phantom `CustomField:…` writer claim:
+ *
+ *   - a `$`-prefixed global-variable ref ($User.x, $Setup.x, …) → not a field
+ *     on this object (would mint `CustomField:$User.x`);
+ *   - a dotted ref with an empty object-part or leaf-part (".", "Foo.", ".Foo")
+ *     → degenerate id (`CustomField:.`, `CustomField:Foo.`, `CustomField:.Foo`).
+ *
+ * A bare same-object name (no dot) and a clean `Object.Field` dotted ref both
+ * pass. (Truly empty `<field>` is already filtered upstream by `optionalString`
+ * → `null`; the cross-object `<targetObject>` case is handled separately per
+ * CR-P3-5.)
+ */
+const isWellFormedFieldRef = (field: string): boolean => {
+  if (field.startsWith('$')) return false;
+  if (!field.includes('.')) return true;
+  // Dotted: every segment must be non-empty.
+  return field.split('.').every((segment) => segment.length > 0);
+};
+
+/**
  * Emit edges for a single resolved action, applying the variant table
  * and the dedup key set. Returns the edges to append. Skips deprecated
  * `Send` and any other unknown variant per the doc.
@@ -553,7 +576,8 @@ const edgesForAction = (
     if (
       target !== undefined &&
       target.field !== null &&
-      target.targetObject === null
+      target.targetObject === null &&
+      isWellFormedFieldRef(target.field)
     ) {
       const fieldTargetId = target.field.includes('.')
         ? `CustomField:${target.field}`
