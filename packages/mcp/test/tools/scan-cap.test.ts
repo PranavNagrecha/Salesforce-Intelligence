@@ -2,6 +2,8 @@
 
 import {
   clampedNodeScanLimit,
+  FULL_SCAN_MAX_NODES,
+  fullScanTruncationNote,
   NODE_SCAN_HARD_CAP,
   nodeScanLimit,
   scanHitCap,
@@ -61,5 +63,26 @@ describe('scan-cap (P12-HONESTY-scan-cap-disclosure)', () => {
     const note = scanTruncationNote(['Profile'], clampedNodeScanLimit());
     expect(note).toMatch(/capped at 500/);
     expect(note).not.toMatch(/10000/);
+  });
+
+  // CR-P3 (scan-cap honesty): a FULL multi-window scan hits FULL_SCAN_MAX_NODES
+  // (e.g. 20000), NOT the per-window 500. The note must quote that real cap and
+  // must NOT recommend SFI_NODE_SCAN_LIMIT — that knob is clamped to ≤500 and
+  // cannot lift the full-scan ceiling (a dead-end remedy).
+  it('FAIL-BEFORE/PASS-AFTER: full-scan note quotes FULL_SCAN_MAX_NODES, not 500', () => {
+    const note = fullScanTruncationNote(['ApexClass', 'ApexTrigger']);
+    expect(FULL_SCAN_MAX_NODES).toBe(20_000);
+    expect(note).toContain('20000');
+    expect(note).not.toMatch(/capped at 500 nodes/);
+    expect(note).toMatch(/ApexClass \/ ApexTrigger/);
+    expect(note).toMatch(/scanTruncated/);
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: full-scan note does NOT recommend raising SFI_NODE_SCAN_LIMIT', () => {
+    const note = fullScanTruncationNote(['ApexClass']);
+    // The remedy must not tell the user to raise the clamped-away knob.
+    expect(note).not.toMatch(/raise SFI_NODE_SCAN_LIMIT/);
+    // It should point at the honest remedies instead.
+    expect(note.toLowerCase()).toMatch(/narrow the query|cursor/);
   });
 });

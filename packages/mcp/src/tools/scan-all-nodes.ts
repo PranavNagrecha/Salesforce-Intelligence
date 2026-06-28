@@ -16,10 +16,16 @@
  * (the scan completes internally; the cursor only pages the output rows).
  *
  * `scanIncomplete` is true ONLY when the walk stopped at `FULL_SCAN_MAX_NODES`
- * with more nodes behind it — an honest residual cap for a pathological type,
- * far above any real org. Under the normal case (type fully scanned) it is
+ * with STRICTLY MORE nodes behind it — an honest residual cap for a pathological
+ * type, far above any real org. Under the normal case (type fully scanned) it is
  * false, so a tool's `scanTruncated` disclosure becomes false once the whole
  * type is read (strictly more honest than the old single-page cap).
+ *
+ * CR-P3 (scan-cap): a type with EXACTLY `FULL_SCAN_MAX_NODES` nodes is NOT
+ * incomplete — every node was scanned and nothing is behind it. The walk
+ * confirms this with a single bounded probe at the cap boundary (does a
+ * next-window read return any row?) rather than declaring incompleteness purely
+ * because `scanned == cap`, which was an off-by-one over-disclosure.
  */
 
 import type { ComponentType, Node } from '@sf-intelligence/contracts';
@@ -53,6 +59,7 @@ export interface FullScanResult {
 export const scanAllNodesOfTypes = async (
   store: GraphStore,
   types: readonly ComponentType[],
+  maxNodes: number = FULL_SCAN_MAX_NODES,
 ): Promise<Result<FullScanResult, { message: string }>> => {
   const windowSize = clampedNodeScanLimit();
   const nodes: Node[] = [];
@@ -72,9 +79,21 @@ export const scanAllNodesOfTypes = async (
       // A short page proves end-of-type — no more windows behind it.
       if (page.value.length < windowSize) break;
       offset += windowSize;
-      // Pathological residual cap: stop and disclose rather than scan unbounded.
-      if (scannedThisType >= FULL_SCAN_MAX_NODES) {
-        incompleteTypes.push(type);
+      // Pathological residual cap: stop scanning at the cap rather than walk
+      // unbounded. The walk is incomplete ONLY if STRICTLY MORE nodes remain;
+      // a type whose count is EXACTLY the cap is fully scanned (off-by-one fix).
+      if (scannedThisType >= maxNodes) {
+        // One bounded probe at the next window: if it returns any row, real
+        // nodes remain behind the cap → incomplete. If it returns nothing, the
+        // type was exhausted exactly at the cap → complete (not incomplete).
+        const probe = await listNodesByType(store, type, {
+          limit: windowSize,
+          offset,
+        });
+        if (!probe.ok) {
+          return { ok: false, error: { message: probe.error.message } };
+        }
+        if (probe.value.length > 0) incompleteTypes.push(type);
         break;
       }
     }

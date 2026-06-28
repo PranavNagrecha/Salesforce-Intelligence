@@ -67,3 +67,20 @@ export const scanTruncationNote = (
   effectiveLimit: number = clampedNodeScanLimit(),
 ): string =>
   `⚠️ Scan capped at ${effectiveLimit} nodes per type; ${[...new Set(truncatedTypes)].sort().join(' / ')} hit the cap, so this enumeration may be INCOMPLETE (scanTruncated) — narrow the query, page with the returned cursor, or raise SFI_NODE_SCAN_LIMIT.`;
+
+/**
+ * The disclosure for a FULL multi-window scan (`scanAllNodesOfTypes`) that
+ * stopped at the {@link FULL_SCAN_MAX_NODES} residual cap. This path windows the
+ * SQL `OFFSET` forward and exhausts the type internally, so the cap that bites
+ * is {@link FULL_SCAN_MAX_NODES} (e.g. 20 000) — NOT the per-window
+ * {@link clampedNodeScanLimit} (≤500). The note therefore quotes the real
+ * effective cap and does NOT recommend `SFI_NODE_SCAN_LIMIT`: that knob is
+ * clamped to ≤500 and only sets the per-window page size, so raising it cannot
+ * lift the full-scan ceiling — a dead-end remedy (CR-P3 scan-cap honesty). The
+ * honest remedies are to narrow the query or page the output cursor.
+ */
+export const fullScanTruncationNote = (
+  truncatedTypes: readonly string[],
+  fullScanCap: number = FULL_SCAN_MAX_NODES,
+): string =>
+  `⚠️ Full scan capped at ${fullScanCap} nodes per type; ${[...new Set(truncatedTypes)].sort().join(' / ')} hit the cap, so this enumeration may be INCOMPLETE (scanTruncated) — narrow the query or page the output with the returned cursor (the per-window SFI_NODE_SCAN_LIMIT is clamped to ${NODE_SCAN_HARD_CAP} and does not lift this ceiling).`;

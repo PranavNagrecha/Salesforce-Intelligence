@@ -49,7 +49,7 @@
  *   - CR-22 B3: the per-type scan WINDOWS the graph SQL `OFFSET` at
  *     `clampedNodeScanLimit()` (≤500) per page until each type is
  *     exhausted, so an org with more than 500 ApexClasses is scanned
- *     in full (no dropped tail). `scanTruncated` / a `scanTruncationNote`
+ *     in full (no dropped tail). `scanTruncated` / a `fullScanTruncationNote`
  *     fire only for a pathological type past `FULL_SCAN_MAX_NODES`.
  *     An operator setting `SFI_NODE_SCAN_LIMIT > 500` is clamped (no
  *     hard error — CR-RV10).
@@ -76,7 +76,7 @@ import type { Context } from '../server.js';
 
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
-import { clampedNodeScanLimit, scanTruncationNote } from './scan-cap.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 
 /** Inclusive upper bound on `limit`. Mirrors the enumeration-style tools. */
 const CODE_QUALITY_AUDIT_MAX_LIMIT = 500;
@@ -427,9 +427,7 @@ export const codeQualityAuditHandler = async (
   // Lives OUTSIDE the zero-findings gate because findings could be among the
   // unscanned residual tail.
   if (scan.value.scanIncomplete) {
-    boundaries.push(
-      scanTruncationNote(scan.value.incompleteTypes, clampedNodeScanLimit()),
-    );
+    boundaries.push(fullScanTruncationNote(scan.value.incompleteTypes));
   }
 
   // Emit paging fields ONLY on a paged response (truncated OR resumed offset>0).

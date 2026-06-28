@@ -12,7 +12,11 @@ export interface ToolMetric {
   /** ISO 8601 timestamp of when the call completed. */
   readonly ts: string;
   readonly tool: string;
-  /** True when the serialized body has no top-level `error` key. */
+  /**
+   * True when the call SUCCEEDED — the dispatch did not throw, the result is not
+   * `isError`, and the serialized body has no top-level `{ error: ... }`. A
+   * thrown dispatch is recorded as `ok: false` (then re-thrown).
+   */
   readonly ok: boolean;
   /** Wall-clock duration of the dispatch, milliseconds. */
   readonly durationMs: number;
@@ -63,11 +67,20 @@ const resultText = (result: CallToolResult): string => {
 };
 
 /**
- * Whether a serialized response body lacks a top-level `error` key. A parse
- * failure (non-JSON text) is treated as ok — the metric must never throw and
- * never mislabel a normal response as an error.
+ * Whether a {@link CallToolResult} represents a SUCCESSFUL call. A call is NOT
+ * ok when EITHER:
+ *   - the SDK envelope flags it (`result.isError === true`) — an error whose
+ *     text body need not be a `{ error: ... }` JSON (the "nested"/SDK-level
+ *     error case); or
+ *   - the serialized text body carries a top-level `{ error: {...} }` envelope
+ *     (the structured-error case `jsonResult` emits).
+ *
+ * A parse failure on a non-flagged body (plain non-JSON text) is treated as ok —
+ * the metric must never throw and never mislabel a normal response as an error.
  */
-const bodyIsOk = (text: string): boolean => {
+const resultIsOk = (result: CallToolResult): boolean => {
+  if (result.isError === true) return false;
+  const text = resultText(result);
   try {
     const body = JSON.parse(text) as unknown;
     return !(
@@ -101,14 +114,23 @@ export const instrumentDispatch = async (
 ): Promise<CallToolResult> => {
   if (!observabilityEnabled()) return dispatch();
   const start = Date.now();
-  const result = await dispatch();
-  const text = resultText(result);
-  emitToolMetric({
-    ts: new Date().toISOString(),
-    tool,
-    ok: bodyIsOk(text),
-    durationMs: Date.now() - start,
-    payloadBytes: Buffer.byteLength(text, 'utf8'),
-  });
-  return result;
+  // CR-14 / CR-P3: a THROWN dispatch must STILL emit a metric (ok:false) and
+  // then re-throw — without the try/finally a throw skipped the metric entirely,
+  // skewing the ok/error ratio toward false-success (errors silently absent).
+  let result: CallToolResult | undefined;
+  try {
+    result = await dispatch();
+    return result;
+  } finally {
+    const text = result === undefined ? '' : resultText(result);
+    emitToolMetric({
+      ts: new Date().toISOString(),
+      tool,
+      // No result (dispatch threw) is an error; otherwise inspect the result
+      // envelope (isError flag OR a top-level `{error:...}` body).
+      ok: result !== undefined && resultIsOk(result),
+      durationMs: Date.now() - start,
+      payloadBytes: Buffer.byteLength(text, 'utf8'),
+    });
+  }
 };

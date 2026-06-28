@@ -164,4 +164,52 @@ describe('instrumentDispatch', () => {
     await instrumentDispatch('sfi.resolve', async () => ok);
     expect(existsSync(log)).toBe(false);
   });
+
+  // CR-14 / CR-P3: a THROWN dispatch must still emit a metric (ok:false) and
+  // re-throw — without a try/finally the throw skips the metric and skews the
+  // ok/error ratio (errors silently absent).
+  it('FAIL-BEFORE/PASS-AFTER: a thrown dispatch still emits an ok:false metric and re-throws', async () => {
+    const log = join(dir, 'metrics.log');
+    process.env['SFI_METRICS_LOG'] = log;
+    await expect(
+      instrumentDispatch('sfi.get_component', async () => {
+        throw new Error('boom');
+      }),
+    ).rejects.toThrow('boom');
+    expect(existsSync(log)).toBe(true);
+    const parsed = JSON.parse(readFileSync(log, 'utf8').trim()) as {
+      tool: string;
+      ok: boolean;
+    };
+    expect(parsed.tool).toBe('sfi.get_component');
+    expect(parsed.ok).toBe(false);
+  });
+
+  it('a thrown dispatch with the flag OFF still re-throws and writes nothing', async () => {
+    delete process.env['SFI_METRICS_LOG'];
+    const log = join(dir, 'metrics.log');
+    await expect(
+      instrumentDispatch('sfi.resolve', async () => {
+        throw new Error('boom');
+      }),
+    ).rejects.toThrow('boom');
+    expect(existsSync(log)).toBe(false);
+  });
+
+  // CR-P3: an SDK-style error result (`isError: true`) whose text body is not a
+  // top-level `{error:...}` JSON must still log ok:false — checking the text's
+  // top-level `error` key alone mislabels it ok:true.
+  it('FAIL-BEFORE/PASS-AFTER: an isError:true result logs ok:false even with a non-error-shaped body', async () => {
+    const log = join(dir, 'metrics.log');
+    process.env['SFI_METRICS_LOG'] = log;
+    const sdkError: CallToolResult = {
+      content: [{ type: 'text', text: 'Internal error: something failed' }],
+      isError: true,
+    };
+    await instrumentDispatch('sfi.get_component', async () => sdkError);
+    const parsed = JSON.parse(readFileSync(log, 'utf8').trim()) as {
+      ok: boolean;
+    };
+    expect(parsed.ok).toBe(false);
+  });
 });

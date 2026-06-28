@@ -51,7 +51,7 @@ import type { Context } from '../server.js';
 
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
-import { clampedNodeScanLimit, scanTruncationNote } from './scan-cap.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 
 /** Inclusive upper bound on `limit`. */
 const CHANGED_SINCE_MAX_LIMIT = 500;
@@ -360,7 +360,7 @@ export const changedSinceHandler = async (
   // array, so surface it only when actually incomplete — a normal full scan
   // leaves this absent and the response byte-identical).
   const scanNote = scan.value.scanIncomplete
-    ? scanTruncationNote(scan.value.incompleteTypes, clampedNodeScanLimit())
+    ? fullScanTruncationNote(scan.value.incompleteTypes)
     : undefined;
 
   return ok({

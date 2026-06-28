@@ -42,22 +42,57 @@ import { formatSfCliFailure } from './input-aliases.js';
  * 10-min default backstop kills NO legitimate call yet caps a wedged process
  * (e.g. an interactive `sf` auth re-prompt waiting on stdin). The slow
  * `sf project retrieve` runs ONLY via refresh.ts `runSf` (already timed at
- * 600s) and never through this helper, so it is unaffected. On timeout the
- * child is sent `SIGTERM` (graceful) and `execFile` rejects with `killed:true`,
- * which `runSfJson` already catches and reports as a redacted internal error.
- * Override with `SFI_SF_EXEC_TIMEOUT_MS`.
+ * 600s) and never through this helper, so it is unaffected.
+ *
+ * On timeout the child is sent `SIGTERM` (graceful); if it has not exited after
+ * {@link SF_EXEC_KILL_GRACE_MS} it is then sent `SIGKILL` (CR-P3) so a wedged
+ * `sf` that ignores SIGTERM cannot outlive the timeout — `execFile`'s built-in
+ * `timeout` only sends one SIGTERM, which a stuck Node CLI can swallow. Either
+ * way `execFile` rejects with `killed:true`, which `runSfJson` already catches
+ * and reports as a redacted internal error. Override the timeout with
+ * `SFI_SF_EXEC_TIMEOUT_MS` and the grace with `SFI_SF_EXEC_KILL_GRACE_MS`.
  */
 const SF_EXEC_TIMEOUT_MS = (() => {
   const n = Number(process.env['SFI_SF_EXEC_TIMEOUT_MS']);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 600_000;
 })();
 
-export const nodeExecFile: ExecCommand = (binary, args) =>
-  promisify(execFile)(binary, [...args], {
+/** Grace after the SIGTERM timeout before escalating to SIGKILL (CR-P3). */
+const SF_EXEC_KILL_GRACE_MS = (() => {
+  const n = Number(process.env['SFI_SF_EXEC_KILL_GRACE_MS']);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 5_000;
+})();
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * Promisified `execFile` with a SIGTERM→SIGKILL escalation. `execFile`'s native
+ * `timeout` sends a single `killSignal` and then stops caring, so a child that
+ * ignores SIGTERM (or whose subprocess tree outlives it) keeps running. CR-P3:
+ * we keep the native `timeout`/SIGTERM for the graceful first strike, then arm
+ * our own timer to send SIGKILL after a short grace if the process is still
+ * alive — guaranteeing a wedged `sf` cannot outlive the timeout.
+ */
+export const nodeExecFile: ExecCommand = (binary, args) => {
+  const child = execFileAsync(binary, [...args], {
     maxBuffer: 10 * 1024 * 1024,
     timeout: SF_EXEC_TIMEOUT_MS,
     killSignal: 'SIGTERM',
   });
+  // After the SIGTERM lands at `timeout`, escalate to SIGKILL once the grace
+  // elapses if the child is still running. Unref so the timer never keeps the
+  // event loop alive on its own.
+  const killTimer = setTimeout(() => {
+    const proc = child.child;
+    if (proc.exitCode === null && proc.signalCode === null) {
+      proc.kill('SIGKILL');
+    }
+  }, SF_EXEC_TIMEOUT_MS + SF_EXEC_KILL_GRACE_MS);
+  killTimer.unref?.();
+  return child.finally(() => {
+    clearTimeout(killTimer);
+  });
+};
 
 /** Strip bearer tokens and long access-token-shaped strings from error text. */
 export const redactSecrets = (message: string): string =>

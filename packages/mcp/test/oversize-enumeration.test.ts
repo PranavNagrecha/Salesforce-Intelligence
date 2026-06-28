@@ -3,6 +3,7 @@
 import {
   analyzeOversizeEnumeration,
   HIGH_FANOUT_INVENTORY,
+  LIMIT_TOOL_EXCLUSIONS,
   type HighFanoutBoundKind,
 } from '../src/oversize-enumeration.js';
 import type { ToolLike } from '../src/response-consistency.js';
@@ -87,6 +88,45 @@ describe('analyzeOversizeEnumeration', () => {
   // confidence while 22 real top-N truncators were mislabeled `paginated`. This
   // pins the gate at the unit level (the qa harness checks the same thing with
   // a real high-fanout org probe set).
+  // CR-P3 (oversize-enumeration): code_quality_audit, find_hardcoded_values,
+  // and governor_limit_risks gained REAL cursors (B3) — they expose
+  // limit+offset+cursor and window past the per-type cap. They must be
+  // classified `paginated` (consistent with the other cursored tools), not
+  // handler-capped / wholly excluded, so they carry the high-fanout probe
+  // requirement instead of silently skipping it.
+  it('FAIL-BEFORE/PASS-AFTER: the 3 B3-cursored quality tools are inventoried as paginated', () => {
+    for (const name of [
+      'sfi.code_quality_audit',
+      'sfi.find_hardcoded_values',
+      'sfi.governor_limit_risks',
+    ]) {
+      const entry = HIGH_FANOUT_INVENTORY[name];
+      expect(entry, `${name} must be in HIGH_FANOUT_INVENTORY`).toBeDefined();
+      expect(entry?.bound, `${name} must be paginated`).toBe('paginated');
+    }
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: code_quality_audit is no longer in LIMIT_TOOL_EXCLUSIONS', () => {
+    expect(LIMIT_TOOL_EXCLUSIONS.has('sfi.code_quality_audit')).toBe(false);
+  });
+
+  it('the 3 B3-cursored quality tools each expose limit+offset+cursor in V01_TOOLS', () => {
+    const roster = new Map(V01_TOOLS.map((t) => [t.name, t]));
+    for (const name of [
+      'sfi.code_quality_audit',
+      'sfi.find_hardcoded_values',
+      'sfi.governor_limit_risks',
+    ]) {
+      const props = (roster.get(name)?.inputSchema?.properties ?? {}) as Record<
+        string,
+        unknown
+      >;
+      expect(props['limit'], `${name} limit`).toBeDefined();
+      expect(props['offset'], `${name} offset`).toBeDefined();
+      expect(props['cursor'], `${name} cursor`).toBeDefined();
+    }
+  });
+
   it('every `paginated` inventory tool exposes a real resume knob in V01_TOOLS', () => {
     const roster = new Map(V01_TOOLS.map((t) => [t.name, t]));
     const offenders: string[] = [];

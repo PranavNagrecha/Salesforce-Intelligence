@@ -80,7 +80,7 @@ import type { Context } from '../server.js';
 import { mergeInputAliases } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
-import { clampedNodeScanLimit, scanTruncationNote } from './scan-cap.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 
 const MAX_LIMIT = 500;
 const DEFAULT_LIMIT = 100;
@@ -621,7 +621,7 @@ export const findHardcodedValuesAnywhereHandler = async (
   // Residual scan-incompleteness only fires for a PATHOLOGICAL type past
   // FULL_SCAN_MAX_NODES — the normal full scan reaches node 501+ and completes.
   if (incompleteTypes.length > 0) {
-    boundaries.push(scanTruncationNote(incompleteTypes, clampedNodeScanLimit()));
+    boundaries.push(fullScanTruncationNote(incompleteTypes));
   }
 
   return ok({

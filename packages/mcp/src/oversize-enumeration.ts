@@ -74,7 +74,7 @@ export const HIGH_FANOUT_INVENTORY: Readonly<
   'sfi.find_code_usages': { bound: 'paginated', note: 'offset + CR-22 cursor' },
   'sfi.find_field_anywhere': { bound: 'paginated', note: 'nested-section cursor: pages one ComponentType bucket + discloses the rest, rolls forward (CR-22)' },
   'sfi.find_semantic_field': { bound: 'paginated', note: 'top-N slice + CR-22 cursor' },
-  'sfi.find_hardcoded_values': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.find_hardcoded_values': { bound: 'paginated', note: 'limit + offset + CR-22 cursor; B3 full-type scan windows past 500' },
   'sfi.find_hardcoded_values_anywhere': { bound: 'paginated', note: 'offset + CR-22 cursor' },
   'sfi.find_clone_patterns': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
   'sfi.integration_map': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
@@ -84,7 +84,8 @@ export const HIGH_FANOUT_INVENTORY: Readonly<
   'sfi.org_history': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
   'sfi.unused_components': { bound: 'paginated', note: 'offset + CR-22 cursor' },
   'sfi.unused_fields_deep': { bound: 'paginated', note: 'offset + byte trim + CR-22 cursor' },
-  'sfi.governor_limit_risks': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.governor_limit_risks': { bound: 'paginated', note: 'limit + offset + CR-22 cursor; B3 full-type scan windows past 500' },
+  'sfi.code_quality_audit': { bound: 'paginated', note: 'limit + offset + CR-22 cursor; B3 full-type scan windows past 500' },
   'sfi.process_builder_migration_candidates': { bound: 'paginated', note: 'section cursor: pages the largest of 3 lists + discloses the others + CR-RV12 scanTruncated (CR-22)' },
   'sfi.empty_queues_and_groups': { bound: 'paginated', note: 'section cursor: pages queues|groups + discloses the other + CR-RV12 scanTruncated (CR-22)' },
   'sfi.unassigned_permission_sets': { bound: 'paginated', note: 'section cursor: pages the populated list + discloses the other + CR-RV12 scanTruncated (CR-22)' },
@@ -131,7 +132,6 @@ export const LIMIT_TOOL_EXCLUSIONS: ReadonlySet<string> = new Set([
   'sfi.automation_risk_report',
   'sfi.permission_risk_report',
   'sfi.release_readiness_report',
-  'sfi.code_quality_audit',
   // CR-22 B5: value_change_audit gained a limit+cursor; it is a per-field
   // impact/what-if report (bounded value-coupling rows, capped at MAX_ROWS),
   // not a raw node-type enumeration — excluded from the high-fanout probe
