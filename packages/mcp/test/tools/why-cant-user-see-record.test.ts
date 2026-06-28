@@ -28,14 +28,14 @@ const FIXTURE_MANIFEST: VaultManifest = {
   refreshedAt: '2026-05-27T14:33:08Z',
   sourceOrg: 'me@example.com',
   components: {
-    CustomObject: 4,
+    CustomObject: 8,
     Profile: 1,
     PermissionSet: 1,
-    Role: 4,
+    Role: 9,
     Group: 1,
-    SharingRule: 4,
+    SharingRule: 8,
   },
-  edges: { grantedBy: 1, parentOf: 4, sharedWith: 4, inheritsFrom: 3 },
+  edges: { grantedBy: 1, parentOf: 8, sharedWith: 8, inheritsFrom: 6 },
   sourceTreeHash: 'sha256:fixture',
 };
 
@@ -310,6 +310,239 @@ const roleHierarchySeed: ExtractionResult = {
     makeEdge({
       fromId: SALES_MANAGER_ROLE,
       toId: SALES_VP_ROLE,
+      edgeType: 'inheritsFrom',
+    }),
+  ],
+};
+
+// =============================================================================
+// Seed 6b (CR-CAP-05): owner-based SharingRule whose RECEIVER (sharedTo) target
+// is a role marked `roleAndSubordinates` (inheritance: 'subordinates'). The
+// rule must reach the named role AND every role below it in the hierarchy.
+//
+// Hierarchy: Sales_VP (top) <- Sales_Manager <- Sales_Rep (subordinate chain
+// via inheritsFrom child->parent). Service_Agent is an unrelated top role.
+//
+// The existing `ownerSharingRuleSeed` puts the inheritance marker on the SOURCE
+// (`direction: 'from'`) edge and a plain Group on the receiver side, so it never
+// exercised receiver-subtree expansion — this seed does.
+// =============================================================================
+
+const SUB_OBJ = 'CustomObject:SubObj';
+const SUB_RULE_ID = 'SharingRule:SubObj.SubRule';
+// Distinct role ids (Cap*) so this subtree does NOT collide with the
+// roleHierarchySeed Sales_* roles — keeps the seeds independent and the
+// FIXTURE_MANIFEST counts unambiguous.
+const SUB_VP_ROLE = 'Role:Cap_VP';
+const SUB_MANAGER_ROLE = 'Role:Cap_Manager';
+const SUB_REP_ROLE = 'Role:Cap_Rep';
+const SERVICE_AGENT_ROLE = 'Role:Cap_Service_Agent';
+
+const ownerSubordinateRuleSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: SUB_OBJ,
+      apiName: 'SubObj',
+      properties: { sharingModel: 'Private' },
+    }),
+    makeNode({
+      id: SUB_RULE_ID,
+      type: 'SharingRule',
+      apiName: 'SubObj.SubRule',
+      parentId: SUB_OBJ,
+      properties: {
+        ruleType: 'owner',
+        accessLevel: 'Read',
+        sharedToType: 'roleAndSubordinates',
+        sharedToName: 'Cap_VP',
+        sharedFromType: 'group',
+        sharedFromName: 'Some_Source_Group',
+        booleanFilter: null,
+        criteriaItemCount: 0,
+      },
+    }),
+    makeNode({ id: SUB_VP_ROLE, type: 'Role', apiName: 'Cap_VP' }),
+    makeNode({ id: SUB_MANAGER_ROLE, type: 'Role', apiName: 'Cap_Manager' }),
+    makeNode({ id: SUB_REP_ROLE, type: 'Role', apiName: 'Cap_Rep' }),
+    makeNode({ id: SERVICE_AGENT_ROLE, type: 'Role', apiName: 'Cap_Service_Agent' }),
+  ],
+  edges: [
+    makeEdge({ fromId: SUB_OBJ, toId: SUB_RULE_ID, edgeType: 'parentOf' }),
+    // The RECEIVER (sharedTo) edge under test: roleAndSubordinates -> Sales_VP.
+    makeEdge({
+      fromId: SUB_RULE_ID,
+      toId: SUB_VP_ROLE,
+      edgeType: 'sharedWith',
+      properties: { inheritance: 'subordinates', direction: 'to' },
+    }),
+    // inheritsFrom is child -> parent. Sales_Rep is a subordinate of Sales_VP
+    // (two rungs down), so its ancestor chain is [Sales_Manager, Sales_VP].
+    makeEdge({
+      fromId: SUB_REP_ROLE,
+      toId: SUB_MANAGER_ROLE,
+      edgeType: 'inheritsFrom',
+    }),
+    makeEdge({
+      fromId: SUB_MANAGER_ROLE,
+      toId: SUB_VP_ROLE,
+      edgeType: 'inheritsFrom',
+    }),
+  ],
+};
+
+// =============================================================================
+// Seed 6c (CR-CAP-05): a PLAIN-role owner rule (NO inheritance marker) whose
+// sharedTo target is Sales_VP. A plain `role` rule reaches ONLY the named role;
+// a subordinate (Sales_Rep) must NOT match it. Guards the false-grant class.
+// Reuses the Sales_* roles seeded in `ownerSubordinateRuleSeed`.
+// =============================================================================
+
+const PLAIN_ROLE_OBJ = 'CustomObject:PlainRoleObj';
+const PLAIN_ROLE_RULE_ID = 'SharingRule:PlainRoleObj.PlainRule';
+
+const ownerPlainRoleRuleSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: PLAIN_ROLE_OBJ,
+      apiName: 'PlainRoleObj',
+      properties: { sharingModel: 'Private' },
+    }),
+    makeNode({
+      id: PLAIN_ROLE_RULE_ID,
+      type: 'SharingRule',
+      apiName: 'PlainRoleObj.PlainRule',
+      parentId: PLAIN_ROLE_OBJ,
+      properties: {
+        ruleType: 'owner',
+        accessLevel: 'Read',
+        sharedToType: 'role',
+        sharedToName: 'Cap_VP',
+        sharedFromType: 'group',
+        sharedFromName: 'Some_Source_Group',
+        booleanFilter: null,
+        criteriaItemCount: 0,
+      },
+    }),
+  ],
+  edges: [
+    makeEdge({ fromId: PLAIN_ROLE_OBJ, toId: PLAIN_ROLE_RULE_ID, edgeType: 'parentOf' }),
+    // Plain role receiver — NO inheritance prop, so named role only.
+    makeEdge({
+      fromId: PLAIN_ROLE_RULE_ID,
+      toId: SUB_VP_ROLE,
+      edgeType: 'sharedWith',
+      properties: { direction: 'to' },
+    }),
+  ],
+};
+
+// =============================================================================
+// Seed 6d (CR-CAP-05): an Edit-level owner rule whose sharedTo target is
+// roleAndSubordinates -> Sales_VP. Proves the subordinate match still composes
+// with the access-level gate: a subordinate (Sales_Rep) gets `visible` for read
+// but `restricted` for edit (Read rule grants Read, not edit). Distinct object
+// + Edit-rule so it stacks alongside the Read SubRule without two owner steps.
+// =============================================================================
+
+const SUB_EDIT_OBJ = 'CustomObject:SubEditObj';
+const SUB_EDIT_RULE_ID = 'SharingRule:SubEditObj.SubEditRule';
+
+const ownerSubordinateReadRuleForLevelSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: SUB_EDIT_OBJ,
+      apiName: 'SubEditObj',
+      properties: { sharingModel: 'Private' },
+    }),
+    makeNode({
+      id: SUB_EDIT_RULE_ID,
+      type: 'SharingRule',
+      apiName: 'SubEditObj.SubEditRule',
+      parentId: SUB_EDIT_OBJ,
+      properties: {
+        ruleType: 'owner',
+        accessLevel: 'Read',
+        sharedToType: 'roleAndSubordinates',
+        sharedToName: 'Cap_VP',
+        sharedFromType: 'group',
+        sharedFromName: 'Some_Source_Group',
+        booleanFilter: null,
+        criteriaItemCount: 0,
+      },
+    }),
+  ],
+  edges: [
+    makeEdge({ fromId: SUB_EDIT_OBJ, toId: SUB_EDIT_RULE_ID, edgeType: 'parentOf' }),
+    makeEdge({
+      fromId: SUB_EDIT_RULE_ID,
+      toId: SUB_VP_ROLE,
+      edgeType: 'sharedWith',
+      properties: { inheritance: 'subordinates', direction: 'to' },
+    }),
+  ],
+};
+
+// =============================================================================
+// Seed 6e (CR-CAP-05 honesty): an owner rule whose sharedTo target is
+// roleAndSubordinates -> Cap_VP (a role that IS retrieved). But an INTERMEDIATE
+// role on the user's ancestor chain (Cap_Mid_Missing) was NOT retrieved, so the
+// upward walk from Cap_Rep_Trunc truncates at the missing node and never reaches
+// Cap_VP — the ancestor set is SHORT and the (real) subordinate relationship is
+// MISSED. An inheritance-gated NON-match on a truncated chain must downgrade to
+// `unknown` (never a confident false-deny). The reason names the target role and
+// points to a refresh.
+// =============================================================================
+
+const TRUNC_OBJ = 'CustomObject:TruncObj';
+const TRUNC_RULE_ID = 'SharingRule:TruncObj.TruncRule';
+// The rule's sharedTo target role — present, and the reason should name it.
+const TRUNC_TARGET_ROLE = SUB_VP_ROLE; // 'Role:Cap_VP'
+const TRUNC_MISSING_MID_ROLE = 'Role:Cap_Mid_Missing';
+const TRUNC_REP_ROLE = 'Role:Cap_Rep_Trunc';
+
+const ownerSubordinateTruncatedSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: TRUNC_OBJ,
+      apiName: 'TruncObj',
+      properties: { sharingModel: 'Private' },
+    }),
+    makeNode({
+      id: TRUNC_RULE_ID,
+      type: 'SharingRule',
+      apiName: 'TruncObj.TruncRule',
+      parentId: TRUNC_OBJ,
+      properties: {
+        ruleType: 'owner',
+        accessLevel: 'Read',
+        sharedToType: 'roleAndSubordinates',
+        sharedToName: 'Cap_VP',
+        sharedFromType: 'group',
+        sharedFromName: 'Some_Source_Group',
+        booleanFilter: null,
+        criteriaItemCount: 0,
+      },
+    }),
+    // The subordinate role node IS present; the INTERMEDIATE role node is NOT.
+    makeNode({ id: TRUNC_REP_ROLE, type: 'Role', apiName: 'Cap_Rep_Trunc' }),
+    // NOTE: Role:Cap_Mid_Missing deliberately NOT seeded as a node, and
+    // Cap_Mid_Missing -> Cap_VP is NOT seeded either, so the walk cannot reach
+    // the (present) Cap_VP target.
+  ],
+  edges: [
+    makeEdge({ fromId: TRUNC_OBJ, toId: TRUNC_RULE_ID, edgeType: 'parentOf' }),
+    makeEdge({
+      fromId: TRUNC_RULE_ID,
+      toId: TRUNC_TARGET_ROLE,
+      edgeType: 'sharedWith',
+      properties: { inheritance: 'subordinates', direction: 'to' },
+    }),
+    // The subordinate inherits from the MISSING intermediate role — the walk
+    // adds Cap_Mid_Missing to the chain, then hits its missing node and
+    // truncates BEFORE reaching the target Cap_VP.
+    makeEdge({
+      fromId: TRUNC_REP_ROLE,
+      toId: TRUNC_MISSING_MID_ROLE,
       edgeType: 'inheritsFrom',
     }),
   ],
@@ -813,6 +1046,10 @@ beforeAll(async () => {
     criteriaSharingRuleSeed,
     owdUnknownSeed,
     roleHierarchySeed,
+    ownerSubordinateRuleSeed,
+    ownerPlainRoleRuleSeed,
+    ownerSubordinateReadRuleForLevelSeed,
+    ownerSubordinateTruncatedSeed,
     restrictionRuleSeed,
     godModeSeed,
     godModeRestrictedSeed,
@@ -1022,6 +1259,134 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(ownerSteps[0]?.verdict).toBe('visible');
     expect(ownerSteps[0]?.reason).toContain(OWNER_RULE_ID);
     expect(ownerSteps[0]?.reason).toContain(SALES_GROUP);
+  });
+
+  // --- CR-CAP-05: owner sharing rule "Roles and Subordinates" subtree match ---
+
+  it('CR-CAP-05 (1): a SUBORDINATE role is GRANTED by a roleAndSubordinates owner rule', async () => {
+    // The core regression. Cap_Rep is two rungs below the rule's sharedTo
+    // target Cap_VP. Before the fix the OwnerSharingRule step matched by EXACT
+    // role membership, so Cap_Rep (not equal Cap_VP) was wrongly `restricted`
+    // and the aggregate not `visible`. After the fix the rule reaches every
+    // subordinate, so the step is `visible` and the aggregate `visible`.
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: SUB_OBJ,
+      userContext: { roleId: SUB_REP_ROLE },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, reasoning } = result.value.data;
+    const ownerSteps = reasoning.filter((s) => s.stage === 'OwnerSharingRule');
+    expect(ownerSteps.length).toBe(1);
+    expect(ownerSteps[0]?.verdict).toBe('visible');
+    expect(ownerSteps[0]?.reason).toContain(SUB_RULE_ID);
+    expect(ownerSteps[0]?.reason).toContain(SUB_VP_ROLE);
+    expect(verdict).toBe('visible');
+  });
+
+  it('CR-CAP-05 (2): the NAMED role itself is still granted by a roleAndSubordinates rule', async () => {
+    // Base case — covered by membership.has(target). Passes before AND after.
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: SUB_OBJ,
+      userContext: { roleId: SUB_VP_ROLE },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ownerSteps = result.value.data.reasoning.filter(
+      (s) => s.stage === 'OwnerSharingRule',
+    );
+    expect(ownerSteps.length).toBe(1);
+    expect(ownerSteps[0]?.verdict).toBe('visible');
+    expect(result.value.data.verdict).toBe('visible');
+  });
+
+  it('CR-CAP-05 (3): a PLAIN role owner rule stays EXACT — a subordinate is NOT granted', async () => {
+    // False-grant guard. PlainRule targets Cap_VP with NO inheritance marker,
+    // so a subordinate (Cap_Rep) must NOT leak into the match. restricted
+    // before AND after.
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: PLAIN_ROLE_OBJ,
+      userContext: { roleId: SUB_REP_ROLE },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ownerSteps = result.value.data.reasoning.filter(
+      (s) => s.stage === 'OwnerSharingRule',
+    );
+    expect(ownerSteps.length).toBe(1);
+    expect(ownerSteps[0]?.verdict).toBe('restricted');
+  });
+
+  it('CR-CAP-05 (4): a role OUTSIDE the subtree is still DENIED', async () => {
+    // Cap_Service_Agent is not Cap_VP and not a subordinate of it.
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: SUB_OBJ,
+      userContext: { roleId: SERVICE_AGENT_ROLE },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, reasoning } = result.value.data;
+    const ownerSteps = reasoning.filter((s) => s.stage === 'OwnerSharingRule');
+    expect(ownerSteps.length).toBe(1);
+    expect(ownerSteps[0]?.verdict).toBe('restricted');
+    expect(verdict).not.toBe('visible');
+  });
+
+  it('CR-CAP-05 (5): an INCOMPLETE role tree downgrades the non-match to UNKNOWN, not restricted', async () => {
+    // Honesty obligation. The rule targets subordinates of Cap_VP, and the user
+    // Cap_Rep_Trunc really IS a subordinate — but the intermediate role
+    // Cap_Mid_Missing was not retrieved, so the upward walk truncates before
+    // reaching Cap_VP and the (real) ancestor match is MISSED. The
+    // inheritance-gated non-match on a truncated chain must downgrade to
+    // `unknown` (never a confident false-deny), name the target role, and point
+    // to a refresh — NOT report `restricted`.
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: TRUNC_OBJ,
+      userContext: { roleId: TRUNC_REP_ROLE },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, reasoning } = result.value.data;
+    const ownerSteps = reasoning.filter((s) => s.stage === 'OwnerSharingRule');
+    expect(ownerSteps.length).toBe(1);
+    expect(ownerSteps[0]?.verdict).toBe('unknown');
+    expect(ownerSteps[0]?.reason).toContain(TRUNC_TARGET_ROLE);
+    expect(ownerSteps[0]?.reason).toContain(TRUNC_REP_ROLE);
+    expect(ownerSteps[0]?.reason).toMatch(/refresh|coverage/i);
+    // No false-deny: the aggregate must not be `restricted`.
+    expect(verdict).not.toBe('restricted');
+  });
+
+  it('CR-CAP-05 (6): the subordinate match composes with the access-level gate', async () => {
+    // A Read rule reaches the subordinate Cap_Rep, so `read` is visible but
+    // `edit` is restricted with the "grants only Read" reason — the inheritance
+    // change did not bypass ruleAccessSatisfiesLevel.
+    const read = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: SUB_EDIT_OBJ,
+      accessLevel: 'read',
+      userContext: { roleId: SUB_REP_ROLE },
+    });
+    expect(read.ok).toBe(true);
+    if (!read.ok) return;
+    const readOwner = read.value.data.reasoning.filter(
+      (s) => s.stage === 'OwnerSharingRule',
+    );
+    expect(readOwner.length).toBe(1);
+    expect(readOwner[0]?.verdict).toBe('visible');
+
+    const edit = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: SUB_EDIT_OBJ,
+      accessLevel: 'edit',
+      userContext: { roleId: SUB_REP_ROLE },
+    });
+    expect(edit.ok).toBe(true);
+    if (!edit.ok) return;
+    const editOwner = edit.value.data.reasoning.filter(
+      (s) => s.stage === 'OwnerSharingRule',
+    );
+    expect(editOwner.length).toBe(1);
+    expect(editOwner[0]?.verdict).toBe('restricted');
+    expect(editOwner[0]?.reason).toMatch(/only Read|grants only/i);
   });
 
   it('returns unknown for a CriteriaSharingRule and surfaces the booleanFilter', async () => {

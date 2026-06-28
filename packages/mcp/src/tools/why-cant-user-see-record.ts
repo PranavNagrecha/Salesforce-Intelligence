@@ -90,12 +90,24 @@
  *   4. **OwnerSharingRule** — list all `SharingRule` nodes parented to
  *      `componentId` (incoming `parentOf`) where
  *      `properties.ruleType === 'owner'`. For each rule, walk outgoing
- *      `sharedWith` edges and check whether the resolved id matches the
- *      user's `roleId` / `groupIds` (treating `Group:AllInternalUsers`
- *      and the other synthetic groups in the variant table as members
- *      whenever any `userContext` field is supplied — every authenticated
- *      user is "internal"). One step per rule; `visible` if a match,
- *      `restricted` otherwise.
+ *      `sharedWith` edges and check whether the resolved id reaches the
+ *      user. A plain `role` / `group` / synthetic / `portalRole` target
+ *      matches EXACTLY against the user's `roleId` / `groupIds`
+ *      (treating `Group:AllInternalUsers` and the other synthetic groups
+ *      in the variant table as members whenever any `userContext` field
+ *      is supplied — every authenticated user is "internal"). A
+ *      `roleAndSubordinates` / `roleAndSubordinatesInternal` Role target
+ *      (carrying `inheritance: subordinates | subordinatesInternal`) ALSO
+ *      matches when the target role is an ANCESTOR of the user role — i.e.
+ *      the user is a SUBORDINATE of the named role — resolved via the
+ *      user's upward role-hierarchy chain (CR-CAP-05). One step per rule;
+ *      `visible` if a match, `restricted` if not. **Incomplete-tree
+ *      honesty:** if a subordinate-aware rule did NOT match but the user's
+ *      ancestor chain was cut short by a role node the refresh never
+ *      retrieved, the step is `unknown` (the rule could still reach the
+ *      user via an unretrieved ancestor) rather than a confident
+ *      false-deny — the reason names the missing role and points to
+ *      `/sfi-refresh` / `coverage_report`.
  *
  *   5. **CriteriaSharingRule** — similar enumeration but
  *      `ruleType === 'criteria'`. Criteria require record-level data to
@@ -774,19 +786,43 @@ const evaluateSystemPermissions = async (
 };
 
 /**
+ * Result of an upward role-hierarchy walk.
+ *
+ *   - `chain`: the parent role ids, nearest-first, NOT including the
+ *     starting role.
+ *   - `truncated`: `true` when the walk stopped at a role node that was
+ *     NOT retrieved (manifest `notModeled` / partial refresh) BEFORE
+ *     reaching a genuine top-of-hierarchy role. A missing node yields
+ *     zero outgoing `inheritsFrom` edges, which is indistinguishable
+ *     from a real top role by edge count alone — so we probe the node's
+ *     existence. CR-CAP-05 uses this so a subordinate-aware sharing rule
+ *     that did NOT match on a SHORT chain downgrades to `unknown` rather
+ *     than asserting a confident (possibly false) `restricted`.
+ */
+interface RoleHierarchyWalk {
+  readonly chain: readonly string[];
+  readonly truncated: boolean;
+}
+
+/**
  * Walk `inheritsFrom` edges upward from `roleId` collecting the
  * parent chain. Stops at the top of the hierarchy (a role with no
  * outgoing `inheritsFrom`), at a missing node, or at
  * `ROLE_HIERARCHY_MAX_DEPTH` rungs — whichever comes first. The
  * visited-set defends against malformed graphs with cycles.
+ *
+ * Surfaces `truncated` (see {@link RoleHierarchyWalk}) so callers that
+ * need a complete ancestor chain (CR-CAP-05's subordinate match) can
+ * tell a genuinely-empty walk from one cut short by a missing role node.
  */
 const walkRoleHierarchy = async (
   ctx: Context,
   roleId: ComponentId,
-): Promise<Result<readonly string[], string>> => {
+): Promise<Result<RoleHierarchyWalk, string>> => {
   const chain: string[] = [];
   const visited = new Set<string>([roleId]);
   let cursor = roleId;
+  let truncated = false;
   for (let depth = 0; depth < ROLE_HIERARCHY_MAX_DEPTH; depth++) {
     const edgesResult = await listEdges(ctx.graph, cursor, {
       direction: 'out',
@@ -795,7 +831,18 @@ const walkRoleHierarchy = async (
     if (!edgesResult.ok) {
       return err(edgesResult.error.message);
     }
-    if (edgesResult.value.length === 0) break;
+    if (edgesResult.value.length === 0) {
+      // Zero outgoing `inheritsFrom` is ambiguous: either `cursor` is a
+      // real top-of-hierarchy role, or its node was never retrieved (so
+      // a parent could exist above it that the vault can't see). Probe
+      // the node — a missing one means the walk is TRUNCATED, not done.
+      const cursorNode = await getNodeById(ctx.graph, cursor as ComponentId);
+      if (!cursorNode.ok) {
+        return err(cursorNode.error.message);
+      }
+      if (cursorNode.value === null) truncated = true;
+      break;
+    }
     // Role.md models exactly one `parentRole` per role, so the
     // extractor emits at most one `inheritsFrom` per role. Take the
     // first; anything beyond it is a graph anomaly.
@@ -805,7 +852,7 @@ const walkRoleHierarchy = async (
     chain.push(parentId);
     cursor = parentId;
   }
-  return ok(chain);
+  return ok({ chain, truncated });
 };
 
 /**
@@ -828,7 +875,7 @@ const evaluateRoleHierarchy = async (
   if (!chainResult.ok) {
     return err(chainResult.error);
   }
-  const chain = chainResult.value;
+  const chain = chainResult.value.chain;
   const traversed = chain.length === 0 ? undefined : chain;
   const reason =
     chain.length === 0
@@ -891,23 +938,69 @@ const fetchSharingRules = async (
   return ok([...rules].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)));
 };
 
+/** The canonical `Role:` id prefix on a `sharedWith` target. */
+const SHARED_TO_ROLE_PREFIX = 'Role:';
+
+/**
+ * Inheritance markers (from the sharing-rules extractor `VARIANT_TABLE`)
+ * that make a `sharedTo` Role target reach the named role AND every role
+ * BELOW it in the hierarchy:
+ *   - `subordinates`          ← `roleAndSubordinates`
+ *   - `subordinatesInternal`  ← `roleAndSubordinatesInternal`
+ * A plain `role` carries no `inheritance` prop (named role only), and
+ * `portalRole` carries only `portal: true` — neither expands to
+ * subordinates, so both stay exact.
+ */
+const SUBORDINATE_INHERITANCE: ReadonlySet<string> = new Set([
+  'subordinates',
+  'subordinatesInternal',
+]);
+
+/** Outcome of testing one owner rule's `sharedTo` edges against the user. */
+type OwnerRuleMatch =
+  | { readonly kind: 'match'; readonly targetId: string }
+  | { readonly kind: 'no-match' }
+  /**
+   * A subordinate-aware (`roleAndSubordinates`) rule did NOT match on the
+   * user's KNOWN ancestor chain, but that chain was TRUNCATED by a missing
+   * role node — so the rule MIGHT reach the user via an ancestor the vault
+   * never retrieved. CR-CAP-05: the caller downgrades this to `unknown`
+   * (never a confident false-deny). `targetId` is the inheritance-gated
+   * role we could neither confirm nor rule out as an ancestor.
+   */
+  | { readonly kind: 'indeterminate'; readonly targetId: string };
+
 /**
  * Determine whether an owner-type `SharingRule` grants access to the
  * user. Walks the rule's outgoing `sharedWith` edges and checks the
- * `toId` against `membership`. The first match short-circuits. The
+ * `toId` against the user. The first definite MATCH short-circuits. The
  * `direction === 'from'` edge on owner rules describes *whose records
  * the rule applies to* (the source of the shared records), not who
  * receives access — we only check the `sharedTo` edge
  * (`direction === 'to'` or undefined for criteria rules).
  *
- * Returns the matched target id directly so the caller can build a
- * reasoning step without a non-null assertion; `null` means no match.
+ * Matching rule per `sharedTo` edge (CR-CAP-05):
+ *   - Plain role / group / synthetic / portalRole (NO `inheritance`
+ *     prop): EXACT — `membership.has(edge.toId)`. portalRole carries
+ *     only `portal: true`, so it stays the named role only.
+ *   - `inheritance === subordinates | subordinatesInternal` on a `Role:`
+ *     target: the rule reaches the named role itself
+ *     (`membership.has`) OR any role BELOW it — i.e. the target is an
+ *     ANCESTOR of the user role (`userAncestorRoleIds.has(edge.toId)`).
+ *     If neither holds AND the user's ancestor chain was TRUNCATED by a
+ *     missing role node, the result is `indeterminate` (the caller emits
+ *     `unknown`) rather than a confident no-match.
+ *
+ * Bounded by the SINGLE user ancestor chain (computed once by the
+ * caller), regardless of how large the rule's role subtree is.
  */
 const ownerRuleMatches = async (
   ctx: Context,
   ruleNode: Node,
   membership: ReadonlySet<string>,
-): Promise<Result<string | null, string>> => {
+  userAncestorRoleIds: ReadonlySet<string>,
+  userAncestorChainTruncated: boolean,
+): Promise<Result<OwnerRuleMatch, string>> => {
   const edgesResult = await listEdges(ctx.graph, ruleNode.id, {
     direction: 'out',
     edgeType: 'sharedWith',
@@ -915,21 +1008,61 @@ const ownerRuleMatches = async (
   if (!edgesResult.ok) {
     return err(edgesResult.error.message);
   }
+  // Defer a possible `indeterminate` so a definite match on ANOTHER edge of
+  // the same rule always wins (a rule can carry several sharedTo targets).
+  let indeterminate: { readonly targetId: string } | null = null;
   for (const edge of edgesResult.value) {
     if (edge.properties['direction'] === 'from') continue;
+    // Exact membership match always wins (covers the named role itself,
+    // groups, synthetic groups, and the plain-role / portalRole cases).
     if (membership.has(edge.toId)) {
-      return ok(edge.toId);
+      return ok({ kind: 'match', targetId: edge.toId });
+    }
+    const inheritance = edge.properties['inheritance'];
+    const isSubordinateRole =
+      typeof inheritance === 'string' &&
+      SUBORDINATE_INHERITANCE.has(inheritance) &&
+      edge.toId.startsWith(SHARED_TO_ROLE_PREFIX);
+    if (isSubordinateRole) {
+      // The target reaches every role below it: match if it is an ancestor
+      // of the user role.
+      if (userAncestorRoleIds.has(edge.toId)) {
+        return ok({ kind: 'match', targetId: edge.toId });
+      }
+      // No ancestor match — but if the user's chain is short because a role
+      // node was missing, we cannot be sure the target ISN'T an ancestor.
+      if (userAncestorChainTruncated && indeterminate === null) {
+        indeterminate = { targetId: edge.toId };
+      }
     }
   }
-  return ok(null);
+  if (indeterminate !== null) {
+    return ok({ kind: 'indeterminate', targetId: indeterminate.targetId });
+  }
+  return ok({ kind: 'no-match' });
 };
 
 /**
- * Evaluate the OwnerSharingRule stage. Emits one step per
- * owner-typed rule attached to the target object. `visible` when the
- * rule's `sharedTo` target is in the user's membership set;
- * `restricted` otherwise. If no owner rules exist, returns a single
- * step explaining that.
+ * Evaluate the OwnerSharingRule stage. Emits one step per owner-typed
+ * rule attached to the target object.
+ *
+ *   - `visible` when the rule's `sharedTo` target reaches the user — by
+ *     exact membership, OR (for a `roleAndSubordinates` /
+ *     `…Internal` Role target) because the target is an ANCESTOR of the
+ *     user role, i.e. the user is a subordinate — AND the rule's access
+ *     level satisfies the requested operation (CR-CAP-05).
+ *   - `unknown` when a subordinate-aware rule did NOT match but the
+ *     user's ancestor chain was TRUNCATED by a missing role node, so the
+ *     rule MIGHT reach the user via an unretrieved ancestor (honesty: no
+ *     confident false-deny).
+ *   - `restricted` otherwise.
+ *
+ * The user's ancestor chain is computed ONCE here (via the existing
+ * upward `walkRoleHierarchy`), not per rule — bounded by a single chain
+ * regardless of subtree fan-out. Ancestors are NOT folded into the base
+ * membership set: that set still drives the EXACT plain-role/group path,
+ * so plain rules never leak to ancestors. If no owner rules exist,
+ * returns a single step explaining that.
  */
 const evaluateOwnerSharingRules = async (
   ctx: Context,
@@ -948,33 +1081,63 @@ const evaluateOwnerSharingRules = async (
     ]);
   }
   const membership = buildUserMembership(userContext);
+  // CR-CAP-05: the ancestor chain only feeds the inheritance-gated path.
+  // Compute it once; an absent roleId means no ancestors (and no truncation).
+  let userAncestorRoleIds: ReadonlySet<string> = new Set<string>();
+  let userAncestorChainTruncated = false;
+  if (userContext.roleId !== undefined) {
+    const walk = await walkRoleHierarchy(
+      ctx,
+      userContext.roleId as ComponentId,
+    );
+    if (!walk.ok) return err(walk.error);
+    userAncestorRoleIds = new Set<string>(walk.value.chain);
+    userAncestorChainTruncated = walk.value.truncated;
+  }
   const steps: AccessReasoningStep[] = [];
   for (const rule of ownerRules) {
-    const matchResult = await ownerRuleMatches(ctx, rule, membership);
+    const matchResult = await ownerRuleMatches(
+      ctx,
+      rule,
+      membership,
+      userAncestorRoleIds,
+      userAncestorChainTruncated,
+    );
     if (!matchResult.ok) return err(matchResult.error);
-    const sharedTo = matchResult.value;
+    const match = matchResult.value;
     const ruleAccess =
       typeof rule.properties['accessLevel'] === 'string'
         ? (rule.properties['accessLevel'] as string)
         : 'Read';
-    // A rule grants the operation only if the user is in the shared target AND
-    // the rule's access level reaches it (a Read rule never grants edit; no
-    // sharing rule grants delete).
-    if (sharedTo !== null && ruleAccessSatisfiesLevel(ruleAccess, level)) {
+    if (match.kind === 'match' && ruleAccessSatisfiesLevel(ruleAccess, level)) {
+      // The user is in (or a subordinate of) the shared target AND the rule's
+      // access level reaches the op (a Read rule never grants edit; no sharing
+      // rule grants delete).
       steps.push(
         step(
           'OwnerSharingRule',
           'visible',
-          `owner sharing rule ${rule.id} grants ${level} access via shared target ${sharedTo} (rule access: ${ruleAccess})`,
+          `owner sharing rule ${rule.id} grants ${level} access via shared target ${match.targetId} (rule access: ${ruleAccess})`,
         ),
       );
-    } else if (sharedTo !== null) {
-      // Membership matches but the rule's access level is too low for this op.
+    } else if (match.kind === 'match') {
+      // Membership/subtree matches but the rule's access level is too low.
       steps.push(
         step(
           'OwnerSharingRule',
           'restricted',
           `owner sharing rule ${rule.id} shares to the user but grants only ${ruleAccess}, not ${level}`,
+        ),
+      );
+    } else if (match.kind === 'indeterminate') {
+      // Honesty: the role tree is truncated above the user, so we cannot
+      // confirm OR deny that the target role is an ancestor — never a
+      // confident false-deny.
+      steps.push(
+        step(
+          'OwnerSharingRule',
+          'unknown',
+          `owner sharing rule ${rule.id} shares to subordinates of ${match.targetId}, but the role hierarchy above ${String(userContext.roleId)} is incomplete (a role node was not retrieved), so the subordinate match cannot be resolved — run /sfi-refresh or see coverage_report, then re-check`,
         ),
       );
     } else {
