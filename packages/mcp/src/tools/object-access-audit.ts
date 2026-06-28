@@ -8,6 +8,13 @@
  * `allowEdit` / `allowDelete` / `viewAllRecords` / `modifyAllRecords` flags the
  * profile / permission-set extractor stamps on each incoming `grantedBy` edge.
  *
+ * CR-CAP-04: it ALSO surfaces PermissionSetGroup-conferred access. A PSG has no
+ * `grantedBy` edge of its own, so for each granting permission set it does a
+ * REVERSE lookup of the groups that contain it and emits an additional
+ * `PermissionSetGroup` row carrying the member's CRUD flags. These rows are NOT
+ * deduped against the direct rows (two honest access paths); muting permission
+ * sets are DISCLOSED in `note`, never subtracted (declared confidence).
+ *
  * This is OBJECT-level access (the CRUD bits + object View All / Modify All),
  * NOT record-level visibility. For "can this user see/edit a specific RECORD"
  * (OWD + sharing + role hierarchy) use `sfi.why_cant_user_see_record`. The two
@@ -37,6 +44,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { expandPermissionSetGroup, findPermissionSetGroupsContaining } from './permission-set-group.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 
 /** Canonical id prefix for the object a caller audits. */
@@ -56,10 +64,14 @@ export const objectAccessAuditInputSchema = z.object({
 /** Parsed input shape. */
 export type ObjectAccessAuditInput = z.infer<typeof objectAccessAuditInputSchema>;
 
-/** One Profile/PermissionSet's object-permission grant. */
+/** One Profile / PermissionSet / PermissionSetGroup object-permission grant. */
 export interface ObjectAccessGrant {
   readonly granterId: string;
-  readonly granterType: 'Profile' | 'PermissionSet';
+  /**
+   * `PermissionSetGroup` rows (CR-CAP-04) are REVERSE-derived: a PSG that
+   * contains a granting permission set confers that set's CRUD on this object.
+   */
+  readonly granterType: 'Profile' | 'PermissionSet' | 'PermissionSetGroup';
   readonly granterLabel: string;
   readonly allowCreate: boolean;
   readonly allowRead: boolean;
@@ -175,6 +187,55 @@ export const objectAccessAuditHandler = async (
       modifyAllRecords: flag(p, 'modifyAllRecords'),
     });
   }
+  // CR-CAP-04 — REVERSE PSG rows. A PermissionSetGroup confers its member
+  // permission sets' object grants, but a PSG has no `grantedBy` edge of its
+  // own, so it is invisible to the direct walk above. For each PermissionSet
+  // grant, find every PSG that contains it and emit an ADDITIONAL row attributed
+  // to the group, copying the member's CRUD flags. Rows are intentionally NOT
+  // deduped: a permset reachable both directly and via a PSG honestly shows two
+  // rows (two distinct access paths), and the PSG row uses the PSG id as its
+  // granterId so `summary.distinctGranters` counts the group as its own path.
+  // Muting is DISCLOSED (a group note), never subtracted.
+  const psgRows: ObjectAccessGrant[] = [];
+  const mutingPsgIds = new Set<string>();
+  let conferringGroups = 0;
+  for (const grant of grants) {
+    if (grant.granterType !== 'PermissionSet') continue;
+    const groupsResult = await findPermissionSetGroupsContaining(
+      ctx,
+      grant.granterId as ComponentId,
+    );
+    if (!groupsResult.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${groupsResult.error.message}` });
+    }
+    for (const psgId of groupsResult.value) {
+      const expanded = await expandPermissionSetGroup(ctx, psgId);
+      if (!expanded.ok) {
+        return err({ kind: 'internal', message: `graph query failed: ${expanded.error.message}` });
+      }
+      if (expanded.value === null) continue;
+      conferringGroups += 1;
+      if (expanded.value.hasMuting) mutingPsgIds.add(psgId);
+      const psgNodeResult = await getNodeById(ctx.graph, psgId);
+      if (!psgNodeResult.ok) {
+        return err({ kind: 'internal', message: `graph query failed: ${psgNodeResult.error.message}` });
+      }
+      const psgNode = psgNodeResult.value;
+      psgRows.push({
+        granterId: psgId,
+        granterType: 'PermissionSetGroup',
+        granterLabel:
+          psgNode?.label ?? psgNode?.apiName ?? psgId.slice('PermissionSetGroup:'.length),
+        allowCreate: grant.allowCreate,
+        allowRead: grant.allowRead,
+        allowEdit: grant.allowEdit,
+        allowDelete: grant.allowDelete,
+        viewAllRecords: grant.viewAllRecords,
+        modifyAllRecords: grant.modifyAllRecords,
+      });
+    }
+  }
+  grants.push(...psgRows);
   grants.sort(compareGrants);
 
   const distinctGranters = new Set(grants.map((g) => g.granterId)).size;
@@ -190,8 +251,16 @@ export const objectAccessAuditHandler = async (
   };
   const multiPathNote =
     grants.length > distinctGranters
-      ? `${grants.length} grant rows come from ${distinctGranters} distinct Profile/PermissionSet(s) — a granter that grants access through more than one path appears in multiple rows. Count actors by \`summary.distinctGranters\`, not row count.`
+      ? `${grants.length} grant rows come from ${distinctGranters} distinct Profile/PermissionSet/PermissionSetGroup(s) — a granter that grants access through more than one path appears in multiple rows. Count actors by \`summary.distinctGranters\`, not row count.`
       : undefined;
+  const psgNote =
+    conferringGroups > 0
+      ? `${conferringGroups} row(s) are PermissionSetGroup-conferred (a group whose member permission set grants this object); these are included as distinct access paths.` +
+        (mutingPsgIds.size > 0
+          ? ` ${mutingPsgIds.size} of those group(s) (${[...mutingPsgIds].sort().join(', ')}) reference a muting permission set — muting is NOT subtracted, so effective access may be lower.`
+          : '')
+      : undefined;
+  const note = [multiPathNote, psgNote].filter((n) => n !== undefined).join(' ');
 
   return ok({
     data: {
@@ -208,7 +277,7 @@ export const objectAccessAuditHandler = async (
           }
         : {}),
       grants,
-      ...(multiPathNote !== undefined ? { note: multiPathNote } : {}),
+      ...(note !== '' ? { note } : {}),
       summary,
     },
     vaultState: {

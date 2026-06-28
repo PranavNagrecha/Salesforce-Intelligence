@@ -16,8 +16,10 @@
  * one container. `declared` confidence (grants are declared metadata).
  *
  * Honesty axis (`disclosures`):
- *   - Permission-set GROUP membership (and muting) is not modeled — pass
- *     the group's member permission sets explicitly.
+ *   - Permission-set GROUP membership IS expanded (CR-CAP-04): a
+ *     `PermissionSetGroup:` id passed in `permissionSetIds` is unioned into
+ *     its member permission sets (declared metadata). Muting permission sets
+ *     are DISCLOSED but never subtracted — effective access may be lower.
  *   - App / tab visibility is a SEPARATE surface (now extracted — see
  *     `app_access` / `tab_availability`); it is not part of this permission
  *     union, which composes object / field / Apex / system permissions.
@@ -47,6 +49,7 @@ import {
   type PageableSection,
   type SectionDisclosure,
 } from './page-cursor.js';
+import { expandPermissionSetGroup } from './permission-set-group.js';
 
 /** Per-response byte budget for the paged section, leaving envelope headroom. */
 const EFFECTIVE_PERMS_BYTE_BUDGET = 38_000;
@@ -142,7 +145,7 @@ const PREFIX = {
 } as const;
 
 const BASE_DISCLOSURES: readonly string[] = Object.freeze([
-  'Permission-set GROUP membership and muting are not modeled — pass the group\'s member permission sets explicitly to include them.',
+  'Permission-set GROUP membership IS expanded: a PermissionSetGroup passed in `permissionSetIds` is unioned into its member permission sets (declared metadata). Muting permission sets are DISCLOSED but NOT subtracted — a group with a muting set may confer LESS than shown.',
   'App and tab visibility are a separate surface (now extracted — see `app_access` / `tab_availability`); they are not part of this permission union, which composes object / field / Apex / system permissions.',
   'Field-level access is summarised here (count of fields with FLS); use `field_access_audit` for a specific field. Object permission is NOT record access — record visibility still depends on OWD + sharing (`why_cant_user_see_record`).',
 ]);
@@ -161,11 +164,43 @@ export const effectivePermissionsHandler = async (
   ctx: Context,
   input: EffectivePermissionsInput,
 ): Promise<Result<McpResponse<EffectivePermissionsOutput>, McpError>> => {
-  // Coerce bare names to canonical ids (Admin -> Profile:Admin).
-  const containers: string[] = [];
-  if (input.profileId !== undefined) containers.push(coercePrefix(input.profileId, ['Profile:']));
+  // Coerce bare names to canonical ids (Admin -> Profile:Admin). A bare
+  // permission-set id is coerced to a `PermissionSet:` id, but the caller may
+  // legitimately pass a `PermissionSetGroup:` id there — coercePrefix leaves a
+  // typed prefix unchanged, so that flows through as a PSG.
+  const rawContainers: string[] = [];
+  if (input.profileId !== undefined) rawContainers.push(coercePrefix(input.profileId, ['Profile:']));
   if (input.permissionSetIds !== undefined) {
-    for (const id of input.permissionSetIds) containers.push(coercePrefix(id, ['PermissionSet:']));
+    for (const id of input.permissionSetIds) rawContainers.push(coercePrefix(id, ['PermissionSet:']));
+  }
+
+  // CR-CAP-04: expand any PermissionSetGroup into its member permission sets and
+  // push the members into the container list, so the existing grant-union loop
+  // confers the group's perms. Muting is DISCLOSED, never subtracted. Dedupe so
+  // a permset reachable BOTH directly and via a PSG is unioned once.
+  const containerSet = new Set<string>();
+  const containers: string[] = [];
+  const mutingPsgs: string[] = [];
+  const pushContainer = (id: string): void => {
+    if (containerSet.has(id)) return;
+    containerSet.add(id);
+    containers.push(id);
+  };
+  for (const id of rawContainers) {
+    if (id.startsWith('PermissionSetGroup:')) {
+      const expanded = await expandPermissionSetGroup(ctx, id as ComponentId);
+      if (!expanded.ok) {
+        return err({ kind: 'internal', message: `graph query failed: ${expanded.error.message}` });
+      }
+      if (expanded.value !== null) {
+        for (const memberId of expanded.value.memberPermissionSetIds) pushContainer(memberId);
+        if (expanded.value.hasMuting) mutingPsgs.push(id);
+        // The PSG id itself is not a grantor; only its members are. Skip it.
+        continue;
+      }
+      // Not a real PSG node — fall through so it lands in missingContainers.
+    }
+    pushContainer(id);
   }
 
   const objectMap = new Map<string, ObjectAccum>();
@@ -319,6 +354,11 @@ export const effectivePermissionsHandler = async (
   const emitCursor = paged.pageInfo.nextCursor !== null;
 
   const disclosures = [...BASE_DISCLOSURES];
+  if (mutingPsgs.length > 0) {
+    disclosures.unshift(
+      `${mutingPsgs.length} expanded permission set group(s) reference a muting permission set (${[...new Set(mutingPsgs)].sort().join(', ')}); muting perms are NOT subtracted, so effective access may be lower than shown.`,
+    );
+  }
   if (missingContainers.length > 0) {
     disclosures.unshift(
       `Ignored ${missingContainers.length} container(s) not found in this vault: ${missingContainers.join(', ')}.`,
