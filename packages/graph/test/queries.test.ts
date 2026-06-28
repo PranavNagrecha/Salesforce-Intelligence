@@ -992,6 +992,77 @@ describe('getSubgraph caps + unresolved-edge filtering', () => {
       expect(nodeIds.has(e.toId)).toBe(true);
     }
   });
+
+  it('includeUnresolved caps stubbed phantoms at SUBGRAPH_MAX_NODES (CR-P3 low)', async () => {
+    // CR-P3 low: bfsExpand budgets edges to maxEdges=400 independently of the
+    // maxNodes=200 node cap. A single class with MORE genuine phantom heuristic
+    // edges than the node cap (each `isHiddenUnresolved` → all pass the RV2 gate)
+    // floods `collectedEdges` with > 200 phantom toIds. The stub loop then
+    // synthesizes a stub for EVERY one of them with no cap check, blowing the
+    // returned node count past the documented `at most SUBGRAPH_MAX_NODES` bound.
+    // The fix must cap the stubbed nodes so the bound holds under includeUnresolved.
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-graph-phantom-flood-'));
+    const instance = await DuckDBInstance.create(join(dir, 'flood.db'));
+    const connection = await instance.connect();
+    const init = await initSchema(connection);
+    expect(init.ok).toBe(true);
+    if (!init.ok) return;
+    const floodStore: GraphStore = { connection, instance };
+
+    // ONE real scanned class with 300 distinct GENUINE phantom callsApex edges
+    // (each toId has no node row → import stamps targetMissing → heuristic +
+    // targetMissing = isHiddenUnresolved). 300 > both maxNodes (200) and
+    // maxEdges-minus-nodes, so the stub loop is forced past the node cap.
+    const PHANTOM_COUNT = 300;
+    const nodes: Node[] = [
+      makeNode({
+        id: 'ApexClass:Flooder',
+        type: 'ApexClass',
+        apiName: 'Flooder',
+        label: 'Flooder',
+      }),
+    ];
+    const edges: Edge[] = [];
+    for (let i = 0; i < PHANTOM_COUNT; i++) {
+      edges.push(
+        makeEdge({
+          fromId: 'ApexClass:Flooder',
+          // Zero-padded so the deterministic to_id ASC order is stable.
+          toId: `ApexClass:Phantom${String(i).padStart(4, '0')}`,
+          edgeType: 'callsApex',
+          confidence: 'heuristic',
+          source: 'apex-scanner',
+        }),
+      );
+    }
+    const imported = await importExtractionResults(floodStore, [{ nodes, edges }]);
+    expect(imported.ok).toBe(true);
+    if (!imported.ok) return;
+
+    const r = await getSubgraph(floodStore, 'ApexClass:Flooder', 1, {
+      includeUnresolved: true,
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      // The documented bound: at most SUBGRAPH_MAX_NODES, even when the stub
+      // loop has > 200 genuine phantom endpoints to synthesize.
+      expect(r.value.nodes.length).toBeLessThanOrEqual(SUBGRAPH_MAX_NODES);
+      // The slice stays self-contained: no edge dangles to a node that was
+      // dropped to keep the cap.
+      const nodeIds = new Set(r.value.nodes.map((n) => n.id));
+      for (const e of r.value.edges) {
+        expect(nodeIds.has(e.fromId)).toBe(true);
+        expect(nodeIds.has(e.toId)).toBe(true);
+      }
+      // The cap was actually exercised (some phantoms were surfaced as stubs,
+      // proving the feature still works rather than being disabled entirely).
+      expect(r.value.truncated).toBe(true);
+    }
+
+    connection.disconnectSync();
+    instance.closeSync();
+    rmSync(dir, { recursive: true, force: true });
+  });
 });
 
 describe('listNodesByType propertyEquals filter (P4-interface-impl)', () => {

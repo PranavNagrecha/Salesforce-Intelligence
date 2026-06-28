@@ -90,8 +90,29 @@ export const readSchemaVersion = async (
     const rows = reader.getRowObjectsJS() as ReadonlyArray<{
       version?: unknown;
     }>;
+    // No row at all (empty ledger) is a pre-versioning vault, same as a missing
+    // table — read as v0 and let the migration ladder upgrade it.
+    if (rows.length === 0) return ok(0);
     const raw = rows[0]?.version;
-    return ok(typeof raw === 'bigint' ? Number(raw) : Number(raw ?? 0));
+    // A PRESENT row whose `version` is not a valid non-negative integer is an
+    // anomaly (a corrupt or foreign-built ledger), NOT a v0 vault. DuckDB's
+    // INTEGER column yields a number/bigint; anything else (a non-numeric
+    // string, null, a float, a negative) must surface a typed error rather than
+    // silently coercing to 0/NaN — `Number('garbage')` was reading as v0 and
+    // would have re-migrated a corrupt vault. Only the empty-ledger and
+    // missing-table cases above legitimately mean v0.
+    const parsed = typeof raw === 'bigint' ? Number(raw) : raw;
+    if (
+      typeof parsed !== 'number' ||
+      !Number.isInteger(parsed) ||
+      parsed < 0
+    ) {
+      return err({
+        kind: 'schema-error',
+        message: `readSchemaVersion: malformed schema_version row (version = ${JSON.stringify(raw)})`,
+      });
+    }
+    return ok(parsed);
   } catch (e) {
     // A missing table reads as a pre-versioning vault (version 0), not an
     // error: that is exactly the case the migration ladder exists to upgrade.
