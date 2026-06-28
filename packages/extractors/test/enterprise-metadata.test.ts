@@ -205,6 +205,197 @@ describe('enterprise metadata extractors', () => {
     }
   });
 
+  // CR-CAP-13: list-view `<filters><field>` identity capture.
+  it('CR-CAP-13: tags a filter-only field as a filterRef references edge', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(
+        dir,
+        'objects',
+        'Training_Assignments__c',
+        'listViews',
+        'Completed.listView-meta.xml',
+      );
+      await mkdir(join(dir, 'objects', 'Training_Assignments__c', 'listViews'), {
+        recursive: true,
+      });
+      await writeFile(
+        path,
+        '<ListView><columns>NAME</columns>' +
+          '<filters><field>UserFacultyId__c</field><operation>equals</operation><value>1</value></filters>' +
+          '</ListView>',
+      );
+
+      const result = await extractListView(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const edge = result.value.edges.find(
+        (e) => e.toId === 'CustomField:Training_Assignments__c.UserFacultyId__c',
+      );
+      expect(edge).toBeDefined();
+      expect(edge?.edgeType).toBe('references');
+      expect(edge?.confidence).toBe('heuristic');
+      // The whole point of CR-CAP-13: a filter-only field is `filterRef`,
+      // NOT the column `fieldRef` it was mis-tagged as before this CR.
+      expect(edge?.properties['referenceKind']).toBe('filterRef');
+      // It must NOT also surface as a column row (no duplicate edge).
+      const sameTarget = result.value.edges.filter(
+        (e) =>
+          e.toId === 'CustomField:Training_Assignments__c.UserFacultyId__c' &&
+          e.edgeType === 'references',
+      );
+      expect(sameTarget).toHaveLength(1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('CR-CAP-13: mints NO edge for non-field filter tokens or value-derived dotted phantoms', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(
+        dir,
+        'objects',
+        'Evaluation__c',
+        'listViews',
+        'My_Open_Flags.listView-meta.xml',
+      );
+      await mkdir(join(dir, 'objects', 'Evaluation__c', 'listViews'), {
+        recursive: true,
+      });
+      await writeFile(
+        path,
+        '<ListView><columns>NAME</columns>' +
+          '<filters><field>RECORDTYPE</field><operation>equals</operation><value>Evaluation__c.Student_Evaluation</value></filters>' +
+          '<filters><field>CREATED_DATE</field><operation>greaterOrEqual</operation><value>LAST_N_DAYS:30</value></filters>' +
+          '<filters><field>UPDATEDBY_USER.ALIAS</field><operation>equals</operation><value>jdoe</value></filters>' +
+          '</ListView>',
+      );
+
+      const result = await extractListView(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const toIds = result.value.edges.map((e) => e.toId);
+      // Special non-field pseudo-columns mint NO field edge.
+      expect(toIds.some((id) => id.includes('RECORDTYPE'))).toBe(false);
+      expect(toIds.some((id) => id.includes('CREATED_DATE'))).toBe(false);
+      expect(toIds.some((id) => id.includes('UPDATEDBY_USER'))).toBe(false);
+      expect(toIds.some((id) => id.includes('ALIAS'))).toBe(false);
+      // The value-derived dotted RecordType-name phantom must NOT be minted.
+      expect(toIds).not.toContain('CustomField:Evaluation__c.Student_Evaluation');
+      // The date-range literal must not be minted either.
+      expect(toIds.some((id) => id.includes('LAST_N_DAYS'))).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('CR-CAP-13: PUBLISH_STATUS/LANGUAGE/numeric-value filters mint no edge', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(
+        dir,
+        'objects',
+        'Knowledge__kav',
+        'listViews',
+        'archived_articles.listView-meta.xml',
+      );
+      await mkdir(join(dir, 'objects', 'Knowledge__kav', 'listViews'), {
+        recursive: true,
+      });
+      await writeFile(
+        path,
+        '<ListView>' +
+          '<filters><field>PUBLISH_STATUS</field><operation>equals</operation><value>3</value></filters>' +
+          '<filters><field>LANGUAGE</field><operation>equals</operation><value>en_US</value></filters>' +
+          '</ListView>',
+      );
+
+      const result = await extractListView(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const toIds = result.value.edges.map((e) => e.toId);
+      expect(toIds.some((id) => id.includes('PUBLISH_STATUS'))).toBe(false);
+      expect(toIds.some((id) => id.includes('LANGUAGE'))).toBe(false);
+      expect(toIds.some((id) => id.includes('en_US'))).toBe(false);
+      // No numeric/locale value edge.
+      expect(result.value.edges.filter((e) => e.edgeType === 'references')).toHaveLength(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('CR-CAP-13: a column-only list view is unchanged (single fieldRef, no filterRef)', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'objects', 'Account', 'listViews', 'Enterprise2.listView-meta.xml');
+      await mkdir(join(dir, 'objects', 'Account', 'listViews'), { recursive: true });
+      await writeFile(path, '<ListView><columns>Industry__c</columns></ListView>');
+
+      const result = await extractListView(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const refEdges = result.value.edges.filter((e) => e.edgeType === 'references');
+      expect(refEdges).toHaveLength(1);
+      expect(refEdges[0]?.toId).toBe('CustomField:Account.Industry__c');
+      expect(refEdges[0]?.properties['referenceKind']).toBe('fieldRef');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('CR-CAP-13: a field that is both column and filter yields ONE merged columnAndFilter edge', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'objects', 'OA_Project__c', 'listViews', 'Open.listView-meta.xml');
+      await mkdir(join(dir, 'objects', 'OA_Project__c', 'listViews'), { recursive: true });
+      await writeFile(
+        path,
+        '<ListView><columns>Status__c</columns>' +
+          '<filters><field>Status__c</field><operation>equals</operation><value>Open</value></filters>' +
+          '</ListView>',
+      );
+
+      const result = await extractListView(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      // ONE edge per (ListView, field) — the graph edge PK is
+      // (fromId,toId,edgeType,source), so two references edges would collide
+      // and one would be silently dropped at import. Merge the role instead.
+      const sameTarget = result.value.edges.filter(
+        (e) =>
+          e.toId === 'CustomField:OA_Project__c.Status__c' &&
+          e.edgeType === 'references',
+      );
+      expect(sameTarget).toHaveLength(1);
+      expect(sameTarget[0]?.properties['referenceKind']).toBe('columnAndFilter');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('CR-CAP-13: a Report `<field>` column still mints a fieldRef edge (no shared-extractor regression)', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'Acct_Cols.report-meta.xml');
+      await writeFile(
+        path,
+        '<Report><reportType>AccountList</reportType><field>Industry__c</field></Report>',
+      );
+
+      const result = await extractReport(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const edge = result.value.edges.find(
+        (e) => e.toId === 'CustomField:Account.Industry__c',
+      );
+      expect(edge).toBeDefined();
+      expect(edge?.properties['referenceKind']).toBe('fieldRef');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('extracts dotted FlexiPage field item references', async () => {
     const dir = await makeTemp();
     try {

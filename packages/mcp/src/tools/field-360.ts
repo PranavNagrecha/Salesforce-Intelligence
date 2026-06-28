@@ -32,7 +32,7 @@
  *   | automations   | incoming `firesWhen` ConditionalContext + v1.3 rule    | declared/parsed/heuristic |
  *   | emails        | incoming `references` from EmailTemplate with role=body-merge | parsed |
  *   | dependencies  | OUTGOING `references` for formula fields only          | parsed           |
- *   | listViews     | incoming `references` from ListView (referenceKind:fieldRef) | heuristic   |
+ *   | listViews     | incoming `references` from ListView (referenceKind: fieldRef column / filterRef predicate / columnAndFilter) | heuristic |
  *
  * **Honesty axis** (the v3.0 constitutional rule per Q165):
  *
@@ -242,12 +242,16 @@ export interface Field360Output {
   readonly emails?: Field360Section;
   readonly dependencies?: Field360Section;
   /**
-   * CR-CAP-02: which list views show/filter this field as a column. Each row's
-   * `ListView:Object.ViewName` → `CustomField` edge is a `references`
-   * (`referenceKind:'fieldRef'`) emitted by the enterprise-metadata extractor's
-   * regex column/filter capture (confidence `heuristic`). Answers "which list
-   * views reference this field"; it does NOT evaluate the saved view's runtime
-   * filter predicate (that gap stays in `dataNotAvailable` as `list-view-filters`).
+   * CR-CAP-02 / CR-CAP-13: which list views show or filter this field. Each
+   * row's `ListView:Object.ViewName` → `CustomField` edge is a `references`
+   * (confidence `heuristic`) emitted by the enterprise-metadata extractor's
+   * regex capture; the row's `referenceKind` distinguishes the role —
+   * `'fieldRef'` (shown as a column), `'filterRef'` (used in a filter
+   * predicate), or `'columnAndFilter'` (both). There is exactly ONE edge per
+   * (ListView, field) — column + filter are merged, never two rows. Answers
+   * "which list views reference this field, and how"; it does NOT evaluate the
+   * saved view's runtime filter predicate (that gap stays in `dataNotAvailable`
+   * as `list-view-filters`).
    */
   readonly listViews?: Field360Section;
   readonly summary: Field360Summary;
@@ -658,12 +662,15 @@ const classifyIncomingEdge = (
     return;
   }
 
-  // `listViews`: incoming references from a ListView column/filter (CR-CAP-02).
-  // The edge is heuristic (regex column extraction by the enterprise-metadata
-  // extractor) with `referenceKind: 'fieldRef'`. ListView is in NONE of the
-  // UI/INTEGRATION/AUTOMATION node-type sets, so without this branch the edge
-  // falls through every case and is dropped silently. Placed before the
-  // line-644 `UI_NODE_TYPES.has` fallback to keep the dispatch explicit.
+  // `listViews`: incoming references from a ListView (CR-CAP-02 / CR-CAP-13).
+  // The edge is heuristic (regex capture by the enterprise-metadata extractor);
+  // its `referenceKind` is `'fieldRef'` (column), `'filterRef'` (filter
+  // predicate), or `'columnAndFilter'` (both). This branch is referenceKind-
+  // AGNOSTIC on purpose so every role flows in; the row carries `referenceKind`
+  // for labeling. ListView is in NONE of the UI/INTEGRATION/AUTOMATION node-type
+  // sets, so without this branch the edge falls through every case and is
+  // dropped silently. Placed before the `UI_NODE_TYPES.has` fallback to keep the
+  // dispatch explicit.
   if (source.type === 'ListView' && edge.edgeType === 'references') {
     buckets.listViews.push(row);
     return;
@@ -921,7 +928,7 @@ export const field360Handler = async (
   // per-category notes naming the unavailable surfaces verbatim.
   const boundaries: string[] = [
     FIELD_360_Q165_DISCLOSURE,
-    'list view column refs ARE composed into the `listViews` section (heuristic — regex column/filter extraction, not the saved view\'s runtime filter evaluation; the `list-view-filters` predicate gap stays in dataNotAvailable)',
+    'list view column AND filter field IDENTITY are composed into the `listViews` section (heuristic regex; a row\'s `referenceKind` is `fieldRef` for a column, `filterRef` for a filter predicate, or `columnAndFilter` for both) — but the saved view\'s runtime filter PREDICATE EVALUATION (whether a given record passes the filter) stays unmodeled and remains in dataNotAvailable as `list-view-filters`',
   ];
   // CR-CAP-03: report / dashboard usage is folded onto the field as a node
   // property by the reports pull (not an edge — the fold DROPS the report/
@@ -987,9 +994,12 @@ export const field360Handler = async (
   const dataShape = await readFactBlock(ctx, fieldId, 'fillRate');
   const annotations = await annotationsBlockFor(ctx, fieldId);
 
-  // CR-CAP-03: `dataNotAvailable` is DYNAMIC. `list-view-filters` is always
-  // listed (filter-predicate evaluation is genuinely unmodeled — CR-CAP-02
-  // surfaces WHICH list views show a field column, which is a different claim).
+  // CR-CAP-03 / CR-CAP-13: `dataNotAvailable` is DYNAMIC. `list-view-filters`
+  // is always listed, but it now means ONLY the runtime filter-PREDICATE
+  // EVALUATION gap (whether a given record passes the saved view's filter),
+  // which is genuinely unmodeled. Filter-field IDENTITY (WHICH views filter on
+  // this field) IS composed into the `listViews` section as `filterRef` /
+  // `columnAndFilter` edges (CR-CAP-13) — a different, available claim.
   // `reports` / `dashboards` are listed ONLY when the family was NOT retrieved
   // (coverage status !== 'complete') AND the field carries no folded usage for
   // it — when reports were retrieved (confirmed not-used) OR the field is

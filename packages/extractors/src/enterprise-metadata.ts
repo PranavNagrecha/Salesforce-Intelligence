@@ -15,6 +15,7 @@ import {
   deriveNestedObjectAndApiName,
 } from './path-utils.js';
 import { VARIANT_TABLE } from './sharing-rules.js';
+import { isWellFormedFieldRef } from './workflow-rule.js';
 
 const EXTRACTOR_SOURCE = 'enterprise-metadata-extractor';
 
@@ -45,6 +46,19 @@ interface EnterpriseExtractorConfig {
    * for `ListView` — other enterprise-metadata types have no `<sharedTo>`.
    */
   readonly captureSharedTo?: boolean;
+  /**
+   * CR-CAP-13: parse the list view's `<filters><field>` predicate fields as
+   * field IDENTITY references (which view filters on a field), distinct from
+   * its `<columns>` (which view shows a field). Set ONLY for `ListView`. When
+   * set, the generic `<field>` column sweep AND the whole-XML `dottedFieldRe`
+   * value scan are SUPPRESSED for this config so a filter field is owned by the
+   * guarded filter parser (and the value-derived RecordType-name phantom is
+   * never minted); a `<columns>`-only field stays a `fieldRef`, a filter-only
+   * field becomes a `filterRef`, and a field that is BOTH is merged into ONE
+   * `columnAndFilter` edge (the graph edge PK is `(fromId,toId,edgeType,source)`
+   * — two `references` edges to the same field would collide and silently drop).
+   */
+  readonly parseListViewFilters?: boolean;
   /**
    * Derive the parent CustomObject from an XML element's text when the file
    * path carries no object (RestrictionRule / ScopingRule retrieve into a
@@ -106,16 +120,18 @@ const inferReportObjectApiName = (xml: string): string | null => {
 const extractFieldRefs = (
   xml: string,
   parentObjectApiName: string | null,
+  options?: { readonly listViewFilterScoped?: boolean },
 ): readonly string[] => {
   const scopeObject =
     parentObjectApiName ?? inferReportObjectApiName(xml);
   const refs = new Set<string>();
-  for (const value of [
-    ...extractXmlValues(xml, 'columns'),
-    ...extractXmlValues(xml, 'field'),
-    ...extractXmlValues(xml, 'fieldItem'),
-    ...extractXmlValues(xml, 'fieldApiName'),
-  ]) {
+  // CR-CAP-13: for a ListView, the generic `<field>` sweep is suppressed —
+  // ListView XML uses `<field>` ONLY inside `<filters>`, which the dedicated
+  // guarded filter parser now owns. `<columns>` is the only column source here.
+  const columnElements = options?.listViewFilterScoped
+    ? ['columns', 'fieldItem', 'fieldApiName']
+    : ['columns', 'field', 'fieldItem', 'fieldApiName'];
+  for (const value of columnElements.flatMap((el) => extractXmlValues(xml, el))) {
     if (value.includes('.')) {
       refs.add(`CustomField:${value}`);
     } else if (scopeObject !== null) {
@@ -123,12 +139,91 @@ const extractFieldRefs = (
     }
   }
 
-  const dottedFieldRe = /\b([A-Za-z][A-Za-z0-9_]*__?(?:c|pc|pr|r|e|b|kav)?\.[A-Za-z][A-Za-z0-9_]*__?[a-zA-Z0-9]*)\b/g;
-  for (const match of xml.matchAll(dottedFieldRe)) {
-    const value = match[1];
-    if (value !== undefined) refs.add(`CustomField:${value}`);
+  // CR-CAP-13: the whole-XML dotted scan mints `CustomField:` from any
+  // `Object.Field`-shaped substring, INCLUDING a list view's
+  // `<value>Evaluation__c.Student_Evaluation</value>` (a RecordType developer
+  // name, not a field). Suppress it for the ListView column path so the filter
+  // parser is the sole, guarded owner of filter-block tokens.
+  if (!options?.listViewFilterScoped) {
+    const dottedFieldRe = /\b([A-Za-z][A-Za-z0-9_]*__?(?:c|pc|pr|r|e|b|kav)?\.[A-Za-z][A-Za-z0-9_]*__?[a-zA-Z0-9]*)\b/g;
+    for (const match of xml.matchAll(dottedFieldRe)) {
+      const value = match[1];
+      if (value !== undefined) refs.add(`CustomField:${value}`);
+    }
   }
 
+  return [...refs].sort();
+};
+
+/**
+ * CR-CAP-13: non-field pseudo-columns that may appear in a list view's
+ * `<filters><field>` but are NOT real fields — special filter operands the
+ * platform resolves itself (record type, owner, audit users/dates, KB
+ * article state/language). `isWellFormedFieldRef` returns TRUE for all of
+ * these (it only rejects `$`-prefixed and empty-segment-dotted tokens), so
+ * this denylist carries the real phantom guard.
+ */
+const LIST_VIEW_FILTER_PSEUDO_FIELDS: ReadonlySet<string> = new Set([
+  'RECORDTYPE',
+  'OWNER',
+  'CREATED_DATE',
+  'CREATEDBY_USER',
+  'UPDATEDBY_USER',
+  'LAST_UPDATE',
+  'LAST_ACTIVITY',
+  'PUBLISH_STATUS',
+  'LANGUAGE',
+  'ARTICLE_NUMBER',
+  'VERSION_NUMBER',
+]);
+
+/**
+ * CR-CAP-13: is this `<filters><field>` token a real field worth a reference
+ * edge? Rejects (a) `$`-prefixed and degenerate-dotted via
+ * {@link isWellFormedFieldRef}; (b) the known non-field pseudo-columns; (c)
+ * `*_USER` audit-user shapes and any `*.ALIAS` dotted relationship into a
+ * user; (d) any token carrying a `:` (date-range literals like
+ * `LAST_N_DAYS:30`); (e) all-UPPERCASE tokens with no `__` (the platform's
+ * special operands — real custom fields carry `__c`, standard fields are
+ * mixed-case). Field IDENTITY only — operation/value are never read.
+ */
+const isWellFormedFilterField = (field: string): boolean => {
+  if (!isWellFormedFieldRef(field)) return false;
+  const upper = field.toUpperCase();
+  if (LIST_VIEW_FILTER_PSEUDO_FIELDS.has(upper)) return false;
+  if (field.includes(':')) return false;
+  if (/(^|\.)[A-Z0-9_]*_USER$/.test(upper)) return false;
+  if (/\.ALIAS$/.test(upper)) return false;
+  // All-uppercase, underscore-or-dot only, with no `__` custom marker: a
+  // platform pseudo-column (RECORDTYPE, FULL_NAME, etc.), not a field.
+  if (!field.includes('__') && /^[A-Z0-9_.]+$/.test(field)) return false;
+  return true;
+};
+
+/**
+ * CR-CAP-13: parse a list view's `<filters>` blocks for predicate field
+ * IDENTITY. Reads ONLY `<field>` from each (repeatable) block — never
+ * `<operation>` or `<value>` (values include `3`, `en_US`, `Open`, picklist
+ * CSVs, and the dotted RecordType name `Evaluation__c.Student_Evaluation`,
+ * none of which are fields). Each token is scoped exactly like a column ref
+ * (dotted verbatim, bare → `${scopeObject}.${field}`) and gated through
+ * {@link isWellFormedFilterField} so no pseudo-column or literal mints an edge.
+ */
+const extractListViewFilterRefs = (
+  xml: string,
+  scopeObject: string | null,
+): readonly string[] => {
+  const refs = new Set<string>();
+  for (const block of xml.matchAll(/<filters>([\s\S]*?)<\/filters>/g)) {
+    for (const field of extractXmlValues(block[1] ?? '', 'field')) {
+      if (!isWellFormedFilterField(field)) continue;
+      if (field.includes('.')) {
+        refs.add(`CustomField:${field}`);
+      } else if (scopeObject !== null) {
+        refs.add(`CustomField:${scopeObject}.${field}`);
+      }
+    }
+  }
   return [...refs].sort();
 };
 
@@ -230,7 +325,20 @@ const extractEnterpriseMetadata = async (
     if (fromXml !== undefined && fromXml.length > 0) parentObjectApiName = fromXml;
   }
 
-  const fieldRefs = extractFieldRefs(text.value, parentObjectApiName);
+  const fieldRefs = extractFieldRefs(text.value, parentObjectApiName, {
+    listViewFilterScoped: config.parseListViewFilters === true,
+  });
+  // CR-CAP-13: list-view filter-predicate field identity. `filterFieldRefs` is
+  // the set of well-formed fields a `<filters>` block predicates on; a field
+  // that is ALSO a column appears in BOTH sets and is merged into one
+  // `columnAndFilter` edge below (the edge PK cannot hold two `references`).
+  const filterFieldRefs = config.parseListViewFilters === true
+    ? extractListViewFilterRefs(
+        text.value,
+        parentObjectApiName ?? inferReportObjectApiName(text.value),
+      )
+    : [];
+  const filterFieldRefSet = new Set(filterFieldRefs);
   const nodeId = `${config.type}:${apiName}`;
 
   // Explicit child-element references (PSG membership / muting, etc.) — emitted
@@ -281,6 +389,9 @@ const extractEnterpriseMetadata = async (
     {
       fieldRefs,
       rawReferenceCount: fieldRefs.length,
+      ...(config.parseListViewFilters === true
+        ? { filterFieldRefs }
+        : {}),
       ...childRefSummary,
       ...(config.captureSharedTo
         ? {
@@ -296,14 +407,31 @@ const extractEnterpriseMetadata = async (
     },
   );
 
-  const fieldRefEdges: Edge[] = fieldRefs.map((fieldId) => ({
-    fromId: node.id,
-    toId: fieldId,
-    edgeType: 'references',
-    confidence: 'heuristic',
-    source: EXTRACTOR_SOURCE,
-    properties: { referenceKind: 'fieldRef' },
-  }));
+  // CR-CAP-13: ONE `references` edge per (ListView, field). The edge PK is
+  // `(fromId,toId,edgeType,source)` — emitting separate fieldRef + filterRef
+  // edges to the same field would collide and one would be silently dropped at
+  // import. Merge the role into a single `referenceKind`: a field that is a
+  // column AND a filter is `columnAndFilter`; a filter-only field is
+  // `filterRef`; a column-only field stays `fieldRef`. Union the two sets so a
+  // filter-only field still emits its edge.
+  const allFieldIds = [...new Set([...fieldRefs, ...filterFieldRefs])].sort();
+  const fieldRefEdges: Edge[] = allFieldIds.map((fieldId) => {
+    const isColumn = fieldRefs.includes(fieldId);
+    const isFilter = filterFieldRefSet.has(fieldId);
+    const referenceKind = isColumn && isFilter
+      ? 'columnAndFilter'
+      : isFilter
+        ? 'filterRef'
+        : 'fieldRef';
+    return {
+      fromId: node.id,
+      toId: fieldId,
+      edgeType: 'references',
+      confidence: 'heuristic',
+      source: EXTRACTOR_SOURCE,
+      properties: { referenceKind },
+    };
+  });
 
   return ok({ nodes: [node], edges: [...fieldRefEdges, ...childRefEdges, ...visibleToEdges] });
 };
@@ -319,6 +447,7 @@ export const extractListView = (path: string): Promise<Result<ExtractionResult, 
     type: 'ListView',
     suffix: '.listView-meta.xml',
     captureSharedTo: true,
+    parseListViewFilters: true,
     nestedParent: 'listViews',
   });
 
