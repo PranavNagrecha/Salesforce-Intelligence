@@ -29,6 +29,7 @@ import {
   liveReportUsageHandler,
   liveSampleHandler,
   liveSecurityExposureHandler,
+  liveSetupAuditTrailHandler,
   liveStaleCheckHandler,
   liveStaleRecordsHandler,
   liveStorageByObjectHandler,
@@ -758,6 +759,24 @@ describe('liveReportUsageHandler', () => {
     expect(r.value.data.reports.find((x) => x.name === 'Old Report')?.stale).toBe(true);
     expect(r.value.data.rendered).toContain('stale');
     expect(r.value.data.trust.provenance).toBe('live_org');
+    // CR-P3-7: within budget, the disclosure is additive and stays off.
+    expect(r.value.data.budgetStopped).toBe(false);
+    expect(r.value.data.rendered.toLowerCase()).not.toContain('budget');
+  });
+
+  it('CR-P3-7: names the budget (not a false "0 of N") when the budget runs out on the stale-count query', async () => {
+    process.env.SFI_LIVE_QUERY_BUDGET = '1';
+    // FIRST query (COUNT Report) succeeds; the stale-count query is over budget.
+    const r = await liveReportUsageHandler(ctx, { liveEnabled: true, staleDays: 90 }, exec);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.budgetStopped).toBe(true);
+    // The budget is NAMED in the rendered output...
+    expect(r.value.data.rendered.toLowerCase()).toContain('budget');
+    // ...and there is NO unqualified clean "0 of N are stale" headline — the
+    // count is disclosed as n/a/partial, not an authoritative zero.
+    expect(r.value.data.rendered).not.toMatch(/\*\*0\*\* of [\d,]+ reports are stale/);
+    expect(r.value.data.rendered.toLowerCase()).toMatch(/n\/a|partial/);
   });
 
   it('returns a STRUCTURED error (not a BUG) when Report is unavailable', async () => {
@@ -802,6 +821,19 @@ describe('liveFolderAccessHandler', () => {
     expect(r.value.data.publicFolders).toBe(1);
     expect(r.value.data.byAccessType.Public).toBe(1);
     expect(r.value.data.rendered).toContain('publicly accessible');
+    expect(r.value.data.budgetStopped).toBe(false);
+  });
+
+  it('CR-P3-8: surfaces the budget when the (un-gated) total COUNT budget-stops; verdict stays correct', async () => {
+    process.env.SFI_LIVE_QUERY_BUDGET = '1';
+    // FIRST query (detail) succeeds; the COUNT Folder is over budget.
+    const r = await liveFolderAccessHandler(ctx, { liveEnabled: true }, exec);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.budgetStopped).toBe(true);
+    expect(r.value.data.rendered.toLowerCase()).toContain('budget');
+    // publicFolders comes from the gated detail rows — still correct, not zeroed.
+    expect(r.value.data.publicFolders).toBe(1);
   });
 });
 
@@ -828,6 +860,57 @@ describe('liveEmailTemplateUsageHandler', () => {
     const lwc = r.value.data.templates.find((t) => t.name === 'Active LWC');
     expect(lwc?.isClassic).toBe(false);
     expect(lwc?.migrationCandidate).toBe(false);
+    expect(r.value.data.budgetStopped).toBe(false);
+  });
+
+  it('CR-P3-8: surfaces the budget when the (un-gated) total COUNT budget-stops; verdicts stay correct', async () => {
+    process.env.SFI_LIVE_QUERY_BUDGET = '1';
+    // FIRST query (detail) succeeds; the COUNT EmailTemplate is over budget.
+    const r = await liveEmailTemplateUsageHandler(ctx, { liveEnabled: true, staleDays: 180 }, exec);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.budgetStopped).toBe(true);
+    expect(r.value.data.rendered.toLowerCase()).toContain('budget');
+    // classic/migration verdicts come from the gated detail rows — still correct.
+    expect(r.value.data.classicTemplates).toBe(2);
+    expect(r.value.data.migrationCandidates).toBe(2);
+  });
+});
+
+describe('liveSetupAuditTrailHandler', () => {
+  const exec: ExecCommand = async (_b, args) => {
+    const soql = soqlOf(args);
+    if (/count\(\)\s*from\s+setupaudittrail/i.test(soql)) {
+      return { stdout: JSON.stringify({ result: { totalSize: 42 } }), stderr: '' };
+    }
+    if (/from\s+setupaudittrail/i.test(soql)) {
+      return { stdout: JSON.stringify({ result: { records: [
+        { Action: 'changedProfile', Section: 'Manage Users', CreatedDate: new Date().toISOString(), Display: 'Changed profile X', CreatedBy: { Name: 'Admin' } },
+      ] } }), stderr: '' };
+    }
+    return { stdout: JSON.stringify({ result: { records: [] } }), stderr: '' };
+  };
+
+  it('reports a setup-change count and detail table (within budget, no stop)', async () => {
+    const r = await liveSetupAuditTrailHandler(ctx, { liveEnabled: true, days: 30 }, exec);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalChanges).toBe(42);
+    expect(r.value.data.changes).toHaveLength(1);
+    expect(r.value.data.budgetStopped).toBe(false);
+    expect(r.value.data.rendered.toLowerCase()).not.toContain('budget');
+  });
+
+  it('CR-P3-8: surfaces the budget when the (un-gated) detail query budget-stops; count stays exact', async () => {
+    process.env.SFI_LIVE_QUERY_BUDGET = '1';
+    // FIRST query (COUNT) succeeds; the detail SELECT is over budget.
+    const r = await liveSetupAuditTrailHandler(ctx, { liveEnabled: true, days: 30 }, exec);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalChanges).toBe(42); // exact, from the gated count
+    expect(r.value.data.changes).toHaveLength(0); // detail was budget-stopped
+    expect(r.value.data.budgetStopped).toBe(true);
+    expect(r.value.data.rendered.toLowerCase()).toContain('budget');
   });
 });
 
