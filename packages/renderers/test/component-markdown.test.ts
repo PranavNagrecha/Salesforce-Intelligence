@@ -496,4 +496,121 @@ describe('renderComponentMarkdown — markdown injection / escaping (CR-16c)', (
     // No stray backslashes introduced into clean values.
     expect(body).not.toContain('\\');
   });
+
+  it('CR-P3-6: neutralizes a markdown link / image in the H1 label (no live link or beacon image)', () => {
+    const node: Node = {
+      id: 'CustomObject:Lnk__c',
+      type: 'CustomObject',
+      label: '[x](http://evil) ![](http://beacon)',
+      apiName: 'Lnk__c',
+      parentId: null,
+      sourcePath: 'x',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {},
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const headingLine = result.value.body
+      .split('\n')
+      .find((l) => l.startsWith('# '));
+    expect(headingLine).toBeDefined();
+    // Brackets and the image-bang are escaped.
+    expect(headingLine).toContain('\\[x\\]');
+    expect(headingLine).toContain('\\!\\[');
+    // The heading is NOT a live link: no unescaped [..](..) pair survives.
+    expect(headingLine).not.toMatch(/\[[^\]\\]*\]\([^)]*\)/);
+  });
+
+  it('CR-P3-6: neutralizes raw-HTML / autolink in the H1 label (no inline HTML beacon or autolink)', () => {
+    const node: Node = {
+      id: 'CustomObject:Html__c',
+      type: 'CustomObject',
+      label: '<img src=x onerror=alert(1)> <http://evil>',
+      apiName: 'Html__c',
+      parentId: null,
+      sourcePath: 'x',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {},
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const headingLine = result.value.body
+      .split('\n')
+      .find((l) => l.startsWith('# '));
+    expect(headingLine).toBeDefined();
+    // Every `<` is escaped, so no live inline-HTML element or autolink survives.
+    expect(headingLine).toContain('\\<img');
+    expect(headingLine).toContain('\\<http://evil>');
+    // No UNescaped `<` opens an element/autolink (every `<` is preceded by `\`).
+    expect(headingLine).not.toMatch(/(^|[^\\])<[^>]*>/);
+  });
+
+  it('CR-P3-9: neutralizes setext underline, ordered-list leader, and raw-HTML in a description block', () => {
+    const node: Node = {
+      id: 'CustomObject:Desc__c',
+      type: 'CustomObject',
+      label: 'Desc',
+      apiName: 'Desc__c',
+      parentId: null,
+      sourcePath: 'x',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {
+        description:
+          'Heading bait\n===\n1. injected item\n<img src=x onerror=alert(1)>',
+      },
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const lines = result.value.body.split('\n');
+    // (a) No bare setext underline; the `===` line starts with `\=`.
+    expect(lines.some((l) => /^=+$/.test(l))).toBe(false);
+    expect(lines.some((l) => l.startsWith('\\='))).toBe(true);
+    // (b) Ordered-list leader: separator escaped, line is no longer a list item.
+    expect(lines.some((l) => /^\s*\d+[.)]\s/.test(l))).toBe(false);
+    expect(lines.some((l) => l.startsWith('1\\.'))).toBe(true);
+    // (c) Raw-HTML block: leading `<` escaped.
+    expect(lines.some((l) => /^</.test(l))).toBe(false);
+    expect(lines.some((l) => l.startsWith('\\<img'))).toBe(true);
+  });
+
+  it('CR-P3-9: leaves clean parenthesized labels and inline-digit / version / equals prose byte-identical', () => {
+    const node: Node = {
+      id: 'CustomObject:Clean__c',
+      type: 'CustomObject',
+      label: 'Customer Project (active)',
+      apiName: 'Clean__c',
+      parentId: null,
+      sourcePath: 'x',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {
+        description: 'Tracks projects. See item 1. inline. Version 2.0. a = b.',
+      },
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.body;
+    // Heading: parens NOT escaped.
+    expect(body).toContain('# Customer Project (active)\n');
+    // Description line byte-identical: no backslash before 1. / 2.0 / = / (.
+    expect(body).toContain(
+      'Tracks projects. See item 1. inline. Version 2.0. a = b.',
+    );
+    const descLine = body
+      .split('\n')
+      .find((l) => l.includes('Tracks projects'));
+    expect(descLine).toBeDefined();
+    expect(descLine).not.toContain('\\');
+  });
 });
