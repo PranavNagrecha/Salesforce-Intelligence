@@ -1624,7 +1624,11 @@ describe('whyCantUserSeeRecordHandler — restriction rules and PSG boundaries',
     expect(rr?.reason).toContain('restriction rule');
   });
 
-  it('surfaces PermissionSetGroup boundary when groups exist in vault', async () => {
+  it('reports PermissionSetGroup as informational when groups exist but none are assigned', async () => {
+    // CR-CAP-04: PSG membership is now MODELED. The user carries only a plain
+    // permission set (no PSG), so the PSG step is informational `restricted`
+    // (the old always-`unknown` stub is gone — membership is no longer an
+    // undecidable gap), and names that no assigned PSG was supplied.
     const result = await whyCantUserSeeRecordHandler(ctx, {
       componentId: RESTRICTION_OBJ,
       userContext: { permissionSetIds: [RESTRICTION_PS] },
@@ -1632,8 +1636,9 @@ describe('whyCantUserSeeRecordHandler — restriction rules and PSG boundaries',
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const psg = result.value.data.reasoning.find((s) => s.stage === 'PermissionSetGroup');
-    expect(psg?.verdict).toBe('unknown');
+    expect(psg?.verdict).toBe('restricted');
     expect(psg?.reason).toContain('permission set group');
+    expect(psg?.reason).toMatch(/none were supplied/i);
   });
 });
 

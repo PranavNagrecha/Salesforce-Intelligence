@@ -167,6 +167,7 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { coercePrefix } from './coerce-id.js';
+import { expandPermissionSetGroup } from './permission-set-group.js';
 
 /**
  * The set of OWD values that imply records are private and access
@@ -1128,14 +1129,56 @@ const evaluateScopingRules = async (
 };
 
 /**
- * Surface Permission Set Group boundary when the vault models PSGs.
- * Membership and muting are not extracted yet, so any PSG in the vault
- * forces `unknown` when the user carries permission-set context.
+ * CR-CAP-04: PermissionSetGroup is now MODELED. Any PSG passed in the user's
+ * `permissionSetIds` has already been EXPANDED into its member permission sets
+ * by `coerceUserContext`, and those members flow through the real grant cascade
+ * (object-Read precondition + PermissionGrant + SystemPermission) — so the
+ * verdict is decided there, not here. This step is INFORMATIONAL: it reports how
+ * many assigned PSGs were expanded into how many member permission sets, and
+ * carries a muting caveat where a group references a muting set (muting is
+ * disclosed but NEVER subtracted — declared confidence).
+ *
+ * `restricted` (not `unknown`): the step itself confers no record-visibility
+ * BYPASS, and PSG membership is no longer an undecidable gap — the grant stages
+ * already accounted for the members. A `restricted` here cannot wrongly demote
+ * the overall verdict (a PSG-conferred grant surfaces as `visible` in the grant
+ * stage, which wins).
  */
 const evaluatePermissionSetGroups = async (
   ctx: Context,
   userContext: UserContext,
 ): Promise<Result<AccessReasoningStep, string>> => {
+  // The coerced+folded permissionSetIds still carry the PSG ids alongside their
+  // expanded members, so the assigned PSGs are read straight off the context.
+  const assignedPsgIds = (userContext.permissionSetIds ?? []).filter((id) =>
+    id.startsWith(PERMISSION_SET_GROUP_PREFIX),
+  );
+
+  if (assignedPsgIds.length > 0) {
+    let memberCount = 0;
+    const mutingPsgs: string[] = [];
+    for (const psgId of assignedPsgIds) {
+      const expanded = await expandPermissionSetGroup(ctx, psgId as ComponentId);
+      if (!expanded.ok) return err(expanded.error.message);
+      if (expanded.value === null) continue;
+      memberCount += expanded.value.memberPermissionSetIds.length;
+      if (expanded.value.hasMuting) mutingPsgs.push(psgId);
+    }
+    const caveat =
+      mutingPsgs.length > 0
+        ? ` ${mutingPsgs.length} of them reference a muting permission set (${[...new Set(mutingPsgs)].sort().join(', ')}); muting is NOT subtracted, so effective access may be lower.`
+        : '';
+    return ok(
+      step(
+        'PermissionSetGroup',
+        'restricted',
+        `${assignedPsgIds.length} assigned permission set group(s) expanded into ${memberCount} member permission set(s), evaluated via the permission-grant cascade above (declared membership).${caveat}`,
+        assignedPsgIds,
+      ),
+    );
+  }
+
+  // No assigned PSG. Report whether any exist in the vault (informational).
   const psgResult = await listNodesByType(ctx.graph, 'PermissionSetGroup', {
     limit: 500,
   });
@@ -1149,24 +1192,11 @@ const evaluatePermissionSetGroups = async (
       ),
     );
   }
-  const hasPsContext =
-    (userContext.permissionSetIds !== undefined &&
-      userContext.permissionSetIds.length > 0) ||
-    userContext.profileId !== undefined;
-  if (!hasPsContext) {
-    return ok(
-      step(
-        'PermissionSetGroup',
-        'unknown',
-        `${psgResult.value.length} permission set group(s) exist in vault; supply permissionSetIds to evaluate group-derived access`,
-      ),
-    );
-  }
   return ok(
     step(
       'PermissionSetGroup',
-      'unknown',
-      `${psgResult.value.length} permission set group(s) in vault; group membership and muting are not modeled — verify assigned PSGs manually`,
+      'restricted',
+      `${psgResult.value.length} permission set group(s) exist in vault but none were supplied in this user's context; pass an assigned PermissionSetGroup id in permissionSetIds to evaluate group-derived access (membership is expanded automatically).`,
     ),
   );
 };
@@ -1249,6 +1279,8 @@ const aggregateVerdict = (
 /** Canonical-id prefixes for the four userContext id families. */
 const PROFILE_PREFIX = 'Profile:';
 const PERMISSION_SET_PREFIX = 'PermissionSet:';
+/** CR-CAP-04: a PSG id that may be passed in `permissionSetIds`; expanded to members. */
+const PERMISSION_SET_GROUP_PREFIX = 'PermissionSetGroup:';
 const ROLE_PREFIX = 'Role:';
 const GROUP_PREFIX = 'Group:';
 const QUEUE_PREFIX = 'Queue:';
@@ -1290,6 +1322,14 @@ const coerceGroupId = async (ctx: Context, raw: string): Promise<string> => {
  * field at a different real container. So the cascade verdict for a coerced
  * context equals the verdict for the equivalent prefixed-id context — the
  * property the unit tests pin.
+ *
+ * **CR-CAP-04 PSG expansion is also verdict-preserving.** A `PermissionSetGroup:`
+ * id in `permissionSetIds` is expanded into the member permission sets it
+ * DENOTES and those are ADDED to the context (the PSG id is also kept so the
+ * PermissionSetGroup reasoning step can report it; it never matches a grant
+ * edge). Expansion only ever ADDS the real containers a PSG aggregates, turning
+ * a PSG-assigned user's formerly-`unknown` answer into the real cascade verdict
+ * — it cannot re-point or remove an existing grant.
  */
 const coerceUserContext = async (
   ctx: Context,
@@ -1305,9 +1345,32 @@ const coerceUserContext = async (
     out.profileId = coercePrefix(uc.profileId, [PROFILE_PREFIX]);
   }
   if (uc.permissionSetIds !== undefined) {
-    out.permissionSetIds = uc.permissionSetIds.map((p) =>
+    const coerced = uc.permissionSetIds.map((p) =>
       coercePrefix(p, [PERMISSION_SET_PREFIX]),
     );
+    // CR-CAP-04: fold every PSG passed here into its member permission sets so
+    // the REAL grant cascade (object-Read precondition, PermissionGrant,
+    // SystemPermission, ModifyAll-for-create) decides PSG-derived access. A PSG
+    // is detected by its `PermissionSetGroup:` prefix; a member that is a
+    // phantom (no node) simply never matches a grant edge, exactly as today.
+    // Dedupe so a permset reachable both directly and via a PSG is unioned once.
+    const folded = new Set<string>();
+    for (const id of coerced) {
+      if (id.startsWith(PERMISSION_SET_GROUP_PREFIX)) {
+        const expanded = await expandPermissionSetGroup(ctx, id as ComponentId);
+        if (expanded.ok && expanded.value !== null) {
+          for (const memberId of expanded.value.memberPermissionSetIds) {
+            folded.add(memberId);
+          }
+          // Keep the PSG id too so the PermissionSetGroup reasoning step can
+          // report which groups were expanded; it never matches a grant edge.
+          folded.add(id);
+          continue;
+        }
+      }
+      folded.add(id);
+    }
+    out.permissionSetIds = [...folded];
   }
   if (uc.roleId !== undefined) {
     out.roleId = coercePrefix(uc.roleId, [ROLE_PREFIX]);

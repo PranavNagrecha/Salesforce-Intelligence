@@ -29,6 +29,7 @@ import {
   type GovernorLimitRisksOutput,
 } from './governor-limit-risks.js';
 import { healthCheckHandler } from './health-check.js';
+import { expandPermissionSetGroup } from './permission-set-group.js';
 import { collectPiiInventoryFields } from './pii-inventory.js';
 import {
   processBuilderMigrationCandidatesHandler,
@@ -669,15 +670,18 @@ const analyzeOverPrivilege = async (
   if (psgResult.ok) {
     for (const psg of psgResult.value) {
       scanned.permissionSetGroups += 1;
-      const members = psg.properties['permissionSets'];
-      if (!Array.isArray(members)) continue;
+      // CR-CAP-04: membership RESOLUTION is delegated to the shared helper —
+      // its `memberPermissionSetIds` are `PermissionSet:<name>` ids, identical
+      // to the old inline `PermissionSet:${member}` reconstruction, so the
+      // `permsetRisk` lookup key and this risk aggregation are UNCHANGED.
+      const expanded = await expandPermissionSetGroup(ctx, psg.id);
+      if (!expanded.ok || expanded.value === null) continue;
       const conferred = new Set<string>();
       let aggModAll = 0;
       let aggViewAll = 0;
       const riskyMembers: string[] = [];
-      for (const member of members) {
-        if (typeof member !== 'string') continue;
-        const risk = permsetRisk.get(`PermissionSet:${member}`);
+      for (const memberId of expanded.value.memberPermissionSetIds) {
+        const risk = permsetRisk.get(memberId);
         if (risk === undefined) continue;
         if (risk.perms.length === 0 && risk.modAll === 0 && risk.viewAll === 0) {
           continue;
@@ -686,7 +690,7 @@ const analyzeOverPrivilege = async (
         aggModAll += risk.modAll;
         aggViewAll += risk.viewAll;
         if (riskyMembers.length < ESCALATION_EXAMPLE_CAP) {
-          riskyMembers.push(`PermissionSet:${member}`);
+          riskyMembers.push(memberId);
         }
       }
       if (conferred.size === 0 && aggModAll === 0 && aggViewAll === 0) continue;
@@ -713,8 +717,9 @@ const analyzeOverPrivilege = async (
         viewAllDataGrantors.push(psg.id);
       }
 
-      const muting = psg.properties['mutingPermissionSets'];
-      const hasMuting = Array.isArray(muting) && muting.length > 0;
+      // Muting is NOTED but NOT subtracted (a v1 honesty boundary) — the helper
+      // surfaces `hasMuting` from the same `mutingPermissionSets` property.
+      const hasMuting = expanded.value.hasMuting;
       const parts: string[] = [];
       if (conferred.size > 0) {
         parts.push(`system perms: ${[...conferred].sort().join(', ')}`);
