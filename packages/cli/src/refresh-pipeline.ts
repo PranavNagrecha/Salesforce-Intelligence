@@ -27,6 +27,7 @@ import {
   extractCustomLabel,
   extractCustomMetadataRecord,
   extractCustomObject,
+  extractCustomPermission,
   extractCustomSettingRecord,
   extractCustomTab,
   extractDecisionTable,
@@ -208,6 +209,7 @@ export const SUPPORTED_TYPES = [
   'CustomLabel',
   'CustomMetadataRecord',
   'CustomObject',
+  'CustomPermission',
   'CustomSettingRecord',
   'CustomTab',
   'DecisionTable',
@@ -292,6 +294,7 @@ const EXTRACTORS: Readonly<Record<SupportedType, Extractor>> = {
   CustomLabel: extractCustomLabel,
   CustomMetadataRecord: extractCustomMetadataRecord,
   CustomObject: extractCustomObject,
+  CustomPermission: extractCustomPermission,
   CustomSettingRecord: extractCustomSettingRecord,
   CustomTab: extractCustomTab,
   DecisionTable: extractDecisionTable,
@@ -507,6 +510,10 @@ const dispatchFile = (
   if (segments.includes('labels') && fileName.endsWith('.labels-meta.xml')) return 'CustomLabel';
   if (segments.includes('staticresources') && fileName.endsWith('.resource-meta.xml')) return 'StaticResource';
   if (segments.includes('installedPackages') && fileName.endsWith('.installedPackage-meta.xml')) return 'InstalledPackage';
+  // CR-CAP-15: CustomPermission definitions live flat under
+  // `customPermissions/{DeveloperName}.customPermission-meta.xml` — the grant
+  // target a PermissionSet/Profile `<customPermissions>` block names (CR-CAP-10).
+  if (segments.includes('customPermissions') && fileName.endsWith('.customPermission-meta.xml')) return 'CustomPermission';
   if (segments.includes('workflows') && fileName.endsWith('.workflow-meta.xml')) return 'WorkflowRule';
   if (segments.includes('approvalProcesses') && fileName.endsWith('.approvalProcess-meta.xml')) return 'ApprovalProcess';
   if (segments.includes('assignmentRules') && fileName.endsWith('.assignmentRules-meta.xml')) return 'AssignmentRule';

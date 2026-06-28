@@ -160,6 +160,17 @@ export type ComponentType =
   | 'ExternalService' //         `ExternalServiceRegistration` — invoke-an-OpenAPI-endpoint binding (`.externalServiceRegistration-meta.xml`); carries a `references` edge to its declared `NamedCredential` when set.
   | 'NetworkAccess' //           IP-range trust-list entry (`.networkAccess-meta.xml`). NOT the Network / Experience Cloud Site (a separate `Community` / `ExperienceBundle` metadata family; v1.5 scope explicitly excludes it).
   // v1.6 — business-user record-value tier.
+  // CR-CAP-15 — declarative custom-permission definition tier. A
+  // CustomPermission is a named permission flag (`.customPermission-meta.xml`)
+  // that Apex / Flow / validation rules gate on, and that PermissionSets /
+  // Profiles grant via their `<customPermissions>` block (the grant side is
+  // CR-CAP-10's `grantedBy` edge; no new EdgeType). Id format is flat
+  // `CustomPermission:{DeveloperName}` (no parent scope — mirroring
+  // RemoteSiteSetting / AuthProvider / CustomLabel) so a bare `<name>` grant
+  // resolves to exactly this id. v0.1 extracts the definition node only; the
+  // optional `<requiredPermission>` CustomPermission-implies-CustomPermission
+  // dependency edges and the `<connectedApp>` reference are deferred.
+  | 'CustomPermission' //        A declarative permission flag (`.customPermission-meta.xml`) checked by Apex/Flow/validation rules and granted by PermissionSet/Profile `<customPermissions>`. Id `CustomPermission:{DeveloperName}`. Carries `label`/`description`; the grant edge (`grantedBy`) is CR-CAP-10.
   | 'CustomMetadataRecord' //    A single record (row) of a `__mdt` Custom Metadata Type; holds runtime-readable configured values. Attached to its `CustomObject:{TypeApiName}` parent via the existing `parentOf` edge (mirroring v1.0's CustomField → CustomObject pattern; no new EdgeType).
   | 'CustomSettingRecord' //     A single record of a List or Hierarchy Custom Setting; extracted ONLY when present in the DX source tree (rare — records typically live as data, requiring `sf data query`). Attached to its `CustomObject:{TypeApiName}` parent via the existing `parentOf` edge.
   // v2.0a — conditional-context tier (the master primitive for "when does this fire?").

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  extractCustomPermission,
   extractFlexiPage,
   extractListView,
   extractPermissionSetGroup,
@@ -33,6 +34,31 @@ describe('enterprise metadata extractors', () => {
       // why_cant_user_see_record / who_can_access_object key their restriction
       // caveats on parentId, so null here = the caveat never fires on real orgs.
       expect(result.value.nodes[0]?.parentId).toBe('CustomObject:Account');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // CR-CAP-15: CustomPermission DEFINITION nodes (the grant target CR-CAP-10
+  // points at). Reuses extractEnterpriseMetadata with a flat top-level config.
+  it('extracts a CustomPermission definition node (flat top-level id, no parent)', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'SkipValidation.customPermission-meta.xml');
+      await writeFile(
+        path,
+        '<CustomPermission xmlns="http://soap.sforce.com/2006/04/metadata"><label>Skip Validation</label></CustomPermission>',
+        'utf8',
+      );
+      const result = await extractCustomPermission(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.nodes[0]?.id).toBe('CustomPermission:SkipValidation');
+      expect(result.value.nodes[0]?.type).toBe('CustomPermission');
+      expect(result.value.nodes[0]?.apiName).toBe('SkipValidation');
+      // Flat top-level convention (like RemoteSiteSetting/AuthProvider): no
+      // parent scope, so the grant edge target id matches a bare <name> grant.
+      expect(result.value.nodes[0]?.parentId).toBe(null);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

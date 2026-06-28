@@ -151,6 +151,28 @@ describe('walkAndExtract skip-counter (architectural-bug-fix observability)', ()
     }
   });
 
+  it('dispatches a top-level CustomPermission definition file to a node (CR-CAP-15)', async () => {
+    const root = await makeTempRoot();
+    try {
+      // customPermissions/{Name}.customPermission-meta.xml is a flat top-level
+      // dispatch. Fail-before: no dispatch branch -> file is walked but never
+      // routed, so no CustomPermission node is emitted and it inflates the
+      // skip count. Pass-after: a CustomPermission:SkipValidation node exists.
+      await writeAt(
+        root,
+        'customPermissions/SkipValidation.customPermission-meta.xml',
+        '<?xml version="1.0"?><CustomPermission xmlns="http://soap.sforce.com/2006/04/metadata"><label>Skip Validation</label></CustomPermission>',
+      );
+
+      const walked = await walkAndExtract(root, null);
+      const ids = walked.results.flatMap((r) => r.nodes.map((n) => n.id));
+      expect(ids).toContain('CustomPermission:SkipValidation');
+      expect(walked.skippedDirectories.customPermissions).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('does not count static-resource content files as an uncovered-type skip', async () => {
     const root = await makeTempRoot();
     try {
