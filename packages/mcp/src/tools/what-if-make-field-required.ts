@@ -132,6 +132,12 @@ const MAKE_REQUIRED_COVERAGE = [
   'VisualforcePage',
   'VisualforceComponent',
   'FlexiPage',
+  // CR-CAP-01: declarative populators credited via the inbound-writesTo walk.
+  // Listing these means the coverageCaveat reflects the new dependency families
+  // (an org whose refresh skipped workflow/approval metadata cannot have those
+  // populator findings, so absence ≠ "no populator").
+  'WorkflowRule',
+  'ApprovalProcess',
 ] as const;
 
 /** Finding category per WhatIfSemantics.md § "Category assignment rules". */
@@ -197,7 +203,7 @@ export interface WhatIfMakeFieldRequiredOutput {
  * coverage — DELIBERATELY NOT IMPLEMENTED".
  */
 const DISCLOSURE =
-  "the analysis checks layouts (UI input paths), Flow create paths, and integration write surfaces. Apex `insert acc;` sites that may or may not set the field are invisible — determining whether `acc.Industry__c` was assigned before the insert requires dataflow analysis. If your org has Apex create paths, verify the field is set before making required.";
+  "the analysis checks layouts (UI input paths), Flow create paths, and integration write surfaces, and credits declarative populators (Flow / Workflow field-updates / Approval field-updates) that may set the field — noting that conditional writers do not guarantee population, so a populator alone never makes the field safe to require. Apex `insert acc;` sites that may or may not set the field are invisible — determining whether `acc.Industry__c` was assigned before the insert requires dataflow analysis. If your org has Apex create paths, verify the field is set before making required.";
 
 const coverageCaveatFor = (ctx: Context): CoverageCaveat | undefined => {
   const coverage = summarizeCoverage(ctx.manifest, MAKE_REQUIRED_COVERAGE);
@@ -456,6 +462,79 @@ const flowCreatesParentRecords = async (
 };
 
 /**
+ * CR-CAP-01 — a declarative populator discovered on the field's inbound
+ * `writesTo` edges: a WorkflowRule field-update or an ApprovalProcess
+ * field-update (CR-05 + CR-CAP-07) that SETS this field.
+ */
+interface DeclarativePopulator {
+  readonly componentId: ComponentId;
+  readonly componentType: ComponentType;
+  readonly apiName: string;
+  /** `properties.operation` on the writesTo edge (Literal / Formula / …), or null. */
+  readonly operation: string | null;
+}
+
+/**
+ * CR-CAP-01 — credit DECLARATIVE populators of the field.
+ *
+ * Walk the field's INBOUND `writesTo` edges and partition the source nodes by
+ * type, surfacing WorkflowRule and ApprovalProcess field-update writers — the
+ * exact gap named in field-provenance.ts:328 ("Writers of other types (e.g.
+ * WorkflowRule field updates) are skipped"). The WorkflowRule writesTo edges
+ * already exist (CR-05); the ApprovalProcess ones land via CR-CAP-07. Both were
+ * INVISIBLE to this safety tool before.
+ *
+ * Flow writers are intentionally NOT returned here — the Flow create-path loop
+ * above already reasons about Flows with the precise create-vs-update
+ * distinction (a Flow that creates the parent without setting the field is a
+ * metadata-blocker), so re-crediting them here would double-count and could
+ * imply the field is populated on a path the create loop already flagged.
+ *
+ * HONESTY: these are CONDITIONAL writers — a WorkflowRule fires only when its
+ * entry criteria/formula match; an ApprovalProcess field-update fires only on a
+ * specific hook AND only for records that actually go through approval. They set
+ * the field on SOME records on SOME paths; they do NOT guarantee every new
+ * record is populated. The caller therefore credits them as informational
+ * `configuration-only` findings (verdict → `review`), NEVER downgrading the
+ * verdict to `safe`. Sparse-graph misses (a writesTo edge whose source node is
+ * gone) are dropped silently, mirroring collectWriters in field-provenance.ts.
+ */
+const fieldPopulators = async (
+  ctx: Context,
+  fieldId: ComponentId,
+): Promise<Result<readonly DeclarativePopulator[], string>> => {
+  const edgesResult = await listEdges(ctx.graph, fieldId, {
+    direction: 'in',
+    edgeType: 'writesTo',
+  });
+  if (!edgesResult.ok) return err(edgesResult.error.message);
+
+  const populators: DeclarativePopulator[] = [];
+  for (const edge of edgesResult.value) {
+    const fromResult = await getNodeById(ctx.graph, edge.fromId);
+    if (!fromResult.ok) return err(fromResult.error.message);
+    const from = fromResult.value;
+    if (from === null) continue;
+    if (from.type !== 'WorkflowRule' && from.type !== 'ApprovalProcess') {
+      continue;
+    }
+    const op = edge.properties['operation'];
+    populators.push({
+      componentId: from.id,
+      componentType: from.type,
+      apiName: from.apiName,
+      operation: typeof op === 'string' ? op : null,
+    });
+  }
+  // Deterministic order by componentId (final response is re-sorted, but a
+  // stable order here keeps the per-call output reproducible).
+  populators.sort((a, b) =>
+    a.componentId < b.componentId ? -1 : a.componentId > b.componentId ? 1 : 0,
+  );
+  return ok(populators);
+};
+
+/**
  * For an integration (ExternalService / ExternalDataSource), determine
  * whether the integration's outgoing `references` edges touch any
  * field on the parent object. The integration's schema is encoded as
@@ -706,6 +785,36 @@ export const whatIfMakeFieldRequiredHandler = async (
       apiName: flow.apiName,
       confidence: 'parsed',
       explanation: `Flow '${flow.apiName}' creates records on the parent object but does not set this field; the create will fail at runtime under the new required-field constraint.`,
+    });
+  }
+
+  // === Declarative populator coverage (CR-CAP-01) ===
+  // Credit the field's inbound `writesTo` writers that are declarative
+  // automation — WorkflowRule field-updates (CR-05) and ApprovalProcess
+  // field-updates (CR-CAP-07). These were INVISIBLE to this tool before; the
+  // gap was named verbatim in field-provenance.ts:328. They are CONDITIONAL
+  // writers, so they are surfaced as informational `configuration-only`
+  // findings (verdict → `review`) — NOT `metadata-blocker`, and they NEVER
+  // downgrade the verdict to `safe`. The explanation names the writer and its
+  // conditional nature so the reader understands a populator does not guarantee
+  // every new record is filled.
+  const populatorsResult = await fieldPopulators(ctx, fieldId);
+  if (!populatorsResult.ok) {
+    return err({ kind: 'internal', message: populatorsResult.error });
+  }
+  for (const pop of populatorsResult.value) {
+    const opPhrase = pop.operation !== null ? ` (${pop.operation} update)` : '';
+    const writerKind =
+      pop.componentType === 'WorkflowRule'
+        ? 'has a field-update that sets this field, but it fires only when its entry criteria/formula match'
+        : 'has an approval field-update that sets this field, but it fires only on a specific approval hook and only for records that go through approval';
+    impacts.push({
+      category: 'configuration-only',
+      componentId: pop.componentId,
+      componentType: pop.componentType,
+      apiName: pop.apiName,
+      confidence: 'parsed',
+      explanation: `${pop.componentType} '${pop.apiName}' ${writerKind}${opPhrase} — it does not guarantee every new record is populated, so it does not by itself make this field safe to require. Treat it as a partial mitigation to verify, not a guarantee.`,
     });
   }
 
