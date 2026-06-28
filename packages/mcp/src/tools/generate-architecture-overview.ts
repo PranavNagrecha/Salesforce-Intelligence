@@ -34,6 +34,7 @@ import type { Context } from '../server.js';
 
 import { domainClustersHandler } from './domain-clusters.js';
 import {
+  GENERATED_DOC_BUDGET_FLOOR_BYTES,
   INHERITED_CONFIDENCE_DISCLOSURE,
   Q125_FRESHNESS_DISCLOSURE,
   STRUCTURAL_DISCLOSURE,
@@ -285,40 +286,92 @@ export const generateArchitectureOverviewHandler = async (
 
   // CR-08: fit the assembled doc under the response budget BEFORE the global
   // guard so its slimDataStrings never 1024-cuts `document.body` and strips the
-  // honesty footer. When `format: 'html'` the envelope ALSO carries the `html`
-  // string (roughly doubling the bytes), so fit against a halved budget — that
-  // way both `document.body` AND the html built from it stay under the global
-  // guard's reductionCap and neither is silently slimmed. The html is built
-  // from the FITTED body so the saved .html tracks the markdown exactly.
+  // honesty footer.
   const budget = generatedDocByteBudget();
-  const document: GeneratedDocument = fitDocumentToBudget(
-    {
-      frontmatter: {
-        title,
-        generatedAt,
-        sourceTreeHash,
-        componentIds,
-      },
-      body,
-      sectionConfidence,
-      boundaries,
+  const rawDoc = {
+    frontmatter: {
+      title,
+      generatedAt,
+      sourceTreeHash,
+      componentIds,
     },
-    input.format === 'html' ? Math.floor(budget / 2) : budget,
-  );
+    body,
+    sectionConfidence,
+    boundaries,
+  };
 
-  // P11-artifacts-html: when asked, also render a self-contained HTML page so the
-  // overview can be saved as a shareable `.html` artifact (mermaid diagrams and
-  // all). The markdown `document` is always returned regardless of format.
-  const html =
-    input.format === 'html'
-      ? renderHtmlDocument(title, document.body)
-      : undefined;
+  const vaultState = { sourceTreeHash, refreshedAt };
+
+  // Markdown path: identical to every sibling generator — fit the document to
+  // the per-doc budget, return. The 40 KB small-org path is byte-identical.
+  if (input.format !== 'html') {
+    const document = fitDocumentToBudget(rawDoc, budget);
+    return ok({ data: { document }, vaultState });
+  }
+
+  // CR-P3-4 / CR-RV8: html path. The saved artifact is the html string, which
+  // is built FROM `document.body` — so the assembled envelope carries the body
+  // TWICE (once as `document`, once embedded+JSON-escaped inside `html`). The
+  // old `budget / 2` reserve double-counted the body WITHOUT measuring the real
+  // envelope, so a large overview's `html` overflowed the global guard's
+  // reductionCap and was slim-chopped to 1024 chars (no closing `</html>`, a
+  // corrupt artifact). Fix: measure the ACTUAL assembled envelope
+  // `{ data: { document, html }, vaultState }` (matches jsonResult's utf8Bytes)
+  // and shrink the FITTED document until that whole envelope fits — never the
+  // body alone. The html is always rebuilt from the fitted body, so the saved
+  // .html tracks the markdown exactly. If even a minimally-fitted document still
+  // overflows, return a structured `oversize` error rather than a silently
+  // chopped html.
+  const envelopeBytes = (document: GeneratedDocument, html: string): number =>
+    Buffer.byteLength(
+      JSON.stringify({ data: { document, html }, vaultState }),
+      'utf8',
+    );
+
+  const buildFitted = (
+    docBudget: number,
+  ): { document: GeneratedDocument; html: string } => {
+    const document = fitDocumentToBudget(rawDoc, docBudget);
+    const html = renderHtmlDocument(title, document.body);
+    return { document, html };
+  };
+
+  // Try the full budget first (the small-org common case: the assembled
+  // envelope fits well under the cap, so `document` is byte-identical to the
+  // markdown path and the html is returned whole).
+  let docBudget = budget;
+  let fitted = buildFitted(docBudget);
+
+  // Shrink the document budget until the assembled envelope fits the per-doc
+  // budget. Each pass roughly halves the headroom; bounded by the budget floor.
+  while (envelopeBytes(fitted.document, fitted.html) > budget) {
+    const overshoot = envelopeBytes(fitted.document, fitted.html) - budget;
+    const next = docBudget - Math.max(512, overshoot);
+    if (next <= GENERATED_DOC_BUDGET_FLOOR_BYTES) {
+      // Already at the smallest fit and the envelope STILL overflows — the
+      // irreducible document + html cannot fit. Surface a structured oversize
+      // error instead of a slim-chopped, malformed artifact.
+      const minimal = buildFitted(GENERATED_DOC_BUDGET_FLOOR_BYTES);
+      if (envelopeBytes(minimal.document, minimal.html) > budget) {
+        return err({
+          kind: 'oversize',
+          message:
+            `The architecture overview html artifact (~${Math.round(
+              envelopeBytes(minimal.document, minimal.html) / 1000,
+            ).toString()} KB even after maximal reduction) exceeds the response budget ` +
+            `(~${Math.round(budget / 1000).toString()} KB, SFI_MAX_RESPONSE_BYTES). ` +
+            'Request `format: "markdown"` (the document is returned without the doubled html), or raise SFI_MAX_RESPONSE_BYTES.',
+        });
+      }
+      fitted = minimal;
+      break;
+    }
+    docBudget = next;
+    fitted = buildFitted(docBudget);
+  }
 
   return ok({
-    data: html === undefined ? { document } : { document, html },
-    vaultState: {
-      sourceTreeHash,
-      refreshedAt,
-    },
+    data: { document: fitted.document, html: fitted.html },
+    vaultState,
   });
 };
