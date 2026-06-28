@@ -224,6 +224,31 @@ const buildFlowEdges = (
 };
 
 /**
+ * CR-CAP-10: emit one `grantedBy` edge per `<customPermissions>` entry with
+ * `<enabled>` true — the custom permissions this profile CONFERS. Element shape
+ * `<customPermissions><name>X</name><enabled>true|false</enabled>` (VERIFIED
+ * against real source; the `<enabled>` gate is mandatory — `enabled=false`
+ * confers nothing). Symmetric with the permission-set extractor; this vault has
+ * 0 profiles using the element, but the Salesforce schema is identical so the
+ * parse is forward-looking. The target id is the flat `CustomPermission:{name}`
+ * (CR-CAP-15's definition node); a name with no definition becomes a
+ * `targetMissing` edge the consumer discloses (no fabricated node).
+ */
+const buildCustomPermissionEdges = (
+  rootObj: Record<string, unknown>,
+  fromId: string,
+): Edge[] => {
+  const edges: Edge[] = [];
+  for (const entry of iterEntries(rootObj, 'customPermissions')) {
+    if (!coerceBoolean(unwrapSingle(entry['enabled']))) continue;
+    const name = String(unwrapSingle(entry['name']) ?? '');
+    if (name.length === 0) continue;
+    edges.push(grantedByEdge(fromId, `CustomPermission:${name}`, { enabled: true }));
+  }
+  return edges;
+};
+
+/**
  * Collect the profile's login-security restrictions onto properties (login is a
  * Profile-only concern — permission sets don't carry it). `loginHours` is the
  * per-weekday allowed window(s); `loginIpRanges` the allowed IP CIDR ranges.
@@ -398,6 +423,7 @@ interface GrantCounts {
   readonly applicationVisibilities: readonly ApplicationVisibilityEntry[];
   readonly tabVisibilities: readonly TabVisibilityEntry[];
   readonly flowGrantCount: number;
+  readonly customPermissionGrantCount: number;
   readonly loginIpRanges: readonly Record<string, string>[];
   readonly loginHoursDefined: boolean;
 }
@@ -425,7 +451,9 @@ const buildProperties = (
  * edges (sorted by `toId`): `objectPermissions` -> `CustomObject:{object}`
  * (all-false skipped); `fieldPermissions` -> `CustomField:{Object.Field}`
  * (both-false skipped); `classAccesses` -> `ApexClass:{apexClass}`
- * (disabled skipped). Enabled `userPermissions` names are collected onto
+ * (disabled skipped); `flowAccesses` -> `Flow:{flow}` (disabled skipped);
+ * `customPermissions` -> `CustomPermission:{name}` (`enabled=false` skipped,
+ * CR-CAP-10). Enabled `userPermissions` names are collected onto
  * `Node.properties.userPermissions` (sorted) rather than as edges, since
  * system permissions don't correspond to graph nodes in v0.1.
  *
@@ -505,6 +533,7 @@ export const extractProfile = async (
   const fieldEdges = fieldEdgesResult.value;
   const classEdges = buildClassEdges(rootObj, nodeId);
   const flowEdges = buildFlowEdges(rootObj, nodeId);
+  const customPermissionEdges = buildCustomPermissionEdges(rootObj, nodeId);
   const userPermissions = collectEnabledUserPermissions(rootObj);
   const layoutAssignments = collectLayoutAssignments(rootObj);
   const recordTypeVisibilities = collectRecordTypeVisibilities(rootObj);
@@ -512,7 +541,7 @@ export const extractProfile = async (
   const tabVisibilities = collectTabVisibilities(rootObj);
   const { loginIpRanges, loginHoursDefined } = collectLoginRestrictions(rootObj);
 
-  const edges: Edge[] = [...objectEdges, ...fieldEdges, ...classEdges, ...flowEdges].sort(
+  const edges: Edge[] = [...objectEdges, ...fieldEdges, ...classEdges, ...flowEdges, ...customPermissionEdges].sort(
     (a, b) => (a.toId < b.toId ? -1 : a.toId > b.toId ? 1 : 0),
   );
 
@@ -536,6 +565,7 @@ export const extractProfile = async (
       applicationVisibilities,
       tabVisibilities,
       flowGrantCount: flowEdges.length,
+      customPermissionGrantCount: customPermissionEdges.length,
       loginIpRanges,
       loginHoursDefined,
     }),

@@ -10,6 +10,12 @@
  *   - **actionPermissions** — the "do / run / export / transfer / convert"
  *     class of system permissions present on the container (filtered from
  *     `userPermissions`), the ones that aren't object CRUD or pure admin.
+ *   - **customPermissions** — the custom permissions the container CONFERS via
+ *     its `<customPermissions>` grants (CR-CAP-10). Each carries `targetMissing`
+ *     (true when the granted name has no `CustomPermission` definition in the
+ *     vault — managed-package or not-retrieved; declared but not resolvable).
+ *
+ * `declared` confidence — all of this is declared profile/permset metadata.
  *
  * Input: `{ componentId: 'Profile:X' | 'PermissionSet:X', limit?, offset? }`.
  * `declared` confidence — all of this is declared profile/permset metadata.
@@ -92,9 +98,20 @@ export interface UserAbilityOutput {
   };
   /** The action/ability system permissions present (sorted). */
   readonly actionPermissions: readonly string[];
+  /**
+   * CR-CAP-10: the custom permissions this container CONFERS (sorted by name).
+   * `targetMissing` is true when the granted name has no `CustomPermission`
+   * definition node in this vault (a managed-package perm like `APXTConga4__*`,
+   * or a vault refreshed before the definition was retrieved) — the grant is
+   * declared but the definition is not resolvable here. Distinct from
+   * `actionPermissions` (those are SYSTEM `<userPermissions>`, not custom
+   * permissions), so the two are never double-counted.
+   */
+  readonly customPermissions: readonly { readonly name: string; readonly targetMissing: boolean }[];
   readonly summary: {
     readonly runnableFlows: number;
     readonly actionPermissions: number;
+    readonly customPermissions: number;
   };
   readonly limit: number;
   readonly offset: number;
@@ -165,6 +182,31 @@ export const userAbilityHandler = async (
     .filter((p) => ACTION_PERMISSIONS.has(p))
     .sort();
 
+  // CR-CAP-10: custom permissions this container confers. The extractor emits a
+  // `grantedBy` edge to `CustomPermission:{name}` per enabled `<customPermissions>`
+  // block; resolve each name's definition node so a managed-package grant whose
+  // definition is not in the vault is DISCLOSED (targetMissing), not dropped and
+  // not fabricated. Dedup defensively (the edge PK guarantees one per name).
+  const customPermissionIds = [
+    ...new Set(
+      edgesResult.value
+        .filter((e) => e.toId.startsWith('CustomPermission:'))
+        .map((e) => e.toId),
+    ),
+  ].sort();
+  const customPermissions: { name: string; targetMissing: boolean }[] = [];
+  for (const cpId of customPermissionIds) {
+    const cpNode = await getNodeById(ctx.graph, cpId as ComponentId);
+    if (!cpNode.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${cpNode.error.message}` });
+    }
+    customPermissions.push({
+      name: cpId.slice('CustomPermission:'.length),
+      targetMissing: cpNode.value === null,
+    });
+  }
+  const missingCustomPerms = customPermissions.filter((c) => c.targetMissing).length;
+
   // Login restrictions (Profile only).
   const ipRanges = node.properties['loginIpRanges'];
   const ipRangeCount = Array.isArray(ipRanges) ? ipRanges.length : 0;
@@ -219,7 +261,12 @@ export const userAbilityHandler = async (
         applies: isProfile,
       },
       actionPermissions,
-      summary: { runnableFlows: total, actionPermissions: actionPermissions.length },
+      customPermissions,
+      summary: {
+        runnableFlows: total,
+        actionPermissions: actionPermissions.length,
+        customPermissions: customPermissions.length,
+      },
       limit,
       offset,
       hasMore,
@@ -227,7 +274,10 @@ export const userAbilityHandler = async (
       ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
       confidence: 'declared',
       boundaryNote:
-        'runnableFlows = the flowAccess grants on this container; actionPermissions are declared system permissions. The user must be ASSIGNED this profile/permission set to gain them (runtime, not modeled). Login restrictions are Profile-only (`applies: false` for a permission set). Flow run access also requires the flow to be active.',
+        'runnableFlows = the flowAccess grants on this container; actionPermissions are declared system permissions; customPermissions are declared `<customPermissions>` grants (custom permissions are NOT system userPermissions, so they are not double-counted with actionPermissions). The user must be ASSIGNED this profile/permission set to gain them (runtime, not modeled). Login restrictions are Profile-only (`applies: false` for a permission set). Flow run access also requires the flow to be active.'
+        + (missingCustomPerms > 0
+          ? ` ${missingCustomPerms} granted custom permission(s) name a definition not present in this vault (targetMissing) — likely managed-package or not retrieved; the grant is declared but the definition is not resolvable here.`
+          : ''),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
