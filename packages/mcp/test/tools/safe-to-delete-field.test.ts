@@ -536,6 +536,42 @@ describe('safeToDeleteFieldHandler', () => {
     expect(result.value.data.trust.completeness.status).toBe('partial');
   });
 
+  it('CR-P3-3: retrieveConfirmed-empty deletion-coverage types yield safe + NO caveat', async () => {
+    // A zero-of-those org where SharingRule/Report/Dashboard/ListView/etc. were
+    // CONFIRMED-CLEAN empty (describe confirmed support + clean retrieve returned
+    // zero), while the code/layout families are covered. Before CR-P3-3 these
+    // empty rows were partial -> buildCoverageCaveat fired -> safe flipped to
+    // review. Now confirmed-empty == complete, so an unreferenced field is plainly
+    // safe with no coverageCaveat.
+    const coverage = FIXTURE_MANIFEST.coverage ?? [];
+    const emptyButConfirmed = new Set([
+      'SharingRule',
+      'Report',
+      'Dashboard',
+      'ListView',
+      'ReportType',
+      'FlexiPage',
+      'WorkflowRule',
+    ]);
+    const confirmedCtx: Context = {
+      ...ctx,
+      manifest: {
+        ...FIXTURE_MANIFEST,
+        coverage: coverage.map((entry) =>
+          emptyButConfirmed.has(entry.type)
+            ? { ...entry, retrieved: 0, retrieveConfirmed: true }
+            : { ...entry, retrieveConfirmed: true },
+        ),
+      },
+    };
+    const result = await safeToDeleteFieldHandler(confirmedCtx, { fieldId: SAFE_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.verdict).toBe('safe');
+    expect(result.value.data.coverageCaveat).toBeUndefined();
+    expect(result.value.data.trust.completeness.status).toBe('complete');
+  });
+
   it('returns blocking with an analytics category for a Report-referenced field', async () => {
     const result = await safeToDeleteFieldHandler(ctx, { fieldId: REPORT_FIELD });
     expect(result.ok).toBe(true);

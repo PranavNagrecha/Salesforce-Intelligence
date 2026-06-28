@@ -627,6 +627,26 @@ export interface CoverageEntry {
    * as partial coverage — absence-claim caveats still fire.
    */
   readonly pending?: boolean;
+  /**
+   * CR-P3-3: true ONLY when the Metadata API CONFIRMED-CLEAN retrieved this
+   * type — i.e. the org's `sf org list metadata-types` describe was non-null
+   * AND listed this type, AND `sf project retrieve` for it returned with no
+   * error (the type landed in `retrieveWithFallback.succeeded`). This is the
+   * one honest signal that disambiguates "retrieved, the org genuinely has
+   * zero of this type" (confirmed-empty, COMPLETE) from "not-retrieved /
+   * silently-dropped / describe-blind" (the byte-identical
+   * {requested:true,retrieved:0,errored:false,neverModeled:false} row), which
+   * stays partial.
+   *
+   * HONESTY: absence === false. Old manifests (pre-signal), `--no-pull`
+   * rebuilds (no retrieve ran), describe-blind pulls (could not prove the org
+   * supports the type), and in-memory backfilled rows all leave this unset, so
+   * they keep firing absence caveats until a full live `sfi refresh`
+   * repopulates coverage. It is NEVER set from `requested` alone (`requested`
+   * only means "in package.xml", which does not prove the retrieve completed)
+   * and NEVER for a capped/dropped (`pending`) type.
+   */
+  readonly retrieveConfirmed?: boolean;
 }
 
 // ============================================================================

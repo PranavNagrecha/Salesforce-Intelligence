@@ -107,6 +107,69 @@ describe('healthCheckHandler: healthy', () => {
   });
 });
 
+describe('healthCheckHandler: CR-P3-3 confirmed-empty vs unconfirmed-empty coverage', () => {
+  let vaultRoot: string;
+  let store: GraphStore;
+  let realHash: string;
+
+  beforeAll(async () => {
+    vaultRoot = await mkdtemp(join(tmpdir(), 'sfi-mcp-health-conf-'));
+    realHash = await seedSourceTree(vaultRoot);
+    const opened = await openGraph(join(vaultRoot, 'graph.duckdb'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    store = opened.value;
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    await rm(vaultRoot, { recursive: true, force: true });
+  });
+
+  it('stays healthy when an empty type is retrieveConfirmed (confirmed-empty == complete)', async () => {
+    const ctx: Context = {
+      vaultRoot,
+      graph: store,
+      manifest: {
+        ...baseManifest(realHash),
+        coverage: [
+          { type: 'CustomObject', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+          { type: 'SharingRule', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
+        ],
+      },
+    };
+    const result = await healthCheckHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.status).toBe('healthy');
+    expect(
+      result.value.data.issues.some((i) => i.includes('coverage is partial')),
+    ).toBe(false);
+  });
+
+  it('reports degraded when the same empty type is NOT retrieveConfirmed (honesty preserved)', async () => {
+    const ctx: Context = {
+      vaultRoot,
+      graph: store,
+      manifest: {
+        ...baseManifest(realHash),
+        coverage: [
+          { type: 'CustomObject', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+          { type: 'SharingRule', requested: true, retrieved: 0, errored: false, neverModeled: false },
+        ],
+      },
+    };
+    const result = await healthCheckHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.status).toBe('degraded');
+    expect(
+      result.value.data.issues.some(
+        (i) => i.includes('coverage is partial') && i.includes('SharingRule'),
+      ),
+    ).toBe(true);
+  });
+});
+
 describe('healthCheckHandler: staged build in progress (P13-STAGED-tiers)', () => {
   let vaultRoot: string;
   let store: GraphStore;

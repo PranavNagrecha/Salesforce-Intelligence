@@ -271,41 +271,63 @@ export const summarizeCoverage = (
     };
   }
 
-  // A type only counts as covered when the retrieve actually LANDED rows
-  // (`retrieved > 0`). A `pending` row (P13-STAGED-tiers: queued by an
-  // in-progress staged build) and a requested-but-empty row (retrieved === 0)
-  // must NEVER count as covered: the coverage data model cannot distinguish
-  // "retrieve confirmed the org has zero of this type" from "retrieve ran but
-  // silently pulled nothing / dropped the members" — both persist the
-  // identical {requested:true, retrieved:0, errored:false, neverModeled:false}
-  // row. The honest reading is therefore "not confirmed", so those rows are
-  // routed into partial/missingCoverage (below) and keep absence-claim caveats
-  // firing rather than reporting a false "complete"/"none in the org".
+  // CR-P3-3 TRI-STATE for a requested, non-errored, non-pending, modeled row:
+  //  (a) retrieved > 0                 -> COVERED (rows actually landed).
+  //  (b) retrieved === 0 AND
+  //      retrieveConfirmed === true    -> COVERED (the describe confirmed the
+  //                                       org supports this type AND the clean
+  //                                       retrieve returned zero members == the
+  //                                       org genuinely has none == complete,
+  //                                       no caveat). `retrieveConfirmed` is set
+  //                                       ONLY from a confirmed-supported,
+  //                                       cleanly-retrieved pull (refresh.ts),
+  //                                       never from `requested` alone, so a
+  //                                       silently-dropped / describe-blind
+  //                                       empty pull does NOT reach here.
+  //  (c) retrieved === 0 AND
+  //      retrieveConfirmed unset/false -> PARTIAL (the not-retrieved /
+  //                                       silently-dropped / pre-signal-manifest
+  //                                       / --no-pull case). The coverage data
+  //                                       model otherwise cannot distinguish
+  //                                       "confirmed zero" from "dropped" — both
+  //                                       persist the identical
+  //                                       {requested:true,retrieved:0,
+  //                                        errored:false,neverModeled:false}
+  //                                       row — so the honest reading stays
+  //                                       "not confirmed": routed into
+  //                                       partial/missingCoverage so absence
+  //                                       caveats keep firing.
+  // A `pending` row (P13-STAGED-tiers / reports-cap) is excluded from BOTH
+  // covered branches by the `pending !== true` guard, so a capped/dropped pull
+  // can never read as confirmed-empty even if it carries retrieveConfirmed.
   const coveredTypes = filtered
     .filter(
       (entry) =>
         entry.requested &&
-        entry.retrieved > 0 &&
+        (entry.retrieved > 0 || entry.retrieveConfirmed === true) &&
         !entry.errored &&
         !entry.neverModeled &&
         entry.pending !== true,
     )
     .map((entry) => entry.type);
   // Requested, non-errored, non-pending, modeled types that retrieved ZERO
-  // rows. Mirrors `coverage-report.ts` `partitionCoverage`, which already
-  // classifies `retrieved === 0` as partial — keeping summarizeCoverage in
-  // lockstep is what stops coverage_report from self-contradicting (summary
-  // said "complete" while its own `partial[]` listed these zero-retrieved
-  // types). Disjoint from the errored/pending branch below (the `!errored &&
-  // pending !== true` guards), so the union into `partialTypes` never
-  // double-counts. Distinct from `neverModeled` (no extractor) and
-  // `notRequested` (scoped-out), so the three honesty states stay separate and
-  // the a4 I3 notModeled-set cross-check is unaffected.
+  // rows WITHOUT a confirmed-clean retrieve (case (c) above). Mirrors
+  // `coverage-report.ts` `partitionCoverage`, which applies the identical
+  // retrieveConfirmed gate — keeping summarizeCoverage in lockstep is what
+  // stops coverage_report from self-contradicting (summary said "complete"
+  // while its own `partial[]` listed these zero-retrieved types). Disjoint from
+  // the covered branch (the `retrieveConfirmed === true` carve-out) and from
+  // the errored/pending branch below (the `!errored && pending !== true`
+  // guards), so the union into `partialTypes` never double-counts. Distinct
+  // from `neverModeled` (no extractor) and `notRequested` (scoped-out), so the
+  // three honesty states stay separate and the a4 I3 notModeled-set cross-check
+  // is unaffected.
   const emptyTypes = filtered
     .filter(
       (entry) =>
         entry.requested &&
         entry.retrieved === 0 &&
+        entry.retrieveConfirmed !== true &&
         !entry.errored &&
         !entry.neverModeled &&
         entry.pending !== true,

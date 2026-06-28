@@ -146,4 +146,34 @@ describe('coverageReportHandler', () => {
     // trust.completeness mirrors the summary status (line 103).
     expect(data.trust.completeness.status).toBe('partial');
   });
+
+  it('CR-P3-3: a retrieveConfirmed-empty type lands in covered (not partial) and the summary agrees (lockstep)', async () => {
+    // A confirmed-clean empty retrieve (describe confirmed the org supports the
+    // type AND the clean pull returned zero) is COMPLETE. partitionCoverage and
+    // summarizeCoverage must stay in lockstep: the confirmed-empty type appears
+    // in `covered`, NOT `partial`, and summary.coveredTypes agrees — no row is
+    // ever in summary.coveredTypes while coverage_report lists it under partial.
+    const confirmedCtx: Context = {
+      ...ctx,
+      manifest: {
+        ...manifest,
+        coverage: [
+          { type: 'CustomObject', requested: true, retrieved: 2, errored: false, neverModeled: false, retrieveConfirmed: true },
+          { type: 'SharingRule', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
+        ],
+      },
+    };
+    const result = await coverageReportHandler(confirmedCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    expect(data.covered.map((e) => e.type)).toContain('SharingRule');
+    expect(data.partial.map((e) => e.type)).not.toContain('SharingRule');
+    expect(data.summary.coveredTypes).toContain('SharingRule');
+    expect(data.summary.partialTypes).not.toContain('SharingRule');
+    // Lockstep: no row is covered-by-summary but partial-by-partition.
+    for (const t of data.summary.coveredTypes) {
+      expect(data.partial.map((e) => e.type)).not.toContain(t);
+    }
+  });
 });

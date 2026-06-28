@@ -626,6 +626,11 @@ export const runRefresh = async (opts: RunRefreshOptions): Promise<RefreshResult
   const requestedTypes = parseTypeFilter(opts.types);
   const progress = opts.onProgress ?? (() => {});
   let pullManifestTypes: readonly ComponentType[] | null = null;
+  // CR-P3-3: describe-confirmed-and-cleanly-retrieved types from the main
+  // pull. Stays null on `--no-pull` (no retrieve ran) and on a describe-blind
+  // pull, so confirmed-empty reclassification only fires after a full live
+  // refresh whose describe succeeded.
+  let confirmedTypes: ReadonlySet<ComponentType> | null = null;
   let sourceReconcileDeleted = 0;
   let retrieveFailures: readonly RetrieveTypeFailure[] = [];
 
@@ -649,6 +654,7 @@ export const runRefresh = async (opts: RunRefreshOptions): Promise<RefreshResult
     const pulled = await runSfRetrieve(targetOrg, paths.source, requestedTypes);
     if (!pulled.ok) return failed(started, pulled.error, []);
     pullManifestTypes = pulled.value.manifestTypes;
+    confirmedTypes = pulled.value.confirmedTypes;
     sourceReconcileDeleted = pulled.value.deletedCount;
     retrieveFailures = pulled.value.failures;
     if (sourceReconcileDeleted > 0) {
@@ -840,6 +846,7 @@ export const runRefresh = async (opts: RunRefreshOptions): Promise<RefreshResult
     walked,
     opts,
     requestedTypes,
+    confirmedTypes,
     snapshotOnRefresh: configResult.value.snapshotOnRefresh,
     retrieveFailures,
     ...(reconciledTypes !== null ? { reconciledTypes } : {}),
@@ -943,6 +950,12 @@ interface RunWithOpenGraphArgs {
   readonly walked: Awaited<ReturnType<typeof walkAndExtract>>;
   readonly opts: RunRefreshOptions;
   readonly requestedTypes: ReadonlySet<ComponentType> | null;
+  /**
+   * CR-P3-3: describe-confirmed, cleanly-retrieved types from the main pull;
+   * null on `--no-pull` (no retrieve ran) and on a describe-blind pull. Drives
+   * `CoverageEntry.retrieveConfirmed` in `buildCoverageEntries`.
+   */
+  readonly confirmedTypes: ReadonlySet<ComponentType> | null;
   readonly snapshotOnRefresh: boolean;
   /** Metadata types that failed the retrieve this run (empty on a clean pull). */
   readonly retrieveFailures: readonly RetrieveTypeFailure[];
@@ -987,6 +1000,7 @@ const buildCoverageEntries = (
   requestedTypes: ReadonlySet<ComponentType> | null,
   sourceRoot: string,
   failures: readonly RefreshExtractionFailure[],
+  confirmedTypes: ReadonlySet<ComponentType> | null,
 ): readonly CoverageEntry[] => {
   const failuresByType = aggregateFailuresByType(sourceRoot, failures);
   const entries: CoverageEntry[] = [];
@@ -994,6 +1008,18 @@ const buildCoverageEntries = (
     const requested = requestedTypes === null || requestedTypes.has(type);
     const failureInfo = failuresByType.get(type);
     const errored = failureInfo !== undefined && failureInfo.count > 0;
+    // CR-P3-3: `retrieveConfirmed` is set ONLY when the describe-confirmed,
+    // cleanly-retrieved set (`confirmedTypes`, null on `--no-pull` /
+    // describe-blind pull) contains this type AND it did not error. This is the
+    // sole honest signal that a `retrieved: 0` row is a CONFIRMED-empty org
+    // (reclassifiable to complete) rather than a not-retrieved / dropped one.
+    // It is NOT derived from `requested` (in-package.xml ≠ retrieve completed)
+    // and stays unset for capped/dropped types — `decorateReportsCapCoverage`
+    // marks those `pending`, and the classifiers require `pending !== true`
+    // before honoring `retrieveConfirmed`, so a capped/dropped pull never reads
+    // as confirmed-empty even though it may carry retrieveConfirmed.
+    const retrieveConfirmed =
+      confirmedTypes !== null && confirmedTypes.has(type) && !errored;
     entries.push({
       type,
       requested,
@@ -1001,6 +1027,7 @@ const buildCoverageEntries = (
       errored,
       ...(errored ? { errorReason: failureInfo.sampleReason } : {}),
       neverModeled: false,
+      ...(retrieveConfirmed ? { retrieveConfirmed: true } : {}),
     });
   }
 
@@ -1265,7 +1292,7 @@ const persistResolveIndexBestEffort = async (
 };
 
 const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResult> => {
-  const { store, paths, started, targetOrg, walked, opts, requestedTypes } = args;
+  const { store, paths, started, targetOrg, walked, opts, requestedTypes, confirmedTypes } = args;
   const progress = opts.onProgress ?? (() => {});
   if (args.publishOnly === true && opts.stagedMarker === undefined) {
     await persistResolveIndexBestEffort(paths.graphDb, store);
@@ -1403,6 +1430,7 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
         requestedTypes,
         paths.source,
         walked.failures,
+        confirmedTypes,
       ),
       opts.stagedMarker,
     ),
@@ -2412,6 +2440,15 @@ interface SfRetrieveResult {
   readonly deletedCount: number;
   /** Types that failed mid-retrieve and were skipped so the rest could land. */
   readonly failures: readonly RetrieveTypeFailure[];
+  /**
+   * CR-P3-3: the set of types whose retrieve was CONFIRMED-CLEAN — the org
+   * describe was non-null AND listed the type AND `sf project retrieve`
+   * returned with no error. NULL when the describe probe failed (describe-blind
+   * pull): we cannot prove the org supports any type, so a clean empty pull is
+   * not trustworthy and NO type may read as confirmed-empty. Drives
+   * `CoverageEntry.retrieveConfirmed`.
+   */
+  readonly confirmedTypes: ReadonlySet<ComponentType> | null;
 }
 
 /**
@@ -2624,10 +2661,24 @@ const runSfRetrieve = async (
   if (outcome.succeeded.length === 0) {
     return err(`sf project retrieve failed: ${summarizeRetrieveFailures(outcome.failures)}`);
   }
+  // CR-P3-3: a type is CONFIRMED-CLEAN-retrieved only when the org describe
+  // was non-null (so we know the org actually supports the type) AND the type
+  // landed in `succeeded`. When the describe probe failed (`orgTypes === null`,
+  // describe-blind pull), `selectManifestTypes` passed the FULL supported set
+  // through unfiltered, so a clean wildcard retrieve of a type the org does not
+  // have can land zero members with `ok` and no error — that is NOT a
+  // trustworthy confirmed-empty. So `confirmedTypes` is null in the
+  // describe-blind case, blocking every type from reading as confirmed-empty.
+  // `succeeded ⊆ manifestTypes ⊆ orgTypes` (selectManifestTypes already
+  // intersected with the describe), so the succeeded set is exactly the
+  // describe-confirmed-and-landed set.
+  const confirmedTypes =
+    orgTypes === null ? null : new Set<ComponentType>(outcome.succeeded);
   return ok({
     manifestTypes: outcome.succeeded,
     deletedCount: outcome.deletedCount,
     failures: outcome.failures,
+    confirmedTypes,
   });
 };
 
