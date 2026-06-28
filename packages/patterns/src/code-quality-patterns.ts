@@ -219,25 +219,68 @@ const enclosingBlockStart = (stripped: string, offset: number): number => {
 };
 
 /**
- * Offset of the `{` that opens the ENCLOSING METHOD (or class) body that
- * contains `offset`, found by walking out one enclosing block at a time
- * until the block's controlling clause looks like a method/ctor signature
- * (`) {`) rather than a control-flow header (`if`/`for`/`while`/`try`/…).
- * Falls back to the outermost block (or 0) when no method-shaped block is
- * found. Offsets align with `source`.
+ * Reserved Apex statement / control-flow keywords that must NEVER be treated
+ * as a declared TYPE. Single source of truth for two consumers:
+ *   1. `enclosingMethodStart` — distinguishes a method body (token before the
+ *      param `(` is a method NAME) from a control-flow header (`if`/`for`/…).
+ *   2. `resolveVarSObjectType` — the declaration regex (`<Type> var`) has no
+ *      keyword guard, so a statement like `return acc;` would otherwise be
+ *      parsed as type=`return`, var=`acc` (CR-RV9). Rejecting these keywords
+ *      makes the resolver fall through to the safe loose-path degrade.
+ * The set is a SUPERSET of the old local control-flow set: `return`, `throw`,
+ * `new`, `final`, `do`, `try` are added (they were never valid method-name
+ * tokens before a `(`, so the extra entries are harmless to consumer 1, and
+ * they ARE the statement keywords the resolver must reject for consumer 2).
+ */
+const APEX_NON_TYPE_KEYWORDS = new Set([
+  'if',
+  'for',
+  'while',
+  'switch',
+  'catch',
+  'else',
+  'return',
+  'throw',
+  'new',
+  'final',
+  'do',
+  'try',
+]);
+
+/**
+ * Offset boundaries of the ENCLOSING METHOD (or class) body that contains
+ * `offset`, found by walking out one enclosing block at a time until the
+ * block's controlling clause looks like a method/ctor signature (`) {`)
+ * rather than a control-flow header (`if`/`for`/`while`/`try`/…). Returns
+ * `{ bodyStart, sigStart }`:
+ *   - `bodyStart` — offset of the method body's `{` (the prior behaviour).
+ *   - `sigStart`  — offset of the parameter-list `(` for the method-shaped
+ *     block, i.e. the start of the SIGNATURE span `[sigStart, bodyStart)`
+ *     which contains the param list incl. its closing `)`. Falls back to
+ *     `bodyStart` when no method shape is found (outermost / 0 fallbacks).
+ * Offsets align with `source`.
  *
- * Used as the WIDER fallback window for the CRUD-check recognizer: an
+ * `bodyStart` is the WIDER fallback window for the CRUD-check recognizer: an
  * early-return / throw guard at the top of a method (`if (!X.isUpdateable())
  * throw ...; ... update x;`) lives in method scope, not the DML's innermost
  * block, so a same-method write-CRUD hint on the RESOLVED sObject is allowed
  * to clear the finding (the dominant guard idiom).
+ *
+ * `sigStart` exposes the parameter list to `resolveVarSObjectType` so a DML
+ * target that is a method PARAMETER (`void save(Account acc){ … insert acc; }`,
+ * the dominant service idiom) resolves to its SObject type — without it the
+ * resolver window starts AFTER the param list and the type is invisible,
+ * forcing the loose any-gate clear (CR-P3-2 security false-negative).
  */
-const enclosingMethodStart = (stripped: string, offset: number): number => {
+const enclosingMethodStart = (
+  stripped: string,
+  offset: number,
+): { bodyStart: number; sigStart: number } => {
   let cursor = offset;
   let outermost = 0;
   for (let guard = 0; guard < 64; guard += 1) {
     const blockOpen = enclosingBlockStart(stripped, cursor);
-    if (blockOpen === 0) return outermost;
+    if (blockOpen === 0) return { bodyStart: outermost, sigStart: outermost };
     outermost = blockOpen;
     // Inspect the text immediately before the `{`: a method/ctor body opens
     // after a `)` (the parameter list), whereas an `if`/`for`/`while`/`try`
@@ -254,21 +297,17 @@ const enclosingMethodStart = (stripped: string, offset: number): number => {
         const end = k;
         while (k >= 0 && /[A-Za-z_0-9]/.test(stripped[k] ?? '')) k -= 1;
         const word = stripped.slice(k + 1, end + 1);
-        const controlFlow = new Set([
-          'if',
-          'for',
-          'while',
-          'switch',
-          'catch',
-          'else',
-        ]);
-        if (!controlFlow.has(word)) return blockOpen; // method / ctor body
+        if (!APEX_NON_TYPE_KEYWORDS.has(word)) {
+          // Method / ctor body. The signature span `[paramOpen, blockOpen)`
+          // contains the param list incl. its closing `)`.
+          return { bodyStart: blockOpen, sigStart: paramOpen };
+        }
       }
     }
     // Otherwise climb to the parent block.
     cursor = blockOpen;
   }
-  return outermost;
+  return { bodyStart: outermost, sigStart: outermost };
 };
 
 /**
@@ -797,7 +836,13 @@ const resolveVarSObjectType = (
   const decl = declRe.exec(methodWindow);
   if (decl !== null && decl[1] !== undefined) {
     const t = unwrapType(decl[1]);
-    if (t.length > 0 && t !== varName) return t;
+    // CR-RV9: the decl regex has no keyword guard, so a statement like
+    // `return acc;` matches with t=`return`. Reject reserved statement /
+    // control-flow keywords as bogus types — fall through (do NOT return) so
+    // the `new Type(` RHS fallback still runs, then null → safe loose-path.
+    if (t.length > 0 && t !== varName && !APEX_NON_TYPE_KEYWORDS.has(t)) {
+      return t;
+    }
   }
   // 2. The `new Type(` shape of the most-recent assignment RHS.
   const rhs = findVarAssignment(source, varName, offset);
@@ -869,14 +914,24 @@ const detectMissingCrudCheck = (
         }
       }
       const blockWindow = stripped.slice(windowStart, m.index);
-      const methodStart = enclosingMethodStart(stripped, m.index);
+      const { bodyStart: methodStart, sigStart } = enclosingMethodStart(
+        stripped,
+        m.index,
+      );
+      // Gate-scan window: from the method BODY `{` (unchanged — the two gate
+      // scans below depend on this exact span).
       const methodWindow = stripped.slice(methodStart, m.index);
+      // Resolver window: WIDER, from the SIGNATURE `(` so a DML target that is
+      // a method PARAMETER (`save(Account acc){ … insert acc; }`) resolves to
+      // its SObject type (CR-P3-2). Signatures carry no CRUD-hint/DML tokens,
+      // so widening only the resolver read does not affect the gate scans.
+      const resolverWindow = stripped.slice(sigStart, m.index);
 
       // Resolve the DML target's sObject type for the sObject-match filter.
       const resolvedType = resolveVarSObjectType(
         source,
         varName,
-        methodWindow,
+        resolverWindow,
         m.index,
       );
 
