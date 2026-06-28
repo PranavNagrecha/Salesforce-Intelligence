@@ -452,6 +452,59 @@ describe('detectCodeQualityIssues — missing-crud-check', () => {
     }`;
     expect(rulesOf(run(src))).not.toContain('missing-crud-check');
   });
+
+  // CR-P3-2 (security FALSE-NEGATIVE): the DML target is a METHOD PARAMETER
+  // (List<Account> accts). enclosingMethodStart returned the body `{`, so the
+  // resolver could not see the param type, fell to the LOOSE path, and the
+  // Contact gate (a DIFFERENT object) wrongly cleared the Account update.
+  // After the param-span fix `accts` resolves to Account → strict path → the
+  // Contact gate does NOT authorize the Account update → MUST flag.
+  it('FLAGS an Account update whose only gate is a Contact check, target a List<Account> param (CR-P3-2)', () => {
+    const src = `public class Svc {
+      public static void save(List<Account> accts) {
+        Schema.sObjectType.Contact.isUpdateable();
+        update accts;
+      }
+    }`;
+    expect(rulesOf(run(src))).toContain('missing-crud-check');
+  });
+
+  // CR-P3-2 single-param variant.
+  it('FLAGS an Account update gated only by a Contact check, target a single Account param (CR-P3-2)', () => {
+    const src = `public class Svc {
+      public static void save(Account acc) {
+        if (Schema.sObjectType.Contact.isUpdateable()) { update acc; }
+      }
+    }`;
+    expect(rulesOf(run(src))).toContain('missing-crud-check');
+  });
+
+  // CR-P3-2 matched-gate MUST-STILL-CLEAR: param resolution must not over-flag.
+  // acc resolves to Account via the param span; the gate matches the resolved
+  // type → strict path clears. (Mirrors eval crud-neg-guarded.)
+  it('does not flag a param-target DML whose in-scope CRUD check matches the resolved param type (CR-P3-2)', () => {
+    const src = `public class Svc {
+      public static void save(Account acc) {
+        if (Schema.sObjectType.Account.isUpdateable()) { update acc; }
+      }
+    }`;
+    expect(rulesOf(run(src))).not.toContain('missing-crud-check');
+  });
+
+  // CR-RV9 (noise FALSE-POSITIVE): `return acc;` was parsed by the decl regex
+  // as a declaration of type `return` (token1=return, token2=acc), forcing the
+  // STRICT path; the real Account gate did not match "return" → wrongly flagged
+  // legitimately-guarded DML. After the keyword-denylist fix `return` is never
+  // a type → acc resolves to Account via the param → matched gate clears.
+  it('does not flag a guarded Account insert preceded by `return acc;` (CR-RV9)', () => {
+    const src = `public class Svc {
+      public static void run(Account acc, Boolean skip) {
+        if (skip) return acc;
+        if (Schema.sObjectType.Account.isCreateable()) { insert acc; }
+      }
+    }`;
+    expect(rulesOf(run(src))).not.toContain('missing-crud-check');
+  });
 });
 
 describe('detectCodeQualityIssues — missing-fls-check', () => {
