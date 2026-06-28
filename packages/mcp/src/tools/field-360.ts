@@ -32,12 +32,18 @@
  *   | automations   | incoming `firesWhen` ConditionalContext + v1.3 rule    | declared/parsed/heuristic |
  *   | emails        | incoming `references` from EmailTemplate with role=body-merge | parsed |
  *   | dependencies  | OUTGOING `references` for formula fields only          | parsed           |
+ *   | listViews     | incoming `references` from ListView (referenceKind:fieldRef) | heuristic   |
  *
  * **Honesty axis** (the v3.0 constitutional rule per Q165):
  *
- *   - `dataNotAvailable: ['list-view-filters', 'reports', 'dashboards']`
- *     surfaces verbatim on EVERY response, regardless of whether the
- *     user's question explicitly named the unavailable categories.
+ *   - `dataNotAvailable` is coverage-aware (CR-CAP-03). `list-view-filters`
+ *     surfaces on EVERY response (filter-predicate evaluation is genuinely
+ *     unmodeled). `reports` / `dashboards` surface ONLY when that family was
+ *     NOT retrieved (coverage status !== 'complete') AND the field carries no
+ *     folded usage for it; when reports/dashboards were retrieved (confirmed
+ *     not-used) or the field is folded-referenced, that data IS available and
+ *     is omitted from `dataNotAvailable`. `FIELD_360_DATA_NOT_AVAILABLE` is the
+ *     full not-retrieved baseline `['list-view-filters','reports','dashboards']`.
  *   - `boundaries[]` carries the verbatim Q165 disclosure naming the
  *     v1.x extraction footprint.
  *   - `confidence` reports `'mixed'` when sections span more than one
@@ -61,6 +67,7 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -103,14 +110,14 @@ const FIELD_360_BYTE_BUDGET = 38_000;
  */
 export const FIELD_360_Q165_DISCLOSURE =
   'v3.0 ships the unified field-forensics composition over the extracted ' +
-  'graph. List view column refs, report/dashboard field usage (folded from ' +
-  'the default capped reports pull or a full `--with-reports` pull), and ' +
-  'list-view filter evaluation are NOT composed into field_360 sections; ' +
-  'use `sfi.find_field_anywhere`, `sfi.list_components`, or the field\'s ' +
-  'folded `usedInReport` / `usedInDashboard` properties for those surfaces. ' +
-  'The report is the COMPLETE answer ONLY for the composed axes ' +
-  '(validation, formula, Apex, Flow, workflow-family, layouts, LWC/Aura/VF/' +
-  'FlexiPage, integration topology, email-template merges).';
+  'graph. Report/dashboard field usage (folded from the default capped ' +
+  'reports pull or a full `--with-reports` pull) and list-view filter ' +
+  'evaluation are NOT composed into field_360 sections; use ' +
+  '`sfi.find_field_anywhere`, `sfi.list_components`, or the field\'s folded ' +
+  '`usedInReport` / `usedInDashboard` properties for those surfaces. The ' +
+  'report is the COMPLETE answer ONLY for the composed axes (validation, ' +
+  'formula, Apex, Flow, workflow-family, layouts, LWC/Aura/VF/FlexiPage, ' +
+  'list views, integration topology, email-template merges).';
 
 /**
  * Verbatim phrase per category for `dataNotAvailable[]`. The order is
@@ -122,7 +129,7 @@ export const FIELD_360_DATA_NOT_AVAILABLE: readonly string[] = [
   'dashboards',
 ];
 
-/** The eight content sections `includeSections` can request. */
+/** The content sections `includeSections` can request. */
 const SECTION_NAMES = [
   'validates',
   'formulas',
@@ -133,6 +140,7 @@ const SECTION_NAMES = [
   'automations',
   'emails',
   'dependencies',
+  'listViews',
   'summary',
 ] as const;
 type SectionName = (typeof SECTION_NAMES)[number];
@@ -233,6 +241,15 @@ export interface Field360Output {
   readonly automations?: Field360Section;
   readonly emails?: Field360Section;
   readonly dependencies?: Field360Section;
+  /**
+   * CR-CAP-02: which list views show/filter this field as a column. Each row's
+   * `ListView:Object.ViewName` → `CustomField` edge is a `references`
+   * (`referenceKind:'fieldRef'`) emitted by the enterprise-metadata extractor's
+   * regex column/filter capture (confidence `heuristic`). Answers "which list
+   * views reference this field"; it does NOT evaluate the saved view's runtime
+   * filter predicate (that gap stays in `dataNotAvailable` as `list-view-filters`).
+   */
+  readonly listViews?: Field360Section;
   readonly summary: Field360Summary;
   readonly boundaries: readonly string[];
   readonly dataNotAvailable: readonly string[];
@@ -540,6 +557,7 @@ interface SectionBuckets {
   automations: Field360Row[];
   emails: Field360Row[];
   dependencies: Field360Row[];
+  listViews: Field360Row[];
 }
 
 const emptyBuckets = (): SectionBuckets => ({
@@ -552,6 +570,7 @@ const emptyBuckets = (): SectionBuckets => ({
   automations: [],
   emails: [],
   dependencies: [],
+  listViews: [],
 });
 
 /**
@@ -636,6 +655,17 @@ const classifyIncomingEdge = (
   // `integrations`: incoming references/exposes from integration types.
   if (INTEGRATION_NODE_TYPES.has(source.type)) {
     buckets.integrations.push(row);
+    return;
+  }
+
+  // `listViews`: incoming references from a ListView column/filter (CR-CAP-02).
+  // The edge is heuristic (regex column extraction by the enterprise-metadata
+  // extractor) with `referenceKind: 'fieldRef'`. ListView is in NONE of the
+  // UI/INTEGRATION/AUTOMATION node-type sets, so without this branch the edge
+  // falls through every case and is dropped silently. Placed before the
+  // line-644 `UI_NODE_TYPES.has` fallback to keep the dispatch explicit.
+  if (source.type === 'ListView' && edge.edgeType === 'references') {
+    buckets.listViews.push(row);
     return;
   }
 
@@ -765,6 +795,7 @@ export const field360Handler = async (
     ['automations', buckets.automations],
     ['emails', buckets.emails],
     ['dependencies', buckets.dependencies],
+    ['listViews', buckets.listViews],
   ];
 
   // CR-22 nested-section cursor. Each section's FULL ordered rows are retained
@@ -890,21 +921,34 @@ export const field360Handler = async (
   // per-category notes naming the unavailable surfaces verbatim.
   const boundaries: string[] = [
     FIELD_360_Q165_DISCLOSURE,
-    'list view column refs are extracted as graph edges but are NOT composed into field_360 sections',
+    'list view column refs ARE composed into the `listViews` section (heuristic — regex column/filter extraction, not the saved view\'s runtime filter evaluation; the `list-view-filters` predicate gap stays in dataNotAvailable)',
   ];
-  // Report / dashboard usage is folded onto the field as a node property by the
-  // `--with-reports` refresh (not an edge), so it appears in no section above.
-  // When present, surface it as a positive in-use signal; when absent, disclose
-  // that report/dashboard usage was not modeled (a now-accurate replacement for
-  // the old static "NOT extracted" lines, which `--with-reports` invalidated).
+  // CR-CAP-03: report / dashboard usage is folded onto the field as a node
+  // property by the reports pull (not an edge — the fold DROPS the report/
+  // dashboard nodes), so it appears in no section above. The honest disclosure
+  // is coverage-aware:
+  //   - folded usage present  -> positive in-use signal (it is NOT unused).
+  //   - no folded usage, BUT the Report/Dashboard families were retrieved
+  //     (coverage 'complete') -> confirmed not-used (retrieved-empty).
+  //   - no folded usage AND the families were NOT retrieved (coverage 'partial'
+  //     /'unknown' — dropped / --no-pull / pre-signal) -> the not-retrieved
+  //     caveat (may still be used outside the pull).
   const analytics = reportDashboardUsage(fieldNode);
+  const analyticsCoverage = summarizeCoverage(ctx.manifest, [
+    'Report',
+    'Dashboard',
+  ]);
   if (analytics.usedInReport || analytics.usedInDashboard) {
     const where = [
       analytics.usedInReport ? 'a report column/filter' : null,
       analytics.usedInDashboard ? 'a dashboard component' : null,
     ].filter((x): x is string => x !== null);
     boundaries.push(
-      `this field IS referenced by ${where.join(' and ')} (folded \`--with-reports\` usage) — it is NOT unused; weigh that before deleting.`,
+      `this field IS referenced by ${where.join(' and ')} (folded reports-pull usage) — it is NOT unused; weigh that before deleting.`,
+    );
+  } else if (analyticsCoverage.status === 'complete') {
+    boundaries.push(
+      'reports/dashboards WERE retrieved and none reference this field — confirmed not-used in any report column/filter or dashboard component (within the retrieved set).',
     );
   } else {
     boundaries.push(REPORT_DASHBOARD_USAGE_CAVEAT);
@@ -943,6 +987,23 @@ export const field360Handler = async (
   const dataShape = await readFactBlock(ctx, fieldId, 'fillRate');
   const annotations = await annotationsBlockFor(ctx, fieldId);
 
+  // CR-CAP-03: `dataNotAvailable` is DYNAMIC. `list-view-filters` is always
+  // listed (filter-predicate evaluation is genuinely unmodeled — CR-CAP-02
+  // surfaces WHICH list views show a field column, which is a different claim).
+  // `reports` / `dashboards` are listed ONLY when the family was NOT retrieved
+  // (coverage status !== 'complete') AND the field carries no folded usage for
+  // it — when reports were retrieved (confirmed not-used) OR the field is
+  // folded-referenced, that data IS available and must not appear here.
+  // FIELD_360_DATA_NOT_AVAILABLE stays exported as the not-retrieved baseline.
+  const dataNotAvailable: string[] = ['list-view-filters'];
+  const reportsRetrieved = analyticsCoverage.status === 'complete';
+  if (!reportsRetrieved && !analytics.usedInReport) {
+    dataNotAvailable.push('reports');
+  }
+  if (!reportsRetrieved && !analytics.usedInDashboard) {
+    dataNotAvailable.push('dashboards');
+  }
+
   return ok({
     data: {
       fieldId,
@@ -954,7 +1015,7 @@ export const field360Handler = async (
       ...sectionsBuilt,
       summary,
       boundaries,
-      dataNotAvailable: FIELD_360_DATA_NOT_AVAILABLE,
+      dataNotAvailable,
       confidence: overallConfidence,
       groupBy,
       ...(dataShape !== undefined ? { dataShape } : {}),

@@ -34,6 +34,19 @@ const FIXTURE_MANIFEST: VaultManifest = {
   sourceTreeHash: 'sha256:field-360-fixture',
 };
 
+// CR-CAP-03: a manifest whose coverage proves Report/Dashboard WERE retrieved
+// (retrieved > 0 -> summarizeCoverage status 'complete'). With this manifest a
+// field that has no folded usage is confirmed-not-used, so `reports`/`dashboards`
+// must drop out of `dataNotAvailable`.
+const COVERAGE_COMPLETE_MANIFEST: VaultManifest = {
+  ...FIXTURE_MANIFEST,
+  components: { Report: 5, Dashboard: 2 },
+  coverage: [
+    { type: 'Report', requested: true, retrieved: 5, errored: false, neverModeled: false },
+    { type: 'Dashboard', requested: true, retrieved: 2, errored: false, neverModeled: false },
+  ],
+};
+
 const makeNode = (overrides: Partial<Node> & Pick<Node, 'id' | 'type'>): Node => ({
   apiName: 'Default',
   label: null,
@@ -79,6 +92,11 @@ const LOOKUP_FIELD = 'CustomField:Payment__c.Sample_Connection__c';
 // disclose that (and point to field_access_audit) so the count is explained.
 const FLS_FIELD = 'CustomField:Account.FLS_Only_Field__c';
 const REPORT_USED_FIELD = 'CustomField:Account.Report_Used__c';
+// CR-CAP-02: a ListView that references the TARGET field as a column. The
+// ListView->CustomField `references` edge exists in the graph (heuristic, regex
+// column extraction) but pre-fix field_360 had no branch for it, so the edge was
+// dropped silently (appeared in NO section).
+const LIST_VIEW = 'ListView:Account.RecentSegments';
 const seed: ExtractionResult = {
   nodes: [
     makeNode({
@@ -169,6 +187,14 @@ const seed: ExtractionResult = {
       parentId: 'CustomObject:Account',
       properties: { dataType: 'Text', usedInReport: true },
     }),
+    // CR-CAP-02: a ListView that shows the TARGET field as a column.
+    makeNode({
+      id: LIST_VIEW,
+      type: 'ListView',
+      apiName: 'RecentSegments',
+      label: 'Recent Segments',
+      parentId: 'CustomObject:Account',
+    }),
   ],
   edges: [
     makeEdge({
@@ -247,6 +273,15 @@ const seed: ExtractionResult = {
         mergeContext: '{!Account.Customer_Segment__c}',
       },
     }),
+    // CR-CAP-02: ListView column ref → TARGET (heuristic, referenceKind fieldRef).
+    makeEdge({
+      fromId: LIST_VIEW,
+      toId: TARGET,
+      edgeType: 'references',
+      confidence: 'heuristic',
+      source: 'enterprise-metadata-extractor',
+      properties: { referenceKind: 'fieldRef' },
+    }),
   ],
 };
 
@@ -305,6 +340,68 @@ describe('field360Handler', () => {
     expect(out.automations?.rows.length).toBe(1);
     expect(out.emails?.rows.length).toBe(1);
     expect(out.emails?.rows[0]?.properties['role']).toBe('body-merge');
+  });
+
+  it('CR-CAP-02 — composes ListView column refs into the listViews section', async () => {
+    // FAIL-BEFORE: classifyIncomingEdge had no branch for a `references` edge
+    // whose source is a ListView, so the edge fell through every case and was
+    // dropped silently (the field appeared in no section). After the fix it
+    // lands in the new `listViews` section.
+    const result = await field360Handler(ctx, { fieldId: TARGET });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.value.data;
+    expect(out.listViews?.rows.length).toBe(1);
+    const row = out.listViews?.rows[0];
+    expect(row?.componentId).toBe(LIST_VIEW);
+    expect(row?.componentType).toBe('ListView');
+    expect(row?.edgeType).toBe('references');
+    expect(row?.confidence).toBe('heuristic');
+    expect(row?.source).toBe('enterprise-metadata-extractor');
+    expect(row?.properties['referenceKind']).toBe('fieldRef');
+    // The per-section count reflects the listViews row too.
+    expect(out.summary.perSectionCounts['listViews']).toBe(1);
+  });
+
+  it('CR-CAP-02 — drops the stale "NOT composed" boundary + Q165 list-view clause', async () => {
+    // FAIL-BEFORE: boundaries carried the verbatim "list view column refs are
+    // extracted as graph edges but are NOT composed into field_360 sections"
+    // line, and FIELD_360_Q165_DISCLOSURE claimed list view column refs are NOT
+    // composed. Both are now false — the refs ARE composed.
+    const result = await field360Handler(ctx, { fieldId: TARGET });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { boundaries } = result.value.data;
+    expect(
+      boundaries.includes(
+        'list view column refs are extracted as graph edges but are NOT composed into field_360 sections',
+      ),
+    ).toBe(false);
+    expect(
+      FIELD_360_Q165_DISCLOSURE.includes(
+        'are NOT composed into field_360 sections',
+      ),
+    ).toBe(true); // the clause survives, but ONLY for report/dashboard + filter eval
+    expect(
+      FIELD_360_Q165_DISCLOSURE.includes('List view column refs'),
+    ).toBe(false);
+    // A present-tense disclosure of the heuristic list-view composition appears.
+    expect(
+      boundaries.some(
+        (b) =>
+          b.includes('listViews') && b.includes('heuristic'),
+      ),
+    ).toBe(true);
+  });
+
+  it('CR-CAP-02 — listViews stays empty for a field with no ListView ref (no fabrication)', async () => {
+    // PASS-AFTER: a field whose only edges are an FLS grant has no ListView ref,
+    // so the listViews section is empty/zero — the fix never fabricates rows.
+    const result = await field360Handler(ctx, { fieldId: FLS_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.listViews?.rows.length).toBe(0);
+    expect(result.value.data.summary.perSectionCounts['listViews']).toBe(0);
   });
 
   it('discloses the FLS/permission-grant exclusion when the field has grantedBy edges', async () => {
@@ -571,6 +668,74 @@ describe('field360Handler', () => {
     expect(out.writers?.count).toBe(2);
     // Sections that fit under the cap show truncatedAtN: null.
     expect(out.validates?.truncatedAtN).toBe(null);
+  });
+});
+
+describe('field360Handler — CR-CAP-03 coverage-aware analytics disclosure', () => {
+  it('not-retrieved manifest keeps reports/dashboards in dataNotAvailable + caveat', async () => {
+    // PASS-AFTER guard: the default fixture manifest has no Report/Dashboard
+    // coverage -> summarizeCoverage status 'unknown' (not 'complete') -> the
+    // families are genuinely not-retrieved, so they STAY in dataNotAvailable and
+    // the REPORT_DASHBOARD_USAGE_CAVEAT boundary stays present. Guards against
+    // over-eager removal.
+    const result = await field360Handler(ctx, { fieldId: TARGET });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.value.data;
+    expect(out.dataNotAvailable).toContain('reports');
+    expect(out.dataNotAvailable).toContain('dashboards');
+    expect(out.dataNotAvailable).toEqual(FIELD_360_DATA_NOT_AVAILABLE);
+    // The not-retrieved caveat (distinctive 'outside that cap' text) is present.
+    expect(out.boundaries.some((b) => b.includes('outside that cap'))).toBe(true);
+  });
+
+  it('retrieved-empty manifest drops reports/dashboards + states confirmed not-used', async () => {
+    // FAIL-BEFORE: dataNotAvailable was the static
+    // ['list-view-filters','reports','dashboards'] regardless of coverage. With
+    // a manifest where Report:5/Dashboard:2 were retrieved (coverage 'complete')
+    // and a field with NO folded usage, reports/dashboards are AVAILABLE
+    // (confirmed-absent), so they must NOT appear in dataNotAvailable, and a
+    // boundary must state reports were retrieved with no reference.
+    const completeCtx: Context = { ...ctx, manifest: COVERAGE_COMPLETE_MANIFEST };
+    const result = await field360Handler(completeCtx, { fieldId: TARGET });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.value.data;
+    expect(out.dataNotAvailable).not.toContain('reports');
+    expect(out.dataNotAvailable).not.toContain('dashboards');
+    // list-view-filters is ALWAYS present (predicate eval genuinely unmodeled).
+    expect(out.dataNotAvailable).toContain('list-view-filters');
+    expect(
+      out.boundaries.some(
+        (b) =>
+          b.includes('WERE retrieved') && b.includes('none reference this field'),
+      ),
+    ).toBe(true);
+    // The not-retrieved CAVEAT must NOT be present when reports were retrieved.
+    // (Note: '--with-reports' also appears in the always-present Q165
+    // disclosure, so we match the caveat's distinctive 'outside that cap' text.)
+    expect(
+      out.boundaries.some((b) => b.includes('outside that cap')),
+    ).toBe(false);
+  });
+
+  it('a folded-used field omits reports from dataNotAvailable even on a not-retrieved manifest', async () => {
+    // PASS-AFTER (used signal preserved): REPORT_USED_FIELD carries
+    // usedInReport:true. Even with the default not-retrieved manifest, reports
+    // is provably AVAILABLE (the field IS used), so 'reports' must NOT appear in
+    // dataNotAvailable. The positive in-use boundary stays.
+    const result = await field360Handler(ctx, { fieldId: REPORT_USED_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.value.data;
+    expect(out.dataNotAvailable).not.toContain('reports');
+    // Dashboard usage is NOT folded on this field and not retrieved -> stays.
+    expect(out.dataNotAvailable).toContain('dashboards');
+    expect(
+      out.boundaries.some(
+        (b) => b.includes('IS referenced') && b.includes('report column/filter'),
+      ),
+    ).toBe(true);
   });
 });
 

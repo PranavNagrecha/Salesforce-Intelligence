@@ -47,6 +47,7 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -55,6 +56,10 @@ import { FIELD_360_Q165_DISCLOSURE } from './field-360.js';
 import { fieldNotFoundError } from './field-not-found-suggest.js';
 import { mergeInputAliases } from './input-aliases.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
+import {
+  REPORT_DASHBOARD_USAGE_CAVEAT,
+  reportDashboardUsage,
+} from './report-dashboard-usage.js';
 import { resolveToFieldOrSuggest } from './resolve-field-or-suggest.js';
 
 /** Canonical id prefix for the CustomField node type. */
@@ -171,8 +176,13 @@ export interface FieldLineageOutput {
   readonly cyclesDetected: boolean;
 }
 
-/** Reused Q165 boundary list — same as `field_360`. */
-const FIELD_LINEAGE_DATA_NOT_AVAILABLE: readonly string[] = [
+/**
+ * The not-retrieved baseline for `dataNotAvailable` — same shape as
+ * `field_360`. CR-CAP-03 makes the emitted array DYNAMIC (see handler): this
+ * full list surfaces only when Report/Dashboard were NOT retrieved and the
+ * field has no folded usage. Exported so tests assert the baseline.
+ */
+export const FIELD_LINEAGE_DATA_NOT_AVAILABLE: readonly string[] = [
   'list-view-filters',
   'reports',
   'dashboards',
@@ -593,6 +603,11 @@ export const fieldLineageHandler = async (
       ),
     );
   }
+  // CR-CAP-03: the field node carries the folded report/dashboard usage flags
+  // (the reports pull DROPS the report/dashboard nodes + edges and stamps
+  // `usedInReport` / `usedInDashboard` booleans). field_lineage previously
+  // discarded this node; capturing it brings the tool to field_360 parity.
+  const fieldNode = fieldResult.value;
 
   let upstreamPayload: UpstreamPayload | undefined;
   let downstreamPayload: DownstreamPayload | undefined;
@@ -637,10 +652,34 @@ export const fieldLineageHandler = async (
     };
   }
 
+  // CR-CAP-03: read the folded report/dashboard usage + coverage so the
+  // report/dashboard boundary line is coverage-aware (parity with field_360,
+  // which lineage previously lacked entirely). list-view column refs are NOT
+  // composed into lineage sections (lineage has no listViews section — out of
+  // CR-CAP-03 scope), so that line stays accurate.
+  const analytics = reportDashboardUsage(fieldNode);
+  const analyticsCoverage = summarizeCoverage(ctx.manifest, [
+    'Report',
+    'Dashboard',
+  ]);
+  let reportDashboardBoundary: string;
+  if (analytics.usedInReport || analytics.usedInDashboard) {
+    const where = [
+      analytics.usedInReport ? 'a report column/filter' : null,
+      analytics.usedInDashboard ? 'a dashboard component' : null,
+    ].filter((x): x is string => x !== null);
+    reportDashboardBoundary = `this field IS referenced by ${where.join(' and ')} (folded reports-pull usage) — it is NOT unused; per-report breakdown is not composed here.`;
+  } else if (analyticsCoverage.status === 'complete') {
+    reportDashboardBoundary =
+      'reports/dashboards WERE retrieved and none reference this field — confirmed not-used (within the retrieved set); per-report breakdown is not composed here.';
+  } else {
+    reportDashboardBoundary = REPORT_DASHBOARD_USAGE_CAVEAT;
+  }
+
   const boundaries: string[] = [
     FIELD_360_Q165_DISCLOSURE,
     'list view column refs are extracted as graph edges but are NOT composed into field_lineage sections',
-    'report/dashboard field usage is folded onto CustomField nodes (default capped pull or `--with-reports`); per-report breakdown is NOT composed here',
+    reportDashboardBoundary,
     'conditions in firesWhen edges are listed but NOT EVALUATED — the tool does not know whether the runtime record satisfies them',
     `lineage walk depth-bounded at ${maxDepth} hops; deeper transitive provenance is NOT walked in this response`,
   ];
@@ -648,6 +687,18 @@ export const fieldLineageHandler = async (
     boundaries.push(
       'cycle detected in the lineage walk; back-edges were short-circuited per the v2.7 cycle discipline',
     );
+  }
+
+  // CR-CAP-03: DYNAMIC dataNotAvailable (same retrieved-vs-not logic as
+  // field_360). `list-view-filters` always; `reports`/`dashboards` only when
+  // NOT retrieved AND no folded usage.
+  const dataNotAvailable: string[] = ['list-view-filters'];
+  const reportsRetrieved = analyticsCoverage.status === 'complete';
+  if (!reportsRetrieved && !analytics.usedInReport) {
+    dataNotAvailable.push('reports');
+  }
+  if (!reportsRetrieved && !analytics.usedInDashboard) {
+    dataNotAvailable.push('dashboards');
   }
 
   return ok({
@@ -660,7 +711,7 @@ export const fieldLineageHandler = async (
         downstream: downstreamPayload,
       }),
       boundaries,
-      dataNotAvailable: FIELD_LINEAGE_DATA_NOT_AVAILABLE,
+      dataNotAvailable,
       cyclesDetected,
     },
     vaultState: {

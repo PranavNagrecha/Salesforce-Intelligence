@@ -20,6 +20,7 @@ import {
 import type { Context } from '../../src/server.js';
 import { FIELD_360_Q165_DISCLOSURE } from '../../src/tools/field-360.js';
 import {
+  FIELD_LINEAGE_DATA_NOT_AVAILABLE,
   fieldLineageHandler,
   fieldLineageInputSchema,
 } from '../../src/tools/field-lineage.js';
@@ -415,6 +416,12 @@ describe('fieldLineageHandler honesty axis', () => {
     expect(result.value.data.boundaries).toContain(
       FIELD_360_Q165_DISCLOSURE,
     );
+    // CR-CAP-03: the default upstream fixture has no Report/Dashboard coverage
+    // (status 'unknown' -> not-retrieved) and TARGET has no folded usage, so the
+    // dynamic dataNotAvailable equals the full not-retrieved baseline.
+    expect(result.value.data.dataNotAvailable).toEqual(
+      FIELD_LINEAGE_DATA_NOT_AVAILABLE,
+    );
     expect(result.value.data.dataNotAvailable).toEqual([
       'list-view-filters',
       'reports',
@@ -440,6 +447,120 @@ describe('fieldLineageHandler honesty axis', () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error.kind).toBe('component-not-found');
+  });
+});
+
+describe('fieldLineageHandler — CR-CAP-03 coverage-aware analytics (field_360 parity)', () => {
+  // A manifest proving Report/Dashboard WERE retrieved (coverage 'complete').
+  const COVERAGE_COMPLETE_MANIFEST: VaultManifest = {
+    ...FIXTURE_MANIFEST,
+    components: { Report: 5, Dashboard: 2 },
+    coverage: [
+      { type: 'Report', requested: true, retrieved: 5, errored: false, neverModeled: false },
+      { type: 'Dashboard', requested: true, retrieved: 2, errored: false, neverModeled: false },
+    ],
+  };
+
+  let capDir: string;
+  let capStore: GraphStore;
+  const FOLDED_FIELD = 'CustomField:Account.Report_Used__c';
+
+  beforeAll(async () => {
+    capDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-fl-cap-'));
+    const opened = await openGraph(join(capDir, 'cap.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    capStore = opened.value;
+    const imp = await importExtractionResults(capStore, [
+      {
+        nodes: [
+          makeNode({
+            id: FOLDED_FIELD,
+            type: 'CustomField',
+            apiName: 'Report_Used__c',
+            parentId: 'CustomObject:Account',
+            // Folded reports-pull usage (the fold DROPS the report node + edge).
+            properties: { usedInReport: true },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imp.ok) throw new Error(imp.error.message);
+  });
+
+  afterAll(async () => {
+    await closeGraph(capStore);
+    rmSync(capDir, { recursive: true, force: true });
+  });
+
+  it('retrieved-empty manifest drops reports/dashboards + states confirmed not-used', async () => {
+    // FAIL-BEFORE: field_lineage hard-coded the static
+    // ['list-view-filters','reports','dashboards']. With Report/Dashboard
+    // retrieved (coverage 'complete') and TARGET having no folded usage, those
+    // families are AVAILABLE (confirmed-absent) and must drop out.
+    const completeCtx: Context = {
+      ...upstreamCtx,
+      manifest: COVERAGE_COMPLETE_MANIFEST,
+    };
+    const result = await fieldLineageHandler(completeCtx, {
+      fieldId: TARGET,
+      direction: 'upstream',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.value.data;
+    expect(out.dataNotAvailable).not.toContain('reports');
+    expect(out.dataNotAvailable).not.toContain('dashboards');
+    expect(out.dataNotAvailable).toContain('list-view-filters');
+    expect(
+      out.boundaries.some(
+        (b) =>
+          b.includes('WERE retrieved') && b.includes('none reference this field'),
+      ),
+    ).toBe(true);
+  });
+
+  it('not-retrieved manifest keeps reports/dashboards + the caveat (sibling guard)', async () => {
+    // PASS-AFTER guard: default fixture manifest -> coverage 'unknown'. The
+    // families stay listed and the REPORT_DASHBOARD_USAGE_CAVEAT is present.
+    const result = await fieldLineageHandler(upstreamCtx, {
+      fieldId: TARGET,
+      direction: 'upstream',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.value.data;
+    expect(out.dataNotAvailable).toContain('reports');
+    expect(out.dataNotAvailable).toContain('dashboards');
+    // The not-retrieved caveat (distinctive 'outside that cap' text) is present.
+    expect(out.boundaries.some((b) => b.includes('outside that cap'))).toBe(true);
+  });
+
+  it('surfaces a positive report-usage boundary for a folded-used field (parity)', async () => {
+    // FAIL-BEFORE: field_lineage read the report/dashboard fold NOWHERE, so a
+    // folded-used field got the generic not-retrieved caveat. After the fix it
+    // surfaces the positive in-use boundary AND drops reports from
+    // dataNotAvailable (the data IS available — provably used).
+    const capCtx: Context = {
+      vaultRoot: capDir,
+      manifest: FIXTURE_MANIFEST,
+      graph: capStore,
+    };
+    const result = await fieldLineageHandler(capCtx, {
+      fieldId: FOLDED_FIELD,
+      direction: 'both',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.value.data;
+    expect(
+      out.boundaries.some(
+        (b) => b.includes('IS referenced') && b.includes('report column/filter'),
+      ),
+    ).toBe(true);
+    expect(out.dataNotAvailable).not.toContain('reports');
+    // Dashboard usage not folded + not retrieved -> stays listed.
+    expect(out.dataNotAvailable).toContain('dashboards');
   });
 });
 
