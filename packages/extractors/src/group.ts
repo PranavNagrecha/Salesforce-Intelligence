@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 
 import type {
+  Edge,
   ExtractionResult,
   ExtractorError,
   Node,
@@ -13,6 +14,7 @@ import { deriveComponentApiName } from './path-utils.js';
 
 const GROUP_FILE_SUFFIX = '.group-meta.xml';
 const ROOT_ELEMENT = 'Group';
+const EXTRACTOR_SOURCE = 'group-extractor';
 // Only <name> is genuinely required. `doesSendEmailToMembers` and
 // `doesIncludeBosses` are OPTIONAL boolean attributes (default false) that real
 // groups routinely omit; the read sites already coerce a missing value to false.
@@ -54,6 +56,101 @@ const coerceBoolean = (value: unknown): boolean => {
 const optionalString = (rootObj: Record<string, unknown>, key: string): string | null => {
   const raw = unwrapSingle(rootObj[key]);
   return raw === undefined ? null : String(raw);
+};
+
+/**
+ * CR-CAP-12 — variant table mapping a `<related>` row's `<type>`
+ * (`GroupTypeEnum`) to the canonical `hasMember` edge target id prefix and any
+ * extra edge properties. This MIRRORS the sharing-rules `<sharedTo>` variant
+ * table so the membership topology a group declares is shaped identically to
+ * the access topology a sharing rule declares: a Role-and-subordinates member
+ * carries the SAME `inheritance: 'subordinates'` marker a
+ * `roleAndSubordinates` sharing target does, and a nested `Group` member is a
+ * plain `Group:{ref}` (transitive — a membership walk can recurse through it).
+ *
+ * Resolution rules per row:
+ *   - `User`                         → `User:{ref}` — a dangling-by-design
+ *     target (there is NO `User` ComponentType, exactly as the sharing-rules
+ *     synthetic groups are dangling). No extra props.
+ *   - `Role`                         → `Role:{ref}` (the named role only).
+ *   - `RoleAndSubordinates`          → `Role:{ref}` + `inheritance:
+ *     'subordinates'` (reaches the role AND every role below it — the same
+ *     marker `why_cant`'s owner-rule path already understands).
+ *   - `RoleAndSubordinatesInternal`  → `Role:{ref}` +
+ *     `inheritance: 'subordinatesInternal'`.
+ *   - `Group`                        → `Group:{ref}` — a resolvable nested
+ *     group, enabling membership transitivity.
+ *   - `Territory` / `TerritoryAndSubordinates` → `Territory:{ref}` +
+ *     `resolvable: false` so consumers DISCLOSE rather than silently treat the
+ *     member as resolved (no Territory ComponentType — dangling-by-design).
+ *
+ * An UNRECOGNISED `<type>` (e.g. `Organization`, `PRMOrganization`) is counted
+ * in `memberCount` but emits NO edge and carries no synthetic — the count stays
+ * honest while the unmodeled topology is simply not asserted.
+ */
+interface MemberVariantSpec {
+  readonly idPrefix: 'User' | 'Role' | 'Group' | 'Territory';
+  readonly extraProps: Readonly<Record<string, unknown>>;
+}
+
+const MEMBER_VARIANT_TABLE: Readonly<Record<string, MemberVariantSpec>> = {
+  User: { idPrefix: 'User', extraProps: {} },
+  Role: { idPrefix: 'Role', extraProps: {} },
+  RoleAndSubordinates: {
+    idPrefix: 'Role',
+    extraProps: { inheritance: 'subordinates' },
+  },
+  RoleAndSubordinatesInternal: {
+    idPrefix: 'Role',
+    extraProps: { inheritance: 'subordinatesInternal' },
+  },
+  Group: { idPrefix: 'Group', extraProps: {} },
+  Territory: { idPrefix: 'Territory', extraProps: { resolvable: false } },
+  TerritoryAndSubordinates: {
+    idPrefix: 'Territory',
+    extraProps: { resolvable: false, inheritance: 'subordinates' },
+  },
+};
+
+/**
+ * Build the `hasMember` edges for a group from its `<related>` rows.
+ *
+ * Each `<related>` row carries a `<type>` (`GroupTypeEnum`) and a
+ * `<members>` reference (the API name of the related principal — for a User
+ * member this is the username, for a Role / Group it is the role / group API
+ * name). A row whose `<type>` resolves in `MEMBER_VARIANT_TABLE` yields one
+ * `hasMember` edge from the group to the resolved member id; a row with an
+ * unrecognised type or a missing reference yields no edge (it is still counted
+ * by the caller's `memberCount`). Edges are `declared` — the `<related>` row IS
+ * the declaration, mirroring the sharing-rules `sharedWith` sibling.
+ */
+const buildMemberEdges = (
+  related: readonly unknown[],
+  groupId: string,
+): Edge[] => {
+  const edges: Edge[] = [];
+  for (const rowRaw of related) {
+    if (typeof rowRaw !== 'object' || rowRaw === null) continue;
+    const row = rowRaw as Record<string, unknown>;
+    const typeRaw = unwrapSingle(row['type']);
+    if (typeRaw === undefined || typeRaw === null) continue;
+    const spec = MEMBER_VARIANT_TABLE[String(typeRaw)];
+    if (spec === undefined) continue; // counted, but topology not asserted
+    // The reference child is `<members>` in the GroupMembers schema; tolerate
+    // the legacy `<reference>` shape some hand-authored fixtures use.
+    const refRaw =
+      unwrapSingle(row['members']) ?? unwrapSingle(row['reference']);
+    if (refRaw === undefined || refRaw === null || refRaw === '') continue;
+    edges.push({
+      fromId: groupId,
+      toId: `${spec.idPrefix}:${String(refRaw)}`,
+      edgeType: 'hasMember',
+      confidence: 'declared',
+      source: EXTRACTOR_SOURCE,
+      properties: { memberType: String(typeRaw), ...spec.extraProps },
+    });
+  }
+  return edges;
 };
 
 /**
@@ -122,9 +219,16 @@ const validateRoot = (
  *
  * Reads the file, parses it as XML, validates the `<Group>` root per the
  * vendored `Group.md` spec, and returns an `ExtractionResult` containing
- * one `Node` of type `'Group'` and **zero edges**. v1.1 defers deep
- * `<related>` member resolution to v1.2 — only the row count is
- * surfaced as `properties.memberCount`.
+ * one `Node` of type `'Group'` plus one `hasMember` edge per resolvable
+ * `<related>` row (CR-CAP-12). The `properties.memberCount` row count is
+ * KEPT (it counts every `<related>` row, including the unmodeled types the
+ * edge pass skips); the edges are ADDITIVE. Each edge target follows the
+ * sharing-rules variant logic: `User:{ref}` (dangling — no User
+ * ComponentType), `Role:{ref}`, `Role:{ref}` with
+ * `inheritance: 'subordinates'` for `RoleAndSubordinates`, a nested
+ * `Group:{ref}` (transitive), and a `Territory:{ref}` synthetic carrying
+ * `resolvable: false`. Edges are `declared` confidence — the `<related>`
+ * row is the declaration, matching the sharing-rules `sharedWith` sibling.
  *
  * The canonical ID derives from the filename, not from the `<name>`
  * element. `<name>` is the human-readable display label; the filename's
@@ -189,13 +293,16 @@ export const extractGroup = async (
   const label = String(unwrapSingle(rootObj['name']));
 
   // Per Group.md "Optional repeated elements": `<emails>` collects to a
-  // `string[]` (empty array when absent). `<related>` rows are counted
-  // only; deep member resolution is deferred to v1.2.
+  // `string[]` (empty array when absent). `<related>` rows are BOTH counted
+  // (`memberCount`, kept) AND resolved into `hasMember` edges (CR-CAP-12).
   const emails = toArray(rootObj['emails']).map((value) => String(value));
-  const memberCount = toArray(rootObj['related']).length;
+  const related = toArray(rootObj['related']);
+  const memberCount = related.length;
+  const groupId = `${ROOT_ELEMENT}:${apiName}`;
+  const edges = buildMemberEdges(related, groupId);
 
   const node: Node = {
-    id: `${ROOT_ELEMENT}:${apiName}`,
+    id: groupId,
     type: 'Group',
     apiName,
     label,
@@ -215,5 +322,5 @@ export const extractGroup = async (
     },
   };
 
-  return ok({ nodes: [node], edges: [] });
+  return ok({ nodes: [node], edges });
 };

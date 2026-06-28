@@ -217,6 +217,75 @@ const ownerSharingRuleSeed: ExtractionResult = {
 };
 
 // =============================================================================
+// Seed 3b (CR-CAP-12): OWD-Private object with an owner rule shared with an
+// ENCLOSING public group. The user is a literal member ONLY of a NESTED group
+// (`Group:Enclosing_PG --hasMember--> Group:Nested_PG`). Before CR-CAP-12 the
+// literal membership set held only `Group:Nested_PG`, so the rule granting
+// `Group:Enclosing_PG` did NOT match (restricted). After: the upward hasMember
+// walk folds `Group:Enclosing_PG` into membership → visible.
+// =============================================================================
+
+const NESTED_RULE_OBJ = 'CustomObject:NestedGroupObj';
+const NESTED_RULE_ID = 'SharingRule:NestedGroupObj.GrantEnclosing';
+const ENCLOSING_PG = 'Group:Enclosing_PG';
+const NESTED_PG = 'Group:Nested_PG';
+
+const nestedGroupOwnerRuleSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: NESTED_RULE_OBJ,
+      apiName: 'NestedGroupObj',
+      properties: { sharingModel: 'Private' },
+    }),
+    makeNode({
+      id: NESTED_RULE_ID,
+      type: 'SharingRule',
+      apiName: 'NestedGroupObj.GrantEnclosing',
+      parentId: NESTED_RULE_OBJ,
+      properties: {
+        ruleType: 'owner',
+        accessLevel: 'Read',
+        sharedToType: 'group',
+        sharedToName: 'Enclosing_PG',
+        sharedFromType: 'group',
+        sharedFromName: 'Enclosing_PG',
+        booleanFilter: null,
+        criteriaItemCount: 0,
+      },
+    }),
+    makeNode({ id: ENCLOSING_PG, type: 'Group', apiName: 'Enclosing_PG' }),
+    makeNode({ id: NESTED_PG, type: 'Group', apiName: 'Nested_PG' }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: NESTED_RULE_OBJ,
+      toId: NESTED_RULE_ID,
+      edgeType: 'parentOf',
+    }),
+    makeEdge({
+      fromId: NESTED_RULE_ID,
+      toId: ENCLOSING_PG,
+      edgeType: 'sharedWith',
+      properties: { direction: 'to' },
+    }),
+    makeEdge({
+      fromId: NESTED_RULE_ID,
+      toId: ENCLOSING_PG,
+      edgeType: 'sharedWith',
+      properties: { direction: 'from' },
+    }),
+    // The enclosing public group CONTAINS the nested group as a member.
+    makeEdge({
+      fromId: ENCLOSING_PG,
+      toId: NESTED_PG,
+      edgeType: 'hasMember',
+      source: 'group-extractor',
+      properties: { memberType: 'Group' },
+    }),
+  ],
+};
+
+// =============================================================================
 // Seed 4: OWD-Private object with a criteria-type SharingRule. Always
 // reports `unknown` with the booleanFilter mentioned in the reason.
 // =============================================================================
@@ -261,6 +330,75 @@ const criteriaSharingRuleSeed: ExtractionResult = {
       edgeType: 'sharedWith',
     }),
   ],
+};
+
+// =============================================================================
+// Seed 4b (CR-CAP-16): OWD-Private object with a GUEST sharing rule. The
+// TerritoryAndGuestRules stage must report `unknown` per rule with the rule id /
+// site / predicate in the reason, and the aggregate stays `unknown`.
+// =============================================================================
+
+const GUEST_OBJ = 'CustomObject:GuestObj';
+const GUEST_RULE_ID = 'SharingRule:GuestObj.Share_To_ClientPortal';
+
+const guestSharingRuleSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: GUEST_OBJ,
+      apiName: 'GuestObj',
+      properties: { sharingModel: 'Private' },
+    }),
+    makeNode({
+      id: GUEST_RULE_ID,
+      type: 'SharingRule',
+      apiName: 'GuestObj.Share_To_ClientPortal',
+      parentId: GUEST_OBJ,
+      properties: {
+        ruleType: 'guest',
+        accessLevel: 'Read',
+        sharedToType: 'guestUser',
+        sharedToName: 'ClientPortal',
+        sharedFromType: null,
+        sharedFromName: null,
+        booleanFilter: '1 AND 2',
+        criteriaItemCount: 2,
+        siteName: 'ClientPortal',
+      },
+    }),
+    makeNode({ id: 'Group:ClientPortal', type: 'Group', apiName: 'ClientPortal' }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: GUEST_OBJ,
+      toId: GUEST_RULE_ID,
+      edgeType: 'parentOf',
+    }),
+    makeEdge({
+      fromId: GUEST_RULE_ID,
+      toId: 'Group:ClientPortal',
+      edgeType: 'sharedWith',
+      properties: { synthetic: true, siteName: 'ClientPortal' },
+    }),
+  ],
+};
+
+// =============================================================================
+// Seed 4c (CR-CAP-16): OWD-Private object with NO guest/territory rules. The
+// TerritoryAndGuestRules stage must preserve the absence disclosure as
+// `unknown`, never `restricted`.
+// =============================================================================
+
+const NO_GUEST_OBJ = 'CustomObject:NoGuestObj';
+
+const noGuestRuleSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: NO_GUEST_OBJ,
+      apiName: 'NoGuestObj',
+      properties: { sharingModel: 'Private' },
+    }),
+  ],
+  edges: [],
 };
 
 // =============================================================================
@@ -1043,7 +1181,10 @@ beforeAll(async () => {
     owdControlledByCampaignSeed,
     permissionGrantSeed,
     ownerSharingRuleSeed,
+    nestedGroupOwnerRuleSeed,
     criteriaSharingRuleSeed,
+    guestSharingRuleSeed,
+    noGuestRuleSeed,
     owdUnknownSeed,
     roleHierarchySeed,
     ownerSubordinateRuleSeed,
@@ -1261,6 +1402,25 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(ownerSteps[0]?.reason).toContain(SALES_GROUP);
   });
 
+  it('CR-CAP-12: a rule granting an ENCLOSING group reaches a user in a NESTED member group', async () => {
+    // The user is a literal member ONLY of Group:Nested_PG. The owner rule
+    // grants Group:Enclosing_PG, which CONTAINS Nested_PG via hasMember. The
+    // literal membership set would miss the grant (restricted); the upward
+    // hasMember expansion folds Enclosing_PG in → visible.
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: NESTED_RULE_OBJ,
+      userContext: { groupIds: [NESTED_PG] },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, reasoning } = result.value.data;
+    expect(verdict).toBe('visible');
+    const ownerSteps = reasoning.filter((s) => s.stage === 'OwnerSharingRule');
+    expect(ownerSteps.length).toBe(1);
+    expect(ownerSteps[0]?.verdict).toBe('visible');
+    expect(ownerSteps[0]?.reason).toContain(ENCLOSING_PG);
+  });
+
   // --- CR-CAP-05: owner sharing rule "Roles and Subordinates" subtree match ---
 
   it('CR-CAP-05 (1): a SUBORDINATE role is GRANTED by a roleAndSubordinates owner rule', async () => {
@@ -1437,6 +1597,41 @@ describe('whyCantUserSeeRecordHandler', () => {
     );
     expect(sharingSets?.verdict).toBe('unknown');
     expect(accountTeams?.verdict).toBe('unknown');
+  });
+
+  it('CR-CAP-16: a GUEST sharing rule surfaces an unknown TerritoryAndGuestRules step with rule id / site / predicate', async () => {
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: GUEST_OBJ,
+      userContext: { groupIds: ['Group:ClientPortal'] },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, reasoning } = result.value.data;
+    const tg = reasoning.filter((s) => s.stage === 'TerritoryAndGuestRules');
+    expect(tg.length).toBe(1);
+    expect(tg[0]?.verdict).toBe('unknown');
+    // Declared detail surfaced: rule id, site name, and predicate.
+    expect(tg[0]?.reason).toContain(GUEST_RULE_ID);
+    expect(tg[0]?.reason).toContain('ClientPortal');
+    expect(tg[0]?.reason).toContain('1 AND 2');
+    // Aggregate stays unknown — the rule's applicability is record-level.
+    expect(verdict).toBe('unknown');
+  });
+
+  it('CR-CAP-16: an object with NO guest/territory rules preserves the absence disclosure as unknown, not restricted', async () => {
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: NO_GUEST_OBJ,
+      userContext: { roleId: SALES_REP_ROLE },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const tg = result.value.data.reasoning.filter(
+      (s) => s.stage === 'TerritoryAndGuestRules',
+    );
+    expect(tg.length).toBe(1);
+    expect(tg[0]?.verdict).toBe('unknown');
+    expect(tg[0]?.verdict).not.toBe('restricted');
+    expect(tg[0]?.reason).toMatch(/no territory or guest/i);
   });
 
   it('short-circuits with a single OWD step when sharingModel is null', async () => {

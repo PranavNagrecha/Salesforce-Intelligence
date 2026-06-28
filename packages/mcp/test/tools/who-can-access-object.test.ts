@@ -59,6 +59,10 @@ const seed: ExtractionResult = {
     node({ id: 'PermissionSet:Creator', type: 'PermissionSet', apiName: 'Creator' }),
     node({ id: 'SharingRule:Deal__c.Share_To_Sales', type: 'SharingRule', apiName: 'Deal__c.Share_To_Sales', properties: { ruleType: 'owner', accessLevel: 'Edit', sObjectType: 'Deal__c' } }),
     node({ id: 'Group:Sales_Public', type: 'Group', apiName: 'Sales_Public' }),
+    // CR-CAP-12: Sales_Public contains a User, a nested Group, and a dangling
+    // Territory; the nested group contains a Role. who_can must list each as its
+    // own granter row, transitively through the nested group.
+    node({ id: 'Group:Sales_Inner', type: 'Group', apiName: 'Sales_Inner' }),
   ],
   edges: [
     edge({ fromId: 'Profile:Admin', toId: OBJ, edgeType: 'grantedBy', properties: { allowRead: true, allowEdit: true, modifyAllRecords: true } }),
@@ -66,6 +70,11 @@ const seed: ExtractionResult = {
     edge({ fromId: 'Profile:Deleter', toId: OBJ, edgeType: 'grantedBy', properties: { allowRead: true, allowDelete: true } }),
     edge({ fromId: 'PermissionSet:Creator', toId: OBJ, edgeType: 'grantedBy', properties: { allowCreate: true } }),
     edge({ fromId: 'SharingRule:Deal__c.Share_To_Sales', toId: 'Group:Sales_Public', edgeType: 'sharedWith' }),
+    // hasMember topology (declared, emitted by the group extractor).
+    edge({ fromId: 'Group:Sales_Public', toId: 'User:rep@example.com', edgeType: 'hasMember', source: 'group-extractor', properties: { memberType: 'User' } }),
+    edge({ fromId: 'Group:Sales_Public', toId: 'Group:Sales_Inner', edgeType: 'hasMember', source: 'group-extractor', properties: { memberType: 'Group' } }),
+    edge({ fromId: 'Group:Sales_Public', toId: 'Territory:West', edgeType: 'hasMember', source: 'group-extractor', properties: { memberType: 'Territory', resolvable: false } }),
+    edge({ fromId: 'Group:Sales_Inner', toId: 'Role:Sales_Rep', edgeType: 'hasMember', source: 'group-extractor', properties: { memberType: 'Role' } }),
   ],
 };
 
@@ -142,6 +151,30 @@ describe('whoCanAccessObjectHandler', () => {
     const group = byId.get('Group:Sales_Public|owner-sharing-rule');
     expect(group?.granterType).toBe('Group');
     expect(group?.access).toBe('edit');
+  });
+
+  it('CR-CAP-12: expands a shared group into its (transitive) members as granter rows', async () => {
+    const r = await whoCanAccessObjectHandler(ctx, { componentId: OBJ, limit: 250 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const byId = new Map(r.value.data.granters.map((g) => [`${g.granterId}|${g.via}`, g]));
+    // The group still appears as its own row...
+    expect(byId.get('Group:Sales_Public|owner-sharing-rule')?.access).toBe('edit');
+    // ...AND each member it contains, transitively through the nested group.
+    const user = byId.get('User:rep@example.com|owner-sharing-rule');
+    expect(user?.granterType).toBe('User');
+    expect(user?.access).toBe('edit');
+    expect(user?.detail).toContain('Group:Sales_Public');
+    const nested = byId.get('Group:Sales_Inner|owner-sharing-rule');
+    expect(nested?.granterType).toBe('Group');
+    // Role reached only via the nested group → transitivity.
+    const role = byId.get('Role:Sales_Rep|owner-sharing-rule');
+    expect(role?.granterType).toBe('Role');
+    expect(role?.access).toBe('edit');
+    // The Territory member is dangling-by-design: listed but flagged unresolved.
+    const territory = byId.get('Territory:West|owner-sharing-rule');
+    expect(territory?.granterType).toBe('Territory');
+    expect(territory?.detail).toMatch(/dangling member/i);
   });
 
   // CR-04: Delete and Create capabilities are enumerated independently — the

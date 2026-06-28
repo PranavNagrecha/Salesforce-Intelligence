@@ -115,13 +115,22 @@
  *      so this stage always returns `unknown` with the rule's
  *      `booleanFilter` (or `criteriaItemCount`) surfaced in the reason.
  *
- *   6/7/8/9. **TerritoryAndGuestRules**, **ManualSharing**,
- *      **SharingSets**, **AccountTeams** — always `unknown` with
- *      explanatory reasons. Territory & guest (Experience Cloud) sharing
- *      rules are SKIPPED by the extractor; the rest require record-level
- *      data or org-config beyond v1.1's metadata model. They appear at
- *      the tail so callers can show admins what was NOT modeled and
- *      recommend a manual check.
+ *   6. **TerritoryAndGuestRules** (CR-CAP-16) — a real per-rule
+ *      enumeration over the attached guest / territory / territoryGroup
+ *      sharing rules (the extractor now models them). Each rule surfaces
+ *      its declared detail — id, accessLevel, Experience-Cloud site name
+ *      (guest) or shared target (territory), and predicate — but the
+ *      verdict stays `unknown`: existence is declarable, applicability is
+ *      record-level (guest = is the requester the site guest user;
+ *      territory = the user's + record's territory assignment). When no
+ *      such rules attach, a single `unknown` step preserves the
+ *      absence-is-not-no-access disclosure.
+ *
+ *   7/8/9. **ManualSharing**, **SharingSets**, **AccountTeams** — always
+ *      `unknown` with explanatory reasons; these require record-level data
+ *      or org-config beyond v1.1's metadata model. They appear at the tail
+ *      so callers can show admins what was NOT modeled and recommend a
+ *      manual check.
  *
  * **Aggregate verdict** (after the object-Read precondition has already passed
  * or is undecidable):
@@ -179,6 +188,7 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { coercePrefix } from './coerce-id.js';
+import { expandGroupMembership } from './group-membership.js';
 import { expandPermissionSetGroup } from './permission-set-group.js';
 
 /**
@@ -885,12 +895,16 @@ const evaluateRoleHierarchy = async (
 };
 
 /**
- * The set of `sharedWith` target ids the user is treated as belonging
- * to. Includes every id the caller supplied plus
- * `Group:AllInternalUsers` (every authenticated user is "internal"
- * for sharing purposes). The other three synthetic groups in the
- * variant table are not auto-included — callers wanting them must
- * pass them in `groupIds` explicitly.
+ * The LITERAL set of `sharedWith` target ids the user is treated as belonging
+ * to. Includes every id the caller supplied plus `Group:AllInternalUsers`
+ * (every authenticated user is "internal" for sharing purposes). The other
+ * three synthetic groups in the variant table are not auto-included — callers
+ * wanting them must pass them in `groupIds` explicitly.
+ *
+ * CR-CAP-12: this is only the LITERAL membership. `evaluateOwnerSharingRules`
+ * then expands it UPWARD through `hasMember` (so a user typed into a nested
+ * group matches a rule granting the enclosing public group); the expansion is
+ * NOT folded in here so the literal/expanded split stays auditable.
  */
 const buildUserMembership = (userContext: UserContext): ReadonlySet<string> => {
   const ids = new Set<string>([ALL_INTERNAL_USERS_GROUP_ID]);
@@ -1000,6 +1014,7 @@ const ownerRuleMatches = async (
   membership: ReadonlySet<string>,
   userAncestorRoleIds: ReadonlySet<string>,
   userAncestorChainTruncated: boolean,
+  groupMembershipTruncated: boolean,
 ): Promise<Result<OwnerRuleMatch, string>> => {
   const edgesResult = await listEdges(ctx.graph, ruleNode.id, {
     direction: 'out',
@@ -1014,7 +1029,8 @@ const ownerRuleMatches = async (
   for (const edge of edgesResult.value) {
     if (edge.properties['direction'] === 'from') continue;
     // Exact membership match always wins (covers the named role itself,
-    // groups, synthetic groups, and the plain-role / portalRole cases).
+    // groups [incl. CR-CAP-12 enclosing groups folded into `membership`],
+    // synthetic groups, and the plain-role / portalRole cases).
     if (membership.has(edge.toId)) {
       return ok({ kind: 'match', targetId: edge.toId });
     }
@@ -1034,6 +1050,17 @@ const ownerRuleMatches = async (
       if (userAncestorChainTruncated && indeterminate === null) {
         indeterminate = { targetId: edge.toId };
       }
+    } else if (
+      // CR-CAP-12: a Group: target that the EXPANDED membership did not reach,
+      // while the upward `hasMember` walk was truncated (a missing enclosing /
+      // nested group node), cannot be confidently ruled out — the rule MIGHT
+      // reach the user via an unretrieved group. Downgrade to indeterminate
+      // (→ `unknown`) rather than a confident false-deny.
+      groupMembershipTruncated &&
+      edge.toId.startsWith(GROUP_PREFIX) &&
+      indeterminate === null
+    ) {
+      indeterminate = { targetId: edge.toId };
     }
   }
   if (indeterminate !== null) {
@@ -1080,7 +1107,19 @@ const evaluateOwnerSharingRules = async (
       ),
     ]);
   }
-  const membership = buildUserMembership(userContext);
+  const literalMembership = buildUserMembership(userContext);
+  // CR-CAP-12: expand the user's literal Group: ids UPWARD through `hasMember`
+  // so a sharing rule granting an ENCLOSING public group matches a user typed
+  // into only a nested member group (the literal set would miss it). Monotone
+  // fixpoint; a truncated walk (missing enclosing-group node) downgrades an
+  // otherwise-`restricted` group rule to `unknown`, never a false-deny.
+  const expanded = await expandGroupMembership(ctx, [...literalMembership]);
+  if (!expanded.ok) return err(expanded.error);
+  const membership: ReadonlySet<string> = new Set<string>([
+    ...literalMembership,
+    ...expanded.value.groupIds,
+  ]);
+  const groupMembershipTruncated = expanded.value.truncated;
   // CR-CAP-05: the ancestor chain only feeds the inheritance-gated path.
   // Compute it once; an absent roleId means no ancestors (and no truncation).
   let userAncestorRoleIds: ReadonlySet<string> = new Set<string>();
@@ -1102,6 +1141,7 @@ const evaluateOwnerSharingRules = async (
       membership,
       userAncestorRoleIds,
       userAncestorChainTruncated,
+      groupMembershipTruncated,
     );
     if (!matchResult.ok) return err(matchResult.error);
     const match = matchResult.value;
@@ -1130,16 +1170,14 @@ const evaluateOwnerSharingRules = async (
         ),
       );
     } else if (match.kind === 'indeterminate') {
-      // Honesty: the role tree is truncated above the user, so we cannot
-      // confirm OR deny that the target role is an ancestor — never a
+      // Honesty: either the role tree is truncated above the user (CR-CAP-05)
+      // OR the group-membership walk hit a missing nested/enclosing group
+      // (CR-CAP-12), so we can neither confirm nor deny the match — never a
       // confident false-deny.
-      steps.push(
-        step(
-          'OwnerSharingRule',
-          'unknown',
-          `owner sharing rule ${rule.id} shares to subordinates of ${match.targetId}, but the role hierarchy above ${String(userContext.roleId)} is incomplete (a role node was not retrieved), so the subordinate match cannot be resolved — run /sfi-refresh or see coverage_report, then re-check`,
-        ),
-      );
+      const reason = match.targetId.startsWith(GROUP_PREFIX)
+        ? `owner sharing rule ${rule.id} shares to group ${match.targetId}, but the group-membership graph is incomplete (a nested/enclosing group node was not retrieved), so membership cannot be resolved — run /sfi-refresh or see coverage_report, then re-check`
+        : `owner sharing rule ${rule.id} shares to subordinates of ${match.targetId}, but the role hierarchy above ${String(userContext.roleId)} is incomplete (a role node was not retrieved), so the subordinate match cannot be resolved — run /sfi-refresh or see coverage_report, then re-check`;
+      steps.push(step('OwnerSharingRule', 'unknown', reason));
     } else {
       steps.push(
         step(
@@ -1210,6 +1248,80 @@ const evaluateCriteriaSharingRules = (
         'CriteriaSharingRule',
         'unknown',
         `rule ${rule.id} grants ${level} (rule access: ${ruleAccess}) if record matches: ${predicate}`,
+      ),
+    );
+  }
+  return steps;
+};
+
+/** The guest / territory rule families CR-CAP-16 now surfaces in this stage. */
+const TERRITORY_GUEST_RULE_TYPES: ReadonlySet<string> = new Set([
+  'guest',
+  'territory',
+  'territoryGroup',
+]);
+
+/**
+ * CR-CAP-16: evaluate the TerritoryAndGuestRules stage. Mirrors
+ * `evaluateCriteriaSharingRules` — one step per attached guest / territory /
+ * territoryGroup rule. The verdict is ALWAYS `unknown`: a rule's EXISTENCE,
+ * `accessLevel`, site / territory name, and predicate are declared in the
+ * metadata (surfaced in the reason), but its APPLICABILITY is record-level
+ * (guest = is the requester the site's guest user; territory = the user's +
+ * record's territory assignment) — context the offline vault lacks. So the step
+ * never fabricates a confident `visible` / `restricted`.
+ *
+ * When NO such rules attach, returns a SINGLE `unknown` step preserving the
+ * absence-is-not-no-access disclosure — never `restricted` (a territory rule we
+ * never retrieved, or guest access in a community, could still grant it).
+ */
+const evaluateTerritoryAndGuestRules = (
+  rules: readonly Node[],
+  level: AccessLevel,
+): readonly AccessReasoningStep[] => {
+  const tgRules = rules.filter((r) => {
+    const rt = r.properties['ruleType'];
+    return typeof rt === 'string' && TERRITORY_GUEST_RULE_TYPES.has(rt);
+  });
+  if (tgRules.length === 0) {
+    return [
+      step(
+        'TerritoryAndGuestRules',
+        'unknown',
+        'no territory or guest (Experience Cloud) sharing rules attached to this object — but absence here is "not modeled / not retrieved", not "no access": these rules need record-level + requester context to evaluate, so verify in the org if relevant',
+      ),
+    ];
+  }
+  const steps: AccessReasoningStep[] = [];
+  for (const rule of tgRules) {
+    const ruleType = String(rule.properties['ruleType']);
+    const ruleAccess =
+      typeof rule.properties['accessLevel'] === 'string'
+        ? (rule.properties['accessLevel'] as string)
+        : 'Read';
+    const booleanFilter = rule.properties['booleanFilter'];
+    const criteriaItemCount = rule.properties['criteriaItemCount'];
+    const predicate =
+      typeof booleanFilter === 'string' && booleanFilter.length > 0
+        ? booleanFilter
+        : typeof criteriaItemCount === 'number' && criteriaItemCount > 0
+          ? `${criteriaItemCount} criteria item(s)`
+          : 'unspecified criteria';
+    // The site (guest) or shared target (territory) name, when present.
+    const siteName = rule.properties['siteName'];
+    const sharedToName = rule.properties['sharedToName'];
+    const targetDetail =
+      ruleType === 'guest' && typeof siteName === 'string'
+        ? ` for Experience Cloud site '${siteName}'`
+        : typeof sharedToName === 'string'
+          ? ` shared to '${sharedToName}'`
+          : '';
+    // Existence is declared; applicability is record-level → always unknown.
+    steps.push(
+      step(
+        'TerritoryAndGuestRules',
+        'unknown',
+        `${ruleType} sharing rule ${rule.id} (${ruleAccess})${targetDetail} grants ${level} if the record matches \`${predicate}\` AND the requester is in the matching ${ruleType === 'guest' ? 'guest/site' : 'territory'} context — record-level data the offline vault lacks, so this cannot be confirmed or denied here`,
       ),
     );
   }
@@ -1370,13 +1482,13 @@ const evaluatePermissionSetGroups = async (
  * would need to model (record-level shares, sharing-set config,
  * account-team membership). Frozen because the steps never vary
  * across invocations — every call appends the same three entries.
+ *
+ * CR-CAP-16: `TerritoryAndGuestRules` is NO LONGER in this frozen tail — it is
+ * now a real per-rule evaluator (`evaluateTerritoryAndGuestRules`) that surfaces
+ * each attached guest / territory rule's declared detail while keeping the
+ * verdict `unknown`. The tail keeps only the genuinely-unmodeled stages.
  */
 const UNKNOWN_TAIL: readonly AccessReasoningStep[] = Object.freeze([
-  step(
-    'TerritoryAndGuestRules',
-    'unknown',
-    'territory sharing rules and guest (Experience Cloud) sharing rules are skipped by the extractor — not evaluated here (absence is not "no access")',
-  ),
   step(
     'ManualSharing',
     'unknown',
@@ -2025,9 +2137,15 @@ export const whyCantUserSeeRecordHandler = async (
   }
   reasoning.push(...scopingStepsResult.value);
 
-  // Stages 6-9: TerritoryAndGuestRules, ManualSharing, SharingSets,
-  // AccountTeams. Always `unknown` with explanatory reasons. These document
-  // what v1.1 could not check so the admin knows where to look manually.
+  // Stage 6 (CR-CAP-16): TerritoryAndGuestRules — a real per-rule evaluator over
+  // the already-loaded sharing rules. Each attached guest / territory rule
+  // surfaces its declared detail with an `unknown` verdict; absence preserves
+  // the not-modeled disclosure (never `restricted`).
+  reasoning.push(...evaluateTerritoryAndGuestRules(rulesResult.value, level));
+
+  // Stages 7-9: ManualSharing, SharingSets, AccountTeams. Always `unknown` with
+  // explanatory reasons. These document what v1.1 could not check so the admin
+  // knows where to look manually.
   reasoning.push(...UNKNOWN_TAIL);
 
   return ok({
