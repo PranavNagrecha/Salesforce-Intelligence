@@ -49,13 +49,20 @@ export interface CoverageReportOutput {
   readonly disclosure: string;
 }
 
+// CR-P3-3: kept in deliberate lockstep with `summarizeCoverage`'s tri-state
+// (manifest.ts). A confirmed-clean empty type (`retrieved === 0` AND
+// `retrieveConfirmed === true`) moves from `partial` to `covered`; an
+// unconfirmed empty type (no signal / dropped / --no-pull) stays in `partial`.
+// Without this gate coverage_report would self-contradict summarizeCoverage
+// (its own `partial[]` listing a type the summary calls complete) — the exact
+// bug the lockstep comment in manifest.ts guards.
 const partitionCoverage = (
   entries: readonly CoverageEntry[],
 ): Pick<CoverageReportOutput, 'covered' | 'partial' | 'notModeled' | 'pending'> => ({
   covered: entries.filter(
     (entry) =>
       entry.requested &&
-      entry.retrieved > 0 &&
+      (entry.retrieved > 0 || entry.retrieveConfirmed === true) &&
       !entry.errored &&
       !entry.neverModeled &&
       entry.pending !== true,
@@ -63,7 +70,8 @@ const partitionCoverage = (
   partial: entries.filter(
     (entry) =>
       entry.requested &&
-      (entry.retrieved === 0 || entry.errored) &&
+      ((entry.retrieved === 0 && entry.retrieveConfirmed !== true) ||
+        entry.errored) &&
       !entry.neverModeled &&
       entry.pending !== true,
   ),

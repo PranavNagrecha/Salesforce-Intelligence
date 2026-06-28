@@ -462,6 +462,67 @@ describe('coverage fields (enterprise trust contract)', () => {
     // missingCoverage is the documented union — ListView still belongs there once.
     expect(summary.missingCoverage).toEqual(['ListView']);
   });
+
+  it('CR-P3-3: a confirmed-clean empty type (retrieveConfirmed:true) is COMPLETE, not partial', () => {
+    // A full live refresh whose describe confirmed the org supports SharingRule
+    // AND whose clean `sf project retrieve` returned ZERO sharing rules. That is
+    // the org genuinely having none == complete, no caveat. Before CR-P3-3 every
+    // requested+retrieved===0 modeled row went unconditionally into
+    // emptyTypes -> partialTypes, so this asserted-complete row would be partial.
+    const manifest: ExtendedVaultManifest = {
+      ...sampleManifest(),
+      coverage: [
+        { type: 'CustomObject', requested: true, retrieved: 47, errored: false, neverModeled: false, retrieveConfirmed: true },
+        { type: 'SharingRule', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
+      ],
+    };
+
+    const summary = summarizeCoverage(manifest, ['CustomObject', 'SharingRule']);
+    expect(summary.status).toBe('complete');
+    expect([...summary.coveredTypes].sort()).toEqual(['CustomObject', 'SharingRule']);
+    expect(summary.partialTypes).not.toContain('SharingRule');
+    expect(summary.missingCoverage).not.toContain('SharingRule');
+  });
+
+  it('CR-P3-3 HONESTY: a retrieved:0 row WITHOUT retrieveConfirmed stays partial (no-signal/dropped/--no-pull)', () => {
+    // The not-retrieved / silently-dropped / pre-signal-manifest case. With the
+    // confirmation signal ABSENT (the byte-identical row the data model cannot
+    // otherwise disambiguate), the honest reading is "not confirmed" -> partial,
+    // in missingCoverage, NOT covered. This locks the honesty contract: a naive
+    // flip of all empty->complete would fail here.
+    const manifest: ExtendedVaultManifest = {
+      ...sampleManifest(),
+      coverage: [
+        { type: 'CustomObject', requested: true, retrieved: 47, errored: false, neverModeled: false, retrieveConfirmed: true },
+        { type: 'Report', requested: true, retrieved: 0, errored: false, neverModeled: false },
+      ],
+    };
+
+    const summary = summarizeCoverage(manifest, ['CustomObject', 'Report']);
+    expect(summary.status).toBe('partial');
+    expect(summary.coveredTypes).toEqual(['CustomObject']);
+    expect(summary.partialTypes).toEqual(['Report']);
+    expect(summary.missingCoverage).toContain('Report');
+  });
+
+  it('CR-P3-3: a pending row that is ALSO retrieveConfirmed:true stays partial (capped/dropped precedence)', () => {
+    // The reports-cap path can mark Report `pending:true` (the un-pulled tail was
+    // NOT checked) on a row that the main pass set retrieveConfirmed:true. Pending
+    // precedence MUST win: a capped/dropped pull can never read as confirmed-empty.
+    const manifest: ExtendedVaultManifest = {
+      ...sampleManifest(),
+      coverage: [
+        { type: 'CustomObject', requested: true, retrieved: 47, errored: false, neverModeled: false, retrieveConfirmed: true },
+        { type: 'Report', requested: true, retrieved: 0, errored: false, neverModeled: false, pending: true, retrieveConfirmed: true },
+      ],
+    };
+
+    const summary = summarizeCoverage(manifest, ['CustomObject', 'Report']);
+    expect(summary.status).toBe('partial');
+    expect(summary.coveredTypes).toEqual(['CustomObject']);
+    expect(summary.partialTypes).toContain('Report');
+    expect(summary.missingCoverage).toContain('Report');
+  });
 });
 
 describe('backfillCoverageInMemory', () => {
@@ -548,6 +609,26 @@ describe('backfillCoverageInMemory', () => {
       expect(types.filter((t) => t === properType)).toEqual([properType]);
       expect(entries.find((e) => e.type === properType)?.neverModeled).toBe(true);
     }
+  });
+
+  it('CR-P3-3: never synthesizes retrieveConfirmed, so a wanted-but-absent type stays partial', () => {
+    // backfill synthesizes rows from component COUNTS with no retrieve signal,
+    // so it must NOT fabricate retrieveConfirmed (confirmation it never observed).
+    // A wanted type the backfilled manifest has no row for falls through to the
+    // missing-from-wanted branch -> partial. Until a real `sfi refresh`
+    // repopulates coverage with the live signal, caveats keep firing.
+    const manifest: ExtendedVaultManifest = {
+      ...sampleManifest(),
+      components: { CustomObject: 3 },
+    };
+    const filled = backfillCoverageInMemory(manifest);
+    for (const entry of readCoverageEntries(filled)) {
+      expect(entry.retrieveConfirmed).toBeUndefined();
+    }
+    const summary = summarizeCoverage(filled, ['CustomObject', 'SharingRule']);
+    expect(summary.coveredTypes).toEqual(['CustomObject']);
+    expect(summary.partialTypes).toContain('SharingRule');
+    expect(summary.status).toBe('partial');
   });
 });
 
