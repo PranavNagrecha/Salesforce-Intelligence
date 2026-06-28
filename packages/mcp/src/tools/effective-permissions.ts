@@ -26,6 +26,11 @@
  *   - Field-level detail is summarised (count); use `field_access_audit`
  *     for a specific field. Record visibility still needs OWD + sharing
  *     (`why_cant_user_see_record`); object permission ≠ record access.
+ *   - Custom permissions (CR-CAP-10) are surfaced as their own list with
+ *     per-container attribution and `targetMissing` for grants whose definition
+ *     is absent (managed-package / not-retrieved). They are NOT system
+ *     `<userPermissions>`, so they are never double-counted under
+ *     `systemPermissions`.
  */
 
 import type {
@@ -106,16 +111,32 @@ export interface EffectiveSystemPerm {
   readonly grantedBy: readonly string[];
 }
 
+/**
+ * CR-CAP-10: one custom permission the union confers, attributed to the
+ * granting containers. `targetMissing` is true when the granted name has no
+ * `CustomPermission` definition node in the vault (managed-package or
+ * not-retrieved). Distinct from `systemPermissions` (those are
+ * `<userPermissions>`), so the two surfaces never double-count.
+ */
+export interface EffectiveCustomPerm {
+  readonly name: string;
+  readonly targetMissing: boolean;
+  readonly grantedBy: readonly string[];
+}
+
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface EffectivePermissionsOutput {
   readonly containers: readonly string[];
   readonly objectPermissions: readonly EffectiveObjectPerm[];
   readonly systemPermissions: readonly EffectiveSystemPerm[];
+  /** CR-CAP-10: custom permissions the union confers (sorted by name, full list). */
+  readonly customPermissions: readonly EffectiveCustomPerm[];
   readonly summary: {
     readonly objects: number;
     readonly fieldsWithFls: number;
     readonly apexClasses: number;
     readonly systemPermissions: number;
+    readonly customPermissions: number;
   };
   readonly limit: number;
   readonly offset: number;
@@ -142,6 +163,7 @@ const PREFIX = {
   object: 'CustomObject:',
   field: 'CustomField:',
   apex: 'ApexClass:',
+  customPermission: 'CustomPermission:',
 } as const;
 
 const BASE_DISCLOSURES: readonly string[] = Object.freeze([
@@ -207,6 +229,8 @@ export const effectivePermissionsHandler = async (
   const fieldsWithFls = new Set<string>();
   const apexClasses = new Set<string>();
   const systemPermMap = new Map<string, Set<string>>();
+  // CR-CAP-10: custom-permission name -> set of granting container ids.
+  const customPermMap = new Map<string, Set<string>>();
   const presentContainers: string[] = [];
   const missingContainers: string[] = [];
 
@@ -262,6 +286,13 @@ export const effectivePermissionsHandler = async (
         }
       } else if (edge.toId.startsWith(PREFIX.apex)) {
         apexClasses.add(edge.toId.slice(PREFIX.apex.length));
+      } else if (edge.toId.startsWith(PREFIX.customPermission)) {
+        // CR-CAP-10: declared custom-permission grant. Attribute it; resolution
+        // (targetMissing) happens after the loop. NOT folded into systemPermMap.
+        const name = edge.toId.slice(PREFIX.customPermission.length);
+        const set = customPermMap.get(name) ?? new Set<string>();
+        set.add(containerId);
+        customPermMap.set(name, set);
       }
     }
   }
@@ -290,6 +321,24 @@ export const effectivePermissionsHandler = async (
   const systemPermissions: EffectiveSystemPerm[] = [...systemPermMap.entries()]
     .map(([permission, set]) => ({ permission, grantedBy: [...set].sort() }))
     .sort((x, y) => (x.permission < y.permission ? -1 : x.permission > y.permission ? 1 : 0));
+
+  // CR-CAP-10: resolve each granted custom permission against its definition
+  // node so a managed-package grant whose definition is absent is disclosed
+  // (targetMissing), not dropped and not fabricated.
+  const customPermNames = [...customPermMap.keys()].sort();
+  const customPermissions: EffectiveCustomPerm[] = [];
+  for (const name of customPermNames) {
+    const cpNode = await getNodeById(ctx.graph, `${PREFIX.customPermission}${name}` as ComponentId);
+    if (!cpNode.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${cpNode.error.message}` });
+    }
+    customPermissions.push({
+      name,
+      targetMissing: cpNode.value === null,
+      grantedBy: [...(customPermMap.get(name) ?? new Set<string>())].sort(),
+    });
+  }
+  const missingCustomPerms = customPermissions.filter((c) => c.targetMissing).length;
 
   const totalObjects = objectPermissions.length;
   const limit = input.limit ?? DEFAULT_LIMIT;
@@ -369,17 +418,24 @@ export const effectivePermissionsHandler = async (
       `Object permissions paginated: showing ${offset}–${offset + objectPage.length} of ${totalObjects}. summary holds the complete counts; page with offset/limit.`,
     );
   }
+  if (missingCustomPerms > 0) {
+    disclosures.push(
+      `${missingCustomPerms} granted custom permission(s) name a definition not present in this vault (targetMissing) — likely managed-package or not retrieved; the grant is declared but the definition is not resolvable here. Custom permissions are NOT system userPermissions, so they are not double-counted under systemPermissions.`,
+    );
+  }
 
   return ok({
     data: {
       containers: presentContainers,
       objectPermissions: objectPage,
       systemPermissions: systemPage,
+      customPermissions,
       summary: {
         objects: totalObjects,
         fieldsWithFls: fieldsWithFls.size,
         apexClasses: apexClasses.size,
         systemPermissions: systemPermissions.length,
+        customPermissions: customPermissions.length,
       },
       limit,
       offset,

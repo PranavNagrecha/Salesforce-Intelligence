@@ -54,12 +54,16 @@ const seed: ExtractionResult = {
     node({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' }),
     node({ id: 'CustomField:Account.Amount__c', type: 'CustomField', apiName: 'Account.Amount__c' }),
     node({ id: 'ApexClass:DealService', type: 'ApexClass', apiName: 'DealService' }),
+    // CR-CAP-10: a defined CustomPermission; the managed-package one below has no node.
+    node({ id: 'CustomPermission:SkipValidation', type: 'CustomPermission', apiName: 'SkipValidation' }),
   ],
   edges: [
     edge({ fromId: 'Profile:Sales', toId: 'CustomObject:Account', edgeType: 'grantedBy', properties: { allowRead: true } }),
     edge({ fromId: 'PermissionSet:DealEditor', toId: 'CustomObject:Account', edgeType: 'grantedBy', properties: { allowRead: true, allowEdit: true } }),
     edge({ fromId: 'PermissionSet:DealEditor', toId: 'CustomField:Account.Amount__c', edgeType: 'grantedBy', properties: { readable: true, editable: true } }),
     edge({ fromId: 'PermissionSet:DealEditor', toId: 'ApexClass:DealService', edgeType: 'grantedBy', properties: {} }),
+    edge({ fromId: 'Profile:Sales', toId: 'CustomPermission:SkipValidation', edgeType: 'grantedBy', properties: { enabled: true } }),
+    edge({ fromId: 'PermissionSet:DealEditor', toId: 'CustomPermission:APXTConga4__Composer_Custom_Permission', edgeType: 'grantedBy', properties: { enabled: true } }),
   ],
 };
 
@@ -131,6 +135,29 @@ describe('effectivePermissionsHandler', () => {
     expect(r.value.data.confidence).toBe('declared');
     expect(r.value.data.disclosures.some((d) => d.includes('GROUP membership'))).toBe(true);
     expect(r.value.data.disclosures.some((d) => d.includes('App and tab'))).toBe(true);
+  });
+
+  // CR-CAP-10: custom permissions are unioned with per-container attribution and
+  // targetMissing disclosure; they are NOT folded into systemPermissions.
+  it('unions granted custom permissions with attribution + targetMissing, distinct from system perms', async () => {
+    const r = await effectivePermissionsHandler(ctx, {
+      profileId: 'Profile:Sales',
+      permissionSetIds: ['PermissionSet:DealEditor'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const cps = r.value.data.customPermissions;
+    expect(cps).toEqual([
+      { name: 'APXTConga4__Composer_Custom_Permission', targetMissing: true, grantedBy: ['PermissionSet:DealEditor'] },
+      { name: 'SkipValidation', targetMissing: false, grantedBy: ['Profile:Sales'] },
+    ]);
+    expect(r.value.data.summary.customPermissions).toBe(2);
+    // Not double-counted into systemPermissions.
+    const sys = r.value.data.systemPermissions.map((s) => s.permission);
+    expect(sys).not.toContain('SkipValidation');
+    expect(sys).not.toContain('APXTConga4__Composer_Custom_Permission');
+    // Disclosure surfaces the granted-but-undefined name.
+    expect(r.value.data.disclosures.some((d) => d.includes('not present in this vault'))).toBe(true);
   });
 
   it('returns component-not-found when no container exists', async () => {

@@ -41,6 +41,10 @@ const seed: ExtractionResult = {
     } }),
     node({ id: 'PermissionSet:FlowRunner', type: 'PermissionSet', apiName: 'FlowRunner', properties: { userPermissions: [] } }),
     node({ id: 'Flow:Onboard_Contact', type: 'Flow', apiName: 'Onboard_Contact' }),
+    // CR-CAP-10: a defined CustomPermission (resolves) and a permset granting
+    // both it and a managed-package perm with no definition (targetMissing).
+    node({ id: 'CustomPermission:SkipValidation', type: 'CustomPermission', apiName: 'SkipValidation' }),
+    node({ id: 'PermissionSet:CustomPerms', type: 'PermissionSet', apiName: 'CustomPerms', properties: { userPermissions: [] } }),
     // A profile that grants run access to THREE flows — used to exercise the
     // CR-22 cursor over the paged runnableFlows list.
     node({ id: 'Profile:MultiFlow', type: 'Profile', apiName: 'MultiFlow', properties: { userPermissions: [] } }),
@@ -54,6 +58,8 @@ const seed: ExtractionResult = {
     edge({ fromId: 'Profile:MultiFlow', toId: 'Flow:Alpha', edgeType: 'grantedBy', properties: { flowAccess: true } }),
     edge({ fromId: 'Profile:MultiFlow', toId: 'Flow:Beta', edgeType: 'grantedBy', properties: { flowAccess: true } }),
     edge({ fromId: 'Profile:MultiFlow', toId: 'Flow:Gamma', edgeType: 'grantedBy', properties: { flowAccess: true } }),
+    edge({ fromId: 'PermissionSet:CustomPerms', toId: 'CustomPermission:SkipValidation', edgeType: 'grantedBy', properties: { enabled: true } }),
+    edge({ fromId: 'PermissionSet:CustomPerms', toId: 'CustomPermission:APXTConga4__Composer_Custom_Permission', edgeType: 'grantedBy', properties: { enabled: true } }),
   ],
 };
 
@@ -95,6 +101,28 @@ describe('userAbilityHandler', () => {
   it('component-not-found for an unknown id', async () => {
     const r = await userAbilityHandler(ctx, { componentId: 'Profile:Ghost' });
     expect(r.ok).toBe(false); if (r.ok) return; expect(r.error.kind).toBe('component-not-found');
+  });
+
+  // CR-CAP-10: user_ability now surfaces granted custom permissions, marking a
+  // managed-package grant whose definition is not in the vault as targetMissing.
+  it('surfaces granted custom permissions, flagging the one with no definition as targetMissing', async () => {
+    const r = await userAbilityHandler(ctx, { componentId: 'PermissionSet:CustomPerms' });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.customPermissions).toEqual([
+      { name: 'APXTConga4__Composer_Custom_Permission', targetMissing: true },
+      { name: 'SkipValidation', targetMissing: false },
+    ]);
+    expect(d.summary.customPermissions).toBe(2);
+    // The disclosure must call out the granted-but-undefined name (not drop it).
+    expect(d.boundaryNote).toContain('not present in this vault');
+  });
+
+  it('reports zero custom permissions cleanly for a container that grants none', async () => {
+    const r = await userAbilityHandler(ctx, { componentId: 'Profile:Sales' });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    expect(r.value.data.customPermissions).toEqual([]);
+    expect(r.value.data.summary.customPermissions).toBe(0);
   });
 });
 
