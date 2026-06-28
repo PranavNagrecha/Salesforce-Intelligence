@@ -43,6 +43,7 @@ export { extractCustomSettingRecord } from './custom-setting-record.js';
 export { extractCustomTab } from './custom-tab.js';
 export { extractDecisionTable } from './decision-table.js';
 export {
+  extractCustomPermission,
   extractDashboard,
   extractFlexiPage,
   extractListView,

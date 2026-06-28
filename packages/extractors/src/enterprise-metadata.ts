@@ -455,6 +455,21 @@ export const extractReportType = (path: string): Promise<Result<ExtractionResult
   extractEnterpriseMetadata(path, { type: 'ReportType', suffix: '.reportType-meta.xml' });
 
 /**
+ * CR-CAP-15: extract a CustomPermission DEFINITION node from a flat
+ * `customPermissions/{DeveloperName}.customPermission-meta.xml` file. The node
+ * id is `CustomPermission:{DeveloperName}` (no parent scope) — the exact target
+ * a PermissionSet/Profile `<customPermissions><name>X</name>` grant resolves to
+ * (CR-CAP-10's `grantedBy` edge). Definition-node only: the optional
+ * `<requiredPermission>` dependency edges and `<connectedApp>` reference are a
+ * deferred follow-up (the generic field scanner emits no useful edges for a
+ * CustomPermission's plain-text label/description).
+ */
+export const extractCustomPermission = (
+  path: string,
+): Promise<Result<ExtractionResult, ExtractorError>> =>
+  extractEnterpriseMetadata(path, { type: 'CustomPermission', suffix: '.customPermission-meta.xml' });
+
+/**
  * The `<type>` values that name a FLEXIPAGE'S page kind (vs the overloaded
  * region/component `<type>` values like `Region`/`Facet`/`Component`). Used to
  * pick the page type out of the many `<type>` occurrences in the XML.
