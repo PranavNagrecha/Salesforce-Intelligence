@@ -912,6 +912,9 @@ const bfsExpand = async (
  * RV2: stubs cover ONLY genuine phantom targets (never budget-clipped REAL
  * nodes — those stay clipped and their edges are dropped), and the synthesized
  * stub is always the edge `toId` (the phantom endpoint per import stamping).
+ * The stub synthesis itself is capped at `SUBGRAPH_MAX_NODES`: a class with
+ * more genuine phantom edges than the node cap stops stubbing at the budget and
+ * flags `truncated`, so the node bound holds even under `includeUnresolved`.
  *
  * @example
  *   const r = await getSubgraph(store, 'CustomObject:Account', 1);
@@ -992,6 +995,19 @@ export const getSubgraph = async (
       for (const edge of collectedEdges) {
         if (!isHiddenUnresolved(edge)) continue;
         if (!returnedIds.has(edge.toId)) {
+          // Mirror the normal-path node cap: synthesizing a stub still grows the
+          // returned node set, so the documented `at most SUBGRAPH_MAX_NODES`
+          // bound must hold here too. A single class can carry MORE genuine
+          // phantom heuristic edges than maxNodes (edges are budgeted to
+          // maxEdges independently of the node cap), so without this guard the
+          // stub loop blows past the cap. Stop stubbing once the node budget is
+          // spent and flag truncation; the unstubbed phantom endpoints stay out
+          // of returnedIds and their edges are dropped by the filter below, so
+          // the slice stays self-contained.
+          if (returnedNodes.length >= limits.maxNodes) {
+            state.truncated = true;
+            break;
+          }
           returnedIds.add(edge.toId);
           returnedNodes.push(makeUnresolvedStubNode(edge.toId));
         }

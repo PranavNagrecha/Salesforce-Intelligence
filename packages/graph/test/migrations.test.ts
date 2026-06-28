@@ -129,6 +129,31 @@ describe('runMigrations', () => {
     close(h);
   });
 
+  it('surfaces a typed schema-error for a MALFORMED schema_version row instead of silently reading v0 (CR-P3 low)', async () => {
+    // CR-P3 low: pre-fix `Number(raw ?? 0)` coerced any present-but-unparseable
+    // `version` value to v0 (a non-numeric string → NaN; null → 0), silently
+    // mis-classifying a corrupt / foreign-built vault as a pre-versioning vault.
+    // A genuine v0 vault has NO schema_version table — a table that EXISTS with a
+    // garbage value is an anomaly that must surface, not masquerade as v0.
+    const h = await open('malformed.db');
+    await buildOldSchema(h.connection);
+    // Simulate a foreign / corrupt schema where `version` is not an integer:
+    // create the ledger with a VARCHAR column holding a non-numeric value.
+    await h.connection.run(
+      'CREATE TABLE schema_version (id INTEGER PRIMARY KEY, version VARCHAR NOT NULL);',
+    );
+    await h.connection.run(
+      "INSERT INTO schema_version (id, version) VALUES (1, 'garbage');",
+    );
+
+    const r = await readSchemaVersion(h.connection);
+    // A present-but-malformed version must NOT read as v0; it surfaces a typed
+    // schema-error so the caller does not silently re-migrate a corrupt vault.
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe('schema-error');
+    close(h);
+  });
+
   it('rolls back and surfaces a typed schema-error when a migration step fails', async () => {
     const h = await open('fail.db');
     await buildOldSchema(h.connection);
