@@ -599,6 +599,142 @@ describe('extractWorkflowRule', () => {
         await rm(dir, { recursive: true, force: true });
       }
     });
+
+    it('CR-RV13: SKIPS the writesTo for a $-prefixed (global) <field> ref, keeping only references', async () => {
+      // A global-variable-style <field> ($User.x, $Setup.x, …) is not a real
+      // CustomField on this (or any) object. Real metadata never emits one as a
+      // FieldUpdate target, but a malformed/hand-edited file can. Minting
+      // CustomField:$User.Email would be a phantom writer claim. The honest
+      // result is NO writesTo — the references edge to the scaffolding node STILL
+      // emits so the action is not silently dropped.
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>Stamp_Global</fullName>
+    <field>$User.Email</field>
+    <operation>Formula</operation>
+  </fieldUpdates>
+  <rules>
+    <fullName>Stamp_Global_Rule</fullName>
+    <actions>
+      <name>Stamp_Global</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <active>true</active>
+    <triggerType>onAllChanges</triggerType>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const writesTo = result.value.edges.filter(
+          (e) => e.edgeType === 'writesTo',
+        );
+        expect(writesTo).toHaveLength(0);
+        const refs = result.value.edges.filter(
+          (e) => e.edgeType === 'references',
+        );
+        expect(refs).toHaveLength(1);
+        expect(refs[0]!.toId).toBe('WorkflowFieldUpdate:Account.Stamp_Global');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('CR-RV13: SKIPS the writesTo for a malformed <field> with an empty dot-segment (lone/leading/trailing dot)', async () => {
+      // A dotted <field> whose object-part or leaf-part is empty (".", "Foo.",
+      // ".Foo") is malformed — real metadata never emits one, but a hand-edited
+      // file can. Each would mint a degenerate CustomField id (CustomField:.,
+      // CustomField:Foo., CustomField:.Foo). Skip the writesTo entirely; the
+      // references edge to the scaffolding node STILL emits.
+      const cases = ['.', 'Foo.', '.Foo'];
+      for (const malformed of cases) {
+        const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>Bad_FU</fullName>
+    <field>${malformed}</field>
+    <operation>Formula</operation>
+  </fieldUpdates>
+  <rules>
+    <fullName>Bad_FU_Rule</fullName>
+    <actions>
+      <name>Bad_FU</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <active>true</active>
+    <triggerType>onAllChanges</triggerType>
+  </rules>
+</Workflow>`;
+        const { dir, path } = await writeTempWorkflowXml('Account', xml);
+        try {
+          const result = await extractWorkflowRule(path);
+          expect(result.ok).toBe(true);
+          if (!result.ok) return;
+          const writesTo = result.value.edges.filter(
+            (e) => e.edgeType === 'writesTo',
+          );
+          expect(writesTo, `<field>${malformed}</field>`).toHaveLength(0);
+          const refs = result.value.edges.filter(
+            (e) => e.edgeType === 'references',
+          );
+          expect(refs).toHaveLength(1);
+          expect(refs[0]!.toId).toBe('WorkflowFieldUpdate:Account.Bad_FU');
+        } finally {
+          await rm(dir, { recursive: true, force: true });
+        }
+      }
+    });
+
+    it('CR-RV13: well-formed bare and dotted <field> refs still emit the writesTo (regression guard)', async () => {
+      // The malformed-leaf guard must not touch well-formed refs: a bare same-
+      // object name stays object-scoped, and a clean Object.Field dotted ref is
+      // taken verbatim.
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>Set_Bare</fullName>
+    <field>Foo__c</field>
+    <operation>Literal</operation>
+  </fieldUpdates>
+  <fieldUpdates>
+    <fullName>Set_Dotted</fullName>
+    <field>ns__Target__c.Bar__c</field>
+    <operation>Literal</operation>
+  </fieldUpdates>
+  <rules>
+    <fullName>Well_Formed_Rule</fullName>
+    <actions>
+      <name>Set_Bare</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <actions>
+      <name>Set_Dotted</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <active>true</active>
+    <triggerType>onAllChanges</triggerType>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const writesTo = result.value.edges
+          .filter((e) => e.edgeType === 'writesTo')
+          .map((e) => e.toId)
+          .sort();
+        expect(writesTo).toEqual([
+          'CustomField:Account.Foo__c',
+          'CustomField:ns__Target__c.Bar__c',
+        ]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe('v2.8 — OutboundMessage promotion', () => {
