@@ -37,6 +37,35 @@ const writeTempApprovalXml = async (
   return { dir, path };
 };
 
+/**
+ * CR-CAP-07 — write BOTH an `approvalProcesses/{stem}.approvalProcess-meta.xml`
+ * AND a sibling `workflows/{objectApiName}.workflow-meta.xml` under ONE temp
+ * root so the extractor's derived sibling path
+ * (`dirname(dirname(approvalPath))/workflows/{Object}.workflow-meta.xml`)
+ * resolves. The two subdirs are siblings under the same root, mirroring
+ * `main/default/` in a real source tree.
+ */
+const writeTempApprovalWithWorkflow = async (
+  stem: string,
+  objectApiName: string,
+  approvalContent: string,
+  workflowContent: string,
+): Promise<{ readonly dir: string; readonly path: string }> => {
+  const dir = await mkdtemp(join(tmpdir(), 'sf-intel-approval-process-'));
+  const approvalSubdir = join(dir, 'approvalProcesses');
+  const workflowSubdir = join(dir, 'workflows');
+  await mkdir(approvalSubdir, { recursive: true });
+  await mkdir(workflowSubdir, { recursive: true });
+  const path = join(approvalSubdir, `${stem}.approvalProcess-meta.xml`);
+  await writeFile(path, approvalContent, 'utf-8');
+  await writeFile(
+    join(workflowSubdir, `${objectApiName}.workflow-meta.xml`),
+    workflowContent,
+    'utf-8',
+  );
+  return { dir, path };
+};
+
 describe('extractApprovalProcess', () => {
   describe('golden output', () => {
     itHarness('produces the golden output for Account.Credit_Review (multi-step + hooks + emailTemplate)', async () => {
@@ -447,6 +476,160 @@ describe('extractApprovalProcess', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  describe('CR-CAP-07 — FieldUpdate writesTo via sibling workflow', () => {
+    const APPROVAL_WITH_FIELD_UPDATE = `<?xml version="1.0"?>
+<ApprovalProcess xmlns="http://soap.sforce.com/2006/04/metadata">
+  <label>Credit Review</label>
+  <active>true</active>
+  <finalApprovalActions>
+    <action>
+      <name>Set_Reviewed</name>
+      <type>FieldUpdate</type>
+    </action>
+  </finalApprovalActions>
+</ApprovalProcess>`;
+
+    it('emits writesTo to the real CustomField AND keeps the references scaffolding edge (KEEP+ADD)', async () => {
+      // FAIL-BEFORE: today the FieldUpdate hook emits ONLY the `references` edge
+      // to WorkflowFieldUpdate:Account.Set_Reviewed — no writesTo to the field
+      // the update actually sets (which lives in the sibling workflow file).
+      const workflowXml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>Set_Reviewed</fullName>
+    <field>Reviewed__c</field>
+    <operation>Literal</operation>
+  </fieldUpdates>
+</Workflow>`;
+      const { dir, path } = await writeTempApprovalWithWorkflow(
+        'Account.Credit_Review',
+        'Account',
+        APPROVAL_WITH_FIELD_UPDATE,
+        workflowXml,
+      );
+      try {
+        const result = await extractApprovalProcess(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+
+        const writesTo = result.value.edges.filter(
+          (e) => e.edgeType === 'writesTo',
+        );
+        expect(writesTo).toHaveLength(1);
+        expect(writesTo[0]).toMatchObject({
+          fromId: 'ApprovalProcess:Account.Credit_Review',
+          toId: 'CustomField:Account.Reviewed__c',
+          edgeType: 'writesTo',
+          confidence: 'parsed',
+          properties: { operation: 'Literal', hookType: 'finalApproval' },
+        });
+
+        // KEEP: the scaffolding `references` edge to WorkflowFieldUpdate node
+        // STILL emits (consumers + the change-impact metadata branch rely on it).
+        const refs = result.value.edges.filter(
+          (e) =>
+            e.edgeType === 'references' &&
+            e.toId === 'WorkflowFieldUpdate:Account.Set_Reviewed',
+        );
+        expect(refs).toHaveLength(1);
+        expect(refs[0]!.properties).toMatchObject({
+          hookType: 'finalApproval',
+          actionType: 'FieldUpdate',
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('fail-soft: no sibling workflow file → no writesTo, but node + references survive (no phantom)', async () => {
+      // A FieldUpdate action with NO sibling workflows/{Object}.workflow-meta.xml
+      // is normal. Extraction must still succeed; only the writesTo is absent.
+      const { dir, path } = await writeTempApprovalXml(
+        'Account.Credit_Review',
+        APPROVAL_WITH_FIELD_UPDATE,
+      );
+      try {
+        const result = await extractApprovalProcess(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(
+          result.value.nodes.some((n) => n.type === 'ApprovalProcess'),
+        ).toBe(true);
+        expect(
+          result.value.edges.filter((e) => e.edgeType === 'writesTo'),
+        ).toHaveLength(0);
+        // The references scaffolding edge still documents the action.
+        expect(
+          result.value.edges.some(
+            (e) =>
+              e.edgeType === 'references' &&
+              e.toId === 'WorkflowFieldUpdate:Account.Set_Reviewed',
+          ),
+        ).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('fail-soft: malformed sibling workflow file → empty map, no writesTo, extraction still ok', async () => {
+      const { dir, path } = await writeTempApprovalWithWorkflow(
+        'Account.Credit_Review',
+        'Account',
+        APPROVAL_WITH_FIELD_UPDATE,
+        '<Workflow><fieldUpdates><fullName>Set_Reviewed', // unterminated → parse-error
+      );
+      try {
+        const result = await extractApprovalProcess(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(
+          result.value.edges.filter((e) => e.edgeType === 'writesTo'),
+        ).toHaveLength(0);
+        expect(
+          result.value.nodes.some((n) => n.type === 'ApprovalProcess'),
+        ).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('CR-P3-5: a cross-object field update (<targetObject>) emits NO writesTo (no relationship-scoped phantom)', async () => {
+      const workflowXml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>Set_Reviewed</fullName>
+    <field>Reviewed__c</field>
+    <operation>Literal</operation>
+    <targetObject>Parent__r</targetObject>
+  </fieldUpdates>
+</Workflow>`;
+      const { dir, path } = await writeTempApprovalWithWorkflow(
+        'Account.Credit_Review',
+        'Account',
+        APPROVAL_WITH_FIELD_UPDATE,
+        workflowXml,
+      );
+      try {
+        const result = await extractApprovalProcess(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(
+          result.value.edges.filter((e) => e.edgeType === 'writesTo'),
+        ).toHaveLength(0);
+        // The references edge is KEPT — the action is never silently dropped.
+        expect(
+          result.value.edges.some(
+            (e) =>
+              e.edgeType === 'references' &&
+              e.toId === 'WorkflowFieldUpdate:Account.Set_Reviewed',
+          ),
+        ).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe('error cases', () => {

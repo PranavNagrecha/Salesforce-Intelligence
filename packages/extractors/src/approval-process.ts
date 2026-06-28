@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 
 import type {
   Edge,
@@ -16,10 +17,23 @@ import {
   type CriteriaItem,
 } from './condition-extractor.js';
 import { deriveDotSplitObjectAndApiName } from './path-utils.js';
+import {
+  buildFieldUpdateTargetMap,
+  isWellFormedFieldRef,
+  type FieldUpdateTarget,
+} from './workflow-rule.js';
 
 const APPROVAL_PROCESS_FILE_SUFFIX = '.approvalProcess-meta.xml';
 const ROOT_ELEMENT = 'ApprovalProcess';
 const EXTRACTOR_SOURCE = 'approval-process-extractor';
+/**
+ * CR-CAP-07: an ApprovalProcess FieldUpdate hook action carries only the
+ * field-update NAME (`<action><name>`); the actual target `<field>` lives in
+ * the OBJECT's sibling `workflows/{Object}.workflow-meta.xml` file's
+ * `<fieldUpdates>` collection — NOT in the .approvalProcess file. This suffix
+ * names that sibling file (mirrors `WORKFLOW_FILE_SUFFIX` in workflow-rule.ts).
+ */
+const WORKFLOW_FILE_SUFFIX = '.workflow-meta.xml';
 
 /**
  * Variant table for the `<approver><type>` discriminator per
@@ -409,8 +423,66 @@ const stepEdges = (
 };
 
 /**
+ * CR-CAP-07 — load the OBJECT's `<fieldUpdates>` name→target map from the
+ * SIBLING `workflows/{Object}.workflow-meta.xml` file. This is a
+ * first-of-its-kind cross-file load for an extractor: the `Extractor` type
+ * hands each extractor ONLY its own `path`, so we DERIVE the sibling path.
+ * `approvalProcesses/` and `workflows/` are sibling directories under
+ * `main/default/`, so the workflow file is
+ * `dirname(dirname(approvalPath))/workflows/{Object}.workflow-meta.xml`.
+ *
+ * MUST fail-soft: a missing sibling workflow file is NORMAL (not every
+ * object that has an approval process also defines workflow field-updates),
+ * and an unparseable one must not sink the ApprovalProcess extraction. On
+ * ENOENT, parse-error, or any other read failure, return an EMPTY map — the
+ * node, approver edges, sendsEmail edges, and the `references` scaffolding
+ * edge all survive; absence simply means no field-level `writesTo` is minted
+ * (the `references` edge already documents the action). Reuses
+ * `buildFieldUpdateTargetMap` from workflow-rule.ts (single source of truth)
+ * so the resolution + cross-object `<targetObject>` semantics never drift.
+ */
+const loadObjectFieldUpdateMap = async (
+  approvalPath: string,
+  objectApiName: string,
+): Promise<Readonly<Map<string, FieldUpdateTarget>>> => {
+  const empty: Readonly<Map<string, FieldUpdateTarget>> = new Map();
+  const workflowPath = join(
+    dirname(dirname(approvalPath)),
+    'workflows',
+    `${objectApiName}${WORKFLOW_FILE_SUFFIX}`,
+  );
+  const xmlResult = await readAndValidateXml(workflowPath);
+  // Fail-soft: ENOENT (no sibling workflow file) or parse-error → empty map.
+  if (!xmlResult.ok) return empty;
+
+  const parser = new XMLParser({
+    ignoreAttributes: true,
+    parseTagValue: false,
+    trimValues: true,
+    processEntities: { maxTotalExpansions: 10000 },
+  });
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = parser.parse(xmlResult.value) as Record<string, unknown>;
+  } catch {
+    return empty;
+  }
+  const root = unwrapSingle(parsed['Workflow']);
+  if (typeof root !== 'object' || root === null) return empty;
+  return buildFieldUpdateTargetMap(root as Record<string, unknown>);
+};
+
+/**
  * Walk one hook list, validating each `<action>` and emitting the
  * variant-table edges with `hookType` in properties.
+ *
+ * CR-CAP-07: a `FieldUpdate` hook action additionally emits a FIELD-level
+ * `writesTo` edge to the `CustomField` the update SETS, resolved against the
+ * `fieldUpdateMap` loaded from the sibling workflow file. This is
+ * KEEP-the-`references`-ADD-the-`writesTo`, mirroring workflow-rule.ts: the
+ * `references` edge still points at the `WorkflowFieldUpdate:{Object}.{name}`
+ * scaffolding node; the new `writesTo` points at the real `CustomField` so
+ * field-change-impact tools (CR-CAP-01) see the ApprovalProcess as a writer.
  */
 const hookListEdges = (
   rootObj: Record<string, unknown>,
@@ -418,6 +490,7 @@ const hookListEdges = (
   hookType: HookType,
   processId: string,
   objectApiName: string,
+  fieldUpdateMap: Readonly<Map<string, FieldUpdateTarget>>,
   _path: string,
 ): Result<readonly Edge[], ExtractorError> => {
   const hookContainerRaw = unwrapSingle(rootObj[hookElement]);
@@ -458,6 +531,44 @@ const hookListEdges = (
         source: EXTRACTOR_SOURCE,
         properties: { hookType, actionType: type },
       });
+    }
+
+    // CR-CAP-07: FieldUpdate hook actions additionally emit a FIELD-level
+    // `writesTo` to the CustomField the update SETS — mirroring
+    // workflow-rule.ts's `edgesForAction` exactly. The target field is NOT on
+    // the `<action>` child (it carries only `<name>` == the field-update's
+    // `<fullName>`); it lives in the sibling `workflows/{Object}.workflow-meta.xml`
+    // file's `<fieldUpdates>` collection, resolved via `fieldUpdateMap`.
+    //
+    // CR-P3-5: a CROSS-OBJECT field update (Salesforce emits a `<targetObject>`)
+    // sets a field on a RELATED record. `<targetObject>` is the relationship
+    // reference, not the related object's API name, and the relationship→object
+    // map is not resolvable offline — so we SKIP the `writesTo` (emit no edge)
+    // rather than mint a relationship-scoped `CustomField:{rel}.{field}` phantom.
+    // The `references` edge to the scaffolding node above STILL emits, so the
+    // action is never silently dropped. Confidence is `parsed` (the field name
+    // is read straight out of the workflow XML), matching workflow-rule.ts CR-05
+    // and flow.ts — NOT `declared` (that tier is for the scaffolding ref).
+    if (type === 'FieldUpdate') {
+      const target = fieldUpdateMap.get(name);
+      if (
+        target !== undefined &&
+        target.field !== null &&
+        target.targetObject === null &&
+        isWellFormedFieldRef(target.field)
+      ) {
+        const fieldTargetId = target.field.includes('.')
+          ? `CustomField:${target.field}`
+          : `CustomField:${objectApiName}.${target.field}`;
+        edges.push({
+          fromId: processId,
+          toId: fieldTargetId,
+          edgeType: 'writesTo',
+          confidence: 'parsed',
+          source: EXTRACTOR_SOURCE,
+          properties: { hookType, operation: target.operation },
+        });
+      }
     }
   }
   return ok(edges);
@@ -548,6 +659,12 @@ export const extractApprovalProcess = async (
   const rootResult = validateRoot(parsed, path);
   if (!rootResult.ok) return rootResult;
   const rootObj = rootResult.value;
+
+  // CR-CAP-07 — resolve the sibling object's workflow `<fieldUpdates>` ONCE so
+  // each FieldUpdate hook action can emit a field-level `writesTo`. Fail-soft:
+  // a missing/unparseable sibling workflow file yields an empty map (the
+  // ApprovalProcess node + all other edges are unaffected).
+  const fieldUpdateMap = await loadObjectFieldUpdateMap(path, objectApiName);
 
   const processId = `ApprovalProcess:${objectApiName}.${processName}`;
   const parentId = `CustomObject:${objectApiName}`;
@@ -700,6 +817,7 @@ export const extractApprovalProcess = async (
       hook.hookType,
       processId,
       objectApiName,
+      fieldUpdateMap,
       path,
     );
     if (!hookResult.ok) return hookResult;
