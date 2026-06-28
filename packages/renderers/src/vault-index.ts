@@ -7,7 +7,7 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok } from '@sf-intelligence/core';
 
-import { escapeMarkdownInline } from './markdown-table.js';
+import { escapeMarkdownHeading } from './markdown-table.js';
 
 // The relative path of the index file under the vault root. Co-located with
 // the per-component directories so links in the body can be relative to the
@@ -53,11 +53,17 @@ const buildLinkTarget = (node: Node): string => {
 // Display text for a node in the index — falls back to apiName when label
 // is null so the bullet is never blank. Mirrors the heading-fallback rule
 // in `component-markdown` (heading uses `label ?? apiName`). The label is
-// free-text metadata, so it is inline-escaped (CR-16c): a newline would
-// otherwise split the bullet and the trailing fragment could be parsed as a
-// new list item / heading / table row.
+// free-text metadata rendered in inline PROSE after the bullet's em dash —
+// NOT inside a code span — so it uses the prose-inline escaper
+// `escapeMarkdownHeading` (CR-P3-6), the same one the renderers use for
+// heading lines (also an inline context). The code-span escaper
+// (backtick-only `escapeMarkdownInline`) was under-escaping here: a label
+// with a pipe / `[text](url)` link / `<img>` raw-HTML / `*emphasis*` /
+// leading `#` would render live in the bullet. `escapeMarkdownHeading` also
+// collapses newlines (CR-16c) and leaves clean labels byte-identical
+// (parens/spaces untouched, so `Status (active)` is unchanged).
 const renderNodeDisplayLabel = (node: Node): string =>
-  escapeMarkdownInline(node.label ?? node.apiName);
+  escapeMarkdownHeading(node.label ?? node.apiName);
 
 // Build the bullet line for one node. The link text is the canonical id in
 // backticks (so it survives copy-paste into other Markdown tools without

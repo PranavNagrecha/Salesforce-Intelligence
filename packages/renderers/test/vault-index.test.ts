@@ -249,4 +249,60 @@ describe('renderVaultIndex — bullet label escaping (CR-16c)', () => {
       '- [`CustomObject:Clean__c`](./CustomObject/Clean__c.md) — Clean Object',
     );
   });
+
+  it('CR-P3 (low): neutralizes inline-markdown vectors in the bullet label (prose context, not code span)', () => {
+    // The label sits in inline PROSE after the em dash, NOT inside a code
+    // span — so the code-span escaper (backtick-only) under-escapes it. A
+    // label with a pipe / link / raw-HTML / emphasis / leading `#` must be
+    // neutralized by the prose-appropriate escaper (consistent with the
+    // CR-P3-6 heading escaper used elsewhere in the renderers).
+    const evil = buildNode({
+      id: 'CustomObject:Vec__c',
+      type: 'CustomObject',
+      apiName: 'Vec__c',
+      label: '# A | [x](http://evil) <img src=y> *b*',
+    });
+    const result = renderVaultIndex([evil]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const bullet = result.value.body
+      .split('\n')
+      .find((l) => l.includes('CustomObject:Vec__c'));
+    expect(bullet).toBeDefined();
+    // Assert the ESCAPED form of each vector is present (the backtick-only
+    // code-span escaper would leave all of these raw). Substring-absence
+    // checks would false-pass — `\[x\]` still contains `[x]` as a substring —
+    // so the contract is verified positively against the escaped output.
+    // No live link: the brackets are backslash-escaped.
+    expect(bullet).toContain('\\[x\\]');
+    // No live raw-HTML/image beacon: the `<` is backslash-escaped.
+    expect(bullet).toContain('\\<img src=y>');
+    // No live emphasis: the asterisks are backslash-escaped.
+    expect(bullet).toContain('\\*b\\*');
+    // The pipe is escaped so it cannot read as a table delimiter downstream.
+    expect(bullet).toContain('\\|');
+    // The leading `#` of the label fragment is escaped.
+    expect(bullet).toContain('\\#');
+    // Sanity: the backtick-only escaper would have left the link bracket raw;
+    // confirm no UN-escaped `[x](` survives (the char before `[` is `\`).
+    expect(bullet).not.toMatch(/[^\\]\[x\]\(/);
+  });
+
+  it('CR-P3 (low): a clean bullet label stays byte-identical under the prose escaper (golden-safe)', () => {
+    // Spaces and parens are common in labels (e.g. "Status (active)"); the
+    // prose escaper must leave a clean label untouched so golden output and
+    // in-budget renders do not churn.
+    const node = buildNode({
+      id: 'CustomObject:Account',
+      type: 'CustomObject',
+      apiName: 'Account',
+      label: 'Account (Standard)',
+    });
+    const result = renderVaultIndex([node]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.body).toContain(
+      '- [`CustomObject:Account`](./CustomObject/Account.md) — Account (Standard)',
+    );
+  });
 });

@@ -18,34 +18,46 @@
  * the surrounding Markdown table's row or columns. GFM renders a
  * backslash-escaped `\|` as a literal pipe even inside a code span.
  */
-/**
- * True when `value` is an array of picklist-value objects (H10 shape:
- * `{ value: string, isActive?: boolean, label?, default? }`). A bare `String()`
- * on such an array renders `[object Object]` in the body Properties table, so
- * it gets the human-readable join in {@link renderPicklistValues} instead.
- */
-const isPicklistValueArray = (
-  value: unknown,
-): value is ReadonlyArray<Record<string, unknown>> =>
-  Array.isArray(value) &&
-  value.length > 0 &&
-  value.every(
-    (e) =>
-      typeof e === 'object' &&
-      e !== null &&
-      typeof (e as Record<string, unknown>)['value'] === 'string',
-  );
+type PicklistEntry = string | Record<string, unknown>;
+
+const isPicklistValueObject = (e: unknown): e is Record<string, unknown> =>
+  typeof e === 'object' &&
+  e !== null &&
+  typeof (e as Record<string, unknown>)['value'] === 'string';
 
 /**
- * Render an H10 picklist-value object array as a comma-joined value list,
- * suffixing deactivated entries with `(inactive)` so a reader can tell which
- * values are retained-but-not-selectable rather than current.
+ * True when `value` is a picklist-value array that contains AT LEAST ONE
+ * `{ value: string, isActive?: boolean, label?, default? }` object entry (the
+ * H10 re-extracted shape) and whose remaining entries are bare strings (the
+ * legacy shape). This is exactly the set of arrays for which a bare `String()`
+ * would emit `[object Object]` for the object entries, so they are diverted to
+ * {@link renderPicklistValues}.
+ *
+ * A vault refreshed across the legacy->object migration can hold a MIXED array
+ * (some strings, some objects); both an all-object array and a mixed array are
+ * matched here. A pure-string array is DELIBERATELY NOT matched — it has no
+ * `[object Object]` problem and stays on the `String()` path so its rendered
+ * cell (comma-joined, no spaces) is byte-identical to before this fix, keeping
+ * golden / in-budget output stable.
  */
-const renderPicklistValues = (
-  entries: ReadonlyArray<Record<string, unknown>>,
-): string =>
+const isPicklistValueArray = (value: unknown): value is ReadonlyArray<PicklistEntry> =>
+  Array.isArray(value) &&
+  value.length > 0 &&
+  value.some(isPicklistValueObject) &&
+  value.every((e) => typeof e === 'string' || isPicklistValueObject(e));
+
+/**
+ * Render a picklist-value array as a comma-joined value list, suffixing
+ * deactivated object entries with `(inactive)` so a reader can tell which
+ * values are retained-but-not-selectable rather than current. Handles BOTH
+ * entry shapes — bare strings and `{ value, isActive? }` objects — so a mixed
+ * array never renders `[object Object]`. Bare-string entries have no activation
+ * state, so they carry no suffix.
+ */
+const renderPicklistValues = (entries: ReadonlyArray<PicklistEntry>): string =>
   entries
     .map((e) => {
+      if (typeof e === 'string') return e;
       const v = String(e['value']);
       return e['isActive'] === false ? `${v} (inactive)` : v;
     })
