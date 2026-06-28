@@ -392,6 +392,87 @@ describe('extractWorkflowRule', () => {
       }
     });
 
+    it('CR-P3-5: SKIPS the writesTo for a cross-object FieldUpdate (<targetObject> present), keeping only references', async () => {
+      // Real Salesforce cross-object format: a BARE <field> (the leaf field on
+      // the RELATED object) plus <targetObject> (the relationship reference). The
+      // relationship→object map is not resolvable offline, so minting any
+      // CustomField id here would be a relationship-scoped phantom. The honest
+      // result is NO writesTo — but the references edge to the WorkflowFieldUpdate
+      // scaffolding node STILL emits, so the action is not silently dropped.
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>Stamp_Parent</fullName>
+    <field>Total__c</field>
+    <targetObject>Contact</targetObject>
+    <operation>Formula</operation>
+  </fieldUpdates>
+  <rules>
+    <fullName>Stamp_Parent_Rule</fullName>
+    <actions>
+      <name>Stamp_Parent</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <active>true</active>
+    <triggerType>onAllChanges</triggerType>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        // No writesTo — no phantom CustomField for the cross-object target.
+        const writesTo = result.value.edges.filter(
+          (e) => e.edgeType === 'writesTo',
+        );
+        expect(writesTo).toHaveLength(0);
+        // The references edge to the scaffolding node still emits.
+        const refs = result.value.edges.filter(
+          (e) => e.edgeType === 'references',
+        );
+        expect(refs).toHaveLength(1);
+        expect(refs[0]!.toId).toBe('WorkflowFieldUpdate:Account.Stamp_Parent');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('CR-P3-5: same-object FieldUpdate (no <targetObject>) still emits the object-scoped writesTo', async () => {
+      // Regression guard: the cross-object skip must NOT touch the same-object
+      // path — a bare <field> with no <targetObject> stays object-scoped.
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>Set_Local</fullName>
+    <field>Foo__c</field>
+    <operation>Literal</operation>
+  </fieldUpdates>
+  <rules>
+    <fullName>Set_Local_Rule</fullName>
+    <actions>
+      <name>Set_Local</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <active>true</active>
+    <triggerType>onAllChanges</triggerType>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const writesTo = result.value.edges.filter(
+          (e) => e.edgeType === 'writesTo',
+        );
+        expect(writesTo).toHaveLength(1);
+        expect(writesTo[0]!.toId).toBe('CustomField:Account.Foo__c');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
     it('emits NO writesTo when the FieldUpdate has no matching <fieldUpdates> entry or no <field>', async () => {
       // Two failure modes: (a) action names a field-update with no
       // matching <fieldUpdates> entry; (b) the matching entry lacks a

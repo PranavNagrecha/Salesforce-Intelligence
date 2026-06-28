@@ -220,6 +220,18 @@ interface FieldUpdateTarget {
   readonly field: string | null;
   /** The `<operation>` (Formula|Literal|Null|NextValue|PreviousValue). */
   readonly operation: string | null;
+  /**
+   * CR-P3-5: the `<targetObject>` element. Salesforce emits it ONLY for a
+   * CROSS-OBJECT field update (e.g. updating a field on a parent/related
+   * record); it holds the RELATIONSHIP reference, not the related object's API
+   * name. Same-object updates omit it (null). Its mere PRESENCE marks the
+   * update as cross-object, which is all we need: the relationship→object map
+   * is not resolvable offline, so a cross-object update emits NO `writesTo`
+   * (minting `CustomField:{relationship}.{field}` would be a relationship-scoped
+   * phantom — a false writer claim). Mirrors `formula-references.ts`, which
+   * skips every cross-object dotted path for the same reason.
+   */
+  readonly targetObject: string | null;
 }
 
 /**
@@ -235,7 +247,9 @@ interface FieldUpdateTarget {
  * addressable by name, so no rule can reference them. Entries without a
  * `<field>` are included with `field: null` so the caller can distinguish
  * "field-update exists but names no target" (emit no `writesTo`) from
- * "field-update not found".
+ * "field-update not found". CR-P3-5: `<targetObject>` is captured so the
+ * caller can detect (and skip the `writesTo` for) cross-object updates whose
+ * relationship→object mapping is not resolvable offline.
  */
 const buildFieldUpdateTargetMap = (
   rootObj: Record<string, unknown>,
@@ -251,6 +265,7 @@ const buildFieldUpdateTargetMap = (
     result.set(String(fullNameRaw), {
       field: optionalString(fu, 'field'),
       operation: optionalString(fu, 'operation'),
+      targetObject: optionalString(fu, 'targetObject'),
     });
   }
   return result;
@@ -518,14 +533,28 @@ const edgesForAction = (
   // that field-change-impact tools see the WorkflowRule as a writer. The
   // target field is NOT on the `<actions>` child (it carries only
   // `<name>` == the field-update's `<fullName>`) — it lives in the sibling
-  // `<fieldUpdates>` collection, resolved via `fieldUpdateMap`. A bare
-  // same-object field name is object-scoped; a dotted name is taken
-  // verbatim (mirrors condition-extractor's field resolution). Confidence
-  // is `parsed` (the field name is read straight out of the XML), matching
-  // `flow.ts`.
+  // `<fieldUpdates>` collection, resolved via `fieldUpdateMap`.
+  //
+  // CR-P3-5: a CROSS-OBJECT field update (Salesforce emits a `<targetObject>`)
+  // sets a field on a RELATED record. `<targetObject>` is the relationship
+  // reference, not the related object's API name, and the relationship→object
+  // map is not resolvable offline — so we SKIP the `writesTo` entirely (emit no
+  // edge) rather than mint a relationship-scoped `CustomField:{rel}.{field}`
+  // phantom (a false writer claim). This mirrors `formula-references.ts`, which
+  // skips every cross-object dotted path for the same reason. The `references`
+  // edge to the scaffolding node above STILL emits, so the action is not
+  // silently dropped (admin-legacy-automation's dangling-edge honesty
+  // contract). A SAME-OBJECT update (no `<targetObject>`): a bare field name is
+  // object-scoped; a dotted name is taken verbatim (mirrors condition-
+  // extractor's field resolution). Confidence is `parsed` (the field name is
+  // read straight out of the XML), matching `flow.ts`.
   if (action.type === 'FieldUpdate') {
     const target = fieldUpdateMap.get(action.name);
-    if (target !== undefined && target.field !== null) {
+    if (
+      target !== undefined &&
+      target.field !== null &&
+      target.targetObject === null
+    ) {
       const fieldTargetId = target.field.includes('.')
         ? `CustomField:${target.field}`
         : `CustomField:${objectApiName}.${target.field}`;
