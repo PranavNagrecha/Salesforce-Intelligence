@@ -9,9 +9,12 @@
 
 describe('nodeExecFile — un-timed live-plane sf exec backstop (RV3 / H8)', () => {
   const PRIOR = process.env['SFI_SF_EXEC_TIMEOUT_MS'];
+  const PRIOR_GRACE = process.env['SFI_SF_EXEC_KILL_GRACE_MS'];
   afterEach(() => {
     if (PRIOR === undefined) delete process.env['SFI_SF_EXEC_TIMEOUT_MS'];
     else process.env['SFI_SF_EXEC_TIMEOUT_MS'] = PRIOR;
+    if (PRIOR_GRACE === undefined) delete process.env['SFI_SF_EXEC_KILL_GRACE_MS'];
+    else process.env['SFI_SF_EXEC_KILL_GRACE_MS'] = PRIOR_GRACE;
     vi.resetModules();
   });
 
@@ -32,6 +35,35 @@ describe('nodeExecFile — un-timed live-plane sf exec backstop (RV3 / H8)', () 
     expect(killed).toBe(true);
     expect(Date.now() - start).toBeLessThan(5000);
   });
+
+  // CR-P3: a child that SWALLOWS SIGTERM must still be force-killed (SIGKILL)
+  // after the grace, so a wedged `sf` subtree cannot outlive the timeout. The
+  // native execFile timeout sends ONE SIGTERM and never escalates, so such a
+  // child runs forever and the promise never settles.
+  it('FAIL-BEFORE/PASS-AFTER: escalates to SIGKILL when a child ignores SIGTERM', async () => {
+    process.env['SFI_SF_EXEC_TIMEOUT_MS'] = '200';
+    process.env['SFI_SF_EXEC_KILL_GRACE_MS'] = '300';
+    vi.resetModules();
+    const { nodeExecFile } = await import('../../src/tools/live-exec.js');
+    const start = Date.now();
+    let rejected = false;
+    let killed = false;
+    let signal: string | undefined;
+    try {
+      await nodeExecFile(process.execPath, [
+        '-e',
+        'process.on("SIGTERM", () => {}); setTimeout(() => {}, 60000);',
+      ]);
+    } catch (cause) {
+      rejected = true;
+      killed = (cause as { killed?: boolean }).killed === true;
+      signal = (cause as { signal?: string }).signal;
+    }
+    expect(rejected).toBe(true);
+    expect(killed).toBe(true);
+    expect(signal).toBe('SIGKILL');
+    expect(Date.now() - start).toBeLessThan(4000);
+  }, 10000);
 
   it('lets a fast child resolve with its stdout under the generous default', async () => {
     delete process.env['SFI_SF_EXEC_TIMEOUT_MS'];

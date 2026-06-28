@@ -71,7 +71,7 @@ import type { Context } from '../server.js';
 import { partitionByBaseline } from './finding-suppression.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
-import { clampedNodeScanLimit, scanTruncationNote } from './scan-cap.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 
 const CRUD_FLS_TOOL = 'sfi.crud_fls_audit';
 
@@ -408,9 +408,7 @@ export const crudFlsAuditHandler = async (
   // could be among the unscanned residual tail. (`truncated` is the OUTPUT
   // offset/limit cursor; this is the INPUT-scan saturation, a separate axis.)
   if (scan.value.scanIncomplete) {
-    boundaries.push(
-      scanTruncationNote(scan.value.incompleteTypes, clampedNodeScanLimit()),
-    );
+    boundaries.push(fullScanTruncationNote(scan.value.incompleteTypes));
   }
 
   return ok({
