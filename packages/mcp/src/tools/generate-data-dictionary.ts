@@ -362,7 +362,7 @@ const GENERATED_DOC_ENVELOPE_RESERVE_BYTES = 1_024;
  * than a footer-chopped doc — H7 cannot re-open. At the default 40 KB this floor
  * is never selected (max(2_000, 38_976) = 38_976).
  */
-const GENERATED_DOC_BUDGET_FLOOR_BYTES = 2_000;
+export const GENERATED_DOC_BUDGET_FLOOR_BYTES = 2_000;
 
 /**
  * When a GENUINELY-oversized document must shed `frontmatter.componentIds[]`
