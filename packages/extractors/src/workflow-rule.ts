@@ -214,8 +214,16 @@ const buildAlertTemplateMap = (
   return result;
 };
 
-/** A `<fieldUpdates>` entry's resolved target: the field it sets + the op. */
-interface FieldUpdateTarget {
+/**
+ * A `<fieldUpdates>` entry's resolved target: the field it sets + the op.
+ *
+ * Exported so `approval-process.ts` (CR-CAP-07) can reuse the SAME shape
+ * + builder + well-formedness guard when it resolves an ApprovalProcess
+ * FieldUpdate hook action against the sibling `workflows/{Object}.workflow-meta.xml`
+ * file's `<fieldUpdates>` collection. Single source of truth — do NOT
+ * copy-paste into the approval extractor (drift risk per CR-CAP-07).
+ */
+export interface FieldUpdateTarget {
   /** The `<field>` API name the update sets (verbatim, or null if absent). */
   readonly field: string | null;
   /** The `<operation>` (Formula|Literal|Null|NextValue|PreviousValue). */
@@ -251,7 +259,7 @@ interface FieldUpdateTarget {
  * caller can detect (and skip the `writesTo` for) cross-object updates whose
  * relationship→object mapping is not resolvable offline.
  */
-const buildFieldUpdateTargetMap = (
+export const buildFieldUpdateTargetMap = (
   rootObj: Record<string, unknown>,
 ): Readonly<Map<string, FieldUpdateTarget>> => {
   const result = new Map<string, FieldUpdateTarget>();
@@ -489,7 +497,7 @@ const resolveAction = (
  * → `null`; the cross-object `<targetObject>` case is handled separately per
  * CR-P3-5.)
  */
-const isWellFormedFieldRef = (field: string): boolean => {
+export const isWellFormedFieldRef = (field: string): boolean => {
   if (field.startsWith('$')) return false;
   if (!field.includes('.')) return true;
   // Dotted: every segment must be non-empty.
