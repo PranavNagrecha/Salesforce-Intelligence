@@ -403,6 +403,69 @@ describe('renderComponentMarkdown', () => {
     expect(picklistRow).toContain('Open');
     expect(picklistRow).toContain('Closed (inactive)');
   });
+
+  it('CR-P3 (low, golden-safe): a pure-string picklistValues row stays on the String() path (comma, no space)', () => {
+    // A pure-string array has no [object Object] problem; it must NOT be
+    // diverted to the comma-SPACE join, so its rendered cell is byte-identical
+    // to the pre-fix `String()` output. This guards the golden/in-budget output.
+    const node: Node = {
+      id: 'CustomField:Account.Stage__c',
+      type: 'CustomField',
+      apiName: 'Stage__c',
+      label: 'Stage',
+      parentId: 'CustomObject:Account',
+      sourcePath: 'objects/Account/fields/Stage__c.field-meta.xml',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {
+        dataType: 'Picklist',
+        picklistValues: ['Open', 'In Progress', 'Closed'],
+      },
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const picklistRow = result.value.body
+      .split('\n')
+      .find((line) => line.startsWith('| picklistValues |'));
+    // Exact pre-fix cell: `String(['Open','In Progress','Closed'])` -> commas,
+    // no spaces, wrapped in backticks.
+    expect(picklistRow).toBe('| picklistValues | `Open,In Progress,Closed` |');
+  });
+
+  it('CR-P3 (low): a MIXED legacy(string)+object picklistValues array renders each entry, never [object Object]', () => {
+    // A vault refreshed across the legacy->object picklist-shape migration can
+    // hold a heterogeneous array: some entries are bare strings (legacy) and
+    // some are `{ value, isActive? }` objects (re-extracted). The guard used
+    // `.every(isObject)`, so the string entry made it fall through to
+    // String(value) -> `Open,[object Object]`. Both shapes must render.
+    const node: Node = {
+      id: 'CustomField:Account.Stage__c',
+      type: 'CustomField',
+      apiName: 'Stage__c',
+      label: 'Stage',
+      parentId: 'CustomObject:Account',
+      sourcePath: 'objects/Account/fields/Stage__c.field-meta.xml',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {
+        dataType: 'Picklist',
+        picklistValues: ['Open', { value: 'Closed', isActive: false }],
+      },
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const picklistRow = result.value.body
+      .split('\n')
+      .find((line) => line.startsWith('| picklistValues |'));
+    expect(picklistRow).toBeDefined();
+    expect(picklistRow).not.toContain('[object Object]');
+    expect(picklistRow).toContain('Open');
+    expect(picklistRow).toContain('Closed (inactive)');
+  });
 });
 
 describe('renderComponentMarkdown — markdown injection / escaping (CR-16c)', () => {
