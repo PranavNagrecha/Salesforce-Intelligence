@@ -18,7 +18,11 @@
  *   3. **System god-mode** — `ViewAllData` / `ModifyAllData` on a profile
  *      or permission set (read / modify every record of every object).
  *   4. **Sharing rules** — the `sharedWith` targets (roles / groups) of
- *      the owner and criteria sharing rules on this object.
+ *      the owner and criteria sharing rules on this object. CR-CAP-12: when a
+ *      target is a public Group, its members (walked transitively through
+ *      nested groups via `hasMember`) are each listed as their own granter
+ *      row, not just the group; a dangling member (e.g. a Territory) is listed
+ *      but flagged as unresolved.
  *
  * Record-level paths it CANNOT enumerate statically are disclosed in
  * `blindSpots`, never fabricated: record ownership + the role hierarchy
@@ -48,10 +52,13 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { readActiveHoldersFor, type HoldersShape } from './facts-block.js';
+import { expandGroupMembers } from './group-membership.js';
 import { mergeInputAliases, toCustomObjectId } from './input-aliases.js';
 import { clampedNodeScanLimit, scanHitCap, scanTruncationNote } from './scan-cap.js';
 
 const CUSTOM_OBJECT_PREFIX = 'CustomObject:';
+/** CR-CAP-12: a `sharedWith` target that is a Group whose members we expand. */
+const GROUP_MEMBER_PREFIX = 'Group:';
 /** Page size for the granter list (a public object can have hundreds). */
 const DEFAULT_LIMIT = 120;
 const MAX_LIMIT = 250;
@@ -103,7 +110,13 @@ export type AccessVia =
   | 'system-view-all-data'
   | 'system-modify-all-data'
   | 'owner-sharing-rule'
-  | 'criteria-sharing-rule';
+  | 'criteria-sharing-rule'
+  // CR-CAP-16: the guest / territory sharing-rule families. Without these the
+  // else branch mislabeled them `owner-sharing-rule`, hiding that they are
+  // record-level-context-gated (guest = site guest user; territory = territory
+  // assignment) and shaped like criteria rules, not owner rules.
+  | 'guest-sharing-rule'
+  | 'territory-sharing-rule';
 
 /** One principal that gains access, with the path and operation level. */
 export interface AccessGranter {
@@ -235,6 +248,9 @@ export const whoCanAccessObjectHandler = async (
   // object-FILTERED count that countNodesByType's type-only form can't give.)
   const scanLimit = clampedNodeScanLimit();
   const truncatedTypes: string[] = [];
+  // CR-CAP-12: set when a group's `hasMember` expansion hit a missing
+  // nested/enclosing group node, so the member roster is possibly incomplete.
+  let groupMembershipTruncated = false;
 
   // 1. Object permissions: incoming `grantedBy` edges from Profiles/PermSets.
   const grantsResult = await listEdges(ctx.graph, componentId, {
@@ -308,8 +324,9 @@ export const whoCanAccessObjectHandler = async (
   }
 
   // 3. Sharing rules on this object: each rule's `sharedWith` targets gain its
-  //    access level. Owner rules share to a fixed group/role; criteria rules
-  //    share records matching a predicate (the matched set is a blind spot).
+  //    access level. Owner rules share to a fixed group/role; criteria / guest /
+  //    territory rules share records matching a predicate (the matched set is a
+  //    blind spot, and guest/territory add a requester-context blind spot).
   const rulesResult = await listNodesByType(ctx.graph, 'SharingRule', { limit: scanLimit });
   if (!rulesResult.ok) {
     return err({ kind: 'internal', message: `graph query failed: ${rulesResult.error.message}` });
@@ -319,8 +336,20 @@ export const whoCanAccessObjectHandler = async (
     if (stringProp(rule.properties, 'sObjectType') !== objectApiName) continue;
     const ruleType = stringProp(rule.properties, 'ruleType');
     const accessLevel = stringProp(rule.properties, 'accessLevel') || 'Read';
-    const via: AccessVia = ruleType === 'criteria' ? 'criteria-sharing-rule' : 'owner-sharing-rule';
-    const predicate = ruleType === 'criteria' ? stringProp(rule.properties, 'booleanFilter') : '';
+    // CR-CAP-16: map each family to its own `via` so guest / territory rules are
+    // not mislabeled `owner-sharing-rule` by the else branch.
+    const via: AccessVia =
+      ruleType === 'criteria'
+        ? 'criteria-sharing-rule'
+        : ruleType === 'guest'
+          ? 'guest-sharing-rule'
+          : ruleType === 'territory' || ruleType === 'territoryGroup'
+            ? 'territory-sharing-rule'
+            : 'owner-sharing-rule';
+    // Criteria / guest / territory rules carry a predicate; owner rules do not.
+    const predicate =
+      ruleType === 'owner' ? '' : stringProp(rule.properties, 'booleanFilter');
+    const siteName = ruleType === 'guest' ? stringProp(rule.properties, 'siteName') : '';
     const targetsResult = await listEdges(ctx.graph, rule.id, {
       direction: 'out',
       edgeType: 'sharedWith',
@@ -342,8 +371,50 @@ export const whoCanAccessObjectHandler = async (
         detail:
           ruleType === 'criteria'
             ? `criteria sharing rule ${rule.id} (${accessLevel}) shares records matching \`${predicate || '(predicate not extracted)'}\``
-            : `owner sharing rule ${rule.id} (${accessLevel}) shares this user/group's owned records`,
+            : ruleType === 'guest'
+              ? `guest sharing rule ${rule.id} (${accessLevel}) shares records matching \`${predicate || '(predicate not extracted)'}\` with the${siteName ? ` '${siteName}'` : ''} Experience Cloud site guest user (record-level + requester context required)`
+              : ruleType === 'territory' || ruleType === 'territoryGroup'
+                ? `${ruleType} sharing rule ${rule.id} (${accessLevel}) shares records matching \`${predicate || '(predicate not extracted)'}\` by territory assignment (record-level + territory context required)`
+                : `owner sharing rule ${rule.id} (${accessLevel}) shares this user/group's owned records`,
       });
+      // CR-CAP-12: a rule shared with a Group also reaches every member that
+      // group contains (transitively, through nested groups), so list each
+      // member as its own granter row instead of stopping at the group. The
+      // member edges are `declared` (the group's `<related>` rows). A dangling
+      // member (`resolvable: false`, e.g. a Territory) is still listed but
+      // flagged in its detail so it is never read as a fully resolved principal.
+      if (edge.toId.startsWith(GROUP_MEMBER_PREFIX)) {
+        const expanded = await expandGroupMembers(ctx, edge.toId);
+        if (!expanded.ok) {
+          return err({ kind: 'internal', message: `graph query failed: ${expanded.error}` });
+        }
+        if (expanded.value.truncated) groupMembershipTruncated = true;
+        for (const member of expanded.value.members) {
+          const memberLabel = member.memberId.includes(':')
+            ? member.memberId.slice(member.memberId.indexOf(':') + 1)
+            : member.memberId;
+          const memberType = member.memberId.includes(':')
+            ? member.memberId.slice(0, member.memberId.indexOf(':'))
+            : 'Group';
+          const subDetail =
+            member.inheritance === 'subordinates' ||
+            member.inheritance === 'subordinatesInternal'
+              ? ' (and its subordinate roles)'
+              : '';
+          const unresolved = member.resolvable
+            ? ''
+            : ' — dangling member (not a resolvable principal in this vault); verify in the org';
+          granters.push({
+            granterId: member.memberId,
+            granterType: memberType,
+            granterLabel: memberLabel,
+            via,
+            access: ruleAccessToOp(accessLevel),
+            scope: 'shared-records',
+            detail: `${ruleType || 'owner'} sharing rule ${rule.id} (${accessLevel}) shares with group ${edge.toId}, which contains this ${member.memberType} member${subDetail}${unresolved}`,
+          });
+        }
+      }
     }
   }
 
@@ -412,6 +483,11 @@ export const whoCanAccessObjectHandler = async (
   if (sharingRuleNotRetrieved) {
     blindSpots.push(
       'Sharing-rule grants could not be enumerated because the `SharingRule` type was NOT retrieved into this vault (a scoped, errored, or empty retrieve). Any owner / criteria sharing-rule paths are **not checked**, never "none" — the listed granters are NOT the complete static access model. Run `sfi refresh` including SharingRule.',
+    );
+  }
+  if (groupMembershipTruncated) {
+    blindSpots.push(
+      'A group shared with this object references a nested / member group whose node was NOT retrieved into this vault, so its membership expansion is INCOMPLETE — some member principals may be missing from the granter list. Run `sfi refresh` including Group.',
     );
   }
 

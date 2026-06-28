@@ -58,15 +58,17 @@ const TYPE_SCAN_CAP = 500;
 
 /**
  * Honest disclosure of the sharing dimensions this summary does NOT model, so
- * an "owner + criteria rules only" report is never read as the complete access
- * model (P11-G5). Territory & guest sharing rules are SKIPPED by the
- * sharing-rule extractor (`<sharingTerritoryRules>` / `<sharingGuestRules>`);
- * sharing sets, account/opportunity/case teams, and manual / Apex sharing are
- * record-level or config the offline metadata does not carry. Absence of any of
- * these here means "not modeled", never "the object has none".
+ * the rules table is never read as the complete access model (P11-G5).
+ * CR-CAP-16: territory & guest sharing rules are now EXTRACTED and listed (their
+ * row appears in the table with a guest/territory predicate), so they are no
+ * longer "skipped" — but their APPLICABILITY is still record-level, so the
+ * disclosure keeps them as a not-decidable dimension. Sharing sets,
+ * account/opportunity/case teams, and manual / Apex sharing remain record-level
+ * or config the offline metadata does not carry. Absence of any of these here
+ * means "not modeled / not decidable", never "the object has none".
  */
 const UNMODELED_SHARING_DIMENSIONS_DISCLOSURE =
-  'Sharing dimensions NOT modeled here (absence ≠ none): territory sharing rules and guest (Experience Cloud) sharing rules are skipped by the extractor; sharing sets, account / opportunity / case teams, and manual & Apex (programmatic) sharing are record-level or config not in the offline metadata. This summary covers OWD, owner + criteria sharing rules, role hierarchy, and Profile/PermissionSet grants. For a per-user record verdict (which surfaces these as explicit not-modeled stages) use `why_cant_user_see_record`.';
+  'Sharing dimensions whose record-level applicability this summary cannot decide (absence ≠ none): territory and guest (Experience Cloud) sharing rules are now LISTED (CR-CAP-16) but whether a given record/user is shared needs record-level + requester context the offline metadata lacks; sharing sets, account / opportunity / case teams, and manual & Apex (programmatic) sharing are record-level or config not in the offline metadata. This summary covers OWD, owner + criteria + guest + territory sharing rules, role hierarchy, and Profile/PermissionSet grants. For a per-user record verdict (which surfaces these as explicit not-decidable stages) use `why_cant_user_see_record`.';
 
 /** Zod schema for the `sfi.generate_sharing_summary` tool input. */
 export const generateSharingSummaryInputSchema = z.object({
@@ -126,6 +128,33 @@ const criteriaPredicate = (
   return 'unspecified criteria';
 };
 
+/** Rule families that are criteria-shaped (carry a predicate) — CR-CAP-16. */
+const PREDICATE_RULE_TYPES: ReadonlySet<string> = new Set([
+  'criteria',
+  'guest',
+  'territory',
+  'territoryGroup',
+]);
+
+/**
+ * The Criteria-column text for a rule row. CR-CAP-16: guest / territory rules
+ * are criteria-shaped, so they show their predicate too; a guest rule also
+ * prefixes its Experience-Cloud site name so the portal is visible. Owner rules
+ * have no predicate ("—").
+ */
+const ruleCriteriaCell = (
+  ruleType: string,
+  properties: Readonly<Record<string, unknown>>,
+): string => {
+  if (!PREDICATE_RULE_TYPES.has(ruleType)) return '—';
+  const predicate = criteriaPredicate(properties);
+  const siteName = properties['siteName'];
+  if (ruleType === 'guest' && typeof siteName === 'string' && siteName.length > 0) {
+    return `site '${siteName}': ${predicate}`;
+  }
+  return predicate;
+};
+
 /**
  * Per-object sharing payload built before rendering. Collected once
  * per object so the rendering pass is purely formatting.
@@ -177,10 +206,11 @@ const renderObjectSection = (
     for (const rule of sorted) {
       const ruleType = stringProp(rule.properties, 'ruleType', 'unknown');
       const access = stringProp(rule.properties, 'accessLevel', 'Unknown');
-      // Surface the criteria predicate (P11-G5) so a criteria-based access path
-      // isn't invisible. The predicate needs record data to evaluate, so it is a
-      // declared rule definition, not a per-record verdict.
-      const criteria = ruleType === 'criteria' ? criteriaPredicate(rule.properties) : '—';
+      // Surface the criteria/guest/territory predicate (P11-G5, CR-CAP-16) so a
+      // predicate-based access path isn't invisible. The predicate needs record
+      // data to evaluate, so it is a declared rule definition, not a per-record
+      // verdict.
+      const criteria = ruleCriteriaCell(ruleType, rule.properties);
       lines.push(
         `| \`${escapeCell(rule.apiName)}\` | ${escapeCell(ruleType)} | ${escapeCell(access)} | ${escapeCell(criteria)} |`,
       );

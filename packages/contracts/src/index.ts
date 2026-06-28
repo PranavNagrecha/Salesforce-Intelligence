@@ -399,6 +399,21 @@ export type EdgeType =
   // v1.1 — sharing & visibility tier.
   | 'inheritsFrom' //      Role -> parent Role (hierarchy)
   | 'sharedWith' //        SharingRule or Queue -> access target
+  // CR-CAP-12 — Group membership topology. Group -> a member it contains, one
+  // edge per `<related>` row in the `*.group-meta.xml`. The member target uses
+  // the SAME variant-prefix logic the sharing-rules `sharedWith` table uses:
+  // a `User` row → a dangling `User:{ref}` id (no User ComponentType, so the
+  // target is dangling-by-design); a `Role` row → `Role:{ref}`; a
+  // `RoleAndSubordinates` row → `Role:{ref}` carrying
+  // `properties.inheritance: 'subordinates'`; a nested `Group` row →
+  // `Group:{ref}` (enabling membership transitivity); a `Territory` row →
+  // a `Territory:{ref}` synthetic carrying `properties.resolvable: false` so
+  // consumers disclose it. Confidence `declared` (the `<related>` row is the
+  // declaration) — matching the sharing-rules `sharedWith` sibling, which emits
+  // the same kind of parsed-from-XML target as `declared` for consistency. The
+  // kept `Group` node `properties.memberCount` is additive, not replaced. See
+  // `docs/vendor/salesforce-metadata/Group.md`.
+  | 'hasMember'
   // v1.2 — record types + UI surfaces tier.
   | 'belongsToApp' //      CustomTab -> CustomApplication (declared, tab/app membership)
   | 'usesValueSet' //      CustomField -> GlobalValueSet (declared, value-set reference)
@@ -455,6 +470,7 @@ export const EDGE_TYPES = [
   'listensTo',
   'inheritsFrom',
   'sharedWith',
+  'hasMember',
   'belongsToApp',
   'usesValueSet',
   'sendsEmail',

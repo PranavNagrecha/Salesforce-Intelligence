@@ -337,22 +337,69 @@ describe('extractSharingRules', () => {
     });
   });
 
-  describe('skipped rule kinds', () => {
-    it('skips <sharingGuestRules> and <sharingTerritoryRules> without emitting nodes', async () => {
-      // Per Sharing.md, the presence of guest or territory rules is NOT an
-      // error — the extractor accepts them and emits no nodes or edges
-      // for their contents.
+  describe('guest & territory rule kinds (CR-CAP-16)', () => {
+    it('extracts a <sharingGuestRules> rule with the site name as the named Group target', async () => {
+      // CR-CAP-16: a guest rule's <guestUser> inner text is the Experience-Cloud
+      // SITE NAME. The extractor emits ONE SharingRule node (ruleType 'guest',
+      // sharedToType 'guestUser', siteName ClientPortal) + a parentOf edge + a
+      // sharedWith edge to a NAMED Group:ClientPortal carrying synthetic:true.
+      // Before CR-CAP-16 this asserted empty nodes/edges — fails today.
       const xml = `<?xml version="1.0"?>
 <SharingRules xmlns="http://soap.sforce.com/2006/04/metadata">
   <sharingGuestRules>
-    <fullName>Guest_Should_Be_Skipped</fullName>
+    <fullName>Share_To_Guest</fullName>
     <accessLevel>Read</accessLevel>
-    <sharedTo><guestUser/></sharedTo>
+    <sharedTo><guestUser>ClientPortal</guestUser></sharedTo>
+    <criteriaItems>
+      <field>Account.Type</field>
+      <operation>equals</operation>
+      <value>Public</value>
+    </criteriaItems>
   </sharingGuestRules>
+</SharingRules>`;
+      const { dir, path } = await writeTempXml(
+        'Account.sharingRules-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractSharingRules(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.nodes).toHaveLength(1);
+        const node = result.value.nodes[0]!;
+        expect(node.id).toBe('SharingRule:Account.Share_To_Guest');
+        expect(node.properties['ruleType']).toBe('guest');
+        expect(node.properties['sharedToType']).toBe('guestUser');
+        expect(node.properties['sharedToName']).toBe('ClientPortal');
+        expect(node.properties['siteName']).toBe('ClientPortal');
+        expect(node.properties['criteriaItemCount']).toBe(1);
+        const parentEdge = result.value.edges.find((e) => e.edgeType === 'parentOf');
+        expect(parentEdge?.fromId).toBe('CustomObject:Account');
+        expect(parentEdge?.toId).toBe('SharingRule:Account.Share_To_Guest');
+        const sharedWith = result.value.edges.find((e) => e.edgeType === 'sharedWith');
+        expect(sharedWith?.toId).toBe('Group:ClientPortal');
+        expect(sharedWith?.confidence).toBe('declared');
+        expect(sharedWith?.properties['synthetic']).toBe(true);
+        expect(sharedWith?.properties['siteName']).toBe('ClientPortal');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('extracts a <sharingTerritoryRules> shared with a normal group', async () => {
+      // A territory rule shared with a standard <group> resolves like any other
+      // group target; the rule is typed `territory`.
+      const xml = `<?xml version="1.0"?>
+<SharingRules xmlns="http://soap.sforce.com/2006/04/metadata">
   <sharingTerritoryRules>
-    <fullName>Territory_Should_Be_Skipped</fullName>
-    <accessLevel>Read</accessLevel>
+    <fullName>Territory_To_Group</fullName>
+    <accessLevel>Edit</accessLevel>
     <sharedTo><group>G</group></sharedTo>
+    <criteriaItems>
+      <field>Account.Region</field>
+      <operation>equals</operation>
+      <value>West</value>
+    </criteriaItems>
   </sharingTerritoryRules>
 </SharingRules>`;
       const { dir, path } = await writeTempXml(
@@ -363,8 +410,74 @@ describe('extractSharingRules', () => {
         const result = await extractSharingRules(path);
         expect(result.ok).toBe(true);
         if (!result.ok) return;
-        expect(result.value.nodes).toEqual([]);
-        expect(result.value.edges).toEqual([]);
+        expect(result.value.nodes).toHaveLength(1);
+        const node = result.value.nodes[0]!;
+        expect(node.properties['ruleType']).toBe('territory');
+        const sharedWith = result.value.edges.find((e) => e.edgeType === 'sharedWith');
+        expect(sharedWith?.toId).toBe('Group:G');
+        expect(sharedWith?.confidence).toBe('declared');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('extracts a <sharingTerritoryGroupRules> with a territory variant as a Territory synthetic', async () => {
+      const xml = `<?xml version="1.0"?>
+<SharingRules xmlns="http://soap.sforce.com/2006/04/metadata">
+  <sharingTerritoryGroupRules>
+    <fullName>TerritoryGroup_To_Territory</fullName>
+    <accessLevel>Read</accessLevel>
+    <sharedTo><territory>WestRegion</territory></sharedTo>
+  </sharingTerritoryGroupRules>
+</SharingRules>`;
+      const { dir, path } = await writeTempXml(
+        'Account.sharingRules-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractSharingRules(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.nodes).toHaveLength(1);
+        const node = result.value.nodes[0]!;
+        expect(node.properties['ruleType']).toBe('territoryGroup');
+        expect(node.properties['sharedToType']).toBe('territory');
+        const sharedWith = result.value.edges.find((e) => e.edgeType === 'sharedWith');
+        expect(sharedWith?.toId).toBe('Territory:WestRegion');
+        expect(sharedWith?.properties['synthetic']).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('back-compat: a self-closing <guestUser/> still resolves to the synthetic Group:GuestUser', async () => {
+      // A standard criteria rule whose <sharedTo> is a self-closing <guestUser/>
+      // (the shared VARIANT_TABLE entry) must STILL collapse to Group:GuestUser —
+      // CR-CAP-16's guest-branch-local resolver only applies to the guest
+      // FAMILY, leaving the exported table untouched for the criteria path.
+      const xml = `<?xml version="1.0"?>
+<SharingRules xmlns="http://soap.sforce.com/2006/04/metadata">
+  <sharingCriteriaRules>
+    <fullName>Criteria_With_GuestUser</fullName>
+    <accessLevel>Read</accessLevel>
+    <sharedTo><guestUser/></sharedTo>
+    <criteriaItems>
+      <field>Account.Name</field>
+      <operation>notEqual</operation>
+      <value></value>
+    </criteriaItems>
+  </sharingCriteriaRules>
+</SharingRules>`;
+      const { dir, path } = await writeTempXml(
+        'Account.sharingRules-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractSharingRules(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const sharedWith = result.value.edges.find((e) => e.edgeType === 'sharedWith');
+        expect(sharedWith?.toId).toBe('Group:GuestUser');
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
