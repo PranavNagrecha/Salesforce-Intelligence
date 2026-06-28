@@ -2036,6 +2036,13 @@ export interface LiveReportUsageOutput {
   readonly capped: boolean;
   readonly reports: readonly ReportUsageEntry[];
   readonly trust: TrustSummary;
+  /**
+   * CR-P3-7: true when the live-query budget ran out on the stale-count or
+   * detail query (after the gated COUNT succeeded). When true the staleReports
+   * count is a partial floor, not an authoritative verdict, and `rendered`
+   * surfaces the stop instead of a false clean "0 of N are stale".
+   */
+  readonly budgetStopped: boolean;
   readonly rendered: string;
 }
 
@@ -2083,9 +2090,25 @@ export const liveReportUsageHandler = async (
     ['Report', 'Folder', 'Last run', 'Days', 'Stale'],
     reports.map((r) => [r.name, r.folderName ?? '—', r.lastRunDate ?? 'never', r.daysSinceRun ?? '—', r.stale ? 'yes' : '']),
   );
+  // CR-P3-7: the stale-count (verdict) and detail queries are NOT gated like
+  // totalQ; a mid-tool budget stop returns total:0 with the budget reason, which
+  // would otherwise render a FALSE CLEAN "0 of N are stale". Detect the stop on
+  // either un-gated query and qualify the headline accordingly.
+  const budgetStopped =
+    isBudgetExhaustedReason(staleQ.reason) ||
+    isBudgetExhaustedReason(detailQ.reason);
+  // When the budget stopped before the stale count completed, the count is NOT a
+  // clean zero — render it as `n/a` (partial), never a literal authoritative 0
+  // (which would contradict BUDGET_SIGNAL's own "shown as n/a, NOT zero").
+  const staleHeadline = budgetStopped
+    ? `Stale-report count is **n/a** (partial) of ${totalQ.total.toLocaleString('en-US')} reports`
+    : `**${staleQ.total.toLocaleString('en-US')}** of ${totalQ.total.toLocaleString('en-US')} reports are stale`;
   const rendered =
-    `**${staleQ.total.toLocaleString('en-US')}** of ${totalQ.total.toLocaleString('en-US')} reports are stale ` +
-    `(not run in ${staleDays} days, or never).\n\n${table}\n\n${renderTrustFooter(trust)}`;
+    `${staleHeadline} (not run in ${staleDays} days, or never).` +
+    (budgetStopped
+      ? `\n\n> ${BUDGET_SIGNAL} The stale-report count is a partial floor, not a clean zero — the budget stopped before the count query completed.`
+      : '') +
+    `\n\n${table}\n\n${renderTrustFooter(trust)}`;
   return ok({
     data: {
       totalReports: totalQ.total,
@@ -2095,6 +2118,7 @@ export const liveReportUsageHandler = async (
       capped: totalQ.total > reports.length,
       reports,
       trust,
+      budgetStopped,
       rendered,
     },
     vaultState: livePlaneVaultState(ctx),
@@ -2133,6 +2157,12 @@ export interface LiveFolderAccessOutput {
   readonly capped: boolean;
   readonly folders: readonly FolderAccessEntry[];
   readonly trust: TrustSummary;
+  /**
+   * CR-P3-8: true when the live-query budget ran out on the (un-gated) total
+   * COUNT after the gated detail query succeeded. The folder total then falls
+   * back to the returned-set size (an understatement); `rendered` names the stop.
+   */
+  readonly budgetStopped: boolean;
   readonly rendered: string;
 }
 
@@ -2157,6 +2187,10 @@ export const liveFolderAccessHandler = async (
   );
   if (!detailQ.available) return err(UNAVAILABLE_ERROR('Folder', org, detailQ.reason));
   const totalQ = await liveQuery(org, `SELECT COUNT() FROM Folder${typeClause}`, exec);
+  // CR-P3-8: totalQ is NOT gated; a mid-tool budget stop makes totalQ.total=0,
+  // silently understating the universe (the verdict publicFolders is from the
+  // gated detail rows and stays correct). Surface the stop.
+  const budgetStopped = isBudgetExhaustedReason(totalQ.reason);
 
   const rows = detailQ.records as readonly FolderRow[];
   const byAccessType: Record<string, number> = {};
@@ -2181,7 +2215,11 @@ export const liveFolderAccessHandler = async (
   );
   const rendered =
     `${(totalQ.total || folders.length).toLocaleString('en-US')} folders — ` +
-    `**${publicFolders}** in the returned set are publicly accessible.\n\n${table}\n\n${renderTrustFooter(trust)}`;
+    `**${publicFolders}** in the returned set are publicly accessible.` +
+    (budgetStopped
+      ? `\n\n> ${BUDGET_SIGNAL} Folder total is the returned set only, not the full count.`
+      : '') +
+    `\n\n${table}\n\n${renderTrustFooter(trust)}`;
   return ok({
     data: {
       totalFolders: totalQ.total || folders.length,
@@ -2191,6 +2229,7 @@ export const liveFolderAccessHandler = async (
       capped: (totalQ.total || folders.length) > folders.length,
       folders,
       trust,
+      budgetStopped,
       rendered,
     },
     vaultState: livePlaneVaultState(ctx),
@@ -2239,6 +2278,12 @@ export interface LiveEmailTemplateUsageOutput {
   readonly capped: boolean;
   readonly templates: readonly TemplateUsageEntry[];
   readonly trust: TrustSummary;
+  /**
+   * CR-P3-8: true when the live-query budget ran out on the (un-gated) total
+   * COUNT after the gated detail query succeeded. The template total then falls
+   * back to the returned-set size; `rendered` names the stop.
+   */
+  readonly budgetStopped: boolean;
   readonly rendered: string;
 }
 
@@ -2261,6 +2306,10 @@ export const liveEmailTemplateUsageHandler = async (
   );
   if (!detailQ.available) return err(UNAVAILABLE_ERROR('EmailTemplate', org, detailQ.reason));
   const totalQ = await liveQuery(org, 'SELECT COUNT() FROM EmailTemplate', exec);
+  // CR-P3-8: totalQ is NOT gated; a mid-tool budget stop makes totalQ.total=0,
+  // understating the total (classic/migration verdicts come from the gated
+  // detail rows and stay correct). Surface the stop.
+  const budgetStopped = isBudgetExhaustedReason(totalQ.reason);
 
   const rows = detailQ.records as readonly TemplateRow[];
   let classicTemplates = 0;
@@ -2296,7 +2345,11 @@ export const liveEmailTemplateUsageHandler = async (
   const rendered =
     `${(totalQ.total || templates.length).toLocaleString('en-US')} email templates — ` +
     `**${classicTemplates}** Classic, **${migrationCandidates}** are migration candidates ` +
-    `(Classic + unused/stale > ${staleDays}d).\n\n${table}\n\n${renderTrustFooter(trust)}`;
+    `(Classic + unused/stale > ${staleDays}d).` +
+    (budgetStopped
+      ? `\n\n> ${BUDGET_SIGNAL} Template total is the returned set only.`
+      : '') +
+    `\n\n${table}\n\n${renderTrustFooter(trust)}`;
   return ok({
     data: {
       totalTemplates: totalQ.total || templates.length,
@@ -2307,6 +2360,7 @@ export const liveEmailTemplateUsageHandler = async (
       capped: (totalQ.total || templates.length) > templates.length,
       templates,
       trust,
+      budgetStopped,
       rendered,
     },
     vaultState: livePlaneVaultState(ctx),
@@ -2617,6 +2671,12 @@ export interface LiveSetupAuditTrailOutput {
   readonly capped: boolean;
   readonly changes: readonly SetupChange[];
   readonly trust: TrustSummary;
+  /**
+   * CR-P3-8: true when the live-query budget ran out on the (un-gated) detail
+   * query after the gated COUNT succeeded. The change table is then silently
+   * empty while totalChanges is exact; `rendered` names the partial.
+   */
+  readonly budgetStopped: boolean;
   readonly rendered: string;
 }
 
@@ -2642,6 +2702,10 @@ export const liveSetupAuditTrailHandler = async (
     `SELECT Action, Section, CreatedDate, Display, CreatedBy.Name FROM SetupAuditTrail WHERE CreatedDate = LAST_N_DAYS:${days} ORDER BY CreatedDate DESC LIMIT ${limit}`,
     exec,
   );
+  // CR-P3-8: detailQ is NOT gated; a mid-tool budget stop yields zero rows so
+  // the change TABLE is silently empty while totalChanges (from the gated count)
+  // is non-zero. Surface the partial.
+  const budgetStopped = isBudgetExhaustedReason(detailQ.reason);
   const changes: SetupChange[] = detailQ.records.map((row) => {
     const r = row as Record<string, unknown>;
     const by = r['CreatedBy'] as { Name?: string } | null | undefined;
@@ -2659,7 +2723,11 @@ export const liveSetupAuditTrailHandler = async (
     changes.slice(0, LIVE_TABLE_ROW_CAP).map((c) => [c.createdDate ?? '—', c.by ?? '—', c.section ?? '—', c.action]),
   );
   const rendered =
-    `**${totalQ.total.toLocaleString('en-US')}** Setup changes in the last ${days} days.\n\n${table}\n\n${renderTrustFooter(trust)}`;
+    `**${totalQ.total.toLocaleString('en-US')}** Setup changes in the last ${days} days.` +
+    (budgetStopped
+      ? `\n\n> ${BUDGET_SIGNAL} The change table is partial; the count is exact.`
+      : '') +
+    `\n\n${table}\n\n${renderTrustFooter(trust)}`;
   return ok({
     data: {
       days,
@@ -2668,6 +2736,7 @@ export const liveSetupAuditTrailHandler = async (
       capped: totalQ.total > changes.length,
       changes,
       trust,
+      budgetStopped,
       rendered,
     },
     vaultState: livePlaneVaultState(ctx),
