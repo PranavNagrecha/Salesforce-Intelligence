@@ -338,6 +338,51 @@ const orphanPublishedSeed: ExtractionResult = {
   ],
 };
 
+// =============================================================================
+// Seed 6 (P3b consumer de-dup): a single ApexClass that subscribes to the SAME
+// event via BOTH paths — `implements Triggerable<X__e>` (apex-class-extractor)
+// AND `EventBus.subscribe('X__e')` (apex-scanner). Two `listensTo` edges land
+// on the event from the same node id, carrying DIFFERENT sources (so the edge
+// PK does not collapse them). The consumer must de-dup by node id so the class
+// appears ONCE in subscribers[] and is counted ONCE in the catalog.
+// =============================================================================
+
+const DUP_EVENT = 'CustomObject:Dual_Path__e';
+const DUP_CLASS = 'ApexClass:Dual_Path_Handler';
+
+const dualPathSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: DUP_EVENT,
+      type: 'CustomObject',
+      apiName: 'Dual_Path__e',
+    }),
+    makeNode({
+      id: DUP_CLASS,
+      type: 'ApexClass',
+      apiName: 'Dual_Path_Handler',
+    }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: DUP_CLASS,
+      toId: DUP_EVENT,
+      edgeType: 'listensTo',
+      confidence: 'declared',
+      source: 'apex-class-extractor',
+      properties: { mechanism: 'implementsTriggerable', eventName: 'Dual_Path__e' },
+    }),
+    makeEdge({
+      fromId: DUP_CLASS,
+      toId: DUP_EVENT,
+      edgeType: 'listensTo',
+      confidence: 'heuristic',
+      source: 'apex-scanner',
+      properties: { mechanism: 'eventBusSubscribe' },
+    }),
+  ],
+};
+
 let tempDir: string;
 let store: GraphStore;
 let ctx: Context;
@@ -356,6 +401,7 @@ beforeAll(async () => {
     crowdedSeed,
     filteredTypeSeed,
     orphanPublishedSeed,
+    dualPathSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -603,6 +649,52 @@ describe('eventSubscribersHandler', () => {
     expect(byNamePub.get('Orphan_Published__e')).toBe(1);
     // Order_Placed__e has no publishers.
     expect(byNamePub.get('Order_Placed__e')).toBe(0);
+  });
+
+  it('P3b: de-dups a class subscribing via BOTH Triggerable AND EventBus.subscribe to ONE subscriber', async () => {
+    const result = await eventSubscribersHandler(ctx, { eventId: DUP_EVENT });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const subs = result.value.data.subscribers;
+    // Two listensTo edges (different sources, both surviving the edge PK) must
+    // collapse to ONE subscriber entry for the same node id.
+    expect(subs.filter((s) => s.id === DUP_CLASS)).toHaveLength(1);
+    expect(subs).toHaveLength(1);
+  });
+
+  it('P3b: catalog counts a dual-path subscriber ONCE, not twice', async () => {
+    const result = await eventSubscribersHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const events = result.value.data.events ?? [];
+    const dual = events.find((e) => e.eventApiName === 'Dual_Path__e');
+    expect(dual?.subscriberCount).toBe(1);
+  });
+
+  it('P3b: disclosure states EventBus.subscribe IS recognized heuristically (static channel only)', async () => {
+    const result = await eventSubscribersHandler(ctx, { eventId: DUP_EVENT });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const text = result.value.data.boundaries.join(' ');
+    // Reworded: subscribe is recognized; dynamic args + managed pkgs invisible.
+    expect(text).toMatch(/EventBus\.subscribe is now recognized heuristically/i);
+    expect(text).toMatch(/dynamic/i);
+    // Must NOT still claim EventBus.subscribe is NOT modeled.
+    expect(text).not.toMatch(/EventBus\.subscribe\([^)]*\)[^.]*are NOT modeled/i);
+  });
+
+  it('P3b: empty-event disclosure also reflects the heuristic-subscribe rewording', async () => {
+    const result = await eventSubscribersHandler(ctx, { eventId: ORDER_EVENT });
+    // Order_Placed__e has a subscriber, so use a truly-empty event instead:
+    const empty = await eventSubscribersHandler(ctx, {
+      eventId: 'CustomObject:Nonexistent_Empty__e',
+    });
+    expect(empty.ok).toBe(true);
+    if (!empty.ok) return;
+    expect(result.ok).toBe(true);
+    const text = empty.value.data.boundaries.join(' ');
+    expect(text).toMatch(/EventBus\.subscribe is now recognized heuristically/i);
+    expect(text).toMatch(/NOT proof nothing subscribes/i);
   });
 });
 

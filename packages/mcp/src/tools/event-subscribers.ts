@@ -254,14 +254,14 @@ export interface EventSubscribersOutput {
 }
 
 const EVENT_SUB_HEURISTIC_DISCLOSURE =
-  'Subscribers are detected from modeled `listensTo` edges (Apex/Flow trigger subscriptions). Detection is partial: the SUBSCRIBE registration via `EventBus.subscribe(...)`, dynamically-built subscriptions, and managed-package listeners are NOT modeled.';
+  'Subscribers are detected from modeled `listensTo` edges (Apex `Triggerable<X__e>` / Flow PlatformEvent triggers). Apex EventBus.subscribe is now recognized heuristically (static/resolvable channel args only); dynamically-built subscriptions (a computed/variable channel arg) and managed-package listeners remain invisible.';
 // CR-CAP-18: publish-side channel routing + declared per-member filters ARE now
 // extracted from `*.platformEventChannel(Member)-meta.xml` (declared XML text,
 // NOT runtime filter evaluation). Surfaced in `channels`.
 const EVENT_SUB_CHANNEL_DISCLOSURE =
   'Publish-side channel routing and per-member filter expressions ARE extracted from `*.platformEventChannel(Member)-meta.xml` (declared XML text — NOT runtime filter EVALUATION; which records actually flow needs record-level data the vault lacks).';
 const EVENT_SUB_EMPTY_DISCLOSURE =
-  'No subscribers found for this event — NOT proof nothing subscribes. The `EventBus.subscribe(...)` registration, dynamically-built subscriptions, and managed-package listeners are not modeled; verify in Setup before assuming the event is unused.';
+  'No subscribers found for this event — NOT proof nothing subscribes. Apex `EventBus.subscribe(...)` is now recognized heuristically (static/resolvable channel args only); dynamically-built subscriptions and managed-package listeners remain invisible. Verify in Setup before assuming the event is unused.';
 // GROUP C: publish-side CODE (the publishers list).
 const EVENT_SUB_PUBLISHER_DISCLOSURE =
   'Publishers are detected from modeled `writesTo` edges (Flow record-create on the event, Apex `EventBus.publish(...)`). Detection is partial: dynamically-built publishes and managed-package publishers are NOT modeled — an empty publishers list is not proof nothing publishes the event.';
@@ -320,6 +320,35 @@ const resolveSubscriber = async (
  */
 const compareSubscribers = (a: EventSubscriber, b: EventSubscriber): number =>
   a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+
+/**
+ * P3b: merge a second `listensTo` edge for an ALREADY-seen subscriber node into
+ * the existing record, preserving every subscription path. A class can listen
+ * via both `Triggerable<X__e>` and `EventBus.subscribe('X__e')`; the two edges
+ * survive the edge PK because their `source` differs, so the consumer must fold
+ * them into ONE subscriber. The kept `source`/`properties` come from the first
+ * edge (id-stable); a `mechanisms` array unions the per-edge `mechanism` tags
+ * (and falls back to the edge `source` when a mechanism is absent) so the
+ * caller can still see that the node subscribes via multiple paths.
+ */
+const mergeSubscriber = (
+  kept: EventSubscriber,
+  next: EventSubscriber,
+): EventSubscriber => {
+  const mechanismOf = (s: EventSubscriber): string => {
+    const m = s.properties['mechanism'];
+    return typeof m === 'string' && m.length > 0 ? m : s.source;
+  };
+  const existing = kept.properties['mechanisms'];
+  const base = Array.isArray(existing)
+    ? (existing as string[])
+    : [mechanismOf(kept)];
+  const merged = [...new Set([...base, mechanismOf(next)])].sort();
+  return {
+    ...kept,
+    properties: { ...kept.properties, mechanisms: merged },
+  };
+};
 
 /**
  * GROUP C: resolve one incoming `writesTo` edge into an `EventPublisher`.
@@ -477,18 +506,22 @@ export const eventSubscribersHandler = async (
       if (!inEdges.ok) {
         return err({ kind: 'internal', message: `graph query failed: ${inEdges.error.message}` });
       }
-      // Count only real subscriber node types (ApexTrigger/ApexClass/Flow) so
-      // the catalog count matches what single-event mode would return.
-      let subscriberCount = 0;
+      // Count DISTINCT subscriber node ids (ApexTrigger/ApexClass/Flow) so the
+      // catalog count matches single-event mode. P3b de-dup: a node listening
+      // via BOTH Triggerable AND EventBus.subscribe emits two `listensTo` edges
+      // (different sources survive the edge PK); counting per-edge would
+      // double-count it. Keep a per-event id set.
+      const subscriberIds = new Set<ComponentId>();
       for (const edge of inEdges.value) {
         const sub = await getNodeById(ctx.graph, edge.fromId);
         if (!sub.ok) {
           return err({ kind: 'internal', message: `graph query failed: ${sub.error.message}` });
         }
         if (sub.value !== null && SUBSCRIBER_NODE_TYPES.has(sub.value.type)) {
-          subscriberCount += 1;
+          subscriberIds.add(sub.value.id);
         }
       }
+      const subscriberCount = subscriberIds.size;
       // GROUP C: count modeled `writesTo` publishers (Flow/Apex emitting the
       // event) so the catalog flags published-but-unsubscribed events.
       const publishersResult = await resolvePublishers(ctx, node.id);
@@ -532,7 +565,15 @@ export const eventSubscribersHandler = async (
     });
   }
 
-  const subscribers: EventSubscriber[] = [];
+  // P3b de-dup: a single node can emit MORE THAN ONE inbound `listensTo` edge
+  // for the same event — e.g. a class that BOTH `implements Triggerable<X__e>`
+  // (apex-class-extractor) AND calls `EventBus.subscribe('X__e')` (apex-scanner).
+  // The edge PK is (fromId, toId, edgeType, SOURCE), so the differing sources
+  // keep BOTH edges alive; without de-dup the same subscriber would appear
+  // twice. Collapse by node id, keeping the first-resolved entry and MERGING
+  // each subsequent edge's source + properties so no subscription signal is
+  // lost (the surviving record discloses every path via `mechanisms`).
+  const byId = new Map<ComponentId, EventSubscriber>();
   for (const edge of edgesResult.value) {
     const resolved = await resolveSubscriber(ctx, edge);
     if (!resolved.ok) {
@@ -541,12 +582,15 @@ export const eventSubscribersHandler = async (
         message: `graph query failed: ${resolved.error}`,
       });
     }
-    if (resolved.value !== null) {
-      subscribers.push(resolved.value);
+    if (resolved.value === null) continue;
+    const existing = byId.get(resolved.value.id);
+    if (existing === undefined) {
+      byId.set(resolved.value.id, resolved.value);
+    } else {
+      byId.set(resolved.value.id, mergeSubscriber(existing, resolved.value));
     }
   }
-
-  const sorted = subscribers.sort(compareSubscribers).slice(0, limit);
+  const sorted = [...byId.values()].sort(compareSubscribers).slice(0, limit);
 
   // CR-CAP-18: resolve the publish-side channel routing for this event.
   const channelsResult = await resolveChannelBindings(ctx, input.eventId);

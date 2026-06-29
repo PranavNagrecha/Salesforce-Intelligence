@@ -137,3 +137,40 @@ describe('buildApexScannerEdges — drops unresolvable trigger-context phantoms 
     expect(fieldTargets.some((t) => t.startsWith('CustomField:this.'))).toBe(false);
   });
 });
+
+describe('buildApexScannerEdges — EventBus.subscribe → listensTo (P3b)', () => {
+  it('mints a heuristic listensTo edge for a resolved static __e channel', () => {
+    const source =
+      "public class AccountChangeSub { void run() { EventBus.subscribe('Account_Change__e', this); } }";
+    const result = buildApexScannerEdges(source, 'ApexClass:AccountChangeSub');
+    expect(result.warnings).toEqual([]);
+    const listensTo = result.edges.filter((e) => e.edgeType === 'listensTo');
+    expect(listensTo).toHaveLength(1);
+    expect(listensTo[0]?.toId).toBe('CustomObject:Account_Change__e');
+    expect(listensTo[0]?.confidence).toBe('heuristic');
+    expect(listensTo[0]?.properties['mechanism']).toBe('eventBusSubscribe');
+  });
+
+  it('resolves the /event/ slash-prefixed channel form to the event node', () => {
+    const source =
+      "public class OrderSub { void run() { EventBus.subscribe('/event/Order_Placed__e', new H()); } }";
+    const result = buildApexScannerEdges(source, 'ApexClass:OrderSub');
+    const listensTo = result.edges.filter((e) => e.edgeType === 'listensTo');
+    expect(listensTo).toHaveLength(1);
+    expect(listensTo[0]?.toId).toBe('CustomObject:Order_Placed__e');
+  });
+
+  it('mints NO listensTo edge for a dynamic / computed channel arg (no phantom)', () => {
+    const source =
+      'public class DynSub { void run() { String chan = pick(); EventBus.subscribe(chan, this); } }';
+    const result = buildApexScannerEdges(source, 'ApexClass:DynSub');
+    expect(result.edges.some((e) => e.edgeType === 'listensTo')).toBe(false);
+  });
+
+  it('mints NO listensTo edge for a non-__e channel (e.g. a CDC channel) to keep listensTo Platform-Event-only', () => {
+    const source =
+      "public class CdcSub { void run() { EventBus.subscribe('Account_ChangeEvent', this); } }";
+    const result = buildApexScannerEdges(source, 'ApexClass:CdcSub');
+    expect(result.edges.some((e) => e.edgeType === 'listensTo')).toBe(false);
+  });
+});

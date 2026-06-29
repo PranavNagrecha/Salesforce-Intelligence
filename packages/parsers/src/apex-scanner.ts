@@ -93,6 +93,31 @@ export interface SoqlFromObject {
 }
 
 /**
+ * One `EventBus.subscribe(channel, ...)` registration detected by the
+ * heuristic scanner (P3b). `channel` is the FIRST argument's resolved
+ * channel/event name when it was a STATIC string literal (a `/event/X__e`
+ * form is normalized to `X__e`); it is `''` when the first argument was
+ * dynamic/computed (a variable, a method call, a concatenation) — string
+ * literals are blanked before scanning, so a non-literal arg leaves nothing
+ * to capture.
+ *
+ * `resolved` records whether a static channel string was recovered. The
+ * extractor mints a `listensTo` edge ONLY for a `resolved: true` entry whose
+ * channel names a real Platform Event (`__e` suffix); a `resolved: false`
+ * entry is the honest "dynamic channel — not resolved" signal and produces NO
+ * edge (no phantom). This mirrors the EventBus.publish publisher honesty.
+ *
+ * `offset` and `length` describe the span of the `EventBus.subscribe(` call in
+ * the *original* source.
+ */
+export interface EventSubscription {
+  readonly channel: string;
+  readonly resolved: boolean;
+  readonly offset: number;
+  readonly length: number;
+}
+
+/**
  * The structured success payload from `scanApexSource`.
  *
  * `fieldAccesses` is deduplicated by `(object, field)` partitioned by
@@ -120,6 +145,14 @@ export interface ApexScannerOutput {
    * `object` (first source-order occurrence wins).
    */
   readonly soqlFromObjects: readonly SoqlFromObject[];
+  /**
+   * `EventBus.subscribe(channel, ...)` registrations (P3b). Each entry records
+   * the first argument's resolved static channel (or `resolved: false` for a
+   * dynamic arg). Deduplicated by `channel` for resolved entries (first
+   * source-order occurrence wins); unresolved entries are kept individually so
+   * the consumer can disclose how many dynamic subscriptions were skipped.
+   */
+  readonly eventSubscriptions: readonly EventSubscription[];
   readonly methodBodyCount: number;
 }
 
@@ -271,6 +304,27 @@ const SOQL_FROM_PATTERN = /\bFROM\b/gi;
 // The object identifier immediately following a `FROM` keyword (allowing a
 // namespace prefix / `__c` / `__mdt` suffix, all plain identifier chars).
 const SOQL_FROM_OBJECT_PATTERN = /^(\s+)([A-Za-z_][A-Za-z0-9_]*)/;
+
+// Capture an `EventBus.subscribe(` call opener (P3b). Tolerates whitespace
+// around the dots and before the paren. The trailing `(` is part of the match
+// so the scanner can read the FIRST argument that follows. Detection runs on
+// the comment/string-stripped source so a commented-out or quoted call cannot
+// match; the channel literal itself is then read from the ORIGINAL source at
+// the same (preserved) offset, since string literals are blanked in `stripped`.
+const EVENT_BUS_SUBSCRIBE_PATTERN =
+  /\bEventBus\s*\.\s*subscribe\s*\(/g;
+
+// The FIRST argument of an EventBus.subscribe(...) call, read from the ORIGINAL
+// source, when it is a STATIC single-quoted string literal. Group 1 is the
+// string contents. Anchored at the start (the slice begins right after the
+// opening paren); leading whitespace is tolerated. A non-literal first arg
+// (a variable, method call, or concatenation) does not match → unresolved.
+const EVENT_BUS_CHANNEL_LITERAL_PATTERN = /^\s*'((?:\\[\s\S]|[^'\\])*)'/;
+
+// The Platform Event channel-routing prefix Salesforce uses for the string
+// form of `EventBus.subscribe`. `'/event/Order_Placed__e'` and
+// `'Order_Placed__e'` name the same event; normalize to the bare API name.
+const EVENT_CHANNEL_PREFIX = '/event/';
 
 const blankOut = (text: string): string => text.replace(/[^\n]/g, ' ');
 
@@ -679,6 +733,58 @@ const scanSoqlFromObjects = (
 };
 
 /**
+ * Sweep `stripped[start..end]` for `EventBus.subscribe(channel, ...)` calls
+ * (P3b) and recover each first-argument channel from the ORIGINAL `source`.
+ * Detection runs on the stripped text (so commented-out / quoted calls are
+ * skipped); the channel literal is read from `source` at the same preserved
+ * offset because `stripped` has the string contents blanked to spaces.
+ *
+ * A static single-quoted literal yields `{ channel, resolved: true }` (a
+ * `/event/X__e` form normalized to `X__e`); any other first arg (variable,
+ * method call, concatenation) yields `{ channel: '', resolved: false }` — the
+ * honest "dynamic channel, not resolved" signal that mints NO edge downstream.
+ *
+ * Resolved entries are deduped by channel (first source-order occurrence wins);
+ * unresolved entries are kept individually.
+ */
+const scanEventSubscriptions = (
+  source: string,
+  stripped: string,
+  start: number,
+  end: number,
+): EventSubscription[] => {
+  const out: EventSubscription[] = [];
+  const seenResolved = new Set<string>();
+  EVENT_BUS_SUBSCRIBE_PATTERN.lastIndex = start;
+  let m: RegExpExecArray | null;
+  while ((m = EVENT_BUS_SUBSCRIBE_PATTERN.exec(stripped)) !== null) {
+    if (m.index >= end) break;
+    const argStart = m.index + m[0].length;
+    // Read the first argument from the ORIGINAL source (string literals are
+    // intact there, blanked in `stripped`).
+    const litMatch = EVENT_BUS_CHANNEL_LITERAL_PATTERN.exec(
+      source.slice(argStart, end),
+    );
+    if (litMatch === null || litMatch[1] === undefined) {
+      out.push({ channel: '', resolved: false, offset: m.index, length: m[0].length });
+      continue;
+    }
+    const raw = litMatch[1];
+    const channel = raw.startsWith(EVENT_CHANNEL_PREFIX)
+      ? raw.slice(EVENT_CHANNEL_PREFIX.length)
+      : raw;
+    if (channel.length === 0) {
+      out.push({ channel: '', resolved: false, offset: m.index, length: m[0].length });
+      continue;
+    }
+    if (seenResolved.has(channel)) continue;
+    seenResolved.add(channel);
+    out.push({ channel, resolved: true, offset: m.index, length: m[0].length });
+  }
+  return out;
+};
+
+/**
  * Scan Apex source for field accesses and method calls using a pure
  * regex / brace-balanced heuristic. Suitable for the v0.3 release —
  * v0.4 will add a PMD AST layer alongside this for the cases regex
@@ -777,6 +883,12 @@ export const scanApexSource = (
     methodCalls: ctx.calls,
     instantiations: ctx.instantiations,
     soqlFromObjects: scanSoqlFromObjects(stripped, outerOpen, outerClose),
+    eventSubscriptions: scanEventSubscriptions(
+      source,
+      stripped,
+      outerOpen,
+      outerClose,
+    ),
     methodBodyCount: bodies.length,
   });
 };

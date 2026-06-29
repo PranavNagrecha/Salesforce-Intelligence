@@ -459,7 +459,11 @@ describe('extractFlow', () => {
             edgeType: 'writesTo',
             confidence: 'parsed',
             source: 'flow-extractor',
-            properties: { operation: 'recordUpdate' },
+            properties: {
+              operation: 'recordUpdate',
+              assignedValue: 'Updated',
+              assignedValueKind: 'literal',
+            },
           },
           {
             fromId: flowId,
@@ -467,7 +471,11 @@ describe('extractFlow', () => {
             edgeType: 'writesTo',
             confidence: 'parsed',
             source: 'flow-extractor',
-            properties: { operation: 'recordCreate' },
+            properties: {
+              operation: 'recordCreate',
+              assignedValue: 'Follow up',
+              assignedValueKind: 'literal',
+            },
           },
           {
             fromId: flowId,
@@ -564,6 +572,10 @@ describe('extractFlow', () => {
         const flowId = 'Flow:CreatePayment';
         const writesTo = result.value.edges.filter((e) => e.edgeType === 'writesTo');
         // 1 object-level + 2 field-level, all operation=recordCreate.
+        // R2-1: field-level edges also carry the assigned <value> — the
+        // Amount__c via an elementReference (kind 'reference'), the
+        // Status__c via a stringValue literal (kind 'literal'). The
+        // object-level edge carries no assignedValue.
         expect(writesTo).toEqual([
           {
             fromId: flowId,
@@ -571,7 +583,11 @@ describe('extractFlow', () => {
             edgeType: 'writesTo',
             confidence: 'parsed',
             source: 'flow-extractor',
-            properties: { operation: 'recordCreate' },
+            properties: {
+              operation: 'recordCreate',
+              assignedValue: 'vAmount',
+              assignedValueKind: 'reference',
+            },
           },
           {
             fromId: flowId,
@@ -579,7 +595,11 @@ describe('extractFlow', () => {
             edgeType: 'writesTo',
             confidence: 'parsed',
             source: 'flow-extractor',
-            properties: { operation: 'recordCreate' },
+            properties: {
+              operation: 'recordCreate',
+              assignedValue: 'Pending',
+              assignedValueKind: 'literal',
+            },
           },
           {
             fromId: flowId,
@@ -590,6 +610,61 @@ describe('extractFlow', () => {
             properties: { operation: 'recordCreate' },
           },
         ]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('stamps assignedValue/assignedValueKind=literal for a stringValue assignment and kind=reference for an elementReference (R2-1)', async () => {
+      // R2-1: the field-level writesTo edge must record WHICH value the flow
+      // assigns AND whether it is a literal (statically comparable) or a
+      // reference (variable/formula/$Record — NOT comparable). A consumer
+      // (what_if_remove_picklist_value) must only literal-match.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Set Status</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <recordCreates>
+        <name>Create_Payment</name>
+        <object>Payment__c</object>
+        <inputAssignments>
+            <field>Status__c</field>
+            <value><stringValue>Completed</stringValue></value>
+        </inputAssignments>
+        <inputAssignments>
+            <field>Owner_Region__c</field>
+            <value><elementReference>$Record.Region__c</elementReference></value>
+        </inputAssignments>
+    </recordCreates>
+</Flow>`;
+      const { dir, path } = await writeTempXml('SetStatus.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const byTo = new Map(
+          result.value.edges
+            .filter((e) => e.edgeType === 'writesTo')
+            .map((e) => [e.toId, e]),
+        );
+        // Literal assignment: kind 'literal', value verbatim.
+        expect(
+          byTo.get('CustomField:Payment__c.Status__c')?.properties,
+        ).toEqual({
+          operation: 'recordCreate',
+          assignedValue: 'Completed',
+          assignedValueKind: 'literal',
+        });
+        // elementReference assignment: kind 'reference' (NOT a literal).
+        expect(
+          byTo.get('CustomField:Payment__c.Owner_Region__c')?.properties,
+        ).toEqual({
+          operation: 'recordCreate',
+          assignedValue: '$Record.Region__c',
+          assignedValueKind: 'reference',
+        });
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
@@ -918,6 +993,67 @@ describe('extractFlow', () => {
         );
         expect(listensTo).toBeUndefined();
         expect(triggersOn?.toId).toBe('CustomObject:Account');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('T7 — scheduled-Flow <start><schedule> extraction', () => {
+    it('stamps scheduleFrequency/scheduleStartDate/scheduleStartTime on the Flow node', async () => {
+      // A scheduled flow declares its cadence under <start><schedule>.
+      // startTime is UTC (trailing Z); the extractor stamps it verbatim and
+      // consumers disclose the UTC framing.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Scheduled Payment Status Update</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <start>
+        <schedule>
+            <frequency>Weekly</frequency>
+            <startDate>2024-11-09</startDate>
+            <startTime>08:00:00.000Z</startTime>
+        </schedule>
+        <triggerType>Scheduled</triggerType>
+    </start>
+</Flow>`;
+      const { dir, path } = await writeTempXml('Scheduled.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const props = result.value.nodes[0]?.properties;
+        expect(props?.['scheduleFrequency']).toBe('Weekly');
+        expect(props?.['scheduleStartDate']).toBe('2024-11-09');
+        expect(props?.['scheduleStartTime']).toBe('08:00:00.000Z');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('leaves all three schedule properties null when <start> has no <schedule>', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Record Triggered</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <start>
+        <object>Account</object>
+        <triggerType>RecordAfterSave</triggerType>
+    </start>
+</Flow>`;
+      const { dir, path } = await writeTempXml('NoSchedule.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const props = result.value.nodes[0]?.properties;
+        expect(props?.['scheduleFrequency']).toBeNull();
+        expect(props?.['scheduleStartDate']).toBeNull();
+        expect(props?.['scheduleStartTime']).toBeNull();
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

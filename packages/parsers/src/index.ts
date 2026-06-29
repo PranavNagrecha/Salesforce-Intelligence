@@ -14,6 +14,7 @@ export type {
   ApexScannerError,
   ApexScannerErrorKind,
   ApexScannerOutput,
+  EventSubscription,
   FieldAccess,
   Instantiation,
   MethodCallSite,

@@ -150,9 +150,20 @@ const validateRoot = (
 };
 
 /**
- * Pull `object`, `triggerType`, and `recordTriggerType` from the
- * optional `<start>` subtree. Returns all-null when `<start>` is absent
- * (e.g., autolaunched flows without a record trigger).
+ * Pull `object`, `triggerType`, `recordTriggerType`, and the optional
+ * `<schedule>` sub-block from the `<start>` subtree. Returns all-null
+ * when `<start>` is absent (e.g., autolaunched flows without a record
+ * trigger).
+ *
+ * T7: `<start><schedule>` is present on scheduled flows
+ * (`triggerType: Scheduled`). Its `<frequency>` (e.g. `Weekly`),
+ * `<startDate>` (`2024-11-09`), and `<startTime>` (`08:00:00.000Z`) are
+ * the flow's design-time schedule. `<startTime>` is UTC (the trailing
+ * `Z`); the local wall-clock run time depends on the org's default
+ * timezone, which the vault does not hold — so consumers must disclose
+ * the UTC framing rather than imply a local time. This is the FLOW
+ * schedule (declared in metadata), distinct from an Apex Schedulable's
+ * runtime CronTrigger registration, which lives only in the Tooling API.
  */
 const extractStartProperties = (
   rootObj: Record<string, unknown>,
@@ -160,16 +171,37 @@ const extractStartProperties = (
   triggerObject: string | null;
   triggerType: string | null;
   recordTriggerType: string | null;
+  scheduleFrequency: string | null;
+  scheduleStartDate: string | null;
+  scheduleStartTime: string | null;
 } => {
   const start = unwrapSingle(rootObj['start']);
   if (typeof start !== 'object' || start === null) {
-    return { triggerObject: null, triggerType: null, recordTriggerType: null };
+    return {
+      triggerObject: null,
+      triggerType: null,
+      recordTriggerType: null,
+      scheduleFrequency: null,
+      scheduleStartDate: null,
+      scheduleStartTime: null,
+    };
   }
   const startObj = start as Record<string, unknown>;
+  const schedule = unwrapSingle(startObj['schedule']);
+  const scheduleObj =
+    typeof schedule === 'object' && schedule !== null
+      ? (schedule as Record<string, unknown>)
+      : null;
   return {
     triggerObject: toNullableString(startObj['object']),
     triggerType: toNullableString(startObj['triggerType']),
     recordTriggerType: toNullableString(startObj['recordTriggerType']),
+    scheduleFrequency:
+      scheduleObj === null ? null : toNonEmptyString(scheduleObj['frequency']),
+    scheduleStartDate:
+      scheduleObj === null ? null : toNonEmptyString(scheduleObj['startDate']),
+    scheduleStartTime:
+      scheduleObj === null ? null : toNonEmptyString(scheduleObj['startTime']),
   };
 };
 
@@ -390,6 +422,76 @@ const buildRecordLookupEdges = (
  * edge whose target the importer flags `targetMissing` — harmless, since the
  * consumer only queries edges to the modeled field it was asked about.
  */
+/**
+ * The literal-scalar `<value>` wrapper keys, in source-precedence order.
+ * Mirrors the right-value wrappers {@link parseFlowConditionTriplet}
+ * recognises. A value carried under any of these is a *literal* the flow
+ * assigns verbatim (e.g. `<stringValue>Completed</stringValue>` →
+ * `'Completed'`); a value under `<elementReference>` is a *reference* to a
+ * variable / formula / `$Record.Field` and is NOT a statically-resolvable
+ * literal.
+ */
+const ASSIGNED_VALUE_LITERAL_WRAPPERS = [
+  'stringValue',
+  'numberValue',
+  'booleanValue',
+  'dateValue',
+  'dateTimeValue',
+] as const;
+
+/** Discriminates a parsed `<inputAssignments><value>` payload. */
+type AssignedValue = {
+  /** The unwrapped scalar, inspectable in BOTH kinds. */
+  readonly value: string;
+  /**
+   * `'literal'` when the value came from a scalar wrapper
+   * (stringValue/numberValue/…) — statically comparable. `'reference'`
+   * when it came from `<elementReference>` (a variable/formula/$Record
+   * path) — NOT a literal, so consumers must not string-match it against
+   * a removed picklist value.
+   */
+  readonly kind: 'literal' | 'reference';
+};
+
+/**
+ * Parse the `<value>` child of an `<inputAssignments>` entry into its
+ * unwrapped scalar plus a `kind` discriminator. Reuses the scalar-unwrap
+ * MECHANISM of {@link parseFlowConditionTriplet} but — unlike that helper,
+ * which collapses every wrapper into one `value` — records WHICH wrapper
+ * matched, because that distinction is load-bearing downstream: an
+ * `<elementReference>` assignment (e.g. `$Record.FormAssembly_Multi_Accom__c`)
+ * must not be mistaken for a literal when a consumer checks whether a flow
+ * assigns a specific picklist value.
+ *
+ * Returns `null` when no `<value>` is present or it carries no recognised
+ * scalar (the edge is still emitted, just without value properties).
+ */
+const parseAssignedValue = (
+  assignment: Record<string, unknown>,
+): AssignedValue | null => {
+  const rawValue = unwrapSingle(assignment['value']);
+  if (typeof rawValue !== 'object' || rawValue === null) {
+    // A bare scalar `<value>Foo</value>` (uncommon for inputAssignments)
+    // is treated as a literal.
+    if (rawValue !== undefined && rawValue !== null && rawValue !== '') {
+      return { value: String(rawValue), kind: 'literal' };
+    }
+    return null;
+  }
+  const wrapper = rawValue as Record<string, unknown>;
+  for (const key of ASSIGNED_VALUE_LITERAL_WRAPPERS) {
+    const v = unwrapSingle(wrapper[key]);
+    if (v !== undefined && v !== null && v !== '') {
+      return { value: String(v), kind: 'literal' };
+    }
+  }
+  const ref = unwrapSingle(wrapper['elementReference']);
+  if (ref !== undefined && ref !== null && ref !== '') {
+    return { value: String(ref), kind: 'reference' };
+  }
+  return null;
+};
+
 const buildInputAssignmentEdges = (
   flowId: string,
   element: Record<string, unknown>,
@@ -403,12 +505,22 @@ const buildInputAssignmentEdges = (
   for (let j = 0; j < assignments.length; j += 1) {
     const assignment = assignments[j];
     if (typeof assignment !== 'object' || assignment === null) continue;
-    const field = toNonEmptyString(
-      (assignment as Record<string, unknown>)['field'],
-    );
+    const assignmentObj = assignment as Record<string, unknown>;
+    const field = toNonEmptyString(assignmentObj['field']);
     if (field === null) {
       warnings.push(`${elementLabel}.<inputAssignments>[${j}] has no <field>`);
       continue;
+    }
+    // R2-1: capture the assigned <value> so a consumer (e.g.
+    // what_if_remove_picklist_value) can tell whether a flow maps the
+    // field to a specific picklist value. `assignedValueKind` keeps the
+    // literal-vs-reference distinction: an `<elementReference>` is a
+    // variable/formula, NOT a statically-comparable literal.
+    const assigned = parseAssignedValue(assignmentObj);
+    const properties: Record<string, unknown> = { operation };
+    if (assigned !== null) {
+      properties['assignedValue'] = assigned.value;
+      properties['assignedValueKind'] = assigned.kind;
     }
     edges.push({
       fromId: flowId,
@@ -416,7 +528,7 @@ const buildInputAssignmentEdges = (
       edgeType: 'writesTo',
       confidence: 'parsed',
       source: EDGE_SOURCE,
-      properties: { operation },
+      properties,
     });
   }
   return edges;
@@ -1007,6 +1119,11 @@ export const extractFlow = async (
       triggerObject: startProps.triggerObject,
       triggerType: startProps.triggerType,
       recordTriggerType: startProps.recordTriggerType,
+      // T7: design-time schedule from <start><schedule>. startTime is UTC
+      // (trailing Z); local run time needs the org timezone (not in vault).
+      scheduleFrequency: startProps.scheduleFrequency,
+      scheduleStartDate: startProps.scheduleStartDate,
+      scheduleStartTime: startProps.scheduleStartTime,
       flowExtractionWarnings: warnings,
       conditions: conditionsMirror,
       faultableElementCount: faultCoverage.faultableElementCount,

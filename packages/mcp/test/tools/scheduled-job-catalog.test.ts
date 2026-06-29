@@ -159,6 +159,45 @@ const mixedSeed: ExtractionResult = {
   ],
 };
 
+// =============================================================================
+// Seed 5 (T7): two Flow nodes — one with a <start><schedule> block (the
+// extractor stamped scheduleFrequency/StartDate/StartTime), one without
+// (a record-triggered flow). Only the scheduled flow should surface in the
+// scheduledFlows section.
+// =============================================================================
+
+const SCHEDULED_FLOW = 'Flow:ScheduledPaymentStatusUpdate';
+const RECORD_FLOW = 'Flow:RecordTriggeredFlow';
+
+const flowSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: SCHEDULED_FLOW,
+      type: 'Flow',
+      apiName: 'ScheduledPaymentStatusUpdate',
+      sourcePath: 'unused.flow-meta.xml',
+      properties: {
+        scheduleFrequency: 'Weekly',
+        scheduleStartDate: '2024-11-09',
+        scheduleStartTime: '08:00:00.000Z',
+      },
+    }),
+    makeNode({
+      id: RECORD_FLOW,
+      type: 'Flow',
+      apiName: 'RecordTriggeredFlow',
+      sourcePath: 'unused.flow-meta.xml',
+      properties: {
+        triggerObject: 'Account',
+        scheduleFrequency: null,
+        scheduleStartDate: null,
+        scheduleStartTime: null,
+      },
+    }),
+  ],
+  edges: [],
+};
+
 let tempDir: string;
 let store: GraphStore;
 let ctx: Context;
@@ -173,6 +212,7 @@ beforeAll(async () => {
     orphanSeed,
     queueableSeed,
     mixedSeed,
+    flowSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -288,6 +328,44 @@ describe('scheduledJobCatalogHandler', () => {
     if (!result.ok) return;
     expect(result.value.data.disclosure).toContain('Tooling API');
     expect(result.value.data.disclosure).toContain('heuristic');
+  });
+
+  it('surfaces a scheduled Flow with its frequency/startDate/startTimeUtc (T7)', async () => {
+    const result = await scheduledJobCatalogHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const flow = result.value.data.scheduledFlows.find(
+      (f) => f.flowId === SCHEDULED_FLOW,
+    );
+    expect(flow).toBeDefined();
+    expect(flow?.frequency).toBe('Weekly');
+    expect(flow?.startDate).toBe('2024-11-09');
+    expect(flow?.startTimeUtc).toBe('08:00:00.000Z');
+  });
+
+  it('does NOT surface a non-scheduled (record-triggered) Flow (T7)', async () => {
+    const result = await scheduledJobCatalogHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.scheduledFlows.map((f) => f.flowId);
+    expect(ids).not.toContain(RECORD_FLOW);
+  });
+
+  it('counts scheduled flows in the summary (T7)', async () => {
+    const result = await scheduledJobCatalogHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.summary.totalScheduledFlows).toBe(1);
+  });
+
+  it('discloses the UTC framing and Flow-vs-Apex-cron distinction for scheduled flows (T7)', async () => {
+    const result = await scheduledJobCatalogHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const disc = result.value.data.flowScheduleDisclosure;
+    expect(disc).toContain('UTC');
+    expect(disc).toContain('timezone');
+    expect(disc).toContain('CronTrigger');
   });
 
   it('carries vaultState from the manifest', async () => {

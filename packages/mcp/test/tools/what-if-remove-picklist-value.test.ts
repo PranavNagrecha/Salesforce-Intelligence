@@ -88,6 +88,10 @@ const FLOW_COND_ID =
   'ConditionalContext:Flow:SetIndustry.condition-0';
 const APEX_ID = 'ApexClass:IndustryService';
 const APEX_NO_MATCH_ID = 'ApexClass:UnrelatedService';
+// R2-1: a flow that ASSIGNS the value as a literal (blocking) vs. one that
+// assigns it via an elementReference (NON-match — not statically resolvable).
+const FLOW_ASSIGN_LITERAL_ID = 'Flow:StampIndustryLiteral';
+const FLOW_ASSIGN_REF_ID = 'Flow:StampIndustryRef';
 
 const seed: ExtractionResult = {
   nodes: [
@@ -157,6 +161,22 @@ const seed: ExtractionResult = {
         stringLiterals: ["'Hello'"],
       },
     }),
+    // Flow that assigns the field the literal 'Tech' — no condition text,
+    // so it is invisible to the haystack scan; only the edge's
+    // assignedValue surfaces it.
+    makeNode({
+      id: FLOW_ASSIGN_LITERAL_ID,
+      type: 'Flow',
+      apiName: 'StampIndustryLiteral',
+    }),
+    // Flow that assigns the field via an elementReference (a variable) —
+    // must NOT match even though the reference name happens to resolve to
+    // a $Record path that could contain 'Tech'.
+    makeNode({
+      id: FLOW_ASSIGN_REF_ID,
+      type: 'Flow',
+      apiName: 'StampIndustryRef',
+    }),
   ],
   edges: [
     makeEdge({ fromId: ACCOUNT_OBJ, toId: PICK_FIELD, edgeType: 'parentOf' }),
@@ -203,6 +223,34 @@ const seed: ExtractionResult = {
       edgeType: 'readsFrom',
       source: 'apex-scanner',
       confidence: 'heuristic',
+    }),
+    // R2-1: flow writesTo edge assigning the literal 'Tech' — must match.
+    makeEdge({
+      fromId: FLOW_ASSIGN_LITERAL_ID,
+      toId: PICK_FIELD,
+      edgeType: 'writesTo',
+      source: 'flow-extractor',
+      confidence: 'parsed',
+      properties: {
+        operation: 'recordUpdate',
+        assignedValue: 'Tech',
+        assignedValueKind: 'literal',
+      },
+    }),
+    // R2-1: flow writesTo edge assigning the value via elementReference —
+    // assignedValue text equals 'Tech' but kind is 'reference', so it must
+    // NOT match (avoids false-positive on $Record/variable assignments).
+    makeEdge({
+      fromId: FLOW_ASSIGN_REF_ID,
+      toId: PICK_FIELD,
+      edgeType: 'writesTo',
+      source: 'flow-extractor',
+      confidence: 'parsed',
+      properties: {
+        operation: 'recordUpdate',
+        assignedValue: 'Tech',
+        assignedValueKind: 'reference',
+      },
     }),
   ],
 };
@@ -409,6 +457,44 @@ describe('whatIfRemovePicklistValueHandler', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.data.fieldType).toBe('Picklist');
+  });
+
+  it('surfaces a Flow that assigns the value as a LITERAL via its writesTo edge (R2-1)', async () => {
+    const result = await whatIfRemovePicklistValueHandler(ctx, {
+      fieldId: PICK_FIELD,
+      value: 'Tech',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const byId = new Map(
+      result.value.data.impacts.map((i) => [i.componentId, i]),
+    );
+    expect(byId.has(FLOW_ASSIGN_LITERAL_ID)).toBe(true);
+    // A Flow source classifies as a metadata-blocker, so the verdict is blocking.
+    expect(byId.get(FLOW_ASSIGN_LITERAL_ID)?.category).toBe('metadata-blocker');
+    expect(result.value.data.verdict).toBe('blocking');
+  });
+
+  it('does NOT match a Flow that assigns the value via an elementReference (R2-1 honesty)', async () => {
+    const result = await whatIfRemovePicklistValueHandler(ctx, {
+      fieldId: PICK_FIELD,
+      value: 'Tech',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.impacts.map((i) => i.componentId);
+    expect(ids).not.toContain(FLOW_ASSIGN_REF_ID);
+  });
+
+  it('discloses that elementReference (variable/formula) flow assignments are not statically resolvable', async () => {
+    const result = await whatIfRemovePicklistValueHandler(ctx, {
+      fieldId: PICK_FIELD,
+      value: 'Tech',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.disclosure).toContain('elementReference');
+    expect(result.value.data.disclosure).toContain('<stringValue>');
   });
 
   it('reports the real resolved type in the non-Picklist rejection message', async () => {
