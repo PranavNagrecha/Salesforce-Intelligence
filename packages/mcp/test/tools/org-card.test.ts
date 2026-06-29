@@ -80,4 +80,44 @@ describe('sfi.org_card', () => {
     expect(r.error.kind).toBe('internal');
     expect(r.error.message).toContain('refresh --no-pull');
   });
+
+  // coverage-aware-zero: the card surfaces automation counts (WorkflowRule /
+  // ApprovalProcess). When those families were NOT retrieved, the served card
+  // must carry a coverageCaveat so a bare automation 0 is not mistaken for a
+  // proven "no legacy automation".
+  it('attaches a coverageCaveat when automation families were not retrieved', async () => {
+    writeFileSync(join(tempDir, 'meta', 'org-card.json'), JSON.stringify(CARD));
+    const covManifest = {
+      ...FIXTURE_MANIFEST,
+      coverage: [
+        { type: 'CustomObject', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+        { type: 'WorkflowRule', requested: true, retrieved: 0, errored: false, neverModeled: false },
+        { type: 'ApprovalProcess', requested: true, retrieved: 0, errored: false, neverModeled: false },
+      ],
+    } as never;
+    const r = await orgCardHandler({ ...ctx, manifest: covManifest }, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.available).toBe(true);
+    expect(r.value.data.coverageCaveat).toBeDefined();
+    expect(r.value.data.coverageCaveat?.missingCoverage).toEqual(
+      expect.arrayContaining(['WorkflowRule', 'ApprovalProcess']),
+    );
+    expect(r.value.data.coverageCaveat?.message).toMatch(/not checked/);
+  });
+
+  it('does NOT attach a coverageCaveat when automation families retrieved clean', async () => {
+    writeFileSync(join(tempDir, 'meta', 'org-card.json'), JSON.stringify(CARD));
+    const covManifest = {
+      ...FIXTURE_MANIFEST,
+      coverage: [
+        { type: 'WorkflowRule', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
+        { type: 'ApprovalProcess', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
+      ],
+    } as never;
+    const r = await orgCardHandler({ ...ctx, manifest: covManifest }, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.coverageCaveat).toBeUndefined();
+  });
 });

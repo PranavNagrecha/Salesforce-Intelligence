@@ -98,6 +98,31 @@ export const buildEnumerationCoverageCaveat = (
   return buildCoverageCaveat(ctx, [type], `The \`${type}\` inventory`);
 };
 
+/**
+ * coverage-aware-zero (CR): the multi-type sibling of
+ * `buildEnumerationCoverageCaveat`. For a tool whose 0/empty assembly spans
+ * several metadata families (e.g. process-builder migration over Flow /
+ * WorkflowRule / ApprovalProcess), attach a caveat when ANY of the requested
+ * types is not fully covered per the manifest, so a bare 0 reads "not
+ * retrieved, re-refresh" instead of a proven "none".
+ *
+ * Guards identical to the single-type helper: returns undefined when the
+ * manifest carries no coverage rows (pre-v4 / legacy vaults — never false-flag
+ * them) or when every requested type retrieved clean (status `complete`). The
+ * caveat's `missingCoverage` lists only the families actually not covered, so a
+ * partially-covered set names exactly which family is "not checked".
+ */
+export const buildEnumerationCoverageCaveatFor = (
+  ctx: Context,
+  types: readonly string[],
+  purpose: string,
+): CoverageCaveat | undefined => {
+  if (types.length === 0) return undefined;
+  const coverage = summarizeCoverage(ctx.manifest, types);
+  if (!coverage.coverageKnown || coverage.status === 'complete') return undefined;
+  return buildCoverageCaveat(ctx, types, purpose);
+};
+
 export const applyCoverageToVerdict = <V extends string>(
   verdict: V,
   caveat: CoverageCaveat | undefined,

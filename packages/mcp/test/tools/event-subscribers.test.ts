@@ -75,6 +75,9 @@ const FLOW_HANDLER = 'Flow:Account_Change_Flow';
 // CR-CAP-18: a publish-side channel routing the event, with a declared filter.
 const ACCOUNT_CHANNEL = 'PlatformEventChannel:Account_Change_Channel__chn';
 const ACCOUNT_MEMBER = 'PlatformEventChannelMember:Account_Change_Member__chn';
+// GROUP C: publish-side code that emits the event (writesTo edge into the event).
+const PUBLISHER_FLOW = 'Flow:Account_Change_Publisher_Flow';
+const PUBLISHER_APEX = 'ApexClass:Account_Change_Publisher';
 
 const mixedSubscribersSeed: ExtractionResult = {
   nodes: [
@@ -116,6 +119,17 @@ const mixedSubscribersSeed: ExtractionResult = {
         filterExpression: "Status__c = 'New'",
       },
     }),
+    // GROUP C publish-side code: a Flow and an Apex class that emit the event.
+    makeNode({
+      id: PUBLISHER_FLOW,
+      type: 'Flow',
+      apiName: 'Account_Change_Publisher_Flow',
+    }),
+    makeNode({
+      id: PUBLISHER_APEX,
+      type: 'ApexClass',
+      apiName: 'Account_Change_Publisher',
+    }),
   ],
   edges: [
     makeEdge({
@@ -156,6 +170,21 @@ const mixedSubscribersSeed: ExtractionResult = {
         referenceKind: 'platformEventChannelMember',
         filterExpression: "Status__c = 'New'",
       },
+    }),
+    // GROUP C publish-side code: Flow + Apex emit the event via writesTo edges.
+    makeEdge({
+      fromId: PUBLISHER_FLOW,
+      toId: ACCOUNT_CHANGE_EVENT,
+      edgeType: 'writesTo',
+      source: 'flow-extractor',
+      properties: { operation: 'create', mechanism: 'flow-create-record' },
+    }),
+    makeEdge({
+      fromId: PUBLISHER_APEX,
+      toId: ACCOUNT_CHANGE_EVENT,
+      edgeType: 'writesTo',
+      source: 'apex-class-extractor',
+      properties: { operation: 'publish', mechanism: 'EventBus.publish' },
     }),
   ],
 };
@@ -262,6 +291,53 @@ const filteredTypeSeed: ExtractionResult = {
   ],
 };
 
+// =============================================================================
+// Seed 5 (GROUP C): a Platform Event that is PUBLISHED but has zero
+// subscribers — a Flow writesTo the event, nothing listensTo it. Before the
+// publishers pass, this event looks orphaned (empty subscribers, no publishers
+// surfaced). After: publishers is populated even though subscribers is empty.
+// =============================================================================
+
+const ORPHAN_PUB_EVENT = 'CustomObject:Orphan_Published__e';
+const ORPHAN_PUB_FLOW = 'Flow:Orphan_Publisher_Flow';
+const ORPHAN_PUB_FIELD = 'CustomField:Account.NotAPublisher__c';
+
+const orphanPublishedSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: ORPHAN_PUB_EVENT,
+      type: 'CustomObject',
+      apiName: 'Orphan_Published__e',
+    }),
+    makeNode({
+      id: ORPHAN_PUB_FLOW,
+      type: 'Flow',
+      apiName: 'Orphan_Publisher_Flow',
+    }),
+    makeNode({
+      id: ORPHAN_PUB_FIELD,
+      type: 'CustomField',
+      apiName: 'Account.NotAPublisher__c',
+    }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: ORPHAN_PUB_FLOW,
+      toId: ORPHAN_PUB_EVENT,
+      edgeType: 'writesTo',
+      source: 'flow-extractor',
+      properties: { operation: 'create', mechanism: 'flow-create-record' },
+    }),
+    // A non-publisher node-type writesTo edge must be filtered out of publishers.
+    makeEdge({
+      fromId: ORPHAN_PUB_FIELD,
+      toId: ORPHAN_PUB_EVENT,
+      edgeType: 'writesTo',
+      source: 'corrupt-extractor',
+    }),
+  ],
+};
+
 let tempDir: string;
 let store: GraphStore;
 let ctx: Context;
@@ -279,6 +355,7 @@ beforeAll(async () => {
     singleSubscriberSeed,
     crowdedSeed,
     filteredTypeSeed,
+    orphanPublishedSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -444,6 +521,53 @@ describe('eventSubscribersHandler', () => {
     expect(result.value.data.eventApiName?.endsWith('__e')).toBe(true);
   });
 
+  it('GROUP C: surfaces writesTo publishers (Flow + Apex) in single-event mode (fail-before: no publishers field)', async () => {
+    const result = await eventSubscribersHandler(ctx, {
+      eventId: ACCOUNT_CHANGE_EVENT,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    expect(d.publishers).toBeDefined();
+    expect(d.publishers?.length).toBe(2);
+    const pubIds = (d.publishers ?? []).map((p) => p.id);
+    expect(pubIds).toContain(PUBLISHER_FLOW);
+    expect(pubIds).toContain(PUBLISHER_APEX);
+    // Sorted by id ASC.
+    expect(pubIds).toEqual([...pubIds].sort());
+    // Apex publisher carries the edge's operation/mechanism metadata.
+    const apexPub = (d.publishers ?? []).find((p) => p.id === PUBLISHER_APEX);
+    expect(apexPub?.type).toBe('ApexClass');
+    expect(apexPub?.source).toBe('apex-class-extractor');
+    expect(apexPub?.properties['operation']).toBe('publish');
+    expect(apexPub?.properties['mechanism']).toBe('EventBus.publish');
+  });
+
+  it('GROUP C: a published-but-unsubscribed event returns publishers populated with empty subscribers (no longer looks orphaned)', async () => {
+    const result = await eventSubscribersHandler(ctx, {
+      eventId: ORPHAN_PUB_EVENT,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    expect(d.subscribers).toEqual([]);
+    expect(d.publishers).toBeDefined();
+    // Only the Flow publisher; the CustomField writesTo edge is filtered out.
+    expect(d.publishers?.length).toBe(1);
+    expect(d.publishers?.[0]?.id).toBe(ORPHAN_PUB_FLOW);
+    expect(d.publishers?.[0]?.type).toBe('Flow');
+    expect(d.publishers?.[0]?.properties['operation']).toBe('create');
+  });
+
+  it('GROUP C: an event with no writesTo publishers returns an empty publishers array (empty≠absent)', async () => {
+    const result = await eventSubscribersHandler(ctx, {
+      eventId: ORDER_EVENT,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.publishers).toEqual([]);
+  });
+
   it('catalog mode: omitting eventId lists every Platform Event with subscriber counts (R0791)', async () => {
     const result = await eventSubscribersHandler(ctx, {});
     expect(result.ok).toBe(true);
@@ -462,6 +586,23 @@ describe('eventSubscribersHandler', () => {
     // CustomField edge is filtered out (count 0) — same as single-event mode.
     expect((byName.get('Account_Change__e') ?? 0)).toBeGreaterThan(0);
     expect(byName.get('Filtered_Event__e')).toBe(0);
+  });
+
+  it('GROUP C catalog mode: each event carries a publisherCount (fail-before: undefined)', async () => {
+    const result = await eventSubscribersHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const events = result.value.data.events ?? [];
+    const byNamePub = new Map(
+      events.map((e) => [e.eventApiName, e.publisherCount]),
+    );
+    // Account_Change__e is published by a Flow + an Apex class (count 2).
+    expect(byNamePub.get('Account_Change__e')).toBe(2);
+    // Orphan_Published__e is published by one Flow (the CustomField edge is
+    // filtered out) yet has zero subscribers.
+    expect(byNamePub.get('Orphan_Published__e')).toBe(1);
+    // Order_Placed__e has no publishers.
+    expect(byNamePub.get('Order_Placed__e')).toBe(0);
   });
 });
 

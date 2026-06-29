@@ -275,6 +275,52 @@ describe('unusedFieldsDeepHandler', () => {
     expect(entry?.checks.noIntegrationExposure).toBe(true);
   });
 
+  // GROUP-A PII-safety: a truly-unused PII / encrypted field must NOT read as
+  // the bland "consider deletion" recommendation — it must PREPEND a compliance
+  // escalation and expose a machine-readable piiClassification.
+  it('escalates a truly-unused PII (SSN) field with a compliance recommendation', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-ufd-pii-'));
+    const opened = await openGraph(join(dir, 'pii.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const s = opened.value;
+    try {
+      const piiField = 'CustomField:Account.SSN__c';
+      const imp = await importExtractionResults(s, [
+        {
+          nodes: [
+            makeNode({
+              id: piiField,
+              apiName: 'SSN__c',
+              parentId: ACCOUNT_ID,
+              properties: { dataType: 'Text' },
+            }),
+          ],
+          edges: [],
+        },
+      ]);
+      if (!imp.ok) throw new Error('import failed');
+      const localCtx: Context = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s };
+      const result = await unusedFieldsDeepHandler(localCtx, { parentObjectFilter: 'Account' });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const entry = result.value.data.fields.find((f) => f.id === piiField);
+      expect(entry).toBeDefined();
+      // machine-readable classification surfaced
+      expect(entry?.piiClassification).toBe('pii');
+      // the recommendation must escalate, not read as bland deletion
+      expect(entry?.recommendedAction.toLowerCase()).toContain('pii');
+      expect(entry?.recommendedAction.toLowerCase()).toMatch(
+        /compliance|retention|irreversible|sign-off/,
+      );
+      expect(entry?.recommendedAction).not.toBe(
+        'field appears unused across all eight tiers; consider deletion after manual review of dynamic Apex / LWC / external integration paths the scanner cannot see.',
+      );
+    } finally {
+      await closeGraph(s);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('excludes a field whose only use is a report/dashboard (usedInReport) + carries the --with-reports caveat', async () => {
     // Dedicated store so the shared seed assertions stay intact.
     const dir = mkdtempSync(join(tmpdir(), 'sfi-ufd-rpt-'));

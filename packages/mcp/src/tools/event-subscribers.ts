@@ -112,6 +112,19 @@ const SUBSCRIBER_NODE_TYPES: ReadonlySet<ComponentType> = new Set([
 ]);
 
 /**
+ * GROUP C: the set of node types that count as valid Platform Event
+ * *publishers* — code that emits the event via an outbound `writesTo` edge into
+ * the event node. Flows (`<recordCreates>` on a `__e`) and Apex
+ * (`EventBus.publish(...)`) and Apex triggers can all publish. Other node types
+ * on a `writesTo` edge (e.g. a stray CustomField) are filtered out.
+ */
+const PUBLISHER_NODE_TYPES: ReadonlySet<ComponentType> = new Set([
+  'Flow',
+  'ApexClass',
+  'ApexTrigger',
+]);
+
+/**
  * Zod schema for the `sfi.event_subscribers` tool input.
  *
  *   - `eventId`: required, non-empty string. The canonical Platform
@@ -156,6 +169,27 @@ export interface EventSubscriber {
 }
 
 /**
+ * GROUP C: one publisher in the output list — code that EMITS the event,
+ * mirroring {@link EventSubscriber} but resolved from the event's INBOUND
+ * `writesTo` edges instead of `listensTo`. Surfaces a published-but-unsubscribed
+ * event (writesTo publishers, zero listensTo subscribers) so it no longer looks
+ * orphaned. `source` is the emitting extractor; `properties` is the edge blob,
+ * carrying the declared `operation` (create/publish) and `mechanism`
+ * (flow-create-record / EventBus.publish) where the extractor surfaced them.
+ *
+ * HONESTY: detection is the modeled `writesTo` edge only. The Apex
+ * `EventBus.publish(...)` call is detected by the extractor's heuristic scan;
+ * dynamically-built publishes and managed-package publishers are NOT modeled.
+ */
+export interface EventPublisher {
+  readonly id: ComponentId;
+  readonly type: ComponentType;
+  readonly apiName: string;
+  readonly source: string;
+  readonly properties: Readonly<Record<string, unknown>>;
+}
+
+/**
  * CR-CAP-18: one publish-side channel binding for an event. Surfaced by walking
  * the event's INBOUND `references` edges tagged
  * `referenceKind === 'platformEventChannelMember'` (the member→event edge) to
@@ -180,6 +214,12 @@ export interface EventCatalogEntry {
   readonly eventId: ComponentId;
   readonly eventApiName: string;
   readonly subscriberCount: number;
+  /**
+   * GROUP C: count of modeled `writesTo` publishers (Flow/ApexClass/ApexTrigger)
+   * that emit this event. A nonzero `publisherCount` with a zero
+   * `subscriberCount` flags a published-but-unsubscribed event.
+   */
+  readonly publisherCount: number;
 }
 
 /**
@@ -194,6 +234,15 @@ export interface EventSubscribersOutput {
   readonly subscribers: readonly EventSubscriber[];
   readonly eventApiName: string | null;
   readonly events?: readonly EventCatalogEntry[];
+  /**
+   * GROUP C: the code that PUBLISHES this event (Flow/Apex emitting a `writesTo`
+   * edge into the event). Present only in single-event mode (eventId supplied).
+   * Empty when nothing modeled publishes the event — empty≠absent (the
+   * `EventBus.publish` heuristic and dynamic/managed-package publishers may be
+   * unmodeled). Surfacing this stops a published-but-unsubscribed event from
+   * looking orphaned.
+   */
+  readonly publishers?: readonly EventPublisher[];
   /**
    * CR-CAP-18: the publish-side channel(s) that route this event, each with the
    * declared per-member filter. Present only in single-event mode (eventId
@@ -213,6 +262,9 @@ const EVENT_SUB_CHANNEL_DISCLOSURE =
   'Publish-side channel routing and per-member filter expressions ARE extracted from `*.platformEventChannel(Member)-meta.xml` (declared XML text — NOT runtime filter EVALUATION; which records actually flow needs record-level data the vault lacks).';
 const EVENT_SUB_EMPTY_DISCLOSURE =
   'No subscribers found for this event — NOT proof nothing subscribes. The `EventBus.subscribe(...)` registration, dynamically-built subscriptions, and managed-package listeners are not modeled; verify in Setup before assuming the event is unused.';
+// GROUP C: publish-side CODE (the publishers list).
+const EVENT_SUB_PUBLISHER_DISCLOSURE =
+  'Publishers are detected from modeled `writesTo` edges (Flow record-create on the event, Apex `EventBus.publish(...)`). Detection is partial: dynamically-built publishes and managed-package publishers are NOT modeled — an empty publishers list is not proof nothing publishes the event.';
 
 /**
  * Validate that `eventId` is a syntactically valid Platform Event id.
@@ -268,6 +320,68 @@ const resolveSubscriber = async (
  */
 const compareSubscribers = (a: EventSubscriber, b: EventSubscriber): number =>
   a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+
+/**
+ * GROUP C: resolve one incoming `writesTo` edge into an `EventPublisher`.
+ * Returns `null` when the edge points at a node missing from the graph or whose
+ * type is outside {@link PUBLISHER_NODE_TYPES} (e.g. a stray CustomField
+ * writesTo edge); the caller drops those rather than erroring. The `source` and
+ * `properties` come from the edge (the emitting extractor + the declared
+ * operation/mechanism), the identity from the resolved node — mirroring
+ * {@link resolveSubscriber}.
+ */
+const resolvePublisher = async (
+  ctx: Context,
+  edge: Edge,
+): Promise<Result<EventPublisher | null, string>> => {
+  const nodeResult = await getNodeById(ctx.graph, edge.fromId);
+  if (!nodeResult.ok) {
+    return err(nodeResult.error.message);
+  }
+  const node: Node | null = nodeResult.value;
+  if (node === null) {
+    return ok(null);
+  }
+  if (!PUBLISHER_NODE_TYPES.has(node.type)) {
+    return ok(null);
+  }
+  return ok({
+    id: node.id,
+    type: node.type,
+    apiName: node.apiName,
+    source: edge.source,
+    properties: edge.properties,
+  });
+};
+
+/** Deterministic comparator for publishers: id ASC (mirrors subscribers). */
+const comparePublishers = (a: EventPublisher, b: EventPublisher): number =>
+  a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+
+/**
+ * GROUP C: resolve every modeled publisher of `eventId` by walking its INBOUND
+ * `writesTo` edges, resolving each `fromId`, and keeping only
+ * {@link PUBLISHER_NODE_TYPES}. Sorted id-ASC for deterministic output.
+ */
+const resolvePublishers = async (
+  ctx: Context,
+  eventId: ComponentId,
+): Promise<Result<EventPublisher[], string>> => {
+  const edgesResult = await listEdges(ctx.graph, eventId, {
+    direction: 'in',
+    edgeType: 'writesTo',
+  });
+  if (!edgesResult.ok) return err(edgesResult.error.message);
+
+  const publishers: EventPublisher[] = [];
+  for (const edge of edgesResult.value) {
+    const resolved = await resolvePublisher(ctx, edge);
+    if (!resolved.ok) return err(resolved.error);
+    if (resolved.value !== null) publishers.push(resolved.value);
+  }
+  publishers.sort(comparePublishers);
+  return ok(publishers);
+};
 
 /**
  * CR-CAP-18: resolve the publish-side channel bindings for an event. Walks the
@@ -375,7 +489,18 @@ export const eventSubscribersHandler = async (
           subscriberCount += 1;
         }
       }
-      events.push({ eventId: node.id, eventApiName: node.apiName, subscriberCount });
+      // GROUP C: count modeled `writesTo` publishers (Flow/Apex emitting the
+      // event) so the catalog flags published-but-unsubscribed events.
+      const publishersResult = await resolvePublishers(ctx, node.id);
+      if (!publishersResult.ok) {
+        return err({ kind: 'internal', message: `graph query failed: ${publishersResult.error}` });
+      }
+      events.push({
+        eventId: node.id,
+        eventApiName: node.apiName,
+        subscriberCount,
+        publisherCount: publishersResult.value.length,
+      });
     }
     events.sort((a, b) => (a.eventId < b.eventId ? -1 : a.eventId > b.eventId ? 1 : 0));
     return ok({
@@ -433,17 +558,32 @@ export const eventSubscribersHandler = async (
   }
   const channels = channelsResult.value;
 
+  // GROUP C: resolve the publish-side CODE (Flow/Apex emitting `writesTo`).
+  const publishersResult = await resolvePublishers(ctx, input.eventId);
+  if (!publishersResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${publishersResult.error}`,
+    });
+  }
+  const publishers = publishersResult.value;
+
   const boundaries =
     sorted.length === 0
       ? [
           EVENT_SUB_HEURISTIC_DISCLOSURE,
           EVENT_SUB_CHANNEL_DISCLOSURE,
+          EVENT_SUB_PUBLISHER_DISCLOSURE,
           EVENT_SUB_EMPTY_DISCLOSURE,
         ]
-      : [EVENT_SUB_HEURISTIC_DISCLOSURE, EVENT_SUB_CHANNEL_DISCLOSURE];
+      : [
+          EVENT_SUB_HEURISTIC_DISCLOSURE,
+          EVENT_SUB_CHANNEL_DISCLOSURE,
+          EVENT_SUB_PUBLISHER_DISCLOSURE,
+        ];
 
   return ok({
-    data: { subscribers: sorted, eventApiName: apiName, channels, boundaries },
+    data: { subscribers: sorted, eventApiName: apiName, channels, publishers, boundaries },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
       refreshedAt: ctx.manifest.refreshedAt,

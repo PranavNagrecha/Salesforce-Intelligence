@@ -347,3 +347,64 @@ describe('emptyQueuesAndGroupsInputSchema', () => {
     ).toBe(true);
   });
 });
+
+describe('coverage-aware-zero — Queue/Group not retrieved', () => {
+  let covDir: string;
+  let covStore: GraphStore;
+
+  beforeAll(async () => {
+    covDir = mkdtempSync(join(tmpdir(), 'sfi-eqg-cov-'));
+    const o = await openGraph(join(covDir, 'g.db'));
+    if (!o.ok) throw new Error(o.error.message);
+    covStore = o.value;
+    await importExtractionResults(covStore, [
+      { nodes: [makeNode({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' })], edges: [] },
+    ]);
+  });
+
+  afterAll(async () => {
+    await closeGraph(covStore);
+    rmSync(covDir, { recursive: true, force: true });
+  });
+
+  const COV_MANIFEST: VaultManifest = {
+    version: '0.1.0',
+    refreshedAt: '2026-05-27T14:33:08Z',
+    sourceOrg: 'me@example.com',
+    components: { CustomObject: 1 },
+    edges: {},
+    sourceTreeHash: 'sha256:fixture-cov',
+    coverage: [
+      { type: 'CustomObject', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+      { type: 'Queue', requested: true, retrieved: 0, errored: false, neverModeled: false },
+      { type: 'Group', requested: true, retrieved: 0, errored: false, neverModeled: false },
+    ],
+  };
+
+  it('attaches a coverageCaveat naming both unretrieved families', async () => {
+    const r = await emptyQueuesAndGroupsHandler(
+      { vaultRoot: covDir, manifest: COV_MANIFEST, graph: covStore },
+      {},
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalQueues).toBe(0);
+    expect(r.value.data.totalGroups).toBe(0);
+    expect(r.value.data.coverageCaveat).toBeDefined();
+    expect(r.value.data.coverageCaveat?.missingCoverage).toEqual(
+      expect.arrayContaining(['Queue', 'Group']),
+    );
+    expect(r.value.data.coverageCaveat?.message).toMatch(/not checked/);
+  });
+
+  it('scopes the caveat to the requested type filter', async () => {
+    const r = await emptyQueuesAndGroupsHandler(
+      { vaultRoot: covDir, manifest: COV_MANIFEST, graph: covStore },
+      { type: 'Queue' },
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.coverageCaveat?.missingCoverage).toContain('Queue');
+    expect(r.value.data.coverageCaveat?.missingCoverage).not.toContain('Group');
+  });
+});

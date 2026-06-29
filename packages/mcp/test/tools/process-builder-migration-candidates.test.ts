@@ -449,3 +449,63 @@ describe('CR-CAP-11b — action-type counts drive WorkflowRule complexity', () =
     expect(wr?.edgeSummary.fieldUpdateCount).toBe(0);
   });
 });
+
+describe('coverage-aware-zero — automation families not retrieved', () => {
+  let tempDir: string;
+  let store: GraphStore;
+  let covCtx: Context;
+
+  beforeAll(async () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'sfi-pbmc-cov-'));
+    const o = await openGraph(join(tempDir, 'g.db'));
+    if (!o.ok) throw new Error(o.error.message);
+    store = o.value;
+    // Only a CustomObject lands — none of the automation families were pulled.
+    await importExtractionResults(store, [
+      { nodes: [makeNode({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' })], edges: [] },
+    ]);
+    const covManifest: VaultManifest = {
+      ...FIXTURE_MANIFEST,
+      components: { CustomObject: 1 },
+      coverage: [
+        { type: 'CustomObject', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+        { type: 'Flow', requested: true, retrieved: 0, errored: false, neverModeled: false },
+        { type: 'WorkflowRule', requested: true, retrieved: 0, errored: false, neverModeled: false },
+        { type: 'ApprovalProcess', requested: true, retrieved: 0, errored: false, neverModeled: false },
+      ],
+    };
+    covCtx = { vaultRoot: tempDir, manifest: covManifest, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('attaches a coverageCaveat qualifying the empty lists as "not checked"', async () => {
+    const r = await processBuilderMigrationCandidatesHandler(covCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.totalProcessBuilders).toBe(0);
+    expect(d.totalWorkflowRules).toBe(0);
+    expect(d.totalApprovalProcesses).toBe(0);
+    expect(d.coverageCaveat).toBeDefined();
+    expect(d.coverageCaveat?.missingCoverage).toEqual(
+      expect.arrayContaining(['Flow', 'WorkflowRule', 'ApprovalProcess']),
+    );
+    expect(d.coverageCaveat?.message).toMatch(/not checked/);
+  });
+
+  it('drops the not-included families from the caveat when toggled off', async () => {
+    const r = await processBuilderMigrationCandidatesHandler(covCtx, {
+      includeWorkflowRules: false,
+      includeApprovalProcesses: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.coverageCaveat?.missingCoverage).not.toContain('WorkflowRule');
+    expect(r.value.data.coverageCaveat?.missingCoverage).not.toContain('ApprovalProcess');
+    expect(r.value.data.coverageCaveat?.missingCoverage).toContain('Flow');
+  });
+});

@@ -67,6 +67,7 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import { detectPiiClassification } from '@sf-intelligence/patterns';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
@@ -541,13 +542,20 @@ const computeRisk = (
 };
 
 /**
- * Determine whether the field is PII-classified. v2.0d's pii-detection
- * recognizer populates `properties.piiClassification` when it
- * classified a field; v3.0 reads it directly rather than re-running
- * the recognizer.
+ * Determine whether the field is PII-classified. Runs the v2.0d
+ * pii-detection recognizer LIVE (`detectPiiClassification`) — the same
+ * recognizer `field_access_audit` and `pii_inventory` use — rather than
+ * reading a `properties.piiClassification` value that NOTHING in the
+ * extraction pipeline ever stamps (the prior read was dead, so the
+ * PII-risk escalation in `computeRisk` never fired for EncryptedText /
+ * SSN / financial fields). Returns true for `pii` or `sensitive`.
+ *
+ * HEURISTIC: a name/type recognizer can miss PII (custom-named columns,
+ * description-only signals it can't see), so a `false` here is NOT a
+ * clearance — only the absence of a recognised signal.
  */
 const detectIsPii = (node: Node): boolean => {
-  const c = node.properties['piiClassification'];
+  const c = detectPiiClassification(node).piiClassification;
   return c === 'pii' || c === 'sensitive';
 };
 

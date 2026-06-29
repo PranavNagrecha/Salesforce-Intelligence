@@ -202,6 +202,49 @@ describe('detectPiiClassification: name-based financial patterns', () => {
   });
 });
 
+// GROUP-A PII-safety: a Currency / Number field whose name carries a money token
+// is a financial access-signal — classify as sensitive/financial (additive).
+describe('detectPiiClassification: money-token Currency/Number fields', () => {
+  it('classifies a Currency Payment_Amount__c as sensitive/financial', () => {
+    const r = detectPiiClassification(
+      field('Account', 'Payment_Amount__c', { dataType: 'Currency' }),
+    );
+    expect(r.piiClassification).toBe('sensitive');
+    expect(r.piiCategory).toBe('financial');
+  });
+
+  it('classifies a Number Outstanding_Balance__c as sensitive/financial', () => {
+    const r = detectPiiClassification(
+      field('Account', 'Outstanding_Balance__c', { dataType: 'Number' }),
+    );
+    expect(r.piiClassification).toBe('sensitive');
+    expect(r.piiCategory).toBe('financial');
+  });
+
+  it('classifies a Currency Late_Fee__c as sensitive/financial', () => {
+    const r = detectPiiClassification(
+      field('Contact', 'Late_Fee__c', { dataType: 'Currency' }),
+    );
+    expect(r.piiClassification).toBe('sensitive');
+    expect(r.piiCategory).toBe('financial');
+  });
+
+  it('does NOT classify a Text field with a money token (no Currency/Number type)', () => {
+    // additive scope: the rule fires only for Currency / Number data types.
+    const r = detectPiiClassification(field('Account', 'Payment_Status__c'));
+    expect(r.piiClassification).toBe('public');
+  });
+
+  it('does NOT classify a generic product/catalog list price as PII', () => {
+    // false-positive guard: a product catalog price is not a person/account
+    // financial signal.
+    const r = detectPiiClassification(
+      field('Product2', 'List_Price__c', { dataType: 'Currency' }),
+    );
+    expect(r.piiClassification).toBe('public');
+  });
+});
+
 describe('detectPiiClassification: name-based health patterns', () => {
   it('classifies Diagnosis__c as sensitive/health', () => {
     const r = detectPiiClassification(field('Patient__c', 'Diagnosis__c'));
