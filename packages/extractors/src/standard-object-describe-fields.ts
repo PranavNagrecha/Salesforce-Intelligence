@@ -18,13 +18,37 @@
 
 import type { Edge, ExtractionResult, Node } from '@sf-intelligence/contracts';
 
-/** Standard objects that receive a describe field snapshot (FLD-05). */
+/**
+ * Standard objects that receive a describe field snapshot (FLD-05).
+ *
+ * CR-CAP-17: extended from the original 5 to the full 14 standard
+ * objects already modeled by `STANDARD_OBJECTS_TO_MODEL` in the refresh
+ * pipeline. The describe pass is OFFLINE-SAFE: it shells out to a live
+ * `sf sobject describe` that fails non-fatally under `--no-pull`
+ * (refresh.ts: `if (!parsed.ok) { progress(...skipped...); continue; }`),
+ * so the 9 added objects materialize ZERO graph nodes offline. The only
+ * observable offline effect is that the two MCP consumers that import
+ * this constant — `phantom-node.ts` (the "NOT proof the field is absent"
+ * disclosure) and `list-components.ts` (`isStandardObjectApiName`) — now
+ * cover all 14 objects instead of bare-falling-through to "no field with
+ * id". The field DATA itself only materializes after the user's next
+ * live describe-backed refresh, exactly like the original 5.
+ */
 export const STANDARD_OBJECT_FIELD_SNAPSHOT = [
   'Account',
   'Contact',
   'Opportunity',
   'Lead',
   'Case',
+  'Task',
+  'Event',
+  'Campaign',
+  'Contract',
+  'Asset',
+  'Order',
+  'Product2',
+  'Pricebook2',
+  'User',
 ] as const;
 
 export type StandardObjectFieldSnapshotName =
