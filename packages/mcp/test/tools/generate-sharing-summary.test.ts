@@ -107,12 +107,45 @@ const seed: ExtractionResult = {
         booleanFilter: 'Account.Industry = "Banking"',
       },
     }),
+    // CR-CAP-05b: an owner rule shared with Role:Executive AND its subordinates.
+    // Role:Manager inheritsFrom Role:Executive, so the summary must name the
+    // recipient AND mark "(and its subordinate roles)".
+    makeNode({
+      id: 'SharingRule:Account.ExecRule',
+      type: 'SharingRule',
+      apiName: 'Account.ExecRule',
+      properties: {
+        sObjectType: 'Account',
+        accessLevel: 'Edit',
+        ruleType: 'owner',
+      },
+    }),
   ],
   edges: [
     makeEdge({
       fromId: 'CustomObject:Account',
       toId: 'CustomField:Account.Industry__c',
       edgeType: 'parentOf',
+    }),
+    // CR-CAP-05b: the criteria rule names a Group recipient verbatim; the owner
+    // rule shares with Role:Executive carrying the subordinates marker.
+    makeEdge({
+      fromId: 'SharingRule:Account.AccountRule',
+      toId: 'Group:Banking_Team',
+      edgeType: 'sharedWith',
+    }),
+    makeEdge({
+      fromId: 'SharingRule:Account.ExecRule',
+      toId: 'Role:Executive',
+      edgeType: 'sharedWith',
+      properties: { inheritance: 'subordinates' },
+    }),
+    // Role:Manager inheritsFrom Role:Executive (child -> parent).
+    makeEdge({
+      fromId: 'Role:Manager',
+      toId: 'Role:Executive',
+      edgeType: 'inheritsFrom',
+      source: 'role-extractor',
     }),
     makeEdge({
       fromId: 'CustomObject:Contact',
@@ -250,11 +283,35 @@ describe('generateSharingSummaryHandler (seeded graph)', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const body = result.value.data.document.body;
-    // The rules table now carries Type + Criteria columns, so a criteria-based
-    // access path is visible with its predicate, not hidden behind a bare name.
-    expect(body).toContain('| Rule | Type | Access Level | Criteria |');
+    // The rules table now carries Type + Shared With + Criteria columns, so both
+    // the recipient AND a criteria-based predicate are visible (CR-CAP-05b adds
+    // the Shared With column to surface recipients that were previously omitted).
+    expect(body).toContain('| Rule | Type | Shared With | Access Level | Criteria |');
     expect(body).toContain('criteria');
     expect(body).toContain('Account.Industry = "Banking"');
+  });
+
+  // CR-CAP-05b: the summary previously named NO recipient (4-column table). It
+  // must now surface the rule's sharedWith recipient verbatim.
+  it('CR-CAP-05b: surfaces each rule\'s sharedWith recipient (was omitted)', async () => {
+    const result = await generateSharingSummaryHandler(ctx, { objectFilter: 'Account' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.data.document.body;
+    // The criteria rule's Group recipient is named verbatim.
+    expect(body).toContain('Banking_Team');
+    // The owner rule's Role recipient is named.
+    expect(body).toContain('Executive');
+  });
+
+  // CR-CAP-05b: a roleAndSubordinates recipient is marked "(and its subordinate
+  // roles)" — consuming the SAME expandRoleSubordinates helper as who_can.
+  it('CR-CAP-05b: marks a subordinate-role recipient with the subordinate note', async () => {
+    const result = await generateSharingSummaryHandler(ctx, { objectFilter: 'Account' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.data.document.body;
+    expect(body).toMatch(/and its subordinate roles/i);
   });
 
   it('tallies OBJECT-level CRUD grants and EXCLUDES FLS-only grantors (CR-04)', async () => {
