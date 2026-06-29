@@ -556,10 +556,56 @@ const applyApexAstEdges = async (
         callsByClass.set(cls, list);
       }
     }
+    // CR-CAP-06: thread per-target-class CALLER-method attribution onto the
+    // SAME single edge per target class — property-only, edge PK/count are
+    // byte-identical (one callsApex edge per target class as before). Two
+    // ADDITIVE keys, AST-PATH-ONLY:
+    //   - callerMethods: the class-level UNION of source methods that call
+    //     ANY method of the target (for call_graph — class->class label).
+    //   - callerMethodsByMethod: target-method -> source-methods that call
+    //     THAT specific method (for what_if — so it can attribute the call-site
+    //     to the queried method without the cross-method phantom the flat union
+    //     would introduce).
+    // A call-site with no enclosing method (callerMethod === '') is FILTERED
+    // here — absent === unknown caller, never a blank attribution.
+    const callerMethodsByClass = new Map<string, Set<string>>();
+    const callerMethodsByMethod = new Map<string, Map<string, Set<string>>>();
+    for (const site of extracted.callSites ?? []) {
+      const cls = site.callee.split('.')[0] ?? '';
+      const targetMethod = site.callee.split('.').slice(1).join('.');
+      if (!(knownClasses.has(cls) && cls !== apexNode.apiName)) continue;
+      if (site.callerMethod.length === 0) continue;
+      const union = callerMethodsByClass.get(cls) ?? new Set<string>();
+      union.add(site.callerMethod);
+      callerMethodsByClass.set(cls, union);
+      if (targetMethod.length > 0) {
+        const byMethod = callerMethodsByMethod.get(cls) ?? new Map<string, Set<string>>();
+        const callers = byMethod.get(targetMethod) ?? new Set<string>();
+        callers.add(site.callerMethod);
+        byMethod.set(targetMethod, callers);
+        callerMethodsByMethod.set(cls, byMethod);
+      }
+    }
     for (const [cls, methods] of callsByClass) {
+      const callerUnion = callerMethodsByClass.get(cls);
+      const byMethod = callerMethodsByMethod.get(cls);
+      const byMethodObj =
+        byMethod === undefined
+          ? undefined
+          : Object.fromEntries(
+              [...byMethod.entries()]
+                .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+                .map(([m, callers]) => [m, [...callers].sort()] as const),
+            );
       pushEdge(`ApexClass:${cls}`, 'callsApex', {
         methods: [...new Set(methods)].sort(),
         viaAst: true,
+        ...(callerUnion !== undefined && callerUnion.size > 0
+          ? { callerMethods: [...callerUnion].sort() }
+          : {}),
+        ...(byMethodObj !== undefined && Object.keys(byMethodObj).length > 0
+          ? { callerMethodsByMethod: byMethodObj }
+          : {}),
       });
     }
     const fieldEdge = (ref: string, kind: 'readsFrom' | 'writesTo'): void => {
