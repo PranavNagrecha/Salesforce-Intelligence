@@ -26,6 +26,7 @@ export {
   buildCoverageEntries,
   ENTERPRISE_NOT_MODELED_TYPES,
   loadManifest,
+  rankUncoveredFamilies,
   readCoverageEntries,
   readSkippedDirectories,
   saveManifest,
@@ -36,6 +37,7 @@ export type {
   ExtendedVaultManifest,
   ManifestError,
   StagedBuildMarker,
+  UncoveredFamily,
 } from './manifest.js';
 export {
   acknowledgeFinding,

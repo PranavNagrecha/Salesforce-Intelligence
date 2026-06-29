@@ -154,6 +154,70 @@ export const readSkippedDirectories = (
   return ext.skippedDirectories;
 };
 
+/**
+ * CR-CAP-20 — one ranked "uncovered family" row. A family is a retrieve
+ * subdirectory whose files were RETRIEVED but NOT MODELED by any
+ * extractor (it appears in `skippedDirectories`). This is NEVER a claim
+ * that the family is absent from the org — only that this build did not
+ * model it.
+ */
+export interface UncoveredFamily {
+  /**
+   * Display label: the canonical `ComponentType` when the raw dir maps
+   * through `SKIPPED_DIR_COVERAGE`, else the raw dir name verbatim.
+   */
+  readonly family: string;
+  /** The raw retrieve subdirectory name (e.g. `omniProcesses`). */
+  readonly rawDir: string;
+  /** Count of files the walker skipped in this directory. */
+  readonly skippedFiles: number;
+  /**
+   * `true` when `rawDir` maps to a known `ComponentType` (the family is
+   * modeled by the product elsewhere, just not retrieved here); `false`
+   * when the family has no extractor at all (raw label kept).
+   */
+  readonly modeledType: boolean;
+}
+
+/**
+ * CR-CAP-20 — turn the raw `skippedDirectories` map into a ranked list of
+ * uncovered families, sorted by skipped-file volume (desc), tiebroken by
+ * family name (asc). Each raw dir is mapped through `SKIPPED_DIR_COVERAGE`
+ * to its canonical `ComponentType` (`modeledType: true`) when known, else
+ * the raw dir name is kept as the label (`modeledType: false`).
+ *
+ * Pure: manifest-in, array-out, no IO — preserves the offline contract.
+ * Returns `[]` for a clean vault (empty/absent `skippedDirectories`),
+ * which is why this signal is INERT on the edu-org golden and must be
+ * unit-verified with a stubbed `skippedDirectories` map. Entries with a
+ * non-positive count are dropped (a retrieved-but-not-skipped dir).
+ */
+export const rankUncoveredFamilies = (
+  manifest: VaultManifest | ExtendedVaultManifest | undefined,
+): readonly UncoveredFamily[] => {
+  const skipped = readSkippedDirectories(manifest);
+  const rows: UncoveredFamily[] = [];
+  for (const [rawDir, skippedFiles] of Object.entries(skipped)) {
+    if (skippedFiles <= 0) continue;
+    const mapped = SKIPPED_DIR_COVERAGE[rawDir];
+    rows.push({
+      family: mapped ?? rawDir,
+      rawDir,
+      skippedFiles,
+      modeledType: mapped !== undefined,
+    });
+  }
+  return rows.sort((a, b) =>
+    b.skippedFiles !== a.skippedFiles
+      ? b.skippedFiles - a.skippedFiles
+      : a.family < b.family
+        ? -1
+        : a.family > b.family
+          ? 1
+          : 0,
+  );
+};
+
 /** Read the optional v4.0 coverage array with a back-compatible default. */
 export const readCoverageEntries = (
   manifest: VaultManifest | ExtendedVaultManifest | undefined,

@@ -13,13 +13,21 @@ import type {
   TrustSummary,
 } from '@sf-intelligence/contracts';
 import { ok, type Result } from '@sf-intelligence/core';
-import { buildCoverageEntries, summarizeCoverage } from '@sf-intelligence/vault';
+import {
+  buildCoverageEntries,
+  rankUncoveredFamilies,
+  summarizeCoverage,
+  type UncoveredFamily,
+} from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+/** CR-CAP-20 — cap on the ranked uncovered-families list. */
+const TOP_UNCOVERED_FAMILIES_CAP = 10;
+
 export const COVERAGE_DISCLOSURE =
-  "Coverage describes what the last `sf project retrieve` requested and returned — not what exists in the org. A type listed under `notModeled` is not analyzed by this product at all; its absence from any result means 'not checked', never 'none'. Re-run `/sfi-refresh` after widening your retrieve manifest to close a gap.";
+  "Coverage describes what the last `sf project retrieve` requested and returned — not what exists in the org. A type listed under `notModeled` is not analyzed by this product at all; its absence from any result means 'not checked', never 'none'. Re-run `/sfi-refresh` after widening your retrieve manifest to close a gap. `topUncoveredFamilies` ranks (by skipped-file volume) directories that WERE retrieved but not modeled by an extractor — a listed family is retrieved-but-not-modeled, never 'absent'.";
 
 export const coverageReportInputSchema = z.object({
   type: z.string().min(1).optional(),
@@ -45,6 +53,15 @@ export interface CoverageReportOutput {
     readonly totalTiers: number;
   };
   readonly summary: ReturnType<typeof summarizeCoverage>;
+  /**
+   * CR-CAP-20: top families (capped at 10) that were RETRIEVED but not
+   * modeled by an extractor, ranked by skipped-file volume desc. Each
+   * row carries the canonical `family` label (a `ComponentType` when the
+   * raw dir maps to one, else the raw dir name), `rawDir`, `skippedFiles`,
+   * and `modeledType`. Empty `[]` on a clean vault — never implies the
+   * family is absent from the org.
+   */
+  readonly topUncoveredFamilies: readonly UncoveredFamily[];
   readonly trust: TrustSummary;
   readonly disclosure: string;
 }
@@ -93,6 +110,12 @@ export const coverageReportHandler = async (
   const partitions = partitionCoverage(entries);
   const missingCoverage = summary.missingCoverage;
   const staged = ctx.manifest.staged;
+  // CR-CAP-20: rank retrieved-but-not-modeled families and cap the list.
+  // Inert ([]) when `skippedDirectories` is empty/absent (clean vault).
+  const topUncoveredFamilies = rankUncoveredFamilies(ctx.manifest).slice(
+    0,
+    TOP_UNCOVERED_FAMILIES_CAP,
+  );
 
   return ok({
     data: {
@@ -103,6 +126,7 @@ export const coverageReportHandler = async (
         ? { stagedBuild: { tier: staged.tier, totalTiers: staged.totalTiers } }
         : {}),
       summary,
+      topUncoveredFamilies,
       trust: {
         provenance: 'offline_snapshot',
         confidence: summary.coverageKnown ? 'declared' : 'unknown',
