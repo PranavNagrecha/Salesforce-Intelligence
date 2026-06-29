@@ -382,6 +382,91 @@ export const canonicalizeApexCallEdgeTargets = (
   }
 };
 
+/**
+ * CR-CAP-09: mint class-granular `@future` dispatch edges at graph-build time.
+ *
+ * The Apex extractor detects `@future` only at CLASS granularity — the
+ * annotation scanner (`collectMethodAnnotations`) cannot bind the annotation to
+ * a specific method declaration, so each class node carries a single boolean
+ * `properties.hasFutureMethod`. Cross-class calls are modeled as class-level
+ * `callsApex` edges. Joining the two yields a class-granular async signal:
+ * "caller has a `callsApex` edge to a class that has SOME `@future` method".
+ *
+ * This is a deliberate over-attribution: the edge fires when the TARGET class
+ * has ANY `@future` method, even if the caller invoked a synchronous method of
+ * that class — because `hasFutureMethod` cannot say WHICH method is `@future`.
+ * That is honored honestly, not hidden: the minted edge is `confidence:
+ * 'heuristic'` and carries `properties.granularity: 'class'`. Method-level
+ * precision is gated on CR-CAP-06 (caller-method attribution). Reuses the
+ * existing `dispatchesAsync` EdgeType (whose contract already names `@future`
+ * as a legitimate target) — no new EdgeType.
+ *
+ * Honesty / safety invariants:
+ *   - Only mints when the TARGET node genuinely has `hasFutureMethod === true`.
+ *   - The future-set is guarded to `ApexClass` nodes only — triggers can't hold
+ *     `@future`, so a trigger target is never minted even if mislabeled.
+ *   - Dedups by `(fromId, toId, edgeType)`: if a `dispatchesAsync` edge already
+ *     exists for the pair (e.g. a `declared` inline-constructor
+ *     `System.enqueueJob(new ClassB())` edge), NOTHING is minted — the
+ *     higher-trust declared edge is never duplicated or downgraded.
+ *
+ * Must run AFTER `canonicalizeApexCallEdgeTargets` so `callsApex` targets are
+ * already canonicalized to real node ids before the future-set membership test.
+ *
+ * INCREMENTAL caveat (apply-change-set path): operates on the change-set's node
+ * view, so a future-holding target class outside the change set is invisible
+ * and under-mints vs a full refresh. A full `/sfi-refresh` is the ground truth.
+ */
+export const mintFutureDispatchEdges = (
+  nodes: readonly Node[],
+  edges: Edge[],
+): void => {
+  const futureClassIds = new Set<string>();
+  for (const node of nodes) {
+    if (node.type === 'ApexClass' && node.properties['hasFutureMethod'] === true) {
+      futureClassIds.add(node.id);
+    }
+  }
+  if (futureClassIds.size === 0) return;
+
+  // Existing dispatchesAsync pairs — minting must never duplicate/downgrade a
+  // pre-existing (e.g. declared inline-constructor) edge for the same pair.
+  const existingDispatchPairs = new Set<string>();
+  for (const edge of edges) {
+    if (edge.edgeType === 'dispatchesAsync') {
+      existingDispatchPairs.add(`${edge.fromId} ${edge.toId}`);
+    }
+  }
+
+  // Distinct callsApex pairs whose target is a @future-holding class. Use a set
+  // so multiple call-sites to the same target collapse to one minted edge.
+  const toMint = new Map<string, { fromId: string; toId: string }>();
+  for (const edge of edges) {
+    if (edge.edgeType !== 'callsApex') continue;
+    if (!futureClassIds.has(edge.toId)) continue;
+    const pairKey = `${edge.fromId} ${edge.toId}`;
+    if (existingDispatchPairs.has(pairKey)) continue;
+    if (!toMint.has(pairKey)) {
+      toMint.set(pairKey, { fromId: edge.fromId, toId: edge.toId });
+    }
+  }
+
+  for (const { fromId, toId } of toMint.values()) {
+    edges.push({
+      fromId,
+      toId,
+      edgeType: 'dispatchesAsync',
+      confidence: 'heuristic',
+      source: 'graph-future-dispatch',
+      properties: {
+        dispatchMechanism: 'future',
+        granularity: 'class',
+        derivedFrom: 'callsApex+hasFutureMethod',
+      },
+    });
+  }
+};
+
 export const importExtractionResults = async (
   store: GraphStore,
   results: readonly ExtractionResult[],
@@ -396,6 +481,9 @@ export const importExtractionResults = async (
   }
 
   canonicalizeApexCallEdgeTargets(allNodes, allEdges);
+  // CR-CAP-09: mint class-granular @future dispatchesAsync edges AFTER targets
+  // are canonicalized so the future-set membership test sees real node ids.
+  mintFutureDispatchEdges(allNodes, allEdges);
 
   const nodeOutcome = await commitBatched(connection, allNodes, insertNode);
   if (!nodeOutcome.ok) {
