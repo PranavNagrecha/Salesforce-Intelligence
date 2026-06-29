@@ -711,6 +711,24 @@ describe('detectCodeQualityIssues — fake-assertion', () => {
     expect(rulesOf(run(src, { isTest: true }))).not.toContain('fake-assertion');
   });
 
+  it('does NOT flag System.assert(false, ...) — it is a fail-guard, not a tautology', () => {
+    // assert(false) sits on a path that should be unreachable (the line after
+    // a call expected to throw). Reaching it FAILS the test, so it verifies
+    // real behavior. Flagging it inverted the audit (deny tests scored worst).
+    const src = `@isTest
+    public class T {
+      @isTest static void denyTest() {
+        try {
+          AccessService.guard(someId);
+          System.assert(false, 'A non-owner must be denied.');
+        } catch (AccessService.NoAccessException e) {
+          System.assertEquals(AccessService.NO_ACCESS, e.getMessage());
+        }
+      }
+    }`;
+    expect(rulesOf(run(src, { isTest: true }))).not.toContain('fake-assertion');
+  });
+
   it('does not flag fake assertions in a non-test class', () => {
     const src = `public class T { public static void t() { System.assert(true); } }`;
     expect(rulesOf(run(src, { isTest: false }))).not.toContain('fake-assertion');
