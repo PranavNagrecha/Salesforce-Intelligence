@@ -283,3 +283,141 @@ describe('generateComplianceReportHandler (seeded graph)', () => {
     expect(joined).toContain('Dynamic Apex');
   });
 });
+
+// =============================================================================
+// F4 / R2-2 (HIGH): org-wide god-mode (ModifyAllData / ViewAllData) stored on
+// Profile/PermissionSet `properties.userPermissions` must be folded into the
+// Object + FLS exposure section. A SysAdmin with ModifyAllData + FLS edit on a
+// regulated field but NO explicit object-permission edge was MISSED, and the
+// section printed the all-clear sentence (security false-negative).
+// =============================================================================
+
+const STUDENT = 'CustomObject:Student__c';
+const SSN_ENC = 'CustomField:Student__c.Student_SSN__c';
+const SYSADMIN = 'Profile:SysAdmin';
+const VIEWER = 'Profile:Viewer';
+const MAD_NO_FLS = 'Profile:MadNoFls';
+const EDGE_PROFILE = 'Profile:EdgeProfile';
+
+const godModeSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: STUDENT,
+      type: 'CustomObject',
+      apiName: 'Student__c',
+      label: 'Student',
+      properties: { sharingModel: 'Private' },
+    }),
+    // EncryptedText → ALWAYS classified pii → regulated.
+    makeNode({
+      id: SSN_ENC,
+      type: 'CustomField',
+      apiName: 'Student_SSN__c',
+      label: 'Student SSN',
+      parentId: STUDENT,
+      properties: { label: 'Student SSN', dataType: 'EncryptedText' },
+    }),
+    // SysAdmin: ModifyAllData god-mode + FLS edit, NO object-permission edge.
+    makeNode({
+      id: SYSADMIN,
+      type: 'Profile',
+      apiName: 'SysAdmin',
+      label: 'System Administrator',
+      properties: { userPermissions: ['ModifyAllData'] },
+    }),
+    // Viewer: ViewAllData god-mode + FLS read, NO object-permission edge.
+    makeNode({
+      id: VIEWER,
+      type: 'Profile',
+      apiName: 'Viewer',
+      label: 'Read-Only Viewer',
+      properties: { userPermissions: ['ViewAllData'] },
+    }),
+    // MadNoFls: ModifyAllData but NO FLS grant on the field → must NOT appear.
+    makeNode({
+      id: MAD_NO_FLS,
+      type: 'Profile',
+      apiName: 'MadNoFls',
+      label: 'Mad No FLS',
+      properties: { userPermissions: ['ModifyAllData'] },
+    }),
+    // EdgeProfile: ordinary object-permission edge path (existing behavior).
+    makeNode({
+      id: EDGE_PROFILE,
+      type: 'Profile',
+      apiName: 'EdgeProfile',
+      label: 'Edge Profile',
+      properties: {},
+    }),
+  ],
+  edges: [
+    makeEdge({ fromId: STUDENT, toId: SSN_ENC, edgeType: 'parentOf' }),
+    makeEdge({ fromId: SYSADMIN, toId: SSN_ENC, edgeType: 'grantedBy', properties: { readable: true, editable: true } }),
+    makeEdge({ fromId: VIEWER, toId: SSN_ENC, edgeType: 'grantedBy', properties: { readable: true, editable: false } }),
+    // EdgeProfile: FLS read on the field + object-level read edge on the object.
+    makeEdge({ fromId: EDGE_PROFILE, toId: SSN_ENC, edgeType: 'grantedBy', properties: { readable: true, editable: false } }),
+    makeEdge({ fromId: EDGE_PROFILE, toId: STUDENT, edgeType: 'grantedBy', properties: { allowRead: true } }),
+    // NOTE: MadNoFls has NO grantedBy edge to the field at all (over-report guard).
+  ],
+};
+
+describe('generateComplianceReportHandler — god-mode in Object+FLS (F4/R2-2)', () => {
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    const built = await makeFreshCtx('godmode.db');
+    store = built.store;
+    ctx = built.ctx;
+    const imported = await importExtractionResults(store, [godModeSeed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  it('lists a ModifyAllData profile with FLS but NO object edge (fails before fix)', async () => {
+    const r = await generateComplianceReportHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const body = r.value.data.document.body;
+    expect(body).not.toContain('no profile/perm-set holds both object-level read');
+    expect(body).toContain('System Administrator');
+    expect(body).toContain('ModifyAllData (system)');
+  });
+
+  it('maps ViewAllData to a read-level system label', async () => {
+    const r = await generateComplianceReportHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const body = r.value.data.document.body;
+    expect(body).toContain('Read-Only Viewer');
+    expect(body).toContain('ViewAllData (system)');
+  });
+
+  it('does NOT over-report a ModifyAllData profile that lacks FLS on the field', async () => {
+    const r = await generateComplianceReportHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const body = r.value.data.document.body;
+    expect(body).not.toContain('Mad No FLS');
+  });
+
+  it('still lists the ordinary object-edge exposure path', async () => {
+    const r = await generateComplianceReportHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const body = r.value.data.document.body;
+    expect(body).toContain('Edge Profile');
+  });
+
+  it('discloses the PSG/muting god-mode gap in boundaries', async () => {
+    const r = await generateComplianceReportHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const boundaries = r.value.data.document.boundaries.join('\n');
+    expect(boundaries).toMatch(/Permission Set Group|muting/i);
+    expect(boundaries).toMatch(/ModifyAllData|ViewAllData|god-mode/i);
+  });
+});
