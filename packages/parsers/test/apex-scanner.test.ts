@@ -67,6 +67,53 @@ describe('scanApexSource — empty and trivial cases', () => {
   });
 });
 
+describe('scanApexSource — EventBus.subscribe channel capture (P3b)', () => {
+  it('captures a static __e Platform Event channel literal as an eventSubscription', () => {
+    const result = scanApexSource(
+      wrapClass(`EventBus.subscribe('Account_Change__e', this);`),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.eventSubscriptions).toHaveLength(1);
+    const sub = result.value.eventSubscriptions[0];
+    expect(sub?.channel).toBe('Account_Change__e');
+    expect(sub?.resolved).toBe(true);
+    expect(typeof sub?.offset).toBe('number');
+  });
+
+  it('captures the slash-prefixed event channel form, stripping the /event/ prefix', () => {
+    const result = scanApexSource(
+      wrapClass(`EventBus.subscribe('/event/Order_Placed__e', new H());`),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.eventSubscriptions).toHaveLength(1);
+    expect(result.value.eventSubscriptions[0]?.channel).toBe('Order_Placed__e');
+    expect(result.value.eventSubscriptions[0]?.resolved).toBe(true);
+  });
+
+  it('flags a dynamic / computed channel arg as NOT resolved (no phantom)', () => {
+    const result = scanApexSource(
+      wrapClass(`String chan = buildChannel(); EventBus.subscribe(chan, this);`),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // String literals are blanked before scanning, so a variable arg leaves
+    // an empty channel — recorded as unresolved, never a fabricated name.
+    expect(result.value.eventSubscriptions).toHaveLength(1);
+    expect(result.value.eventSubscriptions[0]?.resolved).toBe(false);
+  });
+
+  it('does not capture EventBus.publish as a subscription', () => {
+    const result = scanApexSource(
+      wrapClass(`EventBus.publish(new Account_Change__e());`),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.eventSubscriptions).toEqual([]);
+  });
+});
+
 describe('scanApexSource — field writes', () => {
   it('detects a simple assignment as one write', () => {
     const result = scanApexSource(wrapClass(`acc.Industry__c = 'Tech';`));

@@ -94,14 +94,34 @@ export interface ScheduledJobEntry {
   readonly cronExpressions: readonly string[];
 }
 
+/**
+ * T7: one scheduled-Flow entry. Sourced from the Flow node's design-time
+ * `<start><schedule>` block (stamped by the flow extractor as the
+ * `scheduleFrequency` / `scheduleStartDate` / `scheduleStartTime` node
+ * properties). `startTime` is UTC — see {@link SCHEDULED_FLOW_DISCLOSURE}.
+ * This is the FLOW's declared schedule, distinct from the Apex
+ * `CronTrigger` runtime registration captured above.
+ */
+export interface ScheduledFlowEntry {
+  readonly flowId: ComponentId;
+  readonly apiName: string;
+  readonly frequency: string | null;
+  readonly startDate: string | null;
+  /** UTC time-of-day (trailing `Z`); local run time needs the org timezone. */
+  readonly startTimeUtc: string | null;
+}
+
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface ScheduledJobCatalogOutput {
   readonly jobs: readonly ScheduledJobEntry[];
+  readonly scheduledFlows: readonly ScheduledFlowEntry[];
   readonly summary: {
     readonly totalSchedulableClasses: number;
     readonly classesWithKnownCallers: number;
+    readonly totalScheduledFlows: number;
   };
   readonly disclosure: string;
+  readonly flowScheduleDisclosure: string;
 }
 
 /**
@@ -115,6 +135,19 @@ export interface ScheduledJobCatalogOutput {
  */
 const SCHEDULED_JOB_CATALOG_DISCLOSURE =
   'Scanning for System.schedule() invocations is heuristic — the v0.3 Apex scanner detects literal call sites only, NOT runtime registration via Tooling API. Runtime schedules require Tooling API access (CronTrigger / AsyncApexJob). A class flagged `isSchedulable: true` may not currently be scheduled; conversely, a class scheduled via a helper-wrapper or dynamic class load is invisible to the scanner.';
+
+/**
+ * T7: verbatim honesty disclosure for the `scheduledFlows` section.
+ * Scheduled Flows declare their cadence in metadata (`<start><schedule>`),
+ * so this schedule is parsed, not inferred — but `startTimeUtc` is in UTC
+ * (the metadata `<startTime>` carries a trailing `Z`, e.g.
+ * `08:00:00.000Z`); the local wall-clock run time depends on the org's
+ * default timezone, which the vault does NOT hold. This is the FLOW's
+ * design-time schedule and is DISTINCT from the Apex `CronTrigger` /
+ * `AsyncApexJob` runtime registration above, which remains Tooling-API-only.
+ */
+const SCHEDULED_FLOW_DISCLOSURE =
+  'Scheduled-Flow cadence is read from the flow metadata `<start><schedule>` (declared, not inferred). `startTimeUtc` is UTC (the metadata `<startTime>` ends in `Z`, e.g. `08:00:00.000Z`); the local run time depends on the org default timezone, which is not in the vault. This is the Flow design-time schedule, distinct from the Apex CronTrigger runtime registration (Tooling-API-only).';
 
 /**
  * Read the `cronExpressions` property defensively. v2.8's actual
@@ -179,6 +212,34 @@ const collectScheduledCalls = async (
   }
   return ok(calls);
 };
+
+/**
+ * Read an optional non-empty string Flow schedule property, returning
+ * null for missing / non-string / empty values.
+ */
+const readScheduleString = (
+  properties: Readonly<Record<string, unknown>>,
+  key: string,
+): string | null => {
+  const raw = properties[key];
+  return typeof raw === 'string' && raw.length > 0 ? raw : null;
+};
+
+/**
+ * A Flow node is "scheduled" when the extractor stamped a
+ * `scheduleFrequency` (only scheduled flows carry a `<start><schedule>`
+ * block). We gate on frequency presence so non-scheduled flows (which
+ * leave all three schedule props null) are excluded.
+ */
+const isScheduledFlow = (
+  properties: Readonly<Record<string, unknown>>,
+): boolean => readScheduleString(properties, 'scheduleFrequency') !== null;
+
+/**
+ * Deterministic comparator: flowId ASC.
+ */
+const compareFlows = (a: ScheduledFlowEntry, b: ScheduledFlowEntry): number =>
+  a.flowId < b.flowId ? -1 : a.flowId > b.flowId ? 1 : 0;
 
 /**
  * Deterministic comparator: classId ASC. Catalog entries render in
@@ -255,14 +316,40 @@ export const scheduledJobCatalogHandler = async (
 
   const sorted = jobs.sort(compareEntries);
 
+  // T7: scheduled Flows from <start><schedule>.
+  const flowsResult = await listNodesByType(ctx.graph, 'Flow', {
+    limit: SCHEDULED_JOB_CATALOG_MAX_CLASSES,
+  });
+  if (!flowsResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${flowsResult.error.message}`,
+    });
+  }
+  const scheduledFlows: ScheduledFlowEntry[] = [];
+  for (const node of flowsResult.value as readonly Node[]) {
+    if (!isScheduledFlow(node.properties)) continue;
+    scheduledFlows.push({
+      flowId: node.id,
+      apiName: node.apiName,
+      frequency: readScheduleString(node.properties, 'scheduleFrequency'),
+      startDate: readScheduleString(node.properties, 'scheduleStartDate'),
+      startTimeUtc: readScheduleString(node.properties, 'scheduleStartTime'),
+    });
+  }
+  const sortedFlows = scheduledFlows.sort(compareFlows);
+
   return ok({
     data: {
       jobs: sorted,
+      scheduledFlows: sortedFlows,
       summary: {
         totalSchedulableClasses: sorted.length,
         classesWithKnownCallers,
+        totalScheduledFlows: sortedFlows.length,
       },
       disclosure: SCHEDULED_JOB_CATALOG_DISCLOSURE,
+      flowScheduleDisclosure: SCHEDULED_FLOW_DISCLOSURE,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
