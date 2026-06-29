@@ -197,11 +197,12 @@ describe('findSemanticFieldHandler', () => {
     );
   });
 
-  it('bridges synonyms: "date of birth" reaches DOB__c via the synonym group', async () => {
-    // The DOB__c field shares no literal token with "date of birth" (its bag
-    // is {c.dob, dob}); the only path to it is the synonym group
-    // ['dob','birthdate','birthday','birth']. Pre-synonym this scored 0 and
-    // was filtered out — this test guards the recall the bridge adds.
+  it('phrase-collapses "date of birth" -> dob, a LITERAL hit on DOB__c (#19)', async () => {
+    // The DOB__c field bag is {c.dob, dob}. With the opt-in phrase pass the
+    // query "date of birth" collapses to the single canonical token `dob`,
+    // which is LITERALLY present in the field bag — a stronger match than the
+    // old synonym bridge (birth->dob). This is the #19 improvement that the
+    // opt-in expansion on find_semantic_field's query + label corpus delivers.
     const r = await findSemanticFieldHandler(ctx, {
       description: 'date of birth',
     });
@@ -211,15 +212,12 @@ describe('findSemanticFieldHandler', () => {
       (m) => m.componentId === 'CustomField:Tasks__c.DOB__c',
     );
     expect(dob).toBeDefined();
-    // Above the default minScore (0.1): one synonym hit (birth→dob, weight
-    // 0.9) over the union |{date,birth}| + |{c.dob,dob}| − 0 = 4 → 0.225.
+    // Literal hit: query {dob}, field {c.dob, dob}; numerator 1 (literal),
+    // denominator |{dob}| + |{c.dob,dob}| − 1 = 1 + 2 − 1 = 2 → 0.5.
     expect(dob?.score ?? 0).toBeGreaterThan(0.1);
-    expect(dob?.score).toBeCloseTo(0.225, 6);
-    // The matched query token recorded is the synonym-bridged one.
-    expect([...(dob?.matchedTokens ?? [])]).toEqual(['birth']);
-    // Synonym hit scores below a literal hit of equal shape: had the query
-    // token been literally present it would score 1/4 = 0.25 > 0.225.
-    expect(dob?.score ?? 1).toBeLessThan(0.25);
+    expect(dob?.score).toBeCloseTo(0.5, 6);
+    // The matched query token recorded is the phrase-collapsed canonical token.
+    expect([...(dob?.matchedTokens ?? [])]).toEqual(['dob']);
   });
 
   it('does not regress literal-overlap scores (no-synonym match scores as before)', async () => {
