@@ -271,3 +271,95 @@ describe('SOQL subquery scope attribution (CR-06 / H5)', () => {
     expect(semiReads).not.toContain('Account.Contact');
   });
 });
+
+/**
+ * CR-CAP-06 — callSites: the enclosing CALLER method NAME per cross-class /
+ * self call-site. ADDITIVE field (callSites?), AST-path only. Attribution is
+ * by the call-site's nearest enclosing MethodDeclaration; a call with NO
+ * enclosing method (field/static initializer) maps to '' and is dropped
+ * downstream. Original case is preserved (display names).
+ */
+describe('callSites enclosing-method attribution (CR-CAP-06)', () => {
+  let extract: typeof import('../src/apex-ast-edges.js').extractApexAstEdges;
+  beforeAll(async () => {
+    ({ extractApexAstEdges: extract } = await import('../src/apex-ast-edges.js'));
+  });
+  const known = new Set(['Callee']);
+
+  it('attributes ONLY the calling method, not the sibling method (two-method discrimination)', () => {
+    // Method a() calls Callee.foo(); method b() does NOT call Callee at all.
+    // Class-level granularity cannot distinguish; callSites proves it can.
+    const src = [
+      'public class Caller {',
+      '  void a() { Callee.foo(); }',
+      '  void b() { Integer x = 1; }',
+      '}',
+    ].join('\n');
+    const out = extract(src, 'Caller', { knownClasses: known });
+    const sites = out.callSites ?? [];
+    expect(sites).toContainEqual({ callee: 'Callee.foo', callerMethod: 'a' });
+    // NOTHING attributed to b — b makes no call.
+    expect(sites.some((s) => s.callerMethod === 'b')).toBe(false);
+  });
+
+  it('partitions per target method: a()->foo, b()->bar are NOT cross-attributed', () => {
+    // The phantom-attribution guard: a() calls foo, b() calls bar. The
+    // callSites must keep the (callee, callerMethod) pairing so a downstream
+    // consumer never claims b() calls foo.
+    const src = [
+      'public class Caller {',
+      '  void a() { Callee.foo(); }',
+      '  void b() { Callee.bar(); }',
+      '}',
+    ].join('\n');
+    const out = extract(src, 'Caller', { knownClasses: known });
+    const sites = out.callSites ?? [];
+    expect(sites).toContainEqual({ callee: 'Callee.foo', callerMethod: 'a' });
+    expect(sites).toContainEqual({ callee: 'Callee.bar', callerMethod: 'b' });
+    // a never calls bar; b never calls foo.
+    expect(sites.some((s) => s.callee === 'Callee.foo' && s.callerMethod === 'b')).toBe(false);
+    expect(sites.some((s) => s.callee === 'Callee.bar' && s.callerMethod === 'a')).toBe(false);
+  });
+
+  it('preserves ORIGINAL case in the caller method name (display, not the lowercased seed)', () => {
+    const src = [
+      'public class Caller {',
+      '  void processOpp() { Callee.foo(); }',
+      '}',
+    ].join('\n');
+    const out = extract(src, 'Caller', { knownClasses: known });
+    expect(out.callSites ?? []).toContainEqual({
+      callee: 'Callee.foo',
+      callerMethod: 'processOpp',
+    });
+  });
+
+  it('a call with NO enclosing method (static initializer) yields callerMethod ""', () => {
+    // The static-init call site has no MethodDeclaration ancestor → '' (dropped
+    // downstream → absent attribution, never a blank name).
+    const src = [
+      'public class Caller {',
+      '  static { Callee.init(); }',
+      '}',
+    ].join('\n');
+    const out = extract(src, 'Caller', { knownClasses: known });
+    const sites = out.callSites ?? [];
+    const init = sites.find((s) => s.callee === 'Callee.init');
+    expect(init).toBeDefined();
+    expect(init?.callerMethod).toBe('');
+  });
+
+  it('self-call (bare own-method) carries its enclosing caller method', () => {
+    const src = [
+      'public class Caller {',
+      '  void a() { helper(); }',
+      '  void helper() {}',
+      '}',
+    ].join('\n');
+    const out = extract(src, 'Caller', { knownClasses: known });
+    expect(out.callSites ?? []).toContainEqual({
+      callee: 'Caller.helper',
+      callerMethod: 'a',
+    });
+  });
+});

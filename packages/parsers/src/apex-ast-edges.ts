@@ -41,6 +41,21 @@ export interface ApexAstEdges {
    * are typed false positives the import dedupe drops.
    */
   readonly innerTypes?: readonly string[];
+  /**
+   * CR-CAP-06: per-call-site CALLER-method attribution. Each entry pairs a
+   * cross-class (or self) `callee` (`Class.method`, the same string as in
+   * `calls`) with the NAME of the enclosing `MethodDeclaration` that contains
+   * the call-site (`callerMethod`, ORIGINAL case for display). A call-site with
+   * NO enclosing method (field/static initializer, trigger body) carries
+   * `callerMethod: ''` — the aggregator drops it (absent === unknown caller,
+   * never a wrong attribution). ADDITIVE + AST-PATH-ONLY: the heuristic scanner
+   * has no enclosing-method awareness and emits nothing here. Sorted by
+   * `(callee, callerMethod)` for golden stability.
+   */
+  readonly callSites?: readonly {
+    readonly callee: string;
+    readonly callerMethod: string;
+  }[];
 }
 
 export interface ApexAstOptions {
@@ -189,6 +204,21 @@ export const extractApexAstEdges = (
   const calls = new Set<string>();
   const reads = new Set<string>();
   const writes = new Set<string>();
+  // CR-CAP-06: parallel collector — keep `calls` byte-stable (dedupe /
+  // innerTypes / scanner-fallback logic depends on it), record the enclosing
+  // caller method per call-site separately. The enclosing method NAME is read
+  // with the SAME accessor as the ownMethods seed (the first child `Id` of the
+  // nearest `MethodDeclaration` ancestor), in ORIGINAL case for display.
+  const callSites: { callee: string; callerMethod: string }[] = [];
+  const recordCall = (callee: string, node: Ctx): void => {
+    calls.add(callee);
+    const md = ancestorWhere(node, (c) => ctxName(c) === 'MethodDeclaration');
+    const cm =
+      md === null
+        ? undefined
+        : (kids(md).find((k) => ctxName(k) === 'Id')?.getText() as string | undefined);
+    callSites.push({ callee, callerMethod: cm ?? '' });
+  };
 
   const resolveType = (t: string): string => innerClasses.get(t) ?? t;
   const isSObjectish = (t: string | null | undefined): t is string =>
@@ -342,11 +372,11 @@ export const extractApexAstEdges = (
 
     if (tailIsCall) {
       if (recvType !== null) {
-        if (isUserClass(recvType)) calls.add(`${resolveType(recvType)}.${last}`);
-        else if (allowSystemCall(recvType, last)) calls.add(`${recvType}.${last}`);
+        if (isUserClass(recvType)) recordCall(`${resolveType(recvType)}.${last}`, dot);
+        else if (allowSystemCall(recvType, last)) recordCall(`${recvType}.${last}`, dot);
       } else if (!varTypes.has(rootLower) && /^[A-Z]/.test(seg.root) && seg.path.length === 1) {
-        if (allowSystemCall(seg.root, last)) calls.add(`${seg.root}.${last}`);
-        else if (isUserClass(seg.root)) calls.add(`${resolveType(seg.root)}.${last}`);
+        if (allowSystemCall(seg.root, last)) recordCall(`${seg.root}.${last}`, dot);
+        else if (isUserClass(seg.root)) recordCall(`${resolveType(seg.root)}.${last}`, dot);
       }
       if (isSObjectish(recvType) && seg.path.length > 1) {
         reads.add(`${recvType}.${seg.path.slice(0, -1).join('.')}`);
@@ -359,7 +389,7 @@ export const extractApexAstEdges = (
   // ---- bare calls (own methods / recursion) ------------------------------------
   for (const mc of findAll(tree, 'MethodCallExpression')) {
     const id = findAll(mc, 'Id')[0]?.getText() as string | undefined;
-    if (id !== undefined && ownMethods.has(id.toLowerCase())) calls.add(`${className}.${id}`);
+    if (id !== undefined && ownMethods.has(id.toLowerCase())) recordCall(`${className}.${id}`, mc);
   }
 
   return {
@@ -367,5 +397,16 @@ export const extractApexAstEdges = (
     reads: [...reads].sort(),
     writes: [...writes].sort(),
     innerTypes: [...innerClasses.keys()].sort(),
+    callSites: [...callSites].sort((a, b) =>
+      a.callee < b.callee
+        ? -1
+        : a.callee > b.callee
+          ? 1
+          : a.callerMethod < b.callerMethod
+            ? -1
+            : a.callerMethod > b.callerMethod
+              ? 1
+              : 0,
+    ),
   };
 };

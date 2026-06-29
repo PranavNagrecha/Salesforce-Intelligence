@@ -239,11 +239,12 @@ describe('callGraphHandler', () => {
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    // Now method-level call TARGETS are surfaced; the caller-side method
-    // partition remains the disclosed boundary.
+    // Method-level call TARGETS are surfaced; CR-CAP-06 also surfaces
+    // `callerMethods` on AST edges (class-level union; absent = unknown).
     expect(r.value.data.disclosure).toMatch(/method-level call TARGETS/);
-    expect(r.value.data.disclosure).toMatch(/CALLER-side method/);
-    expect(r.value.data.disclosure).toMatch(/NOT partitioned/);
+    expect(r.value.data.disclosure).toMatch(/callerMethods/);
+    expect(r.value.data.disclosure).toMatch(/apex-ast/);
+    expect(r.value.data.disclosure).toMatch(/UNION/);
   });
 
   it('rejects a non-Apex prefix with invalid-query', async () => {
@@ -463,5 +464,93 @@ describe('callGraphHandler: method-level surfacing + filter (P4-C5)', () => {
       .map((n) => n.id)
       .sort();
     expect(callers).toEqual(['ApexClass:ServiceA', 'ApexClass:ServiceB']);
+  });
+});
+
+// =============================================================================
+// CR-CAP-06: callerMethods — the SOURCE-class method(s) that contain the
+// call-site, labelled on AST-extracted edges (class-level union). ABSENT on
+// scanner-path / declared edges and pre-fix vaults — treated as unknown caller
+// method (field omitted, never []).
+// =============================================================================
+describe('callGraphHandler: callerMethods (CR-CAP-06)', () => {
+  let dir3: string;
+  let store3: GraphStore;
+  let ctx3: Context;
+
+  beforeAll(async () => {
+    dir3 = mkdtempSync(join(tmpdir(), 'sfi-mcp-cg-callermethods-'));
+    const opened = await openGraph(join(dir3, 'cg.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    store3 = opened.value;
+    const seed3: ExtractionResult = {
+      nodes: [
+        makeNode({ id: 'ApexClass:Repo', apiName: 'Repo' }),
+        makeNode({ id: 'ApexClass:AstCaller', apiName: 'AstCaller' }),
+        makeNode({ id: 'ApexClass:ScanCaller', apiName: 'ScanCaller' }),
+      ],
+      edges: [
+        // AST-extracted: carries callerMethods (the union of source methods).
+        makeEdge({
+          fromId: 'ApexClass:AstCaller',
+          toId: 'ApexClass:Repo',
+          edgeType: 'callsApex',
+          confidence: 'parsed',
+          source: 'apex-ast',
+          properties: { methods: ['save'], callerMethods: ['a', 'b'], viaAst: true },
+        }),
+        // Scanner-path: NO callerMethods key — absent means unknown.
+        makeEdge({
+          fromId: 'ApexClass:ScanCaller',
+          toId: 'ApexClass:Repo',
+          edgeType: 'callsApex',
+          confidence: 'heuristic',
+          source: 'apex-scanner',
+          properties: { methods: ['save'] },
+        }),
+      ],
+    };
+    const imported = await importExtractionResults(store3, [seed3]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    ctx3 = { vaultRoot: dir3, manifest: FIXTURE_MANIFEST, graph: store3 };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store3);
+    rmSync(dir3, { recursive: true, force: true });
+  });
+
+  it('labels the AST edge with callerMethods (source-class methods, sorted union)', async () => {
+    const r = await callGraphHandler(ctx3, {
+      rootId: 'ApexClass:Repo',
+      direction: 'upstream',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const astEdge = r.value.data.edges.find((e) => e.fromId === 'ApexClass:AstCaller');
+    expect(astEdge?.callerMethods).toEqual(['a', 'b']);
+  });
+
+  it('OMITS callerMethods on the scanner-path edge (absent = unknown, never [])', async () => {
+    const r = await callGraphHandler(ctx3, {
+      rootId: 'ApexClass:Repo',
+      direction: 'upstream',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const scanEdge = r.value.data.edges.find((e) => e.fromId === 'ApexClass:ScanCaller');
+    expect(scanEdge).toBeDefined();
+    expect(Object.hasOwn(scanEdge as object, 'callerMethods')).toBe(false);
+  });
+
+  it('disclosure documents the union semantics + AST-only / unknown-absent boundary', async () => {
+    const r = await callGraphHandler(ctx3, {
+      rootId: 'ApexClass:Repo',
+      direction: 'upstream',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.disclosure).toMatch(/callerMethods/);
+    expect(r.value.data.disclosure).toMatch(/apex-ast/);
   });
 });
