@@ -1193,4 +1193,137 @@ describe('extractWorkflowRule', () => {
       }
     });
   });
+
+  describe('CR-CAP-11 — workflowTimeTriggers declarative shape', () => {
+    it('parses a per-rule <workflowTimeTriggers> into timeTriggerCount + timeTriggers[]', async () => {
+      // The element nests INSIDE <rules> (per-rule), unlike the
+      // top-level <fieldUpdates>/<alerts> collections. Child tag names
+      // are the Salesforce Metadata API WorkflowTimeTrigger shape:
+      // <timeLength>, <workflowTimeTriggerUnit>, <offsetFromField>,
+      // nested <actions>.
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <rules>
+    <fullName>Followup_Reminder</fullName>
+    <active>true</active>
+    <formula>Amount &gt; 100000</formula>
+    <triggerType>onCreateOnly</triggerType>
+    <workflowTimeTriggers>
+      <timeLength>7</timeLength>
+      <workflowTimeTriggerUnit>Days</workflowTimeTriggerUnit>
+      <offsetFromField>CloseDate</offsetFromField>
+      <actions>
+        <name>Some_FU</name>
+        <type>FieldUpdate</type>
+      </actions>
+    </workflowTimeTriggers>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const ruleNode = result.value.nodes.find(
+          (n) => n.type === 'WorkflowRule',
+        );
+        expect(ruleNode).toBeDefined();
+        expect(ruleNode!.properties.timeTriggerCount).toBe(1);
+        expect(ruleNode!.properties.timeTriggers).toEqual([
+          {
+            timeLength: 7,
+            timeUnit: 'Days',
+            offsetFromField: 'CloseDate',
+            actionCount: 1,
+          },
+        ]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('parses multiple <workflowTimeTriggers> per rule and a unit-only / no-offset trigger', async () => {
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <rules>
+    <fullName>Multi_Trigger</fullName>
+    <active>true</active>
+    <triggerType>onAllChanges</triggerType>
+    <workflowTimeTriggers>
+      <timeLength>2</timeLength>
+      <workflowTimeTriggerUnit>Hours</workflowTimeTriggerUnit>
+      <actions>
+        <name>A1</name>
+        <type>Alert</type>
+      </actions>
+      <actions>
+        <name>A2</name>
+        <type>FieldUpdate</type>
+      </actions>
+    </workflowTimeTriggers>
+    <workflowTimeTriggers>
+      <timeLength>1</timeLength>
+      <workflowTimeTriggerUnit>Days</workflowTimeTriggerUnit>
+    </workflowTimeTriggers>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const ruleNode = result.value.nodes.find(
+          (n) => n.type === 'WorkflowRule',
+        );
+        expect(ruleNode).toBeDefined();
+        expect(ruleNode!.properties.timeTriggerCount).toBe(2);
+        expect(ruleNode!.properties.timeTriggers).toEqual([
+          {
+            timeLength: 2,
+            timeUnit: 'Hours',
+            offsetFromField: null,
+            actionCount: 2,
+          },
+          {
+            timeLength: 1,
+            timeUnit: 'Days',
+            offsetFromField: null,
+            actionCount: 0,
+          },
+        ]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits timeTriggerCount===0 and timeTriggers===[] for a rule with no time triggers (no fabrication)', async () => {
+      // Negative case: rides the same shape as the demo
+      // Opportunity.High_Value_Flag rule (zero time triggers). Proves
+      // the property is an empty array, NOT undefined, and that the
+      // count is a genuine 0 rather than propertyNumber's silent default.
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <rules>
+    <fullName>High_Value_Flag</fullName>
+    <active>true</active>
+    <formula>Amount &gt; 100000</formula>
+    <triggerType>onCreateOrTriggeringUpdate</triggerType>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Opportunity', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const ruleNode = result.value.nodes.find(
+          (n) => n.type === 'WorkflowRule',
+        );
+        expect(ruleNode).toBeDefined();
+        expect(ruleNode!.properties.timeTriggerCount).toBe(0);
+        expect(ruleNode!.properties.timeTriggers).toEqual([]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
 });
