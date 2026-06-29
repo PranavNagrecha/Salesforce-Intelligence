@@ -31,9 +31,10 @@
  *     class (Flow callers don't index by methodName — the Flow XML
  *     declares the action name at the class level), surface a
  *     `code-needs-update` impact. The Flow caller's confidence is
- *     `declared` (the Flow XML's `<actionName>` is the source of
- *     truth) per the WhatIfSemantics.md "Flow caller (when target is
- *     @InvocableMethod)" rule.
+ *     `parsed` (the Flow `<actionCalls>` block is parsed out of the
+ *     Flow XML by the flow extractor — flow.ts emits `confidence:
+ *     'parsed'`) per the WhatIfSemantics.md "Flow caller (when target
+ *     is @InvocableMethod)" rule.
  *   - For each LWC / Aura / VF caller with an outgoing `callsApex`
  *     edge to the target class AND `properties.methodName ===
  *     methodName`, surface a `code-needs-update` impact. The frontend
@@ -176,7 +177,7 @@ export interface WhatIfChangeMethodSignatureOutput {
  * tool)" text so the test suite can lock the phrasing.
  */
 const DISCLOSURE =
-  "callers identified via the v1.4 apex-scanner are at heuristic confidence; dynamic dispatch via Type.forName + invoke is invisible. Test classes are identified by @isTest + naming convention (className + 'Test' suffix) and by coversTest edges; a test class that doesn't follow the naming convention and doesn't carry a @TestVisible-tagged covering reference may be missed.";
+  "caller confidence varies by source: Apex and Visualforce callers come from the heuristic apex-scanner (regex/token, no AST) and are reported at heuristic confidence (may include false positives); Flow callers are parsed out of the Flow XML <actionCalls> (confidence: parsed); LWC/Aura callers come from the declarative @salesforce/apex import (confidence: declared). Dynamic dispatch via Type.forName + invoke is invisible to all of them. Test classes are identified by @isTest + naming convention (className + 'Test' suffix) and by coversTest edges; a test class that doesn't follow the naming convention and doesn't carry a @TestVisible-tagged covering reference may be missed.";
 
 /**
  * Zod schema for the `sfi.what_if_change_method_signature` tool input.
