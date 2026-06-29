@@ -204,6 +204,42 @@ export interface ExplainFlowDecision {
   readonly fieldReferences: readonly string[];
 }
 
+/**
+ * The Flow's runtime execution context — the load-bearing facts a caller needs
+ * to answer "what user / sharing context does this Flow run in, and what
+ * happens when a step faults". Surfaced so the host composes the answer from
+ * the DECLARED metadata instead of fabricating platform-semantics inferences
+ * (the two common fabrications: "a subflow inherits the calling flow's
+ * context", and "$User in a triggered flow resolves to the integration/system
+ * user" — both wrong; see `runModeNote`).
+ */
+export interface ExplainFlowExecutionContext {
+  /**
+   * The Flow's declared `<runInMode>` verbatim (e.g.
+   * `SystemModeWithoutSharing`, `SystemModeWithSharing`, `DefaultMode`), or
+   * `null` when the metadata omits it. `DefaultMode` (and a missing value for
+   * most flow types) means the Flow runs in the running USER's context and
+   * enforces that user's CRUD/FLS/sharing; the System modes run with full
+   * access and bypass FLS/CRUD (sharing depends on the With/Without variant).
+   */
+  readonly runInMode: string | null;
+  /**
+   * True when one or more DML/lookup-capable elements have no
+   * `<faultConnector>` (an unhandled fault path). An unhandled fault in an
+   * autolaunched/record-triggered flow running synchronously inside the
+   * triggering transaction rolls back the ENTIRE transaction (including the
+   * triggering record's save), not just the flow.
+   */
+  readonly hasUnhandledFaults: boolean;
+  /** Count of fault-capable elements with no fault connector (0 when all handled). */
+  readonly unhandledFaultElementCount: number;
+  /**
+   * Verbatim platform-semantics note correcting the two common fabrications.
+   * Always present so the host never substitutes a wrong inference.
+   */
+  readonly runModeNote: string;
+}
+
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface ExplainFlowOutput {
   readonly flowId: ComponentId;
@@ -211,6 +247,7 @@ export interface ExplainFlowOutput {
   readonly label: string;
   readonly status: string;
   readonly processType: string;
+  readonly executionContext: ExplainFlowExecutionContext;
   readonly triggerInfo: ExplainFlowTriggerInfo;
   readonly actionCalls: readonly ExplainFlowActionCall[];
   readonly recordLookups: readonly ExplainFlowRecordLookup[];
@@ -231,6 +268,51 @@ export interface ExplainFlowOutput {
 /** Verbatim P4-flow-conditions runtime-evaluation heuristic flag. */
 const CONDITIONS_RUNTIME_NOTE =
   'Decision and trigger conditions are the statically-declared criteria from the Flow metadata (heuristic) — NOT a runtime trace. Whether a given path executes is data-dependent at runtime and is not evaluated here; treat the conditions as the declared rules, not proof a branch runs.';
+
+/**
+ * Verbatim platform-semantics note for the execution-context block. Corrects
+ * the two recurring run-mode fabrications and states the load-bearing rules:
+ *   - A CALLED SUBFLOW runs in its OWN declared `runInMode`, independent of the
+ *     calling flow's context — it does NOT inherit the parent's user context.
+ *   - A record-triggered flow runs as the user whose DML triggered the save;
+ *     `$User` (and `$User.Id` in validation rules/formulas) resolves to that
+ *     RUNNING user, never automatically the integration/system user.
+ *   - `DefaultMode` (and the default for screen flows) enforces the running
+ *     user's CRUD/FLS/sharing; license type does not define a separate FLS.
+ *   - An unhandled fault in a synchronous autolaunched/record-triggered flow
+ *     rolls back the WHOLE triggering transaction, not just the flow.
+ */
+const RUN_MODE_NOTE =
+  'Run-mode semantics (Salesforce platform rules, not a runtime trace): a CALLED SUBFLOW executes in its OWN declared runInMode, independent of the calling flow — it does NOT inherit the parent flow\'s user context. A record-triggered flow runs as the user whose DML triggered the save; $User (incl. $User.Id referenced by validation rules/formulas) resolves to that RUNNING user, never automatically the integration or system user. DefaultMode (and screen-flow default) runs in the running user\'s context and enforces that user\'s CRUD/FLS/sharing — there is no separate license-type FLS. SystemModeWithoutSharing/WithSharing run with full field access (bypassing FLS/CRUD); sharing depends on the With/Without variant. An unhandled fault (hasUnhandledFaults) in a synchronous autolaunched/record-triggered flow rolls back the ENTIRE triggering transaction, including the record save, not just the flow. A Draft/inactive flow cannot be invoked as a subflow by an active parent at runtime until activated.';
+
+/**
+ * Read the Flow's declared `runInMode` property. Returns `null` when the
+ * metadata omits it (the extractor stamps `null` for flows without a
+ * `<runInMode>` element).
+ */
+const readRunInMode = (node: Node): string | null => {
+  const raw = node.properties['runInMode'];
+  return typeof raw === 'string' && raw.length > 0 ? raw : null;
+};
+
+/** Read a non-negative integer flow property, defaulting to 0. */
+const readFlowNonNegInt = (node: Node, key: string): number => {
+  const raw = node.properties[key];
+  return typeof raw === 'number' && Number.isFinite(raw) && raw >= 0
+    ? Math.floor(raw)
+    : 0;
+};
+
+/**
+ * Build the execution-context block from the Flow node's extracted
+ * `runInMode` / fault-coverage properties (see flow.ts extractor).
+ */
+const buildExecutionContext = (node: Node): ExplainFlowExecutionContext => ({
+  runInMode: readRunInMode(node),
+  hasUnhandledFaults: node.properties['hasUnhandledFaults'] === true,
+  unhandledFaultElementCount: readFlowNonNegInt(node, 'elementsWithoutFault'),
+  runModeNote: RUN_MODE_NOTE,
+});
 
 /**
  * Pull the Flow's `label` property. The extractor stamps the label
@@ -634,6 +716,7 @@ export const explainFlowHandler = async (
     label: readFlowLabel(node),
     status: readFlowStatus(node),
     processType: readFlowProcessType(node),
+    executionContext: buildExecutionContext(node),
     triggerInfo: {
       triggerType: readFlowTriggerType(node),
       triggerObject: triggerObjectResult.value,

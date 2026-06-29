@@ -111,6 +111,9 @@ const fullBodyFlowSeed: ExtractionResult = {
         triggerType: 'RecordAfterSave',
         recordTriggerType: 'CreateAndUpdate',
         flowExtractionWarnings: [],
+        faultableElementCount: 3,
+        elementsWithoutFault: 2,
+        hasUnhandledFaults: true,
         conditions: [
           {
             kind: 'flow-recordtrigger',
@@ -383,6 +386,38 @@ describe('explainFlowHandler', () => {
     expect(data.conditionsRuntimeNote).toMatch(/NOT a runtime trace/);
     // vaultState carries the manifest hash and timestamp.
     expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
+  });
+
+  it('surfaces the declared run mode, unhandled-fault flag, and a correct run-mode note', async () => {
+    const result = await explainFlowHandler(ctx, { flowId: FULL_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ec = result.value.data.executionContext;
+    // Declared runInMode surfaced verbatim (not inferred / not inherited).
+    expect(ec.runInMode).toBe('SystemModeWithoutSharing');
+    // Fault coverage surfaced from the extractor's properties.
+    expect(ec.hasUnhandledFaults).toBe(true);
+    expect(ec.unhandledFaultElementCount).toBe(2);
+    // The note states the load-bearing platform rules the host must NOT
+    // fabricate: a subflow runs in its OWN declared mode (does not inherit
+    // the caller), $User resolves to the running user, and an unhandled
+    // fault rolls back the whole transaction.
+    expect(ec.runModeNote).toMatch(/does NOT inherit/);
+    expect(ec.runModeNote).toMatch(/OWN declared runInMode/);
+    expect(ec.runModeNote).toMatch(/running user/);
+    expect(ec.runModeNote).toMatch(/rolls back the ENTIRE/);
+  });
+
+  it('returns runInMode=null and no unhandled faults for a minimal flow', async () => {
+    const result = await explainFlowHandler(ctx, { flowId: MINIMAL_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ec = result.value.data.executionContext;
+    expect(ec.runInMode).toBeNull();
+    expect(ec.hasUnhandledFaults).toBe(false);
+    expect(ec.unhandledFaultElementCount).toBe(0);
+    // Note is always present so the host never substitutes a wrong inference.
+    expect(ec.runModeNote.length).toBeGreaterThan(0);
   });
 
   it('surfaces the fields each trigger/firing condition evaluates', async () => {
