@@ -18,7 +18,10 @@ properties:
       kind: formula
   criteriaItemCount: 0
   description: "Flag opportunities over 100,000 for executive review (legacy workflow rule, kept for order-of-execution demo)."
+  fieldUpdateCount: 1
   formula: "Amount > 100000"
+  outboundMessageCount: 0
+  taskCreationCount: 0
   timeTriggerCount: 0
   timeTriggers: []
   triggerType: onCreateOrTriggeringUpdate
@@ -42,7 +45,10 @@ Flag opportunities over 100,000 for executive review (legacy workflow rule, kept
 | booleanFilter | `null` |
 | conditions | `[object Object]` |
 | criteriaItemCount | `0` |
+| fieldUpdateCount | `1` |
 | formula | `Amount > 100000` |
+| outboundMessageCount | `0` |
+| taskCreationCount | `0` |
 | timeTriggerCount | `0` |
 | timeTriggers | `` |
 | triggerType | `onCreateOrTriggeringUpdate` |

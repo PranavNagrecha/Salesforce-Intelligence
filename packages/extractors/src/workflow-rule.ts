@@ -810,6 +810,20 @@ const buildRule = (
       booleanFilter: optionalString(rule, 'booleanFilter'),
       criteriaItemCount: toArray(rule['criteriaItems']).length,
       actionCount: actions.length,
+      // CR-CAP-11b — per-rule action-type breakdown. Counts this rule's
+      // IMMEDIATE `<actions>` by `<type>` (the SAME array the per-action
+      // edges are derived from), NOT the top-level `<fieldUpdates>` /
+      // `<outboundMessages>` / `<tasks>` DEFINITION collections (which are
+      // a different, larger surface) and NOT the time-trigger nested
+      // actions. Confidence tier `declared` (verbatim from `<type>`). These
+      // make process_builder_migration_candidates' propertyNumber reads
+      // (fieldUpdateCount / outboundMessageCount / taskCreationCount) TRUE
+      // instead of silently 0, so its `totalActions` sum is coherent with
+      // the sendsEmail / callsApex EDGE counts (also per-rule-derived).
+      fieldUpdateCount: actions.filter((a) => a.type === 'FieldUpdate').length,
+      outboundMessageCount: actions.filter((a) => a.type === 'OutboundMessage')
+        .length,
+      taskCreationCount: actions.filter((a) => a.type === 'Task').length,
       conditions: conditionsMirror,
       // CR-CAP-11 — makes the pre-existing skill claim
       // (admin-legacy-automation/SKILL.md "surfaces the trigger count
@@ -894,6 +908,18 @@ const buildRule = (
  * scheduled-action queue are record-level (the `offsetFromField` offset
  * is measured from a record's field value the offline vault cannot read),
  * and the nested action chain is surfaced only as a count.
+ *
+ * CR-CAP-11b: each rule also carries three per-rule action-type counts —
+ * `fieldUpdateCount`, `outboundMessageCount`, `taskCreationCount` —
+ * computed by filtering the rule's resolved IMMEDIATE `<actions>` array by
+ * `<type>` (`FieldUpdate` / `OutboundMessage` / `Task`). These count the
+ * per-rule `<actions>`, NOT the top-level `<fieldUpdates>` /
+ * `<outboundMessages>` / `<tasks>` definition collections (a different,
+ * larger surface) and NOT the time-trigger nested actions; the deprecated
+ * `Send` and any unknown `<type>` are ignored. Confidence tier `declared`.
+ * They mirror the CR-CAP-11 `timeTriggerCount` precedent: the consumer
+ * (`process_builder_migration_candidates`) already reads them via
+ * `propertyNumber` and silently defaulted them to 0 before this emit.
  *
  * `<alerts>`, `<fieldUpdates>`, `<tasks>`, and `<outboundMessages>`
  * collections under the root are not promoted to NODES — they appear

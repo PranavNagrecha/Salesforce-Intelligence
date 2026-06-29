@@ -1326,4 +1326,121 @@ describe('extractWorkflowRule', () => {
       }
     });
   });
+
+  describe('CR-CAP-11b — per-rule action-type counts (declared)', () => {
+    it('counts per-rule <actions> by <type> into fieldUpdateCount/outboundMessageCount/taskCreationCount', async () => {
+      // The three counts come from the PER-RULE <actions> array by <type>,
+      // NOT from the top-level <fieldUpdates>/<outboundMessages>/<tasks>
+      // DEFINITION collections. A definition collection bigger than the
+      // rule's consumed set must NOT inflate the rule's counts.
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>FU1</fullName>
+    <field>Description</field>
+    <name>FU1</name>
+    <operation>Formula</operation>
+    <formula>"x"</formula>
+  </fieldUpdates>
+  <fieldUpdates>
+    <fullName>FU2</fullName>
+    <field>Name</field>
+    <name>FU2</name>
+    <operation>Formula</operation>
+    <formula>"y"</formula>
+  </fieldUpdates>
+  <fieldUpdates>
+    <fullName>FU_Unused</fullName>
+    <field>Industry</field>
+    <name>FU_Unused</name>
+    <operation>Formula</operation>
+    <formula>"z"</formula>
+  </fieldUpdates>
+  <outboundMessages>
+    <fullName>OM1</fullName>
+    <endpointUrl>https://example.com/x</endpointUrl>
+    <name>OM1</name>
+  </outboundMessages>
+  <tasks>
+    <fullName>T1</fullName>
+    <subject>Follow up</subject>
+  </tasks>
+  <rules>
+    <fullName>Multi_Action</fullName>
+    <active>true</active>
+    <formula>true</formula>
+    <triggerType>onAllChanges</triggerType>
+    <actions>
+      <name>FU1</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <actions>
+      <name>FU2</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <actions>
+      <name>OM1</name>
+      <type>OutboundMessage</type>
+    </actions>
+    <actions>
+      <name>T1</name>
+      <type>Task</type>
+    </actions>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const ruleNode = result.value.nodes.find(
+          (n) => n.type === 'WorkflowRule',
+        );
+        expect(ruleNode).toBeDefined();
+        // 2 FieldUpdate <actions> (NOT the 3 top-level <fieldUpdates>).
+        expect(ruleNode!.properties.fieldUpdateCount).toBe(2);
+        expect(ruleNode!.properties.outboundMessageCount).toBe(1);
+        expect(ruleNode!.properties.taskCreationCount).toBe(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits genuine 0s (not undefined) for a rule whose only action is an Alert/Apex (no fabrication)', async () => {
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <rules>
+    <fullName>Alert_Only</fullName>
+    <active>true</active>
+    <formula>true</formula>
+    <triggerType>onCreateOnly</triggerType>
+    <actions>
+      <name>Some_Alert</name>
+      <type>Alert</type>
+    </actions>
+    <actions>
+      <name>Some_Apex</name>
+      <type>Apex</type>
+    </actions>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Opportunity', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const ruleNode = result.value.nodes.find(
+          (n) => n.type === 'WorkflowRule',
+        );
+        expect(ruleNode).toBeDefined();
+        // Present as a numeric 0, not absent (would be propertyNumber's
+        // silent default on the consumer side).
+        expect(ruleNode!.properties.fieldUpdateCount).toBe(0);
+        expect(ruleNode!.properties.outboundMessageCount).toBe(0);
+        expect(ruleNode!.properties.taskCreationCount).toBe(0);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
 });
