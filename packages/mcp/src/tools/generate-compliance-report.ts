@@ -15,6 +15,13 @@
  * heuristic confidence — a field flagged as `pii` here may not store
  * PII at runtime, and a field flagged as `public` may. The Boundaries
  * footer carries the recognizer-heuristic disclosure verbatim.
+ *
+ * Object + FLS exposure (F4/R2-2): a principal is flagged when it can reach the
+ * parent object's records AND holds FLS read/edit on a regulated field. Object
+ * reach is the UNION of an explicit object-permission grant edge and org-wide
+ * god-mode (`ModifyAllData`/`ViewAllData` on `userPermissions`) — so a System
+ * Administrator with no explicit object row is no longer missed. PSG-aggregated
+ * / muting-permission god-mode is a disclosed gap (boundaries[]).
  */
 
 import type {
@@ -90,9 +97,39 @@ interface ObjectFlsExposure {
 }
 
 /**
- * Profiles/perm sets with BOTH object-level read on the parent object AND
+ * Map an org-wide system permission held by a grantor to its broader
+ * object-access label. ModifyAllData is checked FIRST (it implies
+ * read/edit/delete on every record of every object); ViewAllData maps to a
+ * READ-level label only. Mirrors the EXACT sibling guard in
+ * `who-can-access-object.ts` (lines 337-340) and `field-access-audit.ts`
+ * (lines 580-584): `Array.isArray(perms) && perms.includes('ModifyAllData')`,
+ * never a new divergent helper. Returns null when the grantor holds neither.
+ */
+const systemPermAccessLabel = (
+  properties: Readonly<Record<string, unknown>>,
+): string | null => {
+  const perms = properties['userPermissions'];
+  if (!Array.isArray(perms)) return null;
+  if (perms.includes('ModifyAllData')) return 'ModifyAllData (system)';
+  if (perms.includes('ViewAllData')) return 'ViewAllData (system)';
+  return null;
+};
+
+/**
+ * Profiles/perm sets with BOTH object-level access on the parent object AND
  * FLS read on a regulated field — the combination a compliance reviewer cares
  * about (e.g. "Read Only" profile + EncryptedText SSN read).
+ *
+ * F4/R2-2: object access is the UNION of two paths — (1) an explicit
+ * `grantedBy` object-permission edge (allowRead/allowEdit/viewAll/modifyAll)
+ * and (2) org-wide god-mode (ModifyAllData / ViewAllData) stored on the
+ * grantor node's `properties.userPermissions`. A System Administrator with
+ * ModifyAllData but NO explicit `<objectPermissions>` row for a custom object
+ * STILL reaches its records, so the system-perm path is folded in here. Both
+ * paths iterate ONLY `grantorIdsWithFlsRead` (grantors that already hold FLS
+ * read/edit on the regulated field), so a god-mode principal with no FLS on
+ * the field is never emitted (no over-report). The broader system label is
+ * preferred when a grantor matches both paths.
  */
 const findObjectFlsExposures = async (
   ctx: Context,
@@ -107,6 +144,9 @@ const findObjectFlsExposures = async (
     edgeType: 'grantedBy',
   });
   if (!objectGrants.ok) return [];
+  // Track which FLS-read grantors we have already emitted via the edge path so
+  // the system-perm pass below only adds grantors NOT matched by an edge.
+  const emittedViaEdge = new Set<string>();
   const exposures: ObjectFlsExposure[] = [];
   for (const edge of objectGrants.value) {
     if (!grantorIdsWithFlsRead.has(edge.fromId)) continue;
@@ -115,12 +155,33 @@ const findObjectFlsExposures = async (
     const grantorResult = await getNodeById(ctx.graph, edge.fromId);
     if (!grantorResult.ok || grantorResult.value === null) continue;
     const grantor = grantorResult.value;
+    // Prefer the broader god-mode label when this grantor ALSO holds it.
+    const sysLabel = systemPermAccessLabel(grantor.properties);
+    emittedViaEdge.add(edge.fromId);
     exposures.push({
       fieldId: field.id,
       grantorId: grantor.id,
       grantorName: grantor.label ?? grantor.apiName,
       grantorType: grantor.type,
-      objectAccess: access,
+      objectAccess: sysLabel ?? access,
+    });
+  }
+  // System-permission path: any FLS-read grantor holding org-wide god-mode that
+  // was NOT already emitted via an object edge. getNodeById each, mirror the
+  // sibling Array.isArray(perms).includes('ModifyAllData') guard.
+  for (const grantorId of grantorIdsWithFlsRead) {
+    if (emittedViaEdge.has(grantorId)) continue;
+    const grantorResult = await getNodeById(ctx.graph, grantorId);
+    if (!grantorResult.ok || grantorResult.value === null) continue;
+    const grantor = grantorResult.value;
+    const sysLabel = systemPermAccessLabel(grantor.properties);
+    if (sysLabel === null) continue;
+    exposures.push({
+      fieldId: field.id,
+      grantorId: grantor.id,
+      grantorName: grantor.label ?? grantor.apiName,
+      grantorType: grantor.type,
+      objectAccess: sysLabel,
     });
   }
   return exposures;
@@ -309,8 +370,10 @@ export const generateComplianceReportHandler = async (
 
   const objectFlsBlock: string[] = ['## Object + FLS Exposure', ''];
   if (objectFlsExposures.length === 0) {
+    // Emitted only AFTER the system-perm (ModifyAllData/ViewAllData) path has
+    // been checked alongside the object-edge path — god-mode is folded in.
     objectFlsBlock.push(
-      '_(no profile/perm-set holds both object-level read (or View All) on the parent object AND FLS read on a regulated field in the audited set)_',
+      '_(no profile/perm-set holds object-level access — via an object grant or org-wide ModifyAllData/ViewAllData — AND FLS read on a regulated field in the audited set)_',
     );
   } else {
     objectFlsBlock.push(
@@ -361,6 +424,8 @@ export const generateComplianceReportHandler = async (
     'PII classifications inherit the v2.0d recognizer heuristic — fields flagged here may not contain PII at runtime, and unflagged fields may.',
     'Dynamic Apex and runtime SOQL strings are invisible to the access-audit — the recognizer cannot trace reflective field access.',
     'Object+FLS exposure pairs flag principals with BOTH parent-object access and field-level read on regulated fields — cross-check with `sfi.who_can_access_object` and `sfi.field_access_audit`.',
+    'Object+FLS exposure now folds in org-wide god-mode: a Profile/PermissionSet holding `ModifyAllData` or `ViewAllData` (on `userPermissions`) reaches every record even with NO explicit object-permission row, so it is reported whenever it ALSO holds FLS read/edit on a regulated field. ViewAllData maps to read-level only.',
+    'DISCLOSED GAP: god-mode granted via a Permission Set GROUP or a muting permission set is NOT resolved here — the vault models `userPermissions` on Profile/PermissionSet nodes only; PSG aggregation / muting is not folded into this exposure pass.',
   ];
 
   const componentIds: ComponentId[] = regulatedFields.map((f) => f.id);

@@ -137,12 +137,30 @@ const seed: ExtractionResult = {
       apiName: 'AccountTrigger',
       properties: { isTest: false },
     }),
-    // Dead flow — no incoming references.
+    // Dead flow — no incoming references AND Obsolete status (R2-12: only
+    // Obsolete/InvalidDraft flows may fall through to definitely_dead).
     makeNode({
       id: 'Flow:UnusedFlow',
       type: 'Flow',
       apiName: 'UnusedFlow',
-      properties: { active: false },
+      properties: { status: 'Obsolete' },
+    }),
+    // R2-12: an ACTIVE flow with ZERO incoming edges must NOT be definitely_dead
+    // — Flow edges are all OUTGOING (triggersOn/listensTo/callsApex/writesTo),
+    // so in-degree is ~0 by nature. An Active flow fires on its own trigger.
+    makeNode({
+      id: 'Flow:ActiveOrphanFlow',
+      type: 'Flow',
+      apiName: 'ActiveOrphanFlow',
+      properties: { status: 'Active' },
+    }),
+    // R2-12: a flow with NO status property at all → unknown → treated as
+    // active (never confidently dead). The destructive false-positive guard.
+    makeNode({
+      id: 'Flow:StatuslessOrphanFlow',
+      type: 'Flow',
+      apiName: 'StatuslessOrphanFlow',
+      properties: {},
     }),
     // Profile that GRANTS ACCESS (grantedBy) to code/fields — access is NOT usage.
     makeNode({ id: 'Profile:Admin', type: 'Profile', apiName: 'Admin' }),
@@ -400,7 +418,7 @@ describe('findDeadCodeHandler', () => {
     expect(stale?.verdict).toBe('definitely_dead');
   });
 
-  it('flags UnusedFlow as definitely_dead', async () => {
+  it('flags an Obsolete flow with no incoming refs as definitely_dead', async () => {
     const r = await findDeadCodeHandler(ctx, {});
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -408,6 +426,47 @@ describe('findDeadCodeHandler', () => {
       (c) => c.componentId === 'Flow:UnusedFlow',
     );
     expect(flow?.verdict).toBe('definitely_dead');
+  });
+
+  it('R2-12: an ACTIVE flow with 0 incoming edges is NOT definitely_dead (suppressed as uncertain)', async () => {
+    // Default (includeUncertain=false): an active orphan flow must be SUPPRESSED
+    // from the result set entirely — never definitely_dead/likely_dead.
+    const r = await findDeadCodeHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const flow = r.value.data.candidates.find(
+      (c) => c.componentId === 'Flow:ActiveOrphanFlow',
+    );
+    expect(flow).toBeUndefined();
+  });
+
+  it('R2-12: an ACTIVE orphan flow surfaces as uncertain when includeUncertain', async () => {
+    const r = await findDeadCodeHandler(ctx, { includeUncertain: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const flow = r.value.data.candidates.find(
+      (c) => c.componentId === 'Flow:ActiveOrphanFlow',
+    );
+    expect(flow?.verdict).toBe('uncertain');
+  });
+
+  it('R2-12: a status-LESS orphan flow is treated as active, never definitely_dead', async () => {
+    const r = await findDeadCodeHandler(ctx, { includeUncertain: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const flow = r.value.data.candidates.find(
+      (c) => c.componentId === 'Flow:StatuslessOrphanFlow',
+    );
+    expect(flow?.verdict).toBe('uncertain');
+    // And it must NOT appear at all in the default (suppressed) result.
+    const rDefault = await findDeadCodeHandler(ctx, {});
+    expect(rDefault.ok).toBe(true);
+    if (!rDefault.ok) return;
+    expect(
+      rDefault.value.data.candidates.find(
+        (c) => c.componentId === 'Flow:StatuslessOrphanFlow',
+      ),
+    ).toBeUndefined();
   });
 
   it('does NOT flag test classes as dead', async () => {

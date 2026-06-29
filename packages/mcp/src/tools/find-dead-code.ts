@@ -9,14 +9,19 @@
  *
  * **Three verdicts:**
  *
- *   - `definitely_dead`: a code component (ApexClass / ApexTrigger /
- *     Flow) with ZERO incoming USAGE edges (no callers, no triggers,
- *     no listeners). For CustomField, no incoming references at all
- *     (no formula refs, no Apex reads/writes, no Flow record-ops, no
- *     layout placements). `parentOf` (structural) and `grantedBy`
- *     (Profile / PermissionSet access grants) are NOT usage and do not
- *     keep a component alive — access is not usage, the same split the
- *     field / what-if tools make.
+ *   - `definitely_dead`: an ApexClass / ApexTrigger with ZERO incoming
+ *     USAGE edges (no callers, no triggers, no listeners). For
+ *     CustomField, no incoming references at all (no formula refs, no
+ *     Apex reads/writes, no Flow record-ops, no layout placements).
+ *     For a Flow, ONLY when its status is `Obsolete` / `InvalidDraft`
+ *     (R2-12): an Active / Draft / unknown-status Flow is NEVER
+ *     definitely_dead — Flow edges are all OUTGOING (triggersOn /
+ *     listensTo / callsApex / writesTo), so a live flow has ~0 incoming
+ *     edges by nature and fires on its own trigger; flagging it dead
+ *     would delete running automation. `parentOf` (structural) and
+ *     `grantedBy` (Profile / PermissionSet access grants) are NOT usage
+ *     and do not keep a component alive — access is not usage, the same
+ *     split the field / what-if tools make.
  *   - `likely_dead`: a code component reached only by test classes
  *     (`isTest === true`) or via heuristic-only edges that may be
  *     stripped by dynamic SOQL / reflective access. The v2.7
@@ -24,8 +29,10 @@
  *     here.
  *   - `uncertain`: reached by at least one entry point (REST resource,
  *     AuraEnabled, InvocableMethod, Queueable, Batchable, Schedulable,
- *     or ApexTrigger). Surfaced for completeness in the result set
- *     when `includeUncertain: true`; suppressed by default.
+ *     or ApexTrigger) — OR an Active / Draft / unknown-status Flow,
+ *     which is its OWN entry point (R2-12). Surfaced for completeness in
+ *     the result set when `includeUncertain: true`; suppressed by
+ *     default.
  *
  * **Entry-point taxonomy** (matches `method-reachability.ts`):
  *   - `ApexTrigger`: triggers ARE entry points.
@@ -94,6 +101,8 @@ const TEST_DISCLOSURE =
   'test classes (properties.isTest === true) are NEVER flagged as dead — they ARE entry points for the test-runner.';
 const MANAGED_PACKAGE_DISCLOSURE =
   'managed-package code is not vaulted; callers from managed packages are invisible. A class only called by managed-package code will surface as dead.';
+const FLOW_DISCLOSURE =
+  'Flow dead-detection (R2-12): a Flow is flagged definitely_dead ONLY when its status is Obsolete or InvalidDraft. An Active, Draft, or unknown-status Flow is NEVER definitely_dead — Flow graph edges are all OUTGOING (triggersOn / listensTo / callsApex / writesTo), so a live flow has ~0 incoming edges by nature and fires on its own trigger/schedule; it surfaces as `uncertain` (suppressed unless includeUncertain). Note: subflow invocation (flow-calls-flow) is NOT modeled, so a subflow-only flow is treated as in-use via its active status, not via an invocation edge — verify a flow before deleting it.';
 const CUSTOM_FIELD_DISCLOSURE =
   'CustomField dead-detection: Apex field reads/writes (incl. field-level SOQL in constant strings) are PARSED graph edges on vaults refreshed at 0.1.9+, and Flow assignments, formula references, and layout placements are modeled — so a field referenced only in Apex/Flow no longer reads dead (permission grants stay EXCLUDED: access is not usage). REMAINING blind spots an absence verdict cannot rule out: Flow formula-TEXT references, report columns beyond the usage-ranked pull, list-view filters, DYNAMIC SOQL built at runtime, and reflective access. Cross-check with `sfi.field_360` or `sfi.find_field_anywhere` before deleting any field.';
 
@@ -239,6 +248,11 @@ interface DeadCodeRow {
   readonly api_name: string;
   readonly is_test: boolean;
   readonly is_own_entry_point: boolean;
+  /** Flow only (R2-12): TRUE when the Flow's status is NOT Obsolete/InvalidDraft
+   *  (active, Draft, or unknown/missing status — all treated as in-use). An
+   *  active flow fires on its own trigger and has ~0 incoming edges by nature,
+   *  so this guards against deleting live automation. FALSE for non-Flow. */
+  readonly is_active_entry_point: boolean;
   readonly incoming_count: bigint | number;
   readonly has_non_test_reach: boolean;
   readonly has_entry_point_reach: boolean;
@@ -300,6 +314,20 @@ const fetchDeadCodeRows = async (
                      OR COALESCE(json_extract_string(properties_json, '$.isSchedulable') = 'true', FALSE)
                    )),
                FALSE) AS is_own_entry_point,
+             -- Flow only (R2-12): a Flow is its OWN entry point when its status
+             -- is NOT inactive. Flow edges are all OUTGOING (triggersOn /
+             -- listensTo / callsApex / writesTo), so a live flow naturally has
+             -- ~0 incoming edges — counting that as definitely_dead deletes
+             -- running automation. Only Obsolete / InvalidDraft flows are dead.
+             -- COALESCE the missing/NULL status to '' so an unknown-status flow
+             -- PASSES the NOT IN test (=> TRUE => uncertain), NEVER falls
+             -- through to incomingCount===0 => definitely_dead. Mirrors
+             -- unused-components.ts isInactiveEntryPoint (unknown => in-use).
+             COALESCE(
+               type = 'Flow'
+                 AND COALESCE(json_extract_string(properties_json, '$.status'), '')
+                     NOT IN ('Obsolete', 'InvalidDraft'),
+               FALSE) AS is_active_entry_point,
              -- CustomField only: folded report/dashboard usage (--with-reports).
              -- Stored as a node property (not an edge), so the in-degree count
              -- below can't see it; a report-only field would read as dead.
@@ -350,13 +378,13 @@ const fetchDeadCodeRows = async (
         AND e.edge_type <> 'grantedBy'
     )
     SELECT c.id, c.type, c.api_name, c.is_test, c.is_own_entry_point,
-           c.used_in_analytics,
+           c.is_active_entry_point, c.used_in_analytics,
            COUNT(i.cid) AS incoming_count,
            COALESCE(BOOL_OR(i.from_is_null OR NOT i.from_is_test), FALSE) AS has_non_test_reach,
            COALESCE(BOOL_OR(NOT i.from_is_test AND i.from_is_entry), FALSE) AS has_entry_point_reach
     FROM candidates c
     LEFT JOIN incoming i ON i.cid = c.id
-    GROUP BY c.id, c.type, c.api_name, c.is_test, c.is_own_entry_point, c.used_in_analytics
+    GROUP BY c.id, c.type, c.api_name, c.is_test, c.is_own_entry_point, c.is_active_entry_point, c.used_in_analytics
   `;
   try {
     const params =
@@ -454,7 +482,17 @@ export const findDeadCodeHandler = async (
 
     let verdict: DeadCodeVerdict;
     let reasoning: string;
-    if (ownEntryPoint || hasEntryPointReach) {
+    if (row.is_active_entry_point) {
+      // R2-12: an active/Draft/unknown-status Flow is its OWN entry point — it
+      // fires on its own trigger/schedule and has ~0 incoming edges by nature.
+      // Treat exactly like an own-entry-point Apex class: `uncertain`,
+      // suppressed unless includeUncertain. NEVER definitely_dead/likely_dead.
+      // (Only Obsolete/InvalidDraft flows have is_active_entry_point=FALSE and
+      // fall through to the incomingCount===0 => definitely_dead path.)
+      verdict = 'uncertain';
+      reasoning =
+        'Flow fires on its own trigger and is active (or Draft/unknown status); not dead despite no incoming references';
+    } else if (ownEntryPoint || hasEntryPointReach) {
       verdict = 'uncertain';
       reasoning = ownEntryPoint
         ? 'component is its own entry point (REST/Aura/Invocable/Queueable/Batchable/Schedulable or trigger); platform invokes it'
@@ -542,6 +580,13 @@ export const findDeadCodeHandler = async (
   }
 
   const boundaries: string[] = [DEAD_CODE_DISCLOSURE];
+  // R2-12: whenever Flow is in scope, disclose the status-gated Flow rule
+  // (active/Draft/unknown flows are never definitely_dead) and the unmodeled
+  // subflow-invocation caveat — surfaced regardless of whether any flow landed
+  // in the (suppressed) result set, so the honesty is never silently dropped.
+  if (types.includes('Flow' as ComponentType)) {
+    boundaries.push(FLOW_DISCLOSURE);
+  }
   if (candidates.length > 0) {
     boundaries.push(TEST_DISCLOSURE);
     boundaries.push(MANAGED_PACKAGE_DISCLOSURE);
