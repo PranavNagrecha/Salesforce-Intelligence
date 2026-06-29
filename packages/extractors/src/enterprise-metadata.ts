@@ -128,10 +128,25 @@ const extractFieldRefs = (
   // CR-CAP-13: for a ListView, the generic `<field>` sweep is suppressed —
   // ListView XML uses `<field>` ONLY inside `<filters>`, which the dedicated
   // guarded filter parser now owns. `<columns>` is the only column source here.
+  // CR-CAP-13b: each column token is gated through `isWellFormedColumnField`
+  // (the column-path sibling of the filter guard) so platform pseudo-columns do
+  // not mint phantom field edges. The guard is deliberately MORE permissive than
+  // the filter guard — it keeps real all-UPPERCASE standard fields and mixed-
+  // case relationship columns — see that function's doc for why verbatim reuse
+  // of `isWellFormedFilterField` would over-drop.
   const columnElements = options?.listViewFilterScoped
     ? ['columns', 'fieldItem', 'fieldApiName']
     : ['columns', 'field', 'fieldItem', 'fieldApiName'];
+  // CR-CAP-13b: gate every column token through `isWellFormedColumnField` so a
+  // non-field platform operand (CREATED_DATE, OWNER.ALIAS, OWNER_ID, …) never
+  // mints a `targetMissing` phantom `CustomField:` edge. ONE site — covers all
+  // five column-routing ComponentTypes (Report / Dashboard / ReportType /
+  // ListView / FlexiPage). Conservative by design: the guard OMITS a blanket
+  // all-UPPERCASE rule so real UPPERCASE std fields (NAME/TITLE/ABSTRACT) and
+  // mixed-case relationship columns (Owner.Name) are KEPT — when unsure we keep
+  // the edge (a phantom is less harmful than dropping a real field).
   for (const value of columnElements.flatMap((el) => extractXmlValues(xml, el))) {
+    if (!isWellFormedColumnField(value)) continue;
     if (value.includes('.')) {
       refs.add(`CustomField:${value}`);
     } else if (scopeObject !== null) {
@@ -156,12 +171,22 @@ const extractFieldRefs = (
 };
 
 /**
- * CR-CAP-13: non-field pseudo-columns that may appear in a list view's
- * `<filters><field>` but are NOT real fields — special filter operands the
- * platform resolves itself (record type, owner, audit users/dates, KB
- * article state/language). `isWellFormedFieldRef` returns TRUE for all of
- * these (it only rejects `$`-prefixed and empty-segment-dotted tokens), so
- * this denylist carries the real phantom guard.
+ * CR-CAP-13 / CR-CAP-13b: non-field pseudo-columns that may appear in a list
+ * view's `<filters><field>` OR in a `<columns>` sweep but are NOT real fields —
+ * special platform operands the engine resolves itself (record type, owner,
+ * audit users/dates, KB article state/language). `isWellFormedFieldRef` returns
+ * TRUE for all of these (it only rejects `$`-prefixed and empty-segment-dotted
+ * tokens), so this denylist carries the real phantom guard.
+ *
+ * CR-CAP-13b: the column path mints a phantom from a broader set of operands
+ * than the filter path. The four added here (`OWNER_ID`, `SETUP_TYPE`,
+ * `ARCHIVED_DATE`, `LAST_PUBLISHED_DATE`) appear in real list-view `<columns>`
+ * but were absent from the original CR-CAP-13 filter set. Each is also a valid
+ * filter operand, so the set stays shared (it never collides with a real custom
+ * `__c` or mixed-case standard field). NOTE: `ARCHIVEDBY_USER`,
+ * `CREATEDBY_USER.ALIAS`, and `OWNER.FIRST_NAME` are intentionally NOT listed —
+ * they are caught structurally by the `_USER$` / `.ALIAS$` / `OWNER.`-head
+ * regexes in {@link isWellFormedColumnField}.
  */
 const LIST_VIEW_FILTER_PSEUDO_FIELDS: ReadonlySet<string> = new Set([
   'RECORDTYPE',
@@ -175,7 +200,65 @@ const LIST_VIEW_FILTER_PSEUDO_FIELDS: ReadonlySet<string> = new Set([
   'LANGUAGE',
   'ARTICLE_NUMBER',
   'VERSION_NUMBER',
+  // CR-CAP-13b column-path additions.
+  'OWNER_ID',
+  'SETUP_TYPE',
+  'ARCHIVED_DATE',
+  'LAST_PUBLISHED_DATE',
 ]);
+
+/**
+ * CR-CAP-13b: is this `<columns>` token a real field worth a reference edge?
+ *
+ * Mirrors {@link isWellFormedFilterField} EXCEPT it deliberately OMITS the
+ * all-UPPERCASE-no-`__` rule. Real all-UPPERCASE STANDARD fields appear in
+ * `<columns>` (e.g. `NAME`, `TITLE`, `ABSTRACT` on Knowledge articles) but
+ * NEVER in the `<filters>` fixture, so the filter guard's blanket uppercase
+ * reject would drop them — reusing it verbatim would lose ~62 real edges on the
+ * sample vault. Instead the phantom guard here is the shared denylist plus the
+ * structural shapes that are pseudo regardless of case:
+ *
+ *   (a) `$`-prefixed / degenerate-dotted via {@link isWellFormedFieldRef};
+ *   (b) the denylisted bare platform operands;
+ *   (c) a `:` literal (date-range operands like `LAST_N_DAYS:30`);
+ *   (d) an audit-user shape `*_USER` (CREATEDBY_USER / ARCHIVEDBY_USER, and the
+ *       `*_USER.ALIAS` dotted variants) — but ONLY when that segment is
+ *       all-UPPERCASE (a real custom `Foo_User__c` survives: `__c` -> `__C`
+ *       fails the `_USER$` anchor, and a mixed-case `Owner_User` is not the
+ *       platform operand);
+ *   (e) a relationship-into-user `*.ALIAS` / an `OWNER.*` traversal — but ONLY
+ *       when the relationship HEAD is the all-UPPERCASE platform operand shape,
+ *       so a legitimate mixed-case relationship column (`Owner.Name`,
+ *       `CreatedBy.Name`, `Account.Owner.Alias`) survives (CR-CAP-13b design
+ *       review hardening: these are common real Report/FlexiPage columns and
+ *       must not be over-dropped).
+ *
+ * This guard is applied GLOBALLY at the single column-sweep site in
+ * {@link extractFieldRefs}, covering all five column-routing ComponentTypes
+ * (Report / Dashboard / ReportType / ListView / FlexiPage). It is safe across
+ * types because the denylist holds only all-UPPERCASE platform operands that
+ * never collide with a real custom (`__c`) or mixed-case standard field.
+ */
+const isWellFormedColumnField = (field: string): boolean => {
+  if (!isWellFormedFieldRef(field)) return false;
+  const upper = field.toUpperCase();
+  if (LIST_VIEW_FILTER_PSEUDO_FIELDS.has(upper)) return false;
+  if (field.includes(':')) return false;
+  // Audit-user operand: an all-UPPERCASE `*_USER` segment (the trailing
+  // `.ALIAS` of an audit-user dotted operand is handled by the `.ALIAS` rule
+  // below; here we catch the bare and `_USER`-tail forms). A real custom field
+  // ending `_User__c` survives because `__c` -> `__C` breaks the `_USER` anchor.
+  if (/(^|\.)[A-Z0-9_]*_USER$/.test(upper)) return false;
+  // Relationship traversal whose HEAD is an all-UPPERCASE platform operand,
+  // ending in `.ALIAS` (OWNER.ALIAS, CREATEDBY_USER.ALIAS) — but a mixed-case
+  // real relationship column (Owner.Name, SomeRel__r.Alias__c) is kept.
+  if (/^[A-Z0-9_]+\.ALIAS$/.test(field)) return false;
+  // An `OWNER.<anything>` traversal where the head is the literal all-UPPERCASE
+  // OWNER operand (OWNER.FIRST_NAME, OWNER.ALIAS). A mixed-case `Owner.Name`
+  // does NOT match `^OWNER\.` (it is `Owner.`), so it survives.
+  if (/^OWNER\./.test(field)) return false;
+  return true;
+};
 
 /**
  * CR-CAP-13: is this `<filters><field>` token a real field worth a reference
