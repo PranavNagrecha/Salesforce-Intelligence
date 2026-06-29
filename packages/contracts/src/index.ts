@@ -245,7 +245,26 @@ export type ComponentType =
   | 'WebLink' //        An object button/link (`.webLink-meta.xml`). Carries `linkType`, `displayType`, `url`/`page` content. URL merge fields (`{!Object.Field}`) on the OWNING object emit heuristic `references` edges.
   | 'FieldSet' //       A field set (`.fieldSet-meta.xml`) — an ordered field group consumed by LWC/VF/managed packages. `<displayedFields>`/`<availableFields>` field API names each emit a `usedInLayout` edge.
   | 'Index' //          A custom index (`.index-meta.xml`). Indexed `<fields><name>` emit `references` edges (removing an indexed field breaks the index).
-  | 'InstalledPackage'; // A managed/unlocked package installed in the org (`.installedPackage-meta.xml`). The fullName is the namespace prefix; `properties.versionNumber` is the installed version. Answers "what packages are installed?".
+  | 'InstalledPackage' // A managed/unlocked package installed in the org (`.installedPackage-meta.xml`). The fullName is the namespace prefix; `properties.versionNumber` is the installed version. Answers "what packages are installed?".
+  // CR-CAP-18 — platform-event publish/stream-routing topology. A
+  // PlatformEventChannel is the publish/stream container; a
+  // PlatformEventChannelMember binds ONE entity onto that channel with an
+  // optional declared per-member filter. This is the PUBLISH side (channel
+  // routing), DISTINCT from the SUBSCRIBE side (`listensTo`, modeled from
+  // Apex/Flow into the `__e` CustomObject). Ids preserve the `__chn` fullName
+  // suffix: `PlatformEventChannel:{Name}__chn` / `PlatformEventChannelMember:{Name}__chn`.
+  // Edges REUSE existing types (NO new EdgeType): channel→member is `parentOf`
+  // (parent→child, member's parentId = the channel), member→event is
+  // `references` (member → the `__e`/CDC `CustomObject` node) tagged
+  // `properties.referenceKind: 'platformEventChannelMember'` and carrying the
+  // verbatim declared `filterExpression`. For a `data` channel the
+  // selectedEntity (CDC/standard entity) may be absent from an offline vault →
+  // the `references` edge is dangling-by-design (importer stamps
+  // `targetMissing`, mirroring `dispatchesOmniAction`). HONESTY: the
+  // filterExpression is the DECLARED XML text, NOT runtime filter EVALUATION.
+  // EDGE_TYPES tuple + EdgeTypesComplete guard are UNTOUCHED.
+  | 'PlatformEventChannel' //       The publish/stream container (`.platformEventChannel-meta.xml`). Carries `channelType` (`event` | `data`) and `label`. Id `PlatformEventChannel:{Name}__chn`. Node-only; the member file owns the channel→member `parentOf` and member→event `references` edges.
+  | 'PlatformEventChannelMember'; // One entity bound onto a PlatformEventChannel (`.platformEventChannelMember-meta.xml`). Carries `eventChannel`, `selectedEntity`, and the optional declared `filterExpression`. Id `PlatformEventChannelMember:{Name}__chn`; `parentId` = its `PlatformEventChannel`. Emits `parentOf` (channel→member) + `references` (member→`CustomObject:{selectedEntity}`, carrying `filterExpression`). NO new EdgeType.
 
 /**
  * A canonical component identifier.

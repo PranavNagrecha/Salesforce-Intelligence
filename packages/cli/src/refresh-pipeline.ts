@@ -58,6 +58,8 @@ import {
   extractPathAssistant,
   extractPermissionSetGroup,
   extractPermissionSet,
+  extractPlatformEventChannel,
+  extractPlatformEventChannelMember,
   extractProfile,
   extractQueue,
   extractQuickAction,
@@ -241,6 +243,8 @@ export const SUPPORTED_TYPES = [
   'PathAssistant',
   'PermissionSet',
   'PermissionSetGroup',
+  'PlatformEventChannel',
+  'PlatformEventChannelMember',
   'Profile',
   'Queue',
   'QuickAction',
@@ -326,6 +330,8 @@ const EXTRACTORS: Readonly<Record<SupportedType, Extractor>> = {
   PathAssistant: extractPathAssistant,
   PermissionSet: extractPermissionSet,
   PermissionSetGroup: extractPermissionSetGroup,
+  PlatformEventChannel: extractPlatformEventChannel,
+  PlatformEventChannelMember: extractPlatformEventChannelMember,
   Profile: extractProfile,
   Queue: extractQueue,
   QuickAction: extractQuickAction,
@@ -514,6 +520,12 @@ const dispatchFile = (
   // `customPermissions/{DeveloperName}.customPermission-meta.xml` — the grant
   // target a PermissionSet/Profile `<customPermissions>` block names (CR-CAP-10).
   if (segments.includes('customPermissions') && fileName.endsWith('.customPermission-meta.xml')) return 'CustomPermission';
+  // CR-CAP-18: platform-event publish/stream-routing topology. Both are flat
+  // top-level dispatches under their own DX directory (singular Metadata-API
+  // xmlName, no object-nested counterpart). The channel is the stream
+  // container; the member binds one entity onto it with a declared filter.
+  if (segments.includes('platformEventChannels') && fileName.endsWith('.platformEventChannel-meta.xml')) return 'PlatformEventChannel';
+  if (segments.includes('platformEventChannelMembers') && fileName.endsWith('.platformEventChannelMember-meta.xml')) return 'PlatformEventChannelMember';
   if (segments.includes('workflows') && fileName.endsWith('.workflow-meta.xml')) return 'WorkflowRule';
   if (segments.includes('approvalProcesses') && fileName.endsWith('.approvalProcess-meta.xml')) return 'ApprovalProcess';
   if (segments.includes('assignmentRules') && fileName.endsWith('.assignmentRules-meta.xml')) return 'AssignmentRule';

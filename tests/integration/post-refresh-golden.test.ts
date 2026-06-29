@@ -143,6 +143,63 @@ describe('post-refresh golden', () => {
     expect(impact.edges.length).toBeLessThanOrEqual(400);
     expect(typeof env.data['disclosure']).toBe('string');
   });
+
+  it('CR-CAP-18: refresh writes PlatformEventChannel + Member nodes and the member→event references edge resolves', async () => {
+    expect(ctx).not.toBeNull();
+    const liveCtx = ctx as Context;
+    const channels = await listNodesByType(liveCtx.graph, 'PlatformEventChannel', {
+      limit: 50,
+    });
+    expect(channels.ok).toBe(true);
+    if (!channels.ok) return;
+    expect(channels.value.length).toBeGreaterThanOrEqual(1);
+
+    const members = await listNodesByType(
+      liveCtx.graph,
+      'PlatformEventChannelMember',
+      { limit: 50 },
+    );
+    expect(members.ok).toBe(true);
+    if (!members.ok) return;
+    expect(members.value.length).toBeGreaterThanOrEqual(1);
+
+    // The member→event references edge resolves to the in-vault __e CustomObject
+    // (proving tools read what refresh wrote, and the edge is NOT dangling).
+    const memberId = 'PlatformEventChannelMember:Application_Event_Member__chn';
+    const refs = await listEdges(liveCtx.graph, memberId, {
+      direction: 'out',
+      edgeType: 'references',
+    });
+    expect(refs.ok).toBe(true);
+    if (!refs.ok) return;
+    const eventRef = refs.value.find(
+      (e) => e.toId === 'CustomObject:Application_Event__e',
+    );
+    expect(eventRef).toBeDefined();
+    expect(eventRef?.properties['referenceKind']).toBe(
+      'platformEventChannelMember',
+    );
+    expect(eventRef?.properties['filterExpression']).toBe("Status__c = 'New'");
+    // event channel selectedEntity IS in the vault → not dangling.
+    expect(eventRef?.properties['targetMissing']).not.toBe(true);
+
+    // event_subscribers surfaces the publish-side channel for the event.
+    const result = await dispatchTool(liveCtx, 'sfi.event_subscribers', {
+      eventId: 'CustomObject:Application_Event__e',
+    });
+    const env = parseEnvelope(result.content);
+    expect('error' in env).toBe(false);
+    if ('error' in env) return;
+    const chans = env.data['channels'] as Array<{
+      channelType: string;
+      filterExpression: string | null;
+    }>;
+    expect(chans.length).toBeGreaterThanOrEqual(1);
+    expect(chans.some((c) => c.channelType === 'event')).toBe(true);
+    expect(chans.some((c) => c.filterExpression === "Status__c = 'New'")).toBe(
+      true,
+    );
+  });
 });
 
 describe('destructive trust (post-refresh)', () => {

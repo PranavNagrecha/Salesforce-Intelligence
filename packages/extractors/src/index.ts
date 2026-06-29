@@ -76,6 +76,10 @@ export { extractOmniScript } from './omniscript.js';
 export { extractOmniUiCard } from './omni-ui-card.js';
 export { extractPathAssistant } from './path-assistant.js';
 export { extractPermissionSet } from './permission-set.js';
+export {
+  extractPlatformEventChannel,
+  extractPlatformEventChannelMember,
+} from './platform-event-channel.js';
 export { extractProfile } from './profile.js';
 export { extractQueue } from './queue.js';
 export { extractQuickAction } from './quick-action.js';

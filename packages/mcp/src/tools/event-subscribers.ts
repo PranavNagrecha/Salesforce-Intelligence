@@ -16,6 +16,15 @@
  * class, the Flow's `<triggerType>PlatformEvent</triggerType>` mode,
  * the Apex class's `Triggerable<{Event}__e>` interface match).
  *
+ * CR-CAP-18: single-event mode also returns `channels` — the
+ * publish-side routing for the event. The tool walks the event's
+ * INBOUND `references` edges tagged
+ * `referenceKind === 'platformEventChannelMember'` to each
+ * PlatformEventChannelMember, then the member's INBOUND `parentOf` to
+ * its PlatformEventChannel, surfacing `{ channelId, channelType,
+ * memberId, filterExpression }`. The `filterExpression` is the
+ * DECLARED per-member XML text, NOT runtime filter evaluation.
+ *
  * Implementation notes:
  *   - One `listEdges(eventId, { direction: 'in', edgeType: 'listensTo' })`
  *     call retrieves every candidate edge; `getNodeById` then resolves
@@ -146,6 +155,26 @@ export interface EventSubscriber {
   readonly properties: Readonly<Record<string, unknown>>;
 }
 
+/**
+ * CR-CAP-18: one publish-side channel binding for an event. Surfaced by walking
+ * the event's INBOUND `references` edges tagged
+ * `referenceKind === 'platformEventChannelMember'` (the member→event edge) to
+ * the member, then the member's INBOUND `parentOf` to its PlatformEventChannel.
+ * Answers "if I publish this event, what channel routes it (with what declared
+ * filter)?" in the same call as the subscriber list.
+ *
+ * HONESTY: `filterExpression` is the DECLARED XML text from the
+ * `*.platformEventChannelMember-meta.xml`; it is NOT runtime filter
+ * EVALUATION (which records actually flow needs record-level data the vault
+ * lacks).
+ */
+export interface EventChannelBinding {
+  readonly channelId: ComponentId | null;
+  readonly channelType: string | null;
+  readonly memberId: ComponentId;
+  readonly filterExpression: string | null;
+}
+
 /** One Platform Event in catalog mode (eventId omitted). */
 export interface EventCatalogEntry {
   readonly eventId: ComponentId;
@@ -165,14 +194,25 @@ export interface EventSubscribersOutput {
   readonly subscribers: readonly EventSubscriber[];
   readonly eventApiName: string | null;
   readonly events?: readonly EventCatalogEntry[];
+  /**
+   * CR-CAP-18: the publish-side channel(s) that route this event, each with the
+   * declared per-member filter. Present only in single-event mode (eventId
+   * supplied). Empty when no PlatformEventChannelMember binds the event.
+   */
+  readonly channels?: readonly EventChannelBinding[];
   /** §C3 honesty: heuristic-detection + empty≠absent disclosure (never a silent empty). */
   readonly boundaries: readonly string[];
 }
 
 const EVENT_SUB_HEURISTIC_DISCLOSURE =
-  'Subscribers are detected from modeled `listensTo` edges (Apex/Flow trigger subscriptions). Detection is partial: some subscriptions (CDC channel pattern, dynamically-built subscriptions, managed-package listeners) are not modeled.';
+  'Subscribers are detected from modeled `listensTo` edges (Apex/Flow trigger subscriptions). Detection is partial: the SUBSCRIBE registration via `EventBus.subscribe(...)`, dynamically-built subscriptions, and managed-package listeners are NOT modeled.';
+// CR-CAP-18: publish-side channel routing + declared per-member filters ARE now
+// extracted from `*.platformEventChannel(Member)-meta.xml` (declared XML text,
+// NOT runtime filter evaluation). Surfaced in `channels`.
+const EVENT_SUB_CHANNEL_DISCLOSURE =
+  'Publish-side channel routing and per-member filter expressions ARE extracted from `*.platformEventChannel(Member)-meta.xml` (declared XML text — NOT runtime filter EVALUATION; which records actually flow needs record-level data the vault lacks).';
 const EVENT_SUB_EMPTY_DISCLOSURE =
-  'No subscribers found for this event — NOT proof nothing subscribes. Dynamically-built subscriptions, CDC channel subscriptions, and managed-package listeners are not modeled; verify in Setup before assuming the event is unused.';
+  'No subscribers found for this event — NOT proof nothing subscribes. The `EventBus.subscribe(...)` registration, dynamically-built subscriptions, and managed-package listeners are not modeled; verify in Setup before assuming the event is unused.';
 
 /**
  * Validate that `eventId` is a syntactically valid Platform Event id.
@@ -228,6 +268,62 @@ const resolveSubscriber = async (
  */
 const compareSubscribers = (a: EventSubscriber, b: EventSubscriber): number =>
   a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+
+/**
+ * CR-CAP-18: resolve the publish-side channel bindings for an event. Walks the
+ * event's INBOUND `references` edges tagged
+ * `referenceKind === 'platformEventChannelMember'` (member→event), resolves
+ * each member's INBOUND `parentOf` to its PlatformEventChannel, and reads the
+ * channel's declared `channelType`. The declared per-member `filterExpression`
+ * is read from the member→event edge's properties (no extra hop). Sorted by
+ * memberId for deterministic output.
+ */
+const resolveChannelBindings = async (
+  ctx: Context,
+  eventId: ComponentId,
+): Promise<Result<EventChannelBinding[], string>> => {
+  const memberEdges = await listEdges(ctx.graph, eventId, {
+    direction: 'in',
+    edgeType: 'references',
+  });
+  if (!memberEdges.ok) return err(memberEdges.error.message);
+
+  const bindings: EventChannelBinding[] = [];
+  for (const edge of memberEdges.value) {
+    if (edge.properties['referenceKind'] !== 'platformEventChannelMember') {
+      continue;
+    }
+    const memberId = edge.fromId;
+    const filterRaw = edge.properties['filterExpression'];
+    const filterExpression =
+      typeof filterRaw === 'string' ? filterRaw : null;
+
+    // member's INBOUND parentOf → its PlatformEventChannel.
+    const parentEdges = await listEdges(ctx.graph, memberId, {
+      direction: 'in',
+      edgeType: 'parentOf',
+    });
+    if (!parentEdges.ok) return err(parentEdges.error.message);
+
+    let channelId: ComponentId | null = null;
+    let channelType: string | null = null;
+    for (const pe of parentEdges.value) {
+      const node = await getNodeById(ctx.graph, pe.fromId);
+      if (!node.ok) return err(node.error.message);
+      if (node.value !== null && node.value.type === 'PlatformEventChannel') {
+        channelId = node.value.id;
+        const ct = node.value.properties['channelType'];
+        channelType = typeof ct === 'string' ? ct : null;
+        break;
+      }
+    }
+    bindings.push({ channelId, channelType, memberId, filterExpression });
+  }
+  bindings.sort((a, b) =>
+    a.memberId < b.memberId ? -1 : a.memberId > b.memberId ? 1 : 0,
+  );
+  return ok(bindings);
+};
 
 /**
  * The `sfi.event_subscribers` MCP tool. Returns every subscriber
@@ -326,13 +422,28 @@ export const eventSubscribersHandler = async (
   }
 
   const sorted = subscribers.sort(compareSubscribers).slice(0, limit);
+
+  // CR-CAP-18: resolve the publish-side channel routing for this event.
+  const channelsResult = await resolveChannelBindings(ctx, input.eventId);
+  if (!channelsResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${channelsResult.error}`,
+    });
+  }
+  const channels = channelsResult.value;
+
   const boundaries =
     sorted.length === 0
-      ? [EVENT_SUB_HEURISTIC_DISCLOSURE, EVENT_SUB_EMPTY_DISCLOSURE]
-      : [EVENT_SUB_HEURISTIC_DISCLOSURE];
+      ? [
+          EVENT_SUB_HEURISTIC_DISCLOSURE,
+          EVENT_SUB_CHANNEL_DISCLOSURE,
+          EVENT_SUB_EMPTY_DISCLOSURE,
+        ]
+      : [EVENT_SUB_HEURISTIC_DISCLOSURE, EVENT_SUB_CHANNEL_DISCLOSURE];
 
   return ok({
-    data: { subscribers: sorted, eventApiName: apiName, boundaries },
+    data: { subscribers: sorted, eventApiName: apiName, channels, boundaries },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
       refreshedAt: ctx.manifest.refreshedAt,

@@ -72,6 +72,9 @@ const ACCOUNT_CHANGE_EVENT = 'CustomObject:Account_Change__e';
 const TRIGGER_HANDLER = 'ApexTrigger:Account_Change_Handler';
 const APEX_HANDLER = 'ApexClass:Account_Change_AsyncHandler';
 const FLOW_HANDLER = 'Flow:Account_Change_Flow';
+// CR-CAP-18: a publish-side channel routing the event, with a declared filter.
+const ACCOUNT_CHANNEL = 'PlatformEventChannel:Account_Change_Channel__chn';
+const ACCOUNT_MEMBER = 'PlatformEventChannelMember:Account_Change_Member__chn';
 
 const mixedSubscribersSeed: ExtractionResult = {
   nodes: [
@@ -95,6 +98,24 @@ const mixedSubscribersSeed: ExtractionResult = {
       type: 'Flow',
       apiName: 'Account_Change_Flow',
     }),
+    // CR-CAP-18 publish-side: channel + member binding the event.
+    makeNode({
+      id: ACCOUNT_CHANNEL,
+      type: 'PlatformEventChannel',
+      apiName: 'Account_Change_Channel__chn',
+      properties: { channelType: 'event', label: 'Account Change Channel' },
+    }),
+    makeNode({
+      id: ACCOUNT_MEMBER,
+      type: 'PlatformEventChannelMember',
+      apiName: 'Account_Change_Member__chn',
+      parentId: ACCOUNT_CHANNEL,
+      properties: {
+        eventChannel: 'Account_Change_Channel__chn',
+        selectedEntity: 'Account_Change__e',
+        filterExpression: "Status__c = 'New'",
+      },
+    }),
   ],
   edges: [
     makeEdge({
@@ -117,6 +138,24 @@ const mixedSubscribersSeed: ExtractionResult = {
       edgeType: 'listensTo',
       source: 'flow-extractor',
       properties: { triggerType: 'PlatformEvent' },
+    }),
+    // CR-CAP-18 publish-side topology: parentOf(channel→member) +
+    // references(member→event) carrying the declared filterExpression.
+    makeEdge({
+      fromId: ACCOUNT_CHANNEL,
+      toId: ACCOUNT_MEMBER,
+      edgeType: 'parentOf',
+      source: 'platform-event-channel-extractor',
+    }),
+    makeEdge({
+      fromId: ACCOUNT_MEMBER,
+      toId: ACCOUNT_CHANGE_EVENT,
+      edgeType: 'references',
+      source: 'platform-event-channel-extractor',
+      properties: {
+        referenceKind: 'platformEventChannelMember',
+        filterExpression: "Status__c = 'New'",
+      },
     }),
   ],
 };
@@ -280,6 +319,38 @@ describe('eventSubscribersHandler', () => {
     );
     // vaultState carries the manifest state.
     expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
+  });
+
+  it('CR-CAP-18: surfaces publish-side channels with the declared per-member filter (fail-before: no channels field)', async () => {
+    const result = await eventSubscribersHandler(ctx, {
+      eventId: ACCOUNT_CHANGE_EVENT,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    expect(d.channels).toBeDefined();
+    expect(d.channels?.length).toBe(1);
+    const ch = d.channels?.[0];
+    expect(ch?.channelId).toBe(ACCOUNT_CHANNEL);
+    expect(ch?.channelType).toBe('event');
+    expect(ch?.memberId).toBe(ACCOUNT_MEMBER);
+    expect(ch?.filterExpression).toBe("Status__c = 'New'");
+    // Honesty: the reworded disclosure states publish-side channel/filter IS
+    // extracted (declared), and NO longer claims per-channel filters are
+    // unmodeled.
+    const boundaryText = d.boundaries.join(' ');
+    expect(boundaryText).toContain('Publish-side channel routing');
+    expect(boundaryText).toContain('declared');
+    expect(boundaryText).not.toMatch(/per-channel filter expressions.*not.*modeled/i);
+  });
+
+  it('CR-CAP-18: an event with no channel member returns an empty channels array (empty≠absent)', async () => {
+    const result = await eventSubscribersHandler(ctx, {
+      eventId: ORDER_EVENT,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.channels).toEqual([]);
   });
 
   it('returns a single subscriber for an event with one ApexTrigger listener', async () => {
