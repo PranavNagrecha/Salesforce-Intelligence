@@ -1427,8 +1427,16 @@ const detectDatabaseUpsertNoOptions = (
 // ---------- recognizer 13: fake-assertion ---------------------------------
 
 // Tautology assertion shapes. Only fire on @isTest classes / methods.
+//
+// IMPORTANT: only `System.assert(true, ...)` is a tautology — it always
+// passes regardless of behavior. `System.assert(false, ...)` is the OPPOSITE:
+// it is a fail-guard placed on a code path that should be UNREACHABLE (e.g.
+// the line after a call expected to throw, inside a try before its catch).
+// Reaching it FAILS the test, so it verifies real behavior and must NOT be
+// flagged. Matching `false` here over-counted every deny/exception test as
+// fake, inverting the audit (the strongest tests scored worst).
 const FAKE_ASSERT_BOOL_PATTERN =
-  /\bSystem\.assert\s*\(\s*(?:true|false)\s*[,)]/g;
+  /\bSystem\.assert\s*\(\s*true\s*[,)]/g;
 const FAKE_ASSERTEQUALS_SELF_PATTERN =
   /\bSystem\.assertEquals\s*\(\s*([A-Za-z_][A-Za-z_0-9.]*)\s*,\s*([A-Za-z_][A-Za-z_0-9.]*)\s*[,)]/g;
 const FAKE_ASSERTEQUALS_LITERAL_PATTERN =
