@@ -661,6 +661,55 @@ const parseCriteriaItem = (raw: unknown): CriteriaItem | null => {
 };
 
 /**
+ * CR-CAP-11 — declarative shape of a single `<workflowTimeTriggers>`
+ * child of a `<rules>` element. This is the verbatim DECLARATIVE XML
+ * (confidence tier `declared`), NOT an assertion that the trigger fires:
+ * `offsetFromField` is measured from a record's field value the offline
+ * vault cannot evaluate, and the scheduled-action queue is record-level.
+ */
+interface TimeTrigger {
+  /** `<timeLength>` integer offset (null when absent/unparseable). */
+  readonly timeLength: number | null;
+  /** `<workflowTimeTriggerUnit>` enum (Hours|Days), verbatim or null. */
+  readonly timeUnit: string | null;
+  /** `<offsetFromField>` API name; null = offset from the rule trigger date. */
+  readonly offsetFromField: string | null;
+  /** Count of nested `<actions>` queued by this time trigger. */
+  readonly actionCount: number;
+}
+
+/**
+ * CR-CAP-11 — parse the per-rule `<workflowTimeTriggers>` collection.
+ *
+ * `<workflowTimeTriggers>` is a REPEATABLE child of each `<rules>`
+ * element (NOT a top-level Workflow collection like `<fieldUpdates>`),
+ * so it MUST be read off the `rule` record, never off the root. Each
+ * trigger carries `<timeLength>`, `<workflowTimeTriggerUnit>`, an
+ * optional `<offsetFromField>`, and a nested repeatable `<actions>`
+ * block whose count we surface (the action chain itself stays
+ * record-level and is deliberately not modeled — see the extractor doc).
+ */
+const parseTimeTriggers = (
+  rule: Record<string, unknown>,
+): readonly TimeTrigger[] => {
+  const out: TimeTrigger[] = [];
+  for (const raw of toArray(rule['workflowTimeTriggers'])) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const tt = raw as Record<string, unknown>;
+    const lengthStr = optionalString(tt, 'timeLength');
+    const lengthNum = lengthStr === null ? null : Number(lengthStr);
+    out.push({
+      timeLength:
+        lengthNum !== null && Number.isFinite(lengthNum) ? lengthNum : null,
+      timeUnit: optionalString(tt, 'workflowTimeTriggerUnit'),
+      offsetFromField: optionalString(tt, 'offsetFromField'),
+      actionCount: toArray(tt['actions']).length,
+    });
+  }
+  return out;
+};
+
+/**
  * Build the per-rule list of `ConditionSource` entries per the v2.0a
  * spec. A WorkflowRule emits at most ONE condition surface (either
  * the `<formula>` or the `<criteriaItems>` array). When the rule has
@@ -739,6 +788,10 @@ const buildRule = (
       parentObjectApiName: objectApiName,
     });
 
+  // CR-CAP-11 — declarative time-trigger shape. Surfaced as node
+  // properties only; never as a firing claim (record-level condition).
+  const timeTriggers = parseTimeTriggers(rule);
+
   const node: Node = {
     id: ruleId,
     type: 'WorkflowRule',
@@ -758,6 +811,13 @@ const buildRule = (
       criteriaItemCount: toArray(rule['criteriaItems']).length,
       actionCount: actions.length,
       conditions: conditionsMirror,
+      // CR-CAP-11 — makes the pre-existing skill claim
+      // (admin-legacy-automation/SKILL.md "surfaces the trigger count
+      // via properties.timeTriggerCount") and the consumer read
+      // (process-builder-migration-candidates.ts) TRUE; both silently
+      // defaulted to 0 before this property was emitted.
+      timeTriggerCount: timeTriggers.length,
+      timeTriggers,
     },
   };
 
@@ -823,6 +883,17 @@ const buildRule = (
  * and any unknown action type are silently ignored. Duplicate
  * `(rule, target, edgeType)` triples within a single rule are
  * deduplicated.
+ *
+ * CR-CAP-11: each rule's per-rule `<workflowTimeTriggers>` collection
+ * (a REPEATABLE child of `<rules>`, NOT a top-level Workflow collection)
+ * is parsed into two declarative node properties: `timeTriggerCount`
+ * (the number of time triggers) and `timeTriggers[]` ({timeLength,
+ * timeUnit, offsetFromField, actionCount}). These are confidence tier
+ * `declared` — the verbatim declarative XML. The extractor does NOT
+ * model whether or when a trigger fires: the firing condition and the
+ * scheduled-action queue are record-level (the `offsetFromField` offset
+ * is measured from a record's field value the offline vault cannot read),
+ * and the nested action chain is surfaced only as a count.
  *
  * `<alerts>`, `<fieldUpdates>`, `<tasks>`, and `<outboundMessages>`
  * collections under the root are not promoted to NODES — they appear

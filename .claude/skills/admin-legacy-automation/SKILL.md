@@ -512,12 +512,17 @@ follow-ups without paraphrasing.
   the admin to **Setup → Workflow Rules → {rule} → Test** for
   per-record evaluation.
 - **Time-dependent workflow actions.** Workflow rules carry
-  `<workflowTimeTriggers>` that schedule actions for some number
-  of days after a criteria match. v1.3 surfaces the trigger
-  count via the node's `properties.timeTriggerCount` but does
-  **not** model the per-trigger action chain or the scheduled-
-  action queue. Direct the admin to **Setup → Time-Based
-  Workflow → View Pending Actions** for the live queue.
+  `<workflowTimeTriggers>` that schedule actions for some offset
+  (hours/days) after a criteria match. v1.3 surfaces the trigger
+  count via the node's `properties.timeTriggerCount` and the
+  declarative shape via `properties.timeTriggers[]` (each entry:
+  `timeLength`, `timeUnit`, `offsetFromField`, `actionCount`) —
+  all confidence `declared`. It does **not** model whether or
+  *when* a trigger fires (the `offsetFromField` offset is measured
+  from a record's field value, which is record-level), nor the
+  per-trigger action chain or the scheduled-action queue. Direct
+  the admin to **Setup → Time-Based Workflow → View Pending
+  Actions** for the live queue.
 - **Approval process routing per step.** ApprovalProcess
   approver evaluation depends on the approver type
   (`userHierarchyField` walks `User.ManagerId` per submitter,

@@ -19,6 +19,8 @@ properties:
   criteriaItemCount: 0
   description: "Flag opportunities over 100,000 for executive review (legacy workflow rule, kept for order-of-execution demo)."
   formula: "Amount > 100000"
+  timeTriggerCount: 0
+  timeTriggers: []
   triggerType: onCreateOrTriggeringUpdate
 sourcePath: source/main/default/workflows/Opportunity.workflow-meta.xml
 type: WorkflowRule
@@ -41,6 +43,8 @@ Flag opportunities over 100,000 for executive review (legacy workflow rule, kept
 | conditions | `[object Object]` |
 | criteriaItemCount | `0` |
 | formula | `Amount > 100000` |
+| timeTriggerCount | `0` |
+| timeTriggers | `` |
 | triggerType | `onCreateOrTriggeringUpdate` |
 
 ## Incident edges
