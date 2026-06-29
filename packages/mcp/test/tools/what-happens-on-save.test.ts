@@ -713,7 +713,23 @@ describe('whatHappensOnSaveHandler', () => {
     if (!result.ok) return;
     // The disclosure must be the exact string the spec mandates.
     expect(result.value.data.disclosure).toBe(
-      "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once and does not expand that re-entrancy. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.",
+      "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once and does not expand that re-entrancy. A workflow rule's time-dependent actions (its workflowTimeTriggers) are SCHEDULED for an offset measured from a record field value the offline vault cannot evaluate; this composition lists the rule once in the synchronous post-save-workflows phase and does NOT claim its time-delayed actions fire at save. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.",
+    );
+  });
+
+  it('CR-CAP-11b: the time-trigger disclosure sentence is present and makes no firing claim', async () => {
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'EmptyObj',
+      event: 'insert',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data.disclosure;
+    expect(d).toContain('SCHEDULED');
+    expect(d).toContain('does NOT claim its time-delayed actions fire at save');
+    // It must NOT assert the time-trigger fires.
+    expect(/time-(?:delayed|dependent) actions fire(?! at save)/.test(d)).toBe(
+      false,
     );
   });
 

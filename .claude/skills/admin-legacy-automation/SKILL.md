@@ -523,6 +523,16 @@ follow-ups without paraphrasing.
   per-trigger action chain or the scheduled-action queue. Direct
   the admin to **Setup → Time-Based Workflow → View Pending
   Actions** for the live queue.
+- **Per-rule immediate action counts.** A WorkflowRule's IMMEDIATE
+  `<actions>` are counted by `<type>` into
+  `properties.fieldUpdateCount`, `properties.outboundMessageCount`,
+  and `properties.taskCreationCount` (all confidence `declared`).
+  These count the rule's *consumed* actions, NOT the top-level
+  `<fieldUpdates>` / `<outboundMessages>` / `<tasks>` DEFINITION
+  collections (a rule may consume only a subset of them), and NOT
+  the time-trigger nested actions (those stay under
+  `timeTriggers[].actionCount`). `process_builder_migration_candidates`
+  reads these to score migration complexity.
 - **Approval process routing per step.** ApprovalProcess
   approver evaluation depends on the approver type
   (`userHierarchyField` walks `User.ManagerId` per submitter,
