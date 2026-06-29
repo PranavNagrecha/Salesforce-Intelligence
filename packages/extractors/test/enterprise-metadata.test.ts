@@ -400,6 +400,178 @@ describe('enterprise metadata extractors', () => {
     }
   });
 
+  it('CR-CAP-13b: ListView <columns> pseudo-columns mint NO edge but real UPPERCASE std fields survive', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(
+        dir,
+        'objects',
+        'Knowledge__kav',
+        'listViews',
+        'All_Articles.listView-meta.xml',
+      );
+      await mkdir(join(dir, 'objects', 'Knowledge__kav', 'listViews'), {
+        recursive: true,
+      });
+      await writeFile(
+        path,
+        '<ListView>' +
+          // Real all-UPPERCASE standard fields — MUST survive (NOT dropped
+          // by a blanket all-uppercase rule).
+          '<columns>NAME</columns>' +
+          '<columns>TITLE</columns>' +
+          '<columns>ABSTRACT</columns>' +
+          // Real mixed-case standard fields + a real custom field — survive.
+          '<columns>MasterLabel</columns>' +
+          '<columns>Topic__c</columns>' +
+          // Pseudo platform operands — mint NO edge.
+          '<columns>CREATED_DATE</columns>' +
+          '<columns>CREATEDBY_USER</columns>' +
+          '<columns>UPDATEDBY_USER</columns>' +
+          '<columns>LAST_UPDATE</columns>' +
+          '<columns>OWNER.ALIAS</columns>' +
+          '<columns>OWNER.FIRST_NAME</columns>' +
+          '<columns>OWNER_ID</columns>' +
+          '<columns>RECORDTYPE</columns>' +
+          '<columns>PUBLISH_STATUS</columns>' +
+          '<columns>ARTICLE_NUMBER</columns>' +
+          '<columns>SETUP_TYPE</columns>' +
+          '<columns>ARCHIVED_DATE</columns>' +
+          '<columns>ARCHIVEDBY_USER</columns>' +
+          '<columns>LAST_PUBLISHED_DATE</columns>' +
+          '<columns>CREATEDBY_USER.ALIAS</columns>' +
+          '</ListView>',
+      );
+
+      const result = await extractListView(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const toIds = result.value.edges
+        .filter((e) => e.edgeType === 'references')
+        .map((e) => e.toId)
+        .sort();
+      // Real fields KEPT.
+      expect(toIds).toContain('CustomField:Knowledge__kav.NAME');
+      expect(toIds).toContain('CustomField:Knowledge__kav.TITLE');
+      expect(toIds).toContain('CustomField:Knowledge__kav.ABSTRACT');
+      expect(toIds).toContain('CustomField:Knowledge__kav.MasterLabel');
+      expect(toIds).toContain('CustomField:Knowledge__kav.Topic__c');
+      // Exactly the five real fields — no pseudo phantoms.
+      expect(toIds).toEqual([
+        'CustomField:Knowledge__kav.ABSTRACT',
+        'CustomField:Knowledge__kav.MasterLabel',
+        'CustomField:Knowledge__kav.NAME',
+        'CustomField:Knowledge__kav.TITLE',
+        'CustomField:Knowledge__kav.Topic__c',
+      ]);
+      // Spot-check the pseudo tokens never appear.
+      for (const pseudo of [
+        'CREATED_DATE',
+        'CREATEDBY_USER',
+        'UPDATEDBY_USER',
+        'LAST_UPDATE',
+        'ALIAS',
+        'FIRST_NAME',
+        'OWNER_ID',
+        'RECORDTYPE',
+        'PUBLISH_STATUS',
+        'ARTICLE_NUMBER',
+        'SETUP_TYPE',
+        'ARCHIVED_DATE',
+        'ARCHIVEDBY_USER',
+        'LAST_PUBLISHED_DATE',
+      ]) {
+        expect(toIds.some((id) => id.includes(pseudo))).toBe(false);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('CR-CAP-13b: real custom field ending in _USER survives the audit-user guard', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(
+        dir,
+        'objects',
+        'Training__c',
+        'listViews',
+        'Assigned.listView-meta.xml',
+      );
+      await mkdir(join(dir, 'objects', 'Training__c', 'listViews'), {
+        recursive: true,
+      });
+      await writeFile(
+        path,
+        '<ListView><columns>Assigned_To_User__c</columns></ListView>',
+      );
+      const result = await extractListView(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const toIds = result.value.edges.map((e) => e.toId);
+      // `__c` -> `__C` after upper-fold, so the `_USER$` anchor misses it.
+      expect(toIds).toContain('CustomField:Training__c.Assigned_To_User__c');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('CR-CAP-13b: a Report dotted RELATIONSHIP column survives the column guard (cross-type)', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'Acct_Rel.report-meta.xml');
+      await writeFile(
+        path,
+        '<Report>' +
+          '<columns>Owner.Name</columns>' +
+          '<columns>CreatedBy.Name</columns>' +
+          '<columns>Account.Industry__c</columns>' +
+          '<columns>Account.OwnerId</columns>' +
+          // A pseudo column also present — must still drop uniformly.
+          '<columns>CREATED_DATE</columns>' +
+          '</Report>',
+      );
+      const result = await extractReport(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const toIds = result.value.edges
+        .filter((e) => e.edgeType === 'references')
+        .map((e) => e.toId);
+      // Mixed-case dotted relationship columns are legitimate Report columns
+      // and MUST NOT be dropped by the OWNER./.ALIAS structural rejects.
+      expect(toIds).toContain('CustomField:Owner.Name');
+      expect(toIds).toContain('CustomField:CreatedBy.Name');
+      expect(toIds).toContain('CustomField:Account.Industry__c');
+      expect(toIds).toContain('CustomField:Account.OwnerId');
+      // The pseudo column is still dropped uniformly across types.
+      expect(toIds.some((id) => id.includes('CREATED_DATE'))).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('CR-CAP-13b: a FlexiPage dotted relationship fieldItem survives the column guard', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'Account_Record_Page.flexipage-meta.xml');
+      await writeFile(
+        path,
+        '<FlexiPage><sobjectType>Account</sobjectType>' +
+          '<fieldInstance><fieldItem>Owner.Name</fieldItem></fieldInstance>' +
+          '<fieldInstance><fieldItem>Industry__c</fieldItem></fieldInstance>' +
+          '</FlexiPage>',
+      );
+      const result = await extractFlexiPage(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const toIds = result.value.edges.map((e) => e.toId);
+      expect(toIds).toContain('CustomField:Owner.Name');
+      expect(toIds).toContain('CustomField:Account.Industry__c');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('CR-CAP-13: a Report `<field>` column still mints a fieldRef edge (no shared-extractor regression)', async () => {
     const dir = await makeTemp();
     try {
