@@ -900,3 +900,166 @@ describe('findDeadCodeHandler — coverage caveat (P13-STAGED-absence-battery)',
     ]);
   });
 });
+
+// =============================================================================
+// Dead-queueable detection: a class that `implements Queueable` is NOT live by
+// virtue of implementing the interface — it must be ENQUEUED by user Apex. A
+// Queueable/Batchable/Schedulable enqueued from at least one production
+// (non-@isTest) dispatch site is live (uncertain); enqueued only from @isTest
+// code is likely_dead (test dispatch is rolled back at runtime); never enqueued
+// is definitely_dead. A `!Test.isRunningTest()`-guarded enqueue in a NON-test
+// class still counts as a production path (the guard only suppresses during
+// tests). Mirrors the production-vs-test split scheduled_job_catalog already
+// makes for Schedulable classes.
+// =============================================================================
+describe('findDeadCodeHandler — dead async-dispatch (Queueable) detection', () => {
+  let qDir: string;
+  let qStore: GraphStore;
+  let qCtx: Context;
+
+  beforeAll(async () => {
+    qDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-fdc-queueable-'));
+    const opened = await openGraph(join(qDir, 'fdc-q.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    qStore = opened.value;
+    const qSeed: ExtractionResult = {
+      nodes: [
+        // Queueable enqueued from a PRODUCTION (non-test) class → live.
+        makeNode({
+          id: 'ApexClass:LiveQueueable',
+          type: 'ApexClass',
+          apiName: 'LiveQueueable',
+          properties: { isTest: false, isQueueable: true },
+        }),
+        // Production dispatcher (non-@isTest) — its enqueue is guarded only by
+        // `!Test.isRunningTest()`, a genuine production runtime path.
+        makeNode({
+          id: 'ApexClass:DispatcherHelper',
+          type: 'ApexClass',
+          apiName: 'DispatcherHelper',
+          properties: { isTest: false },
+        }),
+        // Queueable enqueued ONLY from an @isTest class → likely_dead (test
+        // dispatch is rolled back at runtime; no production dispatch site).
+        makeNode({
+          id: 'ApexClass:TestOnlyQueueable',
+          type: 'ApexClass',
+          apiName: 'TestOnlyQueueable',
+          properties: { isTest: false, isQueueable: true },
+        }),
+        makeNode({
+          id: 'ApexClass:TestOnlyQueueableTest',
+          type: 'ApexClass',
+          apiName: 'TestOnlyQueueableTest',
+          properties: { isTest: true },
+        }),
+        // Queueable never enqueued anywhere → definitely_dead (the textbook
+        // dead-queueable signature: implements the interface but no dispatch).
+        makeNode({
+          id: 'ApexClass:OrphanQueueable',
+          type: 'ApexClass',
+          apiName: 'OrphanQueueable',
+          properties: { isTest: false, isQueueable: true },
+        }),
+        // Control: a REST entry point with no callers is STILL live — the
+        // platform invokes it externally; async-dispatch reasoning must not
+        // bleed into external entry points.
+        makeNode({
+          id: 'ApexClass:RestEndpoint',
+          type: 'ApexClass',
+          apiName: 'RestEndpoint',
+          properties: { isTest: false, isRestResource: true },
+        }),
+      ],
+      edges: [
+        // DispatcherHelper -> LiveQueueable : production async dispatch.
+        makeEdge({
+          fromId: 'ApexClass:DispatcherHelper',
+          toId: 'ApexClass:LiveQueueable',
+          edgeType: 'dispatchesAsync',
+          confidence: 'declared',
+          source: 'apex-class',
+          properties: { dispatchMechanism: 'enqueueJob' },
+        }),
+        // TestOnlyQueueableTest -> TestOnlyQueueable : test-only async dispatch.
+        makeEdge({
+          fromId: 'ApexClass:TestOnlyQueueableTest',
+          toId: 'ApexClass:TestOnlyQueueable',
+          edgeType: 'dispatchesAsync',
+          confidence: 'declared',
+          source: 'apex-class',
+          properties: { dispatchMechanism: 'enqueueJob' },
+        }),
+      ],
+    };
+    const imp = await importExtractionResults(qStore, [qSeed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    qCtx = { vaultRoot: qDir, manifest: MANIFEST, graph: qStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(qStore);
+    rmSync(qDir, { recursive: true, force: true });
+  });
+
+  it('a Queueable enqueued from a production (non-test) dispatch site is NOT dead', async () => {
+    const r = await findDeadCodeHandler(qCtx, { includeUncertain: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const live = r.value.data.candidates.find(
+      (c) => c.componentId === 'ApexClass:LiveQueueable',
+    );
+    expect(live?.verdict).toBe('uncertain');
+    // and it is suppressed (never dead) in the default result.
+    const rDefault = await findDeadCodeHandler(qCtx, {});
+    expect(rDefault.ok).toBe(true);
+    if (!rDefault.ok) return;
+    expect(
+      rDefault.value.data.candidates.find(
+        (c) => c.componentId === 'ApexClass:LiveQueueable',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('a Queueable enqueued ONLY from an @isTest class is likely_dead', async () => {
+    const r = await findDeadCodeHandler(qCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.candidates.find(
+      (x) => x.componentId === 'ApexClass:TestOnlyQueueable',
+    );
+    expect(c?.verdict).toBe('likely_dead');
+    expect(c?.reachedByTestClassOnly).toBe(true);
+  });
+
+  it('a Queueable that is never enqueued anywhere is definitely_dead', async () => {
+    const r = await findDeadCodeHandler(qCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.candidates.find(
+      (x) => x.componentId === 'ApexClass:OrphanQueueable',
+    );
+    expect(c?.verdict).toBe('definitely_dead');
+    expect(c?.incomingEdgeCount).toBe(0);
+  });
+
+  it('an external REST entry point with no callers stays live (not async-dead)', async () => {
+    const r = await findDeadCodeHandler(qCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(
+      r.value.data.candidates.find(
+        (c) => c.componentId === 'ApexClass:RestEndpoint',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('surfaces the async-dispatch dead-code disclosure when a queueable is flagged', async () => {
+    const r = await findDeadCodeHandler(qCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const joined = r.value.data.boundaries.join(' ');
+    expect(joined).toContain('async-dispatch dead-code');
+    expect(joined).toContain('!Test.isRunningTest()');
+  });
+});
