@@ -51,6 +51,10 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  buildEnumerationCoverageCaveat,
+  type CoverageCaveat,
+} from './coverage-trust.js';
 import { readActiveHoldersFor, type HoldersShape } from './facts-block.js';
 import {
   argsFingerprint,
@@ -127,6 +131,15 @@ export interface UnassignedPermissionSetsOutput {
   readonly summary: string;
   readonly boundaries: readonly string[];
   readonly truncated: boolean;
+  /**
+   * coverage-aware-zero (CR): present when the manifest reports the
+   * `PermissionSet` family was NOT retrieved. A zero `totalScanned` / empty
+   * lists under this caveat is "not retrieved, re-refresh", NOT a proven "every
+   * permission set is assigned". Distinct from `unknownAssignmentCount` (which
+   * is about user-assignment enrichment, not metadata coverage). Absent on a
+   * legacy (no-coverage) vault and on a confirmed-clean retrieve.
+   */
+  readonly coverageCaveat?: CoverageCaveat;
   /**
    * P13-PSA-counts: org-wide active-holder aggregate (`data_snapshot`), when
    * captured. `factualZeroAtCapture: true` upgrades a metadata inference to a
@@ -419,6 +432,10 @@ export const unassignedPermissionSetsHandler = async (
   const orphanedPage =
     designatedListId === 'orphanedFromComponents' ? paged.items : sortedOrphaned.slice(0, limit);
 
+  // coverage-aware-zero: caveat when the PermissionSet family was not retrieved,
+  // so an empty result reads "not retrieved" rather than "nothing unassigned".
+  const coverageCaveat = buildEnumerationCoverageCaveat(ctx, 'PermissionSet');
+
   // dataShape reads the ids actually surfaced in BOTH emitted lists (same shape
   // as pre-CR-22 on a whole-fits call).
   const dataShape = await readActiveHoldersFor(ctx, [
@@ -437,6 +454,7 @@ export const unassignedPermissionSetsHandler = async (
       summary,
       boundaries: BOUNDARIES,
       truncated,
+      ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       ...(dataShape !== undefined ? { dataShape } : {}),
       ...(scanTruncated ? { scanTruncated: true, totalPermissionSets } : {}),
       ...(emitCursor

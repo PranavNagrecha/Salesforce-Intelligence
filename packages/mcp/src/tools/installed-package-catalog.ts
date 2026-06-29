@@ -19,6 +19,8 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { buildEnumerationCoverageCaveat, type CoverageCaveat } from './coverage-trust.js';
+
 /** Defensive ceiling — `listNodesByType` caps at 500; an org with more installed packages than that is unheard of. */
 const CATALOG_SCAN_LIMIT = 500;
 
@@ -39,6 +41,14 @@ export interface InstalledPackageCatalogOutput {
   readonly summary: { readonly count: number };
   readonly confidence: 'declared';
   readonly boundaryNote: string;
+  /**
+   * coverage-aware-zero (CR): present when the manifest reports `InstalledPackage`
+   * was NOT retrieved (requested but not confirmed-clean). An empty `packages`
+   * under this caveat is "not retrieved, re-refresh" — NOT a proven "no managed
+   * packages". Absent on a legacy (no-coverage) vault and on a confirmed-clean
+   * retrieve, so existing goldens do not move.
+   */
+  readonly coverageCaveat?: CoverageCaveat;
 }
 
 const NOT_EXTRACTED_NOTE =
@@ -68,12 +78,15 @@ export const installedPackageCatalogHandler = async (
     })
     .sort((a, b) => (a.namespace < b.namespace ? -1 : a.namespace > b.namespace ? 1 : 0));
 
+  const coverageCaveat = buildEnumerationCoverageCaveat(ctx, 'InstalledPackage');
+
   return ok({
     data: {
       packages,
       summary: { count: packages.length },
       confidence: 'declared',
       boundaryNote: packages.length === 0 ? NOT_EXTRACTED_NOTE : EXTRACTED_NOTE,
+      ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

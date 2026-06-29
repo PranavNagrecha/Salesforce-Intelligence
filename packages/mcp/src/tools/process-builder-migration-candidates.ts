@@ -56,6 +56,10 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import {
+  buildEnumerationCoverageCaveatFor,
+  type CoverageCaveat,
+} from './coverage-trust.js';
+import {
   argsFingerprint,
   decodeCursor,
   paginateSection,
@@ -181,6 +185,15 @@ export interface ProcessBuilderMigrationCandidatesOutput {
   };
   readonly boundaries: readonly string[];
   readonly truncated: boolean;
+  /**
+   * coverage-aware-zero (CR): present when the manifest reports any included
+   * automation family (Flow / WorkflowRule / ApprovalProcess) was NOT retrieved.
+   * An empty list / zero total under this caveat is "not retrieved, re-refresh",
+   * NOT a proven "no migration candidates". `missingCoverage` names exactly the
+   * unretrieved families. Absent on a legacy (no-coverage) vault and when every
+   * included family retrieved clean, so existing goldens do not move.
+   */
+  readonly coverageCaveat?: CoverageCaveat;
   /**
    * CR-RV12: TRUE when the >500 node SCAN cap (LIST_PAGE_SIZE) dropped Flow /
    * WorkflowRule / ApprovalProcess nodes BEFORE filtering — so the lists and
@@ -657,6 +670,20 @@ export const processBuilderMigrationCandidatesHandler = async (
   const paged = pagedResult.value;
   const emitCursor = paged.pageInfo.nextCursor !== null;
 
+  // coverage-aware-zero: caveat over the automation families this call actually
+  // scanned. Flow is always scanned (Process Builder = Flow with processType
+  // Workflow); WorkflowRule / ApprovalProcess only when their toggle is on.
+  const coverageTypes = [
+    'Flow',
+    ...(includeWorkflowRules ? ['WorkflowRule'] : []),
+    ...(includeApprovalProcesses ? ['ApprovalProcess'] : []),
+  ];
+  const coverageCaveat = buildEnumerationCoverageCaveatFor(
+    ctx,
+    coverageTypes,
+    'The migration-candidate inventory',
+  );
+
   const pbPage =
     designatedListId === 'processBuilders'
       ? (paged.items as readonly ProcessBuilderCandidate[])
@@ -684,6 +711,7 @@ export const processBuilderMigrationCandidatesHandler = async (
       },
       boundaries: BOUNDARIES,
       truncated,
+      ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       ...(scanTruncated ? { scanTruncated: true, trueTypeCounts } : {}),
       ...(emitCursor
         ? {

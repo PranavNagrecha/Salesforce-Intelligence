@@ -89,6 +89,7 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { countNodesByType, listEdges, listNodesByType } from '@sf-intelligence/graph';
+import { detectPiiClassification } from '@sf-intelligence/patterns';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
@@ -242,6 +243,14 @@ export interface UnusedFieldDeepEntry {
   readonly invisibilityWarnings: readonly string[];
   readonly confidence: 'high' | 'medium' | 'low';
   readonly recommendedAction: string;
+  /**
+   * GROUP-A PII-safety: machine-readable PII/sensitive classification from the
+   * heuristic `detectPiiClassification` recognizer, present only when the field
+   * classifies as `pii` or `sensitive`. When present, `recommendedAction` is
+   * PREPENDED with a compliance escalation. HEURISTIC — absence is NOT a
+   * clearance, only the absence of a recognised signal.
+   */
+  readonly piiClassification?: 'pii' | 'sensitive';
 }
 
 /** Payload wrapped in the `McpResponse` envelope on success. */
@@ -699,27 +708,46 @@ const computeConfidence = (
 };
 
 /**
+ * GROUP-A PII-safety: compliance escalation prepended to the recommended
+ * action for any field the heuristic recognizer classifies `pii` / `sensitive`,
+ * so a PII / encrypted field NEVER reads as the bland "consider deletion"
+ * string. HEURISTIC — absence of this escalation is NOT a clearance.
+ */
+const PII_DELETION_ESCALATION =
+  'PII/encrypted field — deletion may be irreversible and compliance-relevant (FERPA/GDPR/PCI): require explicit data-retention sign-off and verify this is not the system of record before deleting.';
+
+/**
  * Build a per-field recommended action string. The tier drives the
- * verbiage; managed/standard fields surface as inventory-only.
+ * verbiage; managed/standard fields surface as inventory-only. When the
+ * field carries a `pii` / `sensitive` classification, the compliance
+ * escalation is PREPENDED so the bland deletion string never stands alone.
  */
 const recommendedActionFor = (
   confidence: 'high' | 'medium' | 'low',
   isCustom: boolean,
   isManaged: boolean,
+  node: Node,
 ): string => {
-  if (isManaged) {
-    return 'managed-package field — the vault cannot audit package-internal usage; inventory only.';
+  const base = ((): string => {
+    if (isManaged) {
+      return 'managed-package field — the vault cannot audit package-internal usage; inventory only.';
+    }
+    if (!isCustom) {
+      return 'standard Salesforce field — operationally unsafe to remove regardless of usage signals; inventory only.';
+    }
+    if (confidence === 'high') {
+      return 'field appears unused across all eight tiers; consider deletion after manual review of dynamic Apex / LWC / external integration paths the scanner cannot see.';
+    }
+    if (confidence === 'medium') {
+      return 'field appears unused but one or more invisibility warnings apply; manual review recommended before deletion.';
+    }
+    return 'inventory only.';
+  })();
+  const pii = detectPiiClassification(node).piiClassification;
+  if (pii === 'pii' || pii === 'sensitive') {
+    return `${PII_DELETION_ESCALATION} ${base}`;
   }
-  if (!isCustom) {
-    return 'standard Salesforce field — operationally unsafe to remove regardless of usage signals; inventory only.';
-  }
-  if (confidence === 'high') {
-    return 'field appears unused across all eight tiers; consider deletion after manual review of dynamic Apex / LWC / external integration paths the scanner cannot see.';
-  }
-  if (confidence === 'medium') {
-    return 'field appears unused but one or more invisibility warnings apply; manual review recommended before deletion.';
-  }
-  return 'inventory only.';
+  return base;
 };
 
 /**
@@ -879,6 +907,11 @@ export const unusedFieldsDeepHandler = async (
     if (!allClean) continue;
 
     const confidence = computeConfidence(isProtected);
+    const piiDetected = detectPiiClassification(field).piiClassification;
+    const piiClassification =
+      piiDetected === 'pii' || piiDetected === 'sensitive'
+        ? piiDetected
+        : undefined;
     entries.push({
       id: field.id,
       apiName,
@@ -891,7 +924,8 @@ export const unusedFieldsDeepHandler = async (
       checks,
       invisibilityWarnings: INVISIBILITY_WARNINGS,
       confidence,
-      recommendedAction: recommendedActionFor(confidence, isCustom, isManaged),
+      recommendedAction: recommendedActionFor(confidence, isCustom, isManaged, field),
+      ...(piiClassification !== undefined ? { piiClassification } : {}),
     });
   }
 

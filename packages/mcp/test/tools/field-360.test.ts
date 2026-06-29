@@ -859,10 +859,11 @@ describe('field360 risk classification', () => {
         {
           nodes: [
             makeNode({
-              id: 'CustomField:Contact.Email_Notes__c',
+              id: 'CustomField:Contact.Internal_Notes__c',
               type: 'CustomField',
-              apiName: 'Email_Notes__c',
-              properties: { dataType: 'Text', piiClassification: 'public' },
+              apiName: 'Internal_Notes__c',
+              // Genuinely non-PII name — the live recognizer finds no signal.
+              properties: { dataType: 'Text' },
             }),
             makeNode({
               id: 'ApexClass:NotesWriter',
@@ -873,7 +874,7 @@ describe('field360 risk classification', () => {
           edges: [
             makeEdge({
               fromId: 'ApexClass:NotesWriter',
-              toId: 'CustomField:Contact.Email_Notes__c',
+              toId: 'CustomField:Contact.Internal_Notes__c',
               edgeType: 'writesTo',
               confidence: 'heuristic',
               source: 'apex-scanner',
@@ -889,7 +890,7 @@ describe('field360 risk classification', () => {
           manifest: FIXTURE_MANIFEST,
           graph: lowStore,
         },
-        { fieldId: 'CustomField:Contact.Email_Notes__c' },
+        { fieldId: 'CustomField:Contact.Internal_Notes__c' },
       );
       expect(result.ok).toBe(true);
       if (!result.ok) return;
@@ -915,12 +916,14 @@ describe('field360 risk classification', () => {
         {
           nodes: [
             makeNode({
-              id: 'CustomField:Opportunity.Deal_Size__c',
+              // Recognizer-classified name (Salary -> sensitive/financial) so
+              // the LIVE detectPiiClassification path produces the PII signal —
+              // no longer relying on a stamped `piiClassification` property.
+              id: 'CustomField:Opportunity.Salary__c',
               type: 'CustomField',
-              apiName: 'Deal_Size__c',
+              apiName: 'Salary__c',
               properties: {
                 dataType: 'Currency',
-                piiClassification: 'pii',
               },
             }),
             makeNode({
@@ -937,12 +940,12 @@ describe('field360 risk classification', () => {
           edges: [
             makeEdge({
               fromId: 'OutboundMessage:Opportunity.SyncA',
-              toId: 'CustomField:Opportunity.Deal_Size__c',
+              toId: 'CustomField:Opportunity.Salary__c',
               edgeType: 'references',
             }),
             makeEdge({
               fromId: 'OutboundMessage:Opportunity.SyncB',
-              toId: 'CustomField:Opportunity.Deal_Size__c',
+              toId: 'CustomField:Opportunity.Salary__c',
               edgeType: 'references',
             }),
           ],
@@ -956,7 +959,7 @@ describe('field360 risk classification', () => {
           manifest: FIXTURE_MANIFEST,
           graph: highStore,
         },
-        { fieldId: 'CustomField:Opportunity.Deal_Size__c' },
+        { fieldId: 'CustomField:Opportunity.Salary__c' },
       );
       expect(result.ok).toBe(true);
       if (!result.ok) return;
@@ -970,6 +973,49 @@ describe('field360 risk classification', () => {
       expect(summary.riskFactors).toContain('pii-with-integrations');
     } finally {
       await closeGraph(highStore);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // GROUP-A PII-safety: detectIsPii must run the LIVE recognizer
+  // (detectPiiClassification) rather than reading a `piiClassification`
+  // property that nothing ever stamps. An EncryptedText field with NO
+  // such property must still escalate as PII.
+  it('escalates an EncryptedText field with no stamped property via the live recognizer', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-field-360-enc-'));
+    const dbPath = join(dir, 'enc.db');
+    const opened = await openGraph(dbPath);
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const store = opened.value;
+    try {
+      const imported = await importExtractionResults(store, [
+        {
+          nodes: [
+            makeNode({
+              id: 'CustomField:Contact.Secret__c',
+              type: 'CustomField',
+              apiName: 'Secret__c',
+              // DELIBERATELY no `piiClassification` property — the old
+              // dead-code path would read undefined and never escalate.
+              properties: { dataType: 'EncryptedText' },
+            }),
+          ],
+          edges: [],
+        },
+      ]);
+      expect(imported.ok).toBe(true);
+      if (!imported.ok) return;
+      const result = await field360Handler(
+        { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: store },
+        { fieldId: 'CustomField:Contact.Secret__c' },
+      );
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.data.summary.riskLevel).toBe('high');
+      expect(result.value.data.summary.riskFactors).toContain('pii-classified');
+    } finally {
+      await closeGraph(store);
       rmSync(dir, { recursive: true, force: true });
     }
   });

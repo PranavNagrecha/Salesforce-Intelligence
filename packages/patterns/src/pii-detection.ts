@@ -245,6 +245,58 @@ const NAME_PATTERNS: readonly NamePattern[] = [
   },
 ];
 
+/**
+ * Money-amount name tokens. A Currency or Number field whose api name contains
+ * one of these holds a monetary VALUE (a payment, balance, fee owed, etc.),
+ * which is a financial access-signal worth surfacing as `sensitive`/`financial`
+ * even though the amount alone is not directly person-identifying. The rule is
+ * gated to the Currency / Number data types so a Text status / label field that
+ * merely mentions "payment" (`Payment_Status__c`) is NOT swept in, and it is
+ * suppressed for generic product-catalog price fields (see
+ * `GENERIC_CATALOG_PRICE_MARKERS`) to avoid false positives on list/unit prices.
+ * This rule is HEURISTIC: absence of a financial flag is NOT a clearance.
+ */
+const MONEY_AMOUNT_TOKENS = [
+  'amount',
+  'payment',
+  'fee',
+  'charge',
+  'balance',
+  'cost',
+  'price',
+  'paid',
+] as const;
+
+/** Salesforce data types that can HOLD a monetary amount. */
+const MONEY_CAPABLE_DATA_TYPES = new Set<string>(['Currency', 'Number']);
+
+/**
+ * Generic product / catalog price markers. A `price` / `cost` field on a
+ * product-catalog-shaped object (or named like a list / unit / standard price)
+ * is reference data, not a person/account financial signal — suppress the
+ * money-amount rule for it to avoid swamping the inventory with catalog prices.
+ */
+const GENERIC_CATALOG_PRICE_MARKERS = [
+  'list_price',
+  'listprice',
+  'unit_price',
+  'unitprice',
+  'standard_price',
+  'standardprice',
+  'sales_price',
+  'salesprice',
+  'msrp',
+  'retail_price',
+  'retailprice',
+] as const;
+const GENERIC_CATALOG_PARENT_MARKERS = [
+  'product',
+  'pricebook',
+  'catalog',
+  'item',
+  'sku',
+] as const;
+
 /** Parent-object api-name markers for venue / facility / org-location objects. */
 const ORGANIZATIONAL_OBJECT_MARKERS = [
   'location',
@@ -360,6 +412,32 @@ const isOrganizationalParentObject = (node: Node): boolean => {
   const parent = parentObjectApiNameLower(node);
   if (parent === null) return false;
   return ORGANIZATIONAL_OBJECT_MARKERS.some((m) => parent.includes(m));
+};
+
+/**
+ * True when a Currency / Number field's name marks it as a monetary amount that
+ * is a financial access-signal (a payment / balance / fee owed), and it is NOT a
+ * generic product-catalog price. Heuristic; see `MONEY_AMOUNT_TOKENS`.
+ */
+const isMoneyAmountField = (
+  node: Node,
+  apiNameLower: string,
+  dataType: string | null,
+): boolean => {
+  if (dataType === null || !MONEY_CAPABLE_DATA_TYPES.has(dataType)) return false;
+  if (!MONEY_AMOUNT_TOKENS.some((t) => apiNameLower.includes(t))) return false;
+  // False-positive guard: generic product-catalog list / unit / standard prices.
+  if (GENERIC_CATALOG_PRICE_MARKERS.some((m) => apiNameLower.includes(m))) {
+    return false;
+  }
+  const parent = parentObjectApiNameLower(node);
+  if (
+    parent !== null &&
+    GENERIC_CATALOG_PARENT_MARKERS.some((m) => parent.includes(m))
+  ) {
+    return false;
+  }
+  return true;
 };
 
 /** Venue / event URL fields — not personal mailing addresses. */
@@ -516,6 +594,13 @@ export const detectPiiClassificationWithReason = (
     baseCategory = 'contact';
     baseReason =
       'field data type is Email; classified pii/contact (the data type IS the contract that the value is an email address)';
+  } else if (isMoneyAmountField(node, apiNameLower, dataType)) {
+    // Layer 3b: a Currency / Number field carrying a money-amount token is a
+    // financial access-signal. ADDITIVE — only fires when no name/Email rule
+    // already classified the field, so existing classifications are unchanged.
+    baseClassification = 'sensitive';
+    baseCategory = 'financial';
+    baseReason = `field data type is ${dataType} and the name carries a money-amount token; classified sensitive/financial (a monetary value is a financial access-signal) — heuristic, not a person-identifier`;
   }
 
   // Layer 4: description keyword overlay.

@@ -42,6 +42,10 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import {
+  buildEnumerationCoverageCaveatFor,
+  type CoverageCaveat,
+} from './coverage-trust.js';
+import {
   argsFingerprint,
   decodeCursor,
   paginateSection,
@@ -129,6 +133,15 @@ export interface EmptyQueuesAndGroupsOutput {
   readonly unknownMemberCountGroups: number;
   readonly boundaries: readonly string[];
   readonly truncated: boolean;
+  /**
+   * coverage-aware-zero (CR): present when the manifest reports an included
+   * family (Queue / Group) was NOT retrieved. An empty list / zero total under
+   * this caveat is "not retrieved, re-refresh", NOT a proven "no empty queues or
+   * groups". `missingCoverage` names exactly the unretrieved families (scoped to
+   * the `type` filter). Absent on a legacy (no-coverage) vault and on a
+   * confirmed-clean retrieve, so existing goldens do not move.
+   */
+  readonly coverageCaveat?: CoverageCaveat;
   /**
    * CR-RV12: TRUE when the >500 node SCAN cap (LIST_PAGE_SIZE) dropped Queue
    * and/or Group nodes BEFORE emptiness was computed — so the lists (and totals)
@@ -467,6 +480,19 @@ export const emptyQueuesAndGroupsHandler = async (
   const paged = pagedResult.value;
   const emitCursor = paged.pageInfo.nextCursor !== null;
 
+  // coverage-aware-zero: caveat over the families this call actually scanned,
+  // scoped to the `type` filter, so an empty result reads "not retrieved"
+  // rather than a proven "no empty queues/groups".
+  const coverageTypes = [
+    ...(typeFilter === 'Queue' || typeFilter === 'both' ? ['Queue'] : []),
+    ...(typeFilter === 'Group' || typeFilter === 'both' ? ['Group'] : []),
+  ];
+  const coverageCaveat = buildEnumerationCoverageCaveatFor(
+    ctx,
+    coverageTypes,
+    'The empty queue/group inventory',
+  );
+
   const queuesPage =
     designatedListId === 'queues'
       ? (paged.items as readonly EmptyQueueEntry[])
@@ -486,6 +512,7 @@ export const emptyQueuesAndGroupsHandler = async (
       unknownMemberCountGroups,
       boundaries: BOUNDARIES,
       truncated,
+      ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       ...(scanTruncated
         ? {
             scanTruncated: true,

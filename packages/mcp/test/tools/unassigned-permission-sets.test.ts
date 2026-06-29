@@ -326,3 +326,49 @@ describe('unassignedPermissionSetsInputSchema', () => {
     ).toBe(true);
   });
 });
+
+describe('coverage-aware-zero — PermissionSet not retrieved', () => {
+  let tempDir: string;
+  let store: GraphStore;
+
+  beforeAll(async () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'sfi-ups-cov-'));
+    const o = await openGraph(join(tempDir, 'g.db'));
+    if (!o.ok) throw new Error(o.error.message);
+    store = o.value;
+    // No PermissionSet nodes land — the family was not retrieved.
+    await importExtractionResults(store, [
+      { nodes: [makeNode({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' })], edges: [] },
+    ]);
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('attaches a coverageCaveat when the PermissionSet family was not retrieved', async () => {
+    const covManifest: VaultManifest = {
+      version: '0.1.0',
+      refreshedAt: '2026-05-27T14:33:08Z',
+      sourceOrg: 'me@example.com',
+      components: { CustomObject: 1 },
+      edges: {},
+      sourceTreeHash: 'sha256:fixture-cov',
+      coverage: [
+        { type: 'CustomObject', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+        { type: 'PermissionSet', requested: true, retrieved: 0, errored: false, neverModeled: false },
+      ],
+    };
+    const r = await unassignedPermissionSetsHandler(
+      { vaultRoot: tempDir, manifest: covManifest, graph: store },
+      {},
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalScanned).toBe(0);
+    expect(r.value.data.coverageCaveat).toBeDefined();
+    expect(r.value.data.coverageCaveat?.missingCoverage).toContain('PermissionSet');
+    expect(r.value.data.coverageCaveat?.message).toMatch(/not checked/);
+  });
+});
