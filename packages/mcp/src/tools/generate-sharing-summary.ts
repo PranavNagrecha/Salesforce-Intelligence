@@ -4,10 +4,14 @@
  * The v2.5 documentation-generation tier sharing-summary tool. Given
  * an optional `objectFilter` (api name string), emits a structured
  * markdown document covering every CustomObject's OWD (organization-
- * wide default), the SharingRules that apply to it, and the Profile /
- * PermissionSet OBJECT-level CRUD grants that surface as incoming
- * `grantedBy` edges to the object itself. The Role hierarchy is rendered
- * as a mermaid diagram when Role nodes are present.
+ * wide default), the SharingRules that apply to it (each NAMING its
+ * `sharedWith` recipient — CR-CAP-05b — in a "Shared With" column;
+ * a `roleAndSubordinates` recipient is marked "(and its subordinate
+ * roles)" via the shared `expandRoleSubordinates` helper that
+ * `who_can_access_object` also uses, so the two surfaces never drift),
+ * and the Profile / PermissionSet OBJECT-level CRUD grants that surface
+ * as incoming `grantedBy` edges to the object itself. The Role hierarchy
+ * is rendered as a mermaid diagram when Role nodes are present.
  *
  * Input:
  *   - `objectFilter` (optional string): when supplied, narrows the
@@ -49,6 +53,7 @@ import {
   renderFooter,
   type GeneratedDocument,
 } from './generate-data-dictionary.js';
+import { expandRoleSubordinates, ROLE_PREFIX } from './role-hierarchy.js';
 
 /** Per-scan cap on the number of objects covered. */
 const OBJECT_SCAN_CAP = 50;
@@ -68,7 +73,7 @@ const TYPE_SCAN_CAP = 500;
  * means "not modeled / not decidable", never "the object has none".
  */
 const UNMODELED_SHARING_DIMENSIONS_DISCLOSURE =
-  'Sharing dimensions whose record-level applicability this summary cannot decide (absence ≠ none): territory and guest (Experience Cloud) sharing rules are now LISTED (CR-CAP-16) but whether a given record/user is shared needs record-level + requester context the offline metadata lacks; sharing sets, account / opportunity / case teams, and manual & Apex (programmatic) sharing are record-level or config not in the offline metadata. This summary covers OWD, owner + criteria + guest + territory sharing rules, role hierarchy, and Profile/PermissionSet grants. For a per-user record verdict (which surfaces these as explicit not-decidable stages) use `why_cant_user_see_record`.';
+  'Sharing dimensions whose record-level applicability this summary cannot decide (absence ≠ none): territory and guest (Experience Cloud) sharing rules are now LISTED (CR-CAP-16) but whether a given record/user is shared needs record-level + requester context the offline metadata lacks; sharing sets, account / opportunity / case teams, and manual & Apex (programmatic) sharing are record-level or config not in the offline metadata. Each rule now NAMES its `sharedWith` recipient (CR-CAP-05b) — a `roleAndSubordinates` recipient is marked "(and its subordinate roles)" and the descending role subtree is counted; the `…Internal` variant cannot exclude portal/partner roles offline (disclosed separately). This summary covers OWD, owner + criteria + guest + territory sharing rules and their recipients, role hierarchy, and Profile/PermissionSet grants. For a per-user record verdict (which surfaces these as explicit not-decidable stages) use `why_cant_user_see_record`.';
 
 /** Zod schema for the `sfi.generate_sharing_summary` tool input. */
 export const generateSharingSummaryInputSchema = z.object({
@@ -165,7 +170,80 @@ interface ObjectSharing {
   readonly sharingRules: readonly Node[];
   readonly profilesWithGrants: number;
   readonly permSetsWithGrants: number;
+  /**
+   * CR-CAP-05b: the rendered "Shared With" recipient cell per rule id. The
+   * summary previously named NO recipient (4-column table); each cell now lists
+   * the rule's `sharedWith` targets, appending "(and its subordinate roles)" for
+   * a `roleAndSubordinates` / `…Internal` marker. Computed async (edge reads +
+   * the shared role-subtree helper) before the sync render pass.
+   */
+  readonly ruleRecipients: ReadonlyMap<string, string>;
 }
+
+/**
+ * CR-CAP-05b: build the "Shared With" recipient cell for one sharing rule by
+ * reading its outbound `sharedWith` edges. A `roleAndSubordinates` /
+ * `…Internal` Role target is marked "(and its subordinate roles)" and its
+ * descending subtree counted via the SAME `expandRoleSubordinates` helper
+ * `who_can_access_object` uses, so the two surfaces never drift. Returns the
+ * cell text plus whether any subtree was truncated or any internal marker was
+ * seen (for the doc-level disclosures). Owner rules emit both `sharedTo` and
+ * `sharedFrom` edges (the latter carries `direction: 'from'`) — only the
+ * `sharedTo` recipient side is named.
+ */
+const buildRecipientCell = async (
+  ctx: Context,
+  rule: Node,
+): Promise<{ cell: string; truncated: boolean; hasInternal: boolean }> => {
+  const edgesResult = await listEdges(ctx.graph, rule.id, {
+    direction: 'out',
+    edgeType: 'sharedWith',
+  });
+  if (!edgesResult.ok || edgesResult.value.length === 0) {
+    // No recipient edge: honest "—" (absence is not "shared with nobody" — the
+    // disclosure already covers the unmodeled dimensions).
+    return { cell: '—', truncated: false, hasInternal: false };
+  }
+  const parts: string[] = [];
+  let truncated = false;
+  let hasInternal = false;
+  for (const edge of edgesResult.value) {
+    if (edge.properties['direction'] === 'from') continue; // owner sharedFrom side
+    const targetId = edge.toId;
+    const name = targetId.includes(':')
+      ? targetId.slice(targetId.indexOf(':') + 1)
+      : targetId;
+    const type = targetId.includes(':')
+      ? targetId.slice(0, targetId.indexOf(':'))
+      : 'Group';
+    const inheritance = edge.properties['inheritance'];
+    const isSub =
+      targetId.startsWith(ROLE_PREFIX) &&
+      (inheritance === 'subordinates' || inheritance === 'subordinatesInternal');
+    if (isSub) {
+      if (inheritance === 'subordinatesInternal') hasInternal = true;
+      const subtree = await expandRoleSubordinates(ctx, targetId);
+      const subCount = subtree.ok
+        ? Math.max(0, subtree.value.roleIds.size - 1)
+        : 0;
+      if (subtree.ok && subtree.value.truncated) truncated = true;
+      const internalNote =
+        inheritance === 'subordinatesInternal'
+          ? ' [internal-only filter not applied offline]'
+          : '';
+      parts.push(
+        `${type} ${name} (and its subordinate roles${subCount > 0 ? `: ${subCount.toString()}` : ''})${internalNote}`,
+      );
+    } else {
+      parts.push(`${type} ${name}`);
+    }
+  }
+  return {
+    cell: parts.length > 0 ? parts.join('; ') : '—',
+    truncated,
+    hasInternal,
+  };
+};
 
 /**
  * Render the per-object H2 section.
@@ -198,8 +276,12 @@ const renderObjectSection = (
         : '_(no sharing rules)_',
     );
   } else {
-    lines.push('| Rule | Type | Access Level | Criteria |');
-    lines.push('| --- | --- | --- | --- |');
+    // CR-CAP-05b: a "Shared With" column names the recipient — previously the
+    // table OMITTED recipients entirely (the role/group a rule shared with was
+    // never named). A `roleAndSubordinates` recipient is marked "(and its
+    // subordinate roles)" via the shared expandRoleSubordinates helper.
+    lines.push('| Rule | Type | Shared With | Access Level | Criteria |');
+    lines.push('| --- | --- | --- | --- | --- |');
     const sorted = [...entry.sharingRules].sort((a, b) =>
       a.apiName < b.apiName ? -1 : a.apiName > b.apiName ? 1 : 0,
     );
@@ -211,8 +293,9 @@ const renderObjectSection = (
       // data to evaluate, so it is a declared rule definition, not a per-record
       // verdict.
       const criteria = ruleCriteriaCell(ruleType, rule.properties);
+      const recipient = entry.ruleRecipients.get(rule.id) ?? '—';
       lines.push(
-        `| \`${escapeCell(rule.apiName)}\` | ${escapeCell(ruleType)} | ${escapeCell(access)} | ${escapeCell(criteria)} |`,
+        `| \`${escapeCell(rule.apiName)}\` | ${escapeCell(ruleType)} | ${escapeCell(recipient)} | ${escapeCell(access)} | ${escapeCell(criteria)} |`,
       );
     }
   }
@@ -391,6 +474,10 @@ export const generateSharingSummaryHandler = async (
   // Build per-object sharing entries.
   const sharingIndex = buildSharingRulesIndex(sharingRulesResult.value);
   const entries: ObjectSharing[] = [];
+  // CR-CAP-05b: doc-level disclosure flags — set if any rule's subordinate-role
+  // subtree was incomplete, or any recipient was roleAndSubordinatesInternal.
+  let roleSubtreeTruncated = false;
+  let internalSubordinatesUndisclosable = false;
   for (const object of scanObjects) {
     // CR-04: count OBJECT-level CRUD grants (one edge query on the object),
     // not field-level FLS grants (which conflated planes and inflated counts).
@@ -398,12 +485,22 @@ export const generateSharingSummaryHandler = async (
     if (!grantsResult.ok) return err(grantsResult.error);
     const owd = stringProp(object.properties, 'sharingModel', 'Unknown');
     const rules = sharingIndex.get(object.apiName) ?? [];
+    // CR-CAP-05b: name each rule's sharedWith recipient (was omitted) via the
+    // shared role-subtree helper, so this surface matches who_can_access_object.
+    const ruleRecipients = new Map<string, string>();
+    for (const rule of rules) {
+      const built = await buildRecipientCell(ctx, rule);
+      ruleRecipients.set(rule.id, built.cell);
+      if (built.truncated) roleSubtreeTruncated = true;
+      if (built.hasInternal) internalSubordinatesUndisclosable = true;
+    }
     entries.push({
       object,
       owd,
       sharingRules: rules,
       profilesWithGrants: grantsResult.value.profiles.size,
       permSetsWithGrants: grantsResult.value.permSets.size,
+      ruleRecipients,
     });
   }
 
@@ -498,6 +595,21 @@ export const generateSharingSummaryHandler = async (
   if (roleNotRetrieved) {
     boundaries.push(
       'Role coverage gap: the `Role` type was NOT retrieved into this vault, so the role hierarchy is **not checked**, never "no roles". Run `sfi refresh` including Role, then re-run this tool.',
+    );
+  }
+  // CR-CAP-05b: a roleAndSubordinates recipient expands to the role subtree
+  // below it; an incomplete subtree (a subordinate Role node not retrieved, or
+  // the cap hit) is disclosed, never silently treated as complete.
+  if (roleSubtreeTruncated) {
+    boundaries.push(
+      'roleAndSubordinates subtree gap: a sharing rule shares with a role and its subordinates, but the role hierarchy BELOW that role is INCOMPLETE — a subordinate Role node was not retrieved into this vault (a partial refresh) or the subtree scan was capped. The "(and its subordinate roles)" count may UNDER-report; additional subordinate roles could also gain access. Run `sfi refresh` including Role, or see `coverage_report`.',
+    );
+  }
+  // CR-CAP-05b: the internal-vs-portal exclusion of roleAndSubordinatesInternal
+  // cannot be applied offline (Role nodes carry no portal/partner marker).
+  if (internalSubordinatesUndisclosable) {
+    boundaries.push(
+      'roleAndSubordinatesInternal honesty boundary: a sharing rule shares with a role and its INTERNAL subordinates only (excluding partner / community portal roles), but Role nodes carry no portal/partner marker in the offline metadata, so the internal-vs-portal filter could NOT be applied. The marked subordinate roles may INCLUDE portal/partner roles the real rule excludes — verify those roles in the org.',
     );
   }
 

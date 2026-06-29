@@ -22,7 +22,16 @@
  *      target is a public Group, its members (walked transitively through
  *      nested groups via `hasMember`) are each listed as their own granter
  *      row, not just the group; a dangling member (e.g. a Territory) is listed
- *      but flagged as unresolved.
+ *      but flagged as unresolved. CR-CAP-05b: when a target is a Role carrying a
+ *      `roleAndSubordinates` / `roleAndSubordinatesInternal` inheritance marker,
+ *      it expands to the DESCENDING role subtree (every role below it via
+ *      INBOUND `inheritsFrom`) — each subordinate role is its own granter row
+ *      alongside the named role. An incomplete subtree (a subordinate Role node
+ *      not retrieved, or the cap hit) sets a `blindSpot`, never a fabricated
+ *      row. The `…Internal` variant runs the SAME descend, but its
+ *      internal-vs-portal exclusion CANNOT be applied offline (Role nodes carry
+ *      no portal flag), so an extra blindSpot discloses the enumerated subtree
+ *      may include portal/partner roles the real rule excludes.
  *
  * Record-level paths it CANNOT enumerate statically are disclosed in
  * `blindSpots`, never fabricated: record ownership + the role hierarchy
@@ -54,6 +63,7 @@ import type { Context } from '../server.js';
 import { readActiveHoldersFor, type HoldersShape } from './facts-block.js';
 import { expandGroupMembers } from './group-membership.js';
 import { mergeInputAliases, toCustomObjectId } from './input-aliases.js';
+import { expandRoleSubordinates, ROLE_PREFIX } from './role-hierarchy.js';
 import { clampedNodeScanLimit, scanHitCap, scanTruncationNote } from './scan-cap.js';
 
 const CUSTOM_OBJECT_PREFIX = 'CustomObject:';
@@ -251,6 +261,15 @@ export const whoCanAccessObjectHandler = async (
   // CR-CAP-12: set when a group's `hasMember` expansion hit a missing
   // nested/enclosing group node, so the member roster is possibly incomplete.
   let groupMembershipTruncated = false;
+  // CR-CAP-05b: set when a roleAndSubordinates descend was capped or referenced
+  // a subordinate role node not retrieved into the vault — the subtree is
+  // possibly larger than enumerated (mirror CR-CAP-05: disclose, never invent).
+  let roleSubtreeTruncated = false;
+  // CR-CAP-05b: set when ANY shared target was `roleAndSubordinatesInternal` —
+  // the internal-vs-portal exclusion cannot be applied offline (Role nodes carry
+  // no portal flag), so the enumerated subtree may include portal/partner roles
+  // the real rule excludes. Disclosed, never silently applied.
+  let internalSubordinatesUndisclosable = false;
 
   // 1. Object permissions: incoming `grantedBy` edges from Profiles/PermSets.
   const grantsResult = await listEdges(ctx.graph, componentId, {
@@ -415,6 +434,47 @@ export const whoCanAccessObjectHandler = async (
           });
         }
       }
+      // CR-CAP-05b: a rule shared with a Role carrying a `subordinates` /
+      // `subordinatesInternal` inheritance marker also reaches every role BELOW
+      // it in the role hierarchy. Walk the descending subtree (INBOUND
+      // `inheritsFrom`) and list each subordinate role as its own granter row,
+      // alongside the verbatim named-role row above. The marker is on the
+      // `sharedWith` edge (sharing-rules.ts extraProps). Gated strictly on a
+      // Role target + the marker so plain-role / group / criteria targets are
+      // byte-identical to before.
+      const inheritance = edge.properties['inheritance'];
+      if (
+        edge.toId.startsWith(ROLE_PREFIX) &&
+        (inheritance === 'subordinates' || inheritance === 'subordinatesInternal')
+      ) {
+        if (inheritance === 'subordinatesInternal') {
+          internalSubordinatesUndisclosable = true;
+        }
+        const subtree = await expandRoleSubordinates(ctx, edge.toId);
+        if (!subtree.ok) {
+          return err({ kind: 'internal', message: `graph query failed: ${subtree.error}` });
+        }
+        if (subtree.value.truncated) roleSubtreeTruncated = true;
+        const internalNote =
+          inheritance === 'subordinatesInternal'
+            ? ' [internal-only filter NOT applied offline — may include portal/partner roles; verify in org]'
+            : '';
+        for (const subRoleId of subtree.value.roleIds) {
+          if (subRoleId === edge.toId) continue; // the named role already emitted
+          const subLabel = subRoleId.includes(':')
+            ? subRoleId.slice(subRoleId.indexOf(':') + 1)
+            : subRoleId;
+          granters.push({
+            granterId: subRoleId,
+            granterType: 'Role',
+            granterLabel: subLabel,
+            via,
+            access: ruleAccessToOp(accessLevel),
+            scope: 'shared-records',
+            detail: `${ruleType || 'owner'} sharing rule ${rule.id} (${accessLevel}) shares with ${edge.toId} and its subordinate roles, which include this descendant role${internalNote}`,
+          });
+        }
+      }
     }
   }
 
@@ -488,6 +548,16 @@ export const whoCanAccessObjectHandler = async (
   if (groupMembershipTruncated) {
     blindSpots.push(
       'A group shared with this object references a nested / member group whose node was NOT retrieved into this vault, so its membership expansion is INCOMPLETE — some member principals may be missing from the granter list. Run `sfi refresh` including Group.',
+    );
+  }
+  if (roleSubtreeTruncated) {
+    blindSpots.push(
+      'A roleAndSubordinates sharing rule shares with a role whose role hierarchy BELOW it is INCOMPLETE — a subordinate Role node was not retrieved into this vault (a partial refresh) or the subtree scan was capped, so additional subordinate roles may also gain access but could NOT be enumerated here. Run `sfi refresh` including Role, or see `coverage_report`.',
+    );
+  }
+  if (internalSubordinatesUndisclosable) {
+    blindSpots.push(
+      'A roleAndSubordinatesInternal sharing rule shares with a role and its INTERNAL subordinates only (excluding partner / community portal roles). Role nodes carry no portal/partner marker in the offline metadata, so the internal-vs-portal filter could NOT be applied — the enumerated subordinate roles may INCLUDE portal/partner roles the real rule excludes. Verify those roles in the org.',
     );
   }
 
