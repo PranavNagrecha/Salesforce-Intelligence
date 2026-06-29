@@ -2171,6 +2171,12 @@ const METADATA_API_NAME: Partial<Record<ComponentType, string>> = {
   // the `CustomMetadata` type as `{Type}.{Record}.md-meta.xml` files. The
   // `__mdt` type definitions themselves come down separately as CustomObject.
   CustomMetadataRecord: 'CustomMetadata',
+  // CR-CAP-18: PlatformEventChannel / PlatformEventChannelMember are exposed
+  // by the org describe under their own singular xmlNames (added API v45.0 /
+  // v47.0), so they need NO alias — `toApiName` falls through to the type name.
+  // PRE-SHIP VERIFY: confirm against a real-org `sf org list metadata-types`
+  // that both are PRESENT singular (the B20 class above); add an alias here if
+  // a describe shows otherwise. Not verifiable in this read-only pass.
 };
 
 /** Internal `ComponentType` → the Metadata API `xmlName` used in manifests / describe. */

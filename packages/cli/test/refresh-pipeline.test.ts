@@ -173,6 +173,58 @@ describe('walkAndExtract skip-counter (architectural-bug-fix observability)', ()
     }
   });
 
+  it('dispatches PlatformEventChannel + PlatformEventChannelMember files, wiring channel→member→event (CR-CAP-18)', async () => {
+    const root = await makeTempRoot();
+    try {
+      // Flat top-level dispatches. Fail-before: no dispatch branch -> the two
+      // dirs are walked but never routed (no nodes, inflated skip count).
+      // Pass-after: both nodes exist AND the member emits parentOf(channel→member)
+      // + references(member→CustomObject:Application_Event__e carrying the filter).
+      await writeAt(
+        root,
+        'platformEventChannels/Application_Event_Channel__chn.platformEventChannel-meta.xml',
+        '<?xml version="1.0"?><PlatformEventChannel xmlns="http://soap.sforce.com/2006/04/metadata"><channelType>event</channelType><label>Application Event Channel</label></PlatformEventChannel>',
+      );
+      await writeAt(
+        root,
+        'platformEventChannelMembers/Application_Event_Member__chn.platformEventChannelMember-meta.xml',
+        "<?xml version=\"1.0\"?><PlatformEventChannelMember xmlns=\"http://soap.sforce.com/2006/04/metadata\"><eventChannel>Application_Event_Channel__chn</eventChannel><selectedEntity>Application_Event__e</selectedEntity><filterExpression>Status__c = 'New'</filterExpression></PlatformEventChannelMember>",
+      );
+
+      const walked = await walkAndExtract(root, null);
+      const ids = walked.results.flatMap((r) => r.nodes.map((n) => n.id));
+      expect(ids).toContain(
+        'PlatformEventChannel:Application_Event_Channel__chn',
+      );
+      expect(ids).toContain(
+        'PlatformEventChannelMember:Application_Event_Member__chn',
+      );
+      const edges = walked.results.flatMap((r) => r.edges);
+      const parentOf = edges.find(
+        (e) =>
+          e.edgeType === 'parentOf' &&
+          e.toId === 'PlatformEventChannelMember:Application_Event_Member__chn',
+      );
+      expect(parentOf?.fromId).toBe(
+        'PlatformEventChannel:Application_Event_Channel__chn',
+      );
+      const ref = edges.find(
+        (e) =>
+          e.edgeType === 'references' &&
+          e.fromId ===
+            'PlatformEventChannelMember:Application_Event_Member__chn',
+      );
+      expect(ref?.toId).toBe('CustomObject:Application_Event__e');
+      expect(ref?.properties.filterExpression).toBe("Status__c = 'New'");
+      expect(walked.skippedDirectories.platformEventChannels).toBeUndefined();
+      expect(
+        walked.skippedDirectories.platformEventChannelMembers,
+      ).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('does not count static-resource content files as an uncovered-type skip', async () => {
     const root = await makeTempRoot();
     try {
