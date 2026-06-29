@@ -247,16 +247,58 @@ export const tokenizeIdentifier = (raw: string): string[] => {
 };
 
 /**
+ * Ordered, high-precision PHRASE synonyms (F1) — mirrors the graph resolver's
+ * `tokenize.ts` PHRASE_SYNONYMS so find_semantic_field collapses the same
+ * multi-word business phrases ("social security number" -> `ssn`). Longest-
+ * phrase-first; every key is multi-word and unambiguous (no bare `social ->
+ * ssn`, which would collapse "social media"/"social login").
+ *
+ * Unlike the router's doc corpus, find_semantic_field's corpus is field LABELS
+ * (a different corpus), so expanding both query AND label/description bag here
+ * is the intended #19 improvement and does not affect router-recall.
+ */
+const PHRASE_SYNONYMS: readonly (readonly [string, string])[] = (
+  [
+    ['social security number', 'ssn'],
+    ['social security', 'ssn'],
+    ['date of birth', 'dob'],
+    ['postal code', 'zip'],
+    ['zip code', 'zip'],
+  ] as [string, string][]
+).sort((a, b) => b[0].length - a[0].length);
+
+/** Apply the ordered phrase-synonym rewrites to a lowercased string. */
+const applyPhraseSynonyms = (lower: string): string => {
+  let out = lower;
+  for (const [phrase, canonical] of PHRASE_SYNONYMS) {
+    if (!out.includes(phrase)) continue;
+    const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`\\b${escaped}\\b`, 'g'), canonical);
+  }
+  return out;
+};
+
+/**
  * Description / label / query tokenization path. Replace non-
  * alphanumeric with whitespace, split, lowercase, length filter,
  * stop-word filter. Does NOT apply CamelCase splitting — descriptions
  * are prose and `JSONPayload` / `iPhone` / `macOS` should be preserved
  * as written.
+ *
+ * The phrase-synonym pass is OPT-IN (default OFF): pass `{ expandPhrases:
+ * true }` to collapse multi-word business phrases before splitting. Enabled
+ * for both the query and this tool's OWN label/description corpus (#19) — a
+ * different corpus from the router's, so expanding it is safe.
  */
-export const tokenizeText = (raw: string): string[] => {
+export const tokenizeText = (
+  raw: string,
+  opts?: { readonly expandPhrases?: boolean },
+): string[] => {
   if (raw.length === 0) return [];
+  const normalized =
+    opts?.expandPhrases === true ? applyPhraseSynonyms(raw.toLowerCase()) : raw;
   const tokens: string[] = [];
-  for (const piece of raw.replace(/[^a-zA-Z0-9]/g, ' ').split(/\s+/)) {
+  for (const piece of normalized.replace(/[^a-zA-Z0-9]/g, ' ').split(/\s+/)) {
     const lower = piece.toLowerCase();
     if (lower.length < 2) continue;
     if (STOP_WORDS.has(lower)) continue;
@@ -278,11 +320,11 @@ const fieldTokenBag = (node: Node): Set<string> => {
   for (const t of tokenizeIdentifier(node.apiName)) bag.add(t);
   const label = node.label;
   if (label !== null && label.length > 0) {
-    for (const t of tokenizeText(label)) bag.add(t);
+    for (const t of tokenizeText(label, { expandPhrases: true })) bag.add(t);
   }
   const description = node.properties['description'];
   if (typeof description === 'string' && description.length > 0) {
-    for (const t of tokenizeText(description)) bag.add(t);
+    for (const t of tokenizeText(description, { expandPhrases: true })) bag.add(t);
   }
   return bag;
 };
@@ -452,7 +494,7 @@ export const findSemanticFieldHandler = async (
 ): Promise<Result<McpResponse<FindSemanticFieldOutput>, McpError>> => {
   const limit = input.limit ?? SEMANTIC_FIELD_DEFAULT_LIMIT;
   const minScore = input.minScore ?? SEMANTIC_FIELD_DEFAULT_MIN_SCORE;
-  const queryTokens = tokenizeText(input.description);
+  const queryTokens = tokenizeText(input.description, { expandPhrases: true });
   const queryBag = new Set<string>(queryTokens);
 
   // If the query is empty after tokenization, return zero matches with

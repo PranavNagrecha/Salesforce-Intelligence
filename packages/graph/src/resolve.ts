@@ -322,7 +322,9 @@ export const resolveComponents = async (
 ): Promise<Result<ResolveResult, GraphError>> => {
   const limit = Math.min(options?.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
   const minBase = options?.minScore ?? MIN_BASE;
-  const queryTokens = tokenizeText(query);
+  // Expand multi-word business phrases ("social security number" -> `ssn`) on
+  // the QUERY only — the corpus (node.parentApiName below) stays verbatim.
+  const queryTokens = tokenizeText(query, { expandPhrases: true });
   // Whole-query comparison key for the exact/prefix boost (see the per-node loop).
   const normQuery = normalizeName(query);
   // Space-delimited words of the raw query, each normalized. Used to detect

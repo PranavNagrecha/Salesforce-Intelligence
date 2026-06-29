@@ -116,15 +116,50 @@ const SYNONYMS: Readonly<Record<string, readonly string[]>> = {
 };
 
 /**
+ * Ordered, high-precision PHRASE synonyms (F1) — mirrors the graph resolver's
+ * `tokenize.ts` PHRASE_SYNONYMS so `route_question` collapses the same
+ * multi-word business phrases the field resolver does ("social security
+ * number" -> `ssn`). Longest-phrase-first; every key is multi-word and
+ * unambiguous (no bare `social -> ssn`, which would collapse "social
+ * media"/"social login").
+ */
+const PHRASE_SYNONYMS: readonly (readonly [string, string])[] = (
+  [
+    ['social security number', 'ssn'],
+    ['social security', 'ssn'],
+    ['date of birth', 'dob'],
+    ['postal code', 'zip'],
+    ['zip code', 'zip'],
+  ] as [string, string][]
+).sort((a, b) => b[0].length - a[0].length);
+
+/** Apply the ordered phrase-synonym rewrites to a lowercased string. */
+const applyPhraseSynonyms = (lower: string): string => {
+  let out = lower;
+  for (const [phrase, canonical] of PHRASE_SYNONYMS) {
+    if (!out.includes(phrase)) continue;
+    const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`\\b${escaped}\\b`, 'g'), canonical);
+  }
+  return out;
+};
+
+/**
  * Lowercase, fold apostrophes, split on non-word chars AND underscores (so
  * snake_case tool names and field api-names break into their words —
  * `object_access_audit` → object, access, audit; `Payment_Status__c` → payment,
  * status), drop stopwords + 1-char tokens.
+ *
+ * The phrase-synonym pass is OPT-IN (default OFF): pass `expandPhrases = true`
+ * to collapse multi-word phrases ("social security number" -> `ssn`) before
+ * splitting. Enabled ONLY on the QUERY (`semanticCandidates`), NEVER on the
+ * doc corpus (`buildIndex`) — rewriting the corpus shifts every term's IDF and
+ * tips borderline gold queries out of the top-K (the F1 router-recall
+ * regression). The doc corpus is tokenized verbatim.
  */
-export const tokenize = (text: string): string[] => {
-  const raw = text
-    .toLowerCase()
-    .replace(/[‘’ʼ']/g, "'")
+export const tokenize = (text: string, expandPhrases = false): string[] => {
+  const lowered = text.toLowerCase().replace(/[‘’ʼ']/g, "'");
+  const raw = (expandPhrases ? applyPhraseSynonyms(lowered) : lowered)
     .replace(/[^a-z0-9]+/g, ' ')
     .split(/\s+/)
     .filter((t) => t.length > 1 && !STOPWORDS.has(t));
@@ -277,7 +312,9 @@ export const resetFunnelIndex = (): void => {
  */
 export const semanticCandidates = (question: string, k = 8): ToolCandidate[] => {
   const idx = getFunnelIndex();
-  const qTokens = expand(tokenize(question));
+  // Expand multi-word phrases on the QUERY only — the doc corpus (buildIndex)
+  // is tokenized verbatim so the corpus IDF stays intact (F1 regression fix).
+  const qTokens = expand(tokenize(question, true));
   if (qTokens.length === 0) return [];
 
   const qtf = new Map<string, number>();

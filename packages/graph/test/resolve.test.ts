@@ -87,6 +87,19 @@ const seed: ExtractionResult = {
     // Stop-word-named component: "IT" tokenizes to nothing ("it" is a stop
     // word), so only the whole-name exact pass can recover it.
     makeNode({ id: 'Profile:IT', type: 'Profile', apiName: 'IT', label: 'IT' }),
+    // Phrase-synonym scenario (F1): a regulated SSN field plus a decoy Name
+    // field on the same object. The phrase "social security number" must
+    // collapse to the `ssn` token so Student_SSN__c wins over Student_Name__c
+    // (whose "name"≈"number" fuzz used to float it above the SSN field).
+    makeNode({ id: 'CustomObject:Student__c', apiName: 'Student__c', label: 'Student' }),
+    makeNode({ id: 'CustomField:Student__c.Student_SSN__c', type: 'CustomField', apiName: 'Student_SSN__c', label: 'Student SSN', parentId: 'CustomObject:Student__c' }),
+    makeNode({ id: 'CustomField:Student__c.Student_Name__c', type: 'CustomField', apiName: 'Student_Name__c', label: 'Student Name', parentId: 'CustomObject:Student__c' }),
+    // Corpus over-collapse decoy (F1 negative): a field literally labeled
+    // "Social Media Campaign". The phrase pass must NOT collapse this corpus
+    // label to `ssn`, or "social media campaign" queries would wrongly hit the
+    // SSN field.
+    makeNode({ id: 'CustomObject:Campaign', apiName: 'Campaign', label: 'Campaign' }),
+    makeNode({ id: 'CustomField:Campaign.Social_Media_Campaign__c', type: 'CustomField', apiName: 'Social_Media_Campaign__c', label: 'Social Media Campaign', parentId: 'CustomObject:Campaign' }),
   ],
   edges: [
     // parentOf structure
@@ -187,6 +200,32 @@ describe('resolveComponents — semantic (synonyms)', () => {
     if (!r.ok) return;
     const ids = r.value.candidates.map((c) => c.id);
     expect(ids.some((id) => id.endsWith('Owner__c'))).toBe(true);
+  });
+});
+
+describe('resolveComponents — phrase synonyms (F1)', () => {
+  it('collapses "social security number" to the SSN field, not the Name decoy', async () => {
+    const r = await resolveComponents(
+      store,
+      'the student social security number field',
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Student_SSN__c must be the top candidate (exact/ambiguous-top), not buried
+    // under Student_Name__c (number≈name fuzz). Disposition must NOT be 'none'.
+    expect(r.value.candidates[0]?.id).toBe('CustomField:Student__c.Student_SSN__c');
+    expect(r.value.disposition).not.toBe('none');
+  });
+
+  it('does NOT collapse a "social media" query onto the SSN field (negative)', async () => {
+    const r = await resolveComponents(store, 'social media campaign field');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const top = r.value.candidates[0]?.id ?? '';
+    expect(top).not.toBe('CustomField:Student__c.Student_SSN__c');
+    // The intended corpus field should surface instead.
+    const allIds = r.value.candidates.map((c) => c.id);
+    expect(allIds).toContain('CustomField:Campaign.Social_Media_Campaign__c');
   });
 });
 
