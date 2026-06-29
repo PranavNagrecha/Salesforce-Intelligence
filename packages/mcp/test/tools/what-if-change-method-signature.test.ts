@@ -164,12 +164,15 @@ const richSeed: ExtractionResult = {
     }),
     // Flow caller — methodName is NOT in the Flow edge properties; the
     // tool should accept it anyway because Flow XML declares actions
-    // at the class level.
+    // at the class level. CR-CAP-08: the real flow.ts extractor emits
+    // Flow callsApex at confidence 'parsed' (it parses the <actionCalls>
+    // XML), NOT 'declared'. Seed the realistic value so the per-item
+    // confidence assertion guards real behaviour.
     makeEdge({
       fromId: FLOW_CALLER,
       toId: TARGET_CLASS,
       edgeType: 'callsApex',
-      confidence: 'declared',
+      confidence: 'parsed',
       source: 'flow-extractor',
     }),
     // LWC caller with declared confidence.
@@ -326,6 +329,29 @@ describe('whatIfChangeMethodSignatureHandler', () => {
     expect(byId.get(FLOW_CALLER)?.category).toBe('code-needs-update');
   });
 
+  it('stamps per-caller confidence from the edge: Apex=heuristic, LWC=declared, Flow=parsed', async () => {
+    // CR-CAP-08 regression guard. The tool stamps item.confidence from
+    // edge.confidence, so the three real upstream tiers must survive
+    // round-trip and NOT collapse to one blanket "heuristic" tier.
+    const result = await whatIfChangeMethodSignatureHandler(ctx, {
+      classApiName: TARGET_CLASS,
+      methodName: 'processOpp',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const byId = new Map(
+      result.value.data.callingClasses.map((c) => [c.componentId, c]),
+    );
+    // Apex caller / trigger caller come from the heuristic apex-scanner.
+    expect(byId.get(APEX_CALLER)?.confidence).toBe('heuristic');
+    expect(byId.get(TRIGGER_CALLER)?.confidence).toBe('heuristic');
+    // LWC caller is the declarative @salesforce/apex import.
+    expect(byId.get(LWC_CALLER)?.confidence).toBe('declared');
+    // Flow caller is parsed out of the <actionCalls> XML by flow.ts —
+    // it is 'parsed', NOT 'declared' and NOT 'heuristic'.
+    expect(byId.get(FLOW_CALLER)?.confidence).toBe('parsed');
+  });
+
   it('emits a parallel testClassesNeedingUpdate list with both test classes', async () => {
     const result = await whatIfChangeMethodSignatureHandler(ctx, {
       classApiName: TARGET_CLASS,
@@ -452,6 +478,25 @@ describe('whatIfChangeMethodSignatureHandler', () => {
     expect(result.value.data.disclosure).toContain('heuristic confidence');
     expect(result.value.data.disclosure).toContain('Type.forName');
     expect(result.value.data.disclosure).toContain('coversTest');
+  });
+
+  it('disclosure is per-source-honest: admits Flow=parsed and LWC=declared, not a blanket all-heuristic claim', async () => {
+    // CR-CAP-08: the old disclosure made a blanket "callers identified
+    // via the apex-scanner are at heuristic confidence" claim, which is
+    // false — Flow callers are parsed (flow.ts) and LWC callers are
+    // declared. The disclosure must admit the mixed tiers.
+    const result = await whatIfChangeMethodSignatureHandler(ctx, {
+      classApiName: TARGET_CLASS,
+      methodName: 'processOpp',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const disclosure = result.value.data.disclosure;
+    expect(disclosure).toContain('parsed');
+    expect(disclosure).toContain('declared');
+    // No blanket "all callers ... heuristic" / "via the apex-scanner ...
+    // heuristic" sweep that erases the parsed/declared tiers.
+    expect(disclosure).not.toMatch(/all callers[^.]*heuristic/i);
   });
 
   it('echoes the manifest vaultState into the response envelope', async () => {
