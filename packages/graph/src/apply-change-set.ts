@@ -8,6 +8,7 @@ import {
   EDGE_COLUMN_COUNT,
   edgeRowParams,
   IMPORT_BATCH_SIZE,
+  mintFutureDispatchEdges,
   NODE_COLUMN_COUNT,
   nodeRowParams,
 } from './import.js';
@@ -211,6 +212,13 @@ export const computeChangeSet = async (
   // GRF-01: mirror cold import — canonicalize Apex call targets before the
   // first-writer-wins dedupe so incremental apply matches full rebuild.
   canonicalizeApexCallEdgeTargets([...desiredNodes.values()], desiredEdgeList);
+  // CR-CAP-09: mirror cold import — mint class-granular @future dispatchesAsync
+  // edges after canonicalize. INCREMENTAL GAP: this only sees the change-set's
+  // node view (`desiredNodes`), so a future-holding target class outside the
+  // change set is invisible and under-mints vs a full refresh; full
+  // `/sfi-refresh` is the ground truth. Run before the PK dedupe so the minted
+  // edges participate in the same first-writer-wins collapse.
+  mintFutureDispatchEdges([...desiredNodes.values()], desiredEdgeList);
   const desiredEdges = new Map<string, Edge>();
   for (const edge of desiredEdgeList) {
     const pk = edgePk(edge.fromId, edge.toId, edge.edgeType, edge.source);
