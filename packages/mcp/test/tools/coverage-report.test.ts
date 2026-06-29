@@ -176,4 +176,62 @@ describe('coverageReportHandler', () => {
       expect(data.partial.map((e) => e.type)).not.toContain(t);
     }
   });
+
+  describe('CR-CAP-20 — topUncoveredFamilies ranking', () => {
+    it('ranks skipped families desc, caps at 10, labels modeled vs raw, and extends the disclosure', async () => {
+      // Build a manifest with >10 skipped dirs to exercise the cap, plus a
+      // SKIPPED_DIR_COVERAGE-mapped dir (compactLayouts -> CompactLayout)
+      // and an unmapped one (omniProcesses, raw label).
+      const skipped: Record<string, number> = { omniProcesses: 500, compactLayouts: 5 };
+      for (let i = 0; i < 11; i++) skipped[`fam${i}`] = 100 + i;
+      const skipCtx: Context = {
+        ...ctx,
+        manifest: { ...manifest, skippedDirectories: skipped } as Context['manifest'],
+      };
+      const result = await coverageReportHandler(skipCtx, {});
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const top = result.value.data.topUncoveredFamilies;
+      expect(top).toBeDefined();
+      // Capped at 10.
+      expect(top!.length).toBe(10);
+      // Highest-volume family first.
+      expect(top![0]!.family).toBe('omniProcesses');
+      expect(top![0]!.skippedFiles).toBe(500);
+      expect(top![0]!.modeledType).toBe(false);
+      // compactLayouts (only 5) is below the cap cut-off and excluded;
+      // but verify the mapped-label behavior in the small-map test below.
+      // Disclosure carries the new clause and the honest framing: a
+      // listed family is "retrieved-but-not-modeled, never 'absent'" — it
+      // must NOT label any family as absent.
+      expect(result.value.data.disclosure).toContain('skipped-file volume');
+      expect(result.value.data.disclosure).toContain('not modeled by an extractor');
+      expect(result.value.data.disclosure).toContain("never 'absent'");
+    });
+
+    it('maps a known dir to its ComponentType (modeledType true) and keeps an unmapped dir raw', async () => {
+      const skipCtx: Context = {
+        ...ctx,
+        manifest: {
+          ...manifest,
+          skippedDirectories: { omniProcesses: 30, compactLayouts: 5 },
+        } as Context['manifest'],
+      };
+      const result = await coverageReportHandler(skipCtx, {});
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const top = result.value.data.topUncoveredFamilies!;
+      expect(top).toEqual([
+        { family: 'omniProcesses', rawDir: 'omniProcesses', skippedFiles: 30, modeledType: false },
+        { family: 'CompactLayout', rawDir: 'compactLayouts', skippedFiles: 5, modeledType: true },
+      ]);
+    });
+
+    it('is an empty array on a clean vault (no skippedDirectories) — inert on the golden', async () => {
+      const result = await coverageReportHandler(ctx, {});
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.data.topUncoveredFamilies).toEqual([]);
+    });
+  });
 });

@@ -12,6 +12,7 @@ import {
   buildCoverageEntries,
   ENTERPRISE_NOT_MODELED_TYPES,
   loadManifest,
+  rankUncoveredFamilies,
   readCoverageEntries,
   readSkippedDirectories,
   saveManifest,
@@ -661,5 +662,77 @@ describe('loadManifest missing-file handling', () => {
     } finally {
       await rm(vault, { recursive: true, force: true });
     }
+  });
+});
+
+describe('rankUncoveredFamilies (CR-CAP-20)', () => {
+  it('ranks skipped families by skipped-file volume desc, mapping known dirs to their ComponentType', () => {
+    const manifest: ExtendedVaultManifest = {
+      ...sampleManifest(),
+      skippedDirectories: {
+        omniProcesses: 120,
+        processBuilders: 30,
+        compactLayouts: 5,
+      },
+    };
+    const ranked = rankUncoveredFamilies(manifest);
+    // desc by skippedFiles.
+    expect(ranked.map((r) => r.family)).toEqual([
+      'omniProcesses',
+      'processBuilders',
+      'CompactLayout',
+    ]);
+    expect(ranked.map((r) => r.skippedFiles)).toEqual([120, 30, 5]);
+    // compactLayouts is a SKIPPED_DIR_COVERAGE-mapped family: surfaced
+    // under its canonical ComponentType, modeledType:true.
+    const compact = ranked.find((r) => r.rawDir === 'compactLayouts');
+    expect(compact).toEqual({
+      family: 'CompactLayout',
+      rawDir: 'compactLayouts',
+      skippedFiles: 5,
+      modeledType: true,
+    });
+    // omniProcesses is NOT in SKIPPED_DIR_COVERAGE: raw label kept,
+    // modeledType:false.
+    const omni = ranked.find((r) => r.rawDir === 'omniProcesses');
+    expect(omni).toEqual({
+      family: 'omniProcesses',
+      rawDir: 'omniProcesses',
+      skippedFiles: 120,
+      modeledType: false,
+    });
+  });
+
+  it('tiebreaks equal counts by family name asc', () => {
+    const manifest: ExtendedVaultManifest = {
+      ...sampleManifest(),
+      skippedDirectories: { zebra: 10, alpha: 10, mike: 10 },
+    };
+    const ranked = rankUncoveredFamilies(manifest);
+    expect(ranked.map((r) => r.family)).toEqual(['alpha', 'mike', 'zebra']);
+  });
+
+  it('returns [] for a clean vault (empty skippedDirectories map) — inert on the golden', () => {
+    expect(rankUncoveredFamilies(sampleManifest())).toEqual([]);
+    expect(
+      rankUncoveredFamilies({ ...sampleManifest(), skippedDirectories: {} }),
+    ).toEqual([]);
+    expect(rankUncoveredFamilies(undefined)).toEqual([]);
+  });
+
+  it('ignores zero/negative counts (retrieved-but-not-skipped)', () => {
+    const manifest: ExtendedVaultManifest = {
+      ...sampleManifest(),
+      skippedDirectories: { omniProcesses: 0, compactLayouts: 3 },
+    };
+    const ranked = rankUncoveredFamilies(manifest);
+    expect(ranked).toEqual([
+      {
+        family: 'CompactLayout',
+        rawDir: 'compactLayouts',
+        skippedFiles: 3,
+        modeledType: true,
+      },
+    ]);
   });
 });
