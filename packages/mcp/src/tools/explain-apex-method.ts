@@ -150,6 +150,48 @@ export interface ExplainApexClassifiers {
 }
 
 /**
+ * Authoritative sharing-enforcement semantics for a class, composed
+ * deterministically from the declared sharing keyword (`modifiers`) and the
+ * async classifiers — NOT a runtime trace. This block exists to head off the
+ * single most common Apex misconception: that a top-level class with NO
+ * sharing keyword "defaults to `without sharing`". It does not — an
+ * unannotated top-level class INHERITS THE CALLER'S sharing context. The
+ * platform truth a sharing question must carry:
+ *
+ *   - `declared` — the source sharing keyword (`with sharing` /
+ *     `without sharing` / `inherited sharing`) or `null` when none is
+ *     declared. Read from `modifiers` (the sharing keyword is a class-decl
+ *     modifier), not from the `.cls-meta.xml`.
+ *   - `effectiveModel` — what enforcement actually applies:
+ *       • a declared keyword maps to itself;
+ *       • NO keyword on a SYNCHRONOUS entry inherits the caller's context
+ *         (`inherits-caller`), so it can be with- OR without-sharing depending
+ *         on who called it — it is NOT `without sharing` by default;
+ *       • NO keyword on an ASYNC entry (batch / schedulable / queueable /
+ *         future) that the PLATFORM invokes runs in `system-context` — there
+ *         is no Apex caller whose sharing context can be inherited, and async
+ *         Apex executes in system mode, so record sharing ends up NOT enforced
+ *         (because of system-context execution, NOT because "without sharing
+ *         is the default").
+ *   - `runsAsSystem` — true when the class is async-entry (batch / schedulable
+ *     / queueable / future). Async Apex runs as the SYSTEM, never impersonating
+ *     the user who submitted or scheduled the job.
+ *   - `note` — a verbatim platform-semantics line the renderer surfaces so the
+ *     answer never falls back on the "no keyword = without sharing" myth.
+ */
+export interface ExplainApexSharingSemantics {
+  readonly declared: 'with sharing' | 'without sharing' | 'inherited sharing' | null;
+  readonly effectiveModel:
+    | 'with sharing'
+    | 'without sharing'
+    | 'inherited sharing'
+    | 'inherits-caller'
+    | 'system-context';
+  readonly runsAsSystem: boolean;
+  readonly note: string;
+}
+
+/**
  * One outgoing `callsApex` target. `targetId` is the canonical id of
  * the called class / trigger; `targetApiName` is the bare ApiName so
  * the renderer can inline "calls MyService" without a separate
@@ -204,6 +246,13 @@ export interface ExplainApexMethodOutput {
   readonly sourceBytes: number;
   readonly isTest: boolean;
   readonly classifiers: ExplainApexClassifiers;
+  /**
+   * Deterministic sharing-enforcement semantics (see
+   * {@link ExplainApexSharingSemantics}). Always present so a "does this run
+   * with sharing?" question is answered from platform rules, not the
+   * "no keyword = without sharing" misconception.
+   */
+  readonly sharingSemantics: ExplainApexSharingSemantics;
   readonly calls: readonly ExplainApexCall[];
   /** Heuristic `callsApex` edges with no matching graph node (scanner-only). */
   readonly unresolvedCallTargets: readonly string[];
@@ -310,6 +359,70 @@ const buildClassifiers = (node: Node): ExplainApexClassifiers => ({
   hasAuraEnabledMethod: readBool(node, 'hasAuraEnabledMethod'),
   isRestResource: readBool(node, 'isRestResource'),
 });
+
+/**
+ * Read the declared sharing keyword out of the class's `modifiers`. The
+ * sharing keyword is a class-declaration modifier (`with sharing` /
+ * `without sharing` / `inherited sharing`), surfaced as a single joined token
+ * by the extractor (e.g. `['global', 'with sharing']`). Returns `null` when no
+ * sharing keyword is declared. Read from source modifiers, NOT the
+ * `.cls-meta.xml` (which does not carry the sharing keyword).
+ */
+const readDeclaredSharing = (
+  modifiers: readonly string[],
+): 'with sharing' | 'without sharing' | 'inherited sharing' | null => {
+  for (const m of modifiers) {
+    const norm = m.trim().toLowerCase();
+    if (norm === 'with sharing') return 'with sharing';
+    if (norm === 'without sharing') return 'without sharing';
+    if (norm === 'inherited sharing') return 'inherited sharing';
+  }
+  return null;
+};
+
+/**
+ * Compose the authoritative {@link ExplainApexSharingSemantics} block from the
+ * declared sharing keyword and the async classifiers. Deterministic, no graph
+ * reads. Encodes the platform rules so a sharing question is never answered
+ * with the "no keyword = without sharing" myth.
+ */
+const buildSharingSemantics = (
+  declared: 'with sharing' | 'without sharing' | 'inherited sharing' | null,
+  classifiers: ExplainApexClassifiers,
+): ExplainApexSharingSemantics => {
+  const runsAsSystem =
+    classifiers.isBatchable ||
+    classifiers.isSchedulable ||
+    classifiers.isQueueable ||
+    classifiers.hasFutureMethod;
+
+  if (declared !== null) {
+    const note =
+      `Class declares \`${declared}\`, so record sharing is enforced per that keyword regardless of caller.` +
+      (runsAsSystem
+        ? ' Note: as async Apex (batch/schedulable/queueable/future) it still runs in SYSTEM context as the system — it does NOT impersonate the user who submitted or scheduled it — and CRUD/FLS are NOT enforced unless the code checks them explicitly (WITH SECURITY_ENFORCED / Security.stripInaccessible / Schema describe).'
+        : ' CRUD/FLS are NOT enforced by the sharing keyword — they need explicit checks (WITH SECURITY_ENFORCED / Security.stripInaccessible / Schema describe).');
+    return { declared, effectiveModel: declared, runsAsSystem, note };
+  }
+
+  // No sharing keyword declared.
+  if (runsAsSystem) {
+    return {
+      declared: null,
+      effectiveModel: 'system-context',
+      runsAsSystem: true,
+      note:
+        'No sharing keyword is declared. A no-keyword top-level class does NOT default to `without sharing` — it inherits the caller\'s sharing context. But this class is async Apex (batch/schedulable/queueable/future): the platform invokes it with no Apex caller context to inherit AND async Apex runs in SYSTEM context, so record sharing ends up NOT enforced — because of system-context execution, NOT because "without sharing is the default". It runs as the system, never as the user who submitted/scheduled it. To enforce sharing, declare `with sharing`. CRUD/FLS are also bypassed unless checked explicitly.',
+    };
+  }
+  return {
+    declared: null,
+    effectiveModel: 'inherits-caller',
+    runsAsSystem: false,
+    note:
+      'No sharing keyword is declared. A no-keyword top-level class does NOT default to `without sharing` — it INHERITS THE CALLER\'S sharing context, so enforcement is with- or without-sharing depending on the entry point that invoked it. To pin enforcement, declare `with sharing` or `without sharing` explicitly. CRUD/FLS are a separate concern and need explicit checks regardless.',
+  };
+};
 
 /**
  * Strip the canonical-id prefix to surface the bare ApiName the
@@ -507,6 +620,8 @@ export const explainApexMethodHandler = async (
     return err({ kind: 'internal', message: fieldAccessResult.error });
   }
 
+  const modifiers = readStringArray(node, 'modifiers');
+  const classifiers = buildClassifiers(node);
   const data: ExplainApexMethodOutput = {
     classApiName: classId,
     apiName: node.apiName,
@@ -516,11 +631,15 @@ export const explainApexMethodHandler = async (
     events: readStringArray(node, 'events'),
     status: readString(node, 'status'),
     apiVersion: node.apiVersion,
-    modifiers: readStringArray(node, 'modifiers'),
+    modifiers,
     lineCount: readNumber(node, 'lineCount'),
     sourceBytes: readNumber(node, 'sourceBytes'),
     isTest: readBool(node, 'isTest'),
-    classifiers: buildClassifiers(node),
+    classifiers,
+    sharingSemantics: buildSharingSemantics(
+      readDeclaredSharing(modifiers),
+      classifiers,
+    ),
     calls: callsResult.value.calls,
     unresolvedCallTargets: callsResult.value.unresolvedCallTargets,
     fieldAccess: fieldAccessResult.value.resolved,
