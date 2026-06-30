@@ -388,6 +388,158 @@ describe('synthesize golden chain (SYNTH-03)', () => {
   });
 });
 
+// SYNTH bundle — the deterministic grounding pass must surface the
+// flow/sharing/VR/false-premise fields the analytical tools emit, so a CORRECT
+// cascade no longer flattens to an empty 0-bullet/0-caveat skeleton. Each test
+// FAILS before the FACT_KEY/false-premise extensions and PASSES after.
+describe('SYNTH bundle — surfaces flow/sharing/VR/false-premise facts', () => {
+  it('lifts VR evaluation facts (errorConditionFormula, active, evaluatesAllActiveRules) into bullets', async () => {
+    // ValidationRule cascade: both rules evaluate FALSE so the save succeeds;
+    // one rule is inert only because its OWN formula tests the profile.
+    const vrCascade = {
+      verdict: 'save-succeeds',
+      evaluatesAllActiveRules: true,
+      rules: [
+        {
+          id: 'ValidationRule:Account.No_updates_to_Open',
+          active: true,
+          errorConditionFormula: 'ISCHANGED(StageName)',
+        },
+        {
+          id: 'ValidationRule:Account.FacultyEdit',
+          active: true,
+          errorConditionFormula: "$Profile.Name = 'Faculty'",
+        },
+      ],
+    };
+    const r = await synthesizeAnswerHandler(ctx, { input: vrCascade });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const b = r.value.data.bullets;
+    expect(b).toContain('evaluatesAllActiveRules: true');
+    expect(b).toContain('active: true');
+    expect(b).toContain("errorConditionFormula: $Profile.Name = 'Faculty'");
+    // Both VR ids are cited, so the answer can name them.
+    const ids = r.value.data.citations.map((c) => c.id);
+    expect(ids).toContain('ValidationRule:Account.No_updates_to_Open');
+    expect(ids).toContain('ValidationRule:Account.FacultyEdit');
+    // The cascade is no longer an empty skeleton.
+    expect(r.value.data.bullets.length).toBeGreaterThan(0);
+  });
+
+  it('lifts component-shape facts (apexCallCount, fieldAccessCount, isExposed) for a false-premise rebuttal', async () => {
+    const componentShape = {
+      componentId: 'LightningComponentBundle:applicationFormItem',
+      apexCallCount: 0,
+      fieldAccessCount: 0,
+      isExposed: false,
+    };
+    const r = await synthesizeAnswerHandler(ctx, { input: componentShape });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const b = r.value.data.bullets;
+    expect(b).toContain('apexCallCount: 0');
+    expect(b).toContain('fieldAccessCount: 0');
+    expect(b).toContain('isExposed: false');
+  });
+
+  it('lifts sharing semantics (sharingSemantics, effectiveModel, runInMode) into bullets', async () => {
+    const sharingCascade = {
+      componentId: 'ApexClass:ApplicationValidationService',
+      sharingSemantics: 'inherited',
+      effectiveModel: 'inherits-caller',
+      runInMode: 'inherited',
+      callers: [{ id: 'ApexClass:ApplicationFormService' }],
+    };
+    const r = await synthesizeAnswerHandler(ctx, { input: sharingCascade });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const b = r.value.data.bullets;
+    expect(b).toContain('sharingSemantics: inherited');
+    expect(b).toContain('effectiveModel: inherits-caller');
+    expect(b).toContain('runInMode: inherited');
+    expect(b).toContain('callers: 1 item(s)');
+  });
+
+  it('lifts flow trigger gate facts (triggerType, recordTriggerType, conditions, filterFormula)', async () => {
+    const flowCascade = {
+      flowId: 'Flow:Application_Field_Sync_To_Contact',
+      triggerInfo: {
+        triggerType: 'RecordAfterSave',
+        recordTriggerType: 'CreateAndUpdate',
+        filterFormula: "{!$Profile.Name} = 'TRAA Community Login User'",
+      },
+    };
+    const r = await synthesizeAnswerHandler(ctx, { input: flowCascade });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const b = r.value.data.bullets;
+    expect(b).toContain('triggerType: RecordAfterSave');
+    expect(b).toContain('recordTriggerType: CreateAndUpdate');
+    expect(b).toContain(
+      "filterFormula: {!$Profile.Name} = 'TRAA Community Login User'",
+    );
+  });
+
+  it('lifts transaction/save semantics (rollsBackTransaction, statement)', async () => {
+    const saveCascade = {
+      rollsBackTransaction: true,
+      statement: 'All active validation rules fire on every DML regardless of profile.',
+    };
+    const r = await synthesizeAnswerHandler(ctx, { input: saveCascade });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const b = r.value.data.bullets;
+    expect(b).toContain('rollsBackTransaction: true');
+    expect(b).toContain(
+      'statement: All active validation rules fire on every DML regardless of profile.',
+    );
+  });
+
+  it('emits an explicit false-premise caveat when resolve disposition is "none"', async () => {
+    // The named class does not exist in the vault — the premise is false.
+    const noMatch = {
+      query: 'ApplicationSubmissionService',
+      disposition: 'none',
+      candidates: [],
+    };
+    const r = await synthesizeAnswerHandler(ctx, { input: noMatch });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const caveat = r.value.data.caveats.find((c) => c.startsWith('FALSE PREMISE:'));
+    expect(caveat).toBeDefined();
+    expect(caveat).toContain('does not exist in the vault');
+  });
+
+  it('emits the false-premise caveat for a boolean premiseRejected/falsePremise signal', async () => {
+    const rejected = {
+      query: 'Admissions_Status_History__c',
+      premiseRejected: true,
+      redirectHint: 'CustomField:Contact.Best_Admission_Status__c',
+    };
+    const r = await synthesizeAnswerHandler(ctx, { input: rejected });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(
+      r.value.data.caveats.some((c) => c.startsWith('FALSE PREMISE:')),
+    ).toBe(true);
+    // The redirect hint is still cited so the answer can point to the real field.
+    expect(r.value.data.citations.map((c) => c.id)).toContain(
+      'CustomField:Contact.Best_Admission_Status__c',
+    );
+  });
+
+  it('does NOT emit a false-premise caveat when disposition is exact (no false positive)', async () => {
+    const exact = { query: 'Account', disposition: 'exact', matchKind: 'exact' };
+    const r = await synthesizeAnswerHandler(ctx, { input: exact });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(
+      r.value.data.caveats.some((c) => c.startsWith('FALSE PREMISE:')),
+    ).toBe(false);
+  });
+});
+
 describe('synthesizeAnswerInputSchema', () => {
   it('accepts input of any shape plus optional question + draft', () => {
     expect(
