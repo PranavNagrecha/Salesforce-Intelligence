@@ -733,6 +733,94 @@ describe('detectCodeQualityIssues — fake-assertion', () => {
     const src = `public class T { public static void t() { System.assert(true); } }`;
     expect(rulesOf(run(src, { isTest: false }))).not.toContain('fake-assertion');
   });
+
+  it('counts exactly 5 tautologies and 0 fail-guards in a class with 5 assert(true) + 7 assert(false) — real-org shape', () => {
+    // Mirrors the real ApplicationAccessServiceTest shape: 5 allow-path assert(true)
+    // tautologies and 7 deny-path assert(false) fail-guards across 12 test methods.
+    // Before the fix, the recognizer counted all 12 as fake. After the fix, only the
+    // 5 assert(true) calls are counted.
+    const src = `@isTest
+    private class RecordAccessTest {
+        @isTest static void allowInternalUser() {
+            // allow path — no real behavioral assertion
+            System.assert(true, 'An internal user should access any record.');
+        }
+        @isTest static void allowOwner() {
+            System.assert(true, 'The owner should be allowed.');
+        }
+        @isTest static void allowInternalModify() {
+            System.assert(true, 'An internal user is unrestricted.');
+        }
+        @isTest static void allowNullArgs() {
+            System.assert(true, 'A save with no records should pass the guard.');
+        }
+        @isTest static void allowForeignData() {
+            System.assert(true, 'An internal user is unrestricted, including foreign data.');
+        }
+        @isTest static void denyNonOwner() {
+            try {
+                RecordAccessService.guard(someId);
+                System.assert(false, 'A non-owner community user must be denied.');
+            } catch (RecordAccessService.NoAccessException e) {
+                System.assertEquals(RecordAccessService.NO_ACCESS, e.getMessage(), 'wrong error msg');
+            }
+        }
+        @isTest static void denyLoadedRecord() {
+            try {
+                RecordAccessService.guardLoaded(rec);
+                System.assert(false, 'A non-owner must be denied via the loaded-record overload.');
+            } catch (RecordAccessService.NoAccessException e) {
+                System.assertEquals(RecordAccessService.NO_ACCESS, e.getMessage(), 'wrong error msg');
+            }
+        }
+        @isTest static void denyUnknownId() {
+            try {
+                RecordAccessService.guard(unknownId);
+                System.assert(false, 'An unknown id must be denied.');
+            } catch (RecordAccessService.NoAccessException e) {
+                System.assertEquals(RecordAccessService.NO_ACCESS, e.getMessage(), 'wrong error msg');
+            }
+        }
+        @isTest static void denyNullId() {
+            try {
+                RecordAccessService.guard(null);
+                System.assert(false, 'A null id must be denied under restriction.');
+            } catch (RecordAccessService.NoAccessException e) {
+                System.assertEquals(RecordAccessService.NO_ACCESS, e.getMessage(), 'wrong error msg');
+            }
+        }
+        @isTest static void denyModifyNonOwner() {
+            try {
+                RecordAccessService.guardModify(rec);
+                System.assert(false, 'A non-owner must not modify the record.');
+            } catch (RecordAccessService.NoAccessException e) {
+                System.assertEquals(RecordAccessService.NO_ACCESS, e.getMessage(), 'wrong error msg');
+            }
+        }
+        @isTest static void denyReparent() {
+            try {
+                RecordAccessService.guardModify(reparentRec);
+                System.assert(false, 'Reassigning the program must be blocked.');
+            } catch (RecordAccessService.NoReparentException e) {
+                System.assertEquals(RecordAccessService.NO_REPARENT, e.getMessage(), 'wrong error msg');
+            }
+        }
+        @isTest static void denyForeignContact() {
+            try {
+                RecordAccessService.guardModify(foreignContactRec);
+                System.assert(false, 'Updating someone elses contact must be blocked.');
+            } catch (RecordAccessService.ContactNotOwnException e) {
+                System.assertEquals(RecordAccessService.CONTACT_NOT_OWN, e.getMessage(), 'wrong error msg');
+            }
+        }
+    }`;
+    const issues = run(src, { isTest: true }).filter(
+      (i) => i.rule === 'fake-assertion',
+    );
+    // Only the 5 assert(true) allow-path calls are tautologies.
+    // The 7 assert(false) deny-path calls are fail-guards and must NOT be flagged.
+    expect(issues).toHaveLength(5);
+  });
 });
 
 describe('detectCodeQualityIssues — hardcoded-sandbox-test-data', () => {
