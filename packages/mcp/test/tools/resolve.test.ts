@@ -112,6 +112,83 @@ describe('resolveHandler', () => {
     expect(r.value.data.candidates).toEqual([]);
   });
 
+  it('on a type-scoped none with COMPLETE coverage: disclosure states false premise, stop leads (batch 8)', async () => {
+    // A vault whose ApexClass family is fully covered. Resolving a class name
+    // that does not exist, scoped to ApexClass, is a DETERMINATE NEGATIVE.
+    const apexDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-resolve-apex-'));
+    const opened = await openGraph(join(apexDir, 'apex.db'));
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const apexStore = opened.value;
+    const apexSeed: ExtractionResult = {
+      nodes: [
+        node({
+          id: 'ApexClass:ApplicationFormService',
+          type: 'ApexClass',
+          apiName: 'ApplicationFormService',
+          label: 'ApplicationFormService',
+        }),
+      ],
+      edges: [],
+    };
+    const imp = await importExtractionResults(apexStore, [apexSeed]);
+    expect(imp.ok).toBe(true);
+    const apexManifest = {
+      version: '0.1.0',
+      refreshedAt: '2026-05-27T14:33:08Z',
+      sourceOrg: 'me@example.com',
+      components: { ApexClass: 1 },
+      edges: {},
+      sourceTreeHash: 'sha256:resolve-apex',
+      coverage: [
+        {
+          type: 'ApexClass',
+          requested: true,
+          retrieved: 1,
+          errored: false,
+          neverModeled: false,
+          retrieveConfirmed: true,
+        },
+      ],
+    } as unknown as VaultManifest;
+    const apexCtx: Context = {
+      vaultRoot: apexDir,
+      manifest: apexManifest,
+      graph: apexStore,
+    };
+    try {
+      const r = await resolveHandler(apexCtx, {
+        query: 'AcmeCoSubmissionService',
+        types: ['ApexClass'],
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.value.data;
+      expect(d.disposition).toBe('none');
+      expect(d.disclosure).toContain('FALSE PREMISE');
+      expect(d.disclosure).toContain('COMPLETE coverage');
+      // stop leads; refresh demoted.
+      expect(d.nextActions[0]?.action).toBe('stop');
+      expect(d.nextActions[1]?.action).toBe('refresh');
+    } finally {
+      await closeGraph(apexStore);
+      rmSync(apexDir, { recursive: true, force: true });
+    }
+  });
+
+  it('on a type-scoped none with UNKNOWN coverage: keeps inconclusive refresh-first framing (regression guard)', async () => {
+    // The default fixture has components: {} so ApexClass coverage is unknown.
+    const r = await resolveHandler(ctx, {
+      query: 'AcmeCoSubmissionService',
+      types: ['ApexClass'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.disposition).toBe('none');
+    expect(r.value.data.disclosure).not.toContain('FALSE PREMISE');
+    expect(r.value.data.nextActions[0]?.action).toBe('refresh');
+  });
+
   it('surfaces a ready-to-ask clarifying question on ambiguous (email)', async () => {
     const r = await resolveHandler(ctx, { query: 'email' });
     expect(r.ok).toBe(true);
