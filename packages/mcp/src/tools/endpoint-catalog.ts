@@ -116,6 +116,25 @@ export interface EndpointEntry {
   readonly sourceComponentId: ComponentId;
   readonly url: string | null;
   readonly namedCredential?: string | null;
+  /**
+   * For `named-credential` entries only: the count of inbound
+   * `references` edges that point at this NamedCredential node (an
+   * ExternalService binding it, an OmniStudio IP declaring its
+   * `callout:` alias, a captured Apex `callout:` reference, etc.).
+   * Absent for every other kind. A `0` is the grounded basis for
+   * {@link orphaned}.
+   */
+  readonly referenceCount?: number;
+  /**
+   * For `named-credential` entries only: `true` when
+   * {@link referenceCount} is `0` — the credential exists in the org but
+   * nothing in the retrieved metadata is wired to it. Surfaced so the
+   * catalog reports an orphaned credential as orphaned instead of
+   * implying it authorizes a callout. Honest-boundary: this counts
+   * MODELED references; an `orphaned: true` means "no reference the
+   * retrieve captured", not a guarantee of zero runtime use.
+   */
+  readonly orphaned?: boolean;
 }
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
@@ -295,16 +314,30 @@ const collectNamedCredentials = async (
     limit: ENDPOINT_CATALOG_MAX_PER_CATEGORY,
   });
   if (!nodesResult.ok) return err(nodesResult.error.message);
-  return ok(
-    (nodesResult.value as readonly Node[]).map((node) => ({
+  const entries: EndpointEntry[] = [];
+  for (const node of nodesResult.value as readonly Node[]) {
+    // Inbound `references` edges = anything in the retrieved metadata
+    // wired to this credential. A zero count is the grounded basis for
+    // `orphaned: true` — so the catalog reports an unreferenced
+    // credential as orphaned instead of implying it is in use.
+    const inboundResult = await listEdges(ctx.graph, node.id, {
+      direction: 'in',
+      edgeType: 'references',
+    });
+    if (!inboundResult.ok) return err(inboundResult.error.message);
+    const referenceCount = inboundResult.value.length;
+    entries.push({
       endpointKind: 'named-credential' as const,
       direction: 'outbound' as const,
       sourceComponentId: node.id,
       url:
         readOptionalString(node.properties, 'url') ??
         readOptionalString(node.properties, 'endpoint'),
-    })),
-  );
+      referenceCount,
+      orphaned: referenceCount === 0,
+    });
+  }
+  return ok(entries);
 };
 
 /**
