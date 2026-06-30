@@ -238,6 +238,26 @@ export interface ExplainFlowExecutionContext {
    * Always present so the host never substitutes a wrong inference.
    */
   readonly runModeNote: string;
+  /**
+   * A DETERMINATE, structured answer to "if this flow faults at an unhandled
+   * element, does that roll back the triggering transaction?" — composed from
+   * `hasUnhandledFaults` and the trigger type, so the host never has to (and
+   * never gets to) DECLINE this question as "not captured". `null` only when
+   * the flow has no unhandled fault path (`hasUnhandledFaults: false`).
+   */
+  readonly faultRollback: FaultRollbackVerdict | null;
+}
+
+/**
+ * Whether an unhandled fault in THIS flow rolls back the originating
+ * transaction, with the rationale. `rollsBackTransaction: true` for any
+ * synchronous in-transaction flow (record-triggered before/after-save and
+ * autolaunched/scheduled/platform-event); `false` only for a user-driven
+ * screen flow (the fault shows on a screen, no originating DML to roll back).
+ */
+export interface FaultRollbackVerdict {
+  readonly rollsBackTransaction: boolean;
+  readonly statement: string;
 }
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
@@ -307,12 +327,59 @@ const readFlowNonNegInt = (node: Node, key: string): number => {
  * Build the execution-context block from the Flow node's extracted
  * `runInMode` / fault-coverage properties (see flow.ts extractor).
  */
-const buildExecutionContext = (node: Node): ExplainFlowExecutionContext => ({
-  runInMode: readRunInMode(node),
-  hasUnhandledFaults: node.properties['hasUnhandledFaults'] === true,
-  unhandledFaultElementCount: readFlowNonNegInt(node, 'elementsWithoutFault'),
-  runModeNote: RUN_MODE_NOTE,
-});
+const buildExecutionContext = (node: Node): ExplainFlowExecutionContext => {
+  const hasUnhandledFaults = node.properties['hasUnhandledFaults'] === true;
+  return {
+    runInMode: readRunInMode(node),
+    hasUnhandledFaults,
+    unhandledFaultElementCount: readFlowNonNegInt(node, 'elementsWithoutFault'),
+    runModeNote: RUN_MODE_NOTE,
+    faultRollback: hasUnhandledFaults ? buildFaultRollback(node) : null,
+  };
+};
+
+/**
+ * Compose the determinate fault-rollback verdict from the flow's trigger type.
+ * Record-triggered (before/after-save) and autolaunched/scheduled/platform-event
+ * flows run synchronously inside the triggering transaction, so an unhandled
+ * fault rolls the WHOLE transaction back (the triggering DML fails too). A
+ * screen flow has no originating DML — the fault shows the user an error screen.
+ */
+const buildFaultRollback = (node: Node): FaultRollbackVerdict => {
+  const triggerType =
+    typeof node.properties['triggerType'] === 'string'
+      ? (node.properties['triggerType'] as string)
+      : null;
+  const processType =
+    typeof node.properties['processType'] === 'string'
+      ? (node.properties['processType'] as string)
+      : null;
+  // Screen flow: user-driven interview, not inside a DML transaction.
+  const isScreenFlow =
+    processType === 'Flow' &&
+    (triggerType === null || triggerType === 'None');
+  if (isScreenFlow) {
+    return {
+      rollsBackTransaction: false,
+      statement:
+        'This is a screen (user-driven) flow with an unhandled fault path — the fault shows the running user a flow error screen and halts the interview; there is no originating DML transaction to roll back.',
+    };
+  }
+  const phase =
+    triggerType === 'RecordAfterSave'
+      ? 'after-save record-triggered'
+      : triggerType === 'RecordBeforeSave'
+        ? 'before-save record-triggered'
+        : triggerType !== null && triggerType.startsWith('Record')
+          ? 'record-triggered'
+          : 'autolaunched/scheduled';
+  return {
+    rollsBackTransaction: true,
+    statement:
+      `This is a synchronous ${phase} flow with an unhandled fault path (no fault connector). ` +
+      'If it faults at an unhandled element, the platform raises a surfaced unhandled-fault runtime error that rolls back the ENTIRE originating transaction — the triggering record save fails too, not just the flow; any records the flow created in the same transaction are never committed.',
+  };
+};
 
 /**
  * Pull the Flow's `label` property. The extractor stamps the label
