@@ -60,6 +60,41 @@ describe('isActiveSoeFirer', () => {
       ),
     ).toBe(false);
   });
+
+  it('respects ApexTrigger.status — Inactive is excluded, Active is included', () => {
+    // The extractor emits status: Active | Inactive from the trigger XML.
+    // An Inactive trigger must not appear in the active SOE steps; without this
+    // check the inactive trigger inflates the after-triggers count on dense
+    // standard objects (e.g. Contact) that have deactivated legacy triggers.
+    expect(
+      isActiveSoeFirer(
+        makeNode({
+          id: 'ApexTrigger:ContactTrigger',
+          type: 'ApexTrigger',
+          properties: { status: 'Active', events: ['after insert', 'after update'] },
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isActiveSoeFirer(
+        makeNode({
+          id: 'ApexTrigger:InactiveLegacyTrigger',
+          type: 'ApexTrigger',
+          properties: { status: 'Inactive', events: ['after insert'] },
+        }),
+      ),
+    ).toBe(false);
+    // Missing status is treated as active (conservative prior for older vault data).
+    expect(
+      isActiveSoeFirer(
+        makeNode({
+          id: 'ApexTrigger:LegacyTrigger',
+          type: 'ApexTrigger',
+          properties: { events: ['after insert'] },
+        }),
+      ),
+    ).toBe(true);
+  });
 });
 
 describe('inactive collector', () => {
