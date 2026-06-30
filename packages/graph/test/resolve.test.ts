@@ -43,6 +43,15 @@ const seed: ExtractionResult = {
     makeNode({ id: 'CustomObject:Payment__c', apiName: 'Payment__c', label: 'Payment' }),
     makeNode({ id: 'CustomField:Payment__c.Payment_Amount__c', type: 'CustomField', apiName: 'Payment_Amount__c', label: 'Payment Amount', parentId: 'CustomObject:Payment__c' }),
     makeNode({ id: 'CustomField:Payment__c.Payment_Status__c', type: 'CustomField', apiName: 'Payment_Status__c', label: 'Payment Status', parentId: 'CustomObject:Payment__c' }),
+    // QA batch 5 regression: a same-object sibling whose NAME shares the `state`
+    // token (fuzzy-near the query `status` token, below the contender-score band)
+    // but NOT the `payment` token. The query "Payment_Status__c" names its own
+    // PARENT object (Payment__c) via the `payment` token, so this sibling earns
+    // PARENT-credit for `payment` and is flagged parent-matched. Pre-fix that made
+    // it an always-contender, demoting the literal whole-name-exact hit on
+    // Payment_Status__c to `ambiguous`; it is NOT a score-contender, so the bug is
+    // purely the parent-credit-inflation path.
+    makeNode({ id: 'CustomField:Payment__c.Settlement_State__c', type: 'CustomField', apiName: 'Settlement_State__c', label: 'Settlement State', parentId: 'CustomObject:Payment__c' }),
     // Namespaced object + a Layout decoy that whole-string scoring wrongly outranks.
     makeNode({ id: 'CustomObject:ACME_Transaction__c', apiName: 'ACME_Transaction__c', label: 'Transaction' }),
     makeNode({ id: 'Layout:ACME_Transaction__c-Transaction Layout', type: 'Layout', apiName: 'ACME_Transaction__c-Transaction Layout', label: 'Transaction Layout', parentId: 'CustomObject:ACME_Transaction__c' }),
@@ -394,6 +403,24 @@ describe('resolveComponents — disposition', () => {
     const top2 = r.value.candidates.slice(0, 2).map((c) => c.id);
     expect(top2).toContain('CustomField:Account.Email__c');
     expect(top2).toContain('CustomField:Contact.Email__c');
+  });
+
+  it('reports a sole whole-name-exact field as exact even when a same-object sibling is parent-matched (Payment_Status__c)', async () => {
+    // QA batch 5: querying the LITERAL field API name "Payment_Status__c" is a
+    // definitive hit on CustomField:Payment__c.Payment_Status__c. But the name's
+    // own `payment` token incidentally names its PARENT object (Payment__c), which
+    // flags the genuine same-object sibling Payment_Amount__c as `parentMatched`.
+    // The parent-credit contender rule then inflated the contender count and
+    // demoted this literal-name match to `ambiguous` (the resolve-returns-
+    // ambiguous-on-exact-field bug). A sole whole-name-exact top must stay `exact`.
+    const r = await resolveComponents(store, 'Payment_Status__c');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.candidates[0]?.id).toBe(
+      'CustomField:Payment__c.Payment_Status__c',
+    );
+    expect(r.value.candidates[0]?.matchKind).toBe('exact');
+    expect(r.value.disposition).toBe('exact');
   });
 
   it('returns disposition none for gibberish', async () => {
