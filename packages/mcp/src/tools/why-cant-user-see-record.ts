@@ -2003,6 +2003,15 @@ export const whyCantUserSeeRecordHandler = async (
     userContext.profileId !== undefined ||
     (userContext.permissionSetIds !== undefined &&
       userContext.permissionSetIds.length > 0);
+  // Plane-A hard deny: when set, the object-CRUD precondition definitively
+  // failed (no object Read/Edit/Delete on the supplied profile / permission
+  // sets). The verdict is `restricted` regardless of any downstream stage —
+  // object CRUD is a precondition, so no OWD value or sharing grant can revive
+  // access. We DO NOT short-circuit the cascade here: every remaining stage
+  // (RestrictionRule, ScopingRule, the unknown tail) is still walked and
+  // surfaced in `reasoning` for an honest, complete chain — they simply cannot
+  // OVERTURN the hard deny. The verdict is forced below, after the cascade.
+  let objectCrudHardDenyReason: string | null = null;
   if (profileOrPermSetSupplied) {
     const objectAccessResult = await hasObjectAccess(ctx, componentId, userContext, level);
     if (!objectAccessResult.ok) {
@@ -2015,22 +2024,7 @@ export const whyCantUserSeeRecordHandler = async (
       // RV11: name the CRUD bit actually required for THIS operation, not Read.
       const levelLabel =
         level === 'read' ? 'Read' : level === 'edit' ? 'Edit' : 'Delete';
-      return ok({
-        data: {
-          verdict: 'restricted',
-          reasoning: [
-            step(
-              'PermissionGrant',
-              'restricted',
-              `no object ${levelLabel} permission on the supplied profile / permission sets — object ${levelLabel} is a precondition for record ${level}, so no OWD value or sharing grant can make the record ${level === 'read' ? 'visible' : level + 'able'}`,
-            ),
-          ],
-        },
-        vaultState: {
-          sourceTreeHash: ctx.manifest.sourceTreeHash,
-          refreshedAt: ctx.manifest.refreshedAt,
-        },
-      });
+      objectCrudHardDenyReason = `no object ${levelLabel} permission on the supplied profile / permission sets — object ${levelLabel} is a precondition for record ${level}, so no OWD value or sharing grant can make the record ${level === 'read' ? 'visible' : level + 'able'}`;
     }
   }
 
@@ -2054,7 +2048,14 @@ export const whyCantUserSeeRecordHandler = async (
       message: `graph query failed: ${grantStepResult.error}`,
     });
   }
-  reasoning.push(grantStepResult.value);
+  // When the object-CRUD precondition hard-denied, surface that exact reason on
+  // the PermissionGrant stage (the RV11 wording) instead of the generic
+  // "no read-or-better grant" reason, so the chain explains the hard deny.
+  reasoning.push(
+    objectCrudHardDenyReason !== null
+      ? step('PermissionGrant', 'restricted', objectCrudHardDenyReason)
+      : grantStepResult.value,
+  );
 
   // Stage 2a: SystemPermission. View All Data / Modify All Data on the profile
   // or a permission set bypasses OWD and ALL record sharing (god-mode) — so a
@@ -2148,9 +2149,17 @@ export const whyCantUserSeeRecordHandler = async (
   // knows where to look manually.
   reasoning.push(...UNKNOWN_TAIL);
 
+  // A failed object-CRUD precondition is a hard deny: object CRUD is required
+  // for the operation, so NO downstream stage (a public OWD, a sharing grant,
+  // an `unknown` restriction/scoping rule, the unmodeled tail) can revive
+  // access. Force `restricted` rather than letting `aggregateVerdict` demote to
+  // `unknown` off the tail. The full reasoning chain is still returned so the
+  // admin sees every stage that was evaluated (e.g. an attached RestrictionRule)
+  // even though none of them changes the verdict.
   return ok({
     data: {
-      verdict: aggregateVerdict(reasoning),
+      verdict:
+        objectCrudHardDenyReason !== null ? 'restricted' : aggregateVerdict(reasoning),
       reasoning,
     },
     vaultState: {

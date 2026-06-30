@@ -721,6 +721,42 @@ const restrictionRuleSeed: ExtractionResult = {
   ],
 };
 
+// =============================================================================
+// Seed (hard-deny + restriction rule): a Private object that carries an active
+// RestrictionRule, queried with a profile that has NO object grant. The
+// object-CRUD precondition hard-denies (verdict `restricted`), but the cascade
+// must STILL surface the RestrictionRule stage in the reasoning chain — the
+// hard deny does not erase the rest of the evaluation. Mirrors the CI
+// visibility-honesty eval contract (an active restriction rule on the object
+// surfaces as a RestrictionRule reasoning stage even on a hard deny).
+// =============================================================================
+
+const HARDDENY_RESTRICTION_OBJ = 'CustomObject:HardDenyRestrictObj';
+
+const hardDenyRestrictionSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: HARDDENY_RESTRICTION_OBJ,
+      apiName: 'HardDenyRestrictObj',
+      properties: { sharingModel: 'Private' },
+    }),
+    makeNode({
+      id: 'RestrictionRule:HardDenyRestrictObj.Hide_External',
+      type: 'RestrictionRule',
+      apiName: 'HardDenyRestrictObj.Hide_External',
+      parentId: HARDDENY_RESTRICTION_OBJ,
+    }),
+    // A profile with NO grantedBy edge on this object → object-CRUD precondition
+    // fails → hard deny.
+    makeNode({
+      id: 'Profile:HardDenyUser',
+      type: 'Profile',
+      apiName: 'HardDenyUser',
+    }),
+  ],
+  edges: [],
+};
+
 // One shared graph store + Context across the suite. All seeds use
 // distinct ids so there's no cross-test interference.
 let tempDir: string;
@@ -1192,6 +1228,7 @@ beforeAll(async () => {
     ownerSubordinateReadRuleForLevelSeed,
     ownerSubordinateTruncatedSeed,
     restrictionRuleSeed,
+    hardDenyRestrictionSeed,
     godModeSeed,
     godModeRestrictedSeed,
     modifyAllSeed,
@@ -1346,8 +1383,7 @@ describe('whyCantUserSeeRecordHandler', () => {
     // no View/Modify-All Data. Object Read is a hard PRECONDITION for record
     // access, so the unknown record-level sharing tail (territory / manual /
     // sets / teams) cannot grant it — the answer is a definitive `restricted`,
-    // not `unknown`. The handler returns early at the precondition with a single
-    // PermissionGrant `restricted` step citing the missing object-Read.
+    // not `unknown`. The PermissionGrant step cites the missing object-Read.
     const result = await whyCantUserSeeRecordHandler(ctx, {
       componentId: GODMODE_OBJ,
       userContext: { profileId: 'Profile:NoAccess' },
@@ -1360,9 +1396,38 @@ describe('whyCantUserSeeRecordHandler', () => {
     const grant = reasoning.find((s) => s.stage === 'PermissionGrant');
     expect(grant?.verdict).toBe('restricted');
     expect(grant?.reason).toMatch(/object Read|precondition/i);
-    // Precondition denial short-circuits before the record-level stages — the
-    // reasoning is just the single precondition step.
-    expect(reasoning.length).toBe(1);
+    // The hard deny no longer SHORT-CIRCUITS the cascade: the full reasoning
+    // chain is still walked and returned (OWD through the unknown tail) so the
+    // admin sees every stage that was evaluated. None of those downstream
+    // stages can OVERTURN the hard-deny `restricted` verdict.
+    expect(reasoning.length).toBeGreaterThan(1);
+    expect(reasoning[0]?.stage).toBe('OWD');
+  });
+
+  it('hard-deny still surfaces the RestrictionRule stage: an active restriction rule on the object appears in reasoning even when object CRUD is hard-denied (visibility-honesty)', async () => {
+    // CI eval contract (cases.analytical.ci.json, caseClass visibility-honesty):
+    // Profile:HardDenyUser has no object grant on the Private
+    // HardDenyRestrictObj, so the object-CRUD precondition hard-denies and the
+    // verdict is `restricted`. The object carries an active RestrictionRule, and
+    // an honest reasoning chain MUST surface that RestrictionRule stage — the
+    // hard deny decides the verdict, but it does not erase the rest of the
+    // evaluation. (Regression: a prior short-circuit returned a single
+    // PermissionGrant step and the RestrictionRule stage was lost.)
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: HARDDENY_RESTRICTION_OBJ,
+      userContext: { profileId: 'Profile:HardDenyUser' },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, reasoning } = result.value.data;
+    expect(verdict).toBe('restricted');
+    const stages = reasoning.map((s) => s.stage);
+    // The RestrictionRule stage is present despite the hard deny.
+    expect(stages).toContain('RestrictionRule');
+    // The hard deny is still explained on the PermissionGrant stage.
+    const grant = reasoning.find((s) => s.stage === 'PermissionGrant');
+    expect(grant?.verdict).toBe('restricted');
+    expect(grant?.reason).toMatch(/object Read|precondition/i);
   });
 
   it('downgrades god-mode to unknown when an active restriction rule can still filter the user', async () => {
