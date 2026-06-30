@@ -247,6 +247,16 @@ export interface PicklistValue {
 }
 
 /**
+ * One entry in a picklist controlling-field dependency map. Each `<valueSettings>`
+ * block in `<valueSet>` names a controlling field value and the dependent picklist
+ * value that becomes available when that controlling value is selected.
+ */
+export interface PicklistControllingFieldValue {
+  readonly controllingFieldValue: string;
+  readonly valueName: string;
+}
+
+/**
  * Extract picklist values from a `<valueSet>` subtree, or `null` when
  * the structure is absent. Picklist values live at
  * `valueSet > valueSetDefinition > value`, each carrying `<fullName>` (the
@@ -285,6 +295,47 @@ const extractPicklistValues = (rootObj: Record<string, unknown>): PicklistValue[
 };
 
 /**
+ * Extract the controlling-field name and per-value dependency mappings from a
+ * `<valueSet>` subtree. A dependent picklist carries `<controllingField>` (the
+ * API name of the field whose selection drives which values are visible) and one
+ * or more `<valueSettings>` blocks — each pairing a `<controllingFieldValue>`
+ * with the `<valueName>` that becomes available under it.
+ *
+ * Returns `null` for both when the `<valueSet>` is absent or the field is not
+ * dependent (no `<controllingField>` element). Never fabricates a dependency
+ * structure from `inlineHelpText` or other heuristics.
+ */
+const extractControllingFieldInfo = (
+  rootObj: Record<string, unknown>,
+): {
+  controllingField: string | null;
+  controllingFieldValues: PicklistControllingFieldValue[] | null;
+} => {
+  const valueSet = unwrapSingle(rootObj['valueSet']);
+  if (typeof valueSet !== 'object' || valueSet === null) {
+    return { controllingField: null, controllingFieldValues: null };
+  }
+  const vsObj = valueSet as Record<string, unknown>;
+  const controllingField = toNullableString(vsObj['controllingField']);
+  if (controllingField === null) {
+    return { controllingField: null, controllingFieldValues: null };
+  }
+  const rawSettings = vsObj['valueSettings'];
+  if (rawSettings === undefined) {
+    return { controllingField, controllingFieldValues: [] };
+  }
+  const settingsArr = Array.isArray(rawSettings) ? rawSettings : [rawSettings];
+  const controllingFieldValues: PicklistControllingFieldValue[] = settingsArr.map((raw) => {
+    const entry = raw as Record<string, unknown>;
+    return {
+      controllingFieldValue: String(unwrapSingle(entry['controllingFieldValue']) ?? ''),
+      valueName: String(unwrapSingle(entry['valueName']) ?? ''),
+    };
+  });
+  return { controllingField, controllingFieldValues };
+};
+
+/**
  * Pull `<valueSet><valueSetName>` — the GLOBAL value-set reference a picklist
  * carries instead of an inline definition (P14-USAGE-gvs-edge, closes
  * FINDINGS P-GVS-EDGE). Returns `null` when the value set is inline or the
@@ -315,6 +366,10 @@ const buildProperties = (
   // without re-deriving the rule — and never report "No Formula fields were
   // found" for an object whose formula fields all carry a non-`Formula` <type>.
   const isFormula = formula !== null && formula.length > 0;
+  const { controllingField, controllingFieldValues } = isPicklist
+    ? extractControllingFieldInfo(rootObj)
+    : { controllingField: null, controllingFieldValues: null };
+
   return {
     label: String(unwrapSingle(rootObj['label'])),
     dataType,
@@ -332,6 +387,16 @@ const buildProperties = (
     inlineHelpText: toNullableString(rootObj['inlineHelpText']),
     trackHistory: toBooleanWithDefault(rootObj['trackHistory']),
     picklistValues: isPicklist ? extractPicklistValues(rootObj) : null,
+    // OMIT-when-null: only dependent picklists carry a controlling field. A
+    // `controllingField: null` row on every non-dependent picklist and every
+    // non-picklist field would churn all markdown vault files.
+    ...(controllingField !== null ? { controllingField } : {}),
+    // OMIT-when-null: only dependent picklists carry per-value controlling-field
+    // mappings. Stored alongside controllingField so consumers can answer
+    // dependency questions directly from the node without guessing from
+    // inlineHelpText. The array is [] (not null) when controllingField exists
+    // but no <valueSettings> blocks were present.
+    ...(controllingFieldValues !== null ? { controllingFieldValues } : {}),
     // OMIT-when-false (unlike the fixed keys above): only computed fields carry
     // a formula body, and an `isFormula: false` row on every CustomField would
     // churn every rendered markdown file in every vault. Emitting it only when
