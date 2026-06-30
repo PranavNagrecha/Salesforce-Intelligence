@@ -101,7 +101,6 @@ export const automationBuildAdvisorHandler = async (
 
   const objNode = await getNodeById(ctx.graph, objectId);
   if (!objNode.ok) return err({ kind: 'internal', message: `graph query failed: ${objNode.error.message}` });
-  const objectModeled = objNode.value !== null;
 
   // Incoming triggersOn edges → record-triggered Flows / ApexTriggers / WorkflowRules.
   const inResult = await listEdges(ctx.graph, objectId, { direction: 'in', edgeType: 'triggersOn' });
@@ -131,6 +130,16 @@ export const automationBuildAdvisorHandler = async (
   // Parented ValidationRules (parentOf from the object).
   const outResult = await listEdges(ctx.graph, objectId, { direction: 'out', edgeType: 'parentOf' });
   if (!outResult.ok) return err({ kind: 'internal', message: `graph query failed: ${outResult.error.message}` });
+
+  // A present node means modeled, but a STANDARD object (e.g. Case) legitimately
+  // omits <type> in its definition file, so no CustomObject node is materialized
+  // even though the object IS modeled. Treat node-present OR incoming automation
+  // OR parented rules as modeled (matching evaluateSoeAdmission); only a genuine
+  // phantom — no node and no edges — stays objectModeled:false. Mis-flagging a
+  // standard object as not-modeled would wrongly disclaim grounded conflict /
+  // co-fire analysis on it.
+  const objectModeled =
+    objNode.value !== null || inResult.value.length > 0 || outResult.value.length > 0;
   const validationRules: RuleRef[] = [];
   for (const edge of outResult.value) {
     const node = await getNodeById(ctx.graph, edge.toId);

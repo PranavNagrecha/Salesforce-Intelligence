@@ -51,6 +51,9 @@ const edge = (fromId: string, toId: string, edgeType: Edge['edgeType'], props: R
 
 // Busy__c: 2 active record-triggered Flows + 1 ApexTrigger → ordering + mixed risks.
 // Quiet__c: nothing → greenfield.
+// Case: a STANDARD object — its definition file omits <type>, so no CustomObject
+//   node is materialized, yet automation targets it and it parents a rule. It IS
+//   effectively modeled (node-present-OR-has-edges), not a phantom.
 const seed: ExtractionResult = {
   nodes: [
     node('CustomObject:Busy__c', 'CustomObject'),
@@ -58,11 +61,16 @@ const seed: ExtractionResult = {
     node('Flow:FlowA', 'Flow', { status: 'Active' }),
     node('Flow:FlowB', 'Flow', { status: 'Active' }),
     node('ApexTrigger:BusyTrigger', 'ApexTrigger', { status: 'Active' }),
+    // Standard object Case: no CustomObject node (standard objects omit <type>).
+    node('Flow:CaseAfterSave', 'Flow', { status: 'Active' }),
+    node('ValidationRule:Case.CaseRule', 'ValidationRule', { active: true }),
   ],
   edges: [
     edge('Flow:FlowA', 'CustomObject:Busy__c', 'triggersOn', { recordTriggerType: 'Update' }),
     edge('Flow:FlowB', 'CustomObject:Busy__c', 'triggersOn', { recordTriggerType: 'Update' }),
     edge('ApexTrigger:BusyTrigger', 'CustomObject:Busy__c', 'triggersOn', {}),
+    edge('Flow:CaseAfterSave', 'CustomObject:Case', 'triggersOn', { recordTriggerType: 'Update' }),
+    edge('CustomObject:Case', 'ValidationRule:Case.CaseRule', 'parentOf', {}),
   ],
 };
 
@@ -106,11 +114,23 @@ describe('automationBuildAdvisorHandler', () => {
     expect(r.value.data.risks.map((x) => x.kind)).toEqual(['greenfield']);
   });
 
-  it('answers (objectModeled=false) even when the object node is absent', async () => {
+  it('answers (objectModeled=false) even when the object is a genuine phantom (no node, no edges)', async () => {
     const r = await automationBuildAdvisorHandler(ctx, { objectApiName: 'NotInVault__c' });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.objectModeled).toBe(false);
+  });
+
+  it('treats a standard object (no CustomObject node, but automation + parented rules) as modeled', async () => {
+    // Case omits <type>, so no CustomObject node exists, but a record-triggered
+    // Flow targets it and it parents a validation rule → it IS modeled, not a
+    // phantom. Co-fire analysis on Case must be grounded.
+    const r = await automationBuildAdvisorHandler(ctx, { objectApiName: 'Case' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.objectModeled).toBe(true);
+    expect(r.value.data.existingAutomation.recordTriggeredFlows).toHaveLength(1);
+    expect(r.value.data.existingAutomation.validationRules).toHaveLength(1);
   });
 });
 
