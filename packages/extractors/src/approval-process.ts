@@ -761,6 +761,13 @@ export const extractApprovalProcess = async (
     apiVersion: null,
     properties: {
       active,
+      allowRecall: coerceBoolean(unwrapSingle(rootObj['allowRecall'])),
+      finalApprovalRecordLock: coerceBoolean(
+        unwrapSingle(rootObj['finalApprovalRecordLock']),
+      ),
+      finalRejectionRecordLock: coerceBoolean(
+        unwrapSingle(rootObj['finalRejectionRecordLock']),
+      ),
       description: optionalString(rootObj, 'description'),
       recordEditability: optionalString(rootObj, 'recordEditability'),
       enableMobileDeviceAccess: coerceBoolean(
@@ -771,6 +778,25 @@ export const extractApprovalProcess = async (
       entryCriteriaFormula,
       entryCriteriaItemCount,
       stepCount: steps.length,
+      allowedSubmitters: toArray(rootObj['allowedSubmitters']).flatMap(
+        (rawEntry) => {
+          if (typeof rawEntry !== 'object' || rawEntry === null) return [];
+          const entry = rawEntry as Record<string, unknown>;
+          const typeRaw = unwrapSingle(entry['type']);
+          if (typeRaw === undefined || typeRaw === null || typeRaw === '') {
+            return [];
+          }
+          const submitterType = String(typeRaw);
+          const submitterNameRaw = unwrapSingle(entry['submitter']);
+          const submitterName =
+            submitterNameRaw === undefined ||
+            submitterNameRaw === null ||
+            submitterNameRaw === ''
+              ? null
+              : String(submitterNameRaw);
+          return [{ type: submitterType, name: submitterName }];
+        },
+      ),
       conditions: conditionsMirror,
     },
   };
@@ -822,6 +848,46 @@ export const extractApprovalProcess = async (
     );
     if (!hookResult.ok) return hookResult;
     edges.push(...hookResult.value);
+  }
+
+  // Allowed-submitter references — emit one `references` edge per named entry.
+  // The `<type>` discriminates the target node prefix (same set as the approver
+  // variant table). Entries with no `<submitter>` name (e.g. type=owner) have
+  // no named target and produce no edge.
+  const SUBMITTER_TYPE_TO_PREFIX: Readonly<Record<string, string>> = {
+    group: 'Group',
+    role: 'Role',
+    queue: 'Queue',
+    user: 'User',
+    roleSubordinates: 'Role',
+    roleAndSubordinates: 'Role',
+  };
+  for (const rawEntry of toArray(rootObj['allowedSubmitters'])) {
+    if (typeof rawEntry !== 'object' || rawEntry === null) continue;
+    const entry = rawEntry as Record<string, unknown>;
+    const typeRaw = unwrapSingle(entry['type']);
+    if (typeRaw === undefined || typeRaw === null || typeRaw === '') continue;
+    const submitterType = String(typeRaw);
+    const submitterNameRaw = unwrapSingle(entry['submitter']);
+    if (
+      submitterNameRaw === undefined ||
+      submitterNameRaw === null ||
+      submitterNameRaw === ''
+    ) {
+      // owner / adhoc / etc. — no named target, no edge
+      continue;
+    }
+    const submitterName = String(submitterNameRaw);
+    const prefix = SUBMITTER_TYPE_TO_PREFIX[submitterType];
+    if (prefix === undefined) continue; // unknown type — skip silently
+    edges.push({
+      fromId: processId,
+      toId: `${prefix}:${submitterName}`,
+      edgeType: 'references',
+      confidence: 'declared',
+      source: EXTRACTOR_SOURCE,
+      properties: { referenceKind: 'allowedSubmitter', submitterType },
+    });
   }
 
   // v2.0a — Append the firesWhen edges and the synthetic
