@@ -614,6 +614,76 @@ describe('eventSubscribersHandler', () => {
     expect(result.value.data.publishers).toEqual([]);
   });
 
+  it('Bug 9: publisher description is surfaced from node properties when present', async () => {
+    // The publisher node carries a `description` in its node properties.
+    // Before the fix, `EventPublisher` had no `description` field and
+    // resolvePublisher did not read node.properties['description'].
+    // After the fix, description is present on the publisher object and
+    // matches the value stored on the node.
+    const DESCRIBED_EVENT = 'CustomObject:Described__e';
+    const DESCRIBED_PUBLISHER = 'Flow:AcmeCo_Publisher_Flow';
+    const describedSeed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: DESCRIBED_EVENT, type: 'CustomObject', apiName: 'Described__e' }),
+        makeNode({
+          id: DESCRIBED_PUBLISHER,
+          type: 'Flow',
+          apiName: 'AcmeCo_Publisher_Flow',
+          properties: {
+            description: 'Publishes an event when AcmeCo Account status changes.',
+          },
+        }),
+      ],
+      edges: [
+        makeEdge({
+          fromId: DESCRIBED_PUBLISHER,
+          toId: DESCRIBED_EVENT,
+          edgeType: 'writesTo',
+          source: 'flow-extractor',
+          properties: { operation: 'publish' },
+        }),
+      ],
+    };
+    // Create a fresh in-memory graph for this test to avoid polluting the shared store.
+    const tmpD = mkdtempSync(join(tmpdir(), 'sfi-pub-desc-'));
+    try {
+      const { join: pathJoin } = await import('node:path');
+      const openedD = await openGraph(pathJoin(tmpD, 'desc.db'));
+      if (!openedD.ok) throw new Error(openedD.error.message);
+      const storeD = openedD.value;
+      const imp = await importExtractionResults(storeD, [describedSeed]);
+      if (!imp.ok) throw new Error(imp.error.message);
+      const ctxD: Context = { vaultRoot: tmpD, manifest: FIXTURE_MANIFEST, graph: storeD };
+      const result = await eventSubscribersHandler(ctxD, { eventId: DESCRIBED_EVENT });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const publishers = result.value.data.publishers ?? [];
+      expect(publishers.length).toBe(1);
+      const pub = publishers[0];
+      expect(pub?.id).toBe(DESCRIBED_PUBLISHER);
+      // description must be surfaced from the node's properties.
+      expect(pub?.description).toBe('Publishes an event when AcmeCo Account status changes.');
+      await closeGraph(storeD);
+    } finally {
+      rmSync(tmpD, { recursive: true, force: true });
+    }
+  });
+
+  it('Bug 9: publisher description is null when node has no description property', async () => {
+    // Publisher nodes without a description property must return description: null,
+    // not undefined or a stale property from the edge properties.
+    const result = await eventSubscribersHandler(ctx, {
+      eventId: ACCOUNT_CHANGE_EVENT,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const publishers = result.value.data.publishers ?? [];
+    // PUBLISHER_FLOW and PUBLISHER_APEX nodes have no description in their node properties.
+    for (const pub of publishers) {
+      expect(pub.description).toBeNull();
+    }
+  });
+
   it('catalog mode: omitting eventId lists every Platform Event with subscriber counts (R0791)', async () => {
     const result = await eventSubscribersHandler(ctx, {});
     expect(result.ok).toBe(true);
@@ -750,5 +820,64 @@ describe('eventSubscribersInputSchema', () => {
 
   it('accepts a missing eventId (catalog mode — R0791)', () => {
     expect(eventSubscribersInputSchema.safeParse({}).success).toBe(true);
+  });
+});
+
+// =============================================================================
+// CR-10: Publisher-vs-subscriber role-disambiguation disclosure
+// The product previously confused a Flow that PUBLISHES an event (writesTo
+// edge) with one that SUBSCRIBES (listensTo edge). The fix adds an explicit
+// CRITICAL ROLE DISTINCTION boundary in both the non-empty and empty-subscriber
+// paths so an LLM reading the response cannot conflate the two roles.
+// =============================================================================
+describe('eventSubscribersHandler — CR-10 role-disambiguation disclosure', () => {
+  it('CR-10: single-event with subscribers includes role-disambiguation disclosure in boundaries', async () => {
+    // Account_Change__e has 3 subscribers AND 2 publishers in the fixture.
+    // Before the fix, boundaries did NOT contain the CRITICAL ROLE DISTINCTION
+    // message. After the fix, it must be present in both populated-subscribers
+    // and empty-subscribers paths.
+    const result = await eventSubscribersHandler(ctx, {
+      eventId: ACCOUNT_CHANGE_EVENT,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const boundaryText = result.value.data.boundaries.join(' ');
+    // Key phrase from EVENT_SUB_ROLE_DISAMBIGUATION_DISCLOSURE.
+    expect(boundaryText).toContain('CRITICAL ROLE DISTINCTION');
+    expect(boundaryText).toContain('EMITS');
+    expect(boundaryText).toContain('RECEIVES');
+    // The disclosure must explicitly call out that a Flow with recordCreates
+    // is a publisher, NOT a subscriber.
+    expect(boundaryText).toContain('PUBLISHER');
+    expect(boundaryText).toContain('publishers');
+    expect(boundaryText).toContain('subscribers');
+  });
+
+  it('CR-10: single-event with NO subscribers also includes role-disambiguation disclosure', async () => {
+    // Orphan_Published__e has publishers but zero subscribers — the empty-
+    // subscriber boundary path must also carry the disambiguation message.
+    const result = await eventSubscribersHandler(ctx, {
+      eventId: ORPHAN_PUB_EVENT,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.subscribers).toHaveLength(0);
+    const boundaryText = result.value.data.boundaries.join(' ');
+    expect(boundaryText).toContain('CRITICAL ROLE DISTINCTION');
+    expect(boundaryText).toContain('EMITS');
+    expect(boundaryText).toContain('RECEIVES');
+  });
+
+  it('CR-10: role-disambiguation disclosure is present even when publishers list is empty', async () => {
+    // Order_Placed__e has 1 subscriber and 0 publishers — both arrays are
+    // opposite-empty from the orphan case. The disclosure must still be there.
+    const result = await eventSubscribersHandler(ctx, {
+      eventId: ORDER_EVENT,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.publishers).toEqual([]);
+    const boundaryText = result.value.data.boundaries.join(' ');
+    expect(boundaryText).toContain('CRITICAL ROLE DISTINCTION');
   });
 });

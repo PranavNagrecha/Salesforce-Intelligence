@@ -187,6 +187,16 @@ export interface EventPublisher {
   readonly apiName: string;
   readonly source: string;
   readonly properties: Readonly<Record<string, unknown>>;
+  /**
+   * Human-readable description of the publishing component, read from the
+   * node's `description` property (e.g. the Flow's declared description field
+   * or the Apex class doc comment captured at extraction time). `null` when the
+   * publisher has no declared description.
+   *
+   * Surfaced here so the architect can read "what does this publisher do?" from
+   * a single tool call rather than needing a follow-up `sfi.get_component` call.
+   */
+  readonly description: string | null;
 }
 
 /**
@@ -265,6 +275,18 @@ const EVENT_SUB_EMPTY_DISCLOSURE =
 // GROUP C: publish-side CODE (the publishers list).
 const EVENT_SUB_PUBLISHER_DISCLOSURE =
   'Publishers are detected from modeled `writesTo` edges (Flow record-create on the event, Apex `EventBus.publish(...)`). Detection is partial: dynamically-built publishes and managed-package publishers are NOT modeled — an empty publishers list is not proof nothing publishes the event.';
+/**
+ * CR-10: Publisher-vs-subscriber disambiguation disclosure. A Flow that
+ * writes TO a platform event (recordCreates → `writesTo` edge) is a PUBLISHER,
+ * not a subscriber. Only components with a `listensTo` edge SUBSCRIBE to the
+ * event and receive it when published. A published-but-unsubscribed event means
+ * the `subscribers` array is empty even though `publishers` is non-empty — the
+ * event fires into a void (or an external consumer such as AWS EventBridge via
+ * a PlatformEventChannel binding in `channels`). The two roles are mutually
+ * exclusive in the graph model: `writesTo` = emits/publishes, `listensTo` = receives/subscribes.
+ */
+const EVENT_SUB_ROLE_DISAMBIGUATION_DISCLOSURE =
+  'CRITICAL ROLE DISTINCTION: `publishers` (writesTo edges) = code that EMITS this event; `subscribers` (listensTo edges) = code that RECEIVES it. A Flow with a <recordCreates> element on this event is a PUBLISHER, not a subscriber — it appears in `publishers`, never in `subscribers`. A non-empty `publishers` list with an empty `subscribers` list means the event fires but nothing internal consumes it (check `channels` for external consumers such as AWS EventBridge).';
 
 /**
  * Validate that `eventId` is a syntactically valid Platform Event id.
@@ -374,12 +396,16 @@ const resolvePublisher = async (
   if (!PUBLISHER_NODE_TYPES.has(node.type)) {
     return ok(null);
   }
+  const rawDesc = node.properties['description'];
+  const description =
+    typeof rawDesc === 'string' && rawDesc.length > 0 ? rawDesc : null;
   return ok({
     id: node.id,
     type: node.type,
     apiName: node.apiName,
     source: edge.source,
     properties: edge.properties,
+    description,
   });
 };
 
@@ -618,12 +644,14 @@ export const eventSubscribersHandler = async (
           EVENT_SUB_HEURISTIC_DISCLOSURE,
           EVENT_SUB_CHANNEL_DISCLOSURE,
           EVENT_SUB_PUBLISHER_DISCLOSURE,
+          EVENT_SUB_ROLE_DISAMBIGUATION_DISCLOSURE,
           EVENT_SUB_EMPTY_DISCLOSURE,
         ]
       : [
           EVENT_SUB_HEURISTIC_DISCLOSURE,
           EVENT_SUB_CHANNEL_DISCLOSURE,
           EVENT_SUB_PUBLISHER_DISCLOSURE,
+          EVENT_SUB_ROLE_DISAMBIGUATION_DISCLOSURE,
         ];
 
   return ok({
