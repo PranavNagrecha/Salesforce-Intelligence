@@ -6,8 +6,9 @@
  * are not extracted into the vault unless an explicit facts capture ran.
  */
 
-import type { Context } from '../server.js';
 import { summarizeCoverage } from '@sf-intelligence/vault';
+
+import type { Context } from '../server.js';
 
 /** Verbatim disclosure consumed by judges and synthesize_answer grounding. */
 export const USER_ASSIGNMENT_NOT_IN_VAULT =

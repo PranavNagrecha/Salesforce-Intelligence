@@ -196,7 +196,8 @@ const TOOL_KEYWORDS: Readonly<Record<string, string>> = {
     'metadata count layouts list views triggers validation rules record types web links ' +
     'flows classes triggers profiles permission sets layouts record types validation rules ' +
     'approval processes reports dashboards omniscripts custom standard relationship child ' +
-    'parent inactive active picklist values',
+    'parent inactive active picklist values ' +
+    'which flows are inactive active draft obsolete flows triggers rules by status enumerate components',
   'sfi.capabilities': 'what can you do help capabilities what can i ask how do i use',
   'sfi.automation_risk_report':
     'objects more than one multiple triggers per object trigger quality automation risk',

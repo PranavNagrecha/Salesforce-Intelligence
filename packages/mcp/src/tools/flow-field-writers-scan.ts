@@ -19,8 +19,6 @@ export interface SupplementalFlowFieldWriter {
   readonly mechanism: 'inputAssignments' | 'assignToReference';
 }
 
-const FLOW_SUFFIX = '.flow-meta.xml';
-
 /** Parse `<variables>` blocks mapping var name → SObject objectType. */
 const parseSObjectVariables = (xml: string): ReadonlyMap<string, string> => {
   const out = new Map<string, string>();

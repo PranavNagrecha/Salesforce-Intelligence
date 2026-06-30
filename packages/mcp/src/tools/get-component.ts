@@ -44,8 +44,8 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { annotationsBlockFor, type AnnotationsBlock } from './annotations.js';
-import { mergeInputAliases } from './input-aliases.js';
 import { tryReadComponentDoc } from './component-doc-fallback.js';
+import { mergeInputAliases } from './input-aliases.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import { buildReferenceStub } from './phantom-taxonomy.js';
 
