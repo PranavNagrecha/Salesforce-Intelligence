@@ -721,6 +721,48 @@ const coreSafeToDeleteFieldHandler = async (
     });
   }
 
+  const node = nodeResult.value;
+  const objectApi =
+    node.parentId?.startsWith('CustomObject:')
+      ? node.parentId.slice('CustomObject:'.length)
+      : null;
+  const isStandardObject = objectApi !== null && !objectApi.includes('__');
+  const isStandardField =
+    isStandardObject &&
+    !node.apiName.endsWith('__c') &&
+    !node.apiName.endsWith('__s');
+  if (isStandardField) {
+    return ok({
+      data: {
+        fieldId,
+        verdict: 'blocking',
+        reasoning: [
+          {
+            category: 'unknown',
+            verdict: 'blocking',
+            count: 1,
+            examples: [],
+            note:
+              `This is a standard field on ${objectApi} (${node.apiName}). Standard fields are undeletable via metadata — that verdict is intrinsic and does not depend on clearing Apex or formula references.`,
+          },
+        ],
+        trust: {
+          provenance: 'offline_snapshot',
+          confidence: 'declared',
+          freshness: { snapshotRefreshedAt: ctx.manifest.refreshedAt },
+          completeness: { status: 'complete' },
+          limitations: [
+            'Standard-field deletion is platform-blocked; dependency counts are informational only.',
+          ],
+        },
+      },
+      vaultState: {
+        sourceTreeHash: ctx.manifest.sourceTreeHash,
+        refreshedAt: ctx.manifest.refreshedAt,
+      },
+    });
+  }
+
   // A platform system/audit field (synthesized into the vault for reference,
   // e.g. CreatedById/SystemModstamp on a standard object) is Salesforce-owned
   // and cannot be deleted at all — short-circuit to a blocking verdict rather

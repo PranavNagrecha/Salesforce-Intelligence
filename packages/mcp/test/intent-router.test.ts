@@ -824,6 +824,14 @@ describe('classifyQuestion edge cases', () => {
     expect(r.tools).toContain('sfi.list_components');
   });
 
+  it('routes safe_to_delete_field tool phrasing to safe-to-delete', () => {
+    const r = classifyQuestion(
+      'safe_to_delete_field Contact.Email — does it correctly call a standard field undeletable?',
+    );
+    expect(r.intent).toBe('safe-to-delete');
+    expect(r.tools).toContain('sfi.safe_to_delete_field');
+  });
+
   it('routes named-credential orphan questions to component-usage with find_component_usages', () => {
     const q =
       'Named credential AWS_US_East_1 (NoAuth, ARN endpoint) — is it referenced by any Apex or Flow, or orphaned with zero references?';

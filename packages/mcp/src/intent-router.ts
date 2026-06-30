@@ -1396,7 +1396,7 @@ const RULES: readonly Rule[] = [
     needsResolve: true,
     reason: 'Whether a specific field is safe to delete — coverage-aware dependency check.',
     patterns: [
-      /\bsafe[\s-]+to[\s-]+delete\b/,
+      /\bsafe(?:[\s_-]+to[\s_-]+delete|_to_delete_field)\b/,
       /\b(block|prevent)\w*\b[^.?!]{0,30}\bdeletion\b/,
       /\bbefore\s+deleting\b/,
     ],
@@ -2334,7 +2334,7 @@ const RULES: readonly Rule[] = [
       // high-precision verdict cues (hyphenated safe-to-delete, "block
       // deletion", "before deleting") live in the EARLY precision rule above
       // unassigned-permsets (P14-ROUTER-safe-delete-misroute).
-      /\b(safe[\s-]+to[\s-]+delete|can\s+i\s+delete|ok\s+to\s+(delete|remove))\b/,
+      /\b(safe(?:[\s_-]+to[\s_-]+delete|_to_delete_field)|can\s+i\s+delete|ok\s+to\s+(delete|remove))\b/,
     ],
   },
   {
