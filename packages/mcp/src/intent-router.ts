@@ -348,6 +348,10 @@ const deriveMetadataParentId = (q: string, question?: string): string | undefine
 /** Extract a Salesforce object apiName from a routed question phrase. */
 const deriveObjectApiFromQuestion = (q: string, question?: string): string | undefined => {
   const source = question ?? q;
+  const toolObject = source.match(
+    /\b(?:automation_build_advisor|order_of_execution|apex_build_advisor)\b\s+(?:on\s+)?([A-Za-z][A-Za-z0-9_]*(?:__c|__mdt|__e)?)\b/i,
+  );
+  if (toolObject?.[1] !== undefined) return toolObject[1];
   const onObject = source.match(
     /\b(?:on|for|to|access\s+to)\s+(?:the\s+|an\s+|a\s+)?([A-Za-z][A-Za-z0-9_]*(?:__c|__mdt|__e)?)\b/i,
   );
@@ -356,8 +360,20 @@ const deriveObjectApiFromQuestion = (q: string, question?: string): string | und
     /\b(?:update|insert|delete|save|create|edit)\s+(?:a\s+|an\s+|the\s+)?([A-Za-z][A-Za-z0-9_]*(?:__c|__mdt|__e)?)\b/,
   );
   if (dmlObject?.[1] !== undefined) return dmlObject[1];
+  const objectBeforeDml = source.match(
+    /\b([A-Za-z][A-Za-z0-9_]*(?:__c|__mdt|__e)?)\s+(?:insert|update|delete|save|create)\b/i,
+  );
+  if (objectBeforeDml?.[1] !== undefined) return objectBeforeDml[1];
   const custom = source.match(/\b([A-Za-z][A-Za-z0-9_]*__(?:c|mdt|e))\b/);
   return custom?.[1];
+};
+
+/** Optional hop depth from `get_impact … hops=2` phrasing. */
+const deriveImpactHops = (q: string): number | undefined => {
+  const match = q.match(/\bhops\s*[=:]\s*(\d+)/);
+  if (match === null) return undefined;
+  const hops = Number(match[1]);
+  return Number.isFinite(hops) ? hops : undefined;
 };
 
 /**
@@ -445,6 +461,437 @@ const RULES: readonly Rule[] = [
       /\bshould\s+i\b.*\b(greenfield|new\s+org|new\s+implementation|new\s+project|from\s+day\s+one|day\s+one|before\s+anyone\s+builds?|before\s+building\s+a\s+new|when\s+designing\s+a\s+new|designing\s+a\s+new|standing\s+up|for\s+a\s+new\s+(org|project|implementation))\b/,
       /\bwill\s+this\s+new\s+(implementation|org|project)\b/,
     ],
+  },
+  // === EXPLICIT TOOL INVOCATION (power-user / admin QA phrasing) ===========
+  // Battery questions name `tool_name — …` directly. Natural-language rules
+  // below expect prose; these literal tokens must win without funnel or harness
+  // tool-name injection (admin-edge differential loop).
+  {
+    intent: 'release-readiness',
+    plane: 'vault',
+    tools: ['sfi.release_readiness_report', 'sfi.org_risk_report', 'sfi.tech_debt_score'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit release_readiness_report invocation.',
+    patterns: [/\brelease_readiness_report\b/],
+  },
+  {
+    intent: 'tech-debt',
+    plane: 'vault',
+    tools: ['sfi.tech_debt_score', 'sfi.org_risk_report'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit tech_debt_score invocation.',
+    patterns: [/\btech_debt_score\b/],
+  },
+  {
+    intent: 'vault-health',
+    plane: 'vault',
+    tools: ['sfi.health_check', 'sfi.coverage_report'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit coverage_report invocation.',
+    patterns: [/\bcoverage_report\b/],
+  },
+  {
+    intent: 'retrieve-blindspot',
+    plane: 'vault',
+    tools: ['sfi.retrieve_blindspot_report'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit retrieve_blindspot_report invocation.',
+    patterns: [/\bretrieve_blindspot_report\b/],
+  },
+  {
+    intent: 'automation-on-object',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.automation_build_advisor', 'sfi.get_edges'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit automation_build_advisor invocation.',
+    suggestArgs: (q, question) => {
+      const objectApiName = deriveObjectApiFromQuestion(q, question);
+      return objectApiName !== undefined ? { objectApiName } : undefined;
+    },
+    patterns: [/\bautomation_build_advisor\b/],
+  },
+  {
+    intent: 'automation-risk',
+    plane: 'vault',
+    tools: ['sfi.automation_risk_report'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit automation_risk_report invocation.',
+    patterns: [/\bautomation_risk_report\b/],
+  },
+  {
+    intent: 'apex-build-advisor',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.apex_build_advisor'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit apex_build_advisor invocation — pre-build trigger/Apex briefing.',
+    suggestArgs: (q, question) => {
+      const objectApiName = deriveObjectApiFromQuestion(q, question);
+      return objectApiName !== undefined ? { objectApiName } : undefined;
+    },
+    patterns: [/\bapex_build_advisor\b/],
+  },
+  {
+    intent: 'trigger-order',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.what_happens_on_save', 'sfi.order_of_execution'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit order_of_execution invocation.',
+    suggestArgs: (q, question) => {
+      const args: Record<string, unknown> = { event: deriveSaveEvent(q) };
+      const objectApiName = deriveObjectApiFromQuestion(q, question);
+      if (objectApiName !== undefined) args.objectApiName = objectApiName;
+      return args;
+    },
+    patterns: [/\border_of_execution\b/],
+  },
+  {
+    intent: 'field-mapping',
+    plane: 'vault',
+    tools: ['sfi.field_mapping_between_objects', 'sfi.datatransform_field_map'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit field_mapping_between_objects invocation.',
+    patterns: [/\bfield_mapping_between_objects\b/, /\blead\s*(?:→|->|>)\s*contact\b/],
+  },
+  {
+    intent: 'test-coverage',
+    plane: 'vault',
+    tools: ['sfi.apex_test_coverage', 'sfi.test_coverage_gaps', 'sfi.meaningful_test_audit'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit apex_test_coverage / meaningful_test_audit invocation.',
+    patterns: [/\bapex_test_coverage\b/, /\bmeaningful_test_audit\b/],
+  },
+  {
+    intent: 'clone-patterns',
+    plane: 'vault',
+    tools: ['sfi.find_clone_patterns'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit find_clone_patterns invocation.',
+    patterns: [/\bfind_clone_patterns\b/],
+  },
+  {
+    intent: 'impact-analysis',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.get_impact', 'sfi.field_change_advisor'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit get_impact invocation.',
+    suggestArgs: (q) => {
+      const hops = deriveImpactHops(q);
+      return hops !== undefined ? { hops } : undefined;
+    },
+    patterns: [/\bget_impact\b/],
+  },
+  {
+    intent: 'field-change-advisor',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.field_change_advisor', 'sfi.get_impact'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit field_change_advisor invocation.',
+    patterns: [/\bfield_change_advisor\b/],
+  },
+  {
+    intent: 'disambiguate-concepts',
+    plane: 'vault',
+    tools: ['sfi.disambiguate_concepts'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit disambiguate_concepts invocation — same vs distinct field/status concepts.',
+    patterns: [/\bdisambiguate_concepts\b/],
+  },
+  {
+    intent: 'field-provenance',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.field_provenance'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit field_provenance invocation — who/what sets a field value.',
+    patterns: [/\bfield_provenance\b/],
+  },
+  {
+    intent: 'cmdt-record-values',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.lookup_record', 'sfi.explain_field'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit lookup_record invocation for CMDT / custom-setting record values.',
+    patterns: [/\blookup_record\b/],
+  },
+  {
+    intent: 'last-modified',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.last_modified'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit last_modified invocation.',
+    patterns: [/\blast_modified\b/],
+  },
+  {
+    intent: 'field-population',
+    plane: 'hybrid',
+    tools: ['sfi.resolve', 'sfi.live_field_population'],
+    liveRequired: true,
+    needsResolve: true,
+    reason: 'Explicit live_field_population invocation.',
+    patterns: [/\blive_field_population\b/],
+  },
+  {
+    intent: 'value-change',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.value_change_audit', 'sfi.what_if_change_field_value'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit value_change_audit / what_if_change_field_value invocation.',
+    patterns: [/\bwhat_if_change_field_value\b/, /\bvalue_change_audit\b/],
+  },
+  {
+    intent: 'cross-org-diff',
+    plane: 'vault',
+    tools: ['sfi.compare_vaults', 'sfi.compare_object_across_vaults', 'sfi.compare_profile_across_vaults'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit compare_object_across_vaults invocation.',
+    patterns: [/\bcompare_object_across_vaults\b/],
+  },
+  {
+    intent: 'call-graph',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.call_graph', 'sfi.method_reachability'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit call_graph / method_reachability invocation.',
+    patterns: [/\bcall_graph\b/, /\bmethod_reachability\b/],
+  },
+  {
+    intent: 'tests-for-change',
+    plane: 'vault',
+    tools: ['sfi.tests_for_change'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit tests_for_change invocation.',
+    patterns: [/\btests_for_change\b/],
+  },
+  {
+    intent: 'downstream-effects',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.downstream_effects'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit downstream_effects invocation.',
+    patterns: [/\bdownstream_effects\b/],
+  },
+  {
+    intent: 'dependency-cycles',
+    plane: 'vault',
+    tools: ['sfi.find_dependency_cycles'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit find_dependency_cycles invocation.',
+    patterns: [/\bfind_dependency_cycles\b/],
+  },
+  {
+    intent: 'package-impact',
+    plane: 'vault',
+    tools: ['sfi.package_impact'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit package_impact invocation.',
+    patterns: [/\bpackage_impact\b/],
+  },
+  {
+    intent: 'pii-flow',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.field_lineage'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit field_lineage invocation.',
+    patterns: [/\bfield_lineage\b/],
+  },
+  {
+    intent: 'field-meaning',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.explain_field', 'sfi.field_360'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit field_360 invocation.',
+    patterns: [/\bfield_360\b/],
+  },
+  {
+    intent: 'safe-to-delete',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.safe_to_delete_field'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit safe_to_delete_field invocation.',
+    patterns: [/\bsafe_to_delete_field\b/],
+  },
+  {
+    intent: 'what-if-field',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.what_if_make_field_required', 'sfi.what_if_change_field_type', 'sfi.what_if_remove_picklist_value'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit what-if field schema simulators.',
+    patterns: [
+      /\bwhat_if_make_field_required\b/,
+      /\bwhat_if_change_field_type\b/,
+      /\bwhat_if_remove_picklist_value\b/,
+    ],
+  },
+  {
+    intent: 'scheduled-jobs',
+    plane: 'vault',
+    tools: ['sfi.scheduled_job_catalog'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit scheduled_job_catalog invocation.',
+    patterns: [/\bscheduled_job_catalog\b/],
+  },
+  {
+    intent: 'async-chain-depth',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.async_chain_depth'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit async_chain_depth invocation.',
+    patterns: [/\basync_chain_depth\b/],
+  },
+  {
+    intent: 'endpoints',
+    plane: 'vault',
+    tools: ['sfi.endpoint_catalog', 'sfi.outbound_message_catalog'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit endpoint_catalog / outbound_message_catalog invocation.',
+    patterns: [/\bendpoint_catalog\b/, /\boutbound_message_catalog\b/],
+  },
+  {
+    intent: 'compliance',
+    plane: 'vault',
+    tools: ['sfi.generate_compliance_report'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit generate_compliance_report invocation.',
+    patterns: [/\bgenerate_compliance_report\b/],
+  },
+  {
+    intent: 'architecture-overview',
+    plane: 'vault',
+    tools: ['sfi.generate_architecture_overview'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit generate_architecture_overview invocation.',
+    patterns: [/\bgenerate_architecture_overview\b/],
+  },
+  {
+    intent: 'data-dictionary',
+    plane: 'vault',
+    tools: ['sfi.generate_data_dictionary'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit generate_data_dictionary invocation.',
+    patterns: [/\bgenerate_data_dictionary\b/],
+  },
+  {
+    intent: 'admin-handbook',
+    plane: 'vault',
+    tools: ['sfi.generate_admin_handbook'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit generate_admin_handbook invocation.',
+    patterns: [/\bgenerate_admin_handbook\b/],
+  },
+  {
+    intent: 'layout-access',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.layout_for_user', 'sfi.list_components'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit layout_for_user invocation.',
+    patterns: [/\blayout_for_user\b/],
+  },
+  {
+    intent: 'recordtype-availability',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.recordtype_availability'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit recordtype_availability invocation.',
+    patterns: [/\brecordtype_availability\b/],
+  },
+  {
+    intent: 'tab-availability',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.tab_availability'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit tab_availability invocation.',
+    patterns: [/\btab_availability\b/],
+  },
+  {
+    intent: 'app-access',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.app_access'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit app_access invocation.',
+    patterns: [/\bapp_access\b/],
+  },
+  {
+    intent: 'user-ability',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.user_ability'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit user_ability invocation.',
+    patterns: [/\buser_ability\b/],
+  },
+  {
+    intent: 'governor-risks',
+    plane: 'vault',
+    tools: ['sfi.governor_limit_risks'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit governor_limit_risks invocation.',
+    patterns: [/\bgovernor_limit_risks\b/],
+  },
+  {
+    intent: 'crud-fls-audit',
+    plane: 'vault',
+    tools: ['sfi.crud_fls_audit'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit crud_fls_audit invocation.',
+    patterns: [/\bcrud_fls_audit\b/],
+  },
+  {
+    intent: 'dead-code',
+    plane: 'vault',
+    tools: ['sfi.find_dead_code'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit find_dead_code invocation.',
+    patterns: [/\bfind_dead_code\b/],
+  },
+  {
+    intent: 'hardcoded-values-anywhere',
+    plane: 'vault',
+    tools: ['sfi.find_hardcoded_values_anywhere'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit find_hardcoded_values_anywhere invocation.',
+    patterns: [/\bfind_hardcoded_values_anywhere\b/],
   },
   // === METADATA / APEX / FLOW ANALYSIS routing (checked BEFORE live_*) =======
   // QA-Bundle-2 (ROUTING): validation-rule / save-behavior / flow-trigger /
@@ -1716,6 +2163,7 @@ const RULES: readonly Rule[] = [
       /\brecord[-\s]triggered\s+flows?\b.*\b(combined|combine|performance)/,
       /\bautomation\s+tools?\b.*\bfiring\b.*\bsame\s+object/,
       /\bobjects?\b.*\bmost\s+validation\s+rules/,
+      /\bstacked\s+automation\b/,
     ],
   },
   {
@@ -1961,8 +2409,9 @@ const RULES: readonly Rule[] = [
     needsResolve: false,
     reason: 'Copy-paste / near-duplicate Apex from the vault.',
     patterns: [
-      /\b(clone|duplicate|copy[-\s]?paste|near[-\s]?duplicate)\b.*\b(code|apex|class|logic)\b/,
+      /\b(clone|duplicate|copy[-\s]?paste|near[-\s]?duplicate)\b.*\b(code|apex|class|logic|flows?)\b/,
       /\bduplicated?\s+(logic|code)\b/,
+      /\bcopy_of_\b/,
     ],
   },
   {
@@ -2083,6 +2532,8 @@ const RULES: readonly Rule[] = [
       // so it doesn't collide with the earlier test-coverage route).
       /\bcovered\b.*\b(vault|metadata)\b/,
       /\bwhat\b.*\bcovered\b.*\b(vault|org)\b/,
+      /\bnotmodeled\b/,
+      /\bnever[-\s]?modeled\b/,
     ],
   },
   {
@@ -2118,6 +2569,7 @@ const RULES: readonly Rule[] = [
       /\breferenced\b.*\b(but|yet)\b.*\b(not\s+)?(retrieved|pulled|modeled|in\s+the\s+(vault|manifest))\b/,
       /\b(what|which)\b.*\b(refresh|retrieve|manifest)\b.*\b(miss(ed|ing)?|skip(ped)?|never\s+(pulled|retrieved))\b/,
       /\bretrieve[-\s]?manifest\s+gaps?\b/,
+      /\bnot\s+being\s+pulled\b/,
     ],
   },
   {

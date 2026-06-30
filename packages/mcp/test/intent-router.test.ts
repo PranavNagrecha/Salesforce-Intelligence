@@ -373,6 +373,43 @@ const CASES: readonly Case[] = [
   { q: 'What can you do?', intent: 'capabilities', plane: 'vault' },
   // Collision: object names containing "history" must not steal history-change.
   { q: 'What changed recently in the org?', intent: 'history-change', plane: 'vault' },
+
+  // Admin-edge 61–90: explicit tool-name phrasing (regex must route without funnel).
+  { q: 'release_readiness_report — is this org ready for release?', intent: 'release-readiness', plane: 'vault' },
+  { q: 'tech_debt_score — does it recommend remediation on a zero-count category?', intent: 'tech-debt', plane: 'vault' },
+  { q: 'coverage_report — which metadata families were retrieved vs notModeled?', intent: 'vault-health', plane: 'vault' },
+  { q: 'retrieve_blindspot_report — what is not being pulled?', intent: 'retrieve-blindspot', plane: 'vault' },
+  { q: 'automation_build_advisor Contact — when it cites active record-triggered Flows', intent: 'automation-on-object', plane: 'vault' },
+  { q: 'automation_risk_report — which objects have the most stacked automation?', intent: 'automation-risk', plane: 'vault' },
+  { q: 'apex_build_advisor for a new trigger on hed__Example_Course__c', intent: 'apex-build-advisor', plane: 'vault' },
+  { q: 'order_of_execution Contact update — after-trigger phase', intent: 'trigger-order', plane: 'vault' },
+  { q: 'field_mapping_between_objects Lead→Contact — heuristic conversion map', intent: 'field-mapping', plane: 'vault' },
+  { q: 'apex_test_coverage CalculatePaymentsBatch — specific coverage', intent: 'test-coverage', plane: 'vault' },
+  { q: 'find_clone_patterns — Copy_of_* flows near-duplicates', intent: 'clone-patterns', plane: 'vault' },
+  { q: 'get_impact Contact.hed__Social_Security_Number__c hops=2', intent: 'impact-analysis', plane: 'vault' },
+  { q: 'disambiguate_concepts — is Status the same concept as Stage?', intent: 'disambiguate-concepts', plane: 'vault' },
+  { q: 'field_provenance Contact.Best_Military_Status__c — source of truth', intent: 'field-provenance', plane: 'vault' },
+  { q: 'lookup_record on CustomMetadata Faculty_Management Hours_Limit_Year', intent: 'cmdt-record-values', plane: 'vault' },
+  { q: 'last_modified CalculatePaymentsBatch — who built it and when', intent: 'last-modified', plane: 'vault' },
+  { q: 'live_field_population — how many Contacts have Military_Status__c populated', intent: 'field-population', plane: 'hybrid' },
+  { q: 'field_change_advisor Contact.Best_Status__c — advice on changing it', intent: 'field-change-advisor', plane: 'vault' },
+  { q: 'what_if_change_field_value / value_change_audit — blast radius', intent: 'value-change', plane: 'vault' },
+  { q: 'compare_object_across_vaults Contact sandbox-vs-prod', intent: 'cross-org-diff', plane: 'vault' },
+  { q: 'find_dependency_cycles — circular Apex dependencies', intent: 'dependency-cycles', plane: 'vault' },
+  { q: 'downstream_effects of changing MRK_SessionHandler', intent: 'downstream-effects', plane: 'vault' },
+  { q: 'tests_for_change ApplicationValidationService', intent: 'tests-for-change', plane: 'vault' },
+
+  // Admin-edge 31–60: explicit tool-name phrasing.
+  { q: 'field_lineage on Contact.CB_CE_Yearly_URL__c upstream', intent: 'pii-flow', plane: 'vault' },
+  { q: 'field_360 on Contact.hed__Social_Security_Number__c — riskLevel', intent: 'field-meaning', plane: 'vault' },
+  { q: 'safe_to_delete_field Contact.Email — standard field undeletable', intent: 'safe-to-delete', plane: 'vault' },
+  { q: 'what_if_make_field_required Contact.Email', intent: 'what-if-field', plane: 'vault' },
+  { q: 'scheduled_job_catalog — Schedulables only from tests', intent: 'scheduled-jobs', plane: 'vault' },
+  { q: 'async_chain_depth from CalculatePaymentsBatch', intent: 'async-chain-depth', plane: 'vault' },
+  { q: 'endpoint_catalog — every outbound URL', intent: 'endpoints', plane: 'vault' },
+  { q: 'governor_limit_risks — SOQL in loops', intent: 'governor-risks', plane: 'vault' },
+  { q: 'find_dead_code — unreachable Apex', intent: 'dead-code', plane: 'vault' },
+  { q: 'meaningful_test_audit on the FSR_Trigger* test family', intent: 'test-coverage', plane: 'vault' },
 ];
 
 describe('classifyQuestion battery', () => {
@@ -871,7 +908,7 @@ describe('router ↔ roster contract (CI gate)', () => {
   // that left the 11 Phase-11 access/UI tools unrouted until P12.
   const GRANDFATHERED_NON_ROUTABLE = new Set<string>([
     // Meta / front-door / plumbing (never a question's primary answer):
-    'sfi.route_question', 'sfi.synthesize_answer', 'sfi.disambiguate_concepts',
+    'sfi.route_question', 'sfi.synthesize_answer',
     'sfi.get_manifest', 'sfi.export_manifest', 'sfi.baseline_acknowledge',
     'sfi.baseline_status', 'sfi.live_consent', 'sfi.live_budget',
     // P13-GW catalog gateway (meta-navigation; P13-GW-router-envelope wires
@@ -890,10 +927,10 @@ describe('router ↔ roster contract (CI gate)', () => {
     'sfi.blast_radius_live', 'sfi.live_automation_fired', 'sfi.live_describe',
     'sfi.live_picklist_usage', 'sfi.live_stale_check',
     // Sub-tools / specialized drills reached via a bundle or after `resolve`:
-    'sfi.apex_build_advisor', 'sfi.async_chain_depth', 'sfi.decision_table_browse',
+    'sfi.decision_table_browse',
     // sfi.explain_formula is now router-reachable (QA-Bundle-2 save-behavior rule).
-    'sfi.downstream_effects', 'sfi.field_meaning',
-    'sfi.field_provenance', 'sfi.find_semantic_field', 'sfi.fleet_find',
+    'sfi.field_meaning',
+    'sfi.find_semantic_field', 'sfi.fleet_find',
     // sfi.layout_assignments is now router-reachable (P12-ROUTER-layout-assignments).
     // sfi.lookup_record is now router-reachable (P14-ROUTER-cmdt-record-values).
     'sfi.org_pulse',
