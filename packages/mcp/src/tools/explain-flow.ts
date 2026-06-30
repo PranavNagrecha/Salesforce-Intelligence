@@ -64,6 +64,9 @@
  *     surface as warnings; the renderer simply sees fewer rows.
  */
 
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+
 import type {
   ComponentId,
   Edge,
@@ -339,15 +342,36 @@ const readFlowNonNegInt = (node: Node, key: string): number => {
 /**
  * Build the execution-context block from the Flow node's extracted
  * `runInMode` / fault-coverage properties (see flow.ts extractor).
+ *
+ * When the node's in-graph properties do not carry the async-path markers
+ * (vault built before bundle-4), this function falls back to scanning the
+ * source `.flow-meta.xml` file via {@link readAsyncAfterCommitFromSource}.
+ * The `vaultRoot` is only accessed on that fallback path; no I/O is done when
+ * the in-graph properties are present and sufficient.
  */
-const buildExecutionContext = (node: Node): ExplainFlowExecutionContext => {
+const buildExecutionContext = async (
+  node: Node,
+  vaultRoot: string,
+): Promise<ExplainFlowExecutionContext> => {
   const hasUnhandledFaults = node.properties['hasUnhandledFaults'] === true;
+  let faultRollback: FaultRollbackVerdict | null = null;
+  if (hasUnhandledFaults) {
+    // Check in-graph properties first (fast, no I/O).
+    const asyncFromGraph = hasAsyncAfterCommitPath(node);
+    // Source-file fallback for vaults built before bundle-4 that lack the
+    // scheduledPathTypes / runAsyncAfterCommit properties.
+    const isAsync =
+      asyncFromGraph ||
+      (!asyncFromGraph &&
+        (await readAsyncAfterCommitFromSource(vaultRoot, node)));
+    faultRollback = buildFaultRollback(node, isAsync);
+  }
   return {
     runInMode: readRunInMode(node),
     hasUnhandledFaults,
     unhandledFaultElementCount: readFlowNonNegInt(node, 'elementsWithoutFault'),
     runModeNote: RUN_MODE_NOTE,
-    faultRollback: hasUnhandledFaults ? buildFaultRollback(node) : null,
+    faultRollback,
   };
 };
 
@@ -357,12 +381,25 @@ const buildExecutionContext = (node: Node): ExplainFlowExecutionContext => {
  * AFTER the triggering save has committed. An unhandled fault on such a path
  * cannot roll back the already-committed save.
  *
- * Two shapes are accepted from the flow node properties (the extractor surfaces
- * one of them — see the flow extractor / bundle-4): a `scheduledPaths` array
- * whose entries carry a `pathType`, and a scalar `pathType` (or
- * `runAsyncAfterCommit: true`) stamped directly on the node. The `pathType`
- * marker Salesforce uses for the immediate post-commit async path is
- * `AsyncAfterCommit`.
+ * Three property shapes are accepted (the extractor surfaces one or more):
+ *
+ *   1. `runAsyncAfterCommit: true` — the convenience boolean stamped by the
+ *      extractor when at least one `<scheduledPaths><pathType>` is
+ *      `AsyncAfterCommit` (bundle-4 / extractor v2).
+ *   2. `scheduledPathTypes: string[]` — the canonical extractor array (e.g.
+ *      `['AsyncAfterCommit']`). Checked before the legacy `scheduledPaths`
+ *      shape so that vaults built with the current extractor fast-path here.
+ *   3. `scheduledPaths` array — object-per-path shape used by older vault
+ *      builds or test fixtures (`[{ pathType: 'AsyncAfterCommit' }]`); also
+ *      accepts bare string entries.
+ *   4. Scalar `pathType` directly on the node (uncommon, kept for compat).
+ *
+ * When none of the above properties are present (vault built before bundle-4),
+ * the caller should supply the absolute source-file path so that this function
+ * can fall back to a raw XML substring scan — see {@link readAsyncAfterCommitFromSource}.
+ *
+ * The `pathType` marker Salesforce uses for the immediate post-commit async
+ * path is `AsyncAfterCommit`.
  */
 const ASYNC_AFTER_COMMIT = 'AsyncAfterCommit';
 
@@ -370,6 +407,14 @@ const hasAsyncAfterCommitPath = (node: Node): boolean => {
   if (node.properties['runAsyncAfterCommit'] === true) return true;
   const scalar = node.properties['pathType'];
   if (typeof scalar === 'string' && scalar === ASYNC_AFTER_COMMIT) return true;
+  // scheduledPathTypes: string[] — the canonical extractor property (bundle-4).
+  const pathTypes = node.properties['scheduledPathTypes'];
+  if (Array.isArray(pathTypes)) {
+    for (const pt of pathTypes) {
+      if (typeof pt === 'string' && pt === ASYNC_AFTER_COMMIT) return true;
+    }
+  }
+  // scheduledPaths: object-per-path or string array — older vault builds / test fixtures.
   const paths = node.properties['scheduledPaths'];
   if (Array.isArray(paths)) {
     for (const entry of paths) {
@@ -381,6 +426,43 @@ const hasAsyncAfterCommitPath = (node: Node): boolean => {
     }
   }
   return false;
+};
+
+/**
+ * Source-file XML fallback for detecting `AsyncAfterCommit` scheduled paths
+ * when the vault was built with an older extractor that did not stamp
+ * `scheduledPathTypes` / `runAsyncAfterCommit` onto the node. Reads the raw
+ * `.flow-meta.xml` file and performs a fast substring search for the
+ * `<pathType>AsyncAfterCommit</pathType>` element that Salesforce emits in
+ * `<start><scheduledPaths>` for the immediate post-commit async path.
+ *
+ * This is a READ-ONLY, fire-and-forget fallback: any I/O failure silently
+ * returns `false` (safe: the caller will then fall through to the synchronous
+ * verdict, which errs on the cautious side for rollback analysis). The check
+ * does not re-parse the XML; the substring `AsyncAfterCommit` is unique enough
+ * in a flow file that a raw text scan is both fast and unambiguous.
+ *
+ * Call ONLY after {@link hasAsyncAfterCommitPath} returns `false` — i.e. when
+ * all in-graph property checks have already failed. The `sourcePath` on the
+ * node is vault-root-relative (e.g.
+ * `source/main/default/flows/My_Flow.flow-meta.xml`); `vaultRoot` is the
+ * absolute path to the `org-kb/` directory so the two can be joined.
+ */
+const readAsyncAfterCommitFromSource = async (
+  vaultRoot: string,
+  node: Node,
+): Promise<boolean> => {
+  if (typeof node.sourcePath !== 'string' || node.sourcePath.length === 0) {
+    return false;
+  }
+  try {
+    const absPath = join(vaultRoot, node.sourcePath);
+    const xml = await readFile(absPath, 'utf-8');
+    return xml.includes(`<pathType>${ASYNC_AFTER_COMMIT}</pathType>`);
+  } catch {
+    // I/O error (file missing, permission, etc.) — safe to ignore.
+    return false;
+  }
 };
 
 /**
@@ -398,8 +480,12 @@ const hasAsyncAfterCommitPath = (node: Node): boolean => {
  *   - Record-triggered (before/after-save) and autolaunched/scheduled/platform-
  *     event flows that fault synchronously inside the triggering transaction
  *     roll the WHOLE transaction back (the triggering DML fails too).
+ *
+ * @param isAsync - Whether this flow has an AsyncAfterCommit scheduled path.
+ *   Pre-computed by the caller (combining in-graph property checks and the
+ *   source-file XML fallback) so this function stays pure and synchronous.
  */
-const buildFaultRollback = (node: Node): FaultRollbackVerdict => {
+const buildFaultRollback = (node: Node, isAsync: boolean): FaultRollbackVerdict => {
   const triggerType =
     typeof node.properties['triggerType'] === 'string'
       ? (node.properties['triggerType'] as string)
@@ -411,7 +497,7 @@ const buildFaultRollback = (node: Node): FaultRollbackVerdict => {
   // Post-commit async path: a separate async transaction that runs AFTER the
   // triggering save committed. An unhandled fault here cannot undo the commit —
   // it silently aborts the async interview and notifies only the admin.
-  if (hasAsyncAfterCommitPath(node)) {
+  if (isAsync) {
     return {
       rollsBackTransaction: false,
       statement:
@@ -871,7 +957,7 @@ export const explainFlowHandler = async (
     label: readFlowLabel(node),
     status: readFlowStatus(node),
     processType: readFlowProcessType(node),
-    executionContext: buildExecutionContext(node),
+    executionContext: await buildExecutionContext(node, ctx.vaultRoot),
     triggerInfo: {
       triggerType: readFlowTriggerType(node),
       triggerObject: triggerObjectResult.value,

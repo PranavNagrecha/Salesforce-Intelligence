@@ -1,6 +1,6 @@
 /// <reference types="vitest/globals" />
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -406,6 +406,63 @@ const scheduledFlowSeed: ExtractionResult = {
   edges: [],
 };
 
+// =============================================================================
+// Seed 6: OLD-VAULT shape for an AsyncAfterCommit record-triggered flow —
+// the vault was built before the bundle-4 extractor update that stamps
+// `scheduledPathTypes` / `runAsyncAfterCommit`.  Neither property is present
+// in the node; the extractor only wrote `recordTriggerType: 'Update'` and
+// `triggerType: 'RecordAfterSave'`.  The handler must fall back to scanning
+// the source XML file to detect the <pathType>AsyncAfterCommit</pathType>
+// element and produce rollsBackTransaction=false.
+//
+// The source file is written to disk in beforeAll() using the tempDir vault
+// root, so `sourcePath` resolves relative to ctx.vaultRoot.
+//
+// This is a REAL-ORG-SHAPE fixture: the properties mirror exactly what the
+// live DuckDB vault for Contract_Hours_Approval_Check_Asynchronous contains
+// after a pre-bundle-4 refresh (triggerType=RecordAfterSave,
+// recordTriggerType=Update, hasUnhandledFaults=true, no scheduledPathTypes).
+// =============================================================================
+
+const LEGACY_ASYNC_FLOW_ID = 'Flow:CourseOffering_ContractHours_AsyncCheck';
+// relative to vaultRoot — written to disk in beforeAll()
+const LEGACY_ASYNC_SOURCE_RELPATH =
+  'source/main/default/flows/CourseOffering_ContractHours_AsyncCheck.flow-meta.xml';
+
+const legacyAsyncAfterCommitFlowSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: LEGACY_ASYNC_FLOW_ID,
+      type: 'Flow',
+      apiName: 'CourseOffering_ContractHours_AsyncCheck',
+      label: 'Course Offering Contract Hours Async Check',
+      // sourcePath is vault-root-relative — set after tempDir is known.
+      // Overwritten in beforeAll() via Object.assign.
+      sourcePath: LEGACY_ASYNC_SOURCE_RELPATH,
+      properties: {
+        label: 'Course Offering Contract Hours Async Check',
+        description: 'Checks contract hours after save; runs async.',
+        processType: 'AutoLaunchedFlow',
+        status: 'Active',
+        interviewLabel: null,
+        runInMode: null,
+        triggerObject: 'CustomObject:CourseOffering__c',
+        triggerType: 'RecordAfterSave',
+        recordTriggerType: 'Update',
+        // OLD-VAULT SHAPE: scheduledPathTypes and runAsyncAfterCommit absent —
+        // the vault was built before bundle-4. The handler must fall back to
+        // the source-file XML scan to detect AsyncAfterCommit.
+        flowExtractionWarnings: [],
+        faultableElementCount: 12,
+        elementsWithoutFault: 12,
+        hasUnhandledFaults: true,
+        conditions: [],
+      },
+    }),
+  ],
+  edges: [],
+};
+
 // An ApexTrigger sharing a name with no Flow — "explain flow AccountTrigger"
 // should point here rather than dead-ending (B26).
 const triggerSeed: ExtractionResult = {
@@ -428,6 +485,32 @@ let ctx: Context;
 
 beforeAll(async () => {
   tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-explain-flow-'));
+
+  // Write the minimal source XML for the legacy-async-vault fixture so the
+  // source-file fallback in explain-flow.ts can detect AsyncAfterCommit.
+  const sourceDir = join(tempDir, 'source/main/default/flows');
+  mkdirSync(sourceDir, { recursive: true });
+  writeFileSync(
+    join(sourceDir, 'CourseOffering_ContractHours_AsyncCheck.flow-meta.xml'),
+    [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<Flow xmlns="http://soap.sforce.com/2006/04/metadata">',
+      '    <label>Course Offering Contract Hours Async Check</label>',
+      '    <processType>AutoLaunchedFlow</processType>',
+      '    <status>Active</status>',
+      '    <start>',
+      '        <object>CourseOffering__c</object>',
+      '        <triggerType>RecordAfterSave</triggerType>',
+      '        <recordTriggerType>Update</recordTriggerType>',
+      '        <scheduledPaths>',
+      '            <pathType>AsyncAfterCommit</pathType>',
+      '        </scheduledPaths>',
+      '    </start>',
+      '</Flow>',
+    ].join('\n'),
+    'utf-8',
+  );
+
   const dbPath = join(tempDir, 'explain-flow.db');
   const opened = await openGraph(dbPath);
   if (!opened.ok) {
@@ -440,6 +523,7 @@ beforeAll(async () => {
     asyncAfterCommitFlowSeed,
     screenFlowSeed,
     scheduledFlowSeed,
+    legacyAsyncAfterCommitFlowSeed,
     triggerSeed,
   ]);
   if (!imported.ok) {
@@ -723,6 +807,37 @@ describe('explainFlowHandler', () => {
     if (result.ok) return;
     expect(result.error.kind).toBe('component-not-found');
     expect(result.error.path).toBe('Flow:DoesNotExist');
+  });
+
+  // ---------------------------------------------------------------------------
+  // LEGACY-VAULT SOURCE-FILE FALLBACK — AsyncAfterCommit without in-graph props
+  // ---------------------------------------------------------------------------
+
+  it('detects AsyncAfterCommit via source-file fallback when vault lacks scheduledPathTypes (old-vault shape)', async () => {
+    // This fixture has triggerType=RecordAfterSave + hasUnhandledFaults=true
+    // but NO scheduledPathTypes / runAsyncAfterCommit in properties — matching
+    // the real-org vault for Contract_Hours_Approval_Check_Asynchronous
+    // extracted before the bundle-4 extractor update.  The handler must fall
+    // back to reading the source XML file (written to tempDir in beforeAll)
+    // and return rollsBackTransaction=false, not true.
+    const result = await explainFlowHandler(ctx, {
+      flowId: LEGACY_ASYNC_FLOW_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ec = result.value.data.executionContext;
+    expect(ec.hasUnhandledFaults).toBe(true);
+    expect(ec.faultRollback).not.toBeNull();
+    // The key assertion: must be false (async — save already committed).
+    // FAIL-BEFORE: was true ("synchronous after-save record-triggered flow")
+    // because hasAsyncAfterCommitPath found no in-graph markers.
+    expect(ec.faultRollback?.rollsBackTransaction).toBe(false);
+    const stmt = ec.faultRollback?.statement ?? '';
+    expect(stmt).toMatch(/AsyncAfterCommit|asynchronous post-commit/);
+    expect(stmt).toMatch(/does NOT roll back the committed save/);
+    expect(stmt).toMatch(/not user-visible|silently aborts/);
+    // Must NOT contain the synchronous-rollback language.
+    expect(stmt).not.toMatch(/synchronous .* flow with an unhandled fault path/);
   });
 
   it('returns invalid-query when flowId does not start with Flow:', async () => {
