@@ -405,26 +405,42 @@ const workflowMatchesEvent = (
  *
  * `upsert` matches Create + Update + CreateAndUpdate (the union of
  * insert and update).
+ *
+ * **Absent `recordTriggerType` (under-count guard):** a record-triggered
+ * Flow whose `triggersOn` edge carries the before/after discriminator
+ * (`triggerType: RecordBeforeSave | RecordAfterSave`) but is MISSING the
+ * `recordTriggerType` (the extractor did not stamp it, or the Flow
+ * definition omitted `<recordTriggerType>` and the platform defaulted it)
+ * is a real, firing automation. Silently excluding it (the old
+ * `typeof !== 'string'` short-circuit) under-counts the active flows on a
+ * densely-automated object by half. We instead treat an absent value as
+ * `CreateAndUpdate` — i.e. it fires on insert/update/upsert — which is the
+ * Salesforce default a save-order narration should assume rather than drop
+ * the step. It still does NOT match `delete`/`undelete`, since an absent
+ * value never implies a delete-triggered flow.
  */
 const flowMatchesEvent = (
   recordTriggerType: unknown,
   event: DmlEvent,
 ): boolean => {
-  if (typeof recordTriggerType !== 'string') return false;
+  // Treat an absent / non-string recordTriggerType as the CreateAndUpdate
+  // default so an after-save flow with no explicit value is not dropped.
+  const effective: string =
+    typeof recordTriggerType === 'string' ? recordTriggerType : 'CreateAndUpdate';
   if (event === 'undelete') return false;
-  if (event === 'delete') return recordTriggerType === 'Delete';
+  if (event === 'delete') return effective === 'Delete';
   if (event === 'upsert') {
     return (
-      recordTriggerType === 'Create' ||
-      recordTriggerType === 'Update' ||
-      recordTriggerType === 'CreateAndUpdate'
+      effective === 'Create' ||
+      effective === 'Update' ||
+      effective === 'CreateAndUpdate'
     );
   }
   if (event === 'insert') {
-    return recordTriggerType === 'Create' || recordTriggerType === 'CreateAndUpdate';
+    return effective === 'Create' || effective === 'CreateAndUpdate';
   }
   // event === 'update'
-  return recordTriggerType === 'Update' || recordTriggerType === 'CreateAndUpdate';
+  return effective === 'Update' || effective === 'CreateAndUpdate';
 };
 
 /**
@@ -1072,9 +1088,21 @@ export const whatHappensOnSaveHandler = async (
 
   // On a densely-automated standard object (e.g. Contact) the per-step action
   // enumeration can push the payload past the MCP response budget. Trim the
-  // heaviest steps' action tails to fit — every step stays, only the
-  // exhaustive edge list is capped, with an honest per-step count.
-  const budget = enforceSoeByteBudget(data, [soe] as unknown as BoundableStep[][]);
+  // heaviest steps' action tails (and, if needed, the verbose firing
+  // conditions) to fit — every step STAYS, only the exhaustive edge list /
+  // condition expression is capped, with an honest per-step count.
+  //
+  // `allowStepDrop: false` is load-bearing for the single-event view: dropping
+  // trailing steps would silently un-name real firing automations (the
+  // after-trigger / post-save-flow tail), defeating the whole point of the
+  // tool. A single-event step list, once its actions/conditionals are slimmed,
+  // is small enough that the step COUNT alone never exceeds the budget, so the
+  // last-resort step-drop pass is neither needed nor allowed here.
+  const budget = enforceSoeByteBudget(
+    data,
+    [soe] as unknown as BoundableStep[][],
+    { allowStepDrop: false },
+  );
   if (budget.truncated) {
     data.truncated = true;
     data.disclosure = `${data.disclosure} ${soeTruncationNote(budget)}`;
