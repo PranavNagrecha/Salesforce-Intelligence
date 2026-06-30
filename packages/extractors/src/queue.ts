@@ -232,9 +232,28 @@ export const extractQueue = async (
   if (!sobjectResult.ok) return sobjectResult;
   const { sobjectTypes, rowCount } = sobjectResult.value;
 
-  // Per Queue.md "Optional repeated elements (members)": `<members>`
-  // rows are counted only; deep member resolution is deferred to v1.2.
-  const memberCount = toArray(rootObj['members']).length;
+  // v1.2 member resolution: navigate <queueMembers><users><user> to count
+  // and identify named-user members declared in the metadata. The XML path
+  // is NOT the legacy `<members>` flat list — that element is absent in
+  // real org exports; the actual structure wraps users under:
+  //   <queueMembers>
+  //     <users>
+  //       <user>username@example.com</user>
+  //     </users>
+  //   </queueMembers>
+  const queueMembersBlock = unwrapSingle(rootObj['queueMembers']);
+  const usersBlock =
+    typeof queueMembersBlock === 'object' && queueMembersBlock !== null
+      ? unwrapSingle((queueMembersBlock as Record<string, unknown>)['users'])
+      : undefined;
+  const memberUserRaws: unknown[] =
+    typeof usersBlock === 'object' && usersBlock !== null
+      ? toArray((usersBlock as Record<string, unknown>)['user'])
+      : [];
+  const memberEmails: string[] = memberUserRaws
+    .map((u) => (u !== null && u !== undefined ? String(u).trim() : ''))
+    .filter((s) => s.length > 0);
+  const memberCount = memberEmails.length;
 
   const node: Node = {
     id: nodeId,
@@ -252,11 +271,25 @@ export const extractQueue = async (
       doesSendEmailToMembers: coerceBoolean(
         unwrapSingle(rootObj['doesSendEmailToMembers']),
       ),
+      doesIncludeBosses: coerceBoolean(unwrapSingle(rootObj['doesIncludeBosses'])),
       queueRoutingConfig: optionalString(rootObj, 'queueRoutingConfig'),
       sobjectTypeCount: rowCount,
       memberCount,
+      memberEmails,
     },
   };
+
+  // hasMember edges for each declared user member (v1.2).
+  // Target id is `User:{email}` — dangling by design (there is no User
+  // ComponentType vault node), consistent with the group-membership extractor.
+  const memberEdges: Edge[] = memberEmails.map((email) => ({
+    fromId: nodeId,
+    toId: `User:${email}`,
+    edgeType: 'hasMember' as const,
+    confidence: 'declared' as const,
+    source: EXTRACTOR_SOURCE,
+    properties: { memberKind: 'user' },
+  }));
 
   const edges: Edge[] = sobjectTypes.map((sobjectType) => ({
     fromId: nodeId,
@@ -267,5 +300,5 @@ export const extractQueue = async (
     properties: { relationship: 'queueOwner' },
   }));
 
-  return ok({ nodes: [node], edges });
+  return ok({ nodes: [node], edges: [...edges, ...memberEdges] });
 };
