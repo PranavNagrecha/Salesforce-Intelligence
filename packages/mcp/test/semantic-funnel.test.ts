@@ -62,6 +62,10 @@ describe('semanticCandidates — recall@8 (the gap CAE-01 closes)', () => {
       q: 'what external systems does this org talk to',
       anyOf: ['sfi.integration_map', 'sfi.endpoint_catalog'],
     },
+    {
+      q: 'How many custom fields are on Contact?',
+      anyOf: ['sfi.list_components'],
+    },
   ];
 
   it.each(RECALL)('surfaces a relevant tool for: $q', ({ q, anyOf }) => {

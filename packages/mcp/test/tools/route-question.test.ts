@@ -716,6 +716,58 @@ describe('core-profile gateway envelopes (P13-GW-router-envelope)', () => {
     expect(r.value.data.rendered).toContain('Candidate tools');
   });
 
+  it('promotes regex route tools + suggestedArgs into toolCandidates for metadata-count', async () => {
+    const r = await routeQuestionHandler(ctx, {
+      question: 'How many custom fields are on Contact?',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.route.intent).toBe('metadata-count');
+    const listComponents = (r.value.data.toolCandidates ?? []).find(
+      (c) => c.tool === 'sfi.list_components',
+    );
+    expect(listComponents).toBeDefined();
+    expect(listComponents?.fromRoute).toBe(true);
+    expect(listComponents?.suggestedArgs).toEqual({
+      type: 'CustomField',
+      parentId: 'CustomObject:Contact',
+    });
+    expect((listComponents?.score ?? 0)).toBeGreaterThanOrEqual(0.96);
+  });
+
+  it('emits field_mapping invoke args with object pair and vault alias from config', async () => {
+    const prev = process.env.SFI_TOOL_PROFILE;
+    process.env.SFI_TOOL_PROFILE = 'core';
+    try {
+      const { writeFile, mkdir } = await import('node:fs/promises');
+      const metaDir = join(tempDir, 'meta');
+      await mkdir(metaDir, { recursive: true });
+      await writeFile(
+        join(metaDir, 'config.json'),
+        JSON.stringify({ targetOrg: 'fixture-vault', vaultRoot: tempDir, version: '0.1.0' }),
+        'utf8',
+      );
+      const r = await routeQuestionHandler(ctx, {
+        question: 'How do fields map between Lead and Contact?',
+        logGap: false,
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.route.intent).toBe('field-mapping');
+      expect(r.value.data.invoke?.[0]).toEqual({
+        tool: 'sfi.run_analysis',
+        args: {
+          name: 'sfi.field_mapping_between_objects',
+          args: { objectA: 'Lead', objectB: 'Contact', vault: 'fixture-vault' },
+        },
+      });
+    } finally {
+      if (prev === undefined) delete process.env.SFI_TOOL_PROFILE;
+      else process.env.SFI_TOOL_PROFILE = prev;
+    }
+  });
+
   // CAE-03b: SFI_ROUTER_MODE=offline is the deterministic Design-A fallback for
   // no-LLM / CI / air-gapped hosts — the regex route is authoritative and the
   // funnel candidates are omitted (even when a mode is requested).
