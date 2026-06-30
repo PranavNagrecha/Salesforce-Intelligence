@@ -250,10 +250,23 @@ export interface ExplainFlowExecutionContext {
 
 /**
  * Whether an unhandled fault in THIS flow rolls back the originating
- * transaction, with the rationale. `rollsBackTransaction: true` for any
- * synchronous in-transaction flow (record-triggered before/after-save and
- * autolaunched/scheduled/platform-event); `false` only for a user-driven
- * screen flow (the fault shows on a screen, no originating DML to roll back).
+ * transaction, with the rationale.
+ *
+ * `rollsBackTransaction: true` for any flow whose unhandled-fault element runs
+ * synchronously inside the originating transaction:
+ *   - record-triggered before/after-save and autolaunched/scheduled/platform-
+ *     event flows that fault in the SAME transaction as the triggering save;
+ *   - a user-driven screen flow — the fault rolls back all DML performed since
+ *     the last screen navigation (the current screen-segment transaction) and
+ *     shows the running user a flow error screen.
+ *
+ * `rollsBackTransaction: false` for an unhandled fault in a POST-COMMIT ASYNC
+ * path (an `AsyncAfterCommit` scheduled path on a record-triggered flow): that
+ * interview runs in a SEPARATE asynchronous transaction after the triggering
+ * save has already committed, so it cannot roll the committed save back. The
+ * fault is not user-visible — it silently aborts the async interview (discarding
+ * its intended work, e.g. a task or email) and emails only the admin / Apex-
+ * exception recipient.
  */
 export interface FaultRollbackVerdict {
   readonly rollsBackTransaction: boolean;
@@ -339,11 +352,52 @@ const buildExecutionContext = (node: Node): ExplainFlowExecutionContext => {
 };
 
 /**
- * Compose the determinate fault-rollback verdict from the flow's trigger type.
- * Record-triggered (before/after-save) and autolaunched/scheduled/platform-event
- * flows run synchronously inside the triggering transaction, so an unhandled
- * fault rolls the WHOLE transaction back (the triggering DML fails too). A
- * screen flow has no originating DML — the fault shows the user an error screen.
+ * Detect whether the flow has an `AsyncAfterCommit` scheduled path — a
+ * record-triggered flow path that runs in a SEPARATE asynchronous transaction
+ * AFTER the triggering save has committed. An unhandled fault on such a path
+ * cannot roll back the already-committed save.
+ *
+ * Two shapes are accepted from the flow node properties (the extractor surfaces
+ * one of them — see the flow extractor / bundle-4): a `scheduledPaths` array
+ * whose entries carry a `pathType`, and a scalar `pathType` (or
+ * `runAsyncAfterCommit: true`) stamped directly on the node. The `pathType`
+ * marker Salesforce uses for the immediate post-commit async path is
+ * `AsyncAfterCommit`.
+ */
+const ASYNC_AFTER_COMMIT = 'AsyncAfterCommit';
+
+const hasAsyncAfterCommitPath = (node: Node): boolean => {
+  if (node.properties['runAsyncAfterCommit'] === true) return true;
+  const scalar = node.properties['pathType'];
+  if (typeof scalar === 'string' && scalar === ASYNC_AFTER_COMMIT) return true;
+  const paths = node.properties['scheduledPaths'];
+  if (Array.isArray(paths)) {
+    for (const entry of paths) {
+      if (typeof entry === 'string' && entry === ASYNC_AFTER_COMMIT) return true;
+      if (typeof entry === 'object' && entry !== null) {
+        const pt = (entry as Record<string, unknown>)['pathType'];
+        if (typeof pt === 'string' && pt === ASYNC_AFTER_COMMIT) return true;
+      }
+    }
+  }
+  return false;
+};
+
+/**
+ * Compose the determinate fault-rollback verdict from the flow's trigger type
+ * and execution timing.
+ *
+ *   - A POST-COMMIT ASYNC path (`AsyncAfterCommit` scheduled path on a
+ *     record-triggered flow) runs in its OWN async transaction after the
+ *     triggering save has committed → it CANNOT roll the committed save back
+ *     (`rollsBackTransaction: false`); the fault silently aborts the async
+ *     interview and emails only the admin / Apex-exception recipient.
+ *   - A screen flow's unhandled fault rolls back the DML performed in the
+ *     CURRENT screen segment (since the last screen navigation) and shows the
+ *     user a flow error screen (`rollsBackTransaction: true`).
+ *   - Record-triggered (before/after-save) and autolaunched/scheduled/platform-
+ *     event flows that fault synchronously inside the triggering transaction
+ *     roll the WHOLE transaction back (the triggering DML fails too).
  */
 const buildFaultRollback = (node: Node): FaultRollbackVerdict => {
   const triggerType =
@@ -354,15 +408,49 @@ const buildFaultRollback = (node: Node): FaultRollbackVerdict => {
     typeof node.properties['processType'] === 'string'
       ? (node.properties['processType'] as string)
       : null;
-  // Screen flow: user-driven interview, not inside a DML transaction.
+  // Post-commit async path: a separate async transaction that runs AFTER the
+  // triggering save committed. An unhandled fault here cannot undo the commit —
+  // it silently aborts the async interview and notifies only the admin.
+  if (hasAsyncAfterCommitPath(node)) {
+    return {
+      rollsBackTransaction: false,
+      statement:
+        'This flow has an asynchronous post-commit path (an AsyncAfterCommit scheduled path) with an unhandled fault. ' +
+        'That path runs in a SEPARATE asynchronous transaction AFTER the triggering record save has already committed, so an unhandled fault there does NOT roll back the committed save — the save stands. ' +
+        'The fault is not user-visible: it silently aborts the async interview (discarding the work it intended to do, e.g. an intended task or email) and emails only the admin / Apex-exception recipient. ' +
+        '(Contrast with a synchronous predecessor running in the same transaction, which WOULD roll the triggering save back.)',
+    };
+  }
+  // Screen flow: user-driven interview. An unhandled fault still rolls back the
+  // DML performed since the last screen navigation (the current screen segment),
+  // and shows the running user a flow error screen.
   const isScreenFlow =
     processType === 'Flow' &&
     (triggerType === null || triggerType === 'None');
   if (isScreenFlow) {
     return {
-      rollsBackTransaction: false,
+      rollsBackTransaction: true,
       statement:
-        'This is a screen (user-driven) flow with an unhandled fault path — the fault shows the running user a flow error screen and halts the interview; there is no originating DML transaction to roll back.',
+        'This is a screen (user-driven) flow with an unhandled fault path. ' +
+        'An unhandled fault rolls back ALL DML performed since the last screen navigation — the current screen-segment transaction (e.g. a ContentDocumentLink insert and a record update done on the same screen roll back together) — and shows the running user a flow error screen. ' +
+        'Work committed by earlier screens (before the last navigation) is already saved and is not affected. ' +
+        'A screen flow runs in DefaultMode (the running user\'s context) when runInMode is null, so permission gaps surface as faults at the DML/query steps, not at in-memory decision elements.',
+    };
+  }
+  // Scheduled (autolaunched-on-a-schedule) flow: there is no triggering user
+  // DML transaction. An unhandled fault aborts that scheduled run's transaction
+  // (rolling back the DML it performed in that run) and emails the admin /
+  // last-modifier; it is not user-visible and the flow simply runs again on its
+  // next scheduled interval. Keep rollsBackTransaction=true (the run's own DML
+  // is rolled back) but DON'T claim a triggering-record save failed — there is
+  // none on a schedule-launched run.
+  if (triggerType === 'Scheduled') {
+    return {
+      rollsBackTransaction: true,
+      statement:
+        'This is a scheduled (autolaunched) flow with an unhandled fault path (no fault connector). ' +
+        'A scheduled run is not launched by a user DML transaction, so there is no triggering record save to fail. ' +
+        'An unhandled fault rolls back the DML that run performed and aborts the run; it does NOT surface to an end user — the platform emails the flow error to the admin / last modifier, and the flow runs again on its next scheduled interval.',
     };
   }
   const phase =

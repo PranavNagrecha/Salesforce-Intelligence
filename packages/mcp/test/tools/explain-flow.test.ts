@@ -295,6 +295,117 @@ const minimalFlowSeed: ExtractionResult = {
   edges: [],
 };
 
+// =============================================================================
+// Seed 3: An async (AsyncAfterCommit scheduled-path) record-triggered flow with
+// an unhandled fault. The post-commit async interview runs in its OWN async
+// transaction AFTER the triggering save commits, so an unhandled fault CANNOT
+// roll the committed save back — it silently aborts and emails only the admin.
+// =============================================================================
+
+const ASYNC_FLOW_ID = 'Flow:AcmeCo_Async_After_Commit';
+
+const asyncAfterCommitFlowSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: ASYNC_FLOW_ID,
+      type: 'Flow',
+      apiName: 'AcmeCo_Async_After_Commit',
+      label: 'AcmeCo Async After Commit',
+      properties: {
+        label: 'AcmeCo Async After Commit',
+        description: null,
+        processType: 'AutoLaunchedFlow',
+        status: 'Active',
+        interviewLabel: null,
+        runInMode: 'DefaultMode',
+        triggerObject: ACCOUNT_ID,
+        triggerType: 'RecordAfterSave',
+        recordTriggerType: 'CreateAndUpdate',
+        // The async post-commit scheduled path the extractor surfaces.
+        scheduledPaths: [{ pathType: 'AsyncAfterCommit' }],
+        flowExtractionWarnings: [],
+        faultableElementCount: 1,
+        elementsWithoutFault: 1,
+        hasUnhandledFaults: true,
+        conditions: [],
+      },
+    }),
+  ],
+  edges: [],
+};
+
+// =============================================================================
+// Seed 4: A screen (user-driven) flow with an unhandled fault. An unhandled
+// fault rolls back the current screen-segment DML (since the last screen nav)
+// and shows the user a flow error screen.
+// =============================================================================
+
+const SCREEN_FLOW_ID = 'Flow:AcmeCo_Move_Documents_Screen';
+
+const screenFlowSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: SCREEN_FLOW_ID,
+      type: 'Flow',
+      apiName: 'AcmeCo_Move_Documents_Screen',
+      label: 'AcmeCo Move Documents Screen',
+      properties: {
+        label: 'AcmeCo Move Documents Screen',
+        description: null,
+        processType: 'Flow',
+        status: 'Active',
+        interviewLabel: null,
+        runInMode: null,
+        triggerObject: null,
+        triggerType: null,
+        recordTriggerType: null,
+        flowExtractionWarnings: [],
+        faultableElementCount: 2,
+        elementsWithoutFault: 2,
+        hasUnhandledFaults: true,
+        conditions: [],
+      },
+    }),
+  ],
+  edges: [],
+};
+
+// =============================================================================
+// Seed 5: A scheduled (autolaunched-on-a-schedule) flow with an unhandled
+// fault. There is no triggering user DML — an unhandled fault aborts the run,
+// emails the admin / last modifier, and the flow retries on the next interval.
+// =============================================================================
+
+const SCHEDULED_FLOW_ID = 'Flow:AcmeCo_Close_Feedbacks_Scheduled';
+
+const scheduledFlowSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: SCHEDULED_FLOW_ID,
+      type: 'Flow',
+      apiName: 'AcmeCo_Close_Feedbacks_Scheduled',
+      label: 'AcmeCo Close Feedbacks Scheduled',
+      properties: {
+        label: 'AcmeCo Close Feedbacks Scheduled',
+        description: null,
+        processType: 'AutoLaunchedFlow',
+        status: 'Active',
+        interviewLabel: null,
+        runInMode: 'SystemModeWithoutSharing',
+        triggerObject: null,
+        triggerType: 'Scheduled',
+        recordTriggerType: null,
+        flowExtractionWarnings: [],
+        faultableElementCount: 1,
+        elementsWithoutFault: 1,
+        hasUnhandledFaults: true,
+        conditions: [],
+      },
+    }),
+  ],
+  edges: [],
+};
+
 // An ApexTrigger sharing a name with no Flow — "explain flow AccountTrigger"
 // should point here rather than dead-ending (B26).
 const triggerSeed: ExtractionResult = {
@@ -326,6 +437,9 @@ beforeAll(async () => {
   const imported = await importExtractionResults(store, [
     fullBodyFlowSeed,
     minimalFlowSeed,
+    asyncAfterCommitFlowSeed,
+    screenFlowSeed,
+    scheduledFlowSeed,
     triggerSeed,
   ]);
   if (!imported.ok) {
@@ -428,6 +542,64 @@ describe('explainFlowHandler', () => {
     expect(ec.faultRollback).toBeNull();
     // Note is always present so the host never substitutes a wrong inference.
     expect(ec.runModeNote.length).toBeGreaterThan(0);
+  });
+
+  // ---------------------------------------------------------------------------
+  // FLOW FAULT/ROLLBACK SEMANTICS — the three corrected verdicts.
+  // ---------------------------------------------------------------------------
+
+  it('does NOT roll back the committed save for an AsyncAfterCommit (post-commit async) fault', async () => {
+    const result = await explainFlowHandler(ctx, { flowId: ASYNC_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ec = result.value.data.executionContext;
+    expect(ec.hasUnhandledFaults).toBe(true);
+    expect(ec.faultRollback).not.toBeNull();
+    // A post-commit async path runs AFTER the triggering save committed → it
+    // cannot roll the committed save back. (Was wrongly true / "synchronous".)
+    expect(ec.faultRollback?.rollsBackTransaction).toBe(false);
+    const stmt = ec.faultRollback?.statement ?? '';
+    expect(stmt).toMatch(/AsyncAfterCommit|asynchronous post-commit/);
+    expect(stmt).toMatch(/does NOT roll back the committed save/);
+    expect(stmt).toMatch(/not user-visible|silently aborts/);
+    expect(stmt).toMatch(/admin/);
+    // Must NOT claim the synchronous whole-transaction rollback.
+    expect(stmt).not.toMatch(/synchronous .* flow with an unhandled fault path/);
+  });
+
+  it('rolls back the current screen-segment DML for a screen-flow fault', async () => {
+    const result = await explainFlowHandler(ctx, { flowId: SCREEN_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ec = result.value.data.executionContext;
+    expect(ec.hasUnhandledFaults).toBe(true);
+    expect(ec.faultRollback).not.toBeNull();
+    // A screen flow DOES roll back the current-segment DML on an unhandled
+    // fault. (Was wrongly false with "no originating DML transaction".)
+    expect(ec.faultRollback?.rollsBackTransaction).toBe(true);
+    const stmt = ec.faultRollback?.statement ?? '';
+    expect(stmt).toMatch(/screen/i);
+    expect(stmt).toMatch(/since the last screen navigation|current screen-segment/);
+    expect(stmt).toMatch(/flow error screen/);
+    expect(stmt).toMatch(/DefaultMode/);
+    // Must NOT regress to the old, false premise.
+    expect(stmt).not.toMatch(/no originating DML transaction to roll back/);
+  });
+
+  it('emails the admin and retries next run for a scheduled-flow fault (no triggering save)', async () => {
+    const result = await explainFlowHandler(ctx, { flowId: SCHEDULED_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ec = result.value.data.executionContext;
+    expect(ec.hasUnhandledFaults).toBe(true);
+    expect(ec.faultRollback).not.toBeNull();
+    expect(ec.faultRollback?.rollsBackTransaction).toBe(true);
+    const stmt = ec.faultRollback?.statement ?? '';
+    expect(stmt).toMatch(/scheduled/i);
+    // A scheduled run has no triggering user DML — must not claim one failed.
+    expect(stmt).not.toMatch(/triggering record save fails too/);
+    expect(stmt).toMatch(/admin|last modifier/);
+    expect(stmt).toMatch(/next scheduled interval|runs again/);
   });
 
   it('surfaces the fields each trigger/firing condition evaluates', async () => {
