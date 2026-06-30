@@ -97,7 +97,7 @@ describe('automationBuildAdvisorHandler', () => {
   it('lists existing automation and flags ordering + mixed-paradigm risks', async () => {
     const r = await automationBuildAdvisorHandler(ctx, { objectApiName: 'Busy__c' });
     expect(r.ok).toBe(true);
-    if (!r.ok) return;
+    if (!r.ok || r.value.data.mode !== 'per-object') return;
     const d = r.value.data;
     expect(d.existingAutomation.recordTriggeredFlows).toHaveLength(2);
     expect(d.existingAutomation.apexTriggers).toHaveLength(1);
@@ -110,14 +110,14 @@ describe('automationBuildAdvisorHandler', () => {
   it('reports greenfield for an object with no automation', async () => {
     const r = await automationBuildAdvisorHandler(ctx, { objectApiName: 'Quiet__c' });
     expect(r.ok).toBe(true);
-    if (!r.ok) return;
+    if (!r.ok || r.value.data.mode !== 'per-object') return;
     expect(r.value.data.risks.map((x) => x.kind)).toEqual(['greenfield']);
   });
 
   it('answers (objectModeled=false) even when the object is a genuine phantom (no node, no edges)', async () => {
     const r = await automationBuildAdvisorHandler(ctx, { objectApiName: 'NotInVault__c' });
     expect(r.ok).toBe(true);
-    if (!r.ok) return;
+    if (!r.ok || r.value.data.mode !== 'per-object') return;
     expect(r.value.data.objectModeled).toBe(false);
   });
 
@@ -127,7 +127,7 @@ describe('automationBuildAdvisorHandler', () => {
     // phantom. Co-fire analysis on Case must be grounded.
     const r = await automationBuildAdvisorHandler(ctx, { objectApiName: 'Case' });
     expect(r.ok).toBe(true);
-    if (!r.ok) return;
+    if (!r.ok || r.value.data.mode !== 'per-object') return;
     expect(r.value.data.objectModeled).toBe(true);
     expect(r.value.data.existingAutomation.recordTriggeredFlows).toHaveLength(1);
     expect(r.value.data.existingAutomation.validationRules).toHaveLength(1);
@@ -135,8 +135,167 @@ describe('automationBuildAdvisorHandler', () => {
 });
 
 describe('automationBuildAdvisorInputSchema', () => {
-  it('requires objectApiName', () => {
+  it('accepts per-object OR org-wide scope, but not both/neither', () => {
     expect(automationBuildAdvisorInputSchema.safeParse({}).success).toBe(false);
     expect(automationBuildAdvisorInputSchema.safeParse({ objectApiName: 'Account' }).success).toBe(true);
+    expect(automationBuildAdvisorInputSchema.safeParse({ scope: 'flow-only-objects' }).success).toBe(true);
+    // Exactly one — supplying both is rejected.
+    expect(
+      automationBuildAdvisorInputSchema.safeParse({
+        objectApiName: 'Account',
+        scope: 'flow-only-objects',
+      }).success,
+    ).toBe(false);
+    // Unknown scope literal is rejected.
+    expect(automationBuildAdvisorInputSchema.safeParse({ scope: 'everything' }).success).toBe(false);
+  });
+});
+
+// --- Org-wide flow-only-objects gap analytic ---------------------------------
+//
+// Fixture exercises the set difference and the master-detail role annotation:
+//   FlowOnly__c        : active record-triggered Flow, NO Apex trigger, MD child
+//                        of Account  → flow-only, master-detail-child.
+//   FlowOnlyChild__c   : active record-triggered Flow, NO trigger, MD child of
+//                        Contact     → flow-only, master-detail-child.
+//   Junction__c        : active record-triggered Flow, NO trigger, TWO MD
+//                        parents      → flow-only, junction.
+//   Standalone__c      : active record-triggered Flow, NO trigger, only a
+//                        LOOKUP (not MD) → flow-only, lookup-only.
+//   Guarded__c         : active record-triggered Flow AND an active Apex
+//                        trigger      → EXCLUDED (has a trigger guard).
+//   NS__Managed__c     : active record-triggered Flow, no trigger, but
+//                        namespaced  → EXCLUDED (managed package).
+//   Account / Contact  : record-triggered Flow but STANDARD object → EXCLUDED.
+//   ScreenOnly__c      : an autolaunched/screen Flow targets it (no
+//                        recordTriggerType on the edge) → EXCLUDED.
+//   InactiveFlow__c    : its only record-triggered Flow is Draft (inactive) →
+//                        EXCLUDED.
+const gapSeed: ExtractionResult = {
+  nodes: [
+    node('CustomObject:FlowOnly__c', 'CustomObject'),
+    node('CustomObject:FlowOnlyChild__c', 'CustomObject'),
+    node('CustomObject:Junction__c', 'CustomObject'),
+    node('CustomObject:Standalone__c', 'CustomObject'),
+    node('CustomObject:Guarded__c', 'CustomObject'),
+    node('CustomObject:NS__Managed__c', 'CustomObject'),
+    node('CustomObject:ScreenOnly__c', 'CustomObject'),
+    node('CustomObject:InactiveFlow__c', 'CustomObject'),
+    // MD parents.
+    node('CustomObject:Account', 'CustomObject'),
+    node('CustomObject:Contact', 'CustomObject'),
+    // Flows.
+    node('Flow:GF_FlowOnly', 'Flow', { status: 'Active' }),
+    node('Flow:GF_FlowOnlyChild', 'Flow', { status: 'Active' }),
+    node('Flow:GF_Junction', 'Flow', { status: 'Active' }),
+    node('Flow:GF_Standalone', 'Flow', { status: 'Active' }),
+    node('Flow:GF_Guarded', 'Flow', { status: 'Active' }),
+    node('Flow:GF_Managed', 'Flow', { status: 'Active' }),
+    node('Flow:GF_Standard', 'Flow', { status: 'Active' }),
+    node('Flow:GF_Screen', 'Flow', { status: 'Active' }),
+    node('Flow:GF_Inactive', 'Flow', { status: 'Draft' }),
+    // Apex trigger guarding Guarded__c.
+    node('ApexTrigger:GuardedTrigger', 'ApexTrigger', { status: 'Active' }),
+    // Master-detail / lookup fields.
+    node('CustomField:FlowOnly__c.Acct__c', 'CustomField'),
+    node('CustomField:FlowOnlyChild__c.Con__c', 'CustomField'),
+    node('CustomField:Junction__c.Acct__c', 'CustomField'),
+    node('CustomField:Junction__c.Con__c', 'CustomField'),
+    node('CustomField:Standalone__c.AcctLk__c', 'CustomField'),
+  ],
+  edges: [
+    // Record-triggered Flows (edge carries recordTriggerType).
+    edge('Flow:GF_FlowOnly', 'CustomObject:FlowOnly__c', 'triggersOn', { recordTriggerType: 'Create' }),
+    edge('Flow:GF_FlowOnlyChild', 'CustomObject:FlowOnlyChild__c', 'triggersOn', { recordTriggerType: 'Update' }),
+    edge('Flow:GF_Junction', 'CustomObject:Junction__c', 'triggersOn', { recordTriggerType: 'Create' }),
+    edge('Flow:GF_Standalone', 'CustomObject:Standalone__c', 'triggersOn', { recordTriggerType: 'Update' }),
+    edge('Flow:GF_Guarded', 'CustomObject:Guarded__c', 'triggersOn', { recordTriggerType: 'Create' }),
+    edge('Flow:GF_Managed', 'CustomObject:NS__Managed__c', 'triggersOn', { recordTriggerType: 'Create' }),
+    edge('Flow:GF_Standard', 'CustomObject:Account', 'triggersOn', { recordTriggerType: 'Update' }),
+    edge('Flow:GF_Inactive', 'CustomObject:InactiveFlow__c', 'triggersOn', { recordTriggerType: 'Create' }),
+    // Screen/autolaunched Flow — NO recordTriggerType → not record-triggered.
+    edge('Flow:GF_Screen', 'CustomObject:ScreenOnly__c', 'triggersOn', {}),
+    // Apex trigger guard.
+    edge('ApexTrigger:GuardedTrigger', 'CustomObject:Guarded__c', 'triggersOn', {}),
+    // parentOf field edges.
+    edge('CustomObject:FlowOnly__c', 'CustomField:FlowOnly__c.Acct__c', 'parentOf', {}),
+    edge('CustomObject:FlowOnlyChild__c', 'CustomField:FlowOnlyChild__c.Con__c', 'parentOf', {}),
+    edge('CustomObject:Junction__c', 'CustomField:Junction__c.Acct__c', 'parentOf', {}),
+    edge('CustomObject:Junction__c', 'CustomField:Junction__c.Con__c', 'parentOf', {}),
+    edge('CustomObject:Standalone__c', 'CustomField:Standalone__c.AcctLk__c', 'parentOf', {}),
+    // lookupTo edges: MD vs plain Lookup.
+    edge('CustomField:FlowOnly__c.Acct__c', 'CustomObject:Account', 'lookupTo', { relationshipType: 'MasterDetail' }),
+    edge('CustomField:FlowOnlyChild__c.Con__c', 'CustomObject:Contact', 'lookupTo', { relationshipType: 'MasterDetail' }),
+    edge('CustomField:Junction__c.Acct__c', 'CustomObject:Account', 'lookupTo', { relationshipType: 'MasterDetail' }),
+    edge('CustomField:Junction__c.Con__c', 'CustomObject:Contact', 'lookupTo', { relationshipType: 'MasterDetail' }),
+    edge('CustomField:Standalone__c.AcctLk__c', 'CustomObject:Account', 'lookupTo', { relationshipType: 'Lookup' }),
+  ],
+};
+
+describe('automationBuildAdvisorHandler — flow-only-objects (org-wide gap)', () => {
+  let gapDir: string;
+  let gapStore: GraphStore;
+  let gapCtx: Context;
+
+  beforeAll(async () => {
+    gapDir = mkdtempSync(join(tmpdir(), 'sfi-adv-gap-'));
+    const opened = await openGraph(join(gapDir, 'gap.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    gapStore = opened.value;
+    const imported = await importExtractionResults(gapStore, [gapSeed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    gapCtx = { vaultRoot: gapDir, manifest: FIXTURE_MANIFEST, graph: gapStore } as Context;
+  });
+
+  afterAll(async () => {
+    await closeGraph(gapStore);
+    rmSync(gapDir, { recursive: true, force: true });
+  });
+
+  it('computes the trigger-minus-flow set difference, excluding standard/managed/guarded/screen/inactive', async () => {
+    const r = await automationBuildAdvisorHandler(gapCtx, { scope: 'flow-only-objects' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.mode).toBe('flow-only-objects');
+    if (d.mode !== 'flow-only-objects') return;
+    const names = d.flowOnlyObjects.map((o) => o.apiName);
+    // Included: the four org-custom flow-only objects.
+    expect(names).toEqual(['FlowOnly__c', 'FlowOnlyChild__c', 'Junction__c', 'Standalone__c'].sort());
+    // Excluded: guarded (has trigger), managed, standard, screen-only, inactive-flow.
+    expect(names).not.toContain('Guarded__c');
+    expect(names).not.toContain('NS__Managed__c');
+    expect(names).not.toContain('Account');
+    expect(names).not.toContain('ScreenOnly__c');
+    expect(names).not.toContain('InactiveFlow__c');
+  });
+
+  it('annotates master-detail child / junction / lookup-only relationship roles', async () => {
+    const r = await automationBuildAdvisorHandler(gapCtx, { scope: 'flow-only-objects' });
+    expect(r.ok).toBe(true);
+    if (!r.ok || r.value.data.mode !== 'flow-only-objects') return;
+    const d = r.value.data;
+    const byName = new Map(d.flowOnlyObjects.map((o) => [o.apiName, o]));
+
+    expect(byName.get('FlowOnly__c')?.relationshipRole).toBe('master-detail-child');
+    expect(byName.get('FlowOnly__c')?.masterDetailParents).toEqual(['CustomObject:Account']);
+
+    expect(byName.get('FlowOnlyChild__c')?.relationshipRole).toBe('master-detail-child');
+    expect(byName.get('FlowOnlyChild__c')?.masterDetailParents).toEqual(['CustomObject:Contact']);
+
+    expect(byName.get('Junction__c')?.relationshipRole).toBe('junction');
+    expect(byName.get('Junction__c')?.masterDetailParents).toEqual([
+      'CustomObject:Account',
+      'CustomObject:Contact',
+    ]);
+
+    // Plain lookup (not master-detail) → lookup-only, no MD parent.
+    expect(byName.get('Standalone__c')?.relationshipRole).toBe('lookup-only');
+    expect(byName.get('Standalone__c')?.masterDetailParents).toEqual([]);
+
+    // Summary tallies: 4 org-custom, 2 MD children, 1 junction.
+    expect(d.summary.orgCustomCount).toBe(4);
+    expect(d.summary.masterDetailChildCount).toBe(2);
+    expect(d.summary.junctionCount).toBe(1);
   });
 });
