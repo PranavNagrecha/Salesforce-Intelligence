@@ -1266,6 +1266,8 @@ const RULES: readonly Rule[] = [
       /\blayouts?\b.*\b(per|for\s+each|by)\b.*\bprofiles?\b/,
       // fields, but NOT field usage/population (those are unused-fields / field-population)
       /\bhow\s+many\b.*\b(custom\s+)?fields?\b(?!.*\b(used|populated|filled|actually|unused|empty|blank|set|values?)\b)/,
+      /\b(which|what)\s+standard\s+objects?\b.*\b(triggers?|apex)\b/,
+      /\bstandard\s+objects?\b.*\b(at\s+least\s+one\s+)?(apex\s+)?triggers?\b/,
     ],
   },
   {
@@ -1693,8 +1695,9 @@ const RULES: readonly Rule[] = [
     needsResolve: true,
     reason: 'Walks the sharing cascade (OWD → permission → role hierarchy → sharing rules) from the vault.',
     patterns: [
-      /\bwhy\s+(can'?t|cannot|can\s+not)\b.*\b(see|view|access)\b.*\brecord\b/,
-      /\bcan'?t\s+(see|view|access)\b.*\b(record|account|case|opportunity)\b/,
+      /\bwhy\s+(can'?t|cannot|can\s+not)\b.*\b(see|view|access)\b.*\b(record|account|case|contact|lead|opportunity)\b/,
+      /\bcan'?t\s+(see|view|access)\b.*\b(record|account|case|opportunity|contact|lead)\b/,
+      /\bwhy\s+(can'?t|cannot|can\s+not)\b.*\b(see|view|access)\b.*\b(an?\s+)?(account|case|contact|lead|opportunity)\b/,
     ],
   },
   {
@@ -1762,6 +1765,8 @@ const RULES: readonly Rule[] = [
       // "Is Account.Name in any page layouts?" — field-on-layout inventory (B21).
       /\b(in\s+any|on\s+any)\b.*\b(page\s+)?layouts?\b/,
       /\bis\b.*\bin\s+any\b.*\blayouts?\b/,
+      /\b(what|which)\s+quick\s+actions?\b.*\b(on|for|defined)\b/,
+      /\bcompact\s+layouts?\b/,
     ],
   },
   {
@@ -1798,6 +1803,8 @@ const RULES: readonly Rule[] = [
       /\b(read|create|edit|delete)\s+permissions?\b.*\b(all|every|across)\b/,
       /\bcrud_fls_audit\b/,
       /\bfield[-\s]level\s+security\b.*\b(managed|across|sensitive)/,
+      /\b(apex|classes?)\b.*\b(enforce|enforces|CRUD|FLS|SECURITY_ENFORCED|stripInaccessible)\b/,
+      /\bdoes\b.*\bapex\b.*\b(enforce|CRUD|FLS)\b/,
     ],
   },
   {
@@ -1944,6 +1951,9 @@ const RULES: readonly Rule[] = [
       // "which fields hold personal data" — the noun "fields" before the PII
       // keyword (the pattern above wanted "what personal ... fields"). Battery gap.
       /\b(which|what)\s+fields?\b.*\b(personal|sensitive|pii|private)\b/,
+      /\b(which|what)\s+fields?\b.*\bEncryptedText\b/i,
+      /\bfields?\b.*\bEncryptedText\b/i,
+      /\bEncryptedText\b/,
       /\bpii_inventory\b/,
       /\brun\s+pii\b/,
     ],
@@ -2086,6 +2096,8 @@ const RULES: readonly Rule[] = [
       /\b(what|which|list)\b.*\bapex\s+triggers?\b.*\b(fire|run|on|for)\b/,
       /\b(what|which)\s+triggers?\b.*\b(fire|run)\b.*\bon\b/,
       /^(?!.*\b(list|how\s+many)\b).*\b(triggers?|flows?|validation\s+rules?|workflows?)\b.*\bon\b.*\b(object|account|contact|case|opportunity)\b/,
+      /\bemail\s+alerts?\b.*\b(sent|automation|Case|workflow|flow)\b/,
+      /\bwhat\s+email\s+alerts?\b/,
     ],
   },
   {
@@ -2102,6 +2114,8 @@ const RULES: readonly Rule[] = [
       /\bprocess\s+builder\b.*\bmigration\b/,
       /\bshould\s+be\s+migrated\b.*\bflow\b/,
       /\bconsolidated?\s+into\s+flow\b/,
+      /\bworkflow\s+rules?\b.*\b(or\s+only|only)\b.*\bflows?\b/,
+      /\bdoes\b.*\bhave\b.*\b(active\s+)?workflow\s+rules?\b/,
     ],
   },
   {
@@ -2232,6 +2246,9 @@ const RULES: readonly Rule[] = [
       /\b(send|sends|email)\b.*\bflows?\b/,
       /\bsubflows?\b/,
       /\bwhat\s+subflows?\b/,
+      /\bStageName\b.*\bClosed Won\b/i,
+      /\bClosed Won\b.*\b(StageName|automation|flow|trigger|value.?coupl)/i,
+      /\bvalue.?coupl\w*\b.*\b(StageName|Closed Won|Opportunity)/i,
     ],
   },
   {
@@ -3181,6 +3198,7 @@ const RULES: readonly Rule[] = [
       // inline help bubble IS explain_field's surface; a top baseline-300
       // unrouted cluster (P14-ROUTER-goldset-expand).
       /\b(help\s+text|inline\s+help)\b/,
+      /\bwhat\s+is\s+the\s+data\s+type\b/,
     ],
   },
 
@@ -3518,6 +3536,8 @@ const RULES: readonly Rule[] = [
       // flows" — "show"/"list" with the metadata noun anywhere after (the bare
       // "list X" / "what X" patterns missed these). Battery gaps.
       /\b(show|list)\b.*\b(objects?|fields?|flows?|classes?|triggers?|record\s+types?|profiles?|permission\s+sets?|layouts?|validation\s+rules?|queues?|groups?|labels?)\b/,
+      /\b(web\s+links?|custom\s+buttons?)\b.*\b(exist|on|for|defined)\b/,
+      /\bwhat\b.*\b(web\s+links?|custom\s+buttons?)\b/,
       /\bwhere\s+is\b.*\bfield\b/,
       /\bsearch\s+broadly\s+for\b/,
       /\bvalidation\s+rules?\s+on\b/,
