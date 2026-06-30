@@ -877,6 +877,145 @@ describe('extractFlow', () => {
       }
     });
 
+    it('surfaces every <actionCalls> {actionType, actionName} (apex AND non-apex) on the flow node (bundle-4 a)', async () => {
+      // A non-apex actionCall (activateSessionPermSet) emits NO callsApex edge
+      // — but it must still be identifiable. Without node.properties.actionCalls
+      // explain_flow sees actionCalls:[] and cannot name the faultable element.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Activate Contact Delete Permission</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <actionCalls>
+        <name>Activate_Session</name>
+        <actionType>activateSessionPermSet</actionType>
+        <actionName>Contact_Delete</actionName>
+    </actionCalls>
+    <actionCalls>
+        <name>Call_Apex</name>
+        <actionType>apex</actionType>
+        <actionName>MyApexAction</actionName>
+    </actionCalls>
+</Flow>`;
+      const { dir, path } = await writeTempXml('ActionCalls.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        // The non-apex call emits NO callsApex edge (a callsApex edge to an
+        // ApexClass would be a lie for activateSessionPermSet).
+        const callsApex = result.value.edges.filter(
+          (e) => e.edgeType === 'callsApex',
+        );
+        expect(callsApex.map((e) => e.toId)).toEqual(['ApexClass:MyApexAction']);
+        // But BOTH action calls are surfaced on the node, in source order, so
+        // the consumer can identify activateSessionPermSet (a transient session
+        // activation, not a PermissionSetAssignment insert).
+        expect(result.value.nodes[0]?.properties['actionCalls']).toEqual([
+          { actionType: 'activateSessionPermSet', actionName: 'Contact_Delete' },
+          { actionType: 'apex', actionName: 'MyApexAction' },
+        ]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('defaults actionCalls to an empty list when the flow has none (bundle-4 a)', async () => {
+      const { dir, path } = await writeTempXml('NoActions.flow-meta.xml', VALID_XML);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.nodes[0]?.properties['actionCalls']).toEqual([]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('surfaces an AsyncAfterCommit <scheduledPaths> path on the node (bundle-4 c)', async () => {
+      // A record-triggered after-save flow with an immediate-async post-commit
+      // scheduled path. explain_flow.buildFaultRollback reads runAsyncAfterCommit
+      // / scheduledPathTypes to know the fault cannot roll back the committed save.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Contract Hours</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <start>
+        <object>Contact</object>
+        <recordTriggerType>CreateAndUpdate</recordTriggerType>
+        <triggerType>RecordAfterSave</triggerType>
+        <scheduledPaths>
+            <name>run_async</name>
+            <pathType>AsyncAfterCommit</pathType>
+        </scheduledPaths>
+    </start>
+</Flow>`;
+      const { dir, path } = await writeTempXml('AsyncPath.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const props = result.value.nodes[0]?.properties;
+        expect(props?.['scheduledPathTypes']).toEqual(['AsyncAfterCommit']);
+        expect(props?.['runAsyncAfterCommit']).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('treats a time-based (non-async) scheduled path as not AsyncAfterCommit (bundle-4 c)', async () => {
+      // A scheduled path with a real delay (no AsyncAfterCommit pathType) must
+      // NOT flip runAsyncAfterCommit — only the immediate post-commit async path
+      // qualifies for the async fault-rollback verdict.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Delayed Path</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <start>
+        <object>Contact</object>
+        <recordTriggerType>CreateAndUpdate</recordTriggerType>
+        <triggerType>RecordAfterSave</triggerType>
+        <scheduledPaths>
+            <name>one_day_later</name>
+            <offsetNumber>1</offsetNumber>
+            <offsetUnit>Days</offsetUnit>
+            <timeSource>RecordTriggerEvent</timeSource>
+        </scheduledPaths>
+    </start>
+</Flow>`;
+      const { dir, path } = await writeTempXml('DelayedPath.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const props = result.value.nodes[0]?.properties;
+        // No <pathType> declared → empty list, flag stays false.
+        expect(props?.['scheduledPathTypes']).toEqual([]);
+        expect(props?.['runAsyncAfterCommit']).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('defaults scheduledPathTypes/runAsyncAfterCommit for a flow without <start> (bundle-4 c)', async () => {
+      const { dir, path } = await writeTempXml('NoStart.flow-meta.xml', VALID_XML);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const props = result.value.nodes[0]?.properties;
+        expect(props?.['scheduledPathTypes']).toEqual([]);
+        expect(props?.['runAsyncAfterCommit']).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
     it('dedupes repeated lookups to the same SObject into a single readsFrom edge', async () => {
       // Two `<recordLookups>` on the same object produce two raw edges
       // with the same (fromId,toId,edgeType,source) tuple, which the
