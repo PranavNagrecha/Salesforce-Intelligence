@@ -50,16 +50,53 @@ const CANONICAL_ID_INLINE = /\b[A-Z][A-Za-z0-9]+:[A-Za-z0-9_./-]*[A-Za-z0-9_]/g;
 const CAVEAT_KEY =
   /^(disclosure|caveat|caveats|note|notes|boundary|boundaries|limitation|limitations|notModeledNote|honesty|warning|warnings)$/i;
 
-/** Keys whose scalar values are headline facts worth a bullet. */
+/**
+ * Keys whose scalar values are headline facts worth a bullet.
+ *
+ * Beyond the original count/verdict/status core, this also lifts the
+ * flow/sharing/VR/false-premise fields the analytical tools emit so a CORRECT
+ * cascade is no longer flattened to an empty skeleton (SYNTH bundle):
+ *   - VR / formula evaluation: `errorConditionFormula`, `active`,
+ *     `evaluatesAllActiveRules`, `evaluatesOn`.
+ *   - component shape (false-premise rebuttals): `apexCallCount`,
+ *     `fieldAccessCount`, `isExposed`.
+ *   - flow trigger gates: `triggerType`, `processType`, `recordTriggerType`,
+ *     `filterFormula`, `conditions`.
+ *   - sharing semantics: `sharingSemantics`, `effectiveModel`, `runInMode`,
+ *     `declaredSharing`.
+ *   - transaction / save semantics: `rollsBackTransaction`, `statement`.
+ *   - explicit false-premise signals: `premiseRejected`, `falsePremise`.
+ */
 const FACT_KEY =
-  /^(count|total|totalCount|totalClassCount|totalFindingCount|totalGapsCount|verdict|disposition|status|coverageStatus|riskLevel|truncated|notModeled|plane|intent|confidence|matchKind|fieldLabel|fieldId|piiClassification|piiCategory)$/;
+  /^(count|total|totalCount|totalClassCount|totalFindingCount|totalGapsCount|verdict|disposition|status|coverageStatus|riskLevel|truncated|notModeled|plane|intent|confidence|matchKind|fieldLabel|fieldId|piiClassification|piiCategory|errorConditionFormula|active|evaluatesAllActiveRules|evaluatesOn|apexCallCount|fieldAccessCount|isExposed|triggerType|processType|recordTriggerType|filterFormula|conditions|sharingSemantics|effectiveModel|runInMode|declaredSharing|rollsBackTransaction|statement|premiseRejected|falsePremise)$/;
 
 /** Array keys worth a "N item(s)" count bullet. */
 const COUNT_ARRAY_KEY =
-  /^(grants|findings|gaps|components|candidates|edges|nodes|reasoning|viaApexAccess|fields|matches|classes|tools)$/;
+  /^(grants|findings|gaps|components|candidates|edges|nodes|reasoning|viaApexAccess|fields|matches|classes|tools|conditions|callers|usages|referrers)$/;
 
 /** Key whose string value is a source tool's trust provenance. */
 const PROVENANCE_KEY = /^provenance$/i;
+
+/**
+ * Keys carrying a resolve-style disposition. When the value is `'none'` the
+ * named component does not exist in the vault — the question's premise is false.
+ */
+const DISPOSITION_KEY = /^(disposition|matchKind|resolveDisposition)$/i;
+
+/**
+ * Keys whose truthy value is an explicit false-premise signal. Both the boolean
+ * form (`premiseRejected: true` / `falsePremise: true`) and the string form
+ * (`falsePremise: 'true'` / `'rejected'`) flag a counterfactual question.
+ */
+const FALSE_PREMISE_KEY = /^(falsePremise|premiseRejected)$/i;
+
+/** The single user-readable caveat composed for a false-premise cascade. */
+const FALSE_PREMISE_CAVEAT =
+  'FALSE PREMISE: the named component does not exist in the vault (resolve ' +
+  'disposition `none` / no source match) — the question assumes something that ' +
+  'is not there. Do not present its absence as a normal answer; say plainly ' +
+  'that the component was not found and (if the cascade carried a redirect ' +
+  'hint) point to the real component instead.';
 
 // P12-UX-synth-next-action — keys whose string values populate the grounded
 // Finding → Evidence → Cause → Fix → Risk → Next-action template. Each field is
@@ -196,6 +233,17 @@ const collect = (value: unknown, key: string | null, out: Collected): void => {
       pushCapped(out.caveats, value, MAX_CAVEATS);
     } else if (key !== null && FACT_KEY.test(key)) {
       pushCapped(out.bullets, `${key}: ${value}`, MAX_BULLETS);
+      // FALSE-PREMISE PATH (SYNTH bundle): a `disposition`/`falsePremise`
+      // signal of "none"/no-match means the named component does not exist in
+      // the vault — the question's premise is false. Surface that as an
+      // explicit user-readable caveat instead of letting an empty skeleton
+      // imply the absence is a real answer.
+      if (
+        (DISPOSITION_KEY.test(key) && /^none$/i.test(value.trim())) ||
+        (FALSE_PREMISE_KEY.test(key) && /^(true|false-premise|rejected)$/i.test(value.trim()))
+      ) {
+        pushCapped(out.caveats, FALSE_PREMISE_CAVEAT, MAX_CAVEATS);
+      }
     }
     // Grounded evidence-template hints (independent of the caveat/fact branch —
     // the key names do not overlap). Verbatim from the source, never invented.
@@ -209,6 +257,11 @@ const collect = (value: unknown, key: string | null, out: Collected): void => {
   if (typeof value === 'number' || typeof value === 'boolean') {
     if (key !== null && FACT_KEY.test(key)) {
       pushCapped(out.bullets, `${key}: ${String(value)}`, MAX_BULLETS);
+      // Boolean false-premise signal (`premiseRejected: true` /
+      // `falsePremise: true`) — same explicit caveat as the string form.
+      if (value === true && FALSE_PREMISE_KEY.test(key)) {
+        pushCapped(out.caveats, FALSE_PREMISE_CAVEAT, MAX_CAVEATS);
+      }
     }
     return;
   }
