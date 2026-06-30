@@ -658,6 +658,41 @@ describe('classifyQuestion edge cases', () => {
     });
   });
 
+  it('routes EncryptedText field lists to schema CustomField inventory (admin-edge 141-190)', () => {
+    const r = classifyQuestion('List the EncryptedText fields on Contact.');
+    expect(r.intent).toBe('schema');
+    expect(r.suggestedArgs).toEqual({ type: 'CustomField', parentId: 'CustomObject:Contact' });
+  });
+
+  it('routes report type inventory to vault list_components (not live_report_usage)', () => {
+    expect(classifyQuestion('Are there custom report types joining Account to Opportunity to Case?').intent).toBe(
+      'report-type-inventory',
+    );
+    expect(
+      classifyQuestion('Are there custom report types joining Account to Opportunity to Case?').tools,
+    ).toEqual(['sfi.list_components', 'sfi.get_component']);
+    expect(
+      classifyQuestion('Which report types are based on a standard object but include custom-object joins (e.g., Contact plus a HED object)?').intent,
+    ).toBe('report-type-inventory');
+  });
+
+  it('routes unplaced fields and compact-layout compare (admin-edge 141-190)', () => {
+    expect(
+      classifyQuestion(
+        'Are there fields that exist but are not placed on any layout (hidden but present)?',
+      ).intent,
+    ).toBe('field-layout-coverage');
+    expect(
+      classifyQuestion(
+        'Which compact-layout fields show in Contact highlights vs the full page layout?',
+      ).intent,
+    ).toBe('layout-inventory');
+    expect(
+      classifyQuestion('layout_for_user: which layout does a Faculty-profile user get for Case?')
+        .suggestedArgs,
+    ).toEqual({ objectApiName: 'Case', profileId: 'Profile:Faculty' });
+  });
+
   it('routes update save-order on hed__Application__c (differential b2-a-05)', () => {
     const r = classifyQuestion(
       'What happens when I update hed__Application__c — which validation rules, flows, and triggers run?',

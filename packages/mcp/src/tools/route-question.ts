@@ -575,6 +575,14 @@ const buildRouteToolArgsMap = async (
       });
       continue;
     }
+    if (tool === 'sfi.layout_for_user' && Object.keys(base).length > 0) {
+      out.set(tool, base);
+      continue;
+    }
+    if (tool === 'sfi.pii_inventory' && Object.keys(base).length > 0) {
+      out.set(tool, base);
+      continue;
+    }
     if (tool === primaryTool) {
       out.set(tool, base);
       continue;
