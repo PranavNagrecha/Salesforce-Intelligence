@@ -723,3 +723,248 @@ describe('annotation laundering check (P13-ANNOT-tools)', () => {
     expect(r.value.data.provenance.stamp).toBe('mixed'); // NEVER collapsed to offline_snapshot
   });
 });
+
+// Bundle 6 — structural caveat detectors added to synthesize_answer.
+// Each test covers one of the five bug classes in this bundle and uses a
+// REAL-org-shape fixture (the actual property names / XML element shapes
+// used by list_components, approval-process extractors, and matching-rule
+// extractors in production).
+describe('bundle-6 structural caveats', () => {
+  // BUG-1: Pagination disclosure — hasMore=true means only the first page was
+  // retrieved; the cascade must not draw family-wide conclusions from a partial set.
+  // Real shape: list_components emits hasMore at the top level AND inside pageInfo.
+  it('emits INCOMPLETE RETRIEVAL caveat when hasMore=true (Bug 1 — paginated rule family)', async () => {
+    // Real org shape: list_components response for ValidationRule on Lead with 73 rules,
+    // default limit=50, so hasMore=true and the _Email_3 + _SrcofContact_123 rules are
+    // beyond the first page.
+    const partialListComponentsOutput = {
+      components: [
+        {
+          id: 'ValidationRule:Lead.ContactCategorySecurity_AreaofInterest_1',
+          type: 'ValidationRule',
+          apiName: 'Lead.ContactCategorySecurity_AreaofInterest_1',
+          label: 'ContactCategorySecurity_AreaofInterest_1',
+          parentId: 'CustomObject:Lead',
+          sourcePath: 'objects/Lead/validationRules/ContactCategorySecurity_AreaofInterest_1.validationRule-meta.xml',
+          lastModifiedDate: null,
+          lastModifiedBy: null,
+          apiVersion: null,
+          properties: { active: 'true', errorConditionFormula: "AND($User.Alias != 'iuser', TEXT(Contact_Security_Group__c)='1')" },
+        },
+        {
+          id: 'ValidationRule:Lead.ContactCategorySecurity_City_1or2',
+          type: 'ValidationRule',
+          apiName: 'Lead.ContactCategorySecurity_City_1or2',
+          label: 'ContactCategorySecurity_City_1or2',
+          parentId: 'CustomObject:Lead',
+          sourcePath: 'objects/Lead/validationRules/ContactCategorySecurity_City_1or2.validationRule-meta.xml',
+          lastModifiedDate: null,
+          lastModifiedBy: null,
+          apiVersion: null,
+          properties: { active: 'true', errorConditionFormula: "AND($User.Alias != 'iuser', TEXT(Contact_Security_Group__c)='1'||TEXT(Contact_Security_Group__c)='2')" },
+        },
+        // (48 more rules omitted — Email_3 and SrcofContact_123 are on page 2)
+      ],
+      limit: 50,
+      offset: 0,
+      hasMore: true,
+      pageInfo: {
+        totalCount: 73,
+        returnedCount: 50,
+        hasMore: true,
+        nextCursor: 'eyJ2IjoxLCJ0IjoibGlzdF9jb21wb25lbnRzIiwiaCI6InNoYTI1NjpmaXh0dXJlIiwibyI6NTB9',
+      },
+      trust: { provenance: 'offline_snapshot' },
+    };
+    const r = await synthesizeAnswerHandler(ctx, { input: partialListComponentsOutput });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const incompleteCaveat = r.value.data.caveats.find((c) => c.includes('INCOMPLETE RETRIEVAL'));
+    expect(incompleteCaveat).toBeDefined();
+    expect(incompleteCaveat).toContain('hasMore=true');
+    expect(incompleteCaveat).toContain('first page');
+    // The hasMore fact must also appear as a bullet.
+    expect(r.value.data.bullets.some((b) => b.startsWith('hasMore:'))).toBe(true);
+  });
+
+  it('does NOT emit INCOMPLETE RETRIEVAL caveat when hasMore=false (no false positive)', async () => {
+    const completeOutput = {
+      components: [
+        { id: 'ValidationRule:Lead.ContactCategorySecurity_Email_3', type: 'ValidationRule', apiName: 'Lead.ContactCategorySecurity_Email_3', label: 'ContactCategorySecurity_Email_3', parentId: 'CustomObject:Lead', sourcePath: 'objects/Lead/validationRules/ContactCategorySecurity_Email_3.validationRule-meta.xml', lastModifiedDate: null, lastModifiedBy: null, apiVersion: null, properties: { active: 'true' } },
+      ],
+      limit: 50,
+      offset: 0,
+      hasMore: false,
+      trust: { provenance: 'offline_snapshot' },
+    };
+    const r = await synthesizeAnswerHandler(ctx, { input: completeOutput });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.caveats.some((c) => c.includes('INCOMPLETE RETRIEVAL'))).toBe(false);
+  });
+
+  // BUG-3: Count consistency — a list_components response that states totalCount=11
+  // but enumerates only 10 items in `components` is a count mismatch. The synthesis
+  // must detect and disclose this so the host corrects the stated total.
+  // Real shape: OA_Communication_Request__c has 10 approval process files on disk;
+  // a stale count cache or off-by-one in the synthesis produced "11" in the summary.
+  it('emits COUNT MISMATCH caveat when stated total differs from enumerated components length (Bug 3 — OA count)', async () => {
+    // Real org shape: 10 approval process files, but the stated count is 11 (the bug).
+    const mismatchedListOutput = {
+      components: [
+        { id: 'ApprovalProcess:OA_Communication_Request__c.CommRequest_Approval', type: 'ApprovalProcess', apiName: 'OA_Communication_Request__c.CommRequest_Approval', label: 'CommRequest_Approval', parentId: 'CustomObject:OA_Communication_Request__c', sourcePath: 'approvalProcesses/OA_Communication_Request__c.CommRequest_Approval.approvalProcess-meta.xml', lastModifiedDate: null, lastModifiedBy: null, apiVersion: null, properties: { active: false } },
+        { id: 'ApprovalProcess:OA_Communication_Request__c.CommRequest_Approvalv2', type: 'ApprovalProcess', apiName: 'OA_Communication_Request__c.CommRequest_Approvalv2', label: 'CommRequest_Approvalv2', parentId: 'CustomObject:OA_Communication_Request__c', sourcePath: 'approvalProcesses/OA_Communication_Request__c.CommRequest_Approvalv2.approvalProcess-meta.xml', lastModifiedDate: null, lastModifiedBy: null, apiVersion: null, properties: { active: false } },
+        { id: 'ApprovalProcess:OA_Communication_Request__c.CommRequest_Approvalv3', type: 'ApprovalProcess', apiName: 'OA_Communication_Request__c.CommRequest_Approvalv3', label: 'CommRequest_Approvalv3', parentId: 'CustomObject:OA_Communication_Request__c', sourcePath: 'approvalProcesses/OA_Communication_Request__c.CommRequest_Approvalv3.approvalProcess-meta.xml', lastModifiedDate: null, lastModifiedBy: null, apiVersion: null, properties: { active: false } },
+        { id: 'ApprovalProcess:OA_Communication_Request__c.CommRequest_Approvalv4', type: 'ApprovalProcess', apiName: 'OA_Communication_Request__c.CommRequest_Approvalv4', label: 'CommRequest_Approvalv4', parentId: 'CustomObject:OA_Communication_Request__c', sourcePath: 'approvalProcesses/OA_Communication_Request__c.CommRequest_Approvalv4.approvalProcess-meta.xml', lastModifiedDate: null, lastModifiedBy: null, apiVersion: null, properties: { active: false } },
+        { id: 'ApprovalProcess:OA_Communication_Request__c.CommRequest_Approvalv5', type: 'ApprovalProcess', apiName: 'OA_Communication_Request__c.CommRequest_Approvalv5', label: 'CommRequest_Approvalv5', parentId: 'CustomObject:OA_Communication_Request__c', sourcePath: 'approvalProcesses/OA_Communication_Request__c.CommRequest_Approvalv5.approvalProcess-meta.xml', lastModifiedDate: null, lastModifiedBy: null, apiVersion: null, properties: { active: false } },
+        { id: 'ApprovalProcess:OA_Communication_Request__c.CommRequest_Approvalv6', type: 'ApprovalProcess', apiName: 'OA_Communication_Request__c.CommRequest_Approvalv6', label: 'CommRequest_Approvalv6', parentId: 'CustomObject:OA_Communication_Request__c', sourcePath: 'approvalProcesses/OA_Communication_Request__c.CommRequest_Approvalv6.approvalProcess-meta.xml', lastModifiedDate: null, lastModifiedBy: null, apiVersion: null, properties: { active: false } },
+        { id: 'ApprovalProcess:OA_Communication_Request__c.CommRequest_Approvalv7', type: 'ApprovalProcess', apiName: 'OA_Communication_Request__c.CommRequest_Approvalv7', label: 'CommRequest_Approvalv7', parentId: 'CustomObject:OA_Communication_Request__c', sourcePath: 'approvalProcesses/OA_Communication_Request__c.CommRequest_Approvalv7.approvalProcess-meta.xml', lastModifiedDate: null, lastModifiedBy: null, apiVersion: null, properties: { active: false } },
+        { id: 'ApprovalProcess:OA_Communication_Request__c.CommRequest_Approvalv8', type: 'ApprovalProcess', apiName: 'OA_Communication_Request__c.CommRequest_Approvalv8', label: 'CommRequest_Approvalv8', parentId: 'CustomObject:OA_Communication_Request__c', sourcePath: 'approvalProcesses/OA_Communication_Request__c.CommRequest_Approvalv8.approvalProcess-meta.xml', lastModifiedDate: null, lastModifiedBy: null, apiVersion: null, properties: { active: true } },
+        { id: 'ApprovalProcess:OA_Communication_Request__c.OA_CommRequest', type: 'ApprovalProcess', apiName: 'OA_Communication_Request__c.OA_CommRequest', label: 'OA_CommRequest', parentId: 'CustomObject:OA_Communication_Request__c', sourcePath: 'approvalProcesses/OA_Communication_Request__c.OA_CommRequest.approvalProcess-meta.xml', lastModifiedDate: null, lastModifiedBy: null, apiVersion: null, properties: { active: false } },
+        { id: 'ApprovalProcess:OA_Communication_Request__c.OA_CommRequest_Approval', type: 'ApprovalProcess', apiName: 'OA_Communication_Request__c.OA_CommRequest_Approval', label: 'OA_CommRequest_Approval', parentId: 'CustomObject:OA_Communication_Request__c', sourcePath: 'approvalProcesses/OA_Communication_Request__c.OA_CommRequest_Approval.approvalProcess-meta.xml', lastModifiedDate: null, lastModifiedBy: null, apiVersion: null, properties: { active: false } },
+      ],
+      // The bug: stated total is 11, but there are only 10 files on disk.
+      totalCount: 11,
+      limit: 50,
+      offset: 0,
+      hasMore: false,
+      trust: { provenance: 'offline_snapshot' },
+    };
+    const r = await synthesizeAnswerHandler(ctx, { input: mismatchedListOutput });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const mismatchCaveat = r.value.data.caveats.find((c) => c.includes('COUNT MISMATCH'));
+    expect(mismatchCaveat).toBeDefined();
+    expect(mismatchCaveat).toContain('totalCount=11');
+    expect(mismatchCaveat).toContain('10 item(s)');
+    expect(mismatchCaveat).toContain('use the enumerated count (10)');
+  });
+
+  it('does NOT emit COUNT MISMATCH when stated total matches enumerated length (no false positive)', async () => {
+    const matchingOutput = {
+      components: [
+        { id: 'ApprovalProcess:OA_Communication_Request__c.CommRequest_Approvalv8', type: 'ApprovalProcess', apiName: 'OA_Communication_Request__c.CommRequest_Approvalv8', label: 'CommRequest_Approvalv8', parentId: 'CustomObject:OA_Communication_Request__c', sourcePath: 'approvalProcesses/OA_Communication_Request__c.CommRequest_Approvalv8.approvalProcess-meta.xml', lastModifiedDate: null, lastModifiedBy: null, apiVersion: null, properties: { active: true } },
+      ],
+      totalCount: 1,
+      limit: 50,
+      offset: 0,
+      hasMore: false,
+      trust: { provenance: 'offline_snapshot' },
+    };
+    const r = await synthesizeAnswerHandler(ctx, { input: matchingOutput });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.caveats.some((c) => c.includes('COUNT MISMATCH'))).toBe(false);
+  });
+
+  // BUG-4: Inactive ApprovalProcess + sibling retrieval — when an approval process
+  // with active=false is in the cascade, the sibling active processes are missing.
+  // Real shape: get_component on an inactive versioned approval process returns
+  // active=false; the active successor version was not retrieved by the cascade.
+  it('emits INACTIVE APPROVAL PROCESS caveat when ApprovalProcess is cited and active=false (Bug 4 — inactive versioned process)', async () => {
+    // Real org shape: get_component output for an inactive approval process on
+    // a versioned credit-limit process. The V3 successors are NOT in this payload.
+    const inactiveApprovalProcess = {
+      id: 'ApprovalProcess:Contract__c.Credit_Limit_V2',
+      type: 'ApprovalProcess',
+      apiName: 'Contract__c.Credit_Limit_V2',
+      label: 'Credit_Limit_V2',
+      parentId: 'CustomObject:Contract__c',
+      sourcePath: 'approvalProcesses/Contract__c.Credit_Limit_V2.approvalProcess-meta.xml',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {
+        active: false,
+        entryCriteria: "AND(Approval_Status__c = 'Required', Hours_Limit_Approval_Status__c = 'Not Required')",
+        initialSubmitters: 'submitter',
+        finalApprovalRecordLock: false,
+        allowRecall: false,
+      },
+      trust: { provenance: 'offline_snapshot' },
+    };
+    const r = await synthesizeAnswerHandler(ctx, { input: inactiveApprovalProcess });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const siblingCaveat = r.value.data.caveats.find((c) => c.includes('INACTIVE APPROVAL PROCESS'));
+    expect(siblingCaveat).toBeDefined();
+    expect(siblingCaveat).toContain('active=false');
+    expect(siblingCaveat).toContain('sibling active processes');
+    expect(siblingCaveat).toContain('list_components');
+  });
+
+  it('does NOT emit INACTIVE APPROVAL PROCESS caveat for a non-ApprovalProcess active=false (no false positive)', async () => {
+    // A flow with active=false should not trigger the approval-process sibling caveat.
+    const inactiveFlow = {
+      id: 'Flow:Legacy_Assignment',
+      type: 'Flow',
+      apiName: 'Legacy_Assignment',
+      active: false,
+      trust: { provenance: 'offline_snapshot' },
+    };
+    const r = await synthesizeAnswerHandler(ctx, { input: inactiveFlow });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.caveats.some((c) => c.includes('INACTIVE APPROVAL PROCESS'))).toBe(false);
+  });
+
+  // BUG-5: booleanFilter vs matchingMethods — the cascade conflated the OR structure
+  // in booleanFilter with per-field fuzziness. synthesize_answer must emit a structural
+  // interpretation note when both are present.
+  // Real shape: get_component on MatchingRule:Contact.Contact_FirstLastNameEmail returns
+  // booleanFilter='(1 AND 2) OR (3 OR 4) OR 5' and matchingMethods='FirstName,LastName,Exact'
+  // from properties extracted by matching-rule.ts.
+  it('emits MATCHING RULE dimension caveat when booleanFilter and matchingMethods are both present (Bug 5)', async () => {
+    // Real org shape: get_component output for MatchingRule:Contact.Contact_FirstLastNameEmail.
+    // properties.booleanFilter and properties.matchingMethods come from the matching-rule extractor.
+    const matchingRuleOutput = {
+      id: 'MatchingRule:Contact.Contact_FirstLastNameEmail',
+      type: 'MatchingRule',
+      apiName: 'Contact.Contact_FirstLastNameEmail',
+      label: 'Contact First Last Name Email',
+      parentId: 'CustomObject:Contact',
+      sourcePath: 'objects/Contact/matchingRules/Contact.matchingRule-meta.xml',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {
+        ruleStatus: 'Active',
+        booleanFilter: '(1 AND 2) OR (3 OR 4) OR 5',
+        itemCount: 5,
+        matchingMethods: 'FirstName,LastName,Exact',
+        fieldsCompared: 'FirstName,LastName,Email,Phone,MobilePhone',
+      },
+      trust: { provenance: 'offline_snapshot' },
+    };
+    const r = await synthesizeAnswerHandler(ctx, { input: matchingRuleOutput });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const dimensionCaveat = r.value.data.caveats.find((c) => c.includes('MATCHING RULE'));
+    expect(dimensionCaveat).toBeDefined();
+    expect(dimensionCaveat).toContain('booleanFilter');
+    expect(dimensionCaveat).toContain('matchingMethods');
+    expect(dimensionCaveat).toContain('trigger breadth');
+    expect(dimensionCaveat).toContain('fuzziness');
+    // Both properties surface as bullets.
+    expect(r.value.data.bullets.some((b) => b.startsWith('booleanFilter:'))).toBe(true);
+    expect(r.value.data.bullets.some((b) => b.startsWith('matchingMethods:'))).toBe(true);
+  });
+
+  it('does NOT emit MATCHING RULE caveat when only booleanFilter is present (no false positive)', async () => {
+    // A sharing rule with booleanFilter but no matchingMethods should not trigger.
+    const sharingRule = {
+      id: 'SharingRule:Account.Acct_Territory',
+      type: 'SharingRule',
+      apiName: 'Account.Acct_Territory',
+      properties: {
+        booleanFilter: '1',
+        sharingSemantics: 'criteria-based',
+      },
+      trust: { provenance: 'offline_snapshot' },
+    };
+    const r = await synthesizeAnswerHandler(ctx, { input: sharingRule });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.caveats.some((c) => c.includes('MATCHING RULE'))).toBe(false);
+  });
+});

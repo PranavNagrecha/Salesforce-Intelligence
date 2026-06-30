@@ -66,9 +66,11 @@ const CAVEAT_KEY =
  *     `declaredSharing`.
  *   - transaction / save semantics: `rollsBackTransaction`, `statement`.
  *   - explicit false-premise signals: `premiseRejected`, `falsePremise`.
+ *   - pagination / list completeness: `hasMore`.
+ *   - matching rule dimensions: `booleanFilter`, `matchingMethods`.
  */
 const FACT_KEY =
-  /^(count|total|totalCount|totalClassCount|totalFindingCount|totalGapsCount|verdict|disposition|status|coverageStatus|riskLevel|truncated|notModeled|plane|intent|confidence|matchKind|fieldLabel|fieldId|piiClassification|piiCategory|errorConditionFormula|active|evaluatesAllActiveRules|evaluatesOn|apexCallCount|fieldAccessCount|isExposed|triggerType|processType|recordTriggerType|filterFormula|conditions|sharingSemantics|effectiveModel|runInMode|declaredSharing|rollsBackTransaction|statement|premiseRejected|falsePremise)$/;
+  /^(count|total|totalCount|totalClassCount|totalFindingCount|totalGapsCount|verdict|disposition|status|coverageStatus|riskLevel|truncated|notModeled|plane|intent|confidence|matchKind|fieldLabel|fieldId|piiClassification|piiCategory|errorConditionFormula|active|evaluatesAllActiveRules|evaluatesOn|apexCallCount|fieldAccessCount|isExposed|triggerType|processType|recordTriggerType|filterFormula|conditions|sharingSemantics|effectiveModel|runInMode|declaredSharing|rollsBackTransaction|statement|premiseRejected|falsePremise|hasMore|booleanFilter|matchingMethods)$/;
 
 /** Array keys worth a "N item(s)" count bullet. */
 const COUNT_ARRAY_KEY =
@@ -324,6 +326,117 @@ const parseCitation = (id: string): Citation => {
 };
 
 /**
+ * Walk the source value tree to detect structural patterns that warrant
+ * additional caveats. These run AFTER `collect` so they complement (never
+ * duplicate) the scalar caveat/bullet pass. Each detector is independent.
+ *
+ * Detectors:
+ *   1. PAGINATION — `hasMore: true` in the input means the list_components
+ *      (or any paginated tool) returned only the first page; conclusions drawn
+ *      from that partial set may be wrong for the full family.
+ *   2. COUNT-CONSISTENCY — when a top-level object has both a stated total
+ *      count scalar (`count`/`total`/`totalCount`) and a `components` array
+ *      whose length differs from the stated total, the mismatch is a signal
+ *      of an off-by-one or synthesis error in the prior tool call.
+ *   3. INACTIVE-APPROVALPROCESS — when the input cites at least one
+ *      `ApprovalProcess:` id AND carries `active: false`, emit a caveat that
+ *      the sibling active processes on the same object were not retrieved and
+ *      may provide required routing context.
+ *   4. BOOLEANFILTER-MATCHINGMETHODS — when both `booleanFilter` and
+ *      `matchingMethods` appear in the same object, emit a structural note
+ *      distinguishing trigger-breadth (booleanFilter) from per-field fuzziness
+ *      (matchingMethod values); conflating the two is the canonical error.
+ */
+const applyStructuralCaveats = (value: unknown, out: Collected): void => {
+  // Walk every object node, applying pattern detectors.
+  const walk = (v: unknown): void => {
+    if (Array.isArray(v)) {
+      v.forEach(walk);
+      return;
+    }
+    if (v === null || typeof v !== 'object') return;
+    const o = v as Record<string, unknown>;
+
+    // DETECTOR 1 — PAGINATION: `hasMore: true` means the list was not exhaustive.
+    if (o['hasMore'] === true) {
+      pushCapped(
+        out.caveats,
+        'INCOMPLETE RETRIEVAL: the source tool returned hasMore=true — this response ' +
+          'covers only the first page of results. Conclusions about which values, members, ' +
+          'or rules are present (or absent) in the full family may be wrong. Paginate with ' +
+          'offset/nextCursor or narrow the query before drawing family-wide conclusions.',
+        MAX_CAVEATS,
+      );
+    }
+
+    // DETECTOR 2 — COUNT-CONSISTENCY: stated total vs enumerated components.
+    // Only applies at object nodes that carry BOTH a count-like scalar AND
+    // a `components` array — the canonical list_components response shape.
+    if (Array.isArray(o['components'])) {
+      const actualLen = (o['components'] as unknown[]).length;
+      for (const countKey of ['count', 'total', 'totalCount'] as const) {
+        const stated = o[countKey];
+        if (typeof stated === 'number' && stated !== actualLen) {
+          pushCapped(
+            out.caveats,
+            `COUNT MISMATCH: the input states ${countKey}=${stated} but the enumerated ` +
+              `'components' array contains ${actualLen} item(s). The stated total may be ` +
+              `a synthesis or off-by-one error — use the enumerated count (${actualLen}) ` +
+              `as the authoritative figure; do not repeat the stated total uncritically.`,
+            MAX_CAVEATS,
+          );
+          break; // one mismatch caveat per object node is enough
+        }
+      }
+    }
+
+    // DETECTOR 3 — INACTIVE-APPROVALPROCESS: inactive process without sibling retrieval.
+    // Only fires when an ApprovalProcess canonical id is present in the collected
+    // id set AND the current object node carries `active: false` — a strong signal
+    // that the cascade fetched only the inactive member of the version family.
+    if (o['active'] === false) {
+      const hasApprovalId = [...out.ids].some((id) => id.startsWith('ApprovalProcess:'));
+      if (hasApprovalId) {
+        pushCapped(
+          out.caveats,
+          'INACTIVE APPROVAL PROCESS: the cited ApprovalProcess has active=false. ' +
+            'The sibling active processes on the same object were NOT retrieved by this ' +
+            'cascade — they may provide the current routing logic, successor entry criteria, ' +
+            'and active step assignments. Call list_components on the same parent object ' +
+            'to retrieve the full version family before drawing conclusions about active routing.',
+          MAX_CAVEATS,
+        );
+      }
+    }
+
+    // DETECTOR 4 — BOOLEANFILTER-MATCHINGMETHODS independence.
+    // When both properties are present in the same component properties node,
+    // emit a structural interpretation note so the host distinguishes trigger
+    // breadth (booleanFilter) from per-field fuzziness (matchingMethod values).
+    const bf = o['booleanFilter'];
+    const mm = o['matchingMethods'];
+    if (typeof bf === 'string' && bf.length > 0 && typeof mm === 'string' && mm.length > 0) {
+      pushCapped(
+        out.caveats,
+        'MATCHING RULE — two independent dimensions: ' +
+          `(1) booleanFilter="${bf}" controls which field-combination sets are sufficient ` +
+          'to declare a duplicate (trigger breadth / recall — OR groups widen recall, AND ' +
+          'groups narrow it); ' +
+          `(2) matchingMethods="${mm}" controls how fuzzily each individual field comparison ` +
+          'works (precision — FirstName/LastName are fuzzy; Exact is not). ' +
+          'Do not attribute per-field fuzziness to the OR structure in booleanFilter; ' +
+          'fuzziness comes from matchingMethod values only.',
+        MAX_CAVEATS,
+      );
+    }
+
+    // Recurse into sub-objects AFTER applying node-level detectors.
+    Object.values(o).forEach(walk);
+  };
+  walk(value);
+};
+
+/**
  * The `sfi.synthesize_answer` MCP tool. Grounds a narrative in the supplied
  * tool JSON — see the module JSDoc for the no-hallucination contract.
  *
@@ -432,6 +545,11 @@ export const synthesizeAnswerHandler = async (
     }
   }
   collect(source, null, out);
+  // Apply structural pattern detectors AFTER the scalar collect pass so that
+  // (a) the `out.ids` set is already populated (the inactive-ApprovalProcess
+  // detector needs to see cited ids), and (b) no structural caveat is double-
+  // emitted by the scalar walk.
+  applyStructuralCaveats(source, out);
 
   const citations = [...out.ids].sort().map(parseCitation);
 
