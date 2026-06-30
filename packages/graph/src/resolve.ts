@@ -342,6 +342,36 @@ export const resolveComponents = async (
       .filter((w) => w.length > 0),
   );
 
+  // Dotted Object.Field form (or a full canonical id `Type:Object.Field`): the
+  // user named BOTH the parent object AND the field's literal api name, the most
+  // specific way to point at a field. The dotted whole-name pass below treats a
+  // field whose name only collides with a SPACE-joined query as a decoy, and a
+  // dotted query never whole-name-matches a dotless field — so `Opportunity.
+  // Opportunity_Status__c` would otherwise fall to the parent-aware token path
+  // and be reported `ambiguous` against same-object `*Status*` siblings. When
+  // the query is a single dotted token, capture its normalized object-part and
+  // field-part so a candidate matching BOTH exactly is a definitive `exact` hit.
+  // Guarded to a lone token with exactly one dot (no spaces) so multi-word
+  // questions ("email on Contact.Account") never trigger it. A leading
+  // canonical-id `Type:` segment is stripped first.
+  let dottedObjectNorm: string | null = null;
+  let dottedFieldNorm: string | null = null;
+  {
+    const rawTrim = query.trim();
+    const afterColon = rawTrim.includes(':')
+      ? rawTrim.slice(rawTrim.indexOf(':') + 1)
+      : rawTrim;
+    if (!/\s/.test(afterColon) && (afterColon.match(/\./g)?.length ?? 0) === 1) {
+      const [objPart, fieldPart] = afterColon.split('.');
+      const on = normalizeName(objPart ?? '');
+      const fn = normalizeName(fieldPart ?? '');
+      if (on.length >= 2 && fn.length >= 2) {
+        dottedObjectNorm = on;
+        dottedFieldNorm = fn;
+      }
+    }
+  }
+
   // An empty token list (all stop words — e.g. a component literally named
   // "IT", where "it" is a stop word) is deliberately NOT short-circuited here:
   // the whole-name exact pass below still recovers a node whose normalized name
@@ -484,11 +514,25 @@ export const resolveComponents = async (
       namedObjectWords.size > 0 &&
       (node.parentApiName === null ||
         !namedObjectWords.has(normalizeName(node.parentApiName)));
+    // Dotted Object.Field (or canonical-id) form: this candidate's parent object
+    // AND its own field name both equal the dotted parts of the query. That is a
+    // definitive, maximally-specific hit — promote it to whole-name-exact so the
+    // disposition short-circuit reports it `exact` and same-object `*Status*`
+    // siblings (which share only the parent + a common suffix token) can't demote
+    // it. A field on a DIFFERENT object, or an object-part the query did not name,
+    // does not qualify.
+    const dottedExact =
+      dottedObjectNorm !== null &&
+      dottedFieldNorm !== null &&
+      node.parentApiName !== null &&
+      normalizeName(node.parentApiName) === dottedObjectNorm &&
+      normalizeName(node.apiName) === dottedFieldNorm;
     const wholeExact =
-      normQuery.length >= 2 &&
-      node.normName === normQuery &&
-      query.includes('.') === node.apiName.includes('.') &&
-      !crossObjectFieldDecoy;
+      dottedExact ||
+      (normQuery.length >= 2 &&
+        node.normName === normQuery &&
+        query.includes('.') === node.apiName.includes('.') &&
+        !crossObjectFieldDecoy);
     pass1.push({ node, perToken, wholeExact, parentMatched });
   }
 
@@ -672,11 +716,26 @@ export const resolveComponents = async (
     // Account.Contact_Email__c) instead of confidently picking the decoy.
     // Skipped for a sole whole-name-exact top: that literal-name hit is
     // definitive, so a coincidental parent-token sibling can't make it ambiguous.
-    const contenders = candidates.filter(
-      (c) =>
-        c.score >= top.score * CONTENDER_RATIO ||
-        (!topIsSoleWholeExact && parentMatchedIds.has(c.id)),
-    );
+    //
+    // The score-tie path is the second half of the same bug: when the query is
+    // the LITERAL full api name of one component (e.g. "Opportunity_Status__c"),
+    // same-object siblings that share its non-discriminating tokens — the parent
+    // object token via parent-credit ("opportunity") plus a common suffix token
+    // ("status") — reach base 1.0 and the SAME score, so they tie the top on
+    // `score >= top.score * CONTENDER_RATIO` and inflate the contender count to
+    // `ambiguous` even though the user typed an exact, unambiguous name. A
+    // definitive sole whole-name-exact hit is only genuinely AMBIGUOUS against
+    // ANOTHER whole-name-exact match (a real name collision, e.g. `Email__c` on
+    // both Account and Contact). For such a top, count as contenders only OTHER
+    // whole-name-exact candidates; a score-tied or parent-credited sibling that
+    // is NOT itself a literal whole-name match cannot demote it.
+    const contenders = topIsSoleWholeExact
+      ? candidates.filter((c) => c.id === top.id || wholeExactIds.has(c.id))
+      : candidates.filter(
+          (c) =>
+            c.score >= top.score * CONTENDER_RATIO ||
+            parentMatchedIds.has(c.id),
+        );
     const topCoverage = coverageById.get(top.id) ?? 0;
     // BL-05: a single-token query whose top match is a much-shorter strict
     // prefix (e.g. "opportunitytrigger" → "Opportunity") leaves real query
