@@ -40,6 +40,7 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges, listNodesByType } from '@sf-intelligence/graph';
+import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -103,6 +104,19 @@ export interface OutboundMessageCatalogOutput {
     readonly totalObjects: number;
     readonly entriesWithKnownInvokers: number;
   };
+  /**
+   * Coverage status of the WorkflowRule family that hosts classic
+   * `<outboundMessages>` definitions. Classic SOAP outbound messages
+   * live INSIDE `.workflow-meta.xml` (the same source the WorkflowRule
+   * extractor retrieves), so when that family's coverage is `complete`
+   * a zero-entry result is a DETERMINATE NEGATIVE ("this org defines no
+   * outbound messages"), NOT a coverage gap. When coverage is `partial`
+   * or `unknown` an empty result is inconclusive — the definitions may
+   * simply not have been retrieved. The renderer/host MUST use this to
+   * phrase a zero-result honestly instead of defaulting to "refresh the
+   * vault".
+   */
+  readonly coverageStatus: 'complete' | 'partial' | 'unknown';
   readonly disclosure: string;
 }
 
@@ -115,6 +129,31 @@ export interface OutboundMessageCatalogOutput {
  */
 const OUTBOUND_MESSAGE_DISCLOSURE =
   'Endpoint URLs are captured verbatim from the `<outboundMessages><endpointUrl>` element and NOT VALIDATED — v2.8 does not probe the URL, does not confirm the destination exists, and does not confirm the message is invoked at runtime. Runtime registration via a custom Apex caller or a programmatically-modified workflow rule is invisible to the offline extractor.';
+
+/**
+ * The metadata families whose coverage backs an outbound-message
+ * answer. Classic SOAP outbound messages are serialized INSIDE the
+ * `.workflow-meta.xml` files under the `<outboundMessages>` element, so
+ * the WorkflowRule family's coverage is the authoritative signal for
+ * whether a zero-entry result is a determinate negative or a gap.
+ */
+const OUTBOUND_COVERAGE_TYPES = ['WorkflowRule'] as const;
+
+/**
+ * Build the disclosure for a ZERO-entry result. When the backing
+ * WorkflowRule coverage is `complete`, the org genuinely defines no
+ * outbound messages — say so plainly (a false premise, not a retrieval
+ * miss) so the host does not default to "refresh the vault". When
+ * coverage is `partial`/`unknown` the empty result is inconclusive.
+ */
+const buildEmptyDisclosure = (
+  coverageStatus: 'complete' | 'partial' | 'unknown',
+): string =>
+  coverageStatus === 'complete'
+    ? 'No outbound message definitions exist in this org. The WorkflowRule family — which is where classic SOAP `<outboundMessages>` are serialized — has COMPLETE coverage in this vault, so this is a determinate negative (the org defines none), NOT a coverage gap: do not suggest a refresh to "surface" outbound messages that are not there. ' +
+      OUTBOUND_MESSAGE_DISCLOSURE
+    : 'No outbound message entries were found, BUT the WorkflowRule family that hosts classic `<outboundMessages>` is only partially covered in this vault, so this result is INCONCLUSIVE — outbound message definitions may exist in the org but were not retrieved. Run `/sfi-refresh` (or check `sfi.coverage_report`) before concluding the org has none. ' +
+      OUTBOUND_MESSAGE_DISCLOSURE;
 
 /**
  * Read a string property defensively. Returns the verbatim value
@@ -298,6 +337,11 @@ export const outboundMessageCatalogHandler = async (
     byObject[key] = bucket;
   }
 
+  const coverageStatus = summarizeCoverage(
+    ctx.manifest,
+    OUTBOUND_COVERAGE_TYPES,
+  ).status;
+
   return ok({
     data: {
       entries: sorted,
@@ -307,7 +351,16 @@ export const outboundMessageCatalogHandler = async (
         totalObjects: Object.keys(byObject).length,
         entriesWithKnownInvokers,
       },
-      disclosure: OUTBOUND_MESSAGE_DISCLOSURE,
+      coverageStatus,
+      // A zero-entry result is only a determinate "the org defines no
+      // outbound messages" when the backing WorkflowRule family is fully
+      // covered; otherwise it is inconclusive. Phrasing this distinction
+      // here stops the host from defaulting to a "coverage gap / refresh
+      // the vault" framing on an org that simply has none.
+      disclosure:
+        sorted.length === 0
+          ? buildEmptyDisclosure(coverageStatus)
+          : OUTBOUND_MESSAGE_DISCLOSURE,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
