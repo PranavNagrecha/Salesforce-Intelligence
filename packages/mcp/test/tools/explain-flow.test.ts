@@ -463,6 +463,111 @@ const legacyAsyncAfterCommitFlowSeed: ExtractionResult = {
   edges: [],
 };
 
+// =============================================================================
+// Seed 7: A screen flow whose sole faultable element is an activateSessionPermSet
+// action — real-org-shape fixture matching Activate_Contact_Delete_Permission.
+// The node has properties.actionCalls populated (bundle-4a vault).  The handler
+// must surface the non-apex action call so the consumer can identify that it is
+// NOT a PermissionSetAssignment DML insert (orphaned-grant scenario impossible).
+// =============================================================================
+
+const SESSION_PERM_FLOW_ID = 'Flow:Activate_Delete_Perm_Screen';
+const SESSION_PERM_SOURCE_RELPATH =
+  'source/main/default/flows/Activate_Delete_Perm_Screen.flow-meta.xml';
+
+// Minimal XML matching the real Activate_Contact_Delete_Permission shape.
+const SESSION_PERM_SOURCE_XML = [
+  '<?xml version="1.0" encoding="UTF-8"?>',
+  '<Flow xmlns="http://soap.sforce.com/2006/04/metadata">',
+  '    <actionCalls>',
+  '        <name>Activate_Delete_Permission</name>',
+  '        <label>Activate Delete Permission</label>',
+  '        <actionName>activateSessionPermSet</actionName>',
+  '        <actionType>activateSessionPermSet</actionType>',
+  '    </actionCalls>',
+  '    <apiVersion>58.0</apiVersion>',
+  '    <description>Screen flow that activates a session permission set</description>',
+  '    <label>Activate Delete Perm Screen</label>',
+  '    <processType>Flow</processType>',
+  '    <status>Active</status>',
+  '</Flow>',
+].join('\n');
+
+// Seed with properties.actionCalls present (current-vault shape).
+const sessionPermFlowSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: SESSION_PERM_FLOW_ID,
+      type: 'Flow',
+      apiName: 'Activate_Delete_Perm_Screen',
+      label: 'Activate Delete Perm Screen',
+      sourcePath: SESSION_PERM_SOURCE_RELPATH,
+      properties: {
+        label: 'Activate Delete Perm Screen',
+        description: 'Screen flow that activates a session permission set',
+        processType: 'Flow',
+        status: 'Active',
+        interviewLabel: null,
+        runInMode: null,
+        triggerObject: null,
+        triggerType: null,
+        recordTriggerType: null,
+        flowExtractionWarnings: [],
+        faultableElementCount: 1,
+        elementsWithoutFault: 1,
+        hasUnhandledFaults: true,
+        conditions: [],
+        // bundle-4a: every <actionCalls> element summarised including non-apex types.
+        actionCalls: [
+          { actionType: 'activateSessionPermSet', actionName: 'activateSessionPermSet' },
+        ],
+      },
+    }),
+  ],
+  edges: [],
+};
+
+// =============================================================================
+// Seed 8: Same screen flow shape but WITHOUT properties.actionCalls — simulates
+// a vault built before bundle-4a.  The handler must fall back to scanning the
+// source XML file (written to disk in beforeAll) and still surface the
+// activateSessionPermSet action call.
+// =============================================================================
+
+const SESSION_PERM_LEGACY_FLOW_ID = 'Flow:Activate_Delete_Perm_Screen_Legacy';
+const SESSION_PERM_LEGACY_SOURCE_RELPATH =
+  'source/main/default/flows/Activate_Delete_Perm_Screen_Legacy.flow-meta.xml';
+
+const sessionPermLegacyFlowSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: SESSION_PERM_LEGACY_FLOW_ID,
+      type: 'Flow',
+      apiName: 'Activate_Delete_Perm_Screen_Legacy',
+      label: 'Activate Delete Perm Screen Legacy',
+      sourcePath: SESSION_PERM_LEGACY_SOURCE_RELPATH,
+      properties: {
+        label: 'Activate Delete Perm Screen Legacy',
+        description: 'Screen flow that activates a session permission set',
+        processType: 'Flow',
+        status: 'Active',
+        interviewLabel: null,
+        runInMode: null,
+        triggerObject: null,
+        triggerType: null,
+        recordTriggerType: null,
+        flowExtractionWarnings: [],
+        faultableElementCount: 1,
+        elementsWithoutFault: 1,
+        hasUnhandledFaults: true,
+        conditions: [],
+        // OLD-VAULT SHAPE: properties.actionCalls absent — no bundle-4a property.
+      },
+    }),
+  ],
+  edges: [],
+};
+
 // An ApexTrigger sharing a name with no Flow — "explain flow AccountTrigger"
 // should point here rather than dead-ending (B26).
 const triggerSeed: ExtractionResult = {
@@ -511,6 +616,19 @@ beforeAll(async () => {
     'utf-8',
   );
 
+  // Write source XML for the session-perm legacy-vault fixture (no
+  // properties.actionCalls) so the XML-fallback path can scan it.
+  writeFileSync(
+    join(sourceDir, 'Activate_Delete_Perm_Screen.flow-meta.xml'),
+    SESSION_PERM_SOURCE_XML,
+    'utf-8',
+  );
+  writeFileSync(
+    join(sourceDir, 'Activate_Delete_Perm_Screen_Legacy.flow-meta.xml'),
+    SESSION_PERM_SOURCE_XML,
+    'utf-8',
+  );
+
   const dbPath = join(tempDir, 'explain-flow.db');
   const opened = await openGraph(dbPath);
   if (!opened.ok) {
@@ -524,6 +642,8 @@ beforeAll(async () => {
     screenFlowSeed,
     scheduledFlowSeed,
     legacyAsyncAfterCommitFlowSeed,
+    sessionPermFlowSeed,
+    sessionPermLegacyFlowSeed,
     triggerSeed,
   ]);
   if (!imported.ok) {
@@ -710,7 +830,7 @@ describe('explainFlowHandler', () => {
     ]);
   });
 
-  it('surfaces action calls with target type', async () => {
+  it('surfaces action calls with target type and actionType for apex calls', async () => {
     const result = await explainFlowHandler(ctx, { flowId: FULL_FLOW_ID });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -718,6 +838,7 @@ describe('explainFlowHandler', () => {
     expect(actions.length).toBe(1);
     expect(actions[0]?.targetId).toBe(APEX_CLASS_ID);
     expect(actions[0]?.targetType).toBe('ApexClass');
+    expect(actions[0]?.actionType).toBe('apex');
   });
 
   it('collapses record lookups by target object with filter counts', async () => {
@@ -838,6 +959,47 @@ describe('explainFlowHandler', () => {
     expect(stmt).toMatch(/not user-visible|silently aborts/);
     // Must NOT contain the synchronous-rollback language.
     expect(stmt).not.toMatch(/synchronous .* flow with an unhandled fault path/);
+  });
+
+  // ---------------------------------------------------------------------------
+  // NON-APEX ACTION CALLS — activateSessionPermSet surface (u4-flow-actioncall)
+  // ---------------------------------------------------------------------------
+
+  it('surfaces activateSessionPermSet action call from properties.actionCalls (bundle-4a vault shape)', async () => {
+    // FAIL-BEFORE: actionCalls was always [] because collectActionCalls only
+    // queried callsApex edges; activateSessionPermSet emits no callsApex edge.
+    // PASS-AFTER: handler reads properties.actionCalls and merges non-apex rows.
+    const result = await explainFlowHandler(ctx, { flowId: SESSION_PERM_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const actions = result.value.data.actionCalls;
+    expect(actions.length).toBe(1);
+    const call = actions[0];
+    expect(call?.actionType).toBe('activateSessionPermSet');
+    // targetType mirrors actionType for non-apex calls.
+    expect(call?.targetType).toBe('activateSessionPermSet');
+    // targetId is the bare actionName (not an ApexClass: prefixed id).
+    expect(call?.targetId).toBe('activateSessionPermSet');
+    // The faultRollback verdict for a screen flow with hasUnhandledFaults=true
+    // must also be correct (screen flow rolls back the current screen-segment DML).
+    const ec = result.value.data.executionContext;
+    expect(ec.hasUnhandledFaults).toBe(true);
+    expect(ec.faultRollback?.rollsBackTransaction).toBe(true);
+    expect(ec.faultRollback?.statement).toMatch(/screen.*flow|user-driven/i);
+  });
+
+  it('surfaces activateSessionPermSet via source-file XML fallback when vault lacks properties.actionCalls (pre-bundle-4a shape)', async () => {
+    // FAIL-BEFORE: same as above — callsApex edge absent, properties.actionCalls
+    // absent, XML fallback did not exist → actionCalls=[] always.
+    // PASS-AFTER: handler falls back to raw XML scan and finds the action call.
+    const result = await explainFlowHandler(ctx, { flowId: SESSION_PERM_LEGACY_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const actions = result.value.data.actionCalls;
+    expect(actions.length).toBe(1);
+    const call = actions[0];
+    expect(call?.actionType).toBe('activateSessionPermSet');
+    expect(call?.targetType).toBe('activateSessionPermSet');
   });
 
   it('returns invalid-query when flowId does not start with Flow:', async () => {
