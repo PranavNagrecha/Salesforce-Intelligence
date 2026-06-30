@@ -445,6 +445,12 @@ export interface AccessReasoningStep {
 export interface WhyCantUserSeeRecordOutput {
   readonly verdict: 'visible' | 'restricted' | 'unknown';
   readonly reasoning: readonly AccessReasoningStep[];
+  /**
+   * When object-level CRUD is the determinative deny, names the hard deny so
+   * downstream prose does not bury it under sharing stages.
+   */
+  readonly hardDenyReason?: string;
+  readonly boundaryNote?: string;
 }
 
 /** Parsed `userContext` field. Carried in a typed shape to keep helpers honest. */
@@ -2161,6 +2167,16 @@ export const whyCantUserSeeRecordHandler = async (
       verdict:
         objectCrudHardDenyReason !== null ? 'restricted' : aggregateVerdict(reasoning),
       reasoning,
+      ...(objectCrudHardDenyReason !== null
+        ? {
+            hardDenyReason: objectCrudHardDenyReason,
+            boundaryNote:
+              `Object-level CRUD hard deny is determinative: ${objectCrudHardDenyReason}. ` +
+              `Restriction rules (when present) may further narrow visible records but cannot ` +
+              `grant access when object Read is missing — evaluate RestrictionRule stages for ` +
+              `non-granting filters such as Hide_External even though they do not overturn the deny.`,
+          }
+        : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

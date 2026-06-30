@@ -1102,7 +1102,12 @@ export const whatHappensOnSaveHandler = async (
     event: input.event,
     recordTypeId: input.recordTypeId ?? null,
     objectModeled,
-    soe,
+    ...(inactiveConfigured.length > 0 ? { inactiveConfigured } : {}),
+    ...(inactiveConfigured.length > 0
+      ? {
+          inactiveHeadline: `Excluded inactive: ${inactiveConfigured.map((i) => i.apiName).join(', ')}`,
+        }
+      : {}),
     summary: {
       totalSteps: soe.length,
       activeComponents,
@@ -1110,8 +1115,8 @@ export const whatHappensOnSaveHandler = async (
       asyncFanOut,
       phaseCounts,
     },
+    soe,
     disclosure: composeSoeDisclosure(DISCLOSURE, objectModeled),
-    ...(inactiveConfigured.length > 0 ? { inactiveConfigured } : {}),
   };
 
   // On a densely-automated standard object (e.g. Contact) the per-step action

@@ -132,10 +132,10 @@ export const resolveLiveAccess = async (
 const liveConsentRequiredError = (org: string): McpError => ({
   kind: 'invalid-query',
   message:
-    `Live org plane is not enabled for '${org}'. It is read-only, but it queries your live ` +
-    `org, so it needs explicit one-time consent. Grant it with sfi.live_consent { grant: true } ` +
-    `(persists for future sessions; still read-only), pass liveEnabled: true for a single call, ` +
-    `or set SFI_LIVE_PLANE_ENABLED=1.`,
+    `Live org plane is not enabled for '${org}' — record counts and live data values ` +
+    `require querying the live org and are not available offline. Grant read-only access with ` +
+    `sfi.live_consent { grant: true }, pass liveEnabled: true for one call, or set ` +
+    `SFI_LIVE_PLANE_ENABLED=1.`,
 });
 
 /**
@@ -304,6 +304,9 @@ export interface LiveCountOutput {
    * mismatch. Absent when every equality field was resolvable offline.
    */
   readonly picklistValidationGaps?: readonly PicklistValidationGap[];
+  /** When true, do not treat `count` as an answer to a filtered data question. */
+  readonly cannotAnswer?: boolean;
+  readonly coverageCaveat?: string;
 }
 
 const assertCountSoql = (soql: string): Result<string, McpError> => {
@@ -449,8 +452,32 @@ export const liveCountHandler = async (
     ...mismatches.map((m) => `> ⚠️ ${m.disclosure}`),
     ...validationGaps.map((g) => `> ⚠️ ${g.disclosure}`),
   ];
+  const cannotAnswer = validationGaps.length > 0;
+  const coverageCaveat =
+    cannotAnswer
+      ? 'Record count filtered on field values that could not be validated offline ' +
+        '(managed-package field or live org data required) — this count cannot answer ' +
+        'the question without querying live data.'
+      : undefined;
+  if (coverageCaveat !== undefined) {
+    caveats.push(`> ⚠️ ${coverageCaveat}`);
+  }
   const rendered =
     caveats.length > 0 ? `${baseRendered}\n\n${caveats.join('\n')}` : baseRendered;
+  if (cannotAnswer && coverageCaveat !== undefined) {
+    const filterHint =
+      input.objectApiName !== undefined
+        ? ` object=${input.objectApiName}` +
+          (input.whereClause !== undefined ? ` filter=${input.whereClause}` : '')
+        : '';
+    return err({
+      kind: 'invalid-query',
+      message:
+        `${coverageCaveat}${filterHint} Query: ${soqlCheck.value} ` +
+        `Live query returned count=${count} but that cannot answer the filtered question.`,
+      path: 'soql',
+    });
+  }
   return ok({
     data: {
       ...countData,

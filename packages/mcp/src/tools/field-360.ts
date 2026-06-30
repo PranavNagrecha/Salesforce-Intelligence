@@ -76,6 +76,7 @@ import type { Context } from '../server.js';
 import { annotationsBlockFor, type AnnotationsBlock } from './annotations.js';
 import { readFactBlock, type FactsBlock } from './facts-block.js';
 import { fieldNotFoundError } from './field-not-found-suggest.js';
+import { scanSupplementalFlowFieldWriters } from './flow-field-writers-scan.js';
 import {
   argsFingerprint,
   decodeCursor,
@@ -764,6 +765,32 @@ export const field360Handler = async (
     if (!sr.ok) return sr;
     if (sr.value === null) continue;
     classifyIncomingEdge(edge, sr.value, buckets);
+  }
+
+  // Supplemental Flow writers from source XML (SObject-variable assignments the
+  // graph extractor skipped — e.g. non-$Record recordUpdates).
+  const parentObjectApi =
+    fieldNode.parentId !== null && fieldNode.parentId.startsWith('CustomObject:')
+      ? fieldNode.parentId.slice('CustomObject:'.length)
+      : fieldId.slice('CustomField:'.length).split('.')[0] ?? '';
+  const supplementalWriters = await scanSupplementalFlowFieldWriters(
+    ctx,
+    parentObjectApi,
+    fieldNode.apiName,
+  );
+  const writerIds = new Set(buckets.writers.map((r) => r.componentId));
+  for (const w of supplementalWriters) {
+    if (writerIds.has(w.componentId)) continue;
+    writerIds.add(w.componentId);
+    buckets.writers.push({
+      componentId: w.componentId,
+      componentType: 'Flow',
+      componentApiName: w.apiName,
+      edgeType: 'writesTo',
+      confidence: 'heuristic',
+      source: `flow-field-writers-scan:${w.mechanism}`,
+      properties: { supplemental: true, mechanism: w.mechanism },
+    });
   }
 
   // `dependencies`: OUTGOING references for formula fields only.

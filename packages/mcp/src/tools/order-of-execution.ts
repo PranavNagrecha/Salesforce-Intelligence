@@ -864,9 +864,14 @@ export const orderOfExecutionHandler = async (
   } = {
     objectApiName: input.objectApiName,
     objectModeled,
+    ...(inactiveConfigured.length > 0 ? { inactiveConfigured } : {}),
+    ...(inactiveConfigured.length > 0
+      ? {
+          inactiveHeadline: `Excluded inactive: ${inactiveConfigured.map((i) => i.apiName).join(', ')}`,
+        }
+      : {}),
     byEvent,
     disclosure: composeSoeDisclosure(DISCLOSURE, objectModeled),
-    ...(inactiveConfigured.length > 0 ? { inactiveConfigured } : {}),
   };
 
   // The four-event payload is the heaviest SOE surface in the product; on a

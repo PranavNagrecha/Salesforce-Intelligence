@@ -182,7 +182,7 @@ describe('live_sample picklist-literal mismatch disclosure', () => {
 // not retrieve) cannot be pre-validated offline — a 0 there must be disclosed as
 // "could not pre-validate", not asserted as zero records.
 describe('live_count picklist pre-validation GAP (managed-package field absent from vault)', () => {
-  it('discloses that pre-validation was unavailable instead of asserting zero records', async () => {
+  it('fail-closes when pre-validation was unavailable instead of asserting zero records', async () => {
     const r = await liveCountHandler(
       ctx,
       {
@@ -193,17 +193,11 @@ describe('live_count picklist pre-validation GAP (managed-package field absent f
       },
       zeroCountExec,
     );
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    expect(r.value.data.count).toBe(0);
-    // No mismatch can be detected (field unknown), but a GAP must be surfaced.
-    expect(r.value.data.picklistMismatches).toBeUndefined();
-    expect(r.value.data.picklistValidationGaps).toBeDefined();
-    expect(r.value.data.picklistValidationGaps?.[0]?.field).toBe(
-      'hed__Application_Status__c',
-    );
-    expect(r.value.data.rendered).toMatch(/could not pre-validate/i);
-    expect(r.value.data.rendered).toMatch(/not in the vault/i);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toMatch(/cannot answer the question without querying live data/i);
+    expect(r.error.message).toMatch(/hed__Application_Status__c = 'Withdrawn'/);
   });
 
   it('does NOT add a gap when the field IS modeled in the vault', async () => {
