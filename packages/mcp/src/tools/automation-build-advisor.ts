@@ -28,15 +28,35 @@ import type {
   McpResponse,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import {
+  getNodeById,
+  listEdges,
+  listEdgesForNodes,
+  listNodesByType,
+} from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-/** Zod schema for the `sfi.automation_build_advisor` tool input. */
-export const automationBuildAdvisorInputSchema = z.object({
-  objectApiName: z.string().min(1),
-});
+/**
+ * Zod schema for the `sfi.automation_build_advisor` tool input.
+ *
+ * Two modes (presence of `objectApiName` vs `scope` selects):
+ *   - PER-OBJECT (default): pass `objectApiName` for the single-object briefing.
+ *   - ORG-WIDE GAP (`scope: 'flow-only-objects'`): no object needed; returns the
+ *     org-wide set difference of objects with an active record-triggered Flow but
+ *     ZERO active Apex triggers, annotated with master-detail-child / junction
+ *     role. Exactly one of the two must be supplied.
+ */
+export const automationBuildAdvisorInputSchema = z
+  .object({
+    objectApiName: z.string().min(1).optional(),
+    scope: z.literal('flow-only-objects').optional(),
+  })
+  .refine((v) => (v.objectApiName != null) !== (v.scope != null), {
+    message:
+      "supply exactly one of `objectApiName` (per-object briefing) or `scope: 'flow-only-objects'` (org-wide flow-only gap)",
+  });
 
 export type AutomationBuildAdvisorInput = z.infer<
   typeof automationBuildAdvisorInputSchema
@@ -63,6 +83,7 @@ export interface AutomationRisk {
 }
 
 export interface AutomationBuildAdvisorOutput {
+  readonly mode: 'per-object';
   readonly objectApiName: string;
   readonly objectModeled: boolean;
   readonly existingAutomation: {
@@ -76,27 +97,116 @@ export interface AutomationBuildAdvisorOutput {
   readonly boundaries: readonly string[];
 }
 
+/**
+ * The relationship role of a flow-only object, derived from outbound
+ * master-detail `lookupTo` edges on the fields parented under it:
+ *   - `master-detail-child`: exactly one master-detail parent.
+ *   - `junction`: TWO+ master-detail parents (a junction object).
+ *   - `lookup-only`: no master-detail parent (standalone or lookup-only child).
+ */
+export type ObjectRelationshipRole =
+  | 'master-detail-child'
+  | 'junction'
+  | 'lookup-only';
+
+/** One object that has active Flow automation but ZERO active Apex triggers. */
+export interface FlowOnlyObject {
+  readonly id: ComponentId;
+  readonly apiName: string;
+  /** Active record-triggered Flows targeting this object. */
+  readonly activeFlowCount: number;
+  readonly relationshipRole: ObjectRelationshipRole;
+  /** Master-detail PARENT object ids (the objects this one cascades under). */
+  readonly masterDetailParents: readonly ComponentId[];
+}
+
+export interface FlowOnlyObjectsOutput {
+  readonly mode: 'flow-only-objects';
+  readonly summary: {
+    /** Org-custom objects (`__c`, no managed namespace) that are flow-only. */
+    readonly orgCustomCount: number;
+    readonly masterDetailChildCount: number;
+    readonly junctionCount: number;
+  };
+  /** Sorted by id; org-custom objects only (standard + managed excluded). */
+  readonly flowOnlyObjects: readonly FlowOnlyObject[];
+  readonly recommendations: readonly string[];
+  readonly boundaries: readonly string[];
+}
+
 const BOUNDARIES: readonly string[] = Object.freeze([
   'Lists automation that TARGETS this object from the vault — every entry is a real node, not a fabricated save sequence. Conditions are not evaluated.',
   'Runtime Flow Trigger Order, dynamic/reflective invocation, and managed-package automation are out of scope; treat the ordering risk as "verify", not "proven".',
+]);
+
+const FLOW_ONLY_BOUNDARIES: readonly string[] = Object.freeze([
+  'Org-wide set difference: objects with >=1 ACTIVE record-triggered Flow MINUS objects with >=1 ACTIVE Apex trigger. Standard objects (no `__c` suffix) and managed-package objects (namespaced API names) are EXCLUDED — only org-custom objects are listed.',
+  'A record-triggered Flow is one whose incoming `triggersOn` edge carries a `recordTriggerType`; "active" reads the Flow node `status` (Active, or unset). Apex-trigger activity reads the ApexTrigger node `status`.',
+  'Relationship role is derived from master-detail `lookupTo` edges on the object’s own fields (relationshipType === "MasterDetail"): one parent = master-detail child, two+ = junction. These flow-only objects run cascade-delete-time Flow logic with NO Apex trigger guard. Conditions are not evaluated and Flow Trigger Order is out of scope; treat as "verify".',
+  'The Flow and ApexTrigger scans read up to 500 nodes each (the graph list cap); on an org with more than 500 of either, the gap set is computed over a deterministic prefix — re-verify on very large orgs.',
 ]);
 
 const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
 
 const isActiveFlow = (status: string | null): boolean => status === null || status === 'Active';
 
+/** An Apex trigger is "active" unless its status is explicitly Inactive/Deleted. */
+const isActiveTrigger = (status: string | null): boolean =>
+  status === null || status === 'Active';
+
 /**
- * The `sfi.automation_build_advisor` MCP tool. See module JSDoc for the
- * composition and honesty axis.
+ * Namespace heuristic (mirrors `package_impact`'s `namespaceOf`): a Salesforce
+ * API name carries a managed-package namespace iff its leaf splits into >= 3
+ * `__`-delimited segments (`NS__Object__c`). `Object__c` (2 segments) and
+ * standard names (`Account`) carry none. We exclude any managed/namespaced
+ * object from the org-wide gap view — the admin can't add a trigger guard to
+ * a managed object.
+ */
+const isManagedApiName = (apiName: string): boolean =>
+  apiName.split('__').length >= 3;
+
+/**
+ * Org-custom object = ends in the `__c` custom suffix AND is not namespaced.
+ * Standard objects (`Account`, `Case`) and managed objects (`NS__X__c`) are
+ * excluded from the flow-only gap view.
+ */
+const isOrgCustomObject = (apiName: string): boolean =>
+  apiName.endsWith('__c') && !isManagedApiName(apiName);
+
+/**
+ * The `sfi.automation_build_advisor` MCP tool. Dispatches on input shape:
+ * `objectApiName` → per-object briefing; `scope: 'flow-only-objects'` → the
+ * org-wide flow-only gap view. See module JSDoc for composition and honesty.
  *
  * @example
  *   const r = await automationBuildAdvisorHandler(ctx, { objectApiName: 'Account' });
- *   if (r.ok) console.log(r.value.data.risks, r.value.data.recommendations);
+ *   if (r.ok && r.value.data.mode === 'per-object') console.log(r.value.data.risks);
+ *   const g = await automationBuildAdvisorHandler(ctx, { scope: 'flow-only-objects' });
+ *   if (g.ok && g.value.data.mode === 'flow-only-objects') console.log(g.value.data.summary);
  */
 export const automationBuildAdvisorHandler = async (
   ctx: Context,
   input: AutomationBuildAdvisorInput,
+): Promise<
+  Result<
+    McpResponse<AutomationBuildAdvisorOutput | FlowOnlyObjectsOutput>,
+    McpError
+  >
+> => {
+  if (input.scope === 'flow-only-objects') {
+    return flowOnlyObjectsHandler(ctx);
+  }
+  return perObjectHandler(ctx, input.objectApiName as string);
+};
+
+/**
+ * Per-object briefing (the original tool behavior). See module JSDoc.
+ */
+const perObjectHandler = async (
+  ctx: Context,
+  objectApiName: string,
 ): Promise<Result<McpResponse<AutomationBuildAdvisorOutput>, McpError>> => {
+  const input = { objectApiName };
   const objectId: ComponentId = `CustomObject:${input.objectApiName}`;
 
   const objNode = await getNodeById(ctx.graph, objectId);
@@ -216,12 +326,188 @@ export const automationBuildAdvisorHandler = async (
 
   return ok({
     data: {
+      mode: 'per-object',
       objectApiName: input.objectApiName,
       objectModeled,
       existingAutomation: { recordTriggeredFlows, apexTriggers, validationRules, workflowRules },
       risks,
       recommendations,
       boundaries: BOUNDARIES,
+    },
+    vaultState: {
+      sourceTreeHash: ctx.manifest.sourceTreeHash,
+      refreshedAt: ctx.manifest.refreshedAt,
+    },
+  });
+};
+
+/**
+ * Org-wide flow-only-objects gap analytic. Computes the set difference:
+ *
+ *   { objects with >=1 ACTIVE record-triggered Flow }
+ *     MINUS { objects with >=1 ACTIVE Apex trigger }
+ *
+ * restricted to ORG-CUSTOM objects (standard + managed excluded), then
+ * annotates each with its master-detail relationship role (child / junction /
+ * lookup-only) using outbound `lookupTo` edges on the object's fields. These
+ * are exactly the objects exposed to cascade-delete-time Flow execution with no
+ * Apex trigger guard — the gap no single per-object tool surfaces.
+ */
+const flowOnlyObjectsHandler = async (
+  ctx: Context,
+): Promise<Result<McpResponse<FlowOnlyObjectsOutput>, McpError>> => {
+  const fail = (m: string): Result<never, McpError> =>
+    err({ kind: 'internal', message: `graph query failed: ${m}` });
+
+  // 1) Every record-triggered Flow and Apex trigger, in one type scan each.
+  const flowsRes = await listNodesByType(ctx.graph, 'Flow', { limit: 500 });
+  if (!flowsRes.ok) return fail(flowsRes.error.message);
+  const triggersRes = await listNodesByType(ctx.graph, 'ApexTrigger', { limit: 500 });
+  if (!triggersRes.ok) return fail(triggersRes.error.message);
+
+  // Active automation nodes only — drop deactivated ones up front so the set
+  // difference reflects what actually fires.
+  const activeFlows = flowsRes.value.filter((n) => isActiveFlow(str(n.properties['status'])));
+  const activeTriggers = triggersRes.value.filter((n) =>
+    isActiveTrigger(str(n.properties['status'])),
+  );
+
+  // 2) The objects each kind of automation targets, via outbound `triggersOn`.
+  //    For Flows we additionally require the edge to be RECORD-triggered
+  //    (`recordTriggerType` present) — a screen/autolaunched Flow is not.
+  const flowEdges = await listEdgesForNodes(
+    ctx.graph,
+    activeFlows.map((n) => n.id),
+    { direction: 'out', edgeTypes: ['triggersOn'] },
+  );
+  if (!flowEdges.ok) return fail(flowEdges.error.message);
+  const triggerEdges = await listEdgesForNodes(
+    ctx.graph,
+    activeTriggers.map((n) => n.id),
+    { direction: 'out', edgeTypes: ['triggersOn'] },
+  );
+  if (!triggerEdges.ok) return fail(triggerEdges.error.message);
+
+  // objectId → count of active record-triggered Flows targeting it.
+  const flowCountByObject = new Map<ComponentId, number>();
+  for (const flow of activeFlows) {
+    for (const e of flowEdges.value.get(flow.id) ?? []) {
+      if (str(e.properties['recordTriggerType']) === null) continue;
+      flowCountByObject.set(e.toId, (flowCountByObject.get(e.toId) ?? 0) + 1);
+    }
+  }
+  // objectIds with >=1 active Apex trigger.
+  const objectsWithTrigger = new Set<ComponentId>();
+  for (const trig of activeTriggers) {
+    for (const e of triggerEdges.value.get(trig.id) ?? []) {
+      objectsWithTrigger.add(e.toId);
+    }
+  }
+
+  // 3) Set difference, restricted to org-custom objects.
+  const candidateIds: ComponentId[] = [];
+  for (const objectId of flowCountByObject.keys()) {
+    if (objectsWithTrigger.has(objectId)) continue;
+    const apiName = objectId.startsWith('CustomObject:')
+      ? objectId.slice('CustomObject:'.length)
+      : objectId;
+    if (!isOrgCustomObject(apiName)) continue;
+    candidateIds.push(objectId);
+  }
+  candidateIds.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+
+  // 4) Annotate each with its master-detail role. A CustomField parented under
+  //    the object that has an outbound `lookupTo` edge with
+  //    relationshipType === 'MasterDetail' makes the object an MD child of the
+  //    edge's target; two+ distinct MD parents make it a junction.
+  //    Gather the object's child fields (parentOf), then their lookupTo edges.
+  const parentEdges = await listEdgesForNodes(ctx.graph, candidateIds, {
+    direction: 'out',
+    edgeTypes: ['parentOf'],
+  });
+  if (!parentEdges.ok) return fail(parentEdges.error.message);
+
+  const fieldIdsByObject = new Map<ComponentId, ComponentId[]>();
+  const allFieldIds: ComponentId[] = [];
+  for (const objectId of candidateIds) {
+    const fieldIds = (parentEdges.value.get(objectId) ?? [])
+      .filter((e) => e.toId.startsWith('CustomField:'))
+      .map((e) => e.toId);
+    fieldIdsByObject.set(objectId, fieldIds);
+    allFieldIds.push(...fieldIds);
+  }
+  const lookupEdges = await listEdgesForNodes(ctx.graph, allFieldIds, {
+    direction: 'out',
+    edgeTypes: ['lookupTo'],
+  });
+  if (!lookupEdges.ok) return fail(lookupEdges.error.message);
+
+  const flowOnlyObjects: FlowOnlyObject[] = [];
+  let masterDetailChildCount = 0;
+  let junctionCount = 0;
+  for (const objectId of candidateIds) {
+    const mdParents = new Set<ComponentId>();
+    for (const fieldId of fieldIdsByObject.get(objectId) ?? []) {
+      for (const e of lookupEdges.value.get(fieldId) ?? []) {
+        if (str(e.properties['relationshipType']) === 'MasterDetail') {
+          mdParents.add(e.toId);
+        }
+      }
+    }
+    const masterDetailParents = [...mdParents].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    let relationshipRole: ObjectRelationshipRole;
+    if (masterDetailParents.length >= 2) {
+      relationshipRole = 'junction';
+      junctionCount += 1;
+    } else if (masterDetailParents.length === 1) {
+      relationshipRole = 'master-detail-child';
+      masterDetailChildCount += 1;
+    } else {
+      relationshipRole = 'lookup-only';
+    }
+    flowOnlyObjects.push({
+      id: objectId,
+      apiName: objectId.startsWith('CustomObject:')
+        ? objectId.slice('CustomObject:'.length)
+        : objectId,
+      activeFlowCount: flowCountByObject.get(objectId) ?? 0,
+      relationshipRole,
+      masterDetailParents,
+    });
+  }
+
+  const recommendations: string[] = [];
+  if (flowOnlyObjects.length === 0) {
+    recommendations.push(
+      'No org-custom objects run an active record-triggered Flow without an Apex trigger — no flow-only automation gap detected in the vault.',
+    );
+  } else {
+    recommendations.push(
+      `${flowOnlyObjects.length} org-custom object(s) run active record-triggered Flow logic with NO Apex trigger guard. Review each before relying on a trigger to enforce invariants.`,
+    );
+    if (masterDetailChildCount > 0) {
+      recommendations.push(
+        `${masterDetailChildCount} are master-detail children — cascade-delete on the parent runs their Flow logic with no trigger to intercept; confirm the Flow handles the delete path.`,
+      );
+    }
+    if (junctionCount > 0) {
+      recommendations.push(
+        `${junctionCount} are junction objects (two master-detail parents) — flow-only automation on a junction fires on either parent's cascade; verify both paths.`,
+      );
+    }
+  }
+
+  return ok({
+    data: {
+      mode: 'flow-only-objects',
+      summary: {
+        orgCustomCount: flowOnlyObjects.length,
+        masterDetailChildCount,
+        junctionCount,
+      },
+      flowOnlyObjects,
+      recommendations,
+      boundaries: FLOW_ONLY_BOUNDARIES,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

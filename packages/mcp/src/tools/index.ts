@@ -3752,8 +3752,10 @@ const AUTOMATION_BUILD_ADVISOR_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     type: 'object',
     properties: {
       objectApiName: { type: 'string', minLength: 1 },
+      scope: { type: 'string', enum: ['flow-only-objects'] },
     },
-    required: ['objectApiName'],
+    // Exactly one of objectApiName (per-object) or scope (org-wide gap).
+    oneOf: [{ required: ['objectApiName'] }, { required: ['scope'] }],
     additionalProperties: false,
   });
 
@@ -4296,7 +4298,7 @@ export const V01_TOOLS: readonly ToolDefinition[] = [
   {
     name: 'sfi.automation_build_advisor',
     description:
-      "Decision-support tool: before an admin/architect builds automation on an object, brief them on what already runs there and the org-specific risks of adding more. Given `objectApiName`, returns `existingAutomation` (record-triggered Flows with recordTriggerType+status, ApexTriggers, ValidationRules, WorkflowRules that target the object), `risks` (flow-ordering when ≥2 active record-triggered Flows share the object since Salesforce does not guarantee their order; mixed-trigger-and-flow when both paradigms are present; validation-load when ≥5 active rules; greenfield when none), and synthesised `recommendations`. Does NOT build anything — it arms the decision (this is a backend knowledge layer). Honesty axis: lists automation that TARGETS the object (every entry a real vault node, not a fabricated save sequence), conditions are not evaluated, and runtime Flow Trigger Order / dynamic invocation are out of scope. Pair with sfi.what_happens_on_save for the full ordered sequence.",
+      "Decision-support tool: before an admin/architect builds automation on an object, brief them on what already runs there and the org-specific risks of adding more. PER-OBJECT mode (`objectApiName`): returns `existingAutomation` (record-triggered Flows with recordTriggerType+status, ApexTriggers, ValidationRules, WorkflowRules that target the object), `risks` (flow-ordering when ≥2 active record-triggered Flows share the object since Salesforce does not guarantee their order; mixed-trigger-and-flow when both paradigms are present; validation-load when ≥5 active rules; greenfield when none), and synthesised `recommendations`. ORG-WIDE GAP mode (`scope: 'flow-only-objects'`, no object): returns the set difference — org-custom objects with ≥1 ACTIVE record-triggered Flow but ZERO active Apex triggers — each annotated with its master-detail relationshipRole (master-detail-child / junction / lookup-only) and `masterDetailParents`, plus a `summary` (orgCustomCount, masterDetailChildCount, junctionCount). Use it for 'which objects run Flow logic with no trigger guard?' / cascade-delete exposure. Standard + managed-package objects are excluded. Supply EXACTLY one of objectApiName or scope. Does NOT build anything — it arms the decision. Honesty axis: every entry is a real vault node, conditions are not evaluated, and runtime Flow Trigger Order / dynamic invocation are out of scope. Pair with sfi.what_happens_on_save for the full ordered sequence.",
     inputSchema: AUTOMATION_BUILD_ADVISOR_INPUT_SCHEMA,
   },
   {
