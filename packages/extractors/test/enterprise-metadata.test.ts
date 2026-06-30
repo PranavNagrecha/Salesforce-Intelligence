@@ -10,6 +10,7 @@ import {
   extractListView,
   extractPermissionSetGroup,
   extractReport,
+  extractReportType,
   extractRestrictionRule,
   extractScopingRule,
 } from '../src/enterprise-metadata.js';
@@ -680,6 +681,147 @@ describe('enterprise metadata extractors', () => {
           properties: { referenceKind: 'mutingPermissionSet' },
         }),
       );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Bug fix: ReportType <label> was never extracted — makeNode always set label: null
+  // because extractReportType passed no labelXmlElement config. Real org shape from
+  // org-kb/source/main/default/reportTypes/Bot_Metrics_Daily_v2.reportType-meta.xml.
+  it('extracts the <label> from a real ReportType XML and surfaces it as node.label', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'Bot_Metrics_Daily_v2.reportType-meta.xml');
+      // Real-org XML shape: top-level <label> with a literal apostrophe distinguishes
+      // versioned clones (the real file uses a literal ' not an XML entity).
+      await writeFile(
+        path,
+        `<?xml version="1.0" encoding="UTF-8"?>
+<ReportType xmlns="http://soap.sforce.com/2006/04/metadata">
+    <baseObject></baseObject>
+    <category>other</category>
+    <deployed>true</deployed>
+    <description>Einstein Bot metrics aggregated by day.</description>
+    <label>Bot Metrics Daily Summer '22</label>
+    <sections>
+        <masterLabel>Conversation Definition Dialog Daily Metrics</masterLabel>
+    </sections>
+</ReportType>`,
+        'utf8',
+      );
+      const result = await extractReportType(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const node = result.value.nodes[0]!;
+      expect(node.id).toBe('ReportType:Bot_Metrics_Daily_v2');
+      // Previously always null — must now carry the seasonal-release label.
+      expect(node.label).toBe("Bot Metrics Daily Summer '22");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves ReportType node.label null when the XML has no <label> element', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'Unlabeled_Type.reportType-meta.xml');
+      await writeFile(
+        path,
+        '<ReportType xmlns="http://soap.sforce.com/2006/04/metadata"><deployed>true</deployed></ReportType>',
+        'utf8',
+      );
+      const result = await extractReportType(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.nodes[0]?.label).toBeNull();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Bug fix: extractRestrictionRule never read enforcementType / recordFilter /
+  // userCriteria / active — the generic extractor only produced fieldRefs.
+  // Real-org XML shape from:
+  // org-kb/source/main/default/restrictionRules/Limit_Access_to_Example_Course_for_Faculty.rule-meta.xml
+  it('extracts enforcementType, recordFilter, userCriteria, and active from a real RestrictionRule', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'Limit_Access_to_Example_Course_for_Faculty.rule-meta.xml');
+      // Exact real-org XML shape. RestrictionRule files are top-level (not nested
+      // under an object folder), so the node id is just the file stem — the
+      // parentId comes from <targetEntity> via parentFromXmlElement. The
+      // userCriteria uses an XML entity (&apos;) which extractXmlValues returns
+      // verbatim (no entity decoding) because it is a plain regex, not an XML parser.
+      await writeFile(
+        path,
+        `<?xml version="1.0" encoding="UTF-8"?>
+<RestrictionRule xmlns="http://soap.sforce.com/2006/04/metadata">
+    <active>true</active>
+    <description>Faculty should be allowed to see only records where they are the assigned faculty.</description>
+    <enforcementType>Restrict</enforcementType>
+    <masterLabel>Limit Access to Course Offering for Faculty</masterLabel>
+    <recordFilter>hed__Faculty__r.Faculty_User_Record__c=$User.Id</recordFilter>
+    <targetEntity>hed__Example_Course__c</targetEntity>
+    <userCriteria>$User.ProfileId=&apos;00e4O000001ADFpQAO&apos;</userCriteria>
+    <version>1</version>
+</RestrictionRule>`,
+        'utf8',
+      );
+      const result = await extractRestrictionRule(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const node = result.value.nodes[0]!;
+      // Top-level file: id is just the stem; parentId comes from <targetEntity>.
+      expect(node.id).toBe('RestrictionRule:Limit_Access_to_Example_Course_for_Faculty');
+      expect(node.parentId).toBe('CustomObject:hed__Example_Course__c');
+      // Previously missing — must now be present.
+      expect(node.properties['enforcementType']).toBe('Restrict');
+      expect(node.properties['active']).toBe('true');
+      expect(node.properties['recordFilter']).toBe('hed__Faculty__r.Faculty_User_Record__c=$User.Id');
+      // extractXmlValues uses a plain regex (no XML entity decoding) so &apos;
+      // is returned verbatim from the raw text, not decoded to '.
+      expect(node.properties['userCriteria']).toBe("$User.ProfileId=&apos;00e4O000001ADFpQAO&apos;");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // ScopingRule uses the same XML schema as RestrictionRule (real-org shape from
+  // org-kb/source/main/default/restrictionRules/Viewer_is_Best_Academic_Advisor.rule-meta.xml
+  // — note: that file has <enforcementType>Scoping</enforcementType> despite living
+  // in the restrictionRules/ folder; Salesforce stores both types as .rule-meta.xml).
+  it('extracts enforcementType=Scoping and extra properties from a real ScopingRule', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'Viewer_is_Best_Academic_Advisor.rule-meta.xml');
+      await writeFile(
+        path,
+        `<?xml version="1.0" encoding="UTF-8"?>
+<RestrictionRule xmlns="http://soap.sforce.com/2006/04/metadata">
+    <active>true</active>
+    <description>Used to filter a list view when the user is the best academic advisor</description>
+    <enforcementType>Scoping</enforcementType>
+    <masterLabel>Viewer is Best Academic Advisor</masterLabel>
+    <recordFilter>Best_Academic_Advisor__r.Id=$User.Id</recordFilter>
+    <targetEntity>Contact</targetEntity>
+    <userCriteria>$User.ProfileId=&apos;00e0B000000uM1N&apos;</userCriteria>
+    <version>1</version>
+</RestrictionRule>`,
+        'utf8',
+      );
+      const result = await extractScopingRule(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const node = result.value.nodes[0]!;
+      expect(node.id).toBe('ScopingRule:Viewer_is_Best_Academic_Advisor');
+      expect(node.parentId).toBe('CustomObject:Contact');
+      // Previously missing — must now be present.
+      expect(node.properties['enforcementType']).toBe('Scoping');
+      expect(node.properties['active']).toBe('true');
+      expect(node.properties['recordFilter']).toBe('Best_Academic_Advisor__r.Id=$User.Id');
+      // userCriteria uses &apos; which is returned verbatim by the regex extractor.
+      expect(node.properties['userCriteria']).toBe("$User.ProfileId=&apos;00e0B000000uM1N&apos;");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

@@ -69,6 +69,23 @@ interface EnterpriseExtractorConfig {
    * caveat — silently never fires on real orgs.
    */
   readonly parentFromXmlElement?: string;
+  /**
+   * XML element name whose first text value should be used as the node's
+   * `label`. When set, `extractEnterpriseMetadata` reads the element from the
+   * raw XML and passes it to `makeNode` instead of the hardcoded `null`.
+   * Used for ReportType which has a top-level `<label>` element (e.g.
+   * "Bot Metrics Daily Summer '22") that is otherwise lost.
+   */
+  readonly labelXmlElement?: string;
+  /**
+   * Additional XML element names whose first text value should be included
+   * directly in `node.properties`. Lets callers surface type-specific scalar
+   * fields (e.g. enforcementType / recordFilter / userCriteria / active on
+   * RestrictionRule and ScopingRule) without requiring a new dedicated config
+   * key per field. Values are extracted with `extractXmlValues` and written as
+   * `properties[elementName]`; absent elements are omitted (no null entry).
+   */
+  readonly extraProperties?: readonly string[];
 }
 
 const readText = async (path: string): Promise<Result<string, ExtractorError>> => {
@@ -367,11 +384,12 @@ const makeNode = (
   path: string,
   parentId: string | null,
   properties: Readonly<Record<string, unknown>>,
+  label: string | null = null,
 ): Node => ({
   id: `${type}:${apiName}`,
   type,
   apiName,
-  label: null,
+  label,
   parentId,
   sourcePath: path,
   lastModifiedDate: null,
@@ -464,6 +482,19 @@ const extractEnterpriseMetadata = async (
     }
   }
 
+  // Resolve the optional label from a configured XML element.
+  const label: string | null =
+    config.labelXmlElement !== undefined
+      ? (extractXmlValues(text.value, config.labelXmlElement)[0] ?? null)
+      : null;
+
+  // Resolve extra scalar properties declared in config.extraProperties.
+  const extraPropertiesBlock: Record<string, string> = {};
+  for (const elemName of config.extraProperties ?? []) {
+    const value = extractXmlValues(text.value, elemName)[0];
+    if (value !== undefined) extraPropertiesBlock[elemName] = value;
+  }
+
   const node = makeNode(
     config.type,
     apiName,
@@ -487,7 +518,9 @@ const extractEnterpriseMetadata = async (
             ...(filterScope !== undefined ? { filterScope } : {}),
           }
         : {}),
+      ...extraPropertiesBlock,
     },
+    label,
   );
 
   // CR-CAP-13: ONE `references` edge per (ListView, field). The edge PK is
@@ -535,7 +568,15 @@ export const extractListView = (path: string): Promise<Result<ExtractionResult, 
   });
 
 export const extractReportType = (path: string): Promise<Result<ExtractionResult, ExtractorError>> =>
-  extractEnterpriseMetadata(path, { type: 'ReportType', suffix: '.reportType-meta.xml' });
+  extractEnterpriseMetadata(path, {
+    type: 'ReportType',
+    suffix: '.reportType-meta.xml',
+    // The ReportType XML has a top-level <label> element (e.g. "Bot Metrics
+    // Daily Summer '22") that distinguishes versioned clones from each other.
+    // Without this, makeNode always sets label: null and get_component has no
+    // human-readable display name to surface in vault Markdown.
+    labelXmlElement: 'label',
+  });
 
 /**
  * CR-CAP-15: extract a CustomPermission DEFINITION node from a flat
@@ -664,6 +705,10 @@ export const extractRestrictionRule = (path: string): Promise<Result<ExtractionR
     // Top-level layout carries no object in the path; `<targetEntity>` names
     // the restricted object (why_cant / who_can_access_object key on parentId).
     parentFromXmlElement: 'targetEntity',
+    // Surface enforcement semantics directly so get_component can explain
+    // Restrict vs Scoping, show the SOQL filter, user-criteria profile, and
+    // active state without requiring a live query.
+    extraProperties: ['enforcementType', 'recordFilter', 'userCriteria', 'active'],
   });
 
 export const extractScopingRule = (path: string): Promise<Result<ExtractionResult, ExtractorError>> =>
@@ -671,4 +716,7 @@ export const extractScopingRule = (path: string): Promise<Result<ExtractionResul
     type: 'ScopingRule',
     suffix: '.rule-meta.xml',
     parentFromXmlElement: 'targetEntity',
+    // Same set as RestrictionRule — both rule types share the same XML schema
+    // and the same consumer questions (what filter / who does it apply to).
+    extraProperties: ['enforcementType', 'recordFilter', 'userCriteria', 'active'],
   });
