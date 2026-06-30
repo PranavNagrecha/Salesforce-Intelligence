@@ -1016,6 +1016,78 @@ describe('extractFlow', () => {
       }
     });
 
+    it('sets hasImmediateConnector true when <start> has a direct <connector> (sync after-save)', async () => {
+      // A record-triggered after-save flow whose <start> carries a direct
+      // <connector> fires synchronously within the triggering transaction —
+      // it belongs in post-save-flows, not post-save-async.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>61.0</apiVersion>
+    <label>Sync After Save</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <start>
+        <object>Account</object>
+        <recordTriggerType>CreateAndUpdate</recordTriggerType>
+        <triggerType>RecordAfterSave</triggerType>
+        <connector>
+            <targetReference>firstStep</targetReference>
+        </connector>
+    </start>
+    <assignments>
+        <name>firstStep</name>
+        <label>First Step</label>
+        <locationX>176</locationX>
+        <locationY>134</locationY>
+    </assignments>
+</Flow>`;
+      const { dir, path } = await writeTempXml('SyncAfterSave.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const props = result.value.nodes[0]?.properties;
+        expect(props?.['hasImmediateConnector']).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('sets hasImmediateConnector false when <start> has only <scheduledPaths> (async-only)', async () => {
+      // A record-triggered after-save flow whose <start> has ONLY
+      // <scheduledPaths> and NO direct <connector> is a scheduled-only
+      // (async) flow — it fires only via its time-offset paths and must be
+      // placed in post-save-async, not post-save-flows.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>61.0</apiVersion>
+    <label>Scheduled Only After Save</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <start>
+        <object>Contact</object>
+        <recordTriggerType>CreateAndUpdate</recordTriggerType>
+        <triggerType>RecordAfterSave</triggerType>
+        <scheduledPaths>
+            <name>six_hours_later</name>
+            <offsetNumber>6</offsetNumber>
+            <offsetUnit>Hours</offsetUnit>
+            <timeSource>RecordTriggerEvent</timeSource>
+        </scheduledPaths>
+    </start>
+</Flow>`;
+      const { dir, path } = await writeTempXml('ScheduledOnly.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const props = result.value.nodes[0]?.properties;
+        expect(props?.['hasImmediateConnector']).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
     it('dedupes repeated lookups to the same SObject into a single readsFrom edge', async () => {
       // Two `<recordLookups>` on the same object produce two raw edges
       // with the same (fromId,toId,edgeType,source) tuple, which the

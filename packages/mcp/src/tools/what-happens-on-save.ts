@@ -989,9 +989,24 @@ export const whatHappensOnSaveHandler = async (
   // `recordTriggerType` matches the DML event. After-save flows run after
   // workflow rules. Before-save flows were already emitted in Phase 0, so only
   // the after-save partition is walked here.
+  //
+  // Scheduled-only after-save flows (hasImmediateConnector === false and they
+  // have scheduledPaths) do NOT run synchronously within the triggering
+  // transaction. They are collected and emitted in post-save-async instead.
   const matchedFlows: Node[] = [];
+  const scheduledOnlyAfterSaveFlows: Node[] = [];
   for (const { firer, recordTriggerType } of afterSaveFlows) {
     if (!flowMatchesEvent(recordTriggerType, input.event)) continue;
+    const hasImmediateConnector = firer.properties['hasImmediateConnector'] as boolean | undefined;
+    const scheduledPathTypes = firer.properties['scheduledPathTypes'] as string[] | undefined;
+    const isScheduledOnly =
+      hasImmediateConnector === false &&
+      Array.isArray(scheduledPathTypes) &&
+      scheduledPathTypes.length > 0;
+    if (isScheduledOnly) {
+      scheduledOnlyAfterSaveFlows.push(firer);
+      continue;
+    }
     const stepResult = await buildStep(
       ctx,
       firer,
@@ -1033,6 +1048,10 @@ export const whatHappensOnSaveHandler = async (
 
   // Phase 9: post-save-async. Walk dispatchesAsync from every
   // ApexTrigger that fired in phase 1 / 4. Dedupes targets.
+  // Also emit scheduled-only after-save Flows here: these flows have no
+  // direct <connector> in <start> (hasImmediateConnector === false) so they
+  // run ONLY via their scheduled/time-offset paths — not in the triggering
+  // transaction. They are async by construction.
   const asyncSourceSet: Node[] = [...beforeTriggers, ...afterTriggers];
   const asyncStepsResult = await buildAsyncSteps(
     ctx,
@@ -1043,8 +1062,17 @@ export const whatHappensOnSaveHandler = async (
     return err({ kind: 'internal', message: asyncStepsResult.error });
   }
   soe.push(...asyncStepsResult.value);
-  const asyncFanOut = asyncStepsResult.value.length;
+  let asyncFanOut = asyncStepsResult.value.length;
   stepIndex += asyncFanOut;
+  for (const firer of scheduledOnlyAfterSaveFlows) {
+    const stepResult = await buildStep(ctx, firer, 'post-save-async', stepIndex);
+    if (!stepResult.ok) {
+      return err({ kind: 'internal', message: stepResult.error });
+    }
+    soe.push(stepResult.value);
+    asyncFanOut += 1;
+    stepIndex += 1;
+  }
 
   const conditionalCount = soe.filter((s) => s.conditional !== undefined).length;
   const inactiveConfigured = sortedInactiveConfigured(inactiveCollector);

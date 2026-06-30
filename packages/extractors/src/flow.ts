@@ -195,6 +195,19 @@ const extractStartProperties = (
   scheduleStartTime: string | null;
   scheduledPathTypes: string[];
   runAsyncAfterCommit: boolean;
+  /**
+   * True when the `<start>` element carries a direct `<connector>` child that
+   * is NOT inside a `<scheduledPaths>` element. A direct connector means the
+   * flow has an immediate synchronous execution path that fires within the
+   * same transaction as the triggering DML.
+   *
+   * A record-triggered after-save flow with `hasImmediateConnector: false`
+   * that has `scheduledPaths` executes ONLY via its scheduled/async paths —
+   * it never fires synchronously within the triggering save transaction.
+   * Such flows belong in `post-save-async`, not `post-save-flows`, in the
+   * Salesforce Order of Execution.
+   */
+  hasImmediateConnector: boolean;
 } => {
   const start = unwrapSingle(rootObj['start']);
   if (typeof start !== 'object' || start === null) {
@@ -207,6 +220,7 @@ const extractStartProperties = (
       scheduleStartTime: null,
       scheduledPathTypes: [],
       runAsyncAfterCommit: false,
+      hasImmediateConnector: false,
     };
   }
   const startObj = start as Record<string, unknown>;
@@ -216,6 +230,11 @@ const extractStartProperties = (
       ? (schedule as Record<string, unknown>)
       : null;
   const scheduledPathTypes = extractScheduledPathTypes(startObj);
+  // A direct `<connector>` child of `<start>` (not inside `<scheduledPaths>`)
+  // indicates a synchronous execution path. fast-xml-parser parses `<connector>`
+  // as an object or array; its presence (non-null/undefined) is sufficient.
+  const hasImmediateConnector =
+    startObj['connector'] !== undefined && startObj['connector'] !== null;
   return {
     triggerObject: toNullableString(startObj['object']),
     triggerType: toNullableString(startObj['triggerType']),
@@ -228,6 +247,7 @@ const extractStartProperties = (
       scheduleObj === null ? null : toNonEmptyString(scheduleObj['startTime']),
     scheduledPathTypes,
     runAsyncAfterCommit: scheduledPathTypes.includes(ASYNC_AFTER_COMMIT_PATH),
+    hasImmediateConnector,
   };
 };
 
@@ -1233,6 +1253,13 @@ export const extractFlow = async (
       // synchronous one.
       scheduledPathTypes: startProps.scheduledPathTypes,
       runAsyncAfterCommit: startProps.runAsyncAfterCommit,
+      // True when <start> carries a direct <connector> child (not inside
+      // <scheduledPaths>). A false value on a RecordAfterSave flow that has
+      // scheduledPaths means the flow is scheduled-only (async) — it never
+      // executes synchronously in the triggering transaction. The SOE tools
+      // use this to place these flows in post-save-async rather than
+      // post-save-flows.
+      hasImmediateConnector: startProps.hasImmediateConnector,
       // bundle-4(a): every <actionCalls> element's {actionType, actionName}
       // (apex AND non-apex). Apex calls also get a `callsApex` edge; non-apex
       // action types (e.g. activateSessionPermSet) emit no edge, so this list

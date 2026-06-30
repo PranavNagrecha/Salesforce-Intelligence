@@ -700,8 +700,23 @@ const composeForEvent = async (
   // rules in the documented order of execution. Before-save flows were already
   // emitted in the leading `before-save-flows` phase, so only the after-save
   // partition (already resolved against the object above) is walked here.
+  //
+  // Scheduled-only flows (hasImmediateConnector === false with scheduledPaths)
+  // do NOT run synchronously in the triggering transaction. They are collected
+  // here and emitted in post-save-async below.
+  const scheduledOnlyAfterSaveFlows: Node[] = [];
   for (const { firer, recordTriggerType } of afterSaveFlows) {
     if (!flowMatchesEvent(recordTriggerType, event)) continue;
+    const hasImmediateConnector = firer.properties['hasImmediateConnector'] as boolean | undefined;
+    const scheduledPathTypes = firer.properties['scheduledPathTypes'] as string[] | undefined;
+    const isScheduledOnly =
+      hasImmediateConnector === false &&
+      Array.isArray(scheduledPathTypes) &&
+      scheduledPathTypes.length > 0;
+    if (isScheduledOnly) {
+      scheduledOnlyAfterSaveFlows.push(firer);
+      continue;
+    }
     const stepResult = await buildStep(ctx, firer, 'post-save-flows', stepIndex);
     if (!stepResult.ok) return err(stepResult.error);
     soe.push(stepResult.value);
@@ -738,7 +753,17 @@ const composeForEvent = async (
   );
   if (!asyncStepsResult.ok) return err(asyncStepsResult.error);
   soe.push(...asyncStepsResult.value);
-  const asyncFanOut = asyncStepsResult.value.length;
+  let asyncFanOut = asyncStepsResult.value.length;
+  stepIndex += asyncFanOut;
+  // Emit scheduled-only after-save flows in post-save-async — they run only
+  // via their scheduled/time-offset paths, not within the triggering transaction.
+  for (const firer of scheduledOnlyAfterSaveFlows) {
+    const stepResult = await buildStep(ctx, firer, 'post-save-async', stepIndex);
+    if (!stepResult.ok) return err(stepResult.error);
+    soe.push(stepResult.value);
+    asyncFanOut += 1;
+    stepIndex += 1;
+  }
 
   const conditionalSteps = soe.filter((s) => s.conditional !== undefined).length;
   const activeComponents = soe.filter((s) => s.phase !== 'save').length;
