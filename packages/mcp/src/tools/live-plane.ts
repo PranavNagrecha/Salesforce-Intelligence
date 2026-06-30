@@ -7,6 +7,7 @@
 
 import type { McpError, McpResponse, TrustSummary } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
+import { getNodeById } from '@sf-intelligence/graph';
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 import { z } from 'zod';
 
@@ -41,6 +42,10 @@ import { LIVE_PLANE_DISCLOSURE, nodeExecFile, redactSecrets } from './live-exec.
 // the leaf above) is what routes EVERY live read in this module through the
 // per-session query budget (CR-09).
 import { runLiveQuery, runLiveRest } from './live-session.js';
+import {
+  scanSoqlForPicklistMismatches,
+  type PicklistLiteralMismatch,
+} from './picklist-literal-check.js';
 
 // Re-export the leaf primitives so every existing import path that pulls them
 // FROM './live-plane.js' (live-session.ts, the public barrel, the test suites)
@@ -244,6 +249,14 @@ export interface LiveCountOutput {
   readonly soql: string;
   readonly trust: TrustSummary;
   readonly rendered: string;
+  /**
+   * Present when a WHERE picklist literal does not match any DEFINED picklist
+   * value on its field. A count of 0 (or any count) filtered on a non-existent
+   * value is a VALUE MISMATCH, not proof those records do not exist — these
+   * notes name the real values and near-match suggestions so the caller never
+   * reads the artifact count as ground truth. Absent when every literal matches.
+   */
+  readonly picklistMismatches?: readonly PicklistLiteralMismatch[];
 }
 
 const assertCountSoql = (soql: string): Result<string, McpError> => {
@@ -256,6 +269,60 @@ const assertCountSoql = (soql: string): Result<string, McpError> => {
     });
   }
   return ok(normalized);
+};
+
+/** Pull the FROM object API name from a SELECT statement, or `null`. */
+const fromObjectOf = (soql: string): string | null => {
+  const m = /\bfrom\s+([A-Za-z_][A-Za-z0-9_]*)/i.exec(soql);
+  return m === null || m[1] === undefined ? null : m[1];
+};
+
+/**
+ * Pre-validate the WHERE picklist literals in a live SOQL against the vault's
+ * known picklist values. A literal that matches no DEFINED value on its field
+ * makes a determinate 0 count (or empty sample) a VALUE MISMATCH artifact, not
+ * evidence of zero matching records — so we surface the real values and
+ * near-match suggestions as disclosures. Offline + best-effort: only fields on
+ * the statement's single FROM object are checked (no relationship traversal),
+ * and a field absent from the vault or without an inline picklist definition is
+ * silently skipped. Never blocks the query; only augments the result.
+ */
+const collectPicklistMismatches = async (
+  ctx: Context,
+  soql: string,
+): Promise<readonly PicklistLiteralMismatch[]> => {
+  // No graph wired (e.g. a count-only context) ⇒ nothing to validate against.
+  if (ctx.graph === undefined || ctx.graph === null) return [];
+  const fromObject = fromObjectOf(soql);
+  if (fromObject === null) return [];
+  return scanSoqlForPicklistMismatchesSync(ctx, soql, fromObject);
+};
+
+/**
+ * Synchronous-friendly wrapper: gather every referenced field's picklist values
+ * up front (one graph read per distinct field), then run the pure scanner.
+ */
+const scanSoqlForPicklistMismatchesSync = async (
+  ctx: Context,
+  soql: string,
+  fromObject: string,
+): Promise<readonly PicklistLiteralMismatch[]> => {
+  const cache = new Map<string, unknown>();
+  // Collect each referenced direct field once (skip relationship paths — only a
+  // direct `Object.Field` picklist can be resolved from the vault here).
+  const fieldRefs = new Set<string>();
+  const eqRe = /([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|\bIN\b)/gi;
+  for (let m = eqRe.exec(soql); m !== null; m = eqRe.exec(soql)) {
+    const ref = m[1];
+    if (ref !== undefined && !ref.includes('.')) fieldRefs.add(ref);
+  }
+  for (const field of fieldRefs) {
+    const r = await getNodeById(ctx.graph, `CustomField:${fromObject}.${field}`);
+    cache.set(field, r.ok && r.value ? r.value.properties['picklistValues'] : null);
+  }
+  return scanSoqlForPicklistMismatches(soql, (ref) =>
+    ref.includes('.') ? null : cache.get(ref) ?? null,
+  );
 };
 
 export const liveCountHandler = async (
@@ -285,13 +352,23 @@ export const liveCountHandler = async (
     payload.result?.totalSize ??
     payload.result?.records?.[0]?.expr0 ??
     0;
+  const mismatches = await collectPicklistMismatches(ctx, soqlCheck.value);
   const countData = {
     count,
     soql: soqlCheck.value,
     trust: liveTrust(queriedAt),
   };
+  const baseRendered = renderLiveCountMarkdown(countData);
+  const rendered =
+    mismatches.length > 0
+      ? `${baseRendered}\n\n${mismatches.map((m) => `> ⚠️ ${m.disclosure}`).join('\n')}`
+      : baseRendered;
   return ok({
-    data: { ...countData, rendered: renderLiveCountMarkdown(countData) },
+    data: {
+      ...countData,
+      rendered,
+      ...(mismatches.length > 0 ? { picklistMismatches: mismatches } : {}),
+    },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
       refreshedAt: ctx.manifest.refreshedAt,
@@ -510,6 +587,13 @@ export interface LiveSampleOutput {
   /** Present only when rows were dropped to keep the response under the size
    *  limit (a wide projection), distinct from the SOQL row cap. */
   readonly note?: string;
+  /**
+   * Present when a WHERE picklist literal does not match any DEFINED picklist
+   * value on its field — an empty sample filtered on a non-existent value is a
+   * VALUE MISMATCH, not proof those records do not exist. Absent when every
+   * literal matches. See {@link LiveCountOutput.picklistMismatches}.
+   */
+  readonly picklistMismatches?: readonly PicklistLiteralMismatch[];
 }
 
 const capSampleSoql = (
@@ -557,6 +641,7 @@ export const liveSampleHandler = async (
     records = records.slice(0, Math.floor(records.length * 0.8));
     byteTrimmed = true;
   }
+  const mismatches = await collectPicklistMismatches(ctx, soql);
   const data: LiveSampleOutput = {
     records,
     soql,
@@ -571,6 +656,7 @@ export const liveSampleHandler = async (
             `or lower \`limit\` to sample more rows at a time.`,
         }
       : {}),
+    ...(mismatches.length > 0 ? { picklistMismatches: mismatches } : {}),
   };
   return ok({
     data,
