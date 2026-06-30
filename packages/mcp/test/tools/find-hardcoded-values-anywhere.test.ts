@@ -493,3 +493,101 @@ describe('findHardcodedValuesAnywhereHandler — output cursor (CR-22)', () => {
     expect(replay.error.kind).toBe('invalid-query');
   });
 });
+
+// =============================================================================
+// B-CONSUMPTION-PAGINATION-HONESTY (SkipValidation / $Permission.*) —
+// errorConditionFormula text IS stored offline in ValidationRule node properties
+// and IS searchable via find_hardcoded_values_anywhere with scope:'validation-rule'.
+// The product MUST NOT claim "$Permission.* guards are undetectable from metadata";
+// this test verifies that exact-value search returns the matching ValidationRules.
+// =============================================================================
+describe('findHardcodedValuesAnywhereHandler — $Permission.* guard searchability', () => {
+  const permSeed: ExtractionResult = {
+    nodes: [
+      makeNode({ id: 'CustomObject:Contact', type: 'CustomObject', apiName: 'Contact' }),
+      makeNode({ id: 'CustomObject:Qualified_Faculty__c', type: 'CustomObject', apiName: 'Qualified_Faculty__c' }),
+      makeNode({
+        id: 'ValidationRule:Contact.Prevent_SMS_Optin_for_Admissions',
+        type: 'ValidationRule',
+        apiName: 'Prevent_SMS_Optin_for_Admissions',
+        parentId: 'CustomObject:Contact',
+        properties: {
+          errorConditionFormula: "NOT($Permission.SkipValidation) && SMS_Opt_In__c = TRUE",
+          errorMessage: 'Cannot opt in without consent',
+          active: true,
+        },
+      }),
+      makeNode({
+        id: 'ValidationRule:Contact.Prevent_SMS_Optin_for_Advising',
+        type: 'ValidationRule',
+        apiName: 'Prevent_SMS_Optin_for_Advising',
+        parentId: 'CustomObject:Contact',
+        properties: {
+          errorConditionFormula: "NOT($Permission.SkipValidation) && Advisory_SMS_Opt_In__c = TRUE",
+          errorMessage: 'Cannot opt in without consent',
+          active: true,
+        },
+      }),
+      makeNode({
+        id: 'ValidationRule:Qualified_Faculty__c.FERPA_Training_Required',
+        type: 'ValidationRule',
+        apiName: 'FERPA_Training_Required',
+        parentId: 'CustomObject:Qualified_Faculty__c',
+        properties: {
+          errorConditionFormula: "NOT($Permission.SkipValidation) && ISBLANK(FERPA_Training_Date__c)",
+          errorMessage: 'FERPA training is required',
+          active: true,
+        },
+      }),
+      // A different permission guard — should NOT match SkipValidation search.
+      makeNode({
+        id: 'ValidationRule:Contact.Other_Guard',
+        type: 'ValidationRule',
+        apiName: 'Other_Guard',
+        parentId: 'CustomObject:Contact',
+        properties: {
+          errorConditionFormula: "NOT($Permission.SomeOtherPermission) && Status__c = 'Active'",
+          errorMessage: 'Other',
+          active: true,
+        },
+      }),
+    ],
+    edges: [],
+  };
+
+  let permTmpDir: string; let permStore: GraphStore; let permCtx: Context;
+  beforeAll(async () => {
+    permTmpDir = mkdtempSync(join(tmpdir(), 'sfi-perm-vr-'));
+    const o = await openGraph(join(permTmpDir, 'perm.db')); if (!o.ok) throw new Error(o.error.message);
+    permStore = o.value;
+    const i = await importExtractionResults(permStore, [permSeed]); if (!i.ok) throw new Error(i.error.message);
+    permCtx = { vaultRoot: permTmpDir, manifest: MANIFEST, graph: permStore };
+  });
+  afterAll(async () => { await closeGraph(permStore); rmSync(permTmpDir, { recursive: true, force: true }); });
+
+  it('finds ValidationRules gating on NOT($Permission.SkipValidation) via exact-value search', async () => {
+    const r = await findHardcodedValuesAnywhereHandler(permCtx, {
+      value: '$Permission.SkipValidation',
+      scope: ['validation-rule'],
+    });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const ids = r.value.data.matches.map((m) => m.componentId).sort();
+    // Must find 3 matching validation rules, not 0 (the product's wrong answer).
+    expect(ids).toContain('ValidationRule:Contact.Prevent_SMS_Optin_for_Admissions');
+    expect(ids).toContain('ValidationRule:Contact.Prevent_SMS_Optin_for_Advising');
+    expect(ids).toContain('ValidationRule:Qualified_Faculty__c.FERPA_Training_Required');
+    // Must NOT include the unrelated $Permission.SomeOtherPermission guard.
+    expect(ids).not.toContain('ValidationRule:Contact.Other_Guard');
+    expect(r.value.data.bySource['validation-rule']).toBe(3);
+  });
+
+  it('$Permission.* guards are declared-confidence (formula text is directly in node properties)', async () => {
+    const r = await findHardcodedValuesAnywhereHandler(permCtx, {
+      value: '$Permission.SkipValidation',
+      scope: ['validation-rule'],
+    });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    // Every match must be confidence: 'declared' (not heuristic) since we supplied an exact value.
+    expect(r.value.data.matches.every((m) => m.confidence === 'declared')).toBe(true);
+  });
+});

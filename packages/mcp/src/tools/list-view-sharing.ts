@@ -96,6 +96,14 @@ export interface ListViewSharingOutput {
     readonly sharedWithGroupsRoles: number;
     readonly allUsersWithObjectAccess: number;
     readonly distinctTargets: number;
+    /**
+     * Count of list views that have at least one `sharedTo` entry with
+     * `type === 'role'` (direct role share, NOT roleAndSubordinates).
+     * Computed over ALL list views for the object — not just the current
+     * page — so agents can answer "how many are shared directly to role X?"
+     * without paginating through every `listViews[]` row.
+     */
+    readonly directRoleShareCount: number;
   };
   readonly limit: number;
   readonly offset: number;
@@ -120,7 +128,7 @@ export interface ListViewSharingOutput {
 }
 
 const BOUNDARY_NOTE =
-  'Shows the saved list view’s <sharedTo> visibility scope (the groups/roles it is shared with), at `declared` confidence. This is visibility of the VIEW, not record access — a user still needs read access to the object and the records must pass the view’s filter. `filterScope` (Everything/Mine/Queue/…) is the record filter, a separate axis from who-can-see-the-view. A list view with no <sharedTo> is visible to all users who can see the object; "visible only to me" personal views are not in deployed metadata, so absence is never "private". roleAndSubordinates targets also reach subordinate roles via the role hierarchy.';
+  'Shows the saved list view’s <sharedTo> visibility scope (the groups/roles it is shared with), at `declared` confidence. This is visibility of the VIEW, not record access — a user still needs read access to the object and the records must pass the view’s filter. `filterScope` (Everything/Mine/Queue/…) is the record filter, a separate axis from who-can-see-the-view. A list view with no <sharedTo> is visible to all users who can see the object; "visible only to me" personal views are not in deployed metadata, so absence is never "private". roleAndSubordinates targets also reach subordinate roles via the role hierarchy. IMPORTANT: `summary` counts (including `directRoleShareCount`) are computed over ALL list views for the object — not just the current page. Per-entry type breakdowns (role vs roleAndSubordinates) within `sharedTo[]` are present only in the paginated `listViews[]` rows; exhaust all pages via `nextCursor` before counting by type manually.';
 
 /** Read a node's `properties.sharedTo` into typed entries (defensive). */
 const readSharedTo = (node: Node): SharedToEntry[] => {
@@ -159,15 +167,22 @@ const toRow = (node: Node): ListViewSharingRow => {
 const buildSummary = (rows: readonly ListViewSharingRow[]): ListViewSharingOutput['summary'] => {
   const distinct = new Set<string>();
   let shared = 0;
+  let directRoleShareCount = 0;
   for (const r of rows) {
     if (r.visibility === 'sharedWithGroupsRoles') shared += 1;
-    for (const t of r.sharedTo) distinct.add(t.targetId);
+    let hasDirectRole = false;
+    for (const t of r.sharedTo) {
+      distinct.add(t.targetId);
+      if (t.type === 'role') hasDirectRole = true;
+    }
+    if (hasDirectRole) directRoleShareCount += 1;
   }
   return {
     listViews: rows.length,
     sharedWithGroupsRoles: shared,
     allUsersWithObjectAccess: rows.length - shared,
     distinctTargets: distinct.size,
+    directRoleShareCount,
   };
 };
 
