@@ -429,6 +429,167 @@ const absentRecordTriggerTypeSeed: ExtractionResult = {
   ],
 };
 
+// =============================================================================
+// Seed 7: real-org-shape Contact fixture — models the dense-automation pattern
+// found on the Contact standard object: multiple active triggers with different
+// event sets, ONE Inactive trigger (status: Inactive), plus after-save flows
+// with recordTriggerType Create / Update / CreateAndUpdate and various statuses.
+//
+// This is the fixture-vs-reality gap left after commit 9b3c8a15: that commit
+// fixed the recordTriggerType absent-value undercount but did NOT cover the
+// case of an Inactive ApexTrigger being silently included in the active SOE
+// steps (isActiveSoeFirer ignored ApexTrigger.status). A real org's Contact
+// object always has at least one Inactive trigger; without the status check the
+// inactive trigger inflates the after-triggers count and the wrong component
+// appears in the "automation that fires" list.
+// =============================================================================
+
+const STDOBJ = 'CustomObject:StdObj';
+
+// Two active triggers that fire on both after insert and after update.
+const TRIG_AFTER_BOTH = 'ApexTrigger:StdObjTriggerA'; // mirrors ContactTrigger
+const TRIG_AFTER_BOTH_2 = 'ApexTrigger:StdObjTriggerB'; // mirrors FSR_TriggerContactTest
+// One trigger that fires on every DML event (mirrors dlrs_ContactTrigger).
+const TRIG_ALL_EVENTS = 'ApexTrigger:StdObjTriggerC';
+// One INACTIVE trigger with after insert — must not appear in active steps.
+const TRIG_INACTIVE = 'ApexTrigger:StdObjInactiveTrigger';
+// Active after-save flows.
+const FLOW_AS_CREATE_UPDATE = 'Flow:StdObjAfterSaveCreateUpdate'; // recordTriggerType: CreateAndUpdate
+const FLOW_AS_UPDATE_ONLY = 'Flow:StdObjAfterSaveUpdateOnly'; // recordTriggerType: Update
+const FLOW_AS_CREATE_ONLY = 'Flow:StdObjAfterSaveCreateOnly'; // recordTriggerType: Create
+// Inactive after-save flow — must not appear in active steps.
+const FLOW_AS_OBSOLETE = 'Flow:StdObjAfterSaveObsolete'; // status: Obsolete
+
+const realOrgShapeSeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: STDOBJ, apiName: 'StdObj' }),
+    makeNode({
+      id: TRIG_AFTER_BOTH,
+      type: 'ApexTrigger',
+      apiName: 'StdObjTriggerA',
+      properties: {
+        status: 'Active',
+        events: ['after insert', 'after update'],
+        triggerObject: 'StdObj',
+      },
+    }),
+    makeNode({
+      id: TRIG_AFTER_BOTH_2,
+      type: 'ApexTrigger',
+      apiName: 'StdObjTriggerB',
+      properties: {
+        status: 'Active',
+        events: ['after insert', 'after update'],
+        triggerObject: 'StdObj',
+      },
+    }),
+    makeNode({
+      id: TRIG_ALL_EVENTS,
+      type: 'ApexTrigger',
+      apiName: 'StdObjTriggerC',
+      properties: {
+        status: 'Active',
+        events: [
+          'before delete', 'before insert', 'before update',
+          'after delete', 'after insert', 'after update',
+        ],
+        triggerObject: 'StdObj',
+      },
+    }),
+    // Inactive trigger — status: Inactive. Must be excluded from active steps
+    // and disclosed in inactiveConfigured (mirrors autoCreateStudentAccountTrigger).
+    makeNode({
+      id: TRIG_INACTIVE,
+      type: 'ApexTrigger',
+      apiName: 'StdObjInactiveTrigger',
+      properties: {
+        status: 'Inactive',
+        events: ['after insert'],
+        triggerObject: 'StdObj',
+      },
+    }),
+    makeNode({
+      id: FLOW_AS_CREATE_UPDATE,
+      type: 'Flow',
+      apiName: 'StdObjAfterSaveCreateUpdate',
+      properties: { status: 'Active' },
+    }),
+    makeNode({
+      id: FLOW_AS_UPDATE_ONLY,
+      type: 'Flow',
+      apiName: 'StdObjAfterSaveUpdateOnly',
+      properties: { status: 'Active' },
+    }),
+    makeNode({
+      id: FLOW_AS_CREATE_ONLY,
+      type: 'Flow',
+      apiName: 'StdObjAfterSaveCreateOnly',
+      properties: { status: 'Active' },
+    }),
+    makeNode({
+      id: FLOW_AS_OBSOLETE,
+      type: 'Flow',
+      apiName: 'StdObjAfterSaveObsolete',
+      properties: { status: 'Obsolete' },
+    }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: TRIG_AFTER_BOTH,
+      toId: STDOBJ,
+      edgeType: 'triggersOn',
+      properties: { events: ['after insert', 'after update'] },
+    }),
+    makeEdge({
+      fromId: TRIG_AFTER_BOTH_2,
+      toId: STDOBJ,
+      edgeType: 'triggersOn',
+      properties: { events: ['after insert', 'after update'] },
+    }),
+    makeEdge({
+      fromId: TRIG_ALL_EVENTS,
+      toId: STDOBJ,
+      edgeType: 'triggersOn',
+      properties: {
+        events: [
+          'before delete', 'before insert', 'before update',
+          'after delete', 'after insert', 'after update',
+        ],
+      },
+    }),
+    makeEdge({
+      fromId: TRIG_INACTIVE,
+      toId: STDOBJ,
+      edgeType: 'triggersOn',
+      properties: { events: ['after insert'] },
+    }),
+    makeEdge({
+      fromId: FLOW_AS_CREATE_UPDATE,
+      toId: STDOBJ,
+      edgeType: 'triggersOn',
+      properties: { triggerType: 'RecordAfterSave', recordTriggerType: 'CreateAndUpdate' },
+    }),
+    makeEdge({
+      fromId: FLOW_AS_UPDATE_ONLY,
+      toId: STDOBJ,
+      edgeType: 'triggersOn',
+      properties: { triggerType: 'RecordAfterSave', recordTriggerType: 'Update' },
+    }),
+    makeEdge({
+      fromId: FLOW_AS_CREATE_ONLY,
+      toId: STDOBJ,
+      edgeType: 'triggersOn',
+      properties: { triggerType: 'RecordAfterSave', recordTriggerType: 'Create' },
+    }),
+    makeEdge({
+      fromId: FLOW_AS_OBSOLETE,
+      toId: STDOBJ,
+      edgeType: 'triggersOn',
+      properties: { triggerType: 'RecordAfterSave', recordTriggerType: 'CreateAndUpdate' },
+    }),
+  ],
+};
+
 beforeAll(async () => {
   tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-whos-'));
   const dbPath = join(tempDir, 'whos.db');
@@ -444,6 +605,7 @@ beforeAll(async () => {
     nodelessSeed,
     inactiveFlowSeed,
     absentRecordTriggerTypeSeed,
+    realOrgShapeSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -909,6 +1071,83 @@ describe('whatHappensOnSaveHandler', () => {
     const conditionalCount = soe.filter((s) => s.conditional !== undefined).length;
     expect(summary.conditionalSteps).toBe(conditionalCount);
     expect(summary.conditionalSteps).toBe(2); // ValidationRule + WorkflowRule.
+  });
+
+  // =========================================================================
+  // Real-org-shape Contact fixture tests (Seed 7).
+  // These cover the fixture-vs-reality gap left after commit 9b3c8a15:
+  //   • An Inactive ApexTrigger (status: Inactive) must be excluded from the
+  //     active SOE steps and disclosed in inactiveConfigured.
+  //   • Active after-save flows with recordTriggerType: Create are excluded
+  //     from the update event (only CreateAndUpdate + Update fire on update).
+  //   • The after-triggers and post-save-flows phaseCounts are exact.
+  // =========================================================================
+
+  it('real-org-shape: excludes Inactive ApexTrigger from active after-triggers and discloses it', async () => {
+    // StdObj insert: both active triggers with after insert fire; the Inactive
+    // trigger also has after insert but MUST be excluded and disclosed.
+    // Without the ApexTrigger status check in isActiveSoeFirer the inactive
+    // trigger inflates after-triggers from 3 to 4.
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'StdObj',
+      event: 'insert',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { soe, summary, inactiveConfigured } = result.value.data;
+
+    const afterTrigSteps = soe.filter((s) => s.phase === 'after-triggers');
+    // 3 active triggers have after insert: TriggerA, TriggerB, TriggerC.
+    // StdObjInactiveTrigger (Inactive) must NOT appear.
+    expect(summary.phaseCounts['after-triggers']).toBe(3);
+    expect(afterTrigSteps.map((s) => s.componentId).sort()).toEqual(
+      [TRIG_AFTER_BOTH, TRIG_AFTER_BOTH_2, TRIG_ALL_EVENTS].sort(),
+    );
+    expect(afterTrigSteps.some((s) => s.componentId === TRIG_INACTIVE)).toBe(false);
+
+    // The inactive trigger must be disclosed in inactiveConfigured.
+    const inactiveTrigEntry = inactiveConfigured?.find(
+      (ic) => ic.componentId === TRIG_INACTIVE,
+    );
+    expect(inactiveTrigEntry).toBeDefined();
+    expect(inactiveTrigEntry?.inactiveReason).toBe('status: Inactive');
+  });
+
+  it('real-org-shape: after-update event enumerates correct after-triggers and post-save-flows counts', async () => {
+    // StdObj update:
+    //   after-triggers: TriggerA (after update), TriggerB (after update), TriggerC (after update) = 3.
+    //   StdObjInactiveTrigger (Inactive) is excluded.
+    //   post-save-flows: CreateAndUpdate (fires on update) + UpdateOnly = 2.
+    //   CreateOnly does NOT match update. Obsolete flow is inactive.
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'StdObj',
+      event: 'update',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { summary, inactiveConfigured } = result.value.data;
+
+    expect(summary.phaseCounts['after-triggers']).toBe(3);
+    expect(summary.phaseCounts['post-save-flows']).toBe(2);
+
+    // The inactive trigger and obsolete flow are both disclosed.
+    const ids = inactiveConfigured?.map((ic) => ic.componentId) ?? [];
+    expect(ids).toContain(TRIG_INACTIVE);
+    expect(ids).toContain(FLOW_AS_OBSOLETE);
+  });
+
+  it('real-org-shape: Inactive ApexTrigger inactiveReason is "status: Inactive"', async () => {
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'StdObj',
+      event: 'update',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const inactive = result.value.data.inactiveConfigured ?? [];
+    const entry = inactive.find((ic) => ic.componentId === TRIG_INACTIVE);
+    expect(entry).toBeDefined();
+    expect(entry?.componentType).toBe('ApexTrigger');
+    expect(entry?.inactiveReason).toBe('status: Inactive');
   });
 });
 
