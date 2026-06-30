@@ -226,6 +226,61 @@ export type SoePhase =
   | 'post-save-async';
 
 /**
+ * The automation phases (every {@link SoePhase} except the `save`
+ * placeholder, which is the platform's own database write, not an
+ * org-configured automation component). Frozen in documented SOE
+ * order so a per-phase count map iterates in firing sequence.
+ */
+const AUTOMATION_PHASES: readonly Exclude<SoePhase, 'save'>[] = [
+  'before-save-flows',
+  'pre-save-triggers',
+  'pre-save-validation',
+  'after-triggers',
+  'post-save-assignment',
+  'post-save-workflows',
+  'post-save-flows',
+  'post-save-approval',
+  'post-save-async',
+];
+
+/**
+ * Grounded per-phase active-component counts for a composed SOE.
+ *
+ * Each key is an automation phase (the `save` placeholder is excluded —
+ * it is the platform's own write, not org automation); each value is
+ * the number of ACTIVE components emitted into that phase for this
+ * object + event. This is the count that answers "how many distinct
+ * automation components fire across triggers, record-triggered flows,
+ * and workflow rules, and in what order" directly from the response,
+ * rather than forcing the caller to re-bucket the flat `soe` array and
+ * subtract the placeholder. Inactive automation is NOT counted here —
+ * it is disclosed separately in `inactiveConfigured`, so a deactivation
+ * delta is `phaseCounts` before vs after a component is turned off.
+ */
+export type SoePhaseCounts = Readonly<
+  Record<Exclude<SoePhase, 'save'>, number>
+>;
+
+/**
+ * Tally the active components emitted into each automation phase. The
+ * `save` placeholder is never counted (it is not org automation). Phases
+ * with zero emitted steps are present with a `0` so the count map is a
+ * complete, stable shape every caller can index.
+ */
+export const tallyPhaseCounts = (
+  soe: readonly { readonly phase: SoePhase }[],
+): SoePhaseCounts => {
+  const counts = Object.fromEntries(
+    AUTOMATION_PHASES.map((p) => [p, 0]),
+  ) as Record<Exclude<SoePhase, 'save'>, number>;
+  for (const step of soe) {
+    if (step.phase === 'save') continue;
+    counts[step.phase] += 1;
+  }
+  return counts;
+};
+
+/**
  * One step in the SOE chain. `stepIndex` is the 0-based position
  * across all phases (preserved across the response so callers can
  * cross-reference); `componentId` / `componentType` / `apiName`
@@ -273,8 +328,23 @@ export interface WhatHappensOnSaveOutput {
   readonly soe: readonly SoeStep[];
   readonly summary: {
     readonly totalSteps: number;
+    /**
+     * Count of ACTIVE org-configured automation components that fire on
+     * this object + event — `totalSteps` minus the one `save` placeholder.
+     * The grounded answer to "how many distinct automation components
+     * fire", so a caller need not re-derive it from `soe`.
+     */
+    readonly activeComponents: number;
     readonly conditionalSteps: number;
     readonly asyncFanOut: number;
+    /**
+     * Per-phase active-component counts, in documented SOE order. Answers
+     * the count/ordering question directly (e.g. how many before-save
+     * flows vs before-triggers vs after-triggers vs after-save flows).
+     * Inactive automation is excluded — it is in `inactiveConfigured`, so
+     * a deactivation delta is this map before vs after the change.
+     */
+    readonly phaseCounts: SoePhaseCounts;
   };
   readonly disclosure: string;
   /**
@@ -962,6 +1032,10 @@ export const whatHappensOnSaveHandler = async (
 
   const conditionalCount = soe.filter((s) => s.conditional !== undefined).length;
   const inactiveConfigured = sortedInactiveConfigured(inactiveCollector);
+  const phaseCounts = tallyPhaseCounts(soe);
+  // The save placeholder is the only non-automation step; everything else is an
+  // active org-configured component that fires.
+  const activeComponents = soe.filter((s) => s.phase !== 'save').length;
 
   const data: {
     objectApiName: string;
@@ -971,8 +1045,10 @@ export const whatHappensOnSaveHandler = async (
     soe: readonly SoeStep[];
     summary: {
       totalSteps: number;
+      activeComponents: number;
       conditionalSteps: number;
       asyncFanOut: number;
+      phaseCounts: SoePhaseCounts;
     };
     disclosure: string;
     inactiveConfigured?: readonly InactiveConfiguredFirer[];
@@ -985,8 +1061,10 @@ export const whatHappensOnSaveHandler = async (
     soe,
     summary: {
       totalSteps: soe.length,
+      activeComponents,
       conditionalSteps: conditionalCount,
       asyncFanOut,
+      phaseCounts,
     },
     disclosure: composeSoeDisclosure(DISCLOSURE, objectModeled),
     ...(inactiveConfigured.length > 0 ? { inactiveConfigured } : {}),
