@@ -1099,10 +1099,20 @@ const LIVE_COUNT_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze
   type: 'object',
   // Either `soql` (a SELECT COUNT() query) or `objectApiName` (count all rows).
   // The one-of requirement is enforced in the handler, not the JSON schema, so
-  // the advertised shape stays simple for clients.
+  // the advertised shape stays simple for clients. `additionalProperties:false`
+  // matches the runtime `.strict()` schema so a filter passed under an
+  // unrecognized key (e.g. `filter`/`where`) is rejected, never silently dropped
+  // into an unfiltered full-object count.
+  additionalProperties: false,
   properties: {
     soql: { type: 'string', minLength: 1 },
     objectApiName: { type: 'string', minLength: 1 },
+    whereClause: {
+      type: 'string',
+      minLength: 1,
+      description:
+        'Filter applied only when counting via objectApiName; becomes the WHERE of SELECT COUNT() FROM <object>. Cannot be combined with a full soql.',
+    },
     ...LIVE_ENABLED_PROPERTY,
   },
 });

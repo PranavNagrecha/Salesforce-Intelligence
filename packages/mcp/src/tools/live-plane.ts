@@ -44,7 +44,9 @@ import { LIVE_PLANE_DISCLOSURE, nodeExecFile, redactSecrets } from './live-exec.
 import { runLiveQuery, runLiveRest } from './live-session.js';
 import {
   scanSoqlForPicklistMismatches,
+  scanSoqlForValidationGaps,
   type PicklistLiteralMismatch,
+  type PicklistValidationGap,
 } from './picklist-literal-check.js';
 
 // Re-export the leaf primitives so every existing import path that pulls them
@@ -205,14 +207,30 @@ export const liveDescribeHandler = async (
 // sfi.live_count
 // ---------------------------------------------------------------------------
 
-export const liveCountInputSchema = liveEnabledSchema.extend({
-  // Either `soql` (a SELECT COUNT() query) OR `objectApiName` (count every row
-  // of that object). Both optional at the schema level; the handler requires
-  // exactly one and turns objectApiName into `SELECT COUNT() FROM <object>`.
-  soql: z.string().min(1).optional(),
-  objectApiName: z.string().min(1).optional(),
-  orgAlias: z.string().min(1).optional(),
-});
+export const liveCountInputSchema = liveEnabledSchema
+  .extend({
+    // Either `soql` (a SELECT COUNT() query) OR `objectApiName` (count every row
+    // of that object). Both optional at the schema level; the handler requires
+    // exactly one and turns objectApiName into `SELECT COUNT() FROM <object>`.
+    soql: z.string().min(1).optional(),
+    objectApiName: z.string().min(1).optional(),
+    /**
+     * Optional filter applied ONLY when counting via `objectApiName`; becomes
+     * the `WHERE <whereClause>` of the built `SELECT COUNT() FROM <object>`. Use
+     * it instead of hand-building `soql` for a simple filtered count. It is the
+     * caller's responsibility to write valid SOQL here. It MUST NOT be combined
+     * with a full `soql` (which already carries its own WHERE) — see the handler.
+     */
+    whereClause: z.string().min(1).optional(),
+    orgAlias: z.string().min(1).optional(),
+  })
+  // STRICT: reject unrecognized keys. A caller passing a filter under a NAME the
+  // tool does not accept (e.g. `filter`, `where`, `criteria`) must get a loud
+  // error — not have the param silently stripped by Zod and then run an
+  // unfiltered `SELECT COUNT() FROM <object>` that returns the FULL row count as
+  // if it were the filtered answer (the live-count "silently ignored a filter"
+  // bug). `.strict()` turns the dropped param into a surfaced invalid-query.
+  .strict();
 
 export type LiveCountInput = z.infer<typeof liveCountInputSchema>;
 
@@ -221,11 +239,26 @@ const OBJECT_API_NAME_RE = /^[A-Za-z][A-Za-z0-9_]*$/;
 
 /**
  * Resolve the COUNT() SOQL to run: the caller's `soql` verbatim, or one built
- * from `objectApiName`. Errors when neither is supplied, or when a supplied
- * objectApiName isn't a safe API name (guards SOQL interpolation).
+ * from `objectApiName` (optionally with `whereClause`). Errors when neither is
+ * supplied, when a supplied objectApiName isn't a safe API name (guards SOQL
+ * interpolation), or when `whereClause` is given alongside a full `soql` (where
+ * honoring it is ambiguous, so we refuse rather than silently drop the filter).
  */
 const resolveCountSoql = (input: LiveCountInput): Result<string, McpError> => {
-  if (input.soql !== undefined) return ok(input.soql);
+  if (input.soql !== undefined) {
+    if (input.whereClause !== undefined) {
+      // The filter would be silently dropped (soql already has its own WHERE).
+      // Refuse loudly per "either honor it or error".
+      return err({
+        kind: 'invalid-query',
+        message:
+          'live_count: `whereClause` applies only when counting via `objectApiName`; ' +
+          'it cannot be combined with a full `soql` (put the filter inside the soql WHERE instead).',
+        path: 'whereClause',
+      });
+    }
+    return ok(input.soql);
+  }
   if (input.objectApiName !== undefined) {
     if (!OBJECT_API_NAME_RE.test(input.objectApiName)) {
       return err({
@@ -234,7 +267,13 @@ const resolveCountSoql = (input: LiveCountInput): Result<string, McpError> => {
         path: 'objectApiName',
       });
     }
-    return ok(`SELECT COUNT() FROM ${input.objectApiName}`);
+    const base = `SELECT COUNT() FROM ${input.objectApiName}`;
+    // Honor the filter: it MUST appear in the emitted SOQL, never be dropped.
+    return ok(
+      input.whereClause !== undefined
+        ? `${base} WHERE ${input.whereClause}`
+        : base,
+    );
   }
   return err({
     kind: 'invalid-query',
@@ -257,6 +296,14 @@ export interface LiveCountOutput {
    * reads the artifact count as ground truth. Absent when every literal matches.
    */
   readonly picklistMismatches?: readonly PicklistLiteralMismatch[];
+  /**
+   * Present when a WHERE equality field could NOT be picklist-pre-validated
+   * because it is absent from the vault (a managed-package field the refresh did
+   * not retrieve, or a relationship path). When present, a count of 0 must NOT
+   * be read as "zero records exist" — the literal might be an undetected value
+   * mismatch. Absent when every equality field was resolvable offline.
+   */
+  readonly picklistValidationGaps?: readonly PicklistValidationGap[];
 }
 
 const assertCountSoql = (soql: string): Result<string, McpError> => {
@@ -277,37 +324,63 @@ const fromObjectOf = (soql: string): string | null => {
   return m === null || m[1] === undefined ? null : m[1];
 };
 
+/** Outcome of the offline picklist pre-validation pass for one live SOQL. */
+interface PicklistValidationResult {
+  /** Literals that match no DEFINED picklist value on a vault-KNOWN field. */
+  readonly mismatches: readonly PicklistLiteralMismatch[];
+  /** Equality fields the vault does NOT know (managed-package / not-modeled /
+   *  relationship path), so pre-validation could not run — a 0 there is not
+   *  proof those records do not exist. */
+  readonly validationGaps: readonly PicklistValidationGap[];
+}
+
+const NO_VALIDATION: PicklistValidationResult = Object.freeze({
+  mismatches: [],
+  validationGaps: [],
+});
+
 /**
  * Pre-validate the WHERE picklist literals in a live SOQL against the vault's
  * known picklist values. A literal that matches no DEFINED value on its field
  * makes a determinate 0 count (or empty sample) a VALUE MISMATCH artifact, not
  * evidence of zero matching records — so we surface the real values and
  * near-match suggestions as disclosures. Offline + best-effort: only fields on
- * the statement's single FROM object are checked (no relationship traversal),
- * and a field absent from the vault or without an inline picklist definition is
- * silently skipped. Never blocks the query; only augments the result.
+ * the statement's single FROM object are checked (no relationship traversal).
+ *
+ * Crucially, a field ABSENT from the vault (a managed-package field the refresh
+ * did not retrieve, e.g. `hed__Application_Status__c`, or a relationship path)
+ * is NOT silently skipped — it is reported as a validation GAP so the caller
+ * discloses that picklist pre-validation was unavailable rather than letting a
+ * 0 count read as ground truth. Never blocks the query; only augments the result.
  */
 const collectPicklistMismatches = async (
   ctx: Context,
   soql: string,
-): Promise<readonly PicklistLiteralMismatch[]> => {
+): Promise<PicklistValidationResult> => {
   // No graph wired (e.g. a count-only context) ⇒ nothing to validate against.
-  if (ctx.graph === undefined || ctx.graph === null) return [];
+  if (ctx.graph === undefined || ctx.graph === null) return NO_VALIDATION;
   const fromObject = fromObjectOf(soql);
-  if (fromObject === null) return [];
+  if (fromObject === null) return NO_VALIDATION;
   return scanSoqlForPicklistMismatchesSync(ctx, soql, fromObject);
 };
 
 /**
- * Synchronous-friendly wrapper: gather every referenced field's picklist values
- * up front (one graph read per distinct field), then run the pure scanner.
+ * Synchronous-friendly wrapper: gather every referenced field's vault node up
+ * front (one graph read per distinct field), then run the pure scanners. A
+ * direct field present in the vault feeds the mismatch scanner; a direct field
+ * absent from the vault (or a relationship path, never resolvable offline) feeds
+ * the validation-gap scanner.
  */
 const scanSoqlForPicklistMismatchesSync = async (
   ctx: Context,
   soql: string,
   fromObject: string,
-): Promise<readonly PicklistLiteralMismatch[]> => {
-  const cache = new Map<string, unknown>();
+): Promise<PicklistValidationResult> => {
+  const picklistCache = new Map<string, unknown>();
+  // Which direct fields the vault KNOWS (node exists), regardless of whether
+  // they carry an inline picklist definition. A known non-picklist field is a
+  // benign skip; an UNKNOWN field is a pre-validation gap to disclose.
+  const knownFields = new Set<string>();
   // Collect each referenced direct field once (skip relationship paths — only a
   // direct `Object.Field` picklist can be resolved from the vault here).
   const fieldRefs = new Set<string>();
@@ -318,11 +391,21 @@ const scanSoqlForPicklistMismatchesSync = async (
   }
   for (const field of fieldRefs) {
     const r = await getNodeById(ctx.graph, `CustomField:${fromObject}.${field}`);
-    cache.set(field, r.ok && r.value ? r.value.properties['picklistValues'] : null);
+    const present = r.ok && r.value !== null;
+    if (present) {
+      knownFields.add(field);
+      picklistCache.set(field, r.value!.properties['picklistValues']);
+    }
   }
-  return scanSoqlForPicklistMismatches(soql, (ref) =>
-    ref.includes('.') ? null : cache.get(ref) ?? null,
+  const mismatches = scanSoqlForPicklistMismatches(soql, (ref) =>
+    ref.includes('.') ? null : picklistCache.get(ref) ?? null,
   );
+  // A relationship path is never resolvable offline; a direct field is a gap
+  // only when its vault node is absent (managed-package / not-modeled).
+  const validationGaps = scanSoqlForValidationGaps(soql, (ref) =>
+    ref.includes('.') ? false : knownFields.has(ref),
+  );
+  return { mismatches, validationGaps };
 };
 
 export const liveCountHandler = async (
@@ -352,22 +435,30 @@ export const liveCountHandler = async (
     payload.result?.totalSize ??
     payload.result?.records?.[0]?.expr0 ??
     0;
-  const mismatches = await collectPicklistMismatches(ctx, soqlCheck.value);
+  const { mismatches, validationGaps } = await collectPicklistMismatches(
+    ctx,
+    soqlCheck.value,
+  );
   const countData = {
     count,
     soql: soqlCheck.value,
     trust: liveTrust(queriedAt),
   };
   const baseRendered = renderLiveCountMarkdown(countData);
+  const caveats = [
+    ...mismatches.map((m) => `> ⚠️ ${m.disclosure}`),
+    ...validationGaps.map((g) => `> ⚠️ ${g.disclosure}`),
+  ];
   const rendered =
-    mismatches.length > 0
-      ? `${baseRendered}\n\n${mismatches.map((m) => `> ⚠️ ${m.disclosure}`).join('\n')}`
-      : baseRendered;
+    caveats.length > 0 ? `${baseRendered}\n\n${caveats.join('\n')}` : baseRendered;
   return ok({
     data: {
       ...countData,
       rendered,
       ...(mismatches.length > 0 ? { picklistMismatches: mismatches } : {}),
+      ...(validationGaps.length > 0
+        ? { picklistValidationGaps: validationGaps }
+        : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
@@ -594,6 +685,13 @@ export interface LiveSampleOutput {
    * literal matches. See {@link LiveCountOutput.picklistMismatches}.
    */
   readonly picklistMismatches?: readonly PicklistLiteralMismatch[];
+  /**
+   * Present when a WHERE equality field could NOT be picklist-pre-validated
+   * because it is absent from the vault (a managed-package field the refresh did
+   * not retrieve, or a relationship path). An empty sample then is NOT proof
+   * those records do not exist. See {@link LiveCountOutput.picklistValidationGaps}.
+   */
+  readonly picklistValidationGaps?: readonly PicklistValidationGap[];
 }
 
 const capSampleSoql = (
@@ -641,7 +739,7 @@ export const liveSampleHandler = async (
     records = records.slice(0, Math.floor(records.length * 0.8));
     byteTrimmed = true;
   }
-  const mismatches = await collectPicklistMismatches(ctx, soql);
+  const { mismatches, validationGaps } = await collectPicklistMismatches(ctx, soql);
   const data: LiveSampleOutput = {
     records,
     soql,
@@ -657,6 +755,9 @@ export const liveSampleHandler = async (
         }
       : {}),
     ...(mismatches.length > 0 ? { picklistMismatches: mismatches } : {}),
+    ...(validationGaps.length > 0
+      ? { picklistValidationGaps: validationGaps }
+      : {}),
   };
   return ok({
     data,
