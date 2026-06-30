@@ -108,6 +108,7 @@ describe('extractGlobalValueSet', () => {
           masterLabel: 'Placeholder Set',
           description: null,
           sorted: false,
+          restricted: false,
           valueCount: 0,
           values: [],
         });
@@ -262,6 +263,78 @@ describe('extractGlobalValueSet', () => {
         await rm(dir, { recursive: true, force: true });
       }
     });
+  });
+});
+
+describe('restricted property (CR-GVS-RESTRICTED)', () => {
+  it('defaults restricted to false when <restricted> is absent — real Status GVS shape', async () => {
+    // Real org shape: Status.globalValueSet-meta.xml has no <restricted> element.
+    // Salesforce documents absence as equivalent to false (unrestricted).
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<GlobalValueSet xmlns="http://soap.sforce.com/2006/04/metadata">
+    <customValue>
+        <fullName>Deferred Offer</fullName>
+        <default>false</default>
+        <label>Deferred Offer</label>
+    </customValue>
+    <customValue>
+        <fullName>Working</fullName>
+        <default>false</default>
+        <label>Working</label>
+    </customValue>
+    <masterLabel>Status</masterLabel>
+    <sorted>false</sorted>
+</GlobalValueSet>`;
+    const { dir, path } = await writeTempXml('Status.globalValueSet-meta.xml', xml);
+    try {
+      const result = await extractGlobalValueSet(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const node = result.value.nodes[0];
+      expect(node).toBeDefined();
+      if (!node) return;
+      expect(node.properties['restricted']).toBe(false);
+      expect(node.properties['sorted']).toBe(false);
+      expect(node.properties['valueCount']).toBe(2);
+      expect(node.properties['values']).toContain('Deferred Offer');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reads restricted=true when <restricted>true</restricted> is present', async () => {
+    // Some orgs explicitly mark a GVS as restricted so that only defined
+    // values may be assigned to fields that reference it.
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<GlobalValueSet xmlns="http://soap.sforce.com/2006/04/metadata">
+    <customValue>
+        <fullName>Active</fullName>
+        <default>true</default>
+        <label>Active</label>
+    </customValue>
+    <customValue>
+        <fullName>Inactive</fullName>
+        <default>false</default>
+        <label>Inactive</label>
+    </customValue>
+    <masterLabel>Account Tier</masterLabel>
+    <restricted>true</restricted>
+    <sorted>false</sorted>
+</GlobalValueSet>`;
+    const { dir, path } = await writeTempXml('Account_Tier.globalValueSet-meta.xml', xml);
+    try {
+      const result = await extractGlobalValueSet(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const node = result.value.nodes[0];
+      expect(node).toBeDefined();
+      if (!node) return;
+      expect(node.properties['restricted']).toBe(true);
+      expect(node.properties['masterLabel']).toBe('Account Tier');
+      expect(node.properties['valueCount']).toBe(2);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
