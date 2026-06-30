@@ -18,7 +18,11 @@ import {
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 
 import type { Context } from '../../src/server.js';
-import { liveCountHandler, liveSampleHandler } from '../../src/tools/live-plane.js';
+import {
+  liveCountHandler,
+  liveCountInputSchema,
+  liveSampleHandler,
+} from '../../src/tools/live-plane.js';
 import { resetLiveSession } from '../../src/tools/live-session.js';
 
 const MANIFEST: VaultManifest = {
@@ -171,5 +175,104 @@ describe('live_sample picklist-literal mismatch disclosure', () => {
     expect(r.value.data.picklistMismatches?.[0]?.suggestions).toContain(
       'Withdrawn Application',
     );
+  });
+});
+
+// A WHERE field the vault does NOT model (managed-package field the refresh did
+// not retrieve) cannot be pre-validated offline — a 0 there must be disclosed as
+// "could not pre-validate", not asserted as zero records.
+describe('live_count picklist pre-validation GAP (managed-package field absent from vault)', () => {
+  it('discloses that pre-validation was unavailable instead of asserting zero records', async () => {
+    const r = await liveCountHandler(
+      ctx,
+      {
+        liveEnabled: true,
+        // hed__Application_Status__c is NOT a node in the seed vault — the
+        // managed-package field-not-in-vault case.
+        soql: "SELECT COUNT() FROM AcmeApplication__c WHERE hed__Application_Status__c = 'Withdrawn'",
+      },
+      zeroCountExec,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.count).toBe(0);
+    // No mismatch can be detected (field unknown), but a GAP must be surfaced.
+    expect(r.value.data.picklistMismatches).toBeUndefined();
+    expect(r.value.data.picklistValidationGaps).toBeDefined();
+    expect(r.value.data.picklistValidationGaps?.[0]?.field).toBe(
+      'hed__Application_Status__c',
+    );
+    expect(r.value.data.rendered).toMatch(/could not pre-validate/i);
+    expect(r.value.data.rendered).toMatch(/not in the vault/i);
+  });
+
+  it('does NOT add a gap when the field IS modeled in the vault', async () => {
+    const r = await liveCountHandler(
+      ctx,
+      {
+        liveEnabled: true,
+        soql: "SELECT COUNT() FROM AcmeApplication__c WHERE Status__c = 'Submitted'",
+      },
+      zeroCountExec,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.picklistValidationGaps).toBeUndefined();
+  });
+});
+
+// Part (1): a caller-supplied filter must actually appear in the emitted SOQL.
+describe('live_count whereClause honoring (filter must reach the SOQL)', () => {
+  it('appends whereClause to the objectApiName-built SOQL (not an unfiltered full count)', async () => {
+    let seenSoql = '';
+    const capExec: ExecCommand = async (_cmd, args) => {
+      const i = args.indexOf('--query');
+      seenSoql = i >= 0 ? String(args[i + 1]) : '';
+      return {
+        stdout: JSON.stringify({ result: { totalSize: 3, records: [{ expr0: 3 }] } }),
+        stderr: '',
+      };
+    };
+    const r = await liveCountHandler(
+      ctx,
+      {
+        liveEnabled: true,
+        objectApiName: 'AcmeApplication__c',
+        whereClause: "Status__c = 'Submitted'",
+      },
+      capExec,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(seenSoql).toBe(
+      "SELECT COUNT() FROM AcmeApplication__c WHERE Status__c = 'Submitted'",
+    );
+    expect(r.value.data.soql).toContain('WHERE');
+  });
+
+  it('errors rather than silently dropping whereClause when a full soql is also given', async () => {
+    const r = await liveCountHandler(
+      ctx,
+      {
+        liveEnabled: true,
+        soql: 'SELECT COUNT() FROM AcmeApplication__c',
+        whereClause: "Status__c = 'Submitted'",
+      },
+      zeroCountExec,
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.message).toMatch(/whereClause/);
+  });
+
+  it('rejects a filter passed under an UNRECOGNIZED key (strict schema) instead of running unfiltered', () => {
+    // Zod default behavior would strip `filter`, then the handler would run an
+    // unfiltered SELECT COUNT() FROM <object> — the silent-filter-drop bug.
+    const parsed = liveCountInputSchema.safeParse({
+      liveEnabled: true,
+      objectApiName: 'AcmeApplication__c',
+      filter: "Status__c = 'Submitted'",
+    });
+    expect(parsed.success).toBe(false);
   });
 });

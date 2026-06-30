@@ -200,3 +200,51 @@ export const scanSoqlForPicklistMismatches = (
   }
   return out;
 };
+
+/** Why an equality-filtered field could not be picklist-pre-validated offline. */
+export interface PicklistValidationGap {
+  /** The WHERE equality field that could not be validated against the vault. */
+  readonly field: string;
+  /** The literal(s) compared against it (for the caveat wording). */
+  readonly literals: readonly string[];
+  /** A ready-to-surface, single-sentence honesty disclosure. */
+  readonly disclosure: string;
+}
+
+/**
+ * Find WHERE equality fields whose vault node is ABSENT, so picklist
+ * pre-validation could not run for them. This is the managed-package /
+ * not-in-vault case (e.g. an `hed__*` field the refresh never retrieved): the
+ * scanner cannot confirm the literal is a defined picklist value, so a 0 count
+ * (or empty sample) must NOT be asserted as "zero records exist" — it might be
+ * an undetected VALUE MISMATCH. The caller supplies a `fieldKnown` predicate
+ * (e.g. a graph node read): `true` when the CustomField node exists in the
+ * vault, `false` when it is absent. Relationship-path fields (`Foo__r.Bar`)
+ * cannot be resolved offline either and are reported as gaps.
+ *
+ * Mutually exclusive with {@link scanSoqlForPicklistMismatches}: a field the
+ * vault KNOWS is validated there (matched or mismatched); a field the vault does
+ * NOT know is reported here. A field present in the vault but lacking an inline
+ * picklist definition is neither — it is a non-picklist field, silently fine.
+ */
+export const scanSoqlForValidationGaps = (
+  soql: string,
+  fieldKnown: (fieldRef: string) => boolean,
+): readonly PicklistValidationGap[] => {
+  const out: PicklistValidationGap[] = [];
+  for (const eq of extractEqualityLiterals(soql)) {
+    if (fieldKnown(eq.field)) continue;
+    const litList = eq.literals.map((l) => `'${l}'`).join(', ');
+    out.push({
+      field: eq.field,
+      literals: eq.literals,
+      disclosure:
+        `Could not pre-validate the WHERE literal ${litList} on ${eq.field}: ` +
+        `that field is not in the vault (e.g. a managed-package field the refresh ` +
+        `did not retrieve, or a relationship path). If it is a picklist, a count/sample ` +
+        `of 0 may be a VALUE MISMATCH rather than proof those records do not exist — ` +
+        `verify the exact picklist value in the org (or run /sfi-refresh to model the field).`,
+    });
+  }
+  return out;
+};
