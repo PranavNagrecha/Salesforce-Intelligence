@@ -388,6 +388,42 @@ const deriveMetadataCountArgs = (
     if (parentId !== undefined) return { type: 'ValidationRule', parentId };
     return { type: 'ValidationRule' };
   }
+  if (/\bhow\s+many\b.*\b(custom\s+)?fields?\b/.test(q)) {
+    const objectApi = deriveObjectApiFromQuestion(q, question);
+    if (objectApi !== undefined) return { type: 'CustomField', parentId: `CustomObject:${objectApi}` };
+    return { type: 'CustomField' };
+  }
+  if (/\bhow\s+many\b.*\blist\s+views?\b/.test(q)) {
+    const objectApi = deriveObjectApiFromQuestion(q, question);
+    if (objectApi !== undefined) return { type: 'ListView', parentId: `CustomObject:${objectApi}` };
+    return { type: 'ListView' };
+  }
+  if (/\b(page\s+)?layouts?\b/.test(q) && /\b(exist|how\s+many|what|which)\b/.test(q)) {
+    const objectApi = deriveObjectApiFromQuestion(q, question);
+    if (objectApi !== undefined) return { type: 'Layout', parentId: `CustomObject:${objectApi}` };
+  }
+  if (/\bcompact\s+layouts?\b/.test(q)) {
+    const objectApi = deriveObjectApiFromQuestion(q, question);
+    if (objectApi !== undefined) return { type: 'CompactLayout', parentId: `CustomObject:${objectApi}` };
+  }
+  if (/\bhow\s+many\b.*\b(apex\s+)?triggers?\b/.test(q)) {
+    const objectApi = deriveObjectApiFromQuestion(q, question);
+    if (objectApi !== undefined) return { type: 'ApexTrigger', parentId: `CustomObject:${objectApi}` };
+    if (/\bstandard\s+objects?\b/.test(q)) return { type: 'ApexTrigger' };
+  }
+  if (/\bhow\s+many\b.*\brecord\s+types?\b/.test(q)) {
+    const objectApi = deriveObjectApiFromQuestion(q, question);
+    if (objectApi !== undefined) return { type: 'RecordType', parentId: `CustomObject:${objectApi}` };
+  }
+  if (/\bquick\s+actions?\b/.test(q)) {
+    const objectApi = deriveObjectApiFromQuestion(q, question);
+    if (objectApi !== undefined) return { type: 'QuickAction', parentId: `CustomObject:${objectApi}` };
+  }
+  if (/\b(web\s+links?|custom\s+buttons?)\b/.test(q)) {
+    const objectApi = deriveObjectApiFromQuestion(q, question);
+    if (objectApi !== undefined) return { type: 'WebLink', parentId: `CustomObject:${objectApi}` };
+    return { type: 'WebLink' };
+  }
   if (!/\bflows?\b/.test(q)) return undefined;
   const triggerObject = deriveObjectApiFromQuestion(q, question);
   const recordTriggered =
@@ -1665,6 +1701,9 @@ const RULES: readonly Rule[] = [
     patterns: [
       /\bwhat\s+happens\s+when\b.*\b(becomes?|turns?|changes?\s+to|is\s+set\s+to|reaches?)\b/,
       /\bwhat\s+happens\s+when\b.*\b(closed\s+won|closed\s+lost|converted|approved|activated)\b/,
+      /\b(value.?coupl\w*|coupled)\b.*\b(StageName|Closed Won|stage|transition)\b/,
+      /\bStageName\b.*\b(Closed Won|closed won|transition)\b/,
+      /\bClosed Won\b.*\b(automation|flow|trigger|coupl)\b/,
     ],
   },
   {
@@ -2246,9 +2285,6 @@ const RULES: readonly Rule[] = [
       /\b(send|sends|email)\b.*\bflows?\b/,
       /\bsubflows?\b/,
       /\bwhat\s+subflows?\b/,
-      /\bStageName\b.*\bClosed Won\b/i,
-      /\bClosed Won\b.*\b(StageName|automation|flow|trigger|value.?coupl)/i,
-      /\bvalue.?coupl\w*\b.*\b(StageName|Closed Won|Opportunity)/i,
     ],
   },
   {
@@ -3523,10 +3559,23 @@ const RULES: readonly Rule[] = [
       if (type !== undefined) return { type };
       const fieldParent = deriveFieldListParent(q);
       if (fieldParent !== undefined) return { type: 'CustomField', parentId: fieldParent };
+      if (/\bformula\b/.test(q) && /\bfields?\b/.test(q)) {
+        const objectApi = deriveObjectApiFromQuestion(q, question);
+        if (objectApi !== undefined) return { type: 'CustomField', parentId: `CustomObject:${objectApi}` };
+      }
+      if (/\bpicklists?\b/.test(q) && /\bfields?\b/.test(q)) {
+        const objectApi = deriveObjectApiFromQuestion(q, question);
+        if (objectApi !== undefined) return { type: 'CustomField', parentId: `CustomObject:${objectApi}` };
+      }
+      if (/\brequired\b/.test(q) && /\bfields?\b/.test(q)) {
+        const objectApi = deriveObjectApiFromQuestion(q, question);
+        if (objectApi !== undefined) return { type: 'CustomField', parentId: `CustomObject:${objectApi}` };
+      }
       return undefined;
     },
     patterns: [
       /\bwhat\s+(objects?|fields?|custom\s+objects?|record\s+types?|picklists?|validation\s+rules?)\b/,
+      /\b(which|what)\s+fields?\b.*\b(on|for)\b.*\b(formula|picklist|required|encrypted)\b/,
       /\bwhat\s+standard\s+fields?\b/,
       /\bwhat\s+metadata\s+exists\b/,
       /\b(fields?|structure|schema)\s+(of|on|does|for)\b/,
