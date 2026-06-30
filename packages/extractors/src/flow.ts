@@ -193,6 +193,8 @@ const extractStartProperties = (
   scheduleFrequency: string | null;
   scheduleStartDate: string | null;
   scheduleStartTime: string | null;
+  scheduledPathTypes: string[];
+  runAsyncAfterCommit: boolean;
 } => {
   const start = unwrapSingle(rootObj['start']);
   if (typeof start !== 'object' || start === null) {
@@ -203,6 +205,8 @@ const extractStartProperties = (
       scheduleFrequency: null,
       scheduleStartDate: null,
       scheduleStartTime: null,
+      scheduledPathTypes: [],
+      runAsyncAfterCommit: false,
     };
   }
   const startObj = start as Record<string, unknown>;
@@ -211,6 +215,7 @@ const extractStartProperties = (
     typeof schedule === 'object' && schedule !== null
       ? (schedule as Record<string, unknown>)
       : null;
+  const scheduledPathTypes = extractScheduledPathTypes(startObj);
   return {
     triggerObject: toNullableString(startObj['object']),
     triggerType: toNullableString(startObj['triggerType']),
@@ -221,7 +226,39 @@ const extractStartProperties = (
       scheduleObj === null ? null : toNonEmptyString(scheduleObj['startDate']),
     scheduleStartTime:
       scheduleObj === null ? null : toNonEmptyString(scheduleObj['startTime']),
+    scheduledPathTypes,
+    runAsyncAfterCommit: scheduledPathTypes.includes(ASYNC_AFTER_COMMIT_PATH),
   };
+};
+
+/**
+ * The `<scheduledPaths><scheduledPaths><pathType>` marker Salesforce stamps on
+ * the immediate post-commit ASYNCHRONOUS path of a record-triggered (after-save)
+ * flow. Such a path runs in a SEPARATE transaction AFTER the triggering save has
+ * already committed, so an unhandled fault on it cannot roll the save back —
+ * `explain_flow`'s fault-rollback verdict needs this distinction (bundle-3).
+ */
+const ASYNC_AFTER_COMMIT_PATH = 'AsyncAfterCommit';
+
+/**
+ * Collect the `<pathType>` of every `<start><scheduledPaths>` entry, in source
+ * order. A record-triggered after-save flow can declare scheduled paths: a
+ * `pathType` of `AsyncAfterCommit` is the immediate-async post-commit path; an
+ * absent `pathType` (or a time-based scheduled path) carries a real delay. We
+ * surface only the declared `pathType` strings (skipping empty ones) so
+ * consumers — chiefly `explain_flow.buildFaultRollback` — can tell an async
+ * post-commit path from a synchronous one without re-parsing the XML.
+ */
+const extractScheduledPathTypes = (
+  startObj: Record<string, unknown>,
+): string[] => {
+  const out: string[] = [];
+  for (const path of toArray(startObj['scheduledPaths'])) {
+    if (typeof path !== 'object' || path === null) continue;
+    const pathType = toNonEmptyString((path as Record<string, unknown>)['pathType']);
+    if (pathType !== null) out.push(pathType);
+  }
+  return out;
 };
 
 /**
@@ -377,6 +414,47 @@ const buildActionCallEdges = (
     }
   }
   return edges;
+};
+
+/**
+ * A non-edge-bearing summary of a single `<actionCalls>` element: its declared
+ * `actionType` (e.g. `apex`, `activateSessionPermSet`, `emailAlert`, `flow`)
+ * and `actionName`. Apex action calls already get a `callsApex` edge, but
+ * non-apex action types emit no edge (a `callsApex` edge to an ApexClass would
+ * be a lie for, say, `activateSessionPermSet`). Without this list `explain_flow`
+ * sees `actionCalls: []` and cannot even name the faultable element, which lets
+ * a caller mistake an action-call element for missing. Surfacing every action
+ * call's `{actionType, actionName}` lets the consumer identify the element type
+ * — e.g. recognise `activateSessionPermSet` as a TRANSIENT session activation
+ * (no PermissionSetAssignment row is inserted), so an "orphaned grant" premise
+ * is structurally impossible.
+ */
+interface FlowActionCallSummary {
+  readonly actionType: string | null;
+  readonly actionName: string | null;
+}
+
+/**
+ * Collect a `{actionType, actionName}` summary for EVERY `<actionCalls>`
+ * element (apex AND non-apex), in source order, for the flow node properties.
+ * This is independent of {@link buildActionCallEdges} (which emits `callsApex`
+ * edges only for `actionType=apex`): the property list documents the full set
+ * of action-call elements so a consumer can identify the element type even when
+ * no edge is warranted.
+ */
+const collectActionCallSummaries = (
+  rootObj: Record<string, unknown>,
+): FlowActionCallSummary[] => {
+  const out: FlowActionCallSummary[] = [];
+  for (const call of toArray(rootObj['actionCalls'])) {
+    if (typeof call !== 'object' || call === null) continue;
+    const callObj = call as Record<string, unknown>;
+    out.push({
+      actionType: toNonEmptyString(callObj['actionType']),
+      actionName: toNonEmptyString(callObj['actionName']),
+    });
+  }
+  return out;
 };
 
 /**
@@ -1074,6 +1152,7 @@ export const extractFlow = async (
   const apiVersion = Number.isFinite(apiVersionParsed) ? apiVersionParsed : null;
   const startProps = extractStartProperties(rootObj);
   const faultCoverage = analyzeFaultCoverage(rootObj);
+  const actionCallSummaries = collectActionCallSummaries(rootObj);
 
   // Semantic walk: collect edges from every body section. Each builder
   // pushes onto `warnings` instead of throwing so one bad element
@@ -1146,6 +1225,19 @@ export const extractFlow = async (
       scheduleFrequency: startProps.scheduleFrequency,
       scheduleStartDate: startProps.scheduleStartDate,
       scheduleStartTime: startProps.scheduleStartTime,
+      // bundle-4(c): async post-commit scheduled paths from
+      // <start><scheduledPaths>. `scheduledPathTypes` lists each declared
+      // <pathType> in source order; `runAsyncAfterCommit` is the convenience
+      // flag explain_flow.buildFaultRollback reads to tell an async post-commit
+      // RecordAfterSave flow (fault cannot roll back the committed save) from a
+      // synchronous one.
+      scheduledPathTypes: startProps.scheduledPathTypes,
+      runAsyncAfterCommit: startProps.runAsyncAfterCommit,
+      // bundle-4(a): every <actionCalls> element's {actionType, actionName}
+      // (apex AND non-apex). Apex calls also get a `callsApex` edge; non-apex
+      // action types (e.g. activateSessionPermSet) emit no edge, so this list
+      // is the only place explain_flow can identify the faultable element type.
+      actionCalls: actionCallSummaries,
       flowExtractionWarnings: warnings,
       conditions: conditionsMirror,
       faultableElementCount: faultCoverage.faultableElementCount,
