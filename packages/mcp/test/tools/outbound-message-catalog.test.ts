@@ -360,3 +360,124 @@ describe('outboundMessageCatalogInputSchema', () => {
     ).toBe(false);
   });
 });
+
+// =============================================================================
+// QA batch 8: a zero-outbound-message org must NOT be framed as a coverage
+// gap when the backing WorkflowRule family is fully covered. The classic SOAP
+// `<outboundMessages>` definitions live inside the same `.workflow-meta.xml`
+// the WorkflowRule extractor retrieves, so "complete WorkflowRule coverage +
+// zero OutboundMessage nodes" is a DETERMINATE NEGATIVE (the org defines
+// none), not "we failed to retrieve them".
+// =============================================================================
+
+describe('outboundMessageCatalogHandler — zero-result honesty (batch 8)', () => {
+  let emptyDir: string;
+  let emptyStore: GraphStore;
+
+  beforeAll(async () => {
+    emptyDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-outbound-empty-'));
+    const opened = await openGraph(join(emptyDir, 'empty.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    emptyStore = opened.value;
+    // An org with workflow rules but ZERO outbound messages.
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({
+          id: 'CustomObject:Account',
+          type: 'CustomObject',
+          apiName: 'Account',
+        }),
+        makeNode({
+          id: 'WorkflowRule:Account.SendWelcomeEmail',
+          type: 'WorkflowRule',
+          apiName: 'Account.SendWelcomeEmail',
+        }),
+      ],
+      edges: [],
+    };
+    const imported = await importExtractionResults(emptyStore, [seed]);
+    if (!imported.ok) {
+      throw new Error(`seed import failed: ${imported.error.message}`);
+    }
+  });
+
+  afterAll(async () => {
+    await closeGraph(emptyStore);
+    rmSync(emptyDir, { recursive: true, force: true });
+  });
+
+  it('reports coverageStatus=complete and a determinate-negative disclosure when WorkflowRule coverage is complete', async () => {
+    const completeManifest = {
+      version: '0.1.0',
+      refreshedAt: '2026-05-27T14:33:08Z',
+      sourceOrg: 'me@example.com',
+      components: { CustomObject: 1, WorkflowRule: 1 },
+      edges: {},
+      sourceTreeHash: 'sha256:outbound-empty-complete',
+      // A real refreshed vault carries explicit coverage rows. The
+      // WorkflowRule family — host of classic `<outboundMessages>` — was
+      // confirmed-cleanly retrieved, so its coverage is COMPLETE.
+      coverage: [
+        {
+          type: 'WorkflowRule',
+          requested: true,
+          retrieved: 1,
+          errored: false,
+          neverModeled: false,
+          retrieveConfirmed: true,
+        },
+      ],
+    } as unknown as VaultManifest;
+    const localCtx: Context = {
+      vaultRoot: emptyDir,
+      manifest: completeManifest,
+      graph: emptyStore,
+    };
+    const result = await outboundMessageCatalogHandler(localCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    expect(d.summary.totalEntries).toBe(0);
+    expect(d.coverageStatus).toBe('complete');
+    // Determinate negative: must state the org defines none and must NOT
+    // imply the data is merely un-retrieved.
+    expect(d.disclosure).toContain('No outbound message definitions exist');
+    expect(d.disclosure).toContain('determinate negative');
+    expect(d.disclosure).not.toContain('inconclusive');
+  });
+
+  it('reports coverageStatus!=complete and an inconclusive disclosure when WorkflowRule coverage is partial', async () => {
+    const partialManifest = {
+      version: '0.1.0',
+      refreshedAt: '2026-05-27T14:33:08Z',
+      sourceOrg: 'me@example.com',
+      components: { CustomObject: 1, WorkflowRule: 0 },
+      edges: {},
+      sourceTreeHash: 'sha256:outbound-empty-partial',
+      // Explicit coverage row: WorkflowRule requested but retrieved zero
+      // WITHOUT a confirmed-clean retrieve => partial (not a confirmed empty).
+      coverage: [
+        {
+          type: 'WorkflowRule',
+          requested: true,
+          retrieved: 0,
+          errored: false,
+          neverModeled: false,
+        },
+      ],
+    } as unknown as VaultManifest;
+    const localCtx: Context = {
+      vaultRoot: emptyDir,
+      manifest: partialManifest,
+      graph: emptyStore,
+    };
+    const result = await outboundMessageCatalogHandler(localCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    expect(d.summary.totalEntries).toBe(0);
+    expect(d.coverageStatus).not.toBe('complete');
+    expect(d.disclosure).toContain('INCONCLUSIVE');
+    expect(d.disclosure).not.toContain('No outbound message definitions exist');
+  });
+});
