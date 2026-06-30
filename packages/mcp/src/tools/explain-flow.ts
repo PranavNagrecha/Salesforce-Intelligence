@@ -267,6 +267,18 @@ export interface ExplainFlowExecutionContext {
    * the flow has no unhandled fault path (`hasUnhandledFaults: false`).
    */
   readonly faultRollback: FaultRollbackVerdict | null;
+  /**
+   * Present only when `runInMode` is `SystemModeWithoutSharing`. Surfaces the
+   * security implication that this mode bypasses the ENTIRE Salesforce sharing
+   * stack — including Restriction Rules — so the flow can read and write records
+   * that Restriction Rules would otherwise hide from the running user (or any
+   * user). Absent for `SystemModeWithSharing` and `DefaultMode` because those
+   * modes respect the sharing stack.
+   *
+   * This is a load-bearing security fact: an LLM host must not suppress or
+   * soften it when it is present.
+   */
+  readonly sharingBypassNote?: string;
 }
 
 /**
@@ -384,12 +396,17 @@ const buildExecutionContext = async (
         (await readAsyncAfterCommitFromSource(vaultRoot, node)));
     faultRollback = buildFaultRollback(node, isAsync);
   }
+  const runInMode = readRunInMode(node);
   return {
-    runInMode: readRunInMode(node),
+    runInMode,
     hasUnhandledFaults,
     unhandledFaultElementCount: readFlowNonNegInt(node, 'elementsWithoutFault'),
     runModeNote: RUN_MODE_NOTE,
     faultRollback,
+    ...(runInMode === 'SystemModeWithoutSharing' && {
+      sharingBypassNote:
+        'SECURITY: This flow runs in SystemModeWithoutSharing, which bypasses the ENTIRE Salesforce sharing stack — including OWD, sharing rules, manual shares, AND Restriction Rules. It can read and write records that Restriction Rules would hide from any user. Review all DML/SOQL elements for unintended data exposure.',
+    }),
   };
 };
 

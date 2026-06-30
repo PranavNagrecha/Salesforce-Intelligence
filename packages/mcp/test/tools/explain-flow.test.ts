@@ -734,6 +734,32 @@ describe('explainFlowHandler', () => {
     expect(ec.faultRollback?.statement).toMatch(/triggering record save fails too/);
   });
 
+  it('surfaces sharingBypassNote for SystemModeWithoutSharing flows (Bug 7)', async () => {
+    // A flow running in SystemModeWithoutSharing bypasses the ENTIRE sharing
+    // stack including Restriction Rules. The tool must surface this as an
+    // explicit security field so an LLM host cannot miss it.
+    const result = await explainFlowHandler(ctx, { flowId: FULL_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ec = result.value.data.executionContext;
+    expect(ec.runInMode).toBe('SystemModeWithoutSharing');
+    // sharingBypassNote must be present and call out Restriction Rules explicitly.
+    expect(ec.sharingBypassNote).toBeDefined();
+    expect(ec.sharingBypassNote).toMatch(/SystemModeWithoutSharing/);
+    expect(ec.sharingBypassNote).toMatch(/Restriction Rules/);
+    expect(ec.sharingBypassNote).toMatch(/SECURITY/);
+  });
+
+  it('does NOT surface sharingBypassNote for DefaultMode flows (Bug 7)', async () => {
+    // DefaultMode enforces the user's sharing stack — no bypass note needed.
+    const result = await explainFlowHandler(ctx, { flowId: MINIMAL_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ec = result.value.data.executionContext;
+    // runInMode is null for minimal (DefaultMode by omission): no bypass.
+    expect(ec.sharingBypassNote).toBeUndefined();
+  });
+
   it('returns runInMode=null and no unhandled faults for a minimal flow', async () => {
     const result = await explainFlowHandler(ctx, { flowId: MINIMAL_FLOW_ID });
     expect(result.ok).toBe(true);
