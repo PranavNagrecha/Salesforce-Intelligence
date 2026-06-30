@@ -671,6 +671,72 @@ describe('classifyQuestion edge cases', () => {
     ).toBe('hybrid');
   });
 
+  // QA-Bundle-2 (ROUTING): metadata / Apex / flow analysis questions were being
+  // stolen by the broad live_* and inactive-* rules — `inactive-users` over-fires
+  // on "user"/"license", `inactive-validation-rules` on "validation rule" — so
+  // they misrouted to live_inactive_users / live_org_limits / live_stale_records
+  // / governor_limit_risks / integration_map, none relevant. These assert the
+  // new high-precision rules win, and the guard cases still route as before.
+  it('routes a VR save-behavior question to what_happens_on_save + the rule formula, not live_inactive_users', () => {
+    const cases = [
+      'A validation rule whitelists save when $User.Profile is Admin. Does the save succeed for a Standard user?',
+      'Does the validation rule allow the save to succeed if $Profile is System Administrator?',
+      'For an inactive user, does the save succeed given the validation rule whitelist?',
+    ];
+    for (const q of cases) {
+      const r = classifyQuestion(q);
+      expect(r.intent).toBe('save-behavior');
+      expect(r.tools).toContain('sfi.what_happens_on_save');
+      expect(r.tools).toContain('sfi.get_component');
+      expect(r.tools).not.toContain('sfi.live_inactive_users');
+      expect(r.liveRequired).toBe(false);
+    }
+  });
+
+  it('routes a flow-trigger + permission/license question to explain_flow, not live_inactive_users/license-usage', () => {
+    const cases = [
+      'When does the Application_Field_Sync_To_Contact flow fire, and what permission set or license lets it run?',
+      'Which license lets a user run the Application_Field_Sync_To_Contact flow?',
+    ];
+    for (const q of cases) {
+      const r = classifyQuestion(q);
+      expect(r.intent).toBe('flow-trigger-context');
+      expect(r.tools).toContain('sfi.explain_flow');
+      expect(r.tools).not.toContain('sfi.live_inactive_users');
+      expect(r.tools).not.toContain('sfi.live_license_usage');
+      expect(r.needsResolve).toBe(true);
+    }
+  });
+
+  it('routes a DLRS recursive-rollup question to automation/order-of-execution + the rollup lookup', () => {
+    const cases = [
+      'The CountCET3 DLRS rollup is recursive — how does the recursive trigger path work?',
+      'How does the DLRS recursive rollup CountCET3 behave on save?',
+    ];
+    for (const q of cases) {
+      const r = classifyQuestion(q);
+      expect(r.intent).toBe('dlrs-recursion');
+      expect(r.tools).toContain('sfi.automation_risk_report');
+      expect(r.tools).toContain('sfi.order_of_execution');
+      expect(r.tools).toContain('sfi.search_components');
+      expect(r.tools).not.toContain('sfi.governor_limit_risks');
+      expect(r.tools).not.toContain('sfi.integration_map');
+    }
+  });
+
+  it('does not let the new analysis rules steal genuine live login / license / VR-list questions', () => {
+    expect(classifyQuestion('which users have not logged in for 90 days').intent).toBe(
+      'inactive-users',
+    );
+    expect(classifyQuestion('how many licenses are unused').intent).toBe('license-usage');
+    expect(classifyQuestion('list inactive validation rules').intent).toBe(
+      'inactive-validation-rules',
+    );
+    expect(
+      classifyQuestion('what does the AcmeCheck validation rule enforce').intent,
+    ).toBe('explain-validation-rule');
+  });
+
   it('routes only to real tool names (sfi.*)', () => {
     for (const c of CASES) {
       for (const t of classifyQuestion(c.q).tools) {
@@ -721,7 +787,8 @@ describe('router ↔ roster contract (CI gate)', () => {
     'sfi.live_picklist_usage', 'sfi.live_stale_check',
     // Sub-tools / specialized drills reached via a bundle or after `resolve`:
     'sfi.apex_build_advisor', 'sfi.async_chain_depth', 'sfi.decision_table_browse',
-    'sfi.downstream_effects', 'sfi.explain_formula', 'sfi.field_meaning',
+    // sfi.explain_formula is now router-reachable (QA-Bundle-2 save-behavior rule).
+    'sfi.downstream_effects', 'sfi.field_meaning',
     'sfi.field_provenance', 'sfi.find_semantic_field', 'sfi.fleet_find',
     // sfi.layout_assignments is now router-reachable (P12-ROUTER-layout-assignments).
     // sfi.lookup_record is now router-reachable (P14-ROUTER-cmdt-record-values).
