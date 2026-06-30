@@ -61,6 +61,11 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { readActiveHoldersFor, type HoldersShape } from './facts-block.js';
+import {
+  SHARING_USER_ENUMERATION_NOT_AVAILABLE,
+  USER_ASSIGNMENT_NOT_IN_VAULT,
+  userAssignmentUnavailable,
+} from './vault-assignment-disclosure.js';
 import { expandGroupMembers } from './group-membership.js';
 import { mergeInputAliases, toCustomObjectId } from './input-aliases.js';
 import { expandRoleSubordinates, ROLE_PREFIX } from './role-hierarchy.js';
@@ -570,6 +575,10 @@ export const whoCanAccessObjectHandler = async (
     blindSpots.push(
       'A roleAndSubordinatesInternal sharing rule shares with a role and its INTERNAL subordinates only (excluding partner / community portal roles). Role nodes carry no portal/partner marker in the offline metadata, so the internal-vs-portal filter could NOT be applied — the enumerated subordinate roles may INCLUDE portal/partner roles the real rule excludes. Verify those roles in the org.',
     );
+  }
+  if (userAssignmentUnavailable(ctx)) {
+    blindSpots.push(USER_ASSIGNMENT_NOT_IN_VAULT);
+    blindSpots.push(SHARING_USER_ENUMERATION_NOT_AVAILABLE);
   }
 
   return ok({

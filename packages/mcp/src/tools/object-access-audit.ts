@@ -46,9 +46,15 @@ import type { Context } from '../server.js';
 
 import { expandPermissionSetGroup, findPermissionSetGroupsContaining } from './permission-set-group.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
+import {
+  PERMSET_INTERSECTION_NOT_AVAILABLE,
+  USER_ASSIGNMENT_NOT_IN_VAULT,
+  userAssignmentUnavailable,
+} from './vault-assignment-disclosure.js';
 
 /** Canonical id prefix for the object a caller audits. */
 const CUSTOM_OBJECT_PREFIX = 'CustomObject:';
+const PERMISSION_SET_PREFIX = 'PermissionSet:';
 
 /** Source node types whose `grantedBy` edge carries an object permission. */
 const GRANTOR_TYPES: ReadonlySet<ComponentType> = new Set<ComponentType>([
@@ -59,6 +65,8 @@ const GRANTOR_TYPES: ReadonlySet<ComponentType> = new Set<ComponentType>([
 /** Zod schema for the `sfi.object_access_audit` tool input. */
 export const objectAccessAuditInputSchema = z.object({
   componentId: z.string().min(1),
+  /** Other permission sets referenced in a user-intersection question (disclosure only). */
+  relatedPermissionSetIds: z.array(z.string().min(1)).optional(),
 });
 
 /** Parsed input shape. */
@@ -108,6 +116,8 @@ export interface ObjectAccessAuditOutput {
     readonly viewAll: number;
     readonly modifyAll: number;
   };
+  /** Present when user/assignment data is not in the vault. */
+  readonly assignmentDisclosure?: string;
 }
 
 /** Read a boolean edge property, defaulting to false when absent. */
@@ -130,10 +140,57 @@ export const objectAccessAuditHandler = async (
   ctx: Context,
   input: ObjectAccessAuditInput,
 ): Promise<Result<McpResponse<ObjectAccessAuditOutput>, McpError>> => {
+  if (input.componentId.startsWith(PERMISSION_SET_PREFIX)) {
+    const componentId = input.componentId as ComponentId;
+    const psResult = await getNodeById(ctx.graph, componentId);
+    if (!psResult.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${psResult.error.message}` });
+    }
+    if (psResult.value === null) {
+      return err({
+        kind: 'component-not-found',
+        message: await phantomAwareNotFoundMessage(ctx, componentId, 'PermissionSet'),
+        path: componentId,
+      });
+    }
+    const psNode = psResult.value;
+    const related =
+      input.relatedPermissionSetIds !== undefined
+        ? input.relatedPermissionSetIds.join(', ')
+        : '';
+    const assignmentDisclosure =
+      `${USER_ASSIGNMENT_NOT_IN_VAULT} ${PERMSET_INTERSECTION_NOT_AVAILABLE}` +
+      (related.length > 0 ? ` Referenced permission sets: ${related}.` : '');
+    return ok({
+      data: {
+        componentId,
+        objectLabel: psNode.label ?? psNode.apiName,
+        notModeled: false,
+        grants: [],
+        summary: {
+          granters: 0,
+          distinctGranters: 0,
+          create: 0,
+          read: 0,
+          edit: 0,
+          delete: 0,
+          viewAll: 0,
+          modifyAll: 0,
+        },
+        assignmentDisclosure,
+      },
+      vaultState: {
+        sourceTreeHash: ctx.manifest.sourceTreeHash,
+        refreshedAt: ctx.manifest.refreshedAt,
+      },
+    });
+  }
+
   if (!input.componentId.startsWith(CUSTOM_OBJECT_PREFIX)) {
     return err({
       kind: 'invalid-query',
-      message: `componentId must start with '${CUSTOM_OBJECT_PREFIX}'; got '${input.componentId}'`,
+      message:
+        `componentId must start with '${CUSTOM_OBJECT_PREFIX}' or '${PERMISSION_SET_PREFIX}'; got '${input.componentId}'`,
       path: 'componentId',
     });
   }
@@ -261,6 +318,9 @@ export const objectAccessAuditHandler = async (
           : '')
       : undefined;
   const note = [multiPathNote, psgNote].filter((n) => n !== undefined).join(' ');
+  const assignmentDisclosure = userAssignmentUnavailable(ctx)
+    ? `${USER_ASSIGNMENT_NOT_IN_VAULT} ${PERMSET_INTERSECTION_NOT_AVAILABLE}`
+    : undefined;
 
   return ok({
     data: {
@@ -279,6 +339,7 @@ export const objectAccessAuditHandler = async (
       grants,
       ...(note !== '' ? { note } : {}),
       summary,
+      ...(assignmentDisclosure !== undefined ? { assignmentDisclosure } : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

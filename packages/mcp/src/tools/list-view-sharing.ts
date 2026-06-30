@@ -58,6 +58,8 @@ const LIST_VIEW_SHARING_TOOL = 'sfi.list_view_sharing';
 
 export const listViewSharingInputSchema = z.object({
   componentId: z.string().min(1),
+  /** Count list views shared directly to this role api name (summary only). */
+  sharedWithRoleApiName: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
   // CR-22 continuation cursor from a prior truncated page's nextCursor.
@@ -104,6 +106,9 @@ export interface ListViewSharingOutput {
      * without paginating through every `listViews[]` row.
      */
     readonly directRoleShareCount: number;
+    /** When `sharedWithRoleApiName` is supplied — views with a direct role share to that role. */
+    readonly sharedToRoleCount?: number;
+    readonly sharedToRoleApiName?: string;
   };
   readonly limit: number;
   readonly offset: number;
@@ -164,18 +169,35 @@ const toRow = (node: Node): ListViewSharingRow => {
   };
 };
 
-const buildSummary = (rows: readonly ListViewSharingRow[]): ListViewSharingOutput['summary'] => {
+const buildSummary = (
+  rows: readonly ListViewSharingRow[],
+  sharedWithRoleApiName?: string,
+): ListViewSharingOutput['summary'] => {
   const distinct = new Set<string>();
   let shared = 0;
   let directRoleShareCount = 0;
+  let sharedToRoleCount = 0;
+  const roleTargetId =
+    sharedWithRoleApiName !== undefined
+      ? `Role:${sharedWithRoleApiName}`
+      : null;
   for (const r of rows) {
     if (r.visibility === 'sharedWithGroupsRoles') shared += 1;
     let hasDirectRole = false;
+    let matchesRole = false;
     for (const t of r.sharedTo) {
       distinct.add(t.targetId);
       if (t.type === 'role') hasDirectRole = true;
+      if (
+        roleTargetId !== null &&
+        t.targetId === roleTargetId &&
+        t.type === 'role'
+      ) {
+        matchesRole = true;
+      }
     }
     if (hasDirectRole) directRoleShareCount += 1;
+    if (matchesRole) sharedToRoleCount += 1;
   }
   return {
     listViews: rows.length,
@@ -183,6 +205,9 @@ const buildSummary = (rows: readonly ListViewSharingRow[]): ListViewSharingOutpu
     allUsersWithObjectAccess: rows.length - shared,
     distinctTargets: distinct.size,
     directRoleShareCount,
+    ...(sharedWithRoleApiName !== undefined
+      ? { sharedToRoleCount, sharedToRoleApiName: sharedWithRoleApiName }
+      : {}),
   };
 };
 
@@ -254,7 +279,7 @@ export const listViewSharingHandler = async (
     allRows = [toRow(node.value)];
   }
 
-  const summary = buildSummary(allRows);
+  const summary = buildSummary(allRows, input.sharedWithRoleApiName);
 
   // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
   // The fingerprint covers `componentId` so a token minted for one object/view
