@@ -653,14 +653,29 @@ export const resolveComponents = async (
   if (top === undefined || bestBase < NONE_THRESHOLD) {
     disposition = 'none';
   } else {
+    // When the query is the LITERAL whole API name of exactly one component
+    // (e.g. "Opportunity_Status__c"), that is a definitive, non-ambiguous hit —
+    // the user typed the exact name. A parent-matched sibling must NOT demote it:
+    // a multi-token literal name like `Opportunity_Status__c` contains the parent
+    // object's own token (`opportunity`), which incidentally flags genuine
+    // same-object siblings (e.g. `StageName` on Opportunity) as parent-matched and
+    // inflated the contender count to `ambiguous`. The whole-name-exact match owns
+    // the answer; the parent-credit contender rule only applies when the top is
+    // NOT a literal whole-name match (the "Contact Email" -> like-named decoy case).
+    const topIsSoleWholeExact =
+      wholeExactIds.has(top.id) && wholeExactIds.size === 1;
     // A parent-matched candidate (a field ON an object the query named) is
     // always a contender: when the query names an object, the field on THAT
     // object is a legitimate interpretation even next to a like-named decoy
     // that happens to win on score or whole-name match. This keeps a query
     // like "Contact Email" `ambiguous` (surfacing both Contact.Email and
     // Account.Contact_Email__c) instead of confidently picking the decoy.
+    // Skipped for a sole whole-name-exact top: that literal-name hit is
+    // definitive, so a coincidental parent-token sibling can't make it ambiguous.
     const contenders = candidates.filter(
-      (c) => c.score >= top.score * CONTENDER_RATIO || parentMatchedIds.has(c.id),
+      (c) =>
+        c.score >= top.score * CONTENDER_RATIO ||
+        (!topIsSoleWholeExact && parentMatchedIds.has(c.id)),
     );
     const topCoverage = coverageById.get(top.id) ?? 0;
     // BL-05: a single-token query whose top match is a much-shorter strict
