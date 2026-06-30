@@ -415,6 +415,36 @@ const deriveFieldMappingArgs = (
   return undefined;
 };
 
+/** Profile id hints for layout_for_user from natural-language profile names. */
+const deriveLayoutForUserArgs = (
+  q: string,
+  question?: string,
+): Readonly<Record<string, unknown>> | undefined => {
+  const source = (question ?? q).toLowerCase();
+  const objectApiName = deriveObjectApiFromQuestion(q, question);
+  let profileId: string | undefined;
+  if (/\bfaculty[-\s]?profile\b|\bfaculty\b/.test(source)) {
+    profileId = 'Profile:Faculty';
+  } else if (/\b(system\s+administrator|admin)\s+profile\b|\badmin\b/.test(source)) {
+    profileId = 'Profile:System Administrator';
+  } else if (/\bintegration\b|\bapi\b.*\buser\b/.test(source)) {
+    profileId = 'Profile:Minimum Access - Salesforce';
+  }
+  const args: Record<string, unknown> = {};
+  if (objectApiName !== undefined) args.objectApiName = objectApiName;
+  if (profileId !== undefined) args.profileId = profileId;
+  return Object.keys(args).length > 0 ? args : undefined;
+};
+
+/** Scope pii_inventory to an object when the question names one. */
+const derivePiiInventoryArgs = (
+  q: string,
+  question?: string,
+): Readonly<Record<string, unknown>> | undefined => {
+  const objectApiName = deriveObjectApiFromQuestion(q, question);
+  return objectApiName !== undefined ? { objectApiName } : undefined;
+};
+
 /**
  * `list_components` narrows for metadata-count questions about flows on an object.
  */
@@ -895,6 +925,7 @@ const RULES: readonly Rule[] = [
     liveRequired: false,
     needsResolve: false,
     reason: 'Explicit layout_for_user invocation.',
+    suggestArgs: deriveLayoutForUserArgs,
     patterns: [/\blayout_for_user\b/],
   },
   {
@@ -1510,6 +1541,48 @@ const RULES: readonly Rule[] = [
 
   // === Reports / folders / email templates (catalog demand → Wave 1) ========
   {
+    intent: 'report-type-inventory',
+    plane: 'vault',
+    tools: ['sfi.list_components', 'sfi.get_component'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Report TYPE definitions (ReportType metadata) are vault catalog items — distinct from live report LastRunDate usage or Report bodies that may not be retrieved.',
+    suggestArgs: () => ({ type: 'ReportType' }),
+    patterns: [
+      /\b(which|what|are\s+there|how\s+many)\b.*\breport\s+types?\b/,
+      /\breport\s+types?\b.*\b(based\s+on|join|joining|defined|include|custom|standard)\b/,
+      /\bcustom\s+report\s+types?\b/,
+      /\breport\s+types?\b.*\b(to|→|->)\b.*\b(account|contact|opportunity|case)\b/,
+    ],
+  },
+  {
+    intent: 'report-catalog-gap',
+    plane: 'vault',
+    tools: ['sfi.list_components', 'sfi.get_component'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Report and dashboard DEFINITIONS are vault catalog items when retrieved. The vault may model ReportTypes without Report bodies — never answer from live LastRunDate when the question asks for report/dashboard inventory or field usage in reports.',
+    suggestArgs: (q) => {
+      if (/\bdashboards?\b/.test(q)) return { type: 'Dashboard' };
+      return { type: 'Report' };
+    },
+    patterns: [
+      /\bhow\s+many\b.*\breports?\b(?!.*\breport\s+types?\b)(?!.*\b(useless|unused|stale|dead|old|never\s+run|not\s+used|broken)\b)/,
+      /\bhow\s+many\b.*\bdashboards?\b/,
+      /\bwhich\s+reports?\b.*\b(use|using|reference|include)\b/,
+      /\breports?\b.*\b(use|using|reference)\b.*\b(field|__c)\b/,
+      /\breports?\b.*\b(filters?|filter criteria)\b/,
+      /\b(scheduled|subscription|email)\b.*\breports?\b/,
+      /\breports?\b.*\b(scheduled|subscription|email)\b/,
+      /\bwhich\b.*\bfields?\b.*\b(report|dashboard)\b/,
+      /\bfields?\b.*\bfeed\b.*\b(report|dashboard)\b/,
+      /\bdashboard\b.*\b(running[-\s]?user|folder|visibility)\b/,
+      /\breport\s+folders?\b/,
+    ],
+  },
+  {
     intent: 'reports-usage',
     plane: 'hybrid',
     tools: ['sfi.live_report_usage', 'sfi.list_components'],
@@ -1518,10 +1591,9 @@ const RULES: readonly Rule[] = [
     reason: 'Report inventory is in the vault; stale/unused needs live LastRunDate.',
     patterns: [
       /\breports?\b.*\b(useless|unused|stale|dead|old|never\s+run|not\s+used|broken)\b/,
-      /\b(reports?|dashboards?)\b.*\b(cover|covers|about|for)\b/,
+      /\b(reports?|dashboards?)\b.*\b(cover|covers|about|for)\b(?!.*\breport\s+types?\b)/,
       /\b(useless|unused|stale|dead)\b.*\breports?\b/,
       /\b(dashboards?)\b.*\b(unused|stale|broken|refresh)\b/,
-      /\breport\s+types?\b/,
       /\breports?\b.*\b(not\s+run|haven'?t\s+been\s+run)\b/,
       /\breports?\b.*\b(last\s+year|in\s+the\s+last)\b/,
     ],
@@ -1816,6 +1888,7 @@ const RULES: readonly Rule[] = [
     liveRequired: false,
     needsResolve: false,
     reason: 'Page-layout routing (profile → record type → layout) is modeled in the vault.',
+    suggestArgs: deriveLayoutForUserArgs,
     patterns: [
       /\b(page\s+)?layouts?\b.*\b(who|access|assigned|profile|sees?|user)\b/,
       /\bwho\s+(sees|has|can)\b.*\blayouts?\b/,
@@ -1823,6 +1896,23 @@ const RULES: readonly Rule[] = [
       // "what/which (page) layouts show|contain|have a FIELD" — a field->layout
       // question (vs the who-sees-layout above) used to fall through (B21).
       /\b(what|which)\s+(page\s+)?layouts?\b.*\b(show|contain|display|include|have|with|for)\b.*\bfield\b/,
+    ],
+  },
+  {
+    // Fields present in schema but absent from every page layout — crosswalk,
+    // not a fuzzy resolve of the whole question (edge-171).
+    intent: 'field-layout-coverage',
+    plane: 'vault',
+    tools: ['sfi.list_components', 'sfi.get_component'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Fields that exist in schema but are not placed on any page layout are a vault crosswalk (CustomField inventory vs Layout field placements).',
+    suggestArgs: () => ({ type: 'CustomField' }),
+    patterns: [
+      /\bfields?\b.*\b(not\s+(placed|on)|without being on)\b.*\blayout\b/,
+      /\b(not\s+placed|unplaced|hidden)\b.*\blayout\b/,
+      /\bfields?\b.*\bexist\b.*\b(not\s+on|no)\b.*\blayout\b/,
     ],
   },
   {
@@ -1836,6 +1926,22 @@ const RULES: readonly Rule[] = [
     needsResolve: false,
     reason:
       'Page-layout inventory (how many / which layouts on an object) and contents (fields, related lists, quick actions on a named layout) are modeled in the vault — Layout is a covered type.',
+    suggestArgs: (q, question) => {
+      if (/\bcompact[-\s]layouts?\b/.test(q)) {
+        const objectApi = deriveObjectApiFromQuestion(q, question);
+        if (objectApi !== undefined) {
+          return { type: 'CompactLayout', parentId: `CustomObject:${objectApi}` };
+        }
+        return { type: 'CompactLayout' };
+      }
+      if (/\bhow\s+many\b.*\blayouts?\b/.test(q)) {
+        const objectApi = deriveObjectApiFromQuestion(q, question);
+        if (objectApi !== undefined) {
+          return { type: 'Layout', parentId: `CustomObject:${objectApi}` };
+        }
+      }
+      return deriveMetadataCountArgs(q, question);
+    },
     patterns: [
       /\bhow\s+many\b.*\blayouts?\b/,
       /\b(what|which|list)\b.*\b(page\s+)?layouts?\b.*\b(exist|are\s+there|for\s+the|on\s+the|does|available)\b/,
@@ -1845,7 +1951,9 @@ const RULES: readonly Rule[] = [
       /\b(in\s+any|on\s+any)\b.*\b(page\s+)?layouts?\b/,
       /\bis\b.*\bin\s+any\b.*\blayouts?\b/,
       /\b(what|which)\s+quick\s+actions?\b.*\b(on|for|defined)\b/,
-      /\bcompact\s+layouts?\b/,
+      /\bcompact[-\s]layouts?\b/,
+      /\bcompact[-\s]layout\b.*\b(vs|versus|highlights?|full)\b/,
+      /\bhighlights?\b.*\b(vs|versus|full)\b.*\blayout\b/,
     ],
   },
   {
@@ -2018,21 +2126,43 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // EncryptedText field TYPE inventory — list CustomField components and filter
+    // by metadata type (edge-145). Must sit before pii-inventory, which classifies
+    // PII heuristically and does not enumerate EncryptedText types.
+    intent: 'schema',
+    plane: 'vault',
+    tools: ['sfi.list_components', 'sfi.get_component', 'sfi.search_components'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'EncryptedText field inventory is a CustomField type filter on the vault catalog — not PII classification.',
+    suggestArgs: (q, question) => {
+      const objectApi = deriveObjectApiFromQuestion(q, question);
+      if (objectApi !== undefined) {
+        return { type: 'CustomField', parentId: `CustomObject:${objectApi}` };
+      }
+      return { type: 'CustomField' };
+    },
+    patterns: [
+      /\b(list|which|what)\b.*\bencrypted\s*text\b.*\bfields?\b/,
+      /\bencrypted\s*text\b.*\bfields?\b/,
+      /\bencryptedtext\b.*\bfields?\b/,
+    ],
+  },
+  {
     intent: 'pii-inventory',
     plane: 'vault',
     tools: ['sfi.pii_inventory'],
     liveRequired: false,
     needsResolve: false,
     reason: 'Classifies every field for PII/sensitive data from the vault.',
+    suggestArgs: derivePiiInventoryArgs,
     patterns: [
       /\b(pii|personally\s+identifiable|sensitive\s+data|ssn|social\s+security)\b/,
       /\bwhat\s+(personal|sensitive)\b.*\b(data|fields?|information)\b/,
       // "which fields hold personal data" — the noun "fields" before the PII
       // keyword (the pattern above wanted "what personal ... fields"). Battery gap.
       /\b(which|what)\s+fields?\b.*\b(personal|sensitive|pii|private)\b/,
-      /\b(which|what)\s+fields?\b.*\bEncryptedText\b/i,
-      /\bfields?\b.*\bEncryptedText\b/i,
-      /\bEncryptedText\b/,
       /\bpii_inventory\b/,
       /\brun\s+pii\b/,
     ],
