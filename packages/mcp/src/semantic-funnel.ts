@@ -19,8 +19,16 @@
  * Pure + lazily memoized: the index is built once on first query (which also
  * sidesteps any import-cycle init order — `V01_TOOLS` is only read at call time).
  */
+// TYPE-ONLY import: erased at runtime, so it introduces NO runtime import cycle
+// even though intent-router.ts and this module both read the tool roster. (And
+// intent-router.ts does not import this funnel, so no cycle exists in either
+// direction — verified at build time by the I1 contract test + tsc.)
+import type { Plane } from './intent-router.js';
 import { CATEGORIES } from './tools/capabilities.js';
 import { V01_TOOLS } from './tools/index.js';
+
+/** Funnel-local confidence in the shortlist itself (I2 will calibrate). */
+export type FunnelConfidence = 'high' | 'medium' | 'low';
 
 /** One meaning-ranked tool candidate for the host LLM to choose from. */
 export interface ToolCandidate {
@@ -30,6 +38,25 @@ export interface ToolCandidate {
   readonly score: number;
   /** Capability area the tool belongs to, or `null` when it is in none. */
   readonly category: string | null;
+  /**
+   * The intelligence plane this candidate is answered from — `vault` | `live` |
+   * `hybrid` (`knowledge`/`unknown` never reach a scored row). Carried on the
+   * candidate ITSELF (not just the demoted regex route) so a host LLM can read
+   * the consent requirement from the shortlist alone. I1 keystone for I2/I3.
+   */
+  readonly plane: Plane;
+  /**
+   * Does answering with this tool require the opt-in live plane? `true` only
+   * for `live`-plane tools (their answer needs a live read). `hybrid` tools
+   * answer from the vault with live as optional enrichment (the live part is a
+   * separate `live` candidate), so they are `false`; vault tools are `false`.
+   */
+  readonly liveRequired: boolean;
+  /**
+   * First-cut confidence in the SHORTLIST (margin + coverage led, not raw
+   * score — vault/gap top-score distributions overlap). I2 recalibrates.
+   */
+  readonly confidence: FunnelConfidence;
   /** Heuristic args when the regex route bound this tool (hybrid mode hint). */
   readonly suggestedArgs?: Readonly<Record<string, unknown>>;
   /** True when this row was promoted from the deterministic regex route hint. */
@@ -215,6 +242,92 @@ const TOOL_KEYWORDS: Readonly<Record<string, string>> = {
   'sfi.live_folder_access': 'who can access report dashboard folder pipeline see view shared',
 };
 
+/**
+ * Tools whose plane is NOT derivable from the `live_` name prefix, classified
+ * explicitly. The values are baked from intent-router.ts's RULES (the
+ * authoritative plane source) but COPIED here as a literal so the funnel stays
+ * cycle-free — it does NOT import the 188 RULES. A contract test
+ * (`test/tool-plane-coverage.test.ts`) guards live coverage.
+ *
+ * Derivation (audited against the compiled RULES on 2026-06-30):
+ *  - `blast_radius_live` is NOT routed by any rule, but it issues a live COUNT
+ *    (its live magnitude is an opt-in enrichment over the static impact graph),
+ *    so it is the documented non-`live_`-prefixed LIVE tool. Spec-mandated.
+ *  - `fleet_drift_ranking` — every rule routes it `plane: 'live', liveRequired:
+ *    true`. Genuinely live.
+ *  - `field_cleanup_candidates`, `unused_fields_deep` — routed ONLY as
+ *    `plane: 'hybrid'` (no vault rule); they fuse vault candidates with live
+ *    field-population. Classified `hybrid`.
+ *
+ * DELIBERATELY OMITTED (kept at the `vault` DEFAULT despite appearing in a
+ * minority of hybrid rules): `resolve`, `list_components`, `integration_map`.
+ * Each is routed `vault`/`liveRequired:false` by the overwhelming majority of
+ * its rules (resolve: ~80 vault vs 2 hybrid; list_components: ~22 vs 2;
+ * integration_map: 3 vs 1) and answers fully from the vault — live is an
+ * OPTIONAL enrichment, never a requirement. Marking them `hybrid`/liveRequired
+ * would be a consent FALSE-POSITIVE (telling a host it must grant the live
+ * plane to enumerate components or resolve a name), which directly undermines
+ * the I3 honesty/consent goal this keystone exists to enable.
+ */
+const PLANE_OVERRIDES: Readonly<Record<string, Exclude<Plane, 'unknown' | 'knowledge'>>> = {
+  'sfi.blast_radius_live': 'live',
+  'sfi.fleet_drift_ranking': 'live',
+  'sfi.field_cleanup_candidates': 'hybrid',
+  'sfi.unused_fields_deep': 'hybrid',
+};
+
+/** Plane resolution for one tool name: name prefix, then override, then vault. */
+const planeForTool = (toolName: string): Exclude<Plane, 'unknown' | 'knowledge'> => {
+  if (/^sfi\.live_/.test(toolName)) return 'live';
+  return PLANE_OVERRIDES[toolName] ?? 'vault';
+};
+
+/**
+ * Only a `live`-plane tool needs the opt-in live read to answer at all. A
+ * `hybrid` tool answers from the vault and treats live as OPTIONAL enrichment
+ * (its live magnitude rides on a separate `live` companion candidate), so it
+ * does NOT require consent — marking it liveRequired would be a consent
+ * false-positive that undermines the honesty this keystone enables. A vault
+ * tool never blocks on consent.
+ */
+const liveRequiredForPlane = (plane: Plane): boolean => plane === 'live';
+
+interface PlaneEntry {
+  readonly plane: Exclude<Plane, 'unknown' | 'knowledge'>;
+  readonly liveRequired: boolean;
+}
+
+/**
+ * Build-once `sfi.*` tool name → { plane, liveRequired } over the WHOLE V01
+ * roster, so every candidate (and every route-inserted candidate) can stamp its
+ * consent requirement from the candidate alone. Keyed by full `sfi.*` name.
+ */
+const buildPlaneByTool = (): ReadonlyMap<string, PlaneEntry> => {
+  const map = new Map<string, PlaneEntry>();
+  for (const tool of V01_TOOLS) {
+    const plane = planeForTool(tool.name);
+    map.set(tool.name, { plane, liveRequired: liveRequiredForPlane(plane) });
+  }
+  return map;
+};
+
+let cachedPlanes: ReadonlyMap<string, PlaneEntry> | null = null;
+
+/** Memoized plane/liveRequired lookup keyed by full `sfi.*` tool name. */
+export const getPlaneByTool = (): ReadonlyMap<string, PlaneEntry> =>
+  (cachedPlanes ??= buildPlaneByTool());
+
+/**
+ * Plane + liveRequired for ONE tool name, defaulting to the `vault` plane for
+ * any name not in the roster (e.g. a route hint for a tool absent from V01).
+ */
+export const resolveCandidatePlane = (toolName: string): PlaneEntry => {
+  const entry = getPlaneByTool().get(toolName);
+  if (entry !== undefined) return entry;
+  const plane = planeForTool(toolName);
+  return { plane, liveRequired: liveRequiredForPlane(plane) };
+};
+
 /** Append synonym terms for each token, preserving the originals. */
 const expand = (tokens: readonly string[]): string[] => {
   const out: string[] = [...tokens];
@@ -314,16 +427,60 @@ export const resetFunnelIndex = (): void => {
 };
 
 /**
+ * First-cut funnel-confidence thresholds. Per the Phase-0 finding, absolute
+ * score alone is a weak signal — vault and gap top-score distributions overlap
+ * (median 0.24 vs 0.17), so confidence leans on the top1−top2 MARGIN (how
+ * decisively one tool leads) and query-term COVERAGE (how much of the user's
+ * wording the corpus actually understood).
+ *
+ * TODO I2: calibrate against corpus-gen distributions (these are deliberate,
+ * honest first-cut guesses; I2 owns the calibration pass).
+ */
+const CONF_HIGH_TOP1 = 0.3;
+const CONF_HIGH_MARGIN = 0.08;
+const CONF_HIGH_COVERAGE = 0.5;
+const CONF_LOW_TOP1 = 0.12;
+const CONF_LOW_COVERAGE = 0.34;
+
+/**
+ * Deterministic first-cut confidence from the ranked head: high when one tool
+ * leads decisively AND the corpus understood the query; low when the lead is
+ * weak OR most query words were unknown; medium otherwise.
+ */
+const funnelConfidence = (top1: number, top2: number, coverage: number): FunnelConfidence => {
+  const margin = top1 - top2;
+  if (top1 >= CONF_HIGH_TOP1 && margin >= CONF_HIGH_MARGIN && coverage >= CONF_HIGH_COVERAGE) {
+    return 'high';
+  }
+  if (top1 < CONF_LOW_TOP1 || coverage < CONF_LOW_COVERAGE) return 'low';
+  return 'medium';
+};
+
+/**
  * Rank tools by meaning against `question`, returning the top `k` candidates
  * (cosine > 0), highest score first. Empty when the question has no indexable
  * terms. This is the funnel: the host LLM picks from what this surfaces.
  */
 export const semanticCandidates = (question: string, k = 8): ToolCandidate[] => {
   const idx = getFunnelIndex();
+  const planes = getPlaneByTool();
+  // The RAW (pre-synonym-expansion) non-stopword query tokens — the user's own
+  // words. COVERAGE is the fraction of these distinct tokens the corpus knows
+  // (appears in ≥1 doc, i.e. has an IDF entry). Computed on the raw query, NOT
+  // the synonym-expanded set, so confidence reflects how much of what the user
+  // actually typed was understood — not how many synonyms we bolted on.
+  const rawQueryTokens = new Set(tokenize(question, true));
   // Expand multi-word phrases on the QUERY only — the doc corpus (buildIndex)
   // is tokenized verbatim so the corpus IDF stays intact (F1 regression fix).
   const qTokens = expand(tokenize(question, true));
   if (qTokens.length === 0) return [];
+
+  let coverage = 0;
+  if (rawQueryTokens.size > 0) {
+    let hits = 0;
+    for (const t of rawQueryTokens) if (idx.idf.has(t)) hits += 1;
+    coverage = hits / rawQueryTokens.size;
+  }
 
   const qtf = new Map<string, number>();
   for (const t of qTokens) qtf.set(t, (qtf.get(t) ?? 0) + 1);
@@ -339,7 +496,10 @@ export const semanticCandidates = (question: string, k = 8): ToolCandidate[] => 
   qnorm = Math.sqrt(qnorm) || 1;
   if (qvec.size === 0) return [];
 
-  const scored: ToolCandidate[] = [];
+  // Score rows WITHOUT confidence first — confidence needs the ranked head
+  // (top1 / top2), known only after the sort below.
+  type ScoredRow = Omit<ToolCandidate, 'confidence'>;
+  const scored: ScoredRow[] = [];
   for (const [tool, vec] of idx.vectors) {
     let dot = 0;
     // Iterate the smaller map for the sparse dot product.
@@ -350,12 +510,21 @@ export const semanticCandidates = (question: string, k = 8): ToolCandidate[] => 
     }
     if (dot <= 0) continue;
     const score = dot / qnorm; // doc vectors are unit-normalized → cosine
+    const planeEntry = planes.get(tool) ?? { plane: 'vault' as const, liveRequired: false };
     scored.push({
       tool,
       score: Math.round(score * 1000) / 1000,
       category: idx.toolCategory.get(tool) ?? null,
+      plane: planeEntry.plane,
+      liveRequired: planeEntry.liveRequired,
     });
   }
   scored.sort((a, b) => b.score - a.score || a.tool.localeCompare(b.tool));
-  return scored.slice(0, k);
+
+  // One confidence for the shortlist, derived from the ranked head + coverage,
+  // then stamped on every returned candidate (I2 may make this per-row).
+  const top1 = scored[0]?.score ?? 0;
+  const top2 = scored[1]?.score ?? 0;
+  const confidence = funnelConfidence(top1, top2, coverage);
+  return scored.slice(0, k).map((row) => ({ ...row, confidence }));
 };

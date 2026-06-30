@@ -32,7 +32,11 @@ import {
   routeForSelectedIntent,
   type RouteResult,
 } from '../intent-router.js';
-import { semanticCandidates, type ToolCandidate } from '../semantic-funnel.js';
+import {
+  resolveCandidatePlane,
+  semanticCandidates,
+  type ToolCandidate,
+} from '../semantic-funnel.js';
 import type { Context } from '../server.js';
 
 import { resolveGlossaryAlias } from './resolve.js';
@@ -615,10 +619,18 @@ const mergeRouteHintsIntoCandidates = (
         fromRoute: true,
       });
     } else {
+      // INSERTED a route tool the funnel did not surface — it has no scored
+      // plane/liveRequired/confidence yet, so stamp them: plane + liveRequired
+      // from the same authoritative map the funnel uses, and confidence 'high'
+      // because a deterministic regex route pinned this tool (I1).
+      const { plane, liveRequired } = resolveCandidatePlane(tool);
       byTool.set(tool, {
         tool,
         score: ROUTE_HINT_SCORE,
         category: null,
+        plane,
+        liveRequired,
+        confidence: 'high',
         ...(suggestedArgs !== undefined && Object.keys(suggestedArgs).length > 0
           ? { suggestedArgs }
           : {}),
