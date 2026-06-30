@@ -151,15 +151,33 @@ export interface ExplainFlowTriggerInfo {
 }
 
 /**
- * One action call the Flow makes. The target is the
- * `ApexClass:{ApiName}` (or other callable) the `<actionCalls>`
- * element references; `targetType` carries the resolved node's type
- * so the renderer can pick a rendering ("calls Apex MyClass" vs
- * "calls component MyAction").
+ * One action call the Flow makes.
+ *
+ * For apex-typed calls (`actionType: 'apex'`): `targetId` is the
+ * `ApexClass:{ApiName}` canonical id the `<actionCalls>` element references;
+ * `targetType` is `'ApexClass'` (resolved from the graph node when it exists).
+ *
+ * For non-apex action types (`actionType: 'activateSessionPermSet'`,
+ * `'emailAlert'`, `'emailSimple'`, `'flow'`, etc.): `targetId` is the bare
+ * `actionName` from the XML (no graph node exists for them — emitting a
+ * `callsApex` edge to an ApexClass would be a lie); `targetType` is the
+ * `actionType` string. The `actionType` field is ALWAYS present so consumers
+ * can branch on it:
+ *   - `'apex'` → the Apex class `targetId` references exists in the graph.
+ *   - `'activateSessionPermSet'` → a TRANSIENT session-permission activation,
+ *     no PermissionSetAssignment row is inserted, so an "orphaned grant"
+ *     scenario is structurally impossible.
+ *   - other values → platform-managed action (email, flow call, etc.).
  */
 export interface ExplainFlowActionCall {
-  readonly targetId: ComponentId;
+  readonly targetId: ComponentId | string;
   readonly targetType: string;
+  /**
+   * The raw `<actionType>` value from the flow XML (e.g. `'apex'`,
+   * `'activateSessionPermSet'`, `'emailAlert'`). Always present so the consumer
+   * can identify non-apex action types even when no graph edge exists.
+   */
+  readonly actionType: string;
 }
 
 /**
@@ -678,14 +696,107 @@ const stripObjectPrefix = (id: ComponentId): string => {
 };
 
 /**
- * Collect the Flow's outgoing `callsApex` edges and project each into
- * an `ExplainFlowActionCall` row. The `targetType` is resolved from
- * the target node when it exists; sparse-graph misses default to the
- * target id's prefix (e.g., `ApexClass:Foo` → `'ApexClass'`).
+ * A single action-call summary as written to `properties.actionCalls` by the
+ * extractor (bundle-4a). A nullable-string pair matching the extractor's
+ * `FlowActionCallSummary` interface without importing that package.
+ */
+interface ActionCallSummary {
+  readonly actionType: string | null;
+  readonly actionName: string | null;
+}
+
+/**
+ * Read the `properties.actionCalls` summary list from a Flow node (stamped by
+ * the extractor's `collectActionCallSummaries` call). Returns an empty array
+ * when the property is absent (vault built before bundle-4a).
+ */
+const readActionCallSummariesFromNode = (node: Node): ActionCallSummary[] => {
+  const raw = node.properties['actionCalls'];
+  if (!Array.isArray(raw)) return [];
+  const out: ActionCallSummary[] = [];
+  for (const item of raw) {
+    if (typeof item !== 'object' || item === null) continue;
+    const obj = item as Record<string, unknown>;
+    const actionType =
+      typeof obj['actionType'] === 'string' ? obj['actionType'] : null;
+    const actionName =
+      typeof obj['actionName'] === 'string' ? obj['actionName'] : null;
+    out.push({ actionType, actionName });
+  }
+  return out;
+};
+
+/**
+ * Source-file XML fallback for collecting `<actionCalls>` summaries when
+ * the vault was built with an older extractor that did not stamp
+ * `properties.actionCalls`. Reads the raw `.flow-meta.xml` file and extracts
+ * all `<actionType>` / `<actionName>` pairs via a lightweight regex scan (no
+ * re-parse of the full XML — fast and sufficient for action-call identification).
+ *
+ * Any I/O failure silently returns an empty array (safe: the caller falls back
+ * to a `callsApex`-edge-only answer, which is already the pre-fix behaviour).
+ *
+ * Call ONLY after `readActionCallSummariesFromNode` returns `[]` — i.e. when
+ * `properties.actionCalls` is absent from the in-graph node.
+ */
+const readActionCallSummariesFromSource = async (
+  vaultRoot: string,
+  node: Node,
+): Promise<ActionCallSummary[]> => {
+  if (typeof node.sourcePath !== 'string' || node.sourcePath.length === 0) {
+    return [];
+  }
+  try {
+    const absPath = join(vaultRoot, node.sourcePath);
+    const xml = await readFile(absPath, 'utf-8');
+    // Split on <actionCalls> blocks and extract actionType + actionName per block.
+    const out: ActionCallSummary[] = [];
+    // Each <actionCalls>…</actionCalls> block is a single action call element.
+    const blockPattern = /<actionCalls>([\s\S]*?)<\/actionCalls>/g;
+    let blockMatch: RegExpExecArray | null;
+    while ((blockMatch = blockPattern.exec(xml)) !== null) {
+      const block = blockMatch[1] ?? '';
+      const typeMatch = /<actionType>([^<]*)<\/actionType>/.exec(block);
+      const nameMatch = /<actionName>([^<]*)<\/actionName>/.exec(block);
+      out.push({
+        actionType: typeMatch?.[1]?.trim() ?? null,
+        actionName: nameMatch?.[1]?.trim() ?? null,
+      });
+    }
+    return out;
+  } catch {
+    // I/O error or parse failure — safe to ignore, return empty.
+    return [];
+  }
+};
+
+/**
+ * Collect the Flow's outgoing `callsApex` edges and project each into an
+ * `ExplainFlowActionCall` row. The `targetType` is resolved from the target
+ * node when it exists; sparse-graph misses default to the target id's prefix
+ * (e.g., `ApexClass:Foo` → `'ApexClass'`).
+ *
+ * ALSO surfaces non-apex action types (e.g. `activateSessionPermSet`,
+ * `emailAlert`, `flow`) that the extractor records in `properties.actionCalls`
+ * but never emits a `callsApex` edge for. The merge strategy:
+ *
+ *   1. Query `callsApex` edges → one row per apex call (with a resolved
+ *      `targetId` in `ApexClass:{ApiName}` form).
+ *   2. Read the `properties.actionCalls` summary list from the node (or fall
+ *      back to a raw XML scan for pre-bundle-4a vaults).
+ *   3. For every summary whose `actionType` is NOT `'apex'`, push a row where
+ *      `targetId` is the bare `actionName` (no graph node exists for these
+ *      types) and `targetType` is the `actionType` string.
+ *   4. Apex entries in the summary list are SKIPPED — they are already covered
+ *      by the `callsApex` edge rows (which carry a richer resolved `targetId`).
+ *
+ * Source order is preserved: apex calls (from edges, sorted by toId per the
+ * graph contract) come first, followed by non-apex calls in source order.
  */
 const collectActionCalls = async (
   ctx: Context,
   flowId: ComponentId,
+  node: Node,
 ): Promise<Result<readonly ExplainFlowActionCall[], string>> => {
   const edgesResult = await listEdges(ctx.graph, flowId, {
     direction: 'out',
@@ -700,8 +811,27 @@ const collectActionCalls = async (
       nodeResult.value !== null
         ? nodeResult.value.type
         : prefixOf(edge.toId);
-    out.push({ targetId: edge.toId, targetType });
+    out.push({ targetId: edge.toId, targetType, actionType: 'apex' });
   }
+
+  // Merge non-apex action calls from the node properties (or source-file
+  // fallback). These are action types the extractor recognised as faultable
+  // but never emits a `callsApex` edge for (e.g. activateSessionPermSet).
+  let summaries = readActionCallSummariesFromNode(node);
+  if (summaries.length === 0) {
+    // Vault built before bundle-4a — fall back to raw XML scan.
+    summaries = await readActionCallSummariesFromSource(ctx.vaultRoot, node);
+  }
+  for (const s of summaries) {
+    if (s.actionType === 'apex') continue; // Already covered by callsApex edges.
+    if (s.actionType === null) continue;
+    out.push({
+      targetId: s.actionName ?? '',
+      targetType: s.actionType,
+      actionType: s.actionType,
+    });
+  }
+
   return ok(out);
 };
 
@@ -938,7 +1068,7 @@ export const explainFlowHandler = async (
   if (!conditionsResult.ok) {
     return err({ kind: 'internal', message: conditionsResult.error });
   }
-  const actionCallsResult = await collectActionCalls(ctx, flowId);
+  const actionCallsResult = await collectActionCalls(ctx, flowId, node);
   if (!actionCallsResult.ok) {
     return err({ kind: 'internal', message: actionCallsResult.error });
   }
