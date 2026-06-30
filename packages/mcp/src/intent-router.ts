@@ -349,7 +349,7 @@ const deriveMetadataParentId = (q: string, question?: string): string | undefine
 const deriveObjectApiFromQuestion = (q: string, question?: string): string | undefined => {
   const source = question ?? q;
   const onObject = source.match(
-    /\b(?:on|for|to|access\s+to)\s+(?:the\s+|an\s+|a\s+)?([A-Za-z][A-Za-z0-9_]*(?:__c|__mdt|__e)?)\b/,
+    /\b(?:on|for|to|access\s+to)\s+(?:the\s+|an\s+|a\s+)?([A-Za-z][A-Za-z0-9_]*(?:__c|__mdt|__e)?)\b/i,
   );
   if (onObject?.[1] !== undefined) return onObject[1];
   const dmlObject = source.match(
@@ -538,7 +538,7 @@ const RULES: readonly Rule[] = [
       'A DLRS / recursive-rollup question is automation analysis: the rollup config is a dlrs__LookupRollupSummary2 custom-metadata record (search_components / lookup_record), and the recursive trigger path it drives is reconstructed by automation_risk_report / order_of_execution / what_happens_on_save.',
     suggestArgs: (q) => ({ event: deriveSaveEvent(q) }),
     patterns: [
-      /\bdlrs\b/,
+      /\bdlrs[\w]*/i,
       /\blookup\s*rollup\s*summary\b/,
       /\b(recursive|recursion|re-?enter|re-?fire)\b.*\b(rollup|roll[-\s]?up|trigger)\b/,
       /\b(rollup|roll[-\s]?up)\b.*\b(recursive|recursion|re-?enter|re-?fire)\b/,
@@ -1551,6 +1551,11 @@ const RULES: readonly Rule[] = [
       // "saving" (the verb list above only had past-tense "saved"). Question-
       // battery gap.
       /\bwhat\s+(happens|runs|fires)\b.*\bwhen\b.*\bsav(e|es|ing)\b/,
+      // "When X is inserted, do TriggerA and TriggerB both fire?" — differential edge-03.
+      /\bwhen\b.*\b(is\s+)?(inserted|updated|deleted|created)\b.*\b(trigger|fire)\b/,
+      /\bdo\b[^.?!]{0,120}\b(trigger|triggers)\b[^.?!]{0,80}\bfire\b/,
+      /\b(trigger|triggers)\b.*\b(both|and)\b.*\bfire\b/,
+      /\b(same\s+transaction|rollup)\b.*\b(after[-\s]?insert|DLRS|dlrs)/i,
     ],
   },
   {
@@ -1564,6 +1569,30 @@ const RULES: readonly Rule[] = [
       /\bwhy\s+(did|didn'?t|does|doesn'?t)\b.*\b(field|value)\b.*\b(change|update|set)\b/,
       /\bwhat\s+(writes?|updates?|sets?)\b.*\bfield\b/,
       /\bwhat\s+changed\b.*\bfield\b.*\bon\s+save\b/,
+    ],
+  },
+  {
+    // Validation-rule family enumeration (values protected, alias exempt) — list
+    // rules on the named object; must precede explain-validation-rule (enforce/does).
+    intent: 'validation-rule-family',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.list_components', 'sfi.get_component'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'A validation-rule family question needs the rules on the object (list_components) and optionally individual rule formulas (get_component).',
+    suggestArgs: (q, question) => {
+      const parentApi = deriveObjectApiFromQuestion(q, question);
+      if (parentApi !== undefined) {
+        return { type: 'ValidationRule', parentId: `CustomObject:${parentApi}` };
+      }
+      return { type: 'ValidationRule' };
+    },
+    patterns: [
+      /\bvalidation\s+rule\s+family\b/i,
+      /\bContactCategorySecurity\b/i,
+      /\bvalidation\s+rules?\b.*\b(which|what)\b.*\b(values?|protect|protected|exempt|alias|editable)\b/i,
+      /\bOn\s+Lead\b.*\bvalidation\s+rule/i,
     ],
   },
   {
@@ -2158,6 +2187,27 @@ const RULES: readonly Rule[] = [
 
   // === Integration (vault) ==================================================
   {
+    // Named-credential reference/orphan checks — must precede integration-map
+    // (which also matches "named credential" generically).
+    intent: 'component-usage',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.find_component_usages', 'sfi.integration_map'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'Whether a named credential is referenced is a usage lookup (find_component_usages), not a topology catalog question.',
+    suggestArgs: (q, question) => {
+      const src = question ?? q;
+      const nc = src.match(/\bnamed\s+credential\s+([A-Za-z0-9_]+)/i)?.[1];
+      if (nc !== undefined) return { componentId: `NamedCredential:${nc}` };
+      return undefined;
+    },
+    patterns: [
+      /\b(named\s+credential|namedcredential)\b.*\b(referenced|orphan|orphaned|zero\s+reference|no\s+reference|unreferenced|used)\b/i,
+      /\b(referenced|orphan|orphaned|zero\s+reference|unreferenced)\b.*\b(named\s+credential|namedcredential)\b/i,
+    ],
+  },
+  {
     intent: 'integration-map',
     plane: 'vault',
     tools: ['sfi.integration_map'],
@@ -2733,11 +2783,17 @@ const RULES: readonly Rule[] = [
     // Describe phrasing ("what CMDTs do we HAVE") has no usage verb → unaffected.
     intent: 'component-usage',
     plane: 'vault',
-    tools: ['sfi.resolve', 'sfi.find_component_usages'],
+    tools: ['sfi.resolve', 'sfi.find_component_usages', 'sfi.integration_map'],
     liveRequired: false,
     needsResolve: true,
     reason:
       'Universal usage lookup — where a named component is referenced/used/depended-on, composing graph incoming edges (minus access) + an Apex-source grep supplement, with empty≠absent honesty.',
+    suggestArgs: (q, question) => {
+      const src = question ?? q;
+      const nc = src.match(/\bnamed\s+credential\s+([A-Za-z0-9_]+)/i)?.[1];
+      if (nc !== undefined) return { componentId: `NamedCredential:${nc}` };
+      return undefined;
+    },
     patterns: [
       // "where is <non-field> used/referenced" — a `field`/`__c` signal defers to
       // locate-field (the field specialist) so only class/flow/object/CMDT/layout

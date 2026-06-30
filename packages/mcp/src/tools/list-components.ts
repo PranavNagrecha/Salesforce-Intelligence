@@ -25,6 +25,8 @@ import type {
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { STANDARD_OBJECT_FIELD_SNAPSHOT } from '@sf-intelligence/extractors';
 import { countNodesByType, listNodesByType } from '@sf-intelligence/graph';
+
+import { listValidationRuleDocsForParent } from './component-doc-fallback.js';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
@@ -430,19 +432,41 @@ export const listComponentsHandler = async (
     });
   }
 
+  let pageNodes = queryResult.value;
+  let docFallbackNote: string | undefined;
+  if (
+    pageNodes.length === 0 &&
+    offset === 0 &&
+    input.type === 'ValidationRule' &&
+    input.parentId !== undefined
+  ) {
+    const parentApi = objectApiNameFromParentId(input.parentId);
+    if (parentApi !== null) {
+      const docNodes = await listValidationRuleDocsForParent(ctx.vaultRoot, parentApi, {
+        limit,
+        offset: 0,
+      });
+      if (docNodes.length > 0) {
+        pageNodes = [...docNodes];
+        docFallbackNote =
+          'Graph has no ValidationRule nodes for this parent (scoped/partial refresh), but rendered component docs exist on disk — listing those with doc-only confidence; run a full refresh to restore graph edges.';
+      }
+    }
+  }
+
   // Bound the serialized payload so a full-`Node` page can never trip the
   // global response-size guard (which would reject the whole result outright).
   // When the page is too large to serialize under budget, return the largest
   // id-ordered prefix that fits and flag `hasMore` so the caller can page on.
   const { kept, trimmed } = fitNodesToBudget(
-    queryResult.value,
+    pageNodes,
     LIST_PAYLOAD_BUDGET_BYTES,
   );
 
   // `hasMore` is a hint: a full page (length === limit) may have more rows
   // behind it, and a budget-trimmed page definitely does. A partial page that
   // was NOT trimmed is authoritative proof of end-of-list.
-  const hasMore = queryResult.value.length === limit || trimmed;
+  const hasMore = pageNodes.length === limit || trimmed;
 
   // FRESH-02: an empty first page is ambiguous — none in the org, or never
   // retrieved? Use coverage to say which, so the caller never reads a silent
@@ -450,7 +474,7 @@ export const listComponentsHandler = async (
   let retrievalHint: string | undefined;
   // Skip the coverage hint when a property filter is active: an empty result
   // means "no component matched the filter", NOT a type-coverage gap.
-  if (offset === 0 && queryResult.value.length === 0 && !hasPropertyFilter && !hasStringPropertyFilter && !recordTriggered) {
+  if (offset === 0 && pageNodes.length === 0 && !hasPropertyFilter && !hasStringPropertyFilter && !recordTriggered) {
     const cov = summarizeCoverage(ctx.manifest, [input.type]);
     if (cov.notModeledTypes.includes(input.type)) {
       retrievalHint =
@@ -511,7 +535,10 @@ export const listComponentsHandler = async (
   // lower bound (offset + kept.length) rather than failing the whole
   // enumeration.
   const totalRes = await countNodesByType(ctx.graph, input.type, graphNarrow);
-  const totalCount = totalRes.ok ? totalRes.value : offset + kept.length;
+  let totalCount = totalRes.ok ? totalRes.value : offset + kept.length;
+  if (docFallbackNote !== undefined) {
+    totalCount = pageNodes.length;
+  }
 
   // CR-22: emit a continuation cursor ONLY when more rows remain (over `limit`
   // OR byte-trimmed). The next offset is `offset + kept.length` — `o` IS the SQL
@@ -548,13 +575,14 @@ export const listComponentsHandler = async (
       offset,
       hasMore,
       ...(retrievalHint !== undefined ? { retrievalHint } : {}),
+      ...(docFallbackNote !== undefined ? { docFallbackNote } : {}),
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       ...(formulaFieldCount !== undefined ? { formulaFieldCount } : {}),
       ...(trimmed
         ? {
             truncated: true as const,
             note:
-              `Response trimmed to ${kept.length} of ${queryResult.value.length} ` +
+              `Response trimmed to ${kept.length} of ${pageNodes.length} ` +
               `fetched rows to stay under the ~45 KB MCP response limit. Use ` +
               `totalCount (${totalCount}) for the authoritative vault count; advance ` +
               `with offset += ${kept.length} (or narrow via parentId) for the rest.`,

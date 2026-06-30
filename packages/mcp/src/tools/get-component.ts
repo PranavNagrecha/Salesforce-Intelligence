@@ -45,6 +45,7 @@ import type { Context } from '../server.js';
 
 import { annotationsBlockFor, type AnnotationsBlock } from './annotations.js';
 import { mergeInputAliases } from './input-aliases.js';
+import { tryReadComponentDoc } from './component-doc-fallback.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import { buildReferenceStub } from './phantom-taxonomy.js';
 
@@ -155,6 +156,32 @@ export const getComponentHandler = async (
     });
   }
   if (nodeResult.value === null) {
+    const doc = await tryReadComponentDoc(ctx.vaultRoot, input.id);
+    if (doc !== null) {
+      const split = { frontmatter: doc.frontmatter, body: doc.body.trimStart() };
+      const maxBodyBytes = input.maxBodyBytes ?? DEFAULT_COMPONENT_BODY_MAX_BYTES;
+      const boundedBody = truncateUtf8(split.body, maxBodyBytes);
+      return ok({
+        data: {
+          id: input.id as ComponentId,
+          type: doc.type,
+          path: doc.path,
+          frontmatter: split.frontmatter,
+          body: boundedBody.text,
+          properties: {},
+          referenceIds: [],
+          bodyTruncated: boundedBody.truncated,
+          bodyBytes: boundedBody.originalBytes,
+          returnedBodyBytes: boundedBody.returnedBytes,
+          omittedBodyBytes: boundedBody.originalBytes - boundedBody.returnedBytes,
+          maxBodyBytes,
+        },
+        vaultState: {
+          sourceTreeHash: ctx.manifest.sourceTreeHash,
+          refreshedAt: ctx.manifest.refreshedAt,
+        },
+      });
+    }
     // A bare "no node with id X" reads as "this doesn't exist". But an id that
     // is REFERENCED by retrieved components (e.g. a permission-set grant to a
     // managed-package or standard CustomObject that was never pulled) is a
