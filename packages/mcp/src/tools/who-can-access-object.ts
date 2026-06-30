@@ -61,15 +61,15 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { readActiveHoldersFor, type HoldersShape } from './facts-block.js';
+import { expandGroupMembers } from './group-membership.js';
+import { mergeInputAliases, toCustomObjectId } from './input-aliases.js';
+import { expandRoleSubordinates, ROLE_PREFIX } from './role-hierarchy.js';
+import { clampedNodeScanLimit, scanHitCap, scanTruncationNote } from './scan-cap.js';
 import {
   SHARING_USER_ENUMERATION_NOT_AVAILABLE,
   USER_ASSIGNMENT_NOT_IN_VAULT,
   userAssignmentUnavailable,
 } from './vault-assignment-disclosure.js';
-import { expandGroupMembers } from './group-membership.js';
-import { mergeInputAliases, toCustomObjectId } from './input-aliases.js';
-import { expandRoleSubordinates, ROLE_PREFIX } from './role-hierarchy.js';
-import { clampedNodeScanLimit, scanHitCap, scanTruncationNote } from './scan-cap.js';
 
 const CUSTOM_OBJECT_PREFIX = 'CustomObject:';
 /** CR-CAP-12: a `sharedWith` target that is a Group whose members we expand. */

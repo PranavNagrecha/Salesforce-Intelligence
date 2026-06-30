@@ -25,13 +25,12 @@ import type {
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { STANDARD_OBJECT_FIELD_SNAPSHOT } from '@sf-intelligence/extractors';
 import { countNodesByType, listNodesByType } from '@sf-intelligence/graph';
-
-import { listValidationRuleDocsForParent } from './component-doc-fallback.js';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { listValidationRuleDocsForParent } from './component-doc-fallback.js';
 import { buildEnumerationCoverageCaveat, type CoverageCaveat } from './coverage-trust.js';
 import { argsFingerprint, decodeCursor, encodeCursor, PAGE_CURSOR_VERSION } from './page-cursor.js';
 
