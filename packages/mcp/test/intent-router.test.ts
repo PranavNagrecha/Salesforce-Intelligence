@@ -600,6 +600,28 @@ describe('classifyQuestion edge cases', () => {
     expect(r.tools).toContain('sfi.object_access_audit');
   });
 
+  it('metadata-count suggests ValidationRule parentId (differential b2-a-01)', () => {
+    expect(
+      classifyQuestion('How many validation rules are on hed__Application__c?')
+        .suggestedArgs,
+    ).toEqual({
+      type: 'ValidationRule',
+      parentId: 'CustomObject:hed__Application__c',
+    });
+  });
+
+  it('routes update save-order on hed__Application__c (differential b2-a-05)', () => {
+    const r = classifyQuestion(
+      'What happens when I update hed__Application__c — which validation rules, flows, and triggers run?',
+    );
+    expect(r.intent).toBe('trigger-order');
+    expect(r.tools).toContain('sfi.what_happens_on_save');
+    expect(r.suggestedArgs).toMatchObject({
+      event: 'update',
+      objectApiName: 'hed__Application__c',
+    });
+  });
+
   it('schema route suggests parent-scoped CustomField list for field inventory (FLD-05)', () => {
     expect(
       classifyQuestion('What fields does Opportunity have?').suggestedArgs,
