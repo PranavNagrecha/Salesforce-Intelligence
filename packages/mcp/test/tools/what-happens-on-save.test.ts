@@ -378,6 +378,57 @@ const inactiveFlowSeed: ExtractionResult = {
   ],
 };
 
+// =============================================================================
+// Seed 6: object with TWO active after-save flows — one with an explicit
+// recordTriggerType (Update), one whose triggersOn edge OMITS recordTriggerType
+// (the extractor did not stamp it / the Flow defaulted it). Both are real,
+// firing automations: the absent-value flow must NOT be silently dropped, or
+// the active-flow count under-reports by half (the enumeration-undercount bug).
+// =============================================================================
+
+const ABSENT_OBJ = 'CustomObject:AbsentObj';
+const ABSENT_EXPLICIT_FLOW = 'Flow:AbsentExplicitFlow';
+const ABSENT_MISSING_FLOW = 'Flow:AbsentMissingTypeFlow';
+
+const absentRecordTriggerTypeSeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: ABSENT_OBJ, apiName: 'AbsentObj' }),
+    makeNode({
+      id: ABSENT_EXPLICIT_FLOW,
+      type: 'Flow',
+      apiName: 'AbsentExplicitFlow',
+      properties: { status: 'Active' },
+    }),
+    makeNode({
+      id: ABSENT_MISSING_FLOW,
+      type: 'Flow',
+      apiName: 'AbsentMissingTypeFlow',
+      properties: { status: 'Active' },
+    }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: ABSENT_EXPLICIT_FLOW,
+      toId: ABSENT_OBJ,
+      edgeType: 'triggersOn',
+      properties: {
+        triggerType: 'RecordAfterSave',
+        recordTriggerType: 'Update',
+      },
+    }),
+    // After-save flow whose edge has the before/after discriminator but NO
+    // recordTriggerType — the dropped-flow case.
+    makeEdge({
+      fromId: ABSENT_MISSING_FLOW,
+      toId: ABSENT_OBJ,
+      edgeType: 'triggersOn',
+      properties: {
+        triggerType: 'RecordAfterSave',
+      },
+    }),
+  ],
+};
+
 beforeAll(async () => {
   tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-whos-'));
   const dbPath = join(tempDir, 'whos.db');
@@ -392,6 +443,7 @@ beforeAll(async () => {
     updateOnlySeed,
     nodelessSeed,
     inactiveFlowSeed,
+    absentRecordTriggerTypeSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -681,6 +733,54 @@ describe('whatHappensOnSaveHandler', () => {
     const { soe } = result.value.data;
     const flowSteps = soe.filter((s) => s.phase === 'post-save-flows');
     expect(flowSteps.length).toBe(0);
+  });
+
+  it('enumerates an after-save flow whose triggersOn edge OMITS recordTriggerType (under-count guard)', async () => {
+    // AbsentObj has two active after-save flows: one explicit (Update) and one
+    // with NO recordTriggerType on its triggersOn edge. Both fire on update —
+    // the absent-value flow must not be silently dropped, or the active-flow
+    // count under-reports by half.
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'AbsentObj',
+      event: 'update',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const flowSteps = result.value.data.soe.filter(
+      (s) => s.phase === 'post-save-flows',
+    );
+    // BOTH flows are enumerated and individually named.
+    expect(flowSteps.length).toBe(2);
+    const named = flowSteps.map((s) => s.apiName).sort();
+    expect(named).toContain('AbsentExplicitFlow');
+    expect(named).toContain('AbsentMissingTypeFlow');
+  });
+
+  it('treats an absent recordTriggerType as CreateAndUpdate — fires on insert too, but never on delete', async () => {
+    const onInsert = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'AbsentObj',
+      event: 'insert',
+    });
+    expect(onInsert.ok).toBe(true);
+    if (!onInsert.ok) return;
+    const insertFlows = onInsert.value.data.soe.filter(
+      (s) => s.phase === 'post-save-flows',
+    );
+    // The absent-type flow fires on insert (CreateAndUpdate default); the
+    // explicit Update-only flow does not.
+    expect(insertFlows.map((s) => s.apiName)).toContain('AbsentMissingTypeFlow');
+    expect(insertFlows.map((s) => s.apiName)).not.toContain('AbsentExplicitFlow');
+
+    const onDelete = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'AbsentObj',
+      event: 'delete',
+    });
+    expect(onDelete.ok).toBe(true);
+    if (!onDelete.ok) return;
+    // An absent recordTriggerType is never a delete-triggered flow.
+    expect(
+      onDelete.value.data.soe.filter((s) => s.phase === 'post-save-flows').length,
+    ).toBe(0);
   });
 
   it('echoes the recordTypeId verbatim when provided', async () => {
