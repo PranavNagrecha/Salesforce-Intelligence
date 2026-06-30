@@ -622,6 +622,31 @@ describe('classifyQuestion edge cases', () => {
     });
   });
 
+  it('routes Modify All permission sets to object-access (differential b3-a-02)', () => {
+    const r = classifyQuestion(
+      'Which permission sets grant Modify All Records on Contact?',
+    );
+    expect(r.intent).toBe('object-access');
+    expect(r.tools).toContain('sfi.object_access_audit');
+  });
+
+  it('routes flow system-mode questions to explain-flow (differential b3-a-04)', () => {
+    const r = classifyQuestion(
+      'Does flow Create_Flags_from_Contact run in System Mode Without Sharing, and what sharing risk does that create?',
+    );
+    expect(r.intent).toBe('explain-flow');
+    expect(r.tools).toContain('sfi.explain_flow');
+  });
+
+  it('routes automation step counts to trigger-order (differential b3-a-05)', () => {
+    const r = classifyQuestion(
+      'How many automation steps run on an hed__Application__c update (before-save flows, validation rules, after-save flows, async)?',
+    );
+    expect(r.intent).toBe('trigger-order');
+    expect(r.tools).toContain('sfi.what_happens_on_save');
+    expect(r.suggestedArgs?.objectApiName).toBe('hed__Application__c');
+  });
+
   it('schema route suggests parent-scoped CustomField list for field inventory (FLD-05)', () => {
     expect(
       classifyQuestion('What fields does Opportunity have?').suggestedArgs,

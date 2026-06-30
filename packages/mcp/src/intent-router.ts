@@ -339,7 +339,7 @@ const deriveMetadataParentId = (q: string, question?: string): string | undefine
   if (fieldParent !== undefined) return fieldParent;
   const source = question ?? q;
   const onObject = source.match(
-    /\b(?:on|for|configured\s+on|access\s+to)\s+(?:the\s+)?([A-Za-z][A-Za-z0-9_]*(?:__c|__mdt)?)\b/,
+    /\b(?:on|for|configured\s+on|access\s+to)\s+(?:the\s+|an\s+|a\s+)?([A-Za-z][A-Za-z0-9_]*(?:__c|__mdt)?)\b/,
   );
   if (onObject?.[1] !== undefined) return `CustomObject:${onObject[1]}`;
   return undefined;
@@ -349,7 +349,7 @@ const deriveMetadataParentId = (q: string, question?: string): string | undefine
 const deriveObjectApiFromQuestion = (q: string, question?: string): string | undefined => {
   const source = question ?? q;
   const onObject = source.match(
-    /\b(?:on|for|to|access\s+to)\s+(?:the\s+)?([A-Za-z][A-Za-z0-9_]*(?:__c|__mdt|__e)?)\b/,
+    /\b(?:on|for|to|access\s+to)\s+(?:the\s+|an\s+|a\s+)?([A-Za-z][A-Za-z0-9_]*(?:__c|__mdt|__e)?)\b/,
   );
   if (onObject?.[1] !== undefined) return onObject[1];
   const dmlObject = source.match(
@@ -778,6 +778,27 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // Save-order step counts — must precede metadata-count, which steals
+    // "how many … validation rules" parentheticals on automation-step asks.
+    intent: 'trigger-order',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.what_happens_on_save', 'sfi.order_of_execution'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'Counting automation steps on save is a what_happens_on_save / order_of_execution reconstruction — not a list_components metadata count.',
+    suggestArgs: (q, question) => {
+      const args: Record<string, unknown> = { event: deriveSaveEvent(q) };
+      const objectApiName = deriveObjectApiFromQuestion(q, question);
+      if (objectApiName !== undefined) args.objectApiName = objectApiName;
+      return args;
+    },
+    patterns: [
+      /\bhow\s+many\b.*\b(automation\s+steps?|save[-\s]order\s+steps?)\b/,
+      /\bhow\s+many\b.*\b(before-save|after-save|post-save|pre-save|async)\b.*\b(flows?|steps?|paths?)\b/,
+    ],
+  },
+  {
     // METADATA counts are vault, not live. "How many layouts / fields / objects
     // / profiles / validation rules ... [per X]" was stolen by the live
     // group-count/record-count rules and misrouted to live GROUP BY (B30.1).
@@ -1180,6 +1201,8 @@ const RULES: readonly Rule[] = [
       /\b(which|what)\s+(profiles?|permission\s+sets?)\b.*\b(grant|allow)\b.*\b(create|delete)\b/,
       /\b(which|what)\s+permission\s+sets?\b.*\bgrant\b.*\b(access|object)\b/,
       /\bpermission\s+sets?\b.*\bgrant\b.*\bobject\s+access\b/,
+      /\b(which|what)\s+(profiles?|permission\s+sets?)\b.*\b(modify\s+all|view\s+all)\b/,
+      /\b(which|what)\s+(profiles?|permission\s+sets?)\b.*\bgrant\b.*\b(modify\s+all|view\s+all)\b/,
     ],
   },
   {
@@ -1633,6 +1656,9 @@ const RULES: readonly Rule[] = [
       /\bhow\s+does\b.*\bflows?\b.*\bwork\b/,
       /\bwhen\s+does\b.*\b(run|fire|execute|trigger)\b/,
       /\bwhen\s+does\s+it\s+run\b/,
+      /\bdoes\b.*\bflow\b.*\b(system\s+mode|without\s+sharing|with\s+sharing)\b/,
+      /\b(system\s+mode|without\s+sharing|sharing\s+bypass)\b.*\bflow\b/,
+      /\b(run|runs|running)\b.*\b(system\s+mode|without\s+sharing)\b.*\bflow\b/,
     ],
   },
   {
