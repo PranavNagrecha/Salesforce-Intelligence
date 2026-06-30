@@ -806,6 +806,77 @@ describe('extractFlow', () => {
       }
     });
 
+    it('resolves <inputReference>$Record on a Scheduled Flow to the <start><object> (no spurious "no object" warning)', async () => {
+      // A scheduled flow runs over the records matching its schedule filter on
+      // <start><object>. An <inputReference>$Record</inputReference> update
+      // inside it writes to THAT same object — it is NOT a cross-object write,
+      // and it must NOT be dropped with a "has no <object>" warning. Mirrors
+      // Close_the_Mid_Point_Feedbacks: scheduled on a course object, $Record
+      // update sets a status field on the same object.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Close Feedbacks</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Draft</status>
+    <start>
+        <object>Schedule_Target__c</object>
+        <schedule>
+            <frequency>Daily</frequency>
+            <startDate>2023-10-22</startDate>
+            <startTime>06:00:00.000Z</startTime>
+        </schedule>
+        <triggerType>Scheduled</triggerType>
+    </start>
+    <recordUpdates>
+        <name>Close_the_Course</name>
+        <inputReference>$Record</inputReference>
+        <inputAssignments>
+            <field>Status__c</field>
+            <value><stringValue>Close</stringValue></value>
+        </inputAssignments>
+    </recordUpdates>
+</Flow>`;
+      const { dir, path } = await writeTempXml('Scheduled.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        // The $Record update resolves to the scheduled object (heuristic), so
+        // it emits read+write edges to the SAME object instead of being skipped.
+        const updateEdges = result.value.edges.filter(
+          (e) =>
+            e.toId === 'CustomObject:Schedule_Target__c' &&
+            e.properties?.['operation'] === 'recordUpdate',
+        );
+        expect(updateEdges.some((e) => e.edgeType === 'readsFrom')).toBe(true);
+        expect(updateEdges.some((e) => e.edgeType === 'writesTo')).toBe(true);
+        for (const e of updateEdges) expect(e.confidence).toBe('heuristic');
+        // field-level write to the same object's status field.
+        expect(
+          result.value.edges.some(
+            (e) =>
+              e.edgeType === 'writesTo' &&
+              e.toId === 'CustomField:Schedule_Target__c.Status__c',
+          ),
+        ).toBe(true);
+        // No spurious "has no <object>" warning for the resolved $Record update.
+        const warnings =
+          (result.value.nodes[0]?.properties['flowExtractionWarnings'] as
+            | readonly string[]
+            | undefined) ?? [];
+        expect(
+          warnings.some((w) => w.includes('<recordUpdates>') && w.includes('no <object>')),
+        ).toBe(false);
+        // A scheduled flow does NOT get a record-trigger `triggersOn` edge.
+        expect(
+          result.value.edges.some((e) => e.edgeType === 'triggersOn'),
+        ).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
     it('dedupes repeated lookups to the same SObject into a single readsFrom edge', async () => {
       // Two `<recordLookups>` on the same object produce two raw edges
       // with the same (fromId,toId,edgeType,source) tuple, which the

@@ -38,6 +38,25 @@ const RECORD_TRIGGER_TYPES = new Set([
   'RecordBeforeDelete',
 ]);
 
+/**
+ * The set of `<start><triggerType>` values for which `$Record` (and
+ * `$Record__Prior`) names a concrete record whose SObject type is the
+ * `<start><object>`. This is a SUPERSET of {@link RECORD_TRIGGER_TYPES}:
+ * a `Scheduled` flow runs over the records matching its schedule filter on
+ * `<start><object>`, so an `<inputReference>$Record</inputReference>` DML
+ * inside a scheduled flow updates THAT object — the same object the flow is
+ * scheduled on. Without this, a scheduled flow's `$Record` update was dropped
+ * with a misleading "has no <object>" warning, making `explain_flow` /
+ * `what_happens_on_save` report no write target (or, worse, letting the
+ * synthesis layer mistake the unresolved warning for a cross-object write).
+ * `Scheduled` is intentionally NOT in `RECORD_TRIGGER_TYPES` because it does
+ * not get a record-trigger `triggersOn` edge; it only resolves `$Record`.
+ */
+const RECORD_SCOPED_TRIGGER_TYPES = new Set([
+  ...RECORD_TRIGGER_TYPES,
+  'Scheduled',
+]);
+
 type FlowStatus = (typeof ALLOWED_STATUS)[number];
 
 /**
@@ -601,7 +620,10 @@ const resolveInputReferenceObject = (
   const inputRef = toNonEmptyString(dmlObj['inputReference']);
   if (inputRef !== '$Record' && inputRef !== '$Record__Prior') return null;
   const start = extractStartProperties(rootObj);
-  if (start.triggerType === null || !RECORD_TRIGGER_TYPES.has(start.triggerType)) {
+  if (
+    start.triggerType === null ||
+    !RECORD_SCOPED_TRIGGER_TYPES.has(start.triggerType)
+  ) {
     return null;
   }
   return start.triggerObject;
