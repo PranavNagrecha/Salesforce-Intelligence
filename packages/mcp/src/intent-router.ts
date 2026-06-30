@@ -389,6 +389,104 @@ const RULES: readonly Rule[] = [
       /\bwill\s+this\s+new\s+(implementation|org|project)\b/,
     ],
   },
+  // === METADATA / APEX / FLOW ANALYSIS routing (checked BEFORE live_*) =======
+  // QA-Bundle-2 (ROUTING): validation-rule / save-behavior / flow-trigger /
+  // DLRS-recursion questions were being stolen by the broad live_* and
+  // inactive-* rules below — `inactive-users` over-fires on the bare word
+  // "user"/"license", `inactive-validation-rules` on "validation rule", and
+  // the live record/limit rules on counts — so a metadata/Apex/flow question
+  // routed to live_inactive_users / governor_limit_risks / integration_map /
+  // live_org_limits / live_stale_records, none relevant. These three
+  // high-precision rules sit FIRST so the analysis tools win. Each is anchored
+  // to its own NOUN+verb so it never steals a real live record/login question.
+  {
+    // A "does the save succeed / is the save blocked" question about a
+    // validation rule (often quoting `$User`, `$Profile`, or a whitelist of
+    // who may save) is a SAVE-BEHAVIOR analysis — what runs on save and which
+    // VR formula gates it — NOT a login-activity/inactive-users lookup. The
+    // presence of "$User"/"$Profile"/"whitelist"/"save succeeds" together with
+    // a validation-rule frame routes to what_happens_on_save + the rule's own
+    // formula (get_component) and explain_formula, so the cascade reaches the
+    // VR formulas without the caller hand-entering a componentId.
+    intent: 'save-behavior',
+    plane: 'vault',
+    tools: [
+      'sfi.resolve',
+      'sfi.what_happens_on_save',
+      'sfi.get_component',
+      'sfi.explain_formula',
+    ],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      "Whether a save succeeds under a validation rule is offline metadata: what_happens_on_save reconstructs the save-order, and the VR's own formula (get_component / explain_formula) shows the $User/$Profile/whitelist condition that gates it. Not a live login-activity lookup.",
+    suggestArgs: (q) => ({ event: deriveSaveEvent(q) }),
+    patterns: [
+      // A validation-rule frame + a save-outcome/whitelist/context-variable ask.
+      // Bounded clauses keep the two signals near each other so it never steals
+      // a generic "list inactive validation rules" enumeration.
+      /\bvalidation\s+rules?\b[^.?!]{0,80}\b(save\s+(succeed|success|go\s+through|work|fail|block)|whitelist|allow(ed|s)?\s+to\s+save|let[s]?\b.*\bsave|\$user\b|\$profile\b|\$record\b)/,
+      /\b(save\s+(succeed|success|go\s+through|fail|block)|whitelist|\$user\b|\$profile\b)[^.?!]{0,80}\bvalidation\s+rules?\b/,
+      // "does the save succeed for <whom>" / "will the save go through" — a
+      // save-outcome question even when "validation rule" sits in an earlier
+      // clause. Requires the save-outcome verb so a plain record save (which is
+      // a live DML event) does not collapse here.
+      /\b(does|will|can|would)\b.*\bsave\b.*\b(succeed|go\s+through|be\s+(blocked|allowed)|fail)\b/,
+    ],
+  },
+  {
+    // "When does this flow fire, and what permission set / license lets it run"
+    // is a Flow-trigger + permission-context question. The word "user"/
+    // "license"/"permission set" was pulling it onto inactive-users /
+    // license-usage; route it to explain_flow (the flow's trigger) +
+    // what_happens_on_save so the profile/permission gate is reachable in the
+    // normal cascade. High precision: requires a FLOW noun next to a
+    // fire/run/trigger verb AND a permission/license context term.
+    intent: 'flow-trigger-context',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.explain_flow', 'sfi.what_happens_on_save'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'When a flow fires and which profile / permission set / license can run it is offline metadata: explain_flow narrates the trigger, and what_happens_on_save places it in save-order. Not a live login/license-usage lookup.',
+    suggestArgs: (q) => ({ event: deriveSaveEvent(q) }),
+    patterns: [
+      /\bflows?\b[^.?!]{0,80}\b(fire|fires|run|runs|trigger|triggers|execute)[^.?!]{0,80}\b(permission\s+set|profile|license|licence|run\s+the\s+flow)\b/,
+      /\b(permission\s+set|profile|license|licence)\b[^.?!]{0,80}\b(run|fire|trigger|execute)\b[^.?!]{0,40}\bflows?\b/,
+      /\bwhat\s+(permission\s+set|profile|license|licence)\b.*\b(run|fire|trigger)\b.*\bflows?\b/,
+    ],
+  },
+  {
+    // A DLRS (Declarative Lookup Rollup Summary) / recursive-rollup question —
+    // e.g. the CountCET3 rollup that re-enters its own trigger. The recursive
+    // path lives in automation/order-of-execution analysis (a custom-metadata
+    // rollup that writes the parent and re-fires the child trigger, suppressed
+    // only by a CheckRecursive static guard, not the platform). Route to
+    // automation_risk_report + order_of_execution + what_happens_on_save, and
+    // surface the dlrs__LookupRollupSummary2 custom-metadata record via
+    // lookup_record / search_components so CountCET3 is named in the cascade.
+    intent: 'dlrs-recursion',
+    plane: 'vault',
+    tools: [
+      'sfi.resolve',
+      'sfi.search_components',
+      'sfi.lookup_record',
+      'sfi.automation_risk_report',
+      'sfi.order_of_execution',
+      'sfi.what_happens_on_save',
+    ],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'A DLRS / recursive-rollup question is automation analysis: the rollup config is a dlrs__LookupRollupSummary2 custom-metadata record (search_components / lookup_record), and the recursive trigger path it drives is reconstructed by automation_risk_report / order_of_execution / what_happens_on_save.',
+    suggestArgs: (q) => ({ event: deriveSaveEvent(q) }),
+    patterns: [
+      /\bdlrs\b/,
+      /\blookup\s*rollup\s*summary\b/,
+      /\b(recursive|recursion|re-?enter|re-?fire)\b.*\b(rollup|roll[-\s]?up|trigger)\b/,
+      /\b(rollup|roll[-\s]?up)\b.*\b(recursive|recursion|re-?enter|re-?fire)\b/,
+    ],
+  },
   {
     intent: 'hardcoded-values-anywhere',
     plane: 'vault',
