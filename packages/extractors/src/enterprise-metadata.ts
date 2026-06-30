@@ -623,7 +623,7 @@ const extractFlexiPagePermissionRefs = (xml: string): readonly string[] => {
   // Pattern: {!$Permission.CustomPermission.AssignClinicalLead}
   // — `$Permission.CustomPermission.` is the fixed prefix;
   // — the permission name is one or more word chars (A-Za-z0-9_).
-  const permRe = /\{\!?\$Permission\.CustomPermission\.([A-Za-z0-9_]+)\}/g;
+  const permRe = /\{[!]?\$Permission\.CustomPermission\.([A-Za-z0-9_]+)\}/g;
   const seen = new Set<string>();
   for (const match of xml.matchAll(permRe)) {
     const permName = match[1];
