@@ -412,7 +412,7 @@ const buildSharingSemantics = (
       effectiveModel: 'system-context',
       runsAsSystem: true,
       note:
-        'No sharing keyword is declared. A no-keyword top-level class does NOT default to `without sharing` — it inherits the caller\'s sharing context. But this class is async Apex (batch/schedulable/queueable/future): the platform invokes it with no Apex caller context to inherit AND async Apex runs in SYSTEM context, so record sharing ends up NOT enforced — because of system-context execution, NOT because "without sharing is the default". It runs as the system, never as the user who submitted/scheduled it. To enforce sharing, declare `with sharing`. CRUD/FLS are also bypassed unless checked explicitly.',
+        'No sharing keyword is declared. A no-keyword top-level class does NOT default to `without sharing` — it inherits the caller\'s sharing context. But this class is async Apex (batch/schedulable/queueable/future): the platform invokes it with no Apex caller context to inherit AND async Apex runs in SYSTEM context, so record sharing ends up NOT enforced — because of system-context execution, NOT because "without sharing is the default". It runs as the system, never as the user who submitted/scheduled it. To enforce sharing, declare `with sharing`. IMPORTANT: sharing enforcement and CRUD/FLS are INDEPENDENT security layers — system-context execution means record sharing is not enforced, but object/field CRUD/FLS checks are a separate mechanism that applies regardless of the sharing model unless the code explicitly skips them (WITH SECURITY_ENFORCED / Security.stripInaccessible / Schema describe).',
     };
   }
   return {
