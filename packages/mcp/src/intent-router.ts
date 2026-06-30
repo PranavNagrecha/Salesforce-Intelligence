@@ -376,6 +376,45 @@ const deriveImpactHops = (q: string): number | undefined => {
   return Number.isFinite(hops) ? hops : undefined;
 };
 
+const FIELD_MAP_OBJECT =
+  '(Lead|Contact|Account|Opportunity|Case|[A-Za-z][A-Za-z0-9_]*(?:__c|__mdt)?)';
+
+/**
+ * Bind `field_mapping_between_objects` from Lead→Contact / between A and B phrasing.
+ * Vault alias is injected by `route_question` from the active vault registry.
+ */
+const deriveFieldMappingArgs = (
+  q: string,
+  question?: string,
+): Readonly<Record<string, unknown>> | undefined => {
+  const source = question ?? q;
+  const arrow = source.match(
+    new RegExp(`\\b${FIELD_MAP_OBJECT}\\s*(?:→|->|>|\\sto\\s)\\s*${FIELD_MAP_OBJECT}\\b`, 'i'),
+  );
+  if (arrow?.[1] !== undefined && arrow[2] !== undefined) {
+    return { objectA: arrow[1], objectB: arrow[2] };
+  }
+  const between = source.match(
+    new RegExp(
+      `\\b(?:between|from)\\s+${FIELD_MAP_OBJECT}\\s+(?:and|to)\\s+${FIELD_MAP_OBJECT}\\b`,
+      'i',
+    ),
+  );
+  if (between?.[1] !== undefined && between[2] !== undefined) {
+    return { objectA: between[1], objectB: between[2] };
+  }
+  const mapPhrase = source.match(
+    new RegExp(
+      `\\bmap(?:ping|ped)?\\s+(?:from\\s+)?${FIELD_MAP_OBJECT}\\s+(?:to|into)\\s+${FIELD_MAP_OBJECT}\\b`,
+      'i',
+    ),
+  );
+  if (mapPhrase?.[1] !== undefined && mapPhrase[2] !== undefined) {
+    return { objectA: mapPhrase[1], objectB: mapPhrase[2] };
+  }
+  return undefined;
+};
+
 /**
  * `list_components` narrows for metadata-count questions about flows on an object.
  */
@@ -595,6 +634,7 @@ const RULES: readonly Rule[] = [
     liveRequired: false,
     needsResolve: false,
     reason: 'Explicit field_mapping_between_objects invocation.',
+    suggestArgs: deriveFieldMappingArgs,
     patterns: [/\bfield_mapping_between_objects\b/, /\blead\s*(?:→|->|>)\s*contact\b/],
   },
   {
@@ -3210,6 +3250,7 @@ const RULES: readonly Rule[] = [
     liveRequired: false,
     needsResolve: false,
     reason: 'How fields map between two objects (lead conversion, data transforms).',
+    suggestArgs: deriveFieldMappingArgs,
     patterns: [
       /\bfield\s+mapping\b/,
       /\bhow\s+(do|does)\b.*\bfields?\b.*\bmap\b/,

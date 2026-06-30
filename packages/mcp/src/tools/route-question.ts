@@ -11,6 +11,8 @@
  */
 
 import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 
 import type {
   ComponentType,
@@ -20,6 +22,7 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { resolveComponents, type ResolveResult } from '@sf-intelligence/graph';
+import { findRegistryRoot, listRegisteredVaults } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import { renderRouteMarkdown } from '../answer-render.js';
@@ -510,6 +513,127 @@ const PLAN_FAMILY = /^sfi\.(what_if_|get_impact|safe_to_delete|downstream_effect
 const ASSESSMENT_FAMILY =
   /(_risk_report$|^sfi\.release_readiness|^sfi\.promotion_readiness|^sfi\.coverage_report|^sfi\.tech_debt_score|^sfi\.governor_limit_risks|^sfi\.crud_fls_audit)/;
 
+/** Tools the regex route lists as preambles — they never inherit answering args. */
+const ROUTE_PREAMBLE_TOOLS = new Set(['sfi.resolve', 'sfi.capabilities']);
+
+/** Score floor for regex-hint tools injected into the semantic funnel shortlist. */
+const ROUTE_HINT_SCORE = 0.96;
+
+/**
+ * Registry alias for the vault this server is bound to, when registered.
+ * Falls back to `meta/config.json` `targetOrg`, then manifest `sourceOrg`.
+ */
+const resolveActiveVaultAlias = async (ctx: Context): Promise<string | undefined> => {
+  const normalizedRoot = resolve(ctx.vaultRoot);
+  const listed = await listRegisteredVaults(findRegistryRoot(ctx.vaultRoot));
+  if (listed.ok) {
+    for (const entry of listed.value) {
+      if (resolve(entry.path) === normalizedRoot) return entry.alias;
+    }
+  }
+  try {
+    const raw = await readFile(join(ctx.vaultRoot, 'meta', 'config.json'), 'utf8');
+    const parsed = JSON.parse(raw) as { targetOrg?: unknown };
+    if (typeof parsed.targetOrg === 'string' && parsed.targetOrg.length > 0) {
+      return parsed.targetOrg;
+    }
+  } catch {
+    // config.json is optional on some fixtures
+  }
+  return ctx.manifest.sourceOrg.length > 0 ? ctx.manifest.sourceOrg : undefined;
+};
+
+/**
+ * Per-tool args for every tool in `route.tools` — not just the primary answering
+ * tool. Keeps `list_components` filters, field-mapping pairs, and live tools
+ * separated when the route stacks multiple calls.
+ */
+const buildRouteToolArgsMap = async (
+  route: RouteResult,
+  ctx: Context,
+): Promise<Map<string, Readonly<Record<string, unknown>>>> => {
+  const out = new Map<string, Readonly<Record<string, unknown>>>();
+  const base = route.suggestedArgs ?? {};
+  const primaryIdx = route.tools.findIndex((t) => !ROUTE_PREAMBLE_TOOLS.has(t));
+  const primaryTool = primaryIdx === -1 ? route.tools[0] : route.tools[primaryIdx];
+  const vaultAlias =
+    route.intent === 'field-mapping' ? await resolveActiveVaultAlias(ctx) : undefined;
+
+  for (const tool of route.tools) {
+    if (ROUTE_PREAMBLE_TOOLS.has(tool)) {
+      out.set(tool, {});
+      continue;
+    }
+    if (tool === 'sfi.list_components' && base.type !== undefined) {
+      out.set(tool, base);
+      continue;
+    }
+    if (tool === 'sfi.field_mapping_between_objects') {
+      out.set(tool, {
+        ...base,
+        ...(vaultAlias !== undefined ? { vault: vaultAlias } : {}),
+      });
+      continue;
+    }
+    if (tool === primaryTool) {
+      out.set(tool, base);
+      continue;
+    }
+    out.set(tool, {});
+  }
+  return out;
+};
+
+/** Promote regex route tools into the funnel shortlist with bound suggestedArgs. */
+const mergeRouteHintsIntoCandidates = (
+  route: RouteResult,
+  cands: readonly ToolCandidate[],
+  argsByTool: ReadonlyMap<string, Readonly<Record<string, unknown>>>,
+  k: number,
+): ToolCandidate[] => {
+  if (route.intent === 'unrouted' || route.intent === 'empty') return cands.slice(0, k);
+  const byTool = new Map(cands.map((c) => [c.tool, { ...c }]));
+  for (const tool of route.tools) {
+    if (ROUTE_PREAMBLE_TOOLS.has(tool)) continue;
+    const suggestedArgs = argsByTool.get(tool);
+    const existing = byTool.get(tool);
+    if (existing !== undefined) {
+      byTool.set(tool, {
+        ...existing,
+        score: Math.max(existing.score, ROUTE_HINT_SCORE),
+        ...(suggestedArgs !== undefined && Object.keys(suggestedArgs).length > 0
+          ? { suggestedArgs }
+          : {}),
+        fromRoute: true,
+      });
+    } else {
+      byTool.set(tool, {
+        tool,
+        score: ROUTE_HINT_SCORE,
+        category: null,
+        ...(suggestedArgs !== undefined && Object.keys(suggestedArgs).length > 0
+          ? { suggestedArgs }
+          : {}),
+        fromRoute: true,
+      });
+    }
+  }
+  return [...byTool.values()]
+    .sort((a, b) => b.score - a.score || a.tool.localeCompare(b.tool))
+    .slice(0, k);
+};
+
+const invokeFromArgsMap = (
+  route: RouteResult,
+  argsByTool: ReadonlyMap<string, Readonly<Record<string, unknown>>>,
+): readonly RouteInvocation[] =>
+  route.tools.map((tool): RouteInvocation => {
+    const args = argsByTool.get(tool) ?? {};
+    return CORE_PROFILE_TOOLS.has(tool)
+      ? { tool, args }
+      : { tool: 'sfi.run_analysis', args: { name: tool, args } };
+  });
+
 /** Stable-rerank the funnel candidates so the requested mode's family leads. */
 const rerankForMode = (
   cands: readonly ToolCandidate[],
@@ -550,7 +674,8 @@ const guidanceForMode = (mode: RouteQuestionInput['mode']): string => {
       return (
         'These toolCandidates are the meaning-ranked shortlist — they are PRIMARY and YOU decide. ' +
         'A deterministic `route` is also attached, but only as a HINT (a suggested tool order plus ' +
-        'any resolved entity ids / suggestedArgs) — never follow it blindly. Plan: read the question → ' +
+        'any resolved entity ids / suggestedArgs) — never follow it blindly. When a candidate carries ' +
+        '`suggestedArgs`, treat them as heuristic bindings for that tool. Plan: read the question → ' +
         'resolve any named component with sfi.resolve → pick the tool(s) to run from the candidates ' +
         '(sequence them if compound) → run them → ground the answer with sfi.synthesize_answer. ' +
         'Never answer from a tool name alone.'
@@ -793,23 +918,13 @@ export const routeQuestionHandler = async (
   // the current vault by default (P14-FEEDBACK-gaplog-scope).
   const logged =
     input.logGap === true ? await logGapIfAny(route, undefined, ctx.vaultRoot) : null;
+  const routeToolArgs = await buildRouteToolArgsMap(route, ctx);
   // P13-GW-router-envelope: under the core profile the client only holds 18
   // schemas, so the route also carries EXECUTABLE calls — gateway envelopes
   // for non-core tools (run_analysis is byte-identical to a direct call).
-  // suggestedArgs belong to the PRIMARY ANSWERING tool — the first tool that
-  // is not the resolve preamble (or the sole tool, e.g. component-lookup).
-  const primaryIdx = (() => {
-    const i = route.tools.findIndex((t) => t !== 'sfi.resolve');
-    return i === -1 ? 0 : i;
-  })();
   const invoke =
     toolProfile() === 'core' && !executionBlocked
-      ? route.tools.map((tool, i): RouteInvocation => {
-          const args = i === primaryIdx ? (route.suggestedArgs ?? {}) : {};
-          return CORE_PROFILE_TOOLS.has(tool)
-            ? { tool, args }
-            : { tool: 'sfi.run_analysis', args: { name: tool, args } };
-        })
+      ? invokeFromArgsMap(route, routeToolArgs)
       : undefined;
   // CAE-03b semantic funnel is PRIMARY: in the default HYBRID mode, surface the
   // meaning-ranked candidates + guidance for EVERY routable question and let the
@@ -818,9 +933,15 @@ export const routeQuestionHandler = async (
   // deterministic route alone (Design A, for no-LLM / CI / air-gapped hosts).
   // Offline TF-IDF over the capability map; a mode reranks toward its family.
   const wantCandidates = routerMode() === 'hybrid';
+  const funnelLimit = input.mode !== undefined ? 12 : 8;
   const toolCandidates = wantCandidates
     ? rerankForMode(
-        semanticCandidates(input.question, input.mode !== undefined ? 12 : 8),
+        mergeRouteHintsIntoCandidates(
+          route,
+          semanticCandidates(input.question, funnelLimit),
+          routeToolArgs,
+          funnelLimit,
+        ),
         input.mode,
       )
     : [];

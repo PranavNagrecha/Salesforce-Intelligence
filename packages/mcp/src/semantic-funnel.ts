@@ -30,6 +30,10 @@ export interface ToolCandidate {
   readonly score: number;
   /** Capability area the tool belongs to, or `null` when it is in none. */
   readonly category: string | null;
+  /** Heuristic args when the regex route bound this tool (hybrid mode hint). */
+  readonly suggestedArgs?: Readonly<Record<string, unknown>>;
+  /** True when this row was promoted from the deterministic regex route hint. */
+  readonly fromRoute?: boolean;
 }
 
 /**
@@ -82,6 +86,7 @@ const SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   list: ['components', 'enumerate', 'inventory'],
   relationship: ['lookup', 'child', 'parent', 'schema', 'related'],
   child: ['lookup', 'relationship', 'parent', 'components'],
+  count: ['many', 'number', 'inventory', 'components', 'list'],
   // counts / live records
   how: ['count', 'many', 'number'],
   many: ['count', 'number'],
@@ -187,6 +192,8 @@ export const tokenize = (text: string, expandPhrases = false): string[] => {
 const TOOL_KEYWORDS: Readonly<Record<string, string>> = {
   'sfi.list_components':
     'list inventory enumerate catalog all what do we have how many exist objects fields ' +
+    'custom fields how many fields on object contact account lead opportunity case ' +
+    'metadata count layouts list views triggers validation rules record types web links ' +
     'flows classes triggers profiles permission sets layouts record types validation rules ' +
     'approval processes reports dashboards omniscripts custom standard relationship child ' +
     'parent inactive active picklist values',

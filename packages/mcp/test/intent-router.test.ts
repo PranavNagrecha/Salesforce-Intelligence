@@ -647,6 +647,17 @@ describe('classifyQuestion edge cases', () => {
     });
   });
 
+  it('field-mapping suggests objectA/objectB for Lead→Contact phrasing', () => {
+    expect(
+      classifyQuestion('field_mapping_between_objects Lead→Contact — heuristic conversion map')
+        .suggestedArgs,
+    ).toEqual({ objectA: 'Lead', objectB: 'Contact' });
+    expect(classifyQuestion('How do fields map between Lead and Contact?').suggestedArgs).toEqual({
+      objectA: 'Lead',
+      objectB: 'Contact',
+    });
+  });
+
   it('routes update save-order on hed__Application__c (differential b2-a-05)', () => {
     const r = classifyQuestion(
       'What happens when I update hed__Application__c — which validation rules, flows, and triggers run?',
