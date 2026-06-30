@@ -790,6 +790,7 @@ describe('classifyQuestion edge cases', () => {
     const cases = [
       'The CountCET3 DLRS rollup is recursive — how does the recursive trigger path work?',
       'How does the DLRS recursive rollup CountCET3 behave on save?',
+      'When hed__Course_Enrollment__c is inserted, do dlrs_hed_Course_EnrollmentTrigger and CourseConnectionTrigger both fire?',
     ];
     for (const q of cases) {
       const r = classifyQuestion(q);
@@ -813,6 +814,23 @@ describe('classifyQuestion edge cases', () => {
     expect(
       classifyQuestion('what does the AcmeCheck validation rule enforce').intent,
     ).toBe('explain-validation-rule');
+  });
+
+  it('routes ContactCategorySecurity family questions to validation-rule-family', () => {
+    const q =
+      'On Lead, the ContactCategorySecurity validation rule family protects SIS fields — which Contact_Security_Group__c values trigger protection (is value 3 editable or protected?) and which alias is exempt?';
+    const r = classifyQuestion(q);
+    expect(r.intent).toBe('validation-rule-family');
+    expect(r.tools).toContain('sfi.list_components');
+  });
+
+  it('routes named-credential orphan questions to component-usage with find_component_usages', () => {
+    const q =
+      'Named credential AWS_US_East_1 (NoAuth, ARN endpoint) — is it referenced by any Apex or Flow, or orphaned with zero references?';
+    const r = classifyQuestion(q);
+    expect(r.intent).toBe('component-usage');
+    expect(r.tools).toContain('sfi.find_component_usages');
+    expect(r.suggestedArgs).toEqual({ componentId: 'NamedCredential:AWS_US_East_1' });
   });
 
   it('routes only to real tool names (sfi.*)', () => {

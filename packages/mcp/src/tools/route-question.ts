@@ -262,6 +262,9 @@ const selectedEntityArgsForRoute = (
   if (route.intent === 'impact-analysis' || route.intent === 'component-lookup') {
     return { ...(route.suggestedArgs ?? {}), componentId };
   }
+  if (route.intent === 'component-usage') {
+    return { ...(route.suggestedArgs ?? {}), componentId };
+  }
   if (
     route.intent === 'object-access' ||
     route.intent === 'who-can-access-object' ||
