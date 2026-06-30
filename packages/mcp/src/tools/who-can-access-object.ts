@@ -153,6 +153,12 @@ export interface WhoCanAccessObjectOutput {
   readonly owd: string;
   /** True when a public OWD grants every internal user access to every record. */
   readonly owdGrantsAllInternalUsers: boolean;
+  /**
+   * External OWD (externalSharingModel) — controls access for Experience Cloud
+   * / community (external) users. `null` when the object metadata does not
+   * declare an external OWD (standard objects or non-sharing variants).
+   */
+  readonly externalOwd: string | null;
   readonly granters: readonly AccessGranter[];
   readonly summary: {
     /** ROW count — a grantor with multiple capability paths contributes >1 row. */
@@ -228,6 +234,7 @@ export const whoCanAccessObjectHandler = async (
   const objectNode = objectResult.value;
   const owd = stringProp(objectNode.properties, 'sharingModel') || 'Unknown';
   const owdGrantsAllInternalUsers = PUBLIC_OWD_READ.has(owd);
+  const externalOwd = stringProp(objectNode.properties, 'externalSharingModel') ?? null;
 
   // Restriction rules on this object FILTER records for users matching each
   // rule's user criteria — narrowing even View/Modify All Data holders.
@@ -510,9 +517,13 @@ export const whoCanAccessObjectHandler = async (
   const hasMore = offset + page.length < total;
   const truncated = hasMore || offset > 0;
 
+  const externalOwdNote =
+    externalOwd !== null
+      ? ` External OWD (externalSharingModel): '${externalOwd}' — controls access for Experience Cloud / community users.`
+      : '';
   const owdNote = owdGrantsAllInternalUsers
-    ? `OWD '${owd}' is PUBLIC — every internal user can ${owd === 'Read' ? 'read' : 'read and edit'} EVERY record of this object, beyond the principals listed.`
-    : `OWD '${owd}' is private/controlled — record access flows only from the listed grants/rules plus ownership.`;
+    ? `OWD '${owd}' is PUBLIC — every internal user can ${owd === 'Read' ? 'read' : 'read and edit'} EVERY record of this object, beyond the principals listed.${externalOwdNote}`
+    : `OWD '${owd}' is private/controlled — record access flows only from the listed grants/rules plus ownership.${externalOwdNote}`;
   const multiRowNote =
     total > distinctGranters
       ? ` ${total} granter rows come from ${distinctGranters} distinct Profile/PermissionSet/role/group(s) — each independent capability (read/create/edit/delete + View/Modify-All) is its own row, so a principal can appear in several. Count ACTORS by \`summary.distinctGranters\`, not row count.`
@@ -567,6 +578,7 @@ export const whoCanAccessObjectHandler = async (
       objectLabel: objectNode.label ?? objectNode.apiName,
       owd,
       owdGrantsAllInternalUsers,
+      externalOwd,
       granters: page,
       summary: {
         total,

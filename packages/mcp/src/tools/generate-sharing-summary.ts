@@ -167,6 +167,12 @@ const ruleCriteriaCell = (
 interface ObjectSharing {
   readonly object: Node;
   readonly owd: string;
+  /**
+   * External OWD (externalSharingModel) — controls access for Experience Cloud
+   * / community (external) users. `null` when the object metadata does not
+   * declare an external OWD.
+   */
+  readonly externalOwd: string | null;
   readonly sharingRules: readonly Node[];
   readonly profilesWithGrants: number;
   readonly permSetsWithGrants: number;
@@ -259,10 +265,15 @@ const renderObjectSection = (
   sharingRuleNotRetrieved: boolean,
 ): string => {
   const label = entry.object.label ?? entry.object.apiName;
+  const externalOwdLine =
+    entry.externalOwd !== null
+      ? `**External OWD (externalSharingModel):** \`${entry.externalOwd}\` — controls access for Experience Cloud / community (external) users  `
+      : '';
   const lines: string[] = [
     `## ${escapeCell(label)} (\`${entry.object.apiName}\`)`,
     '',
     `**OWD (Sharing Model):** \`${entry.owd}\`  `,
+    ...(externalOwdLine ? [externalOwdLine] : []),
     `**Profiles with grants:** ${entry.profilesWithGrants.toString()}  `,
     `**PermissionSets with grants:** ${entry.permSetsWithGrants.toString()}`,
     '',
@@ -484,6 +495,10 @@ export const generateSharingSummaryHandler = async (
     const grantsResult = await tallyGrants(ctx, object);
     if (!grantsResult.ok) return err(grantsResult.error);
     const owd = stringProp(object.properties, 'sharingModel', 'Unknown');
+    const externalOwdRaw = object.properties['externalSharingModel'];
+    const externalOwd = typeof externalOwdRaw === 'string' && externalOwdRaw.length > 0
+      ? externalOwdRaw
+      : null;
     const rules = sharingIndex.get(object.apiName) ?? [];
     // CR-CAP-05b: name each rule's sharedWith recipient (was omitted) via the
     // shared role-subtree helper, so this surface matches who_can_access_object.
@@ -497,6 +512,7 @@ export const generateSharingSummaryHandler = async (
     entries.push({
       object,
       owd,
+      externalOwd,
       sharingRules: rules,
       profilesWithGrants: grantsResult.value.profiles.size,
       permSetsWithGrants: grantsResult.value.permSets.size,
