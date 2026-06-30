@@ -27,7 +27,7 @@ import type { Plane } from './intent-router.js';
 import { CATEGORIES } from './tools/capabilities.js';
 import { V01_TOOLS } from './tools/index.js';
 
-/** Funnel-local confidence in the shortlist itself (I2 will calibrate). */
+/** Funnel-local confidence in the shortlist itself (I2a-calibrated band). */
 export type FunnelConfidence = 'high' | 'medium' | 'low';
 
 /** One meaning-ranked tool candidate for the host LLM to choose from. */
@@ -53,8 +53,10 @@ export interface ToolCandidate {
    */
   readonly liveRequired: boolean;
   /**
-   * First-cut confidence in the SHORTLIST (margin + coverage led, not raw
-   * score — vault/gap top-score distributions overlap). I2 recalibrates.
+   * Calibrated confidence in the SHORTLIST (margin + coverage led, not raw
+   * score — vault/gap top-score distributions overlap). I2a tuned the band
+   * against the corpus-gen distributions so gap shortlists read `low` ~2× as
+   * often as vault shortlists, without truncating either.
    */
   readonly confidence: FunnelConfidence;
   /** Heuristic args when the regex route bound this tool (hybrid mode hint). */
@@ -283,6 +285,32 @@ const planeForTool = (toolName: string): Exclude<Plane, 'unknown' | 'knowledge'>
 };
 
 /**
+ * I2a — meta/orchestration tools that are NEVER the answer to a user's org
+ * question, excluded from the ANSWER-candidate shortlist (`semanticCandidates`).
+ *
+ * `route_question`, `synthesize_answer`, `run_analysis`, `list_analyses`, and
+ * `describe_analysis` are the funnel's own plumbing (route, ground, list/run a
+ * saved analysis). A host LLM already IS the router and grounding layer, so
+ * surfacing these as "tools to answer the question with" is noise that crowds a
+ * real answer tool out of the top-K. They are still INDEXED and SCORED (so the
+ * IDF corpus is unchanged — no ranking shift for the real tools); they are only
+ * dropped from the returned candidate list.
+ *
+ * KEPT on purpose: `resolve` (the canonical first-move name lookup),
+ * `guidance`, and `capabilities` (real knowledge answers — "what can you do",
+ * "how do I…"). None of these five appears as an `expectedTool` / `anyOf`
+ * family in the QA gold (router-goldset, router-recall, funnel-generalization),
+ * verified before exclusion, so recall is unaffected.
+ */
+const EXCLUDED_FROM_CANDIDATES: ReadonlySet<string> = new Set([
+  'sfi.route_question',
+  'sfi.synthesize_answer',
+  'sfi.run_analysis',
+  'sfi.list_analyses',
+  'sfi.describe_analysis',
+]);
+
+/**
  * Only a `live`-plane tool needs the opt-in live read to answer at all. A
  * `hybrid` tool answers from the vault and treats live as OPTIONAL enrichment
  * (its live magnitude rides on a separate `live` companion candidate), so it
@@ -427,32 +455,62 @@ export const resetFunnelIndex = (): void => {
 };
 
 /**
- * First-cut funnel-confidence thresholds. Per the Phase-0 finding, absolute
- * score alone is a weak signal — vault and gap top-score distributions overlap
- * (median 0.24 vs 0.17), so confidence leans on the top1−top2 MARGIN (how
- * decisively one tool leads) and query-term COVERAGE (how much of the user's
- * wording the corpus actually understood).
+ * I2a — funnel-confidence thresholds, CALIBRATED against the real corpus-gen
+ * distributions (QA scripts/corpus-gen.mjs, --seed 1/2 --per 4). Per the Phase-0
+ * finding, absolute top-score alone is a BLUNT signal — the vault-positive and
+ * gap (nothing-answers-it) top-score distributions OVERLAP:
  *
- * TODO I2: calibrate against corpus-gen distributions (these are deliberate,
- * honest first-cut guesses; I2 owns the calibration pass).
+ *            top1 med   margin med   coverage med
+ *   vault      0.24        0.046         0.83
+ *   live       0.19        0.035         0.85
+ *   gap        0.17        0.031         0.75
+ *
+ * So an absolute score floor would either pass the gaps or kill real low-scoring
+ * vault hits (BA recall is the weakest at ~68%). Confidence therefore leans on
+ * the top1−top2 MARGIN (how decisively ONE tool leads) and query-term COVERAGE
+ * (the fraction of the user's own non-stopword tokens the corpus understood),
+ * with top1 only as a strength rescue. The result: gap shortlists read `low`
+ * roughly twice as often as vault shortlists do, WITHOUT truncating either.
  */
-const CONF_HIGH_TOP1 = 0.3;
-const CONF_HIGH_MARGIN = 0.08;
-const CONF_HIGH_COVERAGE = 0.5;
-const CONF_LOW_TOP1 = 0.12;
-const CONF_LOW_COVERAGE = 0.34;
+// `high`: one tool leads decisively AND the corpus understood most of the query.
+const CONF_HIGH_TOP1 = 0.27;
+const CONF_HIGH_MARGIN = 0.05;
+const CONF_HIGH_COVERAGE = 0.8;
+// Conservative absolute gap FLOOR — set BELOW the gap median (0.17) so it only
+// catches the CLEAREST non-matches; it does NOT truncate, it forces `low`.
+const CONF_FLOOR_TOP1 = 0.09;
+// Near-zero coverage: most of the user's words were unknown to the corpus.
+const CONF_MIN_COVERAGE = 0.34;
+// `low` band: a thin top1−top2 lead (the #1 tool barely beats #2) UNLESS rescued
+// by a strong absolute lead or strong coverage; or sub-vault-median coverage.
+const CONF_LOW_MARGIN = 0.045;
+const CONF_RESCUE_TOP1 = 0.26;
+const CONF_RESCUE_COVERAGE = 0.84;
+const CONF_LOW_COVERAGE = 0.72;
 
 /**
- * Deterministic first-cut confidence from the ranked head: high when one tool
- * leads decisively AND the corpus understood the query; low when the lead is
- * weak OR most query words were unknown; medium otherwise.
+ * Deterministic, calibrated confidence from the ranked head + query coverage.
+ *
+ * GAP-HONESTY, NOT TRUNCATION: when the clearest gap signals fire (top1 below the
+ * conservative floor OR almost no query tokens understood), we force `low` and
+ * STILL return the candidates. The honest gap signal is `confidence: low` — I3
+ * turns that into a user-facing disclosure. We never return [] / truncate here
+ * because the vault/gap overlap means truncation would silently drop real
+ * low-scoring vault hits (esp. BA), trading a false-confidence problem for a
+ * false-negative one.
  */
 const funnelConfidence = (top1: number, top2: number, coverage: number): FunnelConfidence => {
   const margin = top1 - top2;
+  // Conservative gap floor + near-zero coverage → the clearest non-matches.
+  if (top1 < CONF_FLOOR_TOP1 || coverage < CONF_MIN_COVERAGE) return 'low';
   if (top1 >= CONF_HIGH_TOP1 && margin >= CONF_HIGH_MARGIN && coverage >= CONF_HIGH_COVERAGE) {
     return 'high';
   }
-  if (top1 < CONF_LOW_TOP1 || coverage < CONF_LOW_COVERAGE) return 'low';
+  // A weak lead (top1 barely beats top2) reads `low` unless a strong absolute
+  // lead or strong coverage rescues it — that is the margin-led gap signal.
+  const weakLead =
+    margin < CONF_LOW_MARGIN && top1 < CONF_RESCUE_TOP1 && coverage < CONF_RESCUE_COVERAGE;
+  if (weakLead || coverage < CONF_LOW_COVERAGE) return 'low';
   return 'medium';
 };
 
@@ -521,10 +579,18 @@ export const semanticCandidates = (question: string, k = 8): ToolCandidate[] => 
   }
   scored.sort((a, b) => b.score - a.score || a.tool.localeCompare(b.tool));
 
+  // I2a — DROP meta/orchestration tools from the ANSWER-candidate set. They were
+  // fully indexed + scored above (so the IDF corpus and the cosine ranking of the
+  // real tools are unchanged — no top-1 shift), but they are never the answer to
+  // a user's org question, so they are filtered out here to free top-K slots for
+  // real tools. top1/top2 and the returned shortlist all come from the filtered
+  // ranking, so confidence reflects the actual candidate set the host LLM reads.
+  const candidates = scored.filter((row) => !EXCLUDED_FROM_CANDIDATES.has(row.tool));
+
   // One confidence for the shortlist, derived from the ranked head + coverage,
   // then stamped on every returned candidate (I2 may make this per-row).
-  const top1 = scored[0]?.score ?? 0;
-  const top2 = scored[1]?.score ?? 0;
+  const top1 = candidates[0]?.score ?? 0;
+  const top2 = candidates[1]?.score ?? 0;
   const confidence = funnelConfidence(top1, top2, coverage);
-  return scored.slice(0, k).map((row) => ({ ...row, confidence }));
+  return candidates.slice(0, k).map((row) => ({ ...row, confidence }));
 };
