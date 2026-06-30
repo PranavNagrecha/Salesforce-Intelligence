@@ -555,7 +555,6 @@ describe('classifyQuestion edge cases', () => {
     // list_components REQUIRES `type` (v0.1 contract), so a discovery enumeration
     // would error "type is required" without this hint.
     const cases: ReadonlyArray<{ readonly q: string; readonly type: string }> = [
-      { q: 'Duplicate rules on Lead', type: 'DuplicateRule' },
       { q: 'What validation rules exist?', type: 'ValidationRule' },
       { q: 'What record types do we have?', type: 'RecordType' },
       { q: 'List all flows', type: 'Flow' },
@@ -567,6 +566,38 @@ describe('classifyQuestion edge cases', () => {
       expect(r.tools[0]).toBe('sfi.list_components');
       expect(r.suggestedArgs).toEqual({ type });
     }
+    expect(classifyQuestion('Duplicate rules on Lead').suggestedArgs).toEqual({
+      type: 'DuplicateRule',
+      parentId: 'CustomObject:Lead',
+    });
+  });
+
+  it('metadata-count suggests flow filters for record-triggered flow counts (differential b1-a-03)', () => {
+    expect(
+      classifyQuestion(
+        'How many active record-triggered flows are on hed__Application__c?',
+      ).suggestedArgs,
+    ).toEqual({
+      type: 'Flow',
+      status: 'Active',
+      recordTriggered: true,
+      triggerObject: 'hed__Application__c',
+    });
+  });
+
+  it('routes Apex triggers on object to automation-on-object (differential b1-a-06)', () => {
+    const r = classifyQuestion('What Apex triggers fire on Payment__c?');
+    expect(r.intent).toBe('automation-on-object');
+    expect(r.tools).toContain('sfi.automation_build_advisor');
+    expect(r.suggestedArgs).toEqual({ objectApiName: 'Payment__c' });
+  });
+
+  it('routes permission-set object access to object-access (differential b1-a-05)', () => {
+    const r = classifyQuestion(
+      'Which permission sets grant object access to Payment__c?',
+    );
+    expect(r.intent).toBe('object-access');
+    expect(r.tools).toContain('sfi.object_access_audit');
   });
 
   it('schema route suggests parent-scoped CustomField list for field inventory (FLD-05)', () => {

@@ -119,7 +119,10 @@ interface Rule {
    * e.g. parse the DML event for a save-order route. Returns undefined when
    * nothing can be inferred.
    */
-  readonly suggestArgs?: (q: string) => Readonly<Record<string, unknown>> | undefined;
+  readonly suggestArgs?: (
+    q: string,
+    question?: string,
+  ) => Readonly<Record<string, unknown>> | undefined;
 }
 
 const riskForIntent = (intent: string): RouteRisk => {
@@ -138,7 +141,7 @@ const riskForIntent = (intent: string): RouteRisk => {
 };
 
 const routeFromRule = (question: string, q: string, rule: Rule): RouteResult => {
-  const suggestedArgs = rule.suggestArgs?.(q);
+  const suggestedArgs = rule.suggestArgs?.(q, question);
   return {
     question,
     plane: rule.plane,
@@ -325,6 +328,51 @@ const deriveFieldListParent = (q: string): string | undefined => {
     }
   }
   return undefined;
+};
+
+/**
+ * Parent object for metadata families scoped to one object (duplicate rules on
+ * Lead, validation rules on Contact, flows on hed__Application__c).
+ */
+const deriveMetadataParentId = (q: string, question?: string): string | undefined => {
+  const fieldParent = deriveFieldListParent(q);
+  if (fieldParent !== undefined) return fieldParent;
+  const source = question ?? q;
+  const onObject = source.match(
+    /\b(?:on|for|configured\s+on|access\s+to)\s+(?:the\s+)?([A-Za-z][A-Za-z0-9_]*(?:__c|__mdt)?)\b/,
+  );
+  if (onObject?.[1] !== undefined) return `CustomObject:${onObject[1]}`;
+  return undefined;
+};
+
+/** Extract a Salesforce object apiName from a routed question phrase. */
+const deriveObjectApiFromQuestion = (q: string, question?: string): string | undefined => {
+  const source = question ?? q;
+  const onObject = source.match(
+    /\b(?:on|for|to|access\s+to)\s+(?:the\s+)?([A-Za-z][A-Za-z0-9_]*(?:__c|__mdt|__e)?)\b/,
+  );
+  if (onObject?.[1] !== undefined) return onObject[1];
+  const custom = source.match(/\b([A-Za-z][A-Za-z0-9_]*__(?:c|mdt|e))\b/);
+  return custom?.[1];
+};
+
+/**
+ * `list_components` narrows for metadata-count questions about flows on an object.
+ */
+const deriveMetadataCountArgs = (
+  q: string,
+  question?: string,
+): Readonly<Record<string, unknown>> | undefined => {
+  if (!/\bflows?\b/.test(q)) return undefined;
+  const triggerObject = deriveObjectApiFromQuestion(q, question);
+  const recordTriggered =
+    /\brecord[-\s]?triggered\b/.test(q) || /\brecordtriggered\b/.test(q);
+  if (!recordTriggered && triggerObject === undefined) return undefined;
+  const args: Record<string, unknown> = { type: 'Flow' };
+  if (/\bactive\b/.test(q) || recordTriggered) args.status = 'Active';
+  if (recordTriggered) args.recordTriggered = true;
+  if (triggerObject !== undefined) args.triggerObject = triggerObject;
+  return args;
 };
 
 /**
@@ -734,6 +782,7 @@ const RULES: readonly Rule[] = [
     needsResolve: false,
     reason:
       'Counting metadata components (layouts, fields, objects, profiles, validation rules, flows, classes, record types, list views) is a vault list_components count — not live record data.',
+    suggestArgs: deriveMetadataCountArgs,
     patterns: [
       /\bhow\s+many\b.*\b(page\s+layouts?|layouts?|custom\s+objects?|profiles?|permission\s+sets?|validation\s+rules?|flows?|(apex\s+)?classes?|triggers?|record\s+types?|list\s+views?|report\s+types?|record\s+pages?|flexipages?|approval\s+process(es)?|custom\s+settings?|quick\s+actions?|sharing\s+rules?|named\s+credentials?|picklists?)\b/,
       /\bhow\s+many\b.*\blayouts?\b.*\b(per|for\s+each|by)\b.*\bprofiles?\b/,
@@ -1120,6 +1169,8 @@ const RULES: readonly Rule[] = [
       /\bwho\s+(can|is\s+able\s+to)\s+(create|insert|delete)\b/,
       /\b(which|what)\s+(profiles?|permission\s+sets?|users?)\b.*\bcan\s+(create|insert|delete)\b/,
       /\b(which|what)\s+(profiles?|permission\s+sets?)\b.*\b(grant|allow)\b.*\b(create|delete)\b/,
+      /\b(which|what)\s+permission\s+sets?\b.*\bgrant\b.*\b(access|object)\b/,
+      /\bpermission\s+sets?\b.*\bgrant\b.*\bobject\s+access\b/,
     ],
   },
   {
@@ -1510,10 +1561,16 @@ const RULES: readonly Rule[] = [
     liveRequired: false,
     needsResolve: true,
     reason: 'What automation already exists on an object — the pre-build briefing.',
+    suggestArgs: (q, question) => {
+      const objectApiName = deriveObjectApiFromQuestion(q, question);
+      return objectApiName !== undefined ? { objectApiName } : undefined;
+    },
     patterns: [
       /\bwhat\s+automation\b/,
       /\b(before\s+i\s+build|before\s+adding|building)\b.*\b(automation|flow|trigger)\b/,
-      /\b(triggers?|flows?|validation\s+rules?|workflows?)\b.*\bon\b.*\b(object|account|contact|case|opportunity)\b/,
+      /\b(what|which|list)\b.*\bapex\s+triggers?\b.*\b(fire|run|on|for)\b/,
+      /\b(what|which)\s+triggers?\b.*\b(fire|run)\b.*\bon\b/,
+      /^(?!.*\b(list|how\s+many)\b).*\b(triggers?|flows?|validation\s+rules?|workflows?)\b.*\bon\b.*\b(object|account|contact|case|opportunity)\b/,
     ],
   },
   {
@@ -2891,11 +2948,13 @@ const RULES: readonly Rule[] = [
     liveRequired: false,
     needsResolve: true,
     reason: 'Object/field/record-type/picklist structure is the core of the offline vault.',
-    suggestArgs: (q) => {
+    suggestArgs: (q, question) => {
       const type = deriveListType(q);
+      const parentId = deriveMetadataParentId(q, question);
+      if (type !== undefined && parentId !== undefined) return { type, parentId };
       if (type !== undefined) return { type };
-      const parentId = deriveFieldListParent(q);
-      if (parentId !== undefined) return { type: 'CustomField', parentId };
+      const fieldParent = deriveFieldListParent(q);
+      if (fieldParent !== undefined) return { type: 'CustomField', parentId: fieldParent };
       return undefined;
     },
     patterns: [

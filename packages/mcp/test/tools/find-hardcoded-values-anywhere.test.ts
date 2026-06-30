@@ -1,6 +1,6 @@
 /// <reference types="vitest/globals" />
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -589,5 +589,161 @@ describe('findHardcodedValuesAnywhereHandler — $Permission.* guard searchabili
     expect(r.ok).toBe(true); if (!r.ok) return;
     // Every match must be confidence: 'declared' (not heuristic) since we supplied an exact value.
     expect(r.value.data.matches.every((m) => m.confidence === 'declared')).toBe(true);
+  });
+});
+
+// =============================================================================
+// CR-07: Source-file email fallback
+//
+// Root cause: the graph's `qualityIssues[]` for an ApexClass may be STALE —
+// the email was added to the source file after the last vault refresh, so the
+// graph node has no `hardcoded-email` entry. Without the CR-07 fix, calling
+// {category:'email'} misses those addresses entirely.
+//
+// Fix: when category==='email' or valueFilter contains '@', the handler also
+// scans raw .cls/.trigger source files and de-dupes against graph findings.
+//
+// This test creates a vault where the ApexClass node in the graph has NO
+// hardcoded-email qualityIssue (stale graph), but the actual .cls source
+// file on disk contains a hardcoded email. Verifies the email is found.
+// =============================================================================
+
+// Seed kept at module scope so the fail-before synchronous test can inspect it
+// without needing to re-construct it inside the `it` callback.
+const cr07Seed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: 'ApexClass:NotificationService',
+      type: 'ApexClass',
+      apiName: 'NotificationService',
+      properties: {
+        isTest: false,
+        qualityIssues: [
+          {
+            rule: 'missing-fls-check',
+            severity: 'medium',
+            location: 'line 5',
+            explanation: 'Field-level security check missing',
+            confidence: 'heuristic',
+          },
+          // NOTE: deliberately NO hardcoded-email entry — simulates stale graph.
+        ],
+      },
+    }),
+  ],
+  edges: [],
+};
+
+describe('findHardcodedValuesAnywhereHandler — CR-07 source-file email fallback', () => {
+  let cr07Dir: string;
+  let cr07Store: GraphStore;
+  let cr07Ctx: Context;
+
+  const CR07_CLASS_NAME = 'NotificationService';
+  const CR07_EMAIL = 'noreply@acmeco.example';
+
+  beforeAll(async () => {
+    cr07Dir = mkdtempSync(join(tmpdir(), 'sfi-fhva-cr07-'));
+
+    const opened = await openGraph(join(cr07Dir, 'cr07.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    cr07Store = opened.value;
+    const imp = await importExtractionResults(cr07Store, [cr07Seed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    cr07Ctx = { vaultRoot: cr07Dir, manifest: MANIFEST, graph: cr07Store };
+
+    // Write the source .cls file on disk WITH the hardcoded email.
+    // The graph doesn't know about it (stale) but the file exists on disk.
+    const clsDir = join(cr07Dir, 'source', 'main', 'default', 'classes');
+    mkdirSync(clsDir, { recursive: true });
+    writeFileSync(
+      join(clsDir, `${CR07_CLASS_NAME}.cls`),
+      [
+        'public class NotificationService {',
+        "    private static final String FALLBACK_EMAIL = 'noreply@acmeco.example';",
+        '    public void sendAlert(String body) {',
+        '        Messaging.SingleEmailMessage mail = new Messaging.SingleEmailMessage();',
+        '        mail.setToAddresses(new List<String>{ FALLBACK_EMAIL });',
+        '        Messaging.sendEmail(new List<Messaging.SingleEmailMessage>{ mail });',
+        '    }',
+        '}',
+      ].join('\n'),
+    );
+  });
+
+  afterAll(async () => {
+    await closeGraph(cr07Store);
+    rmSync(cr07Dir, { recursive: true, force: true });
+  });
+
+  it('CR-07 fail-before: the seed graph has no hardcoded-email qualityIssue (confirms stale-graph scenario)', () => {
+    // Without the CR-07 source-file fallback, {category:'email'} would consult
+    // only graph qualityIssues and find zero email matches for this class.
+    // This test confirms the seed is correctly configured (no graph email entry).
+    const qualityIssues = cr07Seed.nodes[0]?.properties['qualityIssues'];
+    const hasEmailInGraph =
+      Array.isArray(qualityIssues) &&
+      (qualityIssues as Array<{ rule: string }>).some(
+        (q) => q.rule === 'hardcoded-email',
+      );
+    expect(hasEmailInGraph).toBe(false);
+  });
+
+  it('CR-07 pass-after: {category:"email"} finds the email in a stale-graph class via source-file scan', async () => {
+    const r = await findHardcodedValuesAnywhereHandler(cr07Ctx, {
+      category: 'email',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const found = r.value.data.matches.some(
+      (m) => m.category === 'email' && m.matchedValue === CR07_EMAIL,
+    );
+    // With the CR-07 fix, the email is surfaced even though the graph has no
+    // hardcoded-email qualityIssue (the source file is scanned directly).
+    expect(found).toBe(true);
+  });
+
+  it('CR-07: {value:"noreply@acmeco.example"} (an @-bearing value) also triggers source-file scan', async () => {
+    const r = await findHardcodedValuesAnywhereHandler(cr07Ctx, {
+      value: CR07_EMAIL,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const found = r.value.data.matches.some((m) => m.matchedValue === CR07_EMAIL);
+    expect(found).toBe(true);
+  });
+
+  it('CR-07: the source-scan hit carries componentId=ApexClass:NotificationService, source=apex, confidence=heuristic', async () => {
+    const r = await findHardcodedValuesAnywhereHandler(cr07Ctx, {
+      category: 'email',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const hit = r.value.data.matches.find((m) => m.matchedValue === CR07_EMAIL);
+    expect(hit).toBeDefined();
+    expect(hit?.componentId).toBe(`ApexClass:${CR07_CLASS_NAME}`);
+    expect(hit?.source).toBe('apex');
+    expect(hit?.confidence).toBe('heuristic');
+  });
+
+  it('CR-07: source-scan disclosure appears in boundaries when category=email', async () => {
+    const r = await findHardcodedValuesAnywhereHandler(cr07Ctx, {
+      category: 'email',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const joined = r.value.data.boundaries.join(' ');
+    expect(joined).toContain('CR-07');
+    expect(joined).toContain('source files were also scanned');
+  });
+
+  it('CR-07: category=id does NOT trigger the source-file scan (no CR-07 disclosure)', async () => {
+    const r = await findHardcodedValuesAnywhereHandler(cr07Ctx, {
+      category: 'id',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const joined = r.value.data.boundaries.join(' ');
+    expect(joined).not.toContain('CR-07');
   });
 });
