@@ -356,4 +356,157 @@ describe('searchFlowMetadataInputSchema', () => {
     });
     expect(parsed.success).toBe(true);
   });
+
+  // CR-06: new input combinations that were previously rejected.
+  it('CR-06: accepts summarize=true without a query', () => {
+    expect(
+      searchFlowMetadataInputSchema.safeParse({ summarize: true }).success,
+    ).toBe(true);
+  });
+
+  it('CR-06: accepts summarize=true combined with a query', () => {
+    expect(
+      searchFlowMetadataInputSchema.safeParse({
+        summarize: true,
+        query: 'Active',
+      }).success,
+    ).toBe(true);
+  });
+
+  it('CR-06: accepts triggerObject alone (with summarize=true)', () => {
+    expect(
+      searchFlowMetadataInputSchema.safeParse({
+        summarize: true,
+        triggerObject: 'Account',
+      }).success,
+    ).toBe(true);
+  });
+
+  it('CR-06: still rejects an empty object (no query AND no summarize)', () => {
+    expect(searchFlowMetadataInputSchema.safeParse({}).success).toBe(false);
+  });
+});
+
+// =============================================================================
+// CR-06: summarize mode + triggerObject filter
+// Uses a self-contained temp vault so these tests are independent of the
+// shared fixture (which has no <status> elements in its flows).
+// =============================================================================
+describe('searchFlowMetadataHandler — CR-06 summarize + triggerObject', () => {
+  let cr06Dir: string;
+  let cr06Store: GraphStore;
+  let cr06Ctx: Context;
+
+  beforeAll(async () => {
+    cr06Dir = mkdtempSync(join(tmpdir(), 'sfi-sfm-cr06-'));
+    const opened = await openGraph(join(cr06Dir, 'unused.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    cr06Store = opened.value;
+    cr06Ctx = { vaultRoot: cr06Dir, manifest: FIXTURE_MANIFEST, graph: cr06Store };
+
+    // Helper: write a flow with a given <status> and optional <object>.
+    const writeStatusFlow = (name: string, status: string, object?: string): void => {
+      const dir = join(cr06Dir, 'source', 'flows');
+      mkdirSync(dir, { recursive: true });
+      const objectXml = object !== undefined ? `    <object>${object}</object>\n` : '';
+      writeFileSync(
+        join(dir, name),
+        `<?xml version="1.0" encoding="UTF-8"?>\n<Flow xmlns="http://soap.sforce.com/2006/04/metadata">\n    <status>${status}</status>\n${objectXml}</Flow>\n`,
+      );
+    };
+
+    // Corpus:
+    //   3 Active flows (2 on Account, 1 on Contact)
+    //   2 Obsolete flows (1 on Account)
+    //   1 Draft flow (on Opportunity)
+    //   1 flow with no <status> element (counts as "other")
+    writeStatusFlow('Act_Flow_A.flow-meta.xml', 'Active', 'Account');
+    writeStatusFlow('Act_Flow_B.flow-meta.xml', 'Active', 'Account');
+    writeStatusFlow('Act_Flow_C.flow-meta.xml', 'Active', 'Contact');
+    writeStatusFlow('Obs_Flow_A.flow-meta.xml', 'Obsolete', 'Account');
+    writeStatusFlow('Obs_Flow_B.flow-meta.xml', 'Obsolete');
+    writeStatusFlow('Draft_Flow.flow-meta.xml', 'Draft', 'Opportunity');
+    // No <status> tag — counts as "other"
+    const noStatusDir = join(cr06Dir, 'source', 'flows');
+    writeFileSync(
+      join(noStatusDir, 'NoStatus_Flow.flow-meta.xml'),
+      '<?xml version="1.0" encoding="UTF-8"?>\n<Flow xmlns="http://soap.sforce.com/2006/04/metadata">\n    <label>No status</label>\n</Flow>\n',
+    );
+  });
+
+  afterAll(async () => {
+    await closeGraph(cr06Store);
+    rmSync(cr06Dir, { recursive: true, force: true });
+  });
+
+  it('CR-06 fail-before: {summarize:true} would have been rejected by the old schema (no query)', () => {
+    // The OLD schema required query to be present; the new refine allows
+    // summarize:true with no query. This test verifies the schema ACCEPTS it
+    // (the fail-before assertion is: the old schema would have returned
+    // parsed.success === false for {}; after the fix it returns true for
+    // {summarize:true}).
+    const parsed = searchFlowMetadataInputSchema.safeParse({ summarize: true });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('CR-06: summarize=true returns statusSummary with correct totals', async () => {
+    const r = await searchFlowMetadataHandler(cr06Ctx, { summarize: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const summary = r.value.data.statusSummary;
+    expect(summary).toBeDefined();
+    if (summary === undefined) return;
+    // 3 Active, 2 Obsolete, 1 Draft, 0 InvalidDraft, 1 other (no status tag), total 7.
+    expect(summary.Active).toBe(3);
+    expect(summary.Obsolete).toBe(2);
+    expect(summary.Draft).toBe(1);
+    expect(summary.InvalidDraft).toBe(0);
+    expect(summary.other).toBe(1);
+    expect(summary.total).toBe(7);
+    // No query → no line matches.
+    expect(r.value.data.matches).toHaveLength(0);
+    expect(r.value.data.truncated).toBe(false);
+  });
+
+  it('CR-06: summarize=true with triggerObject=Account counts only Account flows', async () => {
+    const r = await searchFlowMetadataHandler(cr06Ctx, {
+      summarize: true,
+      triggerObject: 'Account',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const summary = r.value.data.statusSummary;
+    expect(summary).toBeDefined();
+    if (summary === undefined) return;
+    // 2 Active on Account, 1 Obsolete on Account — total 3.
+    expect(summary.Active).toBe(2);
+    expect(summary.Obsolete).toBe(1);
+    expect(summary.Draft).toBe(0);
+    expect(summary.total).toBe(3);
+  });
+
+  it('CR-06: summarize=true plus query returns both summary and line matches', async () => {
+    const r = await searchFlowMetadataHandler(cr06Ctx, {
+      summarize: true,
+      query: '<status>Active</status>',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Summary is present.
+    expect(r.value.data.statusSummary).toBeDefined();
+    // And line matches are also present (3 Active flows, 1 match per file).
+    expect(r.value.data.matches.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('CR-06: triggerObject filters line matches too (query + triggerObject)', async () => {
+    const r = await searchFlowMetadataHandler(cr06Ctx, {
+      query: 'status',
+      triggerObject: 'Opportunity',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Only Draft_Flow has <object>Opportunity</object>; only its status line matches.
+    expect(r.value.data.matches.every((m) => m.path.includes('Draft_Flow'))).toBe(true);
+    expect(r.value.data.matches.length).toBeGreaterThanOrEqual(1);
+  });
 });

@@ -262,6 +262,20 @@ const selectedEntityArgsForRoute = (
   if (route.intent === 'impact-analysis' || route.intent === 'component-lookup') {
     return { ...(route.suggestedArgs ?? {}), componentId };
   }
+  if (
+    route.intent === 'object-access' ||
+    route.intent === 'who-can-access-object' ||
+    route.intent === 'automation-on-object'
+  ) {
+    const objectComponentId = componentId.startsWith('CustomObject:')
+      ? componentId
+      : `CustomObject:${componentId}`;
+    if (route.intent === 'automation-on-object') {
+      const apiName = objectComponentId.slice('CustomObject:'.length);
+      return { ...(route.suggestedArgs ?? {}), objectApiName: apiName };
+    }
+    return { ...(route.suggestedArgs ?? {}), componentId: objectComponentId };
+  }
   return null;
 };
 

@@ -70,6 +70,13 @@ export interface ListNodesOptions {
    * parameterised JSON path, never as raw SQL.
    */
   readonly propertyEquals?: Readonly<Record<string, boolean>>;
+  /**
+   * Exact string matches on `properties_json` keys (e.g. Flow `status`,
+   * `triggerObject`). Keys are parameterised JSON paths — never concatenated.
+   */
+  readonly propertyStringEquals?: Readonly<Record<string, string>>;
+  /** When true, keep only nodes whose `triggerType` starts with `Record`. */
+  readonly recordTriggered?: boolean;
 }
 
 /**
@@ -81,7 +88,36 @@ export interface ListNodesOptions {
 export interface CountNodesOptions {
   readonly parentId?: ComponentId;
   readonly propertyEquals?: Readonly<Record<string, boolean>>;
+  readonly propertyStringEquals?: Readonly<Record<string, string>>;
+  readonly recordTriggered?: boolean;
 }
+
+const appendNodePropertyFilters = (
+  sql: string,
+  params: DuckDBValue[],
+  options?: Pick<
+    ListNodesOptions,
+    'propertyEquals' | 'propertyStringEquals' | 'recordTriggered'
+  >,
+): string => {
+  let out = sql;
+  if (options?.propertyEquals !== undefined) {
+    for (const [key, value] of Object.entries(options.propertyEquals)) {
+      out += ` AND json_extract_string(properties_json, ?) = ?`;
+      params.push(`$.${key}`, value ? 'true' : 'false');
+    }
+  }
+  if (options?.propertyStringEquals !== undefined) {
+    for (const [key, value] of Object.entries(options.propertyStringEquals)) {
+      out += ` AND json_extract_string(properties_json, ?) = ?`;
+      params.push(`$.${key}`, value);
+    }
+  }
+  if (options?.recordTriggered === true) {
+    out += ` AND json_extract_string(properties_json, '$.triggerType') LIKE 'Record%'`;
+  }
+  return out;
+};
 
 /** Options for `listEdges`. */
 export interface ListEdgesOptions {
@@ -299,12 +335,7 @@ export const listNodesByType = async (
   // is bound as a parameterised JSON path (`$.<key>`), never concatenated into
   // SQL, so it cannot inject. An absent property yields NULL, which fails the
   // `= 'true'` test — correct "not a Batchable" semantics.
-  if (options?.propertyEquals !== undefined) {
-    for (const [key, value] of Object.entries(options.propertyEquals)) {
-      sql += ` AND json_extract_string(properties_json, ?) = ?`;
-      params.push(`$.${key}`, value ? 'true' : 'false');
-    }
-  }
+  sql = appendNodePropertyFilters(sql, params, options);
   sql += ' ORDER BY id ASC LIMIT ? OFFSET ?';
   params.push(limit, options?.offset ?? 0);
 
@@ -349,12 +380,7 @@ export const countNodesByType = async (
     // Same parameterised JSON-path filter as `listNodesByType` — key bound as
     // `$.<key>`, never concatenated, so it cannot inject. An absent property is
     // NULL, which fails `= 'true'` (correct "not a Batchable" semantics).
-    if (options?.propertyEquals !== undefined) {
-      for (const [key, value] of Object.entries(options.propertyEquals)) {
-        sql += ` AND json_extract_string(properties_json, ?) = ?`;
-        params.push(`$.${key}`, value ? 'true' : 'false');
-      }
-    }
+    sql = appendNodePropertyFilters(sql, params, options);
     const rows = await fetchRows(store, sql, params);
     return ok(Number((rows[0] as Row)['n']));
   } catch (e) {

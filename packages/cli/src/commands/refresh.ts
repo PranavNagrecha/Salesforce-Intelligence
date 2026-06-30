@@ -38,6 +38,7 @@ import {
   type ImportCounts,
   INCREMENTAL_DELTA_CAP,
   persistResolveIndexArtifact,
+  countNodesByType,
   listEdges,
   listNodesByType,
   openGraph,
@@ -1967,6 +1968,14 @@ const TOOLING_API_ENRICHED_TYPES = [
 ] as const satisfies readonly ComponentType[];
 
 /**
+ * Page size for paging enrichment candidates out of the graph. Must not
+ * exceed the graph layer's `listNodesByType` cap (LIST_MAX_LIMIT = 500),
+ * which rejects any larger `limit`. The candidate loop reads `count`
+ * windows of this size so every node of an enriched type is hydrated.
+ */
+const ENRICH_CANDIDATE_PAGE_SIZE = 500;
+
+/**
  * Drive the v1.7 R2 enrichment pass against the open graph. Returns a
  * structured `ToolingApiRefreshSummary` regardless of outcome so the
  * CLI can render the live-data axis as a separate block. Authentication
@@ -1974,7 +1983,7 @@ const TOOLING_API_ENRICHED_TYPES = [
  * here without flipping the overall refresh status (the offline vault
  * is the source of truth; the enrichment is additive).
  */
-const runToolingApiEnrichment = async (
+export const runToolingApiEnrichment = async (
   store: GraphStore,
   targetOrg: string,
   opts: RunRefreshOptions,
@@ -2005,15 +2014,30 @@ const runToolingApiEnrichment = async (
     }
   }
 
-  // Materialise the in-memory candidates by re-reading from the graph.
-  // This avoids holding the full Node set in memory across the offline
-  // pipeline — the enrichment runs after import/render so the graph is
-  // the canonical store.
+  // Materialise the enrichment candidates by re-reading from the graph.
+  // The enrichment runs after import/render, so the graph is the canonical
+  // store. `listNodesByType` caps each page at LIST_MAX_LIMIT (500), so a
+  // single call silently dropped every node past the first 500 of a type —
+  // on a real org that left ~674/6536 enriched (essentially only ApexClass).
+  // Page through the FULL set per type using `countNodesByType` for the true
+  // total and stable `ORDER BY id ASC` offset windows (no dup/skip), so every
+  // node of every enriched type becomes a candidate.
   const candidates: Node[] = [];
   for (const type of TOOLING_API_ENRICHED_TYPES) {
-    const nodesResult = await listNodesByType(store, type, { limit: 500 });
-    if (!nodesResult.ok) continue;
-    candidates.push(...nodesResult.value);
+    const totalResult = await countNodesByType(store, type);
+    if (!totalResult.ok) continue;
+    const total = totalResult.value;
+    for (let offset = 0; offset < total; offset += ENRICH_CANDIDATE_PAGE_SIZE) {
+      const nodesResult = await listNodesByType(store, type, {
+        limit: ENRICH_CANDIDATE_PAGE_SIZE,
+        offset,
+      });
+      if (!nodesResult.ok) break;
+      candidates.push(...nodesResult.value);
+      // Defensive: a short page means the type was exhausted early (e.g.
+      // concurrent shrink); stop rather than spin to `total`.
+      if (nodesResult.value.length < ENRICH_CANDIDATE_PAGE_SIZE) break;
+    }
   }
   if (candidates.length === 0) {
     return {
@@ -2754,15 +2778,87 @@ const computeReconciledTypes = (
 };
 
 /**
+ * Run an ADDITIVE on-demand `sf project retrieve start --manifest` from an
+ * isolated throwaway SFDX project root, writing into the absolute
+ * `--output-dir` (the vault's source). This is the P1 fix for the three
+ * on-demand pulls (object auto-expansion, foldered reports, smart reports),
+ * which previously ran `runSf` with NO `cwd`: `sf` then resolved the project
+ * from `process.cwd()` (the repo root, which has no `sfdx-project.json`) and
+ * failed every pull with `InvalidProjectWorkspaceError` — silently, because
+ * all three are best-effort. Reports/Dashboards stayed stuck at 0 and the
+ * 44-phantom object auto-expansion never landed.
+ *
+ * The fix mirrors `retrieveTypeBatch`: a fresh `mkdir`'d projectDir with a
+ * `force-app/` package dir + an `sfdx-project.json`, with `sf` run from inside
+ * it (`cwd: projectDir`) so the project root is valid. CRITICAL: these pulls
+ * are ADDITIVE narrow-member subsets — unlike `retrieveTypeBatch`, they MUST
+ * NOT call `reconcileSourceDeletions`/`syncAuthoritativeRetrieveIntoSource`
+ * (a scoped delete would wipe other types). They KEEP the existing absolute
+ * `--output-dir sourceDir` so `sf` writes straight into the vault source the
+ * downstream re-walk reads (`sf` resolves `--output-dir` relative to `cwd`, so
+ * it must stay absolute — `paths.source` from `vaultPaths(vaultRoot)` is).
+ * Best-effort/non-fatal: a residual failure is returned to the caller, which
+ * logs-and-continues. `runSf` is injectable so tests can assert the `cwd`.
+ *
+ * @returns the `sf` stdout/stderr on success, or throws (caller wraps in `err`).
+ */
+const retrieveAdditiveManifest = async (
+  args: {
+    readonly targetOrg: string;
+    readonly outputDir: string;
+    readonly manifestXml: string;
+    readonly tempLabel: string;
+  },
+  runSfFn: typeof runSf = runSf,
+): Promise<void> => {
+  const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const manifestPath = join(tmpdir(), `sfi-refresh-${args.tempLabel}-${stamp}.xml`);
+  // Isolated throwaway project root: a valid `sfdx-project.json` + package dir
+  // so `sf` does NOT fall back to `process.cwd()` (the repo root, which has no
+  // project file → InvalidProjectWorkspaceError). The retrieve still writes to
+  // the absolute `--output-dir`, NOT into this throwaway tree.
+  const projectDir = join(tmpdir(), `sfi-retrieve-${args.tempLabel}-${stamp}`);
+  await mkdir(join(projectDir, 'force-app'), { recursive: true });
+  await writeFile(
+    join(projectDir, 'sfdx-project.json'),
+    `{"packageDirectories":[{"path":"force-app","default":true}],"sourceApiVersion":"${SF_API_VERSION}"}\n`,
+    'utf8',
+  );
+  await writeFile(manifestPath, args.manifestXml, 'utf8');
+  try {
+    await runSfFn(
+      [
+        'project',
+        'retrieve',
+        'start',
+        '--manifest',
+        manifestPath,
+        '--target-org',
+        args.targetOrg,
+        '--output-dir',
+        args.outputDir,
+      ],
+      { maxBuffer: SF_MAX_BUFFER, cwd: projectDir, timeout: SF_RETRIEVE_TIMEOUT_MS },
+    );
+  } finally {
+    // Best-effort: the manifest + the whole throwaway project tree.
+    await rm(manifestPath, { force: true }).catch(() => {});
+    await rm(projectDir, { recursive: true, force: true }).catch(() => {});
+  }
+};
+
+/**
  * Retrieve a specific list of CustomObjects by name into `sourceDir` — the B29
  * auto-expansion second pass for objects your automation references but the
  * `<members>*</members>` wildcard excluded. Best-effort: the caller treats a
- * failure as non-fatal and keeps the first-pass results.
+ * failure as non-fatal and keeps the first-pass results. `runSf` is injectable
+ * for tests.
  */
-const runSfRetrieveObjects = async (
+export const runSfRetrieveObjects = async (
   targetOrg: string,
   sourceDir: string,
   objectNames: readonly string[],
+  runSfFn: typeof runSf = runSf,
 ): Promise<Result<void, string>> => {
   const manifest = [
     '<?xml version="1.0" encoding="UTF-8"?>',
@@ -2774,20 +2870,16 @@ const runSfRetrieveObjects = async (
     `  <version>${SF_API_VERSION}</version>`,
     '</Package>',
   ].join('\n');
-  const manifestPath = join(tmpdir(), `sfi-refresh-expand-${Date.now()}.xml`);
-  await writeFile(manifestPath, manifest, 'utf8');
   try {
-    await runSf(
-      ['project', 'retrieve', 'start', '--manifest', manifestPath, '--target-org', targetOrg, '--output-dir', sourceDir],
-      { maxBuffer: SF_MAX_BUFFER, timeout: SF_RETRIEVE_TIMEOUT_MS },
+    await retrieveAdditiveManifest(
+      { targetOrg, outputDir: sourceDir, manifestXml: manifest, tempLabel: 'expand' },
+      runSfFn,
     );
     return ok(undefined);
   } catch (cause) {
     return err(
       `expansion retrieve failed: ${cause instanceof Error ? cause.message : String(cause)}`,
     );
-  } finally {
-    await rm(manifestPath, { force: true }).catch(() => {});
   }
 };
 
@@ -2960,14 +3052,15 @@ const collectReportMetaFiles = async (dir: string): Promise<readonly string[]> =
   return out;
 };
 
-const runSfRetrieveFolderedReports = async (
+export const runSfRetrieveFolderedReports = async (
   targetOrg: string,
   sourceDir: string,
+  runSfFn: typeof runSf = runSf,
 ): Promise<Result<{ readonly reports: number; readonly dashboards: number }, string>> => {
   const soql = async (
     query: string,
   ): Promise<readonly Record<string, unknown>[]> => {
-    const { stdout } = await runSf(
+    const { stdout } = await runSfFn(
       ['data', 'query', '--query', query, '--target-org', targetOrg, '--json'],
       { maxBuffer: SF_MAX_BUFFER, timeout: SF_QUERY_TIMEOUT_MS },
     );
@@ -3008,22 +3101,18 @@ const runSfRetrieveFolderedReports = async (
   });
   if (manifestXml === null) return ok({ reports: 0, dashboards: 0 });
 
-  // Manifest + retrieve.
-  const manifest = manifestXml;
-  const manifestPath = join(tmpdir(), `sfi-refresh-reports-${Date.now()}.xml`);
-  await writeFile(manifestPath, manifest, 'utf8');
+  // Additive retrieve from an isolated project root (P1) — see
+  // `retrieveAdditiveManifest`. Must NOT reconcile/sync (narrow member subset).
   try {
-    await runSf(
-      ['project', 'retrieve', 'start', '--manifest', manifestPath, '--target-org', targetOrg, '--output-dir', sourceDir],
-      { maxBuffer: SF_MAX_BUFFER, timeout: SF_RETRIEVE_TIMEOUT_MS },
+    await retrieveAdditiveManifest(
+      { targetOrg, outputDir: sourceDir, manifestXml, tempLabel: 'reports' },
+      runSfFn,
     );
     return ok({ reports, dashboards });
   } catch (cause) {
     return err(
       `report/dashboard retrieve failed: ${cause instanceof Error ? cause.message : String(cause)}`,
     );
-  } finally {
-    await rm(manifestPath, { force: true }).catch(() => {});
   }
 };
 
@@ -3047,6 +3136,7 @@ export const runSfRetrieveSmartReports = async (
   targetOrg: string,
   sourceDir: string,
   cap: number,
+  runSfFn: typeof runSf = runSf,
 ): Promise<
   Result<
     {
@@ -3062,7 +3152,7 @@ export const runSfRetrieveSmartReports = async (
   >
 > => {
   const soql = async (query: string): Promise<readonly Record<string, unknown>[]> => {
-    const { stdout } = await runSf(
+    const { stdout } = await runSfFn(
       ['data', 'query', '--query', query, '--target-org', targetOrg, '--json'],
       { maxBuffer: SF_MAX_BUFFER, timeout: SF_QUERY_TIMEOUT_MS },
     );
@@ -3073,7 +3163,7 @@ export const runSfRetrieveSmartReports = async (
   };
   const count = async (query: string): Promise<number> => {
     try {
-      const { stdout } = await runSf(
+      const { stdout } = await runSfFn(
         ['data', 'query', '--query', query, '--target-org', targetOrg, '--json'],
         { maxBuffer: SF_MAX_BUFFER, timeout: SF_QUERY_TIMEOUT_MS },
       );
@@ -3126,12 +3216,12 @@ export const runSfRetrieveSmartReports = async (
     return ok({ reports: 0, dashboards: 0, totals, landed: { reports: 0, dashboards: 0 }, missing: [] });
   }
 
-  const manifestPath = join(tmpdir(), `sfi-refresh-smart-reports-${Date.now()}.xml`);
-  await writeFile(manifestPath, manifestXml, 'utf8');
+  // Additive retrieve from an isolated project root (P1) — see
+  // `retrieveAdditiveManifest`. Must NOT reconcile/sync (narrow member subset).
   try {
-    await runSf(
-      ['project', 'retrieve', 'start', '--manifest', manifestPath, '--target-org', targetOrg, '--output-dir', sourceDir],
-      { maxBuffer: SF_MAX_BUFFER, timeout: SF_RETRIEVE_TIMEOUT_MS },
+    await retrieveAdditiveManifest(
+      { targetOrg, outputDir: sourceDir, manifestXml, tempLabel: 'smart-reports' },
+      runSfFn,
     );
     // Requested-vs-landed: membership check against the freshly-pulled tree
     // (raw file counts would be inflated by files from earlier pulls).
@@ -3150,8 +3240,6 @@ export const runSfRetrieveSmartReports = async (
     return err(
       `smart report retrieve failed: ${cause instanceof Error ? cause.message : String(cause)}`,
     );
-  } finally {
-    await rm(manifestPath, { force: true }).catch(() => {});
   }
 };
 

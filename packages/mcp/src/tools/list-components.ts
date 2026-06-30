@@ -248,6 +248,12 @@ export const listComponentsInputSchema = z.object({
   hasInvocableMethod: coercedOptionalBoolean,
   hasAuraEnabledMethod: coercedOptionalBoolean,
   isTest: coercedOptionalBoolean,
+  /** Flow metadata: exact match on `properties.triggerObject`. */
+  triggerObject: z.string().min(1).optional(),
+  /** Flow metadata: exact match on `properties.status` (e.g. Active). */
+  status: z.string().min(1).optional(),
+  /** Flow metadata: keep only record-triggered flows (`triggerType` starts with Record). */
+  recordTriggered: coercedOptionalBoolean,
 });
 
 /** Parsed input shape, inferred from `listComponentsInputSchema`. */
@@ -356,6 +362,7 @@ export const listComponentsHandler = async (
   }
 
   const limit = input.limit ?? LIST_DEFAULT_LIMIT;
+  const recordTriggered = input.recordTriggered === true;
 
   // CR-22: the narrowing args this cursor binds to (everything except the paging
   // knobs limit/offset/cursor). A token can't be replayed against a different
@@ -363,6 +370,9 @@ export const listComponentsHandler = async (
   const fingerprint = argsFingerprint({
     type: input.type,
     ...(input.parentId !== undefined ? { parentId: input.parentId } : {}),
+    ...(input.triggerObject !== undefined ? { triggerObject: input.triggerObject } : {}),
+    ...(input.status !== undefined ? { status: input.status } : {}),
+    ...(recordTriggered ? { recordTriggered: true } : {}),
     ...Object.fromEntries(
       APEX_BOOLEAN_FILTERS.flatMap((k) =>
         input[k] !== undefined ? [[k, input[k]]] : [],
@@ -393,13 +403,24 @@ export const listComponentsHandler = async (
   }
   const hasPropertyFilter = Object.keys(propertyEquals).length > 0;
 
-  const queryResult = await listNodesByType(ctx.graph, input.type, {
-    limit,
-    offset,
+  const propertyStringEquals: Record<string, string> = {};
+  if (input.triggerObject !== undefined) propertyStringEquals.triggerObject = input.triggerObject;
+  if (input.status !== undefined) propertyStringEquals.status = input.status;
+  const hasStringPropertyFilter = Object.keys(propertyStringEquals).length > 0;
+
+  const graphNarrow = {
     ...(input.parentId !== undefined
       ? { parentId: input.parentId as ComponentId }
       : {}),
     ...(hasPropertyFilter ? { propertyEquals } : {}),
+    ...(hasStringPropertyFilter ? { propertyStringEquals } : {}),
+    ...(recordTriggered ? { recordTriggered: true as const } : {}),
+  };
+
+  const queryResult = await listNodesByType(ctx.graph, input.type, {
+    limit,
+    offset,
+    ...graphNarrow,
   });
 
   if (!queryResult.ok) {
@@ -429,7 +450,7 @@ export const listComponentsHandler = async (
   let retrievalHint: string | undefined;
   // Skip the coverage hint when a property filter is active: an empty result
   // means "no component matched the filter", NOT a type-coverage gap.
-  if (offset === 0 && queryResult.value.length === 0 && !hasPropertyFilter) {
+  if (offset === 0 && queryResult.value.length === 0 && !hasPropertyFilter && !hasStringPropertyFilter && !recordTriggered) {
     const cov = summarizeCoverage(ctx.manifest, [input.type]);
     if (cov.notModeledTypes.includes(input.type)) {
       retrievalHint =
@@ -489,10 +510,7 @@ export const listComponentsHandler = async (
   // size, trimming, or pagination. If the count query fails, fall back to a
   // lower bound (offset + kept.length) rather than failing the whole
   // enumeration.
-  const totalRes = await countNodesByType(ctx.graph, input.type, {
-    ...(input.parentId !== undefined ? { parentId: input.parentId as ComponentId } : {}),
-    ...(hasPropertyFilter ? { propertyEquals } : {}),
-  });
+  const totalRes = await countNodesByType(ctx.graph, input.type, graphNarrow);
   const totalCount = totalRes.ok ? totalRes.value : offset + kept.length;
 
   // CR-22: emit a continuation cursor ONLY when more rows remain (over `limit`

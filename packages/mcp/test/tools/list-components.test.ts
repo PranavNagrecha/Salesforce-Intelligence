@@ -653,6 +653,91 @@ describe('listComponentsHandler — B-GRAPH-BUILD totalCount beats byte-budget t
   });
 });
 
+describe('listComponentsHandler: Flow property filters', () => {
+  let dir3: string;
+  let store3: GraphStore;
+  let ctx3: Context;
+
+  beforeAll(async () => {
+    dir3 = mkdtempSync(join(tmpdir(), 'sfi-mcp-listcomp-flow-'));
+    const opened = await openGraph(join(dir3, 'lc.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    store3 = opened.value;
+    const imported = await importExtractionResults(store3, [
+      {
+        nodes: [
+          makeNode({
+            id: 'Flow:RT_App_Active',
+            type: 'Flow',
+            apiName: 'RT_App_Active',
+            label: 'RT App Active',
+            properties: {
+              status: 'Active',
+              triggerObject: 'hed__Application__c',
+              triggerType: 'RecordAfterSave',
+            },
+          }),
+          makeNode({
+            id: 'Flow:RT_App_Draft',
+            type: 'Flow',
+            apiName: 'RT_App_Draft',
+            label: 'RT App Draft',
+            properties: {
+              status: 'Draft',
+              triggerObject: 'hed__Application__c',
+              triggerType: 'RecordAfterSave',
+            },
+          }),
+          makeNode({
+            id: 'Flow:RT_Case_Active',
+            type: 'Flow',
+            apiName: 'RT_Case_Active',
+            label: 'RT Case Active',
+            properties: {
+              status: 'Active',
+              triggerObject: 'Case',
+              triggerType: 'RecordAfterSave',
+            },
+          }),
+          makeNode({
+            id: 'Flow:Screen_App',
+            type: 'Flow',
+            apiName: 'Screen_App',
+            label: 'Screen App',
+            properties: {
+              status: 'Active',
+              triggerObject: 'hed__Application__c',
+              triggerType: 'Screen',
+            },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    ctx3 = { vaultRoot: dir3, manifest: FIXTURE_MANIFEST, graph: store3 };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store3);
+    rmSync(dir3, { recursive: true, force: true });
+  });
+
+  it('filters flows by triggerObject, status, and recordTriggered', async () => {
+    const r = await listComponentsHandler(ctx3, {
+      type: 'Flow',
+      triggerObject: 'hed__Application__c',
+      status: 'Active',
+      recordTriggered: true,
+      limit: 50,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalCount).toBe(1);
+    expect(r.value.data.components.map((n) => n.id)).toEqual(['Flow:RT_App_Active']);
+  });
+});
+
 describe('listComponentsInputSchema', () => {
   it('accepts a minimal well-formed input', () => {
     const parsed = listComponentsInputSchema.safeParse({ type: 'CustomField' });

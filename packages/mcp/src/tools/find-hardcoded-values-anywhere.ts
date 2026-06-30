@@ -10,7 +10,10 @@
  *     `properties.qualityIssues[]` array on ApexClass / ApexTrigger
  *     nodes for the four hardcoded-literal rules (`hardcoded-id`,
  *     `hardcoded-email`, `hardcoded-username`,
- *     `hardcoded-sandbox-test-data`).
+ *     `hardcoded-sandbox-test-data`). When `category` is `email` or
+ *     `value` contains `@`, ALSO scans raw `.cls`/`.trigger` source
+ *     files directly as a fallback so emails added after the vault was
+ *     built are never silently missed (CR-07 honesty-gap fix).
  *   - **Formula** (CustomField formula expressions): scans the
  *     `properties.formula` string for ID-shape, email-shape, date-
  *     shape, and (when `value` is specified) exact-substring matches.
@@ -42,6 +45,10 @@
  *     composes their existing v2.1 `qualityIssues[]` findings for the
  *     four hardcoded-literal rules. When `value` is specified, also
  *     filters the `explanation` field to substring-match the value.
+ *     For `email` category or an `@`-bearing `value`, additionally
+ *     scans raw source files so the graph's pre-computed findings do
+ *     not create a blind spot for production classes updated after the
+ *     last vault refresh.
  *   - For formula scope: walks CustomField nodes whose
  *     `properties.formula` is non-null, applies the per-category
  *     regex (or substring match when `value` is specified).
@@ -64,6 +71,9 @@
  *   - `limit` defaults to 100 and is capped at 500.
  */
 
+import { readFile } from 'node:fs/promises';
+import { basename } from 'node:path';
+
 import type {
   ComponentId,
   ComponentType,
@@ -73,6 +83,7 @@ import type {
   PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
+import { collectVaultSourceFiles } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -106,12 +117,101 @@ const HARDCODED_APEX_RULES: ReadonlySet<string> = new Set([
   'hardcoded-sandbox-test-data',
 ]);
 
+/** Apex source file suffixes for the CR-07 email fallback source scan. */
+const APEX_SOURCE_SUFFIXES = ['.cls', '.trigger'] as const;
+
+/**
+ * CR-07: source-file email fallback. Scans raw `.cls`/`.trigger` files
+ * for email-shaped string literals. This catches emails in production
+ * classes that were added AFTER the last vault refresh (so their
+ * `qualityIssues` in the graph are stale / missing the `hardcoded-email`
+ * finding). Called only when `category === 'email'` or the `value` filter
+ * contains `@` — the two cases where the caller is explicitly hunting emails.
+ *
+ * De-duplication against graph-sourced findings is not performed here;
+ * the comparator on the output sort ({@link compareMatches}) is a STRICT
+ * TOTAL order over (componentId, source, location, category, matchedValue,
+ * contextSnippet), so duplicate rows from a stale-graph/fresh-source race
+ * are possible but rare and clearly labelled.
+ *
+ * Returns an empty array on any I/O failure (fire-and-forget fallback).
+ */
+const scanApexSourceForEmails = async (
+  vaultRoot: string,
+  valueFilter: string | undefined,
+): Promise<HardcodedValueAnywhereMatch[]> => {
+  // Inline email regex — same shape as EMAIL_REGEX but as a new instance
+  // so `lastIndex` reset is isolated from the formula-scope scan.
+  const EMAIL_RE = /\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b/g;
+  let files: Awaited<ReturnType<typeof collectVaultSourceFiles>>;
+  try {
+    files = await collectVaultSourceFiles(vaultRoot, { suffixes: APEX_SOURCE_SUFFIXES });
+  } catch {
+    return [];
+  }
+  const hits: HardcodedValueAnywhereMatch[] = [];
+  for (const file of files) {
+    let source: string;
+    try {
+      source = await readFile(file.absolutePath, 'utf-8');
+    } catch {
+      continue;
+    }
+    // Derive apiName from the file's basename (strip suffix).
+    const name = basename(file.absolutePath);
+    const apiName = name.endsWith('.trigger')
+      ? name.slice(0, -'.trigger'.length)
+      : name.slice(0, -'.cls'.length);
+    const componentType: 'ApexClass' | 'ApexTrigger' = name.endsWith('.trigger')
+      ? 'ApexTrigger'
+      : 'ApexClass';
+    const componentId: ComponentId = `${componentType}:${apiName}` as ComponentId;
+
+    // Strip line comments and block comments to avoid matching email-shaped
+    // text in /* ... */ or // comments; keep string literals (we want them).
+    const stripped = source.replace(/\/\/[^\n]*/g, (m) => ' '.repeat(m.length))
+      .replace(/\/\*[\s\S]*?\*\//g, (m) => ' '.repeat(m.length));
+
+    EMAIL_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = EMAIL_RE.exec(stripped)) !== null) {
+      const email = m[0];
+      // Apply value filter if present.
+      if (valueFilter !== undefined && !email.includes(valueFilter)) continue;
+      const lineNum = source.slice(0, m.index).split('\n').length;
+      const snippet = snippetAround(source, m.index, email.length);
+      hits.push({
+        componentId,
+        componentType,
+        apiName,
+        source: 'apex',
+        location: `line ${lineNum}`,
+        matchedValue: email,
+        confidence: 'heuristic',
+        category: 'email',
+        contextSnippet: snippet,
+        inTestClass: false,
+      });
+    }
+  }
+  return hits;
+};
+
 const NUMERIC_FP_DISCLOSURE =
   'the numeric category has very high false-positive rate — loop counters, array indices, and arithmetic constants all match. The category is suppressed from default searches; opt in explicitly only when looking for specific hardcoded numbers.';
 const ID_FP_DISCLOSURE =
   'the ID-shape search matches Salesforce-id-shaped strings filtered to a known-key-prefix allowlist (~40 prefixes). Arbitrary 15-character alphanumeric strings outside the allowlist are not returned. Strings shaped like an ID that aren\'t actually IDs (e.g., session keys, hashes) may still match if they happen to start with a known key prefix.';
 const TEST_CLASS_REFUSAL_DISCLOSURE =
   'matches in `@isTest`-annotated classes may be intentional test fixtures rather than production hardcoded values; verify the context before treating as a bug.';
+/**
+ * CR-07: source-scan fallback disclosure. Surfaces when the email/value-with-@
+ * scan also ran the raw source-file pass (supplementing the graph qualityIssues).
+ * The source scan is comment-stripped but not string-isolated — it will surface
+ * email-shaped tokens inside multi-line string concatenations or Javadoc-style
+ * param annotations. Treat as heuristic, not authoritative.
+ */
+const APEX_SOURCE_EMAIL_SCAN_DISCLOSURE =
+  'For the email category, Apex source files were also scanned directly (CR-07 fallback) to catch addresses in classes updated after the last vault refresh. Source-scan matches are comment-stripped but not string-boundary-isolated — email-shaped tokens in @param JavaDoc or string-concatenation expressions may surface as false positives. Confidence: heuristic.';
 
 /**
  * Zod schema for the `sfi.find_hardcoded_values_anywhere` tool input.
@@ -400,6 +500,10 @@ export const findHardcodedValuesAnywhereHandler = async (
   // FULL_SCAN_MAX_NODES cap so the residual incompleteness is disclosed honestly.
   const incompleteTypes: string[] = [];
 
+  // CR-07: true when the email source-scan fallback was triggered. Set here
+  // so the boundary disclosure fires after the scan completes.
+  let ranApexSourceEmailScan = false;
+
   // --- Apex scope: compose v2.1 qualityIssues[] for hardcoded rules. ---
   // CR-22 B4: scan EVERY ApexClass / ApexTrigger by paging the SQL OFFSET forward
   // (window-by-window) so findings on node 501+ are reachable — the old MAX_PAGES
@@ -446,6 +550,32 @@ export const findHardcodedValuesAnywhereHandler = async (
           contextSnippet: issue.explanation,
           inTestClass: inTest,
         });
+      }
+    }
+
+    // CR-07: email source-scan fallback — supplement the graph findings with a
+    // direct source-file scan whenever the caller is hunting email addresses.
+    // This catches hardcoded emails in production classes whose `qualityIssues`
+    // were not populated by the extractor (vault built before the email recognizer
+    // was added, or the class was modified after the last refresh).
+    const needEmailSourceScan =
+      categoryFilter === 'email' ||
+      (valueFilter !== undefined && valueFilter.includes('@'));
+    if (needEmailSourceScan) {
+      ranApexSourceEmailScan = true;
+      const sourceHits = await scanApexSourceForEmails(ctx.vaultRoot, valueFilter);
+      // De-dup against graph-sourced findings by (componentId, location, matchedValue).
+      const graphKeys = new Set<string>(
+        collected
+          .filter((m) => m.source === 'apex' && m.category === 'email')
+          .map((m) => `${m.componentId}|${m.location}|${m.matchedValue}`),
+      );
+      for (const hit of sourceHits) {
+        const key = `${hit.componentId}|${hit.location}|${hit.matchedValue}`;
+        if (!graphKeys.has(key)) {
+          collected.push(hit);
+          graphKeys.add(key);
+        }
       }
     }
   }
@@ -617,6 +747,7 @@ export const findHardcodedValuesAnywhereHandler = async (
     if (categoryFilter === 'numeric') boundaries.push(NUMERIC_FP_DISCLOSURE);
     if (categoryFilter === 'id') boundaries.push(ID_FP_DISCLOSURE);
     if (sawTestClass) boundaries.push(TEST_CLASS_REFUSAL_DISCLOSURE);
+    if (ranApexSourceEmailScan) boundaries.push(APEX_SOURCE_EMAIL_SCAN_DISCLOSURE);
   }
   // Residual scan-incompleteness only fires for a PATHOLOGICAL type past
   // FULL_SCAN_MAX_NODES — the normal full scan reaches node 501+ and completes.
