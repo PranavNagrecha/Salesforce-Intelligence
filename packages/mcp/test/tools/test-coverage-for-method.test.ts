@@ -332,6 +332,163 @@ describe('testCoverageForMethodInputSchema', () => {
   });
 });
 
+describe('testCoverageForMethodHandler: test classes are coverage sinks (no fabricated path)', () => {
+  let dirS: string;
+  let storeS: GraphStore;
+  let ctxS: Context;
+
+  beforeAll(async () => {
+    dirS = mkdtempSync(join(tmpdir(), 'sfi-mcp-tcfm-sink-'));
+    const opened = await openGraph(join(dirS, 't.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    storeS = opened.value;
+    // Selector <- Svc (callsApex). SvcTest -> Svc legitimately covers Selector
+    // transitively. FabricatedTest has a spurious edge INTO SvcTest — the walk
+    // must NOT traverse through the test node and credit FabricatedTest.
+    const imp = await importExtractionResults(storeS, [
+      {
+        nodes: [
+          makeNode({ id: 'ApexClass:Selector', apiName: 'Selector', properties: { isTest: false } }),
+          makeNode({ id: 'ApexClass:Svc', apiName: 'Svc', properties: { isTest: false } }),
+          makeNode({ id: 'ApexClass:SvcTest', apiName: 'SvcTest', properties: { isTest: true } }),
+          makeNode({ id: 'ApexClass:FabricatedTest', apiName: 'FabricatedTest', properties: { isTest: true } }),
+        ],
+        edges: [
+          makeEdge({ fromId: 'ApexClass:Svc', toId: 'ApexClass:Selector', edgeType: 'callsApex' }),
+          makeEdge({ fromId: 'ApexClass:SvcTest', toId: 'ApexClass:Svc', edgeType: 'callsApex' }),
+          // Spurious edge into a test node — must not relay coverage outward.
+          makeEdge({ fromId: 'ApexClass:FabricatedTest', toId: 'ApexClass:SvcTest', edgeType: 'callsApex' }),
+        ],
+      },
+    ]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    ctxS = { vaultRoot: dirS, manifest: FIXTURE_MANIFEST, graph: storeS };
+  });
+
+  afterAll(async () => {
+    await closeGraph(storeS);
+    rmSync(dirS, { recursive: true, force: true });
+  });
+
+  it('counts the real transitive test but never the one reachable only THROUGH a test', async () => {
+    const r = await testCoverageForMethodHandler(ctxS, { classApiName: 'ApexClass:Selector' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ids = r.value.data.coveringTestClasses.map((c) => c.id);
+    expect(ids).toContain('ApexClass:SvcTest');
+    expect(ids).not.toContain('ApexClass:FabricatedTest');
+  });
+});
+
+describe('testCoverageForMethodHandler: callout-mock cross-reference', () => {
+  let dirC: string;
+  let storeC: GraphStore;
+  let ctxC: Context;
+
+  beforeAll(async () => {
+    dirC = mkdtempSync(join(tmpdir(), 'sfi-mcp-tcfm-callout-'));
+    const opened = await openGraph(join(dirC, 't.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    storeC = opened.value;
+    // CalloutSvc implements Database.AllowsCallouts and is covered ONLY by a
+    // mock-less test (MocklessTest) -> inflated coverage. MockedSvc is a callout
+    // class covered by a test that implements HttpCalloutMock. PlainSvc makes no
+    // callout, so no calloutCoverage block is produced.
+    const imp = await importExtractionResults(storeC, [
+      {
+        nodes: [
+          makeNode({
+            id: 'ApexClass:CalloutSvc',
+            apiName: 'CalloutSvc',
+            properties: { isTest: false, implements: ['Database.AllowsCallouts'] },
+          }),
+          makeNode({
+            id: 'ApexClass:MocklessTest',
+            apiName: 'MocklessTest',
+            properties: { isTest: true, implements: [] },
+          }),
+          makeNode({
+            id: 'ApexClass:MockedSvc',
+            apiName: 'MockedSvc',
+            properties: { isTest: false, implements: ['Database.AllowsCallouts'] },
+          }),
+          makeNode({
+            id: 'ApexClass:MockingTest',
+            apiName: 'MockingTest',
+            properties: { isTest: true, implements: ['HttpCalloutMock'] },
+          }),
+          makeNode({
+            id: 'ApexClass:PlainSvc',
+            apiName: 'PlainSvc',
+            properties: { isTest: false, implements: [] },
+          }),
+          makeNode({
+            id: 'ApexClass:PlainTest',
+            apiName: 'PlainTest',
+            properties: { isTest: true, implements: [] },
+          }),
+        ],
+        edges: [
+          makeEdge({ fromId: 'ApexClass:MocklessTest', toId: 'ApexClass:CalloutSvc', edgeType: 'callsApex' }),
+          makeEdge({ fromId: 'ApexClass:MockingTest', toId: 'ApexClass:MockedSvc', edgeType: 'callsApex' }),
+          makeEdge({ fromId: 'ApexClass:PlainTest', toId: 'ApexClass:PlainSvc', edgeType: 'callsApex' }),
+        ],
+      },
+    ]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    ctxC = { vaultRoot: dirC, manifest: FIXTURE_MANIFEST, graph: storeC };
+  });
+
+  afterAll(async () => {
+    await closeGraph(storeC);
+    rmSync(dirC, { recursive: true, force: true });
+  });
+
+  it('flags callout code covered exclusively by a mock-less test', async () => {
+    const r = await testCoverageForMethodHandler(ctxC, { classApiName: 'ApexClass:CalloutSvc' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const cc = r.value.data.calloutCoverage;
+    expect(cc).not.toBeNull();
+    expect(cc?.targetMakesCallout).toBe(true);
+    expect(cc?.mockLessTestCount).toBe(1);
+    expect(cc?.mockSettingTestCount).toBe(0);
+    expect(cc?.coveredOnlyByMockLessTests).toBe(true);
+    const t = r.value.data.coveringTestClasses.find((c) => c.id === 'ApexClass:MocklessTest');
+    expect(t?.setsMock).toBe(false);
+  });
+
+  it('does NOT flag when a covering test installs a mock interface', async () => {
+    const r = await testCoverageForMethodHandler(ctxC, { classApiName: 'ApexClass:MockedSvc' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const cc = r.value.data.calloutCoverage;
+    expect(cc?.targetMakesCallout).toBe(true);
+    expect(cc?.mockSettingTestCount).toBe(1);
+    expect(cc?.coveredOnlyByMockLessTests).toBe(false);
+    const t = r.value.data.coveringTestClasses.find((c) => c.id === 'ApexClass:MockingTest');
+    expect(t?.setsMock).toBe(true);
+  });
+
+  it('omits the calloutCoverage block for a class that makes no callout', async () => {
+    const r = await testCoverageForMethodHandler(ctxC, { classApiName: 'ApexClass:PlainSvc' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.calloutCoverage).toBeNull();
+    // setsMock is suppressed on covering tests for a non-callout target.
+    const t = r.value.data.coveringTestClasses.find((c) => c.id === 'ApexClass:PlainTest');
+    expect(t?.setsMock).toBeUndefined();
+  });
+
+  it('surfaces the callout-mock cross-reference in the disclosure', async () => {
+    const r = await testCoverageForMethodHandler(ctxC, { classApiName: 'ApexClass:CalloutSvc' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.disclosure).toMatch(/calloutCoverage/);
+    expect(r.value.data.disclosure).toMatch(/Test\.setMock/);
+  });
+});
+
 describe('testCoverageForMethodHandler: method-level exercise flag (P4-test-reachability)', () => {
   let dir2: string;
   let store2: GraphStore;
