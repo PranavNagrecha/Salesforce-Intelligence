@@ -76,7 +76,7 @@ const MAX_CHANGED_ITEMS = 500;
 
 /** Verbatim honesty disclosure surfaced on every response. */
 const TESTS_FOR_CHANGE_DISCLOSURE =
-  'tests_for_change selects at CLASS granularity (a changed method on a covered class still selects that class’s tests; method-level resolution promised in v2.7.1). The upstream walk follows both callsApex and dispatchesAsync incoming edges, so coverage via async dispatch (Database.executeBatch, System.enqueueJob, System.schedule) is included. Dynamic dispatch (Type.forName) and reflective invocation are invisible — a test reaching the change only via reflection is missed. Managed-package test classes are invisible. BFS is capped at depth 3; coverage chains longer than 3 hops surface as uncovered even when they exist. A changed component in uncoveredChanges is UNGUARDED — running the selected set will NOT exercise it; run the full suite when any change is uncovered or you suspect a deep chain.';
+  'tests_for_change selects at CLASS granularity (a changed method on a covered class still selects that class’s tests; method-level resolution promised in v2.7.1). The upstream walk follows both callsApex and dispatchesAsync incoming edges, so coverage via async dispatch (Database.executeBatch, System.enqueueJob, System.schedule) is included. A test class is a coverage SINK: it is recorded as a covering test but the walk never traverses THROUGH it, so a test is never credited with covering a class its own production code never references. Dynamic dispatch (Type.forName) and reflective invocation are invisible — a test reaching the change only via reflection is missed. Managed-package test classes are invisible. BFS is capped at depth 3; coverage chains longer than 3 hops surface as uncovered even when they exist. SELECTION ≠ VALIDATION: a selected test that merely runs the changed code does NOT prove the change is correct. In particular, Apex tests run with FULL system-context FLS unless the method wraps the path in System.runAs with a restricted user, so .size()/row-count assertions will NOT detect a WITH SECURITY_ENFORCED / stripInaccessible field-access regression — no field is filtered in the test runtime. A changed component in uncoveredChanges is UNGUARDED — running the selected set will NOT exercise it; run the full suite when any change is uncovered or you suspect a deep chain.';
 
 /**
  * Zod schema for the `sfi.tests_for_change` tool input.
@@ -169,12 +169,23 @@ const isTestClass = (node: Node): boolean =>
  * AND `dispatchesAsync`). Returns the depth at which each upstream id was
  * first discovered. Visited set is global to the walk; a node reachable via
  * both edge types is recorded once at its shortest depth.
+ *
+ * **Test classes are coverage SINKS, not relays.** A discovered test class is
+ * recorded as a covering test but is NOT expanded further upstream: nothing
+ * legitimately *calls* a test, so following an incoming edge into a test node
+ * would attribute whatever sits on the far side of that (spurious) edge as
+ * "exercises the target" even though no real call path from that node to the
+ * target passes through the target's code. That over-attribution is the
+ * fabricated-dependency bug (e.g. crediting `XControllerTest` with covering a
+ * selector its controller never references). The `isTest` check is loaded via
+ * `loadNode` (cached by the caller); only non-test relays grow the frontier.
  */
 const upstreamWalk = async (
   ctx: Context,
   targetId: ComponentId,
   maxDepth: number,
-): Promise<Result<Map<ComponentId, number>, string>> => {
+  loadNode: (id: ComponentId) => Promise<Result<Node | null, McpError>>,
+): Promise<Result<Map<ComponentId, number>, McpError>> => {
   const discovered = new Map<ComponentId, number>();
   let frontier: ComponentId[] = [targetId];
   const visited = new Set<ComponentId>([targetId]);
@@ -183,11 +194,17 @@ const upstreamWalk = async (
     for (const id of frontier) {
       for (const edgeType of COVERAGE_EDGE_TYPES) {
         const r = await listEdges(ctx.graph, id, { direction: 'in', edgeType });
-        if (!r.ok) return err(r.error.message);
+        if (!r.ok) return err({ kind: 'internal', message: r.error.message });
         for (const edge of r.value) {
           if (visited.has(edge.fromId)) continue;
           visited.add(edge.fromId);
           discovered.set(edge.fromId, depth + 1);
+          // Only non-test relays expand the frontier. A test class is a sink:
+          // record it, but never walk THROUGH it (a test has no real callers).
+          const nodeRes = await loadNode(edge.fromId);
+          if (!nodeRes.ok) return nodeRes;
+          const node = nodeRes.value;
+          if (node !== null && isTestClass(node)) continue;
           next.push(edge.fromId);
         }
       }
@@ -298,10 +315,8 @@ export const testsForChangeHandler = async (
       continue;
     }
 
-    const walkRes = await upstreamWalk(ctx, targetId, TESTS_FOR_CHANGE_BFS_DEPTH);
-    if (!walkRes.ok) {
-      return err({ kind: 'internal', message: `graph query failed: ${walkRes.error}` });
-    }
+    const walkRes = await upstreamWalk(ctx, targetId, TESTS_FOR_CHANGE_BFS_DEPTH, loadNode);
+    if (!walkRes.ok) return walkRes;
 
     const coveringTests: CoveringTestRef[] = [];
     for (const [id, depth] of walkRes.value) {
