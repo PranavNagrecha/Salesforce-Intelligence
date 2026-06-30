@@ -103,6 +103,53 @@ export type SoePhase =
   | 'post-save-approval'
   | 'post-save-async';
 
+/**
+ * The automation phases (every {@link SoePhase} except the `save`
+ * placeholder), frozen in documented SOE order. Mirrors the
+ * what_happens_on_save list so the two save-order views agree on which
+ * phases are counted as org automation.
+ */
+const AUTOMATION_PHASES: readonly Exclude<SoePhase, 'save'>[] = [
+  'before-save-flows',
+  'pre-save-triggers',
+  'pre-save-validation',
+  'after-triggers',
+  'post-save-assignment',
+  'post-save-workflows',
+  'post-save-flows',
+  'post-save-approval',
+  'post-save-async',
+];
+
+/**
+ * Grounded per-phase active-component counts. Same shape and semantics
+ * as the what_happens_on_save `SoePhaseCounts` — one count per
+ * automation phase (the `save` placeholder excluded), so the count of
+ * triggers / record-triggered flows / workflow rules per event is
+ * answerable directly from the per-event summary.
+ */
+export type SoePhaseCounts = Readonly<
+  Record<Exclude<SoePhase, 'save'>, number>
+>;
+
+/**
+ * Tally the active components emitted into each automation phase for one
+ * event's composed SOE. The `save` placeholder is never counted; every
+ * phase is present (zero when empty) for a stable, indexable map.
+ */
+const tallyPhaseCounts = (
+  soe: readonly { readonly phase: SoePhase }[],
+): SoePhaseCounts => {
+  const counts = Object.fromEntries(
+    AUTOMATION_PHASES.map((p) => [p, 0]),
+  ) as Record<Exclude<SoePhase, 'save'>, number>;
+  for (const step of soe) {
+    if (step.phase === 'save') continue;
+    counts[step.phase] += 1;
+  }
+  return counts;
+};
+
 /** Same SoeStepCondition shape as `what_happens_on_save`. */
 export interface SoeStepCondition {
   readonly conditionContextId: ComponentId;
@@ -154,8 +201,22 @@ export interface SoePerEvent {
   readonly soe: readonly SoeStep[];
   readonly summary: {
     readonly totalSteps: number;
+    /**
+     * Count of ACTIVE org-configured automation components that fire on
+     * this event — `totalSteps` minus the one `save` placeholder. The
+     * grounded answer to "how many distinct automation components fire on
+     * this event", per event.
+     */
+    readonly activeComponents: number;
     readonly conditionalSteps: number;
     readonly asyncFanOut: number;
+    /**
+     * Per-phase active-component counts for this event, in documented SOE
+     * order. Lets a caller answer the count/ordering question (triggers vs
+     * record-triggered flows vs workflow rules) directly per event.
+     * Inactive automation is excluded — it is in `inactiveConfigured`.
+     */
+    readonly phaseCounts: SoePhaseCounts;
   };
 }
 
@@ -680,13 +741,16 @@ const composeForEvent = async (
   const asyncFanOut = asyncStepsResult.value.length;
 
   const conditionalSteps = soe.filter((s) => s.conditional !== undefined).length;
+  const activeComponents = soe.filter((s) => s.phase !== 'save').length;
 
   return ok({
     soe,
     summary: {
       totalSteps: soe.length,
+      activeComponents,
       conditionalSteps,
       asyncFanOut,
+      phaseCounts: tallyPhaseCounts(soe),
     },
   });
 };
@@ -733,11 +797,21 @@ export const orderOfExecutionHandler = async (
   // sequence — so the response carries the same per-event payload
   // shape per event.
   const inactiveCollector = new Map<ComponentId, InactiveConfiguredFirer>();
+  const emptyPerEvent = (): SoePerEvent => ({
+    soe: [],
+    summary: {
+      totalSteps: 0,
+      activeComponents: 0,
+      conditionalSteps: 0,
+      asyncFanOut: 0,
+      phaseCounts: tallyPhaseCounts([]),
+    },
+  });
   const byEvent: Record<SoeEvent, SoePerEvent> = {
-    insert: { soe: [], summary: { totalSteps: 0, conditionalSteps: 0, asyncFanOut: 0 } },
-    update: { soe: [], summary: { totalSteps: 0, conditionalSteps: 0, asyncFanOut: 0 } },
-    delete: { soe: [], summary: { totalSteps: 0, conditionalSteps: 0, asyncFanOut: 0 } },
-    undelete: { soe: [], summary: { totalSteps: 0, conditionalSteps: 0, asyncFanOut: 0 } },
+    insert: emptyPerEvent(),
+    update: emptyPerEvent(),
+    delete: emptyPerEvent(),
+    undelete: emptyPerEvent(),
   };
   for (const event of SOE_EVENTS) {
     const perEventResult = await composeForEvent(

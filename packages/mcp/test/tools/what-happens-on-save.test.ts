@@ -733,6 +733,71 @@ describe('whatHappensOnSaveHandler', () => {
     );
   });
 
+  it('grounds a per-phase active-component count (answers "how many fire, and in what order")', async () => {
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'FullObj',
+      event: 'insert',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { soe, summary } = result.value.data;
+    // The count question must be answerable from the summary, not re-bucketed
+    // by the caller. activeComponents = every step except the save placeholder.
+    expect(summary.activeComponents).toBe(soe.length - 1);
+    // FullObj on insert: 1 before-save flow, 1 before-trigger, 1 validation
+    // rule, 1 after-trigger, 1 assignment rule, 1 workflow rule, 1 after-save
+    // flow, 1 approval, 1 async job = 9 active components.
+    expect(summary.activeComponents).toBe(9);
+    // Per-phase counts are present for EVERY automation phase (zero-filled),
+    // never the save placeholder, and tally exactly the emitted steps.
+    expect(summary.phaseCounts).toEqual({
+      'before-save-flows': 1,
+      'pre-save-triggers': 1,
+      'pre-save-validation': 1,
+      'after-triggers': 1,
+      'post-save-assignment': 1,
+      'post-save-workflows': 1,
+      'post-save-flows': 1,
+      'post-save-approval': 1,
+      'post-save-async': 1,
+    });
+    expect('save' in summary.phaseCounts).toBe(false);
+    // The map's values sum to activeComponents.
+    const summed = Object.values(summary.phaseCounts).reduce((a, b) => a + b, 0);
+    expect(summed).toBe(summary.activeComponents);
+  });
+
+  it('per-phase counts reflect the deactivation delta — inactive components are not counted', async () => {
+    // InactiveObj has one active after-save flow plus a Draft + an Obsolete
+    // flow on update. Only the active one is counted; the inactive pair is
+    // disclosed separately, so "how many still fire after deactivation" is the
+    // grounded count, not a generic deferral.
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'InactiveObj',
+      event: 'update',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { summary, inactiveConfigured } = result.value.data;
+    expect(summary.phaseCounts['post-save-flows']).toBe(1);
+    expect(summary.activeComponents).toBe(1);
+    // The two inactive flows are accounted for separately (the delta source).
+    expect(inactiveConfigured?.length).toBe(2);
+  });
+
+  it('per-phase counts are all zero (and activeComponents is 0) for an automation-free object', async () => {
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'EmptyObj',
+      event: 'insert',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { summary } = result.value.data;
+    // Only the save placeholder exists, which is NOT automation.
+    expect(summary.activeComponents).toBe(0);
+    expect(Object.values(summary.phaseCounts).every((c) => c === 0)).toBe(true);
+  });
+
   it('summary.conditionalSteps reflects the count of steps with firesWhen', async () => {
     const result = await whatHappensOnSaveHandler(ctx, {
       objectApiName: 'FullObj',
