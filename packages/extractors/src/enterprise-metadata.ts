@@ -610,12 +610,44 @@ const FLEXIPAGE_PAGE_TYPES = new Set([
 ]);
 
 /**
+ * Scan a FlexiPage XML for `{!$Permission.CustomPermission.X}` patterns
+ * inside `<leftValue>` elements (visibilityRule criteria blocks). These
+ * custom-permission gate checks are invisible to `extractFieldRefs` because
+ * they appear inside `<leftValue>` tags whose content is a formula-expression
+ * token, not a plain field API name or dotted field reference.
+ *
+ * Returns an array of deduplicated canonical `CustomPermission:{Name}` ids,
+ * sorted for stable output.
+ */
+const extractFlexiPagePermissionRefs = (xml: string): readonly string[] => {
+  // Pattern: {!$Permission.CustomPermission.AssignClinicalLead}
+  // — `$Permission.CustomPermission.` is the fixed prefix;
+  // — the permission name is one or more word chars (A-Za-z0-9_).
+  const permRe = /\{\!?\$Permission\.CustomPermission\.([A-Za-z0-9_]+)\}/g;
+  const seen = new Set<string>();
+  for (const match of xml.matchAll(permRe)) {
+    const permName = match[1];
+    if (permName !== undefined && permName.length > 0) {
+      seen.add(`CustomPermission:${permName}`);
+    }
+  }
+  return [...seen].sort();
+};
+
+/**
  * Extract a FlexiPage (Lightning page). Beyond the bare node, captures
  * `sobjectType` (which object the page is for), `pageType` (RecordPage /
  * AppPage / HomePage — picked from the page-type set, since `<type>` is also
  * used by regions/components), and `masterLabel`, and emits a `references`
  * edge FlexiPage → `CustomObject:{sobjectType}` so "what Lightning pages are
  * for object X" is answerable. fieldRefs are scoped by sobjectType.
+ *
+ * v2.9: also scans for `{!$Permission.CustomPermission.X}` patterns in
+ * `<leftValue>` elements (visibilityRule criteria) and emits a declared
+ * `references` edge FlexiPage → `CustomPermission:{Name}` tagged
+ * `referenceKind: 'visibilityRulePermission'` for each match. This makes
+ * custom-permission gates in Lightning page visibility rules discoverable via
+ * `sfi.find_component_usages`, `sfi.get_edges`, and `sfi.blast_radius_live`.
  *
  * HONESTY: the profile/recordType/app/form-factor ACTIVATION (which user sees
  * which page) is NOT in the retrieved FlexiPage metadata — it is a separate
@@ -634,6 +666,8 @@ export const extractFlexiPage = async (
   const pageType =
     extractXmlValues(text.value, 'type').find((t) => FLEXIPAGE_PAGE_TYPES.has(t)) ?? null;
   const fieldRefs = extractFieldRefs(text.value, sobjectType);
+  // v2.9: visibility-rule custom-permission references.
+  const permissionRefs = extractFlexiPagePermissionRefs(text.value);
 
   const edges: Edge[] = fieldRefs.map((fieldId) => ({
     fromId: nodeId,
@@ -653,6 +687,17 @@ export const extractFlexiPage = async (
       properties: { referenceKind: 'flexiPageObject' },
     });
   }
+  // v2.9: emit one declared `references` edge per custom-permission gate.
+  for (const permId of permissionRefs) {
+    edges.push({
+      fromId: nodeId,
+      toId: permId,
+      edgeType: 'references',
+      confidence: 'declared',
+      source: EXTRACTOR_SOURCE,
+      properties: { referenceKind: 'visibilityRulePermission' },
+    });
+  }
 
   const node = makeNode('FlexiPage', apiName, path, null, {
     sobjectType,
@@ -661,6 +706,7 @@ export const extractFlexiPage = async (
     activationsModeled: false,
     fieldRefs,
     rawReferenceCount: fieldRefs.length,
+    permissionRefs,
   });
   return ok({ nodes: [node], edges });
 };

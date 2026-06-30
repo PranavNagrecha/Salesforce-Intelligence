@@ -826,4 +826,136 @@ describe('enterprise metadata extractors', () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  // v2.9 — FlexiPage $Permission.CustomPermission visibility-rule edges.
+  it('v2.9: extractFlexiPage emits a declared references edge for each $Permission.CustomPermission.X in <leftValue>', async () => {
+    // Scenario: a Lightning Record Page that gates a component on a custom
+    // permission via {!$Permission.CustomPermission.X} inside a
+    // <visibilityRule><criteria><leftValue> block. extractFieldRefs only
+    // matches <columns>/<field>/<fieldItem>/<fieldApiName> elements — none
+    // of which appear in <leftValue> blocks — so pre-v2.9 this pattern was
+    // silently dropped and no graph edge was emitted.
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'Clinical_Record_Page.flexipage-meta.xml');
+      await writeFile(
+        path,
+        `<?xml version="1.0" encoding="UTF-8"?>
+<FlexiPage xmlns="http://soap.sforce.com/2006/04/metadata">
+    <masterLabel>Course Offering Record Page</masterLabel>
+    <sobjectType>hed__Example_Course__c</sobjectType>
+    <type>RecordPage</type>
+    <flexiPageRegions>
+        <componentInstances>
+            <componentInstanceProperties>
+                <name>visibilityRule</name>
+                <value>
+                    <criteria>
+                        <leftValue>{!$Permission.CustomPermission.AssignClinicalLead}</leftValue>
+                        <operator>EQUAL</operator>
+                        <rightValue>true</rightValue>
+                    </criteria>
+                    <criteria>
+                        <leftValue>{!$Permission.CustomPermission.ViewClinicalDashboard}</leftValue>
+                        <operator>EQUAL</operator>
+                        <rightValue>true</rightValue>
+                    </criteria>
+                </value>
+            </componentInstanceProperties>
+        </componentInstances>
+    </flexiPageRegions>
+</FlexiPage>`,
+        'utf8',
+      );
+      const result = await extractFlexiPage(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      // Two distinct custom-permission refs, each emits one declared edge.
+      const permEdges = result.value.edges.filter(
+        (e) =>
+          e.edgeType === 'references' &&
+          e.toId.startsWith('CustomPermission:'),
+      );
+      expect(permEdges).toHaveLength(2);
+      const permIds = permEdges.map((e) => e.toId).sort();
+      expect(permIds).toEqual([
+        'CustomPermission:AssignClinicalLead',
+        'CustomPermission:ViewClinicalDashboard',
+      ]);
+      // Edge properties: declared confidence + visibilityRulePermission kind.
+      for (const edge of permEdges) {
+        expect(edge.confidence).toBe('declared');
+        expect(edge.properties['referenceKind']).toBe('visibilityRulePermission');
+      }
+      // permissionRefs mirrored on the node.
+      const node = result.value.nodes[0]!;
+      expect((node.properties['permissionRefs'] as string[]).sort()).toEqual([
+        'CustomPermission:AssignClinicalLead',
+        'CustomPermission:ViewClinicalDashboard',
+      ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('v2.9: extractFlexiPage emits no permission edge when no $Permission.CustomPermission pattern is present', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'Simple_Page.flexipage-meta.xml');
+      await writeFile(
+        path,
+        '<FlexiPage xmlns="http://soap.sforce.com/2006/04/metadata"><masterLabel>Simple Page</masterLabel><type>AppPage</type></FlexiPage>',
+        'utf8',
+      );
+      const result = await extractFlexiPage(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const permEdges = result.value.edges.filter(
+        (e) =>
+          e.edgeType === 'references' &&
+          e.toId.startsWith('CustomPermission:'),
+      );
+      expect(permEdges).toHaveLength(0);
+      expect(result.value.nodes[0]?.properties['permissionRefs']).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('v2.9: extractFlexiPage deduplicates repeated $Permission.CustomPermission.X occurrences', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'Dup_Perm_Page.flexipage-meta.xml');
+      await writeFile(
+        path,
+        `<FlexiPage xmlns="http://soap.sforce.com/2006/04/metadata">
+  <type>RecordPage</type>
+  <flexiPageRegions>
+    <componentInstances>
+      <componentInstanceProperties>
+        <value>
+          <criteria><leftValue>{!$Permission.CustomPermission.MyPerm}</leftValue></criteria>
+          <criteria><leftValue>{!$Permission.CustomPermission.MyPerm}</leftValue></criteria>
+        </value>
+      </componentInstanceProperties>
+    </componentInstances>
+  </flexiPageRegions>
+</FlexiPage>`,
+        'utf8',
+      );
+      const result = await extractFlexiPage(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const permEdges = result.value.edges.filter(
+        (e) =>
+          e.edgeType === 'references' &&
+          e.toId.startsWith('CustomPermission:'),
+      );
+      // Duplicated occurrences collapse to one edge.
+      expect(permEdges).toHaveLength(1);
+      expect(permEdges[0]!.toId).toBe('CustomPermission:MyPerm');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
