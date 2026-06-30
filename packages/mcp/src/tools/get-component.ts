@@ -15,6 +15,17 @@
  * parser through this surface, leaving structured parsing to clients that
  * want it. Splitting on the *first* `\n---\n` after the opening means
  * markdown horizontal rules inside the body remain part of the body.
+ *
+ * v0.2 STRUCTURED GROUNDING: `data.properties` exposes the component's typed
+ * properties object (the same record stored in the graph node — for
+ * ValidationRules this carries `active`, `errorConditionFormula`, `conditions`,
+ * `errorMessage`, etc.) and `data.referenceIds` carries the canonical ids of
+ * all components this node has outgoing edges to. Both fields are additive: the
+ * existing `frontmatter` / `body` strings are byte-identical and always present.
+ * This lets `synthesize_answer` (and any LLM caller) lift structured facts
+ * without re-parsing YAML, and cite edge targets as real component ids rather
+ * than guessing from markdown prose — eliminating false hallucination flags on
+ * referenced ids.
  */
 
 import { readFile } from 'node:fs/promises';
@@ -26,7 +37,7 @@ import type {
   McpResponse,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById } from '@sf-intelligence/graph';
+import { getNodeById, listEdges } from '@sf-intelligence/graph';
 import { appendDemandHit, componentPath } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
@@ -71,9 +82,22 @@ export type GetComponentInput = z.infer<typeof getComponentInputSchema>;
  *   - `type`: the component's type (from the graph node).
  *   - `path`: vault-relative path of the markdown file that was read.
  *   - `frontmatter`: raw YAML body between the leading and first trailing
- *     `---` delimiters. Parsing left to the client.
+ *     `---` delimiters. Parsing left to the client (byte-identical with v0.1).
  *   - `body`: response-safe markdown body slice following the frontmatter,
  *     with the leading blank line(s) after the closing delimiter trimmed.
+ *   - `properties`: the component's typed properties object — the same record
+ *     stored in the graph node and rendered into the frontmatter. For
+ *     ValidationRules this carries `active`, `errorConditionFormula`,
+ *     `conditions`, `errorMessage`, `errorDisplayField`, etc. Always present
+ *     (may be `{}` for components whose extractor emits no typed properties).
+ *     Additive: does NOT replace `frontmatter`; the existing string is
+ *     preserved byte-for-byte.
+ *   - `referenceIds`: canonical ids (`{Type}:{ApiName}`) of every component
+ *     this node has a directed outgoing edge to, deduplicated and sorted.
+ *     Covers all outgoing edge types (references, triggersOn, firesWhen, etc.)
+ *     so callers receive the full outbound neighbourhood as structured values
+ *     rather than needing to parse markdown prose. Empty array when this node
+ *     has no outgoing edges.
  *   - truncation fields: explicit byte counts so callers know whether the
  *     body was clipped to keep the MCP response consumable.
  */
@@ -83,6 +107,19 @@ export interface GetComponentOutput {
   readonly path: string;
   readonly frontmatter: string;
   readonly body: string;
+  /**
+   * Structured property bag from the graph node. For ValidationRules:
+   * `{ active, errorConditionFormula, conditions, errorMessage, errorDisplayField }`.
+   * Additive — `frontmatter` (the raw YAML string) is still present and
+   * byte-identical with v0.1.
+   */
+  readonly properties: Readonly<Record<string, unknown>>;
+  /**
+   * Canonical ids of every component this node has an outgoing edge to,
+   * deduplicated and sorted. Lets callers cite real component ids without
+   * parsing markdown prose.
+   */
+  readonly referenceIds: readonly ComponentId[];
   readonly bodyTruncated: boolean;
   readonly bodyBytes: number;
   readonly returnedBodyBytes: number;
@@ -183,6 +220,14 @@ export const getComponentHandler = async (
   const boundedBody = truncateUtf8(split.body, maxBodyBytes);
   const annotations = await annotationsBlockFor(ctx, node.id);
 
+  // Fetch outgoing edges for structured grounding: `referenceIds` gives callers
+  // canonical component ids without needing to parse markdown prose, eliminating
+  // false hallucination flags in synthesize_answer on referenced ids.
+  const edgesResult = await listEdges(ctx.graph, node.id, { direction: 'out' });
+  const referenceIds: ComponentId[] = edgesResult.ok
+    ? [...new Set(edgesResult.value.map((e) => e.toId))].sort()
+    : [];
+
   return ok({
     data: {
       id: node.id,
@@ -190,6 +235,12 @@ export const getComponentHandler = async (
       path: relPath,
       frontmatter: split.frontmatter,
       body: boundedBody.text,
+      // Structured properties from the graph node (already parsed JSON, never
+      // re-derived from the YAML string). For ValidationRules carries `active`,
+      // `errorConditionFormula`, `conditions`, `errorMessage`, etc.
+      properties: node.properties,
+      // Canonical ids of every outgoing neighbour, deduplicated + sorted.
+      referenceIds,
       bodyTruncated: boundedBody.truncated,
       bodyBytes: boundedBody.originalBytes,
       returnedBodyBytes: boundedBody.returnedBytes,

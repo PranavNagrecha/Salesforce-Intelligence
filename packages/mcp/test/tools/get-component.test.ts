@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import type {
+  Edge,
   ExtractionResult,
   Node,
   VaultManifest,
@@ -44,6 +45,32 @@ const makeNode = (overrides: Partial<Node> & Pick<Node, 'id'>): Node => ({
   properties: {},
   ...overrides,
 });
+
+/**
+ * Real-org-shape ValidationRule fixture. Properties match the structure
+ * emitted by the validation-rule extractor (active, errorConditionFormula,
+ * conditions with fieldRefs, errorMessage, errorDisplayField). Neutral names —
+ * no real org tokens.
+ */
+const VALIDATION_RULE_PROPERTIES = {
+  active: true,
+  errorConditionFormula: 'End_Time__c < Start_Time__c',
+  errorDisplayField: 'CustomField:TestObj__c.End_Time__c',
+  errorMessage: 'End time must be after start time.',
+  description: 'Validates that end time is after start time.',
+  conditions: [
+    {
+      conditionContextId:
+        'ConditionalContext:ValidationRule:TestObj__c.EndAfterStart.condition-0',
+      expression: 'End_Time__c < Start_Time__c',
+      kind: 'formula',
+      fieldRefs: [
+        'CustomField:TestObj__c.End_Time__c',
+        'CustomField:TestObj__c.Start_Time__c',
+      ],
+    },
+  ],
+};
 
 const seed: ExtractionResult = {
   nodes: [
@@ -87,8 +114,55 @@ const seed: ExtractionResult = {
       label: 'Large Profile',
       sourcePath: 'profiles/LargeProfile.profile-meta.xml',
     }),
+    // Used by the structured-grounding (u6) test: a ValidationRule with real-
+    // org-shape properties and outgoing references edges.
+    makeNode({
+      id: 'ValidationRule:TestObj__c.EndAfterStart',
+      type: 'ValidationRule',
+      apiName: 'EndAfterStart',
+      label: 'EndAfterStart',
+      parentId: 'CustomObject:TestObj__c',
+      sourcePath:
+        'objects/TestObj__c/validationRules/EndAfterStart.validationRule-meta.xml',
+      properties: VALIDATION_RULE_PROPERTIES,
+    }),
+    // Referenced field nodes (needed so listEdges returns real target ids).
+    makeNode({
+      id: 'CustomField:TestObj__c.End_Time__c',
+      type: 'CustomField',
+      apiName: 'End_Time__c',
+      label: 'End Time',
+      parentId: 'CustomObject:TestObj__c',
+      sourcePath: 'objects/TestObj__c/fields/End_Time__c.field-meta.xml',
+    }),
+    makeNode({
+      id: 'CustomField:TestObj__c.Start_Time__c',
+      type: 'CustomField',
+      apiName: 'Start_Time__c',
+      label: 'Start Time',
+      parentId: 'CustomObject:TestObj__c',
+      sourcePath: 'objects/TestObj__c/fields/Start_Time__c.field-meta.xml',
+    }),
   ],
-  edges: [],
+  edges: [
+    // ValidationRule → CustomField references (formula-tokenizer edges)
+    {
+      fromId: 'ValidationRule:TestObj__c.EndAfterStart',
+      toId: 'CustomField:TestObj__c.End_Time__c',
+      edgeType: 'references',
+      confidence: 'parsed',
+      source: 'formula-tokenizer',
+      properties: {},
+    } as Edge,
+    {
+      fromId: 'ValidationRule:TestObj__c.EndAfterStart',
+      toId: 'CustomField:TestObj__c.Start_Time__c',
+      edgeType: 'references',
+      confidence: 'parsed',
+      source: 'formula-tokenizer',
+      properties: {},
+    } as Edge,
+  ],
 };
 
 const writeMarkdown = (vaultRoot: string, node: Node, raw: string): string => {
@@ -198,6 +272,49 @@ beforeAll(async () => {
 
   // Intentionally do NOT write a file for CustomObject:Orphan; it powers
   // the file-missing scenario.
+
+  // ValidationRule fixture for u6-structured-grounding test. Uses real-org-shape
+  // frontmatter (active, errorConditionFormula, conditions, errorMessage) and
+  // outgoing `references` edges to two CustomFields. Node index 6 in the seed.
+  writeMarkdown(
+    tempDir,
+    seed.nodes[6]!,
+    [
+      '---',
+      'apiName: EndAfterStart',
+      'id: ValidationRule:TestObj__c.EndAfterStart',
+      'parentId: CustomObject:TestObj__c',
+      'properties:',
+      '  active: true',
+      '  errorConditionFormula: End_Time__c < Start_Time__c',
+      '  errorDisplayField: CustomField:TestObj__c.End_Time__c',
+      '  errorMessage: End time must be after start time.',
+      '  description: Validates that end time is after start time.',
+      '  conditions:',
+      '    - conditionContextId: ConditionalContext:ValidationRule:TestObj__c.EndAfterStart.condition-0',
+      '      expression: End_Time__c < Start_Time__c',
+      '      kind: formula',
+      '      fieldRefs:',
+      '        - CustomField:TestObj__c.End_Time__c',
+      '        - CustomField:TestObj__c.Start_Time__c',
+      'type: ValidationRule',
+      '---',
+      '',
+      '# EndAfterStart',
+      '',
+      '**Type:** ValidationRule',
+      '',
+      'Validates that end time is after start time.',
+      '',
+      '## References (outgoing, 2)',
+      '',
+      '| Target | Confidence |',
+      '| --- | --- |',
+      '| `CustomField:TestObj__c.End_Time__c` | parsed |',
+      '| `CustomField:TestObj__c.Start_Time__c` | parsed |',
+      '',
+    ].join('\n'),
+  );
 });
 
 afterAll(async () => {
@@ -452,6 +569,66 @@ describe('getComponentHandler', () => {
       result.value.data.bodyBytes - 128,
     );
     expect(result.value.data.maxBodyBytes).toBe(128);
+  });
+
+  it('u6-structured-grounding: ValidationRule returns data.properties with formula and referenceIds as canonical ids (not empty grounding)', async () => {
+    // This test verifies the fix for the durable-hardening bug (u6): before
+    // the fix, data.properties was absent and data.referenceIds did not exist,
+    // so synthesize_answer had no structured facts to ground answers on —
+    // resulting in empty grounding + false hallucination flags on real ids.
+    // After the fix both fields must be present and populated.
+    const result = await getComponentHandler(ctx, {
+      id: 'ValidationRule:TestObj__c.EndAfterStart',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const { data } = result.value;
+
+    // --- Backward-compat: existing string fields must still be present ---
+    expect(typeof data.frontmatter).toBe('string');
+    expect(data.frontmatter.length).toBeGreaterThan(0);
+    expect(typeof data.body).toBe('string');
+
+    // --- NEW: data.properties must be a real object with typed ValidationRule fields ---
+    expect(data.properties).toBeDefined();
+    expect(typeof data.properties).toBe('object');
+    // active flag (boolean in the graph node)
+    expect(data.properties['active']).toBe(true);
+    // errorConditionFormula must be present as a string value
+    expect(typeof data.properties['errorConditionFormula']).toBe('string');
+    expect(data.properties['errorConditionFormula']).toContain('End_Time__c');
+    // errorMessage must be a string
+    expect(typeof data.properties['errorMessage']).toBe('string');
+
+    // --- NEW: data.referenceIds must be canonical component ids (not empty) ---
+    expect(Array.isArray(data.referenceIds)).toBe(true);
+    expect(data.referenceIds.length).toBe(2);
+    // Both referenced field ids must appear (sorted)
+    expect(data.referenceIds).toContain('CustomField:TestObj__c.End_Time__c');
+    expect(data.referenceIds).toContain('CustomField:TestObj__c.Start_Time__c');
+    // Sorted order
+    expect(data.referenceIds[0]).toBe('CustomField:TestObj__c.End_Time__c');
+    expect(data.referenceIds[1]).toBe('CustomField:TestObj__c.Start_Time__c');
+  });
+
+  it('u6-structured-grounding: existing CustomObject returns empty properties and referenceIds without regression', async () => {
+    // Regression check: a node with properties:{} and no outgoing edges must
+    // return properties as {} and referenceIds as [] — not missing or undefined.
+    const result = await getComponentHandler(ctx, {
+      id: 'CustomObject:Account',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // properties must be present (may be empty for objects with no typed props)
+    expect(result.value.data.properties).toBeDefined();
+    expect(typeof result.value.data.properties).toBe('object');
+    // referenceIds must be an array (empty for a node with no outgoing edges)
+    expect(Array.isArray(result.value.data.referenceIds)).toBe(true);
+    // frontmatter still present and byte-identical
+    expect(result.value.data.frontmatter).toBe(
+      'id: CustomObject:Account\ntype: CustomObject\napiName: Account',
+    );
   });
 });
 
