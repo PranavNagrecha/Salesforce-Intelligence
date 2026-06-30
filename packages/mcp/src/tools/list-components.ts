@@ -301,6 +301,17 @@ export interface ListComponentsOutput {
    * is this page's size; `hasMore` mirrors the legacy `hasMore`.
    */
   readonly pageInfo?: PageInfo;
+  /**
+   * Present ONLY for `type: 'CustomField'`. The TRUE count of formula (computed)
+   * fields across the whole `{type}` (and `parentId` narrow), from
+   * `countNodesByType({ isFormula: true })` — NOT a per-page tally, so it is
+   * authoritative regardless of pagination. In DX-source format a formula field
+   * carries its RETURN type (Text, Number, Checkbox, …) in `<type>`, never the
+   * literal `'Formula'`, so a caller grouping by `dataType` alone would conclude
+   * "No Formula fields were found"; this count makes the computed-vs-stored split
+   * explicit (per-field, `properties.isFormula === true` flags the same fields).
+   */
+  readonly formulaFieldCount?: number;
 }
 
 /**
@@ -433,6 +444,24 @@ export const listComponentsHandler = async (
 
   const coverageCaveat = buildEnumerationCoverageCaveat(ctx, input.type);
 
+  // Formula-field classification (CustomField only). A formula field encodes its
+  // RETURN type (Text, Number, Checkbox, …) in `<type>`, never the literal
+  // `'Formula'`, so a caller that groups a CustomField listing by `dataType`
+  // alone wrongly concludes "No Formula fields were found". Surface the TRUE
+  // computed-field count over the whole `{type}` (and `parentId`) narrow — NOT
+  // a per-page tally — via the derived `isFormula` property the extractor emits.
+  // Only added when the type is CustomField and no property filter is active
+  // (the boolean filters are ApexClass-only). A count failure is non-fatal: the
+  // enumeration still answers, just without the breakdown.
+  let formulaFieldCount: number | undefined;
+  if (input.type === 'CustomField' && !hasPropertyFilter) {
+    const formulaRes = await countNodesByType(ctx.graph, input.type, {
+      ...(input.parentId !== undefined ? { parentId: input.parentId as ComponentId } : {}),
+      propertyEquals: { isFormula: true },
+    });
+    if (formulaRes.ok) formulaFieldCount = formulaRes.value;
+  }
+
   // CR-22: emit a continuation cursor ONLY when more rows remain (over `limit`
   // OR byte-trimmed). The next offset is `offset + kept.length` — `o` IS the SQL
   // offset, so the resumed page SQL-scans deeper (reaches node 501+ natively).
@@ -478,6 +507,7 @@ export const listComponentsHandler = async (
       hasMore,
       ...(retrievalHint !== undefined ? { retrievalHint } : {}),
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
+      ...(formulaFieldCount !== undefined ? { formulaFieldCount } : {}),
       ...(trimmed
         ? {
             truncated: true as const,

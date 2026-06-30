@@ -305,6 +305,16 @@ const buildProperties = (
   dataType: string,
 ): Readonly<Record<string, unknown>> => {
   const isPicklist = PICKLIST_TYPES.includes(dataType as (typeof PICKLIST_TYPES)[number]);
+  const formula = toNullableString(rootObj['formula']);
+  // Derived classifier: in DX-source format `<type>` holds a formula's RETURN
+  // type (Text, Checkbox, Number, …), NOT the literal `'Formula'`, so `dataType`
+  // alone CANNOT tell a computed field from a stored one. The presence of a
+  // non-empty `<formula>` body is the authoritative signal. Surface it as a
+  // first-class `isFormula` boolean so consumers (list_components, field
+  // summaries, field_360, data-dictionary) can group/count formula fields
+  // without re-deriving the rule — and never report "No Formula fields were
+  // found" for an object whose formula fields all carry a non-`Formula` <type>.
+  const isFormula = formula !== null && formula.length > 0;
   return {
     label: String(unwrapSingle(rootObj['label'])),
     dataType,
@@ -316,12 +326,18 @@ const buildProperties = (
     unique: toBooleanWithDefault(rootObj['unique']),
     externalId: toBooleanWithDefault(rootObj['externalId']),
     defaultValue: toNullableString(rootObj['defaultValue']),
-    formula: toNullableString(rootObj['formula']),
+    formula,
     referenceTo: toNullableString(rootObj['referenceTo']),
     relationshipName: toNullableString(rootObj['relationshipName']),
     inlineHelpText: toNullableString(rootObj['inlineHelpText']),
     trackHistory: toBooleanWithDefault(rootObj['trackHistory']),
     picklistValues: isPicklist ? extractPicklistValues(rootObj) : null,
+    // OMIT-when-false (unlike the fixed keys above): only computed fields carry
+    // a formula body, and an `isFormula: false` row on every CustomField would
+    // churn every rendered markdown file in every vault. Emitting it only when
+    // `true` keeps stored fields byte-identical while making formula fields
+    // self-describing.
+    ...(isFormula ? { isFormula: true } : {}),
     // OMIT-when-null (unlike the fixed keys above): only GlobalValueSet-driven
     // picklists carry a value-set name, and a `valueSetName: null` row on every
     // CustomField would churn every rendered markdown file in every vault

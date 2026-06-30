@@ -369,6 +369,100 @@ describe('listComponentsHandler retrievalHint (FRESH-02)', () => {
   });
 });
 
+describe('listComponentsHandler formula-field classification', () => {
+  // A formula field encodes its RETURN type in <type> (Text/Currency here), NOT
+  // the literal 'Formula'. The extractor flags it with properties.isFormula=true;
+  // list_components surfaces the TRUE count so a caller never concludes "No
+  // Formula fields were found" by grouping on dataType alone.
+  let fDir: string;
+  let fStore: GraphStore;
+  let fCtx: Context;
+
+  const fSeed: ExtractionResult = {
+    nodes: [
+      makeNode({ id: 'CustomObject:Payment__c', apiName: 'Payment__c', label: 'Payment' }),
+      // Two formula fields whose <type> is the RETURN type, not 'Formula'.
+      makeNode({
+        id: 'CustomField:Payment__c.Clock_Number__c',
+        type: 'CustomField',
+        apiName: 'Clock_Number__c',
+        label: 'Clock Number',
+        parentId: 'CustomObject:Payment__c',
+        properties: { dataType: 'Text', formula: 'TEXT(Seq__c)', isFormula: true },
+      }),
+      makeNode({
+        id: 'CustomField:Payment__c.Net__c',
+        type: 'CustomField',
+        apiName: 'Net__c',
+        label: 'Net',
+        parentId: 'CustomObject:Payment__c',
+        properties: { dataType: 'Currency', formula: 'Gross__c - Tax__c', isFormula: true },
+      }),
+      // One stored field — no isFormula key (OMIT-when-false).
+      makeNode({
+        id: 'CustomField:Payment__c.Amount__c',
+        type: 'CustomField',
+        apiName: 'Amount__c',
+        label: 'Amount',
+        parentId: 'CustomObject:Payment__c',
+        properties: { dataType: 'Currency' },
+      }),
+    ],
+    edges: [],
+  };
+
+  beforeAll(async () => {
+    fDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-list-formula-'));
+    const opened = await openGraph(join(fDir, 'formula.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    fStore = opened.value;
+    const imported = await importExtractionResults(fStore, [fSeed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    fCtx = { vaultRoot: fDir, manifest: FIXTURE_MANIFEST, graph: fStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(fStore);
+    rmSync(fDir, { recursive: true, force: true });
+  });
+
+  it('reports the TRUE formulaFieldCount across the whole CustomField type', async () => {
+    const r = await listComponentsHandler(fCtx, { type: 'CustomField' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Three fields total, two of them formula — and the count must NOT be zero,
+    // which is the symptom of "No Formula fields were found".
+    expect(r.value.data.formulaFieldCount).toBe(2);
+  });
+
+  it('scopes formulaFieldCount to a parentId narrow', async () => {
+    const r = await listComponentsHandler(fCtx, {
+      type: 'CustomField',
+      parentId: 'CustomObject:Payment__c',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.formulaFieldCount).toBe(2);
+  });
+
+  it('counts formula fields independent of pagination (page size 1)', async () => {
+    // The count is a COUNT(*), not a per-page tally, so a tiny page still
+    // reports the full formula total.
+    const r = await listComponentsHandler(fCtx, { type: 'CustomField', limit: 1 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.components.length).toBe(1);
+    expect(r.value.data.formulaFieldCount).toBe(2);
+  });
+
+  it('omits formulaFieldCount for non-CustomField types', async () => {
+    const r = await listComponentsHandler(fCtx, { type: 'CustomObject' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.formulaFieldCount).toBeUndefined();
+  });
+});
+
 // =============================================================================
 // CR-22 — single-axis continuation cursor. list_components pages
 // listNodesByType DIRECTLY by SQL OFFSET, so `o` already IS the SQL offset (it
