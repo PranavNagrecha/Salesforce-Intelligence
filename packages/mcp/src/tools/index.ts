@@ -1356,6 +1356,22 @@ const SYNTHESIS_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze(
 });
 
 /**
+ * Concrete JSON Schema for `sfi.permission_risk_report`. Mirrors
+ * `permissionRiskReportInputSchema`: the generic `limit` plus an optional
+ * `profileFilter` that SCOPES the report to one profile. The filter is honored
+ * — an unknown profile stops the report with a false-premise caveat rather than
+ * dumping the org-wide report.
+ */
+const PERMISSION_RISK_REPORT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
+  Object.freeze({
+    type: 'object',
+    properties: {
+      limit: { type: 'integer', minimum: 1, maximum: 500 },
+      profileFilter: { type: 'string', minLength: 1 },
+    },
+  });
+
+/**
  * Concrete JSON Schema for `sfi.health_check`. The tool takes no arguments;
  * the schema mirrors the empty `z.object({})` validator declared in the
  * tool's own module. Declared as a named constant so the `tools/list`
@@ -4130,8 +4146,8 @@ export const V01_TOOLS: readonly ToolDefinition[] = [
   {
     name: 'sfi.permission_risk_report',
     description:
-      "Ranked permission-risk report, leading with OVER-PRIVILEGE read straight from the extracted profile / permission-set metadata: every Profile or PermissionSet that grants a god-mode or administrative system permission (Modify All Data / View All Data = critical; Author Apex, Customize Application, Manage Users, Manage Profiles/PermSets, Modify Metadata, Manage Sharing, Manage Roles, password/login policies = high) OR object-level View All / Modify All, surfaced as ONE aggregated finding per grantor (severity = the worst signal; system perms + a per-grantor count of objects escalated). PermissionSetGroups are analysed too: a PSG's effective god-mode is aggregated from its MEMBER permission sets (so a user who gets Modify All Data via a group is caught), with the muting permission set noted but not subtracted (v1 honesty boundary). A `privilege` block rosters the `modifyAllDataGrantors` / `viewAllDataGrantors` (profiles, permission sets, AND groups) and the `overPrivilegedGrantorCount`. Also rolls in unassigned permission sets and CRUD/FLS audit totals. Answers 'who has god mode / Modify All / View All / who is an admin / who is over-permissioned'. Read-only, declared confidence (literal metadata flags, not heuristics); `limit` (default 50) caps the findings. When the vault holds a captured permission-holder aggregate, the god-mode grantors carry active-holder counts via a `dataShape` holders block (`data_snapshot`, counts only) — a god-mode permission set held by 40 active users outranks one held by none.",
-    inputSchema: SYNTHESIS_INPUT_SCHEMA,
+      "Ranked permission-risk report, leading with OVER-PRIVILEGE read straight from the extracted profile / permission-set metadata: every Profile or PermissionSet that grants a god-mode or administrative system permission (Modify All Data / View All Data = critical; Author Apex, Customize Application, Manage Users, Manage Profiles/PermSets, Modify Metadata, Manage Sharing, Manage Roles, password/login policies = high) OR object-level View All / Modify All, surfaced as ONE aggregated finding per grantor (severity = the worst signal; system perms + a per-grantor count of objects escalated). PermissionSetGroups are analysed too: a PSG's effective god-mode is aggregated from its MEMBER permission sets (so a user who gets Modify All Data via a group is caught), with the muting permission set noted but not subtracted (v1 honesty boundary). A `privilege` block rosters the `modifyAllDataGrantors` / `viewAllDataGrantors` (profiles, permission sets, AND groups) and the `overPrivilegedGrantorCount`. Also rolls in unassigned permission sets and CRUD/FLS audit totals. Answers 'who has god mode / Modify All / View All / who is an admin / who is over-permissioned'. Optional `profileFilter` (a Profile api name / label or canonical `Profile:<ApiName>` id) SCOPES the report to one profile — and is HONORED: when the named profile does NOT exist in the vault the report STOPS with a `profileFilter.found: false` result (empty findings + a caveat naming the closest existing profile), never silently dropping the filter and dumping the org-wide report (a false-premise profile name therefore yields a 'profile not found', not a misleading full report). Read-only, declared confidence (literal metadata flags, not heuristics); `limit` (default 50) caps the findings. When the vault holds a captured permission-holder aggregate, the god-mode grantors carry active-holder counts via a `dataShape` holders block (`data_snapshot`, counts only) — a god-mode permission set held by 40 active users outranks one held by none.",
+    inputSchema: PERMISSION_RISK_REPORT_INPUT_SCHEMA,
   },
   {
     name: 'sfi.release_readiness_report',

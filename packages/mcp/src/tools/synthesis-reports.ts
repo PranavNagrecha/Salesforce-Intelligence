@@ -70,8 +70,23 @@ export type FieldCleanupCandidatesInput = z.infer<
 >;
 export const orgRiskReportInputSchema = synthesisInputSchema;
 export const automationRiskReportInputSchema = synthesisInputSchema;
-export const permissionRiskReportInputSchema = synthesisInputSchema;
+/**
+ * `sfi.permission_risk_report` accepts the generic `limit` plus an optional
+ * `profileFilter` — a Profile api name / label to SCOPE the report to one
+ * profile. The filter is HONORED: when the named profile does not exist in the
+ * vault the report STOPS with a `profile not found` result (empty findings +
+ * an explicit caveat naming the closest existing profile) rather than silently
+ * dropping the filter and dumping the full org-wide report. Accepts a bare
+ * name (`Custom: Sales`) or a canonical `Profile:<ApiName>` id.
+ */
+export const permissionRiskReportInputSchema = synthesisInputSchema.extend({
+  profileFilter: z.string().min(1).optional(),
+});
 export const releaseReadinessReportInputSchema = synthesisInputSchema;
+
+export type PermissionRiskReportInput = z.infer<
+  typeof permissionRiskReportInputSchema
+>;
 
 export interface RankedFinding {
   readonly rank: number;
@@ -760,6 +775,109 @@ const analyzeOverPrivilege = async (
   };
 };
 
+/**
+ * Build a permission-risk report SCOPED to a single, already-resolved Profile
+ * node. Analyses ONLY that profile's god-mode / administrative system perms and
+ * object-level View All / Modify All grants — the same declared-metadata logic
+ * `analyzeOverPrivilege` runs org-wide, narrowed to one grantor. An empty
+ * `findings` here means the profile carries no flagged over-privilege (a real
+ * answer, not a missing one).
+ */
+const scopedProfileReport = async (
+  ctx: Context,
+  node: Node,
+  limit: number,
+  requested: string,
+): Promise<Result<McpResponse<PermissionRiskReportOutput>, McpError>> => {
+  const riskyPerms: string[] = [];
+  let worst: RankedFinding['severity'] | null = null;
+  const modifyAllDataGrantors: ComponentId[] = [];
+  const viewAllDataGrantors: ComponentId[] = [];
+  const ups = node.properties['userPermissions'];
+  if (Array.isArray(ups)) {
+    for (const perm of ups) {
+      if (typeof perm !== 'string') continue;
+      const sev = SYSTEM_PERMISSION_SEVERITY[perm];
+      if (sev === undefined) continue;
+      riskyPerms.push(perm);
+      if (worst === null || rankSeverity(sev) > rankSeverity(worst)) worst = sev;
+      if (perm === 'ModifyAllData') modifyAllDataGrantors.push(node.id);
+      if (perm === 'ViewAllData') viewAllDataGrantors.push(node.id);
+    }
+  }
+
+  let modifyAllObjects = 0;
+  let viewAllObjects = 0;
+  const examples: string[] = [];
+  const outResult = await listEdges(ctx.graph, node.id, {
+    direction: 'out',
+    edgeType: 'grantedBy',
+  });
+  if (outResult.ok) {
+    for (const edge of outResult.value) {
+      if (!edge.toId.startsWith('CustomObject:')) continue;
+      if (edge.properties['modifyAllRecords'] === true) {
+        modifyAllObjects += 1;
+        if (examples.length < ESCALATION_EXAMPLE_CAP) examples.push(edge.toId);
+      } else if (edge.properties['viewAllRecords'] === true) {
+        viewAllObjects += 1;
+        if (examples.length < ESCALATION_EXAMPLE_CAP) examples.push(edge.toId);
+      }
+    }
+  }
+  if (
+    modifyAllObjects > 0 &&
+    (worst === null || rankSeverity('high') > rankSeverity(worst))
+  ) {
+    worst = 'high';
+  } else if (viewAllObjects > 0 && worst === null) {
+    worst = 'medium';
+  }
+
+  const finding = grantorFinding(
+    node,
+    'Profile',
+    riskyPerms,
+    modifyAllObjects,
+    viewAllObjects,
+    worst,
+    examples,
+  );
+  const findings: RankedFinding[] = finding !== null ? [finding] : [];
+
+  const godModeIds = [
+    ...new Set([...modifyAllDataGrantors, ...viewAllDataGrantors]),
+  ];
+  const dataShape = await readActiveHoldersFor(ctx, godModeIds);
+
+  return ok({
+    data: {
+      findings: sortFindings(findings).slice(0, limit),
+      auditTotals: null,
+      privilege: {
+        modifyAllDataGrantors: [...modifyAllDataGrantors].sort(),
+        viewAllDataGrantors: [...viewAllDataGrantors].sort(),
+        overPrivilegedGrantorCount: findings.length,
+        scanned: { profiles: 1, permissionSets: 0, permissionSetGroups: 0 },
+      },
+      profileFilter: {
+        requested,
+        found: true,
+        resolvedId: node.id,
+        closestMatch: null,
+        caveat: `Report scoped to ${node.id}.`,
+      },
+      ...(dataShape !== undefined ? { dataShape } : {}),
+      trust: coverageTrust(ctx),
+      disclosure: SYNTHESIS_DISCLOSURE,
+    },
+    vaultState: {
+      sourceTreeHash: ctx.manifest.sourceTreeHash,
+      refreshedAt: ctx.manifest.refreshedAt,
+    },
+  });
+};
+
 // ---------------------------------------------------------------------------
 // sfi.permission_risk_report
 // ---------------------------------------------------------------------------
@@ -777,14 +895,186 @@ export interface PermissionRiskReportOutput extends SynthesisBase {
    * permission set held by 40 active users outranks one held by none.
    */
   readonly dataShape?: HoldersShape;
+  /**
+   * Echo of the requested `profileFilter` and how it was honored. Present ONLY
+   * when a `profileFilter` was supplied. `found: false` means no Profile in the
+   * vault matched the requested name — the report stopped (empty findings),
+   * `closestMatch` names the nearest existing profile (or null), and `caveat`
+   * states the premise was false. `found: true` means the report was SCOPED to
+   * the resolved profile id.
+   */
+  readonly profileFilter?: ProfileFilterResult;
 }
+
+/** Resolution of a requested `profileFilter` against the vault's profiles. */
+export interface ProfileFilterResult {
+  /** The verbatim filter string the caller passed. */
+  readonly requested: string;
+  /** True when a Profile matched and the report was scoped to it. */
+  readonly found: boolean;
+  /** Resolved `Profile:<ApiName>` id when `found`; null otherwise. */
+  readonly resolvedId: ComponentId | null;
+  /** Nearest existing profile name when NOT found (best-effort), else null. */
+  readonly closestMatch: string | null;
+  /** Human-readable caveat — explicit false-premise statement when not found. */
+  readonly caveat: string;
+}
+
+/** Normalise a profile name for forgiving comparison (case/space/underscore). */
+const normalizeProfileName = (raw: string): string =>
+  raw
+    .replace(/^Profile:/i, '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_]+/g, '');
+
+/** Cheap Levenshtein distance, capped to keep the scan bounded. */
+const editDistance = (a: string, b: string): number => {
+  const m = a.length;
+  const n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = Array.from({ length: n + 1 }, (_, i) => i);
+  let curr = new Array<number>(n + 1).fill(0);
+  for (let i = 1; i <= m; i += 1) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(
+        (curr[j - 1] ?? 0) + 1,
+        (prev[j] ?? 0) + 1,
+        (prev[j - 1] ?? 0) + cost,
+      );
+    }
+    [prev, curr] = [curr, prev];
+  }
+  return prev[n] ?? 0;
+};
+
+/**
+ * Resolve a requested `profileFilter` against the Profile nodes in the vault.
+ * Returns the matched node (exact, normalised match wins; substring is a
+ * secondary signal) plus the full profile roster so the caller can name the
+ * closest existing profile when nothing matched. A `profileFilter` for a
+ * profile that does NOT exist is a FALSE PREMISE — the cascade must stop and
+ * say so, never silently ignore the filter and dump the org-wide report.
+ */
+const resolveProfileFilter = async (
+  ctx: Context,
+  requested: string,
+): Promise<{
+  readonly matched: Node | null;
+  readonly profiles: readonly Node[];
+}> => {
+  const nodesResult = await listNodesByType(ctx.graph, 'Profile', {
+    limit: PRIVILEGE_SCAN_CAP,
+  });
+  const profiles = nodesResult.ok ? nodesResult.value : [];
+  const wanted = normalizeProfileName(requested);
+  // 1) Exact normalised match on apiName or label.
+  for (const node of profiles) {
+    if (normalizeProfileName(node.apiName) === wanted) {
+      return { matched: node, profiles };
+    }
+    if (typeof node.label === 'string' && normalizeProfileName(node.label) === wanted) {
+      return { matched: node, profiles };
+    }
+  }
+  return { matched: null, profiles };
+};
+
+/** Name of the profile closest to `requested` (for a false-premise caveat). */
+const closestProfileName = (
+  requested: string,
+  profiles: readonly Node[],
+): string | null => {
+  const wanted = normalizeProfileName(requested);
+  let best: { name: string; score: number } | null = null;
+  for (const node of profiles) {
+    // Prefer the human label for display (matches how an admin names a
+    // profile, e.g. "AcmeCo Community Login User"); fall back to the api name.
+    const display =
+      typeof node.label === 'string' && node.label.length > 0
+        ? node.label
+        : node.apiName;
+    // Score against BOTH api name and label so either spelling can match, but
+    // always REPORT the display name.
+    const forms = [node.apiName];
+    if (typeof node.label === 'string' && node.label.length > 0) {
+      forms.push(node.label);
+    }
+    let nodeScore = Infinity;
+    for (const form of forms) {
+      const norm = normalizeProfileName(form);
+      // Substring overlap is a strong signal (AcmeCo_Integration_User vs
+      // "AcmeCo Community Login User" share the AcmeCo token); score it ahead
+      // of a raw edit distance by halving the distance when one contains the
+      // other.
+      const overlap = norm.includes(wanted) || wanted.includes(norm);
+      const dist = editDistance(wanted, norm);
+      const score = overlap ? dist / 2 : dist;
+      if (score < nodeScore) nodeScore = score;
+    }
+    if (best === null || nodeScore < best.score) {
+      best = { name: display, score: nodeScore };
+    }
+  }
+  return best ? best.name : null;
+};
 
 export const permissionRiskReportHandler = async (
   ctx: Context,
-  input: SynthesisInput,
+  input: PermissionRiskReportInput,
 ): Promise<Result<McpResponse<PermissionRiskReportOutput>, McpError>> => {
   const limit = input.limit ?? 50;
   const findings: RankedFinding[] = [];
+
+  // profileFilter HONESTY: when the caller scopes the report to a named
+  // profile, the filter is HONORED. A profile that does not exist in the vault
+  // is a FALSE PREMISE — stop the cascade and report it (empty findings + the
+  // closest existing profile) rather than silently dropping the filter and
+  // dumping the full org-wide report.
+  if (input.profileFilter !== undefined) {
+    const { matched, profiles } = await resolveProfileFilter(
+      ctx,
+      input.profileFilter,
+    );
+    if (matched === null) {
+      const closest = closestProfileName(input.profileFilter, profiles);
+      const caveat =
+        `No profile named '${input.profileFilter}' exists in this vault` +
+        (closest !== null ? ` (closest match: '${closest}')` : '') +
+        '. The requested profile-scoped analysis cannot be performed — the ' +
+        'premise is false. Verify the profile name or run /sfi-refresh if the ' +
+        'vault may be stale.';
+      return ok({
+        data: {
+          findings: [],
+          auditTotals: null,
+          privilege: {
+            modifyAllDataGrantors: [],
+            viewAllDataGrantors: [],
+            overPrivilegedGrantorCount: 0,
+            scanned: { profiles: 0, permissionSets: 0, permissionSetGroups: 0 },
+          },
+          profileFilter: {
+            requested: input.profileFilter,
+            found: false,
+            resolvedId: null,
+            closestMatch: closest,
+            caveat,
+          },
+          trust: coverageTrust(ctx),
+          disclosure: `${caveat} ${SYNTHESIS_DISCLOSURE}`,
+        },
+        vaultState: {
+          sourceTreeHash: ctx.manifest.sourceTreeHash,
+          refreshedAt: ctx.manifest.refreshedAt,
+        },
+      });
+    }
+    return scopedProfileReport(ctx, matched, limit, input.profileFilter);
+  }
 
   // Over-privilege: god-mode system perms + object-level View All / Modify All,
   // read straight from the extracted profile / permission-set metadata. This is
