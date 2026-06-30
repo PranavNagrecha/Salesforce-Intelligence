@@ -109,6 +109,20 @@ const seed: ExtractionResult = {
     // SSN field.
     makeNode({ id: 'CustomObject:Campaign', apiName: 'Campaign', label: 'Campaign' }),
     makeNode({ id: 'CustomField:Campaign.Social_Media_Campaign__c', type: 'CustomField', apiName: 'Social_Media_Campaign__c', label: 'Social Media Campaign', parentId: 'CustomObject:Campaign' }),
+    // QA-Bundle-2 (resolve): an object with MULTIPLE same-object `*Status__c`
+    // siblings whose names share the parent-object token. Querying the LITERAL
+    // field api name "Deal_Status__c" makes every sibling reach base 1.0 — its own
+    // `status` suffix token matches, and the query's `deal` token earns
+    // PARENT-credit for the shared parent object — so the siblings tie the
+    // literal-name hit on SCORE and inflated the contender count to `ambiguous`,
+    // blocking the resolve-first cascade. A sole whole-name-exact (or dotted
+    // Object.Field) hit must stay `exact`. (Neutral name `Deal__c` so it does not
+    // collide with the `opportunity` token of the long __mdt above.)
+    makeNode({ id: 'CustomObject:Deal__c', apiName: 'Deal__c', label: 'Deal' }),
+    makeNode({ id: 'CustomField:Deal__c.Deal_Status__c', type: 'CustomField', apiName: 'Deal_Status__c', label: 'Deal Status', parentId: 'CustomObject:Deal__c' }),
+    makeNode({ id: 'CustomField:Deal__c.Forecast_Status__c', type: 'CustomField', apiName: 'Forecast_Status__c', label: 'Forecast Status', parentId: 'CustomObject:Deal__c' }),
+    makeNode({ id: 'CustomField:Deal__c.Approval_Status__c', type: 'CustomField', apiName: 'Approval_Status__c', label: 'Approval Status', parentId: 'CustomObject:Deal__c' }),
+    makeNode({ id: 'CustomField:Deal__c.Review_Status__c', type: 'CustomField', apiName: 'Review_Status__c', label: 'Review Status', parentId: 'CustomObject:Deal__c' }),
   ],
   edges: [
     // parentOf structure
@@ -420,6 +434,54 @@ describe('resolveComponents — disposition', () => {
       'CustomField:Payment__c.Payment_Status__c',
     );
     expect(r.value.candidates[0]?.matchKind).toBe('exact');
+    expect(r.value.disposition).toBe('exact');
+  });
+
+  it('resolves a literal field api name exact despite multiple score-tied same-object siblings (Deal_Status__c)', async () => {
+    // QA-Bundle-2: Opportunity has four `*Status__c` fields. The query is the
+    // LITERAL api name of one of them. Each sibling reaches base 1.0 (own `status`
+    // token + parent-credit on `opportunity`) and the SAME score, so they tied the
+    // literal-name hit on the contender-score band and demoted it to `ambiguous`,
+    // blocking the resolve-first cascade. A sole whole-name-exact top owns the
+    // answer — only ANOTHER whole-name-exact match could make it ambiguous.
+    const r = await resolveComponents(store, 'Deal_Status__c');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.candidates[0]?.id).toBe(
+      'CustomField:Deal__c.Deal_Status__c',
+    );
+    expect(r.value.candidates[0]?.matchKind).toBe('exact');
+    expect(r.value.disposition).toBe('exact');
+  });
+
+  it('resolves the dotted Object.Field form exact over same-object siblings (Deal__c.Deal_Status__c)', async () => {
+    // The dotted Object.Field form names BOTH the parent object and the field's
+    // literal name — the most specific reference. It used to fall to the
+    // parent-aware token path (a dotted query never whole-name-matches a dotless
+    // field name) and be reported `ambiguous` against the `*Status__c` siblings.
+    // A candidate whose parent AND own name both equal the dotted parts is a
+    // definitive `exact` hit.
+    const r = await resolveComponents(store, 'Deal__c.Deal_Status__c');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.candidates[0]?.id).toBe(
+      'CustomField:Deal__c.Deal_Status__c',
+    );
+    expect(r.value.disposition).toBe('exact');
+  });
+
+  it('resolves a full canonical id exact (CustomField:Deal__c.Deal_Status__c)', async () => {
+    // A caller may pass the canonical id verbatim. The leading `Type:` segment is
+    // stripped and the dotted Object.Field tail resolves exact, not ambiguous.
+    const r = await resolveComponents(
+      store,
+      'CustomField:Deal__c.Deal_Status__c',
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.candidates[0]?.id).toBe(
+      'CustomField:Deal__c.Deal_Status__c',
+    );
     expect(r.value.disposition).toBe('exact');
   });
 
