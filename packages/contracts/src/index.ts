@@ -184,6 +184,18 @@ export type ComponentType =
   // existing `parentOf` from `CustomObject:{ObjectApiName}` (mirroring
   // the v1.0 CustomField → CustomObject pattern; no new EdgeType).
   | 'OutboundMessage' //       SOAP-based outbound message embedded inside `*.workflow-meta.xml`'s `<outboundMessages>` collection. Carries `name`, `endpointUrl`, `includeSessionId`, `useDeadLetterQueue`, `integrationUser`, and `fields` (string array) properties. The endpoint URL is captured verbatim — v2.8 does NOT probe the URL, does NOT validate the destination exists, and does NOT confirm the message is actually invoked at runtime (the v2.8 honesty axis surfaced verbatim by `sfi.outbound_message_catalog`'s disclosure field). Triggered by `<outboundMessages>` child elements inside `*.workflow-meta.xml`. Pre-v2.8 these references dangled by design (per `WorkflowRule.md` § "outboundMessages"); v2.8 promotes them to real nodes so the integration catalog can list outbound destinations alongside RemoteSiteSetting and NamedCredential. See `docs/vendor/salesforce-metadata/AsyncTopologySemantics.md`.
+  // v2.9 — WorkflowAlert promotion. Each `<alerts>` entry in a
+  // `*.workflow-meta.xml` file is promoted from a dangling-by-design
+  // `references` target (pre-v2.9 only the name→template lookup was
+  // captured) to a real ComponentType node so alert-level properties
+  // (`senderType`, `description`, `template`, `ccEmails`) are queryable.
+  // Id format `WorkflowAlert:{ObjectApiName}.{fullName}` mirrors the
+  // `OutboundMessage:` and `WorkflowFieldUpdate:` scoping convention.
+  // Parent edge is the existing `parentOf` from
+  // `CustomObject:{ObjectApiName}`. The `WorkflowRule→WorkflowAlert`
+  // `references` edge already existed (via the Alert action variant);
+  // v2.9 gives that edge a real node target instead of a phantom stub.
+  | 'WorkflowAlert' //        Email alert embedded inside `*.workflow-meta.xml`'s `<alerts>` collection. Carries `name` (fullName), `description`, `senderType` (CurrentUser | OrgWideEmailAddress | DefaultWorkflowUser), `template` (EmailTemplate path), and `ccEmails` (string array). Id `WorkflowAlert:{ObjectApiName}.{fullName}`. Parented by `CustomObject:{ObjectApiName}` via `parentOf`. Referenced by `WorkflowRule` via the existing Alert-variant `references` edge, which now resolves to a real node rather than a phantom stub.
   // v2.6a — CPQ specialist tier. Five typed CPQ ComponentTypes
   // recognized HEURISTICALLY from underlying CustomMetadataRecord /
   // CustomSettingRecord nodes when their apiName carries the `SBQQ__`

@@ -280,6 +280,92 @@ export const buildFieldUpdateTargetMap = (
 };
 
 /**
+ * v2.9 — promote each `<alerts>` child to a real `WorkflowAlert` Node.
+ * Pre-v2.9 `buildAlertTemplateMap` read `<alerts>` only to build the
+ * name→template lookup for `sendsEmail` edge resolution; it emitted no
+ * nodes, so alert-level properties (`senderType`, `description`,
+ * `template`, `ccEmails`) were invisible to graph queries.
+ *
+ * One Node per `<alerts>` entry. Entries lacking a `<fullName>` are
+ * silently skipped (they're not addressable by name). Each Node carries:
+ *
+ *   - `name`: the entry's `<fullName>` verbatim.
+ *   - `description`: the `<description>` (string or null).
+ *   - `senderType`: the `<senderType>` (string or null; typically
+ *     `CurrentUser`, `OrgWideEmailAddress`, or `DefaultWorkflowUser`).
+ *   - `template`: the `<template>` (string or null; slash-separated
+ *     EmailTemplate path, verbatim from XML).
+ *   - `ccEmails`: the `<ccEmails>` collection as a string array (may
+ *     be empty when no `<ccEmails>` child is present).
+ *
+ * The parent edge is the existing `parentOf` from
+ * `CustomObject:{ObjectApiName}` mirroring the OutboundMessage v2.8
+ * pattern; no new EdgeType is introduced.
+ *
+ * Emission happens regardless of whether the file has any `<rules>` —
+ * a workflow file with only `<alerts>` is a documented orphan-collection
+ * happy path (alert definitions that outlive their consuming rules).
+ */
+const buildWorkflowAlertNodes = (
+  rootObj: Record<string, unknown>,
+  objectApiName: string,
+  parentId: string,
+  path: string,
+): { readonly nodes: readonly Node[]; readonly edges: readonly Edge[] } => {
+  const nodes: Node[] = [];
+  const edges: Edge[] = [];
+  for (const raw of toArray(rootObj['alerts'])) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const alert = raw as Record<string, unknown>;
+    const fullNameRaw = unwrapSingle(alert['fullName']);
+    if (
+      fullNameRaw === undefined ||
+      fullNameRaw === null ||
+      fullNameRaw === ''
+    ) {
+      continue;
+    }
+    const name = String(fullNameRaw);
+    const alertId = `WorkflowAlert:${objectApiName}.${name}`;
+    const ccEmailsRaw = toArray(alert['ccEmails']);
+    const ccEmails = ccEmailsRaw
+      .map((entry) =>
+        entry === undefined || entry === null || entry === ''
+          ? null
+          : String(entry),
+      )
+      .filter((entry): entry is string => entry !== null);
+    nodes.push({
+      id: alertId,
+      type: 'WorkflowAlert',
+      apiName: `${objectApiName}.${name}`,
+      label: name,
+      parentId,
+      sourcePath: path,
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {
+        name,
+        description: optionalString(alert, 'description'),
+        senderType: optionalString(alert, 'senderType'),
+        template: optionalString(alert, 'template'),
+        ccEmails,
+      },
+    });
+    edges.push({
+      fromId: parentId,
+      toId: alertId,
+      edgeType: 'parentOf',
+      confidence: 'declared',
+      source: EXTRACTOR_SOURCE,
+      properties: {},
+    });
+  }
+  return { nodes, edges };
+};
+
+/**
  * v2.8 — promote each `<outboundMessages>` child to a real
  * `OutboundMessage` Node. Pre-v2.8 these references dangled by design
  * (per `WorkflowRule.md` § "outboundMessages"); v2.8 promotes them so
@@ -1004,6 +1090,18 @@ export const extractWorkflowRule = async (
     nodes.push(...built.value.conditionNodes);
     edges.push(...built.value.edges);
   }
+  // v2.9 — promote `<alerts>` entries to WorkflowAlert nodes. These
+  // were dangling-by-design references (the alert name appeared only
+  // in the name→template map used for `sendsEmail` resolution); v2.9
+  // captures them so alert-level properties (`senderType`,
+  // `description`, `template`, `ccEmails`) are queryable via graph
+  // queries (`sfi.get_component`, `sfi.find_component_usages`).
+  // Emission happens regardless of whether the file has any `<rules>` —
+  // a workflow file with only `<alerts>` is a documented orphan-
+  // collection happy path.
+  const wa = buildWorkflowAlertNodes(rootObj, objectApiName, parentId, path);
+  nodes.push(...wa.nodes);
+  edges.push(...wa.edges);
   // v2.8 — promote `<outboundMessages>` entries to OutboundMessage
   // nodes. These were dangling-by-design references in v1.3; v2.8
   // captures them so the integration-catalog tools can enumerate

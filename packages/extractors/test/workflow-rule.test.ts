@@ -242,16 +242,51 @@ describe('extractWorkflowRule', () => {
   });
 
   describe('happy-path empty file', () => {
-    it('returns zero nodes and edges when <Workflow> has no <rules>', async () => {
+    it('returns zero WorkflowRule nodes when <Workflow> has no <rules>, but still promotes any <alerts>', async () => {
       // Per WorkflowRule.md, a `<Workflow>` root with only orphan
-      // `<alerts>` / `<fieldUpdates>` collections is the documented
-      // happy path — the extractor returns zero nodes and zero edges.
+      // `<alerts>` / `<fieldUpdates>` collections is a documented happy
+      // path for objects whose action scaffolding outlives consuming rules.
+      // v2.9: <alerts> entries are now promoted to WorkflowAlert nodes even
+      // when the file has no <rules>, so a file with one <alerts> entry
+      // produces one WorkflowAlert node + one parentOf edge.
       const xml = `<?xml version="1.0"?>
 <Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
   <alerts>
     <fullName>Orphan_Alert</fullName>
     <template>Sales/Template</template>
+    <senderType>CurrentUser</senderType>
   </alerts>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        // No WorkflowRule nodes (no <rules>), but one WorkflowAlert.
+        expect(
+          result.value.nodes.filter((n) => n.type === 'WorkflowRule'),
+        ).toHaveLength(0);
+        expect(
+          result.value.nodes.filter((n) => n.type === 'WorkflowAlert'),
+        ).toHaveLength(1);
+        expect(
+          result.value.edges.filter((e) => e.edgeType === 'parentOf'),
+        ).toHaveLength(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('returns zero nodes and zero edges when <Workflow> has no <rules> and no <alerts>', async () => {
+      // A workflow file with only <fieldUpdates> (no <alerts>, no <rules>)
+      // produces truly zero nodes and zero edges (no promotable entries).
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>Set_Status</fullName>
+    <field>Status__c</field>
+    <operation>Literal</operation>
+  </fieldUpdates>
 </Workflow>`;
       const { dir, path } = await writeTempWorkflowXml('Account', xml);
       try {
@@ -1438,6 +1473,181 @@ describe('extractWorkflowRule', () => {
         expect(ruleNode!.properties.fieldUpdateCount).toBe(0);
         expect(ruleNode!.properties.outboundMessageCount).toBe(0);
         expect(ruleNode!.properties.taskCreationCount).toBe(0);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('v2.9 — WorkflowAlert node promotion', () => {
+    it('promotes each <alerts> child to a WorkflowAlert node with senderType, description, template, ccEmails', async () => {
+      // Real-org shape: OA_Communication_Request__c has three email alerts
+      // all using senderType CurrentUser. This test uses the same structure.
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <alerts>
+    <fullName>OA_CommRequest_Approved_EmailAlert</fullName>
+    <description>OA_CommRequest_Approved_EmailAlert</description>
+    <senderType>CurrentUser</senderType>
+    <template>System_Email_Alerts/OA_CommRequest_Approved</template>
+  </alerts>
+  <alerts>
+    <fullName>OA_CommRequest_Completed</fullName>
+    <description>OA_CommRequest_Completed</description>
+    <senderType>CurrentUser</senderType>
+    <template>System_Email_Alerts/OA_CommRequest_Completed</template>
+    <ccEmails>admin@example.com</ccEmails>
+  </alerts>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml(
+        'OA_Communication_Request__c',
+        xml,
+      );
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const waNodes = result.value.nodes.filter(
+          (n) => n.type === 'WorkflowAlert',
+        );
+        expect(waNodes).toHaveLength(2);
+        // First alert — node shape.
+        const approved = waNodes.find(
+          (n) => n.id === 'WorkflowAlert:OA_Communication_Request__c.OA_CommRequest_Approved_EmailAlert',
+        );
+        expect(approved).toBeDefined();
+        expect(approved!.apiName).toBe(
+          'OA_Communication_Request__c.OA_CommRequest_Approved_EmailAlert',
+        );
+        expect(approved!.label).toBe('OA_CommRequest_Approved_EmailAlert');
+        expect(approved!.parentId).toBe(
+          'CustomObject:OA_Communication_Request__c',
+        );
+        expect(approved!.properties.senderType).toBe('CurrentUser');
+        expect(approved!.properties.description).toBe(
+          'OA_CommRequest_Approved_EmailAlert',
+        );
+        expect(approved!.properties.template).toBe(
+          'System_Email_Alerts/OA_CommRequest_Approved',
+        );
+        expect(approved!.properties.ccEmails).toEqual([]);
+        // Second alert — ccEmails captured.
+        const completed = waNodes.find(
+          (n) => n.id === 'WorkflowAlert:OA_Communication_Request__c.OA_CommRequest_Completed',
+        );
+        expect(completed).toBeDefined();
+        expect(completed!.properties.ccEmails).toEqual(['admin@example.com']);
+        // parentOf edges emitted for each alert.
+        const parentEdges = result.value.edges.filter(
+          (e) =>
+            e.edgeType === 'parentOf' &&
+            e.fromId === 'CustomObject:OA_Communication_Request__c',
+        );
+        // Two WorkflowAlert parentOf edges (no WorkflowRule in this file).
+        expect(parentEdges).toHaveLength(2);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('WorkflowRule alert action references edge resolves to the promoted WorkflowAlert node id', async () => {
+      // The Alert action variant already emits a `references` edge to
+      // `WorkflowAlert:{Object}.{name}`; v2.9 gives that target a real node.
+      // Verify co-existence: the references edge still emits (unchanged),
+      // and the promoted node is present alongside it.
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <alerts>
+    <fullName>Notify_Owner</fullName>
+    <senderType>CurrentUser</senderType>
+    <template>Sales/WelcomeEmail</template>
+  </alerts>
+  <rules>
+    <fullName>Send_Alert_Rule</fullName>
+    <active>true</active>
+    <triggerType>onCreateOnly</triggerType>
+    <actions>
+      <name>Notify_Owner</name>
+      <type>Alert</type>
+    </actions>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const alertNodeId = 'WorkflowAlert:Account.Notify_Owner';
+        // WorkflowAlert node present.
+        const alertNode = result.value.nodes.find(
+          (n) => n.id === alertNodeId,
+        );
+        expect(alertNode).toBeDefined();
+        expect(alertNode!.properties.senderType).toBe('CurrentUser');
+        // Rule's Alert action references edge still resolves to the node.
+        const refEdge = result.value.edges.find(
+          (e) =>
+            e.edgeType === 'references' &&
+            e.fromId === 'WorkflowRule:Account.Send_Alert_Rule' &&
+            e.toId === alertNodeId,
+        );
+        expect(refEdge).toBeDefined();
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('silently skips <alerts> entries lacking a <fullName>', async () => {
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <alerts>
+    <senderType>CurrentUser</senderType>
+    <template>Sales/Anonymous</template>
+  </alerts>
+  <alerts>
+    <fullName>Named_Alert</fullName>
+    <senderType>OrgWideEmailAddress</senderType>
+    <template>Sales/Named</template>
+  </alerts>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Lead', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const waNodes = result.value.nodes.filter(
+          (n) => n.type === 'WorkflowAlert',
+        );
+        // Only the named alert is promoted.
+        expect(waNodes).toHaveLength(1);
+        expect(waNodes[0]!.id).toBe('WorkflowAlert:Lead.Named_Alert');
+        expect(waNodes[0]!.properties.senderType).toBe('OrgWideEmailAddress');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('captures null senderType and null description when absent from the XML', async () => {
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <alerts>
+    <fullName>Minimal_Alert</fullName>
+    <template>Sales/Minimal</template>
+  </alerts>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Contact', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const waNode = result.value.nodes.find(
+          (n) => n.type === 'WorkflowAlert',
+        );
+        expect(waNode).toBeDefined();
+        expect(waNode!.properties.senderType).toBeNull();
+        expect(waNode!.properties.description).toBeNull();
+        expect(waNode!.properties.template).toBe('Sales/Minimal');
+        expect(waNode!.properties.ccEmails).toEqual([]);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
