@@ -352,6 +352,10 @@ const deriveObjectApiFromQuestion = (q: string, question?: string): string | und
     /\b(?:on|for|to|access\s+to)\s+(?:the\s+)?([A-Za-z][A-Za-z0-9_]*(?:__c|__mdt|__e)?)\b/,
   );
   if (onObject?.[1] !== undefined) return onObject[1];
+  const dmlObject = source.match(
+    /\b(?:update|insert|delete|save|create|edit)\s+(?:a\s+|an\s+|the\s+)?([A-Za-z][A-Za-z0-9_]*(?:__c|__mdt|__e)?)\b/,
+  );
+  if (dmlObject?.[1] !== undefined) return dmlObject[1];
   const custom = source.match(/\b([A-Za-z][A-Za-z0-9_]*__(?:c|mdt|e))\b/);
   return custom?.[1];
 };
@@ -363,6 +367,11 @@ const deriveMetadataCountArgs = (
   q: string,
   question?: string,
 ): Readonly<Record<string, unknown>> | undefined => {
+  if (/\bvalidation\s+rules?\b/.test(q)) {
+    const parentId = deriveMetadataParentId(q, question);
+    if (parentId !== undefined) return { type: 'ValidationRule', parentId };
+    return { type: 'ValidationRule' };
+  }
   if (!/\bflows?\b/.test(q)) return undefined;
   const triggerObject = deriveObjectApiFromQuestion(q, question);
   const recordTriggered =
@@ -1491,10 +1500,17 @@ const RULES: readonly Rule[] = [
     needsResolve: true,
     reason:
       "Order of execution / what runs on save is reconstructed from the vault graph. what_happens_on_save needs an explicit DML event — default to 'update' (or insert/delete to match the question) when none is stated.",
-    suggestArgs: (q) => ({ event: deriveSaveEvent(q) }),
+    suggestArgs: (q, question) => {
+      const args: Record<string, unknown> = { event: deriveSaveEvent(q) };
+      const objectApiName = deriveObjectApiFromQuestion(q, question);
+      if (objectApiName !== undefined) args.objectApiName = objectApiName;
+      return args;
+    },
     patterns: [
       /\b(trigger\s+order|order\s+of\s+execution)\b/,
       /\bwhat\s+(happens|runs|fires)\b.*\b(on\s+save|when\b.*\b(created|saved|updated|inserted|deleted|undeleted|restored))\b/,
+      // "what happens when I update Contact" — present-tense DML without "on save"
+      /\bwhat\s+(happens|runs|fires)\b.*\bwhen\b.*\b(i\s+)?(update|insert|delete|save|create|edit)\b/,
       // "which/what flows|triggers|VRs|workflows run|fire when ..." — the
       // "which" phrasing was a router gap (e.g. "which flows run when a Case is
       // created"), so the question fell through to unrouted.
