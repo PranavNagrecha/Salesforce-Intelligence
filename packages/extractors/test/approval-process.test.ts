@@ -771,4 +771,248 @@ describe('extractApprovalProcess', () => {
       }
     });
   });
+
+  describe('record-lock and recall flags (real Payment__c V2 shape)', () => {
+    // Fixture mirrors the exact Salesforce metadata shape from
+    // org-kb/source/.../Payment__c.Payment_Requiring_Approval_V2.approvalProcess-meta.xml:
+    //   allowRecall=false, finalApprovalRecordLock=true, finalRejectionRecordLock=false
+    const PAYMENT_V2_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<ApprovalProcess xmlns="http://soap.sforce.com/2006/04/metadata">
+    <active>true</active>
+    <allowRecall>false</allowRecall>
+    <allowedSubmitters>
+        <submitter>FM_Payment_Edit</submitter>
+        <type>group</type>
+    </allowedSubmitters>
+    <allowedSubmitters>
+        <type>owner</type>
+    </allowedSubmitters>
+    <approvalStep>
+        <allowDelegate>false</allowDelegate>
+        <assignedApprover>
+            <approver>
+                <name>Clinical_Instruction_Payment_Approval</name>
+                <type>queue</type>
+            </approver>
+            <whenMultipleApprovers>FirstResponse</whenMultipleApprovers>
+        </assignedApprover>
+        <label>Step 1</label>
+        <name>Step_1</name>
+    </approvalStep>
+    <description>Clone to remove entry criteria that is handled in flow</description>
+    <enableMobileDeviceAccess>false</enableMobileDeviceAccess>
+    <entryCriteria>
+        <criteriaItems>
+            <field>Payment__c.Approval_Status__c</field>
+            <operation>equals</operation>
+            <value>Required</value>
+        </criteriaItems>
+    </entryCriteria>
+    <finalApprovalRecordLock>true</finalApprovalRecordLock>
+    <finalRejectionRecordLock>false</finalRejectionRecordLock>
+    <label>Payment Requiring Approval V2</label>
+    <processOrder>1</processOrder>
+    <recordEditability>AdminOnly</recordEditability>
+    <showApprovalHistory>true</showApprovalHistory>
+</ApprovalProcess>`;
+
+    it('extracts allowRecall=false, finalApprovalRecordLock=true, finalRejectionRecordLock=false from the Payment V2 real-org XML shape', async () => {
+      // FAILS BEFORE fix (properties block omitted all three fields, so they
+      // defaulted to undefined rather than the parsed boolean values).
+      const { dir, path } = await writeTempApprovalXml(
+        'Payment__c.Payment_Requiring_Approval_V2',
+        PAYMENT_V2_XML,
+      );
+      try {
+        const result = await extractApprovalProcess(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const processNode = result.value.nodes.find(
+          (n) => n.type === 'ApprovalProcess',
+        );
+        expect(processNode).toBeDefined();
+        expect(processNode!.id).toBe(
+          'ApprovalProcess:Payment__c.Payment_Requiring_Approval_V2',
+        );
+        // Golden assertions per goldenAssertion in bundle spec
+        expect(processNode!.properties.allowRecall).toBe(false);
+        expect(processNode!.properties.finalApprovalRecordLock).toBe(true);
+        expect(processNode!.properties.finalRejectionRecordLock).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('defaults allowRecall and record-lock flags to false when elements are absent', async () => {
+      // When the flags are not present in the XML (optional elements), the
+      // extractor must not error — coerceBoolean returns false for undefined.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<ApprovalProcess xmlns="http://soap.sforce.com/2006/04/metadata">
+    <active>true</active>
+    <label>Minimal Approval</label>
+</ApprovalProcess>`;
+      const { dir, path } = await writeTempApprovalXml(
+        'Account.Minimal_Approval',
+        xml,
+      );
+      try {
+        const result = await extractApprovalProcess(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const processNode = result.value.nodes.find(
+          (n) => n.type === 'ApprovalProcess',
+        );
+        expect(processNode!.properties.allowRecall).toBe(false);
+        expect(processNode!.properties.finalApprovalRecordLock).toBe(false);
+        expect(processNode!.properties.finalRejectionRecordLock).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('allowedSubmitters extraction (real Payment__c V2 shape)', () => {
+    // Real-org shape: allowedSubmitters uses <submitter> (not <name>) for the
+    // target identifier and <type> for the discriminator. owner-type has no
+    // <submitter> child. Mirrors the exact XML from Payment__c.Payment_Requiring_Approval_V2.
+    const SUBMITTER_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<ApprovalProcess xmlns="http://soap.sforce.com/2006/04/metadata">
+    <active>true</active>
+    <allowRecall>false</allowRecall>
+    <allowedSubmitters>
+        <submitter>FM_Payment_Edit</submitter>
+        <type>group</type>
+    </allowedSubmitters>
+    <allowedSubmitters>
+        <type>owner</type>
+    </allowedSubmitters>
+    <allowedSubmitters>
+        <submitter>Faculty_Management</submitter>
+        <type>role</type>
+    </allowedSubmitters>
+    <approvalStep>
+        <assignedApprover>
+            <approver>
+                <name>Clinical_Instruction_Payment_Approval</name>
+                <type>queue</type>
+            </approver>
+            <whenMultipleApprovers>FirstResponse</whenMultipleApprovers>
+        </assignedApprover>
+        <label>Step 1</label>
+        <name>Step_1</name>
+    </approvalStep>
+    <finalApprovalRecordLock>true</finalApprovalRecordLock>
+    <finalRejectionRecordLock>false</finalRejectionRecordLock>
+    <label>Payment Requiring Approval V2</label>
+</ApprovalProcess>`;
+
+    it('populates properties.allowedSubmitters with the correct type+name pairs including null for owner', async () => {
+      // FAILS BEFORE fix: allowedSubmitters was not read at all; the property
+      // was absent from the node.
+      const { dir, path } = await writeTempApprovalXml(
+        'Payment__c.Payment_Requiring_Approval_V2',
+        SUBMITTER_XML,
+      );
+      try {
+        const result = await extractApprovalProcess(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const processNode = result.value.nodes.find(
+          (n) => n.type === 'ApprovalProcess',
+        );
+        expect(processNode).toBeDefined();
+        const submitters = processNode!.properties
+          .allowedSubmitters as Array<{ type: string; name: string | null }>;
+        // group entry
+        expect(submitters).toContainEqual({ type: 'group', name: 'FM_Payment_Edit' });
+        // owner entry: no <submitter> child → name is null
+        expect(submitters).toContainEqual({ type: 'owner', name: null });
+        // role entry
+        expect(submitters).toContainEqual({ type: 'role', name: 'Faculty_Management' });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits a references edge from the process to Group:FM_Payment_Edit with referenceKind=allowedSubmitter', async () => {
+      // goldenAssertion: a references edge exists from the process node to
+      // Group:FM_Payment_Edit with referenceKind='allowedSubmitter'.
+      const { dir, path } = await writeTempApprovalXml(
+        'Payment__c.Payment_Requiring_Approval_V2',
+        SUBMITTER_XML,
+      );
+      try {
+        const result = await extractApprovalProcess(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const submitterEdges = result.value.edges.filter(
+          (e) =>
+            e.edgeType === 'references' &&
+            (e.properties as Record<string, unknown>).referenceKind ===
+              'allowedSubmitter',
+        );
+        // group + role = 2 named submitters; owner has no edge
+        expect(submitterEdges).toHaveLength(2);
+        const groupEdge = submitterEdges.find(
+          (e) => e.toId === 'Group:FM_Payment_Edit',
+        );
+        expect(groupEdge).toBeDefined();
+        expect(groupEdge).toMatchObject({
+          fromId: 'ApprovalProcess:Payment__c.Payment_Requiring_Approval_V2',
+          toId: 'Group:FM_Payment_Edit',
+          edgeType: 'references',
+          confidence: 'declared',
+          properties: { referenceKind: 'allowedSubmitter', submitterType: 'group' },
+        });
+        const roleEdge = submitterEdges.find(
+          (e) => e.toId === 'Role:Faculty_Management',
+        );
+        expect(roleEdge).toBeDefined();
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits no allowedSubmitter edge for owner-type (name-less) entries', async () => {
+      // owner entries in <allowedSubmitters> have no <submitter> child — the
+      // extractor must not emit a dangling references edge for them.
+      const ownerOnlyXml = `<?xml version="1.0" encoding="UTF-8"?>
+<ApprovalProcess xmlns="http://soap.sforce.com/2006/04/metadata">
+    <active>true</active>
+    <allowedSubmitters>
+        <type>owner</type>
+    </allowedSubmitters>
+    <approvalStep>
+        <assignedApprover>
+            <approver>
+                <name>Queue_A</name>
+                <type>queue</type>
+            </approver>
+            <whenMultipleApprovers>FirstResponse</whenMultipleApprovers>
+        </assignedApprover>
+        <label>Step 1</label>
+        <name>Step_1</name>
+    </approvalStep>
+    <label>Owner Only</label>
+</ApprovalProcess>`;
+      const { dir, path } = await writeTempApprovalXml(
+        'Account.Owner_Only',
+        ownerOnlyXml,
+      );
+      try {
+        const result = await extractApprovalProcess(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const submitterEdges = result.value.edges.filter(
+          (e) =>
+            e.edgeType === 'references' &&
+            (e.properties as Record<string, unknown>).referenceKind ===
+              'allowedSubmitter',
+        );
+        expect(submitterEdges).toHaveLength(0);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
 });
