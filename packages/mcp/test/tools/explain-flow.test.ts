@@ -406,6 +406,14 @@ describe('explainFlowHandler', () => {
     expect(ec.runModeNote).toMatch(/OWN declared runInMode/);
     expect(ec.runModeNote).toMatch(/running user/);
     expect(ec.runModeNote).toMatch(/rolls back the ENTIRE/);
+    // A DETERMINATE fault-rollback verdict — so the host can answer "does an
+    // unhandled fault roll back the triggering save?" without declining. This
+    // is a RecordAfterSave flow with an unhandled fault path: YES.
+    expect(ec.faultRollback).not.toBeNull();
+    expect(ec.faultRollback?.rollsBackTransaction).toBe(true);
+    expect(ec.faultRollback?.statement).toMatch(/after-save record-triggered/);
+    expect(ec.faultRollback?.statement).toMatch(/rolls back the ENTIRE originating transaction/);
+    expect(ec.faultRollback?.statement).toMatch(/triggering record save fails too/);
   });
 
   it('returns runInMode=null and no unhandled faults for a minimal flow', async () => {
@@ -416,6 +424,8 @@ describe('explainFlowHandler', () => {
     expect(ec.runInMode).toBeNull();
     expect(ec.hasUnhandledFaults).toBe(false);
     expect(ec.unhandledFaultElementCount).toBe(0);
+    // No unhandled fault path ⇒ no rollback verdict to compose.
+    expect(ec.faultRollback).toBeNull();
     // Note is always present so the host never substitutes a wrong inference.
     expect(ec.runModeNote.length).toBeGreaterThan(0);
   });
