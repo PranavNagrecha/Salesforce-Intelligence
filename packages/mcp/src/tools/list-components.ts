@@ -269,6 +269,18 @@ export interface ListComponentsOutput {
   readonly limit: number;
   readonly offset: number;
   readonly hasMore: boolean;
+  /**
+   * B-GRAPH-BUILD: the TRUE total count of matching nodes in the graph, from
+   * `countNodesByType` — always present, regardless of pagination. A caller that
+   * needs the org-wide count for a type MUST read this field rather than
+   * `components.length`, which is bounded by `limit` and further trimmed by the
+   * byte-budget guard (`fitNodesToBudget`) to ~38 KB per page. For example,
+   * `list_components(type='FlexiPage')` with the default limit=50 returns 39 nodes
+   * in `components` (payload budget exhausted) but `totalCount: 86` — the
+   * authoritative vault count. With a `parentId` or property filter the count
+   * reflects the same narrow, so it is always exact for the given filter.
+   */
+  readonly totalCount: number;
   /** True only when the page was trimmed to fit the response-size budget. */
   readonly truncated?: boolean;
   /** Human-readable note describing the trim; present only when `truncated`. */
@@ -462,11 +474,32 @@ export const listComponentsHandler = async (
     if (formulaRes.ok) formulaFieldCount = formulaRes.value;
   }
 
+  // B-GRAPH-BUILD: always fetch the TRUE total count via countNodesByType,
+  // applying the SAME narrows as the page query. This is the authoritative
+  // vault count for the given type (and optional parentId / property filter)
+  // and is always emitted as `totalCount` at the top level of the response —
+  // even on the first page, even when the page was NOT trimmed.
+  //
+  // Rationale: `components.length` is bounded by `limit` (default 50) and
+  // further trimmed by `fitNodesToBudget` (~38 KB per page). For types with
+  // large nodes (e.g. FlexiPage with many fieldRefs), the budget is exhausted
+  // at ~39 nodes even though the org has 86. A cascade that reads
+  // `components.length` for a count question reports 39, not 86. The top-level
+  // `totalCount` is the only field that is always correct regardless of page
+  // size, trimming, or pagination. If the count query fails, fall back to a
+  // lower bound (offset + kept.length) rather than failing the whole
+  // enumeration.
+  const totalRes = await countNodesByType(ctx.graph, input.type, {
+    ...(input.parentId !== undefined ? { parentId: input.parentId as ComponentId } : {}),
+    ...(hasPropertyFilter ? { propertyEquals } : {}),
+  });
+  const totalCount = totalRes.ok ? totalRes.value : offset + kept.length;
+
   // CR-22: emit a continuation cursor ONLY when more rows remain (over `limit`
   // OR byte-trimmed). The next offset is `offset + kept.length` — `o` IS the SQL
   // offset, so the resumed page SQL-scans deeper (reaches node 501+ natively).
   // A final page omits nextCursor/pageInfo, so an in-budget response is
-  // byte-identical to pre-CR-22.
+  // byte-identical to pre-CR-22 (except for the new top-level `totalCount`).
   let cursorFields: { readonly nextCursor: string; readonly pageInfo: PageInfo } | undefined;
   if (hasMore) {
     const nextOffset = offset + kept.length;
@@ -478,16 +511,6 @@ export const listComponentsHandler = async (
       ...(kept.length > 0 ? { k: (kept[kept.length - 1] as Node).id } : {}),
       q: fingerprint,
     });
-    // TRUE total via countNodesByType, applying the SAME narrows so the total is
-    // exact for the unfiltered AND the parentId / property-filtered cases (the
-    // count helper mirrors listNodesByType's WHERE clause). If the count query
-    // fails, fall back to a lower bound rather than failing the whole
-    // enumeration.
-    const totalRes = await countNodesByType(ctx.graph, input.type, {
-      ...(input.parentId !== undefined ? { parentId: input.parentId as ComponentId } : {}),
-      ...(hasPropertyFilter ? { propertyEquals } : {}),
-    });
-    const totalCount = totalRes.ok ? totalRes.value : offset + kept.length + 1;
     cursorFields = {
       nextCursor,
       pageInfo: {
@@ -502,6 +525,7 @@ export const listComponentsHandler = async (
   return ok({
     data: {
       components: kept,
+      totalCount,
       limit,
       offset,
       hasMore,
@@ -513,7 +537,8 @@ export const listComponentsHandler = async (
             truncated: true as const,
             note:
               `Response trimmed to ${kept.length} of ${queryResult.value.length} ` +
-              `fetched rows to stay under the ~45 KB MCP response limit. Advance ` +
+              `fetched rows to stay under the ~45 KB MCP response limit. Use ` +
+              `totalCount (${totalCount}) for the authoritative vault count; advance ` +
               `with offset += ${kept.length} (or narrow via parentId) for the rest.`,
           }
         : {}),

@@ -164,6 +164,10 @@ describe('listComponentsHandler', () => {
     // Seven fields fit comfortably under the default limit, so no further
     // page is implied.
     expect(result.value.data.hasMore).toBe(false);
+    // B-GRAPH-BUILD: totalCount is always present at the top level and must
+    // equal the true graph count, not components.length (which is bounded by
+    // limit and byte-budget trimming).
+    expect(result.value.data.totalCount).toBe(7);
     expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
     expect(result.value.vaultState.refreshedAt).toBe('2026-05-27T14:33:08Z');
   });
@@ -241,6 +245,9 @@ describe('listComponentsHandler', () => {
     if (!fullPage.ok) return;
     expect(fullPage.value.data.components.length).toBe(5);
     expect(fullPage.value.data.hasMore).toBe(true);
+    // B-GRAPH-BUILD: totalCount must be 7 on every page, regardless of how
+    // many rows this page contains.
+    expect(fullPage.value.data.totalCount).toBe(7);
 
     const tailPage = await listComponentsHandler(ctx, {
       type: 'CustomField',
@@ -251,6 +258,8 @@ describe('listComponentsHandler', () => {
     if (!tailPage.ok) return;
     expect(tailPage.value.data.components.length).toBe(2);
     expect(tailPage.value.data.hasMore).toBe(false);
+    // totalCount stays 7 on the tail page too.
+    expect(tailPage.value.data.totalCount).toBe(7);
   });
 });
 
@@ -559,6 +568,88 @@ describe('listComponentsHandler — continuation cursor (CR-22)', () => {
     expect(replay.ok).toBe(false);
     if (replay.ok) return;
     expect(replay.error.kind).toBe('invalid-query');
+  });
+});
+
+// =============================================================================
+// B-GRAPH-BUILD — totalCount is the authoritative vault count regardless of
+// payload trimming. Reproduces the FlexiPage 39-of-86 scenario: nodes with
+// large `properties` blobs exhaust the 38 KB byte budget before the full page
+// is returned, so `components.length` < `limit` < true total. A cascade that
+// reads `components.length` for a count answer reports the wrong number;
+// `totalCount` (from `countNodesByType`) must always be correct.
+// =============================================================================
+describe('listComponentsHandler — B-GRAPH-BUILD totalCount beats byte-budget trim', () => {
+  let bDir: string;
+  let bStore: GraphStore;
+  let bCtx: Context;
+
+  // Generate a node whose serialized JSON is guaranteed to exceed 1 KB so that
+  // a page of 50 of them easily exceeds the 38 KB budget.
+  const makeLargeNode = (n: number): Node =>
+    makeNode({
+      id: `FlexiPage:Page${String(n).padStart(3, '0')}__c`,
+      type: 'FlexiPage',
+      apiName: `Page${String(n).padStart(3, '0')}__c`,
+      label: `FlexiPage ${n}`,
+      sourcePath: `flexipages/Page${n}.flexipage-meta.xml`,
+      properties: {
+        // Simulate the `fieldRefs` array that makes real FlexiPage nodes large:
+        // each entry is ~40 bytes; 30 entries ≈ 1.2 KB per node, so 50 nodes ≈
+        // 60 KB — well above the 38 KB LIST_PAYLOAD_BUDGET_BYTES guard.
+        fieldRefs: Array.from({ length: 30 }, (_, i) => `CustomField:SObject__c.Field${i}__c`),
+        description: `Auto-generated FlexiPage fixture number ${n} for B-GRAPH-BUILD budget-trim test.`,
+      },
+    });
+
+  beforeAll(async () => {
+    bDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-flexipage-budget-'));
+    const opened = await openGraph(join(bDir, 'budget.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    bStore = opened.value;
+    // Seed 86 large FlexiPage nodes — reproduces the 39-of-86 count loss
+    // reported in B-GRAPH-BUILD.
+    const nodes = Array.from({ length: 86 }, (_, i) => makeLargeNode(i + 1));
+    const imported = await importExtractionResults(bStore, [{ nodes, edges: [] }]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    bCtx = { vaultRoot: bDir, manifest: FIXTURE_MANIFEST, graph: bStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(bStore);
+    rmSync(bDir, { recursive: true, force: true });
+  });
+
+  it('totalCount is 86 even when budget trimming stops components at fewer than limit (B-GRAPH-BUILD)', async () => {
+    // default limit=50, but large nodes exhaust the 38 KB budget before 50
+    // nodes are serialized — components.length < 50. The legacy approach of
+    // reading components.length for a count answer reports the wrong number.
+    const r = await listComponentsHandler(bCtx, { type: 'FlexiPage' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // The byte budget must have kicked in: fewer nodes than the default limit.
+    expect(r.value.data.components.length).toBeLessThan(50);
+    // truncated=true confirms the budget guard trimmed the page.
+    expect(r.value.data.truncated).toBe(true);
+    // hasMore=true because the page was trimmed (more nodes remain).
+    expect(r.value.data.hasMore).toBe(true);
+    // THE KEY ASSERTION: totalCount must be the TRUE vault count from
+    // countNodesByType, not the trimmed components.length.
+    expect(r.value.data.totalCount).toBe(86);
+    // The truncation note must reference the correct totalCount.
+    expect(r.value.data.note).toContain('86');
+  });
+
+  it('totalCount stays 86 on page 2 (post-trim cursor resume) — count is never lost mid-pagination', async () => {
+    const page1 = await listComponentsHandler(bCtx, { type: 'FlexiPage', limit: 10 });
+    expect(page1.ok).toBe(true);
+    if (!page1.ok) return;
+    expect(page1.value.data.totalCount).toBe(86);
+
+    const page2 = await listComponentsHandler(bCtx, { type: 'FlexiPage', limit: 10, offset: 10 });
+    expect(page2.ok).toBe(true);
+    if (!page2.ok) return;
+    expect(page2.value.data.totalCount).toBe(86);
   });
 });
 
