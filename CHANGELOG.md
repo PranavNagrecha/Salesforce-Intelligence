@@ -3,6 +3,18 @@
 All notable changes to **sf-intelligence** are documented here. This project
 adheres to [Semantic Versioning](https://semver.org).
 
+## [0.1.16] — 2026-07-01
+
+Headline: **release consolidation.** The same product as 0.1.15 — the honest funnel-primary
+routing and the ~20 Tier-4 modeling capabilities — promoted to a clean, tagged release
+merged to `main` and cut on GitHub. The published package (the `sfi` CLI + MCP server) is
+unchanged from 0.1.15; the only change since is a website fix.
+
+### Fixed
+- Website: corrected a stale automated-test count (`3,500` → `4,700`) on the trust page,
+  `llms.txt`/`llms-full.txt`, and the homepage, and hardened `recalibrate.mjs` so the
+  headline numbers stay in sync with source on every rebuild.
+
 ## [0.1.15] — 2026-07-01
 
 Headline: **honest routing, and a big jump in admin-question accuracy.** Building on
