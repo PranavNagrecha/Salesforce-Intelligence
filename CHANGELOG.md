@@ -3,6 +3,25 @@
 All notable changes to **sf-intelligence** are documented here. This project
 adheres to [Semantic Versioning](https://semver.org).
 
+## [0.1.20] — 2026-07-01
+
+Headline: **privacy hardening.** No functional changes — a clean rebuild plus a
+stronger guard. `0.1.19` is deprecated in favour of this release.
+
+### Fixed
+- **Scrubbed a placeholder object name from the bundled build.** A generic
+  example name used in a JSDoc snippet was renamed to a neutral placeholder, so
+  the shipped `dist` carries no real-org-shaped identifiers. Pure rename, no
+  behaviour change.
+
+### Changed
+- **The release guard now scans commit messages, not just file contents.**
+  `pnpm guard` previously inspected only tracked file text; an identifier in a
+  commit *message* could pass unseen. It now scans every commit message
+  reachable from `HEAD` and fails with the offending commit, closing that blind
+  spot. Test data that used real-org-shaped names was also renamed to generic
+  placeholders.
+
 ## [0.1.19] — 2026-07-01
 
 Headline: **the access surface, made honest and complete.** A 100-question permissions
