@@ -30,6 +30,7 @@ import {
   classifyQuestion,
   logGapIfAny,
   routeForSelectedIntent,
+  type RouteClarification,
   type RouteResult,
 } from '../intent-router.js';
 import {
@@ -187,7 +188,8 @@ export interface RouteQuestionOutput {
   readonly clarificationResolution?: {
     readonly clarificationId: string;
     readonly selection: string;
-    readonly kind: 'intent' | 'entity';
+    /** `tool` resolves an I6 margin (plane/risk) tool-choice clarification. */
+    readonly kind: 'intent' | 'entity' | 'tool';
   };
   readonly gapLogged: boolean;
   readonly rendered: string;
@@ -693,6 +695,110 @@ const rerankForMode = (
   return [...lead, ...rest].slice(0, 8);
 };
 
+// ---------------------------------------------------------------------------
+// I6 — margin-based clarification.
+//
+// The 4 hardcoded semanticAlternatives pairs stop execution when a REGEX family
+// overlaps a materially different one. That catches the wordings the router was
+// hand-tuned for, but it cannot see a NEW high-consequence ambiguity the funnel
+// surfaces as a genuine score tie. This gate generalizes: when the funnel's
+// top-1 and top-2 fused scores are within MARGIN AND the two tools diverge on a
+// high-consequence axis, stop and ask which the user meant — so a host does not
+// silently commit to (say) a live count when a vault catalog was just as likely,
+// or run a DESTRUCTIVE what-if when the user only wanted the impact readout.
+//
+// Scoped TIGHT on purpose: over-triggering (blocking a clear route) is worse
+// than missing a subtle case. Only TWO divergence axes fire, and only on a real
+// near-tie. Same-plane, same-risk near-ties are benign — the host picks fine —
+// and never fire. Because the regex route fuses a bounded bonus (I2b) onto the
+// routed tool, a routed answer usually leads its rivals by well more than
+// MARGIN, so this rarely fires on a confidently-routed question; it is a safety
+// net for the genuinely balanced case the regex pairs miss.
+//
+// At 0.05 the gate held the whole router-goldset at 128/128 (no clear gold
+// route becomes executionBlocked) and fired on only a small set of genuinely
+// balanced high-consequence ties in the corpus. Widening it re-blocks clear
+// routes; that is the wrong trade.
+export const MARGIN = 0.05;
+
+/**
+ * A candidate whose tool MUTATES the org if the host acts on the plan it
+ * describes — the safe-to-delete verdict and the what_if_* simulation family.
+ * Picking one of these when the user wanted a read-only impact/usage readout is
+ * a high-consequence misroute (destructive intent inferred from an ambiguous
+ * ask), so it is one half of the RISK divergence axis.
+ */
+const DESTRUCTIVE_TOOL = /^sfi\.(safe_to_delete_field|what_if_)/;
+
+/**
+ * A candidate that only READS dependency/usage — the classic informational
+ * counterpart the destructive tools are confused with. Kept to the tools that
+ * actually collide with the destructive family on a delete/change ask, so the
+ * axis stays a genuine either-or (a destructive tool tying an unrelated vault
+ * tool is not this ambiguity).
+ */
+const INFORMATIONAL_IMPACT_TOOL =
+  /^sfi\.(get_impact|get_edges|get_subgraph|downstream_effects|find_[a-z_]*usages|find_formula_references|field_lineage)$/;
+
+/** One candidate is vault, the other reaches the org (live) or fuses it (hybrid). */
+const planesDiverge = (a: ToolCandidate, b: ToolCandidate): boolean => {
+  const planes = new Set([a.plane, b.plane]);
+  return planes.has('vault') && (planes.has('live') || planes.has('hybrid'));
+};
+
+/** One candidate is destructive, the other a read-only impact/usage readout. */
+const risksDiverge = (a: ToolCandidate, b: ToolCandidate): boolean =>
+  (DESTRUCTIVE_TOOL.test(a.tool) && INFORMATIONAL_IMPACT_TOOL.test(b.tool)) ||
+  (DESTRUCTIVE_TOOL.test(b.tool) && INFORMATIONAL_IMPACT_TOOL.test(a.tool));
+
+/**
+ * When the top-2 funnel candidates are within MARGIN AND diverge on a
+ * high-consequence axis (plane, or destructive-vs-informational), return a
+ * tool-choice clarification; otherwise null. `existingClarification` short-
+ * circuits the whole gate — the route already stopped for a stronger reason
+ * (entity ambiguity, or a hardcoded semantic pair), and a second overlapping
+ * "which did you mean" would be noise.
+ */
+export const marginClarification = (
+  cands: readonly ToolCandidate[],
+  existingClarification: RouteClarification | null,
+): RouteClarification | null => {
+  if (existingClarification !== null) return null;
+  const [top, second] = cands;
+  if (top === undefined || second === undefined) return null;
+  if (top.score - second.score > MARGIN) return null;
+  // Both top candidates came from the deterministic regex route: the route
+  // deliberately STACKED them (e.g. a `hybrid` plan that runs a vault tool AND
+  // a live tool together, or an impact route that lists get_impact + advisor).
+  // That is a coordinated plan, not competing tools the user must choose
+  // between — so the plane/risk "divergence" is intended, and asking would
+  // block a correctly-planned route. The gate targets a genuine FUNNEL tie the
+  // regex route did not resolve, so require at least one non-route rival.
+  if (top.fromRoute === true && second.fromRoute === true) return null;
+  const axis = planesDiverge(top, second)
+    ? 'plane'
+    : risksDiverge(top, second)
+      ? 'risk'
+      : null;
+  if (axis === null) return null;
+  const question =
+    axis === 'plane'
+      ? `These two tools are equally likely but answer from DIFFERENT planes — ` +
+        `\`${top.tool}\` (${top.plane}) vs \`${second.tool}\` (${second.plane}). ` +
+        `A ${top.plane === 'vault' ? second.plane : top.plane} answer queries the ` +
+        `org at call time (needs the opt-in live plane); a vault answer is the ` +
+        `offline catalog. Which did you mean?`
+      : `These two tools are equally likely but one is DESTRUCTIVE and one is ` +
+        `read-only — \`${top.tool}\` vs \`${second.tool}\`. Do you want the ` +
+        `read-only impact/usage readout, or the change/delete simulation? Which ` +
+        `did you mean?`;
+  return {
+    required: true,
+    question,
+    options: [top.tool, second.tool],
+  };
+};
+
 /**
  * I3a structural honesty: when the answering candidate needs the opt-in live
  * plane, the guidance MUST disclose that up front — name the live plane and the
@@ -764,6 +870,30 @@ const guidanceForMode = (
         consent
       );
   }
+};
+
+/**
+ * Build the ranked funnel candidates for a route + question: score the funnel,
+ * fuse the regex route hints (I2b bounded bonus), then mode-rerank. Shared by
+ * the I6 margin gate (which reads the top-2 to decide ambiguity) and the final
+ * response, so both see the identical shortlist.
+ */
+const buildFunnelCandidates = (
+  route: RouteResult,
+  question: string,
+  routeToolArgs: ReadonlyMap<string, Readonly<Record<string, unknown>>>,
+  mode: RouteQuestionInput['mode'],
+): ToolCandidate[] => {
+  const funnelLimit = mode !== undefined ? 12 : 8;
+  return rerankForMode(
+    mergeRouteHintsIntoCandidates(
+      route,
+      semanticCandidates(question, funnelLimit),
+      routeToolArgs,
+      funnelLimit,
+    ),
+    mode,
+  );
 };
 
 /**
@@ -910,6 +1040,25 @@ export const routeQuestionHandler = async (
     route = { ...route, confidence: 'medium' };
   }
 
+  // I6 — margin-based clarification. Only in hybrid mode (candidates exist).
+  // Runs BEFORE the clarificationId is stamped so a tool-choice clarification
+  // participates in the stateless continuation contract exactly like an intent
+  // or entity clarification. Reuses the same routeToolArgs/candidates the final
+  // response returns, so the gate and the shortlist can never disagree.
+  const marginRouteToolArgs = await buildRouteToolArgsMap(route, ctx);
+  if (routerMode() === 'hybrid') {
+    const gateCandidates = buildFunnelCandidates(
+      route,
+      input.question,
+      marginRouteToolArgs,
+      input.mode,
+    );
+    const marginClar = marginClarification(gateCandidates, route.clarification);
+    if (marginClar !== null) {
+      route = { ...route, confidence: 'low', clarification: marginClar };
+    }
+  }
+
   const clarificationId = clarificationIdFor(ctx.manifest.sourceTreeHash, route);
   if (clarificationId !== null && route.clarification !== null) {
     route = {
@@ -946,9 +1095,44 @@ export const routeQuestionHandler = async (
       });
     }
 
+    // I6 continuation: a margin (plane/risk) clarification offers TOOL names.
+    // The user picking one pins the route to exactly that tool — keep any
+    // leading `sfi.resolve` preamble so a named component is still resolved
+    // first, but drop the losing rival and the ambiguity. This is validated
+    // above (the selection MUST be one of the offered options), so it can only
+    // ever pin a tool the gate itself surfaced.
+    const selectedTool =
+      response.selection.startsWith('sfi.') &&
+      route.tools.includes(response.selection) === false
+        ? response.selection
+        : null;
     const selectedIntent = [route.intent, ...route.alternatives.map((alternative) => alternative.intent)]
       .includes(response.selection);
-    if (selectedIntent) {
+    if (selectedTool !== null && !selectedIntent) {
+      const preamble = route.tools.filter((tool) => ROUTE_PREAMBLE_TOOLS.has(tool));
+      const { plane, liveRequired } = resolveCandidatePlane(selectedTool);
+      route = {
+        ...route,
+        plane,
+        liveRequired,
+        confidence: 'high',
+        clarification: null,
+        tools: [...preamble, selectedTool],
+        plan: [{
+          stepId: 'step-1',
+          dependsOn: [],
+          question: input.question,
+          intent: route.intent,
+          plane,
+          tools: [...preamble, selectedTool],
+        }],
+      };
+      clarificationResolution = {
+        clarificationId,
+        selection: response.selection,
+        kind: 'tool',
+      };
+    } else if (selectedIntent) {
       const selectedRoute = routeForSelectedIntent(input.question, response.selection);
       if (selectedRoute === null) {
         return err({
@@ -1016,17 +1200,8 @@ export const routeQuestionHandler = async (
   // deterministic route alone (Design A, for no-LLM / CI / air-gapped hosts).
   // Offline TF-IDF over the capability map; a mode reranks toward its family.
   const wantCandidates = routerMode() === 'hybrid';
-  const funnelLimit = input.mode !== undefined ? 12 : 8;
   const toolCandidates = wantCandidates
-    ? rerankForMode(
-        mergeRouteHintsIntoCandidates(
-          route,
-          semanticCandidates(input.question, funnelLimit),
-          routeToolArgs,
-          funnelLimit,
-        ),
-        input.mode,
-      )
+    ? buildFunnelCandidates(route, input.question, routeToolArgs, input.mode)
     : [];
   const guidance =
     toolCandidates.length > 0 ? guidanceForMode(input.mode, toolCandidates) : undefined;
