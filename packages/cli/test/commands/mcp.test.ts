@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { VaultManifest } from '@sf-intelligence/contracts';
+import { checkForUpdate, formatUpdateNotice } from '@sf-intelligence/core';
 import { saveManifest, vaultPaths } from '@sf-intelligence/vault';
 
 import { prepareMcp } from '../../src/commands/mcp.js';
@@ -197,5 +198,45 @@ describe('prepareMcp', () => {
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * The `sfi mcp` startup emits a one-time update nudge to stderr built from
+ * `checkForUpdate` + `formatUpdateNotice`. The live-server `.action()` is not
+ * driven here; these lock the wiring contract those two seams provide — the
+ * command auto-suppresses the check in CI and prints exactly the notice string.
+ */
+describe('sfi mcp — startup update nudge wiring', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('suppresses the check in CI (no network, no notice)', async () => {
+    vi.stubEnv('CI', '1');
+    vi.stubEnv('SFI_NO_UPDATE_CHECK', '');
+    const result = await checkForUpdate('0.0.1');
+    expect(result.shouldUpdate).toBe(false);
+    expect(formatUpdateNotice(result)).toBeNull();
+  });
+
+  it('suppresses the check under the explicit opt-out', async () => {
+    vi.stubEnv('CI', '');
+    vi.stubEnv('SFI_NO_UPDATE_CHECK', '1');
+    const result = await checkForUpdate('0.0.1');
+    expect(result.shouldUpdate).toBe(false);
+    expect(formatUpdateNotice(result)).toBeNull();
+  });
+
+  it('formats the stderr nudge exactly as the command prints it', () => {
+    const notice = formatUpdateNotice({
+      shouldUpdate: true,
+      latestVersion: '9.9.9',
+      cached: false,
+      error: null,
+    });
+    expect(notice).toBe(
+      'Update available: sf-intelligence@9.9.9 — run `npm i -g sf-intelligence@latest`.',
+    );
   });
 });

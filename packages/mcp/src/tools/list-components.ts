@@ -108,8 +108,10 @@ const COMPONENT_TYPES = [
   'ExternalDataSource',
   'ExternalService',
   'NetworkAccess',
-  // v1.6 — business-user record-value tier. Order matches the contracts
-  // union for the same reason.
+  // v1.6 — declarative custom-permission definition (CR-CAP-15) +
+  // business-user record-value tier. Order matches the contracts union
+  // for the same reason.
+  'CustomPermission',
   'CustomMetadataRecord',
   'CustomSettingRecord',
   // v2.0a — conditional-context tier. Synthetic; emitted by the seven

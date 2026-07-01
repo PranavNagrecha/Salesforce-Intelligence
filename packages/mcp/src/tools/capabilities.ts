@@ -26,7 +26,7 @@
  */
 
 import type { McpError, McpResponse } from '@sf-intelligence/contracts';
-import { ok, type Result } from '@sf-intelligence/core';
+import { ok, type Result, type UpdateCheckResult } from '@sf-intelligence/core';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -135,12 +135,57 @@ export interface CapabilitiesOutput {
   readonly boundaries: readonly string[];
   readonly disclosure: string;
   /**
+   * Whether a newer `sf-intelligence` is published on npm. Populated from a
+   * fail-silent, cached, opt-out-able version check (see
+   * `@sf-intelligence/core`'s `checkForUpdate`). When the check is disabled
+   * (`SFI_NO_UPDATE_CHECK=1` / CI), failed, or not supplied by the caller, the
+   * block reads `{ available: false, latestVersion: null, message: null }` — a
+   * host must never narrate an update it could not confirm.
+   */
+  readonly update: UpdateAvailability;
+  /**
    * Glossary of the trust tags a host will see on tool answers, keyed by the
    * VERBATIM runtime value (so the glossary cannot drift from the tags a tool
    * actually emits — see the contracts `ConfidenceLevel` / `Provenance`).
    */
   readonly trustGlossary: TrustGlossary;
 }
+
+/** The npm-update sub-report of {@link CapabilitiesOutput}. */
+export interface UpdateAvailability {
+  /** `true` only when a strictly newer version was confirmed on npm. */
+  readonly available: boolean;
+  /** The latest version on npm, or `null` when unknown / check disabled. */
+  readonly latestVersion: string | null;
+  /** A ready-to-print one-line nudge, or `null` when no update is available. */
+  readonly message: string | null;
+}
+
+/** The "no update / not checked" default — never claims an unconfirmed update. */
+const UPDATE_UNAVAILABLE: UpdateAvailability = {
+  available: false,
+  latestVersion: null,
+  message: null,
+};
+
+/**
+ * Project a fail-silent {@link UpdateCheckResult} onto the capabilities
+ * `update` block. A `null` result (the caller ran no check) or a
+ * not-actionable result both collapse to {@link UPDATE_UNAVAILABLE}, so the
+ * block only ever advertises an update the check actually confirmed.
+ */
+const toUpdateAvailability = (
+  result: UpdateCheckResult | null,
+): UpdateAvailability => {
+  if (result === null || !result.shouldUpdate || result.latestVersion === null) {
+    return UPDATE_UNAVAILABLE;
+  }
+  return {
+    available: true,
+    latestVersion: result.latestVersion,
+    message: `Update available: sf-intelligence@${result.latestVersion} — run \`npm i -g sf-intelligence@latest\`.`,
+  };
+};
 
 /** Defines each trust tag a host will see, keyed by its verbatim runtime value. */
 export interface TrustGlossary {
@@ -575,6 +620,12 @@ const CAPABILITIES_DISCLOSURE =
  * a categorized catalog with example questions, the conversational pattern,
  * the slash commands, and the honesty boundary. Takes no arguments.
  *
+ * The optional `update` argument carries an already-resolved npm-version-check
+ * result (from `@sf-intelligence/core`'s `checkForUpdate`). It is injected —
+ * not fetched here — so this no-arg tool stays cheap, deterministic, and free
+ * of network I/O; a caller that already ran the fail-silent check passes its
+ * result through. When omitted the `update` block reports "no update".
+ *
  * @example
  *   const r = await capabilitiesHandler(ctx, {});
  *   if (r.ok) console.log(r.value.data.toolCount, r.value.data.categories.length);
@@ -582,6 +633,7 @@ const CAPABILITIES_DISCLOSURE =
 export const capabilitiesHandler = async (
   ctx: Context,
   _input: CapabilitiesInput,
+  update: UpdateCheckResult | null = null,
 ): Promise<Result<McpResponse<CapabilitiesOutput>, McpError>> => {
   // Derive the live tool count from the dispatcher registry. Imported here
   // (not at module top level) so the index <-> capabilities import cycle
@@ -603,6 +655,7 @@ export const capabilitiesHandler = async (
       commands: COMMANDS,
       boundaries: BOUNDARIES,
       disclosure: CAPABILITIES_DISCLOSURE,
+      update: toUpdateAvailability(update),
       trustGlossary: TRUST_GLOSSARY,
     },
     vaultState: {

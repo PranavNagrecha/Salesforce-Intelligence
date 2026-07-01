@@ -1,8 +1,6 @@
-import { execFile } from 'node:child_process';
 import { appendFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { promisify } from 'node:util';
 
 import type {
   ComponentId,
@@ -14,7 +12,7 @@ import type {
   PhantomClassification,
   VaultManifest,
 } from '@sf-intelligence/contracts';
-import { err, ok, type Result } from '@sf-intelligence/core';
+import { err, execHelper, ok, type Result } from '@sf-intelligence/core';
 import {
   buildDescribeFieldExtraction,
   existingCustomFieldIds,
@@ -94,7 +92,18 @@ import { ORG_ALIAS_RE, validateOrgAlias } from './org-alias.js';
 import { assessRefreshSize } from './refresh-preflight.js';
 import { runSnapshotCreate } from './snapshot.js';
 
-const execFileAsync = promisify(execFile);
+/**
+ * Shape of the low-level exec injected into {@link runSf} by tests — the
+ * `promisify(execFile)` signature (binary + argv + options → buffered stdout /
+ * stderr). Production leaves it unset so `runSf` routes through the shared
+ * cross-platform `execHelper`.
+ */
+type RawExecFile = (
+  file: string,
+  args: readonly string[],
+  options: { readonly maxBuffer?: number; readonly cwd?: string; readonly timeout?: number; readonly killSignal?: string },
+) => Promise<{ stdout: string; stderr: string }>;
+
 /** Default Salesforce metadata API version stamped into the generated package.xml. */
 const SF_API_VERSION = '62.0';
 
@@ -2243,25 +2252,45 @@ const SF_QUERY_TIMEOUT_MS = (() => {
 
 /**
  * The shell-free `sf` runner. Spawns the `sf` binary directly with an argv
- * array via `execFile` (NOT `exec`), so no value — including a `targetOrg` read
- * from `--target-org`/`config.json` — is ever interpreted by a shell (CR-01 /
- * C1): a metacharacter alias is one inert argv element, never executed. Every
- * `sf` call in this module routes through here. `exec` is injectable so tests
- * can assert the argv shape without spawning `sf`.
+ * array — NOT via a shell — so no value (including a `targetOrg` read from
+ * `--target-org`/`config.json`) is ever interpreted by a shell (CR-01 / C1): a
+ * metacharacter alias is one inert argv element, never executed. Every `sf` call
+ * in this module routes through here.
+ *
+ * The default (production) path delegates to the shared cross-platform
+ * {@link execHelper} from `@sf-intelligence/core`, so refresh's retrieve /
+ * describe calls also work on Windows — where `sf` resolves to `sf.cmd` and a
+ * bare `execFile` throws `ENOENT` on the batch shim — AND gain the
+ * SIGTERM→SIGKILL escalation (CR-P3). `execHelper` escapes each argv element per
+ * cmd.exe's rules on Windows, preserving the no-shell argv guarantee.
+ *
+ * `exec` stays injectable so tests can assert the raw argv shape without
+ * spawning `sf`; an injected `exec` is called in the historic
+ * `execFile('sf', args, options)` form (bare binary, verbatim args) rather than
+ * through `execHelper`, so the argv-shape assertions are unaffected by the
+ * Windows escaping.
  *
  * @example runSf(['org', 'list', '--json'], { timeout: SF_QUERY_TIMEOUT_MS })
  */
 export const runSf = (
   args: readonly string[],
   options: { readonly maxBuffer?: number; readonly cwd?: string; readonly timeout: number },
-  exec: typeof execFileAsync = execFileAsync,
-): Promise<{ stdout: string; stderr: string }> =>
-  exec('sf', [...args], {
+  exec?: RawExecFile,
+): Promise<{ stdout: string; stderr: string }> => {
+  if (exec !== undefined) {
+    return exec('sf', [...args], {
+      maxBuffer: options.maxBuffer ?? SF_MAX_BUFFER,
+      timeout: options.timeout,
+      killSignal: 'SIGTERM',
+      ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+    });
+  }
+  return execHelper('sf', args, {
     maxBuffer: options.maxBuffer ?? SF_MAX_BUFFER,
     timeout: options.timeout,
-    killSignal: 'SIGTERM',
     ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
   });
+};
 
 /**
  * Standard objects retrieved by explicit name. A `CustomObject` manifest with

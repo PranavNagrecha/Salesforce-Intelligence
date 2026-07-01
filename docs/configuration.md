@@ -96,6 +96,45 @@ See [`guides/asking-questions.md`](./guides/asking-questions.md) § live data.
 
 ---
 
+## Update checking
+
+On MCP-server startup (`sfi mcp`) the plugin can check npm for a newer
+published `sf-intelligence` and, when one exists, print a one-line
+"update available" nudge to **stderr** (stdout is reserved for MCP JSON-RPC).
+The check is **off in CI**, **opt-out** everywhere, and never blocks the
+server.
+
+### Opt out
+
+| Method | How |
+| --- | --- |
+| Explicit opt-out | Set `SFI_NO_UPDATE_CHECK=1` |
+| CI auto-off | The check disables itself when any common CI marker is set (`CI`, `CONTINUOUS_INTEGRATION`, `GITHUB_ACTIONS`, `GITLAB_CI`, `CIRCLECI`, `TRAVIS`, `BUILDKITE`, `DRONE`, `JENKINS_URL`, `TF_BUILD`) |
+
+### Network behavior (transparency)
+
+The update check:
+
+- Sends a single GET to `https://registry.npmjs.org/sf-intelligence` with a
+  ~3-second timeout — **no** telemetry, user identifiers, or org data.
+- **Fails silently** — a network error, timeout, or bad response never
+  interrupts the server; it simply prints no nudge.
+- **Caches locally** for ~24h in `~/.sf-intelligence/update-check.json`, so a
+  fresh cache answers with zero network I/O.
+- **Never** reads or writes your vault or org metadata.
+
+It is fail-closed: if the check can't confirm a newer version, nothing is
+printed.
+
+### Cache location
+
+| Variable / path | Default | Purpose |
+| --- | --- | --- |
+| `SFI_UPDATE_CACHE_PATH` | *(unset)* | Override the cache file path (tests) |
+| Default file | `~/.sf-intelligence/update-check.json` | Cached npm version check (~24h TTL) |
+
+---
+
 ## Response size budget
 
 MCP clients reject a tool result above their token limit outright (~55 KB

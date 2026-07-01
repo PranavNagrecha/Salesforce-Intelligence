@@ -33,7 +33,7 @@ import type {
   McpError,
   McpResponse,
 } from '@sf-intelligence/contracts';
-import { ok, type Result } from '@sf-intelligence/core';
+import { ok, type Result, type UpdateCheckResult } from '@sf-intelligence/core';
 import { listNodesByType } from '@sf-intelligence/graph';
 import {
   computeSourceTreeHash,
@@ -187,6 +187,7 @@ const buildFreshness = (
   now: number,
   sourceHashMatches: boolean | null,
   recent: ReturnType<typeof summarizeRecentActivity>,
+  update: UpdateCheckResult | null,
 ): HealthFreshness => {
   const refreshedAt = ctx.manifest.refreshedAt;
   const refreshedMs = Date.parse(refreshedAt);
@@ -212,6 +213,16 @@ const buildFreshness = (
   if (sourceHashMatches === false) {
     clauses.push(
       'Local source has drifted from the vault (source-tree hash mismatch); run `sfi refresh --no-pull` to rebuild from the current source.',
+    );
+  }
+  // A newer npm build is an advisory yellow flag too — never a failure. Only
+  // added when the injected check CONFIRMED an update; a disabled / failed /
+  // absent check contributes nothing (a host must not narrate an unconfirmed
+  // upgrade). Distinct from the vault-freshness clauses: it is about the
+  // installed plugin, not the org snapshot.
+  if (update?.shouldUpdate === true && update.latestVersion !== null) {
+    clauses.push(
+      `A newer sf-intelligence is published on npm (${update.latestVersion}); run \`npm i -g sf-intelligence@latest\` to update the plugin.`,
     );
   }
   const nudge = clauses.length > 0 ? clauses.join(' ') : null;
@@ -343,6 +354,7 @@ export const healthCheckHandler = async (
   ctx: Context,
   _input: HealthCheckInput,
   now: number = Date.now(),
+  update: UpdateCheckResult | null = null,
 ): Promise<Result<McpResponse<HealthCheckOutput>, McpError>> => {
   const issues: string[] = [];
 
@@ -427,7 +439,7 @@ export const healthCheckHandler = async (
       netComponentChange: null,
     });
   }
-  const freshness = buildFreshness(ctx, now, hashProbe.match, recent);
+  const freshness = buildFreshness(ctx, now, hashProbe.match, recent, update);
 
   const vaultHistoryEnabled = existsSync(join(ctx.vaultRoot, '.git'));
 

@@ -1,9 +1,8 @@
-import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { promisify } from 'node:util';
 
+import { execHelper } from '@sf-intelligence/core';
 import { gapLogPath } from '@sf-intelligence/mcp';
 import {
   computeSourceTreeHash,
@@ -24,8 +23,6 @@ import {
   isStaleByAge,
 } from './status.js';
 
-const execFileAsync = promisify(execFile);
-
 /**
  * Per-call timeout for doctor's `sf` probes (`--version`, `org display`), so a
  * hung/wedged `sf` (e.g. an auth prompt) cannot hang `sfi doctor` forever
@@ -40,6 +37,32 @@ const SF_DOCTOR_TIMEOUT_MS = (() => {
 
 /** Default vault root, relative to CWD. Mirrors init/status. */
 const DEFAULT_VAULT_ROOT = 'org-kb';
+
+/**
+ * Common absolute install locations to probe when a bare `sf` is not on PATH —
+ * IDE / MCP subprocesses often don't inherit the shell PATH, so `sf` can fail to
+ * resolve even when correctly installed. Platform-specific: on Windows the CLI
+ * installs as a `sf.cmd` shim (npm-global under `%APPDATA%\npm`, or the
+ * Salesforce CLI installer under `Program Files`), which `execHelper` launches
+ * via cmd.exe; on macOS / Linux it lands in the usual bin dirs. Returned as a
+ * function so `process.platform` is read at call time (tests stub it).
+ */
+const sfFallbackPaths = (): readonly string[] => {
+  if (process.platform === 'win32') {
+    const appData = process.env['APPDATA'];
+    const programFiles = process.env['ProgramFiles'] ?? 'C:\\Program Files';
+    const localAppData = process.env['LOCALAPPDATA'];
+    return [
+      ...(appData !== undefined ? [`${appData}\\npm\\sf.cmd`] : []),
+      `${programFiles}\\Salesforce CLI\\bin\\sf.cmd`,
+      `${programFiles}\\sf\\bin\\sf.cmd`,
+      ...(localAppData !== undefined
+        ? [`${localAppData}\\sf\\client\\bin\\sf.cmd`]
+        : []),
+    ];
+  }
+  return ['/usr/local/bin/sf', '/opt/homebrew/bin/sf'];
+};
 
 /**
  * Parse `major.minor.patch` from an `sf --version` line, or null if none is
@@ -183,10 +206,9 @@ export const runDoctor = async (opts: RunDoctorOptions): Promise<DoctorReport> =
   const run =
     opts.exec ??
     ((binary: string, args: readonly string[]) =>
-      execFileAsync(binary, [...args], {
+      execHelper(binary, args, {
         maxBuffer: 64 * 1024 * 1024,
         timeout: SF_DOCTOR_TIMEOUT_MS,
-        killSignal: 'SIGTERM',
       }));
   const checks: DoctorCheck[] = [];
   const vaultRoot = resolve(opts.cwd, DEFAULT_VAULT_ROOT);
@@ -197,7 +219,7 @@ export const runDoctor = async (opts: RunDoctorOptions): Promise<DoctorReport> =
   // Probe the common absolute locations and reuse whatever resolves for every
   // later sf call, so the rest of doctor still works and the failure is
   // diagnosed as a PATH issue rather than "not installed".
-  const SF_FALLBACK_PATHS = ['/usr/local/bin/sf', '/opt/homebrew/bin/sf'];
+  const SF_FALLBACK_PATHS = sfFallbackPaths();
   let sfBin = 'sf';
   let sfDetail: string | null = null;
   let sfOnPath = false;

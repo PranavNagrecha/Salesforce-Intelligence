@@ -16,3 +16,20 @@
 export type { Result } from '@sf-intelligence/contracts';
 
 export { ok, err } from './result.js';
+
+export {
+  execHelper,
+  escapeWindowsArg,
+  isWindows,
+  type ExecCommand,
+  type ExecHelperOptions,
+} from './exec-helper.js';
+
+export {
+  checkForUpdate,
+  compareVersions,
+  formatUpdateNotice,
+  getStateDir,
+  type LatestVersionFetcher,
+  type UpdateCheckResult,
+} from './update-notifier.js';

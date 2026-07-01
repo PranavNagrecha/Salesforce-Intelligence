@@ -222,6 +222,51 @@ describe('capabilitiesHandler', () => {
     ).toBe(true);
   });
 
+  it('reports no update when the caller supplies no update check', async () => {
+    const r = await capabilitiesHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Default: the tool runs no network check itself — the block is inert.
+    expect(r.value.data.update).toEqual({
+      available: false,
+      latestVersion: null,
+      message: null,
+    });
+  });
+
+  it('surfaces an available update (+ actionable message) when one is injected', async () => {
+    const r = await capabilitiesHandler(ctx, {}, {
+      shouldUpdate: true,
+      latestVersion: '9.9.9',
+      cached: false,
+      error: null,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.update.available).toBe(true);
+    expect(r.value.data.update.latestVersion).toBe('9.9.9');
+    expect(r.value.data.update.message).toContain('9.9.9');
+    expect(r.value.data.update.message).toContain(
+      'npm i -g sf-intelligence@latest',
+    );
+  });
+
+  it('never advertises an unconfirmed update (shouldUpdate=false collapses to inert)', async () => {
+    const r = await capabilitiesHandler(ctx, {}, {
+      shouldUpdate: false,
+      latestVersion: '0.1.0',
+      cached: true,
+      error: null,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.update).toEqual({
+      available: false,
+      latestVersion: null,
+      message: null,
+    });
+  });
+
   it('copies vault state into the envelope', async () => {
     const r = await capabilitiesHandler(ctx, {});
     expect(r.ok).toBe(true);

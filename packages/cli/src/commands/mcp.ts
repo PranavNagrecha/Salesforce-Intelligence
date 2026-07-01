@@ -3,7 +3,13 @@ import { readFile, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 
-import { err, ok, type Result } from '@sf-intelligence/core';
+import {
+  checkForUpdate,
+  err,
+  formatUpdateNotice,
+  ok,
+  type Result,
+} from '@sf-intelligence/core';
 import {
   buildContext,
   createServer,
@@ -13,6 +19,8 @@ import {
 } from '@sf-intelligence/mcp';
 import { vaultPaths } from '@sf-intelligence/vault';
 import { Command } from 'commander';
+
+import { readCliPackageVersion } from '../package-version.js';
 
 /**
  * Inferred return type of `@sf-intelligence/mcp`'s `createServer`. We avoid
@@ -229,6 +237,18 @@ export const registerMcpCommand = (program: Command): void => {
         `sfi mcp: serving vault ${vaultRoot}` +
           `${targetOrg !== null ? ` (org: ${targetOrg})` : ' (no targetOrg in config)'}\n`,
       );
+      // One-time "update available" nudge on stderr (stdout is reserved for
+      // JSON-RPC). Fail-silent, cached ~24h, and opt-out via
+      // SFI_NO_UPDATE_CHECK=1 / auto-off in CI — see `checkForUpdate`. It must
+      // never delay or block the server, so a failure here is swallowed.
+      try {
+        const notice = formatUpdateNotice(
+          await checkForUpdate(readCliPackageVersion()),
+        );
+        if (notice !== null) process.stderr.write(`sfi mcp: ${notice}\n`);
+      } catch {
+        // The update check is best-effort; never let it stop the server.
+      }
       const shutdownOnce = makeShutdownOnce(ctx);
       for (const signal of SHUTDOWN_SIGNALS) {
         process.on(signal, () => {

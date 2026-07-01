@@ -16,10 +16,7 @@
  * stdout bounded, so the buffered exec is appropriate here).
  */
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-
-import { err, ok, type Result } from '@sf-intelligence/core';
+import { err, execHelper, ok, type Result } from '@sf-intelligence/core';
 
 /**
  * Auth bundle returned on successful delegation. The three fields are
@@ -81,61 +78,26 @@ export type ExecCommand = (
 ) => Promise<{ readonly stdout: string; readonly stderr: string }>;
 
 /**
- * Per-call timeout for the `sf org display` auth shellout (RV3 / CR-01
- * follow-up / H8). `sf org display` can wedge on an interactive auth re-prompt
- * waiting on stdin; an un-timed `execFile` would block its callers forever —
- * including the refresh-time auth path (runToolingApiEnrichment,
- * data-shape-capture, staged-refresh) which calls `getAuthFromSfCli` with NO
- * injected exec and so falls through to this default. The auth call is short, so
- * the generous 10-min default backstop never clips a legitimate run yet caps a
- * hang.
+ * Production adapter for the `sf org display` auth shellout (RV3 / CR-01
+ * follow-up / H8): the shared cross-platform {@link execHelper} from
+ * `@sf-intelligence/core`.
  *
- * On timeout the child is sent `SIGTERM` (graceful); if it has not exited after
- * {@link SF_EXEC_KILL_GRACE_MS} it is then sent `SIGKILL` (CR-P3) so a wedged
- * `sf` that ignores SIGTERM cannot outlive the timeout — `execFile`'s built-in
- * `timeout` sends a single SIGTERM that a stuck Node CLI can swallow. Either way
- * `execFile` rejects with `killed:true`, surfaced as a `sf-cli-failed`
- * AuthError. Override the timeout with `SFI_SF_EXEC_TIMEOUT_MS` and the grace
- * with `SFI_SF_EXEC_KILL_GRACE_MS` (the same knobs the MCP live-exec leaf reads,
- * kept consistent across both `sf` exec leaves).
+ * `sf org display` can wedge on an interactive auth re-prompt waiting on stdin;
+ * an un-timed exec would block its callers forever — including the refresh-time
+ * auth path (runToolingApiEnrichment, data-shape-capture, staged-refresh) which
+ * calls `getAuthFromSfCli` with NO injected exec and so falls through to this
+ * default. `execHelper` carries the generous 10-min default timeout backstop
+ * (never clips a legitimate short auth call yet caps a hang) with the
+ * SIGTERM→SIGKILL escalation (CR-P3) so a wedged `sf` that ignores SIGTERM
+ * cannot outlive the timeout; the reject carries `killed:true`, surfaced here as
+ * a `sf-cli-failed` AuthError. It ALSO makes the call work on Windows, where
+ * `sf` resolves to `sf.cmd` and a bare `execFile` cannot launch a batch shim.
+ *
+ * Override the timeout with `SFI_SF_EXEC_TIMEOUT_MS` and the grace with
+ * `SFI_SF_EXEC_KILL_GRACE_MS` (the same knobs every `sf` exec site reads).
  */
-const SF_EXEC_TIMEOUT_MS = (() => {
-  const n = Number(process.env['SFI_SF_EXEC_TIMEOUT_MS']);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 600_000;
-})();
-
-/** Grace after the SIGTERM timeout before escalating to SIGKILL (CR-P3). */
-const SF_EXEC_KILL_GRACE_MS = (() => {
-  const n = Number(process.env['SFI_SF_EXEC_KILL_GRACE_MS']);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 5_000;
-})();
-
-const execFileAsync = promisify(execFile);
-
-/**
- * Node's built-in `execFile`, promisified, with a SIGTERM→SIGKILL escalation —
- * the production adapter. `execFile`'s native `timeout` sends a single
- * `killSignal` (SIGTERM) and then stops caring, so a child that ignores SIGTERM
- * keeps running. CR-P3: keep the native timeout/SIGTERM for the graceful first
- * strike, then arm our own timer to SIGKILL after a short grace if the process
- * is still alive — a wedged `sf` cannot outlive the timeout.
- */
-export const nodeExecFile: ExecCommand = (binary, args) => {
-  const child = execFileAsync(binary, [...args], {
-    timeout: SF_EXEC_TIMEOUT_MS,
-    killSignal: 'SIGTERM',
-  });
-  const killTimer = setTimeout(() => {
-    const proc = child.child;
-    if (proc.exitCode === null && proc.signalCode === null) {
-      proc.kill('SIGKILL');
-    }
-  }, SF_EXEC_TIMEOUT_MS + SF_EXEC_KILL_GRACE_MS);
-  killTimer.unref?.();
-  return child.finally(() => {
-    clearTimeout(killTimer);
-  });
-};
+export const nodeExecFile: ExecCommand = (binary, args) =>
+  execHelper(binary, args);
 
 /**
  * The shape `sf org display --target-org X --json` writes to stdout

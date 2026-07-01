@@ -1,10 +1,8 @@
-import { execFile } from 'node:child_process';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
-import { promisify } from 'node:util';
 
 import { confirm, input } from '@inquirer/prompts';
-import { err, ok, type Result } from '@sf-intelligence/core';
+import { err, execHelper, ok, type Result } from '@sf-intelligence/core';
 import { vaultPaths } from '@sf-intelligence/vault';
 import { Command } from 'commander';
 
@@ -22,8 +20,6 @@ const GITIGNORE_ENTRIES: readonly string[] = ['org-kb/source/', 'org-kb/graph/']
 const SF_API_VERSION = '62.0';
 /** Default DX package directory that `sf project retrieve` requires to exist on disk. */
 const DEFAULT_PACKAGE_DIR = 'force-app';
-
-const execFileAsync = promisify(execFile);
 
 /**
  * Per-call timeout for init's best-effort `sf org list --json` probe (2 min
@@ -250,9 +246,8 @@ const ORG_CATEGORIES = ['nonScratchOrgs', 'scratchOrgs', 'otherOrgs', 'devHubs',
  */
 export const getDefaultOrgAlias = async (): Promise<string | null> => {
   try {
-    const { stdout } = await execFileAsync('sf', ['org', 'list', '--json'], {
+    const { stdout } = await execHelper('sf', ['org', 'list', '--json'], {
       timeout: SF_LIST_TIMEOUT_MS,
-      killSignal: 'SIGTERM',
     });
     const parsed = JSON.parse(stdout) as { result?: Record<string, unknown> };
     const result = parsed.result;

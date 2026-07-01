@@ -285,11 +285,50 @@ const collectTabVisibilities = (
   return out;
 };
 
+/** One entry under `properties.recordTypeVisibilities`. */
+interface RecordTypeVisibilityEntry {
+  readonly recordType: string;
+  readonly default: boolean;
+  readonly visible: boolean | null;
+}
+
+/**
+ * Collect `<recordTypeVisibilities>` entries verbatim from the permission set
+ * XML. `<default>` is always present per the Salesforce schema. `<visible>` was
+ * added in a later API version and may be absent on older orgs — surface that
+ * as `null` so downstream tools can distinguish "absent" from "false". Mirror
+ * of the profile extractor's helper so `recordtype_availability`,
+ * `layout_for_user`, and `why_cant_user_see_record` read one shape from both
+ * Profile and PermissionSet nodes. Always returns an array; `[]` when the
+ * element is absent (so tools tell "extracted, none" from "never extracted").
+ */
+const collectRecordTypeVisibilities = (
+  rootObj: Record<string, unknown>,
+): RecordTypeVisibilityEntry[] => {
+  const out: RecordTypeVisibilityEntry[] = [];
+  for (const entry of iterEntries(rootObj, 'recordTypeVisibilities')) {
+    const recordTypeRaw = unwrapSingle(entry['recordType']);
+    if (recordTypeRaw === undefined || recordTypeRaw === null) continue;
+    const visibleRaw = unwrapSingle(entry['visible']);
+    const visible =
+      visibleRaw === undefined || visibleRaw === null
+        ? null
+        : coerceBoolean(visibleRaw);
+    out.push({
+      recordType: String(recordTypeRaw),
+      default: coerceBoolean(unwrapSingle(entry['default'])),
+      visible,
+    });
+  }
+  return out;
+};
+
 interface GrantCounts {
   readonly objectGrantCount: number;
   readonly fieldGrantCount: number;
   readonly classGrantCount: number;
   readonly userPermissions: readonly string[];
+  readonly recordTypeVisibilities: readonly RecordTypeVisibilityEntry[];
   readonly applicationVisibilities: readonly { application: string; default: boolean; visible: boolean }[];
   readonly tabVisibilities: readonly { tab: string; visibility: string }[];
   readonly flowGrantCount: number;
@@ -326,6 +365,14 @@ const buildProperties = (
  * `userPermissions` are surfaced on `Node.properties.userPermissions`
  * (sorted) rather than as edges since system permissions don't correspond
  * to graph nodes in v0.1.
+ *
+ * `<recordTypeVisibilities>` surfaces on `Node.properties.recordTypeVisibilities`
+ * (array of `{ recordType, default, visible }`, verbatim order). `visible` is
+ * `null` when the element is absent (older orgs predate the API version that
+ * added it). Always present (`[]` when the source XML has zero entries) so the
+ * `recordtype_availability` / `layout_for_user` / `why_cant_user_see_record`
+ * tools read the SAME shape from PermissionSet nodes as from Profile nodes,
+ * rather than under-reporting permission-set record-type grants.
  *
  * Returns an `ExtractorError` for documented failure modes:
  * `file-not-found`, `parse-error`, or `malformed-input` (wrong root,
@@ -384,6 +431,7 @@ export const extractPermissionSet = async (
   const flowEdges = buildFlowEdges(rootObj, nodeId);
   const customPermissionEdges = buildCustomPermissionEdges(rootObj, nodeId);
   const userPermissions = collectEnabledUserPermissions(rootObj);
+  const recordTypeVisibilities = collectRecordTypeVisibilities(rootObj);
   const applicationVisibilities = collectApplicationVisibilities(rootObj);
   const tabVisibilities = collectTabVisibilities(rootObj);
 
@@ -406,6 +454,7 @@ export const extractPermissionSet = async (
       fieldGrantCount: fieldEdges.length,
       classGrantCount: classEdges.length,
       userPermissions,
+      recordTypeVisibilities,
       applicationVisibilities,
       tabVisibilities,
       flowGrantCount: flowEdges.length,

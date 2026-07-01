@@ -450,6 +450,46 @@ describe('healthCheckHandler: freshness nudge', () => {
     expect(result.value.data.freshness.lastRefresh.available).toBe(false);
     expect(result.value.data.freshness.lastRefresh.componentsChanged).toBe(0);
   });
+
+  it('emits no plugin-update clause when no update check is injected', async () => {
+    // A fresh vault + no injected update result → completely quiet nudge.
+    const result = await healthCheckHandler(ctx, {}, refreshedMs + 3 * DAY);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.freshness.nudge).toBeNull();
+  });
+
+  it('appends an advisory npm-update clause when an update is confirmed (status unchanged)', async () => {
+    // Fresh vault so the ONLY nudge clause is the plugin-update one.
+    const result = await healthCheckHandler(ctx, {}, refreshedMs + 3 * DAY, {
+      shouldUpdate: true,
+      latestVersion: '9.9.9',
+      cached: false,
+      error: null,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.freshness.nudge).toContain('9.9.9');
+    expect(result.value.data.freshness.nudge).toContain(
+      'npm i -g sf-intelligence@latest',
+    );
+    // The npm update is advisory — it must never change the aggregate status,
+    // and it must not falsely flag the vault snapshot as stale.
+    expect(result.value.data.status).toBe('healthy');
+    expect(result.value.data.freshness.stale).toBe(false);
+  });
+
+  it('adds no update clause when the injected check reports no update', async () => {
+    const result = await healthCheckHandler(ctx, {}, refreshedMs + 3 * DAY, {
+      shouldUpdate: false,
+      latestVersion: '0.1.0',
+      cached: true,
+      error: null,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.freshness.nudge).toBeNull();
+  });
 });
 
 describe('healthCheckHandler: freshness nudge counts the last refresh + flags source drift', () => {
