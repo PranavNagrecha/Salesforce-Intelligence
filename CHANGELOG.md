@@ -3,6 +3,21 @@
 All notable changes to **sf-intelligence** are documented here. This project
 adheres to [Semantic Versioning](https://semver.org).
 
+## [0.1.17] — 2026-07-01
+
+Headline: **the grounding gate now fails closed.** `sfi.synthesize_answer` exists to stop a
+host from asserting something the vault never said — but when a `draft` was handed in with
+no evidence (an empty or missing `input`), it silently returned `grounded: true` instead of
+refusing. It now fails closed.
+
+### Fixed
+- **`synthesize_answer` fail-closed grounding.** A `draft` supplied with an empty or missing
+  `input` now returns `grounded: false` plus a `GROUNDING NOT VERIFIED` caveat, instead of
+  rubber-stamping the draft as grounded. Absence of evidence is not evidence of grounding —
+  the same `empty ≠ none` rule the tool enforces for the host, now applied to its own input.
+  Found by end-user QA: a false *"safe to delete, nothing references it"* draft with no
+  `input` came back `grounded: true`, 0 citations. JSDoc + tool description updated to match.
+
 ## [0.1.16] — 2026-07-01
 
 Headline: **release consolidation.** The same product as 0.1.15 — the honest funnel-primary
