@@ -571,6 +571,87 @@ describe('getComponentHandler', () => {
     expect(result.value.data.maxBodyBytes).toBe(128);
   });
 
+  it('renders Profile loginIpRanges structurally and respects the body size limit', async () => {
+    // A Profile whose graph node carries `loginIpRanges` (the profile-extractor
+    // shape) must surface those ranges as structured `data.properties` while a
+    // large rendered body is still bounded by `maxBodyBytes`.
+    const localDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-getcomp-iprange-'));
+    const opened = await openGraph(join(localDir, 'iprange.db'));
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const localStore = opened.value;
+
+    const loginIpRanges = [
+      { startAddress: '10.0.0.1', endAddress: '10.0.0.255' },
+      { startAddress: '192.168.1.0', endAddress: '192.168.1.255' },
+    ];
+    const profileNode = makeNode({
+      id: 'Profile:IpRestricted',
+      type: 'Profile',
+      apiName: 'IpRestricted',
+      label: 'IP Restricted',
+      sourcePath: 'profiles/IpRestricted.profile-meta.xml',
+      properties: {
+        loginIpRanges,
+        userPermissions: ['ActivateContracts', 'AllowUniversalSearch'],
+      },
+    });
+    const imp = await importExtractionResults(localStore, [
+      { nodes: [profileNode], edges: [] },
+    ]);
+    expect(imp.ok).toBe(true);
+    if (!imp.ok) return;
+    const localCtx: Context = {
+      vaultRoot: localDir,
+      manifest: FIXTURE_MANIFEST,
+      graph: localStore,
+    };
+
+    // Render a body that exceeds the cap so truncation metadata is exercised.
+    const largeBody = 'x'.repeat(25_000);
+    writeMarkdown(
+      localDir,
+      profileNode,
+      [
+        '---',
+        'id: Profile:IpRestricted',
+        'type: Profile',
+        'apiName: IpRestricted',
+        '---',
+        '',
+        '# IP Restricted',
+        '',
+        largeBody,
+        '',
+      ].join('\n'),
+    );
+
+    const result = await getComponentHandler(localCtx, {
+      id: 'Profile:IpRestricted',
+      maxBodyBytes: 5_000,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      await closeGraph(localStore);
+      rmSync(localDir, { recursive: true, force: true });
+      return;
+    }
+    const { data } = result.value;
+
+    // Body was truncated to the cap.
+    expect(data.bodyTruncated).toBe(true);
+    expect(data.returnedBodyBytes).toBeLessThanOrEqual(5_000);
+    expect(data.omittedBodyBytes).toBeGreaterThan(0);
+    expect(data.maxBodyBytes).toBe(5_000);
+
+    // loginIpRanges surfaces as the structured array from the graph node
+    // (not re-parsed from the truncated YAML string).
+    expect(data.properties['loginIpRanges']).toEqual(loginIpRanges);
+
+    await closeGraph(localStore);
+    rmSync(localDir, { recursive: true, force: true });
+  });
+
   it('u6-structured-grounding: ValidationRule returns data.properties with formula and referenceIds as canonical ids (not empty grounding)', async () => {
     // This test verifies the fix for the durable-hardening bug (u6): before
     // the fix, data.properties was absent and data.referenceIds did not exist,

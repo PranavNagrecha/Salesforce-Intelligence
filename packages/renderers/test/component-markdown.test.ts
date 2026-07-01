@@ -466,6 +466,43 @@ describe('renderComponentMarkdown', () => {
     expect(picklistRow).toContain('Open');
     expect(picklistRow).toContain('Closed (inactive)');
   });
+
+  it('renders Profile loginIpRanges as readable IP range pairs (not [object Object])', () => {
+    // A Profile's `loginIpRanges` is an array of `{ startAddress, endAddress }`
+    // objects (collected by the profile extractor). A bare String() on the
+    // array emits `[object Object]` for each entry; renderValueAsBacktickedString
+    // must instead join the entries as `start-end` pairs.
+    const node: Node = {
+      id: 'Profile:RestrictedProfile',
+      type: 'Profile',
+      apiName: 'RestrictedProfile',
+      label: 'Restricted Profile',
+      parentId: null,
+      sourcePath: 'profiles/RestrictedProfile.profile-meta.xml',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {
+        userPermissions: ['ActivateContracts', 'AllowUniversalSearch'],
+        loginIpRanges: [
+          { startAddress: '10.0.0.1', endAddress: '10.0.0.255' },
+          { startAddress: '192.168.1.0', endAddress: '192.168.1.255' },
+        ],
+      },
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const loginIpRangesRow = result.value.body
+      .split('\n')
+      .find((line) => line.startsWith('| loginIpRanges |'));
+    expect(loginIpRangesRow).toBeDefined();
+    // Each IP range rendered as startAddress-endAddress, comma-joined.
+    expect(loginIpRangesRow).toContain('10.0.0.1-10.0.0.255');
+    expect(loginIpRangesRow).toContain('192.168.1.0-192.168.1.255');
+    // No [object Object] literals.
+    expect(loginIpRangesRow).not.toContain('[object Object]');
+  });
 });
 
 describe('renderComponentMarkdown — markdown injection / escaping (CR-16c)', () => {

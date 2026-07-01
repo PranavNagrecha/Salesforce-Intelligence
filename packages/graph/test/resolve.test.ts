@@ -103,6 +103,21 @@ const seed: ExtractionResult = {
     makeNode({ id: 'CustomObject:Student__c', apiName: 'Student__c', label: 'Student' }),
     makeNode({ id: 'CustomField:Student__c.Student_SSN__c', type: 'CustomField', apiName: 'Student_SSN__c', label: 'Student SSN', parentId: 'CustomObject:Student__c' }),
     makeNode({ id: 'CustomField:Student__c.Student_Name__c', type: 'CustomField', apiName: 'Student_Name__c', label: 'Student Name', parentId: 'CustomObject:Student__c' }),
+    // Acronym near-miss decoys (resolver Bug 2): fields whose api-name token is a
+    // same-length near-miss of "ssn" (asn/bsn/msn). A short 3-char query token
+    // must NOT let these substring/fuzzy-graze their way over the field genuinely
+    // named for SSN — Student_SSN__c (an exact token hit) owns the answer. Guards
+    // the isPureShortSubstringOfCompound containment-suppression path.
+    makeNode({ id: 'CustomField:Student__c.ASN__c', type: 'CustomField', apiName: 'ASN__c', label: 'ASN', parentId: 'CustomObject:Student__c' }),
+    makeNode({ id: 'CustomField:Student__c.BSN__c', type: 'CustomField', apiName: 'BSN__c', label: 'BSN', parentId: 'CustomObject:Student__c' }),
+    makeNode({ id: 'CustomField:Student__c.MSN_Professional_Status__c', type: 'CustomField', apiName: 'MSN_Professional_Status__c', label: 'MSN Professional Status', parentId: 'CustomObject:Student__c' }),
+    // Generic-type-word decoy (resolver Bug 1): a Profile literally api-named
+    // "Profile". A bare single-token conceptual query ("Profile") must NOT resolve
+    // to this component (which would trigger an unwanted disambiguation); the
+    // generic-type-word suppression drops it. A differently-named Profile
+    // ("SalesRep") still resolves normally, proving the suppression is narrow.
+    makeNode({ id: 'Profile:Profile', type: 'Profile', apiName: 'Profile', label: 'Profile' }),
+    makeNode({ id: 'Profile:SalesRep', type: 'Profile', apiName: 'SalesRep', label: 'Sales Rep' }),
     // Corpus over-collapse decoy (F1 negative): a field literally labeled
     // "Social Media Campaign". The phrase pass must NOT collapse this corpus
     // label to `ssn`, or "social media campaign" queries would wrongly hit the
@@ -547,6 +562,86 @@ describe('resolveComponents — disposition', () => {
     if (!r.ok) return;
     expect(r.value.disposition).toBe('none');
     expect(r.value.candidates).toHaveLength(0);
+  });
+});
+
+describe('resolveComponents — short-acronym false positives (Bug 2)', () => {
+  it('resolves an SSN query to the SSN field, never the same-length acronym decoys (ASN/BSN/MSN)', async () => {
+    // "ssn" is a 3-char token that Jaro-Winkler grazes against asn/bsn/msn
+    // (all ≈0.78, same length) and could substring-graze a longer compound
+    // token. The field genuinely named for SSN (an exact token hit, base 1.0)
+    // must own the answer; the acronym near-misses stay below it.
+    for (const q of ['SSN', 'the student social security number field']) {
+      const r = await resolveComponents(store, q);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.candidates[0]?.id).toBe(
+        'CustomField:Student__c.Student_SSN__c',
+      );
+      // The acronym decoys never outrank the real SSN field.
+      const ssnRank = r.value.candidates.findIndex(
+        (c) => c.id === 'CustomField:Student__c.Student_SSN__c',
+      );
+      for (const decoy of [
+        'CustomField:Student__c.ASN__c',
+        'CustomField:Student__c.BSN__c',
+        'CustomField:Student__c.MSN_Professional_Status__c',
+      ]) {
+        const decoyRank = r.value.candidates.findIndex((c) => c.id === decoy);
+        if (decoyRank !== -1) expect(ssnRank).toBeLessThan(decoyRank);
+      }
+    }
+  });
+
+  it('does not confidently pick a same-length acronym decoy for a bare SSN token', async () => {
+    // The exact-token hit on Student_SSN__c is definitive; the fuzzy acronym
+    // decoys (base ≈0.78) must never be the confident (`exact`) answer.
+    const r = await resolveComponents(store, 'ssn');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    if (r.value.disposition === 'exact') {
+      expect(r.value.candidates[0]?.id).toBe(
+        'CustomField:Student__c.Student_SSN__c',
+      );
+    }
+  });
+});
+
+describe('resolveComponents — generic type-word suppression (Bug 1)', () => {
+  it('a bare "Profile" query does NOT resolve to a component literally named "Profile"', async () => {
+    // A lone type-word query is conceptual ("what's a Profile?"), not a request
+    // for a component named "Profile". Suppression drops that decoy so the query
+    // does not confidently disambiguate onto it.
+    const r = await resolveComponents(store, 'Profile');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ids = r.value.candidates.map((c) => c.id);
+    expect(ids).not.toContain('Profile:Profile');
+    // With the type-name decoy suppressed, the bare word does not resolve to a
+    // confident component — the caller should route it as a concept, not pick.
+    if (r.value.disposition === 'exact') {
+      expect(r.value.candidates[0]?.id).not.toBe('Profile:Profile');
+    }
+  });
+
+  it('a differently-named Profile still resolves normally (suppression is narrow)', async () => {
+    // Only a component whose api-name IS the type word is suppressed. A Profile
+    // named "SalesRep" resolves as usual — the fix does not blanket-hide Profiles.
+    const r = await resolveComponents(store, 'SalesRep');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.candidates[0]?.id).toBe('Profile:SalesRep');
+    expect(r.value.disposition).toBe('exact');
+  });
+
+  it('a multi-word query containing the type word is NOT suppressed (Sales Rep profile)', async () => {
+    // The suppression only fires for a LONE type-word token. A multi-token query
+    // that merely mentions the type word must resolve normally.
+    const r = await resolveComponents(store, 'Sales Rep');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ids = r.value.candidates.map((c) => c.id);
+    expect(ids).toContain('Profile:SalesRep');
   });
 });
 

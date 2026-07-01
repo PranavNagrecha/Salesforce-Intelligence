@@ -2195,6 +2195,15 @@ const METADATA_API_NAME: Partial<Record<ComponentType, string>> = {
   // the `CustomMetadata` type as `{Type}.{Record}.md-meta.xml` files. The
   // `__mdt` type definitions themselves come down separately as CustomObject.
   CustomMetadataRecord: 'CustomMetadata',
+  // SessionSettings is NOT a top-level Metadata API xmlName — the org describe
+  // exposes only the generic `Settings` container (which also carries Security,
+  // Search, etc.), and `Session.settings-meta.xml` lands under `settings/`. So
+  // the internal `SessionSettings` type must alias to `Settings` or
+  // `selectManifestTypes` drops it before retrieve ever runs (the B20
+  // silent-drop class). The dispatcher then routes only the `Session.settings-meta.xml`
+  // file into the SessionSettings extractor; the container's other settings
+  // files are counted as uncovered (honest, not silently swallowed).
+  SessionSettings: 'Settings',
   // CR-CAP-18: PlatformEventChannel / PlatformEventChannelMember are exposed
   // by the org describe under their own singular xmlNames (added API v45.0 /
   // v47.0), so they need NO alias — `toApiName` falls through to the type name.

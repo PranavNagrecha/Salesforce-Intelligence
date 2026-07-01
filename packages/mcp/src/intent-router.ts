@@ -1059,6 +1059,10 @@ const RULES: readonly Rule[] = [
       /\bhow\s+many\s+users?\b.*\bassigned\s+to\b.*\bprofiles?\b/,
       /\bhow\s+many\s+users?\b.*\bprofiles?\b.*\bassigned\b/,
       /\busers?\b.*\bassigned\s+to\b.*\bprofiles?\b.*\b(count|how\s+many|number)\b/,
+      // "how many users are ON the X profile" — membership phrasing without the
+      // word "assigned" (P0a). Same runtime User-record count grouped by
+      // ProfileId; the metadata-count lookahead already refuses to steal it.
+      /\bhow\s+many\s+users?\b.*\bon\b.*\bprofiles?\b/,
     ],
   },
   {
@@ -1224,7 +1228,16 @@ const RULES: readonly Rule[] = [
       'Counting metadata components (layouts, fields, objects, profiles, validation rules, flows, classes, record types, list views) is a vault list_components count — not live record data.',
     suggestArgs: deriveMetadataCountArgs,
     patterns: [
-      /\bhow\s+many\b.*\b(page\s+layouts?|layouts?|custom\s+objects?|profiles?|permission\s+sets?|validation\s+rules?|flows?|(apex\s+)?classes?|triggers?|record\s+types?|list\s+views?|report\s+types?|record\s+pages?|flexipages?|approval\s+process(es)?|custom\s+settings?|quick\s+actions?|sharing\s+rules?|named\s+credentials?|picklists?)\b/,
+      // Negative lookahead `(?!.*\busers?\b)` scopes the metadata-component
+      // count to EXCLUDE user-assignment phrasings ("how many USERS are on /
+      // assigned to the X profile") — those are runtime User-record counts
+      // (profile-assignment-count, live), not a count of Profile metadata
+      // components. Without this, "how many users are on the System
+      // Administrator profile?" was confidently WRONG: it counted Profile
+      // components (P0a). Keyed on the word "users" alone — metadata-count
+      // questions ("how many profiles / layouts / … , and which is assigned to
+      // each profile") never say "users", so they still fire here.
+      /\bhow\s+many\b(?!.*\busers?\b).*\b(page\s+layouts?|layouts?|custom\s+objects?|profiles?|permission\s+sets?|validation\s+rules?|flows?|(apex\s+)?classes?|triggers?|record\s+types?|list\s+views?|report\s+types?|record\s+pages?|flexipages?|approval\s+process(es)?|custom\s+settings?|quick\s+actions?|sharing\s+rules?|named\s+credentials?|picklists?)\b/,
       /\bhow\s+many\b.*\blayouts?\b.*\b(per|for\s+each|by)\b.*\bprofiles?\b/,
       /\blayouts?\b.*\b(per|for\s+each|by)\b.*\bprofiles?\b/,
       // fields, but NOT field usage/population (those are unused-fields / field-population)
@@ -1563,6 +1576,14 @@ const RULES: readonly Rule[] = [
       // baseline-300 unrouted cluster).
       /\bwhat\s+apps?\b.*\b(visible|available)\b.*\b(profiles?|permission\s+sets?|users?)\b/,
       /\b(default)\s+app\b.*\b(profiles?|permission\s+sets?)\b/,
+      // REVERSE direction (P1a): "which apps is profile X assigned to?" /
+      // "which applications are assigned to profile X?" — the app→profile
+      // grammar; app_access answers it from the granter's own
+      // applicationVisibilities, same as the forward "which profiles can open X".
+      // Matches "app" or "application(s)" and BOTH word orders (assigned-to
+      // before or after the profile noun).
+      /\bwhich\s+app(lication)?s?\b.*\bprofiles?\b.*\b(assigned|available)\b/,
+      /\bwhich\s+app(lication)?s?\b.*\b(assigned|available)\s+to\b.*\bprofiles?\b/,
     ],
   },
   {
@@ -1608,6 +1629,11 @@ const RULES: readonly Rule[] = [
       /\bdefault\s+record\s+type\b/,
       /\brecord\s+types?\b.*\bno\s+profile\b.*\baccess/,
       /\b(which|what)\s+(profiles?|permission\s+sets?)\b.*\baccess\b.*\brecord\s+types?\b/,
+      // REVERSE direction (P1a): "which record types are available to profile X?"
+      // — the recordtype→profile grammar the forward templates above missed. Same
+      // recordTypeVisibilities modeling, answered from the profile side.
+      /\bwhich\s+record\s+types?\b.*\b(available|access|assigned)\s+to\b.*\bprofiles?\b/,
+      /\b(available|access|assigned)\s+to\b.*\bprofiles?\b.*\brecord\s+types?\b/,
     ],
   },
   {
@@ -1627,6 +1653,30 @@ const RULES: readonly Rule[] = [
       // Permission sets assigned to a named user (baseline-300 gap).
       /\bpermission\s+sets?\b.*\bassigned\b.*\buser\b/,
       /\bwhat\s+permission\s+sets?\b.*\bassigned\b/,
+    ],
+  },
+  {
+    // P1b: "what CRUD / permissions / access does {profile|permission set}
+    // allow / grant / have (on {object})" — verb templates the effective-
+    // permissions and object-access tools already answer, but that no regex
+    // routed. Sits AFTER effective-permissions (which keeps "what permissions
+    // does X have" via first-match) and BEFORE object-access, so it only
+    // catches the genuinely-unrouted allow/grant/have-on-object phrasings.
+    intent: 'what-permissions-profile-has',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.effective_permissions', 'sfi.object_access_audit'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'What CRUD / field permissions a profile or permission set has on an object — the union view (effective_permissions) plus the object CRUD matrix (object_access_audit).',
+    patterns: [
+      // Anchored on "what (crud|permissions|access)" and clause-bounded
+      // (`[^.?!]`) so a sprawling compound question ("… we need to know what
+      // Community_Login_Flow does … which profiles and permission sets grant
+      // access to application templates …") is NOT stolen from field-access —
+      // there "what" is followed by a component name, not a permission noun.
+      /\bwhat\s+(crud\s+)?(crud|permissions?|access)\b[^.?!]{0,60}\b(profiles?|permission\s+sets?)\b[^.?!]{0,40}\bhave\b[^.?!]{0,20}\bon\b[^.?!]{0,20}\b(objects?|records?)\b/,
+      /\bwhat\s+(crud\s+)?(crud|permissions?|access)\b[^.?!]{0,60}\b(profiles?|permission\s+sets?)\b[^.?!]{0,40}\b(allow|grant|have)\b/,
     ],
   },
   {
@@ -1669,6 +1719,13 @@ const RULES: readonly Rule[] = [
     patterns: [
       /\bwhat\s+happens\s+when\b.*\b(becomes?|turns?|changes?\s+to|is\s+set\s+to|reaches?)\b/,
       /\bwhat\s+(?:happens|runs|fires)\s+when\b.*\b(closed\s+won|closed\s+lost|converted|approved|activated)\b/,
+      // P1e — generic state-transition verbs beyond the Opportunity/Lead
+      // hardcoded list: "submitted", "disqualified", "completed", "enrolled" are
+      // common transitions on other objects (Applications, Enrollments,
+      // Requests). Verb-symmetry ("happens|runs|fires|occurs|triggers") plus a
+      // transition verb ("is/gets submitted", "transitions to", "reaches"), so
+      // "what runs when an Enrollment is disqualified" now routes.
+      /\bwhat\s+(?:happens|runs|fires|occurs|triggers)\s+when\b.*\b(?:transitions?\s+to|is\s+(?:submitted|disqualified|completed|enrolled|approved|activated|closed|converted)|gets?\s+(?:submitted|disqualified|completed|enrolled|approved|activated|closed|converted))\b/,
       /\b(value.?coupl\w*|coupled)\b.*\b(StageName|Closed Won|stage|transition)\b/,
       /\bStageName\b.*\b(Closed Won|closed won|transition)\b/,
       /\bClosed Won\b.*\b(automation|flow|trigger|coupl)\b/,
@@ -1911,9 +1968,36 @@ const RULES: readonly Rule[] = [
       // and stole a safe-to-delete-field question onto this cleanup intent
       // (P14-ROUTER-safe-delete-misroute; same overreach class as the
       // community-security compound fix).
-      /\b(unassigned|unused|orphan)\b[^.?!]{0,40}\bpermission\s+sets?\b/,
-      /\bpermission\s+sets?\b[^.?!]{0,40}\b(no\s+one|nobody|unassigned|unused)\b/,
+      // Negative lookahead `(?!\s+groups?)` excludes "permission set GROUPS":
+      // "which permission set groups are assigned to nobody?" was confidently
+      // WRONG here — unassigned_permission_sets covers PermissionSet only, not
+      // PermissionSetGroup (P0b). The dedicated unassigned-permset-groups gap
+      // rule below catches that phrasing honestly.
+      /\b(unassigned|unused|orphan)\b[^.?!]{0,40}\bpermission\s+sets?\b(?!\s+groups?)\b/,
+      /\bpermission\s+sets?\b(?!\s+groups?)\b[^.?!]{0,40}\b(no\s+one|nobody|unassigned|unused)\b/,
       /\bunassigned_permission_sets\b/,
+    ],
+  },
+  {
+    // HONEST GAP (P0b): PermissionSetGroup assignment is not modeled — there is
+    // no PSG-assignment tool. Rather than fall through to unassigned_permission_
+    // sets (PermissionSet-only, confidently wrong) or fabricate a live
+    // workaround, route to an explicit capability gap. Must sit AFTER
+    // unassigned-permsets: the lookahead above already refuses "permission set
+    // groups", so this rule catches it on the fall-through.
+    intent: 'unassigned-permset-groups',
+    plane: 'vault',
+    tools: [],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Permission set group assignments are not yet modeled — capability gap.',
+    gap: {
+      category: 'unassigned-permset-groups',
+      note: 'PermissionSetGroup assignment modeling is not built yet. Use sfi.resolve and manual search until a dedicated tool is available; do not substitute unassigned_permission_sets, which covers PermissionSet only.',
+    },
+    patterns: [
+      /\b(unassigned|unused|empty)\b[^.?!]{0,40}\bpermission\s+set\s+groups?\b/,
+      /\bpermission\s+set\s+groups?\b[^.?!]{0,40}\b(no\s+one|nobody|unassigned|unused|assigned\s+to\s+nobody)\b/,
     ],
   },
   {
@@ -1929,6 +2013,26 @@ const RULES: readonly Rule[] = [
       /\b(which|what)\s+queues?\b.*\b(set\s+up|for|exist)\b/,
       /\bpublic\s+groups?\b.*\b(exist|who\s+is)\b/,
       /\bwhat\s+public\s+groups?\b/,
+    ],
+  },
+  {
+    // P1d — the role hierarchy STRUCTURE ("which roles report up to X") was
+    // unrouted: sharing-model only anchored to the literal phrase "role
+    // hierarchy". Reports-to / parent / superior phrasings now route here.
+    // Sits BEFORE sharing-model (both vault, both generate_sharing_summary) so
+    // bare "role hierarchy" and reports-to grammar land on the same tool; broad
+    // sharing questions ("org-wide sharing model") have no role/report words and
+    // still fall through to sharing-model.
+    intent: 'role-hierarchy-structure',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.generate_sharing_summary'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Role hierarchy structure (which roles report to others) is modeled in the vault sharing model.',
+    patterns: [
+      /\brole\s+hierarchy\b/,
+      /\b(which|what)\s+roles?\b.*\b(report\s+to|report\s+up|under|parent|superior|above)\b/,
+      /\broles?\b.*\b(parent|superior|higher|report)\b/,
     ],
   },
   {
@@ -1963,6 +2067,11 @@ const RULES: readonly Rule[] = [
       /\bprofiles?\b.*\b(to|into|vs)\b.*\bpermission\s+sets?\b/,
       /\b(merge|split|consolidate)\b.*\bprofiles?\b/,
       /\bprofile\s+migration\b/,
+      // PASSIVE voice (P1c): "what if two profiles are merged / were consolidated"
+      // — the active templates above ("if I merge profiles") missed the passive
+      // form. Same merge/split/consolidate planning intent.
+      /\bprofiles?\b.*\b(are|were)\s+(merged?|split|consolidat)/,
+      /\bwhat\s+if\b.*\bprofiles?\b.*\b(are|were)\s+(merged?|split|consolidat)/,
     ],
   },
   {

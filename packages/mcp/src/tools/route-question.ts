@@ -1046,7 +1046,14 @@ export const routeQuestionHandler = async (
   // or entity clarification. Reuses the same routeToolArgs/candidates the final
   // response returns, so the gate and the shortlist can never disagree.
   const marginRouteToolArgs = await buildRouteToolArgsMap(route, ctx);
-  if (routerMode() === 'hybrid') {
+  // The margin gate targets FUNNEL-primary ties the deterministic route did not
+  // confidently resolve. When the route already placed the question at HIGH
+  // confidence, a close NON-route funnel candidate is noise, not a genuine
+  // choice — clarifying there re-introduces the round-trip cost on a clear
+  // question (e.g. "how many users assigned to profile X" is a confident live
+  // count; a spuriously-close vault rival cannot answer it at all). Trust a
+  // confident deterministic route; only gate the lower-confidence funnel ties.
+  if (routerMode() === 'hybrid' && route.confidence !== 'high') {
     const gateCandidates = buildFunnelCandidates(
       route,
       input.question,

@@ -63,12 +63,43 @@ const renderPicklistValues = (entries: ReadonlyArray<PicklistEntry>): string =>
     })
     .join(', ');
 
+/**
+ * True when `value` is a login-IP-range array: a non-empty array where every
+ * entry is a `{ startAddress: string, endAddress: string }` object (the shape
+ * the profile extractor collects into `properties.loginIpRanges`). Rendered
+ * through a bare `String()` each entry stringifies to `[object Object]`, so
+ * this set is diverted to {@link renderLoginIpRanges}.
+ *
+ * The guard is checked BEFORE {@link isPicklistValueArray}: IP-range entries
+ * carry `startAddress`/`endAddress` while picklist entries carry `value`, so
+ * the two shapes are mutually exclusive, but the explicit ordering keeps the
+ * intent unambiguous.
+ */
+const isLoginIpRangeObject = (e: unknown): e is Record<string, string> =>
+  typeof e === 'object' &&
+  e !== null &&
+  typeof (e as Record<string, unknown>)['startAddress'] === 'string' &&
+  typeof (e as Record<string, unknown>)['endAddress'] === 'string';
+
+const isLoginIpRangeArray = (value: unknown): value is ReadonlyArray<Record<string, string>> =>
+  Array.isArray(value) && value.length > 0 && value.every(isLoginIpRangeObject);
+
+/**
+ * Render a login-IP-range array as a comma-joined list of `start-end` pairs
+ * (e.g. `10.0.0.1-10.0.0.255, 192.168.1.0-192.168.1.255`) so a security
+ * reviewer can read the allowlist directly instead of `[object Object]`.
+ */
+const renderLoginIpRanges = (entries: ReadonlyArray<Record<string, string>>): string =>
+  entries.map((e) => `${String(e['startAddress'])}-${String(e['endAddress'])}`).join(', ');
+
 export const renderValueAsBacktickedString = (value: unknown): string => {
   if (value === null) return '`null`';
   if (typeof value === 'boolean') return value ? '`true`' : '`false`';
-  const text = isPicklistValueArray(value)
-    ? renderPicklistValues(value)
-    : String(value);
+  const text = isLoginIpRangeArray(value)
+    ? renderLoginIpRanges(value)
+    : isPicklistValueArray(value)
+      ? renderPicklistValues(value)
+      : String(value);
   const cell = text.replace(/\r\n|\r|\n/g, ' ').replace(/\|/g, '\\|');
   return `\`${cell}\``;
 };

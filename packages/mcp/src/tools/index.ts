@@ -506,6 +506,10 @@ import {
   processBuilderMigrationCandidatesInputSchema,
 } from './process-builder-migration-candidates.js';
 import {
+  profileSecurityHandler,
+  profileSecurityInputSchema,
+} from './profile-security.js';
+import {
   promotionReadinessHandler,
   promotionReadinessInputSchema,
 } from './promotion-readiness.js';
@@ -1670,6 +1674,19 @@ const USER_ABILITY_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.free
     cursor: { type: 'string', minLength: 1 },
   },
   required: ['componentId'],
+});
+
+/**
+ * Concrete JSON Schema for `sfi.profile_security`. Mirrors
+ * `profileSecurityInputSchema` — a required `profileId` (`Profile:X` or a bare
+ * apiName, coerced). Profile-only; a permission set is refused.
+ */
+const PROFILE_SECURITY_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
+  type: 'object',
+  properties: {
+    profileId: { type: 'string', minLength: 1 },
+  },
+  required: ['profileId'],
 });
 
 /**
@@ -4212,8 +4229,14 @@ export const V01_TOOLS: readonly ToolDefinition[] = [
   {
     name: 'sfi.user_ability',
     description:
-      "\"What can this Profile / PermissionSet RUN or DO?\" — beyond record CRUD (which `object_access_audit` / `why_cant_user_see_record` cover). Given a `Profile:X` or `PermissionSet:X` (`componentId`): `runnableFlows` (the `Flow:` ids the container grants run access to, via the `flowAccess` grantedBy edges, paginated); `loginRestrictions` (`ipRangeCount` + `loginHoursRestricted` — Profile-only, `applies:false` for a permission set); `actionPermissions` (the run/export/transfer/convert/mass-edit class of system permissions present, filtered from `userPermissions`); and `customPermissions` (CR-CAP-10 — the custom permissions the container CONFERS via its `<customPermissions>` grants, each with `targetMissing` when the granted name has no `CustomPermission` definition in the vault; custom permissions are NOT system userPermissions, so they are not double-counted with actionPermissions). `summary` tallies runnableFlows + actionPermissions + customPermissions. `declared` confidence. `boundaryNote`: the user must be ASSIGNED the container to gain these (runtime, not modeled), and flow run access also needs the flow active. `flowAccess` grant edges are extracted at every refresh (PermissionSet `<flowAccesses>`); a vault refreshed before that extraction reports no runnable flows — re-run `/sfi-refresh` rather than reading it as a verified empty. Unknown id → `component-not-found`; non-Profile/PermissionSet prefix → `invalid-query`.",
+      "\"What can this Profile / PermissionSet RUN or DO?\" — beyond record CRUD (which `object_access_audit` / `why_cant_user_see_record` cover). Given a `Profile:X` or `PermissionSet:X` (`componentId`): `runnableFlows` (the `Flow:` ids the container grants run access to, via the `flowAccess` grantedBy edges, paginated); `loginRestrictions` (`ipRangeCount` + `loginHoursRestricted` scalars PLUS the full `ipRanges[]` of `{startAddress, endAddress}` windows and a `loginHours[]` seam — Profile-only, `applies:false` and empty lists for a permission set; `loginHours[]` is DEFERRED behind the SessionSettings tier, so it is always empty today even when `loginHoursRestricted` is true — for a focused login/session security audit use `profile_security`); `actionPermissions` (the run/export/transfer/convert/mass-edit class of system permissions present, filtered from `userPermissions`); and `customPermissions` (CR-CAP-10 — the custom permissions the container CONFERS via its `<customPermissions>` grants, each with `targetMissing` when the granted name has no `CustomPermission` definition in the vault; custom permissions are NOT system userPermissions, so they are not double-counted with actionPermissions). `summary` tallies runnableFlows + actionPermissions + customPermissions. `declared` confidence. `boundaryNote`: the user must be ASSIGNED the container to gain these (runtime, not modeled), and flow run access also needs the flow active. `flowAccess` grant edges are extracted at every refresh (PermissionSet `<flowAccesses>`); a vault refreshed before that extraction reports no runnable flows — re-run `/sfi-refresh` rather than reading it as a verified empty. Unknown id → `component-not-found`; non-Profile/PermissionSet prefix → `invalid-query`.",
     inputSchema: USER_ABILITY_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.profile_security',
+    description:
+      "\"What are this profile's login & session security policies?\" — a focused security-audit surface separate from `user_ability` (which is \"what can it RUN or DO\"). Given a `Profile:X` (`profileId`; a bare apiName is coerced): `loginIpRanges[]` of `{startAddress, endAddress}` windows (declared Profile metadata, already extracted from `<loginIpRanges>`) + `loginIpRangeCount`; `loginHoursByDay[]` (per-weekday windows, DEFERRED behind the SessionSettings tier — always empty today) + `loginHoursRestricted` (whether ANY login-hours window is defined, from the extracted `loginHoursDefined` flag); and `sessionSecuritySettings` (`mfaRequired` / `requiresStrongAuth` / `sessionTimeoutMinutes` from the single org-wide `SessionSettings:default` node, or `null` when that node is absent). `declared` confidence. `boundaryNote`: the user must be ASSIGNED this profile at runtime to be restricted; org-wide MFA/session settings are REFRESH-GATED — a vault built before the SessionSettings type shipped returns `sessionSecuritySettings: null` until a re-refresh pulls it. Profile-only: a `PermissionSet:` id (or any non-`Profile:` prefix) → `invalid-query` (permission sets carry no login security); unknown Profile → `component-not-found`.",
+    inputSchema: PROFILE_SECURITY_INPUT_SCHEMA,
   },
   {
     name: 'sfi.lightning_pages',
@@ -5246,6 +5269,8 @@ export const dispatchTool = async (
       );
     case 'sfi.user_ability':
       return runTool(ctx, args, userAbilityInputSchema, userAbilityHandler);
+    case 'sfi.profile_security':
+      return runTool(ctx, args, profileSecurityInputSchema, profileSecurityHandler);
     case 'sfi.lightning_pages':
       return runTool(ctx, args, lightningPagesInputSchema, lightningPagesHandler);
     case 'sfi.list_view_sharing':

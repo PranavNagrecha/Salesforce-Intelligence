@@ -89,6 +89,10 @@ describe('userAbilityHandler', () => {
     expect(d.loginRestrictions.ipRangeCount).toBe(1);
     expect(d.loginRestrictions.loginHoursRestricted).toBe(true);
     expect(d.loginRestrictions.applies).toBe(true);
+    // The full IP-range windows are now surfaced structurally (not just counted).
+    expect(d.loginRestrictions.ipRanges).toEqual([{ startAddress: '10.0.0.1', endAddress: '10.0.0.255' }]);
+    // Login-hours windows are deferred behind the SessionSettings tier — always empty.
+    expect(d.loginRestrictions.loginHours).toEqual([]);
   });
 
   it('marks login restrictions not-applicable for a permission set', async () => {
@@ -96,6 +100,9 @@ describe('userAbilityHandler', () => {
     expect(r.ok).toBe(true); if (!r.ok) return;
     expect(r.value.data.runnableFlows).toEqual(['Flow:Onboard_Contact']);
     expect(r.value.data.loginRestrictions.applies).toBe(false);
+    // A permission set carries no login security → empty structured lists.
+    expect(r.value.data.loginRestrictions.ipRanges).toEqual([]);
+    expect(r.value.data.loginRestrictions.loginHours).toEqual([]);
   });
 
   it('component-not-found for an unknown id', async () => {

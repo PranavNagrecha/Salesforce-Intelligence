@@ -276,7 +276,19 @@ export type ComponentType =
   // filterExpression is the DECLARED XML text, NOT runtime filter EVALUATION.
   // EDGE_TYPES tuple + EdgeTypesComplete guard are UNTOUCHED.
   | 'PlatformEventChannel' //       The publish/stream container (`.platformEventChannel-meta.xml`). Carries `channelType` (`event` | `data`) and `label`. Id `PlatformEventChannel:{Name}__chn`. Node-only; the member file owns the channel→member `parentOf` and member→event `references` edges.
-  | 'PlatformEventChannelMember'; // One entity bound onto a PlatformEventChannel (`.platformEventChannelMember-meta.xml`). Carries `eventChannel`, `selectedEntity`, and the optional declared `filterExpression`. Id `PlatformEventChannelMember:{Name}__chn`; `parentId` = its `PlatformEventChannel`. Emits `parentOf` (channel→member) + `references` (member→`CustomObject:{selectedEntity}`, carrying `filterExpression`). NO new EdgeType.
+  | 'PlatformEventChannelMember' // One entity bound onto a PlatformEventChannel (`.platformEventChannelMember-meta.xml`). Carries `eventChannel`, `selectedEntity`, and the optional declared `filterExpression`. Id `PlatformEventChannelMember:{Name}__chn`; `parentId` = its `PlatformEventChannel`. Emits `parentOf` (channel→member) + `references` (member→`CustomObject:{selectedEntity}`, carrying `filterExpression`). NO new EdgeType.
+  // Session / MFA security tier. A SessionSettings node models the org-wide
+  // session-security policy (`.sessionSettings-meta.xml`) — required-MFA,
+  // strong-auth-for-UI-logins, and session-timeout. Exactly ONE per org
+  // (org-level metadata), so the id is the fixed `SessionSettings:default`; no
+  // parent scope and no edges of its own. It pairs with the already-extracted
+  // (but previously unsurfaced) Profile `loginIpRanges` to answer login &
+  // session security questions via `sfi.profile_security`. REFRESH-GATED:
+  // `SessionSettings` is added to the retrieve manifest + extractor tier, so a
+  // vault built before this type shipped will not carry the node until a
+  // re-refresh pulls it. Per-weekday `loginHours` windows are deferred behind
+  // this tier.
+  | 'SessionSettings'; //           Org-wide session-security policy (`.sessionSettings-meta.xml`). Carries `mfaRequired`, `requiresStrongAuth`, and `sessionTimeoutMinutes`. Id `SessionSettings:default` (single org-level node; no parent scope, no edges of its own). Refresh-gated: needs a re-refresh with the new retrieve set to populate.
 
 /**
  * A canonical component identifier.

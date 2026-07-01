@@ -1,0 +1,375 @@
+{
+  "_about": "Regression fixture for the access-control routing surface, distilled from a real-org higher-education sandbox sweep. Every case is SYNTHETIC — generic Salesforce concepts only (Salary, Account, Payment, a System Administrator profile, a CreateApprovalProcess custom permission). No real org identifiers, no PII, no managed-package payloads. Each case pins the GROUND-TRUTH output of `classifyQuestion` (packages/mcp/src/intent-router.ts) as observed at v0.1.18 after the access-surface routing fixes (P0a/P0b metadata-count + permset-group lookaheads, reverse-direction record-type/app templates, what-permissions-profile-has, role-hierarchy-structure, passive-voice profile-migration, generalized lifecycle-process). `expect` is 'routes' when the query lands on a concrete intent, or 'unrouted-gap' when it deliberately falls through to the `unrouted` catch-all — those cases document a KNOWN grammatical-direction gap the sweep surfaced (a phrasing variant the current regexes do not yet cover). They are NOT failures to fix silently: a future router change that flips one of them to a real intent should update this fixture in the same commit, so the fixture tracks the honest routing frontier rather than an aspirational one. A harness (to be added) loads `cases`, calls `classifyQuestion(query)`, and asserts `{ intent, plane, tools, gap }` equals the recorded tuple. Values were captured by probing the built router, not guessed.",
+  "cases": [
+    {
+      "id": "field-access-canonical",
+      "query": "Who can edit the Salary field?",
+      "expect": "routes",
+      "intent": "field-access",
+      "plane": "vault",
+      "tools": ["sfi.resolve", "sfi.field_access_audit", "sfi.get_edges"],
+      "gap": null,
+      "note": "Canonical FLS question, active voice. Regression anchor for field_access_audit routing."
+    },
+    {
+      "id": "field-access-inverted-word-order",
+      "query": "Edit access to the Salary field — who has it?",
+      "expect": "routes",
+      "intent": "field-access",
+      "plane": "vault",
+      "tools": ["sfi.resolve", "sfi.field_access_audit", "sfi.get_edges"],
+      "gap": null,
+      "note": "Permission-first, then subject. Word-order robustness: the trailing 'who ... it' still matches field-access."
+    },
+    {
+      "id": "field-access-component-first",
+      "query": "The Salary field — who can edit it?",
+      "expect": "routes",
+      "intent": "field-access",
+      "plane": "vault",
+      "tools": ["sfi.resolve", "sfi.field_access_audit", "sfi.get_edges"],
+      "gap": null,
+      "note": "Component-first existential-reference form. Equivalent to the canonical route."
+    },
+    {
+      "id": "field-access-grant-phrasing",
+      "query": "What permission sets grant access to the Salary field?",
+      "expect": "routes",
+      "intent": "object-access",
+      "plane": "vault",
+      "tools": ["sfi.resolve", "sfi.object_access_audit"],
+      "gap": null,
+      "note": "DOCUMENTED CROSS-ROUTE: 'permission sets grant access' matches the object-access grant/access template (object_access_audit), NOT field_access_audit, even though the query names a FIELD. Pinned as an intentional asymmetry to catch a future retune that shifts it back to field-access."
+    },
+    {
+      "id": "field-access-gap-able-to",
+      "query": "Who is able to edit the Salary field?",
+      "expect": "unrouted-gap",
+      "intent": "unrouted",
+      "plane": "unknown",
+      "tools": ["sfi.resolve", "sfi.capabilities"],
+      "gap": "unrouted",
+      "note": "KNOWN GAP: the 'is able to' modal is not in the field-access verb set (which anchors on 'who can (see|read|view|edit|access)'). Falls through to the unrouted catch-all. Flip to field-access when the verb set is broadened."
+    },
+    {
+      "id": "field-access-gap-visibility-layouts",
+      "query": "Which users see the Salary field in their layouts?",
+      "expect": "unrouted-gap",
+      "intent": "unrouted",
+      "plane": "unknown",
+      "tools": ["sfi.resolve", "sfi.capabilities"],
+      "gap": "unrouted",
+      "note": "KNOWN GAP: 'which users see ... in their layouts' has no field-access anchor ('who can ...'). Documents the layout-visibility-as-FLS phrasing the sweep flagged."
+    },
+    {
+      "id": "field-access-gap-visible-to-principal",
+      "query": "Is the Salary field visible to support agents?",
+      "expect": "unrouted-gap",
+      "intent": "unrouted",
+      "plane": "unknown",
+      "tools": ["sfi.resolve", "sfi.capabilities"],
+      "gap": "unrouted",
+      "note": "KNOWN GAP: yes/no 'is X visible to <principal>' form is not covered by the field-access templates."
+    },
+    {
+      "id": "field-access-gap-named-role",
+      "query": "Can a System Administrator edit the Salary field?",
+      "expect": "unrouted-gap",
+      "intent": "unrouted",
+      "plane": "unknown",
+      "tools": ["sfi.resolve", "sfi.capabilities"],
+      "gap": "unrouted",
+      "note": "KNOWN GAP: 'can a <role> edit <field>' (subject-first yes/no) is not anchored — the field-access 'who can' patterns require the interrogative 'who' up front."
+    },
+    {
+      "id": "record-access-canonical",
+      "query": "Why can't this user see the record?",
+      "expect": "routes",
+      "intent": "why-cant-see",
+      "plane": "vault",
+      "tools": ["sfi.resolve", "sfi.why_cant_user_see_record"],
+      "gap": null,
+      "note": "Canonical record-level access question (OWD + sharing + roles, not FLS). Regression anchor for why_cant_user_see_record."
+    },
+    {
+      "id": "record-access-gap-fact-first",
+      "query": "This user doesn't see the record — why?",
+      "expect": "unrouted-gap",
+      "intent": "unrouted",
+      "plane": "unknown",
+      "tools": ["sfi.resolve", "sfi.capabilities"],
+      "gap": "unrouted",
+      "note": "KNOWN GAP: the why-cant-see patterns anchor on 'why (can't|cannot) ... see'. A fact-first phrasing with 'why?' trailing is not matched."
+    },
+    {
+      "id": "record-access-gap-preventing",
+      "query": "What's preventing this user from seeing the record?",
+      "expect": "unrouted-gap",
+      "intent": "unrouted",
+      "plane": "unknown",
+      "tools": ["sfi.resolve", "sfi.capabilities"],
+      "gap": "unrouted",
+      "note": "KNOWN GAP: 'what's preventing ... from seeing' verb phrase is a synonym for why-cant-see but is not in the pattern set."
+    },
+    {
+      "id": "record-access-gap-topic-first",
+      "query": "Record visibility: why is this user blocked?",
+      "expect": "unrouted-gap",
+      "intent": "unrouted",
+      "plane": "unknown",
+      "tools": ["sfi.resolve", "sfi.capabilities"],
+      "gap": "unrouted",
+      "note": "KNOWN GAP: topic-first 'record visibility: why is X blocked' has neither the 'why cant see' anchor nor a 'record' object noun after 'see'."
+    },
+    {
+      "id": "object-access-records",
+      "query": "Who can see the Account object's records?",
+      "expect": "routes",
+      "intent": "who-can-access-object",
+      "plane": "vault",
+      "tools": ["sfi.resolve", "sfi.who_can_access_object"],
+      "gap": null,
+      "note": "Object-level record access (reverse of why-cant-see). Anchored on 'records', so it wins over field-access."
+    },
+    {
+      "id": "object-access-crud-verbs",
+      "query": "Who can create read edit delete Account",
+      "expect": "routes",
+      "intent": "object-access",
+      "plane": "vault",
+      "tools": ["sfi.resolve", "sfi.object_access_audit"],
+      "gap": null,
+      "note": "Multi-verb create-bearing CRUD question is OBJECT access (create/delete are object-level), routed to object_access_audit. Distinct from who-can-access-object (record visibility)."
+    },
+    {
+      "id": "object-access-access-model",
+      "query": "What's the access model for the Account object?",
+      "expect": "routes",
+      "intent": "field-access",
+      "plane": "vault",
+      "tools": ["sfi.resolve", "sfi.field_access_audit", "sfi.get_edges"],
+      "gap": null,
+      "note": "DOCUMENTED CROSS-ROUTE: abstract 'access model for the X object' currently lands on field-access via the generic '(access|permission|fls) ... object' pattern, NOT object-access. Pinned to catch a future disambiguation that moves it to who_can_access_object / object_access_audit."
+    },
+    {
+      "id": "unused-grants-nobody",
+      "query": "List every permission set assigned to nobody.",
+      "expect": "routes",
+      "intent": "unassigned-permsets",
+      "plane": "vault",
+      "tools": ["sfi.unassigned_permission_sets"],
+      "gap": null,
+      "note": "Canonical hygiene question. 'assigned to nobody' matches the permission-set + nobody template."
+    },
+    {
+      "id": "unused-grants-gap-not-used",
+      "query": "Which permission sets are not used by any user?",
+      "expect": "unrouted-gap",
+      "intent": "unrouted",
+      "plane": "unknown",
+      "tools": ["sfi.resolve", "sfi.capabilities"],
+      "gap": "unrouted",
+      "note": "KNOWN GAP: 'not used by any user' is a negation synonym for unassigned, but the unassigned-permsets patterns require the literal tokens unassigned|unused|orphan|no one|nobody adjacent to 'permission set(s)'. 'not used' (split) is not matched."
+    },
+    {
+      "id": "unused-grants-crossroute-idle",
+      "query": "Show me every permission set sitting idle.",
+      "expect": "routes",
+      "intent": "schema",
+      "plane": "vault",
+      "tools": ["sfi.list_components", "sfi.get_component", "sfi.search_components"],
+      "gap": null,
+      "note": "DOCUMENTED CROSS-ROUTE: metaphor 'sitting idle' is not the unused-grants vocabulary, so the 'show me every permission set' phrasing falls to the generic schema/list intent. Pinned to catch a metaphor-aware retune."
+    },
+    {
+      "id": "sharing-model-canonical",
+      "query": "Give me the sharing model for the Account object.",
+      "expect": "routes",
+      "intent": "sharing-model",
+      "plane": "vault",
+      "tools": ["sfi.generate_sharing_summary"],
+      "gap": null,
+      "note": "Canonical sharing-summary (OWD + sharing rules + role hierarchy). Regression anchor for generate_sharing_summary."
+    },
+    {
+      "id": "sharing-model-gap-summarize",
+      "query": "Summarize sharing for the Account object.",
+      "expect": "unrouted-gap",
+      "intent": "unrouted",
+      "plane": "unknown",
+      "tools": ["sfi.resolve", "sfi.capabilities"],
+      "gap": "unrouted",
+      "note": "KNOWN GAP: 'summarize sharing' (verb-first) does not match the sharing-model patterns, which key on the noun phrase 'sharing model/rules/settings'."
+    },
+    {
+      "id": "sharing-model-gap-record-visibility-strategy",
+      "query": "What's the record-visibility strategy for Account?",
+      "expect": "unrouted-gap",
+      "intent": "unrouted",
+      "plane": "unknown",
+      "tools": ["sfi.resolve", "sfi.capabilities"],
+      "gap": "unrouted",
+      "note": "KNOWN GAP: 'record-visibility strategy' is domain terminology for the sharing model but shares no tokens with the sharing-model patterns."
+    },
+    {
+      "id": "concept-compare-diff",
+      "query": "What's the difference between a profile and a permission set?",
+      "expect": "routes",
+      "intent": "compare-profiles",
+      "plane": "vault",
+      "tools": ["sfi.resolve", "sfi.compare_components"],
+      "gap": null,
+      "note": "Conceptual comparison of two permission-model concepts. IMPORTANT: it routes to compare-profiles (a real intent), NOT to entity-resolution ambiguity — the two nouns are distinct concepts, not competing candidate matches. Pins the boundary that this must not trigger a disambiguation prompt."
+    },
+    {
+      "id": "concept-compare-vs",
+      "query": "Profile vs Permission Set — how do they differ in access control?",
+      "expect": "routes",
+      "intent": "profile-migration",
+      "plane": "vault",
+      "tools": ["sfi.permission_risk_report", "sfi.what_if_merge_profiles"],
+      "gap": null,
+      "note": "DOCUMENTED CROSS-ROUTE: 'Profile vs Permission Set' matches the profile-migration 'profiles ... vs ... permission sets' template rather than compare-profiles. Still a defensible, non-ambiguous route (no entity-resolution prompt). Pinned to catch a future split between conceptual-compare and migration analysis."
+    },
+    {
+      "id": "concept-compare-when-to-use",
+      "query": "When do I use a Profile vs a Permission Set?",
+      "expect": "routes",
+      "intent": "profile-migration",
+      "plane": "vault",
+      "tools": ["sfi.permission_risk_report", "sfi.what_if_merge_profiles"],
+      "gap": null,
+      "note": "Use-case differentiation. Routes to profile-migration (not entity ambiguity). Confirms conceptual questions never force a component disambiguation."
+    },
+    {
+      "id": "custom-permission-named-grant",
+      "query": "Which permission sets grant the CreateApprovalProcess custom permission?",
+      "expect": "routes",
+      "intent": "field-access",
+      "plane": "vault",
+      "tools": ["sfi.resolve", "sfi.field_access_audit", "sfi.get_edges"],
+      "gap": null,
+      "note": "DOCUMENTED CROSS-ROUTE: a named custom-permission grant question matches the field-access 'which permission sets grant ...' pattern. CustomPermission grant modeling (v0.1.15) is real, but the ROUTER sends this to field_access_audit today. Pinned so a dedicated custom-permission route (if added) updates this case."
+    },
+    {
+      "id": "custom-permission-gap-can-grant",
+      "query": "Can I grant custom permissions via a profile?",
+      "expect": "unrouted-gap",
+      "intent": "unrouted",
+      "plane": "unknown",
+      "tools": ["sfi.resolve", "sfi.capabilities"],
+      "gap": "unrouted",
+      "note": "KNOWN GAP: capability-style 'can I grant custom permissions via a profile' has no routing template. The answer (yes, via grantedBy edges) exists in the model but no regex catches this phrasing."
+    },
+    {
+      "id": "effective-access-role",
+      "query": "Show me effective access for a System Administrator role.",
+      "expect": "routes",
+      "intent": "effective-permissions",
+      "plane": "vault",
+      "tools": ["sfi.resolve", "sfi.effective_permissions"],
+      "gap": null,
+      "note": "Effective (union) access. 'effective access' matches the effective-permissions anchor. Regression pin for effective_permissions."
+    },
+    {
+      "id": "crud-audit-touch",
+      "query": "CRUD audit: what objects can this role touch?",
+      "expect": "routes",
+      "intent": "object-access",
+      "plane": "vault",
+      "tools": ["sfi.resolve", "sfi.object_access_audit"],
+      "gap": null,
+      "note": "DOCUMENTED CROSS-ROUTE: 'what objects can this role touch' matches an object-access CRUD pattern before the crud-fls-audit rule. Both are object-CRUD family; pinned to document precedence."
+    },
+    {
+      "id": "crud-audit-gap-apex-skip",
+      "query": "Which Apex methods skip CRUD/FLS checks?",
+      "expect": "unrouted-gap",
+      "intent": "unrouted",
+      "plane": "unknown",
+      "tools": ["sfi.resolve", "sfi.capabilities"],
+      "gap": "unrouted",
+      "note": "KNOWN GAP: the crud-fls-audit Apex-enforcement patterns key on 'enforce|enforces|SECURITY_ENFORCED|stripInaccessible', not the inverse 'skip ... checks'. Documents an Apex-CRUD-discipline phrasing miss."
+    },
+    {
+      "id": "live-inactive-users",
+      "query": "How many users are inactive right now?",
+      "expect": "routes",
+      "intent": "inactive-users",
+      "plane": "live",
+      "tools": ["sfi.live_inactive_users"],
+      "gap": null,
+      "note": "Live-plane runtime query ('right now'). liveRequired route to live_inactive_users — cannot be answered offline."
+    },
+    {
+      "id": "live-record-count",
+      "query": "How many Accounts are there?",
+      "expect": "routes",
+      "intent": "record-count",
+      "plane": "live",
+      "tools": ["sfi.live_count"],
+      "gap": null,
+      "note": "Live business-data count. Not answerable from the metadata vault; routes to live_count."
+    },
+    {
+      "id": "profile-assignment-count-p0a",
+      "query": "How many users are on the System Administrator profile?",
+      "expect": "routes",
+      "intent": "profile-assignment-count",
+      "plane": "live",
+      "tools": ["sfi.live_group_count"],
+      "gap": null,
+      "note": "P0a fix: runtime User→Profile assignment count. The metadata-count noun list no longer steals this (negative lookahead on 'users'); it routes to the live-plane count, not a Profile-metadata count."
+    },
+    {
+      "id": "unassigned-permset-groups-p0b",
+      "query": "Which permission set groups are assigned to nobody?",
+      "expect": "routes",
+      "intent": "unassigned-permset-groups",
+      "plane": "vault",
+      "tools": [],
+      "gap": "unassigned-permset-groups",
+      "note": "P0b fix: HONEST GAP. PermissionSetGroup assignment is not modeled (no PSG-assignment tool), so this routes to a dedicated capability-gap intent with tools:[] and a gap.note — it must NOT fall through to unassigned_permission_sets (PermissionSet-only, confidently wrong) or fabricate a live workaround."
+    },
+    {
+      "id": "user-assignment-gap-membership",
+      "query": "Who's assigned to which permission sets?",
+      "expect": "unrouted-gap",
+      "intent": "unrouted",
+      "plane": "unknown",
+      "tools": ["sfi.resolve", "sfi.capabilities"],
+      "gap": "unrouted",
+      "note": "KNOWN GAP: user→permission-set membership is record-level (not in the metadata vault) and has no routing template. Documents that the offline vault cannot answer assignment membership; a live_sample route would need to be added deliberately, not assumed."
+    },
+    {
+      "id": "honest-gap-mfa",
+      "query": "What's the MFA policy for this org?",
+      "expect": "unrouted-gap",
+      "intent": "unrouted",
+      "plane": "unknown",
+      "tools": ["sfi.resolve", "sfi.capabilities"],
+      "gap": "unrouted",
+      "note": "HONEST GAP: org-wide MFA / session policy (SessionSettings) is not in the retrieve manifest today, so no route exists. The router correctly returns unrouted with plane:unknown — it must NOT claim an sfi.live_* workaround. When a SessionSettings tier ships, add a route and update this case."
+    },
+    {
+      "id": "honest-gap-password-policy",
+      "query": "Are password policies enforced?",
+      "expect": "unrouted-gap",
+      "intent": "unrouted",
+      "plane": "unknown",
+      "tools": ["sfi.resolve", "sfi.capabilities"],
+      "gap": "unrouted",
+      "note": "HONEST GAP: password-policy enforcement is an org-wide security setting not modeled in the vault. Correctly unrouted; must not be papered over with general Salesforce knowledge or a fabricated live tool."
+    },
+    {
+      "id": "honest-gap-ip-ranges",
+      "query": "Which IP ranges can log in?",
+      "expect": "unrouted-gap",
+      "intent": "unrouted",
+      "plane": "unknown",
+      "tools": ["sfi.resolve", "sfi.capabilities"],
+      "gap": "unrouted",
+      "note": "HONEST GAP: org-wide login IP restrictions have no route today. (Note: per-PROFILE loginIpRanges ARE extracted and surfaced via sfi.profile_security / sfi.user_ability, but the org-wide 'which IP ranges can log in' phrasing does not route.) Correctly unrouted; not live-resolvable."
+    }
+  ]
+}

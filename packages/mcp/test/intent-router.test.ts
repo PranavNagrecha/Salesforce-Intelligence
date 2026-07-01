@@ -85,6 +85,29 @@ const CASES: readonly Case[] = [
   // (previously "what runs when a Lead is converted" fell through to unrouted).
   { q: 'what runs when a Lead is converted', intent: 'lifecycle-process', plane: 'vault' },
   { q: 'what fires when an Opportunity is closed won', intent: 'lifecycle-process', plane: 'vault' },
+  // Access-surface sweep (real-org HEDA probe): P0/P1 routing fixes.
+  // P0a — "how many users are ON the X profile" is a runtime User-record count
+  // (profile-assignment-count, live), NOT a count of Profile metadata. The
+  // metadata-count noun list no longer steals it (negative lookahead on "users").
+  { q: 'How many users are on the System Administrator profile?', intent: 'profile-assignment-count', plane: 'live' },
+  // P0b — permission set GROUPS assignment is an honest gap (tools: []), asserted
+  // in a dedicated test below (the generic battery requires tools.length > 0).
+  // P1a — reverse-direction templates: recordtype→profile and app→profile.
+  { q: 'Which record types are available to the Sales profile?', intent: 'recordtype-availability', plane: 'vault' },
+  { q: 'Which applications are assigned to the Partner profile?', intent: 'app-access', plane: 'vault' },
+  { q: 'Which apps is the Admin profile assigned to?', intent: 'app-access', plane: 'vault' },
+  // P1b — "what CRUD/access does {permission set} allow" verb template (the
+  // "what permissions does X have" phrasing keeps effective-permissions above).
+  { q: 'What CRUD access does this permission set allow?', intent: 'what-permissions-profile-has', plane: 'vault' },
+  // P1c — passive voice: "what if two profiles ARE MERGED" (active "if I merge
+  // profiles" already routed).
+  { q: 'What if two profiles are merged?', intent: 'profile-migration', plane: 'vault' },
+  // P1e — generic state transitions beyond the Opportunity/Lead hardcoded list.
+  { q: 'What happens when an Application becomes Submitted?', intent: 'lifecycle-process', plane: 'vault' },
+  { q: 'What runs when an Enrollment is disqualified?', intent: 'lifecycle-process', plane: 'vault' },
+  // P1d — role hierarchy STRUCTURE ("which roles report up to X") beyond the
+  // literal phrase "role hierarchy".
+  { q: 'Which roles report up to the VP role?', intent: 'role-hierarchy-structure', plane: 'vault' },
 
   // P12-ROUTER-disambiguation — near-miss pairs must route to DISTINCT intents.
   { q: 'who can see Account records', intent: 'who-can-access-object', plane: 'vault' },
@@ -448,6 +471,22 @@ describe('classifyQuestion edge cases', () => {
     const r = classifyQuestion('   ');
     expect(r.plane).toBe('unknown');
     expect(r.intent).toBe('empty');
+  });
+
+  it('routes "which permission set groups are assigned to nobody" to an honest gap (P0b)', () => {
+    // PermissionSetGroup assignment is not modeled; the router must NOT fall
+    // through to unassigned_permission_sets (PermissionSet-only), which would be
+    // confidently wrong. It returns an empty tool list plus a capability gap.
+    for (const q of [
+      'Which permission set groups are assigned to nobody?',
+      'Are there any unused permission set groups?',
+    ]) {
+      const r = classifyQuestion(q);
+      expect(r.intent).toBe('unassigned-permset-groups');
+      expect(r.tools).toHaveLength(0);
+      expect(r.gap).not.toBeNull();
+      expect(r.gap?.category).toBe('unassigned-permset-groups');
+    }
   });
 
   it('routes runtime audit-trail questions to an honest disclosure (P11-WHATHAPPENED-disclosure)', () => {
@@ -988,6 +1027,10 @@ describe('router ↔ roster contract (CI gate)', () => {
     // sfi.lookup_record is now router-reachable (P14-ROUTER-cmdt-record-values).
     'sfi.org_pulse',
     'sfi.promotion_readiness', 'sfi.test_coverage_for_method',
+    // sfi.profile_security is a specialized login/session security drill reached
+    // AFTER a profile is in hand (via `resolve`), analogous to the what-if
+    // profile drills — not a natural-language intent's primary answer yet.
+    'sfi.profile_security',
     // sfi.what_if_change_method_signature is now router-reachable
     // (P14-ROUTER-method-signature-impact); sfi.what_changed_since_refresh
     // is now router-reachable (P14-ROUTER-stress-20).

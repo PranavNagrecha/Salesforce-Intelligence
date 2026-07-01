@@ -233,6 +233,24 @@ interface ScoredToken {
   readonly matchedToken: string;
 }
 
+/**
+ * A short (3–4 char) query token contained in a much-longer COMPOUND node token
+ * (`ssn` ⊂ `msn_professional_status`) is almost always noise, not a real match:
+ * the shared substring covers a tiny fraction of the compound name and the two
+ * are unrelated words that happen to overlap. Suppress the containment score for
+ * exactly that pattern so an acronym like `ssn` cannot ride a 0.33 length-ratio
+ * substring hit into a candidate over the field genuinely named `Student_SSN__c`
+ * (an exact TOKEN hit, unaffected). Longer query tokens, same-length pairs, and
+ * short-to-short containment ("pay" ⊂ "pay_period") are NOT suppressed — this
+ * only fires for the short-in-long-compound false-positive band.
+ */
+const isPureShortSubstringOfCompound = (qt: string, nt: string): boolean => {
+  if (qt.length < 3 || qt.length > 4) return false;
+  if (!nt.includes(qt)) return false;
+  const isCompound = /_/.test(nt) || /[A-Z]{2,}|[a-z][A-Z]/.test(nt);
+  return isCompound && nt.length > qt.length + 2;
+};
+
 /** Best match of one query token against a node's token bag. */
 const scoreToken = (qt: string, nodeTokens: readonly string[]): ScoredToken => {
   // Synonym expansion once per query token (org-agnostic groups). Lets "rep"
@@ -265,11 +283,17 @@ const scoreToken = (qt: string, nodeTokens: readonly string[]): ScoredToken => {
 
     // Containment: a true prefix/substring, scored by how much it covers
     // (length ratio) — never a flat value, so "pay" ⊂ "paymnet" ≈ 0.43.
+    // Suppress pure-short-substring-of-compound false positives: a 3–4 char
+    // token contained in a much-longer compound name (e.g. "ssn" ⊂
+    // "msn_professional_status") is likely noise, not a real match. Typos and
+    // genuine containment are unaffected (longer query tokens, same-length
+    // pairs, and short-to-short containment are not suppressed).
     let contain = 0;
     if (
       qt.length >= 3 &&
       nt.length >= 3 &&
-      (nt.includes(qt) || qt.includes(nt))
+      (nt.includes(qt) || qt.includes(nt)) &&
+      !isPureShortSubstringOfCompound(qt, nt)
     ) {
       contain = lenRatio;
     }
@@ -562,8 +586,40 @@ export const resolveComponents = async (
   // merely contains the object token, regardless of which is more popular.
   const parentMatchedIds = new Set<string>();
 
+  // Generic-type-word suppression: when the query is a bare singular type word
+  // (Profile, Permission Set, Record Type, etc.), suppress candidates whose
+  // apiName is JUST that type name. This prevents a conceptual "what's a
+  // Profile?" from resolving to a component literally named "Profile" and
+  // triggering an unwanted disambiguation. Detection: a single-token query
+  // matching a known type word. Suppression: candidates whose normalized apiName
+  // equals the type word. Conservative by design — it only fires for a lone
+  // type-name token, never for "Profile Reports" or "the Account Layout".
+  const typeWord =
+    queryTokens.length === 1 ? (queryTokens[0] ?? '').toLowerCase() : null;
+  const GENERIC_TYPE_WORDS: ReadonlySet<string> = new Set([
+    'profile',
+    'permissionset',
+    'recordtype',
+    'permissionsetgroup',
+    'layout',
+    'flow',
+  ]);
+  const isGenericTypeQuery = typeWord !== null && GENERIC_TYPE_WORDS.has(typeWord);
+  const suppressTypeNames = new Set<string>();
+  if (isGenericTypeQuery && typeWord !== null) {
+    for (const c of pass1) {
+      if (normalizeName(c.node.apiName).toLowerCase() === typeWord) {
+        suppressTypeNames.add(c.node.id);
+      }
+    }
+  }
+
   // PASS 2 — coverage-weighted base.
   for (const c of pass1) {
+    // Skip generic-type-name candidates (e.g. a Profile component when the
+    // query is just "Profile").
+    if (suppressTypeNames.has(c.node.id)) continue;
+
     // Per-node matched tokens (>= floor) drive match QUALITY — including a
     // weakly-but-genuinely matched non-anchor token, as before.
     const matched = c.perToken.filter((t) => t.score >= MATCHED_FLOOR);

@@ -70,6 +70,7 @@ import {
   extractRestrictionRule,
   extractRole,
   extractScopingRule,
+  extractSessionSettings,
   extractSharingRules,
   extractStaticResource,
   extractValidationRule,
@@ -255,6 +256,7 @@ export const SUPPORTED_TYPES = [
   'RestrictionRule',
   'Role',
   'ScopingRule',
+  'SessionSettings',
   'SharingRule',
   'StaticResource',
   'ValidationRule',
@@ -342,6 +344,7 @@ const EXTRACTORS: Readonly<Record<SupportedType, Extractor>> = {
   RestrictionRule: extractRestrictionRule,
   Role: extractRole,
   ScopingRule: extractScopingRule,
+  SessionSettings: extractSessionSettings,
   SharingRule: extractSharingRules,
   StaticResource: extractStaticResource,
   ValidationRule: extractValidationRule,
@@ -520,6 +523,14 @@ const dispatchFile = (
   // `customPermissions/{DeveloperName}.customPermission-meta.xml` — the grant
   // target a PermissionSet/Profile `<customPermissions>` block names (CR-CAP-10).
   if (segments.includes('customPermissions') && fileName.endsWith('.customPermission-meta.xml')) return 'CustomPermission';
+  // Session-security tier. Salesforce delivers SessionSettings under the
+  // generic `settings/` container (shared by every `*Settings` metadata
+  // type), so the discriminant is the `Session.settings-meta.xml` filename,
+  // NOT the directory — matching on `settings/` alone would falsely claim
+  // coverage over the other settings files (Security, Search, etc.). One
+  // org-level singleton; the extractor emits the fixed `SessionSettings:default`
+  // node. Refresh-gated: only populates once a re-refresh retrieves the new type.
+  if (segments.includes('settings') && fileName === 'Session.settings-meta.xml') return 'SessionSettings';
   // CR-CAP-18: platform-event publish/stream-routing topology. Both are flat
   // top-level dispatches under their own DX directory (singular Metadata-API
   // xmlName, no object-nested counterpart). The channel is the stream

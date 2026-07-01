@@ -6,7 +6,12 @@
  *   - **runnableFlows** — Flows the container grants run access to (the
  *     `flowAccess` `grantedBy` edges the extractor now emits).
  *   - **loginRestrictions** — login IP ranges + whether login hours are set
- *     (Profile-only; permission sets carry no login security).
+ *     (Profile-only; permission sets carry no login security). Beyond the
+ *     `ipRangeCount` scalar, the full `ipRanges` array (`{startAddress,
+ *     endAddress}`) is now surfaced structurally — the extractor already
+ *     collects `<loginIpRanges>` into `properties.loginIpRanges`; it was
+ *     previously only counted. `loginHours` (per-weekday windows) is DEFERRED
+ *     behind the SessionSettings tier, so it is always `[]` for now.
  *   - **actionPermissions** — the "do / run / export / transfer / convert"
  *     class of system permissions present on the container (filtered from
  *     `userPermissions`), the ones that aren't object CRUD or pure admin.
@@ -72,6 +77,62 @@ const ACTION_PERMISSIONS = new Set([
   'ManageBusinessHourHolidays',
 ]);
 
+/**
+ * One declared login-IP-range window from a Profile's `<loginIpRanges>`
+ * (`{startAddress, endAddress}`). Profile-only — permission sets carry no
+ * login security. Shared with `sfi.profile_security`.
+ */
+export interface LoginIpRange {
+  readonly startAddress: string;
+  readonly endAddress: string;
+}
+
+/**
+ * One per-weekday login-hours window (`{day, startTime, endTime}`). DEFERRED
+ * behind the SessionSettings tier — the v0.1 extractor stores only the
+ * `loginHoursDefined` boolean, not the `<loginHours>` weekday boundaries, so
+ * this is always empty until that tier ships. Shared with
+ * `sfi.profile_security`.
+ */
+export interface LoginHourWindow {
+  readonly day: string;
+  readonly startTime: string | null;
+  readonly endTime: string | null;
+}
+
+/**
+ * Read the structured `<loginIpRanges>` off a Profile node's properties. The
+ * extractor collects them as `{startAddress, endAddress}` objects; anything
+ * malformed is skipped so a bad row never emits `[object Object]`-style noise.
+ */
+export const readLoginIpRanges = (
+  props: Readonly<Record<string, unknown>>,
+): LoginIpRange[] => {
+  const raw = props['loginIpRanges'];
+  if (!Array.isArray(raw)) return [];
+  const out: LoginIpRange[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const rec = entry as Record<string, unknown>;
+    const start = rec['startAddress'];
+    const end = rec['endAddress'];
+    if (typeof start === 'string' && typeof end === 'string') {
+      out.push({ startAddress: start, endAddress: end });
+    }
+  }
+  return out;
+};
+
+/**
+ * Read the per-weekday login-hours windows off a Profile node's properties.
+ * DEFERRED behind the SessionSettings tier — the v0.1 extractor does not
+ * populate `<loginHours>` boundaries, so this returns `[]` today. Kept as a
+ * single seam so the SessionSettings tier can wire the real parse in one place.
+ */
+export const readLoginHours = (
+  _props: Readonly<Record<string, unknown>>,
+): LoginHourWindow[] => [];
+
 export const userAbilityInputSchema = z.object({
   componentId: z.string().min(1),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
@@ -90,11 +151,19 @@ export interface UserAbilityOutput {
   readonly granterLabel: string;
   /** Flows the container can run (`Flow:` ids), paginated. */
   readonly runnableFlows: readonly ComponentId[];
-  /** Profile-only login security. `null` ipRanges/hours for a permission set. */
+  /** Profile-only login security. Empty ipRanges/loginHours for a permission set. */
   readonly loginRestrictions: {
     readonly ipRangeCount: number;
     readonly loginHoursRestricted: boolean;
     readonly applies: boolean;
+    /** Full IP-range windows (Profile-only; `[]` for a permission set). */
+    readonly ipRanges: readonly LoginIpRange[];
+    /**
+     * Login-hours per-weekday windows (Profile-only; `[]` for a permission set).
+     * DEFERRED behind the SessionSettings tier — always `[]` today (the v0.1
+     * extractor stores only `loginHoursDefined`, not the weekday boundaries).
+     */
+    readonly loginHours: readonly LoginHourWindow[];
   };
   /** The action/ability system permissions present (sorted). */
   readonly actionPermissions: readonly string[];
@@ -207,10 +276,14 @@ export const userAbilityHandler = async (
   }
   const missingCustomPerms = customPermissions.filter((c) => c.targetMissing).length;
 
-  // Login restrictions (Profile only).
-  const ipRanges = node.properties['loginIpRanges'];
-  const ipRangeCount = Array.isArray(ipRanges) ? ipRanges.length : 0;
-  const loginHoursRestricted = node.properties['loginHoursDefined'] === true;
+  // Login restrictions (Profile only). Surface the FULL ip-range windows
+  // structurally (previously only counted) plus the login-hours seam (deferred,
+  // always empty today). A permission set carries no login security, so both
+  // lists stay empty regardless of any stray property.
+  const loginIpRanges = isProfile ? readLoginIpRanges(node.properties) : [];
+  const loginHours = isProfile ? readLoginHours(node.properties) : [];
+  const ipRangeCount = loginIpRanges.length;
+  const loginHoursRestricted = isProfile && node.properties['loginHoursDefined'] === true;
 
   const total = runnable.length;
   const limit = input.limit ?? DEFAULT_LIMIT;
@@ -259,6 +332,8 @@ export const userAbilityHandler = async (
         ipRangeCount,
         loginHoursRestricted,
         applies: isProfile,
+        ipRanges: loginIpRanges,
+        loginHours,
       },
       actionPermissions,
       customPermissions,

@@ -87,6 +87,7 @@ export { extractRecordType } from './record-type.js';
 export { extractRemoteSiteSetting } from './remote-site-setting.js';
 export { extractRole } from './role.js';
 export { extractSamlSsoConfig } from './saml-sso-config.js';
+export { extractSessionSettings } from './session-settings.js';
 export { extractSharingRules } from './sharing-rules.js';
 export {
   buildDescribeFieldExtraction,
