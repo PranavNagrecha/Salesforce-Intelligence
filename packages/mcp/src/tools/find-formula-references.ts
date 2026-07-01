@@ -36,6 +36,11 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  buildEmptyTraversalCoverageCaveat,
+  type CoverageCaveat,
+  FORMULA_REFERENCE_REQUIRED_COVERAGE,
+} from './coverage-trust.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { resolveToFieldOrSuggest } from './resolve-field-or-suggest.js';
 
@@ -137,6 +142,14 @@ export interface FindFormulaReferencesOutput {
   readonly pageInfo?: PageInfo;
   /** Present only when the page is truncated below the true total. */
   readonly note?: string;
+  /**
+   * I3b (empty ≠ none): present ONLY when the FULL result is empty AND a family
+   * that produces formula `references` edges (`CustomField` / `ValidationRule`)
+   * is NOT fully covered by the vault. Names the not-checked families so an
+   * empty referencer list reads "not retrieved", not a proven "none". Absent on
+   * a non-empty result and on a fully-covered vault (byte-identical to before).
+   */
+  readonly coverageCaveat?: CoverageCaveat;
 }
 
 /**
@@ -273,6 +286,15 @@ export const findFormulaReferencesHandler = async (
       `do not treat it as the full blast radius.`
     : undefined;
   const emitCursor = paged.nextCursor !== null;
+  // I3b (empty ≠ none): only when the WHOLE referencer set is empty do we risk
+  // the host narrating absence as fact — attach a coverage caveat naming the
+  // formula-source families the vault did NOT fully retrieve, so "no formula
+  // references this" carries "…among the families the vault covers". Non-empty
+  // output is untouched.
+  const coverageCaveat =
+    total === 0
+      ? buildEmptyTraversalCoverageCaveat(ctx, FORMULA_REFERENCE_REQUIRED_COVERAGE)
+      : undefined;
 
   return ok({
     data: {
@@ -284,6 +306,7 @@ export const findFormulaReferencesHandler = async (
       nextOffset: hasMore ? returned : null,
       ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
       ...(note !== undefined ? { note } : {}),
+      ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

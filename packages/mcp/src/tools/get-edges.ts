@@ -28,6 +28,11 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  buildEmptyTraversalCoverageCaveat,
+  type CoverageCaveat,
+  GRAPH_TRAVERSAL_REQUIRED_COVERAGE,
+} from './coverage-trust.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 
 /**
@@ -113,6 +118,14 @@ export interface GetEdgesOutput {
   readonly pageInfo?: PageInfo;
   /** Present only when the page was byte-trimmed below `limit` to fit the budget. */
   readonly note?: string;
+  /**
+   * I3b (empty ≠ none): present ONLY when the WHOLE edge set is empty
+   * (`totalCount === 0`) AND a dependency family that would incident an edge on
+   * this node is NOT fully covered by the vault. Names the not-checked families
+   * so an empty edge list reads "not retrieved", not a proven "no edges". Absent
+   * when edges exist or the vault is fully covered (byte-identical to before).
+   */
+  readonly coverageCaveat?: CoverageCaveat;
 }
 
 /**
@@ -196,6 +209,15 @@ export const getEdgesHandler = async (
   // exactly when `paginateLegacy` produced a non-null nextCursor.
   const emitCursor = paged.nextCursor !== null;
 
+  // I3b (empty ≠ none): only when the WHOLE edge set is empty do we risk the
+  // host reading "no edges" as a proven "nothing depends on this" — attach a
+  // coverage caveat naming the dependency families the vault did NOT fully
+  // retrieve. Non-empty pages are untouched.
+  const coverageCaveat =
+    paged.totalCount === 0
+      ? buildEmptyTraversalCoverageCaveat(ctx, GRAPH_TRAVERSAL_REQUIRED_COVERAGE)
+      : undefined;
+
   return ok({
     data: {
       edges: paged.items,
@@ -204,6 +226,7 @@ export const getEdgesHandler = async (
       nextOffset: paged.nextOffset,
       ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
       ...(note !== undefined ? { note } : {}),
+      ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
