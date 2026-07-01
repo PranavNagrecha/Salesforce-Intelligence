@@ -1,31 +1,31 @@
 {
-  "generatedAt": "2026-07-01T17:00:46.711Z",
-  "toolCount": 171,
+  "generatedAt": "2026-07-01T20:53:01.198Z",
+  "toolCount": 172,
   "skillCount": 25,
   "commandCount": 4,
-  "componentTypeCount": 77,
+  "componentTypeCount": 78,
   "edgeTypeCount": 23,
   "tests": {
     "packages": [
       {
         "name": "mcp",
-        "files": 202,
-        "cases": 2881
+        "files": 206,
+        "cases": 2908
       },
       {
         "name": "extractors",
-        "files": 67,
-        "cases": 850
+        "files": 69,
+        "cases": 861
       },
       {
         "name": "cli",
         "files": 36,
-        "cases": 277
+        "cases": 280
       },
       {
         "name": "graph",
         "files": 24,
-        "cases": 216
+        "cases": 221
       },
       {
         "name": "parsers",
@@ -39,8 +39,8 @@
       },
       {
         "name": "renderers",
-        "files": 6,
-        "cases": 93
+        "files": 7,
+        "cases": 100
       },
       {
         "name": "vault",
@@ -51,11 +51,16 @@
         "name": "tooling-api",
         "files": 4,
         "cases": 54
+      },
+      {
+        "name": "core",
+        "files": 2,
+        "cases": 34
       }
     ],
-    "totalCases": 4732,
-    "totalFiles": 354,
-    "packageCount": 9
+    "totalCases": 4819,
+    "totalFiles": 363,
+    "packageCount": 10
   },
   "integrationSuiteCount": 7,
   "gates": [

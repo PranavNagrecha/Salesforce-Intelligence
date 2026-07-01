@@ -53,7 +53,7 @@ const isStandardObjectApiName = (apiName: string): boolean =>
  * with a typo learn `invalid-query` instead of receiving `{ components: [] }`
  * and concluding the org has nothing of that type).
  */
-const COMPONENT_TYPES = [
+export const COMPONENT_TYPES = [
   'CustomObject',
   'CustomField',
   'ValidationRule',

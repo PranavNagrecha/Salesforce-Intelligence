@@ -230,6 +230,10 @@ export const registerMcpCommand = (program: Command): void => {
         process.exit(1);
       }
       const { ctx, server, vaultRoot, targetOrg } = prepared.value;
+      // Expose the running plugin version to in-process tools. health_check's
+      // offline vault-version nudge compares it to the vault's builder version
+      // (manifest.version) to advise a re-refresh when the plugin has moved on.
+      process.env['SFI_PLUGIN_VERSION'] = readCliPackageVersion();
       // Announce the bound vault/org on stderr (stdout is reserved for JSON-RPC).
       // A wrong-org session is otherwise silent — the server serves whatever
       // vault its launch directory holds, so make that choice impossible to miss.

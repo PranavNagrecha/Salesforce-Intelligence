@@ -318,5 +318,9 @@ export const checkForUpdate = async (
  */
 export const formatUpdateNotice = (result: UpdateCheckResult): string | null => {
   if (!result.shouldUpdate || result.latestVersion === null) return null;
-  return `Update available: sf-intelligence@${result.latestVersion} — run \`npm i -g sf-intelligence@latest\`.`;
+  return (
+    `Update available: sf-intelligence@${result.latestVersion} — run ` +
+    `\`npm i -g sf-intelligence@latest\`, then \`/sfi-refresh\` to rebuild your ` +
+    `vault with the new version's extractors.`
+  );
 };

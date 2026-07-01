@@ -67,6 +67,8 @@ describe('formatUpdateNotice', () => {
     expect(notice).toBeTruthy();
     expect(notice).toContain('0.2.0');
     expect(notice).toContain('npm i -g sf-intelligence@latest');
+    // The nudge also prompts a vault rebuild — "upgrade + do a refresh".
+    expect(notice).toContain('/sfi-refresh');
   });
 
   it('returns null when no update is available', () => {

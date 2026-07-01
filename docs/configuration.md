@@ -104,6 +104,16 @@ published `sf-intelligence` and, when one exists, print a one-line
 The check is **off in CI**, **opt-out** everywhere, and never blocks the
 server.
 
+### Offline vault-version nudge
+
+Separately — and with **no network at all** — `sfi.health_check` compares the
+plugin version that BUILT the current vault (`manifest.version`) against the
+running plugin. When the running plugin is newer, the freshness `nudge` advises
+`/sfi-refresh`, so a vault built by an older version (which may lack newer
+extractors — e.g. the CustomPermission / permission-set record-type work in
+0.1.19) is rebuilt rather than silently under-reporting. It is a pure local
+version comparison: no network, no org data.
+
 ### Opt out
 
 | Method | How |

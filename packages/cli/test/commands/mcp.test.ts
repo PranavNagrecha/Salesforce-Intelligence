@@ -236,7 +236,7 @@ describe('sfi mcp — startup update nudge wiring', () => {
       error: null,
     });
     expect(notice).toBe(
-      'Update available: sf-intelligence@9.9.9 — run `npm i -g sf-intelligence@latest`.',
+      "Update available: sf-intelligence@9.9.9 — run `npm i -g sf-intelligence@latest`, then `/sfi-refresh` to rebuild your vault with the new version's extractors.",
     );
   });
 });

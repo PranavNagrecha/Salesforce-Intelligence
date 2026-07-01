@@ -3,6 +3,67 @@
 All notable changes to **sf-intelligence** are documented here. This project
 adheres to [Semantic Versioning](https://semver.org).
 
+## [0.1.19] — 2026-07-01
+
+Headline: **the access surface, made honest and complete.** A 100-question permissions
+sweep on a real org surfaced a cluster of gaps: custom permissions were *retrieved but
+unreachable*, permission sets under-modeled record-type visibility, two questions drew
+confidently-wrong routes, and Windows couldn't shell out to `sf` at all. All fixed in one
+release — plus an opt-out update check that nudges you when a newer sf-intelligence, or a
+stale vault, is behind.
+
+### Added
+- **Update notifier (on by default, opt-out)** — two independent nudges:
+  1. An **npm check on `sfi mcp` startup.** When a newer `sf-intelligence` is published it
+     prints a one-line "upgrade, then `/sfi-refresh`" notice on stderr (stdout stays reserved
+     for JSON-RPC). Opt out with `SFI_NO_UPDATE_CHECK=1`; auto-disabled under CI; 24-hour
+     cache in `~/.sf-intelligence/`; fail-silent on any network/timeout error; reads only the
+     registry `dist-tags.latest` (no version list, no telemetry, no org data ever leaves the
+     machine).
+  2. An **entirely offline vault-version nudge in `health_check`.** It compares the plugin
+     version that BUILT the vault (`manifest.version`) against the running plugin and, when
+     the plugin is newer, advises `/sfi-refresh` — so a vault built by an older version that
+     lacked newer extractors (e.g. the CustomPermission / permission-set record-type work in
+     this release) surfaces as a re-refresh prompt rather than a silent gap. No network.
+
+  Documented in `docs/configuration.md`.
+- **`CustomPermission` is a first-class listable type.** `list_components({ type:
+  'CustomPermission' })` now returns them — previously rejected at the schema enum, so the
+  custom permissions a refresh retrieved were *retrieved but unreachable*. Validated on a
+  real 8,068-component org: 15 records list, `resolve` matches them exactly, and
+  `effective_permissions.customPermissions` surfaces the real grant chain
+  (permission-set → custom permission, with `targetMissing` attributed).
+- **`profile_security` tool + Session Settings tier.** A new extractor and tool surface
+  profile / session security settings as a refresh-gated tier.
+
+### Fixed
+- **Permission-set `recordTypeVisibilities` parity.** The permission-set extractor now
+  models record-type visibility exactly as the profile extractor does (same
+  `collectRecordTypeVisibilities` logic, including `visible: null` handling), closing a
+  blind spot where a permission set could grant a record type with no trace in the vault.
+  Found by real-org QA (a permission set that granted record types with no trace in the
+  vault) and validated end-to-end against a real refresh: permission sets carrying
+  record-type visibility went from none to fully modeled, byte-for-byte matching the source.
+- **Two confidently-wrong routes + template gaps.** The intent router returned confident but
+  wrong tool routes for a pair of permission questions and left template gaps for others; the
+  access-surface rules were tightened and backed by a regression fixture
+  (`eval/access-surface.cases.json`).
+- **Resolver false positives.** Two candidate-ranking fixes: (a) a short acronym query
+  (e.g. `SSN`) no longer rides a substring hit into unrelated compound field names
+  (`MSN` / `ASN` / `BSN`); (b) a bare generic type-word query (`Profile`, `Permission Set`)
+  no longer force-clarifies against a component literally named that. Backed by the
+  "Bug 1 / Bug 2" resolver regression tests.
+- **Windows `sf` execution.** The refresh, live-plane, auth, and init paths could not invoke
+  `sf` on Windows — Node cannot exec a `.cmd` shim without a shell, and the codebase
+  deliberately avoids `shell: true` for injection safety. A shared cross-platform exec helper
+  now runs Windows commands via `cmd.exe /d /s /c` with per-argument escaping (cross-spawn
+  style) and `windowsVerbatimArguments` — no `shell: true`, so the no-injection guarantee is
+  preserved. Non-Windows execution is unchanged.
+- **Margin-gate false-fire on confident routes.** The I6 margin-based clarification gate could
+  suppress an executable route when a newly-added tool perturbed the semantic catalog; it now
+  fires only on genuine funnel-primary ties (`confidence !== 'high'`), restoring direct
+  execution for confidently-resolved questions.
+
 ## [0.1.18] — 2026-07-01
 
 Headline: **lifecycle routing + an honest conversion caveat.** "What *runs* when a Lead is

@@ -33,7 +33,7 @@ import type {
   McpError,
   McpResponse,
 } from '@sf-intelligence/contracts';
-import { ok, type Result, type UpdateCheckResult } from '@sf-intelligence/core';
+import { compareVersions, ok, type Result, type UpdateCheckResult } from '@sf-intelligence/core';
 import { listNodesByType } from '@sf-intelligence/graph';
 import {
   computeSourceTreeHash,
@@ -223,6 +223,25 @@ const buildFreshness = (
   if (update?.shouldUpdate === true && update.latestVersion !== null) {
     clauses.push(
       `A newer sf-intelligence is published on npm (${update.latestVersion}); run \`npm i -g sf-intelligence@latest\` to update the plugin.`,
+    );
+  }
+  // Offline vault-version nudge: the vault records the plugin version that BUILT
+  // it (`manifest.version`). When the running plugin is newer, the vault predates
+  // the current extractors, so a re-refresh may pick up metadata types or fixes
+  // the older build never emitted. Purely local — reads the running version from
+  // `SFI_PLUGIN_VERSION` (set by `sfi mcp` at startup) and never touches the
+  // network; an absent env var or unparseable version simply skips the clause.
+  const runningVersion = process.env['SFI_PLUGIN_VERSION'];
+  const builtByVersion = ctx.manifest.version;
+  if (
+    runningVersion !== undefined &&
+    runningVersion !== '' &&
+    typeof builtByVersion === 'string' &&
+    builtByVersion !== '' &&
+    compareVersions(builtByVersion, runningVersion)
+  ) {
+    clauses.push(
+      `This vault was built by sf-intelligence ${builtByVersion}, but you are running ${runningVersion}; run \`/sfi-refresh\` to rebuild it with the newer version's extractors (metadata types or fixes added since ${builtByVersion} may be missing).`,
     );
   }
   const nudge = clauses.length > 0 ? clauses.join(' ') : null;

@@ -492,6 +492,78 @@ describe('healthCheckHandler: freshness nudge', () => {
   });
 });
 
+describe('healthCheckHandler: offline vault-version nudge', () => {
+  // baseManifest is built by version '0.1.0'. When the RUNNING plugin
+  // (SFI_PLUGIN_VERSION, set by `sfi mcp` at startup) is newer, health_check
+  // advises a re-refresh — purely offline, no network. The env is set inside
+  // each test and cleared afterwards so it can never leak into the sibling
+  // `nudge === null` assertions above.
+  let vaultRoot: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  const refreshedMs = Date.parse('2026-05-27T14:33:08Z');
+  const DAY = 24 * 60 * 60 * 1000;
+  const PLUGIN_ENV = 'SFI_PLUGIN_VERSION';
+
+  beforeAll(async () => {
+    vaultRoot = await mkdtemp(join(tmpdir(), 'sfi-mcp-health-vaultver-'));
+    const realHash = await seedSourceTree(vaultRoot);
+    const built = await openContext(vaultRoot, baseManifest(realHash));
+    ctx = built.ctx;
+    store = built.store;
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    await rm(vaultRoot, { recursive: true, force: true });
+  });
+
+  afterEach(() => {
+    delete process.env[PLUGIN_ENV];
+  });
+
+  it('nudges to /sfi-refresh when the running plugin is newer than the vault builder', async () => {
+    process.env[PLUGIN_ENV] = '0.2.0';
+    // Fresh vault (no age nudge) so the ONLY clause is the vault-version one.
+    const result = await healthCheckHandler(ctx, {}, refreshedMs + 3 * DAY);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const nudge = result.value.data.freshness.nudge;
+    expect(nudge).toContain('built by sf-intelligence 0.1.0');
+    expect(nudge).toContain('0.2.0');
+    expect(nudge).toContain('/sfi-refresh');
+    // Advisory only — an out-of-date builder must not fail the vault.
+    expect(result.value.data.status).toBe('healthy');
+    expect(result.value.data.freshness.stale).toBe(false);
+  });
+
+  it('stays quiet when the running plugin matches the vault builder version', async () => {
+    process.env[PLUGIN_ENV] = '0.1.0';
+    const result = await healthCheckHandler(ctx, {}, refreshedMs + 3 * DAY);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.freshness.nudge).toBeNull();
+  });
+
+  it('stays quiet when the running plugin is OLDER than the vault builder', async () => {
+    // A downgrade must not nag — only a newer plugin implies missing extraction.
+    process.env[PLUGIN_ENV] = '0.0.9';
+    const result = await healthCheckHandler(ctx, {}, refreshedMs + 3 * DAY);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.freshness.nudge).toBeNull();
+  });
+
+  it('stays quiet when SFI_PLUGIN_VERSION is unset (non-`sfi mcp` callers)', async () => {
+    delete process.env[PLUGIN_ENV];
+    const result = await healthCheckHandler(ctx, {}, refreshedMs + 3 * DAY);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.freshness.nudge).toBeNull();
+  });
+});
+
 describe('healthCheckHandler: freshness nudge counts the last refresh + flags source drift', () => {
   let vaultRoot: string;
   let store: GraphStore;

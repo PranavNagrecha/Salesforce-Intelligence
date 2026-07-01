@@ -916,6 +916,8 @@ const LIST_COMPONENTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.f
         'ExternalDataSource',
         'ExternalService',
         'NetworkAccess',
+        // Custom permissions — grant targets referenced by profiles / permission sets.
+        'CustomPermission',
         // v1.6 — business-user record-value tier.
         'CustomMetadataRecord',
         'CustomSettingRecord',
@@ -939,6 +941,13 @@ const LIST_COMPONENTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.f
         'MutingPermissionSet',
         'RestrictionRule',
         'ScopingRule',
+        // Decomposed child types the vault also lists (kept in sync with the
+        // Zod COMPONENT_TYPES validator in list-components.ts).
+        'CompactLayout',
+        'WebLink',
+        'FieldSet',
+        'Index',
+        'InstalledPackage',
       ],
     },
     parentId: { type: 'string', minLength: 1 },

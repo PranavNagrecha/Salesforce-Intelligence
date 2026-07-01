@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
 
-  <title>All 171 tools  -  sf-intelligence Salesforce MCP tool reference</title>
-  <meta name="description" content="The complete reference for all 171 read-only sf-intelligence tools for a Salesforce org  -  search, explain, impact &amp; dependency analysis, permissions, code quality, integrations, OmniStudio, documentation, health, cross-org, and live data  -  each with what it does.">
+  <title>All 172 tools  -  sf-intelligence Salesforce MCP tool reference</title>
+  <meta name="description" content="The complete reference for all 172 read-only sf-intelligence tools for a Salesforce org  -  search, explain, impact &amp; dependency analysis, permissions, code quality, integrations, OmniStudio, documentation, health, cross-org, and live data  -  each with what it does.">
   <link rel="canonical" href="https://salesforce-intelligence.pages.dev/tools.html">
   <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
   <meta name="author" content="sf-intelligence">
@@ -13,7 +13,7 @@
 
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="sf-intelligence">
-  <meta property="og:title" content="All 171 tools  -  sf-intelligence Salesforce MCP tool reference">
+  <meta property="og:title" content="All 172 tools  -  sf-intelligence Salesforce MCP tool reference">
   <meta property="og:description" content="Every read-only sf-intelligence tool for a Salesforce org, grouped by function, each with what it does.">
   <meta property="og:url" content="https://salesforce-intelligence.pages.dev/tools.html">
   <meta property="og:image" content="https://salesforce-intelligence.pages.dev/assets/img/og-image.png">
@@ -21,7 +21,7 @@
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="sf-intelligence product card">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="All 171 tools  -  sf-intelligence">
+  <meta name="twitter:title" content="All 172 tools  -  sf-intelligence">
   <meta name="twitter:description" content="The complete Salesforce MCP tool reference, each with what it does.">
   <meta name="twitter:image" content="https://salesforce-intelligence.pages.dev/assets/img/og-image.png">
 
@@ -85,7 +85,7 @@
     <section class="subhero">
       <div class="container">
         <nav class="crumbs" aria-label="Breadcrumb"><a href="/">home</a><span>/</span><a href="/capabilities.html">capabilities</a><span>/</span>tools</nav>
-        <h1 class="screen-type">All 171 Salesforce tools</h1>
+        <h1 class="screen-type">All 172 Salesforce tools</h1>
         <p>The complete reference for every read-only tool sf-intelligence exposes for a Salesforce org  -  grouped by function, each with what it does. You never call these by name; an offline semantic router surfaces a ranked shortlist for each plain-language question and your AI host picks which to run. They are listed here for transparency and so AI assistants can cite them accurately.</p>
       </div>
     </section>
@@ -303,7 +303,7 @@
           </div>
         </article>
         <article class="card" style="margin-bottom:18px;">
-          <h2 style="font-family:var(--mono); font-size:1.15rem; color:var(--fg-strong); margin-bottom:4px;">Other tools <span class="muted" style="font-size:.8rem;">· 21</span></h2>
+          <h2 style="font-family:var(--mono); font-size:1.15rem; color:var(--fg-strong); margin-bottom:4px;">Other tools <span class="muted" style="font-size:.8rem;">· 22</span></h2>
           <div class="toollist">
           <div class="row"><div class="tn">sfi.list_analyses</div><div class="td">Catalog gateway: the paginated index of EVERY analysis this server can run — name, one-line summary, and a coarse category (core / search / what-if / documentatio…</div></div>
           <div class="row"><div class="tn">sfi.describe_analysis</div><div class="td">Catalog gateway: ONE analysis's full description + JSON input schema, fetched on demand (`name`, with or without the `sfi.` prefix).</div></div>
@@ -312,6 +312,7 @@
           <div class="row"><div class="tn">sfi.who_can_run</div><div class="td">The REVERSE of `sfi.user_ability`: given a `Flow:X` (`componentId`), which Profiles / PermissionSets grant RUN access to it (from the `flowAccess` `grantedBy` edges).</div></div>
           <div class="row"><div class="tn">sfi.who_can_access_object</div><div class="td">The REVERSE of `sfi.why_cant_user_see_record`: given a `CustomObject:X` (`componentId`), ENUMERATE which profiles / permission sets / roles / groups statically ga…</div></div>
           <div class="row"><div class="tn">sfi.user_ability</div><div class="td">"What can this Profile / PermissionSet RUN or DO?" — beyond record CRUD (which `object_access_audit` / `why_cant_user_see_record` cover).</div></div>
+          <div class="row"><div class="tn">sfi.profile_security</div><div class="td">"What are this profile's login &amp; session security policies?" — a focused security-audit surface separate from `user_ability` (which is "what can it RUN or DO").</div></div>
           <div class="row"><div class="tn">sfi.lightning_pages</div><div class="td">Lightning record pages (FlexiPage), both directions.</div></div>
           <div class="row"><div class="tn">sfi.list_view_sharing</div><div class="td">"Who is this list view shared with?" — a list view's `&lt;sharedTo&gt;` visibility scope (the groups/roles it shows up for in the list-view picker), now captured at ext…</div></div>
           <div class="row"><div class="tn">sfi.app_access</div><div class="td">Given a `CustomApplication` (`componentId`, e.g.</div></div>
@@ -328,7 +329,7 @@
           <div class="row"><div class="tn">sfi.component_as_of</div><div class="td">The component AS IT WAS at a git ref in the vault's own history: `git show &lt;ref&gt;:&lt;sourcePath&gt;` re-run through the SAME extractor the refresh uses for that type →…</div></div>
           </div>
         </article>
-        <p class="muted center" style="margin-top:24px; font-size:.84rem;">171 tools registered in this build. Grouping is by function for readability; some tools span more than one area. Generated from the product's tool registry.</p>
+        <p class="muted center" style="margin-top:24px; font-size:.84rem;">172 tools registered in this build. Grouping is by function for readability; some tools span more than one area. Generated from the product's tool registry.</p>
         <div style="padding-top:38px;">
           <div class="cta-box">
             <h2 class="screen-type">See it in action</h2>
