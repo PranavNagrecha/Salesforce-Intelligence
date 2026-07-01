@@ -209,6 +209,9 @@ const DISCLOSURE =
 /**
  * Zod schema for `sfi.synthesize_answer`.
  *   - `input` (required): the JSON returned by prior tool call(s) to ground on.
+ *     A `draft` supplied with an empty or missing `input` FAILS CLOSED —
+ *     `grounded: false` plus a caveat — never a rubber-stamped `grounded: true`,
+ *     because there is nothing to check the draft against.
  *   - `question` (optional): the user's question, echoed into the summary.
  *   - `draft` (optional): a proposed narrative whose canonical ids are checked
  *     against the source so hallucinated ids surface before the user sees them.
@@ -729,6 +732,19 @@ export const synthesizeAnswerHandler = async (
   let ungroundedAnnotationClaims: UngroundedAnnotationClaim[] | undefined;
   let grounded: boolean | undefined;
   let ungroundedAbsenceClaims: string[] | undefined;
+  // A draft can only be GROUNDED against real evidence. When the host supplies
+  // none — a missing `input`, or an empty object / array / string — there is
+  // nothing to check the draft against. This is the same "empty ≠ none" rule the
+  // tool enforces for the host, applied to its own input: absence of evidence is
+  // not evidence of grounding, so we must fail closed rather than rubber-stamp.
+  const evidenceEmpty =
+    source === undefined ||
+    source === null ||
+    (typeof source === 'string' && source.trim().length === 0) ||
+    (Array.isArray(source) && source.length === 0) ||
+    (typeof source === 'object' &&
+      !Array.isArray(source) &&
+      Object.keys(source as Record<string, unknown>).length === 0);
   if (input.draft !== undefined) {
     const draftIds = [...new Set(input.draft.match(CANONICAL_ID_INLINE) ?? [])];
     groundedIds = draftIds.filter((id) => out.ids.has(id)).sort();
@@ -755,6 +771,19 @@ export const synthesizeAnswerHandler = async (
     ungroundedAbsenceClaims =
       out.coverageIncomplete ? absenceClaims : [];
     grounded = ungroundedAbsenceClaims.length === 0;
+
+    // FAIL-CLOSED: a draft handed in with no evidence to ground against must
+    // never come back grounded:true — that silently rubber-stamps whatever the
+    // host wrote (e.g. a "safe to delete, nothing references it" claim the vault
+    // never supported). Certify only when there was something to certify against.
+    if (evidenceEmpty) {
+      grounded = false;
+      out.caveats.unshift(
+        'GROUNDING NOT VERIFIED: no evidence was supplied in `input`, so the ' +
+          'draft was not checked against any tool output. Do NOT present it as ' +
+          'grounded — pass the prior sfi.* tool result(s) as `input` and retry.',
+      );
+    }
   }
 
   const qPrefix =
