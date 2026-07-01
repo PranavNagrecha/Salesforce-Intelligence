@@ -27,7 +27,7 @@ const mk = (o: Partial<Node> & Pick<Node, 'id' | 'type'>): Node => ({
 const fld = (obj: string, name: string, props: Record<string, unknown>): Node =>
   mk({ id: `CustomField:${obj}.${name}`, type: 'CustomField', apiName: name, parentId: `CustomObject:${obj}`, properties: { dataType: 'Text', ...props } });
 
-const SIS = 'External_Ref_SIS_ID__c';
+const SIS = 'External_Ref_Id__c';
 const seed: ExtractionResult = {
   nodes: [
     mk({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' }),

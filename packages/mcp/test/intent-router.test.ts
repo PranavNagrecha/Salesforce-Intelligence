@@ -191,7 +191,7 @@ const CASES: readonly Case[] = [
   { q: 'What if I make the Email field required?', intent: 'what-if-field', plane: 'vault' },
   // Value-change tier (changing stored VALUES, not schema) — must beat impact/what-if.
   { q: 'Will changing the values of FederationIdentifier and Username on User have an impact?', intent: 'value-change', plane: 'vault' },
-  { q: 'Is it safe to update the External_Ref_SIS_ID__c field values?', intent: 'value-change', plane: 'vault' },
+  { q: 'Is it safe to update the External_Ref_Id__c field values?', intent: 'value-change', plane: 'vault' },
   { q: 'What breaks if I change the value of Account.Type from Customer to Partner?', intent: 'value-change', plane: 'vault' },
   { q: 'Can you let me know if changing any of these fields will have an impact on the User object — not removing the fields but changing the values?', intent: 'value-change', plane: 'vault' },
   // B21 over-route control: a field-type CHANGE is a what-if, NOT save-order —

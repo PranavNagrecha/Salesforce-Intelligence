@@ -284,7 +284,7 @@ describe('runTool defensive throw handling', () => {
   const emptySchema = z.object({}).passthrough();
 
   it('converts a handler throw into a bounded internal-error envelope and leaks neither the message nor a stack', async () => {
-    const secret = 'org-secret-value exampleuser@example.edu';
+    const secret = 'org-secret-value user@example.edu';
     const thrown = `boom ${secret}`;
     // Before the fix this rejected (no try/catch) — asserting it resolves at
     // all is itself a kill criterion.
@@ -305,7 +305,7 @@ describe('runTool defensive throw handling', () => {
     // LEAK INVARIANTS: nothing from the throw reaches the client.
     expect(text).not.toContain('boom');
     expect(text).not.toContain('org-secret-value');
-    expect(text).not.toContain('exampleuser@example.edu');
+    expect(text).not.toContain('user@example.edu');
     expect(text).not.toContain(' at '); // no stack-frame markers
     // Bounded by the same byte budget as every other envelope.
     expect(bytesOf(text)).toBeLessThanOrEqual(responseBudgetBytes());

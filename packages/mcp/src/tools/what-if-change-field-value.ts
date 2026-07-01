@@ -137,7 +137,7 @@ const coverageCaveatFor = (ctx: Context): CoverageCaveat | undefined => {
  *
  * @example
  *   const r = await whatIfChangeFieldValueHandler(ctx, {
- *     fieldId: 'CustomField:Contact.External_Ref_SIS_ID__c',
+ *     fieldId: 'CustomField:Contact.External_Ref_Id__c',
  *   });
  *   if (r.ok) console.log(r.value.data.overallSeverity); // 'high'
  */

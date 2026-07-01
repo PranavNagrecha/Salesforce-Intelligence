@@ -178,32 +178,81 @@ export function scan(files) {
   return { hits, scanned, maintainerOnly, total: files.length };
 }
 
-/** The guard CLI: scan the shipping set, print the report, set exit code. */
+/**
+ * Every commit MESSAGE reachable from HEAD — the public-facing history a
+ * browser sees on the commit list. The file scan above never sees these, which
+ * is how an org name in a commit message (an org alias, a permission-set or
+ * field name) can ship to a public repo undetected. This closes that blind spot.
+ */
+export function commitMessages() {
+  const out = execSync('git log --format=%H%x1f%B%x00 HEAD', {
+    encoding: 'utf8',
+    maxBuffer: 256 * 1024 * 1024,
+  });
+  return out
+    .split('\0')
+    .map((rec) => rec.trim())
+    .filter(Boolean)
+    .map((rec) => {
+      const sep = rec.indexOf('\x1f');
+      return { sha: rec.slice(0, sep), body: rec.slice(sep + 1) };
+    });
+}
+
+/**
+ * Scan commit messages for FORBIDDEN identifiers. Same allowlist stripping as
+ * the file scan. Returns `sha  pattern  first-line` hits.
+ *
+ * @param {{sha:string, body:string}[]} messages
+ */
+export function scanMessages(messages) {
+  const hits = [];
+  for (const { sha, body } of messages) {
+    const scanBody = ALLOWLIST.reduce((s, allowed) => s.split(allowed).join(''), body);
+    for (const re of FORBIDDEN) {
+      if (re.test(scanBody)) {
+        hits.push(`${sha.slice(0, 9)}  ${re}  ${body.split('\n')[0].slice(0, 80)}`);
+        break;
+      }
+    }
+  }
+  return hits;
+}
+
+/** The guard CLI: scan the shipping set + commit messages, print, set exit code. */
 export function runGuard() {
   const tracked = trackedFiles();
   const shipped = shippingFiles();
-  const { hits, scanned, maintainerOnly } = scan(shipped);
+  const { hits: fileHits, scanned, maintainerOnly } = scan(shipped);
+  const msgs = commitMessages();
+  const msgHits = scanMessages(msgs);
+  const hits = [...fileHits, ...msgHits];
 
   console.log(
-    `Release privacy guard: scanned ${scanned} public files ` +
+    `Release privacy guard: scanned ${scanned} public files + ${msgs.length} commit messages ` +
       `(${maintainerOnly} harness-gated maintainer-only skipped; ${tracked.length} tracked total).`,
   );
   if (hits.length === 0) {
-    console.log('OK — no private identifiers in the shipping set.');
+    console.log('OK — no private identifiers in the shipping set or commit history.');
     return 0;
   }
-  console.log(`\nFOUND ${hits.length} leak(s):`);
-  for (const h of hits.slice(0, 200)) console.log(`  ${h}`);
-  if (hits.length > 200) console.log(`  … and ${hits.length - 200} more`);
-  // summary by file
-  const byFile = {};
-  for (const h of hits) {
-    const f = h.split(':')[0];
-    byFile[f] = (byFile[f] ?? 0) + 1;
+  if (msgHits.length > 0) {
+    console.log(`\nFOUND ${msgHits.length} leak(s) in COMMIT MESSAGES (history rewrite needed):`);
+    for (const h of msgHits.slice(0, 100)) console.log(`  ${h}`);
   }
-  console.log('\nleaks per shipping file:');
-  for (const [f, n] of Object.entries(byFile).sort((a, b) => b[1] - a[1])) {
-    console.log(`  ${n}\t${f}`);
+  if (fileHits.length > 0) {
+    console.log(`\nFOUND ${fileHits.length} leak(s) in TRACKED FILES:`);
+    for (const h of fileHits.slice(0, 200)) console.log(`  ${h}`);
+    if (fileHits.length > 200) console.log(`  … and ${fileHits.length - 200} more`);
+    const byFile = {};
+    for (const h of fileHits) {
+      const f = h.split(':')[0];
+      byFile[f] = (byFile[f] ?? 0) + 1;
+    }
+    console.log('\nleaks per shipping file:');
+    for (const [f, n] of Object.entries(byFile).sort((a, b) => b[1] - a[1])) {
+      console.log(`  ${n}\t${f}`);
+    }
   }
   return 1;
 }

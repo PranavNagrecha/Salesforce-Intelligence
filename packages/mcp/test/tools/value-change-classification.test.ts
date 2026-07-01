@@ -77,24 +77,24 @@ describe('classifyMutability — the formula trap', () => {
 });
 
 describe('classifyUpsertKey — metadata signals, per instance', () => {
-  it('confirms an externalId key (Account.External_Ref_SIS_ID__c master)', () => {
-    const node = fieldNode('CustomField:Account.External_Ref_SIS_ID__c', {
+  it('confirms an externalId key (Account.External_Ref_Id__c master)', () => {
+    const node = fieldNode('CustomField:Account.External_Ref_Id__c', {
       dataType: 'Number',
       externalId: true,
       unique: false,
     });
-    const r = classifyUpsertKey(node, 'Account', 'External_Ref_SIS_ID__c');
+    const r = classifyUpsertKey(node, 'Account', 'External_Ref_Id__c');
     expect(r.isUpsertKey).toBe(true);
     expect(r.signals).toContain('externalId');
   });
 
   it('does NOT treat a same-named externalId=false shadow copy as a key', () => {
-    const node = fieldNode('CustomField:Registered_Courses_Exam__c.External_Ref_SIS_ID__c', {
+    const node = fieldNode('CustomField:Registered_Courses_Exam__c.External_Ref_Id__c', {
       dataType: 'Text',
       externalId: false,
       unique: false,
     });
-    expect(classifyUpsertKey(node, 'Registered_Courses_Exam__c', 'External_Ref_SIS_ID__c').isUpsertKey).toBe(false);
+    expect(classifyUpsertKey(node, 'Registered_Courses_Exam__c', 'External_Ref_Id__c').isUpsertKey).toBe(false);
   });
 
   it('treats User.Username as an idLookup upsert key even with no metadata flag', () => {
@@ -129,7 +129,7 @@ describe('classifyRole — identity/integration blast radius', () => {
   });
 
   it('rates a confirmed SIS external-ID key high', () => {
-    const r = roleOf('CustomField:Account.External_Ref_SIS_ID__c', 'Account', 'External_Ref_SIS_ID__c', {
+    const r = roleOf('CustomField:Account.External_Ref_Id__c', 'Account', 'External_Ref_Id__c', {
       dataType: 'Number',
       externalId: true,
     });

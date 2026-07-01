@@ -32,7 +32,7 @@ const get = (buckets: ReturnType<typeof buildBuckets>, b: string) => buckets.fin
 
 describe('buildBuckets', () => {
   it('confirms an externalId SIS key as a high integration-key bucket', () => {
-    const buckets = buildBuckets(cls('Account', 'External_Ref_SIS_ID__c', { signals: ['externalId'] }), NO_EDGES);
+    const buckets = buildBuckets(cls('Account', 'External_Ref_Id__c', { signals: ['externalId'] }), NO_EDGES);
     expect(has(buckets, 'integration-key')).toBe(true);
     expect(get(buckets, 'integration-key').severity).toBe('high');
     expect(get(buckets, 'integration-key').confidence).toBe('confirmed');

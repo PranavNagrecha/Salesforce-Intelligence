@@ -80,6 +80,23 @@ describe('formatUpdateNotice', () => {
   });
 });
 
+// Every CI marker checked by shouldDisableCheck(). The tests must clear ALL of
+// them, not just CI: a real CI runner (GitHub Actions) sets CI *and*
+// GITHUB_ACTIONS *and* CONTINUOUS_INTEGRATION, so clearing only CI leaves the
+// check disabled and the fetch/cache assertions fail (only) under CI.
+const CI_MARKERS = [
+  'CI',
+  'CONTINUOUS_INTEGRATION',
+  'GITHUB_ACTIONS',
+  'GITLAB_CI',
+  'CIRCLECI',
+  'TRAVIS',
+  'BUILDKITE',
+  'DRONE',
+  'JENKINS_URL',
+  'TF_BUILD',
+] as const;
+
 describe('checkForUpdate', () => {
   let dir: string;
   let cachePath: string;
@@ -89,9 +106,11 @@ describe('checkForUpdate', () => {
     cachePath = join(dir, 'update-check.json');
     // Point the cache at a throwaway file (the live-consent SFI_*_PATH pattern).
     vi.stubEnv('SFI_UPDATE_CACHE_PATH', cachePath);
-    // Default: keep the network branch OFF so no test reaches out unless it
-    // explicitly opts back in — none do.
-    vi.stubEnv('CI', '1');
+    // Hermetic default: the check is NOT disabled, regardless of the real
+    // environment. Clear EVERY CI marker (a runner sets several) so the
+    // fetch/cache path is reached; the disable-path tests re-set the specific
+    // marker they exercise.
+    for (const marker of CI_MARKERS) vi.stubEnv(marker, '');
     vi.stubEnv('SFI_NO_UPDATE_CHECK', '');
   });
 
@@ -117,7 +136,7 @@ describe('checkForUpdate', () => {
   });
 
   it('short-circuits when a CI marker is set', async () => {
-    // CI='1' via beforeEach.
+    vi.stubEnv('CI', '1');
     const r = await checkForUpdate('0.1.0');
     expect(r.shouldUpdate).toBe(false);
     expect(r.cached).toBe(false);
