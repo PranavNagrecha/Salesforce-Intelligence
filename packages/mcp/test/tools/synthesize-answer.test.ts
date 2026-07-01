@@ -724,6 +724,222 @@ describe('annotation laundering check (P13-ANNOT-tools)', () => {
   });
 });
 
+// I3c (structural honesty — grounding guard). synthesize_answer is now
+// ABSENCE-AWARE: a draft that narrates "no X references this / it's unused /
+// safe to delete" over a source carrying an incomplete-coverage signal
+// (coverageCaveat / notModeled / retrievalHint / dataNotAvailable / partial
+// trust.completeness) is flagged grounded:false with the claim listed. Absence
+// over COMPLETE coverage, or no absence claim at all, stays grounded:true.
+describe('I3c absence-as-fact grounding guard', () => {
+  // The I3b empty-traversal caveat shape a graph tool emits on an EMPTY result.
+  const coverageCaveat = {
+    status: 'partial',
+    missingCoverage: ['ApexClass', 'Flow', 'ValidationRule'],
+    message:
+      'This is an EMPTY result. "Nothing references / uses this" can only be asserted for the dependency families the vault actually retrieved cannot be confirmed because the vault has incomplete coverage for: ApexClass, Flow, ValidationRule. Treat absence of dependencies in those families as "not checked", not "none".',
+  };
+  // A get_impact-shaped EMPTY result carrying the I3b caveat.
+  const emptyImpactWithCaveat = {
+    nodeId: 'CustomField:Account.Legacy_Code__c',
+    nodes: [],
+    edges: [],
+    coverageCaveat,
+    trust: {
+      provenance: 'offline_snapshot',
+      completeness: { status: 'partial', missingCoverage: ['ApexClass', 'Flow'] },
+    },
+  };
+
+  it('absence claim + INCOMPLETE coverage → grounded:false + the claim listed', async () => {
+    const r = await synthesizeAnswerHandler(ctx, {
+      input: emptyImpactWithCaveat,
+      draft:
+        'No flows or Apex reference CustomField:Account.Legacy_Code__c, so it is ' +
+        'safe to delete.',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.grounded).toBe(false);
+    expect(d.ungroundedAbsenceClaims).toBeDefined();
+    expect(d.ungroundedAbsenceClaims?.length).toBeGreaterThan(0);
+    // Both the "no flows…reference" and "safe to delete" absence assertions are
+    // in one sentence; the sentence is surfaced verbatim.
+    expect(
+      d.ungroundedAbsenceClaims?.some((c) => c.includes('safe to delete')),
+    ).toBe(true);
+    // The summary announces the guard fired.
+    expect(d.summary).toContain('grounded=false');
+  });
+
+  it('absence claim + COMPLETE coverage → grounded:true (no false positive)', async () => {
+    // Same empty result but NO incomplete-coverage signal (complete coverage).
+    const emptyImpactComplete = {
+      nodeId: 'CustomField:Account.Legacy_Code__c',
+      nodes: [],
+      edges: [],
+      trust: {
+        provenance: 'offline_snapshot',
+        completeness: { status: 'complete' },
+      },
+    };
+    const r = await synthesizeAnswerHandler(ctx, {
+      input: emptyImpactComplete,
+      draft:
+        'No flows or Apex reference CustomField:Account.Legacy_Code__c; it is ' +
+        'unused and safe to delete.',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.grounded).toBe(true);
+    expect(d.ungroundedAbsenceClaims).toEqual([]);
+    expect(d.summary).not.toContain('grounded=false');
+  });
+
+  it('NO absence claim → grounded:true even when coverage is incomplete', async () => {
+    // Coverage is partial, but the draft asserts a POSITIVE fact (a reference
+    // exists) — the guard only fires on ABSENCE assertions.
+    const r = await synthesizeAnswerHandler(ctx, {
+      input: emptyImpactWithCaveat,
+      draft:
+        'CustomField:Account.Legacy_Code__c is a plain text field on Account.',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.grounded).toBe(true);
+    expect(d.ungroundedAbsenceClaims).toEqual([]);
+  });
+
+  it('the two new fields are ADDITIVE and present only with a draft (no-draft = golden shape)', async () => {
+    const noDraft = await synthesizeAnswerHandler(ctx, {
+      input: emptyImpactWithCaveat,
+    });
+    expect(noDraft.ok).toBe(true);
+    if (!noDraft.ok) return;
+    // No draft → the draft-gated fields are absent (byte-identity with the
+    // no-draft golden preserved).
+    expect(noDraft.value.data.grounded).toBeUndefined();
+    expect(noDraft.value.data.ungroundedAbsenceClaims).toBeUndefined();
+    expect(noDraft.value.data.hallucinatedIds).toBeUndefined();
+
+    const withDraft = await synthesizeAnswerHandler(ctx, {
+      input: emptyImpactWithCaveat,
+      draft: 'CustomField:Account.Legacy_Code__c is a text field.',
+    });
+    expect(withDraft.ok).toBe(true);
+    if (!withDraft.ok) return;
+    // With a draft → both fields are ALWAYS present (structural, not opt-in).
+    expect(typeof withDraft.value.data.grounded).toBe('boolean');
+    expect(Array.isArray(withDraft.value.data.ungroundedAbsenceClaims)).toBe(true);
+  });
+
+  it('fires on notModeled=true (field_access_audit shape) — "no grants" over a not-modeled field', async () => {
+    const notModeledField = {
+      fieldId: 'CustomField:Contact.SSN__c',
+      notModeled: true,
+      notModeledNote: 'Definition not retrieved; grants from edges only.',
+      grants: [],
+    };
+    const r = await synthesizeAnswerHandler(ctx, {
+      input: notModeledField,
+      draft: 'Nothing grants access to CustomField:Contact.SSN__c.',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.grounded).toBe(false);
+    expect(
+      r.value.data.ungroundedAbsenceClaims?.some((c) => /nothing/i.test(c)),
+    ).toBe(true);
+  });
+
+  it('fires on a non-empty dataNotAvailable array (field_360 shape)', async () => {
+    const field360 = {
+      fieldId: 'CustomField:Opportunity.Amount',
+      writers: { rows: [] },
+      dataNotAvailable: ['list-view-filters', 'report-column-usage'],
+    };
+    const r = await synthesizeAnswerHandler(ctx, {
+      input: field360,
+      draft: 'No reports use CustomField:Opportunity.Amount.',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.grounded).toBe(false);
+    expect(r.value.data.ungroundedAbsenceClaims?.length).toBeGreaterThan(0);
+  });
+
+  it('fires on a retrievalHint string (list_components / FRESH-02 shape)', async () => {
+    const partialList = {
+      type: 'Flow',
+      components: [],
+      retrievalHint:
+        'This type was not retrieved by the last refresh; run /sfi-refresh for complete coverage.',
+    };
+    const r = await synthesizeAnswerHandler(ctx, {
+      input: partialList,
+      draft: 'There are no flows in this org.',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.grounded).toBe(false);
+  });
+
+  it('a caveat STRING that reads "not checked" is an incompleteness signal (no structured object needed)', async () => {
+    const stringOnlyCaveat = {
+      nodeId: 'CustomField:Case.Old_Status__c',
+      edges: [],
+      caveat:
+        'Treat absence of dependencies in those families as "not checked", not "none".',
+    };
+    const r = await synthesizeAnswerHandler(ctx, {
+      input: stringOnlyCaveat,
+      draft: 'No triggers reference CustomField:Case.Old_Status__c.',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.grounded).toBe(false);
+  });
+
+  it('a real deprecation-without-annotation is STILL flagged (claim-class generalization did not regress the lifecycle check)', async () => {
+    // The absence generalization must not weaken the annotation-laundering pass.
+    const bare = {
+      data: {
+        fieldId: 'CustomField:Contact.Fax__c',
+        trust: { provenance: 'offline_snapshot', completeness: { status: 'complete' } },
+      },
+    };
+    const r = await synthesizeAnswerHandler(ctx, {
+      input: bare,
+      draft: 'CustomField:Contact.Fax__c is deprecated, so removing it is fine.',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Deprecation without annotation → still flagged in ungroundedAnnotationClaims.
+    const claims = r.value.data.ungroundedAnnotationClaims ?? [];
+    expect(claims.length).toBe(1);
+    expect(claims[0]?.id).toBe('CustomField:Contact.Fax__c');
+    // Coverage is COMPLETE here and the draft makes no absence claim, so the
+    // absence guard stays grounded:true — the two guards are independent.
+    expect(r.value.data.grounded).toBe(true);
+    expect(r.value.data.ungroundedAbsenceClaims).toEqual([]);
+  });
+
+  it('an absence claim with NO source coverage signal at all stays grounded:true (bare positive source)', async () => {
+    // A source that carries neither a coverage signal nor a completeness block
+    // is treated as complete (never false-flag legacy/pre-v4 shapes).
+    const r = await synthesizeAnswerHandler(ctx, {
+      input: { nodeId: 'CustomObject:Account', edges: [] },
+      draft: 'Nothing references CustomObject:Account.',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.grounded).toBe(true);
+    expect(r.value.data.ungroundedAbsenceClaims).toEqual([]);
+  });
+});
+
 // Bundle 6 — structural caveat detectors added to synthesize_answer.
 // Each test covers one of the five bug classes in this bundle and uses a
 // REAL-org-shape fixture (the actual property names / XML element shapes
