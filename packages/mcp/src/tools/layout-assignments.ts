@@ -35,9 +35,10 @@ import type {
   ComponentId,
   McpError,
   McpResponse,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listNodesByType } from '@sf-intelligence/graph';
+import { getNodeById } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -48,7 +49,9 @@ import {
   layoutTargetsObject,
   readLayoutAssignments,
 } from './layout-for-user.js';
-import { nodeScanLimit, scanHitCap, scanTruncationNote } from './scan-cap.js';
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { clampedNodeScanLimit, scanTruncationNote } from './scan-cap.js';
 
 /** Canonical id prefix for the layout a caller reverse-looks-up. */
 const LAYOUT_PREFIX = 'Layout:';
@@ -63,10 +66,14 @@ const LAYOUT_PREFIX = 'Layout:';
 const DEFAULT_LIMIT = 120;
 const MAX_LIMIT = 250;
 
+const LAYOUT_ASSIGNMENTS_TOOL = 'sfi.layout_assignments';
+
 const layoutAssignmentsInputBaseSchema = z.object({
   componentId: z.string().min(1),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
+  // CR-22 continuation cursor from a prior truncated page's nextCursor.
+  cursor: z.string().min(1).optional(),
 });
 
 /** Zod schema for the `sfi.layout_assignments` tool input. */
@@ -120,11 +127,23 @@ export interface LayoutAssignmentsOutput {
   readonly hasMore: boolean;
   /** True when the inlined `assignments` is a partial page of the full list. */
   readonly truncated: boolean;
-  /** True when the Profile scan hit the per-type node cap — assignments may be incomplete. */
+  /**
+   * True only for a PATHOLOGICAL residual cap (a Profile scan past
+   * FULL_SCAN_MAX_NODES). The normal full multi-window scan reaches every
+   * Profile (including 501+) and completes, so this is false for any real org.
+   */
   readonly scanTruncated: boolean;
   readonly confidence: 'declared';
   /** Disclosure when the layout-assignment surface was not extracted, or scope caveats. */
   readonly boundaryNote: string;
+  /**
+   * CR-22 opaque continuation token, present ONLY when this page is truncated
+   * (more assignment rows remain). Echo it back as `cursor` to resume. Absent
+   * on a complete page so an in-budget response is byte-identical to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
 }
 
 const SCOPE_NOTE =
@@ -171,20 +190,21 @@ export const layoutAssignmentsHandler = async (
   const dot = afterPrefix.indexOf('.');
   const object = dot > 0 ? afterPrefix.slice(0, dot) : afterPrefix;
 
-  const scanLimit = nodeScanLimit();
-  const profilesResult = await listNodesByType(ctx.graph, 'Profile', {
-    limit: scanLimit,
-  });
-  if (!profilesResult.ok) {
-    return err({ kind: 'internal', message: `graph query failed: ${profilesResult.error.message}` });
+  // CR-22 B3: scan EVERY Profile by paging the SQL OFFSET forward (window-by-
+  // window at the clamped cap) so assignments owned by Profile 501+ are
+  // reachable — the single capped page used to drop the scan TAIL silently. The
+  // derived assignment list is then COMPLETE and paged on the output axis below.
+  const scan = await scanAllNodesOfTypes(ctx.graph, ['Profile']);
+  if (!scan.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${scan.error.message}` });
   }
-  const scanTruncated = scanHitCap(profilesResult.value.length, scanLimit);
+  const scanTruncated = scan.value.scanIncomplete;
 
   const assignments: LayoutAssignmentRef[] = [];
   const distinctProfiles = new Set<string>();
   let anyProfileHadAssignments = false;
 
-  for (const profile of profilesResult.value) {
+  for (const profile of scan.value.nodes) {
     const entries = readLayoutAssignments(profile);
     if (entries === null) continue; // property absent on this profile
     anyProfileHadAssignments = true;
@@ -202,11 +222,20 @@ export const layoutAssignmentsHandler = async (
     }
   }
 
+  // CR-22: total-order tiebreak. profileId then recordType then the raw record-
+  // type id makes the order a STRICT TOTAL order — two rows sharing profileId
+  // AND recordType previously compared equal (returned 0), so an offset resume
+  // could dup/skip at that tie. `recordTypeId` is the last distinguishing key;
+  // if even it ties, the rows are genuine duplicates (same profile, same RT,
+  // same layout) and ordering between them is immaterial.
   assignments.sort((a, b) => {
     if (a.profileId !== b.profileId) return a.profileId < b.profileId ? -1 : 1;
     const ra = a.recordType ?? '';
     const rb = b.recordType ?? '';
-    return ra < rb ? -1 : ra > rb ? 1 : 0;
+    if (ra !== rb) return ra < rb ? -1 : 1;
+    const ka = a.recordTypeId ?? '';
+    const kb = b.recordTypeId ?? '';
+    return ka < kb ? -1 : ka > kb ? 1 : 0;
   });
 
   // Complete counts BEFORE pagination — a widely-shared layout (Account is
@@ -214,15 +243,43 @@ export const layoutAssignmentsHandler = async (
   // so the inline list pages while the summary stays whole.
   const totalAssignments = assignments.length;
   const limit = input.limit ?? DEFAULT_LIMIT;
-  const offset = input.offset ?? 0;
-  const page = assignments.slice(offset, offset + limit);
-  const hasMore = offset + page.length < totalAssignments;
+
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // The fingerprint covers the narrowing arg `componentId` so a token minted for
+  // one layout can't be replayed against another.
+  const fingerprint = argsFingerprint({ componentId: layoutId });
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: LAYOUT_ASSIGNMENTS_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  const paged = paginateLegacy(assignments, {
+    offset,
+    limit,
+    keyOf: (a) => `${a.profileId}|${a.recordType ?? ''}|${a.recordTypeId ?? ''}`,
+    binding: {
+      tool: LAYOUT_ASSIGNMENTS_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const page = paged.items;
+  const hasMore = paged.hasMore;
   const truncated = hasMore || offset > 0;
+  const emitCursor = paged.nextCursor !== null;
 
   const pageNote = truncated
-    ? ` Showing assignments ${offset}–${offset + page.length} of ${totalAssignments}; summary holds the COMPLETE counts. Page with offset/limit.`
+    ? ` Showing assignments ${offset}–${offset + page.length} of ${totalAssignments}; summary holds the COMPLETE counts. Page with offset/limit or the returned cursor.`
     : '';
-  const scanNote = scanTruncated ? ` ${scanTruncationNote(['Profile'])}` : '';
+  const scanNote = scanTruncated
+    ? ` ${scanTruncationNote(['Profile'], clampedNodeScanLimit())}`
+    : '';
   const boundaryNote = anyProfileHadAssignments
     ? `${SCOPE_NOTE}${pageNote}${scanNote}`
     : `No profile in this vault carries an extracted \`layoutAssignments\` property, so layout assignments could not be evaluated — the result is "not modeled", not a verified "no assignments". Re-run \`/sfi-refresh\` to populate it. ${SCOPE_NOTE}${scanNote}`;
@@ -240,6 +297,9 @@ export const layoutAssignmentsHandler = async (
       scanTruncated,
       confidence: 'declared',
       boundaryNote,
+      ...(emitCursor
+        ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo }
+        : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

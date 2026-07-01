@@ -164,12 +164,15 @@ const richSeed: ExtractionResult = {
     }),
     // Flow caller — methodName is NOT in the Flow edge properties; the
     // tool should accept it anyway because Flow XML declares actions
-    // at the class level.
+    // at the class level. CR-CAP-08: the real flow.ts extractor emits
+    // Flow callsApex at confidence 'parsed' (it parses the <actionCalls>
+    // XML), NOT 'declared'. Seed the realistic value so the per-item
+    // confidence assertion guards real behaviour.
     makeEdge({
       fromId: FLOW_CALLER,
       toId: TARGET_CLASS,
       edgeType: 'callsApex',
-      confidence: 'declared',
+      confidence: 'parsed',
       source: 'flow-extractor',
     }),
     // LWC caller with declared confidence.
@@ -326,6 +329,29 @@ describe('whatIfChangeMethodSignatureHandler', () => {
     expect(byId.get(FLOW_CALLER)?.category).toBe('code-needs-update');
   });
 
+  it('stamps per-caller confidence from the edge: Apex=heuristic, LWC=declared, Flow=parsed', async () => {
+    // CR-CAP-08 regression guard. The tool stamps item.confidence from
+    // edge.confidence, so the three real upstream tiers must survive
+    // round-trip and NOT collapse to one blanket "heuristic" tier.
+    const result = await whatIfChangeMethodSignatureHandler(ctx, {
+      classApiName: TARGET_CLASS,
+      methodName: 'processOpp',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const byId = new Map(
+      result.value.data.callingClasses.map((c) => [c.componentId, c]),
+    );
+    // Apex caller / trigger caller come from the heuristic apex-scanner.
+    expect(byId.get(APEX_CALLER)?.confidence).toBe('heuristic');
+    expect(byId.get(TRIGGER_CALLER)?.confidence).toBe('heuristic');
+    // LWC caller is the declarative @salesforce/apex import.
+    expect(byId.get(LWC_CALLER)?.confidence).toBe('declared');
+    // Flow caller is parsed out of the <actionCalls> XML by flow.ts —
+    // it is 'parsed', NOT 'declared' and NOT 'heuristic'.
+    expect(byId.get(FLOW_CALLER)?.confidence).toBe('parsed');
+  });
+
   it('emits a parallel testClassesNeedingUpdate list with both test classes', async () => {
     const result = await whatIfChangeMethodSignatureHandler(ctx, {
       classApiName: TARGET_CLASS,
@@ -452,6 +478,25 @@ describe('whatIfChangeMethodSignatureHandler', () => {
     expect(result.value.data.disclosure).toContain('heuristic confidence');
     expect(result.value.data.disclosure).toContain('Type.forName');
     expect(result.value.data.disclosure).toContain('coversTest');
+  });
+
+  it('disclosure is per-source-honest: admits Flow=parsed and LWC=declared, not a blanket all-heuristic claim', async () => {
+    // CR-CAP-08: the old disclosure made a blanket "callers identified
+    // via the apex-scanner are at heuristic confidence" claim, which is
+    // false — Flow callers are parsed (flow.ts) and LWC callers are
+    // declared. The disclosure must admit the mixed tiers.
+    const result = await whatIfChangeMethodSignatureHandler(ctx, {
+      classApiName: TARGET_CLASS,
+      methodName: 'processOpp',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const disclosure = result.value.data.disclosure;
+    expect(disclosure).toContain('parsed');
+    expect(disclosure).toContain('declared');
+    // No blanket "all callers ... heuristic" / "via the apex-scanner ...
+    // heuristic" sweep that erases the parsed/declared tiers.
+    expect(disclosure).not.toMatch(/all callers[^.]*heuristic/i);
   });
 
   it('echoes the manifest vaultState into the response envelope', async () => {
@@ -592,5 +637,147 @@ describe('whatIfChangeMethodSignatureHandler: methods[] edge (P4-C5)', () => {
     expect(
       result.value.data.callingClasses.map((c) => c.componentId),
     ).not.toContain(SERVICE);
+  });
+});
+
+// =============================================================================
+// CR-CAP-06: callerMethods enrichment — surfaced PER TARGET METHOD (no phantom
+// cross-method attribution). The AST aggregation threads
+// `callerMethodsByMethod` (target method -> caller methods) so what_if can
+// pinpoint which method of the caller holds the call-site to the SPECIFIC
+// queried method, WITHOUT claiming a sibling caller method calls it.
+// =============================================================================
+describe('whatIfChangeMethodSignatureHandler: callerMethods (CR-CAP-06)', () => {
+  const TARGET = 'ApexClass:Callee';
+  const CALLER = 'ApexClass:Caller';
+  let dir3: string;
+  let store3: GraphStore;
+  let ctx3: Context;
+
+  beforeAll(async () => {
+    dir3 = mkdtempSync(join(tmpdir(), 'sfi-mcp-wcms-callermethods-'));
+    const opened = await openGraph(join(dir3, 'cm.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    store3 = opened.value;
+    // Caller.a() calls Callee.foo(); Caller.b() calls Callee.bar().
+    // ONE callsApex edge (class->class), AST-extracted: methods=['bar','foo'],
+    // callerMethods (union)=['a','b'], partitioned: foo<-a, bar<-b.
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: TARGET, type: 'ApexClass', apiName: 'Callee' }),
+        makeNode({ id: CALLER, type: 'ApexClass', apiName: 'Caller' }),
+      ],
+      edges: [
+        makeEdge({
+          fromId: CALLER,
+          toId: TARGET,
+          edgeType: 'callsApex',
+          confidence: 'parsed',
+          source: 'apex-ast',
+          properties: {
+            methods: ['bar', 'foo'],
+            callerMethods: ['a', 'b'],
+            callerMethodsByMethod: { foo: ['a'], bar: ['b'] },
+            viaAst: true,
+          },
+        }),
+      ],
+    };
+    const imported = await importExtractionResults(store3, [seed]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    ctx3 = { vaultRoot: dir3, manifest: FIXTURE_MANIFEST, graph: store3 };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store3);
+    rmSync(dir3, { recursive: true, force: true });
+  });
+
+  it('surfaces ONLY the caller method that calls the queried method (no cross-method phantom)', async () => {
+    // Changing Callee.foo → caller method a() holds the call-site; b() does NOT
+    // call foo (it calls bar), so b must NEVER appear.
+    const result = await whatIfChangeMethodSignatureHandler(ctx3, {
+      classApiName: 'Callee',
+      methodName: 'foo',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const item = result.value.data.callingClasses.find((c) => c.componentId === CALLER);
+    expect(item).toBeDefined();
+    expect(item?.callerMethods).toEqual(['a']);
+    expect(item?.callerMethods).not.toContain('b');
+    // Explanation pinpoints the method.
+    expect(item?.explanation).toMatch(/call-site in method 'a'/);
+  });
+
+  it('surfaces the OTHER caller method when changing the other target method', async () => {
+    const result = await whatIfChangeMethodSignatureHandler(ctx3, {
+      classApiName: 'Callee',
+      methodName: 'bar',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const item = result.value.data.callingClasses.find((c) => c.componentId === CALLER);
+    expect(item?.callerMethods).toEqual(['b']);
+    expect(item?.callerMethods).not.toContain('a');
+  });
+
+  it('verdict + dedup are UNCHANGED — callerMethods only enriches', async () => {
+    // One AST caller of foo → still risky; the caller still surfaces exactly
+    // once at class granularity (overloaded/collapsed names never narrow it).
+    const result = await whatIfChangeMethodSignatureHandler(ctx3, {
+      classApiName: 'Callee',
+      methodName: 'foo',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.verdict).toBe('risky');
+    expect(
+      result.value.data.callingClasses.filter((c) => c.componentId === CALLER).length,
+    ).toBe(1);
+  });
+
+  it('absent callerMethods (scanner-path edge) omits the field — never [] (honesty boundary)', async () => {
+    // A scanner-path callsApex edge (no callerMethods key) must surface the
+    // caller WITHOUT a callerMethods field — absent === unknown caller method.
+    const dir4 = mkdtempSync(join(tmpdir(), 'sfi-mcp-wcms-scanner-'));
+    const opened = await openGraph(join(dir4, 's.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const store4 = opened.value;
+    try {
+      const seed: ExtractionResult = {
+        nodes: [
+          makeNode({ id: TARGET, type: 'ApexClass', apiName: 'Callee' }),
+          makeNode({ id: 'ApexClass:ScanCaller', type: 'ApexClass', apiName: 'ScanCaller' }),
+        ],
+        edges: [
+          makeEdge({
+            fromId: 'ApexClass:ScanCaller',
+            toId: TARGET,
+            edgeType: 'callsApex',
+            confidence: 'heuristic',
+            source: 'apex-scanner',
+            properties: { methods: ['foo'] },
+          }),
+        ],
+      };
+      const imported = await importExtractionResults(store4, [seed]);
+      if (!imported.ok) throw new Error(imported.error.message);
+      const ctx4: Context = { vaultRoot: dir4, manifest: FIXTURE_MANIFEST, graph: store4 };
+      const result = await whatIfChangeMethodSignatureHandler(ctx4, {
+        classApiName: 'Callee',
+        methodName: 'foo',
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const item = result.value.data.callingClasses.find(
+        (c) => c.componentId === 'ApexClass:ScanCaller',
+      );
+      expect(item).toBeDefined();
+      expect(Object.hasOwn(item as object, 'callerMethods')).toBe(false);
+    } finally {
+      await closeGraph(store4);
+      rmSync(dir4, { recursive: true, force: true });
+    }
   });
 });

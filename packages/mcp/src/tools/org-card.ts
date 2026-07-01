@@ -22,6 +22,19 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  buildEnumerationCoverageCaveatFor,
+  type CoverageCaveat,
+} from './coverage-trust.js';
+
+/**
+ * coverage-aware-zero (CR): the legacy-automation families the card's
+ * automation counts summarize. When the manifest reports either was NOT
+ * retrieved, an automation count of 0 on the card is "not retrieved,
+ * re-refresh" — never a proven "no legacy automation".
+ */
+const CARD_AUTOMATION_COVERAGE = ['WorkflowRule', 'ApprovalProcess'] as const;
+
 /** Zod schema for `sfi.org_card` — no inputs; the card is one per vault. */
 export const orgCardInputSchema = z.object({});
 
@@ -35,6 +48,14 @@ export interface OrgCardToolOutput {
   readonly card?: Readonly<Record<string, unknown>>;
   /** Honest next step when the card is absent. */
   readonly remedy?: string;
+  /**
+   * coverage-aware-zero (CR): present when the card is served but the manifest
+   * reports the legacy-automation families (WorkflowRule / ApprovalProcess) the
+   * card's automation counts summarize were NOT retrieved. A 0 automation count
+   * under this caveat is "not retrieved, re-refresh", NOT a proven "none".
+   * Absent on a legacy (no-coverage) vault and on a confirmed-clean retrieve.
+   */
+  readonly coverageCaveat?: CoverageCaveat;
 }
 
 const ABSENT_REMEDY =
@@ -77,8 +98,17 @@ export const orgCardHandler = async (
       message: `meta/org-card.json is unreadable (corrupt JSON) — re-run \`sfi refresh --no-pull\` to regenerate it.`,
     });
   }
+  const coverageCaveat = buildEnumerationCoverageCaveatFor(
+    ctx,
+    CARD_AUTOMATION_COVERAGE,
+    'The card automation counts',
+  );
   return ok({
-    data: { available: true, card },
+    data: {
+      available: true,
+      card,
+      ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
+    },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
       refreshedAt: ctx.manifest.refreshedAt,

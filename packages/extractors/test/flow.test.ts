@@ -459,7 +459,11 @@ describe('extractFlow', () => {
             edgeType: 'writesTo',
             confidence: 'parsed',
             source: 'flow-extractor',
-            properties: { operation: 'recordUpdate' },
+            properties: {
+              operation: 'recordUpdate',
+              assignedValue: 'Updated',
+              assignedValueKind: 'literal',
+            },
           },
           {
             fromId: flowId,
@@ -467,7 +471,11 @@ describe('extractFlow', () => {
             edgeType: 'writesTo',
             confidence: 'parsed',
             source: 'flow-extractor',
-            properties: { operation: 'recordCreate' },
+            properties: {
+              operation: 'recordCreate',
+              assignedValue: 'Follow up',
+              assignedValueKind: 'literal',
+            },
           },
           {
             fromId: flowId,
@@ -564,6 +572,10 @@ describe('extractFlow', () => {
         const flowId = 'Flow:CreatePayment';
         const writesTo = result.value.edges.filter((e) => e.edgeType === 'writesTo');
         // 1 object-level + 2 field-level, all operation=recordCreate.
+        // R2-1: field-level edges also carry the assigned <value> — the
+        // Amount__c via an elementReference (kind 'reference'), the
+        // Status__c via a stringValue literal (kind 'literal'). The
+        // object-level edge carries no assignedValue.
         expect(writesTo).toEqual([
           {
             fromId: flowId,
@@ -571,7 +583,11 @@ describe('extractFlow', () => {
             edgeType: 'writesTo',
             confidence: 'parsed',
             source: 'flow-extractor',
-            properties: { operation: 'recordCreate' },
+            properties: {
+              operation: 'recordCreate',
+              assignedValue: 'vAmount',
+              assignedValueKind: 'reference',
+            },
           },
           {
             fromId: flowId,
@@ -579,7 +595,11 @@ describe('extractFlow', () => {
             edgeType: 'writesTo',
             confidence: 'parsed',
             source: 'flow-extractor',
-            properties: { operation: 'recordCreate' },
+            properties: {
+              operation: 'recordCreate',
+              assignedValue: 'Pending',
+              assignedValueKind: 'literal',
+            },
           },
           {
             fromId: flowId,
@@ -590,6 +610,61 @@ describe('extractFlow', () => {
             properties: { operation: 'recordCreate' },
           },
         ]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('stamps assignedValue/assignedValueKind=literal for a stringValue assignment and kind=reference for an elementReference (R2-1)', async () => {
+      // R2-1: the field-level writesTo edge must record WHICH value the flow
+      // assigns AND whether it is a literal (statically comparable) or a
+      // reference (variable/formula/$Record — NOT comparable). A consumer
+      // (what_if_remove_picklist_value) must only literal-match.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Set Status</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <recordCreates>
+        <name>Create_Payment</name>
+        <object>Payment__c</object>
+        <inputAssignments>
+            <field>Status__c</field>
+            <value><stringValue>Completed</stringValue></value>
+        </inputAssignments>
+        <inputAssignments>
+            <field>Owner_Region__c</field>
+            <value><elementReference>$Record.Region__c</elementReference></value>
+        </inputAssignments>
+    </recordCreates>
+</Flow>`;
+      const { dir, path } = await writeTempXml('SetStatus.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const byTo = new Map(
+          result.value.edges
+            .filter((e) => e.edgeType === 'writesTo')
+            .map((e) => [e.toId, e]),
+        );
+        // Literal assignment: kind 'literal', value verbatim.
+        expect(
+          byTo.get('CustomField:Payment__c.Status__c')?.properties,
+        ).toEqual({
+          operation: 'recordCreate',
+          assignedValue: 'Completed',
+          assignedValueKind: 'literal',
+        });
+        // elementReference assignment: kind 'reference' (NOT a literal).
+        expect(
+          byTo.get('CustomField:Payment__c.Owner_Region__c')?.properties,
+        ).toEqual({
+          operation: 'recordCreate',
+          assignedValue: '$Record.Region__c',
+          assignedValueKind: 'reference',
+        });
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
@@ -726,6 +801,288 @@ describe('extractFlow', () => {
               e.toId === 'CustomField:Disability__c.Verification_Status__c',
           ),
         ).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('resolves <inputReference>$Record on a Scheduled Flow to the <start><object> (no spurious "no object" warning)', async () => {
+      // A scheduled flow runs over the records matching its schedule filter on
+      // <start><object>. An <inputReference>$Record</inputReference> update
+      // inside it writes to THAT same object — it is NOT a cross-object write,
+      // and it must NOT be dropped with a "has no <object>" warning. Mirrors
+      // Close_the_Mid_Point_Feedbacks: scheduled on a course object, $Record
+      // update sets a status field on the same object.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Close Feedbacks</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Draft</status>
+    <start>
+        <object>Schedule_Target__c</object>
+        <schedule>
+            <frequency>Daily</frequency>
+            <startDate>2023-10-22</startDate>
+            <startTime>06:00:00.000Z</startTime>
+        </schedule>
+        <triggerType>Scheduled</triggerType>
+    </start>
+    <recordUpdates>
+        <name>Close_the_Course</name>
+        <inputReference>$Record</inputReference>
+        <inputAssignments>
+            <field>Status__c</field>
+            <value><stringValue>Close</stringValue></value>
+        </inputAssignments>
+    </recordUpdates>
+</Flow>`;
+      const { dir, path } = await writeTempXml('Scheduled.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        // The $Record update resolves to the scheduled object (heuristic), so
+        // it emits read+write edges to the SAME object instead of being skipped.
+        const updateEdges = result.value.edges.filter(
+          (e) =>
+            e.toId === 'CustomObject:Schedule_Target__c' &&
+            e.properties?.['operation'] === 'recordUpdate',
+        );
+        expect(updateEdges.some((e) => e.edgeType === 'readsFrom')).toBe(true);
+        expect(updateEdges.some((e) => e.edgeType === 'writesTo')).toBe(true);
+        for (const e of updateEdges) expect(e.confidence).toBe('heuristic');
+        // field-level write to the same object's status field.
+        expect(
+          result.value.edges.some(
+            (e) =>
+              e.edgeType === 'writesTo' &&
+              e.toId === 'CustomField:Schedule_Target__c.Status__c',
+          ),
+        ).toBe(true);
+        // No spurious "has no <object>" warning for the resolved $Record update.
+        const warnings =
+          (result.value.nodes[0]?.properties['flowExtractionWarnings'] as
+            | readonly string[]
+            | undefined) ?? [];
+        expect(
+          warnings.some((w) => w.includes('<recordUpdates>') && w.includes('no <object>')),
+        ).toBe(false);
+        // A scheduled flow does NOT get a record-trigger `triggersOn` edge.
+        expect(
+          result.value.edges.some((e) => e.edgeType === 'triggersOn'),
+        ).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('surfaces every <actionCalls> {actionType, actionName} (apex AND non-apex) on the flow node (bundle-4 a)', async () => {
+      // A non-apex actionCall (activateSessionPermSet) emits NO callsApex edge
+      // — but it must still be identifiable. Without node.properties.actionCalls
+      // explain_flow sees actionCalls:[] and cannot name the faultable element.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Activate Contact Delete Permission</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <actionCalls>
+        <name>Activate_Session</name>
+        <actionType>activateSessionPermSet</actionType>
+        <actionName>Contact_Delete</actionName>
+    </actionCalls>
+    <actionCalls>
+        <name>Call_Apex</name>
+        <actionType>apex</actionType>
+        <actionName>MyApexAction</actionName>
+    </actionCalls>
+</Flow>`;
+      const { dir, path } = await writeTempXml('ActionCalls.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        // The non-apex call emits NO callsApex edge (a callsApex edge to an
+        // ApexClass would be a lie for activateSessionPermSet).
+        const callsApex = result.value.edges.filter(
+          (e) => e.edgeType === 'callsApex',
+        );
+        expect(callsApex.map((e) => e.toId)).toEqual(['ApexClass:MyApexAction']);
+        // But BOTH action calls are surfaced on the node, in source order, so
+        // the consumer can identify activateSessionPermSet (a transient session
+        // activation, not a PermissionSetAssignment insert).
+        expect(result.value.nodes[0]?.properties['actionCalls']).toEqual([
+          { actionType: 'activateSessionPermSet', actionName: 'Contact_Delete' },
+          { actionType: 'apex', actionName: 'MyApexAction' },
+        ]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('defaults actionCalls to an empty list when the flow has none (bundle-4 a)', async () => {
+      const { dir, path } = await writeTempXml('NoActions.flow-meta.xml', VALID_XML);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.nodes[0]?.properties['actionCalls']).toEqual([]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('surfaces an AsyncAfterCommit <scheduledPaths> path on the node (bundle-4 c)', async () => {
+      // A record-triggered after-save flow with an immediate-async post-commit
+      // scheduled path. explain_flow.buildFaultRollback reads runAsyncAfterCommit
+      // / scheduledPathTypes to know the fault cannot roll back the committed save.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Contract Hours</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <start>
+        <object>Contact</object>
+        <recordTriggerType>CreateAndUpdate</recordTriggerType>
+        <triggerType>RecordAfterSave</triggerType>
+        <scheduledPaths>
+            <name>run_async</name>
+            <pathType>AsyncAfterCommit</pathType>
+        </scheduledPaths>
+    </start>
+</Flow>`;
+      const { dir, path } = await writeTempXml('AsyncPath.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const props = result.value.nodes[0]?.properties;
+        expect(props?.['scheduledPathTypes']).toEqual(['AsyncAfterCommit']);
+        expect(props?.['runAsyncAfterCommit']).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('treats a time-based (non-async) scheduled path as not AsyncAfterCommit (bundle-4 c)', async () => {
+      // A scheduled path with a real delay (no AsyncAfterCommit pathType) must
+      // NOT flip runAsyncAfterCommit — only the immediate post-commit async path
+      // qualifies for the async fault-rollback verdict.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Delayed Path</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <start>
+        <object>Contact</object>
+        <recordTriggerType>CreateAndUpdate</recordTriggerType>
+        <triggerType>RecordAfterSave</triggerType>
+        <scheduledPaths>
+            <name>one_day_later</name>
+            <offsetNumber>1</offsetNumber>
+            <offsetUnit>Days</offsetUnit>
+            <timeSource>RecordTriggerEvent</timeSource>
+        </scheduledPaths>
+    </start>
+</Flow>`;
+      const { dir, path } = await writeTempXml('DelayedPath.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const props = result.value.nodes[0]?.properties;
+        // No <pathType> declared → empty list, flag stays false.
+        expect(props?.['scheduledPathTypes']).toEqual([]);
+        expect(props?.['runAsyncAfterCommit']).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('defaults scheduledPathTypes/runAsyncAfterCommit for a flow without <start> (bundle-4 c)', async () => {
+      const { dir, path } = await writeTempXml('NoStart.flow-meta.xml', VALID_XML);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const props = result.value.nodes[0]?.properties;
+        expect(props?.['scheduledPathTypes']).toEqual([]);
+        expect(props?.['runAsyncAfterCommit']).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('sets hasImmediateConnector true when <start> has a direct <connector> (sync after-save)', async () => {
+      // A record-triggered after-save flow whose <start> carries a direct
+      // <connector> fires synchronously within the triggering transaction —
+      // it belongs in post-save-flows, not post-save-async.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>61.0</apiVersion>
+    <label>Sync After Save</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <start>
+        <object>Account</object>
+        <recordTriggerType>CreateAndUpdate</recordTriggerType>
+        <triggerType>RecordAfterSave</triggerType>
+        <connector>
+            <targetReference>firstStep</targetReference>
+        </connector>
+    </start>
+    <assignments>
+        <name>firstStep</name>
+        <label>First Step</label>
+        <locationX>176</locationX>
+        <locationY>134</locationY>
+    </assignments>
+</Flow>`;
+      const { dir, path } = await writeTempXml('SyncAfterSave.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const props = result.value.nodes[0]?.properties;
+        expect(props?.['hasImmediateConnector']).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('sets hasImmediateConnector false when <start> has only <scheduledPaths> (async-only)', async () => {
+      // A record-triggered after-save flow whose <start> has ONLY
+      // <scheduledPaths> and NO direct <connector> is a scheduled-only
+      // (async) flow — it fires only via its time-offset paths and must be
+      // placed in post-save-async, not post-save-flows.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>61.0</apiVersion>
+    <label>Scheduled Only After Save</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <start>
+        <object>Contact</object>
+        <recordTriggerType>CreateAndUpdate</recordTriggerType>
+        <triggerType>RecordAfterSave</triggerType>
+        <scheduledPaths>
+            <name>six_hours_later</name>
+            <offsetNumber>6</offsetNumber>
+            <offsetUnit>Hours</offsetUnit>
+            <timeSource>RecordTriggerEvent</timeSource>
+        </scheduledPaths>
+    </start>
+</Flow>`;
+      const { dir, path } = await writeTempXml('ScheduledOnly.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const props = result.value.nodes[0]?.properties;
+        expect(props?.['hasImmediateConnector']).toBe(false);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
@@ -918,6 +1275,67 @@ describe('extractFlow', () => {
         );
         expect(listensTo).toBeUndefined();
         expect(triggersOn?.toId).toBe('CustomObject:Account');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('T7 — scheduled-Flow <start><schedule> extraction', () => {
+    it('stamps scheduleFrequency/scheduleStartDate/scheduleStartTime on the Flow node', async () => {
+      // A scheduled flow declares its cadence under <start><schedule>.
+      // startTime is UTC (trailing Z); the extractor stamps it verbatim and
+      // consumers disclose the UTC framing.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Scheduled Payment Status Update</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <start>
+        <schedule>
+            <frequency>Weekly</frequency>
+            <startDate>2024-11-09</startDate>
+            <startTime>08:00:00.000Z</startTime>
+        </schedule>
+        <triggerType>Scheduled</triggerType>
+    </start>
+</Flow>`;
+      const { dir, path } = await writeTempXml('Scheduled.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const props = result.value.nodes[0]?.properties;
+        expect(props?.['scheduleFrequency']).toBe('Weekly');
+        expect(props?.['scheduleStartDate']).toBe('2024-11-09');
+        expect(props?.['scheduleStartTime']).toBe('08:00:00.000Z');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('leaves all three schedule properties null when <start> has no <schedule>', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Record Triggered</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <start>
+        <object>Account</object>
+        <triggerType>RecordAfterSave</triggerType>
+    </start>
+</Flow>`;
+      const { dir, path } = await writeTempXml('NoSchedule.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const props = result.value.nodes[0]?.properties;
+        expect(props?.['scheduleFrequency']).toBeNull();
+        expect(props?.['scheduleStartDate']).toBeNull();
+        expect(props?.['scheduleStartTime']).toBeNull();
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

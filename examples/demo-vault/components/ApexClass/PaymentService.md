@@ -28,12 +28,12 @@ properties:
       rule: missing-fls-check
       severity: high
     - confidence: heuristic
-      explanation: "DML 'insert payment' executes without a preceding CRUD check. Add Schema.sObjectType.X.is{Createable|Updateable|Deletable}() or use WITH SECURITY_ENFORCED / USER_MODE."
+      explanation: "DML 'insert payment' executes without a preceding object-level CRUD check. Add Schema.sObjectType.X.is{Createable|Updateable|Deletable}(), run the DML in user mode (`insert x as user` / `Database.insert(x, AccessLevel.USER_MODE)`), or strip with Security.stripInaccessible. NOTE: a SOQL `WITH SECURITY_ENFORCED` / `USER_MODE` clause enforces READ FLS on the query and does NOT authorize this write."
       location: line 30
       rule: missing-crud-check
       severity: high
     - confidence: heuristic
-      explanation: "DML 'update invoice' executes without a preceding CRUD check. Add Schema.sObjectType.X.is{Createable|Updateable|Deletable}() or use WITH SECURITY_ENFORCED / USER_MODE."
+      explanation: "DML 'update invoice' executes without a preceding object-level CRUD check. Add Schema.sObjectType.X.is{Createable|Updateable|Deletable}(), run the DML in user mode (`update x as user` / `Database.update(x, AccessLevel.USER_MODE)`), or strip with Security.stripInaccessible. NOTE: a SOQL `WITH SECURITY_ENFORCED` / `USER_MODE` clause enforces READ FLS on the query and does NOT authorize this write."
       location: line 39
       rule: missing-crud-check
       severity: high

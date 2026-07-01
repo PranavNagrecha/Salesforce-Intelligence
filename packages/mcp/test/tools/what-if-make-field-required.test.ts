@@ -56,6 +56,9 @@ const FIXTURE_MANIFEST: VaultManifest = {
     'VisualforcePage',
     'VisualforceComponent',
     'FlexiPage',
+    // CR-CAP-01: declarative-populator families now in MAKE_REQUIRED_COVERAGE.
+    'WorkflowRule',
+    'ApprovalProcess',
   ]),
 };
 
@@ -98,6 +101,12 @@ const FLOW_CREATE_WITH_FIELD = 'Flow:FullCreateAccount';
 // pre-fix consumer missed — it must still be flagged blocking for TARGET_FIELD.
 const FLOW_CREATE_BARE = 'Flow:BareCreateAccount';
 const EXT_SVC_ID = 'ExternalService:LegacyCRMSync';
+// CR-CAP-01: declarative populators of TARGET_FIELD discovered via inbound
+// writesTo edges. A WorkflowRule field-update (CR-05) and an ApprovalProcess
+// field-update (CR-CAP-07) — both conditional writers that must be credited as
+// informational `configuration-only` findings WITHOUT making the verdict safe.
+const WF_RULE_STAMP = 'WorkflowRule:Account.Stamp';
+const APPROVAL_STAMP = 'ApprovalProcess:Account.Credit_Review';
 
 const seed: ExtractionResult = {
   nodes: [
@@ -183,6 +192,20 @@ const seed: ExtractionResult = {
       id: 'ListView:Account.By_Industry',
       type: 'ListView',
       apiName: 'Account.By_Industry',
+    }),
+    // CR-CAP-01: a WorkflowRule + an ApprovalProcess that each set TARGET_FIELD
+    // via a (conditional) field-update.
+    makeNode({
+      id: WF_RULE_STAMP,
+      type: 'WorkflowRule',
+      apiName: 'Account.Stamp',
+      parentId: ACCOUNT_OBJ,
+    }),
+    makeNode({
+      id: APPROVAL_STAMP,
+      type: 'ApprovalProcess',
+      apiName: 'Account.Credit_Review',
+      parentId: ACCOUNT_OBJ,
     }),
   ],
   edges: [
@@ -272,6 +295,24 @@ const seed: ExtractionResult = {
       fromId: EXT_SVC_ID,
       toId: ACCOUNT_OBJ,
       edgeType: 'references',
+    }),
+    // CR-CAP-01: WorkflowRule field-update writesTo TARGET_FIELD (CR-05 shape).
+    makeEdge({
+      fromId: WF_RULE_STAMP,
+      toId: TARGET_FIELD,
+      edgeType: 'writesTo',
+      source: 'workflow-rule-extractor',
+      confidence: 'parsed',
+      properties: { operation: 'Literal' },
+    }),
+    // CR-CAP-01: ApprovalProcess field-update writesTo TARGET_FIELD (CR-CAP-07 shape).
+    makeEdge({
+      fromId: APPROVAL_STAMP,
+      toId: TARGET_FIELD,
+      edgeType: 'writesTo',
+      source: 'approval-process-extractor',
+      confidence: 'parsed',
+      properties: { hookType: 'finalApproval', operation: 'Literal' },
     }),
   ],
 };
@@ -504,6 +545,144 @@ describe('whatIfMakeFieldRequiredHandler', () => {
     if (!result.ok) return;
     expect(result.value.data.coverageCaveat?.missingCoverage).toContain('FlexiPage');
   });
+
+  // === CR-CAP-01: declarative populator coverage ===
+  describe('CR-CAP-01 — declarative populator coverage', () => {
+    it('credits a WorkflowRule field-update writer as a configuration-only populator (FAIL-BEFORE: zero impacts)', async () => {
+      // FAIL-BEFORE: the tool never walked the field's inbound writesTo edges,
+      // so a field written ONLY by a WorkflowRule/ApprovalProcess produced ZERO
+      // populator impacts and the verdict missed them entirely.
+      const result = await whatIfMakeFieldRequiredHandler(ctx, {
+        fieldId: TARGET_FIELD,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const wf = result.value.data.impacts.find(
+        (i) => i.componentId === WF_RULE_STAMP,
+      );
+      expect(wf).toBeDefined();
+      expect(wf?.category).toBe('configuration-only');
+      expect(wf?.componentType).toBe('WorkflowRule');
+      expect(wf?.confidence).toBe('parsed');
+    });
+
+    it('credits an ApprovalProcess field-update writer as a configuration-only populator', async () => {
+      const result = await whatIfMakeFieldRequiredHandler(ctx, {
+        fieldId: TARGET_FIELD,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const ap = result.value.data.impacts.find(
+        (i) => i.componentId === APPROVAL_STAMP,
+      );
+      expect(ap).toBeDefined();
+      expect(ap?.category).toBe('configuration-only');
+      expect(ap?.componentType).toBe('ApprovalProcess');
+    });
+
+    it('honesty: the populator explanation states it does NOT guarantee population (conditional, not exculpatory)', async () => {
+      const result = await whatIfMakeFieldRequiredHandler(ctx, {
+        fieldId: TARGET_FIELD,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const wf = result.value.data.impacts.find(
+        (i) => i.componentId === WF_RULE_STAMP,
+      );
+      const ap = result.value.data.impacts.find(
+        (i) => i.componentId === APPROVAL_STAMP,
+      );
+      // WorkflowRule: conditional on entry criteria.
+      expect(wf?.explanation).toContain('fires only when');
+      expect(wf?.explanation).toContain('does not guarantee');
+      expect(wf?.explanation).toContain('safe to require');
+      // ApprovalProcess: conditional on hook + going through approval.
+      expect(ap?.explanation).toContain('approval hook');
+      expect(ap?.explanation).toContain('does not guarantee');
+    });
+
+    it('honesty: a populator alone NEVER yields verdict safe (stays review or higher)', async () => {
+      // A field whose ONLY findings are declarative populators must NOT be
+      // reported safe — a conditional writer is informational, not exculpatory.
+      // Seed an isolated field written only by a WorkflowRule, on its own graph.
+      const isoDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-wi-mfr-iso-'));
+      const isoDb = join(isoDir, 'iso.db');
+      const opened = await openGraph(isoDb);
+      expect(opened.ok).toBe(true);
+      if (!opened.ok) return;
+      const isoStore = opened.value;
+      try {
+        const ISO_OBJ = 'CustomObject:Iso';
+        const ISO_FIELD = 'CustomField:Iso.OnlyPopulatedByWf';
+        const ISO_WF = 'WorkflowRule:Iso.OnlyWriter';
+        const isoSeed: ExtractionResult = {
+          nodes: [
+            makeNode({ id: ISO_OBJ, apiName: 'Iso' }),
+            makeNode({
+              id: ISO_FIELD,
+              type: 'CustomField',
+              apiName: 'OnlyPopulatedByWf',
+              parentId: ISO_OBJ,
+              properties: { type: 'Text', required: false },
+            }),
+            makeNode({
+              id: ISO_WF,
+              type: 'WorkflowRule',
+              apiName: 'Iso.OnlyWriter',
+              parentId: ISO_OBJ,
+            }),
+          ],
+          edges: [
+            makeEdge({ fromId: ISO_OBJ, toId: ISO_FIELD, edgeType: 'parentOf' }),
+            makeEdge({
+              fromId: ISO_WF,
+              toId: ISO_FIELD,
+              edgeType: 'writesTo',
+              source: 'workflow-rule-extractor',
+              confidence: 'parsed',
+              properties: { operation: 'Literal' },
+            }),
+          ],
+        };
+        const imported = await importExtractionResults(isoStore, [isoSeed]);
+        expect(imported.ok).toBe(true);
+        if (!imported.ok) return;
+        const isoCtx: Context = {
+          vaultRoot: isoDir,
+          manifest: FIXTURE_MANIFEST,
+          graph: isoStore,
+        };
+        const result = await whatIfMakeFieldRequiredHandler(isoCtx, {
+          fieldId: ISO_FIELD,
+        });
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        // Exactly one populator impact, and the verdict is review — never safe.
+        const populator = result.value.data.impacts.find(
+          (i) => i.componentId === ISO_WF,
+        );
+        expect(populator).toBeDefined();
+        expect(populator?.category).toBe('configuration-only');
+        expect(result.value.data.verdict).not.toBe('safe');
+        expect(result.value.data.verdict).toBe('review');
+      } finally {
+        await closeGraph(isoStore);
+        rmSync(isoDir, { recursive: true, force: true });
+      }
+    });
+
+    it('the disclosure names declarative populators and the conditional caveat', async () => {
+      const result = await whatIfMakeFieldRequiredHandler(ctx, {
+        fieldId: TARGET_FIELD,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.data.disclosure).toContain('declarative populators');
+      expect(result.value.data.disclosure).toContain(
+        'conditional writers do not guarantee population',
+      );
+    });
+  });
 });
 
 describe('whatIfMakeFieldRequiredInputSchema', () => {
@@ -576,5 +755,92 @@ describe('whatIfMakeFieldRequiredHandler — live null-rate (P6-required-field-w
     expect(r.value.data.trust.provenance).toBe('hybrid');
     expect(r.value.data.trust.freshness.snapshotRefreshedAt).toBe(FIXTURE_MANIFEST.refreshedAt);
     expect(r.value.data.trust.freshness.liveQueriedAt).toBeDefined();
+  });
+});
+
+// =============================================================================
+// CR-12 — page-to-exhaustion (destructive SAFETY verdict). The Flow scan is
+// walked to exhaustion, not just the first page; a non-writing create-path Flow
+// sorted PAST the cap by id ASC used to be silently skipped → a false 'safe'
+// verdict (a SAFETY false-negative, the worst class for a what-if tool). With
+// SFI_NODE_SCAN_LIMIT=2 the loadAllNodes offset loop walks multiple Flow pages.
+// =============================================================================
+describe('whatIfMakeFieldRequiredHandler — past-cap Flow SAFETY (CR-12 de-cap)', () => {
+  let dir: string;
+  let s: GraphStore;
+  let pagedCtx: Context;
+
+  const acct = 'CustomObject:Account';
+  const targetField = 'CustomField:Account.Industry__c';
+  // id-ASC Flows: Aaa, Bbb (fillers, no create edges), then ZzzCreate LAST —
+  // past a cap of 2. ZzzCreate creates Account via an object-level recordCreate
+  // edge and does NOT set the target field → must be a metadata-blocker.
+  const pastCapSeed: ExtractionResult = {
+    nodes: [
+      makeNode({ id: acct, apiName: 'Account' }),
+      makeNode({
+        id: targetField,
+        type: 'CustomField',
+        apiName: 'Industry__c',
+        parentId: acct,
+        properties: { type: 'Text', required: false },
+      }),
+      makeNode({ id: 'Flow:AaaFiller', type: 'Flow', apiName: 'AaaFiller' }),
+      makeNode({ id: 'Flow:BbbFiller', type: 'Flow', apiName: 'BbbFiller' }),
+      makeNode({ id: 'Flow:ZzzCreateAccount', type: 'Flow', apiName: 'ZzzCreateAccount' }),
+    ],
+    edges: [
+      makeEdge({ fromId: acct, toId: targetField, edgeType: 'parentOf' }),
+      // ZzzCreateAccount creates Account (object-level recordCreate) but never
+      // writes the target field → the create will fail under a required field.
+      makeEdge({
+        fromId: 'Flow:ZzzCreateAccount',
+        toId: acct,
+        edgeType: 'writesTo',
+        source: 'flow-extractor',
+        confidence: 'parsed',
+        properties: { operation: 'recordCreate' },
+      }),
+    ],
+  };
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-wi-mfr-pastcap-'));
+    const opened = await openGraph(join(dir, 'wi-mfr-pastcap.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    s = opened.value;
+    const imported = await importExtractionResults(s, [pastCapSeed]);
+    if (!imported.ok) {
+      throw new Error(`seed import failed: ${imported.error.message}`);
+    }
+    pagedCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s };
+  });
+
+  afterAll(async () => {
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    process.env['SFI_NODE_SCAN_LIMIT'] = '2';
+  });
+
+  afterEach(() => {
+    delete process.env['SFI_NODE_SCAN_LIMIT'];
+  });
+
+  it('flags a non-writing create Flow sorted PAST the cap (the SAFETY false-negative)', async () => {
+    // BEFORE the fix: the first-2-Flow page (AaaFiller, BbbFiller) dropped
+    // ZzzCreateAccount, so the tool returned a false 'safe' verdict.
+    const r = await whatIfMakeFieldRequiredHandler(pagedCtx, {
+      fieldId: targetField,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const blocker = r.value.data.impacts.find(
+      (i) => i.componentId === 'Flow:ZzzCreateAccount',
+    );
+    expect(blocker?.category).toBe('metadata-blocker');
+    expect(r.value.data.verdict).toBe('blocking');
   });
 });

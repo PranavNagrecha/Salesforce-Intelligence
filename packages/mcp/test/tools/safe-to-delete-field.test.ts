@@ -129,6 +129,22 @@ const safeFieldSeed: ExtractionResult = {
   edges: [],
 };
 
+// GROUP-A PII-safety: a PII / encrypted field with NO incoming dependencies.
+// The metadata verdict is `safe`, but a PII field must never READ as bland safe —
+// the result must carry a non-verdict-lowering compliance escalation.
+const PII_SAFE_FIELD = 'CustomField:Account.SSN__c';
+const piiSafeFieldSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: PII_SAFE_FIELD,
+      apiName: 'SSN__c',
+      parentId: ACCOUNT_ID,
+      properties: { dataType: 'Text' },
+    }),
+  ],
+  edges: [],
+};
+
 // =============================================================================
 // Seed: report-blocking field. Report references this field.
 // =============================================================================
@@ -472,6 +488,7 @@ beforeAll(async () => {
   const imported = await importExtractionResults(store, [
     accountParentSeed,
     safeFieldSeed,
+    piiSafeFieldSeed,
     reportFieldSeed,
     flowFieldSeed,
     vrLayoutSeed,
@@ -514,6 +531,36 @@ describe('safeToDeleteFieldHandler', () => {
     expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
   });
 
+  it('surfaces a PII compliance escalation WITHOUT lowering the safe verdict', async () => {
+    const result = await safeToDeleteFieldHandler(ctx, { fieldId: PII_SAFE_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, piiCompliance } = result.value.data;
+    // The escalation must NOT flip the verdict — it mirrors coverageCaveat.
+    expect(verdict).toBe('safe');
+    expect(piiCompliance).toBeDefined();
+    expect(piiCompliance?.classification).toBe('pii');
+    expect(piiCompliance?.message.toLowerCase()).toMatch(
+      /compliance|retention|irreversible/,
+    );
+  });
+
+  it('renders the PII compliance escalation FIRST in the checklist', async () => {
+    const result = await safeToDeleteFieldHandler(ctx, {
+      fieldId: PII_SAFE_FIELD,
+      format: 'checklist',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const checklist = result.value.data.checklist ?? '';
+    expect(checklist).toMatch(/PII|compliance/i);
+    // The escalation appears before the verdict line.
+    const piiIdx = checklist.search(/PII|compliance/i);
+    const verdictIdx = checklist.indexOf('Verdict:');
+    expect(piiIdx).toBeGreaterThanOrEqual(0);
+    expect(piiIdx).toBeLessThan(verdictIdx);
+  });
+
   it('downgrades an otherwise safe field to review when deletion coverage is incomplete', async () => {
     const coverage = FIXTURE_MANIFEST.coverage ?? [];
     const incompleteCtx: Context = {
@@ -534,6 +581,42 @@ describe('safeToDeleteFieldHandler', () => {
       'Report',
     ]);
     expect(result.value.data.trust.completeness.status).toBe('partial');
+  });
+
+  it('CR-P3-3: retrieveConfirmed-empty deletion-coverage types yield safe + NO caveat', async () => {
+    // A zero-of-those org where SharingRule/Report/Dashboard/ListView/etc. were
+    // CONFIRMED-CLEAN empty (describe confirmed support + clean retrieve returned
+    // zero), while the code/layout families are covered. Before CR-P3-3 these
+    // empty rows were partial -> buildCoverageCaveat fired -> safe flipped to
+    // review. Now confirmed-empty == complete, so an unreferenced field is plainly
+    // safe with no coverageCaveat.
+    const coverage = FIXTURE_MANIFEST.coverage ?? [];
+    const emptyButConfirmed = new Set([
+      'SharingRule',
+      'Report',
+      'Dashboard',
+      'ListView',
+      'ReportType',
+      'FlexiPage',
+      'WorkflowRule',
+    ]);
+    const confirmedCtx: Context = {
+      ...ctx,
+      manifest: {
+        ...FIXTURE_MANIFEST,
+        coverage: coverage.map((entry) =>
+          emptyButConfirmed.has(entry.type)
+            ? { ...entry, retrieved: 0, retrieveConfirmed: true }
+            : { ...entry, retrieveConfirmed: true },
+        ),
+      },
+    };
+    const result = await safeToDeleteFieldHandler(confirmedCtx, { fieldId: SAFE_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.verdict).toBe('safe');
+    expect(result.value.data.coverageCaveat).toBeUndefined();
+    expect(result.value.data.trust.completeness.status).toBe('complete');
   });
 
   it('returns blocking with an analytics category for a Report-referenced field', async () => {

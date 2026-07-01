@@ -154,6 +154,97 @@ describe('changedSinceInputSchema', () => {
     });
     expect(r.success).toBe(false);
   });
+
+  it('accepts offset and cursor (CR-22)', () => {
+    const r = changedSinceInputSchema.safeParse({
+      since: '2026-05-01',
+      offset: 1,
+      cursor: 'abc',
+    });
+    expect(r.success).toBe(true);
+  });
+});
+
+// =============================================================================
+// CR-22 B4 — output cursor + full type scan. A whole-fits no-cursor call stays
+// byte-identical (no limit/offset/nextCursor/pageInfo/boundaries); a truncated
+// page resumes the full set with no gaps / dupes.
+// =============================================================================
+describe('changedSinceHandler — output cursor (CR-22)', () => {
+  it('whole-fits no-cursor call omits all paging + boundary fields', async () => {
+    const r = await changedSinceHandler(ctx, { since: '2026-01-01' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data as unknown as Record<string, unknown>;
+    expect('limit' in d).toBe(false);
+    expect('offset' in d).toBe(false);
+    expect('nextOffset' in d).toBe(false);
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+    // Small org full-scan completes → no scan-incompleteness boundary.
+    expect('boundaries' in d).toBe(false);
+  });
+
+  it('a truncated page emits a cursor that resumes with no gaps or dupes', async () => {
+    const all = await changedSinceHandler(ctx, { since: '2026-01-01', limit: 500 });
+    expect(all.ok).toBe(true);
+    if (!all.ok) return;
+    const fullOrder = all.value.data.changed.map((c) => c.id);
+    expect(fullOrder.length).toBeGreaterThan(2);
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const page: Awaited<ReturnType<typeof changedSinceHandler>> =
+        await changedSinceHandler(
+          ctx,
+          cursor !== undefined
+            ? { since: '2026-01-01', limit: 1, cursor }
+            : { since: '2026-01-01', limit: 1 },
+        );
+      expect(page.ok).toBe(true);
+      if (!page.ok) return;
+      for (const c of page.value.data.changed) seen.push(c.id);
+      const nc = page.value.data.nextCursor;
+      if (nc === undefined) break;
+      cursor = nc;
+      guard += 1;
+      if (guard > 50) throw new Error('cursor did not terminate');
+    }
+    expect(seen).toEqual(fullOrder);
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+
+  it('rejects a cursor minted for a different `since` boundary', async () => {
+    const first = await changedSinceHandler(ctx, { since: '2026-01-01', limit: 1 });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const cursor = first.value.data.nextCursor;
+    expect(typeof cursor).toBe('string');
+    if (typeof cursor !== 'string') return;
+    const replay = await changedSinceHandler(ctx, { since: '2026-05-01', cursor });
+    expect(replay.ok).toBe(false);
+    if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
+  });
+
+  it('rejects a cursor minted for a different types filter', async () => {
+    const first = await changedSinceHandler(ctx, { since: '2026-01-01', limit: 1 });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const cursor = first.value.data.nextCursor;
+    expect(typeof cursor).toBe('string');
+    if (typeof cursor !== 'string') return;
+    const replay = await changedSinceHandler(ctx, {
+      since: '2026-01-01',
+      types: ['Flow'],
+      cursor,
+    });
+    expect(replay.ok).toBe(false);
+    if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
+  });
 });
 
 describe('changedSinceHandler — boundary filter and partial-data axis', () => {

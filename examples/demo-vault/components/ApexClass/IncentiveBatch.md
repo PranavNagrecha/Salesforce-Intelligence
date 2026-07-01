@@ -49,7 +49,7 @@ properties:
       rule: soql-in-loop
       severity: critical
     - confidence: heuristic
-      explanation: "DML 'update toUpdate' executes without a preceding CRUD check. Add Schema.sObjectType.X.is{Createable|Updateable|Deletable}() or use WITH SECURITY_ENFORCED / USER_MODE."
+      explanation: "DML 'update toUpdate' executes without a preceding object-level CRUD check. Add Schema.sObjectType.X.is{Createable|Updateable|Deletable}(), run the DML in user mode (`update x as user` / `Database.update(x, AccessLevel.USER_MODE)`), or strip with Security.stripInaccessible. NOTE: a SOQL `WITH SECURITY_ENFORCED` / `USER_MODE` clause enforces READ FLS on the query and does NOT authorize this write."
       location: line 47
       rule: missing-crud-check
       severity: high

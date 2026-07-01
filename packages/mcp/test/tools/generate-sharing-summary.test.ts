@@ -82,6 +82,7 @@ const seed: ExtractionResult = {
       parentId: 'CustomObject:Contact',
     }),
     makeNode({ id: 'Profile:Admin', type: 'Profile', apiName: 'Admin' }),
+    makeNode({ id: 'Profile:FlsOnly', type: 'Profile', apiName: 'FlsOnly' }),
     makeNode({ id: 'PermissionSet:Bonus', type: 'PermissionSet', apiName: 'Bonus' }),
     makeNode({
       id: 'Role:Executive',
@@ -106,6 +107,19 @@ const seed: ExtractionResult = {
         booleanFilter: 'Account.Industry = "Banking"',
       },
     }),
+    // CR-CAP-05b: an owner rule shared with Role:Executive AND its subordinates.
+    // Role:Manager inheritsFrom Role:Executive, so the summary must name the
+    // recipient AND mark "(and its subordinate roles)".
+    makeNode({
+      id: 'SharingRule:Account.ExecRule',
+      type: 'SharingRule',
+      apiName: 'Account.ExecRule',
+      properties: {
+        sObjectType: 'Account',
+        accessLevel: 'Edit',
+        ruleType: 'owner',
+      },
+    }),
   ],
   edges: [
     makeEdge({
@@ -113,20 +127,54 @@ const seed: ExtractionResult = {
       toId: 'CustomField:Account.Industry__c',
       edgeType: 'parentOf',
     }),
+    // CR-CAP-05b: the criteria rule names a Group recipient verbatim; the owner
+    // rule shares with Role:Executive carrying the subordinates marker.
+    makeEdge({
+      fromId: 'SharingRule:Account.AccountRule',
+      toId: 'Group:Banking_Team',
+      edgeType: 'sharedWith',
+    }),
+    makeEdge({
+      fromId: 'SharingRule:Account.ExecRule',
+      toId: 'Role:Executive',
+      edgeType: 'sharedWith',
+      properties: { inheritance: 'subordinates' },
+    }),
+    // Role:Manager inheritsFrom Role:Executive (child -> parent).
+    makeEdge({
+      fromId: 'Role:Manager',
+      toId: 'Role:Executive',
+      edgeType: 'inheritsFrom',
+      source: 'role-extractor',
+    }),
     makeEdge({
       fromId: 'CustomObject:Contact',
       toId: 'CustomField:Contact.Title__c',
       edgeType: 'parentOf',
     }),
+    // CR-04: OBJECT-level CRUD grants — Profile:Admin reads, PermissionSet:Bonus
+    // edits — count toward the object tally. (Previously these pointed at a
+    // CustomField, conflating the FLS plane with object access.)
     makeEdge({
       fromId: 'Profile:Admin',
-      toId: 'CustomField:Account.Industry__c',
+      toId: 'CustomObject:Account',
       edgeType: 'grantedBy',
+      properties: { allowRead: true },
     }),
     makeEdge({
       fromId: 'PermissionSet:Bonus',
+      toId: 'CustomObject:Account',
+      edgeType: 'grantedBy',
+      properties: { allowEdit: true },
+    }),
+    // CR-04 negative: a grantor with ONLY a field-level (FLS) grant and NO
+    // object-CRUD edge must contribute 0 to the OBJECT tally. Profile:FlsOnly
+    // is FLS-only on a field — it should NOT be counted as an object grantor.
+    makeEdge({
+      fromId: 'Profile:FlsOnly',
       toId: 'CustomField:Account.Industry__c',
       edgeType: 'grantedBy',
+      properties: { readable: true },
     }),
   ],
 };
@@ -235,18 +283,45 @@ describe('generateSharingSummaryHandler (seeded graph)', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const body = result.value.data.document.body;
-    // The rules table now carries Type + Criteria columns, so a criteria-based
-    // access path is visible with its predicate, not hidden behind a bare name.
-    expect(body).toContain('| Rule | Type | Access Level | Criteria |');
+    // The rules table now carries Type + Shared With + Criteria columns, so both
+    // the recipient AND a criteria-based predicate are visible (CR-CAP-05b adds
+    // the Shared With column to surface recipients that were previously omitted).
+    expect(body).toContain('| Rule | Type | Shared With | Access Level | Criteria |');
     expect(body).toContain('criteria');
     expect(body).toContain('Account.Industry = "Banking"');
   });
 
-  it('tallies profile and permission-set grants from grantedBy edges', async () => {
-    const result = await generateSharingSummaryHandler(ctx, {});
+  // CR-CAP-05b: the summary previously named NO recipient (4-column table). It
+  // must now surface the rule's sharedWith recipient verbatim.
+  it('CR-CAP-05b: surfaces each rule\'s sharedWith recipient (was omitted)', async () => {
+    const result = await generateSharingSummaryHandler(ctx, { objectFilter: 'Account' });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const body = result.value.data.document.body;
+    // The criteria rule's Group recipient is named verbatim.
+    expect(body).toContain('Banking_Team');
+    // The owner rule's Role recipient is named.
+    expect(body).toContain('Executive');
+  });
+
+  // CR-CAP-05b: a roleAndSubordinates recipient is marked "(and its subordinate
+  // roles)" — consuming the SAME expandRoleSubordinates helper as who_can.
+  it('CR-CAP-05b: marks a subordinate-role recipient with the subordinate note', async () => {
+    const result = await generateSharingSummaryHandler(ctx, { objectFilter: 'Account' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.data.document.body;
+    expect(body).toMatch(/and its subordinate roles/i);
+  });
+
+  it('tallies OBJECT-level CRUD grants and EXCLUDES FLS-only grantors (CR-04)', async () => {
+    const result = await generateSharingSummaryHandler(ctx, { objectFilter: 'Account' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.data.document.body;
+    // Account: Profile:Admin (allowRead) + PermissionSet:Bonus (allowEdit) =
+    // 1 profile + 1 permset. Profile:FlsOnly has only a CustomField FLS grant
+    // and NO object-CRUD edge → it must NOT be counted toward the object tally.
     expect(body).toContain('Profiles with grants:** 1');
     expect(body).toContain('PermissionSets with grants:** 1');
   });
@@ -375,5 +450,126 @@ describe('generateSharingSummaryHandler (phantom CustomObject — B29)', () => {
     expect(result.value.data.document.body).toContain(
       'no CustomObjects matched the filter',
     );
+  });
+});
+
+// C2 / Systemic #1: when the SharingRule / Role TYPE itself was requested but
+// retrieved nothing, an empty per-object rules table and an empty role
+// hierarchy mean "not retrieved", NOT "this object has no sharing rules / no
+// roles". The graph has an Account object but ZERO SharingRule / Role nodes,
+// and the manifest coverage marks both types requested-but-empty.
+describe('generateSharingSummaryHandler (SharingRule / Role not retrieved — C2)', () => {
+  let store: GraphStore;
+  let ctx: Context;
+
+  // Manifest WITH a coverage array so coverageKnown is true; SharingRule and
+  // Role are requested-but-empty (retrieved:0) — the C2 repro shape.
+  const COVERAGE_GAP_MANIFEST: VaultManifest = {
+    ...FIXTURE_MANIFEST,
+    coverage: [
+      { type: 'CustomObject', requested: true, retrieved: 1, errored: false, neverModeled: false },
+      { type: 'SharingRule', requested: true, retrieved: 0, errored: false, neverModeled: false },
+      { type: 'Role', requested: true, retrieved: 0, errored: false, neverModeled: false },
+    ],
+  };
+
+  // Object exists, but NO SharingRule / Role nodes were retrieved.
+  const gapSeed: ExtractionResult = {
+    nodes: [
+      makeNode({
+        id: 'CustomObject:Account',
+        type: 'CustomObject',
+        apiName: 'Account',
+        label: 'Account',
+        properties: { sharingModel: 'Private' },
+      }),
+    ],
+    edges: [],
+  };
+
+  beforeAll(async () => {
+    const built = await makeFreshCtx('coverage-gap.db');
+    store = built.store;
+    ctx = { ...built.ctx, manifest: COVERAGE_GAP_MANIFEST };
+    const imported = await importExtractionResults(store, [gapSeed]);
+    if (!imported.ok)
+      throw new Error(`coverage-gap seed import failed: ${imported.error.message}`);
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  it('renders "SharingRule not retrieved" instead of "(no sharing rules)" for an object with zero rules', async () => {
+    const result = await generateSharingSummaryHandler(ctx, { objectFilter: 'Account' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.data.document.body;
+    expect(body).toContain('SharingRule not retrieved');
+    expect(body).not.toContain('_(no sharing rules)_');
+  });
+
+  it('pushes a SharingRule coverage-gap boundary (not just the UNMODELED dimensions disclosure)', async () => {
+    const result = await generateSharingSummaryHandler(ctx, { objectFilter: 'Account' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const b = result.value.data.document.boundaries.join('\n');
+    expect(b).toContain('SharingRule coverage gap');
+    expect(b).toMatch(/not checked/i);
+  });
+
+  it('renders "Role type not retrieved" and pushes a Role coverage-gap boundary', async () => {
+    const result = await generateSharingSummaryHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const doc = result.value.data.document;
+    expect(doc.body).toContain('Role type not retrieved');
+    expect(doc.body).not.toContain('no Role nodes extracted');
+    expect(doc.boundaries.join('\n')).toContain('Role coverage gap');
+  });
+});
+
+// Regression guard: a pre-v4 manifest with NO coverage array must NOT suddenly
+// emit "not retrieved" noise — coverageKnown is false, so the original
+// "(no sharing rules)" / "no Role nodes extracted" wording is kept.
+describe('generateSharingSummaryHandler (legacy manifest, no coverage array)', () => {
+  let store: GraphStore;
+  let ctx: Context;
+
+  const legacySeed: ExtractionResult = {
+    nodes: [
+      makeNode({
+        id: 'CustomObject:Account',
+        type: 'CustomObject',
+        apiName: 'Account',
+        label: 'Account',
+        properties: { sharingModel: 'Private' },
+      }),
+    ],
+    edges: [],
+  };
+
+  beforeAll(async () => {
+    const built = await makeFreshCtx('legacy-no-coverage.db');
+    store = built.store;
+    // FIXTURE_MANIFEST carries NO `coverage` array → coverageKnown false.
+    ctx = built.ctx;
+    const imported = await importExtractionResults(store, [legacySeed]);
+    if (!imported.ok)
+      throw new Error(`legacy seed import failed: ${imported.error.message}`);
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  it('keeps "(no sharing rules)" and does NOT emit a coverage-gap boundary', async () => {
+    const result = await generateSharingSummaryHandler(ctx, { objectFilter: 'Account' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const doc = result.value.data.document;
+    expect(doc.body).toContain('_(no sharing rules)_');
+    expect(doc.body).not.toContain('SharingRule not retrieved');
+    expect(doc.boundaries.join('\n')).not.toContain('SharingRule coverage gap');
   });
 });

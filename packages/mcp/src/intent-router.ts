@@ -7,15 +7,18 @@
  * DETERMINISTIC, rule-based classifier (ordered shape rules, first match wins)
  * — not an LLM guess — so it is regression-testable and never fabricates a
  * route. When nothing matches, or a question needs a capability we have not
- * built yet, it returns `plane: 'unknown'` / a `gap`, logs it for the backlog,
- * and points at `sfi.resolve` / `sfi.capabilities` instead of pretending.
+ * built yet, it returns `plane: 'unknown'` / a `gap` and points at
+ * `sfi.resolve` / `sfi.capabilities` instead of pretending. The gap is appended
+ * to the local backlog only when the `route_question` caller explicitly opts in
+ * with `logGap: true` (privacy-first, off by default — CR-16).
  *
  * Coverage goal: the org has ~120 read-only tools spanning schema, automation,
  * order-of-execution, code quality, security/sharing, PII, integration,
  * cleanup, what-if impact, docs, change/diff, CPQ/OmniStudio, and the live
  * plane. This router's job is to EXPOSE that surface from natural language —
- * every family below routes to a real tool — and to honestly log the long tail
- * it does not yet cover so the library grows toward real demand.
+ * every family below routes to a real tool — and to honestly surface the long
+ * tail it does not yet cover (logged to the backlog only on explicit opt-in) so
+ * the library grows toward real demand.
  */
 
 import { appendFile, mkdir } from 'node:fs/promises';
@@ -116,7 +119,10 @@ interface Rule {
    * e.g. parse the DML event for a save-order route. Returns undefined when
    * nothing can be inferred.
    */
-  readonly suggestArgs?: (q: string) => Readonly<Record<string, unknown>> | undefined;
+  readonly suggestArgs?: (
+    q: string,
+    question?: string,
+  ) => Readonly<Record<string, unknown>> | undefined;
 }
 
 const riskForIntent = (intent: string): RouteRisk => {
@@ -135,7 +141,7 @@ const riskForIntent = (intent: string): RouteRisk => {
 };
 
 const routeFromRule = (question: string, q: string, rule: Rule): RouteResult => {
-  const suggestedArgs = rule.suggestArgs?.(q);
+  const suggestedArgs = rule.suggestArgs?.(q, question);
   return {
     question,
     plane: rule.plane,
@@ -325,6 +331,181 @@ const deriveFieldListParent = (q: string): string | undefined => {
 };
 
 /**
+ * Parent object for metadata families scoped to one object (duplicate rules on
+ * Lead, validation rules on Contact, flows on hed__Application__c).
+ */
+const deriveMetadataParentId = (q: string, question?: string): string | undefined => {
+  const fieldParent = deriveFieldListParent(q);
+  if (fieldParent !== undefined) return fieldParent;
+  const source = question ?? q;
+  const onObject = source.match(
+    /\b(?:on|for|configured\s+on|access\s+to)\s+(?:the\s+|an\s+|a\s+)?([A-Za-z][A-Za-z0-9_]*(?:__c|__mdt)?)\b/,
+  );
+  if (onObject?.[1] !== undefined) return `CustomObject:${onObject[1]}`;
+  return undefined;
+};
+
+/** Extract a Salesforce object apiName from a routed question phrase. */
+const deriveObjectApiFromQuestion = (q: string, question?: string): string | undefined => {
+  const source = question ?? q;
+  const toolObject = source.match(
+    /\b(?:automation_build_advisor|order_of_execution|apex_build_advisor)\b\s+(?:on\s+)?([A-Za-z][A-Za-z0-9_]*(?:__c|__mdt|__e)?)\b/i,
+  );
+  if (toolObject?.[1] !== undefined) return toolObject[1];
+  const onObject = source.match(
+    /\b(?:on|for|to|access\s+to)\s+(?:the\s+|an\s+|a\s+)?([A-Za-z][A-Za-z0-9_]*(?:__c|__mdt|__e)?)\b/i,
+  );
+  if (onObject?.[1] !== undefined) return onObject[1];
+  const dmlObject = source.match(
+    /\b(?:update|insert|delete|save|create|edit)\s+(?:a\s+|an\s+|the\s+)?([A-Za-z][A-Za-z0-9_]*(?:__c|__mdt|__e)?)\b/,
+  );
+  if (dmlObject?.[1] !== undefined) return dmlObject[1];
+  const objectBeforeDml = source.match(
+    /\b([A-Za-z][A-Za-z0-9_]*(?:__c|__mdt|__e)?)\s+(?:insert|update|delete|save|create)\b/i,
+  );
+  if (objectBeforeDml?.[1] !== undefined) return objectBeforeDml[1];
+  const custom = source.match(/\b([A-Za-z][A-Za-z0-9_]*__(?:c|mdt|e))\b/);
+  return custom?.[1];
+};
+
+/** Optional hop depth from `get_impact … hops=2` phrasing. */
+const deriveImpactHops = (q: string): number | undefined => {
+  const match = q.match(/\bhops\s*[=:]\s*(\d+)/);
+  if (match === null) return undefined;
+  const hops = Number(match[1]);
+  return Number.isFinite(hops) ? hops : undefined;
+};
+
+const FIELD_MAP_OBJECT =
+  '(Lead|Contact|Account|Opportunity|Case|[A-Za-z][A-Za-z0-9_]*(?:__c|__mdt)?)';
+
+/**
+ * Bind `field_mapping_between_objects` from Lead→Contact / between A and B phrasing.
+ * Vault alias is injected by `route_question` from the active vault registry.
+ */
+const deriveFieldMappingArgs = (
+  q: string,
+  question?: string,
+): Readonly<Record<string, unknown>> | undefined => {
+  const source = question ?? q;
+  const arrow = source.match(
+    new RegExp(`\\b${FIELD_MAP_OBJECT}\\s*(?:→|->|>|\\sto\\s)\\s*${FIELD_MAP_OBJECT}\\b`, 'i'),
+  );
+  if (arrow?.[1] !== undefined && arrow[2] !== undefined) {
+    return { objectA: arrow[1], objectB: arrow[2] };
+  }
+  const between = source.match(
+    new RegExp(
+      `\\b(?:between|from)\\s+${FIELD_MAP_OBJECT}\\s+(?:and|to)\\s+${FIELD_MAP_OBJECT}\\b`,
+      'i',
+    ),
+  );
+  if (between?.[1] !== undefined && between[2] !== undefined) {
+    return { objectA: between[1], objectB: between[2] };
+  }
+  const mapPhrase = source.match(
+    new RegExp(
+      `\\bmap(?:ping|ped)?\\s+(?:from\\s+)?${FIELD_MAP_OBJECT}\\s+(?:to|into)\\s+${FIELD_MAP_OBJECT}\\b`,
+      'i',
+    ),
+  );
+  if (mapPhrase?.[1] !== undefined && mapPhrase[2] !== undefined) {
+    return { objectA: mapPhrase[1], objectB: mapPhrase[2] };
+  }
+  return undefined;
+};
+
+/** Profile id hints for layout_for_user from natural-language profile names. */
+const deriveLayoutForUserArgs = (
+  q: string,
+  question?: string,
+): Readonly<Record<string, unknown>> | undefined => {
+  const source = (question ?? q).toLowerCase();
+  const objectApiName = deriveObjectApiFromQuestion(q, question);
+  let profileId: string | undefined;
+  if (/\bfaculty[-\s]?profile\b|\bfaculty\b/.test(source)) {
+    profileId = 'Profile:Faculty';
+  } else if (/\b(system\s+administrator|admin)\s+profile\b|\badmin\b/.test(source)) {
+    profileId = 'Profile:System Administrator';
+  } else if (/\bintegration\b|\bapi\b.*\buser\b/.test(source)) {
+    profileId = 'Profile:Minimum Access - Salesforce';
+  }
+  const args: Record<string, unknown> = {};
+  if (objectApiName !== undefined) args.objectApiName = objectApiName;
+  if (profileId !== undefined) args.profileId = profileId;
+  return Object.keys(args).length > 0 ? args : undefined;
+};
+
+/** Scope pii_inventory to an object when the question names one. */
+const derivePiiInventoryArgs = (
+  q: string,
+  question?: string,
+): Readonly<Record<string, unknown>> | undefined => {
+  const objectApiName = deriveObjectApiFromQuestion(q, question);
+  return objectApiName !== undefined ? { objectApiName } : undefined;
+};
+
+/**
+ * `list_components` narrows for metadata-count questions about flows on an object.
+ */
+const deriveMetadataCountArgs = (
+  q: string,
+  question?: string,
+): Readonly<Record<string, unknown>> | undefined => {
+  if (/\bvalidation\s+rules?\b/.test(q)) {
+    const parentId = deriveMetadataParentId(q, question);
+    if (parentId !== undefined) return { type: 'ValidationRule', parentId };
+    return { type: 'ValidationRule' };
+  }
+  if (/\bhow\s+many\b.*\b(custom\s+)?fields?\b/.test(q)) {
+    const objectApi = deriveObjectApiFromQuestion(q, question);
+    if (objectApi !== undefined) return { type: 'CustomField', parentId: `CustomObject:${objectApi}` };
+    return { type: 'CustomField' };
+  }
+  if (/\bhow\s+many\b.*\blist\s+views?\b/.test(q)) {
+    const objectApi = deriveObjectApiFromQuestion(q, question);
+    if (objectApi !== undefined) return { type: 'ListView', parentId: `CustomObject:${objectApi}` };
+    return { type: 'ListView' };
+  }
+  if (/\b(page\s+)?layouts?\b/.test(q) && /\b(exist|how\s+many|what|which)\b/.test(q)) {
+    const objectApi = deriveObjectApiFromQuestion(q, question);
+    if (objectApi !== undefined) return { type: 'Layout', parentId: `CustomObject:${objectApi}` };
+  }
+  if (/\bcompact\s+layouts?\b/.test(q)) {
+    const objectApi = deriveObjectApiFromQuestion(q, question);
+    if (objectApi !== undefined) return { type: 'CompactLayout', parentId: `CustomObject:${objectApi}` };
+  }
+  if (/\bhow\s+many\b.*\b(apex\s+)?triggers?\b/.test(q)) {
+    const objectApi = deriveObjectApiFromQuestion(q, question);
+    if (objectApi !== undefined) return { type: 'ApexTrigger', parentId: `CustomObject:${objectApi}` };
+    if (/\bstandard\s+objects?\b/.test(q)) return { type: 'ApexTrigger' };
+  }
+  if (/\bhow\s+many\b.*\brecord\s+types?\b/.test(q)) {
+    const objectApi = deriveObjectApiFromQuestion(q, question);
+    if (objectApi !== undefined) return { type: 'RecordType', parentId: `CustomObject:${objectApi}` };
+  }
+  if (/\bquick\s+actions?\b/.test(q)) {
+    const objectApi = deriveObjectApiFromQuestion(q, question);
+    if (objectApi !== undefined) return { type: 'QuickAction', parentId: `CustomObject:${objectApi}` };
+  }
+  if (/\b(web\s+links?|custom\s+buttons?)\b/.test(q)) {
+    const objectApi = deriveObjectApiFromQuestion(q, question);
+    if (objectApi !== undefined) return { type: 'WebLink', parentId: `CustomObject:${objectApi}` };
+    return { type: 'WebLink' };
+  }
+  if (!/\bflows?\b/.test(q)) return undefined;
+  const triggerObject = deriveObjectApiFromQuestion(q, question);
+  const recordTriggered =
+    /\brecord[-\s]?triggered\b/.test(q) || /\brecordtriggered\b/.test(q);
+  if (!recordTriggered && triggerObject === undefined) return undefined;
+  const args: Record<string, unknown> = { type: 'Flow' };
+  if (/\bactive\b/.test(q) || recordTriggered) args.status = 'Active';
+  if (recordTriggered) args.recordTriggered = true;
+  if (triggerObject !== undefined) args.triggerObject = triggerObject;
+  return args;
+};
+
+/**
  * Map an OmniStudio discovery question to the `list_components` `type` for its
  * sub-family, so a "what OmniScripts / Integration Procedures / DataRaptors /
  * FlexCards exist" ask can be answered from the catalog — the per-component
@@ -384,6 +565,393 @@ const RULES: readonly Rule[] = [
     patterns: [
       /\bshould\s+i\b.*\b(greenfield|new\s+org|new\s+implementation|new\s+project|from\s+day\s+one|day\s+one|before\s+anyone\s+builds?|before\s+building\s+a\s+new|when\s+designing\s+a\s+new|designing\s+a\s+new|standing\s+up|for\s+a\s+new\s+(org|project|implementation))\b/,
       /\bwill\s+this\s+new\s+(implementation|org|project)\b/,
+    ],
+  },
+  // === EXPLICIT TOOL INVOCATION (power-user / admin QA phrasing) ===========
+  // Battery questions name `tool_name — …` directly. Natural-language rules
+  // below expect prose; these literal tokens must win without funnel or harness
+  // tool-name injection (admin-edge differential loop).
+  {
+    intent: 'vault-health',
+    plane: 'vault',
+    tools: ['sfi.health_check', 'sfi.coverage_report'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit coverage_report invocation.',
+    patterns: [/\bcoverage_report\b/],
+  },
+  {
+    intent: 'automation-on-object',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.automation_build_advisor', 'sfi.get_edges'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit automation_build_advisor invocation.',
+    suggestArgs: (q, question) => {
+      const objectApiName = deriveObjectApiFromQuestion(q, question);
+      return objectApiName !== undefined ? { objectApiName } : undefined;
+    },
+    patterns: [/\bautomation_build_advisor\b/],
+  },
+  {
+    intent: 'apex-build-advisor',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.apex_build_advisor'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit apex_build_advisor invocation — pre-build trigger/Apex briefing.',
+    suggestArgs: (q, question) => {
+      const objectApiName = deriveObjectApiFromQuestion(q, question);
+      return objectApiName !== undefined ? { objectApiName } : undefined;
+    },
+    patterns: [/\bapex_build_advisor\b/],
+  },
+  {
+    intent: 'trigger-order',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.what_happens_on_save', 'sfi.order_of_execution'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit order_of_execution invocation.',
+    suggestArgs: (q, question) => {
+      const args: Record<string, unknown> = { event: deriveSaveEvent(q) };
+      const objectApiName = deriveObjectApiFromQuestion(q, question);
+      if (objectApiName !== undefined) args.objectApiName = objectApiName;
+      return args;
+    },
+    patterns: [/\border_of_execution\b/],
+  },
+  {
+    intent: 'field-mapping',
+    plane: 'vault',
+    tools: ['sfi.field_mapping_between_objects', 'sfi.datatransform_field_map'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit field_mapping_between_objects invocation.',
+    suggestArgs: deriveFieldMappingArgs,
+    patterns: [/\bfield_mapping_between_objects\b/, /\blead\s*(?:→|->|>)\s*contact\b/],
+  },
+  {
+    intent: 'test-coverage',
+    plane: 'vault',
+    tools: ['sfi.apex_test_coverage', 'sfi.test_coverage_gaps', 'sfi.meaningful_test_audit'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit apex_test_coverage / meaningful_test_audit invocation.',
+    patterns: [/\bapex_test_coverage\b/, /\bmeaningful_test_audit\b/],
+  },
+  {
+    intent: 'impact-analysis',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.get_impact', 'sfi.field_change_advisor'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit get_impact invocation.',
+    suggestArgs: (q) => {
+      const hops = deriveImpactHops(q);
+      return hops !== undefined ? { hops } : undefined;
+    },
+    patterns: [/\bget_impact\b/],
+  },
+  {
+    intent: 'field-change-advisor',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.field_change_advisor', 'sfi.get_impact'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit field_change_advisor invocation.',
+    patterns: [/\bfield_change_advisor\b/],
+  },
+  {
+    intent: 'disambiguate-concepts',
+    plane: 'vault',
+    tools: ['sfi.disambiguate_concepts'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit disambiguate_concepts invocation — same vs distinct field/status concepts.',
+    patterns: [/\bdisambiguate_concepts\b/],
+  },
+  {
+    intent: 'field-provenance',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.field_provenance'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit field_provenance invocation — who/what sets a field value.',
+    patterns: [/\bfield_provenance\b/],
+  },
+  {
+    intent: 'cmdt-record-values',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.lookup_record', 'sfi.explain_field'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit lookup_record invocation for CMDT / custom-setting record values.',
+    patterns: [/\blookup_record\b/],
+  },
+  {
+    intent: 'last-modified',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.last_modified'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit last_modified invocation.',
+    patterns: [/\blast_modified\b/],
+  },
+  {
+    intent: 'field-population',
+    plane: 'hybrid',
+    tools: ['sfi.resolve', 'sfi.live_field_population'],
+    liveRequired: true,
+    needsResolve: true,
+    reason: 'Explicit live_field_population invocation.',
+    patterns: [/\blive_field_population\b/],
+  },
+  {
+    intent: 'value-change',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.value_change_audit', 'sfi.what_if_change_field_value'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit value_change_audit / what_if_change_field_value invocation.',
+    patterns: [/\bwhat_if_change_field_value\b/, /\bvalue_change_audit\b/],
+  },
+  {
+    intent: 'call-graph',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.call_graph', 'sfi.method_reachability'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit call_graph / method_reachability invocation.',
+    patterns: [/\bcall_graph\b/, /\bmethod_reachability\b/],
+  },
+  {
+    intent: 'tests-for-change',
+    plane: 'vault',
+    tools: ['sfi.tests_for_change'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit tests_for_change invocation.',
+    patterns: [/\btests_for_change\b/],
+  },
+  {
+    intent: 'downstream-effects',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.downstream_effects'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit downstream_effects invocation.',
+    patterns: [/\bdownstream_effects\b/],
+  },
+  {
+    intent: 'package-impact',
+    plane: 'vault',
+    tools: ['sfi.package_impact'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit package_impact invocation.',
+    patterns: [/\bpackage_impact\b/],
+  },
+  {
+    intent: 'pii-flow',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.field_lineage'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit field_lineage invocation.',
+    patterns: [/\bfield_lineage\b/],
+  },
+  {
+    intent: 'field-meaning',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.explain_field', 'sfi.field_360'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit field_360 invocation.',
+    patterns: [/\bfield_360\b/],
+  },
+  {
+    intent: 'safe-to-delete',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.safe_to_delete_field'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit safe_to_delete_field invocation.',
+    patterns: [/\bsafe_to_delete_field\b/],
+  },
+  {
+    intent: 'what-if-field',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.what_if_make_field_required', 'sfi.what_if_change_field_type', 'sfi.what_if_remove_picklist_value'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit what-if field schema simulators.',
+    patterns: [
+      /\bwhat_if_make_field_required\b/,
+      /\bwhat_if_change_field_type\b/,
+      /\bwhat_if_remove_picklist_value\b/,
+    ],
+  },
+  {
+    intent: 'async-chain-depth',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.async_chain_depth'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit async_chain_depth invocation.',
+    patterns: [/\basync_chain_depth\b/],
+  },
+  {
+    intent: 'compliance',
+    plane: 'vault',
+    tools: ['sfi.generate_compliance_report'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit generate_compliance_report invocation.',
+    patterns: [/\bgenerate_compliance_report\b/],
+  },
+  {
+    intent: 'layout-access',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.layout_for_user', 'sfi.list_components'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit layout_for_user invocation.',
+    suggestArgs: deriveLayoutForUserArgs,
+    patterns: [/\blayout_for_user\b/],
+  },
+  {
+    intent: 'app-access',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.app_access'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit app_access invocation.',
+    patterns: [/\bapp_access\b/],
+  },
+  {
+    intent: 'user-ability',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.user_ability'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Explicit user_ability invocation.',
+    patterns: [/\buser_ability\b/],
+  },
+  {
+    intent: 'governor-risks',
+    plane: 'vault',
+    tools: ['sfi.governor_limit_risks'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit governor_limit_risks invocation.',
+    patterns: [/\bgovernor_limit_risks\b/],
+  },
+  {
+    intent: 'crud-fls-audit',
+    plane: 'vault',
+    tools: ['sfi.crud_fls_audit'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Explicit crud_fls_audit invocation.',
+    patterns: [/\bcrud_fls_audit\b/],
+  },
+  // === METADATA / APEX / FLOW ANALYSIS routing (checked BEFORE live_*) =======
+  // QA-Bundle-2 (ROUTING): validation-rule / save-behavior / flow-trigger /
+  // DLRS-recursion questions were being stolen by the broad live_* and
+  // inactive-* rules below — `inactive-users` over-fires on the bare word
+  // "user"/"license", `inactive-validation-rules` on "validation rule", and
+  // the live record/limit rules on counts — so a metadata/Apex/flow question
+  // routed to live_inactive_users / governor_limit_risks / integration_map /
+  // live_org_limits / live_stale_records, none relevant. These three
+  // high-precision rules sit FIRST so the analysis tools win. Each is anchored
+  // to its own NOUN+verb so it never steals a real live record/login question.
+  {
+    // A "does the save succeed / is the save blocked" question about a
+    // validation rule (often quoting `$User`, `$Profile`, or a whitelist of
+    // who may save) is a SAVE-BEHAVIOR analysis — what runs on save and which
+    // VR formula gates it — NOT a login-activity/inactive-users lookup. The
+    // presence of "$User"/"$Profile"/"whitelist"/"save succeeds" together with
+    // a validation-rule frame routes to what_happens_on_save + the rule's own
+    // formula (get_component) and explain_formula, so the cascade reaches the
+    // VR formulas without the caller hand-entering a componentId.
+    intent: 'save-behavior',
+    plane: 'vault',
+    tools: [
+      'sfi.resolve',
+      'sfi.what_happens_on_save',
+      'sfi.get_component',
+      'sfi.explain_formula',
+    ],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      "Whether a save succeeds under a validation rule is offline metadata: what_happens_on_save reconstructs the save-order, and the VR's own formula (get_component / explain_formula) shows the $User/$Profile/whitelist condition that gates it. Not a live login-activity lookup.",
+    suggestArgs: (q) => ({ event: deriveSaveEvent(q) }),
+    patterns: [
+      // A validation-rule frame + a save-outcome/whitelist/context-variable ask.
+      // Bounded clauses keep the two signals near each other so it never steals
+      // a generic "list inactive validation rules" enumeration.
+      /\bvalidation\s+rules?\b[^.?!]{0,80}\b(save\s+(succeed|success|go\s+through|work|fail|block)|whitelist|allow(ed|s)?\s+to\s+save|let[s]?\b.*\bsave|\$user\b|\$profile\b|\$record\b)/,
+      /\b(save\s+(succeed|success|go\s+through|fail|block)|whitelist|\$user\b|\$profile\b)[^.?!]{0,80}\bvalidation\s+rules?\b/,
+      // "does the save succeed for <whom>" / "will the save go through" — a
+      // save-outcome question even when "validation rule" sits in an earlier
+      // clause. Requires the save-outcome verb so a plain record save (which is
+      // a live DML event) does not collapse here.
+      /\b(does|will|can|would)\b.*\bsave\b.*\b(succeed|go\s+through|be\s+(blocked|allowed)|fail)\b/,
+    ],
+  },
+  {
+    // "When does this flow fire, and what permission set / license lets it run"
+    // is a Flow-trigger + permission-context question. The word "user"/
+    // "license"/"permission set" was pulling it onto inactive-users /
+    // license-usage; route it to explain_flow (the flow's trigger) +
+    // what_happens_on_save so the profile/permission gate is reachable in the
+    // normal cascade. High precision: requires a FLOW noun next to a
+    // fire/run/trigger verb AND a permission/license context term.
+    intent: 'flow-trigger-context',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.explain_flow', 'sfi.what_happens_on_save'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'When a flow fires and which profile / permission set / license can run it is offline metadata: explain_flow narrates the trigger, and what_happens_on_save places it in save-order. Not a live login/license-usage lookup.',
+    suggestArgs: (q) => ({ event: deriveSaveEvent(q) }),
+    patterns: [
+      /\bflows?\b[^.?!]{0,80}\b(fire|fires|run|runs|trigger|triggers|execute)[^.?!]{0,80}\b(permission\s+set|profile|license|licence|run\s+the\s+flow)\b/,
+      /\b(permission\s+set|profile|license|licence)\b[^.?!]{0,80}\b(run|fire|trigger|execute)\b[^.?!]{0,40}\bflows?\b/,
+      /\bwhat\s+(permission\s+set|profile|license|licence)\b.*\b(run|fire|trigger)\b.*\bflows?\b/,
+    ],
+  },
+  {
+    // A DLRS (Declarative Lookup Rollup Summary) / recursive-rollup question —
+    // e.g. the CountCET3 rollup that re-enters its own trigger. The recursive
+    // path lives in automation/order-of-execution analysis (a custom-metadata
+    // rollup that writes the parent and re-fires the child trigger, suppressed
+    // only by a CheckRecursive static guard, not the platform). Route to
+    // automation_risk_report + order_of_execution + what_happens_on_save, and
+    // surface the dlrs__LookupRollupSummary2 custom-metadata record via
+    // lookup_record / search_components so CountCET3 is named in the cascade.
+    intent: 'dlrs-recursion',
+    plane: 'vault',
+    tools: [
+      'sfi.resolve',
+      'sfi.search_components',
+      'sfi.lookup_record',
+      'sfi.automation_risk_report',
+      'sfi.order_of_execution',
+      'sfi.what_happens_on_save',
+    ],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'A DLRS / recursive-rollup question is automation analysis: the rollup config is a dlrs__LookupRollupSummary2 custom-metadata record (search_components / lookup_record), and the recursive trigger path it drives is reconstructed by automation_risk_report / order_of_execution / what_happens_on_save.',
+    suggestArgs: (q) => ({ event: deriveSaveEvent(q) }),
+    patterns: [
+      /\bdlrs[\w]*/i,
+      /\blookup\s*rollup\s*summary\b/,
+      /\b(recursive|recursion|re-?enter|re-?fire)\b.*\b(rollup|roll[-\s]?up|trigger)\b/,
+      /\b(rollup|roll[-\s]?up)\b.*\b(recursive|recursion|re-?enter|re-?fire)\b/,
     ],
   },
   {
@@ -620,6 +1188,27 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // Save-order step counts — must precede metadata-count, which steals
+    // "how many … validation rules" parentheticals on automation-step asks.
+    intent: 'trigger-order',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.what_happens_on_save', 'sfi.order_of_execution'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'Counting automation steps on save is a what_happens_on_save / order_of_execution reconstruction — not a list_components metadata count.',
+    suggestArgs: (q, question) => {
+      const args: Record<string, unknown> = { event: deriveSaveEvent(q) };
+      const objectApiName = deriveObjectApiFromQuestion(q, question);
+      if (objectApiName !== undefined) args.objectApiName = objectApiName;
+      return args;
+    },
+    patterns: [
+      /\bhow\s+many\b.*\b(automation\s+steps?|save[-\s]order\s+steps?)\b/,
+      /\bhow\s+many\b.*\b(before-save|after-save|post-save|pre-save|async)\b.*\b(flows?|steps?|paths?)\b/,
+    ],
+  },
+  {
     // METADATA counts are vault, not live. "How many layouts / fields / objects
     // / profiles / validation rules ... [per X]" was stolen by the live
     // group-count/record-count rules and misrouted to live GROUP BY (B30.1).
@@ -633,12 +1222,15 @@ const RULES: readonly Rule[] = [
     needsResolve: false,
     reason:
       'Counting metadata components (layouts, fields, objects, profiles, validation rules, flows, classes, record types, list views) is a vault list_components count — not live record data.',
+    suggestArgs: deriveMetadataCountArgs,
     patterns: [
       /\bhow\s+many\b.*\b(page\s+layouts?|layouts?|custom\s+objects?|profiles?|permission\s+sets?|validation\s+rules?|flows?|(apex\s+)?classes?|triggers?|record\s+types?|list\s+views?|report\s+types?|record\s+pages?|flexipages?|approval\s+process(es)?|custom\s+settings?|quick\s+actions?|sharing\s+rules?|named\s+credentials?|picklists?)\b/,
       /\bhow\s+many\b.*\blayouts?\b.*\b(per|for\s+each|by)\b.*\bprofiles?\b/,
       /\blayouts?\b.*\b(per|for\s+each|by)\b.*\bprofiles?\b/,
       // fields, but NOT field usage/population (those are unused-fields / field-population)
       /\bhow\s+many\b.*\b(custom\s+)?fields?\b(?!.*\b(used|populated|filled|actually|unused|empty|blank|set|values?)\b)/,
+      /\b(which|what)\s+standard\s+objects?\b.*\b(triggers?|apex)\b/,
+      /\bstandard\s+objects?\b.*\b(at\s+least\s+one\s+)?(apex\s+)?triggers?\b/,
     ],
   },
   {
@@ -805,6 +1397,48 @@ const RULES: readonly Rule[] = [
 
   // === Reports / folders / email templates (catalog demand → Wave 1) ========
   {
+    intent: 'report-type-inventory',
+    plane: 'vault',
+    tools: ['sfi.list_components', 'sfi.get_component'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Report TYPE definitions (ReportType metadata) are vault catalog items — distinct from live report LastRunDate usage or Report bodies that may not be retrieved.',
+    suggestArgs: () => ({ type: 'ReportType' }),
+    patterns: [
+      /\b(which|what|are\s+there|how\s+many)\b.*\breport\s+types?\b/,
+      /\breport\s+types?\b.*\b(based\s+on|join|joining|defined|include|custom|standard)\b/,
+      /\bcustom\s+report\s+types?\b/,
+      /\breport\s+types?\b.*\b(to|→|->)\b.*\b(account|contact|opportunity|case)\b/,
+    ],
+  },
+  {
+    intent: 'report-catalog-gap',
+    plane: 'vault',
+    tools: ['sfi.list_components', 'sfi.get_component'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Report and dashboard DEFINITIONS are vault catalog items when retrieved. The vault may model ReportTypes without Report bodies — never answer from live LastRunDate when the question asks for report/dashboard inventory or field usage in reports.',
+    suggestArgs: (q) => {
+      if (/\bdashboards?\b/.test(q)) return { type: 'Dashboard' };
+      return { type: 'Report' };
+    },
+    patterns: [
+      /\bhow\s+many\b.*\breports?\b(?!.*\breport\s+types?\b)(?!.*\b(useless|unused|stale|dead|old|never\s+run|not\s+used|broken)\b)/,
+      /\bhow\s+many\b.*\bdashboards?\b/,
+      /\bwhich\s+reports?\b.*\b(use|using|reference|include)\b/,
+      /\breports?\b.*\b(use|using|reference)\b.*\b(field|__c)\b/,
+      /\breports?\b.*\b(filters?|filter criteria)\b/,
+      /\b(scheduled|subscription|email)\b.*\breports?\b/,
+      /\breports?\b.*\b(scheduled|subscription|email)\b/,
+      /\bwhich\b.*\bfields?\b.*\b(report|dashboard)\b/,
+      /\bfields?\b.*\bfeed\b.*\b(report|dashboard)\b/,
+      /\bdashboard\b.*\b(running[-\s]?user|folder|visibility)\b/,
+      /\breport\s+folders?\b/,
+    ],
+  },
+  {
     intent: 'reports-usage',
     plane: 'hybrid',
     tools: ['sfi.live_report_usage', 'sfi.list_components'],
@@ -813,10 +1447,9 @@ const RULES: readonly Rule[] = [
     reason: 'Report inventory is in the vault; stale/unused needs live LastRunDate.',
     patterns: [
       /\breports?\b.*\b(useless|unused|stale|dead|old|never\s+run|not\s+used|broken)\b/,
-      /\b(reports?|dashboards?)\b.*\b(cover|covers|about|for)\b/,
+      /\b(reports?|dashboards?)\b.*\b(cover|covers|about|for)\b(?!.*\breport\s+types?\b)/,
       /\b(useless|unused|stale|dead)\b.*\breports?\b/,
       /\b(dashboards?)\b.*\b(unused|stale|broken|refresh)\b/,
-      /\breport\s+types?\b/,
       /\breports?\b.*\b(not\s+run|haven'?t\s+been\s+run)\b/,
       /\breports?\b.*\b(last\s+year|in\s+the\s+last)\b/,
     ],
@@ -1019,6 +1652,10 @@ const RULES: readonly Rule[] = [
       /\bwho\s+(can|is\s+able\s+to)\s+(create|insert|delete)\b/,
       /\b(which|what)\s+(profiles?|permission\s+sets?|users?)\b.*\bcan\s+(create|insert|delete)\b/,
       /\b(which|what)\s+(profiles?|permission\s+sets?)\b.*\b(grant|allow)\b.*\b(create|delete)\b/,
+      /\b(which|what)\s+permission\s+sets?\b.*\bgrant\b.*\b(access|object)\b/,
+      /\bpermission\s+sets?\b.*\bgrant\b.*\bobject\s+access\b/,
+      /\b(which|what)\s+(profiles?|permission\s+sets?)\b.*\b(modify\s+all|view\s+all)\b/,
+      /\b(which|what)\s+(profiles?|permission\s+sets?)\b.*\bgrant\b.*\b(modify\s+all|view\s+all)\b/,
     ],
   },
   {
@@ -1032,6 +1669,9 @@ const RULES: readonly Rule[] = [
     patterns: [
       /\bwhat\s+happens\s+when\b.*\b(becomes?|turns?|changes?\s+to|is\s+set\s+to|reaches?)\b/,
       /\bwhat\s+happens\s+when\b.*\b(closed\s+won|closed\s+lost|converted|approved|activated)\b/,
+      /\b(value.?coupl\w*|coupled)\b.*\b(StageName|Closed Won|stage|transition)\b/,
+      /\bStageName\b.*\b(Closed Won|closed won|transition)\b/,
+      /\bClosed Won\b.*\b(automation|flow|trigger|coupl)\b/,
     ],
   },
   {
@@ -1062,8 +1702,9 @@ const RULES: readonly Rule[] = [
     needsResolve: true,
     reason: 'Walks the sharing cascade (OWD → permission → role hierarchy → sharing rules) from the vault.',
     patterns: [
-      /\bwhy\s+(can'?t|cannot|can\s+not)\b.*\b(see|view|access)\b.*\brecord\b/,
-      /\bcan'?t\s+(see|view|access)\b.*\b(record|account|case|opportunity)\b/,
+      /\bwhy\s+(can'?t|cannot|can\s+not)\b.*\b(see|view|access)\b.*\b(record|account|case|contact|lead|opportunity)\b/,
+      /\bcan'?t\s+(see|view|access)\b.*\b(record|account|case|opportunity|contact|lead)\b/,
+      /\bwhy\s+(can'?t|cannot|can\s+not)\b.*\b(see|view|access)\b.*\b(an?\s+)?(account|case|contact|lead|opportunity)\b/,
     ],
   },
   {
@@ -1103,6 +1744,7 @@ const RULES: readonly Rule[] = [
     liveRequired: false,
     needsResolve: false,
     reason: 'Page-layout routing (profile → record type → layout) is modeled in the vault.',
+    suggestArgs: deriveLayoutForUserArgs,
     patterns: [
       /\b(page\s+)?layouts?\b.*\b(who|access|assigned|profile|sees?|user)\b/,
       /\bwho\s+(sees|has|can)\b.*\blayouts?\b/,
@@ -1110,6 +1752,23 @@ const RULES: readonly Rule[] = [
       // "what/which (page) layouts show|contain|have a FIELD" — a field->layout
       // question (vs the who-sees-layout above) used to fall through (B21).
       /\b(what|which)\s+(page\s+)?layouts?\b.*\b(show|contain|display|include|have|with|for)\b.*\bfield\b/,
+    ],
+  },
+  {
+    // Fields present in schema but absent from every page layout — crosswalk,
+    // not a fuzzy resolve of the whole question (edge-171).
+    intent: 'field-layout-coverage',
+    plane: 'vault',
+    tools: ['sfi.list_components', 'sfi.get_component'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Fields that exist in schema but are not placed on any page layout are a vault crosswalk (CustomField inventory vs Layout field placements).',
+    suggestArgs: () => ({ type: 'CustomField' }),
+    patterns: [
+      /\bfields?\b.*\b(not\s+(placed|on)|without being on)\b.*\blayout\b/,
+      /\b(not\s+placed|unplaced|hidden)\b.*\blayout\b/,
+      /\bfields?\b.*\bexist\b.*\b(not\s+on|no)\b.*\blayout\b/,
     ],
   },
   {
@@ -1123,6 +1782,22 @@ const RULES: readonly Rule[] = [
     needsResolve: false,
     reason:
       'Page-layout inventory (how many / which layouts on an object) and contents (fields, related lists, quick actions on a named layout) are modeled in the vault — Layout is a covered type.',
+    suggestArgs: (q, question) => {
+      if (/\bcompact[-\s]layouts?\b/.test(q)) {
+        const objectApi = deriveObjectApiFromQuestion(q, question);
+        if (objectApi !== undefined) {
+          return { type: 'CompactLayout', parentId: `CustomObject:${objectApi}` };
+        }
+        return { type: 'CompactLayout' };
+      }
+      if (/\bhow\s+many\b.*\blayouts?\b/.test(q)) {
+        const objectApi = deriveObjectApiFromQuestion(q, question);
+        if (objectApi !== undefined) {
+          return { type: 'Layout', parentId: `CustomObject:${objectApi}` };
+        }
+      }
+      return deriveMetadataCountArgs(q, question);
+    },
     patterns: [
       /\bhow\s+many\b.*\blayouts?\b/,
       /\b(what|which|list)\b.*\b(page\s+)?layouts?\b.*\b(exist|are\s+there|for\s+the|on\s+the|does|available)\b/,
@@ -1131,6 +1806,10 @@ const RULES: readonly Rule[] = [
       // "Is Account.Name in any page layouts?" — field-on-layout inventory (B21).
       /\b(in\s+any|on\s+any)\b.*\b(page\s+)?layouts?\b/,
       /\bis\b.*\bin\s+any\b.*\blayouts?\b/,
+      /\b(what|which)\s+quick\s+actions?\b.*\b(on|for|defined)\b/,
+      /\bcompact[-\s]layouts?\b/,
+      /\bcompact[-\s]layout\b.*\b(vs|versus|highlights?|full)\b/,
+      /\bhighlights?\b.*\b(vs|versus|full)\b.*\blayout\b/,
     ],
   },
   {
@@ -1167,6 +1846,8 @@ const RULES: readonly Rule[] = [
       /\b(read|create|edit|delete)\s+permissions?\b.*\b(all|every|across)\b/,
       /\bcrud_fls_audit\b/,
       /\bfield[-\s]level\s+security\b.*\b(managed|across|sensitive)/,
+      /\b(apex|classes?)\b.*\b(enforce|enforces|CRUD|FLS|SECURITY_ENFORCED|stripInaccessible)\b/,
+      /\bdoes\b.*\bapex\b.*\b(enforce|CRUD|FLS)\b/,
     ],
   },
   {
@@ -1212,7 +1893,7 @@ const RULES: readonly Rule[] = [
     needsResolve: true,
     reason: 'Whether a specific field is safe to delete — coverage-aware dependency check.',
     patterns: [
-      /\bsafe[\s-]+to[\s-]+delete\b/,
+      /\bsafe(?:[\s_-]+to[\s_-]+delete|_to_delete_field)\b/,
       /\b(block|prevent)\w*\b[^.?!]{0,30}\bdeletion\b/,
       /\bbefore\s+deleting\b/,
     ],
@@ -1301,12 +1982,37 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // EncryptedText field TYPE inventory — list CustomField components and filter
+    // by metadata type (edge-145). Must sit before pii-inventory, which classifies
+    // PII heuristically and does not enumerate EncryptedText types.
+    intent: 'schema',
+    plane: 'vault',
+    tools: ['sfi.list_components', 'sfi.get_component', 'sfi.search_components'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'EncryptedText field inventory is a CustomField type filter on the vault catalog — not PII classification.',
+    suggestArgs: (q, question) => {
+      const objectApi = deriveObjectApiFromQuestion(q, question);
+      if (objectApi !== undefined) {
+        return { type: 'CustomField', parentId: `CustomObject:${objectApi}` };
+      }
+      return { type: 'CustomField' };
+    },
+    patterns: [
+      /\b(list|which|what)\b.*\bencrypted\s*text\b.*\bfields?\b/,
+      /\bencrypted\s*text\b.*\bfields?\b/,
+      /\bencryptedtext\b.*\bfields?\b/,
+    ],
+  },
+  {
     intent: 'pii-inventory',
     plane: 'vault',
     tools: ['sfi.pii_inventory'],
     liveRequired: false,
     needsResolve: false,
     reason: 'Classifies every field for PII/sensitive data from the vault.',
+    suggestArgs: derivePiiInventoryArgs,
     patterns: [
       /\b(pii|personally\s+identifiable|sensitive\s+data|ssn|social\s+security)\b/,
       /\bwhat\s+(personal|sensitive)\b.*\b(data|fields?|information)\b/,
@@ -1339,10 +2045,17 @@ const RULES: readonly Rule[] = [
     needsResolve: true,
     reason:
       "Order of execution / what runs on save is reconstructed from the vault graph. what_happens_on_save needs an explicit DML event — default to 'update' (or insert/delete to match the question) when none is stated.",
-    suggestArgs: (q) => ({ event: deriveSaveEvent(q) }),
+    suggestArgs: (q, question) => {
+      const args: Record<string, unknown> = { event: deriveSaveEvent(q) };
+      const objectApiName = deriveObjectApiFromQuestion(q, question);
+      if (objectApiName !== undefined) args.objectApiName = objectApiName;
+      return args;
+    },
     patterns: [
       /\b(trigger\s+order|order\s+of\s+execution)\b/,
       /\bwhat\s+(happens|runs|fires)\b.*\b(on\s+save|when\b.*\b(created|saved|updated|inserted|deleted|undeleted|restored))\b/,
+      // "what happens when I update Contact" — present-tense DML without "on save"
+      /\bwhat\s+(happens|runs|fires)\b.*\bwhen\b.*\b(i\s+)?(update|insert|delete|save|create|edit)\b/,
       // "which/what flows|triggers|VRs|workflows run|fire when ..." — the
       // "which" phrasing was a router gap (e.g. "which flows run when a Case is
       // created"), so the question fell through to unrouted.
@@ -1360,6 +2073,11 @@ const RULES: readonly Rule[] = [
       // "saving" (the verb list above only had past-tense "saved"). Question-
       // battery gap.
       /\bwhat\s+(happens|runs|fires)\b.*\bwhen\b.*\bsav(e|es|ing)\b/,
+      // "When X is inserted, do TriggerA and TriggerB both fire?" — differential edge-03.
+      /\bwhen\b.*\b(is\s+)?(inserted|updated|deleted|created)\b.*\b(trigger|fire)\b/,
+      /\bdo\b[^.?!]{0,120}\b(trigger|triggers)\b[^.?!]{0,80}\bfire\b/,
+      /\b(trigger|triggers)\b.*\b(both|and)\b.*\bfire\b/,
+      /\b(same\s+transaction|rollup)\b.*\b(after[-\s]?insert|DLRS|dlrs)/i,
     ],
   },
   {
@@ -1373,6 +2091,30 @@ const RULES: readonly Rule[] = [
       /\bwhy\s+(did|didn'?t|does|doesn'?t)\b.*\b(field|value)\b.*\b(change|update|set)\b/,
       /\bwhat\s+(writes?|updates?|sets?)\b.*\bfield\b/,
       /\bwhat\s+changed\b.*\bfield\b.*\bon\s+save\b/,
+    ],
+  },
+  {
+    // Validation-rule family enumeration (values protected, alias exempt) — list
+    // rules on the named object; must precede explain-validation-rule (enforce/does).
+    intent: 'validation-rule-family',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.list_components', 'sfi.get_component'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'A validation-rule family question needs the rules on the object (list_components) and optionally individual rule formulas (get_component).',
+    suggestArgs: (q, question) => {
+      const parentApi = deriveObjectApiFromQuestion(q, question);
+      if (parentApi !== undefined) {
+        return { type: 'ValidationRule', parentId: `CustomObject:${parentApi}` };
+      }
+      return { type: 'ValidationRule' };
+    },
+    patterns: [
+      /\bvalidation\s+rule\s+family\b/i,
+      /\bContactCategorySecurity\b/i,
+      /\bvalidation\s+rules?\b.*\b(which|what)\b.*\b(values?|protect|protected|exempt|alias|editable)\b/i,
+      /\bOn\s+Lead\b.*\bvalidation\s+rule/i,
     ],
   },
   {
@@ -1409,10 +2151,18 @@ const RULES: readonly Rule[] = [
     liveRequired: false,
     needsResolve: true,
     reason: 'What automation already exists on an object — the pre-build briefing.',
+    suggestArgs: (q, question) => {
+      const objectApiName = deriveObjectApiFromQuestion(q, question);
+      return objectApiName !== undefined ? { objectApiName } : undefined;
+    },
     patterns: [
       /\bwhat\s+automation\b/,
       /\b(before\s+i\s+build|before\s+adding|building)\b.*\b(automation|flow|trigger)\b/,
-      /\b(triggers?|flows?|validation\s+rules?|workflows?)\b.*\bon\b.*\b(object|account|contact|case|opportunity)\b/,
+      /\b(what|which|list)\b.*\bapex\s+triggers?\b.*\b(fire|run|on|for)\b/,
+      /\b(what|which)\s+triggers?\b.*\b(fire|run)\b.*\bon\b/,
+      /^(?!.*\b(list|how\s+many)\b).*\b(triggers?|flows?|validation\s+rules?|workflows?)\b.*\bon\b.*\b(object|account|contact|case|opportunity)\b/,
+      /\bemail\s+alerts?\b.*\b(sent|automation|Case|workflow|flow)\b/,
+      /\bwhat\s+email\s+alerts?\b/,
     ],
   },
   {
@@ -1429,6 +2179,8 @@ const RULES: readonly Rule[] = [
       /\bprocess\s+builder\b.*\bmigration\b/,
       /\bshould\s+be\s+migrated\b.*\bflow\b/,
       /\bconsolidated?\s+into\s+flow\b/,
+      /\bworkflow\s+rules?\b.*\b(or\s+only|only)\b.*\bflows?\b/,
+      /\bdoes\b.*\bhave\b.*\b(active\s+)?workflow\s+rules?\b/,
     ],
   },
   {
@@ -1459,6 +2211,9 @@ const RULES: readonly Rule[] = [
       /\bhow\s+does\b.*\bflows?\b.*\bwork\b/,
       /\bwhen\s+does\b.*\b(run|fire|execute|trigger)\b/,
       /\bwhen\s+does\s+it\s+run\b/,
+      /\bdoes\b.*\bflow\b.*\b(system\s+mode|without\s+sharing|with\s+sharing)\b/,
+      /\b(system\s+mode|without\s+sharing|sharing\s+bypass)\b.*\bflow\b/,
+      /\b(run|runs|running)\b.*\b(system\s+mode|without\s+sharing)\b.*\bflow\b/,
     ],
   },
   {
@@ -1487,6 +2242,7 @@ const RULES: readonly Rule[] = [
       /\brecord[-\s]triggered\s+flows?\b.*\b(combined|combine|performance)/,
       /\bautomation\s+tools?\b.*\bfiring\b.*\bsame\s+object/,
       /\bobjects?\b.*\bmost\s+validation\s+rules/,
+      /\bstacked\s+automation\b/,
     ],
   },
   {
@@ -1732,8 +2488,9 @@ const RULES: readonly Rule[] = [
     needsResolve: false,
     reason: 'Copy-paste / near-duplicate Apex from the vault.',
     patterns: [
-      /\b(clone|duplicate|copy[-\s]?paste|near[-\s]?duplicate)\b.*\b(code|apex|class|logic)\b/,
+      /\b(clone|duplicate|copy[-\s]?paste|near[-\s]?duplicate)\b.*\b(code|apex|class|logic|flows?)\b/,
       /\bduplicated?\s+(logic|code)\b/,
+      /\bcopy_of_\b/,
     ],
   },
   {
@@ -1854,6 +2611,8 @@ const RULES: readonly Rule[] = [
       // so it doesn't collide with the earlier test-coverage route).
       /\bcovered\b.*\b(vault|metadata)\b/,
       /\bwhat\b.*\bcovered\b.*\b(vault|org)\b/,
+      /\bnotmodeled\b/,
+      /\bnever[-\s]?modeled\b/,
     ],
   },
   {
@@ -1889,6 +2648,7 @@ const RULES: readonly Rule[] = [
       /\breferenced\b.*\b(but|yet)\b.*\b(not\s+)?(retrieved|pulled|modeled|in\s+the\s+(vault|manifest))\b/,
       /\b(what|which)\b.*\b(refresh|retrieve|manifest)\b.*\b(miss(ed|ing)?|skip(ped)?|never\s+(pulled|retrieved))\b/,
       /\bretrieve[-\s]?manifest\s+gaps?\b/,
+      /\bnot\s+being\s+pulled\b/,
     ],
   },
   {
@@ -1957,6 +2717,27 @@ const RULES: readonly Rule[] = [
   },
 
   // === Integration (vault) ==================================================
+  {
+    // Named-credential reference/orphan checks — must precede integration-map
+    // (which also matches "named credential" generically).
+    intent: 'component-usage',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.find_component_usages', 'sfi.integration_map'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'Whether a named credential is referenced is a usage lookup (find_component_usages), not a topology catalog question.',
+    suggestArgs: (q, question) => {
+      const src = question ?? q;
+      const nc = src.match(/\bnamed\s+credential\s+([A-Za-z0-9_]+)/i)?.[1];
+      if (nc !== undefined) return { componentId: `NamedCredential:${nc}` };
+      return undefined;
+    },
+    patterns: [
+      /\b(named\s+credential|namedcredential)\b.*\b(referenced|orphan|orphaned|zero\s+reference|no\s+reference|unreferenced|used)\b/i,
+      /\b(referenced|orphan|orphaned|zero\s+reference|unreferenced)\b.*\b(named\s+credential|namedcredential)\b/i,
+    ],
+  },
   {
     intent: 'integration-map',
     plane: 'vault',
@@ -2084,7 +2865,7 @@ const RULES: readonly Rule[] = [
       // high-precision verdict cues (hyphenated safe-to-delete, "block
       // deletion", "before deleting") live in the EARLY precision rule above
       // unassigned-permsets (P14-ROUTER-safe-delete-misroute).
-      /\b(safe[\s-]+to[\s-]+delete|can\s+i\s+delete|ok\s+to\s+(delete|remove))\b/,
+      /\b(safe(?:[\s_-]+to[\s_-]+delete|_to_delete_field)|can\s+i\s+delete|ok\s+to\s+(delete|remove))\b/,
     ],
   },
   {
@@ -2455,6 +3236,7 @@ const RULES: readonly Rule[] = [
     liveRequired: false,
     needsResolve: false,
     reason: 'How fields map between two objects (lead conversion, data transforms).',
+    suggestArgs: deriveFieldMappingArgs,
     patterns: [
       /\bfield\s+mapping\b/,
       /\bhow\s+(do|does)\b.*\bfields?\b.*\bmap\b/,
@@ -2479,6 +3261,7 @@ const RULES: readonly Rule[] = [
       // inline help bubble IS explain_field's surface; a top baseline-300
       // unrouted cluster (P14-ROUTER-goldset-expand).
       /\b(help\s+text|inline\s+help)\b/,
+      /\bwhat\s+is\s+the\s+data\s+type\b/,
     ],
   },
 
@@ -2533,11 +3316,17 @@ const RULES: readonly Rule[] = [
     // Describe phrasing ("what CMDTs do we HAVE") has no usage verb → unaffected.
     intent: 'component-usage',
     plane: 'vault',
-    tools: ['sfi.resolve', 'sfi.find_component_usages'],
+    tools: ['sfi.resolve', 'sfi.find_component_usages', 'sfi.integration_map'],
     liveRequired: false,
     needsResolve: true,
     reason:
       'Universal usage lookup — where a named component is referenced/used/depended-on, composing graph incoming edges (minus access) + an Apex-source grep supplement, with empty≠absent honesty.',
+    suggestArgs: (q, question) => {
+      const src = question ?? q;
+      const nc = src.match(/\bnamed\s+credential\s+([A-Za-z0-9_]+)/i)?.[1];
+      if (nc !== undefined) return { componentId: `NamedCredential:${nc}` };
+      return undefined;
+    },
     patterns: [
       // "where is <non-field> used/referenced" — a `field`/`__c` signal defers to
       // locate-field (the field specialist) so only class/flow/object/CMDT/layout
@@ -2790,15 +3579,30 @@ const RULES: readonly Rule[] = [
     liveRequired: false,
     needsResolve: true,
     reason: 'Object/field/record-type/picklist structure is the core of the offline vault.',
-    suggestArgs: (q) => {
+    suggestArgs: (q, question) => {
       const type = deriveListType(q);
+      const parentId = deriveMetadataParentId(q, question);
+      if (type !== undefined && parentId !== undefined) return { type, parentId };
       if (type !== undefined) return { type };
-      const parentId = deriveFieldListParent(q);
-      if (parentId !== undefined) return { type: 'CustomField', parentId };
+      const fieldParent = deriveFieldListParent(q);
+      if (fieldParent !== undefined) return { type: 'CustomField', parentId: fieldParent };
+      if (/\bformula\b/.test(q) && /\bfields?\b/.test(q)) {
+        const objectApi = deriveObjectApiFromQuestion(q, question);
+        if (objectApi !== undefined) return { type: 'CustomField', parentId: `CustomObject:${objectApi}` };
+      }
+      if (/\bpicklists?\b/.test(q) && /\bfields?\b/.test(q)) {
+        const objectApi = deriveObjectApiFromQuestion(q, question);
+        if (objectApi !== undefined) return { type: 'CustomField', parentId: `CustomObject:${objectApi}` };
+      }
+      if (/\brequired\b/.test(q) && /\bfields?\b/.test(q)) {
+        const objectApi = deriveObjectApiFromQuestion(q, question);
+        if (objectApi !== undefined) return { type: 'CustomField', parentId: `CustomObject:${objectApi}` };
+      }
       return undefined;
     },
     patterns: [
       /\bwhat\s+(objects?|fields?|custom\s+objects?|record\s+types?|picklists?|validation\s+rules?)\b/,
+      /\b(which|what)\s+fields?\b.*\b(on|for)\b.*\b(formula|picklist|required|encrypted)\b/,
       /\bwhat\s+standard\s+fields?\b/,
       /\bwhat\s+metadata\s+exists\b/,
       /\b(fields?|structure|schema)\s+(of|on|does|for)\b/,
@@ -2808,6 +3612,8 @@ const RULES: readonly Rule[] = [
       // flows" — "show"/"list" with the metadata noun anywhere after (the bare
       // "list X" / "what X" patterns missed these). Battery gaps.
       /\b(show|list)\b.*\b(objects?|fields?|flows?|classes?|triggers?|record\s+types?|profiles?|permission\s+sets?|layouts?|validation\s+rules?|queues?|groups?|labels?)\b/,
+      /\b(web\s+links?|custom\s+buttons?)\b.*\b(exist|on|for|defined)\b/,
+      /\bwhat\b.*\b(web\s+links?|custom\s+buttons?)\b/,
       /\bwhere\s+is\b.*\bfield\b/,
       /\bsearch\s+broadly\s+for\b/,
       /\bvalidation\s+rules?\s+on\b/,

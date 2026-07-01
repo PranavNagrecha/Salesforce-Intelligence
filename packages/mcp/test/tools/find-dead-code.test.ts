@@ -137,12 +137,30 @@ const seed: ExtractionResult = {
       apiName: 'AccountTrigger',
       properties: { isTest: false },
     }),
-    // Dead flow — no incoming references.
+    // Dead flow — no incoming references AND Obsolete status (R2-12: only
+    // Obsolete/InvalidDraft flows may fall through to definitely_dead).
     makeNode({
       id: 'Flow:UnusedFlow',
       type: 'Flow',
       apiName: 'UnusedFlow',
-      properties: { active: false },
+      properties: { status: 'Obsolete' },
+    }),
+    // R2-12: an ACTIVE flow with ZERO incoming edges must NOT be definitely_dead
+    // — Flow edges are all OUTGOING (triggersOn/listensTo/callsApex/writesTo),
+    // so in-degree is ~0 by nature. An Active flow fires on its own trigger.
+    makeNode({
+      id: 'Flow:ActiveOrphanFlow',
+      type: 'Flow',
+      apiName: 'ActiveOrphanFlow',
+      properties: { status: 'Active' },
+    }),
+    // R2-12: a flow with NO status property at all → unknown → treated as
+    // active (never confidently dead). The destructive false-positive guard.
+    makeNode({
+      id: 'Flow:StatuslessOrphanFlow',
+      type: 'Flow',
+      apiName: 'StatuslessOrphanFlow',
+      properties: {},
     }),
     // Profile that GRANTS ACCESS (grantedBy) to code/fields — access is NOT usage.
     makeNode({ id: 'Profile:Admin', type: 'Profile', apiName: 'Admin' }),
@@ -400,7 +418,7 @@ describe('findDeadCodeHandler', () => {
     expect(stale?.verdict).toBe('definitely_dead');
   });
 
-  it('flags UnusedFlow as definitely_dead', async () => {
+  it('flags an Obsolete flow with no incoming refs as definitely_dead', async () => {
     const r = await findDeadCodeHandler(ctx, {});
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -408,6 +426,47 @@ describe('findDeadCodeHandler', () => {
       (c) => c.componentId === 'Flow:UnusedFlow',
     );
     expect(flow?.verdict).toBe('definitely_dead');
+  });
+
+  it('R2-12: an ACTIVE flow with 0 incoming edges is NOT definitely_dead (suppressed as uncertain)', async () => {
+    // Default (includeUncertain=false): an active orphan flow must be SUPPRESSED
+    // from the result set entirely — never definitely_dead/likely_dead.
+    const r = await findDeadCodeHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const flow = r.value.data.candidates.find(
+      (c) => c.componentId === 'Flow:ActiveOrphanFlow',
+    );
+    expect(flow).toBeUndefined();
+  });
+
+  it('R2-12: an ACTIVE orphan flow surfaces as uncertain when includeUncertain', async () => {
+    const r = await findDeadCodeHandler(ctx, { includeUncertain: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const flow = r.value.data.candidates.find(
+      (c) => c.componentId === 'Flow:ActiveOrphanFlow',
+    );
+    expect(flow?.verdict).toBe('uncertain');
+  });
+
+  it('R2-12: a status-LESS orphan flow is treated as active, never definitely_dead', async () => {
+    const r = await findDeadCodeHandler(ctx, { includeUncertain: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const flow = r.value.data.candidates.find(
+      (c) => c.componentId === 'Flow:StatuslessOrphanFlow',
+    );
+    expect(flow?.verdict).toBe('uncertain');
+    // And it must NOT appear at all in the default (suppressed) result.
+    const rDefault = await findDeadCodeHandler(ctx, {});
+    expect(rDefault.ok).toBe(true);
+    if (!rDefault.ok) return;
+    expect(
+      rDefault.value.data.candidates.find(
+        (c) => c.componentId === 'Flow:StatuslessOrphanFlow',
+      ),
+    ).toBeUndefined();
   });
 
   it('does NOT flag test classes as dead', async () => {
@@ -672,6 +731,124 @@ describe('findDeadCodeInputSchema', () => {
       false,
     );
   });
+
+  it('accepts offset and cursor (CR-22)', () => {
+    expect(
+      findDeadCodeInputSchema.safeParse({ offset: 5, cursor: 'abc' }).success,
+    ).toBe(true);
+  });
+});
+
+// =============================================================================
+// CR-22 B4 — output-axis cursor. A truncated page emits an opaque nextCursor
+// that resumes with no gaps / no dupes; a whole-fits no-cursor call is
+// byte-identical (no limit/offset/nextCursor/pageInfo fields) while the
+// always-present `truncated` field stays.
+// =============================================================================
+describe('findDeadCodeHandler — output cursor (CR-22)', () => {
+  it('whole-fits no-cursor call omits paging fields but keeps `truncated`', async () => {
+    const r = await findDeadCodeHandler(ctx, { includeUncertain: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data as unknown as Record<string, unknown>;
+    expect('limit' in d).toBe(false);
+    expect('offset' in d).toBe(false);
+    expect('nextOffset' in d).toBe(false);
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+    // The top-level `truncated` is part of today's golden — always emitted.
+    expect('truncated' in d).toBe(true);
+    expect(d['truncated']).toBe(false);
+  });
+
+  it('a truncated page emits a cursor that resumes with no gaps or dupes', async () => {
+    const all = await findDeadCodeHandler(ctx, {
+      includeUncertain: true,
+      limit: 500,
+    });
+    expect(all.ok).toBe(true);
+    if (!all.ok) return;
+    const fullOrder = all.value.data.candidates.map((c) => c.componentId);
+    expect(fullOrder.length).toBeGreaterThan(2);
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const page: Awaited<ReturnType<typeof findDeadCodeHandler>> =
+        await findDeadCodeHandler(
+          ctx,
+          cursor !== undefined
+            ? { includeUncertain: true, limit: 2, cursor }
+            : { includeUncertain: true, limit: 2 },
+        );
+      expect(page.ok).toBe(true);
+      if (!page.ok) return;
+      for (const c of page.value.data.candidates) seen.push(c.componentId);
+      const nc = page.value.data.nextCursor;
+      if (nc === undefined) break;
+      cursor = nc;
+      guard += 1;
+      if (guard > 50) throw new Error('cursor did not terminate');
+    }
+    expect(seen).toEqual(fullOrder);
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+
+  it('rejects a cursor minted with includeUncertain=true replayed at false', async () => {
+    const first = await findDeadCodeHandler(ctx, {
+      includeUncertain: true,
+      limit: 1,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const cursor = first.value.data.nextCursor;
+    expect(typeof cursor).toBe('string');
+    if (typeof cursor !== 'string') return;
+    const replay = await findDeadCodeHandler(ctx, {
+      includeUncertain: false,
+      cursor,
+    });
+    expect(replay.ok).toBe(false);
+    if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
+  });
+
+  it('rejects a cursor minted for a different types filter', async () => {
+    const first = await findDeadCodeHandler(ctx, {
+      includeUncertain: true,
+      limit: 1,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const cursor = first.value.data.nextCursor;
+    expect(typeof cursor).toBe('string');
+    if (typeof cursor !== 'string') return;
+    const replay = await findDeadCodeHandler(ctx, {
+      includeUncertain: true,
+      types: ['CustomField'],
+      cursor,
+    });
+    expect(replay.ok).toBe(false);
+    if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
+  });
+
+  it('byVerdict/byType stay full-set totals across pages', async () => {
+    const full = await findDeadCodeHandler(ctx, {
+      includeUncertain: true,
+      limit: 500,
+    });
+    const page = await findDeadCodeHandler(ctx, {
+      includeUncertain: true,
+      limit: 1,
+    });
+    expect(full.ok && page.ok).toBe(true);
+    if (!full.ok || !page.ok) return;
+    expect(page.value.data.byVerdict).toEqual(full.value.data.byVerdict);
+    expect(page.value.data.byType).toEqual(full.value.data.byType);
+    expect(page.value.data.totalCount).toBe(full.value.data.totalCount);
+  });
 });
 
 describe('findDeadCodeHandler — coverage caveat (P13-STAGED-absence-battery)', () => {
@@ -721,5 +898,168 @@ describe('findDeadCodeHandler — coverage caveat (P13-STAGED-absence-battery)',
     expect(result.value.data.coverageCaveat?.missingCoverage).toEqual([
       'LightningComponentBundle',
     ]);
+  });
+});
+
+// =============================================================================
+// Dead-queueable detection: a class that `implements Queueable` is NOT live by
+// virtue of implementing the interface — it must be ENQUEUED by user Apex. A
+// Queueable/Batchable/Schedulable enqueued from at least one production
+// (non-@isTest) dispatch site is live (uncertain); enqueued only from @isTest
+// code is likely_dead (test dispatch is rolled back at runtime); never enqueued
+// is definitely_dead. A `!Test.isRunningTest()`-guarded enqueue in a NON-test
+// class still counts as a production path (the guard only suppresses during
+// tests). Mirrors the production-vs-test split scheduled_job_catalog already
+// makes for Schedulable classes.
+// =============================================================================
+describe('findDeadCodeHandler — dead async-dispatch (Queueable) detection', () => {
+  let qDir: string;
+  let qStore: GraphStore;
+  let qCtx: Context;
+
+  beforeAll(async () => {
+    qDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-fdc-queueable-'));
+    const opened = await openGraph(join(qDir, 'fdc-q.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    qStore = opened.value;
+    const qSeed: ExtractionResult = {
+      nodes: [
+        // Queueable enqueued from a PRODUCTION (non-test) class → live.
+        makeNode({
+          id: 'ApexClass:LiveQueueable',
+          type: 'ApexClass',
+          apiName: 'LiveQueueable',
+          properties: { isTest: false, isQueueable: true },
+        }),
+        // Production dispatcher (non-@isTest) — its enqueue is guarded only by
+        // `!Test.isRunningTest()`, a genuine production runtime path.
+        makeNode({
+          id: 'ApexClass:DispatcherHelper',
+          type: 'ApexClass',
+          apiName: 'DispatcherHelper',
+          properties: { isTest: false },
+        }),
+        // Queueable enqueued ONLY from an @isTest class → likely_dead (test
+        // dispatch is rolled back at runtime; no production dispatch site).
+        makeNode({
+          id: 'ApexClass:TestOnlyQueueable',
+          type: 'ApexClass',
+          apiName: 'TestOnlyQueueable',
+          properties: { isTest: false, isQueueable: true },
+        }),
+        makeNode({
+          id: 'ApexClass:TestOnlyQueueableTest',
+          type: 'ApexClass',
+          apiName: 'TestOnlyQueueableTest',
+          properties: { isTest: true },
+        }),
+        // Queueable never enqueued anywhere → definitely_dead (the textbook
+        // dead-queueable signature: implements the interface but no dispatch).
+        makeNode({
+          id: 'ApexClass:OrphanQueueable',
+          type: 'ApexClass',
+          apiName: 'OrphanQueueable',
+          properties: { isTest: false, isQueueable: true },
+        }),
+        // Control: a REST entry point with no callers is STILL live — the
+        // platform invokes it externally; async-dispatch reasoning must not
+        // bleed into external entry points.
+        makeNode({
+          id: 'ApexClass:RestEndpoint',
+          type: 'ApexClass',
+          apiName: 'RestEndpoint',
+          properties: { isTest: false, isRestResource: true },
+        }),
+      ],
+      edges: [
+        // DispatcherHelper -> LiveQueueable : production async dispatch.
+        makeEdge({
+          fromId: 'ApexClass:DispatcherHelper',
+          toId: 'ApexClass:LiveQueueable',
+          edgeType: 'dispatchesAsync',
+          confidence: 'declared',
+          source: 'apex-class',
+          properties: { dispatchMechanism: 'enqueueJob' },
+        }),
+        // TestOnlyQueueableTest -> TestOnlyQueueable : test-only async dispatch.
+        makeEdge({
+          fromId: 'ApexClass:TestOnlyQueueableTest',
+          toId: 'ApexClass:TestOnlyQueueable',
+          edgeType: 'dispatchesAsync',
+          confidence: 'declared',
+          source: 'apex-class',
+          properties: { dispatchMechanism: 'enqueueJob' },
+        }),
+      ],
+    };
+    const imp = await importExtractionResults(qStore, [qSeed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    qCtx = { vaultRoot: qDir, manifest: MANIFEST, graph: qStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(qStore);
+    rmSync(qDir, { recursive: true, force: true });
+  });
+
+  it('a Queueable enqueued from a production (non-test) dispatch site is NOT dead', async () => {
+    const r = await findDeadCodeHandler(qCtx, { includeUncertain: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const live = r.value.data.candidates.find(
+      (c) => c.componentId === 'ApexClass:LiveQueueable',
+    );
+    expect(live?.verdict).toBe('uncertain');
+    // and it is suppressed (never dead) in the default result.
+    const rDefault = await findDeadCodeHandler(qCtx, {});
+    expect(rDefault.ok).toBe(true);
+    if (!rDefault.ok) return;
+    expect(
+      rDefault.value.data.candidates.find(
+        (c) => c.componentId === 'ApexClass:LiveQueueable',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('a Queueable enqueued ONLY from an @isTest class is likely_dead', async () => {
+    const r = await findDeadCodeHandler(qCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.candidates.find(
+      (x) => x.componentId === 'ApexClass:TestOnlyQueueable',
+    );
+    expect(c?.verdict).toBe('likely_dead');
+    expect(c?.reachedByTestClassOnly).toBe(true);
+  });
+
+  it('a Queueable that is never enqueued anywhere is definitely_dead', async () => {
+    const r = await findDeadCodeHandler(qCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.candidates.find(
+      (x) => x.componentId === 'ApexClass:OrphanQueueable',
+    );
+    expect(c?.verdict).toBe('definitely_dead');
+    expect(c?.incomingEdgeCount).toBe(0);
+  });
+
+  it('an external REST entry point with no callers stays live (not async-dead)', async () => {
+    const r = await findDeadCodeHandler(qCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(
+      r.value.data.candidates.find(
+        (c) => c.componentId === 'ApexClass:RestEndpoint',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('surfaces the async-dispatch dead-code disclosure when a queueable is flagged', async () => {
+    const r = await findDeadCodeHandler(qCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const joined = r.value.data.boundaries.join(' ');
+    expect(joined).toContain('async-dispatch dead-code');
+    expect(joined).toContain('!Test.isRunningTest()');
   });
 });

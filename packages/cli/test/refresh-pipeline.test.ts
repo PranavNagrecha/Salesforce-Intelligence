@@ -1,6 +1,6 @@
 /// <reference types="vitest/globals" />
 
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -146,6 +146,80 @@ describe('walkAndExtract skip-counter (architectural-bug-fix observability)', ()
       expect(ids).toContain('ScopingRule:Scope_Y');
       expect(walked.skippedDirectories.restrictionRules).toBeUndefined();
       expect(walked.skippedDirectories.scopingRules).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('dispatches a top-level CustomPermission definition file to a node (CR-CAP-15)', async () => {
+    const root = await makeTempRoot();
+    try {
+      // customPermissions/{Name}.customPermission-meta.xml is a flat top-level
+      // dispatch. Fail-before: no dispatch branch -> file is walked but never
+      // routed, so no CustomPermission node is emitted and it inflates the
+      // skip count. Pass-after: a CustomPermission:SkipValidation node exists.
+      await writeAt(
+        root,
+        'customPermissions/SkipValidation.customPermission-meta.xml',
+        '<?xml version="1.0"?><CustomPermission xmlns="http://soap.sforce.com/2006/04/metadata"><label>Skip Validation</label></CustomPermission>',
+      );
+
+      const walked = await walkAndExtract(root, null);
+      const ids = walked.results.flatMap((r) => r.nodes.map((n) => n.id));
+      expect(ids).toContain('CustomPermission:SkipValidation');
+      expect(walked.skippedDirectories.customPermissions).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('dispatches PlatformEventChannel + PlatformEventChannelMember files, wiring channel→member→event (CR-CAP-18)', async () => {
+    const root = await makeTempRoot();
+    try {
+      // Flat top-level dispatches. Fail-before: no dispatch branch -> the two
+      // dirs are walked but never routed (no nodes, inflated skip count).
+      // Pass-after: both nodes exist AND the member emits parentOf(channel→member)
+      // + references(member→CustomObject:Application_Event__e carrying the filter).
+      await writeAt(
+        root,
+        'platformEventChannels/Application_Event_Channel__chn.platformEventChannel-meta.xml',
+        '<?xml version="1.0"?><PlatformEventChannel xmlns="http://soap.sforce.com/2006/04/metadata"><channelType>event</channelType><label>Application Event Channel</label></PlatformEventChannel>',
+      );
+      await writeAt(
+        root,
+        'platformEventChannelMembers/Application_Event_Member__chn.platformEventChannelMember-meta.xml',
+        "<?xml version=\"1.0\"?><PlatformEventChannelMember xmlns=\"http://soap.sforce.com/2006/04/metadata\"><eventChannel>Application_Event_Channel__chn</eventChannel><selectedEntity>Application_Event__e</selectedEntity><filterExpression>Status__c = 'New'</filterExpression></PlatformEventChannelMember>",
+      );
+
+      const walked = await walkAndExtract(root, null);
+      const ids = walked.results.flatMap((r) => r.nodes.map((n) => n.id));
+      expect(ids).toContain(
+        'PlatformEventChannel:Application_Event_Channel__chn',
+      );
+      expect(ids).toContain(
+        'PlatformEventChannelMember:Application_Event_Member__chn',
+      );
+      const edges = walked.results.flatMap((r) => r.edges);
+      const parentOf = edges.find(
+        (e) =>
+          e.edgeType === 'parentOf' &&
+          e.toId === 'PlatformEventChannelMember:Application_Event_Member__chn',
+      );
+      expect(parentOf?.fromId).toBe(
+        'PlatformEventChannel:Application_Event_Channel__chn',
+      );
+      const ref = edges.find(
+        (e) =>
+          e.edgeType === 'references' &&
+          e.fromId ===
+            'PlatformEventChannelMember:Application_Event_Member__chn',
+      );
+      expect(ref?.toId).toBe('CustomObject:Application_Event__e');
+      expect(ref?.properties.filterExpression).toBe("Status__c = 'New'");
+      expect(walked.skippedDirectories.platformEventChannels).toBeUndefined();
+      expect(
+        walked.skippedDirectories.platformEventChannelMembers,
+      ).toBeUndefined();
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -386,6 +460,160 @@ describe('renderVault pagination (v3.2 R2 OmniUiCard regression)', () => {
     // files. ~0.8s locally but the shared CI runner's disk contention pushed it
     // past the 5s default and flaked the build. A generous explicit budget
     // keeps it deterministic without masking a real hang.
+  }, 30_000);
+});
+
+describe('renderVault edge batching (CR-17 N+1 elimination)', () => {
+  const mkNode = (overrides: Partial<Node> & Pick<Node, 'id' | 'type' | 'apiName'>): Node => ({
+    label: overrides.apiName,
+    parentId: null,
+    sourcePath: `x/${overrides.apiName}.xml`,
+    lastModifiedDate: null,
+    lastModifiedBy: null,
+    apiVersion: null,
+    properties: {},
+    ...overrides,
+  });
+  const mkEdge = (overrides: Partial<Edge> & Pick<Edge, 'fromId' | 'toId'>): Edge => ({
+    edgeType: 'references',
+    confidence: 'parsed',
+    source: 'extractor:test',
+    properties: {},
+    ...overrides,
+  });
+
+  const setupStore = async (
+    seed: ExtractionResult,
+  ): Promise<{ store: GraphStore; vaultRoot: string; tempDir: string }> => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'sfi-render-batch-'));
+    const vaultRoot = join(tempDir, 'org-kb');
+    await mkdir(join(vaultRoot, 'graph'), { recursive: true });
+    await mkdir(join(vaultRoot, 'components'), { recursive: true });
+    const opened = await openGraph(join(vaultRoot, 'graph', 'org-kb.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const store = opened.value;
+    const imported = await importExtractionResults(store, [seed]);
+    if (!imported.ok) throw new Error(`import failed: ${imported.error.message}`);
+    return { store, vaultRoot, tempDir };
+  };
+
+  it('issues O(pages) edge queries, not O(nodes) (CR-17)', async () => {
+    // 5 CustomObjects, each with one outgoing edge. The old path issued one
+    // `listEdges` per node (5 queries); the batched path issues one
+    // `listEdgesForNodes` per page (1 query, all 5 < RENDER_PAGE_SIZE).
+    const nodes: Node[] = [];
+    const edges: Edge[] = [];
+    for (let i = 0; i < 5; i++) {
+      const id = `CustomObject:Obj_${i}`;
+      nodes.push(mkNode({ id, type: 'CustomObject', apiName: `Obj_${i}` }));
+      edges.push(
+        mkEdge({ fromId: id, toId: 'CustomObject:Shared', edgeType: 'references' }),
+      );
+    }
+    nodes.push(mkNode({ id: 'CustomObject:Shared', type: 'CustomObject', apiName: 'Shared' }));
+    const { store, vaultRoot, tempDir } = await setupStore({ nodes, edges });
+    try {
+      const spy = vi.spyOn(store.connection, 'runAndReadAll');
+      await renderVault(store, vaultRoot);
+      const edgeQueries = spy.mock.calls.filter(
+        (c) => typeof c[0] === 'string' && /FROM edges/i.test(c[0] as string),
+      );
+      // CustomObject is the only non-empty type here; all 6 nodes fit one page.
+      expect(edgeQueries.length).toBe(1);
+      spy.mockRestore();
+    } finally {
+      await closeGraph(store);
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it('renders byte-identical Markdown for same-endpoint differing-source edges (CR-17)', async () => {
+    // Two incoming `references` edges to Widget__c, BOTH from the same source
+    // node (identical endpointId) but different `source` producers — the exact
+    // same-endpoint tiebreak gap the plan-check flagged. The renderer sorts
+    // incoming rows only by endpointId, so the two rows' order is decided by
+    // the order the batched bucket feeds them; the pinned
+    // `(toId, edgeType, fromId, source)` total order makes that deterministic.
+    const seed: ExtractionResult = {
+      nodes: [
+        mkNode({ id: 'CustomObject:Widget__c', type: 'CustomObject', apiName: 'Widget__c' }),
+        mkNode({ id: 'Flow:SyncFlow', type: 'Flow', apiName: 'SyncFlow' }),
+      ],
+      edges: [
+        mkEdge({
+          fromId: 'Flow:SyncFlow',
+          toId: 'CustomObject:Widget__c',
+          edgeType: 'references',
+          source: 'extractor:flow-zeta',
+        }),
+        mkEdge({
+          fromId: 'Flow:SyncFlow',
+          toId: 'CustomObject:Widget__c',
+          edgeType: 'references',
+          source: 'extractor:flow-alpha',
+        }),
+      ],
+    };
+    const widgetRel = join('components', 'CustomObject', 'Widget__c.md');
+
+    // Render once.
+    const a = await setupStore(seed);
+    let firstBytes: string;
+    try {
+      await renderVault(a.store, a.vaultRoot);
+      firstBytes = await readFile(join(a.vaultRoot, widgetRel), 'utf8');
+    } finally {
+      await closeGraph(a.store);
+      await rm(a.tempDir, { recursive: true, force: true });
+    }
+
+    // Render again in a fresh store — bytes must be identical (deterministic).
+    const b = await setupStore(seed);
+    let secondBytes: string;
+    try {
+      await renderVault(b.store, b.vaultRoot);
+      secondBytes = await readFile(join(b.vaultRoot, widgetRel), 'utf8');
+    } finally {
+      await closeGraph(b.store);
+      await rm(b.tempDir, { recursive: true, force: true });
+    }
+
+    expect(secondBytes).toBe(firstBytes);
+    // Both producers are present and in the pinned (source ASC) order:
+    // flow-alpha before flow-zeta.
+    const alphaIdx = firstBytes.indexOf('extractor:flow-alpha');
+    const zetaIdx = firstBytes.indexOf('extractor:flow-zeta');
+    expect(alphaIdx).toBeGreaterThan(-1);
+    expect(zetaIdx).toBeGreaterThan(-1);
+    expect(alphaIdx).toBeLessThan(zetaIdx);
+  }, 30_000);
+
+  it('counts only outgoing edges in RenderCounts (batched path preserves the tally)', async () => {
+    // A -> B (references), and a self-loop A -> A (callsApex). Outgoing tally:
+    // references=1 (A->B), callsApex=1 (A->A). B has no outgoing edges.
+    const seed: ExtractionResult = {
+      nodes: [
+        mkNode({ id: 'ApexClass:A', type: 'ApexClass', apiName: 'A', sourcePath: 'classes/A.cls' }),
+        mkNode({ id: 'ApexClass:B', type: 'ApexClass', apiName: 'B', sourcePath: 'classes/B.cls' }),
+      ],
+      edges: [
+        mkEdge({ fromId: 'ApexClass:A', toId: 'ApexClass:B', edgeType: 'callsApex', confidence: 'heuristic', source: 'apex-scanner' }),
+        mkEdge({ fromId: 'ApexClass:A', toId: 'ApexClass:A', edgeType: 'callsApex', confidence: 'heuristic', source: 'apex-scanner' }),
+      ],
+    };
+    const { store, vaultRoot, tempDir } = await setupStore(seed);
+    try {
+      // Apex renderer reads the .cls source from the vault; write stubs.
+      await mkdir(join(vaultRoot, 'classes'), { recursive: true });
+      await writeFile(join(vaultRoot, 'classes', 'A.cls'), 'public class A {}', 'utf8');
+      await writeFile(join(vaultRoot, 'classes', 'B.cls'), 'public class B {}', 'utf8');
+      const counts = await renderVault(store, vaultRoot);
+      // Two outgoing callsApex edges from A (A->B, A->A self-loop counted once).
+      expect(counts.edges.callsApex).toBe(2);
+    } finally {
+      await closeGraph(store);
+      await rm(tempDir, { recursive: true, force: true });
+    }
   }, 30_000);
 });
 

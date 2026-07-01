@@ -488,17 +488,17 @@
     "sharedWith": 4,
     "triggersOn": 4,
     "usedInLayout": 18,
-    "writesTo": 11
+    "writesTo": 12
   },
   "phantomSummary": {
     "buckets": {
       "automation-critical": 6,
       "blindspot-manifest": 1,
-      "standard-field-phantom": 6,
+      "standard-field-phantom": 7,
       "unknown": 5
     },
     "computedAt": "2026-06-25T15:19:46.650Z",
-    "distinctPhantoms": 18
+    "distinctPhantoms": 19
   },
   "refreshedAt": "2026-06-25T15:19:46.650Z",
   "skippedDirectories": {},

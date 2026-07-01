@@ -23,11 +23,13 @@
  * here).
  */
 
-import type { McpError, McpResponse } from '@sf-intelligence/contracts';
+import type { McpError, McpResponse, PageInfo } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
+
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 
 const DEFAULT_LIST_LIMIT = 50;
 const MAX_LIST_LIMIT = 200;
@@ -57,6 +59,9 @@ export const listAnalysesInputSchema = z.object({
   category: z.string().optional(),
   limit: z.number().int().min(1).max(MAX_LIST_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
+  // CR-22 continuation cursor: opaque token from a prior truncated page's
+  // nextCursor; supplies the resume offset. Omit for today's behavior.
+  cursor: z.string().min(1).optional(),
 });
 
 export type ListAnalysesInput = z.infer<typeof listAnalysesInputSchema>;
@@ -73,6 +78,15 @@ export interface ListAnalysesOutput {
   readonly offset: number;
   readonly categories: readonly string[];
   readonly next: string;
+  /**
+   * CR-22 opaque continuation token, present ONLY when this page is truncated
+   * (more entries remain past `limit`). Echo it back as `cursor` to resume.
+   * Absent on a complete page so an in-budget response is byte-identical to the
+   * pre-CR-22 shape.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
 }
 
 /** Lazy roster access (cycle-safe): tools/index.ts owns `V01_TOOLS`. */
@@ -97,15 +111,53 @@ export const listAnalysesHandler = async (
   const categories = [...new Set(all.map((a) => a.category))].sort((a, b) => a.localeCompare(b));
   const filtered =
     input.category === undefined ? all : all.filter((a) => a.category === input.category);
-  const offset = input.offset ?? 0;
+
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset);
+  // a stale/forged cursor (changed `category`, different tool, or refreshed
+  // vault) is rejected with invalid-query. The roster is a STABLE declared
+  // array (`V01_TOOLS`) with unique tool names, so the slice order is already a
+  // total order keyed by array position (unique `name` tiebreak) and offset
+  // resume neither dups nor skips.
+  const fingerprint = argsFingerprint({
+    ...(input.category !== undefined ? { category: input.category } : {}),
+  });
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: 'sfi.list_analyses',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
   const limit = input.limit ?? DEFAULT_LIST_LIMIT;
+
+  // No per-handler byte budget (small roster entries) — set an effectively-
+  // unbounded byteBudget so `paginate()` truncates only on `limit`, keeping the
+  // output byte-identical to the prior open-coded slice. `keyOf` stamps the
+  // entry name onto the cursor for future shift-tolerant resume.
+  const paged = paginateLegacy(filtered, {
+    offset,
+    limit,
+    byteBudget: Number.MAX_SAFE_INTEGER,
+    keyOf: (a) => a.name,
+    binding: {
+      tool: 'sfi.list_analyses',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const emitCursor = paged.nextCursor !== null;
+
   return ok({
     data: {
-      analyses: filtered.slice(offset, offset + limit),
+      analyses: paged.items,
       total: filtered.length,
       offset,
       categories,
       next: 'Call sfi.describe_analysis { name } for one tool’s full input schema, then sfi.run_analysis { name, args } to execute it — identical output to calling the tool directly.',
+      ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

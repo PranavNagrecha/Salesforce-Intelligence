@@ -252,6 +252,133 @@ const resolveSharedTarget = (
 };
 
 /**
+ * The five sharing-rule families this extractor models. `criteria` and `owner`
+ * are the v1.1 originals; CR-CAP-16 adds the three guest / territory families:
+ *   - `guest`          ← `<sharingGuestRules>` (Experience-Cloud guest access)
+ *   - `territory`      ← `<sharingTerritoryRules>`
+ *   - `territoryGroup` ← `<sharingTerritoryGroupRules>`
+ * All three are criteria-SHAPED (carry `criteriaItems`, optional
+ * `booleanFilter`, no `sharedFrom`).
+ */
+type RuleType = 'criteria' | 'owner' | 'guest' | 'territory' | 'territoryGroup';
+
+/**
+ * Rule families whose `<sharedTo>` predicate is criteria-shaped — i.e. carries
+ * `criteriaItems` / `booleanFilter` rather than an owner `sharedFrom`. CR-CAP-16
+ * broadens the original criteria-only check so the guest / territory families
+ * surface their predicate too (they are all criteria-shaped).
+ */
+const HAS_CRITERIA: ReadonlySet<RuleType> = new Set<RuleType>([
+  'criteria',
+  'guest',
+  'territory',
+  'territoryGroup',
+]);
+
+/**
+ * CR-CAP-16 — GUEST-branch-LOCAL `<sharedTo>` resolver.
+ *
+ * A guest sharing rule's `<sharedTo>` carries a SINGLE `<guestUser>` child whose
+ * INNER TEXT is the Experience-Cloud SITE NAME (e.g. `ClientPortal`) — it is
+ * always named, never self-closing. The shared, exported `VARIANT_TABLE.guestUser`
+ * entry is a SELF-CLOSING synthetic that DROPS that text and collapses every
+ * guest rule to one `Group:GuestUser`; it is also shared with
+ * `enterprise-metadata.ts` `readListViewSharedTo` (where a non-null
+ * `syntheticName` means "presence-only"), so flipping it would silently change
+ * ListView extraction. Hence this LOCAL resolver: it reads the site name and
+ * emits a NAMED `Group:{siteName}` target + `siteName` so each portal's guest
+ * access is distinct, WITHOUT touching the shared table.
+ *
+ * The named site group is dangling-by-design (no matching Group component for a
+ * site), so the edge carries `synthetic: true` like the other synthetic groups.
+ */
+const resolveGuestTarget = (
+  sharedTo: Record<string, unknown>,
+  path: string,
+): Result<ResolvedTarget, ExtractorError> => {
+  const guestUserRaw = unwrapSingle(sharedTo['guestUser']);
+  if (
+    guestUserRaw === undefined ||
+    guestUserRaw === null ||
+    guestUserRaw === ''
+  ) {
+    return err({
+      kind: 'malformed-input',
+      path,
+      message: '<sharedTo><guestUser> is empty or missing for a guest rule',
+    });
+  }
+  const siteName = String(guestUserRaw);
+  return ok({
+    variantKey: 'guestUser',
+    variantName: siteName,
+    toId: `Group:${siteName}`,
+    extraProps: { synthetic: true, siteName },
+  });
+};
+
+/** Territory-specific `<sharedTo>` variant element names (NOT in VARIANT_TABLE). */
+const TERRITORY_VARIANT_KEYS = new Set([
+  'territory',
+  'territoryAndSubordinates',
+]);
+
+/**
+ * CR-CAP-16 — TERRITORY-branch-LOCAL `<sharedTo>` resolver.
+ *
+ * Territory rules share to one of:
+ *   - a STANDARD variant (`<group>`, `<role>`, …) — resolved by the normal
+ *     `resolveSharedTarget` (e.g. a territory rule shared with `Group:G`).
+ *   - a TERRITORY-specific variant (`<territory>`, `<territoryAndSubordinates>`)
+ *     NOT in `VARIANT_TABLE` — resolved here to a `Territory:{name}` synthetic
+ *     (dangling-by-design, like `AllInternalUsers`; no Territory ComponentType).
+ *
+ * Tries the standard table first; on a territory variant it builds the
+ * synthetic; an unrecognised / empty / multi-variant container is
+ * `malformed-input` so an unmodeled shape surfaces rather than being silently
+ * dropped.
+ */
+const resolveTerritoryTarget = (
+  sharedTo: Record<string, unknown>,
+  path: string,
+): Result<ResolvedTarget, ExtractorError> => {
+  const standardKeys = Object.keys(sharedTo).filter((k) => VARIANT_KEYS.has(k));
+  const territoryKeys = Object.keys(sharedTo).filter((k) =>
+    TERRITORY_VARIANT_KEYS.has(k),
+  );
+  if (standardKeys.length === 1 && territoryKeys.length === 0) {
+    return resolveSharedTarget(sharedTo, 'sharedTo', path);
+  }
+  if (territoryKeys.length === 1 && standardKeys.length === 0) {
+    const key = territoryKeys[0]!;
+    const innerRaw = unwrapSingle(sharedTo[key]);
+    if (innerRaw === undefined || innerRaw === null || innerRaw === '') {
+      return err({
+        kind: 'malformed-input',
+        path,
+        message: `<sharedTo><${key}> is empty`,
+      });
+    }
+    const name = String(innerRaw);
+    const inheritance =
+      key === 'territoryAndSubordinates' ? { inheritance: 'subordinates' } : {};
+    return ok({
+      variantKey: key,
+      variantName: name,
+      toId: `Territory:${name}`,
+      extraProps: { synthetic: true, ...inheritance },
+    });
+  }
+  return err({
+    kind: 'malformed-input',
+    path,
+    message: `expected exactly one <sharedTo> variant for a territory rule, found ${
+      standardKeys.length + territoryKeys.length
+    }`,
+  });
+};
+
+/**
  * Validate that a per-rule child object carries the required scalars
  * (`fullName`, `accessLevel`) and target containers, and return them as
  * a typed bundle. Field order matches the error-cases table in
@@ -334,7 +461,7 @@ const validateRuleRequired = (
  */
 const buildRule = (
   rule: Record<string, unknown>,
-  ruleType: 'criteria' | 'owner',
+  ruleType: RuleType,
   objectApiName: string,
   parentId: string,
   path: string,
@@ -343,7 +470,16 @@ const buildRule = (
   if (!required.ok) return required;
   const { fullName, accessLevel, sharedTo, sharedFrom } = required.value;
 
-  const sharedToResult = resolveSharedTarget(sharedTo, 'sharedTo', path);
+  // CR-CAP-16: dispatch `<sharedTo>` resolution by family. Guest rules use the
+  // branch-LOCAL resolver (named site group, leaving the shared VARIANT_TABLE
+  // untouched); territory / territoryGroup rules accept either a standard
+  // variant or a Territory synthetic; criteria / owner keep the original table.
+  const sharedToResult =
+    ruleType === 'guest'
+      ? resolveGuestTarget(sharedTo, path)
+      : ruleType === 'territory' || ruleType === 'territoryGroup'
+        ? resolveTerritoryTarget(sharedTo, path)
+        : resolveSharedTarget(sharedTo, 'sharedTo', path);
   if (!sharedToResult.ok) return sharedToResult;
 
   // `sharedFrom` is non-null exactly when `ruleType === 'owner'`, per
@@ -359,14 +495,30 @@ const buildRule = (
   const labelRaw = unwrapSingle(rule['label']);
   const label = labelRaw === undefined ? null : String(labelRaw);
 
-  const booleanFilterRaw =
-    ruleType === 'criteria' ? unwrapSingle(rule['booleanFilter']) : undefined;
+  // CR-CAP-16: criteria / guest / territory / territoryGroup are all
+  // criteria-shaped, so surface `booleanFilter` + `criteriaItemCount` for every
+  // family in HAS_CRITERIA (owner rules stay null/0).
+  const hasCriteria = HAS_CRITERIA.has(ruleType);
+  const booleanFilterRaw = hasCriteria
+    ? unwrapSingle(rule['booleanFilter'])
+    : undefined;
   const booleanFilter =
     booleanFilterRaw === undefined || booleanFilterRaw === null
       ? null
       : String(booleanFilterRaw);
-  const criteriaItemCount =
-    ruleType === 'criteria' ? toArray(rule['criteriaItems']).length : 0;
+  const criteriaItemCount = hasCriteria
+    ? toArray(rule['criteriaItems']).length
+    : 0;
+
+  // CR-CAP-16: a guest rule's resolved target carries the Experience-Cloud
+  // site name; surface it as a first-class `siteName` property so consumers can
+  // disclose WHICH portal's guest user the rule shares with.
+  const siteName =
+    ruleType === 'guest'
+      ? typeof sharedToResult.value.extraProps['siteName'] === 'string'
+        ? (sharedToResult.value.extraProps['siteName'] as string)
+        : null
+      : null;
 
   const node: Node = {
     id: ruleId,
@@ -387,6 +539,7 @@ const buildRule = (
       sharedFromName: sharedFromResolved?.variantName ?? null,
       booleanFilter,
       criteriaItemCount,
+      ...(siteName !== null ? { siteName } : {}),
     },
   };
 
@@ -450,8 +603,19 @@ const buildRule = (
  * ids (`Group:AllInternalUsers`, etc.) carry `synthetic: true` in their
  * edge properties and are dangling-by-design in v1.1.
  *
- * `<sharingGuestRules>` and `<sharingTerritoryRules>` are skipped
- * without emitting nodes or edges — v1.1 does not model their context.
+ * CR-CAP-16: `<sharingGuestRules>`, `<sharingTerritoryRules>`, and
+ * `<sharingTerritoryGroupRules>` are now EXTRACTED into the same `SharingRule`
+ * shape (one node + `parentOf` + one `sharedWith` each, `declared`
+ * confidence). They are criteria-shaped, so they carry `booleanFilter` +
+ * `criteriaItemCount`. A guest rule's `<guestUser>` inner text is the
+ * Experience-Cloud SITE NAME, surfaced as `properties.siteName` and a NAMED
+ * `Group:{siteName}` target (resolved by a guest-branch-LOCAL helper that
+ * leaves the shared `VARIANT_TABLE.guestUser` synthetic untouched). Territory
+ * rules resolve to a standard variant (e.g. `Group:G`) or a `Territory:{name}`
+ * synthetic (dangling-by-design). Whether a given rule grants a specific user /
+ * record is record-level context the offline metadata lacks, so consumers keep
+ * an `unknown` verdict — the EXISTENCE of the rule is declarable, its
+ * APPLICABILITY is not.
  *
  * Returns an `ExtractorError` for any of the documented failure modes:
  * `file-not-found`, `parse-error`, or `malformed-input` (wrong root,
@@ -501,26 +665,29 @@ export const extractSharingRules = async (
   const objectApiName = deriveComponentApiName(path, SHARING_RULES_FILE_SUFFIX);
   const parentId = `CustomObject:${objectApiName}`;
 
-  const criteriaRules = toArray(rootObj['sharingCriteriaRules']).filter(
-    (r): r is Record<string, unknown> => typeof r === 'object' && r !== null,
-  );
-  const ownerRules = toArray(rootObj['sharingOwnerRules']).filter(
-    (r): r is Record<string, unknown> => typeof r === 'object' && r !== null,
-  );
+  // CR-CAP-16: each XML element maps to a `RuleType`. The original two families
+  // plus the three guest / territory families. Order is criteria → owner →
+  // guest → territory → territoryGroup so node/edge output stays deterministic.
+  const FAMILIES: ReadonlyArray<{ readonly element: string; readonly ruleType: RuleType }> = [
+    { element: 'sharingCriteriaRules', ruleType: 'criteria' },
+    { element: 'sharingOwnerRules', ruleType: 'owner' },
+    { element: 'sharingGuestRules', ruleType: 'guest' },
+    { element: 'sharingTerritoryRules', ruleType: 'territory' },
+    { element: 'sharingTerritoryGroupRules', ruleType: 'territoryGroup' },
+  ];
 
   const nodes: Node[] = [];
   const edges: Edge[] = [];
-  for (const rule of criteriaRules) {
-    const built = buildRule(rule, 'criteria', objectApiName, parentId, path);
-    if (!built.ok) return built;
-    nodes.push(built.value.node);
-    edges.push(...built.value.edges);
-  }
-  for (const rule of ownerRules) {
-    const built = buildRule(rule, 'owner', objectApiName, parentId, path);
-    if (!built.ok) return built;
-    nodes.push(built.value.node);
-    edges.push(...built.value.edges);
+  for (const { element, ruleType } of FAMILIES) {
+    const rules = toArray(rootObj[element]).filter(
+      (r): r is Record<string, unknown> => typeof r === 'object' && r !== null,
+    );
+    for (const rule of rules) {
+      const built = buildRule(rule, ruleType, objectApiName, parentId, path);
+      if (!built.ok) return built;
+      nodes.push(built.value.node);
+      edges.push(...built.value.edges);
+    }
   }
 
   return ok({ nodes, edges });

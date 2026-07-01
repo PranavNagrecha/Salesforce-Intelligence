@@ -22,6 +22,39 @@ const countingExec = (totalSize = 5): { exec: ExecCommand; calls: () => number }
   return { exec, calls: () => calls };
 };
 
+/**
+ * A mock `sf` whose call resolution is held until `release()` is invoked — used
+ * to exercise CONCURRENT in-flight identical queries (the cache-stampede path).
+ */
+const gatedExec = (
+  totalSize = 5,
+): { exec: ExecCommand; calls: () => number; release: () => void } => {
+  let calls = 0;
+  const waiters: (() => void)[] = [];
+  const exec: ExecCommand = async () => {
+    calls += 1;
+    await new Promise<void>((resolve) => waiters.push(resolve));
+    return { stdout: JSON.stringify({ result: { totalSize } }), stderr: '' };
+  };
+  return {
+    exec,
+    calls: () => calls,
+    release: () => {
+      for (const w of waiters.splice(0)) w();
+    },
+  };
+};
+
+/** A mock `sf` that always fails (e.g. a bad alias), tracking attempt count. */
+const failingExec = (): { exec: ExecCommand; calls: () => number } => {
+  let calls = 0;
+  const exec: ExecCommand = async () => {
+    calls += 1;
+    throw new Error('No authorization found for org "bad-alias"');
+  };
+  return { exec, calls: () => calls };
+};
+
 const SOQL_A = 'SELECT COUNT() FROM Account WHERE A__c = null';
 const SOQL_B = 'SELECT COUNT() FROM Contact WHERE B__c = null';
 
@@ -109,6 +142,66 @@ describe('live-budget-guard (P6-live-budget-guard)', () => {
     expect(liveBudgetStatus().remaining).toBe(0);
     resetLiveSession();
     expect(liveBudgetStatus().remaining).toBe(1);
+  });
+
+  // CR-P3 (live-session): a FAILED call must REFUND the budget — a transient
+  // failure (e.g. a bad alias) is not cached, so without a refund a wedged alias
+  // burns the whole 50-unit budget one retry at a time.
+  it('FAIL-BEFORE/PASS-AFTER: a failed live call refunds the budget unit', async () => {
+    process.env.SFI_LIVE_QUERY_BUDGET = '3';
+    const { exec, calls } = failingExec();
+    const r1 = await runLiveQuery('org', ['data', 'query', '--query', SOQL_A], exec);
+    const r2 = await runLiveQuery('org', ['data', 'query', '--query', SOQL_A], exec);
+    expect(r1.ok).toBe(false);
+    expect(r2.ok).toBe(false);
+    // Both attempts hit the org (failures are not cached)…
+    expect(calls()).toBe(2);
+    // …but neither consumed budget — a failed call refunds, so a flapping alias
+    // can't drain the session.
+    expect(liveBudgetStatus().remaining).toBe(3);
+  });
+});
+
+// CR-P3 (live-session): concurrent identical queries must NOT stampede — they
+// share ONE in-flight org call (and ONE budget unit), per the "exactly one org
+// query" docstring. Before the fix each concurrent miss hit the org and spent a
+// budget unit independently.
+describe('live-session in-flight de-dup (CR-P3 stampede)', () => {
+  it('FAIL-BEFORE/PASS-AFTER: concurrent identical queries share one org call', async () => {
+    const { exec, calls, release } = gatedExec();
+    // Fire three identical queries concurrently — none has completed/cached yet.
+    const p1 = runLiveQuery('org', ['data', 'query', '--query', SOQL_A], exec);
+    const p2 = runLiveQuery('org', ['data', 'query', '--query', SOQL_A], exec);
+    const p3 = runLiveQuery('org', ['data', 'query', '--query', SOQL_A], exec);
+    // Let the gated org call(s) resolve, then await all three.
+    release();
+    const [r1, r2, r3] = await Promise.all([p1, p2, p3]);
+    expect(r1.ok && r2.ok && r3.ok).toBe(true);
+    // Exactly ONE org call served all three concurrent identical queries.
+    expect(calls()).toBe(1);
+    // And exactly ONE budget unit was spent (50 default - 1).
+    expect(liveBudgetStatus().used).toBe(1);
+  });
+
+  it('concurrent DIFFERENT queries each get their own org call', async () => {
+    const { exec, calls, release } = gatedExec();
+    const pA = runLiveQuery('org', ['data', 'query', '--query', SOQL_A], exec);
+    const pB = runLiveQuery('org', ['data', 'query', '--query', SOQL_B], exec);
+    release();
+    await Promise.all([pA, pB]);
+    expect(calls()).toBe(2);
+    expect(liveBudgetStatus().used).toBe(2);
+  });
+
+  it('a query AFTER an in-flight one completes is served from cache (no extra call)', async () => {
+    const { exec, calls, release } = gatedExec();
+    const p1 = runLiveQuery('org', ['data', 'query', '--query', SOQL_A], exec);
+    release();
+    await p1;
+    const second = await runLiveQuery('org', ['data', 'query', '--query', SOQL_A], exec);
+    expect(second.ok).toBe(true);
+    if (second.ok) expect(second.value.cached).toBe(true);
+    expect(calls()).toBe(1);
   });
 });
 

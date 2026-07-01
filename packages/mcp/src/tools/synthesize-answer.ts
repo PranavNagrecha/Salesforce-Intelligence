@@ -50,16 +50,133 @@ const CANONICAL_ID_INLINE = /\b[A-Z][A-Za-z0-9]+:[A-Za-z0-9_./-]*[A-Za-z0-9_]/g;
 const CAVEAT_KEY =
   /^(disclosure|caveat|caveats|note|notes|boundary|boundaries|limitation|limitations|notModeledNote|honesty|warning|warnings)$/i;
 
-/** Keys whose scalar values are headline facts worth a bullet. */
+/**
+ * Keys whose scalar values are headline facts worth a bullet.
+ *
+ * Beyond the original count/verdict/status core, this also lifts the
+ * flow/sharing/VR/false-premise fields the analytical tools emit so a CORRECT
+ * cascade is no longer flattened to an empty skeleton (SYNTH bundle):
+ *   - VR / formula evaluation: `errorConditionFormula`, `active`,
+ *     `evaluatesAllActiveRules`, `evaluatesOn`.
+ *   - component shape (false-premise rebuttals): `apexCallCount`,
+ *     `fieldAccessCount`, `isExposed`.
+ *   - flow trigger gates: `triggerType`, `processType`, `recordTriggerType`,
+ *     `filterFormula`, `conditions`.
+ *   - sharing semantics: `sharingSemantics`, `effectiveModel`, `runInMode`,
+ *     `declaredSharing`.
+ *   - transaction / save semantics: `rollsBackTransaction`, `statement`.
+ *   - explicit false-premise signals: `premiseRejected`, `falsePremise`.
+ *   - pagination / list completeness: `hasMore`.
+ *   - matching rule dimensions: `booleanFilter`, `matchingMethods`.
+ */
 const FACT_KEY =
-  /^(count|total|totalCount|totalClassCount|totalFindingCount|totalGapsCount|verdict|disposition|status|coverageStatus|riskLevel|truncated|notModeled|plane|intent|confidence|matchKind|fieldLabel|fieldId|piiClassification|piiCategory)$/;
+  /^(count|total|totalCount|totalClassCount|totalFindingCount|totalGapsCount|verdict|disposition|status|coverageStatus|riskLevel|truncated|notModeled|plane|intent|confidence|matchKind|fieldLabel|fieldId|piiClassification|piiCategory|errorConditionFormula|active|evaluatesAllActiveRules|evaluatesOn|apexCallCount|fieldAccessCount|isExposed|triggerType|processType|recordTriggerType|filterFormula|conditions|sharingSemantics|effectiveModel|runInMode|declaredSharing|rollsBackTransaction|statement|premiseRejected|falsePremise|hasMore|booleanFilter|matchingMethods)$/;
 
 /** Array keys worth a "N item(s)" count bullet. */
 const COUNT_ARRAY_KEY =
-  /^(grants|findings|gaps|components|candidates|edges|nodes|reasoning|viaApexAccess|fields|matches|classes|tools)$/;
+  /^(grants|findings|gaps|components|candidates|edges|nodes|reasoning|viaApexAccess|fields|matches|classes|tools|conditions|callers|usages|referrers)$/;
 
 /** Key whose string value is a source tool's trust provenance. */
 const PROVENANCE_KEY = /^provenance$/i;
+
+/**
+ * I3c (structural honesty — grounding guard). The CLAIM-CLASS table: each entry
+ * matches an ASSERTION a draft can make that must be GROUNDED in the source and
+ * is otherwise a laundering risk (an LLM stating a fact the source never
+ * carried). Two families:
+ *
+ *   1. ABSENCE — "no X references this", "unused", "safe to delete", "nothing",
+ *      "none". An absence assertion is only as strong as the coverage behind it:
+ *      if the source carries ANY incomplete-coverage signal (a `coverageCaveat`,
+ *      `notModeled`, `retrievalHint`, `dataNotAvailable`, or a partial/unknown
+ *      `trust.completeness`), then "no X" is "not checked", NOT proven "none" —
+ *      the claim is UNGROUNDED. This is the class the id-verbatim / annotation
+ *      checks structurally cannot catch: an absence claim carries NO id to test.
+ *
+ *   2. LIFECYCLE — "deprecated", "legacy", "replaced by", "do not use", "owned
+ *      by". Curated knowledge that grounds ONLY in an annotation entry (see
+ *      `findUngroundedDeprecationClaims`); generalized here so the table is the
+ *      single home for every laundering class, though the deprecation detector
+ *      still owns the annotation cross-check.
+ *
+ * `id: 'absence'` claims are the ones I3c newly detects; the lifecycle entry is
+ * kept for documentation parity with the annotation-laundering pass.
+ */
+interface ClaimClass {
+  readonly id: 'absence' | 'lifecycle';
+  readonly pattern: RegExp;
+}
+const CLAIM_CLASS_TABLE: readonly ClaimClass[] = [
+  // ABSENCE class — an assertion of NON-existence / no-references / no-impact /
+  // safe-to-delete. Tuned to real host phrasings ("no flows reference this",
+  // "it is unused", "nothing depends on it", "safe to delete", "zero
+  // dependencies", "not referenced anywhere"). Each alternative is anchored on
+  // a word boundary so it does not fire inside a larger token.
+  {
+    id: 'absence',
+    pattern:
+      /\bno\b[^.!?\n]*\b(reference|references|referenced|use|uses|used|usage|depend|depends|dependent|dependents|dependenc|impact|impacts|flow|flows|apex|trigger|triggers|field|fields|caller|callers)\b/i,
+  },
+  { id: 'absence', pattern: /\bnone\b/i },
+  { id: 'absence', pattern: /\bnot\s+(referenced|used|modeled|impacted|found)\b/i },
+  { id: 'absence', pattern: /\bunused\b/i },
+  { id: 'absence', pattern: /\bnothing\b/i },
+  { id: 'absence', pattern: /\bzero\b/i },
+  { id: 'absence', pattern: /\bsafe\s+to\s+delete\b/i },
+  { id: 'absence', pattern: /\bno\s+(impact|dependencies|dependents|references|callers|usages)\b/i },
+  // LIFECYCLE class — kept for parity; the annotation-laundering pass owns the
+  // per-id cross-check (this table entry documents the class, it is not scanned
+  // in the absence loop).
+  { id: 'lifecycle', pattern: /\b(deprecat|legacy|replaced\s+by|do\s+not\s+use|owner)\b/i },
+];
+
+/** The absence-class patterns only, for the absence-claim scan. */
+const ABSENCE_PATTERNS: readonly RegExp[] = CLAIM_CLASS_TABLE.filter(
+  (c) => c.id === 'absence',
+).map((c) => c.pattern);
+
+/**
+ * Keys whose presence in the source signals INCOMPLETE coverage for the family
+ * an absence claim would rest on. When any of these is present-and-truthy, "no
+ * X references this" is "not checked", not proven "none".
+ *   - `coverageCaveat` — the I3b / what-if structural-honesty caveat object.
+ *   - `retrievalHint` — list_components / FRESH-02 "this may be partial" hint.
+ *   - `notModeled` / `notModeledNote` — the family's definition was not retrieved.
+ *   - `dataNotAvailable` — field_360 / field_lineage explicit not-available list.
+ */
+const INCOMPLETE_COVERAGE_KEY =
+  /^(coverageCaveat|retrievalHint|notModeled|notModeledNote|dataNotAvailable)$/;
+
+/**
+ * Free-text phrases a caveat/message carries when coverage is incomplete. The
+ * `coverageCaveat.message` and the empty-traversal caveat both say "not
+ * checked" / "incomplete coverage" / "not retrieved" / "not modeled"; matching
+ * these lets a plain caveat STRING (not just the structured object) count as an
+ * incompleteness signal.
+ */
+const INCOMPLETE_COVERAGE_PHRASE =
+  /\b(not checked|incomplete coverage|not (?:been )?retrieved|not modeled|were not (?:checked|retrieved|modeled)|among the families the vault (?:actually )?(?:covers|retrieved))\b/i;
+
+/**
+ * Keys carrying a resolve-style disposition. When the value is `'none'` the
+ * named component does not exist in the vault — the question's premise is false.
+ */
+const DISPOSITION_KEY = /^(disposition|matchKind|resolveDisposition)$/i;
+
+/**
+ * Keys whose truthy value is an explicit false-premise signal. Both the boolean
+ * form (`premiseRejected: true` / `falsePremise: true`) and the string form
+ * (`falsePremise: 'true'` / `'rejected'`) flag a counterfactual question.
+ */
+const FALSE_PREMISE_KEY = /^(falsePremise|premiseRejected)$/i;
+
+/** The single user-readable caveat composed for a false-premise cascade. */
+const FALSE_PREMISE_CAVEAT =
+  'FALSE PREMISE: the named component does not exist in the vault (resolve ' +
+  'disposition `none` / no source match) — the question assumes something that ' +
+  'is not there. Do not present its absence as a normal answer; say plainly ' +
+  'that the component was not found and (if the cascade carried a redirect ' +
+  'hint) point to the real component instead.';
 
 // P12-UX-synth-next-action — keys whose string values populate the grounded
 // Finding → Evidence → Cause → Fix → Risk → Next-action template. Each field is
@@ -122,6 +239,20 @@ export interface SynthesizeAnswerOutput {
   /** Canonical ids in `draft` NOT found in the source; present only with a `draft`. */
   readonly hallucinatedIds?: readonly string[];
   /**
+   * I3c (structural honesty — grounding guard). `false` when the draft asserts
+   * ABSENCE ("no X references this", "unused", "safe to delete") while the
+   * source carries an incomplete-coverage signal — absence read as fact over
+   * partial coverage. `true` otherwise. Advisory (a signal, not a hard block),
+   * but ALWAYS computed when a `draft` is present.
+   */
+  readonly grounded?: boolean;
+  /**
+   * I3c: the absence assertions in the draft that are UNGROUNDED because the
+   * source's coverage is incomplete. Empty (and `grounded` stays `true`) when
+   * the draft makes no absence claim or coverage is complete.
+   */
+  readonly ungroundedAbsenceClaims?: readonly string[];
+  /**
    * P13-ANNOT-tools laundering check: lifecycle claims ("X is deprecated")
    * the draft makes WITHOUT a backing annotation in the source. Present only
    * when a draft was supplied and at least one claim is ungrounded.
@@ -153,6 +284,13 @@ interface Collected {
   readonly causeHints: string[];
   readonly fixHints: string[];
   readonly nextHints: string[];
+  /**
+   * I3c: set true when the source carries ANY incomplete-coverage signal (a
+   * `coverageCaveat`/`retrievalHint`/`notModeled`/`dataNotAvailable` key, a
+   * partial/unknown `trust.completeness`, or a caveat string that reads "not
+   * checked"). An absence claim over such a source is UNGROUNDED.
+   */
+  coverageIncomplete: boolean;
 }
 
 const MAX_HINTS = 8;
@@ -192,10 +330,31 @@ const collect = (value: unknown, key: string | null, out: Collected): void => {
     if (key !== null && PROVENANCE_KEY.test(key) && value.trim().length > 0) {
       out.provenances.add(value.trim());
     }
+    // I3c incompleteness signal — a non-empty `retrievalHint`/`notModeledNote`
+    // string, OR a caveat/message string that reads "not checked" / "incomplete
+    // coverage" / "not modeled" (the coverageCaveat message phrasing).
+    if (
+      key !== null &&
+      value.trim().length > 0 &&
+      (INCOMPLETE_COVERAGE_KEY.test(key) || INCOMPLETE_COVERAGE_PHRASE.test(value))
+    ) {
+      out.coverageIncomplete = true;
+    }
     if (key !== null && CAVEAT_KEY.test(key) && value.trim().length > 0) {
       pushCapped(out.caveats, value, MAX_CAVEATS);
     } else if (key !== null && FACT_KEY.test(key)) {
       pushCapped(out.bullets, `${key}: ${value}`, MAX_BULLETS);
+      // FALSE-PREMISE PATH (SYNTH bundle): a `disposition`/`falsePremise`
+      // signal of "none"/no-match means the named component does not exist in
+      // the vault — the question's premise is false. Surface that as an
+      // explicit user-readable caveat instead of letting an empty skeleton
+      // imply the absence is a real answer.
+      if (
+        (DISPOSITION_KEY.test(key) && /^none$/i.test(value.trim())) ||
+        (FALSE_PREMISE_KEY.test(key) && /^(true|false-premise|rejected)$/i.test(value.trim()))
+      ) {
+        pushCapped(out.caveats, FALSE_PREMISE_CAVEAT, MAX_CAVEATS);
+      }
     }
     // Grounded evidence-template hints (independent of the caveat/fact branch —
     // the key names do not overlap). Verbatim from the source, never invented.
@@ -207,12 +366,27 @@ const collect = (value: unknown, key: string | null, out: Collected): void => {
     return;
   }
   if (typeof value === 'number' || typeof value === 'boolean') {
+    // I3c: `notModeled: true` is an incompleteness signal (the family's
+    // definition was not retrieved), regardless of whether the key is a FACT.
+    if (value === true && key !== null && INCOMPLETE_COVERAGE_KEY.test(key)) {
+      out.coverageIncomplete = true;
+    }
     if (key !== null && FACT_KEY.test(key)) {
       pushCapped(out.bullets, `${key}: ${String(value)}`, MAX_BULLETS);
+      // Boolean false-premise signal (`premiseRejected: true` /
+      // `falsePremise: true`) — same explicit caveat as the string form.
+      if (value === true && FALSE_PREMISE_KEY.test(key)) {
+        pushCapped(out.caveats, FALSE_PREMISE_CAVEAT, MAX_CAVEATS);
+      }
     }
     return;
   }
   if (Array.isArray(value)) {
+    // I3c: a NON-EMPTY `dataNotAvailable` array (field_360 / field_lineage)
+    // names families the tool could not answer for — an incompleteness signal.
+    if (key !== null && INCOMPLETE_COVERAGE_KEY.test(key) && value.length > 0) {
+      out.coverageIncomplete = true;
+    }
     if (key !== null && CAVEAT_KEY.test(key)) {
       for (const item of value) {
         if (typeof item === 'string' && item.trim().length > 0) {
@@ -228,6 +402,20 @@ const collect = (value: unknown, key: string | null, out: Collected): void => {
     return;
   }
   if (value !== null && typeof value === 'object') {
+    // I3c incompleteness signals at object nodes:
+    //   - a `coverageCaveat` OBJECT present at all (I3b / what-if): its very
+    //     presence means a dependency family is partial/unknown.
+    //   - a `completeness` block (TrustSummary.completeness) whose `status` is
+    //     `partial` or `unknown` — "not fully covered".
+    if (key !== null && INCOMPLETE_COVERAGE_KEY.test(key)) {
+      out.coverageIncomplete = true;
+    }
+    if (key === 'completeness') {
+      const status = (value as { readonly status?: unknown }).status;
+      if (status === 'partial' || status === 'unknown') {
+        out.coverageIncomplete = true;
+      }
+    }
     if (key === 'responseBudget') {
       // P13-GUARD-synth-caveat: a tool response reduced by the global byte
       // budget must surface as an explicit caveat in the synthesis — absence
@@ -268,6 +456,117 @@ const parseCitation = (id: string): Citation => {
     type: id.slice(0, colon),
     apiName: id.slice(colon + 1),
   };
+};
+
+/**
+ * Walk the source value tree to detect structural patterns that warrant
+ * additional caveats. These run AFTER `collect` so they complement (never
+ * duplicate) the scalar caveat/bullet pass. Each detector is independent.
+ *
+ * Detectors:
+ *   1. PAGINATION — `hasMore: true` in the input means the list_components
+ *      (or any paginated tool) returned only the first page; conclusions drawn
+ *      from that partial set may be wrong for the full family.
+ *   2. COUNT-CONSISTENCY — when a top-level object has both a stated total
+ *      count scalar (`count`/`total`/`totalCount`) and a `components` array
+ *      whose length differs from the stated total, the mismatch is a signal
+ *      of an off-by-one or synthesis error in the prior tool call.
+ *   3. INACTIVE-APPROVALPROCESS — when the input cites at least one
+ *      `ApprovalProcess:` id AND carries `active: false`, emit a caveat that
+ *      the sibling active processes on the same object were not retrieved and
+ *      may provide required routing context.
+ *   4. BOOLEANFILTER-MATCHINGMETHODS — when both `booleanFilter` and
+ *      `matchingMethods` appear in the same object, emit a structural note
+ *      distinguishing trigger-breadth (booleanFilter) from per-field fuzziness
+ *      (matchingMethod values); conflating the two is the canonical error.
+ */
+const applyStructuralCaveats = (value: unknown, out: Collected): void => {
+  // Walk every object node, applying pattern detectors.
+  const walk = (v: unknown): void => {
+    if (Array.isArray(v)) {
+      v.forEach(walk);
+      return;
+    }
+    if (v === null || typeof v !== 'object') return;
+    const o = v as Record<string, unknown>;
+
+    // DETECTOR 1 — PAGINATION: `hasMore: true` means the list was not exhaustive.
+    if (o['hasMore'] === true) {
+      pushCapped(
+        out.caveats,
+        'INCOMPLETE RETRIEVAL: the source tool returned hasMore=true — this response ' +
+          'covers only the first page of results. Conclusions about which values, members, ' +
+          'or rules are present (or absent) in the full family may be wrong. Paginate with ' +
+          'offset/nextCursor or narrow the query before drawing family-wide conclusions.',
+        MAX_CAVEATS,
+      );
+    }
+
+    // DETECTOR 2 — COUNT-CONSISTENCY: stated total vs enumerated components.
+    // Only applies at object nodes that carry BOTH a count-like scalar AND
+    // a `components` array — the canonical list_components response shape.
+    if (Array.isArray(o['components'])) {
+      const actualLen = (o['components'] as unknown[]).length;
+      for (const countKey of ['count', 'total', 'totalCount'] as const) {
+        const stated = o[countKey];
+        if (typeof stated === 'number' && stated !== actualLen) {
+          pushCapped(
+            out.caveats,
+            `COUNT MISMATCH: the input states ${countKey}=${stated} but the enumerated ` +
+              `'components' array contains ${actualLen} item(s). The stated total may be ` +
+              `a synthesis or off-by-one error — use the enumerated count (${actualLen}) ` +
+              `as the authoritative figure; do not repeat the stated total uncritically.`,
+            MAX_CAVEATS,
+          );
+          break; // one mismatch caveat per object node is enough
+        }
+      }
+    }
+
+    // DETECTOR 3 — INACTIVE-APPROVALPROCESS: inactive process without sibling retrieval.
+    // Only fires when an ApprovalProcess canonical id is present in the collected
+    // id set AND the current object node carries `active: false` — a strong signal
+    // that the cascade fetched only the inactive member of the version family.
+    if (o['active'] === false) {
+      const hasApprovalId = [...out.ids].some((id) => id.startsWith('ApprovalProcess:'));
+      if (hasApprovalId) {
+        pushCapped(
+          out.caveats,
+          'INACTIVE APPROVAL PROCESS: the cited ApprovalProcess has active=false. ' +
+            'The sibling active processes on the same object were NOT retrieved by this ' +
+            'cascade — they may provide the current routing logic, successor entry criteria, ' +
+            'and active step assignments. Call list_components on the same parent object ' +
+            'to retrieve the full version family before drawing conclusions about active routing.',
+          MAX_CAVEATS,
+        );
+      }
+    }
+
+    // DETECTOR 4 — BOOLEANFILTER-MATCHINGMETHODS independence.
+    // When both properties are present in the same component properties node,
+    // emit a structural interpretation note so the host distinguishes trigger
+    // breadth (booleanFilter) from per-field fuzziness (matchingMethod values).
+    const bf = o['booleanFilter'];
+    const mm = o['matchingMethods'];
+    if (typeof bf === 'string' && bf.length > 0 && typeof mm === 'string' && mm.length > 0) {
+      pushCapped(
+        out.caveats,
+        'MATCHING RULE — two independent dimensions: ' +
+          `(1) booleanFilter="${bf}" controls which field-combination sets are sufficient ` +
+          'to declare a duplicate (trigger breadth / recall — OR groups widen recall, AND ' +
+          'groups narrow it); ' +
+          `(2) matchingMethods="${mm}" controls how fuzzily each individual field comparison ` +
+          'works (precision — FirstName/LastName are fuzzy; Exact is not). ' +
+          'Do not attribute per-field fuzziness to the OR structure in booleanFilter; ' +
+          'fuzziness comes from matchingMethod values only.',
+        MAX_CAVEATS,
+      );
+    }
+
+    // Recurse into sub-objects AFTER applying node-level detectors.
+    Object.values(o).forEach(walk);
+  };
+  walk(value);
 };
 
 /**
@@ -349,6 +648,30 @@ const findUngroundedDeprecationClaims = (
   return claims.sort((a, b) => (a.id < b.id ? -1 : 1));
 };
 
+/**
+ * I3c (structural honesty — grounding guard). Scan a draft for ABSENCE
+ * assertions ("no flows reference this", "it is unused", "safe to delete") and
+ * return the sentences that assert absence. This runs on EVERY draft; the
+ * caller cross-references `coverageIncomplete` to decide whether each such
+ * claim is grounded (absence over COMPLETE coverage is fine; absence over
+ * PARTIAL coverage is the laundering the guard exists to catch).
+ *
+ * Splits on sentence terminators — but NOT on a bare `.` (which lives inside
+ * canonical ids and decimals), matching the annotation-laundering splitter — so
+ * each returned string is one self-contained claim the host can locate and fix.
+ * Returns each matching sentence once (deduped, trimmed), capped, sorted for a
+ * stable contract.
+ */
+const findAbsenceClaims = (draft: string): string[] => {
+  const found = new Set<string>();
+  for (const raw of draft.split(/(?:[!?\n]|\.(?=\s|$))+/)) {
+    const sentence = raw.trim();
+    if (sentence.length === 0) continue;
+    if (ABSENCE_PATTERNS.some((p) => p.test(sentence))) found.add(sentence);
+  }
+  return [...found].sort().slice(0, MAX_CAVEATS);
+};
+
 export const synthesizeAnswerHandler = async (
   ctx: Context,
   input: SynthesizeAnswerInput,
@@ -361,6 +684,7 @@ export const synthesizeAnswerHandler = async (
     causeHints: [],
     fixHints: [],
     nextHints: [],
+    coverageIncomplete: false,
   };
   // A host may hand the prior tool's output as a JSON STRING rather than a
   // parsed object (e.g. copying the tool's text result, or a transport that
@@ -379,6 +703,11 @@ export const synthesizeAnswerHandler = async (
     }
   }
   collect(source, null, out);
+  // Apply structural pattern detectors AFTER the scalar collect pass so that
+  // (a) the `out.ids` set is already populated (the inactive-ApprovalProcess
+  // detector needs to see cited ids), and (b) no structural caveat is double-
+  // emitted by the scalar walk.
+  applyStructuralCaveats(source, out);
 
   const citations = [...out.ids].sort().map(parseCitation);
 
@@ -398,6 +727,8 @@ export const synthesizeAnswerHandler = async (
   let hallucinatedIds: string[] | undefined;
   let groundedIds: string[] | undefined;
   let ungroundedAnnotationClaims: UngroundedAnnotationClaim[] | undefined;
+  let grounded: boolean | undefined;
+  let ungroundedAbsenceClaims: string[] | undefined;
   if (input.draft !== undefined) {
     const draftIds = [...new Set(input.draft.match(CANONICAL_ID_INLINE) ?? [])];
     groundedIds = draftIds.filter((id) => out.ids.has(id)).sort();
@@ -413,6 +744,17 @@ export const synthesizeAnswerHandler = async (
       input.draft,
       annotationEntries,
     );
+
+    // I3c ABSENCE-AS-FACT GUARD. Scan the draft for absence assertions. An
+    // absence claim is UNGROUNDED only when the source's coverage is incomplete
+    // (`out.coverageIncomplete`) — "no X references this" over PARTIAL coverage
+    // is "not checked", not proven "none". Over COMPLETE coverage the same
+    // claim is grounded, so `grounded` stays true and the list is empty. Always
+    // computed when a draft is present (structural, not opt-in).
+    const absenceClaims = findAbsenceClaims(input.draft);
+    ungroundedAbsenceClaims =
+      out.coverageIncomplete ? absenceClaims : [];
+    grounded = ungroundedAbsenceClaims.length === 0;
   }
 
   const qPrefix =
@@ -425,6 +767,11 @@ export const synthesizeAnswerHandler = async (
     `${out.caveats.length} caveat(s)` +
     (hallucinatedIds !== undefined
       ? `, ${hallucinatedIds.length} ungrounded id(s) in the draft`
+      : '') +
+    // I3c: only appended when a draft is present AND the guard fired, so the
+    // no-draft golden summary stays byte-identical.
+    (ungroundedAbsenceClaims !== undefined && ungroundedAbsenceClaims.length > 0
+      ? `, ${ungroundedAbsenceClaims.length} absence claim(s) asserted over incomplete coverage (grounded=false)`
       : '') +
     '.';
 
@@ -461,7 +808,17 @@ export const synthesizeAnswerHandler = async (
       caveats: out.caveats,
       evidence,
       ...(input.draft !== undefined
-        ? { hallucinatedIds: hallucinatedIds ?? [], groundedIds: groundedIds ?? [] }
+        ? {
+            hallucinatedIds: hallucinatedIds ?? [],
+            groundedIds: groundedIds ?? [],
+            // I3c: structural — always present alongside the id-grounding when a
+            // draft is passed. `grounded` false + the listed claims signal an
+            // absence asserted over incomplete coverage. Keeps the no-draft
+            // golden byte-identical (both fields gate on the draft, like the
+            // id-grounding fields above).
+            grounded: grounded ?? true,
+            ungroundedAbsenceClaims: ungroundedAbsenceClaims ?? [],
+          }
         : {}),
       ...(ungroundedAnnotationClaims !== undefined &&
       ungroundedAnnotationClaims.length > 0

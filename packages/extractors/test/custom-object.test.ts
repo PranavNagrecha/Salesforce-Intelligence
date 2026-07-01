@@ -706,6 +706,94 @@ describe('extractCustomObject', () => {
     });
   });
 
+  describe('<externalSharingModel> reading', () => {
+    // Real-org shape: OA_Communication_Request__c has both <sharingModel>ReadWrite
+    // and <externalSharingModel>Private — the two OWDs are independent. Before
+    // this fix, externalSharingModel was silently dropped; properties.externalSharingModel
+    // was always undefined.
+    it('extracts externalSharingModel=Private when present alongside sharingModel=ReadWrite', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <deploymentStatus>Deployed</deploymentStatus>
+    <enableActivities>true</enableActivities>
+    <enableHistory>true</enableHistory>
+    <enableReports>true</enableReports>
+    <enableSearch>true</enableSearch>
+    <externalSharingModel>Private</externalSharingModel>
+    <label>Communication Request</label>
+    <nameField>
+        <label>Communication Request Name</label>
+        <type>Text</type>
+    </nameField>
+    <pluralLabel>Communication Request</pluralLabel>
+    <sharingModel>ReadWrite</sharingModel>
+</CustomObject>`;
+      const { dir, path } = await writeTempXml(
+        'OA_Communication_Request__c.object-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractCustomObject(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0];
+        expect(node).toBeDefined();
+        if (!node) return;
+        // Internal OWD still reads correctly.
+        expect(node.properties['sharingModel']).toBe('ReadWrite');
+        // External OWD must now be surfaced (was undefined/missing before fix).
+        expect(node.properties['externalSharingModel']).toBe('Private');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('stores externalSharingModel=null when the element is absent (standard objects, non-sharing variants)', async () => {
+      // Standard custom object with no <externalSharingModel> element —
+      // the property must be present in the map as null, not undefined.
+      const { dir, path } = await writeTempXml('Widget__c.object-meta.xml', VALID_XML);
+      try {
+        const result = await extractCustomObject(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0];
+        expect(node).toBeDefined();
+        if (!node) return;
+        expect(node.properties['externalSharingModel']).toBeNull();
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('extracts externalSharingModel=ReadWrite when present', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <deploymentStatus>Deployed</deploymentStatus>
+    <externalSharingModel>ReadWrite</externalSharingModel>
+    <label>Portal Object</label>
+    <nameField>
+        <label>Portal Name</label>
+        <type>Text</type>
+    </nameField>
+    <pluralLabel>Portal Objects</pluralLabel>
+    <sharingModel>Private</sharingModel>
+</CustomObject>`;
+      const { dir, path } = await writeTempXml('Portal__c.object-meta.xml', xml);
+      try {
+        const result = await extractCustomObject(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0];
+        expect(node).toBeDefined();
+        if (!node) return;
+        expect(node.properties['sharingModel']).toBe('Private');
+        expect(node.properties['externalSharingModel']).toBe('ReadWrite');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('<visibility> reading', () => {
     it('maps <visibility> to properties.visibility when present', async () => {
       const xml = buildVariantXml(

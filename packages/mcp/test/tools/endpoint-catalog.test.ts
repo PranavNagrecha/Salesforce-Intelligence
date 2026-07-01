@@ -398,6 +398,102 @@ describe('endpointCatalogHandler', () => {
   });
 });
 
+// =============================================================================
+// Orphaned-named-credential scenario: one NamedCredential that an
+// ExternalService references (NOT orphaned) and one that nothing references
+// (orphaned — the "AWS_US_East_1 is unused" shape). The catalog must report
+// the orphan as orphaned rather than implying it authorizes a callout.
+// Uses its OWN store so it is independent of the shared-suite seeding above.
+// =============================================================================
+
+const NC_WIRED = 'NamedCredential:Wired_Api';
+const NC_UNUSED = 'NamedCredential:AcmeCloud_US_East_1';
+const ES_BINDS_NC = 'ExternalService:DirectorySync';
+
+const orphanSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: NC_WIRED,
+      type: 'NamedCredential',
+      apiName: 'Wired_Api',
+      properties: { url: 'https://api.example.com' },
+    }),
+    makeNode({
+      id: NC_UNUSED,
+      type: 'NamedCredential',
+      apiName: 'AcmeCloud_US_East_1',
+      properties: {
+        endpoint: 'arn:aws:US-EAST-1:000000000000',
+        protocol: 'NoAuthentication',
+      },
+    }),
+    makeNode({
+      id: ES_BINDS_NC,
+      type: 'ExternalService',
+      apiName: 'DirectorySync',
+    }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: ES_BINDS_NC,
+      toId: NC_WIRED,
+      edgeType: 'references',
+      properties: { role: 'namedCredential' },
+    }),
+  ],
+};
+
+describe('endpointCatalogHandler (orphaned named credential)', () => {
+  let orphanDir: string;
+  let orphanStore: GraphStore;
+  let orphanCtx: Context;
+
+  beforeAll(async () => {
+    orphanDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-endpoint-orphan-'));
+    const opened = await openGraph(join(orphanDir, 'orphan.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    orphanStore = opened.value;
+    const imported = await importExtractionResults(orphanStore, [orphanSeed]);
+    if (!imported.ok) {
+      throw new Error(`seed import failed: ${imported.error.message}`);
+    }
+    orphanCtx = {
+      vaultRoot: orphanDir,
+      manifest: FIXTURE_MANIFEST,
+      graph: orphanStore,
+    };
+  });
+
+  afterAll(async () => {
+    await closeGraph(orphanStore);
+    rmSync(orphanDir, { recursive: true, force: true });
+  });
+
+  it('flags an unreferenced NamedCredential as orphaned with referenceCount 0', async () => {
+    const result = await endpointCatalogHandler(orphanCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const unused = result.value.data.namedCredentials.find(
+      (e) => e.sourceComponentId === NC_UNUSED,
+    );
+    expect(unused).toBeDefined();
+    expect(unused?.orphaned).toBe(true);
+    expect(unused?.referenceCount).toBe(0);
+  });
+
+  it('does NOT flag a referenced NamedCredential as orphaned', async () => {
+    const result = await endpointCatalogHandler(orphanCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const wired = result.value.data.namedCredentials.find(
+      (e) => e.sourceComponentId === NC_WIRED,
+    );
+    expect(wired).toBeDefined();
+    expect(wired?.orphaned).toBe(false);
+    expect(wired?.referenceCount).toBe(1);
+  });
+});
+
 describe('endpointCatalogInputSchema', () => {
   it('accepts an empty input', () => {
     expect(endpointCatalogInputSchema.safeParse({}).success).toBe(true);

@@ -58,12 +58,22 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
+
+import {
+  buildEmptyTraversalCoverageCaveat,
+  CODE_USAGE_REQUIRED_COVERAGE,
+  type CoverageCaveat,
+} from './coverage-trust.js';
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+
+const FIND_CODE_USAGES_TOOL = 'sfi.find_code_usages';
 
 /**
  * Inclusive upper bound on `limit`. Mirrors `find-apex-usages`'s
@@ -162,6 +172,10 @@ const CODE_NODE_TYPES: ReadonlySet<ComponentType> = new Set(
 export const findCodeUsagesInputSchema = z.object({
   targetId: z.string().min(1),
   limit: z.number().int().min(1).max(CODE_USAGES_MAX_LIMIT).optional(),
+  // CR-22: page offset + continuation cursor for walking the full usage set
+  // when the result is truncated. Omit for today's behavior.
+  offset: z.number().int().nonnegative().optional(),
+  cursor: z.string().min(1).optional(),
   edgeTypes: z.array(z.enum(CODE_EDGE_TYPES)).optional(),
   nodeTypes: z.array(z.enum(CODE_NODE_TYPES_LIST)).optional(),
 });
@@ -191,6 +205,33 @@ export interface FindCodeUsagesOutput {
   readonly usages: readonly CodeUsage[];
   /** §C3 honesty: heuristic-confidence + empty≠absent disclosure (never a silent empty). */
   readonly boundaries: readonly string[];
+  /**
+   * I3b (empty ≠ none): present ONLY when the FULL result is empty AND a code
+   * family (Apex / LWC / Aura / Visualforce) that would produce a usage edge is
+   * NOT fully covered by the vault. Names the not-checked families so an empty
+   * usage list reads "not retrieved", not a proven "none". Absent on a
+   * non-empty result and on a fully-covered vault (byte-identical to before).
+   */
+  readonly coverageCaveat?: CoverageCaveat;
+  /**
+   * Page size applied to this response. Present ONLY on a PAGED response
+   * (`hasMore` or a resumed `offset > 0`); omitted on a whole-fits no-cursor
+   * call so that response stays byte-identical to the pre-CR-22 shape
+   * (`{ usages, boundaries }`).
+   */
+  readonly limit?: number;
+  /** Zero-based offset of this page. Present only when paged (see `limit`). */
+  readonly offset?: number;
+  /** Offset to pass on the next call to fetch the following page. Present only when truncated. */
+  readonly nextOffset?: number;
+  /**
+   * CR-22 opaque continuation token, present ONLY when this page is truncated.
+   * Echo it back as `cursor` to resume. Absent on a complete page so an
+   * in-budget response is byte-identical to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
 }
 
 const CODE_USAGE_HEURISTIC_DISCLOSURE =
@@ -199,15 +240,21 @@ const CODE_USAGE_EMPTY_DISCLOSURE =
   'No code usages found in the vault — this is NOT proof that no code uses it. The scanner is heuristic (dynamic/reflective references are invisible) and managed-package code is not retrieved. Cross-check `find_component_usages` (graph + grep) before concluding it is unused.';
 
 /**
- * Deterministic comparator: `id` ASC, then `edgeType` ASC. The
- * tiebreaker handles the case where a single code referrer has
- * multiple incoming edge types to the same target (e.g., an LWC bundle
- * with both a `references` edge from an `@salesforce/apex` import and
- * a `readsFrom` from a static field reference in a `getRecord` wire).
+ * Deterministic TOTAL-ORDER comparator: `id` ASC, `edgeType` ASC, then
+ * `source` ASC. The `(id, edgeType)` keys handle a single code referrer with
+ * multiple incoming edge types to the same target (e.g., an LWC bundle with both
+ * a `references` edge from an `@salesforce/apex` import and a `readsFrom` from a
+ * static field reference in a `getRecord` wire). The `source` tiebreak (CR-22)
+ * makes the order UNIQUE: the edge PK is `(from_id, to_id, edge_type, source)`,
+ * and here `from_id` = `id`, `to_id` = the fixed `targetId`, `edge_type` =
+ * `edgeType`, so within a fixed `(id, edgeType)` only `source` can differ (the
+ * same referrer's same edge type from two scanners) — adding it guarantees a
+ * unique final key so an offset resume cannot dup or skip.
  */
 const compareUsages = (a: CodeUsage, b: CodeUsage): number => {
   if (a.id !== b.id) return a.id < b.id ? -1 : 1;
   if (a.edgeType !== b.edgeType) return a.edgeType < b.edgeType ? -1 : 1;
+  if (a.source !== b.source) return a.source < b.source ? -1 : 1;
   return 0;
 };
 
@@ -305,14 +352,80 @@ export const findCodeUsagesHandler = async (
     }
   }
 
-  const sorted = usages.sort(compareUsages).slice(0, limit);
+  const ordered = usages.sort(compareUsages);
+
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset);
+  // a stale/forged cursor (changed targetId/edgeTypes/nodeTypes, different tool,
+  // or refreshed vault) is rejected with invalid-query. nodeTypes MUST be in the
+  // fingerprint — it narrows the result set, so a token minted for one nodeTypes
+  // filter must not replay against another.
+  const fingerprint = argsFingerprint({
+    targetId: input.targetId,
+    ...(input.edgeTypes !== undefined ? { edgeTypes: input.edgeTypes } : {}),
+    ...(input.nodeTypes !== undefined ? { nodeTypes: input.nodeTypes } : {}),
+  });
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: FIND_CODE_USAGES_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  // No per-handler byte budget (offset/limit only) — matches the B1 twin
+  // find_apex_usages; the global jsonResult guard remains the byte backstop.
+  const paged = paginateLegacy(ordered, {
+    offset,
+    limit,
+    byteBudget: Number.MAX_SAFE_INTEGER,
+    binding: {
+      tool: FIND_CODE_USAGES_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const page = paged.items;
+  const truncated = paged.hasMore;
+  const emitCursor = paged.nextCursor !== null;
+  // Diverges from the B1 twin's always-on emit shape: find_code_usages today
+  // emits ONLY { usages, boundaries }, so paging fields are spread CONDITIONALLY
+  // (only when truncated OR resumed) to keep a whole-fits no-cursor call
+  // byte-identical to pre-CR-22.
+  const isPaged = truncated || offset > 0;
+
+  // The empty-disclosure is keyed on the FULL result count (paged.totalCount),
+  // not the page, so a non-first page that happens to be empty still discloses
+  // honestly and a target with usages never trips the empty note mid-walk.
+  // I3b (empty ≠ none): on an empty FULL result also name the code families the
+  // vault did NOT fully retrieve, so "no code uses this" carries "…among the
+  // families the vault covers". Non-empty output is untouched.
+  const coverageCaveat =
+    paged.totalCount === 0
+      ? buildEmptyTraversalCoverageCaveat(ctx, CODE_USAGE_REQUIRED_COVERAGE)
+      : undefined;
   const boundaries =
-    sorted.length === 0
-      ? [CODE_USAGE_HEURISTIC_DISCLOSURE, CODE_USAGE_EMPTY_DISCLOSURE]
+    paged.totalCount === 0
+      ? [
+          CODE_USAGE_HEURISTIC_DISCLOSURE,
+          CODE_USAGE_EMPTY_DISCLOSURE,
+          ...(coverageCaveat !== undefined ? [coverageCaveat.message] : []),
+        ]
       : [CODE_USAGE_HEURISTIC_DISCLOSURE];
 
   return ok({
-    data: { usages: sorted, boundaries },
+    data: {
+      usages: page,
+      boundaries,
+      ...(isPaged ? { limit, offset } : {}),
+      ...(truncated ? { nextOffset: offset + page.length } : {}),
+      ...(emitCursor
+        ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo }
+        : {}),
+      ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
+    },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
       refreshedAt: ctx.manifest.refreshedAt,

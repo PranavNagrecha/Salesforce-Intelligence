@@ -148,6 +148,33 @@ describe('extractProfile', () => {
         await rm(dir, { recursive: true, force: true });
       }
     });
+
+    // CR-CAP-10 profile parity: zero in-vault profiles use <customPermissions>,
+    // so this synthetic fixture is the ONLY proof the symmetric profile edit
+    // works. enabled=false is excluded by the same continue-guard.
+    it('emits a grantedBy edge to CustomPermission per enabled customPermissions block (false excluded)', async () => {
+      const xml = `<?xml version="1.0"?>
+<Profile xmlns="http://soap.sforce.com/2006/04/metadata">
+  <userLicense>Salesforce</userLicense>
+  <customPermissions><enabled>true</enabled><name>SkipValidation</name></customPermissions>
+  <customPermissions><enabled>false</enabled><name>Off_Perm</name></customPermissions>
+</Profile>`;
+      const { dir, path } = await writeProfileXml('CustomPerm.profile-meta.xml', xml);
+      try {
+        const result = await extractProfile(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const cpEdges = result.value.edges.filter((e) => e.toId.startsWith('CustomPermission:'));
+        expect(cpEdges.map((e) => e.toId)).toEqual(['CustomPermission:SkipValidation']);
+        expect(cpEdges[0]?.fromId).toBe('Profile:CustomPerm');
+        expect(cpEdges[0]?.edgeType).toBe('grantedBy');
+        expect(cpEdges[0]?.confidence).toBe('declared');
+        expect(cpEdges[0]?.properties['enabled']).toBe(true);
+        expect(result.value.nodes[0]?.properties['customPermissionGrantCount']).toBe(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe('error cases', () => {

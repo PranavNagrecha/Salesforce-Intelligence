@@ -19,9 +19,15 @@
  *
  * **Granularity (v2.7 honesty boundary)**: this is a CLASS-level walk.
  * If `ApexClass:A.foo()` calls `ApexClass:B.bar()` and `A.baz()` calls
- * `B.qux()`, the v2.7 graph sees one `A -> B` edge with no method
- * partition. The `disclosure` field carries the verbatim promise of
- * method-level granularity in v2.7.1.
+ * `B.qux()`, the graph sees one `A -> B` edge. The TARGET methods are
+ * partitioned via `methods` (B.bar + B.qux). CR-CAP-06: AST-extracted edges
+ * ALSO carry `callerMethods` — the SOURCE-class method(s) holding the
+ * call-site (here `A.foo` + `A.baz`), as a class-level UNION (it is NOT
+ * narrowed to a specific target method even when the `method` filter is
+ * applied). Edges without `callerMethods` (the heuristic Apex scanner,
+ * Flow/declared callers, or a pre-upgrade vault) leave the caller method
+ * UNKNOWN — absent is never "no caller". The `disclosure` field carries the
+ * verbatim wording.
  *
  * **Cycle detection**: the visited set is keyed by node id, so a
  * cycle `A -> B -> A` is detected when the second hop tries to
@@ -75,14 +81,18 @@ const APEX_TRIGGER_PREFIX = 'ApexTrigger:';
 
 /**
  * Verbatim honesty-axis disclosure surfaced in every response. Frozen so the
- * test suite can assert the exact string. P4-C5: each `callsApex` edge now
- * carries `methods` — the target-class methods the source invokes — and the
- * optional `method` filter uses them. The caller-side method (WHICH method of
- * the source does the calling) is still not partitioned: that needs full AST
- * analysis, so the edges remain `heuristic`.
+ * test suite can assert the exact string. P4-C5: each `callsApex` edge carries
+ * `methods` — the target-class methods the source invokes — and the optional
+ * `method` filter uses them. CR-CAP-06: AST-extracted edges ALSO carry
+ * `callerMethods` — the SOURCE-class method(s) that contain the call-site, as a
+ * class-level UNION (the source methods that call ANY method of the target;
+ * NOT partitioned to the specific target method even when `method` is set).
+ * Edges without it (the heuristic Apex scanner, Flow/declared callers, or a
+ * pre-upgrade vault) leave the caller method UNKNOWN — absence is not
+ * "no caller".
  */
 const CALL_GRAPH_DISCLOSURE =
-  'call_graph surfaces method-level call TARGETS: each callsApex edge lists `methods` — the methods of the target class the source invokes (heuristic, from the Apex scanner) — and the optional `method` filter narrows the root\'s direct callers/callees to edges involving that method. The CALLER-side method (which method of the source does the calling) is NOT partitioned; that needs full AST analysis. Edges remain at-least-one-call between two classes.';
+  'call_graph surfaces method-level call TARGETS: each callsApex edge lists `methods` — the methods of the target class the source invokes (heuristic, from the Apex scanner) — and the optional `method` filter narrows the root\'s direct callers/callees to edges involving that target method. Each callsApex edge MAY carry `callerMethods` — the method(s) of the SOURCE class that contain the call-site, available ONLY on AST-extracted edges (`source: \'apex-ast\'`); it is a class-level UNION (the source methods that call ANY method of the target, NOT partitioned to the specific target method even when the `method` filter is applied — so do not read it as "the methods that call the filtered target method"). Edges WITHOUT it (the heuristic Apex scanner, Flow/declared callers, or a pre-upgrade vault) leave the caller method UNKNOWN — absence is not "no caller". Edges remain at-least-one-call between two classes.';
 
 /**
  * Zod schema for the `sfi.call_graph` tool input.
@@ -139,6 +149,16 @@ export interface CallGraphEdge {
    * `methodName`). This is target-method granularity, not caller-method.
    */
   readonly methods: readonly string[];
+  /**
+   * CR-CAP-06: the method(s) of the SOURCE class (`fromId`) that contain the
+   * call-site(s) to `toId`, as a class-level UNION (the source methods that
+   * call ANY method of the target — NOT partitioned to a specific target
+   * method, even when the `method` filter is applied). AST-path edges
+   * (`source: 'apex-ast'`) only; ABSENT on scanner-path / declared / Flow
+   * callers and pre-fix vaults — treat absent as "caller method unknown",
+   * never as "no caller".
+   */
+  readonly callerMethods?: readonly string[];
 }
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
@@ -179,6 +199,22 @@ const edgeMethods = (edge: {
   }
   const scalar = edge.properties['methodName'];
   return typeof scalar === 'string' && scalar.length > 0 ? [scalar] : [];
+};
+
+/**
+ * CR-CAP-06: read the SOURCE-class caller method(s) labelled on an AST edge
+ * (`properties.callerMethods`, a class-level union). Returns `undefined` when
+ * the key is absent or empty so the optional field is OMITTED — preserving the
+ * "absent === unknown caller method" honesty distinction (never coerce to `[]`,
+ * which would falsely imply "no caller method"). Always sorted + deduped.
+ */
+const edgeCallerMethods = (edge: {
+  readonly properties: Readonly<Record<string, unknown>>;
+}): readonly string[] | undefined => {
+  const m = edge.properties['callerMethods'];
+  if (!Array.isArray(m)) return undefined;
+  const strs = m.filter((x): x is string => typeof x === 'string');
+  return strs.length === 0 ? undefined : [...new Set(strs)].sort();
 };
 
 /**
@@ -305,6 +341,7 @@ const walkOneDirection = async (
         // fromDepth" semantics regardless of walk direction.
         const fromDepth =
           direction === 'out' ? depth : depth + 1;
+        const callerMethods = edgeCallerMethods(edge);
         edges.push({
           fromId: edge.fromId,
           toId: edge.toId,
@@ -312,6 +349,10 @@ const walkOneDirection = async (
           source: edge.source,
           confidence: edge.confidence,
           methods,
+          // CR-CAP-06: label the edge with the source-class caller method(s)
+          // when the AST extracted them; OMIT when absent (unknown). Intrinsic
+          // to the (from, to, source) edge, so correct for both directions.
+          ...(callerMethods !== undefined ? { callerMethods } : {}),
         });
         // Re-discovering an already-seen node means it was reached by a
         // second path (a diamond / shared callee) — NOT a cycle. Skip

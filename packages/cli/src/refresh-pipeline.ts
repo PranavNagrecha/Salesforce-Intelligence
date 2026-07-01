@@ -27,6 +27,7 @@ import {
   extractCustomLabel,
   extractCustomMetadataRecord,
   extractCustomObject,
+  extractCustomPermission,
   extractCustomSettingRecord,
   extractCustomTab,
   extractDecisionTable,
@@ -57,6 +58,8 @@ import {
   extractPathAssistant,
   extractPermissionSetGroup,
   extractPermissionSet,
+  extractPlatformEventChannel,
+  extractPlatformEventChannelMember,
   extractProfile,
   extractQueue,
   extractQuickAction,
@@ -76,7 +79,7 @@ import {
   extractWorkflowRule,
 } from '@sf-intelligence/extractors';
 import {
-  listEdges,
+  listEdgesForNodes,
   listNodesByType,
   type GraphStore,
 } from '@sf-intelligence/graph';
@@ -208,6 +211,7 @@ export const SUPPORTED_TYPES = [
   'CustomLabel',
   'CustomMetadataRecord',
   'CustomObject',
+  'CustomPermission',
   'CustomSettingRecord',
   'CustomTab',
   'DecisionTable',
@@ -239,6 +243,8 @@ export const SUPPORTED_TYPES = [
   'PathAssistant',
   'PermissionSet',
   'PermissionSetGroup',
+  'PlatformEventChannel',
+  'PlatformEventChannelMember',
   'Profile',
   'Queue',
   'QuickAction',
@@ -292,6 +298,7 @@ const EXTRACTORS: Readonly<Record<SupportedType, Extractor>> = {
   CustomLabel: extractCustomLabel,
   CustomMetadataRecord: extractCustomMetadataRecord,
   CustomObject: extractCustomObject,
+  CustomPermission: extractCustomPermission,
   CustomSettingRecord: extractCustomSettingRecord,
   CustomTab: extractCustomTab,
   DecisionTable: extractDecisionTable,
@@ -323,6 +330,8 @@ const EXTRACTORS: Readonly<Record<SupportedType, Extractor>> = {
   PathAssistant: extractPathAssistant,
   PermissionSet: extractPermissionSet,
   PermissionSetGroup: extractPermissionSetGroup,
+  PlatformEventChannel: extractPlatformEventChannel,
+  PlatformEventChannelMember: extractPlatformEventChannelMember,
   Profile: extractProfile,
   Queue: extractQueue,
   QuickAction: extractQuickAction,
@@ -507,6 +516,16 @@ const dispatchFile = (
   if (segments.includes('labels') && fileName.endsWith('.labels-meta.xml')) return 'CustomLabel';
   if (segments.includes('staticresources') && fileName.endsWith('.resource-meta.xml')) return 'StaticResource';
   if (segments.includes('installedPackages') && fileName.endsWith('.installedPackage-meta.xml')) return 'InstalledPackage';
+  // CR-CAP-15: CustomPermission definitions live flat under
+  // `customPermissions/{DeveloperName}.customPermission-meta.xml` — the grant
+  // target a PermissionSet/Profile `<customPermissions>` block names (CR-CAP-10).
+  if (segments.includes('customPermissions') && fileName.endsWith('.customPermission-meta.xml')) return 'CustomPermission';
+  // CR-CAP-18: platform-event publish/stream-routing topology. Both are flat
+  // top-level dispatches under their own DX directory (singular Metadata-API
+  // xmlName, no object-nested counterpart). The channel is the stream
+  // container; the member binds one entity onto it with a declared filter.
+  if (segments.includes('platformEventChannels') && fileName.endsWith('.platformEventChannel-meta.xml')) return 'PlatformEventChannel';
+  if (segments.includes('platformEventChannelMembers') && fileName.endsWith('.platformEventChannelMember-meta.xml')) return 'PlatformEventChannelMember';
   if (segments.includes('workflows') && fileName.endsWith('.workflow-meta.xml')) return 'WorkflowRule';
   if (segments.includes('approvalProcesses') && fileName.endsWith('.approvalProcess-meta.xml')) return 'ApprovalProcess';
   if (segments.includes('assignmentRules') && fileName.endsWith('.assignmentRules-meta.xml')) return 'AssignmentRule';
@@ -1036,18 +1055,31 @@ export const renderVault = async (
       const page = nodesResult.value;
       if (page.length === 0) break;
       const nodes = [...page].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      // CR-17: fetch every incident edge for the whole page in ONE batched
+      // `listEdgesForNodes` query (direction='both', matching the old
+      // per-node `listEdges(node.id)`), instead of an N+1 loop of one
+      // `listEdges` per node. The helper partitions edges per node and sorts
+      // each bucket by the deterministic `(toId, edgeType, fromId, source)`
+      // total order, so `writeNodeDocument` gets a byte-stable input — the
+      // renderers' `renderEdgeSubsection` re-sorts only by endpointId, and
+      // this total order pins the otherwise-undefined intra-endpoint order.
+      const pageEdges = await listEdgesForNodes(
+        store,
+        nodes.map((n) => n.id),
+        { direction: 'both' },
+      );
+      if (!pageEdges.ok) {
+        throw new Error(`listEdgesForNodes(${type}) failed: ${pageEdges.error.message}`);
+      }
       for (const node of nodes) {
-        const edgesResult = await listEdges(store, node.id);
-        if (!edgesResult.ok) {
-          throw new Error(`listEdges(${node.id}) failed: ${edgesResult.error.message}`);
-        }
+        const nodeEdges = pageEdges.value.get(node.id) ?? [];
         // Count outgoing edges only; BOTH-direction listing would double-count.
-        for (const edge of edgesResult.value) {
+        for (const edge of nodeEdges) {
           if (edge.fromId === node.id) {
             edges[edge.edgeType] = (edges[edge.edgeType] ?? 0) + 1;
           }
         }
-        await writeNodeDocument(vaultRoot, node, edgesResult.value);
+        await writeNodeDocument(vaultRoot, node, nodeEdges);
         components[type] = (components[type] ?? 0) + 1;
         allNodes.push(node);
       }

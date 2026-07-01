@@ -112,4 +112,126 @@ describe('coverageReportHandler', () => {
     expect(result.value.data.pending).toEqual([]);
     expect(result.value.data.stagedBuild).toBeUndefined();
   });
+
+  // C2 / Systemic #1: coverage_report used to self-contradict — its `partial[]`
+  // partition listed every requested-but-empty (retrieved:0) type while its
+  // `summary` (from summarizeCoverage) reported the vault "complete" and counted
+  // those same types as covered. The fix puts summarizeCoverage's coveredTypes
+  // filter in lockstep with partitionCoverage (both require retrieved>0), so
+  // summary now AGREES with partial[].
+  it('summary agrees with partial[] for a requested-but-empty type (no self-contradiction, C2)', async () => {
+    const emptyCtx: Context = {
+      ...ctx,
+      manifest: {
+        ...manifest,
+        coverage: [
+          { type: 'CustomObject', requested: true, retrieved: 2, errored: false, neverModeled: false },
+          // requested but retrieve pulled NOTHING — no error, modeled type.
+          { type: 'SharingRule', requested: true, retrieved: 0, errored: false, neverModeled: false },
+        ],
+      },
+    };
+    const result = await coverageReportHandler(emptyCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    // partitionCoverage classifies the empty type as partial...
+    expect(data.partial.map((e) => e.type)).toContain('SharingRule');
+    expect(data.covered.map((e) => e.type)).not.toContain('SharingRule');
+    // ...and the summary now AGREES (was 'complete' + coveredTypes incl. it).
+    expect(data.summary.status).toBe('partial');
+    expect(data.summary.coveredTypes).not.toContain('SharingRule');
+    expect(data.summary.partialTypes).toContain('SharingRule');
+    expect(data.summary.missingCoverage).toContain('SharingRule');
+    // trust.completeness mirrors the summary status (line 103).
+    expect(data.trust.completeness.status).toBe('partial');
+  });
+
+  it('CR-P3-3: a retrieveConfirmed-empty type lands in covered (not partial) and the summary agrees (lockstep)', async () => {
+    // A confirmed-clean empty retrieve (describe confirmed the org supports the
+    // type AND the clean pull returned zero) is COMPLETE. partitionCoverage and
+    // summarizeCoverage must stay in lockstep: the confirmed-empty type appears
+    // in `covered`, NOT `partial`, and summary.coveredTypes agrees — no row is
+    // ever in summary.coveredTypes while coverage_report lists it under partial.
+    const confirmedCtx: Context = {
+      ...ctx,
+      manifest: {
+        ...manifest,
+        coverage: [
+          { type: 'CustomObject', requested: true, retrieved: 2, errored: false, neverModeled: false, retrieveConfirmed: true },
+          { type: 'SharingRule', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
+        ],
+      },
+    };
+    const result = await coverageReportHandler(confirmedCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    expect(data.covered.map((e) => e.type)).toContain('SharingRule');
+    expect(data.partial.map((e) => e.type)).not.toContain('SharingRule');
+    expect(data.summary.coveredTypes).toContain('SharingRule');
+    expect(data.summary.partialTypes).not.toContain('SharingRule');
+    // Lockstep: no row is covered-by-summary but partial-by-partition.
+    for (const t of data.summary.coveredTypes) {
+      expect(data.partial.map((e) => e.type)).not.toContain(t);
+    }
+  });
+
+  describe('CR-CAP-20 — topUncoveredFamilies ranking', () => {
+    it('ranks skipped families desc, caps at 10, labels modeled vs raw, and extends the disclosure', async () => {
+      // Build a manifest with >10 skipped dirs to exercise the cap, plus a
+      // SKIPPED_DIR_COVERAGE-mapped dir (compactLayouts -> CompactLayout)
+      // and an unmapped one (omniProcesses, raw label).
+      const skipped: Record<string, number> = { omniProcesses: 500, compactLayouts: 5 };
+      for (let i = 0; i < 11; i++) skipped[`fam${i}`] = 100 + i;
+      const skipCtx: Context = {
+        ...ctx,
+        manifest: { ...manifest, skippedDirectories: skipped } as Context['manifest'],
+      };
+      const result = await coverageReportHandler(skipCtx, {});
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const top = result.value.data.topUncoveredFamilies;
+      expect(top).toBeDefined();
+      // Capped at 10.
+      expect(top!.length).toBe(10);
+      // Highest-volume family first.
+      expect(top![0]!.family).toBe('omniProcesses');
+      expect(top![0]!.skippedFiles).toBe(500);
+      expect(top![0]!.modeledType).toBe(false);
+      // compactLayouts (only 5) is below the cap cut-off and excluded;
+      // but verify the mapped-label behavior in the small-map test below.
+      // Disclosure carries the new clause and the honest framing: a
+      // listed family is "retrieved-but-not-modeled, never 'absent'" — it
+      // must NOT label any family as absent.
+      expect(result.value.data.disclosure).toContain('skipped-file volume');
+      expect(result.value.data.disclosure).toContain('not modeled by an extractor');
+      expect(result.value.data.disclosure).toContain("never 'absent'");
+    });
+
+    it('maps a known dir to its ComponentType (modeledType true) and keeps an unmapped dir raw', async () => {
+      const skipCtx: Context = {
+        ...ctx,
+        manifest: {
+          ...manifest,
+          skippedDirectories: { omniProcesses: 30, compactLayouts: 5 },
+        } as Context['manifest'],
+      };
+      const result = await coverageReportHandler(skipCtx, {});
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const top = result.value.data.topUncoveredFamilies!;
+      expect(top).toEqual([
+        { family: 'omniProcesses', rawDir: 'omniProcesses', skippedFiles: 30, modeledType: false },
+        { family: 'CompactLayout', rawDir: 'compactLayouts', skippedFiles: 5, modeledType: true },
+      ]);
+    });
+
+    it('is an empty array on a clean vault (no skippedDirectories) — inert on the golden', async () => {
+      const result = await coverageReportHandler(ctx, {});
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.data.topUncoveredFamilies).toEqual([]);
+    });
+  });
 });

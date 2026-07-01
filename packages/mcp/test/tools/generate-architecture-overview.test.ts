@@ -21,6 +21,7 @@ import type { Context } from '../../src/server.js';
 import {
   generateArchitectureOverviewHandler,
 } from '../../src/tools/generate-architecture-overview.js';
+import { jsonResult } from '../../src/tools/index.js';
 
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -233,5 +234,137 @@ describe('generateArchitectureOverviewHandler (seeded graph)', () => {
     const joined = boundaries.join('\n');
     expect(joined).toContain('offline vault');
     expect(joined).toContain('heuristic');
+  });
+});
+
+// CR-P3-4 / CR-RV8: a LARGE arch overview rendered as html must not become a
+// silently-chopped artifact. The old `budget / 2` reserve double-counted the
+// body (the html is built FROM document.body, so the envelope carries it twice)
+// without measuring the ACTUAL assembled envelope, so the global guard's
+// slimDataStrings 1024-char cut hit `html` and left it with no `</html>`.
+const seedLargeIntegrationGraph = async (
+  store: GraphStore,
+): Promise<void> => {
+  // Many integration nodes → a long Integration Topology section + table, so
+  // the assembled markdown body is comfortably over a few KB.
+  const nodes: Node[] = [];
+  for (let i = 0; i < 60; i += 1) {
+    nodes.push(
+      makeNode({
+        id: `NamedCredential:Cred_${i.toString()}`,
+        type: 'NamedCredential',
+        apiName: `Credential_With_A_Reasonably_Long_Api_Name_${i.toString()}`,
+      }),
+    );
+  }
+  for (let i = 0; i < 30; i += 1) {
+    nodes.push(
+      makeNode({
+        id: `CustomObject:Obj_${i.toString()}`,
+        type: 'CustomObject',
+        apiName: `Custom_Object_With_A_Long_Api_Name_${i.toString()}`,
+      }),
+    );
+  }
+  const edges: Edge[] = [];
+  for (let i = 0; i < 29; i += 1) {
+    edges.push(
+      makeEdge({
+        fromId: `CustomObject:Obj_${i.toString()}`,
+        toId: `CustomObject:Obj_${(i + 1).toString()}`,
+        edgeType: 'references',
+      }),
+    );
+  }
+  const imported = await importExtractionResults(store, [{ nodes, edges }]);
+  if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+};
+
+describe('generateArchitectureOverviewHandler (large html artifact fits, CR-P3-4)', () => {
+  let store: GraphStore;
+  let ctx: Context;
+  const prevMax = process.env['SFI_MAX_RESPONSE_BYTES'];
+
+  beforeAll(async () => {
+    // A modest budget: large enough that a fitted html artifact CAN be returned
+    // well-formed, but small enough that the OLD `budget / 2` math left the
+    // assembled envelope over the global guard's reductionCap (silent chop).
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '9000';
+    const opened = await openGraph(join(tempDir, 'large-html-fits.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    store = opened.value;
+    ctx = { vaultRoot: tempDir, manifest: FIXTURE_MANIFEST, graph: store };
+    await seedLargeIntegrationGraph(store);
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    if (prevMax === undefined) delete process.env['SFI_MAX_RESPONSE_BYTES'];
+    else process.env['SFI_MAX_RESPONSE_BYTES'] = prevMax;
+  });
+
+  it('returns a well-formed html artifact — not a guard-chopped one', async () => {
+    const result = await generateArchitectureOverviewHandler(ctx, {
+      format: 'html',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    // Route the handler's envelope through the REAL global guard (jsonResult),
+    // exactly as the dispatcher does. This is where the silent chop happened.
+    const envelope = jsonResult({
+      data: result.value.data,
+      vaultState: result.value.vaultState,
+    });
+    const text = (envelope.content[0] as { readonly text: string }).text;
+    const parsed = JSON.parse(text) as {
+      readonly data?: { readonly html?: string };
+      readonly error?: { readonly kind?: string };
+    };
+
+    // At this budget a fitted artifact fits — the guard must not have engaged.
+    expect(parsed.error).toBeUndefined();
+    const html = parsed.data?.html;
+    expect(html).toBeDefined();
+    if (html === undefined) return;
+    expect(html).not.toContain('bytes trimmed]');
+    expect(html.startsWith('<!DOCTYPE html>')).toBe(true);
+    expect(html.trimEnd().endsWith('</html>')).toBe(true);
+    // The honesty footer must survive in the paired markdown document.
+    expect(result.value.data.document.body).toContain('## Boundaries');
+  });
+});
+
+describe('generateArchitectureOverviewHandler (irreducible html → oversize error, CR-P3-4)', () => {
+  let store: GraphStore;
+  let ctx: Context;
+  const prevMax = process.env['SFI_MAX_RESPONSE_BYTES'];
+
+  beforeAll(async () => {
+    // A budget so small that even a maximally-reduced document + the fixed html
+    // wrapper cannot fit: the handler must return a structured oversize error,
+    // NOT a slim-chopped artifact.
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '4000';
+    const opened = await openGraph(join(tempDir, 'large-html-oversize.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    store = opened.value;
+    ctx = { vaultRoot: tempDir, manifest: FIXTURE_MANIFEST, graph: store };
+    await seedLargeIntegrationGraph(store);
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    if (prevMax === undefined) delete process.env['SFI_MAX_RESPONSE_BYTES'];
+    else process.env['SFI_MAX_RESPONSE_BYTES'] = prevMax;
+  });
+
+  it('returns a structured oversize error rather than a chopped artifact', async () => {
+    const result = await generateArchitectureOverviewHandler(ctx, {
+      format: 'html',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('oversize');
+    expect(result.error.message).toContain('markdown');
   });
 });

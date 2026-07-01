@@ -154,6 +154,70 @@ export const readSkippedDirectories = (
   return ext.skippedDirectories;
 };
 
+/**
+ * CR-CAP-20 — one ranked "uncovered family" row. A family is a retrieve
+ * subdirectory whose files were RETRIEVED but NOT MODELED by any
+ * extractor (it appears in `skippedDirectories`). This is NEVER a claim
+ * that the family is absent from the org — only that this build did not
+ * model it.
+ */
+export interface UncoveredFamily {
+  /**
+   * Display label: the canonical `ComponentType` when the raw dir maps
+   * through `SKIPPED_DIR_COVERAGE`, else the raw dir name verbatim.
+   */
+  readonly family: string;
+  /** The raw retrieve subdirectory name (e.g. `omniProcesses`). */
+  readonly rawDir: string;
+  /** Count of files the walker skipped in this directory. */
+  readonly skippedFiles: number;
+  /**
+   * `true` when `rawDir` maps to a known `ComponentType` (the family is
+   * modeled by the product elsewhere, just not retrieved here); `false`
+   * when the family has no extractor at all (raw label kept).
+   */
+  readonly modeledType: boolean;
+}
+
+/**
+ * CR-CAP-20 — turn the raw `skippedDirectories` map into a ranked list of
+ * uncovered families, sorted by skipped-file volume (desc), tiebroken by
+ * family name (asc). Each raw dir is mapped through `SKIPPED_DIR_COVERAGE`
+ * to its canonical `ComponentType` (`modeledType: true`) when known, else
+ * the raw dir name is kept as the label (`modeledType: false`).
+ *
+ * Pure: manifest-in, array-out, no IO — preserves the offline contract.
+ * Returns `[]` for a clean vault (empty/absent `skippedDirectories`),
+ * which is why this signal is INERT on the edu-org golden and must be
+ * unit-verified with a stubbed `skippedDirectories` map. Entries with a
+ * non-positive count are dropped (a retrieved-but-not-skipped dir).
+ */
+export const rankUncoveredFamilies = (
+  manifest: VaultManifest | ExtendedVaultManifest | undefined,
+): readonly UncoveredFamily[] => {
+  const skipped = readSkippedDirectories(manifest);
+  const rows: UncoveredFamily[] = [];
+  for (const [rawDir, skippedFiles] of Object.entries(skipped)) {
+    if (skippedFiles <= 0) continue;
+    const mapped = SKIPPED_DIR_COVERAGE[rawDir];
+    rows.push({
+      family: mapped ?? rawDir,
+      rawDir,
+      skippedFiles,
+      modeledType: mapped !== undefined,
+    });
+  }
+  return rows.sort((a, b) =>
+    b.skippedFiles !== a.skippedFiles
+      ? b.skippedFiles - a.skippedFiles
+      : a.family < b.family
+        ? -1
+        : a.family > b.family
+          ? 1
+          : 0,
+  );
+};
+
 /** Read the optional v4.0 coverage array with a back-compatible default. */
 export const readCoverageEntries = (
   manifest: VaultManifest | ExtendedVaultManifest | undefined,
@@ -271,14 +335,63 @@ export const summarizeCoverage = (
     };
   }
 
-  // A `pending` row (P13-STAGED-tiers: queued by an in-progress staged build)
-  // must NEVER count as covered — "requested, zero retrieved, no error" only
-  // means "org has none" when the retrieve actually ran. Routing pending rows
-  // into partial/missingCoverage keeps absence-claim caveats firing mid-build.
+  // CR-P3-3 TRI-STATE for a requested, non-errored, non-pending, modeled row:
+  //  (a) retrieved > 0                 -> COVERED (rows actually landed).
+  //  (b) retrieved === 0 AND
+  //      retrieveConfirmed === true    -> COVERED (the describe confirmed the
+  //                                       org supports this type AND the clean
+  //                                       retrieve returned zero members == the
+  //                                       org genuinely has none == complete,
+  //                                       no caveat). `retrieveConfirmed` is set
+  //                                       ONLY from a confirmed-supported,
+  //                                       cleanly-retrieved pull (refresh.ts),
+  //                                       never from `requested` alone, so a
+  //                                       silently-dropped / describe-blind
+  //                                       empty pull does NOT reach here.
+  //  (c) retrieved === 0 AND
+  //      retrieveConfirmed unset/false -> PARTIAL (the not-retrieved /
+  //                                       silently-dropped / pre-signal-manifest
+  //                                       / --no-pull case). The coverage data
+  //                                       model otherwise cannot distinguish
+  //                                       "confirmed zero" from "dropped" — both
+  //                                       persist the identical
+  //                                       {requested:true,retrieved:0,
+  //                                        errored:false,neverModeled:false}
+  //                                       row — so the honest reading stays
+  //                                       "not confirmed": routed into
+  //                                       partial/missingCoverage so absence
+  //                                       caveats keep firing.
+  // A `pending` row (P13-STAGED-tiers / reports-cap) is excluded from BOTH
+  // covered branches by the `pending !== true` guard, so a capped/dropped pull
+  // can never read as confirmed-empty even if it carries retrieveConfirmed.
   const coveredTypes = filtered
     .filter(
       (entry) =>
         entry.requested &&
+        (entry.retrieved > 0 || entry.retrieveConfirmed === true) &&
+        !entry.errored &&
+        !entry.neverModeled &&
+        entry.pending !== true,
+    )
+    .map((entry) => entry.type);
+  // Requested, non-errored, non-pending, modeled types that retrieved ZERO
+  // rows WITHOUT a confirmed-clean retrieve (case (c) above). Mirrors
+  // `coverage-report.ts` `partitionCoverage`, which applies the identical
+  // retrieveConfirmed gate — keeping summarizeCoverage in lockstep is what
+  // stops coverage_report from self-contradicting (summary said "complete"
+  // while its own `partial[]` listed these zero-retrieved types). Disjoint from
+  // the covered branch (the `retrieveConfirmed === true` carve-out) and from
+  // the errored/pending branch below (the `!errored && pending !== true`
+  // guards), so the union into `partialTypes` never double-counts. Distinct
+  // from `neverModeled` (no extractor) and `notRequested` (scoped-out), so the
+  // three honesty states stay separate and the a4 I3 notModeled-set cross-check
+  // is unaffected.
+  const emptyTypes = filtered
+    .filter(
+      (entry) =>
+        entry.requested &&
+        entry.retrieved === 0 &&
+        entry.retrieveConfirmed !== true &&
         !entry.errored &&
         !entry.neverModeled &&
         entry.pending !== true,
@@ -288,11 +401,15 @@ export const summarizeCoverage = (
   // never modeled belongs ONLY in notModeledTypes. Including it here too made
   // health_check report the same type as both partial AND not-modeled (and
   // triple-counted it into missingCoverage). A "partial" type is one that was
-  // requested and errored during retrieve — or is still queued by a staged
-  // build — but is a modeled type either way.
-  const partialTypes = filtered
-    .filter((entry) => (entry.errored || entry.pending === true) && !entry.neverModeled)
-    .map((entry) => entry.type);
+  // requested and errored during retrieve — is still queued by a staged
+  // build — or was requested but retrieved nothing (`emptyTypes`) — but is a
+  // modeled type in every case.
+  const partialTypes = [
+    ...filtered
+      .filter((entry) => (entry.errored || entry.pending === true) && !entry.neverModeled)
+      .map((entry) => entry.type),
+    ...emptyTypes,
+  ];
   const notModeledTypes = filtered
     .filter((entry) => entry.neverModeled)
     .map((entry) => entry.type);

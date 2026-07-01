@@ -138,6 +138,7 @@ describe('enrichLastModified — CustomField __c suffix handling', () => {
           Id: '00N',
           DeveloperName: 'Industry',
           TableEnumOrId: 'Account',
+          EntityDefinition: { QualifiedApiName: 'Account' },
           LastModifiedDate: '2026-04-01T00:00:00.000Z',
           LastModifiedById: '005',
           LastModifiedBy: { Name: 'A' },
@@ -154,8 +155,49 @@ describe('enrichLastModified — CustomField __c suffix handling', () => {
   });
 });
 
+describe('enrichLastModified — CustomField on a CUSTOM object (key-prefix TableEnumOrId)', () => {
+  it('correlates the row via EntityDefinition.QualifiedApiName, NOT the key-prefix TableEnumOrId Id', async () => {
+    // The vault id is CustomField:{ObjectApiName}.{Field}__c. For a CUSTOM
+    // object the Tooling API returns TableEnumOrId as an SObject key-prefix Id
+    // (e.g. 01Ixx0000000abc), which is NOT the ObjectApiName — so a canonical id
+    // built from TableEnumOrId can never match the vault node and the row is
+    // silently dropped. The fix selects EntityDefinition.QualifiedApiName and
+    // builds the canonical id from that.
+    const nodes = [
+      makeNode({
+        id: 'CustomField:My_Object__c.Status__c',
+        type: 'CustomField',
+        apiName: 'Status__c',
+      }),
+    ];
+    const { client, calls } = stubClient([
+      ok([
+        {
+          Id: '00N1x0000000001',
+          DeveloperName: 'Status',
+          TableEnumOrId: '01Ixx0000000abc', // key-prefix SObject Id for a custom object
+          EntityDefinition: { QualifiedApiName: 'My_Object__c' },
+          LastModifiedDate: '2026-04-01T00:00:00.000Z',
+          LastModifiedById: '005',
+          LastModifiedBy: { Name: 'A' },
+        },
+      ]),
+    ]);
+    const result = await enrichLastModified(
+      { client, types: ['CustomField'], rateLimitPauseMs: 0 },
+      nodes,
+    );
+    // The SELECT must project the EntityDefinition relationship.
+    expect(calls[0]!.soql).toContain('EntityDefinition.QualifiedApiName');
+    expect(result.enrichedCount).toBe(1);
+    expect(result.enrichments[0]!.componentId).toBe(
+      'CustomField:My_Object__c.Status__c',
+    );
+  });
+});
+
 describe('enrichLastModified — ValidationRule split on final dot', () => {
-  it('queries by the rule name (post-dot) and reconstructs via EntityDefinitionId', async () => {
+  it('queries by the rule name (post-dot) and reconstructs via EntityDefinition.QualifiedApiName', async () => {
     const nodes = [
       makeNode({
         id: 'ValidationRule:Account.Require_Phone',
@@ -169,6 +211,7 @@ describe('enrichLastModified — ValidationRule split on final dot', () => {
           Id: '03d',
           ValidationName: 'Require_Phone',
           EntityDefinitionId: 'Account',
+          EntityDefinition: { QualifiedApiName: 'Account' },
           LastModifiedDate: '2026-04-01T00:00:00.000Z',
           LastModifiedById: '005',
           LastModifiedBy: { Name: 'A' },
@@ -181,6 +224,48 @@ describe('enrichLastModified — ValidationRule split on final dot', () => {
     );
     expect(result.enrichedCount).toBe(1);
     expect(calls[0]!.soql).toContain("WHERE ValidationName IN ('Require_Phone')");
+  });
+});
+
+describe('enrichLastModified — ValidationRule on a CUSTOM object (key-prefix EntityDefinitionId)', () => {
+  it('correlates the row via EntityDefinition.QualifiedApiName, NOT the key-prefix EntityDefinitionId Id', async () => {
+    // The vault id is ValidationRule:{ObjectApiName}.{Name}. For a CUSTOM
+    // object the Tooling API returns EntityDefinitionId as an SObject
+    // key-prefix Id (e.g. 01Ixx0000000abc), which is NOT the ObjectApiName —
+    // so a canonical id built from EntityDefinitionId can never match the
+    // vault node and the row is silently dropped (same class as CustomField's
+    // TableEnumOrId). The fix selects EntityDefinition.QualifiedApiName and
+    // builds the canonical id from that.
+    const nodes = [
+      makeNode({
+        id: 'ValidationRule:MyCustomObject__c.Some_Rule',
+        type: 'ValidationRule',
+        apiName: 'MyCustomObject__c.Some_Rule',
+      }),
+    ];
+    const { client, calls } = stubClient([
+      ok([
+        {
+          Id: '03d1x0000000abc',
+          ValidationName: 'Some_Rule',
+          EntityDefinitionId: '01Ixx0000000abc', // key-prefix SObject Id for a custom object
+          EntityDefinition: { QualifiedApiName: 'MyCustomObject__c' },
+          LastModifiedDate: '2026-04-01T00:00:00.000Z',
+          LastModifiedById: '005',
+          LastModifiedBy: { Name: 'A' },
+        },
+      ]),
+    ]);
+    const result = await enrichLastModified(
+      { client, types: ['ValidationRule'], rateLimitPauseMs: 0 },
+      nodes,
+    );
+    // The SELECT must project the EntityDefinition relationship.
+    expect(calls[0]!.soql).toContain('EntityDefinition.QualifiedApiName');
+    expect(result.enrichedCount).toBe(1);
+    expect(result.enrichments[0]!.componentId).toBe(
+      'ValidationRule:MyCustomObject__c.Some_Rule',
+    );
   });
 });
 

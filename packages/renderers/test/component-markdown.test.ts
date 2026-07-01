@@ -368,4 +368,312 @@ describe('renderComponentMarkdown', () => {
       'properties:\n  dataType: Picklist\n  picklistValues:\n    - Open\n    - In Progress\n    - Closed\n',
     );
   });
+
+  it('H10: renders an object[] picklistValues body row human-readably (not [object Object]), marking inactive', () => {
+    // A re-extracted vault stores picklistValues as objects. String(value) on
+    // such an array yields `[object Object]` in the body Properties table;
+    // renderValueAsBacktickedString must instead join the value labels and
+    // suffix deactivated entries with (inactive).
+    const node: Node = {
+      id: 'CustomField:Account.Stage__c',
+      type: 'CustomField',
+      apiName: 'Stage__c',
+      label: 'Stage',
+      parentId: 'CustomObject:Account',
+      sourcePath: 'objects/Account/fields/Stage__c.field-meta.xml',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {
+        dataType: 'Picklist',
+        picklistValues: [
+          { value: 'Open', isActive: true },
+          { value: 'Closed', isActive: false },
+        ],
+      },
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const picklistRow = result.value.body
+      .split('\n')
+      .find((line) => line.startsWith('| picklistValues |'));
+    expect(picklistRow).toBeDefined();
+    expect(picklistRow).not.toContain('[object Object]');
+    expect(picklistRow).toContain('Open');
+    expect(picklistRow).toContain('Closed (inactive)');
+  });
+
+  it('CR-P3 (low, golden-safe): a pure-string picklistValues row stays on the String() path (comma, no space)', () => {
+    // A pure-string array has no [object Object] problem; it must NOT be
+    // diverted to the comma-SPACE join, so its rendered cell is byte-identical
+    // to the pre-fix `String()` output. This guards the golden/in-budget output.
+    const node: Node = {
+      id: 'CustomField:Account.Stage__c',
+      type: 'CustomField',
+      apiName: 'Stage__c',
+      label: 'Stage',
+      parentId: 'CustomObject:Account',
+      sourcePath: 'objects/Account/fields/Stage__c.field-meta.xml',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {
+        dataType: 'Picklist',
+        picklistValues: ['Open', 'In Progress', 'Closed'],
+      },
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const picklistRow = result.value.body
+      .split('\n')
+      .find((line) => line.startsWith('| picklistValues |'));
+    // Exact pre-fix cell: `String(['Open','In Progress','Closed'])` -> commas,
+    // no spaces, wrapped in backticks.
+    expect(picklistRow).toBe('| picklistValues | `Open,In Progress,Closed` |');
+  });
+
+  it('CR-P3 (low): a MIXED legacy(string)+object picklistValues array renders each entry, never [object Object]', () => {
+    // A vault refreshed across the legacy->object picklist-shape migration can
+    // hold a heterogeneous array: some entries are bare strings (legacy) and
+    // some are `{ value, isActive? }` objects (re-extracted). The guard used
+    // `.every(isObject)`, so the string entry made it fall through to
+    // String(value) -> `Open,[object Object]`. Both shapes must render.
+    const node: Node = {
+      id: 'CustomField:Account.Stage__c',
+      type: 'CustomField',
+      apiName: 'Stage__c',
+      label: 'Stage',
+      parentId: 'CustomObject:Account',
+      sourcePath: 'objects/Account/fields/Stage__c.field-meta.xml',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {
+        dataType: 'Picklist',
+        picklistValues: ['Open', { value: 'Closed', isActive: false }],
+      },
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const picklistRow = result.value.body
+      .split('\n')
+      .find((line) => line.startsWith('| picklistValues |'));
+    expect(picklistRow).toBeDefined();
+    expect(picklistRow).not.toContain('[object Object]');
+    expect(picklistRow).toContain('Open');
+    expect(picklistRow).toContain('Closed (inactive)');
+  });
+});
+
+describe('renderComponentMarkdown — markdown injection / escaping (CR-16c)', () => {
+  it('neutralizes structure-breaking chars in label, apiName, and description', () => {
+    const node: Node = {
+      id: 'CustomObject:Evil__c',
+      type: 'CustomObject',
+      // Newline (would inject a 2nd heading line), leading hash (level shift),
+      // backtick (closes a span), pipe (table), asterisk (emphasis).
+      label: 'Evil\n# Injected\n`code` | *bold*',
+      apiName: 'Ev`il__c',
+      parentId: null,
+      sourcePath: 'x',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      // A line-leading hash, a pipe table row, and a code fence in the desc.
+      properties: {
+        description: '# Heading injection\n| col | injection |\n```js\nalert(1)\n```',
+      },
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.body;
+    const lines = body.split('\n');
+
+    // (a) Exactly one heading line — the newline in label was collapsed and the
+    // injected leading hash neutralized, so no spurious second `# ` heading.
+    const headingLines = lines.filter((l) => /^# /.test(l));
+    expect(headingLines).toHaveLength(1);
+
+    // (b) The API Name code span is not closed early by the backtick in apiName:
+    // the whole apiName stays inside the span (escaped backtick).
+    const apiLine = lines.find((l) => l.startsWith('**API Name:**'));
+    expect(apiLine).toBeDefined();
+    expect(apiLine).toContain('Ev\\`il__c');
+
+    // (c) No description line is parsed as a heading / table-delimiter / fence —
+    // the line-leading specials are backslash-escaped.
+    const descLine = lines.find((l) => l.includes('Heading injection'));
+    expect(descLine).toBeDefined();
+    expect(descLine?.startsWith('\\#')).toBe(true);
+    expect(lines.some((l) => l.startsWith('| col |'))).toBe(false);
+    expect(lines.some((l) => l.startsWith('```'))).toBe(false);
+  });
+
+  it('neutralizes a `| --- |` table-delimiter line inside a description (no GFM table injection)', () => {
+    const node: Node = {
+      id: 'CustomObject:Tbl__c',
+      type: 'CustomObject',
+      label: 'Tbl',
+      apiName: 'Tbl__c',
+      parentId: null,
+      sourcePath: 'x',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: { description: 'Header line\n| --- |\nMore prose' },
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const lines = result.value.body.split('\n');
+    // The delimiter row's leading pipe is escaped, so it cannot turn the
+    // preceding prose line into a GFM table.
+    expect(lines.some((l) => l === '| --- |')).toBe(false);
+    expect(lines.some((l) => l.startsWith('\\| --- |'))).toBe(true);
+  });
+
+  it('leaves a clean component byte-identical (no over-escaping)', () => {
+    const node: Node = {
+      id: 'CustomObject:CustomerProject__c',
+      type: 'CustomObject',
+      label: 'Degree Program',
+      apiName: 'Project__c',
+      parentId: null,
+      sourcePath: 'x',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: { description: 'Plain prose.' },
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.body;
+    expect(body).toContain('# Degree Program\n');
+    expect(body).toContain('**API Name:** `Project__c`');
+    expect(body).toContain('Plain prose.');
+    // No stray backslashes introduced into clean values.
+    expect(body).not.toContain('\\');
+  });
+
+  it('CR-P3-6: neutralizes a markdown link / image in the H1 label (no live link or beacon image)', () => {
+    const node: Node = {
+      id: 'CustomObject:Lnk__c',
+      type: 'CustomObject',
+      label: '[x](http://evil) ![](http://beacon)',
+      apiName: 'Lnk__c',
+      parentId: null,
+      sourcePath: 'x',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {},
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const headingLine = result.value.body
+      .split('\n')
+      .find((l) => l.startsWith('# '));
+    expect(headingLine).toBeDefined();
+    // Brackets and the image-bang are escaped.
+    expect(headingLine).toContain('\\[x\\]');
+    expect(headingLine).toContain('\\!\\[');
+    // The heading is NOT a live link: no unescaped [..](..) pair survives.
+    expect(headingLine).not.toMatch(/\[[^\]\\]*\]\([^)]*\)/);
+  });
+
+  it('CR-P3-6: neutralizes raw-HTML / autolink in the H1 label (no inline HTML beacon or autolink)', () => {
+    const node: Node = {
+      id: 'CustomObject:Html__c',
+      type: 'CustomObject',
+      label: '<img src=x onerror=alert(1)> <http://evil>',
+      apiName: 'Html__c',
+      parentId: null,
+      sourcePath: 'x',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {},
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const headingLine = result.value.body
+      .split('\n')
+      .find((l) => l.startsWith('# '));
+    expect(headingLine).toBeDefined();
+    // Every `<` is escaped, so no live inline-HTML element or autolink survives.
+    expect(headingLine).toContain('\\<img');
+    expect(headingLine).toContain('\\<http://evil>');
+    // No UNescaped `<` opens an element/autolink (every `<` is preceded by `\`).
+    expect(headingLine).not.toMatch(/(^|[^\\])<[^>]*>/);
+  });
+
+  it('CR-P3-9: neutralizes setext underline, ordered-list leader, and raw-HTML in a description block', () => {
+    const node: Node = {
+      id: 'CustomObject:Desc__c',
+      type: 'CustomObject',
+      label: 'Desc',
+      apiName: 'Desc__c',
+      parentId: null,
+      sourcePath: 'x',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {
+        description:
+          'Heading bait\n===\n1. injected item\n<img src=x onerror=alert(1)>',
+      },
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const lines = result.value.body.split('\n');
+    // (a) No bare setext underline; the `===` line starts with `\=`.
+    expect(lines.some((l) => /^=+$/.test(l))).toBe(false);
+    expect(lines.some((l) => l.startsWith('\\='))).toBe(true);
+    // (b) Ordered-list leader: separator escaped, line is no longer a list item.
+    expect(lines.some((l) => /^\s*\d+[.)]\s/.test(l))).toBe(false);
+    expect(lines.some((l) => l.startsWith('1\\.'))).toBe(true);
+    // (c) Raw-HTML block: leading `<` escaped.
+    expect(lines.some((l) => /^</.test(l))).toBe(false);
+    expect(lines.some((l) => l.startsWith('\\<img'))).toBe(true);
+  });
+
+  it('CR-P3-9: leaves clean parenthesized labels and inline-digit / version / equals prose byte-identical', () => {
+    const node: Node = {
+      id: 'CustomObject:Clean__c',
+      type: 'CustomObject',
+      label: 'Customer Project (active)',
+      apiName: 'Clean__c',
+      parentId: null,
+      sourcePath: 'x',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {
+        description: 'Tracks projects. See item 1. inline. Version 2.0. a = b.',
+      },
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.body;
+    // Heading: parens NOT escaped.
+    expect(body).toContain('# Customer Project (active)\n');
+    // Description line byte-identical: no backslash before 1. / 2.0 / = / (.
+    expect(body).toContain(
+      'Tracks projects. See item 1. inline. Version 2.0. a = b.',
+    );
+    const descLine = body
+      .split('\n')
+      .find((l) => l.includes('Tracks projects'));
+    expect(descLine).toBeDefined();
+    expect(descLine).not.toContain('\\');
+  });
 });

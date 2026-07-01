@@ -26,12 +26,16 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listNodesByType } from '@sf-intelligence/graph';
+import { countNodesByType, getNodeById, listNodesByType } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
+
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import { scanTruncationNote } from './scan-cap.js';
 
 const OBJECT_PREFIX = 'CustomObject:';
 const LISTVIEW_PREFIX = 'ListView:';
@@ -43,12 +47,23 @@ const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 120;
 /** Bound the per-object scan (listNodesByType caps at 500 per page). */
 const SCAN_PAGE = 500;
-const SCAN_MAX = 4000;
+/**
+ * Hard ceiling on the per-object child-scan walk. CR-22 B3: a child count past
+ * this is a pathological object (no real org has >20k list views on one
+ * object); it is disclosed via `scanTruncated` rather than dropped SILENTLY as
+ * before (the tool used to stop at 4000 with NO disclosure at all).
+ */
+const SCAN_MAX = 20_000;
+const LIST_VIEW_SHARING_TOOL = 'sfi.list_view_sharing';
 
 export const listViewSharingInputSchema = z.object({
   componentId: z.string().min(1),
+  /** Count list views shared directly to this role api name (summary only). */
+  sharedWithRoleApiName: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
+  // CR-22 continuation cursor from a prior truncated page's nextCursor.
+  cursor: z.string().min(1).optional(),
 });
 
 export type ListViewSharingInput = z.infer<typeof listViewSharingInputSchema>;
@@ -83,17 +98,42 @@ export interface ListViewSharingOutput {
     readonly sharedWithGroupsRoles: number;
     readonly allUsersWithObjectAccess: number;
     readonly distinctTargets: number;
+    /**
+     * Count of list views that have at least one `sharedTo` entry with
+     * `type === 'role'` (direct role share, NOT roleAndSubordinates).
+     * Computed over ALL list views for the object — not just the current
+     * page — so agents can answer "how many are shared directly to role X?"
+     * without paginating through every `listViews[]` row.
+     */
+    readonly directRoleShareCount: number;
+    /** When `sharedWithRoleApiName` is supplied — views with a direct role share to that role. */
+    readonly sharedToRoleCount?: number;
+    readonly sharedToRoleApiName?: string;
   };
   readonly limit: number;
   readonly offset: number;
   readonly hasMore: boolean;
   readonly truncated: boolean;
+  /**
+   * CR-22 B3: true ONLY when an object has more list views than the per-object
+   * scan walk (`SCAN_MAX`) could read — a pathological object. Was a SILENT
+   * drop before. False for any real org.
+   */
+  readonly scanTruncated?: boolean;
   readonly confidence: 'declared';
   readonly boundaryNote: string;
+  /**
+   * CR-22 opaque continuation token, present ONLY when this page is truncated.
+   * Echo it back as `cursor` to resume. Absent on a complete page so an
+   * in-budget response is byte-identical to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
 }
 
 const BOUNDARY_NOTE =
-  'Shows the saved list view’s <sharedTo> visibility scope (the groups/roles it is shared with), at `declared` confidence. This is visibility of the VIEW, not record access — a user still needs read access to the object and the records must pass the view’s filter. `filterScope` (Everything/Mine/Queue/…) is the record filter, a separate axis from who-can-see-the-view. A list view with no <sharedTo> is visible to all users who can see the object; "visible only to me" personal views are not in deployed metadata, so absence is never "private". roleAndSubordinates targets also reach subordinate roles via the role hierarchy.';
+  'Shows the saved list view’s <sharedTo> visibility scope (the groups/roles it is shared with), at `declared` confidence. This is visibility of the VIEW, not record access — a user still needs read access to the object and the records must pass the view’s filter. `filterScope` (Everything/Mine/Queue/…) is the record filter, a separate axis from who-can-see-the-view. A list view with no <sharedTo> is visible to all users who can see the object; "visible only to me" personal views are not in deployed metadata, so absence is never "private". roleAndSubordinates targets also reach subordinate roles via the role hierarchy. IMPORTANT: `summary` counts (including `directRoleShareCount`) are computed over ALL list views for the object — not just the current page. Per-entry type breakdowns (role vs roleAndSubordinates) within `sharedTo[]` are present only in the paginated `listViews[]` rows; exhaust all pages via `nextCursor` before counting by type manually.';
 
 /** Read a node's `properties.sharedTo` into typed entries (defensive). */
 const readSharedTo = (node: Node): SharedToEntry[] => {
@@ -129,18 +169,45 @@ const toRow = (node: Node): ListViewSharingRow => {
   };
 };
 
-const buildSummary = (rows: readonly ListViewSharingRow[]): ListViewSharingOutput['summary'] => {
+const buildSummary = (
+  rows: readonly ListViewSharingRow[],
+  sharedWithRoleApiName?: string,
+): ListViewSharingOutput['summary'] => {
   const distinct = new Set<string>();
   let shared = 0;
+  let directRoleShareCount = 0;
+  let sharedToRoleCount = 0;
+  const roleTargetId =
+    sharedWithRoleApiName !== undefined
+      ? `Role:${sharedWithRoleApiName}`
+      : null;
   for (const r of rows) {
     if (r.visibility === 'sharedWithGroupsRoles') shared += 1;
-    for (const t of r.sharedTo) distinct.add(t.targetId);
+    let hasDirectRole = false;
+    let matchesRole = false;
+    for (const t of r.sharedTo) {
+      distinct.add(t.targetId);
+      if (t.type === 'role') hasDirectRole = true;
+      if (
+        roleTargetId !== null &&
+        t.targetId === roleTargetId &&
+        t.type === 'role'
+      ) {
+        matchesRole = true;
+      }
+    }
+    if (hasDirectRole) directRoleShareCount += 1;
+    if (matchesRole) sharedToRoleCount += 1;
   }
   return {
     listViews: rows.length,
     sharedWithGroupsRoles: shared,
     allUsersWithObjectAccess: rows.length - shared,
     distinctTargets: distinct.size,
+    directRoleShareCount,
+    ...(sharedWithRoleApiName !== undefined
+      ? { sharedToRoleCount, sharedToRoleApiName: sharedWithRoleApiName }
+      : {}),
   };
 };
 
@@ -149,7 +216,6 @@ export const listViewSharingHandler = async (
   input: ListViewSharingInput,
 ): Promise<Result<McpResponse<ListViewSharingOutput>, McpError>> => {
   const limit = input.limit ?? DEFAULT_LIMIT;
-  const offset = input.offset ?? 0;
   const isObject = input.componentId.startsWith(OBJECT_PREFIX);
   const isListView = input.componentId.startsWith(LISTVIEW_PREFIX);
 
@@ -168,6 +234,7 @@ export const listViewSharingHandler = async (
   // summary), then paginate the OUTPUT rows.
   let allRows: ListViewSharingRow[];
   let scope: 'object' | 'listView';
+  let scanTruncated = false;
 
   if (isObject) {
     scope = 'object';
@@ -183,6 +250,15 @@ export const listViewSharingHandler = async (
       }
       for (const node of page.value) collected.push(toRow(node));
       if (page.value.length < SCAN_PAGE) break;
+    }
+    // CR-22 B3: the walk above stops at SCAN_MAX. Use a TRUE per-object count to
+    // disclose (rather than SILENTLY drop) when an object has more list views
+    // than the walk read — pre-B3 this was an undisclosed truncation.
+    if (collected.length >= SCAN_MAX) {
+      const trueCount = await countNodesByType(ctx.graph, 'ListView', {
+        parentId: componentId,
+      });
+      if (trueCount.ok && trueCount.value > collected.length) scanTruncated = true;
     }
     allRows = collected.sort((a, b) =>
       a.componentId < b.componentId ? -1 : a.componentId > b.componentId ? 1 : 0,
@@ -203,9 +279,42 @@ export const listViewSharingHandler = async (
     allRows = [toRow(node.value)];
   }
 
-  const summary = buildSummary(allRows);
-  const page = allRows.slice(offset, offset + limit);
-  const hasMore = offset + page.length < allRows.length;
+  const summary = buildSummary(allRows, input.sharedWithRoleApiName);
+
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // The fingerprint covers `componentId` so a token minted for one object/view
+  // can't be replayed against another. The output sort key (componentId) is the
+  // unique node id and matches the SQL id-ASC order, so the order is a strict
+  // total order — a resume neither dups nor skips.
+  const fingerprint = argsFingerprint({ componentId });
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: LIST_VIEW_SHARING_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  const paged = paginateLegacy(allRows, {
+    offset,
+    limit,
+    keyOf: (row) => row.componentId,
+    binding: {
+      tool: LIST_VIEW_SHARING_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const page = paged.items;
+  const hasMore = paged.hasMore;
+  const emitCursor = paged.nextCursor !== null;
+
+  const boundaryNote = scanTruncated
+    ? `${BOUNDARY_NOTE} ${scanTruncationNote(['ListView'], SCAN_MAX)}`
+    : BOUNDARY_NOTE;
 
   return ok({
     data: {
@@ -217,8 +326,12 @@ export const listViewSharingHandler = async (
       offset,
       hasMore,
       truncated: hasMore || offset > 0,
+      ...(scanTruncated ? { scanTruncated: true } : {}),
       confidence: 'declared',
-      boundaryNote: BOUNDARY_NOTE,
+      boundaryNote,
+      ...(emitCursor
+        ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo }
+        : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

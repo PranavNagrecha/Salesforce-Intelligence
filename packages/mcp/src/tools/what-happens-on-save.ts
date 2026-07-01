@@ -125,7 +125,7 @@ import {
  * not a silent drift.
  */
 const DISCLOSURE =
-  "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once and does not expand that re-entrancy. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.";
+  "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once and does not expand that re-entrancy. A workflow rule's time-dependent actions (its workflowTimeTriggers) are SCHEDULED for an offset measured from a record field value the offline vault cannot evaluate; this composition lists the rule once in the synchronous post-save-workflows phase and does NOT claim its time-delayed actions fire at save. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.";
 
 /**
  * The set of DML events the input axis accepts. Mirrors the
@@ -226,6 +226,61 @@ export type SoePhase =
   | 'post-save-async';
 
 /**
+ * The automation phases (every {@link SoePhase} except the `save`
+ * placeholder, which is the platform's own database write, not an
+ * org-configured automation component). Frozen in documented SOE
+ * order so a per-phase count map iterates in firing sequence.
+ */
+const AUTOMATION_PHASES: readonly Exclude<SoePhase, 'save'>[] = [
+  'before-save-flows',
+  'pre-save-triggers',
+  'pre-save-validation',
+  'after-triggers',
+  'post-save-assignment',
+  'post-save-workflows',
+  'post-save-flows',
+  'post-save-approval',
+  'post-save-async',
+];
+
+/**
+ * Grounded per-phase active-component counts for a composed SOE.
+ *
+ * Each key is an automation phase (the `save` placeholder is excluded —
+ * it is the platform's own write, not org automation); each value is
+ * the number of ACTIVE components emitted into that phase for this
+ * object + event. This is the count that answers "how many distinct
+ * automation components fire across triggers, record-triggered flows,
+ * and workflow rules, and in what order" directly from the response,
+ * rather than forcing the caller to re-bucket the flat `soe` array and
+ * subtract the placeholder. Inactive automation is NOT counted here —
+ * it is disclosed separately in `inactiveConfigured`, so a deactivation
+ * delta is `phaseCounts` before vs after a component is turned off.
+ */
+export type SoePhaseCounts = Readonly<
+  Record<Exclude<SoePhase, 'save'>, number>
+>;
+
+/**
+ * Tally the active components emitted into each automation phase. The
+ * `save` placeholder is never counted (it is not org automation). Phases
+ * with zero emitted steps are present with a `0` so the count map is a
+ * complete, stable shape every caller can index.
+ */
+export const tallyPhaseCounts = (
+  soe: readonly { readonly phase: SoePhase }[],
+): SoePhaseCounts => {
+  const counts = Object.fromEntries(
+    AUTOMATION_PHASES.map((p) => [p, 0]),
+  ) as Record<Exclude<SoePhase, 'save'>, number>;
+  for (const step of soe) {
+    if (step.phase === 'save') continue;
+    counts[step.phase] += 1;
+  }
+  return counts;
+};
+
+/**
  * One step in the SOE chain. `stepIndex` is the 0-based position
  * across all phases (preserved across the response so callers can
  * cross-reference); `componentId` / `componentType` / `apiName`
@@ -273,8 +328,23 @@ export interface WhatHappensOnSaveOutput {
   readonly soe: readonly SoeStep[];
   readonly summary: {
     readonly totalSteps: number;
+    /**
+     * Count of ACTIVE org-configured automation components that fire on
+     * this object + event — `totalSteps` minus the one `save` placeholder.
+     * The grounded answer to "how many distinct automation components
+     * fire", so a caller need not re-derive it from `soe`.
+     */
+    readonly activeComponents: number;
     readonly conditionalSteps: number;
     readonly asyncFanOut: number;
+    /**
+     * Per-phase active-component counts, in documented SOE order. Answers
+     * the count/ordering question directly (e.g. how many before-save
+     * flows vs before-triggers vs after-triggers vs after-save flows).
+     * Inactive automation is excluded — it is in `inactiveConfigured`, so
+     * a deactivation delta is this map before vs after the change.
+     */
+    readonly phaseCounts: SoePhaseCounts;
   };
   readonly disclosure: string;
   /**
@@ -335,26 +405,42 @@ const workflowMatchesEvent = (
  *
  * `upsert` matches Create + Update + CreateAndUpdate (the union of
  * insert and update).
+ *
+ * **Absent `recordTriggerType` (under-count guard):** a record-triggered
+ * Flow whose `triggersOn` edge carries the before/after discriminator
+ * (`triggerType: RecordBeforeSave | RecordAfterSave`) but is MISSING the
+ * `recordTriggerType` (the extractor did not stamp it, or the Flow
+ * definition omitted `<recordTriggerType>` and the platform defaulted it)
+ * is a real, firing automation. Silently excluding it (the old
+ * `typeof !== 'string'` short-circuit) under-counts the active flows on a
+ * densely-automated object by half. We instead treat an absent value as
+ * `CreateAndUpdate` — i.e. it fires on insert/update/upsert — which is the
+ * Salesforce default a save-order narration should assume rather than drop
+ * the step. It still does NOT match `delete`/`undelete`, since an absent
+ * value never implies a delete-triggered flow.
  */
 const flowMatchesEvent = (
   recordTriggerType: unknown,
   event: DmlEvent,
 ): boolean => {
-  if (typeof recordTriggerType !== 'string') return false;
+  // Treat an absent / non-string recordTriggerType as the CreateAndUpdate
+  // default so an after-save flow with no explicit value is not dropped.
+  const effective: string =
+    typeof recordTriggerType === 'string' ? recordTriggerType : 'CreateAndUpdate';
   if (event === 'undelete') return false;
-  if (event === 'delete') return recordTriggerType === 'Delete';
+  if (event === 'delete') return effective === 'Delete';
   if (event === 'upsert') {
     return (
-      recordTriggerType === 'Create' ||
-      recordTriggerType === 'Update' ||
-      recordTriggerType === 'CreateAndUpdate'
+      effective === 'Create' ||
+      effective === 'Update' ||
+      effective === 'CreateAndUpdate'
     );
   }
   if (event === 'insert') {
-    return recordTriggerType === 'Create' || recordTriggerType === 'CreateAndUpdate';
+    return effective === 'Create' || effective === 'CreateAndUpdate';
   }
   // event === 'update'
-  return recordTriggerType === 'Update' || recordTriggerType === 'CreateAndUpdate';
+  return effective === 'Update' || effective === 'CreateAndUpdate';
 };
 
 /**
@@ -903,9 +989,24 @@ export const whatHappensOnSaveHandler = async (
   // `recordTriggerType` matches the DML event. After-save flows run after
   // workflow rules. Before-save flows were already emitted in Phase 0, so only
   // the after-save partition is walked here.
+  //
+  // Scheduled-only after-save flows (hasImmediateConnector === false and they
+  // have scheduledPaths) do NOT run synchronously within the triggering
+  // transaction. They are collected and emitted in post-save-async instead.
   const matchedFlows: Node[] = [];
+  const scheduledOnlyAfterSaveFlows: Node[] = [];
   for (const { firer, recordTriggerType } of afterSaveFlows) {
     if (!flowMatchesEvent(recordTriggerType, input.event)) continue;
+    const hasImmediateConnector = firer.properties['hasImmediateConnector'] as boolean | undefined;
+    const scheduledPathTypes = firer.properties['scheduledPathTypes'] as string[] | undefined;
+    const isScheduledOnly =
+      hasImmediateConnector === false &&
+      Array.isArray(scheduledPathTypes) &&
+      scheduledPathTypes.length > 0;
+    if (isScheduledOnly) {
+      scheduledOnlyAfterSaveFlows.push(firer);
+      continue;
+    }
     const stepResult = await buildStep(
       ctx,
       firer,
@@ -947,6 +1048,10 @@ export const whatHappensOnSaveHandler = async (
 
   // Phase 9: post-save-async. Walk dispatchesAsync from every
   // ApexTrigger that fired in phase 1 / 4. Dedupes targets.
+  // Also emit scheduled-only after-save Flows here: these flows have no
+  // direct <connector> in <start> (hasImmediateConnector === false) so they
+  // run ONLY via their scheduled/time-offset paths — not in the triggering
+  // transaction. They are async by construction.
   const asyncSourceSet: Node[] = [...beforeTriggers, ...afterTriggers];
   const asyncStepsResult = await buildAsyncSteps(
     ctx,
@@ -957,11 +1062,24 @@ export const whatHappensOnSaveHandler = async (
     return err({ kind: 'internal', message: asyncStepsResult.error });
   }
   soe.push(...asyncStepsResult.value);
-  const asyncFanOut = asyncStepsResult.value.length;
+  let asyncFanOut = asyncStepsResult.value.length;
   stepIndex += asyncFanOut;
+  for (const firer of scheduledOnlyAfterSaveFlows) {
+    const stepResult = await buildStep(ctx, firer, 'post-save-async', stepIndex);
+    if (!stepResult.ok) {
+      return err({ kind: 'internal', message: stepResult.error });
+    }
+    soe.push(stepResult.value);
+    asyncFanOut += 1;
+    stepIndex += 1;
+  }
 
   const conditionalCount = soe.filter((s) => s.conditional !== undefined).length;
   const inactiveConfigured = sortedInactiveConfigured(inactiveCollector);
+  const phaseCounts = tallyPhaseCounts(soe);
+  // The save placeholder is the only non-automation step; everything else is an
+  // active org-configured component that fires.
+  const activeComponents = soe.filter((s) => s.phase !== 'save').length;
 
   const data: {
     objectApiName: string;
@@ -971,8 +1089,10 @@ export const whatHappensOnSaveHandler = async (
     soe: readonly SoeStep[];
     summary: {
       totalSteps: number;
+      activeComponents: number;
       conditionalSteps: number;
       asyncFanOut: number;
+      phaseCounts: SoePhaseCounts;
     };
     disclosure: string;
     inactiveConfigured?: readonly InactiveConfiguredFirer[];
@@ -982,21 +1102,40 @@ export const whatHappensOnSaveHandler = async (
     event: input.event,
     recordTypeId: input.recordTypeId ?? null,
     objectModeled,
-    soe,
+    ...(inactiveConfigured.length > 0 ? { inactiveConfigured } : {}),
+    ...(inactiveConfigured.length > 0
+      ? {
+          inactiveHeadline: `Excluded inactive: ${inactiveConfigured.map((i) => i.apiName).join(', ')}`,
+        }
+      : {}),
     summary: {
       totalSteps: soe.length,
+      activeComponents,
       conditionalSteps: conditionalCount,
       asyncFanOut,
+      phaseCounts,
     },
+    soe,
     disclosure: composeSoeDisclosure(DISCLOSURE, objectModeled),
-    ...(inactiveConfigured.length > 0 ? { inactiveConfigured } : {}),
   };
 
   // On a densely-automated standard object (e.g. Contact) the per-step action
   // enumeration can push the payload past the MCP response budget. Trim the
-  // heaviest steps' action tails to fit — every step stays, only the
-  // exhaustive edge list is capped, with an honest per-step count.
-  const budget = enforceSoeByteBudget(data, [soe] as unknown as BoundableStep[][]);
+  // heaviest steps' action tails (and, if needed, the verbose firing
+  // conditions) to fit — every step STAYS, only the exhaustive edge list /
+  // condition expression is capped, with an honest per-step count.
+  //
+  // `allowStepDrop: false` is load-bearing for the single-event view: dropping
+  // trailing steps would silently un-name real firing automations (the
+  // after-trigger / post-save-flow tail), defeating the whole point of the
+  // tool. A single-event step list, once its actions/conditionals are slimmed,
+  // is small enough that the step COUNT alone never exceeds the budget, so the
+  // last-resort step-drop pass is neither needed nor allowed here.
+  const budget = enforceSoeByteBudget(
+    data,
+    [soe] as unknown as BoundableStep[][],
+    { allowStepDrop: false },
+  );
   if (budget.truncated) {
     data.truncated = true;
     data.disclosure = `${data.disclosure} ${soeTruncationNote(budget)}`;

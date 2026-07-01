@@ -199,6 +199,30 @@ const buildFlowEdges = (
 };
 
 /**
+ * CR-CAP-10: emit one `grantedBy` edge per `<customPermissions>` entry with
+ * `<enabled>` true — the custom permissions this permission set CONFERS. The
+ * grant element is `<customPermissions>` with `<name>` (the CustomPermission
+ * DeveloperName) and `<enabled>` (the gate, identical to classAccesses /
+ * flowAccesses). `enabled=false` confers nothing and is skipped. The edge
+ * target id is the flat `CustomPermission:{name}` (CR-CAP-15's definition node);
+ * a managed-package name whose definition is not in the vault produces a
+ * `targetMissing` edge the consumer discloses (it does NOT fabricate a node).
+ */
+const buildCustomPermissionEdges = (
+  rootObj: Record<string, unknown>,
+  fromId: string,
+): Edge[] => {
+  const edges: Edge[] = [];
+  for (const entry of iterEntries(rootObj, 'customPermissions')) {
+    if (!coerceBoolean(unwrapSingle(entry['enabled']))) continue;
+    const name = String(unwrapSingle(entry['name']) ?? '');
+    if (name.length === 0) continue;
+    edges.push(grantedByEdge(fromId, `CustomPermission:${name}`, { enabled: true }));
+  }
+  return edges;
+};
+
+/**
  * Return enabled `<userPermissions>` names, sorted alphabetically. Surfaced
  * on `Node.properties.userPermissions` rather than as edges because system
  * permissions don't correspond to graph nodes in v0.1.
@@ -269,6 +293,7 @@ interface GrantCounts {
   readonly applicationVisibilities: readonly { application: string; default: boolean; visible: boolean }[];
   readonly tabVisibilities: readonly { tab: string; visibility: string }[];
   readonly flowGrantCount: number;
+  readonly customPermissionGrantCount: number;
 }
 
 /** Assemble the `properties` map for a PermissionSet node. */
@@ -295,6 +320,8 @@ const buildProperties = (
  *   - `objectPermissions` -> `CustomObject:{object}` (all-false skipped)
  *   - `fieldPermissions` -> `CustomField:{Object.Field}` (both-false skipped)
  *   - `classAccesses` -> `ApexClass:{apexClass}` (disabled skipped)
+ *   - `flowAccesses` -> `Flow:{flow}` (disabled skipped)
+ *   - `customPermissions` -> `CustomPermission:{name}` (`enabled=false` skipped) (CR-CAP-10)
  *
  * `userPermissions` are surfaced on `Node.properties.userPermissions`
  * (sorted) rather than as edges since system permissions don't correspond
@@ -355,11 +382,12 @@ export const extractPermissionSet = async (
   const fieldEdges = fieldEdgesResult.value;
   const classEdges = buildClassEdges(rootObj, nodeId);
   const flowEdges = buildFlowEdges(rootObj, nodeId);
+  const customPermissionEdges = buildCustomPermissionEdges(rootObj, nodeId);
   const userPermissions = collectEnabledUserPermissions(rootObj);
   const applicationVisibilities = collectApplicationVisibilities(rootObj);
   const tabVisibilities = collectTabVisibilities(rootObj);
 
-  const edges: Edge[] = [...objectEdges, ...fieldEdges, ...classEdges, ...flowEdges].sort(
+  const edges: Edge[] = [...objectEdges, ...fieldEdges, ...classEdges, ...flowEdges, ...customPermissionEdges].sort(
     (a, b) => (a.toId < b.toId ? -1 : a.toId > b.toId ? 1 : 0),
   );
 
@@ -381,6 +409,7 @@ export const extractPermissionSet = async (
       applicationVisibilities,
       tabVisibilities,
       flowGrantCount: flowEdges.length,
+      customPermissionGrantCount: customPermissionEdges.length,
     }),
   };
 

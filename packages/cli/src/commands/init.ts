@@ -1,4 +1,4 @@
-import { exec } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -10,6 +10,7 @@ import { Command } from 'commander';
 
 import { readCliPackageVersion } from '../package-version.js';
 
+import { validateOrgAlias } from './org-alias.js';
 import { formatTrustStatement } from './trust-statement.js';
 /** Default vault root, relative to the user's CWD. */
 const DEFAULT_VAULT_ROOT = 'org-kb';
@@ -22,7 +23,17 @@ const SF_API_VERSION = '62.0';
 /** Default DX package directory that `sf project retrieve` requires to exist on disk. */
 const DEFAULT_PACKAGE_DIR = 'force-app';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+
+/**
+ * Per-call timeout for init's best-effort `sf org list --json` probe (2 min
+ * default, sharing refresh's `SFI_SF_QUERY_TIMEOUT_MS` knob), so a hung `sf`
+ * cannot wedge `sfi init` forever (CR-01 / H8). `SIGTERM` on timeout.
+ */
+const SF_LIST_TIMEOUT_MS = (() => {
+  const n = Number(process.env['SFI_SF_QUERY_TIMEOUT_MS']);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 120_000;
+})();
 
 /**
  * The error variants `runInit` can return.
@@ -78,6 +89,12 @@ export interface RunInitSuccess {
 export const runInit = async (
   opts: RunInitOptions,
 ): Promise<Result<RunInitSuccess, InitError>> => {
+  // Reject a poisoned org alias at creation (CR-01 / C1), so a config that a
+  // later `sfi refresh` would refuse is never written in the first place.
+  const aliasCheck = validateOrgAlias(opts.targetOrg);
+  if (!aliasCheck.ok) {
+    return err({ kind: 'write-failed', message: aliasCheck.error });
+  }
   const resolvedRoot = isAbsolute(opts.vaultRoot)
     ? opts.vaultRoot
     : resolve(opts.cwd, opts.vaultRoot);
@@ -233,7 +250,10 @@ const ORG_CATEGORIES = ['nonScratchOrgs', 'scratchOrgs', 'otherOrgs', 'devHubs',
  */
 export const getDefaultOrgAlias = async (): Promise<string | null> => {
   try {
-    const { stdout } = await execAsync('sf org list --json');
+    const { stdout } = await execFileAsync('sf', ['org', 'list', '--json'], {
+      timeout: SF_LIST_TIMEOUT_MS,
+      killSignal: 'SIGTERM',
+    });
     const parsed = JSON.parse(stdout) as { result?: Record<string, unknown> };
     const result = parsed.result;
     if (result === undefined || result === null) return null;

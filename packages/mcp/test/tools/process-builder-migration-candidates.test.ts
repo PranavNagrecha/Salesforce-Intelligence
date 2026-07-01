@@ -281,6 +281,59 @@ describe('processBuilderMigrationCandidatesHandler', () => {
     if (!result.ok) return;
     expect(result.value.data.approvalProcesses.length).toBe(0);
   });
+
+  // ---- CR-22 cursor ----------------------------------------------------
+
+  it('whole-fits omits cursor block + scanTruncated (byte-identical golden)', async () => {
+    const result = await processBuilderMigrationCandidatesHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect('nextCursor' in result.value.data).toBe(false);
+    expect('pageInfo' in result.value.data).toBe(false);
+    expect('otherSections' in result.value.data).toBe(false);
+    expect('scanTruncated' in result.value.data).toBe(false);
+    expect(result.value.data.truncated).toBe(false);
+  });
+
+  it('paging the largest list (workflowRules) emits nextCursor + discloses the others', async () => {
+    const result = await processBuilderMigrationCandidatesHandler(ctx, { limit: 1 });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.designatedList).toBe('workflowRules');
+    expect(result.value.data.workflowRules.length).toBe(1);
+    expect(result.value.data.nextCursor).toBeDefined();
+    const others = result.value.data.otherSections ?? [];
+    expect(others.map((s) => s.listId).sort()).toEqual(['approvalProcesses', 'processBuilders']);
+    expect(result.value.data.totalWorkflowRules).toBe(2);
+  });
+
+  it('resume walks the designated list with no dup/skip', async () => {
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < 4; i += 1) {
+      const r = await processBuilderMigrationCandidatesHandler(ctx, {
+        limit: 1,
+        ...(cursor !== undefined ? { cursor } : {}),
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      for (const w of r.value.data.workflowRules) seen.push(w.id);
+      cursor = r.value.data.nextCursor;
+      if (cursor === undefined) break;
+    }
+    expect(seen.sort()).toEqual([WR_COMPLEX, WR_SIMPLE].sort());
+  });
+
+  it('rejects a cursor minted for a different sortBy', async () => {
+    const p1 = await processBuilderMigrationCandidatesHandler(ctx, { limit: 1 });
+    expect(p1.ok).toBe(true);
+    if (!p1.ok) return;
+    const cursor = p1.value.data.nextCursor!;
+    const stale = await processBuilderMigrationCandidatesHandler(ctx, { limit: 1, cursor, sortBy: 'name' });
+    expect(stale.ok).toBe(false);
+    if (stale.ok) return;
+    expect(stale.error.kind).toBe('invalid-query');
+  });
 });
 
 describe('processBuilderMigrationCandidatesInputSchema', () => {
@@ -303,5 +356,156 @@ describe('processBuilderMigrationCandidatesInputSchema', () => {
       processBuilderMigrationCandidatesInputSchema.safeParse({ limit: 501 })
         .success,
     ).toBe(false);
+  });
+});
+
+// CR-CAP-11b — the three per-rule action-type counts now feed totalActions
+// directly (the producer emits them; before, propertyNumber silently read 0).
+// Self-contained graph so it does not perturb the shared seed's pagination
+// counts above.
+describe('CR-CAP-11b — action-type counts drive WorkflowRule complexity', () => {
+  const WR_ACTIONS = 'WorkflowRule:Opportunity.Three_Action_Rule';
+  const WR_EMAIL_ONLY = 'WorkflowRule:Account.Email_Only_Rule';
+  const seed11b: ExtractionResult = {
+    nodes: [
+      makeNode({
+        id: WR_ACTIONS,
+        type: 'WorkflowRule',
+        apiName: 'Opportunity.Three_Action_Rule',
+        properties: {
+          active: true,
+          triggerType: 'onAllChanges',
+          criteriaItemCount: 0,
+          timeTriggerCount: 0,
+          // 2 + 1 + 0 = 3 actions via the action-type counts ALONE (no edges).
+          fieldUpdateCount: 2,
+          outboundMessageCount: 1,
+          taskCreationCount: 0,
+        },
+      }),
+      makeNode({
+        id: WR_EMAIL_ONLY,
+        type: 'WorkflowRule',
+        apiName: 'Account.Email_Only_Rule',
+        properties: {
+          active: true,
+          triggerType: 'onCreateOnly',
+          criteriaItemCount: 0,
+          timeTriggerCount: 0,
+          fieldUpdateCount: 0,
+          outboundMessageCount: 0,
+          taskCreationCount: 0,
+        },
+      }),
+    ],
+    edges: [
+      makeEdge({
+        fromId: WR_EMAIL_ONLY,
+        toId: 'EmailTemplate:Notify',
+        edgeType: 'sendsEmail',
+      }),
+    ],
+  };
+
+  let dir11b: string;
+  let store11b: GraphStore;
+  let ctx11b: Context;
+
+  beforeAll(async () => {
+    dir11b = mkdtempSync(join(tmpdir(), 'sfi-mcp-pbmc-11b-'));
+    const opened = await openGraph(join(dir11b, 'pbmc11b.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    store11b = opened.value;
+    const imported = await importExtractionResults(store11b, [seed11b]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    ctx11b = { vaultRoot: dir11b, manifest: FIXTURE_MANIFEST, graph: store11b };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store11b);
+    rmSync(dir11b, { recursive: true, force: true });
+  });
+
+  it('classifies a rule with 2 field updates + 1 outbound message (no edges) as complex', async () => {
+    const result = await processBuilderMigrationCandidatesHandler(ctx11b, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const wr = result.value.data.workflowRules.find((w) => w.id === WR_ACTIONS);
+    expect(wr?.complexity).toBe('complex');
+    expect(wr?.edgeSummary.fieldUpdateCount).toBe(2);
+    expect(wr?.edgeSummary.outboundMessageCount).toBe(1);
+    expect(wr?.edgeSummary.taskCreationCount).toBe(0);
+  });
+
+  it('classifies a rule with all action-type counts 0 + one sendsEmail edge as simple', async () => {
+    const result = await processBuilderMigrationCandidatesHandler(ctx11b, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const wr = result.value.data.workflowRules.find(
+      (w) => w.id === WR_EMAIL_ONLY,
+    );
+    expect(wr?.complexity).toBe('simple');
+    expect(wr?.edgeSummary.sendsEmailCount).toBe(1);
+    expect(wr?.edgeSummary.fieldUpdateCount).toBe(0);
+  });
+});
+
+describe('coverage-aware-zero — automation families not retrieved', () => {
+  let tempDir: string;
+  let store: GraphStore;
+  let covCtx: Context;
+
+  beforeAll(async () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'sfi-pbmc-cov-'));
+    const o = await openGraph(join(tempDir, 'g.db'));
+    if (!o.ok) throw new Error(o.error.message);
+    store = o.value;
+    // Only a CustomObject lands — none of the automation families were pulled.
+    await importExtractionResults(store, [
+      { nodes: [makeNode({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' })], edges: [] },
+    ]);
+    const covManifest: VaultManifest = {
+      ...FIXTURE_MANIFEST,
+      components: { CustomObject: 1 },
+      coverage: [
+        { type: 'CustomObject', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+        { type: 'Flow', requested: true, retrieved: 0, errored: false, neverModeled: false },
+        { type: 'WorkflowRule', requested: true, retrieved: 0, errored: false, neverModeled: false },
+        { type: 'ApprovalProcess', requested: true, retrieved: 0, errored: false, neverModeled: false },
+      ],
+    };
+    covCtx = { vaultRoot: tempDir, manifest: covManifest, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('attaches a coverageCaveat qualifying the empty lists as "not checked"', async () => {
+    const r = await processBuilderMigrationCandidatesHandler(covCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.totalProcessBuilders).toBe(0);
+    expect(d.totalWorkflowRules).toBe(0);
+    expect(d.totalApprovalProcesses).toBe(0);
+    expect(d.coverageCaveat).toBeDefined();
+    expect(d.coverageCaveat?.missingCoverage).toEqual(
+      expect.arrayContaining(['Flow', 'WorkflowRule', 'ApprovalProcess']),
+    );
+    expect(d.coverageCaveat?.message).toMatch(/not checked/);
+  });
+
+  it('drops the not-included families from the caveat when toggled off', async () => {
+    const r = await processBuilderMigrationCandidatesHandler(covCtx, {
+      includeWorkflowRules: false,
+      includeApprovalProcesses: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.coverageCaveat?.missingCoverage).not.toContain('WorkflowRule');
+    expect(r.value.data.coverageCaveat?.missingCoverage).not.toContain('ApprovalProcess');
+    expect(r.value.data.coverageCaveat?.missingCoverage).toContain('Flow');
   });
 });

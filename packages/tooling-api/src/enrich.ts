@@ -19,12 +19,18 @@
  *   - Layout: SELECT Id, Name, LastModifiedDate, LastModifiedBy.Name,
  *     LastModifiedById FROM Layout WHERE Name IN (...).
  *   - CustomField: SELECT Id, DeveloperName, TableEnumOrId,
- *     LastModifiedDate, LastModifiedBy.Name, LastModifiedById
- *     FROM CustomField WHERE Id IN (...) — keyed by Tooling Id when
- *     known, falls back to DeveloperName + TableEnumOrId.
+ *     EntityDefinition.QualifiedApiName, LastModifiedDate,
+ *     LastModifiedBy.Name, LastModifiedById FROM CustomField
+ *     WHERE DeveloperName IN (...) — correlated back to the vault id
+ *     via `EntityDefinition.QualifiedApiName` (the parent object's
+ *     ApiName), NOT `TableEnumOrId` (a key-prefix Id for custom objects).
  *   - ValidationRule: SELECT Id, ValidationName, EntityDefinitionId,
- *     LastModifiedDate, LastModifiedBy.Name, LastModifiedById
- *     FROM ValidationRule WHERE ValidationName IN (...).
+ *     EntityDefinition.QualifiedApiName, LastModifiedDate,
+ *     LastModifiedBy.Name, LastModifiedById FROM ValidationRule
+ *     WHERE ValidationName IN (...) — correlated back to the vault id
+ *     via `EntityDefinition.QualifiedApiName` (the parent object's
+ *     ApiName), NOT `EntityDefinitionId` (a key-prefix Id for custom
+ *     objects), same as CustomField.
  *
  * Honesty axes:
  *   - The `--with-tooling-api` flag is opt-in; default `sfi refresh`
@@ -107,6 +113,13 @@ interface ToolingRow {
   readonly ValidationName?: string;
   readonly TableEnumOrId?: string;
   readonly EntityDefinitionId?: string;
+  /**
+   * CustomField's parent SObject API name via the EntityDefinition
+   * relationship. For a CUSTOM object `TableEnumOrId` is a key-prefix
+   * SObject Id (e.g. `01Ixx…`), NOT the ApiName; this relationship column
+   * carries the real `My_Object__c` form the vault id is built from.
+   */
+  readonly EntityDefinition?: { readonly QualifiedApiName?: string };
   readonly LastModifiedDate?: string;
   readonly LastModifiedById?: string;
   readonly LastModifiedBy?: { readonly Name?: string };
@@ -195,7 +208,7 @@ const DISPATCH: Readonly<Partial<Record<ComponentType, PerTypeDispatch>>> = Obje
   CustomField: {
     objectName: 'CustomField',
     columns:
-      'Id, DeveloperName, TableEnumOrId, LastModifiedDate, LastModifiedById, LastModifiedBy.Name',
+      'Id, DeveloperName, TableEnumOrId, EntityDefinition.QualifiedApiName, LastModifiedDate, LastModifiedById, LastModifiedBy.Name',
     whereColumn: 'DeveloperName',
     // CustomField apiName at the vault level usually ends with `__c`
     // (e.g., Industry__c); the Tooling API strips this suffix in
@@ -212,23 +225,24 @@ const DISPATCH: Readonly<Partial<Record<ComponentType, PerTypeDispatch>>> = Obje
       if (typeof row.DeveloperName !== 'string' || row.DeveloperName.length === 0) {
         return null;
       }
-      if (typeof row.TableEnumOrId !== 'string' || row.TableEnumOrId.length === 0) {
+      // The vault id is `CustomField:{ObjectApiName}.{Field}__c`. For a
+      // CUSTOM object `TableEnumOrId` is a key-prefix SObject Id
+      // (e.g. `01Ixx…`), NOT the ApiName, so building the id from it would
+      // never match the vault node and the row would be dropped silently.
+      // `EntityDefinition.QualifiedApiName` carries the real object ApiName
+      // for both standard and custom objects, so build the id from it.
+      const objectApiName = row.EntityDefinition?.QualifiedApiName;
+      if (typeof objectApiName !== 'string' || objectApiName.length === 0) {
         return null;
       }
-      // Some Tooling responses return the SObject Id (15/18-char) for
-      // TableEnumOrId on standard objects; the resulting canonical id
-      // will not match the vault's `CustomField:{ApiName}.X__c` shape.
-      // The enricher leaves the responsibility to the runtime
-      // correlation: when the canonical id is unknown to the vault,
-      // the row is dropped (see `enrichLastModified` body).
       const suffix = row.DeveloperName.endsWith('__c') ? '' : '__c';
-      return `CustomField:${row.TableEnumOrId}.${row.DeveloperName}${suffix}`;
+      return `CustomField:${objectApiName}.${row.DeveloperName}${suffix}`;
     },
   },
   ValidationRule: {
     objectName: 'ValidationRule',
     columns:
-      'Id, ValidationName, EntityDefinitionId, LastModifiedDate, LastModifiedById, LastModifiedBy.Name',
+      'Id, ValidationName, EntityDefinitionId, EntityDefinition.QualifiedApiName, LastModifiedDate, LastModifiedById, LastModifiedBy.Name',
     whereColumn: 'ValidationName',
     nodeToKey: (node) => {
       // Vault canonical id is `ValidationRule:{Parent}.{Name}`; the
@@ -243,10 +257,17 @@ const DISPATCH: Readonly<Partial<Record<ComponentType, PerTypeDispatch>>> = Obje
       if (typeof row.ValidationName !== 'string' || row.ValidationName.length === 0) {
         return null;
       }
-      if (typeof row.EntityDefinitionId !== 'string' || row.EntityDefinitionId.length === 0) {
+      // `EntityDefinitionId` for a CUSTOM object is a key-prefix SObject Id
+      // (e.g. `01Ixx…`), NOT the ApiName, so building the id from it would
+      // never match the vault node `ValidationRule:{ObjectApiName}.{Name}`
+      // and the row would be dropped silently (same class as CustomField's
+      // `TableEnumOrId`). `EntityDefinition.QualifiedApiName` carries the
+      // real object ApiName for both standard and custom objects.
+      const objectApiName = row.EntityDefinition?.QualifiedApiName;
+      if (typeof objectApiName !== 'string' || objectApiName.length === 0) {
         return null;
       }
-      return `ValidationRule:${row.EntityDefinitionId}.${row.ValidationName}`;
+      return `ValidationRule:${objectApiName}.${row.ValidationName}`;
     },
   },
 });

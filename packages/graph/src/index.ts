@@ -19,9 +19,16 @@ export {
   changeSetSize,
   computeChangeSet,
   INCREMENTAL_DELTA_CAP,
+  pruneStaleNodes,
 } from './apply-change-set.js';
-export type { ApplyCounts, ChangeSet, EdgeKey } from './apply-change-set.js';
-export { runMigrations } from './migrations.js';
+export type { ApplyCounts, ChangeSet, EdgeKey, PruneCounts } from './apply-change-set.js';
+export {
+  CURRENT_SCHEMA_VERSION,
+  needsMigration,
+  readSchemaVersion,
+  runMigrations,
+} from './migrations.js';
+export type { Migration } from './migrations.js';
 export {
   contributorsSummary,
   countNodesByType,
@@ -31,16 +38,20 @@ export {
   getSubgraph,
   listChildren,
   listEdges,
+  listEdgesForNodes,
   listNodeIdentities,
+  listNodesByIds,
   listNodesByType,
   searchNodes,
 } from './queries.js';
 export type {
   Contributor,
   ContributorsSummary,
+  CountNodesOptions,
   DanglingTargetGroup,
   FreshnessEntry,
   FreshnessSummary,
+  ListEdgesForNodesOptions,
   ListEdgesOptions,
   ListNodesOptions,
   NodeIdentity,
@@ -99,6 +110,7 @@ export type {
   ResolveResult,
 } from './resolve.js';
 export { initSchema, SCHEMA_DDL } from './schema.js';
+export { openGraphServeReadOnly } from './serve-readonly.js';
 export {
   closeGraph,
   isLockConflict,

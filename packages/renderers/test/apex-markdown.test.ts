@@ -297,3 +297,47 @@ describe('renderApexMarkdown', () => {
     expect(result.error.nodeId).toBe('ApexClass:Missing');
   });
 });
+
+describe('renderApexMarkdown — markdown injection / escaping (CR-16c)', () => {
+  it('escapes header/apiName but leaves the apex source fence raw', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sf-intel-apex-escape-'));
+    try {
+      // Raw source contains a backtick — it must stay verbatim inside the fence.
+      const sourcePath = join(dir, 'EvilClass.cls');
+      await writeFile(
+        sourcePath,
+        'public class EvilClass { String x = `raw`; }\n',
+        'utf-8',
+      );
+      const node: Node = {
+        id: 'ApexClass:EvilClass',
+        type: 'ApexClass',
+        apiName: 'Evil`Class',
+        label: 'Evil\n# Injected',
+        parentId: null,
+        sourcePath,
+        lastModifiedDate: null,
+        lastModifiedBy: null,
+        apiVersion: null,
+        properties: {},
+      };
+      const result = await renderApexMarkdown(node, []);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const lines = result.value.body.split('\n');
+
+      // Heading newline collapsed + injected leading hash neutralized → one `# `.
+      expect(lines.filter((l) => /^# /.test(l))).toHaveLength(1);
+
+      // API Name span not closed early by the backtick in apiName.
+      const apiLine = lines.find((l) => l.startsWith('**API Name:**'));
+      expect(apiLine).toBeDefined();
+      expect(apiLine).toContain('Evil\\`Class');
+
+      // The apex source fence is left RAW — the backtick in source is verbatim.
+      expect(result.value.body).toContain('String x = `raw`;');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

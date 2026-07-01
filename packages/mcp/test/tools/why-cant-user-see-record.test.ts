@@ -28,14 +28,14 @@ const FIXTURE_MANIFEST: VaultManifest = {
   refreshedAt: '2026-05-27T14:33:08Z',
   sourceOrg: 'me@example.com',
   components: {
-    CustomObject: 4,
+    CustomObject: 8,
     Profile: 1,
     PermissionSet: 1,
-    Role: 4,
+    Role: 9,
     Group: 1,
-    SharingRule: 4,
+    SharingRule: 8,
   },
-  edges: { grantedBy: 1, parentOf: 4, sharedWith: 4, inheritsFrom: 3 },
+  edges: { grantedBy: 1, parentOf: 8, sharedWith: 8, inheritsFrom: 6 },
   sourceTreeHash: 'sha256:fixture',
 };
 
@@ -104,6 +104,7 @@ const owdReadWriteTransferSeed: ExtractionResult = {
 // =============================================================================
 
 const CBC_OBJ = 'CustomObject:CampaignMember';
+const CBC_READER_PROFILE = 'Profile:CbcReader';
 
 const owdControlledByCampaignSeed: ExtractionResult = {
   nodes: [
@@ -112,8 +113,18 @@ const owdControlledByCampaignSeed: ExtractionResult = {
       apiName: 'CampaignMember',
       properties: { sharingModel: 'ControlledByCampaign' },
     }),
+    // CR-03: a profile with object Read so the precondition passes and the OWD
+    // stage is reached — this test asserts the OWD's restricted CLASSIFICATION.
+    makeNode({ id: CBC_READER_PROFILE, type: 'Profile', apiName: 'CbcReader' }),
   ],
-  edges: [],
+  edges: [
+    makeEdge({
+      fromId: CBC_READER_PROFILE,
+      toId: CBC_OBJ,
+      edgeType: 'grantedBy',
+      properties: { allowRead: true },
+    }),
+  ],
 };
 
 // =============================================================================
@@ -206,6 +217,75 @@ const ownerSharingRuleSeed: ExtractionResult = {
 };
 
 // =============================================================================
+// Seed 3b (CR-CAP-12): OWD-Private object with an owner rule shared with an
+// ENCLOSING public group. The user is a literal member ONLY of a NESTED group
+// (`Group:Enclosing_PG --hasMember--> Group:Nested_PG`). Before CR-CAP-12 the
+// literal membership set held only `Group:Nested_PG`, so the rule granting
+// `Group:Enclosing_PG` did NOT match (restricted). After: the upward hasMember
+// walk folds `Group:Enclosing_PG` into membership → visible.
+// =============================================================================
+
+const NESTED_RULE_OBJ = 'CustomObject:NestedGroupObj';
+const NESTED_RULE_ID = 'SharingRule:NestedGroupObj.GrantEnclosing';
+const ENCLOSING_PG = 'Group:Enclosing_PG';
+const NESTED_PG = 'Group:Nested_PG';
+
+const nestedGroupOwnerRuleSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: NESTED_RULE_OBJ,
+      apiName: 'NestedGroupObj',
+      properties: { sharingModel: 'Private' },
+    }),
+    makeNode({
+      id: NESTED_RULE_ID,
+      type: 'SharingRule',
+      apiName: 'NestedGroupObj.GrantEnclosing',
+      parentId: NESTED_RULE_OBJ,
+      properties: {
+        ruleType: 'owner',
+        accessLevel: 'Read',
+        sharedToType: 'group',
+        sharedToName: 'Enclosing_PG',
+        sharedFromType: 'group',
+        sharedFromName: 'Enclosing_PG',
+        booleanFilter: null,
+        criteriaItemCount: 0,
+      },
+    }),
+    makeNode({ id: ENCLOSING_PG, type: 'Group', apiName: 'Enclosing_PG' }),
+    makeNode({ id: NESTED_PG, type: 'Group', apiName: 'Nested_PG' }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: NESTED_RULE_OBJ,
+      toId: NESTED_RULE_ID,
+      edgeType: 'parentOf',
+    }),
+    makeEdge({
+      fromId: NESTED_RULE_ID,
+      toId: ENCLOSING_PG,
+      edgeType: 'sharedWith',
+      properties: { direction: 'to' },
+    }),
+    makeEdge({
+      fromId: NESTED_RULE_ID,
+      toId: ENCLOSING_PG,
+      edgeType: 'sharedWith',
+      properties: { direction: 'from' },
+    }),
+    // The enclosing public group CONTAINS the nested group as a member.
+    makeEdge({
+      fromId: ENCLOSING_PG,
+      toId: NESTED_PG,
+      edgeType: 'hasMember',
+      source: 'group-extractor',
+      properties: { memberType: 'Group' },
+    }),
+  ],
+};
+
+// =============================================================================
 // Seed 4: OWD-Private object with a criteria-type SharingRule. Always
 // reports `unknown` with the booleanFilter mentioned in the reason.
 // =============================================================================
@@ -250,6 +330,75 @@ const criteriaSharingRuleSeed: ExtractionResult = {
       edgeType: 'sharedWith',
     }),
   ],
+};
+
+// =============================================================================
+// Seed 4b (CR-CAP-16): OWD-Private object with a GUEST sharing rule. The
+// TerritoryAndGuestRules stage must report `unknown` per rule with the rule id /
+// site / predicate in the reason, and the aggregate stays `unknown`.
+// =============================================================================
+
+const GUEST_OBJ = 'CustomObject:GuestObj';
+const GUEST_RULE_ID = 'SharingRule:GuestObj.Share_To_ClientPortal';
+
+const guestSharingRuleSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: GUEST_OBJ,
+      apiName: 'GuestObj',
+      properties: { sharingModel: 'Private' },
+    }),
+    makeNode({
+      id: GUEST_RULE_ID,
+      type: 'SharingRule',
+      apiName: 'GuestObj.Share_To_ClientPortal',
+      parentId: GUEST_OBJ,
+      properties: {
+        ruleType: 'guest',
+        accessLevel: 'Read',
+        sharedToType: 'guestUser',
+        sharedToName: 'ClientPortal',
+        sharedFromType: null,
+        sharedFromName: null,
+        booleanFilter: '1 AND 2',
+        criteriaItemCount: 2,
+        siteName: 'ClientPortal',
+      },
+    }),
+    makeNode({ id: 'Group:ClientPortal', type: 'Group', apiName: 'ClientPortal' }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: GUEST_OBJ,
+      toId: GUEST_RULE_ID,
+      edgeType: 'parentOf',
+    }),
+    makeEdge({
+      fromId: GUEST_RULE_ID,
+      toId: 'Group:ClientPortal',
+      edgeType: 'sharedWith',
+      properties: { synthetic: true, siteName: 'ClientPortal' },
+    }),
+  ],
+};
+
+// =============================================================================
+// Seed 4c (CR-CAP-16): OWD-Private object with NO guest/territory rules. The
+// TerritoryAndGuestRules stage must preserve the absence disclosure as
+// `unknown`, never `restricted`.
+// =============================================================================
+
+const NO_GUEST_OBJ = 'CustomObject:NoGuestObj';
+
+const noGuestRuleSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: NO_GUEST_OBJ,
+      apiName: 'NoGuestObj',
+      properties: { sharingModel: 'Private' },
+    }),
+  ],
+  edges: [],
 };
 
 // =============================================================================
@@ -304,7 +453,241 @@ const roleHierarchySeed: ExtractionResult = {
   ],
 };
 
+// =============================================================================
+// Seed 6b (CR-CAP-05): owner-based SharingRule whose RECEIVER (sharedTo) target
+// is a role marked `roleAndSubordinates` (inheritance: 'subordinates'). The
+// rule must reach the named role AND every role below it in the hierarchy.
+//
+// Hierarchy: Sales_VP (top) <- Sales_Manager <- Sales_Rep (subordinate chain
+// via inheritsFrom child->parent). Service_Agent is an unrelated top role.
+//
+// The existing `ownerSharingRuleSeed` puts the inheritance marker on the SOURCE
+// (`direction: 'from'`) edge and a plain Group on the receiver side, so it never
+// exercised receiver-subtree expansion — this seed does.
+// =============================================================================
+
+const SUB_OBJ = 'CustomObject:SubObj';
+const SUB_RULE_ID = 'SharingRule:SubObj.SubRule';
+// Distinct role ids (Cap*) so this subtree does NOT collide with the
+// roleHierarchySeed Sales_* roles — keeps the seeds independent and the
+// FIXTURE_MANIFEST counts unambiguous.
+const SUB_VP_ROLE = 'Role:Cap_VP';
+const SUB_MANAGER_ROLE = 'Role:Cap_Manager';
+const SUB_REP_ROLE = 'Role:Cap_Rep';
+const SERVICE_AGENT_ROLE = 'Role:Cap_Service_Agent';
+
+const ownerSubordinateRuleSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: SUB_OBJ,
+      apiName: 'SubObj',
+      properties: { sharingModel: 'Private' },
+    }),
+    makeNode({
+      id: SUB_RULE_ID,
+      type: 'SharingRule',
+      apiName: 'SubObj.SubRule',
+      parentId: SUB_OBJ,
+      properties: {
+        ruleType: 'owner',
+        accessLevel: 'Read',
+        sharedToType: 'roleAndSubordinates',
+        sharedToName: 'Cap_VP',
+        sharedFromType: 'group',
+        sharedFromName: 'Some_Source_Group',
+        booleanFilter: null,
+        criteriaItemCount: 0,
+      },
+    }),
+    makeNode({ id: SUB_VP_ROLE, type: 'Role', apiName: 'Cap_VP' }),
+    makeNode({ id: SUB_MANAGER_ROLE, type: 'Role', apiName: 'Cap_Manager' }),
+    makeNode({ id: SUB_REP_ROLE, type: 'Role', apiName: 'Cap_Rep' }),
+    makeNode({ id: SERVICE_AGENT_ROLE, type: 'Role', apiName: 'Cap_Service_Agent' }),
+  ],
+  edges: [
+    makeEdge({ fromId: SUB_OBJ, toId: SUB_RULE_ID, edgeType: 'parentOf' }),
+    // The RECEIVER (sharedTo) edge under test: roleAndSubordinates -> Sales_VP.
+    makeEdge({
+      fromId: SUB_RULE_ID,
+      toId: SUB_VP_ROLE,
+      edgeType: 'sharedWith',
+      properties: { inheritance: 'subordinates', direction: 'to' },
+    }),
+    // inheritsFrom is child -> parent. Sales_Rep is a subordinate of Sales_VP
+    // (two rungs down), so its ancestor chain is [Sales_Manager, Sales_VP].
+    makeEdge({
+      fromId: SUB_REP_ROLE,
+      toId: SUB_MANAGER_ROLE,
+      edgeType: 'inheritsFrom',
+    }),
+    makeEdge({
+      fromId: SUB_MANAGER_ROLE,
+      toId: SUB_VP_ROLE,
+      edgeType: 'inheritsFrom',
+    }),
+  ],
+};
+
+// =============================================================================
+// Seed 6c (CR-CAP-05): a PLAIN-role owner rule (NO inheritance marker) whose
+// sharedTo target is Sales_VP. A plain `role` rule reaches ONLY the named role;
+// a subordinate (Sales_Rep) must NOT match it. Guards the false-grant class.
+// Reuses the Sales_* roles seeded in `ownerSubordinateRuleSeed`.
+// =============================================================================
+
+const PLAIN_ROLE_OBJ = 'CustomObject:PlainRoleObj';
+const PLAIN_ROLE_RULE_ID = 'SharingRule:PlainRoleObj.PlainRule';
+
+const ownerPlainRoleRuleSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: PLAIN_ROLE_OBJ,
+      apiName: 'PlainRoleObj',
+      properties: { sharingModel: 'Private' },
+    }),
+    makeNode({
+      id: PLAIN_ROLE_RULE_ID,
+      type: 'SharingRule',
+      apiName: 'PlainRoleObj.PlainRule',
+      parentId: PLAIN_ROLE_OBJ,
+      properties: {
+        ruleType: 'owner',
+        accessLevel: 'Read',
+        sharedToType: 'role',
+        sharedToName: 'Cap_VP',
+        sharedFromType: 'group',
+        sharedFromName: 'Some_Source_Group',
+        booleanFilter: null,
+        criteriaItemCount: 0,
+      },
+    }),
+  ],
+  edges: [
+    makeEdge({ fromId: PLAIN_ROLE_OBJ, toId: PLAIN_ROLE_RULE_ID, edgeType: 'parentOf' }),
+    // Plain role receiver — NO inheritance prop, so named role only.
+    makeEdge({
+      fromId: PLAIN_ROLE_RULE_ID,
+      toId: SUB_VP_ROLE,
+      edgeType: 'sharedWith',
+      properties: { direction: 'to' },
+    }),
+  ],
+};
+
+// =============================================================================
+// Seed 6d (CR-CAP-05): an Edit-level owner rule whose sharedTo target is
+// roleAndSubordinates -> Sales_VP. Proves the subordinate match still composes
+// with the access-level gate: a subordinate (Sales_Rep) gets `visible` for read
+// but `restricted` for edit (Read rule grants Read, not edit). Distinct object
+// + Edit-rule so it stacks alongside the Read SubRule without two owner steps.
+// =============================================================================
+
+const SUB_EDIT_OBJ = 'CustomObject:SubEditObj';
+const SUB_EDIT_RULE_ID = 'SharingRule:SubEditObj.SubEditRule';
+
+const ownerSubordinateReadRuleForLevelSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: SUB_EDIT_OBJ,
+      apiName: 'SubEditObj',
+      properties: { sharingModel: 'Private' },
+    }),
+    makeNode({
+      id: SUB_EDIT_RULE_ID,
+      type: 'SharingRule',
+      apiName: 'SubEditObj.SubEditRule',
+      parentId: SUB_EDIT_OBJ,
+      properties: {
+        ruleType: 'owner',
+        accessLevel: 'Read',
+        sharedToType: 'roleAndSubordinates',
+        sharedToName: 'Cap_VP',
+        sharedFromType: 'group',
+        sharedFromName: 'Some_Source_Group',
+        booleanFilter: null,
+        criteriaItemCount: 0,
+      },
+    }),
+  ],
+  edges: [
+    makeEdge({ fromId: SUB_EDIT_OBJ, toId: SUB_EDIT_RULE_ID, edgeType: 'parentOf' }),
+    makeEdge({
+      fromId: SUB_EDIT_RULE_ID,
+      toId: SUB_VP_ROLE,
+      edgeType: 'sharedWith',
+      properties: { inheritance: 'subordinates', direction: 'to' },
+    }),
+  ],
+};
+
+// =============================================================================
+// Seed 6e (CR-CAP-05 honesty): an owner rule whose sharedTo target is
+// roleAndSubordinates -> Cap_VP (a role that IS retrieved). But an INTERMEDIATE
+// role on the user's ancestor chain (Cap_Mid_Missing) was NOT retrieved, so the
+// upward walk from Cap_Rep_Trunc truncates at the missing node and never reaches
+// Cap_VP — the ancestor set is SHORT and the (real) subordinate relationship is
+// MISSED. An inheritance-gated NON-match on a truncated chain must downgrade to
+// `unknown` (never a confident false-deny). The reason names the target role and
+// points to a refresh.
+// =============================================================================
+
+const TRUNC_OBJ = 'CustomObject:TruncObj';
+const TRUNC_RULE_ID = 'SharingRule:TruncObj.TruncRule';
+// The rule's sharedTo target role — present, and the reason should name it.
+const TRUNC_TARGET_ROLE = SUB_VP_ROLE; // 'Role:Cap_VP'
+const TRUNC_MISSING_MID_ROLE = 'Role:Cap_Mid_Missing';
+const TRUNC_REP_ROLE = 'Role:Cap_Rep_Trunc';
+
+const ownerSubordinateTruncatedSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: TRUNC_OBJ,
+      apiName: 'TruncObj',
+      properties: { sharingModel: 'Private' },
+    }),
+    makeNode({
+      id: TRUNC_RULE_ID,
+      type: 'SharingRule',
+      apiName: 'TruncObj.TruncRule',
+      parentId: TRUNC_OBJ,
+      properties: {
+        ruleType: 'owner',
+        accessLevel: 'Read',
+        sharedToType: 'roleAndSubordinates',
+        sharedToName: 'Cap_VP',
+        sharedFromType: 'group',
+        sharedFromName: 'Some_Source_Group',
+        booleanFilter: null,
+        criteriaItemCount: 0,
+      },
+    }),
+    // The subordinate role node IS present; the INTERMEDIATE role node is NOT.
+    makeNode({ id: TRUNC_REP_ROLE, type: 'Role', apiName: 'Cap_Rep_Trunc' }),
+    // NOTE: Role:Cap_Mid_Missing deliberately NOT seeded as a node, and
+    // Cap_Mid_Missing -> Cap_VP is NOT seeded either, so the walk cannot reach
+    // the (present) Cap_VP target.
+  ],
+  edges: [
+    makeEdge({ fromId: TRUNC_OBJ, toId: TRUNC_RULE_ID, edgeType: 'parentOf' }),
+    makeEdge({
+      fromId: TRUNC_RULE_ID,
+      toId: TRUNC_TARGET_ROLE,
+      edgeType: 'sharedWith',
+      properties: { inheritance: 'subordinates', direction: 'to' },
+    }),
+    // The subordinate inherits from the MISSING intermediate role — the walk
+    // adds Cap_Mid_Missing to the chain, then hits its missing node and
+    // truncates BEFORE reaching the target Cap_VP.
+    makeEdge({
+      fromId: TRUNC_REP_ROLE,
+      toId: TRUNC_MISSING_MID_ROLE,
+      edgeType: 'inheritsFrom',
+    }),
+  ],
+};
+
 const RESTRICTION_OBJ = 'CustomObject:RestrictionObj';
+const RESTRICTION_PS = 'PermissionSet:Some_PS';
 const restrictionRuleSeed: ExtractionResult = {
   nodes: [
     makeNode({
@@ -322,6 +705,53 @@ const restrictionRuleSeed: ExtractionResult = {
       id: 'PermissionSetGroup:Ops_Group',
       type: 'PermissionSetGroup',
       apiName: 'Ops_Group',
+    }),
+    // CR-03: a permission set with object Read on RestrictionObj so the
+    // object-Read precondition passes and the cascade reaches the RestrictionRule
+    // / PermissionSetGroup stages (which the boundary tests assert).
+    makeNode({ id: RESTRICTION_PS, type: 'PermissionSet', apiName: 'Some_PS' }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: RESTRICTION_PS,
+      toId: RESTRICTION_OBJ,
+      edgeType: 'grantedBy',
+      properties: { allowRead: true },
+    }),
+  ],
+};
+
+// =============================================================================
+// Seed (hard-deny + restriction rule): a Private object that carries an active
+// RestrictionRule, queried with a profile that has NO object grant. The
+// object-CRUD precondition hard-denies (verdict `restricted`), but the cascade
+// must STILL surface the RestrictionRule stage in the reasoning chain — the
+// hard deny does not erase the rest of the evaluation. Mirrors the CI
+// visibility-honesty eval contract (an active restriction rule on the object
+// surfaces as a RestrictionRule reasoning stage even on a hard deny).
+// =============================================================================
+
+const HARDDENY_RESTRICTION_OBJ = 'CustomObject:HardDenyRestrictObj';
+
+const hardDenyRestrictionSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: HARDDENY_RESTRICTION_OBJ,
+      apiName: 'HardDenyRestrictObj',
+      properties: { sharingModel: 'Private' },
+    }),
+    makeNode({
+      id: 'RestrictionRule:HardDenyRestrictObj.Hide_External',
+      type: 'RestrictionRule',
+      apiName: 'HardDenyRestrictObj.Hide_External',
+      parentId: HARDDENY_RESTRICTION_OBJ,
+    }),
+    // A profile with NO grantedBy edge on this object → object-CRUD precondition
+    // fails → hard deny.
+    makeNode({
+      id: 'Profile:HardDenyUser',
+      type: 'Profile',
+      apiName: 'HardDenyUser',
     }),
   ],
   edges: [],
@@ -352,14 +782,32 @@ const godModeSeed: ExtractionResult = {
       properties: { userPermissions: ['ManageUsers', 'ViewAllData'] },
     }),
     // A non-god-mode profile on the same object, to exercise the restricted path.
+    // CR-03: it holds plain object Read so the object-Read precondition passes
+    // and the cascade reaches the SystemPermission stage (which then reports
+    // `restricted` — no View/Modify All Data).
     makeNode({
       id: 'Profile:Mortal',
       type: 'Profile',
       apiName: 'Mortal',
       properties: { userPermissions: ['ManageUsers'] },
     }),
+    // CR-03: a profile with ZERO object access on this object — used to exercise
+    // the object-Read precondition hard-deny (bug 21).
+    makeNode({
+      id: 'Profile:NoAccess',
+      type: 'Profile',
+      apiName: 'NoAccess',
+      properties: { userPermissions: ['ManageUsers'] },
+    }),
   ],
-  edges: [],
+  edges: [
+    makeEdge({
+      fromId: 'Profile:Mortal',
+      toId: GODMODE_OBJ,
+      edgeType: 'grantedBy',
+      properties: { allowRead: true },
+    }),
+  ],
 };
 
 // =============================================================================
@@ -520,6 +968,241 @@ const createNoRtObjSeed: ExtractionResult = {
   ],
 };
 
+// =============================================================================
+// CR-03 (two-plane access model) seeds.
+//
+// The OWD-public objects above (READ_OBJ, RWT_OBJ) carry NO grantedBy edges, so
+// a `Profile:Standard User` queried against them has ZERO object Read — under
+// the corrected model a public OWD does NOT make a record visible without object
+// Read (plane A). These seeds add a profile that legitimately HAS object Read on
+// a public object so the OWD read/edit/delete ladder can still be exercised, and
+// a Private object where the profile holds only plain object CRUD (the H2 case).
+// =============================================================================
+
+// A profile with object READ CRUD on a Public-Read object (no View/Modify All).
+// On a public OWD the precondition is met → OWD grants record visibility.
+const PUB_READ_OBJ = 'CustomObject:PubReadObj';
+const READER_PROFILE = 'Profile:ObjReader';
+
+const pubReadWithGrantSeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: PUB_READ_OBJ, apiName: 'PubReadObj', properties: { sharingModel: 'Read' } }),
+    makeNode({ id: READER_PROFILE, type: 'Profile', apiName: 'ObjReader' }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: READER_PROFILE,
+      toId: PUB_READ_OBJ,
+      edgeType: 'grantedBy',
+      // Plain object Read + Edit (NO viewAllRecords / modifyAllRecords): the
+      // object precondition is satisfied and Edit implies Read.
+      properties: { allowRead: true, allowEdit: true },
+    }),
+  ],
+};
+
+// A profile with object READ + EDIT CRUD on a Public Read/Write/Transfer object.
+const PUB_RWT_OBJ = 'CustomObject:PubRwtObj';
+const EDITOR_PROFILE = 'Profile:ObjEditor';
+
+const pubRwtWithGrantSeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: PUB_RWT_OBJ, apiName: 'PubRwtObj', properties: { sharingModel: 'ReadWriteTransfer' } }),
+    makeNode({ id: EDITOR_PROFILE, type: 'Profile', apiName: 'ObjEditor' }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: EDITOR_PROFILE,
+      toId: PUB_RWT_OBJ,
+      edgeType: 'grantedBy',
+      properties: { allowRead: true, allowEdit: true, allowDelete: true },
+    }),
+  ],
+};
+
+// H2: a PRIVATE object + a profile with plain object Edit/Delete CRUD only
+// (modifyAllRecords:false, viewAllRecords:false). Object CRUD satisfies the
+// precondition (Edit/Delete imply Read) but is NOT a record-sharing grant on a
+// Private object — record visibility is then the honest unmodeled `unknown`.
+const PRIV_CRUD_OBJ = 'CustomObject:PrivCrudObj';
+const CRUD_ONLY_PROFILE = 'Profile:CrudOnly';
+
+const privateCrudOnlySeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: PRIV_CRUD_OBJ, apiName: 'PrivCrudObj', properties: { sharingModel: 'Private' } }),
+    makeNode({ id: CRUD_ONLY_PROFILE, type: 'Profile', apiName: 'CrudOnly' }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: CRUD_ONLY_PROFILE,
+      toId: PRIV_CRUD_OBJ,
+      edgeType: 'grantedBy',
+      properties: {
+        allowRead: true,
+        allowEdit: true,
+        allowDelete: true,
+        viewAllRecords: false,
+        modifyAllRecords: false,
+      },
+    }),
+  ],
+};
+
+// Object "View All" records (viewAllRecords) on a PRIVATE object — a record-
+// sharing BYPASS scoped to all-records. Read => visible even on Private.
+const PRIV_VIEWALL_OBJ = 'CustomObject:PrivViewAllObj';
+const VIEWALL_PROFILE = 'Profile:ViewAllRecs';
+
+const privateViewAllSeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: PRIV_VIEWALL_OBJ, apiName: 'PrivViewAllObj', properties: { sharingModel: 'Private' } }),
+    makeNode({ id: VIEWALL_PROFILE, type: 'Profile', apiName: 'ViewAllRecs' }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: VIEWALL_PROFILE,
+      toId: PRIV_VIEWALL_OBJ,
+      edgeType: 'grantedBy',
+      properties: { allowRead: true, viewAllRecords: true },
+    }),
+  ],
+};
+
+// ControlledByParent: object Read precondition satisfied, but record access
+// derives from the master object's sharing which v1.x cannot walk → honest
+// `unknown` (NOT a flat restricted). The load-bearing honesty case.
+const CBP_OBJ = 'CustomObject:DetailObj';
+const CBP_READER_PROFILE = 'Profile:DetailReader';
+
+const controlledByParentSeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: CBP_OBJ, apiName: 'DetailObj', properties: { sharingModel: 'ControlledByParent' } }),
+    makeNode({ id: CBP_READER_PROFILE, type: 'Profile', apiName: 'DetailReader' }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: CBP_READER_PROFILE,
+      toId: CBP_OBJ,
+      edgeType: 'grantedBy',
+      properties: { allowRead: true },
+    }),
+  ],
+};
+
+// =============================================================================
+// CR-RV6 fixtures — operation-aware object-CRUD precondition.
+// The old precondition only ever checked object READ regardless of accessLevel,
+// so the FIRST cascade step (OWD) could win for an operation the user lacks the
+// CRUD for: a Read-only user on a ReadWriteTransfer OWD object was told they
+// could EDIT every record; an Edit-but-not-Delete user on a FullAccess OWD
+// object was told they could DELETE. Every prior fixture granted Read+Edit+
+// Delete together (e.g. EDITOR_PROFILE), which masked the bug.
+// =============================================================================
+
+// CR-RV6 #1 — READ-ONLY profile (allowRead:true, allowEdit/allowDelete:false,
+// no view/modify-all) on a PUBLIC Read/Write/Transfer OWD object. OWD
+// ReadWriteTransfer (rank 2) grants edit org-wide, so the FALSE-PERMISSIVE bug
+// made accessLevel:'edit' say "visible" even though the user holds only Read.
+const RV6_RWT_OBJ = 'CustomObject:Rv6RwtObj';
+const RV6_READONLY_PROFILE = 'Profile:Rv6ReadOnly';
+
+const rv6ReadOnlyOnRwtSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: RV6_RWT_OBJ,
+      apiName: 'Rv6RwtObj',
+      properties: { sharingModel: 'ReadWriteTransfer' },
+    }),
+    makeNode({ id: RV6_READONLY_PROFILE, type: 'Profile', apiName: 'Rv6ReadOnly' }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: RV6_READONLY_PROFILE,
+      toId: RV6_RWT_OBJ,
+      edgeType: 'grantedBy',
+      // Read ONLY — no Edit, no Delete, no record bypass. Edit/Delete must be
+      // demoted; read must stay visible.
+      properties: {
+        allowRead: true,
+        allowEdit: false,
+        allowDelete: false,
+        viewAllRecords: false,
+        modifyAllRecords: false,
+      },
+    }),
+  ],
+};
+
+// CR-RV6 #2 — FullAccess OWD object (none existed in the suite before) + a
+// profile with Read+Edit but NOT Delete. OWD FullAccess (rank 3) grants delete
+// org-wide, so the bug made accessLevel:'delete' say "visible" despite no
+// object Delete CRUD. accessLevel:'edit' on the SAME object must stay visible
+// (allowEdit present, FullAccess rank 3 >= edit rank 2) — the demotion is
+// delete-specific, not a blanket deny.
+const RV6_FULLACCESS_OBJ = 'CustomObject:Rv6FullAccessObj';
+const RV6_EDIT_NO_DELETE_PROFILE = 'Profile:Rv6EditNoDelete';
+
+const rv6FullAccessEditNoDeleteSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: RV6_FULLACCESS_OBJ,
+      apiName: 'Rv6FullAccessObj',
+      properties: { sharingModel: 'FullAccess' },
+    }),
+    makeNode({
+      id: RV6_EDIT_NO_DELETE_PROFILE,
+      type: 'Profile',
+      apiName: 'Rv6EditNoDelete',
+    }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: RV6_EDIT_NO_DELETE_PROFILE,
+      toId: RV6_FULLACCESS_OBJ,
+      edgeType: 'grantedBy',
+      properties: {
+        allowRead: true,
+        allowEdit: true,
+        allowDelete: false,
+        viewAllRecords: false,
+        modifyAllRecords: false,
+      },
+    }),
+  ],
+};
+
+// CR-RV6 #3 — grant-edge Modify-All variant: a PRIVATE object + a profile with
+// NO plain CRUD bits but modifyAllRecords:true (object "Modify All"). The new
+// write predicate's modifyAllRecords branch must satisfy the edit/delete
+// precondition even with allowRead/allowEdit/allowDelete all false, mirroring
+// hasObjectReadAccess's bypass handling.
+const RV6_MAREC_OBJ = 'CustomObject:Rv6ModifyAllRecObj';
+const RV6_MAREC_PROFILE = 'Profile:Rv6ModifyAllRec';
+
+const rv6ModifyAllRecordsGrantSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: RV6_MAREC_OBJ,
+      apiName: 'Rv6ModifyAllRecObj',
+      properties: { sharingModel: 'Private' },
+    }),
+    makeNode({ id: RV6_MAREC_PROFILE, type: 'Profile', apiName: 'Rv6ModifyAllRec' }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: RV6_MAREC_PROFILE,
+      toId: RV6_MAREC_OBJ,
+      edgeType: 'grantedBy',
+      properties: {
+        allowRead: false,
+        allowEdit: false,
+        allowDelete: false,
+        modifyAllRecords: true,
+      },
+    }),
+  ],
+};
+
 beforeAll(async () => {
   tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-why-cant-see-'));
   const dbPath = join(tempDir, 'why-cant-see.db');
@@ -534,15 +1217,31 @@ beforeAll(async () => {
     owdControlledByCampaignSeed,
     permissionGrantSeed,
     ownerSharingRuleSeed,
+    nestedGroupOwnerRuleSeed,
     criteriaSharingRuleSeed,
+    guestSharingRuleSeed,
+    noGuestRuleSeed,
     owdUnknownSeed,
     roleHierarchySeed,
+    ownerSubordinateRuleSeed,
+    ownerPlainRoleRuleSeed,
+    ownerSubordinateReadRuleForLevelSeed,
+    ownerSubordinateTruncatedSeed,
     restrictionRuleSeed,
+    hardDenyRestrictionSeed,
     godModeSeed,
     godModeRestrictedSeed,
     modifyAllSeed,
     createWithRtSeed,
     createNoRtObjSeed,
+    pubReadWithGrantSeed,
+    pubRwtWithGrantSeed,
+    privateCrudOnlySeed,
+    privateViewAllSeed,
+    controlledByParentSeed,
+    rv6ReadOnlyOnRwtSeed,
+    rv6FullAccessEditNoDeleteSeed,
+    rv6ModifyAllRecordsGrantSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -560,7 +1259,14 @@ afterAll(async () => {
 });
 
 describe('whyCantUserSeeRecordHandler', () => {
-  it('returns visible after OWD Read; short-circuits the cascade', async () => {
+  it('Public-Read OWD does NOT grant visibility without object Read CRUD (object Read is a precondition)', async () => {
+    // CR-03 (corrected H1): a Public-Read OWD alone does NOT make a record
+    // visible. `Profile:Standard User` is never seeded and has zero object
+    // permission on READ_OBJ, so the object-Read PRECONDITION (plane A) is
+    // unmet and the answer must be `restricted` — NOT the old (wrong) OWD-alone
+    // `visible`. Telling a zero-permission user they can see any Public-Read
+    // object is a catastrophic wrong access answer; this pins the two-plane
+    // model instead.
     const result = await whyCantUserSeeRecordHandler(ctx, {
       componentId: READ_OBJ,
       userContext: { profileId: 'Profile:Standard User' },
@@ -568,34 +1274,54 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const { verdict, reasoning } = result.value.data;
-    expect(verdict).toBe('visible');
-    expect(reasoning.length).toBe(1);
-    expect(reasoning[0]?.stage).toBe('OWD');
-    expect(reasoning[0]?.verdict).toBe('visible');
-    expect(reasoning[0]?.reason).toContain('Read');
+    expect(verdict).toBe('restricted');
+    const grant = reasoning.find((s) => s.stage === 'PermissionGrant');
+    expect(grant?.verdict).toBe('restricted');
+    expect(grant?.reason).toMatch(/object Read|precondition/i);
     // The vaultState carries the manifest hash and timestamp.
     expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
   });
 
-  it('classifies OWD ReadWriteTransfer as visible (Public Read/Write/Transfer)', async () => {
+  it('Public-Read OWD grants visibility when the user HAS object Read CRUD', async () => {
+    // CR-03 PASS-AFTER: with the object-Read precondition satisfied (a seeded
+    // profile holding object Read), the public OWD legitimately makes the record
+    // visible via the OWD step.
     const result = await whyCantUserSeeRecordHandler(ctx, {
-      componentId: RWT_OBJ,
-      userContext: { profileId: 'Profile:Standard User' },
+      componentId: PUB_READ_OBJ,
+      userContext: { profileId: READER_PROFILE },
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const { verdict, reasoning } = result.value.data;
-    // ReadWriteTransfer (the Lead/Case OWD) is a PUBLIC read-or-better setting —
-    // it must short-circuit visible, NOT fall through to 'unrecognised OWD value'.
     expect(verdict).toBe('visible');
-    expect(reasoning[0]?.stage).toBe('OWD');
-    expect(reasoning[0]?.verdict).toBe('visible');
+    const owd = reasoning.find((s) => s.stage === 'OWD');
+    expect(owd?.verdict).toBe('visible');
+    expect(owd?.reason).toContain('Read');
+  });
+
+  it('classifies OWD ReadWriteTransfer as visible (Public Read/Write/Transfer) when object Read is present', async () => {
+    // CR-03: ReadWriteTransfer (the Lead/Case OWD) is a PUBLIC read-or-better
+    // setting — it must read as visible, NOT 'unrecognised OWD value'. The user
+    // here HAS object Read CRUD (precondition satisfied), so the public OWD
+    // grants record visibility.
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: PUB_RWT_OBJ,
+      userContext: { profileId: EDITOR_PROFILE },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, reasoning } = result.value.data;
+    expect(verdict).toBe('visible');
+    const owd = reasoning.find((s) => s.stage === 'OWD');
+    expect(owd?.verdict).toBe('visible');
   });
 
   it('classifies OWD ControlledByCampaign as restricted at the OWD stage', async () => {
+    // CR-03: the supplied profile HAS object Read (precondition met), so the OWD
+    // stage is reached and its CLASSIFICATION is what is tested.
     const result = await whyCantUserSeeRecordHandler(ctx, {
       componentId: CBC_OBJ,
-      userContext: { profileId: 'Profile:Standard User' },
+      userContext: { profileId: CBC_READER_PROFILE },
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -652,31 +1378,56 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(result.value.data.verdict).not.toBe('visible');
   });
 
-  it('object-CRUD hard gate: a supplied profile with no object grant and no god-mode is restricted, not unknown (bug 21)', async () => {
-    // Profile:Mortal has no grantedBy edge on the Private GodModeObj and no
-    // View/Modify-All Data. Object access is a hard pre-condition for record
+  it('object-Read precondition hard-deny: a supplied profile with no object grant and no god-mode is restricted, not unknown (bug 21)', async () => {
+    // CR-03: Profile:NoAccess has no grantedBy edge on the Private GodModeObj and
+    // no View/Modify-All Data. Object Read is a hard PRECONDITION for record
     // access, so the unknown record-level sharing tail (territory / manual /
     // sets / teams) cannot grant it — the answer is a definitive `restricted`,
-    // not `unknown`.
+    // not `unknown`. The PermissionGrant step cites the missing object-Read.
     const result = await whyCantUserSeeRecordHandler(ctx, {
       componentId: GODMODE_OBJ,
-      userContext: { profileId: 'Profile:Mortal' },
+      userContext: { profileId: 'Profile:NoAccess' },
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const { verdict, reasoning } = result.value.data;
-    expect(
-      reasoning.find((s) => s.stage === 'PermissionGrant')?.verdict,
-    ).toBe('restricted');
-    expect(
-      reasoning.find((s) => s.stage === 'SystemPermission')?.verdict,
-    ).toBe('restricted');
-    // The record-level tail is still surfaced as unknown for manual review…
-    expect(
-      reasoning.find((s) => s.stage === 'ManualSharing')?.verdict,
-    ).toBe('unknown');
-    // …but the aggregate is restricted: object access is denied, sharing moot.
+    // …the aggregate is restricted: object Read is absent, sharing moot.
     expect(verdict).toBe('restricted');
+    const grant = reasoning.find((s) => s.stage === 'PermissionGrant');
+    expect(grant?.verdict).toBe('restricted');
+    expect(grant?.reason).toMatch(/object Read|precondition/i);
+    // The hard deny no longer SHORT-CIRCUITS the cascade: the full reasoning
+    // chain is still walked and returned (OWD through the unknown tail) so the
+    // admin sees every stage that was evaluated. None of those downstream
+    // stages can OVERTURN the hard-deny `restricted` verdict.
+    expect(reasoning.length).toBeGreaterThan(1);
+    expect(reasoning[0]?.stage).toBe('OWD');
+  });
+
+  it('hard-deny still surfaces the RestrictionRule stage: an active restriction rule on the object appears in reasoning even when object CRUD is hard-denied (visibility-honesty)', async () => {
+    // CI eval contract (cases.analytical.ci.json, caseClass visibility-honesty):
+    // Profile:HardDenyUser has no object grant on the Private
+    // HardDenyRestrictObj, so the object-CRUD precondition hard-denies and the
+    // verdict is `restricted`. The object carries an active RestrictionRule, and
+    // an honest reasoning chain MUST surface that RestrictionRule stage — the
+    // hard deny decides the verdict, but it does not erase the rest of the
+    // evaluation. (Regression: a prior short-circuit returned a single
+    // PermissionGrant step and the RestrictionRule stage was lost.)
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: HARDDENY_RESTRICTION_OBJ,
+      userContext: { profileId: 'Profile:HardDenyUser' },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, reasoning } = result.value.data;
+    expect(verdict).toBe('restricted');
+    const stages = reasoning.map((s) => s.stage);
+    // The RestrictionRule stage is present despite the hard deny.
+    expect(stages).toContain('RestrictionRule');
+    // The hard deny is still explained on the PermissionGrant stage.
+    const grant = reasoning.find((s) => s.stage === 'PermissionGrant');
+    expect(grant?.verdict).toBe('restricted');
+    expect(grant?.reason).toMatch(/object Read|precondition/i);
   });
 
   it('downgrades god-mode to unknown when an active restriction rule can still filter the user', async () => {
@@ -714,6 +1465,153 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(ownerSteps[0]?.verdict).toBe('visible');
     expect(ownerSteps[0]?.reason).toContain(OWNER_RULE_ID);
     expect(ownerSteps[0]?.reason).toContain(SALES_GROUP);
+  });
+
+  it('CR-CAP-12: a rule granting an ENCLOSING group reaches a user in a NESTED member group', async () => {
+    // The user is a literal member ONLY of Group:Nested_PG. The owner rule
+    // grants Group:Enclosing_PG, which CONTAINS Nested_PG via hasMember. The
+    // literal membership set would miss the grant (restricted); the upward
+    // hasMember expansion folds Enclosing_PG in → visible.
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: NESTED_RULE_OBJ,
+      userContext: { groupIds: [NESTED_PG] },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, reasoning } = result.value.data;
+    expect(verdict).toBe('visible');
+    const ownerSteps = reasoning.filter((s) => s.stage === 'OwnerSharingRule');
+    expect(ownerSteps.length).toBe(1);
+    expect(ownerSteps[0]?.verdict).toBe('visible');
+    expect(ownerSteps[0]?.reason).toContain(ENCLOSING_PG);
+  });
+
+  // --- CR-CAP-05: owner sharing rule "Roles and Subordinates" subtree match ---
+
+  it('CR-CAP-05 (1): a SUBORDINATE role is GRANTED by a roleAndSubordinates owner rule', async () => {
+    // The core regression. Cap_Rep is two rungs below the rule's sharedTo
+    // target Cap_VP. Before the fix the OwnerSharingRule step matched by EXACT
+    // role membership, so Cap_Rep (not equal Cap_VP) was wrongly `restricted`
+    // and the aggregate not `visible`. After the fix the rule reaches every
+    // subordinate, so the step is `visible` and the aggregate `visible`.
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: SUB_OBJ,
+      userContext: { roleId: SUB_REP_ROLE },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, reasoning } = result.value.data;
+    const ownerSteps = reasoning.filter((s) => s.stage === 'OwnerSharingRule');
+    expect(ownerSteps.length).toBe(1);
+    expect(ownerSteps[0]?.verdict).toBe('visible');
+    expect(ownerSteps[0]?.reason).toContain(SUB_RULE_ID);
+    expect(ownerSteps[0]?.reason).toContain(SUB_VP_ROLE);
+    expect(verdict).toBe('visible');
+  });
+
+  it('CR-CAP-05 (2): the NAMED role itself is still granted by a roleAndSubordinates rule', async () => {
+    // Base case — covered by membership.has(target). Passes before AND after.
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: SUB_OBJ,
+      userContext: { roleId: SUB_VP_ROLE },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ownerSteps = result.value.data.reasoning.filter(
+      (s) => s.stage === 'OwnerSharingRule',
+    );
+    expect(ownerSteps.length).toBe(1);
+    expect(ownerSteps[0]?.verdict).toBe('visible');
+    expect(result.value.data.verdict).toBe('visible');
+  });
+
+  it('CR-CAP-05 (3): a PLAIN role owner rule stays EXACT — a subordinate is NOT granted', async () => {
+    // False-grant guard. PlainRule targets Cap_VP with NO inheritance marker,
+    // so a subordinate (Cap_Rep) must NOT leak into the match. restricted
+    // before AND after.
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: PLAIN_ROLE_OBJ,
+      userContext: { roleId: SUB_REP_ROLE },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ownerSteps = result.value.data.reasoning.filter(
+      (s) => s.stage === 'OwnerSharingRule',
+    );
+    expect(ownerSteps.length).toBe(1);
+    expect(ownerSteps[0]?.verdict).toBe('restricted');
+  });
+
+  it('CR-CAP-05 (4): a role OUTSIDE the subtree is still DENIED', async () => {
+    // Cap_Service_Agent is not Cap_VP and not a subordinate of it.
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: SUB_OBJ,
+      userContext: { roleId: SERVICE_AGENT_ROLE },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, reasoning } = result.value.data;
+    const ownerSteps = reasoning.filter((s) => s.stage === 'OwnerSharingRule');
+    expect(ownerSteps.length).toBe(1);
+    expect(ownerSteps[0]?.verdict).toBe('restricted');
+    expect(verdict).not.toBe('visible');
+  });
+
+  it('CR-CAP-05 (5): an INCOMPLETE role tree downgrades the non-match to UNKNOWN, not restricted', async () => {
+    // Honesty obligation. The rule targets subordinates of Cap_VP, and the user
+    // Cap_Rep_Trunc really IS a subordinate — but the intermediate role
+    // Cap_Mid_Missing was not retrieved, so the upward walk truncates before
+    // reaching Cap_VP and the (real) ancestor match is MISSED. The
+    // inheritance-gated non-match on a truncated chain must downgrade to
+    // `unknown` (never a confident false-deny), name the target role, and point
+    // to a refresh — NOT report `restricted`.
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: TRUNC_OBJ,
+      userContext: { roleId: TRUNC_REP_ROLE },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, reasoning } = result.value.data;
+    const ownerSteps = reasoning.filter((s) => s.stage === 'OwnerSharingRule');
+    expect(ownerSteps.length).toBe(1);
+    expect(ownerSteps[0]?.verdict).toBe('unknown');
+    expect(ownerSteps[0]?.reason).toContain(TRUNC_TARGET_ROLE);
+    expect(ownerSteps[0]?.reason).toContain(TRUNC_REP_ROLE);
+    expect(ownerSteps[0]?.reason).toMatch(/refresh|coverage/i);
+    // No false-deny: the aggregate must not be `restricted`.
+    expect(verdict).not.toBe('restricted');
+  });
+
+  it('CR-CAP-05 (6): the subordinate match composes with the access-level gate', async () => {
+    // A Read rule reaches the subordinate Cap_Rep, so `read` is visible but
+    // `edit` is restricted with the "grants only Read" reason — the inheritance
+    // change did not bypass ruleAccessSatisfiesLevel.
+    const read = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: SUB_EDIT_OBJ,
+      accessLevel: 'read',
+      userContext: { roleId: SUB_REP_ROLE },
+    });
+    expect(read.ok).toBe(true);
+    if (!read.ok) return;
+    const readOwner = read.value.data.reasoning.filter(
+      (s) => s.stage === 'OwnerSharingRule',
+    );
+    expect(readOwner.length).toBe(1);
+    expect(readOwner[0]?.verdict).toBe('visible');
+
+    const edit = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: SUB_EDIT_OBJ,
+      accessLevel: 'edit',
+      userContext: { roleId: SUB_REP_ROLE },
+    });
+    expect(edit.ok).toBe(true);
+    if (!edit.ok) return;
+    const editOwner = edit.value.data.reasoning.filter(
+      (s) => s.stage === 'OwnerSharingRule',
+    );
+    expect(editOwner.length).toBe(1);
+    expect(editOwner[0]?.verdict).toBe('restricted');
+    expect(editOwner[0]?.reason).toMatch(/only Read|grants only/i);
   });
 
   it('returns unknown for a CriteriaSharingRule and surfaces the booleanFilter', async () => {
@@ -766,6 +1664,41 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(accountTeams?.verdict).toBe('unknown');
   });
 
+  it('CR-CAP-16: a GUEST sharing rule surfaces an unknown TerritoryAndGuestRules step with rule id / site / predicate', async () => {
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: GUEST_OBJ,
+      userContext: { groupIds: ['Group:ClientPortal'] },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, reasoning } = result.value.data;
+    const tg = reasoning.filter((s) => s.stage === 'TerritoryAndGuestRules');
+    expect(tg.length).toBe(1);
+    expect(tg[0]?.verdict).toBe('unknown');
+    // Declared detail surfaced: rule id, site name, and predicate.
+    expect(tg[0]?.reason).toContain(GUEST_RULE_ID);
+    expect(tg[0]?.reason).toContain('ClientPortal');
+    expect(tg[0]?.reason).toContain('1 AND 2');
+    // Aggregate stays unknown — the rule's applicability is record-level.
+    expect(verdict).toBe('unknown');
+  });
+
+  it('CR-CAP-16: an object with NO guest/territory rules preserves the absence disclosure as unknown, not restricted', async () => {
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: NO_GUEST_OBJ,
+      userContext: { roleId: SALES_REP_ROLE },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const tg = result.value.data.reasoning.filter(
+      (s) => s.stage === 'TerritoryAndGuestRules',
+    );
+    expect(tg.length).toBe(1);
+    expect(tg[0]?.verdict).toBe('unknown');
+    expect(tg[0]?.verdict).not.toBe('restricted');
+    expect(tg[0]?.reason).toMatch(/no territory or guest/i);
+  });
+
   it('short-circuits with a single OWD step when sharingModel is null', async () => {
     const result = await whyCantUserSeeRecordHandler(ctx, {
       componentId: MDT_OBJ,
@@ -816,17 +1749,109 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(roleStep?.reason).toContain('2 level');
   });
 
+  // --- CR-03: two-plane access model (object-Read precondition + sharing) ---
+
+  it('Public Read/Write/Transfer OWD does NOT grant visibility without object Read (precondition)', async () => {
+    // CR-03 (H1): the same precondition gate applies to every public OWD, not
+    // just Public-Read. A zero-permission user on a ReadWriteTransfer object is
+    // `restricted`, not `visible`.
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: RWT_OBJ,
+      userContext: { profileId: 'Profile:Standard User' },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.verdict).toBe('restricted');
+    const grant = result.value.data.reasoning.find((s) => s.stage === 'PermissionGrant');
+    expect(grant?.verdict).toBe('restricted');
+    expect(grant?.reason).toMatch(/object Read|precondition/i);
+  });
+
+  it('H2: object Edit/Delete on a PRIVATE object is NOT a record-visibility grant', async () => {
+    // CR-03 (H2): plain object Edit/Delete satisfies the object precondition
+    // (Edit/Delete imply Read) but on a Private object with no record-sharing
+    // grant it must NEVER read as `visible`. The honest answer is `unknown` —
+    // unmodeled manual sharing / teams / sets could still grant it (the
+    // load-bearing honesty distinction: "we can't see a grant" != "no access").
+    for (const level of ['read', 'edit', 'delete'] as const) {
+      const r = await whyCantUserSeeRecordHandler(ctx, {
+        componentId: PRIV_CRUD_OBJ,
+        accessLevel: level,
+        userContext: { profileId: CRUD_ONLY_PROFILE },
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      // Never `visible` from plain object CRUD on a Private object…
+      expect(r.value.data.verdict).not.toBe('visible');
+      // …and honest `unknown`, not a flat `restricted` (object Read precondition
+      // met → unmodeled sharing tail demotes to unknown).
+      expect(r.value.data.verdict).toBe('unknown');
+      const grant = r.value.data.reasoning.find((s) => s.stage === 'PermissionGrant');
+      expect(grant?.verdict).toBe('restricted');
+      expect(grant?.reason).toMatch(/record visibility depends on OWD \/ sharing/);
+    }
+  });
+
+  it('object View All records (viewAllRecords) on a Private object grants read (all-records bypass)', async () => {
+    // CR-03: object "View All" records IS a record-sharing bypass scoped to all
+    // records — visible even on a Private OWD.
+    const r = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: PRIV_VIEWALL_OBJ,
+      userContext: { profileId: VIEWALL_PROFILE },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.verdict).toBe('visible');
+    const grant = r.value.data.reasoning.find((s) => s.stage === 'PermissionGrant');
+    expect(grant?.verdict).toBe('visible');
+    expect(grant?.reason).toMatch(/View All|Modify All|all records/i);
+  });
+
+  it('object View All records (read-only) on a Private object does NOT grant edit', async () => {
+    // viewAllRecords is read-only — it must not read as edit-capable on a
+    // Private object (no edit bypass), so edit is not `visible`.
+    const r = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: PRIV_VIEWALL_OBJ,
+      accessLevel: 'edit',
+      userContext: { profileId: VIEWALL_PROFILE },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.verdict).not.toBe('visible');
+  });
+
+  it('ControlledByParent with object Read but no modeled sharing is honest unknown, not restricted', async () => {
+    // CR-03 (honesty): record access on a detail object derives from the MASTER
+    // object's sharing, which v1.x cannot walk. With the object-Read precondition
+    // satisfied but no modeled bypass/grant, the answer must be `unknown` — never
+    // a flat `restricted` that would tell an admin the user definitely cannot see
+    // the record.
+    const r = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: CBP_OBJ,
+      userContext: { profileId: CBP_READER_PROFILE },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.verdict).toBe('unknown');
+    const owd = r.value.data.reasoning.find((s) => s.stage === 'OWD');
+    expect(owd?.verdict).toBe('restricted'); // ControlledByParent groups as restricted at OWD
+  });
+
   // --- accessLevel: read vs edit vs delete (P11-ACCESS-edit-verdict) ---
 
   it('a Read OWD is visible for read but NOT for edit (read-only is not edit-capable)', async () => {
+    // CR-03: the supplied profile HAS object Read/Edit CRUD (precondition met),
+    // so the OWD read/edit ladder is what is tested. A Read OWD makes the record
+    // read-visible but the OWD does not grant edit org-wide; with only plain
+    // object CRUD (no record-sharing bypass / grant) edit is NOT visible.
     const read = await whyCantUserSeeRecordHandler(ctx, {
-      componentId: READ_OBJ,
-      userContext: { profileId: 'Profile:Standard User' },
+      componentId: PUB_READ_OBJ,
+      userContext: { profileId: READER_PROFILE },
     });
     const edit = await whyCantUserSeeRecordHandler(ctx, {
-      componentId: READ_OBJ,
+      componentId: PUB_READ_OBJ,
       accessLevel: 'edit',
-      userContext: { profileId: 'Profile:Standard User' },
+      userContext: { profileId: READER_PROFILE },
     });
     expect(read.ok && edit.ok).toBe(true);
     if (!read.ok || !edit.ok) return;
@@ -838,15 +1863,19 @@ describe('whyCantUserSeeRecordHandler', () => {
   });
 
   it('a ReadWrite (ReadWriteTransfer) OWD is visible for edit but NOT for delete', async () => {
+    // CR-03: the supplied profile HAS object Read/Edit/Delete CRUD (precondition
+    // met), so the OWD edit/delete ladder is what is tested. A ReadWrite OWD
+    // makes edit visible but delete needs FullAccess org-wide; with only plain
+    // object CRUD (no record-sharing bypass) delete is NOT visible.
     const edit = await whyCantUserSeeRecordHandler(ctx, {
-      componentId: RWT_OBJ,
+      componentId: PUB_RWT_OBJ,
       accessLevel: 'edit',
-      userContext: { profileId: 'Profile:Standard User' },
+      userContext: { profileId: EDITOR_PROFILE },
     });
     const del = await whyCantUserSeeRecordHandler(ctx, {
-      componentId: RWT_OBJ,
+      componentId: PUB_RWT_OBJ,
       accessLevel: 'delete',
-      userContext: { profileId: 'Profile:Standard User' },
+      userContext: { profileId: EDITOR_PROFILE },
     });
     expect(edit.ok && del.ok).toBe(true);
     if (!edit.ok || !del.ok) return;
@@ -858,7 +1887,15 @@ describe('whyCantUserSeeRecordHandler', () => {
   });
 
   it('ViewAllData grants read god-mode but NOT edit; ModifyAllData grants edit AND delete', async () => {
-    // ViewAllData is read-only.
+    // ViewAllData is read-only. CR-RV6: GOD_PROFILE holds ViewAllData but NO
+    // object Edit CRUD on GODMODE_OBJ, so for accessLevel:'edit' the now
+    // operation-aware precondition (systemPermsForLevel('edit') = ModifyAllData
+    // only) hard-stops at the precondition with `restricted` BEFORE the cascade
+    // — the SystemPermission stage is no longer reached (stronger than the old
+    // behavior, which let it through the read precondition then reported the
+    // SystemPermission step `restricted`). The load-bearing invariant — read
+    // god-mode but NOT edit — is preserved and the precondition reason names the
+    // missing object Edit.
     const vadEdit = await whyCantUserSeeRecordHandler(ctx, {
       componentId: GODMODE_OBJ,
       accessLevel: 'edit',
@@ -866,9 +1903,24 @@ describe('whyCantUserSeeRecordHandler', () => {
     });
     expect(vadEdit.ok).toBe(true);
     if (!vadEdit.ok) return;
-    const sysVad = vadEdit.value.data.reasoning.find((s) => s.stage === 'SystemPermission');
-    expect(sysVad?.verdict).toBe('restricted');
+    expect(vadEdit.value.data.verdict).toBe('restricted');
+    const vadReasons = vadEdit.value.data.reasoning.map((s) => s.reason).join(' | ');
+    expect(vadReasons).toMatch(/no object Edit permission/i);
     expect(vadEdit.value.data.verdict).not.toBe('visible');
+
+    // Sanity: the SAME ViewAllData profile DOES grant read god-mode on the same
+    // Private object (the precondition passes for read, the SystemPermission
+    // stage visibles).
+    const vadRead = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: GODMODE_OBJ,
+      accessLevel: 'read',
+      userContext: { profileId: GOD_PROFILE },
+    });
+    expect(vadRead.ok).toBe(true);
+    if (!vadRead.ok) return;
+    expect(vadRead.value.data.verdict).toBe('visible');
+    const sysRead = vadRead.value.data.reasoning.find((s) => s.stage === 'SystemPermission');
+    expect(sysRead?.verdict).toBe('visible');
 
     // ModifyAllData is full god-mode → edit and delete both visible.
     for (const lvl of ['edit', 'delete'] as const) {
@@ -933,6 +1985,17 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(r.value.data.verdict).toBe('restricted');
     const grant = r.value.data.reasoning.find((s) => s.stage === 'PermissionGrant');
     expect(grant?.verdict).toBe('restricted');
+    // RV1: the reason must match the (correct) `restricted` verdict — it must
+    // say the user has no object Create permission, NOT claim create perm is
+    // present nor that record visibility DEPENDS ON OWD / sharing (create is
+    // never OWD-gated). The evaluateCreateAccess wrapper legitimately appends
+    // "...NOT by OWD / sharing..." to explain create is off the sharing ladder,
+    // so the load-bearing negative assertion is the absence of the buggy
+    // "permission present" claim and the "depends on OWD / sharing" dependence.
+    expect(grant?.reason).toMatch(/no object Create permission/i);
+    expect(grant?.reason).not.toMatch(/depends on OWD \/ sharing/);
+    expect(grant?.reason).not.toMatch(/create permission present/i);
+    expect(grant?.reason).not.toMatch(/View All \/ Modify All/);
   });
 
   it('create is unknown when the object has record types but no visibility data', async () => {
@@ -973,6 +2036,123 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(r.value.data.verdict).toBe('visible');
     const sys = r.value.data.reasoning.find((s) => s.stage === 'SystemPermission');
     expect(sys?.verdict).toBe('visible');
+  });
+
+  // === CR-RV6: operation-aware object-CRUD precondition ======================
+  // The headline false-permissive class. Pre-fix the precondition only checked
+  // object READ regardless of accessLevel, so the OWD step (which visibles edit
+  // on a ReadWriteTransfer OWD and delete on a FullAccess OWD) won for an
+  // operation the user lacked the CRUD for.
+
+  it('CR-RV6: read-only profile on a ReadWriteTransfer OWD object is NOT visible for edit (false-permissive guard)', async () => {
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: RV6_RWT_OBJ,
+      accessLevel: 'edit',
+      userContext: { profileId: RV6_READONLY_PROFILE },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // PRE-FIX BUG: verdict was 'visible' — the tool told a read-only user they
+    // could EDIT every record on a ReadWriteTransfer OWD object.
+    expect(result.value.data.verdict).toBe('restricted');
+    // The precondition-failure reason must name the missing object EDIT bit, not
+    // object Read.
+    const reasons = result.value.data.reasoning.map((s) => s.reason).join(' | ');
+    expect(reasons).toMatch(/no object Edit permission/i);
+    expect(reasons).not.toMatch(/no object Read permission/i);
+  });
+
+  it('CR-RV6: that SAME read-only profile is STILL visible for read (no over-demotion regression)', async () => {
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: RV6_RWT_OBJ,
+      accessLevel: 'read',
+      userContext: { profileId: RV6_READONLY_PROFILE },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // allowRead satisfies the read precondition; OWD ReadWriteTransfer rank 2 >=
+    // read rank 1 → read stays visible.
+    expect(result.value.data.verdict).toBe('visible');
+  });
+
+  it('CR-RV6: Edit-but-not-Delete profile on a FullAccess OWD object is NOT visible for delete (false-permissive guard)', async () => {
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: RV6_FULLACCESS_OBJ,
+      accessLevel: 'delete',
+      userContext: { profileId: RV6_EDIT_NO_DELETE_PROFILE },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // PRE-FIX BUG: verdict was 'visible' — OWD FullAccess rank 3 >= delete rank
+    // 3, and the read-only precondition passed, so delete falsely visibled.
+    expect(result.value.data.verdict).toBe('restricted');
+    const reasons = result.value.data.reasoning.map((s) => s.reason).join(' | ');
+    expect(reasons).toMatch(/no object Delete permission/i);
+    expect(reasons).not.toMatch(/no object Read permission/i);
+  });
+
+  it('CR-RV6: that SAME Edit-but-not-Delete profile IS visible for edit on the FullAccess object (demotion is delete-specific)', async () => {
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: RV6_FULLACCESS_OBJ,
+      accessLevel: 'edit',
+      userContext: { profileId: RV6_EDIT_NO_DELETE_PROFILE },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // allowEdit present, FullAccess rank 3 >= edit rank 2 → edit visible.
+    expect(result.value.data.verdict).toBe('visible');
+  });
+
+  it('CR-RV6: true-positive preserved — Edit+Read profile on ReadWriteTransfer is visible for edit (regression guard for EDITOR_PROFILE)', async () => {
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: PUB_RWT_OBJ,
+      accessLevel: 'edit',
+      userContext: { profileId: EDITOR_PROFILE },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // EDITOR_PROFILE holds allowEdit:true; the operation-aware precondition must
+    // still ADMIT legitimate edits.
+    expect(result.value.data.verdict).toBe('visible');
+  });
+
+  it('CR-RV6: object Modify-All grant-edge satisfies the edit AND delete precondition with no plain CRUD bits', async () => {
+    for (const lvl of ['edit', 'delete'] as const) {
+      const result = await whyCantUserSeeRecordHandler(ctx, {
+        componentId: RV6_MAREC_OBJ,
+        accessLevel: lvl,
+        userContext: { profileId: RV6_MAREC_PROFILE },
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      // modifyAllRecords:true bypasses sharing for every level — the new write
+      // predicate's bypass branch must let the precondition pass (NOT hard-deny
+      // for missing allowEdit/allowDelete), then the PermissionGrant stage
+      // visibles via grantSatisfiesRecordVisible.
+      expect(result.value.data.verdict).toBe('visible');
+    }
+  });
+
+  it('CR-RV6: role/group-only context on a PRIVATE object stays unknown for edit (operation-aware precondition must NOT hard-deny)', async () => {
+    // The load-bearing honesty guard: with NO profileId / permissionSetIds object
+    // perms are UNDECIDABLE, so the operation-aware precondition is SKIPPED
+    // (profileOrPermSetSupplied is false) — it must NOT hard-deny. On a Private
+    // OWD object the OWD does not visible edit, the cascade runs through its
+    // unmodeled stages, and the answer is an honest `unknown` — NOT a hard
+    // `restricted`. (RV6_MAREC_OBJ is Private; its only grant edge is to a
+    // Profile, which the role-only context does not match, so no grant fires.)
+    const result = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: RV6_MAREC_OBJ,
+      accessLevel: 'edit',
+      userContext: { roleId: 'Role:Whatever' },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.verdict).toBe('unknown');
+    // Specifically: the answer is NOT the precondition hard-deny.
+    expect(result.value.data.verdict).not.toBe('restricted');
+    const reasons = result.value.data.reasoning.map((s) => s.reason).join(' | ');
+    expect(reasons).not.toMatch(/no object Edit permission on the supplied profile/i);
   });
 });
 
@@ -1051,32 +2231,39 @@ describe('whyCantUserSeeRecordInputSchema', () => {
 
 describe('whyCantUserSeeRecordHandler — restriction rules and PSG boundaries', () => {
   it('surfaces RestrictionRule stage as unknown when rules exist on the object', async () => {
+    // CR-03: the supplied permission set has object Read on RestrictionObj, so
+    // the object-Read precondition passes and the cascade reaches the
+    // RestrictionRule stage. With object Read present, a Private OWD, and no
+    // modeled bypass / sharing grant, the honest aggregate is `unknown` —
+    // a restriction rule can only further filter access, never grant it, and
+    // unmodeled sharing could still apply.
     const result = await whyCantUserSeeRecordHandler(ctx, {
       componentId: RESTRICTION_OBJ,
-      userContext: { profileId: 'Profile:System Administrator' },
+      userContext: { permissionSetIds: [RESTRICTION_PS] },
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    // The supplied admin profile has no object grant on RestrictionObj and no
-    // View/Modify-All, so object access is denied (hard gate) → `restricted`.
-    // The RestrictionRule stage is still surfaced as `unknown` for review —
-    // a restriction rule can only further filter access, never grant it.
-    expect(result.value.data.verdict).toBe('restricted');
+    expect(result.value.data.verdict).toBe('unknown');
     const rr = result.value.data.reasoning.find((s) => s.stage === 'RestrictionRule');
     expect(rr?.verdict).toBe('unknown');
     expect(rr?.reason).toContain('restriction rule');
   });
 
-  it('surfaces PermissionSetGroup boundary when groups exist in vault', async () => {
+  it('reports PermissionSetGroup as informational when groups exist but none are assigned', async () => {
+    // CR-CAP-04: PSG membership is now MODELED. The user carries only a plain
+    // permission set (no PSG), so the PSG step is informational `restricted`
+    // (the old always-`unknown` stub is gone — membership is no longer an
+    // undecidable gap), and names that no assigned PSG was supplied.
     const result = await whyCantUserSeeRecordHandler(ctx, {
       componentId: RESTRICTION_OBJ,
-      userContext: { permissionSetIds: ['PermissionSet:Some_PS'] },
+      userContext: { permissionSetIds: [RESTRICTION_PS] },
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const psg = result.value.data.reasoning.find((s) => s.stage === 'PermissionSetGroup');
-    expect(psg?.verdict).toBe('unknown');
+    expect(psg?.verdict).toBe('restricted');
     expect(psg?.reason).toContain('permission set group');
+    expect(psg?.reason).toMatch(/none were supplied/i);
   });
 });
 

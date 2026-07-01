@@ -84,10 +84,12 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
   TrustSummary,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listEdges, listNodesByType } from '@sf-intelligence/graph';
+import { countNodesByType, listEdges, listNodesByType } from '@sf-intelligence/graph';
+import { detectPiiClassification } from '@sf-intelligence/patterns';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
@@ -95,6 +97,10 @@ import type { Context } from '../server.js';
 
 import { coercePrefix } from './coerce-id.js';
 import { offlineTrust } from './coverage-trust.js';
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import { nodeScanLimit } from './scan-cap.js';
+
+const UNUSED_FIELDS_DEEP_TOOL = 'sfi.unused_fields_deep';
 
 /** Metadata families exercised by the eight-tier unused-field cross-walk. */
 const UNUSED_FIELDS_DEEP_REQUIRED_COVERAGE = [
@@ -134,8 +140,16 @@ const UNUSED_FIELDS_DEEP_DEFAULT_LIMIT = 100;
 /** Keep the serialized response under the global ~45 KB MCP guard. Each entry
  *  carries the eight-tier detail, so the row `limit` alone can overflow. */
 const UNUSED_FIELDS_DEEP_BYTE_BUDGET = 36_000;
-/** Internal page-size cap on per-type `listNodesByType`. */
-const LIST_PAGE_SIZE = 500;
+/**
+ * Hard ceiling on a single `listNodesByType` page. The graph layer rejects
+ * `limit > 500`, so each page request is clamped here; `nodeScanLimit()` is
+ * env-overridable (`SFI_NODE_SCAN_LIMIT`) so a test can drive the multi-page
+ * offset loop without seeding 500+ nodes. `buildCorpora` pages each corpus type
+ * to EXHAUSTION so the cross-reference walk is complete (an incomplete referrer
+ * corpus would over-suppress, marking a referenced field "unused").
+ */
+const PAGE_CAP = 500;
+const pageSize = (): number => Math.min(nodeScanLimit(), PAGE_CAP);
 
 /**
  * The v1.4 frontend ComponentType set whose incoming `references`
@@ -196,6 +210,9 @@ export const unusedFieldsDeepInputSchema = z.object({
     .min(1)
     .max(UNUSED_FIELDS_DEEP_MAX_LIMIT)
     .optional(),
+  // CR-22: page cursor for walking the full unused-field list when truncated.
+  offset: z.number().int().min(0).optional(),
+  cursor: z.string().min(1).optional(),
 });
 
 export type UnusedFieldsDeepInput = z.infer<typeof unusedFieldsDeepInputSchema>;
@@ -226,6 +243,14 @@ export interface UnusedFieldDeepEntry {
   readonly invisibilityWarnings: readonly string[];
   readonly confidence: 'high' | 'medium' | 'low';
   readonly recommendedAction: string;
+  /**
+   * GROUP-A PII-safety: machine-readable PII/sensitive classification from the
+   * heuristic `detectPiiClassification` recognizer, present only when the field
+   * classifies as `pii` or `sensitive`. When present, `recommendedAction` is
+   * PREPENDED with a compliance escalation. HEURISTIC — absence is NOT a
+   * clearance, only the absence of a recognised signal.
+   */
+  readonly piiClassification?: 'pii' | 'sensitive';
 }
 
 /** Payload wrapped in the `McpResponse` envelope on success. */
@@ -239,6 +264,24 @@ export interface UnusedFieldsDeepOutput {
   readonly trust: TrustSummary;
   /** Present when the page was trimmed below `limit` to fit the response size. */
   readonly note?: string;
+  /**
+   * Page size applied to this response. Present ONLY on a PAGED response
+   * (`truncated` or a resumed `offset > 0`); omitted on a whole-fits no-cursor
+   * call so that response stays byte-identical to the pre-CR-22 shape.
+   */
+  readonly limit?: number;
+  /** Zero-based offset of the first returned field. Present only when paged (see `limit`). */
+  readonly offset?: number;
+  /** Offset to pass on the next call to fetch the following page. Present only when `truncated`. */
+  readonly nextOffset?: number;
+  /**
+   * CR-22 opaque continuation token, present ONLY when this page is truncated.
+   * Echo it back as `cursor` to resume. Absent on a complete page so an
+   * in-budget response is byte-identical to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
 }
 
 /**
@@ -365,10 +408,13 @@ interface ScanCorpora {
 }
 
 /**
- * Fetch every node in each of the cross-tier source types once. The
- * graph layer page-caps at 500 — if an org has more than 500 nodes of
- * a type the scan sees the first 500 only. Same honesty boundary
- * v2.0b's `unused_components` inherits.
+ * Fetch EVERY node in each of the cross-tier source types — paging each type to
+ * exhaustion, not just the first 500. The corpora drive a destructive "unused
+ * field" verdict (and the cross-reference corpora must be COMPLETE or a
+ * referenced field past row 500 would be wrongly suppressed as unused), so each
+ * type is walked fully. `countNodesByType` is the loop's belt cross-check; the
+ * common case (type under the cap) runs exactly one sub-cap page —
+ * byte-identical.
  */
 const buildCorpora = async (
   ctx: Context,
@@ -376,9 +422,17 @@ const buildCorpora = async (
   const fetchType = async (
     type: ComponentType,
   ): Promise<Result<readonly Node[], string>> => {
-    const r = await listNodesByType(ctx.graph, type, { limit: LIST_PAGE_SIZE });
-    if (!r.ok) return err(r.error.message);
-    return ok(r.value);
+    const total = await countNodesByType(ctx.graph, type);
+    if (!total.ok) return err(total.error.message);
+    const limit = pageSize();
+    const all: Node[] = [];
+    for (let offset = 0; ; offset += limit) {
+      const r = await listNodesByType(ctx.graph, type, { limit, offset });
+      if (!r.ok) return err(r.error.message);
+      all.push(...r.value);
+      if (r.value.length < limit || all.length >= total.value) break;
+    }
+    return ok(all);
   };
   const customFields = await fetchType('CustomField');
   if (!customFields.ok) return err(customFields.error);
@@ -654,32 +708,56 @@ const computeConfidence = (
 };
 
 /**
+ * GROUP-A PII-safety: compliance escalation prepended to the recommended
+ * action for any field the heuristic recognizer classifies `pii` / `sensitive`,
+ * so a PII / encrypted field NEVER reads as the bland "consider deletion"
+ * string. HEURISTIC — absence of this escalation is NOT a clearance.
+ */
+const PII_DELETION_ESCALATION =
+  'PII/encrypted field — deletion may be irreversible and compliance-relevant (FERPA/GDPR/PCI): require explicit data-retention sign-off and verify this is not the system of record before deleting.';
+
+/**
  * Build a per-field recommended action string. The tier drives the
- * verbiage; managed/standard fields surface as inventory-only.
+ * verbiage; managed/standard fields surface as inventory-only. When the
+ * field carries a `pii` / `sensitive` classification, the compliance
+ * escalation is PREPENDED so the bland deletion string never stands alone.
  */
 const recommendedActionFor = (
   confidence: 'high' | 'medium' | 'low',
   isCustom: boolean,
   isManaged: boolean,
+  node: Node,
 ): string => {
-  if (isManaged) {
-    return 'managed-package field — the vault cannot audit package-internal usage; inventory only.';
+  const base = ((): string => {
+    if (isManaged) {
+      return 'managed-package field — the vault cannot audit package-internal usage; inventory only.';
+    }
+    if (!isCustom) {
+      return 'standard Salesforce field — operationally unsafe to remove regardless of usage signals; inventory only.';
+    }
+    if (confidence === 'high') {
+      return 'field appears unused across all eight tiers; consider deletion after manual review of dynamic Apex / LWC / external integration paths the scanner cannot see.';
+    }
+    if (confidence === 'medium') {
+      return 'field appears unused but one or more invisibility warnings apply; manual review recommended before deletion.';
+    }
+    return 'inventory only.';
+  })();
+  const pii = detectPiiClassification(node).piiClassification;
+  if (pii === 'pii' || pii === 'sensitive') {
+    return `${PII_DELETION_ESCALATION} ${base}`;
   }
-  if (!isCustom) {
-    return 'standard Salesforce field — operationally unsafe to remove regardless of usage signals; inventory only.';
-  }
-  if (confidence === 'high') {
-    return 'field appears unused across all eight tiers; consider deletion after manual review of dynamic Apex / LWC / external integration paths the scanner cannot see.';
-  }
-  if (confidence === 'medium') {
-    return 'field appears unused but one or more invisibility warnings apply; manual review recommended before deletion.';
-  }
-  return 'inventory only.';
+  return base;
 };
 
 /**
  * Comparator for the deterministic per-field sort. `id` ASC so the
  * truncation point is stable across runs.
+ *
+ * This is already a STRICT TOTAL order (CR-22): `id` is the field's unique graph
+ * ComponentId (`CustomField:{Parent}.{Field}`), so no two distinct entries
+ * compare equal — id-ASC needs no additional tiebreak for a dup-free /
+ * skip-free offset resume.
  */
 const compareById = (a: UnusedFieldDeepEntry, b: UnusedFieldDeepEntry): number =>
   a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
@@ -829,6 +907,11 @@ export const unusedFieldsDeepHandler = async (
     if (!allClean) continue;
 
     const confidence = computeConfidence(isProtected);
+    const piiDetected = detectPiiClassification(field).piiClassification;
+    const piiClassification =
+      piiDetected === 'pii' || piiDetected === 'sensitive'
+        ? piiDetected
+        : undefined;
     entries.push({
       id: field.id,
       apiName,
@@ -841,7 +924,8 @@ export const unusedFieldsDeepHandler = async (
       checks,
       invisibilityWarnings: INVISIBILITY_WARNINGS,
       confidence,
-      recommendedAction: recommendedActionFor(confidence, isCustom, isManaged),
+      recommendedAction: recommendedActionFor(confidence, isCustom, isManaged, field),
+      ...(piiClassification !== undefined ? { piiClassification } : {}),
     });
   }
 
@@ -860,41 +944,74 @@ export const unusedFieldsDeepHandler = async (
   }
   const trust = offlineTrust(ctx, completenessForUnusedFieldsDeep(ctx));
 
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // The fingerprint covers every NARROWING arg — the resolved object scope plus
+  // the two exclude flags — so a token can't replay across a different
+  // scope/flag set. argsFingerprint already strips limit/offset/cursor.
+  const fingerprint = argsFingerprint({
+    ...(parentObjectFilter !== undefined ? { parentObjectFilter } : {}),
+    excludeManaged,
+    excludeStandard,
+  });
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: UNUSED_FIELDS_DEEP_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
   // Each entry carries the full eight-tier detail, so even the row `limit` page
-  // can exceed the response guard (a real org overflowed at ~118 KB). Trim the
-  // page further until the serialized data fits the byte budget; `byParentObject`
-  // / `byConfidence` / `totalCount` keep the UNFILTERED counts so the trim never
-  // understates how many unused fields exist.
-  const build = (n: number): UnusedFieldsDeepOutput => {
-    const fields = sorted.slice(0, n);
-    const byteTrimmed = n < limit && n < sorted.length;
-    return {
+  // can exceed the response guard (a real org overflowed at ~118 KB). paginate
+  // does slice + byte-trim + forward-progress + nextCursor in one pass; pass the
+  // existing 36 KB byteBudget so the per-page trim stays equivalent.
+  // `byParentObject` / `byConfidence` / `totalCount` keep the UNFILTERED counts
+  // so the trim never understates how many unused fields exist.
+  const paged = paginateLegacy(sorted, {
+    offset,
+    limit,
+    byteBudget: UNUSED_FIELDS_DEEP_BYTE_BUDGET,
+    keyOf: (e) => e.id,
+    binding: {
+      tool: UNUSED_FIELDS_DEEP_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const fields = paged.items;
+  const truncated = paged.hasMore;
+  const emitCursor = paged.nextCursor !== null;
+  const isPaged = truncated || offset > 0;
+
+  // Preserve the pre-CR-22 byte-trim `note`: emitted when the page was trimmed
+  // BELOW the requested limit to fit the byte budget (not merely over-limit), so
+  // a byte-trimmed-but-not-over-limit response keeps its existing shape.
+  const byteTrimmedBelowLimit = paged.byteTrimmed && fields.length < limit;
+  const note = byteTrimmedBelowLimit
+    ? `Showing ${fields.length} of ${sorted.length} unused fields — trimmed below the ` +
+      `requested limit to fit the response size. Narrow with \`parentObjectFilter\` ` +
+      `or a lower \`limit\`, or page for more.`
+    : undefined;
+
+  return ok({
+    data: {
       fields,
       totalCount: sorted.length,
       byParentObject,
       byConfidence,
       boundaries: BOUNDARIES,
-      truncated: sorted.length > n,
+      truncated,
       trust,
-      ...(byteTrimmed
-        ? {
-            note:
-              `Showing ${n} of ${sorted.length} unused fields — trimmed below the ` +
-              `requested limit to fit the response size. Narrow with \`parentObjectFilter\` ` +
-              `or a lower \`limit\`, or page for more.`,
-          }
+      ...(note !== undefined ? { note } : {}),
+      ...(isPaged ? { limit, offset } : {}),
+      ...(truncated ? { nextOffset: offset + fields.length } : {}),
+      ...(emitCursor
+        ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo }
         : {}),
-    };
-  };
-  let n = Math.min(limit, sorted.length);
-  let data = build(n);
-  while (n > 1 && Buffer.byteLength(JSON.stringify(data), 'utf8') > UNUSED_FIELDS_DEEP_BYTE_BUDGET) {
-    n = Math.max(1, Math.floor(n * 0.8));
-    data = build(n);
-  }
-
-  return ok({
-    data,
+    },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
       refreshedAt: ctx.manifest.refreshedAt,

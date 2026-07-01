@@ -16,14 +16,21 @@
  * one container. `declared` confidence (grants are declared metadata).
  *
  * Honesty axis (`disclosures`):
- *   - Permission-set GROUP membership (and muting) is not modeled — pass
- *     the group's member permission sets explicitly.
+ *   - Permission-set GROUP membership IS expanded (CR-CAP-04): a
+ *     `PermissionSetGroup:` id passed in `permissionSetIds` is unioned into
+ *     its member permission sets (declared metadata). Muting permission sets
+ *     are DISCLOSED but never subtracted — effective access may be lower.
  *   - App / tab visibility is a SEPARATE surface (now extracted — see
  *     `app_access` / `tab_availability`); it is not part of this permission
  *     union, which composes object / field / Apex / system permissions.
  *   - Field-level detail is summarised (count); use `field_access_audit`
  *     for a specific field. Record visibility still needs OWD + sharing
  *     (`why_cant_user_see_record`); object permission ≠ record access.
+ *   - Custom permissions (CR-CAP-10) are surfaced as their own list with
+ *     per-container attribution and `targetMissing` for grants whose definition
+ *     is absent (managed-package / not-retrieved). They are NOT system
+ *     `<userPermissions>`, so they are never double-counted under
+ *     `systemPermissions`.
  */
 
 import type {
@@ -31,6 +38,7 @@ import type {
   Edge,
   McpError,
   McpResponse,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
@@ -39,6 +47,17 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { coercePrefix } from './coerce-id.js';
+import {
+  argsFingerprint,
+  decodeCursor,
+  paginateSection,
+  type PageableSection,
+  type SectionDisclosure,
+} from './page-cursor.js';
+import { expandPermissionSetGroup } from './permission-set-group.js';
+
+/** Per-response byte budget for the paged section, leaving envelope headroom. */
+const EFFECTIVE_PERMS_BYTE_BUDGET = 38_000;
 
 /** Page size for the object-permission list (Admin grants on many objects). */
 const DEFAULT_LIMIT = 100;
@@ -61,6 +80,10 @@ export const effectivePermissionsInputSchema = z
     permissionSetIds: z.array(z.string().min(1)).optional(),
     limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
     offset: z.number().int().min(0).optional(),
+    // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+    // truncated page's `nextCursor`; carries the resume offset + which list
+    // (object | system) it advances. Omit = today's behavior.
+    cursor: z.string().min(1).optional(),
   })
   .refine(
     (i) => i.profileId !== undefined || (i.permissionSetIds !== undefined && i.permissionSetIds.length > 0),
@@ -88,16 +111,32 @@ export interface EffectiveSystemPerm {
   readonly grantedBy: readonly string[];
 }
 
+/**
+ * CR-CAP-10: one custom permission the union confers, attributed to the
+ * granting containers. `targetMissing` is true when the granted name has no
+ * `CustomPermission` definition node in the vault (managed-package or
+ * not-retrieved). Distinct from `systemPermissions` (those are
+ * `<userPermissions>`), so the two surfaces never double-count.
+ */
+export interface EffectiveCustomPerm {
+  readonly name: string;
+  readonly targetMissing: boolean;
+  readonly grantedBy: readonly string[];
+}
+
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface EffectivePermissionsOutput {
   readonly containers: readonly string[];
   readonly objectPermissions: readonly EffectiveObjectPerm[];
   readonly systemPermissions: readonly EffectiveSystemPerm[];
+  /** CR-CAP-10: custom permissions the union confers (sorted by name, full list). */
+  readonly customPermissions: readonly EffectiveCustomPerm[];
   readonly summary: {
     readonly objects: number;
     readonly fieldsWithFls: number;
     readonly apexClasses: number;
     readonly systemPermissions: number;
+    readonly customPermissions: number;
   };
   readonly limit: number;
   readonly offset: number;
@@ -105,16 +144,30 @@ export interface EffectivePermissionsOutput {
   readonly truncated: boolean;
   readonly confidence: 'declared';
   readonly disclosures: readonly string[];
+  /**
+   * CR-22 opaque continuation token, present ONLY on a truncated page (the
+   * designated list overflowed `limit` or the byte budget). Echo it back as
+   * `cursor` to resume; absent on a whole-fits page so the response is
+   * byte-identical to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata for the designated list; truncation only. */
+  readonly pageInfo?: PageInfo;
+  /** Which list the cursor advances (`'object'` | `'system'`); truncation only. */
+  readonly designatedList?: string;
+  /** The non-designated list(s), disclosed with their full counts; truncation only. */
+  readonly otherSections?: readonly SectionDisclosure[];
 }
 
 const PREFIX = {
   object: 'CustomObject:',
   field: 'CustomField:',
   apex: 'ApexClass:',
+  customPermission: 'CustomPermission:',
 } as const;
 
 const BASE_DISCLOSURES: readonly string[] = Object.freeze([
-  'Permission-set GROUP membership and muting are not modeled — pass the group\'s member permission sets explicitly to include them.',
+  'Permission-set GROUP membership IS expanded: a PermissionSetGroup passed in `permissionSetIds` is unioned into its member permission sets (declared metadata). Muting permission sets are DISCLOSED but NOT subtracted — a group with a muting set may confer LESS than shown.',
   'App and tab visibility are a separate surface (now extracted — see `app_access` / `tab_availability`); they are not part of this permission union, which composes object / field / Apex / system permissions.',
   'Field-level access is summarised here (count of fields with FLS); use `field_access_audit` for a specific field. Object permission is NOT record access — record visibility still depends on OWD + sharing (`why_cant_user_see_record`).',
 ]);
@@ -133,17 +186,51 @@ export const effectivePermissionsHandler = async (
   ctx: Context,
   input: EffectivePermissionsInput,
 ): Promise<Result<McpResponse<EffectivePermissionsOutput>, McpError>> => {
-  // Coerce bare names to canonical ids (Admin -> Profile:Admin).
-  const containers: string[] = [];
-  if (input.profileId !== undefined) containers.push(coercePrefix(input.profileId, ['Profile:']));
+  // Coerce bare names to canonical ids (Admin -> Profile:Admin). A bare
+  // permission-set id is coerced to a `PermissionSet:` id, but the caller may
+  // legitimately pass a `PermissionSetGroup:` id there — coercePrefix leaves a
+  // typed prefix unchanged, so that flows through as a PSG.
+  const rawContainers: string[] = [];
+  if (input.profileId !== undefined) rawContainers.push(coercePrefix(input.profileId, ['Profile:']));
   if (input.permissionSetIds !== undefined) {
-    for (const id of input.permissionSetIds) containers.push(coercePrefix(id, ['PermissionSet:']));
+    for (const id of input.permissionSetIds) rawContainers.push(coercePrefix(id, ['PermissionSet:']));
+  }
+
+  // CR-CAP-04: expand any PermissionSetGroup into its member permission sets and
+  // push the members into the container list, so the existing grant-union loop
+  // confers the group's perms. Muting is DISCLOSED, never subtracted. Dedupe so
+  // a permset reachable BOTH directly and via a PSG is unioned once.
+  const containerSet = new Set<string>();
+  const containers: string[] = [];
+  const mutingPsgs: string[] = [];
+  const pushContainer = (id: string): void => {
+    if (containerSet.has(id)) return;
+    containerSet.add(id);
+    containers.push(id);
+  };
+  for (const id of rawContainers) {
+    if (id.startsWith('PermissionSetGroup:')) {
+      const expanded = await expandPermissionSetGroup(ctx, id as ComponentId);
+      if (!expanded.ok) {
+        return err({ kind: 'internal', message: `graph query failed: ${expanded.error.message}` });
+      }
+      if (expanded.value !== null) {
+        for (const memberId of expanded.value.memberPermissionSetIds) pushContainer(memberId);
+        if (expanded.value.hasMuting) mutingPsgs.push(id);
+        // The PSG id itself is not a grantor; only its members are. Skip it.
+        continue;
+      }
+      // Not a real PSG node — fall through so it lands in missingContainers.
+    }
+    pushContainer(id);
   }
 
   const objectMap = new Map<string, ObjectAccum>();
   const fieldsWithFls = new Set<string>();
   const apexClasses = new Set<string>();
   const systemPermMap = new Map<string, Set<string>>();
+  // CR-CAP-10: custom-permission name -> set of granting container ids.
+  const customPermMap = new Map<string, Set<string>>();
   const presentContainers: string[] = [];
   const missingContainers: string[] = [];
 
@@ -199,6 +286,13 @@ export const effectivePermissionsHandler = async (
         }
       } else if (edge.toId.startsWith(PREFIX.apex)) {
         apexClasses.add(edge.toId.slice(PREFIX.apex.length));
+      } else if (edge.toId.startsWith(PREFIX.customPermission)) {
+        // CR-CAP-10: declared custom-permission grant. Attribute it; resolution
+        // (targetMissing) happens after the loop. NOT folded into systemPermMap.
+        const name = edge.toId.slice(PREFIX.customPermission.length);
+        const set = customPermMap.get(name) ?? new Set<string>();
+        set.add(containerId);
+        customPermMap.set(name, set);
       }
     }
   }
@@ -228,14 +322,92 @@ export const effectivePermissionsHandler = async (
     .map(([permission, set]) => ({ permission, grantedBy: [...set].sort() }))
     .sort((x, y) => (x.permission < y.permission ? -1 : x.permission > y.permission ? 1 : 0));
 
+  // CR-CAP-10: resolve each granted custom permission against its definition
+  // node so a managed-package grant whose definition is absent is disclosed
+  // (targetMissing), not dropped and not fabricated.
+  const customPermNames = [...customPermMap.keys()].sort();
+  const customPermissions: EffectiveCustomPerm[] = [];
+  for (const name of customPermNames) {
+    const cpNode = await getNodeById(ctx.graph, `${PREFIX.customPermission}${name}` as ComponentId);
+    if (!cpNode.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${cpNode.error.message}` });
+    }
+    customPermissions.push({
+      name,
+      targetMissing: cpNode.value === null,
+      grantedBy: [...(customPermMap.get(name) ?? new Set<string>())].sort(),
+    });
+  }
+  const missingCustomPerms = customPermissions.filter((c) => c.targetMissing).length;
+
   const totalObjects = objectPermissions.length;
   const limit = input.limit ?? DEFAULT_LIMIT;
-  const offset = input.offset ?? 0;
-  const page = objectPermissions.slice(offset, offset + limit);
-  const hasMore = offset + page.length < totalObjects;
+
+  // CR-22 section cursor: page ONE designated list (object | system) and
+  // disclose the other honestly. objectPermissions is the largest + already
+  // paged list, so it is the default designated list; a resumed cursor's
+  // token.listId is fed back as designatedListId (paginateSection does NOT
+  // cross-check — the handler owns that binding, B0 note).
+  const TOOL = 'sfi.effective_permissions';
+  const fingerprint = argsFingerprint({
+    ...(input.profileId !== undefined ? { profileId: input.profileId } : {}),
+    ...(input.permissionSetIds !== undefined ? { permissionSetIds: input.permissionSetIds } : {}),
+  });
+  let designatedListId = 'object';
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+    if (decoded.value.listId !== undefined) designatedListId = decoded.value.listId;
+  }
+
+  const sections: readonly PageableSection<EffectiveObjectPerm | EffectiveSystemPerm>[] = [
+    { listId: 'object', items: objectPermissions },
+    { listId: 'system', items: systemPermissions },
+  ];
+  const pagedResult = paginateSection(sections, designatedListId, {
+    offset,
+    limit,
+    byteBudget: EFFECTIVE_PERMS_BYTE_BUDGET,
+    keyOf: (item) =>
+      'object' in item ? (item as EffectiveObjectPerm).object : (item as EffectiveSystemPerm).permission,
+    binding: { tool: TOOL, vaultHash: ctx.manifest.sourceTreeHash, argsFingerprint: fingerprint },
+  });
+  if (!pagedResult.ok) return err(pagedResult.error);
+  const paged = pagedResult.value;
+
+  // Emit both lists: the designated list shows its page; the non-designated
+  // list stays whole (today's shape). On a fresh/whole-fits call the
+  // designated list is 'object', so objectPermissions = its page and
+  // systemPermissions = full — byte-identical to pre-CR-22.
+  const objectPage =
+    designatedListId === 'object'
+      ? (paged.items as readonly EffectiveObjectPerm[])
+      : objectPermissions;
+  const systemPage =
+    designatedListId === 'system'
+      ? (paged.items as readonly EffectiveSystemPerm[])
+      : systemPermissions;
+
+  // Back-compat scalar fields: on the default (designated='object') path these
+  // are exactly pre-CR-22 — `hasMore` tracks the object page, `truncated` is
+  // `hasMore || offset>0`. When resuming INTO the system list these track the
+  // system page instead (the legacy fields describe the page being advanced).
+  const hasMore = paged.pageInfo.hasMore;
   const truncated = hasMore || offset > 0;
+  const emitCursor = paged.pageInfo.nextCursor !== null;
 
   const disclosures = [...BASE_DISCLOSURES];
+  if (mutingPsgs.length > 0) {
+    disclosures.unshift(
+      `${mutingPsgs.length} expanded permission set group(s) reference a muting permission set (${[...new Set(mutingPsgs)].sort().join(', ')}); muting perms are NOT subtracted, so effective access may be lower than shown.`,
+    );
+  }
   if (missingContainers.length > 0) {
     disclosures.unshift(
       `Ignored ${missingContainers.length} container(s) not found in this vault: ${missingContainers.join(', ')}.`,
@@ -243,20 +415,27 @@ export const effectivePermissionsHandler = async (
   }
   if (truncated) {
     disclosures.push(
-      `Object permissions paginated: showing ${offset}–${offset + page.length} of ${totalObjects}. summary holds the complete counts; page with offset/limit.`,
+      `Object permissions paginated: showing ${offset}–${offset + objectPage.length} of ${totalObjects}. summary holds the complete counts; page with offset/limit.`,
+    );
+  }
+  if (missingCustomPerms > 0) {
+    disclosures.push(
+      `${missingCustomPerms} granted custom permission(s) name a definition not present in this vault (targetMissing) — likely managed-package or not retrieved; the grant is declared but the definition is not resolvable here. Custom permissions are NOT system userPermissions, so they are not double-counted under systemPermissions.`,
     );
   }
 
   return ok({
     data: {
       containers: presentContainers,
-      objectPermissions: page,
-      systemPermissions,
+      objectPermissions: objectPage,
+      systemPermissions: systemPage,
+      customPermissions,
       summary: {
         objects: totalObjects,
         fieldsWithFls: fieldsWithFls.size,
         apexClasses: apexClasses.size,
         systemPermissions: systemPermissions.length,
+        customPermissions: customPermissions.length,
       },
       limit,
       offset,
@@ -264,6 +443,14 @@ export const effectivePermissionsHandler = async (
       truncated,
       confidence: 'declared',
       disclosures,
+      ...(emitCursor
+        ? {
+            nextCursor: paged.pageInfo.nextCursor as string,
+            pageInfo: paged.pageInfo,
+            designatedList: paged.listId,
+            otherSections: paged.otherSections,
+          }
+        : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

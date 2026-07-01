@@ -7,15 +7,21 @@
  * result is the slice of nodes and edges that *depend on* the target.
  *
  * Implementation notes:
- *   - Each hop expands the frontier by calling `listEdges(node,
- *     { direction: 'in' })` on every node still under consideration,
- *     then unions the `fromId` of every returned edge into the next
- *     frontier. The graph layer has no direct multi-hop incoming-only
- *     traversal, so the dispatcher composes the walk here.
- *   - When `edgeTypes` is supplied we issue one `listEdges` call per
- *     `(node, edgeType)` pair; this keeps each query small and lets
- *     DuckDB use the `(to_id, edge_type)` index. Without the filter we
- *     issue one call per node (no edge-type predicate).
+ *   - Each hop expands the frontier with ONE batched
+ *     `listEdgesForNodes(frontier, { direction: 'in', edgeTypes })`
+ *     query (CR-17 — was one `listEdges` call per node × edgeType, an
+ *     N+1 loop). The returned per-node buckets are then replayed in the
+ *     SAME visit order the row-at-a-time loop used (frontier order, then
+ *     `edgeTypes ?? [null]` order) so the cap/dedup/next-frontier logic
+ *     is byte-for-byte preserved. The graph layer has no direct
+ *     multi-hop incoming-only traversal, so the dispatcher composes the
+ *     walk here.
+ *   - On a cap hit the surviving prefix is the lowest edges by
+ *     `(toId, edgeType, fromId, source)` within each `(node, edgeType)`
+ *     group — `listEdgesForNodes` pins that total order, whereas the old
+ *     per-`listEdges` path left the intra-group order DuckDB-unspecified.
+ *     The cap-identity test in `get-impact.test.ts` is the contract for
+ *     this pinned prefix.
  *   - Unknown `componentId` resolves to `ok({ impact: { nodes: [],
  *     edges: [] }, traversedEdgeTypes: [] })`. The graph cannot
  *     distinguish "missing component" from "component with no incoming
@@ -35,12 +41,21 @@ import {
   type Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import {
+  getNodeById,
+  listEdgesForNodes,
+  listNodesByIds,
+} from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
 import { isUnresolvedApexCallTarget, isUnresolvedFieldReceiver } from './apex-receiver.js';
+import {
+  buildEmptyTraversalCoverageCaveat,
+  type CoverageCaveat,
+  GRAPH_TRAVERSAL_REQUIRED_COVERAGE,
+} from './coverage-trust.js';
 import {
   enforceGraphPayloadBudget,
   estimateGraphPayloadBytes,
@@ -135,6 +150,15 @@ export interface GetImpactOutput {
   readonly estimatedPayloadBytes: number;
   /** Static-analysis blind spots: `complete: false` when an impacted class uses dynamic Apex. */
   readonly soundness: Soundness;
+  /**
+   * I3b (empty ≠ none): present ONLY when the impact slice found NO dependents
+   * (`impact.edges` is empty) AND a dependency family that would produce an
+   * inbound edge is NOT fully covered by the vault. Names the not-checked
+   * families so an empty impact reads "not retrieved", not a proven "nothing
+   * depends on this". Absent when dependents exist or the vault is fully covered
+   * (byte-identical to before).
+   */
+  readonly coverageCaveat?: CoverageCaveat;
   readonly disclosure: string;
 }
 
@@ -271,6 +295,16 @@ const buildImpactDisclosure = (params: {
  * incoming edges (optionally filtered by `edgeTypes`) and return the
  * `fromId`s that have not yet been visited. Visited sets and edge
  * collector are mutated in place to keep the recursion cheap.
+ *
+ * CR-17: the per-node incoming edges are fetched in ONE batched
+ * `listEdgesForNodes` query for the whole frontier (was an N+1 loop of
+ * `listEdges` per node × edgeType). The returned buckets are then replayed in
+ * the IDENTICAL visit order the row-at-a-time loop used — outer loop over
+ * `frontier` in order, inner loop over `edgeTypes ?? [null]` in order, and
+ * within each `(node, edgeType)` group the bucket's deterministic
+ * `(toId, edgeType, fromId, source)` order — so the cap/dedup/next-push logic
+ * produces the same visited set, the same `collectedEdges`, the same
+ * `truncated` flag, and the same `next` frontier as before.
  */
 const expandIncoming = async (
   ctx: Context,
@@ -285,6 +319,18 @@ const expandIncoming = async (
   error: string | null;
   truncated: boolean;
 }> => {
+  // One round-trip fetches every frontier node's incoming edges; the helper
+  // restricts to `edgeTypes` (a batched `edge_type IN (...)`) reproducing the
+  // union of the old per-`(node, edgeType)` calls, and partitions per node so
+  // the replay below can walk each node's bucket in the same admission order.
+  const batched = await listEdgesForNodes(ctx.graph, frontier, {
+    direction: 'in',
+    ...(edgeTypes !== null ? { edgeTypes } : {}),
+  });
+  if (!batched.ok) {
+    return { next: [], error: batched.error.message, truncated: false };
+  }
+
   const next: ComponentId[] = [];
   let truncated = false;
   for (const nodeId of frontier) {
@@ -292,20 +338,16 @@ const expandIncoming = async (
       truncated = true;
       break;
     }
-    // When edgeTypes is provided, issue one query per type so the
-    // graph layer can use its `(to_id, edge_type)` predicate; otherwise
-    // one query returns every incoming edge.
+    const bucket = batched.value.get(nodeId) ?? [];
+    // Replay the old `edgeTypes ?? [null]` inner loop. `null` = a single pass
+    // over the whole bucket (all types); otherwise one pass per requested type,
+    // each filtered to that type — exactly as the per-call `listEdges(edgeType)`
+    // loop decomposed it, and in the same order.
     const filters = edgeTypes ?? [null];
     for (const edgeType of filters) {
-      const opts =
-        edgeType === null
-          ? { direction: 'in' as const }
-          : { direction: 'in' as const, edgeType };
-      const result = await listEdges(ctx.graph, nodeId, opts);
-      if (!result.ok) {
-        return { next: [], error: result.error.message, truncated: false };
-      }
-      for (const edge of result.value) {
+      const groupEdges =
+        edgeType === null ? bucket : bucket.filter((e) => e.edgeType === edgeType);
+      for (const edge of groupEdges) {
         if (collectedEdges.length >= IMPACT_MAX_EDGES) {
           truncated = true;
           break;
@@ -337,22 +379,23 @@ const expandIncoming = async (
  * dropped silently — the graph can be sparser than the edge table
  * (an edge can reference an id that does not have a corresponding
  * node row, e.g., when only one half of a dependency was extracted).
+ *
+ * CR-17: batched into ONE `listNodesByIds` query (was an N+1 loop of
+ * `getNodeById` per id). This sub-change is PROVABLY identical to the old
+ * loop: the inputs are pre-sorted + capped (`[...visitedNodes].sort().slice`),
+ * the absent-id drop matches `WHERE id IN (...)` returning no row, and the
+ * caller re-sorts the result by id — so output order is unaffected. Unlike the
+ * order-sensitive BFS edge walk above, nothing here depends on row order.
  */
 const fetchNodes = async (
   ctx: Context,
   ids: readonly ComponentId[],
 ): Promise<Result<readonly Node[], string>> => {
-  const nodes: Node[] = [];
-  for (const id of ids) {
-    const result = await getNodeById(ctx.graph, id);
-    if (!result.ok) {
-      return err(result.error.message);
-    }
-    if (result.value !== null) {
-      nodes.push(result.value);
-    }
+  const result = await listNodesByIds(ctx.graph, ids);
+  if (!result.ok) {
+    return err(result.error.message);
   }
-  return ok(nodes);
+  return ok(result.value);
 };
 
 /**
@@ -484,6 +527,16 @@ export const getImpactHandler = async (
     byteTrimmed: budgeted.trimmed,
   });
 
+  // I3b (empty ≠ none): an impact walk with NO dependent edges is exactly where
+  // "nothing depends on this" is dangerous — name the dependency families the
+  // vault did NOT fully retrieve so the host discloses the boundary. Keyed on
+  // the edge set (the root node is always present, so node count is not the
+  // emptiness signal). Non-empty impact slices are untouched.
+  const coverageCaveat =
+    budgeted.edges.length === 0
+      ? buildEmptyTraversalCoverageCaveat(ctx, GRAPH_TRAVERSAL_REQUIRED_COVERAGE)
+      : undefined;
+
   const truncationReason = finalTruncated
     ? {
         reason: budgeted.trimmed
@@ -510,6 +563,7 @@ export const getImpactHandler = async (
       estimatedPayloadBytes,
       payloadSlimmed: slimmedCount > 0,
       soundness,
+      ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       disclosure,
     },
     vaultState: {

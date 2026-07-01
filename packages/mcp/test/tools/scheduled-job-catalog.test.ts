@@ -72,8 +72,16 @@ const scheduledSeed: ExtractionResult = {
       apiName: 'NightlyJob',
       properties: { isSchedulable: true, isTest: false },
     }),
-    makeNode({ id: SCHEDULER_A, apiName: 'SchedulerSetupA' }),
-    makeNode({ id: SCHEDULER_B, apiName: 'SchedulerSetupB' }),
+    makeNode({
+      id: SCHEDULER_A,
+      apiName: 'SchedulerSetupA',
+      properties: { isTest: false },
+    }),
+    makeNode({
+      id: SCHEDULER_B,
+      apiName: 'SchedulerSetupB',
+      properties: { isTest: false },
+    }),
   ],
   edges: [
     makeEdge({
@@ -159,6 +167,79 @@ const mixedSeed: ExtractionResult = {
   ],
 };
 
+// =============================================================================
+// Seed 4b: a Schedulable class whose ONLY System.schedule(...) call site
+// lives inside an @isTest class. Test-only scheduling is sandboxed and
+// rolled back, so it does NOT schedule the class at runtime — the class is
+// the textbook signature of dead/unscheduled Schedulable code. It must
+// surface with productionCallerCount === 0 and likelyUnscheduled === true.
+// =============================================================================
+
+const TEST_ONLY_SCHEDULABLE = 'ApexClass:AcmeBatchSchedulable';
+const TEST_SCHEDULER = 'ApexClass:AcmeBatchSchedulableTest';
+
+const testOnlySeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: TEST_ONLY_SCHEDULABLE,
+      apiName: 'AcmeBatchSchedulable',
+      properties: { isSchedulable: true, isTest: false },
+    }),
+    makeNode({
+      id: TEST_SCHEDULER,
+      apiName: 'AcmeBatchSchedulableTest',
+      properties: { isTest: true },
+    }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: TEST_SCHEDULER,
+      toId: TEST_ONLY_SCHEDULABLE,
+      edgeType: 'dispatchesAsync',
+      properties: { dispatchMechanism: 'schedule' },
+    }),
+  ],
+};
+
+// =============================================================================
+// Seed 5 (T7): two Flow nodes — one with a <start><schedule> block (the
+// extractor stamped scheduleFrequency/StartDate/StartTime), one without
+// (a record-triggered flow). Only the scheduled flow should surface in the
+// scheduledFlows section.
+// =============================================================================
+
+const SCHEDULED_FLOW = 'Flow:ScheduledPaymentStatusUpdate';
+const RECORD_FLOW = 'Flow:RecordTriggeredFlow';
+
+const flowSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: SCHEDULED_FLOW,
+      type: 'Flow',
+      apiName: 'ScheduledPaymentStatusUpdate',
+      sourcePath: 'unused.flow-meta.xml',
+      properties: {
+        scheduleFrequency: 'Weekly',
+        scheduleStartDate: '2024-11-09',
+        scheduleStartTime: '08:00:00.000Z',
+      },
+    }),
+    makeNode({
+      id: RECORD_FLOW,
+      type: 'Flow',
+      apiName: 'RecordTriggeredFlow',
+      sourcePath: 'unused.flow-meta.xml',
+      properties: {
+        triggerObject: 'Account',
+        scheduleFrequency: null,
+        scheduleStartDate: null,
+        scheduleStartTime: null,
+      },
+    }),
+  ],
+  edges: [],
+};
+
 let tempDir: string;
 let store: GraphStore;
 let ctx: Context;
@@ -173,6 +254,8 @@ beforeAll(async () => {
     orphanSeed,
     queueableSeed,
     mixedSeed,
+    testOnlySeed,
+    flowSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -276,10 +359,82 @@ describe('scheduledJobCatalogHandler', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const d = result.value.data;
-    // 3 Schedulable classes: NightlyJob + OrphanSchedulable + MixedDispatchTarget.
-    expect(d.summary.totalSchedulableClasses).toBe(3);
-    // Only NightlyJob has known scheduled callers.
-    expect(d.summary.classesWithKnownCallers).toBe(1);
+    // 4 Schedulable classes: NightlyJob + OrphanSchedulable +
+    // MixedDispatchTarget + AcmeBatchSchedulable (test-only scheduler).
+    expect(d.summary.totalSchedulableClasses).toBe(4);
+    // NightlyJob (2 production callers) + AcmeBatchSchedulable (1 test caller)
+    // both have known callers.
+    expect(d.summary.classesWithKnownCallers).toBe(2);
+  });
+
+  it('counts ONLY production schedulers in classesScheduledFromProduction', async () => {
+    const result = await scheduledJobCatalogHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Only NightlyJob has a non-test System.schedule() call site. The
+    // test-only scheduler for AcmeBatchSchedulable must NOT count here.
+    expect(result.value.data.summary.classesScheduledFromProduction).toBe(1);
+  });
+
+  it('flags a Schedulable class scheduled ONLY by a test class as likelyUnscheduled', async () => {
+    const result = await scheduledJobCatalogHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const testOnly = result.value.data.jobs.find(
+      (j) => j.classId === TEST_ONLY_SCHEDULABLE,
+    );
+    expect(testOnly).toBeDefined();
+    // It HAS a call site, but the caller is a test class — no production
+    // scheduling evidence, so it is dead/unscheduled code.
+    expect(testOnly?.scheduledByCalls).toHaveLength(1);
+    expect(testOnly?.scheduledByCalls[0]?.callerIsTest).toBe(true);
+    expect(testOnly?.productionCallerCount).toBe(0);
+    expect(testOnly?.likelyUnscheduled).toBe(true);
+  });
+
+  it('does NOT flag a class with production schedulers as likelyUnscheduled', async () => {
+    const result = await scheduledJobCatalogHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const nightly = result.value.data.jobs.find(
+      (j) => j.classId === NIGHTLY_JOB,
+    );
+    expect(nightly?.productionCallerCount).toBe(2);
+    expect(nightly?.likelyUnscheduled).toBe(false);
+    expect(
+      nightly?.scheduledByCalls.every((c) => c.callerIsTest === false),
+    ).toBe(true);
+  });
+
+  it('flags an orphan Schedulable class (no callers, no cron) as likelyUnscheduled', async () => {
+    const result = await scheduledJobCatalogHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const orphan = result.value.data.jobs.find(
+      (j) => j.classId === ORPHAN_SCHEDULABLE,
+    );
+    expect(orphan?.productionCallerCount).toBe(0);
+    expect(orphan?.likelyUnscheduled).toBe(true);
+  });
+
+  it('counts likely-unscheduled classes in the summary', async () => {
+    const result = await scheduledJobCatalogHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // OrphanSchedulable (no callers/cron) + AcmeBatchSchedulable
+    // (test-only) are likely unscheduled. MixedDispatchTarget has a
+    // class-level cron so it is NOT flagged; NightlyJob has production
+    // callers.
+    expect(result.value.data.summary.classesLikelyUnscheduled).toBe(2);
+  });
+
+  it('discloses that test-only scheduling is not runtime scheduling', async () => {
+    const result = await scheduledJobCatalogHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const disc = result.value.data.disclosure;
+    expect(disc).toContain('@isTest');
+    expect(disc).toContain('likelyUnscheduled');
   });
 
   it('returns an honest disclosure mentioning the Tooling API boundary', async () => {
@@ -288,6 +443,44 @@ describe('scheduledJobCatalogHandler', () => {
     if (!result.ok) return;
     expect(result.value.data.disclosure).toContain('Tooling API');
     expect(result.value.data.disclosure).toContain('heuristic');
+  });
+
+  it('surfaces a scheduled Flow with its frequency/startDate/startTimeUtc (T7)', async () => {
+    const result = await scheduledJobCatalogHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const flow = result.value.data.scheduledFlows.find(
+      (f) => f.flowId === SCHEDULED_FLOW,
+    );
+    expect(flow).toBeDefined();
+    expect(flow?.frequency).toBe('Weekly');
+    expect(flow?.startDate).toBe('2024-11-09');
+    expect(flow?.startTimeUtc).toBe('08:00:00.000Z');
+  });
+
+  it('does NOT surface a non-scheduled (record-triggered) Flow (T7)', async () => {
+    const result = await scheduledJobCatalogHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.scheduledFlows.map((f) => f.flowId);
+    expect(ids).not.toContain(RECORD_FLOW);
+  });
+
+  it('counts scheduled flows in the summary (T7)', async () => {
+    const result = await scheduledJobCatalogHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.summary.totalScheduledFlows).toBe(1);
+  });
+
+  it('discloses the UTC framing and Flow-vs-Apex-cron distinction for scheduled flows (T7)', async () => {
+    const result = await scheduledJobCatalogHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const disc = result.value.data.flowScheduleDisclosure;
+    expect(disc).toContain('UTC');
+    expect(disc).toContain('timezone');
+    expect(disc).toContain('CronTrigger');
   });
 
   it('carries vaultState from the manifest', async () => {

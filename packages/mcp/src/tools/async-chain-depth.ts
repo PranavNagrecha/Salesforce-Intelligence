@@ -66,7 +66,7 @@ export interface AsyncChainOutput {
 }
 
 const ASYNC_CHAIN_DISCLOSURE =
-  'v2.8 walks the chain via `dispatchesAsync` edges only. The v0.3 Apex scanner that produces those edges is heuristic — reflective async dispatch (`Type.forName + invoke`) and helper-wrapper dispatch (`MyHelper.enqueue(new MyJob())`) are invisible, so the walked chain may UNDERSTATE the runtime chain depth. Depth is capped at 10 hops; chains deeper than that surface with `truncated: true`. When the root is a Flow, depth 1 edges are Flow→ApexClass `callsApex` entry points; async dispatch is walked from each Apex class.';
+  'v2.8 walks the chain via `dispatchesAsync` edges only. The v0.3 Apex scanner that produces those edges is heuristic — reflective async dispatch (`Type.forName + invoke`) and helper-wrapper dispatch (`MyHelper.enqueue(new MyJob())`) are invisible, so the walked chain may UNDERSTATE the runtime chain depth. `@future` dispatch IS now surfaced (CR-CAP-09) but is CLASS-GRANULAR and heuristic: the edge fires when the called class has SOME `@future` method (`properties.dispatchMechanism: "future"`, `granularity: "class"`), not necessarily the method actually invoked — so it may OVER-attribute an async hop to a synchronous call. Depth is capped at 10 hops; chains deeper than that surface with `truncated: true`. When the root is a Flow, depth 1 edges are Flow→ApexClass `callsApex` entry points; async dispatch is walked from each Apex class.';
 
 const compareChainEdges = (a: AsyncChainEdge, b: AsyncChainEdge): number => {
   if (a.depth !== b.depth) return a.depth - b.depth;

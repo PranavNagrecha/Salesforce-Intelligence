@@ -38,6 +38,25 @@ const RECORD_TRIGGER_TYPES = new Set([
   'RecordBeforeDelete',
 ]);
 
+/**
+ * The set of `<start><triggerType>` values for which `$Record` (and
+ * `$Record__Prior`) names a concrete record whose SObject type is the
+ * `<start><object>`. This is a SUPERSET of {@link RECORD_TRIGGER_TYPES}:
+ * a `Scheduled` flow runs over the records matching its schedule filter on
+ * `<start><object>`, so an `<inputReference>$Record</inputReference>` DML
+ * inside a scheduled flow updates THAT object — the same object the flow is
+ * scheduled on. Without this, a scheduled flow's `$Record` update was dropped
+ * with a misleading "has no <object>" warning, making `explain_flow` /
+ * `what_happens_on_save` report no write target (or, worse, letting the
+ * synthesis layer mistake the unresolved warning for a cross-object write).
+ * `Scheduled` is intentionally NOT in `RECORD_TRIGGER_TYPES` because it does
+ * not get a record-trigger `triggersOn` edge; it only resolves `$Record`.
+ */
+const RECORD_SCOPED_TRIGGER_TYPES = new Set([
+  ...RECORD_TRIGGER_TYPES,
+  'Scheduled',
+]);
+
 type FlowStatus = (typeof ALLOWED_STATUS)[number];
 
 /**
@@ -150,9 +169,20 @@ const validateRoot = (
 };
 
 /**
- * Pull `object`, `triggerType`, and `recordTriggerType` from the
- * optional `<start>` subtree. Returns all-null when `<start>` is absent
- * (e.g., autolaunched flows without a record trigger).
+ * Pull `object`, `triggerType`, `recordTriggerType`, and the optional
+ * `<schedule>` sub-block from the `<start>` subtree. Returns all-null
+ * when `<start>` is absent (e.g., autolaunched flows without a record
+ * trigger).
+ *
+ * T7: `<start><schedule>` is present on scheduled flows
+ * (`triggerType: Scheduled`). Its `<frequency>` (e.g. `Weekly`),
+ * `<startDate>` (`2024-11-09`), and `<startTime>` (`08:00:00.000Z`) are
+ * the flow's design-time schedule. `<startTime>` is UTC (the trailing
+ * `Z`); the local wall-clock run time depends on the org's default
+ * timezone, which the vault does not hold — so consumers must disclose
+ * the UTC framing rather than imply a local time. This is the FLOW
+ * schedule (declared in metadata), distinct from an Apex Schedulable's
+ * runtime CronTrigger registration, which lives only in the Tooling API.
  */
 const extractStartProperties = (
   rootObj: Record<string, unknown>,
@@ -160,17 +190,95 @@ const extractStartProperties = (
   triggerObject: string | null;
   triggerType: string | null;
   recordTriggerType: string | null;
+  scheduleFrequency: string | null;
+  scheduleStartDate: string | null;
+  scheduleStartTime: string | null;
+  scheduledPathTypes: string[];
+  runAsyncAfterCommit: boolean;
+  /**
+   * True when the `<start>` element carries a direct `<connector>` child that
+   * is NOT inside a `<scheduledPaths>` element. A direct connector means the
+   * flow has an immediate synchronous execution path that fires within the
+   * same transaction as the triggering DML.
+   *
+   * A record-triggered after-save flow with `hasImmediateConnector: false`
+   * that has `scheduledPaths` executes ONLY via its scheduled/async paths —
+   * it never fires synchronously within the triggering save transaction.
+   * Such flows belong in `post-save-async`, not `post-save-flows`, in the
+   * Salesforce Order of Execution.
+   */
+  hasImmediateConnector: boolean;
 } => {
   const start = unwrapSingle(rootObj['start']);
   if (typeof start !== 'object' || start === null) {
-    return { triggerObject: null, triggerType: null, recordTriggerType: null };
+    return {
+      triggerObject: null,
+      triggerType: null,
+      recordTriggerType: null,
+      scheduleFrequency: null,
+      scheduleStartDate: null,
+      scheduleStartTime: null,
+      scheduledPathTypes: [],
+      runAsyncAfterCommit: false,
+      hasImmediateConnector: false,
+    };
   }
   const startObj = start as Record<string, unknown>;
+  const schedule = unwrapSingle(startObj['schedule']);
+  const scheduleObj =
+    typeof schedule === 'object' && schedule !== null
+      ? (schedule as Record<string, unknown>)
+      : null;
+  const scheduledPathTypes = extractScheduledPathTypes(startObj);
+  // A direct `<connector>` child of `<start>` (not inside `<scheduledPaths>`)
+  // indicates a synchronous execution path. fast-xml-parser parses `<connector>`
+  // as an object or array; its presence (non-null/undefined) is sufficient.
+  const hasImmediateConnector =
+    startObj['connector'] !== undefined && startObj['connector'] !== null;
   return {
     triggerObject: toNullableString(startObj['object']),
     triggerType: toNullableString(startObj['triggerType']),
     recordTriggerType: toNullableString(startObj['recordTriggerType']),
+    scheduleFrequency:
+      scheduleObj === null ? null : toNonEmptyString(scheduleObj['frequency']),
+    scheduleStartDate:
+      scheduleObj === null ? null : toNonEmptyString(scheduleObj['startDate']),
+    scheduleStartTime:
+      scheduleObj === null ? null : toNonEmptyString(scheduleObj['startTime']),
+    scheduledPathTypes,
+    runAsyncAfterCommit: scheduledPathTypes.includes(ASYNC_AFTER_COMMIT_PATH),
+    hasImmediateConnector,
   };
+};
+
+/**
+ * The `<scheduledPaths><scheduledPaths><pathType>` marker Salesforce stamps on
+ * the immediate post-commit ASYNCHRONOUS path of a record-triggered (after-save)
+ * flow. Such a path runs in a SEPARATE transaction AFTER the triggering save has
+ * already committed, so an unhandled fault on it cannot roll the save back —
+ * `explain_flow`'s fault-rollback verdict needs this distinction (bundle-3).
+ */
+const ASYNC_AFTER_COMMIT_PATH = 'AsyncAfterCommit';
+
+/**
+ * Collect the `<pathType>` of every `<start><scheduledPaths>` entry, in source
+ * order. A record-triggered after-save flow can declare scheduled paths: a
+ * `pathType` of `AsyncAfterCommit` is the immediate-async post-commit path; an
+ * absent `pathType` (or a time-based scheduled path) carries a real delay. We
+ * surface only the declared `pathType` strings (skipping empty ones) so
+ * consumers — chiefly `explain_flow.buildFaultRollback` — can tell an async
+ * post-commit path from a synchronous one without re-parsing the XML.
+ */
+const extractScheduledPathTypes = (
+  startObj: Record<string, unknown>,
+): string[] => {
+  const out: string[] = [];
+  for (const path of toArray(startObj['scheduledPaths'])) {
+    if (typeof path !== 'object' || path === null) continue;
+    const pathType = toNonEmptyString((path as Record<string, unknown>)['pathType']);
+    if (pathType !== null) out.push(pathType);
+  }
+  return out;
 };
 
 /**
@@ -329,6 +437,47 @@ const buildActionCallEdges = (
 };
 
 /**
+ * A non-edge-bearing summary of a single `<actionCalls>` element: its declared
+ * `actionType` (e.g. `apex`, `activateSessionPermSet`, `emailAlert`, `flow`)
+ * and `actionName`. Apex action calls already get a `callsApex` edge, but
+ * non-apex action types emit no edge (a `callsApex` edge to an ApexClass would
+ * be a lie for, say, `activateSessionPermSet`). Without this list `explain_flow`
+ * sees `actionCalls: []` and cannot even name the faultable element, which lets
+ * a caller mistake an action-call element for missing. Surfacing every action
+ * call's `{actionType, actionName}` lets the consumer identify the element type
+ * — e.g. recognise `activateSessionPermSet` as a TRANSIENT session activation
+ * (no PermissionSetAssignment row is inserted), so an "orphaned grant" premise
+ * is structurally impossible.
+ */
+interface FlowActionCallSummary {
+  readonly actionType: string | null;
+  readonly actionName: string | null;
+}
+
+/**
+ * Collect a `{actionType, actionName}` summary for EVERY `<actionCalls>`
+ * element (apex AND non-apex), in source order, for the flow node properties.
+ * This is independent of {@link buildActionCallEdges} (which emits `callsApex`
+ * edges only for `actionType=apex`): the property list documents the full set
+ * of action-call elements so a consumer can identify the element type even when
+ * no edge is warranted.
+ */
+const collectActionCallSummaries = (
+  rootObj: Record<string, unknown>,
+): FlowActionCallSummary[] => {
+  const out: FlowActionCallSummary[] = [];
+  for (const call of toArray(rootObj['actionCalls'])) {
+    if (typeof call !== 'object' || call === null) continue;
+    const callObj = call as Record<string, unknown>;
+    out.push({
+      actionType: toNonEmptyString(callObj['actionType']),
+      actionName: toNonEmptyString(callObj['actionName']),
+    });
+  }
+  return out;
+};
+
+/**
  * Build `readsFrom` edges from `<recordLookups>` elements. Each lookup
  * names a target SObject via its `<object>` child, which becomes the
  * edge's `toId` as `CustomObject:{object}`.
@@ -390,6 +539,76 @@ const buildRecordLookupEdges = (
  * edge whose target the importer flags `targetMissing` — harmless, since the
  * consumer only queries edges to the modeled field it was asked about.
  */
+/**
+ * The literal-scalar `<value>` wrapper keys, in source-precedence order.
+ * Mirrors the right-value wrappers {@link parseFlowConditionTriplet}
+ * recognises. A value carried under any of these is a *literal* the flow
+ * assigns verbatim (e.g. `<stringValue>Completed</stringValue>` →
+ * `'Completed'`); a value under `<elementReference>` is a *reference* to a
+ * variable / formula / `$Record.Field` and is NOT a statically-resolvable
+ * literal.
+ */
+const ASSIGNED_VALUE_LITERAL_WRAPPERS = [
+  'stringValue',
+  'numberValue',
+  'booleanValue',
+  'dateValue',
+  'dateTimeValue',
+] as const;
+
+/** Discriminates a parsed `<inputAssignments><value>` payload. */
+type AssignedValue = {
+  /** The unwrapped scalar, inspectable in BOTH kinds. */
+  readonly value: string;
+  /**
+   * `'literal'` when the value came from a scalar wrapper
+   * (stringValue/numberValue/…) — statically comparable. `'reference'`
+   * when it came from `<elementReference>` (a variable/formula/$Record
+   * path) — NOT a literal, so consumers must not string-match it against
+   * a removed picklist value.
+   */
+  readonly kind: 'literal' | 'reference';
+};
+
+/**
+ * Parse the `<value>` child of an `<inputAssignments>` entry into its
+ * unwrapped scalar plus a `kind` discriminator. Reuses the scalar-unwrap
+ * MECHANISM of {@link parseFlowConditionTriplet} but — unlike that helper,
+ * which collapses every wrapper into one `value` — records WHICH wrapper
+ * matched, because that distinction is load-bearing downstream: an
+ * `<elementReference>` assignment (e.g. `$Record.FormAssembly_Multi_Accom__c`)
+ * must not be mistaken for a literal when a consumer checks whether a flow
+ * assigns a specific picklist value.
+ *
+ * Returns `null` when no `<value>` is present or it carries no recognised
+ * scalar (the edge is still emitted, just without value properties).
+ */
+const parseAssignedValue = (
+  assignment: Record<string, unknown>,
+): AssignedValue | null => {
+  const rawValue = unwrapSingle(assignment['value']);
+  if (typeof rawValue !== 'object' || rawValue === null) {
+    // A bare scalar `<value>Foo</value>` (uncommon for inputAssignments)
+    // is treated as a literal.
+    if (rawValue !== undefined && rawValue !== null && rawValue !== '') {
+      return { value: String(rawValue), kind: 'literal' };
+    }
+    return null;
+  }
+  const wrapper = rawValue as Record<string, unknown>;
+  for (const key of ASSIGNED_VALUE_LITERAL_WRAPPERS) {
+    const v = unwrapSingle(wrapper[key]);
+    if (v !== undefined && v !== null && v !== '') {
+      return { value: String(v), kind: 'literal' };
+    }
+  }
+  const ref = unwrapSingle(wrapper['elementReference']);
+  if (ref !== undefined && ref !== null && ref !== '') {
+    return { value: String(ref), kind: 'reference' };
+  }
+  return null;
+};
+
 const buildInputAssignmentEdges = (
   flowId: string,
   element: Record<string, unknown>,
@@ -403,12 +622,22 @@ const buildInputAssignmentEdges = (
   for (let j = 0; j < assignments.length; j += 1) {
     const assignment = assignments[j];
     if (typeof assignment !== 'object' || assignment === null) continue;
-    const field = toNonEmptyString(
-      (assignment as Record<string, unknown>)['field'],
-    );
+    const assignmentObj = assignment as Record<string, unknown>;
+    const field = toNonEmptyString(assignmentObj['field']);
     if (field === null) {
       warnings.push(`${elementLabel}.<inputAssignments>[${j}] has no <field>`);
       continue;
+    }
+    // R2-1: capture the assigned <value> so a consumer (e.g.
+    // what_if_remove_picklist_value) can tell whether a flow maps the
+    // field to a specific picklist value. `assignedValueKind` keeps the
+    // literal-vs-reference distinction: an `<elementReference>` is a
+    // variable/formula, NOT a statically-comparable literal.
+    const assigned = parseAssignedValue(assignmentObj);
+    const properties: Record<string, unknown> = { operation };
+    if (assigned !== null) {
+      properties['assignedValue'] = assigned.value;
+      properties['assignedValueKind'] = assigned.kind;
     }
     edges.push({
       fromId: flowId,
@@ -416,7 +645,7 @@ const buildInputAssignmentEdges = (
       edgeType: 'writesTo',
       confidence: 'parsed',
       source: EDGE_SOURCE,
-      properties: { operation },
+      properties,
     });
   }
   return edges;
@@ -489,7 +718,10 @@ const resolveInputReferenceObject = (
   const inputRef = toNonEmptyString(dmlObj['inputReference']);
   if (inputRef !== '$Record' && inputRef !== '$Record__Prior') return null;
   const start = extractStartProperties(rootObj);
-  if (start.triggerType === null || !RECORD_TRIGGER_TYPES.has(start.triggerType)) {
+  if (
+    start.triggerType === null ||
+    !RECORD_SCOPED_TRIGGER_TYPES.has(start.triggerType)
+  ) {
     return null;
   }
   return start.triggerObject;
@@ -940,6 +1172,7 @@ export const extractFlow = async (
   const apiVersion = Number.isFinite(apiVersionParsed) ? apiVersionParsed : null;
   const startProps = extractStartProperties(rootObj);
   const faultCoverage = analyzeFaultCoverage(rootObj);
+  const actionCallSummaries = collectActionCallSummaries(rootObj);
 
   // Semantic walk: collect edges from every body section. Each builder
   // pushes onto `warnings` instead of throwing so one bad element
@@ -1007,6 +1240,31 @@ export const extractFlow = async (
       triggerObject: startProps.triggerObject,
       triggerType: startProps.triggerType,
       recordTriggerType: startProps.recordTriggerType,
+      // T7: design-time schedule from <start><schedule>. startTime is UTC
+      // (trailing Z); local run time needs the org timezone (not in vault).
+      scheduleFrequency: startProps.scheduleFrequency,
+      scheduleStartDate: startProps.scheduleStartDate,
+      scheduleStartTime: startProps.scheduleStartTime,
+      // bundle-4(c): async post-commit scheduled paths from
+      // <start><scheduledPaths>. `scheduledPathTypes` lists each declared
+      // <pathType> in source order; `runAsyncAfterCommit` is the convenience
+      // flag explain_flow.buildFaultRollback reads to tell an async post-commit
+      // RecordAfterSave flow (fault cannot roll back the committed save) from a
+      // synchronous one.
+      scheduledPathTypes: startProps.scheduledPathTypes,
+      runAsyncAfterCommit: startProps.runAsyncAfterCommit,
+      // True when <start> carries a direct <connector> child (not inside
+      // <scheduledPaths>). A false value on a RecordAfterSave flow that has
+      // scheduledPaths means the flow is scheduled-only (async) — it never
+      // executes synchronously in the triggering transaction. The SOE tools
+      // use this to place these flows in post-save-async rather than
+      // post-save-flows.
+      hasImmediateConnector: startProps.hasImmediateConnector,
+      // bundle-4(a): every <actionCalls> element's {actionType, actionName}
+      // (apex AND non-apex). Apex calls also get a `callsApex` edge; non-apex
+      // action types (e.g. activateSessionPermSet) emit no edge, so this list
+      // is the only place explain_flow can identify the faultable element type.
+      actionCalls: actionCallSummaries,
       flowExtractionWarnings: warnings,
       conditions: conditionsMirror,
       faultableElementCount: faultCoverage.faultableElementCount,

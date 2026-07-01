@@ -83,13 +83,69 @@ export const tokenizeIdentifier = (raw: string): string[] => {
 };
 
 /**
+ * Ordered, high-precision PHRASE synonyms (F1). Each entry rewrites a
+ * multi-word business phrase to its single Salesforce-canonical token BEFORE
+ * tokenization splits on non-alphanumerics. Applied longest-phrase-first so
+ * "social security number" wins over "social security". Every key is
+ * multi-word and unambiguous — no bare single tokens (a bare `social -> ssn`
+ * would wrongly collapse "social media"/"social login" and pollute recall).
+ *
+ * Opt-in (default OFF): the phrase pass runs ONLY when a caller asks for it
+ * via `tokenizeText(raw, { expandPhrases: true })`. It is applied to QUERY
+ * text (so an "SSN" question matches a `Student_SSN__c` field) but NOT to the
+ * router's doc corpus — rewriting the corpus shifts every term's IDF and tips
+ * borderline gold queries out of the top-K, so the corpus is tokenized
+ * verbatim. The keys are phrase-anchored so a "Social Media Campaign" label is
+ * left intact even when expansion is on.
+ */
+const PHRASE_SYNONYMS: readonly (readonly [string, string])[] = (
+  [
+    ['social security number', 'ssn'],
+    ['social security', 'ssn'],
+    ['date of birth', 'dob'],
+    ['postal code', 'zip'],
+    ['zip code', 'zip'],
+  ] as [string, string][]
+).sort((a, b) => b[0].length - a[0].length);
+
+/**
+ * Apply the ordered phrase-synonym rewrites to a lowercased string. Longest
+ * phrase first; each phrase is replaced globally with its canonical token.
+ * Word-boundary anchored so "zip code" matches but a substring inside another
+ * word does not.
+ */
+const applyPhraseSynonyms = (lower: string): string => {
+  let out = lower;
+  for (const [phrase, canonical] of PHRASE_SYNONYMS) {
+    if (!out.includes(phrase)) continue;
+    const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`\\b${escaped}\\b`, 'g'), canonical);
+  }
+  return out;
+};
+
+/**
  * Tokenize human query / label text into lowercase tokens, dropping stop
  * words and sub-2-char tokens. Splits on any non-alphanumeric run.
+ *
+ * The ordered {@link PHRASE_SYNONYMS} pass is OPT-IN (default OFF): pass
+ * `{ expandPhrases: true }` to collapse multi-word business phrases
+ * ("social security number" -> `ssn`) to their canonical token before
+ * splitting. Expansion belongs on QUERY text and on find-semantic-field's
+ * own label corpus, NEVER on the router's doc corpus — rewriting the corpus
+ * shifts every term's TF-IDF/IDF weight and tips borderline gold queries out
+ * of the top-K. Default (no opts) tokenizes the raw text verbatim.
  */
-export const tokenizeText = (raw: string): string[] => {
+export const tokenizeText = (
+  raw: string,
+  opts?: { readonly expandPhrases?: boolean },
+): string[] => {
   if (raw.length === 0) return [];
+  const lowered = raw.toLowerCase();
+  const normalized =
+    opts?.expandPhrases === true ? applyPhraseSynonyms(lowered) : lowered;
   const tokens: string[] = [];
-  for (const piece of raw.split(/[^A-Za-z0-9]+/)) {
+  for (const piece of normalized.split(/[^A-Za-z0-9]+/)) {
     const lower = piece.toLowerCase();
     if (lower.length < 2) continue;
     if (STOP_WORDS.has(lower)) continue;

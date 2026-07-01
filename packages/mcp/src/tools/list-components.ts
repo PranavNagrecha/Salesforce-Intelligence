@@ -20,16 +20,21 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { STANDARD_OBJECT_FIELD_SNAPSHOT } from '@sf-intelligence/extractors';
-import { listNodesByType } from '@sf-intelligence/graph';
+import { countNodesByType, listNodesByType } from '@sf-intelligence/graph';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { listValidationRuleDocsForParent } from './component-doc-fallback.js';
 import { buildEnumerationCoverageCaveat, type CoverageCaveat } from './coverage-trust.js';
+import { argsFingerprint, decodeCursor, encodeCursor, PAGE_CURSOR_VERSION } from './page-cursor.js';
+
+const LIST_COMPONENTS_TOOL = 'sfi.list_components';
 
 const STANDARD_OBJECT_API_NAMES = new Set<string>(STANDARD_OBJECT_FIELD_SNAPSHOT);
 
@@ -230,6 +235,10 @@ export const listComponentsInputSchema = z.object({
   parentId: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(LIST_MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
+  // CR-22 continuation cursor from a prior page's nextCursor. `o` already IS the
+  // SQL offset (list_components pages listNodesByType directly), so this is a
+  // SINGLE-axis cursor — no separate scan offset.
+  cursor: z.string().min(1).optional(),
   // P4-interface-impl boolean filters (ApexClass only). String-coercing so a
   // host that stringifies the arg still works.
   isQueueable: coercedOptionalBoolean,
@@ -240,6 +249,12 @@ export const listComponentsInputSchema = z.object({
   hasInvocableMethod: coercedOptionalBoolean,
   hasAuraEnabledMethod: coercedOptionalBoolean,
   isTest: coercedOptionalBoolean,
+  /** Flow metadata: exact match on `properties.triggerObject`. */
+  triggerObject: z.string().min(1).optional(),
+  /** Flow metadata: exact match on `properties.status` (e.g. Active). */
+  status: z.string().min(1).optional(),
+  /** Flow metadata: keep only record-triggered flows (`triggerType` starts with Record). */
+  recordTriggered: coercedOptionalBoolean,
 });
 
 /** Parsed input shape, inferred from `listComponentsInputSchema`. */
@@ -261,6 +276,18 @@ export interface ListComponentsOutput {
   readonly limit: number;
   readonly offset: number;
   readonly hasMore: boolean;
+  /**
+   * B-GRAPH-BUILD: the TRUE total count of matching nodes in the graph, from
+   * `countNodesByType` — always present, regardless of pagination. A caller that
+   * needs the org-wide count for a type MUST read this field rather than
+   * `components.length`, which is bounded by `limit` and further trimmed by the
+   * byte-budget guard (`fitNodesToBudget`) to ~38 KB per page. For example,
+   * `list_components(type='FlexiPage')` with the default limit=50 returns 39 nodes
+   * in `components` (payload budget exhausted) but `totalCount: 86` — the
+   * authoritative vault count. With a `parentId` or property filter the count
+   * reflects the same narrow, so it is always exact for the given filter.
+   */
+  readonly totalCount: number;
   /** True only when the page was trimmed to fit the response-size budget. */
   readonly truncated?: boolean;
   /** Human-readable note describing the trim; present only when `truncated`. */
@@ -278,6 +305,32 @@ export interface ListComponentsOutput {
    * inventory is never read as authoritative when the vault is partial.
    */
   readonly coverageCaveat?: CoverageCaveat;
+  /**
+   * CR-22 opaque continuation token, present ONLY when more rows remain past
+   * this page (over `limit` OR byte-trimmed). Echo it back as `cursor` to
+   * resume. Absent on a final page so an in-budget response is byte-identical
+   * to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /**
+   * Cursor-aware pagination metadata, present ONLY when `nextCursor` is. Carries
+   * the TRUE `totalCount` (from countNodesByType) — but ONLY for the unfiltered
+   * `{type}` case; with a `parentId` or property filter the filtered total is
+   * also exact (countNodesByType applies the same WHERE narrows). `returnedCount`
+   * is this page's size; `hasMore` mirrors the legacy `hasMore`.
+   */
+  readonly pageInfo?: PageInfo;
+  /**
+   * Present ONLY for `type: 'CustomField'`. The TRUE count of formula (computed)
+   * fields across the whole `{type}` (and `parentId` narrow), from
+   * `countNodesByType({ isFormula: true })` — NOT a per-page tally, so it is
+   * authoritative regardless of pagination. In DX-source format a formula field
+   * carries its RETURN type (Text, Number, Checkbox, …) in `<type>`, never the
+   * literal `'Formula'`, so a caller grouping by `dataType` alone would conclude
+   * "No Formula fields were found"; this count makes the computed-vs-stored split
+   * explicit (per-field, `properties.isFormula === true` flags the same fields).
+   */
+  readonly formulaFieldCount?: number;
 }
 
 /**
@@ -310,7 +363,37 @@ export const listComponentsHandler = async (
   }
 
   const limit = input.limit ?? LIST_DEFAULT_LIMIT;
-  const offset = input.offset ?? 0;
+  const recordTriggered = input.recordTriggered === true;
+
+  // CR-22: the narrowing args this cursor binds to (everything except the paging
+  // knobs limit/offset/cursor). A token can't be replayed against a different
+  // type / parentId / property filter.
+  const fingerprint = argsFingerprint({
+    type: input.type,
+    ...(input.parentId !== undefined ? { parentId: input.parentId } : {}),
+    ...(input.triggerObject !== undefined ? { triggerObject: input.triggerObject } : {}),
+    ...(input.status !== undefined ? { status: input.status } : {}),
+    ...(recordTriggered ? { recordTriggered: true } : {}),
+    ...Object.fromEntries(
+      APEX_BOOLEAN_FILTERS.flatMap((k) =>
+        input[k] !== undefined ? [[k, input[k]]] : [],
+      ),
+    ),
+  });
+
+  // Resolve the effective offset: an echoed cursor wins over an explicit offset.
+  // `o` already IS the SQL offset (this handler pages listNodesByType directly),
+  // so a resumed cursor reaches node 501+ natively — no separate scan axis.
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: LIST_COMPONENTS_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
 
   // P4-interface-impl: collect whichever async/interface boolean filters were
   // supplied into a single propertyEquals map for the DB-layer JSON filter.
@@ -321,13 +404,24 @@ export const listComponentsHandler = async (
   }
   const hasPropertyFilter = Object.keys(propertyEquals).length > 0;
 
-  const queryResult = await listNodesByType(ctx.graph, input.type, {
-    limit,
-    offset,
+  const propertyStringEquals: Record<string, string> = {};
+  if (input.triggerObject !== undefined) propertyStringEquals.triggerObject = input.triggerObject;
+  if (input.status !== undefined) propertyStringEquals.status = input.status;
+  const hasStringPropertyFilter = Object.keys(propertyStringEquals).length > 0;
+
+  const graphNarrow = {
     ...(input.parentId !== undefined
       ? { parentId: input.parentId as ComponentId }
       : {}),
     ...(hasPropertyFilter ? { propertyEquals } : {}),
+    ...(hasStringPropertyFilter ? { propertyStringEquals } : {}),
+    ...(recordTriggered ? { recordTriggered: true as const } : {}),
+  };
+
+  const queryResult = await listNodesByType(ctx.graph, input.type, {
+    limit,
+    offset,
+    ...graphNarrow,
   });
 
   if (!queryResult.ok) {
@@ -337,19 +431,41 @@ export const listComponentsHandler = async (
     });
   }
 
+  let pageNodes = queryResult.value;
+  let docFallbackNote: string | undefined;
+  if (
+    pageNodes.length === 0 &&
+    offset === 0 &&
+    input.type === 'ValidationRule' &&
+    input.parentId !== undefined
+  ) {
+    const parentApi = objectApiNameFromParentId(input.parentId);
+    if (parentApi !== null) {
+      const docNodes = await listValidationRuleDocsForParent(ctx.vaultRoot, parentApi, {
+        limit,
+        offset: 0,
+      });
+      if (docNodes.length > 0) {
+        pageNodes = [...docNodes];
+        docFallbackNote =
+          'Graph has no ValidationRule nodes for this parent (scoped/partial refresh), but rendered component docs exist on disk — listing those with doc-only confidence; run a full refresh to restore graph edges.';
+      }
+    }
+  }
+
   // Bound the serialized payload so a full-`Node` page can never trip the
   // global response-size guard (which would reject the whole result outright).
   // When the page is too large to serialize under budget, return the largest
   // id-ordered prefix that fits and flag `hasMore` so the caller can page on.
   const { kept, trimmed } = fitNodesToBudget(
-    queryResult.value,
+    pageNodes,
     LIST_PAYLOAD_BUDGET_BYTES,
   );
 
   // `hasMore` is a hint: a full page (length === limit) may have more rows
   // behind it, and a budget-trimmed page definitely does. A partial page that
   // was NOT trimmed is authoritative proof of end-of-list.
-  const hasMore = queryResult.value.length === limit || trimmed;
+  const hasMore = pageNodes.length === limit || trimmed;
 
   // FRESH-02: an empty first page is ambiguous — none in the org, or never
   // retrieved? Use coverage to say which, so the caller never reads a silent
@@ -357,14 +473,14 @@ export const listComponentsHandler = async (
   let retrievalHint: string | undefined;
   // Skip the coverage hint when a property filter is active: an empty result
   // means "no component matched the filter", NOT a type-coverage gap.
-  if (offset === 0 && queryResult.value.length === 0 && !hasPropertyFilter) {
+  if (offset === 0 && pageNodes.length === 0 && !hasPropertyFilter && !hasStringPropertyFilter && !recordTriggered) {
     const cov = summarizeCoverage(ctx.manifest, [input.type]);
     if (cov.notModeledTypes.includes(input.type)) {
       retrievalHint =
         `No \`${input.type}\` in the vault — this type is NOT modeled by the current build, so its absence means "not analyzed", never "none in the org".`;
     } else if (cov.missingCoverage.includes(input.type)) {
       retrievalHint =
-        `No \`${input.type}\` retrieved into this vault — the last refresh did not pull this type (a scoped or errored retrieve). Run \`/sfi-refresh\` (widen \`--types\` to include ${input.type}) before concluding the org has none.`;
+        `No \`${input.type}\` retrieved into this vault — the last refresh did not pull this type (a scoped, errored, or empty retrieve that returned zero rows). A requested-but-empty retrieve is byte-identical to "the org has none", so this is reported as "not retrieved", not proof of absence. Run \`/sfi-refresh\` (widen \`--types\` to include ${input.type}) before concluding the org has none.`;
     } else {
       const parentApi =
         input.parentId !== undefined ? objectApiNameFromParentId(input.parentId) : null;
@@ -384,23 +500,94 @@ export const listComponentsHandler = async (
 
   const coverageCaveat = buildEnumerationCoverageCaveat(ctx, input.type);
 
+  // Formula-field classification (CustomField only). A formula field encodes its
+  // RETURN type (Text, Number, Checkbox, …) in `<type>`, never the literal
+  // `'Formula'`, so a caller that groups a CustomField listing by `dataType`
+  // alone wrongly concludes "No Formula fields were found". Surface the TRUE
+  // computed-field count over the whole `{type}` (and `parentId`) narrow — NOT
+  // a per-page tally — via the derived `isFormula` property the extractor emits.
+  // Only added when the type is CustomField and no property filter is active
+  // (the boolean filters are ApexClass-only). A count failure is non-fatal: the
+  // enumeration still answers, just without the breakdown.
+  let formulaFieldCount: number | undefined;
+  if (input.type === 'CustomField' && !hasPropertyFilter) {
+    const formulaRes = await countNodesByType(ctx.graph, input.type, {
+      ...(input.parentId !== undefined ? { parentId: input.parentId as ComponentId } : {}),
+      propertyEquals: { isFormula: true },
+    });
+    if (formulaRes.ok) formulaFieldCount = formulaRes.value;
+  }
+
+  // B-GRAPH-BUILD: always fetch the TRUE total count via countNodesByType,
+  // applying the SAME narrows as the page query. This is the authoritative
+  // vault count for the given type (and optional parentId / property filter)
+  // and is always emitted as `totalCount` at the top level of the response —
+  // even on the first page, even when the page was NOT trimmed.
+  //
+  // Rationale: `components.length` is bounded by `limit` (default 50) and
+  // further trimmed by `fitNodesToBudget` (~38 KB per page). For types with
+  // large nodes (e.g. FlexiPage with many fieldRefs), the budget is exhausted
+  // at ~39 nodes even though the org has 86. A cascade that reads
+  // `components.length` for a count question reports 39, not 86. The top-level
+  // `totalCount` is the only field that is always correct regardless of page
+  // size, trimming, or pagination. If the count query fails, fall back to a
+  // lower bound (offset + kept.length) rather than failing the whole
+  // enumeration.
+  const totalRes = await countNodesByType(ctx.graph, input.type, graphNarrow);
+  let totalCount = totalRes.ok ? totalRes.value : offset + kept.length;
+  if (docFallbackNote !== undefined) {
+    totalCount = pageNodes.length;
+  }
+
+  // CR-22: emit a continuation cursor ONLY when more rows remain (over `limit`
+  // OR byte-trimmed). The next offset is `offset + kept.length` — `o` IS the SQL
+  // offset, so the resumed page SQL-scans deeper (reaches node 501+ natively).
+  // A final page omits nextCursor/pageInfo, so an in-budget response is
+  // byte-identical to pre-CR-22 (except for the new top-level `totalCount`).
+  let cursorFields: { readonly nextCursor: string; readonly pageInfo: PageInfo } | undefined;
+  if (hasMore) {
+    const nextOffset = offset + kept.length;
+    const nextCursor = encodeCursor({
+      v: PAGE_CURSOR_VERSION,
+      t: LIST_COMPONENTS_TOOL,
+      h: ctx.manifest.sourceTreeHash,
+      o: nextOffset,
+      ...(kept.length > 0 ? { k: (kept[kept.length - 1] as Node).id } : {}),
+      q: fingerprint,
+    });
+    cursorFields = {
+      nextCursor,
+      pageInfo: {
+        totalCount,
+        returnedCount: kept.length,
+        hasMore: true,
+        nextCursor,
+      },
+    };
+  }
+
   return ok({
     data: {
       components: kept,
+      totalCount,
       limit,
       offset,
       hasMore,
       ...(retrievalHint !== undefined ? { retrievalHint } : {}),
+      ...(docFallbackNote !== undefined ? { docFallbackNote } : {}),
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
+      ...(formulaFieldCount !== undefined ? { formulaFieldCount } : {}),
       ...(trimmed
         ? {
             truncated: true as const,
             note:
-              `Response trimmed to ${kept.length} of ${queryResult.value.length} ` +
-              `fetched rows to stay under the ~45 KB MCP response limit. Advance ` +
+              `Response trimmed to ${kept.length} of ${pageNodes.length} ` +
+              `fetched rows to stay under the ~45 KB MCP response limit. Use ` +
+              `totalCount (${totalCount}) for the authoritative vault count; advance ` +
               `with offset += ${kept.length} (or narrow via parentId) for the rest.`,
           }
         : {}),
+      ...(cursorFields !== undefined ? cursorFields : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

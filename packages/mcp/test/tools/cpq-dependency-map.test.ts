@@ -252,3 +252,65 @@ describe('cpqDependencyMapHandler', () => {
     expect(result.error.kind).toBe('component-not-found');
   });
 });
+
+// =============================================================================
+// CR-22 B4 — full-scan output cursor (Option A: scanAllNodesOfTypes + paginate
+// the dependency list). A whole-fits no-cursor full-scan is byte-identical;
+// a truncated page resumes the full set with no gaps / dupes. The single-
+// component path never paginates.
+// =============================================================================
+describe('cpqDependencyMapHandler — output cursor (CR-22)', () => {
+  it('full-scan whole-fits no-cursor call omits all paging fields', async () => {
+    const r = await cpqDependencyMapHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data as unknown as Record<string, unknown>;
+    expect('limit' in d).toBe(false);
+    expect('offset' in d).toBe(false);
+    expect('nextOffset' in d).toBe(false);
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+    expect(d['truncated']).toBe(false);
+  });
+
+  it('single-component path never emits a cursor', async () => {
+    const r = await cpqDependencyMapHandler(ctx, { cpqComponentId: PRICE_RULE_ID });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data as unknown as Record<string, unknown>;
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+    expect('limit' in d).toBe(false);
+  });
+
+  it('a truncated full-scan page emits a cursor that resumes with no gaps or dupes', async () => {
+    const all = await cpqDependencyMapHandler(ctx, { limit: 200 });
+    expect(all.ok).toBe(true);
+    if (!all.ok) return;
+    const key = (d: { fromComponentId: string; referencedFieldToken: string; occurrenceCount: number }) =>
+      `${d.fromComponentId}|${d.referencedFieldToken}|${d.occurrenceCount}`;
+    const fullOrder = all.value.data.dependencies.map(key);
+    expect(fullOrder.length).toBeGreaterThan(2);
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const page: Awaited<ReturnType<typeof cpqDependencyMapHandler>> =
+        await cpqDependencyMapHandler(
+          ctx,
+          cursor !== undefined ? { limit: 1, cursor } : { limit: 1 },
+        );
+      expect(page.ok).toBe(true);
+      if (!page.ok) return;
+      for (const d of page.value.data.dependencies) seen.push(key(d));
+      const nc = page.value.data.nextCursor;
+      if (nc === undefined) break;
+      cursor = nc;
+      guard += 1;
+      if (guard > 50) throw new Error('cursor did not terminate');
+    }
+    expect(seen).toEqual(fullOrder);
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+});

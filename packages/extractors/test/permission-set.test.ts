@@ -264,6 +264,72 @@ describe('extractPermissionSet', () => {
       }
     });
 
+    // CR-CAP-10: <customPermissions><name>X</name><enabled>true</enabled> grants
+    // a CustomPermission. Element name VERIFIED against the real edu-org vault
+    // (NOT the roadmap's <enabledCustomPermissions>).
+    it('emits a grantedBy edge to CustomPermission for an enabled customPermissions block', async () => {
+      const xml = `<?xml version="1.0"?>
+<PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
+  <label>Test</label>
+  <customPermissions>
+    <enabled>true</enabled>
+    <name>SkipValidation</name>
+  </customPermissions>
+</PermissionSet>`;
+      const { dir, path } = await writePermsetXml(
+        'CustomPermGrant.permissionset-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractPermissionSet(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const edge = result.value.edges.find((e) => e.toId === 'CustomPermission:SkipValidation');
+        expect(edge).toBeDefined();
+        if (!edge) return;
+        expect(edge.fromId).toBe('PermissionSet:CustomPermGrant');
+        expect(edge.edgeType).toBe('grantedBy');
+        expect(edge.confidence).toBe('declared');
+        expect(edge.properties['enabled']).toBe(true);
+        expect(result.value.nodes[0]?.properties['customPermissionGrantCount']).toBe(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    // CR-CAP-10 honesty: a disabled grant confers nothing. The vault has zero
+    // enabled=false blocks in real source, so this synthetic case is the ONLY
+    // proof the continue-guard is wired (a missing guard would still pass the
+    // happy-path test above).
+    it('skips a customPermissions block where enabled is false', async () => {
+      const xml = `<?xml version="1.0"?>
+<PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
+  <label>Test</label>
+  <customPermissions>
+    <enabled>false</enabled>
+    <name>Off_Perm</name>
+  </customPermissions>
+  <customPermissions>
+    <enabled>true</enabled>
+    <name>On_Perm</name>
+  </customPermissions>
+</PermissionSet>`;
+      const { dir, path } = await writePermsetXml(
+        'CustomPermDisabled.permissionset-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractPermissionSet(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const cpEdges = result.value.edges.filter((e) => e.toId.startsWith('CustomPermission:'));
+        expect(cpEdges.map((e) => e.toId)).toEqual(['CustomPermission:On_Perm']);
+        expect(result.value.nodes[0]?.properties['customPermissionGrantCount']).toBe(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
     it('collects only enabled user permissions, sorted alphabetically', async () => {
       const xml = `<?xml version="1.0"?>
 <PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">

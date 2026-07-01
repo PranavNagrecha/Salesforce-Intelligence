@@ -160,7 +160,7 @@ describe('extractQueue', () => {
   });
 
   describe('optional properties', () => {
-    it('defaults missing optional fields to null and memberCount to 0', async () => {
+    it('defaults missing optional fields to null and memberCount to 0 with empty memberEmails', async () => {
       const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Queue xmlns="http://soap.sforce.com/2006/04/metadata">
   <name>Bare</name>
@@ -178,10 +178,152 @@ describe('extractQueue', () => {
           description: null,
           email: null,
           doesSendEmailToMembers: false,
+          doesIncludeBosses: false,
           queueRoutingConfig: null,
           sobjectTypeCount: 0,
           memberCount: 0,
+          memberEmails: [],
         });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('reads doesIncludeBosses=true and memberCount=3 from FM_Approvals_Graduate real-org XML shape', async () => {
+      // Real-org XML: <queueMembers><users><user> nesting — the old code
+      // read rootObj['members'] (always empty) and never read doesIncludeBosses.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Queue xmlns="http://soap.sforce.com/2006/04/metadata">
+    <doesIncludeBosses>true</doesIncludeBosses>
+    <doesSendEmailToMembers>false</doesSendEmailToMembers>
+    <name>FM - Approvals - Graduate</name>
+    <queueMembers>
+        <users>
+            <user>cjones2@neutral-org.example</user>
+            <user>lbraverman@neutral-org.example</user>
+            <user>spoczos@neutral-org.example</user>
+        </users>
+    </queueMembers>
+    <queueSobject>
+        <sobjectType>Utilization__c</sobjectType>
+    </queueSobject>
+</Queue>`;
+      const { dir, path } = await writeTempQueueXml('FM_Approvals_Graduate.queue-meta.xml', xml);
+      try {
+        const result = await extractQueue(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0];
+        expect(node).toBeDefined();
+        if (!node) return;
+        expect(node.id).toBe('Queue:FM_Approvals_Graduate');
+        expect(node.properties['memberCount']).toBe(3);
+        expect(node.properties['doesIncludeBosses']).toBe(true);
+        expect(node.properties['memberEmails']).toEqual([
+          'cjones2@neutral-org.example',
+          'lbraverman@neutral-org.example',
+          'spoczos@neutral-org.example',
+        ]);
+        // hasMember edges for each declared user member
+        const memberEdges = result.value.edges.filter((e) => e.edgeType === 'hasMember');
+        expect(memberEdges).toHaveLength(3);
+        const memberTargets = memberEdges.map((e) => e.toId).sort();
+        expect(memberTargets).toEqual([
+          'User:cjones2@neutral-org.example',
+          'User:lbraverman@neutral-org.example',
+          'User:spoczos@neutral-org.example',
+        ]);
+        for (const edge of memberEdges) {
+          expect(edge.fromId).toBe('Queue:FM_Approvals_Graduate');
+          expect(edge.edgeType).toBe('hasMember');
+          expect(edge.confidence).toBe('declared');
+          expect(edge.source).toBe('queue-extractor');
+          expect(edge.properties).toEqual({ memberKind: 'user' });
+        }
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('reads memberCount=7 from ME_Article_Approval_Queue real-org XML shape', async () => {
+      // Verifies that the <queueMembers><users><user> nesting is correctly
+      // navigated for a queue with 7 declared user members.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Queue xmlns="http://soap.sforce.com/2006/04/metadata">
+    <doesIncludeBosses>true</doesIncludeBosses>
+    <doesSendEmailToMembers>false</doesSendEmailToMembers>
+    <name>ME_Article Approval Queue</name>
+    <queueMembers>
+        <users>
+            <user>wnettleton@neutral-org.example</user>
+            <user>cyang@neutral-org.example</user>
+            <user>lcady@neutral-org.example</user>
+            <user>mburke@neutral-org.example</user>
+            <user>nmcquade@neutral-org.example</user>
+            <user>phoeg@neutral-org.example</user>
+            <user>tfunk@neutral-org.example</user>
+        </users>
+    </queueMembers>
+    <queueSobject>
+        <sobjectType>KnowledgeArticleVersion</sobjectType>
+    </queueSobject>
+</Queue>`;
+      const { dir, path } = await writeTempQueueXml('ME_Article_Approval_Queue.queue-meta.xml', xml);
+      try {
+        const result = await extractQueue(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0];
+        expect(node).toBeDefined();
+        if (!node) return;
+        expect(node.id).toBe('Queue:ME_Article_Approval_Queue');
+        expect(node.properties['memberCount']).toBe(7);
+        expect(node.properties['doesIncludeBosses']).toBe(true);
+        const memberEdges = result.value.edges.filter((e) => e.edgeType === 'hasMember');
+        expect(memberEdges).toHaveLength(7);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('reads memberCount=2 and emits hasMember edges for Clinical_Instruction_Payment_Approval real-org XML shape', async () => {
+      // Verifies v1.2 member resolution: memberEmails array on node properties
+      // and hasMember edges emitted for each <user> element.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Queue xmlns="http://soap.sforce.com/2006/04/metadata">
+    <doesIncludeBosses>true</doesIncludeBosses>
+    <doesSendEmailToMembers>false</doesSendEmailToMembers>
+    <name>Clinical Instruction Payment Approval</name>
+    <queueMembers>
+        <users>
+            <user>jsherman@neutral-org.example</user>
+            <user>tlackraj@neutral-org.example</user>
+        </users>
+    </queueMembers>
+    <queueSobject>
+        <sobjectType>Payment__c</sobjectType>
+    </queueSobject>
+</Queue>`;
+      const { dir, path } = await writeTempQueueXml('Clinical_Instruction_Payment_Approval.queue-meta.xml', xml);
+      try {
+        const result = await extractQueue(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0];
+        expect(node).toBeDefined();
+        if (!node) return;
+        expect(node.id).toBe('Queue:Clinical_Instruction_Payment_Approval');
+        expect(node.properties['memberCount']).toBe(2);
+        const memberEmails = node.properties['memberEmails'] as string[];
+        expect(memberEmails).toContain('jsherman@neutral-org.example');
+        expect(memberEmails).toContain('tlackraj@neutral-org.example');
+        const memberEdges = result.value.edges.filter((e) => e.edgeType === 'hasMember');
+        expect(memberEdges).toHaveLength(2);
+        const memberTargets = memberEdges.map((e) => e.toId).sort();
+        expect(memberTargets).toEqual([
+          'User:jsherman@neutral-org.example',
+          'User:tlackraj@neutral-org.example',
+        ]);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

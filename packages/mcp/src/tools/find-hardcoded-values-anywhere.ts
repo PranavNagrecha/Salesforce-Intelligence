@@ -10,7 +10,10 @@
  *     `properties.qualityIssues[]` array on ApexClass / ApexTrigger
  *     nodes for the four hardcoded-literal rules (`hardcoded-id`,
  *     `hardcoded-email`, `hardcoded-username`,
- *     `hardcoded-sandbox-test-data`).
+ *     `hardcoded-sandbox-test-data`). When `category` is `email` or
+ *     `value` contains `@`, ALSO scans raw `.cls`/`.trigger` source
+ *     files directly as a fallback so emails added after the vault was
+ *     built are never silently missed (CR-07 honesty-gap fix).
  *   - **Formula** (CustomField formula expressions): scans the
  *     `properties.formula` string for ID-shape, email-shape, date-
  *     shape, and (when `value` is specified) exact-substring matches.
@@ -42,6 +45,10 @@
  *     composes their existing v2.1 `qualityIssues[]` findings for the
  *     four hardcoded-literal rules. When `value` is specified, also
  *     filters the `explanation` field to substring-match the value.
+ *     For `email` category or an `@`-bearing `value`, additionally
+ *     scans raw source files so the graph's pre-computed findings do
+ *     not create a blind spot for production classes updated after the
+ *     last vault refresh.
  *   - For formula scope: walks CustomField nodes whose
  *     `properties.formula` is non-null, applies the per-category
  *     regex (or substring match when `value` is specified).
@@ -64,25 +71,32 @@
  *   - `limit` defaults to 100 and is capped at 500.
  */
 
+import { readFile } from 'node:fs/promises';
+import { basename } from 'node:path';
+
 import type {
   ComponentId,
   ComponentType,
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listNodesByType } from '@sf-intelligence/graph';
+import { collectVaultSourceFiles } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
 import { mergeInputAliases } from './input-aliases.js';
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { fullScanTruncationNote } from './scan-cap.js';
 
 const MAX_LIMIT = 500;
 const DEFAULT_LIMIT = 100;
-const PAGE_SIZE = 500;
-const MAX_PAGES = 20;
+
+const FIND_HARDCODED_ANYWHERE_TOOL = 'sfi.find_hardcoded_values_anywhere';
 
 /** Salesforce ID regex per `SemanticSearchSemantics.md` § "Salesforce ID pattern". */
 const SALESFORCE_ID_REGEX = /\b0[0-9a-zA-Z]{14}([0-9a-zA-Z]{3})?\b/g;
@@ -103,12 +117,101 @@ const HARDCODED_APEX_RULES: ReadonlySet<string> = new Set([
   'hardcoded-sandbox-test-data',
 ]);
 
+/** Apex source file suffixes for the CR-07 email fallback source scan. */
+const APEX_SOURCE_SUFFIXES = ['.cls', '.trigger'] as const;
+
+/**
+ * CR-07: source-file email fallback. Scans raw `.cls`/`.trigger` files
+ * for email-shaped string literals. This catches emails in production
+ * classes that were added AFTER the last vault refresh (so their
+ * `qualityIssues` in the graph are stale / missing the `hardcoded-email`
+ * finding). Called only when `category === 'email'` or the `value` filter
+ * contains `@` — the two cases where the caller is explicitly hunting emails.
+ *
+ * De-duplication against graph-sourced findings is not performed here;
+ * the comparator on the output sort ({@link compareMatches}) is a STRICT
+ * TOTAL order over (componentId, source, location, category, matchedValue,
+ * contextSnippet), so duplicate rows from a stale-graph/fresh-source race
+ * are possible but rare and clearly labelled.
+ *
+ * Returns an empty array on any I/O failure (fire-and-forget fallback).
+ */
+const scanApexSourceForEmails = async (
+  vaultRoot: string,
+  valueFilter: string | undefined,
+): Promise<HardcodedValueAnywhereMatch[]> => {
+  // Inline email regex — same shape as EMAIL_REGEX but as a new instance
+  // so `lastIndex` reset is isolated from the formula-scope scan.
+  const EMAIL_RE = /\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b/g;
+  let files: Awaited<ReturnType<typeof collectVaultSourceFiles>>;
+  try {
+    files = await collectVaultSourceFiles(vaultRoot, { suffixes: APEX_SOURCE_SUFFIXES });
+  } catch {
+    return [];
+  }
+  const hits: HardcodedValueAnywhereMatch[] = [];
+  for (const file of files) {
+    let source: string;
+    try {
+      source = await readFile(file.absolutePath, 'utf-8');
+    } catch {
+      continue;
+    }
+    // Derive apiName from the file's basename (strip suffix).
+    const name = basename(file.absolutePath);
+    const apiName = name.endsWith('.trigger')
+      ? name.slice(0, -'.trigger'.length)
+      : name.slice(0, -'.cls'.length);
+    const componentType: 'ApexClass' | 'ApexTrigger' = name.endsWith('.trigger')
+      ? 'ApexTrigger'
+      : 'ApexClass';
+    const componentId: ComponentId = `${componentType}:${apiName}` as ComponentId;
+
+    // Strip line comments and block comments to avoid matching email-shaped
+    // text in /* ... */ or // comments; keep string literals (we want them).
+    const stripped = source.replace(/\/\/[^\n]*/g, (m) => ' '.repeat(m.length))
+      .replace(/\/\*[\s\S]*?\*\//g, (m) => ' '.repeat(m.length));
+
+    EMAIL_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = EMAIL_RE.exec(stripped)) !== null) {
+      const email = m[0];
+      // Apply value filter if present.
+      if (valueFilter !== undefined && !email.includes(valueFilter)) continue;
+      const lineNum = source.slice(0, m.index).split('\n').length;
+      const snippet = snippetAround(source, m.index, email.length);
+      hits.push({
+        componentId,
+        componentType,
+        apiName,
+        source: 'apex',
+        location: `line ${lineNum}`,
+        matchedValue: email,
+        confidence: 'heuristic',
+        category: 'email',
+        contextSnippet: snippet,
+        inTestClass: false,
+      });
+    }
+  }
+  return hits;
+};
+
 const NUMERIC_FP_DISCLOSURE =
   'the numeric category has very high false-positive rate — loop counters, array indices, and arithmetic constants all match. The category is suppressed from default searches; opt in explicitly only when looking for specific hardcoded numbers.';
 const ID_FP_DISCLOSURE =
   'the ID-shape search matches Salesforce-id-shaped strings filtered to a known-key-prefix allowlist (~40 prefixes). Arbitrary 15-character alphanumeric strings outside the allowlist are not returned. Strings shaped like an ID that aren\'t actually IDs (e.g., session keys, hashes) may still match if they happen to start with a known key prefix.';
 const TEST_CLASS_REFUSAL_DISCLOSURE =
   'matches in `@isTest`-annotated classes may be intentional test fixtures rather than production hardcoded values; verify the context before treating as a bug.';
+/**
+ * CR-07: source-scan fallback disclosure. Surfaces when the email/value-with-@
+ * scan also ran the raw source-file pass (supplementing the graph qualityIssues).
+ * The source scan is comment-stripped but not string-isolated — it will surface
+ * email-shaped tokens inside multi-line string concatenations or Javadoc-style
+ * param annotations. Treat as heuristic, not authoritative.
+ */
+const APEX_SOURCE_EMAIL_SCAN_DISCLOSURE =
+  'For the email category, Apex source files were also scanned directly (CR-07 fallback) to catch addresses in classes updated after the last vault refresh. Source-scan matches are comment-stripped but not string-boundary-isolated — email-shaped tokens in @param JavaDoc or string-concatenation expressions may surface as false positives. Confidence: heuristic.';
 
 /**
  * Zod schema for the `sfi.find_hardcoded_values_anywhere` tool input.
@@ -133,6 +236,9 @@ const findHardcodedValuesAnywhereInputBaseSchema = z.object({
     )
     .optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
+  // CR-22: page cursor for walking the full match list when truncated.
+  offset: z.number().int().min(0).optional(),
+  cursor: z.string().min(1).optional(),
 });
 
 export const findHardcodedValuesAnywhereInputSchema = z.preprocess(
@@ -178,6 +284,24 @@ export interface FindHardcodedValuesAnywhereOutput {
   }>;
   readonly boundaries: readonly string[];
   readonly truncated: boolean;
+  /**
+   * Page size applied to this response. Present ONLY on a PAGED response
+   * (`truncated` or a resumed `offset > 0`); omitted on a whole-fits no-cursor
+   * call so that response stays byte-identical to the pre-CR-22 shape.
+   */
+  readonly limit?: number;
+  /** Zero-based offset of the first returned match. Present only when paged (see `limit`). */
+  readonly offset?: number;
+  /** Offset to pass on the next call to fetch the following page. Present only when `truncated`. */
+  readonly nextOffset?: number;
+  /**
+   * CR-22 opaque continuation token, present ONLY when this page is truncated
+   * (more matches remain). Echo it back as `cursor` to resume. Absent on a
+   * complete page so an in-budget response is byte-identical to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
 }
 
 const RULE_TO_CATEGORY: Readonly<
@@ -304,6 +428,19 @@ const scanText = (
 const isTestClass = (node: Node): boolean =>
   node.type === 'ApexClass' && node.properties['isTest'] === true;
 
+/**
+ * Comparator: componentId ASC, source ASC, location ASC, then (CR-22) category
+ * ASC, matchedValue ASC, contextSnippet ASC.
+ *
+ * The (componentId, source, location) prefix collides for the formula / VR / WF
+ * corpora because `location` there is per-NODE constant (`field:${id}` /
+ * `rule:${id}`, not position-aware) — so EVERY multi-hit formula node is a tie
+ * cluster, and an offset resume across such a cluster could dup or skip. Adding
+ * category, matchedValue, and the position-bearing `contextSnippet` (the
+ * formula-offset window) makes the order a STRICT TOTAL order so resume is
+ * dup-free / skip-free. (Two rows byte-identical in all six keys are genuine
+ * duplicates and ordering between them is immaterial.)
+ */
 const compareMatches = (
   a: HardcodedValueAnywhereMatch,
   b: HardcodedValueAnywhereMatch,
@@ -312,8 +449,17 @@ const compareMatches = (
     return a.componentId < b.componentId ? -1 : 1;
   if (a.source !== b.source) return a.source < b.source ? -1 : 1;
   if (a.location !== b.location) return a.location < b.location ? -1 : 1;
+  if (a.category !== b.category) return a.category < b.category ? -1 : 1;
+  if (a.matchedValue !== b.matchedValue)
+    return a.matchedValue < b.matchedValue ? -1 : 1;
+  if (a.contextSnippet !== b.contextSnippet)
+    return a.contextSnippet < b.contextSnippet ? -1 : 1;
   return 0;
 };
+
+/** Stable total-order key for the cursor `k` field. */
+const matchKey = (m: HardcodedValueAnywhereMatch): string =>
+  `${m.componentId}|${m.source}|${m.location}|${m.category}|${m.matchedValue}|${m.contextSnippet}`;
 
 /**
  * The `sfi.find_hardcoded_values_anywhere` MCP tool. Scans Apex
@@ -350,61 +496,86 @@ export const findHardcodedValuesAnywhereHandler = async (
 
   const collected: HardcodedValueAnywhereMatch[] = [];
   let sawTestClass = false;
+  // CR-22 B4: track types whose full multi-window scan stopped at the pathological
+  // FULL_SCAN_MAX_NODES cap so the residual incompleteness is disclosed honestly.
+  const incompleteTypes: string[] = [];
+
+  // CR-07: true when the email source-scan fallback was triggered. Set here
+  // so the boundary disclosure fires after the scan completes.
+  let ranApexSourceEmailScan = false;
 
   // --- Apex scope: compose v2.1 qualityIssues[] for hardcoded rules. ---
+  // CR-22 B4: scan EVERY ApexClass / ApexTrigger by paging the SQL OFFSET forward
+  // (window-by-window) so findings on node 501+ are reachable — the old MAX_PAGES
+  // (20) x PAGE_SIZE (500) loop SILENTLY broke at 10k nodes with no disclosure.
   if (scope.has('apex')) {
-    for (const type of ['ApexClass', 'ApexTrigger'] as ComponentType[]) {
-      for (let page = 0; page < MAX_PAGES; page += 1) {
-        const r = await listNodesByType(ctx.graph, type, {
-          limit: PAGE_SIZE,
-          offset: page * PAGE_SIZE,
+    const scan = await scanAllNodesOfTypes(ctx.graph, ['ApexClass', 'ApexTrigger']);
+    if (!scan.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${scan.error.message}`,
+      });
+    }
+    incompleteTypes.push(...scan.value.incompleteTypes);
+    for (const node of scan.value.nodes) {
+      const raw = node.properties['qualityIssues'];
+      if (!Array.isArray(raw)) continue;
+      const inTest = isTestClass(node);
+      for (const rawIssue of raw) {
+        const issue = coerceIssue(rawIssue);
+        if (issue === null) continue;
+        if (!HARDCODED_APEX_RULES.has(issue.rule)) continue;
+        const cat = RULE_TO_CATEGORY[issue.rule] ?? 'string';
+        // Apply category filter on the apex side too.
+        if (categoryFilter !== undefined && cat !== categoryFilter) {
+          continue;
+        }
+        // Apply value filter — substring in the explanation.
+        if (
+          valueFilter !== undefined &&
+          !issue.explanation.includes(valueFilter)
+        ) {
+          continue;
+        }
+        if (inTest) sawTestClass = true;
+        collected.push({
+          componentId: node.id,
+          componentType: node.type,
+          apiName: node.apiName,
+          source: 'apex',
+          location: issue.location,
+          matchedValue: valueFilter ?? issue.explanation,
+          confidence: valueFilter !== undefined ? 'declared' : 'heuristic',
+          category: cat,
+          contextSnippet: issue.explanation,
+          inTestClass: inTest,
         });
-        if (!r.ok) {
-          return err({
-            kind: 'internal',
-            message: `graph query failed: ${r.error.message}`,
-          });
+      }
+    }
+
+    // CR-07: email source-scan fallback — supplement the graph findings with a
+    // direct source-file scan whenever the caller is hunting email addresses.
+    // This catches hardcoded emails in production classes whose `qualityIssues`
+    // were not populated by the extractor (vault built before the email recognizer
+    // was added, or the class was modified after the last refresh).
+    const needEmailSourceScan =
+      categoryFilter === 'email' ||
+      (valueFilter !== undefined && valueFilter.includes('@'));
+    if (needEmailSourceScan) {
+      ranApexSourceEmailScan = true;
+      const sourceHits = await scanApexSourceForEmails(ctx.vaultRoot, valueFilter);
+      // De-dup against graph-sourced findings by (componentId, location, matchedValue).
+      const graphKeys = new Set<string>(
+        collected
+          .filter((m) => m.source === 'apex' && m.category === 'email')
+          .map((m) => `${m.componentId}|${m.location}|${m.matchedValue}`),
+      );
+      for (const hit of sourceHits) {
+        const key = `${hit.componentId}|${hit.location}|${hit.matchedValue}`;
+        if (!graphKeys.has(key)) {
+          collected.push(hit);
+          graphKeys.add(key);
         }
-        if (r.value.length === 0) break;
-        for (const node of r.value) {
-          const raw = node.properties['qualityIssues'];
-          if (!Array.isArray(raw)) continue;
-          const inTest = isTestClass(node);
-          for (const rawIssue of raw) {
-            const issue = coerceIssue(rawIssue);
-            if (issue === null) continue;
-            if (!HARDCODED_APEX_RULES.has(issue.rule)) continue;
-            const cat = RULE_TO_CATEGORY[issue.rule] ?? 'string';
-            // Apply category filter on the apex side too.
-            if (
-              categoryFilter !== undefined &&
-              cat !== categoryFilter
-            ) {
-              continue;
-            }
-            // Apply value filter — substring in the explanation.
-            if (
-              valueFilter !== undefined &&
-              !issue.explanation.includes(valueFilter)
-            ) {
-              continue;
-            }
-            if (inTest) sawTestClass = true;
-            collected.push({
-              componentId: node.id,
-              componentType: node.type,
-              apiName: node.apiName,
-              source: 'apex',
-              location: issue.location,
-              matchedValue: valueFilter ?? issue.explanation,
-              confidence: valueFilter !== undefined ? 'declared' : 'heuristic',
-              category: cat,
-              contextSnippet: issue.explanation,
-              inTestClass: inTest,
-            });
-          }
-        }
-        if (r.value.length < PAGE_SIZE) break;
       }
     }
   }
@@ -420,142 +591,110 @@ export const findHardcodedValuesAnywhereHandler = async (
 
   // --- Formula scope: scan CustomField.properties.formula. ---
   if (scope.has('formula')) {
-    for (let page = 0; page < MAX_PAGES; page += 1) {
-      const r = await listNodesByType(ctx.graph, 'CustomField', {
-        limit: PAGE_SIZE,
-        offset: page * PAGE_SIZE,
+    const scan = await scanAllNodesOfTypes(ctx.graph, ['CustomField']);
+    if (!scan.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${scan.error.message}`,
       });
-      if (!r.ok) {
-        return err({
-          kind: 'internal',
-          message: `graph query failed: ${r.error.message}`,
+    }
+    incompleteTypes.push(...scan.value.incompleteTypes);
+    for (const node of scan.value.nodes) {
+      const formula = node.properties['formula'];
+      if (typeof formula !== 'string' || formula.length === 0) continue;
+      const hits = scanText(
+        stripFormulaComments(formula),
+        categoryFilter,
+        valueFilter,
+      );
+      for (const hit of hits) {
+        collected.push({
+          componentId: node.id,
+          componentType: 'CustomField',
+          apiName: node.apiName,
+          source: 'formula',
+          location: `field:${node.id}`,
+          matchedValue: hit.value,
+          confidence: valueFilter !== undefined ? 'declared' : 'heuristic',
+          category: hit.matchedCategory,
+          contextSnippet: snippetAround(formula, hit.index, hit.value.length),
+          inTestClass: false,
         });
       }
-      if (r.value.length === 0) break;
-      for (const node of r.value) {
-        const formula = node.properties['formula'];
-        if (typeof formula !== 'string' || formula.length === 0) continue;
-        const hits = scanText(
-          stripFormulaComments(formula),
-          categoryFilter,
-          valueFilter,
-        );
-        for (const hit of hits) {
-          collected.push({
-            componentId: node.id,
-            componentType: 'CustomField',
-            apiName: node.apiName,
-            source: 'formula',
-            location: `field:${node.id}`,
-            matchedValue: hit.value,
-            confidence: valueFilter !== undefined ? 'declared' : 'heuristic',
-            category: hit.matchedCategory,
-            contextSnippet: snippetAround(
-              formula,
-              hit.index,
-              hit.value.length,
-            ),
-            inTestClass: false,
-          });
-        }
-      }
-      if (r.value.length < PAGE_SIZE) break;
     }
   }
 
   // --- ValidationRule scope: scan errorConditionFormula. ---
   if (scope.has('validation-rule')) {
-    for (let page = 0; page < MAX_PAGES; page += 1) {
-      const r = await listNodesByType(ctx.graph, 'ValidationRule', {
-        limit: PAGE_SIZE,
-        offset: page * PAGE_SIZE,
+    const scan = await scanAllNodesOfTypes(ctx.graph, ['ValidationRule']);
+    if (!scan.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${scan.error.message}`,
       });
-      if (!r.ok) {
-        return err({
-          kind: 'internal',
-          message: `graph query failed: ${r.error.message}`,
+    }
+    incompleteTypes.push(...scan.value.incompleteTypes);
+    for (const node of scan.value.nodes) {
+      const formula = node.properties['errorConditionFormula'];
+      if (typeof formula !== 'string' || formula.length === 0) continue;
+      const hits = scanText(
+        stripFormulaComments(formula),
+        categoryFilter,
+        valueFilter,
+      );
+      for (const hit of hits) {
+        collected.push({
+          componentId: node.id,
+          componentType: 'ValidationRule',
+          apiName: node.apiName,
+          source: 'validation-rule',
+          location: `rule:${node.id}`,
+          matchedValue: hit.value,
+          confidence: valueFilter !== undefined ? 'declared' : 'heuristic',
+          category: hit.matchedCategory,
+          contextSnippet: snippetAround(formula, hit.index, hit.value.length),
+          inTestClass: false,
         });
       }
-      if (r.value.length === 0) break;
-      for (const node of r.value) {
-        const formula = node.properties['errorConditionFormula'];
-        if (typeof formula !== 'string' || formula.length === 0) continue;
-        const hits = scanText(
-          stripFormulaComments(formula),
-          categoryFilter,
-          valueFilter,
-        );
-        for (const hit of hits) {
-          collected.push({
-            componentId: node.id,
-            componentType: 'ValidationRule',
-            apiName: node.apiName,
-            source: 'validation-rule',
-            location: `rule:${node.id}`,
-            matchedValue: hit.value,
-            confidence: valueFilter !== undefined ? 'declared' : 'heuristic',
-            category: hit.matchedCategory,
-            contextSnippet: snippetAround(
-              formula,
-              hit.index,
-              hit.value.length,
-            ),
-            inTestClass: false,
-          });
-        }
-      }
-      if (r.value.length < PAGE_SIZE) break;
     }
   }
 
   // --- WorkflowRule scope: scan optional formula. ---
   if (scope.has('workflow-rule')) {
-    for (let page = 0; page < MAX_PAGES; page += 1) {
-      const r = await listNodesByType(ctx.graph, 'WorkflowRule', {
-        limit: PAGE_SIZE,
-        offset: page * PAGE_SIZE,
+    const scan = await scanAllNodesOfTypes(ctx.graph, ['WorkflowRule']);
+    if (!scan.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${scan.error.message}`,
       });
-      if (!r.ok) {
-        return err({
-          kind: 'internal',
-          message: `graph query failed: ${r.error.message}`,
+    }
+    incompleteTypes.push(...scan.value.incompleteTypes);
+    for (const node of scan.value.nodes) {
+      const formula = node.properties['formula'];
+      if (typeof formula !== 'string' || formula.length === 0) continue;
+      const hits = scanText(
+        stripFormulaComments(formula),
+        categoryFilter,
+        valueFilter,
+      );
+      for (const hit of hits) {
+        collected.push({
+          componentId: node.id,
+          componentType: 'WorkflowRule',
+          apiName: node.apiName,
+          source: 'workflow-rule',
+          location: `rule:${node.id}`,
+          matchedValue: hit.value,
+          confidence: valueFilter !== undefined ? 'declared' : 'heuristic',
+          category: hit.matchedCategory,
+          contextSnippet: snippetAround(formula, hit.index, hit.value.length),
+          inTestClass: false,
         });
       }
-      if (r.value.length === 0) break;
-      for (const node of r.value) {
-        const formula = node.properties['formula'];
-        if (typeof formula !== 'string' || formula.length === 0) continue;
-        const hits = scanText(
-          stripFormulaComments(formula),
-          categoryFilter,
-          valueFilter,
-        );
-        for (const hit of hits) {
-          collected.push({
-            componentId: node.id,
-            componentType: 'WorkflowRule',
-            apiName: node.apiName,
-            source: 'workflow-rule',
-            location: `rule:${node.id}`,
-            matchedValue: hit.value,
-            confidence: valueFilter !== undefined ? 'declared' : 'heuristic',
-            category: hit.matchedCategory,
-            contextSnippet: snippetAround(
-              formula,
-              hit.index,
-              hit.value.length,
-            ),
-            inTestClass: false,
-          });
-        }
-      }
-      if (r.value.length < PAGE_SIZE) break;
     }
   }
 
   const sorted = collected.sort(compareMatches);
-  const truncated = sorted.length > limit;
-  const slice = sorted.slice(0, limit);
 
   const byCategory = { id: 0, email: 0, date: 0, numeric: 0, string: 0 };
   const bySource = {
@@ -569,11 +708,51 @@ export const findHardcodedValuesAnywhereHandler = async (
     bySource[m.source] += 1;
   }
 
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // The fingerprint covers the NARROWING args — value, category, scope — so a
+  // token minted for one query can't be replayed against another.
+  const fingerprint = argsFingerprint({
+    ...(input.value !== undefined ? { value: input.value } : {}),
+    ...(input.category !== undefined ? { category: input.category } : {}),
+    ...(input.scope !== undefined ? { scope: input.scope } : {}),
+  });
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: FIND_HARDCODED_ANYWHERE_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  const paged = paginateLegacy(sorted, {
+    offset,
+    limit,
+    keyOf: matchKey,
+    binding: {
+      tool: FIND_HARDCODED_ANYWHERE_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const slice = paged.items;
+  const truncated = paged.hasMore;
+  const emitCursor = paged.nextCursor !== null;
+  const isPaged = truncated || offset > 0;
+
   const boundaries: string[] = [];
   if (sorted.length > 0 || categoryFilter !== undefined) {
     if (categoryFilter === 'numeric') boundaries.push(NUMERIC_FP_DISCLOSURE);
     if (categoryFilter === 'id') boundaries.push(ID_FP_DISCLOSURE);
     if (sawTestClass) boundaries.push(TEST_CLASS_REFUSAL_DISCLOSURE);
+    if (ranApexSourceEmailScan) boundaries.push(APEX_SOURCE_EMAIL_SCAN_DISCLOSURE);
+  }
+  // Residual scan-incompleteness only fires for a PATHOLOGICAL type past
+  // FULL_SCAN_MAX_NODES — the normal full scan reaches node 501+ and completes.
+  if (incompleteTypes.length > 0) {
+    boundaries.push(fullScanTruncationNote(incompleteTypes));
   }
 
   return ok({
@@ -584,6 +763,11 @@ export const findHardcodedValuesAnywhereHandler = async (
       bySource,
       boundaries,
       truncated,
+      ...(isPaged ? { limit, offset } : {}),
+      ...(truncated ? { nextOffset: offset + slice.length } : {}),
+      ...(emitCursor
+        ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo }
+        : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

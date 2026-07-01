@@ -1,6 +1,6 @@
 /// <reference types="vitest/globals" />
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -111,6 +111,9 @@ const fullBodyFlowSeed: ExtractionResult = {
         triggerType: 'RecordAfterSave',
         recordTriggerType: 'CreateAndUpdate',
         flowExtractionWarnings: [],
+        faultableElementCount: 3,
+        elementsWithoutFault: 2,
+        hasUnhandledFaults: true,
         conditions: [
           {
             kind: 'flow-recordtrigger',
@@ -292,6 +295,279 @@ const minimalFlowSeed: ExtractionResult = {
   edges: [],
 };
 
+// =============================================================================
+// Seed 3: An async (AsyncAfterCommit scheduled-path) record-triggered flow with
+// an unhandled fault. The post-commit async interview runs in its OWN async
+// transaction AFTER the triggering save commits, so an unhandled fault CANNOT
+// roll the committed save back — it silently aborts and emails only the admin.
+// =============================================================================
+
+const ASYNC_FLOW_ID = 'Flow:AcmeCo_Async_After_Commit';
+
+const asyncAfterCommitFlowSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: ASYNC_FLOW_ID,
+      type: 'Flow',
+      apiName: 'AcmeCo_Async_After_Commit',
+      label: 'AcmeCo Async After Commit',
+      properties: {
+        label: 'AcmeCo Async After Commit',
+        description: null,
+        processType: 'AutoLaunchedFlow',
+        status: 'Active',
+        interviewLabel: null,
+        runInMode: 'DefaultMode',
+        triggerObject: ACCOUNT_ID,
+        triggerType: 'RecordAfterSave',
+        recordTriggerType: 'CreateAndUpdate',
+        // The async post-commit scheduled path the extractor surfaces.
+        scheduledPaths: [{ pathType: 'AsyncAfterCommit' }],
+        flowExtractionWarnings: [],
+        faultableElementCount: 1,
+        elementsWithoutFault: 1,
+        hasUnhandledFaults: true,
+        conditions: [],
+      },
+    }),
+  ],
+  edges: [],
+};
+
+// =============================================================================
+// Seed 4: A screen (user-driven) flow with an unhandled fault. An unhandled
+// fault rolls back the current screen-segment DML (since the last screen nav)
+// and shows the user a flow error screen.
+// =============================================================================
+
+const SCREEN_FLOW_ID = 'Flow:AcmeCo_Move_Documents_Screen';
+
+const screenFlowSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: SCREEN_FLOW_ID,
+      type: 'Flow',
+      apiName: 'AcmeCo_Move_Documents_Screen',
+      label: 'AcmeCo Move Documents Screen',
+      properties: {
+        label: 'AcmeCo Move Documents Screen',
+        description: null,
+        processType: 'Flow',
+        status: 'Active',
+        interviewLabel: null,
+        runInMode: null,
+        triggerObject: null,
+        triggerType: null,
+        recordTriggerType: null,
+        flowExtractionWarnings: [],
+        faultableElementCount: 2,
+        elementsWithoutFault: 2,
+        hasUnhandledFaults: true,
+        conditions: [],
+      },
+    }),
+  ],
+  edges: [],
+};
+
+// =============================================================================
+// Seed 5: A scheduled (autolaunched-on-a-schedule) flow with an unhandled
+// fault. There is no triggering user DML — an unhandled fault aborts the run,
+// emails the admin / last modifier, and the flow retries on the next interval.
+// =============================================================================
+
+const SCHEDULED_FLOW_ID = 'Flow:AcmeCo_Close_Feedbacks_Scheduled';
+
+const scheduledFlowSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: SCHEDULED_FLOW_ID,
+      type: 'Flow',
+      apiName: 'AcmeCo_Close_Feedbacks_Scheduled',
+      label: 'AcmeCo Close Feedbacks Scheduled',
+      properties: {
+        label: 'AcmeCo Close Feedbacks Scheduled',
+        description: null,
+        processType: 'AutoLaunchedFlow',
+        status: 'Active',
+        interviewLabel: null,
+        runInMode: 'SystemModeWithoutSharing',
+        triggerObject: null,
+        triggerType: 'Scheduled',
+        recordTriggerType: null,
+        flowExtractionWarnings: [],
+        faultableElementCount: 1,
+        elementsWithoutFault: 1,
+        hasUnhandledFaults: true,
+        conditions: [],
+      },
+    }),
+  ],
+  edges: [],
+};
+
+// =============================================================================
+// Seed 6: OLD-VAULT shape for an AsyncAfterCommit record-triggered flow —
+// the vault was built before the bundle-4 extractor update that stamps
+// `scheduledPathTypes` / `runAsyncAfterCommit`.  Neither property is present
+// in the node; the extractor only wrote `recordTriggerType: 'Update'` and
+// `triggerType: 'RecordAfterSave'`.  The handler must fall back to scanning
+// the source XML file to detect the <pathType>AsyncAfterCommit</pathType>
+// element and produce rollsBackTransaction=false.
+//
+// The source file is written to disk in beforeAll() using the tempDir vault
+// root, so `sourcePath` resolves relative to ctx.vaultRoot.
+//
+// This is a REAL-ORG-SHAPE fixture: the properties mirror exactly what the
+// live DuckDB vault for Contract_Hours_Approval_Check_Asynchronous contains
+// after a pre-bundle-4 refresh (triggerType=RecordAfterSave,
+// recordTriggerType=Update, hasUnhandledFaults=true, no scheduledPathTypes).
+// =============================================================================
+
+const LEGACY_ASYNC_FLOW_ID = 'Flow:CourseOffering_ContractHours_AsyncCheck';
+// relative to vaultRoot — written to disk in beforeAll()
+const LEGACY_ASYNC_SOURCE_RELPATH =
+  'source/main/default/flows/CourseOffering_ContractHours_AsyncCheck.flow-meta.xml';
+
+const legacyAsyncAfterCommitFlowSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: LEGACY_ASYNC_FLOW_ID,
+      type: 'Flow',
+      apiName: 'CourseOffering_ContractHours_AsyncCheck',
+      label: 'Course Offering Contract Hours Async Check',
+      // sourcePath is vault-root-relative — set after tempDir is known.
+      // Overwritten in beforeAll() via Object.assign.
+      sourcePath: LEGACY_ASYNC_SOURCE_RELPATH,
+      properties: {
+        label: 'Course Offering Contract Hours Async Check',
+        description: 'Checks contract hours after save; runs async.',
+        processType: 'AutoLaunchedFlow',
+        status: 'Active',
+        interviewLabel: null,
+        runInMode: null,
+        triggerObject: 'CustomObject:CourseOffering__c',
+        triggerType: 'RecordAfterSave',
+        recordTriggerType: 'Update',
+        // OLD-VAULT SHAPE: scheduledPathTypes and runAsyncAfterCommit absent —
+        // the vault was built before bundle-4. The handler must fall back to
+        // the source-file XML scan to detect AsyncAfterCommit.
+        flowExtractionWarnings: [],
+        faultableElementCount: 12,
+        elementsWithoutFault: 12,
+        hasUnhandledFaults: true,
+        conditions: [],
+      },
+    }),
+  ],
+  edges: [],
+};
+
+// =============================================================================
+// Seed 7: A screen flow whose sole faultable element is an activateSessionPermSet
+// action — real-org-shape fixture matching Activate_Contact_Delete_Permission.
+// The node has properties.actionCalls populated (bundle-4a vault).  The handler
+// must surface the non-apex action call so the consumer can identify that it is
+// NOT a PermissionSetAssignment DML insert (orphaned-grant scenario impossible).
+// =============================================================================
+
+const SESSION_PERM_FLOW_ID = 'Flow:Activate_Delete_Perm_Screen';
+const SESSION_PERM_SOURCE_RELPATH =
+  'source/main/default/flows/Activate_Delete_Perm_Screen.flow-meta.xml';
+
+// Minimal XML matching the real Activate_Contact_Delete_Permission shape.
+const SESSION_PERM_SOURCE_XML = [
+  '<?xml version="1.0" encoding="UTF-8"?>',
+  '<Flow xmlns="http://soap.sforce.com/2006/04/metadata">',
+  '    <actionCalls>',
+  '        <name>Activate_Delete_Permission</name>',
+  '        <label>Activate Delete Permission</label>',
+  '        <actionName>activateSessionPermSet</actionName>',
+  '        <actionType>activateSessionPermSet</actionType>',
+  '    </actionCalls>',
+  '    <apiVersion>58.0</apiVersion>',
+  '    <description>Screen flow that activates a session permission set</description>',
+  '    <label>Activate Delete Perm Screen</label>',
+  '    <processType>Flow</processType>',
+  '    <status>Active</status>',
+  '</Flow>',
+].join('\n');
+
+// Seed with properties.actionCalls present (current-vault shape).
+const sessionPermFlowSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: SESSION_PERM_FLOW_ID,
+      type: 'Flow',
+      apiName: 'Activate_Delete_Perm_Screen',
+      label: 'Activate Delete Perm Screen',
+      sourcePath: SESSION_PERM_SOURCE_RELPATH,
+      properties: {
+        label: 'Activate Delete Perm Screen',
+        description: 'Screen flow that activates a session permission set',
+        processType: 'Flow',
+        status: 'Active',
+        interviewLabel: null,
+        runInMode: null,
+        triggerObject: null,
+        triggerType: null,
+        recordTriggerType: null,
+        flowExtractionWarnings: [],
+        faultableElementCount: 1,
+        elementsWithoutFault: 1,
+        hasUnhandledFaults: true,
+        conditions: [],
+        // bundle-4a: every <actionCalls> element summarised including non-apex types.
+        actionCalls: [
+          { actionType: 'activateSessionPermSet', actionName: 'activateSessionPermSet' },
+        ],
+      },
+    }),
+  ],
+  edges: [],
+};
+
+// =============================================================================
+// Seed 8: Same screen flow shape but WITHOUT properties.actionCalls — simulates
+// a vault built before bundle-4a.  The handler must fall back to scanning the
+// source XML file (written to disk in beforeAll) and still surface the
+// activateSessionPermSet action call.
+// =============================================================================
+
+const SESSION_PERM_LEGACY_FLOW_ID = 'Flow:Activate_Delete_Perm_Screen_Legacy';
+const SESSION_PERM_LEGACY_SOURCE_RELPATH =
+  'source/main/default/flows/Activate_Delete_Perm_Screen_Legacy.flow-meta.xml';
+
+const sessionPermLegacyFlowSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: SESSION_PERM_LEGACY_FLOW_ID,
+      type: 'Flow',
+      apiName: 'Activate_Delete_Perm_Screen_Legacy',
+      label: 'Activate Delete Perm Screen Legacy',
+      sourcePath: SESSION_PERM_LEGACY_SOURCE_RELPATH,
+      properties: {
+        label: 'Activate Delete Perm Screen Legacy',
+        description: 'Screen flow that activates a session permission set',
+        processType: 'Flow',
+        status: 'Active',
+        interviewLabel: null,
+        runInMode: null,
+        triggerObject: null,
+        triggerType: null,
+        recordTriggerType: null,
+        flowExtractionWarnings: [],
+        faultableElementCount: 1,
+        elementsWithoutFault: 1,
+        hasUnhandledFaults: true,
+        conditions: [],
+        // OLD-VAULT SHAPE: properties.actionCalls absent — no bundle-4a property.
+      },
+    }),
+  ],
+  edges: [],
+};
+
 // An ApexTrigger sharing a name with no Flow — "explain flow AccountTrigger"
 // should point here rather than dead-ending (B26).
 const triggerSeed: ExtractionResult = {
@@ -314,6 +590,45 @@ let ctx: Context;
 
 beforeAll(async () => {
   tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-explain-flow-'));
+
+  // Write the minimal source XML for the legacy-async-vault fixture so the
+  // source-file fallback in explain-flow.ts can detect AsyncAfterCommit.
+  const sourceDir = join(tempDir, 'source/main/default/flows');
+  mkdirSync(sourceDir, { recursive: true });
+  writeFileSync(
+    join(sourceDir, 'CourseOffering_ContractHours_AsyncCheck.flow-meta.xml'),
+    [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<Flow xmlns="http://soap.sforce.com/2006/04/metadata">',
+      '    <label>Course Offering Contract Hours Async Check</label>',
+      '    <processType>AutoLaunchedFlow</processType>',
+      '    <status>Active</status>',
+      '    <start>',
+      '        <object>CourseOffering__c</object>',
+      '        <triggerType>RecordAfterSave</triggerType>',
+      '        <recordTriggerType>Update</recordTriggerType>',
+      '        <scheduledPaths>',
+      '            <pathType>AsyncAfterCommit</pathType>',
+      '        </scheduledPaths>',
+      '    </start>',
+      '</Flow>',
+    ].join('\n'),
+    'utf-8',
+  );
+
+  // Write source XML for the session-perm legacy-vault fixture (no
+  // properties.actionCalls) so the XML-fallback path can scan it.
+  writeFileSync(
+    join(sourceDir, 'Activate_Delete_Perm_Screen.flow-meta.xml'),
+    SESSION_PERM_SOURCE_XML,
+    'utf-8',
+  );
+  writeFileSync(
+    join(sourceDir, 'Activate_Delete_Perm_Screen_Legacy.flow-meta.xml'),
+    SESSION_PERM_SOURCE_XML,
+    'utf-8',
+  );
+
   const dbPath = join(tempDir, 'explain-flow.db');
   const opened = await openGraph(dbPath);
   if (!opened.ok) {
@@ -323,6 +638,12 @@ beforeAll(async () => {
   const imported = await importExtractionResults(store, [
     fullBodyFlowSeed,
     minimalFlowSeed,
+    asyncAfterCommitFlowSeed,
+    screenFlowSeed,
+    scheduledFlowSeed,
+    legacyAsyncAfterCommitFlowSeed,
+    sessionPermFlowSeed,
+    sessionPermLegacyFlowSeed,
     triggerSeed,
   ]);
   if (!imported.ok) {
@@ -385,6 +706,132 @@ describe('explainFlowHandler', () => {
     expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
   });
 
+  it('surfaces the declared run mode, unhandled-fault flag, and a correct run-mode note', async () => {
+    const result = await explainFlowHandler(ctx, { flowId: FULL_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ec = result.value.data.executionContext;
+    // Declared runInMode surfaced verbatim (not inferred / not inherited).
+    expect(ec.runInMode).toBe('SystemModeWithoutSharing');
+    // Fault coverage surfaced from the extractor's properties.
+    expect(ec.hasUnhandledFaults).toBe(true);
+    expect(ec.unhandledFaultElementCount).toBe(2);
+    // The note states the load-bearing platform rules the host must NOT
+    // fabricate: a subflow runs in its OWN declared mode (does not inherit
+    // the caller), $User resolves to the running user, and an unhandled
+    // fault rolls back the whole transaction.
+    expect(ec.runModeNote).toMatch(/does NOT inherit/);
+    expect(ec.runModeNote).toMatch(/OWN declared runInMode/);
+    expect(ec.runModeNote).toMatch(/running user/);
+    expect(ec.runModeNote).toMatch(/rolls back the ENTIRE/);
+    // A DETERMINATE fault-rollback verdict — so the host can answer "does an
+    // unhandled fault roll back the triggering save?" without declining. This
+    // is a RecordAfterSave flow with an unhandled fault path: YES.
+    expect(ec.faultRollback).not.toBeNull();
+    expect(ec.faultRollback?.rollsBackTransaction).toBe(true);
+    expect(ec.faultRollback?.statement).toMatch(/after-save record-triggered/);
+    expect(ec.faultRollback?.statement).toMatch(/rolls back the ENTIRE originating transaction/);
+    expect(ec.faultRollback?.statement).toMatch(/triggering record save fails too/);
+  });
+
+  it('surfaces sharingBypassNote for SystemModeWithoutSharing flows (Bug 7)', async () => {
+    // A flow running in SystemModeWithoutSharing bypasses the ENTIRE sharing
+    // stack including Restriction Rules. The tool must surface this as an
+    // explicit security field so an LLM host cannot miss it.
+    const result = await explainFlowHandler(ctx, { flowId: FULL_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ec = result.value.data.executionContext;
+    expect(ec.runInMode).toBe('SystemModeWithoutSharing');
+    // sharingBypassNote must be present and call out Restriction Rules explicitly.
+    expect(ec.sharingBypassNote).toBeDefined();
+    expect(ec.sharingBypassNote).toMatch(/SystemModeWithoutSharing/);
+    expect(ec.sharingBypassNote).toMatch(/Restriction Rules/);
+    expect(ec.sharingBypassNote).toMatch(/SECURITY/);
+  });
+
+  it('does NOT surface sharingBypassNote for DefaultMode flows (Bug 7)', async () => {
+    // DefaultMode enforces the user's sharing stack — no bypass note needed.
+    const result = await explainFlowHandler(ctx, { flowId: MINIMAL_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ec = result.value.data.executionContext;
+    // runInMode is null for minimal (DefaultMode by omission): no bypass.
+    expect(ec.sharingBypassNote).toBeUndefined();
+  });
+
+  it('returns runInMode=null and no unhandled faults for a minimal flow', async () => {
+    const result = await explainFlowHandler(ctx, { flowId: MINIMAL_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ec = result.value.data.executionContext;
+    expect(ec.runInMode).toBeNull();
+    expect(ec.hasUnhandledFaults).toBe(false);
+    expect(ec.unhandledFaultElementCount).toBe(0);
+    // No unhandled fault path ⇒ no rollback verdict to compose.
+    expect(ec.faultRollback).toBeNull();
+    // Note is always present so the host never substitutes a wrong inference.
+    expect(ec.runModeNote.length).toBeGreaterThan(0);
+  });
+
+  // ---------------------------------------------------------------------------
+  // FLOW FAULT/ROLLBACK SEMANTICS — the three corrected verdicts.
+  // ---------------------------------------------------------------------------
+
+  it('does NOT roll back the committed save for an AsyncAfterCommit (post-commit async) fault', async () => {
+    const result = await explainFlowHandler(ctx, { flowId: ASYNC_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ec = result.value.data.executionContext;
+    expect(ec.hasUnhandledFaults).toBe(true);
+    expect(ec.faultRollback).not.toBeNull();
+    // A post-commit async path runs AFTER the triggering save committed → it
+    // cannot roll the committed save back. (Was wrongly true / "synchronous".)
+    expect(ec.faultRollback?.rollsBackTransaction).toBe(false);
+    const stmt = ec.faultRollback?.statement ?? '';
+    expect(stmt).toMatch(/AsyncAfterCommit|asynchronous post-commit/);
+    expect(stmt).toMatch(/does NOT roll back the committed save/);
+    expect(stmt).toMatch(/not user-visible|silently aborts/);
+    expect(stmt).toMatch(/admin/);
+    // Must NOT claim the synchronous whole-transaction rollback.
+    expect(stmt).not.toMatch(/synchronous .* flow with an unhandled fault path/);
+  });
+
+  it('rolls back the current screen-segment DML for a screen-flow fault', async () => {
+    const result = await explainFlowHandler(ctx, { flowId: SCREEN_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ec = result.value.data.executionContext;
+    expect(ec.hasUnhandledFaults).toBe(true);
+    expect(ec.faultRollback).not.toBeNull();
+    // A screen flow DOES roll back the current-segment DML on an unhandled
+    // fault. (Was wrongly false with "no originating DML transaction".)
+    expect(ec.faultRollback?.rollsBackTransaction).toBe(true);
+    const stmt = ec.faultRollback?.statement ?? '';
+    expect(stmt).toMatch(/screen/i);
+    expect(stmt).toMatch(/since the last screen navigation|current screen-segment/);
+    expect(stmt).toMatch(/flow error screen/);
+    expect(stmt).toMatch(/DefaultMode/);
+    // Must NOT regress to the old, false premise.
+    expect(stmt).not.toMatch(/no originating DML transaction to roll back/);
+  });
+
+  it('emails the admin and retries next run for a scheduled-flow fault (no triggering save)', async () => {
+    const result = await explainFlowHandler(ctx, { flowId: SCHEDULED_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ec = result.value.data.executionContext;
+    expect(ec.hasUnhandledFaults).toBe(true);
+    expect(ec.faultRollback).not.toBeNull();
+    expect(ec.faultRollback?.rollsBackTransaction).toBe(true);
+    const stmt = ec.faultRollback?.statement ?? '';
+    expect(stmt).toMatch(/scheduled/i);
+    // A scheduled run has no triggering user DML — must not claim one failed.
+    expect(stmt).not.toMatch(/triggering record save fails too/);
+    expect(stmt).toMatch(/admin|last modifier/);
+    expect(stmt).toMatch(/next scheduled interval|runs again/);
+  });
+
   it('surfaces the fields each trigger/firing condition evaluates', async () => {
     const result = await explainFlowHandler(ctx, { flowId: FULL_FLOW_ID });
     expect(result.ok).toBe(true);
@@ -409,7 +856,7 @@ describe('explainFlowHandler', () => {
     ]);
   });
 
-  it('surfaces action calls with target type', async () => {
+  it('surfaces action calls with target type and actionType for apex calls', async () => {
     const result = await explainFlowHandler(ctx, { flowId: FULL_FLOW_ID });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -417,6 +864,7 @@ describe('explainFlowHandler', () => {
     expect(actions.length).toBe(1);
     expect(actions[0]?.targetId).toBe(APEX_CLASS_ID);
     expect(actions[0]?.targetType).toBe('ApexClass');
+    expect(actions[0]?.actionType).toBe('apex');
   });
 
   it('collapses record lookups by target object with filter counts', async () => {
@@ -506,6 +954,78 @@ describe('explainFlowHandler', () => {
     if (result.ok) return;
     expect(result.error.kind).toBe('component-not-found');
     expect(result.error.path).toBe('Flow:DoesNotExist');
+  });
+
+  // ---------------------------------------------------------------------------
+  // LEGACY-VAULT SOURCE-FILE FALLBACK — AsyncAfterCommit without in-graph props
+  // ---------------------------------------------------------------------------
+
+  it('detects AsyncAfterCommit via source-file fallback when vault lacks scheduledPathTypes (old-vault shape)', async () => {
+    // This fixture has triggerType=RecordAfterSave + hasUnhandledFaults=true
+    // but NO scheduledPathTypes / runAsyncAfterCommit in properties — matching
+    // the real-org vault for Contract_Hours_Approval_Check_Asynchronous
+    // extracted before the bundle-4 extractor update.  The handler must fall
+    // back to reading the source XML file (written to tempDir in beforeAll)
+    // and return rollsBackTransaction=false, not true.
+    const result = await explainFlowHandler(ctx, {
+      flowId: LEGACY_ASYNC_FLOW_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ec = result.value.data.executionContext;
+    expect(ec.hasUnhandledFaults).toBe(true);
+    expect(ec.faultRollback).not.toBeNull();
+    // The key assertion: must be false (async — save already committed).
+    // FAIL-BEFORE: was true ("synchronous after-save record-triggered flow")
+    // because hasAsyncAfterCommitPath found no in-graph markers.
+    expect(ec.faultRollback?.rollsBackTransaction).toBe(false);
+    const stmt = ec.faultRollback?.statement ?? '';
+    expect(stmt).toMatch(/AsyncAfterCommit|asynchronous post-commit/);
+    expect(stmt).toMatch(/does NOT roll back the committed save/);
+    expect(stmt).toMatch(/not user-visible|silently aborts/);
+    // Must NOT contain the synchronous-rollback language.
+    expect(stmt).not.toMatch(/synchronous .* flow with an unhandled fault path/);
+  });
+
+  // ---------------------------------------------------------------------------
+  // NON-APEX ACTION CALLS — activateSessionPermSet surface (u4-flow-actioncall)
+  // ---------------------------------------------------------------------------
+
+  it('surfaces activateSessionPermSet action call from properties.actionCalls (bundle-4a vault shape)', async () => {
+    // FAIL-BEFORE: actionCalls was always [] because collectActionCalls only
+    // queried callsApex edges; activateSessionPermSet emits no callsApex edge.
+    // PASS-AFTER: handler reads properties.actionCalls and merges non-apex rows.
+    const result = await explainFlowHandler(ctx, { flowId: SESSION_PERM_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const actions = result.value.data.actionCalls;
+    expect(actions.length).toBe(1);
+    const call = actions[0];
+    expect(call?.actionType).toBe('activateSessionPermSet');
+    // targetType mirrors actionType for non-apex calls.
+    expect(call?.targetType).toBe('activateSessionPermSet');
+    // targetId is the bare actionName (not an ApexClass: prefixed id).
+    expect(call?.targetId).toBe('activateSessionPermSet');
+    // The faultRollback verdict for a screen flow with hasUnhandledFaults=true
+    // must also be correct (screen flow rolls back the current screen-segment DML).
+    const ec = result.value.data.executionContext;
+    expect(ec.hasUnhandledFaults).toBe(true);
+    expect(ec.faultRollback?.rollsBackTransaction).toBe(true);
+    expect(ec.faultRollback?.statement).toMatch(/screen.*flow|user-driven/i);
+  });
+
+  it('surfaces activateSessionPermSet via source-file XML fallback when vault lacks properties.actionCalls (pre-bundle-4a shape)', async () => {
+    // FAIL-BEFORE: same as above — callsApex edge absent, properties.actionCalls
+    // absent, XML fallback did not exist → actionCalls=[] always.
+    // PASS-AFTER: handler falls back to raw XML scan and finds the action call.
+    const result = await explainFlowHandler(ctx, { flowId: SESSION_PERM_LEGACY_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const actions = result.value.data.actionCalls;
+    expect(actions.length).toBe(1);
+    const call = actions[0];
+    expect(call?.actionType).toBe('activateSessionPermSet');
+    expect(call?.targetType).toBe('activateSessionPermSet');
   });
 
   it('returns invalid-query when flowId does not start with Flow:', async () => {

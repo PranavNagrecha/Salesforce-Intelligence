@@ -26,15 +26,17 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listEdges, listNodesByType } from '@sf-intelligence/graph';
+import { listEdges } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-/** Per-type page cap. The graph layer caps at 500; documented honesty boundary. */
-const APEX_PAGE_SIZE = 500;
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { clampedNodeScanLimit, scanTruncationNote } from './scan-cap.js';
 
 /** Default and max number of cyclic clusters returned. */
 const DEFAULT_LIMIT = 50;
@@ -43,9 +45,14 @@ const MAX_LIMIT = 200;
 /** The Apex node types whose `callsApex` edges form the dependency graph. */
 const APEX_TYPES: readonly ComponentType[] = ['ApexClass', 'ApexTrigger'];
 
+const FIND_DEPENDENCY_CYCLES_TOOL = 'sfi.find_dependency_cycles';
+
 /** Zod schema for the `sfi.find_dependency_cycles` tool input. */
 export const findDependencyCyclesInputSchema = z.object({
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
+  // CR-22: page cursor for walking the full cycle list when truncated.
+  offset: z.number().int().min(0).optional(),
+  cursor: z.string().min(1).optional(),
 });
 
 export type FindDependencyCyclesInput = z.infer<
@@ -73,6 +80,14 @@ export interface FindDependencyCyclesOutput {
     readonly truncated: boolean;
   };
   readonly boundaries: readonly string[];
+  /**
+   * CR-22 opaque continuation token, present ONLY when this page is truncated
+   * (more cycles remain). Echo it back as `cursor` to resume. Absent on a
+   * complete page so an in-budget response is byte-identical to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
 }
 
 /** Build the Apex→Apex adjacency map from outgoing `callsApex` edges. */
@@ -191,13 +206,16 @@ export const findDependencyCyclesHandler = async (
 ): Promise<Result<McpResponse<FindDependencyCyclesOutput>, McpError>> => {
   const limit = input.limit ?? DEFAULT_LIMIT;
 
-  // Collect Apex nodes.
-  const apexNodes: Node[] = [];
-  for (const type of APEX_TYPES) {
-    const r = await listNodesByType(ctx.graph, type, { limit: APEX_PAGE_SIZE });
-    if (!r.ok) return err({ kind: 'internal', message: `graph query failed: ${r.error.message}` });
-    apexNodes.push(...r.value);
+  // CR-22 B4: scan EVERY Apex node by paging the SQL OFFSET forward (window-by-
+  // window) so cycles touching node 501+ are computed — the old single capped
+  // `listNodesByType` silently dropped Apex nodes past 500, dropping any cycle
+  // that touched them. The output cycle list is then paged on the output axis
+  // below; no second `s` scan cursor is needed (the scan completes here).
+  const scan = await scanAllNodesOfTypes(ctx.graph, APEX_TYPES);
+  if (!scan.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${scan.error.message}` });
   }
+  const apexNodes: readonly Node[] = scan.value.nodes;
   const apexIds = new Set<ComponentId>(apexNodes.map((n) => n.id));
 
   const adjResult = await buildAdjacency(ctx, apexIds);
@@ -219,12 +237,61 @@ export const findDependencyCyclesHandler = async (
       });
     }
   }
-  // Largest clusters first; stable by first member for determinism.
-  allCycles.sort((a, b) => b.size - a.size || (a.members[0]! < b.members[0]! ? -1 : 1));
+  // Largest clusters first, then a STRICT TOTAL order on the full member list.
+  // SCCs are disjoint, so members.join(',') is provably unique across distinct
+  // cycles (a component can be in only one SCC); members are id-ASC sorted above
+  // so the join is canonical. (size DESC, members[0] ASC) alone is already a
+  // unique total order since members[0] is unique by disjointness, but the full
+  // join is belt-and-suspenders and we fix the members[0] compare to return 0
+  // on equality for hygiene.
+  allCycles.sort((a, b) => {
+    if (b.size !== a.size) return b.size - a.size;
+    if (a.members[0] !== b.members[0]) return a.members[0]! < b.members[0]! ? -1 : 1;
+    const aj = a.members.join(',');
+    const bj = b.members.join(',');
+    return aj < bj ? -1 : aj > bj ? 1 : 0;
+  });
 
   const largestClusterSize = allCycles.reduce((m, c) => Math.max(m, c.size), 0);
-  const truncatedScan = apexNodes.length >= APEX_TYPES.length * APEX_PAGE_SIZE;
-  const cycles = allCycles.slice(0, limit);
+
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // The narrowing arg set is empty (only paging knobs exist), so the fingerprint
+  // is a constant — the cursor is still bound to tool + vaultHash.
+  const fingerprint = argsFingerprint({});
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: FIND_DEPENDENCY_CYCLES_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  const paged = paginateLegacy(allCycles, {
+    offset,
+    limit,
+    keyOf: (c) => c.members.join(','),
+    binding: {
+      tool: FIND_DEPENDENCY_CYCLES_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const cycles = paged.items;
+  const emitCursor = paged.nextCursor !== null;
+
+  // A pathological Apex type past FULL_SCAN_MAX_NODES leaves the scan incomplete;
+  // disclose it (strictly more honest than the old `truncatedScan` heuristic,
+  // which flipped on for any org with >=500 Apex nodes even after a full scan).
+  const boundaries =
+    scan.value.scanIncomplete
+      ? [
+          ...BOUNDARIES,
+          scanTruncationNote(scan.value.incompleteTypes, clampedNodeScanLimit()),
+        ]
+      : BOUNDARIES;
 
   return ok({
     data: {
@@ -234,9 +301,12 @@ export const findDependencyCyclesHandler = async (
         callsApexEdgesConsidered: edgeCount,
         cyclicClusters: allCycles.length,
         largestClusterSize,
-        truncated: allCycles.length > limit || truncatedScan,
+        truncated: paged.hasMore || scan.value.scanIncomplete,
       },
-      boundaries: BOUNDARIES,
+      boundaries,
+      ...(emitCursor
+        ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo }
+        : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

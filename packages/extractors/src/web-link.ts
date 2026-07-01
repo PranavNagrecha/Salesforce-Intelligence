@@ -170,6 +170,7 @@ export const extractWebLink = async (
       label,
       linkType,
       displayType,
+      openType: toNullableString(rootObj['openType']),
       url,
       page,
       description: toNullableString(rootObj['description']),

@@ -590,6 +590,60 @@ describe('orderOfExecutionHandler', () => {
     }
   });
 
+  it('grounds per-event, per-phase active-component counts (answers the count/ordering question per event)', async () => {
+    const result = await orderOfExecutionHandler(ctx, {
+      objectApiName: 'MixedObj',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { byEvent } = result.value.data;
+
+    // MixedObj on INSERT: a before-save flow, a before-insert trigger, a
+    // validation rule, an after-save (CreateAndUpdate) flow, and an
+    // onAllChanges workflow = 5 active components. The before+after trigger
+    // events are 'before insert' + 'after update', so there is NO after-insert
+    // trigger on the insert event.
+    const insert = byEvent.insert.summary;
+    expect(insert.activeComponents).toBe(5);
+    expect(insert.phaseCounts['before-save-flows']).toBe(1);
+    expect(insert.phaseCounts['pre-save-triggers']).toBe(1);
+    expect(insert.phaseCounts['pre-save-validation']).toBe(1);
+    expect(insert.phaseCounts['after-triggers']).toBe(0);
+    expect(insert.phaseCounts['post-save-workflows']).toBe(1);
+    expect(insert.phaseCounts['post-save-flows']).toBe(1);
+    // The save placeholder is never counted as automation.
+    expect('save' in insert.phaseCounts).toBe(false);
+    expect(insert.activeComponents).toBe(insert.totalSteps - 1);
+
+    // MixedObj on UPDATE: the same before-save flow, an after-update trigger
+    // (so after-triggers, not pre-save-triggers), the validation rule, the
+    // after-save flow, and the onAllChanges workflow = 5.
+    const update = byEvent.update.summary;
+    expect(update.activeComponents).toBe(5);
+    expect(update.phaseCounts['pre-save-triggers']).toBe(0);
+    expect(update.phaseCounts['after-triggers']).toBe(1);
+
+    // Per-phase counts sum to activeComponents on every event.
+    for (const event of ['insert', 'update', 'delete', 'undelete'] as const) {
+      const s = byEvent[event].summary;
+      const summed = Object.values(s.phaseCounts).reduce((a, b) => a + b, 0);
+      expect(summed).toBe(s.activeComponents);
+    }
+  });
+
+  it('per-event phaseCounts are zero-filled for an automation-free object', async () => {
+    const result = await orderOfExecutionHandler(ctx, {
+      objectApiName: 'EmptyObj',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    for (const event of ['insert', 'update', 'delete', 'undelete'] as const) {
+      const s = result.value.data.byEvent[event].summary;
+      expect(s.activeComponents).toBe(0);
+      expect(Object.values(s.phaseCounts).every((c) => c === 0)).toBe(true);
+    }
+  });
+
   it('echoes the objectApiName in the response', async () => {
     const result = await orderOfExecutionHandler(ctx, {
       objectApiName: 'MixedObj',
@@ -606,7 +660,21 @@ describe('orderOfExecutionHandler', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.data.disclosure).toBe(
-      "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once and does not expand that re-entrancy. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.",
+      "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once and does not expand that re-entrancy. A workflow rule's time-dependent actions (its workflowTimeTriggers) are SCHEDULED for an offset measured from a record field value the offline vault cannot evaluate; this composition lists the rule once in the synchronous post-save-workflows phase and does NOT claim its time-delayed actions fire at save. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.",
+    );
+  });
+
+  it('CR-CAP-11b: time-trigger disclosure is byte-identical to what_happens_on_save and makes no firing claim', async () => {
+    const result = await orderOfExecutionHandler(ctx, {
+      objectApiName: 'EmptyObj',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data.disclosure;
+    expect(d).toContain('SCHEDULED');
+    expect(d).toContain('does NOT claim its time-delayed actions fire at save');
+    expect(/time-(?:delayed|dependent) actions fire(?! at save)/.test(d)).toBe(
+      false,
     );
   });
 

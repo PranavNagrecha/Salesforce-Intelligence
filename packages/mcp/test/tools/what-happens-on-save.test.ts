@@ -378,6 +378,218 @@ const inactiveFlowSeed: ExtractionResult = {
   ],
 };
 
+// =============================================================================
+// Seed 6: object with TWO active after-save flows — one with an explicit
+// recordTriggerType (Update), one whose triggersOn edge OMITS recordTriggerType
+// (the extractor did not stamp it / the Flow defaulted it). Both are real,
+// firing automations: the absent-value flow must NOT be silently dropped, or
+// the active-flow count under-reports by half (the enumeration-undercount bug).
+// =============================================================================
+
+const ABSENT_OBJ = 'CustomObject:AbsentObj';
+const ABSENT_EXPLICIT_FLOW = 'Flow:AbsentExplicitFlow';
+const ABSENT_MISSING_FLOW = 'Flow:AbsentMissingTypeFlow';
+
+const absentRecordTriggerTypeSeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: ABSENT_OBJ, apiName: 'AbsentObj' }),
+    makeNode({
+      id: ABSENT_EXPLICIT_FLOW,
+      type: 'Flow',
+      apiName: 'AbsentExplicitFlow',
+      properties: { status: 'Active' },
+    }),
+    makeNode({
+      id: ABSENT_MISSING_FLOW,
+      type: 'Flow',
+      apiName: 'AbsentMissingTypeFlow',
+      properties: { status: 'Active' },
+    }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: ABSENT_EXPLICIT_FLOW,
+      toId: ABSENT_OBJ,
+      edgeType: 'triggersOn',
+      properties: {
+        triggerType: 'RecordAfterSave',
+        recordTriggerType: 'Update',
+      },
+    }),
+    // After-save flow whose edge has the before/after discriminator but NO
+    // recordTriggerType — the dropped-flow case.
+    makeEdge({
+      fromId: ABSENT_MISSING_FLOW,
+      toId: ABSENT_OBJ,
+      edgeType: 'triggersOn',
+      properties: {
+        triggerType: 'RecordAfterSave',
+      },
+    }),
+  ],
+};
+
+// =============================================================================
+// Seed 7: real-org-shape Contact fixture — models the dense-automation pattern
+// found on the Contact standard object: multiple active triggers with different
+// event sets, ONE Inactive trigger (status: Inactive), plus after-save flows
+// with recordTriggerType Create / Update / CreateAndUpdate and various statuses.
+//
+// This is the fixture-vs-reality gap left after commit 9b3c8a15: that commit
+// fixed the recordTriggerType absent-value undercount but did NOT cover the
+// case of an Inactive ApexTrigger being silently included in the active SOE
+// steps (isActiveSoeFirer ignored ApexTrigger.status). A real org's Contact
+// object always has at least one Inactive trigger; without the status check the
+// inactive trigger inflates the after-triggers count and the wrong component
+// appears in the "automation that fires" list.
+// =============================================================================
+
+const STDOBJ = 'CustomObject:StdObj';
+
+// Two active triggers that fire on both after insert and after update.
+const TRIG_AFTER_BOTH = 'ApexTrigger:StdObjTriggerA'; // mirrors ContactTrigger
+const TRIG_AFTER_BOTH_2 = 'ApexTrigger:StdObjTriggerB'; // mirrors FSR_TriggerContactTest
+// One trigger that fires on every DML event (mirrors dlrs_ContactTrigger).
+const TRIG_ALL_EVENTS = 'ApexTrigger:StdObjTriggerC';
+// One INACTIVE trigger with after insert — must not appear in active steps.
+const TRIG_INACTIVE = 'ApexTrigger:StdObjInactiveTrigger';
+// Active after-save flows.
+const FLOW_AS_CREATE_UPDATE = 'Flow:StdObjAfterSaveCreateUpdate'; // recordTriggerType: CreateAndUpdate
+const FLOW_AS_UPDATE_ONLY = 'Flow:StdObjAfterSaveUpdateOnly'; // recordTriggerType: Update
+const FLOW_AS_CREATE_ONLY = 'Flow:StdObjAfterSaveCreateOnly'; // recordTriggerType: Create
+// Inactive after-save flow — must not appear in active steps.
+const FLOW_AS_OBSOLETE = 'Flow:StdObjAfterSaveObsolete'; // status: Obsolete
+
+const realOrgShapeSeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: STDOBJ, apiName: 'StdObj' }),
+    makeNode({
+      id: TRIG_AFTER_BOTH,
+      type: 'ApexTrigger',
+      apiName: 'StdObjTriggerA',
+      properties: {
+        status: 'Active',
+        events: ['after insert', 'after update'],
+        triggerObject: 'StdObj',
+      },
+    }),
+    makeNode({
+      id: TRIG_AFTER_BOTH_2,
+      type: 'ApexTrigger',
+      apiName: 'StdObjTriggerB',
+      properties: {
+        status: 'Active',
+        events: ['after insert', 'after update'],
+        triggerObject: 'StdObj',
+      },
+    }),
+    makeNode({
+      id: TRIG_ALL_EVENTS,
+      type: 'ApexTrigger',
+      apiName: 'StdObjTriggerC',
+      properties: {
+        status: 'Active',
+        events: [
+          'before delete', 'before insert', 'before update',
+          'after delete', 'after insert', 'after update',
+        ],
+        triggerObject: 'StdObj',
+      },
+    }),
+    // Inactive trigger — status: Inactive. Must be excluded from active steps
+    // and disclosed in inactiveConfigured (mirrors autoCreateStudentAccountTrigger).
+    makeNode({
+      id: TRIG_INACTIVE,
+      type: 'ApexTrigger',
+      apiName: 'StdObjInactiveTrigger',
+      properties: {
+        status: 'Inactive',
+        events: ['after insert'],
+        triggerObject: 'StdObj',
+      },
+    }),
+    makeNode({
+      id: FLOW_AS_CREATE_UPDATE,
+      type: 'Flow',
+      apiName: 'StdObjAfterSaveCreateUpdate',
+      properties: { status: 'Active' },
+    }),
+    makeNode({
+      id: FLOW_AS_UPDATE_ONLY,
+      type: 'Flow',
+      apiName: 'StdObjAfterSaveUpdateOnly',
+      properties: { status: 'Active' },
+    }),
+    makeNode({
+      id: FLOW_AS_CREATE_ONLY,
+      type: 'Flow',
+      apiName: 'StdObjAfterSaveCreateOnly',
+      properties: { status: 'Active' },
+    }),
+    makeNode({
+      id: FLOW_AS_OBSOLETE,
+      type: 'Flow',
+      apiName: 'StdObjAfterSaveObsolete',
+      properties: { status: 'Obsolete' },
+    }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: TRIG_AFTER_BOTH,
+      toId: STDOBJ,
+      edgeType: 'triggersOn',
+      properties: { events: ['after insert', 'after update'] },
+    }),
+    makeEdge({
+      fromId: TRIG_AFTER_BOTH_2,
+      toId: STDOBJ,
+      edgeType: 'triggersOn',
+      properties: { events: ['after insert', 'after update'] },
+    }),
+    makeEdge({
+      fromId: TRIG_ALL_EVENTS,
+      toId: STDOBJ,
+      edgeType: 'triggersOn',
+      properties: {
+        events: [
+          'before delete', 'before insert', 'before update',
+          'after delete', 'after insert', 'after update',
+        ],
+      },
+    }),
+    makeEdge({
+      fromId: TRIG_INACTIVE,
+      toId: STDOBJ,
+      edgeType: 'triggersOn',
+      properties: { events: ['after insert'] },
+    }),
+    makeEdge({
+      fromId: FLOW_AS_CREATE_UPDATE,
+      toId: STDOBJ,
+      edgeType: 'triggersOn',
+      properties: { triggerType: 'RecordAfterSave', recordTriggerType: 'CreateAndUpdate' },
+    }),
+    makeEdge({
+      fromId: FLOW_AS_UPDATE_ONLY,
+      toId: STDOBJ,
+      edgeType: 'triggersOn',
+      properties: { triggerType: 'RecordAfterSave', recordTriggerType: 'Update' },
+    }),
+    makeEdge({
+      fromId: FLOW_AS_CREATE_ONLY,
+      toId: STDOBJ,
+      edgeType: 'triggersOn',
+      properties: { triggerType: 'RecordAfterSave', recordTriggerType: 'Create' },
+    }),
+    makeEdge({
+      fromId: FLOW_AS_OBSOLETE,
+      toId: STDOBJ,
+      edgeType: 'triggersOn',
+      properties: { triggerType: 'RecordAfterSave', recordTriggerType: 'CreateAndUpdate' },
+    }),
+  ],
+};
+
 beforeAll(async () => {
   tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-whos-'));
   const dbPath = join(tempDir, 'whos.db');
@@ -392,6 +604,8 @@ beforeAll(async () => {
     updateOnlySeed,
     nodelessSeed,
     inactiveFlowSeed,
+    absentRecordTriggerTypeSeed,
+    realOrgShapeSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -683,6 +897,54 @@ describe('whatHappensOnSaveHandler', () => {
     expect(flowSteps.length).toBe(0);
   });
 
+  it('enumerates an after-save flow whose triggersOn edge OMITS recordTriggerType (under-count guard)', async () => {
+    // AbsentObj has two active after-save flows: one explicit (Update) and one
+    // with NO recordTriggerType on its triggersOn edge. Both fire on update —
+    // the absent-value flow must not be silently dropped, or the active-flow
+    // count under-reports by half.
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'AbsentObj',
+      event: 'update',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const flowSteps = result.value.data.soe.filter(
+      (s) => s.phase === 'post-save-flows',
+    );
+    // BOTH flows are enumerated and individually named.
+    expect(flowSteps.length).toBe(2);
+    const named = flowSteps.map((s) => s.apiName).sort();
+    expect(named).toContain('AbsentExplicitFlow');
+    expect(named).toContain('AbsentMissingTypeFlow');
+  });
+
+  it('treats an absent recordTriggerType as CreateAndUpdate — fires on insert too, but never on delete', async () => {
+    const onInsert = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'AbsentObj',
+      event: 'insert',
+    });
+    expect(onInsert.ok).toBe(true);
+    if (!onInsert.ok) return;
+    const insertFlows = onInsert.value.data.soe.filter(
+      (s) => s.phase === 'post-save-flows',
+    );
+    // The absent-type flow fires on insert (CreateAndUpdate default); the
+    // explicit Update-only flow does not.
+    expect(insertFlows.map((s) => s.apiName)).toContain('AbsentMissingTypeFlow');
+    expect(insertFlows.map((s) => s.apiName)).not.toContain('AbsentExplicitFlow');
+
+    const onDelete = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'AbsentObj',
+      event: 'delete',
+    });
+    expect(onDelete.ok).toBe(true);
+    if (!onDelete.ok) return;
+    // An absent recordTriggerType is never a delete-triggered flow.
+    expect(
+      onDelete.value.data.soe.filter((s) => s.phase === 'post-save-flows').length,
+    ).toBe(0);
+  });
+
   it('echoes the recordTypeId verbatim when provided', async () => {
     const result = await whatHappensOnSaveHandler(ctx, {
       objectApiName: 'FullObj',
@@ -713,8 +975,89 @@ describe('whatHappensOnSaveHandler', () => {
     if (!result.ok) return;
     // The disclosure must be the exact string the spec mandates.
     expect(result.value.data.disclosure).toBe(
-      "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once and does not expand that re-entrancy. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.",
+      "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once and does not expand that re-entrancy. A workflow rule's time-dependent actions (its workflowTimeTriggers) are SCHEDULED for an offset measured from a record field value the offline vault cannot evaluate; this composition lists the rule once in the synchronous post-save-workflows phase and does NOT claim its time-delayed actions fire at save. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.",
     );
+  });
+
+  it('CR-CAP-11b: the time-trigger disclosure sentence is present and makes no firing claim', async () => {
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'EmptyObj',
+      event: 'insert',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data.disclosure;
+    expect(d).toContain('SCHEDULED');
+    expect(d).toContain('does NOT claim its time-delayed actions fire at save');
+    // It must NOT assert the time-trigger fires.
+    expect(/time-(?:delayed|dependent) actions fire(?! at save)/.test(d)).toBe(
+      false,
+    );
+  });
+
+  it('grounds a per-phase active-component count (answers "how many fire, and in what order")', async () => {
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'FullObj',
+      event: 'insert',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { soe, summary } = result.value.data;
+    // The count question must be answerable from the summary, not re-bucketed
+    // by the caller. activeComponents = every step except the save placeholder.
+    expect(summary.activeComponents).toBe(soe.length - 1);
+    // FullObj on insert: 1 before-save flow, 1 before-trigger, 1 validation
+    // rule, 1 after-trigger, 1 assignment rule, 1 workflow rule, 1 after-save
+    // flow, 1 approval, 1 async job = 9 active components.
+    expect(summary.activeComponents).toBe(9);
+    // Per-phase counts are present for EVERY automation phase (zero-filled),
+    // never the save placeholder, and tally exactly the emitted steps.
+    expect(summary.phaseCounts).toEqual({
+      'before-save-flows': 1,
+      'pre-save-triggers': 1,
+      'pre-save-validation': 1,
+      'after-triggers': 1,
+      'post-save-assignment': 1,
+      'post-save-workflows': 1,
+      'post-save-flows': 1,
+      'post-save-approval': 1,
+      'post-save-async': 1,
+    });
+    expect('save' in summary.phaseCounts).toBe(false);
+    // The map's values sum to activeComponents.
+    const summed = Object.values(summary.phaseCounts).reduce((a, b) => a + b, 0);
+    expect(summed).toBe(summary.activeComponents);
+  });
+
+  it('per-phase counts reflect the deactivation delta — inactive components are not counted', async () => {
+    // InactiveObj has one active after-save flow plus a Draft + an Obsolete
+    // flow on update. Only the active one is counted; the inactive pair is
+    // disclosed separately, so "how many still fire after deactivation" is the
+    // grounded count, not a generic deferral.
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'InactiveObj',
+      event: 'update',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { summary, inactiveConfigured } = result.value.data;
+    expect(summary.phaseCounts['post-save-flows']).toBe(1);
+    expect(summary.activeComponents).toBe(1);
+    // The two inactive flows are accounted for separately (the delta source).
+    expect(inactiveConfigured?.length).toBe(2);
+  });
+
+  it('per-phase counts are all zero (and activeComponents is 0) for an automation-free object', async () => {
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'EmptyObj',
+      event: 'insert',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { summary } = result.value.data;
+    // Only the save placeholder exists, which is NOT automation.
+    expect(summary.activeComponents).toBe(0);
+    expect(Object.values(summary.phaseCounts).every((c) => c === 0)).toBe(true);
   });
 
   it('summary.conditionalSteps reflects the count of steps with firesWhen', async () => {
@@ -728,6 +1071,83 @@ describe('whatHappensOnSaveHandler', () => {
     const conditionalCount = soe.filter((s) => s.conditional !== undefined).length;
     expect(summary.conditionalSteps).toBe(conditionalCount);
     expect(summary.conditionalSteps).toBe(2); // ValidationRule + WorkflowRule.
+  });
+
+  // =========================================================================
+  // Real-org-shape Contact fixture tests (Seed 7).
+  // These cover the fixture-vs-reality gap left after commit 9b3c8a15:
+  //   • An Inactive ApexTrigger (status: Inactive) must be excluded from the
+  //     active SOE steps and disclosed in inactiveConfigured.
+  //   • Active after-save flows with recordTriggerType: Create are excluded
+  //     from the update event (only CreateAndUpdate + Update fire on update).
+  //   • The after-triggers and post-save-flows phaseCounts are exact.
+  // =========================================================================
+
+  it('real-org-shape: excludes Inactive ApexTrigger from active after-triggers and discloses it', async () => {
+    // StdObj insert: both active triggers with after insert fire; the Inactive
+    // trigger also has after insert but MUST be excluded and disclosed.
+    // Without the ApexTrigger status check in isActiveSoeFirer the inactive
+    // trigger inflates after-triggers from 3 to 4.
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'StdObj',
+      event: 'insert',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { soe, summary, inactiveConfigured } = result.value.data;
+
+    const afterTrigSteps = soe.filter((s) => s.phase === 'after-triggers');
+    // 3 active triggers have after insert: TriggerA, TriggerB, TriggerC.
+    // StdObjInactiveTrigger (Inactive) must NOT appear.
+    expect(summary.phaseCounts['after-triggers']).toBe(3);
+    expect(afterTrigSteps.map((s) => s.componentId).sort()).toEqual(
+      [TRIG_AFTER_BOTH, TRIG_AFTER_BOTH_2, TRIG_ALL_EVENTS].sort(),
+    );
+    expect(afterTrigSteps.some((s) => s.componentId === TRIG_INACTIVE)).toBe(false);
+
+    // The inactive trigger must be disclosed in inactiveConfigured.
+    const inactiveTrigEntry = inactiveConfigured?.find(
+      (ic) => ic.componentId === TRIG_INACTIVE,
+    );
+    expect(inactiveTrigEntry).toBeDefined();
+    expect(inactiveTrigEntry?.inactiveReason).toBe('status: Inactive');
+  });
+
+  it('real-org-shape: after-update event enumerates correct after-triggers and post-save-flows counts', async () => {
+    // StdObj update:
+    //   after-triggers: TriggerA (after update), TriggerB (after update), TriggerC (after update) = 3.
+    //   StdObjInactiveTrigger (Inactive) is excluded.
+    //   post-save-flows: CreateAndUpdate (fires on update) + UpdateOnly = 2.
+    //   CreateOnly does NOT match update. Obsolete flow is inactive.
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'StdObj',
+      event: 'update',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { summary, inactiveConfigured } = result.value.data;
+
+    expect(summary.phaseCounts['after-triggers']).toBe(3);
+    expect(summary.phaseCounts['post-save-flows']).toBe(2);
+
+    // The inactive trigger and obsolete flow are both disclosed.
+    const ids = inactiveConfigured?.map((ic) => ic.componentId) ?? [];
+    expect(ids).toContain(TRIG_INACTIVE);
+    expect(ids).toContain(FLOW_AS_OBSOLETE);
+  });
+
+  it('real-org-shape: Inactive ApexTrigger inactiveReason is "status: Inactive"', async () => {
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'StdObj',
+      event: 'update',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const inactive = result.value.data.inactiveConfigured ?? [];
+    const entry = inactive.find((ic) => ic.componentId === TRIG_INACTIVE);
+    expect(entry).toBeDefined();
+    expect(entry?.componentType).toBe('ApexTrigger');
+    expect(entry?.inactiveReason).toBe('status: Inactive');
   });
 });
 

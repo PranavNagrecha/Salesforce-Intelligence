@@ -164,6 +164,10 @@ describe('listComponentsHandler', () => {
     // Seven fields fit comfortably under the default limit, so no further
     // page is implied.
     expect(result.value.data.hasMore).toBe(false);
+    // B-GRAPH-BUILD: totalCount is always present at the top level and must
+    // equal the true graph count, not components.length (which is bounded by
+    // limit and byte-budget trimming).
+    expect(result.value.data.totalCount).toBe(7);
     expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
     expect(result.value.vaultState.refreshedAt).toBe('2026-05-27T14:33:08Z');
   });
@@ -241,6 +245,9 @@ describe('listComponentsHandler', () => {
     if (!fullPage.ok) return;
     expect(fullPage.value.data.components.length).toBe(5);
     expect(fullPage.value.data.hasMore).toBe(true);
+    // B-GRAPH-BUILD: totalCount must be 7 on every page, regardless of how
+    // many rows this page contains.
+    expect(fullPage.value.data.totalCount).toBe(7);
 
     const tailPage = await listComponentsHandler(ctx, {
       type: 'CustomField',
@@ -251,6 +258,8 @@ describe('listComponentsHandler', () => {
     if (!tailPage.ok) return;
     expect(tailPage.value.data.components.length).toBe(2);
     expect(tailPage.value.data.hasMore).toBe(false);
+    // totalCount stays 7 on the tail page too.
+    expect(tailPage.value.data.totalCount).toBe(7);
   });
 });
 
@@ -260,7 +269,9 @@ describe('listComponentsHandler retrievalHint (FRESH-02)', () => {
   const COVERAGE_MANIFEST = {
     ...FIXTURE_MANIFEST,
     coverage: [
-      // retrieved this type, found none → "none in the org"
+      // requested but retrieve pulled nothing → "not retrieved / not checked"
+      // (C2: byte-identical to "confirmed none in org", so the honest reading
+      // is "not retrieved" — never silently "none in the org").
       { type: 'StaticResource', requested: true, retrieved: 0, errored: false, neverModeled: false },
       // a scoped refresh never pulled this type → "not retrieved"
       { type: 'Report', requested: false, retrieved: 0, errored: false, neverModeled: false },
@@ -289,15 +300,21 @@ describe('listComponentsHandler retrievalHint (FRESH-02)', () => {
     expect(r.value.data.retrievalHint).not.toContain('none in the org');
   });
 
-  it('says "none in the org" when the type was retrieved but empty', async () => {
+  it('says "not retrieved — /sfi-refresh" (NOT "none in the org") when a requested type retrieved zero rows (C2)', async () => {
+    // C2 / Systemic #1: requested + retrieved:0 is byte-identical to "the org
+    // genuinely has none of this type", so list_components must NOT assert
+    // "retrieved X and found none — this is none in the org". The coverage fix
+    // routes the requested-but-empty type into missingCoverage, so the honest
+    // "did not pull this type, run /sfi-refresh" hint fires instead. (Used to
+    // assert the bug: retrievalHint contained "none in the org".)
     const covCtx: Context = { ...ctx, manifest: COVERAGE_MANIFEST };
     const r = await listComponentsHandler(covCtx, { type: 'StaticResource' });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.components).toHaveLength(0);
-    expect(r.value.data.retrievalHint).toContain('none in the org');
-    // The none-in-org branch must NOT nudge a refresh (nothing to re-pull).
-    expect(r.value.data.retrievalHint).not.toContain('/sfi-refresh');
+    expect(r.value.data.retrievalHint).not.toContain('none in the org');
+    expect(r.value.data.retrievalHint).toContain('/sfi-refresh');
+    expect(r.value.data.retrievalHint).toContain('did not pull');
   });
 
   it('says "not retrieved — /sfi-refresh" when a scoped refresh skipped the type', async () => {
@@ -358,6 +375,366 @@ describe('listComponentsHandler retrievalHint (FRESH-02)', () => {
     if (!r.ok) return;
     expect(r.value.data.retrievalHint).toContain('/sfi-refresh');
     expect(r.value.data.coverageCaveat?.missingCoverage).toContain('Report');
+  });
+});
+
+describe('listComponentsHandler formula-field classification', () => {
+  // A formula field encodes its RETURN type in <type> (Text/Currency here), NOT
+  // the literal 'Formula'. The extractor flags it with properties.isFormula=true;
+  // list_components surfaces the TRUE count so a caller never concludes "No
+  // Formula fields were found" by grouping on dataType alone.
+  let fDir: string;
+  let fStore: GraphStore;
+  let fCtx: Context;
+
+  const fSeed: ExtractionResult = {
+    nodes: [
+      makeNode({ id: 'CustomObject:Payment__c', apiName: 'Payment__c', label: 'Payment' }),
+      // Two formula fields whose <type> is the RETURN type, not 'Formula'.
+      makeNode({
+        id: 'CustomField:Payment__c.Clock_Number__c',
+        type: 'CustomField',
+        apiName: 'Clock_Number__c',
+        label: 'Clock Number',
+        parentId: 'CustomObject:Payment__c',
+        properties: { dataType: 'Text', formula: 'TEXT(Seq__c)', isFormula: true },
+      }),
+      makeNode({
+        id: 'CustomField:Payment__c.Net__c',
+        type: 'CustomField',
+        apiName: 'Net__c',
+        label: 'Net',
+        parentId: 'CustomObject:Payment__c',
+        properties: { dataType: 'Currency', formula: 'Gross__c - Tax__c', isFormula: true },
+      }),
+      // One stored field — no isFormula key (OMIT-when-false).
+      makeNode({
+        id: 'CustomField:Payment__c.Amount__c',
+        type: 'CustomField',
+        apiName: 'Amount__c',
+        label: 'Amount',
+        parentId: 'CustomObject:Payment__c',
+        properties: { dataType: 'Currency' },
+      }),
+    ],
+    edges: [],
+  };
+
+  beforeAll(async () => {
+    fDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-list-formula-'));
+    const opened = await openGraph(join(fDir, 'formula.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    fStore = opened.value;
+    const imported = await importExtractionResults(fStore, [fSeed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    fCtx = { vaultRoot: fDir, manifest: FIXTURE_MANIFEST, graph: fStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(fStore);
+    rmSync(fDir, { recursive: true, force: true });
+  });
+
+  it('reports the TRUE formulaFieldCount across the whole CustomField type', async () => {
+    const r = await listComponentsHandler(fCtx, { type: 'CustomField' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Three fields total, two of them formula — and the count must NOT be zero,
+    // which is the symptom of "No Formula fields were found".
+    expect(r.value.data.formulaFieldCount).toBe(2);
+  });
+
+  it('scopes formulaFieldCount to a parentId narrow', async () => {
+    const r = await listComponentsHandler(fCtx, {
+      type: 'CustomField',
+      parentId: 'CustomObject:Payment__c',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.formulaFieldCount).toBe(2);
+  });
+
+  it('counts formula fields independent of pagination (page size 1)', async () => {
+    // The count is a COUNT(*), not a per-page tally, so a tiny page still
+    // reports the full formula total.
+    const r = await listComponentsHandler(fCtx, { type: 'CustomField', limit: 1 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.components.length).toBe(1);
+    expect(r.value.data.formulaFieldCount).toBe(2);
+  });
+
+  it('omits formulaFieldCount for non-CustomField types', async () => {
+    const r = await listComponentsHandler(fCtx, { type: 'CustomObject' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.formulaFieldCount).toBeUndefined();
+  });
+});
+
+// =============================================================================
+// CR-22 — single-axis continuation cursor. list_components pages
+// listNodesByType DIRECTLY by SQL OFFSET, so `o` already IS the SQL offset (it
+// natively reaches node 501+); no separate scan axis. A truncated page emits an
+// opaque nextCursor + a TRUE total (countNodesByType); a whole-fits final page
+// is byte-identical.
+// =============================================================================
+describe('listComponentsHandler — continuation cursor (CR-22)', () => {
+  it('a final page (hasMore=false) omits nextCursor/pageInfo (byte-identical)', async () => {
+    // All 7 CustomFields fit in one default page → hasMore is false → no cursor.
+    const r = await listComponentsHandler(ctx, { type: 'CustomField' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.hasMore).toBe(false);
+    const d = r.value.data as unknown as Record<string, unknown>;
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+  });
+
+  it('a truncated page emits a cursor + TRUE total and resumes with no gaps or dupes', async () => {
+    const all = await listComponentsHandler(ctx, { type: 'CustomField', limit: 500 });
+    expect(all.ok).toBe(true);
+    if (!all.ok) return;
+    const fullOrder = all.value.data.components.map((c) => c.id);
+    expect(fullOrder.length).toBe(7);
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const page = await listComponentsHandler(
+        ctx,
+        cursor !== undefined ? { type: 'CustomField', limit: 2, cursor } : { type: 'CustomField', limit: 2 },
+      );
+      expect(page.ok).toBe(true);
+      if (!page.ok) return;
+      for (const c of page.value.data.components) seen.push(c.id);
+      // pageInfo (when present) carries the TRUE total of 7, not a capped length.
+      if (page.value.data.pageInfo !== undefined) {
+        expect(page.value.data.pageInfo.totalCount).toBe(7);
+      }
+      const nc = page.value.data.nextCursor;
+      if (nc === undefined) break;
+      cursor = nc;
+      guard += 1;
+      if (guard > 20) throw new Error('cursor did not terminate');
+    }
+    expect(seen).toEqual(fullOrder);
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+
+  it('TRUE total respects a parentId narrow (countNodesByType filtered)', async () => {
+    // Account has 5 CustomFields; a limit of 2 truncates and the pageInfo total
+    // must be the FILTERED 5, not the whole-type 7.
+    const r = await listComponentsHandler(ctx, {
+      type: 'CustomField',
+      parentId: 'CustomObject:Account',
+      limit: 2,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.hasMore).toBe(true);
+    expect(r.value.data.pageInfo?.totalCount).toBe(5);
+  });
+
+  it('rejects a cursor minted for a DIFFERENT type (argsFingerprint bind)', async () => {
+    const first = await listComponentsHandler(ctx, { type: 'CustomField', limit: 2 });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const cursor = first.value.data.nextCursor;
+    expect(typeof cursor).toBe('string');
+    if (typeof cursor !== 'string') return;
+    const replay = await listComponentsHandler(ctx, { type: 'CustomObject', cursor });
+    expect(replay.ok).toBe(false);
+    if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
+  });
+
+  it('rejects a cursor minted for a DIFFERENT parentId (argsFingerprint bind)', async () => {
+    const first = await listComponentsHandler(ctx, {
+      type: 'CustomField',
+      parentId: 'CustomObject:Account',
+      limit: 2,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const cursor = first.value.data.nextCursor;
+    if (typeof cursor !== 'string') return;
+    const replay = await listComponentsHandler(ctx, {
+      type: 'CustomField',
+      parentId: 'CustomObject:Opportunity',
+      cursor,
+    });
+    expect(replay.ok).toBe(false);
+    if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
+  });
+});
+
+// =============================================================================
+// B-GRAPH-BUILD — totalCount is the authoritative vault count regardless of
+// payload trimming. Reproduces the FlexiPage 39-of-86 scenario: nodes with
+// large `properties` blobs exhaust the 38 KB byte budget before the full page
+// is returned, so `components.length` < `limit` < true total. A cascade that
+// reads `components.length` for a count answer reports the wrong number;
+// `totalCount` (from `countNodesByType`) must always be correct.
+// =============================================================================
+describe('listComponentsHandler — B-GRAPH-BUILD totalCount beats byte-budget trim', () => {
+  let bDir: string;
+  let bStore: GraphStore;
+  let bCtx: Context;
+
+  // Generate a node whose serialized JSON is guaranteed to exceed 1 KB so that
+  // a page of 50 of them easily exceeds the 38 KB budget.
+  const makeLargeNode = (n: number): Node =>
+    makeNode({
+      id: `FlexiPage:Page${String(n).padStart(3, '0')}__c`,
+      type: 'FlexiPage',
+      apiName: `Page${String(n).padStart(3, '0')}__c`,
+      label: `FlexiPage ${n}`,
+      sourcePath: `flexipages/Page${n}.flexipage-meta.xml`,
+      properties: {
+        // Simulate the `fieldRefs` array that makes real FlexiPage nodes large:
+        // each entry is ~40 bytes; 30 entries ≈ 1.2 KB per node, so 50 nodes ≈
+        // 60 KB — well above the 38 KB LIST_PAYLOAD_BUDGET_BYTES guard.
+        fieldRefs: Array.from({ length: 30 }, (_, i) => `CustomField:SObject__c.Field${i}__c`),
+        description: `Auto-generated FlexiPage fixture number ${n} for B-GRAPH-BUILD budget-trim test.`,
+      },
+    });
+
+  beforeAll(async () => {
+    bDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-flexipage-budget-'));
+    const opened = await openGraph(join(bDir, 'budget.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    bStore = opened.value;
+    // Seed 86 large FlexiPage nodes — reproduces the 39-of-86 count loss
+    // reported in B-GRAPH-BUILD.
+    const nodes = Array.from({ length: 86 }, (_, i) => makeLargeNode(i + 1));
+    const imported = await importExtractionResults(bStore, [{ nodes, edges: [] }]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    bCtx = { vaultRoot: bDir, manifest: FIXTURE_MANIFEST, graph: bStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(bStore);
+    rmSync(bDir, { recursive: true, force: true });
+  });
+
+  it('totalCount is 86 even when budget trimming stops components at fewer than limit (B-GRAPH-BUILD)', async () => {
+    // default limit=50, but large nodes exhaust the 38 KB budget before 50
+    // nodes are serialized — components.length < 50. The legacy approach of
+    // reading components.length for a count answer reports the wrong number.
+    const r = await listComponentsHandler(bCtx, { type: 'FlexiPage' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // The byte budget must have kicked in: fewer nodes than the default limit.
+    expect(r.value.data.components.length).toBeLessThan(50);
+    // truncated=true confirms the budget guard trimmed the page.
+    expect(r.value.data.truncated).toBe(true);
+    // hasMore=true because the page was trimmed (more nodes remain).
+    expect(r.value.data.hasMore).toBe(true);
+    // THE KEY ASSERTION: totalCount must be the TRUE vault count from
+    // countNodesByType, not the trimmed components.length.
+    expect(r.value.data.totalCount).toBe(86);
+    // The truncation note must reference the correct totalCount.
+    expect(r.value.data.note).toContain('86');
+  });
+
+  it('totalCount stays 86 on page 2 (post-trim cursor resume) — count is never lost mid-pagination', async () => {
+    const page1 = await listComponentsHandler(bCtx, { type: 'FlexiPage', limit: 10 });
+    expect(page1.ok).toBe(true);
+    if (!page1.ok) return;
+    expect(page1.value.data.totalCount).toBe(86);
+
+    const page2 = await listComponentsHandler(bCtx, { type: 'FlexiPage', limit: 10, offset: 10 });
+    expect(page2.ok).toBe(true);
+    if (!page2.ok) return;
+    expect(page2.value.data.totalCount).toBe(86);
+  });
+});
+
+describe('listComponentsHandler: Flow property filters', () => {
+  let dir3: string;
+  let store3: GraphStore;
+  let ctx3: Context;
+
+  beforeAll(async () => {
+    dir3 = mkdtempSync(join(tmpdir(), 'sfi-mcp-listcomp-flow-'));
+    const opened = await openGraph(join(dir3, 'lc.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    store3 = opened.value;
+    const imported = await importExtractionResults(store3, [
+      {
+        nodes: [
+          makeNode({
+            id: 'Flow:RT_App_Active',
+            type: 'Flow',
+            apiName: 'RT_App_Active',
+            label: 'RT App Active',
+            properties: {
+              status: 'Active',
+              triggerObject: 'hed__Application__c',
+              triggerType: 'RecordAfterSave',
+            },
+          }),
+          makeNode({
+            id: 'Flow:RT_App_Draft',
+            type: 'Flow',
+            apiName: 'RT_App_Draft',
+            label: 'RT App Draft',
+            properties: {
+              status: 'Draft',
+              triggerObject: 'hed__Application__c',
+              triggerType: 'RecordAfterSave',
+            },
+          }),
+          makeNode({
+            id: 'Flow:RT_Case_Active',
+            type: 'Flow',
+            apiName: 'RT_Case_Active',
+            label: 'RT Case Active',
+            properties: {
+              status: 'Active',
+              triggerObject: 'Case',
+              triggerType: 'RecordAfterSave',
+            },
+          }),
+          makeNode({
+            id: 'Flow:Screen_App',
+            type: 'Flow',
+            apiName: 'Screen_App',
+            label: 'Screen App',
+            properties: {
+              status: 'Active',
+              triggerObject: 'hed__Application__c',
+              triggerType: 'Screen',
+            },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    ctx3 = { vaultRoot: dir3, manifest: FIXTURE_MANIFEST, graph: store3 };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store3);
+    rmSync(dir3, { recursive: true, force: true });
+  });
+
+  it('filters flows by triggerObject, status, and recordTriggered', async () => {
+    const r = await listComponentsHandler(ctx3, {
+      type: 'Flow',
+      triggerObject: 'hed__Application__c',
+      status: 'Active',
+      recordTriggered: true,
+      limit: 50,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalCount).toBe(1);
+    expect(r.value.data.components.map((n) => n.id)).toEqual(['Flow:RT_App_Active']);
   });
 });
 

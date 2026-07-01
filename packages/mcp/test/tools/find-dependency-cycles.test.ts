@@ -130,4 +130,55 @@ describe('findDependencyCyclesInputSchema', () => {
   it('rejects limit above 200', () => {
     expect(findDependencyCyclesInputSchema.safeParse({ limit: 201 }).success).toBe(false);
   });
+  it('accepts offset and cursor (CR-22)', () => {
+    expect(
+      findDependencyCyclesInputSchema.safeParse({ offset: 1, cursor: 'abc' }).success,
+    ).toBe(true);
+  });
+});
+
+// =============================================================================
+// CR-22 B4 — output cursor over the cycle list (members.join tiebreak) + full
+// Apex scan. A whole-fits no-cursor call omits paging fields; a truncated page
+// resumes the full set with no gaps / dupes.
+// =============================================================================
+describe('findDependencyCyclesHandler — output cursor (CR-22)', () => {
+  it('whole-fits no-cursor call omits paging fields', async () => {
+    const r = await findDependencyCyclesHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data as unknown as Record<string, unknown>;
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+    expect(r.value.data.summary.truncated).toBe(false);
+  });
+
+  it('a truncated page emits a cursor that resumes with no gaps or dupes', async () => {
+    const all = await findDependencyCyclesHandler(ctx, { limit: 200 });
+    expect(all.ok).toBe(true);
+    if (!all.ok) return;
+    const fullOrder = all.value.data.cycles.map((c) => c.members.join(','));
+    expect(fullOrder.length).toBe(2);
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const page: Awaited<ReturnType<typeof findDependencyCyclesHandler>> =
+        await findDependencyCyclesHandler(
+          ctx,
+          cursor !== undefined ? { limit: 1, cursor } : { limit: 1 },
+        );
+      expect(page.ok).toBe(true);
+      if (!page.ok) return;
+      for (const c of page.value.data.cycles) seen.push(c.members.join(','));
+      const nc = page.value.data.nextCursor;
+      if (nc === undefined) break;
+      cursor = nc;
+      guard += 1;
+      if (guard > 20) throw new Error('cursor did not terminate');
+    }
+    expect(seen).toEqual(fullOrder);
+    expect(new Set(seen).size).toBe(seen.length);
+  });
 });

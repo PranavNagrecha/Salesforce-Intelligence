@@ -33,28 +33,69 @@
  *   - When `qualityIssues` is absent the v2.1 R2 recognizer pass has
  *     not run; the report still emits per-test entries with
  *     `fakeAssertionCount: 0` and the disclosure clarifies the gap.
- *   - Pagination: scans the full ApexClass set via
- *     `listNodesByType(ApexClass, { limit: 500 })`; matches the
- *     v2.1 `test_coverage_gaps` page size.
+ *   - Pagination: scans the FULL ApexClass set by paging
+ *     `listNodesByType(ApexClass)` to exhaustion (not just the first
+ *     500), so the ranking and `totalTestClassCount` cover every test
+ *     class — a test sorted past row 500 used to be silently dropped
+ *     from both. `countNodesByType` is the loop's belt cross-check.
  */
 
 import type {
   ComponentId,
+  ComponentType,
   McpError,
   McpResponse,
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listNodesByType } from '@sf-intelligence/graph';
+import { countNodesByType, listNodesByType } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-/** Per-type cap matching `listNodesByType`'s default. */
-const LIST_PAGE_SIZE = 500;
+import { nodeScanLimit } from './scan-cap.js';
+
+/**
+ * Hard ceiling on a single `listNodesByType` page. `nodeScanLimit()` is
+ * env-overridable (`SFI_NODE_SCAN_LIMIT`) so a test can drive the multi-page
+ * offset loop without seeding 500+ nodes, but the graph layer rejects
+ * `limit > 500` — so every page request is clamped here.
+ */
+const PAGE_CAP = 500;
+const pageSize = (): number => Math.min(nodeScanLimit(), PAGE_CAP);
+
+/**
+ * Load EVERY ApexClass node, not just the first page. A single
+ * `listNodesByType` page caps at 500 (id ASC), so an org with > 500 classes
+ * used to drop the tail — a test class sorted past the cap vanished from the
+ * ranking and from `totalTestClassCount`. Page by `pageSize()` accumulating
+ * until a short page proves the type is exhausted, with `countNodesByType` as a
+ * belt cross-check so a page that unexpectedly returns full cannot loop forever.
+ * The common case (org under the cap) runs exactly one sub-cap page —
+ * byte-identical.
+ */
+const loadAllNodes = async (
+  ctx: Context,
+  type: ComponentType,
+): Promise<Result<readonly Node[], string>> => {
+  const total = await countNodesByType(ctx.graph, type);
+  if (!total.ok) return err(total.error.message);
+  const limit = pageSize();
+  const all: Node[] = [];
+  for (let offset = 0; ; offset += limit) {
+    const page = await listNodesByType(ctx.graph, type, { limit, offset });
+    if (!page.ok) return err(page.error.message);
+    all.push(...page.value);
+    if (page.value.length < limit || all.length >= total.value) break;
+  }
+  return ok(all);
+};
 
 /** Canonical id prefix every `classFilter` entry must carry. */
 const APEX_CLASS_PREFIX = 'ApexClass:';
+
+/** Inclusive upper bound on the number of `classFilter` ids the input accepts. */
+const CLASS_FILTER_MAX = 500;
 
 /** Verbatim v2.7 honesty disclosure. */
 const MEANINGFUL_TEST_DISCLOSURE =
@@ -68,7 +109,7 @@ const MEANINGFUL_TEST_DISCLOSURE =
  *     `properties.isTest === true` is audited.
  */
 export const meaningfulTestAuditInputSchema = z.object({
-  classFilter: z.array(z.string().min(1)).max(LIST_PAGE_SIZE).optional(),
+  classFilter: z.array(z.string().min(1)).max(CLASS_FILTER_MAX).optional(),
 });
 
 /** Parsed input shape. */
@@ -217,13 +258,11 @@ export const meaningfulTestAuditHandler = async (
     }
   }
 
-  const classesRes = await listNodesByType(ctx.graph, 'ApexClass', {
-    limit: LIST_PAGE_SIZE,
-  });
+  const classesRes = await loadAllNodes(ctx, 'ApexClass');
   if (!classesRes.ok) {
     return err({
       kind: 'internal',
-      message: `graph query failed: ${classesRes.error.message}`,
+      message: `graph query failed: ${classesRes.error}`,
     });
   }
 

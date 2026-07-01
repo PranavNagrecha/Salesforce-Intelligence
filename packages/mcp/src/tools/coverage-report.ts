@@ -13,13 +13,21 @@ import type {
   TrustSummary,
 } from '@sf-intelligence/contracts';
 import { ok, type Result } from '@sf-intelligence/core';
-import { buildCoverageEntries, summarizeCoverage } from '@sf-intelligence/vault';
+import {
+  buildCoverageEntries,
+  rankUncoveredFamilies,
+  summarizeCoverage,
+  type UncoveredFamily,
+} from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+/** CR-CAP-20 — cap on the ranked uncovered-families list. */
+const TOP_UNCOVERED_FAMILIES_CAP = 10;
+
 export const COVERAGE_DISCLOSURE =
-  "Coverage describes what the last `sf project retrieve` requested and returned — not what exists in the org. A type listed under `notModeled` is not analyzed by this product at all; its absence from any result means 'not checked', never 'none'. Re-run `/sfi-refresh` after widening your retrieve manifest to close a gap.";
+  "Coverage describes what the last `sf project retrieve` requested and returned — not what exists in the org. A type listed under `notModeled` is not analyzed by this product at all; its absence from any result means 'not checked', never 'none'. Re-run `/sfi-refresh` after widening your retrieve manifest to close a gap. `topUncoveredFamilies` ranks (by skipped-file volume) directories that WERE retrieved but not modeled by an extractor — a listed family is retrieved-but-not-modeled, never 'absent'.";
 
 export const coverageReportInputSchema = z.object({
   type: z.string().min(1).optional(),
@@ -45,17 +53,33 @@ export interface CoverageReportOutput {
     readonly totalTiers: number;
   };
   readonly summary: ReturnType<typeof summarizeCoverage>;
+  /**
+   * CR-CAP-20: top families (capped at 10) that were RETRIEVED but not
+   * modeled by an extractor, ranked by skipped-file volume desc. Each
+   * row carries the canonical `family` label (a `ComponentType` when the
+   * raw dir maps to one, else the raw dir name), `rawDir`, `skippedFiles`,
+   * and `modeledType`. Empty `[]` on a clean vault — never implies the
+   * family is absent from the org.
+   */
+  readonly topUncoveredFamilies: readonly UncoveredFamily[];
   readonly trust: TrustSummary;
   readonly disclosure: string;
 }
 
+// CR-P3-3: kept in deliberate lockstep with `summarizeCoverage`'s tri-state
+// (manifest.ts). A confirmed-clean empty type (`retrieved === 0` AND
+// `retrieveConfirmed === true`) moves from `partial` to `covered`; an
+// unconfirmed empty type (no signal / dropped / --no-pull) stays in `partial`.
+// Without this gate coverage_report would self-contradict summarizeCoverage
+// (its own `partial[]` listing a type the summary calls complete) — the exact
+// bug the lockstep comment in manifest.ts guards.
 const partitionCoverage = (
   entries: readonly CoverageEntry[],
 ): Pick<CoverageReportOutput, 'covered' | 'partial' | 'notModeled' | 'pending'> => ({
   covered: entries.filter(
     (entry) =>
       entry.requested &&
-      entry.retrieved > 0 &&
+      (entry.retrieved > 0 || entry.retrieveConfirmed === true) &&
       !entry.errored &&
       !entry.neverModeled &&
       entry.pending !== true,
@@ -63,7 +87,8 @@ const partitionCoverage = (
   partial: entries.filter(
     (entry) =>
       entry.requested &&
-      (entry.retrieved === 0 || entry.errored) &&
+      ((entry.retrieved === 0 && entry.retrieveConfirmed !== true) ||
+        entry.errored) &&
       !entry.neverModeled &&
       entry.pending !== true,
   ),
@@ -85,6 +110,12 @@ export const coverageReportHandler = async (
   const partitions = partitionCoverage(entries);
   const missingCoverage = summary.missingCoverage;
   const staged = ctx.manifest.staged;
+  // CR-CAP-20: rank retrieved-but-not-modeled families and cap the list.
+  // Inert ([]) when `skippedDirectories` is empty/absent (clean vault).
+  const topUncoveredFamilies = rankUncoveredFamilies(ctx.manifest).slice(
+    0,
+    TOP_UNCOVERED_FAMILIES_CAP,
+  );
 
   return ok({
     data: {
@@ -95,6 +126,7 @@ export const coverageReportHandler = async (
         ? { stagedBuild: { tier: staged.tier, totalTiers: staged.totalTiers } }
         : {}),
       summary,
+      topUncoveredFamilies,
       trust: {
         provenance: 'offline_snapshot',
         confidence: summary.coverageKnown ? 'declared' : 'unknown',

@@ -43,11 +43,21 @@
  * - **Cross-method blindness.** A method that delegates the dangerous
  *   operation to a helper is analyzed in isolation; the helper's
  *   behavior is invisible.
- * - **Custom security utility helpers invisible.** Only standard
- *   `Schema.sObjectType.X.isCreateable()` (and equivalents) +
- *   `WITH SECURITY_ENFORCED` / `USER_MODE` clauses count as CRUD/FLS
- *   hints. Org-specific `SecurityUtils.canCreate(...)` helpers
- *   trigger false positives.
+ * - **Three orthogonal access planes (CR-04).** CRUD (object-level),
+ *   FLS (field-level), and record sharing are distinct; the
+ *   `missing-crud-check` recognizer is about WRITE AUTHORIZATION only.
+ *   A SOQL `WITH SECURITY_ENFORCED` / `WITH USER_MODE` clause enforces
+ *   READ FLS + object read on the QUERY and does NOT clear a later DML
+ *   write — only an object write-CRUD check
+ *   (`Schema.sObjectType.X.is{Createable|Updateable|Deletable}()`),
+ *   user-mode DML (`insert x as user`, `Database.insert(x,
+ *   AccessLevel.USER_MODE)`), or a write-FLS strip
+ *   (`Security.stripInaccessible(AccessType.CREATABLE|UPDATABLE, …)`)
+ *   gates a write. `isAccessible()` is a READ check and never clears a
+ *   write.
+ * - **Custom security utility helpers invisible.** Only the standard
+ *   constructs above are recognized; org-specific
+ *   `SecurityUtils.canCreate(...)` helpers trigger false positives.
  * - **Dynamic SOQL strings invisible.** The contents of
  *   `Database.query('SELECT...')` strings are stripped before
  *   pattern passes; the recognizer cannot analyze the embedded SQL.
@@ -177,6 +187,140 @@ const findMatchingBrace = (stripped: string, openIndex: number): number => {
     const ch = stripped[i];
     if (ch === '{') depth += 1;
     else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+};
+
+/**
+ * Offset of the `{` that opens the innermost block enclosing `offset`,
+ * found by walking BACKWARD over the stripped source and counting brace
+ * depth. Returns 0 (file start) when no enclosing `{` is found (e.g. a
+ * statement at top level). Offsets align with `source` because
+ * `stripCommentsAndStrings` preserves byte length.
+ *
+ * Used by the CRUD-check recognizer to bound its hint scan to the block
+ * that lexically contains a DML statement — so a security check in one
+ * method cannot clear an ungated DML in a DIFFERENT method.
+ */
+const enclosingBlockStart = (stripped: string, offset: number): number => {
+  let depth = 0;
+  for (let i = offset - 1; i >= 0; i -= 1) {
+    const ch = stripped[i];
+    if (ch === '}') depth += 1;
+    else if (ch === '{') {
+      if (depth === 0) return i;
+      depth -= 1;
+    }
+  }
+  return 0;
+};
+
+/**
+ * Reserved Apex statement / control-flow keywords that must NEVER be treated
+ * as a declared TYPE. Single source of truth for two consumers:
+ *   1. `enclosingMethodStart` — distinguishes a method body (token before the
+ *      param `(` is a method NAME) from a control-flow header (`if`/`for`/…).
+ *   2. `resolveVarSObjectType` — the declaration regex (`<Type> var`) has no
+ *      keyword guard, so a statement like `return acc;` would otherwise be
+ *      parsed as type=`return`, var=`acc` (CR-RV9). Rejecting these keywords
+ *      makes the resolver fall through to the safe loose-path degrade.
+ * The set is a SUPERSET of the old local control-flow set: `return`, `throw`,
+ * `new`, `final`, `do`, `try` are added (they were never valid method-name
+ * tokens before a `(`, so the extra entries are harmless to consumer 1, and
+ * they ARE the statement keywords the resolver must reject for consumer 2).
+ */
+const APEX_NON_TYPE_KEYWORDS = new Set([
+  'if',
+  'for',
+  'while',
+  'switch',
+  'catch',
+  'else',
+  'return',
+  'throw',
+  'new',
+  'final',
+  'do',
+  'try',
+]);
+
+/**
+ * Offset boundaries of the ENCLOSING METHOD (or class) body that contains
+ * `offset`, found by walking out one enclosing block at a time until the
+ * block's controlling clause looks like a method/ctor signature (`) {`)
+ * rather than a control-flow header (`if`/`for`/`while`/`try`/…). Returns
+ * `{ bodyStart, sigStart }`:
+ *   - `bodyStart` — offset of the method body's `{` (the prior behaviour).
+ *   - `sigStart`  — offset of the parameter-list `(` for the method-shaped
+ *     block, i.e. the start of the SIGNATURE span `[sigStart, bodyStart)`
+ *     which contains the param list incl. its closing `)`. Falls back to
+ *     `bodyStart` when no method shape is found (outermost / 0 fallbacks).
+ * Offsets align with `source`.
+ *
+ * `bodyStart` is the WIDER fallback window for the CRUD-check recognizer: an
+ * early-return / throw guard at the top of a method (`if (!X.isUpdateable())
+ * throw ...; ... update x;`) lives in method scope, not the DML's innermost
+ * block, so a same-method write-CRUD hint on the RESOLVED sObject is allowed
+ * to clear the finding (the dominant guard idiom).
+ *
+ * `sigStart` exposes the parameter list to `resolveVarSObjectType` so a DML
+ * target that is a method PARAMETER (`void save(Account acc){ … insert acc; }`,
+ * the dominant service idiom) resolves to its SObject type — without it the
+ * resolver window starts AFTER the param list and the type is invisible,
+ * forcing the loose any-gate clear (CR-P3-2 security false-negative).
+ */
+const enclosingMethodStart = (
+  stripped: string,
+  offset: number,
+): { bodyStart: number; sigStart: number } => {
+  let cursor = offset;
+  let outermost = 0;
+  for (let guard = 0; guard < 64; guard += 1) {
+    const blockOpen = enclosingBlockStart(stripped, cursor);
+    if (blockOpen === 0) return { bodyStart: outermost, sigStart: outermost };
+    outermost = blockOpen;
+    // Inspect the text immediately before the `{`: a method/ctor body opens
+    // after a `)` (the parameter list), whereas an `if`/`for`/`while`/`try`
+    // body does too — so additionally require the controlling keyword NOT be
+    // a control-flow keyword. Walk back over whitespace + a balanced `(...)`.
+    let j = blockOpen - 1;
+    while (j >= 0 && /\s/.test(stripped[j] ?? '')) j -= 1;
+    if (j >= 0 && stripped[j] === ')') {
+      const paramOpen = matchOpenParenBackward(stripped, j);
+      if (paramOpen >= 0) {
+        // The token(s) immediately before the `(` decide method vs control-flow.
+        let k = paramOpen - 1;
+        while (k >= 0 && /\s/.test(stripped[k] ?? '')) k -= 1;
+        const end = k;
+        while (k >= 0 && /[A-Za-z_0-9]/.test(stripped[k] ?? '')) k -= 1;
+        const word = stripped.slice(k + 1, end + 1);
+        if (!APEX_NON_TYPE_KEYWORDS.has(word)) {
+          // Method / ctor body. The signature span `[paramOpen, blockOpen)`
+          // contains the param list incl. its closing `)`.
+          return { bodyStart: blockOpen, sigStart: paramOpen };
+        }
+      }
+    }
+    // Otherwise climb to the parent block.
+    cursor = blockOpen;
+  }
+  return { bodyStart: outermost, sigStart: outermost };
+};
+
+/**
+ * Walk BACKWARD from a `)` at `closeParen` to the matching `(`. Returns -1
+ * when unbalanced. Mirrors `findMatchingParen` (forward) for the reverse
+ * direction.
+ */
+const matchOpenParenBackward = (s: string, closeParen: number): number => {
+  let depth = 0;
+  for (let i = closeParen; i >= 0; i -= 1) {
+    const ch = s[i];
+    if (ch === ')') depth += 1;
+    else if (ch === '(') {
       depth -= 1;
       if (depth === 0) return i;
     }
@@ -579,23 +723,137 @@ const detectDynamicApex = (stripped: string): readonly QualityIssue[] => {
 
 // ---------- recognizer 6: missing-crud-check ------------------------------
 
+// DML statement form. The variable token is `m[2]`; `m[3]` (when present)
+// is a trailing ` as user` / ` as system` user-mode suffix. The optional
+// middle identifier covers the two-arg `upsert lst Ext__c;` external-id form
+// (otherwise that statement would never match — a silent false negative).
 const DML_STATEMENT_PATTERN =
-  /\b(insert|update|delete|upsert|merge)\s+([A-Za-z_][A-Za-z_0-9]*)\s*[;,)]/g;
+  /\b(insert|update|delete|upsert|merge)\s+([A-Za-z_][A-Za-z_0-9]*)(?:\s+[A-Za-z_][A-Za-z_0-9.]*)?(\s+as\s+(?:user|system))?\s*[;,)]/g;
 const DML_DATABASE_CALL_PATTERN =
   /\bDatabase\.(insert|update|delete|upsert|merge)\s*\(\s*([A-Za-z_][A-Za-z_0-9]*)/g;
 
+// ---------------------------------------------------------------------------
+// CRUD vs FLS vs record-sharing are three orthogonal planes (CR-04). The
+// `missing-crud-check` recognizer is about WRITE AUTHORIZATION for a DML
+// statement, so its hint set recognizes ONLY constructs that gate a WRITE:
+//
+//   - `Schema.sObjectType.X.{isCreateable|isUpdateable|isDeletable}()` —
+//     object-level write-CRUD checks. `isAccessible()` is a READ FLS check
+//     and is deliberately EXCLUDED — it never authorizes a write.
+//   - `Schema.X.SObjectType.getDescribe()` — loose existing describe hint.
+//   - `Database.SObjectAccessDecision` / `Security.stripInaccessible(
+//     AccessType.CREATABLE|UPDATABLE, …)` — field-FLS WRITE stripping. These
+//     enforce field FLS but NOT object CRUD by themselves; accepted as a write
+//     gate consistent with the recognizer's heuristic leniency (see comment on
+//     the delete carve-out in `detectMissingCrudCheck`).
+//
+// Deliberately NOT hints (they were the conflation bug):
+//   - `WITH SECURITY_ENFORCED` / `WITH USER_MODE` — SOQL clauses that enforce
+//     FLS + object READ on the QUERY only. They NEVER authorize a DML write;
+//     a class that queries with them and then writes is UNGATED for the write.
+//     (They remain valid for the separate `missing-fls-check` recognizer.)
+//   - bare `AccessLevel.USER_MODE` — only gates a write when it is an argument
+//     to the SAME `Database.*(…)` DML call; a loose prefix token let an
+//     unrelated user-mode call clear a different DML. Bound to the call site
+//     in `detectMissingCrudCheck` instead.
+//   - `insert x as user` — user-mode DML that DOES enforce CRUD/FLS for the
+//     write; detected at the DML SITE (the `m[3]` suffix), not as a prefix.
 const CRUD_HINT_PATTERNS = [
-  /\bSchema\.sObjectType\.[A-Za-z_][A-Za-z_0-9]*\.(?:isCreateable|isUpdateable|isDeletable|isAccessible)\s*\(/,
-  /\bSchema\.[A-Za-z_][A-Za-z_0-9]*\.SObjectType\.getDescribe\s*\(/,
-  /\bDatabase\.SObjectAccessDecision\b/,
-  /\bWITH\s+SECURITY_ENFORCED\b/i,
-  /\bWITH\s+USER_MODE\b/i,
-  /\bAccessLevel\.USER_MODE\b/,
+  /\bSchema\.sObjectType\.([A-Za-z_][A-Za-z_0-9]*)\.(?:isCreateable|isUpdateable|isDeletable)\s*\(/g,
+  /\bSchema\.[A-Za-z_][A-Za-z_0-9]*\.SObjectType\.getDescribe\s*\(/g,
+  /\bDatabase\.SObjectAccessDecision\b/g,
+  /\bSecurity\.stripInaccessible\s*\(\s*AccessType\.(?:CREATABLE|UPDATABLE)\b/g,
 ];
 
-const hasCrudHintBefore = (stripped: string, dmlOffset: number): boolean => {
-  const prefix = stripped.slice(0, dmlOffset);
-  return CRUD_HINT_PATTERNS.some((p) => p.test(prefix));
+/**
+ * Collect the set of sObject type names whose object-level WRITE-CRUD check
+ * (`Schema.sObjectType.<Type>.is{Createable|Updateable|Deletable}()`) appears
+ * in `window`. The set is empty when only a non-type-bearing hint
+ * (getDescribe / SObjectAccessDecision / stripInaccessible) is present — those
+ * still mark "a write gate exists in scope" (see `hasAnyWriteGate`) but cannot
+ * be pinned to a specific sObject.
+ */
+const writeCheckedSObjects = (window: string): Set<string> => {
+  const types = new Set<string>();
+  const re = new RegExp(CRUD_HINT_PATTERNS[0]!.source, 'g');
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(window)) !== null) {
+    const t = m[1];
+    if (t !== undefined && t.length > 0) types.add(t);
+  }
+  return types;
+};
+
+/** Whether ANY write-authorization hint (typed or not) appears in `window`. */
+const hasAnyWriteGate = (window: string): boolean =>
+  CRUD_HINT_PATTERNS.some((p) => {
+    const re = new RegExp(p.source, 'g');
+    return re.test(window);
+  });
+
+/**
+ * Whether a NON-type-bearing write-FLS / describe gate appears in `window` —
+ * i.e. any hint EXCEPT the typed `Schema.sObjectType.<Type>.is…()` check
+ * (`CRUD_HINT_PATTERNS[0]`). Used on the type-resolved path: a typed check for
+ * a DIFFERENT sObject must NOT clear (defense in depth), but a non-typed gate
+ * (stripInaccessible / getDescribe / SObjectAccessDecision) still can.
+ */
+const hasNonTypedWriteGate = (window: string): boolean =>
+  CRUD_HINT_PATTERNS.slice(1).some((p) => {
+    const re = new RegExp(p.source, 'g');
+    return re.test(window);
+  });
+
+/**
+ * Resolve the DECLARED sObject type of a DML target variable, best-effort.
+ * Looks for a `Type var` declaration (`Account acc;`, `List<Account> accs;`,
+ * `Account acc = …`) in the scan window, then the enclosing method; falls back
+ * to the `new Type(` RHS of the most-recent assignment. Returns the bare
+ * element type for collection wrappers (`List<Account>` → `Account`). Returns
+ * null when unresolvable — the caller then degrades to a scope-only clear
+ * rather than risk a false positive. Heuristic regex (no AST): params declared
+ * in a signature outside the window, reassignment, and exotic shapes may not
+ * resolve.
+ */
+const COLLECTION_WRAPPER = /^(?:List|Set|Map)\s*<\s*([A-Za-z_][A-Za-z_0-9]*)/;
+const unwrapType = (raw: string): string => {
+  const wrapped = COLLECTION_WRAPPER.exec(raw.trim());
+  if (wrapped !== null && wrapped[1] !== undefined) return wrapped[1];
+  return raw.trim();
+};
+const resolveVarSObjectType = (
+  source: string,
+  varName: string,
+  methodWindow: string,
+  offset: number,
+): string | null => {
+  // 1. A typed declaration `<Type> varName` (with optional `= …` or `;`/`,`/`)`).
+  const declRe = new RegExp(
+    `\\b([A-Za-z_][A-Za-z_0-9]*(?:\\s*<[^;{}]*>)?)\\s+${escapeForRegex(
+      varName,
+    )}\\s*(?:=|;|,|\\))`,
+  );
+  const decl = declRe.exec(methodWindow);
+  if (decl !== null && decl[1] !== undefined) {
+    const t = unwrapType(decl[1]);
+    // CR-RV9: the decl regex has no keyword guard, so a statement like
+    // `return acc;` matches with t=`return`. Reject reserved statement /
+    // control-flow keywords as bogus types — fall through (do NOT return) so
+    // the `new Type(` RHS fallback still runs, then null → safe loose-path.
+    if (t.length > 0 && t !== varName && !APEX_NON_TYPE_KEYWORDS.has(t)) {
+      return t;
+    }
+  }
+  // 2. The `new Type(` shape of the most-recent assignment RHS.
+  const rhs = findVarAssignment(source, varName, offset);
+  if (rhs !== null) {
+    const newMatch = /^new\s+([A-Za-z_][A-Za-z_0-9]*(?:\s*<[^>]*>)?)/.exec(rhs.trim());
+    if (newMatch !== null && newMatch[1] !== undefined) {
+      const t = unwrapType(newMatch[1]);
+      if (t.length > 0) return t;
+    }
+  }
+  return null;
 };
 
 const detectMissingCrudCheck = (
@@ -606,28 +864,123 @@ const detectMissingCrudCheck = (
   if (isTest) return [];
   const issues: QualityIssue[] = [];
   const seen = new Set<number>();
-  const collect = (re: RegExp, op: string, sobject: string | null): void => {
+  const collect = (re: RegExp, op: string, isDatabaseCall: boolean): void => {
     const r = new RegExp(re.source, 'g');
     let m: RegExpExecArray | null;
     while ((m = r.exec(stripped)) !== null) {
       const opKind = m[1] ?? op;
-      const target = m[2] ?? sobject ?? 'records';
+      const varName = m[2] ?? 'records';
       if (seen.has(m.index)) continue;
       seen.add(m.index);
-      if (hasCrudHintBefore(stripped, m.index)) continue;
+
+      // --- User-mode DML gates (CR-04 #2), bound to the DML SITE ----------
+      if (isDatabaseCall) {
+        // `Database.insert(x, AccessLevel.USER_MODE)` enforces CRUD/FLS for the
+        // write. Scan THIS call's argument list (to the matching `)`) — not a
+        // loose prefix token, so an unrelated user-mode call elsewhere cannot
+        // clear a different DML.
+        const openParen = stripped.indexOf('(', m.index);
+        if (openParen !== -1) {
+          const closeParen = findMatchingParen(stripped, openParen);
+          if (closeParen !== -1) {
+            const args = stripped.slice(openParen, closeParen + 1);
+            if (/\bAccessLevel\.USER_MODE\b/.test(args)) continue;
+          }
+        }
+      } else if ((m[3] ?? '').length > 0) {
+        // `insert x as user` / `update x as user` — user-mode DML enforces
+        // CRUD/FLS for this write. (`as system` runs in system mode and does
+        // NOT gate, so only ` as user` clears.)
+        if (/\bas\s+user\b/.test(m[3] ?? '')) continue;
+      }
+
+      // --- Object-level / field-FLS write-CRUD hints (CR-04 #1) -----------
+      // Scope the hint scan to the innermost block enclosing the DML plus its
+      // controlling `if (...)` clause — a check in method A no longer clears a
+      // DML in method B. Then strengthen by matching the hinted sObject to the
+      // DML target's type when both resolve.
+      const blockStart = enclosingBlockStart(stripped, m.index);
+      let windowStart = blockStart;
+      // Extend the window LEFT to include the controlling clause of the block
+      // (e.g. `if (Schema...isCreateable()) { insert a; }` — the test is
+      // OUTSIDE the `{`). Walk back over whitespace; if a `)` precedes the `{`,
+      // include from its matching `(`.
+      if (blockStart > 0) {
+        let j = blockStart - 1;
+        while (j >= 0 && /\s/.test(stripped[j] ?? '')) j -= 1;
+        if (j >= 0 && stripped[j] === ')') {
+          const ctrlOpen = matchOpenParenBackward(stripped, j);
+          if (ctrlOpen >= 0) windowStart = ctrlOpen;
+        }
+      }
+      const blockWindow = stripped.slice(windowStart, m.index);
+      const { bodyStart: methodStart, sigStart } = enclosingMethodStart(
+        stripped,
+        m.index,
+      );
+      // Gate-scan window: from the method BODY `{` (unchanged — the two gate
+      // scans below depend on this exact span).
+      const methodWindow = stripped.slice(methodStart, m.index);
+      // Resolver window: WIDER, from the SIGNATURE `(` so a DML target that is
+      // a method PARAMETER (`save(Account acc){ … insert acc; }`) resolves to
+      // its SObject type (CR-P3-2). Signatures carry no CRUD-hint/DML tokens,
+      // so widening only the resolver read does not affect the gate scans.
+      const resolverWindow = stripped.slice(sigStart, m.index);
+
+      // Resolve the DML target's sObject type for the sObject-match filter.
+      const resolvedType = resolveVarSObjectType(
+        source,
+        varName,
+        resolverWindow,
+        m.index,
+      );
+
+      if (resolvedType !== null) {
+        // STRICT path: type resolved. Clear only when a write-CRUD check for
+        // THIS sObject appears in scope — the block window OR (for the
+        // early-return/throw guard idiom) the enclosing method window. A check
+        // for a DIFFERENT sObject does NOT clear (defense in depth).
+        const inScopeTypes = writeCheckedSObjects(blockWindow);
+        for (const t of writeCheckedSObjects(methodWindow)) inScopeTypes.add(t);
+        if (inScopeTypes.has(resolvedType)) continue;
+        // A NON-type-bearing write-FLS gate (stripInaccessible / describe /
+        // SObjectAccessDecision) in the block also clears — but a TYPED
+        // isCreateable/etc. check for a DIFFERENT sObject does NOT (it is the
+        // wrong-object case the sObject-match filter exists to catch). Also
+        // exclude `delete`: there is no field-FLS delete AccessType, so a
+        // field-stripping gate does not authorize the object delete.
+        if (opKind.toLowerCase() !== 'delete' && hasNonTypedWriteGate(blockWindow)) {
+          continue;
+        }
+      } else {
+        // LOOSE fallback: the variable's sObject type could not be resolved
+        // (cross-method param, reassignment, exotic shape). Rather than trade
+        // the old whole-file false-clean for a false-positive wave, clear when
+        // ANY in-scope write gate exists — block window first, then the method
+        // window (catches a method-top early-return guard). This is the
+        // deliberate strict/loose tradeoff: weaker guarantee, but no new false
+        // positive on legitimately-guarded code we simply can't type-resolve.
+        if (hasAnyWriteGate(blockWindow) || hasAnyWriteGate(methodWindow)) {
+          continue;
+        }
+      }
+
       issues.push({
         rule: 'missing-crud-check',
         severity: 'high',
         location: `line ${offsetToLine(source, m.index)}`,
         explanation:
-          `DML '${opKind} ${target}' executes without a preceding CRUD check. ` +
-          `Add Schema.sObjectType.X.is{Createable|Updateable|Deletable}() or use WITH SECURITY_ENFORCED / USER_MODE.`,
+          `DML '${opKind} ${varName}' executes without a preceding object-level CRUD check. ` +
+          `Add Schema.sObjectType.X.is{Createable|Updateable|Deletable}(), run the DML in user mode ` +
+          `(\`${opKind} x as user\` / \`Database.${opKind}(x, AccessLevel.USER_MODE)\`), or strip with ` +
+          `Security.stripInaccessible. NOTE: a SOQL \`WITH SECURITY_ENFORCED\` / \`USER_MODE\` clause ` +
+          `enforces READ FLS on the query and does NOT authorize this write.`,
         confidence: 'heuristic',
       });
     }
   };
-  collect(DML_STATEMENT_PATTERN, 'dml', null);
-  collect(DML_DATABASE_CALL_PATTERN, 'dml', null);
+  collect(DML_STATEMENT_PATTERN, 'dml', false);
+  collect(DML_DATABASE_CALL_PATTERN, 'dml', true);
   return issues;
 };
 
@@ -1074,8 +1427,16 @@ const detectDatabaseUpsertNoOptions = (
 // ---------- recognizer 13: fake-assertion ---------------------------------
 
 // Tautology assertion shapes. Only fire on @isTest classes / methods.
+//
+// IMPORTANT: only `System.assert(true, ...)` is a tautology — it always
+// passes regardless of behavior. `System.assert(false, ...)` is the OPPOSITE:
+// it is a fail-guard placed on a code path that should be UNREACHABLE (e.g.
+// the line after a call expected to throw, inside a try before its catch).
+// Reaching it FAILS the test, so it verifies real behavior and must NOT be
+// flagged. Matching `false` here over-counted every deny/exception test as
+// fake, inverting the audit (the strongest tests scored worst).
 const FAKE_ASSERT_BOOL_PATTERN =
-  /\bSystem\.assert\s*\(\s*(?:true|false)\s*[,)]/g;
+  /\bSystem\.assert\s*\(\s*true\s*[,)]/g;
 const FAKE_ASSERTEQUALS_SELF_PATTERN =
   /\bSystem\.assertEquals\s*\(\s*([A-Za-z_][A-Za-z_0-9.]*)\s*,\s*([A-Za-z_][A-Za-z_0-9.]*)\s*[,)]/g;
 const FAKE_ASSERTEQUALS_LITERAL_PATTERN =

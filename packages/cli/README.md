@@ -7,7 +7,11 @@ org's **real metadata**, not a guess.
 for a single Salesforce org. You run one `sf project retrieve`; it builds a local
 Markdown vault and a DuckDB dependency graph, then answers questions locally
 through an MCP server (the `sfi.*` tools) — no network egress for vault answers.
-An opt-in live read-only plane can answer record counts and samples. MIT + Commons Clause.
+A semantic router turns each plain-language question into a meaning-ranked shortlist
+of the `sfi.*` tools that can answer it — tagged with the plane it needs (offline vault
+/ opt-in live / hybrid) and a confidence band — and asks a clarifying question instead
+of guessing when the top candidates diverge on something consequential. An opt-in live
+read-only plane can answer record counts and samples. MIT + Commons Clause.
 
 ## Install
 

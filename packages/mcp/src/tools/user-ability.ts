@@ -10,6 +10,12 @@
  *   - **actionPermissions** — the "do / run / export / transfer / convert"
  *     class of system permissions present on the container (filtered from
  *     `userPermissions`), the ones that aren't object CRUD or pure admin.
+ *   - **customPermissions** — the custom permissions the container CONFERS via
+ *     its `<customPermissions>` grants (CR-CAP-10). Each carries `targetMissing`
+ *     (true when the granted name has no `CustomPermission` definition in the
+ *     vault — managed-package or not-retrieved; declared but not resolvable).
+ *
+ * `declared` confidence — all of this is declared profile/permset metadata.
  *
  * Input: `{ componentId: 'Profile:X' | 'PermissionSet:X', limit?, offset? }`.
  * `declared` confidence — all of this is declared profile/permset metadata.
@@ -20,12 +26,15 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
+
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 
 const GRANTER_PREFIXES = ['Profile:', 'PermissionSet:'] as const;
 const DEFAULT_LIMIT = 200;
@@ -67,6 +76,10 @@ export const userAbilityInputSchema = z.object({
   componentId: z.string().min(1),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
+  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // truncated page's `nextCursor`. When present it supplies the resume offset;
+  // omitting it = today's behavior (offset 0 / explicit `offset`).
+  cursor: z.string().min(1).optional(),
 });
 
 export type UserAbilityInput = z.infer<typeof userAbilityInputSchema>;
@@ -85,14 +98,34 @@ export interface UserAbilityOutput {
   };
   /** The action/ability system permissions present (sorted). */
   readonly actionPermissions: readonly string[];
+  /**
+   * CR-CAP-10: the custom permissions this container CONFERS (sorted by name).
+   * `targetMissing` is true when the granted name has no `CustomPermission`
+   * definition node in this vault (a managed-package perm like `APXTConga4__*`,
+   * or a vault refreshed before the definition was retrieved) — the grant is
+   * declared but the definition is not resolvable here. Distinct from
+   * `actionPermissions` (those are SYSTEM `<userPermissions>`, not custom
+   * permissions), so the two are never double-counted.
+   */
+  readonly customPermissions: readonly { readonly name: string; readonly targetMissing: boolean }[];
   readonly summary: {
     readonly runnableFlows: number;
     readonly actionPermissions: number;
+    readonly customPermissions: number;
   };
   readonly limit: number;
   readonly offset: number;
   readonly hasMore: boolean;
   readonly truncated: boolean;
+  /**
+   * CR-22 opaque continuation token, present ONLY when the runnableFlows page
+   * was truncated (more flows remain past `limit`). Echo it back as `cursor` to
+   * resume. Absent on a whole-fits page so an in-budget response stays
+   * byte-identical.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
   readonly confidence: 'declared';
   readonly boundaryNote: string;
 }
@@ -129,16 +162,50 @@ export const userAbilityHandler = async (
   if (!edgesResult.ok) {
     return err({ kind: 'internal', message: `graph query failed: ${edgesResult.error.message}` });
   }
-  const runnable = edgesResult.value
-    .filter((e) => e.properties['flowAccess'] === true && e.toId.startsWith('Flow:'))
-    .map((e) => e.toId as ComponentId)
-    .sort();
+  // TOTAL-ORDER list of Flow ids. The bare-string element IS its own unique
+  // key, and the grantedBy edge PK reduces to uniqueness on `to_id` for one
+  // container (from_id/edge_type/source all fixed), so each flow id appears at
+  // most once. Belt-and-suspenders: dedup with a Set before sorting so the
+  // total-order guarantee doesn't silently rely on the extractor's PK invariant
+  // — a CR-22 resume over the deduped list can't dup or skip.
+  const runnable = [
+    ...new Set(
+      edgesResult.value
+        .filter((e) => e.properties['flowAccess'] === true && e.toId.startsWith('Flow:'))
+        .map((e) => e.toId as ComponentId),
+    ),
+  ].sort();
 
   // Action permissions from userPermissions.
   const perms = node.properties['userPermissions'];
   const actionPermissions = (Array.isArray(perms) ? (perms as string[]) : [])
     .filter((p) => ACTION_PERMISSIONS.has(p))
     .sort();
+
+  // CR-CAP-10: custom permissions this container confers. The extractor emits a
+  // `grantedBy` edge to `CustomPermission:{name}` per enabled `<customPermissions>`
+  // block; resolve each name's definition node so a managed-package grant whose
+  // definition is not in the vault is DISCLOSED (targetMissing), not dropped and
+  // not fabricated. Dedup defensively (the edge PK guarantees one per name).
+  const customPermissionIds = [
+    ...new Set(
+      edgesResult.value
+        .filter((e) => e.toId.startsWith('CustomPermission:'))
+        .map((e) => e.toId),
+    ),
+  ].sort();
+  const customPermissions: { name: string; targetMissing: boolean }[] = [];
+  for (const cpId of customPermissionIds) {
+    const cpNode = await getNodeById(ctx.graph, cpId as ComponentId);
+    if (!cpNode.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${cpNode.error.message}` });
+    }
+    customPermissions.push({
+      name: cpId.slice('CustomPermission:'.length),
+      targetMissing: cpNode.value === null,
+    });
+  }
+  const missingCustomPerms = customPermissions.filter((c) => c.targetMissing).length;
 
   // Login restrictions (Profile only).
   const ipRanges = node.properties['loginIpRanges'];
@@ -147,9 +214,40 @@ export const userAbilityHandler = async (
 
   const total = runnable.length;
   const limit = input.limit ?? DEFAULT_LIMIT;
-  const offset = input.offset ?? 0;
-  const page = runnable.slice(offset, offset + limit);
-  const hasMore = offset + page.length < total;
+
+  // CR-22: resolve the resume offset — an echoed cursor wins over an explicit
+  // `offset`; a stale/forged cursor (changed componentId, different tool, or
+  // refreshed vault) is rejected with `invalid-query`.
+  const fingerprint = argsFingerprint({ componentId: input.componentId });
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: 'sfi.user_ability',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  // No per-handler byte budget (offset/limit only) — set an effectively
+  // unbounded byteBudget so `paginate()` truncates ONLY on `limit`
+  // (byte-identical to the prior open-coded slice). The global jsonResult guard
+  // remains the byte backstop. The element string is its own unique tiebreak.
+  const paged = paginateLegacy(runnable, {
+    offset,
+    limit,
+    byteBudget: Number.MAX_SAFE_INTEGER,
+    binding: {
+      tool: 'sfi.user_ability',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+    keyOf: (id) => id,
+  });
+  const page = paged.items;
+  const hasMore = paged.hasMore;
+  const emitCursor = paged.nextCursor !== null;
 
   return ok({
     data: {
@@ -163,14 +261,23 @@ export const userAbilityHandler = async (
         applies: isProfile,
       },
       actionPermissions,
-      summary: { runnableFlows: total, actionPermissions: actionPermissions.length },
+      customPermissions,
+      summary: {
+        runnableFlows: total,
+        actionPermissions: actionPermissions.length,
+        customPermissions: customPermissions.length,
+      },
       limit,
       offset,
       hasMore,
       truncated: hasMore || offset > 0,
+      ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
       confidence: 'declared',
       boundaryNote:
-        'runnableFlows = the flowAccess grants on this container; actionPermissions are declared system permissions. The user must be ASSIGNED this profile/permission set to gain them (runtime, not modeled). Login restrictions are Profile-only (`applies: false` for a permission set). Flow run access also requires the flow to be active.',
+        'runnableFlows = the flowAccess grants on this container; actionPermissions are declared system permissions; customPermissions are declared `<customPermissions>` grants (custom permissions are NOT system userPermissions, so they are not double-counted with actionPermissions). The user must be ASSIGNED this profile/permission set to gain them (runtime, not modeled). Login restrictions are Profile-only (`applies: false` for a permission set). Flow run access also requires the flow to be active.'
+        + (missingCustomPerms > 0
+          ? ` ${missingCustomPerms} granted custom permission(s) name a definition not present in this vault (targetMissing) — likely managed-package or not retrieved; the grant is declared but the definition is not resolvable here.`
+          : ''),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

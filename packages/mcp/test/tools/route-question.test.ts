@@ -1,6 +1,6 @@
 /// <reference types="vitest/globals" />
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -716,6 +716,73 @@ describe('core-profile gateway envelopes (P13-GW-router-envelope)', () => {
     expect(r.value.data.rendered).toContain('Candidate tools');
   });
 
+  it('promotes regex route tools + suggestedArgs into toolCandidates for metadata-count', async () => {
+    const r = await routeQuestionHandler(ctx, {
+      question: 'How many custom fields are on Contact?',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.route.intent).toBe('metadata-count');
+    const listComponents = (r.value.data.toolCandidates ?? []).find(
+      (c) => c.tool === 'sfi.list_components',
+    );
+    expect(listComponents).toBeDefined();
+    expect(listComponents?.fromRoute).toBe(true);
+    expect(listComponents?.suggestedArgs).toEqual({
+      type: 'CustomField',
+      parentId: 'CustomObject:Contact',
+    });
+    // I2b — the regex route is a BOUNDED additive feature, not a flat 0.96 pin.
+    // list_components is a strong meaning match here (cosine ~0.21), so its FUSED
+    // score is well above the ~0.055 bonus floor yet well BELOW the old 0.96
+    // re-pin — a genuine cosine+bonus blend, not an override.
+    const score = listComponents?.score ?? 0;
+    expect(score).toBeGreaterThan(0.055 + 0.1); // clearly above the bonus floor: it earned real cosine
+    expect(score).toBeLessThan(0.96); // NOT the old flat pin
+    // ...and it still leads every non-route candidate (the route tool is favored,
+    // just not by an unbounded override).
+    const nonRouteTop = Math.max(
+      0,
+      ...(r.value.data.toolCandidates ?? [])
+        .filter((c) => c.fromRoute !== true)
+        .map((c) => c.score),
+    );
+    expect(score).toBeGreaterThan(nonRouteTop);
+  });
+
+  it('emits field_mapping invoke args with object pair and vault alias from config', async () => {
+    const prev = process.env.SFI_TOOL_PROFILE;
+    process.env.SFI_TOOL_PROFILE = 'core';
+    try {
+      const { writeFile, mkdir } = await import('node:fs/promises');
+      const metaDir = join(tempDir, 'meta');
+      await mkdir(metaDir, { recursive: true });
+      await writeFile(
+        join(metaDir, 'config.json'),
+        JSON.stringify({ targetOrg: 'fixture-vault', vaultRoot: tempDir, version: '0.1.0' }),
+        'utf8',
+      );
+      const r = await routeQuestionHandler(ctx, {
+        question: 'How do fields map between Lead and Contact?',
+        logGap: false,
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.route.intent).toBe('field-mapping');
+      expect(r.value.data.invoke?.[0]).toEqual({
+        tool: 'sfi.run_analysis',
+        args: {
+          name: 'sfi.field_mapping_between_objects',
+          args: { objectA: 'Lead', objectB: 'Contact', vault: 'fixture-vault' },
+        },
+      });
+    } finally {
+      if (prev === undefined) delete process.env.SFI_TOOL_PROFILE;
+      else process.env.SFI_TOOL_PROFILE = prev;
+    }
+  });
+
   // CAE-03b: SFI_ROUTER_MODE=offline is the deterministic Design-A fallback for
   // no-LLM / CI / air-gapped hosts — the regex route is authoritative and the
   // funnel candidates are omitted (even when a mode is requested).
@@ -739,5 +806,109 @@ describe('core-profile gateway envelopes (P13-GW-router-envelope)', () => {
       if (prev === undefined) delete process.env.SFI_ROUTER_MODE;
       else process.env.SFI_ROUTER_MODE = prev;
     }
+  });
+});
+
+describe('routeQuestionHandler — gap logging is privacy-first opt-in (CR-16b)', () => {
+  let gapDir: string;
+  let gapLogPath: string;
+  let priorEnv: string | undefined;
+
+  beforeEach(() => {
+    priorEnv = process.env.SFI_GAP_LOG_PATH;
+    gapDir = mkdtempSync(join(tmpdir(), 'sfi-route-gap-'));
+    gapLogPath = join(gapDir, 'question-gaps.jsonl');
+    process.env.SFI_GAP_LOG_PATH = gapLogPath;
+  });
+
+  afterEach(() => {
+    if (priorEnv === undefined) delete process.env.SFI_GAP_LOG_PATH;
+    else process.env.SFI_GAP_LOG_PATH = priorEnv;
+    rmSync(gapDir, { recursive: true, force: true });
+  });
+
+  it('does NOT write the gap log when logGap is omitted (privacy-first default off)', async () => {
+    const r = await routeQuestionHandler(ctx, { question: 'blorp glorp shmorp' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Precondition: this unrouted question really does carry a gap, so a write
+    // WOULD happen under the old opt-out default — making the test meaningful.
+    expect(r.value.data.route.gap).not.toBeNull();
+    // Privacy-first: nothing written, gapLogged false, file never created.
+    expect(r.value.data.gapLogged).toBe(false);
+    expect(existsSync(gapLogPath)).toBe(false);
+  });
+
+  it('writes the gap log only when the caller explicitly opts in with logGap:true', async () => {
+    const r = await routeQuestionHandler(ctx, {
+      question: 'blorp glorp shmorp',
+      logGap: true,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.route.gap).not.toBeNull();
+    expect(r.value.data.gapLogged).toBe(true);
+    expect(existsSync(gapLogPath)).toBe(true);
+    const lines = readFileSync(gapLogPath, 'utf8')
+      .trim()
+      .split('\n')
+      .filter((l) => l.length > 0);
+    expect(lines).toHaveLength(1);
+    const written = JSON.parse(lines[0] ?? '{}') as { question?: string };
+    expect(written.question).toBe('blorp glorp shmorp');
+  });
+});
+
+describe('routeQuestionHandler — I3a live-plane consent disclosure in guidance', () => {
+  it('discloses the live plane + consent step when a leading candidate is liveRequired', async () => {
+    const r = await routeQuestionHandler(ctx, {
+      question: 'How many open Cases in the org?',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // A live-record-count question routes to the live plane.
+    expect(r.value.data.route.plane).toBe('live');
+    const cands = r.value.data.toolCandidates ?? [];
+    // The shortlist leads with at least one liveRequired candidate (I1 field).
+    expect(cands.slice(0, 3).some((c) => c.liveRequired === true)).toBe(true);
+    const guidance = r.value.data.guidance ?? '';
+    // The guidance must name the live plane, refuse to invent a number, and name
+    // the concrete consent step — so a host LLM cannot answer from the vault.
+    expect(guidance).toMatch(/LIVE PLANE/i);
+    expect(guidance).toMatch(/liveRequired/);
+    expect(guidance).toMatch(/sfi\.live_consent/);
+    expect(guidance).toMatch(/Do NOT invent/i);
+  });
+
+  it('generalizes across the live bucket — a live field-population question also discloses consent', async () => {
+    const r = await routeQuestionHandler(ctx, {
+      question: 'How many Contact records actually have the Email field populated right now?',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const cands = r.value.data.toolCandidates ?? [];
+    // Only assert the disclosure when a leading candidate is in fact live-required,
+    // so the test pins the MECHANISM (any leading live candidate → disclose), not a
+    // single phrasing's routing.
+    if (cands.slice(0, 3).some((c) => c.liveRequired === true)) {
+      expect(r.value.data.guidance ?? '').toMatch(/sfi\.live_consent/);
+    }
+  });
+
+  it('does NOT attach the consent disclosure to a pure vault question', async () => {
+    const r = await routeQuestionHandler(ctx, {
+      question: 'what custom objects do we have',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const cands = r.value.data.toolCandidates ?? [];
+    // Sanity: this is a vault question — no leading live-required candidate.
+    expect(cands.slice(0, 3).every((c) => c.liveRequired !== true)).toBe(true);
+    const guidance = r.value.data.guidance ?? '';
+    expect(guidance).not.toMatch(/LIVE PLANE/i);
+    expect(guidance).not.toMatch(/sfi\.live_consent/);
   });
 });

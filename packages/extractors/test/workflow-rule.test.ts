@@ -242,16 +242,51 @@ describe('extractWorkflowRule', () => {
   });
 
   describe('happy-path empty file', () => {
-    it('returns zero nodes and edges when <Workflow> has no <rules>', async () => {
+    it('returns zero WorkflowRule nodes when <Workflow> has no <rules>, but still promotes any <alerts>', async () => {
       // Per WorkflowRule.md, a `<Workflow>` root with only orphan
-      // `<alerts>` / `<fieldUpdates>` collections is the documented
-      // happy path — the extractor returns zero nodes and zero edges.
+      // `<alerts>` / `<fieldUpdates>` collections is a documented happy
+      // path for objects whose action scaffolding outlives consuming rules.
+      // v2.9: <alerts> entries are now promoted to WorkflowAlert nodes even
+      // when the file has no <rules>, so a file with one <alerts> entry
+      // produces one WorkflowAlert node + one parentOf edge.
       const xml = `<?xml version="1.0"?>
 <Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
   <alerts>
     <fullName>Orphan_Alert</fullName>
     <template>Sales/Template</template>
+    <senderType>CurrentUser</senderType>
   </alerts>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        // No WorkflowRule nodes (no <rules>), but one WorkflowAlert.
+        expect(
+          result.value.nodes.filter((n) => n.type === 'WorkflowRule'),
+        ).toHaveLength(0);
+        expect(
+          result.value.nodes.filter((n) => n.type === 'WorkflowAlert'),
+        ).toHaveLength(1);
+        expect(
+          result.value.edges.filter((e) => e.edgeType === 'parentOf'),
+        ).toHaveLength(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('returns zero nodes and zero edges when <Workflow> has no <rules> and no <alerts>', async () => {
+      // A workflow file with only <fieldUpdates> (no <alerts>, no <rules>)
+      // produces truly zero nodes and zero edges (no promotable entries).
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>Set_Status</fullName>
+    <field>Status__c</field>
+    <operation>Literal</operation>
+  </fieldUpdates>
 </Workflow>`;
       const { dir, path } = await writeTempWorkflowXml('Account', xml);
       try {
@@ -260,6 +295,477 @@ describe('extractWorkflowRule', () => {
         if (!result.ok) return;
         expect(result.value.nodes).toHaveLength(0);
         expect(result.value.edges).toHaveLength(0);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('CR-05 — FieldUpdate field-level writesTo edge', () => {
+    it('emits a field-level writesTo to the CustomField a FieldUpdate sets (KEEP references + ADD writesTo)', async () => {
+      // A rule's <actions><name> names a field-update; the target field
+      // lives in the sibling top-level <fieldUpdates> collection. The
+      // extractor must resolve the join and emit BOTH the existing
+      // `references` -> WorkflowFieldUpdate scaffolding node AND a new
+      // field-level `writesTo` -> CustomField:{Object}.{field}.
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>Set_Foo</fullName>
+    <field>Foo__c</field>
+    <name>Set Foo</name>
+    <operation>Literal</operation>
+  </fieldUpdates>
+  <rules>
+    <fullName>Set_Foo_Rule</fullName>
+    <actions>
+      <name>Set_Foo</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <active>true</active>
+    <triggerType>onAllChanges</triggerType>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        // The new field-level writesTo edge.
+        const writesTo = result.value.edges.filter(
+          (e) => e.edgeType === 'writesTo',
+        );
+        expect(writesTo).toHaveLength(1);
+        expect(writesTo[0]).toEqual({
+          fromId: 'WorkflowRule:Account.Set_Foo_Rule',
+          toId: 'CustomField:Account.Foo__c',
+          edgeType: 'writesTo',
+          confidence: 'parsed',
+          source: 'workflow-rule-extractor',
+          properties: { operation: 'Literal' },
+        });
+        // CO-EXISTENCE: the existing references edge to the scaffolding
+        // node is STILL present (KEEP + ADD contract). Exactly two
+        // FieldUpdate-derived edges from the rule.
+        const refs = result.value.edges.filter(
+          (e) => e.edgeType === 'references',
+        );
+        expect(refs).toHaveLength(1);
+        expect(refs[0]!.toId).toBe('WorkflowFieldUpdate:Account.Set_Foo');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('object-scopes a bare same-object field name (standard field)', async () => {
+      // A bare <field> (e.g. a standard field like Description) is
+      // object-scoped to the rule's object; a dangling/targetMissing
+      // edge to a not-modeled standard field is harmless by design.
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>Stamp_Desc</fullName>
+    <field>Description</field>
+    <operation>Formula</operation>
+  </fieldUpdates>
+  <rules>
+    <fullName>Stamp_Desc_Rule</fullName>
+    <actions>
+      <name>Stamp_Desc</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <active>true</active>
+    <triggerType>onCreateOnly</triggerType>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const writesTo = result.value.edges.filter(
+          (e) => e.edgeType === 'writesTo',
+        );
+        expect(writesTo).toHaveLength(1);
+        expect(writesTo[0]!.toId).toBe('CustomField:Account.Description');
+        expect(writesTo[0]!.properties).toEqual({ operation: 'Formula' });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('takes a dotted field name verbatim (does not double-scope)', async () => {
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>Set_Pkg</fullName>
+    <field>ns__Target__c.Bar__c</field>
+    <operation>Literal</operation>
+  </fieldUpdates>
+  <rules>
+    <fullName>Set_Pkg_Rule</fullName>
+    <actions>
+      <name>Set_Pkg</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <active>true</active>
+    <triggerType>onAllChanges</triggerType>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const writesTo = result.value.edges.filter(
+          (e) => e.edgeType === 'writesTo',
+        );
+        expect(writesTo).toHaveLength(1);
+        expect(writesTo[0]!.toId).toBe('CustomField:ns__Target__c.Bar__c');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('CR-P3-5: SKIPS the writesTo for a cross-object FieldUpdate (<targetObject> present), keeping only references', async () => {
+      // Real Salesforce cross-object format: a BARE <field> (the leaf field on
+      // the RELATED object) plus <targetObject> (the relationship reference). The
+      // relationship→object map is not resolvable offline, so minting any
+      // CustomField id here would be a relationship-scoped phantom. The honest
+      // result is NO writesTo — but the references edge to the WorkflowFieldUpdate
+      // scaffolding node STILL emits, so the action is not silently dropped.
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>Stamp_Parent</fullName>
+    <field>Total__c</field>
+    <targetObject>Contact</targetObject>
+    <operation>Formula</operation>
+  </fieldUpdates>
+  <rules>
+    <fullName>Stamp_Parent_Rule</fullName>
+    <actions>
+      <name>Stamp_Parent</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <active>true</active>
+    <triggerType>onAllChanges</triggerType>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        // No writesTo — no phantom CustomField for the cross-object target.
+        const writesTo = result.value.edges.filter(
+          (e) => e.edgeType === 'writesTo',
+        );
+        expect(writesTo).toHaveLength(0);
+        // The references edge to the scaffolding node still emits.
+        const refs = result.value.edges.filter(
+          (e) => e.edgeType === 'references',
+        );
+        expect(refs).toHaveLength(1);
+        expect(refs[0]!.toId).toBe('WorkflowFieldUpdate:Account.Stamp_Parent');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('CR-P3-5: same-object FieldUpdate (no <targetObject>) still emits the object-scoped writesTo', async () => {
+      // Regression guard: the cross-object skip must NOT touch the same-object
+      // path — a bare <field> with no <targetObject> stays object-scoped.
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>Set_Local</fullName>
+    <field>Foo__c</field>
+    <operation>Literal</operation>
+  </fieldUpdates>
+  <rules>
+    <fullName>Set_Local_Rule</fullName>
+    <actions>
+      <name>Set_Local</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <active>true</active>
+    <triggerType>onAllChanges</triggerType>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const writesTo = result.value.edges.filter(
+          (e) => e.edgeType === 'writesTo',
+        );
+        expect(writesTo).toHaveLength(1);
+        expect(writesTo[0]!.toId).toBe('CustomField:Account.Foo__c');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits NO writesTo when the FieldUpdate has no matching <fieldUpdates> entry or no <field>', async () => {
+      // Two failure modes: (a) action names a field-update with no
+      // matching <fieldUpdates> entry; (b) the matching entry lacks a
+      // <field>. Both yield only the references edge, no writesTo —
+      // mirrors flow.ts skip-on-missing-field.
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>No_Field_FU</fullName>
+    <operation>Null</operation>
+  </fieldUpdates>
+  <rules>
+    <fullName>Missing_Rule</fullName>
+    <actions>
+      <name>Not_In_Collection</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <actions>
+      <name>No_Field_FU</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <active>true</active>
+    <triggerType>onAllChanges</triggerType>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(
+          result.value.edges.filter((e) => e.edgeType === 'writesTo'),
+        ).toHaveLength(0);
+        // The references edges to the scaffolding nodes still emit.
+        expect(
+          result.value.edges.filter((e) => e.edgeType === 'references'),
+        ).toHaveLength(2);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits ONE writesTo when a rule lists the same FieldUpdate twice (per-rule dedup)', async () => {
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>Set_Foo</fullName>
+    <field>Foo__c</field>
+    <operation>Literal</operation>
+  </fieldUpdates>
+  <rules>
+    <fullName>Dup_FU_Rule</fullName>
+    <actions>
+      <name>Set_Foo</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <actions>
+      <name>Set_Foo</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <active>true</active>
+    <triggerType>onAllChanges</triggerType>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(
+          result.value.edges.filter((e) => e.edgeType === 'writesTo'),
+        ).toHaveLength(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits two writesTo edges when two distinct rules reference the same fieldUpdate', async () => {
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>Set_Foo</fullName>
+    <field>Foo__c</field>
+    <operation>Literal</operation>
+  </fieldUpdates>
+  <rules>
+    <fullName>Rule_A</fullName>
+    <actions>
+      <name>Set_Foo</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <active>true</active>
+    <triggerType>onAllChanges</triggerType>
+  </rules>
+  <rules>
+    <fullName>Rule_B</fullName>
+    <actions>
+      <name>Set_Foo</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <active>true</active>
+    <triggerType>onAllChanges</triggerType>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const writesTo = result.value.edges.filter(
+          (e) => e.edgeType === 'writesTo',
+        );
+        expect(writesTo).toHaveLength(2);
+        const fromIds = writesTo.map((e) => e.fromId).sort();
+        expect(fromIds).toEqual([
+          'WorkflowRule:Account.Rule_A',
+          'WorkflowRule:Account.Rule_B',
+        ]);
+        // Both land on the same field.
+        expect(
+          writesTo.every((e) => e.toId === 'CustomField:Account.Foo__c'),
+        ).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('CR-RV13: SKIPS the writesTo for a $-prefixed (global) <field> ref, keeping only references', async () => {
+      // A global-variable-style <field> ($User.x, $Setup.x, …) is not a real
+      // CustomField on this (or any) object. Real metadata never emits one as a
+      // FieldUpdate target, but a malformed/hand-edited file can. Minting
+      // CustomField:$User.Email would be a phantom writer claim. The honest
+      // result is NO writesTo — the references edge to the scaffolding node STILL
+      // emits so the action is not silently dropped.
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>Stamp_Global</fullName>
+    <field>$User.Email</field>
+    <operation>Formula</operation>
+  </fieldUpdates>
+  <rules>
+    <fullName>Stamp_Global_Rule</fullName>
+    <actions>
+      <name>Stamp_Global</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <active>true</active>
+    <triggerType>onAllChanges</triggerType>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const writesTo = result.value.edges.filter(
+          (e) => e.edgeType === 'writesTo',
+        );
+        expect(writesTo).toHaveLength(0);
+        const refs = result.value.edges.filter(
+          (e) => e.edgeType === 'references',
+        );
+        expect(refs).toHaveLength(1);
+        expect(refs[0]!.toId).toBe('WorkflowFieldUpdate:Account.Stamp_Global');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('CR-RV13: SKIPS the writesTo for a malformed <field> with an empty dot-segment (lone/leading/trailing dot)', async () => {
+      // A dotted <field> whose object-part or leaf-part is empty (".", "Foo.",
+      // ".Foo") is malformed — real metadata never emits one, but a hand-edited
+      // file can. Each would mint a degenerate CustomField id (CustomField:.,
+      // CustomField:Foo., CustomField:.Foo). Skip the writesTo entirely; the
+      // references edge to the scaffolding node STILL emits.
+      const cases = ['.', 'Foo.', '.Foo'];
+      for (const malformed of cases) {
+        const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>Bad_FU</fullName>
+    <field>${malformed}</field>
+    <operation>Formula</operation>
+  </fieldUpdates>
+  <rules>
+    <fullName>Bad_FU_Rule</fullName>
+    <actions>
+      <name>Bad_FU</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <active>true</active>
+    <triggerType>onAllChanges</triggerType>
+  </rules>
+</Workflow>`;
+        const { dir, path } = await writeTempWorkflowXml('Account', xml);
+        try {
+          const result = await extractWorkflowRule(path);
+          expect(result.ok).toBe(true);
+          if (!result.ok) return;
+          const writesTo = result.value.edges.filter(
+            (e) => e.edgeType === 'writesTo',
+          );
+          expect(writesTo, `<field>${malformed}</field>`).toHaveLength(0);
+          const refs = result.value.edges.filter(
+            (e) => e.edgeType === 'references',
+          );
+          expect(refs).toHaveLength(1);
+          expect(refs[0]!.toId).toBe('WorkflowFieldUpdate:Account.Bad_FU');
+        } finally {
+          await rm(dir, { recursive: true, force: true });
+        }
+      }
+    });
+
+    it('CR-RV13: well-formed bare and dotted <field> refs still emit the writesTo (regression guard)', async () => {
+      // The malformed-leaf guard must not touch well-formed refs: a bare same-
+      // object name stays object-scoped, and a clean Object.Field dotted ref is
+      // taken verbatim.
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>Set_Bare</fullName>
+    <field>Foo__c</field>
+    <operation>Literal</operation>
+  </fieldUpdates>
+  <fieldUpdates>
+    <fullName>Set_Dotted</fullName>
+    <field>ns__Target__c.Bar__c</field>
+    <operation>Literal</operation>
+  </fieldUpdates>
+  <rules>
+    <fullName>Well_Formed_Rule</fullName>
+    <actions>
+      <name>Set_Bare</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <actions>
+      <name>Set_Dotted</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <active>true</active>
+    <triggerType>onAllChanges</triggerType>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const writesTo = result.value.edges
+          .filter((e) => e.edgeType === 'writesTo')
+          .map((e) => e.toId)
+          .sort();
+        expect(writesTo).toEqual([
+          'CustomField:Account.Foo__c',
+          'CustomField:ns__Target__c.Bar__c',
+        ]);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
@@ -717,6 +1223,431 @@ describe('extractWorkflowRule', () => {
         expect(result.error.message).toBe(
           'missing required element: <type>',
         );
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('CR-CAP-11 — workflowTimeTriggers declarative shape', () => {
+    it('parses a per-rule <workflowTimeTriggers> into timeTriggerCount + timeTriggers[]', async () => {
+      // The element nests INSIDE <rules> (per-rule), unlike the
+      // top-level <fieldUpdates>/<alerts> collections. Child tag names
+      // are the Salesforce Metadata API WorkflowTimeTrigger shape:
+      // <timeLength>, <workflowTimeTriggerUnit>, <offsetFromField>,
+      // nested <actions>.
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <rules>
+    <fullName>Followup_Reminder</fullName>
+    <active>true</active>
+    <formula>Amount &gt; 100000</formula>
+    <triggerType>onCreateOnly</triggerType>
+    <workflowTimeTriggers>
+      <timeLength>7</timeLength>
+      <workflowTimeTriggerUnit>Days</workflowTimeTriggerUnit>
+      <offsetFromField>CloseDate</offsetFromField>
+      <actions>
+        <name>Some_FU</name>
+        <type>FieldUpdate</type>
+      </actions>
+    </workflowTimeTriggers>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const ruleNode = result.value.nodes.find(
+          (n) => n.type === 'WorkflowRule',
+        );
+        expect(ruleNode).toBeDefined();
+        expect(ruleNode!.properties.timeTriggerCount).toBe(1);
+        expect(ruleNode!.properties.timeTriggers).toEqual([
+          {
+            timeLength: 7,
+            timeUnit: 'Days',
+            offsetFromField: 'CloseDate',
+            actionCount: 1,
+          },
+        ]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('parses multiple <workflowTimeTriggers> per rule and a unit-only / no-offset trigger', async () => {
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <rules>
+    <fullName>Multi_Trigger</fullName>
+    <active>true</active>
+    <triggerType>onAllChanges</triggerType>
+    <workflowTimeTriggers>
+      <timeLength>2</timeLength>
+      <workflowTimeTriggerUnit>Hours</workflowTimeTriggerUnit>
+      <actions>
+        <name>A1</name>
+        <type>Alert</type>
+      </actions>
+      <actions>
+        <name>A2</name>
+        <type>FieldUpdate</type>
+      </actions>
+    </workflowTimeTriggers>
+    <workflowTimeTriggers>
+      <timeLength>1</timeLength>
+      <workflowTimeTriggerUnit>Days</workflowTimeTriggerUnit>
+    </workflowTimeTriggers>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const ruleNode = result.value.nodes.find(
+          (n) => n.type === 'WorkflowRule',
+        );
+        expect(ruleNode).toBeDefined();
+        expect(ruleNode!.properties.timeTriggerCount).toBe(2);
+        expect(ruleNode!.properties.timeTriggers).toEqual([
+          {
+            timeLength: 2,
+            timeUnit: 'Hours',
+            offsetFromField: null,
+            actionCount: 2,
+          },
+          {
+            timeLength: 1,
+            timeUnit: 'Days',
+            offsetFromField: null,
+            actionCount: 0,
+          },
+        ]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits timeTriggerCount===0 and timeTriggers===[] for a rule with no time triggers (no fabrication)', async () => {
+      // Negative case: rides the same shape as the demo
+      // Opportunity.High_Value_Flag rule (zero time triggers). Proves
+      // the property is an empty array, NOT undefined, and that the
+      // count is a genuine 0 rather than propertyNumber's silent default.
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <rules>
+    <fullName>High_Value_Flag</fullName>
+    <active>true</active>
+    <formula>Amount &gt; 100000</formula>
+    <triggerType>onCreateOrTriggeringUpdate</triggerType>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Opportunity', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const ruleNode = result.value.nodes.find(
+          (n) => n.type === 'WorkflowRule',
+        );
+        expect(ruleNode).toBeDefined();
+        expect(ruleNode!.properties.timeTriggerCount).toBe(0);
+        expect(ruleNode!.properties.timeTriggers).toEqual([]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('CR-CAP-11b — per-rule action-type counts (declared)', () => {
+    it('counts per-rule <actions> by <type> into fieldUpdateCount/outboundMessageCount/taskCreationCount', async () => {
+      // The three counts come from the PER-RULE <actions> array by <type>,
+      // NOT from the top-level <fieldUpdates>/<outboundMessages>/<tasks>
+      // DEFINITION collections. A definition collection bigger than the
+      // rule's consumed set must NOT inflate the rule's counts.
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <fieldUpdates>
+    <fullName>FU1</fullName>
+    <field>Description</field>
+    <name>FU1</name>
+    <operation>Formula</operation>
+    <formula>"x"</formula>
+  </fieldUpdates>
+  <fieldUpdates>
+    <fullName>FU2</fullName>
+    <field>Name</field>
+    <name>FU2</name>
+    <operation>Formula</operation>
+    <formula>"y"</formula>
+  </fieldUpdates>
+  <fieldUpdates>
+    <fullName>FU_Unused</fullName>
+    <field>Industry</field>
+    <name>FU_Unused</name>
+    <operation>Formula</operation>
+    <formula>"z"</formula>
+  </fieldUpdates>
+  <outboundMessages>
+    <fullName>OM1</fullName>
+    <endpointUrl>https://example.com/x</endpointUrl>
+    <name>OM1</name>
+  </outboundMessages>
+  <tasks>
+    <fullName>T1</fullName>
+    <subject>Follow up</subject>
+  </tasks>
+  <rules>
+    <fullName>Multi_Action</fullName>
+    <active>true</active>
+    <formula>true</formula>
+    <triggerType>onAllChanges</triggerType>
+    <actions>
+      <name>FU1</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <actions>
+      <name>FU2</name>
+      <type>FieldUpdate</type>
+    </actions>
+    <actions>
+      <name>OM1</name>
+      <type>OutboundMessage</type>
+    </actions>
+    <actions>
+      <name>T1</name>
+      <type>Task</type>
+    </actions>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const ruleNode = result.value.nodes.find(
+          (n) => n.type === 'WorkflowRule',
+        );
+        expect(ruleNode).toBeDefined();
+        // 2 FieldUpdate <actions> (NOT the 3 top-level <fieldUpdates>).
+        expect(ruleNode!.properties.fieldUpdateCount).toBe(2);
+        expect(ruleNode!.properties.outboundMessageCount).toBe(1);
+        expect(ruleNode!.properties.taskCreationCount).toBe(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits genuine 0s (not undefined) for a rule whose only action is an Alert/Apex (no fabrication)', async () => {
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <rules>
+    <fullName>Alert_Only</fullName>
+    <active>true</active>
+    <formula>true</formula>
+    <triggerType>onCreateOnly</triggerType>
+    <actions>
+      <name>Some_Alert</name>
+      <type>Alert</type>
+    </actions>
+    <actions>
+      <name>Some_Apex</name>
+      <type>Apex</type>
+    </actions>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Opportunity', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const ruleNode = result.value.nodes.find(
+          (n) => n.type === 'WorkflowRule',
+        );
+        expect(ruleNode).toBeDefined();
+        // Present as a numeric 0, not absent (would be propertyNumber's
+        // silent default on the consumer side).
+        expect(ruleNode!.properties.fieldUpdateCount).toBe(0);
+        expect(ruleNode!.properties.outboundMessageCount).toBe(0);
+        expect(ruleNode!.properties.taskCreationCount).toBe(0);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('v2.9 — WorkflowAlert node promotion', () => {
+    it('promotes each <alerts> child to a WorkflowAlert node with senderType, description, template, ccEmails', async () => {
+      // Real-org shape: OA_Communication_Request__c has three email alerts
+      // all using senderType CurrentUser. This test uses the same structure.
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <alerts>
+    <fullName>OA_CommRequest_Approved_EmailAlert</fullName>
+    <description>OA_CommRequest_Approved_EmailAlert</description>
+    <senderType>CurrentUser</senderType>
+    <template>System_Email_Alerts/OA_CommRequest_Approved</template>
+  </alerts>
+  <alerts>
+    <fullName>OA_CommRequest_Completed</fullName>
+    <description>OA_CommRequest_Completed</description>
+    <senderType>CurrentUser</senderType>
+    <template>System_Email_Alerts/OA_CommRequest_Completed</template>
+    <ccEmails>admin@example.com</ccEmails>
+  </alerts>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml(
+        'OA_Communication_Request__c',
+        xml,
+      );
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const waNodes = result.value.nodes.filter(
+          (n) => n.type === 'WorkflowAlert',
+        );
+        expect(waNodes).toHaveLength(2);
+        // First alert — node shape.
+        const approved = waNodes.find(
+          (n) => n.id === 'WorkflowAlert:OA_Communication_Request__c.OA_CommRequest_Approved_EmailAlert',
+        );
+        expect(approved).toBeDefined();
+        expect(approved!.apiName).toBe(
+          'OA_Communication_Request__c.OA_CommRequest_Approved_EmailAlert',
+        );
+        expect(approved!.label).toBe('OA_CommRequest_Approved_EmailAlert');
+        expect(approved!.parentId).toBe(
+          'CustomObject:OA_Communication_Request__c',
+        );
+        expect(approved!.properties.senderType).toBe('CurrentUser');
+        expect(approved!.properties.description).toBe(
+          'OA_CommRequest_Approved_EmailAlert',
+        );
+        expect(approved!.properties.template).toBe(
+          'System_Email_Alerts/OA_CommRequest_Approved',
+        );
+        expect(approved!.properties.ccEmails).toEqual([]);
+        // Second alert — ccEmails captured.
+        const completed = waNodes.find(
+          (n) => n.id === 'WorkflowAlert:OA_Communication_Request__c.OA_CommRequest_Completed',
+        );
+        expect(completed).toBeDefined();
+        expect(completed!.properties.ccEmails).toEqual(['admin@example.com']);
+        // parentOf edges emitted for each alert.
+        const parentEdges = result.value.edges.filter(
+          (e) =>
+            e.edgeType === 'parentOf' &&
+            e.fromId === 'CustomObject:OA_Communication_Request__c',
+        );
+        // Two WorkflowAlert parentOf edges (no WorkflowRule in this file).
+        expect(parentEdges).toHaveLength(2);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('WorkflowRule alert action references edge resolves to the promoted WorkflowAlert node id', async () => {
+      // The Alert action variant already emits a `references` edge to
+      // `WorkflowAlert:{Object}.{name}`; v2.9 gives that target a real node.
+      // Verify co-existence: the references edge still emits (unchanged),
+      // and the promoted node is present alongside it.
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <alerts>
+    <fullName>Notify_Owner</fullName>
+    <senderType>CurrentUser</senderType>
+    <template>Sales/WelcomeEmail</template>
+  </alerts>
+  <rules>
+    <fullName>Send_Alert_Rule</fullName>
+    <active>true</active>
+    <triggerType>onCreateOnly</triggerType>
+    <actions>
+      <name>Notify_Owner</name>
+      <type>Alert</type>
+    </actions>
+  </rules>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Account', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const alertNodeId = 'WorkflowAlert:Account.Notify_Owner';
+        // WorkflowAlert node present.
+        const alertNode = result.value.nodes.find(
+          (n) => n.id === alertNodeId,
+        );
+        expect(alertNode).toBeDefined();
+        expect(alertNode!.properties.senderType).toBe('CurrentUser');
+        // Rule's Alert action references edge still resolves to the node.
+        const refEdge = result.value.edges.find(
+          (e) =>
+            e.edgeType === 'references' &&
+            e.fromId === 'WorkflowRule:Account.Send_Alert_Rule' &&
+            e.toId === alertNodeId,
+        );
+        expect(refEdge).toBeDefined();
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('silently skips <alerts> entries lacking a <fullName>', async () => {
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <alerts>
+    <senderType>CurrentUser</senderType>
+    <template>Sales/Anonymous</template>
+  </alerts>
+  <alerts>
+    <fullName>Named_Alert</fullName>
+    <senderType>OrgWideEmailAddress</senderType>
+    <template>Sales/Named</template>
+  </alerts>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Lead', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const waNodes = result.value.nodes.filter(
+          (n) => n.type === 'WorkflowAlert',
+        );
+        // Only the named alert is promoted.
+        expect(waNodes).toHaveLength(1);
+        expect(waNodes[0]!.id).toBe('WorkflowAlert:Lead.Named_Alert');
+        expect(waNodes[0]!.properties.senderType).toBe('OrgWideEmailAddress');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('captures null senderType and null description when absent from the XML', async () => {
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <alerts>
+    <fullName>Minimal_Alert</fullName>
+    <template>Sales/Minimal</template>
+  </alerts>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Contact', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const waNode = result.value.nodes.find(
+          (n) => n.type === 'WorkflowAlert',
+        );
+        expect(waNode).toBeDefined();
+        expect(waNode!.properties.senderType).toBeNull();
+        expect(waNode!.properties.description).toBeNull();
+        expect(waNode!.properties.template).toBe('Sales/Minimal');
+        expect(waNode!.properties.ccEmails).toEqual([]);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

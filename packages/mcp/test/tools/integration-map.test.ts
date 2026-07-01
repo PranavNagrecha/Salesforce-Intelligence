@@ -560,6 +560,132 @@ describe('integrationMapHandler (OmniStudio-only org)', () => {
   });
 });
 
+// =============================================================================
+// Callout-authorization scenario: an org whose outbound HTTP callouts are
+// authorized by ACTIVE RemoteSiteSettings (hardcoded-URL Apex callouts), plus
+// one referenced NamedCredential (wired via an ExternalService) and one
+// ORPHANED NamedCredential (present but nothing references it — the
+// "AWS_US_East_1 is unused" shape). The tool must surface the orphan AND emit
+// a grounded calloutAuthorizationNote instead of abstaining with a coverage gap.
+// Uses its OWN store so it is independent of the shared-suite seeding order.
+// =============================================================================
+
+const RSS_MARKETO_REST = 'RemoteSiteSetting:Marketo_Prod';
+const RSS_MARKETO_SOAP = 'RemoteSiteSetting:MarketoSoapAPI';
+const NC_REFERENCED = 'NamedCredential:Google_Site';
+const NC_ORPHAN = 'NamedCredential:AcmeCloud_US_East_1';
+const ES_USES_NC = 'ExternalService:DirectorySync';
+
+const calloutAuthSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: RSS_MARKETO_REST,
+      type: 'RemoteSiteSetting',
+      apiName: 'Marketo_Prod',
+      properties: { url: 'https://example.mktorest.com', isActive: true },
+    }),
+    makeNode({
+      id: RSS_MARKETO_SOAP,
+      type: 'RemoteSiteSetting',
+      apiName: 'MarketoSoapAPI',
+      properties: { url: 'https://example.mktoapi.com', isActive: true },
+    }),
+    makeNode({
+      id: NC_REFERENCED,
+      type: 'NamedCredential',
+      apiName: 'Google_Site',
+      properties: { url: 'https://www.googleapis.com' },
+    }),
+    makeNode({
+      id: NC_ORPHAN,
+      type: 'NamedCredential',
+      apiName: 'AcmeCloud_US_East_1',
+      properties: {
+        endpoint: 'arn:aws:US-EAST-1:000000000000',
+        protocol: 'NoAuthentication',
+      },
+    }),
+    makeNode({
+      id: ES_USES_NC,
+      type: 'ExternalService',
+      apiName: 'DirectorySync',
+    }),
+  ],
+  edges: [
+    // The ExternalService references the Google_Site NamedCredential — so it
+    // is NOT orphaned. AcmeCloud_US_East_1 has ZERO inbound references.
+    makeEdge({
+      fromId: ES_USES_NC,
+      toId: NC_REFERENCED,
+      edgeType: 'references',
+      properties: { role: 'namedCredential' },
+    }),
+  ],
+};
+
+describe('integrationMapHandler (callout authorization + orphaned named credential)', () => {
+  let authDir: string;
+  let authStore: GraphStore;
+  let authCtx: Context;
+
+  beforeAll(async () => {
+    authDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-integration-map-auth-'));
+    const opened = await openGraph(join(authDir, 'auth.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    authStore = opened.value;
+    const imported = await importExtractionResults(authStore, [calloutAuthSeed]);
+    if (!imported.ok) {
+      throw new Error(`seed import failed: ${imported.error.message}`);
+    }
+    authCtx = { vaultRoot: authDir, manifest: FIXTURE_MANIFEST, graph: authStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(authStore);
+    rmSync(authDir, { recursive: true, force: true });
+  });
+
+  it('flags the unreferenced NamedCredential as orphaned (referenceCount 0)', async () => {
+    const result = await integrationMapHandler(authCtx, { filter: 'all' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const orphan = result.value.data.namedCredentials.find((n) => n.id === NC_ORPHAN);
+    expect(orphan).toBeDefined();
+    expect(orphan?.orphaned).toBe(true);
+    expect(orphan?.referenceCount).toBe(0);
+  });
+
+  it('does NOT flag the referenced NamedCredential as orphaned', async () => {
+    const result = await integrationMapHandler(authCtx, { filter: 'all' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const referenced = result.value.data.namedCredentials.find(
+      (n) => n.id === NC_REFERENCED,
+    );
+    expect(referenced).toBeDefined();
+    expect(referenced?.orphaned).toBe(false);
+    expect(referenced?.referenceCount).toBe(1);
+  });
+
+  it('emits a grounded calloutAuthorizationNote naming the active RemoteSiteSettings', async () => {
+    const result = await integrationMapHandler(authCtx, { filter: 'all' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const note = result.value.data.calloutAuthorizationNote;
+    expect(note).toBeDefined();
+    // The grounded answer names the present RemoteSiteSettings as the
+    // authorizers of hardcoded-URL outbound callouts — not an abstention.
+    expect(note).toContain('Marketo_Prod');
+    expect(note).toContain('MarketoSoapAPI');
+    // It distinguishes the referenced vs orphaned named credentials.
+    expect(note).toContain('Google_Site');
+    expect(note).toContain('AcmeCloud_US_East_1');
+    // It must NOT claim the components are absent / a coverage gap.
+    expect(note.toLowerCase()).not.toContain("doesn't contain");
+    expect(note.toLowerCase()).not.toContain('not found');
+  });
+});
+
 describe('integrationMapInputSchema', () => {
   it('accepts an empty input (filter defaults to all)', () => {
     expect(integrationMapInputSchema.safeParse({}).success).toBe(true);

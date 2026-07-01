@@ -12,6 +12,7 @@ import {
   buildCoverageEntries,
   ENTERPRISE_NOT_MODELED_TYPES,
   loadManifest,
+  rankUncoveredFamilies,
   readCoverageEntries,
   readSkippedDirectories,
   saveManifest,
@@ -318,7 +319,13 @@ describe('coverage fields (enterprise trust contract)', () => {
     expect(summary.missingCoverage).toEqual(['Flow', 'Report']);
   });
 
-  it('treats requested empty types as covered when not errored', () => {
+  it('treats a requested empty type as NOT-RETRIEVED (partial), never complete (C2)', () => {
+    // C2 / Systemic #1: a type that was requested but whose retrieve pulled
+    // NOTHING (`retrieved: 0`, no error) is byte-identical on disk to "the org
+    // genuinely has none of this type". The coverage data model cannot prove
+    // "confirmed zero" vs "silently dropped", so the honest classification is
+    // partial / not-confirmed — never a false "complete" + covered. (Used to
+    // assert the bug: status 'complete', coveredTypes including the empty type.)
     const manifest: ExtendedVaultManifest = {
       ...sampleManifest(),
       coverage: [
@@ -340,8 +347,60 @@ describe('coverage fields (enterprise trust contract)', () => {
     };
 
     const summary = summarizeCoverage(manifest, ['CustomObject', 'Report']);
-    expect(summary.status).toBe('complete');
-    expect(summary.coveredTypes).toEqual(['CustomObject', 'Report']);
+    expect(summary.status).toBe('partial');
+    expect(summary.coveredTypes).toEqual(['CustomObject']);
+    expect(summary.partialTypes).toEqual(['Report']);
+    expect(summary.notModeledTypes).toEqual([]);
+    expect(summary.missingCoverage).toContain('Report');
+  });
+
+  it('marks the live-repro shape (CustomObject covered, Role/SharingRule/LWC/Aura retrieved:0) as partial (C2)', () => {
+    // The verified live repro: a vault with Roles/sharing-rules/LWC/Aura ON
+    // DISK whose coverage rows nonetheless show retrieved:0 must NOT report
+    // "complete". Each empty modeled family flows into partial + missingCoverage
+    // and stays OUT of notModeledTypes (guards the a4 I3 notModeled-set check).
+    const manifest: ExtendedVaultManifest = {
+      ...sampleManifest(),
+      coverage: [
+        { type: 'CustomObject', requested: true, retrieved: 47, errored: false, neverModeled: false },
+        { type: 'Role', requested: true, retrieved: 0, errored: false, neverModeled: false },
+        { type: 'SharingRule', requested: true, retrieved: 0, errored: false, neverModeled: false },
+        { type: 'LightningComponentBundle', requested: true, retrieved: 0, errored: false, neverModeled: false },
+        { type: 'AuraDefinitionBundle', requested: true, retrieved: 0, errored: false, neverModeled: false },
+      ],
+    };
+
+    const summary = summarizeCoverage(manifest, [
+      'CustomObject',
+      'Role',
+      'SharingRule',
+      'LightningComponentBundle',
+      'AuraDefinitionBundle',
+    ]);
+    expect(summary.status).toBe('partial');
+    expect(summary.coveredTypes).toEqual(['CustomObject']);
+    expect([...summary.partialTypes].sort()).toEqual([
+      'AuraDefinitionBundle',
+      'LightningComponentBundle',
+      'Role',
+      'SharingRule',
+    ]);
+    expect(summary.notModeledTypes).toEqual([]);
+    for (const t of ['Role', 'SharingRule', 'LightningComponentBundle', 'AuraDefinitionBundle']) {
+      expect(summary.missingCoverage).toContain(t);
+    }
+  });
+
+  it('returns status "unknown" (never complete or partial) when the manifest has no coverage array (back-compat)', () => {
+    // Pre-v4 manifests carry no `coverage` array. summarizeCoverage must NOT
+    // fabricate covered/partial rows for them: a missing field can never become
+    // a false "complete", and the new emptyTypes bucket must not invent spurious
+    // partial rows. backfillCoverageInMemory only ever synthesizes retrieved>0
+    // rows, so a raw (un-backfilled) manifest stays `unknown`.
+    const summary = summarizeCoverage(sampleManifest(), ['CustomObject', 'Report']);
+    expect(summary.coverageKnown).toBe(false);
+    expect(summary.status).toBe('unknown');
+    expect(summary.coveredTypes).toEqual([]);
     expect(summary.partialTypes).toEqual([]);
   });
 
@@ -403,6 +462,67 @@ describe('coverage fields (enterprise trust contract)', () => {
     expect(summary.coveredTypes).toEqual(['CustomObject']);
     // missingCoverage is the documented union — ListView still belongs there once.
     expect(summary.missingCoverage).toEqual(['ListView']);
+  });
+
+  it('CR-P3-3: a confirmed-clean empty type (retrieveConfirmed:true) is COMPLETE, not partial', () => {
+    // A full live refresh whose describe confirmed the org supports SharingRule
+    // AND whose clean `sf project retrieve` returned ZERO sharing rules. That is
+    // the org genuinely having none == complete, no caveat. Before CR-P3-3 every
+    // requested+retrieved===0 modeled row went unconditionally into
+    // emptyTypes -> partialTypes, so this asserted-complete row would be partial.
+    const manifest: ExtendedVaultManifest = {
+      ...sampleManifest(),
+      coverage: [
+        { type: 'CustomObject', requested: true, retrieved: 47, errored: false, neverModeled: false, retrieveConfirmed: true },
+        { type: 'SharingRule', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
+      ],
+    };
+
+    const summary = summarizeCoverage(manifest, ['CustomObject', 'SharingRule']);
+    expect(summary.status).toBe('complete');
+    expect([...summary.coveredTypes].sort()).toEqual(['CustomObject', 'SharingRule']);
+    expect(summary.partialTypes).not.toContain('SharingRule');
+    expect(summary.missingCoverage).not.toContain('SharingRule');
+  });
+
+  it('CR-P3-3 HONESTY: a retrieved:0 row WITHOUT retrieveConfirmed stays partial (no-signal/dropped/--no-pull)', () => {
+    // The not-retrieved / silently-dropped / pre-signal-manifest case. With the
+    // confirmation signal ABSENT (the byte-identical row the data model cannot
+    // otherwise disambiguate), the honest reading is "not confirmed" -> partial,
+    // in missingCoverage, NOT covered. This locks the honesty contract: a naive
+    // flip of all empty->complete would fail here.
+    const manifest: ExtendedVaultManifest = {
+      ...sampleManifest(),
+      coverage: [
+        { type: 'CustomObject', requested: true, retrieved: 47, errored: false, neverModeled: false, retrieveConfirmed: true },
+        { type: 'Report', requested: true, retrieved: 0, errored: false, neverModeled: false },
+      ],
+    };
+
+    const summary = summarizeCoverage(manifest, ['CustomObject', 'Report']);
+    expect(summary.status).toBe('partial');
+    expect(summary.coveredTypes).toEqual(['CustomObject']);
+    expect(summary.partialTypes).toEqual(['Report']);
+    expect(summary.missingCoverage).toContain('Report');
+  });
+
+  it('CR-P3-3: a pending row that is ALSO retrieveConfirmed:true stays partial (capped/dropped precedence)', () => {
+    // The reports-cap path can mark Report `pending:true` (the un-pulled tail was
+    // NOT checked) on a row that the main pass set retrieveConfirmed:true. Pending
+    // precedence MUST win: a capped/dropped pull can never read as confirmed-empty.
+    const manifest: ExtendedVaultManifest = {
+      ...sampleManifest(),
+      coverage: [
+        { type: 'CustomObject', requested: true, retrieved: 47, errored: false, neverModeled: false, retrieveConfirmed: true },
+        { type: 'Report', requested: true, retrieved: 0, errored: false, neverModeled: false, pending: true, retrieveConfirmed: true },
+      ],
+    };
+
+    const summary = summarizeCoverage(manifest, ['CustomObject', 'Report']);
+    expect(summary.status).toBe('partial');
+    expect(summary.coveredTypes).toEqual(['CustomObject']);
+    expect(summary.partialTypes).toContain('Report');
+    expect(summary.missingCoverage).toContain('Report');
   });
 });
 
@@ -491,6 +611,26 @@ describe('backfillCoverageInMemory', () => {
       expect(entries.find((e) => e.type === properType)?.neverModeled).toBe(true);
     }
   });
+
+  it('CR-P3-3: never synthesizes retrieveConfirmed, so a wanted-but-absent type stays partial', () => {
+    // backfill synthesizes rows from component COUNTS with no retrieve signal,
+    // so it must NOT fabricate retrieveConfirmed (confirmation it never observed).
+    // A wanted type the backfilled manifest has no row for falls through to the
+    // missing-from-wanted branch -> partial. Until a real `sfi refresh`
+    // repopulates coverage with the live signal, caveats keep firing.
+    const manifest: ExtendedVaultManifest = {
+      ...sampleManifest(),
+      components: { CustomObject: 3 },
+    };
+    const filled = backfillCoverageInMemory(manifest);
+    for (const entry of readCoverageEntries(filled)) {
+      expect(entry.retrieveConfirmed).toBeUndefined();
+    }
+    const summary = summarizeCoverage(filled, ['CustomObject', 'SharingRule']);
+    expect(summary.coveredTypes).toEqual(['CustomObject']);
+    expect(summary.partialTypes).toContain('SharingRule');
+    expect(summary.status).toBe('partial');
+  });
 });
 
 describe('loadManifest missing-file handling', () => {
@@ -522,5 +662,77 @@ describe('loadManifest missing-file handling', () => {
     } finally {
       await rm(vault, { recursive: true, force: true });
     }
+  });
+});
+
+describe('rankUncoveredFamilies (CR-CAP-20)', () => {
+  it('ranks skipped families by skipped-file volume desc, mapping known dirs to their ComponentType', () => {
+    const manifest: ExtendedVaultManifest = {
+      ...sampleManifest(),
+      skippedDirectories: {
+        omniProcesses: 120,
+        processBuilders: 30,
+        compactLayouts: 5,
+      },
+    };
+    const ranked = rankUncoveredFamilies(manifest);
+    // desc by skippedFiles.
+    expect(ranked.map((r) => r.family)).toEqual([
+      'omniProcesses',
+      'processBuilders',
+      'CompactLayout',
+    ]);
+    expect(ranked.map((r) => r.skippedFiles)).toEqual([120, 30, 5]);
+    // compactLayouts is a SKIPPED_DIR_COVERAGE-mapped family: surfaced
+    // under its canonical ComponentType, modeledType:true.
+    const compact = ranked.find((r) => r.rawDir === 'compactLayouts');
+    expect(compact).toEqual({
+      family: 'CompactLayout',
+      rawDir: 'compactLayouts',
+      skippedFiles: 5,
+      modeledType: true,
+    });
+    // omniProcesses is NOT in SKIPPED_DIR_COVERAGE: raw label kept,
+    // modeledType:false.
+    const omni = ranked.find((r) => r.rawDir === 'omniProcesses');
+    expect(omni).toEqual({
+      family: 'omniProcesses',
+      rawDir: 'omniProcesses',
+      skippedFiles: 120,
+      modeledType: false,
+    });
+  });
+
+  it('tiebreaks equal counts by family name asc', () => {
+    const manifest: ExtendedVaultManifest = {
+      ...sampleManifest(),
+      skippedDirectories: { zebra: 10, alpha: 10, mike: 10 },
+    };
+    const ranked = rankUncoveredFamilies(manifest);
+    expect(ranked.map((r) => r.family)).toEqual(['alpha', 'mike', 'zebra']);
+  });
+
+  it('returns [] for a clean vault (empty skippedDirectories map) — inert on the golden', () => {
+    expect(rankUncoveredFamilies(sampleManifest())).toEqual([]);
+    expect(
+      rankUncoveredFamilies({ ...sampleManifest(), skippedDirectories: {} }),
+    ).toEqual([]);
+    expect(rankUncoveredFamilies(undefined)).toEqual([]);
+  });
+
+  it('ignores zero/negative counts (retrieved-but-not-skipped)', () => {
+    const manifest: ExtendedVaultManifest = {
+      ...sampleManifest(),
+      skippedDirectories: { omniProcesses: 0, compactLayouts: 3 },
+    };
+    const ranked = rankUncoveredFamilies(manifest);
+    expect(ranked).toEqual([
+      {
+        family: 'CompactLayout',
+        rawDir: 'compactLayouts',
+        skippedFiles: 3,
+        modeledType: true,
+      },
+    ]);
   });
 });

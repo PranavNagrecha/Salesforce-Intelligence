@@ -74,12 +74,15 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { listEdges, listNodesByType } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
+
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 
 /** Per-type cap matching `listNodesByType`'s default. */
 const LIST_PAGE_SIZE = 500;
@@ -135,6 +138,9 @@ export const testCoverageGapsInputSchema = z.object({
     .optional(),
   limit: z.number().int().min(1).max(TEST_COVERAGE_GAPS_MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
+  // CR-22 continuation cursor: opaque token from a prior truncated page's
+  // nextCursor; supplies the resume offset. Omit for today's behavior.
+  cursor: z.string().min(1).optional(),
 });
 
 /** Parsed input shape. */
@@ -187,39 +193,21 @@ export interface TestCoverageGapsOutput {
    */
   readonly nextOffset?: number;
   /**
+   * CR-22 opaque continuation token, present ONLY when this page is truncated
+   * (more gaps remain — over `limit` OR byte-trimmed). Echo it back as `cursor`
+   * to resume. Absent on a complete page so an in-budget response is
+   * byte-identical to the pre-CR-22 shape.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
+  /**
    * Set when the page was byte-trimmed below the global ~45 KB response limit
    * (fewer gaps than `limit` despite more matching). Names the trim and how to
    * advance.
    */
   readonly note?: string;
 }
-
-/**
- * Trim a gap page to the largest sort-ordered prefix whose serialized size
- * fits `budgetBytes`. A gap with many covering tests / fake-assertion
- * locations is large, so a fixed `limit` cannot bound bytes — only a byte
- * budget guarantees the response clears the global guard. Always keeps at
- * least one gap.
- */
-const fitGapsToBudget = (
-  gaps: readonly TestCoverageGapEntry[],
-  budgetBytes: number,
-): {
-  readonly kept: readonly TestCoverageGapEntry[];
-  readonly trimmed: boolean;
-} => {
-  const kept: TestCoverageGapEntry[] = [];
-  let used = 0;
-  for (const gap of gaps) {
-    const size = Buffer.byteLength(JSON.stringify(gap), 'utf8') + 1;
-    if (kept.length > 0 && used + size > budgetBytes) {
-      return { kept, trimmed: true };
-    }
-    kept.push(gap);
-    used += size;
-  }
-  return { kept, trimmed: false };
-};
 
 /**
  * Locations of `fake-assertion` findings in a node's
@@ -459,14 +447,42 @@ export const testCoverageGapsHandler = async (
   }
 
   const limit = input.limit ?? TEST_COVERAGE_GAPS_DEFAULT_LIMIT;
-  const offset = input.offset ?? 0;
-  const page = sorted.slice(offset, offset + limit);
-  const { kept, trimmed } = fitGapsToBudget(
-    page,
-    TEST_COVERAGE_GAPS_PAYLOAD_BUDGET_BYTES,
-  );
-  const returnedEnd = offset + kept.length;
-  const truncated = returnedEnd < sorted.length;
+
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset);
+  // a stale/forged cursor (changed classFilter, different tool, or refreshed
+  // vault) is rejected with invalid-query.
+  const fingerprint = argsFingerprint({
+    ...(input.classFilter !== undefined ? { classFilter: input.classFilter } : {}),
+  });
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: 'sfi.test_coverage_gaps',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  // The pre-byte-trim window size feeds the byte-identical note (`X of Y gaps`).
+  // `paginate()` applies the same largest-prefix byte-trim the handler used to
+  // open-code via `fitGapsToBudget` (verified equivalent kept-set).
+  const windowSize = sorted.slice(offset, offset + limit).length;
+  const paged = paginateLegacy(sorted, {
+    offset,
+    limit,
+    byteBudget: TEST_COVERAGE_GAPS_PAYLOAD_BUDGET_BYTES,
+    binding: {
+      tool: 'sfi.test_coverage_gaps',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const kept = paged.items;
+  const trimmed = paged.byteTrimmed;
+  const truncated = paged.hasMore;
+  const emitCursor = paged.nextCursor !== null;
 
   const boundaries: string[] =
     sorted.length === 0
@@ -486,11 +502,12 @@ export const testCoverageGapsHandler = async (
       limit,
       offset,
       truncated,
-      ...(truncated ? { nextOffset: returnedEnd } : {}),
+      ...(truncated ? { nextOffset: offset + kept.length } : {}),
+      ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
       ...(trimmed
         ? {
             note:
-              `Response trimmed to ${kept.length} of ${page.length} gaps ` +
+              `Response trimmed to ${kept.length} of ${windowSize} gaps ` +
               `(${sorted.length} total) to stay under the ~45 KB MCP response ` +
               `limit. Advance with offset += ${kept.length} for the rest.`,
           }

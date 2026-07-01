@@ -63,14 +63,18 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listEdges, listNodesByType } from '@sf-intelligence/graph';
+import { listEdges } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
 import { partitionByBaseline } from './finding-suppression.js';
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
+import { clampedNodeScanLimit, scanTruncationNote } from './scan-cap.js';
 import { soundnessFromDynamicApexIds, type Soundness } from './soundness.js';
 
 const GOVERNOR_LIMIT_TOOL = 'sfi.governor_limit_risks';
@@ -79,8 +83,6 @@ const GOVERNOR_LIMIT_TOOL = 'sfi.governor_limit_risks';
 const GOVERNOR_LIMIT_MAX_LIMIT = 500;
 /** Default `limit`. */
 const GOVERNOR_LIMIT_DEFAULT_LIMIT = 100;
-/** Per-type cap matching `listNodesByType`'s default. */
-const LIST_PAGE_SIZE = 500;
 
 /**
  * The three rule ids in the v2.1 governor-limit subset. A hard
@@ -129,6 +131,9 @@ export const governorLimitRisksInputSchema = z.object({
     .min(1)
     .max(GOVERNOR_LIMIT_MAX_LIMIT)
     .optional(),
+  // CR-22: class-level page cursor for walking the full audit when truncated.
+  offset: z.number().int().min(0).optional(),
+  cursor: z.string().min(1).optional(),
 });
 
 /** Parsed input shape. */
@@ -183,7 +188,26 @@ export interface GovernorLimitRisksOutput {
   readonly truncated: boolean;
   /** Static-analysis blind spots: `complete: false` when a scanned class uses dynamic Apex. */
   readonly soundness: Soundness;
+  /**
+   * Page size applied. Present only on a PAGED response (`truncated` or a
+   * resumed `offset > 0`); omitted on a whole-fits no-cursor call so that
+   * response stays byte-identical to the pre-CR-22 shape.
+   */
+  readonly limit?: number;
+  /** Zero-based offset of the first returned class. Present only when paged. */
+  readonly offset?: number;
+  /** Offset to pass on the next call to fetch the following page. Present only when `truncated`. */
+  readonly nextOffset?: number;
+  /**
+   * CR-22 opaque continuation token, present ONLY when this page is truncated.
+   * Echo it back as `cursor` to resume. Absent on a complete page.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
 }
+
+const GOVERNOR_LIMIT_TOOL_NAME = 'sfi.governor_limit_risks';
 
 interface QualityIssueLike {
   readonly rule: string;
@@ -343,78 +367,108 @@ export const governorLimitRisksHandler = async (
   let totalRiskCount = 0;
   let suppressedRiskCount = 0;
 
-  for (const type of SCANNED_TYPES) {
-    const nodesResult = await listNodesByType(ctx.graph, type, {
-      limit: LIST_PAGE_SIZE,
+  // CR-22 B3: scan EVERY ApexClass / ApexTrigger by paging the SQL OFFSET
+  // forward (window-by-window at the clamped cap) so risky classes on node 501+
+  // are reachable — the single capped page used to drop the scan TAIL silently.
+  // The output `classes` is then the COMPLETE list, paged on the output axis
+  // below; the scan completes inside this call so no second `s` cursor is
+  // needed.
+  const scan = await scanAllNodesOfTypes(ctx.graph, SCANNED_TYPES);
+  if (!scan.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${scan.error.message}` });
+  }
+  for (const node of scan.value.nodes) {
+    const raw = (node as Node).properties['qualityIssues'];
+    if (!Array.isArray(raw)) continue;
+    const risks: GovernorLimitRiskFinding[] = [];
+    for (const rawIssue of raw) {
+      const issue = coerceIssue(rawIssue);
+      if (issue === null) continue;
+      if (issue.rule === 'dynamic-apex') dynamicApexIds.add(node.id);
+      if (!GOVERNOR_LIMIT_RULES.has(issue.rule)) continue;
+      risks.push({
+        rule: issue.rule,
+        severity: issue.severity,
+        location: issue.location,
+        explanation: issue.explanation,
+      });
+    }
+    const partitioned = await partitionByBaseline(
+      ctx,
+      GOVERNOR_LIMIT_TOOL,
+      node.id,
+      risks,
+    );
+    suppressedRiskCount += partitioned.suppressedCount;
+    for (const issue of partitioned.active) {
+      byRule[issue.rule] = (byRule[issue.rule] ?? 0) + 1;
+      totalRiskCount += 1;
+    }
+    if (partitioned.active.length === 0) continue;
+
+    // Resolve trigger context for ApexClass entries only.
+    // ApexTriggers' own qualityIssues are reported in-place; an
+    // ApexTrigger doesn't have a "trigger caller" upstream.
+    let triggerContext: readonly ComponentId[] = [];
+    let entryPaths: readonly (readonly ComponentId[])[] = [];
+    if (node.type === 'ApexClass') {
+      const tcRes = await collectTriggerCallers(ctx, node.id);
+      if (!tcRes.ok) {
+        return err({ kind: 'internal', message: tcRes.error });
+      }
+      triggerContext = tcRes.value;
+      // P4-graph-sast: the entry-point paths that reach this risky class.
+      const epRes = await collectEntryPaths(ctx, node.id);
+      if (!epRes.ok) {
+        return err({ kind: 'internal', message: epRes.error });
+      }
+      entryPaths = epRes.value;
+    }
+
+    perClass.set(node.id, {
+      componentId: node.id,
+      type: node.type,
+      apiName: node.apiName,
+      risks: [...partitioned.active],
+      triggerContext,
+      entryPaths,
     });
-    if (!nodesResult.ok) {
-      return err({
-        kind: 'internal',
-        message: `graph query failed: ${nodesResult.error.message}`,
-      });
-    }
-    for (const node of nodesResult.value) {
-      const raw = (node as Node).properties['qualityIssues'];
-      if (!Array.isArray(raw)) continue;
-      const risks: GovernorLimitRiskFinding[] = [];
-      for (const rawIssue of raw) {
-        const issue = coerceIssue(rawIssue);
-        if (issue === null) continue;
-        if (issue.rule === 'dynamic-apex') dynamicApexIds.add(node.id);
-        if (!GOVERNOR_LIMIT_RULES.has(issue.rule)) continue;
-        risks.push({
-          rule: issue.rule,
-          severity: issue.severity,
-          location: issue.location,
-          explanation: issue.explanation,
-        });
-      }
-      const partitioned = await partitionByBaseline(
-        ctx,
-        GOVERNOR_LIMIT_TOOL,
-        node.id,
-        risks,
-      );
-      suppressedRiskCount += partitioned.suppressedCount;
-      for (const issue of partitioned.active) {
-        byRule[issue.rule] = (byRule[issue.rule] ?? 0) + 1;
-        totalRiskCount += 1;
-      }
-      if (partitioned.active.length === 0) continue;
-
-      // Resolve trigger context for ApexClass entries only.
-      // ApexTriggers' own qualityIssues are reported in-place; an
-      // ApexTrigger doesn't have a "trigger caller" upstream.
-      let triggerContext: readonly ComponentId[] = [];
-      let entryPaths: readonly (readonly ComponentId[])[] = [];
-      if (node.type === 'ApexClass') {
-        const tcRes = await collectTriggerCallers(ctx, node.id);
-        if (!tcRes.ok) {
-          return err({ kind: 'internal', message: tcRes.error });
-        }
-        triggerContext = tcRes.value;
-        // P4-graph-sast: the entry-point paths that reach this risky class.
-        const epRes = await collectEntryPaths(ctx, node.id);
-        if (!epRes.ok) {
-          return err({ kind: 'internal', message: epRes.error });
-        }
-        entryPaths = epRes.value;
-      }
-
-      perClass.set(node.id, {
-        componentId: node.id,
-        type: node.type,
-        apiName: node.apiName,
-        risks: [...partitioned.active],
-        triggerContext,
-        entryPaths,
-      });
-    }
   }
 
+  // The output key is the perClass map key (componentId), so every entry has a
+  // UNIQUE componentId — compareClassById is already a STRICT TOTAL order; no
+  // extra tiebreak is needed for a dup/skip-proof resume.
   const classes = [...perClass.values()].sort(compareClassById);
-  const truncated = classes.length > limit;
-  const slice = classes.slice(0, limit);
+
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // governor_limit_risks has no narrowing args beyond paging, so the fingerprint
+  // is over the empty arg set — a stale token is still rejected via the
+  // tool+vaultHash bind-check.
+  const fingerprint = argsFingerprint({});
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: GOVERNOR_LIMIT_TOOL_NAME,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  const paged = paginateLegacy(classes, {
+    offset,
+    limit,
+    keyOf: (entry) => entry.componentId,
+    binding: {
+      tool: GOVERNOR_LIMIT_TOOL_NAME,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const slice = paged.items;
+  const truncated = paged.hasMore;
+  const emitCursor = paged.nextCursor !== null;
 
   const boundaries: string[] =
     classes.length === 0
@@ -423,6 +477,20 @@ export const governorLimitRisksHandler = async (
           GOVERNOR_LIMIT_HEURISTIC_DISCLOSURE,
           GOVERNOR_LIMIT_TRIGGER_CONTEXT_DISCLOSURE,
         ];
+
+  // Residual scan-incompleteness only fires for a PATHOLOGICAL type past
+  // FULL_SCAN_MAX_NODES — the normal full scan reaches node 501+ and completes.
+  // Lives OUTSIDE the zero-findings gate because risky classes could be among
+  // the unscanned residual tail.
+  if (scan.value.scanIncomplete) {
+    boundaries.push(
+      scanTruncationNote(scan.value.incompleteTypes, clampedNodeScanLimit()),
+    );
+  }
+
+  // Emit paging fields ONLY on a paged response (truncated OR resumed offset>0),
+  // so a whole-fits no-cursor call stays byte-identical to pre-CR-22.
+  const isPaged = truncated || offset > 0;
 
   return ok({
     data: {
@@ -434,6 +502,11 @@ export const governorLimitRisksHandler = async (
       boundaries,
       truncated,
       soundness: soundnessFromDynamicApexIds([...dynamicApexIds]),
+      ...(isPaged ? { limit, offset } : {}),
+      ...(truncated ? { nextOffset: offset + slice.length } : {}),
+      ...(emitCursor
+        ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo }
+        : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

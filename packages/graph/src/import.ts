@@ -69,6 +69,44 @@ export const REPLACE_EDGE_SQL = `INSERT OR REPLACE INTO edges (
   from_id, to_id, edge_type, confidence, source, properties_json
 ) VALUES (?, ?, ?, ?, ?, ?)`;
 
+/** Column count of a `nodes` row — the param-tuple width of {@link nodeRowParams}. */
+export const NODE_COLUMN_COUNT = 10;
+/** Column count of an `edges` row — the param-tuple width of {@link edgeRowParams}. */
+export const EDGE_COLUMN_COUNT = 6;
+
+/**
+ * Build a single multi-row `INSERT OR REPLACE` statement for `rowCount` rows of
+ * `columnCount` columns each, expanding the `(?, ?, ...)` value template once
+ * per row and joining with `, `. The caller binds the FLATTENED concatenation of
+ * each row's positional params, in row order, so DuckDB applies the rows
+ * left-to-right — preserving the same insertion order (and last-writer-wins /
+ * first-writer-wins dedup parity) as the row-at-a-time path.
+ *
+ * Used by the incremental `applyChangeSet` to collapse N per-row `connection.run`
+ * calls into one statement per chunk, inside the SAME single transaction (no
+ * per-chunk commit — that is the cold-import {@link commitBatched} pattern, which
+ * would BREAK applyChangeSet's all-or-nothing invariant).
+ *
+ * Param-ceiling note: DuckDB's prepared-statement bind list is a uint16, so a
+ * single statement tops out at 65535 params. At {@link IMPORT_BATCH_SIZE}=500
+ * that is 500×10=5000 node params / 500×6=3000 edge params — far under the
+ * ceiling. The safe row ceiling per statement is ~6553 nodes / ~10922 edges;
+ * keep the chunk size at IMPORT_BATCH_SIZE so this can never be approached.
+ */
+export const buildMultiRowUpsertSql = (
+  table: 'nodes' | 'edges',
+  columnCount: number,
+  rowCount: number,
+): string => {
+  const columns =
+    table === 'nodes'
+      ? 'id, type, api_name, label, parent_id, source_path, last_modified_date, last_modified_by, api_version, properties_json'
+      : 'from_id, to_id, edge_type, confidence, source, properties_json';
+  const rowTemplate = `(${new Array<string>(columnCount).fill('?').join(', ')})`;
+  const values = new Array<string>(rowCount).fill(rowTemplate).join(', ');
+  return `INSERT OR REPLACE INTO ${table} (${columns}) VALUES ${values}`;
+};
+
 /**
  * Stringify a value with deterministic key ordering at every depth.
  *
@@ -344,6 +382,91 @@ export const canonicalizeApexCallEdgeTargets = (
   }
 };
 
+/**
+ * CR-CAP-09: mint class-granular `@future` dispatch edges at graph-build time.
+ *
+ * The Apex extractor detects `@future` only at CLASS granularity — the
+ * annotation scanner (`collectMethodAnnotations`) cannot bind the annotation to
+ * a specific method declaration, so each class node carries a single boolean
+ * `properties.hasFutureMethod`. Cross-class calls are modeled as class-level
+ * `callsApex` edges. Joining the two yields a class-granular async signal:
+ * "caller has a `callsApex` edge to a class that has SOME `@future` method".
+ *
+ * This is a deliberate over-attribution: the edge fires when the TARGET class
+ * has ANY `@future` method, even if the caller invoked a synchronous method of
+ * that class — because `hasFutureMethod` cannot say WHICH method is `@future`.
+ * That is honored honestly, not hidden: the minted edge is `confidence:
+ * 'heuristic'` and carries `properties.granularity: 'class'`. Method-level
+ * precision is gated on CR-CAP-06 (caller-method attribution). Reuses the
+ * existing `dispatchesAsync` EdgeType (whose contract already names `@future`
+ * as a legitimate target) — no new EdgeType.
+ *
+ * Honesty / safety invariants:
+ *   - Only mints when the TARGET node genuinely has `hasFutureMethod === true`.
+ *   - The future-set is guarded to `ApexClass` nodes only — triggers can't hold
+ *     `@future`, so a trigger target is never minted even if mislabeled.
+ *   - Dedups by `(fromId, toId, edgeType)`: if a `dispatchesAsync` edge already
+ *     exists for the pair (e.g. a `declared` inline-constructor
+ *     `System.enqueueJob(new ClassB())` edge), NOTHING is minted — the
+ *     higher-trust declared edge is never duplicated or downgraded.
+ *
+ * Must run AFTER `canonicalizeApexCallEdgeTargets` so `callsApex` targets are
+ * already canonicalized to real node ids before the future-set membership test.
+ *
+ * INCREMENTAL caveat (apply-change-set path): operates on the change-set's node
+ * view, so a future-holding target class outside the change set is invisible
+ * and under-mints vs a full refresh. A full `/sfi-refresh` is the ground truth.
+ */
+export const mintFutureDispatchEdges = (
+  nodes: readonly Node[],
+  edges: Edge[],
+): void => {
+  const futureClassIds = new Set<string>();
+  for (const node of nodes) {
+    if (node.type === 'ApexClass' && node.properties['hasFutureMethod'] === true) {
+      futureClassIds.add(node.id);
+    }
+  }
+  if (futureClassIds.size === 0) return;
+
+  // Existing dispatchesAsync pairs — minting must never duplicate/downgrade a
+  // pre-existing (e.g. declared inline-constructor) edge for the same pair.
+  const existingDispatchPairs = new Set<string>();
+  for (const edge of edges) {
+    if (edge.edgeType === 'dispatchesAsync') {
+      existingDispatchPairs.add(`${edge.fromId} ${edge.toId}`);
+    }
+  }
+
+  // Distinct callsApex pairs whose target is a @future-holding class. Use a set
+  // so multiple call-sites to the same target collapse to one minted edge.
+  const toMint = new Map<string, { fromId: string; toId: string }>();
+  for (const edge of edges) {
+    if (edge.edgeType !== 'callsApex') continue;
+    if (!futureClassIds.has(edge.toId)) continue;
+    const pairKey = `${edge.fromId} ${edge.toId}`;
+    if (existingDispatchPairs.has(pairKey)) continue;
+    if (!toMint.has(pairKey)) {
+      toMint.set(pairKey, { fromId: edge.fromId, toId: edge.toId });
+    }
+  }
+
+  for (const { fromId, toId } of toMint.values()) {
+    edges.push({
+      fromId,
+      toId,
+      edgeType: 'dispatchesAsync',
+      confidence: 'heuristic',
+      source: 'graph-future-dispatch',
+      properties: {
+        dispatchMechanism: 'future',
+        granularity: 'class',
+        derivedFrom: 'callsApex+hasFutureMethod',
+      },
+    });
+  }
+};
+
 export const importExtractionResults = async (
   store: GraphStore,
   results: readonly ExtractionResult[],
@@ -358,6 +481,9 @@ export const importExtractionResults = async (
   }
 
   canonicalizeApexCallEdgeTargets(allNodes, allEdges);
+  // CR-CAP-09: mint class-granular @future dispatchesAsync edges AFTER targets
+  // are canonicalized so the future-set membership test sees real node ids.
+  mintFutureDispatchEdges(allNodes, allEdges);
 
   const nodeOutcome = await commitBatched(connection, allNodes, insertNode);
   if (!nodeOutcome.ok) {

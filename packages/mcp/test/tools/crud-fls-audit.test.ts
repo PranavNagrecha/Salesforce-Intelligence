@@ -207,6 +207,15 @@ describe('crudFlsAuditHandler', () => {
     expect(r.value.data.truncated).toBe(true);
   });
 
+  it('CR-22: in-budget whole-fits call emits NO cursor/pageInfo (byte-identical)', async () => {
+    const r = await crudFlsAuditHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.truncated).toBe(false);
+    expect('nextCursor' in r.value.data).toBe(false);
+    expect('pageInfo' in r.value.data).toBe(false);
+  });
+
   it('returns empty classes and empty boundaries when no class has CRUD/FLS findings', async () => {
     const localDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-cfa-empty-'));
     const opened = await openGraph(join(localDir, 'empty.db'));
@@ -387,6 +396,45 @@ describe('crudFlsAuditHandler — pagination + byte budget (B25)', () => {
     expect(d.nextOffset).toBe(d.classes.length);
   });
 
+  // CR-22: the byte-trimmed page carries an opaque continuation cursor and
+  // walking it must cover every class exactly once with no gaps/dupes.
+  it('emits a nextCursor on the truncated page and walks every class once via cursor', async () => {
+    const seen = new Set<string>();
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const r = await crudFlsAuditHandler(
+        bulkCtx,
+        cursor === undefined ? {} : { cursor },
+      );
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.value.data;
+      for (const c of d.classes) seen.add(c.componentId);
+      if (!d.truncated) {
+        expect('nextCursor' in d).toBe(false);
+        break;
+      }
+      expect(typeof d.nextCursor).toBe('string');
+      expect(d.pageInfo?.nextCursor).toBe(d.nextCursor);
+      cursor = d.nextCursor as string;
+      if (++guard > 1000) throw new Error('cursor did not terminate');
+    }
+    expect(seen.size).toBe(BULK_CLASSES);
+  });
+
+  it('rejects a forged cursor minted for a different tool', async () => {
+    // Mint a token that decodes fine but names a different tool — the bind-check
+    // must reject it as invalid-query.
+    const forged = Buffer.from(
+      JSON.stringify({ v: 1, t: 'sfi.get_edges', h: FIXTURE_MANIFEST.sourceTreeHash, o: 5 }),
+      'utf8',
+    ).toString('base64url');
+    const r = await crudFlsAuditHandler(bulkCtx, { cursor: forged });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe('invalid-query');
+  });
+
   it('byte-trims a single oversized class and flags findingsTruncated', async () => {
     const localDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-cfa-giant-'));
     const opened = await openGraph(join(localDir, 'giant.db'));
@@ -417,5 +465,57 @@ describe('crudFlsAuditHandler — pagination + byte budget (B25)', () => {
     expect(d.classes[0]?.findings.length).toBeLessThan(80);
     await closeGraph(localStore);
     rmSync(localDir, { recursive: true, force: true });
+  });
+});
+
+// =============================================================================
+// CR-22 B3 — the scan now WINDOWS past the per-type cap (was: drop the tail).
+// crud_fls_audit already had the OUTPUT cursor (B1); B3 adds the SCAN axis so a
+// low cap no longer makes the verdict INCOMPLETE — it scans in smaller windows
+// and still reaches every unchecked-CRUD class, including ones in the SECOND
+// scanned type. `scanTruncated` fires only for a pathological residual cap.
+// =============================================================================
+describe('crudFlsAuditHandler — full multi-window scan (CR-22 B3)', () => {
+  it('does NOT emit a Scan-capped boundary under the default cap (byte-identical happy path)', async () => {
+    const r = await crudFlsAuditHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.boundaries.join(' ')).not.toMatch(/Scan capped/);
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: a cap of 1 still reaches risky classes in BOTH scanned types', async () => {
+    // Before B3 a cap of 1 fetched only the FIRST ApexClass and FIRST
+    // ApexTrigger and dropped the rest. After B3 the scan pages the SQL OFFSET
+    // forward per type, so BOTH risky entries are found — ApexClass:UnsafeSvc
+    // AND ApexTrigger:AccountTrigger (which lives in the SECOND scanned type).
+    const prev = process.env['SFI_NODE_SCAN_LIMIT'];
+    process.env['SFI_NODE_SCAN_LIMIT'] = '1';
+    try {
+      const r = await crudFlsAuditHandler(ctx, { limit: 500 });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.totalClassCount).toBe(2);
+      const ids = new Set(r.value.data.classes.map((c) => c.componentId));
+      expect(ids.has('ApexClass:UnsafeSvc')).toBe(true);
+      expect(ids.has('ApexTrigger:AccountTrigger')).toBe(true);
+      expect(r.value.data.boundaries.join(' ')).not.toMatch(/Scan capped/);
+    } finally {
+      if (prev === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
+      else process.env['SFI_NODE_SCAN_LIMIT'] = prev;
+    }
+  });
+
+  it('SFI_NODE_SCAN_LIMIT > 500 no longer hard-errors (RV10 clamp)', async () => {
+    const prev = process.env['SFI_NODE_SCAN_LIMIT'];
+    process.env['SFI_NODE_SCAN_LIMIT'] = '600';
+    try {
+      const r = await crudFlsAuditHandler(ctx, {});
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.totalClassCount).toBe(2);
+    } finally {
+      if (prev === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
+      else process.env['SFI_NODE_SCAN_LIMIT'] = prev;
+    }
   });
 });

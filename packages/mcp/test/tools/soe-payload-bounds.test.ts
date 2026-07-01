@@ -88,6 +88,42 @@ describe('enforceSoeByteBudget', () => {
     expect(update.length).toBeGreaterThanOrEqual(1);
   });
 
+  it('NEVER drops a step when allowStepDrop is false — every firing component stays named (single-event what_happens_on_save)', () => {
+    // Reproduces the tail-truncation undercount: a single-event Contact view
+    // with a long after-trigger / post-save-flow tail. Each step carries a
+    // realistically long componentId/apiName so the step COUNT alone exceeds
+    // the budget once actions are gone. With the DEFAULT (step-drop allowed)
+    // the tail is dropped and those components can no longer be named; with
+    // allowStepDrop:false every step — hence every component — survives.
+    const baseStep = (i: number): BoundableStep =>
+      ({
+        actions: [],
+        componentId: `Flow:Record_Triggered_Flow_With_A_Realistically_Long_Name_${i}`,
+        componentType: 'Flow',
+        apiName: `Record_Triggered_Flow_With_A_Realistically_Long_Name_${i}`,
+        phase: 'post-save-flows',
+        stepIndex: i,
+      }) as unknown as BoundableStep;
+    const steps = Array.from({ length: 400 }, (_u, i) => baseStep(i));
+    const payload = { soe: steps, summary: { totalSteps: steps.length } };
+
+    expect(sizeOf(payload)).toBeGreaterThan(SOE_MAX_PAYLOAD_BYTES); // precondition
+
+    // Control: the DEFAULT behaviour drops trailing steps to fit.
+    const control = Array.from({ length: 400 }, (_u, i) => baseStep(i));
+    const controlPayload = { soe: control, summary: { totalSteps: control.length } };
+    const controlResult = enforceSoeByteBudget(controlPayload, [control]);
+    expect(controlResult.stepsOmitted).toBeGreaterThan(0); // bug repro: tail dropped
+    expect(control.length).toBeLessThan(400); // components un-named
+
+    // Fix: with allowStepDrop:false, NO step is ever dropped — every component
+    // stays named (the global jsonResult guard backstops any residual size).
+    const result = enforceSoeByteBudget(payload, [steps], { allowStepDrop: false });
+    expect(result.stepsOmitted).toBe(0);
+    expect(payload.soe).toHaveLength(400); // every firing component still named
+    expect(payload.soe[399]).toBeDefined();
+  });
+
   it('trims oversized payloads under the budget while keeping every step', () => {
     const heavy = stepWithActions(2000, 'Heavy');
     const alsoHeavy = stepWithActions(1500, 'Also');

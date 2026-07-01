@@ -942,6 +942,105 @@ global class AccountResource {
       }
     });
 
+    it('counts exactly 5 fake-assertions for a class with 5 assert(true) + 7 assert(false) — real-org allow/deny shape', async () => {
+      // Mirrors the ApplicationAccessServiceTest pattern: 5 allow-path System.assert(true)
+      // tautologies and 7 deny-path System.assert(false) fail-guards across 12 methods.
+      // The pre-fix recognizer matched (?:true|false) and counted all 12 as fake.
+      // The fixed recognizer matches only `true` and must count exactly 5.
+      const src = `@isTest
+private class RecordGuardTest {
+    @isTest static void allowInternalUser() {
+        System.assert(true, 'An internal user should access any record without a guard.');
+    }
+    @isTest static void allowOwner() {
+        System.assert(true, 'The owner should be allowed.');
+    }
+    @isTest static void allowInternalModify() {
+        System.assert(true, 'An internal user is unrestricted.');
+    }
+    @isTest static void allowNullArgs() {
+        System.assert(true, 'A save with no records should pass the guard.');
+    }
+    @isTest static void allowForeignData() {
+        System.assert(true, 'An internal user is unrestricted, including foreign data.');
+    }
+    @isTest static void denyNonOwner() {
+        try {
+            GuardService.check(someId);
+            System.assert(false, 'A non-owner community user must be denied.');
+        } catch (GuardService.NoAccessException e) {
+            System.assertEquals(GuardService.NO_ACCESS, e.getMessage(), 'wrong error msg');
+        }
+    }
+    @isTest static void denyLoadedRecord() {
+        try {
+            GuardService.checkLoaded(rec);
+            System.assert(false, 'A non-owner must be denied via the loaded-record overload.');
+        } catch (GuardService.NoAccessException e) {
+            System.assertEquals(GuardService.NO_ACCESS, e.getMessage(), 'wrong error msg');
+        }
+    }
+    @isTest static void denyUnknownId() {
+        try {
+            GuardService.check(unknownId);
+            System.assert(false, 'An unknown id must be denied.');
+        } catch (GuardService.NoAccessException e) {
+            System.assertEquals(GuardService.NO_ACCESS, e.getMessage(), 'wrong error msg');
+        }
+    }
+    @isTest static void denyNullId() {
+        try {
+            GuardService.check(null);
+            System.assert(false, 'A null id must be denied under restriction.');
+        } catch (GuardService.NoAccessException e) {
+            System.assertEquals(GuardService.NO_ACCESS, e.getMessage(), 'wrong error msg');
+        }
+    }
+    @isTest static void denyModifyNonOwner() {
+        try {
+            GuardService.checkModify(rec);
+            System.assert(false, 'A non-owner must not modify the record.');
+        } catch (GuardService.NoAccessException e) {
+            System.assertEquals(GuardService.NO_ACCESS, e.getMessage(), 'wrong error msg');
+        }
+    }
+    @isTest static void denyReparent() {
+        try {
+            GuardService.checkModify(reparentRec);
+            System.assert(false, 'Reassigning must be blocked.');
+        } catch (GuardService.NoReparentException e) {
+            System.assertEquals(GuardService.NO_REPARENT, e.getMessage(), 'wrong error msg');
+        }
+    }
+    @isTest static void denyForeignContact() {
+        try {
+            GuardService.checkModify(foreignContactRec);
+            System.assert(false, 'Updating someone elses contact must be blocked.');
+        } catch (GuardService.ContactNotOwnException e) {
+            System.assertEquals(GuardService.CONTACT_NOT_OWN, e.getMessage(), 'wrong error msg');
+        }
+    }
+}`;
+      const { dir, clsPath } = await writeTempApexClass('RecordGuardTest', src);
+      try {
+        const result = await extractApexClass(clsPath);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const props = result.value.nodes[0]?.properties;
+        expect(props).toBeDefined();
+        if (!props) return;
+        const issues = props['qualityIssues'] as ReadonlyArray<{
+          readonly rule: string;
+        }>;
+        const fakeAssertions = issues.filter((i) => i.rule === 'fake-assertion');
+        // Only the 5 assert(true) allow-path calls are tautologies;
+        // the 7 assert(false) deny-path fail-guards must NOT be counted.
+        expect(fakeAssertions).toHaveLength(5);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
     it('flags old-api-version when the metadata declares apiVersion < 50', async () => {
       const oldApiMeta = `<?xml version="1.0" encoding="UTF-8"?>
 <ApexClass xmlns="http://soap.sforce.com/2006/04/metadata">
