@@ -666,12 +666,47 @@ const rerankForMode = (
   return [...lead, ...rest].slice(0, 8);
 };
 
+/**
+ * I3a structural honesty: when the answering candidate needs the opt-in live
+ * plane, the guidance MUST disclose that up front — name the live plane and the
+ * consent step — so the host LLM refuses to invent a number rather than calling
+ * a `live_*` tool blindly and either erroring on a missing arg or (with standing
+ * consent) silently spending the org's API budget. Read from the candidates'
+ * own `liveRequired` field (I1), not the demoted regex route, so it generalizes
+ * across the whole live-needs-consent bucket (counts, field population, samples,
+ * stale records, duplicates), not just one phrasing. Fires only when a LEADING
+ * candidate is live-required (the top 3 the host is most likely to pick); a lone
+ * live tool buried far down the shortlist must not over-warn a vault question.
+ */
+const LIVE_DISCLOSURE_LOOKAHEAD = 3;
+const liveConsentDisclosure = (cands: readonly ToolCandidate[]): string | undefined => {
+  const leadIsLive = cands
+    .slice(0, LIVE_DISCLOSURE_LOOKAHEAD)
+    .some((c) => c.liveRequired === true);
+  if (!leadIsLive) return undefined;
+  return (
+    ' LIVE PLANE / CONSENT: the leading candidate(s) are marked `liveRequired` — ' +
+    'answering needs the opt-in, read-only LIVE PLANE that queries the org at call ' +
+    'time, which the offline vault cannot do. Do NOT invent or estimate a record ' +
+    'count, value, or sample. If the live plane is not enabled the live_* tool will ' +
+    'fail-closed with a consent error; relay that honestly. To enable it, the user ' +
+    'must grant one-time read-only consent with sfi.live_consent { grant: true } ' +
+    '(or pass liveEnabled: true for one call, or set SFI_LIVE_PLANE_ENABLED=1) — ' +
+    'state that consent step before running any live query.'
+  );
+};
+
 /** CAE-02/04: the planner contract, tailored to the requested output mode. */
-const guidanceForMode = (mode: RouteQuestionInput['mode']): string => {
+const guidanceForMode = (
+  mode: RouteQuestionInput['mode'],
+  cands: readonly ToolCandidate[] = [],
+): string => {
+  const consent = liveConsentDisclosure(cands) ?? '';
   const tail =
     ' The candidates are an advisory shortlist, not a route — YOU pick. Resolve any ' +
     'named component first, ground the final answer with sfi.synthesize_answer, and ' +
-    'never answer from a tool name alone.';
+    'never answer from a tool name alone.' +
+    consent;
   switch (mode) {
     case 'plan':
       return (
@@ -698,7 +733,8 @@ const guidanceForMode = (mode: RouteQuestionInput['mode']): string => {
         '`suggestedArgs`, treat them as heuristic bindings for that tool. Plan: read the question → ' +
         'resolve any named component with sfi.resolve → pick the tool(s) to run from the candidates ' +
         '(sequence them if compound) → run them → ground the answer with sfi.synthesize_answer. ' +
-        'Never answer from a tool name alone.'
+        'Never answer from a tool name alone.' +
+        consent
       );
   }
 };
@@ -965,7 +1001,8 @@ export const routeQuestionHandler = async (
         input.mode,
       )
     : [];
-  const guidance = toolCandidates.length > 0 ? guidanceForMode(input.mode) : undefined;
+  const guidance =
+    toolCandidates.length > 0 ? guidanceForMode(input.mode, toolCandidates) : undefined;
   return ok({
     data: {
       route,
