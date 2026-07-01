@@ -3,6 +3,25 @@
 All notable changes to **sf-intelligence** are documented here. This project
 adheres to [Semantic Versioning](https://semver.org).
 
+## [0.1.18] — 2026-07-01
+
+Headline: **lifecycle routing + an honest conversion caveat.** "What *runs* when a Lead is
+converted?" fell through to an unrouted gap while "what *happens* when…" routed fine — a verb
+asymmetry, not a missing capability. Fixed, and `lifecycle_process` now discloses that a
+conversion is a distinct action it only partly models.
+
+### Fixed
+- **Router verb symmetry.** The lifecycle-transition rule matched only `what happens when …`;
+  it now also matches `runs` / `fires`, so "what runs when a Lead is converted" routes to
+  `lifecycle_process` (like the "happens" phrasing already did) instead of logging an
+  unrouted gap. The DML-event save-order rule is unchanged (disjoint value sets — no overlap).
+- **`lifecycle_process` honesty caveat.** It models a transition as an insert/update, so a
+  distinct record ACTION — Lead Convert, Approval submission, Activation — is only partly
+  captured. It now discloses that the action's own automation (Convert field mapping,
+  matching / duplicate rules, managed-package auto-convert, approval / activation routing) is
+  outside the insert/update view, so a conversion answer isn't read as the whole operation.
+  (Found by end-user QA on a real org with package-level auto-convert.)
+
 ## [0.1.17] — 2026-07-01
 
 Headline: **the grounding gate now fails closed.** `sfi.synthesize_answer` exists to stop a
