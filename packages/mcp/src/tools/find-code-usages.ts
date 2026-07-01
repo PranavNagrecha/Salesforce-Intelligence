@@ -66,6 +66,11 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  buildEmptyTraversalCoverageCaveat,
+  CODE_USAGE_REQUIRED_COVERAGE,
+  type CoverageCaveat,
+} from './coverage-trust.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 
 const FIND_CODE_USAGES_TOOL = 'sfi.find_code_usages';
@@ -200,6 +205,14 @@ export interface FindCodeUsagesOutput {
   readonly usages: readonly CodeUsage[];
   /** §C3 honesty: heuristic-confidence + empty≠absent disclosure (never a silent empty). */
   readonly boundaries: readonly string[];
+  /**
+   * I3b (empty ≠ none): present ONLY when the FULL result is empty AND a code
+   * family (Apex / LWC / Aura / Visualforce) that would produce a usage edge is
+   * NOT fully covered by the vault. Names the not-checked families so an empty
+   * usage list reads "not retrieved", not a proven "none". Absent on a
+   * non-empty result and on a fully-covered vault (byte-identical to before).
+   */
+  readonly coverageCaveat?: CoverageCaveat;
   /**
    * Page size applied to this response. Present ONLY on a PAGED response
    * (`hasMore` or a resumed `offset > 0`); omitted on a whole-fits no-cursor
@@ -386,9 +399,20 @@ export const findCodeUsagesHandler = async (
   // The empty-disclosure is keyed on the FULL result count (paged.totalCount),
   // not the page, so a non-first page that happens to be empty still discloses
   // honestly and a target with usages never trips the empty note mid-walk.
+  // I3b (empty ≠ none): on an empty FULL result also name the code families the
+  // vault did NOT fully retrieve, so "no code uses this" carries "…among the
+  // families the vault covers". Non-empty output is untouched.
+  const coverageCaveat =
+    paged.totalCount === 0
+      ? buildEmptyTraversalCoverageCaveat(ctx, CODE_USAGE_REQUIRED_COVERAGE)
+      : undefined;
   const boundaries =
     paged.totalCount === 0
-      ? [CODE_USAGE_HEURISTIC_DISCLOSURE, CODE_USAGE_EMPTY_DISCLOSURE]
+      ? [
+          CODE_USAGE_HEURISTIC_DISCLOSURE,
+          CODE_USAGE_EMPTY_DISCLOSURE,
+          ...(coverageCaveat !== undefined ? [coverageCaveat.message] : []),
+        ]
       : [CODE_USAGE_HEURISTIC_DISCLOSURE];
 
   return ok({
@@ -400,6 +424,7 @@ export const findCodeUsagesHandler = async (
       ...(emitCursor
         ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo }
         : {}),
+      ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

@@ -52,6 +52,11 @@ import type { Context } from '../server.js';
 
 import { isUnresolvedApexCallTarget, isUnresolvedFieldReceiver } from './apex-receiver.js';
 import {
+  buildEmptyTraversalCoverageCaveat,
+  type CoverageCaveat,
+  GRAPH_TRAVERSAL_REQUIRED_COVERAGE,
+} from './coverage-trust.js';
+import {
   enforceGraphPayloadBudget,
   estimateGraphPayloadBytes,
   GRAPH_MAX_PAYLOAD_BYTES,
@@ -145,6 +150,15 @@ export interface GetImpactOutput {
   readonly estimatedPayloadBytes: number;
   /** Static-analysis blind spots: `complete: false` when an impacted class uses dynamic Apex. */
   readonly soundness: Soundness;
+  /**
+   * I3b (empty ≠ none): present ONLY when the impact slice found NO dependents
+   * (`impact.edges` is empty) AND a dependency family that would produce an
+   * inbound edge is NOT fully covered by the vault. Names the not-checked
+   * families so an empty impact reads "not retrieved", not a proven "nothing
+   * depends on this". Absent when dependents exist or the vault is fully covered
+   * (byte-identical to before).
+   */
+  readonly coverageCaveat?: CoverageCaveat;
   readonly disclosure: string;
 }
 
@@ -513,6 +527,16 @@ export const getImpactHandler = async (
     byteTrimmed: budgeted.trimmed,
   });
 
+  // I3b (empty ≠ none): an impact walk with NO dependent edges is exactly where
+  // "nothing depends on this" is dangerous — name the dependency families the
+  // vault did NOT fully retrieve so the host discloses the boundary. Keyed on
+  // the edge set (the root node is always present, so node count is not the
+  // emptiness signal). Non-empty impact slices are untouched.
+  const coverageCaveat =
+    budgeted.edges.length === 0
+      ? buildEmptyTraversalCoverageCaveat(ctx, GRAPH_TRAVERSAL_REQUIRED_COVERAGE)
+      : undefined;
+
   const truncationReason = finalTruncated
     ? {
         reason: budgeted.trimmed
@@ -539,6 +563,7 @@ export const getImpactHandler = async (
       estimatedPayloadBytes,
       payloadSlimmed: slimmedCount > 0,
       soundness,
+      ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       disclosure,
     },
     vaultState: {

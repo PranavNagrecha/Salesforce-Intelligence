@@ -53,6 +53,11 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  APEX_USAGE_REQUIRED_COVERAGE,
+  buildEmptyTraversalCoverageCaveat,
+  type CoverageCaveat,
+} from './coverage-trust.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 
 /**
@@ -149,6 +154,14 @@ export interface FindApexUsagesOutput {
   readonly usages: readonly ApexUsage[];
   /** §C3 honesty: heuristic-confidence + empty≠absent disclosure (never a silent empty). */
   readonly boundaries: readonly string[];
+  /**
+   * I3b (empty ≠ none): present ONLY when the FULL result is empty AND the Apex
+   * families that would produce a usage edge (`ApexClass` / `ApexTrigger`) are
+   * NOT fully covered by the vault. Names the not-checked families so an empty
+   * usage list reads "not retrieved", not a proven "none". Absent on a
+   * non-empty result and on a fully-covered vault (byte-identical to before).
+   */
+  readonly coverageCaveat?: CoverageCaveat;
   /**
    * CR-13 truncation honesty: the TRUE total number of Apex usages matching the
    * filters BEFORE `offset`/`limit` paging (post sparse-graph-miss and
@@ -324,8 +337,17 @@ export const findApexUsagesHandler = async (
   const returned = offset + page.length;
 
   const boundaries: string[] = [APEX_USAGE_HEURISTIC_DISCLOSURE];
+  // I3b (empty ≠ none): only when the WHOLE usage set is empty do we risk the
+  // host narrating absence as fact — attach a coverage caveat naming the Apex
+  // families the vault did NOT fully retrieve, so "no Apex uses this" carries
+  // "…among the families the vault covers". Non-empty output is untouched.
+  const coverageCaveat =
+    total === 0
+      ? buildEmptyTraversalCoverageCaveat(ctx, APEX_USAGE_REQUIRED_COVERAGE)
+      : undefined;
   if (total === 0) {
     boundaries.push(APEX_USAGE_EMPTY_DISCLOSURE);
+    if (coverageCaveat !== undefined) boundaries.push(coverageCaveat.message);
   }
   if (hasMore) {
     boundaries.push(
@@ -346,6 +368,7 @@ export const findApexUsagesHandler = async (
       hasMore,
       nextOffset: hasMore ? returned : null,
       ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
+      ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

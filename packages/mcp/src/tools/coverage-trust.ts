@@ -133,6 +133,96 @@ export const applyCoverageToVerdict = <V extends string>(
   return verdict === safeValue ? reviewValue : verdict;
 };
 
+/**
+ * I3b (structural honesty — empty ≠ none): the coverage caveat a
+ * graph-traversal tool (`get_impact`, `get_edges`, `get_subgraph`,
+ * `find_component_usages`, `find_code_usages`, `find_apex_usages`,
+ * `find_formula_references`) attaches ONLY when its edge / impact / usage set
+ * came back EMPTY.
+ *
+ * An empty traversal result is exactly where "no X references this" is
+ * dangerous: the host cannot tell an *empty* result (nothing referenced it)
+ * from an *incomplete* one (the families that WOULD reference it were never
+ * retrieved / modeled into the vault). This names the not-checked families so
+ * the host discloses the boundary — "…among the families the vault covers;
+ * families A/B/C were not checked" — instead of asserting absence as fact.
+ *
+ * Reuses the SAME machinery as the destructive / what-if suite
+ * (`buildEnumerationCoverageCaveatFor` → `summarizeCoverage`): it returns
+ * `undefined` when the requested families are fully covered (`complete`) OR
+ * when the manifest carries no coverage rows at all (pre-v4 / legacy vault —
+ * never false-flag those, per the vault-coverage-honesty rule). No new caveat
+ * vocabulary is introduced.
+ *
+ * The `purpose` phrasing is uniform across the traversal tools: "No dependency
+ * / usage edges were found" — so the message reads as a boundary on the empty
+ * answer, not a boundary on a non-empty one (callers only invoke this on an
+ * empty set).
+ */
+export const buildEmptyTraversalCoverageCaveat = (
+  ctx: Context,
+  requiredTypes: readonly string[],
+): CoverageCaveat | undefined =>
+  buildEnumerationCoverageCaveatFor(
+    ctx,
+    requiredTypes,
+    'This is an EMPTY result. "Nothing references / uses this" can only be' +
+      ' asserted for the dependency families the vault actually retrieved',
+  );
+
+/**
+ * Coverage families whose incoming edges a general graph-traversal
+ * (`get_impact` / `get_edges` / `get_subgraph`) walks. These are the families
+ * that PRODUCE inbound dependency edges — so an empty traversal that omits any
+ * of them is "not checked", not proven "none". The list is the union of the
+ * dependency producers the destructive suite already enumerates
+ * (`FIELD_DELETION_REQUIRED_COVERAGE` in `safe-to-delete-field.ts`) so the two
+ * honesty surfaces name the same not-checked families.
+ */
+export const GRAPH_TRAVERSAL_REQUIRED_COVERAGE = [
+  'ApexClass',
+  'ApexTrigger',
+  'Flow',
+  'ValidationRule',
+  'WorkflowRule',
+  'Layout',
+  'FlexiPage',
+  'LightningComponentBundle',
+  'AuraDefinitionBundle',
+  'VisualforcePage',
+  'VisualforceComponent',
+  'QuickAction',
+  'CustomField',
+  'CustomObject',
+  'Report',
+  'Dashboard',
+  'ListView',
+] as const;
+
+/** Coverage families the code-usage tools (`find_code_usages`) read from. */
+export const CODE_USAGE_REQUIRED_COVERAGE = [
+  'ApexClass',
+  'ApexTrigger',
+  'LightningComponentBundle',
+  'AuraDefinitionBundle',
+  'VisualforcePage',
+  'VisualforceComponent',
+] as const;
+
+/** Coverage families the Apex-usage tool (`find_apex_usages`) reads from. */
+export const APEX_USAGE_REQUIRED_COVERAGE = ['ApexClass', 'ApexTrigger'] as const;
+
+/**
+ * Coverage families the formula-reference tool (`find_formula_references`)
+ * reads from. Formula `references` edges originate from formula CustomFields
+ * (the formula tokenizer) and Validation Rules, so a missing `CustomField` /
+ * `ValidationRule` pull means an empty result is "not checked".
+ */
+export const FORMULA_REFERENCE_REQUIRED_COVERAGE = [
+  'CustomField',
+  'ValidationRule',
+] as const;
+
 /** Coverage families that affect flow-deactivation what-if completeness. */
 export const FLOW_DEACTIVATION_REQUIRED_COVERAGE = [
   'Flow',

@@ -31,6 +31,11 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  buildEmptyTraversalCoverageCaveat,
+  type CoverageCaveat,
+  GRAPH_TRAVERSAL_REQUIRED_COVERAGE,
+} from './coverage-trust.js';
 import { grepVaultSource, searchApexSourceHandler } from './search-apex-source.js';
 
 /** Incoming edge types that are NOT usage — access grants + structural parentage. */
@@ -125,6 +130,15 @@ export interface FindComponentUsagesOutput {
     readonly hasStaticEvidence: boolean;
   };
   readonly boundaries: readonly string[];
+  /**
+   * I3b (empty ≠ none): present ONLY when there is NO static evidence anywhere
+   * (empty graph tier AND empty grep tier) AND a dependency family that would
+   * reference this component is NOT fully covered by the vault. Names the
+   * not-checked families so an empty usage answer reads "not retrieved", not a
+   * proven "none". Absent when static evidence exists or the vault is fully
+   * covered (byte-identical to before).
+   */
+  readonly coverageCaveat?: CoverageCaveat;
   readonly truncated: boolean;
 }
 
@@ -240,10 +254,18 @@ export const findComponentUsagesHandler = async (
     'Graph referrers are the modeled incoming dependency edges (access grants `grantedBy` and structural `parentOf` are EXCLUDED — access is not usage); each carries edge `confidence` (declared / parsed / heuristic).',
     'The grep supplement is a literal text match on the api name across Apex AND frontend bundle source — LWC, Aura, Visualforce ($Label / $Resource / @salesforce module references) — (`text-match` tier): it can OVER-match (a substring / a different component sharing the name) and UNDER-match (dynamically built references). Treat it as leads, not proof.',
   ];
+  // I3b (empty ≠ none): only when there is NO static evidence anywhere do we
+  // risk narrating absence as fact — name the dependency families the vault did
+  // NOT fully retrieve so "nothing uses this" carries "…among the families the
+  // vault covers". Non-empty answers are untouched.
+  const coverageCaveat = !hasStaticEvidence
+    ? buildEmptyTraversalCoverageCaveat(ctx, GRAPH_TRAVERSAL_REQUIRED_COVERAGE)
+    : undefined;
   if (!hasStaticEvidence) {
     boundaries.push(
       'No static evidence of usage found in this vault — this is NOT proof that nothing uses it. Dynamic SOQL / reflective access, references from un-modeled families (reports, dashboards, list-view filters, custom-metadata-driven config), and managed packages are invisible to static analysis.',
     );
+    if (coverageCaveat !== undefined) boundaries.push(coverageCaveat.message);
     const typeNote = TYPE_EMPTY_NOTES[targetType];
     if (typeNote !== undefined) boundaries.push(typeNote);
   }
@@ -277,6 +299,7 @@ export const findComponentUsagesHandler = async (
         hasStaticEvidence,
       },
       boundaries,
+      ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       truncated: graphTruncated || grepTruncated,
     },
     vaultState: {
