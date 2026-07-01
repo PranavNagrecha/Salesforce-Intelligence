@@ -103,7 +103,7 @@ A few of the foundational edge types (every edge carries a confidence —
 | `callsApex`   | `Flow`                      | `ApexClass`                 |
 | `readsFrom` / `writesTo` | Apex / Flow      | `CustomField`               |
 
-The graph models 20 edge types in total across 72 component types —
+The graph models 23 edge types in total across 77 component types —
 including Apex call edges, Flow-to-Apex invocations, and formula field
 references. The honesty boundary is **static analysis, not runtime**:
 dynamic SOQL, reflective field access, and runtime metadata lookups leave
