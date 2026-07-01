@@ -376,7 +376,8 @@ const CASES: readonly Case[] = [
 
   // Admin-edge 61–90: explicit tool-name phrasing (regex must route without funnel).
   { q: 'release_readiness_report — is this org ready for release?', intent: 'release-readiness', plane: 'vault' },
-  { q: 'tech_debt_score — does it recommend remediation on a zero-count category?', intent: 'tech-debt', plane: 'vault' },
+  // tech_debt_score literal-echo rule removed (I5 slim-down); the tool ranks #1
+  // in the funnel, so the tool-name-only phrasing is no longer a regex route.
   { q: 'coverage_report — which metadata families were retrieved vs notModeled?', intent: 'vault-health', plane: 'vault' },
   { q: 'retrieve_blindspot_report — what is not being pulled?', intent: 'retrieve-blindspot', plane: 'vault' },
   { q: 'automation_build_advisor Contact — when it cites active record-triggered Flows', intent: 'automation-on-object', plane: 'vault' },
@@ -404,9 +405,11 @@ const CASES: readonly Case[] = [
   { q: 'field_360 on Contact.hed__Social_Security_Number__c — riskLevel', intent: 'field-meaning', plane: 'vault' },
   { q: 'safe_to_delete_field Contact.Email — standard field undeletable', intent: 'safe-to-delete', plane: 'vault' },
   { q: 'what_if_make_field_required Contact.Email', intent: 'what-if-field', plane: 'vault' },
-  { q: 'scheduled_job_catalog — Schedulables only from tests', intent: 'scheduled-jobs', plane: 'vault' },
+  // scheduled_job_catalog / endpoint_catalog: pure literal-echo recall-crutch
+  // rules removed in the I5 funnel-primary slim-down. For a tool-name-only
+  // phrasing with no prose signal the funnel is now the recall net (it ranks
+  // both tools #1), so they are no longer asserted as deterministic regex routes.
   { q: 'async_chain_depth from CalculatePaymentsBatch', intent: 'async-chain-depth', plane: 'vault' },
-  { q: 'endpoint_catalog — every outbound URL', intent: 'endpoints', plane: 'vault' },
   { q: 'governor_limit_risks — SOQL in loops', intent: 'governor-risks', plane: 'vault' },
   { q: 'find_dead_code — unreachable Apex', intent: 'dead-code', plane: 'vault' },
   { q: 'meaningful_test_audit on the FSR_Trigger* test family', intent: 'test-coverage', plane: 'vault' },
