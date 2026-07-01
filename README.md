@@ -64,7 +64,12 @@ what order. The router also tags each question with the plane that answers it �
 the **offline vault** (metadata, dependencies, permissions), the **live org**
 (counts, samples, limits, inactive users — read-only, opt-in), or a **hybrid** of
 both (e.g. "is this field *actually* populated?"). Every answer is stamped with
-its provenance (`offline_snapshot`, `live_org`, or `hybrid`) and freshness. When
+its provenance (`offline_snapshot`, `live_org`, or `hybrid`) and freshness. Each
+candidate carries its own plane, whether it needs the live org, and a confidence band —
+and when the two best-fitting tools are close but diverge on something consequential
+(one reads the live org while the other stays offline; or one is destructive while the
+other is only informational), the router **stops and asks which you meant** instead of
+letting the host silently commit. When
 nothing fits, it **says so and logs the gap** rather than guessing — so the
 library grows toward what people actually ask. (A deterministic, no-LLM routing
 mode is available via `SFI_ROUTER_MODE=offline` for CI / air-gapped hosts.)
