@@ -166,6 +166,19 @@ describe('lifecycleProcessHandler', () => {
     expect(r.value.data.disclosures.some((s) => s.includes('NOT EVALUATED'))).toBe(true);
   });
 
+  it('discloses that Lead Convert / approval / activation are distinct actions outside the insert/update view', async () => {
+    const r = await lifecycleProcessHandler(ctx, {
+      objectApiName: 'Opportunity',
+      field: 'StageName',
+      value: 'Closed Won',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(
+      r.value.data.disclosures.some((s) => s.includes('Lead Convert')),
+    ).toBe(true);
+  });
+
   it('propagates the underlying not-found error for an unknown object', async () => {
     const r = await lifecycleProcessHandler(ctx, { objectApiName: 'NoSuchObj__c' });
     // order_of_execution surfaces component-not-found for an unknown object.

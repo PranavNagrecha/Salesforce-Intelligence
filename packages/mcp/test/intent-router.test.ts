@@ -81,6 +81,10 @@ const CASES: readonly Case[] = [
   { q: 'effective permissions for the admin profile', intent: 'effective-permissions', plane: 'vault' },
   { q: 'who can create read edit delete Account', intent: 'object-access', plane: 'vault' },
   { q: 'what happens when an Opportunity becomes Closed Won', intent: 'lifecycle-process', plane: 'vault' },
+  // Bug-2 verb symmetry: "runs/fires + <transition>" must route like "happens"
+  // (previously "what runs when a Lead is converted" fell through to unrouted).
+  { q: 'what runs when a Lead is converted', intent: 'lifecycle-process', plane: 'vault' },
+  { q: 'what fires when an Opportunity is closed won', intent: 'lifecycle-process', plane: 'vault' },
 
   // P12-ROUTER-disambiguation — near-miss pairs must route to DISTINCT intents.
   { q: 'who can see Account records', intent: 'who-can-access-object', plane: 'vault' },

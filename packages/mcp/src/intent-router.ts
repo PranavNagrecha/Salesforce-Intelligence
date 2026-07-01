@@ -1668,7 +1668,7 @@ const RULES: readonly Rule[] = [
       'What happens when {Object}.{field} becomes {value} — the automation coupled to a value/stage transition, from the vault (lifecycle_process).',
     patterns: [
       /\bwhat\s+happens\s+when\b.*\b(becomes?|turns?|changes?\s+to|is\s+set\s+to|reaches?)\b/,
-      /\bwhat\s+happens\s+when\b.*\b(closed\s+won|closed\s+lost|converted|approved|activated)\b/,
+      /\bwhat\s+(?:happens|runs|fires)\s+when\b.*\b(closed\s+won|closed\s+lost|converted|approved|activated)\b/,
       /\b(value.?coupl\w*|coupled)\b.*\b(StageName|Closed Won|stage|transition)\b/,
       /\bStageName\b.*\b(Closed Won|closed won|transition)\b/,
       /\bClosed Won\b.*\b(automation|flow|trigger|coupl)\b/,
