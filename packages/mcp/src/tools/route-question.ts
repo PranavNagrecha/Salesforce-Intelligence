@@ -520,8 +520,27 @@ const ASSESSMENT_FAMILY =
 /** Tools the regex route lists as preambles — they never inherit answering args. */
 const ROUTE_PREAMBLE_TOOLS = new Set(['sfi.resolve', 'sfi.capabilities']);
 
-/** Score floor for regex-hint tools injected into the semantic funnel shortlist. */
-const ROUTE_HINT_SCORE = 0.96;
+/**
+ * I2b — the regex route is a FEATURE, not an override. Instead of hard-pinning
+ * every regex-named tool to a flat 0.96 (which dwarfed every real cosine and let
+ * the regex CAUSALLY decide top-1 — the funnel ranking was cosmetic), a
+ * regex-named candidate's fused score is `min(1, cosine + REGEX_BONUS)`: a
+ * BOUNDED additive bonus on top of its own meaning score. Consequences:
+ *   - a regex tool the funnel ALSO ranked well leads by a real margin (its cosine
+ *     PLUS the bonus), and regex tools no longer sit at a flat identical score —
+ *     the shortlist score distribution reflects genuine meaning variation;
+ *   - a regex tool the funnel did NOT surface (no cosine) sits at exactly
+ *     REGEX_BONUS, so a strongly-confident funnel tool (high cosine) can now
+ *     OUTRANK it — the funnel OVERRIDES the regex when it is decisively sure.
+ *
+ * REGEX_BONUS is tuned so (a) the router-goldset stays 128/128 — but note the
+ * goldset grades the deterministic `route`, which this fusion never touches — and
+ * (b) router-recall / corpus-gen recall@8 do not regress. At 0.25 the bonus keeps
+ * regex-route tools competitive in the candidate shortlist without re-pinning them
+ * to a flat ceiling: e.g. a route tool with cosine 0.05 fuses to 0.30 and can lose
+ * to a non-route funnel tool at cosine 0.32, which is the intended override.
+ */
+const REGEX_BONUS = 0.25;
 
 /**
  * Registry alias for the vault this server is bound to, when registered.
@@ -605,28 +624,36 @@ const mergeRouteHintsIntoCandidates = (
 ): ToolCandidate[] => {
   if (route.intent === 'unrouted' || route.intent === 'empty') return cands.slice(0, k);
   const byTool = new Map(cands.map((c) => [c.tool, { ...c }]));
+  // Bounded additive fusion, rounded to the funnel's 3-dp score precision.
+  const fuse = (cosine: number): number => Math.round(Math.min(1, cosine + REGEX_BONUS) * 1000) / 1000;
   for (const tool of route.tools) {
     if (ROUTE_PREAMBLE_TOOLS.has(tool)) continue;
     const suggestedArgs = argsByTool.get(tool);
     const existing = byTool.get(tool);
     if (existing !== undefined) {
+      // FUSED, not pinned: the tool's own meaning score PLUS a bounded regex
+      // bonus. A well-ranked route tool leads by a real margin; a poorly-ranked
+      // one stays beatable by a decisively-confident funnel tool (the override).
       byTool.set(tool, {
         ...existing,
-        score: Math.max(existing.score, ROUTE_HINT_SCORE),
+        score: fuse(existing.score),
         ...(suggestedArgs !== undefined && Object.keys(suggestedArgs).length > 0
           ? { suggestedArgs }
           : {}),
         fromRoute: true,
       });
     } else {
-      // INSERTED a route tool the funnel did not surface — it has no scored
-      // plane/liveRequired/confidence yet, so stamp them: plane + liveRequired
-      // from the same authoritative map the funnel uses, and confidence 'high'
+      // INSERTED a route tool the funnel did not surface — its cosine is
+      // effectively 0, so its fused score is exactly REGEX_BONUS (the bonus
+      // floor). That deliberately keeps it BEATABLE by a high-cosine funnel tool
+      // rather than pinning it above everything. It still has no scored
+      // plane/liveRequired/confidence, so stamp them: plane + liveRequired from
+      // the same authoritative map the funnel uses, and confidence 'high'
       // because a deterministic regex route pinned this tool (I1).
       const { plane, liveRequired } = resolveCandidatePlane(tool);
       byTool.set(tool, {
         tool,
-        score: ROUTE_HINT_SCORE,
+        score: fuse(0),
         category: null,
         plane,
         liveRequired,

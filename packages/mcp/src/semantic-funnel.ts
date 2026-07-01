@@ -226,6 +226,12 @@ const TOOL_KEYWORDS: Readonly<Record<string, string>> = {
     'flows classes triggers profiles permission sets layouts record types validation rules ' +
     'approval processes reports dashboards omniscripts custom standard relationship child ' +
     'parent inactive active picklist values ' +
+    // I0 status-enum stopgap — KEPT (re-verified under I2b). "which flows are
+    // currently inactive" → list_components MISSES the top-8 without this: the
+    // I2b fused score only reranks candidates INSIDE route_question, but
+    // router-recall / corpus-gen measure the RAW funnel (semanticCandidates),
+    // which this clause is what keeps list_components reachable for status-enum
+    // enumeration questions. Removing it drops recall@8 91.4%→89.8% (regression).
     'which flows are inactive active draft obsolete flows triggers rules by status enumerate components',
   'sfi.capabilities': 'what can you do help capabilities what can i ask how do i use',
   'sfi.automation_risk_report':

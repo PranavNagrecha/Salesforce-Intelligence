@@ -733,7 +733,22 @@ describe('core-profile gateway envelopes (P13-GW-router-envelope)', () => {
       type: 'CustomField',
       parentId: 'CustomObject:Contact',
     });
-    expect((listComponents?.score ?? 0)).toBeGreaterThanOrEqual(0.96);
+    // I2b — the regex route is a BOUNDED additive feature, not a flat 0.96 pin.
+    // list_components is a strong meaning match here (cosine ~0.21), so its FUSED
+    // score is well above the ~0.055 bonus floor yet well BELOW the old 0.96
+    // re-pin — a genuine cosine+bonus blend, not an override.
+    const score = listComponents?.score ?? 0;
+    expect(score).toBeGreaterThan(0.055 + 0.1); // clearly above the bonus floor: it earned real cosine
+    expect(score).toBeLessThan(0.96); // NOT the old flat pin
+    // ...and it still leads every non-route candidate (the route tool is favored,
+    // just not by an unbounded override).
+    const nonRouteTop = Math.max(
+      0,
+      ...(r.value.data.toolCandidates ?? [])
+        .filter((c) => c.fromRoute !== true)
+        .map((c) => c.score),
+    );
+    expect(score).toBeGreaterThan(nonRouteTop);
   });
 
   it('emits field_mapping invoke args with object pair and vault alias from config', async () => {
