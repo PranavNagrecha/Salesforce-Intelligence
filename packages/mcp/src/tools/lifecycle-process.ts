@@ -23,14 +23,16 @@ import type {
   ComponentType,
   McpError,
   McpResponse,
+  PageInfo,
 } from '@sf-intelligence/contracts';
-import { ok, type Result } from '@sf-intelligence/core';
+import { err, ok, type Result } from '@sf-intelligence/core';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
 import { mergeInputAliases, toObjectApiName } from './input-aliases.js';
 import { orderOfExecutionHandler, type SoeStep } from './order-of-execution.js';
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 200;
@@ -46,6 +48,10 @@ const lifecycleProcessInputBaseSchema = z.object({
   event: z.enum(LIFECYCLE_EVENTS).optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
+  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // truncated page's `nextCursor`. When present it supplies the resume offset;
+  // omitting it = today's behavior (offset 0 / explicit `offset`).
+  cursor: z.string().min(1).optional(),
 });
 
 /** Zod schema for the `sfi.lifecycle_process` tool input. */
@@ -100,8 +106,34 @@ export interface LifecycleProcessOutput {
   readonly offset: number;
   readonly hasMore: boolean;
   readonly truncated: boolean;
+  /**
+   * CR-22 opaque continuation token, present ONLY when the process page was
+   * truncated (more steps remain past `limit`). Echo it back as `cursor` to
+   * resume. Absent on a whole-fits page so an in-budget response stays
+   * byte-identical.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
   readonly confidence: 'parsed';
   readonly disclosures: readonly string[];
+}
+
+/**
+ * Internal page carrier: a {@link LifecycleStep} plus the SOE `stepIndex` used
+ * as the CR-22 cursor's UNIQUE total-order key. `stepIndex` is NEVER emitted
+ * (the page is mapped back to bare LifecycleStep before serialization) so the
+ * visible output stays byte-identical to pre-CR-22. It is the right tiebreak:
+ * an ApexTrigger registered for BOTH before and after events appears as a
+ * `pre-save-triggers` row AND an `after-triggers` row with identical
+ * componentId/componentType/apiName (only `phase` differs, and `phase` is not
+ * unique either), so no emitted-row field is a unique key — but `stepIndex` is
+ * a single monotonic 0-based counter incremented after EVERY emitted step in
+ * the event chain, so it is globally unique and stable per (object, event).
+ */
+interface LifecycleStepCarrier {
+  readonly step: LifecycleStep;
+  readonly stepIndex: number;
 }
 
 const annotate = (
@@ -147,7 +179,14 @@ export const lifecycleProcessHandler = async (
   const soeResult = await orderOfExecutionHandler(ctx, { objectApiName: object });
   if (!soeResult.ok) return soeResult;
   const perEvent = soeResult.value.data.byEvent[event];
-  const allSteps = perEvent.soe.map((s) => annotate(s, fieldId, value));
+  // Pair each annotated step with its source SoeStep's stepIndex (index-aligned
+  // 1:1 with perEvent.soe) so the cursor can carry the unique total-order key
+  // WITHOUT emitting it on the visible row.
+  const carriers: LifecycleStepCarrier[] = perEvent.soe.map((s) => ({
+    step: annotate(s, fieldId, value),
+    stepIndex: s.stepIndex,
+  }));
+  const allSteps = carriers.map((c) => c.step);
 
   const coupledAutomation = allSteps.filter((s) => s.coupledToField || s.coupledToValue);
   const fieldCoupledSteps = allSteps.filter((s) => s.coupledToField).length;
@@ -155,10 +194,48 @@ export const lifecycleProcessHandler = async (
 
   const total = allSteps.length;
   const limit = input.limit ?? DEFAULT_LIMIT;
-  const offset = input.offset ?? 0;
-  const page = allSteps.slice(offset, offset + limit);
-  const hasMore = offset + page.length < total;
+
+  // CR-22: resolve the resume offset — an echoed cursor wins over an explicit
+  // `offset`; a stale/forged cursor (changed object/field/value/event, different
+  // tool, or refreshed vault) is rejected with `invalid-query`. argsFingerprint
+  // binds the narrowing args so a different transition can't replay the cursor.
+  const fingerprint = argsFingerprint({
+    objectApiName: object,
+    ...(field !== null ? { field } : {}),
+    ...(value !== null ? { value } : {}),
+    event,
+  });
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: 'sfi.lifecycle_process',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  // No per-handler byte budget today (unbounded slice; the global jsonResult
+  // guard is the byte backstop). Keep that by setting an effectively-unbounded
+  // byteBudget so `paginate()` truncates ONLY on `limit` (byte-identical to the
+  // prior open-coded slice — a currently-whole large page is not byte-trimmed).
+  const paged = paginateLegacy(carriers, {
+    offset,
+    limit,
+    byteBudget: Number.MAX_SAFE_INTEGER,
+    binding: {
+      tool: 'sfi.lifecycle_process',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+    keyOf: (c) => String(c.stepIndex),
+  });
+  // Strip the internal stepIndex so the emitted page is bare LifecycleStep[].
+  const page = paged.items.map((c) => c.step);
+  const hasMore = paged.hasMore;
   const truncated = hasMore || offset > 0;
+  const emitCursor = paged.nextCursor !== null;
 
   const description =
     field !== null && value !== null
@@ -200,6 +277,7 @@ export const lifecycleProcessHandler = async (
       offset,
       hasMore,
       truncated,
+      ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
       confidence: 'parsed',
       disclosures,
     },

@@ -197,11 +197,12 @@ describe('findSemanticFieldHandler', () => {
     );
   });
 
-  it('bridges synonyms: "date of birth" reaches DOB__c via the synonym group', async () => {
-    // The DOB__c field shares no literal token with "date of birth" (its bag
-    // is {c.dob, dob}); the only path to it is the synonym group
-    // ['dob','birthdate','birthday','birth']. Pre-synonym this scored 0 and
-    // was filtered out — this test guards the recall the bridge adds.
+  it('phrase-collapses "date of birth" -> dob, a LITERAL hit on DOB__c (#19)', async () => {
+    // The DOB__c field bag is {c.dob, dob}. With the opt-in phrase pass the
+    // query "date of birth" collapses to the single canonical token `dob`,
+    // which is LITERALLY present in the field bag — a stronger match than the
+    // old synonym bridge (birth->dob). This is the #19 improvement that the
+    // opt-in expansion on find_semantic_field's query + label corpus delivers.
     const r = await findSemanticFieldHandler(ctx, {
       description: 'date of birth',
     });
@@ -211,15 +212,12 @@ describe('findSemanticFieldHandler', () => {
       (m) => m.componentId === 'CustomField:Tasks__c.DOB__c',
     );
     expect(dob).toBeDefined();
-    // Above the default minScore (0.1): one synonym hit (birth→dob, weight
-    // 0.9) over the union |{date,birth}| + |{c.dob,dob}| − 0 = 4 → 0.225.
+    // Literal hit: query {dob}, field {c.dob, dob}; numerator 1 (literal),
+    // denominator |{dob}| + |{c.dob,dob}| − 1 = 1 + 2 − 1 = 2 → 0.5.
     expect(dob?.score ?? 0).toBeGreaterThan(0.1);
-    expect(dob?.score).toBeCloseTo(0.225, 6);
-    // The matched query token recorded is the synonym-bridged one.
-    expect([...(dob?.matchedTokens ?? [])]).toEqual(['birth']);
-    // Synonym hit scores below a literal hit of equal shape: had the query
-    // token been literally present it would score 1/4 = 0.25 > 0.225.
-    expect(dob?.score ?? 1).toBeLessThan(0.25);
+    expect(dob?.score).toBeCloseTo(0.5, 6);
+    // The matched query token recorded is the phrase-collapsed canonical token.
+    expect([...(dob?.matchedTokens ?? [])]).toEqual(['dob']);
   });
 
   it('does not regress literal-overlap scores (no-synonym match scores as before)', async () => {
@@ -421,5 +419,96 @@ describe('findSemanticFieldInputSchema', () => {
         minScore: 1.5,
       }).success,
     ).toBe(false);
+  });
+
+  it('accepts offset and cursor (CR-22)', () => {
+    expect(
+      findSemanticFieldInputSchema.safeParse({
+        description: 'x',
+        offset: 1,
+        cursor: 'abc',
+      }).success,
+    ).toBe(true);
+  });
+});
+
+// =============================================================================
+// CR-22 B4 — output cursor over the ranked match list + full CustomField scan.
+// A whole-fits no-cursor call is byte-identical; a truncated page resumes the
+// full set with no gaps / dupes across the score-tie boundary (componentId
+// tiebreak); totalCount stays the FULL count.
+// =============================================================================
+describe('findSemanticFieldHandler — output cursor (CR-22)', () => {
+  it('whole-fits no-cursor call omits all paging fields', async () => {
+    const r = await findSemanticFieldHandler(ctx, {
+      description: 'customer health',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data as unknown as Record<string, unknown>;
+    expect('limit' in d).toBe(false);
+    expect('offset' in d).toBe(false);
+    expect('nextOffset' in d).toBe(false);
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+  });
+
+  it('a truncated page emits a cursor that resumes with no gaps or dupes', async () => {
+    const all = await findSemanticFieldHandler(ctx, {
+      description: 'customer health',
+      minScore: 0,
+      limit: 50,
+    });
+    expect(all.ok).toBe(true);
+    if (!all.ok) return;
+    const fullOrder = all.value.data.matches.map((m) => m.componentId);
+    expect(fullOrder.length).toBeGreaterThan(2);
+    const fullTotal = all.value.data.totalCount;
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const page: Awaited<ReturnType<typeof findSemanticFieldHandler>> =
+        await findSemanticFieldHandler(
+          ctx,
+          cursor !== undefined
+            ? { description: 'customer health', minScore: 0, limit: 1, cursor }
+            : { description: 'customer health', minScore: 0, limit: 1 },
+        );
+      expect(page.ok).toBe(true);
+      if (!page.ok) return;
+      expect(page.value.data.totalCount).toBe(fullTotal);
+      for (const m of page.value.data.matches) seen.push(m.componentId);
+      const nc = page.value.data.nextCursor;
+      if (nc === undefined) break;
+      cursor = nc;
+      guard += 1;
+      if (guard > 50) throw new Error('cursor did not terminate');
+    }
+    expect(seen).toEqual(fullOrder);
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+
+  it('rejects a cursor minted for a different description / minScore', async () => {
+    const first = await findSemanticFieldHandler(ctx, {
+      description: 'customer health',
+      minScore: 0,
+      limit: 1,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const cursor = first.value.data.nextCursor;
+    expect(typeof cursor).toBe('string');
+    if (typeof cursor !== 'string') return;
+    // Different minScore → different fingerprint → rejected.
+    const replay = await findSemanticFieldHandler(ctx, {
+      description: 'customer health',
+      minScore: 0.5,
+      cursor,
+    });
+    expect(replay.ok).toBe(false);
+    if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
   });
 });

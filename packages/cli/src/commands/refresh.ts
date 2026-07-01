@@ -1,4 +1,4 @@
-import { exec } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { appendFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -38,10 +38,12 @@ import {
   type ImportCounts,
   INCREMENTAL_DELTA_CAP,
   persistResolveIndexArtifact,
+  countNodesByType,
   listEdges,
   listNodesByType,
   openGraph,
   openGraphReadOnly,
+  pruneStaleNodes,
   type GraphStore,
 } from '@sf-intelligence/graph';
 import { dispatchTool, runSfJson, type Context as McpContext } from '@sf-intelligence/mcp';
@@ -88,10 +90,11 @@ import {
   syncAuthoritativeRetrieveIntoSource,
 } from '../source-reconcile.js';
 
+import { ORG_ALIAS_RE, validateOrgAlias } from './org-alias.js';
 import { assessRefreshSize } from './refresh-preflight.js';
 import { runSnapshotCreate } from './snapshot.js';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 /** Default Salesforce metadata API version stamped into the generated package.xml. */
 const SF_API_VERSION = '62.0';
 
@@ -554,10 +557,56 @@ const applyApexAstEdges = async (
         callsByClass.set(cls, list);
       }
     }
+    // CR-CAP-06: thread per-target-class CALLER-method attribution onto the
+    // SAME single edge per target class — property-only, edge PK/count are
+    // byte-identical (one callsApex edge per target class as before). Two
+    // ADDITIVE keys, AST-PATH-ONLY:
+    //   - callerMethods: the class-level UNION of source methods that call
+    //     ANY method of the target (for call_graph — class->class label).
+    //   - callerMethodsByMethod: target-method -> source-methods that call
+    //     THAT specific method (for what_if — so it can attribute the call-site
+    //     to the queried method without the cross-method phantom the flat union
+    //     would introduce).
+    // A call-site with no enclosing method (callerMethod === '') is FILTERED
+    // here — absent === unknown caller, never a blank attribution.
+    const callerMethodsByClass = new Map<string, Set<string>>();
+    const callerMethodsByMethod = new Map<string, Map<string, Set<string>>>();
+    for (const site of extracted.callSites ?? []) {
+      const cls = site.callee.split('.')[0] ?? '';
+      const targetMethod = site.callee.split('.').slice(1).join('.');
+      if (!(knownClasses.has(cls) && cls !== apexNode.apiName)) continue;
+      if (site.callerMethod.length === 0) continue;
+      const union = callerMethodsByClass.get(cls) ?? new Set<string>();
+      union.add(site.callerMethod);
+      callerMethodsByClass.set(cls, union);
+      if (targetMethod.length > 0) {
+        const byMethod = callerMethodsByMethod.get(cls) ?? new Map<string, Set<string>>();
+        const callers = byMethod.get(targetMethod) ?? new Set<string>();
+        callers.add(site.callerMethod);
+        byMethod.set(targetMethod, callers);
+        callerMethodsByMethod.set(cls, byMethod);
+      }
+    }
     for (const [cls, methods] of callsByClass) {
+      const callerUnion = callerMethodsByClass.get(cls);
+      const byMethod = callerMethodsByMethod.get(cls);
+      const byMethodObj =
+        byMethod === undefined
+          ? undefined
+          : Object.fromEntries(
+              [...byMethod.entries()]
+                .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+                .map(([m, callers]) => [m, [...callers].sort()] as const),
+            );
       pushEdge(`ApexClass:${cls}`, 'callsApex', {
         methods: [...new Set(methods)].sort(),
         viaAst: true,
+        ...(callerUnion !== undefined && callerUnion.size > 0
+          ? { callerMethods: [...callerUnion].sort() }
+          : {}),
+        ...(byMethodObj !== undefined && Object.keys(byMethodObj).length > 0
+          ? { callerMethodsByMethod: byMethodObj }
+          : {}),
       });
     }
     const fieldEdge = (ref: string, kind: 'readsFrom' | 'writesTo'): void => {
@@ -614,10 +663,21 @@ export const runRefresh = async (opts: RunRefreshOptions): Promise<RefreshResult
   if (!configResult.ok) return failed(started, configResult.error, []);
   const paths = vaultPaths(configResult.value.vaultRoot);
   const targetOrg = opts.targetOrg ?? configResult.value.targetOrg;
+  // Defense in depth (CR-01 / C1): the `--target-org` flag bypasses config.json
+  // (which loadVaultConfig already gates), so validate the flag override too.
+  if (opts.targetOrg !== undefined) {
+    const aliasCheck = validateOrgAlias(opts.targetOrg);
+    if (!aliasCheck.ok) return failed(started, aliasCheck.error, []);
+  }
 
   const requestedTypes = parseTypeFilter(opts.types);
   const progress = opts.onProgress ?? (() => {});
   let pullManifestTypes: readonly ComponentType[] | null = null;
+  // CR-P3-3: describe-confirmed-and-cleanly-retrieved types from the main
+  // pull. Stays null on `--no-pull` (no retrieve ran) and on a describe-blind
+  // pull, so confirmed-empty reclassification only fires after a full live
+  // refresh whose describe succeeded.
+  let confirmedTypes: ReadonlySet<ComponentType> | null = null;
   let sourceReconcileDeleted = 0;
   let retrieveFailures: readonly RetrieveTypeFailure[] = [];
 
@@ -641,6 +701,7 @@ export const runRefresh = async (opts: RunRefreshOptions): Promise<RefreshResult
     const pulled = await runSfRetrieve(targetOrg, paths.source, requestedTypes);
     if (!pulled.ok) return failed(started, pulled.error, []);
     pullManifestTypes = pulled.value.manifestTypes;
+    confirmedTypes = pulled.value.confirmedTypes;
     sourceReconcileDeleted = pulled.value.deletedCount;
     retrieveFailures = pulled.value.failures;
     if (sourceReconcileDeleted > 0) {
@@ -832,6 +893,7 @@ export const runRefresh = async (opts: RunRefreshOptions): Promise<RefreshResult
     walked,
     opts,
     requestedTypes,
+    confirmedTypes,
     snapshotOnRefresh: configResult.value.snapshotOnRefresh,
     retrieveFailures,
     ...(reconciledTypes !== null ? { reconciledTypes } : {}),
@@ -935,6 +997,12 @@ interface RunWithOpenGraphArgs {
   readonly walked: Awaited<ReturnType<typeof walkAndExtract>>;
   readonly opts: RunRefreshOptions;
   readonly requestedTypes: ReadonlySet<ComponentType> | null;
+  /**
+   * CR-P3-3: describe-confirmed, cleanly-retrieved types from the main pull;
+   * null on `--no-pull` (no retrieve ran) and on a describe-blind pull. Drives
+   * `CoverageEntry.retrieveConfirmed` in `buildCoverageEntries`.
+   */
+  readonly confirmedTypes: ReadonlySet<ComponentType> | null;
   readonly snapshotOnRefresh: boolean;
   /** Metadata types that failed the retrieve this run (empty on a clean pull). */
   readonly retrieveFailures: readonly RetrieveTypeFailure[];
@@ -979,6 +1047,7 @@ const buildCoverageEntries = (
   requestedTypes: ReadonlySet<ComponentType> | null,
   sourceRoot: string,
   failures: readonly RefreshExtractionFailure[],
+  confirmedTypes: ReadonlySet<ComponentType> | null,
 ): readonly CoverageEntry[] => {
   const failuresByType = aggregateFailuresByType(sourceRoot, failures);
   const entries: CoverageEntry[] = [];
@@ -986,6 +1055,18 @@ const buildCoverageEntries = (
     const requested = requestedTypes === null || requestedTypes.has(type);
     const failureInfo = failuresByType.get(type);
     const errored = failureInfo !== undefined && failureInfo.count > 0;
+    // CR-P3-3: `retrieveConfirmed` is set ONLY when the describe-confirmed,
+    // cleanly-retrieved set (`confirmedTypes`, null on `--no-pull` /
+    // describe-blind pull) contains this type AND it did not error. This is the
+    // sole honest signal that a `retrieved: 0` row is a CONFIRMED-empty org
+    // (reclassifiable to complete) rather than a not-retrieved / dropped one.
+    // It is NOT derived from `requested` (in-package.xml ≠ retrieve completed)
+    // and stays unset for capped/dropped types — `decorateReportsCapCoverage`
+    // marks those `pending`, and the classifiers require `pending !== true`
+    // before honoring `retrieveConfirmed`, so a capped/dropped pull never reads
+    // as confirmed-empty even though it may carry retrieveConfirmed.
+    const retrieveConfirmed =
+      confirmedTypes !== null && confirmedTypes.has(type) && !errored;
     entries.push({
       type,
       requested,
@@ -993,6 +1074,7 @@ const buildCoverageEntries = (
       errored,
       ...(errored ? { errorReason: failureInfo.sampleReason } : {}),
       neverModeled: false,
+      ...(retrieveConfirmed ? { retrieveConfirmed: true } : {}),
     });
   }
 
@@ -1171,18 +1253,40 @@ const importGraph = async (
       return fullRebuild(store, results);
     }
     if (reconciledTypes !== undefined && reconciledTypes.size > 0) {
+      // Scoped/pruned WITH-PULL reconcile. The fresh rows of the reconciled
+      // type(s) are upserted by `importExtractionResults` first (its own per-batch
+      // transactions). Then prune ONLY the stale rows of those SAME reconciled
+      // types: `computeChangeSet({ pruneNodeTypes })` returns delete lists already
+      // type-scoped (a delete entry's node/edge endpoint type ∈ `reconciledTypes`),
+      // so a surviving, never-re-extracted type can never appear in them.
+      //
+      // CR-20: this prunes via `pruneStaleNodes` (chunked DELETE transactions),
+      // NOT `applyChangeSet`. `applyChangeSet`'s whole-graph post-apply self-check
+      // compares the GLOBAL row count to a reconciled-ONLY desired count, which is
+      // wrong for a partial reconcile — on any multi-type graph it tripped, rolled
+      // back, and orphaned the stale rows (and hard-failed this refresh). The
+      // chunked prune sidesteps that self-check and bounds memory per batch, so
+      // INCREMENTAL_DELTA_CAP is INFORMATIONAL on this branch only: an over-cap
+      // scoped prune still runs in full (never no-ops, never a whole-graph rebuild
+      // that would defeat the scope), because leaving orphans would corrupt the
+      // vault.
       const imported = await importExtractionResults(store, results);
       if (!imported.ok) return imported;
       const csResult = await computeChangeSet(store, results, { pruneNodeTypes: reconciledTypes });
       if (!csResult.ok) return csResult;
       const delta = changeSetSize(csResult.value);
       if (delta === 0) return imported;
-      const applied = await applyChangeSet(store, csResult.value);
-      if (!applied.ok) return applied;
+      if (delta > INCREMENTAL_DELTA_CAP) {
+        progress(
+          `Pulled reconcile: delta ${delta} rows exceeds cap ${INCREMENTAL_DELTA_CAP}; pruning in batches (scoped — full rebuild would defeat the scope).`,
+        );
+      }
+      const pruned = await pruneStaleNodes(store, csResult.value);
+      if (!pruned.ok) return pruned;
       progress(
-        `Pulled reconcile: dropped ${applied.value.nodesDeleted} stale node(s) for reconciled type(s).`,
+        `Pulled reconcile: dropped ${pruned.value.nodesDeleted} stale node(s) and ${pruned.value.edgesDeleted} stale edge(s) for reconciled type(s).`,
       );
-      return applied;
+      return imported;
     }
     return importExtractionResults(store, results);
   }
@@ -1235,7 +1339,7 @@ const persistResolveIndexBestEffort = async (
 };
 
 const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResult> => {
-  const { store, paths, started, targetOrg, walked, opts, requestedTypes } = args;
+  const { store, paths, started, targetOrg, walked, opts, requestedTypes, confirmedTypes } = args;
   const progress = opts.onProgress ?? (() => {});
   if (args.publishOnly === true && opts.stagedMarker === undefined) {
     await persistResolveIndexBestEffort(paths.graphDb, store);
@@ -1373,6 +1477,7 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
         requestedTypes,
         paths.source,
         walked.failures,
+        confirmedTypes,
       ),
       opts.stagedMarker,
     ),
@@ -1863,6 +1968,14 @@ const TOOLING_API_ENRICHED_TYPES = [
 ] as const satisfies readonly ComponentType[];
 
 /**
+ * Page size for paging enrichment candidates out of the graph. Must not
+ * exceed the graph layer's `listNodesByType` cap (LIST_MAX_LIMIT = 500),
+ * which rejects any larger `limit`. The candidate loop reads `count`
+ * windows of this size so every node of an enriched type is hydrated.
+ */
+const ENRICH_CANDIDATE_PAGE_SIZE = 500;
+
+/**
  * Drive the v1.7 R2 enrichment pass against the open graph. Returns a
  * structured `ToolingApiRefreshSummary` regardless of outcome so the
  * CLI can render the live-data axis as a separate block. Authentication
@@ -1870,7 +1983,7 @@ const TOOLING_API_ENRICHED_TYPES = [
  * here without flipping the overall refresh status (the offline vault
  * is the source of truth; the enrichment is additive).
  */
-const runToolingApiEnrichment = async (
+export const runToolingApiEnrichment = async (
   store: GraphStore,
   targetOrg: string,
   opts: RunRefreshOptions,
@@ -1901,15 +2014,30 @@ const runToolingApiEnrichment = async (
     }
   }
 
-  // Materialise the in-memory candidates by re-reading from the graph.
-  // This avoids holding the full Node set in memory across the offline
-  // pipeline — the enrichment runs after import/render so the graph is
-  // the canonical store.
+  // Materialise the enrichment candidates by re-reading from the graph.
+  // The enrichment runs after import/render, so the graph is the canonical
+  // store. `listNodesByType` caps each page at LIST_MAX_LIMIT (500), so a
+  // single call silently dropped every node past the first 500 of a type —
+  // on a real org that left ~674/6536 enriched (essentially only ApexClass).
+  // Page through the FULL set per type using `countNodesByType` for the true
+  // total and stable `ORDER BY id ASC` offset windows (no dup/skip), so every
+  // node of every enriched type becomes a candidate.
   const candidates: Node[] = [];
   for (const type of TOOLING_API_ENRICHED_TYPES) {
-    const nodesResult = await listNodesByType(store, type, { limit: 500 });
-    if (!nodesResult.ok) continue;
-    candidates.push(...nodesResult.value);
+    const totalResult = await countNodesByType(store, type);
+    if (!totalResult.ok) continue;
+    const total = totalResult.value;
+    for (let offset = 0; offset < total; offset += ENRICH_CANDIDATE_PAGE_SIZE) {
+      const nodesResult = await listNodesByType(store, type, {
+        limit: ENRICH_CANDIDATE_PAGE_SIZE,
+        offset,
+      });
+      if (!nodesResult.ok) break;
+      candidates.push(...nodesResult.value);
+      // Defensive: a short page means the type was exhausted early (e.g.
+      // concurrent shrink); stop rather than spin to `total`.
+      if (nodesResult.value.length < ENRICH_CANDIDATE_PAGE_SIZE) break;
+    }
   }
   if (candidates.length === 0) {
     return {
@@ -2013,6 +2141,12 @@ export const loadVaultConfig = async (cwd: string): Promise<Result<VaultConfig, 
   if (typeof parsed.targetOrg !== 'string' || parsed.targetOrg.length === 0) {
     return err(`Vault config missing 'targetOrg': ${configPath}`);
   }
+  // Defense in depth (CR-01 / C1): this is the single chokepoint every refresh
+  // path reads `targetOrg` through, so reject a poisoned alias here before it
+  // can reach any `sf` call — even though the exec sites are now shell-free.
+  if (!ORG_ALIAS_RE.test(parsed.targetOrg)) {
+    return err(`Vault config 'targetOrg' is not a valid org alias: ${configPath}`);
+  }
   const vaultRoot = typeof parsed.vaultRoot === 'string' && parsed.vaultRoot.length > 0
     ? parsed.vaultRoot
     : resolve(cwd, 'org-kb');
@@ -2061,6 +2195,12 @@ const METADATA_API_NAME: Partial<Record<ComponentType, string>> = {
   // the `CustomMetadata` type as `{Type}.{Record}.md-meta.xml` files. The
   // `__mdt` type definitions themselves come down separately as CustomObject.
   CustomMetadataRecord: 'CustomMetadata',
+  // CR-CAP-18: PlatformEventChannel / PlatformEventChannelMember are exposed
+  // by the org describe under their own singular xmlNames (added API v45.0 /
+  // v47.0), so they need NO alias — `toApiName` falls through to the type name.
+  // PRE-SHIP VERIFY: confirm against a real-org `sf org list metadata-types`
+  // that both are PRESENT singular (the B20 class above); add an alias here if
+  // a describe shows otherwise. Not verifiable in this read-only pass.
 };
 
 /** Internal `ComponentType` → the Metadata API `xmlName` used in manifests / describe. */
@@ -2068,6 +2208,51 @@ const toApiName = (type: ComponentType): string => METADATA_API_NAME[type] ?? ty
 
 /** Stdout ceiling for `sf` shellouts. Retrieve tables and the metadata-types describe both grow with org size. */
 const SF_MAX_BUFFER = 256 * 1024 * 1024;
+
+/**
+ * Per-call timeout for a `sf project retrieve start`. Generous (10 min default)
+ * because a full retrieve on a large org legitimately runs several minutes
+ * (the refresh itself warns "this can take several minutes"). On timeout the
+ * child is sent `SIGTERM` (graceful — lets `sf` clean up) so a hung/wedged
+ * retrieve can never block a refresh or the unattended watch daemon forever
+ * (CR-01 / H8). Override with `SFI_SF_RETRIEVE_TIMEOUT_MS`.
+ */
+const SF_RETRIEVE_TIMEOUT_MS = (() => {
+  const n = Number(process.env['SFI_SF_RETRIEVE_TIMEOUT_MS']);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 600_000;
+})();
+
+/**
+ * Per-call timeout for a `sf data query` / `sf org list metadata-types`
+ * describe (2 min default). These are short read-only calls; a hung one must
+ * not wedge the refresh (CR-01 / H8). Override with `SFI_SF_QUERY_TIMEOUT_MS`.
+ */
+const SF_QUERY_TIMEOUT_MS = (() => {
+  const n = Number(process.env['SFI_SF_QUERY_TIMEOUT_MS']);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 120_000;
+})();
+
+/**
+ * The shell-free `sf` runner. Spawns the `sf` binary directly with an argv
+ * array via `execFile` (NOT `exec`), so no value — including a `targetOrg` read
+ * from `--target-org`/`config.json` — is ever interpreted by a shell (CR-01 /
+ * C1): a metacharacter alias is one inert argv element, never executed. Every
+ * `sf` call in this module routes through here. `exec` is injectable so tests
+ * can assert the argv shape without spawning `sf`.
+ *
+ * @example runSf(['org', 'list', '--json'], { timeout: SF_QUERY_TIMEOUT_MS })
+ */
+export const runSf = (
+  args: readonly string[],
+  options: { readonly maxBuffer?: number; readonly cwd?: string; readonly timeout: number },
+  exec: typeof execFileAsync = execFileAsync,
+): Promise<{ stdout: string; stderr: string }> =>
+  exec('sf', [...args], {
+    maxBuffer: options.maxBuffer ?? SF_MAX_BUFFER,
+    timeout: options.timeout,
+    killSignal: 'SIGTERM',
+    ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+  });
 
 /**
  * Standard objects retrieved by explicit name. A `CustomObject` manifest with
@@ -2259,9 +2444,9 @@ const buildPackageXml = (types: readonly ComponentType[]): string =>
  */
 const getOrgSupportedTypes = async (targetOrg: string): Promise<ReadonlySet<string> | null> => {
   try {
-    const { stdout } = await execAsync(
-      `sf org list metadata-types --target-org "${targetOrg}" --json`,
-      { maxBuffer: SF_MAX_BUFFER },
+    const { stdout } = await runSf(
+      ['org', 'list', 'metadata-types', '--target-org', targetOrg, '--json'],
+      { maxBuffer: SF_MAX_BUFFER, timeout: SF_QUERY_TIMEOUT_MS },
     );
     const parsed = JSON.parse(stdout) as {
       result?: { metadataObjects?: ReadonlyArray<{ xmlName?: string; childXmlNames?: readonly string[] }> };
@@ -2331,6 +2516,15 @@ interface SfRetrieveResult {
   readonly deletedCount: number;
   /** Types that failed mid-retrieve and were skipped so the rest could land. */
   readonly failures: readonly RetrieveTypeFailure[];
+  /**
+   * CR-P3-3: the set of types whose retrieve was CONFIRMED-CLEAN — the org
+   * describe was non-null AND listed the type AND `sf project retrieve`
+   * returned with no error. NULL when the describe probe failed (describe-blind
+   * pull): we cannot prove the org supports any type, so a clean empty pull is
+   * not trustworthy and NO type may read as confirmed-empty. Drives
+   * `CoverageEntry.retrieveConfirmed`.
+   */
+  readonly confirmedTypes: ReadonlySet<ComponentType> | null;
 }
 
 /**
@@ -2492,9 +2686,9 @@ const retrieveTypeBatch = async (
   );
   await writeFile(manifestPath, buildPackageXml(types), 'utf8');
   try {
-    await execAsync(
-      `sf project retrieve start --manifest "${manifestPath}" --target-org "${targetOrg}"`,
-      { maxBuffer: SF_MAX_BUFFER, cwd: projectDir },
+    await runSf(
+      ['project', 'retrieve', 'start', '--manifest', manifestPath, '--target-org', targetOrg],
+      { maxBuffer: SF_MAX_BUFFER, cwd: projectDir, timeout: SF_RETRIEVE_TIMEOUT_MS },
     );
     const reconcile = await reconcileSourceDeletions(sourceDir, pkgDir, new Set(types));
     await syncAuthoritativeRetrieveIntoSource(sourceDir, pkgDir);
@@ -2543,10 +2737,24 @@ const runSfRetrieve = async (
   if (outcome.succeeded.length === 0) {
     return err(`sf project retrieve failed: ${summarizeRetrieveFailures(outcome.failures)}`);
   }
+  // CR-P3-3: a type is CONFIRMED-CLEAN-retrieved only when the org describe
+  // was non-null (so we know the org actually supports the type) AND the type
+  // landed in `succeeded`. When the describe probe failed (`orgTypes === null`,
+  // describe-blind pull), `selectManifestTypes` passed the FULL supported set
+  // through unfiltered, so a clean wildcard retrieve of a type the org does not
+  // have can land zero members with `ok` and no error — that is NOT a
+  // trustworthy confirmed-empty. So `confirmedTypes` is null in the
+  // describe-blind case, blocking every type from reading as confirmed-empty.
+  // `succeeded ⊆ manifestTypes ⊆ orgTypes` (selectManifestTypes already
+  // intersected with the describe), so the succeeded set is exactly the
+  // describe-confirmed-and-landed set.
+  const confirmedTypes =
+    orgTypes === null ? null : new Set<ComponentType>(outcome.succeeded);
   return ok({
     manifestTypes: outcome.succeeded,
     deletedCount: outcome.deletedCount,
     failures: outcome.failures,
+    confirmedTypes,
   });
 };
 
@@ -2570,15 +2778,87 @@ const computeReconciledTypes = (
 };
 
 /**
+ * Run an ADDITIVE on-demand `sf project retrieve start --manifest` from an
+ * isolated throwaway SFDX project root, writing into the absolute
+ * `--output-dir` (the vault's source). This is the P1 fix for the three
+ * on-demand pulls (object auto-expansion, foldered reports, smart reports),
+ * which previously ran `runSf` with NO `cwd`: `sf` then resolved the project
+ * from `process.cwd()` (the repo root, which has no `sfdx-project.json`) and
+ * failed every pull with `InvalidProjectWorkspaceError` — silently, because
+ * all three are best-effort. Reports/Dashboards stayed stuck at 0 and the
+ * 44-phantom object auto-expansion never landed.
+ *
+ * The fix mirrors `retrieveTypeBatch`: a fresh `mkdir`'d projectDir with a
+ * `force-app/` package dir + an `sfdx-project.json`, with `sf` run from inside
+ * it (`cwd: projectDir`) so the project root is valid. CRITICAL: these pulls
+ * are ADDITIVE narrow-member subsets — unlike `retrieveTypeBatch`, they MUST
+ * NOT call `reconcileSourceDeletions`/`syncAuthoritativeRetrieveIntoSource`
+ * (a scoped delete would wipe other types). They KEEP the existing absolute
+ * `--output-dir sourceDir` so `sf` writes straight into the vault source the
+ * downstream re-walk reads (`sf` resolves `--output-dir` relative to `cwd`, so
+ * it must stay absolute — `paths.source` from `vaultPaths(vaultRoot)` is).
+ * Best-effort/non-fatal: a residual failure is returned to the caller, which
+ * logs-and-continues. `runSf` is injectable so tests can assert the `cwd`.
+ *
+ * @returns the `sf` stdout/stderr on success, or throws (caller wraps in `err`).
+ */
+const retrieveAdditiveManifest = async (
+  args: {
+    readonly targetOrg: string;
+    readonly outputDir: string;
+    readonly manifestXml: string;
+    readonly tempLabel: string;
+  },
+  runSfFn: typeof runSf = runSf,
+): Promise<void> => {
+  const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const manifestPath = join(tmpdir(), `sfi-refresh-${args.tempLabel}-${stamp}.xml`);
+  // Isolated throwaway project root: a valid `sfdx-project.json` + package dir
+  // so `sf` does NOT fall back to `process.cwd()` (the repo root, which has no
+  // project file → InvalidProjectWorkspaceError). The retrieve still writes to
+  // the absolute `--output-dir`, NOT into this throwaway tree.
+  const projectDir = join(tmpdir(), `sfi-retrieve-${args.tempLabel}-${stamp}`);
+  await mkdir(join(projectDir, 'force-app'), { recursive: true });
+  await writeFile(
+    join(projectDir, 'sfdx-project.json'),
+    `{"packageDirectories":[{"path":"force-app","default":true}],"sourceApiVersion":"${SF_API_VERSION}"}\n`,
+    'utf8',
+  );
+  await writeFile(manifestPath, args.manifestXml, 'utf8');
+  try {
+    await runSfFn(
+      [
+        'project',
+        'retrieve',
+        'start',
+        '--manifest',
+        manifestPath,
+        '--target-org',
+        args.targetOrg,
+        '--output-dir',
+        args.outputDir,
+      ],
+      { maxBuffer: SF_MAX_BUFFER, cwd: projectDir, timeout: SF_RETRIEVE_TIMEOUT_MS },
+    );
+  } finally {
+    // Best-effort: the manifest + the whole throwaway project tree.
+    await rm(manifestPath, { force: true }).catch(() => {});
+    await rm(projectDir, { recursive: true, force: true }).catch(() => {});
+  }
+};
+
+/**
  * Retrieve a specific list of CustomObjects by name into `sourceDir` — the B29
  * auto-expansion second pass for objects your automation references but the
  * `<members>*</members>` wildcard excluded. Best-effort: the caller treats a
- * failure as non-fatal and keeps the first-pass results.
+ * failure as non-fatal and keeps the first-pass results. `runSf` is injectable
+ * for tests.
  */
-const runSfRetrieveObjects = async (
+export const runSfRetrieveObjects = async (
   targetOrg: string,
   sourceDir: string,
   objectNames: readonly string[],
+  runSfFn: typeof runSf = runSf,
 ): Promise<Result<void, string>> => {
   const manifest = [
     '<?xml version="1.0" encoding="UTF-8"?>',
@@ -2590,20 +2870,16 @@ const runSfRetrieveObjects = async (
     `  <version>${SF_API_VERSION}</version>`,
     '</Package>',
   ].join('\n');
-  const manifestPath = join(tmpdir(), `sfi-refresh-expand-${Date.now()}.xml`);
-  await writeFile(manifestPath, manifest, 'utf8');
   try {
-    await execAsync(
-      `sf project retrieve start --manifest "${manifestPath}" --target-org "${targetOrg}" --output-dir "${sourceDir}"`,
-      { maxBuffer: SF_MAX_BUFFER },
+    await retrieveAdditiveManifest(
+      { targetOrg, outputDir: sourceDir, manifestXml: manifest, tempLabel: 'expand' },
+      runSfFn,
     );
     return ok(undefined);
   } catch (cause) {
     return err(
       `expansion retrieve failed: ${cause instanceof Error ? cause.message : String(cause)}`,
     );
-  } finally {
-    await rm(manifestPath, { force: true }).catch(() => {});
   }
 };
 
@@ -2776,16 +3052,17 @@ const collectReportMetaFiles = async (dir: string): Promise<readonly string[]> =
   return out;
 };
 
-const runSfRetrieveFolderedReports = async (
+export const runSfRetrieveFolderedReports = async (
   targetOrg: string,
   sourceDir: string,
+  runSfFn: typeof runSf = runSf,
 ): Promise<Result<{ readonly reports: number; readonly dashboards: number }, string>> => {
   const soql = async (
     query: string,
   ): Promise<readonly Record<string, unknown>[]> => {
-    const { stdout } = await execAsync(
-      `sf data query --query "${query}" --target-org "${targetOrg}" --json`,
-      { maxBuffer: SF_MAX_BUFFER },
+    const { stdout } = await runSfFn(
+      ['data', 'query', '--query', query, '--target-org', targetOrg, '--json'],
+      { maxBuffer: SF_MAX_BUFFER, timeout: SF_QUERY_TIMEOUT_MS },
     );
     const parsed = JSON.parse(stdout) as {
       result?: { records?: readonly Record<string, unknown>[] };
@@ -2824,22 +3101,18 @@ const runSfRetrieveFolderedReports = async (
   });
   if (manifestXml === null) return ok({ reports: 0, dashboards: 0 });
 
-  // Manifest + retrieve.
-  const manifest = manifestXml;
-  const manifestPath = join(tmpdir(), `sfi-refresh-reports-${Date.now()}.xml`);
-  await writeFile(manifestPath, manifest, 'utf8');
+  // Additive retrieve from an isolated project root (P1) — see
+  // `retrieveAdditiveManifest`. Must NOT reconcile/sync (narrow member subset).
   try {
-    await execAsync(
-      `sf project retrieve start --manifest "${manifestPath}" --target-org "${targetOrg}" --output-dir "${sourceDir}"`,
-      { maxBuffer: SF_MAX_BUFFER },
+    await retrieveAdditiveManifest(
+      { targetOrg, outputDir: sourceDir, manifestXml, tempLabel: 'reports' },
+      runSfFn,
     );
     return ok({ reports, dashboards });
   } catch (cause) {
     return err(
       `report/dashboard retrieve failed: ${cause instanceof Error ? cause.message : String(cause)}`,
     );
-  } finally {
-    await rm(manifestPath, { force: true }).catch(() => {});
   }
 };
 
@@ -2863,6 +3136,7 @@ export const runSfRetrieveSmartReports = async (
   targetOrg: string,
   sourceDir: string,
   cap: number,
+  runSfFn: typeof runSf = runSf,
 ): Promise<
   Result<
     {
@@ -2878,9 +3152,9 @@ export const runSfRetrieveSmartReports = async (
   >
 > => {
   const soql = async (query: string): Promise<readonly Record<string, unknown>[]> => {
-    const { stdout } = await execAsync(
-      `sf data query --query "${query}" --target-org "${targetOrg}" --json`,
-      { maxBuffer: SF_MAX_BUFFER },
+    const { stdout } = await runSfFn(
+      ['data', 'query', '--query', query, '--target-org', targetOrg, '--json'],
+      { maxBuffer: SF_MAX_BUFFER, timeout: SF_QUERY_TIMEOUT_MS },
     );
     const parsed = JSON.parse(stdout) as {
       result?: { records?: readonly Record<string, unknown>[]; totalSize?: number };
@@ -2889,9 +3163,9 @@ export const runSfRetrieveSmartReports = async (
   };
   const count = async (query: string): Promise<number> => {
     try {
-      const { stdout } = await execAsync(
-        `sf data query --query "${query}" --target-org "${targetOrg}" --json`,
-        { maxBuffer: SF_MAX_BUFFER },
+      const { stdout } = await runSfFn(
+        ['data', 'query', '--query', query, '--target-org', targetOrg, '--json'],
+        { maxBuffer: SF_MAX_BUFFER, timeout: SF_QUERY_TIMEOUT_MS },
       );
       const parsed = JSON.parse(stdout) as { result?: { totalSize?: number } };
       return parsed.result?.totalSize ?? 0;
@@ -2942,12 +3216,12 @@ export const runSfRetrieveSmartReports = async (
     return ok({ reports: 0, dashboards: 0, totals, landed: { reports: 0, dashboards: 0 }, missing: [] });
   }
 
-  const manifestPath = join(tmpdir(), `sfi-refresh-smart-reports-${Date.now()}.xml`);
-  await writeFile(manifestPath, manifestXml, 'utf8');
+  // Additive retrieve from an isolated project root (P1) — see
+  // `retrieveAdditiveManifest`. Must NOT reconcile/sync (narrow member subset).
   try {
-    await execAsync(
-      `sf project retrieve start --manifest "${manifestPath}" --target-org "${targetOrg}" --output-dir "${sourceDir}"`,
-      { maxBuffer: SF_MAX_BUFFER },
+    await retrieveAdditiveManifest(
+      { targetOrg, outputDir: sourceDir, manifestXml, tempLabel: 'smart-reports' },
+      runSfFn,
     );
     // Requested-vs-landed: membership check against the freshly-pulled tree
     // (raw file counts would be inflated by files from earlier pulls).
@@ -2966,8 +3240,6 @@ export const runSfRetrieveSmartReports = async (
     return err(
       `smart report retrieve failed: ${cause instanceof Error ? cause.message : String(cause)}`,
     );
-  } finally {
-    await rm(manifestPath, { force: true }).catch(() => {});
   }
 };
 
@@ -3336,6 +3608,12 @@ export const runDemandRetrieve = async (opts: {
   if (!configResult.ok) return { status: 'failed', ...empty, message: configResult.error };
   const paths = vaultPaths(configResult.value.vaultRoot);
   const targetOrg = opts.targetOrg ?? configResult.value.targetOrg;
+  // Defense in depth (CR-01 / C1): validate the `--target-org` flag override,
+  // which bypasses the config.json check in loadVaultConfig.
+  if (opts.targetOrg !== undefined) {
+    const aliasCheck = validateOrgAlias(opts.targetOrg);
+    if (!aliasCheck.ok) return { status: 'failed', ...empty, message: aliasCheck.error };
+  }
 
   const manifestResult = await loadManifest(paths.root);
   if (!manifestResult.ok) {

@@ -38,8 +38,11 @@
  *   - Honesty axis (verbatim in `disclosure`): CDC subscription
  *     detection here recognizes by NAME PATTERN only. The
  *     `EventBus.subscribe(...)` programmatic registration path is
- *     invisible to v2.8; runtime channel-filter expressions in
- *     `*.platformEventChannelMember-meta.xml` are also out of scope.
+ *     invisible to v2.8. (CR-CAP-18: the DECLARED per-member filter
+ *     expressions in `*.platformEventChannelMember-meta.xml` ARE now
+ *     extracted — surfaced on the publish-side `references` edge — but
+ *     that is the declared XML text, NOT runtime filter evaluation of
+ *     which records flow.)
  */
 
 import type {
@@ -164,12 +167,14 @@ export interface CdcSubscribersOutput {
  * Verbatim honesty disclosure surfaced ALWAYS in the response. The
  * heuristic v2.8 CDC detection sees the `listensTo` edge produced by
  * the v1.5 R3 extractors and matches on the target apiName's CDC
- * pattern; runtime `EventBus.subscribe(...)` registration and
- * per-channel filter expressions in
- * `*.platformEventChannelMember-meta.xml` are invisible to v2.8.
+ * pattern; the `EventBus.subscribe(...)` programmatic registration is
+ * invisible. CR-CAP-18: the DECLARED per-member filter expressions in
+ * `*.platformEventChannelMember-meta.xml` ARE now extracted (publish-side
+ * `references` edge), but that is the declared XML text, NOT runtime
+ * filter EVALUATION of which records flow through the channel.
  */
 const CDC_SUBSCRIBERS_DISCLOSURE =
-  'v2.8 recognizes CDC subscribers by name pattern on the `listensTo` edge target (objects ending in `ChangeEvent` or `__ChangeEvent`). Runtime `EventBus.subscribe(...)` registration and per-channel filter expressions in `*.platformEventChannelMember-meta.xml` are NOT extracted; subscribers may exist that this tool cannot see.';
+  'v2.8 recognizes CDC subscribers by name pattern on the `listensTo` edge target (objects ending in `ChangeEvent` or `__ChangeEvent`). The `EventBus.subscribe(...)` registration is NOT modeled, so subscribers may exist that this tool cannot see. CR-CAP-18: per-member filter expressions in `*.platformEventChannelMember-meta.xml` ARE now extracted (declared XML text — NOT runtime filter evaluation of which records flow).';
 
 /**
  * Deterministic subscriber comparator: subscriberId ASC, then

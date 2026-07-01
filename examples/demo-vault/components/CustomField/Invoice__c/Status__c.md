@@ -16,10 +16,22 @@ properties:
   label: Status
   length: null
   picklistValues:
-    - Draft
-    - Sent
-    - Paid
-    - Overdue
+    - default: true
+      isActive: true
+      label: Draft
+      value: Draft
+    - default: false
+      isActive: true
+      label: Sent
+      value: Sent
+    - default: false
+      isActive: true
+      label: Paid
+      value: Paid
+    - default: false
+      isActive: true
+      label: Overdue
+      value: Overdue
   precision: null
   referenceTo: null
   relationshipName: null
@@ -48,7 +60,7 @@ Lifecycle status of the invoice.
 | formula | `null` |
 | inlineHelpText | `null` |
 | length | `null` |
-| picklistValues | `Draft,Sent,Paid,Overdue` |
+| picklistValues | `Draft, Sent, Paid, Overdue` |
 | precision | `null` |
 | referenceTo | `null` |
 | relationshipName | `null` |

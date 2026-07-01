@@ -1,0 +1,136 @@
+import { appendFileSync } from 'node:fs';
+
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+
+/**
+ * One per-call observability metric for a tool invocation. Records timing,
+ * outcome, and serialized payload size — never arg values or any org content
+ * (those can carry PII; the metric is "how a call performed," not "what it
+ * asked"). Mirrors {@link import('./audit.js').AuditEntry}'s no-PII contract.
+ */
+export interface ToolMetric {
+  /** ISO 8601 timestamp of when the call completed. */
+  readonly ts: string;
+  readonly tool: string;
+  /**
+   * True when the call SUCCEEDED — the dispatch did not throw, the result is not
+   * `isError`, and the serialized body has no top-level `{ error: ... }`. A
+   * thrown dispatch is recorded as `ok: false` (then re-thrown).
+   */
+  readonly ok: boolean;
+  /** Wall-clock duration of the dispatch, milliseconds. */
+  readonly durationMs: number;
+  /** UTF-8 byte length of the already-serialized response text. */
+  readonly payloadBytes: number;
+}
+
+/**
+ * Whether per-call observability is enabled. Opt-in: true only when
+ * `SFI_METRICS_LOG` points at a (writable) path. Mirrors the audit-log idiom
+ * (`SF_INTELLIGENCE_AUDIT_LOG`) so both governance sinks share one shape:
+ * unset means total silence and zero work beyond a single env lookup.
+ */
+export const observabilityEnabled = (): boolean => {
+  const path = process.env['SFI_METRICS_LOG'];
+  return path !== undefined && path !== '';
+};
+
+/**
+ * Append one JSON line of per-call metrics. No-op unless `SFI_METRICS_LOG`
+ * points at a writable file; writes one JSON line per call. Best-effort: a
+ * metrics-write failure must NEVER break the underlying tool call, so all
+ * errors are swallowed. When the flag is unset, this does zero work beyond a
+ * single env lookup.
+ *
+ * @example
+ *   emitToolMetric({ ts: new Date().toISOString(), tool: 'sfi.resolve',
+ *     ok: true, durationMs: 12, payloadBytes: 345 });
+ */
+export const emitToolMetric = (metric: ToolMetric): void => {
+  const path = process.env['SFI_METRICS_LOG'];
+  if (path === undefined || path === '') return;
+  try {
+    appendFileSync(path, `${JSON.stringify(metric)}\n`, 'utf8');
+  } catch {
+    // Observability is best-effort; never fail the tool call.
+  }
+};
+
+/**
+ * The first text part of a {@link CallToolResult}, or `''` when absent.
+ * Every `jsonResult`-produced result has exactly one text part, so this
+ * reads the already-serialized body without re-serializing.
+ */
+const resultText = (result: CallToolResult): string => {
+  const first = result.content?.[0];
+  return first !== undefined && first.type === 'text' ? first.text : '';
+};
+
+/**
+ * Whether a {@link CallToolResult} represents a SUCCESSFUL call. A call is NOT
+ * ok when EITHER:
+ *   - the SDK envelope flags it (`result.isError === true`) — an error whose
+ *     text body need not be a `{ error: ... }` JSON (the "nested"/SDK-level
+ *     error case); or
+ *   - the serialized text body carries a top-level `{ error: {...} }` envelope
+ *     (the structured-error case `jsonResult` emits).
+ *
+ * A parse failure on a non-flagged body (plain non-JSON text) is treated as ok —
+ * the metric must never throw and never mislabel a normal response as an error.
+ */
+const resultIsOk = (result: CallToolResult): boolean => {
+  if (result.isError === true) return false;
+  const text = resultText(result);
+  try {
+    const body = JSON.parse(text) as unknown;
+    return !(
+      typeof body === 'object' &&
+      body !== null &&
+      !Array.isArray(body) &&
+      'error' in body &&
+      (body as { readonly error?: unknown }).error != null
+    );
+  } catch {
+    return true;
+  }
+};
+
+/**
+ * The single per-call observability seam. Wraps a `dispatch` thunk, returns
+ * its {@link CallToolResult} UNCHANGED (byte-identical to calling `dispatch`
+ * directly), and — only when {@link observabilityEnabled} — emits one metric
+ * with timing, ok/error, and payload bytes derived from the already-serialized
+ * response text. The flag is read once up front: when off, the only extra work
+ * is that single env lookup, so a metrics-disabled call behaves exactly as
+ * today. Call this from the `tools/call` handler so it sees exactly the
+ * client-facing seam (not the `dispatchTool` recursion or CLI-internal calls).
+ *
+ * @example
+ *   return instrumentDispatch(name, () => dispatchTool(ctx, name, args));
+ */
+export const instrumentDispatch = async (
+  tool: string,
+  dispatch: () => Promise<CallToolResult>,
+): Promise<CallToolResult> => {
+  if (!observabilityEnabled()) return dispatch();
+  const start = Date.now();
+  // CR-14 / CR-P3: a THROWN dispatch must STILL emit a metric (ok:false) and
+  // then re-throw — without the try/finally a throw skipped the metric entirely,
+  // skewing the ok/error ratio toward false-success (errors silently absent).
+  let result: CallToolResult | undefined;
+  try {
+    result = await dispatch();
+    return result;
+  } finally {
+    const text = result === undefined ? '' : resultText(result);
+    emitToolMetric({
+      ts: new Date().toISOString(),
+      tool,
+      // No result (dispatch threw) is an error; otherwise inspect the result
+      // envelope (isError flag OR a top-level `{error:...}` body).
+      ok: result !== undefined && resultIsOk(result),
+      durationMs: Date.now() - start,
+      payloadBytes: Buffer.byteLength(text, 'utf8'),
+    });
+  }
+};

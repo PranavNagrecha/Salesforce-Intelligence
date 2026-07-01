@@ -275,6 +275,52 @@ describe('unusedFieldsDeepHandler', () => {
     expect(entry?.checks.noIntegrationExposure).toBe(true);
   });
 
+  // GROUP-A PII-safety: a truly-unused PII / encrypted field must NOT read as
+  // the bland "consider deletion" recommendation — it must PREPEND a compliance
+  // escalation and expose a machine-readable piiClassification.
+  it('escalates a truly-unused PII (SSN) field with a compliance recommendation', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-ufd-pii-'));
+    const opened = await openGraph(join(dir, 'pii.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const s = opened.value;
+    try {
+      const piiField = 'CustomField:Account.SSN__c';
+      const imp = await importExtractionResults(s, [
+        {
+          nodes: [
+            makeNode({
+              id: piiField,
+              apiName: 'SSN__c',
+              parentId: ACCOUNT_ID,
+              properties: { dataType: 'Text' },
+            }),
+          ],
+          edges: [],
+        },
+      ]);
+      if (!imp.ok) throw new Error('import failed');
+      const localCtx: Context = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s };
+      const result = await unusedFieldsDeepHandler(localCtx, { parentObjectFilter: 'Account' });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const entry = result.value.data.fields.find((f) => f.id === piiField);
+      expect(entry).toBeDefined();
+      // machine-readable classification surfaced
+      expect(entry?.piiClassification).toBe('pii');
+      // the recommendation must escalate, not read as bland deletion
+      expect(entry?.recommendedAction.toLowerCase()).toContain('pii');
+      expect(entry?.recommendedAction.toLowerCase()).toMatch(
+        /compliance|retention|irreversible|sign-off/,
+      );
+      expect(entry?.recommendedAction).not.toBe(
+        'field appears unused across all eight tiers; consider deletion after manual review of dynamic Apex / LWC / external integration paths the scanner cannot see.',
+      );
+    } finally {
+      await closeGraph(s);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('excludes a field whose only use is a report/dashboard (usedInReport) + carries the --with-reports caveat', async () => {
     // Dedicated store so the shared seed assertions stay intact.
     const dir = mkdtempSync(join(tmpdir(), 'sfi-ufd-rpt-'));
@@ -548,6 +594,87 @@ describe('unusedFieldsDeepInputSchema', () => {
       unusedFieldsDeepInputSchema.safeParse({ objectId: 'Account' }).success,
     ).toBe(true);
   });
+
+  it('accepts offset and cursor (CR-22)', () => {
+    expect(
+      unusedFieldsDeepInputSchema.safeParse({ offset: 1, cursor: 'abc' }).success,
+    ).toBe(true);
+  });
+});
+
+// =============================================================================
+// CR-22 B4 — output cursor + byte-trim preserved. A whole-fits no-cursor call
+// is byte-identical; a truncated page resumes the full set with no gaps / dupes;
+// totalCount/byParentObject/byConfidence stay UNFILTERED across pages.
+// =============================================================================
+describe('unusedFieldsDeepHandler — output cursor (CR-22)', () => {
+  it('whole-fits no-cursor call omits all paging fields', async () => {
+    const r = await unusedFieldsDeepHandler(ctx, { parentObjectFilter: 'Account' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data as unknown as Record<string, unknown>;
+    expect('limit' in d).toBe(false);
+    expect('offset' in d).toBe(false);
+    expect('nextOffset' in d).toBe(false);
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+    expect(d['truncated']).toBe(false);
+  });
+
+  it('a truncated page emits a cursor that resumes with no gaps or dupes', async () => {
+    const all = await unusedFieldsDeepHandler(ctx, {
+      parentObjectFilter: 'Account',
+      limit: 500,
+    });
+    expect(all.ok).toBe(true);
+    if (!all.ok) return;
+    const fullOrder = all.value.data.fields.map((f) => f.id);
+    // At least two unused Account fields → limit:1 forces a multi-page walk.
+    expect(fullOrder.length).toBeGreaterThanOrEqual(2);
+    const fullTotal = all.value.data.totalCount;
+    const fullByConfidence = all.value.data.byConfidence;
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const page: Awaited<ReturnType<typeof unusedFieldsDeepHandler>> =
+        await unusedFieldsDeepHandler(
+          ctx,
+          cursor !== undefined
+            ? { parentObjectFilter: 'Account', limit: 1, cursor }
+            : { parentObjectFilter: 'Account', limit: 1 },
+        );
+      expect(page.ok).toBe(true);
+      if (!page.ok) return;
+      // Counts stay full-set across pages.
+      expect(page.value.data.totalCount).toBe(fullTotal);
+      expect(page.value.data.byConfidence).toEqual(fullByConfidence);
+      for (const f of page.value.data.fields) seen.push(f.id);
+      const nc = page.value.data.nextCursor;
+      if (nc === undefined) break;
+      cursor = nc;
+      guard += 1;
+      if (guard > 50) throw new Error('cursor did not terminate');
+    }
+    expect(seen).toEqual(fullOrder);
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+
+  it('rejects a cursor minted for a different object scope', async () => {
+    const first = await unusedFieldsDeepHandler(ctx, {
+      parentObjectFilter: 'Account',
+      limit: 1,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const cursor = first.value.data.nextCursor;
+    if (typeof cursor !== 'string') return; // only meaningful when truncated
+    const replay = await unusedFieldsDeepHandler(ctx, { cursor });
+    expect(replay.ok).toBe(false);
+    if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
+  });
 });
 
 describe('unusedFieldsDeepHandler — FLD-01 objectId filtering', () => {
@@ -627,6 +754,99 @@ describe('unusedFieldsDeepHandler — byte budget (oversize fix)', () => {
       expect(d.totalCount).toBe(120); // honest unfiltered count preserved
       expect(d.truncated).toBe(true);
       expect(typeof d.note).toBe('string');
+    } finally {
+      await closeGraph(s);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// =============================================================================
+// CR-12 — page-to-exhaustion. buildCorpora pages every corpus type (incl. the
+// high-cardinality CustomField driver and the cross-reference corpora) to
+// exhaustion, not just the first 500. The verdict is destructive: an unused
+// CustomField past the cap must still be enumerated, AND a field referenced
+// only by a corpus member (here a Layout) past the cap must NOT be wrongly
+// flagged unused (over-suppression). SFI_NODE_SCAN_LIMIT=2 drives multi-page.
+// =============================================================================
+describe('unusedFieldsDeepHandler — past-cap corpora completeness (CR-12 de-cap)', () => {
+  beforeEach(() => {
+    process.env['SFI_NODE_SCAN_LIMIT'] = '2';
+  });
+
+  afterEach(() => {
+    delete process.env['SFI_NODE_SCAN_LIMIT'];
+  });
+
+  it('enumerates an unused CustomField past the cap', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-ufd-pastcap-'));
+    const opened = await openGraph(join(dir, 'pastcap.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const s = opened.value;
+    try {
+      const acct = 'CustomObject:Account';
+      // 3 unused CustomFields. id-ASC: Aaa__c, Bbb__c, Zzz__c — with a cap of 2
+      // the single-page corpus dropped Zzz__c entirely.
+      const nodes: Node[] = [
+        makeNode({ id: acct, type: 'CustomObject', apiName: 'Account' }),
+        makeNode({ id: 'CustomField:Account.Aaa__c', apiName: 'Aaa__c', parentId: acct, properties: { dataType: 'Text' } }),
+        makeNode({ id: 'CustomField:Account.Bbb__c', apiName: 'Bbb__c', parentId: acct, properties: { dataType: 'Text' } }),
+        makeNode({ id: 'CustomField:Account.Zzz__c', apiName: 'Zzz__c', parentId: acct, properties: { dataType: 'Text' } }),
+      ];
+      const edges: Edge[] = [
+        makeEdge({ fromId: acct, toId: 'CustomField:Account.Aaa__c', edgeType: 'parentOf' }),
+        makeEdge({ fromId: acct, toId: 'CustomField:Account.Bbb__c', edgeType: 'parentOf' }),
+        makeEdge({ fromId: acct, toId: 'CustomField:Account.Zzz__c', edgeType: 'parentOf' }),
+      ];
+      const imp = await importExtractionResults(s, [{ nodes, edges }]);
+      if (!imp.ok) throw new Error(imp.error.message);
+      const localCtx: Context = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s };
+      const r = await unusedFieldsDeepHandler(localCtx, { limit: 500 });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const ids = r.value.data.fields.map((f) => f.id);
+      expect(ids).toContain('CustomField:Account.Zzz__c');
+      expect(ids).toContain('CustomField:Account.Aaa__c');
+    } finally {
+      await closeGraph(s);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does NOT flag a field referenced only by a Layout that sorts PAST the cap (no over-suppression)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-ufd-pastcap-layout-'));
+    const opened = await openGraph(join(dir, 'pastcap-layout.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const s = opened.value;
+    try {
+      const acct = 'CustomObject:Account';
+      // 3 Layouts; id-ASC: A_Layout, B_Layout, Z_Layout. With a cap of 2 the
+      // Z_Layout (which references RefByZLayout__c) was dropped from the corpus,
+      // so the field would be WRONGLY flagged unused (over-suppression).
+      const nodes: Node[] = [
+        makeNode({ id: acct, type: 'CustomObject', apiName: 'Account' }),
+        makeNode({ id: 'CustomField:Account.RefByZLayout__c', apiName: 'RefByZLayout__c', parentId: acct, properties: { dataType: 'Text' } }),
+        makeNode({ id: 'Layout:Account.A_Layout', type: 'Layout', apiName: 'Account.A_Layout', properties: { layoutSections: [] } }),
+        makeNode({ id: 'Layout:Account.B_Layout', type: 'Layout', apiName: 'Account.B_Layout', properties: { layoutSections: [] } }),
+        makeNode({
+          id: 'Layout:Account.Z_Layout',
+          type: 'Layout',
+          apiName: 'Account.Z_Layout',
+          properties: { layoutSections: [{ layoutItems: [{ field: 'RefByZLayout__c' }] }] },
+        }),
+      ];
+      const edges: Edge[] = [
+        makeEdge({ fromId: acct, toId: 'CustomField:Account.RefByZLayout__c', edgeType: 'parentOf' }),
+      ];
+      const imp = await importExtractionResults(s, [{ nodes, edges }]);
+      if (!imp.ok) throw new Error(imp.error.message);
+      const localCtx: Context = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s };
+      const r = await unusedFieldsDeepHandler(localCtx, { limit: 500 });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const ids = r.value.data.fields.map((f) => f.id);
+      // The field IS referenced (by the past-cap Z_Layout) → must NOT be unused.
+      expect(ids).not.toContain('CustomField:Account.RefByZLayout__c');
     } finally {
       await closeGraph(s);
       rmSync(dir, { recursive: true, force: true });

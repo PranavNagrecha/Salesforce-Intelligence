@@ -68,6 +68,7 @@ const ACCOUNT_INDUSTRY = 'CustomField:Account.Industry__c';
 const LEAD_INDUSTRY = 'CustomField:Lead.Industry';
 const UNRELATED_FIELD = 'CustomField:Account.Notes__c';
 const PRE_V29_FIELD = 'CustomField:Account.Old_Field__c';
+const INACTIVE_PICKLIST_FIELD = 'CustomField:Account.Stage__c';
 const APEX_READER = 'ApexClass:AccountReader';
 const APEX_WRITER = 'ApexClass:AccountWriter';
 
@@ -119,6 +120,26 @@ const seed: ExtractionResult = {
         description: null,
         sourceOfTruth: { value: 'manual', confidence: 'heuristic' },
         semanticCategory: { value: 'descriptor', confidence: 'heuristic' },
+      },
+    }),
+    makeNode({
+      id: INACTIVE_PICKLIST_FIELD,
+      type: 'CustomField',
+      apiName: 'Stage__c',
+      label: 'Stage',
+      parentId: ACCOUNT_OBJ,
+      properties: {
+        label: 'Stage',
+        type: 'Picklist',
+        description: null,
+        // H10: object shape with one DEACTIVATED value, plus a legacy bare
+        // string (which must normalize to active) — mixed-shape tolerance.
+        picklistValues: [
+          'Open',
+          { value: 'Cancelled', isActive: false, label: 'Cancelled' },
+        ],
+        sourceOfTruth: { value: 'manual', confidence: 'heuristic' },
+        semanticCategory: { value: 'status', confidence: 'heuristic' },
       },
     }),
     makeNode({
@@ -243,10 +264,11 @@ describe('fieldMeaningHandler', () => {
     expect(data.type).toBe('Picklist');
     expect(data.parentObjectId).toBe(ACCOUNT_OBJ);
     expect(data.parentObjectApiName).toBe('Account');
-    // Picklist values projected from properties.
+    // Picklist values projected from properties — H10: each gains isActive.
+    // These seed entries carry no isActive, so both normalize to active.
     expect(data.picklistValues).toEqual([
-      { value: 'Banking', label: 'Banking' },
-      { value: 'Tech', label: 'Tech' },
+      { value: 'Banking', label: 'Banking', isActive: true },
+      { value: 'Tech', label: 'Tech', isActive: true },
     ]);
     // Asymmetric usage: 2 reads, 1 write.
     expect(data.usageFrequency).toEqual({
@@ -280,6 +302,25 @@ describe('fieldMeaningHandler', () => {
     expect(
       data.boundaries.some((b) => b.includes('name-pattern')),
     ).toBe(false);
+  });
+
+  it('H10: carries isActive (false for deactivated; true for legacy bare string) and surfaces the inactive boundary', async () => {
+    const result = await fieldMeaningHandler(ctx, {
+      fieldId: INACTIVE_PICKLIST_FIELD,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    // Both values LISTED: the bare string normalizes to active, the object
+    // carries isActive:false — listed-and-marked, never dropped.
+    expect(data.picklistValues).toEqual([
+      { value: 'Open', label: 'Open', isActive: true },
+      { value: 'Cancelled', label: 'Cancelled', isActive: false },
+    ]);
+    // The inactive-values boundary surfaces so the host LLM can mark them.
+    expect(
+      data.boundaries.some((b) => b.includes('inactive value')),
+    ).toBe(true);
   });
 
   it('finds a similar field beyond the first 50 by id (paginates the full CustomField corpus)', async () => {

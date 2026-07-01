@@ -6,9 +6,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { err, ok, type Result } from '@sf-intelligence/core';
 import {
   closeGraph,
-  listNodesByType,
-  openGraph,
-  openGraphReadOnly,
+  openGraphServeReadOnly,
   type GraphError,
   type GraphStore,
 } from '@sf-intelligence/graph';
@@ -116,30 +114,16 @@ export interface ServerError {
  * harness run". (A `sfi refresh` still needs exclusive write — see the
  * `locked` error from openGraph.)
  *
- * Fallbacks to a read-write open (which creates the file and runs migrations):
- *   - the read-only open fails (no `graph.duckdb` yet — read-only can't create);
- *   - the read-only handle opens but a cheap probe fails, which means the vault
- *     was built by older code at a stale schema that needs migrating (refresh
- *     runs migrations, so a freshly-refreshed vault never hits this).
- *
- * The read-write fallback re-takes the exclusive lock; if THAT is also denied
- * (a concurrent refresh holds it), its `locked` error surfaces to the caller.
+ * The actual open ladder — read-only first, content probe, CR-19 schema-version
+ * self-heal, and (CR-19 amended) the best-effort lock-tolerant fallback that
+ * DEFERS an additive migration when the read-write re-open collides with a held
+ * lock — lives in ONE place, {@link openGraphServeReadOnly} in the graph
+ * package, so this and `cross-vault-open.ts#openVaultReadOnly` cannot drift.
+ * See that helper for the full rationale and the additive-only safety argument.
  */
 const openServerGraph = async (
   graphDb: string,
-): Promise<Result<GraphStore, GraphError>> => {
-  const ro = await openGraphReadOnly(graphDb);
-  if (ro.ok) {
-    const probe = await listNodesByType(ro.value, 'CustomObject', { limit: 1 });
-    if (probe.ok) return ok(ro.value);
-    // Stale schema (or otherwise unqueryable read-only) — migrate via RW.
-    await closeGraph(ro.value);
-    return openGraph(graphDb);
-  }
-  // No file yet, or a lock conflict — let the read-write path create/migrate
-  // (or surface the actionable `locked` error).
-  return openGraph(graphDb);
-};
+): Promise<Result<GraphStore, GraphError>> => openGraphServeReadOnly(graphDb);
 
 /**
  * P13-WATCH-epoch: the per-vault last-seen mtime of `meta/refresh-epoch`.

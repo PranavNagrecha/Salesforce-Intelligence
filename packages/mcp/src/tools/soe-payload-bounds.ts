@@ -78,6 +78,29 @@ export interface SoeBudgetResult {
 const sizeOf = (payload: unknown): number =>
   Buffer.byteLength(JSON.stringify(payload), 'utf8');
 
+/** Options controlling which trim passes {@link enforceSoeByteBudget} may run. */
+export interface SoeBudgetOptions {
+  /**
+   * Whether the last-resort step-drop pass (Pass 4) may run. When `false`,
+   * trailing steps are NEVER dropped — only per-step actions and conditionals
+   * are trimmed — so EVERY firing component stays named in the response.
+   *
+   * The single-event `what_happens_on_save` view passes `false`: dropping
+   * trailing steps there silently un-names real automations (e.g. the
+   * after-triggers / post-save flows tail on a densely-automated Contact),
+   * which is the exact failure this guard exists to prevent. After actions and
+   * conditionals are slimmed, a single-event step list is small enough that
+   * the step COUNT alone never blows the budget, so step-dropping is not
+   * needed there. The four-event `order_of_execution` view leaves this `true`
+   * (default): its ~4x step count can be pathological, and a caller can still
+   * recover every dropped step by re-querying that one event through
+   * `what_happens_on_save`.
+   *
+   * @default true
+   */
+  readonly allowStepDrop?: boolean;
+}
+
 /**
  * Enforce {@link SOE_MAX_PAYLOAD_BYTES} on a composed SOE payload, IN PLACE.
  *
@@ -86,19 +109,23 @@ const sizeOf = (payload: unknown): number =>
  *                   view (`[data.soe]`), one per event for the four-event
  *                   `order_of_execution` view. Trimming/dropping their steps
  *                   mutates the payload. Trimming order: per-step actions, then
- *                   conditionals, then (last resort) drop steps from the tail.
+ *                   conditionals, then (last resort, only when
+ *                   `options.allowStepDrop !== false`) drop steps from the tail.
+ * @param options    pass control — see {@link SoeBudgetOptions.allowStepDrop}.
  * @returns what was trimmed (actions / conditionals / steps)
  *
  * No-op when already under budget.
  *
  * @example
- *   const r = enforceSoeByteBudget(data, [data.soe]);
+ *   const r = enforceSoeByteBudget(data, [data.soe], { allowStepDrop: false });
  *   if (r.truncated) data.truncated = true;
  */
 export const enforceSoeByteBudget = (
   payload: unknown,
   containers: readonly BoundableStep[][],
+  options: SoeBudgetOptions = {},
 ): SoeBudgetResult => {
+  const allowStepDrop = options.allowStepDrop ?? true;
   if (sizeOf(payload) <= SOE_MAX_PAYLOAD_BYTES) {
     return { truncated: false, actionsOmitted: 0, conditionalsTrimmed: 0, stepsOmitted: 0 };
   }
@@ -192,7 +219,7 @@ export const enforceSoeByteBudget = (
   // `summary.totalSteps` (set before enforcement) still reports the true total,
   // so `stepsOmitted` is an honest "N more not shown".
   let stepsOmitted = 0;
-  for (let guard = 0; guard < 1_000_000; guard += 1) {
+  for (let guard = 0; allowStepDrop && guard < 1_000_000; guard += 1) {
     if (sizeOf(payload) <= SOE_MAX_PAYLOAD_BYTES) break;
     let target: BoundableStep[] | undefined;
     let targetBytes = 0;

@@ -91,6 +91,10 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import {
+  detectPiiClassification,
+  type PiiCategory,
+} from '@sf-intelligence/patterns';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
@@ -234,6 +238,15 @@ export interface SafeToDeleteFieldOutput {
   readonly verdict: Verdict;
   readonly reasoning: readonly SafeToDeleteFieldReason[];
   readonly coverageCaveat?: CoverageCaveat;
+  /**
+   * GROUP-A PII-safety: a non-verdict-lowering compliance escalation present
+   * only when the heuristic recognizer classifies the field `pii` / `sensitive`.
+   * Mirrors `coverageCaveat` — it is surfaced FIRST in the checklist and never
+   * moves the verdict, so a PII field never reads as a bland `safe`. HEURISTIC:
+   * absence of this block is NOT a clearance, only the absence of a recognised
+   * PII signal.
+   */
+  readonly piiCompliance?: PiiCompliance;
   readonly trust: TrustSummary;
   /** Present only when `format: 'checklist'` (P8-destructive-checklist). */
   readonly checklist?: string;
@@ -254,6 +267,16 @@ export interface SafeToDeleteFieldOutput {
 export interface CoverageCaveat {
   readonly status: 'partial' | 'unknown';
   readonly missingCoverage: readonly string[];
+  readonly message: string;
+}
+
+/**
+ * GROUP-A PII-safety: a heuristic PII/sensitive compliance escalation for a
+ * field whose deletion is otherwise judged safe. Does NOT alter the verdict.
+ */
+export interface PiiCompliance {
+  readonly classification: 'pii' | 'sensitive';
+  readonly category: PiiCategory;
   readonly message: string;
 }
 
@@ -514,6 +537,24 @@ const applyCoverageToVerdict = (
 };
 
 /**
+ * GROUP-A PII-safety: build a non-verdict-lowering PII compliance escalation
+ * from the heuristic recognizer. Returns undefined when the field is not
+ * recognised as PII / sensitive (NOT a clearance — just no recognised signal).
+ */
+const buildPiiCompliance = (node: Node): PiiCompliance | undefined => {
+  const { piiClassification, piiCategory } = detectPiiClassification(node);
+  if (piiClassification !== 'pii' && piiClassification !== 'sensitive') {
+    return undefined;
+  }
+  return {
+    classification: piiClassification,
+    category: piiCategory,
+    message:
+      `This field is classified ${piiClassification}/${piiCategory} (heuristic). Even when the metadata verdict is "safe", deletion may be irreversible and compliance-relevant (FERPA/GDPR/PCI): require explicit data-retention sign-off and verify it is not the system of record before deleting. Absence of this escalation on other fields is NOT a clearance.`,
+  };
+};
+
+/**
  * The `sfi.safe_to_delete_field` MCP tool. Returns a confidence-
  * weighted verdict for a CustomField deletion, citing every incoming
  * dependency the graph holds. See the module JSDoc for the
@@ -542,6 +583,15 @@ const VERDICT_ORDER: Record<Verdict, number> = {
  */
 export const renderDeleteChecklist = (out: SafeToDeleteFieldOutput): string => {
   const lines: string[] = [`## Before you delete \`${out.fieldId}\``, ''];
+  // GROUP-A PII-safety: the PII compliance escalation is surfaced FIRST (above
+  // the coverage caveat and the verdict), so a PII field never reads as a bland
+  // "safe" deletion. It NEVER alters the verdict.
+  if (out.piiCompliance !== undefined) {
+    lines.push(
+      `> 🔒 **PII compliance (${out.piiCompliance.classification}/${out.piiCompliance.category}):** ${out.piiCompliance.message}`,
+      '',
+    );
+  }
   if (out.coverageCaveat !== undefined) {
     lines.push(
       `> ⚠️ **Coverage caveat (${out.coverageCaveat.status}):** ${out.coverageCaveat.message}`,
@@ -661,6 +711,48 @@ const coreSafeToDeleteFieldHandler = async (
           completeness: { status: 'partial' },
           limitations: [
             "The field's own definition is not in the vault (standard or managed-package field); this verdict is based on inbound references only.",
+          ],
+        },
+      },
+      vaultState: {
+        sourceTreeHash: ctx.manifest.sourceTreeHash,
+        refreshedAt: ctx.manifest.refreshedAt,
+      },
+    });
+  }
+
+  const node = nodeResult.value;
+  const objectApi =
+    node.parentId?.startsWith('CustomObject:')
+      ? node.parentId.slice('CustomObject:'.length)
+      : null;
+  const isStandardObject = objectApi !== null && !objectApi.includes('__');
+  const isStandardField =
+    isStandardObject &&
+    !node.apiName.endsWith('__c') &&
+    !node.apiName.endsWith('__s');
+  if (isStandardField) {
+    return ok({
+      data: {
+        fieldId,
+        verdict: 'blocking',
+        reasoning: [
+          {
+            category: 'unknown',
+            verdict: 'blocking',
+            count: 1,
+            examples: [],
+            note:
+              `This is a standard field on ${objectApi} (${node.apiName}). Standard fields are undeletable via metadata — that verdict is intrinsic and does not depend on clearing Apex or formula references.`,
+          },
+        ],
+        trust: {
+          provenance: 'offline_snapshot',
+          confidence: 'declared',
+          freshness: { snapshotRefreshedAt: ctx.manifest.refreshedAt },
+          completeness: { status: 'complete' },
+          limitations: [
+            'Standard-field deletion is platform-blocked; dependency counts are informational only.',
           ],
         },
       },
@@ -791,6 +883,8 @@ const coreSafeToDeleteFieldHandler = async (
 
   const reasoning = buildReasoning(buckets);
   const coverageCaveat = buildCoverageCaveat(ctx);
+  // GROUP-A PII-safety: a non-verdict-lowering compliance escalation.
+  const piiCompliance = buildPiiCompliance(nodeResult.value);
   const verdict = applyCoverageToVerdict(aggregateVerdict(reasoning), coverageCaveat);
 
   const dataShape = await readFactBlock(ctx, fieldId, 'fillRate');
@@ -802,6 +896,7 @@ const coreSafeToDeleteFieldHandler = async (
       ...(dataShape !== undefined ? { dataShape } : {}),
       reasoning,
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
+      ...(piiCompliance !== undefined ? { piiCompliance } : {}),
       ...(flsGrantCount > 0 ? { flsGrantCount } : {}),
       trust: {
         provenance: 'offline_snapshot',
@@ -822,6 +917,7 @@ const coreSafeToDeleteFieldHandler = async (
               ]
             : []),
           ...(coverageCaveat !== undefined ? [coverageCaveat.message] : []),
+          ...(piiCompliance !== undefined ? [piiCompliance.message] : []),
         ],
       },
     },

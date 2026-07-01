@@ -46,7 +46,7 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listEdges, listNodesByType } from '@sf-intelligence/graph';
+import { listEdges, listNodesByIds, listNodesByType } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -83,6 +83,16 @@ export type ScheduledJobCatalogInput = z.infer<
 export interface ScheduledCall {
   readonly callerClassId: ComponentId;
   readonly cronExpression: string | null;
+  /**
+   * Whether the caller is an `@isTest` Apex class. A `System.schedule(...)`
+   * call site that lives ONLY inside a test class does NOT schedule the
+   * class at runtime — test scheduling is sandboxed and rolled back. We
+   * stamp this so consumers can tell a real production scheduler from a
+   * test-only call site (the textbook signature of dead/unscheduled
+   * Schedulable code). The value is read from the caller node's `isTest`
+   * property; when the caller node is missing or unflagged it is `false`.
+   */
+  readonly callerIsTest: boolean;
 }
 
 /** One entry in the scheduled-job catalog. */
@@ -92,16 +102,68 @@ export interface ScheduledJobEntry {
   readonly isSchedulable: boolean;
   readonly scheduledByCalls: readonly ScheduledCall[];
   readonly cronExpressions: readonly string[];
+  /**
+   * Count of `scheduledByCalls` whose caller is a PRODUCTION (non-test)
+   * class. Only a production `System.schedule(...)` is evidence that the
+   * class is wired to run; test-only call sites do not schedule anything
+   * at runtime.
+   */
+  readonly productionCallerCount: number;
+  /**
+   * `true` when this Schedulable class has NO production scheduling
+   * evidence in the vault — i.e. zero production call sites AND no
+   * `cronExpressions` parsed from the class. Such a class is LIKELY dead /
+   * unscheduled code (it implements Schedulable but nothing in the offline
+   * source wires it to a cron). This is a likelihood signal, not a
+   * runtime fact — see {@link SCHEDULED_JOB_CATALOG_DISCLOSURE}: confirming
+   * runtime scheduling requires the CronTrigger / AsyncApexJob Tooling API.
+   */
+  readonly likelyUnscheduled: boolean;
+}
+
+/**
+ * T7: one scheduled-Flow entry. Sourced from the Flow node's design-time
+ * `<start><schedule>` block (stamped by the flow extractor as the
+ * `scheduleFrequency` / `scheduleStartDate` / `scheduleStartTime` node
+ * properties). `startTime` is UTC — see {@link SCHEDULED_FLOW_DISCLOSURE}.
+ * This is the FLOW's declared schedule, distinct from the Apex
+ * `CronTrigger` runtime registration captured above.
+ */
+export interface ScheduledFlowEntry {
+  readonly flowId: ComponentId;
+  readonly apiName: string;
+  readonly frequency: string | null;
+  readonly startDate: string | null;
+  /** UTC time-of-day (trailing `Z`); local run time needs the org timezone. */
+  readonly startTimeUtc: string | null;
 }
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface ScheduledJobCatalogOutput {
   readonly jobs: readonly ScheduledJobEntry[];
+  readonly scheduledFlows: readonly ScheduledFlowEntry[];
   readonly summary: {
     readonly totalSchedulableClasses: number;
     readonly classesWithKnownCallers: number;
+    /**
+     * Schedulable classes with at least one PRODUCTION (non-test)
+     * `System.schedule(...)` call site. This is the honest "appears to be
+     * actually scheduled" count — distinct from `classesWithKnownCallers`,
+     * which counts ANY call site including test-only ones.
+     */
+    readonly classesScheduledFromProduction: number;
+    /**
+     * Schedulable classes with NO production scheduling evidence (no
+     * production call site and no parsed cron) — likely dead / unscheduled
+     * code. Equals `totalSchedulableClasses - classesScheduledFromProduction`
+     * for classes lacking class-level cron, computed per-entry via
+     * {@link ScheduledJobEntry.likelyUnscheduled}.
+     */
+    readonly classesLikelyUnscheduled: number;
+    readonly totalScheduledFlows: number;
   };
   readonly disclosure: string;
+  readonly flowScheduleDisclosure: string;
 }
 
 /**
@@ -114,7 +176,20 @@ export interface ScheduledJobCatalogOutput {
  * System.schedule(...) call site (a literal cron string).
  */
 const SCHEDULED_JOB_CATALOG_DISCLOSURE =
-  'Scanning for System.schedule() invocations is heuristic — the v0.3 Apex scanner detects literal call sites only, NOT runtime registration via Tooling API. Runtime schedules require Tooling API access (CronTrigger / AsyncApexJob). A class flagged `isSchedulable: true` may not currently be scheduled; conversely, a class scheduled via a helper-wrapper or dynamic class load is invisible to the scanner.';
+  'Scanning for System.schedule() invocations is heuristic — the v0.3 Apex scanner detects literal call sites only, NOT runtime registration via Tooling API. Runtime schedules require Tooling API access (CronTrigger / AsyncApexJob). A class flagged `isSchedulable: true` may not currently be scheduled; conversely, a class scheduled via a helper-wrapper or dynamic class load is invisible to the scanner. IMPORTANT: a System.schedule() call site that lives ONLY inside an @isTest class does NOT schedule the class at runtime (test scheduling is sandboxed/rolled back) — such a class is `likelyUnscheduled: true` (production callers = 0) and is the textbook signature of dead/unscheduled Schedulable code. Treat `likelyUnscheduled` as a likelihood signal: confirm true runtime state via the CronTrigger / AsyncApexJob Tooling API before concluding a class is or is not scheduled.';
+
+/**
+ * T7: verbatim honesty disclosure for the `scheduledFlows` section.
+ * Scheduled Flows declare their cadence in metadata (`<start><schedule>`),
+ * so this schedule is parsed, not inferred — but `startTimeUtc` is in UTC
+ * (the metadata `<startTime>` carries a trailing `Z`, e.g.
+ * `08:00:00.000Z`); the local wall-clock run time depends on the org's
+ * default timezone, which the vault does NOT hold. This is the FLOW's
+ * design-time schedule and is DISTINCT from the Apex `CronTrigger` /
+ * `AsyncApexJob` runtime registration above, which remains Tooling-API-only.
+ */
+const SCHEDULED_FLOW_DISCLOSURE =
+  'Scheduled-Flow cadence is read from the flow metadata `<start><schedule>` (declared, not inferred). `startTimeUtc` is UTC (the metadata `<startTime>` ends in `Z`, e.g. `08:00:00.000Z`); the local run time depends on the org default timezone, which is not in the vault. This is the Flow design-time schedule, distinct from the Apex CronTrigger runtime registration (Tooling-API-only).';
 
 /**
  * Read the `cronExpressions` property defensively. v2.8's actual
@@ -168,17 +243,55 @@ const collectScheduledCalls = async (
     edgeType: 'dispatchesAsync',
   });
   if (!edgesResult.ok) return err(edgesResult.error.message);
-  const calls: ScheduledCall[] = [];
-  for (const edge of edgesResult.value) {
-    if (edge.properties['dispatchMechanism'] === 'schedule') {
-      calls.push({
-        callerClassId: edge.fromId,
-        cronExpression: readEdgeCronExpression(edge.properties),
-      });
-    }
+  const scheduleEdges = edgesResult.value.filter(
+    (edge) => edge.properties['dispatchMechanism'] === 'schedule',
+  );
+  // Resolve each caller's @isTest status so we can tell a production
+  // scheduler from a test-only call site. A test-only call site does not
+  // schedule the class at runtime, so we must NOT count it as production
+  // scheduling evidence.
+  const callerIds = scheduleEdges.map((edge) => edge.fromId);
+  const callerNodesResult = await listNodesByIds(ctx.graph, callerIds);
+  if (!callerNodesResult.ok) return err(callerNodesResult.error.message);
+  const callerIsTestById = new Map<ComponentId, boolean>();
+  for (const node of callerNodesResult.value) {
+    callerIsTestById.set(node.id, node.properties['isTest'] === true);
   }
+  const calls: ScheduledCall[] = scheduleEdges.map((edge) => ({
+    callerClassId: edge.fromId,
+    cronExpression: readEdgeCronExpression(edge.properties),
+    callerIsTest: callerIsTestById.get(edge.fromId) === true,
+  }));
   return ok(calls);
 };
+
+/**
+ * Read an optional non-empty string Flow schedule property, returning
+ * null for missing / non-string / empty values.
+ */
+const readScheduleString = (
+  properties: Readonly<Record<string, unknown>>,
+  key: string,
+): string | null => {
+  const raw = properties[key];
+  return typeof raw === 'string' && raw.length > 0 ? raw : null;
+};
+
+/**
+ * A Flow node is "scheduled" when the extractor stamped a
+ * `scheduleFrequency` (only scheduled flows carry a `<start><schedule>`
+ * block). We gate on frequency presence so non-scheduled flows (which
+ * leave all three schedule props null) are excluded.
+ */
+const isScheduledFlow = (
+  properties: Readonly<Record<string, unknown>>,
+): boolean => readScheduleString(properties, 'scheduleFrequency') !== null;
+
+/**
+ * Deterministic comparator: flowId ASC.
+ */
+const compareFlows = (a: ScheduledFlowEntry, b: ScheduledFlowEntry): number =>
+  a.flowId < b.flowId ? -1 : a.flowId > b.flowId ? 1 : 0;
 
 /**
  * Deterministic comparator: classId ASC. Catalog entries render in
@@ -232,6 +345,8 @@ export const scheduledJobCatalogHandler = async (
 
   const jobs: ScheduledJobEntry[] = [];
   let classesWithKnownCallers = 0;
+  let classesScheduledFromProduction = 0;
+  let classesLikelyUnscheduled = 0;
   for (const node of apexClassesResult.value as readonly Node[]) {
     if (!readIsSchedulable(node.properties)) continue;
     const callsResult = await collectScheduledCalls(ctx, node.id);
@@ -244,25 +359,65 @@ export const scheduledJobCatalogHandler = async (
     const cronExpressions = readCronExpressions(node.properties);
     const calls = [...callsResult.value].sort(compareCalls);
     if (calls.length > 0) classesWithKnownCallers++;
+    const productionCallerCount = calls.filter(
+      (call) => !call.callerIsTest,
+    ).length;
+    // A class is likely unscheduled when nothing in the offline source
+    // wires it to a cron: zero production call sites AND no class-level
+    // cron expressions. Test-only call sites are NOT production evidence.
+    const likelyUnscheduled =
+      productionCallerCount === 0 && cronExpressions.length === 0;
+    if (productionCallerCount > 0) classesScheduledFromProduction++;
+    if (likelyUnscheduled) classesLikelyUnscheduled++;
     jobs.push({
       classId: node.id,
       apiName: node.apiName,
       isSchedulable: true,
       scheduledByCalls: calls,
       cronExpressions,
+      productionCallerCount,
+      likelyUnscheduled,
     });
   }
 
   const sorted = jobs.sort(compareEntries);
 
+  // T7: scheduled Flows from <start><schedule>.
+  const flowsResult = await listNodesByType(ctx.graph, 'Flow', {
+    limit: SCHEDULED_JOB_CATALOG_MAX_CLASSES,
+  });
+  if (!flowsResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${flowsResult.error.message}`,
+    });
+  }
+  const scheduledFlows: ScheduledFlowEntry[] = [];
+  for (const node of flowsResult.value as readonly Node[]) {
+    if (!isScheduledFlow(node.properties)) continue;
+    scheduledFlows.push({
+      flowId: node.id,
+      apiName: node.apiName,
+      frequency: readScheduleString(node.properties, 'scheduleFrequency'),
+      startDate: readScheduleString(node.properties, 'scheduleStartDate'),
+      startTimeUtc: readScheduleString(node.properties, 'scheduleStartTime'),
+    });
+  }
+  const sortedFlows = scheduledFlows.sort(compareFlows);
+
   return ok({
     data: {
       jobs: sorted,
+      scheduledFlows: sortedFlows,
       summary: {
         totalSchedulableClasses: sorted.length,
         classesWithKnownCallers,
+        classesScheduledFromProduction,
+        classesLikelyUnscheduled,
+        totalScheduledFlows: sortedFlows.length,
       },
       disclosure: SCHEDULED_JOB_CATALOG_DISCLOSURE,
+      flowScheduleDisclosure: SCHEDULED_FLOW_DISCLOSURE,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

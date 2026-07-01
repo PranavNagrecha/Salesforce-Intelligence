@@ -16,6 +16,7 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById } from '@sf-intelligence/graph';
@@ -24,6 +25,7 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { mergeInputAliases, toProfileOrPermSetId } from './input-aliases.js';
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 
 const GRANTER_PREFIXES = ['Profile:', 'PermissionSet:'] as const;
 const DEFAULT_LIMIT = 200;
@@ -36,6 +38,10 @@ const tabAvailabilityInputBaseSchema = z.object({
   componentId: z.string().min(1),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
+  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // truncated page's `nextCursor`. When present it supplies the resume offset;
+  // omitting it = today's behavior (offset 0 / explicit `offset`).
+  cursor: z.string().min(1).optional(),
 });
 
 export const tabAvailabilityInputSchema = z.preprocess((raw) => {
@@ -86,6 +92,14 @@ export interface TabAvailabilityOutput {
   readonly offset: number;
   readonly hasMore: boolean;
   readonly truncated: boolean;
+  /**
+   * CR-22 opaque continuation token, present ONLY when this page was truncated
+   * (more tabs remain past `limit`). Echo it back as `cursor` to resume. Absent
+   * on a whole-fits page so an in-budget response stays byte-identical.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
   readonly confidence: 'declared';
   readonly boundaryNote: string;
 }
@@ -131,15 +145,66 @@ export const tabAvailabilityHandler = async (
       rows.push({ tab: item.tab, visibility, available: AVAILABLE_VISIBILITIES.has(visibility) });
     }
   }
-  rows.sort((a, b) => (a.tab < b.tab ? -1 : a.tab > b.tab ? 1 : 0));
+  // TOTAL-ORDER sort: `tab` ASC then `visibility` ASC. `tab` alone is NOT a
+  // unique key — the extractors emit `tabVisibilities` verbatim (no dedup), and
+  // a PermissionSet whose source carries the same tab under both `tabSettings`
+  // and `tabVisibilities` (or a duplicated `<tabVisibilities>`) yields two rows
+  // with the same `tab` but a different `visibility`. Appending `visibility`
+  // (the only other discriminating field — `available` is derived from it)
+  // makes `(tab, visibility)` the row's full stable identity, so a CR-22
+  // resume cannot dup or skip on a page boundary.
+  rows.sort((a, b) =>
+    a.tab < b.tab
+      ? -1
+      : a.tab > b.tab
+        ? 1
+        : a.visibility < b.visibility
+          ? -1
+          : a.visibility > b.visibility
+            ? 1
+            : 0,
+  );
 
   const available = rows.filter((r) => r.available).length;
   const total = rows.length;
   const limit = input.limit ?? DEFAULT_LIMIT;
-  const offset = input.offset ?? 0;
-  const page = rows.slice(offset, offset + limit);
-  const hasMore = offset + page.length < total;
+
+  // CR-22: resolve the resume offset — an echoed cursor wins over an explicit
+  // `offset`; a stale/forged cursor (changed componentId, different tool, or
+  // refreshed vault) is rejected with `invalid-query`.
+  const fingerprint = argsFingerprint({ componentId: input.componentId });
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: 'sfi.tab_availability',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  // No per-handler byte budget (offset/limit only) — set an effectively
+  // unbounded byteBudget so `paginate()` truncates ONLY on `limit`
+  // (byte-identical to the prior open-coded slice). The global jsonResult guard
+  // remains the byte backstop.
+  const paged = paginateLegacy(rows, {
+    offset,
+    limit,
+    byteBudget: Number.MAX_SAFE_INTEGER,
+    binding: {
+      tool: 'sfi.tab_availability',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+    keyOf: (r) => `${r.tab} ${r.visibility}`,
+  });
+  const page = paged.items;
+  const hasMore = paged.hasMore;
+  // Preserve the EXACT pre-CR-22 `truncated` expression (true on any non-first
+  // page even when that page fully fits), independent of the new nextCursor.
   const truncated = hasMore || offset > 0;
+  const emitCursor = paged.nextCursor !== null;
 
   const boundaryNote = extracted
     ? 'Tab visibility is declared profile/permission-set metadata. A tab being "available" does not by itself grant object access — the user also needs the object permission (`object_access_audit`). The user must be ASSIGNED this profile/permission set (runtime, not modeled).'
@@ -156,6 +221,7 @@ export const tabAvailabilityHandler = async (
       offset,
       hasMore,
       truncated,
+      ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
       confidence: 'declared',
       boundaryNote,
     },

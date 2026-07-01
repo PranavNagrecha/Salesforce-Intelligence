@@ -12,7 +12,12 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok } from '@sf-intelligence/core';
 
-import { renderValueAsBacktickedString } from './markdown-table.js';
+import {
+  escapeMarkdownBlockText,
+  escapeMarkdownHeading,
+  escapeMarkdownInline,
+  renderValueAsBacktickedString,
+} from './markdown-table.js';
 
 // Apex bodies frequently exceed a thousand lines. Embedding the full source
 // would bloat the Markdown diff and overwhelm Obsidian; truncating to the
@@ -117,15 +122,22 @@ const renderEdgesSection = (thisNodeId: ComponentId, edges: readonly Edge[]): st
 
 const buildBody = (node: Node, edges: readonly Edge[], source: string): string => {
   const blocks: string[] = [];
-  // Block 1: top heading.
-  blocks.push(`# ${node.label ?? node.apiName}`);
+  // Block 1: top heading. label/apiName are free-text metadata — escape so a
+  // newline or markdown special cannot inject structure (CR-16c). node.type is
+  // a closed enum and is left raw.
+  blocks.push(`# ${escapeMarkdownHeading(node.label ?? node.apiName)}`);
   // Block 2: API name + Type. Two trailing spaces on the API-name line
   // produce a Markdown line break, keeping both labels in one paragraph.
-  blocks.push(`**API Name:** \`${node.apiName}\`  \n**Type:** ${node.type}`);
-  // Block 3 (optional): description paragraph.
+  // apiName is escaped inside its code span so a backtick can't close it early.
+  blocks.push(
+    `**API Name:** \`${escapeMarkdownInline(node.apiName)}\`  \n**Type:** ${node.type}`,
+  );
+  // Block 3 (optional): description paragraph. Escape line-leading structural
+  // chars so the free-text prose cannot inject headings/tables/fences. The
+  // apex SOURCE fence below is intentionally left RAW (renderSourceSection).
   const description = node.properties['description'];
   if (typeof description === 'string' && description.length > 0) {
-    blocks.push(description);
+    blocks.push(escapeMarkdownBlockText(description));
   }
   // Block 4: Properties table.
   blocks.push(renderPropertiesTable(node.properties));

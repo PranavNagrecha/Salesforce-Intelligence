@@ -238,6 +238,7 @@ daemon drains automatically with `--drain-demand-queue`.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `SF_INTELLIGENCE_AUDIT_LOG` | *(unset — no logging)* | Append-only JSONL path. Logs tool name, argument **keys only** (never values), vault hash, timestamp. Best-effort; never breaks tool calls. |
+| `SFI_METRICS_LOG` | *(unset — no metrics)* | Append-only JSONL path for opt-in per-call observability. One line per `tools/call` with tool name, `ok`/error, `durationMs`, serialized `payloadBytes`, and timestamp — never argument values or org content. Best-effort; never breaks tool calls. Zero overhead when unset (one env lookup, then silence). |
 
 Example:
 
@@ -338,8 +339,11 @@ serializes, and it tells you exactly who holds the lock when it cannot proceed.
 
 ## Question gap log (product telemetry, local only)
 
-When routing cannot answer a question, the intent router may append a gap
-record locally — never sent to the network.
+When routing cannot answer a question, `sfi.route_question` can append a gap
+record locally — never sent to the network. This is **opt-in and off by
+default** (privacy-first, CR-16): the question text is written only when the
+caller passes `logGap: true`. With `logGap` omitted or `false`, nothing is
+written to disk and the response reports `gapLogged: false`.
 
 | Variable / path | Default | Purpose |
 | --- | --- | --- |

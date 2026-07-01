@@ -43,6 +43,15 @@ const seed: ExtractionResult = {
     makeNode({ id: 'CustomObject:Payment__c', apiName: 'Payment__c', label: 'Payment' }),
     makeNode({ id: 'CustomField:Payment__c.Payment_Amount__c', type: 'CustomField', apiName: 'Payment_Amount__c', label: 'Payment Amount', parentId: 'CustomObject:Payment__c' }),
     makeNode({ id: 'CustomField:Payment__c.Payment_Status__c', type: 'CustomField', apiName: 'Payment_Status__c', label: 'Payment Status', parentId: 'CustomObject:Payment__c' }),
+    // QA batch 5 regression: a same-object sibling whose NAME shares the `state`
+    // token (fuzzy-near the query `status` token, below the contender-score band)
+    // but NOT the `payment` token. The query "Payment_Status__c" names its own
+    // PARENT object (Payment__c) via the `payment` token, so this sibling earns
+    // PARENT-credit for `payment` and is flagged parent-matched. Pre-fix that made
+    // it an always-contender, demoting the literal whole-name-exact hit on
+    // Payment_Status__c to `ambiguous`; it is NOT a score-contender, so the bug is
+    // purely the parent-credit-inflation path.
+    makeNode({ id: 'CustomField:Payment__c.Settlement_State__c', type: 'CustomField', apiName: 'Settlement_State__c', label: 'Settlement State', parentId: 'CustomObject:Payment__c' }),
     // Namespaced object + a Layout decoy that whole-string scoring wrongly outranks.
     makeNode({ id: 'CustomObject:ACME_Transaction__c', apiName: 'ACME_Transaction__c', label: 'Transaction' }),
     makeNode({ id: 'Layout:ACME_Transaction__c-Transaction Layout', type: 'Layout', apiName: 'ACME_Transaction__c-Transaction Layout', label: 'Transaction Layout', parentId: 'CustomObject:ACME_Transaction__c' }),
@@ -87,6 +96,33 @@ const seed: ExtractionResult = {
     // Stop-word-named component: "IT" tokenizes to nothing ("it" is a stop
     // word), so only the whole-name exact pass can recover it.
     makeNode({ id: 'Profile:IT', type: 'Profile', apiName: 'IT', label: 'IT' }),
+    // Phrase-synonym scenario (F1): a regulated SSN field plus a decoy Name
+    // field on the same object. The phrase "social security number" must
+    // collapse to the `ssn` token so Student_SSN__c wins over Student_Name__c
+    // (whose "name"≈"number" fuzz used to float it above the SSN field).
+    makeNode({ id: 'CustomObject:Student__c', apiName: 'Student__c', label: 'Student' }),
+    makeNode({ id: 'CustomField:Student__c.Student_SSN__c', type: 'CustomField', apiName: 'Student_SSN__c', label: 'Student SSN', parentId: 'CustomObject:Student__c' }),
+    makeNode({ id: 'CustomField:Student__c.Student_Name__c', type: 'CustomField', apiName: 'Student_Name__c', label: 'Student Name', parentId: 'CustomObject:Student__c' }),
+    // Corpus over-collapse decoy (F1 negative): a field literally labeled
+    // "Social Media Campaign". The phrase pass must NOT collapse this corpus
+    // label to `ssn`, or "social media campaign" queries would wrongly hit the
+    // SSN field.
+    makeNode({ id: 'CustomObject:Campaign', apiName: 'Campaign', label: 'Campaign' }),
+    makeNode({ id: 'CustomField:Campaign.Social_Media_Campaign__c', type: 'CustomField', apiName: 'Social_Media_Campaign__c', label: 'Social Media Campaign', parentId: 'CustomObject:Campaign' }),
+    // QA-Bundle-2 (resolve): an object with MULTIPLE same-object `*Status__c`
+    // siblings whose names share the parent-object token. Querying the LITERAL
+    // field api name "Deal_Status__c" makes every sibling reach base 1.0 — its own
+    // `status` suffix token matches, and the query's `deal` token earns
+    // PARENT-credit for the shared parent object — so the siblings tie the
+    // literal-name hit on SCORE and inflated the contender count to `ambiguous`,
+    // blocking the resolve-first cascade. A sole whole-name-exact (or dotted
+    // Object.Field) hit must stay `exact`. (Neutral name `Deal__c` so it does not
+    // collide with the `opportunity` token of the long __mdt above.)
+    makeNode({ id: 'CustomObject:Deal__c', apiName: 'Deal__c', label: 'Deal' }),
+    makeNode({ id: 'CustomField:Deal__c.Deal_Status__c', type: 'CustomField', apiName: 'Deal_Status__c', label: 'Deal Status', parentId: 'CustomObject:Deal__c' }),
+    makeNode({ id: 'CustomField:Deal__c.Forecast_Status__c', type: 'CustomField', apiName: 'Forecast_Status__c', label: 'Forecast Status', parentId: 'CustomObject:Deal__c' }),
+    makeNode({ id: 'CustomField:Deal__c.Approval_Status__c', type: 'CustomField', apiName: 'Approval_Status__c', label: 'Approval Status', parentId: 'CustomObject:Deal__c' }),
+    makeNode({ id: 'CustomField:Deal__c.Review_Status__c', type: 'CustomField', apiName: 'Review_Status__c', label: 'Review Status', parentId: 'CustomObject:Deal__c' }),
   ],
   edges: [
     // parentOf structure
@@ -187,6 +223,32 @@ describe('resolveComponents — semantic (synonyms)', () => {
     if (!r.ok) return;
     const ids = r.value.candidates.map((c) => c.id);
     expect(ids.some((id) => id.endsWith('Owner__c'))).toBe(true);
+  });
+});
+
+describe('resolveComponents — phrase synonyms (F1)', () => {
+  it('collapses "social security number" to the SSN field, not the Name decoy', async () => {
+    const r = await resolveComponents(
+      store,
+      'the student social security number field',
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Student_SSN__c must be the top candidate (exact/ambiguous-top), not buried
+    // under Student_Name__c (number≈name fuzz). Disposition must NOT be 'none'.
+    expect(r.value.candidates[0]?.id).toBe('CustomField:Student__c.Student_SSN__c');
+    expect(r.value.disposition).not.toBe('none');
+  });
+
+  it('does NOT collapse a "social media" query onto the SSN field (negative)', async () => {
+    const r = await resolveComponents(store, 'social media campaign field');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const top = r.value.candidates[0]?.id ?? '';
+    expect(top).not.toBe('CustomField:Student__c.Student_SSN__c');
+    // The intended corpus field should surface instead.
+    const allIds = r.value.candidates.map((c) => c.id);
+    expect(allIds).toContain('CustomField:Campaign.Social_Media_Campaign__c');
   });
 });
 
@@ -355,6 +417,72 @@ describe('resolveComponents — disposition', () => {
     const top2 = r.value.candidates.slice(0, 2).map((c) => c.id);
     expect(top2).toContain('CustomField:Account.Email__c');
     expect(top2).toContain('CustomField:Contact.Email__c');
+  });
+
+  it('reports a sole whole-name-exact field as exact even when a same-object sibling is parent-matched (Payment_Status__c)', async () => {
+    // QA batch 5: querying the LITERAL field API name "Payment_Status__c" is a
+    // definitive hit on CustomField:Payment__c.Payment_Status__c. But the name's
+    // own `payment` token incidentally names its PARENT object (Payment__c), which
+    // flags the genuine same-object sibling Payment_Amount__c as `parentMatched`.
+    // The parent-credit contender rule then inflated the contender count and
+    // demoted this literal-name match to `ambiguous` (the resolve-returns-
+    // ambiguous-on-exact-field bug). A sole whole-name-exact top must stay `exact`.
+    const r = await resolveComponents(store, 'Payment_Status__c');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.candidates[0]?.id).toBe(
+      'CustomField:Payment__c.Payment_Status__c',
+    );
+    expect(r.value.candidates[0]?.matchKind).toBe('exact');
+    expect(r.value.disposition).toBe('exact');
+  });
+
+  it('resolves a literal field api name exact despite multiple score-tied same-object siblings (Deal_Status__c)', async () => {
+    // QA-Bundle-2: Opportunity has four `*Status__c` fields. The query is the
+    // LITERAL api name of one of them. Each sibling reaches base 1.0 (own `status`
+    // token + parent-credit on `opportunity`) and the SAME score, so they tied the
+    // literal-name hit on the contender-score band and demoted it to `ambiguous`,
+    // blocking the resolve-first cascade. A sole whole-name-exact top owns the
+    // answer — only ANOTHER whole-name-exact match could make it ambiguous.
+    const r = await resolveComponents(store, 'Deal_Status__c');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.candidates[0]?.id).toBe(
+      'CustomField:Deal__c.Deal_Status__c',
+    );
+    expect(r.value.candidates[0]?.matchKind).toBe('exact');
+    expect(r.value.disposition).toBe('exact');
+  });
+
+  it('resolves the dotted Object.Field form exact over same-object siblings (Deal__c.Deal_Status__c)', async () => {
+    // The dotted Object.Field form names BOTH the parent object and the field's
+    // literal name — the most specific reference. It used to fall to the
+    // parent-aware token path (a dotted query never whole-name-matches a dotless
+    // field name) and be reported `ambiguous` against the `*Status__c` siblings.
+    // A candidate whose parent AND own name both equal the dotted parts is a
+    // definitive `exact` hit.
+    const r = await resolveComponents(store, 'Deal__c.Deal_Status__c');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.candidates[0]?.id).toBe(
+      'CustomField:Deal__c.Deal_Status__c',
+    );
+    expect(r.value.disposition).toBe('exact');
+  });
+
+  it('resolves a full canonical id exact (CustomField:Deal__c.Deal_Status__c)', async () => {
+    // A caller may pass the canonical id verbatim. The leading `Type:` segment is
+    // stripped and the dotted Object.Field tail resolves exact, not ambiguous.
+    const r = await resolveComponents(
+      store,
+      'CustomField:Deal__c.Deal_Status__c',
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.candidates[0]?.id).toBe(
+      'CustomField:Deal__c.Deal_Status__c',
+    );
+    expect(r.value.disposition).toBe('exact');
   });
 
   it('returns disposition none for gibberish', async () => {

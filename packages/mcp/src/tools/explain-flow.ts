@@ -64,6 +64,9 @@
  *     surface as warnings; the renderer simply sees fewer rows.
  */
 
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+
 import type {
   ComponentId,
   Edge,
@@ -148,15 +151,33 @@ export interface ExplainFlowTriggerInfo {
 }
 
 /**
- * One action call the Flow makes. The target is the
- * `ApexClass:{ApiName}` (or other callable) the `<actionCalls>`
- * element references; `targetType` carries the resolved node's type
- * so the renderer can pick a rendering ("calls Apex MyClass" vs
- * "calls component MyAction").
+ * One action call the Flow makes.
+ *
+ * For apex-typed calls (`actionType: 'apex'`): `targetId` is the
+ * `ApexClass:{ApiName}` canonical id the `<actionCalls>` element references;
+ * `targetType` is `'ApexClass'` (resolved from the graph node when it exists).
+ *
+ * For non-apex action types (`actionType: 'activateSessionPermSet'`,
+ * `'emailAlert'`, `'emailSimple'`, `'flow'`, etc.): `targetId` is the bare
+ * `actionName` from the XML (no graph node exists for them — emitting a
+ * `callsApex` edge to an ApexClass would be a lie); `targetType` is the
+ * `actionType` string. The `actionType` field is ALWAYS present so consumers
+ * can branch on it:
+ *   - `'apex'` → the Apex class `targetId` references exists in the graph.
+ *   - `'activateSessionPermSet'` → a TRANSIENT session-permission activation,
+ *     no PermissionSetAssignment row is inserted, so an "orphaned grant"
+ *     scenario is structurally impossible.
+ *   - other values → platform-managed action (email, flow call, etc.).
  */
 export interface ExplainFlowActionCall {
-  readonly targetId: ComponentId;
+  readonly targetId: ComponentId | string;
   readonly targetType: string;
+  /**
+   * The raw `<actionType>` value from the flow XML (e.g. `'apex'`,
+   * `'activateSessionPermSet'`, `'emailAlert'`). Always present so the consumer
+   * can identify non-apex action types even when no graph edge exists.
+   */
+  readonly actionType: string;
 }
 
 /**
@@ -204,6 +225,87 @@ export interface ExplainFlowDecision {
   readonly fieldReferences: readonly string[];
 }
 
+/**
+ * The Flow's runtime execution context — the load-bearing facts a caller needs
+ * to answer "what user / sharing context does this Flow run in, and what
+ * happens when a step faults". Surfaced so the host composes the answer from
+ * the DECLARED metadata instead of fabricating platform-semantics inferences
+ * (the two common fabrications: "a subflow inherits the calling flow's
+ * context", and "$User in a triggered flow resolves to the integration/system
+ * user" — both wrong; see `runModeNote`).
+ */
+export interface ExplainFlowExecutionContext {
+  /**
+   * The Flow's declared `<runInMode>` verbatim (e.g.
+   * `SystemModeWithoutSharing`, `SystemModeWithSharing`, `DefaultMode`), or
+   * `null` when the metadata omits it. `DefaultMode` (and a missing value for
+   * most flow types) means the Flow runs in the running USER's context and
+   * enforces that user's CRUD/FLS/sharing; the System modes run with full
+   * access and bypass FLS/CRUD (sharing depends on the With/Without variant).
+   */
+  readonly runInMode: string | null;
+  /**
+   * True when one or more DML/lookup-capable elements have no
+   * `<faultConnector>` (an unhandled fault path). An unhandled fault in an
+   * autolaunched/record-triggered flow running synchronously inside the
+   * triggering transaction rolls back the ENTIRE transaction (including the
+   * triggering record's save), not just the flow.
+   */
+  readonly hasUnhandledFaults: boolean;
+  /** Count of fault-capable elements with no fault connector (0 when all handled). */
+  readonly unhandledFaultElementCount: number;
+  /**
+   * Verbatim platform-semantics note correcting the two common fabrications.
+   * Always present so the host never substitutes a wrong inference.
+   */
+  readonly runModeNote: string;
+  /**
+   * A DETERMINATE, structured answer to "if this flow faults at an unhandled
+   * element, does that roll back the triggering transaction?" — composed from
+   * `hasUnhandledFaults` and the trigger type, so the host never has to (and
+   * never gets to) DECLINE this question as "not captured". `null` only when
+   * the flow has no unhandled fault path (`hasUnhandledFaults: false`).
+   */
+  readonly faultRollback: FaultRollbackVerdict | null;
+  /**
+   * Present only when `runInMode` is `SystemModeWithoutSharing`. Surfaces the
+   * security implication that this mode bypasses the ENTIRE Salesforce sharing
+   * stack — including Restriction Rules — so the flow can read and write records
+   * that Restriction Rules would otherwise hide from the running user (or any
+   * user). Absent for `SystemModeWithSharing` and `DefaultMode` because those
+   * modes respect the sharing stack.
+   *
+   * This is a load-bearing security fact: an LLM host must not suppress or
+   * soften it when it is present.
+   */
+  readonly sharingBypassNote?: string;
+}
+
+/**
+ * Whether an unhandled fault in THIS flow rolls back the originating
+ * transaction, with the rationale.
+ *
+ * `rollsBackTransaction: true` for any flow whose unhandled-fault element runs
+ * synchronously inside the originating transaction:
+ *   - record-triggered before/after-save and autolaunched/scheduled/platform-
+ *     event flows that fault in the SAME transaction as the triggering save;
+ *   - a user-driven screen flow — the fault rolls back all DML performed since
+ *     the last screen navigation (the current screen-segment transaction) and
+ *     shows the running user a flow error screen.
+ *
+ * `rollsBackTransaction: false` for an unhandled fault in a POST-COMMIT ASYNC
+ * path (an `AsyncAfterCommit` scheduled path on a record-triggered flow): that
+ * interview runs in a SEPARATE asynchronous transaction after the triggering
+ * save has already committed, so it cannot roll the committed save back. The
+ * fault is not user-visible — it silently aborts the async interview (discarding
+ * its intended work, e.g. a task or email) and emails only the admin / Apex-
+ * exception recipient.
+ */
+export interface FaultRollbackVerdict {
+  readonly rollsBackTransaction: boolean;
+  readonly statement: string;
+}
+
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface ExplainFlowOutput {
   readonly flowId: ComponentId;
@@ -211,6 +313,7 @@ export interface ExplainFlowOutput {
   readonly label: string;
   readonly status: string;
   readonly processType: string;
+  readonly executionContext: ExplainFlowExecutionContext;
   readonly triggerInfo: ExplainFlowTriggerInfo;
   readonly actionCalls: readonly ExplainFlowActionCall[];
   readonly recordLookups: readonly ExplainFlowRecordLookup[];
@@ -231,6 +334,261 @@ export interface ExplainFlowOutput {
 /** Verbatim P4-flow-conditions runtime-evaluation heuristic flag. */
 const CONDITIONS_RUNTIME_NOTE =
   'Decision and trigger conditions are the statically-declared criteria from the Flow metadata (heuristic) — NOT a runtime trace. Whether a given path executes is data-dependent at runtime and is not evaluated here; treat the conditions as the declared rules, not proof a branch runs.';
+
+/**
+ * Verbatim platform-semantics note for the execution-context block. Corrects
+ * the two recurring run-mode fabrications and states the load-bearing rules:
+ *   - A CALLED SUBFLOW runs in its OWN declared `runInMode`, independent of the
+ *     calling flow's context — it does NOT inherit the parent's user context.
+ *   - A record-triggered flow runs as the user whose DML triggered the save;
+ *     `$User` (and `$User.Id` in validation rules/formulas) resolves to that
+ *     RUNNING user, never automatically the integration/system user.
+ *   - `DefaultMode` (and the default for screen flows) enforces the running
+ *     user's CRUD/FLS/sharing; license type does not define a separate FLS.
+ *   - An unhandled fault in a synchronous autolaunched/record-triggered flow
+ *     rolls back the WHOLE triggering transaction, not just the flow.
+ */
+const RUN_MODE_NOTE =
+  'Run-mode semantics (Salesforce platform rules, not a runtime trace): a CALLED SUBFLOW executes in its OWN declared runInMode, independent of the calling flow — it does NOT inherit the parent flow\'s user context. A record-triggered flow runs as the user whose DML triggered the save; $User (incl. $User.Id referenced by validation rules/formulas) resolves to that RUNNING user, never automatically the integration or system user. DefaultMode (and screen-flow default) runs in the running user\'s context and enforces that user\'s CRUD/FLS/sharing — there is no separate license-type FLS. SystemModeWithoutSharing/WithSharing run with full field access (bypassing FLS/CRUD); sharing depends on the With/Without variant. An unhandled fault (hasUnhandledFaults) in a synchronous autolaunched/record-triggered flow rolls back the ENTIRE triggering transaction, including the record save, not just the flow. A Draft/inactive flow cannot be invoked as a subflow by an active parent at runtime until activated.';
+
+/**
+ * Read the Flow's declared `runInMode` property. Returns `null` when the
+ * metadata omits it (the extractor stamps `null` for flows without a
+ * `<runInMode>` element).
+ */
+const readRunInMode = (node: Node): string | null => {
+  const raw = node.properties['runInMode'];
+  return typeof raw === 'string' && raw.length > 0 ? raw : null;
+};
+
+/** Read a non-negative integer flow property, defaulting to 0. */
+const readFlowNonNegInt = (node: Node, key: string): number => {
+  const raw = node.properties[key];
+  return typeof raw === 'number' && Number.isFinite(raw) && raw >= 0
+    ? Math.floor(raw)
+    : 0;
+};
+
+/**
+ * Build the execution-context block from the Flow node's extracted
+ * `runInMode` / fault-coverage properties (see flow.ts extractor).
+ *
+ * When the node's in-graph properties do not carry the async-path markers
+ * (vault built before bundle-4), this function falls back to scanning the
+ * source `.flow-meta.xml` file via {@link readAsyncAfterCommitFromSource}.
+ * The `vaultRoot` is only accessed on that fallback path; no I/O is done when
+ * the in-graph properties are present and sufficient.
+ */
+const buildExecutionContext = async (
+  node: Node,
+  vaultRoot: string,
+): Promise<ExplainFlowExecutionContext> => {
+  const hasUnhandledFaults = node.properties['hasUnhandledFaults'] === true;
+  let faultRollback: FaultRollbackVerdict | null = null;
+  if (hasUnhandledFaults) {
+    // Check in-graph properties first (fast, no I/O).
+    const asyncFromGraph = hasAsyncAfterCommitPath(node);
+    // Source-file fallback for vaults built before bundle-4 that lack the
+    // scheduledPathTypes / runAsyncAfterCommit properties.
+    const isAsync =
+      asyncFromGraph ||
+      (!asyncFromGraph &&
+        (await readAsyncAfterCommitFromSource(vaultRoot, node)));
+    faultRollback = buildFaultRollback(node, isAsync);
+  }
+  const runInMode = readRunInMode(node);
+  return {
+    runInMode,
+    hasUnhandledFaults,
+    unhandledFaultElementCount: readFlowNonNegInt(node, 'elementsWithoutFault'),
+    runModeNote: RUN_MODE_NOTE,
+    faultRollback,
+    ...(runInMode === 'SystemModeWithoutSharing' && {
+      sharingBypassNote:
+        'SECURITY: This flow runs in SystemModeWithoutSharing, which bypasses the ENTIRE Salesforce sharing stack — including OWD, sharing rules, manual shares, AND Restriction Rules. It can read and write records that Restriction Rules would hide from any user. Review all DML/SOQL elements for unintended data exposure.',
+    }),
+  };
+};
+
+/**
+ * Detect whether the flow has an `AsyncAfterCommit` scheduled path — a
+ * record-triggered flow path that runs in a SEPARATE asynchronous transaction
+ * AFTER the triggering save has committed. An unhandled fault on such a path
+ * cannot roll back the already-committed save.
+ *
+ * Three property shapes are accepted (the extractor surfaces one or more):
+ *
+ *   1. `runAsyncAfterCommit: true` — the convenience boolean stamped by the
+ *      extractor when at least one `<scheduledPaths><pathType>` is
+ *      `AsyncAfterCommit` (bundle-4 / extractor v2).
+ *   2. `scheduledPathTypes: string[]` — the canonical extractor array (e.g.
+ *      `['AsyncAfterCommit']`). Checked before the legacy `scheduledPaths`
+ *      shape so that vaults built with the current extractor fast-path here.
+ *   3. `scheduledPaths` array — object-per-path shape used by older vault
+ *      builds or test fixtures (`[{ pathType: 'AsyncAfterCommit' }]`); also
+ *      accepts bare string entries.
+ *   4. Scalar `pathType` directly on the node (uncommon, kept for compat).
+ *
+ * When none of the above properties are present (vault built before bundle-4),
+ * the caller should supply the absolute source-file path so that this function
+ * can fall back to a raw XML substring scan — see {@link readAsyncAfterCommitFromSource}.
+ *
+ * The `pathType` marker Salesforce uses for the immediate post-commit async
+ * path is `AsyncAfterCommit`.
+ */
+const ASYNC_AFTER_COMMIT = 'AsyncAfterCommit';
+
+const hasAsyncAfterCommitPath = (node: Node): boolean => {
+  if (node.properties['runAsyncAfterCommit'] === true) return true;
+  const scalar = node.properties['pathType'];
+  if (typeof scalar === 'string' && scalar === ASYNC_AFTER_COMMIT) return true;
+  // scheduledPathTypes: string[] — the canonical extractor property (bundle-4).
+  const pathTypes = node.properties['scheduledPathTypes'];
+  if (Array.isArray(pathTypes)) {
+    for (const pt of pathTypes) {
+      if (typeof pt === 'string' && pt === ASYNC_AFTER_COMMIT) return true;
+    }
+  }
+  // scheduledPaths: object-per-path or string array — older vault builds / test fixtures.
+  const paths = node.properties['scheduledPaths'];
+  if (Array.isArray(paths)) {
+    for (const entry of paths) {
+      if (typeof entry === 'string' && entry === ASYNC_AFTER_COMMIT) return true;
+      if (typeof entry === 'object' && entry !== null) {
+        const pt = (entry as Record<string, unknown>)['pathType'];
+        if (typeof pt === 'string' && pt === ASYNC_AFTER_COMMIT) return true;
+      }
+    }
+  }
+  return false;
+};
+
+/**
+ * Source-file XML fallback for detecting `AsyncAfterCommit` scheduled paths
+ * when the vault was built with an older extractor that did not stamp
+ * `scheduledPathTypes` / `runAsyncAfterCommit` onto the node. Reads the raw
+ * `.flow-meta.xml` file and performs a fast substring search for the
+ * `<pathType>AsyncAfterCommit</pathType>` element that Salesforce emits in
+ * `<start><scheduledPaths>` for the immediate post-commit async path.
+ *
+ * This is a READ-ONLY, fire-and-forget fallback: any I/O failure silently
+ * returns `false` (safe: the caller will then fall through to the synchronous
+ * verdict, which errs on the cautious side for rollback analysis). The check
+ * does not re-parse the XML; the substring `AsyncAfterCommit` is unique enough
+ * in a flow file that a raw text scan is both fast and unambiguous.
+ *
+ * Call ONLY after {@link hasAsyncAfterCommitPath} returns `false` — i.e. when
+ * all in-graph property checks have already failed. The `sourcePath` on the
+ * node is vault-root-relative (e.g.
+ * `source/main/default/flows/My_Flow.flow-meta.xml`); `vaultRoot` is the
+ * absolute path to the `org-kb/` directory so the two can be joined.
+ */
+const readAsyncAfterCommitFromSource = async (
+  vaultRoot: string,
+  node: Node,
+): Promise<boolean> => {
+  if (typeof node.sourcePath !== 'string' || node.sourcePath.length === 0) {
+    return false;
+  }
+  try {
+    const absPath = join(vaultRoot, node.sourcePath);
+    const xml = await readFile(absPath, 'utf-8');
+    return xml.includes(`<pathType>${ASYNC_AFTER_COMMIT}</pathType>`);
+  } catch {
+    // I/O error (file missing, permission, etc.) — safe to ignore.
+    return false;
+  }
+};
+
+/**
+ * Compose the determinate fault-rollback verdict from the flow's trigger type
+ * and execution timing.
+ *
+ *   - A POST-COMMIT ASYNC path (`AsyncAfterCommit` scheduled path on a
+ *     record-triggered flow) runs in its OWN async transaction after the
+ *     triggering save has committed → it CANNOT roll the committed save back
+ *     (`rollsBackTransaction: false`); the fault silently aborts the async
+ *     interview and emails only the admin / Apex-exception recipient.
+ *   - A screen flow's unhandled fault rolls back the DML performed in the
+ *     CURRENT screen segment (since the last screen navigation) and shows the
+ *     user a flow error screen (`rollsBackTransaction: true`).
+ *   - Record-triggered (before/after-save) and autolaunched/scheduled/platform-
+ *     event flows that fault synchronously inside the triggering transaction
+ *     roll the WHOLE transaction back (the triggering DML fails too).
+ *
+ * @param isAsync - Whether this flow has an AsyncAfterCommit scheduled path.
+ *   Pre-computed by the caller (combining in-graph property checks and the
+ *   source-file XML fallback) so this function stays pure and synchronous.
+ */
+const buildFaultRollback = (node: Node, isAsync: boolean): FaultRollbackVerdict => {
+  const triggerType =
+    typeof node.properties['triggerType'] === 'string'
+      ? (node.properties['triggerType'] as string)
+      : null;
+  const processType =
+    typeof node.properties['processType'] === 'string'
+      ? (node.properties['processType'] as string)
+      : null;
+  // Post-commit async path: a separate async transaction that runs AFTER the
+  // triggering save committed. An unhandled fault here cannot undo the commit —
+  // it silently aborts the async interview and notifies only the admin.
+  if (isAsync) {
+    return {
+      rollsBackTransaction: false,
+      statement:
+        'This flow has an asynchronous post-commit path (an AsyncAfterCommit scheduled path) with an unhandled fault. ' +
+        'That path runs in a SEPARATE asynchronous transaction AFTER the triggering record save has already committed, so an unhandled fault there does NOT roll back the committed save — the save stands. ' +
+        'The fault is not user-visible: it silently aborts the async interview (discarding the work it intended to do, e.g. an intended task or email) and emails only the admin / Apex-exception recipient. ' +
+        '(Contrast with a synchronous predecessor running in the same transaction, which WOULD roll the triggering save back.)',
+    };
+  }
+  // Screen flow: user-driven interview. An unhandled fault still rolls back the
+  // DML performed since the last screen navigation (the current screen segment),
+  // and shows the running user a flow error screen.
+  const isScreenFlow =
+    processType === 'Flow' &&
+    (triggerType === null || triggerType === 'None');
+  if (isScreenFlow) {
+    return {
+      rollsBackTransaction: true,
+      statement:
+        'This is a screen (user-driven) flow with an unhandled fault path. ' +
+        'An unhandled fault rolls back ALL DML performed since the last screen navigation — the current screen-segment transaction (e.g. a ContentDocumentLink insert and a record update done on the same screen roll back together) — and shows the running user a flow error screen. ' +
+        'Work committed by earlier screens (before the last navigation) is already saved and is not affected. ' +
+        'A screen flow runs in DefaultMode (the running user\'s context) when runInMode is null, so permission gaps surface as faults at the DML/query steps, not at in-memory decision elements.',
+    };
+  }
+  // Scheduled (autolaunched-on-a-schedule) flow: there is no triggering user
+  // DML transaction. An unhandled fault aborts that scheduled run's transaction
+  // (rolling back the DML it performed in that run) and emails the admin /
+  // last-modifier; it is not user-visible and the flow simply runs again on its
+  // next scheduled interval. Keep rollsBackTransaction=true (the run's own DML
+  // is rolled back) but DON'T claim a triggering-record save failed — there is
+  // none on a schedule-launched run.
+  if (triggerType === 'Scheduled') {
+    return {
+      rollsBackTransaction: true,
+      statement:
+        'This is a scheduled (autolaunched) flow with an unhandled fault path (no fault connector). ' +
+        'A scheduled run is not launched by a user DML transaction, so there is no triggering record save to fail. ' +
+        'An unhandled fault rolls back the DML that run performed and aborts the run; it does NOT surface to an end user — the platform emails the flow error to the admin / last modifier, and the flow runs again on its next scheduled interval.',
+    };
+  }
+  const phase =
+    triggerType === 'RecordAfterSave'
+      ? 'after-save record-triggered'
+      : triggerType === 'RecordBeforeSave'
+        ? 'before-save record-triggered'
+        : triggerType !== null && triggerType.startsWith('Record')
+          ? 'record-triggered'
+          : 'autolaunched/scheduled';
+  return {
+    rollsBackTransaction: true,
+    statement:
+      `This is a synchronous ${phase} flow with an unhandled fault path (no fault connector). ` +
+      'If it faults at an unhandled element, the platform raises a surfaced unhandled-fault runtime error that rolls back the ENTIRE originating transaction — the triggering record save fails too, not just the flow; any records the flow created in the same transaction are never committed.',
+  };
+};
 
 /**
  * Pull the Flow's `label` property. The extractor stamps the label
@@ -355,14 +713,107 @@ const stripObjectPrefix = (id: ComponentId): string => {
 };
 
 /**
- * Collect the Flow's outgoing `callsApex` edges and project each into
- * an `ExplainFlowActionCall` row. The `targetType` is resolved from
- * the target node when it exists; sparse-graph misses default to the
- * target id's prefix (e.g., `ApexClass:Foo` → `'ApexClass'`).
+ * A single action-call summary as written to `properties.actionCalls` by the
+ * extractor (bundle-4a). A nullable-string pair matching the extractor's
+ * `FlowActionCallSummary` interface without importing that package.
+ */
+interface ActionCallSummary {
+  readonly actionType: string | null;
+  readonly actionName: string | null;
+}
+
+/**
+ * Read the `properties.actionCalls` summary list from a Flow node (stamped by
+ * the extractor's `collectActionCallSummaries` call). Returns an empty array
+ * when the property is absent (vault built before bundle-4a).
+ */
+const readActionCallSummariesFromNode = (node: Node): ActionCallSummary[] => {
+  const raw = node.properties['actionCalls'];
+  if (!Array.isArray(raw)) return [];
+  const out: ActionCallSummary[] = [];
+  for (const item of raw) {
+    if (typeof item !== 'object' || item === null) continue;
+    const obj = item as Record<string, unknown>;
+    const actionType =
+      typeof obj['actionType'] === 'string' ? obj['actionType'] : null;
+    const actionName =
+      typeof obj['actionName'] === 'string' ? obj['actionName'] : null;
+    out.push({ actionType, actionName });
+  }
+  return out;
+};
+
+/**
+ * Source-file XML fallback for collecting `<actionCalls>` summaries when
+ * the vault was built with an older extractor that did not stamp
+ * `properties.actionCalls`. Reads the raw `.flow-meta.xml` file and extracts
+ * all `<actionType>` / `<actionName>` pairs via a lightweight regex scan (no
+ * re-parse of the full XML — fast and sufficient for action-call identification).
+ *
+ * Any I/O failure silently returns an empty array (safe: the caller falls back
+ * to a `callsApex`-edge-only answer, which is already the pre-fix behaviour).
+ *
+ * Call ONLY after `readActionCallSummariesFromNode` returns `[]` — i.e. when
+ * `properties.actionCalls` is absent from the in-graph node.
+ */
+const readActionCallSummariesFromSource = async (
+  vaultRoot: string,
+  node: Node,
+): Promise<ActionCallSummary[]> => {
+  if (typeof node.sourcePath !== 'string' || node.sourcePath.length === 0) {
+    return [];
+  }
+  try {
+    const absPath = join(vaultRoot, node.sourcePath);
+    const xml = await readFile(absPath, 'utf-8');
+    // Split on <actionCalls> blocks and extract actionType + actionName per block.
+    const out: ActionCallSummary[] = [];
+    // Each <actionCalls>…</actionCalls> block is a single action call element.
+    const blockPattern = /<actionCalls>([\s\S]*?)<\/actionCalls>/g;
+    let blockMatch: RegExpExecArray | null;
+    while ((blockMatch = blockPattern.exec(xml)) !== null) {
+      const block = blockMatch[1] ?? '';
+      const typeMatch = /<actionType>([^<]*)<\/actionType>/.exec(block);
+      const nameMatch = /<actionName>([^<]*)<\/actionName>/.exec(block);
+      out.push({
+        actionType: typeMatch?.[1]?.trim() ?? null,
+        actionName: nameMatch?.[1]?.trim() ?? null,
+      });
+    }
+    return out;
+  } catch {
+    // I/O error or parse failure — safe to ignore, return empty.
+    return [];
+  }
+};
+
+/**
+ * Collect the Flow's outgoing `callsApex` edges and project each into an
+ * `ExplainFlowActionCall` row. The `targetType` is resolved from the target
+ * node when it exists; sparse-graph misses default to the target id's prefix
+ * (e.g., `ApexClass:Foo` → `'ApexClass'`).
+ *
+ * ALSO surfaces non-apex action types (e.g. `activateSessionPermSet`,
+ * `emailAlert`, `flow`) that the extractor records in `properties.actionCalls`
+ * but never emits a `callsApex` edge for. The merge strategy:
+ *
+ *   1. Query `callsApex` edges → one row per apex call (with a resolved
+ *      `targetId` in `ApexClass:{ApiName}` form).
+ *   2. Read the `properties.actionCalls` summary list from the node (or fall
+ *      back to a raw XML scan for pre-bundle-4a vaults).
+ *   3. For every summary whose `actionType` is NOT `'apex'`, push a row where
+ *      `targetId` is the bare `actionName` (no graph node exists for these
+ *      types) and `targetType` is the `actionType` string.
+ *   4. Apex entries in the summary list are SKIPPED — they are already covered
+ *      by the `callsApex` edge rows (which carry a richer resolved `targetId`).
+ *
+ * Source order is preserved: apex calls (from edges, sorted by toId per the
+ * graph contract) come first, followed by non-apex calls in source order.
  */
 const collectActionCalls = async (
   ctx: Context,
   flowId: ComponentId,
+  node: Node,
 ): Promise<Result<readonly ExplainFlowActionCall[], string>> => {
   const edgesResult = await listEdges(ctx.graph, flowId, {
     direction: 'out',
@@ -377,8 +828,27 @@ const collectActionCalls = async (
       nodeResult.value !== null
         ? nodeResult.value.type
         : prefixOf(edge.toId);
-    out.push({ targetId: edge.toId, targetType });
+    out.push({ targetId: edge.toId, targetType, actionType: 'apex' });
   }
+
+  // Merge non-apex action calls from the node properties (or source-file
+  // fallback). These are action types the extractor recognised as faultable
+  // but never emits a `callsApex` edge for (e.g. activateSessionPermSet).
+  let summaries = readActionCallSummariesFromNode(node);
+  if (summaries.length === 0) {
+    // Vault built before bundle-4a — fall back to raw XML scan.
+    summaries = await readActionCallSummariesFromSource(ctx.vaultRoot, node);
+  }
+  for (const s of summaries) {
+    if (s.actionType === 'apex') continue; // Already covered by callsApex edges.
+    if (s.actionType === null) continue;
+    out.push({
+      targetId: s.actionName ?? '',
+      targetType: s.actionType,
+      actionType: s.actionType,
+    });
+  }
+
   return ok(out);
 };
 
@@ -615,7 +1085,7 @@ export const explainFlowHandler = async (
   if (!conditionsResult.ok) {
     return err({ kind: 'internal', message: conditionsResult.error });
   }
-  const actionCallsResult = await collectActionCalls(ctx, flowId);
+  const actionCallsResult = await collectActionCalls(ctx, flowId, node);
   if (!actionCallsResult.ok) {
     return err({ kind: 'internal', message: actionCallsResult.error });
   }
@@ -634,6 +1104,7 @@ export const explainFlowHandler = async (
     label: readFlowLabel(node),
     status: readFlowStatus(node),
     processType: readFlowProcessType(node),
+    executionContext: await buildExecutionContext(node, ctx.vaultRoot),
     triggerInfo: {
       triggerType: readFlowTriggerType(node),
       triggerObject: triggerObjectResult.value,

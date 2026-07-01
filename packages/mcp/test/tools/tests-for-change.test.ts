@@ -69,6 +69,9 @@ const seed: ExtractionResult = {
     makeNode({ id: 'ApexClass:SharedHelperTest', apiName: 'SharedHelperTest', properties: { isTest: true } }),
     makeNode({ id: 'ApexClass:PricingEngineTest', apiName: 'PricingEngineTest', properties: { isTest: true } }),
     makeNode({ id: 'ApexClass:BatchTest', apiName: 'BatchTest', properties: { isTest: true } }),
+    // A test with a spurious edge INTO OrderServiceTest — must never be credited
+    // with covering OrderService (it does not reference it).
+    makeNode({ id: 'ApexClass:FabricatedTest', apiName: 'FabricatedTest', properties: { isTest: true } }),
   ],
   edges: [
     makeEdge({ fromId: 'ApexClass:OrderServiceTest', toId: 'ApexClass:OrderService', edgeType: 'callsApex' }),
@@ -77,6 +80,13 @@ const seed: ExtractionResult = {
     makeEdge({ fromId: 'ApexClass:Mid', toId: 'ApexClass:PricingEngine', edgeType: 'callsApex' }),
     makeEdge({ fromId: 'ApexClass:PricingEngineTest', toId: 'ApexClass:Mid', edgeType: 'callsApex' }),
     makeEdge({ fromId: 'ApexClass:BatchTest', toId: 'ApexClass:OrderBatch', edgeType: 'dispatchesAsync' }),
+    // FABRICATION GUARD: a spurious incoming edge INTO a test node. OrderServiceTest
+    // legitimately covers OrderService (depth 1). FabricatedTest has an edge into
+    // OrderServiceTest — nothing legitimately calls a test, so the walk must NOT
+    // traverse THROUGH OrderServiceTest and credit FabricatedTest with covering
+    // OrderService. This mirrors the real ApplicationFormControllerTest ->
+    // ApplicationSelector fabrication.
+    makeEdge({ fromId: 'ApexClass:FabricatedTest', toId: 'ApexClass:OrderServiceTest', edgeType: 'callsApex' }),
   ],
 };
 
@@ -219,7 +229,24 @@ describe('testsForChangeHandler', () => {
     expect(ids).toEqual([...ids].sort());
   });
 
-  it('surfaces the verbatim honesty disclosure', async () => {
+  it('does NOT credit a test reachable only by walking THROUGH another test (no fabricated path)', async () => {
+    const r = await testsForChangeHandler(ctx, {
+      changedComponents: ['ApexClass:OrderService'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ids = r.value.data.selectedTests.map((t) => t.id);
+    // Legit direct covering tests are present...
+    expect(ids).toContain('ApexClass:OrderServiceTest');
+    expect(ids).toContain('ApexClass:SharedHelperTest');
+    // ...but FabricatedTest, reachable only via a spurious edge INTO
+    // OrderServiceTest, must NOT be counted (a test is a coverage sink).
+    expect(ids).not.toContain('ApexClass:FabricatedTest');
+    const perChange = r.value.data.perChange.find((p) => p.id === 'ApexClass:OrderService');
+    expect(perChange?.coveringTests.map((c) => c.id)).not.toContain('ApexClass:FabricatedTest');
+  });
+
+  it('surfaces the verbatim honesty disclosure including the system-FLS / SECURITY_ENFORCED caveat', async () => {
     const r = await testsForChangeHandler(ctx, {
       changedComponents: ['ApexClass:OrderService'],
     });
@@ -228,6 +255,10 @@ describe('testsForChangeHandler', () => {
     expect(r.value.data.disclosure).toMatch(/CLASS granularity/);
     expect(r.value.data.disclosure).toMatch(/depth 3/);
     expect(r.value.data.disclosure).toMatch(/UNGUARDED/);
+    // Golden: selection ≠ validation, and .size() assertions cannot catch a
+    // WITH SECURITY_ENFORCED regression because tests run with system FLS.
+    expect(r.value.data.disclosure).toMatch(/SECURITY_ENFORCED/);
+    expect(r.value.data.disclosure).toMatch(/system-context FLS/);
   });
 });
 

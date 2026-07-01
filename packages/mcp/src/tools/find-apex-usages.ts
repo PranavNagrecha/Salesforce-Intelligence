@@ -45,12 +45,20 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
+
+import {
+  APEX_USAGE_REQUIRED_COVERAGE,
+  buildEmptyTraversalCoverageCaveat,
+  type CoverageCaveat,
+} from './coverage-trust.js';
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 
 /**
  * Inclusive upper bound on `limit`. Mirrors the
@@ -106,6 +114,17 @@ const APEX_NODE_TYPES: ReadonlySet<ComponentType> = new Set([
 export const findApexUsagesInputSchema = z.object({
   targetId: z.string().min(1),
   limit: z.number().int().min(1).max(APEX_USAGES_MAX_LIMIT).optional(),
+  /**
+   * Zero-based page offset (CR-13). Defaults to 0. Paired with `limit` so the
+   * caller can walk the FULL usage set when the result is truncated — a
+   * blast-radius tool must never silently drop referrers.
+   */
+  offset: z.number().int().nonnegative().optional(),
+  /**
+   * CR-22 continuation cursor: opaque token from a prior truncated page's
+   * `nextCursor`; supplies the resume offset. Omit for today's behavior.
+   */
+  cursor: z.string().min(1).optional(),
   edgeTypes: z.array(z.enum(APEX_EDGE_TYPES)).optional(),
 });
 
@@ -131,9 +150,42 @@ export interface ApexUsage {
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface FindApexUsagesOutput {
+  /** The requested page of usages (after sort + `offset`/`limit`). */
   readonly usages: readonly ApexUsage[];
   /** §C3 honesty: heuristic-confidence + empty≠absent disclosure (never a silent empty). */
   readonly boundaries: readonly string[];
+  /**
+   * I3b (empty ≠ none): present ONLY when the FULL result is empty AND the Apex
+   * families that would produce a usage edge (`ApexClass` / `ApexTrigger`) are
+   * NOT fully covered by the vault. Names the not-checked families so an empty
+   * usage list reads "not retrieved", not a proven "none". Absent on a
+   * non-empty result and on a fully-covered vault (byte-identical to before).
+   */
+  readonly coverageCaveat?: CoverageCaveat;
+  /**
+   * CR-13 truncation honesty: the TRUE total number of Apex usages matching the
+   * filters BEFORE `offset`/`limit` paging (post sparse-graph-miss and
+   * `edgeTypes` filtering — i.e. every returnable referrer, not a raw edge
+   * count). A `totalCount` greater than `usages.length` means the page is a
+   * partial slice; the truncation note in `boundaries[]` says so explicitly.
+   */
+  readonly totalCount: number;
+  /** Zero-based offset of this page. */
+  readonly offset: number;
+  /** Page size applied (the effective `limit`). */
+  readonly limit: number;
+  /** True when more usages remain past this page. */
+  readonly hasMore: boolean;
+  /** Approximate next offset (legacy), or `null` when the list is exhausted. */
+  readonly nextOffset: number | null;
+  /**
+   * CR-22 opaque continuation token, present ONLY when this page is truncated
+   * (more usages remain). Echo it back as `cursor` to resume. Absent on a
+   * complete page so an in-budget response is byte-identical to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
 }
 
 const APEX_USAGE_HEURISTIC_DISCLOSURE =
@@ -142,14 +194,19 @@ const APEX_USAGE_EMPTY_DISCLOSURE =
   'No Apex usages found in the vault — NOT proof nothing uses it. The scanner is heuristic (dynamic/reflective invisible) and managed-package code is not retrieved. Cross-check `find_component_usages` before concluding it is unused.';
 
 /**
- * Deterministic comparator: `id` ASC, then `edgeType` ASC. The
- * tiebreaker handles the case where a single Apex class has multiple
- * incoming edge types to the same target (e.g., both `readsFrom` and
- * `writesTo` on the same field).
+ * Deterministic TOTAL-ORDER comparator: `id` ASC, `edgeType` ASC, then
+ * `source` ASC. The `(id, edgeType)` keys handle a single Apex class with
+ * multiple incoming edge types to the same target (e.g. both `readsFrom` and
+ * `writesTo` on the same field). The `source` tiebreak makes the order UNIQUE:
+ * the underlying edge PK is `(from_id, to_id, edge_type, source)`, and here
+ * `from_id` = `id`, `to_id` = the fixed `targetId`, `edge_type` = `edgeType`,
+ * so within a fixed `(id, edgeType)` only `source` can differ — adding it
+ * guarantees a unique final key so CR-22 offset resume cannot dup or skip.
  */
 const compareUsages = (a: ApexUsage, b: ApexUsage): number => {
   if (a.id !== b.id) return a.id < b.id ? -1 : 1;
   if (a.edgeType !== b.edgeType) return a.edgeType < b.edgeType ? -1 : 1;
+  if (a.source !== b.source) return a.source < b.source ? -1 : 1;
   return 0;
 };
 
@@ -188,9 +245,12 @@ const resolveApexUsage = async (
  * The `sfi.find_apex_usages` MCP tool. Returns the Apex-source-only
  * incoming `readsFrom`/`writesTo`/`callsApex` edges to `targetId`,
  * each carrying the referrer node's identity and the edge's metadata.
- * Sorted by `(id, edgeType)` ASC; truncated to `limit` (default 50,
- * max 500). `edgeTypes` narrows to a subset; empty list yields an
- * empty result.
+ * Sorted by `(id, edgeType)` ASC; PAGED by `offset`/`limit` (default
+ * limit 50, max 500) with `totalCount`/`hasMore`/`nextOffset` so a
+ * heavily-used field's full blast radius is reachable rather than
+ * silently clipped — when the page is partial a truncation note is
+ * appended to `boundaries[]` (CR-13). `edgeTypes` narrows to a subset;
+ * empty list yields an empty result.
  *
  * @example
  *   const r = await findApexUsagesHandler(ctx, {
@@ -234,14 +294,82 @@ export const findApexUsagesHandler = async (
     }
   }
 
-  const sorted = usages.sort(compareUsages).slice(0, limit);
-  const boundaries =
-    sorted.length === 0
-      ? [APEX_USAGE_HEURISTIC_DISCLOSURE, APEX_USAGE_EMPTY_DISCLOSURE]
-      : [APEX_USAGE_HEURISTIC_DISCLOSURE];
+  // CR-13: page after sorting so truncation is stable AND disclosed. `total`
+  // is the full pre-slice count of returnable referrers — the honest blast
+  // radius — and the truncation note tells the caller the page is incomplete.
+  const ordered = usages.sort(compareUsages);
+
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset);
+  // a stale/forged cursor (changed targetId/edgeTypes, different tool, or
+  // refreshed vault) is rejected with invalid-query.
+  const fingerprint = argsFingerprint({
+    targetId: input.targetId,
+    ...(input.edgeTypes !== undefined ? { edgeTypes: input.edgeTypes } : {}),
+  });
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: 'sfi.find_apex_usages',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  // This tool has no per-handler byte budget (offset/limit only) — keep that by
+  // setting an effectively-unbounded byteBudget, so `paginate()` only truncates
+  // on `limit` (byte-identical to the prior open-coded slice). The global
+  // jsonResult guard remains the byte backstop, as before.
+  const paged = paginateLegacy(ordered, {
+    offset,
+    limit,
+    byteBudget: Number.MAX_SAFE_INTEGER,
+    binding: {
+      tool: 'sfi.find_apex_usages',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const page = paged.items;
+  const total = paged.totalCount;
+  const hasMore = paged.hasMore;
+  const returned = offset + page.length;
+
+  const boundaries: string[] = [APEX_USAGE_HEURISTIC_DISCLOSURE];
+  // I3b (empty ≠ none): only when the WHOLE usage set is empty do we risk the
+  // host narrating absence as fact — attach a coverage caveat naming the Apex
+  // families the vault did NOT fully retrieve, so "no Apex uses this" carries
+  // "…among the families the vault covers". Non-empty output is untouched.
+  const coverageCaveat =
+    total === 0
+      ? buildEmptyTraversalCoverageCaveat(ctx, APEX_USAGE_REQUIRED_COVERAGE)
+      : undefined;
+  if (total === 0) {
+    boundaries.push(APEX_USAGE_EMPTY_DISCLOSURE);
+    if (coverageCaveat !== undefined) boundaries.push(coverageCaveat.message);
+  }
+  if (hasMore) {
+    boundaries.push(
+      `Showing ${page.length} of ${total} Apex usage(s) (offset=${offset}). ` +
+        `MORE remain — advance with offset=${returned}. This list is ` +
+        `INCOMPLETE; do not treat it as the full blast radius.`,
+    );
+  }
+  const emitCursor = paged.nextCursor !== null;
 
   return ok({
-    data: { usages: sorted, boundaries },
+    data: {
+      usages: page,
+      boundaries,
+      totalCount: total,
+      offset,
+      limit,
+      hasMore,
+      nextOffset: hasMore ? returned : null,
+      ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
+      ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
+    },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
       refreshedAt: ctx.manifest.refreshedAt,

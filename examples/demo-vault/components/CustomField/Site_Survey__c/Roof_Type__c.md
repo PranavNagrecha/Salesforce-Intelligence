@@ -16,10 +16,22 @@ properties:
   label: Roof Type
   length: null
   picklistValues:
-    - Asphalt
-    - Metal
-    - Tile
-    - Flat
+    - default: true
+      isActive: true
+      label: Asphalt
+      value: Asphalt
+    - default: false
+      isActive: true
+      label: Metal
+      value: Metal
+    - default: false
+      isActive: true
+      label: Tile
+      value: Tile
+    - default: false
+      isActive: true
+      label: Flat
+      value: Flat
   precision: null
   referenceTo: null
   relationshipName: null
@@ -46,7 +58,7 @@ type: CustomField
 | formula | `null` |
 | inlineHelpText | `null` |
 | length | `null` |
-| picklistValues | `Asphalt,Metal,Tile,Flat` |
+| picklistValues | `Asphalt, Metal, Tile, Flat` |
 | precision | `null` |
 | referenceTo | `null` |
 | relationshipName | `null` |

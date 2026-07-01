@@ -331,6 +331,124 @@ describe('permissionRiskReportHandler — Permission Set Group god-mode (effecti
   });
 });
 
+describe('permissionRiskReportHandler — profileFilter honesty (false-premise disclosure)', () => {
+  let pfDir: string;
+  let pfStore: GraphStore;
+  let pfCtx: Context;
+
+  const makeNode = (o: Partial<Node> & Pick<Node, 'id'>): Node => ({
+    type: 'Profile',
+    apiName: 'Anon',
+    label: null,
+    parentId: null,
+    sourcePath: 'x',
+    lastModifiedDate: null,
+    lastModifiedBy: null,
+    apiVersion: null,
+    properties: {},
+    ...o,
+  });
+
+  beforeAll(async () => {
+    pfDir = mkdtempSync(join(tmpdir(), 'sfi-synth-pf-'));
+    const opened = await openGraph(join(pfDir, 'pf.duckdb'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    pfStore = opened.value;
+    const imp = await importExtractionResults(pfStore, [
+      {
+        nodes: [
+          // The org has a community login profile but NO integration-user
+          // profile — so a request for "AcmeCo_Integration_User" is a FALSE
+          // premise: the closest existing profile is the community login one.
+          makeNode({
+            id: 'Profile:AcmeCo_Community_Login_User',
+            apiName: 'AcmeCo_Community_Login_User',
+            label: 'AcmeCo Community Login User',
+            properties: { userPermissions: ['ApiEnabled'] },
+          }),
+          makeNode({
+            id: 'Profile:AcmeCo_Admin',
+            apiName: 'AcmeCo_Admin',
+            label: 'AcmeCo Admin',
+            properties: { userPermissions: ['ModifyAllData', 'ViewAllData'] },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    pfCtx = { vaultRoot: pfDir, manifest: MANIFEST, graph: pfStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(pfStore);
+    rmSync(pfDir, { recursive: true, force: true });
+  });
+
+  it('STOPS with a profile-not-found result for a nonexistent profile (does NOT dump the org-wide report)', async () => {
+    const r = await permissionRiskReportHandler(pfCtx, {
+      profileFilter: 'AcmeCo_Integration_User',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const data = r.value.data;
+    // The premise is false → no findings, no full-org dump.
+    expect(data.findings).toEqual([]);
+    expect(data.privilege.modifyAllDataGrantors).toEqual([]);
+    expect(data.privilege.viewAllDataGrantors).toEqual([]);
+    expect(data.privilege.overPrivilegedGrantorCount).toBe(0);
+    // The filter is echoed honestly with found:false + the closest match.
+    expect(data.profileFilter).toBeDefined();
+    expect(data.profileFilter?.found).toBe(false);
+    expect(data.profileFilter?.requested).toBe('AcmeCo_Integration_User');
+    expect(data.profileFilter?.resolvedId).toBeNull();
+    expect(data.profileFilter?.closestMatch).toBe('AcmeCo Community Login User');
+    expect(data.profileFilter?.caveat).toContain('AcmeCo_Integration_User');
+    expect(data.profileFilter?.caveat.toLowerCase()).toContain('premise is false');
+    expect(data.disclosure).toContain('AcmeCo Community Login User');
+  });
+
+  it('SCOPES the report to the requested profile when it DOES exist', async () => {
+    const r = await permissionRiskReportHandler(pfCtx, {
+      profileFilter: 'AcmeCo_Admin',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const data = r.value.data;
+    expect(data.profileFilter?.found).toBe(true);
+    expect(data.profileFilter?.resolvedId).toBe('Profile:AcmeCo_Admin');
+    // Scoped to ONLY the admin profile — the community profile is not analysed.
+    expect(data.privilege.scanned.profiles).toBe(1);
+    expect(data.privilege.modifyAllDataGrantors).toEqual(['Profile:AcmeCo_Admin']);
+    expect(data.privilege.viewAllDataGrantors).toEqual(['Profile:AcmeCo_Admin']);
+    expect(data.findings.length).toBe(1);
+    expect(data.findings[0]?.summary).toContain('AcmeCo_Admin');
+  });
+
+  it('resolves an exact match by label and by canonical Profile: id', async () => {
+    const byLabel = await permissionRiskReportHandler(pfCtx, {
+      profileFilter: 'AcmeCo Admin',
+    });
+    const byId = await permissionRiskReportHandler(pfCtx, {
+      profileFilter: 'Profile:AcmeCo_Admin',
+    });
+    expect(byLabel.ok && byId.ok).toBe(true);
+    if (!byLabel.ok || !byId.ok) return;
+    expect(byLabel.value.data.profileFilter?.found).toBe(true);
+    expect(byId.value.data.profileFilter?.found).toBe(true);
+    expect(byId.value.data.profileFilter?.resolvedId).toBe('Profile:AcmeCo_Admin');
+  });
+
+  it('omits the profileFilter block entirely when no filter is passed (org-wide report)', async () => {
+    const r = await permissionRiskReportHandler(pfCtx, { limit: 20 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.profileFilter).toBeUndefined();
+    // Org-wide scan sees BOTH profiles.
+    expect(r.value.data.privilege.scanned.profiles).toBe(2);
+  });
+});
+
 describe('fieldCleanupCandidatesHandler — byte budget (oversize fix)', () => {
   let s: GraphStore;
   let dir: string;

@@ -19,9 +19,11 @@ import {
   countLandedReportMembers,
   formatRefreshSummary,
   formatReportsCapSummary,
+  loadVaultConfig,
   manifestMembersForType,
   objectsToExpandManifest,
   runRefresh,
+  runSf,
   selectManifestTypes,
 } from '../../src/commands/refresh.js';
 
@@ -806,5 +808,111 @@ describe('formatReportsCapSummary (P14-USAGE-reports-retrieve-fidelity)', () => 
     // A fully-delivered type carries no warning note.
     expect(text).toContain('Dashboards: 10/10 requested landed (org total 10)');
     expect(text).not.toContain('Dashboards: 10/10 requested landed (org total 10) —');
+  });
+});
+
+describe('CR-01 / C1 — shell-injection hardening of the `sf` exec path', () => {
+  // TEST B — the config-load chokepoint rejects a poisoned config.json.
+  it('loadVaultConfig rejects a poisoned targetOrg before it can reach any `sf` call', async () => {
+    const cwd = await makeTempCwd();
+    try {
+      await writeConfig(cwd, 'x" ; rm -rf ~ ; "');
+      const r = await loadVaultConfig(cwd);
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.error).toContain('not a valid org alias');
+        expect(r.error).toContain('config.json');
+      }
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('loadVaultConfig still accepts a clean unusual-but-valid alias (no legitimate vault is broken)', async () => {
+    const cwd = await makeTempCwd();
+    try {
+      await writeConfig(cwd, 'me@my-sandbox.example.com');
+      const r = await loadVaultConfig(cwd);
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.value.targetOrg).toBe('me@my-sandbox.example.com');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  // TEST C — even a metachar value reaches `sf` as ONE inert argv element, never
+  // a shell. Drive runSf with a stub execFile and assert the argv shape.
+  it('runSf spawns the bare `sf` binary with the raw value as a single argv element (never a shell)', async () => {
+    const seen: { binary?: string; args?: readonly string[]; options?: unknown } = {};
+    const stubExecFile = ((binary: string, args: readonly string[], options: unknown) => {
+      seen.binary = binary;
+      seen.args = args;
+      seen.options = options;
+      return Promise.resolve({ stdout: '{"result":{}}', stderr: '' });
+    }) as unknown as Parameters<typeof runSf>[2];
+
+    const payload = 'x" ; rm -rf ~ ; "';
+    const result = await runSf(
+      ['data', 'query', '--query', payload, '--target-org', 'legit', '--json'],
+      { timeout: 1000 },
+      stubExecFile,
+    );
+    expect(result.stdout).toBe('{"result":{}}');
+    // The binary is exactly `sf` — no shell, no concatenated command string.
+    expect(seen.binary).toBe('sf');
+    // The metachar payload is one verbatim argv element — never split/interpreted.
+    expect(seen.args).toContain(payload);
+    // And it is NOT wrapped in quotes (that would corrupt the real arg under execFile).
+    expect(seen.args).not.toContain(`"${payload}"`);
+    // The timeout + SIGTERM kill signal ride along (H8).
+    expect(seen.options).toMatchObject({ timeout: 1000, killSignal: 'SIGTERM' });
+  });
+
+  // TEST D — the H8 timeout tiers + env overrides are honored by runSf.
+  it('runSf forwards the configured timeout + SIGTERM (H8) and never spawns a shell', async () => {
+    const captured: { options?: { timeout?: number; killSignal?: string } } = {};
+    const stubExecFile = ((_binary: string, _args: readonly string[], options: { timeout?: number; killSignal?: string }) => {
+      captured.options = options;
+      return Promise.resolve({ stdout: '', stderr: '' });
+    }) as unknown as Parameters<typeof runSf>[2];
+
+    await runSf(['org', 'list', '--json'], { timeout: 600_000 }, stubExecFile);
+    expect(captured.options?.timeout).toBe(600_000);
+    expect(captured.options?.killSignal).toBe('SIGTERM');
+  });
+
+  // TEST D (end-to-end kill proof) — Node actually kills a hung child at the
+  // timeout, not just sets the option. Real spawn, tiny timeout.
+  it('a real child exceeding the timeout is killed (proves the hung-process guard works)', async () => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const run = promisify(execFile);
+    const started = Date.now();
+    await expect(
+      run(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
+        timeout: 200,
+        killSignal: 'SIGTERM',
+      }),
+    ).rejects.toMatchObject({ killed: true });
+    // Killed within ~1s, nowhere near the child's 60s sleep.
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+
+  // TEST C (flag path) — a poisoned `--target-org` flag override is rejected by
+  // runRefresh before any `sf` work (defense in depth on the flag seam).
+  it('runRefresh rejects a poisoned `--target-org` flag override (defense in depth)', async () => {
+    const cwd = await makeTempCwd();
+    try {
+      await writeConfig(cwd, 'legit'); // config is clean; the FLAG is poisoned
+      const result = await runRefresh({
+        cwd,
+        noPull: true,
+        targetOrg: 'x" ; rm -rf ~ ; "',
+      });
+      expect(result.status).toBe('failed');
+      expect(result.fatalError).toContain('Invalid Salesforce org alias');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
   });
 });

@@ -29,6 +29,11 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import {
+  buildEmptyTraversalCoverageCaveat,
+  type CoverageCaveat,
+  GRAPH_TRAVERSAL_REQUIRED_COVERAGE,
+} from './coverage-trust.js';
+import {
   enforceGraphPayloadBudget,
   estimateGraphPayloadBytes,
   GRAPH_MAX_PAYLOAD_BYTES,
@@ -88,6 +93,14 @@ export interface GetSubgraphOutput {
   readonly truncated: boolean;
   /** Verbatim honesty note about the size caps and, when truncated, the clipping. */
   readonly disclosure: string;
+  /**
+   * I3b (empty ≠ none): present ONLY when the subgraph has NO edges (an isolated
+   * root) AND a family that would connect an edge to this node is NOT fully
+   * covered by the vault. Names the not-checked families so an empty
+   * neighbourhood reads "not retrieved", not a proven "isolated". Absent when
+   * edges exist or the vault is fully covered (byte-identical to before).
+   */
+  readonly coverageCaveat?: CoverageCaveat;
 }
 
 /**
@@ -150,12 +163,22 @@ export const getSubgraphHandler = async (
       ? `Subgraph capped at ${SUBGRAPH_MAX_NODES} nodes / ${SUBGRAPH_MAX_EDGES} edges and TRUNCATED: \`${input.rootId}\` is a hub, so this is a partial, deterministic slice (lowest ids first), NOT its full neighbourhood.${slimNote} Re-query with a smaller \`hops\` or a more specific root for a complete view.`
       : `Complete subgraph within ${hops} hop(s); under the ${SUBGRAPH_MAX_NODES}-node / ${SUBGRAPH_MAX_EDGES}-edge cap.${slimNote}`;
 
+  // I3b (empty ≠ none): a subgraph with NO edges is an isolated root — exactly
+  // where "nothing connects to this" is dangerous. Name the families the vault
+  // did NOT fully retrieve so the host discloses the boundary. Keyed on the edge
+  // set (the root node is always present). Non-empty neighbourhoods untouched.
+  const coverageCaveat =
+    budgeted.edges.length === 0
+      ? buildEmptyTraversalCoverageCaveat(ctx, GRAPH_TRAVERSAL_REQUIRED_COVERAGE)
+      : undefined;
+
   return ok({
     data: {
       nodes: budgeted.nodes,
       edges: budgeted.edges,
       truncated,
       disclosure,
+      ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

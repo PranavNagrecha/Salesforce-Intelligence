@@ -328,6 +328,89 @@ describe('findApexUsagesHandler', () => {
     ]);
   });
 
+  // CR-13: truncation honesty. A blast-radius tool that silently slices its
+  // result at `limit` lets a refactor decision read an undisclosed-incomplete
+  // usage list. The page must surface the TRUE total + a truncation note +
+  // pagination cursors so the full set is reachable.
+  it('discloses the true total, hasMore, and a truncation note when paged below the referrer count', async () => {
+    const result = await findApexUsagesHandler(ctx, {
+      targetId: CROWDED_FIELD,
+      limit: 2,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    expect(data.usages.length).toBe(2);
+    // The total is the full pre-slice count, not the page length.
+    expect(data.totalCount).toBe(5);
+    expect(data.offset).toBe(0);
+    expect(data.limit).toBe(2);
+    expect(data.hasMore).toBe(true);
+    expect(data.nextOffset).toBe(2);
+    // A truncation note must appear in boundaries[], naming the true total and
+    // disclosing the list is incomplete. The always-on heuristic disclosure
+    // stays present.
+    const truncationNote = data.boundaries.find((b) => b.includes('INCOMPLETE'));
+    expect(truncationNote).toBeDefined();
+    expect(truncationNote).toContain('5');
+  });
+
+  it('pages the full referrer set via offset (CR-13)', async () => {
+    // Page 2: offset 2, limit 2 → R03, R04, still more.
+    const page2 = await findApexUsagesHandler(ctx, {
+      targetId: CROWDED_FIELD,
+      offset: 2,
+      limit: 2,
+    });
+    expect(page2.ok).toBe(true);
+    if (!page2.ok) return;
+    expect(page2.value.data.usages.map((u) => u.id)).toEqual([
+      'ApexClass:R03',
+      'ApexClass:R04',
+    ]);
+    expect(page2.value.data.totalCount).toBe(5);
+    expect(page2.value.data.offset).toBe(2);
+    expect(page2.value.data.hasMore).toBe(true);
+    expect(page2.value.data.nextOffset).toBe(4);
+
+    // Page 3: offset 4, limit 2 → R05 only, list exhausted.
+    const page3 = await findApexUsagesHandler(ctx, {
+      targetId: CROWDED_FIELD,
+      offset: 4,
+      limit: 2,
+    });
+    expect(page3.ok).toBe(true);
+    if (!page3.ok) return;
+    expect(page3.value.data.usages.map((u) => u.id)).toEqual(['ApexClass:R05']);
+    expect(page3.value.data.totalCount).toBe(5);
+    expect(page3.value.data.hasMore).toBe(false);
+    expect(page3.value.data.nextOffset).toBe(null);
+    // No truncation note on the exhausting page.
+    expect(
+      page3.value.data.boundaries.find((b) => b.includes('INCOMPLETE')),
+    ).toBeUndefined();
+  });
+
+  it('leaves the fully-contained case byte-identical: counts present, no truncation note (CR-13 guard)', async () => {
+    // CALLEE has exactly one referrer (< default limit). The new fields must be
+    // purely additive scalars and the boundaries array must be UNCHANGED from
+    // the pre-CR-13 behaviour (heuristic disclosure only, no truncation note).
+    const result = await findApexUsagesHandler(ctx, { targetId: CALLEE });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    expect(data.usages.length).toBe(1);
+    expect(data.totalCount).toBe(data.usages.length);
+    expect(data.offset).toBe(0);
+    expect(data.hasMore).toBe(false);
+    expect(data.nextOffset).toBe(null);
+    // Exactly the always-on heuristic disclosure — no truncation note appended.
+    expect(data.boundaries.length).toBe(1);
+    expect(
+      data.boundaries.find((b) => b.includes('INCOMPLETE')),
+    ).toBeUndefined();
+  });
+
   it('returns an empty list for an unknown targetId', async () => {
     const result = await findApexUsagesHandler(ctx, {
       targetId: 'CustomField:Nope.Nope__c',
@@ -360,6 +443,78 @@ describe('findApexUsagesHandler', () => {
       'ApexClass:Mike',
       'ApexClass:Zeta',
     ]);
+  });
+});
+
+describe('findApexUsagesHandler — CR-22 continuation cursor', () => {
+  it('in-budget whole-fits call emits NO cursor/pageInfo (byte-identical)', async () => {
+    const result = await findApexUsagesHandler(ctx, { targetId: CALLEE });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect('nextCursor' in result.value.data).toBe(false);
+    expect('pageInfo' in result.value.data).toBe(false);
+  });
+
+  it('emits a nextCursor on a truncated page and resumes; pages concat with no gaps/dupes', async () => {
+    const first = await findApexUsagesHandler(ctx, { targetId: CROWDED_FIELD, limit: 2 });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const d1 = first.value.data;
+    expect(d1.usages.length).toBe(2);
+    expect(d1.hasMore).toBe(true);
+    expect(typeof d1.nextCursor).toBe('string');
+    expect(d1.pageInfo?.nextCursor).toBe(d1.nextCursor);
+
+    const second = await findApexUsagesHandler(ctx, {
+      targetId: CROWDED_FIELD,
+      limit: 2,
+      cursor: d1.nextCursor as string,
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    const d2 = second.value.data;
+    expect(d2.usages.map((u) => u.id)).toEqual(['ApexClass:R03', 'ApexClass:R04']);
+    expect(d2.hasMore).toBe(true);
+
+    const third = await findApexUsagesHandler(ctx, {
+      targetId: CROWDED_FIELD,
+      limit: 2,
+      cursor: d2.nextCursor as string,
+    });
+    expect(third.ok).toBe(true);
+    if (!third.ok) return;
+    const d3 = third.value.data;
+    expect(d3.usages.map((u) => u.id)).toEqual(['ApexClass:R05']);
+    expect(d3.hasMore).toBe(false);
+    expect('nextCursor' in d3).toBe(false);
+
+    const combined = [...d1.usages, ...d2.usages, ...d3.usages].map(
+      (u) => `${u.id}|${u.edgeType}|${u.source}`,
+    );
+    expect(new Set(combined).size).toBe(5); // no dupes, all 5
+  });
+
+  it('rejects a cursor minted for a different query (changed edgeTypes filter)', async () => {
+    const first = await findApexUsagesHandler(ctx, { targetId: CROWDED_FIELD, limit: 2 });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const replay = await findApexUsagesHandler(ctx, {
+      targetId: CROWDED_FIELD,
+      limit: 2,
+      edgeTypes: ['readsFrom'],
+      cursor: first.value.data.nextCursor as string,
+    });
+    expect(replay.ok).toBe(false);
+    if (!replay.ok) expect(replay.error.kind).toBe('invalid-query');
+  });
+
+  it('rejects a malformed cursor', async () => {
+    const replay = await findApexUsagesHandler(ctx, {
+      targetId: CROWDED_FIELD,
+      cursor: 'garbage',
+    });
+    expect(replay.ok).toBe(false);
+    if (!replay.ok) expect(replay.error.kind).toBe('invalid-query');
   });
 });
 
@@ -422,5 +577,21 @@ describe('findApexUsagesInputSchema', () => {
       edgeTypes: [],
     });
     expect(parsed.success).toBe(true);
+  });
+
+  it('accepts a non-negative offset (CR-13 pagination)', () => {
+    const parsed = findApexUsagesInputSchema.safeParse({
+      targetId: FIELD_ID,
+      offset: 2,
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('rejects a negative offset', () => {
+    const parsed = findApexUsagesInputSchema.safeParse({
+      targetId: FIELD_ID,
+      offset: -1,
+    });
+    expect(parsed.success).toBe(false);
   });
 });

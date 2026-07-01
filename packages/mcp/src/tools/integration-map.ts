@@ -181,6 +181,28 @@ export interface IntegrationMapNode {
   readonly apiName: string;
   readonly label: string;
   readonly properties: Readonly<Record<string, unknown>>;
+  /**
+   * Count of inbound `references` edges that point AT this node from
+   * elsewhere in the graph (an ExternalService binding a NamedCredential,
+   * an OmniStudio IP declaring a `callout:` alias, an ExternalDataSource
+   * naming its AuthProvider, etc.). Present only for NamedCredential and
+   * AuthProvider nodes — the two trust anchors for which "is anything
+   * actually wired to this?" is a grounded, determinate question. A `0`
+   * here is the grounded basis for {@link orphaned}.
+   */
+  readonly referenceCount?: number;
+  /**
+   * `true` when {@link referenceCount} is `0`: nothing in the retrieved
+   * metadata references this trust anchor. Surfaced ONLY for
+   * NamedCredential / AuthProvider so the map can answer "which named
+   * credential authorizes X" with a determinate "none of these — they are
+   * orphaned" instead of falsely implying every credential is wired.
+   * Honest-boundary: this counts references the retrieve modeled; an
+   * Apex `callout:` reference is modeled only when the apex scanner
+   * captured it, so an `orphaned: true` is "no MODELED reference",
+   * not a guarantee of zero runtime use — see {@link APEX_CALLOUT_DISCLOSURE}.
+   */
+  readonly orphaned?: boolean;
 }
 
 /**
@@ -266,6 +288,19 @@ export interface IntegrationMapOutput {
   readonly note?: string;
   /** Always present: Apex HTTP callouts are out of scope; where to find them. */
   readonly apexCalloutDisclosure: string;
+  /**
+   * Always present: the grounded, determinate answer to "which trust
+   * mechanism authorizes an outbound HTTP callout in this org". Apex /
+   * legacy outbound HTTP callouts are authorized EITHER by an active
+   * RemoteSiteSetting (when the endpoint URL is hardcoded — `Http.request`
+   * to a literal host) OR by a NamedCredential (when the code addresses
+   * `callout:{alias}`). This note states which RemoteSiteSettings are
+   * present in THIS map (they authorize hardcoded-URL callouts) and which
+   * NamedCredentials are referenced vs orphaned — so a caller can answer
+   * the authorization question from the map instead of abstaining with a
+   * coverage-gap claim when the components ARE present.
+   */
+  readonly calloutAuthorizationNote: string;
 }
 
 /** Honest-empty note attached when the integration map has zero components. */
@@ -274,7 +309,45 @@ const INTEGRATION_EMPTY_NOTE =
 
 /** Always-present boundary: Apex HTTP callouts are out of scope for this map. */
 const APEX_CALLOUT_DISCLOSURE =
-  "This map covers DECLARED integration metadata (AuthProvider / NamedCredential / RemoteSiteSetting / CspTrustedSite / ExternalDataSource / ExternalService / ConnectedApp / NetworkAccess) plus OmniStudio callouts. Apex HTTP callouts (`Http.request` / `HttpRequest.setEndpoint`), including calls to hardcoded endpoints, are NOT enumerated here — find them with `sfi.find_code_usages` on `Http`/`HttpRequest` or `sfi.search_apex_source('setEndpoint')`.";
+  "This map covers DECLARED integration metadata (AuthProvider / NamedCredential / RemoteSiteSetting / CspTrustedSite / ExternalDataSource / ExternalService / ConnectedApp / NetworkAccess) plus OmniStudio callouts. The individual Apex callsites (`Http.request` / `HttpRequest.setEndpoint`) are not listed as rows here — enumerate them with `sfi.find_code_usages` on `Http`/`HttpRequest` or `sfi.search_apex_source('setEndpoint')`. The TRUST mechanism that AUTHORIZES those callouts IS in this map, however: see `calloutAuthorizationNote` and the RemoteSiteSetting / NamedCredential sections.";
+
+/**
+ * Build the grounded `calloutAuthorizationNote` from the components
+ * actually present in the map. This is the determinate answer to "which
+ * named credential or remote site setting authorizes the outbound
+ * callouts" — derived from the retrieved RemoteSiteSetting nodes and the
+ * NamedCredential reference/orphan analysis, NOT abstained.
+ */
+const buildCalloutAuthorizationNote = (
+  remoteSiteSettings: readonly IntegrationMapNode[],
+  namedCredentials: readonly IntegrationMapNode[],
+): string => {
+  const rssNames = remoteSiteSettings.map((n) => n.apiName).sort();
+  const referencedNcs = namedCredentials
+    .filter((n) => n.orphaned !== true)
+    .map((n) => n.apiName)
+    .sort();
+  const orphanedNcs = namedCredentials
+    .filter((n) => n.orphaned === true)
+    .map((n) => n.apiName)
+    .sort();
+
+  const rssPart =
+    rssNames.length > 0
+      ? `Active RemoteSiteSettings authorize outbound HTTP callouts to a hardcoded endpoint URL (an Apex \`Http.request\` to a literal host): ${rssNames.join(', ')}.`
+      : 'This map contains no RemoteSiteSettings, so no hardcoded-URL outbound callout is authorized by a remote site setting.';
+
+  const ncPart =
+    namedCredentials.length === 0
+      ? 'This map contains no NamedCredentials, so no callout addresses a `callout:{alias}` endpoint.'
+      : `NamedCredentials authorize callouts that address \`callout:{alias}\`. Referenced (something in the retrieved metadata is wired to them): ${
+          referencedNcs.length > 0 ? referencedNcs.join(', ') : 'none'
+        }. Orphaned (no modeled reference — present but nothing wires to them): ${
+          orphanedNcs.length > 0 ? orphanedNcs.join(', ') : 'none'
+        }.`;
+
+  return `${rssPart} ${ncPart} To attribute a SPECIFIC class's callout, match its endpoint: a \`callout:{alias}\` literal => the NamedCredential of that alias; a hardcoded \`https://host\` => the RemoteSiteSetting whose URL covers that host.`;
+};
 
 /**
  * Convert a `Node` from the graph to a compact `IntegrationMapNode`.
@@ -534,6 +607,39 @@ export const integrationMapHandler = async (
     );
   }
 
+  // Stage 1b: orphan analysis for the two trust anchors (NamedCredential
+  // and AuthProvider). For each, count the INBOUND `references` edges
+  // (anything in the retrieved metadata wired to this credential/provider
+  // — an ExternalService binding it, an ExternalDataSource naming it, an
+  // OmniStudio IP declaring a `callout:` alias, or a captured Apex
+  // `callout:` reference). A `0` is the grounded basis for `orphaned:
+  // true` — the determinate answer to "is this credential actually
+  // authorizing anything", rather than abstaining when it is present.
+  for (const trustType of ['NamedCredential', 'AuthProvider'] as const) {
+    const nodes = buckets.get(trustType);
+    if (nodes === undefined || nodes.length === 0) continue;
+    const annotated: IntegrationMapNode[] = [];
+    for (const node of nodes) {
+      const inboundResult = await listEdges(ctx.graph, node.id, {
+        direction: 'in',
+        edgeType: REFERENCES_EDGE_TYPE,
+      });
+      if (!inboundResult.ok) {
+        return err({
+          kind: 'internal',
+          message: `graph query failed: ${inboundResult.error.message}`,
+        });
+      }
+      const referenceCount = inboundResult.value.length;
+      annotated.push({
+        ...node,
+        referenceCount,
+        orphaned: referenceCount === 0,
+      });
+    }
+    buckets.set(trustType, annotated);
+  }
+
   // Stage 2: cross-type reference edge collection. For each in-scope
   // integration node, list outgoing `references` edges and include
   // only those whose `toId` is also an integration node. The de-dup
@@ -612,6 +718,10 @@ export const integrationMapHandler = async (
     references,
     omniStudio,
     apexCalloutDisclosure: APEX_CALLOUT_DISCLOSURE,
+    calloutAuthorizationNote: buildCalloutAuthorizationNote(
+      buckets.get('RemoteSiteSetting') ?? [],
+      buckets.get('NamedCredential') ?? [],
+    ),
   };
   const totalNodes =
     data.authProviders.length +

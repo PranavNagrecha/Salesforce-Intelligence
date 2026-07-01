@@ -24,6 +24,7 @@ import { join } from 'node:path';
 
 import {
   checkVaultStaleness,
+  resetLiveSession,
   runSfJson,
   STALE_CHECK_TYPES,
 } from '@sf-intelligence/mcp';
@@ -56,6 +57,16 @@ export const runStaleSweep = async (options: {
   readonly exec?: ExecCommand;
   readonly now?: string;
 }): Promise<{ readonly ok: true; readonly snapshot: StalenessSnapshot } | { readonly ok: false; readonly message: string }> => {
+  // CR-09 follow-up: each sweep is a DISCRETE drift check. Start it in a fresh
+  // live-session scope so (a) one 15-type sweep can never trip the per-session
+  // live-query budget (it is a tiny fraction of the 50-unit cap), and (b) the
+  // watch daemon — which runs many ticks IN ONE PROCESS — does not accumulate the
+  // module-level budget across ticks and false-positive drift after ~3 ticks.
+  // Clearing the cache per tick is also correct: a drift tick wants FRESH reads,
+  // not a cached count from the previous tick. The MCP live_* tools keep their
+  // own session budget (this only resets it at sweep boundaries, where the CLI /
+  // daemon — not an interactive MCP session — owns the lifecycle).
+  resetLiveSession();
   const paths = vaultPaths(join(options.cwd, 'org-kb'));
   const manifestResult = await loadManifest(join(options.cwd, 'org-kb'));
   if (!manifestResult.ok) {

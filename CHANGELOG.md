@@ -3,6 +3,91 @@
 All notable changes to **sf-intelligence** are documented here. This project
 adheres to [Semantic Versioning](https://semver.org).
 
+## [0.1.16] — 2026-07-01
+
+Headline: **release consolidation.** The same product as 0.1.15 — the honest funnel-primary
+routing and the ~20 Tier-4 modeling capabilities — promoted to a clean, tagged release
+merged to `main` and cut on GitHub. The published package (the `sfi` CLI + MCP server) is
+unchanged from 0.1.15; the only change since is a website fix.
+
+### Fixed
+- Website: corrected a stale automated-test count (`3,500` → `4,700`) on the trust page,
+  `llms.txt`/`llms-full.txt`, and the homepage, and hardened `recalibrate.mjs` so the
+  headline numbers stay in sync with source on every rebuild.
+
+## [0.1.15] — 2026-07-01
+
+Headline: **honest routing, and a big jump in admin-question accuracy.** Building on
+0.1.12's funnel-primary router, `sfi.route_question` now makes every candidate
+self-describing (which plane it needs, how confident the match is), drops the last hard
+regex override, and — on a genuinely ambiguous, high-consequence tie — asks the user
+instead of guessing. A broad honesty pass stops tools from reading an empty result as a
+confident "none." Paired with ~20 deeper org-modeling capabilities, the maintainer's
+admin-question differential-QA battery went from **48.6% → ~88%** passing. Tool count is
+unchanged (171); no new commands.
+
+### Changed — routing (funnel refinement)
+- **Every `toolCandidate` now carries `plane` (`vault` | `live` | `hybrid`),
+  `liveRequired`, and a `confidence` band.** The host can see, per candidate, whether a
+  tool needs the live org and how strong the match is — instead of inferring it.
+- **The hard `0.96` regex "pin" is gone.** A regex hit no longer forces a route; it is
+  fused into a single bounded score alongside the semantic cosine, so regex *advises* and
+  the host LLM still *decides*. The regex engine is kept (it backs the offline route and
+  the fused score) — 16 recall-crutch rules that only papered over ranking gaps were
+  removed.
+- **Meta-tools de-noised and the confidence band recalibrated** so the shortlist leads
+  with the tool that actually answers the question.
+
+### Added — honest clarification & absence-awareness
+- **Margin-based clarification (`executionBlocked`).** When the top two fused candidates
+  are within `0.05` *and* diverge on a high-consequence axis — vault-vs-live plane, or a
+  destructive `what_if_*` / `safe_to_delete` verdict vs. an informational `get_impact` /
+  `find_*_usages` — `route_question` blocks and returns a clarification so the host asks
+  rather than silently committing to the wrong tool. Tight by design; offline mode never
+  blocks.
+- **`route_question` now discloses the live plane + consent step** in its guidance, so a
+  question that needs live data names `sfi.live_consent` instead of quietly answering from
+  a stale vault.
+- **`empty != none`.** Graph-traversal tools attach a coverage caveat when a family they
+  depend on wasn't retrieved, so "no references found" is qualified rather than presented
+  as certainty.
+- **Absence-aware `synthesize_answer`.** A grounded guard keeps a correct "nothing
+  depends on this" cascade from being flattened into a hollow, over-confident answer.
+
+### Added — deeper org modeling (no new tools)
+Twenty modeling improvements *inside existing tools* that make impact, sharing, and
+automation answers more complete:
+- **CustomPermission** definitions + grants from profiles / permission sets.
+- **PlatformEventChannel** topology with per-channel filters, plus event publishers /
+  subscribers.
+- **ListView filter** predicate fields composed into `field_360`.
+- **Workflow time-triggers** (`workflowTimeTriggers`) and remaining workflow-action counts
+  on the save cascade.
+- **Class-granular `@future` `dispatchesAsync` edges** and caller-side method attribution
+  on AST `callsApex` edges.
+- **Standard-object field snapshots** for all 14 modeled objects; **guest / territory
+  sharing-rule** extraction; **public-Group membership** edges; ApprovalProcess
+  `FieldUpdate → CustomField writesTo`.
+- `what_if_make_field_required` now credits WorkflowRule + ApprovalProcess populators;
+  `coverage_report` ranks the top uncovered metadata families.
+
+### Fixed
+- Routing-accuracy fixes across the admin-question surface (layouts, reports, permission
+  sets, validation-rule save behavior, save-order steps, EncryptedText).
+- `explain_flow` fault-rollback verdicts corrected (async / screen / scheduled); non-Apex
+  action calls and `AsyncAfterCommit` scheduled paths surfaced.
+- `what_happens_on_save` / `order_of_execution` stop under-counting after-save flows;
+  inactive triggers excluded from active steps.
+- `outbound_message_catalog`, `find_dead_code`, `scheduled_job_catalog`, and
+  `test_coverage_for_method` report determinate negatives, async dead code, and
+  mock-backed coverage more honestly.
+
+### Engineering & trust
+- **Admin-question pass rate 48.6% → ~88%** on the maintainer's differential-QA battery
+  (the driver for this work); router goldset 128/128; ~3,180 unit tests green; CI green.
+- Leak/privacy guards unchanged and green: the published tarball carries only the
+  synthetic **Verdant** demo org — no customer metadata.
+
 ## [0.1.14] — 2026-06-25
 
 Headline: **listed on the official MCP Registry.** A metadata-only patch that corrects the

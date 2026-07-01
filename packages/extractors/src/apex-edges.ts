@@ -525,5 +525,32 @@ export const buildApexScannerEdges = (
       },
     });
   }
+  // P3b: `EventBus.subscribe('X__e', ...)` → a heuristic `listensTo` edge to the
+  // Platform Event node, REUSING the existing `listensTo` EdgeType (the same
+  // slot `Triggerable<X__e>` and Flow PlatformEvent triggers fill). HONESTY:
+  // emit ONLY when the scanner RESOLVED a static channel that names a real
+  // Platform Event (`__e` suffix). A dynamic/computed channel arg
+  // (`resolved: false`) mints NO edge — no phantom — mirroring the
+  // EventBus.publish publisher honesty. Non-`__e` channels (e.g. CDC
+  // `*ChangeEvent` streams) are skipped here so `listensTo` stays
+  // Platform-Event-only, matching `buildClassListensToEdge`'s `__e` gate; CDC
+  // subscription has its own `subscribesToChange` modeling path.
+  for (const sub of scanResult.value.eventSubscriptions) {
+    if (!sub.resolved) continue;
+    if (!sub.channel.endsWith('__e')) continue;
+    raw.push({
+      fromId: ownerId,
+      toId: `CustomObject:${sub.channel}`,
+      edgeType: 'listensTo',
+      confidence: 'heuristic',
+      source: SCANNER_SOURCE,
+      properties: {
+        mechanism: 'eventBusSubscribe',
+        eventName: sub.channel,
+        offset: sub.offset,
+        length: sub.length,
+      },
+    });
+  }
   return { edges: mergeAndSortEdges(raw), warnings: [] };
 };

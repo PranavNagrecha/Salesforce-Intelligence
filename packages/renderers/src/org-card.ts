@@ -19,6 +19,8 @@
 
 import type { ComponentId } from '@sf-intelligence/contracts';
 
+import { escapeMarkdownHeading, escapeMarkdownInline } from './markdown-table.js';
+
 /** Hard cap on the rendered markdown body + frontmatter (bytes). */
 export const ORG_CARD_MAX_BYTES = 16_384;
 
@@ -84,8 +86,17 @@ export interface OrgCardInput {
   };
 }
 
+// Render a table row. String cells are made table-safe (CR-16c): newlines
+// collapsed to a space and pipes backslash-escaped so a free-text value cannot
+// break the row/columns. Numbers pass through unchanged. (Most cells here are
+// closed component-type names or numbers, but `automation.type` and any future
+// string cell are free-text-derived, so all string cells are guarded.)
 const fmtRow = (cells: readonly (string | number)[]): string =>
-  `| ${cells.join(' | ')} |`;
+  `| ${cells
+    .map((c) =>
+      typeof c === 'string' ? c.replace(/\r\n|\r|\n/g, ' ').replace(/\|/g, '\\|') : c,
+    )
+    .join(' | ')} |`;
 
 interface Sections {
   topObjects: OrgCardTopObject[];
@@ -96,7 +107,9 @@ interface Sections {
 
 const renderBody = (input: OrgCardInput, s: Sections): string => {
   const lines: string[] = [];
-  lines.push(`# Org card — ${input.targetOrg}`);
+  // targetOrg is a caller-supplied SFDX alias (free text) — escape so it cannot
+  // inject a second heading / break the heading line (CR-16c).
+  lines.push(`# Org card — ${escapeMarkdownHeading(input.targetOrg)}`);
   lines.push('');
   lines.push(
     `Offline snapshot of one Salesforce org. Source-tree hash \`${input.sourceTreeHash}\`; ` +
@@ -176,7 +189,9 @@ const renderBody = (input: OrgCardInput, s: Sections): string => {
     lines.push('## Naming conventions (observed, heuristic)');
     lines.push('');
     for (const n of s.naming) {
-      lines.push(`- ${n.pattern} (${n.matching}/${n.total} fields)`);
+      // pattern is a generator-derived naming-convention string — inline-escape
+      // so a newline/backtick cannot split the bullet (CR-16c).
+      lines.push(`- ${escapeMarkdownInline(n.pattern)} (${n.matching}/${n.total} fields)`);
     }
     lines.push('');
   }
@@ -191,7 +206,11 @@ const renderBody = (input: OrgCardInput, s: Sections): string => {
     );
     lines.push('');
     lines.push(
-      input.dataShape.counts.map(([name, count]) => `\`${name}\`: ${count}`).join(' · '),
+      input.dataShape.counts
+        // name is an object api-name (free text) inside a code span — escape so a
+        // backtick can't close the span early (CR-16c).
+        .map(([name, count]) => `\`${escapeMarkdownInline(name)}\`: ${count}`)
+        .join(' · '),
     );
   }
   lines.push('');

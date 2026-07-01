@@ -41,6 +41,21 @@ export interface ApexAstEdges {
    * are typed false positives the import dedupe drops.
    */
   readonly innerTypes?: readonly string[];
+  /**
+   * CR-CAP-06: per-call-site CALLER-method attribution. Each entry pairs a
+   * cross-class (or self) `callee` (`Class.method`, the same string as in
+   * `calls`) with the NAME of the enclosing `MethodDeclaration` that contains
+   * the call-site (`callerMethod`, ORIGINAL case for display). A call-site with
+   * NO enclosing method (field/static initializer, trigger body) carries
+   * `callerMethod: ''` — the aggregator drops it (absent === unknown caller,
+   * never a wrong attribution). ADDITIVE + AST-PATH-ONLY: the heuristic scanner
+   * has no enclosing-method awareness and emits nothing here. Sorted by
+   * `(callee, callerMethod)` for golden stability.
+   */
+  readonly callSites?: readonly {
+    readonly callee: string;
+    readonly callerMethod: string;
+  }[];
 }
 
 export interface ApexAstOptions {
@@ -83,6 +98,26 @@ const findAll = (n: Ctx, want: string, out: Ctx[] = []): Ctx[] => {
   if (ctxName(n) === want) out.push(n);
   for (const c of kids(n)) findAll(c, want, out);
   return out;
+};
+
+/**
+ * Walk `node` upward via the ANTLR `parentCtx` link until `pred` matches an
+ * ancestor (returned) or the walk crosses one of the `stopAt` rule names
+ * (returns null — the boundary's own node is checked first so a stop name can
+ * also be the match). Guards a missing parent link to avoid an infinite loop.
+ */
+const ancestorWhere = (
+  node: Ctx,
+  pred: (ctx: Ctx) => boolean,
+  stopAt: ReadonlySet<string> = new Set(),
+): Ctx | null => {
+  let cur: Ctx | undefined = node.parentCtx as Ctx | undefined;
+  while (cur !== undefined && cur !== null) {
+    if (pred(cur)) return cur;
+    if (stopAt.has(ctxName(cur))) return null;
+    cur = cur.parentCtx as Ctx | undefined;
+  }
+  return null;
 };
 
 class Collecting extends ApexErrorListener {
@@ -169,6 +204,21 @@ export const extractApexAstEdges = (
   const calls = new Set<string>();
   const reads = new Set<string>();
   const writes = new Set<string>();
+  // CR-CAP-06: parallel collector — keep `calls` byte-stable (dedupe /
+  // innerTypes / scanner-fallback logic depends on it), record the enclosing
+  // caller method per call-site separately. The enclosing method NAME is read
+  // with the SAME accessor as the ownMethods seed (the first child `Id` of the
+  // nearest `MethodDeclaration` ancestor), in ORIGINAL case for display.
+  const callSites: { callee: string; callerMethod: string }[] = [];
+  const recordCall = (callee: string, node: Ctx): void => {
+    calls.add(callee);
+    const md = ancestorWhere(node, (c) => ctxName(c) === 'MethodDeclaration');
+    const cm =
+      md === null
+        ? undefined
+        : (kids(md).find((k) => ctxName(k) === 'Id')?.getText() as string | undefined);
+    callSites.push({ callee, callerMethod: cm ?? '' });
+  };
 
   const resolveType = (t: string): string => innerClasses.get(t) ?? t;
   const isSObjectish = (t: string | null | undefined): t is string =>
@@ -183,13 +233,66 @@ export const extractApexAstEdges = (
   };
 
   // ---- SOQL (inline + constant-string) --------------------------------------
+  //
+  // Scope-aware, per-query-level attribution. A SOQL statement is a tree of
+  // query scopes — the outer Query plus any SubQuery nodes — and a SELECT-list
+  // field belongs to the NEAREST enclosing scope, keyed by THAT scope's FROM
+  // object, never the textually-first FROM. Three field classes are dropped
+  // (honest degradation — a heuristic parser cannot resolve them to a real
+  // sObject.field, so emitting a parsed-confidence edge would be a phantom):
+  //   1. FROM identifiers at any level (object/relationship names are not fields).
+  //   2. Every field of a CHILD-relationship subquery `(SELECT .. FROM Contacts)`
+  //      — its FROM names a relationship, not an sObject API name.
+  //   3. Every field of a polymorphic `TYPEOF .. END` clause — the WHEN tokens
+  //      are sObject type names and the THEN/ELSE fields belong to the
+  //      unresolvable polymorphic target.
+  // SEMI-JOIN subqueries `WHERE Id IN (SELECT .. FROM Contact)` keep their own
+  // scope (their FROM is a real sObject), so their fields attribute to that
+  // inner object, not the outer one. This mirrors the regex scanner's already-
+  // correct SOQL oracle (apex-scanner.ts collectSoqlFroms).
+  const FROM_OBJ = (scopeCtx: Ctx): string | undefined => {
+    // Direct grammar accessor returns this scope's OWN outermost FROM; fall
+    // back to a findAll filtered to NOT-under-a-nested-SubQuery for robustness
+    // on contexts where the accessor is unexpectedly absent.
+    const direct = scopeCtx.fromNameList?.() as Ctx | undefined;
+    const list =
+      direct ??
+      findAll(scopeCtx, 'FromNameList').find(
+        (fl) => (ancestorWhere(fl, (c) => ctxName(c) === 'SubQuery', new Set(['Query'])) ?? scopeCtx) === scopeCtx,
+      );
+    if (list === undefined || list === null) return undefined;
+    const txt = findAll(list, 'FieldName')[0]?.getText() as string | undefined;
+    return txt === undefined || txt.length === 0 ? undefined : txt;
+  };
+
   const soqlFrom = (queryCtx: Ctx): void => {
-    const fromList = findAll(queryCtx, 'FromNameList')[0];
-    const fromFns = fromList === undefined ? [] : findAll(fromList, 'FieldName');
-    const obj = fromFns[0]?.getText() as string | undefined;
-    if (obj === undefined) return;
+    const SCOPE = new Set(['Query', 'SubQuery']);
     for (const fn of findAll(queryCtx, 'FieldName')) {
-      if (fromFns.includes(fn)) continue;
+      // A FROM identifier (this field is itself inside a FromNameList) names an
+      // object/relationship, never a field — skip at every level.
+      if (ancestorWhere(fn, (c) => ctxName(c) === 'FromNameList', SCOPE) !== null) continue;
+      // Polymorphic TYPEOF: WHEN type names + THEN/ELSE target fields are
+      // unresolvable — drop the whole clause's fields.
+      if (ancestorWhere(fn, (c) => ctxName(c) === 'TypeOf', SCOPE) !== null) continue;
+      // Nearest enclosing scope: stop at the first SubQuery/Query boundary.
+      const scope = ancestorWhere(fn, (c) => SCOPE.has(ctxName(c))) ?? queryCtx;
+      if (ctxName(scope) === 'SubQuery') {
+        // A CHILD-relationship subquery (the clause directly enclosing it is a
+        // SELECT entry) cannot map its relationship FROM to an sObject — drop by
+        // STRUCTURE, regardless of whether the FROM token happens to look like
+        // an sObject. Only a subquery whose NEAREST enclosing clause is a WHERE
+        // is a semi-join over a real sObject. Stop at the parent SubQuery/Query
+        // boundary so a child-sub nested inside a semi-join's SELECT is not
+        // misread as a semi-join via the outer WHERE.
+        const semiJoin = ancestorWhere(
+          scope,
+          (c) => ctxName(c) === 'WhereClause',
+          new Set(['Query', 'SubQuery']),
+        );
+        if (semiJoin === null) continue;
+      }
+      const obj = FROM_OBJ(scope);
+      if (obj === undefined) continue;
       reads.add(`${obj}.${fn.getText()}`);
     }
   };
@@ -269,11 +372,11 @@ export const extractApexAstEdges = (
 
     if (tailIsCall) {
       if (recvType !== null) {
-        if (isUserClass(recvType)) calls.add(`${resolveType(recvType)}.${last}`);
-        else if (allowSystemCall(recvType, last)) calls.add(`${recvType}.${last}`);
+        if (isUserClass(recvType)) recordCall(`${resolveType(recvType)}.${last}`, dot);
+        else if (allowSystemCall(recvType, last)) recordCall(`${recvType}.${last}`, dot);
       } else if (!varTypes.has(rootLower) && /^[A-Z]/.test(seg.root) && seg.path.length === 1) {
-        if (allowSystemCall(seg.root, last)) calls.add(`${seg.root}.${last}`);
-        else if (isUserClass(seg.root)) calls.add(`${resolveType(seg.root)}.${last}`);
+        if (allowSystemCall(seg.root, last)) recordCall(`${seg.root}.${last}`, dot);
+        else if (isUserClass(seg.root)) recordCall(`${resolveType(seg.root)}.${last}`, dot);
       }
       if (isSObjectish(recvType) && seg.path.length > 1) {
         reads.add(`${recvType}.${seg.path.slice(0, -1).join('.')}`);
@@ -286,7 +389,7 @@ export const extractApexAstEdges = (
   // ---- bare calls (own methods / recursion) ------------------------------------
   for (const mc of findAll(tree, 'MethodCallExpression')) {
     const id = findAll(mc, 'Id')[0]?.getText() as string | undefined;
-    if (id !== undefined && ownMethods.has(id.toLowerCase())) calls.add(`${className}.${id}`);
+    if (id !== undefined && ownMethods.has(id.toLowerCase())) recordCall(`${className}.${id}`, mc);
   }
 
   return {
@@ -294,5 +397,16 @@ export const extractApexAstEdges = (
     reads: [...reads].sort(),
     writes: [...writes].sort(),
     innerTypes: [...innerClasses.keys()].sort(),
+    callSites: [...callSites].sort((a, b) =>
+      a.callee < b.callee
+        ? -1
+        : a.callee > b.callee
+          ? 1
+          : a.callerMethod < b.callerMethod
+            ? -1
+            : a.callerMethod > b.callerMethod
+              ? 1
+              : 0,
+    ),
   };
 };

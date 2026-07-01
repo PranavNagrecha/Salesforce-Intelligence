@@ -14,6 +14,7 @@ import {
   getSubgraph,
   listChildren,
   listEdges,
+  listEdgesForNodes,
   listNodeIdentities,
   listNodesByType,
   searchNodes,
@@ -360,6 +361,173 @@ describe('listEdges', () => {
   });
 });
 
+describe('listEdgesForNodes (CR-17 batched listEdges)', () => {
+  const sortEdges = (edges: readonly Edge[]): Edge[] =>
+    [...edges].sort((a, b) =>
+      a.toId !== b.toId
+        ? a.toId < b.toId
+          ? -1
+          : 1
+        : a.edgeType !== b.edgeType
+          ? a.edgeType < b.edgeType
+            ? -1
+            : 1
+          : a.fromId !== b.fromId
+            ? a.fromId < b.fromId
+              ? -1
+              : 1
+            : a.source !== b.source
+              ? a.source < b.source
+                ? -1
+                : 1
+              : 0,
+    );
+
+  it('partition per node equals per-id listEdges sets for every direction', async () => {
+    const ids: Edge['fromId'][] = [
+      'CustomObject:Account',
+      'CustomField:Account.Industry__c',
+      'CustomField:Account.Region__c',
+      'CustomObject:Opportunity',
+    ];
+    for (const direction of ['both', 'in', 'out'] as const) {
+      const batched = await listEdgesForNodes(store, ids, { direction });
+      expect(batched.ok).toBe(true);
+      if (!batched.ok) return;
+      for (const id of ids) {
+        const single = await listEdges(store, id, { direction });
+        expect(single.ok).toBe(true);
+        if (!single.ok) return;
+        const bucket = batched.value.get(id) ?? [];
+        // Same SET (order-independent), via the shared total sort.
+        expect(sortEdges(bucket)).toEqual(sortEdges(single.value));
+        // And the batched bucket is already in that defined total order.
+        expect([...bucket]).toEqual(sortEdges(bucket));
+      }
+    }
+  });
+
+  it('reproduces the union of per-edgeType listEdges calls (direction=in)', async () => {
+    const id = 'CustomField:Account.Industry__c';
+    const edgeTypes: Edge['edgeType'][] = ['parentOf', 'triggersOn'];
+    const batched = await listEdgesForNodes(store, [id], {
+      direction: 'in',
+      edgeTypes,
+    });
+    expect(batched.ok).toBe(true);
+    if (!batched.ok) return;
+    const union: Edge[] = [];
+    for (const edgeType of edgeTypes) {
+      const single = await listEdges(store, id, { direction: 'in', edgeType });
+      expect(single.ok).toBe(true);
+      if (!single.ok) return;
+      union.push(...single.value);
+    }
+    expect(sortEdges(batched.value.get(id) ?? [])).toEqual(sortEdges(union));
+  });
+
+  it('returns ok(empty map) on empty nodeIds without emitting invalid SQL', async () => {
+    const spy = vi.spyOn(store.connection, 'runAndReadAll');
+    const r = await listEdgesForNodes(store, []);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.size).toBe(0);
+    // No SQL is issued for an empty batch.
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('always keys every requested id, even those with no incident edges', async () => {
+    const r = await listEdgesForNodes(store, [
+      'CustomField:Account.Region__c',
+      'CustomField:DoesNotExist__c.Nope__c',
+    ]);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.has('CustomField:Account.Region__c')).toBe(true);
+    expect(r.value.has('CustomField:DoesNotExist__c.Nope__c')).toBe(true);
+    expect(r.value.get('CustomField:DoesNotExist__c.Nope__c')).toEqual([]);
+  });
+
+  it('issues exactly ONE query for an N-node batch (O(1), not O(N))', async () => {
+    const ids: Edge['fromId'][] = [
+      'CustomObject:Account',
+      'CustomObject:Opportunity',
+      'CustomObject:CustomerProject__c',
+      'CustomField:Account.Industry__c',
+    ];
+    // Baseline: the row-at-a-time approach issues one query per node.
+    const singleSpy = vi.spyOn(store.connection, 'runAndReadAll');
+    for (const id of ids) {
+      await listEdges(store, id, { direction: 'in' });
+    }
+    expect(singleSpy).toHaveBeenCalledTimes(ids.length);
+    singleSpy.mockRestore();
+    // Batched: one round-trip for the whole frontier.
+    const batchSpy = vi.spyOn(store.connection, 'runAndReadAll');
+    const r = await listEdgesForNodes(store, ids, { direction: 'in' });
+    expect(r.ok).toBe(true);
+    expect(batchSpy).toHaveBeenCalledTimes(1);
+    batchSpy.mockRestore();
+  });
+
+  it('direction=both buckets a self-loop once and a both-endpoints edge in both', async () => {
+    const loopDir = mkdtempSync(join(tmpdir(), 'sfi-graph-batch-loop-'));
+    const dbPath = join(loopDir, 'loop.db');
+    const instance = await DuckDBInstance.create(dbPath);
+    const connection = await instance.connect();
+    const initResult = await initSchema(connection);
+    expect(initResult.ok).toBe(true);
+    const localStore: GraphStore = { connection, instance };
+    const loopSeed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: 'ApexClass:A', type: 'ApexClass', apiName: 'A' }),
+        makeNode({ id: 'ApexClass:B', type: 'ApexClass', apiName: 'B' }),
+      ],
+      edges: [
+        // Self-loop on A (a class that calls itself).
+        makeEdge({
+          fromId: 'ApexClass:A',
+          toId: 'ApexClass:A',
+          edgeType: 'callsApex',
+          confidence: 'heuristic',
+          source: 'apex-scanner',
+        }),
+        // A -> B, both requested in the batch.
+        makeEdge({
+          fromId: 'ApexClass:A',
+          toId: 'ApexClass:B',
+          edgeType: 'callsApex',
+          confidence: 'heuristic',
+          source: 'apex-scanner',
+        }),
+      ],
+    };
+    const imported = await importExtractionResults(localStore, [loopSeed]);
+    expect(imported.ok).toBe(true);
+    const ids: Edge['fromId'][] = ['ApexClass:A', 'ApexClass:B'];
+    const batched = await listEdgesForNodes(localStore, ids, {
+      direction: 'both',
+    });
+    expect(batched.ok).toBe(true);
+    if (!batched.ok) return;
+    // Identity vs per-id listEdges (the contract that preserves behavior).
+    for (const id of ids) {
+      const single = await listEdges(localStore, id, { direction: 'both' });
+      expect(single.ok).toBe(true);
+      if (!single.ok) return;
+      expect(sortEdges(batched.value.get(id) ?? [])).toEqual(
+        sortEdges(single.value),
+      );
+    }
+    // A's bucket: self-loop (once) + A->B = 2 edges.
+    expect((batched.value.get('ApexClass:A') ?? []).length).toBe(2);
+    // B's bucket: just A->B = 1 edge.
+    expect((batched.value.get('ApexClass:B') ?? []).length).toBe(1);
+    rmSync(loopDir, { recursive: true, force: true });
+  });
+});
+
 describe('searchNodes', () => {
   it('returns the exact-match Account node at the top of the score', async () => {
     const r = await searchNodes(store, 'Account');
@@ -586,6 +754,20 @@ describe('getSubgraph caps + unresolved-edge filtering', () => {
         confidence: 'heuristic',
         source: 'apex-scanner',
       }),
+      // RV2: a heuristic phantom edge FROM the over-budget Hub. HubPhantom is
+      // NOT added to `nodes`, so import stamps targetMissing → isHiddenUnresolved
+      // is true. Under includeUnresolved this is the ONLY endpoint that should be
+      // synthesized as an unresolved stub; the ~500 budget-clipped REAL
+      // CustomField leaves must NOT be. `to_id ASC` orders ApexClass:HubPhantom
+      // before CustomField:Hub.F0__c, so it is collected before the node budget
+      // is spent, keeping the exactly-one-unresolved assertion reachable.
+      makeEdge({
+        fromId: 'CustomObject:Hub',
+        toId: 'ApexClass:HubPhantom',
+        edgeType: 'callsApex',
+        confidence: 'heuristic',
+        source: 'apex-scanner',
+      }),
     ];
     for (let i = 0; i < LEAF_COUNT; i++) {
       const id = `CustomField:Hub.F${i}__c`;
@@ -617,6 +799,25 @@ describe('getSubgraph caps + unresolved-edge filtering', () => {
     if (!r.ok) return;
     expect(r.value).toBe(LEAF_COUNT);
     expect(r.value).toBeGreaterThan(500);
+  });
+
+  it('countNodesByType honors a parentId narrow (CR-22 B3 filtered total)', async () => {
+    // All LEAF_COUNT CustomFields are children of CustomObject:Hub; a parent
+    // narrow must return that exact subset total (a true per-parent total for a
+    // filtered paginated enumeration), and a non-existent parent returns 0.
+    const r = await countNodesByType(capStore, 'CustomField', {
+      parentId: 'CustomObject:Hub',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value).toBe(LEAF_COUNT);
+
+    const none = await countNodesByType(capStore, 'CustomField', {
+      parentId: 'CustomObject:DoesNotExist',
+    });
+    expect(none.ok).toBe(true);
+    if (!none.ok) return;
+    expect(none.value).toBe(0);
   });
 
   it('clips a hub subgraph at the node cap and flags truncated', async () => {
@@ -725,6 +926,142 @@ describe('getSubgraph caps + unresolved-edge filtering', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.edges.map((e) => e.toId)).toContain('ApexClass:Phantom');
+  });
+
+  it('synthesizes a stub node for the phantom endpoint so no edge dangles (CR-13)', async () => {
+    // CR-13: a returned edge must never point at a node absent from the
+    // returned node set. The phantom endpoint (ApexClass:Phantom) has no
+    // `nodes` row, so before CR-13 the includeUnresolved edge dangled. The fix
+    // synthesizes a stub boundary node for it so the slice is self-contained.
+    const r = await getSubgraph(capStore, 'ApexClass:Caller', 1, {
+      includeUnresolved: true,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const nodeIds = new Set(r.value.nodes.map((n) => n.id));
+    // The phantom endpoint is now a returned node (a stub).
+    expect(nodeIds.has('ApexClass:Phantom')).toBe(true);
+    // The phantom edge is still present (the feature is preserved).
+    expect(r.value.edges.map((e) => e.toId)).toContain('ApexClass:Phantom');
+    // The stub is marked unresolved so consumers can disclose it, with type +
+    // apiName parsed from the ComponentId.
+    const stub = r.value.nodes.find((n) => n.id === 'ApexClass:Phantom');
+    expect(stub).toBeDefined();
+    expect(stub?.type).toBe('ApexClass');
+    expect(stub?.apiName).toBe('Phantom');
+    expect(stub?.properties['unresolved']).toBe(true);
+    // Full no-dangling invariant: every edge endpoint is a returned node.
+    for (const e of r.value.edges) {
+      expect(nodeIds.has(e.fromId)).toBe(true);
+      expect(nodeIds.has(e.toId)).toBe(true);
+    }
+  });
+
+  it('includeUnresolved on an over-budget hub stubs ONLY genuine phantoms, never budget-clipped real nodes (RV2)', async () => {
+    // RV2: pre-fix the stub loop synthesized a stub for EVERY collectedEdge
+    // endpoint missing from the returned node set. Because bfsExpand collects
+    // edges up to maxEdges=400 independently of the maxNodes=200 cap, edges to
+    // budget-clipped REAL CustomField leaves remained in collectedEdges with
+    // endpoints absent from the node set — they were mislabeled unresolved:true
+    // and pushed the node count past the 200 cap. The fix gates the stub loop on
+    // isHiddenUnresolved (heuristic AND targetMissing), so only the genuine
+    // phantom (ApexClass:HubPhantom) is stubbed; clipped real leaves stay out and
+    // their edges are dropped by the returnedIds filter, exactly like the default.
+    const r = await getSubgraph(capStore, 'CustomObject:Hub', 1, {
+      includeUnresolved: true,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Caps hold: node count never exceeds 200, edge count never exceeds 400.
+    expect(r.value.nodes.length).toBeLessThanOrEqual(SUBGRAPH_MAX_NODES);
+    expect(r.value.edges.length).toBeLessThanOrEqual(400);
+    // No real CustomField leaf is labeled unresolved.
+    for (const n of r.value.nodes) {
+      if (n.type === 'CustomField') {
+        expect(n.properties['unresolved']).not.toBe(true);
+      }
+    }
+    // Exactly one node is an unresolved stub, and it is the genuine phantom.
+    const unresolved = r.value.nodes.filter((n) => n.properties['unresolved'] === true);
+    expect(unresolved.length).toBe(1);
+    expect(unresolved[0]?.id).toBe('ApexClass:HubPhantom');
+    // Zero dangling: every edge endpoint is in the returned node id set.
+    const nodeIds = new Set(r.value.nodes.map((n) => n.id));
+    for (const e of r.value.edges) {
+      expect(nodeIds.has(e.fromId)).toBe(true);
+      expect(nodeIds.has(e.toId)).toBe(true);
+    }
+  });
+
+  it('includeUnresolved caps stubbed phantoms at SUBGRAPH_MAX_NODES (CR-P3 low)', async () => {
+    // CR-P3 low: bfsExpand budgets edges to maxEdges=400 independently of the
+    // maxNodes=200 node cap. A single class with MORE genuine phantom heuristic
+    // edges than the node cap (each `isHiddenUnresolved` → all pass the RV2 gate)
+    // floods `collectedEdges` with > 200 phantom toIds. The stub loop then
+    // synthesizes a stub for EVERY one of them with no cap check, blowing the
+    // returned node count past the documented `at most SUBGRAPH_MAX_NODES` bound.
+    // The fix must cap the stubbed nodes so the bound holds under includeUnresolved.
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-graph-phantom-flood-'));
+    const instance = await DuckDBInstance.create(join(dir, 'flood.db'));
+    const connection = await instance.connect();
+    const init = await initSchema(connection);
+    expect(init.ok).toBe(true);
+    if (!init.ok) return;
+    const floodStore: GraphStore = { connection, instance };
+
+    // ONE real scanned class with 300 distinct GENUINE phantom callsApex edges
+    // (each toId has no node row → import stamps targetMissing → heuristic +
+    // targetMissing = isHiddenUnresolved). 300 > both maxNodes (200) and
+    // maxEdges-minus-nodes, so the stub loop is forced past the node cap.
+    const PHANTOM_COUNT = 300;
+    const nodes: Node[] = [
+      makeNode({
+        id: 'ApexClass:Flooder',
+        type: 'ApexClass',
+        apiName: 'Flooder',
+        label: 'Flooder',
+      }),
+    ];
+    const edges: Edge[] = [];
+    for (let i = 0; i < PHANTOM_COUNT; i++) {
+      edges.push(
+        makeEdge({
+          fromId: 'ApexClass:Flooder',
+          // Zero-padded so the deterministic to_id ASC order is stable.
+          toId: `ApexClass:Phantom${String(i).padStart(4, '0')}`,
+          edgeType: 'callsApex',
+          confidence: 'heuristic',
+          source: 'apex-scanner',
+        }),
+      );
+    }
+    const imported = await importExtractionResults(floodStore, [{ nodes, edges }]);
+    expect(imported.ok).toBe(true);
+    if (!imported.ok) return;
+
+    const r = await getSubgraph(floodStore, 'ApexClass:Flooder', 1, {
+      includeUnresolved: true,
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      // The documented bound: at most SUBGRAPH_MAX_NODES, even when the stub
+      // loop has > 200 genuine phantom endpoints to synthesize.
+      expect(r.value.nodes.length).toBeLessThanOrEqual(SUBGRAPH_MAX_NODES);
+      // The slice stays self-contained: no edge dangles to a node that was
+      // dropped to keep the cap.
+      const nodeIds = new Set(r.value.nodes.map((n) => n.id));
+      for (const e of r.value.edges) {
+        expect(nodeIds.has(e.fromId)).toBe(true);
+        expect(nodeIds.has(e.toId)).toBe(true);
+      }
+      // The cap was actually exercised (some phantoms were surfaced as stubs,
+      // proving the feature still works rather than being disabled entirely).
+      expect(r.value.truncated).toBe(true);
+    }
+
+    connection.disconnectSync();
+    instance.closeSync();
+    rmSync(dir, { recursive: true, force: true });
   });
 });
 

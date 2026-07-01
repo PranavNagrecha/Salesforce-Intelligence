@@ -141,7 +141,7 @@ export interface WhatIfRemovePicklistValueOutput {
  * "Apex string-literal detection".
  */
 const DISCLOSURE =
-  "Apex code referencing the picklist value as a string literal is recognized only for static literals. Variable-based picklist comparisons (`if (account.Industry__c == myVar)`), dynamic SOQL strings, and reflective field access via `obj.get('FieldName')` are invisible to the recognizer; review dynamic comparisons separately before removing the value.";
+  "Apex code referencing the picklist value as a string literal is recognized only for static literals. Variable-based picklist comparisons (`if (account.Industry__c == myVar)`), dynamic SOQL strings, and reflective field access via `obj.get('FieldName')` are invisible to the recognizer; review dynamic comparisons separately before removing the value. Flow record-create/update steps that assign this value to the field as a literal (e.g. `<stringValue>Completed</stringValue>`) ARE detected; Flow steps that assign the value indirectly via a variable, formula, or merge field (`<elementReference>`) are NOT statically resolvable and are not matched — review those flows manually.";
 
 const coverageCaveatFor = (ctx: Context): CoverageCaveat | undefined => {
   const coverage = summarizeCoverage(ctx.manifest, PICKLIST_VALUE_COVERAGE);
@@ -243,6 +243,30 @@ const extractHaystackTexts = (node: Node): readonly string[] => {
     }
   }
   return texts;
+};
+
+/**
+ * R2-1: detect whether a `writesTo` edge assigns the removed value to the
+ * field as a LITERAL. The flow extractor stamps `properties.assignedValue`
+ * (the unwrapped scalar) and `properties.assignedValueKind`
+ * (`'literal' | 'reference'`) on each field-level `writesTo` edge.
+ *
+ * A match requires BOTH:
+ *   - `assignedValueKind === 'literal'` — an `<elementReference>`
+ *     assignment (kind `'reference'`) is a variable/formula/merge field
+ *     and is NOT statically comparable to the removed value, so it is
+ *     deliberately NOT a match (avoids a false positive: the edu vault
+ *     carries hundreds of `$Record.*` reference assignments).
+ *   - `assignedValue === value` — exact, case-sensitive match (picklist
+ *     API names are case-sensitive, mirroring the formula/Apex needle).
+ *
+ * Edges without `assignedValue` (e.g. object-level write edges, or
+ * pre-R2-1 vaults) never match here.
+ */
+const edgeAssignsValueLiterally = (edge: Edge, value: string): boolean => {
+  if (edge.edgeType !== 'writesTo') return false;
+  if (edge.properties['assignedValueKind'] !== 'literal') return false;
+  return edge.properties['assignedValue'] === value;
 };
 
 /**
@@ -417,6 +441,14 @@ export const whatIfRemovePicklistValueHandler = async (
     const texts = extractHaystackTexts(fromNode);
     const directMatch = containsAnyNeedle(texts, needles);
 
+    // R2-1: a Flow record-create/update step that assigns this exact value
+    // to the field as a LITERAL (`<stringValue>…</stringValue>`) is a
+    // destructive blocker the text-haystack scan would miss — the
+    // assignment value lives on the `writesTo` edge, not in any of the
+    // node's scanned text properties. An `<elementReference>` assignment
+    // (kind 'reference') is NOT a literal and is intentionally skipped.
+    const assignMatch = edgeAssignsValueLiterally(edge, value);
+
     // For Flow / WorkflowRule / etc. that route their condition through
     // a v2.0a ConditionalContext, the value match may live on the CC
     // rather than the firer itself. Check the CC for these firers.
@@ -438,7 +470,7 @@ export const whatIfRemovePicklistValueHandler = async (
       if (ccResult.value.length > 0) conditionalMatch = true;
     }
 
-    if (!directMatch && !conditionalMatch) continue;
+    if (!directMatch && !conditionalMatch && !assignMatch) continue;
 
     const category = classifyCategory(edge, fromNode);
     impactsById.set(fromNode.id, {

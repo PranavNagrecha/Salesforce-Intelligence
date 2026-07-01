@@ -124,3 +124,242 @@ describe('innerTypes surface (P14-USAGE-scanner-fp-downgrade)', () => {
     expect(out.innerTypes).toEqual(['ReportWrapper', 'Row']);
   });
 });
+
+/**
+ * CR-06 (H5/H5b) — SOQL scope-aware attribution. The buggy `soqlFrom` picked
+ * the textually-first FROM (a child-relationship name) as the primary object
+ * and swept every FieldName under it, minting phantom parsed-confidence edges
+ * (Contacts.Email, mis-keyed semi-join fields) that beat the correct regex
+ * edges in dedup. Each field must attribute to its NEAREST query scope's FROM
+ * object; child-subquery and TYPEOF fields drop honestly.
+ */
+describe('SOQL subquery scope attribution (CR-06 / H5)', () => {
+  let extract: typeof import('../src/apex-ast-edges.js').extractApexAstEdges;
+  beforeAll(async () => {
+    ({ extractApexAstEdges: extract } = await import('../src/apex-ast-edges.js'));
+  });
+
+  /** Wrap an inline `[SELECT ...]` query as an Apex method body. */
+  const inline = (soql: string): readonly string[] =>
+    extract(`public class Q { public void run() { List<SObject> r = ${soql}; } }`, 'Q', {})
+      .reads;
+  /** Wrap the same query as a constant-string `Database.query('...')` literal. */
+  const dbquery = (innerSoql: string): readonly string[] =>
+    extract(
+      `public class Q { public void run() { List<SObject> r = Database.query('${innerSoql}'); } }`,
+      'Q',
+      {},
+    ).reads;
+
+  it('child subquery: fields stay on the PARENT, child relationship is dropped (no phantom)', () => {
+    const reads = inline('[SELECT Id, Name, (SELECT Email, Name FROM Contacts) FROM Account]');
+    expect(reads).toContain('Account.Id');
+    expect(reads).toContain('Account.Name');
+    // child fields + relationship name are unresolvable → must NOT be emitted
+    expect(reads.some((k) => k.startsWith('Contacts.'))).toBe(false);
+    expect(reads).not.toContain('Account.Email');
+    expect(reads).not.toContain('Account.Contact');
+    // the relationship token never appears as a field segment anywhere
+    expect(reads.some((k) => k.includes('Contacts'))).toBe(false);
+  });
+
+  it('multiple child subqueries: only the parent fields survive (no second-relationship leak)', () => {
+    const reads = inline(
+      '[SELECT Id, (SELECT Email FROM Contacts), (SELECT Subject FROM Cases) FROM Account]',
+    );
+    expect(reads).toEqual(['Account.Id']);
+    expect(reads.some((k) => k.includes('Contacts') || k.includes('Cases'))).toBe(false);
+    expect(reads).not.toContain('Account.Subject');
+    expect(reads).not.toContain('Account.Email');
+  });
+
+  it('semi-join: inner fields attribute to the inner FROM object, not the outer', () => {
+    const reads = inline(
+      '[SELECT Id, Name FROM Account WHERE Id IN (SELECT AccountId FROM Contact WHERE Email != null)]',
+    );
+    expect(reads).toContain('Account.Id');
+    expect(reads).toContain('Account.Name');
+    expect(reads).toContain('Contact.AccountId');
+    expect(reads).toContain('Contact.Email'); // inner WHERE field keyed to Contact
+    // no cross-scope bleed, no FROM-identifier leak
+    expect(reads).not.toContain('Account.AccountId');
+    expect(reads).not.toContain('Account.Email');
+    expect(reads).not.toContain('Account.Contact');
+  });
+
+  it('regression: a simple WHERE keeps its fields on the primary object', () => {
+    const reads = inline('[SELECT Id FROM Account WHERE Industry = null]');
+    expect([...reads].sort()).toEqual(['Account.Id', 'Account.Industry']);
+  });
+
+  it('regression: relationship-prefixed outer fields stay verbatim (cross-object traversal)', () => {
+    const reads = inline('[SELECT Id, Account.Name FROM Contact]');
+    expect(reads).toContain('Contact.Id');
+    expect(reads).toContain('Contact.Account.Name');
+    expect(reads.some((k) => k.startsWith('Account.'))).toBe(false);
+  });
+
+  it('doubly-nested semi-joins partition into three scopes with no bleed', () => {
+    const reads = inline(
+      '[SELECT Id FROM Account WHERE Id IN (SELECT AccountId FROM Contact WHERE Id IN (SELECT ContactId FROM Case))]',
+    );
+    expect([...reads].sort()).toEqual([
+      'Account.Id',
+      'Case.ContactId',
+      'Contact.AccountId',
+      'Contact.Id',
+    ]);
+  });
+
+  it('polymorphic TYPEOF: drops the whole clause (WHEN type names + THEN/ELSE fields are phantoms)', () => {
+    const reads = inline(
+      '[SELECT TYPEOF What WHEN Account THEN Phone WHEN Opportunity THEN Amount ELSE Name END FROM Event]',
+    );
+    // WHEN tokens are sObject TYPE names, not fields; THEN/ELSE targets are
+    // unresolvable to the polymorphic target sObject → emit nothing.
+    expect(reads).toEqual([]);
+    expect(reads).not.toContain('Event.Account');
+    expect(reads).not.toContain('Event.Opportunity');
+    expect(reads).not.toContain('Event.Phone');
+  });
+
+  it('combined child-subquery + semi-join (MergeCases-shaped): only resolvable scopes survive', () => {
+    const reads = inline(
+      '[SELECT Id, (SELECT Subject FROM Cases) FROM Contact WHERE Id IN (SELECT ContactId FROM Case)]',
+    );
+    expect([...reads].sort()).toEqual(['Case.ContactId', 'Contact.Id']);
+    expect(reads.some((k) => k.includes('Cases'))).toBe(false);
+    expect(reads).not.toContain('Contact.Subject');
+  });
+
+  it('child subquery whose relationship coincidentally matches an sObject name is still dropped by structure', () => {
+    const reads = inline('[SELECT Id, (SELECT LastName FROM Contact) FROM Account]');
+    expect(reads).toEqual(['Account.Id']);
+    expect(reads).not.toContain('Contact.LastName');
+  });
+
+  it('aggregate function args + GROUP BY fields stay on the primary object', () => {
+    const reads = inline('[SELECT COUNT(Id) cnt, Name FROM Account GROUP BY Name]');
+    expect(reads).toContain('Account.Id');
+    expect(reads).toContain('Account.Name');
+  });
+
+  it('a child subquery nested inside a semi-join SELECT is dropped by its NEAREST clause, not the outer WHERE', () => {
+    // The inner `(SELECT LastName FROM Notes)` lives in the semi-join's SELECT
+    // list; classification must stop at the parent SubQuery boundary so the
+    // outer WHERE does not falsely make it a semi-join (which would mint a
+    // phantom Notes.LastName).
+    const reads = inline(
+      '[SELECT Id FROM Account WHERE Id IN (SELECT ContactId, (SELECT LastName FROM Notes) FROM Contact)]',
+    );
+    expect([...reads].sort()).toEqual(['Account.Id', 'Contact.ContactId']);
+    expect(reads.some((k) => k.includes('Notes'))).toBe(false);
+  });
+
+  it('Database.query constant-string path is fixed by the same scope-aware logic', () => {
+    const childReads = dbquery('SELECT Id, Name, (SELECT Email FROM Contacts) FROM Account');
+    expect(childReads).toContain('Account.Id');
+    expect(childReads).toContain('Account.Name');
+    expect(childReads.some((k) => k.includes('Contacts'))).toBe(false);
+
+    const semiReads = dbquery(
+      'SELECT Id, Name FROM Account WHERE Id IN (SELECT AccountId FROM Contact)',
+    );
+    expect(semiReads).toContain('Account.Id');
+    expect(semiReads).toContain('Contact.AccountId');
+    expect(semiReads).not.toContain('Account.AccountId');
+    expect(semiReads).not.toContain('Account.Contact');
+  });
+});
+
+/**
+ * CR-CAP-06 — callSites: the enclosing CALLER method NAME per cross-class /
+ * self call-site. ADDITIVE field (callSites?), AST-path only. Attribution is
+ * by the call-site's nearest enclosing MethodDeclaration; a call with NO
+ * enclosing method (field/static initializer) maps to '' and is dropped
+ * downstream. Original case is preserved (display names).
+ */
+describe('callSites enclosing-method attribution (CR-CAP-06)', () => {
+  let extract: typeof import('../src/apex-ast-edges.js').extractApexAstEdges;
+  beforeAll(async () => {
+    ({ extractApexAstEdges: extract } = await import('../src/apex-ast-edges.js'));
+  });
+  const known = new Set(['Callee']);
+
+  it('attributes ONLY the calling method, not the sibling method (two-method discrimination)', () => {
+    // Method a() calls Callee.foo(); method b() does NOT call Callee at all.
+    // Class-level granularity cannot distinguish; callSites proves it can.
+    const src = [
+      'public class Caller {',
+      '  void a() { Callee.foo(); }',
+      '  void b() { Integer x = 1; }',
+      '}',
+    ].join('\n');
+    const out = extract(src, 'Caller', { knownClasses: known });
+    const sites = out.callSites ?? [];
+    expect(sites).toContainEqual({ callee: 'Callee.foo', callerMethod: 'a' });
+    // NOTHING attributed to b — b makes no call.
+    expect(sites.some((s) => s.callerMethod === 'b')).toBe(false);
+  });
+
+  it('partitions per target method: a()->foo, b()->bar are NOT cross-attributed', () => {
+    // The phantom-attribution guard: a() calls foo, b() calls bar. The
+    // callSites must keep the (callee, callerMethod) pairing so a downstream
+    // consumer never claims b() calls foo.
+    const src = [
+      'public class Caller {',
+      '  void a() { Callee.foo(); }',
+      '  void b() { Callee.bar(); }',
+      '}',
+    ].join('\n');
+    const out = extract(src, 'Caller', { knownClasses: known });
+    const sites = out.callSites ?? [];
+    expect(sites).toContainEqual({ callee: 'Callee.foo', callerMethod: 'a' });
+    expect(sites).toContainEqual({ callee: 'Callee.bar', callerMethod: 'b' });
+    // a never calls bar; b never calls foo.
+    expect(sites.some((s) => s.callee === 'Callee.foo' && s.callerMethod === 'b')).toBe(false);
+    expect(sites.some((s) => s.callee === 'Callee.bar' && s.callerMethod === 'a')).toBe(false);
+  });
+
+  it('preserves ORIGINAL case in the caller method name (display, not the lowercased seed)', () => {
+    const src = [
+      'public class Caller {',
+      '  void processOpp() { Callee.foo(); }',
+      '}',
+    ].join('\n');
+    const out = extract(src, 'Caller', { knownClasses: known });
+    expect(out.callSites ?? []).toContainEqual({
+      callee: 'Callee.foo',
+      callerMethod: 'processOpp',
+    });
+  });
+
+  it('a call with NO enclosing method (static initializer) yields callerMethod ""', () => {
+    // The static-init call site has no MethodDeclaration ancestor → '' (dropped
+    // downstream → absent attribution, never a blank name).
+    const src = [
+      'public class Caller {',
+      '  static { Callee.init(); }',
+      '}',
+    ].join('\n');
+    const out = extract(src, 'Caller', { knownClasses: known });
+    const sites = out.callSites ?? [];
+    const init = sites.find((s) => s.callee === 'Callee.init');
+    expect(init).toBeDefined();
+    expect(init?.callerMethod).toBe('');
+  });
+
+  it('self-call (bare own-method) carries its enclosing caller method', () => {
+    const src = [
+      'public class Caller {',
+      '  void a() { helper(); }',
+      '  void helper() {}',
+      '}',
+    ].join('\n');
+    const out = extract(src, 'Caller', { knownClasses: known });
+    expect(out.callSites ?? []).toContainEqual({
+      callee: 'Caller.helper',
+      callerMethod: 'a',
+    });
+  });
+});

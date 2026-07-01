@@ -21,12 +21,15 @@ import type {
   ComponentId,
   McpError,
   McpResponse,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
+
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 
 const OBJECT_PREFIX = 'CustomObject:';
 const FLEXIPAGE_PREFIX = 'FlexiPage:';
@@ -40,6 +43,11 @@ export const lightningPagesInputSchema = z.object({
   componentId: z.string().min(1),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
+  // CR-22 continuation cursor (object mode only): an OPAQUE token echoed back
+  // from a prior truncated page's `nextCursor`. When present it supplies the
+  // resume offset; omitting it = today's behavior (offset 0 / explicit
+  // `offset`). The flexipage branch is a single-node fast path with no list.
+  cursor: z.string().min(1).optional(),
 });
 
 export type LightningPagesInput = z.infer<typeof lightningPagesInputSchema>;
@@ -70,6 +78,15 @@ export interface LightningPagesOutput {
   readonly offset: number;
   readonly hasMore: boolean;
   readonly truncated: boolean;
+  /**
+   * CR-22 opaque continuation token (object mode), present ONLY when the pages
+   * page was truncated (more pages remain past `limit`). Echo it back as
+   * `cursor` to resume. Absent on a whole-fits page so an in-budget response
+   * stays byte-identical.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
   readonly confidence: 'declared';
   readonly activationDisclosure: string;
 }
@@ -154,11 +171,49 @@ export const lightningPagesHandler = async (
       pageType: strProp(pp, 'pageType'),
     });
   }
+  // TOTAL-ORDER sort by the FlexiPage `componentId` (= edge.fromId). This single
+  // key is ALREADY unique: each row's componentId is a distinct FlexiPage id,
+  // and the extractor emits EXACTLY ONE flexiPageObject edge per FlexiPage to a
+  // fixed CustomObject — so no two surviving rows share a componentId. A CR-22
+  // resume over this list cannot dup or skip; no extra tiebreak is needed.
   pages.sort((a, b) => (a.componentId < b.componentId ? -1 : a.componentId > b.componentId ? 1 : 0));
 
-  const total = pages.length;
-  const page = pages.slice(offset, offset + limit);
-  const hasMore = offset + page.length < total;
+  // CR-22 (object mode only): resolve the resume offset — an echoed cursor wins
+  // over an explicit `offset`; a stale/forged cursor (changed componentId,
+  // different tool, or refreshed vault) is rejected with `invalid-query`. The
+  // input.componentId being an OBJECT id is part of the fingerprint, so a cursor
+  // minted on CustomObject:A is auto-rejected if replayed against CustomObject:B.
+  const fingerprint = argsFingerprint({ componentId: input.componentId });
+  let objOffset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: 'sfi.lightning_pages',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    objOffset = decoded.value.o;
+  }
+
+  // No per-handler byte budget (offset/limit only) — set an effectively
+  // unbounded byteBudget so `paginate()` truncates ONLY on `limit`
+  // (byte-identical to the prior open-coded slice). The global jsonResult guard
+  // remains the byte backstop.
+  const paged = paginateLegacy(pages, {
+    offset: objOffset,
+    limit,
+    byteBudget: Number.MAX_SAFE_INTEGER,
+    binding: {
+      tool: 'sfi.lightning_pages',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+    keyOf: (p) => p.componentId,
+  });
+  const page = paged.items;
+  const total = paged.totalCount;
+  const hasMore = paged.hasMore;
+  const emitCursor = paged.nextCursor !== null;
   return ok({
     data: {
       componentId,
@@ -167,9 +222,10 @@ export const lightningPagesHandler = async (
       pages: page,
       summary: { pages: total },
       limit,
-      offset,
+      offset: objOffset,
       hasMore,
-      truncated: hasMore || offset > 0,
+      truncated: hasMore || objOffset > 0,
+      ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
       confidence: 'declared',
       activationDisclosure: ACTIVATION_DISCLOSURE,
     },

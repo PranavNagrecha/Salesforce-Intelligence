@@ -32,12 +32,18 @@
  *   | automations   | incoming `firesWhen` ConditionalContext + v1.3 rule    | declared/parsed/heuristic |
  *   | emails        | incoming `references` from EmailTemplate with role=body-merge | parsed |
  *   | dependencies  | OUTGOING `references` for formula fields only          | parsed           |
+ *   | listViews     | incoming `references` from ListView (referenceKind: fieldRef column / filterRef predicate / columnAndFilter) | heuristic |
  *
  * **Honesty axis** (the v3.0 constitutional rule per Q165):
  *
- *   - `dataNotAvailable: ['list-view-filters', 'reports', 'dashboards']`
- *     surfaces verbatim on EVERY response, regardless of whether the
- *     user's question explicitly named the unavailable categories.
+ *   - `dataNotAvailable` is coverage-aware (CR-CAP-03). `list-view-filters`
+ *     surfaces on EVERY response (filter-predicate evaluation is genuinely
+ *     unmodeled). `reports` / `dashboards` surface ONLY when that family was
+ *     NOT retrieved (coverage status !== 'complete') AND the field carries no
+ *     folded usage for it; when reports/dashboards were retrieved (confirmed
+ *     not-used) or the field is folded-referenced, that data IS available and
+ *     is omitted from `dataNotAvailable`. `FIELD_360_DATA_NOT_AVAILABLE` is the
+ *     full not-retrieved baseline `['list-view-filters','reports','dashboards']`.
  *   - `boundaries[]` carries the verbatim Q165 disclosure naming the
  *     v1.x extraction footprint.
  *   - `confidence` reports `'mixed'` when sections span more than one
@@ -57,9 +63,12 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import { detectPiiClassification } from '@sf-intelligence/patterns';
+import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -67,6 +76,14 @@ import type { Context } from '../server.js';
 import { annotationsBlockFor, type AnnotationsBlock } from './annotations.js';
 import { readFactBlock, type FactsBlock } from './facts-block.js';
 import { fieldNotFoundError } from './field-not-found-suggest.js';
+import { scanSupplementalFlowFieldWriters } from './flow-field-writers-scan.js';
+import {
+  argsFingerprint,
+  decodeCursor,
+  paginateSection,
+  type PageableSection,
+  type SectionDisclosure,
+} from './page-cursor.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import {
   REPORT_DASHBOARD_USAGE_CAVEAT,
@@ -83,6 +100,9 @@ const DEFAULT_MAX_ROWS_PER_SECTION = 50;
 /** Hard cap on `maxRowsPerSection` — Q165 boundary protection. */
 const HARD_CAP_MAX_ROWS_PER_SECTION = 200;
 
+/** Per-response byte budget for the designated section's page (CR-22). */
+const FIELD_360_BYTE_BUDGET = 38_000;
+
 /**
  * The verbatim Q165 disclosure naming the v1.x extraction gap. Surfaces
  * in `boundaries[]` on every `field_360` response per PLAN-v3.0 §16.
@@ -92,14 +112,14 @@ const HARD_CAP_MAX_ROWS_PER_SECTION = 200;
  */
 export const FIELD_360_Q165_DISCLOSURE =
   'v3.0 ships the unified field-forensics composition over the extracted ' +
-  'graph. List view column refs, report/dashboard field usage (folded from ' +
-  'the default capped reports pull or a full `--with-reports` pull), and ' +
-  'list-view filter evaluation are NOT composed into field_360 sections; ' +
-  'use `sfi.find_field_anywhere`, `sfi.list_components`, or the field\'s ' +
-  'folded `usedInReport` / `usedInDashboard` properties for those surfaces. ' +
-  'The report is the COMPLETE answer ONLY for the composed axes ' +
-  '(validation, formula, Apex, Flow, workflow-family, layouts, LWC/Aura/VF/' +
-  'FlexiPage, integration topology, email-template merges).';
+  'graph. Report/dashboard field usage (folded from the default capped ' +
+  'reports pull or a full `--with-reports` pull) and list-view filter ' +
+  'evaluation are NOT composed into field_360 sections; use ' +
+  '`sfi.find_field_anywhere`, `sfi.list_components`, or the field\'s folded ' +
+  '`usedInReport` / `usedInDashboard` properties for those surfaces. The ' +
+  'report is the COMPLETE answer ONLY for the composed axes (validation, ' +
+  'formula, Apex, Flow, workflow-family, layouts, LWC/Aura/VF/FlexiPage, ' +
+  'list views, integration topology, email-template merges).';
 
 /**
  * Verbatim phrase per category for `dataNotAvailable[]`. The order is
@@ -111,7 +131,7 @@ export const FIELD_360_DATA_NOT_AVAILABLE: readonly string[] = [
   'dashboards',
 ];
 
-/** The eight content sections `includeSections` can request. */
+/** The content sections `includeSections` can request. */
 const SECTION_NAMES = [
   'validates',
   'formulas',
@@ -122,6 +142,7 @@ const SECTION_NAMES = [
   'automations',
   'emails',
   'dependencies',
+  'listViews',
   'summary',
 ] as const;
 type SectionName = (typeof SECTION_NAMES)[number];
@@ -150,6 +171,10 @@ export const field360InputSchema = z.object({
     .min(1)
     .max(HARD_CAP_MAX_ROWS_PER_SECTION)
     .optional(),
+  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // truncated page's `nextCursor`; carries the resume offset + which section
+  // (validates | formulas | writers | …) it advances. Omit = today's behavior.
+  cursor: z.string().min(1).optional(),
 });
 
 /** Parsed input shape, inferred from `field360InputSchema`. */
@@ -218,6 +243,19 @@ export interface Field360Output {
   readonly automations?: Field360Section;
   readonly emails?: Field360Section;
   readonly dependencies?: Field360Section;
+  /**
+   * CR-CAP-02 / CR-CAP-13: which list views show or filter this field. Each
+   * row's `ListView:Object.ViewName` → `CustomField` edge is a `references`
+   * (confidence `heuristic`) emitted by the enterprise-metadata extractor's
+   * regex capture; the row's `referenceKind` distinguishes the role —
+   * `'fieldRef'` (shown as a column), `'filterRef'` (used in a filter
+   * predicate), or `'columnAndFilter'` (both). There is exactly ONE edge per
+   * (ListView, field) — column + filter are merged, never two rows. Answers
+   * "which list views reference this field, and how"; it does NOT evaluate the
+   * saved view's runtime filter predicate (that gap stays in `dataNotAvailable`
+   * as `list-view-filters`).
+   */
+  readonly listViews?: Field360Section;
   readonly summary: Field360Summary;
   readonly boundaries: readonly string[];
   readonly dataNotAvailable: readonly string[];
@@ -231,6 +269,19 @@ export interface Field360Output {
   readonly dataShape?: FactsBlock;
   /** P13-ANNOT-tools: curated annotations for this field (provenance `annotation`); absent when none. */
   readonly annotations?: AnnotationsBlock;
+  /**
+   * CR-22 opaque continuation token, present ONLY when truncated (the designated
+   * section overflowed its per-section page or the byte budget). Echo it back as
+   * `cursor` to resume; absent on a whole-fits page so the response is
+   * byte-identical to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata for the designated section; truncation only. */
+  readonly pageInfo?: PageInfo;
+  /** Which section the cursor advances; truncation only. */
+  readonly designatedList?: string;
+  /** The non-paged sections, disclosed with their full row counts; truncation only. */
+  readonly otherSections?: readonly SectionDisclosure[];
 }
 
 /**
@@ -317,9 +368,20 @@ const buildRow = (edge: Edge, source: Node): Field360Row => ({
   properties: edge.properties,
 });
 
-/** Deterministic row sort: by componentId ASC. */
-const compareRows = (a: Field360Row, b: Field360Row): number =>
-  a.componentId < b.componentId ? -1 : a.componentId > b.componentId ? 1 : 0;
+/**
+ * Deterministic row sort: componentId ASC, then edgeType ASC, then source ASC.
+ * componentId ALONE is NOT unique within a section — one source node can emit
+ * several edges into the same section to the same field (two `references` from
+ * one node with different `source`, two writesTo from one Flow). The edgeType +
+ * source tiebreaks make each per-section order a UNIQUE total order so an
+ * offset-based section cursor resume can neither dup nor skip at a tie boundary.
+ */
+const compareRows = (a: Field360Row, b: Field360Row): number => {
+  if (a.componentId !== b.componentId) return a.componentId < b.componentId ? -1 : 1;
+  if (a.edgeType !== b.edgeType) return a.edgeType < b.edgeType ? -1 : 1;
+  if (a.source !== b.source) return a.source < b.source ? -1 : 1;
+  return 0;
+};
 
 /**
  * Bound a row array to `maxRows`. When the underlying total exceeds
@@ -481,13 +543,20 @@ const computeRisk = (
 };
 
 /**
- * Determine whether the field is PII-classified. v2.0d's pii-detection
- * recognizer populates `properties.piiClassification` when it
- * classified a field; v3.0 reads it directly rather than re-running
- * the recognizer.
+ * Determine whether the field is PII-classified. Runs the v2.0d
+ * pii-detection recognizer LIVE (`detectPiiClassification`) — the same
+ * recognizer `field_access_audit` and `pii_inventory` use — rather than
+ * reading a `properties.piiClassification` value that NOTHING in the
+ * extraction pipeline ever stamps (the prior read was dead, so the
+ * PII-risk escalation in `computeRisk` never fired for EncryptedText /
+ * SSN / financial fields). Returns true for `pii` or `sensitive`.
+ *
+ * HEURISTIC: a name/type recognizer can miss PII (custom-named columns,
+ * description-only signals it can't see), so a `false` here is NOT a
+ * clearance — only the absence of a recognised signal.
  */
 const detectIsPii = (node: Node): boolean => {
-  const c = node.properties['piiClassification'];
+  const c = detectPiiClassification(node).piiClassification;
   return c === 'pii' || c === 'sensitive';
 };
 
@@ -501,6 +570,7 @@ interface SectionBuckets {
   automations: Field360Row[];
   emails: Field360Row[];
   dependencies: Field360Row[];
+  listViews: Field360Row[];
 }
 
 const emptyBuckets = (): SectionBuckets => ({
@@ -513,6 +583,7 @@ const emptyBuckets = (): SectionBuckets => ({
   automations: [],
   emails: [],
   dependencies: [],
+  listViews: [],
 });
 
 /**
@@ -600,6 +671,20 @@ const classifyIncomingEdge = (
     return;
   }
 
+  // `listViews`: incoming references from a ListView (CR-CAP-02 / CR-CAP-13).
+  // The edge is heuristic (regex capture by the enterprise-metadata extractor);
+  // its `referenceKind` is `'fieldRef'` (column), `'filterRef'` (filter
+  // predicate), or `'columnAndFilter'` (both). This branch is referenceKind-
+  // AGNOSTIC on purpose so every role flows in; the row carries `referenceKind`
+  // for labeling. ListView is in NONE of the UI/INTEGRATION/AUTOMATION node-type
+  // sets, so without this branch the edge falls through every case and is
+  // dropped silently. Placed before the `UI_NODE_TYPES.has` fallback to keep the
+  // dispatch explicit.
+  if (source.type === 'ListView' && edge.edgeType === 'references') {
+    buckets.listViews.push(row);
+    return;
+  }
+
   // UI-only types (Layout, QuickAction, CustomTab) outside the
   // usedInLayout edge fall into `ui` via `references`.
   if (UI_NODE_TYPES.has(source.type) && edge.edgeType === 'references') {
@@ -682,6 +767,32 @@ export const field360Handler = async (
     classifyIncomingEdge(edge, sr.value, buckets);
   }
 
+  // Supplemental Flow writers from source XML (SObject-variable assignments the
+  // graph extractor skipped — e.g. non-$Record recordUpdates).
+  const parentObjectApi =
+    fieldNode.parentId !== null && fieldNode.parentId.startsWith('CustomObject:')
+      ? fieldNode.parentId.slice('CustomObject:'.length)
+      : fieldId.slice('CustomField:'.length).split('.')[0] ?? '';
+  const supplementalWriters = await scanSupplementalFlowFieldWriters(
+    ctx,
+    parentObjectApi,
+    fieldNode.apiName,
+  );
+  const writerIds = new Set(buckets.writers.map((r) => r.componentId));
+  for (const w of supplementalWriters) {
+    if (writerIds.has(w.componentId)) continue;
+    writerIds.add(w.componentId);
+    buckets.writers.push({
+      componentId: w.componentId,
+      componentType: 'Flow',
+      componentApiName: w.apiName,
+      edgeType: 'writesTo',
+      confidence: 'heuristic',
+      source: `flow-field-writers-scan:${w.mechanism}`,
+      properties: { supplemental: true, mechanism: w.mechanism },
+    });
+  }
+
   // `dependencies`: OUTGOING references for formula fields only.
   if (isFormula) {
     const outResult = await listEdges(ctx.graph, fieldId, {
@@ -716,7 +827,6 @@ export const field360Handler = async (
   const include = (name: SectionName): boolean =>
     requested === null || requested.has(name);
 
-  const sectionsBuilt: Partial<Record<SectionName, Field360Section>> = {};
   const allBuckets: ReadonlyArray<readonly [SectionName, Field360Row[]]> = [
     ['validates', buckets.validates],
     ['formulas', buckets.formulas],
@@ -727,10 +837,93 @@ export const field360Handler = async (
     ['automations', buckets.automations],
     ['emails', buckets.emails],
     ['dependencies', buckets.dependencies],
+    ['listViews', buckets.listViews],
   ];
-  for (const [name, rows] of allBuckets) {
-    if (!include(name)) continue;
-    sectionsBuilt[name] = buildSection(rows, maxRows);
+
+  // CR-22 nested-section cursor. Each section's FULL ordered rows are retained
+  // here (sorted to a UNIQUE total order via compareRows) so a section can be
+  // paged past `maxRowsPerSection` rather than discarding the tail. A whole-fits
+  // call (no cursor, every INCLUDED section ≤ maxRows) emits exactly today's
+  // {rows,count,truncatedAtN} shape with NO cursor block — byte-identical.
+  const TOOL = 'sfi.field_360';
+  const fingerprint = argsFingerprint({
+    fieldId,
+    ...(input.includeSections !== undefined ? { includeSections: input.includeSections } : {}),
+    groupBy,
+  });
+  const includedBuckets = allBuckets.filter(([name]) => include(name));
+  // Sorted full rows per included section, in the stable allBuckets order.
+  const sortedSections: ReadonlyArray<readonly [SectionName, Field360Row[]]> =
+    includedBuckets.map(([name, rows]) => [name, [...rows].sort(compareRows)]);
+  const anyOverCap = sortedSections.some(([, rows]) => rows.length > maxRows);
+
+  let designatedListId: string | null = null;
+  let offset = 0;
+  let isPaged = anyOverCap;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+    if (decoded.value.listId !== undefined) designatedListId = decoded.value.listId;
+    isPaged = true;
+  }
+  if (designatedListId === null && isPaged) {
+    // Fresh paged call: designate the LARGEST populated included section.
+    let best = -1;
+    for (const [name, rows] of sortedSections) {
+      if (rows.length > best) { best = rows.length; designatedListId = name; }
+    }
+  }
+
+  const sectionsBuilt: Partial<Record<SectionName, Field360Section>> = {};
+  let cursorBlock:
+    | { nextCursor: string; pageInfo: PageInfo; designatedList: string; otherSections: readonly SectionDisclosure[] }
+    | undefined;
+
+  if (!isPaged || designatedListId === null) {
+    // Whole-fits: today's per-section cap shape.
+    for (const [name, rows] of includedBuckets) {
+      sectionsBuilt[name] = buildSection(rows, maxRows);
+    }
+  } else {
+    // Paged: the designated section shows its byte-budgeted page; the others
+    // keep today's buildSection shape (capped + truncatedAtN). The cursor lets
+    // the consumer walk the designated section past maxRows.
+    const pageSections: readonly PageableSection<Field360Row>[] = sortedSections.map(
+      ([name, rows]) => ({ listId: name, items: rows }),
+    );
+    const pagedResult = paginateSection(pageSections, designatedListId, {
+      offset,
+      limit: maxRows,
+      byteBudget: FIELD_360_BYTE_BUDGET,
+      keyOf: (r) => `${r.componentId}|${r.edgeType}|${r.source}`,
+      binding: { tool: TOOL, vaultHash: ctx.manifest.sourceTreeHash, argsFingerprint: fingerprint },
+    });
+    if (!pagedResult.ok) return err(pagedResult.error);
+    const paged = pagedResult.value;
+    for (const [name, rows] of includedBuckets) {
+      if (name === designatedListId) {
+        sectionsBuilt[name] = {
+          rows: paged.items,
+          count: rows.length,
+          truncatedAtN: paged.pageInfo.hasMore ? rows.length : null,
+        };
+      } else {
+        sectionsBuilt[name] = buildSection(rows, maxRows);
+      }
+    }
+    if (paged.pageInfo.nextCursor !== null) {
+      cursorBlock = {
+        nextCursor: paged.pageInfo.nextCursor,
+        pageInfo: paged.pageInfo,
+        designatedList: paged.listId,
+        otherSections: paged.otherSections,
+      };
+    }
   }
 
   // Per-section counts use the unfiltered totals from buckets so the
@@ -770,21 +963,34 @@ export const field360Handler = async (
   // per-category notes naming the unavailable surfaces verbatim.
   const boundaries: string[] = [
     FIELD_360_Q165_DISCLOSURE,
-    'list view column refs are extracted as graph edges but are NOT composed into field_360 sections',
+    'list view column AND filter field IDENTITY are composed into the `listViews` section (heuristic regex; a row\'s `referenceKind` is `fieldRef` for a column, `filterRef` for a filter predicate, or `columnAndFilter` for both) — but the saved view\'s runtime filter PREDICATE EVALUATION (whether a given record passes the filter) stays unmodeled and remains in dataNotAvailable as `list-view-filters`',
   ];
-  // Report / dashboard usage is folded onto the field as a node property by the
-  // `--with-reports` refresh (not an edge), so it appears in no section above.
-  // When present, surface it as a positive in-use signal; when absent, disclose
-  // that report/dashboard usage was not modeled (a now-accurate replacement for
-  // the old static "NOT extracted" lines, which `--with-reports` invalidated).
+  // CR-CAP-03: report / dashboard usage is folded onto the field as a node
+  // property by the reports pull (not an edge — the fold DROPS the report/
+  // dashboard nodes), so it appears in no section above. The honest disclosure
+  // is coverage-aware:
+  //   - folded usage present  -> positive in-use signal (it is NOT unused).
+  //   - no folded usage, BUT the Report/Dashboard families were retrieved
+  //     (coverage 'complete') -> confirmed not-used (retrieved-empty).
+  //   - no folded usage AND the families were NOT retrieved (coverage 'partial'
+  //     /'unknown' — dropped / --no-pull / pre-signal) -> the not-retrieved
+  //     caveat (may still be used outside the pull).
   const analytics = reportDashboardUsage(fieldNode);
+  const analyticsCoverage = summarizeCoverage(ctx.manifest, [
+    'Report',
+    'Dashboard',
+  ]);
   if (analytics.usedInReport || analytics.usedInDashboard) {
     const where = [
       analytics.usedInReport ? 'a report column/filter' : null,
       analytics.usedInDashboard ? 'a dashboard component' : null,
     ].filter((x): x is string => x !== null);
     boundaries.push(
-      `this field IS referenced by ${where.join(' and ')} (folded \`--with-reports\` usage) — it is NOT unused; weigh that before deleting.`,
+      `this field IS referenced by ${where.join(' and ')} (folded reports-pull usage) — it is NOT unused; weigh that before deleting.`,
+    );
+  } else if (analyticsCoverage.status === 'complete') {
+    boundaries.push(
+      'reports/dashboards WERE retrieved and none reference this field — confirmed not-used in any report column/filter or dashboard component (within the retrieved set).',
     );
   } else {
     boundaries.push(REPORT_DASHBOARD_USAGE_CAVEAT);
@@ -823,6 +1029,26 @@ export const field360Handler = async (
   const dataShape = await readFactBlock(ctx, fieldId, 'fillRate');
   const annotations = await annotationsBlockFor(ctx, fieldId);
 
+  // CR-CAP-03 / CR-CAP-13: `dataNotAvailable` is DYNAMIC. `list-view-filters`
+  // is always listed, but it now means ONLY the runtime filter-PREDICATE
+  // EVALUATION gap (whether a given record passes the saved view's filter),
+  // which is genuinely unmodeled. Filter-field IDENTITY (WHICH views filter on
+  // this field) IS composed into the `listViews` section as `filterRef` /
+  // `columnAndFilter` edges (CR-CAP-13) — a different, available claim.
+  // `reports` / `dashboards` are listed ONLY when the family was NOT retrieved
+  // (coverage status !== 'complete') AND the field carries no folded usage for
+  // it — when reports were retrieved (confirmed not-used) OR the field is
+  // folded-referenced, that data IS available and must not appear here.
+  // FIELD_360_DATA_NOT_AVAILABLE stays exported as the not-retrieved baseline.
+  const dataNotAvailable: string[] = ['list-view-filters'];
+  const reportsRetrieved = analyticsCoverage.status === 'complete';
+  if (!reportsRetrieved && !analytics.usedInReport) {
+    dataNotAvailable.push('reports');
+  }
+  if (!reportsRetrieved && !analytics.usedInDashboard) {
+    dataNotAvailable.push('dashboards');
+  }
+
   return ok({
     data: {
       fieldId,
@@ -834,11 +1060,19 @@ export const field360Handler = async (
       ...sectionsBuilt,
       summary,
       boundaries,
-      dataNotAvailable: FIELD_360_DATA_NOT_AVAILABLE,
+      dataNotAvailable,
       confidence: overallConfidence,
       groupBy,
       ...(dataShape !== undefined ? { dataShape } : {}),
       ...(annotations !== undefined ? { annotations } : {}),
+      ...(cursorBlock !== undefined
+        ? {
+            nextCursor: cursorBlock.nextCursor,
+            pageInfo: cursorBlock.pageInfo,
+            designatedList: cursorBlock.designatedList,
+            otherSections: cursorBlock.otherSections,
+          }
+        : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

@@ -89,13 +89,28 @@ const classifyDisambiguation = (
  * - `exact`     → no question; a single `use` action.
  * - `ambiguous` → a clarifying question (one option per candidate) plus
  *   `narrow` and `refresh` next actions.
- * - `none`      → no question; offer `refresh` (with `/sfi-refresh`, naming the
- *   last-refresh time so the user can judge staleness) or `stop`.
+ * - `none`      → no question. When `vault.scopedCoverageComplete` is true the
+ *   query was scoped to a metadata family whose coverage is COMPLETE, so the
+ *   absence is a DETERMINATE NEGATIVE ("no such component exists") and `stop`
+ *   leads — `/sfi-refresh` is NOT offered first because a refresh cannot
+ *   surface a component that does not exist (the false-premise honesty fix).
+ *   Otherwise (coverage unknown/partial, or no type scope) the absence is
+ *   inconclusive, so `refresh` leads (the component may be new, or the vault
+ *   may be stale).
  */
 export const buildClarify = (
   query: string,
   result: ResolveResult,
-  vault: { readonly refreshedAt: string },
+  vault: {
+    readonly refreshedAt: string;
+    /**
+     * True ONLY when the resolve was scoped to one or more metadata types AND
+     * every one of those types has COMPLETE coverage in the vault. Lets the
+     * `none` branch state a missing component is a false premise rather than a
+     * coverage gap.
+     */
+    readonly scopedCoverageComplete?: boolean;
+  },
 ): ClarifyResult => {
   if (result.disposition === 'exact') {
     const top = result.candidates[0];
@@ -163,6 +178,31 @@ export const buildClarify = (
   }
 
   // none
+  if (vault.scopedCoverageComplete === true) {
+    // DETERMINATE NEGATIVE: the query was scoped to a metadata family whose
+    // coverage is COMPLETE in this vault, so a missing component is a false
+    // premise — it does not exist in the org. Lead with `stop`; do NOT imply a
+    // refresh would surface it (a refresh cannot surface what is not there).
+    // The honesty fix for "characterized the absence as a coverage gap" — the
+    // refresh action is still offered as a secondary, weaker possibility (the
+    // component could have been created since the last refresh).
+    return {
+      clarification: null,
+      nextActions: [
+        {
+          action: 'stop',
+          label: 'Stop',
+          reason: `no component named "${query}" exists in this vault, and the scoped metadata family has complete coverage — the premise is false (it does not exist), not a coverage gap`,
+        },
+        {
+          action: 'refresh',
+          label: 'Pull fresh metadata from the org',
+          reason: `refresh only if you believe the component was created in the org AFTER the last refresh (${vault.refreshedAt}); a refresh cannot surface a component that does not exist`,
+          command: '/sfi-refresh',
+        },
+      ],
+    };
+  }
   return {
     clarification: null,
     nextActions: [

@@ -16,14 +16,22 @@ export interface InactiveConfiguredFirer {
 /**
  * Whether a firer node represents automation that runs at save time. Flow uses
  * `status === 'Active'`; WorkflowRule, ValidationRule, and ApprovalProcess use
- * `active: true`. ApexTrigger has no extracted inactive axis and is treated as
- * active. Missing status/active is treated as active (conservative prior).
+ * `active: true`; ApexTrigger uses `status !== 'Inactive'` (the extractor
+ * emits `status: Active | Inactive` from the trigger's `<status>` element).
+ * Missing status/active is treated as active (conservative prior).
  */
 export const isActiveSoeFirer = (node: Node): boolean => {
   const props = node.properties;
   if (node.type === 'Flow') {
     const status = props['status'];
     if (typeof status === 'string') return status === 'Active';
+    return true;
+  }
+  if (node.type === 'ApexTrigger') {
+    const status = props['status'];
+    // The extractor records `status: Active | Inactive` from the trigger XML.
+    // Treat absent status as active (conservative prior for older vault data).
+    if (typeof status === 'string') return status !== 'Inactive';
     return true;
   }
   if (
@@ -42,6 +50,10 @@ const inactiveReasonFor = (node: Node): string => {
   if (node.type === 'Flow') {
     const status = node.properties['status'];
     return typeof status === 'string' ? `status: ${status}` : 'status: unknown';
+  }
+  if (node.type === 'ApexTrigger') {
+    const status = node.properties['status'];
+    return typeof status === 'string' ? `status: ${status}` : 'status: Inactive';
   }
   if (
     node.type === 'WorkflowRule' ||

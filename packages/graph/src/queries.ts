@@ -70,13 +70,72 @@ export interface ListNodesOptions {
    * parameterised JSON path, never as raw SQL.
    */
   readonly propertyEquals?: Readonly<Record<string, boolean>>;
+  /**
+   * Exact string matches on `properties_json` keys (e.g. Flow `status`,
+   * `triggerObject`). Keys are parameterised JSON paths — never concatenated.
+   */
+  readonly propertyStringEquals?: Readonly<Record<string, string>>;
+  /** When true, keep only nodes whose `triggerType` starts with `Record`. */
+  readonly recordTriggered?: boolean;
 }
+
+/**
+ * Optional narrows for `countNodesByType` — the SAME WHERE-clause filters
+ * `listNodesByType` accepts (CR-22 B3), so a caller can get a TRUE total for a
+ * filtered enumeration (e.g. ListViews of ONE object, or every `isBatchable`
+ * ApexClass) rather than over-counting the whole type.
+ */
+export interface CountNodesOptions {
+  readonly parentId?: ComponentId;
+  readonly propertyEquals?: Readonly<Record<string, boolean>>;
+  readonly propertyStringEquals?: Readonly<Record<string, string>>;
+  readonly recordTriggered?: boolean;
+}
+
+const appendNodePropertyFilters = (
+  sql: string,
+  params: DuckDBValue[],
+  options?: Pick<
+    ListNodesOptions,
+    'propertyEquals' | 'propertyStringEquals' | 'recordTriggered'
+  >,
+): string => {
+  let out = sql;
+  if (options?.propertyEquals !== undefined) {
+    for (const [key, value] of Object.entries(options.propertyEquals)) {
+      out += ` AND json_extract_string(properties_json, ?) = ?`;
+      params.push(`$.${key}`, value ? 'true' : 'false');
+    }
+  }
+  if (options?.propertyStringEquals !== undefined) {
+    for (const [key, value] of Object.entries(options.propertyStringEquals)) {
+      out += ` AND json_extract_string(properties_json, ?) = ?`;
+      params.push(`$.${key}`, value);
+    }
+  }
+  if (options?.recordTriggered === true) {
+    out += ` AND json_extract_string(properties_json, '$.triggerType') LIKE 'Record%'`;
+  }
+  return out;
+};
 
 /** Options for `listEdges`. */
 export interface ListEdgesOptions {
   readonly direction?: 'in' | 'out' | 'both';
   readonly edgeType?: EdgeType;
   readonly confidence?: ConfidenceLevel;
+}
+
+/** Options for `listEdgesForNodes` — the batched, multi-node `listEdges`. */
+export interface ListEdgesForNodesOptions {
+  /** Defaults to `'both'`, matching `listEdges`. */
+  readonly direction?: 'in' | 'out' | 'both';
+  /**
+   * When set, restrict to edges whose `edge_type` is in this list (a batched
+   * `edge_type IN (...)`). Reproduces the union of N per-`(node, edgeType)`
+   * `listEdges` calls in one round-trip. Omit for all edge types.
+   */
+  readonly edgeTypes?: readonly EdgeType[];
 }
 
 /** Options for `searchNodes`. */
@@ -123,6 +182,36 @@ const queryFailed = (label: string, e: unknown): GraphError => ({
   kind: 'query-failed',
   message: `${label}: ${(e as Error).message}`,
 });
+
+/**
+ * Synthesize a minimal boundary `Node` for a `getSubgraph` edge endpoint that
+ * has no real `nodes` row — used only under `includeUnresolved` so a surfaced
+ * phantom edge does not dangle against the returned node set (CR-13). The
+ * `type`/`apiName` are parsed best-effort from the canonical `Type:apiName`
+ * ComponentId by splitting on the FIRST `:` (the apiName itself may contain
+ * `.`, e.g. `CustomField:Account.Industry__c`). An id without a `:` falls back
+ * to the whole string as `apiName` and an empty `type` cast — the stub is
+ * always well-formed so the outer `try`/`catch` never turns a malformed
+ * phantom into a query-failed error. `properties.unresolved` lets consumers
+ * (and the MCP-layer disclosure) flag it as a stub, not a real component.
+ */
+const makeUnresolvedStubNode = (id: ComponentId): Node => {
+  const sep = id.indexOf(':');
+  const type = (sep > 0 ? id.slice(0, sep) : '') as ComponentType;
+  const apiName = sep >= 0 ? id.slice(sep + 1) : id;
+  return {
+    id,
+    type,
+    apiName,
+    label: null,
+    parentId: null,
+    sourcePath: '',
+    lastModifiedDate: null,
+    lastModifiedBy: null,
+    apiVersion: null,
+    properties: { unresolved: true },
+  };
+};
 
 /**
  * A heuristic edge whose target was tagged `targetMissing` at import — its
@@ -178,6 +267,44 @@ export const getNodeById = async (
 };
 
 /**
+ * Batched form of {@link getNodeById}: fetch the `Node` rows for every id in
+ * `ids` in ONE `WHERE id IN (...)` round-trip. Ids with no matching row are
+ * dropped from the result EXACTLY like the per-id `getNodeById` null-skip — so
+ * a caller iterating `ids` and dropping nulls gets the same node SET (the
+ * result is unordered; callers re-sort). An empty `ids` self-guards to
+ * `ok([])` rather than emitting an invalid `IN ()`. Duplicate ids collapse to
+ * one row (a node id is unique), matching a per-id loop that fetches the same
+ * row twice but produces a set.
+ *
+ * The N+1 batching primitive for `get_impact`'s `fetchNodes` (CR-17);
+ * `getNodeById` stays unchanged for its single-id callers.
+ *
+ * @example
+ *   const r = await listNodesByIds(store, ['CustomObject:Account']);
+ *   if (r.ok) console.log(r.value.length);
+ */
+export const listNodesByIds = async (
+  store: GraphStore,
+  ids: readonly ComponentId[],
+): Promise<Result<readonly Node[], GraphError>> => {
+  const uniqueIds = [...new Set(ids)];
+  if (uniqueIds.length === 0) {
+    return ok([]);
+  }
+  const placeholders = uniqueIds.map(() => '?').join(', ');
+  try {
+    const rows = await fetchRows(
+      store,
+      `SELECT ${NODE_COLUMNS} FROM nodes WHERE id IN (${placeholders})`,
+      [...uniqueIds],
+    );
+    return ok(rows.map(rowToNode));
+  } catch (e) {
+    return err(queryFailed('listNodesByIds', e));
+  }
+};
+
+/**
  * List nodes of a given type, sorted by `id` ascending. `limit` defaults
  * to 50 (max 500). Optional `parentId` narrows to children of one parent.
  *
@@ -208,12 +335,7 @@ export const listNodesByType = async (
   // is bound as a parameterised JSON path (`$.<key>`), never concatenated into
   // SQL, so it cannot inject. An absent property yields NULL, which fails the
   // `= 'true'` test — correct "not a Batchable" semantics.
-  if (options?.propertyEquals !== undefined) {
-    for (const [key, value] of Object.entries(options.propertyEquals)) {
-      sql += ` AND json_extract_string(properties_json, ?) = ?`;
-      params.push(`$.${key}`, value ? 'true' : 'false');
-    }
-  }
+  sql = appendNodePropertyFilters(sql, params, options);
   sql += ' ORDER BY id ASC LIMIT ? OFFSET ?';
   params.push(limit, options?.offset ?? 0);
 
@@ -232,20 +354,34 @@ export const listNodesByType = async (
  * per-type counts) must use this rather than measuring `listNodesByType(...).length`,
  * which saturates at 500 and under-reports large types.
  *
+ * CR-22 B3: accepts the SAME `parentId` / `propertyEquals` narrows as
+ * `listNodesByType`, so a TRUE total can back a FILTERED paginated enumeration
+ * (e.g. ListViews of one object, or `{type, isBatchable:true}`) instead of
+ * over-counting the whole type. With no options the SQL is unchanged (a bare
+ * `WHERE type = ?`), so existing callers are byte-identical.
+ *
  * @example
  *   const r = await countNodesByType(store, 'CustomField');
  *   if (r.ok) console.log(`${r.value} fields`);
+ *   const v = await countNodesByType(store, 'ListView', { parentId: 'CustomObject:Account' });
  */
 export const countNodesByType = async (
   store: GraphStore,
   type: ComponentType,
+  options?: CountNodesOptions,
 ): Promise<Result<number, GraphError>> => {
   try {
-    const rows = await fetchRows(
-      store,
-      `SELECT count(*)::INT AS n FROM nodes WHERE type = ?`,
-      [type],
-    );
+    const params: DuckDBValue[] = [type];
+    let sql = `SELECT count(*)::INT AS n FROM nodes WHERE type = ?`;
+    if (options?.parentId !== undefined) {
+      sql += ' AND parent_id = ?';
+      params.push(options.parentId);
+    }
+    // Same parameterised JSON-path filter as `listNodesByType` — key bound as
+    // `$.<key>`, never concatenated, so it cannot inject. An absent property is
+    // NULL, which fails `= 'true'` (correct "not a Batchable" semantics).
+    sql = appendNodePropertyFilters(sql, params, options);
+    const rows = await fetchRows(store, sql, params);
     return ok(Number((rows[0] as Row)['n']));
   } catch (e) {
     return err(queryFailed('countNodesByType', e));
@@ -334,7 +470,18 @@ export const listChildren = async (
 /**
  * List edges incident to a node. `direction` defaults to `'both'`; can
  * be narrowed to `'in'` (to_id = nodeId) or `'out'` (from_id = nodeId).
- * Optional edgeType and confidence filters. Sorted by `(to_id, edge_type)`.
+ * Optional edgeType and confidence filters.
+ *
+ * Sorted by the FULL total order `(to_id, edge_type, from_id, source)` — the
+ * same order {@link compareEdgesByEndpoint} pins. The leading `(to_id,
+ * edge_type)` keys are unchanged, so any group with at most one edge per
+ * `(to_id, edge_type)` keeps its previous order byte-for-byte; the
+ * `(from_id, source)` tiebreak only ever decides order WITHIN a same-endpoint
+ * group, which was previously DuckDB-unspecified. CR-22: offset-resumed paging
+ * (`get_edges`) requires this unique final tiebreak so a resume cannot skip or
+ * duplicate an edge that shares `(to_id, edge_type)` with its neighbor. The
+ * `(from_id, source)` pair is unique per `(to_id, edge_type)` because the
+ * edges table PK is `(from_id, to_id, edge_type, source)`.
  *
  * @example
  *   const r = await listEdges(store, 'CustomObject:Account', {
@@ -371,12 +518,142 @@ export const listEdges = async (
   try {
     const rows = await fetchRows(
       store,
-      `SELECT ${EDGE_COLUMNS} FROM edges WHERE ${where} ORDER BY to_id ASC, edge_type ASC`,
+      `SELECT ${EDGE_COLUMNS} FROM edges WHERE ${where} ` +
+        `ORDER BY to_id ASC, edge_type ASC, from_id ASC, source ASC`,
       params,
     );
     return ok(rows.map(rowToEdge));
   } catch (e) {
     return err(queryFailed('listEdges', e));
+  }
+};
+
+/**
+ * Total order over edges: `(to_id, edge_type, from_id, source)`. `listEdges`
+ * sorts only by `(to_id, edge_type)`, leaving the intra-group order
+ * DuckDB-unspecified; the batched `listEdgesForNodes` pins this FULL tiebreak
+ * so each per-node bucket is deterministic and reproducible across runs. The
+ * leading `(to_id, edge_type)` keys keep the prefix identical to `listEdges`
+ * for any group with at most one edge per `(to_id, edge_type)`; the
+ * `(from_id, source)` tiebreak only ever decides order WITHIN a same-endpoint
+ * group, which is exactly where `listEdges`' order was undefined.
+ */
+const compareEdgesByEndpoint = (a: Edge, b: Edge): number => {
+  if (a.toId !== b.toId) return a.toId < b.toId ? -1 : 1;
+  if (a.edgeType !== b.edgeType) return a.edgeType < b.edgeType ? -1 : 1;
+  if (a.fromId !== b.fromId) return a.fromId < b.fromId ? -1 : 1;
+  if (a.source !== b.source) return a.source < b.source ? -1 : 1;
+  return 0;
+};
+
+/**
+ * Batched, multi-node form of {@link listEdges}: fetch every edge incident to
+ * ANY id in `nodeIds` in ONE SQL round-trip, then partition the rows per node
+ * in memory. Returns a `Map` keyed by each requested id; a node with no
+ * incident edges maps to `[]`, and every requested id is always present as a
+ * key. Each bucket is sorted by the FULL `(to_id, edge_type, from_id, source)`
+ * total order (see {@link compareEdgesByEndpoint}) so the partition is
+ * deterministic — `listEdges`' `(to_id, edge_type)` sort left the intra-group
+ * order undefined.
+ *
+ * This is the N+1 batching primitive for CR-17: callers that previously ran
+ * `listEdges` once per frontier/page node (`get_impact`'s BFS,
+ * `renderVault`'s per-node render) issue O(1) queries per batch instead of
+ * O(nodes). `listEdges` itself is intentionally left unchanged for its ~84
+ * single-node callers.
+ *
+ * Semantics per `direction` mirror `listEdges`:
+ *   - `'both'` (default): an edge buckets under id X iff `from_id === X` OR
+ *     `to_id === X`. A self-loop or a within-batch edge whose BOTH endpoints
+ *     are requested appears in BOTH buckets — exactly as N separate
+ *     `listEdges(X)` calls would each return it.
+ *   - `'in'`: buckets under `to_id` only.
+ *   - `'out'`: buckets under `from_id` only.
+ *
+ * `edgeTypes` (optional) restricts to those types via a batched
+ * `edge_type IN (...)`, reproducing the union of N per-`(node, edgeType)`
+ * `listEdges` calls. An empty `nodeIds` self-guards to `ok(new Map())` without
+ * emitting an invalid `IN ()`; an empty `edgeTypes` array is treated as "no
+ * edge-type filter" (same as omitting it).
+ *
+ * @example
+ *   const r = await listEdgesForNodes(store, ['CustomObject:Account'], {
+ *     direction: 'in',
+ *   });
+ *   if (r.ok) for (const e of r.value.get('CustomObject:Account') ?? []) ...
+ */
+export const listEdgesForNodes = async (
+  store: GraphStore,
+  nodeIds: readonly ComponentId[],
+  options?: ListEdgesForNodesOptions,
+): Promise<Result<ReadonlyMap<ComponentId, readonly Edge[]>, GraphError>> => {
+  const direction = options?.direction ?? 'both';
+  // Always return a key for every requested id (de-duplicated; order of
+  // insertion follows first occurrence in `nodeIds`).
+  const buckets = new Map<ComponentId, Edge[]>();
+  for (const id of nodeIds) {
+    if (!buckets.has(id)) buckets.set(id, []);
+  }
+  // Self-guard: an empty placeholder list produces invalid `IN ()` SQL.
+  if (buckets.size === 0) {
+    return ok(buckets);
+  }
+  const uniqueIds = [...buckets.keys()];
+  const idPlaceholders = uniqueIds.map(() => '?').join(', ');
+  const params: DuckDBValue[] = [];
+  let where: string;
+  if (direction === 'out') {
+    where = `from_id IN (${idPlaceholders})`;
+    params.push(...uniqueIds);
+  } else if (direction === 'in') {
+    where = `to_id IN (${idPlaceholders})`;
+    params.push(...uniqueIds);
+  } else {
+    where = `(from_id IN (${idPlaceholders}) OR to_id IN (${idPlaceholders}))`;
+    params.push(...uniqueIds, ...uniqueIds);
+  }
+  const edgeTypes = options?.edgeTypes;
+  if (edgeTypes !== undefined && edgeTypes.length > 0) {
+    where += ` AND edge_type IN (${edgeTypes.map(() => '?').join(', ')})`;
+    params.push(...edgeTypes);
+  }
+  try {
+    const rows = await fetchRows(
+      store,
+      `SELECT ${EDGE_COLUMNS} FROM edges WHERE ${where}`,
+      params,
+    );
+    const requested = new Set(uniqueIds);
+    for (const row of rows) {
+      const edge = rowToEdge(row);
+      // Bucket under each requested endpoint the edge is incident to. With
+      // `direction !== 'both'` only one side can match a requested id, so an
+      // edge lands in exactly one bucket; with `'both'` a self-loop or a
+      // both-endpoints-requested edge lands in both, mirroring N separate
+      // `listEdges` calls.
+      if (
+        (direction === 'in' || direction === 'both') &&
+        requested.has(edge.toId)
+      ) {
+        buckets.get(edge.toId)!.push(edge);
+      }
+      if (
+        (direction === 'out' || direction === 'both') &&
+        requested.has(edge.fromId) &&
+        // Guard the both-direction self-loop: when fromId === toId the edge was
+        // already pushed under the `in`/both branch above; a single
+        // `listEdges(X)` call returns a self-loop ONCE, so don't double-count.
+        !(direction === 'both' && edge.fromId === edge.toId)
+      ) {
+        buckets.get(edge.fromId)!.push(edge);
+      }
+    }
+    for (const bucket of buckets.values()) {
+      bucket.sort(compareEdgesByEndpoint);
+    }
+    return ok(buckets);
+  } catch (e) {
+    return err(queryFailed('listEdgesForNodes', e));
   }
 };
 
@@ -652,6 +929,19 @@ const bfsExpand = async (
  * `truncated` flag is set. Heuristic phantom edges (`targetMissing`) are
  * omitted by default; pass `includeUnresolved: true` to surface them.
  *
+ * Self-contained-slice contract (CR-13): every returned edge has BOTH
+ * endpoints in the returned node set — no edge dangles. A node-capped clip
+ * drops edges to the omitted (clipped) nodes; under `includeUnresolved`, a
+ * surfaced GENUINE phantom edge's endpoint (a heuristic+`targetMissing` edge
+ * whose `toId` has no real node row) is added as a minimal stub node carrying
+ * `properties.unresolved: true` so the edge stays visible AND self-contained.
+ * RV2: stubs cover ONLY genuine phantom targets (never budget-clipped REAL
+ * nodes — those stay clipped and their edges are dropped), and the synthesized
+ * stub is always the edge `toId` (the phantom endpoint per import stamping).
+ * The stub synthesis itself is capped at `SUBGRAPH_MAX_NODES`: a class with
+ * more genuine phantom edges than the node cap stops stubbing at the budget and
+ * flags `truncated`, so the node bound holds even under `includeUnresolved`.
+ *
  * @example
  *   const r = await getSubgraph(store, 'CustomObject:Account', 1);
  *   if (r.ok && r.value.truncated) console.warn('hub — partial slice');
@@ -703,14 +993,61 @@ export const getSubgraph = async (
       `SELECT ${NODE_COLUMNS} FROM nodes WHERE id IN (${placeholders})`,
       [...ids],
     );
-    const sortedNodes = nodeRows
-      .map(rowToNode)
-      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-    // Drop any edge whose endpoints aren't both visited, so a node-capped
-    // result never carries a dangling edge to a node it omitted. When
-    // un-truncated every endpoint was visited, so this is a no-op.
+    const returnedNodes: Node[] = nodeRows.map(rowToNode);
+    // CR-13 self-contained-slice contract: an edge must never point at a node
+    // absent from the returned node set. The dangling-edge guard must filter
+    // against the RETURNED nodes (`sortedNodes`), NOT the visited-id set — a
+    // visited id can lack a `nodes` row (node-capped clip, or an
+    // includeUnresolved phantom endpoint the scanner never imported), in which
+    // case filtering on `visitedNodes` would leave its edge dangling.
+    const returnedIds = new Set(returnedNodes.map((n) => n.id));
+    if (limits.includeUnresolved) {
+      // The opt-in flag's whole purpose is to SURFACE phantom edges, so a node
+      // set that omits the phantom endpoint would gut the feature. Synthesize a
+      // stub boundary node for the phantom endpoint, marked `unresolved` so
+      // consumers can disclose it.
+      //
+      // RV2: stub ONLY genuine phantom edges (`isHiddenUnresolved` = heuristic
+      // AND properties.targetMissing), NEVER budget-clipped REAL nodes. A hub
+      // that overflows SUBGRAPH_MAX_NODES leaves edges to clipped real leaves in
+      // `collectedEdges` (edges are budgeted to maxEdges independently of the
+      // node cap); stubbing every missing endpoint would mislabel those real
+      // nodes `unresolved:true` and push the node count past the cap. The
+      // clipped reals stay out and their edges are dropped by the returnedIds
+      // filter below, exactly as on the default (no-includeUnresolved) path. The
+      // phantom endpoint is ALWAYS the edge `toId`: import.ts stamps
+      // `targetMissing` solely from `edge.toId`, and a phantom edge's `fromId`
+      // is the real scanned class/trigger that always has a node row.
+      for (const edge of collectedEdges) {
+        if (!isHiddenUnresolved(edge)) continue;
+        if (!returnedIds.has(edge.toId)) {
+          // Mirror the normal-path node cap: synthesizing a stub still grows the
+          // returned node set, so the documented `at most SUBGRAPH_MAX_NODES`
+          // bound must hold here too. A single class can carry MORE genuine
+          // phantom heuristic edges than maxNodes (edges are budgeted to
+          // maxEdges independently of the node cap), so without this guard the
+          // stub loop blows past the cap. Stop stubbing once the node budget is
+          // spent and flag truncation; the unstubbed phantom endpoints stay out
+          // of returnedIds and their edges are dropped by the filter below, so
+          // the slice stays self-contained.
+          if (returnedNodes.length >= limits.maxNodes) {
+            state.truncated = true;
+            break;
+          }
+          returnedIds.add(edge.toId);
+          returnedNodes.push(makeUnresolvedStubNode(edge.toId));
+        }
+      }
+    }
+    const sortedNodes = returnedNodes.sort((a, b) =>
+      a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
+    );
+    // Drop any edge whose endpoints aren't both in the RETURNED node set, so a
+    // node-capped result never carries a dangling edge to a node it omitted.
+    // When un-truncated (and, under includeUnresolved, after stub synthesis)
+    // every endpoint is a returned node, so this is a no-op.
     const edges = collectedEdges
-      .filter((e) => visitedNodes.has(e.fromId) && visitedNodes.has(e.toId))
+      .filter((e) => returnedIds.has(e.fromId) && returnedIds.has(e.toId))
       .sort(compareEdges);
     return ok({ nodes: sortedNodes, edges, truncated: state.truncated });
   } catch (e) {

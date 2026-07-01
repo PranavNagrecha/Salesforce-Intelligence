@@ -294,6 +294,15 @@ const renderTriggersAndFlowsSection = (
 /**
  * Render the closing Boundaries + How To Regenerate footer. The
  * disclosures are emitted verbatim per the v2.5 honesty contract.
+ *
+ * INVARIANT (load-bearing for `fitDocumentToBudget`): this block is
+ * ALWAYS the final element of a generator's `body` array, and it ALWAYS
+ * emits `## Boundaries` ... `## How To Regenerate` together, in that
+ * order, with `## Boundaries` being the LAST `## Boundaries` line in the
+ * whole body. `splitBodyIntoSections` anchors the never-droppable footer
+ * on that last `## Boundaries` line through end-of-string, so a future
+ * generator must keep this block last (and must not emit a `## Boundaries`
+ * line earlier in its body) or the footer-survival guarantee weakens.
  */
 export const renderFooter = (
   refreshedAt: string,
@@ -312,6 +321,333 @@ export const renderFooter = (
     '',
     regenerationHint,
   ].join('\n');
+
+/**
+ * The byte cost of the jsonResult envelope the global guard wraps around a
+ * `GeneratedDocument`: the `{ data: { document[, targetMissing] }, vaultState,
+ * estimatedPayloadBytes[, responseBudget][, orgDrift] }` shell. The helper
+ * measures `byteLenOf(doc)` (= `JSON.stringify(document)`), while the global
+ * guard trips on the FULL serialized envelope, so this reserve is exactly that
+ * difference: `envelope_bytes - JSON.stringify(document)_bytes`.
+ *
+ * MEASURED, not guessed (the CR-08 regression came from over-reserving 8 KB,
+ * which truncated docs that fit fine): the real wrapper overhead around a
+ * GeneratedDocument is ~197 B for the plain `{ data: { document }, vaultState,
+ * estimatedPayloadBytes }` shell, ~273 B with compliance's `targetMissing[]`,
+ * and ~352 B once jsonResult attaches the `orgDrift` badge — newline escaping
+ * is NOT extra here because both sides serialize through `JSON.stringify`. A
+ * 1 KB reserve covers the worst measured case (~352 B) plus the `responseBudget`
+ * field's headroom with margin, while staying ~8× tighter than the old 8 KB.
+ *
+ * The invariant this preserves: `reserve >= max_envelope_overhead`. That makes
+ * the helper engage AT or BEFORE the global guard — a doc whose full envelope
+ * is under the global cap (the guard would leave it byte-identical) also clears
+ * the helper's `cap - reserve` budget untouched (the referential fast path),
+ * so admin_handbook / onboarding (37–39 KB envelopes, under the 40 KB cap)
+ * pass through unchanged. The `format: 'html'` path is handled by its own
+ * `budget / 2` at the call site (that envelope ALSO carries the `html` string),
+ * not by this reserve.
+ */
+const GENERATED_DOC_ENVELOPE_RESERVE_BYTES = 1_024;
+
+/**
+ * Floor for the per-document byte budget. RV4: this is NOT the global guard's
+ * floor — the global `2_000` (tools/index.ts `responseBudgetBytes`) is the
+ * SFI_MAX_RESPONSE_BYTES acceptance minimum (below which the error envelope
+ * itself wouldn't fit), a different concept that merely shares the value `2_000`.
+ * This floor only guards `generatedDocByteBudget` from targeting a negative or
+ * absurdly small budget when an operator sets a tiny SFI_MAX_RESPONSE_BYTES. At
+ * such a cap the generator collapses fully but the irreducible envelope still
+ * exceeds the cap, so `jsonResult` returns a structured `oversize` error rather
+ * than a footer-chopped doc — H7 cannot re-open. At the default 40 KB this floor
+ * is never selected (max(2_000, 38_976) = 38_976).
+ */
+export const GENERATED_DOC_BUDGET_FLOOR_BYTES = 2_000;
+
+/**
+ * When a GENUINELY-oversized document must shed `frontmatter.componentIds[]`
+ * (provenance metadata, not readable content), keep this many leading ids as a
+ * representative sample and replace the rest with a count disclosure. The
+ * sample preserves a usable provenance anchor while the count keeps the
+ * trimming HONEST; the dropped count is also named in the Truncation Note.
+ */
+const COMPONENT_IDS_SAMPLE_KEEP = 25;
+
+/**
+ * Resolve the active response budget the same way `index.ts`'s
+ * `responseBudgetBytes` does. DUPLICATED here (rather than imported) on
+ * purpose: `index.ts` imports the generators, so importing back from it
+ * would create a module cycle. Keeping the resolver local keeps the
+ * per-document budget composable with an operator's `SFI_MAX_RESPONSE_BYTES`
+ * override while staying cycle-free. Must track `index.ts`'s clamp.
+ */
+const GENERATED_DOC_MAX_RESPONSE_BYTES = 45_000;
+const GENERATED_DOC_RESPONSE_BUDGET_DEFAULT_BYTES = 40_000;
+const resolveResponseBudgetBytes = (): number => {
+  const raw = process.env['SFI_MAX_RESPONSE_BYTES'];
+  const parsed = raw === undefined || raw === '' ? NaN : Number(raw);
+  return Number.isFinite(parsed) && parsed >= 2_000
+    ? Math.min(Math.floor(parsed), GENERATED_DOC_MAX_RESPONSE_BYTES)
+    : GENERATED_DOC_RESPONSE_BUDGET_DEFAULT_BYTES;
+};
+
+/**
+ * The byte budget a `GeneratedDocument` is fitted to BEFORE the global
+ * jsonResult guard ever sees it. Reading the LIVE response budget (minus
+ * the envelope reserve, floored) means the fitted body lands under the
+ * guard's `reductionCap`, so the global `slimDataStrings` 1024-char cut
+ * never engages on `document.body` (the H7 dishonesty bug).
+ */
+export const generatedDocByteBudget = (): number =>
+  Math.max(
+    GENERATED_DOC_BUDGET_FLOOR_BYTES,
+    resolveResponseBudgetBytes() - GENERATED_DOC_ENVELOPE_RESERVE_BYTES,
+  );
+
+/** UTF-8 byte length of a value's JSON serialization. Mirrors index.ts's `utf8Bytes`. */
+const byteLenOf = (value: unknown): number =>
+  Buffer.byteLength(JSON.stringify(value), 'utf8');
+
+/**
+ * The three regions a generator's markdown `body` partitions into when
+ * split on `## ` (exactly-two-hash) H2 boundaries:
+ *   - `head`: everything before the FIRST `## ` line (the H1 + any preamble).
+ *   - `sections`: the ordered list of `## ` blocks between head and footer.
+ *   - `footer`: the trailing run from the LAST `## Boundaries` line to EOF
+ *     (the renderFooter block — `## Boundaries` + `## How To Regenerate`,
+ *     one indivisible unit). `null` when no `## Boundaries` line is present.
+ */
+interface SplitBody {
+  readonly head: string;
+  readonly sections: readonly string[];
+  readonly footer: string | null;
+}
+
+/**
+ * Partition a generator's markdown `body` into [head][sections...][footer].
+ *
+ * Splits strictly on lines matching `^## ` (exactly two hashes) so `### `
+ * subheadings (e.g. data-dictionary's "### Apex Triggers / Flows") and
+ * ```mermaid fences stay bound to their parent `## ` section. Tracks fenced
+ * code-block state while scanning so a `## ` line INSIDE a ``` fence (no
+ * current generator emits one, but it is latent fragility) is not mistaken
+ * for a section boundary.
+ *
+ * The footer anchors on the LAST `## Boundaries` line through EOF, which
+ * captures both `## Boundaries` and the `## How To Regenerate` that
+ * renderFooter always emits after it. When no `## Boundaries` line exists
+ * the footer is `null` and the caller must NOT drop anything (never risk
+ * the honesty footer).
+ */
+export const splitBodyIntoSections = (body: string): SplitBody => {
+  const lines = body.split('\n');
+  const isFence = (line: string): boolean => line.trimStart().startsWith('```');
+  // Index of every `## ` H2 heading line that is NOT inside a code fence.
+  const headingIdx: number[] = [];
+  let lastBoundariesIdx = -1;
+  let inFence = false;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? '';
+    if (isFence(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    if (/^## /.test(line)) {
+      headingIdx.push(i);
+      if (line.startsWith('## Boundaries')) lastBoundariesIdx = i;
+    }
+  }
+
+  if (headingIdx.length === 0) {
+    return { head: body, sections: [], footer: null };
+  }
+  // No honesty footer to anchor on → caller must not drop. Signal via footer=null.
+  if (lastBoundariesIdx === -1) {
+    return { head: body, sections: [], footer: null };
+  }
+
+  const firstHeading = headingIdx[0] ?? 0;
+  const head = lines.slice(0, firstHeading).join('\n');
+  const footer = lines.slice(lastBoundariesIdx).join('\n');
+
+  // Section heading lines strictly between the first heading and the footer.
+  const middleHeadings = headingIdx.filter(
+    (idx) => idx >= firstHeading && idx < lastBoundariesIdx,
+  );
+  const sections: string[] = [];
+  for (let h = 0; h < middleHeadings.length; h += 1) {
+    const start = middleHeadings[h] ?? 0;
+    const end = middleHeadings[h + 1] ?? lastBoundariesIdx;
+    sections.push(lines.slice(start, end).join('\n'));
+  }
+  return { head, sections, footer };
+};
+
+/** The first `## ` heading text of a section block, for the truncation note's drop list. */
+const sectionHeading = (section: string): string => {
+  const firstLine = section.split('\n', 1)[0] ?? '';
+  return firstLine.replace(/^##\s+/, '').trim();
+};
+
+/**
+ * How `frontmatter.componentIds[]` was trimmed (the FIRST reduction step). When
+ * present in the truncation note it discloses how many provenance ids were
+ * dropped and how many were kept as a sample, so a reader knows the id list is
+ * a representative sample, not the complete provenance set.
+ */
+interface ComponentIdsTrimSummary {
+  readonly kept: number;
+  readonly dropped: number;
+}
+
+/**
+ * Build the in-body truncation note naming the dropped section headings, any
+ * componentIds trimming, and the remedy. Always placed immediately BEFORE the
+ * footer so the honesty Boundaries block stays the document's tail.
+ *
+ * `idsTrim` is the FIRST reduction step (provenance metadata), disclosed ahead
+ * of the dropped readable sections so the note reads in reduction order.
+ */
+const renderTruncationNote = (
+  droppedHeadings: readonly string[],
+  idsTrim?: ComponentIdsTrimSummary,
+): string => {
+  const lines: string[] = [
+    '## Truncation Note',
+    '',
+    'This document exceeded the response-size budget and was reduced to keep the readable body and the full Boundaries disclosures intact.',
+  ];
+  if (idsTrim !== undefined && idsTrim.dropped > 0) {
+    lines.push(
+      '',
+      `Provenance was trimmed FIRST: \`frontmatter.componentIds\` kept the first ${idsTrim.kept.toString()} of ${(idsTrim.kept + idsTrim.dropped).toString()} component ids as a sample (…and ${idsTrim.dropped.toString()} more components). The trimmed ids are provenance metadata, not readable content.`,
+    );
+  }
+  if (droppedHeadings.length > 0) {
+    const named = droppedHeadings.map((h) => `\`${h}\``).join(', ');
+    lines.push(
+      '',
+      `The following readable section(s) were then dropped tail-first to fit: ${named}.`,
+    );
+  }
+  lines.push(
+    '',
+    'To get the dropped detail, re-run with a narrower scope (e.g. an `objectFilter` / `objectApiName` for a single object, a `personaFocus`, or pagination), or request `format: "html"` where available for the full document.',
+  );
+  return lines.join('\n');
+};
+
+/**
+ * Fit a `GeneratedDocument` to a byte budget, ALWAYS preserving the readable
+ * body's value and the honesty footer. This runs in each generator BEFORE the
+ * global jsonResult guard, so the guard's `slimDataStrings` never hard-cuts
+ * `document.body` to 1024 chars (the H7 dishonesty bug that would silently
+ * destroy the disclosures).
+ *
+ * Reduction PRIORITY (least-valuable shed first):
+ *   1. Trim `frontmatter.componentIds[]` — provenance metadata, not readable
+ *      content, and the real bloat for the union-everything generators
+ *      (admin_handbook / onboarding carry 800+ ids = ~34 KB while the body is
+ *      ~2–3 KB). Keep the first `COMPONENT_IDS_SAMPLE_KEEP` ids as a sample;
+ *      the dropped count is disclosed in the Truncation Note. If this alone
+ *      brings the doc under budget, EVERY readable section is preserved.
+ *   2. ONLY if still over budget, drop whole body sections tail-first
+ *      (least-important last), on top of the trimmed componentIds.
+ *
+ * Footer-survival is UNCONDITIONAL: the honesty footer (`## Boundaries` +
+ * `## How To Regenerate`), `sectionConfidence`, and per-section confidence are
+ * always preserved. Middle sections are dropped — down to ZERO if necessary —
+ * but the Boundaries block always reaches the client intact.
+ *
+ * Pure and referential: a doc whose full response envelope is under the global
+ * cap is returned UNCHANGED (same object) — the budget is `cap - measured
+ * envelope overhead`, so it engages at or before the global guard and realistic
+ * under-cap docs (admin_handbook / onboarding) stay byte-identical with no note
+ * and no id trimming.
+ *
+ * @example
+ *   const fitted = fitDocumentToBudget(
+ *     { frontmatter, body, sectionConfidence, boundaries },
+ *     generatedDocByteBudget(),
+ *   );
+ */
+export const fitDocumentToBudget = (
+  doc: GeneratedDocument,
+  budgetBytes: number,
+): GeneratedDocument => {
+  // Fast path: already fits → return the SAME object (referential identity).
+  // The budget is `cap - measured envelope overhead`, so an under-cap doc the
+  // global guard would leave byte-identical also passes here untouched.
+  if (byteLenOf(doc) <= budgetBytes) return doc;
+
+  const { head, sections, footer } = splitBodyIntoSections(doc.body);
+  // No honesty footer to anchor on (should never happen for a real generator)
+  // → never risk dropping it; return the doc unchanged.
+  if (footer === null) return doc;
+
+  // STEP 1 — trim frontmatter.componentIds[] FIRST. It is provenance metadata
+  // (not readable content) and is the real bloat for the union-everything
+  // generators, so shedding it before any body section preserves the value.
+  const fullIds = doc.frontmatter.componentIds;
+  const idsAreTrimmable = fullIds.length > COMPONENT_IDS_SAMPLE_KEEP;
+  const trimmedIds: readonly ComponentId[] = idsAreTrimmable
+    ? fullIds.slice(0, COMPONENT_IDS_SAMPLE_KEEP)
+    : fullIds;
+  const idsTrim: ComponentIdsTrimSummary | undefined = idsAreTrimmable
+    ? { kept: trimmedIds.length, dropped: fullIds.length - trimmedIds.length }
+    : undefined;
+
+  // Reassemble a candidate body from the kept sections + (optional) note. The
+  // note discloses the componentIds trim (if any) and the dropped sections.
+  const assemble = (
+    kept: readonly string[],
+    dropped: readonly string[],
+    notedIdsTrim: ComponentIdsTrimSummary | undefined,
+  ): string => {
+    const parts: string[] = [head, ...kept];
+    const hasNote =
+      dropped.length > 0 || (notedIdsTrim !== undefined && notedIdsTrim.dropped > 0);
+    if (hasNote) parts.push(renderTruncationNote(dropped, notedIdsTrim));
+    parts.push(footer);
+    // Drop empty leading/trailing fragments to avoid stray blank runs, but keep
+    // interior joins (sections already carry their own blank-line separators).
+    return parts.filter((p) => p.length > 0).join('\n');
+  };
+
+  const candidate = (
+    ids: readonly ComponentId[],
+    kept: readonly string[],
+    dropped: readonly string[],
+    notedIdsTrim: ComponentIdsTrimSummary | undefined,
+  ): GeneratedDocument => ({
+    ...doc,
+    frontmatter: { ...doc.frontmatter, componentIds: ids },
+    body: assemble(kept, dropped, notedIdsTrim),
+  });
+
+  // If trimming componentIds alone fits, keep every readable body section.
+  const idsOnly = candidate(trimmedIds, sections, [], idsTrim);
+  if (byteLenOf(idsOnly) <= budgetBytes) return idsOnly;
+
+  // STEP 2 — still over budget: drop whole body sections tail-first, on top of
+  // the trimmed componentIds. Re-measure the FULL serialized doc each time
+  // until it fits or every middle section is gone (footer + note never dropped).
+  const kept = [...sections];
+  const dropped: string[] = [];
+  while (
+    byteLenOf(candidate(trimmedIds, kept, dropped, idsTrim)) > budgetBytes &&
+    kept.length > 0
+  ) {
+    const removed = kept.pop();
+    if (removed !== undefined) dropped.unshift(sectionHeading(removed));
+  }
+
+  // If nothing was actually dropped (the body grew under serialization but the
+  // sections were all empty / the split could not help), still return a fitted
+  // shape; assemble with no dropped list yields head + sections + footer.
+  return candidate(trimmedIds, kept, dropped, idsTrim);
+};
 
 /**
  * The `sfi.generate_data_dictionary` MCP tool. Returns a structured
@@ -466,17 +802,20 @@ export const generateDataDictionaryHandler = async (
     STRUCTURAL_DISCLOSURE,
   ];
 
-  const document: GeneratedDocument = {
-    frontmatter: {
-      title: `${objectLabel} — Data Dictionary`,
-      generatedAt,
-      sourceTreeHash,
-      componentIds,
+  const document: GeneratedDocument = fitDocumentToBudget(
+    {
+      frontmatter: {
+        title: `${objectLabel} — Data Dictionary`,
+        generatedAt,
+        sourceTreeHash,
+        componentIds,
+      },
+      body,
+      sectionConfidence,
+      boundaries,
     },
-    body,
-    sectionConfidence,
-    boundaries,
-  };
+    generatedDocByteBudget(),
+  );
 
   return ok({
     data: { document },

@@ -264,6 +264,60 @@ describe('emptyQueuesAndGroupsHandler', () => {
   });
 });
 
+describe('emptyQueuesAndGroupsHandler — CR-22 cursor', () => {
+  it('whole-fits omits cursor block + scanTruncated (byte-identical golden)', async () => {
+    const r = await emptyQueuesAndGroupsHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect('nextCursor' in r.value.data).toBe(false);
+    expect('pageInfo' in r.value.data).toBe(false);
+    expect('otherSections' in r.value.data).toBe(false);
+    expect('scanTruncated' in r.value.data).toBe(false);
+    expect(r.value.data.truncated).toBe(false);
+  });
+
+  it('paging the queues list emits nextCursor + discloses groups', async () => {
+    const r = await emptyQueuesAndGroupsHandler(ctx, { limit: 1 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.queues.length).toBe(1);
+    expect(r.value.data.designatedList).toBe('queues');
+    expect(r.value.data.nextCursor).toBeDefined();
+    const others = r.value.data.otherSections ?? [];
+    expect(others.find((s) => s.listId === 'groups')?.totalCount).toBe(2);
+    // totals stay full.
+    expect(r.value.data.totalQueues).toBe(3);
+  });
+
+  it('resume walks the queues list with no dup/skip', async () => {
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < 6; i += 1) {
+      const r = await emptyQueuesAndGroupsHandler(ctx, {
+        limit: 1,
+        ...(cursor !== undefined ? { cursor } : {}),
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      for (const q of r.value.data.queues) seen.push(q.id);
+      cursor = r.value.data.nextCursor;
+      if (cursor === undefined) break;
+    }
+    expect(seen.sort()).toEqual([Q_LEGACY, Q_STALE, Q_UNKNOWN].sort());
+  });
+
+  it('rejects a cursor minted for a different type filter', async () => {
+    const p1 = await emptyQueuesAndGroupsHandler(ctx, { limit: 1 });
+    expect(p1.ok).toBe(true);
+    if (!p1.ok) return;
+    const cursor = p1.value.data.nextCursor!;
+    const stale = await emptyQueuesAndGroupsHandler(ctx, { type: 'Queue', limit: 1, cursor });
+    expect(stale.ok).toBe(false);
+    if (stale.ok) return;
+    expect(stale.error.kind).toBe('invalid-query');
+  });
+});
+
 describe('emptyQueuesAndGroupsInputSchema', () => {
   it('accepts empty input', () => {
     expect(emptyQueuesAndGroupsInputSchema.safeParse({}).success).toBe(true);
@@ -291,5 +345,66 @@ describe('emptyQueuesAndGroupsInputSchema', () => {
     expect(
       emptyQueuesAndGroupsInputSchema.safeParse({ type: 'Group' }).success,
     ).toBe(true);
+  });
+});
+
+describe('coverage-aware-zero — Queue/Group not retrieved', () => {
+  let covDir: string;
+  let covStore: GraphStore;
+
+  beforeAll(async () => {
+    covDir = mkdtempSync(join(tmpdir(), 'sfi-eqg-cov-'));
+    const o = await openGraph(join(covDir, 'g.db'));
+    if (!o.ok) throw new Error(o.error.message);
+    covStore = o.value;
+    await importExtractionResults(covStore, [
+      { nodes: [makeNode({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' })], edges: [] },
+    ]);
+  });
+
+  afterAll(async () => {
+    await closeGraph(covStore);
+    rmSync(covDir, { recursive: true, force: true });
+  });
+
+  const COV_MANIFEST: VaultManifest = {
+    version: '0.1.0',
+    refreshedAt: '2026-05-27T14:33:08Z',
+    sourceOrg: 'me@example.com',
+    components: { CustomObject: 1 },
+    edges: {},
+    sourceTreeHash: 'sha256:fixture-cov',
+    coverage: [
+      { type: 'CustomObject', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+      { type: 'Queue', requested: true, retrieved: 0, errored: false, neverModeled: false },
+      { type: 'Group', requested: true, retrieved: 0, errored: false, neverModeled: false },
+    ],
+  };
+
+  it('attaches a coverageCaveat naming both unretrieved families', async () => {
+    const r = await emptyQueuesAndGroupsHandler(
+      { vaultRoot: covDir, manifest: COV_MANIFEST, graph: covStore },
+      {},
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalQueues).toBe(0);
+    expect(r.value.data.totalGroups).toBe(0);
+    expect(r.value.data.coverageCaveat).toBeDefined();
+    expect(r.value.data.coverageCaveat?.missingCoverage).toEqual(
+      expect.arrayContaining(['Queue', 'Group']),
+    );
+    expect(r.value.data.coverageCaveat?.message).toMatch(/not checked/);
+  });
+
+  it('scopes the caveat to the requested type filter', async () => {
+    const r = await emptyQueuesAndGroupsHandler(
+      { vaultRoot: covDir, manifest: COV_MANIFEST, graph: covStore },
+      { type: 'Queue' },
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.coverageCaveat?.missingCoverage).toContain('Queue');
+    expect(r.value.data.coverageCaveat?.missingCoverage).not.toContain('Group');
   });
 });

@@ -73,12 +73,21 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listEdges, listNodesByType } from '@sf-intelligence/graph';
+import { countNodesByType, listEdges, listNodesByType } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
+
+import {
+  argsFingerprint,
+  decodeCursor,
+  paginateSection,
+  type PageableSection,
+  type SectionDisclosure,
+} from './page-cursor.js';
 
 /** Inclusive lower bound on `minDensity`. */
 const MIN_DENSITY_LOWER = 0;
@@ -129,6 +138,10 @@ const DOMAIN_CANDIDATE_TYPES: readonly ComponentType[] = [
 export const domainClustersInputSchema = z.object({
   minDensity: z.number().min(MIN_DENSITY_LOWER).max(MIN_DENSITY_UPPER).optional(),
   limit: z.number().int().min(LIMIT_LOWER).max(LIMIT_UPPER).optional(),
+  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior page's
+  // `nextCursor`; carries the member offset + which cluster (Domain.id) it
+  // advances. Omit = today's behavior.
+  cursor: z.string().min(1).optional(),
 });
 
 /** Parsed input shape, inferred from `domainClustersInputSchema`. */
@@ -179,6 +192,32 @@ export interface DomainClustersOutput {
   readonly unclustered: number;
   /** Present when the cluster list was trimmed to fit the response size limit. */
   readonly note?: string;
+  /**
+   * CR-RV12: TRUE when the >500-per-type candidate enumeration cap
+   * (CANDIDATE_LIMIT_PER_TYPE) dropped CustomObject/ApexClass/Flow candidates
+   * BEFORE clustering — so the clustering ran on a partial candidate set.
+   * Present ONLY when actually true so a ≤500-per-type org's golden does not move.
+   */
+  readonly candidateTruncated?: boolean;
+  /** CR-RV12: true org-wide candidate counts per type (only when a type was capped). */
+  readonly trueCandidateCounts?: {
+    readonly CustomObject?: number;
+    readonly ApexClass?: number;
+    readonly Flow?: number;
+  };
+  /**
+   * CR-22 opaque continuation token, present ONLY when a cluster's members are
+   * truncated (members.length < memberCount). Echo it back as `cursor` to page
+   * that cluster's members; absent on a whole-fits page so the response is
+   * byte-identical to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata for the paged cluster's members; truncation only. */
+  readonly pageInfo?: PageInfo;
+  /** Which cluster id the cursor advances; truncation only. */
+  readonly designatedList?: string;
+  /** The other clusters, disclosed with their full member counts; truncation only. */
+  readonly otherSections?: readonly SectionDisclosure[];
 }
 
 /** Cap members listed per cluster so one large domain can't blow the response
@@ -312,8 +351,10 @@ const renderCluster = (
   index: number,
   candidates: readonly Candidate[],
   sharedEdgeCount: number,
-): Domain => {
+): { domain: Domain; allMembers: readonly DomainMember[] } => {
   const centre = pickCentre(candidates);
+  // FULL ordered member list — retained so a section cursor can page past
+  // MAX_MEMBERS_PER_CLUSTER instead of discarding the tail (CR-22).
   const allMembers: DomainMember[] = candidates
     .map((c) => ({ id: c.node.id, apiName: c.node.apiName, type: c.node.type }))
     .sort(memberCompare);
@@ -325,18 +366,21 @@ const renderCluster = (
       ? `${centre.node.apiName}-centered domain (suggested grouping)`
       : `${centre.node.apiName}-anchored group (co-located, no internal edges)`;
   return {
-    id: `domain-${index.toString()}`,
-    suggestedName,
-    centerComponent: {
-      id: centre.node.id,
-      apiName: centre.node.apiName,
-      type: centre.node.type,
+    domain: {
+      id: `domain-${index.toString()}`,
+      suggestedName,
+      centerComponent: {
+        id: centre.node.id,
+        apiName: centre.node.apiName,
+        type: centre.node.type,
+      },
+      members,
+      sharedEdgeCount,
+      cohesion,
+      memberCount: allMembers.length,
+      membersTruncated: allMembers.length > members.length,
     },
-    members,
-    sharedEdgeCount,
-    cohesion,
-    memberCount: allMembers.length,
-    membersTruncated: allMembers.length > members.length,
+    allMembers,
   };
 };
 
@@ -462,9 +506,14 @@ export const domainClustersHandler = async (
   );
 
   // Stage 4: render + sort + slice.
-  const rendered: Domain[] = rawClusters.map((members, idx) =>
+  const renderedPairs = rawClusters.map((members, idx) =>
     renderCluster(idx + 1, members, countInternalEdges(members)),
   );
+  const rendered: Domain[] = renderedPairs.map((p) => p.domain);
+  // Retain each cluster's FULL ordered member list, keyed by Domain.id, so the
+  // member-axis cursor can page past MAX_MEMBERS_PER_CLUSTER (CR-22).
+  const fullMembersById = new Map<string, readonly DomainMember[]>();
+  for (const p of renderedPairs) fullMembersById.set(p.domain.id, p.allMembers);
   const sorted = [...rendered].sort(compareClustersDesc);
 
   // Members are already capped per cluster; this byte-budget backstop reduces the
@@ -483,9 +532,98 @@ export const domainClustersHandler = async (
     n = Math.max(1, Math.floor(n * 0.8));
     data = build(n);
   }
+  const shownClusters = data.clusters;
+
+  // CR-RV12: the candidate enumeration is capped at CANDIDATE_LIMIT_PER_TYPE per
+  // type, so a >500-per-type org clusters on a PARTIAL candidate set silently.
+  // Compare TRUE counts against the cap; surface candidateTruncated + true counts
+  // ONLY for a capped type so a ≤500-per-type org's golden does not move.
+  const trueCandidateCounts: { CustomObject?: number; ApexClass?: number; Flow?: number } = {};
+  let candidateTruncated = false;
+  for (const type of DOMAIN_CANDIDATE_TYPES) {
+    const c = await countNodesByType(ctx.graph, type);
+    if (!c.ok) return err({ kind: 'internal', message: `graph query failed: ${c.error.message}` });
+    if (c.value > CANDIDATE_LIMIT_PER_TYPE) {
+      candidateTruncated = true;
+      trueCandidateCounts[type as 'CustomObject' | 'ApexClass' | 'Flow'] = c.value;
+    }
+  }
+
+  // CR-22 member-axis cursor: page ONE designated cluster's members (sectionId =
+  // Domain.id) and disclose the rest. The cursor is bound to vaultHash +
+  // argsFingerprint(minDensity,limit) — clustering is recomputed each call, so
+  // a refreshed vault or changed args correctly rejects a stale 'domain-N'.
+  const TOOL = 'sfi.domain_clusters';
+  const fingerprint = argsFingerprint({ minDensity, limit });
+  // Sections = the SHOWN clusters' full member lists (only shown clusters are
+  // addressable; a trimmed-away cluster's id is not stable to resume).
+  const sections: readonly PageableSection<DomainMember>[] = shownClusters.map((c) => ({
+    listId: c.id,
+    items: fullMembersById.get(c.id) ?? c.members,
+  }));
+
+  let designatedListId: string | null = null;
+  let offset = 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+    if (decoded.value.listId !== undefined) designatedListId = decoded.value.listId;
+  } else {
+    // Fresh call: designate the FIRST shown cluster whose members truncate.
+    const firstTrunc = shownClusters.find((c) => c.membersTruncated);
+    if (firstTrunc !== undefined) designatedListId = firstTrunc.id;
+  }
+
+  let cursorBlock:
+    | { nextCursor: string; pageInfo: PageInfo; designatedList: string; otherSections: readonly SectionDisclosure[] }
+    | undefined;
+  let clusters: readonly Domain[] = shownClusters;
+
+  if (designatedListId !== null) {
+    const pagedResult = paginateSection(sections, designatedListId, {
+      offset,
+      limit: MAX_MEMBERS_PER_CLUSTER,
+      byteBudget: DOMAIN_CLUSTERS_BYTE_BUDGET,
+      keyOf: (m) => m.id,
+      binding: { tool: TOOL, vaultHash: ctx.manifest.sourceTreeHash, argsFingerprint: fingerprint },
+    });
+    if (!pagedResult.ok) return err(pagedResult.error);
+    const paged = pagedResult.value;
+    // The designated cluster shows its member page; others keep today's shape.
+    clusters = shownClusters.map((c) =>
+      c.id === designatedListId
+        ? { ...c, members: paged.items, membersTruncated: paged.pageInfo.hasMore }
+        : c,
+    );
+    if (paged.pageInfo.nextCursor !== null) {
+      cursorBlock = {
+        nextCursor: paged.pageInfo.nextCursor,
+        pageInfo: paged.pageInfo,
+        designatedList: paged.listId,
+        otherSections: paged.otherSections,
+      };
+    }
+  }
 
   return ok({
-    data,
+    data: {
+      ...data,
+      clusters,
+      ...(candidateTruncated ? { candidateTruncated: true, trueCandidateCounts } : {}),
+      ...(cursorBlock !== undefined
+        ? {
+            nextCursor: cursorBlock.nextCursor,
+            pageInfo: cursorBlock.pageInfo,
+            designatedList: cursorBlock.designatedList,
+            otherSections: cursorBlock.otherSections,
+          }
+        : {}),
+    },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
       refreshedAt: ctx.manifest.refreshedAt,

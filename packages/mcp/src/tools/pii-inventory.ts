@@ -67,6 +67,7 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { listEdges, listNodesByType } from '@sf-intelligence/graph';
@@ -85,6 +86,7 @@ import {
   resolveObjectScopeParentId,
   toCustomObjectId,
 } from './input-aliases.js';
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 
 /**
  * Inclusive upper bound on `limit`. Mirrors the `LIST_MAX_LIMIT`
@@ -136,6 +138,9 @@ const piiInventoryInputBaseSchema = z.object({
   category: z.enum(CATEGORY_FILTER_VALUES).optional(),
   limit: z.number().int().min(1).max(PII_INVENTORY_MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
+  // CR-22 continuation cursor: opaque token from a prior truncated page's
+  // nextCursor; supplies the resume offset. Omit for today's behavior.
+  cursor: z.string().min(1).optional(),
 });
 
 export const piiInventoryInputSchema = z.preprocess((raw) => {
@@ -205,6 +210,15 @@ export interface PiiInventoryOutput {
    */
   readonly nextOffset?: number;
   /**
+   * CR-22 opaque continuation token, present ONLY when this page is truncated
+   * (more matching fields remain — over `limit` OR byte-trimmed). Echo it back
+   * as `cursor` to resume. Absent on a complete page so an in-budget response
+   * is byte-identical to the pre-CR-22 shape.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
+  /**
    * Set only when the page was byte-trimmed below the global ~45 KB response
    * limit (fewer than `limit` rows despite more matching). Names the trim and
    * how to advance.
@@ -221,30 +235,6 @@ export interface PiiInventoryOutput {
  * sort-ordered prefix that fits and flags `truncated` with a `nextOffset`.
  */
 const PII_PAYLOAD_BUDGET_BYTES = 38_000;
-
-/**
- * Trim a field page to the largest sort-ordered prefix whose serialized size
- * fits `budgetBytes`. A fixed `limit` cannot bound bytes — descriptions and
- * reasons vary widely — so only a byte budget guarantees the response clears
- * the global guard. Always keeps at least one field so the tool still answers.
- */
-const fitFieldsToBudget = (
-  fields: readonly PiiField[],
-  budgetBytes: number,
-): { readonly kept: readonly PiiField[]; readonly trimmed: boolean } => {
-  const kept: PiiField[] = [];
-  let used = 0;
-  for (const field of fields) {
-    // +1 approximates the `,` separator between serialized array elements.
-    const size = Buffer.byteLength(JSON.stringify(field), 'utf8') + 1;
-    if (kept.length > 0 && used + size > budgetBytes) {
-      return { kept, trimmed: true };
-    }
-    kept.push(field);
-    used += size;
-  }
-  return { kept, trimmed: false };
-};
 
 /**
  * Build an empty per-classification counter; the handler increments
@@ -457,11 +447,44 @@ export const piiInventoryHandler = async (
   }
 
   const sorted = [...matched].sort(compareFields);
-  const offset = input.offset ?? 0;
-  const page = sorted.slice(offset, offset + limit);
-  const { kept, trimmed } = fitFieldsToBudget(page, PII_PAYLOAD_BUDGET_BYTES);
-  const returnedEnd = offset + kept.length;
-  const truncated = returnedEnd < sorted.length;
+
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset);
+  // a stale/forged cursor (changed objectId/classification/category, different
+  // tool, or refreshed vault) is rejected with invalid-query.
+  const fingerprint = argsFingerprint({
+    ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
+    classification: classificationFilter,
+    category: categoryFilter,
+  });
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: 'sfi.pii_inventory',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  // The pre-byte-trim window size is needed for the byte-identical note text
+  // (`X of Y matched fields`). `paginate()` then applies the same largest-prefix
+  // byte-trim the handler used to open-code (verified equivalent kept-set).
+  const windowSize = sorted.slice(offset, offset + limit).length;
+  const paged = paginateLegacy(sorted, {
+    offset,
+    limit,
+    byteBudget: PII_PAYLOAD_BUDGET_BYTES,
+    binding: {
+      tool: 'sfi.pii_inventory',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const kept = paged.items;
+  const trimmed = paged.byteTrimmed;
+  const truncated = paged.hasMore;
+  const emitCursor = paged.nextCursor !== null;
 
   return ok({
     data: {
@@ -474,11 +497,12 @@ export const piiInventoryHandler = async (
       limit,
       offset,
       truncated,
-      ...(truncated ? { nextOffset: returnedEnd } : {}),
+      ...(truncated ? { nextOffset: offset + kept.length } : {}),
+      ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
       ...(trimmed
         ? {
             note:
-              `Response trimmed to ${kept.length} of ${page.length} matched ` +
+              `Response trimmed to ${kept.length} of ${windowSize} matched ` +
               `fields to stay under the ~45 KB MCP response limit. Advance ` +
               `with offset += ${kept.length} for the rest.`,
           }

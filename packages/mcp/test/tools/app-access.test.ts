@@ -129,18 +129,86 @@ describe('appAccessHandler', () => {
     expect(r.value.data.boundaryNote).not.toMatch(/Scan capped/);
   });
 
-  it('flags scanTruncated + discloses it in boundaryNote when a grantor scan hits the cap', async () => {
+  // CR-22 B3: a low cap no longer drops the scan tail — it windows the scan and
+  // still reaches every grantor, including ones in the SECOND scanned type.
+  it('FAIL-BEFORE/PASS-AFTER: a cap of 1 still reaches a grantor in the SECOND scanned type', async () => {
     const prev = process.env['SFI_NODE_SCAN_LIMIT'];
-    process.env['SFI_NODE_SCAN_LIMIT'] = '1'; // fixture has 2 Profiles -> the Profile scan hits the cap
+    process.env['SFI_NODE_SCAN_LIMIT'] = '1';
     try {
-      const r = await appAccessHandler(ctx, { componentId: APP });
+      const r = await appAccessHandler(ctx, { componentId: APP, limit: 500 });
       expect(r.ok).toBe(true); if (!r.ok) return;
-      expect((r.value.data as AppAccessOutput).scanTruncated).toBe(true);
-      expect(r.value.data.boundaryNote).toMatch(/Scan capped at 1 nodes per type/);
-      expect(r.value.data.boundaryNote).toMatch(/Profile/);
+      const d = r.value.data as AppAccessOutput;
+      // Both grantors found even at cap 1 — PermissionSet:SalesPS lives in the
+      // SECOND scanned type (the pre-B3 unreachable tail).
+      expect(d.canOpen.map((g) => g.granterId).sort()).toEqual([
+        'PermissionSet:SalesPS',
+        'Profile:Admin',
+      ]);
+      // The completed full scan does NOT claim INCOMPLETE.
+      expect(d.scanTruncated).toBe(false);
+      expect(d.boundaryNote).not.toMatch(/Scan capped/);
     } finally {
       if (prev === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
       else process.env['SFI_NODE_SCAN_LIMIT'] = prev;
     }
+  });
+
+  it('SFI_NODE_SCAN_LIMIT > 500 no longer hard-errors (RV10-style clamp while touched)', async () => {
+    const prev = process.env['SFI_NODE_SCAN_LIMIT'];
+    process.env['SFI_NODE_SCAN_LIMIT'] = '600';
+    try {
+      const r = await appAccessHandler(ctx, { componentId: APP });
+      expect(r.ok).toBe(true); if (!r.ok) return;
+      expect((r.value.data as AppAccessOutput).summary.canOpen).toBe(2);
+    } finally {
+      if (prev === undefined) delete process.env['SFI_NODE_SCAN_LIMIT'];
+      else process.env['SFI_NODE_SCAN_LIMIT'] = prev;
+    }
+  });
+
+  // CR-22 output cursor.
+  it('whole-fits no-cursor call omits nextCursor/pageInfo (byte-identical)', async () => {
+    const r = await appAccessHandler(ctx, { componentId: APP });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data as unknown as Record<string, unknown>;
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
+  });
+
+  it('a truncated page emits a cursor that resumes with no gaps or dupes', async () => {
+    const all = await appAccessHandler(ctx, { componentId: APP, limit: 500 });
+    expect(all.ok).toBe(true); if (!all.ok) return;
+    const fullOrder = (all.value.data as AppAccessOutput).canOpen.map((g) => g.granterId);
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const page = await appAccessHandler(
+        ctx,
+        cursor !== undefined ? { componentId: APP, limit: 1, cursor } : { componentId: APP, limit: 1 },
+      );
+      expect(page.ok).toBe(true); if (!page.ok) return;
+      const d = page.value.data as AppAccessOutput;
+      for (const g of d.canOpen) seen.push(g.granterId);
+      if (d.nextCursor === undefined) break;
+      cursor = d.nextCursor;
+      guard += 1;
+      if (guard > 20) throw new Error('cursor did not terminate');
+    }
+    expect(seen).toEqual(fullOrder);
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+
+  it('rejects a cursor minted for a DIFFERENT app (argsFingerprint bind)', async () => {
+    const first = await appAccessHandler(ctx, { componentId: APP, limit: 1 });
+    expect(first.ok).toBe(true); if (!first.ok) return;
+    const cursor = (first.value.data as AppAccessOutput).nextCursor;
+    if (typeof cursor !== 'string') return; // only one grantor → no cursor
+    const replay = await appAccessHandler(ctx, { componentId: 'CustomApplication:Other', cursor });
+    expect(replay.ok).toBe(false); if (replay.ok) return;
+    // Either component-not-found (decode happens after node lookup) or
+    // invalid-query (cursor rejected) — both prove the token can't cross apps.
+    expect(['invalid-query', 'component-not-found']).toContain(replay.error.kind);
   });
 });

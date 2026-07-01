@@ -227,6 +227,7 @@ export const extractGlobalValueSet = async (
       masterLabel,
       description: optionalString(rootObj, 'description'),
       sorted: coerceBoolean(unwrapSingle(rootObj['sorted'])),
+      restricted: coerceBoolean(unwrapSingle(rootObj['restricted'])),
       valueCount,
       values,
     },

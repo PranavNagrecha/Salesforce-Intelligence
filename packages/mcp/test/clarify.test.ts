@@ -77,6 +77,44 @@ describe('buildClarify', () => {
     expect(refresh?.reason).toContain('2026-05-20');
   });
 
+  it('on none with scopedCoverageComplete: leads with stop, frames absence as a false premise not a coverage gap (batch 8)', () => {
+    const result: ResolveResult = {
+      disposition: 'none',
+      queryTokens: ['applicationsubmissionservice'],
+      candidates: [],
+    };
+    const out = buildClarify('ApplicationSubmissionService', result, {
+      ...VAULT,
+      scopedCoverageComplete: true,
+    });
+    expect(out.clarification).toBeNull();
+    // `stop` must come FIRST (determinate negative), refresh demoted to second.
+    expect(out.nextActions[0]?.action).toBe('stop');
+    expect(out.nextActions[1]?.action).toBe('refresh');
+    // The stop reason must state the component does not exist / false premise,
+    // and must NOT frame it as a coverage gap.
+    const stop = out.nextActions.find((a) => a.action === 'stop');
+    expect(stop?.reason).toContain('does not exist');
+    expect(stop?.reason).toContain('not a coverage gap');
+    // The refresh is demoted: it must say a refresh cannot surface a
+    // nonexistent component, not "the vault may be stale".
+    const refresh = out.nextActions.find((a) => a.action === 'refresh');
+    expect(refresh?.reason).toContain('cannot surface');
+    expect(refresh?.reason).not.toContain('the vault may be stale');
+  });
+
+  it('on none WITHOUT scopedCoverageComplete: keeps the inconclusive refresh-first framing (regression guard)', () => {
+    const result: ResolveResult = {
+      disposition: 'none',
+      queryTokens: ['zzzqqq'],
+      candidates: [],
+    };
+    const out = buildClarify('zzzqqq', result, VAULT);
+    expect(out.nextActions[0]?.action).toBe('refresh');
+    const refresh = out.nextActions.find((a) => a.action === 'refresh');
+    expect(refresh?.reason).toContain('the vault may be stale');
+  });
+
   it('on ambiguous with more candidates than the option cap: caps options and stays honest about the total', () => {
     const candidates = Array.from({ length: 12 }, (_, i) =>
       candidate(`CustomField:Obj${i}.Email__c`, 'Email__c'),

@@ -7,13 +7,13 @@
     "url": "https://github.com/PranavNagrecha/Salesforce-Intelligence",
     "source": "github"
   },
-  "version": "0.1.14",
+  "version": "0.1.16",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "sf-intelligence",
-      "version": "0.1.14",
+      "version": "0.1.16",
       "transport": {
         "type": "stdio"
       },

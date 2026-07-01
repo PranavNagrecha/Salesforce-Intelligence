@@ -5,16 +5,10 @@
  * `liveEnabled: true`. Never falls back to vault data on failure.
  */
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-
 import type { McpError, McpResponse, TrustSummary } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import {
-  getAuthFromSfCli,
-  type ExecCommand,
-  type ToolingApiAuth,
-} from '@sf-intelligence/tooling-api';
+import { getNodeById } from '@sf-intelligence/graph';
+import type { ExecCommand } from '@sf-intelligence/tooling-api';
 import { z } from 'zod';
 
 import {
@@ -33,19 +27,39 @@ import {
 import type { Context } from '../server.js';
 
 import { renderHybridStalenessWarning, type HybridStaleness } from './hybrid-trust.js';
-import { formatSfCliFailure } from './input-aliases.js';
+// CR-09 leaf extraction: the raw execution primitives moved to live-exec.ts (a
+// dependency-free leaf) so live-session.ts can import them WITHOUT pulling in
+// this handler module — breaking the would-be live-plane <-> live-session cycle
+// and letting THIS module import the budgeted seam (runLiveQuery / runLiveRest)
+// from live-session.ts below. Re-exported from here so every existing import
+// path (`runSfJson`/`apiPath`/`redactSecrets`/... FROM './live-plane.js') and
+// the public barrel keep resolving unchanged.
+// Only the leaf symbols this module's body still references are imported; the
+// rest (apiPath/getLiveAuth/restGet/runSfJson) are re-exported below for
+// back-compat without being pulled into scope (avoids unused-import lint).
+import { LIVE_PLANE_DISCLOSURE, nodeExecFile, redactSecrets } from './live-exec.js';
+// The single budgeted/consented/cached seam. Importing it here (now acyclic via
+// the leaf above) is what routes EVERY live read in this module through the
+// per-session query budget (CR-09).
+import { runLiveQuery, runLiveRest } from './live-session.js';
+import {
+  scanSoqlForPicklistMismatches,
+  scanSoqlForValidationGaps,
+  type PicklistLiteralMismatch,
+  type PicklistValidationGap,
+} from './picklist-literal-check.js';
 
-const nodeExecFile: ExecCommand = (binary, args) =>
-  promisify(execFile)(binary, [...args], { maxBuffer: 10 * 1024 * 1024 });
-
-/** Strip bearer tokens and long access-token-shaped strings from error text. */
-export const redactSecrets = (message: string): string =>
-  message
-    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
-    .replace(/\b00D[A-Za-z0-9]{12,}![A-Za-z0-9._~+/=-]{20,}\b/g, '[REDACTED_TOKEN]');
-
-export const LIVE_PLANE_DISCLOSURE =
-  'Live org data is read-only, queried at call time via the Salesforce CLI. It does not update the vault. Enable with SFI_LIVE_PLANE_ENABLED=1 or pass liveEnabled: true.';
+// Re-export the leaf primitives so every existing import path that pulls them
+// FROM './live-plane.js' (live-session.ts, the public barrel, the test suites)
+// keeps resolving unchanged after the CR-09 leaf extraction.
+export {
+  apiPath,
+  getLiveAuth,
+  LIVE_PLANE_DISCLOSURE,
+  redactSecrets,
+  restGet,
+  runSfJson,
+} from './live-exec.js';
 
 const MAX_SAMPLE_ROWS = 200;
 /** Trim sampled records so the serialized response stays under the global
@@ -118,10 +132,10 @@ export const resolveLiveAccess = async (
 const liveConsentRequiredError = (org: string): McpError => ({
   kind: 'invalid-query',
   message:
-    `Live org plane is not enabled for '${org}'. It is read-only, but it queries your live ` +
-    `org, so it needs explicit one-time consent. Grant it with sfi.live_consent { grant: true } ` +
-    `(persists for future sessions; still read-only), pass liveEnabled: true for a single call, ` +
-    `or set SFI_LIVE_PLANE_ENABLED=1.`,
+    `Live org plane is not enabled for '${org}' — record counts and live data values ` +
+    `require querying the live org and are not available offline. Grant read-only access with ` +
+    `sfi.live_consent { grant: true }, pass liveEnabled: true for one call, or set ` +
+    `SFI_LIVE_PLANE_ENABLED=1.`,
 });
 
 /**
@@ -140,75 +154,6 @@ export const gateLive = async (
   const access = await resolveLiveAccess(org, input.liveEnabled);
   if (!access.allowed) return err(liveConsentRequiredError(org));
   return ok(org);
-};
-
-const getLiveAuth = async (
-  org: string,
-  exec: ExecCommand = nodeExecFile,
-): Promise<Result<ToolingApiAuth, McpError>> => {
-  const authResult = await getAuthFromSfCli(org, exec);
-  if (!authResult.ok) {
-    return err({
-      kind: 'internal',
-      message: redactSecrets(
-        formatSfCliFailure(
-          `Salesforce CLI auth failed for org '${org}': ${authResult.error.message}`,
-        ),
-      ),
-    });
-  }
-  return ok(authResult.value);
-};
-
-export const runSfJson = async (
-  org: string,
-  args: readonly string[],
-  exec: ExecCommand = nodeExecFile,
-): Promise<Result<unknown, McpError>> => {
-  const fullArgs = [...args, '--target-org', org, '--json'];
-  try {
-    const { stdout } = await exec('sf', fullArgs);
-    return ok(JSON.parse(stdout) as unknown);
-  } catch (cause) {
-    const message = cause instanceof Error ? cause.message : String(cause);
-    return err({
-      kind: 'internal',
-      message: redactSecrets(formatSfCliFailure(`sf CLI failed: ${message}`)),
-    });
-  }
-};
-
-/**
- * Build a Salesforce REST data-API URL. `auth.apiVersion` arrives from the sf
- * CLI as "67.0" (and could be "67" or "v67.0"); normalize to the major version
- * and the canonical `vNN.0` form. The previous code appended ".0"
- * unconditionally, producing "v67.0.0" — a NOT_FOUND 404 — whenever the CLI
- * already included the minor part (which it does: org apiVersion is "67.0").
- */
-export const apiPath = (auth: ToolingApiAuth, suffix: string): string => {
-  const major = auth.apiVersion.replace(/^v/i, '').split('.')[0];
-  return `${auth.instanceUrl}/services/data/v${major}.0${suffix}`;
-};
-
-const restGet = async (
-  auth: ToolingApiAuth,
-  path: string,
-): Promise<Result<unknown, McpError>> => {
-  try {
-    const response = await fetch(path, {
-      headers: { Authorization: `Bearer ${auth.accessToken}` },
-    });
-    if (!response.ok) {
-      return err({
-        kind: 'internal',
-        message: `Salesforce REST ${response.status}: ${await response.text()}`,
-      });
-    }
-    return ok((await response.json()) as unknown);
-  } catch (cause) {
-    const message = cause instanceof Error ? cause.message : String(cause);
-    return err({ kind: 'internal', message: redactSecrets(`REST request failed: ${message}`) });
-  }
 };
 
 // ---------------------------------------------------------------------------
@@ -237,13 +182,14 @@ export const liveDescribeHandler = async (
   if (!gate.ok) return gate;
   const org = resolveOrg(ctx, input.orgAlias);
   const queriedAt = new Date().toISOString();
-  const parsed = await runSfJson(
+  // CR-09: budgeted/cached describe read (one unit per org call / cache miss).
+  const parsed = await runLiveQuery(
     org,
     ['sobject', 'describe', '--sobject', input.objectApiName],
     exec,
   );
   if (!parsed.ok) return parsed;
-  const payload = parsed.value as { result?: unknown };
+  const payload = parsed.value.value as { result?: unknown };
   return ok({
     data: {
       objectApiName: input.objectApiName,
@@ -261,14 +207,30 @@ export const liveDescribeHandler = async (
 // sfi.live_count
 // ---------------------------------------------------------------------------
 
-export const liveCountInputSchema = liveEnabledSchema.extend({
-  // Either `soql` (a SELECT COUNT() query) OR `objectApiName` (count every row
-  // of that object). Both optional at the schema level; the handler requires
-  // exactly one and turns objectApiName into `SELECT COUNT() FROM <object>`.
-  soql: z.string().min(1).optional(),
-  objectApiName: z.string().min(1).optional(),
-  orgAlias: z.string().min(1).optional(),
-});
+export const liveCountInputSchema = liveEnabledSchema
+  .extend({
+    // Either `soql` (a SELECT COUNT() query) OR `objectApiName` (count every row
+    // of that object). Both optional at the schema level; the handler requires
+    // exactly one and turns objectApiName into `SELECT COUNT() FROM <object>`.
+    soql: z.string().min(1).optional(),
+    objectApiName: z.string().min(1).optional(),
+    /**
+     * Optional filter applied ONLY when counting via `objectApiName`; becomes
+     * the `WHERE <whereClause>` of the built `SELECT COUNT() FROM <object>`. Use
+     * it instead of hand-building `soql` for a simple filtered count. It is the
+     * caller's responsibility to write valid SOQL here. It MUST NOT be combined
+     * with a full `soql` (which already carries its own WHERE) — see the handler.
+     */
+    whereClause: z.string().min(1).optional(),
+    orgAlias: z.string().min(1).optional(),
+  })
+  // STRICT: reject unrecognized keys. A caller passing a filter under a NAME the
+  // tool does not accept (e.g. `filter`, `where`, `criteria`) must get a loud
+  // error — not have the param silently stripped by Zod and then run an
+  // unfiltered `SELECT COUNT() FROM <object>` that returns the FULL row count as
+  // if it were the filtered answer (the live-count "silently ignored a filter"
+  // bug). `.strict()` turns the dropped param into a surfaced invalid-query.
+  .strict();
 
 export type LiveCountInput = z.infer<typeof liveCountInputSchema>;
 
@@ -277,11 +239,26 @@ const OBJECT_API_NAME_RE = /^[A-Za-z][A-Za-z0-9_]*$/;
 
 /**
  * Resolve the COUNT() SOQL to run: the caller's `soql` verbatim, or one built
- * from `objectApiName`. Errors when neither is supplied, or when a supplied
- * objectApiName isn't a safe API name (guards SOQL interpolation).
+ * from `objectApiName` (optionally with `whereClause`). Errors when neither is
+ * supplied, when a supplied objectApiName isn't a safe API name (guards SOQL
+ * interpolation), or when `whereClause` is given alongside a full `soql` (where
+ * honoring it is ambiguous, so we refuse rather than silently drop the filter).
  */
 const resolveCountSoql = (input: LiveCountInput): Result<string, McpError> => {
-  if (input.soql !== undefined) return ok(input.soql);
+  if (input.soql !== undefined) {
+    if (input.whereClause !== undefined) {
+      // The filter would be silently dropped (soql already has its own WHERE).
+      // Refuse loudly per "either honor it or error".
+      return err({
+        kind: 'invalid-query',
+        message:
+          'live_count: `whereClause` applies only when counting via `objectApiName`; ' +
+          'it cannot be combined with a full `soql` (put the filter inside the soql WHERE instead).',
+        path: 'whereClause',
+      });
+    }
+    return ok(input.soql);
+  }
   if (input.objectApiName !== undefined) {
     if (!OBJECT_API_NAME_RE.test(input.objectApiName)) {
       return err({
@@ -290,7 +267,13 @@ const resolveCountSoql = (input: LiveCountInput): Result<string, McpError> => {
         path: 'objectApiName',
       });
     }
-    return ok(`SELECT COUNT() FROM ${input.objectApiName}`);
+    const base = `SELECT COUNT() FROM ${input.objectApiName}`;
+    // Honor the filter: it MUST appear in the emitted SOQL, never be dropped.
+    return ok(
+      input.whereClause !== undefined
+        ? `${base} WHERE ${input.whereClause}`
+        : base,
+    );
   }
   return err({
     kind: 'invalid-query',
@@ -305,6 +288,25 @@ export interface LiveCountOutput {
   readonly soql: string;
   readonly trust: TrustSummary;
   readonly rendered: string;
+  /**
+   * Present when a WHERE picklist literal does not match any DEFINED picklist
+   * value on its field. A count of 0 (or any count) filtered on a non-existent
+   * value is a VALUE MISMATCH, not proof those records do not exist — these
+   * notes name the real values and near-match suggestions so the caller never
+   * reads the artifact count as ground truth. Absent when every literal matches.
+   */
+  readonly picklistMismatches?: readonly PicklistLiteralMismatch[];
+  /**
+   * Present when a WHERE equality field could NOT be picklist-pre-validated
+   * because it is absent from the vault (a managed-package field the refresh did
+   * not retrieve, or a relationship path). When present, a count of 0 must NOT
+   * be read as "zero records exist" — the literal might be an undetected value
+   * mismatch. Absent when every equality field was resolvable offline.
+   */
+  readonly picklistValidationGaps?: readonly PicklistValidationGap[];
+  /** When true, do not treat `count` as an answer to a filtered data question. */
+  readonly cannotAnswer?: boolean;
+  readonly coverageCaveat?: string;
 }
 
 const assertCountSoql = (soql: string): Result<string, McpError> => {
@@ -317,6 +319,96 @@ const assertCountSoql = (soql: string): Result<string, McpError> => {
     });
   }
   return ok(normalized);
+};
+
+/** Pull the FROM object API name from a SELECT statement, or `null`. */
+const fromObjectOf = (soql: string): string | null => {
+  const m = /\bfrom\s+([A-Za-z_][A-Za-z0-9_]*)/i.exec(soql);
+  return m === null || m[1] === undefined ? null : m[1];
+};
+
+/** Outcome of the offline picklist pre-validation pass for one live SOQL. */
+interface PicklistValidationResult {
+  /** Literals that match no DEFINED picklist value on a vault-KNOWN field. */
+  readonly mismatches: readonly PicklistLiteralMismatch[];
+  /** Equality fields the vault does NOT know (managed-package / not-modeled /
+   *  relationship path), so pre-validation could not run — a 0 there is not
+   *  proof those records do not exist. */
+  readonly validationGaps: readonly PicklistValidationGap[];
+}
+
+const NO_VALIDATION: PicklistValidationResult = Object.freeze({
+  mismatches: [],
+  validationGaps: [],
+});
+
+/**
+ * Pre-validate the WHERE picklist literals in a live SOQL against the vault's
+ * known picklist values. A literal that matches no DEFINED value on its field
+ * makes a determinate 0 count (or empty sample) a VALUE MISMATCH artifact, not
+ * evidence of zero matching records — so we surface the real values and
+ * near-match suggestions as disclosures. Offline + best-effort: only fields on
+ * the statement's single FROM object are checked (no relationship traversal).
+ *
+ * Crucially, a field ABSENT from the vault (a managed-package field the refresh
+ * did not retrieve, e.g. `hed__Application_Status__c`, or a relationship path)
+ * is NOT silently skipped — it is reported as a validation GAP so the caller
+ * discloses that picklist pre-validation was unavailable rather than letting a
+ * 0 count read as ground truth. Never blocks the query; only augments the result.
+ */
+const collectPicklistMismatches = async (
+  ctx: Context,
+  soql: string,
+): Promise<PicklistValidationResult> => {
+  // No graph wired (e.g. a count-only context) ⇒ nothing to validate against.
+  if (ctx.graph === undefined || ctx.graph === null) return NO_VALIDATION;
+  const fromObject = fromObjectOf(soql);
+  if (fromObject === null) return NO_VALIDATION;
+  return scanSoqlForPicklistMismatchesSync(ctx, soql, fromObject);
+};
+
+/**
+ * Synchronous-friendly wrapper: gather every referenced field's vault node up
+ * front (one graph read per distinct field), then run the pure scanners. A
+ * direct field present in the vault feeds the mismatch scanner; a direct field
+ * absent from the vault (or a relationship path, never resolvable offline) feeds
+ * the validation-gap scanner.
+ */
+const scanSoqlForPicklistMismatchesSync = async (
+  ctx: Context,
+  soql: string,
+  fromObject: string,
+): Promise<PicklistValidationResult> => {
+  const picklistCache = new Map<string, unknown>();
+  // Which direct fields the vault KNOWS (node exists), regardless of whether
+  // they carry an inline picklist definition. A known non-picklist field is a
+  // benign skip; an UNKNOWN field is a pre-validation gap to disclose.
+  const knownFields = new Set<string>();
+  // Collect each referenced direct field once (skip relationship paths — only a
+  // direct `Object.Field` picklist can be resolved from the vault here).
+  const fieldRefs = new Set<string>();
+  const eqRe = /([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|\bIN\b)/gi;
+  for (let m = eqRe.exec(soql); m !== null; m = eqRe.exec(soql)) {
+    const ref = m[1];
+    if (ref !== undefined && !ref.includes('.')) fieldRefs.add(ref);
+  }
+  for (const field of fieldRefs) {
+    const r = await getNodeById(ctx.graph, `CustomField:${fromObject}.${field}`);
+    const present = r.ok && r.value !== null;
+    if (present) {
+      knownFields.add(field);
+      picklistCache.set(field, r.value!.properties['picklistValues']);
+    }
+  }
+  const mismatches = scanSoqlForPicklistMismatches(soql, (ref) =>
+    ref.includes('.') ? null : picklistCache.get(ref) ?? null,
+  );
+  // A relationship path is never resolvable offline; a direct field is a gap
+  // only when its vault node is absent (managed-package / not-modeled).
+  const validationGaps = scanSoqlForValidationGaps(soql, (ref) =>
+    ref.includes('.') ? false : knownFields.has(ref),
+  );
+  return { mismatches, validationGaps };
 };
 
 export const liveCountHandler = async (
@@ -332,26 +424,69 @@ export const liveCountHandler = async (
   if (!soqlCheck.ok) return soqlCheck;
   const org = resolveOrg(ctx, input.orgAlias);
   const queriedAt = new Date().toISOString();
-  const parsed = await runSfJson(
+  // CR-09: budgeted/cached count read (one unit per org call / cache miss).
+  const parsed = await runLiveQuery(
     org,
     ['data', 'query', '--query', soqlCheck.value],
     exec,
   );
   if (!parsed.ok) return parsed;
-  const payload = parsed.value as {
+  const payload = parsed.value.value as {
     result?: { totalSize?: number; records?: readonly { expr0?: number }[] };
   };
   const count =
     payload.result?.totalSize ??
     payload.result?.records?.[0]?.expr0 ??
     0;
+  const { mismatches, validationGaps } = await collectPicklistMismatches(
+    ctx,
+    soqlCheck.value,
+  );
   const countData = {
     count,
     soql: soqlCheck.value,
     trust: liveTrust(queriedAt),
   };
+  const baseRendered = renderLiveCountMarkdown(countData);
+  const caveats = [
+    ...mismatches.map((m) => `> ⚠️ ${m.disclosure}`),
+    ...validationGaps.map((g) => `> ⚠️ ${g.disclosure}`),
+  ];
+  const cannotAnswer = validationGaps.length > 0;
+  const coverageCaveat =
+    cannotAnswer
+      ? 'Record count filtered on field values that could not be validated offline ' +
+        '(managed-package field or live org data required) — this count cannot answer ' +
+        'the question without querying live data.'
+      : undefined;
+  if (coverageCaveat !== undefined) {
+    caveats.push(`> ⚠️ ${coverageCaveat}`);
+  }
+  const rendered =
+    caveats.length > 0 ? `${baseRendered}\n\n${caveats.join('\n')}` : baseRendered;
+  if (cannotAnswer && coverageCaveat !== undefined) {
+    const filterHint =
+      input.objectApiName !== undefined
+        ? ` object=${input.objectApiName}` +
+          (input.whereClause !== undefined ? ` filter=${input.whereClause}` : '')
+        : '';
+    return err({
+      kind: 'invalid-query',
+      message:
+        `${coverageCaveat}${filterHint} Query: ${soqlCheck.value} ` +
+        `Live query returned count=${count} but that cannot answer the filtered question.`,
+      path: 'soql',
+    });
+  }
   return ok({
-    data: { ...countData, rendered: renderLiveCountMarkdown(countData) },
+    data: {
+      ...countData,
+      rendered,
+      ...(mismatches.length > 0 ? { picklistMismatches: mismatches } : {}),
+      ...(validationGaps.length > 0
+        ? { picklistValidationGaps: validationGaps }
+        : {}),
+    },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
       refreshedAt: ctx.manifest.refreshedAt,
@@ -464,7 +599,12 @@ export const checkVaultStaleness = async (
   let total = 0;
   for (const type of STALE_CHECK_TYPES) {
     const soql = `SELECT Id FROM ${type} WHERE LastModifiedDate > ${sinceLiteral}`;
-    const parsed = await runSfJson(
+    // CR-09: budgeted/cached per-type Tooling read (the `--use-tooling-api` flag
+    // is part of the args vector, so it is preserved AND keys the cache distinctly
+    // from a non-Tooling query of the same SOQL). A failure — including a
+    // budget-exhausted stop mid-loop — records the type into erroredTypes (the
+    // existing graceful per-type degrade) instead of aborting the whole check.
+    const parsed = await runLiveQuery(
       org,
       ['data', 'query', '--query', soql, '--use-tooling-api'],
       exec,
@@ -474,7 +614,7 @@ export const checkVaultStaleness = async (
       continue;
     }
     const totalSize =
-      (parsed.value as { result?: { totalSize?: number } }).result?.totalSize ?? 0;
+      (parsed.value.value as { result?: { totalSize?: number } }).result?.totalSize ?? 0;
     byType[type] = totalSize;
     checkedTypes.push(type);
     total += totalSize;
@@ -511,9 +651,19 @@ export const liveStaleCheckHandler = async (
   const { byType, checkedTypes, erroredTypes, driftCount: total } = stale.value;
 
   const orgAheadOfVault = stale.value.vaultStale;
+  // CR-09: each of the 15 STALE_CHECK_TYPES is now ONE budgeted live query, so a
+  // type can land in erroredTypes either because the org rejected the Tooling
+  // query OR because the per-session live-query budget ran out mid-loop. Name
+  // the un-checked types explicitly so a skipped type is never read as
+  // "not drifted". (The interpretation reports the REAL checkedTypes count
+  // rather than a hard-coded 6, which understated the 15 actually checked.)
+  const erroredNote =
+    erroredTypes.length > 0
+      ? ` ${erroredTypes.length} type(s) were not checked (${erroredTypes.join(', ')}) — the org rejected those Tooling queries, or the live-query budget ran out mid-check (raise SFI_LIVE_QUERY_BUDGET or start a new session and re-run).`
+      : '';
   const interpretation = orgAheadOfVault
-    ? `Org is AHEAD of the vault: ${total} component(s) across ${checkedTypes.length} checked type(s) were modified after the last refresh (${refreshedAt}). The vault — and any answer grounded in it — may be stale. Run /sfi-refresh.`
-    : `No drift detected for the checked types since ${refreshedAt}; the vault is current for ApexClass / ApexTrigger / ValidationRule / Layout / Flow / CustomField (other families not checked).`;
+    ? `Org is AHEAD of the vault: ${total} component(s) across ${checkedTypes.length} checked type(s) were modified after the last refresh (${refreshedAt}). The vault — and any answer grounded in it — may be stale. Run /sfi-refresh.${erroredNote}`
+    : `No drift detected for the ${checkedTypes.length} checked type(s) since ${refreshedAt}; other metadata families are not checked.${erroredNote}`;
 
   return ok({
     data: {
@@ -555,6 +705,20 @@ export interface LiveSampleOutput {
   /** Present only when rows were dropped to keep the response under the size
    *  limit (a wide projection), distinct from the SOQL row cap. */
   readonly note?: string;
+  /**
+   * Present when a WHERE picklist literal does not match any DEFINED picklist
+   * value on its field — an empty sample filtered on a non-existent value is a
+   * VALUE MISMATCH, not proof those records do not exist. Absent when every
+   * literal matches. See {@link LiveCountOutput.picklistMismatches}.
+   */
+  readonly picklistMismatches?: readonly PicklistLiteralMismatch[];
+  /**
+   * Present when a WHERE equality field could NOT be picklist-pre-validated
+   * because it is absent from the vault (a managed-package field the refresh did
+   * not retrieve, or a relationship path). An empty sample then is NOT proof
+   * those records do not exist. See {@link LiveCountOutput.picklistValidationGaps}.
+   */
+  readonly picklistValidationGaps?: readonly PicklistValidationGap[];
 }
 
 const capSampleSoql = (
@@ -579,9 +743,10 @@ export const liveSampleHandler = async (
   const org = resolveOrg(ctx, input.orgAlias);
   const queriedAt = new Date().toISOString();
   const soql = capSampleSoql(input.soql, limit);
-  const parsed = await runSfJson(org, ['data', 'query', '--query', soql], exec);
+  // CR-09: budgeted/cached sample read (one unit per org call / cache miss).
+  const parsed = await runLiveQuery(org, ['data', 'query', '--query', soql], exec);
   if (!parsed.ok) return parsed;
-  const payload = parsed.value as {
+  const payload = parsed.value.value as {
     result?: { records?: readonly unknown[]; totalSize?: number };
   };
   const fetched = payload.result?.records ?? [];
@@ -601,6 +766,7 @@ export const liveSampleHandler = async (
     records = records.slice(0, Math.floor(records.length * 0.8));
     byteTrimmed = true;
   }
+  const { mismatches, validationGaps } = await collectPicklistMismatches(ctx, soql);
   const data: LiveSampleOutput = {
     records,
     soql,
@@ -614,6 +780,10 @@ export const liveSampleHandler = async (
             `rows to stay within the size limit — narrow the SELECT (fewer fields) ` +
             `or lower \`limit\` to sample more rows at a time.`,
         }
+      : {}),
+    ...(mismatches.length > 0 ? { picklistMismatches: mismatches } : {}),
+    ...(validationGaps.length > 0
+      ? { picklistValidationGaps: validationGaps }
       : {}),
   };
   return ok({
@@ -741,16 +911,14 @@ export const liveOrgLimitsHandler = async (
   if (!gate.ok) return gate;
   const org = resolveOrg(ctx, input.orgAlias);
   const queriedAt = new Date().toISOString();
-  const authResult = await getLiveAuth(org, exec);
-  if (!authResult.ok) return authResult;
-  const limitsResult = await restGet(
-    authResult.value,
-    apiPath(authResult.value, '/limits'),
-  );
+  // CR-09: a USER-invoked REST limits read counts against the budget (one unit).
+  // (The INTERNAL budget cross-check in liveBudgetHandler stays on raw runSfJson
+  // so a budget CHECK never spends budget — see live-session.ts.)
+  const limitsResult = await runLiveRest(org, '/limits', exec);
   if (!limitsResult.ok) return limitsResult;
   return ok({
     data: {
-      limits: limitsResult.value,
+      limits: limitsResult.value.value,
       trust: liveTrust(queriedAt),
     },
     vaultState: {
@@ -919,9 +1087,12 @@ export const liveInactiveUsersHandler = async (
     `SELECT Id, Name, Username, UserType, Profile.Name, LastLoginDate ` +
     `FROM User WHERE ${where} ` +
     `ORDER BY LastLoginDate ASC NULLS FIRST LIMIT ${limit}`;
-  const parsed = await runSfJson(org, ['data', 'query', '--query', detailSoql], exec);
+  // CR-09: route the detail read through the budget too — the count above already
+  // routes via liveCountHandler, so this tool decrements by exactly 2 (count +
+  // detail), no residual bypass and no double-count.
+  const parsed = await runLiveQuery(org, ['data', 'query', '--query', detailSoql], exec);
   if (!parsed.ok) return parsed;
-  const payload = parsed.value as { result?: { records?: readonly UserRow[] } };
+  const payload = parsed.value.value as { result?: { records?: readonly UserRow[] } };
   const rows = payload.result?.records ?? [];
 
   const users: InactiveUser[] = rows.map((r) => {
@@ -1124,22 +1295,23 @@ export const liveLicenseUsageHandler = async (
   const limit = input.limit ?? MAX_RECLAIM_ROWS;
   const cutoff = soqlDateTime(new Date(Date.now() - inactiveDays * MS_PER_DAY));
 
-  const licRes = await runSfJson(
+  // CR-09: all three license reads route through the budget (decrements 3).
+  const licRes = await runLiveQuery(
     org,
     ['data', 'query', '--query', 'SELECT Name, Status, TotalLicenses, UsedLicenses FROM UserLicense ORDER BY Name'],
     exec,
   );
   if (!licRes.ok) return licRes;
-  const licPayload = licRes.value as { result?: { records?: readonly LicenseRow[] } };
+  const licPayload = licRes.value.value as { result?: { records?: readonly LicenseRow[] } };
   const licenseUtilization = toUtilization(licPayload.result?.records ?? [], 'Name');
 
-  const pslRes = await runSfJson(
+  const pslRes = await runLiveQuery(
     org,
     ['data', 'query', '--query', 'SELECT MasterLabel, Status, TotalLicenses, UsedLicenses FROM PermissionSetLicense ORDER BY MasterLabel'],
     exec,
   );
   if (!pslRes.ok) return pslRes;
-  const pslPayload = pslRes.value as { result?: { records?: readonly LicenseRow[] } };
+  const pslPayload = pslRes.value.value as { result?: { records?: readonly LicenseRow[] } };
   const permissionSetLicenseUtilization = toUtilization(
     pslPayload.result?.records ?? [],
     'MasterLabel',
@@ -1152,9 +1324,9 @@ export const liveLicenseUsageHandler = async (
     `WHERE IsActive = true AND UserType = 'Standard' ` +
     `AND (LastLoginDate < ${cutoff} OR LastLoginDate = null) ` +
     `GROUP BY Profile.UserLicense.Name ORDER BY COUNT(Id) DESC`;
-  const reclaimRes = await runSfJson(org, ['data', 'query', '--query', reclaimSoql], exec);
+  const reclaimRes = await runLiveQuery(org, ['data', 'query', '--query', reclaimSoql], exec);
   if (!reclaimRes.ok) return reclaimRes;
-  const reclaimPayload = reclaimRes.value as {
+  const reclaimPayload = reclaimRes.value.value as {
     result?: { records?: readonly ReclaimRow[] };
   };
   const reclaimRows = reclaimPayload.result?.records ?? [];
@@ -1296,15 +1468,29 @@ interface LiveQueryResult {
   readonly reason?: string;
 }
 
-/** Run a SOQL query, converting any failure into `available:false` (never throws). */
+/**
+ * Run a SOQL query, converting any failure into `available:false` (never throws).
+ *
+ * CR-09: routes through the budgeted/cached seam {@link runLiveQuery}, so every
+ * one of the ~31 Wave-1 sites that flow through this helper (group_count,
+ * stale_records, recent_activity, aggregate, duplicate_check, owner_breakdown,
+ * report_usage, folder_access, email_template_usage, org_health SOQL signals,
+ * data_skew, setup_audit_trail, security_exposure) decrements the per-session
+ * budget exactly once per org query / cache miss. A budget-exhausted stop is
+ * surfaced as a normal `available:false` with the budget reason, so the existing
+ * per-signal graceful-degrade (org_health/security_exposure) and the hard-fail
+ * handlers (which wrap the reason in UNAVAILABLE_ERROR) stay legible rather than
+ * 500-ing. The {available, records, total, reason} shape is byte-identical to
+ * before.
+ */
 const liveQuery = async (
   org: string,
   soql: string,
   exec: ExecCommand,
 ): Promise<LiveQueryResult> => {
-  const r = await runSfJson(org, ['data', 'query', '--query', soql], exec);
+  const r = await runLiveQuery(org, ['data', 'query', '--query', soql], exec);
   if (!r.ok) return { available: false, records: [], total: 0, reason: r.error.message };
-  const p = r.value as {
+  const p = r.value.value as {
     result?: { records?: Record<string, unknown>[]; totalSize?: number };
   };
   return {
@@ -1331,6 +1517,22 @@ const UNAVAILABLE_ERROR = (object: string, org: string, reason?: string): McpErr
     `The ${object} object is not queryable in '${org}' (it may be disabled for this edition/feature). ` +
     (reason ? `Underlying: ${redactSecrets(reason).slice(0, 120)}` : ''),
 });
+
+/**
+ * CR-09 budget legibility: detect a per-session budget-exhaustion reason coming
+ * back from a graceful `liveQuery` (available:false). A multi-signal tool
+ * (org_health, security_exposure) swallows available:false into null/n-a, which
+ * would otherwise make a budget STOP indistinguishable from "object not
+ * queryable for this edition". When this returns true the tool must name the
+ * budget in a distinct boundary signal rather than silently dropping the signal.
+ * The probe matches the actionable phrase budgetExceededError emits.
+ */
+const isBudgetExhaustedReason = (reason?: string): boolean =>
+  reason !== undefined && /live-query budget exhausted/i.test(reason);
+
+/** The user-facing boundary line for a mid-tool budget stop in a graceful tool. */
+const BUDGET_SIGNAL =
+  'Live-query budget exhausted mid-read — one or more signals were skipped (shown as n/a, NOT zero). Raise SFI_LIVE_QUERY_BUDGET or start a new session, then re-run.';
 
 /** Reject SOQL injection — only simple unqualified API names (Object, Field__c). */
 export const assertSoqlIdentifier = (
@@ -1949,6 +2151,10 @@ export const liveOwnerBreakdownHandler = async (
     .map((row) => String((row as Record<string, unknown>).OwnerId ?? ''))
     .filter((id) => id.length > 0);
   const nameById = new Map<string, string>();
+  // CR-09: the two count queries above hard-fail (their budget reason surfaces
+  // through UNAVAILABLE_ERROR). The name-resolution queries below degrade
+  // silently to ownerId-only — track a budget stop so it is named, not hidden.
+  let nameResolutionBudgetStopped = false;
   if (ownerIds.length > 0) {
     const inList = ownerIds.map((id) => soqlLiteral(id)).join(',');
     const userQ = await liveQuery(org, `SELECT Id, Name FROM User WHERE Id IN (${inList})`, exec);
@@ -1957,6 +2163,8 @@ export const liveOwnerBreakdownHandler = async (
         const r = row as Record<string, unknown>;
         nameById.set(String(r.Id ?? ''), String(r.Name ?? ''));
       }
+    } else if (isBudgetExhaustedReason(userQ.reason)) {
+      nameResolutionBudgetStopped = true;
     }
     const unresolved = ownerIds.filter((id) => !nameById.has(id));
     if (unresolved.length > 0) {
@@ -1967,6 +2175,8 @@ export const liveOwnerBreakdownHandler = async (
           const r = row as Record<string, unknown>;
           nameById.set(String(r.Id ?? ''), String(r.Name ?? ''));
         }
+      } else if (isBudgetExhaustedReason(groupQ.reason)) {
+        nameResolutionBudgetStopped = true;
       }
     }
   }
@@ -1986,7 +2196,9 @@ export const liveOwnerBreakdownHandler = async (
     owners.slice(0, LIVE_TABLE_ROW_CAP).map((o) => [o.ownerName ?? o.ownerId, o.count]),
   );
   const rendered =
-    `**${totalQ.total.toLocaleString('en-US')}** ${objectName} records across **${owners.length}** owners (top shown).\n\n${table}\n\n${renderTrustFooter(trust)}`;
+    `**${totalQ.total.toLocaleString('en-US')}** ${objectName} records across **${owners.length}** owners (top shown).` +
+    (nameResolutionBudgetStopped ? `\n\n> ${BUDGET_SIGNAL} Owner names show as IDs.` : '') +
+    `\n\n${table}\n\n${renderTrustFooter(trust)}`;
   return ok({
     data: {
       objectApiName: objectName,
@@ -2038,6 +2250,13 @@ export interface LiveReportUsageOutput {
   readonly capped: boolean;
   readonly reports: readonly ReportUsageEntry[];
   readonly trust: TrustSummary;
+  /**
+   * CR-P3-7: true when the live-query budget ran out on the stale-count or
+   * detail query (after the gated COUNT succeeded). When true the staleReports
+   * count is a partial floor, not an authoritative verdict, and `rendered`
+   * surfaces the stop instead of a false clean "0 of N are stale".
+   */
+  readonly budgetStopped: boolean;
   readonly rendered: string;
 }
 
@@ -2085,9 +2304,25 @@ export const liveReportUsageHandler = async (
     ['Report', 'Folder', 'Last run', 'Days', 'Stale'],
     reports.map((r) => [r.name, r.folderName ?? '—', r.lastRunDate ?? 'never', r.daysSinceRun ?? '—', r.stale ? 'yes' : '']),
   );
+  // CR-P3-7: the stale-count (verdict) and detail queries are NOT gated like
+  // totalQ; a mid-tool budget stop returns total:0 with the budget reason, which
+  // would otherwise render a FALSE CLEAN "0 of N are stale". Detect the stop on
+  // either un-gated query and qualify the headline accordingly.
+  const budgetStopped =
+    isBudgetExhaustedReason(staleQ.reason) ||
+    isBudgetExhaustedReason(detailQ.reason);
+  // When the budget stopped before the stale count completed, the count is NOT a
+  // clean zero — render it as `n/a` (partial), never a literal authoritative 0
+  // (which would contradict BUDGET_SIGNAL's own "shown as n/a, NOT zero").
+  const staleHeadline = budgetStopped
+    ? `Stale-report count is **n/a** (partial) of ${totalQ.total.toLocaleString('en-US')} reports`
+    : `**${staleQ.total.toLocaleString('en-US')}** of ${totalQ.total.toLocaleString('en-US')} reports are stale`;
   const rendered =
-    `**${staleQ.total.toLocaleString('en-US')}** of ${totalQ.total.toLocaleString('en-US')} reports are stale ` +
-    `(not run in ${staleDays} days, or never).\n\n${table}\n\n${renderTrustFooter(trust)}`;
+    `${staleHeadline} (not run in ${staleDays} days, or never).` +
+    (budgetStopped
+      ? `\n\n> ${BUDGET_SIGNAL} The stale-report count is a partial floor, not a clean zero — the budget stopped before the count query completed.`
+      : '') +
+    `\n\n${table}\n\n${renderTrustFooter(trust)}`;
   return ok({
     data: {
       totalReports: totalQ.total,
@@ -2097,6 +2332,7 @@ export const liveReportUsageHandler = async (
       capped: totalQ.total > reports.length,
       reports,
       trust,
+      budgetStopped,
       rendered,
     },
     vaultState: livePlaneVaultState(ctx),
@@ -2135,6 +2371,12 @@ export interface LiveFolderAccessOutput {
   readonly capped: boolean;
   readonly folders: readonly FolderAccessEntry[];
   readonly trust: TrustSummary;
+  /**
+   * CR-P3-8: true when the live-query budget ran out on the (un-gated) total
+   * COUNT after the gated detail query succeeded. The folder total then falls
+   * back to the returned-set size (an understatement); `rendered` names the stop.
+   */
+  readonly budgetStopped: boolean;
   readonly rendered: string;
 }
 
@@ -2159,6 +2401,10 @@ export const liveFolderAccessHandler = async (
   );
   if (!detailQ.available) return err(UNAVAILABLE_ERROR('Folder', org, detailQ.reason));
   const totalQ = await liveQuery(org, `SELECT COUNT() FROM Folder${typeClause}`, exec);
+  // CR-P3-8: totalQ is NOT gated; a mid-tool budget stop makes totalQ.total=0,
+  // silently understating the universe (the verdict publicFolders is from the
+  // gated detail rows and stays correct). Surface the stop.
+  const budgetStopped = isBudgetExhaustedReason(totalQ.reason);
 
   const rows = detailQ.records as readonly FolderRow[];
   const byAccessType: Record<string, number> = {};
@@ -2183,7 +2429,11 @@ export const liveFolderAccessHandler = async (
   );
   const rendered =
     `${(totalQ.total || folders.length).toLocaleString('en-US')} folders — ` +
-    `**${publicFolders}** in the returned set are publicly accessible.\n\n${table}\n\n${renderTrustFooter(trust)}`;
+    `**${publicFolders}** in the returned set are publicly accessible.` +
+    (budgetStopped
+      ? `\n\n> ${BUDGET_SIGNAL} Folder total is the returned set only, not the full count.`
+      : '') +
+    `\n\n${table}\n\n${renderTrustFooter(trust)}`;
   return ok({
     data: {
       totalFolders: totalQ.total || folders.length,
@@ -2193,6 +2443,7 @@ export const liveFolderAccessHandler = async (
       capped: (totalQ.total || folders.length) > folders.length,
       folders,
       trust,
+      budgetStopped,
       rendered,
     },
     vaultState: livePlaneVaultState(ctx),
@@ -2241,6 +2492,12 @@ export interface LiveEmailTemplateUsageOutput {
   readonly capped: boolean;
   readonly templates: readonly TemplateUsageEntry[];
   readonly trust: TrustSummary;
+  /**
+   * CR-P3-8: true when the live-query budget ran out on the (un-gated) total
+   * COUNT after the gated detail query succeeded. The template total then falls
+   * back to the returned-set size; `rendered` names the stop.
+   */
+  readonly budgetStopped: boolean;
   readonly rendered: string;
 }
 
@@ -2263,6 +2520,10 @@ export const liveEmailTemplateUsageHandler = async (
   );
   if (!detailQ.available) return err(UNAVAILABLE_ERROR('EmailTemplate', org, detailQ.reason));
   const totalQ = await liveQuery(org, 'SELECT COUNT() FROM EmailTemplate', exec);
+  // CR-P3-8: totalQ is NOT gated; a mid-tool budget stop makes totalQ.total=0,
+  // understating the total (classic/migration verdicts come from the gated
+  // detail rows and stay correct). Surface the stop.
+  const budgetStopped = isBudgetExhaustedReason(totalQ.reason);
 
   const rows = detailQ.records as readonly TemplateRow[];
   let classicTemplates = 0;
@@ -2298,7 +2559,11 @@ export const liveEmailTemplateUsageHandler = async (
   const rendered =
     `${(totalQ.total || templates.length).toLocaleString('en-US')} email templates — ` +
     `**${classicTemplates}** Classic, **${migrationCandidates}** are migration candidates ` +
-    `(Classic + unused/stale > ${staleDays}d).\n\n${table}\n\n${renderTrustFooter(trust)}`;
+    `(Classic + unused/stale > ${staleDays}d).` +
+    (budgetStopped
+      ? `\n\n> ${BUDGET_SIGNAL} Template total is the returned set only.`
+      : '') +
+    `\n\n${table}\n\n${renderTrustFooter(trust)}`;
   return ok({
     data: {
       totalTemplates: totalQ.total || templates.length,
@@ -2309,6 +2574,7 @@ export const liveEmailTemplateUsageHandler = async (
       capped: (totalQ.total || templates.length) > templates.length,
       templates,
       trust,
+      budgetStopped,
       rendered,
     },
     vaultState: livePlaneVaultState(ctx),
@@ -2373,30 +2639,38 @@ export const liveOrgHealthHandler = async (
     exec,
   );
 
-  // Governor limits via REST (reuse the live_org_limits path).
+  // Governor limits via REST — CR-09: budgeted (one unit) and resilient. A
+  // budget-exhausted REST read just skips the limits signal (like an auth
+  // failure already does) and is flagged below, never a hard 500.
   const limitsAtRisk: LimitAtRisk[] = [];
-  const authResult = await getLiveAuth(org, exec);
-  if (authResult.ok) {
-    const limitsResult = await restGet(authResult.value, apiPath(authResult.value, '/limits'));
-    if (limitsResult.ok && limitsResult.value && typeof limitsResult.value === 'object') {
-      for (const [name, v] of Object.entries(limitsResult.value as Record<string, unknown>)) {
-        const lv = v as { Max?: number; Remaining?: number };
-        if (typeof lv.Max === 'number' && typeof lv.Remaining === 'number' && lv.Max > 0) {
-          const usedPct = (lv.Max - lv.Remaining) / lv.Max;
-          if (usedPct >= LIMIT_RISK_THRESHOLD) {
-            limitsAtRisk.push({ name, max: lv.Max, remaining: lv.Remaining, usedPct: Math.round(usedPct * 1000) / 1000 });
-          }
+  const limitsRest = await runLiveRest(org, '/limits', exec);
+  const limitsBudgetStopped = !limitsRest.ok && /live-query budget exhausted/i.test(limitsRest.error.message);
+  if (limitsRest.ok && limitsRest.value.value && typeof limitsRest.value.value === 'object') {
+    for (const [name, v] of Object.entries(limitsRest.value.value as Record<string, unknown>)) {
+      const lv = v as { Max?: number; Remaining?: number };
+      if (typeof lv.Max === 'number' && typeof lv.Remaining === 'number' && lv.Max > 0) {
+        const usedPct = (lv.Max - lv.Remaining) / lv.Max;
+        if (usedPct >= LIMIT_RISK_THRESHOLD) {
+          limitsAtRisk.push({ name, max: lv.Max, remaining: lv.Remaining, usedPct: Math.round(usedPct * 1000) / 1000 });
         }
       }
-      limitsAtRisk.sort((a, b) => b.usedPct - a.usedPct);
     }
+    limitsAtRisk.sort((a, b) => b.usedPct - a.usedPct);
   }
 
   const failedAsyncJobs = failedQ.available ? failedQ.total : null;
   const pendingAsyncJobs = pendingQ.available ? pendingQ.total : null;
   const pausedFlowInterviews = pausedQ.available ? pausedQ.total : null;
 
+  // CR-09: a budget stop on ANY signal must be legible, not a silent null/skip.
+  const budgetStopped =
+    limitsBudgetStopped ||
+    isBudgetExhaustedReason(failedQ.reason) ||
+    isBudgetExhaustedReason(pendingQ.reason) ||
+    isBudgetExhaustedReason(pausedQ.reason);
+
   const signals: string[] = [];
+  if (budgetStopped) signals.push(BUDGET_SIGNAL);
   if (failedAsyncJobs && failedAsyncJobs > 0) signals.push(`${failedAsyncJobs} failed async job(s) in the last ${days} days`);
   if (pausedFlowInterviews && pausedFlowInterviews > 0) signals.push(`${pausedFlowInterviews} paused flow interview(s)`);
   for (const l of limitsAtRisk.slice(0, 5)) signals.push(`${l.name} at ${Math.round(l.usedPct * 100)}% of limit`);
@@ -2464,11 +2738,12 @@ export const liveStorageByObjectHandler = async (
   const org = gate.value;
   const queriedAt = new Date().toISOString();
   const limit = input.limit ?? 50;
-  const authResult = await getLiveAuth(org, exec);
-  if (!authResult.ok) return authResult;
-  const result = await restGet(authResult.value, apiPath(authResult.value, '/limits/recordCount'));
-  if (!result.ok) return err(UNAVAILABLE_ERROR('record count', org));
-  const payload = result.value as { sObjects?: { name?: string; count?: number }[] };
+  // CR-09: a USER-invoked REST recordCount read counts against the budget (one
+  // unit). A budget-exhausted stop surfaces its reason through UNAVAILABLE_ERROR
+  // so the user sees "budget", not a bare "not queryable".
+  const result = await runLiveRest(org, '/limits/recordCount', exec);
+  if (!result.ok) return err(UNAVAILABLE_ERROR('record count', org, result.error.message));
+  const payload = result.value.value as { sObjects?: { name?: string; count?: number }[] };
   let all = (payload.sObjects ?? [])
     .map((o) => ({ name: String(o.name ?? ''), count: Number(o.count ?? 0) }))
     .filter((o) => o.name.length > 0);
@@ -2610,6 +2885,12 @@ export interface LiveSetupAuditTrailOutput {
   readonly capped: boolean;
   readonly changes: readonly SetupChange[];
   readonly trust: TrustSummary;
+  /**
+   * CR-P3-8: true when the live-query budget ran out on the (un-gated) detail
+   * query after the gated COUNT succeeded. The change table is then silently
+   * empty while totalChanges is exact; `rendered` names the partial.
+   */
+  readonly budgetStopped: boolean;
   readonly rendered: string;
 }
 
@@ -2635,6 +2916,10 @@ export const liveSetupAuditTrailHandler = async (
     `SELECT Action, Section, CreatedDate, Display, CreatedBy.Name FROM SetupAuditTrail WHERE CreatedDate = LAST_N_DAYS:${days} ORDER BY CreatedDate DESC LIMIT ${limit}`,
     exec,
   );
+  // CR-P3-8: detailQ is NOT gated; a mid-tool budget stop yields zero rows so
+  // the change TABLE is silently empty while totalChanges (from the gated count)
+  // is non-zero. Surface the partial.
+  const budgetStopped = isBudgetExhaustedReason(detailQ.reason);
   const changes: SetupChange[] = detailQ.records.map((row) => {
     const r = row as Record<string, unknown>;
     const by = r['CreatedBy'] as { Name?: string } | null | undefined;
@@ -2652,7 +2937,11 @@ export const liveSetupAuditTrailHandler = async (
     changes.slice(0, LIVE_TABLE_ROW_CAP).map((c) => [c.createdDate ?? '—', c.by ?? '—', c.section ?? '—', c.action]),
   );
   const rendered =
-    `**${totalQ.total.toLocaleString('en-US')}** Setup changes in the last ${days} days.\n\n${table}\n\n${renderTrustFooter(trust)}`;
+    `**${totalQ.total.toLocaleString('en-US')}** Setup changes in the last ${days} days.` +
+    (budgetStopped
+      ? `\n\n> ${BUDGET_SIGNAL} The change table is partial; the count is exact.`
+      : '') +
+    `\n\n${table}\n\n${renderTrustFooter(trust)}`;
   return ok({
     data: {
       days,
@@ -2661,6 +2950,7 @@ export const liveSetupAuditTrailHandler = async (
       capped: totalQ.total > changes.length,
       changes,
       trust,
+      budgetStopped,
       rendered,
     },
     vaultState: livePlaneVaultState(ctx),
@@ -2709,7 +2999,17 @@ export const liveSecurityExposureHandler = async (
   const usersWithModifyAll = usersModifyAllQ.available ? usersModifyAllQ.total : null;
   const activeUsers = activeUsersQ.available ? activeUsersQ.total : null;
 
+  // CR-09: a budget stop on ANY of the 5 signals must be legible — otherwise a
+  // null reads as "PermissionSet not queryable" and silently understates risk.
+  const budgetStopped =
+    isBudgetExhaustedReason(modifyAllQ.reason) ||
+    isBudgetExhaustedReason(viewAllQ.reason) ||
+    isBudgetExhaustedReason(authorApexQ.reason) ||
+    isBudgetExhaustedReason(usersModifyAllQ.reason) ||
+    isBudgetExhaustedReason(activeUsersQ.reason);
+
   const signals: string[] = [];
+  if (budgetStopped) signals.push(BUDGET_SIGNAL);
   if (modifyAllGrants) signals.push(`${modifyAllGrants} permission set(s) grant Modify All Data`);
   if (usersWithModifyAll) signals.push(`${usersWithModifyAll} user assignment(s) carry Modify All Data`);
   if (viewAllGrants) signals.push(`${viewAllGrants} permission set(s) grant View All Data`);

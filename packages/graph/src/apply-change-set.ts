@@ -3,11 +3,14 @@ import type { ComponentType, Edge, ExtractionResult, Node } from '@sf-intelligen
 import { err, ok, type Result } from '@sf-intelligence/core';
 
 import {
+  buildMultiRowUpsertSql,
   canonicalizeApexCallEdgeTargets,
+  EDGE_COLUMN_COUNT,
   edgeRowParams,
-  INSERT_NODE_SQL,
+  IMPORT_BATCH_SIZE,
+  mintFutureDispatchEdges,
+  NODE_COLUMN_COUNT,
   nodeRowParams,
-  REPLACE_EDGE_SQL,
 } from './import.js';
 import type { GraphError, GraphStore } from './store.js';
 
@@ -209,12 +212,30 @@ export const computeChangeSet = async (
   // GRF-01: mirror cold import — canonicalize Apex call targets before the
   // first-writer-wins dedupe so incremental apply matches full rebuild.
   canonicalizeApexCallEdgeTargets([...desiredNodes.values()], desiredEdgeList);
+  // CR-CAP-09: mirror cold import — mint class-granular @future dispatchesAsync
+  // edges after canonicalize. INCREMENTAL GAP: this only sees the change-set's
+  // node view (`desiredNodes`), so a future-holding target class outside the
+  // change set is invisible and under-mints vs a full refresh; full
+  // `/sfi-refresh` is the ground truth. Run before the PK dedupe so the minted
+  // edges participate in the same first-writer-wins collapse.
+  mintFutureDispatchEdges([...desiredNodes.values()], desiredEdgeList);
   const desiredEdges = new Map<string, Edge>();
   for (const edge of desiredEdgeList) {
     const pk = edgePk(edge.fromId, edge.toId, edge.edgeType, edge.source);
     if (!desiredEdges.has(pk)) desiredEdges.set(pk, edge);
   }
   const finalNodeIds = new Set<string>(desiredNodes.keys());
+
+  // CR-P3-1: the set of extractor `source`s that actually re-ran this reconcile,
+  // derived ONLY from the desired edges (an extractor that produced no results
+  // for this scoped pull contributes none). A static type→source map is NOT
+  // usable: sources are not 1:1 with types (flow-extractor spans
+  // Flow→{CustomObject,ApexClass,CustomField}; custom-field.ts emits parentOf
+  // with fromId=CustomObject but source=custom-field-extractor). Used below to
+  // preserve an absent-from-desired edge whose emitter did not re-run when both
+  // endpoints survive (the headline inbound-cross-extractor data-loss fix).
+  const reRanSources = new Set<string>();
+  for (const e of desiredEdges.values()) reRanSources.add(e.source);
 
   let currentNodeKeys: Map<string, string>;
   let currentEdges: Map<string, CurrentEdge>;
@@ -243,6 +264,9 @@ export const computeChangeSet = async (
     }
     deleteNodeIds.push(id);
   }
+  // CR-P3-1: set form of the just-computed node deletes, used by the edge loop's
+  // orphan clause to drop edges incident to a deleted node.
+  const deleteNodeSet = new Set<string>(deleteNodeIds);
 
   const upsertEdges: Edge[] = [];
   for (const [pk, edge] of desiredEdges) {
@@ -252,13 +276,30 @@ export const computeChangeSet = async (
   const deleteEdgeKeys: EdgeKey[] = [];
   for (const [pk, current] of currentEdges) {
     if (desiredEdges.has(pk)) continue;
+    // CR-P3-1 HYBRID criterion (scoped/pruned path only — gated on
+    // pruneNodeTypes set). Delete an absent-from-desired edge IFF (i) it is
+    // incident to a DELETED node, OR (ii) its emitting source RE-RAN this
+    // reconcile AND it touches a pruned type. The plain `touchesPrunedType`
+    // guard alone silently deleted an inbound cross-extractor edge (e.g.
+    // QuickAction:N→Flow:Y) on `sfi refresh --types Flow` even though both
+    // endpoints survived and its emitter never re-ran. The whole-graph
+    // (--incremental-graph) path leaves pruneNodeTypes undefined and is
+    // UNCHANGED: every absent edge is deleted there as before.
     if (pruneNodeTypes !== undefined) {
-      const fromType = componentTypeFromNodeId(current.edgeKey.fromId);
-      const toType = componentTypeFromNodeId(current.edgeKey.toId);
-      const touchesPrunedType =
-        (fromType !== null && pruneNodeTypes.has(fromType)) ||
-        (toType !== null && pruneNodeTypes.has(toType));
-      if (!touchesPrunedType) continue;
+      const { fromId, toId, source } = current.edgeKey;
+      const incidentToDeletedNode = deleteNodeSet.has(fromId) || deleteNodeSet.has(toId);
+      if (!incidentToDeletedNode) {
+        const fromType = componentTypeFromNodeId(fromId);
+        const toType = componentTypeFromNodeId(toId);
+        const touchesPrunedType =
+          (fromType !== null && pruneNodeTypes.has(fromType)) ||
+          (toType !== null && pruneNodeTypes.has(toType));
+        const sourceReRan = reRanSources.has(source);
+        // Preserve (req #1): not an orphan and not a genuinely-stale same-source
+        // edge. The type-gate conjunct neutralizes a source shared across types
+        // (e.g. vf-scanner over VisualforcePage + VisualforceComponent).
+        if (!(sourceReRan && touchesPrunedType)) continue;
+      }
     }
     deleteEdgeKeys.push(current.edgeKey);
   }
@@ -272,6 +313,41 @@ export const computeChangeSet = async (
     desiredNodeCount: desiredNodes.size,
     desiredEdgeCount: desiredEdges.size,
   });
+};
+
+/**
+ * Upsert `rows` into `table` via multi-row `INSERT OR REPLACE` statements,
+ * chunked at {@link IMPORT_BATCH_SIZE}. Each chunk is ONE `connection.run` (a
+ * statement of `chunk.length` value-tuples with flattened positional params),
+ * issued on the connection the caller has ALREADY put in an open transaction.
+ *
+ * This is the CR-20 Part-1 batching: it replaces the row-at-a-time upsert loops
+ * but deliberately does NOT begin/commit anything — atomicity stays with the
+ * single transaction `applyChangeSet` owns. (Contrast cold import's
+ * `commitBatched`, which commits per chunk; adopting that here would break the
+ * documented all-or-nothing invariant.) Chunking still bounds the in-flight
+ * write buffer per statement, the same reason `IMPORT_BATCH_SIZE` exists.
+ *
+ * Insertion order is preserved: chunks run in array order and each multi-row
+ * statement binds rows in array order, so the end state matches a row-at-a-time
+ * apply (and a cold rebuild) byte-for-byte under last-writer-wins on the PK.
+ */
+const upsertRowsChunked = async <T>(
+  connection: DuckDBConnection,
+  table: 'nodes' | 'edges',
+  columnCount: number,
+  rows: readonly T[],
+  rowParams: (row: T) => readonly unknown[],
+): Promise<void> => {
+  for (let start = 0; start < rows.length; start += IMPORT_BATCH_SIZE) {
+    const chunk = rows.slice(start, start + IMPORT_BATCH_SIZE);
+    const sql = buildMultiRowUpsertSql(table, columnCount, chunk.length);
+    const params: unknown[] = [];
+    for (const row of chunk) {
+      for (const p of rowParams(row)) params.push(p);
+    }
+    await connection.run(sql, params as never);
+  }
 };
 
 const scalarCount = async (
@@ -324,21 +400,33 @@ export const applyChangeSet = async (
     // Order: delete edges, delete nodes, upsert nodes, upsert edges. Deletes
     // first keeps the working set small; node upserts before edge upserts so an
     // edge's freshly-added target node already exists when the edge is written.
+    //
+    // CR-20 Part 1: the two upsert loops are batched into multi-row statements
+    // (one `connection.run` per IMPORT_BATCH_SIZE chunk) to cut the per-row
+    // round-trips on a large diff — still inside this single transaction, so the
+    // all-or-nothing invariant is unchanged. Deletes stay per-row: the volume
+    // lives in the upserts, and a row-at-a-time delete is the simplest exact-PK
+    // guarantee (the composite edge key has four columns).
     for (const k of changeSet.deleteEdgeKeys) {
       await connection.run(DELETE_EDGE_SQL, [k.fromId, k.toId, k.edgeType, k.source]);
     }
     for (const id of changeSet.deleteNodeIds) {
       await connection.run(DELETE_NODE_SQL, [id]);
     }
-    for (const node of changeSet.upsertNodes) {
-      await connection.run(INSERT_NODE_SQL, nodeRowParams(node));
-    }
-    for (const edge of changeSet.upsertEdges) {
-      await connection.run(
-        REPLACE_EDGE_SQL,
-        edgeRowParams(edge, changeSet.finalNodeIds),
-      );
-    }
+    await upsertRowsChunked(
+      connection,
+      'nodes',
+      NODE_COLUMN_COUNT,
+      changeSet.upsertNodes,
+      nodeRowParams,
+    );
+    await upsertRowsChunked(
+      connection,
+      'edges',
+      EDGE_COLUMN_COUNT,
+      changeSet.upsertEdges,
+      (edge) => edgeRowParams(edge, changeSet.finalNodeIds),
+    );
 
     const nodeCount = await scalarCount(connection, 'nodes');
     const edgeCount = await scalarCount(connection, 'edges');
@@ -370,4 +458,103 @@ export const applyChangeSet = async (
       message: `applyChangeSet: ${(e as Error).message}; transaction rolled back`,
     });
   }
+};
+
+/** Per-prune summary: how many stale nodes/edges the scoped prune dropped. */
+export interface PruneCounts {
+  readonly nodesDeleted: number;
+  readonly edgesDeleted: number;
+}
+
+/**
+ * Prune ONLY the stale rows a scoped/partial reconcile produced — the delete
+ * lists of a change set built with `computeChangeSet(..., { pruneNodeTypes })`.
+ *
+ * This is the CR-20 Part-2 path for the scoped/pruned WITH-PULL refresh, where
+ * `importExtractionResults` has ALREADY persisted the reconciled type's fresh
+ * rows; all that remains is dropping the stale rows of the reconciled types.
+ *
+ * It deliberately does NOT route through {@link applyChangeSet}: that function's
+ * post-apply self-check compares the GLOBAL `count(nodes)`/`count(edges)` to the
+ * change set's `desiredNodeCount`/`desiredEdgeCount`, which `computeChangeSet`
+ * derives ONLY from the reconciled subset (`results`). On any multi-type graph
+ * the global count is larger than the reconciled-only desired count, so the
+ * self-check trips, rolls back, and leaves the stale rows orphaned (and the CLI
+ * branch hard-fails). `pruneStaleNodes` sidesteps the whole-graph self-check
+ * entirely and only executes the already-type-scoped DELETEs:
+ *   - `deleteNodeIds` holds only current nodes whose type ∈ `pruneNodeTypes` and
+ *     that the reconcile no longer contains, so surviving types are never in it.
+ *   - `deleteEdgeKeys` (CR-P3-1 hybrid criterion) holds an absent-from-desired
+ *     edge ONLY when it is incident to a deleted node OR its emitting source
+ *     re-ran this reconcile AND it touches a pruned type. So it covers the
+ *     pruned nodes' orphan edges and genuinely-stale same-source edges, but
+ *     NEVER an inbound cross-extractor edge whose emitter did not re-run while
+ *     both endpoints survive (the silent-data-loss class CR-P3-1 fixed).
+ *
+ * The DELETEs run in {@link IMPORT_BATCH_SIZE}-sized transactions (the proven
+ * cold-import batched-commit pattern). That bounds the in-flight working set, so
+ * an OVER-`INCREMENTAL_DELTA_CAP` prune is still safe to run in full — on this
+ * branch the cap is therefore informational only: over-cap STILL prunes (never
+ * no-ops, never falls back to a whole-graph rebuild that would defeat the scope).
+ *
+ * Atomicity is per batch, not per call (matching `commitBatched`). The upserts
+ * were already committed by `importExtractionResults`; these deletes only remove
+ * orphans, and a re-run re-issues the same idempotent DELETEs, so a mid-prune
+ * failure leaves a coherent (if not-yet-fully-pruned) graph that the next
+ * refresh finishes.
+ */
+export const pruneStaleNodes = async (
+  store: GraphStore,
+  changeSet: ChangeSet,
+): Promise<Result<PruneCounts, GraphError>> => {
+  const { connection } = store;
+
+  // Edges first so a node's incident edges are gone before the node row, then
+  // nodes. Both batched at IMPORT_BATCH_SIZE, each batch in its own transaction.
+  for (let start = 0; start < changeSet.deleteEdgeKeys.length; start += IMPORT_BATCH_SIZE) {
+    const batch = changeSet.deleteEdgeKeys.slice(start, start + IMPORT_BATCH_SIZE);
+    try {
+      await connection.run('BEGIN TRANSACTION;');
+      for (const k of batch) {
+        await connection.run(DELETE_EDGE_SQL, [k.fromId, k.toId, k.edgeType, k.source]);
+      }
+      await connection.run('COMMIT;');
+    } catch (e) {
+      try {
+        await connection.run('ROLLBACK;');
+      } catch {
+        // Swallow; the original error is what the caller needs to see.
+      }
+      return err({
+        kind: 'query-failed',
+        message: `pruneStaleNodes: failed deleting stale edges: ${(e as Error).message}`,
+      });
+    }
+  }
+
+  for (let start = 0; start < changeSet.deleteNodeIds.length; start += IMPORT_BATCH_SIZE) {
+    const batch = changeSet.deleteNodeIds.slice(start, start + IMPORT_BATCH_SIZE);
+    try {
+      await connection.run('BEGIN TRANSACTION;');
+      for (const id of batch) {
+        await connection.run(DELETE_NODE_SQL, [id]);
+      }
+      await connection.run('COMMIT;');
+    } catch (e) {
+      try {
+        await connection.run('ROLLBACK;');
+      } catch {
+        // Swallow; the original error is what the caller needs to see.
+      }
+      return err({
+        kind: 'query-failed',
+        message: `pruneStaleNodes: failed deleting stale nodes: ${(e as Error).message}`,
+      });
+    }
+  }
+
+  return ok({
+    nodesDeleted: changeSet.deleteNodeIds.length,
+    edgesDeleted: changeSet.deleteEdgeKeys.length,
+  });
 };

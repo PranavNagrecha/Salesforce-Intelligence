@@ -21,6 +21,21 @@
  * callers whose call-sites would actually compile-fail under the new
  * signature; v2.3 flags every caller for human review.
  *
+ * **CR-CAP-06 caller-method enrichment (additive, does NOT narrow the
+ * verdict).** When a caller's `callsApex` edge was AST-extracted
+ * (`source: 'apex-ast'`), it carries `callerMethodsByMethod` — a
+ * target-method-partitioned map of which method(s) of the caller hold
+ * the call-site. This tool reads ONLY the partition for the queried
+ * `methodName` (never the flat class-level union — that would phantom-
+ * attribute a sibling caller method that called a DIFFERENT method of the
+ * same target class) and surfaces it as `callerMethods` on the impact
+ * item plus a "(call-site in method …)" clause in the explanation. It is
+ * pure enrichment: attribution is by method NAME so overloaded callers
+ * collapse to one name, the class-level dedup and the verdict are
+ * unchanged, and every caller is still flagged for human review. Absent
+ * on heuristic-scanner / Flow / LWC-Aura-declared callers and pre-fix
+ * vaults (caller method unknown — the field is omitted, never `[]`).
+ *
  * **Caller identification.** Composes over the v0.3 apex-scanner's
  * outgoing `callsApex` edges (the method-call-site index):
  *
@@ -31,9 +46,10 @@
  *     class (Flow callers don't index by methodName — the Flow XML
  *     declares the action name at the class level), surface a
  *     `code-needs-update` impact. The Flow caller's confidence is
- *     `declared` (the Flow XML's `<actionName>` is the source of
- *     truth) per the WhatIfSemantics.md "Flow caller (when target is
- *     @InvocableMethod)" rule.
+ *     `parsed` (the Flow `<actionCalls>` block is parsed out of the
+ *     Flow XML by the flow extractor — flow.ts emits `confidence:
+ *     'parsed'`) per the WhatIfSemantics.md "Flow caller (when target
+ *     is @InvocableMethod)" rule.
  *   - For each LWC / Aura / VF caller with an outgoing `callsApex`
  *     edge to the target class AND `properties.methodName ===
  *     methodName`, surface a `code-needs-update` impact. The frontend
@@ -155,6 +171,17 @@ export interface WhatIfImpactItem {
   readonly apiName: string;
   readonly confidence: ConfidenceLevel;
   readonly explanation: string;
+  /**
+   * CR-CAP-06: AST-path only — the method(s) of THIS calling class that hold a
+   * call-site to the SPECIFIC queried method (read from the edge's
+   * `callerMethodsByMethod[methodName]` partition, NOT the class-level union —
+   * so a sibling method that calls a DIFFERENT method of the target is never
+   * falsely attributed here). Absent on heuristic-scanner / Flow /
+   * LWC-Aura-declared callers and pre-fix vaults (caller method unknown). This
+   * ENRICHES the explanation, it NEVER narrows the verdict (overloaded callers
+   * collapse to one NAME, so the class-level human-review posture stands).
+   */
+  readonly callerMethods?: readonly string[];
 }
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
@@ -176,7 +203,7 @@ export interface WhatIfChangeMethodSignatureOutput {
  * tool)" text so the test suite can lock the phrasing.
  */
 const DISCLOSURE =
-  "callers identified via the v1.4 apex-scanner are at heuristic confidence; dynamic dispatch via Type.forName + invoke is invisible. Test classes are identified by @isTest + naming convention (className + 'Test' suffix) and by coversTest edges; a test class that doesn't follow the naming convention and doesn't carry a @TestVisible-tagged covering reference may be missed.";
+  "caller confidence varies by source: Apex and Visualforce callers come from the heuristic apex-scanner (regex/token, no AST) and are reported at heuristic confidence (may include false positives); Flow callers are parsed out of the Flow XML <actionCalls> (confidence: parsed); LWC/Aura callers come from the declarative @salesforce/apex import (confidence: declared). Dynamic dispatch via Type.forName + invoke is invisible to all of them. Test classes are identified by @isTest + naming convention (className + 'Test' suffix) and by coversTest edges; a test class that doesn't follow the naming convention and doesn't carry a @TestVisible-tagged covering reference may be missed. When an Apex caller's edge was AST-extracted, `callerMethods` names which method(s) of that caller hold a call-site to THIS specific method (enrichment only — overloaded callers collapse to one NAME, so every caller is still flagged for human review at class granularity and the verdict is unchanged); absent callerMethods means the call-site method is unknown (heuristic scanner, Flow, or LWC/Aura caller).";
 
 /**
  * Zod schema for the `sfi.what_if_change_method_signature` tool input.
@@ -223,6 +250,31 @@ const callsMethod = (edge: Edge, methodName: string): boolean => {
 };
 
 /**
+ * CR-CAP-06: read the caller class's method(s) that hold a call-site to the
+ * SPECIFIC `methodName`, from the AST edge's `callerMethodsByMethod`
+ * partition (`{ [targetMethod]: callerMethod[] }`). Partitioned by TARGET
+ * METHOD so we attribute ONLY the caller methods that called THIS method —
+ * never the flat class-level union, which would phantom-attribute a sibling
+ * caller method that called a different method of the same target class.
+ * Returns `undefined` when the partition is absent or holds no entry for the
+ * queried method (scanner-path / Flow / declared / pre-fix edge → caller
+ * method unknown → field OMITTED, never `[]`). Always sorted + deduped.
+ */
+const callerMethodsForTarget = (
+  edge: Edge,
+  methodName: string,
+): readonly string[] | undefined => {
+  const byMethod = edge.properties['callerMethodsByMethod'];
+  if (byMethod === null || typeof byMethod !== 'object' || Array.isArray(byMethod)) {
+    return undefined;
+  }
+  const raw = (byMethod as Record<string, unknown>)[methodName];
+  if (!Array.isArray(raw)) return undefined;
+  const strs = raw.filter((x): x is string => typeof x === 'string');
+  return strs.length === 0 ? undefined : [...new Set(strs)].sort();
+};
+
+/**
  * Check whether a node represents a test class. Mirrors the
  * `explain-apex-method.ts` `isTest` axis: the v1.5 ApexClass
  * classifier populates `properties.isTest` as a top-level boolean.
@@ -246,6 +298,13 @@ const buildExplanation = (
   classApiName: string,
   methodName: string,
   isTest: boolean,
+  /**
+   * CR-CAP-06: the caller's method(s) holding the call-site to `methodName`
+   * (AST-path, partitioned by target method). When present, the prose pinpoints
+   * the method so a reviewer narrows from class to method; absent leaves the
+   * sentence unchanged (caller method unknown).
+   */
+  callerMethods?: readonly string[],
 ): string => {
   const callerLabel = `${fromNode.type} '${fromNode.apiName}'`;
   const targetLabel = `${classApiName}.${methodName}(...)`;
@@ -260,7 +319,13 @@ const buildExplanation = (
         : edge.confidence === 'declared'
           ? 'imports and calls'
           : 'calls';
-  return `${callerLabel} ${verb} ${targetLabel}; the signature change requires updating this call-site.`;
+  const siteClause =
+    callerMethods !== undefined && callerMethods.length > 0
+      ? ` (call-site in ${callerMethods.length === 1 ? 'method' : 'methods'} ${callerMethods
+          .map((m) => `'${m}'`)
+          .join(', ')})`
+      : '';
+  return `${callerLabel} ${verb} ${targetLabel}${siteClause}; the signature change requires updating this call-site.`;
 };
 
 /**
@@ -371,6 +436,10 @@ const collectCallers = async (
     }
     const isTest = isTestClass(fromNode);
     const category = classifyCaller(fromNode, isTest);
+    // CR-CAP-06: the caller's method(s) that call THIS specific method
+    // (partitioned by target method — no cross-method phantom). Absent on
+    // scanner/Flow/declared edges → field omitted, explanation unchanged.
+    const callerMethods = callerMethodsForTarget(edge, methodName);
     impactsByCaller.set(edge.fromId, {
       category,
       componentId: fromNode.id,
@@ -383,7 +452,9 @@ const collectCallers = async (
         classApiName,
         methodName,
         isTest,
+        callerMethods,
       ),
+      ...(callerMethods !== undefined ? { callerMethods } : {}),
     });
     if (isTest) testIds.add(fromNode.id);
   }

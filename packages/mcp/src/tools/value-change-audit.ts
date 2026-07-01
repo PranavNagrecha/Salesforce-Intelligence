@@ -23,6 +23,7 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
   TrustSummary,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
@@ -32,6 +33,11 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  argsFingerprint,
+  decodeCursor,
+  paginateLegacy,
+} from './page-cursor.js';
 import {
   classifyField,
   lookupIdentityCatalog,
@@ -81,6 +87,14 @@ export interface ValueChangeAuditOutput {
   readonly coverageCaveat?: CoverageCaveat;
   readonly trust: TrustSummary;
   readonly disclosure: string;
+  /**
+   * CR-22 opaque continuation token, present ONLY when `rows` was truncated
+   * (over `limit`/MAX_ROWS or the byte budget). Echo it back as `cursor` to
+   * resume; absent on a whole-fits page so an in-budget response is byte-identical.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
 }
 
 const DISCLOSURE =
@@ -96,6 +110,14 @@ export const valueChangeAuditInputSchema = z.object({
   object: z.string().min(1),
   fields: z.array(z.string()).optional(),
   verbosity: z.enum(['summary', 'detail']).optional(),
+  // CR-22: page size for the risk-ranked `rows` list. Capped at MAX_ROWS so the
+  // response-size guard holds; default = MAX_ROWS so a no-limit call returns
+  // today's first 200 rows byte-identically.
+  limit: z.number().int().min(1).max(MAX_ROWS).optional(),
+  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // truncated page's `nextCursor`. When present it supplies the resume offset;
+  // omitting it = today's behavior (offset 0).
+  cursor: z.string().min(1).optional(),
 });
 
 export type ValueChangeAuditInput = z.infer<typeof valueChangeAuditInputSchema>;
@@ -207,14 +229,51 @@ export const valueChangeAuditHandler = async (
     rows.push(buildRow(assessmentResult.value, node, verbosity));
   }
 
+  // Total order: severity DESC, then field ASC, then fieldId ASC (fieldId is the
+  // canonical CustomField id — provably unique — so an offset-based cursor
+  // resume can neither dup nor skip at a (severity, field) tie boundary).
   rows.sort((a, b) =>
     severityRank(b.overallSeverity) - severityRank(a.overallSeverity) ||
-    (a.field < b.field ? -1 : a.field > b.field ? 1 : 0),
+    (a.field < b.field ? -1 : a.field > b.field ? 1 : 0) ||
+    (a.fieldId < b.fieldId ? -1 : a.fieldId > b.fieldId ? 1 : 0),
   );
 
-  const truncated = rows.length > MAX_ROWS;
-  const shownRows = truncated ? rows.slice(0, MAX_ROWS) : rows;
+  // Resolve the resume offset: an echoed CR-22 cursor wins; a stale/forged
+  // cursor (different object / field-set / verbosity) is rejected. The
+  // fingerprint includes `verbosity` because detail vs summary changes a row's
+  // byte size and therefore the truncation boundary.
+  const TOOL = 'sfi.value_change_audit';
+  const fingerprint = argsFingerprint({
+    object,
+    ...(input.fields !== undefined ? { fields: input.fields } : {}),
+    verbosity,
+  });
+  let offset = 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
 
+  const limit = input.limit ?? MAX_ROWS;
+  const paged = paginateLegacy(rows, {
+    offset,
+    limit,
+    keyOf: (r) => r.fieldId,
+    binding: { tool: TOOL, vaultHash: ctx.manifest.sourceTreeHash, argsFingerprint: fingerprint },
+  });
+  const shownRows = paged.items;
+  // Keep `truncated` emitted unconditionally (existing golden field): true when
+  // more rows remain past this page.
+  const truncated = paged.hasMore;
+  const emitCursor = paged.nextCursor !== null;
+
+  // summary is computed over the FULL `rows` (not the page) so per-severity
+  // counts stay honest behind a truncated page.
   const summary: Record<Severity, number> = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
   for (const r of rows) summary[r.overallSeverity] += 1;
 
@@ -245,6 +304,7 @@ export const valueChangeAuditHandler = async (
         limitations: [DISCLOSURE, ...(coverageCaveat !== undefined ? [coverageCaveat.message] : [])],
       },
       disclosure: DISCLOSURE,
+      ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

@@ -32,7 +32,7 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listNodesByType } from '@sf-intelligence/graph';
+import { countNodesByType, listNodesByType } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -41,6 +41,8 @@ import {
   INHERITED_CONFIDENCE_DISCLOSURE,
   Q125_FRESHNESS_DISCLOSURE,
   STRUCTURAL_DISCLOSURE,
+  fitDocumentToBudget,
+  generatedDocByteBudget,
   renderFooter,
   type GeneratedDocument,
 } from './generate-data-dictionary.js';
@@ -83,6 +85,28 @@ const fetchNodes = async (
   type: ComponentType,
 ): Promise<Result<readonly Node[], McpError>> => {
   const result = await listNodesByType(ctx.graph, type, { limit: SCAN_LIMIT });
+  if (!result.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${result.error.message}`,
+    });
+  }
+  return ok(result.value);
+};
+
+/**
+ * Exact COUNT(*) tally for a single ComponentType. The per-section counts
+ * MUST come from here, NOT from `fetchNodes(...).value.length` — the latter
+ * is bounded by `SCAN_LIMIT` (500) and saturates on a large org (a
+ * 1,000-ApexClass org would report 500). The list from `fetchNodes` is still
+ * used for the genuine list consumers (Main Objects top-N, Recent Changes
+ * candidates), but never as a headline count. Mirrors `org_overview`.
+ */
+const countNodes = async (
+  ctx: Context,
+  type: ComponentType,
+): Promise<Result<number, McpError>> => {
+  const result = await countNodesByType(ctx.graph, type);
   if (!result.ok) {
     return err({
       kind: 'internal',
@@ -287,22 +311,55 @@ export const generateAdminHandbookHandler = async (
   const vfResult = await fetchNodes(ctx, 'VisualforcePage');
   if (!vfResult.ok) return err(vfResult.error);
 
+  // Exact per-type tallies via COUNT(*). The fetchNodes lists above feed the
+  // genuine list consumers (Main Objects top-N, Recent Changes candidates);
+  // every COUNT we render below comes from here so it never saturates at
+  // SCAN_LIMIT on a large org (ApexClass / Flow routinely exceed 500).
+  const objectCount = await countNodes(ctx, 'CustomObject');
+  if (!objectCount.ok) return err(objectCount.error);
+  const profileCount = await countNodes(ctx, 'Profile');
+  if (!profileCount.ok) return err(profileCount.error);
+  const permSetCount = await countNodes(ctx, 'PermissionSet');
+  if (!permSetCount.ok) return err(permSetCount.error);
+  const workflowCount = await countNodes(ctx, 'WorkflowRule');
+  if (!workflowCount.ok) return err(workflowCount.error);
+  const approvalCount = await countNodes(ctx, 'ApprovalProcess');
+  if (!approvalCount.ok) return err(approvalCount.error);
+  const flowCount = await countNodes(ctx, 'Flow');
+  if (!flowCount.ok) return err(flowCount.error);
+  const triggerCount = await countNodes(ctx, 'ApexTrigger');
+  if (!triggerCount.ok) return err(triggerCount.error);
+  const apexCount = await countNodes(ctx, 'ApexClass');
+  if (!apexCount.ok) return err(apexCount.error);
+  const namedCredCount = await countNodes(ctx, 'NamedCredential');
+  if (!namedCredCount.ok) return err(namedCredCount.error);
+  const authProvCount = await countNodes(ctx, 'AuthProvider');
+  if (!authProvCount.ok) return err(authProvCount.error);
+  const externalSvcCount = await countNodes(ctx, 'ExternalService');
+  if (!externalSvcCount.ok) return err(externalSvcCount.error);
+  const externalDsCount = await countNodes(ctx, 'ExternalDataSource');
+  if (!externalDsCount.ok) return err(externalDsCount.error);
+  const lwcCount = await countNodes(ctx, 'LightningComponentBundle');
+  if (!lwcCount.ok) return err(lwcCount.error);
+  const vfCount = await countNodes(ctx, 'VisualforcePage');
+  if (!vfCount.ok) return err(vfCount.error);
+
   const objects = objectsResult.value;
   const totalComponents =
-    objects.length +
-    profilesResult.value.length +
-    permSetsResult.value.length +
-    workflowsResult.value.length +
-    approvalsResult.value.length +
-    flowsResult.value.length +
-    triggersResult.value.length +
-    apexResult.value.length +
-    namedCredResult.value.length +
-    authProvResult.value.length +
-    externalSvcResult.value.length +
-    externalDsResult.value.length +
-    lwcResult.value.length +
-    vfResult.value.length;
+    objectCount.value +
+    profileCount.value +
+    permSetCount.value +
+    workflowCount.value +
+    approvalCount.value +
+    flowCount.value +
+    triggerCount.value +
+    apexCount.value +
+    namedCredCount.value +
+    authProvCount.value +
+    externalSvcCount.value +
+    externalDsCount.value +
+    lwcCount.value +
+    vfCount.value;
 
   // The Recent Changes candidate pool: every code-tier node, since the
   // v1.7 enricher targets those types. An empty enrichment surfaces a
@@ -321,27 +378,27 @@ export const generateAdminHandbookHandler = async (
   );
   const mainObjectsSection = renderMainObjectsSection(objects);
   const automationSection = renderAutomationSection(
-    workflowsResult.value.length,
-    approvalsResult.value.length,
-    flowsResult.value.length,
-    triggersResult.value.length,
+    workflowCount.value,
+    approvalCount.value,
+    flowCount.value,
+    triggerCount.value,
   );
   const permissionSection = renderPermissionSection(
-    profilesResult.value.length,
-    permSetsResult.value.length,
+    profileCount.value,
+    permSetCount.value,
   );
   const integrationSection = renderIntegrationSection(
-    namedCredResult.value.length,
-    authProvResult.value.length,
-    externalSvcResult.value.length,
-    externalDsResult.value.length,
+    namedCredCount.value,
+    authProvCount.value,
+    externalSvcCount.value,
+    externalDsCount.value,
   );
   const recentChangesSection = renderRecentChangesSection(recentCandidates);
   const codebaseSection = renderCodebaseFootprintSection(
-    apexResult.value.length,
-    triggersResult.value.length,
-    lwcResult.value.length,
-    vfResult.value.length,
+    apexCount.value,
+    triggerCount.value,
+    lwcCount.value,
+    vfCount.value,
   );
 
   // Persona-specific ordering. The H1 + Purpose always lead; the
@@ -438,17 +495,20 @@ export const generateAdminHandbookHandler = async (
     ...vfResult.value.map((n) => n.id),
   ];
 
-  const document: GeneratedDocument = {
-    frontmatter: {
-      title,
-      generatedAt,
-      sourceTreeHash,
-      componentIds,
+  const document: GeneratedDocument = fitDocumentToBudget(
+    {
+      frontmatter: {
+        title,
+        generatedAt,
+        sourceTreeHash,
+        componentIds,
+      },
+      body,
+      sectionConfidence,
+      boundaries,
     },
-    body,
-    sectionConfidence,
-    boundaries,
-  };
+    generatedDocByteBudget(),
+  );
 
   return ok({
     data: { document },

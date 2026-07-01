@@ -79,7 +79,7 @@ import {
  * concern, not a silent drift.
  */
 const DISCLOSURE =
-  "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once and does not expand that re-entrancy. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.";
+  "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once and does not expand that re-entrancy. A workflow rule's time-dependent actions (its workflowTimeTriggers) are SCHEDULED for an offset measured from a record field value the offline vault cannot evaluate; this composition lists the rule once in the synchronous post-save-workflows phase and does NOT claim its time-delayed actions fire at save. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.";
 
 /**
  * The four DML events the generic SOE diagram surfaces. `upsert` is
@@ -102,6 +102,53 @@ export type SoePhase =
   | 'post-save-flows'
   | 'post-save-approval'
   | 'post-save-async';
+
+/**
+ * The automation phases (every {@link SoePhase} except the `save`
+ * placeholder), frozen in documented SOE order. Mirrors the
+ * what_happens_on_save list so the two save-order views agree on which
+ * phases are counted as org automation.
+ */
+const AUTOMATION_PHASES: readonly Exclude<SoePhase, 'save'>[] = [
+  'before-save-flows',
+  'pre-save-triggers',
+  'pre-save-validation',
+  'after-triggers',
+  'post-save-assignment',
+  'post-save-workflows',
+  'post-save-flows',
+  'post-save-approval',
+  'post-save-async',
+];
+
+/**
+ * Grounded per-phase active-component counts. Same shape and semantics
+ * as the what_happens_on_save `SoePhaseCounts` — one count per
+ * automation phase (the `save` placeholder excluded), so the count of
+ * triggers / record-triggered flows / workflow rules per event is
+ * answerable directly from the per-event summary.
+ */
+export type SoePhaseCounts = Readonly<
+  Record<Exclude<SoePhase, 'save'>, number>
+>;
+
+/**
+ * Tally the active components emitted into each automation phase for one
+ * event's composed SOE. The `save` placeholder is never counted; every
+ * phase is present (zero when empty) for a stable, indexable map.
+ */
+const tallyPhaseCounts = (
+  soe: readonly { readonly phase: SoePhase }[],
+): SoePhaseCounts => {
+  const counts = Object.fromEntries(
+    AUTOMATION_PHASES.map((p) => [p, 0]),
+  ) as Record<Exclude<SoePhase, 'save'>, number>;
+  for (const step of soe) {
+    if (step.phase === 'save') continue;
+    counts[step.phase] += 1;
+  }
+  return counts;
+};
 
 /** Same SoeStepCondition shape as `what_happens_on_save`. */
 export interface SoeStepCondition {
@@ -154,8 +201,22 @@ export interface SoePerEvent {
   readonly soe: readonly SoeStep[];
   readonly summary: {
     readonly totalSteps: number;
+    /**
+     * Count of ACTIVE org-configured automation components that fire on
+     * this event — `totalSteps` minus the one `save` placeholder. The
+     * grounded answer to "how many distinct automation components fire on
+     * this event", per event.
+     */
+    readonly activeComponents: number;
     readonly conditionalSteps: number;
     readonly asyncFanOut: number;
+    /**
+     * Per-phase active-component counts for this event, in documented SOE
+     * order. Lets a caller answer the count/ordering question (triggers vs
+     * record-triggered flows vs workflow rules) directly per event.
+     * Inactive automation is excluded — it is in `inactiveConfigured`.
+     */
+    readonly phaseCounts: SoePhaseCounts;
   };
 }
 
@@ -639,8 +700,23 @@ const composeForEvent = async (
   // rules in the documented order of execution. Before-save flows were already
   // emitted in the leading `before-save-flows` phase, so only the after-save
   // partition (already resolved against the object above) is walked here.
+  //
+  // Scheduled-only flows (hasImmediateConnector === false with scheduledPaths)
+  // do NOT run synchronously in the triggering transaction. They are collected
+  // here and emitted in post-save-async below.
+  const scheduledOnlyAfterSaveFlows: Node[] = [];
   for (const { firer, recordTriggerType } of afterSaveFlows) {
     if (!flowMatchesEvent(recordTriggerType, event)) continue;
+    const hasImmediateConnector = firer.properties['hasImmediateConnector'] as boolean | undefined;
+    const scheduledPathTypes = firer.properties['scheduledPathTypes'] as string[] | undefined;
+    const isScheduledOnly =
+      hasImmediateConnector === false &&
+      Array.isArray(scheduledPathTypes) &&
+      scheduledPathTypes.length > 0;
+    if (isScheduledOnly) {
+      scheduledOnlyAfterSaveFlows.push(firer);
+      continue;
+    }
     const stepResult = await buildStep(ctx, firer, 'post-save-flows', stepIndex);
     if (!stepResult.ok) return err(stepResult.error);
     soe.push(stepResult.value);
@@ -677,16 +753,29 @@ const composeForEvent = async (
   );
   if (!asyncStepsResult.ok) return err(asyncStepsResult.error);
   soe.push(...asyncStepsResult.value);
-  const asyncFanOut = asyncStepsResult.value.length;
+  let asyncFanOut = asyncStepsResult.value.length;
+  stepIndex += asyncFanOut;
+  // Emit scheduled-only after-save flows in post-save-async — they run only
+  // via their scheduled/time-offset paths, not within the triggering transaction.
+  for (const firer of scheduledOnlyAfterSaveFlows) {
+    const stepResult = await buildStep(ctx, firer, 'post-save-async', stepIndex);
+    if (!stepResult.ok) return err(stepResult.error);
+    soe.push(stepResult.value);
+    asyncFanOut += 1;
+    stepIndex += 1;
+  }
 
   const conditionalSteps = soe.filter((s) => s.conditional !== undefined).length;
+  const activeComponents = soe.filter((s) => s.phase !== 'save').length;
 
   return ok({
     soe,
     summary: {
       totalSteps: soe.length,
+      activeComponents,
       conditionalSteps,
       asyncFanOut,
+      phaseCounts: tallyPhaseCounts(soe),
     },
   });
 };
@@ -733,11 +822,21 @@ export const orderOfExecutionHandler = async (
   // sequence — so the response carries the same per-event payload
   // shape per event.
   const inactiveCollector = new Map<ComponentId, InactiveConfiguredFirer>();
+  const emptyPerEvent = (): SoePerEvent => ({
+    soe: [],
+    summary: {
+      totalSteps: 0,
+      activeComponents: 0,
+      conditionalSteps: 0,
+      asyncFanOut: 0,
+      phaseCounts: tallyPhaseCounts([]),
+    },
+  });
   const byEvent: Record<SoeEvent, SoePerEvent> = {
-    insert: { soe: [], summary: { totalSteps: 0, conditionalSteps: 0, asyncFanOut: 0 } },
-    update: { soe: [], summary: { totalSteps: 0, conditionalSteps: 0, asyncFanOut: 0 } },
-    delete: { soe: [], summary: { totalSteps: 0, conditionalSteps: 0, asyncFanOut: 0 } },
-    undelete: { soe: [], summary: { totalSteps: 0, conditionalSteps: 0, asyncFanOut: 0 } },
+    insert: emptyPerEvent(),
+    update: emptyPerEvent(),
+    delete: emptyPerEvent(),
+    undelete: emptyPerEvent(),
   };
   for (const event of SOE_EVENTS) {
     const perEventResult = await composeForEvent(
@@ -765,9 +864,14 @@ export const orderOfExecutionHandler = async (
   } = {
     objectApiName: input.objectApiName,
     objectModeled,
+    ...(inactiveConfigured.length > 0 ? { inactiveConfigured } : {}),
+    ...(inactiveConfigured.length > 0
+      ? {
+          inactiveHeadline: `Excluded inactive: ${inactiveConfigured.map((i) => i.apiName).join(', ')}`,
+        }
+      : {}),
     byEvent,
     disclosure: composeSoeDisclosure(DISCLOSURE, objectModeled),
-    ...(inactiveConfigured.length > 0 ? { inactiveConfigured } : {}),
   };
 
   // The four-event payload is the heaviest SOE surface in the product; on a

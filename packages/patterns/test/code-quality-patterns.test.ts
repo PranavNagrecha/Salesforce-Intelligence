@@ -331,11 +331,176 @@ describe('detectCodeQualityIssues — missing-crud-check', () => {
     );
   });
 
-  it('does not flag when WITH SECURITY_ENFORCED is used upstream', () => {
+  // CR-04 #2: WITH SECURITY_ENFORCED is a SOQL READ/FLS-enforcement clause; it
+  // NEVER authorizes a DML write. A class that queries with it then writes is
+  // UNGATED for the write and MUST be flagged. (This FLIPS the prior, incorrect
+  // expectation that the read-only clause cleared the write.)
+  it('FLAGS a write after a SOQL WITH SECURITY_ENFORCED (read clause does not gate a write)', () => {
     const src = `public class Svc {
-      public static void run() {
+      public static void run(Id id) {
         Account a = [SELECT Id FROM Account WHERE Id = :id WITH SECURITY_ENFORCED];
         update a;
+      }
+    }`;
+    expect(rulesOf(run(src))).toContain('missing-crud-check');
+  });
+
+  // CR-04 #2: WITH USER_MODE on a SOQL is read-enforcement only and must NOT
+  // clear a later write.
+  it('FLAGS a write after a SOQL WITH USER_MODE (read clause does not gate a write)', () => {
+    const src = `public class Svc {
+      public static void run() {
+        List<Account> l = [SELECT Id FROM Account WITH USER_MODE];
+        delete l;
+      }
+    }`;
+    expect(rulesOf(run(src))).toContain('missing-crud-check');
+  });
+
+  // CR-04 #2: user-mode DML (`as user`) DOES enforce CRUD/FLS for the write and
+  // is a legitimate gate. (Before the fix this form did not even MATCH the DML
+  // pattern — a silent false negative; now it matches and is cleared.)
+  it('does not flag `insert x as user` (user-mode DML enforces CRUD/FLS)', () => {
+    const src = `public class Svc {
+      public static void create(Account a) { insert a as user; }
+    }`;
+    expect(rulesOf(run(src))).not.toContain('missing-crud-check');
+  });
+
+  it('does not flag `Database.insert(x, AccessLevel.USER_MODE)` (user-mode DML)', () => {
+    const src = `public class Svc {
+      public static void create(Account a) { Database.insert(a, AccessLevel.USER_MODE); }
+    }`;
+    expect(rulesOf(run(src))).not.toContain('missing-crud-check');
+  });
+
+  // `as system` runs in system mode and does NOT enforce CRUD/FLS — still flagged.
+  it('FLAGS `insert x as system` (system mode does not enforce CRUD/FLS)', () => {
+    const src = `public class Svc {
+      public static void create(Account a) { insert a as system; }
+    }`;
+    expect(rulesOf(run(src))).toContain('missing-crud-check');
+  });
+
+  // CR-04 #2: isAccessible() is a READ FLS check and must NOT clear a write.
+  it('FLAGS a write gated only by isAccessible() (read check does not gate a write)', () => {
+    const src = `public class Svc {
+      public static void run(Account a) {
+        if (Schema.sObjectType.Account.isAccessible()) { insert a; }
+      }
+    }`;
+    expect(rulesOf(run(src))).toContain('missing-crud-check');
+  });
+
+  it('does not flag a write gated by isCreateable() (write check gates a write)', () => {
+    const src = `public class Svc {
+      public static void run(Account a) {
+        if (Schema.sObjectType.Account.isCreateable()) { insert a; }
+      }
+    }`;
+    expect(rulesOf(run(src))).not.toContain('missing-crud-check');
+  });
+
+  // CR-04 #1: the hint scan is method/block-scoped — a CRUD check in method A
+  // must NOT clear an ungated DML in method B.
+  it('FLAGS an ungated DML in method B even when method A has a CRUD check (cross-method scoping)', () => {
+    const src = `public class Svc {
+      public static void gated(Account a) {
+        if (Schema.sObjectType.Account.isCreateable()) { insert a; }
+      }
+      public static void ungated(Account b) {
+        insert b;
+      }
+    }`;
+    const issues = run(src);
+    expect(rulesOf(issues)).toContain('missing-crud-check');
+    // Exactly the method-B insert is flagged (method A is gated).
+    expect(issues.filter((i) => i.rule === 'missing-crud-check')).toHaveLength(1);
+  });
+
+  // CR-04 #1: the dominant early-return/throw guard idiom (check at method top,
+  // not in the DML's block) still clears when it matches the resolved sObject.
+  it('does not flag a DML gated by an early-throw write-CRUD check at method top', () => {
+    const src = `public class Svc {
+      public static void run() {
+        Account acc = new Account();
+        if (!Schema.sObjectType.Account.isUpdateable()) { throw new AuraHandledException('no'); }
+        update acc;
+      }
+    }`;
+    expect(rulesOf(run(src))).not.toContain('missing-crud-check');
+  });
+
+  // CR-04 #1b: the in-scope CRUD check is for the WRONG sObject → still flagged.
+  it('FLAGS a DML whose in-scope CRUD check is for a DIFFERENT sObject', () => {
+    const src = `public class Svc {
+      public static void run() {
+        Account acc = new Account();
+        if (Schema.sObjectType.Contact.isCreateable()) { insert acc; }
+      }
+    }`;
+    expect(rulesOf(run(src))).toContain('missing-crud-check');
+  });
+
+  // CR-04 #1b: matching-sObject variant clears.
+  it('does not flag a DML whose in-scope CRUD check matches the resolved sObject', () => {
+    const src = `public class Svc {
+      public static void run() {
+        Account acc = new Account();
+        if (Schema.sObjectType.Account.isCreateable()) { insert acc; }
+      }
+    }`;
+    expect(rulesOf(run(src))).not.toContain('missing-crud-check');
+  });
+
+  // CR-P3-2 (security FALSE-NEGATIVE): the DML target is a METHOD PARAMETER
+  // (List<Account> accts). enclosingMethodStart returned the body `{`, so the
+  // resolver could not see the param type, fell to the LOOSE path, and the
+  // Contact gate (a DIFFERENT object) wrongly cleared the Account update.
+  // After the param-span fix `accts` resolves to Account → strict path → the
+  // Contact gate does NOT authorize the Account update → MUST flag.
+  it('FLAGS an Account update whose only gate is a Contact check, target a List<Account> param (CR-P3-2)', () => {
+    const src = `public class Svc {
+      public static void save(List<Account> accts) {
+        Schema.sObjectType.Contact.isUpdateable();
+        update accts;
+      }
+    }`;
+    expect(rulesOf(run(src))).toContain('missing-crud-check');
+  });
+
+  // CR-P3-2 single-param variant.
+  it('FLAGS an Account update gated only by a Contact check, target a single Account param (CR-P3-2)', () => {
+    const src = `public class Svc {
+      public static void save(Account acc) {
+        if (Schema.sObjectType.Contact.isUpdateable()) { update acc; }
+      }
+    }`;
+    expect(rulesOf(run(src))).toContain('missing-crud-check');
+  });
+
+  // CR-P3-2 matched-gate MUST-STILL-CLEAR: param resolution must not over-flag.
+  // acc resolves to Account via the param span; the gate matches the resolved
+  // type → strict path clears. (Mirrors eval crud-neg-guarded.)
+  it('does not flag a param-target DML whose in-scope CRUD check matches the resolved param type (CR-P3-2)', () => {
+    const src = `public class Svc {
+      public static void save(Account acc) {
+        if (Schema.sObjectType.Account.isUpdateable()) { update acc; }
+      }
+    }`;
+    expect(rulesOf(run(src))).not.toContain('missing-crud-check');
+  });
+
+  // CR-RV9 (noise FALSE-POSITIVE): `return acc;` was parsed by the decl regex
+  // as a declaration of type `return` (token1=return, token2=acc), forcing the
+  // STRICT path; the real Account gate did not match "return" → wrongly flagged
+  // legitimately-guarded DML. After the keyword-denylist fix `return` is never
+  // a type → acc resolves to Account via the param → matched gate clears.
+  it('does not flag a guarded Account insert preceded by `return acc;` (CR-RV9)', () => {
+    const src = `public class Svc {
+      public static void run(Account acc, Boolean skip) {
+        if (skip) return acc;
+        if (Schema.sObjectType.Account.isCreateable()) { insert acc; }
       }
     }`;
     expect(rulesOf(run(src))).not.toContain('missing-crud-check');
@@ -546,9 +711,115 @@ describe('detectCodeQualityIssues — fake-assertion', () => {
     expect(rulesOf(run(src, { isTest: true }))).not.toContain('fake-assertion');
   });
 
+  it('does NOT flag System.assert(false, ...) — it is a fail-guard, not a tautology', () => {
+    // assert(false) sits on a path that should be unreachable (the line after
+    // a call expected to throw). Reaching it FAILS the test, so it verifies
+    // real behavior. Flagging it inverted the audit (deny tests scored worst).
+    const src = `@isTest
+    public class T {
+      @isTest static void denyTest() {
+        try {
+          AccessService.guard(someId);
+          System.assert(false, 'A non-owner must be denied.');
+        } catch (AccessService.NoAccessException e) {
+          System.assertEquals(AccessService.NO_ACCESS, e.getMessage());
+        }
+      }
+    }`;
+    expect(rulesOf(run(src, { isTest: true }))).not.toContain('fake-assertion');
+  });
+
   it('does not flag fake assertions in a non-test class', () => {
     const src = `public class T { public static void t() { System.assert(true); } }`;
     expect(rulesOf(run(src, { isTest: false }))).not.toContain('fake-assertion');
+  });
+
+  it('counts exactly 5 tautologies and 0 fail-guards in a class with 5 assert(true) + 7 assert(false) — real-org shape', () => {
+    // Mirrors the real ApplicationAccessServiceTest shape: 5 allow-path assert(true)
+    // tautologies and 7 deny-path assert(false) fail-guards across 12 test methods.
+    // Before the fix, the recognizer counted all 12 as fake. After the fix, only the
+    // 5 assert(true) calls are counted.
+    const src = `@isTest
+    private class RecordAccessTest {
+        @isTest static void allowInternalUser() {
+            // allow path — no real behavioral assertion
+            System.assert(true, 'An internal user should access any record.');
+        }
+        @isTest static void allowOwner() {
+            System.assert(true, 'The owner should be allowed.');
+        }
+        @isTest static void allowInternalModify() {
+            System.assert(true, 'An internal user is unrestricted.');
+        }
+        @isTest static void allowNullArgs() {
+            System.assert(true, 'A save with no records should pass the guard.');
+        }
+        @isTest static void allowForeignData() {
+            System.assert(true, 'An internal user is unrestricted, including foreign data.');
+        }
+        @isTest static void denyNonOwner() {
+            try {
+                RecordAccessService.guard(someId);
+                System.assert(false, 'A non-owner community user must be denied.');
+            } catch (RecordAccessService.NoAccessException e) {
+                System.assertEquals(RecordAccessService.NO_ACCESS, e.getMessage(), 'wrong error msg');
+            }
+        }
+        @isTest static void denyLoadedRecord() {
+            try {
+                RecordAccessService.guardLoaded(rec);
+                System.assert(false, 'A non-owner must be denied via the loaded-record overload.');
+            } catch (RecordAccessService.NoAccessException e) {
+                System.assertEquals(RecordAccessService.NO_ACCESS, e.getMessage(), 'wrong error msg');
+            }
+        }
+        @isTest static void denyUnknownId() {
+            try {
+                RecordAccessService.guard(unknownId);
+                System.assert(false, 'An unknown id must be denied.');
+            } catch (RecordAccessService.NoAccessException e) {
+                System.assertEquals(RecordAccessService.NO_ACCESS, e.getMessage(), 'wrong error msg');
+            }
+        }
+        @isTest static void denyNullId() {
+            try {
+                RecordAccessService.guard(null);
+                System.assert(false, 'A null id must be denied under restriction.');
+            } catch (RecordAccessService.NoAccessException e) {
+                System.assertEquals(RecordAccessService.NO_ACCESS, e.getMessage(), 'wrong error msg');
+            }
+        }
+        @isTest static void denyModifyNonOwner() {
+            try {
+                RecordAccessService.guardModify(rec);
+                System.assert(false, 'A non-owner must not modify the record.');
+            } catch (RecordAccessService.NoAccessException e) {
+                System.assertEquals(RecordAccessService.NO_ACCESS, e.getMessage(), 'wrong error msg');
+            }
+        }
+        @isTest static void denyReparent() {
+            try {
+                RecordAccessService.guardModify(reparentRec);
+                System.assert(false, 'Reassigning the program must be blocked.');
+            } catch (RecordAccessService.NoReparentException e) {
+                System.assertEquals(RecordAccessService.NO_REPARENT, e.getMessage(), 'wrong error msg');
+            }
+        }
+        @isTest static void denyForeignContact() {
+            try {
+                RecordAccessService.guardModify(foreignContactRec);
+                System.assert(false, 'Updating someone elses contact must be blocked.');
+            } catch (RecordAccessService.ContactNotOwnException e) {
+                System.assertEquals(RecordAccessService.CONTACT_NOT_OWN, e.getMessage(), 'wrong error msg');
+            }
+        }
+    }`;
+    const issues = run(src, { isTest: true }).filter(
+      (i) => i.rule === 'fake-assertion',
+    );
+    // Only the 5 assert(true) allow-path calls are tautologies.
+    // The 7 assert(false) deny-path calls are fail-guards and must NOT be flagged.
+    expect(issues).toHaveLength(5);
   });
 });
 

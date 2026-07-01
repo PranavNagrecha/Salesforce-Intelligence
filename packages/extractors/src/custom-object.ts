@@ -420,6 +420,15 @@ export const extractCustomObject = async (
   const visibilityRaw = unwrapSingle(rootObj['visibility']);
   const visibility = visibilityRaw === undefined ? null : String(visibilityRaw);
 
+  // `<externalSharingModel>` controls access for external / Experience Cloud
+  // (community) users. It is distinct from `<sharingModel>` (internal OWD)
+  // and is optional — absent on standard objects and variants that don't
+  // expose records to external users. Defaults to `null` when absent so
+  // consumers can distinguish "not applicable" from "Private".
+  const externalSharingModelRaw = unwrapSingle(rootObj['externalSharingModel']);
+  const externalSharingModel =
+    externalSharingModelRaw === undefined ? null : String(externalSharingModelRaw);
+
   const node: Node = {
     id: `${ROOT_ELEMENT}:${apiName}`,
     type: 'CustomObject',
@@ -436,6 +445,7 @@ export const extractCustomObject = async (
       description,
       deploymentStatus,
       sharingModel,
+      externalSharingModel,
       visibility,
       nameFieldLabel,
       nameFieldType,

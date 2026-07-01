@@ -99,6 +99,21 @@ const toBooleanWithDefault = (value: unknown): boolean =>
   coerceBoolean(unwrapSingle(value));
 
 /**
+ * Coerce a picklist `<value>`'s `<isActive>` element with a default of
+ * `true` — the INVERSE default of {@link toBooleanWithDefault}. Salesforce
+ * DX-source OMITS `<isActive>` for ACTIVE values and only writes
+ * `<isActive>false</isActive>` on a DEACTIVATED value, so an absent element
+ * means the value is selectable (active). Reusing the `false`-defaulting
+ * coercion here would mark every active value inactive on every real
+ * picklist (H10) — keep this helper separate and do NOT "unify" it with
+ * `toBooleanWithDefault`.
+ */
+const coerceIsActiveDefaultTrue = (value: unknown): boolean => {
+  const v = unwrapSingle(value);
+  return v === undefined ? true : coerceBoolean(v);
+};
+
+/**
  * Read and strictly-validate a file as XML. fast-xml-parser's `parse()`
  * is permissive (it silently truncates on mismatched tags), so we
  * validate first to surface malformed input as `parse-error` rather than
@@ -217,11 +232,42 @@ const derivePathParts = (
 };
 
 /**
+ * One inline picklist value as the vault stores it. `isActive` carries the
+ * honesty axis (H10): an INACTIVE value is RETAINED but no longer selectable
+ * for new records — existing records may still hold it — so consumers must
+ * list-and-mark inactive values, never drop them silently nor present them as
+ * selectable. `label` / `default` are present only when the source `<label>`
+ * / `<default>` element was, to avoid churning fields that never had them.
+ */
+export interface PicklistValue {
+  readonly value: string;
+  readonly isActive: boolean;
+  readonly label?: string;
+  readonly default?: boolean;
+}
+
+/**
+ * One entry in a picklist controlling-field dependency map. Each `<valueSettings>`
+ * block in `<valueSet>` names a controlling field value and the dependent picklist
+ * value that becomes available when that controlling value is selected.
+ */
+export interface PicklistControllingFieldValue {
+  readonly controllingFieldValue: string;
+  readonly valueName: string;
+}
+
+/**
  * Extract picklist values from a `<valueSet>` subtree, or `null` when
  * the structure is absent. Picklist values live at
- * `valueSet > valueSetDefinition > value > fullName`.
+ * `valueSet > valueSetDefinition > value`, each carrying `<fullName>` (the
+ * API value), `<label>`, `<default>`, and — only when DEACTIVATED —
+ * `<isActive>false</isActive>`. The emitted element is an object carrying
+ * `isActive` (H10): Salesforce DX OMITS `<isActive>` for active values, so an
+ * absent element defaults to `true` (selectable). Inactive values are EMITTED
+ * (not dropped) so consumers can mark them retained-but-not-selectable rather
+ * than reporting them as current or claiming they do not exist.
  */
-const extractPicklistValues = (rootObj: Record<string, unknown>): string[] | null => {
+const extractPicklistValues = (rootObj: Record<string, unknown>): PicklistValue[] | null => {
   const valueSet = unwrapSingle(rootObj['valueSet']);
   if (typeof valueSet !== 'object' || valueSet === null) return null;
   const definition = unwrapSingle((valueSet as Record<string, unknown>)['valueSetDefinition']);
@@ -229,7 +275,64 @@ const extractPicklistValues = (rootObj: Record<string, unknown>): string[] | nul
   const rawValues = (definition as Record<string, unknown>)['value'];
   if (rawValues === undefined) return [];
   const values = Array.isArray(rawValues) ? rawValues : [rawValues];
-  return values.map((entry) => String(unwrapSingle((entry as Record<string, unknown>)['fullName'])));
+  return values.map((raw) => {
+    const entry = raw as Record<string, unknown>;
+    const value = String(unwrapSingle(entry['fullName']));
+    const isActive = coerceIsActiveDefaultTrue(entry['isActive']);
+    const label = toNullableString(entry['label']);
+    const out: PicklistValue = { value, isActive };
+    // OMIT-when-null: only attach label/default when the source element was
+    // present, mirroring the valueSetName pattern so fields that never carried
+    // them do not gain new keys (avoids A7 / golden churn).
+    return {
+      ...out,
+      ...(label !== null ? { label } : {}),
+      ...(unwrapSingle(entry['default']) !== undefined
+        ? { default: toBooleanWithDefault(entry['default']) }
+        : {}),
+    };
+  });
+};
+
+/**
+ * Extract the controlling-field name and per-value dependency mappings from a
+ * `<valueSet>` subtree. A dependent picklist carries `<controllingField>` (the
+ * API name of the field whose selection drives which values are visible) and one
+ * or more `<valueSettings>` blocks — each pairing a `<controllingFieldValue>`
+ * with the `<valueName>` that becomes available under it.
+ *
+ * Returns `null` for both when the `<valueSet>` is absent or the field is not
+ * dependent (no `<controllingField>` element). Never fabricates a dependency
+ * structure from `inlineHelpText` or other heuristics.
+ */
+const extractControllingFieldInfo = (
+  rootObj: Record<string, unknown>,
+): {
+  controllingField: string | null;
+  controllingFieldValues: PicklistControllingFieldValue[] | null;
+} => {
+  const valueSet = unwrapSingle(rootObj['valueSet']);
+  if (typeof valueSet !== 'object' || valueSet === null) {
+    return { controllingField: null, controllingFieldValues: null };
+  }
+  const vsObj = valueSet as Record<string, unknown>;
+  const controllingField = toNullableString(vsObj['controllingField']);
+  if (controllingField === null) {
+    return { controllingField: null, controllingFieldValues: null };
+  }
+  const rawSettings = vsObj['valueSettings'];
+  if (rawSettings === undefined) {
+    return { controllingField, controllingFieldValues: [] };
+  }
+  const settingsArr = Array.isArray(rawSettings) ? rawSettings : [rawSettings];
+  const controllingFieldValues: PicklistControllingFieldValue[] = settingsArr.map((raw) => {
+    const entry = raw as Record<string, unknown>;
+    return {
+      controllingFieldValue: String(unwrapSingle(entry['controllingFieldValue']) ?? ''),
+      valueName: String(unwrapSingle(entry['valueName']) ?? ''),
+    };
+  });
+  return { controllingField, controllingFieldValues };
 };
 
 /**
@@ -253,6 +356,20 @@ const buildProperties = (
   dataType: string,
 ): Readonly<Record<string, unknown>> => {
   const isPicklist = PICKLIST_TYPES.includes(dataType as (typeof PICKLIST_TYPES)[number]);
+  const formula = toNullableString(rootObj['formula']);
+  // Derived classifier: in DX-source format `<type>` holds a formula's RETURN
+  // type (Text, Checkbox, Number, …), NOT the literal `'Formula'`, so `dataType`
+  // alone CANNOT tell a computed field from a stored one. The presence of a
+  // non-empty `<formula>` body is the authoritative signal. Surface it as a
+  // first-class `isFormula` boolean so consumers (list_components, field
+  // summaries, field_360, data-dictionary) can group/count formula fields
+  // without re-deriving the rule — and never report "No Formula fields were
+  // found" for an object whose formula fields all carry a non-`Formula` <type>.
+  const isFormula = formula !== null && formula.length > 0;
+  const { controllingField, controllingFieldValues } = isPicklist
+    ? extractControllingFieldInfo(rootObj)
+    : { controllingField: null, controllingFieldValues: null };
+
   return {
     label: String(unwrapSingle(rootObj['label'])),
     dataType,
@@ -264,12 +381,28 @@ const buildProperties = (
     unique: toBooleanWithDefault(rootObj['unique']),
     externalId: toBooleanWithDefault(rootObj['externalId']),
     defaultValue: toNullableString(rootObj['defaultValue']),
-    formula: toNullableString(rootObj['formula']),
+    formula,
     referenceTo: toNullableString(rootObj['referenceTo']),
     relationshipName: toNullableString(rootObj['relationshipName']),
     inlineHelpText: toNullableString(rootObj['inlineHelpText']),
     trackHistory: toBooleanWithDefault(rootObj['trackHistory']),
     picklistValues: isPicklist ? extractPicklistValues(rootObj) : null,
+    // OMIT-when-null: only dependent picklists carry a controlling field. A
+    // `controllingField: null` row on every non-dependent picklist and every
+    // non-picklist field would churn all markdown vault files.
+    ...(controllingField !== null ? { controllingField } : {}),
+    // OMIT-when-null: only dependent picklists carry per-value controlling-field
+    // mappings. Stored alongside controllingField so consumers can answer
+    // dependency questions directly from the node without guessing from
+    // inlineHelpText. The array is [] (not null) when controllingField exists
+    // but no <valueSettings> blocks were present.
+    ...(controllingFieldValues !== null ? { controllingFieldValues } : {}),
+    // OMIT-when-false (unlike the fixed keys above): only computed fields carry
+    // a formula body, and an `isFormula: false` row on every CustomField would
+    // churn every rendered markdown file in every vault. Emitting it only when
+    // `true` keeps stored fields byte-identical while making formula fields
+    // self-describing.
+    ...(isFormula ? { isFormula: true } : {}),
     // OMIT-when-null (unlike the fixed keys above): only GlobalValueSet-driven
     // picklists carry a value-set name, and a `valueSetName: null` row on every
     // CustomField would churn every rendered markdown file in every vault

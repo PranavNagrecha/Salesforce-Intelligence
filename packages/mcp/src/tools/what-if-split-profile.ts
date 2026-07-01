@@ -65,6 +65,7 @@ import type {
   McpError,
   McpResponse,
   Node,
+  PageInfo,
   TrustSummary,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
@@ -78,6 +79,7 @@ import {
   type CoverageCaveat,
   type Verdict,
 } from './coverage-trust.js';
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 
 /** Canonical id prefix for the Profile node type. */
 const PROFILE_PREFIX = 'Profile:';
@@ -171,6 +173,15 @@ export interface WhatIfSplitProfileOutput {
   readonly hasMore: boolean;
   /** True when the inlined `assignments` is a partial page of the full list. */
   readonly truncated: boolean;
+  /**
+   * CR-22 opaque continuation token, present ONLY when the assignments page was
+   * truncated (more assignments remain past `limit`). Echo it back as `cursor`
+   * to resume. Absent on a whole-fits page so an in-budget response stays
+   * byte-identical.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
   readonly disclosure: string;
 }
 
@@ -195,6 +206,10 @@ export const whatIfSplitProfileInputSchema = z.object({
   targetPermSets: z.array(z.string().min(1)).min(1),
   limit: z.number().int().min(1).max(SPLIT_MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
+  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // truncated page's `nextCursor`. When present it supplies the resume offset;
+  // omitting it = today's behavior (offset 0 / explicit `offset`).
+  cursor: z.string().min(1).optional(),
 });
 
 /** Parsed input shape inferred from the Zod schema. */
@@ -547,9 +562,18 @@ const fetchProfile = async (
 };
 
 /**
- * Sort the assignment list deterministically by `(settingType,
- * settingId)`. Matches the convention every other enumeration-style
- * tool uses so fixture-based tests are stable across runs.
+ * Sort the assignment list deterministically into a UNIQUE TOTAL ORDER:
+ * `(settingType, settingId, targetPermSetId, rationale)`. The 2-key
+ * `(settingType, settingId)` order is NOT provably total — `splitGrants()` does
+ * not dedupe, so two grantedBy edges to the same toId OR a duplicated
+ * `userPermissions` name yield two distinct rows with an identical
+ * `(settingType, settingId)`, making a 2-key comparator return 0. There is no
+ * single intrinsic PK column on `SplitAssignment` (`settingId` is the closest
+ * but not unique across dupes), so the deterministic tiebreaks available on the
+ * row are appended: `targetPermSetId` (a ComponentId), then `rationale` to
+ * break the residual case where two identical grants also resolve to the same
+ * target. This yields a deterministic total order — required so a CR-22 cursor
+ * resume cannot dup or skip on a page boundary — with no new field on the row.
  */
 const sortAssignments = (
   list: readonly SplitAssignment[],
@@ -558,7 +582,13 @@ const sortAssignments = (
     if (a.settingType !== b.settingType) {
       return a.settingType < b.settingType ? -1 : 1;
     }
-    return a.settingId < b.settingId ? -1 : a.settingId > b.settingId ? 1 : 0;
+    if (a.settingId !== b.settingId) {
+      return a.settingId < b.settingId ? -1 : 1;
+    }
+    if (a.targetPermSetId !== b.targetPermSetId) {
+      return a.targetPermSetId < b.targetPermSetId ? -1 : 1;
+    }
+    return a.rationale < b.rationale ? -1 : a.rationale > b.rationale ? 1 : 0;
   });
 
 /**
@@ -635,10 +665,48 @@ export const whatIfSplitProfileHandler = async (
 
   // Paginate the per-grant detail (the bomb source on wide profiles).
   const limit = input.limit ?? SPLIT_DEFAULT_LIMIT;
-  const offset = input.offset ?? 0;
-  const page = assignments.slice(offset, offset + limit);
-  const hasMore = offset + page.length < assignments.length;
+
+  // CR-22: resolve the resume offset — an echoed cursor wins over an explicit
+  // `offset`; a stale/forged cursor (changed profile/targets, different tool, or
+  // refreshed vault) is rejected with `invalid-query`. targetPermSets ORDER is
+  // load-bearing (drives default-fallback + tie resolution); argsFingerprint's
+  // canonicalJson preserves array order so a reordered target list correctly
+  // yields a different fingerprint and stale-rejects a replayed cursor.
+  const fingerprint = argsFingerprint({
+    profileId: input.profileId,
+    targetPermSets: input.targetPermSets,
+  });
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: 'sfi.what_if_split_profile',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  // No per-handler byte budget today (unbounded slice; the global jsonResult
+  // guard is the byte backstop). Keep that with an effectively-unbounded
+  // byteBudget so `paginate()` truncates ONLY on `limit` (byte-identical to the
+  // prior open-coded slice for whole-fits pages). `keyOf` carries the total-order
+  // tiebreak key the extended `sortAssignments` produces.
+  const paged = paginateLegacy(assignments, {
+    offset,
+    limit,
+    byteBudget: Number.MAX_SAFE_INTEGER,
+    binding: {
+      tool: 'sfi.what_if_split_profile',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+    keyOf: (a) => `${a.settingType} ${a.settingId} ${a.targetPermSetId}`,
+  });
+  const page = paged.items;
+  const hasMore = paged.hasMore;
   const truncated = hasMore || offset > 0;
+  const emitCursor = paged.nextCursor !== null;
   const disclosure = truncated
     ? `${DISCLOSURE} Returning assignments ${offset}–${offset + page.length} of ${assignments.length} (page size ${limit}); summary.byTarget holds the COMPLETE per-target counts. Page through the remaining grants with offset/limit.`
     : DISCLOSURE;
@@ -671,6 +739,7 @@ export const whatIfSplitProfileHandler = async (
       offset,
       hasMore,
       truncated,
+      ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
       disclosure,
     },
     vaultState: {

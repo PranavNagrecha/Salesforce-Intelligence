@@ -231,6 +231,115 @@ const triggerSeed: ExtractionResult = {
   edges: [],
 };
 
+// =============================================================================
+// Seed 4: A no-keyword BATCH class (Batchable + Stateful, no sharing keyword)
+// — the exact shape of the sharing-semantics bug. A no-keyword top-level class
+// must NOT be reported as `without sharing` by default; as async Apex it runs
+// in SYSTEM context. Neutral name (no real org tokens).
+// =============================================================================
+
+const NOKEY_BATCH_ID = 'ApexClass:PaymentBatch';
+
+const noKeywordBatchSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: NOKEY_BATCH_ID,
+      type: 'ApexClass',
+      apiName: 'PaymentBatch',
+      label: 'PaymentBatch',
+      properties: {
+        status: 'Active',
+        // `global` only — NO sharing keyword declared.
+        modifiers: ['global'],
+        implements: ['Database.Batchable<sObject>', 'Database.Stateful'],
+        isTest: false,
+        isQueueable: false,
+        isSchedulable: false,
+        isBatchable: true,
+        hasFutureMethod: false,
+        hasInvocableMethod: false,
+        hasAuraEnabledMethod: false,
+        isRestResource: false,
+        lineCount: 130,
+        sourceBytes: 4096,
+      },
+    }),
+  ],
+  edges: [],
+};
+
+// =============================================================================
+// Seed 5a: A no-keyword QUEUEABLE + AllowsCallouts class (matches the shape of
+// a feed-item poster queueable used in case-log automation). Neutral name.
+// Verifies the CRUD/FLS independence note: system-context execution means
+// sharing is NOT enforced, but CRUD/FLS is a SEPARATE security layer that
+// applies independently — these must NOT be conflated.
+// =============================================================================
+
+const NOKEY_QUEUEABLE_ID = 'ApexClass:FeedItemPosterJob';
+
+const noKeywordQueueableSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: NOKEY_QUEUEABLE_ID,
+      type: 'ApexClass',
+      apiName: 'FeedItemPosterJob',
+      label: 'FeedItemPosterJob',
+      properties: {
+        status: 'Active',
+        // `public` only — NO sharing keyword, implements Queueable + AllowsCallouts.
+        modifiers: ['public'],
+        implements: ['Queueable', 'Database.AllowsCallouts'],
+        isTest: false,
+        isQueueable: true,
+        isSchedulable: false,
+        isBatchable: false,
+        hasFutureMethod: false,
+        hasInvocableMethod: false,
+        hasAuraEnabledMethod: false,
+        isRestResource: false,
+        lineCount: 35,
+        sourceBytes: 900,
+      },
+    }),
+  ],
+  edges: [],
+};
+
+// =============================================================================
+// Seed 5: A no-keyword SYNCHRONOUS service class (no async classifier). It must
+// be reported as `inherits-caller`, NOT `without sharing`, NOT system-context.
+// =============================================================================
+
+const NOKEY_SYNC_ID = 'ApexClass:AccountService';
+
+const noKeywordSyncSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: NOKEY_SYNC_ID,
+      type: 'ApexClass',
+      apiName: 'AccountService',
+      label: 'AccountService',
+      properties: {
+        status: 'Active',
+        // `public` only — NO sharing keyword, synchronous.
+        modifiers: ['public'],
+        isTest: false,
+        isQueueable: false,
+        isSchedulable: false,
+        isBatchable: false,
+        hasFutureMethod: false,
+        hasInvocableMethod: false,
+        hasAuraEnabledMethod: false,
+        isRestResource: false,
+        lineCount: 40,
+        sourceBytes: 800,
+      },
+    }),
+  ],
+  edges: [],
+};
+
 // One shared graph store + Context across the suite.
 let tempDir: string;
 let store: GraphStore;
@@ -248,6 +357,9 @@ beforeAll(async () => {
     allClassifiersSeed,
     testClassSeed,
     triggerSeed,
+    noKeywordBatchSeed,
+    noKeywordQueueableSeed,
+    noKeywordSyncSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -291,6 +403,79 @@ describe('explainApexMethodHandler', () => {
     expect(data.classifiers.isRestResource).toBe(true);
     expect(data.disclosure).toContain('Structured narrative; Claude composes prose');
     expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
+  });
+
+  it('reports a declared `with sharing` class as effectiveModel `with sharing`', async () => {
+    const result = await explainApexMethodHandler(ctx, {
+      classApiName: ALL_CLASSIFIERS_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const s = result.value.data.sharingSemantics;
+    expect(s.declared).toBe('with sharing');
+    expect(s.effectiveModel).toBe('with sharing');
+    // Still async — runs as system, but enforcement is per the keyword.
+    expect(s.runsAsSystem).toBe(true);
+  });
+
+  it('does NOT report a no-keyword BATCH class as `without sharing` (system-context, runs as system)', async () => {
+    const result = await explainApexMethodHandler(ctx, {
+      classApiName: NOKEY_BATCH_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const s = result.value.data.sharingSemantics;
+    // The bug: a no-keyword batch class was answered as "without sharing by default".
+    expect(s.declared).toBeNull();
+    expect(s.effectiveModel).not.toBe('without sharing');
+    expect(s.effectiveModel).toBe('system-context');
+    expect(s.runsAsSystem).toBe(true);
+    // The note must correct the misconception AND name system context.
+    expect(s.note).toContain('does NOT default to `without sharing`');
+    expect(s.note.toLowerCase()).toContain('system context');
+    // Never impersonates the scheduling/submitting user.
+    expect(s.note.toLowerCase()).toContain('never');
+  });
+
+  it('sharing and CRUD/FLS independence: no-keyword queueable note must NOT conflate system-context with CRUD/FLS bypass', async () => {
+    // Regression: the note previously said "CRUD/FLS are also bypassed unless checked
+    // explicitly" which wrongly implied system-context execution auto-bypasses FLS.
+    // Sharing enforcement and CRUD/FLS are INDEPENDENT security layers — system context
+    // only means sharing is not enforced; CRUD/FLS applies separately.
+    const result = await explainApexMethodHandler(ctx, {
+      classApiName: NOKEY_QUEUEABLE_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const s = result.value.data.sharingSemantics;
+    // System-context, no declared keyword.
+    expect(s.declared).toBeNull();
+    expect(s.effectiveModel).toBe('system-context');
+    expect(s.runsAsSystem).toBe(true);
+    // Sharing is not enforced due to system-context.
+    expect(s.note).toContain('does NOT default to `without sharing`');
+    expect(s.note.toLowerCase()).toContain('system context');
+    // CRUD/FLS independence note must be present and explicit.
+    expect(s.note).toContain('INDEPENDENT');
+    expect(s.note.toLowerCase()).toContain('crud/fls');
+    // Must NOT say "bypassed" without attributing the correct condition
+    // (the old note wrongly implied FLS is bypassed by system-context itself).
+    // The note must clarify it is a SEPARATE mechanism.
+    expect(s.note.toLowerCase()).toContain('separate');
+  });
+
+  it('reports a no-keyword SYNCHRONOUS class as inherits-caller (not without sharing)', async () => {
+    const result = await explainApexMethodHandler(ctx, {
+      classApiName: NOKEY_SYNC_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const s = result.value.data.sharingSemantics;
+    expect(s.declared).toBeNull();
+    expect(s.effectiveModel).toBe('inherits-caller');
+    expect(s.runsAsSystem).toBe(false);
+    expect(s.note).toContain('INHERITS THE CALLER');
+    expect(s.note).toContain('does NOT default to `without sharing`');
   });
 
   it('surfaces calls with target ApiName', async () => {

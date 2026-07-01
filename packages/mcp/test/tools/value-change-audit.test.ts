@@ -120,4 +120,54 @@ describe('valueChangeAuditHandler', () => {
     expect(summary.value.data.rows[0]!.buckets).toBeUndefined();
     expect(detail.value.data.rows[0]!.buckets).toBeDefined();
   });
+
+  // ---- CR-22 cursor ----------------------------------------------------
+
+  it('whole-fits call omits nextCursor/pageInfo (golden-identical)', async () => {
+    const r = await valueChangeAuditHandler(ctx, { object: 'User' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect('nextCursor' in r.value.data).toBe(false);
+    expect('pageInfo' in r.value.data).toBe(false);
+    expect(r.value.data.truncated).toBe(false);
+  });
+
+  it('limit=N truncates to N + emits nextCursor; summary stays full', async () => {
+    const r = await valueChangeAuditHandler(ctx, { object: 'User', limit: 2 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.rows.length).toBe(2);
+    expect(r.value.data.truncated).toBe(true);
+    expect(r.value.data.nextCursor).toBeDefined();
+    expect(r.value.data.pageInfo?.totalCount).toBe(4);
+    // summary is over ALL rows, not the page.
+    expect(r.value.data.summary.critical).toBe(1);
+    expect(r.value.data.summary.high).toBe(1);
+  });
+
+  it('resume with returned cursor yields the next rows with no dup/skip', async () => {
+    const page1 = await valueChangeAuditHandler(ctx, { object: 'User', limit: 2 });
+    expect(page1.ok).toBe(true);
+    if (!page1.ok) return;
+    const cursor = page1.value.data.nextCursor;
+    expect(cursor).toBeDefined();
+    const page2 = await valueChangeAuditHandler(ctx, { object: 'User', limit: 2, cursor });
+    expect(page2.ok).toBe(true);
+    if (!page2.ok) return;
+    const all = [...page1.value.data.rows, ...page2.value.data.rows].map((x) => x.field).sort();
+    expect(all).toEqual(['Alias', 'Code__c', 'Faculty_ID__c', 'Username']);
+    expect(page2.value.data.pageInfo?.hasMore ?? false).toBe(false);
+  });
+
+  it('rejects a cursor minted for a different object/fields/verbosity', async () => {
+    const page1 = await valueChangeAuditHandler(ctx, { object: 'User', limit: 2 });
+    expect(page1.ok).toBe(true);
+    if (!page1.ok) return;
+    const cursor = page1.value.data.nextCursor!;
+    // Different verbosity → different fingerprint → stale.
+    const stale = await valueChangeAuditHandler(ctx, { object: 'User', limit: 2, cursor, verbosity: 'detail' });
+    expect(stale.ok).toBe(false);
+    if (stale.ok) return;
+    expect(stale.error.kind).toBe('invalid-query');
+  });
 });

@@ -278,6 +278,50 @@ describe('meaningfulTestAuditHandler', () => {
   });
 });
 
+// =============================================================================
+// CR-12 — page-to-exhaustion. The ApexClass roster is walked to the end, not
+// just the first page; a test class sorted PAST the cap by id ASC used to be
+// dropped from both the ranking and totalTestClassCount. With
+// SFI_NODE_SCAN_LIMIT=2 the loop walks multiple pages. Mirrors
+// apex-test-coverage.test.ts past-cap pattern.
+// =============================================================================
+describe('meaningfulTestAuditHandler — past-cap roster (CR-12 de-cap)', () => {
+  beforeEach(() => {
+    process.env['SFI_NODE_SCAN_LIMIT'] = '2';
+  });
+
+  afterEach(() => {
+    delete process.env['SFI_NODE_SCAN_LIMIT'];
+  });
+
+  it('includes a test class sorted PAST the cap and counts the FULL corpus', async () => {
+    // id-ASC test classes: CleanDenseTest, CleanSparseTest, HighFakeTest,
+    // LegacyTest, OneFakeTest. With a cap of 2 the single-page code saw only
+    // the first 2, dropping HighFakeTest (the genuinely-worst class) AND
+    // undercounting totalTestClassCount.
+    const r = await meaningfulTestAuditHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ids = r.value.data.tests.map((t) => t.testClassId);
+    expect(ids).toContain('ApexClass:HighFakeTest');
+    expect(ids).toContain('ApexClass:OneFakeTest');
+    // 5 test classes (NotATest is excluded) — the full count, not the capped 2.
+    expect(r.value.data.totalTestClassCount).toBe(5);
+    // The past-cap worst class still ranks at the top by fakeAssertionCount.
+    expect(r.value.data.tests[0]?.testClassId).toBe('ApexClass:HighFakeTest');
+  });
+
+  it('preserves the disclosure field and adds no new top-level field (output-shape)', async () => {
+    const r = await meaningfulTestAuditHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(typeof r.value.data.disclosure).toBe('string');
+    expect(Object.keys(r.value.data).sort()).toEqual(
+      ['disclosure', 'tests', 'totalTestClassCount'].sort(),
+    );
+  });
+});
+
 describe('meaningfulTestAuditInputSchema', () => {
   it('accepts empty input', () => {
     expect(meaningfulTestAuditInputSchema.safeParse({}).success).toBe(true);

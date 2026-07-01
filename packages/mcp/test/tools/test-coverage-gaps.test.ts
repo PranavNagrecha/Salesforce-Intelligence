@@ -468,4 +468,54 @@ describe('testCoverageGapsHandler — pagination + byte budget (B25)', () => {
     expect(d.truncated).toBe(true);
     expect(d.nextOffset).toBe(d.gaps.length);
   });
+
+  // CR-22: continuation cursor on the truncated page; walk it to cover all gaps.
+  it('emits a nextCursor on the truncated page and walks every gap once via cursor', async () => {
+    const seen = new Set<string>();
+    let cursor: string | undefined;
+    let guard = 0;
+    for (;;) {
+      const r = await testCoverageGapsHandler(
+        bulkCtx,
+        cursor === undefined ? {} : { cursor },
+      );
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const d = r.value.data;
+      for (const g of d.gaps) seen.add(g.componentId);
+      if (!d.truncated) {
+        expect('nextCursor' in d).toBe(false);
+        break;
+      }
+      expect(typeof d.nextCursor).toBe('string');
+      expect(d.pageInfo?.nextCursor).toBe(d.nextCursor);
+      cursor = d.nextCursor as string;
+      if (++guard > 5000) throw new Error('cursor did not terminate');
+    }
+    expect(seen.size).toBe(BULK);
+  });
+
+  it('rejects a cursor replayed against a different query (added classFilter)', async () => {
+    const first = await testCoverageGapsHandler(bulkCtx, { limit: 5 });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const cursor = first.value.data.nextCursor;
+    expect(typeof cursor).toBe('string');
+    const replay = await testCoverageGapsHandler(bulkCtx, {
+      classFilter: ['ApexClass:Whatever'],
+      cursor: cursor as string,
+    });
+    expect(replay.ok).toBe(false);
+    if (!replay.ok) expect(replay.error.kind).toBe('invalid-query');
+  });
+
+  it('CR-22: in-budget whole-fits call emits NO cursor/pageInfo (byte-identical)', async () => {
+    // The non-bulk small fixture (`ctx`) fits under the default limit.
+    const r = await testCoverageGapsHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.truncated).toBe(false);
+    expect('nextCursor' in r.value.data).toBe(false);
+    expect('pageInfo' in r.value.data).toBe(false);
+  });
 });

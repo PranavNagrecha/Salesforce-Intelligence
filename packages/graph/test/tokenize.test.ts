@@ -111,6 +111,50 @@ describe('tokenizeText', () => {
   it('returns [] for a query that is all stop words', () => {
     expect(tokenizeText('where is the')).toEqual([]);
   });
+
+  it('collapses the phrase "social security number" to the ssn token (F1, opt-in)', () => {
+    expect(
+      tokenizeText('student social security number', { expandPhrases: true }),
+    ).toEqual(['student', 'ssn']);
+  });
+
+  it('collapses "social security" (no "number") to ssn, longest-first (opt-in)', () => {
+    expect(tokenizeText('social security', { expandPhrases: true })).toEqual([
+      'ssn',
+    ]);
+  });
+
+  it('collapses "date of birth" to dob and "zip code"/"postal code" to zip (opt-in)', () => {
+    expect(tokenizeText('the date of birth', { expandPhrases: true })).toEqual([
+      'dob',
+    ]);
+    expect(tokenizeText('zip code', { expandPhrases: true })).toEqual(['zip']);
+    expect(tokenizeText('postal code', { expandPhrases: true })).toEqual([
+      'zip',
+    ]);
+  });
+
+  it('does NOT collapse phrases by default — the phrase pass is opt-in (router-corpus safety)', () => {
+    // The router's doc corpus relies on this: rewriting the corpus shifts IDF
+    // and tips borderline gold queries out of the top-K (the F1 regression).
+    expect(tokenizeText('social security number')).toEqual([
+      'social',
+      'security',
+      'number',
+    ]);
+    expect(tokenizeText('the date of birth')).toEqual(['date', 'birth']);
+    expect(tokenizeText('zip code')).toEqual(['zip', 'code']);
+  });
+
+  it('does NOT collapse "social media" or "social login" to ssn even when opt-in (negative)', () => {
+    expect(
+      tokenizeText('social media campaign', { expandPhrases: true }),
+    ).toEqual(['social', 'media', 'campaign']);
+    expect(tokenizeText('social login', { expandPhrases: true })).toEqual([
+      'social',
+      'login',
+    ]);
+  });
 });
 
 describe('expandSynonyms', () => {

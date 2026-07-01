@@ -16,6 +16,15 @@
  * class, the Flow's `<triggerType>PlatformEvent</triggerType>` mode,
  * the Apex class's `Triggerable<{Event}__e>` interface match).
  *
+ * CR-CAP-18: single-event mode also returns `channels` — the
+ * publish-side routing for the event. The tool walks the event's
+ * INBOUND `references` edges tagged
+ * `referenceKind === 'platformEventChannelMember'` to each
+ * PlatformEventChannelMember, then the member's INBOUND `parentOf` to
+ * its PlatformEventChannel, surfacing `{ channelId, channelType,
+ * memberId, filterExpression }`. The `filterExpression` is the
+ * DECLARED per-member XML text, NOT runtime filter evaluation.
+ *
  * Implementation notes:
  *   - One `listEdges(eventId, { direction: 'in', edgeType: 'listensTo' })`
  *     call retrieves every candidate edge; `getNodeById` then resolves
@@ -103,6 +112,19 @@ const SUBSCRIBER_NODE_TYPES: ReadonlySet<ComponentType> = new Set([
 ]);
 
 /**
+ * GROUP C: the set of node types that count as valid Platform Event
+ * *publishers* — code that emits the event via an outbound `writesTo` edge into
+ * the event node. Flows (`<recordCreates>` on a `__e`) and Apex
+ * (`EventBus.publish(...)`) and Apex triggers can all publish. Other node types
+ * on a `writesTo` edge (e.g. a stray CustomField) are filtered out.
+ */
+const PUBLISHER_NODE_TYPES: ReadonlySet<ComponentType> = new Set([
+  'Flow',
+  'ApexClass',
+  'ApexTrigger',
+]);
+
+/**
  * Zod schema for the `sfi.event_subscribers` tool input.
  *
  *   - `eventId`: required, non-empty string. The canonical Platform
@@ -146,11 +168,68 @@ export interface EventSubscriber {
   readonly properties: Readonly<Record<string, unknown>>;
 }
 
+/**
+ * GROUP C: one publisher in the output list — code that EMITS the event,
+ * mirroring {@link EventSubscriber} but resolved from the event's INBOUND
+ * `writesTo` edges instead of `listensTo`. Surfaces a published-but-unsubscribed
+ * event (writesTo publishers, zero listensTo subscribers) so it no longer looks
+ * orphaned. `source` is the emitting extractor; `properties` is the edge blob,
+ * carrying the declared `operation` (create/publish) and `mechanism`
+ * (flow-create-record / EventBus.publish) where the extractor surfaced them.
+ *
+ * HONESTY: detection is the modeled `writesTo` edge only. The Apex
+ * `EventBus.publish(...)` call is detected by the extractor's heuristic scan;
+ * dynamically-built publishes and managed-package publishers are NOT modeled.
+ */
+export interface EventPublisher {
+  readonly id: ComponentId;
+  readonly type: ComponentType;
+  readonly apiName: string;
+  readonly source: string;
+  readonly properties: Readonly<Record<string, unknown>>;
+  /**
+   * Human-readable description of the publishing component, read from the
+   * node's `description` property (e.g. the Flow's declared description field
+   * or the Apex class doc comment captured at extraction time). `null` when the
+   * publisher has no declared description.
+   *
+   * Surfaced here so the architect can read "what does this publisher do?" from
+   * a single tool call rather than needing a follow-up `sfi.get_component` call.
+   */
+  readonly description: string | null;
+}
+
+/**
+ * CR-CAP-18: one publish-side channel binding for an event. Surfaced by walking
+ * the event's INBOUND `references` edges tagged
+ * `referenceKind === 'platformEventChannelMember'` (the member→event edge) to
+ * the member, then the member's INBOUND `parentOf` to its PlatformEventChannel.
+ * Answers "if I publish this event, what channel routes it (with what declared
+ * filter)?" in the same call as the subscriber list.
+ *
+ * HONESTY: `filterExpression` is the DECLARED XML text from the
+ * `*.platformEventChannelMember-meta.xml`; it is NOT runtime filter
+ * EVALUATION (which records actually flow needs record-level data the vault
+ * lacks).
+ */
+export interface EventChannelBinding {
+  readonly channelId: ComponentId | null;
+  readonly channelType: string | null;
+  readonly memberId: ComponentId;
+  readonly filterExpression: string | null;
+}
+
 /** One Platform Event in catalog mode (eventId omitted). */
 export interface EventCatalogEntry {
   readonly eventId: ComponentId;
   readonly eventApiName: string;
   readonly subscriberCount: number;
+  /**
+   * GROUP C: count of modeled `writesTo` publishers (Flow/ApexClass/ApexTrigger)
+   * that emit this event. A nonzero `publisherCount` with a zero
+   * `subscriberCount` flags a published-but-unsubscribed event.
+   */
+  readonly publisherCount: number;
 }
 
 /**
@@ -165,14 +244,49 @@ export interface EventSubscribersOutput {
   readonly subscribers: readonly EventSubscriber[];
   readonly eventApiName: string | null;
   readonly events?: readonly EventCatalogEntry[];
+  /**
+   * GROUP C: the code that PUBLISHES this event (Flow/Apex emitting a `writesTo`
+   * edge into the event). Present only in single-event mode (eventId supplied).
+   * Empty when nothing modeled publishes the event — empty≠absent (the
+   * `EventBus.publish` heuristic and dynamic/managed-package publishers may be
+   * unmodeled). Surfacing this stops a published-but-unsubscribed event from
+   * looking orphaned.
+   */
+  readonly publishers?: readonly EventPublisher[];
+  /**
+   * CR-CAP-18: the publish-side channel(s) that route this event, each with the
+   * declared per-member filter. Present only in single-event mode (eventId
+   * supplied). Empty when no PlatformEventChannelMember binds the event.
+   */
+  readonly channels?: readonly EventChannelBinding[];
   /** §C3 honesty: heuristic-detection + empty≠absent disclosure (never a silent empty). */
   readonly boundaries: readonly string[];
 }
 
 const EVENT_SUB_HEURISTIC_DISCLOSURE =
-  'Subscribers are detected from modeled `listensTo` edges (Apex/Flow trigger subscriptions). Detection is partial: some subscriptions (CDC channel pattern, dynamically-built subscriptions, managed-package listeners) are not modeled.';
+  'Subscribers are detected from modeled `listensTo` edges (Apex `Triggerable<X__e>` / Flow PlatformEvent triggers). Apex EventBus.subscribe is now recognized heuristically (static/resolvable channel args only); dynamically-built subscriptions (a computed/variable channel arg) and managed-package listeners remain invisible.';
+// CR-CAP-18: publish-side channel routing + declared per-member filters ARE now
+// extracted from `*.platformEventChannel(Member)-meta.xml` (declared XML text,
+// NOT runtime filter evaluation). Surfaced in `channels`.
+const EVENT_SUB_CHANNEL_DISCLOSURE =
+  'Publish-side channel routing and per-member filter expressions ARE extracted from `*.platformEventChannel(Member)-meta.xml` (declared XML text — NOT runtime filter EVALUATION; which records actually flow needs record-level data the vault lacks).';
 const EVENT_SUB_EMPTY_DISCLOSURE =
-  'No subscribers found for this event — NOT proof nothing subscribes. Dynamically-built subscriptions, CDC channel subscriptions, and managed-package listeners are not modeled; verify in Setup before assuming the event is unused.';
+  'No subscribers found for this event — NOT proof nothing subscribes. Apex `EventBus.subscribe(...)` is now recognized heuristically (static/resolvable channel args only); dynamically-built subscriptions and managed-package listeners remain invisible. Verify in Setup before assuming the event is unused.';
+// GROUP C: publish-side CODE (the publishers list).
+const EVENT_SUB_PUBLISHER_DISCLOSURE =
+  'Publishers are detected from modeled `writesTo` edges (Flow record-create on the event, Apex `EventBus.publish(...)`). Detection is partial: dynamically-built publishes and managed-package publishers are NOT modeled — an empty publishers list is not proof nothing publishes the event.';
+/**
+ * CR-10: Publisher-vs-subscriber disambiguation disclosure. A Flow that
+ * writes TO a platform event (recordCreates → `writesTo` edge) is a PUBLISHER,
+ * not a subscriber. Only components with a `listensTo` edge SUBSCRIBE to the
+ * event and receive it when published. A published-but-unsubscribed event means
+ * the `subscribers` array is empty even though `publishers` is non-empty — the
+ * event fires into a void (or an external consumer such as AWS EventBridge via
+ * a PlatformEventChannel binding in `channels`). The two roles are mutually
+ * exclusive in the graph model: `writesTo` = emits/publishes, `listensTo` = receives/subscribes.
+ */
+const EVENT_SUB_ROLE_DISAMBIGUATION_DISCLOSURE =
+  'CRITICAL ROLE DISTINCTION: `publishers` (writesTo edges) = code that EMITS this event; `subscribers` (listensTo edges) = code that RECEIVES it. A Flow with a <recordCreates> element on this event is a PUBLISHER, not a subscriber — it appears in `publishers`, never in `subscribers`. A non-empty `publishers` list with an empty `subscribers` list means the event fires but nothing internal consumes it (check `channels` for external consumers such as AWS EventBridge).';
 
 /**
  * Validate that `eventId` is a syntactically valid Platform Event id.
@@ -230,6 +344,157 @@ const compareSubscribers = (a: EventSubscriber, b: EventSubscriber): number =>
   a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 
 /**
+ * P3b: merge a second `listensTo` edge for an ALREADY-seen subscriber node into
+ * the existing record, preserving every subscription path. A class can listen
+ * via both `Triggerable<X__e>` and `EventBus.subscribe('X__e')`; the two edges
+ * survive the edge PK because their `source` differs, so the consumer must fold
+ * them into ONE subscriber. The kept `source`/`properties` come from the first
+ * edge (id-stable); a `mechanisms` array unions the per-edge `mechanism` tags
+ * (and falls back to the edge `source` when a mechanism is absent) so the
+ * caller can still see that the node subscribes via multiple paths.
+ */
+const mergeSubscriber = (
+  kept: EventSubscriber,
+  next: EventSubscriber,
+): EventSubscriber => {
+  const mechanismOf = (s: EventSubscriber): string => {
+    const m = s.properties['mechanism'];
+    return typeof m === 'string' && m.length > 0 ? m : s.source;
+  };
+  const existing = kept.properties['mechanisms'];
+  const base = Array.isArray(existing)
+    ? (existing as string[])
+    : [mechanismOf(kept)];
+  const merged = [...new Set([...base, mechanismOf(next)])].sort();
+  return {
+    ...kept,
+    properties: { ...kept.properties, mechanisms: merged },
+  };
+};
+
+/**
+ * GROUP C: resolve one incoming `writesTo` edge into an `EventPublisher`.
+ * Returns `null` when the edge points at a node missing from the graph or whose
+ * type is outside {@link PUBLISHER_NODE_TYPES} (e.g. a stray CustomField
+ * writesTo edge); the caller drops those rather than erroring. The `source` and
+ * `properties` come from the edge (the emitting extractor + the declared
+ * operation/mechanism), the identity from the resolved node — mirroring
+ * {@link resolveSubscriber}.
+ */
+const resolvePublisher = async (
+  ctx: Context,
+  edge: Edge,
+): Promise<Result<EventPublisher | null, string>> => {
+  const nodeResult = await getNodeById(ctx.graph, edge.fromId);
+  if (!nodeResult.ok) {
+    return err(nodeResult.error.message);
+  }
+  const node: Node | null = nodeResult.value;
+  if (node === null) {
+    return ok(null);
+  }
+  if (!PUBLISHER_NODE_TYPES.has(node.type)) {
+    return ok(null);
+  }
+  const rawDesc = node.properties['description'];
+  const description =
+    typeof rawDesc === 'string' && rawDesc.length > 0 ? rawDesc : null;
+  return ok({
+    id: node.id,
+    type: node.type,
+    apiName: node.apiName,
+    source: edge.source,
+    properties: edge.properties,
+    description,
+  });
+};
+
+/** Deterministic comparator for publishers: id ASC (mirrors subscribers). */
+const comparePublishers = (a: EventPublisher, b: EventPublisher): number =>
+  a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+
+/**
+ * GROUP C: resolve every modeled publisher of `eventId` by walking its INBOUND
+ * `writesTo` edges, resolving each `fromId`, and keeping only
+ * {@link PUBLISHER_NODE_TYPES}. Sorted id-ASC for deterministic output.
+ */
+const resolvePublishers = async (
+  ctx: Context,
+  eventId: ComponentId,
+): Promise<Result<EventPublisher[], string>> => {
+  const edgesResult = await listEdges(ctx.graph, eventId, {
+    direction: 'in',
+    edgeType: 'writesTo',
+  });
+  if (!edgesResult.ok) return err(edgesResult.error.message);
+
+  const publishers: EventPublisher[] = [];
+  for (const edge of edgesResult.value) {
+    const resolved = await resolvePublisher(ctx, edge);
+    if (!resolved.ok) return err(resolved.error);
+    if (resolved.value !== null) publishers.push(resolved.value);
+  }
+  publishers.sort(comparePublishers);
+  return ok(publishers);
+};
+
+/**
+ * CR-CAP-18: resolve the publish-side channel bindings for an event. Walks the
+ * event's INBOUND `references` edges tagged
+ * `referenceKind === 'platformEventChannelMember'` (member→event), resolves
+ * each member's INBOUND `parentOf` to its PlatformEventChannel, and reads the
+ * channel's declared `channelType`. The declared per-member `filterExpression`
+ * is read from the member→event edge's properties (no extra hop). Sorted by
+ * memberId for deterministic output.
+ */
+const resolveChannelBindings = async (
+  ctx: Context,
+  eventId: ComponentId,
+): Promise<Result<EventChannelBinding[], string>> => {
+  const memberEdges = await listEdges(ctx.graph, eventId, {
+    direction: 'in',
+    edgeType: 'references',
+  });
+  if (!memberEdges.ok) return err(memberEdges.error.message);
+
+  const bindings: EventChannelBinding[] = [];
+  for (const edge of memberEdges.value) {
+    if (edge.properties['referenceKind'] !== 'platformEventChannelMember') {
+      continue;
+    }
+    const memberId = edge.fromId;
+    const filterRaw = edge.properties['filterExpression'];
+    const filterExpression =
+      typeof filterRaw === 'string' ? filterRaw : null;
+
+    // member's INBOUND parentOf → its PlatformEventChannel.
+    const parentEdges = await listEdges(ctx.graph, memberId, {
+      direction: 'in',
+      edgeType: 'parentOf',
+    });
+    if (!parentEdges.ok) return err(parentEdges.error.message);
+
+    let channelId: ComponentId | null = null;
+    let channelType: string | null = null;
+    for (const pe of parentEdges.value) {
+      const node = await getNodeById(ctx.graph, pe.fromId);
+      if (!node.ok) return err(node.error.message);
+      if (node.value !== null && node.value.type === 'PlatformEventChannel') {
+        channelId = node.value.id;
+        const ct = node.value.properties['channelType'];
+        channelType = typeof ct === 'string' ? ct : null;
+        break;
+      }
+    }
+    bindings.push({ channelId, channelType, memberId, filterExpression });
+  }
+  bindings.sort((a, b) =>
+    a.memberId < b.memberId ? -1 : a.memberId > b.memberId ? 1 : 0,
+  );
+  return ok(bindings);
+};
+
+/**
  * The `sfi.event_subscribers` MCP tool. Returns every subscriber
  * (ApexTrigger, ApexClass, Flow) that emits a `listensTo` edge into
  * the supplied Platform Event id. The output's `eventApiName` field
@@ -267,19 +532,34 @@ export const eventSubscribersHandler = async (
       if (!inEdges.ok) {
         return err({ kind: 'internal', message: `graph query failed: ${inEdges.error.message}` });
       }
-      // Count only real subscriber node types (ApexTrigger/ApexClass/Flow) so
-      // the catalog count matches what single-event mode would return.
-      let subscriberCount = 0;
+      // Count DISTINCT subscriber node ids (ApexTrigger/ApexClass/Flow) so the
+      // catalog count matches single-event mode. P3b de-dup: a node listening
+      // via BOTH Triggerable AND EventBus.subscribe emits two `listensTo` edges
+      // (different sources survive the edge PK); counting per-edge would
+      // double-count it. Keep a per-event id set.
+      const subscriberIds = new Set<ComponentId>();
       for (const edge of inEdges.value) {
         const sub = await getNodeById(ctx.graph, edge.fromId);
         if (!sub.ok) {
           return err({ kind: 'internal', message: `graph query failed: ${sub.error.message}` });
         }
         if (sub.value !== null && SUBSCRIBER_NODE_TYPES.has(sub.value.type)) {
-          subscriberCount += 1;
+          subscriberIds.add(sub.value.id);
         }
       }
-      events.push({ eventId: node.id, eventApiName: node.apiName, subscriberCount });
+      const subscriberCount = subscriberIds.size;
+      // GROUP C: count modeled `writesTo` publishers (Flow/Apex emitting the
+      // event) so the catalog flags published-but-unsubscribed events.
+      const publishersResult = await resolvePublishers(ctx, node.id);
+      if (!publishersResult.ok) {
+        return err({ kind: 'internal', message: `graph query failed: ${publishersResult.error}` });
+      }
+      events.push({
+        eventId: node.id,
+        eventApiName: node.apiName,
+        subscriberCount,
+        publisherCount: publishersResult.value.length,
+      });
     }
     events.sort((a, b) => (a.eventId < b.eventId ? -1 : a.eventId > b.eventId ? 1 : 0));
     return ok({
@@ -311,7 +591,15 @@ export const eventSubscribersHandler = async (
     });
   }
 
-  const subscribers: EventSubscriber[] = [];
+  // P3b de-dup: a single node can emit MORE THAN ONE inbound `listensTo` edge
+  // for the same event — e.g. a class that BOTH `implements Triggerable<X__e>`
+  // (apex-class-extractor) AND calls `EventBus.subscribe('X__e')` (apex-scanner).
+  // The edge PK is (fromId, toId, edgeType, SOURCE), so the differing sources
+  // keep BOTH edges alive; without de-dup the same subscriber would appear
+  // twice. Collapse by node id, keeping the first-resolved entry and MERGING
+  // each subsequent edge's source + properties so no subscription signal is
+  // lost (the surviving record discloses every path via `mechanisms`).
+  const byId = new Map<ComponentId, EventSubscriber>();
   for (const edge of edgesResult.value) {
     const resolved = await resolveSubscriber(ctx, edge);
     if (!resolved.ok) {
@@ -320,19 +608,54 @@ export const eventSubscribersHandler = async (
         message: `graph query failed: ${resolved.error}`,
       });
     }
-    if (resolved.value !== null) {
-      subscribers.push(resolved.value);
+    if (resolved.value === null) continue;
+    const existing = byId.get(resolved.value.id);
+    if (existing === undefined) {
+      byId.set(resolved.value.id, resolved.value);
+    } else {
+      byId.set(resolved.value.id, mergeSubscriber(existing, resolved.value));
     }
   }
+  const sorted = [...byId.values()].sort(compareSubscribers).slice(0, limit);
 
-  const sorted = subscribers.sort(compareSubscribers).slice(0, limit);
+  // CR-CAP-18: resolve the publish-side channel routing for this event.
+  const channelsResult = await resolveChannelBindings(ctx, input.eventId);
+  if (!channelsResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${channelsResult.error}`,
+    });
+  }
+  const channels = channelsResult.value;
+
+  // GROUP C: resolve the publish-side CODE (Flow/Apex emitting `writesTo`).
+  const publishersResult = await resolvePublishers(ctx, input.eventId);
+  if (!publishersResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${publishersResult.error}`,
+    });
+  }
+  const publishers = publishersResult.value;
+
   const boundaries =
     sorted.length === 0
-      ? [EVENT_SUB_HEURISTIC_DISCLOSURE, EVENT_SUB_EMPTY_DISCLOSURE]
-      : [EVENT_SUB_HEURISTIC_DISCLOSURE];
+      ? [
+          EVENT_SUB_HEURISTIC_DISCLOSURE,
+          EVENT_SUB_CHANNEL_DISCLOSURE,
+          EVENT_SUB_PUBLISHER_DISCLOSURE,
+          EVENT_SUB_ROLE_DISAMBIGUATION_DISCLOSURE,
+          EVENT_SUB_EMPTY_DISCLOSURE,
+        ]
+      : [
+          EVENT_SUB_HEURISTIC_DISCLOSURE,
+          EVENT_SUB_CHANNEL_DISCLOSURE,
+          EVENT_SUB_PUBLISHER_DISCLOSURE,
+          EVENT_SUB_ROLE_DISAMBIGUATION_DISCLOSURE,
+        ];
 
   return ok({
-    data: { subscribers: sorted, eventApiName: apiName, boundaries },
+    data: { subscribers: sorted, eventApiName: apiName, channels, publishers, boundaries },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
       refreshedAt: ctx.manifest.refreshedAt,

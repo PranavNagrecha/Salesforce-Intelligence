@@ -66,7 +66,8 @@ describe('product surface counts', () => {
     expect(surface.componentTypeCount).toBe(componentTypes);
     expect(surface.edgeTypeCount).toBe(edgeTypes);
     expect(componentTypes).toBeGreaterThan(50);
-    expect(edgeTypes).toBe(22);
+    // CR-CAP-12 added the `hasMember` EdgeType (Group → member), 22 → 23.
+    expect(edgeTypes).toBe(23);
   });
 
   it('marketing docs do not hard-code stale MCP tool counts', () => {

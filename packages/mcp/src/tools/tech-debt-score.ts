@@ -45,7 +45,7 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listNodesByType } from '@sf-intelligence/graph';
+import { countNodesByType, listNodesByType } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -57,6 +57,7 @@ import { findHardcodedValuesAnywhereHandler } from './find-hardcoded-values-anyw
 import {
   processBuilderMigrationCandidatesHandler,
 } from './process-builder-migration-candidates.js';
+import { nodeScanLimit } from './scan-cap.js';
 import {
   unassignedPermissionSetsHandler,
 } from './unassigned-permission-sets.js';
@@ -67,7 +68,42 @@ import {
   unusedFieldsDeepHandler,
 } from './unused-fields-deep.js';
 
-const LIST_PAGE_SIZE = 500;
+/**
+ * Hard ceiling on a single `listNodesByType` page. `nodeScanLimit()` is
+ * env-overridable (`SFI_NODE_SCAN_LIMIT`) so a test can drive the multi-page
+ * offset loop without seeding 500+ nodes, but it does NOT clamp at 500, and the
+ * graph layer rejects `limit > 500` — so every page request is clamped here.
+ */
+const PAGE_CAP = 500;
+const pageSize = (): number => Math.min(nodeScanLimit(), PAGE_CAP);
+
+/**
+ * Load EVERY node of a single ComponentType, not just the first page. The
+ * tech-debt composite SCORE inspects per-node properties (apiVersion,
+ * qualityIssues, lastModifiedDate) and must be computed over the COMPLETE set —
+ * a single `listNodesByType` page caps at 500 (id ASC), so an org with > 500 of
+ * a scanned type used to score off only the first page (a saturated, wrong
+ * composite). Page by `pageSize()` accumulating until a short page proves the
+ * type is exhausted, with `countNodesByType` as a belt cross-check so a page
+ * that unexpectedly returns full cannot loop forever. The common case (type
+ * under the cap) runs exactly one sub-cap page — byte-identical.
+ */
+const loadAllNodes = async (
+  ctx: Context,
+  type: ComponentType,
+): Promise<Result<readonly Node[], string>> => {
+  const total = await countNodesByType(ctx.graph, type);
+  if (!total.ok) return err(total.error.message);
+  const limit = pageSize();
+  const all: Node[] = [];
+  for (let offset = 0; ; offset += limit) {
+    const page = await listNodesByType(ctx.graph, type, { limit, offset });
+    if (!page.ok) return err(page.error.message);
+    all.push(...page.value);
+    if (page.value.length < limit || all.length >= total.value) break;
+  }
+  return ok(all);
+};
 
 /**
  * The default weighting scheme per PLAN-v2.4 §15. Weights are
@@ -104,6 +140,16 @@ const WEIGHT_SCHEME_DISCLOSURE =
  */
 const CODE_QUALITY_HEURISTIC_DISCLOSURE =
   'the codeQuality axis is derived from the heuristic Apex scanner (regex/token, not a real compiler), so its issue counts carry confidence: heuristic — they approximate code quality and may over- or under-count (dynamic dispatch, reflective access, and cross-method dataflow are invisible). Treat this axis’s contribution to the score as indicative, not exact.';
+
+/**
+ * Surfaced when the freshness axis is INCLUDED. The
+ * componentsNeverModifiedSinceCreation detail is always null because the vault
+ * does not capture a per-component createdDate (only lastModifiedDate is
+ * extracted/enriched) — so this honest boundary replaces what used to be a
+ * fabricated 0 (CR-16a).
+ */
+const NEVER_MODIFIED_UNAVAILABLE_DISCLOSURE =
+  'the "never modified since creation" count is not available — the vault does not capture a per-component createdDate (only lastModifiedDate is extracted/enriched), so this metric is reported as null rather than a fabricated 0.';
 
 /** Per-category scale factor — converts a raw count to a 0-100 contribution. */
 const SCALE_FACTORS: Readonly<Record<TechDebtCategory, number>> = Object.freeze({
@@ -303,10 +349,8 @@ const computeApiVersionDistribution = async (
     string
   >
 > => {
-  const r = await listNodesByType(ctx.graph, 'ApexClass', {
-    limit: LIST_PAGE_SIZE,
-  });
-  if (!r.ok) return err(r.error.message);
+  const r = await loadAllNodes(ctx, 'ApexClass');
+  if (!r.ok) return err(r.error);
   let below30 = 0;
   let below40 = 0;
   let below50 = 0;
@@ -344,11 +388,7 @@ const computeCodeQualityCounts = async (
 > => {
   const fetchType = async (
     type: ComponentType,
-  ): Promise<Result<readonly Node[], string>> => {
-    const r = await listNodesByType(ctx.graph, type, { limit: LIST_PAGE_SIZE });
-    if (!r.ok) return err(r.error.message);
-    return ok(r.value);
-  };
+  ): Promise<Result<readonly Node[], string>> => loadAllNodes(ctx, type);
   const cs = await fetchType('ApexClass');
   if (!cs.ok) return err(cs.error);
   const ts = await fetchType('ApexTrigger');
@@ -376,9 +416,19 @@ const computeCodeQualityCounts = async (
 };
 
 /**
- * Compute the freshness category counts from `lastModifiedDate`
- * properties. When NO node carries non-null `lastModifiedDate` (v1.7
- * R2 hasn't run), returns null.
+ * Compute the freshness category counts from the `lastModifiedDate`
+ * node field. When NO node carries non-null `lastModifiedDate` (v1.7
+ * R2 / Tooling-API enrichment hasn't run), returns null.
+ *
+ * `neverModified` ("never modified since creation") is ALWAYS null/unknown:
+ * computing it requires a per-component `createdDate` to diff against
+ * `lastModifiedDate`, but no such datum exists in the vault/graph — the Node
+ * contract carries only `lastModifiedDate`/`lastModifiedBy`/`apiVersion` (no
+ * `createdDate`), and the Tooling-API enrichment never SELECTs `CreatedDate`.
+ * So only the `lastModifiedDate`-based axes (olderThan1Year/olderThan2Years)
+ * are real; per the honesty contract `neverModified` is reported as null, never
+ * a fabricated 0. (TODO: if a future enrichment adds `CreatedDate` to enrich.ts
+ * and a `createdDate` field to Node, this could become a real computed metric.)
  */
 const computeFreshnessCounts = async (
   ctx: Context,
@@ -387,7 +437,7 @@ const computeFreshnessCounts = async (
     | {
         readonly olderThan1Year: number;
         readonly olderThan2Years: number;
-        readonly neverModified: number;
+        readonly neverModified: null;
       }
     | null,
     string
@@ -406,12 +456,14 @@ const computeFreshnessCounts = async (
   let any = false;
   let olderThan1Year = 0;
   let olderThan2Years = 0;
-  const neverModified = 0;
+  // Always null/unknown: no per-component createdDate exists in the vault/graph
+  // to diff against lastModifiedDate (see JSDoc). Never a fabricated 0.
+  const neverModified = null;
   const oneYearAgo = Date.now() - 365 * 24 * 60 * 60 * 1000;
   const twoYearsAgo = Date.now() - 2 * 365 * 24 * 60 * 60 * 1000;
   for (const t of types) {
-    const r = await listNodesByType(ctx.graph, t, { limit: LIST_PAGE_SIZE });
-    if (!r.ok) return err(r.error.message);
+    const r = await loadAllNodes(ctx, t);
+    if (!r.ok) return err(r.error);
     for (const n of r.value) {
       if (n.lastModifiedDate === null) continue;
       any = true;
@@ -716,10 +768,11 @@ export const techDebtScoreHandler = async (
           'freshness',
           fr?.olderThan2Years ?? 0,
         ),
-        componentsNeverModifiedSinceCreation: detailWhenIncluded(
-          'freshness',
-          fr?.neverModified ?? 0,
-        ),
+        // Always null/unknown — "never modified since creation" needs a
+        // per-component createdDate that the vault/graph does not capture, so we
+        // report null (not measured) rather than a fabricated 0. Null in BOTH
+        // the data-present and freshness-excluded paths. (CR-16a)
+        componentsNeverModifiedSinceCreation: fr?.neverModified ?? null,
       },
     },
     apiVersions: {
@@ -780,6 +833,12 @@ export const techDebtScoreHandler = async (
   // not part of the score, so the disclosure would be misleading.
   if (codeQualityExtractorRan && !excludedSet.has('codeQuality')) {
     boundaries.push(CODE_QUALITY_HEURISTIC_DISCLOSURE);
+  }
+  // When freshness is INCLUDED, state honestly that the never-modified count is
+  // not available (no createdDate in the vault) rather than emit a fabricated 0.
+  // When freshness is excluded the extractor-not-run note already covers it.
+  if (freshnessExtractorRan && !excludedSet.has('freshness')) {
+    boundaries.push(NEVER_MODIFIED_UNAVAILABLE_DISCLOSURE);
   }
 
   // Hardcoded-Salesforce-ID debt, sourced from the dedicated recognizer so the

@@ -16,10 +16,22 @@ properties:
   label: Method
   length: null
   picklistValues:
-    - ACH
-    - Card
-    - Check
-    - Wire
+    - default: false
+      isActive: true
+      label: ACH
+      value: ACH
+    - default: false
+      isActive: true
+      label: Card
+      value: Card
+    - default: false
+      isActive: true
+      label: Check
+      value: Check
+    - default: false
+      isActive: true
+      label: Wire
+      value: Wire
   precision: null
   referenceTo: null
   relationshipName: null
@@ -48,7 +60,7 @@ How the payment was tendered.
 | formula | `null` |
 | inlineHelpText | `null` |
 | length | `null` |
-| picklistValues | `ACH,Card,Check,Wire` |
+| picklistValues | `ACH, Card, Check, Wire` |
 | precision | `null` |
 | referenceTo | `null` |
 | relationshipName | `null` |

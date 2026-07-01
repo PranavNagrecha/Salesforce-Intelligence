@@ -215,6 +215,157 @@ const buildAlertTemplateMap = (
 };
 
 /**
+ * A `<fieldUpdates>` entry's resolved target: the field it sets + the op.
+ *
+ * Exported so `approval-process.ts` (CR-CAP-07) can reuse the SAME shape
+ * + builder + well-formedness guard when it resolves an ApprovalProcess
+ * FieldUpdate hook action against the sibling `workflows/{Object}.workflow-meta.xml`
+ * file's `<fieldUpdates>` collection. Single source of truth — do NOT
+ * copy-paste into the approval extractor (drift risk per CR-CAP-07).
+ */
+export interface FieldUpdateTarget {
+  /** The `<field>` API name the update sets (verbatim, or null if absent). */
+  readonly field: string | null;
+  /** The `<operation>` (Formula|Literal|Null|NextValue|PreviousValue). */
+  readonly operation: string | null;
+  /**
+   * CR-P3-5: the `<targetObject>` element. Salesforce emits it ONLY for a
+   * CROSS-OBJECT field update (e.g. updating a field on a parent/related
+   * record); it holds the RELATIONSHIP reference, not the related object's API
+   * name. Same-object updates omit it (null). Its mere PRESENCE marks the
+   * update as cross-object, which is all we need: the relationship→object map
+   * is not resolvable offline, so a cross-object update emits NO `writesTo`
+   * (minting `CustomField:{relationship}.{field}` would be a relationship-scoped
+   * phantom — a false writer claim). Mirrors `formula-references.ts`, which
+   * skips every cross-object dotted path for the same reason.
+   */
+  readonly targetObject: string | null;
+}
+
+/**
+ * Build a name -> target lookup from the file's `<fieldUpdates>`
+ * collection. Each entry maps a field-update `<fullName>` (the name a
+ * rule's `<actions><name>` references) to the `<field>` that update SETS
+ * and its `<operation>`. This is the same join `buildAlertTemplateMap`
+ * does for alert templates: the `<actions>` child of a rule carries only
+ * the field-update's NAME, never the target field — the target field lives
+ * here, in the sibling top-level `<fieldUpdates>` collection.
+ *
+ * Entries without a `<fullName>` are silently skipped — they're not
+ * addressable by name, so no rule can reference them. Entries without a
+ * `<field>` are included with `field: null` so the caller can distinguish
+ * "field-update exists but names no target" (emit no `writesTo`) from
+ * "field-update not found". CR-P3-5: `<targetObject>` is captured so the
+ * caller can detect (and skip the `writesTo` for) cross-object updates whose
+ * relationship→object mapping is not resolvable offline.
+ */
+export const buildFieldUpdateTargetMap = (
+  rootObj: Record<string, unknown>,
+): Readonly<Map<string, FieldUpdateTarget>> => {
+  const result = new Map<string, FieldUpdateTarget>();
+  for (const raw of toArray(rootObj['fieldUpdates'])) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const fu = raw as Record<string, unknown>;
+    const fullNameRaw = unwrapSingle(fu['fullName']);
+    if (fullNameRaw === undefined || fullNameRaw === null || fullNameRaw === '') {
+      continue;
+    }
+    result.set(String(fullNameRaw), {
+      field: optionalString(fu, 'field'),
+      operation: optionalString(fu, 'operation'),
+      targetObject: optionalString(fu, 'targetObject'),
+    });
+  }
+  return result;
+};
+
+/**
+ * v2.9 — promote each `<alerts>` child to a real `WorkflowAlert` Node.
+ * Pre-v2.9 `buildAlertTemplateMap` read `<alerts>` only to build the
+ * name→template lookup for `sendsEmail` edge resolution; it emitted no
+ * nodes, so alert-level properties (`senderType`, `description`,
+ * `template`, `ccEmails`) were invisible to graph queries.
+ *
+ * One Node per `<alerts>` entry. Entries lacking a `<fullName>` are
+ * silently skipped (they're not addressable by name). Each Node carries:
+ *
+ *   - `name`: the entry's `<fullName>` verbatim.
+ *   - `description`: the `<description>` (string or null).
+ *   - `senderType`: the `<senderType>` (string or null; typically
+ *     `CurrentUser`, `OrgWideEmailAddress`, or `DefaultWorkflowUser`).
+ *   - `template`: the `<template>` (string or null; slash-separated
+ *     EmailTemplate path, verbatim from XML).
+ *   - `ccEmails`: the `<ccEmails>` collection as a string array (may
+ *     be empty when no `<ccEmails>` child is present).
+ *
+ * The parent edge is the existing `parentOf` from
+ * `CustomObject:{ObjectApiName}` mirroring the OutboundMessage v2.8
+ * pattern; no new EdgeType is introduced.
+ *
+ * Emission happens regardless of whether the file has any `<rules>` —
+ * a workflow file with only `<alerts>` is a documented orphan-collection
+ * happy path (alert definitions that outlive their consuming rules).
+ */
+const buildWorkflowAlertNodes = (
+  rootObj: Record<string, unknown>,
+  objectApiName: string,
+  parentId: string,
+  path: string,
+): { readonly nodes: readonly Node[]; readonly edges: readonly Edge[] } => {
+  const nodes: Node[] = [];
+  const edges: Edge[] = [];
+  for (const raw of toArray(rootObj['alerts'])) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const alert = raw as Record<string, unknown>;
+    const fullNameRaw = unwrapSingle(alert['fullName']);
+    if (
+      fullNameRaw === undefined ||
+      fullNameRaw === null ||
+      fullNameRaw === ''
+    ) {
+      continue;
+    }
+    const name = String(fullNameRaw);
+    const alertId = `WorkflowAlert:${objectApiName}.${name}`;
+    const ccEmailsRaw = toArray(alert['ccEmails']);
+    const ccEmails = ccEmailsRaw
+      .map((entry) =>
+        entry === undefined || entry === null || entry === ''
+          ? null
+          : String(entry),
+      )
+      .filter((entry): entry is string => entry !== null);
+    nodes.push({
+      id: alertId,
+      type: 'WorkflowAlert',
+      apiName: `${objectApiName}.${name}`,
+      label: name,
+      parentId,
+      sourcePath: path,
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {
+        name,
+        description: optionalString(alert, 'description'),
+        senderType: optionalString(alert, 'senderType'),
+        template: optionalString(alert, 'template'),
+        ccEmails,
+      },
+    });
+    edges.push({
+      fromId: parentId,
+      toId: alertId,
+      edgeType: 'parentOf',
+      confidence: 'declared',
+      source: EXTRACTOR_SOURCE,
+      properties: {},
+    });
+  }
+  return { nodes, edges };
+};
+
+/**
  * v2.8 — promote each `<outboundMessages>` child to a real
  * `OutboundMessage` Node. Pre-v2.8 these references dangled by design
  * (per `WorkflowRule.md` § "outboundMessages"); v2.8 promotes them so
@@ -417,6 +568,29 @@ const resolveAction = (
 };
 
 /**
+ * CR-RV13: malformed-leaf guard for a FieldUpdate's target `<field>`.
+ * Returns `false` for a `<field>` value that real Salesforce metadata never
+ * emits as a same-object FieldUpdate target but a hand-edited/corrupt file can,
+ * each of which would mint a phantom `CustomField:…` writer claim:
+ *
+ *   - a `$`-prefixed global-variable ref ($User.x, $Setup.x, …) → not a field
+ *     on this object (would mint `CustomField:$User.x`);
+ *   - a dotted ref with an empty object-part or leaf-part (".", "Foo.", ".Foo")
+ *     → degenerate id (`CustomField:.`, `CustomField:Foo.`, `CustomField:.Foo`).
+ *
+ * A bare same-object name (no dot) and a clean `Object.Field` dotted ref both
+ * pass. (Truly empty `<field>` is already filtered upstream by `optionalString`
+ * → `null`; the cross-object `<targetObject>` case is handled separately per
+ * CR-P3-5.)
+ */
+export const isWellFormedFieldRef = (field: string): boolean => {
+  if (field.startsWith('$')) return false;
+  if (!field.includes('.')) return true;
+  // Dotted: every segment must be non-empty.
+  return field.split('.').every((segment) => segment.length > 0);
+};
+
+/**
  * Emit edges for a single resolved action, applying the variant table
  * and the dedup key set. Returns the edges to append. Skips deprecated
  * `Send` and any other unknown variant per the doc.
@@ -426,6 +600,7 @@ const edgesForAction = (
   ruleId: string,
   objectApiName: string,
   alertTemplateMap: Readonly<Map<string, string | null>>,
+  fieldUpdateMap: Readonly<Map<string, FieldUpdateTarget>>,
   seen: Set<string>,
 ): readonly Edge[] => {
   // `Send` is the deprecated variant: silently ignored.
@@ -462,6 +637,57 @@ const edgesForAction = (
         source: EXTRACTOR_SOURCE,
         properties: { actionType: action.type },
       });
+    }
+  }
+
+  // FieldUpdate actions additionally emit a FIELD-level `writesTo` edge
+  // to the CustomField the update SETS — mirroring `flow.ts`'s
+  // `buildInputAssignmentEdges`. This is KEEP-the-`references`-ADD-the-
+  // `writesTo`: the `references` above points at the
+  // `WorkflowFieldUpdate:{Object}.{name}` scaffolding node (which several
+  // consumers and the change-impact metadata-blocker branch rely on); the
+  // new `writesTo` points at the actual `CustomField:{Object}.{field}` so
+  // that field-change-impact tools see the WorkflowRule as a writer. The
+  // target field is NOT on the `<actions>` child (it carries only
+  // `<name>` == the field-update's `<fullName>`) — it lives in the sibling
+  // `<fieldUpdates>` collection, resolved via `fieldUpdateMap`.
+  //
+  // CR-P3-5: a CROSS-OBJECT field update (Salesforce emits a `<targetObject>`)
+  // sets a field on a RELATED record. `<targetObject>` is the relationship
+  // reference, not the related object's API name, and the relationship→object
+  // map is not resolvable offline — so we SKIP the `writesTo` entirely (emit no
+  // edge) rather than mint a relationship-scoped `CustomField:{rel}.{field}`
+  // phantom (a false writer claim). This mirrors `formula-references.ts`, which
+  // skips every cross-object dotted path for the same reason. The `references`
+  // edge to the scaffolding node above STILL emits, so the action is not
+  // silently dropped (admin-legacy-automation's dangling-edge honesty
+  // contract). A SAME-OBJECT update (no `<targetObject>`): a bare field name is
+  // object-scoped; a dotted name is taken verbatim (mirrors condition-
+  // extractor's field resolution). Confidence is `parsed` (the field name is
+  // read straight out of the XML), matching `flow.ts`.
+  if (action.type === 'FieldUpdate') {
+    const target = fieldUpdateMap.get(action.name);
+    if (
+      target !== undefined &&
+      target.field !== null &&
+      target.targetObject === null &&
+      isWellFormedFieldRef(target.field)
+    ) {
+      const fieldTargetId = target.field.includes('.')
+        ? `CustomField:${target.field}`
+        : `CustomField:${objectApiName}.${target.field}`;
+      const writesToDedupKey = `writesTo|${fieldTargetId}`;
+      if (!seen.has(writesToDedupKey)) {
+        seen.add(writesToDedupKey);
+        out.push({
+          fromId: ruleId,
+          toId: fieldTargetId,
+          edgeType: 'writesTo',
+          confidence: 'parsed',
+          source: EXTRACTOR_SOURCE,
+          properties: { operation: target.operation },
+        });
+      }
     }
   }
 
@@ -521,6 +747,55 @@ const parseCriteriaItem = (raw: unknown): CriteriaItem | null => {
 };
 
 /**
+ * CR-CAP-11 — declarative shape of a single `<workflowTimeTriggers>`
+ * child of a `<rules>` element. This is the verbatim DECLARATIVE XML
+ * (confidence tier `declared`), NOT an assertion that the trigger fires:
+ * `offsetFromField` is measured from a record's field value the offline
+ * vault cannot evaluate, and the scheduled-action queue is record-level.
+ */
+interface TimeTrigger {
+  /** `<timeLength>` integer offset (null when absent/unparseable). */
+  readonly timeLength: number | null;
+  /** `<workflowTimeTriggerUnit>` enum (Hours|Days), verbatim or null. */
+  readonly timeUnit: string | null;
+  /** `<offsetFromField>` API name; null = offset from the rule trigger date. */
+  readonly offsetFromField: string | null;
+  /** Count of nested `<actions>` queued by this time trigger. */
+  readonly actionCount: number;
+}
+
+/**
+ * CR-CAP-11 — parse the per-rule `<workflowTimeTriggers>` collection.
+ *
+ * `<workflowTimeTriggers>` is a REPEATABLE child of each `<rules>`
+ * element (NOT a top-level Workflow collection like `<fieldUpdates>`),
+ * so it MUST be read off the `rule` record, never off the root. Each
+ * trigger carries `<timeLength>`, `<workflowTimeTriggerUnit>`, an
+ * optional `<offsetFromField>`, and a nested repeatable `<actions>`
+ * block whose count we surface (the action chain itself stays
+ * record-level and is deliberately not modeled — see the extractor doc).
+ */
+const parseTimeTriggers = (
+  rule: Record<string, unknown>,
+): readonly TimeTrigger[] => {
+  const out: TimeTrigger[] = [];
+  for (const raw of toArray(rule['workflowTimeTriggers'])) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const tt = raw as Record<string, unknown>;
+    const lengthStr = optionalString(tt, 'timeLength');
+    const lengthNum = lengthStr === null ? null : Number(lengthStr);
+    out.push({
+      timeLength:
+        lengthNum !== null && Number.isFinite(lengthNum) ? lengthNum : null,
+      timeUnit: optionalString(tt, 'workflowTimeTriggerUnit'),
+      offsetFromField: optionalString(tt, 'offsetFromField'),
+      actionCount: toArray(tt['actions']).length,
+    });
+  }
+  return out;
+};
+
+/**
  * Build the per-rule list of `ConditionSource` entries per the v2.0a
  * spec. A WorkflowRule emits at most ONE condition surface (either
  * the `<formula>` or the `<criteriaItems>` array). When the rule has
@@ -569,6 +844,7 @@ const buildRule = (
   objectApiName: string,
   parentId: string,
   alertTemplateMap: Readonly<Map<string, string | null>>,
+  fieldUpdateMap: Readonly<Map<string, FieldUpdateTarget>>,
   path: string,
 ): Result<BuiltRule, ExtractorError> => {
   const required = validateRuleRequired(rule, path);
@@ -598,6 +874,10 @@ const buildRule = (
       parentObjectApiName: objectApiName,
     });
 
+  // CR-CAP-11 — declarative time-trigger shape. Surfaced as node
+  // properties only; never as a firing claim (record-level condition).
+  const timeTriggers = parseTimeTriggers(rule);
+
   const node: Node = {
     id: ruleId,
     type: 'WorkflowRule',
@@ -616,7 +896,28 @@ const buildRule = (
       booleanFilter: optionalString(rule, 'booleanFilter'),
       criteriaItemCount: toArray(rule['criteriaItems']).length,
       actionCount: actions.length,
+      // CR-CAP-11b — per-rule action-type breakdown. Counts this rule's
+      // IMMEDIATE `<actions>` by `<type>` (the SAME array the per-action
+      // edges are derived from), NOT the top-level `<fieldUpdates>` /
+      // `<outboundMessages>` / `<tasks>` DEFINITION collections (which are
+      // a different, larger surface) and NOT the time-trigger nested
+      // actions. Confidence tier `declared` (verbatim from `<type>`). These
+      // make process_builder_migration_candidates' propertyNumber reads
+      // (fieldUpdateCount / outboundMessageCount / taskCreationCount) TRUE
+      // instead of silently 0, so its `totalActions` sum is coherent with
+      // the sendsEmail / callsApex EDGE counts (also per-rule-derived).
+      fieldUpdateCount: actions.filter((a) => a.type === 'FieldUpdate').length,
+      outboundMessageCount: actions.filter((a) => a.type === 'OutboundMessage')
+        .length,
+      taskCreationCount: actions.filter((a) => a.type === 'Task').length,
       conditions: conditionsMirror,
+      // CR-CAP-11 — makes the pre-existing skill claim
+      // (admin-legacy-automation/SKILL.md "surfaces the trigger count
+      // via properties.timeTriggerCount") and the consumer read
+      // (process-builder-migration-candidates.ts) TRUE; both silently
+      // defaulted to 0 before this property was emitted.
+      timeTriggerCount: timeTriggers.length,
+      timeTriggers,
     },
   };
 
@@ -641,7 +942,14 @@ const buildRule = (
   const seen = new Set<string>();
   for (const action of actions) {
     edges.push(
-      ...edgesForAction(action, ruleId, objectApiName, alertTemplateMap, seen),
+      ...edgesForAction(
+        action,
+        ruleId,
+        objectApiName,
+        alertTemplateMap,
+        fieldUpdateMap,
+        seen,
+      ),
     );
   }
   edges.push(...firesWhenEdges);
@@ -663,19 +971,51 @@ const buildRule = (
  * `Alert` actions emit two edges: a `references` to
  * `WorkflowAlert:{ObjectApiName}.{name}` AND a `sendsEmail` to
  * `EmailTemplate:{Folder}.{Name}` when the named alert's `<template>`
- * resolves inside this file. `Apex` actions emit `callsApex` (no
- * `references`); `FlowAction` emits `references` to `Flow:{name}` (no
+ * resolves inside this file. `FieldUpdate` actions likewise emit two
+ * edges: the `references` to `WorkflowFieldUpdate:{ObjectApiName}.{name}`
+ * scaffolding node AND a FIELD-level `writesTo` to the
+ * `CustomField:{ObjectApiName}.{field}` the update SETS (the target field
+ * is read from this file's sibling `<fieldUpdates>` collection via
+ * {@link buildFieldUpdateTargetMap}, mirroring `flow.ts`'s
+ * `<inputAssignments>` writesTo edges). `Apex` actions emit `callsApex`
+ * (no `references`); `FlowAction` emits `references` to `Flow:{name}` (no
  * object scope, per the variant table); the deprecated `Send` variant
  * and any unknown action type are silently ignored. Duplicate
  * `(rule, target, edgeType)` triples within a single rule are
  * deduplicated.
  *
+ * CR-CAP-11: each rule's per-rule `<workflowTimeTriggers>` collection
+ * (a REPEATABLE child of `<rules>`, NOT a top-level Workflow collection)
+ * is parsed into two declarative node properties: `timeTriggerCount`
+ * (the number of time triggers) and `timeTriggers[]` ({timeLength,
+ * timeUnit, offsetFromField, actionCount}). These are confidence tier
+ * `declared` — the verbatim declarative XML. The extractor does NOT
+ * model whether or when a trigger fires: the firing condition and the
+ * scheduled-action queue are record-level (the `offsetFromField` offset
+ * is measured from a record's field value the offline vault cannot read),
+ * and the nested action chain is surfaced only as a count.
+ *
+ * CR-CAP-11b: each rule also carries three per-rule action-type counts —
+ * `fieldUpdateCount`, `outboundMessageCount`, `taskCreationCount` —
+ * computed by filtering the rule's resolved IMMEDIATE `<actions>` array by
+ * `<type>` (`FieldUpdate` / `OutboundMessage` / `Task`). These count the
+ * per-rule `<actions>`, NOT the top-level `<fieldUpdates>` /
+ * `<outboundMessages>` / `<tasks>` definition collections (a different,
+ * larger surface) and NOT the time-trigger nested actions; the deprecated
+ * `Send` and any unknown `<type>` are ignored. Confidence tier `declared`.
+ * They mirror the CR-CAP-11 `timeTriggerCount` precedent: the consumer
+ * (`process_builder_migration_candidates`) already reads them via
+ * `propertyNumber` and silently defaulted them to 0 before this emit.
+ *
  * `<alerts>`, `<fieldUpdates>`, `<tasks>`, and `<outboundMessages>`
- * collections under the root are not promoted to nodes — they appear
+ * collections under the root are not promoted to NODES — they appear
  * only as dangling-by-design `references` targets named by consuming
- * rules. A file with `<Workflow>` root but zero `<rules>` children is
- * the documented happy path for objects whose action scaffolding
- * outlives its consuming rules; it yields zero nodes and zero edges.
+ * rules. The `<fieldUpdates>` collection is additionally CONSULTED (not
+ * promoted) to resolve each FieldUpdate action's target field for the
+ * field-level `writesTo` edge described above. A file with `<Workflow>`
+ * root but zero `<rules>` children is the documented happy path for
+ * objects whose action scaffolding outlives its consuming rules; it
+ * yields zero nodes and zero edges.
  *
  * Returns an `ExtractorError` for any of the documented failure modes:
  * `file-not-found`, `parse-error`, or `malformed-input` (wrong root,
@@ -725,6 +1065,7 @@ export const extractWorkflowRule = async (
   const objectApiName = deriveComponentApiName(path, WORKFLOW_FILE_SUFFIX);
   const parentId = `CustomObject:${objectApiName}`;
   const alertTemplateMap = buildAlertTemplateMap(rootObj);
+  const fieldUpdateMap = buildFieldUpdateTargetMap(rootObj);
 
   const rules = toArray(rootObj['rules']).filter(
     (r): r is Record<string, unknown> => typeof r === 'object' && r !== null,
@@ -733,7 +1074,14 @@ export const extractWorkflowRule = async (
   const nodes: Node[] = [];
   const edges: Edge[] = [];
   for (const rule of rules) {
-    const built = buildRule(rule, objectApiName, parentId, alertTemplateMap, path);
+    const built = buildRule(
+      rule,
+      objectApiName,
+      parentId,
+      alertTemplateMap,
+      fieldUpdateMap,
+      path,
+    );
     if (!built.ok) return built;
     nodes.push(built.value.node);
     // v2.0a — emit the per-rule ConditionalContext nodes alongside
@@ -742,6 +1090,18 @@ export const extractWorkflowRule = async (
     nodes.push(...built.value.conditionNodes);
     edges.push(...built.value.edges);
   }
+  // v2.9 — promote `<alerts>` entries to WorkflowAlert nodes. These
+  // were dangling-by-design references (the alert name appeared only
+  // in the name→template map used for `sendsEmail` resolution); v2.9
+  // captures them so alert-level properties (`senderType`,
+  // `description`, `template`, `ccEmails`) are queryable via graph
+  // queries (`sfi.get_component`, `sfi.find_component_usages`).
+  // Emission happens regardless of whether the file has any `<rules>` —
+  // a workflow file with only `<alerts>` is a documented orphan-
+  // collection happy path.
+  const wa = buildWorkflowAlertNodes(rootObj, objectApiName, parentId, path);
+  nodes.push(...wa.nodes);
+  edges.push(...wa.edges);
   // v2.8 — promote `<outboundMessages>` entries to OutboundMessage
   // nodes. These were dangling-by-design references in v1.3; v2.8
   // captures them so the integration-catalog tools can enumerate

@@ -251,6 +251,57 @@ describe('unassignedPermissionSetsHandler — Scenario B (structural-only fallba
     const ids = r.value.data.orphanedFromComponents.map((u) => u.id);
     expect(ids).toContain(MUTING_PS);
   });
+
+  // ---- CR-22 cursor + CR-RV12 ----------------------------------------
+
+  it('whole-fits omits cursor block + scanTruncated (byte-identical golden)', async () => {
+    const r = await unassignedPermissionSetsHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect('nextCursor' in r.value.data).toBe(false);
+    expect('pageInfo' in r.value.data).toBe(false);
+    expect('otherSections' in r.value.data).toBe(false);
+    expect('scanTruncated' in r.value.data).toBe(false);
+  });
+
+  it('paging the populated (orphaned) list emits nextCursor + discloses the other', async () => {
+    const r = await unassignedPermissionSetsHandler(ctx, { limit: 1 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.orphanedFromComponents.length).toBe(1);
+    expect(r.value.data.designatedList).toBe('orphanedFromComponents');
+    expect(r.value.data.nextCursor).toBeDefined();
+    const others = r.value.data.otherSections ?? [];
+    expect(others.find((s) => s.listId === 'unassigned')?.totalCount).toBe(0);
+  });
+
+  it('resume walks the orphaned list with no dup/skip', async () => {
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < 4; i += 1) {
+      const r = await unassignedPermissionSetsHandler(ctx, {
+        limit: 1,
+        ...(cursor !== undefined ? { cursor } : {}),
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      for (const e of r.value.data.orphanedFromComponents) seen.push(e.id);
+      cursor = r.value.data.nextCursor;
+      if (cursor === undefined) break;
+    }
+    expect(seen.sort()).toEqual([MUTING_PS, ORPHANED_PS].sort());
+  });
+
+  it('rejects a cursor minted for a different filter', async () => {
+    const p1 = await unassignedPermissionSetsHandler(ctx, { limit: 1 });
+    expect(p1.ok).toBe(true);
+    if (!p1.ok) return;
+    const cursor = p1.value.data.nextCursor!;
+    const stale = await unassignedPermissionSetsHandler(ctx, { includeManagedPackage: true, limit: 1, cursor });
+    expect(stale.ok).toBe(false);
+    if (stale.ok) return;
+    expect(stale.error.kind).toBe('invalid-query');
+  });
 });
 
 describe('unassignedPermissionSetsInputSchema', () => {
@@ -273,5 +324,51 @@ describe('unassignedPermissionSetsInputSchema', () => {
         includeMutingPermissionSets: false,
       }).success,
     ).toBe(true);
+  });
+});
+
+describe('coverage-aware-zero — PermissionSet not retrieved', () => {
+  let tempDir: string;
+  let store: GraphStore;
+
+  beforeAll(async () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'sfi-ups-cov-'));
+    const o = await openGraph(join(tempDir, 'g.db'));
+    if (!o.ok) throw new Error(o.error.message);
+    store = o.value;
+    // No PermissionSet nodes land — the family was not retrieved.
+    await importExtractionResults(store, [
+      { nodes: [makeNode({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' })], edges: [] },
+    ]);
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('attaches a coverageCaveat when the PermissionSet family was not retrieved', async () => {
+    const covManifest: VaultManifest = {
+      version: '0.1.0',
+      refreshedAt: '2026-05-27T14:33:08Z',
+      sourceOrg: 'me@example.com',
+      components: { CustomObject: 1 },
+      edges: {},
+      sourceTreeHash: 'sha256:fixture-cov',
+      coverage: [
+        { type: 'CustomObject', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+        { type: 'PermissionSet', requested: true, retrieved: 0, errored: false, neverModeled: false },
+      ],
+    };
+    const r = await unassignedPermissionSetsHandler(
+      { vaultRoot: tempDir, manifest: covManifest, graph: store },
+      {},
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalScanned).toBe(0);
+    expect(r.value.data.coverageCaveat).toBeDefined();
+    expect(r.value.data.coverageCaveat?.missingCoverage).toContain('PermissionSet');
+    expect(r.value.data.coverageCaveat?.message).toMatch(/not checked/);
   });
 });

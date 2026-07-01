@@ -28,6 +28,7 @@ import type {
   Edge,
   McpError,
   McpResponse,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
@@ -35,6 +36,12 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  buildEmptyTraversalCoverageCaveat,
+  type CoverageCaveat,
+  FORMULA_REFERENCE_REQUIRED_COVERAGE,
+} from './coverage-trust.js';
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { resolveToFieldOrSuggest } from './resolve-field-or-suggest.js';
 
 /**
@@ -63,6 +70,17 @@ const FORMULA_REFS_DEFAULT_LIMIT = 50;
 export const findFormulaReferencesInputSchema = z.object({
   fieldId: z.string().min(1),
   limit: z.number().int().min(1).max(FORMULA_REFS_MAX_LIMIT).optional(),
+  /**
+   * Zero-based page offset (CR-13). Defaults to 0. Paired with `limit` so the
+   * caller can walk the FULL referencer set when the result is truncated — a
+   * blast-radius tool must never silently drop referencers.
+   */
+  offset: z.number().int().nonnegative().optional(),
+  /**
+   * CR-22 continuation cursor: opaque token from a prior truncated page's
+   * `nextCursor`; supplies the resume offset. Omit for today's behavior.
+   */
+  cursor: z.string().min(1).optional(),
 });
 
 /** Parsed input shape, inferred from `findFormulaReferencesInputSchema`. */
@@ -85,9 +103,53 @@ export interface FormulaReferencer {
   readonly properties: Readonly<Record<string, unknown>>;
 }
 
-/** Payload wrapped inside the `McpResponse` envelope on success. */
+/**
+ * Payload wrapped inside the `McpResponse` envelope on success.
+ *
+ * The pagination counters (`totalCount`/`offset`/`limit`/`hasMore`/
+ * `nextOffset`) and the truncation `note` are OPTIONAL because the
+ * graceful object→field suggestion early-return (`resolveToFieldOrSuggest`)
+ * casts a DIFFERENT suggestion envelope onto this type — it has no
+ * referencer list to page, so it carries none of these fields. The
+ * normal path always populates the counters; the suggestion path never
+ * does.
+ */
 export interface FindFormulaReferencesOutput {
+  /** The requested page of referencers (after sort + `offset`/`limit`). */
   readonly referencers: readonly FormulaReferencer[];
+  /**
+   * CR-13 truncation honesty: the TRUE total number of referencers BEFORE
+   * `offset`/`limit` paging (post sparse-graph-miss filtering — every
+   * returnable referencer, not a raw edge count). Greater than
+   * `referencers.length` means the page is a partial slice; `note` discloses it.
+   */
+  readonly totalCount?: number;
+  /** Zero-based offset of this page. */
+  readonly offset?: number;
+  /** Page size applied (the effective `limit`). */
+  readonly limit?: number;
+  /** True when more referencers remain past this page. */
+  readonly hasMore?: boolean;
+  /** Approximate next offset (legacy), or `null` when the list is exhausted. */
+  readonly nextOffset?: number | null;
+  /**
+   * CR-22 opaque continuation token, present ONLY when this page is truncated
+   * (more referencers remain). Echo it back as `cursor` to resume. Absent on a
+   * complete page so an in-budget response is byte-identical to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
+  /** Present only when the page is truncated below the true total. */
+  readonly note?: string;
+  /**
+   * I3b (empty ≠ none): present ONLY when the FULL result is empty AND a family
+   * that produces formula `references` edges (`CustomField` / `ValidationRule`)
+   * is NOT fully covered by the vault. Names the not-checked families so an
+   * empty referencer list reads "not retrieved", not a proven "none". Absent on
+   * a non-empty result and on a fully-covered vault (byte-identical to before).
+   */
+  readonly coverageCaveat?: CoverageCaveat;
 }
 
 /**
@@ -121,8 +183,11 @@ const resolveReferencer = async (
 /**
  * The `sfi.find_formula_references` MCP tool. Returns the source nodes
  * of every incoming `references` edge to `fieldId`, enriched with the
- * edge's `source` and `properties`. Sorted by id ASC; truncated to
- * `limit` (default 50, max 500).
+ * edge's `source` and `properties`. Sorted by id ASC; PAGED by
+ * `offset`/`limit` (default limit 50, max 500) with
+ * `totalCount`/`hasMore`/`nextOffset` so a heavily-referenced field's
+ * full set is reachable rather than silently clipped — when the page is
+ * partial a truncation `note` is added (CR-13).
  *
  * @example
  *   const r = await findFormulaReferencesHandler(ctx, {
@@ -170,12 +235,79 @@ export const findFormulaReferencesHandler = async (
     }
   }
 
-  const sorted = referencers
-    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-    .slice(0, limit);
+  // CR-13: page after sorting so truncation is stable AND disclosed. `total`
+  // is the full pre-slice count of returnable referencers; the `note` (omitted
+  // when the page is complete, mirroring get_edges) discloses an incomplete page.
+  // TOTAL ORDER: `id` ASC then `source` ASC — a single `fromId` (= `id`) can
+  // hold more than one `references` edge to the same field, differing only by
+  // `source` (edge PK is (from_id,to_id,edge_type,source) with to_id/edge_type
+  // fixed here), so `source` is the unique final tiebreak CR-22 resume needs.
+  const ordered = referencers.sort((a, b) => {
+    if (a.id !== b.id) return a.id < b.id ? -1 : 1;
+    if (a.source !== b.source) return a.source < b.source ? -1 : 1;
+    return 0;
+  });
+
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset);
+  // a stale/forged cursor (changed fieldId, different tool, refreshed vault) is
+  // rejected with invalid-query.
+  const fingerprint = argsFingerprint({ fieldId: input.fieldId });
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: 'sfi.find_formula_references',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  // No per-handler byte budget (offset/limit only) — set an effectively-
+  // unbounded byteBudget so `paginate()` truncates only on `limit`, keeping the
+  // output byte-identical to the prior open-coded slice. Global guard backstops.
+  const paged = paginateLegacy(ordered, {
+    offset,
+    limit,
+    byteBudget: Number.MAX_SAFE_INTEGER,
+    binding: {
+      tool: 'sfi.find_formula_references',
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const page = paged.items;
+  const total = paged.totalCount;
+  const hasMore = paged.hasMore;
+  const returned = offset + page.length;
+  const note = hasMore
+    ? `Showing ${page.length} of ${total} formula reference(s) (offset=${offset}). ` +
+      `MORE remain — advance with offset=${returned}. This list is INCOMPLETE; ` +
+      `do not treat it as the full blast radius.`
+    : undefined;
+  const emitCursor = paged.nextCursor !== null;
+  // I3b (empty ≠ none): only when the WHOLE referencer set is empty do we risk
+  // the host narrating absence as fact — attach a coverage caveat naming the
+  // formula-source families the vault did NOT fully retrieve, so "no formula
+  // references this" carries "…among the families the vault covers". Non-empty
+  // output is untouched.
+  const coverageCaveat =
+    total === 0
+      ? buildEmptyTraversalCoverageCaveat(ctx, FORMULA_REFERENCE_REQUIRED_COVERAGE)
+      : undefined;
 
   return ok({
-    data: { referencers: sorted },
+    data: {
+      referencers: page,
+      totalCount: total,
+      offset,
+      limit,
+      hasMore,
+      nextOffset: hasMore ? returned : null,
+      ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
+      ...(note !== undefined ? { note } : {}),
+      ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
+    },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
       refreshedAt: ctx.manifest.refreshedAt,

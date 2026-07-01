@@ -373,6 +373,46 @@ const CASES: readonly Case[] = [
   { q: 'What can you do?', intent: 'capabilities', plane: 'vault' },
   // Collision: object names containing "history" must not steal history-change.
   { q: 'What changed recently in the org?', intent: 'history-change', plane: 'vault' },
+
+  // Admin-edge 61–90: explicit tool-name phrasing (regex must route without funnel).
+  { q: 'release_readiness_report — is this org ready for release?', intent: 'release-readiness', plane: 'vault' },
+  // tech_debt_score literal-echo rule removed (I5 slim-down); the tool ranks #1
+  // in the funnel, so the tool-name-only phrasing is no longer a regex route.
+  { q: 'coverage_report — which metadata families were retrieved vs notModeled?', intent: 'vault-health', plane: 'vault' },
+  { q: 'retrieve_blindspot_report — what is not being pulled?', intent: 'retrieve-blindspot', plane: 'vault' },
+  { q: 'automation_build_advisor Contact — when it cites active record-triggered Flows', intent: 'automation-on-object', plane: 'vault' },
+  { q: 'automation_risk_report — which objects have the most stacked automation?', intent: 'automation-risk', plane: 'vault' },
+  { q: 'apex_build_advisor for a new trigger on hed__Example_Course__c', intent: 'apex-build-advisor', plane: 'vault' },
+  { q: 'order_of_execution Contact update — after-trigger phase', intent: 'trigger-order', plane: 'vault' },
+  { q: 'field_mapping_between_objects Lead→Contact — heuristic conversion map', intent: 'field-mapping', plane: 'vault' },
+  { q: 'apex_test_coverage CalculatePaymentsBatch — specific coverage', intent: 'test-coverage', plane: 'vault' },
+  { q: 'find_clone_patterns — Copy_of_* flows near-duplicates', intent: 'clone-patterns', plane: 'vault' },
+  { q: 'get_impact Contact.hed__Social_Security_Number__c hops=2', intent: 'impact-analysis', plane: 'vault' },
+  { q: 'disambiguate_concepts — is Status the same concept as Stage?', intent: 'disambiguate-concepts', plane: 'vault' },
+  { q: 'field_provenance Contact.Best_Military_Status__c — source of truth', intent: 'field-provenance', plane: 'vault' },
+  { q: 'lookup_record on CustomMetadata Faculty_Management Hours_Limit_Year', intent: 'cmdt-record-values', plane: 'vault' },
+  { q: 'last_modified CalculatePaymentsBatch — who built it and when', intent: 'last-modified', plane: 'vault' },
+  { q: 'live_field_population — how many Contacts have Military_Status__c populated', intent: 'field-population', plane: 'hybrid' },
+  { q: 'field_change_advisor Contact.Best_Status__c — advice on changing it', intent: 'field-change-advisor', plane: 'vault' },
+  { q: 'what_if_change_field_value / value_change_audit — blast radius', intent: 'value-change', plane: 'vault' },
+  { q: 'compare_object_across_vaults Contact sandbox-vs-prod', intent: 'cross-org-diff', plane: 'vault' },
+  { q: 'find_dependency_cycles — circular Apex dependencies', intent: 'dependency-cycles', plane: 'vault' },
+  { q: 'downstream_effects of changing MRK_SessionHandler', intent: 'downstream-effects', plane: 'vault' },
+  { q: 'tests_for_change ApplicationValidationService', intent: 'tests-for-change', plane: 'vault' },
+
+  // Admin-edge 31–60: explicit tool-name phrasing.
+  { q: 'field_lineage on Contact.CB_CE_Yearly_URL__c upstream', intent: 'pii-flow', plane: 'vault' },
+  { q: 'field_360 on Contact.hed__Social_Security_Number__c — riskLevel', intent: 'field-meaning', plane: 'vault' },
+  { q: 'safe_to_delete_field Contact.Email — standard field undeletable', intent: 'safe-to-delete', plane: 'vault' },
+  { q: 'what_if_make_field_required Contact.Email', intent: 'what-if-field', plane: 'vault' },
+  // scheduled_job_catalog / endpoint_catalog: pure literal-echo recall-crutch
+  // rules removed in the I5 funnel-primary slim-down. For a tool-name-only
+  // phrasing with no prose signal the funnel is now the recall net (it ranks
+  // both tools #1), so they are no longer asserted as deterministic regex routes.
+  { q: 'async_chain_depth from CalculatePaymentsBatch', intent: 'async-chain-depth', plane: 'vault' },
+  { q: 'governor_limit_risks — SOQL in loops', intent: 'governor-risks', plane: 'vault' },
+  { q: 'find_dead_code — unreachable Apex', intent: 'dead-code', plane: 'vault' },
+  { q: 'meaningful_test_audit on the FSR_Trigger* test family', intent: 'test-coverage', plane: 'vault' },
 ];
 
 describe('classifyQuestion battery', () => {
@@ -555,7 +595,6 @@ describe('classifyQuestion edge cases', () => {
     // list_components REQUIRES `type` (v0.1 contract), so a discovery enumeration
     // would error "type is required" without this hint.
     const cases: ReadonlyArray<{ readonly q: string; readonly type: string }> = [
-      { q: 'Duplicate rules on Lead', type: 'DuplicateRule' },
       { q: 'What validation rules exist?', type: 'ValidationRule' },
       { q: 'What record types do we have?', type: 'RecordType' },
       { q: 'List all flows', type: 'Flow' },
@@ -567,6 +606,131 @@ describe('classifyQuestion edge cases', () => {
       expect(r.tools[0]).toBe('sfi.list_components');
       expect(r.suggestedArgs).toEqual({ type });
     }
+    expect(classifyQuestion('Duplicate rules on Lead').suggestedArgs).toEqual({
+      type: 'DuplicateRule',
+      parentId: 'CustomObject:Lead',
+    });
+  });
+
+  it('metadata-count suggests flow filters for record-triggered flow counts (differential b1-a-03)', () => {
+    expect(
+      classifyQuestion(
+        'How many active record-triggered flows are on hed__Application__c?',
+      ).suggestedArgs,
+    ).toEqual({
+      type: 'Flow',
+      status: 'Active',
+      recordTriggered: true,
+      triggerObject: 'hed__Application__c',
+    });
+  });
+
+  it('routes Apex triggers on object to automation-on-object (differential b1-a-06)', () => {
+    const r = classifyQuestion('What Apex triggers fire on Payment__c?');
+    expect(r.intent).toBe('automation-on-object');
+    expect(r.tools).toContain('sfi.automation_build_advisor');
+    expect(r.suggestedArgs).toEqual({ objectApiName: 'Payment__c' });
+  });
+
+  it('routes permission-set object access to object-access (differential b1-a-05)', () => {
+    const r = classifyQuestion(
+      'Which permission sets grant object access to Payment__c?',
+    );
+    expect(r.intent).toBe('object-access');
+    expect(r.tools).toContain('sfi.object_access_audit');
+  });
+
+  it('metadata-count suggests ValidationRule parentId (differential b2-a-01)', () => {
+    expect(
+      classifyQuestion('How many validation rules are on hed__Application__c?')
+        .suggestedArgs,
+    ).toEqual({
+      type: 'ValidationRule',
+      parentId: 'CustomObject:hed__Application__c',
+    });
+  });
+
+  it('field-mapping suggests objectA/objectB for Lead→Contact phrasing', () => {
+    expect(
+      classifyQuestion('field_mapping_between_objects Lead→Contact — heuristic conversion map')
+        .suggestedArgs,
+    ).toEqual({ objectA: 'Lead', objectB: 'Contact' });
+    expect(classifyQuestion('How do fields map between Lead and Contact?').suggestedArgs).toEqual({
+      objectA: 'Lead',
+      objectB: 'Contact',
+    });
+  });
+
+  it('routes EncryptedText field lists to schema CustomField inventory (admin-edge 141-190)', () => {
+    const r = classifyQuestion('List the EncryptedText fields on Contact.');
+    expect(r.intent).toBe('schema');
+    expect(r.suggestedArgs).toEqual({ type: 'CustomField', parentId: 'CustomObject:Contact' });
+  });
+
+  it('routes report type inventory to vault list_components (not live_report_usage)', () => {
+    expect(classifyQuestion('Are there custom report types joining Account to Opportunity to Case?').intent).toBe(
+      'report-type-inventory',
+    );
+    expect(
+      classifyQuestion('Are there custom report types joining Account to Opportunity to Case?').tools,
+    ).toEqual(['sfi.list_components', 'sfi.get_component']);
+    expect(
+      classifyQuestion('Which report types are based on a standard object but include custom-object joins (e.g., Contact plus a HED object)?').intent,
+    ).toBe('report-type-inventory');
+  });
+
+  it('routes unplaced fields and compact-layout compare (admin-edge 141-190)', () => {
+    expect(
+      classifyQuestion(
+        'Are there fields that exist but are not placed on any layout (hidden but present)?',
+      ).intent,
+    ).toBe('field-layout-coverage');
+    expect(
+      classifyQuestion(
+        'Which compact-layout fields show in Contact highlights vs the full page layout?',
+      ).intent,
+    ).toBe('layout-inventory');
+    expect(
+      classifyQuestion('layout_for_user: which layout does a Faculty-profile user get for Case?')
+        .suggestedArgs,
+    ).toEqual({ objectApiName: 'Case', profileId: 'Profile:Faculty' });
+  });
+
+  it('routes update save-order on hed__Application__c (differential b2-a-05)', () => {
+    const r = classifyQuestion(
+      'What happens when I update hed__Application__c — which validation rules, flows, and triggers run?',
+    );
+    expect(r.intent).toBe('trigger-order');
+    expect(r.tools).toContain('sfi.what_happens_on_save');
+    expect(r.suggestedArgs).toMatchObject({
+      event: 'update',
+      objectApiName: 'hed__Application__c',
+    });
+  });
+
+  it('routes Modify All permission sets to object-access (differential b3-a-02)', () => {
+    const r = classifyQuestion(
+      'Which permission sets grant Modify All Records on Contact?',
+    );
+    expect(r.intent).toBe('object-access');
+    expect(r.tools).toContain('sfi.object_access_audit');
+  });
+
+  it('routes flow system-mode questions to explain-flow (differential b3-a-04)', () => {
+    const r = classifyQuestion(
+      'Does flow Create_Flags_from_Contact run in System Mode Without Sharing, and what sharing risk does that create?',
+    );
+    expect(r.intent).toBe('explain-flow');
+    expect(r.tools).toContain('sfi.explain_flow');
+  });
+
+  it('routes automation step counts to trigger-order (differential b3-a-05)', () => {
+    const r = classifyQuestion(
+      'How many automation steps run on an hed__Application__c update (before-save flows, validation rules, after-save flows, async)?',
+    );
+    expect(r.intent).toBe('trigger-order');
+    expect(r.tools).toContain('sfi.what_happens_on_save');
+    expect(r.suggestedArgs?.objectApiName).toBe('hed__Application__c');
   });
 
   it('schema route suggests parent-scoped CustomField list for field inventory (FLD-05)', () => {
@@ -671,6 +835,98 @@ describe('classifyQuestion edge cases', () => {
     ).toBe('hybrid');
   });
 
+  // QA-Bundle-2 (ROUTING): metadata / Apex / flow analysis questions were being
+  // stolen by the broad live_* and inactive-* rules — `inactive-users` over-fires
+  // on "user"/"license", `inactive-validation-rules` on "validation rule" — so
+  // they misrouted to live_inactive_users / live_org_limits / live_stale_records
+  // / governor_limit_risks / integration_map, none relevant. These assert the
+  // new high-precision rules win, and the guard cases still route as before.
+  it('routes a VR save-behavior question to what_happens_on_save + the rule formula, not live_inactive_users', () => {
+    const cases = [
+      'A validation rule whitelists save when $User.Profile is Admin. Does the save succeed for a Standard user?',
+      'Does the validation rule allow the save to succeed if $Profile is System Administrator?',
+      'For an inactive user, does the save succeed given the validation rule whitelist?',
+    ];
+    for (const q of cases) {
+      const r = classifyQuestion(q);
+      expect(r.intent).toBe('save-behavior');
+      expect(r.tools).toContain('sfi.what_happens_on_save');
+      expect(r.tools).toContain('sfi.get_component');
+      expect(r.tools).not.toContain('sfi.live_inactive_users');
+      expect(r.liveRequired).toBe(false);
+    }
+  });
+
+  it('routes a flow-trigger + permission/license question to explain_flow, not live_inactive_users/license-usage', () => {
+    const cases = [
+      'When does the Application_Field_Sync_To_Contact flow fire, and what permission set or license lets it run?',
+      'Which license lets a user run the Application_Field_Sync_To_Contact flow?',
+    ];
+    for (const q of cases) {
+      const r = classifyQuestion(q);
+      expect(r.intent).toBe('flow-trigger-context');
+      expect(r.tools).toContain('sfi.explain_flow');
+      expect(r.tools).not.toContain('sfi.live_inactive_users');
+      expect(r.tools).not.toContain('sfi.live_license_usage');
+      expect(r.needsResolve).toBe(true);
+    }
+  });
+
+  it('routes a DLRS recursive-rollup question to automation/order-of-execution + the rollup lookup', () => {
+    const cases = [
+      'The CountCET3 DLRS rollup is recursive — how does the recursive trigger path work?',
+      'How does the DLRS recursive rollup CountCET3 behave on save?',
+      'When hed__Course_Enrollment__c is inserted, do dlrs_hed_Course_EnrollmentTrigger and CourseConnectionTrigger both fire?',
+    ];
+    for (const q of cases) {
+      const r = classifyQuestion(q);
+      expect(r.intent).toBe('dlrs-recursion');
+      expect(r.tools).toContain('sfi.automation_risk_report');
+      expect(r.tools).toContain('sfi.order_of_execution');
+      expect(r.tools).toContain('sfi.search_components');
+      expect(r.tools).not.toContain('sfi.governor_limit_risks');
+      expect(r.tools).not.toContain('sfi.integration_map');
+    }
+  });
+
+  it('does not let the new analysis rules steal genuine live login / license / VR-list questions', () => {
+    expect(classifyQuestion('which users have not logged in for 90 days').intent).toBe(
+      'inactive-users',
+    );
+    expect(classifyQuestion('how many licenses are unused').intent).toBe('license-usage');
+    expect(classifyQuestion('list inactive validation rules').intent).toBe(
+      'inactive-validation-rules',
+    );
+    expect(
+      classifyQuestion('what does the AcmeCheck validation rule enforce').intent,
+    ).toBe('explain-validation-rule');
+  });
+
+  it('routes ContactCategorySecurity family questions to validation-rule-family', () => {
+    const q =
+      'On Lead, the ContactCategorySecurity validation rule family protects SIS fields — which Contact_Security_Group__c values trigger protection (is value 3 editable or protected?) and which alias is exempt?';
+    const r = classifyQuestion(q);
+    expect(r.intent).toBe('validation-rule-family');
+    expect(r.tools).toContain('sfi.list_components');
+  });
+
+  it('routes safe_to_delete_field tool phrasing to safe-to-delete', () => {
+    const r = classifyQuestion(
+      'safe_to_delete_field Contact.Email — does it correctly call a standard field undeletable?',
+    );
+    expect(r.intent).toBe('safe-to-delete');
+    expect(r.tools).toContain('sfi.safe_to_delete_field');
+  });
+
+  it('routes named-credential orphan questions to component-usage with find_component_usages', () => {
+    const q =
+      'Named credential AWS_US_East_1 (NoAuth, ARN endpoint) — is it referenced by any Apex or Flow, or orphaned with zero references?';
+    const r = classifyQuestion(q);
+    expect(r.intent).toBe('component-usage');
+    expect(r.tools).toContain('sfi.find_component_usages');
+    expect(r.suggestedArgs).toEqual({ componentId: 'NamedCredential:AWS_US_East_1' });
+  });
+
   it('routes only to real tool names (sfi.*)', () => {
     for (const c of CASES) {
       for (const t of classifyQuestion(c.q).tools) {
@@ -701,7 +957,7 @@ describe('router ↔ roster contract (CI gate)', () => {
   // that left the 11 Phase-11 access/UI tools unrouted until P12.
   const GRANDFATHERED_NON_ROUTABLE = new Set<string>([
     // Meta / front-door / plumbing (never a question's primary answer):
-    'sfi.route_question', 'sfi.synthesize_answer', 'sfi.disambiguate_concepts',
+    'sfi.route_question', 'sfi.synthesize_answer',
     'sfi.get_manifest', 'sfi.export_manifest', 'sfi.baseline_acknowledge',
     'sfi.baseline_status', 'sfi.live_consent', 'sfi.live_budget',
     // P13-GW catalog gateway (meta-navigation; P13-GW-router-envelope wires
@@ -720,9 +976,10 @@ describe('router ↔ roster contract (CI gate)', () => {
     'sfi.blast_radius_live', 'sfi.live_automation_fired', 'sfi.live_describe',
     'sfi.live_picklist_usage', 'sfi.live_stale_check',
     // Sub-tools / specialized drills reached via a bundle or after `resolve`:
-    'sfi.apex_build_advisor', 'sfi.async_chain_depth', 'sfi.decision_table_browse',
-    'sfi.downstream_effects', 'sfi.explain_formula', 'sfi.field_meaning',
-    'sfi.field_provenance', 'sfi.find_semantic_field', 'sfi.fleet_find',
+    'sfi.decision_table_browse',
+    // sfi.explain_formula is now router-reachable (QA-Bundle-2 save-behavior rule).
+    'sfi.field_meaning',
+    'sfi.find_semantic_field', 'sfi.fleet_find',
     // sfi.layout_assignments is now router-reachable (P12-ROUTER-layout-assignments).
     // sfi.lookup_record is now router-reachable (P14-ROUTER-cmdt-record-values).
     'sfi.org_pulse',

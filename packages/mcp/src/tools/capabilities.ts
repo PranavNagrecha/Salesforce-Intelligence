@@ -208,12 +208,16 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
     id: 'understand',
     title: 'Understand what something does',
     description:
-      'Explain a single component in plain terms — a field’s meaning, a flow’s logic, an Apex method, a formula, or everything that fires when a record is saved.',
+      'Explain a single component in plain business terms — what a field means, what a flow or automation is for, what an Apex method or formula does, the full profile of a field, or everything that already runs when a record is saved.',
     exampleQuestions: [
       'What does the Payment_Status__c field mean?',
       'Explain what this flow does.',
-      'What happens when an Account is saved?',
-      'Walk me through this formula.',
+      'What is the Lead_Nurture flow for?',
+      'Walk me through this automation.',
+      'What already runs when a Case is saved?',
+      'Is my new automation a duplicate of something that already fires on save?',
+      'Give me the full profile of this field.',
+      'What happens when an Opportunity becomes Closed Won?',
     ],
     tools: [
       'sfi.explain_field',
@@ -222,15 +226,19 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
       'sfi.explain_formula',
       'sfi.field_meaning',
       'sfi.what_happens_on_save',
+      'sfi.lifecycle_process',
+      'sfi.field_360',
     ],
   },
   {
     id: 'impact',
     title: 'Impact & dependencies',
     description:
-      'See what depends on a component and what would break before you change or delete it — the dependency graph plus what-if simulations.',
+      'See what depends on a component and what would break before you change or delete it — the dependency graph, what touches a field across automation and code, and what-if simulations.',
     exampleQuestions: [
       'What breaks if I delete this field?',
+      'The business wants to delete this field — what evidence do I need that no one uses it?',
+      'What touches this field across automation and code?',
       'What depends on this Apex class?',
       'Is it safe to deactivate this flow?',
       'What if I make this field required?',

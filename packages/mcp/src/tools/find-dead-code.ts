@@ -9,23 +9,37 @@
  *
  * **Three verdicts:**
  *
- *   - `definitely_dead`: a code component (ApexClass / ApexTrigger /
- *     Flow) with ZERO incoming USAGE edges (no callers, no triggers,
- *     no listeners). For CustomField, no incoming references at all
- *     (no formula refs, no Apex reads/writes, no Flow record-ops, no
- *     layout placements). `parentOf` (structural) and `grantedBy`
- *     (Profile / PermissionSet access grants) are NOT usage and do not
- *     keep a component alive — access is not usage, the same split the
- *     field / what-if tools make.
+ *   - `definitely_dead`: an ApexClass / ApexTrigger with ZERO incoming
+ *     USAGE edges (no callers, no triggers, no listeners). For
+ *     CustomField, no incoming references at all (no formula refs, no
+ *     Apex reads/writes, no Flow record-ops, no layout placements).
+ *     For a Flow, ONLY when its status is `Obsolete` / `InvalidDraft`
+ *     (R2-12): an Active / Draft / unknown-status Flow is NEVER
+ *     definitely_dead — Flow edges are all OUTGOING (triggersOn /
+ *     listensTo / callsApex / writesTo), so a live flow has ~0 incoming
+ *     edges by nature and fires on its own trigger; flagging it dead
+ *     would delete running automation. `parentOf` (structural) and
+ *     `grantedBy` (Profile / PermissionSet access grants) are NOT usage
+ *     and do not keep a component alive — access is not usage, the same
+ *     split the field / what-if tools make.
  *   - `likely_dead`: a code component reached only by test classes
  *     (`isTest === true`) or via heuristic-only edges that may be
  *     stripped by dynamic SOQL / reflective access. The v2.7
  *     `method_reachability` `test-only-reachable` verdict cascades
  *     here.
- *   - `uncertain`: reached by at least one entry point (REST resource,
- *     AuraEnabled, InvocableMethod, Queueable, Batchable, Schedulable,
- *     or ApexTrigger). Surfaced for completeness in the result set
- *     when `includeUncertain: true`; suppressed by default.
+ *     An ASYNC-DISPATCH class (Queueable / Batchable / Schedulable)
+ *     that is never enqueued/executed/scheduled is `definitely_dead`,
+ *     and one dispatched only from `@isTest` code is `likely_dead` —
+ *     implementing the interface does NOT make it live; only a
+ *     production dispatch site does. A production enqueue guarded only
+ *     by `!Test.isRunningTest()` still counts as a live production path.
+ *   - `uncertain`: reached by at least one EXTERNAL entry point (REST
+ *     resource, AuraEnabled, InvocableMethod, or ApexTrigger — the
+ *     platform invokes these directly), an async-dispatch class with a
+ *     production dispatch site — OR an Active / Draft / unknown-status Flow,
+ *     which is its OWN entry point (R2-12). Surfaced for completeness in
+ *     the result set when `includeUncertain: true`; suppressed by
+ *     default.
  *
  * **Entry-point taxonomy** (matches `method-reachability.ts`):
  *   - `ApexTrigger`: triggers ARE entry points.
@@ -65,6 +79,7 @@ import type {
   ComponentType,
   McpError,
   McpResponse,
+  PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import type { GraphStore } from '@sf-intelligence/graph';
@@ -78,11 +93,14 @@ import {
   resolveObjectScopeParentId,
   toCustomObjectId,
 } from './input-aliases.js';
+import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { REPORT_DASHBOARD_USAGE_CAVEAT } from './report-dashboard-usage.js';
 import { soundnessFromIds, type Soundness } from './soundness.js';
 
 const MAX_LIMIT = 500;
 const DEFAULT_LIMIT = 100;
+
+const FIND_DEAD_CODE_TOOL = 'sfi.find_dead_code';
 
 const DEAD_CODE_DISCLOSURE =
   'dead-code detection is heuristic: dynamic dispatch (`Type.forName(...)`), reflective invocation, framework wiring (TriggerHandler / fflib base classes), and managed-package callers are invisible to the graph edges this tool walks. A class genuinely invoked at runtime via one of these mechanisms will surface as `definitely_dead` or `likely_dead`. Verify before deleting.';
@@ -90,6 +108,10 @@ const TEST_DISCLOSURE =
   'test classes (properties.isTest === true) are NEVER flagged as dead — they ARE entry points for the test-runner.';
 const MANAGED_PACKAGE_DISCLOSURE =
   'managed-package code is not vaulted; callers from managed packages are invisible. A class only called by managed-package code will surface as dead.';
+const FLOW_DISCLOSURE =
+  'Flow dead-detection (R2-12): a Flow is flagged definitely_dead ONLY when its status is Obsolete or InvalidDraft. An Active, Draft, or unknown-status Flow is NEVER definitely_dead — Flow graph edges are all OUTGOING (triggersOn / listensTo / callsApex / writesTo), so a live flow has ~0 incoming edges by nature and fires on its own trigger/schedule; it surfaces as `uncertain` (suppressed unless includeUncertain). Note: subflow invocation (flow-calls-flow) is NOT modeled, so a subflow-only flow is treated as in-use via its active status, not via an invocation edge — verify a flow before deleting it.';
+const ASYNC_DISPATCH_DISCLOSURE =
+  'async-dispatch dead-code (Queueable/Batchable/Schedulable): a class that "implements Queueable" is NOT automatically live — it must be enqueued/executed/scheduled by user Apex. A class with a PRODUCTION dispatch site (`System.enqueueJob` / `Database.executeBatch` / `System.schedule` from a non-@isTest class) is treated as live; a class dispatched ONLY from @isTest code surfaces as likely_dead (test dispatch is rolled back at runtime) and one never dispatched as definitely_dead. A production enqueue guarded only by `!Test.isRunningTest()` STILL counts as a live production path. Blind spots: helper-wrapper dispatch (`MyHelper.enqueue(new MyJob())`), reflective dispatch (`Type.forName`), and managed-package dispatchers are invisible — verify before deleting.';
 const CUSTOM_FIELD_DISCLOSURE =
   'CustomField dead-detection: Apex field reads/writes (incl. field-level SOQL in constant strings) are PARSED graph edges on vaults refreshed at 0.1.9+, and Flow assignments, formula references, and layout placements are modeled — so a field referenced only in Apex/Flow no longer reads dead (permission grants stay EXCLUDED: access is not usage). REMAINING blind spots an absence verdict cannot rule out: Flow formula-TEXT references, report columns beyond the usage-ranked pull, list-view filters, DYNAMIC SOQL built at runtime, and reflective access. Cross-check with `sfi.field_360` or `sfi.find_field_anywhere` before deleting any field.';
 
@@ -114,6 +136,9 @@ const findDeadCodeInputBaseSchema = z.object({
     .optional(),
   includeUncertain: z.boolean().optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
+  // CR-22: page cursor for walking the full candidate list when truncated.
+  offset: z.number().int().min(0).optional(),
+  cursor: z.string().min(1).optional(),
 });
 
 /** Zod schema for `sfi.find_dead_code`. */
@@ -159,6 +184,24 @@ export interface FindDeadCodeOutput {
   readonly byType: Readonly<Record<string, number>>;
   readonly boundaries: readonly string[];
   readonly truncated: boolean;
+  /**
+   * Page size applied to this response. Present ONLY on a PAGED response
+   * (`truncated` or a resumed `offset > 0`); omitted on a whole-fits no-cursor
+   * call so that response stays byte-identical to the pre-CR-22 shape.
+   */
+  readonly limit?: number;
+  /** Zero-based offset of the first returned candidate. Present only when paged (see `limit`). */
+  readonly offset?: number;
+  /** Offset to pass on the next call to fetch the following page. Present only when `truncated`. */
+  readonly nextOffset?: number;
+  /**
+   * CR-22 opaque continuation token, present ONLY when this page is truncated
+   * (more candidates remain). Echo it back as `cursor` to resume. Absent on a
+   * complete page so an in-budget response is byte-identical to pre-CR-22.
+   */
+  readonly nextCursor?: string;
+  /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
+  readonly pageInfo?: PageInfo;
   /** Static-analysis blind spots: `complete: false` when a candidate class uses dynamic Apex. */
   readonly soundness: Soundness;
   /**
@@ -214,6 +257,30 @@ interface DeadCodeRow {
   readonly api_name: string;
   readonly is_test: boolean;
   readonly is_own_entry_point: boolean;
+  /**
+   * Async-dispatch entry point only (Queueable / Batchable / Schedulable): an
+   * ApexClass dispatched by USER code (`System.enqueueJob` / `Database.executeBatch`
+   * / `System.schedule`), NOT invoked externally by the platform like REST / Aura /
+   * Invocable. Unlike an external entry point, an async-dispatch class is dead when
+   * nothing production-side ever dispatches it — so it must be cross-referenced
+   * against its inbound `dispatchesAsync` edges rather than blanket-trusted as live.
+   * FALSE for external entry points, triggers, flows, fields.
+   */
+  readonly is_async_dispatch_entry: boolean;
+  /**
+   * Async-dispatch only: TRUE when at least one inbound `dispatchesAsync` edge
+   * comes from a NON-test (`isTest !== true`) caller — a real production dispatch
+   * site. A caller guarded by `!Test.isRunningTest()` is still a production class
+   * (the guard suppresses the call only during test execution), so it counts here.
+   * A class enqueued ONLY from @isTest classes has this FALSE — that test dispatch
+   * is rolled back at runtime and does not keep the class alive.
+   */
+  readonly has_production_dispatch: boolean;
+  /** Flow only (R2-12): TRUE when the Flow's status is NOT Obsolete/InvalidDraft
+   *  (active, Draft, or unknown/missing status — all treated as in-use). An
+   *  active flow fires on its own trigger and has ~0 incoming edges by nature,
+   *  so this guards against deleting live automation. FALSE for non-Flow. */
+  readonly is_active_entry_point: boolean;
   readonly incoming_count: bigint | number;
   readonly has_non_test_reach: boolean;
   readonly has_entry_point_reach: boolean;
@@ -264,17 +331,47 @@ const fetchDeadCodeRows = async (
                type = 'ApexClass'
                  AND json_extract_string(properties_json, '$.isTest') = 'true',
                FALSE) AS is_test,
+             -- EXTERNAL entry points only: the platform invokes these directly
+             -- (REST callout, Lightning/Aura, Flow/Process-Builder dispatch) or
+             -- they fire on their own (triggers). They have no in-org caller edge
+             -- by nature, so they are blanket-trusted as live. Async-dispatch
+             -- classes (Queueable/Batchable/Schedulable) are DELIBERATELY excluded
+             -- here — they are dispatched by USER code and are dead when nothing
+             -- enqueues them, so they are cross-referenced via is_async_dispatch_entry
+             -- + has_production_dispatch below rather than trusted unconditionally.
              COALESCE(
                type = 'ApexTrigger'
                  OR (type = 'ApexClass' AND (
                      COALESCE(json_extract_string(properties_json, '$.isRestResource') = 'true', FALSE)
                      OR COALESCE(json_extract_string(properties_json, '$.hasAuraEnabledMethod') = 'true', FALSE)
                      OR COALESCE(json_extract_string(properties_json, '$.hasInvocableMethod') = 'true', FALSE)
-                     OR COALESCE(json_extract_string(properties_json, '$.isQueueable') = 'true', FALSE)
-                     OR COALESCE(json_extract_string(properties_json, '$.isBatchable') = 'true', FALSE)
-                     OR COALESCE(json_extract_string(properties_json, '$.isSchedulable') = 'true', FALSE)
                    )),
                FALSE) AS is_own_entry_point,
+             -- Async-dispatch entry point: Queueable / Batchable / Schedulable.
+             -- Dispatched by user Apex (enqueueJob / executeBatch / schedule), so
+             -- a class nothing ever dispatches from PRODUCTION is dead even though
+             -- it "implements Queueable" — the textbook dead-queueable signature.
+             COALESCE(
+               type = 'ApexClass' AND (
+                 COALESCE(json_extract_string(properties_json, '$.isQueueable') = 'true', FALSE)
+                 OR COALESCE(json_extract_string(properties_json, '$.isBatchable') = 'true', FALSE)
+                 OR COALESCE(json_extract_string(properties_json, '$.isSchedulable') = 'true', FALSE)
+               ),
+               FALSE) AS is_async_dispatch_entry,
+             -- Flow only (R2-12): a Flow is its OWN entry point when its status
+             -- is NOT inactive. Flow edges are all OUTGOING (triggersOn /
+             -- listensTo / callsApex / writesTo), so a live flow naturally has
+             -- ~0 incoming edges — counting that as definitely_dead deletes
+             -- running automation. Only Obsolete / InvalidDraft flows are dead.
+             -- COALESCE the missing/NULL status to '' so an unknown-status flow
+             -- PASSES the NOT IN test (=> TRUE => uncertain), NEVER falls
+             -- through to incomingCount===0 => definitely_dead. Mirrors
+             -- unused-components.ts isInactiveEntryPoint (unknown => in-use).
+             COALESCE(
+               type = 'Flow'
+                 AND COALESCE(json_extract_string(properties_json, '$.status'), '')
+                     NOT IN ('Obsolete', 'InvalidDraft'),
+               FALSE) AS is_active_entry_point,
              -- CustomField only: folded report/dashboard usage (--with-reports).
              -- Stored as a node property (not an edge), so the in-degree count
              -- below can't see it; a report-only field would read as dead.
@@ -310,6 +407,18 @@ const fetchDeadCodeRows = async (
                      OR COALESCE(json_extract_string(r.properties_json, '$.isSchedulable') = 'true', FALSE)
                    )),
                FALSE) AS from_is_entry,
+             -- A PRODUCTION async dispatch: an inbound dispatchesAsync edge
+             -- (enqueueJob / executeBatch / schedule) whose caller is NOT an
+             -- isTest class. A caller guarded by !Test.isRunningTest() is still
+             -- a production class -- the guard suppresses the call only during
+             -- tests -- so it counts here. Tells a live Queueable from a dead one.
+             COALESCE(
+               e.edge_type = 'dispatchesAsync'
+                 AND NOT COALESCE(
+                   r.type = 'ApexClass'
+                     AND json_extract_string(r.properties_json, '$.isTest') = 'true',
+                   FALSE),
+               FALSE) AS from_is_production_dispatch,
              r.id IS NULL AS from_is_null
       FROM edges e
       LEFT JOIN nodes r ON r.id = e.from_id
@@ -325,13 +434,14 @@ const fetchDeadCodeRows = async (
         AND e.edge_type <> 'grantedBy'
     )
     SELECT c.id, c.type, c.api_name, c.is_test, c.is_own_entry_point,
-           c.used_in_analytics,
+           c.is_async_dispatch_entry, c.is_active_entry_point, c.used_in_analytics,
            COUNT(i.cid) AS incoming_count,
            COALESCE(BOOL_OR(i.from_is_null OR NOT i.from_is_test), FALSE) AS has_non_test_reach,
-           COALESCE(BOOL_OR(NOT i.from_is_test AND i.from_is_entry), FALSE) AS has_entry_point_reach
+           COALESCE(BOOL_OR(NOT i.from_is_test AND i.from_is_entry), FALSE) AS has_entry_point_reach,
+           COALESCE(BOOL_OR(i.from_is_production_dispatch), FALSE) AS has_production_dispatch
     FROM candidates c
     LEFT JOIN incoming i ON i.cid = c.id
-    GROUP BY c.id, c.type, c.api_name, c.is_test, c.is_own_entry_point, c.used_in_analytics
+    GROUP BY c.id, c.type, c.api_name, c.is_test, c.is_own_entry_point, c.is_async_dispatch_entry, c.is_active_entry_point, c.used_in_analytics
   `;
   try {
     const params =
@@ -346,6 +456,15 @@ const fetchDeadCodeRows = async (
   }
 };
 
+/**
+ * Comparator: verdict rank ASC, componentType ASC, then componentId ASC.
+ *
+ * This is already a STRICT TOTAL order (CR-22): `componentId` is the node `id`
+ * the dead-code CTE groups by (`GROUP BY c.id` — one row per distinct node id),
+ * so every candidate has a unique componentId and the final key resolves all
+ * ties uniquely. The earlier verdict / componentType keys only coarsen. No
+ * additional tiebreak is required for a dup-free / skip-free offset resume.
+ */
 const compareCandidates = (
   a: DeadCodeCandidate,
   b: DeadCodeCandidate,
@@ -406,12 +525,20 @@ export const findDeadCodeHandler = async (
     // Excluding it here matches `unused_fields_deep` / `safe_to_delete_field`.
     if (row.type === 'CustomField' && row.used_in_analytics) continue;
 
-    const ownEntryPoint = row.is_own_entry_point;
+    const externalEntryPoint = row.is_own_entry_point;
+    const asyncDispatchEntry = row.is_async_dispatch_entry;
+    // `isOwnEntryPoint` on the candidate stays the broad "is it an entry point"
+    // signal callers expect — external (REST/Aura/Invocable/trigger) OR async
+    // dispatch (Queueable/Batchable/Schedulable). The dead-vs-live cascade below
+    // treats the two kinds DIFFERENTLY (external = always live; async = live only
+    // when production-dispatched), but the display flag does not need that split.
+    const ownEntryPoint = externalEntryPoint || asyncDispatchEntry;
     // The SQL CTE COALESCEs both aggregates and the per-row entry-point
     // flag to FALSE so zero-row aggregations and missing-property nodes
     // both surface as actual booleans rather than nulls.
     const hasNonTestReach = row.has_non_test_reach;
     const hasEntryPointReach = row.has_entry_point_reach;
+    const hasProductionDispatch = row.has_production_dispatch;
     // DuckDB returns COUNT as bigint; the v3.2 caller compares
     // against zero and surfaces the value as a number in the
     // candidate payload, so the cast is safe (no overflow risk for
@@ -420,10 +547,46 @@ export const findDeadCodeHandler = async (
 
     let verdict: DeadCodeVerdict;
     let reasoning: string;
-    if (ownEntryPoint || hasEntryPointReach) {
+    if (row.is_active_entry_point) {
+      // R2-12: an active/Draft/unknown-status Flow is its OWN entry point — it
+      // fires on its own trigger/schedule and has ~0 incoming edges by nature.
+      // Treat exactly like an own-entry-point Apex class: `uncertain`,
+      // suppressed unless includeUncertain. NEVER definitely_dead/likely_dead.
+      // (Only Obsolete/InvalidDraft flows have is_active_entry_point=FALSE and
+      // fall through to the incomingCount===0 => definitely_dead path.)
+      verdict = 'uncertain';
+      reasoning =
+        'Flow fires on its own trigger and is active (or Draft/unknown status); not dead despite no incoming references';
+    } else if (asyncDispatchEntry && !externalEntryPoint) {
+      // Async-dispatch class (Queueable / Batchable / Schedulable). Unlike an
+      // external entry point, the platform does NOT invoke it on its own — user
+      // Apex must enqueue/executeBatch/schedule it. So it is only LIVE when a
+      // PRODUCTION dispatch site exists. A class dispatched only from @isTest code
+      // (test dispatch rolls back) — or never dispatched at all — is dead code.
+      // A `!Test.isRunningTest()`-guarded enqueue in a non-test class still counts
+      // as production (the guard suppresses the call only during test runs).
+      if (hasProductionDispatch || hasEntryPointReach) {
+        verdict = 'uncertain';
+        reasoning = hasProductionDispatch
+          ? 'async-dispatch class (Queueable/Batchable/Schedulable) enqueued from at least one production (non-@isTest) dispatch site; live at runtime'
+          : 'async-dispatch class reached by a production entry-point caller';
+      } else if (incomingCount === 0) {
+        verdict = 'definitely_dead';
+        reasoning =
+          'async-dispatch class (Queueable/Batchable/Schedulable) that is never enqueued/executed/scheduled anywhere in the vault; dead — it cannot be exercised at runtime';
+      } else if (!hasNonTestReach) {
+        verdict = 'likely_dead';
+        reasoning =
+          'async-dispatch class enqueued ONLY from @isTest code (test dispatch is rolled back at runtime); no production dispatch site';
+      } else {
+        verdict = 'uncertain';
+        reasoning =
+          'async-dispatch class with non-test inbound references but no recognized production dispatch site';
+      }
+    } else if (ownEntryPoint || hasEntryPointReach) {
       verdict = 'uncertain';
       reasoning = ownEntryPoint
-        ? 'component is its own entry point (REST/Aura/Invocable/Queueable/Batchable/Schedulable or trigger); platform invokes it'
+        ? 'component is its own entry point (REST/Aura/Invocable or trigger); platform invokes it'
         : 'reached by an entry-point class (REST resource / AuraEnabled / InvocableMethod / async-dispatch)';
     } else if (incomingCount === 0) {
       verdict = 'definitely_dead';
@@ -455,8 +618,46 @@ export const findDeadCodeHandler = async (
   }
 
   candidates.sort(compareCandidates);
-  const truncated = candidates.length > limit;
-  const slice = candidates.slice(0, limit);
+
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // The fingerprint covers every NARROWING arg — includeUncertain (it filters
+  // which candidates are in the list, line below `verdict === 'uncertain'`), the
+  // canonical objectId scope, and types — so a token minted for one narrowing
+  // set can't be replayed against another.
+  const fingerprint = argsFingerprint({
+    ...(objectScopeParentId !== undefined
+      ? { objectId: objectScopeParentId }
+      : {}),
+    types,
+    includeUncertain,
+  });
+  let offset = input.offset ?? 0;
+  if (input.cursor !== undefined) {
+    const decoded = decodeCursor(input.cursor, {
+      tool: FIND_DEAD_CODE_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    });
+    if (!decoded.ok) return err(decoded.error);
+    offset = decoded.value.o;
+  }
+
+  const paged = paginateLegacy(candidates, {
+    offset,
+    limit,
+    keyOf: (c) => c.componentId,
+    binding: {
+      tool: FIND_DEAD_CODE_TOOL,
+      vaultHash: ctx.manifest.sourceTreeHash,
+      argsFingerprint: fingerprint,
+    },
+  });
+  const slice = paged.items;
+  const truncated = paged.hasMore;
+  const emitCursor = paged.nextCursor !== null;
+  // Paged when truncated OR resumed past 0; only then do we add paging fields,
+  // so a whole-fits no-cursor response stays byte-identical to pre-CR-22.
+  const isPaged = truncated || offset > 0;
 
   const byVerdict = {
     definitely_dead: 0,
@@ -470,9 +671,28 @@ export const findDeadCodeHandler = async (
   }
 
   const boundaries: string[] = [DEAD_CODE_DISCLOSURE];
+  // R2-12: whenever Flow is in scope, disclose the status-gated Flow rule
+  // (active/Draft/unknown flows are never definitely_dead) and the unmodeled
+  // subflow-invocation caveat — surfaced regardless of whether any flow landed
+  // in the (suppressed) result set, so the honesty is never silently dropped.
+  if (types.includes('Flow' as ComponentType)) {
+    boundaries.push(FLOW_DISCLOSURE);
+  }
   if (candidates.length > 0) {
     boundaries.push(TEST_DISCLOSURE);
     boundaries.push(MANAGED_PACKAGE_DISCLOSURE);
+  }
+  // When any async-dispatch class (Queueable/Batchable/Schedulable) lands in the
+  // result set — at any verdict — disclose the production-dispatch rule and the
+  // !Test.isRunningTest() nuance so a "dead queueable" claim is never silent.
+  if (
+    candidates.some(
+      (c) =>
+        c.componentType === 'ApexClass' &&
+        c.reasoning.startsWith('async-dispatch class'),
+    )
+  ) {
+    boundaries.push(ASYNC_DISPATCH_DISCLOSURE);
   }
   // A CustomField flagged dead is the weakest verdict: Apex/Flow/SOQL field
   // reads are not graph edges, so an in-use field can surface as dead.
@@ -511,6 +731,11 @@ export const findDeadCodeHandler = async (
       byType,
       boundaries,
       truncated,
+      ...(isPaged ? { limit, offset } : {}),
+      ...(truncated ? { nextOffset: offset + slice.length } : {}),
+      ...(emitCursor
+        ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo }
+        : {}),
       soundness,
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
     },

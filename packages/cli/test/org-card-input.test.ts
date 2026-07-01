@@ -1,8 +1,15 @@
 /// <reference types="vitest/globals" />
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import type { ExtractionResult, VaultManifest } from '@sf-intelligence/contracts';
 import {
@@ -10,8 +17,10 @@ import {
   importExtractionResults,
   listEdges,
   openGraph,
+  openGraphReadOnly,
   type GraphStore,
 } from '@sf-intelligence/graph';
+import { renderOrgCard } from '@sf-intelligence/renderers';
 
 import { buildOrgCardInput } from '../src/org-card-input.js';
 
@@ -150,5 +159,72 @@ describe('buildOrgCardInput', () => {
     expect(input.generatedAt).toBe('2026-06-10T00:00:00.000Z');
     expect(input.refreshedAt).toBe(MANIFEST.refreshedAt);
     expect(input.sourceTreeHash).toBe(MANIFEST.sourceTreeHash);
+  });
+});
+
+/**
+ * CR-RV15 — the committed demo org-card is a STATIC artifact: it is shipped in
+ * `examples/demo-vault/meta/org-card.json` but generated from that vault's
+ * graph + manifest. Nothing tied the two together, so the JSON could silently
+ * drift from what the generator produces (e.g. a renderer/`buildOrgCardInput`
+ * change lands without regenerating the demo card) and ship a stale,
+ * misleading example.
+ *
+ * This guard re-runs the real generation pipeline (`buildOrgCardInput` →
+ * `renderOrgCard(...).json`) over the demo vault's COMMITTED graph + manifest
+ * and asserts it equals the committed `org-card.json` byte-for-byte, except the
+ * wall-clock `generatedAt` stamp (neutralized — it is the only non-graph,
+ * non-manifest field). When it fails, regenerate the demo card via
+ * `sfi refresh` over the demo vault (or update the committed JSON to match).
+ *
+ * The committed graph is opened from a TEMP COPY in READ-ONLY mode so the test
+ * can never mutate or lock the shipped artifact.
+ */
+describe('demo org-card.json drift guard (CR-RV15)', () => {
+  // packages/cli/test → repo root is three levels up.
+  const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..');
+  const VAULT = join(REPO_ROOT, 'examples', 'demo-vault');
+  const GRAPH = join(VAULT, 'graph', 'graph.duckdb');
+  const MANIFEST_PATH = join(VAULT, 'meta', 'manifest.json');
+  const CARD_PATH = join(VAULT, 'meta', 'org-card.json');
+
+  it('committed demo card matches a fresh regeneration from the demo vault', async () => {
+    // Fail loudly (not silently skip) if the demo vault is missing — the
+    // committed example is part of the product surface.
+    expect(existsSync(GRAPH)).toBe(true);
+    expect(existsSync(MANIFEST_PATH)).toBe(true);
+    expect(existsSync(CARD_PATH)).toBe(true);
+
+    const manifest = JSON.parse(readFileSync(MANIFEST_PATH, 'utf8')) as VaultManifest;
+    const committed = JSON.parse(readFileSync(CARD_PATH, 'utf8')) as Record<string, unknown>;
+
+    const tmp = mkdtempSync(join(tmpdir(), 'sfi-demo-card-'));
+    try {
+      // Copy then open READ-ONLY so the committed graph is never touched.
+      const dbCopy = join(tmp, 'graph.duckdb');
+      copyFileSync(GRAPH, dbCopy);
+      const opened = await openGraphReadOnly(dbCopy);
+      expect(opened.ok).toBe(true);
+      if (!opened.ok) return;
+      const store = opened.value;
+      try {
+        // Inject the committed `generatedAt` so the ONLY wall-clock field is
+        // identical by construction; every other field is graph/manifest-derived.
+        const input = await buildOrgCardInput(
+          manifest,
+          store,
+          committed['generatedAt'] as string,
+        );
+        const regenerated = renderOrgCard(input).json;
+
+        // Canonical-JSON compare: identical key/value content regardless of
+        // file whitespace. A drift in ANY derived field fails here.
+        expect(regenerated).toEqual(committed);
+      } finally {
+        await closeGraph(store);
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });

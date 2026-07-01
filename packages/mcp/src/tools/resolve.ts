@@ -28,7 +28,11 @@ import {
   type MatchKind,
   type ResolveDisposition,
 } from '@sf-intelligence/graph';
-import { readAnnotations, vaultPaths } from '@sf-intelligence/vault';
+import {
+  readAnnotations,
+  summarizeCoverage,
+  vaultPaths,
+} from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import { renderResolveMarkdown } from '../answer-render.js';
@@ -252,8 +256,21 @@ export const resolveHandler = async (
   }
   const candidates = baseCandidates;
 
+  // Honesty fix (batch 8): a `none` disposition on a query SCOPED to one or
+  // more metadata families whose coverage is COMPLETE is a determinate
+  // negative — the component does not exist (false premise) — NOT a coverage
+  // gap. Only true when `types` was supplied AND every requested type is fully
+  // covered; an unscoped or partially-covered resolve stays inconclusive and
+  // keeps leading with `/sfi-refresh`.
+  const scopedCoverageComplete =
+    disposition === 'none' &&
+    input.types !== undefined &&
+    input.types.length > 0 &&
+    summarizeCoverage(ctx.manifest, input.types).status === 'complete';
+
   const clarify = buildClarify(input.query, aliasResolution, {
     refreshedAt: ctx.manifest.refreshedAt,
+    scopedCoverageComplete,
   });
 
   const rendered = renderResolveMarkdown({
@@ -268,7 +285,9 @@ export const resolveHandler = async (
       candidates,
       queryTokens: result.value.queryTokens,
       confidence: 'heuristic',
-      disclosure: RESOLVE_DISCLOSURE,
+      disclosure: scopedCoverageComplete
+        ? `No component named "${input.query}" exists among the scoped metadata families, which have COMPLETE coverage in this vault — so this is a FALSE PREMISE (the component does not exist), not a coverage gap. Do not hedge toward "the vault did not retrieve it" or imply a refresh would surface it. ${RESOLVE_DISCLOSURE}`
+        : RESOLVE_DISCLOSURE,
       clarification: clarify.clarification,
       nextActions: clarify.nextActions,
       rendered,

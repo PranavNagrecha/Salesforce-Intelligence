@@ -160,6 +160,17 @@ export type ComponentType =
   | 'ExternalService' //         `ExternalServiceRegistration` — invoke-an-OpenAPI-endpoint binding (`.externalServiceRegistration-meta.xml`); carries a `references` edge to its declared `NamedCredential` when set.
   | 'NetworkAccess' //           IP-range trust-list entry (`.networkAccess-meta.xml`). NOT the Network / Experience Cloud Site (a separate `Community` / `ExperienceBundle` metadata family; v1.5 scope explicitly excludes it).
   // v1.6 — business-user record-value tier.
+  // CR-CAP-15 — declarative custom-permission definition tier. A
+  // CustomPermission is a named permission flag (`.customPermission-meta.xml`)
+  // that Apex / Flow / validation rules gate on, and that PermissionSets /
+  // Profiles grant via their `<customPermissions>` block (the grant side is
+  // CR-CAP-10's `grantedBy` edge; no new EdgeType). Id format is flat
+  // `CustomPermission:{DeveloperName}` (no parent scope — mirroring
+  // RemoteSiteSetting / AuthProvider / CustomLabel) so a bare `<name>` grant
+  // resolves to exactly this id. v0.1 extracts the definition node only; the
+  // optional `<requiredPermission>` CustomPermission-implies-CustomPermission
+  // dependency edges and the `<connectedApp>` reference are deferred.
+  | 'CustomPermission' //        A declarative permission flag (`.customPermission-meta.xml`) checked by Apex/Flow/validation rules and granted by PermissionSet/Profile `<customPermissions>`. Id `CustomPermission:{DeveloperName}`. Carries `label`/`description`; the grant edge (`grantedBy`) is CR-CAP-10.
   | 'CustomMetadataRecord' //    A single record (row) of a `__mdt` Custom Metadata Type; holds runtime-readable configured values. Attached to its `CustomObject:{TypeApiName}` parent via the existing `parentOf` edge (mirroring v1.0's CustomField → CustomObject pattern; no new EdgeType).
   | 'CustomSettingRecord' //     A single record of a List or Hierarchy Custom Setting; extracted ONLY when present in the DX source tree (rare — records typically live as data, requiring `sf data query`). Attached to its `CustomObject:{TypeApiName}` parent via the existing `parentOf` edge.
   // v2.0a — conditional-context tier (the master primitive for "when does this fire?").
@@ -173,6 +184,18 @@ export type ComponentType =
   // existing `parentOf` from `CustomObject:{ObjectApiName}` (mirroring
   // the v1.0 CustomField → CustomObject pattern; no new EdgeType).
   | 'OutboundMessage' //       SOAP-based outbound message embedded inside `*.workflow-meta.xml`'s `<outboundMessages>` collection. Carries `name`, `endpointUrl`, `includeSessionId`, `useDeadLetterQueue`, `integrationUser`, and `fields` (string array) properties. The endpoint URL is captured verbatim — v2.8 does NOT probe the URL, does NOT validate the destination exists, and does NOT confirm the message is actually invoked at runtime (the v2.8 honesty axis surfaced verbatim by `sfi.outbound_message_catalog`'s disclosure field). Triggered by `<outboundMessages>` child elements inside `*.workflow-meta.xml`. Pre-v2.8 these references dangled by design (per `WorkflowRule.md` § "outboundMessages"); v2.8 promotes them to real nodes so the integration catalog can list outbound destinations alongside RemoteSiteSetting and NamedCredential. See `docs/vendor/salesforce-metadata/AsyncTopologySemantics.md`.
+  // v2.9 — WorkflowAlert promotion. Each `<alerts>` entry in a
+  // `*.workflow-meta.xml` file is promoted from a dangling-by-design
+  // `references` target (pre-v2.9 only the name→template lookup was
+  // captured) to a real ComponentType node so alert-level properties
+  // (`senderType`, `description`, `template`, `ccEmails`) are queryable.
+  // Id format `WorkflowAlert:{ObjectApiName}.{fullName}` mirrors the
+  // `OutboundMessage:` and `WorkflowFieldUpdate:` scoping convention.
+  // Parent edge is the existing `parentOf` from
+  // `CustomObject:{ObjectApiName}`. The `WorkflowRule→WorkflowAlert`
+  // `references` edge already existed (via the Alert action variant);
+  // v2.9 gives that edge a real node target instead of a phantom stub.
+  | 'WorkflowAlert' //        Email alert embedded inside `*.workflow-meta.xml`'s `<alerts>` collection. Carries `name` (fullName), `description`, `senderType` (CurrentUser | OrgWideEmailAddress | DefaultWorkflowUser), `template` (EmailTemplate path), and `ccEmails` (string array). Id `WorkflowAlert:{ObjectApiName}.{fullName}`. Parented by `CustomObject:{ObjectApiName}` via `parentOf`. Referenced by `WorkflowRule` via the existing Alert-variant `references` edge, which now resolves to a real node rather than a phantom stub.
   // v2.6a — CPQ specialist tier. Five typed CPQ ComponentTypes
   // recognized HEURISTICALLY from underlying CustomMetadataRecord /
   // CustomSettingRecord nodes when their apiName carries the `SBQQ__`
@@ -234,7 +257,26 @@ export type ComponentType =
   | 'WebLink' //        An object button/link (`.webLink-meta.xml`). Carries `linkType`, `displayType`, `url`/`page` content. URL merge fields (`{!Object.Field}`) on the OWNING object emit heuristic `references` edges.
   | 'FieldSet' //       A field set (`.fieldSet-meta.xml`) — an ordered field group consumed by LWC/VF/managed packages. `<displayedFields>`/`<availableFields>` field API names each emit a `usedInLayout` edge.
   | 'Index' //          A custom index (`.index-meta.xml`). Indexed `<fields><name>` emit `references` edges (removing an indexed field breaks the index).
-  | 'InstalledPackage'; // A managed/unlocked package installed in the org (`.installedPackage-meta.xml`). The fullName is the namespace prefix; `properties.versionNumber` is the installed version. Answers "what packages are installed?".
+  | 'InstalledPackage' // A managed/unlocked package installed in the org (`.installedPackage-meta.xml`). The fullName is the namespace prefix; `properties.versionNumber` is the installed version. Answers "what packages are installed?".
+  // CR-CAP-18 — platform-event publish/stream-routing topology. A
+  // PlatformEventChannel is the publish/stream container; a
+  // PlatformEventChannelMember binds ONE entity onto that channel with an
+  // optional declared per-member filter. This is the PUBLISH side (channel
+  // routing), DISTINCT from the SUBSCRIBE side (`listensTo`, modeled from
+  // Apex/Flow into the `__e` CustomObject). Ids preserve the `__chn` fullName
+  // suffix: `PlatformEventChannel:{Name}__chn` / `PlatformEventChannelMember:{Name}__chn`.
+  // Edges REUSE existing types (NO new EdgeType): channel→member is `parentOf`
+  // (parent→child, member's parentId = the channel), member→event is
+  // `references` (member → the `__e`/CDC `CustomObject` node) tagged
+  // `properties.referenceKind: 'platformEventChannelMember'` and carrying the
+  // verbatim declared `filterExpression`. For a `data` channel the
+  // selectedEntity (CDC/standard entity) may be absent from an offline vault →
+  // the `references` edge is dangling-by-design (importer stamps
+  // `targetMissing`, mirroring `dispatchesOmniAction`). HONESTY: the
+  // filterExpression is the DECLARED XML text, NOT runtime filter EVALUATION.
+  // EDGE_TYPES tuple + EdgeTypesComplete guard are UNTOUCHED.
+  | 'PlatformEventChannel' //       The publish/stream container (`.platformEventChannel-meta.xml`). Carries `channelType` (`event` | `data`) and `label`. Id `PlatformEventChannel:{Name}__chn`. Node-only; the member file owns the channel→member `parentOf` and member→event `references` edges.
+  | 'PlatformEventChannelMember'; // One entity bound onto a PlatformEventChannel (`.platformEventChannelMember-meta.xml`). Carries `eventChannel`, `selectedEntity`, and the optional declared `filterExpression`. Id `PlatformEventChannelMember:{Name}__chn`; `parentId` = its `PlatformEventChannel`. Emits `parentOf` (channel→member) + `references` (member→`CustomObject:{selectedEntity}`, carrying `filterExpression`). NO new EdgeType.
 
 /**
  * A canonical component identifier.
@@ -399,6 +441,21 @@ export type EdgeType =
   // v1.1 — sharing & visibility tier.
   | 'inheritsFrom' //      Role -> parent Role (hierarchy)
   | 'sharedWith' //        SharingRule or Queue -> access target
+  // CR-CAP-12 — Group membership topology. Group -> a member it contains, one
+  // edge per `<related>` row in the `*.group-meta.xml`. The member target uses
+  // the SAME variant-prefix logic the sharing-rules `sharedWith` table uses:
+  // a `User` row → a dangling `User:{ref}` id (no User ComponentType, so the
+  // target is dangling-by-design); a `Role` row → `Role:{ref}`; a
+  // `RoleAndSubordinates` row → `Role:{ref}` carrying
+  // `properties.inheritance: 'subordinates'`; a nested `Group` row →
+  // `Group:{ref}` (enabling membership transitivity); a `Territory` row →
+  // a `Territory:{ref}` synthetic carrying `properties.resolvable: false` so
+  // consumers disclose it. Confidence `declared` (the `<related>` row is the
+  // declaration) — matching the sharing-rules `sharedWith` sibling, which emits
+  // the same kind of parsed-from-XML target as `declared` for consistency. The
+  // kept `Group` node `properties.memberCount` is additive, not replaced. See
+  // `docs/vendor/salesforce-metadata/Group.md`.
+  | 'hasMember'
   // v1.2 — record types + UI surfaces tier.
   | 'belongsToApp' //      CustomTab -> CustomApplication (declared, tab/app membership)
   | 'usesValueSet' //      CustomField -> GlobalValueSet (declared, value-set reference)
@@ -408,7 +465,7 @@ export type EdgeType =
   | 'coversTest' //        ApexClass (@isTest) -> ApexClass (covered); declared via @TestVisible/@TestSetup, heuristic from callsApex inference
   // v1.5 — integration topology + event/async/API surface tier.
   | 'exposes' //           ApexClass with @RestResource / @AuraEnabled / @InvocableMethod -> synthetic `ExternalApi:{kind}/{path}` target (declared; the annotation IS the declaration, the synthetic id is a graph-store convention not a ComponentType — see PLAN-v1.5.md §3).
-  | 'dispatchesAsync' //   ApexClass (caller) -> ApexClass (Queueable / Schedulable / Batchable / @future job); declared when the dispatch shape names the target class in-line (`System.enqueueJob(new MyQueueable())`), heuristic when it passes a constructed local variable the scanner can still resolve. Does NOT replace `callsApex` — a caller emits both edges in parallel.
+  | 'dispatchesAsync' //   ApexClass (caller) -> ApexClass (Queueable / Schedulable / Batchable / @future job); declared when the dispatch shape names the target class in-line (`System.enqueueJob(new MyQueueable())`), heuristic when it passes a constructed local variable the scanner can still resolve. The @future variant is minted at GRAPH-BUILD time (CR-CAP-09, `mintFutureDispatchEdges`) by joining a `callsApex` edge to a target class with `hasFutureMethod === true`; it is `heuristic` and CLASS-GRANULAR (`properties.dispatchMechanism: 'future'`, `granularity: 'class'`) — it fires when the target class has SOME @future method, not necessarily the invoked one (method-level precision gated on CR-CAP-06). Does NOT replace `callsApex` — a caller emits both edges in parallel.
   // v1.7 — Tooling API freshness + dependency tier.
   | 'dependsOnFromApi' //  Sourced from Tooling API's MetadataComponentDependency endpoint; declared confidence. Direction is `{Source} -> {Target}` per the API's response (typically ApexClass -> CustomField, Flow -> ApexClass, Layout -> CustomField). Emitted ONLY by the opt-in `tooling-api-dependency` enricher behind `sfi refresh --with-tooling-api`; absent from offline-only vaults by design. Does NOT replace `references` — when the API confirms a pre-existing extracted edge, the enricher adds `properties.confirmedByApi: true` to that edge instead of duplicating it. See PLAN-v1.7.md §3.
   // v2.0a — conditional-context tier (the master primitive for "when does this fire?").
@@ -455,6 +512,7 @@ export const EDGE_TYPES = [
   'listensTo',
   'inheritsFrom',
   'sharedWith',
+  'hasMember',
   'belongsToApp',
   'usesValueSet',
   'sendsEmail',
@@ -627,6 +685,26 @@ export interface CoverageEntry {
    * as partial coverage — absence-claim caveats still fire.
    */
   readonly pending?: boolean;
+  /**
+   * CR-P3-3: true ONLY when the Metadata API CONFIRMED-CLEAN retrieved this
+   * type — i.e. the org's `sf org list metadata-types` describe was non-null
+   * AND listed this type, AND `sf project retrieve` for it returned with no
+   * error (the type landed in `retrieveWithFallback.succeeded`). This is the
+   * one honest signal that disambiguates "retrieved, the org genuinely has
+   * zero of this type" (confirmed-empty, COMPLETE) from "not-retrieved /
+   * silently-dropped / describe-blind" (the byte-identical
+   * {requested:true,retrieved:0,errored:false,neverModeled:false} row), which
+   * stays partial.
+   *
+   * HONESTY: absence === false. Old manifests (pre-signal), `--no-pull`
+   * rebuilds (no retrieve ran), describe-blind pulls (could not prove the org
+   * supports the type), and in-memory backfilled rows all leave this unset, so
+   * they keep firing absence caveats until a full live `sfi refresh`
+   * repopulates coverage. It is NEVER set from `requested` alone (`requested`
+   * only means "in package.xml", which does not prove the retrieve completed)
+   * and NEVER for a capped/dropped (`pending`) type.
+   */
+  readonly retrieveConfirmed?: boolean;
 }
 
 // ============================================================================
@@ -767,4 +845,81 @@ export interface McpError {
    * the requested id. Heuristic — confirm before acting.
    */
   readonly resolveSuggestions?: readonly ResolveSuggestion[];
+}
+
+// ============================================================================
+// Continuation-cursor pagination (CR-22)
+// ============================================================================
+
+/**
+ * Decoded shape of a CR-22 continuation cursor. The cursor is an OPAQUE,
+ * versioned, per-handler token: a caller receives `PageInfo.nextCursor` (a
+ * base64url string), treats it as a black box, and echoes it back on the next
+ * call. This is the post-decode struct the handler reasons over — never
+ * something a caller constructs by hand.
+ *
+ * A cursor is bound to ONE specific query: the tool that minted it (`t`), the
+ * vault it was minted against (`h` = `vaultState.sourceTreeHash`), and a
+ * fingerprint of the narrowing args (`q`). On resume the handler re-validates
+ * all three; ANY mismatch (different tool, refreshed vault, changed filters)
+ * means the cursor is stale and the caller must restart without it.
+ *
+ * The cursor is emitted ONLY when a page was truncated (over the byte budget OR
+ * over `limit`). A request with no cursor behaves exactly as today: offset 0,
+ * default limit — so adding a cursor never moves an in-budget golden response.
+ */
+export interface PageCursorToken {
+  /** Protocol version. Bumped if the encoding changes; a stale `v` is rejected. */
+  readonly v: number;
+  /** Tool name the cursor was minted for (e.g. `sfi.get_edges`). */
+  readonly t: string;
+  /** `sourceTreeHash` of the vault the cursor was minted against. */
+  readonly h: string;
+  /** Resume offset into the designated list (safe non-negative integer). */
+  readonly o: number;
+  /**
+   * Optional total-order tiebreak key (e.g. the last row's edge-PK / id) of the
+   * last item on the prior page. RESERVED for a future shift-tolerant resume —
+   * it is stamped onto the cursor but NOT yet consulted on resume (resume uses
+   * the `o` offset only). With offset-only resume, a front-deletion between
+   * pages can still skip/dup; `k` exists so a later batch can wire key-anchored
+   * resume without an encoding change. Validated as a string.
+   */
+  readonly k?: string;
+  /**
+   * Optional scan offset for tools that walk a capped node scan separately from
+   * the page offset (safe non-negative integer).
+   */
+  readonly s?: number;
+  /** Fingerprint of the query's narrowing args — guards against arg drift. */
+  readonly q?: string;
+  /**
+   * Optional list/section identifier for the multi-list and section-cursor
+   * variants (e.g. `'object'` vs `'system'`). Absent for a flat single list.
+   */
+  readonly listId?: string;
+}
+
+/**
+ * Pagination metadata a cursor-aware handler attaches to its `data` payload.
+ * `jsonResult` DETECTS this block (a `nextCursor`/`pageInfo`) and skips its own
+ * approximate `nextOffset` computation — the handler's cursor wins.
+ *
+ * `nextCursor` is present ONLY on a truncated page. When the list is exhausted
+ * it is `null` and `hasMore` is `false`, so a caller loops `while (hasMore)`.
+ * `limit`/`offset` remain on the payload for backward compatibility.
+ */
+export interface PageInfo {
+  /** Total items matching the query BEFORE paging (the designated list). */
+  readonly totalCount: number;
+  /** Items returned in THIS page. */
+  readonly returnedCount: number;
+  /** True when more items remain past this page. */
+  readonly hasMore: boolean;
+  /**
+   * Opaque continuation token to fetch the next page, or `null` when exhausted.
+   * Present ONLY on a truncated page; echo it back verbatim as the `cursor`
+   * input. A caller MUST NOT parse or construct it.
+   */
+  readonly nextCursor: string | null;
 }
