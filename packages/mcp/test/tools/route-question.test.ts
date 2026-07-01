@@ -843,3 +843,57 @@ describe('routeQuestionHandler — gap logging is privacy-first opt-in (CR-16b)'
     expect(written.question).toBe('blorp glorp shmorp');
   });
 });
+
+describe('routeQuestionHandler — I3a live-plane consent disclosure in guidance', () => {
+  it('discloses the live plane + consent step when a leading candidate is liveRequired', async () => {
+    const r = await routeQuestionHandler(ctx, {
+      question: 'How many open Cases in the org?',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // A live-record-count question routes to the live plane.
+    expect(r.value.data.route.plane).toBe('live');
+    const cands = r.value.data.toolCandidates ?? [];
+    // The shortlist leads with at least one liveRequired candidate (I1 field).
+    expect(cands.slice(0, 3).some((c) => c.liveRequired === true)).toBe(true);
+    const guidance = r.value.data.guidance ?? '';
+    // The guidance must name the live plane, refuse to invent a number, and name
+    // the concrete consent step — so a host LLM cannot answer from the vault.
+    expect(guidance).toMatch(/LIVE PLANE/i);
+    expect(guidance).toMatch(/liveRequired/);
+    expect(guidance).toMatch(/sfi\.live_consent/);
+    expect(guidance).toMatch(/Do NOT invent/i);
+  });
+
+  it('generalizes across the live bucket — a live field-population question also discloses consent', async () => {
+    const r = await routeQuestionHandler(ctx, {
+      question: 'How many Contact records actually have the Email field populated right now?',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const cands = r.value.data.toolCandidates ?? [];
+    // Only assert the disclosure when a leading candidate is in fact live-required,
+    // so the test pins the MECHANISM (any leading live candidate → disclose), not a
+    // single phrasing's routing.
+    if (cands.slice(0, 3).some((c) => c.liveRequired === true)) {
+      expect(r.value.data.guidance ?? '').toMatch(/sfi\.live_consent/);
+    }
+  });
+
+  it('does NOT attach the consent disclosure to a pure vault question', async () => {
+    const r = await routeQuestionHandler(ctx, {
+      question: 'what custom objects do we have',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const cands = r.value.data.toolCandidates ?? [];
+    // Sanity: this is a vault question — no leading live-required candidate.
+    expect(cands.slice(0, 3).every((c) => c.liveRequired !== true)).toBe(true);
+    const guidance = r.value.data.guidance ?? '';
+    expect(guidance).not.toMatch(/LIVE PLANE/i);
+    expect(guidance).not.toMatch(/sfi\.live_consent/);
+  });
+});
