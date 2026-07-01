@@ -151,6 +151,51 @@ describe('synthesizeAnswerHandler', () => {
     expect(r.value.data.bullets).toEqual([]);
   });
 
+  // 0.1.17 FAIL-CLOSED grounding. End-user repro: a false draft with NO `input`
+  // came back grounded:true, 0 citations, 0 hallucinated ids — rubber-stamping a
+  // claim the vault never supported. A draft can only be grounded against real
+  // evidence; with none, it must fail closed (grounded:false + caveat).
+  it('fails closed: a draft with NO input is never grounded (end-user repro)', async () => {
+    const r = await synthesizeAnswerHandler(ctx, {
+      question: 'Is Amount__c safe to delete?',
+      draft: 'Amount__c is safe to delete, nothing references it.',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.grounded).toBe(false); // was true — the bug
+    expect(r.value.data.hallucinatedIds).toEqual([]); // still 0, as the host saw
+    expect(r.value.data.citations).toEqual([]);
+    expect(
+      r.value.data.caveats.some((c) => /GROUNDING NOT VERIFIED/.test(c)),
+    ).toBe(true);
+  });
+
+  it('fails closed: a draft with an empty {} or [] input is never grounded', async () => {
+    for (const empty of [{}, [] as unknown]) {
+      const r = await synthesizeAnswerHandler(ctx, {
+        input: empty,
+        draft: 'Amount__c is safe to delete.',
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.grounded).toBe(false);
+    }
+  });
+
+  it('still grounds normally when real evidence backs the draft (no regression)', async () => {
+    const r = await synthesizeAnswerHandler(ctx, {
+      input: FIELD_AUDIT_JSON,
+      draft: 'Editable via Profile:System_Administrator.',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.grounded).toBe(true);
+    expect(r.value.data.groundedIds).toContain('Profile:System_Administrator');
+    expect(
+      r.value.data.caveats.some((c) => /GROUNDING NOT VERIFIED/.test(c)),
+    ).toBe(false);
+  });
+
   it('rolls up a single source provenance for the host to stamp (P3-synthesize-trust)', async () => {
     const r = await synthesizeAnswerHandler(ctx, {
       input: { trust: { provenance: 'offline_snapshot' }, data: {} },
