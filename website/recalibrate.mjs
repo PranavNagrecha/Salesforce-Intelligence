@@ -357,6 +357,7 @@ patch("index.html", [
   [/(<div class="num">)\d[\d,]*(<\/div><div class="label">read-only tools<\/div>)/, `$1${T}$2`],
   [/(› all )\d[\d,]*( tools<\/a>)/, `$1${T}$2`],
   [/("softwareVersion": ")\d+\.\d+\.\d+(")/, `$1${VERSION}$2`],
+  [/(~)[\d,]+( tests, full CI gate)/g, `$1${approxStr}$2`],
 ]);
 patch("capabilities.html", [
   [/(capability map: )\d[\d,]*( read-only tools)/, `$1${T}$2`],
@@ -375,6 +376,7 @@ const llmsRules = [
 ];
 if (stats.commandCount != null) llmsRules.push([/(\*\*)\d+( slash commands\*\*)/, `$1${stats.commandCount}$2`]);
 if (stats.skillCount != null) llmsRules.push([/(ships \*\*)\d+( skills\*\*)/, `$1${stats.skillCount}$2`]);
+llmsRules.push([/(~)[\d,]+( automated tests across )\d+( packages)/g, `$1${approxStr}$2${packageCount}$3`]);
 patch("llms.txt", llmsRules);
 
 // trust.html: stat band, headings, meta, per-package table
@@ -388,6 +390,7 @@ patch("trust.html", [
   [/(<div class="num">)\d+(<\/div><div class="label">tested packages<\/div>)/, `$1${packageCount}$2`],
   [/(<div class="num">)\d+(<\/div><div class="label">CI gates per change<\/div>)/, `$1${stats.gateCount}$2`],
   [/(~)[\d,]+( tests across the stack)/, `$1${approxStr}$2`],
+  [/(~)[\d,]+( tests, full CI gate)/g, `$1${approxStr}$2`],
   [/(~)[\d,]+( unit tests)/, `$1${approxStr}$2`],
   [/(~)[\d,]+( automated tests)/g, `$1${approxStr}$2`],
   [/(automated tests across )\d+( packages)/g, `$1${packageCount}$2`],
