@@ -25,6 +25,8 @@ import { appendFile, mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
+import type { RefusalShape } from './refusal-gates.js';
+
 /** The intelligence plane a question is best answered from. */
 export type Plane = 'vault' | 'live' | 'hybrid' | 'knowledge' | 'unknown';
 
@@ -102,6 +104,15 @@ export interface RouteResult {
    * only when the intent has derivable args (absent otherwise).
    */
   readonly suggestedArgs?: Readonly<Record<string, unknown>>;
+  /**
+   * Present ONLY when a score-independent refusal-shape gate fired (router-v2
+   * P2): a write imperative (`refused-write`), prompt-injection / record-value
+   * exfiltration (`refused-injection`), unmodeled runtime telemetry
+   * (`honest-gap-runtime`), or a non-Salesforce ask (`out-of-scope`). A refusal
+   * route is NEVER executable — `tools` is empty and the disclosure is the
+   * route's `reason`. Additive: hosts reading `route.intent` are unaffected.
+   */
+  readonly refusal?: RefusalShape;
 }
 
 interface Rule {

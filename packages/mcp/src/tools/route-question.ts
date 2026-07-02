@@ -8,6 +8,22 @@
  * surfaces the gap rather than fabricating a capability; the question text is
  * appended to the local backlog only when the caller explicitly passes
  * `logGap: true` (privacy-first opt-in, off by default — CR-16).
+ *
+ * Router-v2 P2 additions:
+ * - REFUSAL-SHAPE GATES run FIRST, score-independent, in both router modes: a
+ *   write imperative (`refused-write`, with a read-side alternative offered),
+ *   prompt-injection / record-value exfiltration (`refused-injection`, hard —
+ *   candidates and guidance suppressed), unmodeled runtime telemetry
+ *   (`honest-gap-runtime`), and non-Salesforce asks (`out-of-scope`). All four
+ *   return `tools: []` (never executable) with the disclosure as `reason` and
+ *   the structured `route.refusal` field; permission/hypothetical READS ("am I
+ *   allowed to…", "what if I delete…") are explicit excluders and route
+ *   normally.
+ * - FUNNEL-PRIMARY advisory fallback: when no deterministic stage places the
+ *   question (unrouted, no clarification, premise clean), a PURE-funnel top
+ *   candidate scoring ≥ FUNNEL_PRIMARY_MIN_SCORE upgrades the dead `unrouted`
+ *   to intent `funnel-advisory` — top-3 funnel tools, confidence `low` by
+ *   construction, reason flagged FUNNEL-DERIVED. Advisory, never authoritative.
  */
 
 import { createHash } from 'node:crypto';
@@ -33,6 +49,7 @@ import {
   type RouteClarification,
   type RouteResult,
 } from '../intent-router.js';
+import { detectRefusalShape, type RefusalKind, type RefusalShape } from '../refusal-gates.js';
 import {
   resolveCandidatePlane,
   semanticCandidates,
@@ -827,11 +844,15 @@ const mergeRouteHintsIntoCandidates = (
       // rather than pinning it above everything. It still has no scored
       // plane/liveRequired/confidence, so stamp them: plane + liveRequired from
       // the same authoritative map the funnel uses, and confidence 'high'
-      // because a deterministic regex route pinned this tool (I1).
+      // because a deterministic regex route pinned this tool (I1). Its
+      // `cosine: 0` declares the ZERO semantic evidence outright (P2 §4): the
+      // 0.25 score is pure regex assertion, and no threshold logic may ever
+      // read it as funnel support — the row stays listed as a legitimate HINT.
       const { plane, liveRequired } = resolveCandidatePlane(tool);
       byTool.set(tool, {
         tool,
         score: fuse(0),
+        cosine: 0,
         category: null,
         plane,
         liveRequired,
@@ -896,6 +917,22 @@ const rerankForMode = (
 // balanced high-consequence ties in the corpus. Widening it re-blocks clear
 // routes; that is the wrong trade.
 export const MARGIN = 0.05;
+
+/**
+ * FUNNEL-PRIMARY advisory threshold (router-v2 P2 §3): when no deterministic
+ * stage placed the question, the top PURE-funnel candidate must score at least
+ * this to upgrade a dead `unrouted` into an advisory `funnel-advisory` route.
+ *
+ * The floor mass sits at exactly 0.25 (`REGEX_BONUS` fused over cosine 0 —
+ * pure regex assertion, zero semantic evidence): 37/133 labeled over-routes
+ * vs 8/529 misses sat there, so the threshold must be strictly above it. The
+ * funnel-primary path only ever sees PURE cosines (the merge short-circuits
+ * for an unrouted intent — pinned by a regression test), so 0.30 is a real
+ * semantic threshold. 0.26 is the stretch setting — evaluate ONLY in the
+ * Phase-7 harness re-run with the over-route tripwire green (≤69 relabeled /
+ * ≤133 raw); never ship it blind.
+ */
+export const FUNNEL_PRIMARY_MIN_SCORE = 0.30;
 
 /**
  * A candidate whose tool MUTATES the org if the host acts on the plan it
@@ -1051,10 +1088,15 @@ const guidanceForMode = (
 /**
  * Build the ranked funnel candidates for a route + question: score the funnel,
  * fuse the regex route hints (I2b bounded bonus), then mode-rerank. Shared by
- * the I6 margin gate (which reads the top-2 to decide ambiguity) and the final
- * response, so both see the identical shortlist.
+ * the I6 margin gate (which reads the top-2 to decide ambiguity), the
+ * funnel-primary fallback (P2 §3), and the final response, so all see the
+ * identical shortlist. LOAD-BEARING INVARIANT (P2 §4, pinned by test): for an
+ * `unrouted`/`empty` intent the merge short-circuits, so this returns PURE
+ * cosines — no regex bonus, no 0.25 floor mass, no `fromRoute` rows — which is
+ * what makes FUNNEL_PRIMARY_MIN_SCORE a real semantic threshold. Exported for
+ * that regression test.
  */
-const buildFunnelCandidates = (
+export const buildFunnelCandidates = (
   route: RouteResult,
   question: string,
   routeToolArgs: ReadonlyMap<string, Readonly<Record<string, unknown>>>,
@@ -1084,10 +1126,131 @@ type RouterMode = 'hybrid' | 'offline';
 const routerMode = (): RouterMode =>
   (process.env.SFI_ROUTER_MODE ?? '').trim().toLowerCase() === 'offline' ? 'offline' : 'hybrid';
 
+// ---------------------------------------------------------------------------
+// Stage 0 — refusal-shape gates (router-v2 P2 §2). Score-independent, run on
+// the RAW question BEFORE classifyQuestion, in BOTH router modes: an
+// imperative like "deactivate the X flow for me" must never reach the
+// what-if simulator, whatever the host. A refusal is NEVER an executable
+// route: `tools: []` is what makes it non-executable (`executionBlocked`
+// stays false — that flag remains clarification-derived).
+// ---------------------------------------------------------------------------
+
+/** Stable intent label per refusal kind (new `route.intent` string values). */
+const REFUSAL_INTENT: Readonly<Record<RefusalKind, string>> = {
+  'write-imperative': 'refused-write',
+  'injection-exfiltration': 'refused-injection',
+  'runtime-analytics': 'honest-gap-runtime',
+  'out-of-scope': 'out-of-scope',
+};
+
+/** Gap record per refusal kind, so `logGap: true` still records the demand. */
+const REFUSAL_GAP: Readonly<Record<RefusalKind, NonNullable<RouteResult['gap']>>> = {
+  'write-imperative': {
+    category: 'write-request',
+    note: 'org mutation requested; refused (read-only product)',
+  },
+  'injection-exfiltration': {
+    category: 'injection',
+    note: 'prompt-injection/exfiltration shape refused',
+  },
+  'runtime-analytics': {
+    category: 'runtime-analytics',
+    note: 'runtime/ops telemetry the product does not model; honest gap disclosed',
+  },
+  'out-of-scope': {
+    category: 'out-of-scope',
+    note: 'outside the Salesforce-metadata boundary; refused',
+  },
+};
+
+/**
+ * Assemble the full response for a refusal shape. Candidates ride along for
+ * transparency (`tools: []` keeps the route non-executable) EXCEPT for
+ * injection/exfiltration, which suppresses candidates and guidance entirely —
+ * the one exception to candidates-for-transparency. Offline mode omits
+ * candidates as always; the refusal itself (route shape + disclosure) is
+ * mode-independent.
+ */
+const refusalResponse = async (
+  ctx: Context,
+  input: RouteQuestionInput,
+  shape: RefusalShape,
+): Promise<Result<McpResponse<RouteQuestionOutput>, McpError>> => {
+  const wantCands = routerMode() === 'hybrid' && shape.kind !== 'injection-exfiltration';
+  const cands = wantCands
+    ? rerankForMode(semanticCandidates(input.question, input.mode !== undefined ? 12 : 8), input.mode)
+    : [];
+  // The runtime honest-gap discloses its nearest reads inline, so the text is
+  // self-contained even for a host that never renders the candidate list.
+  const disclosure =
+    shape.kind === 'runtime-analytics' && cands.length > 0
+      ? `${shape.disclosure} Nearest reads: ${cands.slice(0, 3).map((c) => c.tool).join(', ')}.`
+      : shape.disclosure;
+  const refusal: RefusalShape = { ...shape, disclosure };
+  const route: RouteResult = {
+    question: input.question,
+    plane: 'unknown',
+    intent: REFUSAL_INTENT[shape.kind],
+    tools: [],
+    liveRequired: false,
+    needsResolve: false,
+    reason: disclosure,
+    gap: REFUSAL_GAP[shape.kind],
+    confidence: 'high', // confident IN the refusal, not in any tool
+    risk: 'informational',
+    alternatives: [],
+    clarification: null,
+    plan: [],
+    refusal,
+  };
+  const logged =
+    input.logGap === true ? await logGapIfAny(route, undefined, ctx.vaultRoot) : null;
+  const guidance = wantCands
+    ? `${disclosure} Do not execute any tool to satisfy the refused action.`
+    : undefined;
+  return ok({
+    data: {
+      route,
+      executionBlocked: false,
+      gapLogged: logged !== null,
+      rendered:
+        cands.length > 0
+          ? `${renderRouteMarkdown(route)}\n\n**Candidate tools (transparency only — the request itself is refused/gapped; do not execute them to satisfy it):** ${cands
+              .map((c) => c.tool)
+              .join(', ')}`
+          : renderRouteMarkdown(route),
+      trust: routeTrust(),
+      ...(cands.length > 0 ? { toolCandidates: cands } : {}),
+      ...(guidance !== undefined ? { guidance } : {}),
+    },
+    vaultState: {
+      sourceTreeHash: ctx.manifest.sourceTreeHash,
+      refreshedAt: ctx.manifest.refreshedAt,
+    },
+  });
+};
+
 export const routeQuestionHandler = async (
   ctx: Context,
   input: RouteQuestionInput,
 ): Promise<Result<McpResponse<RouteQuestionOutput>, McpError>> => {
+  // Stage 0 — refusal-shape gates FIRST (P2 §1): a hit short-circuits
+  // everything (no entity resolve, no margin gate, no funnel-primary). Gates
+  // run on the WHOLE question, so a compound turn with a refusal clause
+  // refuses the whole turn.
+  const refusalShape = detectRefusalShape(input.question);
+  if (refusalShape !== null) {
+    if (input.clarificationResponse !== undefined) {
+      // Same contract as any question with no active clarification challenge.
+      return err({
+        kind: 'invalid-query',
+        message:
+          'clarificationResponse was supplied, but this question has no active clarification challenge. Route the question again without a response.',
+        path: 'clarificationResponse',
+      });
+    }
+    return refusalResponse(ctx, input, refusalShape);
+  }
   let route = classifyQuestion(input.question);
   // A short phrase the pure router couldn't place may still name a real
   // component — rescue it to sfi.resolve when (and only when) it resolves.
@@ -1273,6 +1436,11 @@ export const routeQuestionHandler = async (
     }
   }
 
+  // Tracks whether either FALSE-PREMISE branch below disclosed: the contract
+  // order "refusal → premise → intent" is realized logically, not by moving
+  // code — the stage-6 premise verdict recorded here blocks funnel-primary
+  // (stage 7) before it can advisory-route an existence-negative (P2 §1/§3).
+  let premiseFlagged = false;
   // Eval family E — FALSE PREMISE. The question NAMED a specific entity but the
   // resolver found nothing (disposition `none`): the route must not present as
   // clean + high-confidence, or the host answers as if the component exists.
@@ -1330,6 +1498,7 @@ export const routeQuestionHandler = async (
         })),
       };
     } else {
+      premiseFlagged = true;
       const premiseWarning =
         `PREMISE CHECK: no component matching '${entityQuery}' exists in the vault — ` +
         `verify the name (a typo, or metadata newer than the last refresh; /sfi-refresh may help). ` +
@@ -1367,6 +1536,7 @@ export const routeQuestionHandler = async (
     // `none` (something always fuzzy-matches), so without this branch a
     // literal false premise presented as a routine weak-match warning. Keep
     // the lookalikes as suggestions; downgrade and disclose.
+    premiseFlagged = true;
     const premiseWarning =
       `PREMISE CHECK: no component named '${entityQuery}' exists in the vault — the listed ` +
       `candidates are fuzzy lookalikes, not the component you named. Verify the name ` +
@@ -1379,6 +1549,98 @@ export const routeQuestionHandler = async (
     };
     if (entityEvidence !== undefined) {
       entityEvidence = { ...entityEvidence, warning: premiseWarning };
+    }
+  }
+
+  // Stage 7 — FUNNEL-PRIMARY advisory fallback (router-v2 P2 §3). Fires ONLY
+  // when every deterministic stage passed and the question is STILL dead:
+  // no refusal gate (stage 0 returned early), no intent match, no resolve
+  // rescue, no compound/mixed plan, no clarification (the margin gate and
+  // entity ambiguity always win), and the premise is clean — an
+  // existence-negative that disclosed above must never advisory-route. It
+  // never overrides an intent match. The candidates here are PURE cosines
+  // (the merge short-circuits for an unrouted intent — no regex bonus, no
+  // 0.25 floor mass), so FUNNEL_PRIMARY_MIN_SCORE is a real semantic bar;
+  // the fromRoute / >0.25 guards are assert-style drift protection. Computed
+  // ONCE and reused for the final response so gate and output cannot
+  // disagree.
+  let advisoryCandidates: readonly ToolCandidate[] | null = null;
+  if (
+    route.intent === 'unrouted' &&
+    route.plane === 'unknown' &&
+    route.clarification === null &&
+    !premiseFlagged
+  ) {
+    const cands = buildFunnelCandidates(route, input.question, marginRouteToolArgs, input.mode);
+    advisoryCandidates = cands;
+    const resolvedExact =
+      refinedEntityResolution?.disposition === 'exact'
+        ? refinedEntityResolution.candidates[0]
+        : undefined;
+    // A resolved entity TYPE that CONTRADICTS a candidate's compatible-type
+    // set drops that candidate (the tool hard-errors on this id) and promotes
+    // the next — which must independently clear the threshold, else the route
+    // stays unrouted. Untyped tools are never dropped.
+    const usable =
+      resolvedExact === undefined
+        ? cands
+        : cands.filter((candidate) => {
+            const compatible = TOOL_COMPATIBLE_TYPES.get(candidate.tool);
+            return compatible === undefined || compatible.has(resolvedExact.type);
+          });
+    const top = usable[0];
+    if (
+      top !== undefined &&
+      top.score >= FUNNEL_PRIMARY_MIN_SCORE &&
+      top.fromRoute !== true &&
+      top.score > 0.25
+    ) {
+      const tools = usable.slice(0, 3).map((candidate) => candidate.tool);
+      // Bind the stage-3 resolver output only when it is EXACT and the key is
+      // knowable: a typed tool gets the id under its known key; an untyped
+      // tool gets `componentId` only when its name says it takes a component.
+      // Never guess an arg key (same principle as selectedEntityArgsForRoute).
+      let advisoryArgs: Readonly<Record<string, unknown>> | null = null;
+      if (resolvedExact !== undefined) {
+        const compatible = TOOL_COMPATIBLE_TYPES.get(top.tool);
+        if (compatible !== undefined && compatible.has(resolvedExact.type)) {
+          advisoryArgs =
+            top.tool === 'sfi.field_access_audit'
+              ? { fieldId: resolvedExact.id }
+              : { componentId: resolvedExact.id };
+        } else if (
+          compatible === undefined &&
+          /get_impact|get_edges|component/.test(top.tool)
+        ) {
+          advisoryArgs = { componentId: resolvedExact.id };
+        }
+      }
+      route = {
+        question: input.question,
+        plane: top.plane,
+        intent: 'funnel-advisory',
+        tools,
+        liveRequired: top.liveRequired,
+        needsResolve: entityQuery !== null,
+        reason:
+          'No deterministic intent matched. This route is FUNNEL-DERIVED (advisory): the ' +
+          'semantic funnel ranked these tools by meaning alone. Confidence is low by construction — ' +
+          'verify the pick, resolve any named component first, and ground with sfi.synthesize_answer.',
+        gap: null,
+        confidence: 'low',
+        risk: DESTRUCTIVE_TOOL.test(top.tool) ? 'destructive' : 'informational',
+        alternatives: [],
+        clarification: null,
+        plan: [{
+          stepId: 'step-1',
+          dependsOn: [],
+          question: input.question,
+          intent: 'funnel-advisory',
+          plane: top.plane,
+          tools,
+        }],
+        ...(advisoryArgs !== null ? { suggestedArgs: advisoryArgs } : {}),
+      };
     }
   }
 
@@ -1523,8 +1785,11 @@ export const routeQuestionHandler = async (
   // deterministic route alone (Design A, for no-LLM / CI / air-gapped hosts).
   // Offline TF-IDF over the capability map; a mode reranks toward its family.
   const wantCandidates = routerMode() === 'hybrid';
+  // A funnel-advisory route reuses the EXACT candidate list stage 7 gated on
+  // (P2 §3): recomputing over the replaced route would re-enter the regex-bonus
+  // fusion (intent is no longer 'unrouted') and let gate and output disagree.
   const toolCandidates = wantCandidates
-    ? buildFunnelCandidates(route, input.question, routeToolArgs, input.mode)
+    ? advisoryCandidates ?? buildFunnelCandidates(route, input.question, routeToolArgs, input.mode)
     : [];
   const guidance =
     toolCandidates.length > 0 ? guidanceForMode(input.mode, toolCandidates) : undefined;

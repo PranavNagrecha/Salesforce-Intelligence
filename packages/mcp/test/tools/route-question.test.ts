@@ -13,8 +13,13 @@ import {
 } from '@sf-intelligence/graph';
 import { appendAnnotationEvent } from '@sf-intelligence/vault';
 
+import { classifyQuestion } from '../../src/intent-router.js';
 import type { Context } from '../../src/server.js';
-import { routeQuestionHandler } from '../../src/tools/route-question.js';
+import {
+  buildFunnelCandidates,
+  FUNNEL_PRIMARY_MIN_SCORE,
+  routeQuestionHandler,
+} from '../../src/tools/route-question.js';
 
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -670,14 +675,18 @@ describe('core-profile gateway envelopes (P13-GW-router-envelope)', () => {
     expect('invoke' in r.value.data).toBe(false);
   });
 
-  it('attaches semantic toolCandidates when the question is unrouted (CAE-01 funnel)', async () => {
+  it('attaches semantic toolCandidates when no deterministic intent matches (CAE-01 funnel)', async () => {
     const r = await routeQuestionHandler(ctx, {
       question: 'where does Pranav have access to',
       logGap: false,
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.value.data.route.intent).toBe('unrouted');
+    // Router-v2 P2: this phrasing's pure-funnel top clears the advisory
+    // threshold, so the previously dead 'unrouted' is upgraded to the advisory
+    // funnel route — the candidates below are still the primary output.
+    expect(r.value.data.route.intent).toBe('funnel-advisory');
+    expect(r.value.data.route.confidence).toBe('low');
     const candidates = r.value.data.toolCandidates ?? [];
     expect(candidates.length).toBeGreaterThan(0);
     const tools = candidates.map((c) => c.tool);
@@ -1041,5 +1050,138 @@ describe('routeQuestionHandler — schema nouns are intent signals, not entity l
     expect(r.value.data.route.intent).toBe('compare-profiles');
     expect(r.value.data.entityEvidence).toBeUndefined();
     expect(r.value.data.executionBlocked).toBe(false);
+  });
+});
+
+// Router-v2 P2 §3 — FUNNEL-PRIMARY advisory fallback. Positive + every
+// negative precondition (threshold, margin-gate precedence, premise check),
+// plus the §4 floor invariant (T7). Synthetic paraphrases of labeled 2K
+// misses; scores verified against the real funnel index.
+describe('routeQuestionHandler — funnel-primary advisory fallback (P2 §3)', () => {
+  it('POSITIVE: an unrouted question whose pure-funnel top clears the threshold becomes funnel-advisory', async () => {
+    // Synthetic paraphrase of a labeled unrouted miss (naming-convention ask,
+    // topScore 0.376 ≥ 0.33): no regex rule matches, nothing else blocks.
+    const r = await routeQuestionHandler(ctx, {
+      question: 'are the naming conventions in this org consistent or a total free-for-all',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const { route, executionBlocked, toolCandidates } = r.value.data;
+    expect(route.intent).toBe('funnel-advisory');
+    expect(route.tools.length).toBeGreaterThan(0);
+    expect(route.tools.length).toBeLessThanOrEqual(3);
+    expect(route.tools[0]).toBe('sfi.get_naming_convention_report');
+    expect(route.confidence).toBe('low'); // low by construction
+    expect(route.reason).toContain('FUNNEL-DERIVED');
+    expect(route.gap).toBeNull(); // routed now — no unrouted gap
+    expect(route.clarification).toBeNull();
+    expect(executionBlocked).toBe(false);
+    expect(route.plan).toHaveLength(1);
+    expect(route.plan[0]?.tools).toEqual(route.tools);
+    // The response candidates are the SAME list the gate scored (computed once).
+    expect((toolCandidates ?? [])[0]?.tool).toBe('sfi.get_naming_convention_report');
+  });
+
+  it('NEGATIVE (threshold): top below FUNNEL_PRIMARY_MIN_SCORE stays honestly unrouted', async () => {
+    // Real candidates exist (top ~0.08) but none clears the bar.
+    const r = await routeQuestionHandler(ctx, {
+      question: 'any thoughts on the general vibe of the setup here',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.route.intent).toBe('unrouted');
+    expect(r.value.data.route.plane).toBe('unknown');
+    expect(r.value.data.route.gap).not.toBeNull();
+    expect((r.value.data.toolCandidates ?? []).length).toBeGreaterThan(0);
+  });
+
+  it('NEGATIVE (margin gate wins): a plane near-tie clarifies instead of advisory-routing', async () => {
+    // "report usage" tops ≥0.30 but ties live_report_usage (live) with
+    // find_apex_usages (vault) inside MARGIN — the clarification must win and
+    // funnel-primary must NOT override it.
+    const r = await routeQuestionHandler(ctx, { question: 'report usage', logGap: false });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.route.intent).not.toBe('funnel-advisory');
+    expect(r.value.data.route.clarification?.required).toBe(true);
+    expect(r.value.data.executionBlocked).toBe(true);
+  });
+
+  it('NEGATIVE (premise check wins): an existence-negative discloses, never advisory-routes', async () => {
+    // Funnel top ≥0.30 (naming-convention vocabulary) but the named component
+    // does not exist in the vault — the stage-6 premise verdict must block the
+    // advisory upgrade (DIAGNOSIS §6.4: the nastiest residual class).
+    const r = await routeQuestionHandler(ctx, {
+      question: 'are our naming conventions consistent for Zorp_Widget__c or a total free-for-all',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const { route, entityEvidence } = r.value.data;
+    expect(route.intent).toBe('unrouted'); // NOT funnel-advisory
+    expect(route.reason).toContain('PREMISE CHECK');
+    expect(entityEvidence?.warning ?? route.reason).toContain('PREMISE CHECK');
+    expect(r.value.data.executionBlocked).toBe(false);
+  });
+
+  it('design negative (c): "is there a custom permission called … or similar?" never advisory-routes', async () => {
+    const r = await routeQuestionHandler(ctx, {
+      question: 'is there a custom permission called Allow_Legacy_Edit or similar?',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.route.intent).not.toBe('funnel-advisory');
+  });
+
+  it('T7 invariant: the unrouted funnel-primary path sees PURE cosines — no fromRoute rows, no 0.25 floor mass', () => {
+    const route = classifyQuestion(
+      'are the naming conventions in this org consistent or a total free-for-all',
+    );
+    expect(route.intent).toBe('unrouted');
+    const cands = buildFunnelCandidates(
+      route,
+      route.question,
+      new Map<string, Readonly<Record<string, unknown>>>(),
+      undefined,
+    );
+    expect(cands.length).toBeGreaterThan(0);
+    for (const candidate of cands) {
+      expect(candidate.fromRoute).not.toBe(true);
+      expect(candidate.score).not.toBe(0.25);
+      // Pure path: the fused score IS the raw cosine.
+      expect(candidate.cosine).toBe(candidate.score);
+    }
+    // Pin the threshold relationship the design ships with.
+    expect(FUNNEL_PRIMARY_MIN_SCORE).toBeGreaterThan(0.25);
+  });
+});
+
+// Router-v2 P2 §4 — the additive `cosine` field: pre-fusion semantic evidence,
+// preserved through the regex-bonus fusion; 0 for route-inserted rows.
+describe('toolCandidates carry the pre-fusion cosine (P2 §4)', () => {
+  it('fused route rows keep cosine < score; inserted rows carry cosine 0 at the 0.25 floor; funnel rows cosine === score', async () => {
+    // metadata-count routes [list_components (funnel-surfaced → fused),
+    // get_component (not surfaced → inserted at the 0.25 floor)].
+    const r = await routeQuestionHandler(ctx, {
+      question: 'How many custom fields are on Contact?',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const cands = r.value.data.toolCandidates ?? [];
+    const fused = cands.find((c) => c.tool === 'sfi.list_components');
+    expect(fused?.fromRoute).toBe(true);
+    expect(fused?.cosine).toBeGreaterThan(0); // real semantic support…
+    expect(fused?.cosine ?? 0).toBeLessThan(fused?.score ?? 0); // …plus the bounded bonus
+    const inserted = cands.find((c) => c.tool === 'sfi.get_component');
+    expect(inserted?.fromRoute).toBe(true);
+    expect(inserted?.score).toBe(0.25); // the floor: pure regex assertion
+    expect(inserted?.cosine).toBe(0); // declared as ZERO semantic evidence
+    for (const c of cands.filter((x) => x.fromRoute !== true)) {
+      expect(c.cosine).toBe(c.score); // untouched funnel rows
+    }
   });
 });

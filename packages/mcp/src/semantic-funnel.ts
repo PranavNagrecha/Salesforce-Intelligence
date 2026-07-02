@@ -63,6 +63,16 @@ export interface ToolCandidate {
   readonly suggestedArgs?: Readonly<Record<string, unknown>>;
   /** True when this row was promoted from the deterministic regex route hint. */
   readonly fromRoute?: boolean;
+  /**
+   * Raw PRE-FUSION cosine similarity (router-v2 P2 §4). For a funnel-scored row
+   * this equals `score` at scoring time; when route_question fuses the regex
+   * bonus, `score` moves but `cosine` stays the semantic evidence — and a row
+   * INSERTED purely from the regex route hint carries `cosine: 0` (zero
+   * semantic support; its 0.25 score is regex assertion, not meaning).
+   * Downstream calibration must read THIS field, never sniff the 0.25 magic
+   * number, to tell real semantic support from a regex assertion.
+   */
+  readonly cosine?: number;
 }
 
 /**
@@ -574,10 +584,14 @@ export const semanticCandidates = (question: string, k = 8): ToolCandidate[] => 
     }
     if (dot <= 0) continue;
     const score = dot / qnorm; // doc vectors are unit-normalized → cosine
+    const rounded = Math.round(score * 1000) / 1000;
     const planeEntry = planes.get(tool) ?? { plane: 'vault' as const, liveRequired: false };
     scored.push({
       tool,
-      score: Math.round(score * 1000) / 1000,
+      score: rounded,
+      // Pre-fusion semantic evidence — identical to `score` here; preserved
+      // verbatim through route_question's regex-bonus fusion (P2 §4).
+      cosine: rounded,
       category: idx.toolCategory.get(tool) ?? null,
       plane: planeEntry.plane,
       liveRequired: planeEntry.liveRequired,
