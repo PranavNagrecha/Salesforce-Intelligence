@@ -146,8 +146,8 @@
  <div class="container hero-grid">
  <div class="hero-copy">
  <p class="sec-label">Salesforce metadata · read-only · MCP server</p>
- <h1 class="screen-type">ASK YOUR<br>SALESFORCE ORG.<br>GET THE <span class="g">TRUTH</span>.<span class="cursor" aria-hidden="true"></span></h1>
- <p class="tag">An offline knowledge base for a single <b>Salesforce org</b> that runs <b>on your machine</b>. One retrieve, then every answer is grounded in your org's real Salesforce metadata - <b>not a guess</b>.</p>
+ <h1 class="screen-type">THE BACKEND YOUR<br>SALESFORCE AI<br>CAN <span class="g">TRUST</span>.<span class="cursor" aria-hidden="true"></span></h1>
+ <p class="tag">The grounded, fail-closed backend for AI assistants working in one <b>Salesforce org</b> - the funnel advises, <b>your LLM decides</b>, and anything it can't ground is refused. Ask your org anything in plain language and every answer comes from its real metadata, <b>not a guess</b>.</p>
  <div class="hero-meta">
  <span class="chip"><b>172</b> tools</span>
  <span class="chip"><b>0</b> writes</span>
@@ -365,6 +365,11 @@
  <div class="tag-row"><span class="badge mid">unknown</span><span class="desc">Coverage couldn't be determined.</span></div>
  </div>
  </div>
+ <article class="card" style="margin-top:30px;">
+ <div class="tagn">fail-closed</div>
+ <h3>It tells you no.</h3>
+ <p>Refusal gates run on every question before any routing. "Delete this field for me" is refused - and answered anyway with the read-only simulation that covers it safely, like <span class="mono amber">safe_to_delete_field</span>. Prompt injection ("ignore your previous instructions…") and record-value exfiltration ("dump all SSN values") are hard-refused, with no tool shortlist left to route around. And when no tool models the question - login history, adoption metrics - it returns an honest gap naming the nearest real reads instead of a confident guess.</p>
+ </article>
  <p class="center" style="margin-top:30px;"><a class="btn btn-ghost" href="/trust.html">› how it's tested - ~5,000 tests, full CI gate &amp; the trust model</a></p>
  </div>
  </section>
