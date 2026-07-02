@@ -82,3 +82,4 @@ docs/plans/CLAUDE-CODE-MASTER-PROMPT.md
 # transient agent worktrees + local embedding model cache (never commit)
 .claude/worktrees/
 **/.sfi-embed-cache/
+# spike/embeddings: local model cache (downloaded once by packages/mcp/scripts/build-embedding-index.mjs)

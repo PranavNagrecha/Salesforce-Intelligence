@@ -74,6 +74,14 @@ export interface ToolCandidate {
    * number, to tell real semantic support from a regex assertion.
    */
   readonly cosine?: number;
+  /**
+   * SPIKE (spike/embeddings): neural-embedding cosine similarity of this tool's
+   * document to the question, present ONLY when the embeddings gate is on
+   * (`SFI_EMBEDDINGS=1` + model available) and the row was scored by the hybrid
+   * path. Never set on the lexical-only path — gate-off output is byte-identical
+   * to `semanticCandidates` (pinned by test/embedding-funnel.test.ts).
+   */
+  readonly embedCosine?: number;
 }
 
 /**
@@ -511,7 +519,7 @@ const planeForTool = (toolName: string): Exclude<Plane, 'unknown' | 'knowledge'>
  * family in the QA gold (router-goldset, router-recall, funnel-generalization),
  * verified before exclusion, so recall is unaffected.
  */
-const EXCLUDED_FROM_CANDIDATES: ReadonlySet<string> = new Set([
+export const EXCLUDED_FROM_CANDIDATES: ReadonlySet<string> = new Set([
   'sfi.route_question',
   'sfi.synthesize_answer',
   'sfi.run_analysis',
@@ -852,4 +860,44 @@ export const semanticCandidates = (question: string, k = 8): ToolCandidate[] => 
   const top2 = candidates[1]?.score ?? 0;
   const confidence = funnelConfidence(top1, top2, coverage);
   return candidates.slice(0, k).map((row) => ({ ...row, confidence }));
+};
+
+/**
+ * SPIKE (spike/embeddings): fusion strategy for the embedding-hybrid funnel.
+ * `max` — candidate score = max(lexicalScore, w * embeddingCosine);
+ * `rrf` — reciprocal-rank fusion of the lexical and embedding rankings.
+ * Both are implemented so the measure phase can pick; neither is a default
+ * product decision.
+ */
+export type FusionMode = 'max' | 'rrf';
+
+/**
+ * SPIKE (spike/embeddings): embedding-hybrid candidate shortlist behind a hard
+ * feature gate. When `SFI_EMBEDDINGS` !== '1' (the DEFAULT — the gate is
+ * opt-in), this returns EXACTLY `semanticCandidates(question, k)`: the
+ * embedding module is never even imported, so the lexical path stays
+ * byte-identical and fully offline/deterministic (pinned by
+ * test/embedding-funnel.test.ts gate-off byte-identity).
+ *
+ * When the gate is ON, the hybrid layer (embedding-funnel.ts) fuses the
+ * lexical ranking with neural-embedding cosine similarity against a
+ * PRE-COMPUTED per-tool vector index (data/embedding-index.json). Any failure
+ * on the embedding path — model not cached, index missing, runtime import
+ * error — degrades gracefully to the lexical-only result, never throws.
+ */
+export const semanticCandidatesHybrid = async (
+  question: string,
+  k = 8,
+  fusion: FusionMode = 'max',
+): Promise<ToolCandidate[]> => {
+  if (process.env['SFI_EMBEDDINGS'] !== '1') return semanticCandidates(question, k);
+  try {
+    // Dynamic import: the embedding layer (and its transformers.js dependency)
+    // is loaded ONLY behind the gate — zero cost / zero new deps when off.
+    const mod = await import('./embedding-funnel.js');
+    return await mod.hybridCandidates(question, k, fusion);
+  } catch {
+    // Graceful degradation: the lexical funnel is always the floor.
+    return semanticCandidates(question, k);
+  }
 };

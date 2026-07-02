@@ -19,6 +19,14 @@ const EXTERNAL_PACKAGES = [
   '@duckdb/node-api',
   '@modelcontextprotocol/sdk',
   'zod',
+  // SPIKE (spike/embeddings): the hybrid funnel's gate-guarded dynamic import.
+  // Must stay external — transformers.js drags in onnxruntime-node's native
+  // .node binaries, which esbuild cannot bundle. It is a devDependency, NOT a
+  // runtime dependency: gate off (default) the import never executes; gate on
+  // without the package installed, the funnel degrades to lexical. This line is
+  // itself a productionization finding — bundling the model runtime into the
+  // CLI is not an option.
+  '@huggingface/transformers',
 ];
 // Externalize each package and its subpath imports (e.g. .../sdk/server/index.js).
 const external = EXTERNAL_PACKAGES.flatMap((name) => [name, `${name}/*`]);
@@ -47,3 +55,13 @@ const demoDest = fileURLToPath(new URL('./demo-source/main/default', import.meta
 rmSync(demoDestRoot, { recursive: true, force: true });
 cpSync(demoSrc, demoDest, { recursive: true });
 console.log('copied demo source -> demo-source/');
+
+// SPIKE (spike/embeddings): ship the checked-in embedding index next to the
+// bundled dist/index.js so the gate-guarded hybrid funnel can find it at runtime
+// (embedding-funnel.ts walks up from import.meta.url looking for data/embedding-index.json).
+// Gate off (default) it is never read; the 886KB JSON is the only embedding asset
+// that ships — the 23MB model is downloaded on opt-in, never bundled.
+const embedIndexSrc = fileURLToPath(new URL('../mcp/data/embedding-index.json', import.meta.url));
+const embedIndexDest = fileURLToPath(new URL('./dist/data/embedding-index.json', import.meta.url));
+cpSync(embedIndexSrc, embedIndexDest, { recursive: false });
+console.log('copied embedding index -> dist/data/');

@@ -1,7 +1,7 @@
 {
   "name": "sf-intelligence",
   "version": "0.1.23",
-  "description": "Offline-first, MCP-first knowledge base for a Salesforce org. Ask about your org's metadata, dependencies, permissions, and automation \u2014 grounded in real retrieved metadata. Ships the sfi CLI and an MCP server.",
+  "description": "Offline-first, MCP-first knowledge base for a Salesforce org. Ask about your org's metadata, dependencies, permissions, and automation — grounded in real retrieved metadata. Ships the sfi CLI and an MCP server.",
   "license": "SEE LICENSE IN LICENSE",
   "homepage": "https://salesforce-intelligence.pages.dev",
   "repository": {
@@ -50,6 +50,7 @@
   },
   "files": [
     "dist/index.js",
+    "dist/data",
     "bin",
     "README.md",
     "server.json",
