@@ -3,7 +3,15 @@
 All notable changes to **sf-intelligence** are documented here. This project
 adheres to [Semantic Versioning](https://semver.org).
 
-## [Unreleased]
+## [0.1.23] — 2026-07-02
+
+Headline: **80% crossed — candidate generation and honesty seams in the same
+release.** Two eval-driven rounds on 0.1.22's architecture. Measured on the
+same 2,000-question real-org bank: answer-clean **77.6% → 80.5%** raw
+(**81.0%** relabeled), honesty over-routes **down** 97 → 89 with **zero false
+refusals**, funnel-blind recall@8 **57.3% → 69.8%**, follow-ups with host
+context 67.0%. Three-release trend on the same bank: 62.9 → 72.0 → 77.6 →
+**80.5%**.
 
 ### Added
 - **Runtime-analytics honest-gap arms** — the refusal gate now recognizes the
