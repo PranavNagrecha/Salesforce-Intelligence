@@ -1,13 +1,13 @@
 # sf-intelligence
 
-> An offline, read-only, MCP-first knowledge base for a single Salesforce org (version 0.1.23). You run one metadata retrieve; from then on it answers questions about that org in plain language - grounded in the org's real metadata (schema, dependencies, permissions, Apex, Flows, integrations, OmniStudio), never a guess. Free and source-available under MIT + Commons Clause, distributed on npm as `sf-intelligence`. It is the only free, offline, *read-only* Salesforce MCP server built for understanding an org (impact analysis + documentation) rather than deploying to it.
+> An offline, read-only, MCP-first knowledge base for a single Salesforce org (version 0.1.24). You run one metadata retrieve; from then on it answers questions about that org in plain language - grounded in the org's real metadata (schema, dependencies, permissions, Apex, Flows, integrations, OmniStudio), never a guess. Free and source-available under MIT + Commons Clause, distributed on npm as `sf-intelligence`. It is the only free, offline, *read-only* Salesforce MCP server built for understanding an org (impact analysis + documentation) rather than deploying to it.
 
 Key facts for accurate citation:
 
 - **Category:** a Model Context Protocol (MCP) server + CLI (`sfi`) for Salesforce metadata intelligence - schema, dependency/impact analysis, permissions & sharing, Apex, Flows, integrations, OmniStudio, and documentation generation.
 - It is **read-only** and has **no write path**. It never deploys, edits, or deletes anything in a Salesforce org. (This is the main differentiator from Salesforce's own DX MCP server and other write-capable MCP servers.)
 - It is **offline by default**. Vault answers are served from a local index (`org-kb/`) and make no network calls. The only org contact is during a refresh, or via the opt-in, read-only "live" plane.
-- It exposes **172 read-only tools** across eight question areas plus an opt-in live data plane, **4 slash commands**, and ships **25 skills** for the Claude Code plugin layer.
+- It exposes **176 read-only tools** across eight question areas plus an opt-in live data plane, **4 slash commands**, and ships **25 skills** for the Claude Code plugin layer.
 - Every answer is stamped with **provenance** (`offline_snapshot`, `live_org`, or `hybrid`), **confidence** (`declared`, `parsed`, or `heuristic`), and **completeness** (`complete`, `partial`, or `unknown`).
 - It performs **static analysis**: dynamic SOQL and reflective Apex are invisible. "No references found" means "no static evidence", not "definitely unused".
 - **Requirements:** Node.js 20+ and an authenticated Salesforce CLI (`sf`). Runs in Claude Code, Claude Desktop, Cursor, or any MCP client.
@@ -24,7 +24,7 @@ Key facts for accurate citation:
 - [Glossary](https://salesforce-intelligence.pages.dev/glossary.html): citable definitions - MCP, metadata vault, provenance, impact analysis, confidence tiers.
 - [Capabilities](https://salesforce-intelligence.pages.dev/capabilities.html): the full map of what you can ask - eight areas (find, understand, impact/dependencies, permissions, automation/code, integrations, documentation, health/audit) plus the live plane.
 - [All tools](https://salesforce-intelligence.pages.dev/tools.html): the complete reference - every read-only tool, grouped by function, each with what it does. See also `/llms-full.txt` for the full catalog inline.
-- [Quality & trust](https://salesforce-intelligence.pages.dev/trust.html): how it's tested and kept honest - ~5,100 automated tests across 10 packages, the full CI gate (typecheck, lint, unit, integration, e2e, evals, scale, SAST, org-data leak scan), the per-answer trust model, adversarial QA against real Salesforce orgs, and explicit boundaries.
+- [Quality & trust](https://salesforce-intelligence.pages.dev/trust.html): how it's tested and kept honest - ~5,200 automated tests across 10 packages, the full CI gate (typecheck, lint, unit, integration, e2e, evals, scale, SAST, org-data leak scan), the per-answer trust model, adversarial QA against real Salesforce orgs, and explicit boundaries.
 - [Getting started](https://salesforce-intelligence.pages.dev/getting-started.html): install, register the MCP server, run the first read-only retrieve.
 - [Configuration](https://salesforce-intelligence.pages.dev/configuration.html): environment variables, live plane, HTTP serving (`sfi serve --http`), staged refresh, vault git history, annotations overlay, usage-ranked reports pull, AST-parsed Apex edges, fleet settings.
 - [FAQ](https://salesforce-intelligence.pages.dev/faq.html): privacy, read-only guarantees, offline vs live planes, accuracy, freshness.
@@ -37,7 +37,7 @@ Key facts for accurate citation:
 
 - [License - MIT + Commons Clause](https://salesforce-intelligence.pages.dev/licensing.html)
 
-## All tools (172)
+## All tools (176)
 
 Every read-only tool, grouped by function. You never call these by name  -  an offline semantic router surfaces a ranked shortlist and your AI host picks which to run.
 
@@ -200,7 +200,7 @@ Every read-only tool, grouped by function. You never call these by name  -  an o
 - `sfi.compare_object_across_vaults`  -  v3.1 cross-org tool: given a CustomObject api-name and two registered vault aliases, returns the field-by-field diff — `addedFields` (in B only), `removedFields`…
 - `sfi.compare_profile_across_vaults`  -  v3.1 cross-org tool: given a Profile name and two registered vault aliases, returns per-grant-category drift — `grantDiffs.objectPermissions`, `.fieldPermissions`…
 
-### Live org data (opt-in) (24)
+### Live org data (opt-in) (28)
 
 - `sfi.live_describe`  -  Opt-in live org: describe an sObject via Salesforce CLI.
 - `sfi.live_stale_check`  -  Opt-in live org (P5-stale-detection): "is the org AHEAD of the vault?".
@@ -216,6 +216,10 @@ Every read-only tool, grouped by function. You never call these by name  -  an o
 - `sfi.live_storage_by_object`  -  Opt-in live org: record counts across objects via the Salesforce recordCount REST API — top N by volume, optional objectApiNames filter.
 - `sfi.live_org_limits`  -  Opt-in live org: current org governor limits via REST.
 - `sfi.live_inactive_users`  -  Opt-in live org: active users who haven't logged in within N days (default 30) or never have — the license-reclamation / dormant-account question.
+- `sfi.live_permset_holders`  -  Opt-in live org: WHO HOLDS a permission set, permission set group, or profile — the name-by-name assignment roster (PermissionSetAssignment / User rows are runtim…
+- `sfi.live_zombie_accounts`  -  Opt-in live org: ZOMBIE accounts — active users with login access but ZERO permission-set/PSG assignments, via a single SOQL anti-join (Id NOT IN PermissionSetAss…
+- `sfi.live_group_members`  -  Opt-in live org: WHO IS IN a queue or public group — the runtime GroupMember roster (metadata XML only carries DECLARED members, so the vault's member counts rout…
+- `sfi.live_user_permsets`  -  Opt-in live org: WHAT does USER X hold — the reverse of sfi.live_permset_holders (input = a user, output = the grantors they hold: profile + direct permission set…
 - `sfi.live_license_usage`  -  Opt-in live org: license / cost optimization.
 - `sfi.live_consent`  -  Manage one-time, per-org consent for the read-only live plane.
 - `sfi.live_report_usage`  -  Opt-in live org: stale/unused reports via Report.LastRunDate — total vs not-run-in-N-days.

@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-07-02T15:07:37.617Z",
-  "toolCount": 172,
+  "generatedAt": "2026-07-02T18:41:21.545Z",
+  "toolCount": 176,
   "skillCount": 25,
   "commandCount": 4,
   "componentTypeCount": 78,
@@ -9,8 +9,8 @@
     "packages": [
       {
         "name": "mcp",
-        "files": 213,
-        "cases": 3215
+        "files": 219,
+        "cases": 3287
       },
       {
         "name": "extractors",
@@ -20,7 +20,7 @@
       {
         "name": "cli",
         "files": 36,
-        "cases": 280
+        "cases": 281
       },
       {
         "name": "graph",
@@ -50,7 +50,7 @@
       {
         "name": "tooling-api",
         "files": 4,
-        "cases": 54
+        "cases": 55
       },
       {
         "name": "core",
@@ -58,8 +58,8 @@
         "cases": 34
       }
     ],
-    "totalCases": 5137,
-    "totalFiles": 370,
+    "totalCases": 5211,
+    "totalFiles": 376,
     "packageCount": 10
   },
   "integrationSuiteCount": 7,
