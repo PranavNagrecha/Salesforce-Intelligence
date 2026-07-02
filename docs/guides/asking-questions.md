@@ -44,6 +44,14 @@ zero-result query, so a near-miss still surfaces the likely candidates
 instead of an empty list. Ask `sfi.capabilities` (or just "what can you
 do?") for the live map of capability areas.
 
+Routing is **advisory**: `sfi.route_question` surfaces a meaning-ranked
+shortlist of tools and your AI host decides which to run — and it fails
+closed on questions it should not route (write requests, prompt injection,
+asks no tool covers get a refusal or an honest gap, never a lookalike tool).
+Terse follow-ups ("does it fire on delete too?") work when the host passes
+the optional `context.previous` param — the server keeps no conversation
+memory. Full host contract in [`../routing.md`](../routing.md).
+
 For broad **discovery** questions, `sfi.route_question` also returns
 `suggestedArgs` — the argument the first recommended tool needs to run —
 so the ask answers in one hop instead of erroring on a missing parameter.

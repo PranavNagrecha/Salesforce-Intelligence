@@ -15,6 +15,7 @@ Claude Code plugin.
 | [Guided onboarding](./guides/onboarding.md) | `/sfi-onboard`: org selection, init, refresh, verification, first question |
 | [First refresh](./guides/first-refresh.md) | `/sfi-init`, `/sfi-refresh`, vault layout, git policy |
 | [Asking questions](./guides/asking-questions.md) | What to ask, resolver behavior, live plane, boundaries |
+| [Routing](./routing.md) | The host contract: advisory routing, refusal gates, clarifications, conversation context |
 | [Configuration](./configuration.md) | Environment variables, live consent, audit log |
 | [Positioning](./POSITIONING.md) | Honest competitive framing — when to use something else |
 

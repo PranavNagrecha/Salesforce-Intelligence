@@ -1,17 +1,23 @@
 # sf-intelligence
 
-Ask questions about your Salesforce org in plain language — grounded in the
-org's **real metadata**, not a guess.
+A **grounded, fail-closed backend for AI assistants** working in one Salesforce
+org — answers come from the org's **real metadata**, not a guess.
 
 `sf-intelligence` is an **offline-first, read-only, MCP-first knowledge base**
 for a single Salesforce org. You run one `sf project retrieve`; it builds a local
 Markdown vault and a DuckDB dependency graph, then answers questions locally
 through an MCP server (the `sfi.*` tools) — no network egress for vault answers.
-A semantic router turns each plain-language question into a meaning-ranked shortlist
-of the `sfi.*` tools that can answer it — tagged with the plane it needs (offline vault
-/ opt-in live / hybrid) and a confidence band — and asks a clarifying question instead
-of guessing when the top candidates diverge on something consequential. An opt-in live
-read-only plane can answer record counts and samples. MIT + Commons Clause.
+It is not a standalone chatbot: a semantic router **advises** — it turns each
+plain-language question into a meaning-ranked shortlist of the `sfi.*` tools
+that can answer it, tagged with the plane it needs (offline vault / opt-in live
+/ hybrid) and a confidence band — and your **host LLM decides** which tools to
+run. It **fails closed**: write imperatives, prompt injection, and
+record-value exfiltration are refused by shape (with a read-only alternative
+offered), unanswerable asks get an honest gap instead of a lookalike tool, and
+genuine ambiguity gets a clarifying question instead of a guess. Terse
+follow-ups resolve through an optional host-passed `context.previous` param —
+the server itself stores no conversation state. An opt-in live read-only plane
+can answer record counts and samples. MIT + Commons Clause.
 
 ## Install
 

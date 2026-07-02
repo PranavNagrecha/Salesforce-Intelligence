@@ -3,6 +3,112 @@
 All notable changes to **sf-intelligence** are documented here. This project
 adheres to [Semantic Versioning](https://semver.org).
 
+## [0.1.22] — 2026-07-02
+
+Headline: **the router now advises — it does not decide.** This release
+completes the advisory architecture the router has been moving toward since
+hybrid mode became the default (0.1.10): `sfi.route_question` is a
+grounded, fail-closed advisory layer — it surfaces ranked tool candidates plus
+explicit disclosures (refusals, premise checks, clarifications, context
+application) and the **host LLM decides** which tools to run. Questions that
+should never execute are now refused *by shape* before any scoring; questions
+no deterministic rule covers get an honest advisory route instead of a dead
+`unrouted`; and terse follow-ups resolve through a host-passed context param
+with zero server-side conversation state. All numbers below were measured on a
+2,000-question evaluation against a real production-scale org vault (plus a
+separate 500-question routing sweep), compared against the 0.1.21 baseline.
+
+### Added
+- **Refusal-shape gates** — score-independent detectors that run on the raw
+  question BEFORE intent matching, in both router modes. Write imperatives
+  aimed at the agent ("delete the X field for me") return `refused-write` with
+  empty tools and a **read-only alternative** by verb family
+  (`safe_to_delete_field`, `what_if_merge_profiles`, `get_impact`, …);
+  prompt-injection / record-value exfiltration returns `refused-injection`
+  with candidates and guidance suppressed; runtime telemetry no tool models
+  returns `honest-gap-runtime` naming the nearest real reads; non-Salesforce
+  asks return `out-of-scope`. Every refusal is non-executable by construction
+  (`tools: []`, structured `route.refusal`), and legitimate permission /
+  hypothetical reads ("am I allowed to edit…", "is it safe to…") are explicit
+  excluders that route normally.
+- **Funnel-primary advisory routing.** When no deterministic intent matches
+  and nothing else stopped the route (no clarification, clean premise), a
+  pure-cosine top candidate scoring ≥ 0.30 upgrades the dead `unrouted` to
+  intent `funnel-advisory`: top-3 funnel tools, confidence `low` by
+  construction, reason flagged FUNNEL-DERIVED — an advisory pick for the host
+  to verify, never a command. Candidate rows now also carry `cosine`, the raw
+  pre-fusion semantic score, so a host can tell semantic support from regex
+  assertion.
+- **Funnel recall: per-tool utterance corpus + weighted synonym expansion.**
+  A generated corpus of 1,125 synthetic question phrasings across the full
+  tool registry (registry-parity tested) now feeds the semantic funnel, and
+  synonym expansion is weighted (originals weigh 1, expansions 0.5, never
+  downgrading) with the generic-Salesforce synonym table grown 54 → 146 keys.
+- **Conversation context (`context.previous`)** on `sfi.route_question` —
+  stateless, host-passed, nothing stored server-side. Enables pronoun/ellipsis
+  entity substitution (exact-id, never fuzzy), advisory tool continuation
+  (confidence capped at `medium`; plane always from the live tool registry;
+  type-gated), re-parameterization ("what about on Contact?"), and
+  ordinal/descriptor clarification picks ("the second one") that re-dispatch
+  through the existing clarification contract. Refusal gates run before any
+  context logic; a self-contained question ignores context (omitting the param
+  keeps behavior identical); when context changes the route the response
+  discloses it in `route.contextApplied`. Host contract documented in
+  `docs/routing.md`.
+- **`docs/routing.md`** — the host-developer contract for advisory routing,
+  refusal gates, clarifications, premise checks, and the context param.
+
+### Fixed
+- **Clarification hygiene + qualified-entity auto-resolve.** Clarifications
+  are a last resort: an object word next to a same-named field, a type word
+  after a name ("the X object/flow"), or a literal API name in the question
+  auto-resolves instead of blocking; fuzzy acronym-graze rivals and
+  far-below-top junk no longer appear as options; complementary readings stack
+  their tools in one route instead of asking which-first; a vault-vs-live
+  near-tie is decided by the question's own runtime-data language (only the
+  destructive-vs-read-only tie still blocks).
+- **Live-plane reachability.** Runtime-data questions (picklist usage,
+  record-level automation activity, counts/aggregates phrased informally) now
+  reach the `sfi.live_*` roster instead of dead-ending on vault tools — with
+  the guard in the other direction verified (schema questions never get
+  hijacked to live).
+- **Code-literal searches route to source grep.** "Which class handles the
+  System.debug output…" routes to `search_apex_source` instead of the
+  audit-trail read.
+- **`route_question` advertised-schema drift.** The `mode` parameter was
+  accepted by the handler but missing from the advertised input schema; both
+  `mode` and the new `context` are now advertised, with a test pinning
+  Zod↔advertised-schema key/enum parity.
+
+### Changed
+- **Positioning.** README, npm README, and docs now state the architecture
+  plainly: sf-intelligence is a grounded, fail-closed backend for AI
+  assistants working in one Salesforce org — not a standalone chatbot. The
+  funnel advises (candidates + disclosures + advisory routes); the host LLM
+  decides; the engine grounds every answer in the vault and fails closed.
+- **False premises block advisory upgrades.** The premise check now runs
+  before funnel-primary: a question naming a component the resolver cannot
+  find keeps its premise disclosure and never earns a `funnel-advisory` route.
+
+### Measured (2,000-question real-org evaluation, vs 0.1.21)
+- **Over-confident routes on honesty-labeled questions: 69 → 11**, with
+  **zero false refusals** — all 64 questions independently relabeled as
+  genuinely answerable still route.
+- **Blocked-by-clarification misses: 115 → 11**; each surviving clarification
+  was individually verified to be a genuine same-name ambiguity.
+- **Misses whose correct tool was already a candidate, now routing clean to
+  it: 0 → 85 of 271.**
+- **Funnel-blind recall@8: 0 → 57.3%** (146/255 misses whose correct tool was
+  absent from the candidate shortlist now surface it in the top 8).
+- **Live-plane reachability: 92 → 125 of 161** needs-live questions (~78%),
+  with zero previously-passing routes regressed.
+- **500-question routing sweep: clean 387 → 414, blocked 33 → 8**, zero
+  errors.
+- **Follow-up turns (with host-passed context): 21.7% → 66.7%** of a
+  previously-failing follow-up cohort now routes executable; 41/41
+  self-contained follow-ups return identical output with context present vs
+  absent, and a previously-passing cohort is 59/60 verdict-unchanged.
+
 ## [0.1.21] — 2026-07-01
 
 Headline: **routing reach + two correctness fixes**, driven by a 500-question

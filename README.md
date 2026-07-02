@@ -12,8 +12,10 @@
 
 # sf-intelligence
 
-Ask questions about your Salesforce org in plain language — and get answers
-grounded in the org's **real metadata**, not a guess.
+**A grounded, fail-closed backend for AI assistants working in one Salesforce
+org.** Your AI host (Claude, or any MCP client) asks it questions in plain
+language; it answers from the org's **real metadata** — never a guess — and
+labels every claim with how much to lean on it.
 
 `sf-intelligence` is an **offline, read-only, MCP-first knowledge base** for a
 single Salesforce org. You run one retrieve (`sf project retrieve`); it builds a
@@ -21,6 +23,13 @@ local Markdown vault and a DuckDB dependency graph. From then on every answer is
 served locally by default — **offline-first, no network egress for vault
 answers.** An **opt-in live read-only plane** (`sfi.live_*`) can answer record
 counts and samples when enabled. Private by design. MIT + Commons Clause.
+
+It is **not a standalone chatbot** — it has no chat surface. It is the
+evidence layer an AI host consumes: a router that **advises** (ranked tool
+candidates plus explicit disclosures), a host LLM that **decides** (picks and
+runs the tools), and an engine that grounds every answer in the vault and
+**fails closed** — refusing, disclosing a gap, or asking a clarifying
+question — when it cannot.
 
 ## Ask it like a person
 
@@ -54,25 +63,112 @@ score is string similarity, not proof. **Source grep tools** (`sfi.search_apex_s
 `sfi.search_flow_metadata`) walk the vaulted `source/` tree from your last
 refresh — run `/sfi-refresh` before trusting an empty grep result.
 
+## Advisory routing — the funnel advises, the host decides
+
 Under the hood a semantic **router** (`sfi.route_question`) reads each question
-and returns a **meaning-ranked shortlist** of the `sfi.*` tools that can answer
-it — so your AI host picks and runs them without you ever typing a tool name. It
-runs fully **offline** (a small TF-IDF model over the tool catalog — no network,
-no embeddings service) and it **advises rather than dictates**: the host LLM sees
-the shortlist plus a short planner contract and decides which tools to run, in
-what order. The router also tags each question with the plane that answers it —
+and returns a **meaning-ranked shortlist** (`toolCandidates`) of the `sfi.*`
+tools that can answer it — so your AI host picks and runs them without you ever
+typing a tool name. It runs fully **offline** (a small TF-IDF model over the
+tool catalog — no network, no embeddings service) and it **advises rather than
+dictates**: the candidates are the primary output; the deterministic `route`
+that rides along is a non-authoritative hint. The host LLM decides which tools
+to run, in what order.
+
+Confidence semantics are explicit. When no deterministic intent matches but the
+semantic funnel's top candidate scores above a fixed floor, the router returns a
+**`funnel-advisory` route** — the top funnel tools, confidence **`low` by
+construction**, reason flagged `FUNNEL-DERIVED` — an advisory pick for the host
+to verify (resolve the named component, then ground), never a command. Each
+candidate row also carries `cosine`, its raw semantic score, so a host can tell
+real semantic support from a regex-rule assertion.
+
+The router also tags each question with the plane that answers it —
 the **offline vault** (metadata, dependencies, permissions), the **live org**
 (counts, samples, limits, inactive users — read-only, opt-in), or a **hybrid** of
 both (e.g. "is this field *actually* populated?"). Every answer is stamped with
-its provenance (`offline_snapshot`, `live_org`, or `hybrid`) and freshness. Each
-candidate carries its own plane, whether it needs the live org, and a confidence band —
-and when the two best-fitting tools are close but diverge on something consequential
-(one reads the live org while the other stays offline; or one is destructive while the
-other is only informational), the router **stops and asks which you meant** instead of
-letting the host silently commit. When
-nothing fits, it **says so and logs the gap** rather than guessing — so the
-library grows toward what people actually ask. (A deterministic, no-LLM routing
-mode is available via `SFI_ROUTER_MODE=offline` for CI / air-gapped hosts.)
+its provenance (`offline_snapshot`, `live_org`, or `hybrid`) and freshness.
+Clarifying questions are a **last resort**: a qualifier already in the question
+("the X *object*", an object word next to a same-named field, a literal API
+name) auto-resolves instead of blocking, and offered options are hygienic —
+fuzzy lookalike junk never appears as a choice. But when two genuinely competing
+components remain, or the best-fitting tools diverge on something consequential
+(one destructive-simulation, one read-only), the router **stops and asks which
+you meant** instead of letting the host silently commit. When nothing fits, it
+**says so** rather than guessing (and can log the gap locally — opt-in via
+`logGap: true`). (A deterministic, no-LLM routing mode is available via
+`SFI_ROUTER_MODE=offline` for CI / air-gapped hosts.)
+
+## Refusal behavior — fail closed, offer the read
+
+Some questions should never route to an executable tool, no matter how well
+they score. Score-independent **refusal gates** run on the raw question before
+any intent matching, and a refusal is non-executable *by shape* (`tools: []`
+plus a structured `route.refusal` disclosure):
+
+- **Write imperatives** ("delete the X field for me", "go ahead and merge these
+  profiles") → `refused-write`, with a **read-only alternative** offered instead
+  (`safe_to_delete_field`, `what_if_merge_profiles`, `get_impact`, … by verb
+  family) — the product has no write path; the refusal names the simulation
+  that answers the underlying question safely.
+- **Prompt injection / record-value exfiltration** ("ignore your previous
+  instructions…", "dump all SSN values") → `refused-injection`, with candidates
+  and guidance suppressed entirely.
+- **Runtime telemetry no tool models** → `honest-gap-runtime`, naming the
+  nearest real reads. **Non-Salesforce asks** → `out-of-scope`.
+
+Legitimate reads are explicit excluders — "am I allowed to edit…", "who can
+delete…", "is it safe to…" are permission *questions* and route normally. On a
+2,000-question real-org evaluation, the gates cut genuine over-confident routes
+from 69 to 11 with **zero** answerable questions falsely refused.
+
+## Conversation context — follow-ups without server-side memory
+
+The product stores **no conversation state**. Instead, the host may pass an
+optional `context.previous` on each `route_question` call describing what the
+prior turn was about, and terse follow-ups ("does it fire on delete too?",
+"what about on Contact?", "the second one") resolve against it — pronoun
+substitution is an **exact-id** lookup (never fuzzy), an inherited tool is an
+advisory continuation **capped at `medium` confidence**, and a clarification
+pick re-dispatches through the normal clarification contract (out-of-range
+ordinals re-ask, stale ids are rejected). A self-contained question ignores
+context entirely, and refusal gates run before any context logic — context
+never bypasses them. Host-side, after routing "who can edit the SSN field?"
+and running the tools:
+
+```jsonc
+// next turn: "can Support Agents specifically edit it?"
+{
+  "question": "can Support Agents specifically edit it?",
+  "context": {
+    "previous": {
+      "question": "who can edit the SSN field?",
+      "tool": "sfi.field_access_audit",
+      "componentId": "CustomField:Contact.SSN__c"
+    }
+  }
+}
+```
+
+When (and only when) context changes the route, the response discloses it in
+`route.contextApplied`. See [docs/routing.md](./docs/routing.md) for the full
+host contract.
+
+## Honesty guarantees
+
+The design rule across the surface is **fail closed, disclose first**:
+
+- **Grounded or refused.** Every answer path ends in real tool output against
+  the vault (or the consented live org); when no tool covers the ask, the
+  router returns an honest gap — never a lookalike tool, never general
+  Salesforce knowledge dressed up as org fact.
+- **Premise checks.** A question naming a component the resolver cannot find
+  still routes (the tools fail closed on the unknown id), but confidence is
+  downgraded and a `PREMISE CHECK` disclosure warns that no such component
+  exists in the vault — and a funnel-advisory route is never granted on a
+  failed premise.
+- **Disclosure-first.** Coverage caveats, staleness warnings, live-consent
+  notices, refusals, and context application are structured fields the host
+  renders *before* the answer — not fine print after it.
 
 ## How it works
 

@@ -175,6 +175,24 @@ called directly still works.
 | --- | --- | --- |
 | `SFI_TOOL_PROFILE` | `full` | `core` advertises the 18-schema roster; anything else (or unset) advertises everything. Zero behavior change under the default. |
 
+## Router mode
+
+`sfi.route_question` defaults to **hybrid** mode: the meaning-ranked
+`toolCandidates` are the primary output and the deterministic `route` is a
+non-authoritative hint — the host LLM decides. See
+[`routing.md`](./routing.md) for the full host contract (advisory routes,
+refusal gates, clarifications, the `context.previous` param).
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SFI_ROUTER_MODE` | *(unset — hybrid)* | `offline` makes the deterministic route authoritative and omits candidates — for CI and no-LLM hosts. Refusal gates and clarifications behave identically in both modes. |
+
+The funnel-advisory score floor (`FUNNEL_PRIMARY_MIN_SCORE = 0.30` in
+`packages/mcp/src/tools/route-question.ts`) and the synonym-expansion weight
+(`EXPANSION_WEIGHT = 0.5` in `packages/mcp/src/semantic-funnel.ts`) are
+**source constants, not env vars** — they are calibrated against the routing
+evaluation and changing them re-opens the honesty gates.
+
 ## Report / Dashboard pull (default: top 500 by usage)
 
 Folder-based Reports/Dashboards are invisible to the wildcard retrieve, so
