@@ -1228,7 +1228,9 @@ const RULES: readonly Rule[] = [
     needsResolve: false,
     reason: 'Login activity (LastLoginDate) is runtime state that lives only in the org.',
     patterns: [
-      /\b(who|users?|people)\b.*\b(log(ged)?\s?in|login|active|inactive|dormant)\b/,
+      // `in(to)?` — "which users logged INTO the org last week" is the same
+      // LastLoginDate read; the bare `in\b` missed the fused "into" (P4).
+      /\b(who|users?|people)\b.*\b(log(ged)?\s?in(to)?|login|active|inactive|dormant)\b/,
       /\b(inactive|dormant|stale|unused)\b.*\busers?\b/,
       /\bhaven'?t\b.*\blog(ged)?\s?in\b/,
       /\blast\s+login\b/,
@@ -1253,8 +1255,10 @@ const RULES: readonly Rule[] = [
       // near a field/value (so "empty queues" doesn't get swallowed here).
       /\b(populated|filled)\b/,
       // "field population for X" / "population rate" — the noun "population"
-      // (vs the adjective "populated"). Battery gap.
-      /\b(field\s+)?population\b/,
+      // (vs the adjective "populated"). Battery gap. Guarded (P4): "the FLOW
+      // THAT fires the 'General Population RR Group' step" uses "population"
+      // inside a quoted flow-step name — a flow-search ask, not field fill.
+      /^(?!.*\bflows?\s+that\b).*\b(field\s+)?population\b/,
       // `fields?`/`values?` — `\b(field|value)\b` missed the PLURALS, so
       // "which Account fields are empty" fell through to metadata-count
       // (vault plane) instead of this hybrid live-data intent.
@@ -1262,6 +1266,13 @@ const RULES: readonly Rule[] = [
       /\b(fields?|values?)\b.*\b(empty|blank|null|populated|filled)\b/,
       /\bhow\s+many\b.*\b(have|with|without)\b.*\b(field|value|filled|set)\b/,
       /\b(actually|really)\s+(populated|filled)\b/,
+      // Router-v2 P4 needs-live reachability: "fill rate", "completeness of
+      // key fields", and "how many X have a blank Y" are all the same live
+      // per-field population read. Queue/group emptiness and missing
+      // DESCRIPTIONS stay vault (excluded).
+      /\bfill\s+rates?\b/,
+      /\bcompleteness\b.*\b(fields?|data|records?)\b|\b(fields?|data)\b.*\bcompleteness\b/,
+      /\bhow\s+many\b(?!.*\b(queues?|groups?|descriptions?|help\s+text)\b)[^.?!]*\b(blank|null|missing)\b/,
     ],
   },
   {
@@ -1298,6 +1309,10 @@ const RULES: readonly Rule[] = [
       /\b(show|give)\s+me\s+\d+\b/,
       /\bsample\s+\d+\b/,
       /\b\d+\s+(sample|example)\s+\w+\b/,
+      // Router-v2 P4: a literal Salesforce record ID (15/18 chars, leading 0 +
+      // keyprefix — "did lead 00Q5x000004abcd convert?") is a live row lookup;
+      // the vault never holds record data.
+      /\b0[0-9a-z]{2}[0-9a-z]{12}(?:[0-9a-z]{3})?\b/,
     ],
   },
   {
@@ -1360,7 +1375,10 @@ const RULES: readonly Rule[] = [
       // components (P0a). Keyed on the word "users" alone — metadata-count
       // questions ("how many profiles / layouts / … , and which is assigned to
       // each profile") never say "users", so they still fire here.
-      /\bhow\s+many\b(?!.*\busers?\b).*\b(page\s+layouts?|layouts?|custom\s+objects?|profiles?|permission\s+sets?|validation\s+rules?|flows?|(apex\s+)?classes?|triggers?|record\s+types?|list\s+views?|report\s+types?|record\s+pages?|flexipages?|approval\s+process(es)?|custom\s+settings?|quick\s+actions?|sharing\s+rules?|named\s+credentials?|picklists?)\b/,
+      // The second lookahead (P4): "how many RECORDS per record type" is a
+      // live GROUP BY over record data — the metadata noun ("record type") is
+      // the grouping key, not the thing being counted.
+      /\bhow\s+many\b(?!.*\busers?\b)(?!.*\brecords?\s+(?:per|by|for\s+each)\b).*\b(page\s+layouts?|layouts?|custom\s+objects?|profiles?|permission\s+sets?|validation\s+rules?|flows?|(apex\s+)?classes?|triggers?|record\s+types?|list\s+views?|report\s+types?|record\s+pages?|flexipages?|approval\s+process(es)?|custom\s+settings?|quick\s+actions?|sharing\s+rules?|named\s+credentials?|picklists?)\b/,
       /\bhow\s+many\b.*\blayouts?\b.*\b(per|for\s+each|by)\b.*\bprofiles?\b/,
       /\blayouts?\b.*\b(per|for\s+each|by)\b.*\bprofiles?\b/,
       // fields, but NOT field usage/population (those are unused-fields / field-population)
@@ -1383,6 +1401,15 @@ const RULES: readonly Rule[] = [
       /\bhow\s+many\b.*\b(in|with)\s+(each|every)\b/,
       // "how many Applications with status Submitted" — filtered live COUNT, not vault metadata-count (B21).
       /\bhow\s+many\b.*\bwith\s+(status|stage|type|record\s+type)\b/,
+      // Router-v2 P4: imperative "count X grouped by Y" / "count of X by Y" /
+      // "count X records by Y" — the same live GROUP BY, phrased without
+      // "how many".
+      /\bcount\b[^.?!]{0,60}\bgrouped?\s+by\b/,
+      /\bcount\s+of\b[^.?!]{0,60}\bby\b/,
+      /\bcount\b[^.?!]{0,60}\brecords?\s+by\b/,
+      // "who's in the ADA Team Queue" — queue/public-group membership is a
+      // live GroupMember read; the vault holds the queue definition only.
+      /\bwho(?:'?s|\s+is|\s+are)?\b[^.?!]{0,40}\bin\s+the\b[^.?!]{0,50}\b(queues?|public\s+groups?)\b/,
     ],
   },
   {
@@ -1396,6 +1423,9 @@ const RULES: readonly Rule[] = [
       /\b(average|avg|mean|minimum|min|maximum|max|sum|total)\b.*\b(field|value|amount|revenue|score)\b/,
       /\bwhat\s+is\s+the\b.*\b(average|avg|min|max|sum)\b/,
       /\bhow\s+(big|large|small)\b.*\b(on\s+average|average)\b/,
+      // Router-v2 P4: "average number of X per Y" — a live AVG/GROUP BY ask
+      // that named no field noun.
+      /\baverage\s+number\s+of\b/,
     ],
   },
   {
@@ -1406,8 +1436,12 @@ const RULES: readonly Rule[] = [
     needsResolve: false,
     reason: 'Duplicate detection needs live GROUP BY + HAVING on field values.',
     patterns: [
-      /\bduplicate\b.*\b(records?|values?|emails?|contacts?|accounts?|fields?|rows?)\b/,
-      /\b(records?|values?|emails?|contacts?|accounts?)\b.*\bduplicate\b/,
+      // `duplicat\w*` — "most DUPLICATED email domain" is the same live GROUP
+      // BY + HAVING read; the bare `duplicate` missed the participle (P4).
+      /\bduplicat\w*\b.*\b(records?|values?|emails?|domains?|contacts?|accounts?|fields?|rows?)\b/,
+      // Guarded: "which FIELDS are duplicated" is a SCHEMA-redundancy ask
+      // (vault), not live record duplicates — exclude the fields subject.
+      /^(?!.*\bfields?\b[^.?!]{0,40}\bduplicat)\b.*\b(records?|values?|emails?|domains?|contacts?|accounts?)\b.*\bduplicat\w*\b/,
       /\bsame\b.*\b(email|phone|name|value)\b/,
     ],
   },
@@ -1431,6 +1465,13 @@ const RULES: readonly Rule[] = [
       /\b(which|what)\b[^.?!]{0,40}\bobjects?\b[^.?!]{0,50}\bempty\b/,
       /\bempty\b[^.?!]{0,20}\b(custom\s+)?objects?\b/,
       /\bobjects?\b[^.?!]{0,40}\b(no|zero|barely\s+any|hardly\s+any)\s+(records?|rows?|data)\b/,
+      // Router-v2 P4: growth and per-object size asks are the same live
+      // per-object COUNT read ("which objects have grown the fastest",
+      // "inventory of every custom object and roughly how big each is").
+      /\bobjects?\b[^.?!]{0,60}\b(grown|growth|growing)\b/,
+      /\b(grown|growth|growing)\b[^.?!]{0,60}\bobjects?\b/,
+      /\bobjects?\b[^.?!]{0,60}\bhow\s+big\b/,
+      /\bhow\s+big\b[^.?!]{0,60}\bobjects?\b/,
     ],
   },
   {
@@ -1441,8 +1482,10 @@ const RULES: readonly Rule[] = [
     needsResolve: false,
     reason: 'A record COUNT is live data; the offline vault holds metadata only.',
     patterns: [
-      /\bhow\s+many\b.*\b(records?|rows?|accounts?|contacts?|opportunit|leads?|cases?)\b/,
+      /\bhow\s+many\b.*\b(records?|rows?|accounts?|contacts?|opportunit(?:y|ies)?|leads?|cases?)\b/,
       /\b(count|number)\s+of\b.*\b(records?|rows?)\b/,
+      // Router-v2 P4: imperative "count <X> records" (no "of", no "how many").
+      /\bcount\b[^.?!]{0,60}\brecords?\b/,
       /\bhow\s+many\b.*\bin\s+(the\s+)?(org|production|prod)\b/,
       /\blive\s+count\b/,
       // A TEMPORAL qualifier cues live data regardless of the noun — "how
@@ -1452,7 +1495,7 @@ const RULES: readonly Rule[] = [
       // win: the metadata-count rule sits earlier. fired/ran/logged forms
       // are excluded so automation/login activity asks don't collapse into
       // a bare record count.
-      /\bhow\s+many\b(?!.*\b(fired|ran|executed|triggered|logged)\b).*\b(right\s+now|currently|at\s+the\s+moment|as\s+of\s+(now|today)|today)\b/,
+      /\bhow\s+many\b(?!.*\b(fired|ran|executed|triggered|logged)\b).*\b(right\s+now|currently|at\s+the\s+moment|as\s+of\s+(now|today)|today|this\s+(term|semester|quarter))\b/,
       /\b(count|number)\s+of\b.*\b(right\s+now|currently|at\s+the\s+moment|today)\b/,
       // Named sObject totals without the word "records" — "how many Opportunities
       // are there" (TEST-SANDBOX-ROUTER-first-user). Exclude non-SF platforms
@@ -1486,6 +1529,54 @@ const RULES: readonly Rule[] = [
       /\b(recent(ly)?|last\s+\d+\s+days?|this\s+week|past\s+week)\b.*\b(created|modified|updated|changed|added)\b/,
       /\b(created|modified|updated|new)\b.*\b(recent(ly)?|last\s+\d+\s+days?|this\s+week)\b/,
       /\bwhat\s+(was|were)\b.*\b(created|modified|updated|changed)\b.*\b(recent|last)\b/,
+      // Router-v2 P4: "who's been making the most changes lately" / "busiest
+      // user by record edits" — the same recent-modified read, cut by editor.
+      /\bwho\b[^.?!]{0,40}\b(making|made)\b[^.?!]{0,30}\bchanges\b/,
+      /\bbusiest\s+users?\b/,
+    ],
+  },
+  {
+    // Live picklist VALUE USAGE — "which Case.Status values are never used",
+    // "distribution of Status values", "most common Resolution_Code__c".
+    // Distinct from picklist-values (vault, DECLARED value set): usage /
+    // distribution / most-common language means live GROUP BY counts per
+    // value (router-v2 P4 needs-live reachability). Placed in the live block
+    // so it wins over the vault picklist-values rule further down.
+    intent: 'picklist-usage',
+    plane: 'live',
+    tools: ['sfi.live_picklist_usage'],
+    liveRequired: true,
+    needsResolve: false,
+    reason:
+      'How picklist/field VALUES are actually used across records (counts per value, never-used values) is live GROUP BY data — the vault only declares the value set.',
+    // NOTE the distance windows allow an interior dot (`Case.Status`) — a
+    // dotted field reference must not break the sentence-bounded window.
+    patterns: [
+      /\bpicklist\b(?:[^.?!]|\.(?=\w)){0,80}\b(never\s+used|actually\s+used|usage|distribut\w+|frequen\w+)\b/,
+      /\bvalues?\b(?:[^.?!]|\.(?=\w)){0,60}\b(never|rarely)\s+used\b/,
+      /\b(distribution|breakdown)\s+of\b(?:[^.?!]|\.(?=\w)){0,60}\bvalues?\b/,
+      /\bhow\s+are\b(?:[^.?!]|\.(?=\w)){0,40}\bvalues?\b(?:[^.?!]|\.(?=\w)){0,40}\bdistributed\b/,
+      /\b(most|least)\s+common\b(?:[^.?!]|\.(?=\w)){0,50}\b(value|status|code|__c)\b/,
+      /\b(?:whats?|what\s+is)\s+the\s+most\s+common\b/,
+    ],
+  },
+  {
+    // Live automation execution — "did the flow FIRE yesterday?" is a runtime
+    // question about actual executions (FlowInterview / job traces), not the
+    // automation catalog (router-v2 P4). Temporal anchor required so the
+    // metadata asks ("what fires on save") never land here.
+    intent: 'automation-fired',
+    plane: 'live',
+    tools: ['sfi.live_automation_fired'],
+    liveRequired: true,
+    needsResolve: false,
+    reason:
+      'Whether an automation actually RAN (and when) is runtime execution state — live_automation_fired reads it; the vault only holds the automation definitions.',
+    patterns: [
+      /\b(flow|trigger|automation|process|it)\b[^.?!]{0,60}\bfired\b[^.?!]{0,50}\b(yesterday|today|last\s+\w+|this\s+\w+|recently)\b/,
+      /\bfired\b[^.?!]{0,30}\b(yesterday|today|last\s+night|recently)\b/,
+      /\bdid\b[^.?!]{0,60}\b(flow|trigger|automation)\b[^.?!]{0,50}\b(fire|run|execute|actually\s+fire)\b/,
+      /\b(flow|trigger|automation)\b[^.?!]{0,40}\b(actually\s+(ran|fired|executed))\b/,
     ],
   },
   {
@@ -1500,6 +1591,10 @@ const RULES: readonly Rule[] = [
       /\b(failed|faulted|stuck)\b.*\b(jobs?|batch|async|apex\s+job)\b/,
       /\bpaused\b.*\bflows?\b/i,
       /\bis\s+my\s+org\b.*\b(ok|fine|broken|failing)\b/,
+      // Router-v2 P4: "give me a health snapshot of the org" — the noun order
+      // put "health" before "org", which the first pattern missed, and the
+      // word "snapshot" was stolen by the vault snapshot-diff rule.
+      /\bhealth\s+snapshot\b/,
     ],
   },
   {
@@ -1599,6 +1694,12 @@ const RULES: readonly Rule[] = [
       /\b(dashboards?)\b.*\b(unused|stale|broken|refresh)\b/,
       /\breports?\b.*\b(not\s+run|haven'?t\s+been\s+run)\b/,
       /\breports?\b.*\b(last\s+year|in\s+the\s+last)\b/,
+      // "which reports are ACTUALLY USED" — run-history is live LastRunDate
+      // (router-v2 P4; previously a funnel plane near-tie that BLOCKED).
+      /\breports?\b[^.?!]{0,40}\bactually\s+used\b/,
+      // Router-v2 P4: "reports/dashboards nobody looks at / no one uses" —
+      // the colloquial unused-ask without the word "unused".
+      /\b(reports?|dashboards?)\b[^.?!]{0,60}\b(nobody|no\s+one)\b[^.?!]{0,40}\b(looks?|uses?|runs?|view\w*|open\w*)\b/,
     ],
   },
   {
@@ -1618,7 +1719,7 @@ const RULES: readonly Rule[] = [
       /\b(who\s+can|access\s+to)\b.*\bfolders?\b/,
       // Folder-gated artifacts asked about by ACCESS without the word "folder":
       // "who can see/access/view this report/dashboard/document".
-      /\bwho\s+can\s+(access|see|view|open)\b.*\b(reports?|dashboards?|documents?)\b/,
+      /\bwho\s+can\s+(access|see|view|open|run)\b.*\b(reports?|dashboards?|documents?)\b/,
       /\b(access|visib(le|ility))\b.*\b(reports?|dashboards?|documents?)\s+folders?\b/,
       /\b(dashboards?|reports?)\b.*\bshared\b.*\b(with|to)\b/,
     ],
@@ -2206,6 +2307,8 @@ const RULES: readonly Rule[] = [
       // Admin-level / least-privilege / security-gap phrasings (baseline-300).
       /\b(which|what)\s+users?\b.*\badmin\b/,
       /\busers?\b.*\badmin[-\s]level\b/,
+      // "do we have too many admins" (router-v2 P4).
+      /\btoo\s+many\s+admins?\b/,
       /\bleast\s+privilege\b/,
       /\bsecurity\s+gaps?\b.*\b(profile|permission)/,
       /\bpermission\s+sets?\b.*\binstead\s+of\b.*\bprofiles?\b/,
@@ -2974,6 +3077,9 @@ const RULES: readonly Rule[] = [
     patterns: [
       /\b(which|what)\s+flows?\b.*\b(references?|uses?|mentions?|touch(es)?|calls?)\b/,
       /\bflows?\b.*\b(that|which)\b.*\b(references?|uses?)\b/,
+      // Router-v2 P4: "pull the flow that FIRES/SENDS/CREATES the '<step
+      // name>' step" — find-a-flow-by-what-it-does is a Flow-XML grep.
+      /\bflows?\s+that\s+(fires?|sends?|creates?|assigns?|updates?|contains?|does)\b/,
       /\b(sync|stamping|affiliate|marketo|applicant|partner|budget)\b.*\bflows?\b/,
       /\bflows?\b.*\b(sync|stamping|affiliate|marketo|applicant|partner|budget)\b/,
       /\bflows?\b.*\b(send|sends|email)\b/,
@@ -3099,7 +3205,9 @@ const RULES: readonly Rule[] = [
       // runs bulk") or test coverage ("which test class covers Y … the bulk
       // case"), those earlier rules win by order — this guard keeps the bare
       // word from firing even when their patterns miss a phrasing.
-      /^(?!.*\b(?:what\s+(?:fires|runs|happens)|test\s+class)\b).*\b(bulk|bulkif|unbounded)\b/,
+      // …and "WHICH CLASS HANDLES the Boomi integration for BULK loads" is a
+      // find-the-class source grep (apex-search), not a limit report (P4).
+      /^(?!.*\b(?:what\s+(?:fires|runs|happens)|test\s+class|(?:which|what)\s+(?:apex\s+)?class(?:es)?\s+(?:handles?|processes?|implements?))\b).*\b(bulk|bulkif|unbounded)\b/,
       /\bcpu\s+time\b/,
       /\bheap\s+size\b/,
       /\bmost\s+dml\b/,
@@ -3437,10 +3545,26 @@ const RULES: readonly Rule[] = [
     liveRequired: false,
     needsResolve: false,
     reason: 'Text grep over Apex source + usage edges.',
+    // A dotted CODE LITERAL in the question ("System.debug") is the grep text —
+    // bind it so the routed search_apex_source call is executable as-is.
+    suggestArgs: (q) => {
+      const literal = q.match(/\b[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\b/)?.[0];
+      return literal !== undefined ? { query: literal } : undefined;
+    },
     patterns: [
       /\bfind\b.*\b(class|apex|code)\b.*\b(mentions?|references?|uses?|calls?|reads?|writes?|with)\b/,
       /\b(which|what)\s+(classes?|apex)\b.*\b(mentions?|references?|uses?|touch(es)?|reads?|writes?|calls?|invokes?)\b/,
       /\bsearch\b.*\b(apex|code)\b/,
+      // Router-v2 P4 (q522 family): a CODE-LITERAL search — "does anything
+      // call System.debug", "leftover System.debug statements" — is a source
+      // grep, never the runtime-audit-trail fallback ("debug logs" in the
+      // prose must not swallow it; this rule sits earlier, so the literal
+      // wins).
+      /\bsystem\.debug\b/,
+      /\b(?:calls?|calling|invokes?|references?)\b[^.?!]{0,40}\b[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\s*\(/,
+      // "which apex class HANDLES the Boomi integration" — find-the-class-by-
+      // what-it-does is a source/usage grep, not a code-quality report.
+      /\b(?:which|what)\s+(?:apex\s+)?class(?:es)?\b[^.?!]{0,60}\b(?:handles?|processes?|implements?|integrates?|owns?)\b/,
       // "which classes make HTTP callouts and what endpoints do they hit" —
       // HTTP callouts live in Apex SOURCE, so the answer is a source grep,
       // not the outbound endpoint catalog and never field lineage (eval
@@ -4832,6 +4956,36 @@ const intentLabel = (intent: string): string => {
 };
 
 /**
+ * Alternative pairs that are COMPLEMENTARY, not competing (router-v2 P4):
+ * both readings are read-only vault analyses answering the same question
+ * through different lenses ("who can access X" = the grantor enumeration AND
+ * the CRUD matrix; "what breaks if I change/delete X" = the dependency blast
+ * radius AND the simulation verdict). Blocking on a which-do-you-want-first
+ * clarification added a round-trip carrying zero information — either tool
+ * (usually both) answers, so these pairs STACK: the alternative's tools append
+ * to the primary route, the alternative stays listed for transparency, and
+ * execution is NOT blocked. Pairs absent here still genuinely diverge and keep
+ * the blocking clarification.
+ */
+const COMPLEMENTARY_ALTERNATIVE_PAIRS: ReadonlySet<string> = new Set([
+  'impact-analysis|safe-to-delete',
+  'impact-analysis|what-if-field',
+  'who-can-access-object|object-access',
+]);
+
+/**
+ * The runtime-audit-trail | last-modified split resolves from a QUALIFIER the
+ * question already carries (router-v2 P4): "who last modified <a named
+ * component>" is the metadata stamp (`last_modified`), not record forensics —
+ * an API-ish token (underscored / __suffix / dotted) or an explicit metadata
+ * type noun next to the ask names a COMPONENT, and the clarification the
+ * router used to raise is pre-answered. Record/data phrasings never reach
+ * this (the semanticAlternatives excluder drops the pair entirely).
+ */
+const NAMES_COMPONENT_FOR_LAST_MODIFIED =
+  /[a-z0-9]_[a-z0-9]|__(?:c|mdt|e|x|b|kav)\b|\w+\.\w+|\b(?:flow|flows|class|classes|trigger|triggers|validation\s+rule|permission\s+set|profile|layout|object|field|component|page|dashboard|report)\b/;
+
+/**
  * Classify a question. Pure: no I/O, deterministic. Returns the best route, or
  * `plane: 'unknown'` with a gap when nothing matches.
  */
@@ -4857,23 +5011,67 @@ export const classifyQuestion = (question: string): RouteResult => {
   const matches = RULES.filter((rule) => rule.patterns.some((p) => p.test(q)));
   const first = matches[0];
   if (first !== undefined) {
-    const primary = routeFromRule(question, q, first);
+    let primary = routeFromRule(question, q, first);
     // Ordered regex rules intentionally overlap: a later match often adds
     // recall, not a genuinely competing user goal. Only explicit semantic
     // ambiguity policies may stop execution; raw overlap remains diagnostic
     // implementation detail and must not interrupt a correctly routed user.
-    const alternatives = [...semanticAlternatives(q, primary.intent)]
+    let alternatives = [...semanticAlternatives(q, primary.intent)]
       .filter((alternative, i, all) =>
         alternative.intent !== primary.intent &&
         all.findIndex((candidate) => candidate.intent === alternative.intent) === i
       )
       .slice(0, 3);
+    // Router-v2 P4 QUALIFIED AUTO-RESOLVE: "who last modified <a named
+    // component>" — the component mention pre-answers the runtime-vs-metadata
+    // clarification, so route the metadata stamp directly. Without a
+    // component-ish qualifier the pair stays a genuine blocking ambiguity.
+    if (
+      primary.intent === 'runtime-audit-trail' &&
+      alternatives.some((alternative) => alternative.intent === 'last-modified') &&
+      NAMES_COMPONENT_FOR_LAST_MODIFIED.test(q)
+    ) {
+      const lastModifiedRule = RULES.find((rule) => rule.intent === 'last-modified');
+      if (lastModifiedRule !== undefined) {
+        primary = routeFromRule(question, q, lastModifiedRule);
+        alternatives = [];
+      }
+    }
+    // Router-v2 P4 COMPLEMENTARY STACKING: pairs where either reading answers
+    // (both read-only, same plane family) never block — the alternative's
+    // tools stack after the primary's and stay listed for transparency.
+    const complementary = alternatives.filter((alternative) =>
+      COMPLEMENTARY_ALTERNATIVE_PAIRS.has(`${primary.intent}|${alternative.intent}`),
+    );
+    const blocking = alternatives.filter(
+      (alternative) => !complementary.includes(alternative),
+    );
+    const stackedTools =
+      complementary.length > 0
+        ? [
+            ...primary.tools,
+            ...complementary
+              .flatMap((alternative) => alternative.tools)
+              .filter((tool) => !primary.tools.includes(tool)),
+          ]
+        : primary.tools;
+    if (complementary.length > 0) {
+      primary = {
+        ...primary,
+        tools: stackedTools,
+        reason:
+          `${primary.reason} The question also admits a complementary reading ` +
+          `(${complementary.map((a) => intentLabel(a.intent)).join('; ')}) — its ` +
+          `tools are stacked after the primary so either or both can run; no ` +
+          `clarification needed.`,
+      };
+    }
     const clarification =
-      alternatives.length > 0
+      blocking.length > 0
         ? {
             required: true,
-            question: `Which result do you want first: ${intentLabel(primary.intent)}, or ${alternatives.map((a) => intentLabel(a.intent)).join(', ')}?`,
-            options: [primary.intent, ...alternatives.map((a) => a.intent)],
+            question: `Which result do you want first: ${intentLabel(primary.intent)}, or ${blocking.map((a) => intentLabel(a.intent)).join(', ')}?`,
+            options: [primary.intent, ...blocking.map((a) => a.intent)],
             fallback: {
               intent: primary.intent,
               warning:
@@ -4884,7 +5082,8 @@ export const classifyQuestion = (question: string): RouteResult => {
         : null;
     return {
       ...primary,
-      confidence: alternatives.length === 0 ? 'high' : 'low',
+      confidence:
+        blocking.length > 0 ? 'low' : complementary.length > 0 ? 'medium' : 'high',
       alternatives,
       clarification,
       plan: [{

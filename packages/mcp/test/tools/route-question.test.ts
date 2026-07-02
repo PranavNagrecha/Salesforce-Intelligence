@@ -178,24 +178,38 @@ describe('routeQuestionHandler — RESIDUAL 1: comparison aside must not block a
     expect(r.value.data.route.intent).toBe('explain-flow');
     expect(r.value.data.executionBlocked).toBe(false);
     expect(r.value.data.route.clarification).toBeNull();
-    expect(r.value.data.entityEvidence?.query).toBe('Foo_Bar_Flow flow');
+    // P4: the underscored api token is captured bare (no trailing type noun).
+    expect(r.value.data.entityEvidence?.query).toBe('Foo_Bar_Flow');
     expect(r.value.data.entityEvidence?.disposition).toBe('exact');
     expect(r.value.data.entityEvidence?.clarificationRequired).toBe(false);
   });
 });
 
 describe('routeQuestionHandler — enterprise routing evidence', () => {
-  it('stops and asks for clarification whenever distinct intents match', async () => {
-    const r = await routeQuestionHandler(ctx, {
+  it('P4: a complementary intent pair STACKS instead of blocking; a genuine split still stops', async () => {
+    // impact-analysis|safe-to-delete is complementary — both reads answer, so
+    // the tools stack and execution proceeds (router-v2 P4).
+    const stacked = await routeQuestionHandler(ctx, {
       question: 'What breaks if I delete the Account field?',
       logGap: false,
     });
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    expect(r.value.data.route.alternatives.length).toBeGreaterThan(0);
-    expect(r.value.data.route.clarification?.required).toBe(true);
-    expect(r.value.data.executionBlocked).toBe(true);
-    expect(r.value.data.rendered).toContain('Stop before executing');
+    expect(stacked.ok).toBe(true);
+    if (!stacked.ok) return;
+    expect(stacked.value.data.route.alternatives.length).toBeGreaterThan(0);
+    expect(stacked.value.data.route.clarification).toBeNull();
+    expect(stacked.value.data.executionBlocked).toBe(false);
+    expect(stacked.value.data.route.tools).toContain('sfi.safe_to_delete_field');
+    // runtime-audit-trail|last-modified WITHOUT a named component genuinely
+    // diverges (record forensics vs metadata stamp) and still blocks.
+    const blocked = await routeQuestionHandler(ctx, {
+      question: 'Who changed Account?',
+      logGap: false,
+    });
+    expect(blocked.ok).toBe(true);
+    if (!blocked.ok) return;
+    expect(blocked.value.data.route.clarification?.required).toBe(true);
+    expect(blocked.value.data.executionBlocked).toBe(true);
+    expect(blocked.value.data.rendered).toContain('Stop before executing');
   });
 
   it('attaches vault-backed entity evidence for a named component', async () => {
@@ -376,7 +390,9 @@ describe('routeQuestionHandler — enterprise routing evidence', () => {
   });
 
   it('resumes deterministically with an offered alternative intent', async () => {
-    const question = 'What breaks if I delete the Account field?';
+    // P4: the impact pairs stack (no clarification), so the intent-continuation
+    // contract is exercised on the still-blocking runtime/metadata pair.
+    const question = 'Who changed Account?';
     const first = await routeQuestionHandler(ctx, { question, logGap: false });
     expect(first.ok).toBe(true);
     if (!first.ok) return;
@@ -388,24 +404,24 @@ describe('routeQuestionHandler — enterprise routing evidence', () => {
       logGap: false,
       clarificationResponse: {
         clarificationId: clarificationId as string,
-        selection: 'safe-to-delete',
+        selection: 'last-modified',
       },
     });
     expect(resumed.ok).toBe(true);
     if (!resumed.ok) return;
-    expect(resumed.value.data.route.intent).toBe('safe-to-delete');
+    expect(resumed.value.data.route.intent).toBe('last-modified');
     expect(resumed.value.data.route.confidence).toBe('high');
     expect(resumed.value.data.route.clarification).toBeNull();
     expect(resumed.value.data.executionBlocked).toBe(false);
     expect(resumed.value.data.clarificationResolution).toEqual({
       clarificationId,
-      selection: 'safe-to-delete',
+      selection: 'last-modified',
       kind: 'intent',
     });
   });
 
   it('rejects stale clarification ids and invented selections', async () => {
-    const question = 'What breaks if I delete the Account field?';
+    const question = 'Who changed Account?';
     const first = await routeQuestionHandler(ctx, { question, logGap: false });
     expect(first.ok).toBe(true);
     if (!first.ok) return;
@@ -416,7 +432,7 @@ describe('routeQuestionHandler — enterprise routing evidence', () => {
       logGap: false,
       clarificationResponse: {
         clarificationId: 'stale-challenge',
-        selection: 'safe-to-delete',
+        selection: 'last-modified',
       },
     });
     expect(stale.ok).toBe(false);
@@ -518,7 +534,7 @@ describe('core-profile gateway envelopes (P13-GW-router-envelope)', () => {
   it('withholds executable calls when clarification is required', async () => {
     process.env['SFI_TOOL_PROFILE'] = 'core';
     const r = await routeQuestionHandler(ctx, {
-      question: 'What breaks if I delete the Account field?',
+      question: 'Who changed Account?',
       logGap: false,
     });
     expect(r.ok).toBe(true);
@@ -529,7 +545,7 @@ describe('core-profile gateway envelopes (P13-GW-router-envelope)', () => {
 
   it('emits executable calls after a validated clarification response', async () => {
     process.env.SFI_TOOL_PROFILE = 'core';
-    const question = 'What breaks if I delete the Account field?';
+    const question = 'Who changed Account?';
     const first = await routeQuestionHandler(ctx, { question, logGap: false });
     expect(first.ok).toBe(true);
     if (!first.ok) return;
@@ -538,7 +554,7 @@ describe('core-profile gateway envelopes (P13-GW-router-envelope)', () => {
     const resumed = await routeQuestionHandler(ctx, {
       question,
       logGap: false,
-      clarificationResponse: { clarificationId, selection: 'safe-to-delete' },
+      clarificationResponse: { clarificationId, selection: 'last-modified' },
     });
     expect(resumed.ok).toBe(true);
     if (!resumed.ok) return;
@@ -1097,13 +1113,15 @@ describe('routeQuestionHandler — funnel-primary advisory fallback (P2 §3)', (
     expect((r.value.data.toolCandidates ?? []).length).toBeGreaterThan(0);
   });
 
-  it('NEGATIVE (margin gate wins): a plane near-tie clarifies instead of advisory-routing', async () => {
-    // "which reports are actually used" tops ≥0.30 but ties live_report_usage
-    // (live, 0.32) with find_code_usages (vault, 0.284) inside MARGIN — the
-    // clarification must win and funnel-primary must NOT override it. (Fixture
-    // updated for router-v2 P3: the utterance corpus made the old "report
-    // usage" phrasing decisively live_report_usage, no longer a near-tie.)
-    const r = await routeQuestionHandler(ctx, { question: 'which reports are actually used', logGap: false });
+  it('NEGATIVE (margin gate wins): a risk near-tie clarifies instead of advisory-routing', async () => {
+    // P4: the plane axis resolves by live-signal instead of blocking, and
+    // "which reports are actually used" now routes deterministically
+    // (reports-usage). The gate-beats-advisory precedence is pinned on the
+    // still-blocking DESTRUCTIVE/read-only axis.
+    const r = await routeQuestionHandler(ctx, {
+      question: 'removal simulation or usage readout for that field',
+      logGap: false,
+    });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.route.intent).not.toBe('funnel-advisory');

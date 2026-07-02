@@ -80,6 +80,17 @@ export interface ResolveCandidate {
   /** Pre-weight token-overlap score in [0,1]. The confidence signal. */
   readonly base: number;
   readonly matchKind: MatchKind;
+  /**
+   * Fraction of this candidate's OWN name tokens the matched query tokens
+   * landed on, in [0,1]. A whole-name exact match is 1. Distinguishes a
+   * genuine name hit ("Resolution_Code__c" covering `Case.Resolution_Code__c`
+   * fully) from a generic-token graze ("test" covering 1 of 4 tokens of
+   * `ApplicationPortalTestData`) — callers use it to keep junk ties out of
+   * clarification prompts (router-v2 P4 option hygiene). Optional so
+   * hand-built fixtures and older candidate shapes stay valid; absent means
+   * "treat as fully covered" (callers default to 1).
+   */
+  readonly nameCoverage?: number;
   /** Human-readable explanation, e.g. `fuzzy match on "paymnet"≈"payment"`. */
   readonly evidence: string;
 }
@@ -791,10 +802,10 @@ export const resolveComponents = async (
     const matchedNodeTokens = new Set(
       matched.map((m) => m.matchedToken).filter((t) => nodeTokenSet.has(t)),
     );
-    coverageById.set(
-      c.node.id,
-      c.wholeExact ? 1 : matchedNodeTokens.size / c.node.tokens.length,
-    );
+    const nameCoverage = c.wholeExact
+      ? 1
+      : matchedNodeTokens.size / c.node.tokens.length;
+    coverageById.set(c.node.id, nameCoverage);
     if (c.wholeExact) wholeExactIds.add(c.node.id);
     if (c.parentMatched) parentMatchedIds.add(c.node.id);
 
@@ -806,6 +817,7 @@ export const resolveComponents = async (
       parentApiName: c.node.parentApiName,
       score: Number(score.toFixed(6)),
       base: Number(base.toFixed(6)),
+      nameCoverage: Number(nameCoverage.toFixed(6)),
       matchKind: kind,
       evidence: c.wholeExact
         ? `exact name match on "${query.trim()}"`

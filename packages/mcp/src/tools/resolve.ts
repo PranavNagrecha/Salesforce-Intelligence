@@ -246,6 +246,7 @@ export const resolveHandler = async (
             parentApiName: a.parentApiName,
             score: a.score,
             base: a.base,
+            nameCoverage: 1,
             matchKind: 'exact' as MatchKind,
             evidence: a.evidence,
           })),

@@ -1082,9 +1082,11 @@ describe('router ↔ roster contract (CI gate)', () => {
     // component is in hand; sfi.component_history is now router-reachable
     // ("when did X change" — P14-ROUTER-goldset-expand).
     'sfi.component_as_of',
-    // Opt-in live-plane helpers the agent invokes directly inside a live flow:
-    'sfi.blast_radius_live', 'sfi.live_automation_fired', 'sfi.live_describe',
-    'sfi.live_picklist_usage', 'sfi.live_stale_check',
+    // Opt-in live-plane helpers the agent invokes directly inside a live flow.
+    // sfi.live_automation_fired ("did the flow fire yesterday") and
+    // sfi.live_picklist_usage ("which values are never used") are now
+    // router-reachable (router-v2 P4 needs-live reachability).
+    'sfi.blast_radius_live', 'sfi.live_describe', 'sfi.live_stale_check',
     // Sub-tools / specialized drills reached via a bundle or after `resolve`:
     'sfi.decision_table_browse',
     // sfi.explain_formula is now router-reachable (QA-Bundle-2 save-behavior rule).
@@ -1227,24 +1229,29 @@ describe('RESIDUAL 2 — disable / deactivate / turn-off what-if routing', () =>
 });
 
 describe('enterprise route metadata', () => {
-  it('classifies route risk and exposes competing intents', () => {
+  it('classifies route risk and exposes competing intents (P4: complementary pair STACKS, no block)', () => {
     const r = classifyQuestion('What breaks if I delete the Account field?');
     expect(r.risk).not.toBe('informational');
     expect(r.alternatives.length).toBeGreaterThan(0);
-    expect(r.confidence).toBe('low');
-    expect(r.clarification?.required).toBe(true);
-    expect(r.clarification?.question).toContain('full dependency blast radius');
-    expect(r.clarification?.fallback?.intent).toBe('impact-analysis');
+    // Router-v2 P4: impact-analysis|safe-to-delete is a COMPLEMENTARY pair —
+    // either read answers, so the alternative's tools stack after the primary
+    // and execution is not blocked on a which-first round-trip.
+    expect(r.confidence).toBe('medium');
+    expect(r.clarification).toBeNull();
+    expect(r.tools).toContain('sfi.safe_to_delete_field');
+    expect(r.reason).toContain('complementary');
   });
 
-  it('stops on generic object access because CRUD and record visibility differ', () => {
+  it('generic object access runs BOTH lenses (P4: record visibility + CRUD stack, no block)', () => {
     const r = classifyQuestion('Who can access Account?');
     expect(r.intent).toBe('who-can-access-object');
     expect(r.risk).toBe('security-sensitive');
     expect(r.alternatives.map((alternative) => alternative.intent)).toContain('object-access');
-    expect(r.clarification?.required).toBe(true);
-    expect(r.clarification?.question).toContain('record-level visibility');
-    expect(r.clarification?.question).toContain('object-level CRUD permissions');
+    // Router-v2 P4: who-can-access-object|object-access is complementary —
+    // the grantor enumeration and the CRUD matrix both answer, stacked.
+    expect(r.clarification).toBeNull();
+    expect(r.tools).toContain('sfi.who_can_access_object');
+    expect(r.tools).toContain('sfi.object_access_audit');
   });
 
   it('stops when who-changed wording does not distinguish records from metadata', () => {

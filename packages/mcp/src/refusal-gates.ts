@@ -52,6 +52,12 @@ const EXFIL_VERB = /\b(?:dump|export|give\s+me|tell\s+me|list|retrieve)\b/i;
 const EXFIL_QUANTIFIER = /\b(?:every|all|actual|the\s+real|random)\b/i;
 const EXFIL_SENSITIVE = /\b(?:ssn|social\s+security|pii|ferpa|hipaa)\b/i;
 const EXFIL_VALUES = /\bvalues?\b|\bstored\b/i;
+// P4 survivor arm — a SINGLE-record sensitive-value ask ("whats the SSN of the
+// most recent lead"): asks for the stored value OF a record/person, no
+// quantifier needed. "whats the SSN FIELD…" (a metadata ask) is excluded by
+// the field/fields carve-out.
+const EXFIL_SINGLE_VALUE =
+  /\b(?:what(?:'s|s|\s+is)|show\s+me|give\s+me|pull)\s+the\s+(?:ssn|social\s+security(?:\s+number)?)\b(?!\s+fields?\b)[^.?!]{0,60}\b(?:lead|contact|record|student|person|user|account|applicant)s?\b/i;
 
 const INJECTION_DISCLOSURE =
   'REFUSED: this request asks me to override instructions or exfiltrate record ' +
@@ -69,7 +75,14 @@ const WRITE_VERB =
   '(?:create|add|delete|remove|update|change|(?<!permission\\s)set|deploy|assign|' +
   'reassign|revoke|deactivate|activate|disable|enable|merge|reset|rename|fix|' +
   'grant|provision|turn\\s+(?:on|off)|clean\\s+up|migrate|convert|insert|upsert|' +
-  'push|publish|install|uninstall|schedule)';
+  'push|publish|install|uninstall|schedule|upgrade|downgrade|throttle|purge)';
+
+/**
+ * Adverb/quantifier filler allowed between the imperative frame and the verb —
+ * "i need you to BULK update…", "can you go ahead and MASS delete…" all carry
+ * the same mutation ask; the bare-verb anchor missed them (P4 survivors).
+ */
+const WRITE_VERB_FILLER = '(?:(?:bulk|mass|batch|just|please|go\\s+ahead\\s+and)\\s+)*';
 
 // (B) EXCLUDERS — any present means the USER is asking about permission or a
 // hypothetical, not instructing the agent to mutate: route normally. "can I
@@ -81,17 +94,40 @@ const WRITE_EXCLUDER =
 // (A) imperative position, three arms — each captures the verb phrase (verb +
 // bounded trailing slice) for the disclosure.
 const WRITE_SENTENCE_INITIAL = new RegExp(
-  `(?:^|[.!?;]\\s+)(?:please\\s+|just\\s+)?(${WRITE_VERB}\\b[^.?!;]{0,80})`,
+  `(?:^|[.!?;]\\s+)(?:please\\s+|just\\s+)?${WRITE_VERB_FILLER}(${WRITE_VERB}\\b[^.?!;]{0,80})`,
   'i',
 );
 const WRITE_LEAD_IN = new RegExp(
-  `\\b(?:please|just|go\\s+ahead\\s+and|can\\s+(?:you|u)|could\\s+(?:you|u)|would\\s+(?:you|u)|you\\s+should|i\\s+need\\s+you\\s+to)\\s+(?:please\\s+|just\\s+)?(${WRITE_VERB}\\b[^.?!;]{0,80})`,
+  `\\b(?:please|just|go\\s+ahead\\s+and|can\\s+(?:you|u)|could\\s+(?:you|u)|would\\s+(?:you|u)|you\\s+should|i\\s+need\\s+you\\s+to)\\s+(?:please\\s+|just\\s+)?${WRITE_VERB_FILLER}(${WRITE_VERB}\\b[^.?!;]{0,80})`,
   'i',
 );
 const WRITE_TRAILING_FRAME = new RegExp(
   `\\b(${WRITE_VERB}\\b[^.?!;]{0,80}?\\b(?:for\\s+me|right\\s+now|and\\s+confirm)\\b[^.?!;]{0,20})`,
   'i',
 );
+// P4 survivor arms — each a narrow, high-precision imperative the three
+// generic frames missed:
+// - "can you MAKE the X field required" — schema-mutation "make" (never the
+//   idiomatic "make sense of"; anchored on the schema outcome word).
+const WRITE_MAKE_SCHEMA = new RegExp(
+  `\\b(?:can|could|would)\\s+(?:you|u)\\b[^.?!;]{0,10}\\s(make\\b[^.?!;]{0,60}\\b(?:required|mandatory|optional|unique|read[-\\s]?only|editable|visible)\\b)`,
+  'i',
+);
+// - "can you GIVE the Admissions profile Modify All Data" — a grant phrased
+//   with "give". `give me …` (a READ delivery ask) is explicitly excluded.
+const WRITE_GIVE_GRANT = new RegExp(
+  `\\b(?:can|could|would)\\s+(?:you|u)\\b[^.?!;]{0,30}\\b(give\\s+(?!me\\b)[^.?!;]{0,60}\\b(?:profile|permission|perm\\s+set|access|user)\\b[^.?!;]{0,40})`,
+  'i',
+);
+// - sentence-initial "GIVE everyone admin access" — the same grant, imperative
+//   from the first word. `give me …` (a READ delivery ask) stays excluded.
+const WRITE_GIVE_INITIAL =
+  /(?:^|[.!?;]\s+)(give\s+(?!me\b)[^.?!;]{0,60}\b(?:admin|access|permission|profile)\b[^.?!;]{0,30})/i;
+// - "…run it and DELETE THE DUPES" — a mutation chained behind a read in the
+//   same sentence. Anchored on the dupes/duplicates object so read phrasings
+//   ("which profiles can edit and delete Cases") never match.
+const WRITE_CHAINED_DUPE_DELETE =
+  /\b(?:and|then)\s+(?:just\s+)?((?:delete|remove|purge|merge)\s+(?:the\s+)?dup(?:e|licate)s?\b[^.?!;]{0,30})/i;
 
 /** Static read-side alternative by verb family (write-imperative gate only). */
 const readOnlyAlternativeFor = (verbPhrase: string, question: string): string => {
@@ -111,6 +147,21 @@ const readOnlyAlternativeFor = (verbPhrase: string, question: string): string =>
   }
   if (/^merge\b/.test(v) && /\bprofile/.test(q)) {
     return 'sfi.what_if_merge_profiles';
+  }
+  if (/^make\b/.test(v) && /\brequired|mandatory\b/.test(v)) {
+    return 'sfi.what_if_make_field_required';
+  }
+  if (/^give\b/.test(v) || (/^grant\b/.test(v) && /\b(?:profile|permission)\b/.test(q))) {
+    return 'sfi.permission_risk_report';
+  }
+  if (/^(?:upgrade|downgrade|install|uninstall)\b/.test(v) && /\bpackage\b/.test(q)) {
+    return 'sfi.package_impact';
+  }
+  if (/^throttle\b/.test(v) || /\basync\b/.test(q)) {
+    return 'sfi.async_chain_depth';
+  }
+  if (/dup(?:e|licate)s?\b/.test(v)) {
+    return 'sfi.live_duplicate_check';
   }
   return 'sfi.get_impact';
 };
@@ -147,7 +198,18 @@ const runtimeDisclosure = (topic: string): string =>
 
 const EXTERNAL_SYSTEM =
   /\b(sharepoint|jira|confluence|google\s+drive|onedrive|slack\s+workspace|s3\s+bucket)\b/i;
-const POLICY_ASK = /\bwhat(?:'s|\s+is)\s+our\b[^.?!]{0,60}\bpolicy\b/i;
+// Password/session/sharing/IP policies are REAL profile metadata (the
+// profile-login-security route) — only organizational-governance policy asks
+// gate here.
+const POLICY_ASK =
+  /\bwhat(?:'s|s|\s+is)\s+our\b(?![^.?!]{0,60}\b(?:password|session|sharing|lockout|ip|login)\b)[^.?!]{0,60}\bpolic(?:y|ies)\b/i;
+// Retention schedules and consent PROCESSES are organizational governance, not
+// Salesforce metadata — the vault has no retention/consent model to read
+// (P4 survivors q879/q438/q899). Narrow nouns; "retention" alone (e.g. "data
+// retention fields on Contact") does not gate.
+const RETENTION_POLICY_ASK = /\bretention\s+(?:polic(?:y|ies)|schedule|rules?)\b/i;
+const CONSENT_PROCESS_ASK =
+  /\bhow\s+do(?:es)?\s+(?:students?|users?|customers?|people|contacts?)\s+consent\b/i;
 const OPINION_ASK = /\bwhat\s+do\s+you\s+think\b/i;
 const SHOULD_WE = /\bshould\s+we\b/i;
 // "should we" only gates WITHOUT a metadata object in sight — "should we split
@@ -183,18 +245,25 @@ export const detectRefusalShape = (question: string): RefusalShape | null => {
   // an override that also names a mutation lands here).
   const injected =
     INJECTION_PATTERNS.some((p) => p.test(q)) ||
-    (EXFIL_VERB.test(q) && EXFIL_QUANTIFIER.test(q) && EXFIL_SENSITIVE.test(q) && EXFIL_VALUES.test(q));
+    (EXFIL_VERB.test(q) && EXFIL_QUANTIFIER.test(q) && EXFIL_SENSITIVE.test(q) && EXFIL_VALUES.test(q)) ||
+    EXFIL_SINGLE_VALUE.test(q);
   if (injected) {
     return { kind: 'injection-exfiltration', disclosure: INJECTION_DISCLOSURE };
   }
 
   // 2 — write imperative: mutation verb in imperative position AND no
-  // permission/hypothetical frame.
+  // permission/hypothetical frame. The chained dupe-delete arm runs even
+  // under an excluder-free compound ask ("write me the SOQL … and delete the
+  // dupes") — the mutation clause poisons the whole turn.
   if (!WRITE_EXCLUDER.test(q)) {
     const verbPhrase = (
       WRITE_SENTENCE_INITIAL.exec(q) ??
       WRITE_LEAD_IN.exec(q) ??
-      WRITE_TRAILING_FRAME.exec(q)
+      WRITE_TRAILING_FRAME.exec(q) ??
+      WRITE_MAKE_SCHEMA.exec(q) ??
+      WRITE_GIVE_GRANT.exec(q) ??
+      WRITE_GIVE_INITIAL.exec(q) ??
+      WRITE_CHAINED_DUPE_DELETE.exec(q)
     )?.[1]
       ?.trim()
       .replace(/[,;:]$/, '');
@@ -224,17 +293,21 @@ export const detectRefusalShape = (question: string): RefusalShape | null => {
   const outOfScopeTopic =
     externalSystem !== undefined
       ? `"${externalSystem}"`
-      : POLICY_ASK.test(q)
-        ? 'Org policy authorship'
-        : OPINION_ASK.test(q)
-          ? 'An opinion'
-          : DELIVERY_ASK.test(q)
-            ? 'Message delivery'
-            : WRITE_CODE_ASK.test(q)
-              ? 'Code generation'
-              : SHOULD_WE.test(q) && !METADATA_NOUN.test(q)
-                ? 'An org-decision recommendation'
-                : undefined;
+      : RETENTION_POLICY_ASK.test(q)
+        ? 'A data-retention policy (organizational governance, not org metadata)'
+        : CONSENT_PROCESS_ASK.test(q)
+          ? 'A consent process (organizational governance, not org metadata)'
+          : POLICY_ASK.test(q)
+            ? 'Org policy authorship'
+            : OPINION_ASK.test(q)
+              ? 'An opinion'
+              : DELIVERY_ASK.test(q)
+                ? 'Message delivery'
+                : WRITE_CODE_ASK.test(q)
+                  ? 'Code generation'
+                  : SHOULD_WE.test(q) && !METADATA_NOUN.test(q)
+                    ? 'An org-decision recommendation'
+                    : undefined;
   if (outOfScopeTopic !== undefined) {
     return { kind: 'out-of-scope', disclosure: outOfScopeDisclosure(outOfScopeTopic) };
   }

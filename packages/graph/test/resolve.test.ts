@@ -1056,3 +1056,51 @@ describe('resolveComponents — exact api-name wins over superset-containing riv
     expect(topTwo).toContain('CustomField:Contact.Foo__c');
   });
 });
+
+// --- router-v2 P4: nameCoverage exposure --------------------------------------
+describe('nameCoverage (router-v2 P4 option hygiene input)', () => {
+  let dir: string;
+  let covStore: GraphStore;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-resolve-cov-'));
+    const instance = await DuckDBInstance.create(join(dir, 'cov.db'));
+    const connection = await instance.connect();
+    const init = await initSchema(connection);
+    if (!init.ok) throw new Error(init.error.message);
+    covStore = { connection, instance };
+    await importExtractionResults(covStore, [{
+      nodes: [
+        makeNode({ id: 'ApexClass:ApplicationPortalTestData', apiName: 'ApplicationPortalTestData', type: 'ApexClass' }),
+        makeNode({ id: 'CustomField:Case.Resolution_Code__c', apiName: 'Resolution_Code__c', type: 'CustomField', parentId: 'CustomObject:Case' }),
+        makeNode({ id: 'CustomObject:Case', apiName: 'Case' }),
+      ],
+      edges: [],
+    }]);
+  });
+
+  afterAll(async () => {
+    covStore.connection.closeSync();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('a generic-token graze reports LOW own-name coverage; a full-name hit reports 1', async () => {
+    const graze = await resolveComponents(covStore, 'test class');
+    expect(graze.ok).toBe(true);
+    if (!graze.ok) return;
+    const testData = graze.value.candidates.find(
+      (c) => c.id === 'ApexClass:ApplicationPortalTestData',
+    );
+    if (testData !== undefined) {
+      expect(testData.nameCoverage ?? 1).toBeLessThan(0.5);
+    }
+
+    const full = await resolveComponents(covStore, 'Resolution_Code__c');
+    expect(full.ok).toBe(true);
+    if (!full.ok) return;
+    const field = full.value.candidates.find(
+      (c) => c.id === 'CustomField:Case.Resolution_Code__c',
+    );
+    expect(field?.nameCoverage).toBe(1);
+  });
+});

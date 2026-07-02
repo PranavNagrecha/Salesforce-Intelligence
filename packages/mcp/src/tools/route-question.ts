@@ -156,6 +156,16 @@ const tryResolveFallback = async (
   ) {
     return null;
   }
+  // P4 option hygiene on the fallback's pick-one prompt too: fuzzy grazes and
+  // far-below-top rivals are junk. When hygiene leaves a SINGLE plausible
+  // candidate, the ambiguity was junk-manufactured — resolve to it instead of
+  // blocking.
+  const hygienicOptions =
+    disposition === 'ambiguous'
+      ? hygienicClarificationOptions(candidates.slice(0, 5))
+      : [];
+  const effectivelyExact =
+    disposition === 'exact' || hygienicOptions.length === 1;
   return {
     question,
     plane: 'vault',
@@ -167,15 +177,15 @@ const tryResolveFallback = async (
       `Names a component (resolve disposition: ${disposition}) but asks nothing ` +
       `specific yet. Resolve it, then pick the analysis you want.`,
     gap: null,
-    confidence: disposition === 'exact' ? 'high' : 'low',
+    confidence: effectivelyExact ? 'high' : 'low',
     risk: 'informational',
     alternatives: [],
     clarification:
-      disposition === 'ambiguous'
+      disposition === 'ambiguous' && !effectivelyExact
         ? {
             required: true,
             question: 'Several components match. Which component did you mean?',
-            options: candidates.slice(0, 5).map((candidate) => candidate.id),
+            options: hygienicOptions.map((candidate) => candidate.id),
           }
         : null,
     plan: [{
@@ -376,8 +386,14 @@ const selectedEntityArgsForRoute = (
  * such as "what", "change", and "access".
  */
 const extractEntityQuery = (question: string, intent: string): string | null => {
+  // Three literal API-reference shapes, most-specific first: dotted
+  // Object.Field, a __suffix custom name, and (router-v2 P4) a bare
+  // UNDERSCORED token ("Clinical_Lead_Student_Assignment_Screen_Flow",
+  // "Opportunity_Stage_Date_Update") — nobody types underscores in prose
+  // unless they are naming a component, and missing these left the extractor
+  // scraping generic phrases ("screen flow") that resolved to junk menus.
   const apiReference = question.match(
-    /\b[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)\b|\b[A-Za-z][A-Za-z0-9_]*__(?:c|mdt|e|x|b|kav)\b/,
+    /\b[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)\b|\b[A-Za-z][A-Za-z0-9_]*__(?:c|mdt|e|x|b|kav)\b|\b[A-Za-z][A-Za-z0-9]*(?:_+[A-Za-z0-9]+)+\b/,
   )?.[0];
   if (apiReference !== undefined) {
     if (intent === 'what-if-method-signature' && apiReference.includes('.')) {
@@ -416,7 +432,7 @@ const extractEntityQuery = (question: string, intent: string): string | null => 
   if (typedPhrase === undefined) return null;
   const cleaned = typedPhrase
     .replace(
-      /^(?:(?:what|whatever|which|who|where|when|why|how|is|are|can|does|do|did|show|find|explain|locate|list|calls?|invokes?|references?|owns?|edit|read|view|access|change|delete|remove|possible|values?|apex|api|version|data|type|for|of|the|this|that|in|on|to|used|assigned|set|every|all|each|any|me|a|an)\s+)+/i,
+      /^(?:(?:what|whats|whatever|which|who|whos|where|wheres|when|why|how|hows|is|are|can|does|do|did|show|find|explain|locate|list|walk|through|pull|give|gimme|tell|about|break|down|compare|effective|calls?|invokes?|references?|owns?|edit|read|view|access|change|delete|remove|possible|values?|apex|api|version|data|type|for|of|the|this|that|in|on|to|used|assigned|set|every|all|each|any|me|my|us|a|an)\s+)+/i,
       '',
     )
     .trim();
@@ -441,7 +457,6 @@ const inferEntityTypes = (
   question: string,
 ): readonly ComponentType[] => {
   if (intent === 'what-if-method-signature') return ['ApexClass'];
-  if (/\bfield\b/i.test(question)) return ['CustomField'];
   if (query.includes('.') && !/\sclass$/i.test(query)) return ['CustomField'];
   if (/__(?:mdt|e|x|b|kav)$/i.test(query) || /(?:^object\s|\sobject(?:\s+on\s+\w+)?$)/i.test(query)) return ['CustomObject'];
   if (/(?:^field\s|\sfield(?:\s+on\s+\w+)?$)/i.test(query)) return ['CustomField'];
@@ -455,20 +470,58 @@ const inferEntityTypes = (
   if (/(?:^validation\s+rule\s|\svalidation\s+rule$)/i.test(query)) return ['ValidationRule'];
   if (/(?:^report\s|\sreport$)/i.test(query)) return ['Report'];
   if (/(?:^dashboard\s|\sdashboard$)/i.test(query)) return ['Dashboard'];
+  // QUESTION-level type qualifier RIGHT AFTER the extracted name — "does the
+  // faculty profile have access to the Registered_Courses_Exam__c OBJECT". The
+  // user told us the type; scoping resolution to it keeps same-named
+  // components of other types (the CustomTab twin, sibling fields) from
+  // manufacturing a fake ambiguity (router-v2 P4 qualified-entity shape).
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const qualifier = question.match(
+    new RegExp(`\\b${escaped}\\s+(object|flow|field|trigger|profile|permission\\s+set)\\b`, 'i'),
+  )?.[1]?.toLowerCase().replace(/\s+/g, ' ');
+  if (qualifier === 'object') return ['CustomObject'];
+  if (qualifier === 'flow') return ['Flow'];
+  if (qualifier === 'field') return ['CustomField'];
+  if (qualifier === 'trigger') return ['ApexTrigger'];
+  if (qualifier === 'profile') return ['Profile'];
+  if (qualifier === 'permission set') return ['PermissionSet'];
+  // Question-level "field" is the WEAKEST hint — it must not override a
+  // query-level type noun ("the financial aid PROFILE" in a question that
+  // also says "field" elsewhere), so it is checked last (router-v2 P4).
+  if (/\bfield\b/i.test(question)) return ['CustomField'];
   return [];
 };
+
+/** Loose literal key: lowercase, punctuation/space/underscore-insensitive. */
+const normLiteral = (value: string): string =>
+  value.toLowerCase().replace(/[^a-z0-9]/g, '');
 
 /**
  * The fuzzy resolver deliberately returns `ambiguous` when nearby names are
  * plausible. A unique literal API/canonical-id match is stronger evidence and
- * is safe for the router to treat as exact.
+ * is safe for the router to treat as exact. Router-v2 P4 widens "literal":
+ * - SPACE-TYPED names ("Alpha Beta Flow" ≈ `Alpha_Beta_Flow`)
+ *   compare punctuation-insensitively — but never for a CustomField when the
+ *   query has spaces (the "Contact Email" → `Account.Contact_Email__c` decoy
+ *   family the resolver deliberately keeps ambiguous).
+ * - "Object Field" order ("Case Status" ≈ `Case.Status`): parent+name equals
+ *   the whole query — the most specific way to name a field in prose.
+ * - A CustomTab literal twin of a CustomObject is NOT a rival: the tab is the
+ *   object's UI shell, and every routed tool wants the object id (a tab ask
+ *   routes to tab-availability which also takes the object). Dropping twins
+ *   that leaves ONE literal winner resolves `exact` instead of blocking.
  */
 const refineEntityResolution = (query: string, resolution: ResolveResult): ResolveResult => {
   if (resolution.disposition !== 'ambiguous') return resolution;
   const normalized = query.toLowerCase();
+  const looseQuery = normLiteral(query);
+  const queryHasSpace = /\s/.test(query.trim());
   const exactApi = resolution.candidates.filter((candidate) =>
     candidate.apiName.toLowerCase() === normalized ||
-    candidate.id.toLowerCase().endsWith(`:${normalized}`)
+    candidate.id.toLowerCase().endsWith(`:${normalized}`) ||
+    (normLiteral(candidate.apiName) === looseQuery &&
+      looseQuery.length >= 4 &&
+      !(candidate.type === 'CustomField' && queryHasSpace))
   );
   const parentQualified = query.match(/^(.+?)\s+field\s+on\s+([A-Za-z][A-Za-z0-9_]*)$/i);
   const normalizedName = parentQualified?.[1]?.replace(/[^a-z0-9]/gi, '').toLowerCase();
@@ -481,9 +534,89 @@ const refineEntityResolution = (query: string, resolution: ResolveResult): Resol
           candidate.apiName.replace(/__[a-z]+$/i, '').replace(/[^a-z0-9]/gi, '').toLowerCase() === normalizedName &&
           candidate.parentApiName?.replace(/[^a-z0-9]/gi, '').toLowerCase() === normalizedParent
         );
-  const exact = exactParentField.length === 1 ? exactParentField : exactApi;
+  // "Object Field" prose order — parent + own name together equal the query
+  // ("Case Status" → `CustomField:Case.Status`). Definitive when unique.
+  const parentPlusName =
+    queryHasSpace && looseQuery.length >= 4
+      ? resolution.candidates.filter(
+          (candidate) =>
+            candidate.type === 'CustomField' &&
+            candidate.parentApiName !== null &&
+            normLiteral(candidate.parentApiName) +
+              normLiteral(candidate.apiName.replace(/__[a-z]+$/i, '')) ===
+              looseQuery,
+        )
+      : [];
+  // CustomTab twins of a literally-matched CustomObject are UI shells, not
+  // genuine rivals — drop them from the literal set before deciding.
+  const objectLiteralNames = new Set(
+    exactApi
+      .filter((candidate) => candidate.type === 'CustomObject')
+      .map((candidate) => normLiteral(candidate.apiName)),
+  );
+  const exactApiNoTabTwins = exactApi.filter(
+    (candidate) =>
+      candidate.type !== 'CustomTab' ||
+      !objectLiteralNames.has(normLiteral(candidate.apiName)),
+  );
+  const exact =
+    exactParentField.length === 1
+      ? exactParentField
+      : parentPlusName.length === 1
+        ? parentPlusName
+        : exactApiNoTabTwins.length === 1
+          ? exactApiNoTabTwins
+          : exactApi;
   if (exact.length !== 1) return resolution;
   const winner = exact[0]!;
+  return {
+    ...resolution,
+    disposition: 'exact',
+    candidates: [winner, ...resolution.candidates.filter((candidate) => candidate.id !== winner.id)],
+  };
+};
+
+/**
+ * QUALIFIED-ENTITY AUTO-RESOLVE (router-v2 P4): when the ambiguity is a
+ * same-named component family differing only by PARENT object (the classic
+ * `Resolution_Code__c` on Case/Task/Event), and the QUESTION itself names
+ * exactly ONE of those parents as a word ("…saving a CASE without a
+ * Resolution_Code__c…"), the question already carries the disambiguating
+ * qualifier — resolve with it instead of blocking on a clarification the user
+ * has effectively pre-answered. Promotes only on a UNIQUE parent mention;
+ * zero or several mentioned parents keep the genuine ambiguity.
+ */
+const resolveParentQualifier = (
+  question: string,
+  resolution: ResolveResult,
+): ResolveResult => {
+  if (resolution.disposition !== 'ambiguous') return resolution;
+  const top = resolution.candidates[0];
+  if (top === undefined) return resolution;
+  const family = resolution.candidates.filter(
+    (candidate) =>
+      candidate.apiName.toLowerCase() === top.apiName.toLowerCase() &&
+      candidate.parentApiName !== null,
+  );
+  if (family.length < 2) return resolution;
+  const questionWords = new Set(
+    question
+      .toLowerCase()
+      .split(/[^a-z0-9_]+/)
+      .filter((word) => word.length > 0),
+  );
+  const namesParent = (parentApiName: string): boolean => {
+    const full = parentApiName.toLowerCase();
+    const bare = full.replace(/__c$/, '').replace(/^[a-z0-9]+__/, '');
+    return (
+      questionWords.has(full) ||
+      questionWords.has(bare) ||
+      questionWords.has(`${bare}s`)
+    );
+  };
+  const parentNamed = family.filter((candidate) => namesParent(candidate.parentApiName!));
+  if (parentNamed.length !== 1) return resolution;
+  const winner = parentNamed[0]!;
   return {
     ...resolution,
     disposition: 'exact',
@@ -518,6 +651,7 @@ const applyGlossaryAliases = async (
         parentApiName: candidate.parentApiName,
         score: candidate.score,
         base: candidate.base,
+        nameCoverage: 1,
         matchKind: 'exact' as const,
         evidence: candidate.evidence,
       })),
@@ -539,7 +673,49 @@ const entityAmbiguityRequiresClarification = (
   if (literalMatches.length > 1) return true;
   if (/[A-Za-z0-9_]__(?:c|mdt|e|x|b|kav)\b|\w+\.\w+/.test(query)) return false;
   const [top, second] = resolution.candidates;
-  return top!.base >= 0.92 && second!.base >= 0.92 && second!.score >= top!.score * 0.97;
+  // JUNK-TIE SUPPRESSION (router-v2 P4): a blocking clarification is only
+  // justified when the top rivals look like the NAME the user typed — both
+  // non-fuzzy AND both covering at least half their own name (a generic token
+  // like "test" grazing 1-of-4 tokens of `ApplicationPortalTestData` ties at
+  // base 1.0 but is vocabulary, not a name; blocking on it turns an answerable
+  // question into a dead clarification full of junk options). Genuine
+  // same-name families (literal collisions above, full-name ties here) still
+  // clarify. nameCoverage defaults to 1 for legacy candidates without it.
+  const looksLikeNamedComponent = (candidate: (typeof resolution.candidates)[number]): boolean =>
+    candidate.matchKind !== 'fuzzy' && (candidate.nameCoverage ?? 1) >= 0.5;
+  return (
+    top!.base >= 0.92 &&
+    second!.base >= 0.92 &&
+    second!.score >= top!.score * 0.97 &&
+    looksLikeNamedComponent(top!) &&
+    looksLikeNamedComponent(second!)
+  );
+};
+
+/**
+ * OPTION HYGIENE (router-v2 P4): the options offered by an entity
+ * clarification must be the PLAUSIBLE candidates only. A rival that matched
+ * fuzzily (the Bug-2-class pure-short-acronym overlap: "ssn" ≈
+ * `{ASN,BSN,MSN}_Professional_Status__c` on a 2-char "SN" graze) or whose base
+ * sits well below the top option is junk the resolver itself would never act
+ * on — offering it as a pick teaches the user the tool can't tell junk from
+ * signal. Keeps every candidate within 90% of the top base that matched
+ * non-fuzzily, always including the top option itself.
+ */
+export const hygienicClarificationOptions = <
+  T extends { readonly base: number; readonly matchKind: string },
+>(
+  candidates: readonly T[],
+): T[] => {
+  const top = candidates[0];
+  if (top === undefined) return [];
+  const kept = candidates.filter(
+    (candidate) =>
+      candidate.matchKind !== 'fuzzy' && candidate.base >= top.base * 0.9,
+  );
+  // The top option is always offered, whatever its kind — the clarification
+  // gate already vetted the top pair before any options are assembled.
+  return kept.length > 0 && kept[0] === top ? kept : [top, ...kept.filter((c) => c !== top)];
 };
 
 interface CompoundClause {
@@ -959,6 +1135,41 @@ const planesDiverge = (a: ToolCandidate, b: ToolCandidate): boolean => {
   return planes.has('vault') && (planes.has('live') || planes.has('hybrid'));
 };
 
+/**
+ * Runtime-DATA language: the question asks about records/values/usage as they
+ * exist in the org right now — the live plane's domain. Used to break a
+ * plane-diverging funnel near-tie WITHOUT a blocking clarification (router-v2
+ * P4): a vault-flavored question ("give me a breakdown of the X flow") whose
+ * TF-IDF cosine grazes a live tool ("breakdown" ≈ live_owner_breakdown) is
+ * noise, not a genuine plane choice — the vault candidate leads. A question
+ * that speaks in record counts / fill rates / logins leads with the live
+ * candidate, and the existing liveRequired consent disclosure fires.
+ */
+const LIVE_DATA_SIGNAL =
+  /\bhow\s+many\b|\bcounts?\b|\bfill\s+rate\b|\bpopulat(?:ed|ion)\b|\bstorage\b|\bdata\s+volume\b|\blog(?:ged)?\s?in(?:to)?\b|\blast\s+login\b|\bright\s+now\b|\bcurrently\b|\bas\s+of\s+(?:now|today)\b|\bin\s+prod(?:uction)?\b|\bsample\s+records?\b|\brows?\b|\brecord\s+data\b|\bactual(?:ly)?\s+(?:records?|values?|data|used?|runs?)\b|\bapi\s+usage\b|\blimits?\s+headroom\b/i;
+
+/**
+ * Resolve a plane-diverging near-tie by the question's own language instead of
+ * blocking: live-data language promotes the live/hybrid candidate to the top
+ * of the shortlist (consent disclosure follows from its liveRequired flag);
+ * otherwise the vault candidate leads. Regex-route pairs are a coordinated
+ * plan and are never reordered.
+ */
+export const resolvePlaneTie = (
+  cands: readonly ToolCandidate[],
+  question: string,
+): ToolCandidate[] => {
+  const [top, second] = cands;
+  if (top === undefined || second === undefined) return [...cands];
+  if (top.score - second.score > MARGIN) return [...cands];
+  if (!planesDiverge(top, second)) return [...cands];
+  if (top.fromRoute === true && second.fromRoute === true) return [...cands];
+  const wantsLive = LIVE_DATA_SIGNAL.test(question);
+  const topReachesOrg = top.plane === 'live' || top.plane === 'hybrid';
+  if (wantsLive === topReachesOrg) return [...cands];
+  return [second, top, ...cands.slice(2)];
+};
+
 /** One candidate is destructive, the other a read-only impact/usage readout. */
 const risksDiverge = (a: ToolCandidate, b: ToolCandidate): boolean =>
   (DESTRUCTIVE_TOOL.test(a.tool) && INFORMATIONAL_IMPACT_TOOL.test(b.tool)) ||
@@ -988,23 +1199,17 @@ export const marginClarification = (
   // block a correctly-planned route. The gate targets a genuine FUNNEL tie the
   // regex route did not resolve, so require at least one non-route rival.
   if (top.fromRoute === true && second.fromRoute === true) return null;
-  const axis = planesDiverge(top, second)
-    ? 'plane'
-    : risksDiverge(top, second)
-      ? 'risk'
-      : null;
-  if (axis === null) return null;
+  // PLANE divergence no longer BLOCKS (router-v2 P4): the tie is resolved by
+  // the question's own runtime-data language in resolvePlaneTie — a
+  // vault-flavored question whose cosine grazed a live tool routes vault, a
+  // live-implying question leads live WITH the consent disclosure. Only the
+  // destructive-vs-informational axis still stops execution.
+  if (!risksDiverge(top, second)) return null;
   const question =
-    axis === 'plane'
-      ? `These two tools are equally likely but answer from DIFFERENT planes — ` +
-        `\`${top.tool}\` (${top.plane}) vs \`${second.tool}\` (${second.plane}). ` +
-        `A ${top.plane === 'vault' ? second.plane : top.plane} answer queries the ` +
-        `org at call time (needs the opt-in live plane); a vault answer is the ` +
-        `offline catalog. Which did you mean?`
-      : `These two tools are equally likely but one is DESTRUCTIVE and one is ` +
-        `read-only — \`${top.tool}\` vs \`${second.tool}\`. Do you want the ` +
-        `read-only impact/usage readout, or the change/delete simulation? Which ` +
-        `did you mean?`;
+    `These two tools are equally likely but one is DESTRUCTIVE and one is ` +
+    `read-only — \`${top.tool}\` vs \`${second.tool}\`. Do you want the ` +
+    `read-only impact/usage readout, or the change/delete simulation? Which ` +
+    `did you mean?`;
   return {
     required: true,
     question,
@@ -1103,14 +1308,17 @@ export const buildFunnelCandidates = (
   mode: RouteQuestionInput['mode'],
 ): ToolCandidate[] => {
   const funnelLimit = mode !== undefined ? 12 : 8;
-  return rerankForMode(
-    mergeRouteHintsIntoCandidates(
-      route,
-      semanticCandidates(question, funnelLimit),
-      routeToolArgs,
-      funnelLimit,
+  return resolvePlaneTie(
+    rerankForMode(
+      mergeRouteHintsIntoCandidates(
+        route,
+        semanticCandidates(question, funnelLimit),
+        routeToolArgs,
+        funnelLimit,
+      ),
+      mode,
     ),
-    mode,
+    question,
   );
 };
 
@@ -1348,7 +1556,10 @@ export const routeQuestionHandler = async (
       : null;
   const refinedEntityResolution =
     entityQuery !== null && glossaryAwareEntityResolution !== null
-      ? refineEntityResolution(entityQuery, glossaryAwareEntityResolution)
+      ? resolveParentQualifier(
+          input.question,
+          refineEntityResolution(entityQuery, glossaryAwareEntityResolution),
+        )
       : null;
   const entityClarificationRequired =
     entityQuery !== null &&
@@ -1390,7 +1601,11 @@ export const routeQuestionHandler = async (
       clarification: {
         required: true,
         question: 'Several components match the named entity. Which component did you mean?',
-        options: entityEvidence?.candidates.map((candidate) => candidate.componentId) ?? [],
+        // P4 option hygiene: fuzzy grazes and far-below-top rivals are junk,
+        // not options — offer only the plausible candidates.
+        options: hygienicClarificationOptions(entityEvidence?.candidates ?? []).map(
+          (candidate) => candidate.componentId,
+        ),
       },
     };
   } else if (
@@ -1398,6 +1613,22 @@ export const routeQuestionHandler = async (
     route.clarification === null
   ) {
     route = { ...route, confidence: 'medium' };
+  } else if (
+    route.intent === 'component-lookup' &&
+    route.clarification !== null &&
+    refinedEntityResolution?.disposition === 'exact'
+  ) {
+    // The resolve-fallback blocked on a whole-phrase ambiguity, but the
+    // NARROW entity extraction resolved EXACT (e.g. a dotted
+    // `Object.Field__c` reference inside a 3-token phrase). The specific
+    // reference wins over the phrase-level noise — clear the block.
+    const winner = refinedEntityResolution.candidates[0]!;
+    route = {
+      ...route,
+      confidence: 'high',
+      clarification: null,
+      suggestedArgs: { ...(route.suggestedArgs ?? {}), componentId: winner.id },
+    };
   }
 
   // Eval family B — the resolved TYPE gates the routed tools. When the entity

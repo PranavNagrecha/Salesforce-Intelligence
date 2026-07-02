@@ -60,11 +60,12 @@ describe('detectRefusalShape — write-imperative (2.1)', () => {
       detectRefusalShape('please merge the Standard_Agent profile into Standard_Manager')
         ?.readOnlyAlternative,
     ).toBe('sfi.what_if_merge_profiles');
-    // No mapped family → the generic impact read.
+    // Duplicate-record mutation → the read-only duplicate scan (P4: was the
+    // generic impact read before the dupe family mapping existed).
     expect(
       detectRefusalShape('go ahead and merge the duplicate Supplier__c records you find')
         ?.readOnlyAlternative,
-    ).toBe('sfi.get_impact');
+    ).toBe('sfi.live_duplicate_check');
   });
 });
 
