@@ -14,6 +14,10 @@ import type {
 } from '@sf-intelligence/contracts';
 import { ok, type Result } from '@sf-intelligence/core';
 import {
+  ACTIVE_HOLDERS_COMPLETE_SUBJECT,
+  readFacts,
+} from '@sf-intelligence/graph';
+import {
   buildCoverageEntries,
   rankUncoveredFamilies,
   summarizeCoverage,
@@ -22,6 +26,9 @@ import {
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
+
+import { resolveLiveAccess } from './live-plane.js';
+import { ASSIGNMENT_DATA_LIVE_TOOLS } from './vault-assignment-disclosure.js';
 
 /** CR-CAP-20 — cap on the ranked uncovered-families list. */
 const TOP_UNCOVERED_FAMILIES_CAP = 10;
@@ -62,9 +69,82 @@ export interface CoverageReportOutput {
    * family is absent from the org.
    */
   readonly topUncoveredFamilies: readonly UncoveredFamily[];
+  /**
+   * ENGINE-ARC §6 — runtime assignment data (User rows, PermissionSetAssignment,
+   * GroupMember). NOT a retrieve gap: these are runtime data objects excluded
+   * from the vault BY DESIGN (live-first; the counts-only facts capture is the
+   * only offline snapshot, PII-pinned to counts). This section names the
+   * consent-gated live tools that answer those questions and whether an
+   * offline counts snapshot exists.
+   */
+  readonly assignmentData: AssignmentDataCoverage;
   readonly trust: TrustSummary;
   readonly disclosure: string;
 }
+
+/** The `assignmentData` section of {@link CoverageReportOutput}. */
+export interface AssignmentDataCoverage {
+  readonly vaultModeled: false;
+  readonly reason: string;
+  readonly liveTools: readonly string[];
+  /** Whether the live plane may run for this org right now (consent/env). */
+  readonly liveConsent: boolean;
+  /** The P13-FACTS counts-only snapshot (`sfi refresh --with-data-shape`). */
+  readonly factsCounts: {
+    readonly present: boolean;
+    readonly capturedAt: string | null;
+  };
+  /** One-line human rendering of the three facts above. */
+  readonly rendered: string;
+}
+
+/** Verbatim `reason` for {@link AssignmentDataCoverage} — judge-consumed. */
+export const ASSIGNMENT_DATA_NOT_A_GAP_REASON =
+  'runtime data object — by design, not a retrieve gap';
+
+/**
+ * Build the assignmentData coverage section: facts-snapshot presence from the
+ * ACTIVE_HOLDERS_COMPLETE_SUBJECT marker (counts-only capture) and live-plane
+ * availability from the org's standing consent/env. Best-effort — a facts
+ * table that cannot be read simply reports `present: false`.
+ */
+export const buildAssignmentDataCoverage = async (
+  ctx: Context,
+): Promise<AssignmentDataCoverage> => {
+  let present = false;
+  let capturedAt: string | null = null;
+  try {
+    const rows = await readFacts(ctx.graph, {
+      subjectId: ACTIVE_HOLDERS_COMPLETE_SUBJECT,
+      metric: 'activeHolders',
+      limit: 1,
+    });
+    const marker = rows.ok ? rows.value[0] : undefined;
+    if (
+      marker !== undefined &&
+      typeof marker.value === 'object' &&
+      marker.value !== null &&
+      (marker.value as { readonly complete?: unknown }).complete === true
+    ) {
+      present = true;
+      capturedAt = marker.capturedAt;
+    }
+  } catch {
+    // A missing/corrupt facts table must not fail the coverage report.
+  }
+  const liveConsent = (await resolveLiveAccess(ctx.manifest.sourceOrg)).allowed;
+  return {
+    vaultModeled: false,
+    reason: ASSIGNMENT_DATA_NOT_A_GAP_REASON,
+    liveTools: ASSIGNMENT_DATA_LIVE_TOOLS,
+    liveConsent,
+    factsCounts: { present, capturedAt },
+    rendered:
+      'Runtime assignment data: not in vault (by design). ' +
+      `Live: ${liveConsent ? 'available' : 'consent-needed'} (${ASSIGNMENT_DATA_LIVE_TOOLS.join(', ')}). ` +
+      `Offline counts snapshot: ${present && capturedAt !== null ? `as of ${capturedAt}` : 'none'}.`,
+  };
+};
 
 // CR-P3-3: kept in deliberate lockstep with `summarizeCoverage`'s tri-state
 // (manifest.ts). A confirmed-clean empty type (`retrieved === 0` AND
@@ -116,6 +196,7 @@ export const coverageReportHandler = async (
     0,
     TOP_UNCOVERED_FAMILIES_CAP,
   );
+  const assignmentData = await buildAssignmentDataCoverage(ctx);
 
   return ok({
     data: {
@@ -127,6 +208,7 @@ export const coverageReportHandler = async (
         : {}),
       summary,
       topUncoveredFamilies,
+      assignmentData,
       trust: {
         provenance: 'offline_snapshot',
         confidence: summary.coverageKnown ? 'declared' : 'unknown',

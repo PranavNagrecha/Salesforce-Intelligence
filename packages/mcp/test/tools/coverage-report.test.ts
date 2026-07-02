@@ -235,3 +235,68 @@ describe('coverageReportHandler', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// ENGINE-ARC §6 — the assignmentData section: runtime assignment data is NOT
+// a retrieve gap (by design, live-first), and the report says so explicitly.
+// ---------------------------------------------------------------------------
+
+describe('coverageReportHandler — assignmentData (ENGINE-ARC §6)', () => {
+  const savedEnv = {
+    consent: process.env['SFI_CONSENT_PATH'],
+    live: process.env['SFI_LIVE_PLANE_ENABLED'],
+  };
+  beforeEach(() => {
+    // Deterministic consent state: point the consent store at a nonexistent
+    // file and clear the env enable, so liveConsent is false unless a test
+    // explicitly turns it on.
+    process.env['SFI_CONSENT_PATH'] = '/tmp/sfi-nonexistent-consent/none.json';
+    delete process.env['SFI_LIVE_PLANE_ENABLED'];
+  });
+  afterAll(() => {
+    if (savedEnv.consent === undefined) delete process.env['SFI_CONSENT_PATH'];
+    else process.env['SFI_CONSENT_PATH'] = savedEnv.consent;
+    if (savedEnv.live === undefined) delete process.env['SFI_LIVE_PLANE_ENABLED'];
+    else process.env['SFI_LIVE_PLANE_ENABLED'] = savedEnv.live;
+  });
+
+  it('reports the by-design boundary, the four live tools, and no facts snapshot', async () => {
+    const result = await coverageReportHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const ad = result.value.data.assignmentData;
+    expect(ad.vaultModeled).toBe(false);
+    // Verbatim judge-consumed reason — a retrieve gap this is NOT.
+    expect(ad.reason).toBe('runtime data object — by design, not a retrieve gap');
+    expect(ad.liveTools).toEqual([
+      'sfi.live_permset_holders',
+      'sfi.live_user_permsets',
+      'sfi.live_group_members',
+      'sfi.live_zombie_accounts',
+    ]);
+    expect(ad.liveConsent).toBe(false);
+    // The fake graph has no facts capture — present:false, never invented.
+    expect(ad.factsCounts).toEqual({ present: false, capturedAt: null });
+    expect(ad.rendered).toContain('not in vault (by design)');
+    expect(ad.rendered).toContain('consent-needed');
+    expect(ad.rendered).toContain('Offline counts snapshot: none');
+  });
+
+  it('reports liveConsent true when the live plane is env-enabled', async () => {
+    process.env['SFI_LIVE_PLANE_ENABLED'] = '1';
+    const result = await coverageReportHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.assignmentData.liveConsent).toBe(true);
+    expect(result.value.data.assignmentData.rendered).toContain('Live: available');
+  });
+
+  it('assignmentData never poses as coverage: PermissionSetAssignment stays out of covered[]', async () => {
+    const result = await coverageReportHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.covered.map((e) => e.type)).not.toContain('PermissionSetAssignment');
+    expect(result.value.data.covered.map((e) => e.type)).not.toContain('User');
+  });
+});

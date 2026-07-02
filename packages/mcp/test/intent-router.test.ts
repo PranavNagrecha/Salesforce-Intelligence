@@ -156,7 +156,7 @@ const CASES: readonly Case[] = [
   { q: 'Who can customize the application?', intent: 'over-permission', plane: 'vault' },
   { q: 'Who can manage users?', intent: 'over-permission', plane: 'vault' },
   { q: 'Which permission sets are unassigned?', intent: 'unassigned-permsets', plane: 'vault' },
-  { q: 'Which queues are empty?', intent: 'empty-queues-groups', plane: 'vault' },
+  { q: 'Which queues are empty?', intent: 'empty-queues-groups', plane: 'hybrid' },
   { q: 'What is our org-wide sharing model?', intent: 'sharing-model', plane: 'vault' },
   { q: 'Help me migrate profiles to permission sets', intent: 'profile-migration', plane: 'vault' },
   { q: 'What PII do we have in the org?', intent: 'pii-inventory', plane: 'vault' },
@@ -540,19 +540,25 @@ describe('classifyQuestion edge cases', () => {
     expect(r.intent).toBe('empty');
   });
 
-  it('routes "which permission set groups are assigned to nobody" to an honest gap (P0b)', () => {
-    // PermissionSetGroup assignment is not modeled; the router must NOT fall
-    // through to unassigned_permission_sets (PermissionSet-only), which would be
-    // confidently wrong. It returns an empty tool list plus a capability gap.
+  it('routes "which permission set groups are assigned to nobody" to the live PSG holder check (ENGINE-ARC §4 partial flip)', () => {
+    // Was HONEST GAP P0b. PSG assignment is now checkable live per named group
+    // (live_permset_holders kind: permissionSetGroup — zero effectiveTotal =
+    // unassigned). Still must NOT fall through to unassigned_permission_sets
+    // (PermissionSet-only, confidently wrong), and the gap note is DOWNGRADED
+    // to the partial (no single-call all-PSG sweep yet), not deleted.
     for (const q of [
       'Which permission set groups are assigned to nobody?',
       'Are there any unused permission set groups?',
     ]) {
       const r = classifyQuestion(q);
       expect(r.intent).toBe('unassigned-permset-groups');
-      expect(r.tools).toHaveLength(0);
-      expect(r.gap).not.toBeNull();
+      expect(r.plane).toBe('live');
+      expect(r.liveRequired).toBe(true);
+      expect(r.tools).toEqual(['sfi.live_permset_holders']);
+      expect(r.tools).not.toContain('sfi.unassigned_permission_sets');
+      expect(r.suggestedArgs).toEqual({ kind: 'permissionSetGroup' });
       expect(r.gap?.category).toBe('unassigned-permset-groups');
+      expect(r.gap?.note).toMatch(/Partial/);
     }
   });
 
@@ -1109,6 +1115,12 @@ describe('router ↔ roster contract (CI gate)', () => {
     // sfi.what_if_deactivate_flow is now router-reachable (RESIDUAL 2 —
     // "what breaks if I deactivate the X flow" / "turn off FlowA and FlowB").
     'sfi.what_if_split_profile',
+    // ENGINE-ARC: the four live assignment-data tools are now router-reachable
+    // via the §4 retargets (permset-user-roster / profile-user-roster /
+    // unassigned-permset-groups / permset-group-grants flips, the NEW
+    // queue-group-member-roster / user-permset-holdings arms, and the
+    // zombie-accounts arm), so they were removed from this list — the
+    // stale-entry test below enforces that removal.
   ]);
 
   it('every V01 tool is router-reachable OR explicitly grandfathered (no silently-unrouted tool)', () => {
@@ -1400,7 +1412,7 @@ describe('Family D — wrong-plane / missing-candidate routes', () => {
     expect(classifyQuestion('Are there empty queues or groups?').intent).toBe('empty-queues-groups');
   });
 
-  it('profile user-roster asks route LIVE (User records) with a partial-answer disclosure', () => {
+  it('profile user-roster asks route LIVE to the name-by-name roster tool (gap DELETED — ENGINE-ARC §4)', () => {
     for (const q of [
       'list everyone with the Regional Sales profile',
       'which users have the Support Agent profile',
@@ -1410,12 +1422,16 @@ describe('Family D — wrong-plane / missing-candidate routes', () => {
       expect(r.intent).toBe('profile-user-roster');
       expect(r.plane).toBe('live');
       expect(r.liveRequired).toBe(true);
+      // live_permset_holders (kind: profile) IS the name-by-name roster now —
+      // it leads; live_group_count keeps the count side.
+      expect(r.tools[0]).toBe('sfi.live_permset_holders');
       expect(r.tools).toContain('sfi.live_group_count');
       // Never the Profile METADATA catalog, never a grant-describing tool.
       expect(r.tools).not.toContain('sfi.get_component');
       expect(r.tools).not.toContain('sfi.effective_permissions');
-      expect(r.suggestedArgs).toEqual({ objectApiName: 'User', groupByField: 'ProfileId' });
-      expect(r.gap?.category).toBe('profile-user-roster');
+      expect(r.suggestedArgs).toEqual({ kind: 'profile' });
+      // The roster is BUILT — the old partial-answer gap must be gone.
+      expect(r.gap).toBeNull();
     }
   });
 
@@ -1426,25 +1442,40 @@ describe('Family D — wrong-plane / missing-candidate routes', () => {
       .toBe('profile-assignment-count');
   });
 
-  it('permission-set HOLDER rosters are an honest gap — PermissionSetAssignment is not modeled', () => {
+  it('permission-set HOLDER rosters route LIVE to live_permset_holders (ENGINE-ARC §4 full flip)', () => {
+    // Was HONEST GAP eval family D — PermissionSetAssignment is runtime data
+    // the vault never models, and the live tool now answers it.
     for (const q of [
       'which users have permission set Data Export',
       'who has the Data Export permission set assigned',
       'list users with the Data Export permission set',
+      // q1213 (the ENGINE-ARC design doc's grounding miss) abbreviates —
+      // "perm set" / "permset" must reach the same arm.
+      'who has the View_Fraud_Score_Component perm set',
+      'which users have the Data Export permset',
     ]) {
       const r = classifyQuestion(q);
       expect(r.intent).toBe('permset-user-roster');
-      // No tools: routing to effective_permissions / object_access_audit would
-      // describe what the permission set GRANTS, not who HOLDS it.
-      expect(r.tools).toHaveLength(0);
-      expect(r.gap?.category).toBe('permset-user-roster');
-      expect(r.gap?.note).toMatch(/PermissionSetAssignment/);
+      expect(r.plane).toBe('live');
+      expect(r.liveRequired).toBe(true);
+      expect(r.tools).toEqual(['sfi.live_permset_holders']);
+      // Still never the grant-describing substitutes (the old confidently-
+      // wrong answer) — the warning stays in the route reason.
+      expect(r.tools).not.toContain('sfi.effective_permissions');
+      expect(r.tools).not.toContain('sfi.object_access_audit');
+      expect(r.reason).toMatch(/GRANTS, not who holds/);
+      // The gap block is DELETED — this is a built capability now.
+      expect(r.gap).toBeNull();
     }
   });
 
-  it('the reverse "what permission sets does a user have" keeps effective-permissions', () => {
-    expect(classifyQuestion('What permission sets are assigned to that user?').intent)
-      .toBe('effective-permissions');
+  it('the reverse "what permission sets does a user have" routes the live holdings pair (ENGINE-ARC §4 NEW arm)', () => {
+    const r = classifyQuestion('What permission sets are assigned to that user?');
+    expect(r.intent).toBe('user-permset-holdings');
+    expect(r.plane).toBe('live');
+    // Ordered dual-provenance pair: live holdings first, vault grants second.
+    expect(r.tools).toEqual(['sfi.live_user_permsets', 'sfi.effective_permissions']);
+    expect(r.gap).toBeNull();
   });
 
   it('admin-level access sweeps keep over-permission (no roster steal)', () => {
@@ -1713,7 +1744,7 @@ describe('Family C — qualifier words never outrank the head-noun intent', () =
       'Who is assigned the Data Export permission set — are we wasting seats?',
     );
     expect(r.intent).toBe('permset-user-roster');
-    expect(r.gap?.category).toBe('permset-user-roster');
+    expect(r.tools).toEqual(['sfi.live_permset_holders']);
     expect(r.tools).not.toContain('sfi.live_license_usage');
     expect(r.tools).not.toContain('sfi.live_inactive_users');
     // Genuine license-usage asks keep the live counter.
@@ -2844,5 +2875,115 @@ describe('R3 CPQ enumeration-vs-id gate', () => {
     const r = classifyQuestion('show me the cpq price rules touching Quote__c');
     expect(r.intent).toBe('cpq');
     expect(r.tools).toContain('sfi.cpq_rule_chain');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ENGINE-ARC §4 — assignment-data retarget sweep. Each family below was a
+// refusal / honest gap / wrong-tool route before the four live assignment
+// tools shipped; the retargets land in the SAME change as tool registration so
+// no contradictory gates ship. Sweep-parity: the old refusal utterances now
+// route to the new tools, and the neighboring vault pins are NOT stolen.
+// ---------------------------------------------------------------------------
+
+describe('ENGINE-ARC §4 — queue/group member roster arm (NEW)', () => {
+  it.each([
+    'who is in the Support queue?',
+    "who's in the ADA Team Queue right now?",
+    'list the members of the Portal_Admins public group',
+    'which users are in the Support queue?',
+    'show me the current membership of the Support queue',
+  ])('routes the runtime roster ask live: %s', (q) => {
+    const r = classifyQuestion(q);
+    expect(r.intent).toBe('queue-group-member-roster');
+    expect(r.plane).toBe('live');
+    expect(r.liveRequired).toBe(true);
+    expect(r.tools).toEqual(['sfi.live_group_members']);
+    expect(r.gap).toBeNull();
+  });
+
+  it('answers the queue-ownership capability ask (q267 family)', () => {
+    const r = classifyQuestion('can the ADA_Team_Queue own Case records?');
+    expect(r.intent).toBe('queue-group-member-roster');
+    expect(r.tools).toEqual(['sfi.live_group_members']);
+  });
+
+  it('does NOT steal the neutral routing inspection pinned to queue-membership', () => {
+    const r = classifyQuestion(
+      'which queues does the ADA_Team_Queue route to and who are the members?',
+    );
+    expect(r.intent).toBe('queue-membership');
+  });
+
+  it('does NOT steal the empty-queue hygiene sweep (vault primary, live secondary appended)', () => {
+    const r = classifyQuestion('Are there empty queues or groups?');
+    expect(r.intent).toBe('empty-queues-groups');
+    expect(r.tools[0]).toBe('sfi.empty_queues_and_groups');
+    expect(r.tools).toContain('sfi.live_group_members');
+    expect(r.liveRequired).toBe(false);
+  });
+
+  it('does NOT steal a PSG "member of" ask (no queue / public-group noun)', () => {
+    const r = classifyQuestion(
+      'which permission set groups is jane.doe@example.com a member of?',
+    );
+    expect(r.intent).not.toBe('queue-group-member-roster');
+  });
+});
+
+describe('ENGINE-ARC §4 — user-permset-holdings arm (NEW, reverse direction)', () => {
+  it.each([
+    'what permission sets does Jane Doe have?',
+    'which permission sets is jane.doe@example.com assigned right now?',
+    'which permission set groups is Jane Doe a member of?',
+    'what does the user Jane hold — direct sets and via groups?',
+    'show me every permission set assigned to Jane Doe, with expirations',
+    'does Jane Doe have any expiring permission set assignments?',
+  ])('routes the user→grantors ask to the live/vault dual pair: %s', (q) => {
+    const r = classifyQuestion(q);
+    expect(r.intent).toBe('user-permset-holdings');
+    expect(r.plane).toBe('live');
+    expect(r.tools).toEqual(['sfi.live_user_permsets', 'sfi.effective_permissions']);
+    expect(r.gap).toBeNull();
+  });
+
+  it('does NOT steal the GRANTS direction (pinned effective-permissions / field-access asks)', () => {
+    expect(classifyQuestion('what permissions does the Sales User profile have').intent)
+      .toBe('effective-permissions');
+    expect(classifyQuestion('which permission sets grant edit on the SSN field').intent)
+      .toBe('field-access');
+    expect(classifyQuestion('combine the Sales profile and the Data Export permission set and show me the effective access').intent)
+      .toBe('effective-permissions');
+  });
+
+  it('does NOT steal the HOLDER direction (who has X → permset-user-roster)', () => {
+    expect(classifyQuestion('who has the Data Export permission set assigned').intent)
+      .toBe('permset-user-roster');
+  });
+});
+
+describe('ENGINE-ARC §2c — zombie-accounts arm (NEW)', () => {
+  it.each([
+    'find zombie accounts — login access but zero permission sets',
+    'which active users have no permission sets assigned?',
+    'active accounts with zero permission set or group assignments',
+    'which users have nothing assigned beyond their profile?',
+  ])('routes the perm-set-less sweep live: %s', (q) => {
+    const r = classifyQuestion(q);
+    expect(r.intent).toBe('zombie-accounts');
+    expect(r.plane).toBe('live');
+    expect(r.liveRequired).toBe(true);
+    expect(r.tools).toEqual(['sfi.live_zombie_accounts']);
+    expect(r.gap).toBeNull();
+  });
+
+  it('dormancy-only asks keep live_inactive_users (the §2c delta boundary)', () => {
+    expect(classifyQuestion("who hasn't logged in for 90 days").intent).toBe('inactive-users');
+    expect(classifyQuestion('list dormant users').intent).toBe('inactive-users');
+  });
+
+  it('holder-roster asks (no negative frame) are never dragged onto the zombie sweep', () => {
+    expect(classifyQuestion('which users have permission set Data Export').intent)
+      .toBe('permset-user-roster');
   });
 });

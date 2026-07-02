@@ -435,6 +435,14 @@ import {
   liveStorageByObjectInputSchema,
   liveStaleRecordsHandler,
   liveStaleRecordsInputSchema,
+  livePermsetHoldersHandler,
+  livePermsetHoldersInputSchema,
+  liveGroupMembersHandler,
+  liveGroupMembersInputSchema,
+  liveUserPermsetsHandler,
+  liveUserPermsetsInputSchema,
+  liveZombieAccountsHandler,
+  liveZombieAccountsInputSchema,
 } from './live-plane.js';
 import {
   liveBudgetHandler,
@@ -1191,6 +1199,102 @@ const LIVE_INACTIVE_USERS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     properties: {
       days: { type: 'integer', minimum: 1, maximum: 3650 },
       includeAllUserTypes: { type: 'boolean' },
+      limit: { type: 'integer', minimum: 1, maximum: 500 },
+      ...LIVE_ENABLED_PROPERTY,
+    },
+  });
+
+/** Concrete JSON Schema for `sfi.live_permset_holders`. Mirrors `livePermsetHoldersInputSchema`. */
+const LIVE_PERMSET_HOLDERS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
+  Object.freeze({
+    type: 'object',
+    required: ['name'],
+    properties: {
+      name: {
+        type: 'string',
+        minLength: 1,
+        description:
+          'Exact PermissionSet.Name / PermissionSetGroup DeveloperName / Profile.Name (labels accepted).',
+      },
+      kind: {
+        type: 'string',
+        enum: ['permissionSet', 'permissionSetGroup', 'profile', 'auto'],
+        description:
+          "What `name` names. Default 'auto' probes PermissionSet → PermissionSetGroup → Profile by exact name/label; no-match or ambiguity errors honestly.",
+      },
+      includeInactiveAssignees: { type: 'boolean' },
+      includeViaGroups: {
+        type: 'boolean',
+        description:
+          'For kind permissionSet: also count holders receiving the set through a PermissionSetGroup containing it (default true).',
+      },
+      groupBy: { type: 'string', enum: ['none', 'profile'] },
+      limit: { type: 'integer', minimum: 1, maximum: 500 },
+      afterId: {
+        type: 'string',
+        description: 'Keyset paging token — the `nextAfterId` from the previous page.',
+      },
+      ...LIVE_ENABLED_PROPERTY,
+    },
+  });
+
+/** Concrete JSON Schema for `sfi.live_zombie_accounts`. Mirrors `liveZombieAccountsInputSchema`. */
+const LIVE_ZOMBIE_ACCOUNTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
+  Object.freeze({
+    type: 'object',
+    properties: {
+      minDaysInactive: {
+        type: 'integer',
+        minimum: 0,
+        maximum: 3650,
+        description:
+          'Additionally require last login older than N days (default 0 = ignore login age).',
+      },
+      includeAllUserTypes: { type: 'boolean' },
+      limit: { type: 'integer', minimum: 1, maximum: 500 },
+      ...LIVE_ENABLED_PROPERTY,
+    },
+  });
+
+/** Concrete JSON Schema for `sfi.live_group_members`. Mirrors `liveGroupMembersInputSchema`. */
+const LIVE_GROUP_MEMBERS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
+  Object.freeze({
+    type: 'object',
+    required: ['name'],
+    properties: {
+      name: {
+        type: 'string',
+        minLength: 1,
+        description: 'Exact Group DeveloperName or Name (label) of the queue / public group.',
+      },
+      groupType: {
+        type: 'string',
+        enum: ['Queue', 'Regular', 'auto'],
+        description:
+          "What kind of Group `name` names. Default 'auto' matches both; an ambiguous name across both errors honestly.",
+      },
+      expandNested: {
+        type: 'boolean',
+        description:
+          'Expand exactly ONE level of nested public groups (default false). Role entries are never expanded.',
+      },
+      limit: { type: 'integer', minimum: 1, maximum: 500 },
+      ...LIVE_ENABLED_PROPERTY,
+    },
+  });
+
+/** Concrete JSON Schema for `sfi.live_user_permsets`. Mirrors `liveUserPermsetsInputSchema`. */
+const LIVE_USER_PERMSETS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
+  Object.freeze({
+    type: 'object',
+    required: ['user'],
+    properties: {
+      user: {
+        type: 'string',
+        minLength: 1,
+        description:
+          'Exact Username (preferred — unique) or exact User.Name. An ambiguous name returns candidates, never a guess.',
+      },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       ...LIVE_ENABLED_PROPERTY,
     },
@@ -4031,7 +4135,7 @@ export const V01_TOOLS: readonly ToolDefinition[] = [
   {
     name: 'sfi.coverage_report',
     description:
-      "Report the vault's self-assessed metadata coverage: covered, partial, not-modeled, and — during a staged refresh — pending families (queued by the in-progress tiered build, with `stagedBuild` tier progress; pending types count as missing coverage, so absence answers about them must stay qualified). Use before absence-based or destructive answers.",
+      "Report the vault's self-assessed metadata coverage: covered, partial, not-modeled, and — during a staged refresh — pending families (queued by the in-progress tiered build, with `stagedBuild` tier progress; pending types count as missing coverage, so absence answers about them must stay qualified). Use before absence-based or destructive answers. The `assignmentData` section covers runtime assignment data (User / PermissionSetAssignment / GroupMember): NOT in the vault by design (a runtime data object, not a retrieve gap) — it names the consent-gated live tools that answer those questions (sfi.live_permset_holders, sfi.live_user_permsets, sfi.live_group_members, sfi.live_zombie_accounts), whether live consent is currently granted, and whether/when a counts-only facts snapshot (`sfi refresh --with-data-shape`) was captured.",
     inputSchema: COVERAGE_REPORT_INPUT_SCHEMA,
   },
   {
@@ -4043,7 +4147,7 @@ export const V01_TOOLS: readonly ToolDefinition[] = [
   {
     name: 'sfi.health_check',
     description:
-      'Report self-assessed server health, render consistency, and coverage completeness, plus a freshness block (vault age, a stale flag, the most recent refresh\'s change count, and a yellow-flag nudge when the vault is old or local source drifted). While a staged refresh (`sfi refresh --staged`) is mid-build, status is degraded with explicit tier progress ("building tier i/n") until the final tier clears the marker.',
+      'Report self-assessed server health, render consistency, and coverage completeness, plus a freshness block (vault age, a stale flag, the most recent refresh\'s change count, and a yellow-flag nudge when the vault is old or local source drifted). While a staged refresh (`sfi refresh --staged`) is mid-build, status is degraded with explicit tier progress ("building tier i/n") until the final tier clears the marker. Also carries an INFORMATIONAL `assignmentData` block (runtime assignment data is live-first by design — its absence never degrades status; a stale counts snapshot >30 days old earns an advisory only).',
     inputSchema: HEALTH_CHECK_INPUT_SCHEMA,
   },
   {
@@ -4139,8 +4243,32 @@ export const V01_TOOLS: readonly ToolDefinition[] = [
   {
     name: 'sfi.live_inactive_users',
     description:
-      "Opt-in live org: active users who haven't logged in within N days (default 30) or never have — the license-reclamation / dormant-account question. Standard (human) users by default; reports the true total (`totalInactive`) plus a capped detail page, oldest-dormant first. `limit` pages the detail rows (default 100, hard cap 500) and a per-response ~36 KB byte budget trims the page further when a wide page would exceed it (the response carries both the structured rows and a rendered table, so it can't trip the global ~45 KB limit); `capped` flips true when more remain and a `note` appears when the page was byte-trimmed. Read-only; LastLoginDate is live-only state.",
+      "Opt-in live org: active users who haven't logged in within N days (default 30) or never have — the license-reclamation / dormant-account question. Standard (human) users by default; reports the true total (`totalInactive`) plus a capped detail page, oldest-dormant first. `limit` pages the detail rows (default 100, hard cap 500) and a per-response ~36 KB byte budget trims the page further when a wide page would exceed it (the response carries both the structured rows and a rendered table, so it can't trip the global ~45 KB limit); `capped` flips true when more remain and a `note` appears when the page was byte-trimmed. Read-only; LastLoginDate is live-only state. Dormancy ONLY — for active users with login access but ZERO permission-set/PSG assignments (the perm-set-less variant of this sweep), use sfi.live_zombie_accounts.",
     inputSchema: LIVE_INACTIVE_USERS_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.live_permset_holders',
+    description:
+      "Opt-in live org: WHO HOLDS a permission set, permission set group, or profile — the name-by-name assignment roster (PermissionSetAssignment / User rows are runtime state, never in the vault; vault sfi.effective_permissions describes what a grantor GRANTS, not who holds it). `kind` defaults to 'auto' (probes PermissionSet → PermissionSetGroup → Profile by exact name/label; ambiguity or no-match is an honest error, never a guess). For a permission set the default `includeViaGroups: true` ALSO counts users who receive it through a PermissionSetGroup containing it (querying PermissionSetGroupComponent), reported separately as `directHolders` / `viaGroupHolders` with a deduped `totalAssignees` — direct-only rosters silently miss via-group holders (the classic wrong answer). kind 'profile' returns the User roster for the profile. Expired assignments are excluded and disclosed (`expiredExcluded`); active assignees only by default. True count first; `limit` (default 100, cap 500) + ~36 KB byte budget page the detail; keyset paging via `afterId`/`nextAfterId`; `groupBy: 'profile'` (default) adds per-profile buckets. Reverse direction (what does USER X hold) = sfi.live_user_permsets. Read-only; point-in-time as of queriedAt — never cached beyond the live-session TTL; roster is CURRENT org state, unlike vault answers.",
+    inputSchema: LIVE_PERMSET_HOLDERS_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.live_zombie_accounts',
+    description:
+      'Opt-in live org: ZOMBIE accounts — active users with login access but ZERO permission-set/PSG assignments, via a single SOQL anti-join (Id NOT IN PermissionSetAssignment WHERE PermissionSet.IsOwnedByProfile = false; the IsOwnedByProfile filter is load-bearing — every user carries a system PSA row for their profile-owned set). When the org rejects the anti-join it falls back to a DISCLOSED client-side diff of two bounded queries (`method: \'client-diff\'`, capped scans flagged as a lower bound). Optional `minDaysInactive` additionally requires dormancy; Standard (human) users by default. True count first (`totalZombies`); `limit` (default 100, cap 500) + ~36 KB byte budget page the detail. HONESTY: a "zombie" still holds every permission its PROFILE grants — this reports "no permission-set/PSG assignments", NOT "no access". This is the perm-set-less variant of sfi.live_inactive_users, which covers dormancy only (and for who DOES hold a set, use sfi.live_permset_holders). Read-only; point-in-time.',
+    inputSchema: LIVE_ZOMBIE_ACCOUNTS_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.live_group_members',
+    description:
+      "Opt-in live org: WHO IS IN a queue or public group — the runtime GroupMember roster (metadata XML only carries DECLARED members, so the vault's member counts routinely say 0 while Setup-managed membership is live-only; vault sfi.empty_queues_and_groups reads the declared counts). Resolves the Group by exact DeveloperName/Name (`groupType` defaults to 'auto'; ambiguity or no-match is an honest error, never a guess). GroupMember.UserOrGroupId is polymorphic: users (005) are resolved name-by-name, nested groups (00G) are LISTED but not expanded, and Role / RoleAndSubordinates entries are surfaced by UserRole name and NEVER expanded to users. `expandNested: true` expands exactly ONE level of nested public groups, stamped `expansion: 'partial-one-level'` — deeper nesting and role-hierarchy subordinates are not enumerated; never treat a partial expansion as the full effective membership. Queues also return `supportedObjects` (QueueSobject — which sObjects the queue can own). Output cross-checks the vault: `vaultDeclaredMemberCount` vs `liveDirectMemberCount` with a `drift` boolean. True count first (`totalDirectMembers`); `limit` (default 100, cap 500) + ~36 KB byte budget page the user rows. Read-only; point-in-time as of queriedAt.",
+    inputSchema: LIVE_GROUP_MEMBERS_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.live_user_permsets',
+    description:
+      "Opt-in live org: WHAT does USER X hold — the reverse of sfi.live_permset_holders (input = a user, output = the grantors they hold: profile + direct permission sets + permission set groups, with expirations). Resolves the user by exact Username (preferred — unique) then exact Name; an ambiguous name returns an honest candidate list, never a guess. PSA rows are split `directPermsets` vs `viaGroups` (grouped by PermissionSetGroup); the query pins PermissionSet.IsOwnedByProfile = false so the user's profile-owned system PSA row never masquerades as a direct assignment — the profile is reported as `user.profileName` instead. Expired assignments are excluded and disclosed (`expiredExcluded`). DUAL PROVENANCE: this answers WHICH grantors the user holds (live, point-in-time as of queriedAt); vault sfi.effective_permissions answers WHAT those grantors grant — pair them, each half stamped with its own provenance. True count first (`totalAssignments`); `limit` (default 200, cap 500) + ~36 KB byte budget page the detail. Read-only.",
+    inputSchema: LIVE_USER_PERMSETS_INPUT_SCHEMA,
   },
   {
     name: 'sfi.live_license_usage',
@@ -4253,7 +4381,7 @@ export const V01_TOOLS: readonly ToolDefinition[] = [
   {
     name: 'sfi.effective_permissions',
     description:
-      "Compute a user's EFFECTIVE access — the UNION of a profile + assigned permission sets, max-wins, with each permission attributed to the container(s) that grant it. `why_cant_user_see_record` evaluates a single record question against a bundle; nothing else rolls the containers up into one combined ability — this does. Input: `profileId` and/or `permissionSetIds[]` (at least one). A `PermissionSetGroup:` id may be passed in `permissionSetIds[]` — it is EXPANDED into its member permission sets (declared membership) and unioned in, so a PSG-assigned user gets a real answer (a permset reachable both directly and via a group is unioned once, not double-counted). It composes each container's outgoing `grantedBy` edges (object + field + apex), `properties.userPermissions` (system perms), and `properties.recordTypeVisibilities` (record-type visibility). `objectPermissions[]` carries the OR'd `allowCreate`/`allowRead`/`allowEdit`/`allowDelete`/`viewAllRecords`/`modifyAllRecords` per object plus `grantedBy` (the containers contributing a flag); `systemPermissions[]` lists each user-permission with its `grantedBy`; `customPermissions[]` (CR-CAP-10) lists each granted custom permission with its `grantedBy` + `targetMissing` (true when the granted name has no `CustomPermission` definition in the vault — managed-package / not-retrieved; declared but not resolvable, and NOT folded into systemPermissions); `recordTypeVisibilities[]` unions each container's declared record-type visibility (max-wins — visible=true wins; `<visible>` omitted in older metadata counts as visible, only an explicit false hides), each entry `{recordType, visible, grantedBy}` — record-type visibility is part of THIS union now, no longer only the separate `recordtype_availability` surface (that tool remains for the per-object grouped view); a container carrying no extracted `recordTypeVisibilities` property (a vault refreshed before record-type extraction) contributes nothing and is DISCLOSED (re-run /sfi-refresh), never fabricated as 'no record types'; `summary` reports objects / fieldsWithFls / apexClasses / systemPermissions / customPermissions / recordTypeVisibilities counts. The object list PAGES (`limit` default 100 / max 200, `offset`/`hasMore`/`truncated`). `declared` confidence. `disclosures` is explicit about the boundaries: permission-set GROUP membership IS expanded, but muting permission sets are DISCLOSED, not subtracted (effective access may be lower); app/tab visibility is a SEPARATE surface (now extracted — see `app_access` / `tab_availability`), not part of this union; field-level detail is summarised (use `field_access_audit`); object permission is NOT record access (record visibility needs OWD + sharing); custom permissions are declared grants, NOT system userPermissions, so they are never double-counted. Missing containers are ignored with a disclosure; if none exist → `component-not-found`.",
+      "Compute a user's EFFECTIVE access — the UNION of a profile + assigned permission sets, max-wins, with each permission attributed to the container(s) that grant it. `why_cant_user_see_record` evaluates a single record question against a bundle; nothing else rolls the containers up into one combined ability — this does. Input: `profileId` and/or `permissionSetIds[]` (at least one). A `PermissionSetGroup:` id may be passed in `permissionSetIds[]` — it is EXPANDED into its member permission sets (declared membership) and unioned in, so a PSG-assigned user gets a real answer (a permset reachable both directly and via a group is unioned once, not double-counted). It composes each container's outgoing `grantedBy` edges (object + field + apex), `properties.userPermissions` (system perms), and `properties.recordTypeVisibilities` (record-type visibility). `objectPermissions[]` carries the OR'd `allowCreate`/`allowRead`/`allowEdit`/`allowDelete`/`viewAllRecords`/`modifyAllRecords` per object plus `grantedBy` (the containers contributing a flag); `systemPermissions[]` lists each user-permission with its `grantedBy`; `customPermissions[]` (CR-CAP-10) lists each granted custom permission with its `grantedBy` + `targetMissing` (true when the granted name has no `CustomPermission` definition in the vault — managed-package / not-retrieved; declared but not resolvable, and NOT folded into systemPermissions); `recordTypeVisibilities[]` unions each container's declared record-type visibility (max-wins — visible=true wins; `<visible>` omitted in older metadata counts as visible, only an explicit false hides), each entry `{recordType, visible, grantedBy}` — record-type visibility is part of THIS union now, no longer only the separate `recordtype_availability` surface (that tool remains for the per-object grouped view); a container carrying no extracted `recordTypeVisibilities` property (a vault refreshed before record-type extraction) contributes nothing and is DISCLOSED (re-run /sfi-refresh), never fabricated as 'no record types'; `summary` reports objects / fieldsWithFls / apexClasses / systemPermissions / customPermissions / recordTypeVisibilities counts. The object list PAGES (`limit` default 100 / max 200, `offset`/`hasMore`/`truncated`). `declared` confidence. `disclosures` is explicit about the boundaries: permission-set GROUP membership IS expanded, but muting permission sets are DISCLOSED, not subtracted (effective access may be lower); app/tab visibility is a SEPARATE surface (now extracted — see `app_access` / `tab_availability`), not part of this union; field-level detail is summarised (use `field_access_audit`); object permission is NOT record access (record visibility needs OWD + sharing); custom permissions are declared grants, NOT system userPermissions, so they are never double-counted. Missing containers are ignored with a disclosure; if none exist → `component-not-found`. DIRECTION: this answers WHAT a given container bundle GRANTS (vault metadata); WHICH sets/PSGs a specific USER actually holds right now is runtime assignment state — use sfi.live_user_permsets (live, read-only) and feed its grantors back into this tool for a dual-provenance answer.",
     inputSchema: EFFECTIVE_PERMISSIONS_INPUT_SCHEMA,
   },
   {
@@ -4565,13 +4693,13 @@ export const V01_TOOLS: readonly ToolDefinition[] = [
   {
     name: 'sfi.unassigned_permission_sets',
     description:
-      "v2.4 hygiene tool: list PermissionSets unassigned to users. The tool ships TWO output paths: (1) when v1.7 R2 Tooling-API enrichment has run, reads `properties.assignedUserCount` as the authoritative answer (PermissionSets with count 0 surface in `unassigned[]`); (2) when enrichment has not run, falls back to a structural check — PermissionSets with no outgoing `grantedBy` edges surface as `orphanedFromComponents[]`. The `unassignedCount` field counts confirmed unassigned; `unknownAssignmentCount` separately tallies PermissionSets where assignment cannot be determined. `enrichmentStatus` reports which path the answer came from (`tooling-api-fresh` / `tooling-api-stale` / `structural-only` / `no-assignment-data`). Honesty axis (v2.4 constitutional): NEVER counts unknownAssignmentCount toward unassignedCount — separates 'no data' from 'no assignments'. Emits a `coverageCaveat` when the PermissionSet family was not retrieved (distinct from the unknownAssignmentCount enrichment axis); empty results under it are 'not retrieved'. When the vault holds a captured permission-holder aggregate (`refresh --with-data-shape`), the response embeds a `dataShape` holders block (`data_snapshot`, COUNTS ONLY — no identities): a container absent from the org-wide aggregate had FACTUALLY zero active assignments at the capture stamp, upgrading the metadata inference.",
+      "v2.4 hygiene tool: list PermissionSets unassigned to users. The tool ships TWO output paths: (1) when v1.7 R2 Tooling-API enrichment has run, reads `properties.assignedUserCount` as the authoritative answer (PermissionSets with count 0 surface in `unassigned[]`); (2) when enrichment has not run, falls back to a structural check — PermissionSets with no outgoing `grantedBy` edges surface as `orphanedFromComponents[]`. The `unassignedCount` field counts confirmed unassigned; `unknownAssignmentCount` separately tallies PermissionSets where assignment cannot be determined. `enrichmentStatus` reports which path the answer came from (`tooling-api-fresh` / `tooling-api-stale` / `structural-only` / `no-assignment-data`). Honesty axis (v2.4 constitutional): NEVER counts unknownAssignmentCount toward unassignedCount — separates 'no data' from 'no assignments'. Emits a `coverageCaveat` when the PermissionSet family was not retrieved (distinct from the unknownAssignmentCount enrichment axis); empty results under it are 'not retrieved'. When the vault holds a captured permission-holder aggregate (`refresh --with-data-shape`), the response embeds a `dataShape` holders block (`data_snapshot`, COUNTS ONLY — no identities): a container absent from the org-wide aggregate had FACTUALLY zero active assignments at the capture stamp, upgrading the metadata inference. For the current name-by-name holder list of one specific container, use sfi.live_permset_holders (opt-in, read-only).",
     inputSchema: UNASSIGNED_PERMISSION_SETS_INPUT_SCHEMA,
   },
   {
     name: 'sfi.empty_queues_and_groups',
     description:
-      "v2.4 hygiene tool: list Queue and Group nodes with zero members. Walks `properties.memberCount` (the v1.1+ extractor convention) and falls back to `properties.queueMembers` / `properties.groupMembers` array length. The 'routing trap' case — a Queue with zero members but multiple incoming AssignmentRule references — surfaces with `incomingAssignmentRuleCount > 0`; admins must reassign routing before deletion. The `isLikelyStale` flag combines zero members + incoming refs + `lastModifiedAt > 180 days`. Member resolution that cannot decide ('unknown') is counted in `unknownMemberCountQueues` / `unknownMemberCountGroups`, NEVER toward emptiness. Honesty axis (verbatim): runtime membership changes via the Setup UI since the last vault refresh are not reflected. Emits a `coverageCaveat` (scoped to the type filter) when Queue/Group was not retrieved; empty lists under it are 'not checked', not 'none'.",
+      "v2.4 hygiene tool: list Queue and Group nodes with zero members. Walks `properties.memberCount` (the v1.1+ extractor convention) and falls back to `properties.queueMembers` / `properties.groupMembers` array length. The 'routing trap' case — a Queue with zero members but multiple incoming AssignmentRule references — surfaces with `incomingAssignmentRuleCount > 0`; admins must reassign routing before deletion. The `isLikelyStale` flag combines zero members + incoming refs + `lastModifiedAt > 180 days`. Member resolution that cannot decide ('unknown') is counted in `unknownMemberCountQueues` / `unknownMemberCountGroups`, NEVER toward emptiness. Honesty axis (verbatim): runtime membership changes via the Setup UI since the last vault refresh are not reflected — for the CURRENT runtime roster (and a measured vault-vs-live drift check), use sfi.live_group_members (opt-in, read-only). Emits a `coverageCaveat` (scoped to the type filter) when Queue/Group was not retrieved; empty lists under it are 'not checked', not 'none'.",
     inputSchema: EMPTY_QUEUES_AND_GROUPS_INPUT_SCHEMA,
   },
   {
@@ -5212,6 +5340,34 @@ export const dispatchTool = async (
         args,
         liveInactiveUsersInputSchema,
         liveInactiveUsersHandler,
+      );
+    case 'sfi.live_permset_holders':
+      return runTool(
+        ctx,
+        args,
+        livePermsetHoldersInputSchema,
+        livePermsetHoldersHandler,
+      );
+    case 'sfi.live_zombie_accounts':
+      return runTool(
+        ctx,
+        args,
+        liveZombieAccountsInputSchema,
+        liveZombieAccountsHandler,
+      );
+    case 'sfi.live_group_members':
+      return runTool(
+        ctx,
+        args,
+        liveGroupMembersInputSchema,
+        liveGroupMembersHandler,
+      );
+    case 'sfi.live_user_permsets':
+      return runTool(
+        ctx,
+        args,
+        liveUserPermsetsInputSchema,
+        liveUserPermsetsHandler,
       );
     case 'sfi.live_license_usage':
       return runTool(

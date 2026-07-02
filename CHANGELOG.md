@@ -3,6 +3,74 @@
 All notable changes to **sf-intelligence** are documented here. This project
 adheres to [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+Headline: **the assignment-data engine** — four consent-gated live tools close
+the biggest "honest gap" family (who holds X / who's in Y), and the router
+flips those refusals into live routes in the same change.
+
+### Added
+- **`sfi.live_permset_holders`** — who HOLDS a permission set, permission set
+  group, or profile (`kind: permissionSet | permissionSetGroup | profile |
+  auto`), answered from the live org. PSG-trap-aware: direct holders and
+  via-group holders (`PermissionSetGroupComponent`) are reported separately
+  with a deduped `effectiveTotal`, so the count is audit-grade instead of
+  confidently understated. True count first, expired assignments excluded and
+  disclosed, 500-row cap with byte-fit that never understates totals, keyset
+  paging (`afterId`/`nextAfterId`), optional per-profile buckets. This also
+  answers the name-by-name **profile roster** family.
+- **`sfi.live_user_permsets`** — the REVERSE direction: what a named USER
+  holds. Direct permission sets vs via-PSG assignments (with expirations),
+  profile named; `PermissionSet.IsOwnedByProfile = false` is pinned into every
+  assignment query so the system profile-owned row never masquerades as a
+  direct assignment. Pairs with vault `sfi.effective_permissions` for a
+  dual-provenance answer (live = which grantors; vault = what they grant).
+- **`sfi.live_group_members`** — who is IN a queue / public group right now:
+  users, nested groups (expanded at most ONE level, fail-closed and stamped
+  `expansion: 'partial-one-level'`), role-based members surfaced as ROLE
+  entries (never silently expanded), queue `supportedObjects` ("can this queue
+  own Case"), and a measured `vaultDeclaredMemberCount` vs
+  `liveDirectMemberCount` drift check.
+- **`sfi.live_zombie_accounts`** — active users with login access but ZERO
+  permission-set/PSG assignments (single anti-join on
+  `PermissionSet.IsOwnedByProfile = false`; disclosed bounded client-diff
+  fallback when an org rejects the anti-join). Output states verbatim that a
+  "zombie" still holds everything its PROFILE grants. Optional
+  `minDaysInactive` / `includeAllUserTypes`. Dormancy-only questions stay on
+  `sfi.live_inactive_users`.
+- All four follow the live-plane contract: consent-gated (`sfi.live_consent` /
+  `SFI_LIVE_PLANE_ENABLED` / `liveEnabled`), budgeted
+  (`SFI_LIVE_QUERY_BUDGET`, budget exhaustion is an honest error, never a
+  silent fallback), read-only SOQL, `provenance: live_org` point-in-time
+  stamps. No user identifiers land in the vault — the counts-only facts pin
+  is untouched.
+- **`sfi.coverage_report` `assignmentData` section** — runtime assignment
+  data (User / PermissionSetAssignment / GroupMember) is reported as
+  "not in vault **by design**" (a runtime data object, not a retrieve gap),
+  naming the four live tools, current live-consent state, and the counts-only
+  facts snapshot presence/timestamp. `sfi.health_check` carries the same
+  block informationally — it never degrades status; a >30-day-old counts
+  snapshot earns an advisory only.
+
+### Changed
+- **Router retargets (same change as the tools — no contradictory gates):**
+  `permset-user-roster` ("which users have permission set X") flips from
+  honest-gap refusal to `sfi.live_permset_holders`; `profile-user-roster`
+  drops its partial-answer gap (the name-by-name roster is now built);
+  `unassigned-permset-groups` and `permset-group-grants` flip partially to
+  `sfi.live_permset_holders` (per-PSG zero-holder check and PSG containment —
+  the enumerate-all-PSGs sweep and the 2-hop "which PSG grants custom
+  permission X" chain remain disclosed gaps); NEW `queue-group-member-roster`
+  arm ("who's in the Support queue") routes `sfi.live_group_members`; NEW
+  `user-permset-holdings` arm ("what permission sets does Jane have") routes
+  `sfi.live_user_permsets` + `sfi.effective_permissions` as an ordered
+  dual-provenance pair; `empty-queues-groups` keeps the vault scan primary and
+  appends `sfi.live_group_members` for runtime verification.
+- The vault-side assignment disclosures (`object_access_audit`,
+  `who_can_access_object`, and friends) now name the concrete live tools
+  ("answerable via the live plane: …") instead of a generic "run the live org
+  plane" pointer.
+
 ## [0.1.23] — 2026-07-02
 
 Headline: **80% crossed — candidate generation and honesty seams in the same

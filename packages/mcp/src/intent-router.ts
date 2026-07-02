@@ -1253,25 +1253,51 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
-    // "list everyone with the X profile" is a USER ROSTER ask: user-to-profile
-    // assignment is runtime User-record state, not vault metadata — the schema
-    // list rule used to claim it via "list ... profiles" and answer with the
-    // Profile METADATA catalog (eval family D). live_group_count genuinely
-    // answers the count side (Users grouped by ProfileId) and
-    // live_inactive_users the login-activity side; the name-by-name roster
-    // itself is disclosed as a partial answer, never papered over.
-    intent: 'profile-user-roster',
+    // ENGINE-ARC §2c (NEW arm): "zombie accounts" — active users with login
+    // access but ZERO permission-set/PSG assignments. This is the User × PSA
+    // anti-join (sfi.live_zombie_accounts), an explicit DELTA over
+    // live_inactive_users: dormancy-only phrasings ("who hasn't logged in")
+    // carry no permission-set-absence noun and fall through to inactive-users.
+    // Every pattern requires either the literal "zombie" or a
+    // no/zero/without + permission-set frame, so genuine holder-roster asks
+    // ("which users have permission set X" — no negative) never land here.
+    // Sits BEFORE profile-user-roster so "users with nothing assigned beyond
+    // their profile" is not stolen by the profile-roster grammar.
+    intent: 'zombie-accounts',
     plane: 'live',
-    tools: ['sfi.live_group_count', 'sfi.live_inactive_users'],
+    tools: ['sfi.live_zombie_accounts'],
     liveRequired: true,
     needsResolve: false,
     reason:
-      'Which users hold a profile is runtime User-record state: count them live grouped by ProfileId (live_group_count); login-activity detail comes from live_inactive_users.',
-    gap: {
-      category: 'profile-user-roster',
-      note: 'Partial answer: live_group_count returns user COUNTS per profile and live_inactive_users lists dormant users, but a full name-by-name user roster per profile is not a built capability yet.',
-    },
-    suggestArgs: () => ({ objectApiName: 'User', groupByField: 'ProfileId' }),
+      'Active users with NO permission-set/PSG assignments is a live User × PermissionSetAssignment anti-join (live_zombie_accounts). Note: a "zombie" still holds everything its PROFILE grants — the tool discloses that.',
+    patterns: [
+      /\bzombie\s+(?:accounts?|users?)\b/,
+      // "which active users have no/zero permission sets (assigned)?" /
+      // "users with zero permission set or group assignments" / "can log in
+      // but have no permission set assignments"
+      /\b(?:users?|accounts?)\b[^.?!]{0,50}\b(?:no|zero|without|not\s+any)\b[^.?!]{0,15}\bpermission\s+sets?\b/,
+      // "which users have nothing assigned beyond their profile?"
+      /\bnothing\s+assigned\s+beyond\b[^.?!]{0,25}\bprofiles?\b/,
+      // "login access but no perm sets" (perm-set abbreviation variant)
+      /\b(?:no|zero|without)\b[^.?!]{0,15}\bperm\s+sets?\b/,
+    ],
+  },
+  {
+    // "list everyone with the X profile" is a USER ROSTER ask: user-to-profile
+    // assignment is runtime User-record state, not vault metadata — the schema
+    // list rule used to claim it via "list ... profiles" and answer with the
+    // Profile METADATA catalog (eval family D). ENGINE-ARC §4: the name-by-name
+    // roster IS now built — sfi.live_permset_holders (kind:'profile') lists the
+    // users live; live_group_count keeps the count side and live_inactive_users
+    // the login-activity side. The old partial-answer gap block is DELETED.
+    intent: 'profile-user-roster',
+    plane: 'live',
+    tools: ['sfi.live_permset_holders', 'sfi.live_group_count', 'sfi.live_inactive_users'],
+    liveRequired: true,
+    needsResolve: false,
+    reason:
+      'Which users hold a profile is runtime User-record state: live_permset_holders (kind: profile) lists the roster name-by-name from the live org; live_group_count covers per-profile counts and live_inactive_users the login-activity side.',
+    suggestArgs: () => ({ kind: 'profile' }),
     patterns: [
       /\b(list|show|who\s+are)\b[^.?!]{0,20}\b(everyone|everybody|all\s+(the\s+)?users?|the\s+users?|people)\b[^.?!]{0,40}\b(with|on|assigned|holding|having)\b[^.?!]{0,40}\bprofile\b/,
       /\b(which|what)\s+users?\b[^.?!]{0,40}\b(have|hold|are\s+on|with|assigned)\b[^.?!]{0,40}\bprofile\b/,
@@ -1496,6 +1522,42 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // ENGINE-ARC §4 (NEW arm): runtime queue / public-group MEMBERSHIP asks
+    // ("who's in the Support queue", "members of the X public group", "can the
+    // X queue own Case"). GroupMember rows are runtime state the vault does not
+    // model — sfi.live_group_members reads them live (polymorphic user/group/
+    // role split, QueueSobject supported objects, vault-drift cross-check).
+    // Sits BEFORE group-count, which used to claim "who's in the X queue" with
+    // a generic GROUP BY count; the roster tool now owns that vocabulary.
+    // Boundary notes: "which queues are EMPTY" (declared-metadata hygiene
+    // sweep) stays on empty-queues-groups; the neutral "which queues does
+    // X_Queue route to and who are the members" stays on queue-membership
+    // (vault get_component — declared members); a PSG "member of" ask never
+    // lands here (patterns require the literal queue / public group noun).
+    intent: 'queue-group-member-roster',
+    plane: 'live',
+    tools: ['sfi.live_group_members'],
+    liveRequired: true,
+    needsResolve: false,
+    reason:
+      'Who is actually IN a queue or public group is runtime GroupMember data — live_group_members lists the current roster (users, nested groups, roles) from the live org and cross-checks the vault-declared member count.',
+    patterns: [
+      // "who's / who is / who are ... in|on|member of ... the X queue|public group"
+      /\bwho(?:'?s|\s+is|\s+are)?\b[^.?!]{0,30}\b(?:in|on|member\s+of)\b[^.?!]{0,40}\b(?:queues?|public\s+groups?)\b/,
+      // "which users are in the Support queue?"
+      /\b(?:which|what)\s+users?\b[^.?!]{0,30}\b(?:in|on|belong\s+to)\b[^.?!]{0,40}\b(?:queues?|public\s+groups?)\b/,
+      // "members of the X queue" / "list the members of the Y public group"
+      /\bmembers?\s+of\b[^.?!]{0,40}\b(?:queues?|public\s+groups?)\b/,
+      // "the current membership of the X queue"
+      /\bmembership\s+of\b[^.?!]{0,40}\b(?:queues?|public\s+groups?)\b/,
+      // q267: "can the ADA_Team_Queue own Case records?" / "what objects does
+      // the X queue support?" — QueueSobject supported objects.
+      /\bcan\s+(?:the\s+)?\S+\s*queue\s+own\b/,
+      /\bqueues?\b[^.?!]{0,30}\b(?:own|support)\b[^.?!]{0,30}\b(?:case|lead|objects?|records?)\b/,
+      /\bobjects?\s+(?:does|can)\b[^.?!]{0,40}\bqueue\s+(?:support|own)\b/,
+    ],
+  },
+  {
     intent: 'group-count',
     plane: 'live',
     tools: ['sfi.live_group_count'],
@@ -1515,9 +1577,9 @@ const RULES: readonly Rule[] = [
       /\bcount\b[^.?!]{0,60}\bgrouped?\s+by\b/,
       /\bcount\s+of\b[^.?!]{0,60}\bby\b/,
       /\bcount\b[^.?!]{0,60}\brecords?\s+by\b/,
-      // "who's in the ADA Team Queue" — queue/public-group membership is a
-      // live GroupMember read; the vault holds the queue definition only.
-      /\bwho(?:'?s|\s+is|\s+are)?\b[^.?!]{0,40}\bin\s+the\b[^.?!]{0,50}\b(queues?|public\s+groups?)\b/,
+      // NOTE (ENGINE-ARC §4): "who's in the ADA Team Queue" used to land here
+      // as a generic GROUP BY count; the queue-group-member-roster arm ABOVE
+      // now owns that vocabulary with the dedicated live_group_members roster.
     ],
   },
   {
@@ -2008,6 +2070,59 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // ENGINE-ARC §4 (NEW arm): the REVERSE user→grantors direction — "what
+    // permission sets does USER Jane hold". A different contract from the
+    // holder-roster direction (permset-user-roster below) and from the vault
+    // GRANTS direction: PermissionSetAssignment rows for one assignee are
+    // runtime state, so sfi.live_user_permsets reads them live (direct sets vs
+    // via-PSG, expirations, profile named). The ordered pair with vault
+    // sfi.effective_permissions is deliberate DUAL PROVENANCE: live = WHICH
+    // grantors she holds; vault = WHAT those grantors grant. Sits BEFORE
+    // effective-permissions, which used to first-match these phrasings and
+    // could only describe grants, never the user's actual assignments.
+    intent: 'user-permset-holdings',
+    plane: 'live',
+    tools: ['sfi.live_user_permsets', 'sfi.effective_permissions'],
+    liveRequired: true,
+    needsResolve: false,
+    reason:
+      'What a named USER holds (their PermissionSetAssignment rows) is runtime state: live_user_permsets lists the direct sets and via-PSG assignments from the live org; effective_permissions then expands what those grantors grant (dual provenance).',
+    patterns: [
+      // Permission sets assigned to a named user (moved here from
+      // effective-permissions — the router used to first-match these to the
+      // vault GRANTS tool, which cannot know a user's assignments).
+      /\bpermission\s+sets?\b.*\bassigned\b.*\buser\b/,
+      /\bwhat\s+permission\s+sets?\b.*\bassigned\b/,
+      // "what permission sets does Jane Doe have / hold" — requires the
+      // PERMISSION SET(S) noun phrase, so "what permissions does the X profile
+      // have" (grants direction) stays on effective-permissions. The
+      // `(?!\s+group)` lookahead keeps "which permission set GROUPS are
+      // assigned to nobody" on the unassigned-permset-groups hygiene arm.
+      /\b(?:what|which)\s+(?:permission\s+sets?|perm\s+sets?)(?!\s+group)\b[^.?!]{0,20}\b(?:does|do|is|are)\b[^.?!]{0,50}\b(?:have|hold|holds|assigned|carry)\b/,
+      // "which permission set groups is <UserName> a member of?" — anchored on
+      // the literal "member of" so "which PSGs are assigned to NOBODY" (the
+      // unassigned-permset-groups hygiene ask, a later rule) is never stolen.
+      // [^?!] (not [^.?!]): usernames are email-shaped and contain dots.
+      /\bwhich\s+permission\s+set\s+groups?\s+(?:is|are)\b[^?!]{0,60}\bmember\s+of\b/,
+      // "which permission sets is jane.doe@example.com assigned right now?" —
+      // the grantee token sits between is/are and "assigned"; \S+ spans the
+      // email-shaped username that clause-bounded classes cannot.
+      /\bpermission\s+sets?\s+(?:is|are)\s+\S+(?:\s+\S+)?\s+assigned\b/,
+      // "what does the user Jane hold — direct sets and via groups?"
+      /\bwhat\s+does\s+(?:the\s+)?user\b[^.?!]{0,40}\bhold\b/,
+      // "show me every permission set assigned to <UserName>" — the grantee is
+      // named after "assigned to" (holder-direction phrasings name the SET
+      // after the users noun and never match this). The lookahead excludes
+      // "assigned to NOBODY / no one / anyone" — that is the vault
+      // unassigned-permsets hygiene sweep, not a user's holdings.
+      /\b(?:every|all|each)\s+permission\s+sets?\s+assigned\s+to\s+(?!nobody\b|no\s+one\b|noone\b|anyone\b|anybody\b)/,
+      // "list <UserName>'s permission set and PSG assignments"
+      /\S+'s\s+permission\s+sets?\b/,
+      // "does <UserName> have any expiring permission set assignments?"
+      /\bexpir\w+\s+permission\s+set\s+assignments?\b/,
+    ],
+  },
+  {
     intent: 'effective-permissions',
     plane: 'vault',
     tools: ['sfi.resolve', 'sfi.effective_permissions'],
@@ -2021,9 +2136,10 @@ const RULES: readonly Rule[] = [
       // "what permissions does the Sales User profile have" — a top
       // baseline-300 unrouted cluster (P14-ROUTER-goldset-expand).
       /\bwhat\s+permissions?\s+(does|do)\b.*\b(profiles?|permission\s+sets?|users?)\b/,
-      // Permission sets assigned to a named user (baseline-300 gap).
-      /\bpermission\s+sets?\b.*\bassigned\b.*\buser\b/,
-      /\bwhat\s+permission\s+sets?\b.*\bassigned\b/,
+      // NOTE (ENGINE-ARC §4): the "permission sets assigned to a user"
+      // phrasings moved to the user-permset-holdings arm ABOVE — a user's
+      // actual assignments are runtime state (live_user_permsets); this vault
+      // arm keeps the GRANTS direction only.
       // REACH (permissions/access cluster): "does/can the <Named> profile /
       // <Named> perm set have|give|grant|read|edit|create|delete|access|see|
       // change <object>". These name a SPECIFIC granter (a profile/permission
@@ -2536,71 +2652,84 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
-    // HONEST GAP (P0b): PermissionSetGroup assignment is not modeled — there is
-    // no PSG-assignment tool. Rather than fall through to unassigned_permission_
-    // sets (PermissionSet-only, confidently wrong) or fabricate a live
-    // workaround, route to an explicit capability gap. Must sit AFTER
-    // unassigned-permsets: the lookahead above already refuses "permission set
-    // groups", so this rule catches it on the fall-through.
+    // PARTIAL FLIP (ENGINE-ARC §4, was HONEST GAP P0b): PermissionSetGroup
+    // ASSIGNMENT is now answerable live per group — sfi.live_permset_holders
+    // (kind:'permissionSetGroup') returns the true holder count and roster for
+    // a NAMED PSG, so "is PSG X assigned to nobody" is a live zero-holder
+    // check. What is still unbuilt is an enumerate-ALL mode (vault PSG list
+    // minus a live GROUP BY PermissionSetGroupId sweep in one call) — the gap
+    // note is DOWNGRADED to that partial until Deferred-2 ships. Must sit
+    // AFTER unassigned-permsets: the lookahead above already refuses
+    // "permission set groups", so this rule catches it on the fall-through.
     intent: 'unassigned-permset-groups',
-    plane: 'vault',
-    tools: [],
-    liveRequired: false,
+    plane: 'live',
+    tools: ['sfi.live_permset_holders'],
+    liveRequired: true,
     needsResolve: false,
-    reason: 'Permission set group assignments are not yet modeled — capability gap.',
+    reason:
+      'Whether a permission set group is assigned to anyone is runtime PermissionSetAssignment state: live_permset_holders (kind: permissionSetGroup) returns the true holder count per named PSG.',
     gap: {
       category: 'unassigned-permset-groups',
-      note: 'PermissionSetGroup assignment modeling is not built yet. Use sfi.resolve and manual search until a dedicated tool is available; do not substitute unassigned_permission_sets, which covers PermissionSet only.',
+      note: 'Partial: live_permset_holders checks ONE named permission set group at a time (a zero effectiveTotal = unassigned). A single-call sweep of ALL PSGs is not built yet — enumerate the vault PSG list first, then check candidates live. Do not substitute unassigned_permission_sets, which covers PermissionSet only.',
     },
+    suggestArgs: () => ({ kind: 'permissionSetGroup' }),
     patterns: [
       /\b(unassigned|unused|empty)\b[^.?!]{0,40}\bpermission\s+set\s+groups?\b/,
       /\bpermission\s+set\s+groups?\b[^.?!]{0,40}\b(no\s+one|nobody|unassigned|unused|assigned\s+to\s+nobody)\b/,
     ],
   },
   {
-    // HONEST GAP (eval family D): "which USERS have permission set X" is a
-    // holder ROSTER — PermissionSetAssignment is runtime assignment data the
-    // vault does not model, and no live tool answers it yet.
-    // effective_permissions / object_access_audit describe what a permission
-    // set GRANTS, not who HOLDS it, so substituting them would be confidently
-    // wrong. Mirrors the unassigned-permset-groups gap above. The reverse
-    // direction ("what permission sets does user X have") stays on
-    // effective-permissions via first-match.
+    // FULL FLIP (ENGINE-ARC §4, was HONEST GAP eval family D): "which USERS
+    // have permission set X" is a holder ROSTER — PermissionSetAssignment is
+    // runtime assignment data the vault does not model, and it is now answered
+    // LIVE by sfi.live_permset_holders (kinds permissionSet | permissionSetGroup
+    // | profile | auto; PSG-trap-aware: direct holders vs via-group holders,
+    // deduped effectiveTotal). The gap block is DELETED. The
+    // do-not-substitute warning stays in `reason`: effective_permissions /
+    // object_access_audit describe what a permission set GRANTS, not who HOLDS
+    // it. The reverse direction ("what permission sets does user X have") is
+    // the user-permset-holdings arm (live_user_permsets).
     intent: 'permset-user-roster',
-    plane: 'vault',
-    tools: [],
-    liveRequired: false,
+    plane: 'live',
+    tools: ['sfi.live_permset_holders'],
+    liveRequired: true,
     needsResolve: false,
-    reason: 'Which users hold a permission set (PermissionSetAssignment) is not modeled — capability gap.',
-    gap: {
-      category: 'permset-user-roster',
-      note: 'PermissionSetAssignment modeling is not built yet, so "which users have permission set X" cannot be answered. Do not substitute effective_permissions or object_access_audit — they describe what a permission set GRANTS, not who holds it.',
-    },
+    reason:
+      'Which users hold a permission set is runtime PermissionSetAssignment state: live_permset_holders lists the roster live, including holders via permission set groups. Do not substitute effective_permissions or object_access_audit — they describe what a permission set GRANTS, not who holds it.',
     patterns: [
-      /\b(which|what|list)\s+users?\b[^.?!]{0,40}\b(have|hold|with|assigned)\b[^.?!]{0,40}\bpermission\s+sets?\b/,
-      /\bwho\s+(has|holds|is\s+assigned)\b[^.?!]{0,50}\bpermission\s+sets?\b/,
-      /\b(everyone|everybody|all\s+users?)\b[^.?!]{0,30}\bwith\b[^.?!]{0,40}\bpermission\s+sets?\b/,
-      /\busers?\b[^.?!]{0,30}\bassigned\b[^.?!]{0,30}\bpermission\s+sets?\b/,
+      // "perm set(s)" / "permset(s)" ride along with the full "permission
+      // set(s)" spelling — q1213 ("who has the View_Fraud_Score_Component
+      // perm set", the design doc's grounding miss) uses the abbreviation,
+      // and the user-permset-holdings arm above already accepts it.
+      /\b(which|what|list)\s+users?\b[^.?!]{0,40}\b(have|hold|with|assigned)\b[^.?!]{0,40}\b(?:permission\s+sets?|perm\s+sets?|permsets?)\b/,
+      /\bwho\s+(has|holds|is\s+assigned)\b[^.?!]{0,50}\b(?:permission\s+sets?|perm\s+sets?|permsets?)\b/,
+      /\b(everyone|everybody|all\s+users?)\b[^.?!]{0,30}\bwith\b[^.?!]{0,40}\b(?:permission\s+sets?|perm\s+sets?|permsets?)\b/,
+      /\busers?\b[^.?!]{0,30}\bassigned\b[^.?!]{0,30}\b(?:permission\s+sets?|perm\s+sets?|permsets?)\b/,
     ],
   },
   {
-    // HONEST GAP (round-2, q1948/q1559): "which PSG grants the X custom
-    // permission / the Y role" is a PermissionSetGroup COMPOSITION lookup —
-    // PSG membership/composition is not modeled (same boundary as the two PSG
-    // gaps above), and roles are not granted by PSGs at all, so substituting
-    // object_access_audit / effective_permissions would be confidently wrong.
-    // Requires the GROUP noun: "which permission SETS grant edit on X" (no
-    // `group`) stays on the real field/effective-permissions routes.
+    // PARTIAL FLIP (ENGINE-ARC §4, was HONEST GAP round-2 q1948/q1559):
+    // "which PSG grants the X custom permission / the Y role" is a
+    // PermissionSetGroup COMPOSITION lookup. live_permset_holders now surfaces
+    // PSG composition live via PermissionSetGroupComponent (probing a
+    // permission SET reports which PSGs contain it), so the roster/containment
+    // half is answerable. The 2-hop chain "which PSG grants custom permission
+    // X" (custom permission → permission set → PSG, q1916) remains an honest
+    // gap — the slimmed note below keeps it — and roles are not granted by
+    // PSGs at all, so substituting object_access_audit / effective_permissions
+    // would still be confidently wrong. Requires the GROUP noun: "which
+    // permission SETS grant edit on X" (no `group`) stays on the real
+    // field/effective-permissions routes.
     intent: 'permset-group-grants',
-    plane: 'vault',
-    tools: [],
-    liveRequired: false,
+    plane: 'live',
+    tools: ['sfi.live_permset_holders'],
+    liveRequired: true,
     needsResolve: false,
     reason:
-      'Which permission set group grants a permission (PermissionSetGroup composition) is not modeled — capability gap.',
+      'PSG composition is runtime state: live_permset_holders reads PermissionSetGroupComponent live (probe the permission SET to see which PSGs contain it). Roles are never granted by PSGs.',
     gap: {
       category: 'permset-group-grants',
-      note: 'PermissionSetGroup composition/membership modeling is not built yet, so "which PSG grants X" cannot be answered. Do not substitute effective_permissions or object_access_audit — they cover permission sets and profiles, not PSG composition. (If X is a custom permission, sfi.resolve + the permission-set reverse lookup covers PERMISSION SETS granting it.)',
+      note: 'Partial: live_permset_holders surfaces which PSGs CONTAIN a given permission set (PermissionSetGroupComponent). The 2-hop chain "which PSG grants custom permission X" (custom permission → permission set → PSG) is still unbuilt — resolve the custom permission to its granting permission sets in the vault first, then probe each set live. Do not substitute effective_permissions or object_access_audit for the PSG-composition step.',
     },
     patterns: [
       // Tempered verb→grants gap: "which permission set groups REFERENCE a
@@ -2615,11 +2744,17 @@ const RULES: readonly Rule[] = [
   },
   {
     intent: 'empty-queues-groups',
-    plane: 'vault',
-    tools: ['sfi.empty_queues_and_groups'],
+    // ENGINE-ARC §4: vault scan stays PRIMARY; sfi.live_group_members is
+    // appended as the optional runtime-verification secondary (declared
+    // metadata can drift from runtime GroupMember rows — the live tool
+    // measures that drift per queue/group). Hybrid like unused-fields:
+    // liveRequired stays false, the vault half answers alone.
+    plane: 'hybrid',
+    tools: ['sfi.empty_queues_and_groups', 'sfi.live_group_members'],
     liveRequired: false,
     needsResolve: false,
-    reason: 'Queues / public groups with no members — vault membership scan.',
+    reason:
+      'Queues / public groups with no members — vault membership scan first; live_group_members optionally verifies a candidate against runtime GroupMember rows (declared metadata can drift).',
     patterns: [
       /\b(empty|unused)\b.*\b(queues?|groups?)\b/,
       /\b(queues?|public\s+groups?)\b.*\b(empty|no\s+members?|unused)\b/,

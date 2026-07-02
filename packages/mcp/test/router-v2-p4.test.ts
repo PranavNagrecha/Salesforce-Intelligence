@@ -309,7 +309,9 @@ describe('router-v2 P4 — needs-live questions reach the live plane', () => {
     ['whats the fill rate on Status__c on Application', 'field-population'],
     ['how many opportunities have a blank Amount', 'field-population'],
     ['Which users logged into the org in the last week?', 'inactive-users'],
-    ['whos in the Intake Team Queue', 'group-count'],
+    // ENGINE-ARC §4: "who's in the X queue" retargeted from the generic
+    // group-count GROUP BY to the dedicated live_group_members roster arm.
+    ['whos in the Intake Team Queue', 'queue-group-member-roster'],
     ['which picklist values on Case.Status are never used', 'picklist-usage'],
     ['Give me the distribution of Case.Status values across all Cases.', 'picklist-usage'],
     ['whats the most common Resolution_Code__c on closed Cases', 'picklist-usage'],
@@ -337,14 +339,23 @@ describe('router-v2 P4 — needs-live questions reach the live plane', () => {
     ['how many custom objects do we have', 'metadata-count'],
     // Schema-redundancy "duplicated fields" is NOT a live duplicate scan.
     ['which fields on Contact are duplicated - same data stored twice', 'schema'],
-    // Metadata "empty queues" inventory is NOT a live field-population read.
-    ['how many queues are empty with no members', 'empty-queues-groups'],
   ];
 
   it.each(VAULT_NOT_HIJACKED)('%s stays %s on the vault plane', (q, intent) => {
     const route = classifyQuestion(q);
     expect(route.intent).toBe(intent);
     expect(route.plane).toBe('vault');
+    expect(route.liveRequired).toBe(false);
+  });
+
+  it('metadata "empty queues" inventory keeps the vault scan primary (live never REQUIRED)', () => {
+    // ENGINE-ARC §4: the arm is hybrid now — empty_queues_and_groups stays the
+    // primary vault answer; live_group_members is an OPTIONAL runtime
+    // verification secondary. The not-hijacked spirit is unchanged: the
+    // question is answerable offline (liveRequired false, vault tool first).
+    const route = classifyQuestion('how many queues are empty with no members');
+    expect(route.intent).toBe('empty-queues-groups');
+    expect(route.tools[0]).toBe('sfi.empty_queues_and_groups');
     expect(route.liveRequired).toBe(false);
   });
 });

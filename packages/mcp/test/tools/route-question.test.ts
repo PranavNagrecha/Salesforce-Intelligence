@@ -1402,15 +1402,17 @@ describe('classifyQuestion — PSG expansion vs the R2 PSG gaps (R3)', () => {
     expect(r.intent).not.toBe('permset-user-roster');
   });
 
-  it('"which PSG grants the <custom permission>" STAYS gapped', () => {
+  it('"which PSG grants the <custom permission>" routes live with the 2-hop gap disclosed (ENGINE-ARC §4 partial flip)', () => {
     const r = classifyQuestion('Which PSG grants the ZorpFullAccess custom permission?');
     expect(r.intent).toBe('permset-group-grants');
-    expect(r.tools).toEqual([]);
+    expect(r.tools).toEqual(['sfi.live_permset_holders']);
+    expect(r.gap).not.toBeNull();
   });
 
-  it('"which users hold the <perm set>" STAYS gapped (membership roster)', () => {
+  it('"which users hold the <perm set>" routes to the LIVE holder roster (ENGINE-ARC §4 full flip)', () => {
     const r = classifyQuestion('which users hold the Zorp_Admin permission set?');
     expect(r.intent).toBe('permset-user-roster');
-    expect(r.tools).toEqual([]);
+    expect(r.tools).toEqual(['sfi.live_permset_holders']);
+    expect(r.gap).toBeNull();
   });
 });

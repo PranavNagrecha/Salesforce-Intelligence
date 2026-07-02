@@ -49,6 +49,11 @@ import {
 } from '../history-store.js';
 import type { Context } from '../server.js';
 
+import {
+  buildAssignmentDataCoverage,
+  type AssignmentDataCoverage,
+} from './coverage-report.js';
+
 /**
  * Age (in whole days) at or above which `health_check` flags the vault as
  * `stale` and emits a freshness nudge. Picked at 7 so a vault refreshed
@@ -71,6 +76,15 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
  * files; thousands of FSL Industries files) reliably do.
  */
 const SKIPPED_FILES_DEGRADED_THRESHOLD = 100;
+
+/**
+ * Age (in whole days) at or above which an EXISTING assignment-data facts
+ * capture (`sfi refresh --with-data-shape`) earns a re-capture advisory in the
+ * informational `assignmentData` block. Advisory only — assignment data is
+ * live-first BY DESIGN (ENGINE-ARC §6), so neither a missing nor a stale
+ * capture ever degrades `status`.
+ */
+const STALE_FACTS_ADVISORY_DAYS = 30;
 
 /**
  * Zod schema for the `sfi.health_check` tool input. The tool takes no
@@ -141,6 +155,17 @@ export interface HealthCheckOutput {
   readonly vaultHistory: {
     readonly enabled: boolean;
     readonly enableHint: string | null;
+  };
+  /**
+   * ENGINE-ARC §6 — runtime assignment data (User / PermissionSetAssignment /
+   * GroupMember). INFORMATIONAL ONLY: assignment data is excluded from the
+   * vault by design (live-first), so its absence is not a retrieval failure
+   * and MUST NOT degrade `status`. `advisory` carries a stale-facts (>30d)
+   * re-capture nudge when a counts snapshot exists but has aged — advisory,
+   * never an `issues[]` entry (issues flip `status` to degraded).
+   */
+  readonly assignmentData: AssignmentDataCoverage & {
+    readonly advisory: string | null;
   };
 }
 
@@ -462,6 +487,25 @@ export const healthCheckHandler = async (
 
   const vaultHistoryEnabled = existsSync(join(ctx.vaultRoot, '.git'));
 
+  // ENGINE-ARC §6 — informational assignment-data block. Computed AFTER
+  // `status` is derived so it can never influence the verdict: missing
+  // assignment data is by-design (live-first), not a retrieval failure.
+  const assignmentBase = await buildAssignmentDataCoverage(ctx);
+  let assignmentAdvisory: string | null = null;
+  if (assignmentBase.factsCounts.present && assignmentBase.factsCounts.capturedAt !== null) {
+    const capturedMs = Date.parse(assignmentBase.factsCounts.capturedAt);
+    const factsAgeDays = Number.isNaN(capturedMs)
+      ? null
+      : Math.max(0, Math.floor((now - capturedMs) / MS_PER_DAY));
+    if (factsAgeDays !== null && factsAgeDays >= STALE_FACTS_ADVISORY_DAYS) {
+      assignmentAdvisory =
+        `Assignment-data counts snapshot is ${factsAgeDays} days old (captured ${assignmentBase.factsCounts.capturedAt}); ` +
+        'holder counts quoted from it may be stale — re-run `sfi refresh --with-data-shape`, ' +
+        'or use the live tools for current rosters.';
+    }
+  }
+  const assignmentData = { ...assignmentBase, advisory: assignmentAdvisory };
+
   return ok({
     data: {
       status,
@@ -469,6 +513,7 @@ export const healthCheckHandler = async (
       checks,
       coverage,
       freshness,
+      assignmentData,
       vaultHistory: {
         enabled: vaultHistoryEnabled,
         enableHint: vaultHistoryEnabled

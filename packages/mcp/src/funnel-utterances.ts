@@ -435,6 +435,58 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'which license types do we have and how many are used?',
     'how many Salesforce licenses are actually being used vs assigned?',
   ],
+  // ENGINE-ARC §2a — assignment rosters (holders of a grantor). Vocabulary is
+  // the HOLDER direction (who has / assigned to / roster / everyone with);
+  // the GRANTS direction ("which permission sets grant edit on X") stays owned
+  // by sfi.effective_permissions — do not add grants-phrasings here.
+  'sfi.live_permset_holders': [
+    'who has the <PermSet> permission set?',
+    'list everyone assigned the <PermSet> permission set',
+    'which users hold the <PermSetGroup> permission set group?',
+    'show me the roster of users with the <PermSet> permission set',
+    'how many users are assigned <PermSet> right now — directly or through a group?',
+    'name-by-name list of users with the <Profile> profile',
+    'which users are in the <PermSetGroup> permission set group?',
+    'who holds <PermSet>, including via permission set groups?',
+    'all users assigned the System Administrator profile',
+    'holder count for the <PermSet> permission set — I need it for an audit',
+  ],
+  // ENGINE-ARC §2c — the perm-set-less sweep (anti-join). Dormancy-only
+  // phrasings ("who hasn't logged in") stay owned by sfi.live_inactive_users.
+  'sfi.live_zombie_accounts': [
+    'which active users have no permission sets assigned?',
+    'find zombie accounts — login access but zero permission sets',
+    'users who can log in but have no permission set assignments',
+    'which users have nothing assigned beyond their profile?',
+    'active accounts with zero permission set or group assignments',
+    'audit accounts that can still log in but hold no perm sets',
+  ],
+  // ENGINE-ARC §2b — runtime queue/public-group membership. "Which queues are
+  // EMPTY" (hygiene sweep over declared metadata) stays owned by
+  // sfi.empty_queues_and_groups; this family is the who's-in-it roster.
+  'sfi.live_group_members': [
+    "who's in the <QueueName> queue right now?",
+    'list the members of the <GroupName> public group',
+    'which users are in the Support queue?',
+    'show me the current membership of the <QueueName> queue',
+    'can the <QueueName> queue own Case records?',
+    'what objects does the <QueueName> queue support?',
+    'members of the <GroupName> group — including any nested groups or roles',
+    'who is actually in this queue in the live org, not the vault snapshot?',
+  ],
+  // ENGINE-ARC §3 — reverse direction: what a named USER holds. The GRANTS
+  // direction ("what can <Profile> do", "expand the <PermSetGroup>") stays
+  // owned by sfi.effective_permissions; this family is user → grantors.
+  'sfi.live_user_permsets': [
+    'what permission sets does <UserName> have?',
+    'which permission sets is <UserName> assigned right now?',
+    "list <UserName>'s permission set and permission set group assignments",
+    'what does the user <UserName> hold — direct sets and via groups?',
+    'which permission set groups is <UserName> a member of?',
+    'show me every permission set assigned to <UserName>, with expirations',
+    'does <UserName> have any expiring permission set assignments?',
+    'what perm sets is jane.doe@example.com assigned in the live org?',
+  ],
   'sfi.live_consent': [
     'which Contacts have opted out of email?',
     'show me consent status for marketing contacts',
@@ -595,9 +647,13 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'effective read/write/delete access for <Profile> on Order',
     // R3 PSG-expansion band (DIAGNOSIS-R3 permissions family): what a member
     // of a permission set GROUP ends up with — effective_permissions expands
-    // PSGs (verified). The genuinely-unanswerable directions stay gapped:
-    // "which USERS are in the group" (permset-user-roster) and "which PSG
-    // grants X" (permset-group-grants) are capability-gap intents, untouched.
+    // PSGs (verified). "Which USERS are in the group / hold the set"
+    // (permset-user-roster) is now answered LIVE by sfi.live_permset_holders
+    // (ENGINE-ARC §2a) — that tool owns the holder-roster vocabulary.
+    // permset-group-grants is a PARTIAL live flip (§4): live_permset_holders
+    // surfaces PSG containment via PermissionSetGroupComponent, while the
+    // 2-hop "which PSG grants custom permission X" chain stays an honest gap
+    // note on that intent.
     'what does a user get through the <PermSetGroup> permission set group?',
     'expand the <PermSetGroup> permission set group — every permission a member ends up with',
     'if someone is assigned the <PermSetGroup> permission set group, do they automatically get <CustomPermission>?',

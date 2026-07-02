@@ -44,6 +44,36 @@ import {
   routeQuestionHandler,
   type RouteQuestionInput,
 } from '../src/tools/route-question.js';
+import {
+  PERMSET_INTERSECTION_NOT_AVAILABLE,
+  SHARING_USER_ENUMERATION_NOT_AVAILABLE,
+  USER_ASSIGNMENT_NOT_IN_VAULT,
+} from '../src/tools/vault-assignment-disclosure.js';
+
+// ---------------------------------------------------------------------------
+// ENGINE-ARC §4 — the OFFLINE vault-side assignment disclosures must name the
+// CONCRETE live tools (judge-consumed verbatim), not a generic "run the live
+// org plane" pointer. An offline ask without live consent still gets an
+// honest, actionable boundary.
+// ---------------------------------------------------------------------------
+
+describe('vault assignment disclosures name the live answer path (ENGINE-ARC §4)', () => {
+  it('USER_ASSIGNMENT_NOT_IN_VAULT names all three roster tools', () => {
+    expect(USER_ASSIGNMENT_NOT_IN_VAULT).toContain('sfi.live_permset_holders');
+    expect(USER_ASSIGNMENT_NOT_IN_VAULT).toContain('sfi.live_group_members');
+    expect(USER_ASSIGNMENT_NOT_IN_VAULT).toContain('sfi.live_user_permsets');
+    expect(USER_ASSIGNMENT_NOT_IN_VAULT).toContain('read-only');
+    expect(USER_ASSIGNMENT_NOT_IN_VAULT).toContain('consent-gated');
+    // The offline boundary statement itself is unchanged — still honest first.
+    expect(USER_ASSIGNMENT_NOT_IN_VAULT).toContain('cannot be answered offline');
+  });
+  it('PERMSET_INTERSECTION_NOT_AVAILABLE names live_permset_holders', () => {
+    expect(PERMSET_INTERSECTION_NOT_AVAILABLE).toContain('sfi.live_permset_holders');
+  });
+  it('SHARING_USER_ENUMERATION_NOT_AVAILABLE names live_group_members', () => {
+    expect(SHARING_USER_ENUMERATION_NOT_AVAILABLE).toContain('sfi.live_group_members');
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Seam 1 — runtime-analytics honest-gap arms (score-independent, stage 0).
@@ -179,17 +209,23 @@ describe('seam 3 — privilege-escalation injection arm', () => {
 // Seam 3c — PSG-composition capability gap (q1948/q1559 shapes).
 // ---------------------------------------------------------------------------
 
-describe('seam 3 — permset-group-grants capability gap', () => {
-  it('gaps "Which PSG grants the <custom permission>?" (q1948)', () => {
+describe('seam 3 — permset-group-grants (ENGINE-ARC §4 PARTIAL flip: live containment, honest 2-hop gap)', () => {
+  it('routes "Which PSG grants the <custom permission>?" live, 2-hop chain still disclosed (q1948)', () => {
     const route = classifyQuestion('Which PSG grants the FullAccessOverride custom permission?');
     expect(route.intent).toBe('permset-group-grants');
-    expect(route.tools).toEqual([]);
+    // live_permset_holders surfaces PSG containment (PermissionSetGroupComponent);
+    // the 2-hop custom-permission→set→PSG chain stays an honest gap NOTE.
+    expect(route.tools).toEqual(['sfi.live_permset_holders']);
     expect(route.gap?.category).toBe('permset-group-grants');
+    expect(route.gap?.note).toMatch(/2-hop/);
   });
-  it('gaps "Which permission set group grants the <role>?" (q1559)', () => {
+  it('routes "Which permission set group grants the <role>?" the same way (q1559)', () => {
     const route = classifyQuestion('Which permission set group grants the Registrar role?');
     expect(route.intent).toBe('permset-group-grants');
-    expect(route.tools).toEqual([]);
+    expect(route.tools).toEqual(['sfi.live_permset_holders']);
+    expect(route.gap).not.toBeNull();
+    // Roles are never granted by PSGs — the reason keeps saying so.
+    expect(route.reason).toMatch(/Roles are never granted/);
   });
   it('does NOT gap the PSG→permset REFERENCE read (q1916, answerable)', () => {
     const route = classifyQuestion(

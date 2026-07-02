@@ -10,9 +10,11 @@ import type {
   VaultManifest,
 } from '@sf-intelligence/contracts';
 import {
+  ACTIVE_HOLDERS_COMPLETE_SUBJECT,
   closeGraph,
   importExtractionResults,
   openGraph,
+  writeFacts,
   type GraphStore,
 } from '@sf-intelligence/graph';
 import { computeSourceTreeHash } from '@sf-intelligence/vault';
@@ -723,5 +725,120 @@ describe('healthCheckHandler: partially-rendered vault (graph/vault desync)', ()
     if (!result.ok) return;
     expect(result.value.data.checks.graphReadable).toBe(true);
     expect(result.value.data.checks.sourceHashMatches).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ENGINE-ARC §6 — the informational assignmentData block: runtime assignment
+// data is live-first BY DESIGN, so it never degrades status.
+// ---------------------------------------------------------------------------
+
+describe('healthCheckHandler: assignmentData block (informational only)', () => {
+  let vaultRoot: string;
+  let store: GraphStore;
+  let ctx: Context;
+  const savedConsent = process.env['SFI_CONSENT_PATH'];
+  const savedLive = process.env['SFI_LIVE_PLANE_ENABLED'];
+
+  beforeAll(async () => {
+    process.env['SFI_CONSENT_PATH'] = '/tmp/sfi-nonexistent-consent/none.json';
+    delete process.env['SFI_LIVE_PLANE_ENABLED'];
+    vaultRoot = await mkdtemp(join(tmpdir(), 'sfi-mcp-health-assign-'));
+    const realHash = await seedSourceTree(vaultRoot);
+    const built = await openContext(vaultRoot, baseManifest(realHash));
+    ctx = built.ctx;
+    store = built.store;
+  });
+
+  afterAll(async () => {
+    if (savedConsent === undefined) delete process.env['SFI_CONSENT_PATH'];
+    else process.env['SFI_CONSENT_PATH'] = savedConsent;
+    if (savedLive === undefined) delete process.env['SFI_LIVE_PLANE_ENABLED'];
+    else process.env['SFI_LIVE_PLANE_ENABLED'] = savedLive;
+    await closeGraph(store);
+    await rm(vaultRoot, { recursive: true, force: true });
+  });
+
+  it('carries the block without degrading status — missing assignment data is by-design', async () => {
+    const result = await healthCheckHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    // The vault has NO assignment data and NO facts capture — and the verdict
+    // must still be healthy, with zero issues. Not a retrieval failure.
+    expect(result.value.data.status).toBe('healthy');
+    expect(result.value.data.issues).toEqual([]);
+
+    const ad = result.value.data.assignmentData;
+    expect(ad.vaultModeled).toBe(false);
+    expect(ad.reason).toBe('runtime data object — by design, not a retrieve gap');
+    expect(ad.liveTools).toEqual([
+      'sfi.live_permset_holders',
+      'sfi.live_user_permsets',
+      'sfi.live_group_members',
+      'sfi.live_zombie_accounts',
+    ]);
+    expect(ad.factsCounts).toEqual({ present: false, capturedAt: null });
+    // No capture at all → no stale-facts advisory (absence is not staleness).
+    expect(ad.advisory).toBeNull();
+  });
+});
+
+describe('healthCheckHandler: stale assignment-facts advisory (>30d, advisory only)', () => {
+  let vaultRoot: string;
+  let store: GraphStore;
+  let ctx: Context;
+  const savedConsent = process.env['SFI_CONSENT_PATH'];
+
+  beforeAll(async () => {
+    process.env['SFI_CONSENT_PATH'] = '/tmp/sfi-nonexistent-consent/none.json';
+    vaultRoot = await mkdtemp(join(tmpdir(), 'sfi-mcp-health-facts-'));
+    const realHash = await seedSourceTree(vaultRoot);
+    const built = await openContext(vaultRoot, baseManifest(realHash));
+    ctx = built.ctx;
+    store = built.store;
+    // Seed a COMPLETE counts capture 40 days before the injected `now`.
+    const wrote = await writeFacts(store, [
+      {
+        subjectId: ACTIVE_HOLDERS_COMPLETE_SUBJECT,
+        metric: 'activeHolders',
+        value: { complete: true },
+        capturedAt: '2026-05-23T00:00:00.000Z',
+        method: 'aggregate-soql',
+        source: 'refresh-with-data-shape',
+      },
+    ]);
+    if (!wrote.ok) throw new Error(`writeFacts failed: ${wrote.error.message}`);
+  });
+
+  afterAll(async () => {
+    if (savedConsent === undefined) delete process.env['SFI_CONSENT_PATH'];
+    else process.env['SFI_CONSENT_PATH'] = savedConsent;
+    await closeGraph(store);
+    await rm(vaultRoot, { recursive: true, force: true });
+  });
+
+  it('emits the re-capture advisory without touching status or issues', async () => {
+    const now = Date.parse('2026-07-02T00:00:00.000Z'); // 40 days after capture
+    const result = await healthCheckHandler(ctx, {}, now);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const ad = result.value.data.assignmentData;
+    expect(ad.factsCounts.present).toBe(true);
+    expect(ad.factsCounts.capturedAt).toBe('2026-05-23T00:00:00.000Z');
+    expect(ad.advisory).toContain('40 days old');
+    expect(ad.advisory).toContain('--with-data-shape');
+    // Advisory ONLY: the stale snapshot must not appear in issues[] (which
+    // would flip status to degraded) — assignment data is live-first.
+    expect(result.value.data.issues.join(' ')).not.toContain('--with-data-shape');
+  });
+
+  it('stays silent when the capture is fresh (<30d)', async () => {
+    const now = Date.parse('2026-06-01T00:00:00.000Z'); // 9 days after capture
+    const result = await healthCheckHandler(ctx, {}, now);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.assignmentData.advisory).toBeNull();
   });
 });

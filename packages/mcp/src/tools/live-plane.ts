@@ -3028,3 +3028,1614 @@ export const liveSecurityExposureHandler = async (
     vaultState: livePlaneVaultState(ctx),
   });
 };
+
+// ---------------------------------------------------------------------------
+// sfi.live_permset_holders — WHO HOLDS permission set / PSG / profile X
+// ---------------------------------------------------------------------------
+//
+// ENGINE-ARC §2a. Assignment rosters are runtime state (PermissionSetAssignment
+// / User rows), deliberately absent from the vault (the facts PII pin keeps the
+// vault to counts only), so "who has the X permission set" is inherently a
+// live-plane capability. Three kinds behind one contract:
+//   - permissionSet      → PSA rows, direct AND via permission set groups
+//   - permissionSetGroup → PSA rows assigned through the group
+//   - profile            → User rows (the profile-roster gap, finally answered
+//                          name-by-name)
+//
+// THE PSG TRAP (the classic wrong answer): direct holders of set X
+// (`PermissionSetId = :id AND PermissionSetGroupId = null`) MISS every user who
+// receives X through a PermissionSetGroup containing X. With the default
+// `includeViaGroups: true` the handler queries PermissionSetGroupComponent for
+// the groups containing X, then PSA rows assigned via those groups, and reports
+// `directHolders` / `viaGroupHolders` / deduped `effectiveTotal` separately.
+// This separation is pinned by test — it is what makes the tool audit-grade
+// instead of confidently wrong.
+
+const MAX_HOLDER_ROWS = 500;
+const DEFAULT_HOLDER_ROWS = 100;
+/** Keep the serialized `data` (structured rows + rendered table) under the
+ *  global MAX_RESPONSE_BYTES (~45 KB) guard, with headroom for the wrapper. */
+const HOLDERS_BYTE_BUDGET = 36_000;
+const MAX_HOLDER_BUCKETS = 50;
+
+/** Verbatim disclosure (ENGINE-ARC §2a) — tool description + rendered footer. */
+export const PERMSET_HOLDERS_DISCLOSURE =
+  'Read-only; point-in-time as of queriedAt — never cached beyond the live-session TTL; roster is CURRENT org state, unlike vault answers.';
+
+export const livePermsetHoldersInputSchema = liveEnabledSchema.extend({
+  /** PermissionSet.Name / PSG DeveloperName / Profile.Name (labels accepted). */
+  name: z.string().min(1),
+  /** What `name` names. Default 'auto': probe PermissionSet → PermissionSetGroup
+   *  → Profile by exact name/label; no-match or ambiguity is an honest error,
+   *  never a guess. */
+  kind: z.enum(['permissionSet', 'permissionSetGroup', 'profile', 'auto']).optional(),
+  /** Include inactive assignees (default false — active users only). */
+  includeInactiveAssignees: z.boolean().optional(),
+  /** For kind 'permissionSet': also count holders who receive the set through a
+   *  PermissionSetGroup containing it (default TRUE — see the PSG trap above). */
+  includeViaGroups: z.boolean().optional(),
+  /** Aggregation buckets for the headline (default 'profile'). */
+  groupBy: z.enum(['none', 'profile']).optional(),
+  /** Max detail rows (default 100, hard cap 500); a ~36 KB byte budget may trim
+   *  the page further. `totalAssignees` is always the TRUE deduped count. */
+  limit: z.number().int().min(1).max(MAX_HOLDER_ROWS).optional(),
+  /** Keyset paging: return rows with Id > afterId (use `nextAfterId`). */
+  afterId: z.string().optional(),
+  orgAlias: z.string().min(1).optional(),
+});
+
+export type LivePermsetHoldersInput = z.infer<typeof livePermsetHoldersInputSchema>;
+
+export type PermsetHolderKind = 'permissionSet' | 'permissionSetGroup' | 'profile';
+
+/** One holder. For kind 'profile' the rows are User rows (`assignmentId` null);
+ *  otherwise PermissionSetAssignment rows. `viaGroup` names the PSG the holder
+ *  received the set through (null = direct assignment). */
+export interface PermsetHolder {
+  readonly assignmentId: string | null;
+  readonly userId: string;
+  readonly name: string;
+  readonly username: string;
+  readonly isActive: boolean;
+  readonly profileName: string | null;
+  readonly expirationDate: string | null;
+  readonly viaGroup: string | null;
+}
+
+export interface ViaGroupHolders {
+  readonly groupName: string;
+  readonly holders: readonly PermsetHolder[];
+}
+
+export interface HolderProfileBucket {
+  readonly profileId: string | null;
+  readonly profileName: string | null;
+  readonly holders: number;
+}
+
+export interface LivePermsetHoldersOutput {
+  readonly target: {
+    readonly kind: PermsetHolderKind;
+    readonly name: string;
+    readonly id: string;
+  };
+  /** TRUE deduped count of matching assignees (COUNT_DISTINCT AssigneeId), never
+   *  understated by row caps or byte trimming. */
+  readonly totalAssignees: number;
+  readonly activeAssignees: number;
+  /** PSA rows excluded because ExpirationDate has passed (0 for kind 'profile'). */
+  readonly expiredExcluded: number;
+  readonly returned: number;
+  readonly capped: boolean;
+  /** Keyset token: pass as `afterId` to fetch the next page. */
+  readonly nextAfterId?: string;
+  readonly buckets?: readonly HolderProfileBucket[];
+  readonly directHolders: readonly PermsetHolder[];
+  readonly viaGroupHolders?: readonly ViaGroupHolders[];
+  readonly trust: TrustSummary;
+  readonly rendered: string;
+  readonly note?: string;
+}
+
+interface ResolvedHolderTarget {
+  readonly kind: PermsetHolderKind;
+  readonly id: string;
+  readonly name: string;
+}
+
+interface PsaRow {
+  readonly Id?: string;
+  readonly AssigneeId?: string;
+  readonly ExpirationDate?: string | null;
+  readonly PermissionSetGroupId?: string | null;
+  readonly PermissionSetGroup?: { readonly DeveloperName?: string } | null;
+  readonly Assignee?: {
+    readonly Name?: string;
+    readonly Username?: string;
+    readonly IsActive?: boolean;
+    readonly Profile?: { readonly Name?: string } | null;
+  } | null;
+}
+
+interface HolderUserRow {
+  readonly Id?: string;
+  readonly Name?: string;
+  readonly Username?: string;
+  readonly IsActive?: boolean;
+  readonly Profile?: { readonly Name?: string } | null;
+}
+
+const holderNotFoundError = (name: string, probed: readonly string[]): McpError => ({
+  kind: 'component-not-found',
+  message:
+    `No exact match for '${name}' — probed ${probed.join(', ')} by exact name/label ` +
+    `in the live org. Check the API name (sfi.resolve can fix typos against the vault), ` +
+    `or pass \`kind\` explicitly.`,
+});
+
+const holderAmbiguousError = (name: string, kind: string, count: number): McpError => ({
+  kind: 'invalid-query',
+  message:
+    `'${name}' matches ${count}+ ${kind} records in the live org — refusing to guess. ` +
+    `Use the exact API name (Name/DeveloperName), not a label shared by several.`,
+});
+
+/** Probe PermissionSet → PermissionSetGroup → Profile (or just the explicit
+ *  kind) by EXACT name/label. 1–3 budgeted queries; never guesses. */
+const resolveHolderTarget = async (
+  org: string,
+  name: string,
+  kind: LivePermsetHoldersInput['kind'],
+  exec: ExecCommand,
+): Promise<Result<ResolvedHolderTarget, McpError>> => {
+  const lit = soqlLiteral(name);
+  const probes: ReadonlyArray<{ kind: PermsetHolderKind; soql: string; nameField: string }> = [
+    {
+      kind: 'permissionSet',
+      // IsOwnedByProfile = false: every Profile owns a system permission set
+      // with a matching name — matching one here would silently answer the
+      // PROFILE question under the permissionSet kind.
+      soql:
+        `SELECT Id, Name FROM PermissionSet ` +
+        `WHERE (Name = ${lit} OR Label = ${lit}) AND IsOwnedByProfile = false LIMIT 2`,
+      nameField: 'Name',
+    },
+    {
+      kind: 'permissionSetGroup',
+      soql:
+        `SELECT Id, DeveloperName FROM PermissionSetGroup ` +
+        `WHERE (DeveloperName = ${lit} OR MasterLabel = ${lit}) LIMIT 2`,
+      nameField: 'DeveloperName',
+    },
+    {
+      kind: 'profile',
+      soql: `SELECT Id, Name FROM Profile WHERE Name = ${lit} LIMIT 2`,
+      nameField: 'Name',
+    },
+  ];
+  const wanted = kind === undefined || kind === 'auto' ? probes : probes.filter((p) => p.kind === kind);
+  const probedKinds: string[] = [];
+  for (const probe of wanted) {
+    probedKinds.push(probe.kind);
+    const q = await liveQuery(org, probe.soql, exec);
+    if (!q.available) {
+      return err({
+        kind: 'invalid-query',
+        message: `Could not probe ${probe.kind} for '${name}': ${redactSecrets(q.reason ?? 'query failed').slice(0, 160)}`,
+      });
+    }
+    if (q.records.length > 1) return err(holderAmbiguousError(name, probe.kind, q.records.length));
+    if (q.records.length === 1) {
+      const row = q.records[0] as Record<string, unknown>;
+      return ok({
+        kind: probe.kind,
+        id: String(row.Id ?? ''),
+        name: String(row[probe.nameField] ?? name),
+      });
+    }
+  }
+  return err(holderNotFoundError(name, probedKinds));
+};
+
+const toPermsetHolder = (r: PsaRow): PermsetHolder => ({
+  assignmentId: String(r.Id ?? ''),
+  userId: String(r.AssigneeId ?? ''),
+  name: String(r.Assignee?.Name ?? ''),
+  username: String(r.Assignee?.Username ?? ''),
+  isActive: r.Assignee?.IsActive === true,
+  profileName: r.Assignee?.Profile?.Name ?? null,
+  expirationDate: r.ExpirationDate ?? null,
+  viaGroup: r.PermissionSetGroupId ? (r.PermissionSetGroup?.DeveloperName ?? r.PermissionSetGroupId) : null,
+});
+
+const renderPermsetHoldersMarkdown = (
+  data: Omit<LivePermsetHoldersOutput, 'rendered' | 'returned' | 'capped'> & {
+    readonly returned: number;
+    readonly capped: boolean;
+  },
+): string => {
+  const kindLabel: Record<PermsetHolderKind, string> = {
+    permissionSet: 'permission set',
+    permissionSetGroup: 'permission set group',
+    profile: 'profile',
+  };
+  const direct = data.directHolders.length;
+  const viaGroups = (data.viaGroupHolders ?? []).reduce((n, g) => n + g.holders.length, 0);
+  const lines: string[] = [
+    `### Holders of ${kindLabel[data.target.kind]} \`${data.target.name}\``,
+    '',
+    `**${data.totalAssignees.toLocaleString('en-US')}** ${data.target.kind === 'profile' ? 'users hold this profile' : 'distinct users hold this'}` +
+      (data.target.kind === 'permissionSet'
+        ? ` (${direct} direct row(s), ${viaGroups} via-group row(s) on this page)`
+        : '') +
+      (data.expiredExcluded > 0 ? `; ${data.expiredExcluded} expired assignment(s) excluded` : '') +
+      '.',
+  ];
+  if (data.buckets !== undefined && data.buckets.length > 0) {
+    lines.push(
+      '',
+      '**By profile**',
+      '',
+      mdTable(
+        ['Profile', 'Holders'],
+        data.buckets.map((b) => [b.profileName ?? b.profileId ?? '(none)', b.holders]),
+      ),
+    );
+  }
+  const holderRows = (holders: readonly PermsetHolder[]) =>
+    mdTable(
+      ['User', 'Username', 'Profile', 'Active', 'Expires'],
+      holders.map((h) => [
+        h.name,
+        h.username,
+        h.profileName ?? '—',
+        h.isActive ? 'yes' : 'no',
+        h.expirationDate ?? '—',
+      ]),
+    );
+  if (data.directHolders.length > 0) {
+    lines.push('', data.target.kind === 'permissionSet' ? '**Direct holders**' : '**Holders**', '', holderRows(data.directHolders));
+  }
+  for (const g of data.viaGroupHolders ?? []) {
+    if (g.holders.length > 0) {
+      lines.push('', `**Via group \`${g.groupName}\`**`, '', holderRows(g.holders));
+    }
+  }
+  if (data.capped) {
+    lines.push(
+      '',
+      `Showing ${data.returned} of ${data.totalAssignees} holder(s)` +
+        (data.nextAfterId !== undefined ? ` — pass \`afterId: "${data.nextAfterId}"\` for the next page.` : '.'),
+    );
+  }
+  lines.push('', PERMSET_HOLDERS_DISCLOSURE, '', renderTrustFooter(data.trust));
+  return lines.join('\n');
+};
+
+/** Parse the single aggregate row of a `SELECT COUNT_DISTINCT(...) alias` query. */
+const aggregateNumber = (records: readonly Record<string, unknown>[], alias: string): number => {
+  const row = records[0];
+  if (row === undefined) return 0;
+  return Number(row[alias] ?? row['expr0'] ?? 0);
+};
+
+export const livePermsetHoldersHandler = async (
+  ctx: Context,
+  input: LivePermsetHoldersInput,
+  exec: ExecCommand = nodeExecFile,
+): Promise<Result<McpResponse<LivePermsetHoldersOutput>, McpError>> => {
+  const gate = await gateLive(ctx, input);
+  if (!gate.ok) return gate;
+  const org = gate.value;
+  const queriedAt = new Date().toISOString();
+  const limit = input.limit ?? DEFAULT_HOLDER_ROWS;
+  const groupBy = input.groupBy ?? 'profile';
+  const includeViaGroups = input.includeViaGroups ?? true;
+  const nowLiteral = soqlDateTime(new Date());
+
+  const resolved = await resolveHolderTarget(org, input.name, input.kind, exec);
+  if (!resolved.ok) return resolved;
+  const target = resolved.value;
+
+  // Keyset paging guard: afterId is interpolated into SOQL — require a plain
+  // Salesforce Id shape so it cannot inject.
+  if (input.afterId !== undefined && !/^[a-zA-Z0-9]{15,18}$/.test(input.afterId)) {
+    return err({
+      kind: 'invalid-query',
+      message: 'afterId must be a Salesforce record Id (the `nextAfterId` from the previous page).',
+      path: 'afterId',
+    });
+  }
+  const afterClause = input.afterId !== undefined ? ` AND Id > '${input.afterId}'` : '';
+
+  if (target.kind === 'profile') {
+    // Profile roster = User rows (no PSA involved). This is the perm-set-less
+    // half of the old profile-user-roster gap, answered name-by-name.
+    const activeClause = input.includeInactiveAssignees ? '' : ' AND IsActive = true';
+    const where = `ProfileId = '${target.id}'${activeClause}`;
+    const totalQ = await liveQuery(org, `SELECT COUNT() FROM User WHERE ${where}`, exec);
+    if (!totalQ.available) return err(UNAVAILABLE_ERROR('User', org, totalQ.reason));
+    const totalAssignees = totalQ.total;
+    let activeAssignees = totalAssignees;
+    if (input.includeInactiveAssignees) {
+      const activeQ = await liveQuery(
+        org,
+        `SELECT COUNT() FROM User WHERE ProfileId = '${target.id}' AND IsActive = true`,
+        exec,
+      );
+      if (!activeQ.available) return err(UNAVAILABLE_ERROR('User', org, activeQ.reason));
+      activeAssignees = activeQ.total;
+    }
+    const detailQ = await liveQuery(
+      org,
+      `SELECT Id, Name, Username, IsActive, Profile.Name FROM User ` +
+        `WHERE ${where}${afterClause} ORDER BY Id LIMIT ${limit}`,
+      exec,
+    );
+    if (!detailQ.available) return err(UNAVAILABLE_ERROR('User', org, detailQ.reason));
+    const holders: PermsetHolder[] = (detailQ.records as readonly HolderUserRow[]).map((r) => ({
+      assignmentId: null,
+      userId: String(r.Id ?? ''),
+      name: String(r.Name ?? ''),
+      username: String(r.Username ?? ''),
+      isActive: r.IsActive === true,
+      profileName: r.Profile?.Name ?? null,
+      expirationDate: null,
+      viaGroup: null,
+    }));
+    return ok({
+      data: fitPermsetHolders(
+        {
+          target,
+          totalAssignees,
+          activeAssignees,
+          expiredExcluded: 0,
+          trust: liveTrust(queriedAt),
+        },
+        holders,
+        [],
+        undefined,
+      ),
+      vaultState: livePlaneVaultState(ctx),
+    });
+  }
+
+  // PSA-based kinds: permissionSet (direct + via groups) or permissionSetGroup.
+  let viaGroups: ReadonlyArray<{ id: string; name: string }> = [];
+  if (target.kind === 'permissionSet' && includeViaGroups) {
+    const psgcQ = await liveQuery(
+      org,
+      `SELECT PermissionSetGroupId, PermissionSetGroup.DeveloperName ` +
+        `FROM PermissionSetGroupComponent WHERE PermissionSetId = '${target.id}'`,
+      exec,
+    );
+    if (!psgcQ.available) {
+      return err(UNAVAILABLE_ERROR('PermissionSetGroupComponent', org, psgcQ.reason));
+    }
+    viaGroups = psgcQ.records.map((r) => {
+      const row = r as PsaRow;
+      return {
+        id: String(row.PermissionSetGroupId ?? ''),
+        name: String(row.PermissionSetGroup?.DeveloperName ?? row.PermissionSetGroupId ?? ''),
+      };
+    });
+  }
+  const scope =
+    target.kind === 'permissionSetGroup'
+      ? `PermissionSetGroupId = '${target.id}'`
+      : viaGroups.length > 0
+        ? `((PermissionSetId = '${target.id}' AND PermissionSetGroupId = null) OR ` +
+          `PermissionSetGroupId IN (${viaGroups.map((g) => `'${g.id}'`).join(', ')}))`
+        : `(PermissionSetId = '${target.id}' AND PermissionSetGroupId = null)`;
+  const activeClause = input.includeInactiveAssignees ? '' : ' AND Assignee.IsActive = true';
+  // Expired assignments are excluded from totals and the page, and disclosed.
+  const notExpiredClause = ` AND (ExpirationDate = null OR ExpirationDate >= ${nowLiteral})`;
+  const where = `${scope}${activeClause}${notExpiredClause}`;
+
+  // TRUE deduped headline first (a user holding the set directly AND via a
+  // group is one assignee, not two).
+  const totalQ = await liveQuery(
+    org,
+    `SELECT COUNT_DISTINCT(AssigneeId) total FROM PermissionSetAssignment WHERE ${where}`,
+    exec,
+  );
+  if (!totalQ.available) return err(UNAVAILABLE_ERROR('PermissionSetAssignment', org, totalQ.reason));
+  const totalAssignees = aggregateNumber(totalQ.records, 'total');
+
+  let activeAssignees = totalAssignees;
+  if (input.includeInactiveAssignees) {
+    const activeQ = await liveQuery(
+      org,
+      `SELECT COUNT_DISTINCT(AssigneeId) total FROM PermissionSetAssignment ` +
+        `WHERE ${scope} AND Assignee.IsActive = true${notExpiredClause}`,
+      exec,
+    );
+    if (!activeQ.available) return err(UNAVAILABLE_ERROR('PermissionSetAssignment', org, activeQ.reason));
+    activeAssignees = aggregateNumber(activeQ.records, 'total');
+  }
+
+  const expiredQ = await liveQuery(
+    org,
+    `SELECT COUNT() FROM PermissionSetAssignment WHERE ${scope}${activeClause} AND ExpirationDate < ${nowLiteral}`,
+    exec,
+  );
+  const expiredExcluded = expiredQ.available ? expiredQ.total : 0;
+
+  let buckets: HolderProfileBucket[] | undefined;
+  if (groupBy === 'profile') {
+    const bucketQ = await liveQuery(
+      org,
+      `SELECT Assignee.ProfileId pid, MAX(Assignee.Profile.Name) pname, COUNT(Id) holders ` +
+        `FROM PermissionSetAssignment WHERE ${where} ` +
+        `GROUP BY Assignee.ProfileId ORDER BY COUNT(Id) DESC LIMIT ${MAX_HOLDER_BUCKETS}`,
+      exec,
+    );
+    // Buckets are a convenience aggregate — degrade gracefully when the org
+    // rejects the aggregate (the roster itself still answers).
+    if (bucketQ.available) {
+      buckets = bucketQ.records.map((r) => {
+        const row = r as Record<string, unknown>;
+        return {
+          profileId: row.pid === undefined || row.pid === null ? null : String(row.pid),
+          profileName: row.pname === undefined || row.pname === null ? null : String(row.pname),
+          holders: Number(row.holders ?? row.expr1 ?? 0),
+        };
+      });
+    }
+  }
+
+  const detailQ = await liveQuery(
+    org,
+    `SELECT Id, AssigneeId, Assignee.Name, Assignee.Username, Assignee.IsActive, ` +
+      `Assignee.Profile.Name, ExpirationDate, PermissionSetGroupId, PermissionSetGroup.DeveloperName ` +
+      `FROM PermissionSetAssignment WHERE ${where}${afterClause} ORDER BY Id LIMIT ${limit}`,
+    exec,
+  );
+  if (!detailQ.available) return err(UNAVAILABLE_ERROR('PermissionSetAssignment', org, detailQ.reason));
+  const rows = (detailQ.records as readonly PsaRow[]).map(toPermsetHolder);
+
+  return ok({
+    data: fitPermsetHolders(
+      {
+        target,
+        totalAssignees,
+        activeAssignees,
+        expiredExcluded,
+        trust: liveTrust(queriedAt),
+      },
+      rows,
+      viaGroups.map((g) => g.name),
+      buckets,
+    ),
+    vaultState: livePlaneVaultState(ctx),
+  });
+};
+
+type PermsetHoldersBase = Pick<
+  LivePermsetHoldersOutput,
+  'target' | 'totalAssignees' | 'activeAssignees' | 'expiredExcluded' | 'trust'
+>;
+
+/** Split rows into direct / via-group buckets. */
+const splitHolders = (
+  rows: readonly PermsetHolder[],
+  groupNames: readonly string[],
+): { direct: PermsetHolder[]; via: ViaGroupHolders[] } => {
+  const direct = rows.filter((h) => h.viaGroup === null);
+  const byGroup = new Map<string, PermsetHolder[]>();
+  for (const h of rows) {
+    if (h.viaGroup === null) continue;
+    const list = byGroup.get(h.viaGroup) ?? [];
+    list.push(h);
+    byGroup.set(h.viaGroup, list);
+  }
+  // Preserve the PSGC-declared group order, then any groups only seen in rows.
+  const ordered = [
+    ...groupNames.filter((g) => byGroup.has(g)),
+    ...[...byGroup.keys()].filter((g) => !groupNames.includes(g)),
+  ];
+  return {
+    direct,
+    via: ordered.map((g) => ({ groupName: g, holders: byGroup.get(g) ?? [] })),
+  };
+};
+
+/** Byte-fit loop (liveInactiveUsers invariant): trim detail rows until the
+ *  serialized output fits HOLDERS_BYTE_BUDGET. `totalAssignees` is never
+ *  touched, so a trimmed page never understates the count; `nextAfterId` is
+ *  recomputed from the LAST KEPT row so keyset paging stays correct. */
+const fitPermsetHolders = (
+  base: PermsetHoldersBase,
+  allRows: readonly PermsetHolder[],
+  groupNames: readonly string[],
+  buckets: readonly HolderProfileBucket[] | undefined,
+): LivePermsetHoldersOutput => {
+  let slice: readonly PermsetHolder[] = allRows;
+  let byteTrimmed = false;
+  for (;;) {
+    const returned = slice.length;
+    const distinctReturned = new Set(slice.map((h) => h.userId)).size;
+    const capped = byteTrimmed || base.totalAssignees > distinctReturned;
+    const last = slice[slice.length - 1];
+    const nextAfterId =
+      capped && last !== undefined ? (last.assignmentId ?? last.userId) : undefined;
+    const { direct, via } = splitHolders(slice, groupNames);
+    const shape: Omit<LivePermsetHoldersOutput, 'rendered'> = {
+      ...base,
+      returned,
+      capped,
+      ...(nextAfterId !== undefined ? { nextAfterId } : {}),
+      ...(buckets !== undefined ? { buckets } : {}),
+      directHolders: direct,
+      ...(groupNames.length > 0 || via.length > 0 ? { viaGroupHolders: via } : {}),
+      ...(byteTrimmed
+        ? {
+            note:
+              `Detail rows trimmed to ${returned} to stay within the response size ` +
+              `limit; totalAssignees (${base.totalAssignees}) is the true count — ` +
+              `page on with afterId.`,
+          }
+        : {}),
+    };
+    const rendered = renderPermsetHoldersMarkdown(shape);
+    const bytes = Buffer.byteLength(JSON.stringify({ ...shape, rendered }), 'utf8');
+    if (bytes <= HOLDERS_BYTE_BUDGET || slice.length <= 1) {
+      return { ...shape, rendered };
+    }
+    slice = slice.slice(0, Math.max(1, Math.floor(slice.length * 0.85)));
+    byteTrimmed = true;
+  }
+};
+
+// ---------------------------------------------------------------------------
+// sfi.live_zombie_accounts — login access, no permission-set assignments
+// ---------------------------------------------------------------------------
+//
+// ENGINE-ARC §2c. Explicit DELTA over sfi.live_inactive_users (which covers
+// dormancy only): this is the User × PermissionSetAssignment ANTI-JOIN — active
+// users with NO permission-set/PSG assignments at all, the perm-set-less
+// variant of the access-hygiene sweep. The `PermissionSet.IsOwnedByProfile =
+// false` filter is LOAD-BEARING: every user has a system PSA row for their
+// profile-owned permission set, so without the filter the answer is always
+// empty. Pinned by test.
+
+const MAX_ZOMBIE_ROWS = 500;
+const DEFAULT_ZOMBIE_ROWS = 100;
+const ZOMBIE_BYTE_BUDGET = 36_000;
+/** Bounded scan size for the disclosed client-diff fallback. */
+const ZOMBIE_CLIENT_DIFF_CAP = 2000;
+
+/** Verbatim honesty note (ENGINE-ARC §2c) — without it the tool invites a
+ *  dangerous misread. */
+export const ZOMBIE_ACCOUNTS_DISCLOSURE =
+  'A "zombie" here still holds every permission its PROFILE grants — this tool reports "no permission-set/PSG assignments", NOT "no access". Read-only; point-in-time as of queriedAt.';
+
+export const liveZombieAccountsInputSchema = liveEnabledSchema.extend({
+  /** Additionally require last login older than N days (default 0 = ignore
+   *  login age; dormancy alone is sfi.live_inactive_users' job). */
+  minDaysInactive: z.number().int().min(0).max(3650).optional(),
+  /** Include non-Standard user types (default false — Standard/human only). */
+  includeAllUserTypes: z.boolean().optional(),
+  /** Max detail rows (default 100, hard cap 500); byte budget may trim further.
+   *  `totalZombies` is always the true count. */
+  limit: z.number().int().min(1).max(MAX_ZOMBIE_ROWS).optional(),
+  orgAlias: z.string().min(1).optional(),
+});
+
+export type LiveZombieAccountsInput = z.infer<typeof liveZombieAccountsInputSchema>;
+
+export interface ZombieUser {
+  readonly id: string;
+  readonly name: string;
+  readonly username: string;
+  readonly profileName: string | null;
+  readonly lastLoginDate: string | null;
+  readonly neverLoggedIn: boolean;
+}
+
+export interface LiveZombieAccountsOutput {
+  readonly criteria: {
+    readonly minDaysInactive: number;
+    /** ISO cutoff when minDaysInactive > 0, else null. */
+    readonly cutoff: string | null;
+    readonly userTypeFilter: 'Standard' | 'all';
+  };
+  /** TRUE total of matching users (never understated by caps/trimming). Under
+   *  method 'client-diff' it is bounded by the disclosed scan caps. */
+  readonly totalZombies: number;
+  readonly returned: number;
+  readonly capped: boolean;
+  readonly users: readonly ZombieUser[];
+  /** 'anti-join' = single NOT IN SOQL; 'client-diff' = disclosed fallback (two
+   *  bounded queries diffed client-side) when the org rejects the anti-join. */
+  readonly method: 'anti-join' | 'client-diff';
+  readonly disclosure: string;
+  readonly trust: TrustSummary;
+  readonly rendered: string;
+  readonly note?: string;
+}
+
+const toZombieUser = (r: HolderUserRow & { LastLoginDate?: string | null }): ZombieUser => ({
+  id: String(r.Id ?? ''),
+  name: String(r.Name ?? ''),
+  username: String(r.Username ?? ''),
+  profileName: r.Profile?.Name ?? null,
+  lastLoginDate: r.LastLoginDate ?? null,
+  neverLoggedIn: (r.LastLoginDate ?? null) === null,
+});
+
+type ZombieBase = Pick<LiveZombieAccountsOutput, 'criteria' | 'totalZombies' | 'method' | 'disclosure' | 'trust'>;
+
+const renderZombieAccountsMarkdown = (
+  data: Omit<LiveZombieAccountsOutput, 'rendered'>,
+): string => {
+  const head =
+    `**${data.totalZombies.toLocaleString('en-US')}** active ` +
+    `${data.criteria.userTypeFilter === 'Standard' ? 'Standard ' : ''}user(s) have login access ` +
+    `but ZERO permission-set/PSG assignments` +
+    (data.criteria.cutoff !== null
+      ? ` and no login within ${data.criteria.minDaysInactive} days`
+      : '') +
+    '.';
+  const table =
+    data.users.length === 0
+      ? ''
+      : `\n\n${mdTable(
+          ['User', 'Username', 'Profile', 'Last login'],
+          data.users.map((u) => [
+            u.name,
+            u.username,
+            u.profileName ?? '—',
+            u.neverLoggedIn ? 'never' : (u.lastLoginDate ?? '—'),
+          ]),
+        )}`;
+  const cappedLine = data.capped ? `\n\nShowing ${data.returned} of ${data.totalZombies}.` : '';
+  const methodLine =
+    data.method === 'client-diff'
+      ? `\n\nMethod: client-diff — the org rejected the single anti-join SOQL, so this was computed by diffing two bounded queries (scan cap ${ZOMBIE_CLIENT_DIFF_CAP} rows each).`
+      : '';
+  return `${head}${table}${cappedLine}${methodLine}\n\n${data.disclosure}\n\n${renderTrustFooter(data.trust)}`;
+};
+
+const fitZombieUsers = (
+  base: ZombieBase,
+  allUsers: readonly ZombieUser[],
+  extraNote: string | undefined,
+): LiveZombieAccountsOutput => {
+  let slice: readonly ZombieUser[] = allUsers;
+  let byteTrimmed = false;
+  for (;;) {
+    const returned = slice.length;
+    const capped = byteTrimmed || base.totalZombies > returned;
+    const noteText = [
+      ...(extraNote !== undefined ? [extraNote] : []),
+      ...(byteTrimmed
+        ? [
+            `Detail rows trimmed to ${returned} to stay within the response size limit; ` +
+              `totalZombies (${base.totalZombies}) is the true count.`,
+          ]
+        : []),
+    ].join(' ');
+    const shape: Omit<LiveZombieAccountsOutput, 'rendered'> = {
+      ...base,
+      returned,
+      capped,
+      users: slice,
+      ...(noteText.length > 0 ? { note: noteText } : {}),
+    };
+    const rendered = renderZombieAccountsMarkdown(shape);
+    const bytes = Buffer.byteLength(JSON.stringify({ ...shape, rendered }), 'utf8');
+    if (bytes <= ZOMBIE_BYTE_BUDGET || slice.length <= 1) {
+      return { ...shape, rendered };
+    }
+    slice = slice.slice(0, Math.max(1, Math.floor(slice.length * 0.85)));
+    byteTrimmed = true;
+  }
+};
+
+export const liveZombieAccountsHandler = async (
+  ctx: Context,
+  input: LiveZombieAccountsInput,
+  exec: ExecCommand = nodeExecFile,
+): Promise<Result<McpResponse<LiveZombieAccountsOutput>, McpError>> => {
+  const gate = await gateLive(ctx, input);
+  if (!gate.ok) return gate;
+  const org = gate.value;
+  const queriedAt = new Date().toISOString();
+  const minDaysInactive = input.minDaysInactive ?? 0;
+  const limit = input.limit ?? DEFAULT_ZOMBIE_ROWS;
+  const cutoff = minDaysInactive > 0 ? daysAgoSoql(minDaysInactive) : null;
+  const userTypeClause = input.includeAllUserTypes ? '' : ` AND UserType = 'Standard'`;
+  const loginClause =
+    cutoff !== null ? ` AND (LastLoginDate < ${cutoff} OR LastLoginDate = null)` : '';
+  const baseWhere = `IsActive = true${userTypeClause}${loginClause}`;
+  // THE LOAD-BEARING FILTER: IsOwnedByProfile = false. Every user carries a
+  // system PSA row for their profile-owned permission set — without this filter
+  // the anti-join matches nobody, ever, and the tool is silently useless.
+  const antiJoin =
+    ` AND Id NOT IN (SELECT AssigneeId FROM PermissionSetAssignment ` +
+    `WHERE PermissionSet.IsOwnedByProfile = false)`;
+  const criteria = {
+    minDaysInactive,
+    cutoff,
+    userTypeFilter: (input.includeAllUserTypes ? 'all' : 'Standard') as 'Standard' | 'all',
+  };
+  const detailSelect = `SELECT Id, Name, Username, Profile.Name, LastLoginDate FROM User`;
+
+  // Primary path: single anti-join SOQL, true count first.
+  const countQ = await liveQuery(org, `SELECT COUNT() FROM User WHERE ${baseWhere}${antiJoin}`, exec);
+  if (countQ.available) {
+    const detailQ = await liveQuery(
+      org,
+      `${detailSelect} WHERE ${baseWhere}${antiJoin} ` +
+        `ORDER BY LastLoginDate ASC NULLS FIRST LIMIT ${limit}`,
+      exec,
+    );
+    if (!detailQ.available) return err(UNAVAILABLE_ERROR('User', org, detailQ.reason));
+    const users = (detailQ.records as readonly (HolderUserRow & { LastLoginDate?: string | null })[]).map(
+      toZombieUser,
+    );
+    return ok({
+      data: fitZombieUsers(
+        {
+          criteria,
+          totalZombies: countQ.total,
+          method: 'anti-join',
+          disclosure: ZOMBIE_ACCOUNTS_DISCLOSURE,
+          trust: liveTrust(queriedAt),
+        },
+        users,
+        undefined,
+      ),
+      vaultState: livePlaneVaultState(ctx),
+    });
+  }
+
+  // A budget stop is a STOP, not a reason to spend three more queries.
+  if (isBudgetExhaustedReason(countQ.reason)) {
+    return err({ kind: 'invalid-query', message: redactSecrets(countQ.reason ?? 'live-query budget exhausted') });
+  }
+
+  // Disclosed fallback: the org rejected the anti-join (some orgs/API versions
+  // refuse semi-join filters on PermissionSetAssignment). Two bounded queries,
+  // diffed client-side, disclosed as method:'client-diff'.
+  const usersQ = await liveQuery(
+    org,
+    `${detailSelect} WHERE ${baseWhere} ORDER BY LastLoginDate ASC NULLS FIRST LIMIT ${ZOMBIE_CLIENT_DIFF_CAP}`,
+    exec,
+  );
+  if (!usersQ.available) return err(UNAVAILABLE_ERROR('User', org, usersQ.reason));
+  const assigneesQ = await liveQuery(
+    org,
+    `SELECT AssigneeId FROM PermissionSetAssignment ` +
+      `WHERE PermissionSet.IsOwnedByProfile = false GROUP BY AssigneeId LIMIT ${ZOMBIE_CLIENT_DIFF_CAP}`,
+    exec,
+  );
+  if (!assigneesQ.available) {
+    return err(UNAVAILABLE_ERROR('PermissionSetAssignment', org, assigneesQ.reason));
+  }
+  const assigneeIds = new Set(
+    assigneesQ.records.map((r) => String((r as Record<string, unknown>).AssigneeId ?? '')),
+  );
+  const zombies = (usersQ.records as readonly (HolderUserRow & { LastLoginDate?: string | null })[])
+    .map(toZombieUser)
+    .filter((u) => !assigneeIds.has(u.id) && !assigneeIds.has(u.id.slice(0, 15)));
+  const scanBounded =
+    usersQ.records.length >= ZOMBIE_CLIENT_DIFF_CAP ||
+    assigneesQ.records.length >= ZOMBIE_CLIENT_DIFF_CAP;
+  const extraNote =
+    `Anti-join SOQL was rejected by the org (${redactSecrets(countQ.reason ?? 'unknown').slice(0, 120)}); ` +
+    `fell back to a client-side diff of two bounded queries.` +
+    (scanBounded
+      ? ` One scan hit its ${ZOMBIE_CLIENT_DIFF_CAP}-row cap, so totalZombies may UNDERCOUNT — treat it as a lower bound.`
+      : '');
+  return ok({
+    data: fitZombieUsers(
+      {
+        criteria,
+        totalZombies: zombies.length,
+        method: 'client-diff',
+        disclosure: ZOMBIE_ACCOUNTS_DISCLOSURE,
+        trust: liveTrust(queriedAt),
+      },
+      zombies.slice(0, limit),
+      extraNote,
+    ),
+    vaultState: livePlaneVaultState(ctx),
+  });
+};
+
+// ---------------------------------------------------------------------------
+// sfi.live_group_members — who's in queue / public group X
+// ---------------------------------------------------------------------------
+//
+// ENGINE-ARC §2b. Queue/group membership is runtime `GroupMember` data —
+// metadata XML only carries the DECLARED members (most orgs manage membership
+// through Setup, so the vault's `properties.memberCount` is routinely 0 while
+// the live org has members). This tool measures that drift instead of
+// disclaiming it: `vaultDeclaredMemberCount` (vault) vs `liveDirectMemberCount`
+// (live) with a `drift` boolean.
+//
+// `GroupMember.UserOrGroupId` is POLYMORPHIC: `005` → User, `00G` → a nested
+// Group — which itself may be a Role / RoleAndSubordinates proxy group. Role
+// entries are surfaced by UserRole name and NEVER expanded to users (the role
+// hierarchy is not enumerable in one budgeted call). Nested public groups are
+// listed, not expanded, unless `expandNested: true` — which expands exactly ONE
+// level and stamps `expansion: 'partial-one-level'`. Fail-closed: a partial
+// expansion is never presented as the full effective membership.
+
+const MAX_MEMBER_ROWS = 500;
+const DEFAULT_MEMBER_ROWS = 100;
+const MEMBERS_BYTE_BUDGET = 36_000;
+/** IN-clause chunk size for batched User/Group id resolution. */
+const MEMBER_ID_CHUNK = 200;
+
+/** Verbatim disclosure (ENGINE-ARC §2b) — tool description + rendered footer. */
+export const GROUP_MEMBERS_DISCLOSURE =
+  'Direct membership only by default — nested public groups and role entries are listed but NOT expanded to users. expandNested: true expands exactly ONE level of nested public groups (stamped expansion: "partial-one-level"); deeper nesting and role-hierarchy subordinates are not enumerated — never treat this as the full effective membership. Read-only; point-in-time as of queriedAt.';
+
+export const liveGroupMembersInputSchema = liveEnabledSchema.extend({
+  /** Group.DeveloperName or Group.Name (label) — exact match, never a guess. */
+  name: z.string().min(1),
+  /** What kind of Group `name` names. Default 'auto' matches both Queue and
+   *  Regular (public group); an ambiguous name across both is an honest error. */
+  groupType: z.enum(['Queue', 'Regular', 'auto']).optional(),
+  /** Expand exactly ONE level of nested public groups (default false). Role
+   *  entries are never expanded. */
+  expandNested: z.boolean().optional(),
+  /** Max direct GroupMember rows fetched (default 100, hard cap 500); a ~36 KB
+   *  byte budget may trim the user page further. `totalDirectMembers` is
+   *  always the TRUE count. */
+  limit: z.number().int().min(1).max(MAX_MEMBER_ROWS).optional(),
+  orgAlias: z.string().min(1).optional(),
+});
+
+export type LiveGroupMembersInput = z.infer<typeof liveGroupMembersInputSchema>;
+
+export interface GroupMemberUser {
+  readonly id: string;
+  readonly name: string;
+  readonly username: string;
+  readonly isActive: boolean;
+}
+
+export interface NestedGroupEntry {
+  readonly id: string;
+  readonly name: string;
+  readonly type: string;
+  /** Present only under expandNested — ONE level of this group's own users. */
+  readonly members?: readonly GroupMemberUser[];
+  /** Under expandNested: how many of this group's own members are THEMSELVES
+   *  groups/roles that were NOT expanded (the fail-closed remainder). */
+  readonly unexpandedNestedCount?: number;
+}
+
+export interface GroupRoleEntry {
+  readonly id: string;
+  /** UserRole.Name when resolvable, else null (never invented). */
+  readonly roleName: string | null;
+  readonly type: string;
+  readonly includesSubordinates: boolean;
+}
+
+export interface LiveGroupMembersOutput {
+  readonly group: {
+    readonly id: string;
+    readonly name: string;
+    readonly developerName: string;
+    readonly type: 'Queue' | 'Regular';
+  };
+  /** Queues only: the sObject types this queue can own (QueueSobject). */
+  readonly supportedObjects?: readonly string[];
+  /** TRUE total of direct GroupMember rows (never understated by caps). */
+  readonly totalDirectMembers: number;
+  readonly returned: number;
+  readonly capped: boolean;
+  readonly users: readonly GroupMemberUser[];
+  readonly nestedGroups: readonly NestedGroupEntry[];
+  readonly roles: readonly GroupRoleEntry[];
+  readonly expansion: 'none' | 'partial-one-level';
+  /** Declared member count from the vault node (Queue/Group properties.memberCount),
+   *  null when the group is not in the vault or carries no count. */
+  readonly vaultDeclaredMemberCount: number | null;
+  /** Same value as totalDirectMembers — named to pair with the vault count. */
+  readonly liveDirectMemberCount: number;
+  /** true when the vault DECLARED count disagrees with live DIRECT membership —
+   *  the measured form of the old "runtime membership not reflected" disclosure. */
+  readonly drift: boolean;
+  readonly disclosure: string;
+  readonly trust: TrustSummary;
+  readonly rendered: string;
+  readonly note?: string;
+}
+
+interface LiveGroupRow {
+  readonly Id?: string;
+  readonly Name?: string;
+  readonly DeveloperName?: string;
+  readonly Type?: string;
+  readonly RelatedId?: string | null;
+}
+
+/** Chunk `ids` into IN-clause literals of MEMBER_ID_CHUNK. */
+const idChunks = (ids: readonly string[]): string[][] => {
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += MEMBER_ID_CHUNK) {
+    chunks.push(ids.slice(i, i + MEMBER_ID_CHUNK));
+  }
+  return chunks;
+};
+
+/** Batch-resolve User rows by id (IN-chunks of 200). Hard-fails so a budget
+ *  stop is an honest error, never a silently-empty roster. */
+const resolveMemberUsers = async (
+  org: string,
+  ids: readonly string[],
+  exec: ExecCommand,
+): Promise<Result<Map<string, GroupMemberUser>, McpError>> => {
+  const byId = new Map<string, GroupMemberUser>();
+  for (const chunk of idChunks(ids)) {
+    const inList = chunk.map((id) => soqlLiteral(id)).join(', ');
+    const q = await liveQuery(
+      org,
+      `SELECT Id, Name, Username, IsActive FROM User WHERE Id IN (${inList})`,
+      exec,
+    );
+    if (!q.available) return err(UNAVAILABLE_ERROR('User', org, q.reason));
+    for (const r of q.records) {
+      const row = r as { Id?: string; Name?: string; Username?: string; IsActive?: boolean };
+      const id = String(row.Id ?? '');
+      byId.set(id, {
+        id,
+        name: String(row.Name ?? ''),
+        username: String(row.Username ?? ''),
+        isActive: row.IsActive === true,
+      });
+    }
+  }
+  return ok(byId);
+};
+
+type GroupMembersBase = Pick<
+  LiveGroupMembersOutput,
+  | 'group'
+  | 'totalDirectMembers'
+  | 'nestedGroups'
+  | 'roles'
+  | 'expansion'
+  | 'vaultDeclaredMemberCount'
+  | 'liveDirectMemberCount'
+  | 'drift'
+  | 'disclosure'
+  | 'trust'
+> & { readonly supportedObjects?: readonly string[] };
+
+const renderGroupMembersMarkdown = (data: Omit<LiveGroupMembersOutput, 'rendered'>): string => {
+  const kind = data.group.type === 'Queue' ? 'queue' : 'public group';
+  const lines: string[] = [
+    `### Members of ${kind} \`${data.group.developerName}\``,
+    '',
+    `**${data.totalDirectMembers.toLocaleString('en-US')}** direct member entr${data.totalDirectMembers === 1 ? 'y' : 'ies'} ` +
+      `(${data.users.length} user(s), ${data.nestedGroups.length} nested group(s), ${data.roles.length} role(s) on this page).`,
+  ];
+  if (data.supportedObjects !== undefined) {
+    lines.push(
+      '',
+      data.supportedObjects.length > 0
+        ? `**Can own:** ${data.supportedObjects.join(', ')}`
+        : '**Can own:** (no QueueSobject rows — this queue supports no objects)',
+    );
+  }
+  if (data.users.length > 0) {
+    lines.push(
+      '',
+      '**Users**',
+      '',
+      mdTable(
+        ['User', 'Username', 'Active'],
+        data.users.map((u) => [u.name, u.username, u.isActive ? 'yes' : 'no']),
+      ),
+    );
+  }
+  for (const g of data.nestedGroups) {
+    lines.push('', `**Nested group \`${g.name}\`** (${g.type}${g.members === undefined ? ' — not expanded' : ''})`);
+    if (g.members !== undefined) {
+      lines.push(
+        '',
+        g.members.length > 0
+          ? mdTable(
+              ['User', 'Username', 'Active'],
+              g.members.map((u) => [u.name, u.username, u.isActive ? 'yes' : 'no']),
+            )
+          : '(no direct users)',
+      );
+      if ((g.unexpandedNestedCount ?? 0) > 0) {
+        lines.push(
+          '',
+          `${g.unexpandedNestedCount} nested group/role member(s) inside \`${g.name}\` were NOT expanded (one-level limit).`,
+        );
+      }
+    }
+  }
+  if (data.roles.length > 0) {
+    lines.push(
+      '',
+      '**Roles** (never expanded to users)',
+      '',
+      mdTable(
+        ['Role', 'Includes subordinates'],
+        data.roles.map((r) => [r.roleName ?? r.id, r.includesSubordinates ? 'yes' : 'no']),
+      ),
+    );
+  }
+  lines.push(
+    '',
+    data.vaultDeclaredMemberCount === null
+      ? 'Vault cross-check: no declared member count in the vault for this group (membership is runtime data).'
+      : `Vault cross-check: vault declared **${data.vaultDeclaredMemberCount}** member(s) at last refresh vs **${data.liveDirectMemberCount}** live direct member(s) — drift: ${data.drift ? 'YES' : 'no'}.`,
+  );
+  if (data.capped) {
+    lines.push('', `Showing ${data.returned} of ${data.totalDirectMembers} direct member(s).`);
+  }
+  lines.push('', data.disclosure, '', renderTrustFooter(data.trust));
+  return lines.join('\n');
+};
+
+/** Byte-fit loop (liveInactiveUsers invariant): trim the direct-user page until
+ *  the serialized output fits; totalDirectMembers is never touched. */
+const fitGroupMembers = (
+  base: GroupMembersBase,
+  allUsers: readonly GroupMemberUser[],
+  pageEntryCount: number,
+  extraNote: string | undefined,
+): LiveGroupMembersOutput => {
+  let slice: readonly GroupMemberUser[] = allUsers;
+  let byteTrimmed = false;
+  for (;;) {
+    const returned = pageEntryCount - (allUsers.length - slice.length);
+    const capped = byteTrimmed || base.totalDirectMembers > pageEntryCount;
+    const noteText = [
+      ...(extraNote !== undefined ? [extraNote] : []),
+      ...(byteTrimmed
+        ? [
+            `User rows trimmed to ${slice.length} to stay within the response size limit; ` +
+              `totalDirectMembers (${base.totalDirectMembers}) is the true count.`,
+          ]
+        : []),
+    ].join(' ');
+    const shape: Omit<LiveGroupMembersOutput, 'rendered'> = {
+      ...base,
+      returned,
+      capped,
+      users: slice,
+      ...(noteText.length > 0 ? { note: noteText } : {}),
+    };
+    const rendered = renderGroupMembersMarkdown(shape);
+    const bytes = Buffer.byteLength(JSON.stringify({ ...shape, rendered }), 'utf8');
+    if (bytes <= MEMBERS_BYTE_BUDGET || slice.length <= 1) {
+      return { ...shape, rendered };
+    }
+    slice = slice.slice(0, Math.max(1, Math.floor(slice.length * 0.85)));
+    byteTrimmed = true;
+  }
+};
+
+export const liveGroupMembersHandler = async (
+  ctx: Context,
+  input: LiveGroupMembersInput,
+  exec: ExecCommand = nodeExecFile,
+): Promise<Result<McpResponse<LiveGroupMembersOutput>, McpError>> => {
+  const gate = await gateLive(ctx, input);
+  if (!gate.ok) return gate;
+  const org = gate.value;
+  const queriedAt = new Date().toISOString();
+  const limit = input.limit ?? DEFAULT_MEMBER_ROWS;
+  const lit = soqlLiteral(input.name);
+  const typeClause =
+    input.groupType === undefined || input.groupType === 'auto'
+      ? `Type IN ('Queue', 'Regular')`
+      : `Type = '${input.groupType}'`;
+
+  const resolveQ = await liveQuery(
+    org,
+    `SELECT Id, Name, DeveloperName, Type FROM Group ` +
+      `WHERE (DeveloperName = ${lit} OR Name = ${lit}) AND ${typeClause} LIMIT 3`,
+    exec,
+  );
+  if (!resolveQ.available) return err(UNAVAILABLE_ERROR('Group', org, resolveQ.reason));
+  if (resolveQ.records.length === 0) {
+    return err({
+      kind: 'component-not-found',
+      message:
+        `No queue or public group named '${input.name}' in the live org (probed Group by exact ` +
+        `DeveloperName/Name${input.groupType && input.groupType !== 'auto' ? `, Type ${input.groupType}` : ''}). ` +
+        `Check the API name — sfi.resolve can fix typos against the vault.`,
+    });
+  }
+  if (resolveQ.records.length > 1) {
+    const kinds = resolveQ.records.map((r) => String((r as LiveGroupRow).Type ?? '?')).join(' + ');
+    return err({
+      kind: 'invalid-query',
+      message:
+        `'${input.name}' matches ${resolveQ.records.length} Group records in the live org (${kinds}) — ` +
+        `refusing to guess. Pass groupType ('Queue' | 'Regular') or the exact DeveloperName.`,
+    });
+  }
+  const groupRow = resolveQ.records[0] as LiveGroupRow;
+  const group = {
+    id: String(groupRow.Id ?? ''),
+    name: String(groupRow.Name ?? groupRow.DeveloperName ?? input.name),
+    developerName: String(groupRow.DeveloperName ?? input.name),
+    type: (groupRow.Type === 'Queue' ? 'Queue' : 'Regular') as 'Queue' | 'Regular',
+  };
+
+  // TRUE direct-member count first.
+  const countQ = await liveQuery(
+    org,
+    `SELECT COUNT() FROM GroupMember WHERE GroupId = '${group.id}'`,
+    exec,
+  );
+  if (!countQ.available) return err(UNAVAILABLE_ERROR('GroupMember', org, countQ.reason));
+  const totalDirectMembers = countQ.total;
+
+  const membersQ = await liveQuery(
+    org,
+    `SELECT Id, UserOrGroupId FROM GroupMember WHERE GroupId = '${group.id}' ORDER BY Id LIMIT ${limit}`,
+    exec,
+  );
+  if (!membersQ.available) return err(UNAVAILABLE_ERROR('GroupMember', org, membersQ.reason));
+  const memberIds = membersQ.records.map((r) =>
+    String((r as { UserOrGroupId?: string }).UserOrGroupId ?? ''),
+  );
+  const directUserIds = memberIds.filter((id) => id.startsWith('005'));
+  const nestedGroupIds = memberIds.filter((id) => id.startsWith('00G'));
+  const unclassified = memberIds.filter((id) => !id.startsWith('005') && !id.startsWith('00G'));
+
+  // Nested `00G` members: fetch their Group rows to split public groups from
+  // Role / RoleAndSubordinates proxy groups (RelatedId → UserRole).
+  let nestedRows: LiveGroupRow[] = [];
+  if (nestedGroupIds.length > 0) {
+    for (const chunk of idChunks(nestedGroupIds)) {
+      const inList = chunk.map((id) => soqlLiteral(id)).join(', ');
+      const q = await liveQuery(
+        org,
+        `SELECT Id, Name, DeveloperName, Type, RelatedId FROM Group WHERE Id IN (${inList})`,
+        exec,
+      );
+      if (!q.available) return err(UNAVAILABLE_ERROR('Group', org, q.reason));
+      nestedRows = nestedRows.concat(q.records as readonly LiveGroupRow[]);
+    }
+  }
+  const roleRows = nestedRows.filter((r) => String(r.Type ?? '').startsWith('Role'));
+  const publicNestedRows = nestedRows.filter((r) => !String(r.Type ?? '').startsWith('Role'));
+
+  // Role names via UserRole (graceful degrade to null — a missing name is
+  // shown as the raw id, never invented).
+  const roleNameById = new Map<string, string>();
+  const relatedIds = roleRows
+    .map((r) => String(r.RelatedId ?? ''))
+    .filter((id) => id.length > 0);
+  if (relatedIds.length > 0) {
+    const inList = relatedIds.map((id) => soqlLiteral(id)).join(', ');
+    const q = await liveQuery(org, `SELECT Id, Name FROM UserRole WHERE Id IN (${inList})`, exec);
+    if (!q.available && isBudgetExhaustedReason(q.reason)) {
+      return err({ kind: 'invalid-query', message: redactSecrets(q.reason ?? 'live-query budget exhausted') });
+    }
+    if (q.available) {
+      for (const r of q.records) {
+        const row = r as { Id?: string; Name?: string };
+        roleNameById.set(String(row.Id ?? ''), String(row.Name ?? ''));
+      }
+    }
+  }
+  const roles: GroupRoleEntry[] = roleRows.map((r) => {
+    const relatedId = String(r.RelatedId ?? '');
+    return {
+      id: String(r.Id ?? ''),
+      roleName: roleNameById.get(relatedId) ?? null,
+      type: String(r.Type ?? 'Role'),
+      includesSubordinates: String(r.Type ?? '').startsWith('RoleAndSubordinates'),
+    };
+  });
+
+  // One-level nested expansion (opt-in, fail-closed).
+  const expandNested = input.expandNested === true;
+  const nestedMembersByGroup = new Map<string, string[]>();
+  if (expandNested && publicNestedRows.length > 0) {
+    const inList = publicNestedRows.map((r) => soqlLiteral(String(r.Id ?? ''))).join(', ');
+    const q = await liveQuery(
+      org,
+      `SELECT GroupId, UserOrGroupId FROM GroupMember WHERE GroupId IN (${inList}) ORDER BY Id LIMIT ${MAX_MEMBER_ROWS}`,
+      exec,
+    );
+    if (!q.available) return err(UNAVAILABLE_ERROR('GroupMember', org, q.reason));
+    for (const r of q.records) {
+      const row = r as { GroupId?: string; UserOrGroupId?: string };
+      const gid = String(row.GroupId ?? '');
+      const list = nestedMembersByGroup.get(gid) ?? [];
+      list.push(String(row.UserOrGroupId ?? ''));
+      nestedMembersByGroup.set(gid, list);
+    }
+  }
+
+  // ONE batched User resolution across direct + expanded-nested user ids.
+  const nestedUserIds = [...nestedMembersByGroup.values()]
+    .flat()
+    .filter((id) => id.startsWith('005'));
+  const allUserIds = [...new Set([...directUserIds, ...nestedUserIds])];
+  const usersR = await resolveMemberUsers(org, allUserIds, exec);
+  if (!usersR.ok) return usersR;
+  const userById = usersR.value;
+  const toUser = (id: string): GroupMemberUser =>
+    userById.get(id) ??
+    userById.get(id.slice(0, 15)) ?? { id, name: '', username: '', isActive: false };
+
+  const nestedGroups: NestedGroupEntry[] = publicNestedRows.map((r) => {
+    const id = String(r.Id ?? '');
+    const base = {
+      id,
+      name: String(r.DeveloperName ?? r.Name ?? id),
+      type: String(r.Type ?? 'Regular'),
+    };
+    if (!expandNested) return base;
+    const memberIdsOfGroup = nestedMembersByGroup.get(id) ?? [];
+    const userMembers = memberIdsOfGroup.filter((m) => m.startsWith('005')).map(toUser);
+    const unexpanded = memberIdsOfGroup.length - userMembers.length;
+    return {
+      ...base,
+      members: userMembers,
+      ...(unexpanded > 0 ? { unexpandedNestedCount: unexpanded } : {}),
+    };
+  });
+
+  // Queues: which sObject types the queue can own (q267). Graceful degrade —
+  // but a budget stop is an honest stop, not a silent omission.
+  let supportedObjects: string[] | undefined;
+  if (group.type === 'Queue') {
+    const q = await liveQuery(
+      org,
+      `SELECT SobjectType FROM QueueSobject WHERE QueueId = '${group.id}'`,
+      exec,
+    );
+    if (!q.available && isBudgetExhaustedReason(q.reason)) {
+      return err({ kind: 'invalid-query', message: redactSecrets(q.reason ?? 'live-query budget exhausted') });
+    }
+    if (q.available) {
+      supportedObjects = q.records
+        .map((r) => String((r as { SobjectType?: string }).SobjectType ?? ''))
+        .filter((s) => s.length > 0)
+        .sort();
+    }
+  }
+
+  // Vault cross-check: DECLARED metadata member count (Queue:/Group: node).
+  // Absent vault / absent node / unreadable graph all degrade to null — the
+  // live answer never depends on the vault.
+  let vaultDeclaredMemberCount: number | null = null;
+  if (ctx.graph !== undefined && ctx.graph !== null) {
+    const vaultId = `${group.type === 'Queue' ? 'Queue' : 'Group'}:${group.developerName}`;
+    const nodeR = await getNodeById(ctx.graph, vaultId);
+    if (nodeR.ok && nodeR.value !== null) {
+      const declared = nodeR.value.properties['memberCount'];
+      if (typeof declared === 'number') vaultDeclaredMemberCount = declared;
+    }
+  }
+  const drift =
+    vaultDeclaredMemberCount !== null && vaultDeclaredMemberCount !== totalDirectMembers;
+
+  const extraNote =
+    unclassified.length > 0
+      ? `${unclassified.length} GroupMember row(s) carry an id prefix that is neither User (005) nor Group (00G) — listed in no bucket, but counted in totalDirectMembers.`
+      : undefined;
+
+  return ok({
+    data: fitGroupMembers(
+      {
+        group,
+        ...(supportedObjects !== undefined ? { supportedObjects } : {}),
+        totalDirectMembers,
+        nestedGroups,
+        roles,
+        expansion: expandNested ? 'partial-one-level' : 'none',
+        vaultDeclaredMemberCount,
+        liveDirectMemberCount: totalDirectMembers,
+        drift,
+        disclosure: GROUP_MEMBERS_DISCLOSURE,
+        trust: liveTrust(queriedAt),
+      },
+      directUserIds.map(toUser),
+      memberIds.length,
+      extraNote,
+    ),
+    vaultState: livePlaneVaultState(ctx),
+  });
+};
+
+// ---------------------------------------------------------------------------
+// sfi.live_user_permsets — WHAT does USER X hold (reverse of permset_holders)
+// ---------------------------------------------------------------------------
+//
+// ENGINE-ARC §3. A SEPARATE contract from sfi.live_permset_holders: input is a
+// USER, output is the grantors they hold (profile + direct permission sets +
+// permission set groups, with expirations). Folding this into permset_holders
+// as a `direction` flag would bloat one Zod schema with two disjoint shapes —
+// separate tool, same file, shared query helpers.
+//
+// Dual-provenance pairing: this tool answers WHICH grantors the user holds
+// (live, point-in-time); vault sfi.effective_permissions answers WHAT those
+// grantors grant. Neither substitutes for the other.
+//
+// The PSA query pins `PermissionSet.IsOwnedByProfile = false` — every user
+// carries a system PSA row for their profile-owned permission set, and without
+// the filter that system row would masquerade as a direct assignment. The
+// profile is reported from User.Profile.Name instead, labeled as the profile.
+
+const MAX_USER_PERMSET_ROWS = 500;
+const DEFAULT_USER_PERMSET_ROWS = 200;
+const USER_PERMSETS_BYTE_BUDGET = 36_000;
+
+/** Verbatim disclosure (ENGINE-ARC §3) — tool description + rendered footer. */
+export const USER_PERMSETS_DISCLOSURE =
+  'Live = WHICH grantors this user holds right now (point-in-time as of queriedAt); vault sfi.effective_permissions = WHAT those grantors grant — pair them for a dual-provenance answer. The PROFILE grants permissions too: it is named here but its contents are not enumerated. Read-only.';
+
+export const liveUserPermsetsInputSchema = liveEnabledSchema.extend({
+  /** Exact Username (preferred — unique) or exact User.Name. An ambiguous name
+   *  returns an honest candidate list, never a guess. */
+  user: z.string().min(1),
+  /** Max assignment rows (default 200, hard cap 500); a ~36 KB byte budget may
+   *  trim further. `totalAssignments` is always the TRUE count. */
+  limit: z.number().int().min(1).max(MAX_USER_PERMSET_ROWS).optional(),
+  orgAlias: z.string().min(1).optional(),
+});
+
+export type LiveUserPermsetsInput = z.infer<typeof liveUserPermsetsInputSchema>;
+
+export interface UserPermsetGrant {
+  readonly assignmentId: string;
+  readonly permissionSetName: string;
+  readonly permissionSetLabel: string | null;
+  readonly expirationDate: string | null;
+}
+
+export interface UserPermsetsViaGroup {
+  readonly groupName: string;
+  readonly permsets: readonly UserPermsetGrant[];
+}
+
+export interface LiveUserPermsetsOutput {
+  readonly user: {
+    readonly id: string;
+    readonly name: string;
+    readonly username: string;
+    readonly isActive: boolean;
+    /** The profile grantor — named, not enumerated (see disclosure). */
+    readonly profileName: string | null;
+  };
+  /** TRUE count of non-expired, non-profile-owned PSA rows for this user. */
+  readonly totalAssignments: number;
+  /** PSA rows excluded because ExpirationDate has passed — disclosed, not dropped. */
+  readonly expiredExcluded: number;
+  readonly returned: number;
+  readonly capped: boolean;
+  readonly directPermsets: readonly UserPermsetGrant[];
+  readonly viaGroups: readonly UserPermsetsViaGroup[];
+  readonly disclosure: string;
+  readonly trust: TrustSummary;
+  readonly rendered: string;
+  readonly note?: string;
+}
+
+interface UserPsaRow {
+  readonly Id?: string;
+  readonly ExpirationDate?: string | null;
+  readonly PermissionSetGroupId?: string | null;
+  readonly PermissionSetGroup?: { readonly DeveloperName?: string } | null;
+  readonly PermissionSet?: { readonly Name?: string; readonly Label?: string } | null;
+}
+
+/** A PSA row, tagged with the PSG it arrived through (null = direct). */
+interface TaggedUserGrant extends UserPermsetGrant {
+  readonly viaGroup: string | null;
+}
+
+type UserPermsetsBase = Pick<
+  LiveUserPermsetsOutput,
+  'user' | 'totalAssignments' | 'expiredExcluded' | 'disclosure' | 'trust'
+>;
+
+const renderUserPermsetsMarkdown = (data: Omit<LiveUserPermsetsOutput, 'rendered'>): string => {
+  const direct = data.directPermsets.length;
+  const via = data.viaGroups.reduce((n, g) => n + g.permsets.length, 0);
+  const lines: string[] = [
+    `### Live permission-set holdings for ${data.user.name} (\`${data.user.username}\`)`,
+    '',
+    `Profile: **${data.user.profileName ?? '(none)'}**${data.user.isActive ? '' : ' — user is INACTIVE'}.`,
+    '',
+    `**${data.totalAssignments.toLocaleString('en-US')}** assignment(s)` +
+      ` (${direct} direct, ${via} via group(s) on this page)` +
+      (data.expiredExcluded > 0 ? `; ${data.expiredExcluded} expired assignment(s) excluded` : '') +
+      '.',
+  ];
+  const grantRows = (grants: readonly UserPermsetGrant[]) =>
+    mdTable(
+      ['Permission set', 'Label', 'Expires'],
+      grants.map((g) => [g.permissionSetName, g.permissionSetLabel ?? '—', g.expirationDate ?? '—']),
+    );
+  if (data.directPermsets.length > 0) {
+    lines.push('', '**Direct permission sets**', '', grantRows(data.directPermsets));
+  }
+  for (const g of data.viaGroups) {
+    lines.push('', `**Via permission set group \`${g.groupName}\`**`, '', grantRows(g.permsets));
+  }
+  if (data.capped) {
+    lines.push('', `Showing ${data.returned} of ${data.totalAssignments} assignment(s).`);
+  }
+  lines.push('', data.disclosure, '', renderTrustFooter(data.trust));
+  return lines.join('\n');
+};
+
+/** Byte-fit loop: trim assignment rows until the output fits; totalAssignments
+ *  is never touched, so a trimmed page never understates the holdings. */
+const fitUserPermsets = (
+  base: UserPermsetsBase,
+  allRows: readonly TaggedUserGrant[],
+): LiveUserPermsetsOutput => {
+  let slice: readonly TaggedUserGrant[] = allRows;
+  let byteTrimmed = false;
+  for (;;) {
+    const returned = slice.length;
+    const capped = byteTrimmed || base.totalAssignments > returned;
+    const direct: UserPermsetGrant[] = [];
+    const byGroup = new Map<string, UserPermsetGrant[]>();
+    for (const row of slice) {
+      const { viaGroup, ...grant } = row;
+      if (viaGroup === null) {
+        direct.push(grant);
+      } else {
+        const list = byGroup.get(viaGroup) ?? [];
+        list.push(grant);
+        byGroup.set(viaGroup, list);
+      }
+    }
+    const shape: Omit<LiveUserPermsetsOutput, 'rendered'> = {
+      ...base,
+      returned,
+      capped,
+      directPermsets: direct,
+      viaGroups: [...byGroup.entries()].map(([groupName, permsets]) => ({ groupName, permsets })),
+      ...(byteTrimmed
+        ? {
+            note:
+              `Assignment rows trimmed to ${returned} to stay within the response size limit; ` +
+              `totalAssignments (${base.totalAssignments}) is the true count.`,
+          }
+        : {}),
+    };
+    const rendered = renderUserPermsetsMarkdown(shape);
+    const bytes = Buffer.byteLength(JSON.stringify({ ...shape, rendered }), 'utf8');
+    if (bytes <= USER_PERMSETS_BYTE_BUDGET || slice.length <= 1) {
+      return { ...shape, rendered };
+    }
+    slice = slice.slice(0, Math.max(1, Math.floor(slice.length * 0.85)));
+    byteTrimmed = true;
+  }
+};
+
+export const liveUserPermsetsHandler = async (
+  ctx: Context,
+  input: LiveUserPermsetsInput,
+  exec: ExecCommand = nodeExecFile,
+): Promise<Result<McpResponse<LiveUserPermsetsOutput>, McpError>> => {
+  const gate = await gateLive(ctx, input);
+  if (!gate.ok) return gate;
+  const org = gate.value;
+  const queriedAt = new Date().toISOString();
+  const limit = input.limit ?? DEFAULT_USER_PERMSET_ROWS;
+  const lit = soqlLiteral(input.user);
+  const nowLiteral = soqlDateTime(new Date());
+  const userSelect = `SELECT Id, Name, Username, IsActive, Profile.Name FROM User`;
+
+  // Resolve: exact Username first (unique in an org), then exact Name.
+  let userRow: (HolderUserRow & { Profile?: { Name?: string } | null }) | undefined;
+  const byUsername = await liveQuery(org, `${userSelect} WHERE Username = ${lit} LIMIT 2`, exec);
+  if (!byUsername.available) return err(UNAVAILABLE_ERROR('User', org, byUsername.reason));
+  if (byUsername.records.length === 1) {
+    userRow = byUsername.records[0] as HolderUserRow;
+  } else {
+    const byName = await liveQuery(org, `${userSelect} WHERE Name = ${lit} LIMIT 5`, exec);
+    if (!byName.available) return err(UNAVAILABLE_ERROR('User', org, byName.reason));
+    if (byName.records.length === 0) {
+      return err({
+        kind: 'component-not-found',
+        message:
+          `No user with exact Username or Name '${input.user}' in the live org. ` +
+          `Usernames are unique — prefer the full Username.`,
+      });
+    }
+    if (byName.records.length > 1) {
+      const candidates = byName.records
+        .map((r) => String((r as HolderUserRow).Username ?? ''))
+        .filter((u) => u.length > 0)
+        .join(', ');
+      return err({
+        kind: 'invalid-query',
+        message:
+          `'${input.user}' matches ${byName.records.length} users in the live org — refusing to guess. ` +
+          `Pass the exact Username. Candidates: ${candidates}.`,
+      });
+    }
+    userRow = byName.records[0] as HolderUserRow;
+  }
+  const user = {
+    id: String(userRow.Id ?? ''),
+    name: String(userRow.Name ?? ''),
+    username: String(userRow.Username ?? ''),
+    isActive: userRow.IsActive === true,
+    profileName: userRow.Profile?.Name ?? null,
+  };
+
+  // THE FILTER (see module note): IsOwnedByProfile = false keeps the user's
+  // profile-owned system PSA row from masquerading as a direct assignment.
+  const scope =
+    `AssigneeId = '${user.id}' AND PermissionSet.IsOwnedByProfile = false`;
+  const notExpiredClause = ` AND (ExpirationDate = null OR ExpirationDate >= ${nowLiteral})`;
+
+  const countQ = await liveQuery(
+    org,
+    `SELECT COUNT() FROM PermissionSetAssignment WHERE ${scope}${notExpiredClause}`,
+    exec,
+  );
+  if (!countQ.available) {
+    return err(UNAVAILABLE_ERROR('PermissionSetAssignment', org, countQ.reason));
+  }
+  const totalAssignments = countQ.total;
+
+  const expiredQ = await liveQuery(
+    org,
+    `SELECT COUNT() FROM PermissionSetAssignment WHERE ${scope} AND ExpirationDate < ${nowLiteral}`,
+    exec,
+  );
+  const expiredExcluded = expiredQ.available ? expiredQ.total : 0;
+
+  // ORDER BY Id, NOT `ORDER BY PermissionSet.Name` — probe-verified on a real
+  // org (2026-07-02): ordering by the relationship field silently DROPS PSA
+  // rows whose permission set is license-backed (e.g. `CodeBuilderUserPsl`),
+  // so the roster would enumerate 42 rows while honestly counting 43 — and
+  // the missing grantor could never appear on ANY page. Ordering by Id keeps
+  // every row enumerable; the page is sorted by name client-side below.
+  const detailQ = await liveQuery(
+    org,
+    `SELECT Id, PermissionSet.Name, PermissionSet.Label, PermissionSetGroupId, ` +
+      `PermissionSetGroup.DeveloperName, ExpirationDate FROM PermissionSetAssignment ` +
+      `WHERE ${scope}${notExpiredClause} ORDER BY Id LIMIT ${limit}`,
+    exec,
+  );
+  if (!detailQ.available) {
+    return err(UNAVAILABLE_ERROR('PermissionSetAssignment', org, detailQ.reason));
+  }
+  const rows: TaggedUserGrant[] = (detailQ.records as readonly UserPsaRow[])
+    .map((r) => ({
+      assignmentId: String(r.Id ?? ''),
+      permissionSetName: String(r.PermissionSet?.Name ?? ''),
+      permissionSetLabel: r.PermissionSet?.Label ?? null,
+      expirationDate: r.ExpirationDate ?? null,
+      viaGroup: r.PermissionSetGroupId
+        ? (r.PermissionSetGroup?.DeveloperName ?? String(r.PermissionSetGroupId))
+        : null,
+    }))
+    .sort((a, b) => a.permissionSetName.localeCompare(b.permissionSetName));
+
+  return ok({
+    data: fitUserPermsets(
+      {
+        user,
+        totalAssignments,
+        expiredExcluded,
+        disclosure: USER_PERMSETS_DISCLOSURE,
+        trust: liveTrust(queriedAt),
+      },
+      rows,
+    ),
+    vaultState: livePlaneVaultState(ctx),
+  });
+};

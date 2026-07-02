@@ -50,6 +50,10 @@ CLI queries and label answers `provenance: live_org`:
 | `sfi.live_describe` | Live object describe |
 | `sfi.live_org_limits` | Governor limit snapshot |
 | `sfi.live_inactive_users` | Users inactive for N days |
+| `sfi.live_permset_holders` | Who HOLDS a permission set / permission set group / profile — name-by-name roster with true count first and keyset paging |
+| `sfi.live_user_permsets` | What a named USER holds — direct permission sets vs via permission set groups, with expirations |
+| `sfi.live_group_members` | Who is IN a queue / public group right now — users, nested groups (one level), roles; queue supported objects; vault-drift check |
+| `sfi.live_zombie_accounts` | Active users with login access but zero permission-set/PSG assignments (profile grants still apply — disclosed) |
 | `sfi.live_drift_check` | Compare vault claims vs live org |
 | `sfi.live_report_usage` | Stale/unused reports (LastRunDate) |
 | `sfi.live_folder_access` | Folder access types |
@@ -60,6 +64,42 @@ CLI queries and label answers `provenance: live_org`:
 | `sfi.live_picklist_usage` | Which picklist values records actually use (GROUP BY vs the defined value set) |
 | `sfi.live_budget` | Session live-query budget + cache state (+ org API headroom when enabled) |
 | `sfi.live_consent` | Grant/revoke standing live-plane consent (not a query) |
+
+### Assignment-data tools (live-first by design)
+
+Runtime assignment data — User rows, `PermissionSetAssignment`, `GroupMember` —
+is deliberately **not** stored in the vault (only a counts-only facts snapshot
+via `sfi refresh --with-data-shape`; no user identities ever land in vault
+facts). Rosters go stale in exactly the way an auditor must not trust, so the
+four assignment tools (`live_permset_holders`, `live_user_permsets`,
+`live_group_members`, `live_zombie_accounts`) answer **live only**: consent-
+gated like every live tool, budgeted (`SFI_LIVE_QUERY_BUDGET`), true-count
+first, capped at 500 detail rows per page with keyset paging (`afterId`), and
+stamped `provenance: live_org` (point-in-time as of `queriedAt`).
+
+Semantics worth knowing:
+
+- **The PSG trap** — direct holders of a permission set miss users who receive
+  it through a permission set group containing it. `live_permset_holders`
+  queries `PermissionSetGroupComponent` and reports `directHolders` /
+  `viaGroupHolders` separately with a deduped `effectiveTotal`, so the holder
+  count is audit-grade instead of confidently understated. Expired assignments
+  are excluded from totals and disclosed (`expiredExcluded`).
+- **Zombie ≠ no access** — `live_zombie_accounts` anti-joins on
+  `PermissionSet.IsOwnedByProfile = false` (every user carries a system PSA row
+  for their profile-owned set; without the filter the answer is always empty).
+  A "zombie" still holds everything its PROFILE grants — the output says so
+  verbatim.
+- **One level of nesting** — `live_group_members` expands nested public groups
+  exactly one level when asked (`expandNested: true`, stamped
+  `expansion: 'partial-one-level'`) and surfaces role-based members as ROLE
+  entries, never silently expanded to users.
+- **Direction matters** — `live_permset_holders` answers "who holds X";
+  `live_user_permsets` answers "what does user Jane hold" (paired with the
+  vault's `effective_permissions`, which describes what those grantors GRANT —
+  a dual-provenance answer). `sfi.coverage_report` carries an `assignmentData`
+  section naming this boundary; `sfi.health_check` reports it informationally
+  and never degrades for it.
 
 ### Hybrid answers (vault + live)
 

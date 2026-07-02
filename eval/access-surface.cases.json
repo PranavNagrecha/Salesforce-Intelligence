@@ -326,10 +326,10 @@
       "query": "Which permission set groups are assigned to nobody?",
       "expect": "routes",
       "intent": "unassigned-permset-groups",
-      "plane": "vault",
-      "tools": [],
+      "plane": "live",
+      "tools": ["sfi.live_permset_holders"],
       "gap": "unassigned-permset-groups",
-      "note": "P0b fix: HONEST GAP. PermissionSetGroup assignment is not modeled (no PSG-assignment tool), so this routes to a dedicated capability-gap intent with tools:[] and a gap.note — it must NOT fall through to unassigned_permission_sets (PermissionSet-only, confidently wrong) or fabricate a live workaround."
+      "note": "ENGINE-ARC §4 PARTIAL FLIP (was P0b HONEST GAP). PSG assignment is now checkable live per named group: sfi.live_permset_holders (kind: permissionSetGroup) returns the true holder count — zero effectiveTotal = unassigned. Still must NOT fall through to unassigned_permission_sets (PermissionSet-only, confidently wrong); the gap note is DOWNGRADED to the partial (no single-call all-PSG sweep yet), not deleted."
     },
     {
       "id": "user-assignment-gap-membership",

@@ -237,10 +237,17 @@ full matrix.
 | `sfi.live_describe` | Live object describe |
 | `sfi.live_org_limits` | Governor limit snapshot |
 | `sfi.live_inactive_users` | Users inactive for N days |
+| `sfi.live_permset_holders` | Who holds a permission set / PSG / profile (PSG-trap-aware roster) |
+| `sfi.live_user_permsets` | What a named user holds (direct vs via-PSG, expirations) |
+| `sfi.live_group_members` | Current queue / public-group membership + vault-drift check |
+| `sfi.live_zombie_accounts` | Active users with zero permission-set/PSG assignments |
 | `sfi.live_drift_check` | Offline vault vs live contradiction check |
 
 Hybrid answers fuse vault + live and disclose both provenances. Live never
-backfills stale vault claims.
+backfills stale vault claims. Runtime assignment data (User /
+PermissionSetAssignment / GroupMember) is live-first **by design** — it is
+never modeled in the vault, and `sfi.coverage_report` reports that boundary as
+an `assignmentData` section, not a retrieve gap.
 
 ## 6. Component and edge coverage
 
