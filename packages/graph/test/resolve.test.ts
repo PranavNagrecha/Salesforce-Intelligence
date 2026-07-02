@@ -110,7 +110,15 @@ const seed: ExtractionResult = {
     // the isPureShortSubstringOfCompound containment-suppression path.
     makeNode({ id: 'CustomField:Student__c.ASN__c', type: 'CustomField', apiName: 'ASN__c', label: 'ASN', parentId: 'CustomObject:Student__c' }),
     makeNode({ id: 'CustomField:Student__c.BSN__c', type: 'CustomField', apiName: 'BSN__c', label: 'BSN', parentId: 'CustomObject:Student__c' }),
-    makeNode({ id: 'CustomField:Student__c.MSN_Professional_Status__c', type: 'CustomField', apiName: 'MSN_Professional_Status__c', label: 'MSN Professional Status', parentId: 'CustomObject:Student__c' }),
+    makeNode({ id: 'CustomField:Student__c.MSN_Compound_Status__c', type: 'CustomField', apiName: 'MSN_Compound_Status__c', label: 'MSN Compound Status', parentId: 'CustomObject:Student__c' }),
+    // Type-hint scenarios (eval Family A): a ValidationRule with an exact `ssn`
+    // token — a "<name> field" query's CustomField hint must PREFER fields among
+    // equal-confidence matches but never resurrect the fuzzy acronym decoys
+    // (ssn≈asn/bsn/msn, base ≈0.78) above this exact-token match of another
+    // type. Plus a trigger on Contact so "Contact trigger" resolves to the
+    // trigger rather than a fuzzy menu.
+    makeNode({ id: 'ValidationRule:Student__c.SSN_Format_Check', type: 'ValidationRule', apiName: 'SSN_Format_Check', label: 'SSN Format Check', parentId: 'CustomObject:Student__c' }),
+    makeNode({ id: 'ApexTrigger:ContactTrigger', type: 'ApexTrigger', apiName: 'ContactTrigger', label: 'ContactTrigger', parentId: 'CustomObject:Contact' }),
     // Generic-type-word decoy (resolver Bug 1): a Profile literally api-named
     // "Profile". A bare single-token conceptual query ("Profile") must NOT resolve
     // to this component (which would trigger an unwanted disambiguation); the
@@ -585,7 +593,7 @@ describe('resolveComponents — short-acronym false positives (Bug 2)', () => {
       for (const decoy of [
         'CustomField:Student__c.ASN__c',
         'CustomField:Student__c.BSN__c',
-        'CustomField:Student__c.MSN_Professional_Status__c',
+        'CustomField:Student__c.MSN_Compound_Status__c',
       ]) {
         const decoyRank = r.value.candidates.findIndex((c) => c.id === decoy);
         if (decoyRank !== -1) expect(ssnRank).toBeLessThan(decoyRank);
@@ -604,6 +612,105 @@ describe('resolveComponents — short-acronym false positives (Bug 2)', () => {
         'CustomField:Student__c.Student_SSN__c',
       );
     }
+  });
+});
+
+describe('resolveComponents — leading/trailing schema nouns are type hints (Family A)', () => {
+  it('"SSN field" scores exactly like bare "SSN": the noun is stripped from matching', async () => {
+    // The trailing noun is a TYPE hint, not name content. Fed to the matcher it
+    // used to resurrect the acronym false-positives Bug 2 suppressed (the
+    // CustomField hint floated the fuzzy asn/bsn/msn fields over exact-token
+    // matches of other types). Both forms must reduce to the same tokens and
+    // put the genuine SSN field first with every decoy below it.
+    for (const q of ['SSN', 'SSN field', 'ssn field']) {
+      const r = await resolveComponents(store, q);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.queryTokens).toEqual(['ssn']);
+      expect(r.value.candidates[0]?.id).toBe('CustomField:Student__c.Student_SSN__c');
+      const rank = (id: string): number =>
+        r.value.candidates.findIndex((c) => c.id === id);
+      for (const decoy of [
+        'CustomField:Student__c.ASN__c',
+        'CustomField:Student__c.BSN__c',
+        'CustomField:Student__c.MSN_Compound_Status__c',
+      ]) {
+        const decoyRank = rank(decoy);
+        if (decoyRank !== -1) expect(rank('CustomField:Student__c.Student_SSN__c')).toBeLessThan(decoyRank);
+      }
+    }
+  });
+
+  it('the type hint never floats a weak fuzzy match of the hinted type over an exact-token match of another type', async () => {
+    // "SSN field" hints CustomField — but the fuzzy acronym decoys (base ≈0.78)
+    // must still rank BELOW the ValidationRule whose name carries an exact
+    // `ssn` token (base 1.0). Type intent breaks ties within a confidence
+    // tier; it never outranks confidence.
+    const r = await resolveComponents(store, 'SSN field');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const rank = (id: string): number => r.value.candidates.findIndex((c) => c.id === id);
+    const vrRank = rank('ValidationRule:Student__c.SSN_Format_Check');
+    expect(vrRank).not.toBe(-1);
+    for (const decoy of [
+      'CustomField:Student__c.ASN__c',
+      'CustomField:Student__c.BSN__c',
+      'CustomField:Student__c.MSN_Compound_Status__c',
+    ]) {
+      const decoyRank = rank(decoy);
+      if (decoyRank !== -1) expect(vrRank).toBeLessThan(decoyRank);
+    }
+  });
+
+  it('"<acronym> field" variants resolve their own field (hint helps, never hurts)', async () => {
+    for (const [q, id] of [
+      ['ASN field', 'CustomField:Student__c.ASN__c'],
+      ['BSN field', 'CustomField:Student__c.BSN__c'],
+    ] as const) {
+      const r = await resolveComponents(store, q);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.candidates[0]?.id).toBe(id);
+    }
+  });
+
+  it('"the payment object" resolves the Payment object instead of fuzzy "object" junk', async () => {
+    // Pre-fix the token "object" fuzzy-matched unrelated names and dragged the
+    // whole query to `none`/noise. Stripped as a hint, the query is just
+    // "payment" with a CustomObject preference.
+    const r = await resolveComponents(store, 'the payment object');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.queryTokens).toEqual(['payment']);
+    expect(r.value.candidates[0]?.id).toBe('CustomObject:Payment__c');
+    expect(r.value.disposition).toBe('exact');
+  });
+
+  it('"Contact trigger" resolves the trigger on Contact', async () => {
+    const r = await resolveComponents(store, 'Contact trigger');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.candidates[0]?.id).toBe('ApexTrigger:ContactTrigger');
+    expect(r.value.disposition).toBe('exact');
+  });
+
+  it('a query that is ONLY nouns/articles is left untouched ("permission set")', async () => {
+    // Stripping everything would turn a concept word into an empty query;
+    // noun-only queries keep their existing behavior instead.
+    const r = await resolveComponents(store, 'permission set');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.queryTokens).toEqual(['permission', 'set']);
+  });
+
+  it('interior nouns are never stripped (a field genuinely named with the noun stays findable)', async () => {
+    // Only the leading/trailing edge is hint territory — "pay period field"
+    // loses the trailing noun but keeps its real name tokens.
+    const r = await resolveComponents(store, 'pay period field');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.queryTokens).toEqual(['pay', 'period']);
+    expect(r.value.candidates[0]?.id).toBe('CustomField:Account.Pay_Period__c');
   });
 });
 
@@ -823,5 +930,129 @@ describe('resolveComponents — parent-object word beats whole-name decoy (B1/B2
     connection.disconnectSync();
     instance.closeSync();
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// =============================================================================
+// Bug 3 — exact api-name match must win over a superset/substring rival
+// =============================================================================
+// Real-org eval case: query "Calculate_Contact_Budget_Group" returns
+// disposition=ambiguous because both the exact flow AND a longer flow that
+// merely CONTAINS the query string score highly. An exact api-name match must
+// always win; only a genuine same-name collision (two components with the
+// identical normalized api-name) stays ambiguous.
+// =============================================================================
+describe('resolveComponents — exact api-name wins over superset-containing rival (Bug 3)', () => {
+  let bug3Dir: string;
+  let bug3Store: GraphStore;
+
+  beforeAll(async () => {
+    bug3Dir = mkdtempSync(join(tmpdir(), 'sfi-resolve-bug3-'));
+    const instance = await DuckDBInstance.create(join(bug3Dir, 'b3.db'));
+    const connection = await instance.connect();
+    const init = await initSchema(connection);
+    if (!init.ok) throw new Error(init.error.message);
+    bug3Store = { connection, instance };
+    const bug3Seed: ExtractionResult = {
+      nodes: [
+        // The EXACT match: api-name equals the query verbatim.
+        makeNode({
+          id: 'Flow:Alpha_Beta_Flow',
+          type: 'Flow',
+          apiName: 'Alpha_Beta_Flow',
+          label: 'Alpha Beta Flow',
+        }),
+        // The SUPERSET rival: contains the query string but is longer.
+        // Made MORE popular (3 inbound refs) to stress-test that popularity
+        // cannot let a superset override an exact api-name match.
+        makeNode({
+          id: 'Flow:RT_X_Alpha_Beta_Flow_Calculation',
+          type: 'Flow',
+          apiName: 'RT_X_Alpha_Beta_Flow_Calculation',
+          label: 'RT X Alpha Beta Flow Calculation',
+        }),
+        // Dummy referrers that make the superset more popular.
+        makeNode({ id: 'ApexClass:Ref1', type: 'ApexClass', apiName: 'Ref1' }),
+        makeNode({ id: 'ApexClass:Ref2', type: 'ApexClass', apiName: 'Ref2' }),
+        makeNode({ id: 'ApexClass:Ref3', type: 'ApexClass', apiName: 'Ref3' }),
+        // Two same-named fields on different objects — genuine collision.
+        makeNode({ id: 'CustomObject:Account', apiName: 'Account', label: 'Account' }),
+        makeNode({ id: 'CustomObject:Contact', apiName: 'Contact', label: 'Contact' }),
+        makeNode({
+          id: 'CustomField:Account.Foo__c',
+          type: 'CustomField',
+          apiName: 'Foo__c',
+          label: 'Foo',
+          parentId: 'CustomObject:Account',
+        }),
+        makeNode({
+          id: 'CustomField:Contact.Foo__c',
+          type: 'CustomField',
+          apiName: 'Foo__c',
+          label: 'Foo',
+          parentId: 'CustomObject:Contact',
+        }),
+      ],
+      edges: [
+        makeEdge({ fromId: 'CustomObject:Account', toId: 'CustomField:Account.Foo__c', edgeType: 'parentOf' }),
+        makeEdge({ fromId: 'CustomObject:Contact', toId: 'CustomField:Contact.Foo__c', edgeType: 'parentOf' }),
+        // Make the superset rival popular.
+        makeEdge({ fromId: 'ApexClass:Ref1', toId: 'Flow:RT_X_Alpha_Beta_Flow_Calculation' }),
+        makeEdge({ fromId: 'ApexClass:Ref2', toId: 'Flow:RT_X_Alpha_Beta_Flow_Calculation' }),
+        makeEdge({ fromId: 'ApexClass:Ref3', toId: 'Flow:RT_X_Alpha_Beta_Flow_Calculation' }),
+      ],
+    };
+    const imp = await importExtractionResults(bug3Store, [bug3Seed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+  });
+
+  afterAll(() => {
+    bug3Store.connection.disconnectSync();
+    bug3Store.instance.closeSync();
+    rmSync(bug3Dir, { recursive: true, force: true });
+  });
+
+  it('(a) unique exact api-name match wins over a more-popular superset rival — bare query', async () => {
+    // query "Alpha_Beta_Flow" matches Flow:Alpha_Beta_Flow EXACTLY (api-name
+    // equals query) but also Flow:RT_X_Alpha_Beta_Flow_Calculation (contains
+    // every token). The superset is more popular (3 inbound refs). The resolver
+    // must return disposition=exact with the exact-named flow ranked first.
+    const r = await resolveComponents(bug3Store, 'Alpha_Beta_Flow');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.candidates[0]?.id).toBe('Flow:Alpha_Beta_Flow');
+    expect(r.value.disposition).toBe('exact');
+    // Superset may appear in candidates, but never as rank-1.
+    const supersetRank = r.value.candidates.findIndex(
+      (c) => c.id === 'Flow:RT_X_Alpha_Beta_Flow_Calculation',
+    );
+    if (supersetRank !== -1) expect(supersetRank).toBeGreaterThan(0);
+  });
+
+  it("(a') exact api-name + trailing type hint still resolves exact (Bug 3 core case)", async () => {
+    // The highest-value real-org eval case: a user appends a type hint
+    // ("Alpha_Beta_Flow flow"). The type-hint stripping removes "flow" from the
+    // token stream, but normQuery was computed from the raw query and encodes
+    // the hint ("alphabetaflowflow"), so the old wholeExact gate couldn't fire.
+    // The fix computes normStrippedQuery from the hint-stripped form and uses it
+    // as an additional wholeExact key, so the exact api-name node still wins.
+    const r = await resolveComponents(bug3Store, 'Alpha_Beta_Flow flow');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.candidates[0]?.id).toBe('Flow:Alpha_Beta_Flow');
+    expect(r.value.disposition).toBe('exact');
+  });
+
+  it('(b) genuine same-name collision (two fields named Foo__c on different objects) stays ambiguous', async () => {
+    // Both CustomField:Account.Foo__c and CustomField:Contact.Foo__c have the
+    // same api-name. Neither is a unique exact match — this is a real collision
+    // and must remain ambiguous so the user can disambiguate.
+    const r = await resolveComponents(bug3Store, 'Foo__c');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.disposition).toBe('ambiguous');
+    const topTwo = r.value.candidates.slice(0, 2).map((c) => c.id);
+    expect(topTwo).toContain('CustomField:Account.Foo__c');
+    expect(topTwo).toContain('CustomField:Contact.Foo__c');
   });
 });

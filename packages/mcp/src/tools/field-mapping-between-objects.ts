@@ -6,6 +6,15 @@
  * tools, this operates on TWO objects within the SAME vault. The
  * output is a heuristic field pairing the user MUST verify.
  *
+ * `vault` is OPTIONAL: when omitted the tool answers from the SERVED
+ * vault (`ctx.graph`), so the normal single-vault `sfi mcp` session —
+ * which has no multi-vault registry at all — works out of the box.
+ * When an alias IS supplied but no registry exists, a clearly
+ * self-referential alias (the served vault's directory name or path)
+ * still answers from the served vault with an honest single-vault
+ * disclosure; any other alias gets the alias-not-found refusal plus a
+ * hint that omitting `vault` uses the served vault.
+ *
  * The verbatim Q174 disclosure appears in `boundaries[]` on EVERY
  * response, regardless of similarity-threshold result:
  *
@@ -36,6 +45,8 @@
  *   any other combination           : incompatible
  */
 
+import { basename } from 'node:path';
+
 import type {
   ComponentId,
   McpError,
@@ -56,7 +67,12 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 export const fieldMappingBetweenObjectsInputSchema = z.object({
-  vault: z.string().min(1),
+  /**
+   * Optional registered-vault alias. When omitted the tool answers from
+   * the SERVED vault (the one this MCP session was launched against) —
+   * the normal single-vault deployment needs no registry at all.
+   */
+  vault: z.string().min(1).optional(),
   objectA: z.string().min(1),
   objectB: z.string().min(1),
   similarityThreshold: z.number().min(0).max(1).optional(),
@@ -254,13 +270,49 @@ const openVault = async (
 const HEURISTIC_MAPPING_DISCLOSURE =
   'field-mapping suggestions are heuristic — labels are matched by token overlap and types by compatibility table. Verify each suggested pair against your business rules before relying on the mapping for a migration script.';
 
+/**
+ * `VaultRef` for the SERVED vault — the one this MCP session was
+ * launched against. It is not (necessarily) in any registry, so
+ * `registeredAt` is empty and the alias is the vault directory name;
+ * freshness comes from the served manifest.
+ */
+const servedVaultRef = (ctx: Context): VaultRef => ({
+  alias: basename(ctx.vaultRoot),
+  path: ctx.vaultRoot,
+  registeredAt: '',
+  lastRefreshedAt: ctx.manifest.refreshedAt,
+  sourceTreeHash: ctx.manifest.sourceTreeHash,
+  componentCount: null,
+});
+
+/**
+ * Is `alias` clearly the served vault itself? True when it matches the
+ * served vault's path or directory name (case-insensitive) — the
+ * aliases a user naturally reaches for in a single-vault install.
+ */
+const isSelfReferentialAlias = (alias: string, vaultRoot: string): boolean => {
+  const a = alias.toLowerCase();
+  return a === vaultRoot.toLowerCase() || a === basename(vaultRoot).toLowerCase();
+};
+
+/**
+ * Mirrors fleet-find's single-vault degradation wording: an honest
+ * note instead of a silent empty answer when there is no registry.
+ */
+const SINGLE_VAULT_NOTE =
+  'No multi-vault registry found (set SF_INTELLIGENCE_REGISTRY_PATH to enable). This looks like a single-vault install — answered from the served vault.';
+
+const OMIT_VAULT_HINT =
+  'Omit `vault` to map fields within the served vault.';
+
 const vaultNotFoundResponse = (
   vault: string,
   objectA: string,
   objectB: string,
   ctx: Context,
+  extraBoundaries: readonly string[] = [],
 ): Result<McpResponse<FieldMappingBetweenObjectsOutput>, McpError> => {
-  const message = `vault alias '${vault}' is not registered. Run \`sfi register-vault ${vault} <path>\` first, or \`sfi list-vaults\` to see what's registered.`;
+  const message = `vault alias '${vault}' is not registered. Run \`sfi register-vault ${vault} <path>\` first, or \`sfi list-vaults\` to see what's registered. ${OMIT_VAULT_HINT}`;
   return ok({
     data: {
       vault: {
@@ -276,7 +328,7 @@ const vaultNotFoundResponse = (
       suggestedPairs: [],
       unpairedFromA: [],
       unpairedFromB: [],
-      boundaries: [HEURISTIC_MAPPING_DISCLOSURE, message],
+      boundaries: [HEURISTIC_MAPPING_DISCLOSURE, message, ...extraBoundaries],
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
@@ -295,24 +347,48 @@ export const fieldMappingBetweenObjectsHandler = async (
   const threshold = input.similarityThreshold ?? 0.5;
   const includeTypeIncompatible = input.includeTypeIncompatible === true;
 
-  const registry = await loadRegistry(registryRoot);
-  if (!registry.ok && registry.error.kind === 'registry-missing') {
-    return vaultNotFoundResponse(input.vault, input.objectA, input.objectB, ctx);
+  // Resolve WHICH vault to answer from. Three routes:
+  //   1. `vault` omitted → the served vault, registry or not.
+  //   2. `vault` given, no registry → served vault when the alias is
+  //      clearly self-referential (with the single-vault disclosure);
+  //      otherwise the alias-not-found refusal + omit-`vault` hint.
+  //   3. `vault` given, registry present → alias resolution as before.
+  let vaultPath: string;
+  let vaultRef: VaultRef;
+  const extraBoundaries: string[] = [];
+
+  if (input.vault === undefined) {
+    vaultPath = ctx.vaultRoot;
+    vaultRef = servedVaultRef(ctx);
+  } else {
+    const registry = await loadRegistry(registryRoot);
+    if (!registry.ok && registry.error.kind === 'registry-missing') {
+      if (!isSelfReferentialAlias(input.vault, ctx.vaultRoot)) {
+        return vaultNotFoundResponse(input.vault, input.objectA, input.objectB, ctx, [
+          'No multi-vault registry found (set SF_INTELLIGENCE_REGISTRY_PATH to enable). This looks like a single-vault install — omit `vault` to map fields within the served vault.',
+        ]);
+      }
+      vaultPath = ctx.vaultRoot;
+      vaultRef = { ...servedVaultRef(ctx), alias: input.vault };
+      extraBoundaries.push(SINGLE_VAULT_NOTE);
+    } else {
+      const pathResult = await resolveVault(registryRoot, input.vault);
+      if (!pathResult.ok) {
+        return vaultNotFoundResponse(input.vault, input.objectA, input.objectB, ctx);
+      }
+      const vaultRefResult = await getVaultRef(registryRoot, input.vault);
+      if (!vaultRefResult.ok) {
+        return err({
+          kind: 'internal',
+          message: 'failed to load vault metadata after alias resolution',
+        });
+      }
+      vaultPath = pathResult.value;
+      vaultRef = vaultRefResult.value;
+    }
   }
 
-  const pathResult = await resolveVault(registryRoot, input.vault);
-  if (!pathResult.ok) {
-    return vaultNotFoundResponse(input.vault, input.objectA, input.objectB, ctx);
-  }
-  const vaultRefResult = await getVaultRef(registryRoot, input.vault);
-  if (!vaultRefResult.ok) {
-    return err({
-      kind: 'internal',
-      message: 'failed to load vault metadata after alias resolution',
-    });
-  }
-
-  const opened = await openVault(ctx, pathResult.value);
+  const opened = await openVault(ctx, vaultPath);
   if (!opened.ok) return opened;
 
   try {
@@ -371,13 +447,13 @@ export const fieldMappingBetweenObjectsHandler = async (
 
     return ok({
       data: {
-        vault: vaultRefResult.value,
+        vault: vaultRef,
         objectA: { apiName: input.objectA, fieldCount: fieldsA.length },
         objectB: { apiName: input.objectB, fieldCount: fieldsB.length },
         suggestedPairs,
         unpairedFromA,
         unpairedFromB,
-        boundaries: [HEURISTIC_MAPPING_DISCLOSURE],
+        boundaries: [HEURISTIC_MAPPING_DISCLOSURE, ...extraBoundaries],
       },
       vaultState: {
         sourceTreeHash: ctx.manifest.sourceTreeHash,

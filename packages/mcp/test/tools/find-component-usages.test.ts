@@ -200,3 +200,91 @@ describe('type-specific empty boundaries', () => {
     expect(joined).not.toMatch(/launch points|assignments are access|expected shape/i);
   });
 });
+
+// Access-grant section: grants stay OUT of graphReferrers (access is not
+// usage), but a CustomPermission target — or a zero-usage target with incoming
+// grantedBy edges — surfaces its granters SEPARATELY under `grantedBy`, so
+// "which permission sets grant custom permission X?" stays answerable.
+describe('grantedBy section (grants listed separately from usages)', () => {
+  beforeAll(async () => {
+    await importExtractionResults(store, [{
+      nodes: [
+        node({ id: 'CustomPermission:Bypass_Checks', type: 'CustomPermission', apiName: 'Bypass_Checks' }),
+        node({ id: 'CustomPermission:Ungranted_Perm', type: 'CustomPermission', apiName: 'Ungranted_Perm' }),
+        node({ id: 'PermissionSet:OpsAccess', type: 'PermissionSet', apiName: 'OpsAccess' }),
+        node({ id: 'Profile:Support', type: 'Profile', apiName: 'Support' }),
+        node({ id: 'ApexClass:ChecksSvc', type: 'ApexClass', apiName: 'ChecksSvc' }),
+        node({ id: 'CustomField:Account.GrantOnly__c', type: 'CustomField', apiName: 'Account.GrantOnly__c' }),
+      ],
+      edges: [
+        edge({ fromId: 'PermissionSet:OpsAccess', toId: 'CustomPermission:Bypass_Checks', edgeType: 'grantedBy' }),
+        edge({ fromId: 'Profile:Support', toId: 'CustomPermission:Bypass_Checks', edgeType: 'grantedBy' }),
+        // A code usage of the same custom permission — usage tier, not a grant.
+        edge({ fromId: 'ApexClass:ChecksSvc', toId: 'CustomPermission:Bypass_Checks', edgeType: 'readsFrom', confidence: 'heuristic' }),
+        // A field with ONLY a grant edge (zero usage) — the fallback trigger.
+        edge({ fromId: 'Profile:Support', toId: 'CustomField:Account.GrantOnly__c', edgeType: 'grantedBy' }),
+        // A granted-but-never-defined managed-package custom permission (phantom).
+        edge({ fromId: 'PermissionSet:OpsAccess', toId: 'CustomPermission:Pkg_Only_Perm', edgeType: 'grantedBy' }),
+      ],
+    }]);
+  });
+
+  it('surfaces a CustomPermission\'s granting containers WITHOUT putting them in graphReferrers', async () => {
+    const r = await findComponentUsagesHandler(ctx, { componentId: 'CustomPermission:Bypass_Checks', includeGrep: false });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.grantedBy).toEqual({
+      count: 2,
+      granters: [
+        { id: 'PermissionSet:OpsAccess', type: 'PermissionSet' },
+        { id: 'Profile:Support', type: 'Profile' },
+      ],
+    });
+    // Grants never leak into the usage tier — only the Apex read is usage.
+    const allRefs = d.graphReferrers.flatMap((g) => g.sample.map((s) => s.referrerId));
+    expect(allRefs).toEqual(['ApexClass:ChecksSvc']);
+    expect(allRefs).not.toContain('PermissionSet:OpsAccess');
+    expect(allRefs).not.toContain('Profile:Support');
+    expect(d.summary.graphReferrerCount).toBe(1);
+    // The boundary explains grants are listed separately from usages.
+    expect(d.boundaries.join(' ')).toMatch(/listed SEPARATELY/i);
+  });
+
+  it('surfaces grants for a zero-usage non-CustomPermission target (fallback trigger)', async () => {
+    const r = await findComponentUsagesHandler(ctx, { componentId: 'CustomField:Account.GrantOnly__c', includeGrep: false });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.grantedBy).toEqual({
+      count: 1,
+      granters: [{ id: 'Profile:Support', type: 'Profile' }],
+    });
+    // Grants are NOT usage evidence — the empty≠absent honesty is unchanged.
+    expect(d.summary.hasStaticEvidence).toBe(false);
+    expect(d.boundaries.join(' ')).toMatch(/no static evidence/i);
+  });
+
+  it('OMITS the section when a non-CustomPermission target has usage edges (byte-identical to before)', async () => {
+    const r = await findComponentUsagesHandler(ctx, { componentId: FIELD, includeGrep: false });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    expect('grantedBy' in r.value.data).toBe(false);
+  });
+
+  it('answers a granted-but-undefined (phantom) CustomPermission from its grant edges', async () => {
+    const r = await findComponentUsagesHandler(ctx, { componentId: 'CustomPermission:Pkg_Only_Perm', includeGrep: false });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.target.retrieved).toBe(false);
+    expect(d.grantedBy).toEqual({
+      count: 1,
+      granters: [{ id: 'PermissionSet:OpsAccess', type: 'PermissionSet' }],
+    });
+    expect(d.boundaries.join(' ')).toMatch(/PHANTOM/);
+  });
+
+  it('reports an explicit count-0 section for a CustomPermission nothing grants', async () => {
+    const r = await findComponentUsagesHandler(ctx, { componentId: 'CustomPermission:Ungranted_Perm', includeGrep: false });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    expect(r.value.data.grantedBy).toEqual({ count: 0, granters: [] });
+    expect(r.value.data.summary.hasStaticEvidence).toBe(false);
+  });
+});

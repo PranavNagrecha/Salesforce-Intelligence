@@ -170,6 +170,43 @@ const LIST_PAYLOAD_BUDGET_BYTES = 38_000;
  * itself larger than the whole budget it is returned identity-only (properties
  * dropped) so the enumeration still answers instead of tripping the guard.
  */
+/**
+ * Per-item size threshold above which a node's bulky properties are slimmed
+ * for LIST output. Profile / PermissionSet nodes carry tens of KB of
+ * declarative grants (`userPermissions`, `fieldPermissions`,
+ * `recordTypeVisibilities`, …) in `properties`; shipping those verbatim means
+ * ONE profile exhausts the whole page budget, so a 59-profile org listed 1
+ * profile per page (the "1 of 59" bug). An enumeration needs identity plus
+ * scalar flags — not the full grant dump — so scalar properties (booleans /
+ * numbers / short strings, e.g. `isFormula`, `isBatchable`, `status`) are
+ * preserved, bulky arrays / objects / long strings are dropped, and
+ * `propertiesTruncated: true` marks the slimming so a caller knows to fetch
+ * `get_component` for the full detail.
+ */
+const ITEM_SLIM_THRESHOLD_BYTES = 2_048;
+
+/** Longest string property value the slimmed projection keeps verbatim. */
+const SLIM_STRING_MAX_CHARS = 256;
+
+const slimOversizedNode = (node: Node): Node => {
+  if (Buffer.byteLength(JSON.stringify(node), 'utf8') <= ITEM_SLIM_THRESHOLD_BYTES) {
+    return node;
+  }
+  const compact: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(node.properties ?? {})) {
+    if (
+      value === null ||
+      typeof value === 'boolean' ||
+      typeof value === 'number' ||
+      (typeof value === 'string' && value.length <= SLIM_STRING_MAX_CHARS)
+    ) {
+      compact[key] = value;
+    }
+  }
+  compact['propertiesTruncated'] = true;
+  return { ...node, properties: compact };
+};
+
 const fitNodesToBudget = (
   nodes: readonly Node[],
   budgetBytes: number,
@@ -294,6 +331,17 @@ export interface ListComponentsOutput {
   readonly truncated?: boolean;
   /** Human-readable note describing the trim; present only when `truncated`. */
   readonly note?: string;
+  /**
+   * Present (always `true`) when at least one row on this page was slimmed to
+   * scalar properties — bulky arrays/objects dropped, the row itself marked
+   * `properties.propertiesTruncated: true`. Grant-heavy types (Profile,
+   * PermissionSet) carry tens of KB of declarative grants per node; shipping
+   * those verbatim meant ONE row exhausted the ~38 KB page budget and a
+   * 59-profile org listed 1 profile per page (the "1 of 59" bug). Distinct
+   * from `truncated` (rows DROPPED from the page): a slimmed page still
+   * contains every row. Fetch `get_component` for a slimmed row's full detail.
+   */
+  readonly propertiesSlimmed?: true;
   /**
    * Set only when the FIRST page came back empty (FRESH-02). Distinguishes
    * "none in the org" (the type was retrieved, nothing found) from "not
@@ -457,11 +505,25 @@ export const listComponentsHandler = async (
 
   // Bound the serialized payload so a full-`Node` page can never trip the
   // global response-size guard (which would reject the whole result outright).
-  // When the page is too large to serialize under budget, return the largest
-  // id-ordered prefix that fits and flag `hasMore` so the caller can page on.
+  // Slim each oversized row FIRST: `fitNodesToBudget` measures the FULL
+  // serialized node, so a grant-heavy Profile/PermissionSet node (~38 KB of
+  // declarative grants in `properties`) exhausted the whole page budget by
+  // itself — a 59-profile org listed exactly 1 profile per page (the
+  // "1 of 59" bug). Slimming keeps identity + scalar flags per row (marked
+  // `propertiesTruncated: true`) so the whole inventory fits one page. When
+  // the slimmed page is STILL too large, return the largest id-ordered prefix
+  // that fits and flag `hasMore` so the caller can page on.
+  const slimmedPageNodes = pageNodes.map(slimOversizedNode);
   const { kept, trimmed } = fitNodesToBudget(
-    pageNodes,
+    slimmedPageNodes,
     LIST_PAYLOAD_BUDGET_BYTES,
+  );
+
+  // Whether any RETURNED row was slimmed — its per-row `propertiesTruncated:
+  // true` marker survives the prefix-trim because slimming runs first. Echoed
+  // as a top-level flag so a caller knows to use `get_component` for detail.
+  const propertiesSlimmed = kept.some(
+    (n) => n.properties?.['propertiesTruncated'] === true,
   );
 
   // `hasMore` is a hint: a full page (length === limit) may have more rows
@@ -579,6 +641,7 @@ export const listComponentsHandler = async (
       ...(docFallbackNote !== undefined ? { docFallbackNote } : {}),
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       ...(formulaFieldCount !== undefined ? { formulaFieldCount } : {}),
+      ...(propertiesSlimmed ? { propertiesSlimmed: true as const } : {}),
       ...(trimmed
         ? {
             truncated: true as const,

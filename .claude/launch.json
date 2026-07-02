@@ -1,0 +1,6 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    { "name": "website", "runtimeExecutable": "python3", "runtimeArgs": ["-m", "http.server", "8099", "--directory", "website"], "port": 8099 }
+  ]
+}

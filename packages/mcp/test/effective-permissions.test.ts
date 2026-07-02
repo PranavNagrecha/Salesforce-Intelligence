@@ -209,6 +209,29 @@ describe('CustomPermission access surface — effective_permissions union', () =
     ).toBe(true);
   });
 
+  // RT parity, older-vault path: NEITHER seeded container carries a
+  // recordTypeVisibilities property (pre-extraction vault) — the union must
+  // not throw, contributes nothing, and discloses the re-refresh remedy.
+  it('an absent recordTypeVisibilities property yields an empty RT union plus a re-refresh disclosure, never a throw', async () => {
+    const r = await effectivePermissionsHandler(ctx, {
+      profileId: 'Profile:CampusAdmin',
+      permissionSetIds: ['PermissionSet:AdvisorAccess'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.recordTypeVisibilities).toEqual([]);
+    expect(r.value.data.summary.recordTypeVisibilities).toBe(0);
+    expect(
+      r.value.data.disclosures.some(
+        (d) =>
+          d.includes('recordTypeVisibilities') &&
+          d.includes('/sfi-refresh') &&
+          d.includes('Profile:CampusAdmin') &&
+          d.includes('PermissionSet:AdvisorAccess'),
+      ),
+    ).toBe(true);
+  });
+
   it('links the two surfaces: every non-missing effective grant is enumerable via list_components', async () => {
     const listed = await listComponentsHandler(ctx, {
       type: 'CustomPermission',

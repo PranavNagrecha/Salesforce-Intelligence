@@ -197,6 +197,36 @@ const normalize = (q: string): string =>
   q.trim().toLowerCase().replace(/[‘’ʼ]/g, "'").replace(/\s+/g, ' ');
 
 /**
+ * Source for a "the question NAMES a component" regex fragment (lowercased). A
+ * token carrying at least two underscores — e.g. `rt_cu_as_create_new_advising_
+ * case`, `application_save_rt_orch`, `populate_program_of_interest_on_lead` — is
+ * unambiguously a Salesforce API name, never English prose (real words never
+ * stack two underscores). Used only in conjunction with a narration/behavior
+ * verb so it fires solely on "explain/summarize/walk-through/does <Name> fire"
+ * shapes, and it deliberately excludes the `hed__`/`__c`/`__mdt`/`__e`
+ * double-underscore custom-suffix forms (those are objects/fields, handled by
+ * the schema rules) via the leading `(?!\w*__)` guard on the first token. Kept
+ * as a string so callers can embed it in a larger anchored pattern.
+ */
+const NAMED_COMPONENT_ID = '(?!\\w*__)[a-z][a-z0-9]*_[a-z0-9]+_[a-z0-9_]*[a-z0-9]';
+
+/**
+ * Source for a "the question NAMES a specific field" regex fragment
+ * (lowercased). Matches either the dotted `<Object>.<field>` form
+ * (`case.foo_code__c`, `lead.bar_id__c`, `opportunity.amount`) OR a
+ * bare custom-field api name carrying the `__c` suffix
+ * (`widget_status__c`, `order_flag__c`). This is the
+ * field-forensics analogue of NAMED_COMPONENT_ID: it fires ONLY on an explicit
+ * field reference, so a field-lineage / field-provenance / safe-to-delete /
+ * what-if rule built on it cannot steal a bare-English question (which carries
+ * neither a dot nor a `__c`). Kept as a string so callers can embed it in a
+ * larger anchored pattern. The dotted branch requires a lowercase-letter start
+ * so a decimal ("3.5") is never mistaken for a field ref.
+ */
+const NAMED_FIELD_ID =
+  '(?:[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*|[a-z][a-z0-9_]*__c)';
+
+/**
  * Infer the DML event a save-order question is about, so the router can hand
  * `what_happens_on_save` the `event` arg it REQUIRES instead of the caller
  * guessing. Order matters: 'undelete' is checked before 'delete'. Defaults to
@@ -236,6 +266,13 @@ const deriveKnowledgeTopic = (q: string): string | undefined => {
   if (/\bnaming\s+conventions?\b/.test(q)) return 'naming-conventions';
   if (/\b(test\s+classes?|test\s+data\s+factory|structure\s+apex\s+test)\b/.test(q)) return 'apex-testing';
   if (/\bstandard\s+profiles?\b.*\b(ship|new\s+org)\b/.test(q)) return 'profiles-vs-permission-sets';
+  // Concept ask about the ACCESS PRIMITIVES themselves ("what is a profile") —
+  // the indefinite-article form names no org component, so it is knowledge,
+  // not a Profile-record lookup (eval family A over-clarify). The generic
+  // "difference between a profile and a permission set" phrasing deliberately
+  // stays on compare-profiles (see the access-surface fixture) — that route
+  // just must never raise an entity menu for the bare type words.
+  if (/\bwhat\s+is\s+an?\s+(?:profile|permission\s+set)\b/.test(q)) return 'profiles-vs-permission-sets';
   if (/\b(person\s+accounts?)\b/.test(q)) return 'standard-vs-custom-objects';
   if (/\b(ci\/cd|source\s+control|deployment\s+(and\s+)?release)\b/.test(q)) return 'release-management';
   if (/\bsandboxes?\b.*\b(refresh|managed)\b/.test(q)) return 'sandbox-environment-strategy';
@@ -345,6 +382,17 @@ const deriveMetadataParentId = (q: string, question?: string): string | undefine
   return undefined;
 };
 
+/**
+ * Prepositional captures that are DML/schema nouns, not object names — "what
+ * happens on SAVE for a Contact" must skip "save" and bind Contact, not emit
+ * `objectApiName: 'save'`.
+ */
+const NON_OBJECT_CAPTURES: ReadonlySet<string> = new Set([
+  'save', 'saves', 'saving', 'insert', 'update', 'delete', 'undelete',
+  'create', 'creation', 'edit', 'record', 'records', 'object', 'objects',
+  'it', 'this', 'that', 'them', 'each', 'every', 'all',
+]);
+
 /** Extract a Salesforce object apiName from a routed question phrase. */
 const deriveObjectApiFromQuestion = (q: string, question?: string): string | undefined => {
   const source = question ?? q;
@@ -352,10 +400,14 @@ const deriveObjectApiFromQuestion = (q: string, question?: string): string | und
     /\b(?:automation_build_advisor|order_of_execution|apex_build_advisor)\b\s+(?:on\s+)?([A-Za-z][A-Za-z0-9_]*(?:__c|__mdt|__e)?)\b/i,
   );
   if (toolObject?.[1] !== undefined) return toolObject[1];
-  const onObject = source.match(
-    /\b(?:on|for|to|access\s+to)\s+(?:the\s+|an\s+|a\s+)?([A-Za-z][A-Za-z0-9_]*(?:__c|__mdt|__e)?)\b/i,
-  );
-  if (onObject?.[1] !== undefined) return onObject[1];
+  const onObjectRe =
+    /\b(?:on|for|to|access\s+to)\s+(?:the\s+|an\s+|a\s+)?([A-Za-z][A-Za-z0-9_]*(?:__c|__mdt|__e)?)\b/gi;
+  for (const match of source.matchAll(onObjectRe)) {
+    const capture = match[1];
+    if (capture !== undefined && !NON_OBJECT_CAPTURES.has(capture.toLowerCase())) {
+      return capture;
+    }
+  }
   const dmlObject = source.match(
     /\b(?:update|insert|delete|save|create|edit)\s+(?:a\s+|an\s+|the\s+)?([A-Za-z][A-Za-z0-9_]*(?:__c|__mdt|__e)?)\b/,
   );
@@ -741,7 +793,13 @@ const RULES: readonly Rule[] = [
     liveRequired: false,
     needsResolve: true,
     reason: 'Explicit downstream_effects invocation.',
-    patterns: [/\bdownstream_effects\b/],
+    patterns: [
+      /\bdownstream_effects\b/,
+      // "downstream effects of changing X" — the natural phrasing. Previously
+      // caught only by pii-flow's bare \bdownstream\b catch-all (eval family E
+      // demoted that), so the dedicated tool now owns its own noun phrase.
+      /\b(?:downstream|ripple)\s+effects?\b/,
+    ],
   },
   {
     intent: 'package-impact',
@@ -799,7 +857,17 @@ const RULES: readonly Rule[] = [
     liveRequired: false,
     needsResolve: true,
     reason: 'Explicit async_chain_depth invocation.',
-    patterns: [/\basync_chain_depth\b/],
+    patterns: [
+      /\basync_chain_depth\b/,
+      // NL async-chain shapes (flow-family REACH). High precision: an explicit
+      // async-chain-depth / async-Apex-limit concern (queueable→queueable /
+      // future/batch chaining against the 5-deep / async-Apex governor limit).
+      /\basync\s+chain\b/,
+      /\basync[-\s]?apex[-\s]?limit\b/,
+      /\basync[-\s]apex[-\s]limit\b/,
+      /\bhow\s+deep\b[^.?!]{0,40}\basync\b/,
+      /\b(queueable|future|batch)\b[^.?!]{0,40}\bchain\w*\b[^.?!]{0,40}\b(depth|deep|limit)\b/,
+    ],
   },
   {
     intent: 'compliance',
@@ -1066,6 +1134,33 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // "list everyone with the X profile" is a USER ROSTER ask: user-to-profile
+    // assignment is runtime User-record state, not vault metadata — the schema
+    // list rule used to claim it via "list ... profiles" and answer with the
+    // Profile METADATA catalog (eval family D). live_group_count genuinely
+    // answers the count side (Users grouped by ProfileId) and
+    // live_inactive_users the login-activity side; the name-by-name roster
+    // itself is disclosed as a partial answer, never papered over.
+    intent: 'profile-user-roster',
+    plane: 'live',
+    tools: ['sfi.live_group_count', 'sfi.live_inactive_users'],
+    liveRequired: true,
+    needsResolve: false,
+    reason:
+      'Which users hold a profile is runtime User-record state: count them live grouped by ProfileId (live_group_count); login-activity detail comes from live_inactive_users.',
+    gap: {
+      category: 'profile-user-roster',
+      note: 'Partial answer: live_group_count returns user COUNTS per profile and live_inactive_users lists dormant users, but a full name-by-name user roster per profile is not a built capability yet.',
+    },
+    suggestArgs: () => ({ objectApiName: 'User', groupByField: 'ProfileId' }),
+    patterns: [
+      /\b(list|show|who\s+are)\b[^.?!]{0,20}\b(everyone|everybody|all\s+(the\s+)?users?|the\s+users?|people)\b[^.?!]{0,40}\b(with|on|assigned|holding|having)\b[^.?!]{0,40}\bprofile\b/,
+      /\b(which|what)\s+users?\b[^.?!]{0,40}\b(have|hold|are\s+on|with|assigned)\b[^.?!]{0,40}\bprofile\b/,
+      /\bwho\s+(has|holds|is\s+assigned)\b[^.?!]{0,40}\bprofile\b/,
+      /\beveryone\b[^.?!]{0,30}\b(with|on|assigned)\b[^.?!]{0,40}\bprofile\b/,
+    ],
+  },
+  {
     intent: 'stale-metadata',
     plane: 'vault',
     tools: ['sfi.list_components'],
@@ -1093,10 +1188,25 @@ const RULES: readonly Rule[] = [
     reason:
       'License provisioning/usage and reclaimable seats are live org state (UserLicense / PermissionSetLicense + login activity).',
     patterns: [
-      /\b(licen[sc]e|seat)s?\b.*\b(usage|used|unused|utili[sz]ation|utilized|reclaim|reclaimable|available|free|provision|assigned|wasted|cost|optimi[sz])/,
-      /\b(usage|utili[sz]ation|utilized|reclaim|reclaimable|unused|provision|assigned|wasted)\b.*\b(licen[sc]e|seat)s?\b/,
+      // Guarded (eval family C — qualifier hijack): "seats"/"license" as a
+      // TRAILING modifier must not drag a permission-set ASSIGNMENT question
+      // ("who is assigned the X permission set — are we wasting seats?") onto
+      // the live license counter. When the question mentions a permission set
+      // that is NOT the literal "permission set license" (PSL) noun, the
+      // perm-set rules below own it; genuine PSL asks keep the third pattern.
+      /^(?!.*\bpermission\s+sets?\b(?!\s+licen[sc]e)).*\b(licen[sc]e|seat)s?\b.*\b(usage|used|unused|utili[sz]ation|utilized|reclaim|reclaimable|available|free|provision|assigned|wasted|cost|optimi[sz])/,
+      /^(?!.*\bpermission\s+sets?\b(?!\s+licen[sc]e)).*\b(usage|utili[sz]ation|utilized|reclaim|reclaimable|unused|provision|assigned|wasted)\b.*\b(licen[sc]e|seat)s?\b/,
       /\bpermission\s+set\s+licen[sc]e/,
       /\bhow\s+many\s+(licen[sc]e|seat)s?\b/,
+      // DISCOVERY/META REACH: "how many <LicenseType> and <LicenseType>
+      // licenses are we actually USING vs what we're PAYING for" — the
+      // provisioning-vs-consumption ask. The base patterns above keyed on
+      // `used`/`usage` (not the gerund "using") and on "how many licenses"
+      // adjacent, so "how many Salesforce and Community licenses … using"
+      // fell through. Anchor on "how many … licenses … using/paying" (the
+      // provisioned-vs-paid frame), still guarded off a perm-set-assignment
+      // question by the leading negative lookahead style used above.
+      /^(?!.*\bpermission\s+sets?\b(?!\s+licen[sc]e)).*\bhow\s+many\b[^.?!]{0,60}\blicen[sc]es?\b[^.?!]{0,60}\b(?:using|use|paying|pay|provision\w*|actually\s+us\w*)\b/,
     ],
   },
   {
@@ -1115,7 +1225,9 @@ const RULES: readonly Rule[] = [
       // count (record-count) or a permission audit (over-permission), not dormancy.
       /\bhow\s+many\b.*\b(inactive|dormant|stale)\b.*\busers?\b/,
       /\bhow\s+many\b.*\busers?\b.*\b(inactive|dormant|stale|haven'?t\s+logged|not\s+logged)\b/,
-      /\b(license|seat)s?\b.*\b(reclaim|unused|free|available)\b/,
+      // Same permission-set guard as license-usage (eval family C): a seat
+      // modifier on a perm-set-assignment ask must not land on login activity.
+      /^(?!.*\bpermission\s+sets?\b(?!\s+licen[sc]e)).*\b(license|seat)s?\b.*\b(reclaim|unused|free|available)\b/,
     ],
   },
   {
@@ -1301,6 +1413,13 @@ const RULES: readonly Rule[] = [
       /\bstorage\b.*\b(by|per)\b.*\bobject\b/,
       /\bdata\s+volume\b.*\bobject\b/,
       /\btop\b.*\bobjects?\b.*\b(by|with)\b.*\b(records?|rows?)\b/,
+      // "which custom objects are essentially empty in prod" — whether an
+      // object holds records is the SAME live per-object COUNT read from the
+      // other end (zero/near-zero instead of most); it was unrouted and the
+      // vault cannot answer it at all (eval family D).
+      /\b(which|what)\b[^.?!]{0,40}\bobjects?\b[^.?!]{0,50}\bempty\b/,
+      /\bempty\b[^.?!]{0,20}\b(custom\s+)?objects?\b/,
+      /\bobjects?\b[^.?!]{0,40}\b(no|zero|barely\s+any|hardly\s+any)\s+(records?|rows?|data)\b/,
     ],
   },
   {
@@ -1460,7 +1579,11 @@ const RULES: readonly Rule[] = [
     reason: 'Report inventory is in the vault; stale/unused needs live LastRunDate.',
     patterns: [
       /\breports?\b.*\b(useless|unused|stale|dead|old|never\s+run|not\s+used|broken)\b/,
-      /\b(reports?|dashboards?)\b.*\b(cover|covers|about|for)\b(?!.*\breport\s+types?\b)/,
+      // Guarded (eval family C): "compliance report … who touches the X field"
+      // uses "report" as the requested DELIVERABLE, not the subject — the
+      // head question is field access, so a compliance/who-touches frame must
+      // not land on live report run-history.
+      /^(?!.*\b(?:compliance|who\s+touch)\w*\b).*\b(reports?|dashboards?)\b.*\b(cover|covers|about|for)\b(?!.*\breport\s+types?\b)/,
       /\b(useless|unused|stale|dead)\b.*\breports?\b/,
       /\b(dashboards?)\b.*\b(unused|stale|broken|refresh)\b/,
       /\breports?\b.*\b(not\s+run|haven'?t\s+been\s+run)\b/,
@@ -1534,6 +1657,13 @@ const RULES: readonly Rule[] = [
       // API-enabled login profiles.
       /\b(which|what)\s+profiles?\b.*\b(api|log\s+in|login)\b/,
       /\bprofiles?\b.*\b(log\s+in|login)\b.*\bapi\b/,
+      // REACH (permissions/access cluster) — FORWARD run-access: "which screen
+      // flows are exposed / available / visible / assigned to the <Named>
+      // profile / perm set". This is the granter's OWN runnableFlows list
+      // (user_ability), not the reverse who_can_run (which starts from a flow).
+      // "exposed to <profile>" is the natural phrasing the existing
+      // "what flows can X run" templates missed.
+      /\bwhich\s+(?:screen\s+)?flows?\b[^.?!]{0,40}\b(?:exposed|available|visible|assigned)\s+to\b[^.?!]{0,30}\b(?:profile|perm\s*sets?|permission\s+sets?|user)\b/,
     ],
   },
   {
@@ -1548,6 +1678,19 @@ const RULES: readonly Rule[] = [
       /\bwho\s+can\s+run\b.*\bflow/,
       /\b(which|what)\s+(profiles?|permission\s+sets?|permsets?)\b.*\brun\b.*\bflow/,
       /\bwho\s+(can|is\s+able\s+to)\s+run\b.*\bflow/,
+      // REACH (permissions/access cluster): the existing templates broke on
+      // (1) an adverb between who/can and run ("who EXACTLY can run …",
+      // "who ACTUALLY can run …") and (2) a Flow named by its API id with a
+      // `_flow` / `_screen_flow` suffix but no separate bare word "flow"
+      // ("run Some_Named_Screen_Flow"). `FLOWREF` matches the bare word
+      // "flow(s)", the `_flow` suffix (no leading `\b`, so it fires inside a
+      // multi-underscore API name), or "screen flow(s)". Two shapes:
+      //   (a) who [adverb] can run … <flow>
+      //   (b) can the <profile/perm set/user> run … <flow>
+      // Both require the RUN verb + a flow reference, so they never steal a
+      // record/object/field access ask (no "run … flow" there).
+      /\bwho\b[^.?!]{0,20}\bcan\b[^.?!]{0,15}\brun\b[^.?!]{0,60}(?:\bflows?\b|_flow\b|screen\s+flows?\b)/,
+      /\bcan\b[^.?!]{0,40}\b(?:profile|perm\s*sets?|permission\s+sets?|user)\b[^.?!]{0,20}\brun\b[^.?!]{0,60}(?:\bflows?\b|_flow\b|screen\s+flows?\b)/,
     ],
   },
   {
@@ -1634,6 +1777,14 @@ const RULES: readonly Rule[] = [
       // recordTypeVisibilities modeling, answered from the profile side.
       /\bwhich\s+record\s+types?\b.*\b(available|access|assigned)\s+to\b.*\bprofiles?\b/,
       /\b(available|access|assigned)\s+to\b.*\bprofiles?\b.*\brecord\s+types?\b/,
+      // REACH (permissions/access cluster) — "why can't / won't <user> create /
+      // pick / select the <X> RECORD TYPE" is a recordTypeVisibilities gap: the
+      // container simply doesn't have that record type visible-for-create. The
+      // literal "record type" / "recordtypeid" noun keeps this off why-cant-see
+      // (record SHARING) and off object-access (object CRUD) — both of which
+      // lack the record-type noun.
+      /\bwhy\s+(?:can'?t|won'?t|cannot)\b[^.?!]{0,60}\b(?:create|pick|select|use|choose|see|open)\b[^.?!]{0,40}\brecord\s+type\b/,
+      /\brecord\s?type\s?id\b[^.?!]{0,60}\b(?:pick|select|choose|create|use)\b/,
     ],
   },
   {
@@ -1653,6 +1804,31 @@ const RULES: readonly Rule[] = [
       // Permission sets assigned to a named user (baseline-300 gap).
       /\bpermission\s+sets?\b.*\bassigned\b.*\buser\b/,
       /\bwhat\s+permission\s+sets?\b.*\bassigned\b/,
+      // REACH (permissions/access cluster): "does/can the <Named> profile /
+      // <Named> perm set have|give|grant|read|edit|create|delete|access|see|
+      // change <object>". These name a SPECIFIC granter (a profile/permission
+      // set) and ask what access it confers — the exact effective_permissions
+      // ask, which no earlier rule caught (the existing templates required the
+      // literal "effective/combined access" or the generic word "permissions").
+      // Anchored on the interrogative verb `does|can` PLUS the granter noun
+      // (profile|perm set) PLUS an access verb, all clause-bounded (`[^.?!]`) so
+      // one sentence's verb can't reach across into the next. The `(?<!\bwhy\s)`
+      // lookbehind keeps "why can't the X profile see the record" on
+      // why-cant-see; "who can …" field asks (no does/can-led granter) stay on
+      // field-access; enumerative "which permission sets grant …" stays on
+      // object-access (no does/can lead). recordtype-availability and
+      // profile-security sit EARLIER, so a record-type / session-security
+      // phrasing still wins by first-match. The leading `^(?!.*\blayouts?\b)`
+      // yields any "which layout does the X profile SEE" question to
+      // layout-access (a later rule) — "layout" anywhere disqualifies this
+      // permission route.
+      /^(?!.*\blayouts?\b).*?(?<!\bwhy\s)\b(?:does|can)\b[^.?!]{0,60}\b(?:profile|perm\s*sets?|permission\s+sets?)\b[^.?!]{0,60}\b(?:have|give|gives?|grant|grants?|read|edit|create|delete|access|see|change)\b/,
+      // "which perm sets are stacked on top of / assigned on top of the <Named>
+      // profile" — a union-of-containers ask (what the stack effectively grants).
+      /\bwhich\s+perm\s*sets?\b[^.?!]{0,40}\b(?:stacked|stack|on\s+top\s+of|added\s+to|layered)\b/,
+      // "for <PermSetA>, <PermSetB>, <PermSetC> perm sets, what does each
+      // contribute" — the division-of-access breakdown across a bundle.
+      /\bperm\s*sets?\b[^.?!]{0,20},[^.?!]{0,80}\bwhat\s+does\s+each\s+(?:contribute|grant|add|allow)\b/,
     ],
   },
   {
@@ -1718,7 +1894,16 @@ const RULES: readonly Rule[] = [
       'What happens when {Object}.{field} becomes {value} — the automation coupled to a value/stage transition, from the vault (lifecycle_process).',
     patterns: [
       /\bwhat\s+happens\s+when\b.*\b(becomes?|turns?|changes?\s+to|is\s+set\s+to|reaches?)\b/,
-      /\bwhat\s+(?:happens|runs|fires)\s+when\b.*\b(closed\s+won|closed\s+lost|converted|approved|activated)\b/,
+      // Up to three optional adverb words between the verb and "when" — "what
+      // runs AUTOMATICALLY when a Lead is converted" / "what fires IN THE
+      // BACKGROUND when …" were unrouted (eval lifecycle family). The DML-event
+      // save-order rule stays disjoint: its verb list has no transition verbs
+      // (converted / closed won / approved), so nothing is stolen either way.
+      /\bwhat\s+(?:happens|runs|fires)\b(?:\s+\w+){0,3}\s+when\b.*\b(closed\s+won|closed\s+lost|converted|approved|activated)\b/,
+      // Nominalized transition — "what runs ON Lead CONVERSION?" / "what fires
+      // upon Case escalation to closed" has no "when …is converted" clause at
+      // all; the nominal "on/upon <Entity> conversion" form routes the same.
+      /\bwhat\s+(?:happens|runs|fires|occurs|triggers)\b[^.?!]{0,40}\b(?:on|upon|during|after)\s+(?:an?\s+|the\s+)?\w+\s+conversion\b/,
       // P1e — generic state-transition verbs beyond the Opportunity/Lead
       // hardcoded list: "submitted", "disqualified", "completed", "enrolled" are
       // common transitions on other objects (Applications, Enrollments,
@@ -1749,6 +1934,20 @@ const RULES: readonly Rule[] = [
       /\b(which|what)\s+(profiles?|permission\s+sets?|roles?|groups?)\b.*\b(see|access|edit)\b.*\brecords?\b/,
       // Object-level access without the word "records" — must beat field-access.
       /\bwho\s+can\s+access\b(?!.*\bfield\b)/,
+      // Enumerative SINGULAR phrasings — "list every profile with delete
+      // permission on Contact", "show me every profile that can access Case".
+      // The bare noun "profile" is an intent signal here, not a named entity;
+      // these fell through to the generic schema list rule (eval family A).
+      /\b(?:list|show)\b.*\bevery\s+profiles?\b.*\b(?:permission|access)/,
+      /\bevery\s+profiles?\s+(?:that|who|with)\b.*\b(?:access|see|view|edit|read|delete|create)\b/,
+      /\b(?:which|what)\s+profiles?\b.*\b(?:create|read|edit|delete|view)\s+permission\b/,
+      // REACH (permissions/access cluster): "is <Object__c> visible / accessible
+      // to the <Named> profile / perm set / role" — the forward object-record
+      // access ask, which who_can_access_object answers (the agent reads whether
+      // that container is among the granters). `__c`-anchored + "visible/…
+      // to <container>" so it never grabs a layout ("is Account.Name visible on
+      // the layout") or a schema ("is Payment__c an object") question.
+      /\bis\b[^.?!]{0,20}\b\w+__c\b[^.?!]{0,20}\b(?:visible|accessible|available|readable|editable)\b[^.?!]{0,20}\bto\b[^.?!]{0,30}\b(?:profile|perm\s*sets?|permission\s+sets?|role|user)\b/,
     ],
   },
   {
@@ -1762,6 +1961,19 @@ const RULES: readonly Rule[] = [
       /\bwhy\s+(can'?t|cannot|can\s+not)\b.*\b(see|view|access)\b.*\b(record|account|case|contact|lead|opportunity)\b/,
       /\bcan'?t\s+(see|view|access)\b.*\b(record|account|case|opportunity|contact|lead)\b/,
       /\bwhy\s+(can'?t|cannot|can\s+not)\b.*\b(see|view|access)\b.*\b(an?\s+)?(account|case|contact|lead|opportunity)\b/,
+      // REACH (permissions/access cluster): the existing templates used a
+      // SINGULAR `\brecord\b` and only see/view/access, so a plural "records"
+      // ask ("why can't the Manager ROLE see Enrollment RECORDS", "why can't a
+      // user EDIT Order__c RECORDS") fell through. Add plural
+      // `records?` + the `edit|read` verbs — this is still the record-sharing
+      // cascade (OWD → sharing → role hierarchy), the honest tool for a
+      // "why can't X see/edit these RECORDS" question. The literal "records"
+      // keeps it OFF field-access (a named FIELD, no "records").
+      /\bwhy\s+(?:can'?t|won'?t|cannot|can\s+not)\b[^.?!]{0,60}\b(?:see|view|access|edit|read)\b[^.?!]{0,60}\brecords?\b/,
+      // Negative-contrast visibility — "why can a <user> see A records BUT NOT
+      // B" — the same sharing-cascade question phrased as a see-one-not-the-other
+      // puzzle. The "but not" tail distinguishes it from a plain who-can-see.
+      /\bwhy\s+can\b[^.?!]{0,60}\b(?:see|view|access)\b[^.?!]{0,60}\brecords?\b[^.?!]{0,40}\bbut\s+not\b/,
     ],
   },
   {
@@ -1888,6 +2100,40 @@ const RULES: readonly Rule[] = [
       // with the field named after (the (field|object)-after-access patterns
       // missed it). Battery gap.
       /\bfield[-\s]access\b/,
+      // Eval family C — qualifier hijack. "which fields are only ever written
+      // BY an integration user" is a field WRITE-access audit (who can edit),
+      // not integration topology: the "integration" qualifier was dragging it
+      // onto integration_map.
+      /\b(?:which|what)\s+fields?\b[^.?!]{0,80}\b(?:written|edited|updated|writable)\b[^.?!]{0,40}\bby\b/,
+      // "compliance report … who touches the <X> field" — who-touches-a-field
+      // is FLS edit access, not report run-history (the "report" qualifier was
+      // dragging it onto reports-usage).
+      /\bwho\s+touch(?:es)?\b[^.?!]{0,60}\b(?:fields?\b|__c\b)/,
+      // REACH (permissions/access cluster) — FLS on a NAMED field:
+      // (a) "who [adverb] can see/read/view/edit/access <Field__c or
+      //     Object.field>" — the existing who-can-see template broke on an
+      //     adverb ("who can ACTUALLY see Some_Field__c"). Field-anchored
+      //     (dotted or `__c`) and clause-guarded against "records" so a
+      //     who-can-see-RECORDS ask stays on who-can-access-object.
+      /\bwho\s+can\b(?![^.?!]*\brecords?\b)[^.?!]{0,25}\b(?:see|read|view|edit|access)\b[^.?!]{0,40}(?:\b\w+\.\w+\b|\b\w+__c\b)/,
+      // (b) "can/does <someone> edit/see <Object.field>" — FLS on a DOTTED
+      //     field ref ("Can Analytics edit Opportunity.Amount"). Restricted to a
+      //     dotted ref (or a bare `__c` accompanied by the word "field") so a
+      //     bare `__c` OBJECT ("can a user see Payment__c?") is NOT mistaken for
+      //     a field; the `(?<!\bwhy\s)` and no-"records" guards keep why-cant /
+      //     record asks off this rule, and effective-permissions (earlier) still
+      //     wins any granter-worded "does the X profile …" phrasing.
+      /(?<!\bwhy\s)\b(?:can|does)\b(?![^.?!]*\brecords?\b)[^.?!]{0,40}\b(?:see|read|view|edit|access)\b[^.?!]{0,30}(?:\b\w+\.\w+\b|\b\w+__c\b[^.?!]{0,25}\bfields?\b|\bfields?\b[^.?!]{0,25}\b\w+__c\b)/,
+      // (c) "why can't <someone> edit/see <Object.field or Field__c>" — an FLS
+      //     gap on a named FIELD (no "records"), which why_cant_user_see_record
+      //     (record sharing) does not answer; field_access_audit shows who holds
+      //     read/edit on the field. The no-"records" guard routes the RECORD
+      //     variant ("why can't X see <Object> records") to why-cant-see instead.
+      //     "access" is deliberately EXCLUDED from the verb list here — the noun
+      //     phrase "<managed-package> access" (in a "why can't they run the
+      //     managed-package action" question) would otherwise be misread as an
+      //     FLS verb.
+      /\bwhy\s+can'?t\b(?![^.?!]*\brecords?\b)[^.?!]{0,40}\b(?:see|read|view|edit)\b[^.?!]{0,40}(?:\b\w+\.\w+\b|\b\w+__c\b)/,
     ],
   },
   {
@@ -1905,6 +2151,28 @@ const RULES: readonly Rule[] = [
       /\bfield[-\s]level\s+security\b.*\b(managed|across|sensitive)/,
       /\b(apex|classes?)\b.*\b(enforce|enforces|CRUD|FLS|SECURITY_ENFORCED|stripInaccessible)\b/,
       /\bdoes\b.*\bapex\b.*\b(enforce|CRUD|FLS)\b/,
+    ],
+  },
+  {
+    // Deactivate-a-permission-set what-if (RESIDUAL 2). There is NO dedicated
+    // what_if_* simulator for permission sets in the vault tier, so this is an
+    // HONEST route to permission_risk_report (+ its impact edges via get_impact
+    // once the set is resolved): the report surfaces what access the set grants
+    // and who depends on it — the closest truthful answer to "does anything
+    // break if we deactivate it". needsResolve so the named permission set is
+    // resolved first. Sits before over-permission so a deactivation ask beats
+    // the generic god-mode phrasing; requires the deactivate/turn-off verb + a
+    // permission-set noun, so it never steals a plain over-privilege question.
+    intent: 'permission-set-deactivation-impact',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.permission_risk_report', 'sfi.get_impact'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'No what_if simulator exists for permission sets, so this routes honestly to permission_risk_report (what the set grants + who depends on it) with get_impact for the dependency surface — the truthful stand-in for a deactivation blast radius, not a fabricated simulation.',
+    patterns: [
+      /\b(?:deactivat\w+|disabl\w+|turn(?:ed|ing)?\s+off|remov\w+|delet\w+)\b[^.?!]{0,60}\bpermission\s+sets?\b/,
+      /\bpermission\s+sets?\b[^.?!]{0,60}\b(?:is|are|was|were|gets?|being)\s+(?:deactivated|disabled|turned\s+off|removed|deleted)\b/,
     ],
   },
   {
@@ -1933,6 +2201,37 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // Profile login/session security — IP ranges ("IP relaxation"), login
+    // hours, session settings (sfi.profile_security). Eval family C: the
+    // "integration users" qualifier in "do any profiles have IP relaxation
+    // that would block integration users" dragged this onto integration_map;
+    // the head noun is the PROFILE security posture. Enumerative asks list
+    // Profiles then drill per profile (profile_security requires a profileId).
+    intent: 'profile-security',
+    plane: 'vault',
+    tools: ['sfi.list_components', 'sfi.profile_security'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      "Profile login/session security (login IP ranges — 'IP relaxation' — login hours, org session settings) is declared Profile metadata: list_components(type Profile) enumerates, then profile_security per profile reads the posture.",
+    suggestArgs: () => ({ type: 'Profile' }),
+    patterns: [
+      /\bip\s+(?:relaxation|relaxed|ranges?|restrictions?|whitelists?|allowlists?)\b/,
+      /\blogin\s+(?:ip|hours?)\b/,
+      /\bprofiles?\b[^.?!]{0,50}\b(?:session\s+(?:timeout|settings?)|login\s+restrictions?)\b/,
+      // REACH (permissions/access cluster): MFA / password-policy / session
+      // security compared ACROSS profiles ("which profiles have MFA or session
+      // security settings weaker than the rest", "what password policies and
+      // session timeout are set per profile"). Both word orders (profile→setting
+      // and setting→profile). These are Profile login/session posture — the
+      // profile_security surface — which the IP/login-hours templates above did
+      // not cover. The `\bprofiles?\b` co-anchor keeps a generic "what is MFA"
+      // knowledge question on guidance.
+      /\bprofiles?\b[^.?!]{0,60}\b(?:mfa|multi[-\s]?factor|password\s+polic\w*|session\s+(?:security|timeout|settings?))\b/,
+      /\b(?:mfa|multi[-\s]?factor|password\s+polic\w*|session\s+(?:security|timeout|settings?))\b[^.?!]{0,60}\bprofiles?\b/,
+    ],
+  },
+  {
     // EARLY PRECISION RULE (P14-ROUTER-safe-delete-misroute): a long
     // compound delete-verdict question enumerates nouns ("every layout,
     // validation rule, flow, formula field, and permission set…") and the
@@ -1953,6 +2252,12 @@ const RULES: readonly Rule[] = [
       /\bsafe(?:[\s_-]+to[\s_-]+delete|_to_delete_field)\b/,
       /\b(block|prevent)\w*\b[^.?!]{0,30}\bdeletion\b/,
       /\bbefore\s+deleting\b/,
+      // "can I SAFELY delete X, Y, Z or are they referenced somewhere" — the
+      // adverb "safely" sits between "can i" and "delete", so the later
+      // `can\s+i\s+delete` pattern misses it. The safe/safely + delete/remove
+      // frame is the honest safe_to_delete_field ask (FIELD-FORENSICS REACH).
+      /\bcan\s+i\s+safely\s+(delete|remove)\b/,
+      /\bsafely\s+(delete|remove)\b[^.?!]{0,80}\breferenced\b/,
     ],
   },
   {
@@ -2001,6 +2306,32 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // HONEST GAP (eval family D): "which USERS have permission set X" is a
+    // holder ROSTER — PermissionSetAssignment is runtime assignment data the
+    // vault does not model, and no live tool answers it yet.
+    // effective_permissions / object_access_audit describe what a permission
+    // set GRANTS, not who HOLDS it, so substituting them would be confidently
+    // wrong. Mirrors the unassigned-permset-groups gap above. The reverse
+    // direction ("what permission sets does user X have") stays on
+    // effective-permissions via first-match.
+    intent: 'permset-user-roster',
+    plane: 'vault',
+    tools: [],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Which users hold a permission set (PermissionSetAssignment) is not modeled — capability gap.',
+    gap: {
+      category: 'permset-user-roster',
+      note: 'PermissionSetAssignment modeling is not built yet, so "which users have permission set X" cannot be answered. Do not substitute effective_permissions or object_access_audit — they describe what a permission set GRANTS, not who holds it.',
+    },
+    patterns: [
+      /\b(which|what|list)\s+users?\b[^.?!]{0,40}\b(have|hold|with|assigned)\b[^.?!]{0,40}\bpermission\s+sets?\b/,
+      /\bwho\s+(has|holds|is\s+assigned)\b[^.?!]{0,50}\bpermission\s+sets?\b/,
+      /\b(everyone|everybody|all\s+users?)\b[^.?!]{0,30}\bwith\b[^.?!]{0,40}\bpermission\s+sets?\b/,
+      /\busers?\b[^.?!]{0,30}\bassigned\b[^.?!]{0,30}\bpermission\s+sets?\b/,
+    ],
+  },
+  {
     intent: 'empty-queues-groups',
     plane: 'vault',
     tools: ['sfi.empty_queues_and_groups'],
@@ -2013,6 +2344,44 @@ const RULES: readonly Rule[] = [
       /\b(which|what)\s+queues?\b.*\b(set\s+up|for|exist)\b/,
       /\bpublic\s+groups?\b.*\b(exist|who\s+is)\b/,
       /\bwhat\s+public\s+groups?\b/,
+      // DISCOVERY/META REACH: routing-trap SYMPTOM questions. When work "isn't
+      // getting picked up" / members "can't see cases routed to them", the
+      // HONEST first check is whether the queue actually HAS members — exactly
+      // what empty_queues_and_groups reports (memberCount / unknownMemberCount).
+      // Every pattern REQUIRES the literal "queue(s)" AND a NEGATIVE/failure
+      // frame (can't / not / isn't picked up / sitting in / exist-challenge),
+      // so a neutral "which queues does X route to and who are the members"
+      // stays a get_component ask (handled by the queue-membership rule below),
+      // and a record-sharing ("why can't X see an Account") question — which
+      // carries no "queue" — never lands here.
+      // "why can (members of) <queue> NOT see … routed to them"
+      new RegExp(
+        `\\bqueues?\\b[^.?!]{0,80}\\b(?:can'?t|cannot|not\\s+(?:see|get|pick|able)|isn'?t|aren'?t)\\b`,
+      ),
+      // Queue named only by its `_Queue` API-name suffix (no standalone "queue"
+      // word — underscore is a word char so `\bqueue\b` misses "ada_team_queue")
+      // WITH a member/routing symptom. "why can members of <X>_Queue not see …
+      // cases ROUTED to them" — the routing-trap membership check.
+      // Failure-framed only ("NOT see", "can't", "isn't picked up") — a neutral
+      // "which queues does <X>_Queue ROUTE to and who are the members" stays a
+      // get_component ask (route/routed deliberately excluded here).
+      /_queue\b[^.?!]{0,80}\b(?:not\s+(?:see|get|pick|able)|can'?t|cannot|isn'?t\s+(?:getting|picked))\b/,
+      /\bmembers?\s+of\b[^.?!]{0,30}_queue\b[^.?!]{0,80}\b(?:not|can'?t|cannot)\b/,
+      new RegExp(
+        `\\b(?:can'?t|cannot|not\\s+(?:see|get|pick|able)|isn'?t|aren'?t)\\b[^.?!]{0,80}\\bqueues?\\b`,
+      ),
+      // "why is the Lead SITTING IN <queue> instead of getting PICKED UP —
+      // queue members exist, right?" — the stuck-in-queue symptom.
+      /\bsitting\s+in\b[^.?!]{0,40}\bqueues?\b/,
+      /\bqueues?\b[^.?!]{0,40}\b(?:picked\s+up|getting\s+picked)\b/,
+      /\bqueue\s+members?\b[^.?!]{0,30}\bexist\b/,
+      // "why can't a user REASSIGN a Case to <Named>? They can touch every
+      // other QUEUE" — reassignment-to-a-queue trouble; the membership /
+      // queue-access check is the honest first probe. Requires a can't/cannot
+      // failure frame co-occurring with "reassign" and "queue".
+      new RegExp(
+        `\\b(?:can'?t|cannot)\\b[^.?!]{0,40}\\breassign\\w*\\b.*\\bqueues?\\b`,
+      ),
     ],
   },
   {
@@ -2065,7 +2434,12 @@ const RULES: readonly Rule[] = [
     reason: 'Profile→permission-set migration / merge-split planning from permission metadata.',
     patterns: [
       /\bprofiles?\b.*\b(to|into|vs)\b.*\bpermission\s+sets?\b/,
-      /\b(merge|split|consolidate)\b.*\bprofiles?\b/,
+      // `\bmerge\b` never matched the PAST tense "merged" (no boundary after
+      // "merge"), so "what would break if I MERGED the A and B profiles" fell
+      // through to unrouted. `merg\w*` catches merge/merged/merging; the two
+      // named profiles + the plural "profiles" keep it precise (USAGE/impact
+      // REACH — profiles/access family).
+      /\b(merg\w*|split|splitting|consolidat\w*)\b.*\bprofiles?\b/,
       /\bprofile\s+migration\b/,
       // PASSIVE voice (P1c): "what if two profiles are merged / were consolidated"
       // — the active templates above ("if I merge profiles") missed the passive
@@ -2083,11 +2457,20 @@ const RULES: readonly Rule[] = [
     liveRequired: false,
     needsResolve: true,
     reason: 'Traces where a field flows (upstream/downstream) across Apex, flows, integrations.',
+    // DEMOTED from catch-all (eval family E): field_lineage was the default
+    // for any field-adjacent question carrying "flow(s)" or a bare
+    // "upstream/downstream". Every pattern now requires an explicit
+    // lineage/provenance/movement frame, so the earlier field-access /
+    // explain-flow / save-order rules keep their heads and only genuine
+    // "where does this data come from / flow to" questions land here.
     patterns: [
       /\b(data\s+flow|lineage)\b/,
-      /\bwhere\s+does\b.*\b(field|data|pii|it)\b.*\b(flow|go)\b/,
-      /\bfield\b.*\bflows?\b/,
-      /\b(upstream|downstream)\b/,
+      /\bwhere\s+does\b.*\b(field|data|pii|it)\b.*\b(flow|go|come\s+from)\b/,
+      /\bfield\b[^.?!]{0,50}\bflows?\s+(?:to|into|out|through|downstream|between)\b/,
+      // A change/delete/disable verb marks an IMPACT question, not lineage —
+      // "what breaks downstream if I delete the X field" stays impact-analysis.
+      /^(?!.*\b(?:break|delet|disabl|deactivat|remov|chang)\w*\b).*\b(upstream|downstream)\b[^.?!]{0,40}\b(?:fields?|data)\b/,
+      /^(?!.*\b(?:break|delet|disabl|deactivat|remov|chang)\w*\b).*\b(?:fields?|data)\b[^.?!]{0,40}\b(upstream|downstream)\b/,
     ],
   },
   {
@@ -2147,6 +2530,72 @@ const RULES: readonly Rule[] = [
 
   // === Automation / order-of-execution (vault) ==============================
   {
+    // Disable-a-trigger what-if (eval family C): "blast radius if I disable
+    // trigger T" was hijacked by qualifier words — "integration"/vendor-sync
+    // onto integration_map, bare "downstream" onto field_lineage — when the
+    // head question is the dedicated what_if_disable_trigger simulation.
+    // Sits FIRST in the automation cluster so a disable ask beats the generic
+    // trigger-order/automation-on-object phrasings; those carry no
+    // disable/turn-off verb, so nothing is stolen from them.
+    intent: 'what-if-disable-trigger',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.what_if_disable_trigger'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'What stops firing / breaks if a named trigger is disabled — the dedicated what_if_disable_trigger simulation over the vault graph (not integration topology, not generic lineage).',
+    patterns: [
+      /\bdisabl\w+\b[^.?!]{0,40}\btriggers?\b/,
+      /\btriggers?\b[^.?!]{0,40}\b(?:is|was|were|gets?|being)\s+disabled\b/,
+      /\b(?:turn(?:ed|ing)?\s+off|switch(?:ed|ing)?\s+off)\b[^.?!]{0,40}\btriggers?\b/,
+    ],
+  },
+  {
+    // Deactivate-a-flow what-if (RESIDUAL 2): "what breaks if I deactivate the
+    // Onboarding flow" / "if I turn off FlowA and FlowB, does anything break".
+    // The dedicated what_if_deactivate_flow simulator owns these — before it,
+    // the deactivate-flow phrasing fell to generic impact-analysis (get_impact,
+    // not the flow-specific simulator) and the "turn off … does anything break"
+    // shape went unrouted entirely. Sits with the disable-trigger rule ahead of
+    // trigger-order/automation-on-object: those carry no deactivate/turn-off
+    // verb, so nothing is stolen from a save-order question. The deactivate/
+    // turn-off verb + FLOW noun is the discriminator; needsResolve so the named
+    // flow (or the first of several) is resolved before the simulation.
+    intent: 'what-if-deactivate-flow',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.what_if_deactivate_flow'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'What stops running / breaks if a named flow is deactivated — the dedicated what_if_deactivate_flow simulation over the vault graph (not a generic get_impact walk).',
+    patterns: [
+      /\b(?:deactivat\w+|disabl\w+|turn(?:ed|ing)?\s+off|switch(?:ed|ing)?\s+off)\b[^.?!]{0,60}\bflows?\b/,
+      /\bflows?\b[^.?!]{0,60}\b(?:is|are|was|were|gets?|being)\s+(?:deactivated|disabled|turned\s+off)\b/,
+      /\bflows?\b[^.?!]{0,60}\b(?:deactivat\w+|turn(?:ed|ing)?\s+off)\b/,
+      // API-name form: "turn off Discount_Flow and Pricing_Flow, does anything
+      // break" — the flow names carry the `_Flow` suffix rather than a standalone
+      // "flow" word, so anchor on a deactivate/turn-off verb next to a *_Flow
+      // component name (the whole-word "flow" alternations above miss this).
+      /\b(?:deactivat\w+|disabl\w+|turn(?:ed|ing)?\s+off|switch(?:ed|ing)?\s+off)\b[^.?!]{0,40}\b[A-Za-z][A-Za-z0-9]*_Flow\b/i,
+      // Flow-family API-name suffixes beyond `_Flow` (flow-family REACH): a
+      // deactivate/turn-off verb next to a `_Process` / `_Orch` / `_Screen_Flow`
+      // component name (e.g. Application_Save_RT_Orch). The SINGULAR flow-family
+      // suffix (`_flow`, not the plural `_flows`) keeps the existing guard that a
+      // plural embedded-Flow name like `ADA_Accom_Flow_Attribute_Flows` stays on
+      // impact-analysis.
+      /\b(?:deactivat\w+|disabl\w+|turn(?:ed|ing)?\s+off|switch(?:ed|ing)?\s+off)\b[^.?!]{0,60}\b[a-z][a-z0-9_]*_(?:process|orch|screen_flow)\b/i,
+      // "what would happen if I deactivated <flow-suffix name>" — the explicit
+      // what-if frame with a flow-family-named component.
+      /\bwhat\s+would\s+happen\s+if\s+i\s+deactivat\w+\b[^.?!]{0,60}\b[a-z][a-z0-9_]*_(?:flow|process|orch|screen_flow)\b/i,
+      // "suppose we deactivated <NamedComponent> versus <NamedComponent>" — the
+      // "suppose … deactivated" lead is absent from the "what if we deactivate"
+      // impact-analysis guard, so a >=2-underscore API name is safe here.
+      new RegExp(
+        `\\bsuppose\\s+we\\s+deactivat\\w+\\b[^.?!]{0,60}\\b${NAMED_COMPONENT_ID}\\b`,
+      ),
+    ],
+  },
+  {
     intent: 'trigger-order',
     plane: 'vault',
     tools: ['sfi.resolve', 'sfi.what_happens_on_save', 'sfi.order_of_execution'],
@@ -2162,7 +2611,9 @@ const RULES: readonly Rule[] = [
     },
     patterns: [
       /\b(trigger\s+order|order\s+of\s+execution)\b/,
-      /\bwhat\s+(happens|runs|fires)\b.*\b(on\s+save|when\b.*\b(created|saved|updated|inserted|deleted|undeleted|restored))\b/,
+      // One optional adverb between "what" and the verb — "what ACTUALLY
+      // happens on save" fell through to unrouted (eval OVER-CLARIFY family A).
+      /\bwhat\s+(?:\w+\s+)?(happens|runs|fires)\b.*\b(on\s+save|when\b.*\b(created|saved|updated|inserted|deleted|undeleted|restored))\b/,
       // "what happens when I update Contact" — present-tense DML without "on save"
       /\bwhat\s+(happens|runs|fires)\b.*\bwhen\b.*\b(i\s+)?(update|insert|delete|save|create|edit)\b/,
       // "which/what flows|triggers|VRs|workflows run|fire when ..." — the
@@ -2176,8 +2627,14 @@ const RULES: readonly Rule[] = [
       // "what happens when a Case STATUS CHANGES" — a status/stage change is a
       // save-order event the "(created|updated|...)" verb list missed (B21).
       /\bwhat\s+(happens|runs|fires)\b.*\b(status|stage)\b.*\bchang/,
-      // "What runs on Account insert?" — DML event without "on save" / "when" (B21).
-      /\bwhat\s+runs\b.*\b(insert|update|delete|undelete)\b/,
+      // "What runs on Account insert?" — DML event without "on save" / "when"
+      // (B21). Verb-symmetric "fires"/"happens" too: "what FIRES on X insert
+      // during the integration load — what runs bulk" is a save-order head
+      // question; the bulk/load/integration qualifiers must not drag it onto
+      // governor_limit_risks or integration_map (eval family C).
+      // ("what happens IF I delete…" is an impact/what-if frame, not a DML
+      // save-order ask — the immediate "if" is excluded so it falls through.)
+      /\bwhat\s+(?:runs|fires|happens)\b(?!\s+if\b).*\b(insert|update|delete|undelete)\b/,
       // "what happens when I SAVE an Evaluation" — present-tense "save"/"saves"/
       // "saving" (the verb list above only had past-tense "saved"). Question-
       // battery gap.
@@ -2187,6 +2644,49 @@ const RULES: readonly Rule[] = [
       /\bdo\b[^.?!]{0,120}\b(trigger|triggers)\b[^.?!]{0,80}\bfire\b/,
       /\b(trigger|triggers)\b.*\b(both|and)\b.*\bfire\b/,
       /\b(same\s+transaction|rollup)\b.*\b(after[-\s]?insert|DLRS|dlrs)/i,
+      // FULL SAVE-ORDER / whole-transaction reconstruction (flow-family REACH).
+      // "walk me through everything that fires in order", "list every/all
+      // automation that fires when …", "full save order on X", "before-vs-after
+      // -save breakdown of every automation" — the whole-order ask, distinct
+      // from lifecycle-process (transition-value coupled) which owns the
+      // "…becomes/is set to <value>" shapes above it.
+      /\b(everything|every\s+automation|all\s+(?:the\s+)?automation)\b[^.?!]{0,60}\b(fires?|runs?|happens?)\b/,
+      /\b(fires?|runs?|happens?)\b[^.?!]{0,40}\bin\s+order\b/,
+      /\b(list|give\s+me)\b[^.?!]{0,40}\b(?:every|all)\b[^.?!]{0,20}\bautomation\b[^.?!]{0,50}\b(fires?|runs?|when)\b/,
+      /\bfull\s+save\s+order\b/,
+      /\bsave\s+order\b[^.?!]{0,40}\b(?:on|for)\b/,
+      /\bbefore[-\s]?(?:vs[-\s]?)?after[-\s]?save\b[^.?!]{0,40}\b(breakdown|every\s+automation|automation)\b/,
+      // "what order do validation rules and record-triggered flows evaluate" —
+      // an explicit ordering question over multiple automation families.
+      /\bwhat\s+order\b[^.?!]{0,90}\b(evaluate|run|fire|execute)\b/,
+      // "run order between <FlowA> and <flow>" — the pairwise ordering ask.
+      /\brun\s+order\s+between\b/,
+      // "which apex classes are triggered when a X is inserted/created" — the
+      // "apex classes" phrasing the "(apex|code|class)" pattern above missed
+      // because it requires the singular "runs" verb, not "are triggered".
+      /\b(?:which|what)\s+apex\s+classes?\b[^.?!]{0,40}\b(triggered|fire|run)\b[^.?!]{0,40}\b(insert|update|delete|save|creat)/,
+      // "does anything run on X update that would collide with <Flow>" — an
+      // impact-on-save question framed as "does anything run … on <dml>".
+      /\bdoes\s+anything\s+(run|fire|happen)\b[^.?!]{0,40}\b(update|insert|save|edit|creat)/,
+      // "what else fires on the same X save transaction" — co-firing on the same
+      // transaction as a named automation.
+      /\bwhat\s+else\s+(fires?|runs?|happens?)\b[^.?!]{0,60}\bsave\s+transaction\b/,
+      // "assignment rules … run before or after the record-triggered flows" — the
+      // classic order-of-execution question about where assignment rules sit.
+      /\bassignment\s+rules?\b[^.?!]{0,60}\b(before|after)\b[^.?!]{0,40}\b(?:record[-\s]?triggered\s+)?flows?\b/,
+      // "will it fight/collide/conflict with HEDA" when ADDING an after-save flow
+      // — the build-planning ask whose answer is the existing save-order.
+      /\b(?:after[-\s]?save|before[-\s]?save)\s+flow\b[^.?!]{0,80}\b(fight|collide|conflict|clash)\b/,
+      // ORDER-OF-EXECUTION: "which TDTM/handler/trigger classes fire on X insert
+      // and in what order" — the ordered trigger-handler question (HEDA TDTM
+      // handlers register per DML event). "in what order" is the discriminator.
+      /\b(?:which|what)\b[^.?!]{0,60}\b(?:tdtm|handler|trigger)\s+classes?\b[^.?!]{0,50}\bfire\b[^.?!]{0,50}\b(?:in\s+what\s+order|what\s+order|order)\b/,
+      // "does <NamedFlow> run before or after <the> lead conversion" — a pairwise
+      // ordering ask relative to a conversion; order_of_execution reconstructs it.
+      // (lifecycle-process owns "what runs WHEN a Lead is converted"; this "run
+      // before/after conversion" shape carries no such "what happens when" head,
+      // so the two stay disjoint.)
+      /\bruns?\s+(?:before|after)\b[^.?!]{0,60}\b(?:lead\s+conversion|converts?\s+the\s+lead|conversion)\b/,
     ],
   },
   {
@@ -2323,6 +2823,55 @@ const RULES: readonly Rule[] = [
       /\bdoes\b.*\bflow\b.*\b(system\s+mode|without\s+sharing|with\s+sharing)\b/,
       /\b(system\s+mode|without\s+sharing|sharing\s+bypass)\b.*\bflow\b/,
       /\b(run|runs|running)\b.*\b(system\s+mode|without\s+sharing)\b.*\bflow\b/,
+      // NAMED-FLOW narration (flow-family REACH). A question that NAMES a
+      // component by its API name (NAMED_COMPONENT_ID — a >=2-underscore token,
+      // never English prose) AND asks to narrate/summarize/walk-through it is an
+      // explain_flow ask. Each pattern REQUIRES the named id so a generic
+      // "explain the sharing model" never lands here. resolve binds the entity
+      // and the type-guard keeps explain_flow on a real Flow.
+      // A COMPARE frame ("explain the difference between A and B", "compare …")
+      // is NOT single-flow narration — explain_flow narrates ONE flow, so a
+      // two-flow comparison must fall through (it stays a compare/unrouted gap
+      // rather than a forced bad route). The `(?!…difference/compare/versus…)`
+      // lookahead on the narration patterns below enforces that.
+      new RegExp(
+        `^(?!.*\\b(?:difference|differences|compare|comparison|versus|vs\\.?)\\b).*\\b(explain|summariz(?:e|ing)|walk\\s+me\\s+through|walkthrough|plain[-\\s]english\\s+walkthrough|purpose\\s+of)\\b[^.?!]{0,60}\\b${NAMED_COMPONENT_ID}\\b`,
+      ),
+      new RegExp(
+        `\\b${NAMED_COMPONENT_ID}\\b[^.?!]{0,60}\\b(in\\s+plain\\s+(?:terms|english)|end\\s+to\\s+end|step\\s+by\\s+step)\\b`,
+      ),
+      // Narration verbs where the named id sits BEFORE the verb clause — e.g.
+      // "Summarize <Name> and what it's calculating", "Explain <Name> and what
+      // a 'flag' means", "What does <Name> copy from …". Same compare-frame
+      // guard so "explain the difference between <A> and <B>" is not stolen.
+      new RegExp(
+        `^(?!.*\\b(?:difference|differences|compare|comparison|versus|vs\\.?)\\b).*\\b(?:explain|summarize|walk\\s+me\\s+through)\\b[^.?!]{0,20}\\b${NAMED_COMPONENT_ID}\\b`,
+      ),
+      new RegExp(
+        `\\bwhat\\s+does\\b[^.?!]{0,20}\\b${NAMED_COMPONENT_ID}\\b[^.?!]{0,40}\\b(do|does|copy|copies|write|writes|calculat\\w*)\\b`,
+      ),
+      // "Does <Name> fire/run/write/have/send …" — a behavior question about a
+      // NAMED flow (does it fire on insert+update, run every time, write to X,
+      // have fault connectors, send texts). The named id as grammatical subject
+      // of a flow-behavior verb keeps it precise.
+      new RegExp(
+        `\\bdoes\\s+(?:the\\s+)?${NAMED_COMPONENT_ID}\\b[^.?!]{0,80}\\b(fire|fires|run|runs|write|writes|have|has|send|sends|execute|re-?trigger)\\b`,
+      ),
+      // "Is <Name> a before-save/after-save/fast-field/scheduled/screen flow …" —
+      // a flow-shape classification question about a named flow.
+      new RegExp(
+        `\\bis\\s+(?:the\\s+)?${NAMED_COMPONENT_ID}\\b[^.?!]{0,60}\\b(before[-\\s]?save|after[-\\s]?save|fast[-\\s]?field|scheduled\\s+path|screen\\s+flow|record[-\\s]?triggered)\\b`,
+      ),
+      // "What entry condition(s)/entry criteria gate/on <Name>" and "why would
+      // <Name> skip a record" — entry-gate and skip-behavior narration.
+      /\bentry\s+conditions?\b[^.?!]{0,20}\b(gate|on)\b/,
+      /\bwhat(?:'s| is)?\s+the\s+entry\s+condition\b/,
+      new RegExp(`\\bwhy\\s+would\\s+${NAMED_COMPONENT_ID}\\b[^.?!]{0,60}\\bskip\\b`),
+      // "Does <Name> have any active version" / "why is it named like that" — the
+      // active-version + naming question about a named flow.
+      new RegExp(
+        `\\bdoes\\s+${NAMED_COMPONENT_ID}\\b[^.?!]{0,40}\\b(active\\s+version|any\\s+active)\\b`,
+      ),
     ],
   },
   {
@@ -2450,6 +2999,11 @@ const RULES: readonly Rule[] = [
       /\btests?\b.*\bfor\s+(my|this|the|these)\s+(change|changes|diff|deploy|branch|pr|edit|edits)\b/,
       /\b(test\s+impact|impacted\s+tests?|test\s+selection|minimal\s+(set\s+of\s+)?tests?|test\s+subset)\b/,
       /\bwhat\s+(do\s+i|should\s+i|to)\s+(run|test)\b.*\b(chang|deploy|diff)/,
+      // "which/what test class COVERS <X> (and does it test the bulk case)" —
+      // which tests exercise a named class is the tests_for_change call-graph
+      // walk; the trailing "bulk" qualifier must not drag it onto
+      // governor_limit_risks (eval family C).
+      /\b(?:which|what)\s+test\s+class(?:es)?\b[^.?!]{0,20}\bcovers?\b/,
     ],
   },
   {
@@ -2470,8 +3024,19 @@ const RULES: readonly Rule[] = [
       /\b(fake|meaningless|empty|no\s+(real\s+)?)\s*assert/,
       /\btests?\b.*\bno\s+(real\s+)?assert/,
       /\bassertion\s+(quality|coverage)\b/,
+      // "meaningful test audit on <X>" — the tool's own name as a natural-language
+      // ask (USAGE/test-forensics REACH). Plus the classic no-op assertion tell
+      // `System.assert(true)` / `assert(true)` that flags a rubber-stamp test.
+      /\bmeaningful\s+test\s+audit\b/,
+      /\bassert\w*\s*\(\s*true\s*\)/,
       /\b(less\s+than|below|under)\b.*\b\d+\s*%\b.*\bcoverage\b/,
       /\b(coverage|percent)\b.*\b(less\s+than|below|under)\b/,
+      // "list apex classes below 75% coverage" — the `%\b` above never matches
+      // "75% coverage" (%→space is not a word boundary), so the phrasing fell
+      // through to the schema list rule and answered with get_component instead
+      // of the coverage tools (eval family D).
+      /\b(below|under|less\s+than)\s+\d+\s*(?:%|percent)?\s*(?:code\s+|test\s+)?coverage\b/,
+      /\bcoverage\b[^.?!]{0,25}\b(below|under|less\s+than)\s+\d+/,
       /\bwhich\s+apex\s+classes\b.*\bcoverage\b/,
       /\bseealldata\s*=\s*true\b/i,
       /\bsee\s+all\s+data\b/i,
@@ -2518,7 +3083,12 @@ const RULES: readonly Rule[] = [
       // "show performance risks in apex" — performance/scale risk phrasing the
       // governor-limit recognizer answers. Battery gap.
       /\bperformance\s+(risk|issue|problem|concern|bottleneck)s?\b/,
-      /\b(bulk|bulkif|unbounded)\b/,
+      // "bulk" is a MODIFIER, not a head noun (eval family C): when the head
+      // question is save-order ("what fires/runs/happens on X insert … what
+      // runs bulk") or test coverage ("which test class covers Y … the bulk
+      // case"), those earlier rules win by order — this guard keeps the bare
+      // word from firing even when their patterns miss a phrasing.
+      /^(?!.*\b(?:what\s+(?:fires|runs|happens)|test\s+class)\b).*\b(bulk|bulkif|unbounded)\b/,
       /\bcpu\s+time\b/,
       /\bheap\s+size\b/,
       /\bmost\s+dml\b/,
@@ -2566,6 +3136,13 @@ const RULES: readonly Rule[] = [
       // package's objects (the package_impact extensionCount surface).
       /\b(what|which)\s+(of\s+(my|our)\s+)?(components?|metadata|customizations?|objects?|fields?)\b.*\bextends?\b/,
       /\bextends?\b.*\b(package|namespace|managed)\b/,
+      // "what custom fields did <Package> INJECT across <objects>? Inventory for
+      // UNINSTALL" — a managed-package boundary/uninstall inventory named by the
+      // package rather than the literal word "package". The uninstall/inventory
+      // frame + the inject/add-across verb keep it on package_impact and off the
+      // generic field-usage tools (USAGE/IMPACT REACH — package boundary).
+      /\b(inject\w*|add\w*|install\w*)\b[^.?!]{0,40}\bacross\b[^.?!]{0,60}\b(objects?|lead|contact|account|case|opportunity)\b[^]*\b(uninstall|inventory)\b/,
+      /\binventory\s+for\s+uninstall\b/,
     ],
   },
   {
@@ -2696,6 +3273,15 @@ const RULES: readonly Rule[] = [
       /\b(ready|readiness)\b.*\b(release|deploy|go[-\s]?live|cutover|production)\b/,
       /\bpre[-\s]?release\b.*\b(check|review|audit)\b/,
       /\bgo[-\s]?live\b.*\b(risk|readiness|checklist)\b/,
+      // DISCOVERY/META REACH: "is this org release-ready for the summer push,
+      // or are there blockers" — the hyphenated "release-ready" adjective and
+      // the "blockers" framing the patterns above missed (they keyed on
+      // "release readiness"/"ready … [to] release"). Co-anchored on
+      // release/deploy/ship so a generic "are we ready for the demo" (no
+      // release verb) does not match.
+      /\brelease[-\s]?ready\b/,
+      /\b(?:blockers?|showstoppers?)\b[^.?!]{0,40}\b(?:release|deploy|ship|go[-\s]?live|production|cutover)\b/,
+      /\b(?:release|deploy|ship|go[-\s]?live|production|cutover)\b[^.?!]{0,40}\b(?:blockers?|showstoppers?)\b/,
     ],
   },
   // === Vault health / freshness / coverage (vault) ==========================
@@ -2792,6 +3378,28 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // API-version hygiene ("any apex still on API version below 50?") was
+    // unrouted — the schema rule only covers the single-component "what is the
+    // api version of X" lookup (eval family D). tech_debt_score carries the
+    // roll-up (apexBelowApiVersion30/40/50Count) and list_components(type:
+    // ApexClass) enumerates the classes with each node's apiVersion.
+    intent: 'api-version-audit',
+    plane: 'vault',
+    tools: ['sfi.tech_debt_score', 'sfi.list_components'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Old-API-version inventory: tech_debt_score counts Apex below API version 30/40/50, and list_components(type: ApexClass) carries each class apiVersion.',
+    suggestArgs: () => ({ type: 'ApexClass' }),
+    patterns: [
+      /\bapi\s+versions?\b[^.?!]{0,25}\b(below|under|older|before|less\s+than)\b/,
+      /\b(old|outdated|legacy|ancient)\b[^.?!]{0,15}\bapi\s+versions?\b/,
+      /\b(apex|class(es)?|components?|metadata|flows?|triggers?)\b[^.?!]{0,40}\b(still\s+on|stuck\s+on|running\s+on)\b[^.?!]{0,15}\bapi\s+version/,
+      /\b(upgrad|updat|bump)\w*\b[^.?!]{0,25}\bapi\s+versions?\b/,
+      /\bapi\s+versions?\b[^.?!]{0,25}\b(upgrad|updat|bump)/,
+    ],
+  },
+  {
     // "Which classes implement <interface>" (Batchable, Schedulable, Queueable,
     // RestResource, ...) — grep Apex source for the implements clause. The
     // apex-search verbs (uses/references) didn't cover "implement" (B21.16/17,
@@ -2822,6 +3430,32 @@ const RULES: readonly Rule[] = [
       /\bfind\b.*\b(class|apex|code)\b.*\b(mentions?|references?|uses?|calls?|reads?|writes?|with)\b/,
       /\b(which|what)\s+(classes?|apex)\b.*\b(mentions?|references?|uses?|touch(es)?|reads?|writes?|calls?|invokes?)\b/,
       /\bsearch\b.*\b(apex|code)\b/,
+      // "which classes make HTTP callouts and what endpoints do they hit" —
+      // HTTP callouts live in Apex SOURCE, so the answer is a source grep,
+      // not the outbound endpoint catalog and never field lineage (eval
+      // family C). "What endpoints do we call out to?" (no "callout" noun,
+      // no HTTP) stays on the outbound endpoints catalog below.
+      /\bhttp\s+callouts?\b/,
+      /\bcallouts?\b[^.?!]{0,50}\bendpoints?\b/,
+    ],
+  },
+  {
+    // "Does <the named class/job> run async — in its own transaction?" is a
+    // question about ONE component's actual implementation (its @future /
+    // Queueable / Batchable shape, read from its source via get_component),
+    // not a best-practice lecture — the "async" qualifier was dragging it
+    // onto the generic knowledge-plane guidance rule (eval family C).
+    intent: 'async-transaction-context',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.get_component'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      "Whether a named component runs async in its own transaction is read from its OWN source/metadata (resolve it, then get_component shows the @future/Queueable/Batchable shape) — not generic async guidance.",
+    patterns: [
+      /\basync\w*\b[^.?!]{0,80}\bown\s+transaction\b/,
+      /\bown\s+transaction\b[^.?!]{0,80}\basync\w*/,
+      /\bin\s+its\s+own\s+transaction\b/,
     ],
   },
 
@@ -2854,9 +3488,15 @@ const RULES: readonly Rule[] = [
     liveRequired: false,
     needsResolve: false,
     reason: 'Topology of the org\'s integration surfaces (named creds, connected apps, remote sites, external services).',
+    // Guarded (eval family C — qualifier hijack): "integration"/vendor-sync
+    // words are MODIFIERS when the head question is a what-if simulation
+    // ("if the field type changed, what integrations blow up"), a blast
+    // radius ("blast radius if I disable trigger T"), a field-write audit,
+    // or profile IP security — those heads route earlier / later on their
+    // own rules, so the bare noun must not force the topology catalog.
     patterns: [
-      /\b(integrations?|named\s+credentials?|connected\s+apps?|remote\s+sites?|external\s+services?|auth\s+providers?)\b/,
-      /\bwhat\b.*\bintegrat/,
+      /^(?!.*\b(?:what\s+if|blast\s+radius|what\s+breaks|blows?\s+up|field\s+type|data\s+type|written\s+(?:only\s+)?by|only\s+ever\s+written|ip\s+relax\w*|disabl\w+)\b).*\b(integrations?|named\s+credentials?|connected\s+apps?|remote\s+sites?|external\s+services?|auth\s+providers?)\b/,
+      /^(?!.*\b(?:what\s+if|blast\s+radius|what\s+breaks|blows?\s+up|field\s+type|data\s+type|written\s+(?:only\s+)?by|only\s+ever\s+written|ip\s+relax\w*|disabl\w+)\b).*\bwhat\b.*\bintegrat/,
       /\bapi\b.*\b(connections?|surfaces?)\b/,
     ],
   },
@@ -2872,6 +3512,16 @@ const RULES: readonly Rule[] = [
       /\bwho\s+(subscribes?|listens?)\b/,
       /\b(subscribers?|subscriptions?)\b.*\bevents?\b/,
       /\bshow\s+event\s+subscribers?\b/,
+      // CDC fan-out / subscriber discovery (flow-family REACH). "what's
+      // SUBSCRIBING TO Change Data Capture" (verb precedes the noun, so the
+      // noun→verb pattern above misses it), "if turning on CDC for X will fan
+      // out", and "CDC or platform-event subscribers feeding Marketo" (hyphenated
+      // "platform-event" the space-only alternation above misses). Anchored to a
+      // CDC/platform-event noun so a generic "who subscribes" is unaffected.
+      /\b(subscrib\w*)\b[^.?!]{0,30}\b(change\s+data\s+capture|cdc|platform[-\s]?events?)\b/,
+      /\b(turn\w*\s+on|enabl\w+)\s+cdc\b/,
+      /\bcdc\b[^.?!]{0,40}\bfan\s+out\b/,
+      /\b(cdc|change\s+data\s+capture|platform[-\s]?events?)\b[^.?!]{0,40}\bsubscribers?\b/,
     ],
   },
   {
@@ -3038,6 +3688,14 @@ const RULES: readonly Rule[] = [
       /\breplacing\b.*\bwith\b.*\b(lwc|aura)\b/,
       /\baffected\b.*\b(removing|remove)\b.*\brecord\s+type/,
       /\bwhat\s+would\s+break\b.*\b(changed|change)\b/,
+      // "what if I REMOVED the <X> record type … which page layouts and flows
+      // assume it exists" — a record-type deletion blast radius (IMPACT REACH).
+      // `\bremove\b` misses the PAST tense "removed", so this fell through to
+      // unrouted. High-precision: the remove/delete verb must co-occur with the
+      // literal "record type" AND a what-if/assume/kept frame, so it never steals
+      // a field-type what-if (those say "field"/"required"/"picklist value").
+      /\b(remov\w*|delet\w*|drop\w*)\b[^.?!]{0,40}\brecord\s+type\b[^]*\b(assume|assumes?|kept|keep|rely|relies|reference|expect)\w*/,
+      /\bwhat\s+if\s+i\s+(remov\w*|delet\w*|drop\w*)\b[^.?!]{0,40}\brecord\s+type\b/,
     ],
   },
   {
@@ -3056,7 +3714,36 @@ const RULES: readonly Rule[] = [
       /\b(change|convert)\b.*\bfield\s+type\b/,
       /\b(change|changed)\b.*\bdata\s+type\b/,
       /\bdata\s+type\b.*\bchange/,
+      // PASSIVE / noun-first form — "if the field type CHANGED, what
+      // integrations blow up": \bchange\b never matches "changed", so the
+      // phrasing fell through and the "integrations" qualifier hijacked it
+      // onto integration_map (eval family C).
+      /\bfield\s+type\b[^.?!]{0,60}\bchang/,
       /\bremove\b.*\bpicklist\s+value\b/,
+      // FIELD-FORENSICS REACH (what_if_make_field_required / _change_field_type).
+      // The `\bmake\b` and `\bchange\b` verb anchors above miss the PAST tense
+      // ("if we MADE X required", "if I CHANGED X") and the noun form
+      // ("required-field validation"), so these fell to unrouted. Each new
+      // pattern REQUIRES a required/field-type/picklist frame near the verb, so
+      // it stays a schema what-if and never steals a value-change or usage ask.
+      // "if we made <field> required" / "made X required but left Y optional".
+      /\bmade\b[^.?!]{0,40}\brequired\b/,
+      // "adding a required-field validation on <Field>" — making a field
+      // mandatory expressed as a validation-rule ask; the required frame keeps
+      // it on what_if_make_field_required.
+      /\brequired[-\s]field\b/,
+      /\b(add\w*|making|makes)\b[^.?!]{0,30}\brequired\b/,
+      // "what happens if I change <field> FROM a picklist TO a text field" — a
+      // field-TYPE conversion named by the from/to types (picklist→text) rather
+      // than the literal "field type". The from-X-to-Y frame around a field-type
+      // noun (picklist/text/number/checkbox/formula/lookup/date/currency) is
+      // unambiguously a type change.
+      new RegExp(
+        `\\b(chang\\w*|convert\\w*)\\b[^.?!]{0,60}\\bfrom\\b[^.?!]{0,40}\\bto\\b[^.?!]{0,40}\\b(picklist|text|number|checkbox|formula|lookup|date|currency|multi[-\\s]?select)\\b`,
+      ),
+      new RegExp(
+        `\\bfrom\\s+a\\s+picklist\\s+to\\s+a\\s+(?:text|number|formula|lookup|date|currency)\\b`,
+      ),
     ],
   },
   {
@@ -3278,11 +3965,23 @@ const RULES: readonly Rule[] = [
     tools: ['sfi.compare_vaults', 'sfi.compare_object_across_vaults', 'sfi.compare_profile_across_vaults'],
     liveRequired: false,
     needsResolve: false,
-    reason: 'Differences between two registered orgs (UAT vs prod) from the vault registry.',
+    reason:
+      'Differences between two registered orgs (UAT vs prod) from the vault registry. Requires BOTH orgs to be registered vaults — the compare_* tools diff two offline snapshots, never the live org.',
+    // DISCLOSURE, not a block (eval family D): on a single-vault install the
+    // compare tools fail with vault-not-found — say the second-registered-vault
+    // prerequisite up front instead of routing confident-clean into it.
+    gap: {
+      category: 'cross-vault-registry',
+      note: 'Cross-vault comparison needs a SECOND registered vault (a multi-vault registry). If only this vault is registered, the compare_* call will return vault-not-found — register the other org first (sfi vault register) or name the two vault aliases to compare.',
+    },
     patterns: [
       /\b(uat|sandbox|staging)\b.*\b(vs|versus|compared?\s+to|and)\b.*\b(prod|production)\b/,
       /\bwhat('?s| is)\s+different\b.*\b(between|across)\b.*\borgs?\b/,
       /\bcompare\b.*\borgs?\b/,
+      // "compare the Account object across our sandboxes" — the cross-vault
+      // ask phrased with "across" + an environment noun (eval family D).
+      /\bcompare\b[^.?!]{0,60}\bacross\b[^.?!]{0,30}\b(orgs?|sandbox(es)?|environments?|vaults?|instances?)\b/,
+      /\b(differs?|difference|different)\b[^.?!]{0,50}\b(between|across)\b[^.?!]{0,40}\b(sandbox(es)?|environments?|instances?|vaults?)\b/,
     ],
   },
   {
@@ -3412,6 +4111,133 @@ const RULES: readonly Rule[] = [
       /\bsandboxes?\b.*\b(refresh|managed)\b/,
       /\benvironment\s+and\s+release\s+strategy\b/,
       /\b(is\s+there\s+a\s+)?ci\/cd\b/,
+      // Concept ask about an access primitive — "What is a Profile" / "what is
+      // a permission set". The indefinite article marks a GENERIC type word,
+      // never a named component, so this must not fall through to unrouted (or
+      // worse, a Profile-record disambiguation menu). Comparisons ("difference
+      // between a profile and a permission set") stay on compare-profiles.
+      /\bwhat\s+is\s+an?\s+(?:profile|permission\s+set)\s*\??\s*$/,
+    ],
+  },
+  // === FIELD-FORENSICS REACH block (USAGE / IMPACT / FIELD-FORENSICS cluster) =
+  // These sit BEFORE the generic component-usage dispatcher so a question that
+  // NAMES a specific field (NAMED_FIELD_ID — a dotted `Object.field` or a bare
+  // `__c` api name) and asks a field-forensics question lands on the dedicated
+  // field tool instead of the generic usage tool. Every pattern REQUIRES the
+  // named field, so a bare-English question (no dot, no `__c`) never fires here
+  // and keeps its existing route. The order within the block encodes the eval's
+  // distinction: "reads OR writes" → find_field_anywhere; "what writes … is it a
+  // flow" (writers only) → field_provenance; a lineage/trace frame →
+  // field_lineage; "field 360" → field_360; a semantic "do we have a field for
+  // X" → find_semantic_field. USAGE ("which flows write X", "is X triggered by
+  // Y", "connected to Marketo") stays on the component-usage dispatcher below.
+  {
+    // "do we already have a field for <concept>" / "where do we store <concept>
+    // data across the org" — semantic field discovery. High-precision on the
+    // store/have-a-field frame + a cross-org scope; must sit before the field-id
+    // rules because it is about a CONCEPT, not a specific named field (the named
+    // field it cites, e.g. "X is one, what ELSE", is an example, not the target).
+    intent: 'find-semantic-field',
+    plane: 'vault',
+    tools: ['sfi.find_semantic_field'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Semantic field discovery — "do we already have a field for X" ranks CustomFields by token overlap with a natural-language concept (heuristic recommendation).',
+    patterns: [
+      /\bwhere\s+do\s+we\s+store\b[^.?!]{0,60}\b(across|anywhere|in\s+(?:the\s+)?org)\b/,
+      /\bdo\s+we\s+(?:already\s+)?have\s+a\s+field\s+for\b/,
+      /\b(is|are)\s+there\s+(?:already\s+)?an?\s+(?:existing\s+)?field\s+for\b/,
+      // "X is one, what else" — the caller names one example field and asks for
+      // the rest of the concept family (the semantic-discovery signature).
+      /\bis\s+one,?\s+what\s+else\b/,
+    ],
+  },
+  {
+    // "trace where <field> goes after conversion / where does <field> data come
+    // from / where does <field> flow" — data lineage for a NAMED field. Sits
+    // before find_field_anywhere/provenance so an explicit trace/lineage frame
+    // wins over a bare reads/writes ask. The named-field id + a movement verb
+    // (trace/goes/lands/flows/come from) keep it precise; the pii-flow rule
+    // earlier already owns the "field data flow/lineage" phrasings without a
+    // named id, so this only adds the NAMED-field trace shape it missed.
+    intent: 'field-lineage',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.field_lineage'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'Trace where a NAMED field\'s value comes from and what it feeds — the provenance + downstream-effects walker, requested by an explicit trace/lineage frame on a named field.',
+    patterns: [
+      new RegExp(
+        `\\btrace\\b[^.?!]{0,40}\\b${NAMED_FIELD_ID}\\b[^.?!]{0,60}\\b(goes?|lands?|flows?|end\\s+up|get\\s+dropped|come\\s+from|after\\s+conversion)\\b`,
+      ),
+      new RegExp(
+        `\\bwhere\\s+does\\b[^.?!]{0,30}\\b${NAMED_FIELD_ID}\\b[^.?!]{0,50}\\b(go|goes?|flow|flows?|come\\s+from|land)\\b`,
+      ),
+    ],
+  },
+  {
+    // "give me the field 360 on <Field>" / "the full picture of <Field>" — the
+    // unified field-forensics synthesis tool, requested by its own vocabulary.
+    // The literal "field 360" / "360 on <field>" phrase is unambiguous.
+    intent: 'field-360',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.field_360', 'sfi.explain_field'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'Full 360 profile of a single field — everything that validates / writes / reads / uses it across automation, code, UI, integrations, composed into one report.',
+    patterns: [
+      /\bfield\s*360\b/,
+      /\b360\b[^.?!]{0,20}\b(on|of|for)\b[^.?!]{0,20}(?:[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*|[a-z][a-z0-9_]*__c)\b/,
+      new RegExp(
+        `\\b(full\s+(?:picture|profile)|everything\s+that\s+(?:touches|uses))\\b[^.?!]{0,30}\\b${NAMED_FIELD_ID}\\b`,
+      ),
+    ],
+  },
+  {
+    // "What READS OR WRITES <Field> on <Object>" — the universal find-anywhere
+    // for a named field (both directions). The "reads or/and writes" (or the
+    // "used anywhere") frame distinguishes it from provenance (writers-only)
+    // below. Requires the named field id so bare English never fires.
+    intent: 'find-field-anywhere-usage',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.find_field_anywhere'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'Where a NAMED field is used anywhere — every incoming edge (apex reads/writes, flow ops, layout placements, VR refs), grouped by referrer type. Both read and write directions.',
+    patterns: [
+      new RegExp(
+        `\\b(reads?\\s+(?:or|and)\\s+writes?|writes?\\s+(?:or|and)\\s+reads?)\\b[^.?!]{0,60}\\b${NAMED_FIELD_ID}\\b`,
+      ),
+      new RegExp(
+        `\\b${NAMED_FIELD_ID}\\b[^.?!]{0,40}\\bused\\s+anywhere\\b`,
+      ),
+    ],
+  },
+  {
+    // "What WRITES <Field> on <Object> — is it a flow?" — the source-of-a-field
+    // ask (writers only): who/what SETS this field's value, and is it manual /
+    // automated / integration-synced. Distinguished from find-field-anywhere
+    // above by being writers-only (no "reads"), and from the "which flows write
+    // X" USAGE ask below by NOT scoping to a component type up front (the field
+    // is the subject: "what writes X"). Requires the named field id.
+    intent: 'field-provenance',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.field_provenance'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      "Who/what SETS a field's value — the writers fabric (apex/flow/trigger writers, formula/auto-number declaration, integration-synced classifier) for a named field.",
+    patterns: [
+      new RegExp(
+        `^(?!.*\\breads?\\b)(?!.*\\bwhich\\s+flows?\\b).*\\bwhat\\s+writes\\b[^.?!]{0,80}\\b${NAMED_FIELD_ID}\\b`,
+      ),
+      new RegExp(
+        `\\bwhat\\s+(?:sets|populates?|fills?)\\b[^.?!]{0,60}\\b${NAMED_FIELD_ID}\\b[^.?!]{0,40}\\bis\\s+it\\s+(?:a\\s+)?(?:flow|manual|automated|integration)`,
+      ),
     ],
   },
   {
@@ -3443,6 +4269,32 @@ const RULES: readonly Rule[] = [
       /\bwhere\s+is\b(?![^?]*\bfield\b)(?![^?]*__c)[^?]*\b(used|referenced|consumed)\b/,
       /\b(what|who|which\s+components?)\b.*\b(uses?|references?|depends?\s+on|consumes?)\b/,
       /\bwhat\s+still\s+references\b/,
+      // USAGE REACH (find_component_usages). "Which flows WRITE (to) <field>" —
+      // the writers of a field scoped to a component TYPE (flows). Distinct from
+      // field_provenance ("what writes X") by naming the referrer type first;
+      // find_component_usages is the right dispatcher for "which <type> touch X".
+      /\bwhich\s+(?:flows?|classes?|triggers?|automations?|processes?)\b[^.?!]{0,20}\b(writes?|write\s+to|updates?|reads?|references?|touch\w*|sets?)\b/,
+      // "which flow SHOULD (do X / update Y) and why isn't it running" — a
+      // which-component-does-this usage lookup phrased as a troubleshooting ask.
+      /\bwhich\s+(?:flow|class|automation|process)\b[^.?!]{0,30}\bshould\b/,
+      // "is <NamedFlow> triggered by <OtherFlow> or standalone" — whether one
+      // component invokes another (an incoming-edge usage question).
+      /\bis\s+(?:the\s+)?[a-z][a-z0-9_]*_[a-z0-9_]+\b[^.?!]{0,30}\btriggered\s+by\b/,
+      // "does updating <field> trigger any <X> automation" — whether writing a
+      // field fires downstream automation (the field's incoming/outgoing usage).
+      // `[^?!]` (not `[^.?!]`) so the gap can span the dotted `Object.field__c`
+      // name, whose `.` the standard class would otherwise stop at.
+      /\bdoes\s+updating\b[^?!]{0,50}\btrigger\b[^?!]{0,30}\bautomation\b/,
+      // "is <object> connected to <ExternalSystem>" — integration-usage of a
+      // component; find_component_usages composes graph edges + the integration
+      // map (the rule already carries integration_map as a secondary tool).
+      /\b(is|are)\b[^.?!]{0,40}\b(connected\s+to|integrated\s+with|synced?\s+(?:to|with)|feeding)\b[^.?!]{0,30}\b(marketo|pardot|hubspot|external|api)\b/,
+      // "is <NamedComponent> even/still needed anymore BASED ON USAGE" — a
+      // still-in-use check on a named component, answered by walking its usage
+      // edges. The "based on usage" / "still used anywhere" frame is the tell;
+      // it keeps this off the cleanup-catalog tools (which take no named id).
+      /\b(?:even|still)\s+(?:needed|used|referenced)\b[^?!]{0,20}\b(?:anymore\s+)?based\s+on\s+usage\b/,
+      /\bstill\s+(?:used|referenced)\s+anywhere\b/,
     ],
   },
   {
@@ -3668,6 +4520,132 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // DISCOVERY/META REACH: "compare A and B" / "explain the difference between
+    // A and B" where A and B are TWO NAMED components (permission-set groups,
+    // flows, classes) — a two-component diff, which compare_components answers.
+    // Sits AFTER compare-profiles (that owns the "profiles"/"permission sets"
+    // wording) and AFTER explain-flow (whose narration patterns carry a
+    // compare-frame negative-lookahead, so a two-flow "difference between A and
+    // B" deliberately falls through to HERE rather than being narrated as one
+    // flow). Precision: every pattern requires TWO distinct named tokens joined
+    // by "and"/"vs"/"versus" (or the explicit plural "PSGs"/"perm groups"), so
+    // a single-component "explain X" never lands here.
+    intent: 'compare-components',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.compare_components'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'Comparing two named components is a vault diff — resolve both, then compare_components.',
+    patterns: [
+      // "compare the <NamedA> and <NamedB> PSGs" / "… perm groups" — an
+      // explicit two-thing compare of permission-set GROUPS (compare-profiles
+      // keys on "profiles"/"permission sets", not the "PSG"/"perm group" plural).
+      new RegExp(
+        `\\bcompare\\b[^.?!]{0,80}\\b(?:psgs?|perm(?:ission)?\\s+set\\s+groups?|perm\\s+groups?)\\b`,
+      ),
+      new RegExp(
+        `\\b(?:psgs?|perm(?:ission)?\\s+set\\s+groups?|perm\\s+groups?)\\b[^.?!]{0,80}\\b(?:compare|difference|differ|versus|vs\\.?)\\b`,
+      ),
+      // "compare/difference between <NamedA> and <NamedB>" — two API-name tokens
+      // (>=2 underscores each: unambiguously component ids, never prose) joined
+      // by "and"/"&". The two-id requirement is what distinguishes a real
+      // comparison from a single-component narration. The leading
+      // `(?!.*record\s+types?)` yields a "difference between A and B and C record
+      // TYPES" enumeration to record-type-enumeration below (list all types),
+      // which is the honest surface for several record types side by side.
+      new RegExp(
+        `^(?!.*\\brecord\\s+types?\\b).*\\b(?:compare|difference|differ|versus|vs\\.?)\\b[^.?!]{0,40}\\b${NAMED_COMPONENT_ID}\\b[^.?!]{0,20}\\b(?:and|&|versus|vs\\.?)\\b[^.?!]{0,20}\\b${NAMED_COMPONENT_ID}\\b`,
+      ),
+    ],
+  },
+  {
+    // DISCOVERY/META REACH: "does <NamedFlow> relate to the <concept> concept" /
+    // "is <A> the same as <B>" — an org-vocabulary disambiguation, which
+    // disambiguate_concepts answers (are these two tokens the same or distinct
+    // concepts here). Anchored on the literal "concept(s)" noun OR the "same
+    // as … thing/idea" frame so it never grabs a compare (two components) or a
+    // field-lineage ("where does X go") question.
+    intent: 'disambiguate-concepts-nl',
+    plane: 'vault',
+    tools: ['sfi.disambiguate_concepts'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Whether two org-specific concepts/terms mean the same thing is a vocabulary disambiguation (disambiguate_concepts).',
+    patterns: [
+      /\b(?:relate\s+to|related\s+to|same\s+as|different\s+from|distinct\s+from|the\s+same\s+thing)\b[^.?!]{0,50}\bconcepts?\b/,
+      /\bconcepts?\b[^.?!]{0,50}\b(?:relate\s+to|related\s+to|same\s+as|different\s+from|distinct\s+from)\b/,
+      /\bis\b[^.?!]{0,30}\bthe\s+same\s+(?:as|thing\s+as|concept\s+as)\b/,
+    ],
+  },
+  {
+    // DISCOVERY/META REACH: "which queues does <Named>_Queue route to and who
+    // are the MEMBERS" — a NEUTRAL single-queue inspection (no failure frame),
+    // which get_component renders (the Queue node carries members + routing).
+    // resolve binds the named queue first. Distinct from empty-queues above,
+    // which only fires on a can't/stuck SYMPTOM. Anchored on a `_queue`
+    // API-name suffix (or the literal "queue" + "members") so it never grabs a
+    // schema-inventory ("list all queues") ask.
+    intent: 'queue-membership',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.get_component'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'A single queue\'s members and routing targets are on its Queue node — resolve the queue, then get_component.',
+    patterns: [
+      /\bwho\s+are\s+the\s+members?\b[^.?!]{0,60}\bqueues?\b/,
+      /\bqueues?\b[^.?!]{0,60}\bwho\s+are\s+the\s+members?\b/,
+      /\bwhich\s+queues?\b[^.?!]{0,40}\broute\b/,
+    ],
+  },
+  {
+    // DISCOVERY/META REACH: "what's the API version on the TDTM handlers / these
+    // HEDA classes" — the per-class apiVersion is a get_component field. The
+    // existing schema-rule api-version patterns cover the SINGULAR
+    // "api version of X class" (Family-D contract) but missed the PLURAL
+    // "handlers"/"classes" scan. Requires the api-version phrase with a PLURAL
+    // handlers/classes/triggers noun (mandatory `s`) so the singular
+    // "what is the api version of the AccountService class" stays on schema and
+    // a plain "what version are we on" (org release) never matches.
+    intent: 'component-api-version',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.list_components', 'sfi.get_component'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'The api version across a set of Apex classes / triggers / handlers is a per-component property scan — list_components then get_component per member.',
+    patterns: [
+      /\bapi\s+version\b[^.?!]{0,60}\b(?:classes|handlers|triggers)\b/,
+      /\b(?:classes|handlers|triggers)\b[^.?!]{0,60}\bapi\s+version\b/,
+    ],
+  },
+  {
+    // DISCOVERY/META REACH: "explain the difference between <RT_A> and <RT_B>
+    // and <RT_C> record types" — an enumeration of MULTIPLE record types on an
+    // object; list_components(type: 'RecordType') is the honest surface (the
+    // user wants each type side by side, not a pairwise diff). Requires the
+    // literal "record types" plural AND at least the "difference"/"vs" framing
+    // over 3+ named types joined by "and" — so a two-thing "compare A and B"
+    // (handled by compare-components) and a single "what is the X record type"
+    // do not land here.
+    intent: 'record-type-enumeration',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.list_components', 'sfi.get_component'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'Distinguishing several record types on an object is a vault enumeration — list_components(RecordType) plus get_component per type.',
+    suggestArgs: () => ({ type: 'RecordType' }),
+    patterns: [
+      // "difference between A and B and C record types" — 3+ names joined by
+      // "and", trailing "record types". The two "and"-joins are the tell that
+      // this is a multi-type enumeration, not a pairwise compare.
+      /\b(?:difference|differ|distinguish|compare)\b[^.?!]{0,120}\band\b[^.?!]{0,60}\band\b[^.?!]{0,60}\brecord\s+types?\b/,
+    ],
+  },
+  {
     intent: 'capabilities',
     plane: 'vault',
     tools: ['sfi.capabilities'],
@@ -3679,6 +4657,20 @@ const RULES: readonly Rule[] = [
       /\bwhat\s+are\s+you\s+capable\b/,
       /\bwhat\s+tools?\s+(do\s+you\s+have|are\s+available)\b/,
       /\bhelp\b.*\b(capabilit|tools?|commands?)\b/,
+      // DISCOVERY/META REACH: "what are you actually able to answer about this
+      // org", "what can I ask" — a self-capability ask. `able to answer` /
+      // `can .. ask` co-anchored so it never grabs an org-content question
+      // ("what can this profile do"): the subject is the tool ("you"/"I"/"this"),
+      // not an org component.
+      /\bwhat\b[^.?!]{0,30}\b(?:you|i)\b[^.?!]{0,20}\b(?:able\s+to\s+answer|answer\s+about|ask\s+about|ask\s+you)\b/,
+      /\bwhat\s+can\s+i\s+ask\b/,
+      // "can you (even) tell me anything about … record data … or is this just
+      // metadata" — a boundary/capability probe. `just metadata` / `only
+      // metadata` is the capability-boundary tell (capabilities reports the
+      // metadata-vs-live-record boundary); it never appears in a real
+      // org-content question.
+      /\b(?:just|only)\s+metadata\b/,
+      /\bcan\s+you\s+(?:even\s+)?tell\s+me\s+anything\s+about\b[^.?!]{0,40}\b(?:record\s+data|data\s+in\s+here)\b/,
     ],
   },
   {

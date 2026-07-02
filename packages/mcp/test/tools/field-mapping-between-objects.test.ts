@@ -298,4 +298,152 @@ describe('fieldMappingBetweenObjectsHandler', () => {
     expect(r.value.data.unpairedFromA.length).toBeGreaterThan(0);
     expect(r.value.data.unpairedFromB.length).toBeGreaterThan(0);
   });
+
+  it('accepts input with `vault` omitted via the Zod schema', () => {
+    const parsed = fieldMappingBetweenObjectsInputSchema.safeParse({
+      objectA: 'Lead',
+      objectB: 'Contact',
+    });
+    expect(parsed.success).toBe(true);
+  });
+});
+
+/**
+ * Single-vault deployment — the normal `sfi mcp` session: NO registry
+ * (no SF_INTELLIGENCE_REGISTRY_PATH, no registry.json anywhere above
+ * the vault) and no `vault` argument. The tool must answer from the
+ * SERVED vault instead of refusing with fieldCount: 0.
+ */
+describe('fieldMappingBetweenObjectsHandler (single-vault, no registry)', () => {
+  let soloRoot: string;
+  let soloStore: GraphStore;
+  let soloCtx: Context;
+  let savedRegistryPath: string | undefined;
+
+  beforeAll(async () => {
+    soloRoot = await mkdtemp(join(tmpdir(), 'sfi-v31-field-mapping-solo-'));
+    const soloVaultPath = join(soloRoot, 'solo-org');
+    await mkdir(join(soloVaultPath, 'graph'), { recursive: true });
+    await saveManifest(soloVaultPath, FIXTURE_MANIFEST);
+
+    const opened = await openGraph(vaultPaths(soloVaultPath).graphDb);
+    if (!opened.ok) throw new Error(opened.error.message);
+    soloStore = opened.value;
+
+    // Order with Order_Total__c (Currency); Invoice with
+    // Invoice_Total__c (Currency) — a real pair on the shared "total"
+    // token. NO registerVault call: this vault is served, not registered.
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: 'CustomObject:Order__c', apiName: 'Order__c' }),
+        makeNode({ id: 'CustomObject:Invoice__c', apiName: 'Invoice__c' }),
+        makeNode({
+          id: 'CustomField:Order__c.Order_Total__c',
+          type: 'CustomField',
+          apiName: 'Order_Total__c',
+          label: 'Order Total',
+          parentId: 'CustomObject:Order__c',
+          properties: { dataType: 'Currency' },
+        }),
+        makeNode({
+          id: 'CustomField:Invoice__c.Invoice_Total__c',
+          type: 'CustomField',
+          apiName: 'Invoice_Total__c',
+          label: 'Invoice Total',
+          parentId: 'CustomObject:Invoice__c',
+          properties: { dataType: 'Currency' },
+        }),
+      ],
+      edges: [],
+    };
+    await importExtractionResults(soloStore, [seed]);
+
+    soloCtx = {
+      vaultRoot: soloVaultPath,
+      manifest: FIXTURE_MANIFEST,
+      graph: soloStore,
+    };
+  });
+
+  beforeEach(() => {
+    // The sibling suite sets SF_INTELLIGENCE_REGISTRY_PATH in ITS
+    // beforeAll; clear it so these cases exercise the registry-less path.
+    savedRegistryPath = process.env['SF_INTELLIGENCE_REGISTRY_PATH'];
+    delete process.env['SF_INTELLIGENCE_REGISTRY_PATH'];
+  });
+
+  afterEach(() => {
+    if (savedRegistryPath !== undefined) {
+      process.env['SF_INTELLIGENCE_REGISTRY_PATH'] = savedRegistryPath;
+    }
+  });
+
+  afterAll(async () => {
+    await closeGraph(soloStore);
+    await rm(soloRoot, { recursive: true, force: true });
+  });
+
+  it('answers from the served vault when `vault` is omitted (fieldCount > 0 both sides)', async () => {
+    const r = await fieldMappingBetweenObjectsHandler(soloCtx, {
+      objectA: 'Order__c',
+      objectB: 'Invoice__c',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.objectA.fieldCount).toBeGreaterThan(0);
+    expect(r.value.data.objectB.fieldCount).toBeGreaterThan(0);
+    const totalPair = r.value.data.suggestedPairs.find(
+      (p) =>
+        p.fieldA.apiName === 'Order_Total__c' &&
+        p.fieldB.apiName === 'Invoice_Total__c',
+    );
+    expect(totalPair).toBeDefined();
+    expect(totalPair?.typeCompatible).toBe(true);
+    // The served-vault ref points at the vault this session serves.
+    expect(r.value.data.vault.path).toBe(soloCtx.vaultRoot);
+    // The Q174 verbatim phrase is unconditional.
+    expect(
+      r.value.data.boundaries.some((s) =>
+        s.includes('field-mapping suggestions are heuristic'),
+      ),
+    ).toBe(true);
+  });
+
+  it('answers from the served vault for a self-referential alias, with the single-vault disclosure', async () => {
+    const r = await fieldMappingBetweenObjectsHandler(soloCtx, {
+      vault: 'solo-org',
+      objectA: 'Order__c',
+      objectB: 'Invoice__c',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.objectA.fieldCount).toBeGreaterThan(0);
+    expect(r.value.data.objectB.fieldCount).toBeGreaterThan(0);
+    expect(r.value.data.suggestedPairs.length).toBeGreaterThan(0);
+    expect(
+      r.value.data.boundaries.some((s) =>
+        s.includes('single-vault install'),
+      ),
+    ).toBe(true);
+  });
+
+  it('refuses an unknown alias with the omit-`vault` hint when no registry exists', async () => {
+    const r = await fieldMappingBetweenObjectsHandler(soloCtx, {
+      vault: 'some-other-org',
+      objectA: 'Order__c',
+      objectB: 'Invoice__c',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(
+      r.value.data.boundaries.some((s) =>
+        s.includes("'some-other-org' is not registered"),
+      ),
+    ).toBe(true);
+    expect(
+      r.value.data.boundaries.some((s) =>
+        s.includes('Omit `vault` to map fields within the served vault'),
+      ),
+    ).toBe(true);
+  });
 });

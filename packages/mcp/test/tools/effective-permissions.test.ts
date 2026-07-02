@@ -49,8 +49,37 @@ const edge = (o: Partial<Edge> & Pick<Edge, 'fromId' | 'toId' | 'edgeType'>): Ed
 // perm + a field + an apex class. The union must exceed either container.
 const seed: ExtractionResult = {
   nodes: [
-    node({ id: 'Profile:Sales', type: 'Profile', apiName: 'Sales', properties: { userPermissions: ['ApiEnabled'] } }),
-    node({ id: 'PermissionSet:DealEditor', type: 'PermissionSet', apiName: 'DealEditor', properties: { userPermissions: ['ViewAllData'] } }),
+    node({
+      id: 'Profile:Sales',
+      type: 'Profile',
+      apiName: 'Sales',
+      properties: {
+        userPermissions: ['ApiEnabled'],
+        // RT parity: profile sees Standard_Deal, explicitly HIDES Archived_Deal.
+        recordTypeVisibilities: [
+          { recordType: 'Deal__c.Standard_Deal', visible: true, default: true },
+          { recordType: 'Deal__c.Archived_Deal', visible: false, default: false },
+        ],
+      },
+    }),
+    node({
+      id: 'PermissionSet:DealEditor',
+      type: 'PermissionSet',
+      apiName: 'DealEditor',
+      properties: {
+        userPermissions: ['ViewAllData'],
+        // Adds Enterprise_Deal, re-grants Archived_Deal (visible=true must win),
+        // and carries an older-metadata entry with visible:null (counts visible).
+        recordTypeVisibilities: [
+          { recordType: 'Deal__c.Enterprise_Deal', visible: true, default: false },
+          { recordType: 'Deal__c.Archived_Deal', visible: true, default: false },
+          { recordType: 'Deal__c.Legacy_Deal', visible: null, default: false },
+        ],
+      },
+    }),
+    // A permission set from a vault refreshed BEFORE record-type extraction —
+    // no recordTypeVisibilities key at all (contributes nothing, disclosed).
+    node({ id: 'PermissionSet:LegacyNoRt', type: 'PermissionSet', apiName: 'LegacyNoRt', properties: {} }),
     node({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' }),
     node({ id: 'CustomField:Account.Amount__c', type: 'CustomField', apiName: 'Account.Amount__c' }),
     node({ id: 'ApexClass:DealService', type: 'ApexClass', apiName: 'DealService' }),
@@ -158,6 +187,63 @@ describe('effectivePermissionsHandler', () => {
     expect(sys).not.toContain('APXTConga4__Composer_Custom_Permission');
     // Disclosure surfaces the granted-but-undefined name.
     expect(r.value.data.disclosures.some((d) => d.includes('not present in this vault'))).toBe(true);
+  });
+
+  // RT parity: record-type visibilities are unioned max-wins with per-container
+  // attribution, mirroring the customPermissions pattern.
+  it('unions record-type visibilities across profile + permission set (visible=true wins) with attribution', async () => {
+    const r = await effectivePermissionsHandler(ctx, {
+      profileId: 'Profile:Sales',
+      permissionSetIds: ['PermissionSet:DealEditor'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.recordTypeVisibilities).toEqual([
+      // Profile hides it, permission set grants it → visible wins, cited to the granter only.
+      { recordType: 'Deal__c.Archived_Deal', visible: true, grantedBy: ['PermissionSet:DealEditor'] },
+      { recordType: 'Deal__c.Enterprise_Deal', visible: true, grantedBy: ['PermissionSet:DealEditor'] },
+      // `<visible>` null (older metadata) counts as visible — only explicit false hides.
+      { recordType: 'Deal__c.Legacy_Deal', visible: true, grantedBy: ['PermissionSet:DealEditor'] },
+      { recordType: 'Deal__c.Standard_Deal', visible: true, grantedBy: ['Profile:Sales'] },
+    ]);
+    expect(r.value.data.summary.recordTypeVisibilities).toBe(4);
+  });
+
+  it('a lone container that hides a record type yields visible:false with no granter cited', async () => {
+    const r = await effectivePermissionsHandler(ctx, { profileId: 'Profile:Sales' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const archived = r.value.data.recordTypeVisibilities.find((v) => v.recordType === 'Deal__c.Archived_Deal');
+    expect(archived).toEqual({ recordType: 'Deal__c.Archived_Deal', visible: false, grantedBy: [] });
+  });
+
+  it('a container WITHOUT the recordTypeVisibilities property contributes nothing and is disclosed (older vault)', async () => {
+    const r = await effectivePermissionsHandler(ctx, {
+      profileId: 'Profile:Sales',
+      permissionSetIds: ['PermissionSet:LegacyNoRt'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Only the profile's record types — LegacyNoRt contributes nothing, no throw.
+    expect(r.value.data.recordTypeVisibilities.map((v) => v.recordType)).toEqual([
+      'Deal__c.Archived_Deal',
+      'Deal__c.Standard_Deal',
+    ]);
+    expect(
+      r.value.data.disclosures.some(
+        (d) => d.includes('recordTypeVisibilities') && d.includes('PermissionSet:LegacyNoRt') && d.includes('/sfi-refresh'),
+      ),
+    ).toBe(true);
+  });
+
+  it('does NOT emit the missing-RT-data disclosure when every container carries the property', async () => {
+    const r = await effectivePermissionsHandler(ctx, {
+      profileId: 'Profile:Sales',
+      permissionSetIds: ['PermissionSet:DealEditor'],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.disclosures.some((d) => d.includes('no extracted `recordTypeVisibilities`'))).toBe(false);
   });
 
   it('returns component-not-found when no container exists', async () => {

@@ -653,6 +653,112 @@ describe('listComponentsHandler — B-GRAPH-BUILD totalCount beats byte-budget t
   });
 });
 
+// =============================================================================
+// Per-item slimming — grant-heavy rows must not exhaust the page budget.
+// Reproduces the Profile "1 of 59" bug: each Profile node carries ~37 KB of
+// declarative grants in `properties`, LIST_PAYLOAD_BUDGET_BYTES is 38 KB, and
+// `fitNodesToBudget` measures the FULL node — so each page held exactly ONE
+// profile. Slimming oversized rows to scalar properties (marked
+// `propertiesTruncated: true`) must let the whole inventory fit one page,
+// while small nodes pass through byte-identical.
+// =============================================================================
+describe('listComponentsHandler — oversized rows are slimmed, not budget-starved (Profile 1-of-59)', () => {
+  let pDir: string;
+  let pStore: GraphStore;
+  let pCtx: Context;
+
+  // Generate a Profile node whose serialized JSON is ~37 KB — matching the
+  // real-vault measurement that reproduced the 1-of-59 bug. The bulk is a
+  // `fieldPermissions` array (the grant dump slimming must drop); the scalar
+  // props (`custom`, `userLicense`) are what slimming must preserve.
+  const makeGrantHeavyProfile = (n: number): Node =>
+    makeNode({
+      id: `Profile:Fixture_Profile_${String(n).padStart(3, '0')}`,
+      type: 'Profile',
+      apiName: `Fixture_Profile_${String(n).padStart(3, '0')}`,
+      label: `Fixture Profile ${n}`,
+      sourcePath: `profiles/Fixture_Profile_${n}.profile-meta.xml`,
+      properties: {
+        custom: true,
+        userLicense: 'Salesforce',
+        // ~600 grant entries × ~62 bytes each ≈ 37 KB — one node alone nearly
+        // fills the whole 38 KB LIST_PAYLOAD_BUDGET_BYTES page budget.
+        fieldPermissions: Array.from({ length: 600 }, (_, i) => ({
+          field: `Obj${i % 40}__c.Field${String(i).padStart(3, '0')}__c`,
+          readable: true,
+          editable: i % 2 === 0,
+        })),
+      },
+    });
+
+  // A small node (a few hundred bytes) that must pass through UNTOUCHED —
+  // no slimming, no `propertiesTruncated` key.
+  const smallObjectNode = makeNode({
+    id: 'CustomObject:SmallFixture__c',
+    apiName: 'SmallFixture__c',
+    label: 'Small Fixture',
+    sourcePath: 'objects/SmallFixture__c/SmallFixture__c.object-meta.xml',
+    properties: { sharingModel: 'ReadWrite', deploymentStatus: 'Deployed' },
+  });
+
+  beforeAll(async () => {
+    pDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-profile-slim-'));
+    const opened = await openGraph(join(pDir, 'slim.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    pStore = opened.value;
+    // Seed 59 grant-heavy Profile nodes — the exact shape of the 1-of-59 bug —
+    // plus one small CustomObject to prove small rows are untouched.
+    const nodes = [
+      ...Array.from({ length: 59 }, (_, i) => makeGrantHeavyProfile(i + 1)),
+      smallObjectNode,
+    ];
+    const imported = await importExtractionResults(pStore, [{ nodes, edges: [] }]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    pCtx = { vaultRoot: pDir, manifest: FIXTURE_MANIFEST, graph: pStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(pStore);
+    rmSync(pDir, { recursive: true, force: true });
+  });
+
+  it('returns ALL 59 grant-heavy profiles on one page, each slimmed to scalar properties', async () => {
+    const r = await listComponentsHandler(pCtx, { type: 'Profile', limit: 100 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // THE KEY ASSERTION: the whole inventory fits one page (pre-fix: 1 of 59).
+    expect(r.value.data.components).toHaveLength(59);
+    expect(r.value.data.totalCount).toBe(59);
+    expect(r.value.data.hasMore).toBe(false);
+    // The top-level flag tells the caller detail was slimmed page-wide.
+    expect(r.value.data.propertiesSlimmed).toBe(true);
+    for (const node of r.value.data.components) {
+      // Every slimmed row is marked, keeps its scalar props, and drops the
+      // bulky grant dump.
+      expect(node.properties['propertiesTruncated']).toBe(true);
+      expect(node.properties['custom']).toBe(true);
+      expect(node.properties['userLicense']).toBe('Salesforce');
+      expect(node.properties['fieldPermissions']).toBeUndefined();
+    }
+  });
+
+  it('small nodes pass through untouched — no slimming, no propertiesTruncated key', async () => {
+    const r = await listComponentsHandler(pCtx, { type: 'CustomObject' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.components).toHaveLength(1);
+    const node = r.value.data.components[0] as Node;
+    // Properties are returned exactly as seeded — no marker key injected.
+    expect(node.properties).toEqual({
+      sharingModel: 'ReadWrite',
+      deploymentStatus: 'Deployed',
+    });
+    expect('propertiesTruncated' in node.properties).toBe(false);
+    // And the top-level flag is ABSENT (not `false`) when nothing was slimmed.
+    expect('propertiesSlimmed' in r.value.data).toBe(false);
+  });
+});
+
 describe('listComponentsHandler: Flow property filters', () => {
   let dir3: string;
   let store3: GraphStore;

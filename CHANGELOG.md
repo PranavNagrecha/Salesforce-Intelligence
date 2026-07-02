@@ -3,6 +3,78 @@
 All notable changes to **sf-intelligence** are documented here. This project
 adheres to [Semantic Versioning](https://semver.org).
 
+## [0.1.21] — 2026-07-01
+
+Headline: **routing reach + two correctness fixes**, driven by a 500-question
+stress test against a real org. The knowledge base was already accurate; the
+router was under-delivering — over-clarifying answerable questions, latching
+onto qualifier words, and hard-erroring when a resolved Flow hit an Apex-only
+tool. This release closes those gaps and fixes two tools that returned nothing.
+
+### Fixed
+- **`list_components` now lists grant-heavy types fully.** Profile /
+  PermissionSet rows carry tens of KB of declarative grants; the page-size
+  budget measured the full row, so a 59-profile org returned **one profile per
+  page**. Oversized rows are now slimmed to identity + scalar flags (marked
+  `propertiesTruncated`, top-level `propertiesSlimmed`) before the budget check —
+  all 59 fit one page; use `get_component` for a row's full detail.
+- **`field_mapping_between_objects` works in a single-vault install.** `vault`
+  was required and resolved through a registry that is empty in a normal
+  `sfi mcp` session, so it returned `fieldCount: 0` for both objects — no working
+  invocation existed. `vault` is now optional and defaults to the served vault.
+- **Router — an exact name wins over a superset.** A uniquely-named component
+  (e.g. a flow whose api-name is also a substring of a longer flow's name) is now
+  resolved as an exact match instead of blocking with a "which did you mean?"
+  menu; genuine same-name collisions still clarify.
+- **Router — spurious over-clarification.** A bare schema noun in the question
+  ("trigger", "profile", "field", "object") was promoted to a fuzzy entity
+  lookup and blocked with a menu of unrelated components — even when the object
+  was already given or the resolver returned an exact match. Schema nouns are now
+  intent signals, and an exact disposition is honored over the inline extractor.
+- **Router — Flow entities no longer hard-error.** A question whose entity
+  resolves to a Flow routed to Apex-only tools (`call_graph`,
+  `explain_apex_method`) that fail closed. A type-guard now substitutes the
+  Flow-appropriate tools (`explain_flow`, `who_can_run`, `get_impact`).
+- **Router — qualifier words no longer hijack intent.** "bulk"/"load",
+  "integration"/vendor-sync, "seats"/"license", "compliance", "best practice" no
+  longer outrank the head-noun intent (save-order, field-access, test-coverage,
+  what-if).
+- **Router — wrong-plane fixes + what-if routing.** Coverage asks route to the
+  coverage tools, API-version asks to `tech_debt_score`, empty-object asks to the
+  live plane; disable/deactivate asks route to `what_if_disable_trigger` /
+  `what_if_deactivate_flow` (permission-set deactivation routes to
+  `permission_risk_report` with a disclosure that no dedicated simulator exists).
+- **`find_component_usages` reverse custom-permission lookup.** A
+  `CustomPermission` target now surfaces the permission sets that grant it in a
+  `grantedBy` section (grants stay separate from usages).
+- **`effective_permissions` now unions `recordTypeVisibilities`** across the
+  profile + permission sets, with per-container attribution.
+
+### Changed
+- **False-premise questions are downgraded, not asserted.** When a named entity
+  can't be found, the route carries a `PREMISE CHECK` disclosure and low
+  confidence instead of routing clean+confident (the fail-closed tools still
+  back-stop it).
+- **Lifecycle phrasing coverage.** "What runs automatically when a Lead is
+  converted?" and "What runs on Lead conversion?" now route to
+  `lifecycle_process`.
+
+### Added
+- **Router reach — ~110 previously-unreachable questions now route.** A
+  500-question real-org stress test found a large class of questions where a
+  capable tool existed but no routing rule reached it (named-flow narration,
+  whole-transaction save order, granter-specific access asks, field forensics,
+  what-if deactivation, CDC/async, discovery/meta). High-precision rules now
+  route them — each anchored on an unambiguous shape so it cannot steal a
+  question that already routed correctly.
+
+### Measured (same 500-question bank, before → after)
+- routed-and-clean **269 → 387**, unrouted **188 → 80**, spurious blocks
+  **43 → 33**, with **zero** clean-question regressions. Remaining unrouted are
+  predominantly genuine capability gaps (which the router now discloses) rather
+  than reachable-but-missed tools. The engine's honesty and fail-closed
+  behavior are unchanged — and remain the trust backbone.
+
 ## [0.1.20] — 2026-07-01
 
 Headline: **privacy hardening.** No functional changes — a clean rebuild plus a

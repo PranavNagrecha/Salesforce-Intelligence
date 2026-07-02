@@ -23,6 +23,13 @@
  * a referenced-but-not-retrieved target still answers from its incoming edges.
  * Specialized tools (find_field_anywhere, layout_assignments, …) remain for a
  * deeper single-family answer; this unifies the common case.
+ *
+ * ACCESS-GRANT section: excluding `grantedBy` from the usage tier made "which
+ * permission sets grant custom permission X?" unanswerable (a CustomPermission's
+ * ONLY incoming edges are grants). Grants stay OUT of `graphReferrers` — access
+ * is still not usage — but a `CustomPermission` target, or any target with zero
+ * usage edges and >0 incoming `grantedBy` edges, surfaces its granters in a
+ * SEPARATE `grantedBy` section so the grant surface stays answerable.
  */
 import type { ComponentId, Edge, McpError, McpResponse, Node } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
@@ -112,6 +119,18 @@ export interface ReferrerGroup {
   readonly sample: readonly GraphReferrer[];
 }
 
+/**
+ * Access-grant section: the containers (Profiles / PermissionSets / record-type
+ * assignments) whose incoming `grantedBy` edges point at the target, listed
+ * SEPARATELY from usages because access is not usage. `count` is the full
+ * distinct-granter count; `granters` is a sorted sample (cap
+ * `GRAPH_REFERRER_SAMPLE`).
+ */
+export interface GrantedBySection {
+  readonly count: number;
+  readonly granters: readonly { readonly id: ComponentId; readonly type: string }[];
+}
+
 export interface FindComponentUsagesOutput {
   readonly target: { readonly componentId: ComponentId; readonly type: string; readonly apiName: string; readonly retrieved: boolean };
   readonly graphReferrers: readonly ReferrerGroup[];
@@ -123,6 +142,15 @@ export interface FindComponentUsagesOutput {
     readonly matches: readonly { readonly path: string; readonly line: number; readonly snippet: string }[];
     readonly truncated: boolean;
   };
+  /**
+   * Grants listed SEPARATELY from usages (`graphReferrers` still excludes
+   * `grantedBy` — access is not usage). Present ONLY when the target is a
+   * `CustomPermission` (whose natural question is "which containers GRANT
+   * it?" — its only incoming edges are grants) or when the target has ZERO
+   * usage edges but >0 incoming `grantedBy` edges. Absent otherwise, so a
+   * normal usage answer is byte-identical to before.
+   */
+  readonly grantedBy?: GrantedBySection;
   readonly summary: {
     readonly graphReferrerCount: number;
     readonly grepMatchCount: number;
@@ -180,7 +208,12 @@ export const findComponentUsagesHandler = async (
   if (!edgesRes.ok) {
     return err({ kind: 'internal', message: `graph query failed: ${edgesRes.error.message}` });
   }
-  const usageEdges = (edgesRes.value as readonly Edge[]).filter((e) => !NON_USAGE_EDGE_TYPES.has(e.edgeType));
+  const incomingEdges = edgesRes.value as readonly Edge[];
+  const usageEdges = incomingEdges.filter((e) => !NON_USAGE_EDGE_TYPES.has(e.edgeType));
+  // Grant edges are kept ASIDE (never in the usage tier): a CustomPermission's
+  // only incoming edges are grants, and a zero-usage-but-granted target must
+  // stay answerable — surfaced in the separate `grantedBy` section below.
+  const grantEdges = incomingEdges.filter((e) => e.edgeType === 'grantedBy');
 
   const byType = new Map<string, GraphReferrer[]>();
   for (const e of usageEdges) {
@@ -241,8 +274,27 @@ export const findComponentUsagesHandler = async (
 
   const hasStaticEvidence = graphReferrerCount > 0 || grepMatches.length > 0;
 
-  // Unknown target with NO evidence anywhere → genuinely not found.
-  if (!retrieved && graphReferrerCount === 0 && !hasStaticEvidence) {
+  // Access-grant section (grants are NOT usage, so they never count as static
+  // evidence): always present for a CustomPermission (an explicit count of 0
+  // means "no container grants it in this vault"), and for any other target
+  // only when it has zero usage edges but IS granted — otherwise absent.
+  const surfaceGrants =
+    targetType === 'CustomPermission' || (usageEdges.length === 0 && grantEdges.length > 0);
+  let grantedBySection: GrantedBySection | undefined;
+  if (surfaceGrants) {
+    const granterIds = [...new Set(grantEdges.map((e) => e.fromId))].sort();
+    grantedBySection = {
+      count: granterIds.length,
+      granters: granterIds
+        .slice(0, GRAPH_REFERRER_SAMPLE)
+        .map((id) => ({ id, type: typeOf(id) })),
+    };
+  }
+
+  // Unknown target with NO evidence anywhere → genuinely not found. A grant
+  // edge counts as existence here: a granted-but-not-retrieved CustomPermission
+  // (managed-package) must answer from its grants, not vanish.
+  if (!retrieved && graphReferrerCount === 0 && !hasStaticEvidence && grantEdges.length === 0) {
     return err({
       kind: 'component-not-found',
       message: `no component or referrer matches \`${componentId}\` in this vault`,
@@ -274,6 +326,11 @@ export const findComponentUsagesHandler = async (
       `${targetType} usage has a weaker graph tier — FRONTEND references ($Label / $Resource / $Setup and @salesforce imports in LWC/Aura/Visualforce) are modeled as graph edges on vaults refreshed at 0.1.10+, but Apex references (System.Label.X, dynamic config reads) are still grep-only, so the grep supplement carries part of the answer here. Confirm by reading the matched source.`,
     );
   }
+  if (grantedBySection !== undefined) {
+    boundaries.push(
+      `Access grants are listed SEPARATELY in \`grantedBy\` (${grantedBySection.count} granting container(s)) — a grant is ACCESS, not usage, so granters never appear in graphReferrers. For a CustomPermission this answers "which Profiles / PermissionSets grant it?"; checking a custom permission in code (FeatureManagement / $Permission) is usage and stays in the usage tiers.`,
+    );
+  }
   if (!retrieved) {
     boundaries.push(
       'This component is a PHANTOM — referenced by the edges below but NOT retrieved into the vault, so its own definition is unavailable; the referrer list is still valid.',
@@ -284,6 +341,7 @@ export const findComponentUsagesHandler = async (
     data: {
       target: { componentId, type: targetType, apiName: targetApiName, retrieved },
       graphReferrers,
+      ...(grantedBySection !== undefined ? { grantedBy: grantedBySection } : {}),
       grepSupplement: {
         tier: 'text-match',
         ran: grepRan,

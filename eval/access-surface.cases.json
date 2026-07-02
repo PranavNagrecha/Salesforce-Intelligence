@@ -364,12 +364,12 @@
     {
       "id": "honest-gap-ip-ranges",
       "query": "Which IP ranges can log in?",
-      "expect": "unrouted-gap",
-      "intent": "unrouted",
-      "plane": "unknown",
-      "tools": ["sfi.resolve", "sfi.capabilities"],
-      "gap": "unrouted",
-      "note": "HONEST GAP: org-wide login IP restrictions have no route today. (Note: per-PROFILE loginIpRanges ARE extracted and surfaced via sfi.profile_security / sfi.user_ability, but the org-wide 'which IP ranges can log in' phrasing does not route.) Correctly unrouted; not live-resolvable."
+      "expect": "routes",
+      "intent": "profile-security",
+      "plane": "vault",
+      "tools": ["sfi.list_components", "sfi.profile_security"],
+      "gap": null,
+      "note": "ROUTED (eval family C): per-PROFILE loginIpRanges are extracted and surfaced via sfi.profile_security, so 'which IP ranges can log in' now routes to the profile-security intent — list_components(type Profile) enumerates, then profile_security per profile reads the login IP ranges (the org-wide answer is the union over profiles). Previously pinned unrouted only because no rule existed."
     }
   ]
 }

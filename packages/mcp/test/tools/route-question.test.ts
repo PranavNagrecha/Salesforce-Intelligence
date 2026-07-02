@@ -45,6 +45,11 @@ const seed: ExtractionResult = {
     node({ id: 'CustomField:Account.Status__c', type: 'CustomField', apiName: 'Status__c', label: 'Status', parentId: 'CustomObject:Account' }),
     node({ id: 'CustomObject:Case', apiName: 'Case', label: 'Case' }),
     node({ id: 'CustomField:Case.Status__c', type: 'CustomField', apiName: 'Status__c', label: 'Status', parentId: 'CustomObject:Case' }),
+    // Synthetic Flow + a similarly-named calculation flow, so a comparison-clause
+    // ("is it the same as the bar calc?") gives the fuzzy resolver a rival to
+    // pick up — the shape RESIDUAL 1 fixes (a clean explain-flow must not block).
+    node({ id: 'Flow:Foo_Bar_Flow', type: 'Flow', apiName: 'Foo_Bar_Flow', label: 'Foo Bar Flow' }),
+    node({ id: 'Flow:Bar_Calc_Flow', type: 'Flow', apiName: 'Bar_Calc_Flow', label: 'Bar Calc' }),
   ],
   edges: [],
 };
@@ -155,6 +160,25 @@ describe('routeQuestionHandler — bare-component resolve fallback (P10-A5)', ()
   });
 });
 
+describe('routeQuestionHandler — RESIDUAL 1: comparison aside must not block a single-entity explain', () => {
+  it('routes explain-flow clean when a trailing "is it the same as X" aside names a second flow', async () => {
+    const r = await routeQuestionHandler(ctx, {
+      question: 'explain the Foo_Bar_Flow flow, is it the same as the bar calc?',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // The comparison target ("bar calc") must NOT seed a rival entity: the
+    // primary flow resolves exact and the question routes clean, not blocked.
+    expect(r.value.data.route.intent).toBe('explain-flow');
+    expect(r.value.data.executionBlocked).toBe(false);
+    expect(r.value.data.route.clarification).toBeNull();
+    expect(r.value.data.entityEvidence?.query).toBe('Foo_Bar_Flow flow');
+    expect(r.value.data.entityEvidence?.disposition).toBe('exact');
+    expect(r.value.data.entityEvidence?.clarificationRequired).toBe(false);
+  });
+});
+
 describe('routeQuestionHandler — enterprise routing evidence', () => {
   it('stops and asks for clarification whenever distinct intents match', async () => {
     const r = await routeQuestionHandler(ctx, {
@@ -212,6 +236,25 @@ describe('routeQuestionHandler — enterprise routing evidence', () => {
     expect(r.value.data.entityEvidence?.disposition).toBe('ambiguous');
     expect(r.value.data.entityEvidence?.clarificationRequired).toBe(true);
     expect(r.value.data.executionBlocked).toBe(true);
+  });
+
+  it('an object qualifier SCOPES the field — resolver exact, no cross-object menu (Family A)', async () => {
+    // Status__c exists on Payment__c, Account, AND Case. Unqualified, that is
+    // genuine ambiguity (test above). Qualified with "on Case" the resolver is
+    // handed the parent-scoped dotted form and reports exact — emitting the
+    // "Several components match" block for a stated object is an over-clarify.
+    const r = await routeQuestionHandler(ctx, {
+      question: 'who can edit Status__c on Case',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.entityEvidence?.query).toBe('Case.Status__c');
+    expect(r.value.data.entityEvidence?.disposition).toBe('exact');
+    expect(r.value.data.entityEvidence?.candidates[0]?.componentId).toBe(
+      'CustomField:Case.Status__c',
+    );
+    expect(r.value.data.executionBlocked).toBe(false);
   });
 
   it('uses a confirmed org glossary alias in front-door entity routing', async () => {
@@ -910,5 +953,93 @@ describe('routeQuestionHandler — I3a live-plane consent disclosure in guidance
     const guidance = r.value.data.guidance ?? '';
     expect(guidance).not.toMatch(/LIVE PLANE/i);
     expect(guidance).not.toMatch(/sfi\.live_consent/);
+  });
+});
+
+describe('routeQuestionHandler — schema nouns are intent signals, not entity lookups (Family A)', () => {
+  it('save-order phrasing full of bare nouns routes clean — no ApexTrigger menu', async () => {
+    // "the Case trigger" is intent vocabulary for the save-order question, not
+    // a named component. Pre-fix the extractor sent the whole noun phrase to
+    // the resolver and blocked on a menu of unrelated ApexTriggers.
+    const r = await routeQuestionHandler(ctx, {
+      question: 'Which flows fire before the Case trigger and which run after?',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.route.intent).toBe('trigger-order');
+    expect(r.value.data.route.tools).toContain('sfi.what_happens_on_save');
+    expect(r.value.data.executionBlocked).toBe(false);
+    expect(r.value.data.route.clarification).toBeNull();
+  });
+
+  it('resolves ONLY the object a save-order intent needs (exact, CustomObject-typed)', async () => {
+    const r = await routeQuestionHandler(ctx, {
+      question:
+        'what actually happens on save for a Case — every trigger, flow, and validation rule',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.route.intent).toBe('trigger-order');
+    expect(r.value.data.route.suggestedArgs).toEqual({ event: 'update', objectApiName: 'Case' });
+    expect(r.value.data.entityEvidence?.query).toBe('Case');
+    expect(r.value.data.entityEvidence?.typeHints).toEqual(['CustomObject']);
+    expect(r.value.data.entityEvidence?.disposition).toBe('exact');
+    expect(r.value.data.entityEvidence?.candidates[0]?.componentId).toBe('CustomObject:Case');
+    expect(r.value.data.executionBlocked).toBe(false);
+  });
+
+  it('"List every profile with delete permission on Contact" routes clean to who_can_access_object', async () => {
+    const r = await routeQuestionHandler(ctx, {
+      question: 'List every profile with delete permission on Contact',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.route.intent).toBe('who-can-access-object');
+    expect(r.value.data.route.tools).toContain('sfi.who_can_access_object');
+    // The bare noun "profile" must not become an entity lookup.
+    expect(r.value.data.entityEvidence).toBeUndefined();
+    expect(r.value.data.executionBlocked).toBe(false);
+  });
+
+  it('"Show me every profile that can access Case" routes clean to who_can_access_object', async () => {
+    const r = await routeQuestionHandler(ctx, {
+      question: 'Show me every profile that can access Case',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.route.intent).toBe('who-can-access-object');
+    expect(r.value.data.entityEvidence).toBeUndefined();
+    expect(r.value.data.executionBlocked).toBe(false);
+  });
+
+  it('"What is a Profile?" routes to the knowledge concept, never a Profile-record menu', async () => {
+    const r = await routeQuestionHandler(ctx, {
+      question: 'What is a Profile?',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.route.intent).toBe('guidance');
+    expect(r.value.data.route.plane).toBe('knowledge');
+    expect(r.value.data.entityEvidence).toBeUndefined();
+    expect(r.value.data.executionBlocked).toBe(false);
+  });
+
+  it('lowercase "difference between a profile and a permission set" compares concepts — no entity menu', async () => {
+    // Pinned to compare-profiles by the access-surface fixture; the Family A
+    // fix is that the generic type words never reach the resolver.
+    const r = await routeQuestionHandler(ctx, {
+      question: 'difference between a profile and a permission set',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.route.intent).toBe('compare-profiles');
+    expect(r.value.data.entityEvidence).toBeUndefined();
+    expect(r.value.data.executionBlocked).toBe(false);
   });
 });

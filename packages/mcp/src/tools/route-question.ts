@@ -60,6 +60,60 @@ import { CORE_PROFILE_TOOLS, toolProfile } from './tool-profile.js';
 const RESOLVE_FALLBACK_MAX_TOKENS = 3;
 
 /**
+ * Intents whose primary tools (`what_happens_on_save` / `order_of_execution` /
+ * automation advisors) take an OBJECT api name. For these, entity resolution
+ * targets the object the rule derived — never a fuzzy phrase scraped from the
+ * question, where bare schema nouns ("trigger", "flow", "validation rule") are
+ * intent vocabulary rather than component names.
+ */
+const SAVE_ORDER_INTENTS: ReadonlySet<string> = new Set([
+  'trigger-order',
+  'save-behavior',
+  'automation-on-object',
+  'dlrs-recursion',
+]);
+
+/**
+ * Single-entity intents: the question names ONE component to explain/fetch, and
+ * a trailing comparison/aside clause ("is it the same as X", "vs Y", "or is it
+ * Z") is a rhetorical aside about the SAME answer — not a second component to
+ * resolve. RESIDUAL 1: the comparison clause was giving the fuzzy resolver a
+ * second name to match, turning a cleanly-routed explain into an ambiguity
+ * BLOCK. For these intents the aside is stripped before entity extraction so
+ * the primary answer routes clean.
+ */
+const SINGLE_ENTITY_INTENTS: ReadonlySet<string> = new Set([
+  'explain-flow',
+  'explain-apex',
+  'get-component',
+]);
+
+/**
+ * Strip a trailing comparison/aside clause from a single-entity question so the
+ * comparison TARGET is never scraped as a rival entity. Only removes a clause
+ * that starts with an explicit comparison connector ("is it the same as…",
+ * "vs…", "versus…", "or is it…", "same as…", "compared to…"), so a normal
+ * question is left untouched. Conservative: requires the connector to introduce
+ * the FINAL clause, and only fires for SINGLE_ENTITY_INTENTS.
+ */
+const COMPARISON_ASIDE = new RegExp(
+  '\\s*(?:,|—|-|;)?\\s*\\b(?:' +
+    'is\\s+(?:it|this|that)\\s+the\\s+same\\s+as|' +
+    'is\\s+(?:it|this|that)\\s+different\\s+(?:from|to)|' +
+    '(?:the\\s+)?same\\s+as|' +
+    'compared\\s+to|' +
+    'or\\s+is\\s+(?:it|this|that)|' +
+    'vs\\.?|versus' +
+    ')\\b.*$',
+  'i',
+);
+const stripComparisonAside = (question: string, intent: string): string => {
+  if (!SINGLE_ENTITY_INTENTS.has(intent)) return question;
+  const stripped = question.replace(COMPARISON_ASIDE, '').trim();
+  return stripped.length > 0 ? stripped : question;
+};
+
+/**
  * Vault-gated rescue for an `unrouted` route: if the question is a SHORT phrase
  * that resolves to a real vault component (disposition exact|ambiguous), route
  * it to `sfi.resolve` on the vault plane instead of a dead `unknown`. Gated
@@ -159,7 +213,11 @@ export interface RouteQuestionOutput {
   readonly route: RouteResult;
   /** True when the client must ask route.clarification before executing tools. */
   readonly executionBlocked: boolean;
-  /** Vault-backed evidence about the named entity, when resolution was useful. */
+  /**
+   * Vault-backed evidence about the named entity, when resolution was useful —
+   * including disposition `none`, where it carries the FALSE-PREMISE disclosure
+   * (the question named a component the vault does not contain).
+   */
   readonly entityEvidence?: {
     /** Narrow phrase sent to the resolver; never the whole question. */
     readonly query: string;
@@ -168,7 +226,11 @@ export interface RouteQuestionOutput {
     readonly disposition: 'exact' | 'ambiguous' | 'none';
     /** Whether candidate competition is strong enough that execution must stop. */
     readonly clarificationRequired: boolean;
-    /** Non-blocking warning when matches are weak rather than truly competitive. */
+    /**
+     * Non-blocking warning when matches are weak rather than truly competitive;
+     * on disposition `none` this is the premise disclosure ("no component
+     * matching '<name>' exists in the vault — verify the name").
+     */
     readonly warning: string | null;
     /** Canonical entity explicitly selected through clarification continuation. */
     readonly selectedComponentId?: string;
@@ -304,6 +366,19 @@ const extractEntityQuery = (question: string, intent: string): string | null => 
     if (intent === 'what-if-method-signature' && apiReference.includes('.')) {
       return `${apiReference.slice(0, apiReference.indexOf('.'))} class`;
     }
+    // Object-qualified field reference — "Resolution_Code__c on Case". The
+    // stated object must SCOPE the entity: emit the dotted Object.Field form
+    // the resolver treats as a definitive parent+name hit, so a same-named
+    // field on another object can never drag this into a cross-object menu.
+    if (!apiReference.includes('.')) {
+      const qualifier = question.match(
+        new RegExp(
+          `\\b${apiReference}\\b\\s+(?:field\\s+)?on\\s+(?:the\\s+)?([A-Za-z][A-Za-z0-9_]*)\\b`,
+          'i',
+        ),
+      )?.[1];
+      if (qualifier !== undefined) return `${qualifier}.${apiReference}`;
+    }
     return apiReference;
   }
 
@@ -312,29 +387,35 @@ const extractEntityQuery = (question: string, intent: string): string | null => 
   )?.[1];
   if (prefixedTypePhrase !== undefined) return prefixedTypePhrase.trim();
 
+  // `logic` is in the trailing-noun alternation so "the Order Fulfillment
+  // logic" captures a name (eval family B), but unlike the schema nouns it is
+  // a generic implementation word, not a resolver type hint — it is DROPPED
+  // from the returned phrase below so the resolver ranks the bare name and the
+  // type-guard adapts the route to whatever family it lands on.
   const typedMatch = question.match(
-    /\b(?:the\s+)?([A-Za-z][A-Za-z0-9_]*(?:[\s_-]+[A-Za-z][A-Za-z0-9_]*){0,5}\s+(?:object|field|flow|class|trigger|layout|profile|permission\s+set|record\s+type|validation\s+rule|report|dashboard))(?:\s+(?:on|for|of)\s+(?:the\s+)?([A-Za-z][A-Za-z0-9_]*)(?:\s+object)?)?\b/i,
+    /\b(?:the\s+)?([A-Za-z][A-Za-z0-9_]*(?:[\s_-]+[A-Za-z][A-Za-z0-9_]*){0,5}\s+(?:object|field|flow|class|trigger|layout|profile|permission\s+set|record\s+type|validation\s+rule|report|dashboard|logic))(?:\s+(?:on|for|of)\s+(?:the\s+)?([A-Za-z][A-Za-z0-9_]*)(?:\s+object)?)?\b/i,
   );
   const typedPhrase = typedMatch?.[1];
   if (typedPhrase === undefined) return null;
   const cleaned = typedPhrase
     .replace(
-      /^(?:(?:what|which|who|where|when|why|how|is|are|can|does|do|did|show|find|explain|locate|list|references?|owns?|edit|read|view|access|change|delete|remove|possible|values?|api|version|data|type|for|of|the|this|that|in|on|to|used|assigned|set)\s+)+/i,
+      /^(?:(?:what|whatever|which|who|where|when|why|how|is|are|can|does|do|did|show|find|explain|locate|list|calls?|invokes?|references?|owns?|edit|read|view|access|change|delete|remove|possible|values?|apex|api|version|data|type|for|of|the|this|that|in|on|to|used|assigned|set|every|all|each|any|me|a|an)\s+)+/i,
       '',
     )
     .trim();
   if (
-    /\b(?:and|when|should|use|there|any|that|no|available|tools?|required\s+fields?|record\s+types?)\b/i.test(cleaned)
+    /\b(?:and|when|should|use|there|any|that|no|available|tools?|difference|between|required\s+fields?|record\s+types?)\b/i.test(cleaned)
   ) return null;
   const distinctive = cleaned
     .replace(
-      /\b(?:object|field|flow|class|trigger|page|layout|profile|permission|set|record|type|validation|rule|report|dashboard|data)\b/gi,
+      /\b(?:object|field|flow|class|trigger|page|layout|profile|permission|set|record|type|validation|rule|report|dashboard|data|logic)\b/gi,
       '',
     )
     .replace(/[^A-Za-z0-9_]+/g, '');
   if (distinctive.length === 0) return null;
+  const phrase = cleaned.replace(/\s+logic$/i, '');
   const parent = typedMatch?.[2];
-  return parent === undefined ? cleaned : `${cleaned} on ${parent}`;
+  return parent === undefined ? phrase : `${phrase} on ${parent}`;
 };
 
 const inferEntityTypes = (
@@ -521,6 +602,101 @@ const ASSESSMENT_FAMILY =
 
 /** Tools the regex route lists as preambles — they never inherit answering args. */
 const ROUTE_PREAMBLE_TOOLS = new Set(['sfi.resolve', 'sfi.capabilities']);
+
+/**
+ * Eval family B — tool ↔ resolved-component-type compatibility. The tools keyed
+ * here FAIL CLOSED when handed a component outside their family (an Apex call
+ * graph over a Flow id, an object CRUD audit over a Flow) — a route that ships
+ * them anyway is a guaranteed hard error, not a wrong-but-plausible answer.
+ * Tools not keyed here accept any component type and are never touched.
+ */
+const TOOL_COMPATIBLE_TYPES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ['sfi.call_graph', new Set(['ApexClass', 'ApexTrigger'])],
+  ['sfi.method_reachability', new Set(['ApexClass', 'ApexTrigger'])],
+  ['sfi.explain_apex_method', new Set(['ApexClass', 'ApexTrigger'])],
+  ['sfi.who_can_access_object', new Set(['CustomObject'])],
+  ['sfi.object_access_audit', new Set(['CustomObject'])],
+  ['sfi.field_access_audit', new Set(['CustomField'])],
+]);
+
+/** The access-flavored half of the map — their Flow analogue is RUN access. */
+const ACCESS_FLAVORED_TOOLS: ReadonlySet<string> = new Set([
+  'sfi.who_can_access_object',
+  'sfi.object_access_audit',
+  'sfi.field_access_audit',
+]);
+
+/**
+ * Resolve the entity TYPE the guard should act on. `exact` trusts the top
+ * candidate. `ambiguous` is treated as typed only when NO candidate could
+ * satisfy the route's type-restricted tools — whichever candidate the user
+ * turns out to mean, those tools are a guaranteed hard error (verified live:
+ * a Flow whose ambiguity rivals are its own conditional contexts and business
+ * processes, never an Apex class), so substituting is safe even before the
+ * ambiguity resolves. A mixed list with a compatible rival stays untyped —
+ * the route may be right once the user picks.
+ */
+export const resolvedTypeForGuard = (
+  route: RouteResult,
+  resolution: Pick<ResolveResult, 'disposition' | 'candidates'> | null,
+): string | null => {
+  if (resolution === null || resolution.candidates.length === 0) return null;
+  const top = resolution.candidates[0]!;
+  if (resolution.disposition === 'exact') return top.type;
+  if (resolution.disposition !== 'ambiguous') return null;
+  const guardedCompatibleTypes = new Set(
+    route.tools.flatMap((tool) => [...(TOOL_COMPATIBLE_TYPES.get(tool) ?? [])]),
+  );
+  if (guardedCompatibleTypes.size === 0) return null;
+  return resolution.candidates.some((candidate) => guardedCompatibleTypes.has(candidate.type))
+    ? null
+    : top.type;
+};
+
+/**
+ * When the question's entity RESOLVES to a Flow but the route carries tools
+ * that hard-error on a Flow id, SUBSTITUTE the Flow-appropriate tools instead
+ * of routing into the guaranteed error: access asks get who_can_run (flowAccess
+ * grants) leading, code/dependency asks get explain_flow (which narrates the
+ * Apex the Flow invokes) leading, and both get get_impact for the dependency
+ * surface. A substitution, never a block — the question stays answerable, and
+ * because the swap happens BEFORE the funnel fusion, explain_flow/get_impact
+ * also surface in toolCandidates. Exported for drift-proof unit tests.
+ */
+export const applyComponentTypeGuard = (
+  route: RouteResult,
+  resolvedType: string | null,
+): RouteResult => {
+  if (resolvedType !== 'Flow') return route;
+  const incompatible = new Set(
+    route.tools.filter((tool) => {
+      const compatible = TOOL_COMPATIBLE_TYPES.get(tool);
+      return compatible !== undefined && !compatible.has(resolvedType);
+    }),
+  );
+  if (incompatible.size === 0) return route;
+  const substitutes = [...incompatible].some((tool) => ACCESS_FLAVORED_TOOLS.has(tool))
+    ? ['sfi.who_can_run', 'sfi.explain_flow', 'sfi.get_impact']
+    : ['sfi.explain_flow', 'sfi.get_impact'];
+  const substituteSet = new Set(substitutes);
+  const preamble = route.tools.filter((tool) => ROUTE_PREAMBLE_TOOLS.has(tool));
+  const kept = route.tools.filter(
+    (tool) =>
+      !ROUTE_PREAMBLE_TOOLS.has(tool) && !incompatible.has(tool) && !substituteSet.has(tool),
+  );
+  const originalTools = route.tools;
+  const tools = [...preamble, ...substitutes, ...kept];
+  return {
+    ...route,
+    tools,
+    reason:
+      `${route.reason} The named entity resolved to a Flow, so tools that require ` +
+      `an Apex class, object, or field id were replaced with the Flow-appropriate ones.`,
+    plan: route.plan.map((step) =>
+      step.tools === originalTools ? { ...step, tools } : step,
+    ),
+  };
+};
 
 /**
  * I2b — the regex route is a FEATURE, not an override. Instead of hard-pinning
@@ -973,9 +1149,30 @@ export const routeQuestionHandler = async (
       suggestedArgs: { type: 'CustomObject' },
     };
   }
-  const entityQuery = route.needsResolve ? extractEntityQuery(input.question, route.intent) : null;
-  const entityTypes =
-    entityQuery === null ? [] : inferEntityTypes(entityQuery, route.intent, input.question);
+  // Save-order/automation intents take an OBJECT. Their phrasings are full of
+  // bare schema nouns ("the Contact trigger", "every trigger, flow, and
+  // validation rule") that are intent signals, not component names — fed to
+  // the fuzzy resolver they produce a menu of unrelated ApexTriggers and block
+  // a perfectly clear question (eval family A). Resolve exactly the object the
+  // routed tool needs (already derived into suggestedArgs), or nothing.
+  const saveOrderIntent = SAVE_ORDER_INTENTS.has(route.intent);
+  const suggestedObject = route.suggestedArgs?.['objectApiName'];
+  // RESIDUAL 1: for a single-entity explain/fetch, a trailing comparison aside
+  // ("…, is it the same as the bar calc?") is rhetoric about the SAME answer,
+  // not a second component — strip it before extraction so it cannot seed a
+  // rival entity and turn a clean route into an ambiguity block.
+  const entityExtractionSource = stripComparisonAside(input.question, route.intent);
+  const entityQuery = !route.needsResolve
+    ? null
+    : saveOrderIntent
+      ? (typeof suggestedObject === 'string' ? suggestedObject : null)
+      : extractEntityQuery(entityExtractionSource, route.intent);
+  const entityTypes: readonly ComponentType[] =
+    entityQuery === null
+      ? []
+      : saveOrderIntent
+        ? ['CustomObject']
+        : inferEntityTypes(entityQuery, route.intent, input.question);
   const entityResolution = entityQuery !== null
     ? await resolveComponents(ctx.graph, entityQuery, {
         limit: 5,
@@ -1040,6 +1237,16 @@ export const routeQuestionHandler = async (
     route = { ...route, confidence: 'medium' };
   }
 
+  // Eval family B — the resolved TYPE gates the routed tools. When the entity
+  // resolves to a Flow (exact, or ambiguous with no candidate the guarded
+  // tools could accept), a route carrying Apex-/object-/field-only tools
+  // would hard-error, so swap in the Flow-appropriate tools BEFORE the args
+  // map, the funnel fusion, and the margin gate see the route.
+  route = applyComponentTypeGuard(
+    route,
+    resolvedTypeForGuard(route, refinedEntityResolution),
+  );
+
   // I6 — margin-based clarification. Only in hybrid mode (candidates exist).
   // Runs BEFORE the clarificationId is stamped so a tool-choice clarification
   // participates in the stateless continuation contract exactly like an intent
@@ -1063,6 +1270,115 @@ export const routeQuestionHandler = async (
     const marginClar = marginClarification(gateCandidates, route.clarification);
     if (marginClar !== null) {
       route = { ...route, confidence: 'low', clarification: marginClar };
+    }
+  }
+
+  // Eval family E — FALSE PREMISE. The question NAMED a specific entity but the
+  // resolver found nothing (disposition `none`): the route must not present as
+  // clean + high-confidence, or the host answers as if the component exists.
+  // Downgrade confidence and attach a premise disclosure — but keep routing:
+  // the routed tool fails closed on an unknown id (the honesty stack is
+  // unchanged), so this is a warning, never an execution block. Runs AFTER the
+  // margin gate on purpose: the gate's inputs stay identical to a resolvable
+  // question, so a premise problem never manufactures a tool-choice tie.
+  if (
+    entityQuery !== null &&
+    refinedEntityResolution !== null &&
+    refinedEntityResolution.disposition === 'none'
+  ) {
+    // The extracted query can carry a schema noun the graph resolver does not
+    // strip ("PaymentProcessor class"): retry the BARE name before flagging,
+    // so a real component is never accused of not existing over a type word.
+    const bareQuery = entityQuery
+      .replace(/^(?:the|a|an)\s+/i, '')
+      .replace(
+        /\s+(?:class(?:es)?|trigger(?:s)?|field(?:s)?|object(?:s)?|flow(?:s)?|component(?:s)?|layout(?:s)?|profile(?:s)?|report(?:s)?|dashboard(?:s)?|rule(?:s)?)$/i,
+        '',
+      );
+    const bareRetry =
+      bareQuery !== entityQuery && bareQuery.length > 0
+        ? await resolveComponents(ctx.graph, bareQuery, {
+            limit: 5,
+            ...(entityTypes.length > 0 ? { types: entityTypes } : {}),
+          })
+        : null;
+    const bareResolution =
+      bareRetry?.ok === true && bareRetry.value.disposition !== 'none'
+        ? bareRetry.value
+        : null;
+    if (bareResolution !== null) {
+      // The bare name IS real — surface it as evidence instead of a premise flag.
+      entityEvidence = {
+        query: bareQuery,
+        typeHints: entityTypes,
+        disposition: bareResolution.disposition,
+        clarificationRequired: false,
+        warning:
+          bareResolution.disposition === 'ambiguous'
+            ? 'Possible component matches were found, but none is strong enough to interrupt routing. Resolve the component before executing a component-specific analysis.'
+            : null,
+        candidates: bareResolution.candidates.slice(0, 5).map((candidate) => ({
+          componentId: candidate.id,
+          type: candidate.type,
+          apiName: candidate.apiName,
+          label: candidate.label,
+          parentApiName: candidate.parentApiName,
+          score: candidate.score,
+          base: candidate.base,
+          matchKind: candidate.matchKind,
+          evidence: candidate.evidence,
+        })),
+      };
+    } else {
+      const premiseWarning =
+        `PREMISE CHECK: no component matching '${entityQuery}' exists in the vault — ` +
+        `verify the name (a typo, or metadata newer than the last refresh; /sfi-refresh may help). ` +
+        `The routed tool fails closed on an unknown component; do not present its error as an answer about a real component.`;
+      route = {
+        ...route,
+        confidence: 'low',
+        reason: `${route.reason} ${premiseWarning}`,
+      };
+      entityEvidence = {
+        query: entityQuery,
+        typeHints: entityTypes,
+        disposition: 'none',
+        clarificationRequired: false,
+        warning: premiseWarning,
+        candidates: [],
+      };
+    }
+  } else if (
+    entityQuery !== null &&
+    refinedEntityResolution !== null &&
+    refinedEntityResolution.disposition === 'ambiguous' &&
+    (/__(?:c|mdt|e|x|b|kav)\b/i.test(entityQuery) || entityQuery.includes('.')) &&
+    !refinedEntityResolution.candidates.some(
+      (candidate) =>
+        candidate.apiName.toLowerCase() === entityQuery.toLowerCase() ||
+        candidate.id.toLowerCase().endsWith(`:${entityQuery.toLowerCase()}`),
+    )
+  ) {
+    // Same FALSE-PREMISE family, literal form: a dotted / suffixed API
+    // reference ("Case.F__c", "F__c") is an unambiguous NAME, and
+    // refineEntityResolution already promotes a literal hit to exact — so an
+    // ambiguous literal means the NAMED component does not exist and the
+    // rivals are merely fuzzy lookalikes. Large vaults almost never return
+    // `none` (something always fuzzy-matches), so without this branch a
+    // literal false premise presented as a routine weak-match warning. Keep
+    // the lookalikes as suggestions; downgrade and disclose.
+    const premiseWarning =
+      `PREMISE CHECK: no component named '${entityQuery}' exists in the vault — the listed ` +
+      `candidates are fuzzy lookalikes, not the component you named. Verify the name ` +
+      `(a typo, or metadata newer than the last refresh; /sfi-refresh may help). ` +
+      `The routed tool fails closed on an unknown component; do not present its error as an answer about a real component.`;
+    route = {
+      ...route,
+      confidence: 'low',
+      reason: `${route.reason} ${premiseWarning}`,
+    };
+    if (entityEvidence !== undefined) {
+      entityEvidence = { ...entityEvidence, warning: premiseWarning };
     }
   }
 

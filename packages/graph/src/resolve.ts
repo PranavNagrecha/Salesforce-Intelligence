@@ -7,7 +7,9 @@
  * a tool) decides. Resolution is always `heuristic` confidence.
  *
  * Pipeline:
- *   1. Tokenize the query (drop stop-words + filler).
+ *   1. Tokenize the query (drop stop-words + filler; leading/trailing schema
+ *      nouns like "field"/"object"/"trigger" are TYPE hints, stripped from
+ *      matching and folded into the type-intent ranking instead).
  *   2. Load candidate nodes (api_name + label only — never properties_json,
  *      which was the source of Profile-at-1.0 noise) + inbound-reference counts.
  *   3. Score: per query token, best match over a node's tokens, where
@@ -206,7 +208,64 @@ const queryNamesComponentType = (q: string): ComponentType | null => {
   if (/\bfields?\b/.test(lower)) return 'CustomField';
   if (/\b(classes?|apex)\b/.test(lower)) return 'ApexClass';
   if (/\btriggers?\b/.test(lower)) return 'ApexTrigger';
+  if (/\bpermission\s+sets?\b/.test(lower)) return 'PermissionSet';
+  if (/\brecord\s+types?\b/.test(lower)) return 'RecordType';
+  if (/\bprofiles?\b/.test(lower)) return 'Profile';
   return null;
+};
+
+/**
+ * Schema nouns a user attaches to a name as a TYPE hint, not name content —
+ * "SSN field", "the payment object", "Contact trigger". Left in the token
+ * stream they fuzzy-match unrelated corpus tokens ("object"≈"project") and
+ * drag genuine matches below noise, so `stripTypeHintNouns` removes them from
+ * the LEADING/TRAILING edge of the query before tokenization. The RAW query is
+ * still used for the whole-name exact pass (a component literally named
+ * `SSN_Field__c` stays findable) and for `queryNamesComponentType`, which
+ * turns the stripped noun into the type-intent ranking factor.
+ */
+const TYPE_HINT_SINGLE_NOUNS: ReadonlySet<string> = new Set([
+  'trigger', 'triggers', 'profile', 'profiles', 'field', 'fields',
+  'object', 'objects', 'flow', 'flows', 'component', 'components',
+]);
+/** Two-word type hints, matched as a trailing/leading pair. */
+const TYPE_HINT_NOUN_PAIRS: ReadonlyArray<readonly [string, string]> = [
+  ['permission', 'set'], ['permission', 'sets'],
+  ['record', 'type'], ['record', 'types'],
+];
+
+/**
+ * Strip leading/trailing schema-noun type hints (and leading articles) from a
+ * query so "SSN field" tokenizes exactly like bare "SSN". Interior words are
+ * never touched ("pay period field" only loses the trailing noun), and a query
+ * that is NOTHING BUT nouns/articles ("field", "permission set") is returned
+ * unchanged so concept-word queries keep their existing behavior (including
+ * the generic-type-word suppression below).
+ */
+const stripTypeHintNouns = (raw: string): string => {
+  const words = raw.trim().split(/\s+/);
+  const norm = (w: string): string => w.toLowerCase().replace(/[^a-z0-9]/g, '');
+  let start = 0;
+  let end = words.length;
+  const isPairAt = (i: number): boolean =>
+    i >= 0 &&
+    i + 1 < end &&
+    TYPE_HINT_NOUN_PAIRS.some(([a, b]) => norm(words[i]!) === a && norm(words[i + 1]!) === b);
+  // Leading: articles, then noun hints ("the trigger ContactSync").
+  for (;;) {
+    if (start < end && /^(?:the|a|an)$/i.test(norm(words[start]!))) { start += 1; continue; }
+    if (isPairAt(start) && start + 2 < end) { start += 2; continue; }
+    if (start < end - 1 && TYPE_HINT_SINGLE_NOUNS.has(norm(words[start]!))) { start += 1; continue; }
+    break;
+  }
+  // Trailing: noun hints ("SSN field", "Admin permission set").
+  for (;;) {
+    if (isPairAt(end - 2) && end - 2 > start) { end -= 2; continue; }
+    if (end - 1 > start && TYPE_HINT_SINGLE_NOUNS.has(norm(words[end - 1]!))) { end -= 1; continue; }
+    break;
+  }
+  const kept = words.slice(start, end).join(' ');
+  return kept.length > 0 ? kept : raw;
 };
 
 const TYPE_WEIGHT: Readonly<Partial<Record<ComponentType, number>>> = {
@@ -348,9 +407,43 @@ export const resolveComponents = async (
   const minBase = options?.minScore ?? MIN_BASE;
   // Expand multi-word business phrases ("social security number" -> `ssn`) on
   // the QUERY only — the corpus (node.parentApiName below) stays verbatim.
-  const queryTokens = tokenizeText(query, { expandPhrases: true });
+  // Leading/trailing schema nouns ("SSN field", "the payment object", "Contact
+  // trigger") are TYPE hints, not name content: they are stripped from the
+  // token stream (so "SSN field" scores exactly like bare "SSN") while the raw
+  // query still drives the whole-name exact pass and the type-intent ranking.
+  const strippedQuery = stripTypeHintNouns(query);
+  const queryTokens = tokenizeText(strippedQuery, { expandPhrases: true });
   // Whole-query comparison key for the exact/prefix boost (see the per-node loop).
   const normQuery = normalizeName(query);
+  // Bug 3 — exact api-name match wins over a superset/substring rival.
+  // When the user appends a leading/trailing type hint ("Calculate_Contact_Budget_Group
+  // flow"), normQuery encodes that hint ("calculatecontactbudgetgroupflow") and
+  // can no longer whole-name-match a node whose normName is the bare api-name
+  // ("calculatecontactbudgetgroup"). The stripped form removes the hint so the
+  // whole-name-exact gate fires correctly for that node. Guard: only fire when the
+  // stripped form is SHORTER than the raw form (i.e. something was actually
+  // stripped) and the stripped query has content — a no-op when the query is
+  // already bare (stripped === query → normStrippedQuery === normQuery, harmless).
+  const normStrippedQuery =
+    strippedQuery.length < query.trim().length
+      ? normalizeName(strippedQuery)
+      : normQuery;
+  // Canonical-id form ("Flow:Calculate_Contact_Budget_Group"): the "Type:" prefix
+  // is stripped so the name segment can whole-name-match the node's api-name.
+  // Applied only when the query is a single space-free token containing exactly
+  // one colon (not a multi-word question that happens to contain a colon).
+  const queryTrimmed = query.trim();
+  const normAfterTypePrefix: string = (() => {
+    if (!queryTrimmed.includes(':') || /\s/.test(queryTrimmed)) return normQuery;
+    const colonIdx = queryTrimmed.indexOf(':');
+    const afterColon = queryTrimmed.slice(colonIdx + 1);
+    // Only the simple "Type:ApiName" case (no second colon, no dot already
+    // handled by the dottedExact path). A dotted afterColon is for
+    // "Type:Object.Field" which the dottedExact path owns.
+    if (afterColon.includes(':') || afterColon.includes('.')) return normQuery;
+    const n = normalizeName(afterColon);
+    return n.length >= 2 ? n : normQuery;
+  })();
   // Space-delimited words of the raw query, each normalized. Used to detect
   // when the query names an OBJECT as its own word (see `namedObjectWords`
   // once the index loads): "Contact Email" names the object Contact, so a field
@@ -419,7 +512,23 @@ export const resolveComponents = async (
       message: `resolveComponents: ${(e as Error).message}`,
     });
   }
-  const candidateIdx = gatherCandidates(index, queryTokens, normQuery);
+  // Bug 3 — gather candidates using all three norm keys so exact-api-name
+  // nodes are never excluded from scoring even when the raw normQuery doesn't
+  // match (e.g. "ApiName flow" or "Flow:ApiName" queries).
+  const candidateIdxSet = new Set(gatherCandidates(index, queryTokens, normQuery));
+  // Additional byNormName lookups for the stripped-query and after-type-prefix
+  // norms. The token-based buckets above already cover most of these nodes,
+  // but stop-word-named components (e.g. "IT") rely solely on byNormName and
+  // would be missed if their normName doesn't match normQuery.
+  if (normStrippedQuery !== normQuery) {
+    const extra = index.byNormName.get(normStrippedQuery);
+    if (extra !== undefined) for (const i of extra) candidateIdxSet.add(i);
+  }
+  if (normAfterTypePrefix !== normQuery && normAfterTypePrefix !== normStrippedQuery) {
+    const extra = index.byNormName.get(normAfterTypePrefix);
+    if (extra !== undefined) for (const i of extra) candidateIdxSet.add(i);
+  }
+  const candidateIdx = [...candidateIdxSet];
 
   // Normalized names of every object in the vault, and the subset of the query's
   // space-words that name one. When the query names an object as its own word, a
@@ -551,10 +660,21 @@ export const resolveComponents = async (
       node.parentApiName !== null &&
       normalizeName(node.parentApiName) === dottedObjectNorm &&
       normalizeName(node.apiName) === dottedFieldNorm;
+    // Bug 3 — also check the stripped-query norm and the after-type-prefix norm
+    // so that "ApiName flow" and "Flow:ApiName" forms reach wholeExact just
+    // like a bare "ApiName" query. The dot-agreement guard uses the original
+    // query's dot-ness; the crossObjectFieldDecoy guard is unchanged.
+    const wholeExactNormMatch =
+      (normQuery.length >= 2 && node.normName === normQuery) ||
+      (normStrippedQuery !== normQuery &&
+        normStrippedQuery.length >= 2 &&
+        node.normName === normStrippedQuery) ||
+      (normAfterTypePrefix !== normQuery &&
+        normAfterTypePrefix.length >= 2 &&
+        node.normName === normAfterTypePrefix);
     const wholeExact =
       dottedExact ||
-      (normQuery.length >= 2 &&
-        node.normName === normQuery &&
+      (wholeExactNormMatch &&
         query.includes('.') === node.apiName.includes('.') &&
         !crossObjectFieldDecoy);
     pass1.push({ node, perToken, wholeExact, parentMatched });
@@ -709,11 +829,6 @@ export const resolveComponents = async (
     return 1;
   };
   scored.sort((a, b) => {
-    if (namedTypeForSort !== null) {
-      const ttA = typeIntentTier(a.type);
-      const ttB = typeIntentTier(b.type);
-      if (ttA !== ttB) return ttA - ttB;
-    }
     // Whole-name exact matches first — typing a component's exact API name
     // must return that component above any popular fuzzy neighbour. (A field
     // whose name only collides with a spaced query naming a DIFFERENT object
@@ -725,6 +840,16 @@ export const resolveComponents = async (
     const tierA = a.base >= EXACT_THRESHOLD ? 0 : 1;
     const tierB = b.base >= EXACT_THRESHOLD ? 0 : 1;
     if (tierA !== tierB) return tierA - tierB;
+    // Type intent breaks ties WITHIN a base tier only. Ranking it above the
+    // base tier let a weak fuzzy match of the hinted type ("ssn"≈"asn" on a
+    // CustomField) resurrect over an exact-token match of another type — the
+    // "<name> field" acronym-false-positive regression. A type hint prefers
+    // the named type among comparable matches; it never outranks confidence.
+    if (namedTypeForSort !== null) {
+      const ttA = typeIntentTier(a.type);
+      const ttB = typeIntentTier(b.type);
+      if (ttA !== ttB) return ttA - ttB;
+    }
     // Within a tier, a candidate whose PARENT object the query named ranks
     // first — "field on the stated object" beats a same-tier field that merely
     // contains the object token, even when the latter is more heavily

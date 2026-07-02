@@ -9,7 +9,8 @@
  * containers up into one combined ability. This does.
  *
  * It composes each container's outgoing `grantedBy` edges (object + field
- * + apex grants) and `properties.userPermissions` (system perms), ORs the
+ * + apex grants), `properties.userPermissions` (system perms), and
+ * `properties.recordTypeVisibilities` (record-type visibility), ORs the
  * object CRUD / View-Modify-All flags, and cites the granting containers.
  *
  * Input: `{ profileId?, permissionSetIds?, limit?, offset? }` — at least
@@ -22,7 +23,8 @@
  *     are DISCLOSED but never subtracted — effective access may be lower.
  *   - App / tab visibility is a SEPARATE surface (now extracted — see
  *     `app_access` / `tab_availability`); it is not part of this permission
- *     union, which composes object / field / Apex / system permissions.
+ *     union, which composes object / field / Apex / system / custom
+ *     permissions and record-type visibilities.
  *   - Field-level detail is summarised (count); use `field_access_audit`
  *     for a specific field. Record visibility still needs OWD + sharing
  *     (`why_cant_user_see_record`); object permission ≠ record access.
@@ -31,6 +33,12 @@
  *     is absent (managed-package / not-retrieved). They are NOT system
  *     `<userPermissions>`, so they are never double-counted under
  *     `systemPermissions`.
+ *   - Record-type visibilities are unioned max-wins (visible=true wins) from
+ *     each container's extracted `properties.recordTypeVisibilities`, with the
+ *     same per-container attribution as custom permissions. A container
+ *     WITHOUT the property (a vault refreshed before record-type extraction)
+ *     contributes nothing and is DISCLOSED (re-run `/sfi-refresh`) — never
+ *     fabricated as "no record types".
  */
 
 import type {
@@ -124,6 +132,21 @@ export interface EffectiveCustomPerm {
   readonly grantedBy: readonly string[];
 }
 
+/**
+ * One record-type visibility the union confers, attributed to the granting
+ * containers. Unioned max-wins like the rest: `visible` is true when ANY
+ * container declares the record type visible (`<visible>` omitted in older
+ * metadata counts as visible — only an explicit false hides, mirroring
+ * `recordtype_availability`). `grantedBy` cites the containers CONTRIBUTING
+ * visibility (empty when every declaring container hides it, like an
+ * all-false object-permission row).
+ */
+export interface EffectiveRecordTypeVisibility {
+  readonly recordType: string;
+  readonly visible: boolean;
+  readonly grantedBy: readonly string[];
+}
+
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface EffectivePermissionsOutput {
   readonly containers: readonly string[];
@@ -131,12 +154,20 @@ export interface EffectivePermissionsOutput {
   readonly systemPermissions: readonly EffectiveSystemPerm[];
   /** CR-CAP-10: custom permissions the union confers (sorted by name, full list). */
   readonly customPermissions: readonly EffectiveCustomPerm[];
+  /**
+   * Record-type visibilities the union confers (sorted by recordType, full
+   * list; max-wins — visible=true wins). Read from each container's extracted
+   * `properties.recordTypeVisibilities`; a container without the property
+   * (pre-extraction vault) contributes nothing and is disclosed.
+   */
+  readonly recordTypeVisibilities: readonly EffectiveRecordTypeVisibility[];
   readonly summary: {
     readonly objects: number;
     readonly fieldsWithFls: number;
     readonly apexClasses: number;
     readonly systemPermissions: number;
     readonly customPermissions: number;
+    readonly recordTypeVisibilities: number;
   };
   readonly limit: number;
   readonly offset: number;
@@ -168,7 +199,7 @@ const PREFIX = {
 
 const BASE_DISCLOSURES: readonly string[] = Object.freeze([
   'Permission-set GROUP membership IS expanded: a PermissionSetGroup passed in `permissionSetIds` is unioned into its member permission sets (declared metadata). Muting permission sets are DISCLOSED but NOT subtracted — a group with a muting set may confer LESS than shown.',
-  'App and tab visibility are a separate surface (now extracted — see `app_access` / `tab_availability`); they are not part of this permission union, which composes object / field / Apex / system permissions.',
+  'App and tab visibility are a separate surface (now extracted — see `app_access` / `tab_availability`); they are not part of this permission union, which composes object / field / Apex / system / custom permissions AND record-type visibilities (for the per-object grouped record-type view use `recordtype_availability`).',
   'Field-level access is summarised here (count of fields with FLS); use `field_access_audit` for a specific field. Object permission is NOT record access — record visibility still depends on OWD + sharing (`why_cant_user_see_record`).',
 ]);
 
@@ -231,6 +262,11 @@ export const effectivePermissionsHandler = async (
   const systemPermMap = new Map<string, Set<string>>();
   // CR-CAP-10: custom-permission name -> set of granting container ids.
   const customPermMap = new Map<string, Set<string>>();
+  // Record-type visibility union: recordType -> OR'd visible + contributors.
+  const rtVisMap = new Map<string, { visible: boolean; grantedBy: Set<string> }>();
+  // Present containers whose node carries NO recordTypeVisibilities property —
+  // an older vault; they contribute nothing to the RT union and are disclosed.
+  const containersWithoutRtData: string[] = [];
   const presentContainers: string[] = [];
   const missingContainers: string[] = [];
 
@@ -254,6 +290,30 @@ export const effectivePermissionsHandler = async (
         set.add(containerId);
         systemPermMap.set(p, set);
       }
+    }
+
+    // Record-type visibilities from the container's extracted property. An
+    // ABSENT key means the vault predates record-type extraction — the
+    // container contributes nothing and the gap is DISCLOSED below, never
+    // fabricated as "no record types" (mirrors recordtype_availability).
+    const rtRaw = nodeResult.value.properties['recordTypeVisibilities'];
+    if (Array.isArray(rtRaw)) {
+      for (const entry of rtRaw) {
+        if (entry === null || typeof entry !== 'object') continue;
+        const rt = (entry as { recordType?: unknown }).recordType;
+        if (typeof rt !== 'string') continue;
+        const accum = rtVisMap.get(rt) ?? { visible: false, grantedBy: new Set<string>() };
+        // `<visible>` omitted (null) in older metadata means the type IS
+        // visible — only an explicit false hides it (recordtype_availability's
+        // reading). visible=true wins, max-wins like the rest of the union.
+        if ((entry as { visible?: unknown }).visible !== false) {
+          accum.visible = true;
+          accum.grantedBy.add(containerId);
+        }
+        rtVisMap.set(rt, accum);
+      }
+    } else {
+      containersWithoutRtData.push(containerId);
     }
 
     // Object / field / apex grants from outgoing grantedBy edges.
@@ -340,6 +400,16 @@ export const effectivePermissionsHandler = async (
   }
   const missingCustomPerms = customPermissions.filter((c) => c.targetMissing).length;
 
+  // Record-type visibility union (mirrors the customPermissions assembly):
+  // sorted full list, per-container attribution, max-wins visible.
+  const recordTypeVisibilities: EffectiveRecordTypeVisibility[] = [...rtVisMap.entries()]
+    .map(([recordType, a]) => ({
+      recordType,
+      visible: a.visible,
+      grantedBy: [...a.grantedBy].sort(),
+    }))
+    .sort((x, y) => (x.recordType < y.recordType ? -1 : x.recordType > y.recordType ? 1 : 0));
+
   const totalObjects = objectPermissions.length;
   const limit = input.limit ?? DEFAULT_LIMIT;
 
@@ -423,6 +493,11 @@ export const effectivePermissionsHandler = async (
       `${missingCustomPerms} granted custom permission(s) name a definition not present in this vault (targetMissing) — likely managed-package or not retrieved; the grant is declared but the definition is not resolvable here. Custom permissions are NOT system userPermissions, so they are not double-counted under systemPermissions.`,
     );
   }
+  if (containersWithoutRtData.length > 0) {
+    disclosures.push(
+      `${containersWithoutRtData.length} container(s) carry no extracted \`recordTypeVisibilities\` property (${[...containersWithoutRtData].sort().join(', ')}) — the vault was refreshed before record-type extraction, so their record-type visibility is NOT in this union; re-run \`/sfi-refresh\`. The missing contribution is "not modeled", never a verified "no record types".`,
+    );
+  }
 
   return ok({
     data: {
@@ -430,12 +505,14 @@ export const effectivePermissionsHandler = async (
       objectPermissions: objectPage,
       systemPermissions: systemPage,
       customPermissions,
+      recordTypeVisibilities,
       summary: {
         objects: totalObjects,
         fieldsWithFls: fieldsWithFls.size,
         apexClasses: apexClasses.size,
         systemPermissions: systemPermissions.length,
         customPermissions: customPermissions.length,
+        recordTypeVisibilities: recordTypeVisibilities.length,
       },
       limit,
       offset,
