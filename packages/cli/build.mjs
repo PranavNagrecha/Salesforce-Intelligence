@@ -19,6 +19,14 @@ const EXTERNAL_PACKAGES = [
   '@duckdb/node-api',
   '@modelcontextprotocol/sdk',
   'zod',
+  // SPIKE (spike/embeddings): the hybrid funnel's gate-guarded dynamic import.
+  // Must stay external — transformers.js drags in onnxruntime-node's native
+  // .node binaries, which esbuild cannot bundle. It is a devDependency, NOT a
+  // runtime dependency: gate off (default) the import never executes; gate on
+  // without the package installed, the funnel degrades to lexical. This line is
+  // itself a productionization finding — bundling the model runtime into the
+  // CLI is not an option.
+  '@huggingface/transformers',
 ];
 // Externalize each package and its subpath imports (e.g. .../sdk/server/index.js).
 const external = EXTERNAL_PACKAGES.flatMap((name) => [name, `${name}/*`]);
