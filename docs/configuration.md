@@ -233,6 +233,55 @@ The funnel-advisory score floor (`FUNNEL_PRIMARY_MIN_SCORE = 0.26` in
 **source constants, not env vars** — they are calibrated against the routing
 evaluation and changing them re-opens the honesty gates.
 
+## Embeddings hybrid (experimental, off by default)
+
+An opt-in RRF hybrid layer that fuses the existing lexical TF-IDF candidates
+with a locally cached neural sentence-embedding model. **Off by default;
+most installs need nothing here.**
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SFI_EMBEDDINGS` | *(unset — lexical only)* | Set to `1` to enable the neural hybrid. Off by default; the lexical-only path is byte-identical when unset. |
+| `SFI_EMBED_CACHE` | `packages/mcp/.sfi-embed-cache/` | Override the local model cache directory. |
+
+### What it does
+
+When `SFI_EMBEDDINGS=1`, the semantic funnel runs a Reciprocal Rank Fusion
+(RRF) pass that re-ranks the lexical TF-IDF shortlist against a
+neural-embedding cosine. The fused ranking feeds the `toolCandidates`
+shortlist — the honesty/refusal decision and the `route.tools` deterministic
+plan are **not affected**.
+
+### Setup
+
+The embedding layer is **not bundled** in the npm package (the quantized
+model is ~23 MB). Install the peer dependency and the model is downloaded
+once on first use:
+
+```sh
+npm install @huggingface/transformers
+```
+
+Model: `Xenova/all-MiniLM-L6-v2` (quantized), pinned in
+`packages/mcp/data/embedding-index.json`. `allowRemoteModels` is disabled at
+query time — the funnel never phones home once the model is cached; only the
+initial download touches the network.
+
+### Graceful fallback
+
+If `@huggingface/transformers` is not installed, the model cache is empty, or
+the embed fails for any reason, the funnel silently falls back to the
+lexical-only path. The `toolCandidates` output is the same shape either way.
+
+### Status
+
+**Experimental.** The spike measured candidate recall lift on the routing
+evaluation bank with zero honesty regressions; the feature is off by default
+while the model download story and bundle size tradeoffs are evaluated.
+Feedback welcome — see the GitHub issues page.
+
+---
+
 ## Report / Dashboard pull (default: top 500 by usage)
 
 Folder-based Reports/Dashboards are invisible to the wildcard retrieve, so

@@ -5,9 +5,25 @@ adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
-Headline: **the assignment-data engine** — four consent-gated live tools close
-the biggest "honest gap" family (who holds X / who's in Y), and the router
-flips those refusals into live routes in the same change.
+## [0.1.24] — 2026-07-02
+
+Headline: **assignment-data engine + router honesty R4 + experimental embeddings.**
+Three simultaneous workstreams: four new live tools close the "who holds X / who's in
+Y" honest-gap family; the router's fourth honesty round adds write-evasion hardening,
+forecast/authorship gaps, narrowed clarification, and show-me candidate coverage; and
+an opt-in RRF hybrid embeddings layer sits behind a feature gate for early adopters.
+Tool count 172 → 176.
+
+**Measured on the maintainer's two real-org suites (2,000 + 2,995 primary
+questions, 12,352 turns, 0 route errors), 0.1.23 → 0.1.24:** honesty rose on
+both — declined-correctly 82.9 → 83.8% (2K) and **57.2 → 66.9% (3K, +9.7)** —
+while over-routing *fell* on both (2K 89 → 88; **3K 229 → 185, −44**), reversing
+the eagerness regression 0.1.23 introduced. The injection/write-evasion family
+dropped from 8 leaks to 1 (a read-only report with execution skipped, unchanged
+since 0.1.23); the curated write-execution set is 24/24 refused. Answer-recall
+held (2K 82.9%, 3K 80.2%), recall@3 61.1, needs-live 76.9 → 78.1%. The recall
+gain came from *precision* this round, not more eagerness — the opposite of the
+0.1.23 trade.
 
 ### Added
 - **`sfi.live_permset_holders`** — who HOLDS a permission set, permission set
@@ -70,6 +86,27 @@ flips those refusals into live routes in the same change.
   `who_can_access_object`, and friends) now name the concrete live tools
   ("answerable via the live plane: …") instead of a generic "run the live org
   plane" pointer.
+- **Router R4 — honesty + candidate coverage:**
+  Injection/write-evasion hardening (indirect re-delegation attempts and
+  tool-self-capability asks refused with a read-side alternative);
+  forecast/authorship honest-gaps (predictive "how will X change by…" and
+  authorship/attribution asks return honest gaps naming the nearest real reads);
+  narrow clarification re-introduced for genuine same-name collisions that
+  the R2b rebalance over-suppressed; show-me candidate coverage (visual/UI
+  render requests clarify to the relevant read tool rather than silently
+  mis-routing).
+
+### Experimental
+- **Embeddings hybrid (`SFI_EMBEDDINGS=1`, off by default)** — an opt-in
+  RRF hybrid layer that fuses the existing lexical TF-IDF candidates with a
+  locally cached neural sentence-embedding model (`Xenova/all-MiniLM-L6-v2`,
+  ~23 MB, downloaded once on first use from HuggingFace Hub into
+  `.sfi-embed-cache/`). Affects candidate ranking only — the honesty/refusal
+  decision and the `route.tools` deterministic plan are untouched.
+  Graceful lexical fallback when the model is absent or the embed fails;
+  `allowRemoteModels` is disabled, so the funnel can never phone home at
+  query time. Requires `npm i @huggingface/transformers` in your project (not
+  bundled). See `docs/configuration.md §Embeddings` for full opt-in details.
 
 ## [0.1.23] — 2026-07-02
 

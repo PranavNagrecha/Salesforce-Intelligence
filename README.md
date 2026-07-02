@@ -98,6 +98,14 @@ you meant** instead of letting the host silently commit. When nothing fits, it
 `logGap: true`). (A deterministic, no-LLM routing mode is available via
 `SFI_ROUTER_MODE=offline` for CI / air-gapped hosts.)
 
+An **experimental RRF hybrid embeddings layer** is available for early adopters
+(`SFI_EMBEDDINGS=1` + `npm i @huggingface/transformers`). It fuses the TF-IDF
+candidates with a locally cached neural model (`~23 MB`, downloaded once on
+first use) via Reciprocal Rank Fusion. Off by default — the lexical path is
+byte-identical when unset. The honesty/refusal decision and the deterministic
+`route.tools` plan are not affected. See
+[`docs/configuration.md`](./docs/configuration.md) for details.
+
 ## Refusal behavior — fail closed, offer the read
 
 Some questions should never route to an executable tool, no matter how well
@@ -212,7 +220,7 @@ Eight capability areas, each answerable in natural language (ask
 | **Find & identify** | "where is the email field?" · "what's the payment object called?" |
 | **Understand** | "what does this validation rule do?" · "what happens when an Account is saved?" (automation on standard objects works even when the object file was not retrieved; `objectModeled: false` is surfaced) |
 | **Impact & dependencies** | "what breaks if I delete this field?" · "is it safe to deactivate this flow?" |
-| **Permissions & sharing** | "why can't this user see this record?" · "who can edit the Salary field?" |
+| **Permissions & sharing** | "why can't this user see this record?" · "who can edit the Salary field?" · "who holds the Sales Manager permission set?" (live) · "what does user Jane hold?" (live) · "who's in the Support queue?" (live) · "which active users have zero permission-set assignments?" (live) |
 | **Automation & code** | "what runs on Case create?" · "which Apex methods have no real test coverage?" |
 | **Decision-support (before you build/change)** | "before I add automation to this object, what already runs there?" · "building Apex here — what should I watch out for?" · "before I change/require this field, what breaks?" |
 | **Architect & developer** | "are there circular Apex dependencies?" · "which classes have no test reference?" · "does the vault still match the live org?" |
