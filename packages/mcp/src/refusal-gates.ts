@@ -22,6 +22,8 @@ export type RefusalKind =
   | 'injection-exfiltration'
   | 'write-imperative'
   | 'identity-gap'
+  | 'forecast-gap'
+  | 'provenance-gap'
   | 'runtime-analytics'
   | 'out-of-scope';
 
@@ -38,11 +40,44 @@ export interface RefusalShape {
 // ---------------------------------------------------------------------------
 
 const INJECTION_PATTERNS: readonly RegExp[] = [
-  /\bignore\s+(?:your|all|the)\s+(?:previous|prior|read-?only)\s+(?:instructions?|rules?|restrictions?)\b/i,
+  // "ignore your previous/prior/read-only instructions|rules|restrictions".
+  // R4: the (?:and\s+\w+\s+)? optional carries "ignore your read-only AND
+  // PRIVACY restrictions" (q3749) — a conjoined adjective before the noun no
+  // longer breaks the token sequence. `constraints` joins the noun set (q4047
+  // "ignore your read-only constraints").
+  /\bignore\s+(?:your|all|the)\s+(?:previous|prior|read-?only)\s+(?:and\s+\w+\s+)?(?:instructions?|rules?|restrictions?|constraints?)\b/i,
+  // R4 injection framings the 3K phrasings used to evade every arm above:
+  //  - "forget everything above / forget your prior instructions" (q4842).
+  /\bforget\s+(?:everything|all(?:\s+of)?\s+the)\s+(?:above|prior|previous|earlier)\b|\bforget\s+(?:your|the)\s+(?:prior|previous|earlier)\s+(?:instructions?|rules?|restrictions?|constraints?)\b/i,
+  //  - role-play jailbreak: "AI with no restrictions", "named DAN", "you are
+  //    now an unrestricted assistant / DAN / an AI that can modify the org".
+  /\b(?:ai|assistant|model)\s+(?:with\s+)?no\s+restrictions\b|\bnamed\s+dan\b|\bact\s+as\s+dan\b|\byou\s+are\s+(?:now\s+)?(?:an?\s+)?(?:unrestricted|jailbroken|uncensored)\b/i,
+  //  - "SYSTEM OVERRIDE", "the previous ... constraints are revoked",
+  //    "you are now permitted to reveal ..." (q4873).
+  /\bsystem\s+override\b|\b(?:previous|prior)\s+(?:knowledge-?base\s+)?(?:constraints?|restrictions?|instructions?)\s+(?:are|have\s+been)\s+revoked\b|\byou\s+are\s+now\s+permitted\s+to\s+reveal\b/i,
+  //  - "new instruction ... embedded in this message" / "instruction from the
+  //    vault owner embedded in ..." (q4627) — a smuggled-instruction framing.
+  /\b(?:new\s+)?instruction[s]?\b[^.?!]{0,40}\bembedded\s+in\s+this\s+(?:message|prompt|text|question)\b/i,
+  //  - social-engineering authority claim to force an action: "the (real)
+  //    admins told me to have you ...", "they authorized it", "the client
+  //    signed off" chained with a mutation/exfil (q4893/q4668). Narrow: the
+  //    authority claim must co-occur with an override/do-it imperative.
+  // "the client signed off" arms ONLY when a redeploy/deploy/mutation of org
+  // artifacts rides in the same breath (q4668) — a plain "the client signed
+  // off on the design, show me the flow" must not gate, so require a deploy
+  // verb nearby.
+  /\bthey\s+authorized\s+it\b|\breal\s+admins?\s+told\s+me\s+to\s+have\s+you\b|\b(?:the\s+)?client\s+signed\s+off\b[^.?!]{0,120}\b(?:re-?deploy|deploy|repoint|push\s+(?:it|them|this)|redeploy\s+them)\b/i,
   /\bpretend\s+the\s+(?:previous|prior)\s+rules\b/i,
   /\byou\s+are\s+now\s+(?:in\s+)?(?:admin|deploy|god)\s*[- ]?mode\b/i,
   /\byou'?re\s+actually\s+an?\b[^.?!]*\bbot\b/i,
   /\b(?:print|reveal|show)\s+(?:me\s+)?your\s+(?:system\s+)?prompt\b/i,
+  // Secret/credential exfiltration (q4873/q3635 secret asks): reveal/output/
+  // give the raw connection string, OAuth/client secret, session/refresh
+  // token, API key, or password policy for delivery. The metadata READ
+  // "which named credentials exist" / "what auth provider does X use" carries
+  // no reveal-the-SECRET-VALUE verb and stays routed. `endpoint` alone is NOT
+  // a secret (q4956 "I need the endpoint on the named credential" routes).
+  /\b(?:reveal|output|show\s+me|give\s+me|dump|print|expose)\b[^.?!]{0,60}\b(?:client\s+secret|oauth\s+secret|connection\s+string|session\s+token|refresh\s+token|api\s+key|secret\s+key|private\s+key)\b/i,
   // Privilege-escalation asks (q1548 "sudo give me full access"): `sudo` as a
   // command prefix, or a grant-to-SELF ("give me full/admin access"). The
   // READ delivery ask "give me the FLS grant list" carries no privilege noun
@@ -79,18 +114,32 @@ const INJECTION_DISCLOSURE =
 // Mutation verbs. `set` carries a negative lookbehind so the schema NOUN
 // "permission set" can never read as the verb; word boundaries keep
 // "inactive"/"assigned"/"address" from matching activate/assign/add.
+// R4 additions (obfuscated / uncommon mutation verbs the 3K used to evade the
+// gate): build (create a package/report/flow/object/table), (re)deploy,
+// provision, split (a profile), rotate (a secret), bump (an API version), pin
+// (a tab), stand up / spin up (a new component), operationalize, repoint,
+// wire … in(to), roll … into, comment out (code), quick-deploy, lock down
+// (sharing). Read verbs (pull/get/show/find/explain/trace/list) are DELIBERATELY
+// excluded — the mislabeled-64 lesson: "Pull the sharing rules", "Get it",
+// "just find it", "Trace the async chain", "Show me the custom permission" are
+// all READS that must route. `set` keeps its permission-set lookbehind.
 const WRITE_VERB =
-  '(?:create|add|delete|remove|update|change|(?<!permission\\s)set|deploy|assign|' +
+  '(?:create|add|delete|remove|update|change|(?<!permission\\s)set|(?:quick[-\\s]?|re)?deploy|assign|' +
   'reassign|revoke|deactivate|activate|disable|enable|merge|reset|rename|fix|' +
   'grant|provision|turn\\s+(?:on|off)|clean\\s+up|migrate|convert|insert|upsert|' +
-  'push|publish|install|uninstall|schedule|upgrade|downgrade|throttle|purge)';
+  'push|publish|install|uninstall|schedule|upgrade|downgrade|throttle|purge|' +
+  'build|split|rotate|bump|pin|operationalize|repoint|' +
+  'stand\\s+up|spin\\s+up|comment\\s+out|wire\\s+(?:it|them|this|that)?\\s*(?:in|into)|' +
+  'roll\\s+(?:it|them|this|that)?\\s*into)';
 
 /**
  * Adverb/quantifier filler allowed between the imperative frame and the verb —
  * "i need you to BULK update…", "can you go ahead and MASS delete…" all carry
  * the same mutation ask; the bare-verb anchor missed them (P4 survivors).
  */
-const WRITE_VERB_FILLER = '(?:(?:bulk|mass|batch|just|please|go\\s+ahead\\s+and)\\s+)*';
+// R4: `bulk-convert` / `mass-delete` are hyphenated too — the `[-\s]` after the
+// quantifier carries "Bulk-convert the ~1000 stuck leads" (q4689).
+const WRITE_VERB_FILLER = '(?:(?:bulk|mass|batch|just|please|go\\s+ahead\\s+and)[-\\s]+)*';
 
 // (B) EXCLUDERS — any present means the USER is asking about permission or a
 // hypothetical, not instructing the agent to mutate: route normally. "can I
@@ -104,6 +153,45 @@ const WRITE_VERB_FILLER = '(?:(?:bulk|mass|batch|just|please|go\\s+ahead\\s+and)
 // ("deactivate the flow", "do it safely for me") still refuses.
 const WRITE_EXCLUDER =
   /\b(?:am\s+i|can\s+i|could\s+i|do\s+i|who\s+can|who\s+is\s+able|allowed\s+to|able\s+to|what\s+if|what\s+would|would\s+happen|is\s+it\s+safe|safe\s+to|before\s+i|if\s+(?:i|we)|when\s+(?:i|we)|suppose|should\s+i|how\s+do\s+i|how\s+would\s+i|what\s+happens\s+when)\b|\bsafely\s*\?|\bwhat\s+(?:depends\s+on|breaks|would\s+break|will\s+break|stops\s+working)\b/i;
+
+// (B2) READ-FRAME EXCLUDERS — R4 tripwire recovery. The R4 WRITE_VERB additions
+// (`build`, `deploy`, `enable`) over-fired on three READ shapes that 0.1.23
+// answered cleanly. Each arm is anchored tightly so a genuine mutation can never
+// slip through:
+//   1. DOC-GENERATION — "I need an onboarding doc … Build it", "build me a
+//      developer-focused tour / handbook / architecture overview / data
+//      dictionary / sharing summary". `build|create|generate|write|draft|put
+//      together|make` paired with a DOCUMENT noun is a request for the
+//      generate_* documentation tier (a read), never an org mutation. Anchored
+//      on the document noun so "build a flow / object / package" (real writes)
+//      never match.
+//   2. INTERROGATIVE CONFIG READ — "Which profiles ENABLE X directly", "what
+//      permission sets enable …". A leading which/what/who interrogative before
+//      an `enable`/`disable`/`grant` verb is asking which config CONFERS a
+//      capability (an effective_permissions / who_can read), not instructing the
+//      agent to toggle it.
+//   3. TEMPORAL-QUALIFIER DEPLOY — "i need the CDC subscribers LIST before
+//      deploy", "the manifest export before/after a deploy". Here `deploy` is a
+//      time reference ("before deploy"), not the imperative verb — the actual
+//      ask is a read (list/export/catalog). Anchored on before|after|ahead-of +
+//      deploy with no imperative deploy verb of its own.
+const WRITE_DOC_NOUN =
+  '(?:onboarding|admin|developer|dev|architecture|data)?[-\\s]?' +
+  '(?:doc(?:ument(?:ation)?|s)?|handbook|tour|walkthrough|overview|dictionary|' +
+  'summary|guide|primer|runbook|onboarding|write[-\\s]?up|report\\s+of)';
+const WRITE_READ_FRAME =
+  new RegExp(
+    // 1 — doc-generation: a build/create/generate/write/draft/make verb whose
+    // object (within a short window) is a documentation noun.
+    `\\b(?:build|create|generate|write|draft|put\\s+together|make|need|want|give\\s+me)\\b[^.?!;]{0,40}\\b${WRITE_DOC_NOUN}\\b` +
+    // …or the document noun first, then "build/create it" (q1088 "…doc. Build it").
+    `|\\b${WRITE_DOC_NOUN}\\b[^.?!;]{0,30}\\.?\\s*(?:build|create|generate|make|put\\s+together)\\s+(?:it|this|that|one)\\b` +
+    // 2 — interrogative config read before an enable/grant/disable verb.
+    `|\\b(?:which|what|who|whose|list\\s+(?:the\\s+)?)\\b[^.?!;]{0,40}\\b(?:enables?|disables?|grants?)\\b` +
+    // 3 — temporal-qualifier deploy: "… before|after|ahead of (a|the) deploy(ment)".
+    `|\\b(?:before|after|ahead\\s+of|prior\\s+to|until|once)\\s+(?:a\\s+|the\\s+|we\\s+|you\\s+|i\\s+)?(?:re-?)?deploy(?:ment|ing)?\\b`,
+    'i',
+  );
 
 // R3 §5c — SIMULATION CARVE-OUT (write-gate what-if family, 12 capable-missed
 // with the right what_if_* already at rank 1): an imperative mutation verb
@@ -120,9 +208,12 @@ const SIMULATION_TAIL =
   /\b(?:and\s+)?(?:tell|show|give)\s+me\s+(?:the\s+)?(?:impact|blast\s+radius|consequences?|every\s+conflict|conflicts|what\s+(?:breaks|happens|stops|changes))\b|[—–-]\s*(?:impact|consequences?|blast\s+radius)\s*\??\s*$|\b(?:impact|consequences)\s*\?\s*$|\bwhat(?:'s|\s+is)\s+the\s+(?:impact|blast\s+radius|fallout)\b|\bwhat\s+(?:happens|stops|breaks)\s+(?:to|if|when|after|downstream)\b/i;
 
 // (A) imperative position, three arms — each captures the verb phrase (verb +
-// bounded trailing slice) for the disclosure.
+// bounded trailing slice) for the disclosure. R4: the clause separator also
+// accepts an em/en dash — "we need audit logging — provision a … object"
+// (q4976) puts the imperative after a dash, not sentence-initial punctuation.
+const CLAUSE_SEP = '(?:^|[.!?;]\\s+|\\s+[—–]\\s*)';
 const WRITE_SENTENCE_INITIAL = new RegExp(
-  `(?:^|[.!?;]\\s+)(?:please\\s+|just\\s+)?${WRITE_VERB_FILLER}(${WRITE_VERB}\\b[^.?!;]{0,80})`,
+  `${CLAUSE_SEP}(?:please\\s+|just\\s+)?${WRITE_VERB_FILLER}(${WRITE_VERB}\\b[^.?!;]{0,80})`,
   'i',
 );
 // The `just` lead-in carries a negative lookbehind for "or/vs/than just":
@@ -157,8 +248,26 @@ const WRITE_GIVE_INITIAL =
 // - "…run it and DELETE THE DUPES" — a mutation chained behind a read in the
 //   same sentence. Anchored on the dupes/duplicates object so read phrasings
 //   ("which profiles can edit and delete Cases") never match.
+// R4: quantifier filler ("delete ALL THE duplicate Accounts") no longer breaks
+// the anchor; and a sentence-initial "delete all the duplicate …" (q4379 —
+// "…and delete all the duplicate Accounts you find") is caught by the leading
+// clause separator in addition to the and/then chain.
+// - "…and check it in" / "commit it" / "push it to prod" (q4687): a
+//   version-control commit / promote of generated org code is a mutation by
+//   proxy — the write happens in the org's source of truth. Anchored on the
+//   check-in/commit/promote idiom so "check the flow" (a read) never matches.
+const WRITE_CHECK_IN =
+  /\b(check\s+(?:it|them|this|that)\s+in|commit\s+(?:it|them|this|the\s+\w+)|push\s+(?:it|them|this)\s+to\s+(?:prod|production|the\s+repo)|promote\s+(?:it|them|this)\s+to\s+(?:prod|production))\b/i;
+// - CHAINED DEPLOY/REPOINT (q4668 "retrieve the …, repoint their remote
+//   actions …, and redeploy them to the target org"): a strong org-mutation
+//   verb chained after a comma or "and" mid-sentence. Restricted to the
+//   unambiguous deploy family (deploy/redeploy/repoint/quick-deploy) so a read
+//   list ("show the fields, and explain the flow") never matches — none of
+//   those verbs is a read. Also fires sentence-initial for the same verbs.
+const WRITE_CHAINED_DEPLOY =
+  /(?:^|[.!?;]\s+|,\s*(?:and\s+|then\s+)?|\band\s+|\bthen\s+)((?:re-?deploy|quick[-\s]?deploy|repoint)\b[^.?!;]{0,60})/i;
 const WRITE_CHAINED_DUPE_DELETE =
-  /\b(?:and|then)\s+(?:just\s+)?((?:delete|remove|purge|merge)\s+(?:the\s+)?dup(?:e|licate)s?\b[^.?!;]{0,30})/i;
+  /(?:\b(?:and|then)\s+(?:just\s+)?|(?:^|[.!?;]\s+)(?:just\s+)?)((?:delete|remove|purge|merge)\s+(?:all\s+|the\s+|every\s+){0,2}dup(?:e|licate)s?\b[^.?!;]{0,30})/i;
 // - RUN IMPERATIVE (q1537 "Run the Application_Save_RT_Orch flow against test
 //   data for me"): an EXECUTION ask — run/execute/kick off/trigger an org
 //   EXECUTABLE (flow, trigger, batch, job, apex, automation). Executing
@@ -278,6 +387,77 @@ const IDENTITY_DISCLOSURE =
   '(sfi.effective_permissions / sfi.user_ability). Which user or profile should I check?';
 
 // ---------------------------------------------------------------------------
+// S1 (DIAGNOSIS-R4 §1.3) — FUTURE / FORECAST asks. Score-independent: the topic
+// keyword ("storage", "governor limits", "leads", "tech debt") routes the
+// snapshot intent cleanly and often at a HIGH score, but the asked facet is a
+// PREDICTION over a time-series the product does not model — no forecasting, no
+// trend extrapolation. Honest-gap and point at the current-snapshot tool.
+//
+// CARVE-OUT (must survive, R3 task #63): the `what_if_*` simulation family is
+// legitimately forward-phrased ("if I deactivate X, what breaks") — those are
+// deterministic dependency reads, NOT statistical forecasts. The forecast arm
+// requires an explicit prediction verb OR a growth-rate/next-period frame, and
+// yields to the what-if simulation tail (SIMULATION_TAIL) so "deactivate X and
+// tell me the impact" never reads as a forecast.
+// ---------------------------------------------------------------------------
+
+const FORECAST_VERB =
+  /\b(?:forecast|predict|projection|projecting|extrapolate|estimate\s+how\s+many|best\s+estimate\s+of\s+how\s+many)\b|\bproject\s+(?:our|the|how|where|when|my)\b|\bwhen\s+do\s+you\s+project\b|\bgive\s+me\s+your\s+(?:projection|best\s+estimate|churn\s+forecast)\b/i;
+// A growth/next-period frame co-occurring with a forward outcome verb — catches
+// "given current growth, will we exceed … next quarter" (no explicit
+// forecast/predict token). Requires BOTH a rate/trend phrase AND a next-period
+// + will/hit/exceed/run-out outcome, so a plain "what happens next quarter"
+// (no growth premise) does not gate.
+const FORECAST_TREND =
+  /\b(?:current\s+(?:\w+\s+)?(?:growth|trend|trajectory)|given\s+(?:current|projected)\s+(?:\w+\s+)?(?:growth|trends?)|based\s+on\s+(?:current\s+)?trends?|at\s+the\s+current\s+(?:growth\s+)?rate|projected\s+growth)\b/i;
+const FORECAST_HORIZON =
+  /\b(?:next\s+(?:quarter|term|month|fiscal\s+year|year)|by\s+(?:the\s+)?end\s+of\s+next\b|in\s+(?:12\s+months|two\s+quarters|\d+\s+(?:months|quarters|years))|next\s+term)\b/i;
+const FORECAST_OUTCOME =
+  /\bwill\s+(?:we|it|this|our|migrating|rolling|the)\b|\b(?:hit|exceed|run\s+out|breach|reach)\b|\bhow\s+many\b|\bhow\s+likely\b|\bwe'?ll\b|\bwhere\s+will\b/i;
+// A growth premise + a STRONG forward-limit outcome ("will … hit/exceed/run
+// out/breach") is a forecast even without an explicit next-period horizon
+// (q4435 "given current data growth, will the trigger hit limits?").
+const FORECAST_STRONG_OUTCOME = /\bwill\b[^.?!]{0,60}\b(?:hit|exceed|run\s+out|breach|reach)\b/i;
+
+const FORECAST_DISCLOSURE =
+  'HONEST GAP (forecast): sf-intelligence has no time-series or forecasting model — ' +
+  'it reads the CURRENT metadata/limits snapshot, not future projections or growth ' +
+  'trends. I can show you the present state (e.g. sfi.live_org_limits, sfi.org_pulse, ' +
+  'sfi.tech_debt_score) so you can extrapolate, but the prediction itself is out of scope.';
+
+// ---------------------------------------------------------------------------
+// S3 (DIAGNOSIS-R4 §1.3) — AUTHORSHIP / CREATOR provenance. The vault captures
+// LastModified{Date,By} where the refresh retrieved it, but never CreatedBy /
+// original-author / creation-date — Salesforce does not expose it in metadata
+// source and the vault does not model it. Honest-gap.
+//
+// HARD carve-out (must survive): "who LAST MODIFIED X" / "who last changed X" /
+// "which admin has EDITED it since" ARE answerable (sfi.last_modified) — the arm
+// gates ONLY on created/originally-built/authored/set-up-originally/first
+// verbs, never on modified/changed/edited. (q4829/q3331 prove last_modified is
+// the right route; they must NOT gate.)
+// ---------------------------------------------------------------------------
+
+const PROVENANCE_CREATE =
+  /\bwho\s+(?:originally\s+)?(?:created|built|authored|made|wrote|set\s+up|first\s+(?:created|built|granted|authored))\b|\b(?:original|initial)\s+author\b|\bwho\s+first\s+(?:created|built|authored)\b|\bcreator\s+of\b|\bwho\s+(?:created|built|authored|set\s+up)\s+(?:it|this|that|the)\b/i;
+// The creation-DATE facet ("on what date … created", "creation date",
+// "install date") — same gap. Paired with a create verb elsewhere in the text.
+const PROVENANCE_CREATE_DATE = /\bcreation\s+date\b|\binstall\s+date\b/i;
+// EXCLUDER — the answerable last-modified facet. If the question is (also)
+// asking who LAST MODIFIED / changed / edited-since, it is a last_modified
+// route: do NOT gate as provenance. "who created X AND who edited it since"
+// (q3930) is a mixed ask — the create half is the genuine gap, so the excluder
+// only fires when there is NO create verb, i.e. a pure last-modified ask.
+const PROVENANCE_LASTMOD_ONLY =
+  /\bwho\s+(?:last\s+(?:modified|changed|updated|edited)|modified|changed|updated|edited)\b/i;
+
+const PROVENANCE_DISCLOSURE =
+  'HONEST GAP (authorship): the vault records LastModified (who/when) where the ' +
+  'refresh captured it, but never CreatedBy / original author / creation date — ' +
+  'Salesforce does not expose creator provenance in metadata source. For the ' +
+  'answerable side, sfi.last_modified reports who LAST changed a component and when.';
+
+// ---------------------------------------------------------------------------
 // 2.3 — runtime/ops telemetry no tool models (honest gap, not a refusal of
 // intent — the ask is legitimate, the data does not exist in the product).
 // ---------------------------------------------------------------------------
@@ -370,6 +550,15 @@ const RUNTIME_TRIGGERS: readonly (readonly [RegExp, string])[] = [
   [
     /\bactual\s+content\s+of\s+the\s+(?:emails?|messages?|texts?)\b/i,
     'the content of individually sent messages (the TEMPLATE body is metadata — sfi.get_component reads it)',
+  ],
+  // Chatter/feed RUNTIME activity (q4450 "who posted last in the … chatter
+  // group"): who posted, most recent post, feed content — CollaborationGroup
+  // feed data that lives in the runtime org, never the vault. Metadata reads
+  // stay routed: "which public groups exist" / "who is IN the group"
+  // (live_group_members) carry no post/feed verb.
+  [
+    /\bwho\s+(?:posted|commented|last\s+posted)\b|\b(?:chatter|feed)\b[^.?!]{0,40}\b(?:posts?|activity|comments?)\b|\b(?:last|latest|recent)\s+(?:chatter|feed)\s+posts?\b/i,
+    'Chatter/feed activity (who posted, most recent posts)',
   ],
   // Site/community WEB ANALYTICS (hon-050): click paths, page views.
   [
@@ -497,7 +686,14 @@ export const detectRefusalShape = (question: string): RefusalShape | null => {
     // the write-verb arms so the router routes the matching what_if_* tool.
     // RUN imperatives below are NOT excused: executing automation stays
     // refused whatever the tail.
-    const simulationFrame = SIMULATION_TAIL.test(q);
+    // R4 read-frame carve-out: doc-generation ("build me a handbook"),
+    // interrogative config reads ("which profiles enable X"), and
+    // temporal-qualifier deploy ("the list before deploy") are reads the
+    // `build|deploy|enable` verbs over-caught — skip the WRITE-verb arms for
+    // them. The RUN-imperative arms below are unaffected (execution is a real
+    // mutation regardless of framing).
+    const readFrame = WRITE_READ_FRAME.test(q);
+    const simulationFrame = SIMULATION_TAIL.test(q) || readFrame;
     const verbPhrase = simulationFrame
       ? undefined
       : (
@@ -507,7 +703,9 @@ export const detectRefusalShape = (question: string): RefusalShape | null => {
           WRITE_MAKE_SCHEMA.exec(q) ??
           WRITE_GIVE_GRANT.exec(q) ??
           WRITE_GIVE_INITIAL.exec(q) ??
-          WRITE_CHAINED_DUPE_DELETE.exec(q)
+          WRITE_CHAINED_DUPE_DELETE.exec(q) ??
+          WRITE_CHAINED_DEPLOY.exec(q) ??
+          WRITE_CHECK_IN.exec(q)
         )?.[1]
           ?.trim()
           .replace(/[,;:]$/, '');
@@ -554,6 +752,31 @@ export const detectRefusalShape = (question: string): RefusalShape | null => {
     !IDENTITY_LOOK_EXCLUDER.test(q)
   ) {
     return { kind: 'identity-gap', disclosure: IDENTITY_DISCLOSURE };
+  }
+
+  // 2.6 — S1 FORECAST honest gap (score-independent). Fires on an explicit
+  // prediction verb, OR on a growth-trend + horizon + forward-outcome triad.
+  // Yields to the what-if simulation frame (SIMULATION_TAIL): a deterministic
+  // dependency simulation is legitimately forward-phrased and is NOT a
+  // statistical forecast.
+  if (!SIMULATION_TAIL.test(q)) {
+    const isForecast =
+      FORECAST_VERB.test(q) ||
+      (FORECAST_TREND.test(q) && FORECAST_HORIZON.test(q) && FORECAST_OUTCOME.test(q)) ||
+      (FORECAST_TREND.test(q) && FORECAST_STRONG_OUTCOME.test(q));
+    if (isForecast) {
+      return { kind: 'forecast-gap', disclosure: FORECAST_DISCLOSURE };
+    }
+  }
+
+  // 2.7 — S3 AUTHORSHIP/CREATOR provenance honest gap. Gates ONLY on a
+  // create/originally-authored verb; a pure last-modified ask (no create verb)
+  // is excluded so it routes to sfi.last_modified. A mixed "who created AND
+  // who edited since" still gates on the genuine create-gap half.
+  const provenanceCreate =
+    PROVENANCE_CREATE.test(q) || (PROVENANCE_CREATE_DATE.test(q) && /\bcreated?\b/i.test(q));
+  if (provenanceCreate && !(PROVENANCE_LASTMOD_ONLY.test(q) && !PROVENANCE_CREATE.test(q))) {
+    return { kind: 'provenance-gap', disclosure: PROVENANCE_DISCLOSURE };
   }
 
   // 3 — runtime/ops telemetry honest gap.

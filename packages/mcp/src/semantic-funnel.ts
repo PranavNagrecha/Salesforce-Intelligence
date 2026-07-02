@@ -132,6 +132,15 @@ const SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   many: ['count', 'number'],
   show: ['sample', 'records'],
   sample: ['records', 'show'],
+  // R4 show-me corpus (DIAGNOSIS-R4 §2 lever 2): display verbs → fetch/list the
+  // component's metadata. EXPANSION_WEIGHT keeps originals dominant, so these
+  // only tip a question that is ALREADY display-shaped ("open X", "pull up X",
+  // "bring up X", "display X") toward get_component / list_components without
+  // hijacking real intents.
+  open: ['fetch', 'component', 'metadata', 'definition'],
+  display: ['fetch', 'component', 'metadata', 'list'],
+  bring: ['fetch', 'component', 'metadata', 'list'],
+  pull: ['fetch', 'component', 'metadata'],
   // change / audit / freshness
   changed: ['modified', 'change', 'history', 'audit'],
   change: ['modified', 'history', 'changed'],
@@ -592,9 +601,25 @@ export const expandWeighted = (tokens: readonly string[]): Map<string, number> =
  * each capability category that lists the tool. Tools in no category fall back
  * to description + utterances.
  */
+// R10 (DIAGNOSIS-R4): `sfi.route_question`'s OWN description/utterances are the
+// router's meta-vocabulary ("route the question", "shortlist of candidate
+// tools", "guidance", "which tool answers…"). Those terms overlap the phrasing
+// of MANY real user questions, so indexing route_question as a corpus document
+// inflates the document-frequency of that meta-vocabulary and DEPRESSES its IDF
+// — a drift that quietly de-weights the very words that should discriminate a
+// real answer tool. route_question is never itself a returned candidate
+// (EXCLUDED_FROM_CANDIDATES) and a host LLM already IS the router, so it has no
+// business polluting the ANSWER corpus. Exclude it from buildToolDocs so it is
+// neither scored NOR counted in n/df — this deliberately moves ranks; the pins
+// are re-baselined accordingly. (The other four EXCLUDED_FROM_CANDIDATES tools
+// stay INDEXED — their descriptions are ordinary tool prose, not router
+// meta-vocabulary, and dropping them would strand their utterance corpus.)
+const CORPUS_EXCLUDED: ReadonlySet<string> = new Set(['sfi.route_question']);
+
 const buildToolDocs = (): Map<string, string> => {
   const docs = new Map<string, string>();
   for (const tool of V01_TOOLS) {
+    if (CORPUS_EXCLUDED.has(tool.name)) continue;
     // The tool NAME encodes the intent (object_access_audit, live_count,
     // find_component_usages). Weight it by repeating it, so a question whose
     // words match the name ranks the tool even when the prose description does

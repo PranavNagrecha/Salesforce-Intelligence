@@ -86,6 +86,12 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'wait, is <Name__c> a field or an object?',
     'pull up <ComponentName> — I might have the name spelled wrong',
     'does the <ComponentName> component actually exist in this org, yes or no?',
+    // R4 show-me corpus (DIAGNOSIS-R4 §2 lever 2): "show me / pull up / open X"
+    // where X is a bare informal name that must be RESOLVED first — the display
+    // verb over an unqualified nickname reaches resolve.
+    'show me the <nickname> thing — I\'m not sure of its exact name',
+    'pull up whatever we call <nickname> around here',
+    'open the one that sounds like <fuzzy-name>',
   ],
   'sfi.capabilities': [
     'what can you actually do?',
@@ -186,6 +192,18 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'is the <FlowName> flow active or dormant?',
     'can you give me the raw metadata XML for the <CustomPermission> custom permission?',
     'pull up <ComponentName> so I can look at it',
+    // R4 show-me corpus (DIAGNOSIS-R4 §2 lever 2): the "show me X / pull up X /
+    // open X / bring up X / display X" families — display verbs over a single
+    // NAMED component reach get_component. Generic vocabulary, no org tokens.
+    'open the <FlowName> flow so I can see its definition',
+    'bring up the <ApexClass> class for me',
+    'display the metadata for the <PermSet> permission set',
+    'let me see the <ComponentName> component in full',
+    'open up <ComponentName> and show me everything about it',
+    'can you show me what the <FlowName> flow contains?',
+    'pull the definition of the <ComponentName> component',
+    'I want to see the full <ApexClass> apex class source and metadata',
+    'render the raw metadata for the <ComponentName> component',
   ],
   'sfi.list_components': [
     'whats on the Account object — give me the whole field list',
@@ -209,6 +227,16 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'can i see the validation rules on the <Object> object',
     'is there validation on the <Object> object?',
     'show me all the invocable apex methods',
+    // R4 show-me corpus (DIAGNOSIS-R4 §2 lever 2): "show me / pull up / open /
+    // bring up ALL the X" enumeration phrasings over a component TYPE reach
+    // list_components. Generic vocabulary, no org tokens.
+    'open the list of every flow in this org',
+    'bring up all the apex classes for me — the whole inventory',
+    'display all the custom objects we have',
+    'let me see everything of type permission set',
+    'pull up the full list of validation rules',
+    'show me the whole inventory of layouts',
+    'bring up the entire list of triggers in the org',
   ],
   'sfi.get_edges': [
     'what are the edges between <ApexClass> and the objects it touches?',
@@ -1700,6 +1728,16 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'how could a user have gotten the <CustomPermission> custom permission?',
     'what perm set gives access to the <ComponentName> component?',
     'who is allowed to bypass the validation — which custom permission guards it and who holds it?',
+    // R4 custom-permission VERIFY-FIRST band (DIAGNOSIS-R4 lever 3, the 5 R3
+    // residuals): a NAMED custom permission where the ask combines "what does
+    // it control" WITH "who has / who grants it", or verifies a specific
+    // granting perm set ("granted by X or a different one"). These name a
+    // specific custom permission and want the reverse-grant answer.
+    'the <CustomPermission> custom permission — what does it control and who has it?',
+    'does the <CustomPermission> custom permission get granted by the <PermSet> perm set or a different one?',
+    'which permission set enables the <CustomPermission> custom permission, and what does that permission gate?',
+    'for the <CustomPermission> custom permission, tell me both the granting permission set and what it lets people do',
+    'is <CustomPermission> actually granted by <PermSet>, or does the grant come from somewhere else?',
   ],
   'sfi.installed_package_catalog': [
     'what managed packages are installed in this org?',

@@ -146,18 +146,27 @@ export const getAuthFromSfCli = async (
     ]);
     stdout = result.stdout;
   } catch (cause) {
-    // ENOENT means `sf` itself is missing from PATH. Any other failure
-    // is treated as a `sf-cli-failed` (typical for "not authenticated")
-    // unless the message specifically names an unknown org.
+    // ENOENT means `sf` itself is missing from PATH (posix path, or Windows
+    // when using execFile directly). On Windows, execHelper routes through
+    // cmd.exe so the OS does NOT throw ENOENT — instead cmd.exe exits non-zero
+    // with "'sf' is not recognized as an internal or external command" in
+    // stderr. Both shapes map to the same sf-cli-missing classification.
     const codeBag = cause as { code?: string; stderr?: string; message?: string };
-    if (codeBag.code === 'ENOENT') {
+    const stderrOrMsg = codeBag.stderr ?? codeBag.message ?? String(cause);
+    // ENOENT = posix "sf not on PATH". On Windows, execHelper routes through
+    // cmd.exe so the OS never throws ENOENT; instead cmd.exe emits "'sf' is
+    // not recognized as an internal or external command". Both shapes map to
+    // the same sf-cli-missing classification.
+    if (
+      codeBag.code === 'ENOENT' ||
+      stderrOrMsg.includes('is not recognized as an internal or external command')
+    ) {
       return err({
         kind: 'sf-cli-missing',
         message:
           "The `sf` CLI is not installed or not on PATH. Install it from https://developer.salesforce.com/tools/sfdxcli and run `sf org login web --target-org <alias>` to authenticate.",
       });
     }
-    const stderrOrMsg = codeBag.stderr ?? codeBag.message ?? String(cause);
     if (
       stderrOrMsg.includes('No authentication for org') ||
       stderrOrMsg.includes('NoOrgFound') ||

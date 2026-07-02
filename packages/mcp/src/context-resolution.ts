@@ -178,6 +178,45 @@ export const detectClarificationSelection = (
 // detector only ever runs where a continuation would otherwise fire.
 // ---------------------------------------------------------------------------
 
+/**
+ * Runtime-analytics follow-up terms (R4 seam-strengthening, DIAGNOSIS-R4 §S4).
+ * A follow-up asking for RUNTIME org data the vault never modeled — login
+ * history/IPs, API call logs, approval-instance history ("who actually
+ * approved"), record field-history ("every value change on that record"),
+ * report-subscription recipients, chatter/feed posts, sandbox-refresh date,
+ * deployment logs, flow-interview history — must NOT inherit the previous
+ * turn's metadata tool.
+ *
+ * CAPABILITY-MAP RULE (critical): roster / membership / zombie vocabulary
+ * (permset holders, queue/group members, dormant-with-access accounts) is NOW
+ * an answerable live capability (sfi.live_permset_holders / live_group_members
+ * / live_zombie_accounts / live_user_permsets) and MUST route, not gap — so it
+ * is deliberately EXCLUDED here. Only the genuinely-unbuilt runtime families
+ * (per-user login history, execution traces, debug logs, field history, PSG
+ * 2-hop custom-perm chains, historical membership) are caught.
+ */
+const RUNTIME_FOLLOW_UP_SHAPES: readonly RegExp[] = [
+  // login history + IPs (per-user session telemetry, never modeled).
+  /\b(?:login|log[-\s]?in|sign[-\s]?in)\s+history\b|\bwho\s+(?:actually\s+)?logged\s+in\b|\bfrom\s+what\s+ip\b|\bip\s+address(?:es)?\b/i,
+  // API call logs / latency / error rate (runtime, not metadata).
+  /\bapi\s+call\s+(?:logs?|counts?|volume)\b|\b(?:error|failure)\s+rate\b|\bhow\s+(?:many\s+times|often)\s+(?:was\s+it|has\s+it\s+been)\s+called\b|\bcall\s+volume\b/i,
+  // approval-instance history — "who actually approved" (a runtime instance,
+  // not the approval-process metadata). "who CAN approve" stays a config read.
+  /\bwho\s+(?:actually\s+)?approved\b|\bapproval\s+history\b|\bwas\s+(?:it|that|this)\s+approved\b/i,
+  // record field-history — every value change ON A RECORD (runtime audit
+  // trail). "why did the FIELD change" (metadata provenance) is NOT this: the
+  // anchor is a record/instance ("on that record", "for that account").
+  /\b(?:every|all\s+the|each)\s+(?:value\s+)?changes?\s+(?:on|to|for)\s+(?:that|this|the)\s+(?:record|row|account|contact|case|lead|opportunity)\b|\bfield\s+history\s+(?:on|for)\b/i,
+  // report/dashboard subscription recipients (runtime subscriptions).
+  /\bwho\s+(?:is\s+)?subscribed\b|\bsubscription\s+recipients?\b|\bwho\s+gets?\s+(?:the|that)\s+(?:report|dashboard)\s+(?:emailed|sent)\b/i,
+  // chatter / feed posts (runtime social data).
+  /\bchatter\s+(?:posts?|activity|feed)\b|\bfeed\s+(?:posts?|items?|comments?)\b/i,
+  // sandbox refresh date / deployment logs (runtime org lifecycle telemetry).
+  /\bsandbox\s+(?:last\s+)?refresh(?:ed)?\b|\bwhen\s+was\s+(?:the\s+)?sandbox\b|\bdeployment\s+(?:logs?|history)\b|\blast\s+deploy(?:ment|ed)\b/i,
+  // flow-interview history / event publish counts (runtime execution traces).
+  /\bflow\s+interview(?:s|\s+history)?\b|\b(?:how\s+many\s+)?(?:events?\s+)?(?:were\s+)?published\b|\bpublish\s+counts?\b/i,
+];
+
 /** Gap family → follow-up shapes (all matched on the raw follow-up text). */
 const GAP_FOLLOW_UP_SHAPES: readonly (readonly [RegExp, string])[] = [
   // Normative/judgment asks — the product reads metadata, it has no opinion
@@ -192,13 +231,29 @@ const GAP_FOLLOW_UP_SHAPES: readonly (readonly [RegExp, string])[] = [
   [/\bhow\s+hard\s+(?:is|would)\s+it\b/i, 'judgment'],
   [/\bdoes\s+that\s+mean\s+something(?:'s|\s+is)\s+broken\b/i, 'judgment'],
   [/\bis\s+it\s+doing\s+its\s+job\b/i, 'judgment'],
+  // R4 additions — more normative/opinion shapes the 2K context run showed
+  // inheriting the prior tool: "is that a problem?", "is that too many/too
+  // much?", "is that a good idea?", "should I be worried?", "is that
+  // secure/safe?" (a verdict, not a metadata read — "is it SAFE TO DELETE"
+  // is excluded: it carries its own real route and never reaches this
+  // detector, which only runs while STILL unrouted).
+  [/\bis\s+(?:that|this|it)\s+(?:a\s+)?problem\b|\bis\s+(?:that|this|it)\s+(?:too\s+(?:many|much|few)|a\s+lot)\b/i, 'judgment'],
+  [/\bis\s+(?:that|this|it)\s+(?:a\s+)?good\s+idea\b|\bshould\s+i\s+be\s+(?:worried|concerned)\b/i, 'judgment'],
+  [/\bis\s+(?:that|this|it)\s+(?:considered\s+)?(?:secure|safe|risky|dangerous)\b(?!\s+to\s+delete\b)/i, 'judgment'],
   // Delivery/export asks (q914 "as a file rather than on screen", q882 "can
   // it be exported…", q1939 "flag those as an audit finding").
   [/\bas\s+a\s+file\b|\bcan\s+(?:it|this|that)\s+be\s+exported\b/i, 'delivery'],
   [/^\s*flag\s+(?:those|these|them|it)\b/i, 'delivery'],
+  // R4 additions — more delivery/notification shapes: "email me that", "send
+  // it to …", "put it in a spreadsheet / csv / pdf", "download it".
+  [/^\s*(?:email|send|forward)\s+(?:me\s+)?(?:that|this|it|those|these|them)\b/i, 'delivery'],
+  [/\b(?:as|in|to)\s+(?:a\s+)?(?:spreadsheet|csv|pdf|excel|report\s+file)\b|\b(?:can\s+(?:you|i)\s+)?download\s+(?:it|that|this|them)\b/i, 'delivery'],
   // Self-capability probes about the TOOL, not the org (q849 "does the tool
   // trace transitive access like that, or is that beyond it?").
   [/\b(?:does|can)\s+(?:the|this)\s+tool\b/i, 'tool-self-capability'],
+  // R4 additions — "is that beyond you / can you even do that / do you have
+  // that data" self-capability probes.
+  [/\bis\s+(?:that|this)\s+beyond\s+(?:you|it|the\s+tool)\b|\bcan\s+you\s+even\b|\bdo\s+you\s+(?:have|hold)\s+(?:that|this)\s+(?:data|info(?:rmation)?)\b/i, 'tool-self-capability'],
   // Deployment-status telemetry (q1402 "was the change deployed or is it
   // still pending?").
   [/\bstill\s+pending\b|\bwas\s+(?:it|that|the\s+change)\s+deployed\b/i, 'deployment-status'],
@@ -211,6 +266,9 @@ const GAP_FOLLOW_UP_SHAPES: readonly (readonly [RegExp, string])[] = [
 export const detectGapShapedFollowUp = (question: string): string | null => {
   for (const [shape, family] of GAP_FOLLOW_UP_SHAPES) {
     if (shape.test(question)) return family;
+  }
+  for (const shape of RUNTIME_FOLLOW_UP_SHAPES) {
+    if (shape.test(question)) return 'runtime-analytics';
   }
   return null;
 };

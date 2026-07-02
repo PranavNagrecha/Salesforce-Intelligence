@@ -89,6 +89,19 @@ describe('getAuthFromSfCli — error paths', () => {
     expect(result.error.kind).toBe('sf-cli-missing');
   });
 
+  it('returns sf-cli-missing on Windows cmd.exe "not recognized" stderr (R8)', async () => {
+    // On Windows, execHelper routes through cmd.exe which does NOT throw ENOENT —
+    // instead it exits non-zero with "'sf' is not recognized as an internal or
+    // external command" in stderr. That must map to sf-cli-missing, not sf-cli-failed.
+    const result = await getAuthFromSfCli(
+      'my-org',
+      failExec({ stderr: "'sf' is not recognized as an internal or external command,\r\noperable program or batch file." }),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('sf-cli-missing');
+  });
+
   it('returns org-not-found when sf reports an unauthenticated alias', async () => {
     const result = await getAuthFromSfCli('mystery-org', failExec({
       stderr: 'Error: No authentication for org: mystery-org',

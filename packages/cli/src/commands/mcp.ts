@@ -242,17 +242,21 @@ export const registerMcpCommand = (program: Command): void => {
           `${targetOrg !== null ? ` (org: ${targetOrg})` : ' (no targetOrg in config)'}\n`,
       );
       // One-time "update available" nudge on stderr (stdout is reserved for
-      // JSON-RPC). Fail-silent, cached ~24h, and opt-out via
-      // SFI_NO_UPDATE_CHECK=1 / auto-off in CI — see `checkForUpdate`. It must
-      // never delay or block the server, so a failure here is swallowed.
-      try {
-        const notice = formatUpdateNotice(
-          await checkForUpdate(readCliPackageVersion()),
-        );
-        if (notice !== null) process.stderr.write(`sfi mcp: ${notice}\n`);
-      } catch {
-        // The update check is best-effort; never let it stop the server.
-      }
+      // JSON-RPC). Fire-and-forget: do NOT await — a cache miss triggers a
+      // ~3s registry GET that would otherwise delay `startServer` and make the
+      // server appear unresponsive to the MCP client. The result arrives
+      // whenever the network responds; the server is already serving by then.
+      // Fail-silent end-to-end (cached ~24h, opt-out via SFI_NO_UPDATE_CHECK=1,
+      // auto-off in CI — see `checkForUpdate`).
+      void checkForUpdate(readCliPackageVersion()).then(
+        (result) => {
+          const notice = formatUpdateNotice(result);
+          if (notice !== null) process.stderr.write(`sfi mcp: ${notice}\n`);
+        },
+        () => {
+          // The update check is best-effort; never let it stop the server.
+        },
+      );
       const shutdownOnce = makeShutdownOnce(ctx);
       for (const signal of SHUTDOWN_SIGNALS) {
         process.on(signal, () => {

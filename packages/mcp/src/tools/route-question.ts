@@ -806,6 +806,16 @@ const entityAmbiguityRequiresClarification = (
   query: string,
   resolution: ResolveResult,
   question?: string,
+  /**
+   * R4 NARROW CLARIFY (DIAGNOSIS-R4 §2.2): when the winning route targets a
+   * SINGLE named component, a wider near-equal band (top2/top1 ≥ 0.8) fires the
+   * clarification — this converts the ~55-70 entity-ambiguous misses. When the
+   * route is NOT single-component (scope-vague inventory/audit asks), only the
+   * existing tight-band / literal-collision / self-asserted paths fire, so the
+   * 242 scope-vague turns stay untouched and wrong-clarifies hold ≤87 (T6).
+   * Defaults false so every existing caller keeps the pre-R4 behavior exactly.
+   */
+  routeTargetsSingleComponentTool = false,
 ): boolean => {
   // BARE-LABEL EXACT TIE (router-v2 R2): the resolver can return `exact` for
   // a bare label ("the 'Concentration' field") even when several SAME-named
@@ -857,13 +867,45 @@ const entityAmbiguityRequiresClarification = (
   // clarify. nameCoverage defaults to 1 for legacy candidates without it.
   const looksLikeNamedComponent = (candidate: (typeof resolution.candidates)[number]): boolean =>
     candidate.matchKind !== 'fuzzy' && (candidate.nameCoverage ?? 1) >= 0.5;
-  return (
+  if (
     top!.base >= 0.92 &&
     second!.base >= 0.92 &&
     second!.score >= top!.score * 0.97 &&
     looksLikeNamedComponent(top!) &&
     looksLikeNamedComponent(second!)
-  );
+  ) {
+    return true;
+  }
+  // R4 NARROW CLARIFY (DIAGNOSIS-R4 §2.2): a WIDER near-equal band (top2/top1 ≥
+  // 0.8, verbatim from the diagnosis) fires the clarification, but ONLY when
+  // the winning route targets a single named component and the top pair are
+  // both real-name matches for DISTINCT components. This converts the
+  // entity-ambiguous misses the tight 0.97 band left on the table (e.g. "the
+  // ApplicationForm class" → controller vs service, "Course Manager" → profile
+  // vs app) without touching the scope-vague turns (their routes are not
+  // single-component, so this branch is skipped and wrong-clarifies hold ≤87).
+  if (routeTargetsSingleComponentTool) {
+    // A genuine same-name family: two DISTINCT components sharing the SAME
+    // normalized api-name, both at a high base (≥ 0.85) and within the 0.8
+    // near-equal score band. Shared-name is the strongest ambiguity signal and
+    // exactly the §2.1 shape ("ApplicationForm" controller vs service,
+    // "Course Manager" profile vs app, "Concentration" field on two objects) —
+    // a trailing type word ("the X CLASS") makes the match read `fuzzy` and
+    // drops per-candidate nameCoverage, so neither is a reliable discriminator
+    // here; the shared name IS. Junk grazes never share a normalized name.
+    const sameName =
+      top!.id !== second!.id &&
+      top!.apiName.toLowerCase() === second!.apiName.toLowerCase();
+    if (
+      sameName &&
+      top!.base >= 0.85 &&
+      second!.base >= 0.85 &&
+      second!.score >= top!.score * 0.8
+    ) {
+      return true;
+    }
+  }
+  return false;
 };
 
 /**
@@ -890,6 +932,34 @@ export const hygienicClarificationOptions = <
   // The top option is always offered, whatever its kind — the clarification
   // gate already vetted the top pair before any options are assembled.
   return kept.length > 0 && kept[0] === top ? kept : [top, ...kept.filter((c) => c !== top)];
+};
+
+/**
+ * Clarification option ids for an ambiguous entity. Prefers the P4 hygiene set;
+ * but when that collapses to <2 options AND the resolve is a genuine SAME-NAME
+ * family (the R4 narrow-clarify shape — e.g. "the ApplicationForm CLASS" reads
+ * `fuzzy`, which hygiene would drop), it falls back to the distinct components
+ * sharing the top candidate's normalized name, so the clarification has real
+ * options to offer instead of degenerating to a single pick.
+ */
+const clarificationOptionIds = (
+  candidates: readonly ResolveResult['candidates'][number][],
+): readonly string[] => {
+  const hygienic = hygienicClarificationOptions(
+    candidates.map((candidate) => ({
+      componentId: candidate.id,
+      base: candidate.base,
+      matchKind: candidate.matchKind,
+    })),
+  ).map((candidate) => candidate.componentId);
+  if (hygienic.length >= 2) return hygienic;
+  const top = candidates[0];
+  if (top === undefined) return hygienic;
+  const topName = top.apiName.toLowerCase();
+  const sameName = candidates
+    .filter((candidate) => candidate.apiName.toLowerCase() === topName)
+    .map((candidate) => candidate.id);
+  return sameName.length >= 2 ? sameName : hygienic;
 };
 
 interface CompoundClause {
@@ -969,6 +1039,57 @@ const ASSESSMENT_FAMILY =
 
 /** Tools the regex route lists as preambles — they never inherit answering args. */
 const ROUTE_PREAMBLE_TOOLS = new Set(['sfi.resolve', 'sfi.capabilities']);
+
+/**
+ * SINGLE-COMPONENT-TARGET primary tools (DIAGNOSIS-R4 §2.2 rule, condition 2).
+ * The narrow clarify rule fires ONLY when the winning route's primary tool
+ * operates on exactly ONE named component — an entity ambiguity genuinely
+ * blocks these because the tool cannot proceed without knowing WHICH component
+ * the user meant. The `what_if_*` family (all named-target simulations) is
+ * matched by prefix below rather than enumerated. Scope-vague questions (no
+ * single entity — audits, inventories, list/menu asks) route to tools NOT in
+ * this set, so the clarify gate stays off them: that is the precision guard
+ * that holds wrong-clarifies ≤87 (tripwire T6). The list is the diagnosis's
+ * verbatim single-component intents plus their close field/flow/apex kin.
+ */
+const SINGLE_COMPONENT_TARGET_TOOLS: ReadonlySet<string> = new Set([
+  'sfi.explain_flow',
+  'sfi.explain_apex_method',
+  'sfi.explain_field',
+  'sfi.explain_formula',
+  'sfi.get_component',
+  'sfi.downstream_effects',
+  'sfi.component_history',
+  'sfi.call_graph',
+  'sfi.method_reachability',
+  'sfi.safe_to_delete_field',
+  'sfi.who_can_run',
+  'sfi.field_360',
+  'sfi.field_lineage',
+  'sfi.what_happens_on_save',
+  'sfi.order_of_execution',
+  'sfi.field_access_audit',
+  'sfi.object_access_audit',
+  'sfi.who_can_access_object',
+  'sfi.what_if_deactivate_flow',
+  'sfi.what_if_disable_trigger',
+]);
+
+/**
+ * True when the route's PRIMARY tool (first non-preamble tool) targets a
+ * single named component, so an entity ambiguity should block with a
+ * clarification. `what_if_*` simulations (all named-target) count via prefix.
+ * A route with no non-preamble primary (pure resolve/capabilities) is NOT a
+ * single-component target — clarifying there is the scope-vague leak.
+ */
+const routeTargetsSingleComponent = (route: RouteResult): boolean => {
+  const primary = route.tools.find((tool) => !ROUTE_PREAMBLE_TOOLS.has(tool));
+  if (primary === undefined) return false;
+  return (
+    SINGLE_COMPONENT_TARGET_TOOLS.has(primary) ||
+    primary.startsWith('sfi.what_if_')
+  );
+};
 
 /**
  * Eval family B — tool ↔ resolved-component-type compatibility. The tools keyed
@@ -1544,6 +1665,8 @@ const REFUSAL_INTENT: Readonly<Record<RefusalKind, string>> = {
   'write-imperative': 'refused-write',
   'injection-exfiltration': 'refused-injection',
   'identity-gap': 'honest-gap-identity',
+  'forecast-gap': 'honest-gap-forecast',
+  'provenance-gap': 'honest-gap-provenance',
   'runtime-analytics': 'honest-gap-runtime',
   'out-of-scope': 'out-of-scope',
 };
@@ -1561,6 +1684,14 @@ const REFUSAL_GAP: Readonly<Record<RefusalKind, NonNullable<RouteResult['gap']>>
   'identity-gap': {
     category: 'identity-gap',
     note: 'first-person capability ask; no session-user identity — declined with a which-user clarify pointer',
+  },
+  'forecast-gap': {
+    category: 'forecast-gap',
+    note: 'future/forecast ask; no time-series or forecasting model — honest gap, current snapshot offered',
+  },
+  'provenance-gap': {
+    category: 'provenance-gap',
+    note: 'creator/authorship ask; vault has LastModified, never CreatedBy — honest gap disclosed',
   },
   'runtime-analytics': {
     category: 'runtime-analytics',
@@ -2053,7 +2184,12 @@ export const routeQuestionHandler = async (
     // same-name cross-type collision is the ANSWER to that question, not an
     // obstacle — sfi.resolve enumerates the types and the host explains.
     route.intent !== 'component-type' &&
-    entityAmbiguityRequiresClarification(entityQuery, refinedEntityResolution, input.question);
+    entityAmbiguityRequiresClarification(
+      entityQuery,
+      refinedEntityResolution,
+      input.question,
+      routeTargetsSingleComponent(route),
+    );
   let entityEvidence: RouteQuestionOutput['entityEvidence'] =
     refinedEntityResolution !== null && refinedEntityResolution.disposition !== 'none'
       ? {
@@ -2090,11 +2226,10 @@ export const routeQuestionHandler = async (
       clarification: {
         required: true,
         question: 'Several components match the named entity. Which component did you mean?',
-        // P4 option hygiene: fuzzy grazes and far-below-top rivals are junk,
-        // not options — offer only the plausible candidates.
-        options: hygienicClarificationOptions(entityEvidence?.candidates ?? []).map(
-          (candidate) => candidate.componentId,
-        ),
+        // P4 option hygiene (fuzzy grazes / far-below-top rivals are junk),
+        // with the R4 same-name fallback so a genuine same-name family whose
+        // match reads `fuzzy` (the narrow-clarify shape) still offers ≥2 picks.
+        options: clarificationOptionIds(refinedEntityResolution?.candidates ?? []),
       },
     };
   } else if (
@@ -2536,6 +2671,8 @@ export const routeQuestionHandler = async (
           "the product's own capability boundary — sfi.capabilities answers what is and is not built",
         'deployment-status':
           'deployment/pending-change status, runtime telemetry the vault does not model',
+        'runtime-analytics':
+          'runtime org data (login history, API-call logs, approval-instance history, record field-history, subscription recipients, chatter posts, sandbox-refresh/deployment logs, or execution traces) — this is live runtime telemetry, not vault metadata',
       };
       const carried =
         previous.componentId !== undefined
@@ -2592,7 +2729,16 @@ export const routeQuestionHandler = async (
               target = refinedTarget.candidates[0]!;
             } else if (
               refinedTarget.disposition === 'ambiguous' &&
-              entityAmbiguityRequiresClarification(phrase, refinedTarget)
+              entityAmbiguityRequiresClarification(
+                phrase,
+                refinedTarget,
+                undefined,
+                // The re-parameterization inherits previous.tool; the widened
+                // R4 band applies when THAT tool is single-component-target.
+                previous.tool !== undefined &&
+                  (SINGLE_COMPONENT_TARGET_TOOLS.has(previous.tool) ||
+                    previous.tool.startsWith('sfi.what_if_')),
+              )
             ) {
               route = {
                 ...route,

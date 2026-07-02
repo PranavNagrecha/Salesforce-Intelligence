@@ -277,6 +277,60 @@ describe('seam 2 — detectGapShapedFollowUp (pure)', () => {
   });
 });
 
+// R4 — strengthen detectGapShapedFollowUp (DIAGNOSIS-R4 item 4, R6 seam:
+// gap-shaped follow-ups under context should still gap, not inherit the prior
+// tool). New runtime-analytics arm + more judgment/delivery/self-capability
+// shapes; the CAPABILITY-MAP rule is enforced by the roster/membership/zombie
+// NEGATIVES (those are now live-answerable and must NOT gap).
+describe('seam 2 (R4) — new gap-shaped follow-up arms', () => {
+  const newGaps: readonly (readonly [string, string])[] = [
+    // runtime-analytics — genuinely-unbuilt runtime families.
+    ['who actually logged in last week and from what IP?', 'runtime-analytics'],
+    ['what does its login history look like?', 'runtime-analytics'],
+    ['how many API calls did it make, and what was the error rate?', 'runtime-analytics'],
+    ['who actually approved that request?', 'runtime-analytics'],
+    ['show me every value change on that record', 'runtime-analytics'],
+    ['who is subscribed to that report?', 'runtime-analytics'],
+    ['what chatter posts are on it?', 'runtime-analytics'],
+    ['when was the sandbox last refreshed?', 'runtime-analytics'],
+    ['how many events were published?', 'runtime-analytics'],
+    // extra judgment shapes.
+    ['is that a problem?', 'judgment'],
+    ['is that too many?', 'judgment'],
+    ['is that a good idea?', 'judgment'],
+    ['should I be worried?', 'judgment'],
+    // extra delivery shapes.
+    ['email me that', 'delivery'],
+    ['can you download it as a csv?', 'delivery'],
+    // extra self-capability shape.
+    ['is that beyond you?', 'tool-self-capability'],
+    ['do you have that data?', 'tool-self-capability'],
+  ];
+  it.each(newGaps)('detects new gap shape: %s', (question, family) => {
+    expect(detectGapShapedFollowUp(question)).toBe(family);
+  });
+
+  // CAPABILITY-MAP RULE — roster / membership / zombie / last-modified asks are
+  // NOW answerable (live plane or last_modified) and must NOT be caught as
+  // gaps, or R4 would fight the engine arc and re-fail the q4419-family.
+  const notGaps: readonly string[] = [
+    'who holds that permission set?',
+    'who is in that queue?',
+    'who are the members of that group?',
+    'which accounts are dormant but still have access?',
+    'which of those users are zombie accounts?',
+    'what permission sets does that user have?',
+    'who last modified it?',
+    'when was it last changed?',
+    // "is it safe to delete" carries its own route and must not read as the
+    // new "is that secure/safe" judgment arm.
+    'is it safe to delete?',
+  ];
+  it.each(notGaps)('roster/membership/last-modified is NOT gap-shaped: %s', (question) => {
+    expect(detectGapShapedFollowUp(question)).toBeNull();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Seam 2 — handler wiring (fixture vault, synthetic names only).
 // ---------------------------------------------------------------------------
