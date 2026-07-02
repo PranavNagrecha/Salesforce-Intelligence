@@ -55,7 +55,7 @@ If nothing else stopped the route — no pending clarification, and a clean
 premise (a question naming a component the resolver cannot find gets the
 premise disclosure instead, never an advisory route) — and the semantic
 funnel's top candidate scores at or above a fixed floor
-(`FUNNEL_PRIMARY_MIN_SCORE = 0.30`, a source constant, not an env var; the
+(`FUNNEL_PRIMARY_MIN_SCORE = 0.26`, a source constant, not an env var; the
 score is a pure cosine, uninflated by regex fusion bonuses), the dead
 `unrouted` verdict is upgraded to:
 
@@ -211,7 +211,7 @@ vs absent.
 | `SFI_ROUTER_MODE=offline` | env | Deterministic route is authoritative; candidates omitted. Default (unset / anything else): hybrid. |
 | `mode: 'ask' \| 'plan' \| 'assessment'` | call param | Reranks candidates toward that family (`plan` → what_if/impact, `assessment` → risk/readiness/coverage) and tailors guidance. |
 | `logGap: true` | call param | Opt-in: append an unanswerable question to the local gap log (`~/.sf-intelligence/question-gaps.jsonl`). Off by default; nothing leaves the machine either way. |
-| `FUNNEL_PRIMARY_MIN_SCORE` (0.30), `EXPANSION_WEIGHT` (0.5) | source constants | The funnel-advisory score floor and the weighted-synonym-expansion weight. **Not env vars** — calibrated against the evaluation set; changing them re-opens the honesty gates. |
+| `FUNNEL_PRIMARY_MIN_SCORE` (0.26), `EXPANSION_WEIGHT` (0.5) | source constants | The funnel-advisory score floor and the weighted-synonym-expansion weight. **Not env vars** — calibrated against the evaluation set; changing them re-opens the honesty gates. |
 
 ## 8. Measured behavior (2,000-question real-org evaluation)
 

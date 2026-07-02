@@ -187,7 +187,7 @@ refusal gates, clarifications, the `context.previous` param).
 | --- | --- | --- |
 | `SFI_ROUTER_MODE` | *(unset — hybrid)* | `offline` makes the deterministic route authoritative and omits candidates — for CI and no-LLM hosts. Refusal gates and clarifications behave identically in both modes. |
 
-The funnel-advisory score floor (`FUNNEL_PRIMARY_MIN_SCORE = 0.30` in
+The funnel-advisory score floor (`FUNNEL_PRIMARY_MIN_SCORE = 0.26` in
 `packages/mcp/src/tools/route-question.ts`) and the synonym-expansion weight
 (`EXPANSION_WEIGHT = 0.5` in `packages/mcp/src/semantic-funnel.ts`) are
 **source constants, not env vars** — they are calibrated against the routing

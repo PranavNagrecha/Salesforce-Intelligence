@@ -1163,12 +1163,14 @@ export const MARGIN = 0.05;
  * pure regex assertion, zero semantic evidence): 37/133 labeled over-routes
  * vs 8/529 misses sat there, so the threshold must be strictly above it. The
  * funnel-primary path only ever sees PURE cosines (the merge short-circuits
- * for an unrouted intent — pinned by a regression test), so 0.30 is a real
- * semantic threshold. 0.26 is the stretch setting — evaluate ONLY in the
- * Phase-7 harness re-run with the over-route tripwire green (≤69 relabeled /
- * ≤133 raw); never ship it blind.
+ * for an unrouted intent — pinned by a regression test), so this is a real
+ * semantic threshold. 0.26 was adopted in the Phase-7 calibration (was 0.30):
+ * labeled cleanToGold 85 → 123 with the over-route tripwire flat (11
+ * executables on the 133-list, 21 confident routes on the full 334 honesty
+ * primaries — unchanged from 0.30) and sweep-blocked flat at 8 (clean
+ * 414 → 425). Re-run those tripwires before moving it again.
  */
-export const FUNNEL_PRIMARY_MIN_SCORE = 0.30;
+export const FUNNEL_PRIMARY_MIN_SCORE = 0.26;
 
 /**
  * A candidate whose tool MUTATES the org if the host acts on the plan it

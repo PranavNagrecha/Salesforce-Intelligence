@@ -33,7 +33,9 @@ separate 500-question routing sweep), compared against the 0.1.21 baseline.
   excluders that route normally.
 - **Funnel-primary advisory routing.** When no deterministic intent matches
   and nothing else stopped the route (no clarification, clean premise), a
-  pure-cosine top candidate scoring ≥ 0.30 upgrades the dead `unrouted` to
+  pure-cosine top candidate scoring ≥ 0.26 (floor calibrated 0.30 → 0.26 in
+  the Phase-7 harness re-run; over-route and sweep-blocked tripwires held)
+  upgrades the dead `unrouted` to
   intent `funnel-advisory`: top-3 funnel tools, confidence `low` by
   construction, reason flagged FUNNEL-DERIVED — an advisory pick for the host
   to verify, never a command. Candidate rows now also carry `cosine`, the raw
