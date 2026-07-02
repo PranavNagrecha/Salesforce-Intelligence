@@ -71,6 +71,35 @@ export interface RoutePlanStep {
   readonly tools: readonly string[];
 }
 
+/**
+ * Disclosure of how HOST-PASSED conversation context changed this route
+ * (router-v2 P5). Present ONLY when context actually changed the route — the
+ * mere presence of the `context` input param never emits it. The product
+ * stays stateless: the host passes context per call; nothing is stored
+ * server-side.
+ */
+export interface RouteContextApplied {
+  readonly kind:
+    | 'entity-substitution'
+    | 'continuation'
+    | 'reparameterization'
+    | 'clarification-selection';
+  /** Matched anaphor token, e.g. "it", "what about". */
+  readonly anaphor: string;
+  /** What was substituted from the previous turn, when an entity was. */
+  readonly substitutedComponentId?: string;
+  readonly from?:
+    | 'previous.componentId'
+    | 'previous.objectApiName'
+    | 'previous.clarification';
+  /** `previous.tool`, when a continuation/re-parameterization inherited it. */
+  readonly inheritedTool?: string;
+  /** Clarification selection: the option the ordinal/descriptor mapped to. */
+  readonly selection?: string;
+  /** Fail-open notes: invalid `previous.tool`/`componentId` fields skipped. */
+  readonly ignored?: readonly string[];
+}
+
 /** The router's verdict for one question. */
 export interface RouteResult {
   readonly question: string;
@@ -113,6 +142,14 @@ export interface RouteResult {
    * route's `reason`. Additive: hosts reading `route.intent` are unaffected.
    */
   readonly refusal?: RefusalShape;
+  /**
+   * Present ONLY when host-passed conversation context changed this route
+   * (router-v2 P5): what was substituted/inherited and from which
+   * `context.previous` field. Absent whenever context was not passed, or was
+   * passed but did not change the route (a self-contained question ignores
+   * context). Additive and purely a disclosure.
+   */
+  readonly contextApplied?: RouteContextApplied;
 }
 
 interface Rule {

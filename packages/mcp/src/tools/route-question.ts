@@ -24,6 +24,21 @@
  *   candidate scoring ≥ FUNNEL_PRIMARY_MIN_SCORE upgrades the dead `unrouted`
  *   to intent `funnel-advisory` — top-3 funnel tools, confidence `low` by
  *   construction, reason flagged FUNNEL-DERIVED. Advisory, never authoritative.
+ *
+ * Router-v2 P5 addition — HOST-PASSED conversation context (`context.previous`,
+ * optional): the product is STATELESS — conversation memory belongs to the
+ * host, which passes what the previous turn was about per call; nothing is
+ * stored server-side. A pronoun/ellipsis follow-up with no entity of its own
+ * substitutes `previous.componentId` (exact-id lookup, never fuzzy) and, when
+ * still unrouted, inherits `previous.tool` as an advisory `context-continuation`
+ * route (confidence capped at `medium`); a re-parameterization follow-up
+ * ("what about on Contact?") re-runs `previous.tool` against the new target;
+ * an ordinal/descriptor pick against `previous.clarification` re-dispatches
+ * through the existing clarification-continuation contract. Refusal gates run
+ * BEFORE all context logic; a carried id that no longer resolves premise-flags
+ * instead of routing; `context` absent keeps every code path byte-identical;
+ * a self-contained question ignores context. When context changes the route,
+ * `route.contextApplied` discloses what was substituted/inherited.
  */
 
 import { createHash } from 'node:crypto';
@@ -31,26 +46,39 @@ import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 import type {
+  ComponentId,
   ComponentType,
   McpError,
   McpResponse,
   TrustSummary,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { resolveComponents, type ResolveResult } from '@sf-intelligence/graph';
+import { getNodeById, resolveComponents, type ResolveResult } from '@sf-intelligence/graph';
 import { findRegistryRoot, listRegisteredVaults } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
-import { renderRouteMarkdown } from '../answer-render.js';
+import { renderContextApplied, renderRouteMarkdown } from '../answer-render.js';
+import {
+  continuationToolCompatible,
+  detectClarificationSelection,
+  detectPronounAnchor,
+  detectReparamAnchor,
+  extractReparamTarget,
+  isAnaphorOnly,
+  validatePreviousContext,
+  type ValidatedContext,
+} from '../context-resolution.js';
 import {
   classifyQuestion,
   logGapIfAny,
   routeForSelectedIntent,
   type RouteClarification,
+  type RouteContextApplied,
   type RouteResult,
 } from '../intent-router.js';
 import { detectRefusalShape, type RefusalKind, type RefusalShape } from '../refusal-gates.js';
 import {
+  getPlaneByTool,
   resolveCandidatePlane,
   semanticCandidates,
   type ToolCandidate,
@@ -226,6 +254,38 @@ export const routeQuestionInputSchema = z.object({
    * always attached, regardless of the deterministic route's confidence.
    */
   mode: z.enum(['ask', 'plan', 'assessment']).optional(),
+  /**
+   * Router-v2 P5: HOST-PASSED conversation context. The product is STATELESS —
+   * conversation memory belongs to the host, which passes what the PREVIOUS
+   * turn was about so a terse follow-up ("does it fire on delete too?") can be
+   * resolved; nothing is stored server-side. `context` absent ⇒ every code
+   * path is byte-identical to a call without the feature. Value validation is
+   * FAIL-OPEN (an unregistered `tool` / malformed `componentId` is ignored and
+   * noted in `contextApplied.ignored`); shape errors reject normally. Context
+   * strings are NEVER treated as question text — `previous.question` is only
+   * ever re-dispatched through the full handler (refusal gates included) for
+   * clarification continuation. A self-contained question IGNORES context.
+   */
+  context: z.object({
+    previous: z.object({
+      /** Canonical id the prior answer was about, e.g. "Flow:Order_Sync". */
+      componentId: z.string().min(1).max(256).optional(),
+      /** Object api name in focus last turn, e.g. "Contact". */
+      objectApiName: z.string().min(1).max(256).optional(),
+      /** sfi.* tool that produced the prior answer. */
+      tool: z.string().regex(/^sfi\.[a-z0-9_]+$/).optional(),
+      /** route.intent of the prior turn (advisory only). */
+      intent: z.string().min(1).max(64).optional(),
+      plane: z.enum(['vault', 'live', 'hybrid']).optional(),
+      /** Prior turn's question text — required ONLY for clarification continuation. */
+      question: z.string().min(1).max(2000).optional(),
+      /** Open disambiguation set from the prior turn's blocking clarification. */
+      clarification: z.object({
+        clarificationId: z.string().min(1).max(64),
+        options: z.array(z.string().min(1).max(256)).min(1).max(10),
+      }).strict().optional(),
+    }).strict(),
+  }).strict().optional(),
 });
 
 export type RouteQuestionInput = z.infer<typeof routeQuestionInputSchema>;
@@ -1438,6 +1498,149 @@ const refusalResponse = async (
   });
 };
 
+// ---------------------------------------------------------------------------
+// Router-v2 P5 — host-passed conversation context. All of the helpers below
+// run ONLY under `input.context !== undefined` guards in the handler; the
+// no-context path never touches them (byte-identical requirement).
+// ---------------------------------------------------------------------------
+
+/** Minimal resolved-entity shape the context arg-binding needs. */
+interface ContextWinner {
+  readonly id: string;
+  readonly type: string;
+  readonly apiName: string;
+  readonly parentApiName: string | null;
+}
+
+/**
+ * Save-order primaries take an OBJECT api name, keyed by TOOL because a
+ * context continuation's intent is `context-continuation`, not a save-order
+ * intent name.
+ */
+const CONTEXT_SAVE_ORDER_TOOLS: ReadonlySet<string> = new Set([
+  'sfi.what_happens_on_save',
+  'sfi.order_of_execution',
+]);
+
+/**
+ * Known non-default argument keys for context binding — the same
+ * never-guess-a-key principle as `selectedEntityArgsForRoute`: keys listed
+ * here are the tool's REAL Zod input key; everything else falls back to the
+ * `componentId` default of the advisory-args logic.
+ */
+const CONTEXT_TOOL_ARG_KEYS: ReadonlyMap<string, string> = new Map([
+  ['sfi.field_access_audit', 'fieldId'],
+  ['sfi.safe_to_delete_field', 'fieldId'],
+  ['sfi.field_360', 'fieldId'],
+  ['sfi.field_lineage', 'fieldId'],
+  ['sfi.explain_field', 'fieldId'],
+  ['sfi.explain_flow', 'flowId'],
+]);
+
+/**
+ * Generic schema/list intents a re-parameterization anchor may override when
+ * the route is NOT high-confidence: they answer "what is there", so "what
+ * about on Contact?" re-running the PREVIOUS tool is the likelier reading.
+ * A confident intent match is never overridden (the self-contained negative).
+ */
+const GENERIC_SCHEMA_INTENTS: ReadonlySet<string> = new Set([
+  'schema',
+  'metadata-count',
+  'component-lookup',
+]);
+
+/**
+ * Bind a context-substituted entity to the route's primary tool using the
+ * advisory-args key logic (P5 §2a): `objectApiName` (the id's object) for the
+ * save-order family, the tool's known key where we have it (fieldId/flowId),
+ * `componentId` otherwise. Returns null when no binding is derivable (e.g. a
+ * field-less object for a save-order tool) — never guess.
+ */
+const contextArgsFor = (
+  route: RouteResult,
+  winner: ContextWinner,
+): Readonly<Record<string, unknown>> | null => {
+  const primary = route.tools.find((tool) => !ROUTE_PREAMBLE_TOOLS.has(tool));
+  if (primary === undefined) return null;
+  if (SAVE_ORDER_INTENTS.has(route.intent) || CONTEXT_SAVE_ORDER_TOOLS.has(primary)) {
+    const objectApiName =
+      winner.type === 'CustomObject' ? winner.apiName : winner.parentApiName;
+    if (objectApiName === null || objectApiName === undefined) return null;
+    return { ...(route.suggestedArgs ?? {}), objectApiName };
+  }
+  const key = CONTEXT_TOOL_ARG_KEYS.get(primary) ?? 'componentId';
+  return { ...(route.suggestedArgs ?? {}), [key]: winner.id };
+};
+
+/**
+ * Build a CONTEXT-CONTINUATION route (P5 §2b/2c): the previous turn's tool
+ * re-run for this follow-up, with the substituted/new entity bound per the
+ * advisory-args logic. Plane and liveRequired always come from the live tool
+ * registry (`resolveCandidatePlane`), NEVER from `previous.plane`.
+ * `applyComponentTypeGuard` runs on the result; if the primary tool is still
+ * type-incompatible with the entity afterwards (e.g. explain_flow inherited
+ * against an ApexClass id — a mismatch the Flow-only guard table cannot fix),
+ * returns null so the caller falls THROUGH to funnel-primary — never an
+ * executable tool bound to an id that guarantees a hard error.
+ * Confidence: `medium` when the entity resolved exact AND the tool passed the
+ * guard unchanged; `low` otherwise. Never `high` — a context route is advisory.
+ */
+const buildContextContinuation = (
+  question: string,
+  inheritedTool: string,
+  winner: ContextWinner | null,
+  anaphor: string,
+  prependResolve: boolean,
+): RouteResult | null => {
+  const entry = resolveCandidatePlane(inheritedTool);
+  const tools = prependResolve ? ['sfi.resolve', inheritedTool] : [inheritedTool];
+  const base: RouteResult = {
+    question,
+    plane: entry.plane,
+    intent: 'context-continuation',
+    tools,
+    liveRequired: entry.liveRequired,
+    needsResolve: prependResolve,
+    reason:
+      `CONTEXT-DERIVED (advisory): no deterministic intent matched this follow-up on its ` +
+      `own; '${anaphor}' was resolved from host-passed conversation context` +
+      (winner !== null ? ` to ${winner.id}` : '') +
+      `, and the previous turn's tool ${inheritedTool} was inherited. Verify the pick, ` +
+      `resolve any named component first, and ground with sfi.synthesize_answer.`,
+    gap: null,
+    confidence: 'low',
+    risk: DESTRUCTIVE_TOOL.test(inheritedTool) ? 'destructive' : 'informational',
+    alternatives: [],
+    clarification: null,
+    plan: [{
+      stepId: 'step-1',
+      dependsOn: [],
+      question,
+      intent: 'context-continuation',
+      plane: entry.plane,
+      tools,
+    }],
+  };
+  const boundArgs = winner !== null ? contextArgsFor(base, winner) : null;
+  const withArgs = boundArgs !== null ? { ...base, suggestedArgs: boundArgs } : base;
+  const guarded = applyComponentTypeGuard(withArgs, winner?.type ?? null);
+  const primary = guarded.tools.find((tool) => !ROUTE_PREAMBLE_TOOLS.has(tool));
+  if (primary === undefined) return null;
+  if (winner !== null && !continuationToolCompatible(primary, winner.type)) {
+    return null;
+  }
+  const passedGuardUnchanged = primary === inheritedTool;
+  const finalEntry = resolveCandidatePlane(primary);
+  return {
+    ...guarded,
+    plane: finalEntry.plane,
+    liveRequired: finalEntry.liveRequired,
+    confidence: winner !== null && passedGuardUnchanged ? 'medium' : 'low',
+    risk: DESTRUCTIVE_TOOL.test(primary) ? 'destructive' : 'informational',
+    plan: guarded.plan.map((step) => ({ ...step, plane: finalEntry.plane })),
+  };
+};
+
 export const routeQuestionHandler = async (
   ctx: Context,
   input: RouteQuestionInput,
@@ -1459,6 +1662,79 @@ export const routeQuestionHandler = async (
     }
     return refusalResponse(ctx, input, refusalShape);
   }
+
+  // -------------------------------------------------------------------------
+  // Router-v2 P5 — host-passed conversation context. The product is
+  // STATELESS: the host passes what the previous turn was about; nothing is
+  // stored server-side. Everything below is inside `input.context` guards —
+  // `context` absent keeps every code path byte-identical to today. Refusal
+  // gates already ran on the RAW text above: context never bypasses them, and
+  // a refused follow-up returns before any context logic (contextApplied
+  // absent). Value validation is FAIL-OPEN: a stale tool / malformed id is
+  // ignored with a note, never a hard error.
+  // -------------------------------------------------------------------------
+  const contextInput = input.context;
+  const validatedContext: ValidatedContext | null =
+    contextInput !== undefined
+      ? validatePreviousContext(contextInput.previous, (tool) =>
+          getPlaneByTool().has(tool),
+        )
+      : null;
+
+  // (P5 §2d) CLARIFICATION CONTINUATION — the question is an ordinal /
+  // descriptor pick ("the second one", "the Contact one") against the prior
+  // turn's open clarification. Map it to the offered option and re-dispatch
+  // INTERNALLY through the FULL handler (recursion depth 1 — the inner call
+  // carries no context), so every existing validation applies unchanged: the
+  // id must hash-match previous.question + vault state (stale ⇒ the existing
+  // stale-id error), the selection must be an offered option. 0 or ≥2
+  // descriptor matches / an out-of-range ordinal re-asks the prior
+  // clarification — NEVER guess. This is the ONLY use of `previous.question`.
+  if (
+    validatedContext !== null &&
+    validatedContext.previous.clarification !== undefined &&
+    validatedContext.previous.question !== undefined &&
+    input.clarificationResponse === undefined
+  ) {
+    const selected = detectClarificationSelection(
+      input.question,
+      validatedContext.previous.clarification.options,
+    );
+    if (selected !== null) {
+      const inner =
+        selected.kind === 'selected'
+          ? await routeQuestionHandler(ctx, {
+              question: validatedContext.previous.question,
+              clarificationResponse: {
+                clarificationId:
+                  validatedContext.previous.clarification.clarificationId,
+                selection: selected.selection,
+              },
+            })
+          : await routeQuestionHandler(ctx, {
+              question: validatedContext.previous.question,
+            });
+      if (!inner.ok) return inner;
+      const contextApplied: RouteContextApplied = {
+        kind: 'clarification-selection',
+        anaphor: selected.anaphor,
+        from: 'previous.clarification',
+        ...(selected.kind === 'selected' ? { selection: selected.selection } : {}),
+        ...(validatedContext.ignored.length > 0
+          ? { ignored: validatedContext.ignored }
+          : {}),
+      };
+      return ok({
+        ...inner.value,
+        data: {
+          ...inner.value.data,
+          route: { ...inner.value.data.route, contextApplied },
+          rendered: `${inner.value.data.rendered}\n\n${renderContextApplied(contextApplied)}`,
+        },
+      });
+    }
+  }
+
   let route = classifyQuestion(input.question);
   // A short phrase the pure router couldn't place may still name a real
   // component — rescue it to sfi.resolve when (and only when) it resolves.
@@ -1533,18 +1809,82 @@ export const routeQuestionHandler = async (
   // not a second component — strip it before extraction so it cannot seed a
   // rival entity and turn a clean route into an ambiguity block.
   const entityExtractionSource = stripComparisonAside(input.question, route.intent);
-  const entityQuery = !route.needsResolve
+  let entityQuery = !route.needsResolve
     ? null
     : saveOrderIntent
       ? (typeof suggestedObject === 'string' ? suggestedObject : null)
       : extractEntityQuery(entityExtractionSource, route.intent);
-  const entityTypes: readonly ComponentType[] =
+  let entityTypes: readonly ComponentType[] =
     entityQuery === null
       ? []
       : saveOrderIntent
         ? ['CustomObject']
         : inferEntityTypes(entityQuery, route.intent, input.question);
-  const entityResolution = entityQuery !== null
+
+  // (P5 §2a) ENTITY SUBSTITUTION — a PRONOUN anchor with NO real entity of the
+  // question's own ("does it fire on delete too") is filled from host-passed
+  // context. If the question's OWN extraction found a real phrase, context
+  // does NOT touch it (the self-contained negative). The carried componentId
+  // is resolved by EXACT id (never fuzzy): found ⇒ it feeds in as the refined
+  // entity resolution so everything downstream (type guard, premise check,
+  // arg binding) is unchanged code; missing ⇒ a context-specific premise flag
+  // below blocks stages 6.5 and 7 — stale context must never advisory-route.
+  const pronounAnchor =
+    validatedContext !== null ? detectPronounAnchor(input.question) : null;
+  let contextExactResolution: ResolveResult | null = null;
+  let contextSubstitution:
+    | { readonly anaphor: string; readonly from: 'previous.componentId' | 'previous.objectApiName' }
+    | null = null;
+  let contextGhostComponentId: string | null = null;
+  if (
+    pronounAnchor !== null &&
+    validatedContext !== null &&
+    (entityQuery === null || isAnaphorOnly(entityQuery))
+  ) {
+    const previous = validatedContext.previous;
+    if (saveOrderIntent && previous.objectApiName !== undefined) {
+      // Save-order intents take an OBJECT api name: substitute it through the
+      // normal resolve path, exactly like a question-derived object.
+      entityQuery = previous.objectApiName;
+      entityTypes = ['CustomObject'];
+      contextSubstitution = { anaphor: pronounAnchor, from: 'previous.objectApiName' };
+    } else if (!saveOrderIntent && previous.componentId !== undefined) {
+      const carried = await getNodeById(
+        ctx.graph,
+        previous.componentId as ComponentId,
+      );
+      if (carried.ok && carried.value !== null) {
+        const node = carried.value;
+        contextExactResolution = {
+          disposition: 'exact',
+          candidates: [{
+            id: node.id,
+            type: node.type,
+            apiName: node.apiName,
+            label: node.label,
+            parentApiName:
+              node.parentId === null
+                ? null
+                : node.parentId.slice(node.parentId.indexOf(':') + 1),
+            score: 1,
+            base: 1,
+            matchKind: 'exact',
+            nameCoverage: 1,
+            evidence: `context: exact id carried from the previous turn (${node.id})`,
+          }],
+          queryTokens: [],
+        };
+        entityQuery = node.apiName;
+        entityTypes = [node.type];
+        contextSubstitution = { anaphor: pronounAnchor, from: 'previous.componentId' };
+      } else if (carried.ok) {
+        contextGhostComponentId = previous.componentId;
+      }
+      // A graph read error is FAIL-OPEN: context simply is not applied.
+    }
+  }
+
+  const entityResolution = entityQuery !== null && contextExactResolution === null
     ? await resolveComponents(ctx.graph, entityQuery, {
         limit: 5,
         ...(entityTypes.length > 0 ? { types: entityTypes } : {}),
@@ -1555,12 +1895,13 @@ export const routeQuestionHandler = async (
       ? await applyGlossaryAliases(ctx, entityQuery, entityTypes, entityResolution.value)
       : null;
   const refinedEntityResolution =
-    entityQuery !== null && glossaryAwareEntityResolution !== null
+    contextExactResolution ??
+    (entityQuery !== null && glossaryAwareEntityResolution !== null
       ? resolveParentQualifier(
           input.question,
           refineEntityResolution(entityQuery, glossaryAwareEntityResolution),
         )
-      : null;
+      : null);
   const entityClarificationRequired =
     entityQuery !== null &&
     refinedEntityResolution !== null &&
@@ -1640,6 +1981,30 @@ export const routeQuestionHandler = async (
     route,
     resolvedTypeForGuard(route, refinedEntityResolution),
   );
+
+  // (P5 §2a) bind the context-substituted entity into suggestedArgs with the
+  // advisory-args key logic, so a MATCHED intent's tool runs against the
+  // carried entity without the host re-deriving it. Records the substitution
+  // for the `contextApplied` disclosure. Unrouted questions bind in stage 6.5
+  // instead (context continuation), never here.
+  let contextEntityApplied: RouteContextApplied | null = null;
+  if (
+    contextSubstitution !== null &&
+    route.intent !== 'unrouted' &&
+    refinedEntityResolution?.disposition === 'exact'
+  ) {
+    const winner = refinedEntityResolution.candidates[0]!;
+    const bound = contextArgsFor(route, winner);
+    if (bound !== null) {
+      route = { ...route, suggestedArgs: bound };
+      contextEntityApplied = {
+        kind: 'entity-substitution',
+        anaphor: contextSubstitution.anaphor,
+        substitutedComponentId: winner.id,
+        from: contextSubstitution.from,
+      };
+    }
+  }
 
   // I6 — margin-based clarification. Only in hybrid mode (candidates exist).
   // Runs BEFORE the clarificationId is stamped so a tool-choice clarification
@@ -1783,6 +2148,160 @@ export const routeQuestionHandler = async (
     }
   }
 
+  // (P5 §3) CONTEXT PREMISE — the componentId carried from the previous turn
+  // no longer resolves (deleted, renamed, or newer than the last refresh).
+  // Same FALSE-PREMISE family, context-specific disclosure: the flag blocks
+  // stage 6.5 AND stage 7 exactly as premise flags do today — stale context
+  // must never advisory-route.
+  if (contextGhostComponentId !== null) {
+    premiseFlagged = true;
+    const premiseWarning =
+      `PREMISE CHECK: the component carried from the previous turn ` +
+      `(${contextGhostComponentId}) no longer exists in the vault (deleted, renamed, ` +
+      `or newer than the last refresh; /sfi-refresh may help). Do not answer as if it ` +
+      `exists — re-ask with the component named explicitly.`;
+    route = {
+      ...route,
+      confidence: 'low',
+      reason: `${route.reason} ${premiseWarning}`,
+    };
+    entityEvidence = {
+      query: contextGhostComponentId,
+      typeHints: [],
+      disposition: 'none',
+      clarificationRequired: false,
+      warning: premiseWarning,
+      candidates: [],
+    };
+  }
+
+  // Stage 6.5 — CONTEXT CONTINUATION / RE-PARAMETERIZATION (router-v2 P5
+  // §2b/2c), immediately BEFORE funnel-primary and gated identically (no
+  // clarification, clean premise) plus the context-specific conditions.
+  // When 6.5 fires the intent leaves `unrouted`, so stage 7 is skipped; when
+  // it does not, stage 7 behaves exactly as today.
+  let contextRouteApplied: RouteContextApplied | null = null;
+  if (validatedContext !== null && route.clarification === null && !premiseFlagged) {
+    const previous = validatedContext.previous;
+    const stillUnrouted = route.intent === 'unrouted' && route.plane === 'unknown';
+    const reparamAnchor = detectReparamAnchor(input.question);
+    // (c) RE-PARAMETERIZATION — a REPARAM anchor re-asks the PREVIOUS tool
+    // against a NEW target ("what about on Contact?"). Only from a weak own
+    // route: `unrouted`, or a generic schema/list intent below high
+    // confidence — a CONFIDENT self-contained route ignores context.
+    const ownRouteWeak =
+      stillUnrouted ||
+      (GENERIC_SCHEMA_INTENTS.has(route.intent) && route.confidence !== 'high');
+    if (reparamAnchor !== null && ownRouteWeak && previous.tool !== undefined) {
+      // The new target: the question's own extraction when it resolved exact
+      // (and was not itself the context substitution), else the anchor-
+      // stripped remainder through the NORMAL resolver — clarification rules
+      // intact, an ambiguous new entity still blocks.
+      let target =
+        contextSubstitution === null &&
+        refinedEntityResolution?.disposition === 'exact'
+          ? refinedEntityResolution.candidates[0]!
+          : null;
+      let newEntityBlocked = false;
+      if (target === null) {
+        const phrase = extractReparamTarget(input.question);
+        if (phrase !== null) {
+          const resolvedTarget = await resolveComponents(ctx.graph, phrase, { limit: 5 });
+          if (resolvedTarget.ok) {
+            const refinedTarget = refineEntityResolution(phrase, resolvedTarget.value);
+            if (refinedTarget.disposition === 'exact') {
+              target = refinedTarget.candidates[0]!;
+            } else if (
+              refinedTarget.disposition === 'ambiguous' &&
+              entityAmbiguityRequiresClarification(phrase, refinedTarget)
+            ) {
+              route = {
+                ...route,
+                confidence: 'low',
+                clarification: {
+                  required: true,
+                  question:
+                    'Several components match the named entity. Which component did you mean?',
+                  options: hygienicClarificationOptions(
+                    refinedTarget.candidates.slice(0, 5),
+                  ).map((candidate) => candidate.id),
+                },
+              };
+              newEntityBlocked = true;
+            }
+          }
+        }
+      }
+      if (!newEntityBlocked && target !== null) {
+        const continuation = buildContextContinuation(
+          input.question,
+          previous.tool,
+          target,
+          reparamAnchor,
+          false,
+        );
+        if (continuation !== null) {
+          route = continuation;
+          contextRouteApplied = {
+            kind: 'reparameterization',
+            anaphor: reparamAnchor,
+            substitutedComponentId: target.id,
+            inheritedTool: previous.tool,
+          };
+        }
+      }
+      // A REPARAM anchor with NO new entity degrades to (b) semantics below.
+    }
+    // (b) CONTEXT CONTINUATION — a PRONOUN anchor (or a degraded REPARAM
+    // anchor) on a STILL-unrouted follow-up inherits the previous turn's
+    // tool, bound to the §2a-substituted entity. Requires the substitution to
+    // have resolved EXACT, or no componentId to have been carried at all.
+    if (
+      contextRouteApplied === null &&
+      route.clarification === null &&
+      stillUnrouted &&
+      route.intent === 'unrouted' &&
+      previous.tool !== undefined
+    ) {
+      const anchor = pronounAnchor ?? reparamAnchor;
+      const substitutedExact =
+        contextSubstitution !== null &&
+        refinedEntityResolution?.disposition === 'exact';
+      if (anchor !== null && (substitutedExact || previous.componentId === undefined)) {
+        const winner = substitutedExact
+          ? refinedEntityResolution!.candidates[0]!
+          : null;
+        // Prepend sfi.resolve when the question ALSO named a fresh entity the
+        // continuation is not bound to — the host must resolve it first.
+        const newEntityAppeared =
+          contextSubstitution === null &&
+          entityQuery !== null &&
+          !isAnaphorOnly(entityQuery);
+        const continuation = buildContextContinuation(
+          input.question,
+          previous.tool,
+          winner,
+          anchor,
+          newEntityAppeared,
+        );
+        if (continuation !== null) {
+          route = continuation;
+          contextRouteApplied = {
+            kind: 'continuation',
+            anaphor: anchor,
+            ...(winner !== null
+              ? {
+                  substitutedComponentId: winner.id,
+                  from: contextSubstitution!.from,
+                }
+              : {}),
+            inheritedTool: previous.tool,
+          };
+        }
+      }
+    }
+  }
+
   // Stage 7 — FUNNEL-PRIMARY advisory fallback (router-v2 P2 §3). Fires ONLY
   // when every deterministic stage passed and the question is STILL dead:
   // no refusal gate (stage 0 returned early), no intent match, no resolve
@@ -1873,6 +2392,23 @@ export const routeQuestionHandler = async (
         ...(advisoryArgs !== null ? { suggestedArgs: advisoryArgs } : {}),
       };
     }
+  }
+
+  // (P5 §4) contextApplied disclosure — attached ONLY when context actually
+  // changed the route (a continuation/re-parameterization wins over a bare
+  // entity substitution); mere presence of the param never emits it. The
+  // fail-open `ignored` notes ride along when another context action fired.
+  const contextApplied = contextRouteApplied ?? contextEntityApplied;
+  if (contextApplied !== null) {
+    route = {
+      ...route,
+      contextApplied: {
+        ...contextApplied,
+        ...(validatedContext !== null && validatedContext.ignored.length > 0
+          ? { ignored: validatedContext.ignored }
+          : {}),
+      },
+    };
   }
 
   const clarificationId = clarificationIdFor(ctx.manifest.sourceTreeHash, route);

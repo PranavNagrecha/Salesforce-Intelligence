@@ -292,14 +292,48 @@ interface RouteLike {
     readonly intent: string;
     readonly tools: readonly string[];
   }[];
+  readonly contextApplied?: ContextAppliedLike;
 }
+
+/** Router-v2 P5: host-passed context disclosure attached to a route. */
+interface ContextAppliedLike {
+  readonly anaphor: string;
+  readonly substitutedComponentId?: string;
+  readonly inheritedTool?: string;
+  readonly selection?: string;
+}
+
+/**
+ * One-line disclosure of how host-passed conversation context changed the
+ * route, e.g. "Context applied: 'it' → Flow:Order_Sync (from previous turn);
+ * tool inherited: sfi.explain_flow." Exported so route_question can append it
+ * to an already-rendered inner response (clarification continuation, where the
+ * inner rendered text — candidate list included — is reused verbatim).
+ */
+export const renderContextApplied = (contextApplied: ContextAppliedLike): string => {
+  const substituted =
+    contextApplied.substitutedComponentId ?? contextApplied.selection;
+  return (
+    `Context applied: '${contextApplied.anaphor}'` +
+    (substituted !== undefined ? ` → ${substituted}` : '') +
+    ' (from previous turn)' +
+    (contextApplied.inheritedTool !== undefined
+      ? `; tool inherited: \`${contextApplied.inheritedTool}\`.`
+      : '.')
+  );
+};
 
 /** Render a routing verdict: plane + the tool plan + honest gap note. */
 export const renderRouteMarkdown = (route: RouteLike): string => {
+  const contextLine =
+    route.contextApplied !== undefined
+      ? `\n\n${renderContextApplied(route.contextApplied)}`
+      : '';
   if (route.plane === 'unknown') {
     return (
       `I don't have a tool for **"${route.question}"** yet — ${route.reason} ` +
-      `${route.gap ? `(logged as \`${route.gap.category}\`).` : ''}`
+      `${route.gap ? `(logged as \`${route.gap.category}\`).` : ''}` +
+      contextLine
     );
   }
   const steps: string[] = [];
@@ -343,6 +377,7 @@ export const renderRouteMarkdown = (route: RouteLike): string => {
     enterprise +
     clarification +
     compoundPlan +
-    (route.gap ? `\n\n_Partial: ${route.gap.note}_` : '')
+    (route.gap ? `\n\n_Partial: ${route.gap.note}_` : '') +
+    contextLine
   );
 };
