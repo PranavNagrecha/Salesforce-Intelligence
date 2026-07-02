@@ -78,3 +78,6 @@ tests/integration/*-smoke-*-report.md
 
 # Local maintainer reference (contains org blocklist terms) — never commit
 docs/plans/CLAUDE-CODE-MASTER-PROMPT.md
+
+# spike/embeddings: local model cache (downloaded once by packages/mcp/scripts/build-embedding-index.mjs)
+.sfi-embed-cache/
