@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-07-02T11:19:58.667Z",
+  "generatedAt": "2026-07-02T13:00:38.494Z",
   "toolCount": 172,
   "skillCount": 25,
   "commandCount": 4,
@@ -9,8 +9,8 @@
     "packages": [
       {
         "name": "mcp",
-        "files": 211,
-        "cases": 3163
+        "files": 213,
+        "cases": 3181
       },
       {
         "name": "extractors",
@@ -58,8 +58,8 @@
         "cases": 34
       }
     ],
-    "totalCases": 5085,
-    "totalFiles": 368,
+    "totalCases": 5103,
+    "totalFiles": 370,
     "packageCount": 10
   },
   "integrationSuiteCount": 7,

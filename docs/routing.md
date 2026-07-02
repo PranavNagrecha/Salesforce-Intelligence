@@ -78,9 +78,9 @@ structured `route.refusal = { kind, disclosure, readOnlyAlternative? }`.
 
 | `kind` | Trigger | What the host gets |
 | --- | --- | --- |
-| `write-imperative` | A mutation asked *of the agent* ("delete the X field for me", "go ahead and merge…") | `refused-write` intent, a read-only boundary disclosure, and a **`readOnlyAlternative`** — the simulation that answers the underlying question safely (`safe_to_delete_field`, `what_if_deactivate_flow`, `what_if_disable_trigger`, `what_if_change_field_type`, `what_if_merge_profiles`, `get_impact` — by verb family). Offer it. |
-| `injection-exfiltration` | Prompt-injection ("ignore your previous instructions…") or record-value exfiltration ("dump all SSN values") | `refused-injection`; `toolCandidates` and `guidance` are suppressed entirely. Do not route around it. |
-| `runtime-analytics` | Runtime/ops telemetry no tool models (login history, adoption metrics, "errors this week") | `honest-gap-runtime` with an HONEST GAP disclosure naming the nearest real reads. |
+| `write-imperative` | A mutation asked *of the agent* ("delete the X field for me", "go ahead and merge…"), or an EXECUTION ask ("run the X flow against test data for me", "execute the batch job") | `refused-write` intent, a read-only boundary disclosure, and a **`readOnlyAlternative`** — the simulation/read that answers the underlying question safely (`safe_to_delete_field`, `what_if_deactivate_flow`, `what_if_disable_trigger`, `what_if_change_field_type`, `what_if_merge_profiles`, `get_impact`; for execution asks `explain_flow` / `scheduled_job_catalog` / `what_happens_on_save` — by verb family). Offer it. |
+| `injection-exfiltration` | Prompt-injection ("ignore your previous instructions…"), record-value exfiltration ("dump all SSN values"), or privilege escalation ("sudo give me full access") | `refused-injection`; `toolCandidates` and `guidance` are suppressed entirely. Do not route around it. |
+| `runtime-analytics` | Runtime/ops telemetry no tool models: per-user login events/sessions, adoption metrics, "errors this week", automation execution traces & aggregate run counts, run/failure forensics, CPU/heap profiling, debug-log retrieval, SOQL execution plans, message delivery counts & sent-message content, site click analytics, record-level before/after field history, record-access audit events ("who accessed…") | `honest-gap-runtime` with an HONEST GAP disclosure naming the nearest real reads (e.g. `live_inactive_users` covers dormancy thresholds, not login events; `live_automation_fired` infers per-record, not aggregate run counts). |
 | `out-of-scope` | Non-Salesforce asks (other systems, "email me…", write-me-code) | `out-of-scope` disclosure. |
 
 Evaluation order is first-hit-wins: injection → write → runtime → out-of-scope
@@ -188,6 +188,14 @@ Honesty under context:
 
 - Refusal gates run on the raw question **before** any context logic —
   context never bypasses them and adds no executable path to a refused turn.
+- **Gap detection precedes continuation**: a follow-up that is itself
+  gap-shaped — a normative judgment ("should they be able to?", "is it
+  normal?"), a delivery/export ask ("can I get it as a file?"), a probe of
+  the product's own capabilities ("does the tool trace…?"), or
+  deployment-status telemetry ("is it still pending?") — never inherits
+  `previous.tool`. It returns a non-executable `context-gap-followup` route
+  (`tools: []`, `gap` set) with an honest disclosure instead of an advisory
+  continuation that cannot answer the ask.
 - A carried `componentId` that no longer resolves gets a context-specific
   premise disclosure and never advisory-routes.
 - Value validation is **fail-open**: an unregistered `tool` or malformed

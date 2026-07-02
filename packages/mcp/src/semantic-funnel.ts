@@ -265,6 +265,25 @@ const SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   // queue / assignment routing family
   queue: ['assignment', 'routing', 'owner', 'group'],
   routed: ['assignment', 'queue', 'rule', 'routing'],
+  // ---- router-v2 R2 biz-user vocabulary bridges. Grown from the
+  // business-user persona misses on the additions-tuning set; every entry is
+  // GENERIC business English mapped to Salesforce vocabulary — no org terms.
+  // "which automation gets sunset / retired" → legacy-migration vocabulary
+  sunset: ['retire', 'retired', 'deprecated', 'migrate', 'legacy', 'replace'],
+  retiring: ['sunset', 'deprecated', 'migrate', 'legacy'],
+  // "when the status flips to X" → transition vocabulary
+  flips: ['changes', 'transition', 'moves', 'value', 'status'],
+  // "who are the top contributors" → change-activity vocabulary
+  contributors: ['changes', 'modified', 'activity', 'churn'],
+  // "how are records distributed by X" → grouped-count vocabulary
+  distributed: ['count', 'group', 'grouped', 'breakdown'],
+  // "would you give it a passing grade" → health/risk vocabulary
+  grade: ['risk', 'health', 'score', 'debt'],
+  graded: ['risk', 'health', 'score', 'debt'],
+  architected: ['architecture', 'risk', 'health', 'design'],
+  // "the report my boss uses / the thing she made" → ownership vocabulary
+  boss: ['owner', 'user'],
+  made: ['created', 'built'],
 };
 
 /**
@@ -287,6 +306,17 @@ const PHRASE_SYNONYMS: readonly (readonly [string, string])[] = (
     // expansion hijacks the ranking. Collapse the phrase to the single token
     // 'breakdown' (whose SYNONYMS entry bridges to explain/overview/walk).
     ['break down', 'breakdown'],
+    // router-v2 R2 biz-user idioms: altitude metaphors are OVERVIEW asks
+    // ("10,000-foot view" survives tokenization as "...-foot view"), and
+    // "kicks in" is the business phrasing of "fires".
+    ['foot view', 'overview'],
+    ['birds eye view', 'overview'],
+    ["bird's eye view", 'overview'],
+    ['big picture', 'overview'],
+    ['lay of the land', 'overview'],
+    ['kicks in', 'fires'],
+    ['kick in', 'fire'],
+    ['reference sheet', 'dictionary'],
   ] as [string, string][]
 ).sort((a, b) => b[0].length - a[0].length);
 

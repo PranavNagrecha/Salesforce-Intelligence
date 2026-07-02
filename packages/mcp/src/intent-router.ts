@@ -2231,6 +2231,36 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // COMPONENT-TYPE CONFUSION (router-v2 R2, type-confusion trap family):
+    // "is <Name> a flow or a trigger?", "is that an Apex class or a flow?",
+    // "the name has 'Trigger' in it but is it actually a test class?", "what
+    // type is that?". The user is unsure WHAT KIND of component a name is —
+    // resolve answers the type question, and the two explainers cover
+    // whichever family it lands on (the stage-5 type guard swaps the
+    // incompatible one once the entity resolves). MUST precede
+    // automation-on-object, whose "triggers … on <object>" pattern otherwise
+    // steals "…an actual trigger on Contact?".
+    intent: 'component-type',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.explain_flow', 'sfi.explain_apex_method'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'The question asks WHICH KIND of component a name is (flow vs trigger vs Apex class vs test class). Resolve the name to its actual type first; then explain it with the family-appropriate tool — the resolver output, not the name, decides which.',
+    patterns: [
+      // Two component-family nouns joined by "or" inside one clause:
+      // "is <name>/that/it (actually) a flow … or (an actual) trigger".
+      /\bis\s+(?:that|this|it|[a-z0-9_]+)\s+(?:actually\s+)?(?:an?\s+)?(?:apex(?:\s+(?:class|test\s+class|logging))?|flow|trigger|test\s+class)\b[^.?!]{0,40}\bor\s+(?:an?\s+)?(?:actual(?:ly)?\s+a?\s*)?(?:apex(?:\s+class)?|flow|trigger|test\s+class|something\s+else)/,
+      // Name-vs-nature: "…but is it actually a test class?"
+      /\bbut\s+is\s+(?:it|that)\s+(?:actually\s+)?an?\s+(?:test\s+class|trigger|flow|apex\s+class)\b/,
+      // "what type is that / what type of component is <name>" — `that/this`
+      // only (not `it`), and never when the question names a __c FIELD:
+      // "what type is it?" about CON_...__c asks the field's DATA type, not
+      // the component family (the cov3-029 negative).
+      /^(?!.*__c\b)(?=[\s\S]*\bwhat\s+type\s+(?:is\s+(?:that|this)|of\s+component\s+is)\b)/,
+    ],
+  },
+  {
     intent: 'field-access',
     plane: 'vault',
     tools: ['sfi.resolve', 'sfi.field_access_audit', 'sfi.get_edges'],
@@ -2480,6 +2510,36 @@ const RULES: readonly Rule[] = [
       /\bwho\s+(has|holds|is\s+assigned)\b[^.?!]{0,50}\bpermission\s+sets?\b/,
       /\b(everyone|everybody|all\s+users?)\b[^.?!]{0,30}\bwith\b[^.?!]{0,40}\bpermission\s+sets?\b/,
       /\busers?\b[^.?!]{0,30}\bassigned\b[^.?!]{0,30}\bpermission\s+sets?\b/,
+    ],
+  },
+  {
+    // HONEST GAP (round-2, q1948/q1559): "which PSG grants the X custom
+    // permission / the Y role" is a PermissionSetGroup COMPOSITION lookup —
+    // PSG membership/composition is not modeled (same boundary as the two PSG
+    // gaps above), and roles are not granted by PSGs at all, so substituting
+    // object_access_audit / effective_permissions would be confidently wrong.
+    // Requires the GROUP noun: "which permission SETS grant edit on X" (no
+    // `group`) stays on the real field/effective-permissions routes.
+    intent: 'permset-group-grants',
+    plane: 'vault',
+    tools: [],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Which permission set group grants a permission (PermissionSetGroup composition) is not modeled — capability gap.',
+    gap: {
+      category: 'permset-group-grants',
+      note: 'PermissionSetGroup composition/membership modeling is not built yet, so "which PSG grants X" cannot be answered. Do not substitute effective_permissions or object_access_audit — they cover permission sets and profiles, not PSG composition. (If X is a custom permission, sfi.resolve + the permission-set reverse lookup covers PERMISSION SETS granting it.)',
+    },
+    patterns: [
+      // Tempered verb→grants gap: "which permission set groups REFERENCE a
+      // permission set that grants X" is a graph-edge read (answerable) — a
+      // reference/contain/include verb between the PSG noun and `grants`
+      // breaks the match, so only the PSG-as-grantor ask gaps. `not` breaks it
+      // too: "why would a PSG NOT grant expected access" is a troubleshooting
+      // ask that stays on its pre-round-2 route (sweep-parity pin).
+      /\b(?:which|what)\s+(?:permission\s+set\s+groups?|psgs?)\b(?:(?!\b(?:references?|referencing|contains?|containing|includes?|including|not)\b)[^.?!]){0,60}\bgrants?\b/,
+      /\b(?:permission\s+set\s+groups?|psgs?)\b(?:(?!\b(?:references?|referencing|contains?|containing|includes?|including|not)\b)[^.?!]){0,40}\bgrants?\b[^.?!]{0,60}\b(?:custom\s+permission|permission|role|access)\b/,
     ],
   },
   {

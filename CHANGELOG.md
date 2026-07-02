@@ -3,6 +3,88 @@
 All notable changes to **sf-intelligence** are documented here. This project
 adheres to [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+### Added
+- **Runtime-analytics honest-gap arms** — the refusal gate now recognizes the
+  unmodeled telemetry families and discloses the gap (naming the nearest real
+  reads) instead of routing: per-user login events/sessions/last-login
+  rosters, automation execution traces and aggregate run counts, run/failure
+  forensics ("the error message from the last time X failed"), CPU/heap
+  profiling, debug-log retrieval, SOQL execution plans, message delivery
+  counts and sent-message content, site/community click analytics,
+  record-level before/after field history, and record-access audit events
+  ("who accessed…"). Precision-guarded: dormancy questions still reach
+  `live_inactive_users`, login IP ranges still reach `profile_security`,
+  `System.debug` code searches still reach `search_apex_source`, static
+  reference counts and save-order questions route unchanged.
+- **Run-imperative refusal** — "run the X flow against test data for me" /
+  "execute the batch job" is refused as `refused-write` (executing automation
+  mutates the org) with a read-side alternative describing what the
+  executable WOULD do (`explain_flow`, `scheduled_job_catalog`,
+  `what_happens_on_save` by target). Permission/hypothetical frames ("who can
+  run…", "what happens if I run…", "how do I run…") route normally.
+- **Privilege-escalation injection arm** — "sudo …" and grant-to-self asks
+  ("give me full/admin access") land `refused-injection`; READ delivery asks
+  ("give me the FLS grant list…") are unaffected.
+- **`permset-group-grants` capability gap** — "which PSG grants the X custom
+  permission / the Y role" discloses that PermissionSetGroup composition is
+  not modeled instead of advisory-routing to permission tools that cannot
+  answer it; PSG→permission-set REFERENCE reads stay routed.
+- **Gap detection before context continuation** — a follow-up that is itself
+  gap-shaped (judgment, delivery/export, tool-self-capability,
+  deployment-status) never inherits `previous.tool`; it returns a
+  non-executable `context-gap-followup` route with an honest disclosure.
+  Legitimate continuations ("is it safe to delete?", "what about on
+  Contact?") are unchanged, and a gap-shaped question WITHOUT context routes
+  exactly as before.
+- **Business-user register corpus** — the funnel utterance corpus grew a
+  non-technical phrasing band ("what business process does this flow
+  support", "the 10,000-foot view", "which automation is Salesforce going to
+  sunset", "a reference sheet for the business team", "who's been making the
+  most changes lately") plus matching synonym/idiom bridges (sunset→retire,
+  flips→transition, grade→health, "kicks in"→fires, "big picture"→overview).
+  Business-user recall on the additions-tuning set rose 60.9% → 76.1% with
+  zero regressions.
+- **`component-type` intent** — "is <Name> a flow or a trigger?", "…has
+  'Trigger' in the name but is it actually a test class?", "what type is
+  that?" now routes resolve-first with both family explainers; a same-name
+  cross-type collision is treated as the ANSWER (resolve enumerates it), not
+  an ambiguity block. Type-confusion trap family: 52.2% → 91.3%.
+- **Type-confusion premise disclosure** — when a type-scoped resolve finds
+  nothing ("the X permission set") the premise check now retries UNSCOPED
+  before declaring nonexistence: a strong match under a different family
+  discloses "TYPE CHECK: X exists as <realType>, not as a <statedType>" and
+  keeps routing on the component that actually exists. Pure ghosts still get
+  the existence PREMISE CHECK and still never advisory-route.
+- **Genuine-tie clarifications restored (post-P4 rebalance)** — quoted bare
+  labels ("the 'Status' field") now reach entity resolution; a question that
+  itself asserts a same-name family ("three different things called Status")
+  always clarifies; a bare label the resolver silently picked one of several
+  identical same-name parents for ("the 'Concentration' field" ×3 parents)
+  clarifies; and a compound vault+live ask ("what breaks AND is it actually
+  running in production") returns a two-plane tool-choice clarification.
+  Additions-tuning clarify 3/13 → 9/13; the P4 junk-tie suppression is
+  unchanged (no previously-clean answer question started blocking).
+- **CI self-recall gate** — new test (`funnel-self-recall.test.ts`): every
+  candidate-eligible tool must retrieve itself in the pure-funnel top-8 for
+  ≥70% of its own utterances, so a tool invisible to the funnel is a CI
+  failure forever (measured floor at landing: 77.8%).
+
+### Fixed
+- **Write-gate impact carve-out** — "can you deactivate X safely? I need to
+  know what depends on it" is a what-if impact ask, not a mutation
+  instruction: `safely?` and explicit dependency/breakage questions now
+  excuse the write-imperative refusal. Bare imperatives still refuse.
+- **Shield event-monitoring log retrieval** — "show me the event monitoring
+  log from last Tuesday" now lands the same runtime-telemetry honest-gap as
+  debug-log retrieval (additions-tuning honest-gap 16/16).
+- **`website/recalibrate.mjs` stale-count bug** — the capabilities.html
+  rewrite rules were spacing/markup-sensitive and silently no-opped when the
+  page copy reflowed (the shipped stale "171 tools"). Rules are now
+  whitespace- and markup-tolerant, and a post-rewrite tripwire warns on any
+  surviving tool-count string that disagrees with the registry.
+
 ## [0.1.22] — 2026-07-02
 
 Headline: **the router now advises — it does not decide.** This release

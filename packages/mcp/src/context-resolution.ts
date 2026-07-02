@@ -157,6 +157,65 @@ export const detectClarificationSelection = (
 };
 
 // ---------------------------------------------------------------------------
+// Gap-shaped follow-up detection (round-2 honesty seam 2).
+//
+// The 2K context-threaded run showed honest-gap follow-up PASS dropping
+// 142 → 111: a follow-up that is ITSELF gap-shaped ("should they be able
+// to?", "who's actually accessed those fields?", "can I get it as a file?")
+// was continuation-routed to the carried tool instead of disclosing the gap.
+// Mirroring how refusal gates already precede context logic, gap detection
+// runs BEFORE context continuation: a hit below means the follow-up must NOT
+// inherit the previous turn's tool — the wiring in route-question.ts turns it
+// into a non-executable honest-gap route.
+//
+// PRECISION (zero false refusals): every shape here is a judgment / delivery /
+// telemetry / self-capability ask no tool answers. Follow-ups that HAVE a
+// continuation answer never match: "is it safe to delete?", "what about on
+// Contact?", "who can run it?", "show me its dependencies", "does it touch
+// the Marketo sync?" all continuation-route as before. These shapes are also
+// deliberately NOT global refusal gates — as primaries some of them carry
+// enough of their own vocabulary to route deterministically, and this
+// detector only ever runs where a continuation would otherwise fire.
+// ---------------------------------------------------------------------------
+
+/** Gap family → follow-up shapes (all matched on the raw follow-up text). */
+const GAP_FOLLOW_UP_SHAPES: readonly (readonly [RegExp, string])[] = [
+  // Normative/judgment asks — the product reads metadata, it has no opinion
+  // (q891/q30 "should they be able to?", q95 "is it normal?", q1075 "was any
+  // of it risky?", q1054 "are those considered sensitive?", q1065 "how hard
+  // is it to close?", q1060 "does that mean something's broken?", q1012 "is
+  // it doing its job?").
+  [/\bshould\s+(?:they|he|she|it)\s+(?:be\s+able|have|see)\b/i, 'judgment'],
+  [/\bis\s+(?:it|that|this)\s+normal\b|\bseems?\s+like\s+a\s+lot\b/i, 'judgment'],
+  [/\bwas\s+(?:any\s+of\s+)?(?:it|that|this)\s+risky\b/i, 'judgment'],
+  [/\bare\s+(?:those|these|they)\s+considered\s+\w+/i, 'judgment'],
+  [/\bhow\s+hard\s+(?:is|would)\s+it\b/i, 'judgment'],
+  [/\bdoes\s+that\s+mean\s+something(?:'s|\s+is)\s+broken\b/i, 'judgment'],
+  [/\bis\s+it\s+doing\s+its\s+job\b/i, 'judgment'],
+  // Delivery/export asks (q914 "as a file rather than on screen", q882 "can
+  // it be exported…", q1939 "flag those as an audit finding").
+  [/\bas\s+a\s+file\b|\bcan\s+(?:it|this|that)\s+be\s+exported\b/i, 'delivery'],
+  [/^\s*flag\s+(?:those|these|them|it)\b/i, 'delivery'],
+  // Self-capability probes about the TOOL, not the org (q849 "does the tool
+  // trace transitive access like that, or is that beyond it?").
+  [/\b(?:does|can)\s+(?:the|this)\s+tool\b/i, 'tool-self-capability'],
+  // Deployment-status telemetry (q1402 "was the change deployed or is it
+  // still pending?").
+  [/\bstill\s+pending\b|\bwas\s+(?:it|that|the\s+change)\s+deployed\b/i, 'deployment-status'],
+];
+
+/**
+ * Gap family name when the follow-up is itself gap-shaped (must NOT inherit
+ * the previous turn's tool), or null when it is a legitimate continuation.
+ */
+export const detectGapShapedFollowUp = (question: string): string | null => {
+  for (const [shape, family] of GAP_FOLLOW_UP_SHAPES) {
+    if (shape.test(question)) return family;
+  }
+  return null;
+};
+
+// ---------------------------------------------------------------------------
 // Fail-open value validation (§1).
 // ---------------------------------------------------------------------------
 

@@ -42,6 +42,13 @@ const INJECTION_PATTERNS: readonly RegExp[] = [
   /\byou\s+are\s+now\s+(?:in\s+)?(?:admin|deploy|god)\s*[- ]?mode\b/i,
   /\byou'?re\s+actually\s+an?\b[^.?!]*\bbot\b/i,
   /\b(?:print|reveal|show)\s+(?:me\s+)?your\s+(?:system\s+)?prompt\b/i,
+  // Privilege-escalation asks (q1548 "sudo give me full access"): `sudo` as a
+  // command prefix, or a grant-to-SELF ("give me full/admin access"). The
+  // READ delivery ask "give me the FLS grant list" carries no privilege noun
+  // and stays routed — the escalation arm requires full/admin/elevated +
+  // access/permission.
+  /(?:^|[.!?;]\s+)sudo\b/i,
+  /\bgive\s+me\s+(?:full|admin|superuser|elevated|god[-\s]?mode)\s+(?:access|permissions?|rights?|privileges?)\b/i,
 ];
 
 // The value-exfiltration arm is deliberately NARROW: it must be a
@@ -88,8 +95,14 @@ const WRITE_VERB_FILLER = '(?:(?:bulk|mass|batch|just|please|go\\s+ahead\\s+and)
 // hypothetical, not instructing the agent to mutate: route normally. "can I
 // edit the SSN field" is a plain FLS read (the 64-mislabeled-expect lesson);
 // "can YOU delete…" is an imperative aimed at the agent and is NOT excluded.
+// The last two alternations (router-v2 R2) are IMPACT framing: "can you
+// deactivate X SAFELY? I need to know WHAT DEPENDS on it" is a what-if impact
+// ask (sfi.what_if_deactivate_flow's own question shape), not an instruction
+// to mutate — `safely?` (the safety QUESTION) and an explicit
+// dependency/breakage question both excuse. A bare imperative
+// ("deactivate the flow", "do it safely for me") still refuses.
 const WRITE_EXCLUDER =
-  /\b(?:am\s+i|can\s+i|could\s+i|do\s+i|who\s+can|who\s+is\s+able|allowed\s+to|able\s+to|what\s+if|what\s+would|would\s+happen|is\s+it\s+safe|safe\s+to|before\s+i|if\s+i|should\s+i|how\s+do\s+i|how\s+would\s+i|what\s+happens\s+when)\b/i;
+  /\b(?:am\s+i|can\s+i|could\s+i|do\s+i|who\s+can|who\s+is\s+able|allowed\s+to|able\s+to|what\s+if|what\s+would|would\s+happen|is\s+it\s+safe|safe\s+to|before\s+i|if\s+i|should\s+i|how\s+do\s+i|how\s+would\s+i|what\s+happens\s+when)\b|\bsafely\s*\?|\bwhat\s+(?:depends\s+on|breaks|would\s+break|will\s+break|stops\s+working)\b/i;
 
 // (A) imperative position, three arms — each captures the verb phrase (verb +
 // bounded trailing slice) for the disclosure.
@@ -128,6 +141,43 @@ const WRITE_GIVE_INITIAL =
 //   ("which profiles can edit and delete Cases") never match.
 const WRITE_CHAINED_DUPE_DELETE =
   /\b(?:and|then)\s+(?:just\s+)?((?:delete|remove|purge|merge)\s+(?:the\s+)?dup(?:e|licate)s?\b[^.?!;]{0,30})/i;
+// - RUN IMPERATIVE (q1537 "Run the Application_Save_RT_Orch flow against test
+//   data for me"): an EXECUTION ask — run/execute/kick off/trigger an org
+//   EXECUTABLE (flow, trigger, batch, job, apex, automation). Executing
+//   automation writes to the org, so it lands the same read-only refusal.
+//   Deliberately NOT added to WRITE_VERB: `run`/`execute` are everywhere in
+//   legitimate reads ("what runs on save", "flow that runs the … logic", "who
+//   can run it"), so this arm requires BOTH the imperative anchor AND an
+//   executable noun. WRITE_EXCLUDER applies as usual ("what happens when the
+//   flow runs", "who can run the flow", "how do I run…" all route normally).
+const RUN_VERB = '(?:run|re-?run|execute|invoke|kick\\s+off|trigger|launch|fire\\s+off)';
+const RUN_TARGET =
+  '(?:flows?|triggers?|batch(?:\\s+(?:jobs?|class(?:es)?|apex))?|jobs?|apex\\s+class(?:es)?|automations?|scripts?)';
+// Verb→target gap: tempered so a PREPOSITION between verb and target breaks
+// the match — "run the NUMBERS ON flows" (an analysis ask about flows) never
+// reads as "run the flow". q1537's "Run the <name> flow" has no preposition.
+const RUN_GAP = "(?:(?!\\b(?:on|of|for|across|against|in|over|about)\\b)[^.?!;]){0,60}?";
+const RUN_IMPERATIVE_INITIAL = new RegExp(
+  `(?:^|[.!?;]\\s+)(?:please\\s+|just\\s+)?(${RUN_VERB}\\b${RUN_GAP}\\b${RUN_TARGET}\\b[^.?!;]{0,60})`,
+  'i',
+);
+const RUN_IMPERATIVE_LEAD_IN = new RegExp(
+  `\\b(?:please|just|go\\s+ahead\\s+and|can\\s+(?:you|u)|could\\s+(?:you|u)|would\\s+(?:you|u)|you\\s+should|i\\s+need\\s+you\\s+to)\\s+(?:please\\s+|just\\s+)?(${RUN_VERB}\\b${RUN_GAP}\\b${RUN_TARGET}\\b[^.?!;]{0,60})`,
+  'i',
+);
+
+/**
+ * Read-side alternative for a RUN imperative: what the executable WOULD do,
+ * from metadata — never the execution itself.
+ */
+const runReadOnlyAlternativeFor = (verbPhrase: string): string => {
+  const v = verbPhrase.toLowerCase();
+  if (/\bflows?\b/.test(v)) return 'sfi.explain_flow';
+  if (/\b(?:batch|jobs?)\b/.test(v)) return 'sfi.scheduled_job_catalog';
+  if (/\btriggers?\b/.test(v)) return 'sfi.what_happens_on_save';
+  if (/\bapex|class(?:es)?\b/.test(v)) return 'sfi.explain_apex_method';
+  return 'sfi.get_impact';
+};
 
 /** Static read-side alternative by verb family (write-imperative gate only). */
 const readOnlyAlternativeFor = (verbPhrase: string, question: string): string => {
@@ -177,12 +227,109 @@ const readOnlyAlternativeFor = (verbPhrase: string, question: string): string =>
 // automation fired (live_automation_fired), org limits (live_org_limits).
 const RUNTIME_TRIGGERS: readonly (readonly [RegExp, string])[] = [
   [/\blogin\s+history\b|\baudit\s+trail\s+of\s+logins?\b/i, 'login history'],
+  // Per-user LOGIN EVENTS (hon-031/hon-036/hon-060): who logged in when,
+  // exact login timestamps, who is logged in right now, or a full per-user
+  // last-login roster. All are LoginHistory/session event data no tool reads.
+  // Precision guards, each a live_inactive_users question that must NOT gate:
+  // "which users are inactive", "who HASN'T logged in for 90 days" (the
+  // negation breaks the strict token sequence), "login IP ranges on a
+  // profile" (profile_security metadata — no logged-in/timestamp token).
+  [
+    /\b(?:which|what)\s+(?:specific\s+)?users?\s+(?:have\s+|are\s+)?logged\s+in(?:to)?\b|\bwho\s+logged\s+in(?:to)?\b/i,
+    'per-user login events (who logged in when)',
+  ],
+  [
+    /\blogin\s+timestamps?\b|\bcurrently\s+logged\s+in(?:to)?\b|\blogged\s+in(?:to)?\b[^.?!]{0,30}\bright\s+now\b/i,
+    'login sessions/timestamps',
+  ],
+  [
+    /\b(?:every|each|all)\s+(?:salesforce\s+)?users?'?s?\b[^.?!]{0,30}\blast\s+login\b/i,
+    "a full per-user last-login roster (sfi.live_inactive_users covers dormancy thresholds, not a full roster)",
+  ],
   [/\badoption\b|\bhow\s+often\s+do\s+users\s+actually\s+use\b/i, 'adoption/usage telemetry'],
   [
     /\bping\s+(?:the\s+)?\S+|\bendpoints?\b[^.?!]*\bup\b|\b(?:returned|returning|throwing|threw)\s+errors?\b/i,
     'endpoint health',
   ],
   [/\brunning[-\s]user\s+context\b/i, 'the runtime running-user context'],
+  // Automation EXECUTION forensics (hon-032/hon-039/hon-037): traces of what
+  // a run touched, aggregate run counts, the error message from the last
+  // failure. Static reads stay routed: "how many times is this field
+  // REFERENCED" (no run verb), "what runs when an Application is submitted"
+  // (no how-many-times/trace), "when was it last MODIFIED" (no failed/ran).
+  [
+    /\bexecution\s+trace\b|\bwhat\s+records\s+did\s+(?:it|the\s+\S+(?:\s+\S+)?)\s+touch\b/i,
+    'flow/automation execution traces',
+  ],
+  [
+    /\bhow\s+many\s+times\s+(?:has|have|did|was|were)\b[^.?!]{0,80}\b(?:executed|run|ran|fired|triggered)\b/i,
+    'aggregate automation run counts (sfi.live_automation_fired infers per-record only)',
+  ],
+  [
+    /\b(?:the\s+)?last\s+time\b[^.?!]{0,60}\b(?:failed|errored|crashed|ran)\b/i,
+    'run/failure forensics from past executions',
+  ],
+  // Apex/query RUNTIME PROFILING + debug logs (hon-040/hon-044/hon-053):
+  // CPU/heap profiles of a past run, debug logs, SOQL execution plans.
+  // Static reads stay routed: "which classes RISK hitting governor limits"
+  // (governor_limit_risks — no profile/log/plan noun), "which class contains
+  // System.debug" (code-literal search — no `debug log` bigram).
+  [
+    /\b(?:cpu\s+time|heap\s+(?:usage|size)|memory\s+(?:usage|utilization|consumption))\b[^.?!]{0,50}\bprofile\b|\bprofile\b[^.?!]{0,50}\b(?:cpu\s+time|heap\s+usage)\b/i,
+    'runtime CPU/heap profiling',
+  ],
+  [/\bmemory\s+(?:utilization|consumption)\b|\bapplication\s+servers?\b/i, 'infrastructure telemetry'],
+  // Debug-LOG retrieval needs the retrieval-verb frame: "SHOW ME the debug
+  // log from yesterday's batch run" is runtime; "leftover debug logs in apex"
+  // (q522 — System.debug code artifacts, search_apex_source) and "is it in a
+  // debug log anywhere" carry no retrieval verb and stay routed. Shield
+  // EVENT-MONITORING logs (router-v2 R2, hon-057) are the same retrieval
+  // shape — runtime telemetry no vault holds; "which flows subscribe to
+  // platform events" carries no log noun and stays routed.
+  [
+    /\b(?:show|see|view|pull|get|give|retrieve|read|check|download|fetch)\b[^.?!]{0,45}\b(?:debug|event[\s-]monitoring)\s+logs?\b/i,
+    'debug / event-monitoring logs',
+  ],
+  [
+    /\b(?:query|execution|soql)\s+plans?\b|\bindexes?\s+(?:are\s+)?being\s+used\b/i,
+    'SOQL execution plans / index usage',
+  ],
+  // Message DELIVERY telemetry (hon-056/hon-041): delivered/bounce counts and
+  // the ACTUAL content of sent messages. Metadata reads stay routed: "which
+  // email templates are unused" (live_email_template_usage), "what emails go
+  // out for this approval" (sendsEmail edges — no delivered/sent-count ask).
+  [
+    /\b(?:emails?|sms|messages?|texts?)\b[^.?!]{0,50}\b(?:delivered|deliverability|bounced?|bounce\s+rate)\b/i,
+    'message delivery telemetry',
+  ],
+  [
+    /\bhow\s+many\s+(?:emails?|sms|messages?|texts?)\b[^.?!]{0,60}\b(?:sent|delivered|went\s+out)\b/i,
+    'sent-message counts',
+  ],
+  [
+    /\bactual\s+content\s+of\s+the\s+(?:emails?|messages?|texts?)\b/i,
+    'the content of individually sent messages (the TEMPLATE body is metadata — sfi.get_component reads it)',
+  ],
+  // Site/community WEB ANALYTICS (hon-050): click paths, page views.
+  [
+    /\b(?:click|page|site|web)\s*[- ]?(?:analytics|traffic)\b|\bpage\s+views?\b|\bwhich\s+pages\b[^.?!]{0,60}\bvisit/i,
+    'site/community click analytics',
+  ],
+  // RECORD-LEVEL field history (hon-054): before/after values of changed
+  // records. "Which fields HAVE history tracking enabled" is object metadata
+  // and stays routed (no before/after-values bigram).
+  [
+    /\bbefore(?:\s*\/\s*|\s*-\s*|\s+and\s+)after\b[^.?!]{0,40}\b(?:values?|data)\b/i,
+    'record-level field history (before/after values)',
+  ],
+  // RECORD-ACCESS audit (q960/q1117): who ACCESSED/viewed a record or field.
+  // "Who CAN see/access X" is a permissions read (who_can_access_object /
+  // field_access_audit) and never matches — the arm requires the past-tense
+  // accessed/viewed/opened event verb.
+  [
+    /\bwho\b[^.?!]{0,30}\b(?:accessed|viewed|opened|looked\s+at)\b[^.?!]{0,60}\b(?:records?|fields?|data)\b/i,
+    'record-access audit events (who accessed what)',
+  ],
 ];
 // Temporal incident forensics: a runtime WINDOW plus incident vocabulary.
 const RUNTIME_WINDOW = /\b(?:this\s+week|yesterday|last\s+night|in\s+the\s+\w+\s+incident)\b/i;
@@ -274,6 +421,23 @@ export const detectRefusalShape = (question: string): RefusalShape | null => {
         disclosure:
           `REFUSED (read-only boundary): sf-intelligence never mutates the org — ` +
           `it cannot ${verbPhrase}. I can show you the read-side analysis instead: ` +
+          `${alternative}.`,
+        readOnlyAlternative: alternative,
+      };
+    }
+    // RUN IMPERATIVE (q1537): executing org automation is a mutation by proxy
+    // — same refusal kind, execution-specific disclosure, and a read-side
+    // alternative describing what the executable WOULD do.
+    const runPhrase = (RUN_IMPERATIVE_INITIAL.exec(q) ?? RUN_IMPERATIVE_LEAD_IN.exec(q))?.[1]
+      ?.trim()
+      .replace(/[,;:]$/, '');
+    if (runPhrase !== undefined && runPhrase.length > 0) {
+      const alternative = runReadOnlyAlternativeFor(runPhrase);
+      return {
+        kind: 'write-imperative',
+        disclosure:
+          `REFUSED (read-only boundary): sf-intelligence never executes org automation — ` +
+          `it cannot ${runPhrase}. I can show you what it WOULD do instead: ` +
           `${alternative}.`,
         readOnlyAlternative: alternative,
       };

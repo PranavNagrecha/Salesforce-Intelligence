@@ -43,6 +43,8 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'show me every component that references the <PermSet> permission set',
     'is there an approval process on Opportunity?',
     'find me anything that blocks record creation when a required field is empty',
+    // biz-user register (router-v2 R2): existence-check with a look-inside.
+    'does a <Object> object exist in this org? I want to see its fields',
   ],
   'sfi.resolve': [
     'pull the <vague-field-name> field — <PermSet> implies we have one',
@@ -58,6 +60,11 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'what\'s the canonical name for the field that stores the SLA deadline?',
     'look up Status__c — which object is it on?',
     'do we have anything for tracking escalation dates on Case?',
+    // biz-user register (router-v2 R2): nickname-existence and
+    // component-type-confusion phrasings ("is that a flow or a trigger").
+    'I keep calling it the \'<nickname>\' object — does this org have something like that?',
+    'is <ComponentName> a flow or a trigger? I can\'t tell from the name',
+    'what type of component is <ComponentName> — an Apex class or a flow?',
   ],
   'sfi.capabilities': [
     'what can you actually do?',
@@ -115,6 +122,11 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'quick status: how is the org doing right now?',
     'is there anything alarming about this org at a glance?',
     'one-liner on org health',
+    // biz-user register (router-v2 R2): "who is changing things" asked as a
+    // people question, not a metadata question.
+    'who has been modifying things in this org the most?',
+    'who are the top contributors to changes in this org lately?',
+    'who\'s been making the most changes to this org lately?',
   ],
   'sfi.org_card': [
     'show me the org\'s basic info — edition, limits, creation date',
@@ -286,6 +298,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'show me what Account data actually looks like',
     'grab a handful of Order records for me to inspect',
     'give me a sample of 10 Opportunities with Stage = Prospecting',
+    // biz-user register (router-v2 R2): single-record lookup by an id the
+    // user has in hand, asking for every field value.
+    'can you pull up the specific record for id <RecordId>? I need to see all their field values',
+    'show me one actual record with every field value filled in',
   ],
   'sfi.live_field_population': [
     'what percentage of Contacts have the Email field filled in?',
@@ -302,6 +318,9 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'show me group sizes across all public groups',
     'how many members does the Sales territory group have?',
     'how are Cases distributed by Status right now?',
+    // biz-user register (router-v2 R2): distribution-by-field phrasing.
+    'how are <Object> records distributed by their Type field?',
+    'breakdown of records by picklist value — how many land in each bucket?',
   ],
   'sfi.live_stale_records': [
     'which Cases haven\'t been updated in over 90 days?',
@@ -398,6 +417,8 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'who can access the shared document library?',
     'folder-level access for the Finance reports',
     'are any report or dashboard folders publicly accessible?',
+    // biz-user register (router-v2 R2): single-report ownership question.
+    'the <ReportName> report — who owns it and who can run it?',
   ],
   'sfi.live_email_template_usage': [
     'which email templates are actually being used?',
@@ -450,6 +471,9 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'what should I be worried about before we go live?',
     'pull together the top risks I need to present to leadership',
     'is there anything that would block a production release right now?',
+    // biz-user register (router-v2 R2): quality asked as a grade.
+    'is our Salesforce org well-architected? would you give it a passing grade?',
+    'if an outside expert graded this org\'s setup, what would they flag?',
   ],
   'sfi.field_cleanup_candidates': [
     'which fields can we safely delete?',
@@ -608,6 +632,8 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'show me tab settings for the <Profile> profile',
     'which tabs are set to \'Default Off\' for a specific profile?',
     'which tabs are visible to users with the <Profile> profile?',
+    // biz-user register (router-v2 R2): imperative "list its tabs" shape.
+    'the <Profile> profile — what does it have access to? list its tabs',
   ],
   'sfi.lifecycle_process': [
     'what\'s the Case lifecycle — statuses and transitions?',
@@ -616,6 +642,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'describe the record lifecycle for Order',
     'what\'s the path an Account goes through from creation to active?',
     'what happens when an Opportunity moves to Closed Won?',
+    // biz-user register (router-v2 R2): status-transition asked as "what
+    // kicks in when the value flips".
+    'when the Status field flips to Resolved, what processes kick in for that value transition?',
+    'what happens behind the scenes when a record moves to a new stage?',
   ],
   'sfi.layout_assignments': [
     'which layouts are assigned to which profiles on Case?',
@@ -804,6 +834,8 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'what\'s different between the <Profile> profile in sandbox vs prod?',
     'compare the <ApexClass> class across environments',
     'are these two record types actually different or just named differently?',
+    // biz-user register (router-v2 R2): duplicate-automation confusion.
+    'why do we have two triggers on the same object — what does each one do differently?',
   ],
   'sfi.export_manifest': [
     'export the full org manifest',
@@ -836,6 +868,8 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'object-level permission audit for Contact',
     'show me which profiles have full CRUD on custom object <ObjectName>',
     'which profiles have Create access on the Case object?',
+    // biz-user register (router-v2 R2): group-membership create-access ask.
+    'can members of <GroupName> create <Object> records, and where does that access come from?',
   ],
   'sfi.recordtype_availability': [
     'which record types on Case are available to the Support profile?',
@@ -858,6 +892,9 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'how big is this org — fields, flows, classes, the works?',
     'what\'s the overall complexity of this org?',
     'give me a lay of the land for this Salesforce environment',
+    // biz-user register (router-v2 R2): the new-joiner altitude idioms.
+    'I just joined this team — what\'s the 10,000-foot view of what\'s in this Salesforce org?',
+    'give me the bird\'s-eye view of this org for a newcomer',
   ],
   'sfi.domain_clusters': [
     'what functional areas does this org cover?',
@@ -897,6 +934,8 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'which flows fire synchronously on Lead save?',
     'complete save-event automation inventory for the Account object',
     'what happens behind the scenes when I create a new Contact?',
+    // biz-user register (router-v2 R2): terse "show me its automation" shape.
+    'the <Object> object — can you show me its automation?',
   ],
   'sfi.why_field_changed': [
     'which flows write to Contact.Status__c?',
@@ -934,6 +973,13 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'does <FlowName> have any error handling?',
     'what variables does <FlowName> use?',
     'which object does <FlowName> primarily operate on?',
+    // biz-user register (router-v2 R2): non-technical phrasings from the
+    // business-user persona misses — purpose-of-flow asked as a business
+    // question, and the "is that a flow or a trigger" type-confusion shape.
+    'there\'s a flow called <FlowName> — what is it for? what business process does it support?',
+    'what does the <FlowName> flow do for the business?',
+    '<FlowName> — is that a flow or a trigger? what does it invoke?',
+    'is <ComponentName> an Apex class or a flow? I want to see what it does',
   ],
   'sfi.explain_apex_method': [
     'what does the <MethodName> method in <ApexClass> do?',
@@ -942,6 +988,11 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'what does this method return and what does it modify?',
     'explain the business logic in the <MethodName> method',
     'what does the AccountController class do?',
+    // biz-user register (router-v2 R2): whole-class purpose questions and the
+    // "Trigger in the name but is it a test class" type-confusion shape.
+    'we have an Apex class called <ClassName> — what does it do and what objects does it touch?',
+    'is <ClassName> an Apex test class or an actual trigger?',
+    'that class has Trigger in its name — is it actually a test class?',
   ],
   'sfi.explain_formula': [
     'what does this formula field actually calculate?',
@@ -966,6 +1017,9 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'what Process Builder is left that we need to retire?',
     'identify Process Builder processes that would be straightforward to convert',
     'which Process Builders should we migrate to Flow first?',
+    // biz-user register (router-v2 R2): "sunset/retire" business phrasing.
+    'which automation is Salesforce going to sunset that we need to replace?',
+    'what legacy automation is being retired that we still depend on?',
   ],
   'sfi.unassigned_permission_sets': [
     'are there permission sets that aren\'t assigned to anyone?',
@@ -974,6 +1028,11 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'show me unassigned permission sets we could clean up',
     'permission sets nobody has — are there any?',
     'which permission sets aren\'t assigned to any user?',
+    // biz-user register (router-v2 R2): single-perm-set assignment questions
+    // ("is X assigned to anyone") — the premise-trap family phrasing.
+    'is the <PermSet> permission set assigned to anyone?',
+    'is <PermSet> assigned to any active users right now?',
+    'who has the <PermSet> permission set assigned and what does it let them do?',
   ],
   'sfi.empty_queues_and_groups': [
     'are there any queues with no members?',
@@ -990,6 +1049,8 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'debt score breakdown — what\'s contributing most?',
     'quantify the technical debt in this org',
     'what\'s the overall technical debt score for this org?',
+    // biz-user register (router-v2 R2): quality asked as a grade.
+    'overall, is this org in good shape or carrying a lot of debt — passing grade or not?',
   ],
   'sfi.code_quality_audit': [
     'how good is our Apex code quality?',
@@ -1058,6 +1119,8 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'can I safely make this field required without breaking flows?',
     'what automation would break if I make this field mandatory?',
     'what would break if I made Account.Website required?',
+    // biz-user register (router-v2 R2): "I want to set X to required" ask.
+    'I want to set <Field__c> to required — can you check what flows and Apex would break?',
   ],
   'sfi.what_if_deactivate_flow': [
     'what breaks if I deactivate <FlowName>?',
@@ -1066,6 +1129,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'can I safely deactivate <FlowName> without breaking anything?',
     'what would stop working if I switch off <FlowName>?',
     'what happens if I deactivate the <FlowName> flow?',
+    // biz-user register (router-v2 R2): "can you deactivate it safely" and
+    // "impact if we turn it off" phrasings (premise-trap family).
+    'can you deactivate <FlowName> safely? I need to know what depends on it',
+    'we have a <ProcessName> process that runs on these records — what\'s the impact if we turn it off?',
   ],
   'sfi.what_if_disable_trigger': [
     'what breaks if I disable the Contact trigger?',
@@ -1108,6 +1175,9 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'export field descriptions and types for all custom objects',
     'generate a schema reference document',
     'generate a data dictionary for the Contact object',
+    // biz-user register (router-v2 R2): "reference sheet" business phrasing.
+    'our business team needs a reference sheet for the <Object> object — field names, types, required vs optional',
+    'make a field reference sheet the business team can read',
   ],
   'sfi.generate_admin_handbook': [
     'write an admin handbook for this org',
@@ -1124,6 +1194,8 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'document the overall structure of this Salesforce implementation',
     'generate an architecture diagram description for this org',
     'write an architecture overview document for this Salesforce org',
+    // biz-user register (router-v2 R2): altitude idiom for leadership.
+    'the leadership team wants the 10,000-foot architecture picture of our Salesforce org',
   ],
   'sfi.generate_sharing_summary': [
     'generate a sharing model summary for this org',
@@ -1164,12 +1236,18 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'subflow map — which flows call other flows?',
   ],
   'sfi.downstream_effects': [
-    'what does changing <Field__c> ripple out to?',
+    'what does changing <Field__c> ripple out to downstream?',
     'show me the downstream effects of modifying <ApexClass>',
-    'if I change <FlowName>, what else is affected?',
+    'if I change <FlowName>, what else is affected downstream?',
     'downstream impact of updating the Case status picklist',
     'what does it affect if <ComponentName> changes?',
     'what side effects does the AccountTrigger handler produce downstream?',
+    // self-recall reinforcement (router-v2 R2): the two paraphrase-only
+    // utterances above ("what else is affected", "what does it affect")
+    // shared no vocabulary with the tool's own name and lost the tie to
+    // get_impact — anchor the downstream/effects terms.
+    'what are the downstream effects if I change <FlowName>?',
+    'show downstream effects of a change to <ComponentName>',
   ],
   'sfi.test_coverage_for_method': [
     'what tests cover the <MethodName> method?',
@@ -1250,6 +1328,11 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'what does Amount__c represent — is it revenue, cost, or something else?',
     'in plain English, what does this field track?',
     'what does the External_Id__c field on Account actually mean in this org?',
+    // biz-user register (router-v2 R2): label-first "what is it really for /
+    // who sets it" phrasings from the business-user misses.
+    'what is the <Field__c> field really for in this org?',
+    'the bad email field — what does it represent and who sets it?',
+    'what does that field mean in context — is it set by automation or by users, and what object is it on?',
   ],
   'sfi.disambiguate_concepts': [
     'we have both Priority__c and Case.Priority — which one should I use?',
@@ -1268,6 +1351,8 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'where does the data in this field come from?',
     'is this field set by a trigger, a flow, or does a user type it in?',
     'trace the origin of values in <Field__c>',
+    // biz-user register (router-v2 R2): "how does it get its value" shape.
+    'how does the <Field__c> field get its value — is it a formula or is something writing to it?',
   ],
   'sfi.find_field_anywhere': [
     'find all objects that have a field called External_Id__c',

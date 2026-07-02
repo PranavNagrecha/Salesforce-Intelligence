@@ -61,6 +61,7 @@ import { renderContextApplied, renderRouteMarkdown } from '../answer-render.js';
 import {
   continuationToolCompatible,
   detectClarificationSelection,
+  detectGapShapedFollowUp,
   detectPronounAnchor,
   detectReparamAnchor,
   extractReparamTarget,
@@ -475,6 +476,18 @@ const extractEntityQuery = (question: string, intent: string): string | null => 
     return apiReference;
   }
 
+  // QUOTED NAME + type noun (router-v2 R2): "the 'Status' field", "'Name
+  // Subject' field — which object?", "the 'Standard' profile". Quote marks
+  // break the word-boundary shapes below ("'Status' field" never matched
+  // typedMatch), which silently skipped entity resolution — so a user
+  // explicitly flagging an ambiguous bare label never got the clarification
+  // the same unquoted phrasing gets. A quoted VALUE literal ("flips to
+  // 'Resolved'") stays ignored: the type noun must follow the closing quote.
+  const quotedTyped = question.match(
+    /['"‘“]([A-Za-z][A-Za-z0-9_ ]{1,40}?)['"’”]\s+(?:field|object|profile|permission\s+set|flow|record\s+type)\b/i,
+  )?.[1];
+  if (quotedTyped !== undefined) return quotedTyped.trim();
+
   const prefixedTypePhrase = question.match(
     /\b((?:validation\s+rule|permission\s+set|record\s+type|page\s+layout|object|field|flow|class|trigger|layout|profile|report|dashboard)\s+(?:named\s+)?[A-Z][A-Za-z0-9_]*(?:\s+[A-Z][A-Za-z0-9_]*){0,5})\b/,
   )?.[1];
@@ -720,11 +733,57 @@ const applyGlossaryAliases = async (
   };
 };
 
+/**
+ * The user's own words ASSERT a same-name family exists ("there are like
+ * three different things called Status", "I see a few of these with that
+ * name") — router-v2 R2. When the resolver agrees (disposition ambiguous),
+ * that self-reported multiplicity is the strongest possible clarify signal:
+ * junk-tie suppression must not swallow it. Deliberately narrow — bare
+ * counting nouns ("two triggers on Lead") do NOT match; the phrase must
+ * assert sameness ("different things CALLED …", "of these", "which one").
+ */
+export const questionAssertsNameMultiplicity = (question: string): boolean =>
+  /\b(?:a\s+few|several|a\s+couple)\s+of\s+(?:these|those|them)\b|\b(?:two|three|four|five|\d+)\s+different\s+(?:things?|ones?|fields?|objects?|components?|versions?)\b|\bmore\s+than\s+one\s+(?:of\s+(?:these|those|them)|with\s+(?:that|this)\s+name)\b|\bwhich\s+one\s+(?:do|should|did)\s+i\b/i.test(
+    question,
+  );
+
 const entityAmbiguityRequiresClarification = (
   query: string,
   resolution: ResolveResult,
+  question?: string,
 ): boolean => {
+  // BARE-LABEL EXACT TIE (router-v2 R2): the resolver can return `exact` for
+  // a bare label ("the 'Concentration' field") even when several SAME-named
+  // fields on DIFFERENT parents all matched at identical base — its pick of a
+  // parent is arbitrary, and a destructive what-if against the wrong parent
+  // is the worst outcome. Only for a bare label (no __ suffix, no dot: API
+  // references keep their P4 auto-resolve), only when the question did not
+  // name a parent (resolveParentQualifier would have consumed it), and only
+  // on a true dead heat (same normalized name + equal base + exact kind).
+  if (
+    resolution.disposition === 'exact' &&
+    resolution.candidates.length >= 2 &&
+    !/__|\./.test(query)
+  ) {
+    const [top, second] = resolution.candidates;
+    const sameName =
+      top !== undefined &&
+      second !== undefined &&
+      top.matchKind === 'exact' &&
+      second.matchKind === 'exact' &&
+      top.base === second.base &&
+      top.apiName.toLowerCase() === second.apiName.toLowerCase() &&
+      top.parentApiName !== second.parentApiName;
+    if (sameName) {
+      const promoted = resolveParentQualifier(question ?? '', {
+        ...resolution,
+        disposition: 'ambiguous',
+      });
+      if (promoted.disposition === 'ambiguous') return true;
+    }
+  }
   if (resolution.disposition !== 'ambiguous' || resolution.candidates.length < 2) return false;
+  if (question !== undefined && questionAssertsNameMultiplicity(question)) return true;
   const normalized = query.toLowerCase();
   const literalMatches = resolution.candidates.filter((candidate) =>
     candidate.apiName.toLowerCase() === normalized ||
@@ -1230,6 +1289,26 @@ export const resolvePlaneTie = (
   const topReachesOrg = top.plane === 'live' || top.plane === 'hybrid';
   if (wantsLive === topReachesOrg) return [...cands];
   return [second, top, ...cands.slice(2)];
+};
+
+/**
+ * COMPOUND VAULT+LIVE ASK (router-v2 R2): one question that EXPLICITLY asks
+ * for both a metadata answer (what breaks / what it does / the schema) AND a
+ * live-runtime verification (actually running / how many records right now /
+ * in production), joined in one breath. Unlike the resolvePlaneTie graze
+ * (one meaning, two tool planes), this is TWO asks on different planes — a
+ * genuine either-or the P4 auto-resolve must not paper over, so it clarifies.
+ * All three signals are required; a plain needs-live question ("how many
+ * records right now") or a plain impact question ("what breaks if…") never
+ * carries both halves plus the conjunction.
+ */
+export const isCompoundPlaneAsk = (question: string): boolean => {
+  const liveHalf =
+    /\b(?:actually|really)\s+(?:running|firing|executing|live)\b|\bright\s+now\b|\bin\s+production\b/i;
+  const vaultHalf =
+    /\bwhat\s+(?:breaks?|depends|would\s+break|will\s+break)\b|\bwhat\s+does\b[^.?!]{0,60}\bdo\b|\bschema\b|\bmetadata\b|\bsafe\s+to\s+(?:disable|deactivate|delete|remove)\b|\btell\s+me\s+about\b/i;
+  const conjoined = /\b(?:and|also|plus)\b/i;
+  return liveHalf.test(question) && vaultHalf.test(question) && conjoined.test(question);
 };
 
 /** One candidate is destructive, the other a read-only impact/usage readout. */
@@ -1896,7 +1975,10 @@ export const routeQuestionHandler = async (
     entityQuery !== null && entityResolution?.ok === true
       ? await applyGlossaryAliases(ctx, entityQuery, entityTypes, entityResolution.value)
       : null;
-  const refinedEntityResolution =
+  // `let`: the stage-6 premise check may REPLACE a type-scoped `none` with the
+  // unscoped resolution when the name exists as a DIFFERENT component family
+  // (the type-confusion premise) — stages 6.5/7 then see the real component.
+  let refinedEntityResolution =
     contextExactResolution ??
     (entityQuery !== null && glossaryAwareEntityResolution !== null
       ? resolveParentQualifier(
@@ -1907,7 +1989,11 @@ export const routeQuestionHandler = async (
   const entityClarificationRequired =
     entityQuery !== null &&
     refinedEntityResolution !== null &&
-    entityAmbiguityRequiresClarification(entityQuery, refinedEntityResolution);
+    // component-type asks ("is X a flow or a trigger?") are EXEMPT: a
+    // same-name cross-type collision is the ANSWER to that question, not an
+    // obstacle — sfi.resolve enumerates the types and the host explains.
+    route.intent !== 'component-type' &&
+    entityAmbiguityRequiresClarification(entityQuery, refinedEntityResolution, input.question);
   let entityEvidence: RouteQuestionOutput['entityEvidence'] =
     refinedEntityResolution !== null && refinedEntityResolution.disposition !== 'none'
       ? {
@@ -2034,6 +2120,55 @@ export const routeQuestionHandler = async (
     }
   }
 
+  // COMPOUND VAULT+LIVE gate (router-v2 R2): the question carries an explicit
+  // metadata ask AND an explicit live-runtime ask in one breath ("what breaks
+  // AND is it actually running in production", "the schema AND how many
+  // records right now"). That is a genuine plane choice, independent of the
+  // funnel margin — offer the leading candidate of each plane as a tool-choice
+  // clarification (same continuation contract as the I6 gate: the selection
+  // pins that tool). Runs at any confidence — a confident single-plane route
+  // over a two-plane ask is precisely the failure this catches.
+  if (
+    routerMode() === 'hybrid' &&
+    route.clarification === null &&
+    isCompoundPlaneAsk(input.question)
+  ) {
+    const compoundCands = buildFunnelCandidates(
+      route,
+      input.question,
+      marginRouteToolArgs,
+      input.mode,
+    );
+    const vaultTop = compoundCands.find((candidate) => candidate.plane === 'vault');
+    // A vault-dominated shortlist can carry no live rival at all ("is the
+    // trigger safe to disable AND is it actually running in production" ranks
+    // impact tools 1..8). The runtime-verification half still needs a live
+    // tool to offer — fall back to the canonical execution-trace tool when
+    // the live half speaks of something running/firing.
+    const liveTop =
+      compoundCands.find(
+        (candidate) => candidate.plane === 'live' || candidate.plane === 'hybrid',
+      ) ??
+      (/\b(?:running|firing|executing|fired?|ran)\b/i.test(input.question)
+        ? { tool: 'sfi.live_automation_fired' }
+        : undefined);
+    if (vaultTop !== undefined && liveTop !== undefined) {
+      route = {
+        ...route,
+        confidence: 'low',
+        clarification: {
+          required: true,
+          question:
+            `This asks for BOTH a vault-metadata answer AND a live-org verification — ` +
+            `\`${vaultTop.tool}\` answers from the offline vault; \`${liveTop.tool}\` ` +
+            `queries the org right now and needs the opt-in live plane. Which should ` +
+            `lead? (Pick one; the other can run as a follow-up.)`,
+          options: [vaultTop.tool, liveTop.tool],
+        },
+      };
+    }
+  }
+
   // Tracks whether either FALSE-PREMISE branch below disclosed: the contract
   // order "refusal → premise → intent" is realized logically, not by moving
   // code — the stage-6 premise verdict recorded here blocks funnel-primary
@@ -2072,7 +2207,61 @@ export const routeQuestionHandler = async (
       bareRetry?.ok === true && bareRetry.value.disposition !== 'none'
         ? bareRetry.value
         : null;
-    if (bareResolution !== null) {
+    // TYPE-CONFUSION PREMISE (router-v2 R2): the resolve was TYPE-SCOPED
+    // ("the <X> permission set") and found nothing under that type. Before
+    // declaring the component nonexistent, retry UNSCOPED: when the name is a
+    // strong match under a DIFFERENT family (a validation rule the user
+    // called a permission set, a flow they called an object), the premise
+    // error is the STATED TYPE, not existence — disclose the real type and
+    // keep routing on the component that actually exists. A weak/absent
+    // unscoped match falls through to the existence premise flag unchanged.
+    let crossTypeResolution: ResolveResult | null = null;
+    if (bareResolution === null && entityTypes.length > 0) {
+      const unscopedQuery = bareQuery.length > 0 ? bareQuery : entityQuery;
+      const unscopedRetry = await resolveComponents(ctx.graph, unscopedQuery, { limit: 5 });
+      if (
+        unscopedRetry.ok &&
+        unscopedRetry.value.disposition !== 'none' &&
+        (unscopedRetry.value.candidates[0]?.base ?? 0) >= 0.9
+      ) {
+        crossTypeResolution = unscopedRetry.value;
+      }
+    }
+    if (crossTypeResolution !== null) {
+      const real = crossTypeResolution.candidates[0]!;
+      const statedTypes = entityTypes.join('/');
+      const typeWarning =
+        `TYPE CHECK: no ${statedTypes} named '${entityQuery}' exists in the vault, but the name ` +
+        `matches ${real.id} (a ${real.type}). The question's stated component type appears to be ` +
+        `wrong — answer about the component that actually exists, and say so.`;
+      route = {
+        ...route,
+        confidence: 'low',
+        reason: `${route.reason} ${typeWarning}`,
+      };
+      // Feed the REAL component to stages 6.5/7 (type guard, advisory
+      // type-filter, arg binding) so downstream behaves as if the user had
+      // named the right family.
+      refinedEntityResolution = crossTypeResolution;
+      entityEvidence = {
+        query: entityQuery,
+        typeHints: entityTypes,
+        disposition: crossTypeResolution.disposition,
+        clarificationRequired: false,
+        warning: typeWarning,
+        candidates: crossTypeResolution.candidates.slice(0, 5).map((candidate) => ({
+          componentId: candidate.id,
+          type: candidate.type,
+          apiName: candidate.apiName,
+          label: candidate.label,
+          parentApiName: candidate.parentApiName,
+          score: candidate.score,
+          base: candidate.base,
+          matchKind: candidate.matchKind,
+          evidence: candidate.evidence,
+        })),
+      };
+    } else if (bareResolution !== null) {
       // The bare name IS real — surface it as evidence instead of a premise flag.
       entityEvidence = {
         query: bareQuery,
@@ -2186,7 +2375,56 @@ export const routeQuestionHandler = async (
   if (validatedContext !== null && route.clarification === null && !premiseFlagged) {
     const previous = validatedContext.previous;
     const stillUnrouted = route.intent === 'unrouted' && route.plane === 'unknown';
-    const reparamAnchor = detectReparamAnchor(input.question);
+    // GAP DETECTION BEFORE CONTINUATION (round-2 honesty seam 2, mirroring
+    // how refusal gates precede all context logic at stage 0): a follow-up
+    // that is ITSELF gap-shaped — a judgment ("should they be able to?"),
+    // delivery ("as a file?"), tool-self-capability, or deployment-status ask
+    // about the carried component — must NOT inherit the previous turn's
+    // tool. It becomes a non-executable honest-gap route instead; both
+    // continuation arms below are skipped (the guard on each). Only reachable
+    // when the question is STILL unrouted deterministically, so a follow-up
+    // with its own real route ("is it safe to delete?") is never touched.
+    const gapFollowUpFamily = stillUnrouted
+      ? detectGapShapedFollowUp(input.question)
+      : null;
+    if (gapFollowUpFamily !== null) {
+      const gapDescription: Record<string, string> = {
+        judgment:
+          'a normative judgment (should/normal/risky) — sf-intelligence reads org metadata and has no opinion to offer',
+        delivery:
+          'file export or message delivery, which the product does not perform',
+        'tool-self-capability':
+          "the product's own capability boundary — sfi.capabilities answers what is and is not built",
+        'deployment-status':
+          'deployment/pending-change status, runtime telemetry the vault does not model',
+      };
+      const carried =
+        previous.componentId !== undefined
+          ? ` The component carried from the previous turn (${previous.componentId}) was noted but the previous tool was NOT inherited — inheriting it would execute a read that cannot answer this ask.`
+          : '';
+      route = {
+        question: input.question,
+        plane: 'unknown',
+        intent: 'context-gap-followup',
+        tools: [],
+        liveRequired: false,
+        needsResolve: false,
+        reason:
+          `HONEST GAP (context follow-up): this follow-up asks for ` +
+          `${gapDescription[gapFollowUpFamily] ?? gapFollowUpFamily}.${carried}`,
+        gap: {
+          category: 'context-gap-followup',
+          note: `gap-shaped follow-up (${gapFollowUpFamily}); context continuation suppressed rather than inheriting the previous tool`,
+        },
+        confidence: 'high',
+        risk: 'informational',
+        alternatives: [],
+        clarification: null,
+        plan: [],
+      };
+    }
+    const reparamAnchor =
+      gapFollowUpFamily !== null ? null : detectReparamAnchor(input.question);
     // (c) RE-PARAMETERIZATION — a REPARAM anchor re-asks the PREVIOUS tool
     // against a NEW target ("what about on Contact?"). Only from a weak own
     // route: `unrouted`, or a generic schema/list intent below high
