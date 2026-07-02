@@ -2496,9 +2496,12 @@ describe('usage/impact/field-forensics REACH routing', () => {
 
   describe('impact — record-type / merge / package blast radius stays distinct from usage', () => {
     it('"what if I removed the <X> record type … which layouts and flows assume it" → get_impact', () => {
+      // R3 §5b what-if change-type whitelist: record-type removal now lands
+      // the DEDICATED honest route (no what_if_remove_record_type simulator
+      // exists — the reason discloses that) with sfi.get_impact still primary.
       routesTo(
         'What if I removed the New_Lead_RT record type but kept Existing_Lead_RT — which page layouts and flows assume New_Lead_RT exists?',
-        'impact-analysis',
+        'record-type-removal-impact',
         'sfi.get_impact',
       );
     });
@@ -2775,5 +2778,71 @@ describe('usage/impact/field-forensics REACH routing', () => {
       const r = classifyQuestion('is Status the same thing as Stage here?');
       expect(r.intent).toBe('disambiguate-concepts-nl');
     });
+  });
+});
+
+// R3 §5b — what-if CHANGE-TYPE WHITELIST + enumeration-vs-id gate. A what-if
+// ask about a change type with NO simulator routes the dedicated honest read
+// (never the nearest-neighbor what_if_*), and the id-required CPQ tools never
+// commit on an org-wide enumeration ask. All names synthetic.
+describe('R3 what-if change-type whitelist honest routes', () => {
+  it('record-type removal → record-type-removal-impact (get_impact, no fabricated simulator)', () => {
+    const r = classifyQuestion("What if I remove the 'Standard Support' record type from Case?");
+    expect(r.intent).toBe('record-type-removal-impact');
+    expect(r.tools).toContain('sfi.get_impact');
+    expect(r.tools.some((t) => /what_if_/.test(t))).toBe(false);
+    expect(r.reason).toMatch(/No what_if simulator exists/);
+  });
+
+  it('layout-assignment change → layout-assignment-change-impact (lookup + impact)', () => {
+    const r = classifyQuestion(
+      "what if I change the Standard_Case record type's page layout assignment?",
+    );
+    expect(r.intent).toBe('layout-assignment-change-impact');
+    expect(r.tools).toContain('sfi.layout_assignments');
+    expect(r.tools.some((t) => /what_if_/.test(t))).toBe(false);
+  });
+
+  it('flow variable-type change → flow-variable-type-change-impact (callers + explain)', () => {
+    const r = classifyQuestion(
+      'if I change the input variable type on the Zorp_Assignment_Screen_Flow from a single record to a collection, what breaks upstream?',
+    );
+    expect(r.intent).toBe('flow-variable-type-change-impact');
+    expect(r.tools).toContain('sfi.get_impact');
+    expect(r.tools.some((t) => /what_if_/.test(t))).toBe(false);
+  });
+
+  it('must-NOT-fire negatives: every BUILT what-if change type keeps its simulator route', () => {
+    expect(classifyQuestion('what happens if I make Priority__c required on Case?').tools)
+      .toContain('sfi.what_if_make_field_required');
+    expect(classifyQuestion('what breaks if I deactivate Zorp_Flow?').tools)
+      .toContain('sfi.what_if_deactivate_flow');
+    expect(classifyQuestion('what breaks if I disable the Contact trigger?').tools)
+      .toContain('sfi.what_if_disable_trigger');
+    expect(
+      classifyQuestion('What would break if I merged the Sales and Support profiles?').tools,
+    ).toContain('sfi.what_if_merge_profiles');
+  });
+});
+
+describe('R3 CPQ enumeration-vs-id gate', () => {
+  it('org-wide "map the CPQ rule chain … evaluation order" routes the id-free enumeration path', () => {
+    const r = classifyQuestion(
+      'map the CPQ rule chain — price rules, product rules, and their evaluation order',
+    );
+    expect(r.intent).toBe('cpq-enumeration');
+    expect(r.tools).toEqual(['sfi.cpq_dependency_map', 'sfi.list_components']);
+  });
+
+  it('"What CPQ quote template does the org use?" never commits the id-required breakdown', () => {
+    const r = classifyQuestion('What CPQ quote template does the org use?');
+    expect(r.intent).toBe('cpq-enumeration');
+    expect(r.tools).not.toContain('sfi.cpq_quote_template_breakdown');
+  });
+
+  it('must-NOT-fire negative: a plain CPQ ask keeps the generic cpq route (per-id tools offered)', () => {
+    const r = classifyQuestion('show me the cpq price rules touching Quote__c');
+    expect(r.intent).toBe('cpq');
+    expect(r.tools).toContain('sfi.cpq_rule_chain');
   });
 });

@@ -284,6 +284,37 @@ const SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   // "the report my boss uses / the thing she made" → ownership vocabulary
   boss: ['owner', 'user'],
   made: ['created', 'built'],
+  // ---- router-v2 R3 vocabulary bridges. Grown from the v0.1.22 labeled-miss
+  // permissions/flows families (DIAGNOSIS-R3 §2); every entry is GENERIC
+  // Salesforce/business vocabulary — no org terms — and safe at
+  // EXPANSION_WEIGHT (originals always win).
+  // custom-permission family: bypass / gate / guard / unlock verbs → the
+  // permission vocabulary the tool docs actually use.
+  bypass: ['permission', 'custom', 'validation', 'skip'],
+  bypasses: ['bypass', 'permission', 'custom', 'validation'],
+  bypassing: ['bypass', 'permission', 'custom', 'validation'],
+  gate: ['permission', 'custom', 'guard', 'control'],
+  gates: ['gate', 'permission', 'custom', 'guard'],
+  gated: ['gate', 'permission', 'custom'],
+  guarding: ['gate', 'permission', 'custom', 'validation'],
+  unlock: ['grant', 'permission', 'access', 'enable'],
+  unlocks: ['grant', 'permission', 'access', 'enable'],
+  // PSG-expansion family: expand/inheritance → effective-permission union.
+  expand: ['effective', 'permission', 'group', 'union'],
+  inheritance: ['group', 'permission', 'effective', 'union'],
+  inherits: ['group', 'permission', 'effective', 'union'],
+  // access-diagnostics family: greyed-out / read-only symptom words.
+  greyed: ['edit', 'editable', 'access', 'security', 'field'],
+  grayed: ['edit', 'editable', 'access', 'security', 'field'],
+  // flow-diagnostics family: "didn't stamp the date", "what does it
+  // orchestrate", "the flow is skipping records".
+  stamp: ['writes', 'sets', 'populates', 'updates', 'flow'],
+  stamps: ['writes', 'sets', 'populates', 'updates', 'flow'],
+  orchestrate: ['flow', 'subflow', 'invoke', 'explain'],
+  orchestrates: ['flow', 'subflow', 'invoke', 'explain'],
+  skipping: ['skip', 'bypass', 'decision', 'flow'],
+  // automation-footprint family (what_happens_on_save / risk report).
+  footprint: ['automation', 'inventory', 'overview', 'save'],
 };
 
 /**
@@ -385,7 +416,11 @@ const TOOL_KEYWORDS: Readonly<Record<string, string>> = {
     // router-recall / corpus-gen measure the RAW funnel (semanticCandidates),
     // which this clause is what keeps list_components reachable for status-enum
     // enumeration questions. Removing it drops recall@8 91.4%→89.8% (regression).
-    'which flows are inactive active draft obsolete flows triggers rules by status enumerate components',
+    'which flows are inactive active draft obsolete flows triggers rules by status enumerate components ' +
+    // R3: custom-permission ENUMERATION ("which custom permissions exist /
+    // are defined") — list_components is the enumeration answer; without
+    // these exact terms the permission-heavy tools outrank it.
+    'custom permissions defined exist inventory what do they gate',
   'sfi.capabilities': 'what can you do help capabilities what can i ask how do i use',
   'sfi.automation_risk_report':
     'objects more than one multiple triggers per object trigger quality automation risk',

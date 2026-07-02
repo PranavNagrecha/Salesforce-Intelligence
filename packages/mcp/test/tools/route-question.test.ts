@@ -18,6 +18,7 @@ import type { Context } from '../../src/server.js';
 import {
   buildFunnelCandidates,
   FUNNEL_PRIMARY_MIN_SCORE,
+  looksLikeComponentName,
   routeQuestionHandler,
 } from '../../src/tools/route-question.js';
 
@@ -1179,6 +1180,86 @@ describe('routeQuestionHandler — funnel-primary advisory fallback (P2 §3)', (
   });
 });
 
+// R3 forensics — the funnel-primary FIRING bug: 6 of the 8 eligible 0.1.22
+// misses that met every visible stage-7 condition were killed by a PREMISE
+// flag raised on a PROSE fragment the typed-phrase extractor scraped ("I want
+// a risk report on all", "they say the field"), and 1 more by treating a
+// literal TOOL-NAME mention as a ghost component. A `none` resolve on junk is
+// not a false premise; real ghost names must still flag (pinned below).
+describe('routeQuestionHandler — premise flag fires only on name-shaped extractions (R3)', () => {
+  it('looksLikeComponentName: prose fragments are NOT names; real name shapes are', () => {
+    // The actual junk extractions from the 0.1.22 forensic set (q703, q1188,
+    // q1370, q1918, q1919).
+    expect(looksLikeComponentName('I want a risk report on all')).toBe(false);
+    expect(looksLikeComponentName('they say the field')).toBe(false);
+    expect(looksLikeComponentName('so I can cross-check my report')).toBe(false);
+    expect(looksLikeComponentName('If someone is assigned the Billing permission set')).toBe(false);
+    expect(
+      looksLikeComponentName('some user get AssignZorpLead through their permission set'),
+    ).toBe(false);
+    // Real name shapes keep the premise family armed: single tokens, typo'd
+    // ghosts, Title Case phrases, type-noun-suffixed names, connector names.
+    expect(looksLikeComponentName('Zorp_Widget__c')).toBe(true);
+    expect(looksLikeComponentName('AlowZorpCodeEdit')).toBe(true);
+    expect(looksLikeComponentName('ZorpAid permission set')).toBe(true);
+    expect(looksLikeComponentName('Zorp Acommodation')).toBe(true);
+    expect(looksLikeComponentName('Course of Study')).toBe(true);
+  });
+
+  it('POSITIVE (q703 repro): a prose-junk extraction resolving to none must not block stage 7', async () => {
+    // The extractor scrapes "I want a risk report on all" (typed-phrase path,
+    // "report" type noun) → resolves `none` → 0.1.22-shape premise flag ate
+    // the 0.41 automation_risk_report conversion. Junk prose is not a named
+    // ghost: no PREMISE CHECK, funnel-primary fires.
+    const r = await routeQuestionHandler(ctx, {
+      question:
+        'I want a risk report on all our automation — flows and triggers overlapping on the same objects',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const { route } = r.value.data;
+    expect(route.reason).not.toContain('PREMISE CHECK');
+    expect(route.intent).toBe('funnel-advisory');
+    expect(route.tools[0]).toBe('sfi.automation_risk_report');
+  });
+
+  it('POSITIVE (q594 repro): a literal tool-name mention is not a ghost component', async () => {
+    // "find_dependency_cycles" matches the underscored api-reference shape but
+    // names OUR OWN TOOL — it must not premise-flag as a nonexistent
+    // component, and the ask converts to the tool the user literally named.
+    const r = await routeQuestionHandler(ctx, {
+      question:
+        'find_dependency_cycles across triggers too, not just classes — do any triggers call classes in a loop?',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const { route, entityEvidence } = r.value.data;
+    expect(route.reason).not.toContain('PREMISE CHECK');
+    expect(entityEvidence).toBeUndefined(); // no entity extracted at all
+    expect(route.intent).toBe('funnel-advisory');
+    expect(route.tools[0]).toBe('sfi.find_dependency_cycles');
+  });
+
+  it('GUARD: a quoted Title-Case ghost name still premise-flags and blocks the advisory upgrade', async () => {
+    // "'Zorp Widget' object" extracts the bare quoted name — name-shaped →
+    // the existence premise must still block funnel-primary (the §5b
+    // false-premise over-route cluster depends on this staying armed; the
+    // underscored-ghost variant is pinned by the P2 §3 negative above).
+    const r = await routeQuestionHandler(ctx, {
+      question:
+        "are our naming conventions consistent for the 'Zorp Widget' object or a total free-for-all",
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const { route } = r.value.data;
+    expect(route.intent).toBe('unrouted'); // NOT funnel-advisory
+    expect(route.reason).toContain('PREMISE CHECK');
+  });
+});
+
 // Router-v2 P2 §4 — the additive `cosine` field: pre-fusion semantic evidence,
 // preserved through the regex-bonus fusion; 0 for route-inserted rows.
 describe('toolCandidates carry the pre-fusion cosine (P2 §4)', () => {
@@ -1203,5 +1284,133 @@ describe('toolCandidates carry the pre-fusion cosine (P2 §4)', () => {
     for (const c of cands.filter((x) => x.fromRoute !== true)) {
       expect(c.cosine).toBe(c.score); // untouched funnel rows
     }
+  });
+});
+
+// R3 §5b — PRE-ROUTE EXISTENCE GATE: a question that names an api-shaped
+// component but routes an intent that never runs entity resolution (the
+// 23-question false-premise over-route cluster) is existence-probed
+// pre-commit; a ghost premise-flags, a real name passes untouched, and
+// dotted STANDARD references are never probed (the q799 recall shape).
+describe('routeQuestionHandler — pre-route existence gate (R3 §5b)', () => {
+  it('a ghost custom object in a no-resolve intent (record-count) premise-flags', async () => {
+    const r = await routeQuestionHandler(ctx, {
+      question: 'count records in the Ghost_Award__c object by year',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const { route, entityEvidence } = r.value.data;
+    expect(route.intent).toBe('record-count'); // route intact — flag, not block
+    expect(route.confidence).toBe('low');
+    expect(route.reason).toContain('PREMISE CHECK');
+    expect(entityEvidence?.disposition).toBe('none');
+    expect(entityEvidence?.query).toBe('Ghost_Award__c');
+  });
+
+  it('the SAME intent over a real vault component passes untouched (zero recall cost)', async () => {
+    const r = await routeQuestionHandler(ctx, {
+      question: 'count records in the Payment__c object by year',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.route.reason).not.toContain('PREMISE CHECK');
+  });
+
+  it('a dotted STANDARD field reference is never probed (standard fields are legitimately absent)', async () => {
+    const r = await routeQuestionHandler(ctx, {
+      question: 'how many records have Case.RecordTypeId populated right now',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.route.reason).not.toContain('PREMISE CHECK');
+  });
+
+  it('a ghost premise from the probe blocks the stage-7 advisory upgrade too', async () => {
+    // Unrouted phrasing + ghost underscored flow name that the typed-phrase
+    // extractor does not scrape (no type noun adjacency) — the probe must
+    // still find and flag it instead of letting funnel-primary advisory-route.
+    const r = await routeQuestionHandler(ctx, {
+      question: 'whats the impact radius of Zorb_Ghost_Sync on our payment records',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const { route } = r.value.data;
+    expect(route.intent).not.toBe('funnel-advisory');
+    expect(route.reason).toContain('PREMISE CHECK');
+  });
+});
+
+// R3 catch-all narrowing — an ANAPHOR-ONLY fragment with no host context must
+// stay honestly unrouted instead of advisory-routing on a cosine graze (the
+// funnel-advisory over-route family on the R2 honesty holdouts).
+describe('routeQuestionHandler — anaphor-only fragments never advisory-route without context (R3)', () => {
+  it.each([
+    'does it call an invocable apex at least?',
+    "if it doesn't exist just say so, don't guess",
+  ])('stays unrouted: %s', async (question) => {
+    const r = await routeQuestionHandler(ctx, { question, logGap: false });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.route.intent).not.toBe('funnel-advisory');
+  });
+
+  it('a question with its OWN entity keeps the advisory path (pronoun is rhetoric, not the subject)', async () => {
+    // "it" appears, but the question names a real component — the fragment
+    // gate must not touch it (entityQuery is the component, not an anaphor).
+    const r = await routeQuestionHandler(ctx, {
+      question: 'I want a risk report on all our automation — flows and triggers overlapping on the same objects',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.route.intent).toBe('funnel-advisory');
+  });
+});
+
+// R3 §5b — the identity gap rides the refusal-route contract end to end.
+describe('routeQuestionHandler — identity-gap refusal shape (R3 §5b)', () => {
+  it('first-person capability ask returns honest-gap-identity with tools [] and the clarify pointer', async () => {
+    const r = await routeQuestionHandler(ctx, {
+      question: 'am I allowed to merge two profiles together?',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const { route, executionBlocked } = r.value.data;
+    expect(route.intent).toBe('honest-gap-identity');
+    expect(route.tools).toEqual([]);
+    expect(route.refusal?.kind).toBe('identity-gap');
+    expect(route.reason).toMatch(/Which user or profile should I check\?/);
+    expect(executionBlocked).toBe(false);
+    expect(route.gap?.category).toBe('identity-gap');
+  });
+});
+
+// R3 permissions family — the ANSWERABLE PSG-expansion direction must not be
+// eaten by the R2 capability-gap intents (which keep the genuinely-
+// unanswerable directions gapped).
+describe('classifyQuestion — PSG expansion vs the R2 PSG gaps (R3)', () => {
+  it('"what does a user get through the <PSG>" is NOT the permset-group-grants gap', () => {
+    const r = classifyQuestion(
+      'what does a user get through the Advisor_Perm_Group permission set group?',
+    );
+    expect(r.intent).not.toBe('permset-group-grants');
+    expect(r.intent).not.toBe('permset-user-roster');
+  });
+
+  it('"which PSG grants the <custom permission>" STAYS gapped', () => {
+    const r = classifyQuestion('Which PSG grants the ZorpFullAccess custom permission?');
+    expect(r.intent).toBe('permset-group-grants');
+    expect(r.tools).toEqual([]);
+  });
+
+  it('"which users hold the <perm set>" STAYS gapped (membership roster)', () => {
+    const r = classifyQuestion('which users hold the Zorp_Admin permission set?');
+    expect(r.intent).toBe('permset-user-roster');
+    expect(r.tools).toEqual([]);
   });
 });

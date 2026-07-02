@@ -442,6 +442,18 @@ const selectedEntityArgsForRoute = (
 };
 
 /**
+ * A token that names one of this server's OWN tools ("find_dependency_cycles",
+ * "sfi.automation_risk_report") is a TOOL mention, not an org component — a
+ * user typing a tool name verbatim must not premise-flag as "no component
+ * named find_dependency_cycles exists" (R3 funnel-primary forensics, q594).
+ * Lazy `getPlaneByTool()` is the canonical registered-tool roster.
+ */
+const isToolNameMention = (token: string): boolean => {
+  const bare = token.toLowerCase().replace(/^sfi[._]/, '');
+  return getPlaneByTool().has(`sfi.${bare}`);
+};
+
+/**
  * Resolve only a bounded component phrase. Sending the full natural-language
  * question to the fuzzy resolver creates false ambiguity from action words
  * such as "what", "change", and "access".
@@ -453,9 +465,10 @@ const extractEntityQuery = (question: string, intent: string): string | null => 
   // "Opportunity_Stage_Date_Update") — nobody types underscores in prose
   // unless they are naming a component, and missing these left the extractor
   // scraping generic phrases ("screen flow") that resolved to junk menus.
-  const apiReference = question.match(
-    /\b[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)\b|\b[A-Za-z][A-Za-z0-9_]*__(?:c|mdt|e|x|b|kav)\b|\b[A-Za-z][A-Za-z0-9]*(?:_+[A-Za-z0-9]+)+\b/,
-  )?.[0];
+  // A token naming one of our own tools is skipped (tool mention, not entity).
+  const apiReference = [...question.matchAll(
+    /\b[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)\b|\b[A-Za-z][A-Za-z0-9_]*__(?:c|mdt|e|x|b|kav)\b|\b[A-Za-z][A-Za-z0-9]*(?:_+[A-Za-z0-9]+)+\b/g,
+  )].map((match) => match[0]).find((token) => !isToolNameMention(token));
   if (apiReference !== undefined) {
     if (intent === 'what-if-method-signature' && apiReference.includes('.')) {
       return `${apiReference.slice(0, apiReference.indexOf('.'))} class`;
@@ -523,6 +536,48 @@ const extractEntityQuery = (question: string, intent: string): string | null => 
   const parent = typedMatch?.[2];
   return parent === undefined ? phrase : `${phrase} on ${parent}`;
 };
+
+/**
+ * Does an extracted entity phrase actually LOOK like a component name the user
+ * asserted exists? The typed-phrase extractor sometimes scrapes prose ("I want
+ * a risk report on all", "they say the field", "If someone is assigned the
+ * Billing permission set") — resolving that to `none` says nothing about
+ * any premise, yet the stage-6 existence flag treated it as a named ghost and
+ * BLOCKED funnel-primary (stage 7), eating high-score conversions (R3
+ * forensics: 6 of the 8 non-firing eligible misses). A single token is always
+ * name-shaped (the api-reference shapes guarantee it); a multi-word phrase is
+ * name-shaped only when every word beyond schema-type nouns and connectors is
+ * capitalized ("Zorp Widget", "ZorpAid permission set" — yes; prose
+ * fragments with lowercase verbs/pronouns — no).
+ */
+const NAME_IGNORABLE_WORD =
+  /^(?:object|field|flow|class|trigger|page|layout|profile|permission|set|record|type|validation|rule|report|dashboard|logic|named|of|and|or|the|a|an|for)$/i;
+export const looksLikeComponentName = (query: string): boolean => {
+  const words = query.trim().split(/\s+/);
+  if (words.length <= 1) return true;
+  const nameWords = words.filter((word) => !NAME_IGNORABLE_WORD.test(word));
+  return nameWords.length > 0 && nameWords.every((word) => /^["'‘“(]?[A-Z0-9]/.test(word));
+};
+
+/**
+ * R3 §5b — PRE-ROUTE EXISTENCE GATE token extractor. The largest genuine
+ * over-route cluster (23) named a proper-noun component and committed a CLEAN
+ * route because the intent never ran entity resolution (Router E's premise
+ * flag only fires when resolve actually ran). This finds the strongest
+ * name-shaped token to existence-probe: a custom-suffixed name
+ * (`Ghost_Field__c`) or a multi-part underscored name (`Ghost_Sync_Flow`) —
+ * nobody types those in prose unless naming a component. DOTTED standard
+ * references (`Lead.Amount`) are deliberately EXCLUDED: standard fields are
+ * legitimately absent from a metadata vault, so probing them would
+ * premise-flag real questions (the q799 `Case.RecordTypeId` shape). A token
+ * naming one of this server's own tools is skipped as always.
+ */
+const extractExistenceProbeToken = (question: string): string | null =>
+  [...question.matchAll(
+    /\b[A-Za-z][A-Za-z0-9_]*__(?:c|mdt|e|x|b|kav)\b|\b[A-Za-z][A-Za-z0-9]*(?:_+[A-Za-z0-9]+)+\b/g,
+  )]
+    .map((match) => match[0])
+    .find((token) => !isToolNameMention(token) && !/^\d/.test(token)) ?? null;
 
 const inferEntityTypes = (
   query: string,
@@ -1488,6 +1543,7 @@ const routerMode = (): RouterMode =>
 const REFUSAL_INTENT: Readonly<Record<RefusalKind, string>> = {
   'write-imperative': 'refused-write',
   'injection-exfiltration': 'refused-injection',
+  'identity-gap': 'honest-gap-identity',
   'runtime-analytics': 'honest-gap-runtime',
   'out-of-scope': 'out-of-scope',
 };
@@ -1501,6 +1557,10 @@ const REFUSAL_GAP: Readonly<Record<RefusalKind, NonNullable<RouteResult['gap']>>
   'injection-exfiltration': {
     category: 'injection',
     note: 'prompt-injection/exfiltration shape refused',
+  },
+  'identity-gap': {
+    category: 'identity-gap',
+    note: 'first-person capability ask; no session-user identity — declined with a which-user clarify pointer',
   },
   'runtime-analytics': {
     category: 'runtime-analytics',
@@ -2284,7 +2344,7 @@ export const routeQuestionHandler = async (
           evidence: candidate.evidence,
         })),
       };
-    } else {
+    } else if (looksLikeComponentName(entityQuery)) {
       premiseFlagged = true;
       const premiseWarning =
         `PREMISE CHECK: no component matching '${entityQuery}' exists in the vault — ` +
@@ -2301,6 +2361,20 @@ export const routeQuestionHandler = async (
         disposition: 'none',
         clarificationRequired: false,
         warning: premiseWarning,
+        candidates: [],
+      };
+    } else {
+      // PROSE-SHAPED extraction (R3 funnel-primary firing bug): the extractor
+      // scraped a sentence fragment, not a name the user asserted — a `none`
+      // resolve on junk is NOT a false premise. Record the evidence without a
+      // warning and WITHOUT premiseFlagged, so stage 7 stays reachable. Real
+      // ghost names (underscored, CamelCase, Title Case) still flag above.
+      entityEvidence = {
+        query: entityQuery,
+        typeHints: entityTypes,
+        disposition: 'none',
+        clarificationRequired: false,
+        warning: null,
         candidates: [],
       };
     }
@@ -2364,6 +2438,71 @@ export const routeQuestionHandler = async (
       warning: premiseWarning,
       candidates: [],
     };
+  }
+
+  // R3 §5b — PRE-ROUTE EXISTENCE GATE: the question names an api-shaped
+  // component (custom-suffixed or multi-part underscored) but no stage above
+  // resolved it (the intent carried no entity extraction, or extraction found
+  // nothing) — the 23-question false-premise over-route cluster committed
+  // clean routes exactly here. Probe the name pre-commit: no literal match in
+  // the vault ⇒ the same premise flag as a resolved `none` (downgrade +
+  // disclosure + nearest matches as explicitly-labeled lookalikes), which
+  // also blocks the stage-7 advisory upgrade. A resolvable name passes
+  // untouched, so this costs no recall (0 of the 400 labeled misses were
+  // premise-flagged). Dotted standard references are never probed (see
+  // extractExistenceProbeToken).
+  if (
+    !premiseFlagged &&
+    entityQuery === null &&
+    route.clarification === null &&
+    route.intent !== 'empty' &&
+    route.intent !== 'component-lookup'
+  ) {
+    const probeToken = extractExistenceProbeToken(input.question);
+    if (probeToken !== null) {
+      const probe = await resolveComponents(ctx.graph, probeToken, { limit: 5 });
+      if (probe.ok) {
+        const lowered = probeToken.toLowerCase();
+        const loose = normLiteral(probeToken);
+        const literalHit = probe.value.candidates.some(
+          (candidate) =>
+            candidate.apiName.toLowerCase() === lowered ||
+            candidate.id.toLowerCase().endsWith(`:${lowered}`) ||
+            normLiteral(candidate.apiName) === loose,
+        );
+        if (probe.value.disposition === 'none' || !literalHit) {
+          premiseFlagged = true;
+          const premiseWarning =
+            `PREMISE CHECK: no component named '${probeToken}' exists in the vault — any ` +
+            `listed candidates are fuzzy lookalikes, not the component you named. Verify the name ` +
+            `(a typo, or metadata newer than the last refresh; /sfi-refresh may help). ` +
+            `The routed tool fails closed on an unknown component; do not present its error as an answer about a real component.`;
+          route = {
+            ...route,
+            confidence: 'low',
+            reason: `${route.reason} ${premiseWarning}`,
+          };
+          entityEvidence = {
+            query: probeToken,
+            typeHints: [],
+            disposition: 'none',
+            clarificationRequired: false,
+            warning: premiseWarning,
+            candidates: probe.value.candidates.slice(0, 5).map((candidate) => ({
+              componentId: candidate.id,
+              type: candidate.type,
+              apiName: candidate.apiName,
+              label: candidate.label,
+              parentApiName: candidate.parentApiName,
+              score: candidate.score,
+              base: candidate.base,
+              matchKind: candidate.matchKind,
+              evidence: candidate.evidence,
+            })),
+          };
+        }
+      }
+    }
   }
 
   // Stage 6.5 — CONTEXT CONTINUATION / RE-PARAMETERIZATION (router-v2 P5
@@ -2555,11 +2694,26 @@ export const routeQuestionHandler = async (
   // ONCE and reused for the final response so gate and output cannot
   // disagree.
   let advisoryCandidates: readonly ToolCandidate[] | null = null;
+  // R3 catch-all narrowing: an ANAPHOR-ONLY fragment with NO host context
+  // ("does it call an invocable apex at least?", "if it doesn't exist just
+  // say so") cannot be answered — the pronoun is unresolvable, and a cosine
+  // graze advisory-routing it was the funnel-advisory over-route family on
+  // the R2 honesty holdouts. With host context, stage 6.5 already handled it;
+  // without, stay honestly unrouted. Scoped to a SUBJECT-position pronoun
+  // (within the first five words): a trailing "…all of it" on a full,
+  // self-contained question is rhetoric, not the subject (the q154 shape).
+  // A question with its OWN extracted entity is never touched either.
+  const questionHead = input.question.trim().split(/\s+/).slice(0, 5).join(' ');
+  const anaphorOnlyFragment =
+    validatedContext === null &&
+    detectPronounAnchor(questionHead) !== null &&
+    (entityQuery === null || isAnaphorOnly(entityQuery));
   if (
     route.intent === 'unrouted' &&
     route.plane === 'unknown' &&
     route.clarification === null &&
-    !premiseFlagged
+    !premiseFlagged &&
+    !anaphorOnlyFragment
   ) {
     const cands = buildFunnelCandidates(route, input.question, marginRouteToolArgs, input.mode);
     advisoryCandidates = cands;

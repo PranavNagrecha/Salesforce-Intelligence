@@ -99,3 +99,66 @@ describe('semanticCandidates — shape & honesty', () => {
     expect(a).toEqual(b);
   });
 });
+
+// R3 candidate-generation bands (DIAGNOSIS-R3 §2): the two weak families —
+// permissions (custom-permission vocabulary, PSG expansion, access
+// diagnostics) and flows (explain/diagnostics/what-if) — must surface their
+// gold tool in the funnel's own top ranks for representative phrasings. All
+// names synthetic. Top-3 is the bar the funnel-advisory route actually ships.
+describe('R3 corpus bands — permissions + flows families reach their tools', () => {
+  const expectTop = (q: string, tool: string, k: number) => {
+    const top = names(q, 8).slice(0, k);
+    expect(top, `expected ${tool} in top-${k} for "${q}" — got ${top.join(', ')}`).toContain(tool);
+  };
+
+  it('custom-permission describe/bypass phrasings reach search_components', () => {
+    expectTop('What does the Bypass_Widget_Validation custom permission bypass?', 'sfi.search_components', 3);
+    expectTop('whos allowed to bypass the widget validation and whats that guarding', 'sfi.search_components', 3);
+  });
+
+  it('custom-permission enumeration reaches list_components', () => {
+    expectTop('Which custom permissions exist and what do they gate?', 'sfi.list_components', 3);
+    expectTop('What custom permissions are defined?', 'sfi.list_components', 3);
+  });
+
+  it('reverse custom-permission grants reach find_component_usages', () => {
+    expectTop('which perm sets or PSGs turn on the Bypass_Widget custom permission and who ends up with it?', 'sfi.find_component_usages', 3);
+    expectTop('what perm set gives access to the risk score component', 'sfi.find_component_usages', 3);
+  });
+
+  it('PSG expansion reaches effective_permissions (the answerable direction)', () => {
+    expectTop('what does a user get through the Advisor_Perm_Group permission set group?', 'sfi.effective_permissions', 3);
+    expectTop('If someone is assigned the Advisor permission set group, do they automatically get WidgetEdit, yes or no?', 'sfi.effective_permissions', 3);
+  });
+
+  it('access-diagnostics symptoms reach the diagnostic tools', () => {
+    expectTop('user cant edit the widget code field, they say the field is greyed out', 'sfi.field_access_audit', 3);
+    expectTop('user says the Convert button is missing on a Lead, why', 'sfi.user_ability', 3);
+  });
+
+  it('flow-explain and flow-diagnostics phrasings reach explain_flow', () => {
+    expectTop('Give me a breakdown of the Zorp_Accommodation_Flow.', 'sfi.explain_flow', 3);
+    expectTop('before i touch the Zorp_Stage_Date_Update flow, what does it even do', 'sfi.explain_flow', 3);
+  });
+
+  it('save-cascade phrasings reach what_happens_on_save', () => {
+    expectTop('whats on save for the Payment__c object', 'sfi.what_happens_on_save', 3);
+    expectTop('How many automations fire when an Application gets saved?', 'sfi.what_happens_on_save', 3);
+  });
+
+  it('deactivation what-ifs reach what_if_deactivate_flow', () => {
+    expectTop('deactivating Zorp_Accommodation_Flow — consequences?', 'sfi.what_if_deactivate_flow', 3);
+    expectTop('deactivate Zorp_Calc_Flow and tell me what stops recalculating', 'sfi.what_if_deactivate_flow', 3);
+  });
+
+  it('q738-class flow-metadata searches reach search_flow_metadata/search_components', () => {
+    const top = names('Does any flow reference the Bypass_Widget_Validation custom permission to skip a validation rule?', 8).slice(0, 3);
+    expect(top.some((t) => t === 'sfi.search_flow_metadata' || t === 'sfi.search_components')).toBe(true);
+    expectTop('which custom permissions are checked inside flows', 'sfi.search_flow_metadata', 3);
+  });
+
+  it('existence-verification asks reach resolve (trap-122-a family)', () => {
+    expectTop('does the Zorp_Code__c field exist on Contact or only on Lead?', 'sfi.resolve', 8);
+    expectTop('is Zorp_Widget_Flow even the right name? prove it actually exists', 'sfi.resolve', 8);
+  });
+});

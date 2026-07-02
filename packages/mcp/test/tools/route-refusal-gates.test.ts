@@ -323,3 +323,134 @@ describe('routeQuestionHandler — refusal route contract (shared by all four ga
     expect(r.value.data.route.tools.length).toBeGreaterThan(0);
   });
 });
+
+// --- 3. R3 gate additions (all fixtures SYNTHETIC) ---------------------------
+
+describe('detectRefusalShape — R3 §5c simulation carve-out (write gate yields to a what-if frame)', () => {
+  it.each([
+    'Deactivate Zorp_Course_Flow and tell me impact',
+    'Merge the Standard_Agent profile into Standard_Manager and tell me every conflict.',
+    "remove picklist value 'Denied' from Order__c.Status__c — impact?",
+    'deactivate the Order_Sync flow — what happens to new records',
+    'deactivate Zorp_Calc_Flow and tell me what stops recalculating',
+    'Deactivate the Zorp_Opportunity trigger — what is the blast radius?',
+    'When I deactivate Zorp_Review_Flow, does the review process just stall?',
+  ])('does NOT refuse the simulation ask: %s', (q) => {
+    expect(detectRefusalShape(q)).toBeNull();
+  });
+
+  it.each([
+    // The q682/q1750 false positive: insert/update after "or just" are
+    // trigger EVENTS in an event-scope question, never an imperative.
+    'does Zorp_Save_Flow fire on update too or just insert',
+    'Populate_Zorp_on_Lead — when does it run and does it fire on update too or just insert?',
+  ])('event-scope "or just insert/update" is not a write: %s', (q) => {
+    expect(detectRefusalShape(q)).toBeNull();
+  });
+
+  it.each([
+    'deactivate the Order_Sync flow for me', // bare imperative, no impact tail
+    'i want you to merge the profiles', // q1610 shape — no tail, stays refused
+    'Delete the Invoice__c.Legacy_Code__c field for me.',
+    'just delete the dupes and confirm',
+  ])('a bare imperative with NO impact tail still refuses: %s', (q) => {
+    expect(detectRefusalShape(q)?.kind).toBe('write-imperative');
+  });
+
+  it('the carve-out never excuses a RUN imperative (execution is not a simulation)', () => {
+    expect(
+      detectRefusalShape('Run the Zorp_Save_Orch flow against test data for me')?.kind,
+    ).toBe('write-imperative');
+  });
+});
+
+describe('detectRefusalShape — R3 bare-anaphor run imperative ("can you run it?")', () => {
+  it.each(['can you run it?', 'just execute it against the sandbox', 'please kick it off'])(
+    'refuses the execution-by-proxy follow-up: %s',
+    (q) => {
+      const shape = detectRefusalShape(q);
+      expect(shape?.kind).toBe('write-imperative');
+      expect(shape?.disclosure).toMatch(/never executes org automation/);
+    },
+  );
+
+  it.each([
+    'can you run it by me one more time?', // idiom = explain
+    'who can run it?', // permission read (excluder)
+    'what happens when it runs?', // hypothetical read (excluder)
+  ])('does not refuse the read: %s', (q) => {
+    expect(detectRefusalShape(q)).toBeNull();
+  });
+});
+
+describe('detectRefusalShape — R3 §5b first-person identity gap', () => {
+  it.each([
+    'Please tell me — can I be trusted to edit a validation rule, or is that above my permission level?',
+    'Um, is it within my power to change an org-wide default, or is that a scary irreversible thing?',
+    "Can I delete a record type? Not that I want to, I'm just wondering what I'm capable of.",
+    'Please, before I do anything — am I allowed to merge two profiles together?',
+    'Um, am I allowed to change a picklist value? Like on Case Status?',
+  ])('declines with the which-user pointer: %s', (q) => {
+    const shape = detectRefusalShape(q);
+    expect(shape?.kind).toBe('identity-gap');
+    expect(shape?.disclosure).toMatch(/^HONEST GAP \(identity\)/);
+    expect(shape?.disclosure).toMatch(/Which user or profile should I check\?/);
+  });
+
+  it.each([
+    // The politeness look-at frame is a metadata READ about X — never gated.
+    'am I allowed to see what the Zorp_Director permission set grants, or is that restricted info?',
+    'Am I allowed to look at the Zorp_Accommodation_Flow to understand it?',
+    'am i allowed to see everything the System Administrator profile can do, or is that too much',
+    // The mislabeled-64 lesson: first-person FLS reads route (edit/read verbs
+    // are deliberately NOT identity-arming).
+    'can I edit the SSN field?',
+    'am I allowed to edit Cases?',
+    // Third-person capability is a permissions read, whatever the verb.
+    'who is allowed to change a picklist value?',
+  ])('does not gate the read: %s', (q) => {
+    expect(detectRefusalShape(q)).toBeNull();
+  });
+});
+
+describe('detectRefusalShape — R3 §5b audit-trail-plane arms', () => {
+  it.each([
+    'Who modified the field-level security on Lead.Tax_Id__c most recently, and when?',
+    'pull the setup audit trail for last month',
+    'Do we have any reports or dashboards built on the Disability__c object?',
+    'Do we have any reports that reference deleted or renamed fields and are silently broken?',
+    'which dashboards are broken or point at a report that got deleted',
+  ])('discloses the audit-trail/report-definition gap: %s', (q) => {
+    const shape = detectRefusalShape(q);
+    expect(shape?.kind).toBe('runtime-analytics');
+    expect(shape?.disclosure).toMatch(/^HONEST GAP:/);
+  });
+
+  it.each([
+    'which reports were run recently?', // live_report_usage stays routed
+    'who last modified the Zorp_Flow flow?', // component metadata stamp (last_modified)
+    'which email templates are unused?',
+    'who can see the Sales dashboard?', // folder access read
+  ])('does not gate the covered read: %s', (q) => {
+    expect(detectRefusalShape(q)).toBeNull();
+  });
+});
+
+describe('detectRefusalShape — R3 out-of-scope narrowing (document authorship, career guidance)', () => {
+  it('document authorship gates out-of-scope', () => {
+    const shape = detectRefusalShape(
+      'Draft a data-processing agreement clause covering our installed billing package.',
+    );
+    expect(shape?.kind).toBe('out-of-scope');
+  });
+
+  it('career guidance gates out-of-scope', () => {
+    expect(detectRefusalShape('how do i become a better admin')?.kind).toBe('out-of-scope');
+  });
+
+  it('the VR-formula DRAFT the product does perform stays routed', () => {
+    expect(
+      detectRefusalShape('draft a validation rule formula that requires Status__c on save'),
+    ).toBeNull();
+  });
+});

@@ -45,6 +45,19 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'find me anything that blocks record creation when a required field is empty',
     // biz-user register (router-v2 R2): existence-check with a look-inside.
     'does a <Object> object exist in this org? I want to see its fields',
+    // R3 custom-permission band (DIAGNOSIS-R3 §2 rank 2 — the #1 corpus
+    // family): describe-what-it-gates and bypass/guard phrasings. The tools
+    // work (0.1.19 CustomPermission exposure); the vocabulary was missing.
+    'what does the <CustomPermission> custom permission bypass exactly?',
+    'whos allowed to bypass the validation and what is that custom permission guarding?',
+    'which custom permission gates the <FlowName> screen flow?',
+    'is there a custom permission that could let someone bypass a control?',
+    'which custom permissions have descriptions that mention bypassing something?',
+    'tell me every custom permission checked by a validation rule',
+    // R3 cross-object field-existence band (same §2 row).
+    'does Amount__c exist on any object, and which ones?',
+    'do we track a completion date anywhere I could report on?',
+    'is the <RecordType> record type only on Case or is it on other objects too?',
   ],
   'sfi.resolve': [
     'pull the <vague-field-name> field — <PermSet> implies we have one',
@@ -65,6 +78,14 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'I keep calling it the \'<nickname>\' object — does this org have something like that?',
     'is <ComponentName> a flow or a trigger? I can\'t tell from the name',
     'what type of component is <ComponentName> — an Apex class or a flow?',
+    // R3 existence/verification/typo band (DIAGNOSIS-R3 §2 rank 1 +
+    // trap-122-a): explicit "does X exist" asks, prove-it challenges, and
+    // is-that-the-right-name verification.
+    'does <Field__c> exist on Contact or only on Lead?',
+    'is <ComponentName> even the right name? prove it actually exists',
+    'wait, is <Name__c> a field or an object?',
+    'pull up <ComponentName> — I might have the name spelled wrong',
+    'does the <ComponentName> component actually exist in this org, yes or no?',
   ],
   'sfi.capabilities': [
     'what can you actually do?',
@@ -159,6 +180,12 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'fetch the permission set definition for <PermSet>',
     'show me the layout metadata for Case',
     'pull the full metadata for <FlowName>',
+    // R3 show-me-the-thing band (DIAGNOSIS-R3 §2 rank 4).
+    'whats in the <PermSet> permission set?',
+    'what is the <PermSet> permission set for? the name confuses me',
+    'is the <FlowName> flow active or dormant?',
+    'can you give me the raw metadata XML for the <CustomPermission> custom permission?',
+    'pull up <ComponentName> so I can look at it',
   ],
   'sfi.list_components': [
     'whats on the Account object — give me the whole field list',
@@ -174,6 +201,14 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'what approval processes are deployed?',
     'list all custom labels',
     'give me every email template in the org',
+    // R3 custom-permission enumeration band (DIAGNOSIS-R3 §2 rank 6) + the
+    // "can i see the validation rules" type-noun phrasings.
+    'which custom permissions exist and what do they gate?',
+    'what custom permissions are defined in this org?',
+    'pull the full custom permission inventory for the audit workpaper',
+    'can i see the validation rules on the <Object> object',
+    'is there validation on the <Object> object?',
+    'show me all the invocable apex methods',
   ],
   'sfi.get_edges': [
     'what are the edges between <ApexClass> and the objects it touches?',
@@ -209,6 +244,12 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'which flows have a Get Records step on the Account object?',
     'search for flows that send emails',
     'find every flow that creates an Opportunity',
+    // R3 q738-class boundary recovery: custom-permission checks inside flow
+    // XML, subflow-by-name, and field-stamping searches.
+    'does any flow reference the <CustomPermission> custom permission to skip a validation rule?',
+    'which custom permissions are checked inside flows?',
+    'find the flow that fires the <SubflowName> subflow',
+    'is there a flow that stamps <Field__c> when the record closes?',
   ],
   'sfi.get_naming_convention_report': [
     'do our field names follow any consistent pattern?',
@@ -552,6 +593,17 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'does this user actually have delete access on Account?',
     'what objects can the <Profile> profile read?',
     'effective read/write/delete access for <Profile> on Order',
+    // R3 PSG-expansion band (DIAGNOSIS-R3 permissions family): what a member
+    // of a permission set GROUP ends up with — effective_permissions expands
+    // PSGs (verified). The genuinely-unanswerable directions stay gapped:
+    // "which USERS are in the group" (permset-user-roster) and "which PSG
+    // grants X" (permset-group-grants) are capability-gap intents, untouched.
+    'what does a user get through the <PermSetGroup> permission set group?',
+    'expand the <PermSetGroup> permission set group — every permission a member ends up with',
+    'if someone is assigned the <PermSetGroup> permission set group, do they automatically get <CustomPermission>?',
+    'what custom permissions does a new hire end up with after all their permission set group assignments?',
+    'can a user in the <PermSetGroup> permission set group edit these records?',
+    'walk me through how permission set group inheritance works here, with a real group as the example',
   ],
   'sfi.who_can_run': [
     'who can run the <Report> report?',
@@ -576,6 +628,11 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'why is this record invisible to a specific user?',
     'I need to figure out why a user can\'t open this record',
     'user says they get a \'No access\' error on a Contact record — what gives?',
+    // R3 access-diagnostics band (DIAGNOSIS-R3 permissions family): symptom
+    // phrasings — greyed-out fields, blocked edits, blocked reassignment.
+    'a user cant edit the <Field__c> field on a record, they say its greyed out — why?',
+    'why cant a user with the <Profile> profile reassign the Case owner?',
+    'a user reports the record is read-only for them — which layer blocks the edit?',
   ],
   'sfi.layout_for_user': [
     'what page layout does <Profile> see on Case?',
@@ -592,6 +649,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'check if <Username> can create Opportunities',
     'what record types can this user access on Case?',
     'what flows can users with the <Profile> profile actually run?',
+    // R3 access-diagnostics band: missing-button / failing-action symptoms.
+    'a user says the Convert button is missing on a Lead — why?',
+    'why does the send action fail for one user — do they need the <PermSet> permission set?',
+    'which permission is this user missing to perform the action?',
   ],
   'sfi.profile_security': [
     'how locked down is the <Profile> profile?',
@@ -936,6 +997,16 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'what happens behind the scenes when I create a new Contact?',
     // biz-user register (router-v2 R2): terse "show me its automation" shape.
     'the <Object> object — can you show me its automation?',
+    // R3 save-cascade band (DIAGNOSIS-R3 §2 rank 7): terse "whats on save",
+    // event-split phrasings, apex-on-insert, and the automation footprint.
+    'whats on save for the <Object> object?',
+    'how many automations fire when a record gets saved?',
+    'what apex runs on Contact insert?',
+    'list the flows that run on Contact insert',
+    'which flows are triggered by Case creation vs Case update?',
+    'whats the automation footprint on the <Object> object — flows, triggers, everything together?',
+    'why did the flow not fire on my lead update — what is even wired to Lead saves?',
+    'does anything on <Object> save update a date field automatically?',
   ],
   'sfi.why_field_changed': [
     'which flows write to Contact.Status__c?',
@@ -980,6 +1051,20 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'what does the <FlowName> flow do for the business?',
     '<FlowName> — is that a flow or a trigger? what does it invoke?',
     'is <ComponentName> an Apex class or a flow? I want to see what it does',
+    // R3 flow-explain band (DIAGNOSIS-R3 §2 rank 3): indirect explanation
+    // phrasings — orchestrate/breakdown/what-triggers-it/fires-on-update.
+    'before i touch the <FlowName> flow, what does it even do?',
+    'what does the <FlowName> flow orchestrate?',
+    'give me a breakdown of the <FlowName> flow',
+    'what triggers the <FlowName> flow — a record change, a schedule, or a button?',
+    'does <FlowName> fire on update too or just on insert?',
+    'which record type does the <FlowName> flow assign to the Case?',
+    'the <FlowName> screen flow — walk me through its screens and decisions',
+    // R3 flow-diagnostics band ("why did it NOT fire / not stamp"):
+    'why did the <FlowName> flow NOT fire when the record was updated?',
+    'why is the <FlowName> flow not sending the confirmation email — walk the decision branches',
+    'the flow didnt stamp the date when the stage moved — why not?',
+    'a reviewer says the <FlowName> flow is skipping records — what does it actually gate?',
   ],
   'sfi.explain_apex_method': [
     'what does the <MethodName> method in <ApexClass> do?',
@@ -1133,6 +1218,17 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     // "impact if we turn it off" phrasings (premise-trap family).
     'can you deactivate <FlowName> safely? I need to know what depends on it',
     'we have a <ProcessName> process that runs on these records — what\'s the impact if we turn it off?',
+    // R3 what-if band (DIAGNOSIS-R3 flows family + §5c simulation frames):
+    // imperative-plus-impact phrasings the write gate now carves out.
+    'deactivate <FlowName> and tell me the impact',
+    'deactivating <FlowName> — consequences?',
+    'what happens if the <FlowName> flow is turned off during a busy period?',
+    'deactivate the <FlowName> flow — what happens to new records?',
+    'deactivate <FlowName> and tell me what stops recalculating',
+    'does deactivating <FlowName> stop the confirmation emails?',
+    'when I deactivate <FlowName>, does the review process just stall?',
+    'consequences of deactivating the <FlowName> flow?',
+    'what would happen if the <FlowName> flow were deactivated?',
   ],
   'sfi.what_if_disable_trigger': [
     'what breaks if I disable the Contact trigger?',
@@ -1537,6 +1633,17 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'which flows invoke <ComponentName>?',
     'where is this custom label used?',
     'what uses the <PermSet> permission set — show me all assignments and references',
+    // R3 reverse custom-permission grant band (DIAGNOSIS-R3 §2 rank 5): who
+    // holds / which perm sets turn on / which profiles enable a custom
+    // permission — the reverse lookup shipped in 0.1.19; the vocabulary here.
+    'who holds the <CustomPermission> custom permission and which perm sets grant it?',
+    'which permission sets or permission set groups turn on <CustomPermission>?',
+    'which profiles enable the <CustomPermission> custom permission directly — not perm sets?',
+    'is <CustomPermission> granted anywhere besides the <PermSet> permission set?',
+    'i need the granting perm set for the <CustomPermission> custom permission',
+    'how could a user have gotten the <CustomPermission> custom permission?',
+    'what perm set gives access to the <ComponentName> component?',
+    'who is allowed to bypass the validation — which custom permission guards it and who holds it?',
   ],
   'sfi.installed_package_catalog': [
     'what managed packages are installed in this org?',

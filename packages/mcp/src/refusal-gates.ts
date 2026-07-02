@@ -21,6 +21,7 @@
 export type RefusalKind =
   | 'injection-exfiltration'
   | 'write-imperative'
+  | 'identity-gap'
   | 'runtime-analytics'
   | 'out-of-scope';
 
@@ -102,7 +103,21 @@ const WRITE_VERB_FILLER = '(?:(?:bulk|mass|batch|just|please|go\\s+ahead\\s+and)
 // dependency/breakage question both excuse. A bare imperative
 // ("deactivate the flow", "do it safely for me") still refuses.
 const WRITE_EXCLUDER =
-  /\b(?:am\s+i|can\s+i|could\s+i|do\s+i|who\s+can|who\s+is\s+able|allowed\s+to|able\s+to|what\s+if|what\s+would|would\s+happen|is\s+it\s+safe|safe\s+to|before\s+i|if\s+i|should\s+i|how\s+do\s+i|how\s+would\s+i|what\s+happens\s+when)\b|\bsafely\s*\?|\bwhat\s+(?:depends\s+on|breaks|would\s+break|will\s+break|stops\s+working)\b/i;
+  /\b(?:am\s+i|can\s+i|could\s+i|do\s+i|who\s+can|who\s+is\s+able|allowed\s+to|able\s+to|what\s+if|what\s+would|would\s+happen|is\s+it\s+safe|safe\s+to|before\s+i|if\s+(?:i|we)|when\s+(?:i|we)|suppose|should\s+i|how\s+do\s+i|how\s+would\s+i|what\s+happens\s+when)\b|\bsafely\s*\?|\bwhat\s+(?:depends\s+on|breaks|would\s+break|will\s+break|stops\s+working)\b/i;
+
+// R3 §5c — SIMULATION CARVE-OUT (write-gate what-if family, 12 capable-missed
+// with the right what_if_* already at rank 1): an imperative mutation verb
+// whose SAME breath asks for the impact/conflict/what-happens readout
+// ("Deactivate <Flow> and tell me impact", "merge A into B and tell me every
+// conflict", "remove picklist value 'X' — impact?") is a what-if SIMULATION
+// ask — the product's READ answer — not an instruction to mutate. The write
+// gate yields and the router routes the matching `what_if_*`. A bare
+// imperative with no impact tail ("deactivate the flow", "merge the
+// profiles", "delete X for me") still refuses — the tail is required.
+// Applies ONLY to the write-verb arms, never the RUN-imperative arms:
+// "run the flow and tell me what happens" is still an execution ask.
+const SIMULATION_TAIL =
+  /\b(?:and\s+)?(?:tell|show|give)\s+me\s+(?:the\s+)?(?:impact|blast\s+radius|consequences?|every\s+conflict|conflicts|what\s+(?:breaks|happens|stops|changes))\b|[—–-]\s*(?:impact|consequences?|blast\s+radius)\s*\??\s*$|\b(?:impact|consequences)\s*\?\s*$|\bwhat(?:'s|\s+is)\s+the\s+(?:impact|blast\s+radius|fallout)\b|\bwhat\s+(?:happens|stops|breaks)\s+(?:to|if|when|after|downstream)\b/i;
 
 // (A) imperative position, three arms — each captures the verb phrase (verb +
 // bounded trailing slice) for the disclosure.
@@ -110,8 +125,11 @@ const WRITE_SENTENCE_INITIAL = new RegExp(
   `(?:^|[.!?;]\\s+)(?:please\\s+|just\\s+)?${WRITE_VERB_FILLER}(${WRITE_VERB}\\b[^.?!;]{0,80})`,
   'i',
 );
+// The `just` lead-in carries a negative lookbehind for "or/vs/than just":
+// "does it fire on update too OR JUST insert" (q682/q1750) is an event-scope
+// question — `insert`/`update` there are trigger EVENTS, not an imperative.
 const WRITE_LEAD_IN = new RegExp(
-  `\\b(?:please|just|go\\s+ahead\\s+and|can\\s+(?:you|u)|could\\s+(?:you|u)|would\\s+(?:you|u)|you\\s+should|i\\s+need\\s+you\\s+to)\\s+(?:please\\s+|just\\s+)?${WRITE_VERB_FILLER}(${WRITE_VERB}\\b[^.?!;]{0,80})`,
+  `\\b(?:please|(?<!\\b(?:or|vs|than)\\s)just|go\\s+ahead\\s+and|can\\s+(?:you|u)|could\\s+(?:you|u)|would\\s+(?:you|u)|you\\s+should|i\\s+(?:need|want)\\s+you\\s+to)\\s+(?:please\\s+|just\\s+)?${WRITE_VERB_FILLER}(${WRITE_VERB}\\b[^.?!;]{0,80})`,
   'i',
 );
 const WRITE_TRAILING_FRAME = new RegExp(
@@ -165,6 +183,16 @@ const RUN_IMPERATIVE_LEAD_IN = new RegExp(
   `\\b(?:please|just|go\\s+ahead\\s+and|can\\s+(?:you|u)|could\\s+(?:you|u)|would\\s+(?:you|u)|you\\s+should|i\\s+need\\s+you\\s+to)\\s+(?:please\\s+|just\\s+)?(${RUN_VERB}\\b${RUN_GAP}\\b${RUN_TARGET}\\b[^.?!;]{0,60})`,
   'i',
 );
+// R3 boundary recovery — BARE-ANAPHOR run imperative ("can you run it?",
+// "just execute it", "kick it off"): an execution ask whose target is a
+// pronoun (usually a follow-up about the component just discussed). Still an
+// execution-by-proxy ask, so it refuses instead of low-advising. The idioms
+// "run it by/past me (again)" (= explain it) are excluded; WRITE_EXCLUDER
+// already excuses "who can run it" / "what happens when it runs".
+const RUN_ANAPHOR = new RegExp(
+  `(?:(?:^|[.!?;]\\s+)(?:please\\s+|just\\s+)?|\\b(?:please|just|go\\s+ahead\\s+and|can\\s+(?:you|u)|could\\s+(?:you|u)|would\\s+(?:you|u)|you\\s+should|i\\s+need\\s+you\\s+to)\\s+(?:please\\s+|just\\s+)?)(${RUN_VERB}\\s+(?:it|that|this)\\b(?!\\s+(?:by|past)\\b)[^.?!;]{0,40}|(?:kick|fire|set)\\s+(?:it|that|this)\\s+off\\b[^.?!;]{0,30})`,
+  'i',
+);
 
 /**
  * Read-side alternative for a RUN imperative: what the executable WOULD do,
@@ -215,6 +243,39 @@ const readOnlyAlternativeFor = (verbPhrase: string, question: string): string =>
   }
   return 'sfi.get_impact';
 };
+
+// ---------------------------------------------------------------------------
+// R3 §5b — FIRST-PERSON IDENTITY gap: "can I be trusted to edit…", "is it
+// within my power to change…", "am I allowed to merge two profiles?" ask what
+// THE SPEAKER may do — but the product has no session-user identity, so the
+// honest answer is a decline plus "name the user/profile and I can check"
+// (sfi.effective_permissions / sfi.user_ability become routable then).
+//
+// Deliberately NARROW (the mislabeled-64 tripwire: "can I edit the SSN
+// field?" is a plain FLS read that must route). Two arms:
+//  - unambiguous self-capability idioms ("can i be trusted to", "within my
+//    power", "above my permission level", "what I'm capable of");
+//  - "am I allowed/permitted to <MUTATION-verb>" — the politeness frame
+//    "am I allowed to LOOK AT / SEE / VIEW / ASK about X" is excluded (those
+//    are metadata reads about X, not identity questions), and the read verbs
+//    "edit/read" alone do NOT arm it — the FLS-read lesson stands; only the
+//    platform-admin mutation verbs (change/delete/merge/deactivate/…) do.
+// ---------------------------------------------------------------------------
+
+const IDENTITY_IDIOM =
+  /\bcan\s+i\s+be\s+trusted\s+to\b|\bwithin\s+my\s+power\b|\babove\s+my\s+(?:permission\s+level|pay\s+grade)\b|\bwhat\s+(?:am\s+i|i'?m)\s+capable\s+of\b|\bwondering\s+what\s+i'?m\s+capable\s+of\b/i;
+const IDENTITY_ALLOWED_MUTATE =
+  /\bam\s+i\s+(?:allowed|permitted|able)\s+to\s+(?:change|delete|remove|merge|deactivate|disable|create|rename|reset|convert|reassign|modify|update)\b|\bis\s+it\s+(?:okay?|ok)\s+for\s+me\s+to\s+(?:change|delete|remove|merge|deactivate|disable|create|rename|reset|convert|reassign|modify|update)\b/i;
+// The look-at politeness frame — "am I allowed to look at / see / view /
+// read / ask about X" — is a metadata READ about X; never an identity gap.
+const IDENTITY_LOOK_EXCLUDER =
+  /\bam\s+i\s+(?:allowed|permitted|able)\s+to\s+(?:look|see|view|read|ask|know|check|understand|open)\b|\bis\s+it\s+(?:okay?|ok)\s+for\s+me\s+to\s+(?:look|see|view|read|ask|know|check)\b/i;
+
+const IDENTITY_DISCLOSURE =
+  'HONEST GAP (identity): sf-intelligence has no session-user identity — it cannot ' +
+  'know what YOU specifically are allowed to do. Name the user, profile, or ' +
+  'permission set to check and I can answer from the permission metadata ' +
+  '(sfi.effective_permissions / sfi.user_ability). Which user or profile should I check?';
 
 // ---------------------------------------------------------------------------
 // 2.3 — runtime/ops telemetry no tool models (honest gap, not a refusal of
@@ -330,6 +391,25 @@ const RUNTIME_TRIGGERS: readonly (readonly [RegExp, string])[] = [
     /\bwho\b[^.?!]{0,30}\b(?:accessed|viewed|opened|looked\s+at)\b[^.?!]{0,60}\b(?:records?|fields?|data)\b/i,
     'record-access audit events (who accessed what)',
   ],
+  // R3 §5b AUDIT-TRAIL-PLANE arms (8-question over-route cluster): Setup
+  // Audit Trail asks — who changed a SETTING (FLS, sharing, OWD, session/
+  // password policy) and when. Component lastModifiedBy IS metadata
+  // (sfi.last_modified stays routed — those asks say "who changed <component>",
+  // no settings noun); FLS/OWD/policy flips are only in the Setup Audit
+  // Trail, which neither the vault nor the live plane reads.
+  [/\bsetup\s+audit\s+trail\b/i, 'Setup Audit Trail entries'],
+  [
+    /\bwho\s+(?:modified|changed|flipped|updated|edited)\b[^.?!]{0,50}\b(?:field-?level\s+security|fls|sharing\s+settings?|org-?wide\s+defaults?|owd|session\s+settings?|password\s+polic\w*|mfa)\b/i,
+    'who changed org security settings and when (Setup Audit Trail data)',
+  ],
+  // R3 §5b: report/dashboard DEFINITIONS (source object, columns, broken
+  // references) are not retrieved into the vault — "which reports are
+  // stale/unused" (live_report_usage) and "who can see the dashboard"
+  // (folder access) carry none of these definition verbs and stay routed.
+  [
+    /\b(?:reports?|dashboards?)\b[^.?!]{0,50}\b(?:built|based)\s+on\b|\breports?\b[^.?!]{0,50}\breference\b[^.?!]{0,50}\b(?:deleted|renamed|broken|missing)\b|\bdashboards?\b[^.?!]{0,40}\b(?:broken|point\s+at)\b/i,
+    'report/dashboard definitions (source object, columns, referenced fields) — not retrieved into the vault',
+  ],
 ];
 // Temporal incident forensics: a runtime WINDOW plus incident vocabulary.
 const RUNTIME_WINDOW = /\b(?:this\s+week|yesterday|last\s+night|in\s+the\s+\w+\s+incident)\b/i;
@@ -369,6 +449,15 @@ const DELIVERY_ASK = /\bemail\s+me\b|\bsend\s+(?:this|it)\s+to\b|\bpost\s+(?:thi
 // "write …" and stay routed.
 const WRITE_CODE_ASK =
   /\bwrite\s+(?:me\s+)?(?:an?\s+)?(?:apex|lwc|trigger|class|component)\b[^.?!]*\b(?:that|to)\b/i;
+// R3 catch-all narrowing: DOCUMENT authorship ("draft a data-processing
+// agreement clause…") is content generation, not org metadata. Deliberately
+// excludes the drafting the product DOES do (validation-rule formula drafts
+// via explain_formula) — only legal/comms document nouns gate.
+const DRAFT_DOCUMENT_ASK =
+  /\bdraft\s+(?:me\s+)?(?:a|an)\b[^.?!]{0,60}\b(?:agreement|contract|clause|policy|memo|press\s+release)\b/i;
+// "how do i become a better admin / a developer" — career/self-improvement
+// guidance, not this org's metadata.
+const CAREER_ASK = /\bhow\s+do\s+i\s+become\b/i;
 
 const outOfScopeDisclosure = (topic: string): string =>
   `OUT OF SCOPE: sf-intelligence answers questions about this org's Salesforce ` +
@@ -403,17 +492,25 @@ export const detectRefusalShape = (question: string): RefusalShape | null => {
   // under an excluder-free compound ask ("write me the SOQL … and delete the
   // dupes") — the mutation clause poisons the whole turn.
   if (!WRITE_EXCLUDER.test(q)) {
-    const verbPhrase = (
-      WRITE_SENTENCE_INITIAL.exec(q) ??
-      WRITE_LEAD_IN.exec(q) ??
-      WRITE_TRAILING_FRAME.exec(q) ??
-      WRITE_MAKE_SCHEMA.exec(q) ??
-      WRITE_GIVE_GRANT.exec(q) ??
-      WRITE_GIVE_INITIAL.exec(q) ??
-      WRITE_CHAINED_DUPE_DELETE.exec(q)
-    )?.[1]
-      ?.trim()
-      .replace(/[,;:]$/, '');
+    // R3 §5c simulation carve-out: an imperative WRITE verb with an
+    // impact/conflict/what-happens tail is a what-if simulation ask — skip
+    // the write-verb arms so the router routes the matching what_if_* tool.
+    // RUN imperatives below are NOT excused: executing automation stays
+    // refused whatever the tail.
+    const simulationFrame = SIMULATION_TAIL.test(q);
+    const verbPhrase = simulationFrame
+      ? undefined
+      : (
+          WRITE_SENTENCE_INITIAL.exec(q) ??
+          WRITE_LEAD_IN.exec(q) ??
+          WRITE_TRAILING_FRAME.exec(q) ??
+          WRITE_MAKE_SCHEMA.exec(q) ??
+          WRITE_GIVE_GRANT.exec(q) ??
+          WRITE_GIVE_INITIAL.exec(q) ??
+          WRITE_CHAINED_DUPE_DELETE.exec(q)
+        )?.[1]
+          ?.trim()
+          .replace(/[,;:]$/, '');
     if (verbPhrase !== undefined && verbPhrase.length > 0) {
       const alternative = readOnlyAlternativeFor(verbPhrase, q);
       return {
@@ -427,8 +524,13 @@ export const detectRefusalShape = (question: string): RefusalShape | null => {
     }
     // RUN IMPERATIVE (q1537): executing org automation is a mutation by proxy
     // — same refusal kind, execution-specific disclosure, and a read-side
-    // alternative describing what the executable WOULD do.
-    const runPhrase = (RUN_IMPERATIVE_INITIAL.exec(q) ?? RUN_IMPERATIVE_LEAD_IN.exec(q))?.[1]
+    // alternative describing what the executable WOULD do. The bare-anaphor
+    // arm ("can you run it?") refuses too — execution asks never low-advise.
+    const runPhrase = (
+      RUN_IMPERATIVE_INITIAL.exec(q) ??
+      RUN_IMPERATIVE_LEAD_IN.exec(q) ??
+      RUN_ANAPHOR.exec(q)
+    )?.[1]
       ?.trim()
       .replace(/[,;:]$/, '');
     if (runPhrase !== undefined && runPhrase.length > 0) {
@@ -442,6 +544,16 @@ export const detectRefusalShape = (question: string): RefusalShape | null => {
         readOnlyAlternative: alternative,
       };
     }
+  }
+
+  // 2.5 — first-person identity gap (R3 §5b): what may *I* do. After the
+  // write gate (an imperative outranks a self-capability musing), before the
+  // runtime gate (identity is the more specific disclosure).
+  if (
+    (IDENTITY_IDIOM.test(q) || IDENTITY_ALLOWED_MUTATE.test(q)) &&
+    !IDENTITY_LOOK_EXCLUDER.test(q)
+  ) {
+    return { kind: 'identity-gap', disclosure: IDENTITY_DISCLOSURE };
   }
 
   // 3 — runtime/ops telemetry honest gap.
@@ -469,9 +581,13 @@ export const detectRefusalShape = (question: string): RefusalShape | null => {
                 ? 'Message delivery'
                 : WRITE_CODE_ASK.test(q)
                   ? 'Code generation'
-                  : SHOULD_WE.test(q) && !METADATA_NOUN.test(q)
-                    ? 'An org-decision recommendation'
-                    : undefined;
+                  : DRAFT_DOCUMENT_ASK.test(q)
+                    ? 'Document authorship (agreements, policies, memos)'
+                    : CAREER_ASK.test(q)
+                      ? 'Career/self-improvement guidance'
+                      : SHOULD_WE.test(q) && !METADATA_NOUN.test(q)
+                        ? 'An org-decision recommendation'
+                        : undefined;
   if (outOfScopeTopic !== undefined) {
     return { kind: 'out-of-scope', disclosure: outOfScopeDisclosure(outOfScopeTopic) };
   }

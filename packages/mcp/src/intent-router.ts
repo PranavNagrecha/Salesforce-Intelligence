@@ -898,6 +898,77 @@ const RULES: readonly Rule[] = [
       /\bwhat_if_remove_picklist_value\b/,
     ],
   },
+  // === R3 §5b — what-if CHANGE-TYPE WHITELIST honest routes ================
+  // The what_if_* simulators cover a fixed change-type list (field type /
+  // required / picklist value, flow deactivation, trigger disable, method
+  // signature, profile merge/split). A what-if ask about a change type with
+  // NO simulator (remove a record type, change a layout assignment, change a
+  // flow variable's type) must not be absorbed by the nearest-neighbor
+  // what_if_* — these rules catch those shapes FIRST and route the honest
+  // dependency read (get_impact & friends) with an explicit no-simulator
+  // disclosure, mirroring `permission-set-deactivation-impact`.
+  {
+    intent: 'record-type-removal-impact',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.get_impact', 'sfi.recordtype_availability'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'No what_if simulator exists for removing a record type, so this routes honestly to the dependency read: get_impact surfaces the flows, layouts, validation rules, and profiles referencing the record type, and recordtype_availability shows who can see it today — the truthful stand-in for a removal blast radius, not a fabricated simulation.',
+    patterns: [
+      /\b(?:remov\w+|delet\w+|dropp?\w*|consolidat\w+|retir\w+)\b[^.?!]{0,50}\brecord\s+types?\b/,
+      /\brecord\s+types?\b[^.?!]{0,50}\b(?:is|are|was|were|gets?|being)\s+(?:removed|deleted|dropped|consolidated|retired)\b/,
+    ],
+  },
+  {
+    intent: 'layout-assignment-change-impact',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.layout_assignments', 'sfi.get_impact'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'No what_if simulator exists for changing a page-layout assignment, so this routes honestly to the current state: layout_assignments shows the Profile × RecordType assignments the change would rewire, plus get_impact for the dependency surface — a lookup plus impact read, not a fabricated simulation.',
+    patterns: [
+      /\b(?:chang\w+|swapp?\w*|reassign\w*|switch\w*)\b[^.?!]{0,60}\blayout\s+assignments?\b/,
+      /\bwhat\s+(?:if|happens|breaks)\b[^.?!]{0,80}\blayout\s+assignments?\b/,
+    ],
+  },
+  {
+    intent: 'flow-variable-type-change-impact',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.get_impact', 'sfi.explain_flow'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      "No what_if simulator models changing a flow variable's type (e.g. single record to collection), so this routes honestly to the callers: get_impact surfaces the flows/processes invoking it (whose passed values a type change breaks), and explain_flow the variable's uses inside — an interface-impact read, not a fabricated simulation.",
+    patterns: [
+      /\b(?:input|output)\s+variable\b[^.?!]{0,60}\btype\b/,
+      /\bvariable\s+type\b[^.?!]{0,60}\bflow\b/,
+      /\bflow\b[^.?!]{0,60}\bvariable\s+type\b/,
+    ],
+  },
+  {
+    // R3 §5b — ENUMERATION-vs-ID gate: `cpq_rule_chain` and
+    // `cpq_quote_template_breakdown` REQUIRE a specific canonical id, so an
+    // org-wide ask ("map the whole CPQ rule chain", "what quote template does
+    // the org use?") must route the ENUMERATION path — the id-free dependency
+    // map plus list_components — never commit an id-required tool without an
+    // id. Hoisted ABOVE the call-graph/"map the chain" family and the generic
+    // `cpq` rule (first-match): only org-wide CPQ phrasings land here; a
+    // named rule/template still gets the per-id chain tools.
+    intent: 'cpq-enumeration',
+    plane: 'vault',
+    tools: ['sfi.cpq_dependency_map', 'sfi.list_components'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Org-wide CPQ enumeration: cpq_dependency_map maps the whole rule/template surface with no id needed, and list_components enumerates the CPQ rules/templates themselves. The per-id tools (cpq_rule_chain, cpq_quote_template_breakdown) need a specific named rule or template — pick one from the enumeration first.',
+    patterns: [
+      /\bmap\s+the\b[^.?!]{0,40}\bcpq\b|\bcpq\b[^.?!]{0,40}\brule\s+chain\b[^.?!]{0,60}\b(?:evaluation\s+order|all|every|org-?wide|whole)\b/,
+      /\b(?:what|which)\s+(?:cpq\s+)?quote\s+templates?\b[^.?!]{0,50}\b(?:do(?:es)?\s+(?:we|the\s+org)|org)\s*use\b/,
+      /\b(?:all|every|list)\b[^.?!]{0,30}\b(?:price|product|discount)\s+rules?\b[^.?!]{0,50}\b(?:evaluation\s+order|and\s+their)\b/,
+    ],
+  },
   {
     intent: 'async-chain-depth',
     plane: 'vault',
