@@ -4192,7 +4192,7 @@ const RULES: readonly Rule[] = [
       /\bfield\s*360\b/,
       /\b360\b[^.?!]{0,20}\b(on|of|for)\b[^.?!]{0,20}(?:[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*|[a-z][a-z0-9_]*__c)\b/,
       new RegExp(
-        `\\b(full\s+(?:picture|profile)|everything\s+that\s+(?:touches|uses))\\b[^.?!]{0,30}\\b${NAMED_FIELD_ID}\\b`,
+        `\\b(full\\s+(?:picture|profile)|everything\\s+that\\s+(?:touches|uses))\\b[^.?!]{0,30}\\b${NAMED_FIELD_ID}\\b`,
       ),
     ],
   },
