@@ -188,16 +188,21 @@ afterAll(async () => {
 
 describe('routeQuestionHandler — I6 margin gate wired end to end', () => {
   it('fires on a genuine plane near-tie and offers the two divergent tools', async () => {
-    // "report usage" is unrouted: the funnel ties live_report_usage (live) with
-    // find_apex_usages (vault) inside MARGIN — a real vault-vs-live ambiguity.
-    const r = await routeQuestionHandler(ctx, { question: 'report usage', logGap: false });
+    // "which reports are actually used" is unrouted: the funnel ties
+    // live_report_usage (live) with find_code_usages (vault) inside MARGIN — a
+    // real vault-vs-live ambiguity. (Fixture updated for router-v2 P3: the
+    // utterance corpus made the old "report usage" phrasing DECISIVE for
+    // live_report_usage — top1 0.419 vs 0.26, no longer a tie — so the gate
+    // correctly stopped firing on it; this phrasing is a genuine residual tie,
+    // 0.32 live vs 0.284 vault.)
+    const r = await routeQuestionHandler(ctx, { question: 'which reports are actually used', logGap: false });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.executionBlocked).toBe(true);
     expect(r.value.data.route.clarification?.required).toBe(true);
     const opts = r.value.data.route.clarification?.options ?? [];
     expect(opts).toContain('sfi.live_report_usage');
-    expect(opts).toContain('sfi.find_apex_usages');
+    expect(opts).toContain('sfi.find_code_usages');
     expect(opts.every((o) => o.startsWith('sfi.'))).toBe(true);
   });
 
@@ -215,14 +220,14 @@ describe('routeQuestionHandler — I6 margin gate wired end to end', () => {
   });
 
   it('resumes deterministically when the user picks one of the offered tools', async () => {
-    const first = await routeQuestionHandler(ctx, { question: 'report usage', logGap: false });
+    const first = await routeQuestionHandler(ctx, { question: 'which reports are actually used', logGap: false });
     expect(first.ok).toBe(true);
     if (!first.ok) return;
     const clarificationId = first.value.data.route.clarification?.id as string;
     expect(clarificationId).toBeDefined();
 
     const resumed = await routeQuestionHandler(ctx, {
-      question: 'report usage',
+      question: 'which reports are actually used',
       logGap: false,
       clarificationResponse: { clarificationId, selection: 'sfi.live_report_usage' },
     });
@@ -240,12 +245,12 @@ describe('routeQuestionHandler — I6 margin gate wired end to end', () => {
   });
 
   it('rejects a tool selection that was not one of the offered options', async () => {
-    const first = await routeQuestionHandler(ctx, { question: 'report usage', logGap: false });
+    const first = await routeQuestionHandler(ctx, { question: 'which reports are actually used', logGap: false });
     expect(first.ok).toBe(true);
     if (!first.ok) return;
     const clarificationId = first.value.data.route.clarification?.id as string;
     const bad = await routeQuestionHandler(ctx, {
-      question: 'report usage',
+      question: 'which reports are actually used',
       logGap: false,
       clarificationResponse: { clarificationId, selection: 'sfi.get_impact' },
     });
@@ -256,7 +261,7 @@ describe('routeQuestionHandler — I6 margin gate wired end to end', () => {
     const prev = process.env.SFI_ROUTER_MODE;
     process.env.SFI_ROUTER_MODE = 'offline';
     try {
-      const r = await routeQuestionHandler(ctx, { question: 'report usage', logGap: false });
+      const r = await routeQuestionHandler(ctx, { question: 'which reports are actually used', logGap: false });
       expect(r.ok).toBe(true);
       if (!r.ok) return;
       expect(r.value.data.executionBlocked).toBe(false);

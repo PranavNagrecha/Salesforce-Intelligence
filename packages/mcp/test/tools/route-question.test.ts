@@ -1098,10 +1098,12 @@ describe('routeQuestionHandler — funnel-primary advisory fallback (P2 §3)', (
   });
 
   it('NEGATIVE (margin gate wins): a plane near-tie clarifies instead of advisory-routing', async () => {
-    // "report usage" tops ≥0.30 but ties live_report_usage (live) with
-    // find_apex_usages (vault) inside MARGIN — the clarification must win and
-    // funnel-primary must NOT override it.
-    const r = await routeQuestionHandler(ctx, { question: 'report usage', logGap: false });
+    // "which reports are actually used" tops ≥0.30 but ties live_report_usage
+    // (live, 0.32) with find_code_usages (vault, 0.284) inside MARGIN — the
+    // clarification must win and funnel-primary must NOT override it. (Fixture
+    // updated for router-v2 P3: the utterance corpus made the old "report
+    // usage" phrasing decisively live_report_usage, no longer a near-tie.)
+    const r = await routeQuestionHandler(ctx, { question: 'which reports are actually used', logGap: false });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.route.intent).not.toBe('funnel-advisory');

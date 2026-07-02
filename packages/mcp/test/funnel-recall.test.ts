@@ -67,3 +67,55 @@ describe('funnel recall (CI guard)', () => {
     expect(semanticCandidates('zxqw plkj vbnm', 8)).toEqual([]);
   });
 });
+
+/**
+ * router-v2 P3 — blind-spot phrasings. SYNTHETIC analogs (generic entities
+ * only) of the labeled funnel-blind misses from the 2K eval diagnosis, biased
+ * toward the top gap families: search_components / find_component_usages /
+ * list_components / resolve / explain_flow / what_happens_on_save /
+ * effective_permissions. Each gold tool must be IN the top-8 (candidate
+ * recall — the host LLM makes the final pick). These pass because of the
+ * utterance corpus (funnel-utterances.ts) + weighted synonym expansion; a
+ * corpus or synonym-table edit that drops one is a real recall regression.
+ */
+const BLIND_SPOTS: ReadonlyArray<{ q: string; anyOf: readonly string[] }> = [
+  // search_components — existence checks phrased as yes/no behavior questions
+  { q: 'is there a validation rule that stops me from saving a Contact without a phone number', anyOf: ['sfi.search_components', 'sfi.list_components'] },
+  { q: 'do we have a duplicate rule on Contact', anyOf: ['sfi.search_components', 'sfi.list_components', 'sfi.live_duplicate_check'] },
+  { q: 'is there an approval process on Opportunity', anyOf: ['sfi.search_components', 'sfi.list_components'] },
+  // find_component_usages — "who has this perm set" + "what references this"
+  { q: 'who has the Invoice Manager permission set assigned', anyOf: ['sfi.find_component_usages'] },
+  { q: 'what references the Invoice Manager permission set', anyOf: ['sfi.find_component_usages'] },
+  { q: 'does anything still use the Discount component', anyOf: ['sfi.find_component_usages'] },
+  // list_components — informal full-enumeration asks
+  { q: 'give me the whole field list on Account', anyOf: ['sfi.list_components'] },
+  { q: 'what record types exist on Case', anyOf: ['sfi.list_components', 'sfi.recordtype_availability'] },
+  // resolve — fuzzy / conceptual lookups that never say "resolve"
+  { q: 'find me the field that stores the customer tier', anyOf: ['sfi.resolve', 'sfi.find_semantic_field'] },
+  { q: 'look up the thing called something like case assignment', anyOf: ['sfi.resolve'] },
+  // explain_flow — "walk me through / break down" a named flow
+  { q: 'break down the Case_Escalation flow for me', anyOf: ['sfi.explain_flow'] },
+  { q: 'walk me through what the renewal flow creates and updates', anyOf: ['sfi.explain_flow'] },
+  // what_happens_on_save — save cascade + record-lock collision diagnosis
+  { q: 'what runs behind the scenes when I save an Opportunity', anyOf: ['sfi.what_happens_on_save', 'sfi.order_of_execution'] },
+  { q: 'we keep hitting record lock errors when saving Cases', anyOf: ['sfi.what_happens_on_save', 'sfi.order_of_execution'] },
+  // effective_permissions — union-of-grants + error-message-driven asks
+  { q: 'what can the Support profile actually do once you combine its permission sets', anyOf: ['sfi.effective_permissions'] },
+  { q: "the update failed with 'missing Edit permission' — whose perm is that", anyOf: ['sfi.effective_permissions', 'sfi.field_access_audit'] },
+  // secondary gap families from the same diagnosis
+  { q: 'i keep seeing acme__ everywhere — what is that prefix', anyOf: ['sfi.installed_package_catalog', 'sfi.package_impact', 'sfi.resolve'] },
+  { q: 'which flows write to the Status field on Case', anyOf: ['sfi.why_field_changed', 'sfi.field_provenance'] },
+  { q: 'are there any dependency loops between our triggers', anyOf: ['sfi.find_dependency_cycles'] },
+  { q: 'what is the blast radius of changing the Amount field type', anyOf: ['sfi.what_if_change_field_type', 'sfi.get_impact', 'sfi.blast_radius_live'] },
+  { q: 'how entangled are we with the acme package if we uninstall it', anyOf: ['sfi.package_impact', 'sfi.installed_package_catalog'] },
+];
+
+describe('funnel recall — blind-spot phrasings (router-v2 P3)', () => {
+  it.each(BLIND_SPOTS)('puts the gold tool in the top-8 for: $q', ({ q, anyOf }) => {
+    const tools = semanticCandidates(q, 8).map((c) => c.tool);
+    expect(
+      tools.some((t) => anyOf.includes(t)),
+      `expected one of [${anyOf.join(', ')}] in top-8, got: ${tools.join(', ')}`,
+    ).toBe(true);
+  });
+});

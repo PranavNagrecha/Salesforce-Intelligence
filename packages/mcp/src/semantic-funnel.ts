@@ -23,6 +23,7 @@
 // even though intent-router.ts and this module both read the tool roster. (And
 // intent-router.ts does not import this funnel, so no cycle exists in either
 // direction — verified at build time by the I1 contract test + tsc.)
+import { FUNNEL_UTTERANCES } from './funnel-utterances.js';
 import type { Plane } from './intent-router.js';
 import { CATEGORIES } from './tools/capabilities.js';
 import { V01_TOOLS } from './tools/index.js';
@@ -157,6 +158,113 @@ const SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   populated: ['population', 'filled', 'fill', 'usage'],
   required: ['mandatory', 'needed', 'blank', 'null'],
   walk: ['explain', 'trace', 'describe', 'order', 'execution'],
+  // ---- router-v2 P3 vocabulary bridges (informal → technical). Grown from the
+  // labeled funnel-miss diagnosis; every entry is GENERIC Salesforce vocabulary
+  // (never org-specific) and safe at EXPANSION_WEIGHT (originals always win).
+  // "who has / who's assigned" family → grants & assignment vocabulary
+  assigned: ['permission', 'permissionset', 'granted', 'assignment', 'member', 'usages'],
+  perm: ['permission', 'permissions', 'permissionset'],
+  granted: ['permission', 'access', 'assigned', 'effective'],
+  holds: ['assigned', 'granted', 'permission'],
+  allowed: ['permission', 'access', 'granted', 'effective'],
+  actually: ['effective', 'permission', 'access'],
+  union: ['effective', 'permission', 'combined'],
+  combine: ['merge', 'effective', 'union'],
+  consolidate: ['merge', 'combine', 'profiles', 'permission'],
+  conflicts: ['merge', 'conflict', 'overlap', 'duplicate'],
+  cant: ['access', 'permission', 'visibility', 'see', 'blocked'],
+  cannot: ['access', 'permission', 'visibility', 'see', 'blocked'],
+  unable: ['access', 'permission', 'visibility', 'see'],
+  // "what writes / what sets" family → writer / provenance vocabulary
+  writes: ['write', 'writer', 'provenance', 'populates', 'updates', 'changed', 'field'],
+  wrote: ['writes', 'writer', 'provenance', 'changed'],
+  writer: ['writes', 'provenance', 'changed', 'flow', 'trigger'],
+  sets: ['writes', 'populates', 'value', 'changed'],
+  populates: ['writes', 'sets', 'provenance', 'value', 'filled'],
+  updates: ['update', 'writes', 'changed', 'modified'],
+  trace: ['lineage', 'provenance', 'history', 'graph', 'walk'],
+  // "do we have / is there / find me" family → search & resolve vocabulary
+  find: ['search', 'lookup', 'locate', 'resolve', 'matching', 'usages'],
+  lookup: ['find', 'resolve', 'search', 'locate'],
+  locate: ['find', 'search', 'lookup', 'resolve'],
+  called: ['named', 'name', 'resolve', 'find'],
+  named: ['called', 'name', 'resolve', 'find'],
+  anywhere: ['everywhere', 'usages', 'search', 'find', 'components'],
+  everywhere: ['anywhere', 'usages', 'search', 'find'],
+  contains: ['references', 'includes', 'search', 'element'],
+  referencing: ['usage', 'usages', 'references', 'used'],
+  points: ['references', 'usages', 'depends'],
+  // "what is this prefix" family → namespace / package vocabulary
+  prefix: ['namespace', 'package', 'installed', 'managed'],
+  namespace: ['package', 'prefix', 'installed', 'managed'],
+  package: ['namespace', 'installed', 'managed', 'prefix', 'dependency'],
+  installed: ['package', 'packages', 'namespace', 'catalog'],
+  managed: ['package', 'namespace', 'installed'],
+  uninstall: ['package', 'impact', 'remove', 'dependency'],
+  entangled: ['package', 'dependency', 'impact', 'uninstall'],
+  // "what fires / what runs on save" family → save-cascade vocabulary
+  fires: ['fire', 'run', 'runs', 'trigger', 'execution', 'automation', 'save'],
+  fired: ['fire', 'run', 'trigger', 'execution', 'automation'],
+  happens: ['fires', 'runs', 'execution', 'automation', 'save'],
+  saving: ['save', 'automation', 'validation', 'execution', 'trigger'],
+  saved: ['save', 'automation', 'execution', 'trigger'],
+  cascade: ['order', 'execution', 'save', 'automation'],
+  blocks: ['validation', 'rule', 'save', 'required', 'error'],
+  blocking: ['validation', 'rule', 'save', 'error'],
+  stops: ['validation', 'blocks', 'save', 'rule', 'error'],
+  prevents: ['validation', 'blocks', 'save', 'rule'],
+  automations: ['automation', 'flow', 'trigger', 'workflow', 'process', 'rule'],
+  lock: ['record', 'save', 'automation', 'contention', 'error'],
+  // informal call-topology family → usages / call-graph vocabulary
+  calls: ['call', 'invoke', 'invokes', 'usage', 'usages', 'graph', 'references'],
+  invoke: ['call', 'calls', 'usage', 'references', 'apex'],
+  invokes: ['call', 'calls', 'usage', 'references', 'apex'],
+  invoked: ['call', 'calls', 'usage', 'references'],
+  nested: ['subflow', 'call', 'graph', 'depth', 'invoke'],
+  subflow: ['flow', 'call', 'graph', 'nested', 'invoke'],
+  subflows: ['flow', 'flows', 'call', 'graph', 'nested'],
+  chain: ['call', 'graph', 'depth', 'dependency', 'order'],
+  // dependency loops → cycle vocabulary
+  loop: ['cycle', 'cycles', 'dependency', 'recursion', 'circular'],
+  loops: ['cycle', 'cycles', 'dependency', 'recursion', 'circular'],
+  circular: ['cycle', 'cycles', 'dependency', 'loop'],
+  recursive: ['cycle', 'recursion', 'loop', 'dependency'],
+  // blast-radius / pre-change safety family → impact vocabulary
+  blast: ['impact', 'radius', 'breaks', 'affected', 'change'],
+  radius: ['impact', 'blast', 'affected'],
+  breaks: ['impact', 'affected', 'depend', 'change', 'break'],
+  affected: ['impact', 'downstream', 'breaks'],
+  downstream: ['impact', 'effects', 'affected', 'dependency'],
+  safe: ['impact', 'risk', 'change', 'delete', 'breaks'],
+  safely: ['impact', 'risk', 'change', 'breaks'],
+  // error-driven diagnosis family
+  error: ['failed', 'failure', 'exception', 'validation', 'blocked'],
+  failed: ['error', 'failure', 'exception', 'permission'],
+  fault: ['error', 'exception', 'handling', 'flow'],
+  handling: ['fault', 'error', 'exception', 'flow'],
+  // exec-summary / org-tour family → overview & risk vocabulary
+  tour: ['overview', 'org', 'summary', 'inventory'],
+  describe: ['overview', 'explain', 'summary'],
+  breakdown: ['overview', 'explain', 'walk', 'components', 'summary'],
+  big: ['size', 'overview', 'count', 'many', 'inventory'],
+  size: ['count', 'overview', 'many', 'storage'],
+  leadership: ['risk', 'summary', 'overview', 'report'],
+  executive: ['risk', 'summary', 'overview', 'report'],
+  worried: ['risk', 'report', 'health'],
+  confident: ['risk', 'report', 'health'],
+  shape: ['health', 'risk', 'overview'],
+  // cleanup / dead-code family
+  unused: ['dead', 'usages', 'components', 'cleanup'],
+  dead: ['unused', 'code', 'usages'],
+  cleanup: ['unused', 'dead', 'delete', 'candidates'],
+  // freshness / coverage stragglers
+  outdated: ['stale', 'fresh', 'current'],
+  refresh: ['vault', 'stale', 'fresh', 'current', 'health'],
+  tested: ['test', 'tests', 'coverage'],
+  untested: ['coverage', 'gaps', 'test', 'tests'],
+  // queue / assignment routing family
+  queue: ['assignment', 'routing', 'owner', 'group'],
+  routed: ['assignment', 'queue', 'rule', 'routing'],
 };
 
 /**
@@ -174,6 +282,11 @@ const PHRASE_SYNONYMS: readonly (readonly [string, string])[] = (
     ['date of birth', 'dob'],
     ['postal code', 'zip'],
     ['zip code', 'zip'],
+    // router-v2 P3: "break down X for me" is an EXPLAIN ask, but token-split it
+    // becomes 'break' (→ impact/dependency synonyms) + 'down' — the impact
+    // expansion hijacks the ranking. Collapse the phrase to the single token
+    // 'breakdown' (whose SYNONYMS entry bridges to explain/overview/walk).
+    ['break down', 'breakdown'],
   ] as [string, string][]
 ).sort((a, b) => b[0].length - a[0].length);
 
@@ -258,6 +371,12 @@ const TOOL_KEYWORDS: Readonly<Record<string, string>> = {
   'sfi.integration_map': 'api limits at risk integration volume callout capacity external',
   'sfi.find_apex_usages': 'which flows invoke call use apex classes methods from',
   'sfi.live_folder_access': 'who can access report dashboard folder pipeline see view shared',
+  // router-v2 P3: the two labeled miss families for this tool are "who has this
+  // permission set" (assignment/grant phrasing) and "what references this
+  // component" — its (long) description dilutes those terms, so the overlay
+  // re-weights them. Referee: funnel-recall blind-spot cases.
+  'sfi.find_component_usages':
+    'who has this permission set assigned granted holds it references referenced still used anywhere',
 };
 
 /**
@@ -372,20 +491,41 @@ export const resolveCandidatePlane = (toolName: string): PlaneEntry => {
   return { plane, liveRequired: liveRequiredForPlane(plane) };
 };
 
-/** Append synonym terms for each token, preserving the originals. */
-const expand = (tokens: readonly string[]): string[] => {
-  const out: string[] = [...tokens];
+/**
+ * Weight of synonym-EXPANDED query terms relative to the user's own tokens
+ * (which weigh 1 per occurrence). Ported from Quartermaster's `expansionWeight`
+ * mechanism (packages/core, P1-16): its benchmark showed UNWEIGHTED expansion
+ * washes out exact-term matches on rich corpora — which is exactly why this
+ * funnel's SYNONYMS table was historically "kept deliberately small". At 0.5,
+ * expanded terms can nudge the ranking toward the right tool but an original
+ * term always outweighs a bolted-on synonym, which is what makes it safe to
+ * GROW the table (router-v2 P3) without flipping exact-vocabulary queries.
+ */
+export const EXPANSION_WEIGHT = 0.5;
+
+/**
+ * Expand query tokens into a term → weight map. Original tokens accumulate
+ * weight 1 per occurrence; each synonym of an original gets `EXPANSION_WEIGHT`
+ * UNLESS the term is already present (originals always win; synonyms shared by
+ * several originals do not stack). Exported for the expansion-weight unit
+ * tests — not part of the public MCP surface.
+ */
+export const expandWeighted = (tokens: readonly string[]): Map<string, number> => {
+  const w = new Map<string, number>();
+  for (const t of tokens) w.set(t, (w.get(t) ?? 0) + 1);
   for (const t of tokens) {
     const syn = SYNONYMS[t];
-    if (syn !== undefined) out.push(...syn);
+    if (syn !== undefined) for (const s of syn) if (!w.has(s)) w.set(s, EXPANSION_WEIGHT);
   }
-  return out;
+  return w;
 };
 
 /**
  * Build the per-tool document corpus: every tool's MCP description, augmented
- * with the title / description / example questions of each capability category
- * that lists the tool. Tools in no category fall back to their description only.
+ * with the generated utterance corpus (funnel-utterances.ts — synthetic
+ * ask-phrasings per tool) and the title / description / example questions of
+ * each capability category that lists the tool. Tools in no category fall back
+ * to description + utterances.
  */
 const buildToolDocs = (): Map<string, string> => {
   const docs = new Map<string, string>();
@@ -396,7 +536,13 @@ const buildToolDocs = (): Map<string, string> => {
     // not echo them.
     const nameWords = tool.name.replace(/^sfi\./, '').replace(/_/g, ' ');
     const keywords = TOOL_KEYWORDS[tool.name] ?? '';
-    docs.set(tool.name, `${nameWords} ${nameWords} ${tool.description} ${keywords}`);
+    // router-v2 P3: the generated utterance corpus teaches the index how users
+    // actually PHRASE the question ("what stops me from saving", "who has this
+    // perm set"). NOTE the standing invariant: docs are tokenized VERBATIM (no
+    // phrase-synonym rewrite — see tokenize) and any corpus edit shifts every
+    // term's IDF, so the funnel-recall / semantic-funnel tests referee changes.
+    const utterances = (FUNNEL_UTTERANCES[tool.name] ?? []).join(' ');
+    docs.set(tool.name, `${nameWords} ${nameWords} ${tool.description} ${keywords} ${utterances}`);
   }
   for (const cat of CATEGORIES) {
     const catText = ` ${cat.title} ${cat.description} ${cat.exampleQuestions.join(' ')}`;
@@ -546,8 +692,11 @@ export const semanticCandidates = (question: string, k = 8): ToolCandidate[] => 
   const rawQueryTokens = new Set(tokenize(question, true));
   // Expand multi-word phrases on the QUERY only — the doc corpus (buildIndex)
   // is tokenized verbatim so the corpus IDF stays intact (F1 regression fix).
-  const qTokens = expand(tokenize(question, true));
-  if (qTokens.length === 0) return [];
+  // Synonym expansion is WEIGHTED (Quartermaster backport): originals weigh 1
+  // per occurrence, expanded terms EXPANSION_WEIGHT, so a grown synonym table
+  // cannot wash out an exact-vocabulary match.
+  const qWeights = expandWeighted(tokenize(question, true));
+  if (qWeights.size === 0) return [];
 
   let coverage = 0;
   if (rawQueryTokens.size > 0) {
@@ -556,12 +705,12 @@ export const semanticCandidates = (question: string, k = 8): ToolCandidate[] => 
     coverage = hits / rawQueryTokens.size;
   }
 
-  const qtf = new Map<string, number>();
-  for (const t of qTokens) qtf.set(t, (qtf.get(t) ?? 0) + 1);
   const qvec = new Map<string, number>();
   let qnorm = 0;
-  for (const [term, f] of qtf) {
-    const w = (f / qTokens.length) * (idx.idf.get(term) ?? 0);
+  for (const [term, weight] of qWeights) {
+    // The old `/ qTokens.length` TF scale was a constant factor cancelled by
+    // the L2 normalization below — dropped, only relative weights matter.
+    const w = weight * (idx.idf.get(term) ?? 0);
     if (w > 0) {
       qvec.set(term, w);
       qnorm += w * w;
