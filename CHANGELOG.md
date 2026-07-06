@@ -5,6 +5,16 @@ adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.1.25] — 2026-07-02
+
+Headline: **the org's `<description>` text is now captured and queryable.** Four
+metadata types silently dropped their descriptions; now every type that carries
+one keeps it, and a new `missingDescription` filter answers "which reports /
+objects / permission sets are undocumented?" — previously an honest gap.
+
+> **Upgrade note:** the description is captured at extraction time, so run
+> `sfi refresh` once on 0.1.25 to backfill descriptions into an existing vault.
+
 ### Added
 - **Description capture across every metadata type that carries one.** The
   org's top-level `<description>` is now extracted into `node.properties.description`

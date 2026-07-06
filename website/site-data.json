@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-07-02T18:41:21.545Z",
+  "generatedAt": "2026-07-06T19:10:47.481Z",
   "toolCount": 176,
   "skillCount": 25,
   "commandCount": 4,
@@ -10,12 +10,12 @@
       {
         "name": "mcp",
         "files": 219,
-        "cases": 3287
+        "cases": 3293
       },
       {
         "name": "extractors",
         "files": 69,
-        "cases": 861
+        "cases": 866
       },
       {
         "name": "cli",
@@ -25,7 +25,7 @@
       {
         "name": "graph",
         "files": 24,
-        "cases": 232
+        "cases": 235
       },
       {
         "name": "parsers",
@@ -40,7 +40,7 @@
       {
         "name": "renderers",
         "files": 7,
-        "cases": 100
+        "cases": 101
       },
       {
         "name": "vault",
@@ -58,7 +58,7 @@
         "cases": 34
       }
     ],
-    "totalCases": 5211,
+    "totalCases": 5226,
     "totalFiles": 376,
     "packageCount": 10
   },
