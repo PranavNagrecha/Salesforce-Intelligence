@@ -681,6 +681,13 @@ describe('getComponentHandler', () => {
     expect(data.properties['errorConditionFormula']).toContain('End_Time__c');
     // errorMessage must be a string
     expect(typeof data.properties['errorMessage']).toBe('string');
+    // description must surface structurally (get_component exposes properties.description
+    // so a caller answering "does this component have a description?" reads it directly
+    // rather than parsing markdown prose) AND render into the markdown body.
+    expect(data.properties['description']).toBe(
+      'Validates that end time is after start time.',
+    );
+    expect(data.body).toContain('Validates that end time is after start time.');
 
     // --- NEW: data.referenceIds must be canonical component ids (not empty) ---
     expect(Array.isArray(data.referenceIds)).toBe(true);

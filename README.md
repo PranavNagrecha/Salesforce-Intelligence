@@ -225,7 +225,7 @@ Eight capability areas, each answerable in natural language (ask
 | **Decision-support (before you build/change)** | "before I add automation to this object, what already runs there?" · "building Apex here — what should I watch out for?" · "before I change/require this field, what breaks?" |
 | **Architect & developer** | "are there circular Apex dependencies?" · "which classes have no test reference?" · "does the vault still match the live org?" |
 | **Integrations** | "what external systems does this org talk to?" · "list every outbound endpoint" |
-| **Documentation** | "give me a tour of this org" · "generate a data dictionary" |
+| **Documentation** | "give me a tour of this org" · "generate a data dictionary" · "which reports / objects / permission sets have no description?" (`list_components` with `missingDescription: true`) |
 | **Health & audit** | "is my vault fresh?" · "where is PII stored?" · "how has the org changed across refreshes?" |
 
 These are **advisory, read-only briefings** — e.g. `automation_build_advisor`,

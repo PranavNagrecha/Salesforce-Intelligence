@@ -553,10 +553,24 @@ const extractEnterpriseMetadata = async (
 };
 
 export const extractReport = (path: string): Promise<Result<ExtractionResult, ExtractorError>> =>
-  extractEnterpriseMetadata(path, { type: 'Report', suffix: '.report-meta.xml' });
+  extractEnterpriseMetadata(path, {
+    type: 'Report',
+    suffix: '.report-meta.xml',
+    // Reports carry a top-level <description> in source. Capture it so
+    // "which reports have no description" is answerable and get_component
+    // can surface the report's stated purpose. Omitted when absent — the
+    // "extracted, none present" signal (vs a not-modeled type).
+    extraProperties: ['description'],
+  });
 
 export const extractDashboard = (path: string): Promise<Result<ExtractionResult, ExtractorError>> =>
-  extractEnterpriseMetadata(path, { type: 'Dashboard', suffix: '.dashboard-meta.xml' });
+  extractEnterpriseMetadata(path, {
+    type: 'Dashboard',
+    suffix: '.dashboard-meta.xml',
+    // Dashboards carry a top-level <description>. Same capture rationale as
+    // Report — omitted when absent.
+    extraProperties: ['description'],
+  });
 
 export const extractListView = (path: string): Promise<Result<ExtractionResult, ExtractorError>> =>
   extractEnterpriseMetadata(path, {
@@ -576,6 +590,10 @@ export const extractReportType = (path: string): Promise<Result<ExtractionResult
     // Without this, makeNode always sets label: null and get_component has no
     // human-readable display name to surface in vault Markdown.
     labelXmlElement: 'label',
+    // ReportType XML carries a top-level <description> (nearly universal in
+    // source). Capture it so custom report types disclose their purpose and
+    // are queryable via missingDescription. Omitted when absent.
+    extraProperties: ['description'],
   });
 
 /**
@@ -715,6 +733,10 @@ export const extractPermissionSetGroup = (path: string): Promise<Result<Extracti
   extractEnterpriseMetadata(path, {
     type: 'PermissionSetGroup',
     suffix: '.permissionsetgroup-meta.xml',
+    // PSGs carry a top-level <description>. Capture it so the group's stated
+    // purpose is surfaced and queryable via missingDescription. Omitted when
+    // absent.
+    extraProperties: ['description'],
     // A PSG's effective permissions are the UNION of its member permission
     // sets' grants, minus the muting permission set's. Capture both so the
     // permission analysis can flow god-mode / object grants through the group.

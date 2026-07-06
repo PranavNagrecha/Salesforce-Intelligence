@@ -122,6 +122,34 @@ describe('renderComponentMarkdown', () => {
     expect(result.value.body).toContain('**Type:** CustomObject\n\n## Properties');
   });
 
+  it('renders a captured description for an enterprise type (Report) and keeps it out of the Properties table', () => {
+    // Report/Dashboard/ReportType/PermissionSetGroup now capture a top-level
+    // <description> into properties.description. The renderer is generic, so the
+    // paragraph block + Properties-table exclusion applies to them with no
+    // renderer change — this test locks that behavior for an enterprise type.
+    const node: Node = {
+      id: 'Report:Widget_Usage',
+      type: 'Report',
+      apiName: 'Widget_Usage',
+      label: 'Widget Usage',
+      parentId: null,
+      sourcePath: 'reports/Widget_Usage.report-meta.xml',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: { description: 'Weekly rollup of widget usage.', rawReferenceCount: 0 },
+    };
+    const result = renderComponentMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Description renders as its own paragraph block right after the Type line.
+    expect(result.value.body).toContain(
+      '**Type:** Report\n\nWeekly rollup of widget usage.\n\n## Properties',
+    );
+    // ...and is NOT duplicated as a Properties-table row.
+    expect(result.value.body).not.toContain('| description |');
+  });
+
   it('falls back to apiName for the heading when label is null', () => {
     const node: Node = {
       id: 'CustomObject:NoLabel__c',

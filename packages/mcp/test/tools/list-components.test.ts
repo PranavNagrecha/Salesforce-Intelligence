@@ -995,3 +995,126 @@ describe('listComponentsHandler: ApexClass boolean filters (P4-interface-impl)',
     expect(parsed.success).toBe(false);
   });
 });
+
+describe('listComponentsHandler — description-presence filter', () => {
+  // Report fixture: one WITH a description, two WITHOUT (a JSON-null variant and
+  // a key-omitted variant) — the two enterprise/custom "none present" shapes.
+  const descSeed: ExtractionResult = {
+    nodes: [
+      makeNode({
+        id: 'Report:HasDesc',
+        type: 'Report',
+        apiName: 'HasDesc',
+        label: 'Has Desc',
+        sourcePath: 'reports/HasDesc.report-meta.xml',
+        properties: { description: 'A documented report.' },
+      }),
+      makeNode({
+        id: 'Report:NullDesc',
+        type: 'Report',
+        apiName: 'NullDesc',
+        label: 'Null Desc',
+        sourcePath: 'reports/NullDesc.report-meta.xml',
+        properties: { description: null },
+      }),
+      makeNode({
+        id: 'Report:NoDescKey',
+        type: 'Report',
+        apiName: 'NoDescKey',
+        label: 'No Desc Key',
+        sourcePath: 'reports/NoDescKey.report-meta.xml',
+        properties: { rawReferenceCount: 0 },
+      }),
+    ],
+    edges: [],
+  };
+
+  let descDir: string;
+  let descStore: GraphStore;
+  let descCtx: Context;
+
+  beforeAll(async () => {
+    descDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-list-desc-'));
+    const opened = await openGraph(join(descDir, 'desc.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    descStore = opened.value;
+    const imported = await importExtractionResults(descStore, [descSeed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    descCtx = {
+      vaultRoot: descDir,
+      manifest: { ...FIXTURE_MANIFEST, components: { Report: 3 } },
+      graph: descStore,
+    };
+  });
+
+  afterAll(async () => {
+    await closeGraph(descStore);
+    rmSync(descDir, { recursive: true, force: true });
+  });
+
+  it('missingDescription:true returns the two undescribed reports; totalCount is the count', async () => {
+    const r = await listComponentsHandler(descCtx, {
+      type: 'Report',
+      missingDescription: true,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.components.map((n) => n.id)).toEqual([
+      'Report:NoDescKey',
+      'Report:NullDesc',
+    ]);
+    expect(r.value.data.totalCount).toBe(2);
+  });
+
+  it('hasDescription:true returns only the documented report', async () => {
+    const r = await listComponentsHandler(descCtx, {
+      type: 'Report',
+      hasDescription: true,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.components.map((n) => n.id)).toEqual(['Report:HasDesc']);
+    expect(r.value.data.totalCount).toBe(1);
+  });
+
+  it('missing + has counts sum to the unfiltered type total', async () => {
+    const missing = await listComponentsHandler(descCtx, {
+      type: 'Report',
+      missingDescription: true,
+    });
+    const has = await listComponentsHandler(descCtx, { type: 'Report', hasDescription: true });
+    const all = await listComponentsHandler(descCtx, { type: 'Report' });
+    expect(missing.ok && has.ok && all.ok).toBe(true);
+    if (!missing.ok || !has.ok || !all.ok) return;
+    expect(missing.value.data.totalCount + has.value.data.totalCount).toBe(
+      all.value.data.totalCount,
+    );
+  });
+
+  it('rejects the contradiction of both missingDescription and hasDescription', async () => {
+    const r = await listComponentsHandler(descCtx, {
+      type: 'Report',
+      missingDescription: true,
+      hasDescription: true,
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('an empty description-filtered page does not emit a coverage retrievalHint', async () => {
+    // Every report HAS a description-key state, so a `hasDescription` filter that
+    // matches nothing (e.g. after excluding the only documented one) must read
+    // as "no match", not a coverage gap. Use a filter guaranteed to be empty by
+    // querying a type with no nodes but requesting the description filter.
+    const r = await listComponentsHandler(descCtx, {
+      type: 'Dashboard',
+      missingDescription: true,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.components).toHaveLength(0);
+    // FRESH-02 retrievalHint is suppressed under a description filter.
+    expect(r.value.data.retrievalHint).toBeUndefined();
+  });
+});

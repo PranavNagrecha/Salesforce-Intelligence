@@ -6,6 +6,7 @@ import { join } from 'node:path';
 
 import {
   extractCustomPermission,
+  extractDashboard,
   extractFlexiPage,
   extractListView,
   extractPermissionSetGroup,
@@ -954,6 +955,127 @@ describe('enterprise metadata extractors', () => {
       // Duplicated occurrences collapse to one edge.
       expect(permEdges).toHaveLength(1);
       expect(permEdges[0]!.toId).toBe('CustomPermission:MyPerm');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Description capture: Report / Dashboard / ReportType / PermissionSetGroup
+  // each carry a top-level <description> in Salesforce source that the generic
+  // enterprise extractor dropped until extraProperties:['description'] was added.
+  // The key is captured when present and OMITTED when absent — the honest
+  // "extracted, none present" signal (distinct from a not-modeled type).
+  it('captures a top-level <description> on a Report', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'Widget_Usage.report-meta.xml');
+      await writeFile(
+        path,
+        `<?xml version="1.0" encoding="UTF-8"?>
+<Report xmlns="http://soap.sforce.com/2006/04/metadata">
+    <description>Weekly rollup of widget usage by region.</description>
+    <name>Widget Usage</name>
+</Report>`,
+        'utf8',
+      );
+      const result = await extractReport(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.nodes[0]?.properties['description']).toBe(
+        'Weekly rollup of widget usage by region.',
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('OMITS the description key on a Report with no <description>', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'No_Desc.report-meta.xml');
+      await writeFile(
+        path,
+        '<Report xmlns="http://soap.sforce.com/2006/04/metadata"><name>No Desc</name></Report>',
+        'utf8',
+      );
+      const result = await extractReport(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      // "extracted, none present": the key is absent, not null — so the
+      // list_components presence filter reads it as "no description".
+      expect('description' in result.value.nodes[0]!.properties).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('captures a top-level <description> on a Dashboard', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'Ops_Board.dashboard-meta.xml');
+      await writeFile(
+        path,
+        '<Dashboard xmlns="http://soap.sforce.com/2006/04/metadata"><description>Operations KPIs.</description></Dashboard>',
+        'utf8',
+      );
+      const result = await extractDashboard(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.nodes[0]?.properties['description']).toBe('Operations KPIs.');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('captures both <label> and <description> on a ReportType', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'Widget_Metrics.reportType-meta.xml');
+      await writeFile(
+        path,
+        `<?xml version="1.0" encoding="UTF-8"?>
+<ReportType xmlns="http://soap.sforce.com/2006/04/metadata">
+    <label>Widget Metrics</label>
+    <description>Custom report type joining widgets to regions.</description>
+    <deployed>true</deployed>
+</ReportType>`,
+        'utf8',
+      );
+      const result = await extractReportType(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const node = result.value.nodes[0]!;
+      // label capture (pre-existing) must not regress alongside description.
+      expect(node.label).toBe('Widget Metrics');
+      expect(node.properties['description']).toBe(
+        'Custom report type joining widgets to regions.',
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('captures <description> on a PermissionSetGroup alongside membership', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'Regional_Ops.permissionsetgroup-meta.xml');
+      await writeFile(
+        path,
+        `<?xml version="1.0" encoding="UTF-8"?>
+<PermissionSetGroup xmlns="http://soap.sforce.com/2006/04/metadata">
+    <description>Bundle for regional operations staff.</description>
+    <label>Regional Ops</label>
+    <permissionSets>Widget_Editor</permissionSets>
+</PermissionSetGroup>`,
+        'utf8',
+      );
+      const result = await extractPermissionSetGroup(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const node = result.value.nodes[0]!;
+      expect(node.properties['description']).toBe('Bundle for regional operations staff.');
+      // membership capture (pre-existing) must not regress.
+      expect(node.properties['permissionSets']).toEqual(['Widget_Editor']);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

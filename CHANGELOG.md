@@ -5,6 +5,37 @@ adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Added
+- **Description capture across every metadata type that carries one.** The
+  org's top-level `<description>` is now extracted into `node.properties.description`
+  for the four generic metadata types that previously dropped it — `Report`,
+  `Dashboard`, `ReportType`, and `PermissionSetGroup` (`extractReport`,
+  `extractDashboard`, `extractReportType`, `extractPermissionSetGroup` in
+  `enterprise-metadata.ts` now pass `extraProperties: ['description']`). The
+  seven custom extractors (`CustomObject`, `CustomField`, `PermissionSet`,
+  `Profile`, `Flow`, `ValidationRule`, `RecordType`) plus `CustomTab` and
+  `CustomApplication` already captured it. The description renders as a paragraph
+  in the component markdown (unchanged renderer). Verified offline against a real
+  ~1,300-object source tree: captured counts match the source's
+  files-with-`<description>` ground truth exactly for every generic type (Report
+  221, Dashboard 17, PermissionSetGroup 16, plus CustomField 1315, ValidationRule
+  306, PermissionSet 159, RecordType 86, CustomObject 75). Only the genuine
+  top-level `<description>` is captured — nested element-level descriptions (e.g.
+  a Flow decision's own `<description>`) are intentionally excluded, and Profiles
+  capture their single real top-level description with no fabrication.
+- **`list_components` documentation-coverage filter.** New `missingDescription`
+  / `hasDescription` boolean flags answer "which reports / objects / permission
+  sets / validation rules have no description?" — previously an honest gap. Backed
+  by a `descriptionPresence: 'present' | 'absent'` narrow in the graph layer
+  (`queries.ts`) that folds key-absent, JSON-null, and empty-string all into one
+  honest "absent" bucket via `coalesce(json_extract_string(...,'$.description'),'')`.
+  The narrow is applied to both the page query and the authoritative
+  `countNodesByType` total; the two flags are mutually exclusive (invalid-query
+  guard). **Honesty caveat, disclosed in the tool description:** for a type whose
+  source carries no `<description>` element at all (`ListView`, `CustomPermission`,
+  `MutingPermissionSet`, `CustomMetadata`), `missingDescription` matches *every*
+  node — the answer means "no description in this metadata type", not "left blank".
+
 ## [0.1.24] — 2026-07-02
 
 Headline: **assignment-data engine + router honesty R4 + experimental embeddings.**

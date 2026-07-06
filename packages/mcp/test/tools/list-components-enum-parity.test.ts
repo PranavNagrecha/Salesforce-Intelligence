@@ -29,4 +29,22 @@ describe('list_components advertised inputSchema enum ↔ Zod validator parity',
     // Spot-check the 0.1.19 addition explicitly so a regression names it.
     expect(advertised).toContain('CustomPermission');
   });
+
+  it('advertises the missingDescription / hasDescription boolean filters the Zod schema accepts', () => {
+    const roster = new Map(V01_TOOLS.map((t) => [t.name, t]));
+    const tool = roster.get('sfi.list_components');
+    expect(tool, 'sfi.list_components must be registered').toBeDefined();
+
+    const schema = tool?.inputSchema as
+      | { properties?: Record<string, { type?: string }> }
+      | undefined;
+    const props = schema?.properties ?? {};
+
+    // The Zod validator accepts these (coerced-boolean) narrows; the advertised
+    // JSON Schema must expose them or a schema-respecting client can never send
+    // the description filter — the same silent-unreachability failure mode the
+    // CustomPermission enum drift caused. Assert presence AND boolean type.
+    expect(props['missingDescription']).toEqual({ type: 'boolean' });
+    expect(props['hasDescription']).toEqual({ type: 'boolean' });
+  });
 });

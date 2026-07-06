@@ -77,6 +77,16 @@ export interface ListNodesOptions {
   readonly propertyStringEquals?: Readonly<Record<string, string>>;
   /** When true, keep only nodes whose `triggerType` starts with `Record`. */
   readonly recordTriggered?: boolean;
+  /**
+   * Filter on whether the node carries a non-empty `properties.description`.
+   * `'present'` keeps only nodes with a real description; `'absent'` keeps only
+   * those with none. "None" folds together three cases into one honest bucket:
+   * the key is absent (enterprise-metadata types omit it when the source has no
+   * `<description>`), the value is JSON `null` (custom extractors write
+   * `description: null`), and an empty string. All three mean "extracted, none
+   * present" — distinct from a metadata type the vault does not model at all.
+   */
+  readonly descriptionPresence?: 'present' | 'absent';
 }
 
 /**
@@ -90,6 +100,7 @@ export interface CountNodesOptions {
   readonly propertyEquals?: Readonly<Record<string, boolean>>;
   readonly propertyStringEquals?: Readonly<Record<string, string>>;
   readonly recordTriggered?: boolean;
+  readonly descriptionPresence?: 'present' | 'absent';
 }
 
 const appendNodePropertyFilters = (
@@ -97,7 +108,7 @@ const appendNodePropertyFilters = (
   params: DuckDBValue[],
   options?: Pick<
     ListNodesOptions,
-    'propertyEquals' | 'propertyStringEquals' | 'recordTriggered'
+    'propertyEquals' | 'propertyStringEquals' | 'recordTriggered' | 'descriptionPresence'
   >,
 ): string => {
   let out = sql;
@@ -115,6 +126,16 @@ const appendNodePropertyFilters = (
   }
   if (options?.recordTriggered === true) {
     out += ` AND json_extract_string(properties_json, '$.triggerType') LIKE 'Record%'`;
+  }
+  // Description presence/absence. `json_extract_string` returns SQL NULL when
+  // the `description` key is absent OR its value is JSON null; `coalesce(...,'')`
+  // folds those plus empty-string into one "absent" bucket, so enterprise types
+  // (key omitted) and custom extractors (`description: null`) behave identically.
+  // Literal JSON path, no user input interpolated (mirrors `recordTriggered`).
+  if (options?.descriptionPresence === 'present') {
+    out += ` AND coalesce(json_extract_string(properties_json, '$.description'), '') <> ''`;
+  } else if (options?.descriptionPresence === 'absent') {
+    out += ` AND coalesce(json_extract_string(properties_json, '$.description'), '') = ''`;
   }
   return out;
 };

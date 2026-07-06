@@ -294,6 +294,18 @@ export const listComponentsInputSchema = z.object({
   status: z.string().min(1).optional(),
   /** Flow metadata: keep only record-triggered flows (`triggerType` starts with Record). */
   recordTriggered: coercedOptionalBoolean,
+  /**
+   * Keep only components that LACK a description — `properties.description` is
+   * absent, null, or empty. Answers "which reports/objects/permission-sets have
+   * no description". Only trustworthy for a type whose extractor captures
+   * description; a type that carries no `<description>` in Salesforce source
+   * (ListView, CustomPermission, MutingPermissionSet, CustomMetadata records)
+   * will match ALL of its nodes — that means "this type has no description in
+   * source", not "the org failed to fill them in".
+   */
+  missingDescription: coercedOptionalBoolean,
+  /** Keep only components that HAVE a non-empty `properties.description`. */
+  hasDescription: coercedOptionalBoolean,
 });
 
 /** Parsed input shape, inferred from `listComponentsInputSchema`. */
@@ -412,6 +424,24 @@ export const listComponentsHandler = async (
     });
   }
 
+  // Description-presence filter. `missingDescription` and `hasDescription` are
+  // mutually exclusive — a component cannot both have and lack a description —
+  // so reject the contradiction rather than silently picking one (honesty: a
+  // caller that asked for both gets told the query is invalid).
+  if (input.missingDescription === true && input.hasDescription === true) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        'missingDescription and hasDescription are mutually exclusive — pass at most one.',
+    });
+  }
+  const descriptionPresence: 'present' | 'absent' | undefined =
+    input.missingDescription === true
+      ? 'absent'
+      : input.hasDescription === true
+        ? 'present'
+        : undefined;
+
   const limit = input.limit ?? LIST_DEFAULT_LIMIT;
   const recordTriggered = input.recordTriggered === true;
 
@@ -424,6 +454,7 @@ export const listComponentsHandler = async (
     ...(input.triggerObject !== undefined ? { triggerObject: input.triggerObject } : {}),
     ...(input.status !== undefined ? { status: input.status } : {}),
     ...(recordTriggered ? { recordTriggered: true } : {}),
+    ...(descriptionPresence !== undefined ? { descriptionPresence } : {}),
     ...Object.fromEntries(
       APEX_BOOLEAN_FILTERS.flatMap((k) =>
         input[k] !== undefined ? [[k, input[k]]] : [],
@@ -466,6 +497,7 @@ export const listComponentsHandler = async (
     ...(hasPropertyFilter ? { propertyEquals } : {}),
     ...(hasStringPropertyFilter ? { propertyStringEquals } : {}),
     ...(recordTriggered ? { recordTriggered: true as const } : {}),
+    ...(descriptionPresence !== undefined ? { descriptionPresence } : {}),
   };
 
   const queryResult = await listNodesByType(ctx.graph, input.type, {
@@ -537,7 +569,14 @@ export const listComponentsHandler = async (
   let retrievalHint: string | undefined;
   // Skip the coverage hint when a property filter is active: an empty result
   // means "no component matched the filter", NOT a type-coverage gap.
-  if (offset === 0 && pageNodes.length === 0 && !hasPropertyFilter && !hasStringPropertyFilter && !recordTriggered) {
+  if (
+    offset === 0 &&
+    pageNodes.length === 0 &&
+    !hasPropertyFilter &&
+    !hasStringPropertyFilter &&
+    !recordTriggered &&
+    descriptionPresence === undefined
+  ) {
     const cov = summarizeCoverage(ctx.manifest, [input.type]);
     if (cov.notModeledTypes.includes(input.type)) {
       retrievalHint =

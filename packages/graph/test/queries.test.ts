@@ -1147,3 +1147,97 @@ describe('listNodesByType propertyEquals filter (P4-interface-impl)', () => {
     expect(r.value.map((n) => n.id)).toEqual(['ApexClass:QueueOnly']);
   });
 });
+
+describe('descriptionPresence filter', () => {
+  // Four Report nodes exercise every way a description can be "absent": a real
+  // non-empty string (present), an explicit JSON null (custom-extractor shape),
+  // an empty string, and the key entirely omitted (enterprise-extractor shape).
+  // The three absent shapes must all fall into the 'absent' bucket so the
+  // list_components missingDescription filter behaves identically regardless of
+  // which extractor produced the node.
+  let localDir: string;
+  let localStore: GraphStore;
+
+  beforeAll(async () => {
+    localDir = mkdtempSync(join(tmpdir(), 'sfi-graph-descpresence-'));
+    const dbPath = join(localDir, 'desc.db');
+    const instance = await DuckDBInstance.create(dbPath);
+    const connection = await instance.connect();
+    const initResult = await initSchema(connection);
+    expect(initResult.ok).toBe(true);
+    localStore = { connection, instance };
+    const descSeed: ExtractionResult = {
+      nodes: [
+        makeNode({
+          id: 'Report:HasDesc',
+          type: 'Report',
+          apiName: 'HasDesc',
+          properties: { description: 'A real description.' },
+        }),
+        makeNode({
+          id: 'Report:NullDesc',
+          type: 'Report',
+          apiName: 'NullDesc',
+          properties: { description: null },
+        }),
+        makeNode({
+          id: 'Report:EmptyDesc',
+          type: 'Report',
+          apiName: 'EmptyDesc',
+          properties: { description: '' },
+        }),
+        makeNode({
+          id: 'Report:NoDescKey',
+          type: 'Report',
+          apiName: 'NoDescKey',
+          properties: { rawReferenceCount: 0 },
+        }),
+      ],
+      edges: [],
+    };
+    const imported = await importExtractionResults(localStore, [descSeed]);
+    expect(imported.ok).toBe(true);
+  });
+
+  afterAll(async () => {
+    await closeGraph(localStore);
+    rmSync(localDir, { recursive: true, force: true });
+  });
+
+  it("'present' keeps only nodes with a non-empty description", async () => {
+    const r = await listNodesByType(localStore, 'Report', {
+      descriptionPresence: 'present',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.map((n) => n.id)).toEqual(['Report:HasDesc']);
+  });
+
+  it("'absent' folds null, empty-string, and missing-key into one bucket", async () => {
+    const r = await listNodesByType(localStore, 'Report', {
+      descriptionPresence: 'absent',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.map((n) => n.id)).toEqual([
+      'Report:EmptyDesc',
+      'Report:NoDescKey',
+      'Report:NullDesc',
+    ]);
+  });
+
+  it('present + absent counts are complementary and sum to the type total', async () => {
+    const present = await countNodesByType(localStore, 'Report', {
+      descriptionPresence: 'present',
+    });
+    const absent = await countNodesByType(localStore, 'Report', {
+      descriptionPresence: 'absent',
+    });
+    const total = await countNodesByType(localStore, 'Report');
+    expect(present.ok && absent.ok && total.ok).toBe(true);
+    if (!present.ok || !absent.ok || !total.ok) return;
+    expect(present.value).toBe(1);
+    expect(absent.value).toBe(3);
+    expect(present.value + absent.value).toBe(total.value);
+  });
+});

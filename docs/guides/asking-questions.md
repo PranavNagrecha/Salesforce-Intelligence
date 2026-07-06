@@ -84,6 +84,17 @@ Tools: `sfi.list_components` (enumerate by `type`),
 `sfi.search_components` (fuzzy search when the user doesn't know the
 exact name).
 
+`sfi.list_components` also answers **documentation-coverage** questions —
+"which reports / objects / permission sets / validation rules have no
+description?" — via the `missingDescription: true` (or `hasDescription:
+true`) filter on any `type`. The org's top-level `<description>` is now
+captured into `properties.description` for every metadata type that
+carries one, so the filter returns a real roster instead of an honest
+gap. Honesty caveat: for a type whose source has **no** `<description>`
+element at all (e.g. `ListView`, `CustomPermission`), `missingDescription`
+matches *every* node — the answer means "no description in this metadata
+type", not "someone left it blank".
+
 ### Dependency questions
 
 What references what? What breaks if I rename this? What layouts use
