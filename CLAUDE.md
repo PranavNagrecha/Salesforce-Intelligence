@@ -31,8 +31,13 @@ and cited with its canonical ID (`CustomObject:Account`,
 
 SfIntelligence is **read-only and offline-first**. Vault answers come from
 the last refresh's vault. An **opt-in live read-only plane** (`sfi.live_*`)
-can answer capped record counts and samples when explicitly enabled — see
-`docs/configuration.md`. It does NOT:
+can answer capped record counts and samples when explicitly enabled — plus
+**assignment-data questions the vault cannot answer offline**: who holds a
+permission set / group / profile (`sfi.live_permset_holders`), who is in a
+queue or public group (`sfi.live_group_members`), everything a user holds
+(`sfi.live_user_permsets`), and active users with login access but no
+non-profile permission sets (`sfi.live_zombie_accounts`). All are read-only,
+consent- and budget-gated SOQL — see `docs/configuration.md`. It does NOT:
 
 - Call Salesforce unless the live plane is enabled (`sfi.live_consent`,
   `SFI_LIVE_PLANE_ENABLED=1`, or `liveEnabled: true`). Vault tools never
