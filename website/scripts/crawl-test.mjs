@@ -95,6 +95,9 @@ for (const path of sitemapUrls) {
   // collect internal links for link-integrity + orphan checks
   for (const m of body.matchAll(/href="(\/[^"#]*)(#[^"]*)?"/g)) {
     const p = m[1].replace(/\/$/, "") || "/";
+    // Cloudflare rewrites mailto: into /cdn-cgi/l/email-protection#… — a JS-only
+    // endpoint that 404s on a bare fetch by design. Not a real broken link.
+    if (p.startsWith("/cdn-cgi/")) continue;
     if (!/\.(png|svg|xml|txt|webmanifest|ico|json)$/i.test(p)) internalLinks.add(p);
   }
 }
