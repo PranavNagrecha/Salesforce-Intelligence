@@ -119,14 +119,61 @@ const orphans = sitemapUrls.filter((u) => {
 if (orphans.length) orphans.forEach((o) => fail(o, `orphan — in sitemap but not linked from any page`));
 else ok(`no orphan pages (every sitemap URL is internally linked)`);
 
-// ---- 5. robots.txt welcomes AI crawlers, once each ----
+// ---- 5. robots.txt welcomes AI crawlers + points at Astro sitemap index ----
 const robotsTxt = (await get("/robots.txt")).body;
 for (const bot of ["GPTBot", "ClaudeBot", "PerplexityBot", "Google-Extended", "Bingbot"]) {
   const disallowed = new RegExp(`User-agent:\\s*${bot}[\\s\\S]*?Disallow:\\s*/\\s`, "i").test(robotsTxt);
   if (disallowed) fail("/robots.txt", `${bot} is Disallowed (blocks AI crawler)`);
 }
-if (!/Sitemap:/i.test(robotsTxt)) fail("/robots.txt", `no Sitemap: directive`);
+if (!/Sitemap:\s*https?:\/\/[^\s]+\/sitemap-index\.xml/i.test(robotsTxt)) {
+  fail("/robots.txt", `Sitemap: must point at /sitemap-index.xml (Astro), not a hand-written /sitemap.xml`);
+}
 ok(`robots.txt checked`);
+
+// ---- 6. legacy /sitemap.xml must redirect to the Astro index ----
+{
+  const legacy = await get("/sitemap.xml");
+  const loc = legacy.location || "";
+  const toIndex =
+    legacy.status >= 300 &&
+    legacy.status < 400 &&
+    (/\/sitemap-index\.xml\/?$/.test(new URL(loc, BASE).pathname) ||
+      /\/sitemap-0\.xml\/?$/.test(new URL(loc, BASE).pathname));
+  // Local `astro preview` may not honor Cloudflare _redirects — accept 200 of
+  // the Astro index body only if the file is absent (no stale hand sitemap).
+  if (toIndex) ok(`/sitemap.xml redirects → ${new URL(loc, BASE).pathname}`);
+  else if (legacy.status === 404) ok(`/sitemap.xml absent (no stale hand sitemap)`);
+  else if (legacy.status === 200 && /<sitemapindex[\s>]/i.test(legacy.body)) {
+    ok(`/sitemap.xml serves sitemap index directly`);
+  } else if (legacy.status === 200 && /<urlset[\s>]/i.test(legacy.body) && /ai-safety/.test(legacy.body)) {
+    ok(`/sitemap.xml is a complete urlset (includes ai-safety)`);
+  } else {
+    fail(
+      "/sitemap.xml",
+      `expected 301→sitemap-index, 404, or full Astro sitemap; got ${legacy.status}` +
+        (loc ? ` location=${loc}` : "") +
+        (legacy.body ? ` body=${legacy.body.slice(0, 80).replace(/\s+/g, " ")}…` : ""),
+    );
+  }
+}
+
+// ---- 7. 404 must be noindex and must not self-canonicalize ----
+{
+  const missing = await get("/__crawl-test-missing-page__");
+  const body = missing.body || (await get("/404")).body;
+  if (!(missing.status === 404 || missing.status === 200)) {
+    fail("/404", `unexpected status ${missing.status} for missing path`);
+  } else {
+    const robots = [...body.matchAll(/<meta[^>]+name="robots"[^>]*>/gi)];
+    if (!robots.length) fail("/404", `missing robots meta`);
+    else if (!/noindex/i.test(robots[0][0])) fail("/404", `robots meta must be noindex (got ${robots[0][0]})`);
+    const canons = [...body.matchAll(/<link[^>]+rel="canonical"[^>]*>/gi)];
+    if (canons.length) fail("/404", `must not emit a canonical (found ${canons.length})`);
+    if (robots.length && /noindex/i.test(robots[0][0]) && !canons.length) {
+      ok(`404 page is noindex with no canonical`);
+    }
+  }
+}
 
 // ---- summary ----
 console.log("");

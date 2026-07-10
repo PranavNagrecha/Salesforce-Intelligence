@@ -25,7 +25,7 @@ interface Props {
   jsonld?: Record<string, unknown>[];
   /** Override the shared OG image. */
   ogImage?: string;
-  /** Set false only for pages that must not be indexed (none today). */
+  /** Set false for error pages (404) — emits noindex and omits canonical. */
   index?: boolean;
 }
 
@@ -39,7 +39,6 @@ const {
   index = true,
 } = Astro.props;
 
-const canonical = new URL(path, site.url).href.replace(/\/$/, path === "/" ? "/" : "");
 const canonicalClean = path === "/" ? site.url + "/" : new URL(path, site.url).href;
 const image = new URL(ogImage ?? "/assets/img/og-image.png", site.url).href;
 
@@ -90,7 +89,7 @@ for (const node of jsonld) graph.push(node);
 <title>{title}</title>
 <meta name="description" content={description} />
 {site.googleVerification && <meta name="google-site-verification" content={site.googleVerification} />}
-<link rel="canonical" href={canonicalClean} />
+{index && <link rel="canonical" href={canonicalClean} />}
 <meta
   name="robots"
   content={index ? "index, follow, max-image-preview:large, max-snippet:-1" : "noindex, nofollow"}
@@ -103,7 +102,7 @@ for (const node of jsonld) graph.push(node);
 <meta property="og:site_name" content={site.name} />
 <meta property="og:title" content={title} />
 <meta property="og:description" content={description} />
-<meta property="og:url" content={canonicalClean} />
+{index && <meta property="og:url" content={canonicalClean} />}
 <meta property="og:image" content={image} />
 <meta property="og:image:width" content="1200" />
 <meta property="og:image:height" content="630" />

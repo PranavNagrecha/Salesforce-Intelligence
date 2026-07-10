@@ -27,6 +27,8 @@ export default defineConfig({
   integrations: [
     mdx(),
     sitemap({
+      // Never list the error page (Astro usually skips it; keep the guard explicit).
+      filter: (page) => !page.includes("/404"),
       serialize(item) {
         for (const [re, priority, changefreq] of PRIORITY) {
           if (re.test(new URL(item.url).pathname)) {

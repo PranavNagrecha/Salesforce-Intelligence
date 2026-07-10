@@ -12,9 +12,11 @@ interface Props {
   breadcrumbs?: Breadcrumb[];
   jsonld?: Record<string, unknown>[];
   ogImage?: string;
+  /** Set false for error pages that must not be indexed. */
+  index?: boolean;
 }
 
-const { title, description, path, breadcrumbs, jsonld, ogImage } = Astro.props;
+const { title, description, path, breadcrumbs, jsonld, ogImage, index = true } = Astro.props;
 ---
 
 <!doctype html>
@@ -27,6 +29,7 @@ const { title, description, path, breadcrumbs, jsonld, ogImage } = Astro.props;
       breadcrumbs={breadcrumbs}
       jsonld={jsonld}
       ogImage={ogImage}
+      index={index}
     />
   </head>
   <body>
