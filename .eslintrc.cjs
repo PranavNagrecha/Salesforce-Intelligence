@@ -82,5 +82,7 @@ module.exports = {
     '@typescript-eslint/no-for-in-array': 'error',
     'no-throw-literal': 'error',
   },
-  ignorePatterns: ['dist/', 'node_modules/', '*.cjs'],
+  // website/ is a self-contained Astro npm project with its own tooling/tsconfig
+  // (Astro idioms like `export default` differ from the product's lint rules).
+  ignorePatterns: ['dist/', 'node_modules/', '*.cjs', 'website/'],
 };

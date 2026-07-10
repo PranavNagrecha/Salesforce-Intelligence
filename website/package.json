@@ -5,6 +5,7 @@
   "private": true,
   "scripts": {
     "dev": "astro dev",
+    "prebuild": "npm install --no-audit --no-fund --prefer-offline",
     "build": "astro build",
     "preview": "astro preview",
     "check": "astro check",
