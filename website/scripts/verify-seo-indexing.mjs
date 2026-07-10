@@ -18,7 +18,10 @@ const warnings = [];
 function locToFile(loc) {
   const u = new URL(loc);
   if (u.pathname === "/") return path.join(SITE, "index.html");
-  return path.join(SITE, u.pathname.replace(/^\//, ""));
+  const rel = u.pathname.replace(/^\//, "");
+  const direct = path.join(SITE, rel);
+  if (fs.existsSync(direct)) return direct;
+  return path.join(SITE, `${rel}.html`);
 }
 
 // 1. robots.txt points at sitemap
@@ -38,6 +41,10 @@ for (const loc of locs) {
   if (seen.has(loc)) errors.push(`duplicate sitemap loc: ${loc}`);
   seen.add(loc);
   if (!loc.startsWith(BASE)) errors.push(`sitemap loc not on BASE: ${loc}`);
+  const u = new URL(loc);
+  if (u.pathname !== "/" && u.pathname.endsWith(".html")) {
+    errors.push(`sitemap loc should use extensionless canonical URL: ${loc}`);
+  }
   const file = locToFile(loc);
   if (!fs.existsSync(file)) errors.push(`sitemap loc missing file: ${loc} → ${path.relative(SITE, file)}`);
 }
@@ -62,6 +69,12 @@ for (const loc of locs) {
   else if (!/Salesforce|sf-intelligence|MCP|install|Configuration|FAQ|Glossary|impact|sharing|trust|capabilities|tools/i.test(title[1])) {
     warnings.push(`${rel}: title may lack primary keyword: ${title[1]}`);
   }
+  const desc = html.match(/<meta name="description" content="([^"]+)"/);
+  if (!desc) {
+    errors.push(`${rel}: missing meta description`);
+  } else if (desc[1].length > 160) {
+    errors.push(`${rel}: meta description too long (${desc[1].length} chars)`);
+  }
   const h1 = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/);
   if (!h1) errors.push(`${rel}: missing <h1>`);
   if (!html.includes('lang="en"')) warnings.push(`${rel}: missing lang=en`);
@@ -71,14 +84,14 @@ for (const loc of locs) {
 
 // 4. Homepage internal links to new pages
 const index = fs.readFileSync(path.join(SITE, "index.html"), "utf8");
-for (const href of ["/mcp.html", "/use-cases/impact-analysis.html", "/use-cases/sharing-troubleshooting.html", "/compare/salesforce-dx-mcp.html", "/glossary.html"]) {
+for (const href of ["/mcp", "/use-cases/impact-analysis", "/use-cases/salesforce-metadata-analysis", "/use-cases/salesforce-dependency-analysis", "/use-cases/sharing-troubleshooting", "/use-cases/claude-salesforce-mcp", "/compare/salesforce-dx-mcp", "/glossary"]) {
   if (!index.includes(`href="${href}"`)) errors.push(`index.html missing link to ${href}`);
 }
 
-// 5. llms.txt lists sitemap pages (except tools.html optional)
+// 5. llms.txt lists sitemap pages (except tools optional)
 const llms = fs.readFileSync(path.join(SITE, "llms.txt"), "utf8");
 for (const loc of locs) {
-  if (loc.endsWith("/tools.html")) continue;
+  if (loc.endsWith("/tools")) continue;
   if (!llms.includes(loc)) warnings.push(`llms.txt missing ${loc}`);
 }
 

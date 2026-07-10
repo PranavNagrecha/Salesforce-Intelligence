@@ -5,8 +5,8 @@
  <meta name="viewport" content="width=device-width, initial-scale=1">
 
  <title>Configuration - sf-intelligence (HTTP serve, staged refresh, git history &amp; annotations)</title>
- <meta name="description" content="sf-intelligence configuration: opt-in read-only live plane, sfi serve --http (remote read-only MCP), staged refresh for large orgs, vault git history, annotations overlay, usage-ranked reports pull, AST-parsed Apex edges, fleet registry, and audit log.">
- <link rel="canonical" href="https://salesforce-intelligence.pages.dev/configuration.html">
+ <meta name="description" content="Configure sf-intelligence: live plane, HTTP serving, staged refresh, vault git history, annotations, report pull, Apex edges, fleet settings, and audit log.">
+ <link rel="canonical" href="https://salesforce-intelligence.pages.dev/configuration">
  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
  <meta name="author" content="sf-intelligence">
  <meta name="theme-color" content="#05070A">
@@ -15,7 +15,7 @@
  <meta property="og:site_name" content="sf-intelligence">
  <meta property="og:title" content="Configuration - sf-intelligence">
  <meta property="og:description" content="Environment variables, the opt-in read-only live plane, hybrid answers, cost controls, audit log, and multi-vault / fleet settings.">
- <meta property="og:url" content="https://salesforce-intelligence.pages.dev/configuration.html">
+ <meta property="og:url" content="https://salesforce-intelligence.pages.dev/configuration">
  <meta property="og:image" content="https://salesforce-intelligence.pages.dev/assets/img/og-image.png">
  <meta property="og:image:width" content="1200">
  <meta property="og:image:height" content="630">
@@ -40,8 +40,8 @@
  "@type": "BreadcrumbList",
  "itemListElement": [
  { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://salesforce-intelligence.pages.dev/" },
- { "@type": "ListItem", "position": 2, "name": "Getting started", "item": "https://salesforce-intelligence.pages.dev/getting-started.html" },
- { "@type": "ListItem", "position": 3, "name": "Configuration", "item": "https://salesforce-intelligence.pages.dev/configuration.html" }
+ { "@type": "ListItem", "position": 2, "name": "Getting started", "item": "https://salesforce-intelligence.pages.dev/getting-started" },
+ { "@type": "ListItem", "position": 3, "name": "Configuration", "item": "https://salesforce-intelligence.pages.dev/configuration" }
  ]
  }
  </script>
@@ -54,30 +54,30 @@
  <a class="brand" href="/" aria-label="sf-intelligence home"><span class="mk">&gt;_</span>&nbsp;sf-intelligence</a>
  <nav aria-label="Primary">
  <ul class="nav-links">
- <li><a href="/capabilities.html">capabilities</a></li>
- <li><a href="/tools.html">tools</a></li>
- <li><a href="/trust.html">trust</a></li>
- <li><a href="/getting-started.html">get-started</a></li>
- <li><a href="/faq.html">faq</a></li>
+ <li><a href="/capabilities">capabilities</a></li>
+ <li><a href="/tools">tools</a></li>
+ <li><a href="/trust">trust</a></li>
+ <li><a href="/getting-started">get-started</a></li>
+ <li><a href="/faq">faq</a></li>
  </ul>
  </nav>
  <div class="nav-cta">
  <a class="btn btn-ghost" href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">npm</a>
- <a class="btn btn-solid" href="/getting-started.html#install">install</a>
+ <a class="btn btn-solid" href="/getting-started#install">install</a>
  <button class="nav-toggle" aria-label="Open menu" aria-controls="mobile-menu" aria-expanded="false">menu</button>
  </div>
  </div>
  <div class="container">
  <div id="mobile-menu" class="mobile-menu">
  <ul>
- <li><a href="/capabilities.html">capabilities</a></li>
- <li><a href="/tools.html">tools</a></li>
- <li><a href="/trust.html">trust</a></li>
- <li><a href="/getting-started.html">get-started</a></li>
- <li><a href="/configuration.html">configuration</a></li>
- <li><a href="/faq.html">faq</a></li>
+ <li><a href="/capabilities">capabilities</a></li>
+ <li><a href="/tools">tools</a></li>
+ <li><a href="/trust">trust</a></li>
+ <li><a href="/getting-started">get-started</a></li>
+ <li><a href="/configuration">configuration</a></li>
+ <li><a href="/faq">faq</a></li>
  </ul>
- <a class="btn btn-solid" href="/getting-started.html#install" style="width:100%; justify-content:center;">install</a>
+ <a class="btn btn-solid" href="/getting-started#install" style="width:100%; justify-content:center;">install</a>
  </div>
  </div>
  </header>
@@ -85,9 +85,9 @@
  <main id="main">
  <section class="subhero">
  <div class="container">
- <nav class="crumbs" aria-label="Breadcrumb"><a href="/">home</a><span>/</span><a href="/getting-started.html">getting-started</a><span>/</span>configuration</nav>
+ <nav class="crumbs" aria-label="Breadcrumb"><a href="/">home</a><span>/</span><a href="/getting-started">getting-started</a><span>/</span>configuration</nav>
  <h1 class="screen-type">Configuration reference</h1>
- <p>Environment variables and on-disk paths for sf-intelligence. Most installs need <strong>none</strong> of these - the defaults are safe for offline vault use. New here? Start with the <a href="/getting-started.html">install guide</a>.</p>
+ <p>Environment variables and on-disk paths for sf-intelligence. Most installs need <strong>none</strong> of these - the defaults are safe for offline vault use. New here? Start with the <a href="/getting-started">install guide</a>.</p>
  </div>
  </section>
 
@@ -223,7 +223,7 @@
  </table>
 
  <h2 id="mcp">MCP server registration</h2>
- <p>The full register-once steps live in the <a href="/getting-started.html#install">install guide</a>. The MCP server resolves the vault as <code>org-kb/</code> relative to the <strong>current working directory</strong> (your Salesforce DX repo), not the install path.</p>
+ <p>The full register-once steps live in the <a href="/getting-started#install">install guide</a>. The MCP server resolves the vault as <code>org-kb/</code> relative to the <strong>current working directory</strong> (your Salesforce DX repo), not the install path.</p>
 
  <div class="callout"><p><strong>Note:</strong> a handful of additional variables exist for development, evaluation, and release gates (scale budgets, SAST thresholds, eval reporters). Those aren't used in normal sessions.</p></div>
 
@@ -232,8 +232,8 @@
  <h2 class="screen-type">Most of this is optional.</h2>
  <p>The defaults are safe and offline. Reach for these only when you want live data or multiple orgs.</p>
  <div class="cta-actions">
- <a class="btn btn-solid" href="/getting-started.html">back to install</a>
- <a class="btn btn-ghost" href="/tools.html">all tools</a>
+ <a class="btn btn-solid" href="/getting-started">back to install</a>
+ <a class="btn btn-ghost" href="/tools">all tools</a>
  </div>
  </div>
  </div>
@@ -250,9 +250,9 @@
  <a class="brand" href="/" style="margin-bottom:12px;"><span class="mk">&gt;_</span>&nbsp;sf-intelligence</a>
  <p>An offline, read-only, MCP-first knowledge base for one Salesforce org. Answers grounded in real metadata - never a guess.</p>
  </div>
- <div><h4>product</h4><ul><li><a href="/capabilities.html">capabilities</a></li><li><a href="/tools.html">all tools</a></li><li><a href="/trust.html">quality &amp; trust</a></li><li><a href="/#install">install</a></li></ul></div>
- <div><h4>docs</h4><ul><li><a href="/getting-started.html">getting started</a></li><li><a href="/configuration.html">configuration</a></li><li><a href="/faq.html">faq</a></li><li><a href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">npm package</a></li></ul></div>
- <div><h4>about</h4><ul><li><a href="/faq.html#privacy">privacy</a></li><li><a href="/licensing.html">license</a></li></ul></div>
+ <div><h4>product</h4><ul><li><a href="/capabilities">capabilities</a></li><li><a href="/tools">all tools</a></li><li><a href="/trust">quality &amp; trust</a></li><li><a href="/#install">install</a></li></ul></div>
+ <div><h4>docs</h4><ul><li><a href="/getting-started">getting started</a></li><li><a href="/configuration">configuration</a></li><li><a href="/faq">faq</a></li><li><a href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">npm package</a></li></ul></div>
+ <div><h4>about</h4><ul><li><a href="/faq#privacy">privacy</a></li><li><a href="/licensing">license</a></li></ul></div>
  </div>
  <div class="footer-bottom">
  <span><span class="ok">●</span> © <span id="year">2026</span> sf-intelligence - all systems offline</span>

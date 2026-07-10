@@ -4,9 +4,9 @@
  <meta charset="utf-8">
  <meta name="viewport" content="width=device-width, initial-scale=1">
 
- <title>Install sf-intelligence - setup guide for your Salesforce org</title>
- <meta name="description" content="Install sf-intelligence from npm: prerequisites (Node.js 20+, authenticated Salesforce CLI, a DX repo), register the MCP server in Claude Code / Claude Desktop / Cursor, verify the install, run your first read-only metadata retrieve, keep the vault fresh, and troubleshoot common issues.">
- <link rel="canonical" href="https://salesforce-intelligence.pages.dev/getting-started.html">
+ <title>Install sf-intelligence - Salesforce MCP setup guide</title>
+ <meta name="description" content="Install the sf-intelligence Salesforce MCP server, register it in an AI client, run a read-only metadata retrieve, and keep the local vault fresh.">
+ <link rel="canonical" href="https://salesforce-intelligence.pages.dev/getting-started">
  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
  <meta name="author" content="sf-intelligence">
  <meta name="theme-color" content="#05070A">
@@ -15,7 +15,7 @@
  <meta property="og:site_name" content="sf-intelligence">
  <meta property="og:title" content="Install sf-intelligence - setup guide">
  <meta property="og:description" content="Prerequisites, npm install, register the MCP server, first read-only retrieve, and troubleshooting. Node.js 20+ and the Salesforce CLI.">
- <meta property="og:url" content="https://salesforce-intelligence.pages.dev/getting-started.html">
+ <meta property="og:url" content="https://salesforce-intelligence.pages.dev/getting-started">
  <meta property="og:image" content="https://salesforce-intelligence.pages.dev/assets/img/og-image.png">
  <meta property="og:image:width" content="1200">
  <meta property="og:image:height" content="630">
@@ -40,7 +40,7 @@
  "@type": "BreadcrumbList",
  "itemListElement": [
  { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://salesforce-intelligence.pages.dev/" },
- { "@type": "ListItem", "position": 2, "name": "Getting started", "item": "https://salesforce-intelligence.pages.dev/getting-started.html" }
+ { "@type": "ListItem", "position": 2, "name": "Getting started", "item": "https://salesforce-intelligence.pages.dev/getting-started" }
  ]
  }
  </script>
@@ -57,11 +57,11 @@
  { "@type": "HowToTool", "name": "A Salesforce DX project repository" }
  ],
  "step": [
- { "@type": "HowToStep", "name": "Check prerequisites", "text": "Confirm Node.js 20+ (node --version), an authenticated Salesforce CLI (sf org list --json shows Connected), and a Salesforce DX repo.", "url": "https://salesforce-intelligence.pages.dev/getting-started.html#prerequisites" },
- { "@type": "HowToStep", "name": "Register the MCP server", "text": "claude mcp add --transport stdio --scope project sf-intelligence -- npx -y sf-intelligence mcp", "url": "https://salesforce-intelligence.pages.dev/getting-started.html#install" },
- { "@type": "HowToStep", "name": "Verify the install", "text": "Run /mcp in Claude Code, or ask the model to run sfi.health_check.", "url": "https://salesforce-intelligence.pages.dev/getting-started.html#verify" },
- { "@type": "HowToStep", "name": "First-run setup", "text": "From your DX repo: sfi init, then sfi refresh --target-org my-org-alias, then sfi status.", "url": "https://salesforce-intelligence.pages.dev/getting-started.html#first-run" },
- { "@type": "HowToStep", "name": "Ask questions", "text": "Ask questions about the org in plain language from any registered MCP client.", "url": "https://salesforce-intelligence.pages.dev/getting-started.html#ask" }
+ { "@type": "HowToStep", "name": "Check prerequisites", "text": "Confirm Node.js 20+ (node --version), an authenticated Salesforce CLI (sf org list --json shows Connected), and a Salesforce DX repo.", "url": "https://salesforce-intelligence.pages.dev/getting-started#prerequisites" },
+ { "@type": "HowToStep", "name": "Register the MCP server", "text": "claude mcp add --transport stdio --scope project sf-intelligence -- npx -y sf-intelligence mcp", "url": "https://salesforce-intelligence.pages.dev/getting-started#install" },
+ { "@type": "HowToStep", "name": "Verify the install", "text": "Run /mcp in Claude Code, or ask the model to run sfi.health_check.", "url": "https://salesforce-intelligence.pages.dev/getting-started#verify" },
+ { "@type": "HowToStep", "name": "First-run setup", "text": "From your DX repo: sfi init, then sfi refresh --target-org my-org-alias, then sfi status.", "url": "https://salesforce-intelligence.pages.dev/getting-started#first-run" },
+ { "@type": "HowToStep", "name": "Ask questions", "text": "Ask questions about the org in plain language from any registered MCP client.", "url": "https://salesforce-intelligence.pages.dev/getting-started#ask" }
  ]
  }
  </script>
@@ -74,11 +74,11 @@
  <a class="brand" href="/" aria-label="sf-intelligence home"><span class="mk">&gt;_</span>&nbsp;sf-intelligence</a>
  <nav aria-label="Primary">
  <ul class="nav-links">
- <li><a href="/capabilities.html">capabilities</a></li>
- <li><a href="/tools.html">tools</a></li>
- <li><a href="/trust.html">trust</a></li>
- <li><a href="/getting-started.html">get-started</a></li>
- <li><a href="/faq.html">faq</a></li>
+ <li><a href="/capabilities">capabilities</a></li>
+ <li><a href="/tools">tools</a></li>
+ <li><a href="/trust">trust</a></li>
+ <li><a href="/getting-started">get-started</a></li>
+ <li><a href="/faq">faq</a></li>
  </ul>
  </nav>
  <div class="nav-cta">
@@ -90,12 +90,12 @@
  <div class="container">
  <div id="mobile-menu" class="mobile-menu">
  <ul>
- <li><a href="/capabilities.html">capabilities</a></li>
- <li><a href="/tools.html">tools</a></li>
- <li><a href="/trust.html">trust</a></li>
- <li><a href="/getting-started.html">get-started</a></li>
- <li><a href="/configuration.html">configuration</a></li>
- <li><a href="/faq.html">faq</a></li>
+ <li><a href="/capabilities">capabilities</a></li>
+ <li><a href="/tools">tools</a></li>
+ <li><a href="/trust">trust</a></li>
+ <li><a href="/getting-started">get-started</a></li>
+ <li><a href="/configuration">configuration</a></li>
+ <li><a href="/faq">faq</a></li>
  </ul>
  <a class="btn btn-solid" href="#install" style="width:100%; justify-content:center;">install</a>
  </div>
@@ -180,13 +180,13 @@
 <span class="tok-p">›</span> What breaks if I delete CustomField:Account.Industry__c?
 <span class="tok-p">›</span> Why can't the Standard User profile see Opportunities?
 <span class="tok-p">›</span> Give me a tour of this org.</pre></div>
- <p>See the <a href="/capabilities.html">capability map</a> and the <a href="/tools.html">full tool reference</a> for everything it can answer.</p>
+ <p>See the <a href="/capabilities">capability map</a> and the <a href="/tools">full tool reference</a> for everything it can answer.</p>
 
  <h2 id="fresh">6. Keeping the vault fresh</h2>
  <p>The vault is a point-in-time snapshot; the live org keeps changing. Two tools tell you when to re-pull, so a stale answer is never presented as current:</p>
  <ul>
  <li><code>sfi.health_check</code> reports a <code>freshness</code> block - the vault's age, a <code>stale</code> flag, and a plain-language nudge once it's more than a week old (advisory only).</li>
- <li><code>sfi.live_drift_check</code> compares the vault's recorded fields against a <strong>live</strong> describe of an object you name, reporting what's drifted. It reads the org, so it needs the opt-in <a href="/configuration.html#live">live plane</a>.</li>
+ <li><code>sfi.live_drift_check</code> compares the vault's recorded fields against a <strong>live</strong> describe of an object you name, reporting what's drifted. It reads the org, so it needs the opt-in <a href="/configuration#live">live plane</a>.</li>
  </ul>
  <p>When either flags drift, run <code>sfi refresh --target-org my-org-alias</code> (or <code>/sfi-refresh</code>) to re-pull and rebuild.</p>
 
@@ -206,7 +206,7 @@
  <p>Anything not on this table - run <code>sfi doctor</code>; it checks the <code>sf</code> CLI, the vault, target-org auth, freshness, and the graph file, and prints an actionable fix for each problem.</p>
 
  <h2 id="more">Configuration, live data &amp; the plugin</h2>
- <p>Vault answers are offline by default. To enable the read-only live plane (record counts, samples, org limits), set environment variables, or wire up multiple orgs, see the <a href="/configuration.html">configuration reference</a>.</p>
+ <p>Vault answers are offline by default. To enable the read-only live plane (record counts, samples, org limits), set environment variables, or wire up multiple orgs, see the <a href="/configuration">configuration reference</a>.</p>
  <p>Running it as a <strong>Claude Code plugin</strong>? The same operations are slash commands - <code>/sfi-onboard</code> (guided first run), <code>/sfi-init</code>, <code>/sfi-refresh</code>, <code>/sfi-status</code> - and the coaching skills auto-activate when Salesforce vocabulary appears.</p>
 
  <div style="padding-top:36px;">
@@ -214,8 +214,8 @@
  <h2 class="screen-type">That's the whole setup.</h2>
  <p>Browse what you can ask next, or tune the configuration.</p>
  <div class="cta-actions">
- <a class="btn btn-solid" href="/capabilities.html">see all capabilities</a>
- <a class="btn btn-ghost" href="/configuration.html">configuration reference</a>
+ <a class="btn btn-solid" href="/capabilities">see all capabilities</a>
+ <a class="btn btn-ghost" href="/configuration">configuration reference</a>
  </div>
  </div>
  </div>
@@ -232,9 +232,9 @@
  <a class="brand" href="/" style="margin-bottom:12px;"><span class="mk">&gt;_</span>&nbsp;sf-intelligence</a>
  <p>An offline, read-only, MCP-first knowledge base for one Salesforce org. Answers grounded in real metadata - never a guess.</p>
  </div>
- <div><h4>product</h4><ul><li><a href="/capabilities.html">capabilities</a></li><li><a href="/tools.html">all tools</a></li><li><a href="/trust.html">quality &amp; trust</a></li><li><a href="/#install">install</a></li></ul></div>
- <div><h4>docs</h4><ul><li><a href="/getting-started.html">getting started</a></li><li><a href="/configuration.html">configuration</a></li><li><a href="/faq.html">faq</a></li><li><a href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">npm package</a></li></ul></div>
- <div><h4>about</h4><ul><li><a href="/faq.html#privacy">privacy</a></li><li><a href="/licensing.html">license</a></li></ul></div>
+ <div><h4>product</h4><ul><li><a href="/capabilities">capabilities</a></li><li><a href="/tools">all tools</a></li><li><a href="/trust">quality &amp; trust</a></li><li><a href="/#install">install</a></li></ul></div>
+ <div><h4>docs</h4><ul><li><a href="/getting-started">getting started</a></li><li><a href="/configuration">configuration</a></li><li><a href="/faq">faq</a></li><li><a href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">npm package</a></li></ul></div>
+ <div><h4>about</h4><ul><li><a href="/faq#privacy">privacy</a></li><li><a href="/licensing">license</a></li></ul></div>
  </div>
  <div class="footer-bottom">
  <span><span class="ok">●</span> © <span id="year">2026</span> sf-intelligence - all systems offline</span>

@@ -4,9 +4,9 @@
  <meta charset="utf-8">
  <meta name="viewport" content="width=device-width, initial-scale=1">
 
- <title>FAQ - sf-intelligence, the offline Salesforce knowledge base</title>
- <meta name="description" content="Frequently asked questions about sf-intelligence: is it read-only, does it send my org data anywhere, what's the difference between offline and live planes, how does it differ from asking a chatbot, and how do I keep the vault fresh.">
- <link rel="canonical" href="https://salesforce-intelligence.pages.dev/faq.html">
+ <title>FAQ - sf-intelligence Salesforce org intelligence</title>
+ <meta name="description" content="FAQ for sf-intelligence: read-only guarantees, local metadata, offline vs live planes, AI accuracy, install requirements, cost, and freshness.">
+ <link rel="canonical" href="https://salesforce-intelligence.pages.dev/faq">
  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
  <meta name="author" content="sf-intelligence">
  <meta name="theme-color" content="#05070A">
@@ -15,7 +15,7 @@
  <meta property="og:site_name" content="sf-intelligence">
  <meta property="og:title" content="FAQ - sf-intelligence">
  <meta property="og:description" content="Is it read-only? Does it send my org data anywhere? Offline vs live planes, and how it differs from a chatbot.">
- <meta property="og:url" content="https://salesforce-intelligence.pages.dev/faq.html">
+ <meta property="og:url" content="https://salesforce-intelligence.pages.dev/faq">
  <meta property="og:image" content="https://salesforce-intelligence.pages.dev/assets/img/og-image.png">
  <meta property="og:image:width" content="1200">
  <meta property="og:image:height" content="630">
@@ -40,7 +40,7 @@
  "@type": "BreadcrumbList",
  "itemListElement": [
  { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://salesforce-intelligence.pages.dev/" },
- { "@type": "ListItem", "position": 2, "name": "FAQ", "item": "https://salesforce-intelligence.pages.dev/faq.html" }
+ { "@type": "ListItem", "position": 2, "name": "FAQ", "item": "https://salesforce-intelligence.pages.dev/faq" }
  ]
  }
  </script>
@@ -70,11 +70,11 @@
  <a class="brand" href="/" aria-label="sf-intelligence home"><span class="mk">&gt;_</span>&nbsp;sf-intelligence</a>
  <nav aria-label="Primary">
  <ul class="nav-links">
- <li><a href="/capabilities.html">capabilities</a></li><li><a href="/tools.html">tools</a></li>
+ <li><a href="/capabilities">capabilities</a></li><li><a href="/tools">tools</a></li>
  <li><a href="/#how">how-it-works</a></li>
- <li><a href="/trust.html">trust</a></li>
- <li><a href="/getting-started.html">get-started</a></li>
- <li><a href="/faq.html">faq</a></li>
+ <li><a href="/trust">trust</a></li>
+ <li><a href="/getting-started">get-started</a></li>
+ <li><a href="/faq">faq</a></li>
  </ul>
  </nav>
  <div class="nav-cta">
@@ -86,11 +86,11 @@
  <div class="container">
  <div id="mobile-menu" class="mobile-menu">
  <ul>
- <li><a href="/capabilities.html">capabilities</a></li><li><a href="/tools.html">tools</a></li>
+ <li><a href="/capabilities">capabilities</a></li><li><a href="/tools">tools</a></li>
  <li><a href="/#how">how-it-works</a></li>
- <li><a href="/trust.html">trust</a></li>
- <li><a href="/getting-started.html">get-started</a></li>
- <li><a href="/faq.html">faq</a></li>
+ <li><a href="/trust">trust</a></li>
+ <li><a href="/getting-started">get-started</a></li>
+ <li><a href="/faq">faq</a></li>
  </ul>
  <a class="btn btn-solid" href="/#install" style="width:100%; justify-content:center;">install</a>
  </div>
@@ -136,12 +136,12 @@
 
  <details class="faq-item" id="cost">
  <summary>How much does it cost?</summary>
- <div class="answer"><p>Free and source-available under the <a href="/licensing.html">MIT + Commons Clause</a> license, distributed on npm as <code>sf-intelligence</code>.</p></div>
+ <div class="answer"><p>Free and source-available under the <a href="/licensing">MIT + Commons Clause</a> license, distributed on npm as <code>sf-intelligence</code>.</p></div>
  </details>
 
  <details class="faq-item" id="requirements">
  <summary>What do I need to run it?</summary>
- <div class="answer"><p><a href="https://nodejs.org" rel="noopener">Node.js 20+</a> and an authenticated <a href="https://developer.salesforce.com/tools/salesforcecli" rel="noopener">Salesforce CLI</a> (<code>sf</code>) pointed at the org you want to index. It runs in Claude Code, Claude Desktop, or any MCP client. See the <a href="/getting-started.html">getting-started guide</a>.</p></div>
+ <div class="answer"><p><a href="https://nodejs.org" rel="noopener">Node.js 20+</a> and an authenticated <a href="https://developer.salesforce.com/tools/salesforcecli" rel="noopener">Salesforce CLI</a> (<code>sf</code>) pointed at the org you want to index. It runs in Claude Code, Claude Desktop, or any MCP client. See the <a href="/getting-started">getting-started guide</a>.</p></div>
  </details>
 
  <details class="faq-item" id="accuracy">
@@ -159,8 +159,8 @@
  <h2 class="screen-type">Still have a question?</h2>
  <p>The getting-started guide covers setup end to end, and the capability map shows everything it can answer.</p>
  <div class="cta-actions">
- <a class="btn btn-solid" href="/getting-started.html">getting started</a>
- <a class="btn btn-ghost" href="/capabilities.html">capabilities</a>
+ <a class="btn btn-solid" href="/getting-started">getting started</a>
+ <a class="btn btn-ghost" href="/capabilities">capabilities</a>
  </div>
  </div>
  </div>
@@ -175,9 +175,9 @@
  <a class="brand" href="/" style="margin-bottom:12px;"><span class="mk">&gt;_</span>&nbsp;sf-intelligence</a>
  <p>An offline, read-only, MCP-first knowledge base for one Salesforce org. Answers grounded in real metadata - never a guess.</p>
  </div>
- <div><h4>product</h4><ul><li><a href="/capabilities.html">capabilities</a></li><li><a href="/tools.html">tools</a></li><li><a href="/#how">how it works</a></li><li><a href="/trust.html">trust</a></li><li><a href="/#install">install</a></li></ul></div>
- <div><h4>docs</h4><ul><li><a href="/getting-started.html">getting started</a></li><li><a href="/configuration.html">configuration</a></li><li><a href="/faq.html">faq</a></li><li><a href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">npm package</a></li></ul></div>
- <div><h4>about</h4><ul><li><a href="/faq.html#privacy">privacy</a></li><li><a href="/licensing.html">license</a></li></ul></div>
+ <div><h4>product</h4><ul><li><a href="/capabilities">capabilities</a></li><li><a href="/tools">tools</a></li><li><a href="/#how">how it works</a></li><li><a href="/trust">trust</a></li><li><a href="/#install">install</a></li></ul></div>
+ <div><h4>docs</h4><ul><li><a href="/getting-started">getting started</a></li><li><a href="/configuration">configuration</a></li><li><a href="/faq">faq</a></li><li><a href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">npm package</a></li></ul></div>
+ <div><h4>about</h4><ul><li><a href="/faq#privacy">privacy</a></li><li><a href="/licensing">license</a></li></ul></div>
  </div>
  <div class="footer-bottom">
  <span><span class="ok">●</span> © <span id="year">2026</span> sf-intelligence - all systems offline</span>

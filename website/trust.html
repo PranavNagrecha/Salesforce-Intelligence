@@ -5,8 +5,8 @@
  <meta name="viewport" content="width=device-width, initial-scale=1">
 
  <title>Quality &amp; trust - how sf-intelligence is tested and kept honest</title>
- <meta name="description" content="How to trust sf-intelligence: ~5,200 automated tests across 10 packages, a full CI gate (typecheck, lint, unit, integration, e2e, evaluation, scale, SAST, and an org-data leak scan), a per-answer trust model (provenance, confidence, completeness), adversarial QA against real Salesforce orgs, and explicit boundaries.">
- <link rel="canonical" href="https://salesforce-intelligence.pages.dev/trust.html">
+ <meta name="description" content="How sf-intelligence earns trust: automated tests, CI gates, provenance, confidence, completeness labels, adversarial QA, leak scans, and clear limits.">
+ <link rel="canonical" href="https://salesforce-intelligence.pages.dev/trust">
  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
  <meta name="author" content="sf-intelligence">
  <meta name="theme-color" content="#05070A">
@@ -15,7 +15,7 @@
  <meta property="og:site_name" content="sf-intelligence">
  <meta property="og:title" content="Quality &amp; trust - how sf-intelligence is tested">
  <meta property="og:description" content="~5,200 automated tests, a full CI gate, a per-answer trust model, adversarial QA against real Salesforce orgs, and explicit boundaries. How to trust the answers.">
- <meta property="og:url" content="https://salesforce-intelligence.pages.dev/trust.html">
+ <meta property="og:url" content="https://salesforce-intelligence.pages.dev/trust">
  <meta property="og:image" content="https://salesforce-intelligence.pages.dev/assets/img/og-image.png">
  <meta property="og:image:width" content="1200">
  <meta property="og:image:height" content="630">
@@ -40,7 +40,7 @@
  "@type": "BreadcrumbList",
  "itemListElement": [
  { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://salesforce-intelligence.pages.dev/" },
- { "@type": "ListItem", "position": 2, "name": "Quality & trust", "item": "https://salesforce-intelligence.pages.dev/trust.html" }
+ { "@type": "ListItem", "position": 2, "name": "Quality & trust", "item": "https://salesforce-intelligence.pages.dev/trust" }
  ]
  }
  </script>
@@ -53,11 +53,11 @@
  <a class="brand" href="/" aria-label="sf-intelligence home"><span class="mk">&gt;_</span>&nbsp;sf-intelligence</a>
  <nav aria-label="Primary">
  <ul class="nav-links">
- <li><a href="/capabilities.html">capabilities</a></li>
- <li><a href="/tools.html">tools</a></li>
- <li><a href="/trust.html">trust</a></li>
- <li><a href="/getting-started.html">get-started</a></li>
- <li><a href="/faq.html">faq</a></li>
+ <li><a href="/capabilities">capabilities</a></li>
+ <li><a href="/tools">tools</a></li>
+ <li><a href="/trust">trust</a></li>
+ <li><a href="/getting-started">get-started</a></li>
+ <li><a href="/faq">faq</a></li>
  </ul>
  </nav>
  <div class="nav-cta">
@@ -69,11 +69,11 @@
  <div class="container">
  <div id="mobile-menu" class="mobile-menu">
  <ul>
- <li><a href="/capabilities.html">capabilities</a></li>
- <li><a href="/tools.html">tools</a></li>
- <li><a href="/trust.html">trust</a></li>
- <li><a href="/getting-started.html">get-started</a></li>
- <li><a href="/faq.html">faq</a></li>
+ <li><a href="/capabilities">capabilities</a></li>
+ <li><a href="/tools">tools</a></li>
+ <li><a href="/trust">trust</a></li>
+ <li><a href="/getting-started">get-started</a></li>
+ <li><a href="/faq">faq</a></li>
  </ul>
  <a class="btn btn-solid" href="/#install" style="width:100%; justify-content:center;">install</a>
  </div>
@@ -218,7 +218,7 @@
  <h2 class="screen-type">Trust, but verify.</h2>
  <p>Every claim above is in the source-available repo and runs in CI. Point it at your own org and check the answers against reality.</p>
  <div class="cta-actions">
- <a class="btn btn-solid" href="/getting-started.html">get started</a>
+ <a class="btn btn-solid" href="/getting-started">get started</a>
  <a class="btn btn-ghost" href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">view on npm</a>
  </div>
  </div>
@@ -233,9 +233,9 @@
  <a class="brand" href="/" style="margin-bottom:12px;"><span class="mk">&gt;_</span>&nbsp;sf-intelligence</a>
  <p>An offline, read-only, MCP-first knowledge base for one Salesforce org. Answers grounded in real metadata - never a guess.</p>
  </div>
- <div><h4>product</h4><ul><li><a href="/capabilities.html">capabilities</a></li><li><a href="/tools.html">all tools</a></li><li><a href="/trust.html">quality &amp; trust</a></li><li><a href="/#install">install</a></li></ul></div>
- <div><h4>docs</h4><ul><li><a href="/getting-started.html">getting started</a></li><li><a href="/configuration.html">configuration</a></li><li><a href="/faq.html">faq</a></li><li><a href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">npm package</a></li></ul></div>
- <div><h4>about</h4><ul><li><a href="/faq.html#privacy">privacy</a></li><li><a href="/licensing.html">license</a></li></ul></div>
+ <div><h4>product</h4><ul><li><a href="/capabilities">capabilities</a></li><li><a href="/tools">all tools</a></li><li><a href="/trust">quality &amp; trust</a></li><li><a href="/#install">install</a></li></ul></div>
+ <div><h4>docs</h4><ul><li><a href="/getting-started">getting started</a></li><li><a href="/configuration">configuration</a></li><li><a href="/faq">faq</a></li><li><a href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">npm package</a></li></ul></div>
+ <div><h4>about</h4><ul><li><a href="/faq#privacy">privacy</a></li><li><a href="/licensing">license</a></li></ul></div>
  </div>
  <div class="footer-bottom">
  <span><span class="ok">●</span> © <span id="year">2026</span> sf-intelligence - all systems offline</span>

@@ -5,8 +5,8 @@
  <meta name="viewport" content="width=device-width, initial-scale=1">
 
  <title>Why can't a user see a record in Salesforce? - sharing &amp; visibility troubleshooting</title>
- <meta name="description" content="Troubleshoot Salesforce record visibility with sf-intelligence: ask why a user cannot see a record, who can edit a field, or trace the sharing cascade. Read-only permission analysis grounded in Profiles, Permission Sets, OWD, and sharing rules.">
- <link rel="canonical" href="https://salesforce-intelligence.pages.dev/use-cases/sharing-troubleshooting.html">
+ <meta name="description" content="Troubleshoot Salesforce record visibility and sharing. Trace Profiles, Permission Sets, FLS, OWD, and sharing rules with read-only org intelligence.">
+ <link rel="canonical" href="https://salesforce-intelligence.pages.dev/use-cases/sharing-troubleshooting">
  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
  <meta name="author" content="sf-intelligence">
  <meta name="theme-color" content="#05070A">
@@ -15,7 +15,7 @@
  <meta property="og:site_name" content="sf-intelligence">
  <meta property="og:title" content="Salesforce record visibility troubleshooting">
  <meta property="og:description" content="Trace why a user cannot see a Salesforce record - permissions, sharing, FLS - from real org metadata.">
- <meta property="og:url" content="https://salesforce-intelligence.pages.dev/use-cases/sharing-troubleshooting.html">
+ <meta property="og:url" content="https://salesforce-intelligence.pages.dev/use-cases/sharing-troubleshooting">
  <meta property="og:image" content="https://salesforce-intelligence.pages.dev/assets/img/og-image.png">
  <meta name="twitter:card" content="summary_large_image">
  <meta name="twitter:image" content="https://salesforce-intelligence.pages.dev/assets/img/og-image.png">
@@ -33,8 +33,8 @@
  "@type": "BreadcrumbList",
  "itemListElement": [
  { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://salesforce-intelligence.pages.dev/" },
- { "@type": "ListItem", "position": 2, "name": "Use cases", "item": "https://salesforce-intelligence.pages.dev/capabilities.html" },
- { "@type": "ListItem", "position": 3, "name": "Sharing troubleshooting", "item": "https://salesforce-intelligence.pages.dev/use-cases/sharing-troubleshooting.html" }
+ { "@type": "ListItem", "position": 2, "name": "Use cases", "item": "https://salesforce-intelligence.pages.dev/capabilities" },
+ { "@type": "ListItem", "position": 3, "name": "Sharing troubleshooting", "item": "https://salesforce-intelligence.pages.dev/use-cases/sharing-troubleshooting" }
  ]
  }
  </script>
@@ -47,23 +47,23 @@
  <a class="brand" href="/" aria-label="sf-intelligence home"><span class="mk">&gt;_</span>&nbsp;sf-intelligence</a>
  <nav aria-label="Primary">
  <ul class="nav-links">
- <li><a href="/capabilities.html">capabilities</a></li>
- <li><a href="/tools.html">tools</a></li>
- <li><a href="/trust.html">trust</a></li>
- <li><a href="/getting-started.html">get-started</a></li>
- <li><a href="/faq.html">faq</a></li>
+ <li><a href="/capabilities">capabilities</a></li>
+ <li><a href="/tools">tools</a></li>
+ <li><a href="/trust">trust</a></li>
+ <li><a href="/getting-started">get-started</a></li>
+ <li><a href="/faq">faq</a></li>
  </ul>
  </nav>
  <div class="nav-cta">
  <a class="btn btn-ghost" href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">npm</a>
- <a class="btn btn-solid" href="/getting-started.html">install</a>
+ <a class="btn btn-solid" href="/getting-started">install</a>
  <button class="nav-toggle" aria-label="Open menu" aria-controls="mobile-menu" aria-expanded="false">menu</button>
  </div>
  </div>
  <div class="container">
  <div id="mobile-menu" class="mobile-menu">
- <ul><li><a href="/capabilities.html">capabilities</a></li><li><a href="/tools.html">tools</a></li><li><a href="/trust.html">trust</a></li><li><a href="/getting-started.html">get-started</a></li><li><a href="/faq.html">faq</a></li></ul>
- <a class="btn btn-solid" href="/getting-started.html" style="width:100%; justify-content:center;">install</a>
+ <ul><li><a href="/capabilities">capabilities</a></li><li><a href="/tools">tools</a></li><li><a href="/trust">trust</a></li><li><a href="/getting-started">get-started</a></li><li><a href="/faq">faq</a></li></ul>
+ <a class="btn btn-solid" href="/getting-started" style="width:100%; justify-content:center;">install</a>
  </div>
  </div>
  </header>
@@ -71,7 +71,7 @@
  <main id="main">
  <section class="subhero">
  <div class="container">
- <nav class="crumbs" aria-label="Breadcrumb"><a href="/">home</a><span>/</span><a href="/capabilities.html">use-cases</a><span>/</span>sharing-troubleshooting</nav>
+ <nav class="crumbs" aria-label="Breadcrumb"><a href="/">home</a><span>/</span><a href="/capabilities">use-cases</a><span>/</span>sharing-troubleshooting</nav>
  <h1 class="screen-type">Salesforce sharing &amp; visibility troubleshooting</h1>
  <p>Support tickets like "why can't this user see this record?" need more than generic advice. sf-intelligence traces the visibility cascade - Profiles, Permission Sets, OWD, sharing rules, restriction rules - from metadata retrieved from <em>your</em> org.</p>
  </div>
@@ -109,8 +109,8 @@
  <h2 class="screen-type">Stop guessing about access.</h2>
  <p>Read-only, offline, free. Ask permission questions in plain language from any MCP client.</p>
  <div class="cta-actions">
- <a class="btn btn-solid" href="/getting-started.html">get started</a>
- <a class="btn btn-ghost" href="/use-cases/impact-analysis.html">impact analysis</a>
+ <a class="btn btn-solid" href="/getting-started">get started</a>
+ <a class="btn btn-ghost" href="/use-cases/impact-analysis">impact analysis</a>
  </div>
  </div>
  </div>
@@ -124,9 +124,9 @@
  <div class="container">
  <div class="footer-grid">
  <div class="footer-about"><a class="brand" href="/" style="margin-bottom:12px;"><span class="mk">&gt;_</span>&nbsp;sf-intelligence</a><p>Offline Salesforce org intelligence.</p></div>
- <div><h4>use cases</h4><ul><li><a href="/use-cases/impact-analysis.html">impact analysis</a></li><li><a href="/use-cases/sharing-troubleshooting.html">sharing</a></li><li><a href="/mcp.html">MCP server</a></li></ul></div>
- <div><h4>docs</h4><ul><li><a href="/getting-started.html">getting started</a></li><li><a href="/faq.html">faq</a></li></ul></div>
- <div><h4>about</h4><ul><li><a href="/trust.html">trust</a></li><li><a href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">npm</a></li></ul></div>
+ <div><h4>use cases</h4><ul><li><a href="/use-cases/impact-analysis">impact analysis</a></li><li><a href="/use-cases/sharing-troubleshooting">sharing</a></li><li><a href="/mcp">MCP server</a></li></ul></div>
+ <div><h4>docs</h4><ul><li><a href="/getting-started">getting started</a></li><li><a href="/faq">faq</a></li></ul></div>
+ <div><h4>about</h4><ul><li><a href="/trust">trust</a></li><li><a href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">npm</a></li></ul></div>
  </div>
  <div class="footer-bottom"><span><span class="ok">●</span> © <span id="year">2026</span> sf-intelligence</span><span>MIT + Commons Clause</span></div>
  </div>

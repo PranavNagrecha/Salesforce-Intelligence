@@ -5,8 +5,8 @@
  <meta name="viewport" content="width=device-width, initial-scale=1">
 
  <title>Glossary - Salesforce MCP, metadata vault &amp; org intelligence terms</title>
- <meta name="description" content="Definitions for sf-intelligence and Salesforce org intelligence: MCP server, metadata vault, provenance, impact analysis, confidence tiers, offline vs live planes, and more. Written for AI citation and developer reference.">
- <link rel="canonical" href="https://salesforce-intelligence.pages.dev/glossary.html">
+ <meta name="description" content="Definitions for Salesforce org intelligence, MCP servers, metadata vaults, provenance, impact analysis, confidence tiers, and offline vs live planes.">
+ <link rel="canonical" href="https://salesforce-intelligence.pages.dev/glossary">
  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
  <meta name="author" content="sf-intelligence">
  <meta name="theme-color" content="#05070A">
@@ -15,7 +15,7 @@
  <meta property="og:site_name" content="sf-intelligence">
  <meta property="og:title" content="Glossary - sf-intelligence terms">
  <meta property="og:description" content="Short, citable definitions for Salesforce MCP, metadata vault, provenance, and org intelligence concepts.">
- <meta property="og:url" content="https://salesforce-intelligence.pages.dev/glossary.html">
+ <meta property="og:url" content="https://salesforce-intelligence.pages.dev/glossary">
  <meta property="og:image" content="https://salesforce-intelligence.pages.dev/assets/img/og-image.png">
  <meta name="twitter:card" content="summary_large_image">
  <meta name="twitter:image" content="https://salesforce-intelligence.pages.dev/assets/img/og-image.png">
@@ -33,7 +33,7 @@
  "@type": "BreadcrumbList",
  "itemListElement": [
  { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://salesforce-intelligence.pages.dev/" },
- { "@type": "ListItem", "position": 2, "name": "Glossary", "item": "https://salesforce-intelligence.pages.dev/glossary.html" }
+ { "@type": "ListItem", "position": 2, "name": "Glossary", "item": "https://salesforce-intelligence.pages.dev/glossary" }
  ]
  }
  </script>
@@ -60,23 +60,23 @@
  <a class="brand" href="/" aria-label="sf-intelligence home"><span class="mk">&gt;_</span>&nbsp;sf-intelligence</a>
  <nav aria-label="Primary">
  <ul class="nav-links">
- <li><a href="/capabilities.html">capabilities</a></li>
- <li><a href="/tools.html">tools</a></li>
- <li><a href="/trust.html">trust</a></li>
- <li><a href="/getting-started.html">get-started</a></li>
- <li><a href="/faq.html">faq</a></li>
+ <li><a href="/capabilities">capabilities</a></li>
+ <li><a href="/tools">tools</a></li>
+ <li><a href="/trust">trust</a></li>
+ <li><a href="/getting-started">get-started</a></li>
+ <li><a href="/faq">faq</a></li>
  </ul>
  </nav>
  <div class="nav-cta">
  <a class="btn btn-ghost" href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">npm</a>
- <a class="btn btn-solid" href="/getting-started.html">install</a>
+ <a class="btn btn-solid" href="/getting-started">install</a>
  <button class="nav-toggle" aria-label="Open menu" aria-controls="mobile-menu" aria-expanded="false">menu</button>
  </div>
  </div>
  <div class="container">
  <div id="mobile-menu" class="mobile-menu">
- <ul><li><a href="/capabilities.html">capabilities</a></li><li><a href="/tools.html">tools</a></li><li><a href="/trust.html">trust</a></li><li><a href="/getting-started.html">get-started</a></li><li><a href="/faq.html">faq</a></li></ul>
- <a class="btn btn-solid" href="/getting-started.html" style="width:100%; justify-content:center;">install</a>
+ <ul><li><a href="/capabilities">capabilities</a></li><li><a href="/tools">tools</a></li><li><a href="/trust">trust</a></li><li><a href="/getting-started">get-started</a></li><li><a href="/faq">faq</a></li></ul>
+ <a class="btn btn-solid" href="/getting-started" style="width:100%; justify-content:center;">install</a>
  </div>
  </div>
  </header>
@@ -95,13 +95,13 @@
  <div class="prose">
 
  <h2 id="mcp">MCP server (Model Context Protocol)</h2>
- <p>A standardized way for AI assistants (Claude, Cursor, Codex) to call external tools. A Salesforce MCP server exposes org-aware capabilities - schema lookup, dependency analysis, permission tracing - that the model invokes during conversation. sf-intelligence is a <strong>read-only</strong> Salesforce MCP server focused on org understanding, not DevOps. See the <a href="/mcp.html">MCP overview</a>.</p>
+ <p>A standardized way for AI assistants (Claude, Cursor, Codex) to call external tools. A Salesforce MCP server exposes org-aware capabilities - schema lookup, dependency analysis, permission tracing - that the model invokes during conversation. sf-intelligence is a <strong>read-only</strong> Salesforce MCP server focused on org understanding, not DevOps. See the <a href="/mcp">MCP overview</a>.</p>
 
  <h2 id="vault">Metadata vault (<code>org-kb/</code>)</h2>
  <p>The local directory created by <code>sfi refresh</code>. Contains Markdown-rendered component docs, a DuckDB dependency graph, manifest files, and optional overlays (annotations, git history). All offline answers are served from here - no network calls during conversation.</p>
 
  <h2 id="refresh">Refresh</h2>
- <p>A read-only metadata pull via <code>sf project retrieve</code> followed by local indexing. Re-run after org changes to keep answers current. Large orgs can use <code>sfi refresh --staged</code> for a servable vault in minutes. See <a href="/configuration.html#staged">staged refresh</a>.</p>
+ <p>A read-only metadata pull via <code>sf project retrieve</code> followed by local indexing. Re-run after org changes to keep answers current. Large orgs can use <code>sfi refresh --staged</code> for a servable vault in minutes. See <a href="/configuration#staged">staged refresh</a>.</p>
 
  <h2 id="planes">Intelligence planes</h2>
  <p><strong>Offline</strong> - answers from the vault (default). <strong>Live</strong> - opt-in, read-only SOQL for record counts and samples. <strong>Hybrid</strong> - fuses vault structure with live magnitude, disclosing both provenances.</p>
@@ -116,7 +116,7 @@
  <p>Whether all needed metadata families were retrieved: <code>complete</code>, <code>partial</code> (some types pending or not checked), or <code>unknown</code>.</p>
 
  <h2 id="impact">Impact analysis / blast radius</h2>
- <p>Tracing components that depend on a field, object, Flow, or Apex class before you change or delete it. Core use case - see <a href="/use-cases/impact-analysis.html">impact analysis</a>.</p>
+ <p>Tracing components that depend on a field, object, Flow, or Apex class before you change or delete it. Core use case - see <a href="/use-cases/impact-analysis">impact analysis</a>.</p>
 
  <h2 id="static">Static analysis</h2>
  <p>Analysis of retrieved source and metadata without running code. Dynamic SOQL and reflective Apex are invisible. "No references" means no static evidence, not "unused."</p>
@@ -131,10 +131,10 @@
  <p>A compact JSON summary of org scale and coverage rendered at every refresh. Served via <code>sfi.org_card</code> for fast orientation.</p>
 
  <h2 id="annotations">Annotations overlay</h2>
- <p>Human- or AI-proposed metadata stored in <code>meta/annotations.jsonl</code> - owner, status, glossary synonyms - that survives refreshes. See <a href="/configuration.html#annotations">configuration</a>.</p>
+ <p>Human- or AI-proposed metadata stored in <code>meta/annotations.jsonl</code> - owner, status, glossary synonyms - that survives refreshes. See <a href="/configuration#annotations">configuration</a>.</p>
 
  <h2 id="read-only">Read-only guarantee</h2>
- <p>sf-intelligence has no write, deploy, or delete path to Salesforce. Only metadata retrieve touches the org. See <a href="/faq.html#privacy">FAQ</a> and <a href="/trust.html">trust</a>.</p>
+ <p>sf-intelligence has no write, deploy, or delete path to Salesforce. Only metadata retrieve touches the org. See <a href="/faq#privacy">FAQ</a> and <a href="/trust">trust</a>.</p>
 
  </div>
  </div>
@@ -145,9 +145,9 @@
  <div class="container">
  <div class="footer-grid">
  <div class="footer-about"><a class="brand" href="/" style="margin-bottom:12px;"><span class="mk">&gt;_</span>&nbsp;sf-intelligence</a><p>Salesforce org intelligence glossary.</p></div>
- <div><h4>learn</h4><ul><li><a href="/glossary.html">glossary</a></li><li><a href="/mcp.html">MCP server</a></li><li><a href="/faq.html">faq</a></li></ul></div>
- <div><h4>use cases</h4><ul><li><a href="/use-cases/impact-analysis.html">impact analysis</a></li><li><a href="/use-cases/sharing-troubleshooting.html">sharing</a></li></ul></div>
- <div><h4>docs</h4><ul><li><a href="/getting-started.html">getting started</a></li><li><a href="/trust.html">trust</a></li></ul></div>
+ <div><h4>learn</h4><ul><li><a href="/glossary">glossary</a></li><li><a href="/mcp">MCP server</a></li><li><a href="/faq">faq</a></li></ul></div>
+ <div><h4>use cases</h4><ul><li><a href="/use-cases/impact-analysis">impact analysis</a></li><li><a href="/use-cases/sharing-troubleshooting">sharing</a></li></ul></div>
+ <div><h4>docs</h4><ul><li><a href="/getting-started">getting started</a></li><li><a href="/trust">trust</a></li></ul></div>
  </div>
  <div class="footer-bottom"><span><span class="ok">●</span> © <span id="year">2026</span> sf-intelligence</span><span>MIT + Commons Clause</span></div>
  </div>

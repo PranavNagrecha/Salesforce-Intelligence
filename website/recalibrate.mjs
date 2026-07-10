@@ -165,12 +165,13 @@ fs.writeFileSync(dataPath, JSON.stringify(stats, null, 2) + "\n");
 /* =========================================================================
  * 3. regenerate the GENERATED surfaces (tools.html + the catalog)
  * ======================================================================= */
-const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const normalizeSeoText = (s) => s.replace(/[–—]/g, "-").replace(/…/g, "...");
+const esc = (s) => normalizeSeoText(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const oneLine = (d) => {
   let s = d.split(/\.\s/)[0].trim();
-  if (s.length > 165) s = s.slice(0, 162).trimEnd() + "…";
+  if (s.length > 165) s = s.slice(0, 162).trimEnd() + "...";
   else if (!/[.!?…]$/.test(s)) s += ".";
-  return s;
+  return normalizeSeoText(s);
 };
 const bare = (n) => n.replace(/^sfi\./, "");
 const GROUPS = [
@@ -210,8 +211,8 @@ const toolsHtml = `<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
 
   <title>All ${N} tools  -  sf-intelligence Salesforce MCP tool reference</title>
-  <meta name="description" content="The complete reference for all ${N} read-only sf-intelligence tools for a Salesforce org  -  search, explain, impact &amp; dependency analysis, permissions, code quality, integrations, OmniStudio, documentation, health, cross-org, and live data  -  each with what it does.">
-  <link rel="canonical" href="https://salesforce-intelligence.pages.dev/tools.html">
+  <meta name="description" content="Reference for ${N} read-only sf-intelligence Salesforce MCP tools: search, impact analysis, permissions, code, integrations, docs, audits, and live data.">
+  <link rel="canonical" href="https://salesforce-intelligence.pages.dev/tools">
   <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
   <meta name="author" content="sf-intelligence">
   <meta name="theme-color" content="#05070A">
@@ -220,7 +221,7 @@ const toolsHtml = `<!DOCTYPE html>
   <meta property="og:site_name" content="sf-intelligence">
   <meta property="og:title" content="All ${N} tools  -  sf-intelligence Salesforce MCP tool reference">
   <meta property="og:description" content="Every read-only sf-intelligence tool for a Salesforce org, grouped by function, each with what it does.">
-  <meta property="og:url" content="https://salesforce-intelligence.pages.dev/tools.html">
+  <meta property="og:url" content="https://salesforce-intelligence.pages.dev/tools">
   <meta property="og:image" content="https://salesforce-intelligence.pages.dev/assets/img/og-image.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -245,8 +246,8 @@ const toolsHtml = `<!DOCTYPE html>
     "@type": "BreadcrumbList",
     "itemListElement": [
       { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://salesforce-intelligence.pages.dev/" },
-      { "@type": "ListItem", "position": 2, "name": "Capabilities", "item": "https://salesforce-intelligence.pages.dev/capabilities.html" },
-      { "@type": "ListItem", "position": 3, "name": "All tools", "item": "https://salesforce-intelligence.pages.dev/tools.html" }
+      { "@type": "ListItem", "position": 2, "name": "Capabilities", "item": "https://salesforce-intelligence.pages.dev/capabilities" },
+      { "@type": "ListItem", "position": 3, "name": "All tools", "item": "https://salesforce-intelligence.pages.dev/tools" }
     ]
   }
   </script>
@@ -259,11 +260,11 @@ const toolsHtml = `<!DOCTYPE html>
       <a class="brand" href="/" aria-label="sf-intelligence home"><span class="mk">&gt;_</span>&nbsp;sf-intelligence</a>
       <nav aria-label="Primary">
         <ul class="nav-links">
-          <li><a href="/capabilities.html">capabilities</a></li>
-          <li><a href="/tools.html">tools</a></li>
-          <li><a href="/trust.html">trust</a></li>
-          <li><a href="/getting-started.html">get-started</a></li>
-          <li><a href="/faq.html">faq</a></li>
+          <li><a href="/capabilities">capabilities</a></li>
+          <li><a href="/tools">tools</a></li>
+          <li><a href="/trust">trust</a></li>
+          <li><a href="/getting-started">get-started</a></li>
+          <li><a href="/faq">faq</a></li>
         </ul>
       </nav>
       <div class="nav-cta">
@@ -275,11 +276,11 @@ const toolsHtml = `<!DOCTYPE html>
     <div class="container">
       <div id="mobile-menu" class="mobile-menu">
         <ul>
-          <li><a href="/capabilities.html">capabilities</a></li>
-          <li><a href="/tools.html">tools</a></li>
-          <li><a href="/trust.html">trust</a></li>
-          <li><a href="/getting-started.html">get-started</a></li>
-          <li><a href="/faq.html">faq</a></li>
+          <li><a href="/capabilities">capabilities</a></li>
+          <li><a href="/tools">tools</a></li>
+          <li><a href="/trust">trust</a></li>
+          <li><a href="/getting-started">get-started</a></li>
+          <li><a href="/faq">faq</a></li>
         </ul>
         <a class="btn btn-solid" href="/#install" style="width:100%; justify-content:center;">install</a>
       </div>
@@ -289,7 +290,7 @@ const toolsHtml = `<!DOCTYPE html>
   <main id="main">
     <section class="subhero">
       <div class="container">
-        <nav class="crumbs" aria-label="Breadcrumb"><a href="/">home</a><span>/</span><a href="/capabilities.html">capabilities</a><span>/</span>tools</nav>
+        <nav class="crumbs" aria-label="Breadcrumb"><a href="/">home</a><span>/</span><a href="/capabilities">capabilities</a><span>/</span>tools</nav>
         <h1 class="screen-type">All ${N} Salesforce tools</h1>
         <p>The complete reference for every read-only tool sf-intelligence exposes for a Salesforce org  -  grouped by function, each with what it does. You never call these by name; an offline semantic router surfaces a ranked shortlist for each plain-language question and your AI host picks which to run. They are listed here for transparency and so AI assistants can cite them accurately.</p>
       </div>
@@ -304,8 +305,8 @@ ${bodyCards}
             <h2 class="screen-type">See it in action</h2>
             <p>You don't memorize these  -  you ask in plain language, the router surfaces the right shortlist, and your AI host runs them.</p>
             <div class="cta-actions">
-              <a class="btn btn-solid" href="/getting-started.html">get started</a>
-              <a class="btn btn-ghost" href="/capabilities.html">capability overview</a>
+              <a class="btn btn-solid" href="/getting-started">get started</a>
+              <a class="btn btn-ghost" href="/capabilities">capability overview</a>
             </div>
           </div>
         </div>
@@ -320,9 +321,9 @@ ${bodyCards}
           <a class="brand" href="/" style="margin-bottom:12px;"><span class="mk">&gt;_</span>&nbsp;sf-intelligence</a>
           <p>An offline, read-only, MCP-first knowledge base for one Salesforce org. Answers grounded in real metadata  -  never a guess.</p>
         </div>
-        <div><h4>product</h4><ul><li><a href="/capabilities.html">capabilities</a></li><li><a href="/tools.html">all tools</a></li><li><a href="/trust.html">quality &amp; trust</a></li><li><a href="/#install">install</a></li></ul></div>
-        <div><h4>docs</h4><ul><li><a href="/getting-started.html">getting started</a></li><li><a href="/configuration.html">configuration</a></li><li><a href="/faq.html">faq</a></li><li><a href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">npm package</a></li></ul></div>
-        <div><h4>about</h4><ul><li><a href="/faq.html#privacy">privacy</a></li><li><a href="/licensing.html">license</a></li></ul></div>
+        <div><h4>product</h4><ul><li><a href="/capabilities">capabilities</a></li><li><a href="/tools">all tools</a></li><li><a href="/trust">quality &amp; trust</a></li><li><a href="/#install">install</a></li></ul></div>
+        <div><h4>docs</h4><ul><li><a href="/getting-started">getting started</a></li><li><a href="/configuration">configuration</a></li><li><a href="/faq">faq</a></li><li><a href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">npm package</a></li></ul></div>
+        <div><h4>about</h4><ul><li><a href="/faq#privacy">privacy</a></li><li><a href="/licensing">license</a></li></ul></div>
       </div>
       <div class="footer-bottom">
         <span><span class="ok">●</span> © <span id="year">2026</span> sf-intelligence  -  all systems offline</span>
@@ -368,6 +369,7 @@ patch("index.html", [
 // wrapped alone or together with the phrase.
 patch("capabilities.html", [
   [/(capability map:\s*)\d[\d,]*(\s+read-only tools)/, `$1${T}$2`],
+  [/(content="Explore )\d[\d,]*(\s+read-only sf-intelligence tools)/g, `$1${T}$2`],
   [/(content=")\d[\d,]*(\s+read-only tools across eight)/g, `$1${T}$2`],
   [/(registers <strong>)\d[\d,]*(<\/strong>\s+read-only tools|\s+read-only tools<\/strong>)/, `$1${T}$2`],
   [/(see all )\d[\d,]*( tools\s*[-–—]+\s*each explained)/, `$1${T}$2`],
