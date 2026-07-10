@@ -1,0 +1,41 @@
+---
+import SeoHead from "../components/SeoHead.astro";
+import type { Breadcrumb } from "../components/SeoHead.astro";
+import Header from "../components/Header.astro";
+import Footer from "../components/Footer.astro";
+import "../styles/style.css";
+
+interface Props {
+  title: string;
+  description: string;
+  path: string;
+  breadcrumbs?: Breadcrumb[];
+  jsonld?: Record<string, unknown>[];
+  ogImage?: string;
+}
+
+const { title, description, path, breadcrumbs, jsonld, ogImage } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <SeoHead
+      title={title}
+      description={description}
+      path={path}
+      breadcrumbs={breadcrumbs}
+      jsonld={jsonld}
+      ogImage={ogImage}
+    />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <Header />
+    <main id="main">
+      <slot />
+    </main>
+    <Footer />
+    <script src="/assets/main.js" defer is:inline></script>
+  </body>
+</html>

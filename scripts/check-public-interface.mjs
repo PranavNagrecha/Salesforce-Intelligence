@@ -39,11 +39,13 @@ const ABSOLUTE_LOCAL_PATH = /\/(Users|home|private|var\/folders)\//;
 // (add it here) — this catches an accidentally-committed real-org screenshot.
 const RASTER_IMAGE = /\.(png|jpe?g|gif|webp|bmp|tiff?)$/i;
 const ALLOWED_RASTER_IMAGES = new Set([
-  'website/assets/img/apple-touch-icon.png',
-  'website/assets/img/favicon-32.png',
-  'website/assets/img/icon-192.png',
-  'website/assets/img/icon-512.png',
-  'website/assets/img/og-image.png',
+  // Astro build serves static assets from public/ — brand graphics only
+  // (favicon set + OG card), same leak-safe images as before the migration.
+  'website/public/assets/img/apple-touch-icon.png',
+  'website/public/assets/img/favicon-32.png',
+  'website/public/assets/img/icon-192.png',
+  'website/public/assets/img/icon-512.png',
+  'website/public/assets/img/og-image.png',
 ]);
 
 const violations = [];

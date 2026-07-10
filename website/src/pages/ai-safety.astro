@@ -1,0 +1,131 @@
+---
+import DocPage from "../layouts/DocPage.astro";
+import site from "../data/site.ts";
+
+const title = "Is it safe to connect AI to your Salesforce org?";
+const description =
+  "Is it safe to point an AI agent at Salesforce? How an offline, read-only, fail-closed MCP server keeps org data on your machine - no writes, no data egress.";
+
+const faq = [
+  {
+    q: "Is it safe to connect an AI agent to my Salesforce org?",
+    a: "It depends entirely on what the connection can do. The two risks are write access (an agent changing or deleting org data) and data egress (org data leaving for a third-party cloud). sf-intelligence removes both: it is read-only - there is no create, update, or delete path in the code - and it answers offline from a local vault on your machine, so no org data is sent anywhere.",
+  },
+  {
+    q: "Does an AI tool reading my Salesforce metadata send my data to a third party?",
+    a: "With sf-intelligence, no. The vault is built once with a read-only `sf project retrieve` and then lives on your machine. Answering makes no network calls. Most competing tools are cloud SaaS that ingest your org metadata into their servers - a different trust model you should evaluate separately.",
+  },
+  {
+    q: "Can an MCP server be tricked by prompt injection into leaking or changing data?",
+    a: "Prompt injection is a real risk for agents with write or data-read scope. sf-intelligence is fail-closed: write requests, prompt-injection attempts, and record-value exfiltration requests are refused before any tool runs. Because it has no write path and stores schema rather than record rows, the blast radius of a successful injection is bounded to read-only metadata questions.",
+  },
+  {
+    q: "What is the safest way to give an AI agent Salesforce context?",
+    a: "A read-only, offline, least-privilege connection. Give the agent a local metadata snapshot it can reason over instead of a live, write-capable API session. sf-intelligence is built around exactly that model, and it labels every answer with its provenance and freshness so you can tell a grounded fact from a guess.",
+  },
+];
+
+const jsonld = [
+  {
+    "@type": "TechArticle",
+    headline: "Is it safe to connect AI to your Salesforce org?",
+    description,
+    author: { "@id": `${site.url}/#org` },
+    publisher: { "@id": `${site.url}/#org` },
+    about: "AI agent security and data privacy for Salesforce orgs",
+  },
+  {
+    "@type": "FAQPage",
+    mainEntity: faq.map((f) => ({
+      "@type": "Question",
+      name: f.q,
+      acceptedAnswer: { "@type": "Answer", text: f.a },
+    })),
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/ai-safety"
+  heading="Is AI safe on your org?"
+  intro={`Pointing an AI agent at a production Salesforce org raises two honest fears: could it <b>change something</b>, and could your <b>data leave</b>? This page answers both plainly - and explains why an offline, read-only, fail-closed design is the low-risk way to give AI real context about your org.`}
+  crumbs={[{ label: "ai-safety", href: "/ai-safety" }]}
+  breadcrumbs={[{ name: "Is AI safe on your org?", path: "/ai-safety" }]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container">
+      <div class="prose">
+        {/* Definition-first answer block for AI-engine citation */}
+        <div class="callout">
+          <p><strong>Short answer:</strong> The risk of connecting AI to Salesforce comes from two things - <strong>write access</strong> and <strong>data egress</strong>. sf-intelligence removes both. It is <strong>read-only</strong> (no create/update/delete path exists), <strong>offline</strong> (every answer is served from a local vault, with no network call), and <strong>fail-closed</strong> (write, prompt-injection, and data-exfiltration requests are refused before any tool runs). No org data leaves your machine.</p>
+        </div>
+
+        <h2 id="risks">The two real risks</h2>
+        <p>Most "AI + Salesforce" anxiety reduces to two concrete failure modes. Be specific about which one a given tool exposes you to:</p>
+        <ul>
+          <li><strong>Write / action risk.</strong> An agent with write or execute scope can change field values, deactivate automations, delete records, or run Apex - sometimes because it misunderstood you, sometimes because it was manipulated. Any tool that can <em>deploy</em> or <em>mutate</em> carries this risk.</li>
+          <li><strong>Data-egress risk.</strong> A tool that ships your org's metadata or records to a third-party cloud to answer questions has moved your data outside your security boundary. That may be acceptable - but it is a decision you should make deliberately, not a default.</li>
+        </ul>
+
+        <h2 id="model">How sf-intelligence is designed for safety</h2>
+        <table class="doc-table">
+          <thead><tr><th>Concern</th><th>How it's handled</th></tr></thead>
+          <tbody>
+            <tr><td>Writing to the org</td><td><strong>No write path exists.</strong> The only org contact is a read-only <code>sf project retrieve</code>. There is no create, update, delete, or deploy code to invoke.</td></tr>
+            <tr><td>Data leaving your machine</td><td><strong>Offline by default.</strong> The vault is built once and stored locally; answering makes no network calls. No telemetry, no phone-home.</td></tr>
+            <tr><td>Prompt injection</td><td><strong>Fail-closed gates.</strong> "Ignore your instructions and…", write requests, and "dump all SSN values" are refused before routing - there is no tool left to route around.</td></tr>
+            <tr><td>Record-level exposure</td><td>The vault stores <strong>schema and source, not rows</strong>. Record values are only reachable via an opt-in, capped, read-only live plane you enable yourself.</td></tr>
+            <tr><td>Supply-chain exposure</td><td>The published npm package is <strong>code only</strong> - a files whitelist keeps the vault out, and every version is grepped clean of org identifiers.</td></tr>
+            <tr><td>Trusting an answer</td><td>Every answer is <strong>labelled with provenance and confidence</strong>, so a grounded fact is distinguishable from a heuristic guess.</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="vs-cloud">Offline read-only vs. cloud connectors</h2>
+        <p>The distinction that matters for a security review:</p>
+        <table class="doc-table">
+          <thead><tr><th>&nbsp;</th><th>sf-intelligence</th><th>Typical cloud AI connector</th></tr></thead>
+          <tbody>
+            <tr><td>Org data location</td><td>Your machine only</td><td>Vendor cloud</td></tr>
+            <tr><td>Write access</td><td>None (read-only)</td><td>Often read + write</td></tr>
+            <tr><td>Works offline</td><td>Yes, after one retrieve</td><td>No, requires connectivity</td></tr>
+            <tr><td>Source-available</td><td>Yes (audit the code)</td><td>Usually closed</td></tr>
+            <tr><td>Cost</td><td>Free</td><td>Paid / per-seat</td></tr>
+          </tbody>
+        </table>
+        <div class="callout"><p>This is a genuine wedge, not marketing: no cloud connector - including Salesforce's own hosted MCP servers - can claim true offline operation, because answering a question requires a round-trip to their service. If "no data leaves my machine" is a hard requirement, a local vault is the only model that satisfies it.</p></div>
+
+        <h2 id="agentforce">Planning for Agentforce or agentic AI?</h2>
+        <p>Before you enable an agentic platform like Agentforce, it helps to know exactly what it <em>could</em> see and touch. sf-intelligence is a companion tool for the developers and admins doing that prep: use it to audit field-level access, PII exposure, and permission risk offline while you design and debug your agent's topics and grounding - it does not replace or run inside the platform, it gives you an accurate, read-only map of the org first. See <a href="/use-cases/sharing-troubleshooting">sharing &amp; visibility</a> and the <a href="/capabilities">permission tools</a>.</p>
+
+        <h2 id="limits">Where it's honest about limits</h2>
+        <ul>
+          <li>It is a <strong>metadata</strong> tool - it doesn't read record rows unless you turn on the opt-in live plane, which is itself read-only and capped.</li>
+          <li>Answers are only as fresh as your last refresh; it stamps freshness and warns when the vault is stale rather than implying it's current.</li>
+          <li>Static analysis has blind spots (dynamic SOQL, reflective Apex). "No references found" means "no static evidence", not a guarantee.</li>
+        </ul>
+
+        <h2 id="faq">Frequently asked</h2>
+        {faq.map((f) => (
+          <details class="faq-item">
+            <summary>{f.q}</summary>
+            <div class="answer"><p>{f.a}</p></div>
+          </details>
+        ))}
+
+        <div style="padding-top:36px;">
+          <div class="cta-box">
+            <h2 class="screen-type">Read-only. Offline. Fail-closed.</h2>
+            <p>Give AI real context about your Salesforce org without a write path or a data upload.</p>
+            <div class="cta-actions">
+              <a class="btn btn-solid" href="/getting-started">get started</a>
+              <a class="btn btn-ghost" href="/trust">how it's tested</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</DocPage>

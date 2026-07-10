@@ -1,0 +1,84 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+import site from "../../data/site.ts";
+import siteData from "../../data/site-data.json";
+
+const title = "Claude Salesforce MCP server setup - sf-intelligence";
+const description =
+  "Set up a read-only Salesforce MCP server for Claude Code, Claude Desktop, Cursor, Codex, or any MCP client using sf-intelligence.";
+
+const jsonld = [
+  {
+    "@type": "TechArticle",
+    headline: "Claude Salesforce MCP server setup",
+    description: "How to register sf-intelligence as a read-only Salesforce MCP server for Claude Code, Claude Desktop, Cursor, Codex, and other MCP clients.",
+    author: { "@id": `${site.url}/#org` },
+    publisher: { "@id": `${site.url}/#org` },
+    dateModified: "2026-07-10",
+    mainEntityOfPage: `${site.url}/use-cases/claude-salesforce-mcp`,
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/use-cases/claude-salesforce-mcp"
+  heading="Claude Salesforce MCP server"
+  intro="Register sf-intelligence as a read-only Salesforce MCP server for Claude Code, Claude Desktop, Cursor, Codex, or any MCP client. It is built for org understanding, not metadata deployment."
+  crumbs={[{ label: "use-cases", href: "/use-cases" }, { label: "claude-salesforce-mcp", href: "/use-cases/claude-salesforce-mcp" }]}
+  breadcrumbs={[{ name: "Use cases", path: "/use-cases" }, { name: "Claude Salesforce MCP", path: "/use-cases/claude-salesforce-mcp" }]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container">
+      <div class="prose">
+        <h2 id="command">Claude Code setup</h2>
+        <p>From a Salesforce DX project, register the server once:</p>
+        <pre><code>claude mcp add --transport stdio --scope project sf-intelligence -- npx -y sf-intelligence mcp</code></pre>
+        <p>Then run a read-only metadata refresh:</p>
+        <pre><code>npx -y sf-intelligence init
+npx -y sf-intelligence refresh --target-org my-org-alias</code></pre>
+
+        <h2 id="clients">Works with MCP clients</h2>
+        <table class="doc-table">
+          <thead><tr><th>Client</th><th>Use case</th></tr></thead>
+          <tbody>
+            <tr><td>Claude Code</td><td>Ask org questions from the project where the metadata vault lives</td></tr>
+            <tr><td>Claude Desktop</td><td>Point a desktop assistant at a local read-only Salesforce knowledge base</td></tr>
+            <tr><td>Cursor</td><td>Use org metadata intelligence while editing Salesforce code</td></tr>
+            <tr><td>Codex</td><td>Give coding agents structured, read-only Salesforce context</td></tr>
+            <tr><td>Any MCP client</td><td>Run the same stdio server and call the same {siteData.toolCount} read-only tools</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="why">Why not use a write-capable server for this?</h2>
+        <p>Deployment and retrieval MCP servers are useful for DevOps. sf-intelligence is deliberately different: it is a Salesforce org intelligence layer. It answers questions about dependencies, permissions, automation, Apex, Flows, and documentation from a local vault, and it has no write path to the org.</p>
+
+        <h2 id="queries">Searches this page targets</h2>
+        <ul>
+          <li>"Claude Salesforce MCP"</li>
+          <li>"Salesforce MCP server Claude Code"</li>
+          <li>"Cursor Salesforce MCP"</li>
+          <li>"Codex Salesforce MCP"</li>
+          <li>"read-only Salesforce MCP server"</li>
+          <li>"AI agent Salesforce metadata"</li>
+        </ul>
+
+        <h2 id="next">Next steps</h2>
+        <p>For the full setup sequence, read <a href="/getting-started">getting started</a>. For how it differs from Salesforce's official DevOps-oriented server, read <a href="/compare/salesforce-dx-mcp">sf-intelligence vs Salesforce DX MCP Server</a>. For metadata search examples, read <a href="/use-cases/salesforce-metadata-analysis">Salesforce metadata analysis</a>.</p>
+
+        <div style="padding-top:36px;">
+          <div class="cta-box">
+            <h2 class="screen-type">Connect your AI client to Salesforce context.</h2>
+            <p>Register the MCP server, run a read-only refresh, then ask questions from your agent.</p>
+            <div class="cta-actions">
+              <a class="btn btn-solid" href="/getting-started">full install guide</a>
+              <a class="btn btn-ghost" href="/mcp">MCP overview</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</DocPage>

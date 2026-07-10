@@ -1,0 +1,149 @@
+{
+  "generatedAt": "2026-07-10T14:42:10.769Z",
+  "version": "0.1.26",
+  "toolCount": 176,
+  "skillCount": 25,
+  "commandCount": 4,
+  "componentTypeCount": 78,
+  "edgeTypeCount": 23,
+  "tests": {
+    "packages": [
+      {
+        "name": "mcp",
+        "files": 219,
+        "cases": 3293
+      },
+      {
+        "name": "extractors",
+        "files": 69,
+        "cases": 866
+      },
+      {
+        "name": "cli",
+        "files": 36,
+        "cases": 281
+      },
+      {
+        "name": "graph",
+        "files": 24,
+        "cases": 235
+      },
+      {
+        "name": "parsers",
+        "files": 4,
+        "cases": 143
+      },
+      {
+        "name": "patterns",
+        "files": 3,
+        "cases": 131
+      },
+      {
+        "name": "renderers",
+        "files": 7,
+        "cases": 101
+      },
+      {
+        "name": "vault",
+        "files": 8,
+        "cases": 87
+      },
+      {
+        "name": "tooling-api",
+        "files": 4,
+        "cases": 55
+      },
+      {
+        "name": "core",
+        "files": 2,
+        "cases": 34
+      }
+    ],
+    "totalCases": 5226,
+    "totalFiles": 376,
+    "packageCount": 10,
+    "approx": 5200
+  },
+  "integrationSuiteCount": 7,
+  "gates": [
+    "Type-check",
+    "Lint",
+    "Unit tests",
+    "Integration + golden tests",
+    "End-to-end smoke",
+    "Natural-language regression",
+    "Analytical correctness eval",
+    "Scale benchmarks",
+    "SAST",
+    "Release guard",
+    "Org-data leak scan"
+  ],
+  "gateCount": 11,
+  "scaleBudgets": {
+    "graphImport": "10,000 nodes in under 90 seconds",
+    "fullRefresh": "1,000 object + field files in under 10 minutes",
+    "resolve": "p95 under 2 seconds on the CI vault"
+  },
+  "packageDescriptions": [
+    {
+      "name": "mcp",
+      "files": 219,
+      "cases": 3293,
+      "description": "The 176 read-only tools + router + grounding layer"
+    },
+    {
+      "name": "extractors",
+      "files": 69,
+      "cases": 866,
+      "description": "Metadata parsing for every Salesforce component type"
+    },
+    {
+      "name": "cli",
+      "files": 36,
+      "cases": 281,
+      "description": "The sfi command-line tool"
+    },
+    {
+      "name": "graph",
+      "files": 24,
+      "cases": 235,
+      "description": "The DuckDB dependency-graph engine"
+    },
+    {
+      "name": "parsers",
+      "files": 4,
+      "cases": 143,
+      "description": "Formula / SOQL / source tokenizers"
+    },
+    {
+      "name": "patterns",
+      "files": 3,
+      "cases": 131,
+      "description": "Heuristic recognizers (PII, naming, code quality)"
+    },
+    {
+      "name": "renderers",
+      "files": 7,
+      "cases": 101,
+      "description": "Markdown vault rendering"
+    },
+    {
+      "name": "vault",
+      "files": 8,
+      "cases": 87,
+      "description": "Vault layout, manifest, freshness"
+    },
+    {
+      "name": "tooling-api",
+      "files": 4,
+      "cases": 55,
+      "description": "Optional Tooling-API enrichment"
+    },
+    {
+      "name": "core",
+      "files": 2,
+      "cases": 34,
+      "description": "core package tests"
+    }
+  ]
+}

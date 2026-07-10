@@ -1,0 +1,80 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+import site from "../../data/site.ts";
+
+const title = "Salesforce dependency analysis - fields, Flows, Apex";
+const description =
+  "Run Salesforce dependency analysis before changing fields, Flows, Apex, objects, layouts, or permission metadata. Read-only, local, and evidence-based.";
+
+const jsonld = [
+  {
+    "@type": "TechArticle",
+    headline: "Salesforce dependency analysis",
+    description: "How sf-intelligence traces Salesforce metadata dependencies for fields, Flows, Apex, objects, layouts, and permissions.",
+    author: { "@id": `${site.url}/#org` },
+    publisher: { "@id": `${site.url}/#org` },
+    dateModified: "2026-07-10",
+    mainEntityOfPage: `${site.url}/use-cases/salesforce-dependency-analysis`,
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/use-cases/salesforce-dependency-analysis"
+  heading="Salesforce dependency analysis"
+  intro="Use sf-intelligence to trace what depends on a Salesforce field, object, Flow, Apex class, layout, permission set, integration endpoint, or package boundary before you change it."
+  crumbs={[{ label: "use-cases", href: "/use-cases" }, { label: "dependency-analysis", href: "/use-cases/salesforce-dependency-analysis" }]}
+  breadcrumbs={[{ name: "Use cases", path: "/use-cases" }, { name: "Salesforce dependency analysis", path: "/use-cases/salesforce-dependency-analysis" }]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container">
+      <div class="prose">
+        <h2 id="why">Why Salesforce dependencies are hard to see</h2>
+        <p>Salesforce dependencies live across XML metadata, Apex source, formulas, Flow definitions, Profile and Permission Set grants, page layouts, packages, and integration configuration. A single field can be referenced by automation, code, reports, validation rules, and external systems. sf-intelligence collects those signals into a local graph and reports how each dependency was found.</p>
+
+        <h2 id="targets">Dependency analysis targets</h2>
+        <table class="doc-table">
+          <thead><tr><th>Change target</th><th>What to inspect</th></tr></thead>
+          <tbody>
+            <tr><td>Field</td><td>Formulas, Flows, validation rules, Apex references, layouts, FLS, reports</td></tr>
+            <tr><td>Object</td><td>Child relationships, automations, Apex queries, permissions, tabs, record types</td></tr>
+            <tr><td>Flow</td><td>Entry criteria, called subflows, field writes, Apex actions, scheduled paths</td></tr>
+            <tr><td>Apex class</td><td>Call graph, trigger entry points, tests, integrations, async jobs</td></tr>
+            <tr><td>Permission set</td><td>Object and field grants, app access, tab access, assigned users through live reads</td></tr>
+            <tr><td>Package</td><td>Namespaced components, local references, uninstall and upgrade blast radius</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="questions">Searches this page answers</h2>
+        <ul>
+          <li>"Salesforce dependency analysis for custom fields"</li>
+          <li>"Where is this Salesforce field used?"</li>
+          <li>"What depends on this Flow?"</li>
+          <li>"What breaks if I remove a picklist value?"</li>
+          <li>"What Apex classes call this method?"</li>
+          <li>"What is the impact of changing a permission set?"</li>
+        </ul>
+
+        <h2 id="evidence">Evidence-first output</h2>
+        <p>The output is designed for review before a change lands. Each dependency points to a canonical component ID, the edge type, the confidence tier, and any known coverage caveat. If a metadata family was not retrieved, sf-intelligence says that the scan is partial instead of implying safety.</p>
+
+        <h2 id="related">Related pages</h2>
+        <p>For change-specific blast radius examples, read <a href="/use-cases/impact-analysis">Salesforce impact analysis</a>. For broader org inventory, read <a href="/use-cases/salesforce-metadata-analysis">Salesforce metadata analysis</a>. For installation in an AI client, read <a href="/use-cases/claude-salesforce-mcp">Claude Salesforce MCP setup</a>.</p>
+
+        <div style="padding-top:36px;">
+          <div class="cta-box">
+            <h2 class="screen-type">Trace dependencies before you change metadata.</h2>
+            <p>Run a read-only refresh, then ask dependency questions in plain language.</p>
+            <div class="cta-actions">
+              <a class="btn btn-solid" href="/getting-started">get started</a>
+              <a class="btn btn-ghost" href="/tools">tool reference</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</DocPage>

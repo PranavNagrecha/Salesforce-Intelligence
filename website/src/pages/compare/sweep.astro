@@ -1,0 +1,110 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+
+const title = "sf-intelligence vs Sweep - sf-intelligence";
+const description =
+  "Compare sf-intelligence with Sweep: a free, offline, read-only Salesforce MCP server for AI coding agents vs a cloud agentic layer for enterprise GTM/RevOps teams.";
+
+const jsonld = [
+  {
+    "@type": "FAQPage",
+    mainEntity: [
+      {
+        "@type": "Question",
+        name: "What is the difference between sf-intelligence and Sweep?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "Sweep is a cloud-hosted 'agentic layer' that connects multiple enterprise systems (Salesforce, Snowflake, ServiceNow, HubSpot) with visual mapping and metadata agents, aimed at RevOps, GTM, and admin teams. sf-intelligence is a free, open-source, offline, read-only MCP server focused on one Salesforce org's metadata, aimed at developers and AI coding agents. Sweep is a broad ops platform in the cloud; sf-intelligence is a local, single-org developer tool.",
+        },
+      },
+      {
+        "@type": "Question",
+        name: "Is sf-intelligence a RevOps tool like Sweep?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "No. sf-intelligence is a developer and AI-agent tool for metadata understanding - schema, dependencies, permissions, Apex, Flows. Sweep targets revenue operations and GTM workflows (routing, dedup, pipeline). If you want a cloud RevOps platform, Sweep fits that; if you want local read-only org context for an AI coding agent, that's sf-intelligence.",
+        },
+      },
+      {
+        "@type": "Question",
+        name: "Does sf-intelligence keep my data local like a self-hosted tool?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "Yes. sf-intelligence builds a local vault with one read-only retrieve and answers offline - no org metadata leaves your machine. Sweep, like other cloud platforms, stores and processes your metadata in its service.",
+        },
+      },
+    ],
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/compare/sweep"
+  heading="sf-intelligence vs Sweep"
+  intro="They aim at different people. Sweep is a cloud <strong>agentic layer for enterprise GTM/RevOps</strong> teams across many systems; sf-intelligence is a free, offline, read-only MCP server that gives AI coding agents a local map of <strong>one Salesforce org</strong>. Here's an honest comparison."
+  crumbs={[{ label: "compare", href: "/compare/sweep" }]}
+  breadcrumbs={[{ name: "sf-intelligence vs Sweep", path: "/compare/sweep" }]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container">
+      <div class="prose">
+        <div class="callout">
+          <p><strong>Short answer:</strong> <strong>Sweep</strong> is a cloud-hosted "agentic layer" that maps and coordinates multiple enterprise systems (Salesforce, Snowflake, ServiceNow, HubSpot) with visual workspaces and metadata agents - built for RevOps, GTM, and admin teams. <strong>sf-intelligence</strong> is a free, open-source, offline, read-only MCP server that gives an AI coding agent a local metadata knowledge base of a single Salesforce org. Different audience, different trust model: Sweep runs in its cloud; sf-intelligence runs on your machine.</p>
+        </div>
+
+        <h2 id="summary">At a glance</h2>
+        <table class="doc-table">
+          <thead><tr><th>&nbsp;</th><th>sf-intelligence</th><th>Sweep</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Category</strong></td><td>Offline MCP server + CLI for AI agents</td><td>Cloud agentic layer for enterprise systems</td></tr>
+            <tr><td><strong>Delivery</strong></td><td>Local (npm package, runs on your machine)</td><td>Cloud-hosted SaaS</td></tr>
+            <tr><td><strong>Where your metadata lives</strong></td><td><strong>Your machine only</strong></td><td>The vendor's cloud</td></tr>
+            <tr><td><strong>Cost</strong></td><td>Free (MIT + Commons Clause)</td><td>Freemium (free tier; paid plans)</td></tr>
+            <tr><td><strong>Open source</strong></td><td>Yes - audit the code</td><td>No</td></tr>
+            <tr><td><strong>Works offline</strong></td><td>Yes - after one retrieve</td><td>No - cloud service</td></tr>
+            <tr><td><strong>Scope</strong></td><td>One Salesforce org's metadata</td><td>Multi-system (Salesforce, Snowflake, ServiceNow, HubSpot…)</td></tr>
+            <tr><td><strong>Primary user</strong></td><td>Developers &amp; AI coding agents</td><td>RevOps, GTM leadership, business-systems admins</td></tr>
+            <tr><td><strong>Focus</strong></td><td>Metadata depth: impact, permissions, Apex, Flows</td><td>GTM ops: routing, dedup, pipeline, visual mapping</td></tr>
+            <tr><td><strong>Write access</strong></td><td>None (read-only)</td><td>Builds/automates in the connected systems</td></tr>
+            <tr><td><strong>MCP</strong></td><td>Native - it is an MCP server</td><td>Lists MCP as a capability</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="when-sfi">Choose sf-intelligence when you want to…</h2>
+        <ul>
+          <li>Give an AI coding agent deep, grounded context on <strong>one Salesforce org</strong> - offline and read-only</li>
+          <li>Keep org metadata on your machine (no cloud upload)</li>
+          <li>Ask developer-grade questions: blast radius, permission cascades, Apex/Flow dependencies</li>
+          <li>Use a free, open-source tool with no write path to production</li>
+        </ul>
+
+        <h2 id="when-sweep">Choose Sweep when you want to…</h2>
+        <ul>
+          <li>A cloud platform for <strong>revenue operations</strong> across multiple systems, not just Salesforce</li>
+          <li>Visual org/workspace mapping and GTM automation (lead routing, dedup)</li>
+          <li>A shared, team-facing dashboard for admins and operations leaders</li>
+          <li>Cross-system metadata coordination beyond a single org</li>
+        </ul>
+
+        <h2 id="together">Different layers</h2>
+        <p>Sweep operates at the business-operations layer across many systems; sf-intelligence operates at the developer/AI layer for one org's metadata. A RevOps team could run Sweep while its developers use sf-intelligence to feed AI coding agents a local, read-only view of the Salesforce org - the two don't overlap much in practice.</p>
+
+        <div class="callout"><p><strong>Disclaimer:</strong> This comparison reflects publicly documented positioning as of 2026 and is written to be fair. Sweep's feature set and pricing evolve - verify current details on their site. sf-intelligence is an independent project, not affiliated with Sweep or Salesforce.</p></div>
+
+        <div style="padding-top:36px;">
+          <div class="cta-box">
+            <h2 class="screen-type">Local, read-only, free.</h2>
+            <p>Deep metadata context for your AI agent - on one org, on your machine.</p>
+            <div class="cta-actions">
+              <a class="btn btn-solid" href="/getting-started">install sf-intelligence</a>
+              <a class="btn btn-ghost" href="/compare/elements-cloud">vs Elements.cloud</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</DocPage>

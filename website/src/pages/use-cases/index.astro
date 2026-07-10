@@ -1,0 +1,78 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+import site from "../../data/site.ts";
+
+const title = "Salesforce use cases - sf-intelligence";
+const description =
+  "Intent-matched Salesforce use cases: metadata analysis, dependency & impact analysis, sharing troubleshooting, field usage, delete-impact, and MCP setup.";
+
+const cases = [
+  { slug: "salesforce-metadata-analysis", tag: "metadata", title: "Salesforce metadata analysis", blurb: "Search and explain schema, fields, Flows, Apex, permissions, integrations, and OmniStudio from a local org vault." },
+  { slug: "salesforce-dependency-analysis", tag: "dependencies", title: "Salesforce dependency analysis", blurb: "Trace what depends on a field, object, Flow, Apex class, permission set, or package before you change it." },
+  { slug: "impact-analysis", tag: "impact", title: "Impact analysis", blurb: "What breaks if you delete a field, object, Flow, or Apex class? Dependency tracing with confidence tiers." },
+  { slug: "where-is-a-field-used", tag: "where-used", title: "Where is a field used?", blurb: "Find every place a Salesforce field is referenced - Flows, Apex, layouts, reports, validation rules - from the dependency graph plus a source grep." },
+  { slug: "what-breaks-if-you-delete-a-field", tag: "safe-delete", title: "What breaks if you delete a field?", blurb: "Simulate a delete before you make it. See every dependent component, with honest coverage caveats on what static analysis can miss." },
+  { slug: "explain-a-salesforce-flow", tag: "explain", title: "Explain a Salesforce flow", blurb: "Ask what a specific Flow actually does in plain English - its trigger, decisions, and the components it touches." },
+  { slug: "sharing-troubleshooting", tag: "access", title: "Sharing & visibility", blurb: "Why can't a user see a record? Who can edit a field? Trace Profiles, Permission Sets, and the sharing cascade." },
+  { slug: "claude-salesforce-mcp", tag: "agents", title: "Claude Salesforce MCP", blurb: "Register a read-only Salesforce MCP server in Claude Code, Claude Desktop, Cursor, Codex, or any MCP client." },
+];
+
+const jsonld = [
+  {
+    "@type": "CollectionPage",
+    name: "Salesforce use cases",
+    description,
+    isPartOf: { "@id": `${site.url}/#website` },
+  },
+  {
+    "@type": "ItemList",
+    itemListElement: cases.map((c, i) => ({
+      "@type": "ListItem",
+      position: i + 1,
+      name: c.title,
+      url: `${site.url}/use-cases/${c.slug}`,
+    })),
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/use-cases"
+  heading="Use cases"
+  intro={`The operational problems Salesforce teams actually search for - each one an intent-matched page that answers the question and shows the sf-intelligence tools that solve it. Offline, read-only, grounded in your real metadata.`}
+  crumbs={[{ label: "use-cases", href: "/use-cases" }]}
+  breadcrumbs={[{ name: "Use cases", path: "/use-cases" }]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container">
+      <div class="grid cols-3">
+        {cases.map((c) => (
+          <article class="card">
+            <div class="tagn">{c.tag}</div>
+            <h3><a href={`/use-cases/${c.slug}`}>{c.title}</a></h3>
+            <p>{c.blurb}</p>
+          </article>
+        ))}
+        <article class="card">
+          <div class="tagn">safety</div>
+          <h3><a href="/ai-safety">Is AI safe on my org?</a></h3>
+          <p>Offline, read-only, fail-closed - why a local metadata vault is the low-risk way to point an AI agent at Salesforce. No writes, no data egress.</p>
+        </article>
+      </div>
+      <h2 class="head screen-type" style="font-size:clamp(1.5rem,3.5vw,2rem); margin-top:48px;">Compare</h2>
+      <p class="sec-intro">How sf-intelligence stacks up against the official Salesforce MCP server and the paid cloud platforms.</p>
+      <p style="margin-top:16px; display:flex; gap:12px; flex-wrap:wrap;">
+        <a class="btn btn-ghost" href="/compare/salesforce-dx-mcp">› vs Salesforce DX MCP</a>
+        <a class="btn btn-ghost" href="/compare/elements-cloud">› vs Elements.cloud</a>
+        <a class="btn btn-ghost" href="/compare/sweep">› vs Sweep</a>
+      </p>
+      <p class="center" style="margin-top:28px; display:flex; gap:12px; justify-content:center; flex-wrap:wrap;">
+        <a class="btn btn-ghost" href="/capabilities">› full capability map</a>
+        <a class="btn btn-solid" href="/getting-started">get started</a>
+      </p>
+    </div>
+  </section>
+</DocPage>

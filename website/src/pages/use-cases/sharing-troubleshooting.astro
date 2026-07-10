@@ -1,0 +1,59 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+
+const title = "Why can't a user see a record? - sf-intelligence";
+const description =
+  "Troubleshoot Salesforce record visibility and sharing. Trace Profiles, Permission Sets, FLS, OWD, and sharing rules with read-only org intelligence.";
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/use-cases/sharing-troubleshooting"
+  heading="Salesforce sharing & visibility troubleshooting"
+  intro={`Support tickets like "why can't this user see this record?" need more than generic advice. sf-intelligence traces the visibility cascade - Profiles, Permission Sets, OWD, sharing rules, restriction rules - from metadata retrieved from <em>your</em> org.`}
+  crumbs={[{ label: "use-cases", href: "/use-cases" }, { label: "sharing-troubleshooting", href: "/use-cases/sharing-troubleshooting" }]}
+  breadcrumbs={[{ name: "Use cases", path: "/use-cases" }, { name: "Sharing troubleshooting", path: "/use-cases/sharing-troubleshooting" }]}
+>
+  <section>
+    <div class="container">
+      <div class="prose">
+
+        <h2 id="questions">Questions admins and support ask</h2>
+        <ul>
+          <li>"Why can't User X see this Contact record?"</li>
+          <li>"Who can edit the SSN field on Account?"</li>
+          <li>"Who can access the Case object?"</li>
+          <li>"What permission sets grant delete on Opportunity?"</li>
+          <li>"Does this Profile have View All Data?"</li>
+        </ul>
+
+        <h2 id="how">How sf-intelligence answers</h2>
+        <p>The permissions plane models object access, field-level security, and the sharing stack from retrieved Profiles, Permission Sets, Permission Set Groups, and sharing metadata. Tools like <code>who_can_access_object</code>, <code>why_cant</code>, and <code>field_access_audit</code> return structured results with caveats when restriction rules or scoping rules apply.</p>
+        <p>Every answer carries provenance (<code>offline_snapshot</code> by default) and flags blind spots - for example, when a RestrictionRule was not retrieved and visibility cannot be fully determined.</p>
+
+        <h2 id="vs-chatbot">Not the same as asking a chatbot</h2>
+        <p>A general model knows how Salesforce sharing <em>works in theory</em>. sf-intelligence knows which Profiles and Permission Sets <em>exist in your org</em>, which fields they expose, and whether a restriction rule blocks access. When it cannot determine an outcome, it says <code>unknown</code> rather than guessing <code>visible</code>.</p>
+
+        <h2 id="limits">What it cannot do</h2>
+        <ul>
+          <li><strong>No record-level data</strong> - it analyzes permission containers, not "does User X own this specific record?" (that needs the opt-in live plane or direct SOQL)</li>
+          <li><strong>Static metadata only</strong> - manual shares and team membership changes since the last refresh may be stale</li>
+          <li><strong>Restriction rules require retrieval</strong> - if the rule metadata was not pulled, the answer includes an explicit blind spot</li>
+        </ul>
+
+        <div style="padding-top:36px;">
+          <div class="cta-box">
+            <h2 class="screen-type">Stop guessing about access.</h2>
+            <p>Read-only, offline, free. Ask permission questions in plain language from any MCP client.</p>
+            <div class="cta-actions">
+              <a class="btn btn-solid" href="/getting-started">get started</a>
+              <a class="btn btn-ghost" href="/use-cases/impact-analysis">impact analysis</a>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+</DocPage>

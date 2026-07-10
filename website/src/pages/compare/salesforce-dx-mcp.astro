@@ -1,0 +1,111 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+
+const title = "sf-intelligence vs Salesforce DX MCP - sf-intelligence";
+const description =
+  "Compare sf-intelligence with Salesforce DX MCP Server: read-only org intelligence for impact, permissions, and docs vs DevOps retrieve and deploy workflows.";
+
+const jsonld = [
+  {
+    "@type": "FAQPage",
+    mainEntity: [
+      {
+        "@type": "Question",
+        name: "Can sf-intelligence replace the Salesforce DX MCP Server?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "No - they solve different problems. The DX MCP Server is for DevOps: deploy, retrieve, run Apex, LWC scaffolding. sf-intelligence is for read-only org understanding: impact analysis, permissions tracing, dependency graphs, and documentation. Many teams use both.",
+        },
+      },
+      {
+        "@type": "Question",
+        name: "Is sf-intelligence safer for production orgs?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "sf-intelligence has no write path - it cannot deploy, edit, or delete anything in Salesforce. The DX MCP Server includes write-capable DevOps tools. For exploring a production org's metadata safely, sf-intelligence's read-only guarantee is the differentiator.",
+        },
+      },
+      {
+        "@type": "Question",
+        name: "Does sf-intelligence work offline?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "Yes. After one read-only retrieve, answers come from a local vault with no network calls. The DX MCP Server calls Salesforce APIs during tool use.",
+        },
+      },
+    ],
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/compare/salesforce-dx-mcp"
+  heading="sf-intelligence vs Salesforce DX MCP Server"
+  intro="Both are Salesforce MCP servers. They are <strong>complementary, not competing</strong> - one is for DevOps, the other for read-only org intelligence. This page helps you pick the right tool (or both)."
+  crumbs={[{ label: "compare", href: "/compare/salesforce-dx-mcp" }]}
+  breadcrumbs={[{ name: "sf-intelligence vs Salesforce DX MCP", path: "/compare/salesforce-dx-mcp" }]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container">
+      <div class="prose">
+
+        <h2 id="summary">At a glance</h2>
+        <table class="doc-table">
+          <thead><tr><th></th><th>sf-intelligence</th><th>Salesforce DX MCP Server</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Maintainer</strong></td><td>Community (MIT + Commons Clause)</td><td>Salesforce (official)</td></tr>
+            <tr><td><strong>Primary purpose</strong></td><td>Understand an org - impact, permissions, docs</td><td>DevOps - deploy, retrieve, run code</td></tr>
+            <tr><td><strong>Write to org</strong></td><td><strong>No</strong> - read-only retrieve only</td><td>Yes - deploy, edit, run Apex/tests</td></tr>
+            <tr><td><strong>Default mode</strong></td><td>Offline (local vault)</td><td>Live API per tool call</td></tr>
+            <tr><td><strong>Dependency graph</strong></td><td>Yes - DuckDB, confidence-tagged edges</td><td>No dedicated graph</td></tr>
+            <tr><td><strong>Impact / blast radius</strong></td><td>Core feature</td><td>Not a focus</td></tr>
+            <tr><td><strong>Permission tracing</strong></td><td>Yes - FLS, sharing cascade</td><td>Limited</td></tr>
+            <tr><td><strong>Plain-language routing</strong></td><td>Semantic router, host LLM picks the tools</td><td>Tool-per-task model</td></tr>
+            <tr><td><strong>Cost</strong></td><td>Free</td><td>Free (official)</td></tr>
+            <tr><td><strong>npm package</strong></td><td><code>sf-intelligence</code></td><td><code>@salesforce/mcp</code> (via Salesforce CLI)</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="when-sfi">Choose sf-intelligence when you need to…</h2>
+        <ul>
+          <li>Ask "what breaks if I delete this field?" before making a change</li>
+          <li>Trace why a user cannot see a record or edit a field</li>
+          <li>Document an inherited org (data dictionary, architecture overview)</li>
+          <li>Explore a production org with zero write risk</li>
+          <li>Work offline after a single retrieve (airplane, VPN-restricted environments)</li>
+          <li>Get provenance and confidence labels on every answer</li>
+        </ul>
+
+        <h2 id="when-dx">Choose the DX MCP Server when you need to…</h2>
+        <ul>
+          <li>Deploy or retrieve metadata from an AI-assisted workflow</li>
+          <li>Run Apex, execute tests, scaffold LWC</li>
+          <li>Use first-party Salesforce DevOps tooling in MCP</li>
+        </ul>
+
+        <h2 id="both">Use both together</h2>
+        <p>A common pattern: use sf-intelligence to <strong>understand</strong> the blast radius and permissions landscape, then use the DX MCP Server to <strong>implement</strong> the change. Register both MCP servers in the same Claude Code or Cursor project - they do not conflict.</p>
+
+        <h2 id="more">More comparisons</h2>
+        <p>See how sf-intelligence compares with the paid cloud platforms: <a href="/compare/elements-cloud">vs Elements.cloud</a> and <a href="/compare/sweep">vs Sweep</a>.</p>
+
+        <div class="callout"><p><strong>Disclaimer:</strong> This comparison is based on publicly documented capabilities as of 2026. Salesforce's official MCP offerings evolve - verify current feature sets in Salesforce's official documentation. sf-intelligence is not affiliated with Salesforce.</p></div>
+
+        <div style="padding-top:36px;">
+          <div class="cta-box">
+            <h2 class="screen-type">Try the read-only side.</h2>
+            <p>Free on npm. Install alongside your existing MCP servers.</p>
+            <div class="cta-actions">
+              <a class="btn btn-solid" href="/getting-started">install sf-intelligence</a>
+              <a class="btn btn-ghost" href="/mcp">MCP overview</a>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+</DocPage>

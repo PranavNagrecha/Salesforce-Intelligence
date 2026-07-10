@@ -1,0 +1,114 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+
+const title = "sf-intelligence vs Elements.cloud - sf-intelligence";
+const description =
+  "Compare sf-intelligence with Elements.cloud: free, offline, read-only, open-source org intelligence vs an enterprise cloud Change Intelligence platform.";
+
+const jsonld = [
+  {
+    "@type": "FAQPage",
+    mainEntity: [
+      {
+        "@type": "Question",
+        name: "What is the difference between sf-intelligence and Elements.cloud?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "Elements.cloud is an enterprise, cloud-hosted Change Intelligence platform (a managed package plus a web app) built for architects and platform owners. sf-intelligence is a free, open-source, offline, read-only MCP server that gives AI coding agents a local metadata knowledge base of one org. Elements.cloud ingests your metadata into its cloud; sf-intelligence keeps it on your machine.",
+        },
+      },
+      {
+        "@type": "Question",
+        name: "Is there a free alternative to Elements.cloud for dependency and impact analysis?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "sf-intelligence is free and open-source, and covers dependency graphs, impact analysis, and permission tracing offline and read-only. It is a developer/AI-agent tool rather than an enterprise governance dashboard, so it is a different shape of product - but on the specific axes of free, offline, and read-only it is uncontested.",
+        },
+      },
+      {
+        "@type": "Question",
+        name: "Does sf-intelligence send my Salesforce metadata to a cloud?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "No. sf-intelligence builds a local vault with one read-only retrieve and then answers offline, with no network calls. Cloud platforms like Elements.cloud store your org metadata in their service to power their dashboards.",
+        },
+      },
+    ],
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/compare/elements-cloud"
+  heading="sf-intelligence vs Elements.cloud"
+  intro="Both help you understand a Salesforce org - but they are different <strong>shapes</strong> of product. Elements.cloud is an enterprise, cloud-hosted governance platform; sf-intelligence is a free, offline, read-only MCP server for AI coding agents. This is an honest comparison to help you pick."
+  crumbs={[{ label: "compare", href: "/compare/elements-cloud" }]}
+  breadcrumbs={[{ name: "sf-intelligence vs Elements.cloud", path: "/compare/elements-cloud" }]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container">
+      <div class="prose">
+        <div class="callout">
+          <p><strong>Short answer:</strong> <strong>Elements.cloud</strong> is an enterprise, cloud-hosted "Change Intelligence" platform - a managed package plus a web app - built for architects, platform owners, and governance teams, with paid plans. <strong>sf-intelligence</strong> is a free, open-source, offline, read-only MCP server that gives an AI coding agent (Claude, Cursor) a local metadata knowledge base of one org. If you need an enterprise governance dashboard, Elements.cloud is built for that. If you need free, local, read-only org context for AI - with no data leaving your machine - that's sf-intelligence.</p>
+        </div>
+
+        <h2 id="summary">At a glance</h2>
+        <table class="doc-table">
+          <thead><tr><th>&nbsp;</th><th>sf-intelligence</th><th>Elements.cloud</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Category</strong></td><td>Offline MCP server + CLI for AI agents</td><td>Enterprise Change Intelligence platform</td></tr>
+            <tr><td><strong>Delivery</strong></td><td>Local (npm package, runs on your machine)</td><td>Cloud-hosted SaaS (managed package + web app)</td></tr>
+            <tr><td><strong>Where your metadata lives</strong></td><td><strong>Your machine only</strong></td><td>The vendor's cloud</td></tr>
+            <tr><td><strong>Cost</strong></td><td>Free (MIT + Commons Clause)</td><td>Paid (enterprise plans; free trial)</td></tr>
+            <tr><td><strong>Open source</strong></td><td>Yes - audit the code</td><td>No (closed, managed package)</td></tr>
+            <tr><td><strong>Works offline</strong></td><td>Yes - after one retrieve</td><td>No - cloud service</td></tr>
+            <tr><td><strong>Write access</strong></td><td>None (read-only)</td><td>Read-only analysis; separate change workflows</td></tr>
+            <tr><td><strong>Primary user</strong></td><td>Developers &amp; AI coding agents</td><td>Architects, platform owners, governance</td></tr>
+            <tr><td><strong>Dependency / impact analysis</strong></td><td>Yes - local dependency graph</td><td>Yes - a core platform feature</td></tr>
+            <tr><td><strong>Process mapping / BA tooling</strong></td><td>No</td><td>Yes - process maps, requirements, UPN</td></tr>
+            <tr><td><strong>MCP for AI agents</strong></td><td>Native - it is an MCP server</td><td>Has an MCP/metadata-for-AI offering</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="when-sfi">Choose sf-intelligence when you want to…</h2>
+        <ul>
+          <li>Give an AI coding agent grounded org context <strong>without sending metadata to a cloud</strong></li>
+          <li>Work for free, on your own machine, offline after one retrieve</li>
+          <li>Audit the tool's code yourself (open source)</li>
+          <li>Ask developer questions - impact, permissions, dependency graphs - with provenance labels</li>
+          <li>Avoid any write path to production entirely</li>
+        </ul>
+
+        <h2 id="when-elements">Choose Elements.cloud when you want to…</h2>
+        <ul>
+          <li>An enterprise governance and change-management platform with a shared web dashboard</li>
+          <li>Business-analysis tooling - process maps (UPN), requirements, story-to-metadata traceability</li>
+          <li>Org-wide compliance monitoring and change attribution across a large team</li>
+          <li>A vendor-supported managed package with enterprise SLAs</li>
+        </ul>
+
+        <h2 id="together">They can be complementary</h2>
+        <p>These aren't mutually exclusive. A team can run Elements.cloud as its system-of-record for governance while individual developers use sf-intelligence to feed an AI agent a local, read-only map of the org during day-to-day work. The distinction that matters for a security review is simply <strong>where your metadata lives</strong> and <strong>whether a tool can write</strong>.</p>
+
+        <h2 id="more">More comparisons</h2>
+        <p>See also: <a href="/compare/sweep">vs Sweep</a> and <a href="/compare/salesforce-dx-mcp">vs the official Salesforce DX MCP Server</a>.</p>
+
+        <div class="callout"><p><strong>Disclaimer:</strong> This comparison reflects publicly documented positioning as of 2026 and is written to be fair, not to disparage. Elements.cloud's feature set evolves - verify current capabilities and pricing on their site. sf-intelligence is an independent project, not affiliated with Elements.cloud or Salesforce.</p></div>
+
+        <div style="padding-top:36px;">
+          <div class="cta-box">
+            <h2 class="screen-type">Free, local, read-only.</h2>
+            <p>Give your AI agent org context without a cloud upload or a write path.</p>
+            <div class="cta-actions">
+              <a class="btn btn-solid" href="/getting-started">install sf-intelligence</a>
+              <a class="btn btn-ghost" href="/ai-safety">is AI safe on my org?</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</DocPage>

@@ -1,0 +1,110 @@
+---
+import DocPage from "../layouts/DocPage.astro";
+import siteData from "../data/site-data.json";
+
+const title = "Read-only Salesforce MCP server - sf-intelligence";
+const description =
+  "Free read-only Salesforce MCP server for Claude, Cursor, Codex, and AI agents. Ask org questions from local metadata with no writes or deploys.";
+
+const jsonld = [
+  {
+    "@type": "SoftwareApplication",
+    name: "sf-intelligence",
+    applicationCategory: "DeveloperApplication",
+    applicationSubCategory: "Read-only Salesforce MCP server",
+    operatingSystem: "macOS, Linux, Windows (Node.js 20+)",
+    description:
+      "A free, offline, read-only Model Context Protocol server for Salesforce org metadata intelligence.",
+    url: "https://sfi.auditforce.cloud/mcp",
+    downloadUrl: "https://www.npmjs.com/package/sf-intelligence",
+    offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/mcp"
+  heading="Read-only Salesforce MCP server"
+  intro="<strong>sf-intelligence</strong> is a Model Context Protocol (MCP) server built for <em>understanding</em> a Salesforce org - impact analysis, dependency tracing, permissions, and documentation - not deploying to it. It is the only free, offline, read-only Salesforce MCP server that answers from your org's real metadata."
+  crumbs={[{ label: "mcp", href: "/mcp" }]}
+  breadcrumbs={[{ name: "MCP server", path: "/mcp" }]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container">
+      <div class="prose">
+
+        <h2 id="what">What is a Salesforce MCP server?</h2>
+        <p>The <a href="https://modelcontextprotocol.io" rel="noopener">Model Context Protocol (MCP)</a> lets AI assistants call tools against external systems. A Salesforce MCP server exposes org-aware tools - schema lookup, dependency analysis, permission tracing - that Claude, Cursor, Codex, or any MCP client can invoke during a conversation.</p>
+        <p>Most Salesforce MCP servers are built for <strong>DevOps tasks</strong>: deploy, retrieve, run Apex, execute SOQL. sf-intelligence fills the gap they leave open: <strong>read-only org intelligence</strong> with explicit provenance on every answer.</p>
+
+        <h2 id="different">How sf-intelligence differs</h2>
+        <table class="doc-table">
+          <thead><tr><th>Property</th><th>sf-intelligence</th><th>Typical Salesforce MCP servers</th></tr></thead>
+          <tbody>
+            <tr><td>Write path</td><td><strong>None</strong> - read-only retrieve only</td><td>Often deploy, edit, run Apex/SOQL</td></tr>
+            <tr><td>Default mode</td><td><strong>Offline</strong> - answers from local vault</td><td>Live API calls per question</td></tr>
+            <tr><td>Primary use</td><td>Impact analysis, permissions, documentation</td><td>DevOps, coding, data queries</td></tr>
+            <tr><td>Data leaves your machine</td><td><strong>Never</strong> (vault is local)</td><td>Varies - often cloud-hosted</td></tr>
+            <tr><td>Cost</td><td>Free (MIT + Commons Clause)</td><td>Free official tools or paid SaaS</td></tr>
+          </tbody>
+        </table>
+        <p>See a detailed comparison with Salesforce's official DX MCP server on the <a href="/compare/salesforce-dx-mcp">comparison page</a>.</p>
+
+        <h2 id="clients">Works with Claude, Cursor, Codex, and more</h2>
+        <p>Register once via stdio transport. The server resolves the vault from your Salesforce DX repo's working directory.</p>
+
+        <h3>Claude Code (project-scoped)</h3>
+        <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope project sf-intelligence -- npx -y sf-intelligence mcp</pre></div>
+
+        <h3>Claude Desktop / Cursor / any MCP client</h3>
+        <div class="code-block"><div class="cb-head"><span class="fname">mcp config</span></div><pre>{'{'}
+  <span class="tok-s">"mcpServers"</span>: {'{'}
+    <span class="tok-s">"sf-intelligence"</span>: {'{'}
+      <span class="tok-s">"type"</span>: <span class="tok-s">"stdio"</span>,
+      <span class="tok-s">"command"</span>: <span class="tok-s">"npx"</span>,
+      <span class="tok-s">"args"</span>: [<span class="tok-s">"-y"</span>, <span class="tok-s">"sf-intelligence"</span>, <span class="tok-s">"mcp"</span>]
+    {'}'}
+  {'}'}
+{'}'}</pre></div>
+
+        <h3>Remote read-only HTTP (optional)</h3>
+        <p>For CI or shared read-only access on localhost, <code>sfi serve --http</code> exposes streamable HTTP with bearer-token auth. The live plane is <strong>hard-disabled</strong> over HTTP - remote callers cannot reach your org. Details in the <a href="/configuration#http">configuration reference</a>.</p>
+
+        <h2 id="tools">{siteData.toolCount} read-only tools, plain-language routing</h2>
+        <p>You never memorize tool names. Ask questions like:</p>
+        <ul>
+          <li>"What breaks if I delete the Contact email field?" → <a href="/use-cases/impact-analysis">impact analysis</a></li>
+          <li>"Why can't this user see this record?" → <a href="/use-cases/sharing-troubleshooting">sharing troubleshooting</a></li>
+          <li>"Where is this Apex class used?" → dependency graph + source grep</li>
+          <li>"Generate a data dictionary for this org" → documentation tools</li>
+        </ul>
+        <p>An offline semantic router surfaces a ranked shortlist of the right tools for each question across offline, live, and hybrid planes, and your AI host picks which to run. It fails closed: write requests and prompt injection are refused with a read-only alternative, and a question nothing covers gets an honest gap instead of a lookalike tool. Browse the full <a href="/capabilities">capability map</a> or <a href="/tools">tool reference</a>.</p>
+
+        <h2 id="safe">Safe for production orgs</h2>
+        <p>Enterprise testers' first question: what does this do to my org? The answer is nothing destructive:</p>
+        <ul>
+          <li>Only <code>sf project retrieve</code> touches Salesforce - metadata read, never write</li>
+          <li>Vault answers make no network calls</li>
+          <li>Live plane is off until you grant per-org consent</li>
+          <li>No telemetry, no phone-home</li>
+        </ul>
+        <p>Full guarantees on the <a href="/trust">trust page</a> and in <a href="/faq#privacy">FAQ</a>.</p>
+
+        <div style="padding-top:36px;">
+          <div class="cta-box">
+            <h2 class="screen-type">Register in 30 seconds.</h2>
+            <p>Free on npm. One read-only retrieve, then ask anything about your org.</p>
+            <div class="cta-actions">
+              <a class="btn btn-solid" href="/getting-started">full install guide</a>
+              <a class="btn btn-ghost" href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">view on npm</a>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+</DocPage>

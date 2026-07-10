@@ -1,0 +1,173 @@
+---
+import DocPage from "../layouts/DocPage.astro";
+
+const title = "Configuration - sf-intelligence";
+const description = "Configure sf-intelligence: live plane, HTTP serving, staged refresh, vault git history, annotations, report pull, Apex edges, fleet settings, and audit log.";
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/configuration"
+  heading="Configuration reference"
+  intro={`Environment variables and on-disk paths for sf-intelligence. Most installs need <strong>none</strong> of these - the defaults are safe for offline vault use. New here? Start with the <a href="/getting-started">install guide</a>.`}
+  crumbs={[{ label: "getting-started", href: "/getting-started" }, { label: "configuration", href: "/configuration" }]}
+  breadcrumbs={[{ name: "Getting started", path: "/getting-started" }, { name: "Configuration", path: "/configuration" }]}
+>
+  <section>
+    <div class="container">
+      <div class="prose">
+
+        <h2 id="live">Live read-only plane</h2>
+        <p>The live plane is <strong>off by default</strong>. Vault tools never call Salesforce. Enable it any one of three ways:</p>
+        <table class="doc-table">
+          <thead><tr><th>Method</th><th>Scope</th><th>How</th></tr></thead>
+          <tbody>
+            <tr><td>Standing consent</td><td>Per org, persists</td><td><code>sfi.live_consent {'{'} grant: true, orgAlias: "my-org" {'}'}</code></td></tr>
+            <tr><td>Environment</td><td>All live tools in the MCP process</td><td><code>SFI_LIVE_PLANE_ENABLED=1</code></td></tr>
+            <tr><td>Per-call flag</td><td>A single tool invocation</td><td>pass <code>liveEnabled: true</code> in the tool args</td></tr>
+          </tbody>
+        </table>
+        <p>Revoke standing consent with <code>sfi.live_consent {'{'} grant: false {'}'}</code>. Consent is stored vault-independently (default <code>~/.sf-intelligence/live-consent.json</code>; override with <code>SFI_CONSENT_PATH</code>) so it works before <code>sfi init</code>.</p>
+
+        <h3>The curated live-tool roster</h3>
+        <p>There is <strong>no generic SOQL tool</strong>. When enabled, only these read-only tools run, and they label answers <code>provenance: live_org</code>:</p>
+        <table class="doc-table">
+          <thead><tr><th>Tool</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><td><code>live_count</code></td><td><code>SELECT COUNT()</code> for one object</td></tr>
+            <tr><td><code>live_sample</code></td><td>Sample rows (max 200)</td></tr>
+            <tr><td><code>live_field_population</code></td><td>Null vs populated ratio for one field</td></tr>
+            <tr><td><code>live_group_count</code></td><td>Value distribution (GROUP BY one field)</td></tr>
+            <tr><td><code>live_stale_records</code></td><td>Records not touched in N days</td></tr>
+            <tr><td><code>live_recent_activity</code></td><td>Recently created or modified records</td></tr>
+            <tr><td><code>live_aggregate</code></td><td>MIN/MAX/AVG/SUM on one numeric field</td></tr>
+            <tr><td><code>live_duplicate_check</code></td><td>Duplicate values on one field</td></tr>
+            <tr><td><code>live_owner_breakdown</code></td><td>Record counts by owner (User/Queue names)</td></tr>
+            <tr><td><code>live_storage_by_object</code></td><td>Top N objects by record count</td></tr>
+            <tr><td><code>live_describe</code></td><td>Live object describe</td></tr>
+            <tr><td><code>live_org_limits</code></td><td>Governor limit snapshot</td></tr>
+            <tr><td><code>live_inactive_users</code></td><td>Users inactive for N days</td></tr>
+            <tr><td><code>live_drift_check</code></td><td>Compare vault claims vs live org</td></tr>
+            <tr><td><code>live_report_usage</code></td><td>Stale/unused reports (LastRunDate)</td></tr>
+            <tr><td><code>live_folder_access</code></td><td>Folder access types</td></tr>
+            <tr><td><code>live_email_template_usage</code></td><td>Email template usage / migration candidates</td></tr>
+            <tr><td><code>live_license_usage</code></td><td>License allocation vs actual usage</td></tr>
+            <tr><td><code>live_org_health</code></td><td>Failed jobs, paused flows, limits at risk</td></tr>
+            <tr><td><code>live_stale_check</code></td><td>Is the org ahead of the vault? (Tooling-API drift)</td></tr>
+            <tr><td><code>live_picklist_usage</code></td><td>Which picklist values records actually use</td></tr>
+            <tr><td><code>live_budget</code></td><td>Session live-query budget + cache state</td></tr>
+            <tr><td><code>live_consent</code></td><td>Grant/revoke standing live-plane consent (not a query)</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Hybrid answers (vault + live)</h3>
+        <p>Some tools <strong>fuse</strong> the offline vault (structure - what depends on what) with a live read-only query (magnitude - how many records), stamping <code>provenance: hybrid</code> and carrying <strong>both</strong> planes' freshness. When the org is ahead of the vault, a hybrid answer <strong>leads with a staleness warning</strong> rather than narrating a fresh count against stale structure. Live data <strong>never</strong> backfills stale vault claims.</p>
+        <table class="doc-table">
+          <thead><tr><th>Tool</th><th>Hybrid value</th></tr></thead>
+          <tbody>
+            <tr><td><code>blast_radius_live</code></td><td>The static impact graph + a live affected-record count per record-bearing dependency</td></tr>
+            <tr><td><code>what_if_make_field_required</code></td><td>Pass <code>liveEnabled: true</code> to add the field's live production null-rate</td></tr>
+            <tr><td><code>field_change_advisor</code></td><td>Pass <code>liveEnabled: true</code> to cite the live record population alongside the vault verdict</td></tr>
+            <tr><td><code>live_picklist_usage</code></td><td>Defined value set (vault) × actual usage (live)</td></tr>
+          </tbody>
+        </table>
+        <p>Without consent these tools still answer from the vault, with a caveat - the static answer is never blocked on the live plane.</p>
+
+        <h3>Live-plane cost controls</h3>
+        <table class="doc-table">
+          <thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td><code>SFI_LIVE_QUERY_BUDGET</code></td><td><code>50</code></td><td>Max live org queries per server session; the plane fails <strong>closed</strong> with an actionable message when spent. A cache hit costs nothing.</td></tr>
+            <tr><td><code>SFI_LIVE_CACHE_TTL_MS</code></td><td><code>90000</code></td><td>TTL for the in-process live-result cache. A repeated identical query inside the session is served from cache, stamped <code>cached: true</code> with the original read time. Memory-only - never persisted.</td></tr>
+            <tr><td><code>SFI_BLAST_RADIUS_MAX_LIVE</code></td><td><code>25</code></td><td>Per-call cap on live COUNT queries for <code>blast_radius_live</code>; beyond it the answer is marked <code>partial</code>.</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="audit">Governance &amp; observability</h2>
+        <table class="doc-table">
+          <thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td><code>SF_INTELLIGENCE_AUDIT_LOG</code></td><td><em>(unset - no logging)</em></td><td>Append-only JSONL path. Logs tool name, argument <strong>keys only</strong> (never values), vault hash, timestamp. Best-effort; never breaks tool calls.</td></tr>
+          </tbody>
+        </table>
+        <div class="code-block">
+          <div class="cb-head"><span class="fname">terminal</span></div>
+          <pre><span class="tok-k">export</span> SF_INTELLIGENCE_AUDIT_LOG=<span class="tok-s">"$HOME/.sf-intelligence/audit.jsonl"</span></pre>
+        </div>
+
+        <h2 id="fleet">Multi-vault / fleet</h2>
+        <p>Cross-vault tools (<code>fleet_find</code>, <code>compare_vaults</code>, <code>fleet_drift_ranking</code>, …) need a registry of vault roots.</p>
+        <table class="doc-table">
+          <thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td><code>SF_INTELLIGENCE_REGISTRY_PATH</code></td><td>walk up for <code>registry.json</code>, else <code>~/sf-intelligence-vaults</code></td><td>Path to <code>registry.json</code> <strong>or</strong> a directory containing it</td></tr>
+          </tbody>
+        </table>
+        <p>Register vaults with the CLI (the file is created on first use), then list them:</p>
+        <div class="code-block">
+          <div class="cb-head"><span class="fname">terminal</span></div>
+          <pre><span class="tok-k">sfi</span> register-vault acme-prod /path/to/acme-prod/org-kb
+<span class="tok-k">sfi</span> register-vault acme-sandbox /path/to/acme-sandbox/org-kb
+<span class="tok-k">sfi</span> list-vaults</pre>
+        </div>
+        <p>Vault paths must be absolute. Per-vault freshness is read from each vault's own <code>meta/manifest.json</code>, never duplicated in the registry - so a vault refreshed independently never goes stale in the registry. <code>fleet_drift_ranking</code> runs the staleness probe across every registered vault and ranks them by how far each is behind its live org, so a team running many orgs knows which to refresh first (it's a live sweep, so per-org consent and the session budget both apply).</p>
+
+        <h3>Concurrent read-only serving (the vault lock)</h3>
+        <p>The MCP server opens the vault <strong>read-only</strong>, taking a <em>shared</em> DuckDB lock - so several read-only consumers can serve the <strong>same</strong> vault at once (an IDE's <code>sfi mcp</code> server, a CI/eval harness, a fleet dashboard) with no conflict. Only a <code>sfi refresh</code> needs the single <strong>exclusive</strong> writer lock; if a refresh runs while a server is serving, it fails fast with an actionable error naming the likely holder and the remedy. The rule is <strong>many readers, one writer</strong>.</p>
+
+        <h2 id="http">HTTP serving (<code>sfi serve --http</code>)</h2>
+        <p>Read-only MCP over streamable HTTP for CI pipelines or shared localhost access. Requires a bearer token (constant-time compare; <code>--generate-token</code> prints one once). Binds <code>127.0.0.1</code> by default - non-loopback <code>--host</code> warns and requires a token. The live plane is <strong>hard-disabled</strong> over HTTP regardless of consent or environment: a remote caller can never reach your org or spend its API budget. Each request gets a fresh read-only context, so a refresh underneath is visible immediately. stdio serving remains <code>sfi mcp</code>.</p>
+
+        <h2 id="staged">Staged refresh (<code>sfi refresh --staged</code>)</h2>
+        <p>On large orgs, get a servable vault in minutes instead of waiting for the full pull:</p>
+        <ul>
+          <li><strong>T0 (seconds)</strong> - read-only COUNT queries write a skeleton org card (<code>partial: true</code>) and a manifest whose coverage rows are all <code>pending</code>.</li>
+          <li><strong>T1 (minutes)</strong> - retrieves the 10 priority families behind most questions (objects, fields, validation rules, Flows, Apex, layouts, record types, Profiles, PermissionSets). The vault answers questions about those types from here on.</li>
+          <li><strong>T2</strong> - full monolithic refresh through a transactional side-build: the live graph is replaced only on success, so an interruption leaves the T1 vault servable.</li>
+          <li><strong>T3</strong> - only with <code>--with-reports</code>: the folder-based Report/Dashboard pass.</li>
+        </ul>
+        <p>Mid-build honesty is automatic: <code>sfi.health_check</code> reports <code>degraded (building tier i/n)</code>, absence answers stay qualified until the type's tier has landed, and re-running <code>--staged</code> skips completed tiers.</p>
+
+        <h2 id="reports">Usage-ranked Reports &amp; Dashboards (default pull)</h2>
+        <p>Folder-based Reports/Dashboards are invisible to the wildcard retrieve, so every full refresh pulls the top <code>SFI_REPORTS_CAP</code> (default <strong>500</strong>) ranked by actual usage (<code>LastRunDate</code> / <code>LastViewedDate</code>) via read-only SOQL. Field references fold onto fields - no separate report nodes. When the org holds more than the cap, coverage rows read <code>pending</code> and absence claims stay qualified. <code>--with-reports</code> = uncapped full pull; <code>--no-reports</code> = skip.</p>
+
+        <h2 id="apex-ast">AST-parsed Apex edges (default on)</h2>
+        <p>During refresh, a parser-grade Apex pass builds <code>parsed</code>-confidence dependency edges from real AST analysis - cross-method references, SOQL in loops, and call graphs that regex heuristics miss. Opt out with <code>--no-apex-ast</code> at the cost of weaker Apex edge confidence. Parsed edges are deduplicated and aggregated at the class/method level.</p>
+
+        <h2 id="git">Vault git history (<code>sfi vault git enable</code>)</h2>
+        <p>Optional: turn <code>org-kb/</code> into its own git repo (generated <code>.gitignore</code> keeps graph DB, snapshots, and caches out). After enabling, every refresh whose source tree changed auto-commits with a per-type delta message; unchanged refreshes commit nothing; git failure never fails a refresh. Consumers: <code>sfi.component_history</code> (timeline + capped diff) and <code>sfi.component_as_of</code> (properties at a ref). Non-git vaults answer <code>available: false</code> with the enable hint.</p>
+
+        <h2 id="annotations">Annotations overlay (<code>meta/annotations.jsonl</code>)</h2>
+        <p>Curated meaning the org cannot carry - <code>owner</code>, <code>status</code> (e.g. deprecated), glossary synonyms, <code>domain</code>, <code>note</code> - event-sourced and surviving every refresh. Humans write via <code>sfi annotate</code>; AI proposes via <code>sfi.propose_annotation</code> (always <code>confirmed: false</code>). Consumers serve annotations with provenance <code>annotation</code> - never <code>offline_snapshot</code>. Orphans (annotated IDs whose component left the graph) surface in the refresh pulse and <code>sfi annotate orphans</code>.</p>
+
+        <h2 id="gaps">Question-gap log (local telemetry)</h2>
+        <p>When routing cannot answer a question, the router may append a gap record <strong>locally</strong> - never sent to the network - so the library grows toward what people actually ask.</p>
+        <table class="doc-table">
+          <thead><tr><th>Variable / path</th><th>Default</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td><code>SFI_GAP_LOG_PATH</code></td><td><em>(unset)</em></td><td>Override the gap-log path (tests)</td></tr>
+            <tr><td>default file</td><td><code>~/.sf-intelligence/question-gaps.jsonl</code></td><td>Local gap log for product review</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="mcp">MCP server registration</h2>
+        <p>The full register-once steps live in the <a href="/getting-started#install">install guide</a>. The MCP server resolves the vault as <code>org-kb/</code> relative to the <strong>current working directory</strong> (your Salesforce DX repo), not the install path.</p>
+
+        <div class="callout"><p><strong>Note:</strong> a handful of additional variables exist for development, evaluation, and release gates (scale budgets, SAST thresholds, eval reporters). Those aren't used in normal sessions.</p></div>
+
+        <div style="padding-top:36px;">
+          <div class="cta-box">
+            <h2 class="screen-type">Most of this is optional.</h2>
+            <p>The defaults are safe and offline. Reach for these only when you want live data or multiple orgs.</p>
+            <div class="cta-actions">
+              <a class="btn btn-solid" href="/getting-started">back to install</a>
+              <a class="btn btn-ghost" href="/tools">all tools</a>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+</DocPage>

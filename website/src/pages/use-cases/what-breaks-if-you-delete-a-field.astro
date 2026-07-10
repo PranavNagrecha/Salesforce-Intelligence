@@ -1,0 +1,94 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+import site from "../../data/site.ts";
+
+const title = "Delete a Salesforce field: what breaks? - sf-intelligence";
+const description =
+  "Before you delete a Salesforce field, simulate it - see every dependent Flow, Apex class, layout, and report, with honest caveats on what static analysis misses.";
+
+const faq = [
+  {
+    q: "How do I know what breaks if I delete a Salesforce field?",
+    a: "Trace its dependents first. sf-intelligence's safe_to_delete_field simulates the delete: it collects every component that references the field, weighs them, and returns a verdict with a coverage caveat that tells you which metadata families it did and didn't check. It never gives a confident 'safe' it can't back up with evidence.",
+  },
+  {
+    q: "Is it safe to delete a custom field with no data?",
+    a: "Having no data removes one risk (data loss) but not the other (broken references). A field with no records can still be referenced by a Flow, formula, Apex class, or report that will break on delete. Check the references, not just the row count.",
+  },
+  {
+    q: "What does Salesforce not warn me about when deleting a field?",
+    a: "Salesforce blocks a delete on some hard dependencies but not all - formula text, certain Apex references, and report columns can slip through. A metadata-level simulation surfaces those before you act, and flags dynamic references it can only detect heuristically.",
+  },
+];
+
+const jsonld = [
+  {
+    "@type": "TechArticle",
+    headline: "What breaks if you delete a Salesforce field?",
+    description,
+    author: { "@id": `${site.url}/#org` },
+    publisher: { "@id": `${site.url}/#org` },
+  },
+  {
+    "@type": "FAQPage",
+    mainEntity: faq.map((f) => ({ "@type": "Question", name: f.q, acceptedAnswer: { "@type": "Answer", text: f.a } })),
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/use-cases/what-breaks-if-you-delete-a-field"
+  heading="What breaks if I delete this?"
+  intro={`Deleting a Salesforce field is a one-way door with hidden dependents. Simulate the delete first - see every Flow, Apex class, layout, validation rule, and report that references it, weighed into a verdict with honest coverage caveats.`}
+  crumbs={[{ label: "use-cases", href: "/use-cases" }, { label: "delete impact", href: "/use-cases/what-breaks-if-you-delete-a-field" }]}
+  breadcrumbs={[{ name: "Use cases", path: "/use-cases" }, { name: "What breaks if you delete a field?", path: "/use-cases/what-breaks-if-you-delete-a-field" }]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container">
+      <div class="prose">
+        <div class="callout">
+          <p><strong>Short answer:</strong> Don't guess - simulate. Ask sf-intelligence <em>"what breaks if I delete Contact.Legacy_Status__c?"</em> and it collects every dependent component, weighs the impact, and returns a verdict with a <strong>coverage caveat</strong> naming what it did and didn't check. It surfaces the risk before you make the change, and it's read-only - it never deletes anything for you.</p>
+        </div>
+
+        <h2 id="how">A delete you can preview</h2>
+        <div class="code-block"><div class="cb-head"><span class="fname">claude - sf-intelligence</span></div><pre><span class="tok-p">›</span> is it safe to delete Contact.Legacy_Status__c?
+▸ verdict: <span class="tok-s">review-first</span> — 4 dependents found
+  ValidationRule "Status_Required" · Flow "Contact_Router" · ApexClass "ContactSvc" · Report
+  <span class="tok-c">coverageCaveat: reports & dashboards fully modeled; dynamic Apex not checked</span></pre></div>
+
+        <h2 id="why">Why "no data" isn't the same as "safe"</h2>
+        <table class="doc-table">
+          <thead><tr><th>Risk</th><th>Removed by "no records"?</th><th>Removed by dependency check?</th></tr></thead>
+          <tbody>
+            <tr><td>Data loss on delete</td><td>Yes</td><td>-</td></tr>
+            <tr><td>A Flow that reads the field breaking</td><td>No</td><td>Yes - it's surfaced</td></tr>
+            <tr><td>A formula / validation rule referencing it</td><td>No</td><td>Yes - it's surfaced</td></tr>
+            <tr><td>A report column disappearing</td><td>No</td><td>Yes - it's surfaced</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="tools">The tools behind it</h2>
+        <ul>
+          <li><code>safe_to_delete_field</code> - the delete simulation with a verdict and coverage caveat.</li>
+          <li><code>get_impact</code> - the raw dependency subgraph (what references this, N hops out).</li>
+          <li><code>what_if_change_field_type</code> - the sibling question for a type change rather than a delete.</li>
+        </ul>
+
+        <h2 id="limits">Honest limits</h2>
+        <p>A destructive verdict is only as strong as the coverage behind it. sf-intelligence renders the coverage caveat <em>before</em> the verdict, distinguishes "not in the vault" from "not in the org", and marks dynamic references heuristic. Treat a "safe" verdict as "no static evidence of a dependent", then spot-check. See <a href="/trust">how it's tested</a>.</p>
+
+        <h2 id="faq">Frequently asked</h2>
+        {faq.map((f) => (<details class="faq-item"><summary>{f.q}</summary><div class="answer"><p>{f.a}</p></div></details>))}
+
+        <div style="padding-top:36px;"><div class="cta-box">
+          <h2 class="screen-type">Preview the delete.</h2>
+          <p>Simulate a field change against your real metadata before you make it.</p>
+          <div class="cta-actions"><a class="btn btn-solid" href="/getting-started">get started</a><a class="btn btn-ghost" href="/use-cases/impact-analysis">full impact analysis</a></div>
+        </div></div>
+      </div>
+    </div>
+  </section>
+</DocPage>

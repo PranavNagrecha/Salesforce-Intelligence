@@ -1,0 +1,71 @@
+---
+import DocPage from "../layouts/DocPage.astro";
+
+const title = "Licensing - sf-intelligence (MIT + Commons Clause)";
+const description = "sf-intelligence is free to use at work under MIT + Commons Clause. You just can't Sell it. Learn what's allowed and when to get a commercial license.";
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/licensing"
+  heading="Licensing"
+  intro={`Free to use, even at work. A commercial license is only needed to <em>Sell</em> it.`}
+  crumbs={[{ label: "licensing", href: "/licensing" }]}
+  breadcrumbs={[{ name: "Licensing", path: "/licensing" }]}
+>
+  <section>
+    <div class="container">
+
+      <h2>License Overview</h2>
+      <p>sf-intelligence is licensed under the <strong>MIT License with Commons Clause</strong>. This means:</p>
+
+      <div class="feature-grid" style="grid-template-columns: 1fr 1fr; gap: 2rem; margin: 2rem 0;">
+        <div class="feature-card">
+          <h3>✓ Free to Use</h3>
+          <p>Free, forever - including at work, inside a company. Use sf-intelligence for:</p>
+          <ul style="margin-top: 1rem; font-size: 0.95rem;">
+            <li>Personal projects, learning, and evaluation</li>
+            <li>Internal org analysis - at home or on the job</li>
+            <li>Self-hosting it for your own or your team's use</li>
+            <li>Forking, modifying, redistributing, and contributing</li>
+          </ul>
+        </div>
+
+        <div class="feature-card">
+          <h3>✗ Selling It</h3>
+          <p>You may not "Sell" it without a commercial license - i.e. provide it to others, for a fee, as a product or service whose value derives substantially from it:</p>
+          <ul style="margin-top: 1rem; font-size: 0.95rem;">
+            <li>Offering it (or a hosted / SaaS version) as a paid product or service</li>
+            <li>Reselling it, or paid access to it or its output</li>
+            <li>Charging for hosting/support whose value derives substantially from it</li>
+            <li>A competing product whose value derives substantially from it</li>
+          </ul>
+        </div>
+      </div>
+
+      <h2>Commercial Licensing</h2>
+      <p>If you want to use sf-intelligence commercially, or aren't sure if your use case requires a license, get in touch:</p>
+      <div style="margin: 2rem 0; padding: 1.5rem; background: rgba(255, 255, 255, 0.05); border-radius: 8px;">
+        <p><strong>Email:</strong> <a href="mailto:pranav.sfintelligence@gmail.com">pranav.sfintelligence@gmail.com</a></p>
+        <p style="margin-top: 0.5rem;"><strong>Subject:</strong> sf-intelligence Commercial License</p>
+      </div>
+
+      <h2>Attribution</h2>
+      <p>Attribution is appreciated but not required. If you include attribution, please link to <a href="https://sfi.auditforce.cloud">sfi.auditforce.cloud</a>.</p>
+
+      <h2>Derivative Works</h2>
+      <p>You are free to modify sf-intelligence for your own use under the same license terms. If you modify the code, you may distribute those modifications under the MIT + Commons Clause license.</p>
+
+      <h2>Contributing</h2>
+      <p>Contributors agree that their contributions are also licensed under the MIT + Commons Clause. By submitting a pull request or contribution, you agree that your contribution can be used under these terms.</p>
+
+      <h2>Full License Text</h2>
+      <p>The complete license text ships in the <code>LICENSE</code> file inside the <a href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">npm package</a>.</p>
+
+      <h2>Questions?</h2>
+      <p>If you have any questions about how the license applies to your use case, please reach out to <a href="mailto:pranav.sfintelligence@gmail.com">pranav.sfintelligence@gmail.com</a>.</p>
+
+    </div>
+  </section>
+</DocPage>

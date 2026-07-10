@@ -1,0 +1,145 @@
+---
+import DocPage from "../layouts/DocPage.astro";
+import site from "../data/site.ts";
+
+const title = "Install sf-intelligence - Salesforce MCP setup guide";
+const description =
+  "Install the sf-intelligence Salesforce MCP server, register it in an AI client, run a read-only metadata retrieve, and keep the local vault fresh.";
+
+// HowTo rich results were deprecated by Google (2023) — modelled as TechArticle
+// now, which AI engines and Bing still parse. Steps kept in the article body.
+const jsonld = [
+  {
+    "@type": "TechArticle",
+    headline: "Install sf-intelligence for a Salesforce org",
+    description:
+      "Install the sf-intelligence MCP server from npm and build a local, read-only metadata vault for one Salesforce org.",
+    author: { "@id": `${site.url}/#org` },
+    publisher: { "@id": `${site.url}/#org` },
+    proficiencyLevel: "Beginner",
+    dependencies: "Node.js 20+, Salesforce CLI (sf), a Salesforce DX project",
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/getting-started"
+  heading="Install & first run"
+  intro={`sf-intelligence is published on npm as <span class="mono amber">sf-intelligence</span> - an MCP server plus the <span class="mono amber">sfi</span> command-line tool. There's nothing to clone and nothing to build; <code>npx</code> fetches it. Register it once, point it at your Salesforce org, run one read-only retrieve - then every answer is served from your machine.`}
+  crumbs={[{ label: "getting-started", href: "/getting-started" }]}
+  breadcrumbs={[{ name: "Getting started", path: "/getting-started" }]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container">
+      <div class="prose">
+        <h2 id="prerequisites">1. Prerequisites</h2>
+        <p>You need two things on the machine that runs your MCP client. Versions are minimums.</p>
+
+        <h3>Node.js 20+</h3>
+        <p><code>npx</code>, which launches the server, ships with Node. Install <a href="https://nodejs.org" rel="noopener">Node.js 20 LTS</a> if this reports an older version.</p>
+        <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">node</span> --version <span class="tok-c"># v20.x or later</span></pre></div>
+
+        <h3>Salesforce CLI (<code>sf</code>), authenticated</h3>
+        <p><code>sfi refresh</code> shells out to <code>sf project retrieve</code>, so you need a working <code>sf</code> CLI logged in to your target org. Confirm <code>connectedStatus</code> is <code>"Connected"</code>:</p>
+        <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">sf</span> --version
+<span class="tok-k">sf</span> org list --json <span class="tok-c"># connectedStatus must be "Connected"</span>
+<span class="tok-c"># not connected? re-authenticate:</span>
+<span class="tok-k">sf</span> org login web --alias my-org-alias</pre></div>
+
+        <h3>A Salesforce DX project repo</h3>
+        <p>sf-intelligence vaults <strong>a per-org repo</strong> - the directory that holds your <code>sfdx-project.json</code> and <code>force-app/</code>. The vault (<code>org-kb/</code>) lives next to that source. No DX repo yet?</p>
+        <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">sf</span> project generate --name my-org-repo
+<span class="tok-k">cd</span> my-org-repo</pre></div>
+        <div class="callout"><p>You do <strong>not</strong> need Python, pnpm, or a checkout of the project to <em>use</em> sf-intelligence - those are only for contributing.</p></div>
+
+        <h2 id="install">2. Install - register the MCP server</h2>
+        <p><strong>Claude Code</strong> - from your DX repo, register it project-scoped (writes a <code>.mcp.json</code> at the repo root, which you can commit so your team shares it):</p>
+        <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope project sf-intelligence -- npx -y sf-intelligence mcp</pre></div>
+        <p>Use <code>--scope user</code> to make it available in every project on your machine, or <code>--scope local</code> (the default) for just this project, private to you.</p>
+
+        <p><strong>Claude Desktop, or any other MCP client</strong> - add this block to the client's MCP config (Claude Desktop on macOS: <code>~/Library/Application Support/Claude/claude_desktop_config.json</code>), then restart the client:</p>
+        <div class="code-block"><div class="cb-head"><span class="fname">claude_desktop_config.json</span></div><pre>{'{'}
+  <span class="tok-s">"mcpServers"</span>: {'{'}
+    <span class="tok-s">"sf-intelligence"</span>: {'{'}
+      <span class="tok-s">"type"</span>: <span class="tok-s">"stdio"</span>,
+      <span class="tok-s">"command"</span>: <span class="tok-s">"npx"</span>,
+      <span class="tok-s">"args"</span>: [<span class="tok-s">"-y"</span>, <span class="tok-s">"sf-intelligence"</span>, <span class="tok-s">"mcp"</span>]
+    {'}'}
+  {'}'}
+{'}'}</pre></div>
+        <div class="callout"><p><strong>Cursor &amp; other IDE clients:</strong> after editing the MCP config you must reload it - Cursor does not pick up <code>.cursor/mcp.json</code> changes live. Toggle the server off/on in Settings → MCP (or restart the IDE), or the <code>sfi.*</code> tools won't appear.</p></div>
+
+        <h3>Optional: a shorter <code>sfi</code> command</h3>
+        <p><code>npx -y sf-intelligence …</code> works without installing anything, but it's verbose and re-checks the registry each run. A global install gives you a short <code>sfi</code> command for setup; or add it to the repo and call it via <code>npx</code> (which resolves the local copy, no re-download):</p>
+        <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">npm</span> install -g sf-intelligence <span class="tok-c"># global: gives you `sfi`</span>
+<span class="tok-c"># …or, local to the repo:</span>
+<span class="tok-k">npm</span> install sf-intelligence <span class="tok-c"># adds it to the repo</span>
+<span class="tok-k">npx</span> sf-intelligence --version <span class="tok-c"># resolves the local copy</span></pre></div>
+
+        <h2 id="verify">3. Verify the install</h2>
+        <p>In a session with your MCP client, confirm the server connected:</p>
+        <ul>
+          <li><strong>Claude Code</strong> - run <code>/mcp</code>. <code>sf-intelligence</code> should be listed as connected.</li>
+          <li><strong>Any client</strong> - ask the model to run <code>sfi.health_check</code>. A <code>healthy</code> envelope (or <code>degraded</code> "no vault" - expected before your first refresh) means it's wired up correctly.</li>
+        </ul>
+
+        <h2 id="first-run">4. First-run setup</h2>
+        <p>From your DX repo. The first refresh is read-only: it retrieves metadata and builds the local knowledge base - it never deploys or mutates Salesforce data.</p>
+        <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">sfi</span> init <span class="tok-c"># create org-kb/, record the org alias</span>
+<span class="tok-k">sfi</span> refresh --target-org my-org-alias <span class="tok-c"># retrieve metadata, build the vault</span>
+<span class="tok-k">sfi</span> status <span class="tok-c"># freshness, source-tree hash, counts</span>
+<span class="tok-k">sfi</span> doctor <span class="tok-c"># checks sf CLI, vault, auth, graph + fixes</span></pre></div>
+        <p>The first refresh runs <code>sf project retrieve</code> then the extractor → renderer → graph-import pipeline; it takes a few minutes on a typical sandbox, and later refreshes are incremental. No global install? Prefix each command with <code>npx -y sf-intelligence</code>. The vault (<code>org-kb/</code>) is local to the repo - most teams gitignore it.</p>
+
+        <h2 id="ask">5. Ask anything the vault can answer</h2>
+        <p>From whatever MCP client you registered, ask in plain language:</p>
+        <div class="code-block"><div class="cb-head"><span class="fname">examples</span></div><pre><span class="tok-p">›</span> What fields does the Account object have?
+<span class="tok-p">›</span> What breaks if I delete CustomField:Account.Industry__c?
+<span class="tok-p">›</span> Why can't the Standard User profile see Opportunities?
+<span class="tok-p">›</span> Give me a tour of this org.</pre></div>
+        <p>See the <a href="/capabilities">capability map</a> and the <a href="/tools">full tool reference</a> for everything it can answer.</p>
+
+        <h2 id="fresh">6. Keeping the vault fresh</h2>
+        <p>The vault is a point-in-time snapshot; the live org keeps changing. Two tools tell you when to re-pull, so a stale answer is never presented as current:</p>
+        <ul>
+          <li><code>sfi.health_check</code> reports a <code>freshness</code> block - the vault's age, a <code>stale</code> flag, and a plain-language nudge once it's more than a week old (advisory only).</li>
+          <li><code>sfi.live_drift_check</code> compares the vault's recorded fields against a <strong>live</strong> describe of an object you name, reporting what's drifted. It reads the org, so it needs the opt-in <a href="/configuration#live">live plane</a>.</li>
+        </ul>
+        <p>When either flags drift, run <code>sfi refresh --target-org my-org-alias</code> (or <code>/sfi-refresh</code>) to re-pull and rebuild.</p>
+
+        <h2 id="troubleshooting">7. Troubleshooting</h2>
+        <table class="doc-table">
+          <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+          <tbody>
+            <tr><td>MCP server not listed in <code>/mcp</code> (no <code>sfi.*</code> tools)</td><td>Client not reloaded, or config in the wrong file</td><td>Reload/restart the client. For Claude Code, confirm <code>.mcp.json</code> is at the repo root and you launched from that directory. For Cursor, reload Settings → MCP after editing <code>.cursor/mcp.json</code>.</td></tr>
+            <tr><td><code>sfi doctor</code> says <code>sf</code> not found, but it is installed</td><td>The MCP subprocess didn't inherit your shell <code>PATH</code></td><td>doctor probes common locations and reports a PATH warning; add the Salesforce CLI directory to the PATH of whatever launches the client.</td></tr>
+            <tr><td><code>npx</code> re-downloads the package every run</td><td>That's how <code>npx</code> works</td><td>Run <code>npm install -g sf-intelligence</code> once, then use the <code>sfi</code> command.</td></tr>
+            <tr><td><code>sfi: command not found</code></td><td>CLI isn't installed globally</td><td><code>npm install -g sf-intelligence</code>, or call it via <code>npx -y sf-intelligence &lt;command&gt;</code>.</td></tr>
+            <tr><td><code>sfi init</code> reports "no DX project"</td><td>Not in a Salesforce DX project</td><td><code>cd</code> into the directory containing <code>sfdx-project.json</code>, then re-run.</td></tr>
+            <tr><td><code>sfi refresh</code> reports "no vault"</td><td><code>sfi init</code> hasn't run in this repo yet</td><td>Run <code>sfi init</code> first; pick a target-org alias when prompted.</td></tr>
+            <tr><td><code>sf project retrieve</code> fails during refresh</td><td><code>sf</code> not authenticated, or wrong alias</td><td><code>sf org login web --alias my-org-alias</code>, then re-run <code>sfi refresh --target-org my-org-alias</code>.</td></tr>
+          </tbody>
+        </table>
+        <p>Anything not on this table - run <code>sfi doctor</code>; it checks the <code>sf</code> CLI, the vault, target-org auth, freshness, and the graph file, and prints an actionable fix for each problem.</p>
+
+        <h2 id="more">Configuration, live data &amp; the plugin</h2>
+        <p>Vault answers are offline by default. To enable the read-only live plane (record counts, samples, org limits), set environment variables, or wire up multiple orgs, see the <a href="/configuration">configuration reference</a>.</p>
+        <p>Running it as a <strong>Claude Code plugin</strong>? The same operations are slash commands - <code>/sfi-onboard</code> (guided first run), <code>/sfi-init</code>, <code>/sfi-refresh</code>, <code>/sfi-status</code> - and the coaching skills auto-activate when Salesforce vocabulary appears.</p>
+
+        <div style="padding-top:36px;">
+          <div class="cta-box">
+            <h2 class="screen-type">That's the whole setup.</h2>
+            <p>Browse what you can ask next, or tune the configuration.</p>
+            <div class="cta-actions">
+              <a class="btn btn-solid" href="/capabilities">see all capabilities</a>
+              <a class="btn btn-ghost" href="/configuration">configuration reference</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</DocPage>

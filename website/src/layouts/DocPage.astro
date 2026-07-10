@@ -1,0 +1,38 @@
+---
+import Base from "./Base.astro";
+import type { Breadcrumb } from "../components/SeoHead.astro";
+
+interface Props {
+  title: string;
+  description: string;
+  path: string;
+  /** Big display heading (screen-type). Defaults to `heading` or `title`. */
+  heading: string;
+  /** Sub-hero intro paragraph. */
+  intro?: string;
+  breadcrumbs?: Breadcrumb[];
+  jsonld?: Record<string, unknown>[];
+  /** Visible breadcrumb trail links (label + href). Home is prepended. */
+  crumbs?: { label: string; href: string }[];
+}
+
+const { title, description, path, heading, intro, breadcrumbs, jsonld, crumbs } = Astro.props;
+---
+
+<Base title={title} description={description} path={path} breadcrumbs={breadcrumbs} jsonld={jsonld}>
+  <section class="subhero">
+    <div class="container">
+      {crumbs && (
+        <nav class="crumbs" aria-label="Breadcrumb">
+          <a href="/">home</a>
+          {crumbs.map((c) => (
+            <><span>/</span><a href={c.href}>{c.label}</a></>
+          ))}
+        </nav>
+      )}
+      <h1 class="screen-type">{heading}</h1>
+      {intro && <p set:html={intro} />}
+    </div>
+  </section>
+  <slot />
+</Base>

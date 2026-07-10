@@ -1,0 +1,92 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+import site from "../../data/site.ts";
+
+const title = "Explain a Salesforce flow in plain English - sf-intelligence";
+const description =
+  "Ask an AI agent what a specific Salesforce Flow actually does - its trigger, decisions, and the fields, objects, and Apex it touches - grounded in the real metadata.";
+
+const faq = [
+  {
+    q: "How do I understand what a Salesforce Flow does?",
+    a: "Instead of opening Flow Builder and tracing every element by hand, ask sf-intelligence to explain the specific Flow. It reads the Flow metadata and describes its trigger, decision branches, and every field, object, and Apex action it references - in plain language, with links to the components it touches.",
+  },
+  {
+    q: "Can it explain what runs when a record is saved?",
+    a: "Yes - that's the order-of-execution question. sf-intelligence can list what fires on save (validation rules, before/after flows, Apex triggers, workflow) for an object, so you can see the full save-time picture, not just one Flow in isolation.",
+  },
+  {
+    q: "Does it run the Flow or read record data?",
+    a: "No. It's a static, read-only explanation from the Flow's metadata - it does not execute the Flow or read record values. Runtime-only behavior (which branch a specific record takes) is outside what metadata alone can tell you, and it says so.",
+  },
+];
+
+const jsonld = [
+  {
+    "@type": "TechArticle",
+    headline: "Explain a Salesforce flow in plain English",
+    description,
+    author: { "@id": `${site.url}/#org` },
+    publisher: { "@id": `${site.url}/#org` },
+  },
+  {
+    "@type": "FAQPage",
+    mainEntity: faq.map((f) => ({ "@type": "Question", name: f.q, acceptedAnswer: { "@type": "Answer", text: f.a } })),
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/use-cases/explain-a-salesforce-flow"
+  heading="Explain this flow to me"
+  intro={`Inheriting an undocumented Flow means tracing every element in Flow Builder by hand. Ask sf-intelligence instead - it reads the Flow's metadata and explains the trigger, the decision branches, and every field, object, and Apex action it touches, in plain English.`}
+  crumbs={[{ label: "use-cases", href: "/use-cases" }, { label: "explain a flow", href: "/use-cases/explain-a-salesforce-flow" }]}
+  breadcrumbs={[{ name: "Use cases", path: "/use-cases" }, { name: "Explain a Salesforce flow", path: "/use-cases/explain-a-salesforce-flow" }]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container">
+      <div class="prose">
+        <div class="callout">
+          <p><strong>Short answer:</strong> Ask sf-intelligence <em>"explain the Opportunity_Router flow"</em> and it summarizes what the Flow does - its trigger and object, its decision branches, and the fields, records, and Apex it reads or writes - from the Flow metadata, with every referenced component linked. It's a static, read-only explanation: it does not run the Flow.</p>
+        </div>
+
+        <h2 id="how">From metadata to plain English</h2>
+        <div class="code-block"><div class="cb-head"><span class="fname">claude - sf-intelligence</span></div><pre><span class="tok-p">›</span> what does the Opportunity_Router flow do?
+▸ <span class="tok-k">Flow:Opportunity_Router</span> — record-triggered, after save on Opportunity
+  • decision "Is Closed Won?" → branch A / branch B
+  • branch A: update Account.Health__c, call ApexAction "NotifyCsm"
+  • reads: Opportunity.StageName, Amount · writes: Account.Health__c
+  provenance offline_snapshot · confidence: parsed</pre></div>
+
+        <h2 id="also">Related questions it answers</h2>
+        <ul>
+          <li><strong>What runs when this record is saved?</strong> - the full order of execution across validation rules, flows, triggers, and workflow, not just one Flow.</li>
+          <li><strong>What depends on this Flow?</strong> - what breaks if you deactivate it, via impact analysis.</li>
+          <li><strong>Where is this field used?</strong> - trace a field the Flow touches across the whole org.</li>
+        </ul>
+
+        <h2 id="tools">The tools behind it</h2>
+        <ul>
+          <li><code>explain_flow</code> - the plain-language walkthrough of a specific Flow.</li>
+          <li><code>order_of_execution</code> / <code>what_happens_on_save</code> - the full save-time sequence for an object.</li>
+          <li><code>what_if_deactivate_flow</code> - the impact of turning the Flow off.</li>
+        </ul>
+
+        <h2 id="limits">Honest limits</h2>
+        <p>The explanation is built from Flow metadata, not a live run. Which branch a given record actually takes is runtime behavior that needs record data, and it says so rather than guessing. Answers reflect your last refresh. See <a href="/trust">how it's tested</a>.</p>
+
+        <h2 id="faq">Frequently asked</h2>
+        {faq.map((f) => (<details class="faq-item"><summary>{f.q}</summary><div class="answer"><p>{f.a}</p></div></details>))}
+
+        <div style="padding-top:36px;"><div class="cta-box">
+          <h2 class="screen-type">Read the flow, in English.</h2>
+          <p>Point the read-only MCP server at your org and ask what anything does.</p>
+          <div class="cta-actions"><a class="btn btn-solid" href="/getting-started">get started</a><a class="btn btn-ghost" href="/capabilities">all capabilities</a></div>
+        </div></div>
+      </div>
+    </div>
+  </section>
+</DocPage>

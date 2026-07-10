@@ -1,0 +1,94 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+import site from "../../data/site.ts";
+
+const title = "Where is a Salesforce field used? - sf-intelligence";
+const description =
+  "Find every place a Salesforce field is referenced - Flows, Apex, layouts, reports, validation rules - by asking an AI agent instead of clicking through Setup.";
+
+const faq = [
+  {
+    q: "How do I find where a Salesforce field is used?",
+    a: "Salesforce's built-in Where is this used? button covers many reference types but misses some (formula text, certain Apex references) and only works one field at a time in Setup. sf-intelligence answers the question from a dependency graph plus a source grep of the retrieved metadata, so you can ask 'where is Account.Industry__c used?' in plain language and get Flows, Apex, layouts, validation rules, reports, and more in one answer.",
+  },
+  {
+    q: "Does it find field references inside Apex and formulas?",
+    a: "Yes - it parses Apex and formula source and reports references with a confidence label. Static analysis can't see dynamic SOQL or reflective field access, so those edges are marked heuristic and it tells you plainly that 'no references found' means 'no static evidence', not a guarantee the field is unused.",
+  },
+  {
+    q: "Can it tell me if a field is safe to delete?",
+    a: "That's the related question - see what breaks if you delete a field. Usage tells you what references a field; the delete simulation weighs those references and adds coverage caveats before giving a verdict.",
+  },
+];
+
+const jsonld = [
+  {
+    "@type": "TechArticle",
+    headline: "Where is a Salesforce field used?",
+    description,
+    author: { "@id": `${site.url}/#org` },
+    publisher: { "@id": `${site.url}/#org` },
+  },
+  {
+    "@type": "FAQPage",
+    mainEntity: faq.map((f) => ({ "@type": "Question", name: f.q, acceptedAnswer: { "@type": "Answer", text: f.a } })),
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/use-cases/where-is-a-field-used"
+  heading="Where is this field used?"
+  intro={`The everyday admin question that means clicking through Setup one field at a time - or asking an AI agent once and getting every Flow, Apex class, layout, report, and validation rule that touches it, grounded in your real metadata.`}
+  crumbs={[{ label: "use-cases", href: "/use-cases" }, { label: "field usage", href: "/use-cases/where-is-a-field-used" }]}
+  breadcrumbs={[{ name: "Use cases", path: "/use-cases" }, { name: "Where is a field used?", path: "/use-cases/where-is-a-field-used" }]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container">
+      <div class="prose">
+        <div class="callout">
+          <p><strong>Short answer:</strong> Ask sf-intelligence <em>"where is Account.Industry__c used?"</em> and it returns every component that references the field - Flows, Apex, layouts, validation rules, reports - from a dependency graph plus a source grep of your retrieved metadata, each reference labelled with its confidence. One question replaces a field-by-field crawl through Setup.</p>
+        </div>
+
+        <h2 id="how">How it works</h2>
+        <p>When you name a field, the router resolves it to a canonical ID (and asks a clarifying question if several match), then walks the incoming edges in the dependency graph and grep-scans the source for any reference the graph doesn't already model:</p>
+        <div class="code-block"><div class="cb-head"><span class="fname">claude - sf-intelligence</span></div><pre><span class="tok-p">›</span> where is the Industry field on Account used?
+▸ 7 components reference <span class="tok-k">CustomField:Account.Industry__c</span>:
+  ValidationRule · Flow · ApexClass(2) · Layout · Report · FieldSet
+  provenance offline_snapshot · edges: declared, parsed, heuristic</pre></div>
+
+        <h2 id="what-it-catches">What it catches</h2>
+        <table class="doc-table">
+          <thead><tr><th>Reference type</th><th>Confidence</th></tr></thead>
+          <tbody>
+            <tr><td>Layouts, field sets, validation rules, record types</td><td><strong>declared</strong> - Salesforce states it directly</td></tr>
+            <tr><td>Flows, formulas, Apex (parsed source)</td><td><strong>parsed</strong> - from AST/XML parsing</td></tr>
+            <tr><td>Dynamic SOQL / reflective Apex mentions</td><td><strong>heuristic</strong> - grep-level, spot-check it</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="tools">The tools behind it</h2>
+        <ul>
+          <li><code>find_field_anywhere</code> - lexical search for a field across every retrieved component.</li>
+          <li><code>field_360</code> - the full profile of a field: definition, references, what fires when it changes.</li>
+          <li><code>find_component_usages</code> - the universal "where is X used" dispatcher for any component, not just fields.</li>
+        </ul>
+
+        <h2 id="limits">Honest limits</h2>
+        <p>Usage answers are only as complete as your last refresh and the metadata you retrieved. Dynamic field access is invisible to static analysis, so it labels heuristic matches and never reports a confident "unused" it can't back up. See <a href="/trust">how it's tested</a>.</p>
+
+        <h2 id="faq">Frequently asked</h2>
+        {faq.map((f) => (<details class="faq-item"><summary>{f.q}</summary><div class="answer"><p>{f.a}</p></div></details>))}
+
+        <div style="padding-top:36px;"><div class="cta-box">
+          <h2 class="screen-type">Ask once, not field by field.</h2>
+          <p>Register the read-only MCP server and ask where anything is used.</p>
+          <div class="cta-actions"><a class="btn btn-solid" href="/getting-started">get started</a><a class="btn btn-ghost" href="/use-cases/what-breaks-if-you-delete-a-field">what breaks if I delete it?</a></div>
+        </div></div>
+      </div>
+    </div>
+  </section>
+</DocPage>

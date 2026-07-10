@@ -1,0 +1,63 @@
+---
+import DocPage from "../layouts/DocPage.astro";
+import site from "../data/site.ts";
+import toolsData from "../data/tools.json";
+
+const { toolCount, sections } = toolsData;
+
+const title = `All ${toolCount} tools - sf-intelligence Salesforce MCP reference`;
+const description = `Reference for ${toolCount} read-only sf-intelligence Salesforce MCP tools: search, impact analysis, permissions, code, integrations, docs, audits, and live data.`;
+
+// ItemList schema of the grouped tool sections (upgrade over a plain table).
+const jsonld = [
+  {
+    "@type": "ItemList",
+    name: `sf-intelligence tools (${toolCount})`,
+    numberOfItems: toolCount,
+    itemListElement: sections.map((s, i) => ({
+      "@type": "ListItem",
+      position: i + 1,
+      name: s.label,
+    })),
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/tools"
+  heading={`All ${toolCount} Salesforce tools`}
+  intro={`The complete reference for every read-only tool sf-intelligence exposes for a Salesforce org - grouped by function, each with what it does. You never call these by name; an offline semantic router surfaces a ranked shortlist for each plain-language question and your AI host picks which to run. They are listed here for transparency and so AI assistants can cite them accurately.`}
+  crumbs={[{ label: "capabilities", href: "/capabilities" }, { label: "tools", href: "/tools" }]}
+  breadcrumbs={[{ name: "Capabilities", path: "/capabilities" }, { name: "All tools", path: "/tools" }]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container">
+      {sections.map((s) => (
+        <article class="card" style="margin-bottom:18px;">
+          <h2 style="font-family:var(--mono); font-size:1.15rem; color:var(--fg-strong); margin-bottom:4px;">
+            {s.label} <span class="muted" style="font-size:.8rem;">· {s.tools.length}</span>
+          </h2>
+          <div class="toollist">
+            {s.tools.map((t) => (
+              <div class="row"><div class="tn">{t.name}</div><div class="td">{t.description}</div></div>
+            ))}
+          </div>
+        </article>
+      ))}
+      <p class="muted center" style="margin-top:24px; font-size:.84rem;">{toolCount} tools registered in this build. Grouping is by function for readability; some tools span more than one area. Generated from the product's tool registry.</p>
+      <div style="padding-top:38px;">
+        <div class="cta-box">
+          <h2 class="screen-type">See it in action</h2>
+          <p>You don't memorize these - you ask in plain language, the router surfaces the right shortlist, and your AI host runs them.</p>
+          <div class="cta-actions">
+            <a class="btn btn-solid" href="/getting-started">get started</a>
+            <a class="btn btn-ghost" href="/capabilities">capability overview</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</DocPage>

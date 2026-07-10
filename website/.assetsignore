@@ -1,8 +1,0 @@
-# Files in this folder that Cloudflare Pages should NOT serve publicly.
-# (Maintainer/build files — the site itself is the .html/.txt/.xml/assets.)
-README.md
-SEO-STRATEGY.md
-recalibrate.mjs
-site-data.json
-.gitignore
-.assetsignore

@@ -1,0 +1,82 @@
+---
+import DocPage from "../layouts/DocPage.astro";
+
+const title = "Salesforce MCP & metadata glossary - sf-intelligence";
+const description = "Definitions for Salesforce org intelligence, MCP servers, metadata vaults, provenance, impact analysis, confidence tiers, and offline vs live planes.";
+
+// DefinedTermSet schema, preserved from the source page (Organization/WebSite/BreadcrumbList are auto-injected by the layout).
+const jsonld = [
+  {
+    "@type": "DefinedTermSet",
+    name: "sf-intelligence glossary",
+    description: "Terms used in Salesforce org intelligence and the sf-intelligence MCP server.",
+    hasDefinedTerm: [
+      { "@type": "DefinedTerm", name: "MCP server", description: "A Model Context Protocol server that exposes tools an AI assistant can call. sf-intelligence is an MCP server for read-only Salesforce org metadata intelligence." },
+      { "@type": "DefinedTerm", name: "Metadata vault", description: "The local org-kb/ directory built by sfi refresh: Markdown component docs, a DuckDB dependency graph, and manifest files. Answers are served from here offline." },
+      { "@type": "DefinedTerm", name: "Provenance", description: "Where an answer came from: offline_snapshot (vault), live_org (opt-in SOQL), hybrid (both), or annotation (human-curated overlay)." },
+      { "@type": "DefinedTerm", name: "Impact analysis", description: "Tracing what depends on a Salesforce component before you change or delete it - fields, objects, Flows, Apex classes." },
+    ],
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/glossary"
+  heading="Glossary"
+  intro="Short, factual definitions for terms used across sf-intelligence docs. Each entry is written to be citable by search engines and AI assistants."
+  crumbs={[{ label: "glossary", href: "/glossary" }]}
+  breadcrumbs={[{ name: "Glossary", path: "/glossary" }]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container">
+      <div class="prose">
+
+        <h2 id="mcp">MCP server (Model Context Protocol)</h2>
+        <p>A standardized way for AI assistants (Claude, Cursor, Codex) to call external tools. A Salesforce MCP server exposes org-aware capabilities - schema lookup, dependency analysis, permission tracing - that the model invokes during conversation. sf-intelligence is a <strong>read-only</strong> Salesforce MCP server focused on org understanding, not DevOps. See the <a href="/mcp">MCP overview</a>.</p>
+
+        <h2 id="vault">Metadata vault (<code>org-kb/</code>)</h2>
+        <p>The local directory created by <code>sfi refresh</code>. Contains Markdown-rendered component docs, a DuckDB dependency graph, manifest files, and optional overlays (annotations, git history). All offline answers are served from here - no network calls during conversation.</p>
+
+        <h2 id="refresh">Refresh</h2>
+        <p>A read-only metadata pull via <code>sf project retrieve</code> followed by local indexing. Re-run after org changes to keep answers current. Large orgs can use <code>sfi refresh --staged</code> for a servable vault in minutes. See <a href="/configuration#staged">staged refresh</a>.</p>
+
+        <h2 id="planes">Intelligence planes</h2>
+        <p><strong>Offline</strong> - answers from the vault (default). <strong>Live</strong> - opt-in, read-only SOQL for record counts and samples. <strong>Hybrid</strong> - fuses vault structure with live magnitude, disclosing both provenances.</p>
+
+        <h2 id="provenance">Provenance</h2>
+        <p>Where an answer's data came from: <code>offline_snapshot</code>, <code>live_org</code>, <code>hybrid</code>, or <code>annotation</code> (human-curated overlay). Every sf-intelligence answer carries a provenance stamp.</p>
+
+        <h2 id="confidence">Confidence tier</h2>
+        <p>How a dependency or finding was derived: <code>declared</code> (Salesforce metadata), <code>parsed</code> (AST/XML analysis), or <code>heuristic</code> (regex - verify before acting).</p>
+
+        <h2 id="completeness">Completeness</h2>
+        <p>Whether all needed metadata families were retrieved: <code>complete</code>, <code>partial</code> (some types pending or not checked), or <code>unknown</code>.</p>
+
+        <h2 id="impact">Impact analysis / blast radius</h2>
+        <p>Tracing components that depend on a field, object, Flow, or Apex class before you change or delete it. Core use case - see <a href="/use-cases/impact-analysis">impact analysis</a>.</p>
+
+        <h2 id="static">Static analysis</h2>
+        <p>Analysis of retrieved source and metadata without running code. Dynamic SOQL and reflective Apex are invisible. "No references" means no static evidence, not "unused."</p>
+
+        <h2 id="canonical-id">Canonical component ID</h2>
+        <p>A stable identifier like <code>CustomField:Account.Industry__c</code> or <code>ApexClass:PaymentProcessor</code>. Every component sf-intelligence names is cited with one.</p>
+
+        <h2 id="router">Semantic router</h2>
+        <p>The offline semantic layer that surfaces a meaning-ranked shortlist of the right tools (and intelligence plane) for each plain-language question; your AI host picks which to run. Logs unrouted questions locally for product improvement.</p>
+
+        <h2 id="org-card">Org card</h2>
+        <p>A compact JSON summary of org scale and coverage rendered at every refresh. Served via <code>sfi.org_card</code> for fast orientation.</p>
+
+        <h2 id="annotations">Annotations overlay</h2>
+        <p>Human- or AI-proposed metadata stored in <code>meta/annotations.jsonl</code> - owner, status, glossary synonyms - that survives refreshes. See <a href="/configuration#annotations">configuration</a>.</p>
+
+        <h2 id="read-only">Read-only guarantee</h2>
+        <p>sf-intelligence has no write, deploy, or delete path to Salesforce. Only metadata retrieve touches the org. See <a href="/faq#privacy">FAQ</a> and <a href="/trust">trust</a>.</p>
+
+      </div>
+    </div>
+  </section>
+</DocPage>

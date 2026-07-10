@@ -1,0 +1,159 @@
+---
+import DocPage from "../layouts/DocPage.astro";
+
+const title = "FAQ - sf-intelligence Salesforce org intelligence";
+const description =
+  "FAQ for sf-intelligence: read-only guarantees, local metadata, offline vs live planes, AI accuracy, install requirements, cost, and freshness.";
+
+const jsonld = [
+  {
+    "@type": "FAQPage",
+    mainEntity: [
+      {
+        "@type": "Question",
+        name: "Does sf-intelligence write to or change my Salesforce org?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "No. It is read-only and has no write path. The first refresh runs sf project retrieve, which only reads metadata. No tool deploys, edits, or deletes anything in your org.",
+        },
+      },
+      {
+        "@type": "Question",
+        name: "Does it send my org data to the cloud or to an AI provider?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "Vault answers make no network calls. The metadata index lives on your machine in an org-kb/ directory, and the MCP server reads those local files to answer. The only time it talks to Salesforce is during a refresh (to retrieve metadata) or when you explicitly enable the opt-in, read-only live plane for record counts and samples.",
+        },
+      },
+      {
+        "@type": "Question",
+        name: "How is this different from just asking ChatGPT or Claude about Salesforce?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "A general model answers from generic Salesforce training data, which is often wrong for your specific org. sf-intelligence answers only from the metadata you actually retrieved, cites every component with its canonical ID, and asks a clarifying question when a name is ambiguous instead of guessing.",
+        },
+      },
+      {
+        "@type": "Question",
+        name: "What is the difference between the offline and live planes?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "The offline plane answers from your last refresh's local vault - schema, dependencies, permissions, source - and is the default. The live plane runs capped, read-only SOQL against the connected org for record-level facts like counts and samples, and is off until you grant consent once per org. Hybrid answers fuse both and disclose each provenance.",
+        },
+      },
+      {
+        "@type": "Question",
+        name: "Can it tell me how many records are in an object?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "Only with the live plane enabled. The offline vault stores schema and source, not rows, so record-level questions need a read-only live query (sfi.live_count) or a direct sf data query against the org.",
+        },
+      },
+      {
+        "@type": "Question",
+        name: "How much does sf-intelligence cost?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "It is free and source-available under the MIT + Commons Clause license, distributed on npm as sf-intelligence.",
+        },
+      },
+      {
+        "@type": "Question",
+        name: "What do I need to run it?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "Node.js 20 or newer and an authenticated Salesforce CLI (sf) pointed at the org you want to index. It runs in Claude Code, Claude Desktop, or any MCP client.",
+        },
+      },
+      {
+        "@type": "Question",
+        name: "Are its answers always correct?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "Answers are grounded in real metadata, but each is tagged so you know how much to trust it. Confidence is declared, parsed, or heuristic; heuristic findings from the regex Apex scanner can have false positives and should be spot-checked. It also performs static analysis, so dynamic SOQL and reflective Apex are invisible - a 'no references found' result means 'no static evidence', not 'definitely unused'.",
+        },
+      },
+      {
+        "@type": "Question",
+        name: "How do I keep the answers up to date?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "Run sfi refresh (or /sfi-refresh in Claude Code) after you deploy changes to the org. sfi.health_check reports whether the vault is healthy, degraded, or unhealthy and tells you when a rebuild is due.",
+        },
+      },
+    ],
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/faq"
+  heading="Salesforce knowledge base - FAQ"
+  intro="The questions people ask before they point sf-intelligence at a production Salesforce org."
+  crumbs={[{ label: "faq", href: "/faq" }]}
+  breadcrumbs={[{ name: "FAQ", path: "/faq" }]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container" style="max-width:820px;">
+
+      <details class="faq-item" id="write" open>
+        <summary>Does it write to or change my Salesforce org?</summary>
+        <div class="answer"><p><strong>No.</strong> It is read-only and has no write path. The first refresh runs <code>sf project retrieve</code>, which only reads metadata. No tool deploys, edits, or deletes anything in your org.</p></div>
+      </details>
+
+      <details class="faq-item" id="privacy">
+        <summary>Does it send my org data to the cloud or to an AI provider?</summary>
+        <div class="answer"><p>Vault answers make <strong>no network calls</strong>. The metadata index lives on your machine in an <code>org-kb/</code> directory, and the MCP server reads those local files to answer. The only times it talks to Salesforce are during a refresh (to retrieve metadata) or when you explicitly enable the opt-in, read-only live plane for record counts and samples. What you index stays yours.</p></div>
+      </details>
+
+      <details class="faq-item" id="vs-chatbot">
+        <summary>How is this different from asking ChatGPT or Claude about Salesforce?</summary>
+        <div class="answer"><p>A general model answers from generic Salesforce training data, which is often wrong for <em>your</em> org. sf-intelligence answers only from the metadata you actually retrieved, cites every component with its canonical ID (like <code>CustomField:Account.Industry__c</code>), and asks a clarifying question when a name is ambiguous instead of guessing.</p></div>
+      </details>
+
+      <details class="faq-item" id="planes">
+        <summary>What is the difference between the offline and live planes?</summary>
+        <div class="answer"><p>The <strong>offline</strong> plane answers from your last refresh's local vault - schema, dependencies, permissions, source - and is the default. The <strong>live</strong> plane runs capped, read-only SOQL against the connected org for record-level facts like counts and samples, and is off until you grant consent once per org. <strong>Hybrid</strong> answers fuse both and disclose each provenance. Live answers never silently backfill a stale vault claim.</p></div>
+      </details>
+
+      <details class="faq-item" id="records">
+        <summary>Can it tell me how many records are in an object?</summary>
+        <div class="answer"><p>Only with the live plane enabled. The offline vault stores schema and source, not rows, so record-level questions need a read-only live query (<code>sfi.live_count</code>) or a direct <code>sf data query</code> against the org.</p></div>
+      </details>
+
+      <details class="faq-item" id="cost">
+        <summary>How much does it cost?</summary>
+        <div class="answer"><p>Free and source-available under the <a href="/licensing">MIT + Commons Clause</a> license, distributed on npm as <code>sf-intelligence</code>.</p></div>
+      </details>
+
+      <details class="faq-item" id="requirements">
+        <summary>What do I need to run it?</summary>
+        <div class="answer"><p><a href="https://nodejs.org" rel="noopener">Node.js 20+</a> and an authenticated <a href="https://developer.salesforce.com/tools/salesforcecli" rel="noopener">Salesforce CLI</a> (<code>sf</code>) pointed at the org you want to index. It runs in Claude Code, Claude Desktop, or any MCP client. See the <a href="/getting-started">getting-started guide</a>.</p></div>
+      </details>
+
+      <details class="faq-item" id="accuracy">
+        <summary>Are its answers always correct?</summary>
+        <div class="answer"><p>Answers are grounded in real metadata, but each is tagged so you know how much to trust it. Confidence is <code>declared</code>, <code>parsed</code>, or <code>heuristic</code> - heuristic findings from the regex Apex scanner can have false positives and should be spot-checked. It also performs static analysis, so dynamic SOQL and reflective Apex are invisible: a “no references found” result means “no static evidence”, not “definitely unused”.</p></div>
+      </details>
+
+      <details class="faq-item" id="fresh">
+        <summary>How do I keep the answers up to date?</summary>
+        <div class="answer"><p>Run <code>sfi refresh</code> (or <code>/sfi-refresh</code> in Claude Code) after you deploy changes. <code>sfi.health_check</code> reports whether the vault is <code>healthy</code>, <code>degraded</code>, or <code>unhealthy</code> and tells you when a rebuild is due.</p></div>
+      </details>
+
+      <div style="padding-top:42px;">
+        <div class="cta-box">
+          <h2 class="screen-type">Still have a question?</h2>
+          <p>The getting-started guide covers setup end to end, and the capability map shows everything it can answer.</p>
+          <div class="cta-actions">
+            <a class="btn btn-solid" href="/getting-started">getting started</a>
+            <a class="btn btn-ghost" href="/capabilities">capabilities</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</DocPage>

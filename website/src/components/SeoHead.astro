@@ -1,0 +1,143 @@
+---
+/**
+ * SeoHead — the single source of every page's <head> SEO surface.
+ * Making this a required-prop component means it is structurally impossible to
+ * ship a page without a title, description, canonical, OG/Twitter, and favicon.
+ *
+ * Pattern (props → title/canonical/OG/Twitter/JSON-LD) borrowed from
+ * open-design's landing-page `seo-head.astro`; the look/graph is our own.
+ */
+import site from "../data/site.ts";
+
+export interface Breadcrumb {
+  name: string;
+  path: string; // absolute path, e.g. "/capabilities"
+}
+
+interface Props {
+  title: string;
+  description: string;
+  /** Absolute path of this page, e.g. "/" or "/capabilities". */
+  path: string;
+  /** Breadcrumb trail (Home is prepended automatically). Omit on the home page. */
+  breadcrumbs?: Breadcrumb[];
+  /** Extra JSON-LD @graph nodes for this page (FAQPage, TechArticle, ItemList…). */
+  jsonld?: Record<string, unknown>[];
+  /** Override the shared OG image. */
+  ogImage?: string;
+  /** Set false only for pages that must not be indexed (none today). */
+  index?: boolean;
+}
+
+const {
+  title,
+  description,
+  path,
+  breadcrumbs,
+  jsonld = [],
+  ogImage,
+  index = true,
+} = Astro.props;
+
+const canonical = new URL(path, site.url).href.replace(/\/$/, path === "/" ? "/" : "");
+const canonicalClean = path === "/" ? site.url + "/" : new URL(path, site.url).href;
+const image = new URL(ogImage ?? "/assets/img/og-image.png", site.url).href;
+
+// ---- structured-data @graph, cross-referenced by @id ----
+const ORG_ID = `${site.url}/#org`;
+const WEBSITE_ID = `${site.url}/#website`;
+
+const graph: Record<string, unknown>[] = [
+  {
+    "@type": "Organization",
+    "@id": ORG_ID,
+    name: site.name,
+    url: `${site.url}/`,
+    logo: `${site.url}/assets/img/icon-512.png`,
+    sameAs: site.sameAs,
+    description:
+      "Independent open-source project. Not affiliated with Salesforce, Inc.",
+  },
+  {
+    "@type": "WebSite",
+    "@id": WEBSITE_ID,
+    name: site.name,
+    url: `${site.url}/`,
+    publisher: { "@id": ORG_ID },
+    inLanguage: "en",
+  },
+];
+
+if (breadcrumbs && breadcrumbs.length) {
+  graph.push({
+    "@type": "BreadcrumbList",
+    itemListElement: [{ name: "Home", path: "/" }, ...breadcrumbs].map((b, i) => ({
+      "@type": "ListItem",
+      position: i + 1,
+      name: b.name,
+      item: new URL(b.path, site.url).href,
+    })),
+  });
+}
+
+for (const node of jsonld) graph.push(node);
+---
+
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+{/* ===== Primary SEO ===== */}
+<title>{title}</title>
+<meta name="description" content={description} />
+{site.googleVerification && <meta name="google-site-verification" content={site.googleVerification} />}
+<link rel="canonical" href={canonicalClean} />
+<meta
+  name="robots"
+  content={index ? "index, follow, max-image-preview:large, max-snippet:-1" : "noindex, nofollow"}
+/>
+<meta name="author" content={site.author} />
+<meta name="theme-color" content="#05070A" />
+
+{/* ===== Open Graph ===== */}
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content={site.name} />
+<meta property="og:title" content={title} />
+<meta property="og:description" content={description} />
+<meta property="og:url" content={canonicalClean} />
+<meta property="og:image" content={image} />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:image:alt" content={`${site.name} — offline, read-only, MCP-first knowledge base for one Salesforce org`} />
+<meta property="og:locale" content="en_US" />
+
+{/* ===== Twitter ===== */}
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content={title} />
+<meta name="twitter:description" content={description} />
+<meta name="twitter:image" content={image} />
+<meta name="twitter:image:alt" content={`${site.name} product card`} />
+
+{/* ===== Icons / manifest ===== */}
+<link rel="icon" href="/assets/img/favicon.svg" type="image/svg+xml" />
+<link rel="icon" href="/assets/img/favicon-32.png" sizes="32x32" type="image/png" />
+<link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png" />
+<link rel="manifest" href="/site.webmanifest" />
+
+{/* ===== Fonts (self-hosted would be ideal; kept on Google Fonts for now with preconnect) ===== */}
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+  rel="stylesheet"
+  href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=VT323&display=swap"
+/>
+
+{/* ===== GEO: signal the llms.txt context file ===== */}
+<link rel="alternate" type="text/plain" title="LLM context" href="/llms.txt" />
+
+{/* ===== Structured data ===== */}
+{graph.length > 0 && (
+  <script
+    type="application/ld+json"
+    set:html={JSON.stringify({ "@context": "https://schema.org", "@graph": graph })}
+  />
+)}

@@ -1,0 +1,82 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+import site from "../../data/site.ts";
+
+const title = "Salesforce field impact analysis - what breaks if deleted?";
+const description =
+  "Salesforce impact analysis for fields, objects, Flows, and Apex. Trace dependencies from real org metadata before you delete or change anything.";
+
+// Source page used a HowTo node; HowTo rich results are deprecated, so this
+// converts to TechArticle, keeping the same headline/description.
+const jsonld = [
+  {
+    "@type": "TechArticle",
+    headline: "Analyze Salesforce field deletion impact with sf-intelligence",
+    description: "Ask what breaks if you delete or change a Salesforce field, object, Flow, or Apex class using read-only dependency analysis.",
+    author: { "@id": `${site.url}/#org` },
+    publisher: { "@id": `${site.url}/#org` },
+    dateModified: "2026-07-10",
+    mainEntityOfPage: `${site.url}/use-cases/impact-analysis`,
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/use-cases/impact-analysis"
+  heading="Salesforce impact analysis"
+  intro={`Before you delete a field, deactivate a Flow, or refactor an Apex class, you need to know what depends on it. sf-intelligence answers <strong>"what breaks if I change this?"</strong> from your org's real dependency graph - not generic Salesforce training data.`}
+  crumbs={[{ label: "use-cases", href: "/use-cases" }, { label: "impact-analysis", href: "/use-cases/impact-analysis" }]}
+  breadcrumbs={[{ name: "Use cases", path: "/use-cases" }, { name: "Impact analysis", path: "/use-cases/impact-analysis" }]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container">
+      <div class="prose">
+
+        <h2 id="problem">The problem with guessing</h2>
+        <p>A general AI model will list "typical" references - validation rules, page layouts, reports - but cannot know which ones exist in <em>your</em> org. sf-intelligence builds a DuckDB dependency graph from a read-only metadata retrieve and traces edges with confidence tags: <code>declared</code> (from Salesforce metadata), <code>parsed</code> (from AST/XML analysis), or <code>heuristic</code> (regex - spot-check these).</p>
+
+        <h2 id="questions">Questions you can ask</h2>
+        <ul>
+          <li>"What breaks if I delete the Contact email field?"</li>
+          <li>"What is the blast radius of removing the Payment custom object?"</li>
+          <li>"Is it safe to deactivate this Flow?"</li>
+          <li>"What depends on Account.Industry__c?"</li>
+          <li>"What would happen if I make this field required?" (optionally with live null-rate)</li>
+        </ul>
+        <p>The router picks tools like <code>find_component_usages</code>, <code>blast_radius</code>, <code>what_if_delete</code>, and <code>field_change_advisor</code> automatically - you type the question, not the tool name.</p>
+
+        <h2 id="evidence">Evidence tiers you can trust</h2>
+        <table class="doc-table">
+          <thead><tr><th>Signal</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>declared</code></td><td>Salesforce metadata states the dependency directly (highest trust)</td></tr>
+            <tr><td><code>parsed</code></td><td>Found by AST/XML parsing of Apex, Flow, or formula source</td></tr>
+            <tr><td><code>heuristic</code></td><td>Regex/token match - may have false positives; verify before acting</td></tr>
+            <tr><td><code>partial</code></td><td>A metadata family was not retrieved - "not checked", not "none"</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="live">Optional: live record counts</h2>
+        <p>With the opt-in read-only live plane, <code>blast_radius_live</code> adds affected-record counts on top of the static graph. Hybrid answers disclose both vault freshness and live provenance - if the org is ahead of the vault, you get a staleness warning first.</p>
+
+        <h2 id="limits">Honest boundaries</h2>
+        <p>sf-intelligence performs <strong>static analysis</strong>. Dynamic SOQL, reflective Apex, and runtime-only references are invisible. "No references found" means <strong>no static evidence</strong>, not "definitely unused." See the full boundary list on the <a href="/trust">trust page</a>.</p>
+
+        <div style="padding-top:36px;">
+          <div class="cta-box">
+            <h2 class="screen-type">Try it on your org.</h2>
+            <p>Free, read-only, offline. One retrieve, then ask impact questions in plain language.</p>
+            <div class="cta-actions">
+              <a class="btn btn-solid" href="/getting-started">get started</a>
+              <a class="btn btn-ghost" href="/capabilities">all capabilities</a>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+</DocPage>

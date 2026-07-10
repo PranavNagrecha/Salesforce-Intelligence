@@ -1,0 +1,410 @@
+---
+import Base from "../layouts/Base.astro";
+import site from "../data/site.ts";
+import siteData from "../data/site-data.json";
+
+const toolCount = siteData.toolCount;
+const version = siteData.version;
+const approxTests = siteData.tests.approx.toLocaleString("en-US");
+const ORG_ID = `${site.url}/#org`;
+
+const title = "Salesforce Org Intelligence MCP Server - sf-intelligence";
+const description =
+  "Read-only Salesforce org intelligence for AI agents. Ask metadata, dependency, permission, Apex, Flow, and impact questions through an offline MCP server.";
+
+const jsonld = [
+  {
+    "@type": "SoftwareApplication",
+    "@id": `${site.url}/#software`,
+    name: "sf-intelligence",
+    applicationCategory: "DeveloperApplication",
+    applicationSubCategory: "Salesforce org intelligence MCP server",
+    operatingSystem: "macOS, Linux, Windows (Node.js 20+)",
+    softwareVersion: version,
+    description:
+      "An offline, read-only Salesforce org intelligence MCP server. Ask questions in plain language and get answers grounded in real org metadata: schema, dependencies, permissions, Apex, Flows, integrations, and OmniStudio.",
+    license: `${site.url}/licensing`,
+    url: `${site.url}/`,
+    downloadUrl: site.npm,
+    codeRepository: site.github,
+    softwareHelp: `${site.url}/getting-started`,
+    author: { "@id": ORG_ID },
+    publisher: { "@id": ORG_ID },
+    offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+    featureList: [
+      "Typo-tolerant resolver that asks a clarifying question instead of guessing",
+      "Advisory semantic router surfaces a ranked tool shortlist - your AI host decides which to run - across offline, live and hybrid planes",
+      "Fail-closed refusal gates: write requests, prompt injection and record-value exfiltration are refused with a read-only alternative",
+      "Stateless conversation context: terse follow-ups resolve via a host-passed context parameter, no server-side memory",
+      "Impact and what-if dependency analysis with AST-parsed Apex edges",
+      "Permissions and record-visibility tracing",
+      "Apex, Flow and automation order-of-execution analysis",
+      "Integration topology mapping",
+      "Documentation generators (data dictionary, admin handbook, architecture overview)",
+      "Staged refresh for large orgs - servable vault in minutes",
+      "Vault git history and component-as-of queries",
+      "Read-only HTTP serving for CI and shared access",
+      "Per-answer provenance and confidence labelling",
+    ],
+  },
+];
+---
+
+<Base title={title} description={description} path="/" jsonld={jsonld}>
+  {/* ===================== HERO ===================== */}
+  <section class="hero">
+    <div class="container hero-grid">
+      <div class="hero-copy">
+        <p class="sec-label">Salesforce org intelligence · read-only · MCP server</p>
+        <h1 class="screen-type">SALESFORCE ORG<br />INTELLIGENCE YOUR AI<br />CAN <span class="g">TRUST</span>.<span class="cursor" aria-hidden="true"></span></h1>
+        <p class="tag">A grounded, fail-closed MCP server for AI assistants working in one <b>Salesforce org</b> - the funnel advises, <b>your LLM decides</b>, and anything it can't ground is refused. Ask metadata, permission, dependency, Apex, Flow, and impact questions in plain language.</p>
+        <div class="hero-meta">
+          <span class="chip"><b>{toolCount}</b> tools</span>
+          <span class="chip"><b>0</b> writes</span>
+          <span class="chip"><b>100%</b> offline</span>
+          <span class="chip">MIT + Commons Clause</span>
+        </div>
+        <div class="hero-actions">
+          <a class="btn btn-solid" href="/getting-started">$ install</a>
+          <a class="btn btn-ghost" href="/capabilities">browse {toolCount} capabilities</a>
+        </div>
+        <p class="hero-note">Runs in Claude Code, Claude Desktop, or any MCP client. Needs <code>Node 20+</code> &amp; the Salesforce CLI.</p>
+      </div>
+
+      <div class="hero-visual">
+        <div class="screen" role="img" aria-label="Example terminal session: a user types a misspelled field name; sf-intelligence asks a clarifying question instead of guessing, then answers a delete-impact question with a canonical component ID and its provenance.">
+          <div class="bar">
+            <span class="dots"><i></i><i></i><i></i></span>
+            <span class="ttl">claude - sf-intelligence - 80×24</span>
+          </div>
+          <div class="scr boot">
+            <p class="line"><span class="sys"># vault loaded · offline_snapshot · {toolCount} tools ready</span></p>
+            <p class="line"><span class="u">where's the emale field?</span></p>
+            <p class="line"><span class="out">◆ 3 matches for “email” - which did you mean?</span>
+              <span class="opt"><span class="id">Email__c</span> on Account</span>
+              <span class="opt"><span class="id">Email__c</span> on Contact</span>
+              <span class="opt"><span class="id">Alternate_Email__c</span> on Lead</span>
+            </p>
+            <p class="line"><span class="u">the contact one - what breaks if I delete it?</span></p>
+            <p class="line"><span class="out">▸ <span class="ok">3 components</span> reference <span class="id">CustomField:Contact.Email__c</span>:</span>
+              <span class="opt">ValidationRule · Flow · ApexClass</span>
+            </p>
+            <p class="line"><span class="meta">provenance <span class="stamp">offline_snapshot</span> · edges: declared, parsed</span></p>
+            <p class="line"><span class="u"><span class="cursor" aria-hidden="true"></span></span></p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* ===================== STATS ===================== */}
+  <section class="stats" aria-label="At a glance" style="padding:0;">
+    <div class="container stats-grid">
+      <div class="stat"><div class="num">{toolCount}</div><div class="label">read-only tools</div></div>
+      <div class="stat"><div class="num">3</div><div class="label">intelligence planes</div></div>
+      <div class="stat"><div class="num">0</div><div class="label">writes to your org</div></div>
+      <div class="stat"><div class="num">100%</div><div class="label">offline by default</div></div>
+    </div>
+  </section>
+
+  {/* ===================== WHAT IS (citable block for AI engines) ===================== */}
+  <section id="what-is" style="border-top:1px solid var(--line);">
+    <div class="container">
+      <p class="sec-label">$ what is sf-intelligence?</p>
+      <h2 class="head screen-type">A knowledge base for one org.</h2>
+      <p class="sec-intro" style="max-width:760px; font-size:1.05rem; color:var(--fg);">
+        <b>sf-intelligence</b> is a free, open-source <b>Model Context Protocol (MCP) server</b> and CLI that turns one Salesforce org's metadata into a local, queryable knowledge base for AI agents like Claude and Cursor. You retrieve your org's metadata once; after that every answer is served <b>offline and read-only</b> from a vault on your machine - schema, fields, Apex, Flows, permissions, sharing, integrations, and OmniStudio - grounded in real metadata and labelled with its provenance. It never writes to your org and no org data leaves your machine. It is an independent project, not affiliated with Salesforce, Inc.
+      </p>
+    </div>
+  </section>
+
+  {/* ===================== WHY ===================== */}
+  <section id="why" style="border-top:1px solid var(--line);">
+    <div class="container">
+      <p class="sec-label">the problem</p>
+      <h2 class="head screen-type">A chatbot guesses. This reads the org.</h2>
+      <p class="sec-intro">Ask a general model “what breaks if I delete this field?” and it answers from generic Salesforce training data - confidently, and often wrong for <em>your</em> org. sf-intelligence answers only from the metadata you actually retrieved. When it isn't sure, it says so and shows you the candidates.</p>
+      <div class="grid cols-3" style="margin-top:34px;">
+        <article class="card">
+          <div class="tagn">grounded</div>
+          <h3>Grounded, not generative</h3>
+          <p>Every component it names is backed by a tool call and cited with a canonical ID like <span class="mono amber">CustomField:Account.Industry__c</span>. No invented fields.</p>
+        </article>
+        <article class="card">
+          <div class="tagn">asks-first</div>
+          <h3>Asks before it guesses</h3>
+          <p>A typo-tolerant resolver turns messy phrasing into the right component. When several match, it hands you a clarifying question - it never silently picks one.</p>
+        </article>
+        <article class="card">
+          <div class="tagn">local-only</div>
+          <h3>Private by design</h3>
+          <p>The vault lives on your machine. Answering makes no network calls. Live org reads are opt-in, read-only, capped - and never backfill stale claims.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  {/* ===================== ASK ===================== */}
+  <section id="ask">
+    <div class="container">
+      <p class="sec-label">$ sfi.capabilities - what can you ask?</p>
+      <h2 class="head screen-type">The questions your team actually asks.</h2>
+      <p class="sec-intro">Not a tool catalogue - the operational questions admins, developers, architects, release managers, and support reps ask every day. You type the question in plain language; the router surfaces the right tools and your AI assistant runs them - across eight areas.</p>
+      <div class="grid cols-3" style="margin-top:32px;">
+        <article class="card">
+          <div class="tagn">admin</div>
+          <h3>Admin</h3>
+          <ul class="examples">
+            <li>Who can edit the SSN field?</li>
+            <li>Who can see this object's records?</li>
+            <li>What runs when a Case is created?</li>
+          </ul>
+        </article>
+        <article class="card">
+          <div class="tagn">developer</div>
+          <h3>Developer</h3>
+          <ul class="examples">
+            <li>What breaks if I change this field's type?</li>
+            <li>Where is this class used?</li>
+            <li>What is the test coverage for this method?</li>
+          </ul>
+        </article>
+        <article class="card">
+          <div class="tagn">architect</div>
+          <h3>Architect</h3>
+          <ul class="examples">
+            <li>What depends on this component?</li>
+            <li>What's the blast radius of deleting this object?</li>
+            <li>Show the org's integration topology.</li>
+          </ul>
+        </article>
+        <article class="card">
+          <div class="tagn">release</div>
+          <h3>Release manager</h3>
+          <ul class="examples">
+            <li>Is this org ready to deploy?</li>
+            <li>What changed since the last refresh?</li>
+            <li>Which tests should I run for this change?</li>
+          </ul>
+        </article>
+        <article class="card">
+          <div class="tagn">support</div>
+          <h3>Support</h3>
+          <ul class="examples">
+            <li>Why can't this user see this record?</li>
+            <li>What happens when this Opportunity becomes Closed Won?</li>
+            <li>Who changed this record?</li>
+          </ul>
+        </article>
+        <article class="card">
+          <div class="tagn">where-used</div>
+          <h3>Where is anything used?</h3>
+          <p>One question for any component - field, class, Flow, layout, custom metadata - answered from the dependency graph plus a source-grep, and honest when there's no evidence (never a false "unused").</p>
+          <ul class="examples"><li>where is this field used?</li><li>what references this Flow?</li></ul>
+        </article>
+      </div>
+      <p class="center" style="margin-top:30px; display:flex; gap:12px; justify-content:center; flex-wrap:wrap;"><a class="btn btn-ghost" href="/capabilities">› browse the full capability map</a><a class="btn btn-ghost" href="/tools">› all {toolCount} tools</a></p>
+    </div>
+  </section>
+
+  {/* ===================== USE CASES ===================== */}
+  <section id="use-cases" style="border-top:1px solid var(--line);">
+    <div class="container">
+      <p class="sec-label">use cases</p>
+      <h2 class="head screen-type">Built for the questions that matter.</h2>
+      <p class="sec-intro">Intent-matched pages for the operational problems Salesforce teams search for - metadata analysis, dependency analysis, impact analysis, sharing troubleshooting, and MCP setup.</p>
+      <div class="grid cols-3" style="margin-top:32px;">
+        <article class="card">
+          <div class="tagn">metadata</div>
+          <h3><a href="/use-cases/salesforce-metadata-analysis">Salesforce metadata analysis</a></h3>
+          <p>Search and explain schema, fields, Flows, Apex, permissions, integrations, OmniStudio, and generated documentation from a local org vault.</p>
+        </article>
+        <article class="card">
+          <div class="tagn">dependencies</div>
+          <h3><a href="/use-cases/salesforce-dependency-analysis">Salesforce dependency analysis</a></h3>
+          <p>Trace what depends on a field, object, Flow, Apex class, permission set, integration endpoint, or package before you change it.</p>
+        </article>
+        <article class="card">
+          <div class="tagn">agents</div>
+          <h3><a href="/use-cases/claude-salesforce-mcp">Claude Salesforce MCP</a></h3>
+          <p>Register a read-only Salesforce MCP server in Claude Code, Claude Desktop, Cursor, Codex, or any MCP client.</p>
+        </article>
+        <article class="card">
+          <div class="tagn">impact</div>
+          <h3><a href="/use-cases/impact-analysis">Impact analysis</a></h3>
+          <p>What breaks if you delete a field, object, Flow, or Apex class? Dependency tracing with confidence tiers.</p>
+        </article>
+        <article class="card">
+          <div class="tagn">access</div>
+          <h3><a href="/use-cases/sharing-troubleshooting">Sharing &amp; visibility</a></h3>
+          <p>Why can't a user see a record? Who can edit a field? Trace Profiles, Permission Sets, and the sharing cascade.</p>
+        </article>
+        <article class="card">
+          <div class="tagn">safety</div>
+          <h3><a href="/ai-safety">Is AI safe on my org?</a></h3>
+          <p>Offline, read-only, fail-closed. Why a local metadata vault is the low-risk way to point an AI agent at Salesforce - no writes, no data egress.</p>
+        </article>
+      </div>
+      <p class="center" style="margin-top:24px;"><a class="btn btn-ghost" href="/use-cases">› all use cases</a> <a class="btn btn-ghost" href="/compare/salesforce-dx-mcp">› vs Salesforce DX MCP Server</a> <a class="btn btn-ghost" href="/glossary">› glossary</a></p>
+    </div>
+  </section>
+
+  {/* ===================== HOW IT WORKS ===================== */}
+  <section id="how">
+    <div class="container">
+      <p class="sec-label">how it works</p>
+      <h2 class="head screen-type">One retrieve, then ask anything.</h2>
+      <p class="sec-intro">No cloud service, no account. The whole index is files on your machine.</p>
+      <div class="steps" style="margin-top:32px;">
+        <div class="step">
+          <div class="n"></div>
+          <h3>Retrieve</h3>
+          <p>Run <code>sfi refresh</code>. It shells out to <code>sf project retrieve</code> against your org - read-only - and pulls the metadata down once.</p>
+        </div>
+        <div class="step">
+          <div class="n"></div>
+          <h3>Index</h3>
+          <p>It builds a local Markdown vault and a DuckDB dependency graph of objects, fields, Flows, Apex and permissions, connected by typed, confidence-tagged edges.</p>
+        </div>
+        <div class="step">
+          <div class="n"></div>
+          <h3>Ask</h3>
+          <p>Question your org in plain language from any MCP client. Answers are served locally, stamped with provenance and freshness.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* ===================== TRUST ===================== */}
+  <section id="trust">
+    <div class="container">
+      <p class="sec-label">trust &amp; provenance</p>
+      <h2 class="head screen-type">Every answer is labelled.</h2>
+      <p class="sec-intro">Findings carry where they came from, how they were derived, and how complete the underlying coverage was.</p>
+      <div class="trust-cols" style="margin-top:30px;">
+        <div class="trust-col">
+          <h3>confidence</h3>
+          <div class="tag-row"><span class="badge high">declared</span><span class="desc">Salesforce states it directly - highest trust.</span></div>
+          <div class="tag-row"><span class="badge mid">parsed</span><span class="desc">From AST/XML parsing of source - high trust.</span></div>
+          <div class="tag-row"><span class="badge low">heuristic</span><span class="desc">Regex / token analysis - spot-check it.</span></div>
+        </div>
+        <div class="trust-col">
+          <h3>provenance</h3>
+          <div class="tag-row"><span class="badge mid">offline_snapshot</span><span class="desc">The last refresh's vault - the default.</span></div>
+          <div class="tag-row"><span class="badge mid">live_org</span><span class="desc">An opt-in, capped, read-only SOQL read.</span></div>
+          <div class="tag-row"><span class="badge mid">hybrid</span><span class="desc">Fuses vault + live, discloses both.</span></div>
+        </div>
+        <div class="trust-col">
+          <h3>completeness</h3>
+          <div class="tag-row"><span class="badge high">complete</span><span class="desc">Every needed family was modeled.</span></div>
+          <div class="tag-row"><span class="badge low">partial</span><span class="desc">A dependency wasn't retrieved - “not checked”, not “none”.</span></div>
+          <div class="tag-row"><span class="badge mid">unknown</span><span class="desc">Coverage couldn't be determined.</span></div>
+        </div>
+      </div>
+      <article class="card" style="margin-top:30px;">
+        <div class="tagn">fail-closed</div>
+        <h3>It tells you no.</h3>
+        <p>Refusal gates run on every question before any routing. "Delete this field for me" is refused - and answered anyway with the read-only simulation that covers it safely, like <span class="mono amber">safe_to_delete_field</span>. Prompt injection ("ignore your previous instructions…") and record-value exfiltration ("dump all SSN values") are hard-refused, with no tool shortlist left to route around. And when no tool models the question - login history, adoption metrics - it returns an honest gap naming the nearest real reads instead of a confident guess.</p>
+      </article>
+      <p class="center" style="margin-top:30px;"><a class="btn btn-ghost" href="/trust">› how it's tested - ~{approxTests} tests, full CI gate &amp; the trust model</a></p>
+    </div>
+  </section>
+
+  {/* ===================== SAFETY + HONESTY ===================== */}
+  <section id="org-safety" style="border-top:1px solid var(--line); border-bottom:1px solid var(--line); background:var(--screen);">
+    <div class="container">
+      <p class="sec-label">before you point it at production</p>
+      <h2 class="head screen-type">Safe to run, honest about limits.</h2>
+      <p class="sec-intro">The first question any admin asks. The left column is the one-screen guarantee <code>sfi init</code> prints in your terminal; the right is the boundaries it states plainly instead of papering over. <a href="/ai-safety">More on AI safety →</a></p>
+      <div class="grid cols-2" style="gap:40px; align-items:start; margin-top:30px;">
+        <div>
+          <h3 class="mono" style="color:var(--green); font-size:.95rem; margin-bottom:18px;">// guarantees</h3>
+          <div class="bound"><span class="mk">✓</span><div><b>Read-only to your org.</b><p>It never writes, deploys, or modifies anything in Salesforce - only <code>sf project retrieve</code> (metadata read). No create, update, or delete path exists.</p></div></div>
+          <div class="bound"><span class="mk">✓</span><div><b>Offline by default.</b><p>Every answer comes from the local vault built at the last refresh, not a live call. The org is contacted only when you run <code>sfi refresh</code>.</p></div></div>
+          <div class="bound"><span class="mk">✓</span><div><b>Local &amp; never uploaded.</b><p>The vault lives on your machine and is never sent anywhere. No telemetry, no phone-home; feedback is captured locally and shared only if you choose to.</p></div></div>
+          <div class="bound"><span class="mk">✓</span><div><b>The npm package ships no org data.</b><p>The published package is code only - a <code>files</code> whitelist keeps the vault out, and every public version has been downloaded and grepped clean of org identifiers (the leak audit).</p></div></div>
+        </div>
+        <div>
+          <h3 class="mono" style="color:var(--amber); font-size:.95rem; margin-bottom:18px;">// boundaries it states plainly</h3>
+          <div class="bound"><span class="mk amber" style="color:var(--amber);">!</span><div><b>No record-level data.</b><p>The vault stores schema and source, not rows. “How many Opportunities closed?” is a live-org question - answered only by the opt-in, capped live plane you turn on yourself.</p></div></div>
+          <div class="bound"><span class="mk amber" style="color:var(--amber);">!</span><div><b>Static analysis, not runtime.</b><p>Dynamic SOQL and reflective Apex are invisible - “no references” means “no static evidence”, not “unused”. Heuristic edges are labelled so you know to spot-check.</p></div></div>
+          <div class="bound"><span class="mk amber" style="color:var(--amber);">!</span><div><b>Live plane is off until you turn it on.</b><p>The opt-in live read-only plane (capped counts/samples) stays disabled until you enable it - and even then runs a curated query roster, never arbitrary SOQL, never a write.</p></div></div>
+          <div class="bound"><span class="mk amber" style="color:var(--amber);">!</span><div><b>Only as fresh as the last refresh.</b><p>Answers reflect the metadata you retrieved. It stamps every answer with freshness and tells you when the vault is stale rather than implying it's current.</p></div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* ===================== HIGHLIGHTS ===================== */}
+  <section id="features-new" style="border-top:1px solid var(--line); background:var(--screen);">
+    <div class="container">
+      <p class="sec-label">highlights</p>
+      <h2 class="head screen-type">Shipped for real orgs at scale.</h2>
+      <p class="sec-intro">Read-only capabilities built for large production orgs - all optional except the defaults you already get on refresh.</p>
+      <div class="grid cols-3" style="margin-top:28px;">
+        <article class="card"><div class="tagn">staged</div><h3>Staged refresh</h3><p>Servable vault in minutes on large orgs - T0 skeleton, T1 priority families, T2 full build. Honest mid-build coverage.</p></article>
+        <article class="card"><div class="tagn">http</div><h3>HTTP serving</h3><p><code>sfi serve --http</code> for CI/shared read-only access. Live plane hard-disabled over the wire.</p></article>
+        <article class="card"><div class="tagn">git</div><h3>Vault git history</h3><p>Auto-commit on refresh. <code>component_history</code> and <code>component_as_of</code> for time-travel queries.</p></article>
+        <article class="card"><div class="tagn">annot</div><h3>Annotations overlay</h3><p>Curated owner, status, and glossary synonyms that survive every refresh.</p></article>
+        <article class="card"><div class="tagn">ast</div><h3>AST-parsed Apex</h3><p>Parser-grade dependency edges by default - stronger than regex heuristics alone.</p></article>
+        <article class="card"><div class="tagn">reports</div><h3>Usage-ranked reports</h3><p>Top 500 Reports/Dashboards by actual usage pulled on every refresh - field refs included.</p></article>
+      </div>
+      <p class="center" style="margin-top:24px;"><a class="btn btn-ghost" href="/configuration">› full configuration reference</a></p>
+    </div>
+  </section>
+
+  {/* ===================== INSTALL ===================== */}
+  <section id="install">
+    <div class="container" style="max-width:840px;">
+      <p class="sec-label">install</p>
+      <h2 class="head screen-type">Register once, then just ask.</h2>
+      <p class="sec-intro">Distributed on npm as <span class="mono amber">sf-intelligence</span> - an MCP server plus the <span class="mono amber">sfi</span> CLI.</p>
+
+      <h3 class="mono" style="color:var(--green-soft); margin-top:28px; font-size:.92rem;">// Claude Code - project-scoped</h3>
+      <div class="code-block">
+        <div class="cb-head"><span class="fname">terminal</span></div>
+        <pre><span class="tok-k">claude</span> mcp add --transport stdio --scope project sf-intelligence -- npx -y sf-intelligence mcp</pre>
+      </div>
+
+      <h3 class="mono" style="color:var(--green-soft); margin-top:26px; font-size:.92rem;">// Claude Desktop or any MCP client</h3>
+      <div class="code-block">
+        <div class="cb-head"><span class="fname">claude_desktop_config.json</span></div>
+        <pre>{'{'}
+  <span class="tok-s">"mcpServers"</span>: {'{'}
+    <span class="tok-s">"sf-intelligence"</span>: {'{'}
+      <span class="tok-s">"type"</span>: <span class="tok-s">"stdio"</span>,
+      <span class="tok-s">"command"</span>: <span class="tok-s">"npx"</span>,
+      <span class="tok-s">"args"</span>: [<span class="tok-s">"-y"</span>, <span class="tok-s">"sf-intelligence"</span>, <span class="tok-s">"mcp"</span>]
+    {'}'}
+  {'}'}
+{'}'}</pre>
+      </div>
+
+      <h3 class="mono" style="color:var(--green-soft); margin-top:26px; font-size:.92rem;">// first run, from your Salesforce DX repo</h3>
+      <div class="code-block">
+        <div class="cb-head"><span class="fname">terminal</span></div>
+        <pre><span class="tok-c"># 1. create the local vault and pick your org alias</span>
+<span class="tok-k">sfi</span> init
+<span class="tok-c"># 2. retrieve metadata and build the index (read-only)</span>
+<span class="tok-k">sfi</span> refresh --target-org my-org-alias
+<span class="tok-c"># 3. confirm freshness and component counts any time</span>
+<span class="tok-k">sfi</span> status</pre>
+      </div>
+      <p class="center" style="margin-top:6px;"><a class="btn btn-solid" href="/getting-started">$ full getting-started guide</a></p>
+    </div>
+  </section>
+
+  {/* ===================== CTA ===================== */}
+  <section>
+    <div class="container">
+      <div class="cta-box">
+        <h2 class="screen-type">Stop guessing about your org.</h2>
+        <p>Free and source-available under MIT + Commons Clause. One retrieve, and every answer after that is grounded in your real metadata.</p>
+        <div class="cta-actions">
+          <a class="btn btn-solid" href="/getting-started">get started</a>
+          <a class="btn btn-ghost" href={site.github} rel="noopener">view on GitHub</a>
+        </div>
+      </div>
+    </div>
+  </section>
+</Base>

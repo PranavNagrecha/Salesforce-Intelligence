@@ -1,0 +1,81 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+import site from "../../data/site.ts";
+import siteData from "../../data/site-data.json";
+
+const title = "Salesforce metadata analysis for AI agents - sf-intelligence";
+const description =
+  "Analyze Salesforce metadata with read-only AI agents. Search schema, Flows, Apex, permissions, integrations, and documentation from a local org vault.";
+
+const jsonld = [
+  {
+    "@type": "TechArticle",
+    headline: "Salesforce metadata analysis for AI agents",
+    description: "How sf-intelligence lets AI agents analyze Salesforce metadata from a local, read-only org vault.",
+    author: { "@id": `${site.url}/#org` },
+    publisher: { "@id": `${site.url}/#org` },
+    dateModified: "2026-07-10",
+    mainEntityOfPage: `${site.url}/use-cases/salesforce-metadata-analysis`,
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/use-cases/salesforce-metadata-analysis"
+  heading="Salesforce metadata analysis"
+  intro="sf-intelligence gives AI agents a read-only way to analyze Salesforce metadata: schema, fields, Flows, Apex, permission models, integrations, OmniStudio, and generated documentation from one local org vault."
+  crumbs={[{ label: "use-cases", href: "/use-cases" }, { label: "metadata-analysis", href: "/use-cases/salesforce-metadata-analysis" }]}
+  breadcrumbs={[{ name: "Use cases", path: "/use-cases" }, { name: "Salesforce metadata analysis", path: "/use-cases/salesforce-metadata-analysis" }]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container">
+      <div class="prose">
+        <h2 id="what">What metadata analysis means here</h2>
+        <p>Most Salesforce search tools stop at file search or raw metadata retrieval. sf-intelligence builds a queryable knowledge base from the retrieved org metadata, then exposes that knowledge through a Salesforce MCP server. The result is plain-language metadata analysis that stays grounded in the org you actually indexed.</p>
+
+        <h2 id="questions">Questions this page targets</h2>
+        <ul>
+          <li>"What fields exist on Account, and which are custom?"</li>
+          <li>"Which Flows update this field?"</li>
+          <li>"What Apex classes reference this object?"</li>
+          <li>"Which permission sets grant access to this field?"</li>
+          <li>"Generate a data dictionary for this Salesforce org."</li>
+          <li>"Explain this org to a new admin or developer."</li>
+        </ul>
+
+        <h2 id="coverage">Metadata families covered</h2>
+        <table class="doc-table">
+          <thead><tr><th>Area</th><th>Examples</th></tr></thead>
+          <tbody>
+            <tr><td>Schema</td><td>Objects, fields, record types, picklists, layouts, tabs</td></tr>
+            <tr><td>Automation</td><td>Flows, workflow, approval processes, assignment and escalation rules</td></tr>
+            <tr><td>Code</td><td>Apex classes, triggers, call graph, test coverage signals</td></tr>
+            <tr><td>Security</td><td>Profiles, permission sets, field-level security, object access, sharing metadata</td></tr>
+            <tr><td>Integrations</td><td>Named credentials, remote sites, endpoints, outbound messages, platform events</td></tr>
+            <tr><td>Documentation</td><td>Data dictionary, admin handbook, architecture overview, onboarding docs</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="why-ai">Why AI agents need a metadata layer</h2>
+        <p>A general model can explain Salesforce concepts, but it cannot know your org's custom fields, naming conventions, automations, package boundaries, and security model unless those facts are supplied. sf-intelligence supplies those facts as structured, read-only tools, so Claude, Cursor, Codex, or another MCP client can answer from the vault instead of guessing.</p>
+
+        <h2 id="next">Related searches</h2>
+        <p>For blast-radius work, see <a href="/use-cases/salesforce-dependency-analysis">Salesforce dependency analysis</a>. For client setup, see <a href="/use-cases/claude-salesforce-mcp">Claude Salesforce MCP setup</a>. For the complete tool surface, browse <a href="/tools">all {siteData.toolCount} Salesforce MCP tools</a>.</p>
+
+        <div style="padding-top:36px;">
+          <div class="cta-box">
+            <h2 class="screen-type">Analyze your org metadata locally.</h2>
+            <p>Install once, run a read-only refresh, then ask metadata questions in plain language.</p>
+            <div class="cta-actions">
+              <a class="btn btn-solid" href="/getting-started">install sf-intelligence</a>
+              <a class="btn btn-ghost" href="/capabilities">capability map</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</DocPage>

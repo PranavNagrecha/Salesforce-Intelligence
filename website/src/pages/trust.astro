@@ -1,0 +1,168 @@
+---
+import DocPage from "../layouts/DocPage.astro";
+import site from "../data/site.ts";
+import siteData from "../data/site-data.json";
+
+const approx = siteData.tests.approx.toLocaleString("en-US");
+const pkgCount = siteData.tests.packageCount;
+const gateCount = siteData.gateCount;
+const integ = siteData.integrationSuiteCount;
+const pkgs = siteData.packageDescriptions;
+const budgets = siteData.scaleBudgets;
+
+const title = "Quality & trust - sf-intelligence";
+const description =
+  "How sf-intelligence earns trust: automated tests, CI gates, provenance, confidence, completeness labels, adversarial QA, leak scans, and clear limits.";
+
+const jsonld = [
+  {
+    "@type": "TechArticle",
+    headline: "How to trust the answers - sf-intelligence quality & trust model",
+    description,
+    author: { "@id": `${site.url}/#org` },
+    publisher: { "@id": `${site.url}/#org` },
+    about: "Software quality, testing and provenance for a Salesforce MCP server",
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/trust"
+  heading="How to trust the answers"
+  intro={`An AI that talks confidently about your Salesforce org is easy to build. One you can <em>trust</em> is not. Here is exactly how sf-intelligence earns it - the test suite, the CI gate every change must pass, the per-answer trust labels, and the boundaries it refuses to cross.`}
+  crumbs={[{ label: "trust", href: "/trust" }]}
+  breadcrumbs={[{ name: "Quality & trust", path: "/trust" }]}
+  jsonld={jsonld}
+>
+  {/* headline numbers */}
+  <section class="stats" aria-label="Quality at a glance" style="padding:0;">
+    <div class="container stats-grid">
+      <div class="stat"><div class="num">{approx}+</div><div class="label">automated tests</div></div>
+      <div class="stat"><div class="num">{pkgCount}</div><div class="label">tested packages</div></div>
+      <div class="stat"><div class="num">{gateCount}</div><div class="label">CI gates per change</div></div>
+      <div class="stat"><div class="num">0</div><div class="label">org-data in the repo</div></div>
+    </div>
+  </section>
+
+  {/* 1. test coverage */}
+  <section id="tests">
+    <div class="container">
+      <p class="sec-label">automated testing</p>
+      <h2 class="head screen-type">~{approx} tests across the stack</h2>
+      <p class="sec-intro">Every layer of the product has its own test suite - from the metadata extractors and the dependency-graph engine to the {siteData.toolCount} MCP tools and the CLI. These run on every change.</p>
+      <article class="card" style="margin-top:26px;">
+        <div class="toollist">
+          {pkgs.map((p) => (
+            <div class="row">
+              <div class="tn">{p.name}</div>
+              <div class="td" set:html={`${p.description}  -  <strong>≈${p.cases.toLocaleString("en-US")}</strong> cases${p.name === "mcp" ? ` across ${p.files} files` : ""}.`} />
+            </div>
+          ))}
+        </div>
+      </article>
+      <p class="muted" style="margin-top:14px; font-size:.86rem;">Plus <strong>{integ} integration suites</strong> that drive the real MCP server end-to-end - including post-refresh <em>golden</em> tests, a fixed reference-question set, and deep smoke tests.</p>
+    </div>
+  </section>
+
+  {/* 2. CI gate */}
+  <section id="ci" style="border-top:1px solid var(--line); border-bottom:1px solid var(--line); background:var(--screen);">
+    <div class="container">
+      <p class="sec-label">the ship gate</p>
+      <h2 class="head screen-type">Nothing ships unless all of this is green</h2>
+      <p class="sec-intro">Every change runs the full gate in CI. A single red check blocks the release.</p>
+      <div class="grid cols-2" style="margin-top:24px; gap:10px 32px;">
+        <div class="bound"><span class="mk">✓</span><div><b>Type-check</b><p>Strict TypeScript across every package.</p></div></div>
+        <div class="bound"><span class="mk">✓</span><div><b>Lint</b><p>ESLint, including import-order rules.</p></div></div>
+        <div class="bound"><span class="mk">✓</span><div><b>~{approx} unit tests</b><p>Every package suite must pass.</p></div></div>
+        <div class="bound"><span class="mk">✓</span><div><b>Integration + golden tests</b><p>The real MCP server, end-to-end.</p></div></div>
+        <div class="bound"><span class="mk">✓</span><div><b>End-to-end smoke</b><p>The server boots and answers over stdio.</p></div></div>
+        <div class="bound"><span class="mk">✓</span><div><b>Natural-language regression</b><p>A large question set is routed and checked, not just plumbing.</p></div></div>
+        <div class="bound"><span class="mk">✓</span><div><b>Analytical correctness eval</b><p>Answers are checked for the right verdict, not just a response.</p></div></div>
+        <div class="bound"><span class="mk">✓</span><div><b>Scale benchmarks</b><p>Import / refresh / resolve budgets enforced (below).</p></div></div>
+        <div class="bound"><span class="mk">✓</span><div><b>SAST</b><p>Static application security scanning.</p></div></div>
+        <div class="bound"><span class="mk">✓</span><div><b>Release guard</b><p>Validates the exact shipping set before publish.</p></div></div>
+        <div class="bound"><span class="mk">✓</span><div><b>Org-data leak scan</b><p>Fails the build if any real org identifier is found in the shipping set.</p></div></div>
+      </div>
+    </div>
+  </section>
+
+  {/* 3. trust model */}
+  <section id="trust-model">
+    <div class="container">
+      <p class="sec-label">per-answer trust</p>
+      <h2 class="head screen-type">Every answer is labelled</h2>
+      <p class="sec-intro">Testing keeps the code correct. These labels keep each <em>answer</em> honest - you always know where it came from, how it was derived, and how complete the evidence was.</p>
+      <div class="trust-cols" style="margin-top:28px;">
+        <div class="trust-col">
+          <h3>confidence</h3>
+          <div class="tag-row"><span class="badge high">declared</span><span class="desc">Salesforce states it directly - highest trust.</span></div>
+          <div class="tag-row"><span class="badge mid">parsed</span><span class="desc">From AST/XML parsing of source - high trust.</span></div>
+          <div class="tag-row"><span class="badge low">heuristic</span><span class="desc">Regex / token analysis - spot-check it.</span></div>
+        </div>
+        <div class="trust-col">
+          <h3>provenance</h3>
+          <div class="tag-row"><span class="badge mid">offline_snapshot</span><span class="desc">The last refresh's local vault - the default.</span></div>
+          <div class="tag-row"><span class="badge mid">live_org</span><span class="desc">An opt-in, capped, read-only SOQL read.</span></div>
+          <div class="tag-row"><span class="badge mid">hybrid</span><span class="desc">Fuses vault + live, discloses both.</span></div>
+        </div>
+        <div class="trust-col">
+          <h3>completeness</h3>
+          <div class="tag-row"><span class="badge high">complete</span><span class="desc">Every needed family was modeled.</span></div>
+          <div class="tag-row"><span class="badge low">partial</span><span class="desc">A dependency wasn't retrieved - "not checked", not "none".</span></div>
+          <div class="tag-row"><span class="badge mid">unknown</span><span class="desc">Coverage couldn't be determined.</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* 4. scale + adversarial */}
+  <section id="scale">
+    <div class="container">
+      <div class="grid cols-2" style="gap:40px; align-items:start;">
+        <div>
+          <p class="sec-label">tested at scale</p>
+          <h2 class="head screen-type" style="font-size:clamp(1.7rem,4vw,2.4rem);">Budgets, gated in CI</h2>
+          <div class="bound"><span class="mk">▸</span><div><b>Graph import</b><p>{budgets.graphImport}.</p></div></div>
+          <div class="bound"><span class="mk">▸</span><div><b>Full refresh</b><p>{budgets.fullRefresh}.</p></div></div>
+          <div class="bound"><span class="mk">▸</span><div><b>Resolve</b><p>{budgets.resolve}.</p></div></div>
+        </div>
+        <div>
+          <p class="sec-label">adversarial QA</p>
+          <h2 class="head screen-type" style="font-size:clamp(1.7rem,4vw,2.4rem);">Tested on real orgs</h2>
+          <p class="sec-intro">Beyond synthetic fixtures, the product is exercised against <strong>real production Salesforce orgs</strong> with a deliberately adversarial, failure-finding QA pass - not happy-path validation. Bugs found on real metadata are fixed and turned into regression tests so they stay fixed.</p>
+          <p class="muted" style="font-size:.9rem;">No customer org data is published or shipped - see the leak scan above.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* 5. honesty */}
+  <section id="boundaries" style="border-top:1px solid var(--line); background:var(--screen);">
+    <div class="container">
+      <p class="sec-label">the honest part</p>
+      <h2 class="head screen-type">What testing can't promise</h2>
+      <p class="sec-intro">Trust also means stating the limits plainly.</p>
+      <div class="grid cols-2" style="margin-top:22px; gap:8px 32px;">
+        <div class="bound"><span class="mk">!</span><div><b>Heuristic findings can be wrong.</b><p>Anything labelled <span class="mono">heuristic</span> (the Apex scanner, name-pattern detection) may have false positives. Spot-check before acting.</p></div></div>
+        <div class="bound"><span class="mk">!</span><div><b>Static analysis has blind spots.</b><p>Dynamic SOQL and reflective Apex are invisible - "no references found" means "no static evidence", not "definitely unused".</p></div></div>
+        <div class="bound"><span class="mk">!</span><div><b>Answers are as fresh as your last refresh.</b><p>The vault is a snapshot. <span class="mono">health_check</span> tells you when it's stale.</p></div></div>
+        <div class="bound"><span class="mk">!</span><div><b>It's read-only by design.</b><p>No write path means no accidental changes - and no claim to fix anything for you.</p></div></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="container">
+      <div class="cta-box">
+        <h2 class="screen-type">Trust, but verify.</h2>
+        <p>Every claim above is in the source-available repo and runs in CI. Point it at your own org and check the answers against reality.</p>
+        <div class="cta-actions">
+          <a class="btn btn-solid" href="/getting-started">get started</a>
+          <a class="btn btn-ghost" href={site.github} rel="noopener">view on GitHub</a>
+        </div>
+      </div>
+    </div>
+  </section>
+</DocPage>
