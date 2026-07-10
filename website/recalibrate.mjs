@@ -212,7 +212,7 @@ const toolsHtml = `<!DOCTYPE html>
 
   <title>All ${N} tools  -  sf-intelligence Salesforce MCP tool reference</title>
   <meta name="description" content="Reference for ${N} read-only sf-intelligence Salesforce MCP tools: search, impact analysis, permissions, code, integrations, docs, audits, and live data.">
-  <link rel="canonical" href="https://salesforce-intelligence.pages.dev/tools">
+  <link rel="canonical" href="https://sfi.auditforce.cloud/tools">
   <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
   <meta name="author" content="sf-intelligence">
   <meta name="theme-color" content="#05070A">
@@ -221,15 +221,15 @@ const toolsHtml = `<!DOCTYPE html>
   <meta property="og:site_name" content="sf-intelligence">
   <meta property="og:title" content="All ${N} tools  -  sf-intelligence Salesforce MCP tool reference">
   <meta property="og:description" content="Every read-only sf-intelligence tool for a Salesforce org, grouped by function, each with what it does.">
-  <meta property="og:url" content="https://salesforce-intelligence.pages.dev/tools">
-  <meta property="og:image" content="https://salesforce-intelligence.pages.dev/assets/img/og-image.png">
+  <meta property="og:url" content="https://sfi.auditforce.cloud/tools">
+  <meta property="og:image" content="https://sfi.auditforce.cloud/assets/img/og-image.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="sf-intelligence product card">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="All ${N} tools  -  sf-intelligence">
   <meta name="twitter:description" content="The complete Salesforce MCP tool reference, each with what it does.">
-  <meta name="twitter:image" content="https://salesforce-intelligence.pages.dev/assets/img/og-image.png">
+  <meta name="twitter:image" content="https://sfi.auditforce.cloud/assets/img/og-image.png">
 
   <link rel="icon" href="/assets/img/favicon.svg" type="image/svg+xml">
   <link rel="icon" href="/assets/img/favicon-32.png" sizes="32x32" type="image/png">
@@ -245,9 +245,9 @@ const toolsHtml = `<!DOCTYPE html>
     "@context": "https://schema.org",
     "@type": "BreadcrumbList",
     "itemListElement": [
-      { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://salesforce-intelligence.pages.dev/" },
-      { "@type": "ListItem", "position": 2, "name": "Capabilities", "item": "https://salesforce-intelligence.pages.dev/capabilities" },
-      { "@type": "ListItem", "position": 3, "name": "All tools", "item": "https://salesforce-intelligence.pages.dev/tools" }
+      { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://sfi.auditforce.cloud/" },
+      { "@type": "ListItem", "position": 2, "name": "Capabilities", "item": "https://sfi.auditforce.cloud/capabilities" },
+      { "@type": "ListItem", "position": 3, "name": "All tools", "item": "https://sfi.auditforce.cloud/tools" }
     ]
   }
   </script>

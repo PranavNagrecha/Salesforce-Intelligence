@@ -32,4 +32,4 @@ Allow: /
 User-agent: Bingbot
 Allow: /
 
-Sitemap: https://salesforce-intelligence.pages.dev/sitemap.xml
+Sitemap: https://sfi.auditforce.cloud/sitemap.xml

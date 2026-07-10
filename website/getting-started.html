@@ -6,7 +6,7 @@
 
  <title>Install sf-intelligence - Salesforce MCP setup guide</title>
  <meta name="description" content="Install the sf-intelligence Salesforce MCP server, register it in an AI client, run a read-only metadata retrieve, and keep the local vault fresh.">
- <link rel="canonical" href="https://salesforce-intelligence.pages.dev/getting-started">
+ <link rel="canonical" href="https://sfi.auditforce.cloud/getting-started">
  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
  <meta name="author" content="sf-intelligence">
  <meta name="theme-color" content="#05070A">
@@ -15,15 +15,15 @@
  <meta property="og:site_name" content="sf-intelligence">
  <meta property="og:title" content="Install sf-intelligence - setup guide">
  <meta property="og:description" content="Prerequisites, npm install, register the MCP server, first read-only retrieve, and troubleshooting. Node.js 20+ and the Salesforce CLI.">
- <meta property="og:url" content="https://salesforce-intelligence.pages.dev/getting-started">
- <meta property="og:image" content="https://salesforce-intelligence.pages.dev/assets/img/og-image.png">
+ <meta property="og:url" content="https://sfi.auditforce.cloud/getting-started">
+ <meta property="og:image" content="https://sfi.auditforce.cloud/assets/img/og-image.png">
  <meta property="og:image:width" content="1200">
  <meta property="og:image:height" content="630">
  <meta property="og:image:alt" content="sf-intelligence product card">
  <meta name="twitter:card" content="summary_large_image">
  <meta name="twitter:title" content="Install sf-intelligence">
  <meta name="twitter:description" content="Prerequisites, npm install, register the MCP server, first read-only retrieve, and troubleshooting.">
- <meta name="twitter:image" content="https://salesforce-intelligence.pages.dev/assets/img/og-image.png">
+ <meta name="twitter:image" content="https://sfi.auditforce.cloud/assets/img/og-image.png">
 
  <link rel="icon" href="/assets/img/favicon.svg" type="image/svg+xml">
  <link rel="icon" href="/assets/img/favicon-32.png" sizes="32x32" type="image/png">
@@ -39,8 +39,8 @@
  "@context": "https://schema.org",
  "@type": "BreadcrumbList",
  "itemListElement": [
- { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://salesforce-intelligence.pages.dev/" },
- { "@type": "ListItem", "position": 2, "name": "Getting started", "item": "https://salesforce-intelligence.pages.dev/getting-started" }
+ { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://sfi.auditforce.cloud/" },
+ { "@type": "ListItem", "position": 2, "name": "Getting started", "item": "https://sfi.auditforce.cloud/getting-started" }
  ]
  }
  </script>
@@ -57,11 +57,11 @@
  { "@type": "HowToTool", "name": "A Salesforce DX project repository" }
  ],
  "step": [
- { "@type": "HowToStep", "name": "Check prerequisites", "text": "Confirm Node.js 20+ (node --version), an authenticated Salesforce CLI (sf org list --json shows Connected), and a Salesforce DX repo.", "url": "https://salesforce-intelligence.pages.dev/getting-started#prerequisites" },
- { "@type": "HowToStep", "name": "Register the MCP server", "text": "claude mcp add --transport stdio --scope project sf-intelligence -- npx -y sf-intelligence mcp", "url": "https://salesforce-intelligence.pages.dev/getting-started#install" },
- { "@type": "HowToStep", "name": "Verify the install", "text": "Run /mcp in Claude Code, or ask the model to run sfi.health_check.", "url": "https://salesforce-intelligence.pages.dev/getting-started#verify" },
- { "@type": "HowToStep", "name": "First-run setup", "text": "From your DX repo: sfi init, then sfi refresh --target-org my-org-alias, then sfi status.", "url": "https://salesforce-intelligence.pages.dev/getting-started#first-run" },
- { "@type": "HowToStep", "name": "Ask questions", "text": "Ask questions about the org in plain language from any registered MCP client.", "url": "https://salesforce-intelligence.pages.dev/getting-started#ask" }
+ { "@type": "HowToStep", "name": "Check prerequisites", "text": "Confirm Node.js 20+ (node --version), an authenticated Salesforce CLI (sf org list --json shows Connected), and a Salesforce DX repo.", "url": "https://sfi.auditforce.cloud/getting-started#prerequisites" },
+ { "@type": "HowToStep", "name": "Register the MCP server", "text": "claude mcp add --transport stdio --scope project sf-intelligence -- npx -y sf-intelligence mcp", "url": "https://sfi.auditforce.cloud/getting-started#install" },
+ { "@type": "HowToStep", "name": "Verify the install", "text": "Run /mcp in Claude Code, or ask the model to run sfi.health_check.", "url": "https://sfi.auditforce.cloud/getting-started#verify" },
+ { "@type": "HowToStep", "name": "First-run setup", "text": "From your DX repo: sfi init, then sfi refresh --target-org my-org-alias, then sfi status.", "url": "https://sfi.auditforce.cloud/getting-started#first-run" },
+ { "@type": "HowToStep", "name": "Ask questions", "text": "Ask questions about the org in plain language from any registered MCP client.", "url": "https://sfi.auditforce.cloud/getting-started#ask" }
  ]
  }
  </script>

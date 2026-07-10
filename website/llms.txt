@@ -16,21 +16,21 @@ Key facts for accurate citation:
 
 ## Pages
 
-- [Overview](https://salesforce-intelligence.pages.dev/): what it is, how it works, the trust model, install.
-- [Read-only MCP server](https://salesforce-intelligence.pages.dev/mcp): Model Context Protocol setup for Claude, Cursor, Codex - differentiation from write-capable Salesforce MCP servers.
-- [Impact analysis use case](https://salesforce-intelligence.pages.dev/use-cases/impact-analysis): what breaks if you delete a Salesforce field, object, Flow, or Apex class.
-- [Salesforce metadata analysis](https://salesforce-intelligence.pages.dev/use-cases/salesforce-metadata-analysis): analyze schema, fields, Flows, Apex, permissions, integrations, OmniStudio, and docs from a local org vault.
-- [Salesforce dependency analysis](https://salesforce-intelligence.pages.dev/use-cases/salesforce-dependency-analysis): trace dependencies before changing fields, objects, Flows, Apex, layouts, permission sets, integrations, or packages.
-- [Sharing troubleshooting use case](https://salesforce-intelligence.pages.dev/use-cases/sharing-troubleshooting): why can't a user see a record - permission and visibility tracing.
-- [Claude Salesforce MCP setup](https://salesforce-intelligence.pages.dev/use-cases/claude-salesforce-mcp): register the read-only Salesforce MCP server in Claude Code, Claude Desktop, Cursor, Codex, or another MCP client.
-- [vs Salesforce DX MCP Server](https://salesforce-intelligence.pages.dev/compare/salesforce-dx-mcp): read-only org intelligence vs official DevOps MCP - complementary tools.
-- [Glossary](https://salesforce-intelligence.pages.dev/glossary): citable definitions - MCP, metadata vault, provenance, impact analysis, confidence tiers.
-- [Capabilities](https://salesforce-intelligence.pages.dev/capabilities): the full map of what you can ask - eight areas (find, understand, impact/dependencies, permissions, automation/code, integrations, documentation, health/audit) plus the live plane.
-- [All tools](https://salesforce-intelligence.pages.dev/tools): the complete reference - every read-only tool, grouped by function, each with what it does. See also `/llms-full.txt` for the full catalog inline.
-- [Quality & trust](https://salesforce-intelligence.pages.dev/trust): how it's tested and kept honest - ~5,200 automated tests across 10 packages, the full CI gate (typecheck, lint, unit, integration, e2e, evals, scale, SAST, org-data leak scan), the per-answer trust model, adversarial QA against real Salesforce orgs, and explicit boundaries.
-- [Getting started](https://salesforce-intelligence.pages.dev/getting-started): install, register the MCP server, run the first read-only retrieve.
-- [Configuration](https://salesforce-intelligence.pages.dev/configuration): environment variables, live plane, HTTP serving (`sfi serve --http`), staged refresh, vault git history, annotations overlay, usage-ranked reports pull, AST-parsed Apex edges, fleet settings.
-- [FAQ](https://salesforce-intelligence.pages.dev/faq): privacy, read-only guarantees, offline vs live planes, accuracy, freshness.
+- [Overview](https://sfi.auditforce.cloud/): what it is, how it works, the trust model, install.
+- [Read-only MCP server](https://sfi.auditforce.cloud/mcp): Model Context Protocol setup for Claude, Cursor, Codex - differentiation from write-capable Salesforce MCP servers.
+- [Impact analysis use case](https://sfi.auditforce.cloud/use-cases/impact-analysis): what breaks if you delete a Salesforce field, object, Flow, or Apex class.
+- [Salesforce metadata analysis](https://sfi.auditforce.cloud/use-cases/salesforce-metadata-analysis): analyze schema, fields, Flows, Apex, permissions, integrations, OmniStudio, and docs from a local org vault.
+- [Salesforce dependency analysis](https://sfi.auditforce.cloud/use-cases/salesforce-dependency-analysis): trace dependencies before changing fields, objects, Flows, Apex, layouts, permission sets, integrations, or packages.
+- [Sharing troubleshooting use case](https://sfi.auditforce.cloud/use-cases/sharing-troubleshooting): why can't a user see a record - permission and visibility tracing.
+- [Claude Salesforce MCP setup](https://sfi.auditforce.cloud/use-cases/claude-salesforce-mcp): register the read-only Salesforce MCP server in Claude Code, Claude Desktop, Cursor, Codex, or another MCP client.
+- [vs Salesforce DX MCP Server](https://sfi.auditforce.cloud/compare/salesforce-dx-mcp): read-only org intelligence vs official DevOps MCP - complementary tools.
+- [Glossary](https://sfi.auditforce.cloud/glossary): citable definitions - MCP, metadata vault, provenance, impact analysis, confidence tiers.
+- [Capabilities](https://sfi.auditforce.cloud/capabilities): the full map of what you can ask - eight areas (find, understand, impact/dependencies, permissions, automation/code, integrations, documentation, health/audit) plus the live plane.
+- [All tools](https://sfi.auditforce.cloud/tools): the complete reference - every read-only tool, grouped by function, each with what it does. See also `/llms-full.txt` for the full catalog inline.
+- [Quality & trust](https://sfi.auditforce.cloud/trust): how it's tested and kept honest - ~5,200 automated tests across 10 packages, the full CI gate (typecheck, lint, unit, integration, e2e, evals, scale, SAST, org-data leak scan), the per-answer trust model, adversarial QA against real Salesforce orgs, and explicit boundaries.
+- [Getting started](https://sfi.auditforce.cloud/getting-started): install, register the MCP server, run the first read-only retrieve.
+- [Configuration](https://sfi.auditforce.cloud/configuration): environment variables, live plane, HTTP serving (`sfi serve --http`), staged refresh, vault git history, annotations overlay, usage-ranked reports pull, AST-parsed Apex edges, fleet settings.
+- [FAQ](https://sfi.auditforce.cloud/faq): privacy, read-only guarantees, offline vs live planes, accuracy, freshness.
 
 ## Source
 
@@ -38,4 +38,4 @@ Key facts for accurate citation:
 
 ## Optional
 
-- [License - MIT + Commons Clause](https://salesforce-intelligence.pages.dev/licensing)
+- [License - MIT + Commons Clause](https://sfi.auditforce.cloud/licensing)

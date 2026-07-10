@@ -91,13 +91,13 @@ per-package descriptions) are constants at the top of `recalibrate.mjs`.
 ## Site URL
 
 All absolute URLs (canonical, Open Graph, sitemap, robots, structured data) are set to
-**`https://salesforce-intelligence.pages.dev`** (the Cloudflare Pages default). If you add a
+**`https://sfi.auditforce.cloud`** (the Cloudflare Pages default). If you add a
 **custom domain** later, re-point them in one pass (this also fixes the `recalibrate.mjs`
 template so it sticks):
 
 ```sh
 # from this directory — swap in your domain (no trailing slash)
-OLD="https://salesforce-intelligence.pages.dev"; NEW="https://your-domain.example"
+OLD="https://sfi.auditforce.cloud"; NEW="https://your-domain.example"
 grep -rl "$OLD" --include="*.html" --include="*.xml" --include="*.txt" --include="*.mjs" . \
   | xargs sed -i '' "s|$OLD|$NEW|g"   # macOS sed; drop the '' on Linux
 node recalibrate.mjs                  # regenerate tools.html + llms-full.txt with the new URL
@@ -126,7 +126,7 @@ Prefer no Git at all? Direct-upload just this folder instead:
 
 ## Google Search Console
 
-1. Add `https://salesforce-intelligence.pages.dev` (or your custom domain) at
+1. Add `https://sfi.auditforce.cloud` (or your custom domain) at
    <https://search.google.com/search-console>.
 2. Verify ownership — easiest is the **HTML tag** method: paste the
    `<meta name="google-site-verification" ...>` tag into the `<head>` of `index.html`

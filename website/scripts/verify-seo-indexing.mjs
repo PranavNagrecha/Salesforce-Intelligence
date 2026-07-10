@@ -8,7 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SITE = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const BASE = "https://salesforce-intelligence.pages.dev";
+const BASE = "https://sfi.auditforce.cloud";
 const ROBOTS = fs.readFileSync(path.join(SITE, "robots.txt"), "utf8");
 const SITEMAP = fs.readFileSync(path.join(SITE, "sitemap.xml"), "utf8");
 

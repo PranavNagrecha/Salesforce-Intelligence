@@ -75,14 +75,14 @@ guessing.
 ## Documentation
 
 Full guides, capabilities, the tool catalog, and configuration:
-**https://salesforce-intelligence.pages.dev**
+**https://sfi.auditforce.cloud**
 
-- [Getting started](https://salesforce-intelligence.pages.dev/getting-started.html)
-- [Capabilities](https://salesforce-intelligence.pages.dev/capabilities.html) · [All tools](https://salesforce-intelligence.pages.dev/tools.html)
-- [Configuration](https://salesforce-intelligence.pages.dev/configuration.html) · [FAQ](https://salesforce-intelligence.pages.dev/faq.html)
-- [Quality & trust](https://salesforce-intelligence.pages.dev/trust.html)
+- [Getting started](https://sfi.auditforce.cloud/getting-started.html)
+- [Capabilities](https://sfi.auditforce.cloud/capabilities.html) · [All tools](https://sfi.auditforce.cloud/tools.html)
+- [Configuration](https://sfi.auditforce.cloud/configuration.html) · [FAQ](https://sfi.auditforce.cloud/faq.html)
+- [Quality & trust](https://sfi.auditforce.cloud/trust.html)
 
 ## License
 
 MIT + Commons Clause — see the `LICENSE` file shipped in this package, or
-<https://salesforce-intelligence.pages.dev/licensing.html>.
+<https://sfi.auditforce.cloud/licensing.html>.
