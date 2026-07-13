@@ -166,7 +166,11 @@ describe('execHelper — unix branch (default, real children)', () => {
     expect(Date.now() - start).toBeLessThan(5000);
   });
 
-  it('escalates to SIGKILL when a child swallows SIGTERM (CR-P3)', async () => {
+  // POSIX-only: spawns a real child that installs a SIGTERM handler and hangs,
+  // then asserts the grace timer escalates to SIGKILL. Windows has no real
+  // SIGTERM/SIGKILL child semantics (node reports 'SIGTERM'), so skip on win32 —
+  // the win32 exec path is covered by the platform-stubbed describe above.
+  it.skipIf(process.platform === 'win32')('escalates to SIGKILL when a child swallows SIGTERM (CR-P3)', async () => {
     // The native execFile timeout sends ONE SIGTERM and never escalates; a child
     // that installs a SIGTERM handler and hangs would run forever. The helper's
     // grace timer must force SIGKILL so a wedged `sf` cannot outlive the timeout.

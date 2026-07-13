@@ -6,9 +6,12 @@ export default defineConfig({
     include: ['test/**/*.test.ts'],
     globals: true,
     pool: 'threads',
-    // Shell package — no tests yet. Phase F's mcp-server-lifecycle and the
-    // ten mcp-tool-* tasks add the real tests. Avoid vitest exiting
-    // non-zero in the meantime.
+    // The bounded-graph-query tests open real DuckDB connections; under the
+    // parallel thread pool on constrained CI runners the default 5s ceiling can
+    // be exceeded, and a vitest-killed DuckDB query aborts the worker (Napi
+    // core dump → exit 134) rather than failing softly. Give the graph-backed
+    // tests headroom so a slow runner is a slow pass, not a crash.
+    testTimeout: 20000,
     passWithNoTests: true,
   },
 });
