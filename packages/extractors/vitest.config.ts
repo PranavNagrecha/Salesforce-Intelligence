@@ -6,5 +6,8 @@ export default defineConfig({
     include: ['test/**/*.test.ts'],
     globals: true,
     pool: 'threads',
+    // Headroom for graph-backed tests under the parallel pool on slow CI
+    // runners (a slow runner is a slow pass, not a 5s-timeout crash).
+    testTimeout: 20000,
   },
 });
