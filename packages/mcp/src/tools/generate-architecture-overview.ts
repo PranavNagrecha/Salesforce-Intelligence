@@ -11,13 +11,26 @@
  *
  * Output: `{ document: GeneratedDocument }`, plus `html` (a self-contained
  * HTML page) when `format: 'html'`. The body is structured markdown with
- * three mermaid diagrams (org structure, domain clustering, integration
- * topology) and supporting tables; the HTML export renders all of it
- * client-side and is meant to be written to a `.html` file.
+ * FOUR mermaid diagrams (org structure, domain clustering, integration
+ * topology, and — R6-19 — an entity-relationship diagram of the top
+ * objects by Lookup/Master-Detail relationship degree) and supporting
+ * tables; the HTML export renders all of it client-side and is meant to
+ * be written to a `.html` file.
  *
  * Honesty axis: every "top X" ranking inherits the upstream tools'
  * heuristic provenance. The body's Boundaries section surfaces the
- * v2.5 verbatim disclosures.
+ * v2.5 verbatim disclosures. CR-22-B6: the two mermaid diagrams' node caps
+ * (Org Structure top `ORG_STRUCTURE_DIAGRAM_CAP`=5 by inbound references;
+ * Integration Topology top `INTEGRATION_DIAGRAM_CAP`=20 surfaces) are now
+ * reader-facing — a "showing the top N of M" / "showing the first N of M"
+ * line renders inline under the affected diagram AND as a verbatim
+ * `document.boundaries` entry whenever the cap actually truncated something
+ * (present only then, so an under-cap org's document stays byte-identical).
+ * The Integration Topology Type/Count TABLE is never capped — only its
+ * diagram's node list is. NOT covered here (byte-drop/hop-cursor pagination
+ * for a many-thousand-object org's overview) — stays open, out of scope for
+ * this fix; see `fitDocumentToBudget` for the existing byte-budget behavior
+ * this tool already has, which is unrelated to the per-diagram node caps.
  */
 
 import type {
@@ -27,6 +40,7 @@ import type {
   McpResponse,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
+import { buildErDiagram, type ErdRelationship } from '@sf-intelligence/renderers';
 import { z } from 'zod';
 
 import { renderHtmlDocument } from '../html-document.js';
@@ -34,6 +48,7 @@ import type { Context } from '../server.js';
 
 import { domainClustersHandler } from './domain-clusters.js';
 import {
+  ERD_SCOPE_DISCLOSURE,
   GENERATED_DOC_BUDGET_FLOOR_BYTES,
   INHERITED_CONFIDENCE_DISCLOSURE,
   Q125_FRESHNESS_DISCLOSURE,
@@ -72,6 +87,14 @@ export interface GenerateArchitectureOverviewOutput {
   readonly html?: string;
 }
 
+/**
+ * CR-22-B6: node caps on the two mermaid diagrams below — previously
+ * JSDoc-only (a `.slice(0, N)` with no reader-facing disclosure). Named so
+ * both the slice and the "showing first N of M" line stay in lockstep.
+ */
+const ORG_STRUCTURE_DIAGRAM_CAP = 5;
+const INTEGRATION_DIAGRAM_CAP = 20;
+
 /** Escape a markdown table cell. */
 const escapeCell = (raw: string): string =>
   raw.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
@@ -79,6 +102,94 @@ const escapeCell = (raw: string): string =>
 /** Sanitise an api name for use as a mermaid node id. */
 const safeMermaidId = (raw: string): string =>
   raw.replace(/[^A-Za-z0-9_]/g, '_');
+
+/**
+ * R6-19: top-N objects by Lookup/Master-Detail RELATIONSHIP DEGREE (distinct
+ * from `topObjects`'s inbound-reference-count ranking used by the Org
+ * Structure diagram above). Capped so a hub object's diagram cannot balloon
+ * to hundreds of entities; disclosed honestly (never implied complete).
+ */
+const ARCHITECTURE_ERD_MAX_OBJECTS = 12;
+
+interface LookupToEdgeRow {
+  readonly from_id: string;
+  readonly to_id: string;
+  readonly properties_json: string;
+}
+
+/** Canonical id prefixes this module parses without a graph round-trip. */
+const CUSTOM_FIELD_PREFIX = 'CustomField:';
+const CUSTOM_OBJECT_PREFIX = 'CustomObject:';
+
+/** Split a `CustomField:{Object}.{Field}` id; `null` for any other shape. */
+const parseCustomFieldId = (id: string): { readonly object: string; readonly field: string } | null => {
+  if (!id.startsWith(CUSTOM_FIELD_PREFIX)) return null;
+  const rest = id.slice(CUSTOM_FIELD_PREFIX.length);
+  const dot = rest.indexOf('.');
+  if (dot < 0) return null;
+  return { object: rest.slice(0, dot), field: rest.slice(dot + 1) };
+};
+
+/**
+ * Read every `lookupTo` edge in ONE table scan (mirrors the whole-vault
+ * edge reads `compare-vaults.ts` / `diff-snapshots.ts` already treat as an
+ * acceptable cost) and derive both (a) the per-object relationship DEGREE
+ * (in + out) used to rank the top-N objects, and (b) the flat
+ * {@link ErdRelationship} list `buildErDiagram` renders. A `lookupTo`
+ * `fromId` is always a CustomField id (`CustomField:{child}.{field}`); its
+ * `toId` is always a CustomObject id (`CustomObject:{parent}`) — that shape
+ * is guaranteed by the extractor (`custom-field.ts`), so no extra Node
+ * lookups are needed to resolve either side.
+ */
+const computeObjectRelationshipDegree = async (
+  ctx: Context,
+): Promise<
+  Result<
+    { readonly degreeByObject: Map<string, number>; readonly relationships: readonly ErdRelationship[] },
+    McpError
+  >
+> => {
+  let rows: readonly LookupToEdgeRow[];
+  try {
+    const reader = await ctx.graph.connection.runAndReadAll(
+      "SELECT from_id, to_id, properties_json FROM edges WHERE edge_type = 'lookupTo'",
+    );
+    rows = reader.getRowObjectsJS() as unknown as readonly LookupToEdgeRow[];
+  } catch (cause) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+    });
+  }
+
+  const degreeByObject = new Map<string, number>();
+  const bump = (name: string): void => {
+    degreeByObject.set(name, (degreeByObject.get(name) ?? 0) + 1);
+  };
+
+  const relationships: ErdRelationship[] = [];
+  for (const row of rows) {
+    const parsed = parseCustomFieldId(row.from_id);
+    if (parsed === null || !row.to_id.startsWith(CUSTOM_OBJECT_PREFIX)) continue;
+    const parentObjectApiName = row.to_id.slice(CUSTOM_OBJECT_PREFIX.length);
+    let relationshipType: unknown;
+    try {
+      relationshipType = (JSON.parse(row.properties_json) as Record<string, unknown>)['relationshipType'];
+    } catch {
+      relationshipType = undefined;
+    }
+    relationships.push({
+      childObjectApiName: parsed.object,
+      childFieldApiName: parsed.field,
+      parentObjectApiName,
+      relationshipKind: relationshipType === 'MasterDetail' ? 'MasterDetail' : 'Lookup',
+    });
+    bump(parsed.object);
+    bump(parentObjectApiName);
+  }
+
+  return ok({ degreeByObject, relationships });
+};
 
 /**
  * The `sfi.generate_architecture_overview` MCP tool. Composes
@@ -114,7 +225,14 @@ export const generateArchitectureOverviewHandler = async (
   ].join('\n');
 
   // Org Structure diagram (mermaid): the top 5 objects as nodes.
-  const topObjects = overview.topObjects.slice(0, 5);
+  const topObjects = overview.topObjects.slice(0, ORG_STRUCTURE_DIAGRAM_CAP);
+  // CR-22-B6: the diagram shows the top N by inbound references — disclose
+  // against the TRUE org-wide CustomObject count (Executive Summary already
+  // computed it), not just `overview.topObjects.length` (itself a separate,
+  // upstream org_overview cap) — a reader cares "how many objects does this
+  // org have, and I'm seeing the top N", not the intermediate cap.
+  const totalCustomObjects = counts['CustomObject'] ?? 0;
+  const orgStructureTruncated = totalCustomObjects > topObjects.length;
   const orgDiagram: string[] = ['```mermaid', 'graph TD'];
   if (topObjects.length === 0) {
     orgDiagram.push('  empty["no extracted objects"]');
@@ -131,6 +249,42 @@ export const generateArchitectureOverviewHandler = async (
     '## Org Structure',
     '',
     ...orgDiagram,
+    ...(orgStructureTruncated
+      ? [
+          '',
+          `_(showing the top ${topObjects.length.toString()} of ${totalCustomObjects.toString()} CustomObjects, ranked by inbound references — see \`sfi.org_overview\` for the fuller ranking or \`sfi.list_components\` for the complete inventory)_`,
+        ]
+      : []),
+  ].join('\n');
+
+  // R6-19: Entity Relationship Diagram — top objects by Lookup/Master-Detail
+  // relationship DEGREE (in+out lookupTo edges), distinct from the Org
+  // Structure diagram's inbound-reference ranking above. The rendered
+  // relationships are the INDUCED subgraph on that object set — both ends
+  // of a relationship line must be one of the top-N objects, or the object
+  // cap would be defeated by pulling in every neighbour.
+  const degreeResult = await computeObjectRelationshipDegree(ctx);
+  if (!degreeResult.ok) return err(degreeResult.error);
+  const { degreeByObject, relationships: allLookupRelationships } = degreeResult.value;
+  const rankedObjects = [...degreeByObject.entries()].sort((a, b) => {
+    if (a[1] !== b[1]) return b[1] - a[1];
+    return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
+  });
+  const topErdObjects = new Set(rankedObjects.slice(0, ARCHITECTURE_ERD_MAX_OBJECTS).map(([name]) => name));
+  const inducedRelationships = allLookupRelationships.filter(
+    (r) => topErdObjects.has(r.childObjectApiName) && topErdObjects.has(r.parentObjectApiName),
+  );
+  const erd = buildErDiagram(inducedRelationships);
+  const objectCapDisclosure =
+    rankedObjects.length > ARCHITECTURE_ERD_MAX_OBJECTS
+      ? `Showing the top ${ARCHITECTURE_ERD_MAX_OBJECTS.toString()} of ${rankedObjects.length.toString()} objects with at least one Lookup/Master-Detail relationship, ranked by relationship degree (inbound + outbound \`lookupTo\` edges). For any single object's complete relationship set, use \`sfi.generate_data_dictionary\`.`
+      : undefined;
+  const erdSection = [
+    '## Entity Relationship Diagram',
+    '',
+    erd.mermaid,
+    ...(objectCapDisclosure !== undefined ? ['', `> ${objectCapDisclosure}`] : []),
+    ...(erd.disclosure !== undefined ? ['', `> ${erd.disclosure}`] : []),
   ].join('\n');
 
   // Domain Clustering diagram + per-domain section.
@@ -170,12 +324,15 @@ export const generateArchitectureOverviewHandler = async (
     ...integration.connectedApps,
     ...integration.networkAccesses,
   ];
+  // CR-22-B6: the diagram's NODE list (not the Type/Count table below, which
+  // is already complete) is capped at INTEGRATION_DIAGRAM_CAP.
+  const integrationDiagramTruncated = allIntegrationNodes.length > INTEGRATION_DIAGRAM_CAP;
   if (allIntegrationNodes.length === 0) {
     integrationLines.push('_(no integration surfaces extracted)_');
   } else {
     integrationLines.push('```mermaid');
     integrationLines.push('graph LR');
-    for (const node of allIntegrationNodes.slice(0, 20)) {
+    for (const node of allIntegrationNodes.slice(0, INTEGRATION_DIAGRAM_CAP)) {
       integrationLines.push(
         `  ${safeMermaidId(node.apiName)}["${escapeCell(node.apiName)} (${node.type})"]`,
       );
@@ -186,6 +343,12 @@ export const generateArchitectureOverviewHandler = async (
       );
     }
     integrationLines.push('```');
+    if (integrationDiagramTruncated) {
+      integrationLines.push('');
+      integrationLines.push(
+        `_(diagram shows the first ${Math.min(allIntegrationNodes.length, INTEGRATION_DIAGRAM_CAP).toString()} of ${allIntegrationNodes.length.toString()} integration surfaces — the Type/Count table below covers ALL of them; see \`sfi.integration_map\` for the full per-surface list)_`,
+      );
+    }
     integrationLines.push('');
     integrationLines.push('| Type | Count |');
     integrationLines.push('| --- | --- |');
@@ -240,6 +403,8 @@ export const generateArchitectureOverviewHandler = async (
     '',
     orgStructureSection,
     '',
+    erdSection,
+    '',
     domainsLines.join('\n'),
     '',
     integrationLines.join('\n'),
@@ -257,6 +422,7 @@ export const generateArchitectureOverviewHandler = async (
   const sectionConfidence: Record<string, ConfidenceLevel> = {
     'Executive Summary': 'declared',
     'Org Structure': 'heuristic',
+    'Entity Relationship Diagram': 'declared',
     'Domain Clustering': 'heuristic',
     'Integration Topology': 'declared',
     'Automation Footprint': 'declared',
@@ -267,9 +433,23 @@ export const generateArchitectureOverviewHandler = async (
     Q125_FRESHNESS_DISCLOSURE.replace('{TIMESTAMP}', refreshedAt),
     INHERITED_CONFIDENCE_DISCLOSURE,
     STRUCTURAL_DISCLOSURE,
+    ERD_SCOPE_DISCLOSURE,
+    ...(objectCapDisclosure !== undefined ? [objectCapDisclosure] : []),
+    ...(erd.disclosure !== undefined ? [erd.disclosure] : []),
     'Domain clusters and top-object rankings are heuristic — present as suggested starting points, not authoritative groupings.',
     'Scope: this overview is a STRUCTURED TOUR composed from org_overview, domain_clusters, and integration_map — a starting map, not a deep architectural analysis. It does not trace Apex call chains, data/field lineage, or the sharing model. For those, follow up with `sfi.call_graph`, `sfi.get_subgraph`, `sfi.field_lineage`, and `sfi.generate_sharing_summary` on the components this tour surfaces.',
   ];
+  // CR-22-B6: the two mermaid diagrams' node caps were previously JSDoc-only.
+  if (orgStructureTruncated) {
+    boundaries.push(
+      `Org Structure diagram capped: showing the top ${topObjects.length.toString()} of ${totalCustomObjects.toString()} CustomObjects (ranked by inbound references) — the rest are NOT pictured. See \`sfi.org_overview\` for the fuller ranking.`,
+    );
+  }
+  if (integrationDiagramTruncated) {
+    boundaries.push(
+      `Integration Topology diagram capped: showing the first ${Math.min(allIntegrationNodes.length, INTEGRATION_DIAGRAM_CAP).toString()} of ${allIntegrationNodes.length.toString()} integration surfaces as diagram nodes — the Type/Count table covers ALL of them, but only the first ${INTEGRATION_DIAGRAM_CAP.toString()} are pictured. See \`sfi.integration_map\` for the full per-surface list.`,
+    );
+  }
 
   // Component ids: top objects + domain centres + integration nodes,
   // DEDUPLICATED in first-seen order. A component can be selected by more
@@ -279,6 +459,7 @@ export const generateArchitectureOverviewHandler = async (
   const componentIds: ComponentId[] = [
     ...new Set<ComponentId>([
       ...overview.topObjects.map((o) => o.id),
+      ...[...topErdObjects].map((name) => `CustomObject:${name}` as ComponentId),
       ...domains.clusters.map((c) => c.centerComponent.id),
       ...allIntegrationNodes.map((n) => n.id),
     ]),

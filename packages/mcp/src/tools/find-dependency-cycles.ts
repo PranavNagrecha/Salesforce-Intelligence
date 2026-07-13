@@ -29,7 +29,7 @@ import type {
   PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listEdges } from '@sf-intelligence/graph';
+import { listEdgesForNodes } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -98,11 +98,24 @@ const buildAdjacency = async (
   const adj = new Map<ComponentId, ComponentId[]>();
   const selfLoops = new Set<ComponentId>();
   let edgeCount = 0;
+  // ONE batched round-trip for every Apex node's OUTGOING callsApex edges,
+  // replacing the former per-node `listEdges` N+1 (~#ApexClasses serial DuckDB
+  // queries on a large vault). `listEdgesForNodes` buckets each node's edges by
+  // the FULL (to_id, edge_type, from_id, source) total order — a refinement of
+  // the (to_id, edge_type, from_id, source) order `listEdges` returned — and
+  // every bucket edge here shares from_id (the node) and edge_type (`callsApex`)
+  // by construction, so the effective (to_id, source) intra-node order is
+  // byte-identical to the old per-node loop. The adjacency is fully materialized
+  // below before Tarjan runs, so SCC results are unchanged. A failed batch is
+  // surfaced exactly like the old `!r.ok` per-node error.
+  const batch = await listEdgesForNodes(ctx.graph, [...apexIds], {
+    direction: 'out',
+    edgeTypes: ['callsApex'],
+  });
+  if (!batch.ok) return err(batch.error.message);
   for (const id of apexIds) {
-    const r = await listEdges(ctx.graph, id, { direction: 'out', edgeType: 'callsApex' });
-    if (!r.ok) return err(r.error.message);
     const targets: ComponentId[] = [];
-    for (const edge of r.value) {
+    for (const edge of batch.value.get(id) ?? []) {
       // Only Apex→Apex edges form the dependency graph; Flow→Apex etc. are out of scope.
       if (!apexIds.has(edge.toId)) continue;
       edgeCount += 1;

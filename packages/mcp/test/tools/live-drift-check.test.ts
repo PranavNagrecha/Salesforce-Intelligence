@@ -2,6 +2,7 @@
 
 import type { VaultManifest } from '@sf-intelligence/contracts';
 
+import { mintLiveCapability } from '../../src/live-capability.js';
 import type { Context } from '../../src/server.js';
 import {
   diffFields,
@@ -18,7 +19,7 @@ const FIXTURE_MANIFEST: VaultManifest = {
   sourceTreeHash: 'sha256:fixture',
 };
 
-const ctx = { manifest: FIXTURE_MANIFEST } as Context;
+const ctx = { manifest: FIXTURE_MANIFEST, liveCapability: mintLiveCapability('primary') } as Context;
 
 describe('diffFields', () => {
   it('flags vault-only fields (stale) and custom live-only fields (added)', () => {

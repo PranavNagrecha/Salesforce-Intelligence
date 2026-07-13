@@ -16,6 +16,20 @@
  * correspondence axis — renamed components appear as remove+add, NOT
  * as modified; the disclosure surfaces this verbatim).
  *
+ * **R6-12 — `edgeDrift` axis.** Node-hash comparison alone is blind to
+ * DEPENDENCY drift: a Flow that starts referencing a new field, or a
+ * validation rule that drops a reference, changes NOTHING in the
+ * node's own `properties`, so it never showed up as `shapeModified`.
+ * For every component present in BOTH vaults (regardless of whether
+ * its node hash matched), `edgeDrift` compares the two vaults'
+ * OUTGOING edge sets and reports `edgesAdded[]` / `edgesRemoved[]` per
+ * component. The comparison identity is deliberately narrow —
+ * `edgeType` + `toId` + the `referenceKind` property when present —
+ * mirroring the node-side volatile-property exclusion: every OTHER
+ * edge property (confidence, source, extractor-internal bookkeeping)
+ * is excluded so it cannot manufacture false drift the way a
+ * `lastModifiedDate` node property would.
+ *
  * **Honesty axes (verbatim in `boundaries[]`):**
  *
  *   1. Volatile-property filter — `lastModifiedDate`,
@@ -27,6 +41,21 @@
  *   3. Vault-not-found refusal — when either alias is missing the
  *      tool returns the register-vault directive verbatim per the
  *      Q170 honesty anchor.
+ *   4. Edge-drift scope — only OUTGOING edges of components present in
+ *      BOTH vaults are compared; a component's edges are not diffed
+ *      against nothing when the component itself was added/removed.
+ *   5. Extractor-version caveat — when the two vaults' manifests
+ *      report different sf-intelligence product versions,
+ *      `extractorVersionCaveat` names both versions: an edge-set
+ *      difference between differently-extracted vaults can reflect an
+ *      EXTRACTOR change, not a real change in the org.
+ *
+ * **R7-W10.** The `edgeDrift` / `extractorVersionCaveat` primitives
+ * (types, caps, `loadEdgesByFrom`, `buildEdgeDrift`,
+ * `buildExtractorVersionCaveat`) live in the shared
+ * `./cross-vault-edge-drift.js` module — `compare-object-across-vaults.ts`
+ * reuses them, scoped to one object's own components, rather than
+ * re-implementing the diff logic.
  */
 
 import { createHash } from 'node:crypto';
@@ -51,7 +80,17 @@ import { z } from 'zod';
 import { mdTable } from '../answer-render.js';
 import type { Context } from '../server.js';
 
+import {
+  buildEdgeDrift,
+  buildExtractorVersionCaveat,
+  EDGE_DRIFT_SCOPE_DISCLOSURE,
+  EMPTY_EDGE_DRIFT,
+  loadEdgesByFrom,
+  type EdgeDriftOutput,
+} from './cross-vault-edge-drift.js';
 import { openVaultReadOnly } from './cross-vault-open.js';
+
+export type { ComponentEdgeDrift, EdgeDiffEntry, EdgeDriftOutput } from './cross-vault-edge-drift.js';
 
 /**
  * Volatile-property name allowlist that v3.1 inherits VERBATIM from
@@ -101,6 +140,11 @@ export interface ComponentDiff {
   readonly drift?: readonly PropertyDrift[];
 }
 
+// R7-W10: EdgeDiffEntry / ComponentEdgeDrift / EdgeDriftOutput (the R6-12
+// edgeDrift axis types) moved to the shared `cross-vault-edge-drift.ts`
+// module so `compare-object-across-vaults.ts` can reuse them without
+// duplication — re-exported above for callers that imported them from here.
+
 export interface CompareVaultsOutput {
   readonly vaultA: VaultRef;
   readonly vaultB: VaultRef;
@@ -112,6 +156,8 @@ export interface CompareVaultsOutput {
   readonly added: readonly ComponentDiff[];
   readonly removed: readonly ComponentDiff[];
   readonly shapeModified: readonly ComponentDiff[];
+  /** R6-12: outgoing-edge drift for components present in both vaults (independent of node-hash drift). */
+  readonly edgeDrift: EdgeDriftOutput;
   readonly summary: {
     readonly addedCount: number;
     readonly removedCount: number;
@@ -127,6 +173,15 @@ export interface CompareVaultsOutput {
   /** Verbatim honesty note about the size caps and, when truncated, how to narrow. */
   readonly disclosure: string;
   readonly boundaries: readonly string[];
+  /**
+   * R6-12: present ONLY when vaultA's and vaultB's manifests report different
+   * sf-intelligence product versions — an edge-set (or node) difference between
+   * differently-extracted vaults can reflect an EXTRACTOR change, not a real
+   * change in the org. Absent when both versions match or either manifest could
+   * not be read (a read failure is disclosed separately in `boundaries[]`,
+   * never silently treated as "versions match").
+   */
+  readonly extractorVersionCaveat?: string;
   /** A GitHub-flavored Markdown drift dashboard — present only when `format: 'markdown'`. */
   readonly markdown?: string;
 }
@@ -176,7 +231,31 @@ export const renderCompareVaultsMarkdown = (d: CompareVaultsOutput): string => {
   if (d.added.length === 0 && d.removed.length === 0 && d.shapeModified.length === 0) {
     lines.push('', '_No drift between the two vaults for the selected filter._');
   }
+  if (d.edgeDrift.components.length > 0) {
+    lines.push('', `## Edge drift (${d.edgeDrift.summary.componentsWithDriftCount})`);
+    for (const c of d.edgeDrift.components) {
+      lines.push('', `### ${c.id}`);
+      if (c.edgesAdded.length > 0) {
+        lines.push(
+          mdTable(
+            ['edgesAdded', 'toId', 'referenceKind'],
+            c.edgesAdded.map((e) => [e.edgeType, e.toId, e.referenceKind ?? '']),
+          ),
+        );
+      }
+      if (c.edgesRemoved.length > 0) {
+        lines.push(
+          mdTable(
+            ['edgesRemoved', 'toId', 'referenceKind'],
+            c.edgesRemoved.map((e) => [e.edgeType, e.toId, e.referenceKind ?? '']),
+          ),
+        );
+      }
+    }
+  }
+  if (d.extractorVersionCaveat !== undefined) lines.push('', `> ⚠️ ${d.extractorVersionCaveat}`);
   if (d.truncated) lines.push('', `> ⚠️ ${d.disclosure}`);
+  if (d.edgeDrift.truncated) lines.push('', `> ⚠️ ${d.edgeDrift.disclosure}`);
   return lines.join('\n');
 };
 
@@ -242,7 +321,22 @@ const loadNodes = async (
   }));
 };
 
+/**
+ * Pre-existing bug fixed while adding R6-12 (surfaced by real-vault
+ * verification — see R6-HANDOFF.md): `JSON.stringify(undefined)` returns
+ * the JS value `undefined`, NOT the string `"undefined"`, so a naive
+ * `typeof value !== 'object'` fall-through returned `undefined` for an
+ * absent property. `collectDrift` legitimately produces `undefined` inputs
+ * — its `keys` set is the UNION of both sides' property keys, so a key
+ * present on only one side reads as `undefined` on the other — and
+ * `boundValue` then crashed calling `.length` on that non-string. The
+ * explicit `undefined` branch below returns a sentinel string that cannot
+ * collide with any real JSON value (`null`, `"undefined"`, etc. all
+ * canonicalize differently), so "this property doesn't exist here" always
+ * compares UNEQUAL to any real value it's diffed against.
+ */
 const canonicalJson = (value: unknown): string => {
+  if (value === undefined) return '\0undefined\0';
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   const record = value as Readonly<Record<string, unknown>>;
@@ -320,6 +414,10 @@ const VOLATILE_FILTER_DISCLOSURE =
 const API_NAME_MATCH_DISCLOSURE =
   'components correspond by api-name match; renamed components appear as removed-from-A + added-to-B, not as modified — review apparent add/remove pairs for renames before treating as actual creations / deletions.';
 
+// R7-W10: EDGE_DRIFT_SCOPE_DISCLOSURE / loadEdgesByFrom / buildEdgeDrift /
+// buildExtractorVersionCaveat (the R6-12 edge-drift block) moved to the
+// shared ./cross-vault-edge-drift.js module — imported above.
+
 /**
  * Build the structured "vault not found" payload the skill surfaces
  * verbatim. The Q170 honesty anchor specifies the language; we match
@@ -353,6 +451,7 @@ const vaultNotFoundResponse = (
       added: [],
       removed: [],
       shapeModified: [],
+      edgeDrift: EMPTY_EDGE_DRIFT,
       summary: {
         addedCount: 0,
         removedCount: 0,
@@ -430,8 +529,13 @@ export const compareVaultsHandler = async (
   }
 
   try {
-    const nodesA = await loadNodes(openA.value.store, input.typeFilter, input.objectFilter);
-    const nodesB = await loadNodes(openB.value.store, input.typeFilter, input.objectFilter);
+    const [nodesA, nodesB, edgesByFromA, edgesByFromB, versionCaveat] = await Promise.all([
+      loadNodes(openA.value.store, input.typeFilter, input.objectFilter),
+      loadNodes(openB.value.store, input.typeFilter, input.objectFilter),
+      loadEdgesByFrom(openA.value.store),
+      loadEdgesByFrom(openB.value.store),
+      buildExtractorVersionCaveat(pathAResult.value, pathBResult.value, input.vaultA, input.vaultB),
+    ]);
 
     const mapA = new Map<ComponentId, CompactNode>();
     for (const n of nodesA) mapA.set(n.id, n);
@@ -441,6 +545,11 @@ export const compareVaultsHandler = async (
     const added: ComponentDiff[] = [];
     const removed: ComponentDiff[] = [];
     const shapeModified: ComponentDiff[] = [];
+    // R6-12: every id present in BOTH vaults (post typeFilter/objectFilter),
+    // regardless of node-hash drift — the edgeDrift axis needs the FULL
+    // intersection, not just the shape-modified subset, since an edge can
+    // change while every node property stays byte-identical.
+    const commonNodes = new Map<ComponentId, CompactNode>();
     let unchangedCount = 0;
     let anyDriftTruncated = false;
 
@@ -454,6 +563,7 @@ export const compareVaultsHandler = async (
           side: 'B',
         });
       } else {
+        commonNodes.set(id, nodeB);
         const hashA = hashProperties(nodeA.properties, includeVolatile);
         const hashB = hashProperties(nodeB.properties, includeVolatile);
         if (hashA !== hashB) {
@@ -491,6 +601,8 @@ export const compareVaultsHandler = async (
     removed.sort(compareById);
     shapeModified.sort(compareById);
 
+    const edgeDrift = buildEdgeDrift(commonNodes, edgesByFromA, edgesByFromB);
+
     // True totals BEFORE clipping the inlined lists (summary stays honest).
     const addedCount = added.length;
     const removedCount = removed.length;
@@ -507,6 +619,14 @@ export const compareVaultsHandler = async (
       ? `Output capped: per-bucket lists are clipped to ${COMPARE_MAX_PER_BUCKET} components (lowest ids first) and/or drift to ${DRIFT_MAX_ROWS} rows per component, with property values over ${DRIFT_MAX_VALUE_BYTES} bytes summarised. The \`summary\` counts are the TRUE totals — only the inlined \`added\`/\`removed\`/\`shapeModified\` lists are partial. Narrow with \`typeFilter\` or \`objectFilter\` for a complete, reviewable slice.`
       : `Complete diff; every bucket is under the ${COMPARE_MAX_PER_BUCKET}-component cap.`;
 
+    const boundaries: string[] = [
+      VOLATILE_FILTER_DISCLOSURE,
+      API_NAME_MATCH_DISCLOSURE,
+      EDGE_DRIFT_SCOPE_DISCLOSURE,
+    ];
+    if (versionCaveat.readFailureNote !== undefined) boundaries.push(versionCaveat.readFailureNote);
+    if (versionCaveat.caveat !== undefined) boundaries.push(versionCaveat.caveat);
+
     const base: CompareVaultsOutput = {
       vaultA: vaultARefResult.value,
       vaultB: vaultBRefResult.value,
@@ -518,6 +638,7 @@ export const compareVaultsHandler = async (
       added: clip(added),
       removed: clip(removed),
       shapeModified: clip(shapeModified),
+      edgeDrift,
       summary: {
         addedCount,
         removedCount,
@@ -526,7 +647,8 @@ export const compareVaultsHandler = async (
       },
       truncated,
       disclosure,
-      boundaries: [VOLATILE_FILTER_DISCLOSURE, API_NAME_MATCH_DISCLOSURE],
+      boundaries,
+      ...(versionCaveat.caveat !== undefined ? { extractorVersionCaveat: versionCaveat.caveat } : {}),
     };
     const data =
       input.format === 'markdown'

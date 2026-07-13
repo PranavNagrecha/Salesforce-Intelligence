@@ -35,6 +35,7 @@ import {
 } from '@sf-intelligence/graph';
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 
+import { mintLiveCapability } from '../../src/live-capability.js';
 import type { Context } from '../../src/server.js';
 import { liveGroupMembersHandler } from '../../src/tools/live-plane.js';
 import { resetLiveSession } from '../../src/tools/live-session.js';
@@ -205,7 +206,7 @@ beforeAll(async () => {
   store = opened.value;
   const imp = await importExtractionResults(store, [seed]);
   if (!imp.ok) throw new Error('seed failed');
-  ctx = { vaultRoot: dir, manifest: MANIFEST, graph: store } as Context;
+  ctx = { vaultRoot: dir, manifest: MANIFEST, graph: store, liveCapability: mintLiveCapability('primary') } as Context;
 });
 
 afterAll(async () => {

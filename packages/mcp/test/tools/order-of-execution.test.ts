@@ -23,6 +23,8 @@ import {
   orderOfExecutionInputSchema,
 } from '../../src/tools/order-of-execution.js';
 
+import { measureGraphQueries } from './_graph-query-budget.js';
+
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
   refreshedAt: '2026-05-27T14:33:08Z',
@@ -234,18 +236,24 @@ const nodelessSeed: ExtractionResult = {
 // Neither real test vault has an object that triggers
 // >=2 post-save phases together, so this synthetic seed is the only way
 // to assert the cross-phase emit order. Has a before+after-insert
-// ApexTrigger (with dispatchesAsync), a ValidationRule, a Create Flow,
-// an onCreateOnly WorkflowRule, an AssignmentRule, and an ApprovalProcess.
+// ApexTrigger (with dispatchesAsync), a ValidationRule, an active
+// blocking DuplicateRule (R6-07), a Create Flow, an onCreateOnly
+// WorkflowRule, an AssignmentRule, an ApprovalProcess, and — as the child
+// of a Summary field on a separate parent object (R6-07) — a
+// post-save-rollup-recalc entry.
 // =============================================================================
 
 const ORDER_OBJ = 'CustomObject:OrderObj';
 const ORDER_VR = 'ValidationRule:OrderObj.IsValid';
+const ORDER_DUP = 'DuplicateRule:OrderObj.ActiveBlockRule';
 const ORDER_TRIGGER = 'ApexTrigger:OrderTrigger';
 const ORDER_ASYNC_JOB = 'ApexClass:OrderAsyncJob';
 const ORDER_FLOW = 'Flow:OrderFlow';
 const ORDER_WORKFLOW = 'WorkflowRule:OrderObj.NotifyOnCreate';
 const ORDER_ASSIGNMENT = 'AssignmentRule:OrderObj.RoundRobin';
 const ORDER_APPROVAL = 'ApprovalProcess:OrderObj.CreditReview';
+const ORDER_ROLLUP_PARENT = 'CustomObject:OrderRollupParent';
+const ORDER_ROLLUP_FIELD = 'CustomField:OrderRollupParent.Total__c';
 
 const orderSeed: ExtractionResult = {
   nodes: [
@@ -261,6 +269,13 @@ const orderSeed: ExtractionResult = {
         errorConditionFormula: 'ISBLANK(Industry)',
         active: true,
       },
+    }),
+    makeNode({
+      id: ORDER_DUP,
+      type: 'DuplicateRule',
+      apiName: 'OrderObj.ActiveBlockRule',
+      parentId: ORDER_OBJ,
+      properties: { isActive: true, operationsOnInsert: ['Block'], operationsOnUpdate: ['Block'] },
     }),
     makeNode({
       id: ORDER_TRIGGER,
@@ -296,9 +311,23 @@ const orderSeed: ExtractionResult = {
       apiName: 'OrderObj.CreditReview',
       parentId: ORDER_OBJ,
     }),
+    makeNode({ id: ORDER_ROLLUP_PARENT, apiName: 'OrderRollupParent' }),
+    makeNode({
+      id: ORDER_ROLLUP_FIELD,
+      type: 'CustomField',
+      apiName: 'Total__c',
+      parentId: ORDER_ROLLUP_PARENT,
+      properties: {
+        dataType: 'Summary',
+        summarizedField: 'OrderObj.Amount__c',
+        summaryForeignKey: 'OrderObj.Parent__c',
+        summaryOperation: 'sum',
+      },
+    }),
   ],
   edges: [
     makeEdge({ fromId: ORDER_OBJ, toId: ORDER_VR, edgeType: 'parentOf' }),
+    makeEdge({ fromId: ORDER_OBJ, toId: ORDER_DUP, edgeType: 'parentOf' }),
     makeEdge({
       fromId: ORDER_TRIGGER,
       toId: ORDER_OBJ,
@@ -332,6 +361,7 @@ const orderSeed: ExtractionResult = {
       edgeType: 'parentOf',
     }),
     makeEdge({ fromId: ORDER_OBJ, toId: ORDER_APPROVAL, edgeType: 'parentOf' }),
+    makeEdge({ fromId: ORDER_ROLLUP_PARENT, toId: ORDER_ROLLUP_FIELD, edgeType: 'parentOf' }),
   ],
 };
 
@@ -660,7 +690,7 @@ describe('orderOfExecutionHandler', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.data.disclosure).toBe(
-      "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once and does not expand that re-entrancy. A workflow rule's time-dependent actions (its workflowTimeTriggers) are SCHEDULED for an offset measured from a record field value the offline vault cannot evaluate; this composition lists the rule once in the synchronous post-save-workflows phase and does NOT claim its time-delayed actions fire at save. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.",
+      "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Duplicate rules are modeled as their own `duplicate-rules` phase, running after before-triggers and validation but BEFORE the save — evaluated on insert/update only, with the effective Block/Allow/Alert/Report operations surfaced per rule. Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once and does not expand that re-entrancy. A workflow rule's time-dependent actions (its workflowTimeTriggers) are SCHEDULED for an offset measured from a record field value the offline vault cannot evaluate; this composition lists the rule once in the synchronous post-save-workflows phase and does NOT claim its time-delayed actions fire at save. Parent Summary (roll-up) fields that aggregate this object recalculate in the `post-save-rollup-recalc` phase, capped to ONE level — a grandparent's own rollup on that recalculated parent is NOT walked — and the parent's own triggers/flows/workflows that its recalculated save would fire are NOT expanded (no re-entrancy). Entitlement-process and milestone-type METADATA is modeled elsewhere in the vault (R6-18: `EntitlementProcess`/`MilestoneType` nodes, queryable via `sfi.get_component` / `sfi.get_edges`, including each milestone's declared target `minutesToComplete` as of R7-C7) — but this composition does NOT simulate entitlement milestones as an order-of-execution phase: whether a specific record is currently on-track or breached against those target minutes is live, per-record timer data this offline vault cannot hold. Criteria-based sharing recalculation — the FINAL step in Salesforce's documented order-of-execution, evaluated after every phase modeled here (including post-save-async) — is also NOT modeled: a save that causes a record to newly match or stop matching a criteria-based sharing rule's criteria triggers a sharing recalculation this composition does not surface. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.",
     );
   });
 
@@ -701,22 +731,75 @@ describe('orderOfExecutionHandler', () => {
     const { soe } = result.value.data.byEvent.insert;
     // OrderObj is the one seed where every post-save phase co-occurs.
     // Assert the EXACT documented Salesforce order of execution: before
-    // triggers precede custom validation rules, and post-save automation
-    // runs assignment → workflow rules → after-save flows (NOT flows
-    // first). This is the regression guard for the phase-order bug.
+    // triggers precede custom validation rules, duplicate rules run after
+    // validation but before the save (R6-07), post-save automation runs
+    // assignment → workflow rules → after-save flows (NOT flows first), and
+    // roll-up recalculation (R6-07) runs after approval but before async.
+    // This is the regression guard for the phase-order bug.
     expect(soe.map((s) => s.phase)).toEqual([
       'pre-save-triggers',
       'pre-save-validation',
+      'duplicate-rules',
       'save',
       'after-triggers',
       'post-save-assignment',
       'post-save-workflows',
       'post-save-flows',
       'post-save-approval',
+      'post-save-rollup-recalc',
       'post-save-async',
     ]);
     for (let i = 0; i < soe.length; i += 1) {
       expect(soe[i]?.stepIndex).toBe(i);
+    }
+    const dupStep = soe.find((s) => s.phase === 'duplicate-rules');
+    expect(dupStep?.componentId).toBe(ORDER_DUP);
+    expect(dupStep?.blocksOnSave).toBe(true);
+    const rollupStep = soe.find((s) => s.phase === 'post-save-rollup-recalc');
+    expect(rollupStep?.componentId).toBe(ORDER_ROLLUP_FIELD);
+    expect(rollupStep?.actions[0]?.targetId).toBe(ORDER_ROLLUP_PARENT);
+  });
+
+  // ===========================================================================
+  // R6-07: duplicate-rules + post-save-rollup-recalc per-event coverage.
+  // ===========================================================================
+
+  it('duplicate-rules is present on insert/update but absent on delete/undelete', async () => {
+    const result = await orderOfExecutionHandler(ctx, { objectApiName: 'OrderObj' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { byEvent } = result.value.data;
+    expect(byEvent.insert.soe.some((s) => s.phase === 'duplicate-rules')).toBe(true);
+    expect(byEvent.update.soe.some((s) => s.phase === 'duplicate-rules')).toBe(true);
+    expect(byEvent.delete.soe.some((s) => s.phase === 'duplicate-rules')).toBe(false);
+    expect(byEvent.undelete.soe.some((s) => s.phase === 'duplicate-rules')).toBe(
+      false,
+    );
+  });
+
+  it('post-save-rollup-recalc is present on every event (insert/update/delete/undelete alike)', async () => {
+    const result = await orderOfExecutionHandler(ctx, { objectApiName: 'OrderObj' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { byEvent } = result.value.data;
+    for (const event of ['insert', 'update', 'delete', 'undelete'] as const) {
+      const rollupSteps = byEvent[event].soe.filter(
+        (s) => s.phase === 'post-save-rollup-recalc',
+      );
+      expect(rollupSteps.map((s) => s.componentId)).toEqual([ORDER_ROLLUP_FIELD]);
+    }
+  });
+
+  it('omits both duplicate-rules and post-save-rollup-recalc for an object with neither', async () => {
+    const result = await orderOfExecutionHandler(ctx, { objectApiName: 'EmptyObj' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    for (const event of ['insert', 'update', 'delete', 'undelete'] as const) {
+      const phasesPresent = new Set(
+        result.value.data.byEvent[event].soe.map((s) => s.phase),
+      );
+      expect(phasesPresent.has('duplicate-rules')).toBe(false);
+      expect(phasesPresent.has('post-save-rollup-recalc')).toBe(false);
     }
   });
 });
@@ -739,5 +822,69 @@ describe('orderOfExecutionInputSchema', () => {
   it('rejects a missing objectApiName', () => {
     const parsed = orderOfExecutionInputSchema.safeParse({});
     expect(parsed.success).toBe(false);
+  });
+});
+
+// =============================================================================
+// N+1 query budget (finding C-1). fetchParentedFirers / fetchTriggersOnFirers
+// used to `getNodeById` once per incident edge, and buildAsyncSteps /
+// the flow-partition loop `listEdges` once per source — all now batched. The
+// total edge+node round-trip count must NOT scale with the object's child
+// fan-out. A wide object with children that are all filtered-out non-firers
+// isolates the firer-resolution N+1: it produces ZERO steps (so buildStep
+// never runs) but the old code issued ~fan-out node queries per resolution.
+// =============================================================================
+describe('orderOfExecutionHandler — bounded graph queries', () => {
+  const seedWideObject = async (childCount: number) => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-ooe-budget-'));
+    const opened = await openGraph(join(dir, 'ooe.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const s = opened.value;
+    // A modeled object with `childCount` CustomField children (parentOf) — none
+    // are firer types, so every fetchParentedFirers call fetches them all and
+    // filters them out, producing no steps. Fits in one scan window.
+    const nodes: Node[] = [makeNode({ id: 'CustomObject:Wide', apiName: 'Wide' })];
+    const edges: Edge[] = [];
+    for (let i = 0; i < childCount; i += 1) {
+      nodes.push(
+        makeNode({
+          id: `CustomField:Wide.F${i}__c`,
+          type: 'CustomField',
+          apiName: `F${i}__c`,
+          parentId: 'CustomObject:Wide',
+        }),
+      );
+      edges.push(
+        makeEdge({
+          fromId: 'CustomObject:Wide',
+          toId: `CustomField:Wide.F${i}__c`,
+          edgeType: 'parentOf',
+        }),
+      );
+    }
+    const imported = await importExtractionResults(s, [{ nodes, edges }]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const wideCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s } as Context;
+    const measured = await measureGraphQueries(s, () =>
+      orderOfExecutionHandler(wideCtx, { objectApiName: 'Wide' }),
+    );
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+    return measured;
+  };
+
+  it('issues a query count independent of the object child fan-out', async () => {
+    const small = await seedWideObject(60);
+    const large = await seedWideObject(200);
+    expect(small.result.ok).toBe(true);
+    expect(large.result.ok).toBe(true);
+    // Independence is the discriminator: a reintroduced per-child getNodeById
+    // loop would add ~140 node queries going 60 -> 200. Batched, both counts
+    // are identical.
+    expect(large.nodeQueries).toBe(small.nodeQueries);
+    expect(large.edgeQueries).toBe(small.edgeQueries);
+    // And the constant stays far below the fan-out (a per-child N+1 at N=200
+    // would be >=200 node queries across the firer resolutions).
+    expect(large.nodeQueries).toBeLessThan(60);
   });
 });

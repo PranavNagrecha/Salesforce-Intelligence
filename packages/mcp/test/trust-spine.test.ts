@@ -20,6 +20,7 @@ import {
 } from '@sf-intelligence/graph';
 import type { ExtendedVaultManifest } from '@sf-intelligence/vault';
 
+import { mintLiveCapability } from '../src/live-capability.js';
 import type { Context } from '../src/server.js';
 import { coverageReportHandler } from '../src/tools/coverage-report.js';
 import { safeToDeleteFieldHandler } from '../src/tools/safe-to-delete-field.js';
@@ -128,7 +129,7 @@ beforeAll(async () => {
   store = opened.value;
   const imported = await importExtractionResults(store, [seed]);
   if (!imported.ok) throw new Error(imported.error.message);
-  ctx = { vaultRoot: tempDir, manifest: MANIFEST, graph: store };
+  ctx = { vaultRoot: tempDir, manifest: MANIFEST, graph: store, liveCapability: mintLiveCapability('opt-in')};
 });
 
 afterAll(async () => {
@@ -198,6 +199,7 @@ describe('trust spine — ListView coverage gap', () => {
       vaultRoot: dir,
       manifest: listViewNeverModeledManifest(),
       graph: localStore,
+      liveCapability: mintLiveCapability('opt-in'),
     };
     const r = await safeToDeleteFieldHandler(localCtx, { fieldId: FIELD_LV });
     expect(r.ok).toBe(true);

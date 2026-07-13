@@ -562,7 +562,15 @@ export const techDebtScoreHandler = async (
   const ucRes = await unusedComponentsHandler(ctx, {});
   if (!ucRes.ok) return err(ucRes.error);
   const uc = ucRes.value.data;
-  const ufdRes = await unusedFieldsDeepHandler(ctx, {});
+  // staticOnly: this composition reads ONLY `ufd.totalCount` (the static count),
+  // so it must NOT trigger the CR-CAP-L5 live-population cross-check. Without
+  // this guard, a standing-consent org would fire ~2 live SELECT COUNT() reads
+  // per high-confidence unused field from inside the score roll-up — hundreds of
+  // serial live queries pushing tech_debt_score (and org_risk_report /
+  // release_readiness_report, which compose it) past the MCP 60s client timeout.
+  // The live cross-check never changes `totalCount`, so the score is byte-
+  // identical to the discarded-live path — just without the wasted queries.
+  const ufdRes = await unusedFieldsDeepHandler(ctx, { staticOnly: true });
   if (!ufdRes.ok) return err(ufdRes.error);
   const ufd = ufdRes.value.data;
   const unusedFieldsCount = uc.byType['CustomField'] ?? 0;

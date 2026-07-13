@@ -19,12 +19,15 @@ import {
 } from '@sf-intelligence/graph';
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 
+import { mintLiveCapability } from '../../src/live-capability.js';
 import type { Context } from '../../src/server.js';
 import { resetLiveSession } from '../../src/tools/live-session.js';
 import {
   whatIfMakeFieldRequiredHandler,
   whatIfMakeFieldRequiredInputSchema,
 } from '../../src/tools/what-if-make-field-required.js';
+
+import { measureGraphQueries } from './_graph-query-budget.js';
 
 const completeCoverage = (types: readonly string[]): readonly CoverageEntry[] =>
   types.map((type) => ({
@@ -337,6 +340,7 @@ beforeAll(async () => {
     vaultRoot: tempDir,
     manifest: FIXTURE_MANIFEST,
     graph: store,
+      liveCapability: mintLiveCapability('opt-in'),
   };
 });
 
@@ -651,6 +655,7 @@ describe('whatIfMakeFieldRequiredHandler', () => {
           vaultRoot: isoDir,
           manifest: FIXTURE_MANIFEST,
           graph: isoStore,
+      liveCapability: mintLiveCapability('opt-in'),
         };
         const result = await whatIfMakeFieldRequiredHandler(isoCtx, {
           fieldId: ISO_FIELD,
@@ -842,5 +847,61 @@ describe('whatIfMakeFieldRequiredHandler — past-cap Flow SAFETY (CR-12 de-cap)
     );
     expect(blocker?.category).toBe('metadata-blocker');
     expect(r.value.data.verdict).toBe('blocking');
+  });
+});
+
+// =============================================================================
+// N+1 query budget (finding C-1). fieldPopulators (writesTo sources) and the
+// ListView reference walk each resolved edge endpoints with a `getNodeById`
+// per edge; both are now single `listNodesByIds` batches. The count must NOT
+// scale with the field's inbound write/reference fan-out.
+// =============================================================================
+describe('whatIfMakeFieldRequiredHandler — bounded graph queries', () => {
+  const seedWideField = async (fanOut: number) => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-wimfr-budget-'));
+    const opened = await openGraph(join(dir, 'wimfr.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const s = opened.value;
+    const FIELD = 'CustomField:Wide.Target__c';
+    const nodes: Node[] = [
+      makeNode({ id: 'CustomObject:Wide', apiName: 'Wide' }),
+      makeNode({
+        id: FIELD,
+        type: 'CustomField',
+        apiName: 'Target__c',
+        parentId: 'CustomObject:Wide',
+        properties: { type: 'Picklist', required: false },
+      }),
+    ];
+    const edges: Edge[] = [
+      makeEdge({ fromId: 'CustomObject:Wide', toId: FIELD, edgeType: 'parentOf' }),
+    ];
+    for (let i = 0; i < fanOut; i += 1) {
+      nodes.push(makeNode({ id: `WorkflowRule:Wide.WF${i}`, type: 'WorkflowRule', apiName: `WF${i}` }));
+      edges.push(makeEdge({ fromId: `WorkflowRule:Wide.WF${i}`, toId: FIELD, edgeType: 'writesTo' }));
+      nodes.push(makeNode({ id: `ListView:Wide.LV${i}`, type: 'ListView', apiName: `LV${i}` }));
+      edges.push(makeEdge({ fromId: `ListView:Wide.LV${i}`, toId: FIELD, edgeType: 'references' }));
+    }
+    const imported = await importExtractionResults(s, [{ nodes, edges }]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const wideCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s, liveCapability: mintLiveCapability('opt-in') } as Context;
+    const measured = await measureGraphQueries(s, () =>
+      whatIfMakeFieldRequiredHandler(wideCtx, { fieldId: FIELD }),
+    );
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+    return measured;
+  };
+
+  it('issues a query count independent of the field write/reference fan-out', async () => {
+    const small = await seedWideField(60);
+    const large = await seedWideField(200);
+    expect(small.result.ok).toBe(true);
+    expect(large.result.ok).toBe(true);
+    expect(large.nodeQueries).toBe(small.nodeQueries);
+    expect(large.edgeQueries).toBe(small.edgeQueries);
+    // A per-edge getNodeById across the two walks would be >=120 node queries at
+    // fanOut=200; batched, each walk is one node fetch.
+    expect(large.nodeQueries).toBeLessThan(60);
   });
 });

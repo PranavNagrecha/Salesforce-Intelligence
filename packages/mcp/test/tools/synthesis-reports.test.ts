@@ -567,3 +567,87 @@ describe('fieldCleanupCandidatesHandler — byte budget (oversize fix)', () => {
     );
   });
 });
+
+// Perf regression guard: the org-wide over-privilege scan reads each Profile /
+// PermissionSet's OUTGOING grantedBy edges. It MUST fetch them in ONE batched
+// `listEdgesForNodes` round-trip, NOT an N+1 `listEdges`-per-node loop — that
+// N+1 (one DuckDB round-trip per permission container) was the residual cost
+// that kept org_risk_report / release_readiness_report over the 60s MCP client
+// timeout after the first perf fix (d7a3b8f) batched the sibling hygiene tools.
+describe('permissionRiskReportHandler — batched grantedBy scan (no N+1)', () => {
+  const PROFILE_COUNT = 60;
+  let perfDir: string;
+  let perfStore: GraphStore;
+  let perfCtx: Context;
+
+  const makeNode = (o: Partial<Node> & Pick<Node, 'id'>): Node => ({
+    type: 'Profile',
+    apiName: 'Anon',
+    label: null,
+    parentId: null,
+    sourcePath: 'x',
+    lastModifiedDate: null,
+    lastModifiedBy: null,
+    apiVersion: null,
+    properties: {},
+    ...o,
+  });
+  const makeEdge = (o: Partial<Edge> & Pick<Edge, 'fromId' | 'toId'>): Edge => ({
+    edgeType: 'grantedBy',
+    confidence: 'declared',
+    source: 'unit-test',
+    properties: {},
+    ...o,
+  });
+
+  beforeAll(async () => {
+    perfDir = mkdtempSync(join(tmpdir(), 'sfi-synth-perf-'));
+    const opened = await openGraph(join(perfDir, 'perf.duckdb'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    perfStore = opened.value;
+    // One shared object each profile has object-level Modify All over — an
+    // object-escalation finding with NO god-mode system perm (so the god-mode
+    // roster / active-holder facts path stays empty and can't add edge queries).
+    const nodes: Node[] = [
+      makeNode({ id: 'CustomObject:Perf__c', type: 'CustomObject', apiName: 'Perf__c' }),
+    ];
+    const edges: Edge[] = [];
+    for (let i = 0; i < PROFILE_COUNT; i += 1) {
+      nodes.push(
+        makeNode({ id: `Profile:Perf${i}`, apiName: `Perf${i}` }),
+      );
+      edges.push(
+        makeEdge({
+          fromId: `Profile:Perf${i}`,
+          toId: 'CustomObject:Perf__c',
+          properties: { allowRead: true, modifyAllRecords: true },
+        }),
+      );
+    }
+    const imp = await importExtractionResults(perfStore, [{ nodes, edges }]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    perfCtx = { vaultRoot: perfDir, manifest: MANIFEST, graph: perfStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(perfStore);
+    rmSync(perfDir, { recursive: true, force: true });
+  });
+
+  it('issues a bounded number of edge queries regardless of container count', async () => {
+    const spy = vi.spyOn(perfStore.connection, 'runAndReadAll');
+    const r = await permissionRiskReportHandler(perfCtx, { limit: 500 });
+    const edgeQueries = spy.mock.calls.filter(([sql]) =>
+      String(sql).includes('FROM edges'),
+    ).length;
+    spy.mockRestore();
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Every profile was scanned (proves the ONE batch covered them all).
+    expect(r.value.data.privilege.overPrivilegedGrantorCount).toBe(PROFILE_COUNT);
+    expect(r.value.data.privilege.scanned.profiles).toBe(PROFILE_COUNT);
+    // ONE batched listEdgesForNodes for the whole grantedBy scan — not one per
+    // container. An N+1 would be ~PROFILE_COUNT edge queries.
+    expect(edgeQueries).toBeLessThanOrEqual(2);
+  });
+});

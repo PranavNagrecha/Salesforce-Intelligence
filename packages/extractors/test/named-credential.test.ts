@@ -192,7 +192,7 @@ describe('extractNamedCredential', () => {
     it('reads the endpoint from a Url parameter on a new-style (SecuredEndpoint) credential', async () => {
       // New-style Named Credentials (namedCredentialType=SecuredEndpoint, API
       // 56+) have NO top-level <endpoint>; the URL lives in a
-      // <namedCredentialParameters> entry with parameterName=Url. Real mass.gov
+      // <namedCredentialParameters> entry with parameterName=Url. Real example.gov
       // NCs (EXT_API_ClientInfo, MA_SSP_Notice_API, ...) use this shape and used
       // to fail extraction with 'missing required element: <endpoint>'.
       const xml = `<?xml version="1.0"?>

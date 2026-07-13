@@ -18,6 +18,8 @@ import {
   automationBuildAdvisorInputSchema,
 } from '../../src/tools/automation-build-advisor.js';
 
+import { measureGraphQueries } from './_graph-query-budget.js';
+
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
   refreshedAt: '2026-05-29T00:00:00Z',
@@ -297,5 +299,54 @@ describe('automationBuildAdvisorHandler — flow-only-objects (org-wide gap)', (
     expect(d.summary.orgCustomCount).toBe(4);
     expect(d.summary.masterDetailChildCount).toBe(2);
     expect(d.summary.junctionCount).toBe(1);
+  });
+});
+
+// =============================================================================
+// N+1 query budget (finding C-1). perObjectHandler resolved incoming
+// triggersOn sources and parented ValidationRules with `getNodeById` per edge;
+// both are now single `listNodesByIds` batches. The count must NOT scale with
+// the object's automation/child fan-out. (The org-wide flow-only-objects path
+// was already batched in 299a460.)
+// =============================================================================
+describe('automationBuildAdvisorHandler — bounded graph queries (perObject)', () => {
+  const seedWideObject = async (fanOut: number) => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-aba-budget-'));
+    const opened = await openGraph(join(dir, 'aba.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const s = opened.value;
+    // `fanOut` incoming triggersOn Flows AND `fanOut` parented ValidationRules,
+    // so both batched loops range over a wide fan-out.
+    const nodes: Node[] = [node('CustomObject:Wide__c', 'CustomObject')];
+    const edges: Edge[] = [];
+    for (let i = 0; i < fanOut; i += 1) {
+      nodes.push(node(`Flow:WideFlow${i}`, 'Flow', { status: 'Active' }));
+      edges.push(edge(`Flow:WideFlow${i}`, 'CustomObject:Wide__c', 'triggersOn', { recordTriggerType: 'Update' }));
+      nodes.push(node(`ValidationRule:Wide__c.Rule${i}`, 'ValidationRule', { active: true }));
+      edges.push(edge('CustomObject:Wide__c', `ValidationRule:Wide__c.Rule${i}`, 'parentOf', {}));
+    }
+    const imported = await importExtractionResults(s, [{ nodes, edges }]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const wideCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s } as Context;
+    const measured = await measureGraphQueries(s, () =>
+      automationBuildAdvisorHandler(wideCtx, { objectApiName: 'Wide__c' }),
+    );
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+    return measured;
+  };
+
+  it('issues a query count independent of automation/child fan-out', async () => {
+    const small = await seedWideObject(60);
+    const large = await seedWideObject(200);
+    expect(small.result.ok).toBe(true);
+    expect(large.result.ok).toBe(true);
+    // Exactly two edge fetches (incoming triggersOn + outgoing parentOf), flat.
+    expect(small.edgeQueries).toBe(2);
+    expect(large.edgeQueries).toBe(2);
+    // Node fetches: one object probe + one batch per non-empty fan-out — a
+    // small constant, NOT one per edge. Equal at N=60 and N=200.
+    expect(large.nodeQueries).toBe(small.nodeQueries);
+    expect(large.nodeQueries).toBeLessThanOrEqual(4);
   });
 });

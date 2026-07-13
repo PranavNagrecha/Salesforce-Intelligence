@@ -17,6 +17,11 @@ const EXTERNAL_PACKAGES = [
   'commander',
   'fast-xml-parser',
   '@duckdb/node-api',
+  // INFRA-11: ANTLR Apex grammar (~5 MB). Refresh lazy-loads parsers/apex-ast;
+  // without this line esbuild still inlines the grammar into the single outfile
+  // and defeats that laziness for install weight. Keep in sync with package.json
+  // "dependencies".
+  '@apexdevtools/apex-parser',
   '@modelcontextprotocol/sdk',
   'zod',
   // SPIKE (spike/embeddings): the hybrid funnel's gate-guarded dynamic import.
@@ -45,6 +50,33 @@ await build({
 
 console.log(`bundled -> dist/index.js (version ${pkg.version})`);
 
+// INFRA-05: separate worker entry for the Apex AST pool. Bundles parsers/
+// apex-ast into the worker; keeps @apexdevtools/apex-parser external (INFRA-11)
+// so workers resolve the grammar from node_modules rather than re-inlining ANTLR.
+await build({
+  entryPoints: ['workers/apex-ast-worker.mjs'],
+  outfile: 'dist/apex-ast-worker.js',
+  bundle: true,
+  platform: 'node',
+  format: 'esm',
+  target: 'node20',
+  external,
+  logLevel: 'info',
+});
+
+console.log('bundled -> dist/apex-ast-worker.js');
+
+// INFRA-11: fail the build if the ANTLR grammar is re-inlined.
+const { spawnSync } = await import('node:child_process');
+const assertScript = fileURLToPath(new URL('../../scripts/check-cli-bundle.mjs', import.meta.url));
+const assert = spawnSync(process.execPath, [assertScript], {
+  cwd: fileURLToPath(new URL('../..', import.meta.url)),
+  stdio: 'inherit',
+});
+if (assert.status !== 0) {
+  process.exit(assert.status ?? 1);
+}
+
 // Ship the synthetic demo org source so `sfi demo` (and `npx sf-intelligence demo`)
 // can build + serve a no-org demo vault. The single source of truth lives at the repo
 // root (examples/demo-vault/source); copy it into the package's whitelisted demo-source/
@@ -56,12 +88,11 @@ rmSync(demoDestRoot, { recursive: true, force: true });
 cpSync(demoSrc, demoDest, { recursive: true });
 console.log('copied demo source -> demo-source/');
 
-// SPIKE (spike/embeddings): ship the checked-in embedding index next to the
-// bundled dist/index.js so the gate-guarded hybrid funnel can find it at runtime
-// (embedding-funnel.ts walks up from import.meta.url looking for data/embedding-index.json).
-// Gate off (default) it is never read; the 886KB JSON is the only embedding asset
-// that ships — the 23MB model is downloaded on opt-in, never bundled.
-const embedIndexSrc = fileURLToPath(new URL('../mcp/data/embedding-index.json', import.meta.url));
-const embedIndexDest = fileURLToPath(new URL('./dist/data/embedding-index.json', import.meta.url));
-cpSync(embedIndexSrc, embedIndexDest, { recursive: false });
-console.log('copied embedding index -> dist/data/');
+// spike/embeddings: the MiniLM `embedding-index.json` is NO LONGER copied into
+// the tarball. It was pure dead weight — the only code that reads it
+// (embedding-funnel.ts `hybridCandidates`) is unreachable from `route_question`
+// (the async hybrid was never wired in), and `@huggingface/transformers` is a
+// devDependency, so the gate is inert on a published install regardless. The
+// static-embedding assets (option 4a) are likewise not shipped: that gate is
+// off by default (measured sub-bar lift) and its assets are gitignored,
+// regenerated on demand. Net: the published package carries NO embedding data.

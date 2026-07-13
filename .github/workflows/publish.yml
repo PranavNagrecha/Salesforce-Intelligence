@@ -1,0 +1,60 @@
+name: Publish (npm Trusted Publishing)
+
+# Publishes `sf-intelligence` to npm on a version tag push, keyless via OIDC.
+# NO NPM TOKEN is used or stored: npm Trusted Publishing exchanges the GitHub
+# Actions OIDC identity for a short-lived publish credential, and provenance is
+# attached automatically.
+#
+# ONE-TIME SETUP (npmjs.com, done by the package owner — cannot be automated):
+#   npmjs.com -> package `sf-intelligence` -> Settings -> Trusted Publishing
+#   -> add a GitHub Actions publisher:
+#        Organization/user: PranavNagrecha
+#        Repository:        Salesforce-Intelligence
+#        Workflow filename: publish.yml
+#   (leave Environment blank to match this workflow, or set one and add
+#    `environment:` below to match). Must be configured BEFORE pushing the tag,
+#    or the publish step fails auth (re-runnable after).
+#
+# To release: push an annotated tag `vX.Y.Z` whose version matches
+# packages/cli/package.json (the prepublishOnly guard enforces the match).
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write # required for npm Trusted Publishing (OIDC) + provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+
+      - name: Upgrade npm (>= 11.5.1 for OIDC Trusted Publishing)
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build all packages
+        run: pnpm -r build
+
+      - name: Publish sf-intelligence (keyless, with provenance)
+        working-directory: packages/cli
+        run: npm publish --provenance --access public

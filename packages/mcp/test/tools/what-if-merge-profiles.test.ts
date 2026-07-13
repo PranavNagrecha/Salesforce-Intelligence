@@ -604,3 +604,69 @@ describe('whatIfMergeProfilesInputSchema', () => {
     expect(parsed.success).toBe(false);
   });
 });
+
+// =============================================================================
+// Finding #35 — format: 'proposal' emits a LOCAL package.xml pulling both
+// profiles for a human to hand-merge.
+// =============================================================================
+
+const isWellFormedMergeXml = (xml: string): boolean => {
+  const body = xml
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<\?xml[^>]*\?>/g, '');
+  const stack: string[] = [];
+  for (const m of body.matchAll(/<(\/?)([A-Za-z][\w.-]*)(\s[^>]*)?(\/?)>/g)) {
+    const closing = m[1] === '/';
+    const name = m[2] ?? '';
+    if (m[4] === '/') continue;
+    if (closing) {
+      if (stack.pop() !== name) return false;
+    } else {
+      stack.push(name);
+    }
+  }
+  return stack.length === 0;
+};
+
+describe('whatIfMergeProfilesHandler — format: proposal (Finding #35)', () => {
+  it('emits a deploy package.xml naming both profiles, with conflict evidence inline', async () => {
+    const result = await whatIfMergeProfilesHandler(ctx, {
+      profileIdA: PROFILE_A,
+      profileIdB: PROFILE_B,
+      format: 'proposal',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const proposal = result.value.data.proposal;
+    expect(proposal).toBeDefined();
+    if (proposal === undefined) return;
+
+    expect(proposal.kind).toBe('deploy');
+    expect(proposal.files.map((f) => f.path)).toEqual(['package.xml']);
+    const pkg = proposal.files[0]?.contents ?? '';
+    // Both profiles are packaged under <name>Profile</name>.
+    expect(pkg).toContain('<members>SalesA</members>');
+    expect(pkg).toContain('<members>SalesB</members>');
+    expect(pkg).toContain('<name>Profile</name>');
+    expect(pkg).toContain('<version>');
+    expect(isWellFormedMergeXml(pkg)).toBe(true);
+
+    // Self-justifying: verdict + conflict count + REVIEW banner + vault hash.
+    expect(pkg).toMatch(/REVIEW BEFORE DEPLOY/i);
+    expect(pkg).toContain(`verdict: ${result.value.data.verdict}`);
+    expect(proposal.summary.componentCount).toBe(2);
+    expect(proposal.evidence.reasons.join(' ')).toMatch(/conflict/i);
+    // The "surfaces but does not auto-resolve" disclosure rides verbatim.
+    expect(proposal.evidence.disclosures.join(' ')).toMatch(/auto-resolve/i);
+  });
+
+  it('does not attach a proposal for the default json format', async () => {
+    const result = await whatIfMergeProfilesHandler(ctx, {
+      profileIdA: PROFILE_A,
+      profileIdB: PROFILE_B,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.proposal).toBeUndefined();
+  });
+});

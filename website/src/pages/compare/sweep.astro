@@ -44,8 +44,14 @@ const jsonld = [
   path="/compare/sweep"
   heading="sf-intelligence vs Sweep"
   intro="They aim at different people. Sweep is a cloud <strong>agentic layer for enterprise GTM/RevOps</strong> teams across many systems; sf-intelligence is a free, offline, read-only MCP server that gives AI coding agents a local map of <strong>one Salesforce org</strong>. Here's an honest comparison."
-  crumbs={[{ label: "compare", href: "/compare/sweep" }]}
-  breadcrumbs={[{ name: "sf-intelligence vs Sweep", path: "/compare/sweep" }]}
+  crumbs={[
+    { label: "compare", href: "/compare" },
+    { label: "vs Sweep", href: "/compare/sweep" },
+  ]}
+  breadcrumbs={[
+    { name: "Compare", path: "/compare" },
+    { name: "vs Sweep", path: "/compare/sweep" },
+  ]}
   jsonld={jsonld}
 >
   <section>
@@ -92,6 +98,9 @@ const jsonld = [
         <h2 id="together">Different layers</h2>
         <p>Sweep operates at the business-operations layer across many systems; sf-intelligence operates at the developer/AI layer for one org's metadata. A RevOps team could run Sweep while its developers use sf-intelligence to feed AI coding agents a local, read-only view of the Salesforce org - the two don't overlap much in practice.</p>
 
+        <h2 id="more">More comparisons</h2>
+        <p><a href="/compare">compare hub</a> · <a href="/compare/salesforce-dx-mcp">Salesforce MCP</a> · <a href="/compare/elements-cloud">Elements.cloud</a> · <a href="/compare/dx0">dx0</a> · <a href="/compare/hubbl">Hubbl</a> · <a href="/compare/metazoa">Metazoa</a>.</p>
+
         <div class="callout"><p><strong>Disclaimer:</strong> This comparison reflects publicly documented positioning as of 2026 and is written to be fair. Sweep's feature set and pricing evolve - verify current details on their site. sf-intelligence is an independent project, not affiliated with Sweep or Salesforce.</p></div>
 
         <div style="padding-top:36px;">
@@ -100,7 +109,7 @@ const jsonld = [
             <p>Deep metadata context for your AI agent - on one org, on your machine.</p>
             <div class="cta-actions">
               <a class="btn btn-solid" href="/getting-started">install sf-intelligence</a>
-              <a class="btn btn-ghost" href="/compare/elements-cloud">vs Elements.cloud</a>
+              <a class="btn btn-ghost" href="/compare">all comparisons</a>
             </div>
           </div>
         </div>

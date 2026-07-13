@@ -6,13 +6,18 @@
 
 import type {
   ComponentId,
+  Edge,
   McpError,
   McpResponse,
   Node,
   TrustSummary,
 } from '@sf-intelligence/contracts';
 import { ok, type Result } from '@sf-intelligence/core';
-import { listEdges, listNodesByType } from '@sf-intelligence/graph';
+import {
+  listEdges,
+  listEdgesForNodes,
+  listNodesByType,
+} from '@sf-intelligence/graph';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
@@ -34,7 +39,6 @@ import { collectPiiInventoryFields } from './pii-inventory.js';
 import {
   processBuilderMigrationCandidatesHandler,
 } from './process-builder-migration-candidates.js';
-import { REPORT_DASHBOARD_USAGE_CAVEAT } from './report-dashboard-usage.js';
 import {
   techDebtScoreHandler,
   type TechDebtScoreOutput,
@@ -44,6 +48,7 @@ import {
 } from './unassigned-permission-sets.js';
 import {
   unusedFieldsDeepHandler,
+  type UnusedFieldCleanupFinding,
   type UnusedFieldsDeepOutput,
 } from './unused-fields-deep.js';
 
@@ -68,7 +73,18 @@ export const fieldCleanupCandidatesInputSchema = synthesisInputSchema.extend({
 export type FieldCleanupCandidatesInput = z.infer<
   typeof fieldCleanupCandidatesInputSchema
 >;
-export const orgRiskReportInputSchema = synthesisInputSchema;
+/**
+ * `sfi.org_risk_report` accepts the generic `limit` plus an optional `gate`
+ * deploy-gate MODE (STEP-2: absorbed from the retired `release_readiness_report`).
+ * When `gate: true`, the output additionally carries `ready` + `blockers` — the
+ * critical-severity findings plus any ACTIONABLE coverage gap (a requested
+ * metadata type that errored during retrieve) — so a caller can treat the org
+ * risk synthesis as a go/no-go release gate.
+ */
+export const orgRiskReportInputSchema = synthesisInputSchema.extend({
+  gate: z.boolean().optional(),
+});
+export type OrgRiskReportInput = z.infer<typeof orgRiskReportInputSchema>;
 export const automationRiskReportInputSchema = synthesisInputSchema;
 /**
  * `sfi.permission_risk_report` accepts the generic `limit` plus an optional
@@ -165,11 +181,24 @@ export interface OrgRiskReportOutput extends SynthesisBase {
   readonly healthIssueCount: number;
   readonly permissionRisk: OrgRiskPermissionSummary | null;
   readonly piiExposure: OrgRiskPiiSummary | null;
+  /**
+   * Deploy-gate verdict — present ONLY in `gate: true` MODE (STEP-2: absorbed
+   * from the retired `release_readiness_report`). `true` when there are no
+   * blockers. Absent on a plain (non-gate) call so that output is unchanged.
+   */
+  readonly ready?: boolean;
+  /**
+   * The blocking conditions — critical-severity findings plus any ACTIONABLE
+   * coverage gap (a requested metadata type that errored during retrieve).
+   * Present ONLY in `gate: true` MODE. NOT-modeled families are NEVER blockers
+   * (they are a permanent product limitation, disclosed via `trust`).
+   */
+  readonly blockers?: readonly string[];
 }
 
 export const orgRiskReportHandler = async (
   ctx: Context,
-  input: SynthesisInput,
+  input: OrgRiskReportInput,
 ): Promise<Result<McpResponse<OrgRiskReportOutput>, McpError>> => {
   const limit = input.limit ?? 50;
   const findings: RankedFinding[] = [];
@@ -314,15 +343,38 @@ export const orgRiskReportHandler = async (
     }
   }
 
+  const sortedFindings = sortFindings(findings);
+
+  // STEP-2 gate MODE (absorbed from release_readiness_report). Emit the
+  // deploy-gate verdict ONLY when the caller opts in with `gate: true`, so a
+  // plain org_risk_report response is byte-unchanged. Block on critical findings
+  // + ACTIONABLE coverage gaps (a requested type that ERRORED during retrieve),
+  // NEVER on not-modeled families — those are a permanent product limitation and
+  // would keep `ready` false for every vault; they stay disclosed via `trust`.
+  let gate: { ready: boolean; blockers: string[] } | undefined;
+  if (input.gate === true) {
+    const blockers: string[] = [];
+    for (const finding of sortedFindings) {
+      if (finding.severity === 'critical') blockers.push(finding.summary);
+    }
+    if (coverage.partialTypes.length > 0) {
+      blockers.push(
+        `Incomplete vault coverage — requested metadata failed retrieve: ${coverage.partialTypes.join(', ')}. Re-run /sfi-refresh.`,
+      );
+    }
+    gate = { ready: blockers.length === 0, blockers };
+  }
+
   return ok({
     data: {
-      findings: sortFindings(findings),
+      findings: sortedFindings,
       techDebt,
       healthIssueCount: issues.length,
       permissionRisk,
       piiExposure,
       trust: coverageTrust(ctx),
       disclosure: SYNTHESIS_DISCLOSURE,
+      ...(gate !== undefined ? { ready: gate.ready, blockers: gate.blockers } : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
@@ -332,89 +384,43 @@ export const orgRiskReportHandler = async (
 };
 
 // ---------------------------------------------------------------------------
-// sfi.field_cleanup_candidates
+// sfi.field_cleanup_candidates — HIDDEN back-compat alias (STEP-2)
+//
+// The ranked cleanup roster (findings + report/dashboard caveat + 36 KB
+// findings+fields trim) folded into `unused_fields_deep`'s `format: 'cleanup'`
+// MODE, so the survivor owns the preserved projection. This is now a THIN alias
+// forwarding the object-scope params with `format: 'cleanup'`. Un-advertised on
+// tools/list, dispatchable by name / run_analysis.
 // ---------------------------------------------------------------------------
 
-export interface FieldCleanupCandidatesOutput extends SynthesisBase {
-  readonly fields: UnusedFieldsDeepOutput['fields'];
-  /** Present when the candidate list was trimmed to fit the response size limit. */
-  readonly note?: string;
+/**
+ * The cleanup output the (hidden) field_cleanup alias returns. `format: 'cleanup'`
+ * always populates `findings` + `disclosure`, redeclared here as required (they
+ * are optional on the base `UnusedFieldsDeepOutput`).
+ */
+export interface FieldCleanupCandidatesOutput extends UnusedFieldsDeepOutput {
+  readonly findings: readonly UnusedFieldCleanupFinding[];
+  readonly disclosure: string;
 }
-
-/** Keep the serialized response under the global ~45 KB MCP guard. The `fields`
- *  entries carry the full eight-tier detail, so the default page can overflow. */
-const FIELD_CLEANUP_BYTE_BUDGET = 36_000;
 
 export const fieldCleanupCandidatesHandler = async (
   ctx: Context,
   input: FieldCleanupCandidatesInput,
 ): Promise<Result<McpResponse<FieldCleanupCandidatesOutput>, McpError>> => {
-  const limit = input.limit ?? 100;
-  // Pass the object-scope parameters through to unused_fields_deep so the
-  // scan is scoped to the requested object rather than returning org-wide
-  // results. Both objectId and objectApiName are forwarded so callers can
-  // use either alias.
-  const deep = await unusedFieldsDeepHandler(ctx, {
-    limit,
+  // Forward the object-scope params (objectId / objectApiName) + `limit` with
+  // `format: 'cleanup'`. Deliberately does NOT pass `staticOnly` — the
+  // user-facing cleanup view keeps unused_fields_deep's live-population
+  // enrichment (bounded by LIVE_CROSS_CHECK_CAP, so no 60s-timeout risk).
+  const r = await unusedFieldsDeepHandler(ctx, {
+    ...(input.limit !== undefined ? { limit: input.limit } : {}),
     ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
     ...(input.objectApiName !== undefined
       ? { objectApiName: input.objectApiName }
       : {}),
+    format: 'cleanup',
   });
-  if (!deep.ok) return deep;
-  const allFields = deep.value.data.fields;
-  const toFinding = (field: UnusedFieldsDeepOutput['fields'][number]): RankedFinding => ({
-    rank: 0,
-    severity:
-      field.confidence === 'high'
-        ? 'high'
-        : field.confidence === 'medium'
-          ? 'medium'
-          : 'low',
-    category: 'unused-field',
-    summary: `${field.id} — ${field.recommendedAction}`,
-    evidence: field.invisibilityWarnings,
-    confidence: 'heuristic' as const,
-  });
-
-  // Each `fields` entry carries the full eight-tier detail, so the default page
-  // can exceed the response guard (a real org overflowed at ~191 KB). Trim
-  // findings + fields together (they stay parallel, findings[i] from fields[i])
-  // until the serialized response fits the byte budget.
-  const build = (n: number): FieldCleanupCandidatesOutput => {
-    const fields = allFields.slice(0, n);
-    return {
-      findings: sortFindings(fields.map(toFinding)),
-      fields,
-      trust: coverageTrust(ctx),
-      // Cleanup candidates are absence-of-usage findings; without `--with-reports`
-      // a report/dashboard-only field reads as unused. Surface that caveat so the
-      // list is not mistaken for a safe-to-delete set.
-      disclosure: `${SYNTHESIS_DISCLOSURE} Also: ${REPORT_DASHBOARD_USAGE_CAVEAT}`,
-      ...(n < allFields.length
-        ? {
-            note:
-              `Showing ${n} of ${allFields.length} cleanup candidates — trimmed to ` +
-              `fit the response size limit. Narrow with a lower \`limit\` or use ` +
-              `\`unused_fields_deep\` (paginated) for the full detail.`,
-          }
-        : {}),
-    };
-  };
-  let n = allFields.length;
-  let data = build(n);
-  while (n > 1 && Buffer.byteLength(JSON.stringify(data), 'utf8') > FIELD_CLEANUP_BYTE_BUDGET) {
-    n = Math.max(1, Math.floor(n * 0.8));
-    data = build(n);
-  }
-
-  return ok({
-    data,
-    vaultState: {
-      sourceTreeHash: ctx.manifest.sourceTreeHash,
-      refreshedAt: ctx.manifest.refreshedAt,
-    },
-  });
+  // `format: 'cleanup'` guarantees findings + disclosure are populated.
+  return r as Result<McpResponse<FieldCleanupCandidatesOutput>, McpError>;
 };
 
 // ---------------------------------------------------------------------------
@@ -593,85 +599,105 @@ const analyzeOverPrivilege = async (
     }
   >();
 
+  // Collect Profile then PermissionSet nodes in the SAME order the former
+  // per-type loop scanned them, so the accumulation pass below reproduces
+  // node-iteration order exactly — the ROSTER_CAP roster and the per-node
+  // ESCALATION_EXAMPLE_CAP examples are order-sensitive.
+  const scanNodes: { readonly type: 'Profile' | 'PermissionSet'; readonly node: Node }[] = [];
   for (const type of ['Profile', 'PermissionSet'] as const) {
     const nodesResult = await listNodesByType(ctx.graph, type, {
       limit: PRIVILEGE_SCAN_CAP,
     });
     if (!nodesResult.ok) continue;
     for (const node of nodesResult.value) {
-      if (type === 'Profile') scanned.profiles += 1;
-      else scanned.permissionSets += 1;
-
-      // 1) High-risk system permissions (properties.userPermissions).
-      const riskyPerms: string[] = [];
-      let worst: RankedFinding['severity'] | null = null;
-      const ups = node.properties['userPermissions'];
-      if (Array.isArray(ups)) {
-        for (const perm of ups) {
-          if (typeof perm !== 'string') continue;
-          const sev = SYSTEM_PERMISSION_SEVERITY[perm];
-          if (sev === undefined) continue;
-          riskyPerms.push(perm);
-          if (worst === null || rankSeverity(sev) > rankSeverity(worst)) {
-            worst = sev;
-          }
-          if (perm === 'ModifyAllData' && modifyAllDataGrantors.length < ROSTER_CAP) {
-            modifyAllDataGrantors.push(node.id);
-          }
-          if (perm === 'ViewAllData' && viewAllDataGrantors.length < ROSTER_CAP) {
-            viewAllDataGrantors.push(node.id);
-          }
-        }
-      }
-
-      // 2) Object-level View All / Modify All (outgoing grantedBy edges).
-      let modifyAllObjects = 0;
-      let viewAllObjects = 0;
-      const examples: string[] = [];
-      const outResult = await listEdges(ctx.graph, node.id, {
-        direction: 'out',
-        edgeType: 'grantedBy',
-      });
-      if (outResult.ok) {
-        for (const edge of outResult.value) {
-          if (!edge.toId.startsWith('CustomObject:')) continue;
-          if (edge.properties['modifyAllRecords'] === true) {
-            modifyAllObjects += 1;
-            if (examples.length < ESCALATION_EXAMPLE_CAP) examples.push(edge.toId);
-          } else if (edge.properties['viewAllRecords'] === true) {
-            viewAllObjects += 1;
-            if (examples.length < ESCALATION_EXAMPLE_CAP) examples.push(edge.toId);
-          }
-        }
-      }
-      if (
-        modifyAllObjects > 0 &&
-        (worst === null || rankSeverity('high') > rankSeverity(worst))
-      ) {
-        worst = 'high';
-      } else if (viewAllObjects > 0 && worst === null) {
-        worst = 'medium';
-      }
-
-      if (type === 'PermissionSet') {
-        permsetRisk.set(node.id, {
-          perms: riskyPerms,
-          modAll: modifyAllObjects,
-          viewAll: viewAllObjects,
-        });
-      }
-
-      const finding = grantorFinding(
-        node,
-        type,
-        riskyPerms,
-        modifyAllObjects,
-        viewAllObjects,
-        worst,
-        examples,
-      );
-      if (finding !== null) findings.push(finding);
+      scanNodes.push({ type, node });
     }
+  }
+
+  // ONE batched round-trip for every scanned container's OUTGOING grantedBy
+  // edges, replacing the former per-node `listEdges` N+1 (thousands of serial
+  // DuckDB queries on a large vault — the residual >60s timeout after d7a3b8f).
+  // `listEdgesForNodes` sorts each per-node bucket by the FULL
+  // (to_id, edge_type, from_id, source) total order — a refinement of the
+  // (to_id, edge_type) order `listEdges` returned — so the capped example
+  // pushes below stay byte-identical. A failed batch yields an empty map, i.e.
+  // every node behaves exactly as the old `!outResult.ok` (no escalation) path.
+  let grantedByOut: ReadonlyMap<ComponentId, readonly Edge[]> = new Map();
+  const outBatch = await listEdgesForNodes(
+    ctx.graph,
+    scanNodes.map((s) => s.node.id),
+    { direction: 'out', edgeTypes: ['grantedBy'] },
+  );
+  if (outBatch.ok) grantedByOut = outBatch.value;
+
+  for (const { type, node } of scanNodes) {
+    if (type === 'Profile') scanned.profiles += 1;
+    else scanned.permissionSets += 1;
+
+    // 1) High-risk system permissions (properties.userPermissions).
+    const riskyPerms: string[] = [];
+    let worst: RankedFinding['severity'] | null = null;
+    const ups = node.properties['userPermissions'];
+    if (Array.isArray(ups)) {
+      for (const perm of ups) {
+        if (typeof perm !== 'string') continue;
+        const sev = SYSTEM_PERMISSION_SEVERITY[perm];
+        if (sev === undefined) continue;
+        riskyPerms.push(perm);
+        if (worst === null || rankSeverity(sev) > rankSeverity(worst)) {
+          worst = sev;
+        }
+        if (perm === 'ModifyAllData' && modifyAllDataGrantors.length < ROSTER_CAP) {
+          modifyAllDataGrantors.push(node.id);
+        }
+        if (perm === 'ViewAllData' && viewAllDataGrantors.length < ROSTER_CAP) {
+          viewAllDataGrantors.push(node.id);
+        }
+      }
+    }
+
+    // 2) Object-level View All / Modify All (outgoing grantedBy edges) — read
+    //    from the ONE batched fetch above instead of a per-node round-trip.
+    let modifyAllObjects = 0;
+    let viewAllObjects = 0;
+    const examples: string[] = [];
+    for (const edge of grantedByOut.get(node.id) ?? []) {
+      if (!edge.toId.startsWith('CustomObject:')) continue;
+      if (edge.properties['modifyAllRecords'] === true) {
+        modifyAllObjects += 1;
+        if (examples.length < ESCALATION_EXAMPLE_CAP) examples.push(edge.toId);
+      } else if (edge.properties['viewAllRecords'] === true) {
+        viewAllObjects += 1;
+        if (examples.length < ESCALATION_EXAMPLE_CAP) examples.push(edge.toId);
+      }
+    }
+    if (
+      modifyAllObjects > 0 &&
+      (worst === null || rankSeverity('high') > rankSeverity(worst))
+    ) {
+      worst = 'high';
+    } else if (viewAllObjects > 0 && worst === null) {
+      worst = 'medium';
+    }
+
+    if (type === 'PermissionSet') {
+      permsetRisk.set(node.id, {
+        perms: riskyPerms,
+        modAll: modifyAllObjects,
+        viewAll: viewAllObjects,
+      });
+    }
+
+    const finding = grantorFinding(
+      node,
+      type,
+      riskyPerms,
+      modifyAllObjects,
+      viewAllObjects,
+      worst,
+      examples,
+    );
+    if (finding !== null) findings.push(finding);
   }
 
   // 3) Permission Set Groups: a PSG's effective permissions are the UNION of
@@ -753,7 +779,7 @@ const analyzeOverPrivilege = async (
           `PermissionSetGroup ${psg.apiName} confers via member permission ` +
           `set(s) ${parts.join('; ')}` +
           (hasMuting
-            ? ' (has a muting permission set — effective perms may be lower)'
+            ? ' (has a muting permission set, not subtracted in this god-mode roster — effective perms may be lower; use sfi.effective_permissions for the muting-correct net grant, R6-06)'
             : ''),
         evidence: [psg.id, ...riskyMembers],
         confidence: 'declared',
@@ -809,6 +835,9 @@ const scopedProfileReport = async (
   let modifyAllObjects = 0;
   let viewAllObjects = 0;
   const examples: string[] = [];
+  // Single-node `listEdges` is O(1) here — this scoped path analyses exactly
+  // one already-resolved Profile, so there is no N+1 to batch (unlike the
+  // org-wide `analyzeOverPrivilege` scan, which now uses `listEdgesForNodes`).
   const outResult = await listEdges(ctx.graph, node.id, {
     direction: 'out',
     edgeType: 'grantedBy',
@@ -1140,10 +1169,21 @@ export const permissionRiskReportHandler = async (
 };
 
 // ---------------------------------------------------------------------------
-// sfi.release_readiness_report
+// sfi.release_readiness_report — HIDDEN back-compat alias (STEP-2)
+//
+// The deploy-gate capability (ready + blockers) folded into org_risk_report's
+// `gate: true` MODE. This is now a THIN alias delegating with gate forced on, so
+// the survivor owns the preserved output and direct / run_analysis callers of
+// the retired name keep working. Un-advertised on tools/list.
 // ---------------------------------------------------------------------------
 
-export interface ReleaseReadinessReportOutput extends SynthesisBase {
+/**
+ * The org-risk gate output the (hidden) release_readiness alias returns. Since
+ * the alias always forces `gate: true`, `ready` + `blockers` are ALWAYS present
+ * — redeclared here as required (they are optional on the base). A structural
+ * superset of the historical shape (also carries the org-risk drill-down fields).
+ */
+export interface ReleaseReadinessReportOutput extends OrgRiskReportOutput {
   readonly ready: boolean;
   readonly blockers: readonly string[];
 }
@@ -1152,44 +1192,8 @@ export const releaseReadinessReportHandler = async (
   ctx: Context,
   input: SynthesisInput,
 ): Promise<Result<McpResponse<ReleaseReadinessReportOutput>, McpError>> => {
-  const orgRisk = await orgRiskReportHandler(ctx, input);
-  if (!orgRisk.ok) return orgRisk;
-
-  const blockers: string[] = [];
-  for (const finding of orgRisk.value.data.findings) {
-    if (finding.severity === 'critical') {
-      blockers.push(finding.summary);
-    }
-  }
-
-  // Block ONLY on ACTIONABLE coverage gaps: a requested metadata type that
-  // errored during retrieve (`partialTypes`), which the user can fix by
-  // re-running /sfi-refresh. Do NOT block on `notModeledTypes`
-  // (CompactLayout/FieldSet/Index/ListView/WebLink) — those are families this
-  // product never models by design, so blocking on them made `ready`
-  // permanently false for EVERY vault: a non-actionable gate that signals
-  // nothing about the org. The not-modeled scope limitation is still disclosed
-  // honestly via `trust.completeness`.
-  const coverage = summarizeCoverage(ctx.manifest);
-  if (coverage.partialTypes.length > 0) {
-    blockers.push(
-      `Incomplete vault coverage — requested metadata failed retrieve: ${coverage.partialTypes.join(', ')}. Re-run /sfi-refresh.`,
-    );
-  }
-
-  const ready = blockers.length === 0;
-
-  return ok({
-    data: {
-      findings: orgRisk.value.data.findings,
-      ready,
-      blockers,
-      trust: coverageTrust(ctx),
-      disclosure: SYNTHESIS_DISCLOSURE,
-    },
-    vaultState: {
-      sourceTreeHash: ctx.manifest.sourceTreeHash,
-      refreshedAt: ctx.manifest.refreshedAt,
-    },
-  });
+  const r = await orgRiskReportHandler(ctx, { ...input, gate: true });
+  // `gate: true` guarantees the handler populated ready + blockers, so the
+  // widened base output is safe to present with them required.
+  return r as Result<McpResponse<ReleaseReadinessReportOutput>, McpError>;
 };

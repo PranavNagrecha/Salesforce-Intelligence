@@ -6,12 +6,18 @@ import { err, ok, type Result } from '@sf-intelligence/core';
 import {
   classifyRetrieveError,
   formatRefreshSummary,
+  PROFILE_COBATCH_GROUP,
   retrieveWithFallback,
   splitTypeBatch,
   summarizeRetrieveFailures,
+  toAtomicUnits,
   type RefreshResult,
   type RetrieveTypeFailure,
 } from '../../src/commands/refresh.js';
+import { SUPPORTED_TYPES } from '../../src/refresh-pipeline.js';
+
+/** Empty atomic group: the legacy pure per-type split semantics. */
+const NO_GROUP: ReadonlySet<ComponentType> = new Set();
 
 /**
  * A fake batch retriever that fails for any type in `badTypes` with `errorFor`,
@@ -118,7 +124,10 @@ describe('retrieveWithFallback', () => {
   it('splits a load-induced timeout until batches are small enough to land (the real bug)', async () => {
     // Any batch larger than 2 types "times out"; smaller batches succeed. The old
     // behavior classified the timeout 'global' and returned zero types; the fix
-    // must split the oversized batch until every type lands.
+    // must split the oversized batch until every type lands. Group disabled:
+    // this test pins the pure per-type split mechanics (TYPES contains three
+    // PROFILE_COBATCH_GROUP members, which the default group would — correctly —
+    // refuse to shrink below a 3-type batch; see the co-batch describe below).
     const calls: ComponentType[][] = [];
     const fn = async (
       types: readonly ComponentType[],
@@ -128,7 +137,7 @@ describe('retrieveWithFallback', () => {
         ? err('Client network socket disconnected before secure TLS connection was established; socket hang up')
         : ok({ deletedCount: types.length });
     };
-    const out = await retrieveWithFallback(TYPES, fn);
+    const out = await retrieveWithFallback(TYPES, fn, NO_GROUP);
     expect([...out.succeeded].sort()).toEqual([...TYPES].sort());
     expect(out.failures).toEqual([]);
     expect(calls.length).toBeGreaterThan(1); // it split rather than aborting on the timeout
@@ -139,6 +148,131 @@ describe('retrieveWithFallback', () => {
     const out = await retrieveWithFallback(TYPES, fn);
     expect(out.succeeded).toEqual([]);
     expect(out.failures.map((f) => f.type).sort()).toEqual([...TYPES].sort());
+  });
+});
+
+describe('PROFILE_COBATCH_GROUP', () => {
+  it('contains Profile and every co-listing partner the regression bared out', () => {
+    // The Metadata API serializes Profile grant sections ONLY for co-named
+    // types; these are the partners whose separation shipped the
+    // grantedBy 83,798 -> 26,849 regression.
+    for (const type of [
+      'Profile',
+      'CustomObject',
+      'ApexClass',
+      'ListView',
+      'ValidationRule',
+      'RecordType',
+      'WebLink',
+      'FieldSet',
+    ] as unknown as ComponentType[]) {
+      expect(PROFILE_COBATCH_GROUP.has(type)).toBe(true);
+    }
+  });
+
+  it('does NOT contain PermissionSet — permsets retrieve complete standalone (API v40+), proven by the regression itself', () => {
+    expect(PROFILE_COBATCH_GROUP.has('PermissionSet' as ComponentType)).toBe(false);
+  });
+
+  it('every member is a supported retrieve type (a typo here would silently disable the invariant)', () => {
+    const supported = new Set<string>(SUPPORTED_TYPES);
+    for (const member of PROFILE_COBATCH_GROUP) {
+      expect(supported.has(member)).toBe(true);
+    }
+  });
+});
+
+describe('toAtomicUnits', () => {
+  it('collapses group members into ONE unit at the first member position, preserving order', () => {
+    const types = ['ApexClass', 'ApexTrigger', 'CustomObject', 'Flow', 'Profile'] as unknown as readonly ComponentType[];
+    const units = toAtomicUnits(types, PROFILE_COBATCH_GROUP);
+    expect(units).toEqual([
+      ['ApexClass', 'CustomObject', 'Profile'],
+      ['ApexTrigger'],
+      ['Flow'],
+    ]);
+  });
+
+  it('degenerates to per-type singletons with an empty group or a single member present', () => {
+    const types = ['Profile', 'Flow'] as unknown as readonly ComponentType[];
+    expect(toAtomicUnits(types, NO_GROUP)).toEqual([['Profile'], ['Flow']]);
+    expect(toAtomicUnits(types, PROFILE_COBATCH_GROUP)).toEqual([['Profile'], ['Flow']]);
+  });
+});
+
+describe('retrieveWithFallback profile co-batch invariant (the grantedBy regression)', () => {
+  // A manifest where the naive midpoint split would separate Profile (last)
+  // from CustomObject/ApexClass (first half) — the exact shape that shipped
+  // profiles with zero fieldPermissions/objectPermissions/classAccesses.
+  const COBATCH_TYPES = [
+    'ApexClass',
+    'ApexTrigger',
+    'CustomObject',
+    'Flow',
+    'OmniScript',
+    'Profile',
+  ] as unknown as readonly ComponentType[];
+  const groupMembersIn = (types: readonly ComponentType[]): readonly ComponentType[] =>
+    types.filter((t) => PROFILE_COBATCH_GROUP.has(t));
+  const presentMembers = groupMembersIn(COBATCH_TYPES); // ApexClass, CustomObject, Profile
+
+  it('never attempts a batch that separates Profile from its co-listing partners while isolating a poison type', async () => {
+    const bad = 'OmniScript' as ComponentType;
+    const { fn, calls } = fakeRetriever(new Set([bad]), (t) => `INVALID_TYPE: ${t}`);
+    const out = await retrieveWithFallback(COBATCH_TYPES, fn);
+    // Every attempted batch carries ALL present group members or NONE — the
+    // splitter can never divide the atomic unit.
+    for (const batch of calls) {
+      const members = groupMembersIn(batch);
+      expect(
+        members.length === 0 || members.length === presentMembers.length,
+        `batch [${batch.join(', ')}] split the profile co-batch group`,
+      ).toBe(true);
+    }
+    // The poison type is still isolated and everything else — including the
+    // whole group — lands.
+    expect(out.failures).toEqual([{ type: bad, error: 'INVALID_TYPE: OmniScript' }]);
+    expect([...out.succeeded].sort()).toEqual(
+      [...COBATCH_TYPES].filter((t) => t !== bad).sort(),
+    );
+  });
+
+  it('drops the group WHOLE and DISCLOSED when it cannot land — never lands it bare', async () => {
+    // Any batch containing Profile fails (e.g. the org rejects something the
+    // group co-retrieves). The group must fail as one unit: every member in
+    // `failures` (disclosed -> partial status upstream), none in `succeeded`.
+    const fn = async (
+      types: readonly ComponentType[],
+    ): Promise<Result<{ readonly deletedCount: number }, string>> =>
+      types.includes('Profile' as ComponentType)
+        ? err('INVALID_TYPE: something in the co-batch')
+        : ok({ deletedCount: types.length });
+    const out = await retrieveWithFallback(COBATCH_TYPES, fn);
+    expect(out.failures.map((f) => f.type).sort()).toEqual([...presentMembers].sort());
+    for (const member of presentMembers) {
+      expect(out.succeeded).not.toContain(member);
+    }
+    // Non-group types still land: a failing group yields a partial vault, not
+    // an aborted refresh.
+    expect([...out.succeeded].sort()).toEqual(
+      COBATCH_TYPES.filter((t) => !PROFILE_COBATCH_GROUP.has(t)).sort(),
+    );
+  });
+
+  it('keeps the group atomic through a load-induced timeout shrink instead of landing bare profiles', async () => {
+    // Batches above 2 types time out. The legacy split would eventually land
+    // Profile in a 1-2 type batch WITHOUT CustomObject/ApexClass — a "success"
+    // that silently bares the profiles. The invariant instead drops the whole
+    // 3-member group as a disclosed failure while the rest lands.
+    const fn = async (
+      types: readonly ComponentType[],
+    ): Promise<Result<{ readonly deletedCount: number }, string>> =>
+      types.length > 2 ? err('socket hang up') : ok({ deletedCount: types.length });
+    const out = await retrieveWithFallback(COBATCH_TYPES, fn);
+    expect([...out.succeeded].sort()).toEqual(
+      COBATCH_TYPES.filter((t) => !PROFILE_COBATCH_GROUP.has(t)).sort(),
+    );
+    expect(out.failures.map((f) => f.type).sort()).toEqual([...presentMembers].sort());
   });
 });
 

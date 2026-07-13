@@ -8,14 +8,22 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { ExtractionResult, Node } from '@sf-intelligence/contracts';
 import { closeGraph, importExtractionResults, openGraph } from '@sf-intelligence/graph';
+import { readAnnotations } from '@sf-intelligence/vault';
 
 import {
   generateToken,
+  loadTokensFile,
+  matchTokenEntry,
+  resolveBearerAuth,
   startHttpServer,
   tokenEquals,
   type RunningHttpServer,
 } from '../src/serve-http.js';
-import { buildContext, shutdown } from '../src/server.js';
+import { bindCallerIdentity, buildContext, shutdown } from '../src/server.js';
+import {
+  proposeAnnotationHandler,
+  resetProposalSessionCap,
+} from '../src/tools/annotations.js';
 import { dispatchTool } from '../src/tools/index.js';
 
 /**
@@ -184,6 +192,135 @@ describe('stdio↔HTTP parity + leak check', () => {
       }
     } finally {
       await client.close();
+    }
+  });
+});
+
+describe('per-caller tokens (R8-PERCALLER-TOKENS)', () => {
+  const SYNTH_ALICE = 'synth-token-alice-aaaaaaaaaaaaaaaa';
+  const SYNTH_BOB = 'synth-token-bob-bbbbbbbbbbbbbbbbbb';
+
+  it('loadTokensFile accepts array or {tokens}; rejects duplicates/empty', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-tokens-file-'));
+    try {
+      const arrPath = join(dir, 'tokens.json');
+      writeFileSync(
+        arrPath,
+        JSON.stringify([
+          { token: SYNTH_ALICE, id: 'alice', label: 'Alice Synth' },
+          { token: SYNTH_BOB, id: 'bob' },
+        ]),
+        'utf8',
+      );
+      const loaded = loadTokensFile(arrPath);
+      expect(loaded).toHaveLength(2);
+      expect(loaded[0]?.label).toBe('Alice Synth');
+
+      const wrapped = join(dir, 'wrapped.json');
+      writeFileSync(
+        wrapped,
+        JSON.stringify({ tokens: [{ token: SYNTH_ALICE, id: 'alice' }] }),
+        'utf8',
+      );
+      expect(loadTokensFile(wrapped)).toHaveLength(1);
+
+      const dup = join(dir, 'dup.json');
+      writeFileSync(
+        dup,
+        JSON.stringify([
+          { token: SYNTH_ALICE, id: 'alice' },
+          { token: SYNTH_ALICE, id: 'alice-2' },
+        ]),
+        'utf8',
+      );
+      expect(() => loadTokensFile(dup)).toThrow(/duplicate token/);
+      expect(() => loadTokensFile(join(dir, 'missing.json'))).toThrow(/cannot read/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('resolveBearerAuth maps tokens to identities; solo token has none', () => {
+    const entries = [
+      { token: SYNTH_ALICE, id: 'alice', label: 'Alice Synth' },
+      { token: SYNTH_BOB, id: 'bob' },
+    ] as const;
+    expect(resolveBearerAuth(SYNTH_ALICE, { tokens: entries })).toEqual({
+      ok: true,
+      identity: { id: 'alice', label: 'Alice Synth' },
+    });
+    expect(resolveBearerAuth(SYNTH_BOB, { tokens: entries })).toEqual({
+      ok: true,
+      identity: { id: 'bob' },
+    });
+    expect(resolveBearerAuth('wrong', { tokens: entries }).ok).toBe(false);
+    expect(resolveBearerAuth(SYNTH_ALICE, { token: SYNTH_ALICE })).toEqual({
+      ok: true,
+      identity: undefined,
+    });
+    expect(matchTokenEntry(SYNTH_ALICE, entries)?.id).toBe('alice');
+  });
+
+  it('HTTP tokens map authenticates distinct callers; wrong token 401s', async () => {
+    const mapped = await startHttpServer({
+      vaultRoot,
+      port: 0,
+      host: '127.0.0.1',
+      tokens: [
+        { token: SYNTH_ALICE, id: 'alice', label: 'Alice Synth' },
+        { token: SYNTH_BOB, id: 'bob' },
+      ],
+    });
+    try {
+      const bad = await fetch(`http://127.0.0.1:${mapped.port}/`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+          Authorization: 'Bearer wrong-synth-token',
+        },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+      });
+      expect(bad.status).toBe(401);
+
+      const transport = new StreamableHTTPClientTransport(
+        new URL(`http://127.0.0.1:${mapped.port}/`),
+        { requestInit: { headers: { Authorization: `Bearer ${SYNTH_ALICE}` } } },
+      );
+      const client = new Client({ name: 'tokens-map-test', version: '1' }, { capabilities: {} });
+      await client.connect(transport as never);
+      try {
+        const r = await client.callTool({ name: 'sfi.get_manifest', arguments: {} });
+        const body = JSON.parse((r.content as { text: string }[])[0]?.text ?? '{}');
+        expect(body.data.sourceOrg).toBe('test');
+      } finally {
+        await client.close();
+      }
+    } finally {
+      await mapped.close();
+    }
+  });
+
+  it('bindCallerIdentity overlays identity for annotation attribution without mutating shared ctx', async () => {
+    resetProposalSessionCap();
+    const ctxResult = await buildContext(vaultRoot);
+    if (!ctxResult.ok) throw new Error(ctxResult.error.message);
+    try {
+      const shared = ctxResult.value;
+      expect(shared.callerIdentity).toBeUndefined();
+      const alice = bindCallerIdentity(shared, { id: 'alice', label: 'Alice Synth' });
+      expect(shared.callerIdentity).toBeUndefined();
+      expect(alice.callerIdentity?.id).toBe('alice');
+      const proposed = await proposeAnnotationHandler(alice, {
+        componentId: 'ApexClass:Alpha',
+        key: 'note',
+        value: 'from alice',
+      });
+      expect(proposed.ok).toBe(true);
+      const stored = await readAnnotations(vaultRoot);
+      expect(stored.some((a) => a.author === 'Alice Synth' && a.value === 'from alice')).toBe(true);
+    } finally {
+      await shutdown(ctxResult.value);
     }
   });
 });

@@ -8,6 +8,7 @@ import type { VaultManifest } from '@sf-intelligence/contracts';
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 import { registerVault } from '@sf-intelligence/vault';
 
+import { mintLiveCapability } from '../../src/live-capability.js';
 import type { Context } from '../../src/server.js';
 import { fleetDriftRankingHandler } from '../../src/tools/fleet-drift-ranking.js';
 import { STALE_CHECK_TYPES } from '../../src/tools/live-plane.js';
@@ -66,7 +67,12 @@ beforeAll(async () => {
   if (!r1.ok) throw new Error(r1.error.message);
   const r2 = await registerVault(tmpRoot, 'acme-sandbox', vSand);
   if (!r2.ok) throw new Error(r2.error.message);
-  ctx = { vaultRoot: vProd, manifest: CTX_MANIFEST, graph: {} as Context['graph'] };
+  ctx = {
+    vaultRoot: vProd,
+    manifest: CTX_MANIFEST,
+    graph: {} as Context['graph'],
+    liveCapability: mintLiveCapability('primary'),
+  };
 });
 
 beforeEach(() => {

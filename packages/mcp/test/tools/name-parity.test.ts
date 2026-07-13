@@ -4,16 +4,23 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { V01_TOOLS } from '../../src/tools/index.js';
+import { advertisedTools, V01_TOOLS } from '../../src/tools/index.js';
 
 // Guards against the tool-name drift class of bug: a tool advertised in the
 // roster but not routed in dispatch (or vice versa), or a roster/docs name
 // that doesn't match the dispatch case. This is exactly the failure that
 // makes a tool report "unknown-tool" at runtime despite having a handler.
+//
+// Hidden tools (`hidden: true`) stay in `V01_TOOLS` (so they keep a dispatch
+// case and remain resolvable) but are excluded from `advertisedTools()`. The
+// roster<->dispatch parity below is checked against the FULL `V01_TOOLS`
+// (hidden included, since they must still dispatch); a dedicated case asserts
+// the hidden contract explicitly (dispatchable but not advertised).
 
 const here = dirname(fileURLToPath(import.meta.url));
+// R7-F2: dispatch switch now lives in tool-dispatch.ts (split from index.ts).
 const indexSource = readFileSync(
-  join(here, '..', '..', 'src', 'tools', 'index.ts'),
+  join(here, '..', '..', 'src', 'tools', 'tool-dispatch.ts'),
   'utf8',
 );
 
@@ -36,6 +43,10 @@ describe('tool name parity (roster <-> dispatch)', () => {
     expect(orphans).toEqual([]);
   });
 
+  it('V01_TOOLS.length equals dispatch case count (roster/handler size parity)', () => {
+    expect(rosterNames.length).toBe(dispatchCaseNames.length);
+  });
+
   it('roster tool names are unique', () => {
     expect(new Set(rosterNames).size).toBe(rosterNames.length);
   });
@@ -47,5 +58,23 @@ describe('tool name parity (roster <-> dispatch)', () => {
   it('includes the new sfi.resolve tool in both roster and dispatch', () => {
     expect(rosterNames).toContain('sfi.resolve');
     expect(dispatchCaseNames).toContain('sfi.resolve');
+  });
+
+  it('hidden tools are dispatchable but NOT advertised (back-compat alias contract)', () => {
+    const advertised = new Set(advertisedTools('full').map((t) => t.name));
+    const cases = new Set(dispatchCaseNames);
+    const hidden = V01_TOOLS.filter((t) => t.hidden);
+    for (const tool of hidden) {
+      // A hidden alias must still resolve at dispatch...
+      expect(
+        cases.has(tool.name),
+        `hidden tool ${tool.name} has no dispatch case — it would report unknown-tool`,
+      ).toBe(true);
+      // ...but must never occupy a tools/list schema slot.
+      expect(
+        advertised.has(tool.name),
+        `hidden tool ${tool.name} is still advertised on tools/list`,
+      ).toBe(false);
+    }
   });
 });

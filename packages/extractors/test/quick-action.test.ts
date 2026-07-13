@@ -448,7 +448,7 @@ describe('extractQuickAction', () => {
       // Standard quick actions (e.g. Task.UpdateStatus with <type>Update</type>)
       // carry a <standardLabel> enum (ChangeStatus, Defer, ChangePriority, …)
       // that names a platform-provided label — they omit the custom <label>
-      // entirely. 120 of 125 mass.gov quickActions are this shape; the
+      // entirely. 120 of 125 example.gov quickActions are this shape; the
       // extractor must accept them and use the standardLabel as the display
       // label, never erroring or emitting the literal string "undefined".
       const xml = `<?xml version="1.0"?>

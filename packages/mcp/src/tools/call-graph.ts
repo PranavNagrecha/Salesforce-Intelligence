@@ -62,7 +62,7 @@ import type {
   McpResponse,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import { listEdgesForNodes, listNodesByIds } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -315,13 +315,21 @@ const walkOneDirection = async (
   let frontier: ComponentId[] = [rootId];
   for (let depth = 0; depth < maxDepth && frontier.length > 0; depth += 1) {
     const next: ComponentId[] = [];
+    // ONE batched fetch of the WHOLE frontier's `callsApex` edges in the walk
+    // direction, replacing the per-frontier-node `listEdges` N+1 (~frontier-
+    // width serial DuckDB queries per hop). Iterating `frontier` in order and
+    // reading each node's bucket (sorted by the FULL (to_id, edge_type, from_id,
+    // source) order — the same order `listEdges` returned, and here edge_type is
+    // fixed to `callsApex` per bucket) reproduces the exact `edges` push order,
+    // `discovered` insertion order, and next-frontier order. The query count is
+    // now one per DEPTH LEVEL, independent of frontier WIDTH.
+    const edgeBatch = await listEdgesForNodes(ctx.graph, frontier, {
+      direction,
+      edgeTypes: ['callsApex'],
+    });
+    if (!edgeBatch.ok) return err(edgeBatch.error.message);
     for (const nodeId of frontier) {
-      const r = await listEdges(ctx.graph, nodeId, {
-        direction,
-        edgeType: 'callsApex',
-      });
-      if (!r.ok) return err(r.error.message);
-      for (const edge of r.value) {
+      for (const edge of edgeBatch.value.get(nodeId) ?? []) {
         const methods = edgeMethods(edge);
         // P4-C5 method filter: narrow ONLY the root's direct edges to those
         // whose target methods include the queried method (e.g. "who calls
@@ -380,15 +388,23 @@ const resolveNodes = async (
   ctx: Context,
   discovered: ReadonlyMap<ComponentId, number>,
 ): Promise<Result<CallGraphNode[], string>> => {
+  // ONE batched `listNodesByIds` over every discovered id, replacing the
+  // per-node `getNodeById` N+1 (~#discovered serial DuckDB queries). Ids with
+  // no matching row are dropped by `listNodesByIds` exactly like the old
+  // per-id null-skip. Iterating `discovered` in its insertion order and looking
+  // each id up by-id reproduces the byte-identical `out` push order (and the
+  // caller re-sorts by `compareNodes` regardless).
+  const nodesRes = await listNodesByIds(ctx.graph, [...discovered.keys()]);
+  if (!nodesRes.ok) return err(nodesRes.error.message);
+  const nodeById = new Map(nodesRes.value.map((n) => [n.id, n]));
   const out: CallGraphNode[] = [];
   for (const [id, depth] of discovered) {
-    const r = await getNodeById(ctx.graph, id);
-    if (!r.ok) return err(r.error.message);
-    if (r.value === null) continue;
+    const node = nodeById.get(id);
+    if (node === undefined) continue;
     out.push({
       id,
-      type: r.value.type,
-      apiName: r.value.apiName,
+      type: node.type,
+      apiName: node.apiName,
       depth,
     });
   }

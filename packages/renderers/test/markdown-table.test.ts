@@ -1,6 +1,9 @@
 /// <reference types="vitest/globals" />
 
-import { renderValueAsBacktickedString } from '../src/markdown-table.js';
+import {
+  escapeMarkdownInline,
+  renderValueAsBacktickedString,
+} from '../src/markdown-table.js';
 
 describe('renderValueAsBacktickedString', () => {
   it('renders login IP range arrays as comma-joined startAddress-endAddress pairs', () => {
@@ -54,5 +57,44 @@ describe('renderValueAsBacktickedString', () => {
     const partial = [{ startAddress: '10.0.0.1' }];
     const result = renderValueAsBacktickedString(partial);
     expect(result).toContain('[object Object]');
+  });
+});
+
+describe('escapeMarkdownInline (CR-16d)', () => {
+  it('wraps a clean value (no backticks) in the minimal single-backtick fence', () => {
+    // Byte-identical to the old "caller wraps in one backtick" contract for
+    // every current caller — all feed backtick-free SF identifiers.
+    expect(escapeMarkdownInline('Account__c')).toBe('`Account__c`');
+  });
+
+  it('collapses newlines to a single space before fencing', () => {
+    expect(escapeMarkdownInline('a\nb')).toBe('`a b`');
+  });
+
+  it('widens the fence to two backticks when the value contains a single embedded backtick', () => {
+    // A fixed single-backtick fence cannot hold this value: per CommonMark, a
+    // code span closes at the next backtick run of the SAME length as its
+    // opening run, and backslash escapes are inert inside code spans — so
+    // the fence must be wider than any backtick run in the content, not
+    // backslash-escaped.
+    expect(escapeMarkdownInline('Ev`il__c')).toBe('``Ev`il__c``');
+  });
+
+  it('widens the fence past the longest embedded backtick run', () => {
+    // The value contains a run of two consecutive backticks, so a
+    // two-backtick fence would itself be swallowed as the closer; the fence
+    // must be longer than the longest run present (three, here).
+    expect(escapeMarkdownInline('a``b')).toBe('```a``b```');
+  });
+
+  it('pads with a single space on each side when the value starts with a backtick', () => {
+    // Without the padding, the fence and the value's own leading backtick
+    // would visually (and per the CommonMark space-stripping rule,
+    // structurally) fuse together.
+    expect(escapeMarkdownInline('`leading')).toBe('`` `leading ``');
+  });
+
+  it('pads with a single space on each side when the value ends with a backtick', () => {
+    expect(escapeMarkdownInline('trailing`')).toBe('`` trailing` ``');
   });
 });

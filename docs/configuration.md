@@ -60,6 +60,14 @@ CLI queries and label answers `provenance: live_org`:
 | `sfi.live_email_template_usage` | Email template usage / migration candidates |
 | `sfi.live_license_usage` | License allocation vs. actual usage (paid licenses provisioned but unused) |
 | `sfi.live_org_health` | Failed jobs, paused flows, limits at risk |
+| `sfi.live_setup_audit_trail` | WHO changed WHAT in Setup (SetupAuditTrail, up to 180 days) |
+| `sfi.live_security_exposure` | Runtime count of Modify All Data / View All Data / Author Apex grants |
+| `sfi.live_scheduled_jobs` | What is actually scheduled right now (CronTrigger registry) |
+| `sfi.live_data_skew` | Ownership / data-skew concentration (owners over a record threshold) |
+| `sfi.live_record_access` | A user's EFFECTIVE access to one record (Read/Edit/Delete/Transfer/Full) |
+| `sfi.live_record_shares` | The explicit sharing rows on one record — who it's shared with and why |
+| `sfi.live_field_history` | WHO changed a field on a record and to what (`{Object}History`) |
+| `sfi.live_automation_fired` | Whether a record-triggered automation likely runs in production (heuristic) |
 | `sfi.live_stale_check` | Is the org AHEAD of the vault? (Tooling-API drift count) |
 | `sfi.live_picklist_usage` | Which picklist values records actually use (GROUP BY vs the defined value set) |
 | `sfi.live_budget` | Session live-query budget + cache state (+ org API headroom when enabled) |
@@ -166,7 +174,9 @@ version comparison: no network, no org data.
 The update check:
 
 - Sends a single GET to `https://registry.npmjs.org/sf-intelligence` with a
-  ~3-second timeout — **no** telemetry, user identifiers, or org data.
+  ~3-second timeout — **no** telemetry, user identifiers, or org data by
+  default (see opt-in counter below; both `SFI_TELEMETRY_OPTIN` and
+  `SFI_TELEMETRY_ENDPOINT` must be set for any second request).
 - **Fails silently** — a network error, timeout, or bad response never
   interrupts the server; it simply prints no nudge.
 - **Caches locally** for ~24h in `~/.sf-intelligence/update-check.json`, so a
@@ -176,12 +186,46 @@ The update check:
 It is fail-closed: if the check can't confirm a newer version, nothing is
 printed.
 
+### Opt-in version-check counter (default OFF)
+
+Separately from the npm registry GET, maintainers can arm an **opt-in hit
+counter** that fires only after a *fresh* version check (never on a 24h cache
+hit, never when `SFI_NO_UPDATE_CHECK=1` / CI). This is **off by default** and
+requires both gates:
+
+| Variable | Required value | Role |
+| --- | --- | --- |
+| `SFI_TELEMETRY_OPTIN` | `1` | Explicit consent — anything else = no counter |
+| `SFI_TELEMETRY_ENDPOINT` | `https://…` URL | Where to POST; unset = documented no-op stub |
+
+**Request shape** (the only payload the client will ever send):
+
+```http
+POST {SFI_TELEMETRY_ENDPOINT}
+Content-Type: application/json
+
+{"event":"version_check","bucket":"YYYY-MM-DD"}
+```
+
+- `event` is always the literal `version_check`.
+- `bucket` is the UTC calendar day of the check — a day/week rollup key, **not**
+  a client id. No version string, no machine id, no org/vault data.
+- HTTPS only (the default poster refuses non-https endpoints).
+- Fail-silent, ~2s timeout; a missing Worker must never break MCP/CLI startup.
+
+**Retention (server-side, when infra exists):** daily/weekly bucket counters
+only — no IP storage, no persistent client id, no geolocation. The Cloudflare
+Worker + KV backend is **not shipped yet**; until `SFI_TELEMETRY_ENDPOINT`
+points at a real counter, setting `SFI_TELEMETRY_OPTIN=1` alone does nothing.
+
 ### Cache location
 
 | Variable / path | Default | Purpose |
 | --- | --- | --- |
 | `SFI_UPDATE_CACHE_PATH` | *(unset)* | Override the cache file path (tests) |
 | Default file | `~/.sf-intelligence/update-check.json` | Cached npm version check (~24h TTL) |
+| `SFI_TELEMETRY_OPTIN` | *(unset — off)* | Arm the opt-in version-check counter |
+| `SFI_TELEMETRY_ENDPOINT` | *(unset — no-op)* | HTTPS counter URL (Worker deferred) |
 
 ---
 
@@ -202,7 +246,8 @@ field.
 
 ## Tool profile (advertised roster)
 
-163+ tool schemas cost tens of thousands of context tokens in MCP clients
+The full roster's 196 advertised tool schemas (200 registered; 4 back-compat
+aliases stay hidden) cost tens of thousands of context tokens in MCP clients
 that do not defer tool definitions. `SFI_TOOL_PROFILE=core` advertises only
 the 18-schema core roster (orientation, resolve/route, the universal graph
 reads, and the catalog gateway `list_analyses` / `describe_analysis` /
@@ -233,52 +278,67 @@ The funnel-advisory score floor (`FUNNEL_PRIMARY_MIN_SCORE = 0.26` in
 **source constants, not env vars** — they are calibrated against the routing
 evaluation and changing them re-opens the honesty gates.
 
-## Embeddings hybrid (experimental, off by default)
+## Embedding fusion (experimental, off by default)
 
-An opt-in RRF hybrid layer that fuses the existing lexical TF-IDF candidates
-with a locally cached neural sentence-embedding model. **Off by default;
-most installs need nothing here.**
+Two opt-in layers can fuse the lexical TF-IDF candidates with an embedding
+ranking. **Both are off by default; the shipped path is lexical-only and most
+installs need nothing here.** With both gates unset the funnel output is
+byte-identical to the pure lexical shortlist, and the honesty/refusal decision
+and the `route.tools` deterministic plan are never affected either way.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SFI_EMBEDDINGS` | *(unset — lexical only)* | Set to `1` to enable the neural hybrid. Off by default; the lexical-only path is byte-identical when unset. |
-| `SFI_EMBED_CACHE` | `packages/mcp/.sfi-embed-cache/` | Override the local model cache directory. |
+| `SFI_STATIC_EMBED` | *(unset — lexical only)* | Set to `1` to enable the **static-embedding** fusion (sync, no native dep). Requires the checked-in table; see below. |
+| `SFI_EMBEDDINGS` | *(unset — lexical only)* | Set to `1` to enable the **neural MiniLM** hybrid (async, needs the model runtime). |
+| `SFI_EMBED_CACHE` | `packages/mcp/.sfi-embed-cache/` | Override the MiniLM model cache directory. |
 
-### What it does
+### Static-embedding fusion (`SFI_STATIC_EMBED=1`)
 
-When `SFI_EMBEDDINGS=1`, the semantic funnel runs a Reciprocal Rank Fusion
-(RRF) pass that re-ranks the lexical TF-IDF shortlist against a
-neural-embedding cosine. The fused ranking feeds the `toolCandidates`
-shortlist — the honesty/refusal decision and the `route.tools` deterministic
-plan are **not affected**.
+A pure-JS `model2vec`/potion static embedding (`minishlab/potion-base-8M`):
+WordPiece tokenize → int8 token-table lookup → mean-pool → normalize. It is
+**synchronous, deterministic, and has no native/ONNX dependency**, so it folds
+directly into `semanticCandidates` via a lexical-favouring asymmetric RRF —
+lexical stays the authority; the embedding only rescues near-miss tools into
+the tail of the shortlist, never displacing a strong lexical hit.
 
-### Setup
-
-The embedding layer is **not bundled** in the npm package (the quantized
-model is ~23 MB). Install the peer dependency and the model is downloaded
-once on first use:
+**Assets are NOT committed or shipped.** The ~8.5 MB table + per-tool doc
+vectors are gitignored; regenerate them (deterministically, one model download)
+with:
 
 ```sh
-npm install @huggingface/transformers
+pnpm --filter @sf-intelligence/mcp build
+node packages/mcp/scripts/build-static-embedding-index.mjs
 ```
 
-Model: `Xenova/all-MiniLM-L6-v2` (quantized), pinned in
-`packages/mcp/data/embedding-index.json`. `allowRemoteModels` is disabled at
-query time — the funnel never phones home once the model is cached; only the
-initial download touches the network.
+The gate degrades to the lexical path when the assets are absent, so `=1` on a
+published install (which does not carry the assets) is a safe no-op.
 
-### Graceful fallback
+**Why off by default:** the measured lift is real but marginal — generalization
+recall@8 +0.9 pt (90.5→91.4) and recall@3 +0.4 pt, goldset recall@8 flat, with
+zero regression on the goldset tripwire. That is just under the ship bar and
+does not justify a ~12× package-size increase, so the shipped default stays
+lexical. The code is kept, deterministic, for a future iteration.
 
-If `@huggingface/transformers` is not installed, the model cache is empty, or
-the embed fails for any reason, the funnel silently falls back to the
-lexical-only path. The `toolCandidates` output is the same shape either way.
+### Neural MiniLM hybrid (`SFI_EMBEDDINGS=1`)
+
+The older spike layer: an async Reciprocal Rank Fusion pass that re-ranks the
+lexical shortlist against `Xenova/all-MiniLM-L6-v2` (quantized, ~23 MB)
+embedding cosine. `@huggingface/transformers` is a **`devDependency`, not a
+peer dependency** — it is absent from a normal `npx sf-intelligence` install,
+so this gate is inert unless you add the package and cache the model yourself:
+
+```sh
+npm install @huggingface/transformers   # dev-time only
+```
+
+`allowRemoteModels` is disabled at query time — the funnel never phones home
+once the model is cached. If the package is missing, the cache is empty, or the
+embed fails, the funnel silently falls back to the lexical-only path.
 
 ### Status
 
-**Experimental.** The spike measured candidate recall lift on the routing
-evaluation bank with zero honesty regressions; the feature is off by default
-while the model download story and bundle size tradeoffs are evaluated.
-Feedback welcome — see the GitHub issues page.
+**Experimental.** Both layers ship off by default; the shipped routing path is
+the lexical funnel. Feedback welcome — see the GitHub issues page.
 
 ---
 
@@ -340,6 +400,14 @@ HARD-DISABLED over HTTP regardless of the host's consent or env — a remote
 caller can never reach your org or spend its API budget. Each request gets
 a fresh read-only context, so a refresh underneath is visible immediately.
 stdio serving remains `sfi mcp`.
+
+For a shared team server, pass `--tokens-file <path>` instead of a single
+`--token` / `--generate-token`. The file is JSON — either an array of
+`{ "token", "id", "label?" }` or `{ "tokens": [ ... ] }`. Each request's
+matched `id`/`label` is threaded into Context and used as the `author` on
+annotation writes (propose / confirm / reject). Identity attribution only —
+no role or permission tiers. Solo `--token` / `--generate-token` stays the
+default (no caller identity; authors remain `ai` / `human`).
 
 `sfi mcp` serves the `org-kb` vault in its launch directory and prints the
 served vault path and its bound `targetOrg` to stderr at startup, so a

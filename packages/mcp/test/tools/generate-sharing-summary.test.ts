@@ -573,3 +573,81 @@ describe('generateSharingSummaryHandler (legacy manifest, no coverage array)', (
     expect(doc.boundaries.join('\n')).not.toContain('SharingRule coverage gap');
   });
 });
+
+// CR-RV12: the OBJECT_SCAN_CAP=50 slice had NO reader-facing disclosure — on a
+// >50-object org the summary silently read as complete. A 60-CustomObject
+// fixture (past the cap) asserts the scanTruncated field, the "showing first
+// N of M" boundary, and the Overview line all disclose the true count.
+describe('generateSharingSummaryHandler (OBJECT_SCAN_CAP truncation — CR-RV12)', () => {
+  let store: GraphStore;
+  let ctx: Context;
+
+  const OBJECT_COUNT = 60;
+  const capSeed: ExtractionResult = {
+    nodes: Array.from({ length: OBJECT_COUNT }, (_, i) => {
+      const api = `Cap_Object_${String(i).padStart(2, '0')}__c`;
+      return makeNode({
+        id: `CustomObject:${api}`,
+        type: 'CustomObject',
+        apiName: api,
+        label: api,
+        properties: { sharingModel: 'Private' },
+      });
+    }),
+    edges: [],
+  };
+
+  beforeAll(async () => {
+    const built = await makeFreshCtx('object-scan-cap.db');
+    store = built.store;
+    ctx = built.ctx;
+    const imported = await importExtractionResults(store, [capSeed]);
+    if (!imported.ok)
+      throw new Error(`cap seed import failed: ${imported.error.message}`);
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  it('sets scanTruncated + totalMatchingObjects when the org exceeds OBJECT_SCAN_CAP', async () => {
+    const result = await generateSharingSummaryHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.scanTruncated).toBe(true);
+    expect(result.value.data.totalMatchingObjects).toBe(OBJECT_COUNT);
+    // Only the first 50 got a full per-object sharing entry built.
+    expect(result.value.data.document.frontmatter.componentIds.length).toBeLessThan(
+      OBJECT_COUNT,
+    );
+  });
+
+  it('discloses "showing first N of M" in boundaries — never silently reads as complete', async () => {
+    const result = await generateSharingSummaryHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const boundaries = result.value.data.document.boundaries.join('\n');
+    expect(boundaries).toContain('Object scan capped');
+    expect(boundaries).toContain(`first 50 of ${OBJECT_COUNT}`);
+  });
+
+  it('discloses the true count in the Overview body line', async () => {
+    const result = await generateSharingSummaryHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.document.body).toContain(`50 of ${OBJECT_COUNT} matching`);
+  });
+
+  it('does NOT set scanTruncated when a narrowing objectFilter drops under the cap', async () => {
+    const result = await generateSharingSummaryHandler(ctx, {
+      objectFilter: 'Cap_Object_00__c',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.scanTruncated).toBeUndefined();
+    expect(result.value.data.totalMatchingObjects).toBeUndefined();
+    expect(result.value.data.document.boundaries.join('\n')).not.toContain(
+      'Object scan capped',
+    );
+  });
+});

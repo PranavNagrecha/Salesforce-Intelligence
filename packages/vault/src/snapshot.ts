@@ -84,6 +84,13 @@ export interface SnapshotMeta {
   readonly sourceTreeHash: string;
   readonly componentCount: number;
   readonly edgeCount: number;
+  /**
+   * Optional capture-time scalar bag (R8-SECURITY-TREND). Written at
+   * `sfi snapshot create` / refresh auto-capture. Keys are metric names;
+   * values are numbers (`securityScore` 0–100, `securityGrade` GPA 0–4).
+   * Absent on pre-upgrade snapshots — trend discloses that honestly.
+   */
+  readonly metrics?: Readonly<Record<string, number>>;
 }
 
 /**

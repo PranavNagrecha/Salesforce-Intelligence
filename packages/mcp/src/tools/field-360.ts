@@ -33,6 +33,13 @@
  *   | emails        | incoming `references` from EmailTemplate with role=body-merge | parsed |
  *   | dependencies  | OUTGOING `references` for formula fields only          | parsed           |
  *   | listViews     | incoming `references` from ListView (referenceKind: fieldRef column / filterRef predicate / columnAndFilter) | heuristic |
+ * Finding #36: when the field carries folded report/dashboard usage, the
+ * `reportUsage` output field names WHICH reports/dashboards reference it
+ * (capped at 50 names per family, sorted, with a disclosed truncation total
+ * beyond the cap) — not just the `usedInReport`/`usedInDashboard` booleans.
+ * The same names are echoed inline in the `boundaries[]` "IS referenced by"
+ * sentence. A vault refreshed before this property existed still surfaces
+ * the boolean with empty name arrays; `sfi refresh --no-pull` repopulates it.
  *
  * **Honesty axis** (the v3.0 constitutional rule per Q165):
  *
@@ -87,7 +94,7 @@ import {
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import {
   REPORT_DASHBOARD_USAGE_CAVEAT,
-  reportDashboardUsage,
+  reportDashboardUsageDetail,
 } from './report-dashboard-usage.js';
 import { resolveToFieldOrSuggest } from './resolve-field-or-suggest.js';
 
@@ -208,6 +215,26 @@ export interface Field360Section {
   readonly truncatedAtN: number | null;
 }
 
+/**
+ * Finding #36: WHICH reports/dashboards reference this field — not just the
+ * boolean "used in a report" signal. Sourced from the fold-time capped name
+ * list (`foldReportDashboardUsageIntoFields`, first 50 per family, sorted).
+ * Present only when the field carries folded report/dashboard usage; a vault
+ * refreshed before this property existed carries the boolean flags with
+ * empty name arrays here (see `boundaries[]` for that fallback phrasing) —
+ * re-run `sfi refresh --no-pull` to repopulate the names on an existing vault.
+ */
+export interface Field360ReportUsage {
+  /** Capped (first 50), sorted api-names of referencing reports. */
+  readonly reportNames: readonly string[];
+  /** True total when `reportNames` was truncated by the fold-time cap; absent otherwise. */
+  readonly reportsTruncatedTotal?: number;
+  /** Capped (first 50), sorted api-names of referencing dashboards. */
+  readonly dashboardNames: readonly string[];
+  /** True total when `dashboardNames` was truncated by the fold-time cap; absent otherwise. */
+  readonly dashboardsTruncatedTotal?: number;
+}
+
 /** Summary section payload. */
 export interface Field360Summary {
   readonly perSectionCounts: Readonly<Record<string, number>>;
@@ -256,6 +283,13 @@ export interface Field360Output {
    * as `list-view-filters`).
    */
   readonly listViews?: Field360Section;
+  /**
+   * Finding #36: WHICH reports/dashboards reference this field, capped at 50
+   * names per family with an honestly-disclosed truncation total. Present
+   * only when the field carries folded report/dashboard usage (mirrors the
+   * `usedInReport`/`usedInDashboard` booleans surfaced in `boundaries[]`).
+   */
+  readonly reportUsage?: Field360ReportUsage;
   readonly summary: Field360Summary;
   readonly boundaries: readonly string[];
   readonly dataNotAvailable: readonly string[];
@@ -975,15 +1009,44 @@ export const field360Handler = async (
   //   - no folded usage AND the families were NOT retrieved (coverage 'partial'
   //     /'unknown' — dropped / --no-pull / pre-signal) -> the not-retrieved
   //     caveat (may still be used outside the pull).
-  const analytics = reportDashboardUsage(fieldNode);
+  const analytics = reportDashboardUsageDetail(fieldNode);
   const analyticsCoverage = summarizeCoverage(ctx.manifest, [
     'Report',
     'Dashboard',
   ]);
   if (analytics.usedInReport || analytics.usedInDashboard) {
+    // Finding #36: name the specific reports/dashboards when the fold-time
+    // capped name list is present; a vault refreshed before that property
+    // existed carries only the boolean, so fall back to the un-named phrasing
+    // (which also keeps the substring back-compat callers match on: 'report
+    // column/filter' / 'a dashboard component').
+    const describe = (
+      used: boolean,
+      label: string,
+      names: readonly string[],
+      truncatedTotal: number | undefined,
+    ): string | null => {
+      if (!used) return null;
+      if (names.length === 0) return label;
+      const truncationNote =
+        truncatedTotal !== undefined
+          ? `, +${truncatedTotal - names.length} more beyond the 50-name cap`
+          : '';
+      return `${label} (${names.join(', ')}${truncationNote})`;
+    };
     const where = [
-      analytics.usedInReport ? 'a report column/filter' : null,
-      analytics.usedInDashboard ? 'a dashboard component' : null,
+      describe(
+        analytics.usedInReport,
+        'a report column/filter',
+        analytics.reportNames,
+        analytics.reportsTruncatedTotal,
+      ),
+      describe(
+        analytics.usedInDashboard,
+        'a dashboard component',
+        analytics.dashboardNames,
+        analytics.dashboardsTruncatedTotal,
+      ),
     ].filter((x): x is string => x !== null);
     boundaries.push(
       `this field IS referenced by ${where.join(' and ')} (folded reports-pull usage) — it is NOT unused; weigh that before deleting.`,
@@ -1029,6 +1092,25 @@ export const field360Handler = async (
   const dataShape = await readFactBlock(ctx, fieldId, 'fillRate');
   const annotations = await annotationsBlockFor(ctx, fieldId);
 
+  // Finding #36: structured "WHICH reports/dashboards" companion to the
+  // boundaries[] prose above — present only when the field carries folded
+  // usage. Empty name arrays with the boolean true (a pre-Finding-#36 vault)
+  // still populate this block so a consumer can detect "used, but names not
+  // yet repopulated" rather than treating the block's absence as "not used".
+  const reportUsage: Field360ReportUsage | undefined =
+    analytics.usedInReport || analytics.usedInDashboard
+      ? {
+          reportNames: analytics.reportNames,
+          ...(analytics.reportsTruncatedTotal !== undefined
+            ? { reportsTruncatedTotal: analytics.reportsTruncatedTotal }
+            : {}),
+          dashboardNames: analytics.dashboardNames,
+          ...(analytics.dashboardsTruncatedTotal !== undefined
+            ? { dashboardsTruncatedTotal: analytics.dashboardsTruncatedTotal }
+            : {}),
+        }
+      : undefined;
+
   // CR-CAP-03 / CR-CAP-13: `dataNotAvailable` is DYNAMIC. `list-view-filters`
   // is always listed, but it now means ONLY the runtime filter-PREDICATE
   // EVALUATION gap (whether a given record passes the saved view's filter),
@@ -1065,6 +1147,7 @@ export const field360Handler = async (
       groupBy,
       ...(dataShape !== undefined ? { dataShape } : {}),
       ...(annotations !== undefined ? { annotations } : {}),
+      ...(reportUsage !== undefined ? { reportUsage } : {}),
       ...(cursorBlock !== undefined
         ? {
             nextCursor: cursorBlock.nextCursor,

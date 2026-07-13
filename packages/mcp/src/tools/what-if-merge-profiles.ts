@@ -98,6 +98,11 @@ import {
   type Verdict,
 } from './coverage-trust.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import {
+  buildDeployProposal,
+  type ProposalArtifact,
+  type ProposalEvidence,
+} from './proposal-artifact.js';
 
 /** Canonical id prefix for the Profile node type. */
 const PROFILE_PREFIX = 'Profile:';
@@ -196,6 +201,14 @@ export interface WhatIfMergeProfilesOutput {
   /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
   readonly pageInfo?: PageInfo;
   readonly disclosure: string;
+  /**
+   * Present only when `format: 'proposal'` (Finding #35): a LOCAL, deploy-ready
+   * `package.xml` pulling BOTH profiles for a human to hand-merge, with the
+   * verdict + conflict summary + coverage caveat inline as XML comments. sfi
+   * does NOT auto-resolve conflicts and NEVER deploys — the host writes the
+   * string; a human feeds it to Gearset / Copado / `sf project deploy`.
+   */
+  readonly proposal?: ProposalArtifact;
 }
 
 /**
@@ -247,6 +260,9 @@ export const whatIfMergeProfilesInputSchema = z.object({
   // truncated page's `nextCursor`. When present it supplies the resume offset;
   // omitting it = today's behavior (offset 0 / explicit `offset`).
   cursor: z.string().min(1).optional(),
+  // Finding #35: 'proposal' attaches a LOCAL package.xml pulling both profiles
+  // (a human hand-merges), with the conflicts named inline as evidence.
+  format: z.enum(['json', 'proposal']).optional(),
 });
 
 /** Parsed input shape inferred from the Zod schema. */
@@ -756,6 +772,53 @@ const sortConflicts = (
   });
 };
 
+/** How many sample conflicts to inline into the proposal evidence comment. */
+const PROPOSAL_CONFLICT_SAMPLE = 20;
+
+/**
+ * Finding #35: build a LOCAL, deploy-ready merge proposal. Emits a `package.xml`
+ * that pulls BOTH profiles (so a human can retrieve them and hand-merge in their
+ * own deploy tool), with the verdict, the COMPLETE conflict rollups, a sample of
+ * the conflicts, and the tool's verbatim disclosures inline as an evidence
+ * comment. sfi does NOT auto-resolve and never deploys — PURE local-file emit.
+ */
+const buildMergeProfilesProposal = (
+  out: WhatIfMergeProfilesOutput,
+  vaultState: { readonly sourceTreeHash: string; readonly refreshedAt: string },
+): ProposalArtifact => {
+  const reasons = [
+    `${out.summary.conflicts} conflict(s) across ${out.summary.totalSettings} setting(s); ${out.summary.agreed} agreed.`,
+    ...out.summary.byCategory.map((b) => `conflicts in ${b.key}: ${b.count}`),
+    ...out.summary.byPolicy.map((b) => `recommendedPolicy ${b.key}: ${b.count}`),
+    ...out.conflicts
+      .slice(0, PROPOSAL_CONFLICT_SAMPLE)
+      .map(
+        (c) =>
+          `${c.settingType} ${c.settingId}: A=${JSON.stringify(c.profileAValue)} B=${JSON.stringify(c.profileBValue)} -> policy ${c.recommendedPolicy}${c.tieBreak !== undefined ? ` (${c.tieBreak})` : ''}`,
+      ),
+  ];
+  const disclosures = [
+    out.disclosure,
+    ...(out.summary.notEvaluatedCategories.length > 0
+      ? [`NOT evaluated (un-modeled): ${out.summary.notEvaluatedCategories.join(', ')}`]
+      : []),
+    ...(out.coverageCaveat !== undefined ? [out.coverageCaveat.message] : []),
+  ];
+  const evidence: ProposalEvidence = {
+    verdict: out.verdict,
+    sourceTreeHash: vaultState.sourceTreeHash,
+    refreshedAt: vaultState.refreshedAt,
+    reasons,
+    disclosures,
+  };
+  return buildDeployProposal([out.profileIdA, out.profileIdB], evidence, {
+    headline:
+      `Proposes a package.xml pulling both profiles (${out.profileIdA}, ${out.profileIdB}) ` +
+      `for a human to hand-merge; ${out.summary.conflicts} conflict(s) named in the evidence. ` +
+      `sfi does not auto-resolve and never deploys.`,
+  });
+};
+
 /**
  * The `sfi.what_if_merge_profiles` MCP tool. Surfaces every conflict
  * between two profiles' grant sets and visibility settings, plus a
@@ -937,32 +1000,38 @@ export const whatIfMergeProfilesHandler = async (
     conflicts.length === 0 ? 'safe' : 'review',
   );
 
+  const vaultState = {
+    sourceTreeHash: ctx.manifest.sourceTreeHash,
+    refreshedAt: ctx.manifest.refreshedAt,
+  };
+  const data: WhatIfMergeProfilesOutput = {
+    profileIdA,
+    profileIdB,
+    verdict: verdict as Verdict,
+    ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
+    trust,
+    conflicts: page,
+    summary: {
+      totalSettings,
+      agreed,
+      conflicts: conflicts.length,
+      byCategory,
+      byPolicy,
+      notEvaluatedCategories,
+    },
+    limit,
+    offset,
+    hasMore,
+    truncated,
+    ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
+    disclosure,
+  };
+
   return ok({
-    data: {
-      profileIdA,
-      profileIdB,
-      verdict: verdict as Verdict,
-      ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
-      trust,
-      conflicts: page,
-      summary: {
-        totalSettings,
-        agreed,
-        conflicts: conflicts.length,
-        byCategory,
-        byPolicy,
-        notEvaluatedCategories,
-      },
-      limit,
-      offset,
-      hasMore,
-      truncated,
-      ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
-      disclosure,
-    },
-    vaultState: {
-      sourceTreeHash: ctx.manifest.sourceTreeHash,
-      refreshedAt: ctx.manifest.refreshedAt,
-    },
+    data:
+      input.format === 'proposal'
+        ? { ...data, proposal: buildMergeProfilesProposal(data, vaultState) }
+        : data,
+    vaultState,
   });
 };

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<WaveXmd xmlns="http://soap.sforce.com/2006/04/metadata">
+    <application>Verdant_Analytics</application>
+    <dataset>Project_Pipeline</dataset>
+    <type>User</type>
+    <dimensions>
+        <field>Project__c.Status__c</field>
+        <isDerived>false</isDerived>
+        <label>Project Status</label>
+        <origin>Project__c.Status__c</origin>
+        <showInExplorer>true</showInExplorer>
+        <sortIndex>0</sortIndex>
+    </dimensions>
+    <measures>
+        <field>Project__c.Contract_Value__c</field>
+        <isDerived>false</isDerived>
+        <label>Contract Value</label>
+        <origin>Project__c.Contract_Value__c</origin>
+        <showInExplorer>true</showInExplorer>
+    </measures>
+</WaveXmd>

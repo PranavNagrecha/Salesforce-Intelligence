@@ -8,7 +8,25 @@
 
 export { renderApexMarkdown } from './apex-markdown.js';
 export { renderComponentMarkdown } from './component-markdown.js';
+export {
+  buildErDiagram,
+  type ErdDiagramOptions,
+  type ErdDiagramResult,
+  type ErdRelationship,
+  type ErdRelationshipKind,
+} from './erd-mermaid.js';
+export {
+  encodeCsvField,
+  encodeCsvRow,
+  fitCsvRowsToBudget,
+  renderCsv,
+  renderCsvComments,
+  renderCsvWithDisclosures,
+  type CsvCell,
+  type CsvFitResult,
+} from './csv.js';
 export { renderFlowMarkdown } from './flow-markdown.js';
+export { buildSafeMermaidIdMap, safeMermaidLabel } from './mermaid-id.js';
 export {
   ORG_CARD_MAX_BYTES,
   renderOrgCard,

@@ -5,9 +5,9 @@
  * `liveEnabled: true`. Never falls back to vault data on failure.
  */
 
-import type { McpError, McpResponse, TrustSummary } from '@sf-intelligence/contracts';
+import type { ComponentId, McpError, McpResponse, TrustSummary } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById } from '@sf-intelligence/graph';
+import { getNodeById, listNodesByType } from '@sf-intelligence/graph';
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 import { z } from 'zod';
 
@@ -18,6 +18,7 @@ import {
   renderLiveCountMarkdown,
   renderTrustFooter,
 } from '../answer-render.js';
+import type { LiveCapability } from '../live-capability.js';
 import {
   grantLiveConsent,
   hasLiveConsent,
@@ -108,24 +109,59 @@ export interface LiveAccessDecision {
 }
 
 /**
- * Decide whether the read-only live plane may run for `org`. Three ways in,
- * checked in order: an explicit per-call `liveEnabled: true`, the
- * `SFI_LIVE_PLANE_ENABLED` env, or standing one-time consent persisted for the
- * org. Fail-closed — no match means not allowed; never auto-grants.
+ * Decide whether the read-only live plane may run for `org`.
+ *
+ * INFRA-12-DEEP: a {@link LiveCapability} token (minted from the invoked tool's
+ * registry `livePlane` tag and threaded on `Context`) is REQUIRED before any
+ * path — param, env, or ambient standing consent — can allow live. A `never`
+ * tool (no capability) fail-closes even when consent is on file. Prefer
+ * {@link probeLiveAccess} / {@link gateLive} from tool handlers; this function
+ * is the sanctioned seam that alone may call {@link hasLiveConsent}.
+ *
+ * Three ways in once capability is present, checked in order: an explicit
+ * per-call `liveEnabled: true`, the `SFI_LIVE_PLANE_ENABLED` env, or standing
+ * one-time consent persisted for the org. Fail-closed — no match means not
+ * allowed; never auto-grants.
  */
 export const resolveLiveAccess = async (
   org: string,
   inputLiveEnabled?: boolean,
+  capability?: LiveCapability,
 ): Promise<LiveAccessDecision> => {
   // P13-REMOTE-http: over HTTP the live plane is HARD-DISABLED regardless of
   // params, env, or the HOST machine's standing consent — a remote caller
   // must never spend the host's Salesforce API budget or reach its org.
   // Pinned by test, not by documentation.
   if (process.env['SFI_TRANSPORT'] === 'http') return { allowed: false, source: 'none' };
+  // INFRA-12-DEEP: no registry capability → cannot read ambient consent (or
+  // honor param/env). Structural guard against offline handlers going live.
+  if (!capability) return { allowed: false, source: 'none' };
   if (inputLiveEnabled === true) return { allowed: true, source: 'param' };
   if (isLivePlaneEnabled()) return { allowed: true, source: 'env' };
   if (await hasLiveConsent(org)) return { allowed: true, source: 'consent' };
   return { allowed: false, source: 'none' };
+};
+
+/**
+ * Soft live-access probe for opt-in / primary tools. Reads the capability from
+ * `ctx.liveCapability` (set by `dispatchTool`). Returns `{ allowed: false }`
+ * when the top-level tool is `livePlane: 'never'` — composed sub-handlers
+ * inherit that refusal rather than independently consulting standing consent.
+ */
+export const probeLiveAccess = async (
+  ctx: Context,
+  input?: {
+    readonly liveEnabled?: boolean | undefined;
+    readonly orgAlias?: string | undefined;
+  },
+): Promise<LiveAccessDecision & { readonly org: string }> => {
+  const org = resolveOrg(ctx, input?.orgAlias);
+  const access = await resolveLiveAccess(
+    org,
+    input?.liveEnabled,
+    ctx.liveCapability,
+  );
+  return { ...access, org };
 };
 
 /** Structured fail-closed error naming the org + the one-time grant path. */
@@ -150,10 +186,9 @@ export const gateLive = async (
     readonly orgAlias?: string | undefined;
   },
 ): Promise<Result<string, McpError>> => {
-  const org = resolveOrg(ctx, input.orgAlias);
-  const access = await resolveLiveAccess(org, input.liveEnabled);
-  if (!access.allowed) return err(liveConsentRequiredError(org));
-  return ok(org);
+  const probed = await probeLiveAccess(ctx, input);
+  if (!probed.allowed) return err(liveConsentRequiredError(probed.org));
+  return ok(probed.org);
 };
 
 // ---------------------------------------------------------------------------
@@ -4636,6 +4671,1020 @@ export const liveUserPermsetsHandler = async (
       },
       rows,
     ),
+    vaultState: livePlaneVaultState(ctx),
+  });
+};
+
+// ---------------------------------------------------------------------------
+// sfi.live_record_access — a user's EFFECTIVE access to ONE record (live)
+// ---------------------------------------------------------------------------
+//
+// UserRecordAccess is a runtime-only object: it answers "can user U read / edit
+// / delete / transfer / fully-control THIS specific record R right now?" from
+// the org's live sharing calculation. This is the exact question
+// sfi.why_cant_user_see_record can only answer `unknown` for offline — manual
+// shares, account/opportunity teams, Apex managed sharing, and criteria sharing
+// evaluated over record FIELD VALUES are all record-level state the vault never
+// holds. This tool RESOLVES that unknown against the live org. Read-only.
+
+/** A Salesforce 15- or 18-char record/user Id. */
+const RECORD_ID_RE = /^[a-zA-Z0-9]{15,18}$/;
+
+/**
+ * Validate a Salesforce record/user Id shape before it reaches SOQL. The value
+ * is ALSO bound through {@link soqlLiteral} at the call site (belt and
+ * suspenders) — this check fails fast on garbage with a legible message rather
+ * than shipping a malformed literal to the org.
+ */
+const assertRecordId = (raw: string, label: string): Result<string, McpError> => {
+  const trimmed = raw.trim();
+  if (!RECORD_ID_RE.test(trimmed)) {
+    return err({
+      kind: 'invalid-query',
+      message: `${label} must be a 15- or 18-character Salesforce record Id.`,
+      path: label,
+    });
+  }
+  return ok(trimmed);
+};
+
+/** The reusable descriptor for a record-scoped sibling object. */
+export interface SiblingObject {
+  /** The `{Object}Share` / `{Object}History` sibling API name. */
+  readonly object: string;
+  /** The field on the sibling that points at the parent record's Id. */
+  readonly parentField: string;
+  /** True when the base object is a custom object (`__c`). */
+  readonly isCustom: boolean;
+}
+
+/**
+ * Derive a record-scoped sibling object (`{Object}Share` / `{Object}History`)
+ * and its parent-Id field from a base object API name, following Salesforce's
+ * standard-vs-custom naming rule — the SHARED SOQL builder for the record-shares
+ * (CR-CAP-L2) and field-history (R6-14) tools:
+ *   - Standard object `Account` → `Account{Suffix}`, parent field `AccountId`.
+ *   - Custom object `Widget__c`  → `Widget__{Suffix}`, parent field `ParentId`.
+ *
+ * Returns null when the base name is not a safe API name (SOQL-injection guard;
+ * the caller surfaces the invalid-name error). The derivation follows the
+ * documented convention — a non-conforming object simply produces a sibling name
+ * the org will reject as not-queryable, which the caller reports honestly rather
+ * than as a match.
+ */
+export const deriveSiblingObject = (
+  objectApiName: string,
+  suffix: 'Share' | 'History',
+): SiblingObject | null => {
+  const trimmed = objectApiName.trim();
+  if (!OBJECT_API_NAME_RE.test(trimmed)) return null;
+  if (/__c$/.test(trimmed)) {
+    const base = trimmed.replace(/__c$/, '');
+    return { object: `${base}__${suffix}`, parentField: 'ParentId', isCustom: true };
+  }
+  return { object: `${trimmed}${suffix}`, parentField: `${trimmed}Id`, isCustom: false };
+};
+
+/**
+ * Resolve the object API name for a record Id from the org's GLOBAL describe
+ * (`/sobjects`), matching the 3-char key prefix. Read-only, budgeted (one REST
+ * unit). Refuses to guess: a prefix that maps to zero or MULTIPLE objects is an
+ * honest error asking for an explicit `objectApiName` rather than a wrong match.
+ */
+const resolveObjectFromRecordId = async (
+  org: string,
+  recordId: string,
+  exec: ExecCommand,
+): Promise<Result<string, McpError>> => {
+  const prefix = recordId.slice(0, 3);
+  const rest = await runLiveRest(org, '/sobjects', exec);
+  if (!rest.ok) return rest;
+  const body = rest.value.value as {
+    sobjects?: readonly { name?: string; keyPrefix?: string | null }[];
+  };
+  const matches = (body.sobjects ?? [])
+    .filter((s) => s.keyPrefix === prefix)
+    .map((s) => String(s.name ?? ''))
+    .filter((n) => n.length > 0);
+  if (matches.length === 1) return ok(matches[0] as string);
+  if (matches.length === 0) {
+    return err({
+      kind: 'invalid-query',
+      message: `Could not derive the object for record Id prefix '${prefix}' from the org describe — pass objectApiName explicitly.`,
+      path: 'recordId',
+    });
+  }
+  return err({
+    kind: 'invalid-query',
+    message: `Record Id prefix '${prefix}' maps to multiple objects (${matches.join(', ')}) — pass objectApiName explicitly.`,
+    path: 'objectApiName',
+  });
+};
+
+export const liveRecordAccessInputSchema = liveEnabledSchema.extend({
+  /** The record whose access is being checked (15- or 18-char Id). */
+  recordId: z.string().min(1),
+  /** The user to check, by Id. Provide this OR `username` (userId wins). */
+  userId: z.string().min(1).optional(),
+  /** The user to check, by exact Username (resolved to an Id via a capped
+   *  lookup). Provide this OR `userId`. */
+  username: z.string().min(1).optional(),
+  orgAlias: z.string().min(1).optional(),
+});
+export type LiveRecordAccessInput = z.infer<typeof liveRecordAccessInputSchema>;
+
+export interface LiveRecordAccessUser {
+  readonly id: string;
+  readonly name: string | null;
+  readonly username: string | null;
+}
+export interface LiveRecordAccessOutput {
+  readonly recordId: string;
+  readonly user: LiveRecordAccessUser;
+  readonly hasReadAccess: boolean;
+  readonly hasEditAccess: boolean;
+  readonly hasDeleteAccess: boolean;
+  readonly hasTransferAccess: boolean;
+  readonly hasAllAccess: boolean;
+  /**
+   * True when the org returned NO UserRecordAccess row for this (user, record)
+   * pair — the record does not exist, is not visible to the QUERYING user, or
+   * the id is wrong. Every access flag is then false and MUST NOT be read as an
+   * authoritative "no access"; it is "could not determine".
+   */
+  readonly noAccessRow: boolean;
+  readonly disclosure: string;
+  readonly trust: TrustSummary;
+  readonly rendered: string;
+}
+
+/** Verbatim disclosure — tool description + rendered footer. */
+export const LIVE_RECORD_ACCESS_DISCLOSURE =
+  "Live effective record access from the org's runtime sharing calculation " +
+  '(UserRecordAccess) as of queriedAt — it reflects manual shares, teams, Apex ' +
+  'managed sharing, and criteria sharing evaluated over record field values, ' +
+  'none of which the offline vault can see. Point-in-time; not cached beyond the ' +
+  'live-session TTL. An empty result (noAccessRow) means the org returned no ' +
+  'access row for this user+record (record missing, wrong id, or invisible to ' +
+  'the querying user) — treat it as "could not determine", NOT a confirmed deny.';
+
+export const liveRecordAccessHandler = async (
+  ctx: Context,
+  input: LiveRecordAccessInput,
+  exec: ExecCommand = nodeExecFile,
+): Promise<Result<McpResponse<LiveRecordAccessOutput>, McpError>> => {
+  const gate = await gateLive(ctx, input);
+  if (!gate.ok) return gate;
+  const org = gate.value;
+  const recordCheck = assertRecordId(input.recordId, 'recordId');
+  if (!recordCheck.ok) return recordCheck;
+  const recordId = recordCheck.value;
+  if (input.userId === undefined && input.username === undefined) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        'Provide userId or username — UserRecordAccess is evaluated for a specific user.',
+      path: 'userId',
+    });
+  }
+  const queriedAt = new Date().toISOString();
+
+  // Resolve the user: an explicit userId is authoritative (name resolved
+  // best-effort, degrading to null); a username MUST resolve to exactly one Id.
+  let user: LiveRecordAccessUser;
+  if (input.userId !== undefined) {
+    const uc = assertRecordId(input.userId, 'userId');
+    if (!uc.ok) return uc;
+    const userId = uc.value;
+    const uq = await liveQuery(
+      org,
+      `SELECT Id, Name, Username FROM User WHERE Id = ${soqlLiteral(userId)} LIMIT 1`,
+      exec,
+    );
+    const r = uq.available ? (uq.records[0] as Record<string, unknown> | undefined) : undefined;
+    user = {
+      id: userId,
+      name: r?.Name != null ? String(r.Name) : null,
+      username: r?.Username != null ? String(r.Username) : null,
+    };
+  } else {
+    const username = input.username as string;
+    const uq = await liveQuery(
+      org,
+      `SELECT Id, Name, Username FROM User WHERE Username = ${soqlLiteral(username)} LIMIT 2`,
+      exec,
+    );
+    if (!uq.available) return err(UNAVAILABLE_ERROR('User', org, uq.reason));
+    if (uq.records.length === 0) {
+      return err({
+        kind: 'component-not-found',
+        message: `No user with exact Username '${username}' in the live org. Usernames are unique — pass the exact Username or a userId.`,
+      });
+    }
+    if (uq.records.length > 1) {
+      return err({
+        kind: 'invalid-query',
+        message: `'${username}' matches multiple users in the live org — pass the exact Username or a userId.`,
+      });
+    }
+    const r = uq.records[0] as Record<string, unknown>;
+    user = {
+      id: String(r.Id ?? ''),
+      name: r.Name != null ? String(r.Name) : null,
+      username: r.Username != null ? String(r.Username) : null,
+    };
+  }
+
+  const accessQ = await liveQuery(
+    org,
+    `SELECT RecordId, HasReadAccess, HasEditAccess, HasDeleteAccess, HasTransferAccess, HasAllAccess ` +
+      `FROM UserRecordAccess WHERE UserId = ${soqlLiteral(user.id)} AND RecordId = ${soqlLiteral(recordId)}`,
+    exec,
+  );
+  if (!accessQ.available) return err(UNAVAILABLE_ERROR('UserRecordAccess', org, accessQ.reason));
+  const row = accessQ.records[0] as Record<string, unknown> | undefined;
+  const noAccessRow = row === undefined;
+  const flag = (k: string): boolean => row?.[k] === true;
+  const trust = liveTrust(queriedAt);
+  const table = mdTable(
+    ['Right', 'Granted'],
+    [
+      ['Read', flag('HasReadAccess') ? 'yes' : 'no'],
+      ['Edit', flag('HasEditAccess') ? 'yes' : 'no'],
+      ['Delete', flag('HasDeleteAccess') ? 'yes' : 'no'],
+      ['Transfer', flag('HasTransferAccess') ? 'yes' : 'no'],
+      ['Full (All)', flag('HasAllAccess') ? 'yes' : 'no'],
+    ],
+  );
+  const who = user.name ?? user.username ?? user.id;
+  const rendered =
+    (noAccessRow
+      ? `> No UserRecordAccess row for **${who}** on record \`${recordId}\` — could NOT determine access (record missing, wrong id, or invisible to the querying user), NOT a confirmed deny.\n\n`
+      : `Effective access for **${who}** on record \`${recordId}\`:\n\n`) +
+    `${table}\n\n${renderTrustFooter(trust)}`;
+  return ok({
+    data: {
+      recordId,
+      user,
+      hasReadAccess: flag('HasReadAccess'),
+      hasEditAccess: flag('HasEditAccess'),
+      hasDeleteAccess: flag('HasDeleteAccess'),
+      hasTransferAccess: flag('HasTransferAccess'),
+      hasAllAccess: flag('HasAllAccess'),
+      noAccessRow,
+      disclosure: LIVE_RECORD_ACCESS_DISCLOSURE,
+      trust,
+      rendered,
+    },
+    vaultState: livePlaneVaultState(ctx),
+  });
+};
+
+// ---------------------------------------------------------------------------
+// sfi.live_record_shares — the explicit share rows on ONE record (live)
+// ---------------------------------------------------------------------------
+//
+// The `{Object}Share` table is runtime sharing state the vault never holds:
+// each row is a UserOrGroupId + AccessLevel + RowCause (why the share exists —
+// Owner, Manual, a sharing Rule, a Team, Apex managed sharing, etc.). This is
+// the shares-of-a-record complement to sfi.live_record_access (a user's
+// effective access): it enumerates WHO the record is explicitly shared with and
+// WHY. Objects whose OWD is Public Read/Write have no Share table at all — that
+// is reported honestly, not as an error. Read-only.
+
+const MAX_SHARE_ROWS = 500;
+const DEFAULT_SHARE_ROWS = 200;
+
+export const liveRecordSharesInputSchema = liveEnabledSchema.extend({
+  /** The record whose explicit shares are being listed (15- or 18-char Id). */
+  recordId: z.string().min(1),
+  /** The record's object API name. Optional — when omitted it is derived from
+   *  the Id's key prefix via the org's global describe (an ambiguous or unknown
+   *  prefix is an honest error asking for this field). */
+  objectApiName: z.string().min(1).optional(),
+  /** Max share rows (default 200, hard cap 500). `totalShares` is the true count. */
+  limit: z.number().int().min(1).max(MAX_SHARE_ROWS).optional(),
+  orgAlias: z.string().min(1).optional(),
+});
+export type LiveRecordSharesInput = z.infer<typeof liveRecordSharesInputSchema>;
+
+export interface RecordShareEntry {
+  readonly userOrGroupId: string;
+  readonly userOrGroupName: string | null;
+  readonly accessLevel: string;
+  readonly rowCause: string | null;
+}
+export interface LiveRecordSharesOutput {
+  readonly recordId: string;
+  readonly objectApiName: string;
+  readonly shareObject: string;
+  /**
+   * False when the `{Object}Share` object could not be queried — the record's
+   * OWD is likely Public Read/Write (rows are implicitly shared, so there is NO
+   * Share table) OR the object is not sharable / not exposed for this edition.
+   * When false, `shares` is empty and the ABSENCE is disclosed, never read as
+   * "no one has access".
+   */
+  readonly shareTableQueryable: boolean;
+  readonly totalShares: number;
+  readonly returned: number;
+  readonly capped: boolean;
+  readonly shares: readonly RecordShareEntry[];
+  readonly disclosure: string;
+  readonly trust: TrustSummary;
+  /** Present when `shareTableQueryable` is false — explains the absence. */
+  readonly note?: string;
+  readonly rendered: string;
+}
+
+/** Verbatim disclosure — tool description + rendered footer. */
+export const LIVE_RECORD_SHARES_DISCLOSURE =
+  'Live explicit sharing rows from the runtime `{Object}Share` table as of ' +
+  'queriedAt — each row is a UserOrGroupId + AccessLevel + RowCause (Owner / ' +
+  'Manual / a sharing Rule / a Team / Apex managed sharing). This is runtime ' +
+  'state the offline vault never holds. IMPORTANT: an object whose OWD is ' +
+  'Public Read/Write has NO Share table (rows are implicitly shared) — an empty ' +
+  'or non-queryable result there means "no explicit shares apply", NOT "no one ' +
+  'has access". Point-in-time; not cached beyond the live-session TTL; read-only.';
+
+export const liveRecordSharesHandler = async (
+  ctx: Context,
+  input: LiveRecordSharesInput,
+  exec: ExecCommand = nodeExecFile,
+): Promise<Result<McpResponse<LiveRecordSharesOutput>, McpError>> => {
+  const gate = await gateLive(ctx, input);
+  if (!gate.ok) return gate;
+  const org = gate.value;
+  const recordCheck = assertRecordId(input.recordId, 'recordId');
+  if (!recordCheck.ok) return recordCheck;
+  const recordId = recordCheck.value;
+
+  // Resolve the object: explicit objectApiName wins; else derive from the Id
+  // key prefix via the global describe (refuses to guess on ambiguity).
+  let objectApiName: string;
+  if (input.objectApiName !== undefined) {
+    const objCheck = assertSoqlIdentifier(input.objectApiName, 'objectApiName');
+    if (!objCheck.ok) return objCheck;
+    objectApiName = objCheck.value;
+  } else {
+    const resolved = await resolveObjectFromRecordId(org, recordId, exec);
+    if (!resolved.ok) return resolved;
+    objectApiName = resolved.value;
+  }
+
+  const sibling = deriveSiblingObject(objectApiName, 'Share');
+  if (sibling === null) {
+    return err({
+      kind: 'invalid-query',
+      message: `objectApiName "${objectApiName}" is not a valid Salesforce object API name.`,
+      path: 'objectApiName',
+    });
+  }
+  const queriedAt = new Date().toISOString();
+  const limit = input.limit ?? DEFAULT_SHARE_ROWS;
+  const trust = liveTrust(queriedAt);
+
+  const detailQ = await liveQuery(
+    org,
+    `SELECT UserOrGroupId, AccessLevel, RowCause FROM ${sibling.object} ` +
+      `WHERE ${sibling.parentField} = ${soqlLiteral(recordId)} ORDER BY RowCause LIMIT ${limit}`,
+    exec,
+  );
+  // A non-queryable Share object is the OWD-Public / non-sharable case: report
+  // it honestly as "no Share table" rather than a hard failure. A budget stop is
+  // the ONE non-queryable reason that IS a hard fail (a partial answer would be
+  // silently wrong), so surface it through UNAVAILABLE_ERROR.
+  if (!detailQ.available) {
+    if (isBudgetExhaustedReason(detailQ.reason)) {
+      return err(UNAVAILABLE_ERROR(sibling.object, org, detailQ.reason));
+    }
+    const note =
+      `The ${sibling.object} object could not be queried — ${objectApiName}'s OWD is ` +
+      `likely Public Read/Write (no explicit shares exist) or the object is not sharable / ` +
+      `not exposed for this edition. Absence of a Share table is NOT "no access".` +
+      (detailQ.reason ? ` Underlying: ${redactSecrets(detailQ.reason).slice(0, 120)}` : '');
+    const rendered =
+      `> ${note}\n\n${renderTrustFooter(trust)}`;
+    return ok({
+      data: {
+        recordId,
+        objectApiName,
+        shareObject: sibling.object,
+        shareTableQueryable: false,
+        totalShares: 0,
+        returned: 0,
+        capped: false,
+        shares: [],
+        disclosure: LIVE_RECORD_SHARES_DISCLOSURE,
+        note,
+        trust,
+        rendered,
+      },
+      vaultState: livePlaneVaultState(ctx),
+    });
+  }
+
+  const totalQ = await liveQuery(
+    org,
+    `SELECT COUNT() FROM ${sibling.object} WHERE ${sibling.parentField} = ${soqlLiteral(recordId)}`,
+    exec,
+  );
+  const totalShares = totalQ.available ? totalQ.total : detailQ.records.length;
+
+  // Resolve UserOrGroupId → names (User 005 or Group 00G), degrading silently to
+  // the raw id and naming a budget stop rather than hiding it.
+  const ids = detailQ.records
+    .map((row) => String((row as Record<string, unknown>).UserOrGroupId ?? ''))
+    .filter((id) => id.length > 0);
+  const nameById = new Map<string, string>();
+  let nameResolutionBudgetStopped = false;
+  if (ids.length > 0) {
+    const inList = [...new Set(ids)].map((id) => soqlLiteral(id)).join(',');
+    const userQ = await liveQuery(org, `SELECT Id, Name FROM User WHERE Id IN (${inList})`, exec);
+    if (userQ.available) {
+      for (const row of userQ.records) {
+        const r = row as Record<string, unknown>;
+        nameById.set(String(r.Id ?? ''), String(r.Name ?? ''));
+      }
+    } else if (isBudgetExhaustedReason(userQ.reason)) {
+      nameResolutionBudgetStopped = true;
+    }
+    const unresolved = [...new Set(ids)].filter((id) => !nameById.has(id));
+    if (unresolved.length > 0) {
+      const groupIn = unresolved.map((id) => soqlLiteral(id)).join(',');
+      const groupQ = await liveQuery(org, `SELECT Id, Name FROM Group WHERE Id IN (${groupIn})`, exec);
+      if (groupQ.available) {
+        for (const row of groupQ.records) {
+          const r = row as Record<string, unknown>;
+          nameById.set(String(r.Id ?? ''), String(r.Name ?? ''));
+        }
+      } else if (isBudgetExhaustedReason(groupQ.reason)) {
+        nameResolutionBudgetStopped = true;
+      }
+    }
+  }
+
+  const shares: RecordShareEntry[] = detailQ.records.map((row) => {
+    const r = row as Record<string, unknown>;
+    const id = String(r.UserOrGroupId ?? '');
+    return {
+      userOrGroupId: id,
+      userOrGroupName: nameById.get(id) ?? null,
+      accessLevel: String(r.AccessLevel ?? ''),
+      rowCause: r.RowCause === undefined || r.RowCause === null ? null : String(r.RowCause),
+    };
+  });
+  const table = mdTable(
+    ['Shared with', 'Access', 'Reason'],
+    shares
+      .slice(0, LIVE_TABLE_ROW_CAP)
+      .map((s) => [s.userOrGroupName ?? s.userOrGroupId, s.accessLevel, s.rowCause ?? '—']),
+  );
+  const rendered =
+    `**${totalShares.toLocaleString('en-US')}** explicit share row(s) on ${objectApiName} record \`${recordId}\` (via ${sibling.object}).` +
+    (nameResolutionBudgetStopped ? `\n\n> ${BUDGET_SIGNAL} Names show as IDs.` : '') +
+    `\n\n${table}\n\n${renderTrustFooter(trust)}`;
+  return ok({
+    data: {
+      recordId,
+      objectApiName,
+      shareObject: sibling.object,
+      shareTableQueryable: true,
+      totalShares,
+      returned: shares.length,
+      capped: totalShares > shares.length,
+      shares,
+      disclosure: LIVE_RECORD_SHARES_DISCLOSURE,
+      trust,
+      rendered,
+    },
+    vaultState: livePlaneVaultState(ctx),
+  });
+};
+
+// ---------------------------------------------------------------------------
+// sfi.live_scheduled_jobs — the RUNTIME schedule registry (live)
+// ---------------------------------------------------------------------------
+//
+// The live half of the offline sfi.scheduled_job_catalog. The catalog lists
+// Schedulable-CAPABLE Apex classes from metadata (schedule-capable, not
+// necessarily currently scheduled — the actual schedule is runtime state). This
+// tool reads the CronTrigger registry (with CronJobDetail.Name / JobType) — what
+// is ACTUALLY scheduled right now — plus an optional recent AsyncApexJob status
+// summary. Read-only.
+
+const MAX_CRON_ROWS = 500;
+const DEFAULT_CRON_ROWS = 200;
+const DEFAULT_ASYNC_SUMMARY_DAYS = 7;
+/** CronJobDetail.JobType code for Scheduled Apex (per Salesforce docs). Used
+ *  ONLY for the count-only cross-reference against the static catalog; the raw
+ *  JobType is always surfaced so a code-map drift never hides a row. */
+const SCHEDULED_APEX_JOBTYPE = '7';
+
+export const liveScheduledJobsInputSchema = liveEnabledSchema.extend({
+  /** Max CronTrigger rows (default 200, hard cap 500). `totalCronJobs` is the
+   *  true count. */
+  limit: z.number().int().min(1).max(MAX_CRON_ROWS).optional(),
+  /** Include a recent AsyncApexJob status summary (default true). */
+  includeAsyncApexJobs: z.boolean().optional(),
+  /** Window (days) for the AsyncApexJob summary (default 7). */
+  asyncDays: z.number().int().min(1).max(90).optional(),
+  orgAlias: z.string().min(1).optional(),
+});
+export type LiveScheduledJobsInput = z.infer<typeof liveScheduledJobsInputSchema>;
+
+export interface ScheduledJobEntry {
+  readonly id: string;
+  readonly name: string | null;
+  readonly jobType: string | null;
+  readonly state: string | null;
+  readonly cronExpression: string | null;
+  readonly nextFireTime: string | null;
+  readonly previousFireTime: string | null;
+  readonly startTime: string | null;
+  readonly endTime: string | null;
+  readonly timesTriggered: number | null;
+}
+export interface AsyncApexJobStatusCount {
+  readonly status: string;
+  readonly count: number;
+}
+export interface LiveScheduledJobsOutput {
+  readonly totalCronJobs: number;
+  readonly returned: number;
+  readonly capped: boolean;
+  readonly jobs: readonly ScheduledJobEntry[];
+  /** Count-only cross-reference (see disclosure): schedulable-CAPABLE Apex
+   *  classes the vault knows vs live cron jobs registered as Scheduled Apex.
+   *  `null` when the vault could not be read. Capped at 500. */
+  readonly staticSchedulableClassCount: number | null;
+  /** ORG-WIDE count of cron registrations of Scheduled-Apex type (a dedicated
+   *  COUNT query, NOT limited to the returned page — the page cap would badly
+   *  understate it on large orgs). Falls back to the returned-page count only if
+   *  the count query is unavailable. */
+  readonly liveScheduledApexCount: number;
+  /** Recent AsyncApexJob status counts (omitted when not requested / not
+   *  queryable). */
+  readonly asyncApexJobSummary?: {
+    readonly days: number;
+    readonly byStatus: readonly AsyncApexJobStatusCount[];
+    readonly total: number;
+  };
+  readonly disclosure: string;
+  readonly trust: TrustSummary;
+  readonly rendered: string;
+}
+
+/** Verbatim disclosure — tool description + rendered footer. */
+export const LIVE_SCHEDULED_JOBS_DISCLOSURE =
+  'Live runtime schedule registry (CronTrigger + CronJobDetail) as of queriedAt. ' +
+  'The static sfi.scheduled_job_catalog lists Schedulable-CAPABLE Apex classes ' +
+  '(metadata — schedule-capable, not necessarily scheduled); THIS tool lists what ' +
+  'is ACTUALLY scheduled in the org. The two measure DIFFERENT things and ' +
+  'routinely differ — a Schedulable class may not currently be scheduled, and a ' +
+  'cron job may run managed-package or non-Apex work (Data Export, Dashboard ' +
+  'Refresh) that no catalog class covers. The class-vs-cron cross-reference is ' +
+  'COUNT-ONLY (JobType matching is best-effort); do not pair a specific class to a ' +
+  'specific cron row from these counts. Read-only; point-in-time.';
+
+export const liveScheduledJobsHandler = async (
+  ctx: Context,
+  input: LiveScheduledJobsInput,
+  exec: ExecCommand = nodeExecFile,
+): Promise<Result<McpResponse<LiveScheduledJobsOutput>, McpError>> => {
+  const gate = await gateLive(ctx, input);
+  if (!gate.ok) return gate;
+  const org = gate.value;
+  const queriedAt = new Date().toISOString();
+  const limit = input.limit ?? DEFAULT_CRON_ROWS;
+  const includeAsync = input.includeAsyncApexJobs ?? true;
+  const asyncDays = input.asyncDays ?? DEFAULT_ASYNC_SUMMARY_DAYS;
+
+  const totalQ = await liveQuery(org, 'SELECT COUNT() FROM CronTrigger', exec);
+  if (!totalQ.available) return err(UNAVAILABLE_ERROR('CronTrigger', org, totalQ.reason));
+
+  const detailQ = await liveQuery(
+    org,
+    `SELECT Id, CronJobDetail.Name, CronJobDetail.JobType, State, CronExpression, ` +
+      `NextFireTime, PreviousFireTime, StartTime, EndTime, TimesTriggered FROM CronTrigger ` +
+      `ORDER BY NextFireTime NULLS LAST LIMIT ${limit}`,
+    exec,
+  );
+  if (!detailQ.available) return err(UNAVAILABLE_ERROR('CronTrigger', org, detailQ.reason));
+
+  const jobs: ScheduledJobEntry[] = detailQ.records.map((row) => {
+    const r = row as Record<string, unknown>;
+    const detail = r.CronJobDetail as { Name?: string; JobType?: string } | null | undefined;
+    const num = (v: unknown): number | null => (v === undefined || v === null ? null : Number(v));
+    const str = (v: unknown): string | null => (v === undefined || v === null ? null : String(v));
+    return {
+      id: String(r.Id ?? ''),
+      name: detail?.Name != null ? String(detail.Name) : null,
+      jobType: detail?.JobType != null ? String(detail.JobType) : null,
+      state: str(r.State),
+      cronExpression: str(r.CronExpression),
+      nextFireTime: str(r.NextFireTime),
+      previousFireTime: str(r.PreviousFireTime),
+      startTime: str(r.StartTime),
+      endTime: str(r.EndTime),
+      timesTriggered: num(r.TimesTriggered),
+    };
+  });
+  // ORG-WIDE Scheduled-Apex cron count via a dedicated COUNT (the returned page
+  // is capped at `limit`, so counting within it would understate the total on a
+  // large org — verified live at ~15k cron rows). Falls back to the page count
+  // only if the filtered COUNT is unavailable.
+  const apexCountQ = await liveQuery(
+    org,
+    `SELECT COUNT() FROM CronTrigger WHERE CronJobDetail.JobType = '${SCHEDULED_APEX_JOBTYPE}'`,
+    exec,
+  );
+  const liveScheduledApexCount = apexCountQ.available
+    ? apexCountQ.total
+    : jobs.filter((j) => j.jobType === SCHEDULED_APEX_JOBTYPE).length;
+
+  // Count-only cross-reference against the static catalog (vault Schedulable
+  // classes). Degrades to null (never fabricates) if the vault graph read fails
+  // or is unavailable — a null count is disclosed as "not checked", never 0.
+  let staticSchedulableClassCount: number | null = null;
+  try {
+    const schedRes = await listNodesByType(ctx.graph, 'ApexClass', {
+      propertyEquals: { isSchedulable: true },
+      limit: 500,
+    });
+    staticSchedulableClassCount = schedRes.ok ? schedRes.value.length : null;
+  } catch {
+    staticSchedulableClassCount = null;
+  }
+
+  let asyncSummary: LiveScheduledJobsOutput['asyncApexJobSummary'];
+  if (includeAsync) {
+    const asyncQ = await liveQuery(
+      org,
+      `SELECT Status, COUNT(Id) cnt FROM AsyncApexJob WHERE CreatedDate = LAST_N_DAYS:${asyncDays} GROUP BY Status`,
+      exec,
+    );
+    if (asyncQ.available) {
+      const byStatus: AsyncApexJobStatusCount[] = asyncQ.records.map((row) => {
+        const r = row as Record<string, unknown>;
+        return {
+          status: String(r.Status ?? ''),
+          count: aggregateCountFromRow(r, ['cnt', 'expr0']),
+        };
+      });
+      asyncSummary = {
+        days: asyncDays,
+        byStatus,
+        total: byStatus.reduce((n, s) => n + s.count, 0),
+      };
+    }
+  }
+
+  const trust = liveTrust(queriedAt);
+  const table = mdTable(
+    ['Job', 'Type', 'State', 'Next fire', 'Cron'],
+    jobs
+      .slice(0, LIVE_TABLE_ROW_CAP)
+      .map((j) => [j.name ?? j.id, j.jobType ?? '—', j.state ?? '—', j.nextFireTime ?? '—', j.cronExpression ?? '—']),
+  );
+  const crossRef =
+    staticSchedulableClassCount === null
+      ? ''
+      : `\n\nCross-reference (count-only): vault knows **${staticSchedulableClassCount}** Schedulable-capable Apex class(es); **${liveScheduledApexCount}** live cron job(s) are registered as Scheduled Apex.`;
+  const asyncLine = asyncSummary
+    ? `\n\nAsyncApexJob (last ${asyncSummary.days}d): **${asyncSummary.total}** total — ` +
+      asyncSummary.byStatus.map((s) => `${s.status}: ${s.count}`).join(', ')
+    : '';
+  const rendered =
+    `**${totalQ.total.toLocaleString('en-US')}** scheduled cron job(s) registered right now.` +
+    crossRef +
+    asyncLine +
+    `\n\n${table}\n\n${renderTrustFooter(trust)}`;
+  return ok({
+    data: {
+      totalCronJobs: totalQ.total,
+      returned: jobs.length,
+      capped: totalQ.total > jobs.length,
+      jobs,
+      staticSchedulableClassCount,
+      liveScheduledApexCount,
+      ...(asyncSummary ? { asyncApexJobSummary: asyncSummary } : {}),
+      disclosure: LIVE_SCHEDULED_JOBS_DISCLOSURE,
+      trust,
+      rendered,
+    },
+    vaultState: livePlaneVaultState(ctx),
+  });
+};
+
+// ---------------------------------------------------------------------------
+// sfi.live_field_history — WHO changed a field on a record, and to what (live)
+// ---------------------------------------------------------------------------
+//
+// Queries the `{Object}History` table (Field, OldValue, NewValue, CreatedBy.Name,
+// CreatedDate). This is the ONE live tool family that returns runtime RECORD
+// DATA (OldValue/NewValue are actual field values), so rows are capped HARD and
+// the default page is small.
+//
+// PRECONDITION COMPOSITION (R6-14): field history only exists when tracking is
+// enabled. The vault already knows per-field `trackHistory` (CustomField) and
+// per-object `enableHistory` (CustomObject), so we check the vault FIRST:
+//   - Vault says tracking is OFF for the field/object  → FAIL CLOSED with a
+//     precise "history tracking is not enabled … (per last refresh)" reason,
+//     instead of a cryptic INVALID_TYPE SOQL error.
+//   - Vault says tracking is ON                        → proceed, `trackingState:
+//     'enabled'`.
+//   - Vault holds NO metadata for the object/field (a scoped refresh, a managed
+//     object the refresh skipped, or the graph is unavailable) → we do NOT fail
+//     closed. We proceed with the live probe and DISCLOSE `trackingState:
+//     'unknown'` ("vault has no field/object metadata; proceeding with a live
+//     query — zero rows must NOT be read as 'no changes' if tracking is off").
+//     Justification: failing closed on missing vault data would make the tool
+//     useless on exactly the scoped/partial vaults where a live probe is most
+//     valuable; the honest disclosure keeps a zero result from being misread.
+
+const MAX_HISTORY_ROWS = 200;
+const DEFAULT_HISTORY_ROWS = 20;
+/** Keep the serialized `data` (record values can be long text) under the global
+ *  ~45 KB response guard. Trailing rows are trimmed and disclosed. */
+const HISTORY_BYTE_BUDGET = 36_000;
+/** Cap a single OldValue/NewValue preview so one long-text field cannot blow the
+ *  budget on its own; the trim is disclosed via `valueTruncated`. */
+const HISTORY_VALUE_MAX_LEN = 255;
+
+type HistoryTrackingState = 'enabled' | 'disabled' | 'unknown';
+
+interface HistoryPreconditionResult {
+  readonly state: HistoryTrackingState;
+  /** Human reason — the fail-closed message (disabled) or the disclosure note
+   *  (unknown). Empty when enabled. */
+  readonly reason: string;
+}
+
+/**
+ * Compose the field-history precondition from the vault. Field-level
+ * `trackHistory` is the specific signal; when a field is named but not modeled,
+ * a KNOWN object-level `enableHistory === false` still fails closed (object
+ * history off ⇒ no field is tracked). Missing metadata (or an unavailable graph)
+ * is `unknown` — proceed with disclosure, never a fabricated verdict.
+ */
+const readVaultHistoryTracking = async (
+  ctx: Context,
+  objectApiName: string,
+  fieldApiName?: string,
+): Promise<HistoryPreconditionResult> => {
+  const objectEnableHistory = async (): Promise<boolean | null> => {
+    const objNode = await getNodeById(ctx.graph, `CustomObject:${objectApiName}` as ComponentId);
+    if (!objNode.ok || objNode.value === null) return null;
+    const en = objNode.value.properties['enableHistory'];
+    return en === true ? true : en === false ? false : null;
+  };
+  try {
+    if (fieldApiName !== undefined) {
+      const fieldNode = await getNodeById(
+        ctx.graph,
+        `CustomField:${objectApiName}.${fieldApiName}` as ComponentId,
+      );
+      if (fieldNode.ok && fieldNode.value !== null) {
+        const track = fieldNode.value.properties['trackHistory'];
+        if (track === false) {
+          return {
+            state: 'disabled',
+            reason: `history tracking is not enabled for the field ${objectApiName}.${fieldApiName} (per the last vault refresh)`,
+          };
+        }
+        if (track === true) return { state: 'enabled', reason: '' };
+      }
+      // Field not modeled (or trackHistory unknown): a KNOWN object-off still
+      // fails closed; otherwise the field state is unknown.
+      if ((await objectEnableHistory()) === false) {
+        return {
+          state: 'disabled',
+          reason: `history tracking is not enabled for the object ${objectApiName} (per the last vault refresh), so no field on it is tracked`,
+        };
+      }
+      return {
+        state: 'unknown',
+        reason: `the vault holds no history-tracking metadata for ${objectApiName}.${fieldApiName} (last refresh) — proceeding with a live probe; zero rows must NOT be read as "no changes" if tracking is off`,
+      };
+    }
+    const objState = await objectEnableHistory();
+    if (objState === false) {
+      return {
+        state: 'disabled',
+        reason: `history tracking is not enabled for the object ${objectApiName} (per the last vault refresh)`,
+      };
+    }
+    if (objState === true) return { state: 'enabled', reason: '' };
+    return {
+      state: 'unknown',
+      reason: `the vault holds no history-tracking metadata for the object ${objectApiName} (last refresh) — proceeding with a live probe; zero rows must NOT be read as "no changes" if tracking is off`,
+    };
+  } catch {
+    return {
+      state: 'unknown',
+      reason: 'the vault graph is unavailable, so history-tracking state was not checked — proceeding with a live probe',
+    };
+  }
+};
+
+export const liveFieldHistoryInputSchema = liveEnabledSchema.extend({
+  objectApiName: z.string().min(1),
+  /** Restrict to one field (History.Field equals the field API name). */
+  fieldApiName: z.string().min(1).optional(),
+  /** Restrict to one record (the {Object}History parent-Id field). */
+  recordId: z.string().min(1).optional(),
+  /** Only changes in the last N days (CreatedDate = LAST_N_DAYS:N). */
+  days: z.number().int().min(1).max(3650).optional(),
+  /** Max history rows (default 20, HARD cap 200 — these are record values). */
+  limit: z.number().int().min(1).max(MAX_HISTORY_ROWS).optional(),
+  orgAlias: z.string().min(1).optional(),
+});
+export type LiveFieldHistoryInput = z.infer<typeof liveFieldHistoryInputSchema>;
+
+export interface FieldHistoryEntry {
+  readonly field: string | null;
+  readonly oldValue: string | null;
+  readonly newValue: string | null;
+  readonly changedBy: string | null;
+  readonly changedDate: string | null;
+  /** True when oldValue/newValue was truncated to the preview length. */
+  readonly valueTruncated?: boolean;
+}
+export interface LiveFieldHistoryOutput {
+  readonly objectApiName: string;
+  readonly fieldApiName: string | null;
+  readonly recordId: string | null;
+  readonly historyObject: string;
+  readonly days: number | null;
+  readonly returned: number;
+  readonly capped: boolean;
+  /** Vault-derived precondition state (enabled / disabled short-circuits before
+   *  the live query / unknown = proceeded with disclosure). Here it is always
+   *  'enabled' or 'unknown' (a 'disabled' precondition returns an error). */
+  readonly trackingState: Exclude<HistoryTrackingState, 'disabled'>;
+  readonly entries: readonly FieldHistoryEntry[];
+  readonly disclosure: string;
+  /** Present for the unknown-tracking disclosure and/or byte-trim note. */
+  readonly note?: string;
+  readonly trust: TrustSummary;
+  readonly rendered: string;
+}
+
+/** Verbatim disclosure — tool description + rendered footer. */
+export const LIVE_FIELD_HISTORY_DISCLOSURE =
+  'Live field-change history from the `{Object}History` table as of queriedAt. ' +
+  'THIS IS RUNTIME RECORD DATA — OldValue/NewValue are actual field values, the ' +
+  'only live tool family that returns them; rows are capped hard and the default ' +
+  'page is small. History exists only where tracking is enabled: the vault ' +
+  'per-field `trackHistory` / per-object `enableHistory` state is checked FIRST ' +
+  '(a known-off state fails closed with a precise reason; missing vault metadata ' +
+  'proceeds with `trackingState: unknown` and this disclosure). A zero result ' +
+  'under unknown tracking must NOT be read as "no changes". Read-only; ' +
+  'point-in-time; never falls back to vault data.';
+
+export const liveFieldHistoryHandler = async (
+  ctx: Context,
+  input: LiveFieldHistoryInput,
+  exec: ExecCommand = nodeExecFile,
+): Promise<Result<McpResponse<LiveFieldHistoryOutput>, McpError>> => {
+  const gate = await gateLive(ctx, input);
+  if (!gate.ok) return gate;
+  const org = gate.value;
+  const objectCheck = assertSoqlIdentifier(input.objectApiName, 'objectApiName');
+  if (!objectCheck.ok) return objectCheck;
+  const objectApiName = objectCheck.value;
+  let fieldApiName: string | null = null;
+  if (input.fieldApiName !== undefined) {
+    const fieldCheck = assertSoqlIdentifier(input.fieldApiName, 'fieldApiName');
+    if (!fieldCheck.ok) return fieldCheck;
+    fieldApiName = fieldCheck.value;
+  }
+  let recordId: string | null = null;
+  if (input.recordId !== undefined) {
+    const recCheck = assertRecordId(input.recordId, 'recordId');
+    if (!recCheck.ok) return recCheck;
+    recordId = recCheck.value;
+  }
+
+  const sibling = deriveSiblingObject(objectApiName, 'History');
+  if (sibling === null) {
+    return err({
+      kind: 'invalid-query',
+      message: `objectApiName "${objectApiName}" is not a valid Salesforce object API name.`,
+      path: 'objectApiName',
+    });
+  }
+
+  // PRECONDITION: consult the vault BEFORE spending a live query. A known-off
+  // state fails closed with a precise reason; missing metadata proceeds with a
+  // disclosure (see readVaultHistoryTracking / this tool's JSDoc).
+  const precondition = await readVaultHistoryTracking(
+    ctx,
+    objectApiName,
+    fieldApiName ?? undefined,
+  );
+  if (precondition.state === 'disabled') {
+    return err({
+      kind: 'invalid-query',
+      message:
+        `Cannot query field history: ${precondition.reason}. ` +
+        `Enable Set History Tracking on the field/object (or refresh the vault if it was recently enabled).`,
+      path: fieldApiName !== null ? 'fieldApiName' : 'objectApiName',
+    });
+  }
+
+  const days = input.days ?? null;
+  const limit = input.limit ?? DEFAULT_HISTORY_ROWS;
+  const clauses: string[] = [];
+  if (fieldApiName !== null) clauses.push(`Field = ${soqlLiteral(fieldApiName)}`);
+  if (recordId !== null) clauses.push(`${sibling.parentField} = ${soqlLiteral(recordId)}`);
+  if (days !== null) clauses.push(`CreatedDate = LAST_N_DAYS:${days}`);
+  const whereClause = clauses.length > 0 ? ` WHERE ${clauses.join(' AND ')}` : '';
+  const queriedAt = new Date().toISOString();
+
+  const detailQ = await liveQuery(
+    org,
+    `SELECT Field, OldValue, NewValue, CreatedBy.Name, CreatedDate FROM ${sibling.object}${whereClause} ` +
+      `ORDER BY CreatedDate DESC LIMIT ${limit}`,
+    exec,
+  );
+  if (!detailQ.available) return err(UNAVAILABLE_ERROR(sibling.object, org, detailQ.reason));
+
+  const clampValue = (v: unknown): { value: string | null; truncated: boolean } => {
+    if (v === undefined || v === null) return { value: null, truncated: false };
+    const s = String(v);
+    return s.length > HISTORY_VALUE_MAX_LEN
+      ? { value: s.slice(0, HISTORY_VALUE_MAX_LEN), truncated: true }
+      : { value: s, truncated: false };
+  };
+  let entries: FieldHistoryEntry[] = detailQ.records.map((row) => {
+    const r = row as Record<string, unknown>;
+    const by = r['CreatedBy'] as { Name?: string } | null | undefined;
+    const oldV = clampValue(r['OldValue']);
+    const newV = clampValue(r['NewValue']);
+    const truncated = oldV.truncated || newV.truncated;
+    return {
+      field: r['Field'] === undefined || r['Field'] === null ? null : String(r['Field']),
+      oldValue: oldV.value,
+      newValue: newV.value,
+      changedBy: by?.Name ?? null,
+      changedDate: r['CreatedDate'] === undefined || r['CreatedDate'] === null ? null : String(r['CreatedDate']),
+      ...(truncated ? { valueTruncated: true } : {}),
+    };
+  });
+  const trust = liveTrust(queriedAt);
+
+  // Byte-budget trim: record values can be large even at the row cap. Drop
+  // trailing rows until the serialized data fits, disclosed via the note.
+  const fits = (rows: readonly FieldHistoryEntry[]): boolean =>
+    Buffer.byteLength(JSON.stringify({ entries: rows, trust }), 'utf8') <= HISTORY_BYTE_BUDGET;
+  let byteTrimmed = false;
+  const fetched = entries.length;
+  while (entries.length > 1 && !fits(entries)) {
+    entries = entries.slice(0, Math.floor(entries.length * 0.8));
+    byteTrimmed = true;
+  }
+
+  const noteParts: string[] = [];
+  if (precondition.state === 'unknown') noteParts.push(precondition.reason);
+  if (byteTrimmed) {
+    noteParts.push(
+      `Response trimmed to ${entries.length} of ${fetched} fetched rows to stay within the size limit — lower \`limit\` or narrow with fieldApiName/recordId/days.`,
+    );
+  }
+  const note = noteParts.length > 0 ? noteParts.join(' ') : undefined;
+
+  const table = mdTable(
+    ['When', 'Who', 'Field', 'Old', 'New'],
+    entries
+      .slice(0, LIVE_TABLE_ROW_CAP)
+      .map((e) => [e.changedDate ?? '—', e.changedBy ?? '—', e.field ?? '—', e.oldValue ?? '∅', e.newValue ?? '∅']),
+  );
+  const scope =
+    (fieldApiName !== null ? ` field \`${fieldApiName}\`` : '') +
+    (recordId !== null ? ` on record \`${recordId}\`` : '') +
+    (days !== null ? ` in the last ${days} days` : '');
+  const rendered =
+    `**${entries.length}** ${objectApiName} history row(s)${scope} (via ${sibling.object}).` +
+    (precondition.state === 'unknown' ? `\n\n> ${precondition.reason}` : '') +
+    `\n\n${table}\n\n${renderTrustFooter(trust)}`;
+  return ok({
+    data: {
+      objectApiName,
+      fieldApiName,
+      recordId,
+      historyObject: sibling.object,
+      days,
+      returned: entries.length,
+      capped: fetched > entries.length,
+      trackingState: precondition.state,
+      entries,
+      disclosure: LIVE_FIELD_HISTORY_DISCLOSURE,
+      ...(note !== undefined ? { note } : {}),
+      trust,
+      rendered,
+    },
     vaultState: livePlaneVaultState(ctx),
   });
 };

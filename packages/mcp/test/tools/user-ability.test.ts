@@ -38,6 +38,10 @@ const seed: ExtractionResult = {
       userPermissions: ['RunReports', 'ExportReport', 'ApiEnabled', 'ManageUsers' /* admin, filtered out */],
       loginIpRanges: [{ startAddress: '10.0.0.1', endAddress: '10.0.0.255' }],
       loginHoursDefined: true,
+      loginHours: [
+        { day: 'Monday', startTime: '480', endTime: '1020' },
+        { day: 'Tuesday', startTime: '480', endTime: '1020' },
+      ],
     } }),
     node({ id: 'PermissionSet:FlowRunner', type: 'PermissionSet', apiName: 'FlowRunner', properties: { userPermissions: [] } }),
     node({ id: 'Flow:Onboard_Contact', type: 'Flow', apiName: 'Onboard_Contact' }),
@@ -89,10 +93,13 @@ describe('userAbilityHandler', () => {
     expect(d.loginRestrictions.ipRangeCount).toBe(1);
     expect(d.loginRestrictions.loginHoursRestricted).toBe(true);
     expect(d.loginRestrictions.applies).toBe(true);
-    // The full IP-range windows are now surfaced structurally (not just counted).
+    // The full IP-range windows are surfaced structurally (not just counted).
     expect(d.loginRestrictions.ipRanges).toEqual([{ startAddress: '10.0.0.1', endAddress: '10.0.0.255' }]);
-    // Login-hours windows are deferred behind the SessionSettings tier — always empty.
-    expect(d.loginRestrictions.loginHours).toEqual([]);
+    // Login-hours per-weekday windows are surfaced structurally too.
+    expect(d.loginRestrictions.loginHours).toEqual([
+      { day: 'Monday', startTime: '480', endTime: '1020' },
+      { day: 'Tuesday', startTime: '480', endTime: '1020' },
+    ]);
   });
 
   it('marks login restrictions not-applicable for a permission set', async () => {

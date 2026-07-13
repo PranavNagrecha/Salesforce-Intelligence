@@ -50,7 +50,11 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import {
+  getNodeById,
+  listEdgesForNodes,
+  listNodesByIds,
+} from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -173,13 +177,21 @@ const upstreamWalk = async (
   let frontier: ComponentId[] = [targetId];
   for (let depth = 0; depth < maxDepth && frontier.length > 0; depth += 1) {
     const next: ComponentId[] = [];
+    // ONE batched fetch of the WHOLE frontier's INCOMING `callsApex` edges,
+    // replacing the per-frontier-node `listEdges` N+1 (~frontier-width serial
+    // DuckDB queries per hop). Iterating `frontier` in order and reading each
+    // node's bucket (sorted by the FULL (to_id, edge_type, from_id, source)
+    // order — the same order `listEdges` returned, and here to_id + edge_type
+    // are fixed per bucket) reproduces the exact `discovered` insertion order
+    // and next-frontier order. Query count is now one per DEPTH LEVEL,
+    // independent of frontier WIDTH.
+    const edgeBatch = await listEdgesForNodes(ctx.graph, frontier, {
+      direction: 'in',
+      edgeTypes: ['callsApex'],
+    });
+    if (!edgeBatch.ok) return err(edgeBatch.error.message);
     for (const id of frontier) {
-      const r = await listEdges(ctx.graph, id, {
-        direction: 'in',
-        edgeType: 'callsApex',
-      });
-      if (!r.ok) return err(r.error.message);
-      for (const edge of r.value) {
+      for (const edge of edgeBatch.value.get(id) ?? []) {
         if (discovered.has(edge.fromId)) continue;
         discovered.set(edge.fromId, depth + 1);
         next.push(edge.fromId);
@@ -261,16 +273,25 @@ export const methodReachabilityHandler = async (
   const entryPoints: EntryPointHit[] = [];
   const reachingTests: ReachingTestClass[] = [];
 
+  // ONE batched `listNodesByIds` over every discovered id, replacing the
+  // per-node `getNodeById` N+1 (~#discovered serial DuckDB queries). Ids with
+  // no matching row are dropped by `listNodesByIds` exactly like the old
+  // per-id null-skip (`node === null` → `continue`). Iterating `walkRes.value`
+  // in its BFS insertion order and looking each node up by-id reproduces the
+  // byte-identical `entryPoints` / `reachingTests` push order (both re-sorted
+  // by the caller regardless).
+  const nodesRes = await listNodesByIds(ctx.graph, [...walkRes.value.keys()]);
+  if (!nodesRes.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${nodesRes.error.message}`,
+    });
+  }
+  const nodeById = new Map(nodesRes.value.map((n) => [n.id, n]));
+
   for (const [id, depth] of walkRes.value) {
-    const r = await getNodeById(ctx.graph, id);
-    if (!r.ok) {
-      return err({
-        kind: 'internal',
-        message: `graph query failed: ${r.error.message}`,
-      });
-    }
-    const node = r.value;
-    if (node === null) continue;
+    const node = nodeById.get(id);
+    if (node === undefined) continue;
 
     for (const kind of entryKindsFor(node)) {
       entryPoints.push({ id: node.id, apiName: node.apiName, kind, depth });

@@ -23,6 +23,8 @@ import {
   callGraphInputSchema,
 } from '../../src/tools/call-graph.js';
 
+import { measureGraphQueries } from './_graph-query-budget.js';
+
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
   refreshedAt: '2026-05-28T09:12:00Z',
@@ -552,5 +554,190 @@ describe('callGraphHandler: callerMethods (CR-CAP-06)', () => {
     if (!r.ok) return;
     expect(r.value.data.disclosure).toMatch(/callerMethods/);
     expect(r.value.data.disclosure).toMatch(/apex-ast/);
+  });
+});
+
+// =============================================================================
+// N+1 query budget (finding #6a). `walkOneDirection`'s per-frontier-node
+// `listEdges` and `resolveNodes`' per-node `getNodeById` were batched through
+// `listEdgesForNodes` / `listNodesByIds`. The query count must scale with the
+// walk DEPTH (and the two directions), NEVER frontier WIDTH. A golden-output
+// assertion over a transitive both-direction fixture (chain + diamond + AST
+// caller edge) locks the batched result byte-for-byte against the pre-batch
+// output captured before the change.
+// =============================================================================
+describe('callGraphHandler — bounded graph queries (transitive)', () => {
+  const withStore = async <T>(
+    seedData: ExtractionResult,
+    run: (ctx: Context, s: GraphStore) => Promise<T>,
+  ): Promise<T> => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-cg-budget-'));
+    const opened = await openGraph(join(dir, 'cg.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const s = opened.value;
+    const imported = await importExtractionResults(s, [seedData]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const localCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s } as Context;
+    const out = await run(localCtx, s);
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+    return out;
+  };
+
+  // Root --calls--> Mid --calls--> Leaf (downstream chain), Root --calls-->
+  // Sib via an AST edge carrying callerMethods, Up2 --calls--> Up1 --calls-->
+  // Root (upstream chain), plus a Trigger entry into Root. Exercises both
+  // walk directions, multi-hop depth, a method-target edge, and an AST
+  // caller-method edge in one shot.
+  const goldenSeed: ExtractionResult = {
+    nodes: [
+      makeNode({ id: 'ApexClass:Root', apiName: 'Root' }),
+      makeNode({ id: 'ApexClass:Mid', apiName: 'Mid' }),
+      makeNode({ id: 'ApexClass:Leaf', apiName: 'Leaf' }),
+      makeNode({ id: 'ApexClass:Sib', apiName: 'Sib' }),
+      makeNode({ id: 'ApexClass:Up1', apiName: 'Up1' }),
+      makeNode({ id: 'ApexClass:Up2', apiName: 'Up2' }),
+      makeNode({ id: 'ApexTrigger:RootTrig', type: 'ApexTrigger', apiName: 'RootTrig' }),
+    ],
+    edges: [
+      makeEdge({
+        fromId: 'ApexClass:Root',
+        toId: 'ApexClass:Mid',
+        edgeType: 'callsApex',
+        properties: { methods: ['go', 'run'], methodName: 'go' },
+      }),
+      makeEdge({
+        fromId: 'ApexClass:Root',
+        toId: 'ApexClass:Sib',
+        edgeType: 'callsApex',
+        confidence: 'parsed',
+        source: 'apex-ast',
+        properties: { methods: ['x'], callerMethods: ['b', 'a'] },
+      }),
+      makeEdge({ fromId: 'ApexClass:Mid', toId: 'ApexClass:Leaf', edgeType: 'callsApex' }),
+      makeEdge({ fromId: 'ApexClass:Up1', toId: 'ApexClass:Root', edgeType: 'callsApex' }),
+      makeEdge({ fromId: 'ApexClass:Up2', toId: 'ApexClass:Up1', edgeType: 'callsApex' }),
+      makeEdge({
+        fromId: 'ApexTrigger:RootTrig',
+        toId: 'ApexClass:Root',
+        edgeType: 'callsApex',
+      }),
+    ],
+  };
+
+  it('golden: the batched both-direction walk is byte-identical to the pre-batch output', async () => {
+    const result = await withStore(goldenSeed, (localCtx) =>
+      callGraphHandler(localCtx, { rootId: 'ApexClass:Root', direction: 'both', maxDepth: 5 }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Captured from the pre-batch handler on this exact fixture; the batching
+    // may reorder neither nodes nor edges (both are deterministically sorted).
+    expect(result.value.data).toEqual({
+      rootId: 'ApexClass:Root',
+      direction: 'both',
+      nodes: [
+        { id: 'ApexClass:Root', type: 'ApexClass', apiName: 'Root', depth: 0 },
+        { id: 'ApexClass:Mid', type: 'ApexClass', apiName: 'Mid', depth: 1 },
+        { id: 'ApexClass:Sib', type: 'ApexClass', apiName: 'Sib', depth: 1 },
+        { id: 'ApexClass:Up1', type: 'ApexClass', apiName: 'Up1', depth: 1 },
+        { id: 'ApexTrigger:RootTrig', type: 'ApexTrigger', apiName: 'RootTrig', depth: 1 },
+        { id: 'ApexClass:Leaf', type: 'ApexClass', apiName: 'Leaf', depth: 2 },
+        { id: 'ApexClass:Up2', type: 'ApexClass', apiName: 'Up2', depth: 2 },
+      ],
+      edges: [
+        {
+          fromId: 'ApexClass:Root',
+          toId: 'ApexClass:Mid',
+          fromDepth: 0,
+          source: 'apex-scanner',
+          confidence: 'heuristic',
+          methods: ['go', 'run'],
+        },
+        {
+          fromId: 'ApexClass:Root',
+          toId: 'ApexClass:Sib',
+          fromDepth: 0,
+          source: 'apex-ast',
+          confidence: 'parsed',
+          methods: ['x'],
+          callerMethods: ['a', 'b'],
+        },
+        {
+          fromId: 'ApexClass:Mid',
+          toId: 'ApexClass:Leaf',
+          fromDepth: 1,
+          source: 'apex-scanner',
+          confidence: 'heuristic',
+          methods: [],
+        },
+        {
+          fromId: 'ApexClass:Up1',
+          toId: 'ApexClass:Root',
+          fromDepth: 1,
+          source: 'apex-scanner',
+          confidence: 'heuristic',
+          methods: [],
+        },
+        {
+          fromId: 'ApexTrigger:RootTrig',
+          toId: 'ApexClass:Root',
+          fromDepth: 1,
+          source: 'apex-scanner',
+          confidence: 'heuristic',
+          methods: [],
+        },
+        {
+          fromId: 'ApexClass:Up2',
+          toId: 'ApexClass:Up1',
+          fromDepth: 2,
+          source: 'apex-scanner',
+          confidence: 'heuristic',
+          methods: [],
+        },
+      ],
+      cycleDetected: false,
+      maxDepthReached: 2,
+      disclosure: result.value.data.disclosure,
+    });
+  });
+
+  // Root callsApex `width` leaf classes (a wide frontier at depth 1); each leaf
+  // is a downstream sink with no outgoing edges. Depth is fixed; the query
+  // count is bounded by depth (one listEdgesForNodes per BFS level + one
+  // listNodesByIds node resolve), not the leaf count.
+  const seedWideFrontier = (width: number): ExtractionResult => ({
+    nodes: [
+      makeNode({ id: 'ApexClass:Root', apiName: 'Root' }),
+      ...Array.from({ length: width }, (_u, i) =>
+        makeNode({ id: `ApexClass:Leaf${i}`, apiName: `Leaf${i}` }),
+      ),
+    ],
+    edges: Array.from({ length: width }, (_u, i) =>
+      makeEdge({ fromId: 'ApexClass:Root', toId: `ApexClass:Leaf${i}`, edgeType: 'callsApex' }),
+    ),
+  });
+
+  it('query count is depth-bounded, NOT frontier-width-scaled (N=60 vs N=200)', async () => {
+    const measure = (width: number) =>
+      withStore(seedWideFrontier(width), (localCtx, s) =>
+        measureGraphQueries(s, () =>
+          callGraphHandler(localCtx, {
+            rootId: 'ApexClass:Root',
+            direction: 'downstream',
+            maxDepth: 5,
+          }),
+        ),
+      );
+    const narrow = await measure(60);
+    const wide = await measure(200);
+    expect(narrow.result.ok).toBe(true);
+    expect(wide.result.ok).toBe(true);
+    // Flat: one listEdgesForNodes per BFS depth level + one listNodesByIds
+    // resolve, NOT one listEdges/getNodeById per discovered class. An N+1
+    // would be ~2*width queries.
+    expect(wide.edgeQueries).toBe(narrow.edgeQueries);
+    expect(wide.nodeQueries).toBe(narrow.nodeQueries);
+    expect(wide.edgeQueries + wide.nodeQueries).toBeLessThan(15);
   });
 });

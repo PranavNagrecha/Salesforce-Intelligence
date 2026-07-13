@@ -14,6 +14,7 @@ import { loadManifest, summarizeCoverage } from '@sf-intelligence/vault';
 
 import {
   buildFolderedReportManifest,
+  buildPackageXml,
   buildRefreshPulse,
   computeChangeSummary,
   countLandedReportMembers,
@@ -494,6 +495,48 @@ describe('selectManifestTypes', () => {
     const { included } = selectManifestTypes(null, orgTypes);
     expect([...included].sort()).toEqual(['ApexClass', 'CustomObject']);
   });
+
+  it('includes GenAiPlannerBundle when the org describe reports it (R6-30)', () => {
+    // The type-name intersection has no special-casing for GenAiPlannerBundle
+    // (it maps to its own xmlName via the identity fallback in `toApiName`), so
+    // it passes through selection like any other type once a describe lists it.
+    // The version floor that makes the describe/retrieve actually SEE the type
+    // is a separate manifest-generation concern: it needs Metadata API v65.0+,
+    // which the pipeline pins BELOW (62.0) to keep Profile grants intact, so in
+    // practice this type stays deferred until a split manifest exists.
+    const requested = new Set(['GenAiPlannerBundle', 'ApexClass'] as const);
+    const orgTypes = new Set(['GenAiPlannerBundle', 'ApexClass']);
+    const { included, dropped } = selectManifestTypes(requested, orgTypes);
+    expect([...included].sort()).toEqual(['ApexClass', 'GenAiPlannerBundle']);
+    expect(dropped).toEqual([]);
+  });
+});
+
+describe('buildPackageXml API version floor (profile-safe)', () => {
+  it('stamps the profile-safe 62.0 floor into the generated manifest', () => {
+    // Pinned at 62.0 to avoid a HIGH-severity vault regression the 64.0 bump
+    // caused. NOT because v64 strips Profiles (a co-retrieved Profile is
+    // identical at v62/v64) — but because at v64 the org describe surfaces
+    // GenAiPlannerBundle, which is un-retrievable until v65 and fails the whole
+    // combined retrieve; the fallback then binary-splits the types, separating
+    // Profile (and object child types) from CustomObject/ApexClass, and those
+    // grants only serialize when co-named — so the split bares them out. 62.0
+    // keeps the poison type out of the manifest. See the SF_API_VERSION doc.
+    const xml = buildPackageXml(['ApexClass']);
+    expect(xml).toContain('<version>62.0</version>');
+    expect(xml).not.toContain('<version>64.0</version>');
+  });
+
+  it('emits a <types> block for any requested type, stamped at the pinned version', () => {
+    // buildPackageXml is version-agnostic XML formatting — it stamps whatever
+    // types it is handed. GenAiPlannerBundle is still formatted here even though
+    // it is not retrievable at 62.0 (selectManifestTypes drops it when the org
+    // describe omits it); the deferral is a version concern, not a formatting one.
+    const xml = buildPackageXml(['GenAiPlannerBundle']);
+    expect(xml).toContain('<name>GenAiPlannerBundle</name>');
+    expect(xml).toContain('<members>*</members>');
+    expect(xml).toContain('<version>62.0</version>');
+  });
 });
 
 describe('manifestMembersForType', () => {
@@ -508,6 +551,33 @@ describe('manifestMembersForType', () => {
   it('uses only * for non-CustomObject types', () => {
     expect(manifestMembersForType('ApexClass')).toEqual(['*']);
     expect(manifestMembersForType('Flow')).toEqual(['*']);
+  });
+
+  it('prunes named standard objects the org lacks when a describeGlobal set is supplied (26c103e guard)', () => {
+    // Regression guard: 26c103e named eleven Field Service objects (and `Order`
+    // predates it) unconditionally. In an org without those features enabled
+    // the object is ABSENT, and naming an absent member makes the CustomObject
+    // retrieve fragile. With an org-object set the named list is intersected
+    // with it — absent objects drop out, `*` and present objects stay.
+    const orgObjects = new Set(['Account', 'Contact', 'Case', 'ServiceResource']);
+    const members = manifestMembersForType('CustomObject', orgObjects);
+    expect(members).toContain('*');
+    expect(members).toContain('Account');
+    expect(members).toContain('ServiceResource');
+    // Absent (Field Service not enabled): must NOT be named.
+    expect(members).not.toContain('WorkOrder');
+    expect(members).not.toContain('Order');
+    // Only `*` plus the four that exist — nothing the org lacks.
+    expect(members).toEqual(['*', 'Account', 'Contact', 'Case', 'ServiceResource']);
+  });
+
+  it('names the full standard list when no describeGlobal set is supplied (legacy null-safe path)', () => {
+    // Undefined/null orgObjects preserves the pre-guard behaviour so a
+    // describe-blind refresh still models the common standard objects.
+    const members = manifestMembersForType('CustomObject');
+    expect(members).toContain('WorkOrder');
+    expect(members).toContain('Order');
+    expect(manifestMembersForType('CustomObject', null)).toEqual(members);
   });
 });
 

@@ -29,6 +29,11 @@ import type { McpError, McpResponse } from '@sf-intelligence/contracts';
 import { ok, type Result, type UpdateCheckResult } from '@sf-intelligence/core';
 import { z } from 'zod';
 
+import {
+  gapLogPath,
+  routeGapsNudge,
+  type RouteGapsNudge,
+} from '../intent-router.js';
 import type { Context } from '../server.js';
 
 /**
@@ -149,6 +154,12 @@ export interface CapabilitiesOutput {
    * actually emits — see the contracts `ConfidenceLevel` / `Provenance`).
    */
   readonly trustGlossary: TrustGlossary;
+  /**
+   * Open route-gap count from the local opt-in gap log (R8-GAPLOG-SURFACE).
+   * `nudge` is non-null only above the threshold so a quiet machine stays quiet.
+   * Category/count only — never includes question text.
+   */
+  readonly routeGaps: RouteGapsNudge;
 }
 
 /** The npm-update sub-report of {@link CapabilitiesOutput}. */
@@ -239,6 +250,7 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
       'What is the payment object actually called?',
       'Find the field that stores a social security number.',
       'Is there a class that handles refunds?',
+      'Advanced: query the graph for every ApexClass whose name starts with Billing.',
     ],
     tools: [
       'sfi.resolve',
@@ -247,6 +259,7 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
       'sfi.find_semantic_field',
       'sfi.get_component',
       'sfi.list_components',
+      'sfi.query_graph',
     ],
   },
   {
@@ -263,6 +276,8 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
       'Is my new automation a duplicate of something that already fires on save?',
       'Give me the full profile of this field.',
       'What happens when an Opportunity becomes Closed Won?',
+      'A user pasted this save error — which component produced it?',
+      'Explain this Apex debug log / governor-limit exception and point me at the class.',
     ],
     tools: [
       'sfi.explain_field',
@@ -273,6 +288,8 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
       'sfi.what_happens_on_save',
       'sfi.lifecycle_process',
       'sfi.field_360',
+      'sfi.explain_error',
+      'sfi.explain_debug_log',
     ],
   },
   {
@@ -288,6 +305,7 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
       'Is it safe to deactivate this flow?',
       'What if I make this field required?',
       'What of mine breaks if I uninstall the SBQQ package?',
+      'Is this changeset safe to deploy?',
     ],
     tools: [
       'sfi.get_impact',
@@ -297,6 +315,7 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
       'sfi.safe_to_delete_field',
       'sfi.what_if_deactivate_flow',
       'sfi.package_impact',
+      'sfi.review_change',
     ],
   },
   {
@@ -309,6 +328,8 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
       'Who can edit the Salary field?',
       'Which permission sets are assigned to nobody?',
       'Summarize sharing for the Account object.',
+      'What can unauthenticated guest users see in my community?',
+      'What access would this user gain if I assign the Sales Console permission set?',
     ],
     tools: [
       'sfi.why_cant_user_see_record',
@@ -316,6 +337,9 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
       'sfi.field_access_audit',
       'sfi.generate_sharing_summary',
       'sfi.unassigned_permission_sets',
+      'sfi.guest_exposure_report',
+      'sfi.what_if_assign_permset',
+      'sfi.what_if_revoke_permset',
     ],
   },
   {
@@ -325,19 +349,25 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
       'Trace what runs and when — the order of execution on save, the Apex call graph, governor-limit risks, dead code, and test coverage.',
     exampleQuestions: [
       'What automation runs when a Case is created?',
+      'How do Case records get created?',
+      'Which flows have no fault path on their DML elements?',
       'Show the call graph for this Apex class.',
       'Which Apex methods have no real test coverage?',
       'Which tests should I run for the classes I changed?',
       'Where are the governor-limit risks?',
+      'Are two automations fighting over the same field on Account?',
     ],
     tools: [
       'sfi.order_of_execution',
+      'sfi.record_creation_paths',
+      'sfi.flow_fault_audit',
       'sfi.call_graph',
       'sfi.governor_limit_risks',
       'sfi.find_dead_code',
       'sfi.test_coverage_for_method',
       'sfi.tests_for_change',
       'sfi.method_reachability',
+      'sfi.automation_collisions',
     ],
   },
   {
@@ -374,6 +404,7 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
       'sfi.generate_architecture_overview',
       'sfi.generate_data_dictionary',
       'sfi.generate_onboarding_doc',
+      'sfi.generate_fleet_report',
     ],
   },
   {
@@ -386,6 +417,11 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
       'What changed since last month?',
       'Where is PII stored in this org?',
       'How much technical debt is there?',
+      'What data can my Agentforce agent see?',
+      'Is my AI agent exposing PII?',
+      'Which fields do my prompt templates ground on?',
+      'Which sensitive fields have no field-history tracking enabled?',
+      'Which annotation proposals are still unconfirmed?',
     ],
     tools: [
       'sfi.health_check',
@@ -394,13 +430,16 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
       'sfi.org_pulse',
       'sfi.changed_since',
       'sfi.trend',
-      'sfi.churn',
+      'sfi.diff_snapshots',
       'sfi.baseline_status',
       'sfi.last_modified',
       'sfi.pii_inventory',
+      'sfi.ai_exposure_report',
+      'sfi.history_tracking_gaps',
+      'sfi.review_annotations',
+      'sfi.component_change_attribution',
       'sfi.tech_debt_score',
       'sfi.org_risk_report',
-      'sfi.release_readiness_report',
     ],
   },
   {
@@ -413,6 +452,8 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
       'Sample 10 Opportunities in Negotiation.',
       'What are the current org governor limits?',
       'Which paid licenses are provisioned but unused?',
+      'Which owners have data skew on Account?',
+      'Run a live security exposure check on the org.',
     ],
     tools: [
       'sfi.live_count',
@@ -425,6 +466,12 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
       'sfi.live_aggregate',
       'sfi.live_duplicate_check',
       'sfi.live_owner_breakdown',
+      'sfi.live_data_skew',
+      'sfi.live_security_exposure',
+      'sfi.live_record_access',
+      'sfi.live_record_shares',
+      'sfi.live_scheduled_jobs',
+      'sfi.live_field_history',
       'sfi.live_storage_by_object',
       'sfi.live_org_limits',
       'sfi.live_inactive_users',
@@ -433,6 +480,7 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
       'sfi.live_zombie_accounts',
       'sfi.live_group_members',
       'sfi.live_user_permsets',
+      'sfi.live_setup_audit_trail',
       'sfi.live_report_usage',
       'sfi.live_folder_access',
       'sfi.live_email_template_usage',
@@ -497,7 +545,7 @@ const PERSONAS: readonly Persona[] = [
       'Change readiness and risk — is the org safe to deploy, what changed since the last refresh, the blast radius and risk of a specific change, and which tests to run for it.',
     categoryIds: ['impact', 'govern', 'find', 'docs'],
     questionPaths: [
-      { question: 'Is this org ready to deploy?', tools: ['sfi.release_readiness_report'] },
+      { question: 'Is this org ready to deploy?', tools: ['sfi.org_risk_report'] },
       { question: 'What changed since the last refresh?', tools: ['sfi.what_changed_since_refresh', 'sfi.changed_since'] },
       { question: 'What breaks if I change this field?', tools: ['sfi.resolve', 'sfi.field_change_advisor', 'sfi.get_impact'] },
       { question: 'Which tests should I run for this change?', tools: ['sfi.resolve', 'sfi.tests_for_change'] },
@@ -546,6 +594,10 @@ const INTELLIGENCE_PLANES: readonly IntelligencePlane[] = [
       'sfi.live_aggregate',
       'sfi.live_duplicate_check',
       'sfi.live_owner_breakdown',
+      'sfi.live_record_access',
+      'sfi.live_record_shares',
+      'sfi.live_scheduled_jobs',
+      'sfi.live_field_history',
       'sfi.live_storage_by_object',
       'sfi.live_org_limits',
       'sfi.live_inactive_users',
@@ -554,6 +606,7 @@ const INTELLIGENCE_PLANES: readonly IntelligencePlane[] = [
       'sfi.live_zombie_accounts',
       'sfi.live_group_members',
       'sfi.live_user_permsets',
+      'sfi.live_setup_audit_trail',
       'sfi.live_report_usage',
       'sfi.live_folder_access',
       'sfi.live_email_template_usage',
@@ -568,7 +621,7 @@ const INTELLIGENCE_PLANES: readonly IntelligencePlane[] = [
       'Combine static impact from the vault with live population or counts when the user needs both "what references this?" and "how empty is it in production?"',
     default: false,
     enablement: 'Enable live plane, then pair vault tools with sfi.live_*; disclose both provenance values.',
-    tools: ['sfi.get_impact', 'sfi.live_field_population', 'sfi.field_cleanup_candidates'],
+    tools: ['sfi.get_impact', 'sfi.live_field_population', 'sfi.unused_fields_deep'],
   },
 ];
 
@@ -615,7 +668,7 @@ const BOUNDARIES: readonly string[] = [
   'Offline by default: vault tools use the last /sfi-refresh snapshot. Live tools are opt-in and labeled provenance live_org.',
   'Coverage-aware: partial vault coverage downgrades unqualified “safe” and “none” claims — check sfi.coverage_report first.',
   'SAST suppression: use sfi.baseline_acknowledge for false positives; sfi.baseline_status lists what is muted.',
-  'Change over time: sfi.trend and sfi.churn need persisted `sfi snapshot create` captures after refreshes.',
+  "Change over time: sfi.trend and sfi.diff_snapshots need persisted `sfi snapshot create` captures after refreshes. Pass `metric: 'securityScore'` on sfi.trend for capture-time security posture (0–100).",
   'Metadata-first: record-level answers require sfi.live_* (when enabled) or direct sf data query — not silent vault inference.',
   'Every named org artifact is backed by a tool call and a canonical id; the tools do not speculate from general Salesforce knowledge.',
 ];
@@ -642,18 +695,24 @@ export const capabilitiesHandler = async (
   ctx: Context,
   _input: CapabilitiesInput,
   update: UpdateCheckResult | null = null,
+  opts?: { readonly gapLogFile?: string },
 ): Promise<Result<McpResponse<CapabilitiesOutput>, McpError>> => {
   // Derive the live tool count from the dispatcher registry. Imported here
   // (not at module top level) so the index <-> capabilities import cycle
   // resolves at call-time, when both modules are fully initialized.
   const { V01_TOOLS } = await import('./index.js');
+  const routeGaps = await routeGapsNudge(opts?.gapLogFile ?? gapLogPath());
 
   return ok({
     data: {
       product: 'sf-intelligence',
       tagline:
         'Offline, MCP-first knowledge base for one Salesforce org — ask questions in plain language, get answers grounded in the org’s real metadata.',
-      toolCount: V01_TOOLS.length,
+      // ADVERTISED count: the distinct tools a host sees via tools/list — the
+      // 4 hidden back-compat aliases are excluded (matches website/recalibrate.mjs
+      // and the roster convention). Profile-independent headline (always the full
+      // advertised set, not the core-narrowed 18).
+      toolCount: V01_TOOLS.filter((t) => !t.hidden).length,
       commandCount: COMMANDS.length,
       intelligencePlanes: INTELLIGENCE_PLANES,
       categories: CATEGORIES,
@@ -665,6 +724,7 @@ export const capabilitiesHandler = async (
       disclosure: CAPABILITIES_DISCLOSURE,
       update: toUpdateAvailability(update),
       trustGlossary: TRUST_GLOSSARY,
+      routeGaps,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

@@ -198,6 +198,10 @@ const CASES: readonly Case[] = [
 
   // Integration
   { q: 'What integrations and named credentials do we have?', intent: 'integration-map', plane: 'vault' },
+  // Finding #44: martech connections — org-wide catalog ask, no named component.
+  { q: 'What marketing tools does this org have?', intent: 'martech-connections', plane: 'vault' },
+  { q: 'Does this org have Pardot?', intent: 'martech-connections', plane: 'vault' },
+  { q: 'What martech connections does this org have?', intent: 'martech-connections', plane: 'vault' },
   { q: 'Who subscribes to the Order platform event?', intent: 'event-subscribers', plane: 'vault' },
   { q: 'What platform events does this org publish?', intent: 'event-catalog', plane: 'vault' },
   { q: 'What endpoints do we call out to?', intent: 'endpoints', plane: 'vault' },
@@ -234,6 +238,9 @@ const CASES: readonly Case[] = [
   { q: 'When was the Status field last modified?', intent: 'last-modified', plane: 'vault' },
   { q: "What's different between UAT and prod?", intent: 'cross-org-diff', plane: 'vault' },
   { q: 'Show me the churn between snapshots', intent: 'snapshot-diff', plane: 'vault' },
+  // R8-SECURITY-TREND — posture-over-time must beat generic snapshot-diff and
+  // suggest metric:securityScore.
+  { q: 'Is our security posture getting better or worse?', intent: 'security-posture-trend', plane: 'vault' },
 
   // CPQ / OmniStudio
   { q: 'Explain the CPQ price rules', intent: 'cpq', plane: 'vault' },
@@ -337,6 +344,13 @@ const CASES: readonly Case[] = [
   // two grandfathered tools with real phrasings.
   { q: 'When did the Status field change?', intent: 'component-history', plane: 'vault' },
   { q: 'Show the change history of the Payment flow', intent: 'component-history', plane: 'vault' },
+  // #39 — offline persisted SetupAuditTrail attribution (must beat runtime-audit-trail).
+  {
+    q: 'Who changed this validation rule according to the persisted setup audit trail?',
+    intent: 'component-change-attribution',
+    plane: 'vault',
+  },
+  { q: 'offline setup change attribution for AlphaController', intent: 'component-change-attribution', plane: 'vault' },
   { q: 'Who owns the Status field?', intent: 'annotations-owner', plane: 'vault' },
   { q: 'What is the help text for the Discount_Percent__c field?', intent: 'field-meaning', plane: 'vault' },
   { q: 'What is the relationship between Account and Contact?', intent: 'schema', plane: 'vault' },
@@ -705,6 +719,15 @@ describe('classifyQuestion edge cases', () => {
     expect(
       classifyQuestion('give me an overview of this org').suggestedArgs,
     ).toBeUndefined();
+  });
+
+  it('security-posture-trend suggests metric:securityScore (R8-SECURITY-TREND)', () => {
+    const r = classifyQuestion(
+      'Is our security posture getting better or worse across refreshes?',
+    );
+    expect(r.intent).toBe('security-posture-trend');
+    expect(r.tools[0]).toBe('sfi.trend');
+    expect(r.suggestedArgs).toEqual({ metric: 'securityScore' });
   });
 
   it('schema route suggests the list_components `type` for enumerations (P1-B14-exec)', () => {
@@ -1083,7 +1106,12 @@ describe('router ↔ roster contract (CI gate)', () => {
     // P13-ANNOT-tools — `propose_annotation` is agent plumbing, never a
     // question's primary answer. sfi.annotations is now router-reachable
     // ("who owns X" — P14-ROUTER-goldset-expand).
+    // R8-ANNOTATION-REVIEW — review/confirm/reject are host-driven review
+    // verbs (user sign-off), not natural-language question answers.
     'sfi.propose_annotation',
+    'sfi.review_annotations',
+    'sfi.confirm_annotation',
+    'sfi.reject_annotation',
     // P13-GITHIST-tools — `component_as_of` is a drill reached AFTER a
     // component is in hand; sfi.component_history is now router-reachable
     // ("when did X change" — P14-ROUTER-goldset-expand).
@@ -1121,13 +1149,76 @@ describe('router ↔ roster contract (CI gate)', () => {
     // queue-group-member-roster / user-permset-holdings arms, and the
     // zombie-accounts arm), so they were removed from this list — the
     // stale-entry test below enforces that removal.
+    //
+    // R7-W6 (router-v2 pass): sfi.automation_collisions, sfi.live_setup_audit_
+    // trail, sfi.ai_exposure_report, sfi.explain_error, sfi.live_record_access,
+    // sfi.live_record_shares, sfi.live_scheduled_jobs, sfi.live_field_history,
+    // and sfi.review_change are all now router-reachable — each got a
+    // dedicated, low-collision deterministic intent (see intent-router.ts:
+    // 'automation-collisions', 'live-setup-audit-trail', 'ai-exposure',
+    // 'explain-error', 'live-record-access', 'live-record-shares',
+    // 'live-scheduled-jobs', 'live-field-history', 'review-change') anchored
+    // on vocabulary the overlapping neighbor intent never uses, so the
+    // collisions the R6/R6B notes above worried about (automation-risk,
+    // why-cant-see, scheduled-jobs, why-field-changed / runtime-audit-trail,
+    // release-readiness) are avoided rather than hand-waved. review_change
+    // still needs a caller-ASSEMBLED `components` array (from a PR /
+    // package.xml / git diff) that the router cannot derive from question
+    // text — same as several already-routable tools with non-derivable
+    // required args (e.g. live_record_access's recordId) — so the route is a
+    // hint for the agent to then assemble the set and call the tool, not a
+    // fully self-contained dispatch; that does not disqualify it from
+    // "routable" here. All nine removed from this list — the stale-entry test
+    // below enforces that removal.
+    // R7-W7: sfi.history_tracking_gaps (compliance audit — PII/sensitive
+    // CustomFields with no field-history tracking) ships without a dedicated
+    // deterministic-router rule. Its phrasing space ("history tracking",
+    // "audit trail", "compliance gap") overlaps the EXISTING pii/sensitive
+    // vocabulary the regex router already routes toward sfi.pii_inventory —
+    // disentangling the two needs eval-harness-informed tuning, which a
+    // parallel-branch builder should not hand-tune in isolation. The tool IS
+    // reachable via the hybrid-mode semantic funnel (see funnel-utterances.ts)
+    // and via sfi.capabilities' `govern` category; grandfathered here pending
+    // the orchestrator's router-v2 pass, exactly as R6-15 (automation_collisions).
+    'sfi.history_tracking_gaps',
+    // R7-C4: sfi.query_graph is the ADVANCED, power-user raw-graph query surface
+    // (structured, allowlisted, read-only SELECT over nodes/edges). It is an
+    // escape hatch for filters the purpose-built tools do not expose, NOT a
+    // primary answer to any natural question — and a deterministic regex intent
+    // would actively STEAL phrasings from get_edges / list_components /
+    // search_components (the grounded tools that must answer ordinary asks
+    // first). It IS reachable via the hybrid-mode semantic funnel (varied
+    // "query the graph for X" / "raw graph query" / "advanced: find all edges
+    // where…" utterances in funnel-utterances.ts) and via sfi.capabilities'
+    // `find` category; grandfathered here pending the orchestrator's router-v2
+    // pass, exactly as R6-15 (automation_collisions) / R6-16 (review_change).
+    'sfi.query_graph',
+    // R7-C6: sfi.generate_fleet_report (the "state of my orgs" digest,
+    // composed across every registered vault) ships without a dedicated
+    // deterministic-router rule. Its natural phrasing ("fleet report",
+    // "state of the fleet", "which of my orgs is most out of date") heavily
+    // overlaps the EXISTING fleet-drift-ranking intent's vocabulary
+    // (line ~1775) and the generate_architecture_overview / org-overview
+    // "overview" vocabulary — disentangling the three without the eval
+    // harness risks stealing a phrasing from an already-tuned intent. The
+    // tool IS reachable via the hybrid-mode semantic funnel (utterances
+    // added to funnel-utterances.ts, same pattern as sibling sfi.fleet_find)
+    // and via sfi.capabilities' `docs` category; a deterministic regex
+    // intent is deferred to the orchestrator's router-v2 pass, exactly as
+    // R6-15/R6-16.
+    'sfi.generate_fleet_report',
   ]);
 
   it('every V01 tool is router-reachable OR explicitly grandfathered (no silently-unrouted tool)', () => {
     const routable = new Set(allRoutableTools());
-    const orphans = V01_TOOLS.map((t) => t.name).filter(
-      (name) => !routable.has(name) && !GRANDFATHERED_NON_ROUTABLE.has(name),
-    );
+    // Hidden tools (back-compat aliases) are DELIBERATELY un-routed — their
+    // intent-router rules were repointed to the survivor — so they are exempt
+    // from the reachability requirement (they stay dispatchable by name only).
+    const orphans = V01_TOOLS.filter((t) => !t.hidden)
+      .map((t) => t.name)
+      .filter(
+        (name) => !routable.has(name) && !GRANDFATHERED_NON_ROUTABLE.has(name),
+      );
     expect(orphans).toEqual([]);
   });
 
@@ -2699,7 +2790,9 @@ describe('usage/impact/field-forensics REACH routing', () => {
         'Is this org release-ready for the summer push, or are there blockers I should know about?',
       );
       expect(r.intent).toBe('release-readiness');
-      expect(r.tools).toContain('sfi.release_readiness_report');
+      // STEP-2: release_readiness_report retired to a hidden alias; the survivor
+      // org_risk_report (its `gate: true` MODE) now leads this intent.
+      expect(r.tools).toContain('sfi.org_risk_report');
     });
 
     // --- empty queues / groups (routing-trap symptom) ---------------------

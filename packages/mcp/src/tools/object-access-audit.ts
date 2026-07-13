@@ -39,7 +39,7 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import { getNodeById, listEdges, listNodesByIds } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -222,14 +222,25 @@ export const objectAccessAuditHandler = async (
   }
   const notModeled = objectNode === null;
 
+  // ONE batched fetch of every grantor node, replacing the per-edge
+  // `getNodeById` N+1 (Account-class hubs fan out to hundreds of grants). The
+  // per-edge Map lookup preserves the old null-skip (`listNodesByIds` drops ids
+  // with no row) and multiplicity (a granter reachable via two edges still emits
+  // two rows, each reading its own edge properties); `grants` is re-sorted by
+  // `compareGrants` below so push order is irrelevant.
+  const grantorNodesResult = await listNodesByIds(
+    ctx.graph,
+    grantedByResult.value.map((e) => e.fromId),
+  );
+  if (!grantorNodesResult.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${grantorNodesResult.error.message}` });
+  }
+  const grantorById = new Map(grantorNodesResult.value.map((n) => [n.id, n]));
+
   const grants: ObjectAccessGrant[] = [];
   for (const edge of grantedByResult.value) {
-    const grantorResult = await getNodeById(ctx.graph, edge.fromId);
-    if (!grantorResult.ok) {
-      return err({ kind: 'internal', message: `graph query failed: ${grantorResult.error.message}` });
-    }
-    const grantor: Node | null = grantorResult.value;
-    if (grantor === null) continue; // sparse edge target
+    const grantor: Node | undefined = grantorById.get(edge.fromId);
+    if (grantor === undefined) continue; // sparse edge target
     if (!GRANTOR_TYPES.has(grantor.type)) continue; // not a profile/permset grant
     const p = edge.properties;
     grants.push({
@@ -314,7 +325,7 @@ export const objectAccessAuditHandler = async (
     conferringGroups > 0
       ? `${conferringGroups} row(s) are PermissionSetGroup-conferred (a group whose member permission set grants this object); these are included as distinct access paths.` +
         (mutingPsgIds.size > 0
-          ? ` ${mutingPsgIds.size} of those group(s) (${[...mutingPsgIds].sort().join(', ')}) reference a muting permission set — muting is NOT subtracted, so effective access may be lower.`
+          ? ` ${mutingPsgIds.size} of those group(s) (${[...mutingPsgIds].sort().join(', ')}) reference a muting permission set — muting is NOT subtracted here (this roster shows raw grant paths), so effective access may be lower; use \`sfi.effective_permissions\` for the muting-correct net grant (R6-06).`
           : '')
       : undefined;
   const note = [multiPathNote, psgNote].filter((n) => n !== undefined).join(' ');

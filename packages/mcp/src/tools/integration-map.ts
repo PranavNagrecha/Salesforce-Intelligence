@@ -17,6 +17,15 @@
  * OmniStudio org (whose external surface is overwhelmingly IP REST
  * callouts) would read as having "No integration metadata found".
  *
+ * It ALSO surfaces `martechConnectors` (Finding #44): a friendly-name
+ * decoration over data this tool and `installed_package_catalog` already
+ * see — an `InstalledPackage` node whose namespace matches a known martech
+ * vendor (Marketing Cloud Connect / Pardot / Marketo), or a NamedCredential
+ * / ExternalDataSource whose declared endpoint host matches a known martech
+ * domain (adds HubSpot, which has no reliable namespace signal). This adds
+ * NO new extraction — see `packages/mcp/src/known-integration-packages.ts`
+ * for the lookup table and its disclosed heuristic-confidence boundary.
+ *
  * The architect's question this tool answers: "what external systems
  * does my org talk to, what trust mechanism do they use, and which
  * pieces are wired together?". One call returns the full map.
@@ -72,6 +81,12 @@ import { err, ok, type Result } from '@sf-intelligence/core';
 import { listEdges, listNodesByType } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
+import {
+  lookupKnownMartechEndpoint,
+  lookupKnownMartechNamespace,
+  MARTECH_CONNECTOR_DISCLOSURE,
+  type MartechCategory,
+} from '../known-integration-packages.js';
 import type { Context } from '../server.js';
 
 /**
@@ -259,6 +274,37 @@ export interface OmniStudioIntegrationSurface {
   readonly referencedNamedCredentials: readonly string[];
 }
 
+/**
+ * One detected martech (marketing-technology) connector (Finding #44) — a
+ * friendly-name decoration over a component this map (or
+ * `installed_package_catalog`) already surfaces, not a new extraction. See
+ * `packages/mcp/src/known-integration-packages.ts` for the lookup table and
+ * its disclosed confidence boundary.
+ */
+export interface MartechConnectorMatch {
+  readonly componentId: ComponentId;
+  readonly componentType: ComponentType;
+  readonly productName: string;
+  readonly vendor: string;
+  readonly category: MartechCategory;
+  /**
+   * `'installed-package'`: matched an `InstalledPackage` node's namespace
+   * (declared confidence). `'named-credential-endpoint'` /
+   * `'external-data-source-endpoint'`: matched a NamedCredential /
+   * ExternalDataSource node's declared endpoint host against a known martech
+   * domain (heuristic confidence — see {@link confidence}).
+   */
+  readonly source:
+    | 'installed-package'
+    | 'named-credential-endpoint'
+    | 'external-data-source-endpoint';
+  /** What actually matched (`namespace:et4ae5` / `endpoint:https://…`), for audit. */
+  readonly matchedOn: string;
+  readonly confidence: 'declared' | 'heuristic';
+  /** One-line basis for the match, echoed from the lookup table. */
+  readonly basis: string;
+}
+
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface IntegrationMapOutput {
   readonly authProviders: readonly IntegrationMapNode[];
@@ -280,10 +326,25 @@ export interface IntegrationMapOutput {
    */
   readonly omniStudio: OmniStudioIntegrationSurface;
   /**
+   * Martech (marketing-technology) connectors detected via the known-
+   * namespace / known-endpoint lookup (Finding #44) — Marketing Cloud
+   * Connect, Pardot/Account Engagement, Marketo, HubSpot. Empty when no
+   * `InstalledPackage` / NamedCredential / ExternalDataSource node matches a
+   * known martech signal — that is "none detected", not "none exist"; see
+   * {@link martechConnectorDisclosure}. Populated from `InstalledPackage`
+   * nodes (filter-independent — always scanned) plus whichever
+   * NamedCredential / ExternalDataSource nodes the current `filter` already
+   * put in scope (no extra query beyond what the map already fetched).
+   */
+  readonly martechConnectors: readonly MartechConnectorMatch[];
+  /** Always present: the heuristic-confidence boundary for {@link martechConnectors}. */
+  readonly martechConnectorDisclosure: string;
+  /**
    * Present ONLY when every bucket is empty AND the OmniStudio surface
-   * is empty. Distinguishes "this org has no integration metadata (or it
-   * wasn't retrieved)" from a broken tool — an all-empty map otherwise
-   * reads as a failure to a newcomer.
+   * is empty AND no martech connector was detected. Distinguishes "this
+   * org has no integration metadata (or it wasn't retrieved)" from a
+   * broken tool — an all-empty map otherwise reads as a failure to a
+   * newcomer.
    */
   readonly note?: string;
   /** Always present: Apex HTTP callouts are out of scope; where to find them. */
@@ -555,6 +616,112 @@ const collectOmniSurface = async (
   return ok({ restCallouts, remoteCallouts, referencedNamedCredentials });
 };
 
+/** Defensive ceiling for the InstalledPackage scan — mirrors `installed_package_catalog`'s own cap; an org with more installed packages than this is unheard of. */
+const MARTECH_PACKAGE_SCAN_LIMIT = 500;
+
+/**
+ * Read a node's declared endpoint URL, trying the extractor-canonical
+ * `endpoint` property first (NamedCredential / ExternalDataSource both use
+ * this key — see `named-credential.ts` / `external-data-source.ts`), falling
+ * back to `url` for a looser fixture/vault shape. Returns `null` when neither
+ * is a non-empty string.
+ */
+const readDeclaredEndpoint = (
+  properties: Readonly<Record<string, unknown>>,
+): string | null => {
+  const endpoint = properties['endpoint'];
+  if (typeof endpoint === 'string' && endpoint.length > 0) return endpoint;
+  const url = properties['url'];
+  if (typeof url === 'string' && url.length > 0) return url;
+  return null;
+};
+
+/**
+ * Detect martech (marketing-technology) connectors (Finding #44) from data
+ * this map already has, plus one additional filter-independent scan of
+ * `InstalledPackage` nodes (small — a real org has tens, not thousands, of
+ * installed packages, mirroring `installed_package_catalog`'s own
+ * assumption). NamedCredential / ExternalDataSource endpoint matching reuses
+ * whichever of those buckets the caller's `filter` already put in scope — no
+ * extra graph query for that half.
+ *
+ * Two independent signal sources, never conflated:
+ *   - `InstalledPackage.namespace` against {@link lookupKnownMartechNamespace}
+ *     — `declared` confidence (the org's own retrieved package metadata).
+ *   - NamedCredential / ExternalDataSource declared endpoint host against
+ *     {@link lookupKnownMartechEndpoint} — `heuristic` confidence (a hostname
+ *     regex, not declared package metadata).
+ */
+const collectMartechConnectors = async (
+  ctx: Context,
+  namedCredentials: readonly IntegrationMapNode[],
+  externalDataSources: readonly IntegrationMapNode[],
+): Promise<Result<readonly MartechConnectorMatch[], McpError>> => {
+  const matches: MartechConnectorMatch[] = [];
+
+  const pkgResult = await listNodesByType(ctx.graph, 'InstalledPackage', {
+    limit: MARTECH_PACKAGE_SCAN_LIMIT,
+  });
+  if (!pkgResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${pkgResult.error.message}`,
+    });
+  }
+  for (const node of pkgResult.value) {
+    const rawNamespace = node.properties['namespace'];
+    const namespace =
+      typeof rawNamespace === 'string' && rawNamespace.length > 0
+        ? rawNamespace
+        : node.apiName;
+    const known = lookupKnownMartechNamespace(namespace);
+    if (known === null) continue;
+    matches.push({
+      componentId: node.id,
+      componentType: 'InstalledPackage',
+      productName: known.productName,
+      vendor: known.vendor,
+      category: known.category,
+      source: 'installed-package',
+      matchedOn: `namespace:${namespace}`,
+      confidence: 'declared',
+      basis: known.basis,
+    });
+  }
+
+  const endpointBuckets: ReadonlyArray<
+    readonly [readonly IntegrationMapNode[], MartechConnectorMatch['source']]
+  > = [
+    [namedCredentials, 'named-credential-endpoint'],
+    [externalDataSources, 'external-data-source-endpoint'],
+  ];
+  for (const [nodes, source] of endpointBuckets) {
+    for (const node of nodes) {
+      const rawEndpoint = readDeclaredEndpoint(node.properties);
+      if (rawEndpoint === null) continue;
+      const known = lookupKnownMartechEndpoint(rawEndpoint);
+      if (known === null) continue;
+      matches.push({
+        componentId: node.id,
+        componentType: node.type,
+        productName: known.productName,
+        vendor: known.vendor,
+        category: known.category,
+        source,
+        matchedOn: `endpoint:${rawEndpoint}`,
+        confidence: 'heuristic',
+        basis: known.basis,
+      });
+    }
+  }
+
+  matches.sort((a, b) => {
+    if (a.componentId !== b.componentId) return a.componentId < b.componentId ? -1 : 1;
+    return a.productName < b.productName ? -1 : a.productName > b.productName ? 1 : 0;
+  });
+  return ok(matches);
+};
+
 /**
  * The `sfi.integration_map` MCP tool. Returns a structured topology of
  * every integration surface in the org (AuthProvider, NamedCredential,
@@ -702,6 +869,18 @@ export const integrationMapHandler = async (
     omniStudio = omniResult.value;
   }
 
+  // Stage 2c: martech connector detection (Finding #44). Filter-independent
+  // for the InstalledPackage half (always scanned — small, bounded); reuses
+  // whichever NamedCredential / ExternalDataSource buckets `filter` already
+  // populated for the endpoint half (no extra query).
+  const martechResult = await collectMartechConnectors(
+    ctx,
+    buckets.get('NamedCredential') ?? [],
+    buckets.get('ExternalDataSource') ?? [],
+  );
+  if (!martechResult.ok) return martechResult;
+  const martechConnectors = martechResult.value;
+
   // Stage 3: assemble the response. Bucket lookups are guarded with
   // `?? []` so a future addition to `INTEGRATION_TYPES` without a
   // matching bucket initialization surfaces as an empty array rather
@@ -717,6 +896,8 @@ export const integrationMapHandler = async (
     networkAccesses: buckets.get('NetworkAccess') ?? [],
     references,
     omniStudio,
+    martechConnectors,
+    martechConnectorDisclosure: MARTECH_CONNECTOR_DISCLOSURE,
     apexCalloutDisclosure: APEX_CALLOUT_DISCLOSURE,
     calloutAuthorizationNote: buildCalloutAuthorizationNote(
       buckets.get('RemoteSiteSetting') ?? [],
@@ -732,17 +913,19 @@ export const integrationMapHandler = async (
     data.externalServices.length +
     data.connectedApps.length +
     data.networkAccesses.length;
-  // The OmniStudio callout surface counts toward "this org has an
-  // integration surface": an OmniStudio org with 0 classic
-  // ComponentTypes but IPs that call out must NOT report "No integration
-  // metadata found". The honest-empty note fires only when BOTH the
-  // classic buckets AND the OmniStudio surface are empty.
+  // The OmniStudio callout surface AND a detected martech connector both
+  // count toward "this org has an integration surface": an org with 0
+  // classic ComponentTypes but IPs that call out, or an InstalledPackage
+  // that matches a known martech namespace, must NOT report "No integration
+  // metadata found". The honest-empty note fires only when the classic
+  // buckets, the OmniStudio surface, AND the martech detections are ALL
+  // empty.
   const omniSurfaceCount =
     omniStudio.restCallouts.length + omniStudio.remoteCallouts.length;
 
   return ok({
     data:
-      totalNodes === 0 && omniSurfaceCount === 0
+      totalNodes === 0 && omniSurfaceCount === 0 && martechConnectors.length === 0
         ? { ...data, note: INTEGRATION_EMPTY_NOTE }
         : data,
     vaultState: {

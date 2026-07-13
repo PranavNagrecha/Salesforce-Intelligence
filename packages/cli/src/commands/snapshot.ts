@@ -37,6 +37,7 @@ import { resolve } from 'node:path';
 import type { ComponentId, ComponentType, EdgeType } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { closeGraph, openGraph, type GraphStore } from '@sf-intelligence/graph';
+import { captureSecurityPostureMetrics } from '@sf-intelligence/mcp';
 import {
   deleteSnapshot,
   listSnapshots,
@@ -76,8 +77,31 @@ export interface SnapshotCommandError {
  * Matches the graph layer's `canonicalJson` so the snapshot's per-row
  * hashes line up with the graph's stored `properties_json` column
  * character-for-character whenever both inputs are equivalent.
+ *
+ * C-3 (finding 28) — `canonicalJson(undefined)` crash-class sweep. This
+ * copy was missing the explicit `undefined` branch from R6-12's fix in
+ * `compare-vaults.ts`: a naive `typeof value !== 'object'` fall-through
+ * calls `JSON.stringify(undefined)`, which returns the JS value `undefined`
+ * (NOT a string) — `hashRecord` would then hash the literal characters
+ * `undefined` via `String(undefined)` coercion inside `createHash().update`,
+ * an inconsistent, easy-to-collide input. HASH-PARITY CAUTION: every
+ * `hashRecord` call site in this file (`captureSnapshotGraph`) builds its
+ * `hashInput` from `row.type`/`row.api_name`/`row.label`/`row.confidence`
+ * (DB columns, never JS `undefined`) plus `parsePropertiesJson`'s output
+ * (parsed JSON, which can produce `null` but never a bare `undefined`
+ * value) — so no current caller can reach the new branch, and every
+ * existing snapshot's hash is byte-for-byte unchanged. The branch exists
+ * only to close the same landmine class as R6-12, matching its exact
+ * sentinel semantics, should a future caller ever pass an explicit
+ * `undefined`.
+ *
+ * Exported (only) so the C-3 regression test can exercise the `undefined`
+ * branch directly, and independently confirm hash-parity for the common
+ * (non-undefined) path via a golden-hash assertion against
+ * `captureSnapshotGraph`.
  */
-const canonicalJson = (value: unknown): string => {
+export const canonicalJson = (value: unknown): string => {
+  if (value === undefined) return '\0undefined\0';
   if (value === null || typeof value !== 'object') {
     return JSON.stringify(value);
   }
@@ -294,12 +318,27 @@ export const runSnapshotCreate = async (
     if (!captured.ok) return captured;
     const { nodes, edges } = captured.value;
 
+    // R8-SECURITY-TREND: persist a graded securityScore at capture time.
+    // Best-effort — a posture failure must not block the snapshot. Reuses the
+    // already-open graph (do NOT shutdown this context).
+    let metrics: Readonly<Record<string, number>> | undefined;
+    try {
+      metrics = await captureSecurityPostureMetrics({
+        vaultRoot,
+        manifest,
+        graph: store,
+      });
+    } catch {
+      metrics = undefined;
+    }
+
     const meta: SnapshotMeta = {
       label,
       createdAt: (opts.now ?? new Date()).toISOString(),
       sourceTreeHash: manifest.sourceTreeHash,
       componentCount: nodes.length,
       edgeCount: edges.length,
+      ...(metrics !== undefined ? { metrics } : {}),
     };
 
     const snapshot: Snapshot = { meta, manifest, nodes, edges };

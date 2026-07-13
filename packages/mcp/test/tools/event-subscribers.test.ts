@@ -23,6 +23,8 @@ import {
   eventSubscribersInputSchema,
 } from '../../src/tools/event-subscribers.js';
 
+import { measureGraphQueries } from './_graph-query-budget.js';
+
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
   refreshedAt: '2026-05-27T14:33:08Z',
@@ -879,5 +881,127 @@ describe('eventSubscribersHandler — CR-10 role-disambiguation disclosure', () 
     expect(result.value.data.publishers).toEqual([]);
     const boundaryText = result.value.data.boundaries.join(' ');
     expect(boundaryText).toContain('CRITICAL ROLE DISTINCTION');
+  });
+});
+
+// =============================================================================
+// N+1 query budget (finding C-1). Catalog mode used a per-event listEdges +
+// per-subscriber / per-publisher getNodeById org-wide nested N+1; it is now
+// three round-trips total (listensTo batch + writesTo batch + one node batch).
+// The query count must NOT scale with the event count. Plus a golden asserting
+// the DISTINCT-subscriber dedup and the per-EDGE publisher count are unchanged.
+// =============================================================================
+describe('eventSubscribersHandler — bounded graph queries (catalog)', () => {
+  const withStore = async <T>(
+    seedData: ExtractionResult,
+    run: (ctx: Context, s: GraphStore) => Promise<T>,
+  ): Promise<T> => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-evsub-budget-'));
+    const opened = await openGraph(join(dir, 'evsub.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const s = opened.value;
+    const imported = await importExtractionResults(s, [seedData]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const localCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s } as Context;
+    const out = await run(localCtx, s);
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+    return out;
+  };
+
+  // Ev1__e: Sub1 subscribes via TWO edges (distinct sources) -> deduped to 1;
+  //         Sub2 (Flow) subscribes; a CustomField listensTo is filtered out.
+  //         Pub1 publishes via TWO writesTo edges -> per-EDGE count = 2.
+  // Ev2__e: nothing.
+  const goldenSeed: ExtractionResult = {
+    nodes: [
+      makeNode({ id: 'CustomObject:Ev1__e', apiName: 'Ev1__e' }),
+      makeNode({ id: 'CustomObject:Ev2__e', apiName: 'Ev2__e' }),
+      makeNode({ id: 'ApexClass:Sub1', type: 'ApexClass', apiName: 'Sub1' }),
+      makeNode({ id: 'Flow:Sub2', type: 'Flow', apiName: 'Sub2' }),
+      makeNode({ id: 'CustomField:Account.NotASub', type: 'CustomField', apiName: 'NotASub' }),
+      makeNode({ id: 'ApexClass:Pub1', type: 'ApexClass', apiName: 'Pub1' }),
+    ],
+    edges: [
+      makeEdge({ fromId: 'ApexClass:Sub1', toId: 'CustomObject:Ev1__e', edgeType: 'listensTo', source: 'triggerable' }),
+      makeEdge({ fromId: 'ApexClass:Sub1', toId: 'CustomObject:Ev1__e', edgeType: 'listensTo', source: 'eventbus' }),
+      makeEdge({ fromId: 'Flow:Sub2', toId: 'CustomObject:Ev1__e', edgeType: 'listensTo', source: 'flow' }),
+      makeEdge({ fromId: 'CustomField:Account.NotASub', toId: 'CustomObject:Ev1__e', edgeType: 'listensTo', source: 'stray' }),
+      makeEdge({ fromId: 'ApexClass:Pub1', toId: 'CustomObject:Ev1__e', edgeType: 'writesTo', source: 'publish-a' }),
+      makeEdge({ fromId: 'ApexClass:Pub1', toId: 'CustomObject:Ev1__e', edgeType: 'writesTo', source: 'publish-b' }),
+    ],
+  };
+
+  it('golden: catalog subscriber-dedup + per-edge publisher count unchanged', async () => {
+    const result = await withStore(goldenSeed, (localCtx) =>
+      eventSubscribersHandler(localCtx, {}),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.events).toEqual([
+      { eventId: 'CustomObject:Ev1__e', eventApiName: 'Ev1__e', subscriberCount: 2, publisherCount: 2 },
+      { eventId: 'CustomObject:Ev2__e', eventApiName: 'Ev2__e', subscriberCount: 0, publisherCount: 0 },
+    ]);
+  });
+
+  const seedManyEvents = (count: number): ExtractionResult => {
+    const nodes: Node[] = [];
+    const edges: Edge[] = [];
+    for (let i = 0; i < count; i += 1) {
+      nodes.push(makeNode({ id: `CustomObject:Ev${i}__e`, apiName: `Ev${i}__e` }));
+      nodes.push(makeNode({ id: `ApexClass:Sub${i}`, type: 'ApexClass', apiName: `Sub${i}` }));
+      edges.push(makeEdge({ fromId: `ApexClass:Sub${i}`, toId: `CustomObject:Ev${i}__e`, edgeType: 'listensTo' }));
+    }
+    return { nodes, edges };
+  };
+
+  it('query count does NOT scale with the event count', async () => {
+    const measure = (count: number) =>
+      withStore(seedManyEvents(count), (localCtx, s) =>
+        measureGraphQueries(s, () => eventSubscribersHandler(localCtx, {})),
+      );
+    const few = await measure(60);
+    const many = await measure(200);
+    expect(few.result.ok).toBe(true);
+    expect(many.result.ok).toBe(true);
+    // Three round-trips total (listensTo batch + writesTo batch + node batch);
+    // the CustomObject scan adds a constant. An N+1 would be ~2 * event count.
+    expect(many.edgeQueries).toBe(few.edgeQueries);
+    expect(many.nodeQueries).toBe(few.nodeQueries);
+    expect(many.edgeQueries + many.nodeQueries).toBeLessThan(10);
+  });
+
+  // Single-event mode (J2): the subscriber resolution loop, resolvePublishers,
+  // and resolveChannelBindings all batched. Query count must NOT scale with one
+  // event's subscriber / publisher / channel-member fan-out.
+  const seedWideEvent = (fanOut: number): ExtractionResult => {
+    const EVENT = 'CustomObject:Wide__e';
+    const nodes: Node[] = [makeNode({ id: EVENT, apiName: 'Wide__e' })];
+    const edges: Edge[] = [];
+    for (let i = 0; i < fanOut; i += 1) {
+      nodes.push(makeNode({ id: `ApexClass:Sub${i}`, type: 'ApexClass', apiName: `Sub${i}` }));
+      edges.push(makeEdge({ fromId: `ApexClass:Sub${i}`, toId: EVENT, edgeType: 'listensTo' }));
+      nodes.push(makeNode({ id: `Flow:Pub${i}`, type: 'Flow', apiName: `Pub${i}` }));
+      edges.push(makeEdge({ fromId: `Flow:Pub${i}`, toId: EVENT, edgeType: 'writesTo' }));
+    }
+    return { nodes, edges };
+  };
+
+  it('single-event query count does NOT scale with subscriber/publisher fan-out', async () => {
+    const measure = (fanOut: number) =>
+      withStore(seedWideEvent(fanOut), (localCtx, s) =>
+        measureGraphQueries(s, () =>
+          eventSubscribersHandler(localCtx, { eventId: 'CustomObject:Wide__e', limit: 500 }),
+        ),
+      );
+    const narrow = await measure(60);
+    const wide = await measure(200);
+    expect(narrow.result.ok).toBe(true);
+    expect(wide.result.ok).toBe(true);
+    // Constant: listensTo/writesTo/references edge fetches + a couple of node
+    // batches — independent of fan-out. An N+1 would be ~fan-out.
+    expect(wide.edgeQueries).toBe(narrow.edgeQueries);
+    expect(wide.nodeQueries).toBe(narrow.nodeQueries);
+    expect(wide.edgeQueries + wide.nodeQueries).toBeLessThan(10);
   });
 });

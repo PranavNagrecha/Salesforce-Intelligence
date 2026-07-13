@@ -24,6 +24,7 @@ export type {
 export { extractAuraDefinitionBundle } from './aura-definition-bundle.js';
 export { extractAuthProvider } from './auth-provider.js';
 export { extractAutoResponseRule } from './auto-response-rule.js';
+export { extractBot, extractBotVersion } from './bot.js';
 export { extractBusinessProcess } from './business-process.js';
 export { extractConnectedApp } from './connected-app.js';
 export {
@@ -40,27 +41,54 @@ export { extractCustomLabel } from './custom-label.js';
 export { extractCustomMetadataRecord } from './custom-metadata-record.js';
 export { extractCustomObject } from './custom-object.js';
 export { extractCustomSettingRecord } from './custom-setting-record.js';
+export { extractCustomSite, guestProfileNameForSite } from './custom-site.js';
 export { extractCustomTab } from './custom-tab.js';
 export { extractDecisionTable } from './decision-table.js';
 export {
+  extractCertificate,
   extractCustomPermission,
   extractDashboard,
+  extractEntitlementProcess,
   extractFlexiPage,
   extractListView,
-  extractMutingPermissionSet,
+  extractMilestoneType,
   extractPermissionSetGroup,
+  extractPresenceUserConfig,
+  extractQueueRoutingConfig,
   extractReport,
   extractReportType,
   extractRestrictionRule,
   extractScopingRule,
+  extractServiceChannel,
+  extractTransactionSecurityPolicy,
 } from './enterprise-metadata.js';
 export { extractDuplicateRule } from './duplicate-rule.js';
 export { extractEmailTemplate } from './email-template.js';
 export { extractEscalationRule } from './escalation-rule.js';
+export { extractExperienceBundle } from './experience-bundle.js';
 export { extractExternalDataSource } from './external-data-source.js';
 export { extractExternalService } from './external-service.js';
+export { extractFieldServiceSettings } from './field-service-settings.js';
 export { extractFieldSet } from './field-set.js';
 export { extractFlow } from './flow.js';
+export {
+  buildFlowDataflowIndex,
+  DATAFLOW_SOURCE_OPERATION,
+  FLOW_DATAFLOW_TRACE_DEPTH_CAP,
+  traceValueReference,
+} from './flow-dataflow.js';
+export type {
+  DataflowConfidence,
+  DataflowTrace,
+  FlowDataflowIndex,
+  TracedSourceField,
+} from './flow-dataflow.js';
+export {
+  extractGenAiFunction,
+  extractGenAiPlannerBundle,
+  extractGenAiPlugin,
+  extractGenAiPromptTemplate,
+} from './gen-ai.js';
 export { extractGlobalValueSet } from './global-value-set.js';
 export { extractGroup } from './group.js';
 export { extractInstalledPackage } from './installed-package.js';
@@ -68,7 +96,9 @@ export { extractLayout } from './layout.js';
 export { extractLetterhead } from './letterhead.js';
 export { extractLightningComponentBundle } from './lightning-component-bundle.js';
 export { extractMatchingRule } from './matching-rule.js';
+export { extractMutingPermissionSet } from './muting-permission-set.js';
 export { extractNamedCredential } from './named-credential.js';
+export { extractNetwork } from './network.js';
 export { extractNetworkAccess } from './network-access.js';
 export { extractOmniDataTransform } from './omni-data-transform.js';
 export { extractOmniIntegrationProcedure } from './omni-integration-procedure.js';
@@ -89,6 +119,7 @@ export { extractRole } from './role.js';
 export { extractSamlSsoConfig } from './saml-sso-config.js';
 export { extractSessionSettings } from './session-settings.js';
 export { extractSharingRules } from './sharing-rules.js';
+export { extractSkill } from './skill.js';
 export {
   buildDescribeFieldExtraction,
   existingCustomFieldIds,
@@ -101,9 +132,20 @@ export type {
   DescribeFieldRow,
   StandardObjectFieldSnapshotName,
 } from './standard-object-describe-fields.js';
+export { extractStandardValueSet } from './standard-value-set.js';
 export { extractStaticResource } from './static-resource.js';
+export { extractTimeSheetTemplate } from './time-sheet-template.js';
 export { extractValidationRule } from './validation-rule.js';
 export { extractVisualforceComponent } from './visualforce-component.js';
 export { extractVisualforcePage } from './visualforce-page.js';
+export {
+  extractWaveDashboard,
+  extractWaveDataflow,
+  extractWaveXmd,
+  isObjectFieldRef,
+  WAVE_DASHBOARD_FILE_SUFFIX,
+  WAVE_DATAFLOW_FILE_SUFFIX,
+  WAVE_XMD_FILE_SUFFIX,
+} from './wave.js';
 export { extractWebLink } from './web-link.js';
 export { extractWorkflowRule } from './workflow-rule.js';

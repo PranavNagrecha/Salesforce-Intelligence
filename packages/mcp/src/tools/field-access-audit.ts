@@ -55,7 +55,7 @@
  *     those edges flag the source file, not the runtime user. The
  *     tool reports the ApexClass identity so a caller can do the
  *     downstream "who can execute this class" analysis with
- *     `sfi.get_edges` / `sfi.find_apex_usages`.
+ *     `sfi.get_edges` / `sfi.find_code_usages`.
  */
 
 import type {

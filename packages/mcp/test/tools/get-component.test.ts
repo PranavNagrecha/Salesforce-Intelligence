@@ -72,6 +72,42 @@ const VALIDATION_RULE_PROPERTIES = {
   ],
 };
 
+/**
+ * R6-31 fixture: mirrors the real-world shape that broke `maxBodyBytes: 0`
+ * — a Profile whose graph node carries thousands of `fieldPermissions`/
+ * `objectPermissions` entries alongside a few small scalar fields. The
+ * frontmatter written to disk for this node (below) is ALSO oversized on
+ * its own, standing in for a large rendered permissions block, so the fix
+ * has to bound both `properties` and `frontmatter`, not just `body`.
+ */
+const HUGE_PROFILE_PROPERTIES = {
+  description: 'A profile with many permission grants.',
+  userLicense: 'Salesforce',
+  custom: false,
+  fieldPermissions: Array.from({ length: 1_500 }, (_, i) => ({
+    field: `CustomField:TestObj__c.Field_${i}__c`,
+    readable: true,
+    editable: i % 2 === 0,
+  })),
+  objectPermissions: Array.from({ length: 500 }, (_, i) => ({
+    object: `CustomObject:HugeTarget_${i}__c`,
+    allowRead: true,
+    allowEdit: false,
+    allowCreate: false,
+    allowDelete: false,
+  })),
+};
+
+/** Outgoing `grantedBy` edges from the huge profile — enough to exercise `referenceIds` truncation. */
+const HUGE_PROFILE_EDGES: Edge[] = Array.from({ length: 150 }, (_, i) => ({
+  fromId: 'Profile:HugeProfile',
+  toId: `CustomObject:HugeTarget_${i}__c`,
+  edgeType: 'grantedBy',
+  confidence: 'declared',
+  source: 'unit-test',
+  properties: {},
+})) as Edge[];
+
 const seed: ExtractionResult = {
   nodes: [
     makeNode({
@@ -143,8 +179,18 @@ const seed: ExtractionResult = {
       parentId: 'CustomObject:TestObj__c',
       sourcePath: 'objects/TestObj__c/fields/Start_Time__c.field-meta.xml',
     }),
+    // R6-31 fixture: huge node used by the metadata-probe regression tests.
+    makeNode({
+      id: 'Profile:HugeProfile',
+      type: 'Profile',
+      apiName: 'HugeProfile',
+      label: 'Huge Profile',
+      sourcePath: 'profiles/HugeProfile.profile-meta.xml',
+      properties: HUGE_PROFILE_PROPERTIES,
+    }),
   ],
   edges: [
+    ...HUGE_PROFILE_EDGES,
     // ValidationRule → CustomField references (formula-tokenizer edges)
     {
       fromId: 'ValidationRule:TestObj__c.EndAfterStart',
@@ -312,6 +358,31 @@ beforeAll(async () => {
       '| --- | --- |',
       '| `CustomField:TestObj__c.End_Time__c` | parsed |',
       '| `CustomField:TestObj__c.Start_Time__c` | parsed |',
+      '',
+    ].join('\n'),
+  );
+
+  // R6-31 fixture: a HUGE node whose on-disk frontmatter is ALSO oversized
+  // (standing in for a real Profile's rendered permissions block — see the
+  // real-vault numbers in the handoff). Node index 9 in the seed. Before the
+  // fix, `getComponentHandler(ctx, { id, maxBodyBytes: 0 })` on a node like
+  // this would still serialize the full frontmatter + full `properties` +
+  // full `referenceIds`, which the caller explicitly asked to skip.
+  writeMarkdown(
+    tempDir,
+    seed.nodes[9]!,
+    [
+      '---',
+      'id: Profile:HugeProfile',
+      'type: Profile',
+      // Stand-in for a large rendered permissions block: real Profile
+      // frontmatter for a big org runs tens of KB past the response budget.
+      `renderedPermissionsBlob: ${'x'.repeat(60_000)}`,
+      '---',
+      '',
+      '# Huge Profile',
+      '',
+      'Body content.',
       '',
     ].join('\n'),
   );
@@ -717,6 +788,137 @@ describe('getComponentHandler', () => {
     expect(result.value.data.frontmatter).toBe(
       'id: CustomObject:Account\ntype: CustomObject\napiName: Account',
     );
+  });
+
+  describe('R6-31: metadata-probe mode (maxBodyBytes 0 / small)', () => {
+    it('maxBodyBytes: 0 on a huge node returns ok with a bounded metadata envelope (was oversize before the fix)', async () => {
+      const result = await getComponentHandler(ctx, {
+        id: 'Profile:HugeProfile',
+        maxBodyBytes: 0,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const { data } = result.value;
+
+      expect(data.metadataOnly).toBe(true);
+
+      // body fully omitted, as before.
+      expect(data.body).toBe('');
+      expect(data.bodyTruncated).toBe(true);
+
+      // frontmatter (the ~60 KB rendered blob) is ALSO bounded now, not just body.
+      expect(data.frontmatter).toBe('');
+      expect(data.frontmatterTruncated).toBe(true);
+      expect(data.frontmatterBytes).toBeGreaterThan(50_000);
+      expect(data.returnedFrontmatterBytes).toBe(0);
+
+      // properties: scalars survive, the two huge arrays are dropped and named.
+      expect(data.properties['description']).toBe(
+        'A profile with many permission grants.',
+      );
+      expect(data.properties['userLicense']).toBe('Salesforce');
+      expect(data.properties['fieldPermissions']).toBeUndefined();
+      expect(data.properties['objectPermissions']).toBeUndefined();
+      expect(data.omittedPropertyKeys).toContain('fieldPermissions');
+      expect(data.omittedPropertyKeys).toContain('objectPermissions');
+
+      // referenceIds: bounded subset, true total disclosed separately.
+      expect(data.referenceCount).toBe(150);
+      expect(data.referenceIds.length).toBeLessThan(150);
+      expect(data.omittedReferenceCount).toBe(
+        150 - data.referenceIds.length,
+      );
+
+      // Honest disclosure names what was omitted.
+      expect(data.disclosure).toBeDefined();
+      expect(data.disclosure).toContain('maxBodyBytes=0');
+      expect(data.disclosure).toContain('fieldPermissions');
+      expect(data.disclosure).toContain('objectPermissions');
+
+      // The whole point: the envelope now fits comfortably under the global
+      // MCP response budget (40 000 bytes) — before the fix, unbounded
+      // frontmatter/properties/referenceIds alone blew well past it even
+      // with maxBodyBytes: 0.
+      const { RESPONSE_BUDGET_DEFAULT_BYTES } = await import(
+        '../../src/tools/index.js'
+      );
+      expect(Buffer.byteLength(JSON.stringify(result.value), 'utf8')).toBeLessThan(
+        RESPONSE_BUDGET_DEFAULT_BYTES,
+      );
+    });
+
+    it('maxBodyBytes: 0 never trips the global oversize guard (full jsonResult stack)', async () => {
+      const result = await getComponentHandler(ctx, {
+        id: 'Profile:HugeProfile',
+        maxBodyBytes: 0,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+
+      const { jsonResult } = await import('../../src/tools/index.js');
+      const wrapped = jsonResult(result.value);
+      const text = (wrapped.content[0] as { readonly text: string }).text;
+      const parsed = JSON.parse(text) as {
+        readonly error?: { readonly kind?: string };
+        readonly data?: { readonly metadataOnly?: boolean };
+      };
+      expect(parsed.error).toBeUndefined();
+      expect(parsed.data?.metadataOnly).toBe(true);
+    });
+
+    it('a small positive maxBodyBytes (metadata-probe range) also truncates properties/referenceIds with disclosure', async () => {
+      const result = await getComponentHandler(ctx, {
+        id: 'Profile:HugeProfile',
+        maxBodyBytes: 500,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const { data } = result.value;
+
+      expect(data.metadataOnly).toBe(true);
+      expect(data.maxBodyBytes).toBe(500);
+      expect(data.returnedBodyBytes).toBeLessThanOrEqual(500);
+      expect(data.returnedFrontmatterBytes).toBeLessThanOrEqual(500);
+      expect(data.omittedPropertyKeys).toContain('fieldPermissions');
+      expect(data.disclosure).toContain('maxBodyBytes=500');
+    });
+
+    it('the default call (no maxBodyBytes) on the same huge node is UNCHANGED — full properties and referenceIds', async () => {
+      const result = await getComponentHandler(ctx, { id: 'Profile:HugeProfile' });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const { data } = result.value;
+
+      expect(data.metadataOnly).toBeUndefined();
+      expect(data.disclosure).toBeUndefined();
+      expect(data.omittedPropertyKeys).toBeUndefined();
+      // Full fidelity: both huge arrays present, full length.
+      expect(
+        (data.properties['fieldPermissions'] as readonly unknown[]).length,
+      ).toBe(1_500);
+      expect(
+        (data.properties['objectPermissions'] as readonly unknown[]).length,
+      ).toBe(500);
+      // Full referenceIds — all 150 edges, none dropped.
+      expect(data.referenceIds.length).toBe(150);
+    });
+
+    it('existing maxBodyBytes:128 / maxBodyBytes:5000 regression tests are unaffected by entering metadata-probe mode', async () => {
+      // Profile:LargeProfile / Profile:IpRestricted have small-or-empty
+      // properties, so metadata-probe mode (now entered for maxBodyBytes:128,
+      // since 128 <= METADATA_PROBE_MAX_BODY_BYTES) is a no-op for them —
+      // this test just pins that down explicitly alongside the pre-existing
+      // assertions in the tests above.
+      const result = await getComponentHandler(ctx, {
+        id: 'Profile:LargeProfile',
+        maxBodyBytes: 128,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.data.metadataOnly).toBe(true);
+      expect(result.value.data.properties).toEqual({});
+      expect(result.value.data.referenceIds).toEqual([]);
+    });
   });
 });
 

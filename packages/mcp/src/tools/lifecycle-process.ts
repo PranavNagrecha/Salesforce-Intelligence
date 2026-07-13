@@ -247,7 +247,7 @@ export const lifecycleProcessHandler = async (
   const disclosures: string[] = [
     `Composed from the documented order of execution for the ${event} event — conditions are LISTED but NOT EVALUATED; whether a given record actually matches ${field !== null && value !== null ? `${field} = "${value}"` : 'the transition'} needs record data.`,
     'Value coupling is a literal match of the value over the parsed condition expression — it can miss a value encoded in a formula and can over-match a substring. Field coupling uses the condition’s extracted field references.',
-    'This is the metadata automation chain. It does not include manual user actions, the runtime field-history / audit trail, roll-up / cross-object parent recalculation, or external callouts.',
+    'This is the metadata automation chain. It does not include manual user actions, the runtime field-history / audit trail, or external callouts. Parent Summary (roll-up) field recalculation IS included (inherited from order_of_execution’s post-save-rollup-recalc phase) but capped to one level — a grandparent’s own rollup on the recalculated parent is not walked — and does not expand the parent’s own automation.',
     'Distinct record ACTIONS — Lead Convert (IsConverted), Approval submission, and Activation — are not plain field edits and are not modeled as save-order steps: their action-specific automation (for Lead Convert, the Convert field mapping, matching / duplicate rules, and any managed-package auto-convert; for approval / activation, the approval or activation process itself) is outside this insert/update view. Treat a conversion / approval / activation answer as the save-time slice only, not the whole operation.',
   ];
   if (field === null || value === null) {

@@ -39,8 +39,15 @@ export interface RecordCreationPathsOutput {
   readonly objectId: string;
   readonly creatorCount: number;
   readonly creators: readonly CreationSource[];
+  /**
+   * True when `creators` was cut at `limit` — `creatorCount` is still the FULL
+   * count. No cursor: raise `limit` (max 500) to see the dropped tail.
+   */
+  readonly creatorsTruncated: boolean;
   readonly triggerCount: number;
   readonly triggers: readonly CreationSource[];
+  /** True when `triggers` was cut at `limit` — `triggerCount` stays the full count. */
+  readonly triggersTruncated: boolean;
   readonly trust: TrustSummary;
   readonly rendered: string;
 }
@@ -91,6 +98,12 @@ export const recordCreationPathsHandler = async (
     edges.filter((e) => e.edgeType === 'triggersOn').map((e) => toSource(e.fromId, e.confidence)),
   ).sort((a, b) => a.sourceId.localeCompare(b.sourceId));
 
+  // Handler cap (P15 oversize-enumeration guard): hub objects can fan out —
+  // slice both lists at `limit` but ALWAYS report the full counts and disclose
+  // the cut. No cursor; the caller raises `limit` (max 500) to see the tail.
+  const creatorsTruncated = creators.length > limit;
+  const triggersTruncated = triggers.length > limit;
+
   const trust = offlineTrust(ctx, { status: summarizeCoverage(ctx.manifest).status });
   const creatorTable = mdTable(
     ['Creator', 'Type', 'Confidence'],
@@ -100,11 +113,17 @@ export const recordCreationPathsHandler = async (
     ['Trigger', 'Type'],
     triggers.slice(0, limit).map((t) => [t.name, t.sourceType]),
   );
+  const creatorTruncNote = creatorsTruncated
+    ? `\n_Creator list truncated to ${limit} of ${creators.length} — raise \`limit\` (max 500) to see the rest._\n`
+    : '';
+  const triggerTruncNote = triggersTruncated
+    ? `\n_Trigger list truncated to ${limit} of ${triggers.length} — raise \`limit\` (max 500) to see the rest._\n`
+    : '';
   const rendered =
     `Records of \`${objectApiName}\` are inserted by **${creators.length}** Flow automation(s); ` +
     `**${triggers.length}** trigger(s) fire on it.\n\n` +
-    (creators.length > 0 ? `### Creates records\n${creatorTable}\n\n` : '') +
-    (triggers.length > 0 ? `### Triggers on save\n${triggerTable}\n\n` : '') +
+    (creators.length > 0 ? `### Creates records\n${creatorTable}\n${creatorTruncNote}\n` : '') +
+    (triggers.length > 0 ? `### Triggers on save\n${triggerTable}\n${triggerTruncNote}\n` : '') +
     `_Offline static analysis surfaces **Flow** record-creates + triggers only. Apex DML inserts ` +
     `(\`insert x;\` static AND \`Database.insert\` dynamic) are NOT modeled, so an object created only ` +
     `by Apex reports **0 creators** — cross-check Apex (e.g. \`grep "new ${objectApiName}"\`) before ` +
@@ -116,8 +135,10 @@ export const recordCreationPathsHandler = async (
       objectId,
       creatorCount: creators.length,
       creators: creators.slice(0, limit),
+      creatorsTruncated,
       triggerCount: triggers.length,
       triggers: triggers.slice(0, limit),
+      triggersTruncated,
       trust,
       rendered,
     },

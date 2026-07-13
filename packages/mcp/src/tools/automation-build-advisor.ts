@@ -32,6 +32,7 @@ import {
   getNodeById,
   listEdges,
   listEdgesForNodes,
+  listNodesByIds,
   listNodesByType,
 } from '@sf-intelligence/graph';
 import { z } from 'zod';
@@ -216,14 +217,20 @@ const perObjectHandler = async (
   const inResult = await listEdges(ctx.graph, objectId, { direction: 'in', edgeType: 'triggersOn' });
   if (!inResult.ok) return err({ kind: 'internal', message: `graph query failed: ${inResult.error.message}` });
 
+  // ONE batched node fetch for every triggersOn source, replacing the per-edge
+  // `getNodeById` N+1. The per-edge Map lookup preserves the old null-skip and
+  // reads each edge's own `recordTriggerType`; the byId sort below makes push
+  // order irrelevant.
+  const inNodesResult = await listNodesByIds(ctx.graph, inResult.value.map((e) => e.fromId));
+  if (!inNodesResult.ok) return err({ kind: 'internal', message: `graph query failed: ${inNodesResult.error.message}` });
+  const inNodeById = new Map(inNodesResult.value.map((node) => [node.id, node]));
+
   const recordTriggeredFlows: FlowRef[] = [];
   const apexTriggers: TriggerRef[] = [];
   const workflowRules: ComponentId[] = [];
   for (const edge of inResult.value) {
-    const node = await getNodeById(ctx.graph, edge.fromId);
-    if (!node.ok) return err({ kind: 'internal', message: `graph query failed: ${node.error.message}` });
-    if (node.value === null) continue;
-    const n = node.value;
+    const n = inNodeById.get(edge.fromId);
+    if (n === undefined) continue;
     if (n.type === 'Flow') {
       recordTriggeredFlows.push({
         id: n.id,
@@ -250,13 +257,19 @@ const perObjectHandler = async (
   // co-fire analysis on it.
   const objectModeled =
     objNode.value !== null || inResult.value.length > 0 || outResult.value.length > 0;
+  // ONE batched node fetch for every parentOf child, replacing the per-edge
+  // `getNodeById` N+1 (a missing id maps to `undefined`, matching the old
+  // `node.value?.type` optional-chaining skip).
+  const outNodesResult = await listNodesByIds(ctx.graph, outResult.value.map((e) => e.toId));
+  if (!outNodesResult.ok) return err({ kind: 'internal', message: `graph query failed: ${outNodesResult.error.message}` });
+  const outNodeById = new Map(outNodesResult.value.map((node) => [node.id, node]));
+
   const validationRules: RuleRef[] = [];
   for (const edge of outResult.value) {
-    const node = await getNodeById(ctx.graph, edge.toId);
-    if (!node.ok) return err({ kind: 'internal', message: `graph query failed: ${node.error.message}` });
-    if (node.value?.type === 'ValidationRule') {
-      const active = node.value.properties['active'];
-      validationRules.push({ id: node.value.id, active: typeof active === 'boolean' ? active : null });
+    const node = outNodeById.get(edge.toId);
+    if (node?.type === 'ValidationRule') {
+      const active = node.properties['active'];
+      validationRules.push({ id: node.id, active: typeof active === 'boolean' ? active : null });
     }
   }
 

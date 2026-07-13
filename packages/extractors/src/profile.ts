@@ -248,17 +248,63 @@ const buildCustomPermissionEdges = (
   return edges;
 };
 
+/** Weekday field-name prefixes for `<loginHours>`, in metadata declaration order. */
+const LOGIN_HOURS_DAYS = [
+  'Monday',
+  'Tuesday',
+  'Wednesday',
+  'Thursday',
+  'Friday',
+  'Saturday',
+  'Sunday',
+] as const;
+
+/** One declared per-weekday `<loginHours>` window, verbatim off the source XML. */
+interface LoginHoursWindow {
+  readonly day: string;
+  readonly startTime: string;
+  readonly endTime: string;
+}
+
+/**
+ * Read the per-weekday windows off an already-unwrapped `<loginHours>` object.
+ * Salesforce declares one `{day}Start`/`{day}End` pair (minutes since
+ * midnight, GMT) per restricted weekday; a day with no pair is unrestricted
+ * (full 24-hour access), so only complete `Start`+`End` pairs are kept — a
+ * lone/partial pair is skipped rather than emitting a half-formed window.
+ */
+const collectLoginHoursWindows = (
+  loginHoursObj: Record<string, unknown>,
+): LoginHoursWindow[] => {
+  const windows: LoginHoursWindow[] = [];
+  for (const day of LOGIN_HOURS_DAYS) {
+    const prefix = day.toLowerCase();
+    const start = unwrapSingle(loginHoursObj[`${prefix}Start`]);
+    const end = unwrapSingle(loginHoursObj[`${prefix}End`]);
+    if (start === undefined || start === null) continue;
+    if (end === undefined || end === null) continue;
+    windows.push({ day, startTime: String(start), endTime: String(end) });
+  }
+  return windows;
+};
+
 /**
  * Collect the profile's login-security restrictions onto properties (login is a
  * Profile-only concern — permission sets don't carry it). `loginHours` is the
- * per-weekday allowed window(s); `loginIpRanges` the allowed IP CIDR ranges.
- * Both are surfaced as a count + the raw entries so a tool can answer "is this
- * profile login-restricted". Always present (`{ loginHours: [], loginIpRanges: [] }`
- * when absent) so a consumer can tell "extracted, none" from "never extracted".
+ * per-weekday allowed window(s), read off `<loginHours>`'s `{day}Start`/
+ * `{day}End` children via {@link collectLoginHoursWindows}; `loginIpRanges` the
+ * allowed IP CIDR ranges. Both are surfaced as a count + the raw entries so a
+ * tool can answer "is this profile login-restricted". Always present
+ * (`{ loginHours: [], loginIpRanges: [] }` when absent) so a consumer can tell
+ * "extracted, none" from "never extracted".
  */
 const collectLoginRestrictions = (
   rootObj: Record<string, unknown>,
-): { loginIpRanges: Array<Record<string, string>>; loginHoursDefined: boolean } => {
+): {
+  loginIpRanges: Array<Record<string, string>>;
+  loginHoursDefined: boolean;
+  loginHours: LoginHoursWindow[];
+} => {
   const loginIpRanges: Array<Record<string, string>> = [];
   for (const entry of iterEntries(rootObj, 'loginIpRanges')) {
     const start = unwrapSingle(entry['startAddress']);
@@ -266,11 +312,16 @@ const collectLoginRestrictions = (
     if (start === undefined || start === null) continue;
     loginIpRanges.push({ startAddress: String(start), endAddress: String(end ?? start) });
   }
-  // <loginHours> is a single element with per-weekday <mondayStart> etc. children;
-  // its presence means the profile restricts login windows.
+  // <loginHours> is a single element with per-weekday <mondayStart>/<mondayEnd>
+  // etc. children; its presence means the profile restricts login windows, and
+  // the individual weekday pairs (read by collectLoginHoursWindows) ARE those windows.
   const loginHoursRaw = unwrapSingle(rootObj['loginHours']);
   const loginHoursDefined = loginHoursRaw !== undefined && loginHoursRaw !== null;
-  return { loginIpRanges, loginHoursDefined };
+  const loginHours =
+    loginHoursDefined && typeof loginHoursRaw === 'object'
+      ? collectLoginHoursWindows(loginHoursRaw as Record<string, unknown>)
+      : [];
+  return { loginIpRanges, loginHoursDefined, loginHours };
 };
 
 /**
@@ -426,6 +477,7 @@ interface GrantCounts {
   readonly customPermissionGrantCount: number;
   readonly loginIpRanges: readonly Record<string, string>[];
   readonly loginHoursDefined: boolean;
+  readonly loginHours: readonly LoginHoursWindow[];
 }
 
 /** Assemble the `properties` map for a Profile node. */
@@ -539,7 +591,7 @@ export const extractProfile = async (
   const recordTypeVisibilities = collectRecordTypeVisibilities(rootObj);
   const applicationVisibilities = collectApplicationVisibilities(rootObj);
   const tabVisibilities = collectTabVisibilities(rootObj);
-  const { loginIpRanges, loginHoursDefined } = collectLoginRestrictions(rootObj);
+  const { loginIpRanges, loginHoursDefined, loginHours } = collectLoginRestrictions(rootObj);
 
   const edges: Edge[] = [...objectEdges, ...fieldEdges, ...classEdges, ...flowEdges, ...customPermissionEdges].sort(
     (a, b) => (a.toId < b.toId ? -1 : a.toId > b.toId ? 1 : 0),
@@ -568,6 +620,7 @@ export const extractProfile = async (
       customPermissionGrantCount: customPermissionEdges.length,
       loginIpRanges,
       loginHoursDefined,
+      loginHours,
     }),
   };
 

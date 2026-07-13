@@ -17,7 +17,10 @@ import {
   extractAuraDefinitionBundle,
   extractAuthProvider,
   extractAutoResponseRule,
+  extractBot,
+  extractBotVersion,
   extractBusinessProcess,
+  extractCertificate,
   extractCompactLayout,
   extractConnectedApp,
   extractCspTrustedSite,
@@ -29,17 +32,25 @@ import {
   extractCustomObject,
   extractCustomPermission,
   extractCustomSettingRecord,
+  extractCustomSite,
   extractCustomTab,
   extractDecisionTable,
   extractDashboard,
   extractDuplicateRule,
   extractEmailTemplate,
+  extractEntitlementProcess,
   extractEscalationRule,
+  extractExperienceBundle,
   extractFlexiPage,
   extractExternalDataSource,
   extractExternalService,
+  extractFieldServiceSettings,
   extractFieldSet,
   extractFlow,
+  extractGenAiFunction,
+  extractGenAiPlannerBundle,
+  extractGenAiPlugin,
+  extractGenAiPromptTemplate,
   extractGlobalValueSet,
   extractGroup,
   extractInstalledPackage,
@@ -48,8 +59,10 @@ import {
   extractLightningComponentBundle,
   extractListView,
   extractMatchingRule,
+  extractMilestoneType,
   extractMutingPermissionSet,
   extractNamedCredential,
+  extractNetwork,
   extractNetworkAccess,
   extractOmniDataTransform,
   extractOmniIntegrationProcedure,
@@ -58,10 +71,12 @@ import {
   extractPathAssistant,
   extractPermissionSetGroup,
   extractPermissionSet,
+  extractPresenceUserConfig,
   extractPlatformEventChannel,
   extractPlatformEventChannelMember,
   extractProfile,
   extractQueue,
+  extractQueueRoutingConfig,
   extractQuickAction,
   extractRecordType,
   extractReport,
@@ -69,13 +84,22 @@ import {
   extractRemoteSiteSetting,
   extractRestrictionRule,
   extractRole,
+  extractSamlSsoConfig,
   extractScopingRule,
+  extractServiceChannel,
   extractSessionSettings,
   extractSharingRules,
+  extractSkill,
+  extractStandardValueSet,
   extractStaticResource,
+  extractTimeSheetTemplate,
+  extractTransactionSecurityPolicy,
   extractValidationRule,
   extractVisualforceComponent,
   extractVisualforcePage,
+  extractWaveDashboard,
+  extractWaveDataflow,
+  extractWaveXmd,
   extractWebLink,
   extractWorkflowRule,
 } from '@sf-intelligence/extractors';
@@ -187,11 +211,17 @@ type Extractor = (path: string) => Promise<Result<ExtractionResult, ExtractorErr
  * edges) plus the v1.6 business-user record-value tier
  * (`CustomMetadataRecord`, `CustomSettingRecord` — each carries a single
  * record's configured values and attaches to its parent `CustomObject`
- * via the existing `parentOf` edge; no new EdgeType is introduced).
+ * via the existing `parentOf` edge; no new EdgeType is introduced) plus
+ * the R6-17 Experience Cloud community tier (`Network`, `CustomSite`,
+ * `ExperienceBundle` — the community definition, its site container, and
+ * the Builder bundle's top-level meta; `Network` emits DECLARED
+ * `references` to its site + bundle, `CustomSite` emits a HEURISTIC
+ * `references` to its convention-named guest profile, and the bundle's
+ * JSON page tree is out of scope by design).
  *
  * Directories that don't exist under `source/` are skipped cleanly by
  * `walkDir`'s readdir try/catch — orgs without the v1.1 / v1.2 / v1.3 /
- * v1.4 / v1.5 / v1.6 directories (the edu-org fixture has no v1.1
+ * v1.4 / v1.5 / v1.6 / R6-17 directories (the edu-org fixture has no v1.1
  * sharing tree, for instance) produce zero nodes of those types without
  * surfacing as failures.
  */
@@ -203,7 +233,10 @@ export const SUPPORTED_TYPES = [
   'AuraDefinitionBundle',
   'AuthProvider',
   'AutoResponseRule',
+  'Bot',
+  'BotVersion',
   'BusinessProcess',
+  'Certificate',
   'CompactLayout',
   'ConnectedApp',
   'CspTrustedSite',
@@ -214,17 +247,25 @@ export const SUPPORTED_TYPES = [
   'CustomObject',
   'CustomPermission',
   'CustomSettingRecord',
+  'CustomSite',
   'CustomTab',
   'DecisionTable',
   'Dashboard',
   'DuplicateRule',
   'EmailTemplate',
+  'EntitlementProcess',
   'EscalationRule',
+  'ExperienceBundle',
   'ExternalDataSource',
   'ExternalService',
+  'FieldServiceSettings',
   'FieldSet',
   'FlexiPage',
   'Flow',
+  'GenAiFunction',
+  'GenAiPlannerBundle',
+  'GenAiPlugin',
+  'GenAiPromptTemplate',
   'GlobalValueSet',
   'Group',
   'Index',
@@ -234,8 +275,10 @@ export const SUPPORTED_TYPES = [
   'LightningComponentBundle',
   'ListView',
   'MatchingRule',
+  'MilestoneType',
   'MutingPermissionSet',
   'NamedCredential',
+  'Network',
   'NetworkAccess',
   'OmniDataTransform',
   'OmniIntegrationProcedure',
@@ -246,8 +289,10 @@ export const SUPPORTED_TYPES = [
   'PermissionSetGroup',
   'PlatformEventChannel',
   'PlatformEventChannelMember',
+  'PresenceUserConfig',
   'Profile',
   'Queue',
+  'QueueRoutingConfig',
   'QuickAction',
   'RecordType',
   'RemoteSiteSetting',
@@ -255,13 +300,22 @@ export const SUPPORTED_TYPES = [
   'ReportType',
   'RestrictionRule',
   'Role',
+  'SamlSsoConfig',
   'ScopingRule',
+  'ServiceChannel',
   'SessionSettings',
   'SharingRule',
+  'Skill',
+  'StandardValueSet',
   'StaticResource',
+  'TimeSheetTemplate',
+  'TransactionSecurityPolicy',
   'ValidationRule',
   'VisualforceComponent',
   'VisualforcePage',
+  'WaveDashboard',
+  'WaveDataflow',
+  'WaveXmd',
   'WebLink',
   'WorkflowRule',
 ] as const satisfies readonly ComponentType[];
@@ -291,7 +345,10 @@ const EXTRACTORS: Readonly<Record<SupportedType, Extractor>> = {
   AuraDefinitionBundle: extractAuraDefinitionBundle,
   AuthProvider: extractAuthProvider,
   AutoResponseRule: extractAutoResponseRule,
+  Bot: extractBot,
+  BotVersion: extractBotVersion,
   BusinessProcess: extractBusinessProcess,
+  Certificate: extractCertificate,
   CompactLayout: extractCompactLayout,
   ConnectedApp: extractConnectedApp,
   CspTrustedSite: extractCspTrustedSite,
@@ -302,17 +359,25 @@ const EXTRACTORS: Readonly<Record<SupportedType, Extractor>> = {
   CustomObject: extractCustomObject,
   CustomPermission: extractCustomPermission,
   CustomSettingRecord: extractCustomSettingRecord,
+  CustomSite: extractCustomSite,
   CustomTab: extractCustomTab,
   DecisionTable: extractDecisionTable,
   Dashboard: extractDashboard,
   DuplicateRule: extractDuplicateRule,
   EmailTemplate: extractEmailTemplate,
+  EntitlementProcess: extractEntitlementProcess,
   EscalationRule: extractEscalationRule,
+  ExperienceBundle: extractExperienceBundle,
   ExternalDataSource: extractExternalDataSource,
   ExternalService: extractExternalService,
+  FieldServiceSettings: extractFieldServiceSettings,
   FieldSet: extractFieldSet,
   FlexiPage: extractFlexiPage,
   Flow: extractFlow,
+  GenAiFunction: extractGenAiFunction,
+  GenAiPlannerBundle: extractGenAiPlannerBundle,
+  GenAiPlugin: extractGenAiPlugin,
+  GenAiPromptTemplate: extractGenAiPromptTemplate,
   GlobalValueSet: extractGlobalValueSet,
   Group: extractGroup,
   Index: extractCustomIndex,
@@ -322,8 +387,10 @@ const EXTRACTORS: Readonly<Record<SupportedType, Extractor>> = {
   LightningComponentBundle: extractLightningComponentBundle,
   ListView: extractListView,
   MatchingRule: extractMatchingRule,
+  MilestoneType: extractMilestoneType,
   MutingPermissionSet: extractMutingPermissionSet,
   NamedCredential: extractNamedCredential,
+  Network: extractNetwork,
   NetworkAccess: extractNetworkAccess,
   OmniDataTransform: extractOmniDataTransform,
   OmniIntegrationProcedure: extractOmniIntegrationProcedure,
@@ -334,8 +401,10 @@ const EXTRACTORS: Readonly<Record<SupportedType, Extractor>> = {
   PermissionSetGroup: extractPermissionSetGroup,
   PlatformEventChannel: extractPlatformEventChannel,
   PlatformEventChannelMember: extractPlatformEventChannelMember,
+  PresenceUserConfig: extractPresenceUserConfig,
   Profile: extractProfile,
   Queue: extractQueue,
+  QueueRoutingConfig: extractQueueRoutingConfig,
   QuickAction: extractQuickAction,
   RecordType: extractRecordType,
   Report: extractReport,
@@ -343,13 +412,22 @@ const EXTRACTORS: Readonly<Record<SupportedType, Extractor>> = {
   RemoteSiteSetting: extractRemoteSiteSetting,
   RestrictionRule: extractRestrictionRule,
   Role: extractRole,
+  SamlSsoConfig: extractSamlSsoConfig,
   ScopingRule: extractScopingRule,
+  ServiceChannel: extractServiceChannel,
   SessionSettings: extractSessionSettings,
   SharingRule: extractSharingRules,
+  Skill: extractSkill,
+  StandardValueSet: extractStandardValueSet,
   StaticResource: extractStaticResource,
+  TimeSheetTemplate: extractTimeSheetTemplate,
+  TransactionSecurityPolicy: extractTransactionSecurityPolicy,
   ValidationRule: extractValidationRule,
   VisualforceComponent: extractVisualforceComponent,
   VisualforcePage: extractVisualforcePage,
+  WaveDashboard: extractWaveDashboard,
+  WaveDataflow: extractWaveDataflow,
+  WaveXmd: extractWaveXmd,
   WebLink: extractWebLink,
   WorkflowRule: extractWorkflowRule,
 };
@@ -531,6 +609,14 @@ const dispatchFile = (
   // org-level singleton; the extractor emits the fixed `SessionSettings:default`
   // node. Refresh-gated: only populates once a re-refresh retrieves the new type.
   if (segments.includes('settings') && fileName === 'Session.settings-meta.xml') return 'SessionSettings';
+  // Finding #38: FieldServiceSettings shares the generic `settings/`
+  // container with SessionSettings — same discriminant-by-filename
+  // approach (`FieldService.settings-meta.xml`, per the Metadata API's
+  // `[FeatureName].settings` file-naming convention: the member name
+  // "FieldService" plus the `.settings` extension). One org-level
+  // singleton; the extractor emits the fixed `FieldServiceSettings:default`
+  // node.
+  if (segments.includes('settings') && fileName === 'FieldService.settings-meta.xml') return 'FieldServiceSettings';
   // CR-CAP-18: platform-event publish/stream-routing topology. Both are flat
   // top-level dispatches under their own DX directory (singular Metadata-API
   // xmlName, no object-nested counterpart). The channel is the stream
@@ -568,6 +654,36 @@ const dispatchFile = (
   // own DX directory. Previously unregistered, so they were never retrieved.
   if (segments.includes('namedCredentials') && fileName.endsWith('.namedCredential-meta.xml')) return 'NamedCredential';
   if (segments.includes('connectedApps') && fileName.endsWith('.connectedApp-meta.xml')) return 'ConnectedApp';
+  // R6-01: SamlSsoConfig — flat top-level dispatch under `samlssoconfigs/`.
+  // Suffix verified against the Metadata API Developer Guide ("SamlSsoConfig
+  // components have the suffix .samlssoconfig and are stored in the
+  // samlssoconfigs folder") — all-lowercase, NOT the camelCase
+  // `.samlSsoConfig-meta.xml` a naive type-name transform would guess. The
+  // extractor (`saml-sso-config.ts`) and contracts ComponentType were already
+  // written and exported but never reachable: this dispatch line — plus the
+  // SUPPORTED_TYPES/EXTRACTORS entries above — is what makes it retrieve and
+  // extract. `value-change-risk.ts` / `value-change-audit.ts` already query
+  // `listNodesByType(ctx.graph, 'SamlSsoConfig', ...)`, so wiring this in is
+  // the whole fix; no consumer-side change is needed.
+  if (segments.includes('samlssoconfigs') && fileName.endsWith('.samlssoconfig-meta.xml')) return 'SamlSsoConfig';
+  // R6-22: Certificate — flat top-level dispatch under `certs/`. The
+  // Metadata API retrieves TWO files per component: `{Name}.crt` (the actual
+  // PEM/DER certificate or exported key content) and this `{Name}.crt-meta.xml`
+  // sidecar (verified live against a production-scale sandbox: `sf project
+  // retrieve start --metadata Certificate` landed exactly this pair for all 4
+  // real certs). The strict `.crt-meta.xml` suffix check means the bare
+  // `.crt` content file never matches ANY dispatch branch — it falls through
+  // to `null` and is silently skipped by the walk, exactly like any other
+  // non-metadata file. This is deliberate, not an oversight: the extractor
+  // must never read key/cert material, so it must never even be dispatched.
+  if (segments.includes('certs') && fileName.endsWith('.crt-meta.xml')) return 'Certificate';
+  // R6-22: TransactionSecurityPolicy — flat top-level dispatch under
+  // `transactionSecurityPolicies/`. Folder + `.transactionSecurityPolicy`
+  // suffix verified against the Metadata API Developer Guide (not a live
+  // vault — TransactionSecurityPolicy requires Salesforce Shield / Event
+  // Monitoring and was unavailable ("not available in this organization",
+  // per the retrieve warning) in the gate-vault fleet's accessible sandboxes).
+  if (segments.includes('transactionSecurityPolicies') && fileName.endsWith('.transactionSecurityPolicy-meta.xml')) return 'TransactionSecurityPolicy';
   // v1.6 business-user record-value tier. CustomMetadataRecord files
   // live flat under `customMetadata/` with shape
   // `{TypeApiName}.{RecordName}.md-meta.xml`; CustomSettingRecord
@@ -592,6 +708,86 @@ const dispatchFile = (
   // file suffix `.ouc-meta.xml` is unique to FlexCards.
   if (segments.includes('omniUiCard') && fileName.endsWith('.ouc-meta.xml')) return 'OmniUiCard';
   if (segments.includes('decisionTables') && fileName.endsWith('.decisionTable-meta.xml')) return 'DecisionTable';
+  // R6-08: standard-picklist tier. Flat top-level dispatch under
+  // `standardValueSets/` — suffix/folder verified against the Metadata API
+  // Developer Guide ("StandardValueSet components have the suffix
+  // .standardValueSet and are stored in the standardValueSets folder").
+  // Unlike every other top-level type here, StandardValueSet is NOT
+  // auto-included in a full org retrieve — the Metadata API requires each
+  // standard value set to be named individually in the manifest (there is
+  // no wildcard), so a vault only carries the ones `sfi refresh` explicitly
+  // requests (see `refresh.ts`'s manifest-selection logic).
+  if (segments.includes('standardValueSets') && fileName.endsWith('.standardValueSet-meta.xml')) return 'StandardValueSet';
+  // R6-18: Service Cloud entitlement/SLA + Omni-Channel routing tier. All four
+  // types are flat top-level dispatches under their own DX directory — folder
+  // and suffix verified against REAL scoped retrieves from two live orgs
+  // (`sf project retrieve start --metadata EntitlementProcess --metadata
+  // MilestoneType --metadata ServiceChannel --metadata QueueRoutingConfig`),
+  // not assumed from the Metadata API Developer Guide alone.
+  if (segments.includes('entitlementProcesses') && fileName.endsWith('.entitlementProcess-meta.xml')) return 'EntitlementProcess';
+  if (segments.includes('milestoneTypes') && fileName.endsWith('.milestoneType-meta.xml')) return 'MilestoneType';
+  if (segments.includes('serviceChannels') && fileName.endsWith('.serviceChannel-meta.xml')) return 'ServiceChannel';
+  if (segments.includes('queueRoutingConfigs') && fileName.endsWith('.queueRoutingConfig-meta.xml')) return 'QueueRoutingConfig';
+  // R7-C7: Omni-Channel presence configuration — the R6-18 leftover. Flat
+  // top-level dispatch under its own DX directory; folder/suffix verified
+  // via real scoped retrieves (`sf project retrieve start --metadata
+  // PresenceUserConfig`) from two live orgs.
+  if (segments.includes('presenceUserConfigs') && fileName.endsWith('.presenceUserConfig-meta.xml')) return 'PresenceUserConfig';
+  // R6-13: Agentforce / Einstein GenAI tier. Four flat file-based dispatches
+  // under their own DX directory. Folders/suffixes verified against a live
+  // Agentforce dev org's `sf org list metadata-types` describe (directoryName /
+  // suffix): genAiFunctions/.genAiFunction, genAiPlugins/.genAiPlugin,
+  // genAiPlannerBundles/.genAiPlannerBundle (nested folder-per-agent — the
+  // segment check tolerates the nesting; apiName is basename-derived),
+  // genAiPromptTemplates/.genAiPromptTemplate. None nests under any other
+  // dispatch branch, so segment + suffix is unambiguous.
+  if (segments.includes('genAiFunctions') && fileName.endsWith('.genAiFunction-meta.xml')) return 'GenAiFunction';
+  if (segments.includes('genAiPlugins') && fileName.endsWith('.genAiPlugin-meta.xml')) return 'GenAiPlugin';
+  if (segments.includes('genAiPlannerBundles') && fileName.endsWith('.genAiPlannerBundle-meta.xml')) return 'GenAiPlannerBundle';
+  if (segments.includes('genAiPromptTemplates') && fileName.endsWith('.genAiPromptTemplate-meta.xml')) return 'GenAiPromptTemplate';
+  // R7-C7: legacy Einstein Bot / Agentforce agent tier — the R6-13 leftover
+  // ("Bot's nested folder-per-bot layout doesn't fit the flat generic
+  // pattern"). Folder/suffixes verified against a real scoped retrieve
+  // (`sf project retrieve start --metadata Bot`) from a production-scale
+  // university sandbox: both `.bot-meta.xml` (the definition) AND every
+  // `.botVersion-meta.xml` (one per version) land under the SAME nested
+  // `bots/{BotName}/` directory from that single retrieve — no separate
+  // `--metadata BotVersion` request is needed or issued. The `bots`
+  // segment check tolerates the nesting exactly like `genAiPlannerBundles`
+  // above; the two suffixes are mutually exclusive so check order does not
+  // matter (`.botVersion-meta.xml` never satisfies `.bot-meta.xml`'s
+  // `endsWith` check).
+  if (segments.includes('bots') && fileName.endsWith('.bot-meta.xml')) return 'Bot';
+  if (segments.includes('bots') && fileName.endsWith('.botVersion-meta.xml')) return 'BotVersion';
+  // R6-17: Experience Cloud community tier. `Network` (`networks/`) is the
+  // anchor. `CustomSite` (`sites/`) and `ExperienceBundle`
+  // (`experiences/{Name}.site-meta.xml`) SHARE the `.site-meta.xml` suffix but
+  // live in DIFFERENT directories — so the directory segment disambiguates
+  // them (they are never co-located; the check order below is immaterial). The
+  // ExperienceBundle *page tree* under `experiences/{Name}/…` is JSON, never
+  // `.site-meta.xml`, so only the bundle's top-level meta dispatches here; the
+  // JSON tree is suppressed from the skip-counter in `walkAndExtract` (page
+  // content is out of scope by design — see the ExperienceBundle extractor).
+  if (segments.includes('networks') && fileName.endsWith('.network-meta.xml')) return 'Network';
+  if (segments.includes('sites') && fileName.endsWith('.site-meta.xml')) return 'CustomSite';
+  if (segments.includes('experiences') && fileName.endsWith('.site-meta.xml')) return 'ExperienceBundle';
+  // Finding #38: the two genuine flat-catalog FSL Metadata API types. Both
+  // are top-level, one-file-per-record directories — folder/suffix per the
+  // Metadata API / Field Service Developer Guide references (not verified
+  // against a live FSL org; recommended, not required, before shipping —
+  // see the ComponentType doc comment in @sf-intelligence/contracts).
+  // `Skill` is shared with Omni-Channel/chat agent routing, not FSL-exclusive.
+  if (segments.includes('skills') && fileName.endsWith('.skill-meta.xml')) return 'Skill';
+  if (segments.includes('timeSheetTemplates') && fileName.endsWith('.timeSheetTemplate-meta.xml')) return 'TimeSheetTemplate';
+  // Finding #45 CRMA slice: WaveDashboard / WaveDataflow / WaveXmd all live
+  // under the shared DX `wave/` folder. Discriminate by sidecar suffix
+  // (`.wdash-meta.xml` / `.wdf-meta.xml` / `.xmd-meta.xml`). The companion
+  // content blobs (`.wdash` / `.wdf`) match no branch and are silently
+  // skipped — deliberate, matching Certificate's `.crt` content-file skip:
+  // JSON content is out of scope for v1 (see extractor JSDoc).
+  if (segments.includes('wave') && fileName.endsWith('.wdash-meta.xml')) return 'WaveDashboard';
+  if (segments.includes('wave') && fileName.endsWith('.wdf-meta.xml')) return 'WaveDataflow';
+  if (segments.includes('wave') && fileName.endsWith('.xmd-meta.xml')) return 'WaveXmd';
   return null;
 };
 
@@ -604,8 +800,13 @@ const dispatchFile = (
  * `walkDir` so a future bundle-shaped metadata type can be added by
  * extending this set and adding the matching dispatch branch in
  * `dispatchFile` — no second edit to the walker required.
+ *
+ * Exported so consumers OUTSIDE the walker (e.g. `sfi review-change`'s
+ * `git diff` path mapper, R6-29) that need to locate a bundle's parent
+ * directory within an arbitrary path do not hand-maintain a second copy
+ * of this list.
  */
-const BUNDLE_PARENT_DIRS = new Set<string>(['lwc', 'aura']);
+export const BUNDLE_PARENT_DIRS = new Set<string>(['lwc', 'aura']);
 
 /**
  * A single entry the walker hands to the dispatch loop. File-shaped
@@ -763,7 +964,20 @@ const skipAttributionKey = (dirSegments: readonly string[]): string => {
 
 /**
  * Resolve the {@link ComponentType} a source-tree path would dispatch to.
- * Used by coverage reporting to attribute extractor failures to a type.
+ * Used by coverage reporting to attribute extractor failures to a type, and
+ * by `sfi review-change`'s `git diff` path mapper to resolve a changed file
+ * (or bundle directory) to its component type.
+ *
+ * `fileName`/`dirSegments` are derived IDENTICALLY to `walkAndExtract`'s own
+ * call site (the last path segment is always the dispatch unit's basename,
+ * everything before it is the directory chain) regardless of `isDirectory`.
+ * A prior version special-cased `isDirectory` to keep the bundle's own
+ * basename inside `dirSegments`, which broke `dispatchFile`'s bundle branch:
+ * it reads `segments[segments.length - 1]` expecting the PARENT dir
+ * (`lwc`/`aura`), but got the bundle name itself (e.g. `myCmp`) and returned
+ * `null` for every bundle directory (R6-29). Bundle dirs now resolve
+ * correctly in both directions: `lwc/{bundle}/` -> `LightningComponentBundle`,
+ * `aura/{bundle}/` -> `AuraDefinitionBundle`.
  */
 export const componentTypeFromSourcePath = (
   sourceRoot: string,
@@ -771,15 +985,44 @@ export const componentTypeFromSourcePath = (
   isDirectory = false,
 ): SupportedType | null => {
   const segments = relativeSegments(sourceRoot, absPath);
-  const fileName = isDirectory
-    ? basename(absPath)
-    : (segments[segments.length - 1] ?? basename(absPath));
-  const dirSegments = isDirectory ? segments : segments.slice(0, -1);
+  const fileName = segments[segments.length - 1] ?? basename(absPath);
+  const dirSegments = segments.slice(0, -1);
   return dispatchFile(dirSegments, fileName, isDirectory);
 };
 
 /** Report / Dashboard usage is folded onto fields rather than kept as nodes. */
 const FOLD_TO_FIELD_USAGE: ReadonlySet<ComponentType> = new Set(['Report', 'Dashboard']);
+
+/**
+ * Per-field cap on how many report/dashboard NAMES are preserved by
+ * {@link foldReportDashboardUsageIntoFields} (Finding #36). This is a
+ * per-field name-list cap, distinct from the org-wide `--with-reports`
+ * pull cap (top 500 by usage — see `REPORT_DASHBOARD_USAGE_CAVEAT`). It
+ * exists so a field referenced by an unusually large number of reports
+ * doesn't balloon that one `CustomField` node's properties; beyond-cap
+ * membership is disclosed via the `usedInReportsTruncated` /
+ * `usedInDashboardsTruncated` total-count property.
+ */
+/**
+ * Per-field cap on preserved report/dashboard api-names (R6-24 Option B).
+ * Documented/exported so tests and CHANGELOG stay aligned with the fold.
+ */
+export const FOLDED_REPORT_DASHBOARD_NAME_CAP = 50;
+const FOLDED_NAME_CAP = FOLDED_REPORT_DASHBOARD_NAME_CAP;
+
+/**
+ * Sort a name set deterministically and cap it at {@link FOLDED_NAME_CAP},
+ * returning the capped list plus (only when truncated) the true total count
+ * so the cap is honestly disclosed rather than silently dropping members.
+ */
+const capFoldedNames = (
+  names: ReadonlySet<string> | undefined,
+): { readonly list: readonly string[]; readonly truncatedTotal?: number } => {
+  if (names === undefined || names.size === 0) return { list: [] };
+  const sorted = [...names].sort();
+  if (sorted.length <= FOLDED_NAME_CAP) return { list: sorted };
+  return { list: sorted.slice(0, FOLDED_NAME_CAP), truncatedTotal: sorted.length };
+};
 
 /**
  * Fold Report / Dashboard field usage onto the referenced `CustomField` nodes,
@@ -789,32 +1032,46 @@ const FOLD_TO_FIELD_USAGE: ReadonlySet<ComponentType> = new Set(['Report', 'Dash
  * org), and the only thing we need from them for analysis is "this field is used
  * by a report/dashboard" — so we deliberately do NOT persist a node per report.
  * This pass harvests each Report/Dashboard's `references` field-edges, stamps
- * `usedInReport` / `usedInDashboard` on the target `CustomField` nodes (so the
- * unused-field tools stop false-flagging a field whose only use is a report
- * column or dashboard component), and removes the heavyweight report/dashboard
- * nodes + edges so they never bloat the graph. Pure transform; every other type
- * (FlexiPage, etc.) passes through untouched. A no-op when no report/dashboard
- * was retrieved.
+ * `usedInReport` / `usedInDashboard` booleans on the target `CustomField` nodes
+ * (so the unused-field tools stop false-flagging a field whose only use is a
+ * report column or dashboard component) — AND (Finding #36) a CAPPED, sorted
+ * list of the referencing report/dashboard api-names on `usedInReports` /
+ * `usedInDashboards` (first `FOLDED_NAME_CAP`, with `usedInReportsTruncated` /
+ * `usedInDashboardsTruncated` carrying the true total when it exceeds the cap),
+ * so "which reports break if I change this field" can name WHICH reports
+ * instead of only asserting "used in a report". It then removes the
+ * heavyweight report/dashboard nodes + edges so they never bloat the graph —
+ * only the capped name list survives, not a node per report. Pure transform;
+ * every other type (FlexiPage, etc.) passes through untouched. A no-op when no
+ * report/dashboard was retrieved.
  */
 export const foldReportDashboardUsageIntoFields = (
   results: readonly ExtractionResult[],
 ): readonly ExtractionResult[] => {
-  const foldedNodeIds = new Set<string>();
+  const foldedNodeApiNames = new Map<string, string>();
   for (const r of results) {
     for (const n of r.nodes) {
-      if (FOLD_TO_FIELD_USAGE.has(n.type)) foldedNodeIds.add(n.id);
+      if (FOLD_TO_FIELD_USAGE.has(n.type)) foldedNodeApiNames.set(n.id, n.apiName);
     }
   }
-  if (foldedNodeIds.size === 0) return results;
+  if (foldedNodeApiNames.size === 0) return results;
 
-  const usedInReport = new Set<string>();
-  const usedInDashboard = new Set<string>();
+  const reportNamesByField = new Map<string, Set<string>>();
+  const dashboardNamesByField = new Map<string, Set<string>>();
   for (const r of results) {
     for (const e of r.edges) {
-      if (e.edgeType !== 'references' || !foldedNodeIds.has(e.fromId)) continue;
+      if (e.edgeType !== 'references' || !foldedNodeApiNames.has(e.fromId)) continue;
       if (!e.toId.startsWith('CustomField:')) continue;
-      if (e.fromId.startsWith('Report:')) usedInReport.add(e.toId);
-      else if (e.fromId.startsWith('Dashboard:')) usedInDashboard.add(e.toId);
+      const sourceApiName = foldedNodeApiNames.get(e.fromId) ?? e.fromId;
+      const byField = e.fromId.startsWith('Report:')
+        ? reportNamesByField
+        : e.fromId.startsWith('Dashboard:')
+          ? dashboardNamesByField
+          : null;
+      if (byField === null) continue;
+      const names = byField.get(e.toId) ?? new Set<string>();
+      names.add(sourceApiName);
+      byField.set(e.toId, names);
     }
   }
 
@@ -824,20 +1081,32 @@ export const foldReportDashboardUsageIntoFields = (
       .filter((n) => !FOLD_TO_FIELD_USAGE.has(n.type))
       .map((n): Node => {
         if (n.type !== 'CustomField') return n;
-        const inReport = usedInReport.has(n.id);
-        const inDashboard = usedInDashboard.has(n.id);
-        if (!inReport && !inDashboard) return n;
+        const reportNames = reportNamesByField.get(n.id);
+        const dashboardNames = dashboardNamesByField.get(n.id);
+        if (reportNames === undefined && dashboardNames === undefined) return n;
+        const reportCap = capFoldedNames(reportNames);
+        const dashboardCap = capFoldedNames(dashboardNames);
         return {
           ...n,
           properties: {
             ...n.properties,
-            ...(inReport ? { usedInReport: true } : {}),
-            ...(inDashboard ? { usedInDashboard: true } : {}),
+            ...(reportNames !== undefined
+              ? { usedInReport: true, usedInReports: reportCap.list }
+              : {}),
+            ...(reportCap.truncatedTotal !== undefined
+              ? { usedInReportsTruncated: reportCap.truncatedTotal }
+              : {}),
+            ...(dashboardNames !== undefined
+              ? { usedInDashboard: true, usedInDashboards: dashboardCap.list }
+              : {}),
+            ...(dashboardCap.truncatedTotal !== undefined
+              ? { usedInDashboardsTruncated: dashboardCap.truncatedTotal }
+              : {}),
           },
         };
       }),
     edges: r.edges.filter(
-      (e) => !foldedNodeIds.has(e.fromId) && !foldedNodeIds.has(e.toId),
+      (e) => !foldedNodeApiNames.has(e.fromId) && !foldedNodeApiNames.has(e.toId),
     ),
   }));
 };
@@ -902,8 +1171,17 @@ export const walkAndExtract = async (
       // node, not a separate metadata type — so it must NOT be counted as an
       // "uncovered type" skip. Without this, every refresh of every org reports a
       // false `staticresources` gap (the warning is meant to flag REAL coverage
-      // holes, so a permanent false positive erodes its signal).
-      if (!isKnownSidecar(fileName) && !dirSegments.includes('staticresources')) {
+      // holes, so a permanent false positive erodes its signal). R6-17: the same
+      // reasoning covers the ExperienceBundle page tree — its hundreds of
+      // `experiences/{Name}/…/*.json` page/component files are OUT OF SCOPE by
+      // design (the bundle's existence + meta is covered by its ExperienceBundle
+      // node), so they must not flood the skip-counter with a false `experiences`
+      // gap. Only the dispatched top-level `{Name}.site-meta.xml` is modeled.
+      if (
+        !isKnownSidecar(fileName) &&
+        !dirSegments.includes('staticresources') &&
+        !dirSegments.includes('experiences')
+      ) {
         const key = skipAttributionKey(dirSegments);
         skippedDirectories[key] = (skippedDirectories[key] ?? 0) + 1;
       }

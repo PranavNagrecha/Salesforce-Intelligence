@@ -30,6 +30,7 @@ const CASES: ReadonlyArray<{ q: string; anyOf: readonly string[] }> = [
   { q: 'write an admin handbook for this org', anyOf: ['sfi.generate_admin_handbook', 'sfi.generate_onboarding_doc', 'sfi.org_overview'] },
   { q: 'where does this org keep personal data', anyOf: ['sfi.pii_inventory', 'sfi.generate_compliance_report'] },
   { q: 'how much technical debt is in here', anyOf: ['sfi.tech_debt_score', 'sfi.org_risk_report'] },
+  { q: 'is our security posture getting better or worse across refreshes', anyOf: ['sfi.trend'] },
   { q: 'is my local copy of the org current', anyOf: ['sfi.health_check', 'sfi.live_stale_check', 'sfi.org_pulse'] },
   { q: 'give me a tour of this org', anyOf: ['sfi.org_overview', 'sfi.org_card'] },
   { q: 'how many open opportunities do we have', anyOf: ['sfi.live_count'] },

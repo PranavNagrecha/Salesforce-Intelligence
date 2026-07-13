@@ -43,6 +43,13 @@ export const isActiveSoeFirer = (node: Node): boolean => {
     if (typeof active === 'boolean') return active;
     return true;
   }
+  // DuplicateRule uses `isActive` (its own `<isActive>` XML element), not
+  // `active` like the workflow/validation/approval trio.
+  if (node.type === 'DuplicateRule') {
+    const isActive = props['isActive'];
+    if (typeof isActive === 'boolean') return isActive;
+    return true;
+  }
   return true;
 };
 
@@ -61,6 +68,9 @@ const inactiveReasonFor = (node: Node): string => {
     node.type === 'ValidationRule'
   ) {
     return 'active: false';
+  }
+  if (node.type === 'DuplicateRule') {
+    return 'isActive: false';
   }
   return 'inactive';
 };

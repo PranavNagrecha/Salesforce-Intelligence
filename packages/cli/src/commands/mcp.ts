@@ -1,11 +1,10 @@
-import { execFile } from 'node:child_process';
 import { readFile, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { promisify } from 'node:util';
 
 import {
   checkForUpdate,
   err,
+  execHelper,
   formatUpdateNotice,
   ok,
   type Result,
@@ -81,16 +80,23 @@ const readBoundOrg = async (configPath: string): Promise<string | null> => {
   }
 };
 
-const nodeExecFile = promisify(execFile);
-
 /**
  * List the user's authenticated Salesforce orgs via `sf org list --json`.
- * Best-effort: any failure (no sf CLI, not logged in, malformed JSON) yields an
- * empty list so the no-vault hint degrades gracefully rather than throwing.
+ * Best-effort: any failure (no sf CLI, not logged in, malformed JSON, or a
+ * wedged `sf` subprocess that outlives its timeout) yields an empty list so
+ * the no-vault hint degrades gracefully rather than throwing or hanging.
+ *
+ * CR-RV3b: routed through {@link execHelper} (the shared cross-platform `sf`
+ * exec seam) instead of a bare `promisify(execFile)` call, so this probe
+ * inherits the same `SFI_SF_EXEC_TIMEOUT_MS`-backed timeout (10-min default)
+ * and SIGTERM→SIGKILL escalation as every other `sf` shellout in the plugin
+ * — a hung `sf` process can no longer wedge `sfi mcp` startup forever. The
+ * timeout rejection is caught by the existing `catch` below exactly like any
+ * other exec failure, so the graceful-degrade contract is unchanged.
  */
 const defaultListOrgs: ListOrgs = async () => {
   try {
-    const { stdout } = await nodeExecFile('sf', ['org', 'list', '--json'], {
+    const { stdout } = await execHelper('sf', ['org', 'list', '--json'], {
       maxBuffer: 10 * 1024 * 1024,
     });
     const json = JSON.parse(stdout) as {

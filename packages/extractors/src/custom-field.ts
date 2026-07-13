@@ -347,6 +347,42 @@ const extractValueSetName = (rootObj: Record<string, unknown>): string | null =>
   return toNullableString((valueSet as Record<string, unknown>)['valueSetName']);
 };
 
+/** The `SummaryOperation` enumeration Salesforce carries on `<summaryOperation>`. */
+const SUMMARY_DATA_TYPE = 'Summary';
+
+/**
+ * Extract the roll-up-summary-specific triple from a `<type>Summary</type>`
+ * CustomField: `summarizedField` (the child-object field being aggregated —
+ * ABSENT for a `count` operation, since counting rows needs no source field),
+ * `summaryForeignKey` (the child-object master-detail field that points back
+ * at THIS field's own object — the anchor a consumer needs to answer "which
+ * child object recalculates this rollup"), and `summaryOperation` (`count` /
+ * `sum` / `min` / `max`). Both `summarizedField` and `summaryForeignKey` are
+ * `{ChildObjectApiName}.{ChildFieldApiName}` dot-qualified strings verbatim
+ * from the XML — NOT re-parsed into a canonical CustomField id here, so a
+ * consumer that wants the child object alone splits on the first `.`.
+ *
+ * Returns all-`null` for a non-Summary field so the caller's OMIT-when-null
+ * spread keeps every other CustomField byte-identical (no churn).
+ */
+const extractSummaryInfo = (
+  rootObj: Record<string, unknown>,
+  dataType: string,
+): {
+  summarizedField: string | null;
+  summaryForeignKey: string | null;
+  summaryOperation: string | null;
+} => {
+  if (dataType !== SUMMARY_DATA_TYPE) {
+    return { summarizedField: null, summaryForeignKey: null, summaryOperation: null };
+  }
+  return {
+    summarizedField: toNullableString(rootObj['summarizedField']),
+    summaryForeignKey: toNullableString(rootObj['summaryForeignKey']),
+    summaryOperation: toNullableString(rootObj['summaryOperation']),
+  };
+};
+
 /**
  * Build the `properties` map for a CustomField Node. Keys are exactly
  * those listed in the vendored doc's "Node properties" section.
@@ -369,6 +405,10 @@ const buildProperties = (
   const { controllingField, controllingFieldValues } = isPicklist
     ? extractControllingFieldInfo(rootObj)
     : { controllingField: null, controllingFieldValues: null };
+  const { summarizedField, summaryForeignKey, summaryOperation } = extractSummaryInfo(
+    rootObj,
+    dataType,
+  );
 
   return {
     label: String(unwrapSingle(rootObj['label'])),
@@ -411,6 +451,18 @@ const buildProperties = (
       const valueSetName = extractValueSetName(rootObj);
       return valueSetName !== null ? { valueSetName } : {};
     })(),
+    // OMIT-when-null (unlike the fixed keys above): only `type: Summary`
+    // (roll-up summary) fields carry these three, and a null row on every
+    // stored/formula CustomField would churn every rendered markdown vault
+    // file. `summarizedField` is itself OMIT-able even on a Summary field —
+    // a `count` operation has no source field to summarize, so it is absent
+    // (not null) on that shape. Consumers (the SOE post-save-rollup-recalc
+    // phase, field_360, data-dictionary) read `summaryForeignKey`'s
+    // `{ChildObject}.` prefix to find which child object's save recalculates
+    // this field.
+    ...(summarizedField !== null ? { summarizedField } : {}),
+    ...(summaryForeignKey !== null ? { summaryForeignKey } : {}),
+    ...(summaryOperation !== null ? { summaryOperation } : {}),
   };
 };
 

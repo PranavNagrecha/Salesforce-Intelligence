@@ -41,6 +41,12 @@ const seedNoSession: ExtractionResult = {
         { startAddress: '172.16.0.1' },
       ],
       loginHoursDefined: true,
+      loginHours: [
+        { day: 'Monday', startTime: '480', endTime: '1020' },
+        { day: 'Friday', startTime: '480', endTime: '780' },
+        // A malformed row (no day) must be dropped, never [object Object].
+        { startTime: '0', endTime: '100' },
+      ],
     } }),
     node({ id: 'Profile:Open', type: 'Profile', apiName: 'Open', label: 'Open Profile', properties: {} }),
     node({ id: 'PermissionSet:Custom', type: 'PermissionSet', apiName: 'Custom', properties: {} }),
@@ -96,8 +102,11 @@ describe('profileSecurityHandler', () => {
     ]);
     expect(d.loginIpRangeCount).toBe(2);
     expect(d.loginHoursRestricted).toBe(true);
-    // Login-hours windows are DEFERRED behind the SessionSettings tier.
-    expect(d.loginHoursByDay).toEqual([]);
+    // Login-hours per-weekday windows, dropping the malformed row (no day).
+    expect(d.loginHoursByDay).toEqual([
+      { day: 'Monday', startTime: '480', endTime: '1020' },
+      { day: 'Friday', startTime: '480', endTime: '780' },
+    ]);
     expect(d.confidence).toBe('declared');
     expect(d.profileLabel).toBe('Restricted Profile');
   });

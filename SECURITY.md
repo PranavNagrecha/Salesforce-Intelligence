@@ -4,7 +4,7 @@
 
 | Version | Supported |
 | --- | --- |
-| 0.1.x (current public release) | Yes |
+| 0.2.x (current public release) | Yes |
 | Pre-0.1 / maintainer-only snapshots | No |
 
 Security fixes land on the latest release tag. Pin your install to a tagged
@@ -14,9 +14,9 @@ version in production workflows.
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
-Email **security@sf-intelligence.dev** (or, if that address is not yet live,
-open a [private security advisory](https://github.com/PranavNagrecha/Salesforce-Intelligence/security/advisories/new)
-on GitHub) with:
+Open a [private security advisory](https://github.com/PranavNagrecha/Salesforce-Intelligence/security/advisories/new)
+on GitHub (preferred — routes directly to the maintainer). If you cannot use
+GitHub, email **security@auditforce.cloud** instead. Include:
 
 1. A description of the issue and its impact
 2. Steps to reproduce

@@ -4,15 +4,21 @@ description: |
   Answers business-user-flavored Salesforce questions like "what
   does this field mean in English", "what happens when I close this
   opportunity", "why can't I do X", "how do I find report Y",
-  "what's the SLA on this case", "is this field required", "what's
-  this object for", "how is this calculated". Classifies the intent
-  and routes to the right `sfi.*` tool, OR honestly refuses when
-  v1.x doesn't yet model the answer (record-level data, reports,
-  dashboards, entitlements/SLAs, flow-to-narrative). Bridges the
-  vocabulary gap between business-user phrasing and the architect/
-  admin tools the product already ships. v1.6 broadens to
-  record-value lookups for Custom Metadata Type records and Custom
-  Setting records via `sfi.lookup_record` + `sfi.explain_field`.
+  "what's the SLA on this case", "how are cases routed to agents",
+  "is this field required", "what's this object for", "how is this
+  calculated". Classifies the intent and routes to the right `sfi.*`
+  tool, OR honestly refuses when v1.x doesn't yet model the answer
+  (record-level data, reports, dashboards, live entitlement-milestone
+  status/timers, flow-to-narrative). R6-18 extracts
+  EntitlementProcess/MilestoneType (which milestones apply, business
+  hours, active state) and ServiceChannel/QueueRoutingConfig
+  (Omni-Channel routing model, capacity, overflow queue) — SLA/
+  entitlement and case-routing questions get a real partial answer
+  now, not a blanket refusal. Bridges the vocabulary gap between
+  business-user phrasing and the architect/admin tools the product
+  already ships. v1.6 broadens to record-value lookups for Custom
+  Metadata Type records and Custom Setting records via
+  `sfi.lookup_record` + `sfi.explain_field`.
 ---
 
 # Business-user orientation
@@ -104,7 +110,7 @@ another skill, or refuse honestly.
 | **Org-wide vocabulary lookup** | "What's a `Order_Line__c`?" / "What's this object for?" / "What does this object represent?" | `sfi.get_component` on the `CustomObject:` ID. Surface `properties.description` (object-level) and the count of `CustomField` children via `sfi.list_components({ type: 'CustomField', parentId: 'CustomObject:...' })` as a "fields it tracks" summary. Refuse if the object-level description is null and the object name is opaque (`Order_Line__c` with no description and no admin annotation means "v1.x can't tell you what this is for"). |
 | **Where do I find** | "Where do I find the Pipeline report?" / "How do I run the Won Deals dashboard?" / "Where's the list view called 'My Cases'?" | **Honest boundary.** Report/dashboard *folder names* and UI navigation are not in the vault — direct the user to the Reports/Dashboards tabs. For **field usage** questions ("is this field used in a report?"), check the field's folded `usedInReport` / `usedInDashboard` properties (default capped pull) or run `sfi refresh --with-reports` for full coverage. ListView **column field refs** are extracted as graph edges (`sfi.find_field_anywhere`, `sfi.list_components({ type: 'ListView' })`); list-view **filter evaluation** and UI picker paths are not composed in field tools. |
 | **What does this config value mean** | "What's the value of Number_Of_Retries for Marketo_Api_Setting Default?" / "Show me the values for all Clinical_Instruction records" / "What does the Industry field hold across records?" / "Is this CMD record protected?" | **v1.6+.** Route to `sfi.lookup_record({ recordId: 'CustomMetadataRecord:Type.Record' })` (or `CustomSettingRecord:Type.Record`) when the user names a specific record; route to `sfi.explain_field({ fieldId: 'CustomField:Type.Field', includeRecordValues: true })` when the user wants the value of a field across all records of a `__mdt` type. Both tools pass `{ value: null, isMasked: true }` through verbatim for masked (`***`) values — surface the masked status to the user; **never fabricate** the underlying value. If `sfi.lookup_record` returns `component-not-found` for a `CustomSettingRecord:` id, that's the v1.6 boundary on CustomSetting serialization — suggest `sf data query` against the running org. |
-| **SLA / entitlement** | "What's the SLA on this case?" / "When does this case escalate?" / "What's the entitlement on this account?" | **Honest refusal.** v1.x does not extract `Entitlement`, `MilestoneType`, `EntitlementProcess`, `ServiceContract`, `EscalationRule`, or `EntitlementTemplate`. Tell the user: "Entitlements and SLAs aren't in v1.x's vault. Check the case's **Entitlement** related list in the Salesforce UI, or ask your admin." Do **not** invent SLA numbers from general Salesforce-product knowledge. |
+| **SLA / entitlement / routing** | "What's the SLA on this case?" / "When does this case escalate?" / "What's the entitlement on this account?" / "How are cases routed to agents?" | **Partial answer + honest refusal (R6-18).** `EntitlementProcess` (name, active, `SObjectType`, version, business hours, and the `MilestoneType` names it references) and `MilestoneType` (description, recurrence) are extracted — normalize via `sfi.search_components` then `sfi.get_component` / `sfi.get_edges` to list which milestones apply and whether the process is active. For routing: `ServiceChannel` (related object, capacity model) and `QueueRoutingConfig` (routing model, capacity weight, push timeout, overflow queue — a `references` edge from the owning `Queue`) are extracted; `sfi.get_component` on the `Queue:` id surfaces its routing config. **Then honestly refuse the still-unmodeled parts:** per-milestone target minutes, whether a SPECIFIC case is on-track or breached, and real-time agent capacity/availability are live-only — direct the user to the Salesforce UI's **Entitlement**/**Milestones** related lists. The record-level `Entitlement` assignment and `ServiceContract` remain entirely unmodeled. Do **not** invent SLA numbers from general Salesforce-product knowledge. |
 
 A few cues to break ties:
 
@@ -123,8 +129,10 @@ A few cues to break ties:
   properties or `sfi.find_field_anywhere`.
 - The user names a list view **by UI name only** → honest UI redirect; column
   field-ref questions → graph tools (`find_field_anywhere`, `list_components`).
-- The user names an SLA, entitlement, escalation timer, or
-  milestone → honest refusal (SLA / entitlement).
+- The user names an SLA, entitlement, milestone, or case-routing/
+  queue-assignment question → SLA / entitlement / routing (partial
+  answer for the modeled process/milestone/routing metadata, honest
+  refusal for target minutes and live status).
 
 ## When to fire
 
@@ -147,9 +155,10 @@ human-readable enumeration. Concrete triggers:
 - **"Where do I find…"** — "where do I find the Pipeline report?",
   "how do I run the Won Deals dashboard?", "where's the list view
   for My Cases?".
-- **"What's the SLA / entitlement on…"** — "what's the SLA on this
-  case?", "when does this escalate?", "what's the entitlement on
-  this account?".
+- **"What's the SLA / entitlement on…" / "How are cases routed…"** —
+  "what's the SLA on this case?", "when does this escalate?",
+  "what's the entitlement on this account?", "how are cases routed
+  to agents?", "what's this queue's routing config?".
 - **"Explain this process / flow to me."** — "explain this
   approval process", "walk me through the close-opportunity flow",
   "what does this automation do?".
@@ -219,12 +228,15 @@ then offer to run the second (defer to
 `admin-sharing-troubleshooting` for the why-can't-I half if
 record-level).
 
-If the question's intent is one of the three honest-refusal
-intents (where-do-I-find, SLA/entitlement, or
-process-explanation-as-narrative), **stop and refuse honestly**.
-Do not call any tool. Direct the user to the Salesforce UI or to
-their admin, and explicitly name what v1.x doesn't yet model. See
-*Anti-patterns* below for why "I'll try anyway" is the wrong move.
+If the question's intent is where-do-I-find, **stop and refuse
+honestly** — do not call any tool to fish for an unmodeled answer.
+SLA / entitlement / routing and process-explanation are **hybrids**:
+call `sfi.search_components` / `sfi.get_component` (/ `sfi.get_edges`)
+for the metadata that IS modeled, present it, then refuse honestly
+for the part that isn't (target minutes and live status for SLA /
+entitlement / routing; narrated prose for process explanation). See
+*Anti-patterns* below for why "I'll try anyway" on the *unmodeled*
+half is the wrong move.
 
 ### Step 2 — Normalize the user's phrase into a canonical ID
 
@@ -317,10 +329,14 @@ Seven refusal conditions, each with a fixed-form response:
    dashboards, and list views aren't extracted in v1.x. Try the
    **Reports** tab or **Dashboards** tab in the Salesforce UI for
    `{org}`."
-3. **User asked for SLA / entitlement** — "Entitlements,
-   milestones, and SLAs aren't extracted in v1.x. Check the
-   record's **Entitlement** related list in the Salesforce UI, or
-   ask your admin for the entitlement policy."
+3. **User asked for SLA target minutes or live entitlement/milestone
+   status** — "This org's EntitlementProcess/MilestoneType metadata
+   is extracted (which milestones apply, whether the process is
+   active, business hours), but not the per-milestone target
+   minutes or whether THIS case is currently on-track or breached —
+   that's live, per-record data. Check the case's **Entitlement**
+   and **Milestones** related lists in Salesforce, or ask your
+   admin."
 4. **User asked for process narration (Flow XML → English)** —
    "v1.x stores Flow XML and Apex source as text, but it doesn't
    translate them to a plain-English narrative. I can list what
@@ -401,32 +417,32 @@ Note what the response does and doesn't do:
 - Does **not** invent generic meaning ("Product Name is the name of
   the product") if the description had been empty.
 
-**Counter-example — honest refusal.** User asks: *"What's the SLA
-on this case?"*
+**Hybrid example — partial answer + honest refusal (R6-18).** User asks:
+*"What's the SLA on this case?"*
 
 Claude's flow:
 
-1. **Classify** → SLA / entitlement intent.
-2. **Stop.** No tool call. Refuse honestly.
+1. **Classify** → SLA / entitlement / routing intent.
+2. **Normalize + call.** `sfi.search_components({ query: 'Case' })` to
+   confirm the object, then `sfi.list_components({ type:
+   'EntitlementProcess' })` (or `sfi.get_component` on the resolved
+   process id) plus `sfi.get_edges` to list the `MilestoneType`
+   targets it references.
 3. **Respond:**
 
-> Entitlements, milestones, and SLAs aren't extracted in v1.x's
-> vault — the metadata for `Entitlement`, `EntitlementProcess`,
-> `MilestoneType`, and `ServiceContract` isn't yet covered. To see
-> the SLA on this specific case:
+> This org's Case entitlement process is **"Gold Support Process"**
+> (active). It defines three milestones: **First Response to
+> Customer**, **Escalate Case**, and **Close Case**.
 >
-> - Open the case in Salesforce; check the **Entitlement** related
->   list and the **Milestones** list.
-> - Or ask your admin who owns the entitlement policy for your
->   service team.
->
-> I can answer business-user questions about fields, objects, and
-> what fires on save once v1.x has extracted them. SLAs and
-> entitlements are on the roadmap for a later milestone.
+> What I *can't* tell you from the vault: the target minutes for
+> each milestone, and whether *this specific* case is currently
+> on-track or breached — that's live, per-record timer data. Check
+> the case's **Entitlement** and **Milestones** related lists in
+> Salesforce, or ask your admin for the target times.
 
-The response names what v1.x doesn't model, lists two concrete
-manual-check paths, and stays honest about scope — no fabricated
-SLA hours.
+The response grounds the process/milestone SHAPE in real extracted
+metadata (EntitlementProcess/MilestoneType, R6-18), then honestly
+refuses the live number instead of fabricating "24 hours."
 
 ## Boundary disclosure
 
@@ -457,12 +473,35 @@ answer, and **always** include the relevant subset when refusing:
 - **Apex-to-narrative translation.** Same boundary for Apex
   classes and triggers — text storage and heuristic edge
   extraction, no semantic narration.
-- **Entitlements, milestones, SLAs.** `Entitlement`,
-  `EntitlementProcess`, `MilestoneType`, `ServiceContract`,
-  `EscalationRule`, `EntitlementTemplate` are not in v1.x's
-  extracted ComponentTypes.
-- **Quote, Order, Contract approval routing.** Approval Process
-  metadata is not yet covered.
+- **Entitlements, milestones, SLAs (R6-18: partial).**
+  `EntitlementProcess` (name, active, `SObjectType`, version,
+  business hours, referenced `MilestoneType` names) and
+  `MilestoneType` (description, recurrence) ARE extracted
+  ComponentTypes — the process/milestone SHAPE is answerable.
+  Per-milestone target minutes, live on-track/breached status, the
+  record-level `Entitlement` assignment, and `ServiceContract` are
+  still NOT modeled (live/record-level only). (`EscalationRule` was
+  listed here as unmodeled in an earlier revision of this skill —
+  that was stale; it has been an extracted ComponentType since
+  v1.3.)
+- **Omni-Channel routing (R6-18).** `ServiceChannel` (related
+  object via `relatedEntityType`, capacity model) and
+  `QueueRoutingConfig` (routing model, capacity weight, push
+  timeout, overflow queue) are extracted, including the
+  `Queue -> QueueRoutingConfig` `references` edge. Real-time agent
+  capacity/availability/presence is still live-only.
+- **Quote, Order, Contract approval routing (R7-W8-skill: corrected —
+  ApprovalProcess was listed here as uncovered; that was stale).**
+  `ApprovalProcess` IS an extracted ComponentType (since v1.3, object-agnostic
+  — Opportunity, Quote, Order, Contract, or any custom object): approval
+  steps and their approver chains (user / role / role-subordinates / queue /
+  group / hierarchy-field variants), entry-criteria conditions, field-update
+  actions (`writesTo` edges to the `CustomField` each step sets), and
+  approval/rejection email alerts (`sendsEmail` edges) are all modeled — the
+  DECLARED routing shape is answerable. What's still NOT modeled: a specific
+  record's LIVE in-flight approval state (who it's currently pending on, how
+  long it's been sitting, its history) — that's live/record-level data, same
+  boundary as the Entitlements bullet above.
 - **Live state.** Queue depth, recent errors, governor-limit
   consumption, currently-running jobs — none of this is in v1.x.
   The vault is a snapshot at refresh time.
@@ -483,7 +522,7 @@ fabricated answers is naming the gap explicitly.
 |---|---|
 | Answering "what does this field mean" with generic Salesforce documentation when `properties.description` is empty. | Silent fabrication. The user has no way to tell the answer wasn't grounded in their org. Refuse honestly — "the description is empty in this org's metadata; ask your admin" — and stop. |
 | Translating `Product_Name__c` to "Product Name" as a *guess* at the label instead of reading `properties.label`. | API-name-to-label translation is unreliable: an admin may have set the label to "Class Title" while the field is still named `Product_Name__c`. Always read `properties.label`. |
-| Confidently answering "the SLA on this case is 24 hours" because that's a common default. | v1.x has no Entitlement extractor. Any SLA number you state is fabricated. Refuse honestly and point to the Entitlement related list. |
+| Confidently answering "the SLA on this case is 24 hours" because that's a common default. | v1.x models WHICH milestones apply (EntitlementProcess/MilestoneType) but not their target minutes. Surface the milestone names/process, then refuse the number and point to the Entitlement related list — any specific SLA number you state is fabricated. |
 | Forwarding the user's literal question to a tool input ("`sfi.get_component({ id: 'the customer field' })`"). | The tool requires a canonical ID. The right move is `sfi.search_components({ query: 'the customer field' })` first, then `sfi.get_component` on the top match. |
 | Narrating a Flow as plain-English prose by reading the XML. | v1.x doesn't have a Flow-to-narrative renderer. The honest answer is "I can list what the flow contains, but I don't translate Flow XML to a story." Offer the structured list; refuse the prose. |
 | Defaulting to `admin-sharing-troubleshooting` for every "why can't I" question. | The routing distinction matters: record-level visibility ("can the user open this record at all") is admin-sharing. Field-level permission ("why is this field grayed out") is this skill's why-can't-I-do-X intent with field-permission flavor. Picking the wrong route loads the wrong tool. |
@@ -518,13 +557,42 @@ Claude's flow:
    sees the skill boundary rather than experiencing an unexplained
    topic shift.
 
-### Honest refusal — entitlement question
+### Hybrid — entitlement question (R6-18)
 
 User: *"What's the SLA on this case?"*
 
-See the *Reporting format* counter-example above. The response
-names the v1.x gap, lists two manual-check paths, and stays honest
-about the boundary.
+See the *Reporting format* hybrid example above. The response
+surfaces the real extracted process/milestone metadata, then names
+the still-live gap (target minutes, on-track/breached status) and
+stays honest about that boundary.
+
+### Partial answer — case routing (R6-18)
+
+User: *"How are cases routed to agents?"*
+
+Claude's flow:
+
+1. **Classify** → SLA / entitlement / routing intent.
+2. **Normalize + call.** `sfi.list_components({ type: 'ServiceChannel'
+   })` to find the Case channel's `relatedEntityType`, then walk the
+   `Queue`s that own Case (`sfi.get_edges` `sharedWith` from
+   `CustomObject:Case`) and read each queue's `references` edge to its
+   `QueueRoutingConfig`.
+3. **Respond:**
+
+> Cases route through the **Case** Omni-Channel service channel. The
+> **Case Queue** uses the **"agent routing"** routing config:
+> **Most Available** routing model, capacity weight 5.0, with
+> overflow to **Fallback Queue** when the primary queue is full.
+>
+> What I *can't* tell you: which agents are online right now or their
+> current capacity — that's live presence data. Check
+> **Omni-Channel Supervisor** in Salesforce for real-time agent
+> status.
+
+The response grounds the routing BEHAVIOR in real extracted metadata
+(ServiceChannel/QueueRoutingConfig, R6-18), then honestly refuses the
+live presence/capacity half.
 
 ### Honest refusal — process narration
 
@@ -674,12 +742,15 @@ Before sending a response, confirm:
 - [ ] I classified the question into exactly one of the nine
       intents (the original eight, plus v1.6's "what does this
       config value mean").
-- [ ] If the intent was one of the three honest-refusal intents
-      (where-do-I-find, SLA / entitlement,
-      process-explanation-as-narrative), I refused honestly —
-      named what v1.x doesn't model, and directed the user to the
-      Salesforce UI or to their admin. I did **not** call a tool
-      to fish for an answer.
+- [ ] If the intent was where-do-I-find, I refused honestly — named
+      what v1.x doesn't model, and directed the user to the
+      Salesforce UI or to their admin, without calling a tool to
+      fish for an answer. If the intent was SLA / entitlement /
+      routing or process-explanation, I surfaced the extracted
+      metadata that DOES exist first, then honestly refused the
+      part that doesn't (live target-minutes/status for SLA /
+      entitlement / routing; narrated prose for process
+      explanation).
 - [ ] If the intent was routable, I normalized the user's phrase
       into a canonical ID via `sfi.search_components` rather than
       guessing. I did not pass the raw phrase to
@@ -711,9 +782,9 @@ Before sending a response, confirm:
       as a stand-in for `properties.description` on the org's
       actual metadata.
 - [ ] When I refused, I named the v1.x boundary explicitly
-      (Reports, dashboards, Entitlements, Flow-to-narrative,
-      record-level data, etc.) and offered the closest concrete
-      manual-check path.
+      (Reports, dashboards, live entitlement/milestone status and
+      agent presence, Flow-to-narrative, record-level data, etc.)
+      and offered the closest concrete manual-check path.
 
 ---
 

@@ -1,0 +1,164 @@
+name: 'sf-intelligence review-change'
+description: >-
+  Pre-deploy Salesforce change review as a reusable GitHub Action. Wraps
+  `sfi review-change` (Finding #37): runs it over a package.xml or git diff
+  against an ALREADY-MATERIALIZED, offline org-kb vault and emits SARIF 2.1.0
+  (for GitHub code scanning) and/or a compact PR-comment markdown summary.
+  This action NEVER runs `sfi refresh` and NEVER invokes the `sf` CLI — it
+  only reads the vault directory you point it at (`vault-path`). Vault
+  availability modes (cached artifact vs vault-git clone + cached graph/):
+  .github/actions/review-change/README.md. End-to-end PR-gate template:
+  docs/ci/review-change-pr-gate.example.yml.
+
+inputs:
+  vault-path:
+    description: >-
+      Path to an already-materialized org-kb vault (must include
+      graph/graph.duckdb — a source-only checkout is NOT enough). Two supported
+      ways onto the runner: cached artifact, or vault-git clone plus cached
+      graph/ — see .github/actions/review-change/README.md and
+      docs/ci/review-change-pr-gate.example.yml.
+    required: true
+  manifest-path:
+    description: >-
+      Path to a package.xml to review. Mutually exclusive with diff-base;
+      exactly one of the two must be set.
+    required: false
+    default: ''
+  diff-base:
+    description: >-
+      Base ref for `git diff --name-status <diff-base>` (e.g. the PR base
+      branch, `origin/main`). Mutually exclusive with manifest-path. The
+      calling workflow's checkout step must fetch enough history for this
+      ref to resolve (`fetch-depth: 0`, or an explicit `git fetch origin
+      <base>`).
+    required: false
+    default: ''
+  project-path:
+    description: 'sfdx project working tree for --diff (default: the action working directory).'
+    required: false
+    default: '.'
+  against-vault:
+    description: >-
+      Optional alias or path to a SECOND vault (e.g. PROD) to review the
+      changeset against instead of vault-path — passed through verbatim to
+      `sfi review-change --against`.
+    required: false
+    default: ''
+  limit:
+    description: 'Optional cap on the number of detailed component rows (summary tallies stay full).'
+    required: false
+    default: ''
+  sarif-path:
+    description: 'Where to write the SARIF 2.1.0 report. Set to empty to skip the SARIF run entirely.'
+    required: false
+    default: 'review-change.sarif.json'
+  markdown-path:
+    description: 'Where to write the PR-comment markdown summary. Set to empty to skip the markdown run entirely.'
+    required: false
+    default: 'review-change-comment.md'
+  sfi-version:
+    description: 'sf-intelligence npm version to install (default: latest published).'
+    required: false
+    default: 'latest'
+  fail-on-blocking:
+    description: >-
+      When 'true' (default), this action's own step fails (non-zero) if the
+      review found a blocking change — the CI-gate behaviour. Set to
+      'false' to let the calling workflow decide (e.g. gate on the code
+      scanning alert instead) — the raw exit code is still exposed via the
+      `exit-code` output either way.
+    required: false
+    default: 'true'
+
+outputs:
+  exit-code:
+    description: "sfi review-change's own exit code: 0 clean, 1 blocking, 2 usage/environment error."
+    value: ${{ steps.review.outputs.exit-code }}
+  blocking:
+    description: "'true' when exit-code is 1 (at least one blocking component)."
+    value: ${{ steps.review.outputs.blocking }}
+  sarif-path:
+    description: 'The SARIF file path that was written (empty if sarif-path input was empty).'
+    value: ${{ steps.review.outputs.sarif-path }}
+  markdown-path:
+    description: 'The markdown-comment file path that was written (empty if markdown-path input was empty).'
+    value: ${{ steps.review.outputs.markdown-path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install sf-intelligence
+      shell: bash
+      run: npm install --global "sf-intelligence@${{ inputs.sfi-version }}"
+
+    - name: Run sfi review-change
+      id: review
+      shell: bash
+      run: |
+        set -uo pipefail
+
+        if [ -z "${{ inputs.manifest-path }}" ] && [ -z "${{ inputs.diff-base }}" ]; then
+          echo "::error::review-change action: set exactly one of manifest-path / diff-base." >&2
+          exit 2
+        fi
+        if [ -n "${{ inputs.manifest-path }}" ] && [ -n "${{ inputs.diff-base }}" ]; then
+          echo "::error::review-change action: set only ONE of manifest-path / diff-base." >&2
+          exit 2
+        fi
+        if [ -z "${{ inputs.sarif-path }}" ] && [ -z "${{ inputs.markdown-path }}" ]; then
+          echo "::error::review-change action: sarif-path and markdown-path are both empty — nothing to produce." >&2
+          exit 2
+        fi
+
+        SOURCE_ARGS=()
+        if [ -n "${{ inputs.manifest-path }}" ]; then
+          SOURCE_ARGS+=(--manifest "${{ inputs.manifest-path }}")
+        else
+          SOURCE_ARGS+=(--diff "${{ inputs.diff-base }}" --project "${{ inputs.project-path }}")
+        fi
+
+        COMMON_ARGS=(--vault "${{ inputs.vault-path }}")
+        [ -n "${{ inputs.against-vault }}" ] && COMMON_ARGS+=(--against "${{ inputs.against-vault }}")
+        [ -n "${{ inputs.limit }}" ] && COMMON_ARGS+=(--limit "${{ inputs.limit }}")
+
+        # sfi review-change's own exit code (0/1/2) is the authoritative
+        # signal. Both format runs are the SAME offline analysis re-rendered
+        # (no org contact, no extra vault read cost worth avoiding) — run
+        # whichever outputs were asked for, capture the LAST exit code seen
+        # (every run of the same inputs produces the same code), and never
+        # let a `set -e` abort before both artifacts are written.
+        EXIT_CODE=0
+
+        if [ -n "${{ inputs.sarif-path }}" ]; then
+          sfi review-change "${SOURCE_ARGS[@]}" "${COMMON_ARGS[@]}" --format sarif > "${{ inputs.sarif-path }}"
+          EXIT_CODE=$?
+          echo "sarif-path=${{ inputs.sarif-path }}" >> "$GITHUB_OUTPUT"
+        else
+          echo "sarif-path=" >> "$GITHUB_OUTPUT"
+        fi
+
+        if [ -n "${{ inputs.markdown-path }}" ]; then
+          sfi review-change "${SOURCE_ARGS[@]}" "${COMMON_ARGS[@]}" --format markdown-comment > "${{ inputs.markdown-path }}"
+          EXIT_CODE=$?
+          echo "markdown-path=${{ inputs.markdown-path }}" >> "$GITHUB_OUTPUT"
+        else
+          echo "markdown-path=" >> "$GITHUB_OUTPUT"
+        fi
+
+        echo "exit-code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+        if [ "$EXIT_CODE" = "1" ]; then
+          echo "blocking=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "blocking=false" >> "$GITHUB_OUTPUT"
+        fi
+
+        if [ "$EXIT_CODE" = "2" ]; then
+          echo "::error::sfi review-change exited 2 (usage/environment error) — see the run log above." >&2
+          exit 2
+        fi
+        if [ "$EXIT_CODE" = "1" ] && [ "${{ inputs.fail-on-blocking }}" = "true" ]; then
+          echo "::error::sfi review-change found a BLOCKING change — see ${{ inputs.sarif-path }} / ${{ inputs.markdown-path }}." >&2
+          exit 1
+        fi
+        exit 0

@@ -158,7 +158,7 @@ export type ComponentType =
   | 'CspTrustedSite' //          CSP allowlist entry (`.cspTrustedSite-meta.xml`) for browser-side fetches from LWC and Lightning Experience.
   | 'ExternalDataSource' //      Salesforce-Connect (OData / cross-org) data-source binding (`.dataSource-meta.xml`); carries a `references` edge to its declared `AuthProvider` when set.
   | 'ExternalService' //         `ExternalServiceRegistration` — invoke-an-OpenAPI-endpoint binding (`.externalServiceRegistration-meta.xml`); carries a `references` edge to its declared `NamedCredential` when set.
-  | 'NetworkAccess' //           IP-range trust-list entry (`.networkAccess-meta.xml`). NOT the Network / Experience Cloud Site (a separate `Community` / `ExperienceBundle` metadata family; v1.5 scope explicitly excludes it).
+  | 'NetworkAccess' //           IP-range trust-list entry (`.networkAccess-meta.xml`). NOT the Experience Cloud community: that `Network` / `CustomSite` / `ExperienceBundle` family is now modeled as its own tier (R6-17, below). This type is the unrelated "Trusted IP Ranges" list — the two only share the XML-namespace `Network` prefix.
   // v1.6 — business-user record-value tier.
   // CR-CAP-15 — declarative custom-permission definition tier. A
   // CustomPermission is a named permission flag (`.customPermission-meta.xml`)
@@ -286,9 +286,221 @@ export type ComponentType =
   // session security questions via `sfi.profile_security`. REFRESH-GATED:
   // `SessionSettings` is added to the retrieve manifest + extractor tier, so a
   // vault built before this type shipped will not carry the node until a
-  // re-refresh pulls it. Per-weekday `loginHours` windows are deferred behind
-  // this tier.
-  | 'SessionSettings'; //           Org-wide session-security policy (`.sessionSettings-meta.xml`). Carries `mfaRequired`, `requiresStrongAuth`, and `sessionTimeoutMinutes`. Id `SessionSettings:default` (single org-level node; no parent scope, no edges of its own). Refresh-gated: needs a re-refresh with the new retrieve set to populate.
+  // re-refresh pulls it. Per-weekday `loginHours` windows are a separate,
+  // already-shipped Profile-only concern (read straight off the Profile's own
+  // `<loginHours>` element into `properties.loginHours`) — NOT gated by this
+  // tier.
+  | 'SessionSettings' //            Org-wide session-security policy (`.sessionSettings-meta.xml`). Carries `mfaRequired`, `requiresStrongAuth`, and `sessionTimeoutMinutes`. Id `SessionSettings:default` (single org-level node; no parent scope, no edges of its own). Refresh-gated: needs a re-refresh with the new retrieve set to populate.
+  // R6-08 — standard-picklist tier. Standard picklists (Industry, LeadSource,
+  // OpportunityStage, …) were previously entirely unmodeled: zero
+  // ComponentType, zero extraction. A StandardValueSet is Salesforce's org-wide
+  // definition of one standard picklist's value set (`.standardValueSet-meta.xml`,
+  // `standardValueSets/` folder — mirrors GlobalValueSet's shape but for
+  // STANDARD, not custom, fields). Id `StandardValueSet:{Name}` (the file's own
+  // API name, e.g. `StandardValueSet:LeadSource`) — flat, no parent scope,
+  // mirroring GlobalValueSet/CustomLabel. EDGE-LESS: v0.1 extracts the node
+  // only (value apiName + active flag per entry, mirrored as a `values[]`
+  // array plus `valueCount`); no `usesValueSet`-style edge from the standard
+  // CustomField to its StandardValueSet is emitted (unlike GlobalValueSet's
+  // CustomField-side edge) — a standard field's implicit binding to its
+  // StandardValueSet is not itself declared anywhere in metadata to read an
+  // edge from. See `docs/vendor/salesforce-metadata/StandardValueSet.md`.
+  | 'StandardValueSet' //          Org-wide standard-picklist value set (`.standardValueSet-meta.xml`). Carries `sorted`, `valueCount`, and `values` (array of `{ apiName, active }` — the Metadata API's `StandardValue` has no separate `label` field, so `apiName` doubles as the display value). Id `StandardValueSet:{Name}` (e.g. `StandardValueSet:LeadSource`). Node-only; no edges.
+  // R6-18 — Service Cloud entitlement/SLA + Omni-Channel routing tier. Closes
+  // the eval-refused "what's the SLA on this case" / "how are cases routed to
+  // agents" gap. Both sub-families use the generic `extractEnterpriseMetadata`
+  // pattern (mirroring `CustomPermission`'s flat-top-level shape) — verified
+  // against real retrieves from two live orgs (a small services org and a
+  // university sandbox), NOT assumed from docs alone.
+  //
+  // `EntitlementProcess` (`entitlementProcesses/`, `.entitlementProcess-meta.xml`
+  // — folder/suffix confirmed via a real scoped retrieve) is Salesforce's SLA
+  // definition for one SObject: `SObjectType`, `active`, `businessHours`
+  // (name only — not a `BusinessHours` ComponentType; none exists in this
+  // vault yet), `versionNumber`/`versionMaster` (entitlement VERSIONING: a
+  // process can have multiple files, one per version, each independently
+  // retrieved — this extractor does NOT merge versions, it models each file
+  // as its own node keyed by the file's own `fullName`, which already embeds
+  // the version distinction Salesforce assigns it). Its `<milestones>` blocks
+  // repeat per milestone; the `<milestoneName>` child of each is promoted to
+  // a `references` edge to `MilestoneType:{Name}` (`referenceKind:
+  // 'entitlementMilestone'`). R7-C7 additionally captures each block's OWN
+  // `minutesToComplete` / `useCriteriaStartTime` via a block-scoped parser
+  // (`properties.milestones`) — R6-18 deliberately did NOT ship this: the
+  // generic extractor's flat `extraProperties` reads only the FIRST
+  // occurrence of a repeated element, which would have silently
+  // misattributed one milestone's target minutes to a different milestone;
+  // `timeTriggers` / `exitCriteriaFilterItems` remain out of scope. This is
+  // the load-bearing honesty boundary: `sfi.lifecycle_process` /
+  // `sfi.what_happens_on_save` can now say WHICH milestones apply to an
+  // object, whether the process is active, AND each milestone's target
+  // minutes — but NEVER whether a specific case is currently on-track or
+  // breached (that is live, per-record timer data — still unmodeled).
+  | 'EntitlementProcess' //        SLA/entitlement process definition (`entitlementProcesses/{fullName}.entitlementProcess-meta.xml`). Carries `SObjectType`, `active`, `businessHours`, `versionNumber`, `versionMaster`, `isVersionDefault`, `versionNotes`, `entryStartDateField`, `description`, `label` (top-level `<name>`, distinct from the file's own `fullName`/apiName), `milestoneName` (the deduplicated, sorted array of referenced milestone names, mirroring the emitted edges), and `milestones` (R7-C7: `{ milestoneName, minutesToComplete, useCriteriaStartTime }[]`, one entry per `<milestones>` block, each read scoped to its OWN block — correct per-milestone attribution, not a first-occurrence guess). Id `EntitlementProcess:{fullName}` — flat, no parent scope (multiple versions of the same process are multiple files/nodes; NOT merged). Emits one `references` edge per distinct `<milestoneName>` to `MilestoneType:{Name}` (`declared` confidence). `timeTriggers`, `exitCriteriaFilterItems`, and live on-track/breached status are NOT modeled.
+  // `MilestoneType` (`milestoneTypes/`, `.milestoneType-meta.xml` — folder/
+  // suffix confirmed via the same real retrieve) is the org-wide milestone
+  // DEFINITION an `EntitlementProcess` references by name. Real org files
+  // carry no `<name>` element at all (the fullName IS the name) — only
+  // `<description>` and `<recurrenceType>`.
+  | 'MilestoneType' //            Org-wide milestone definition (`milestoneTypes/{fullName}.milestoneType-meta.xml`). Carries `description` and `recurrenceType` (`none` | `recursIndependently` | `recursChained` in real org data). Id `MilestoneType:{fullName}` — flat, no parent scope. Node-only; the `EntitlementProcess -> MilestoneType` edge is emitted by the entitlement-process extractor. Real Metadata API files carry no separate `<name>`/`<label>` element — the node's own `apiName` (from the filename) IS the display name.
+  //
+  // Omni-Channel routing tier. `ServiceChannel` (`serviceChannels/`,
+  // `.serviceChannel-meta.xml`) is the routable work-item TYPE (Case, Chat,
+  // Voice Call, Messaging Session, …). The task brief assumed a
+  // `salesforceObject` property name; real retrieves from both verification
+  // orgs confirm the actual Metadata API field is `relatedEntityType` — used
+  // here instead of the assumed name (corrected against ground truth, not
+  // documentation guesswork). `capacityModel` (`STATUS_BASED` | `TAB_BASED`)
+  // is ServiceChannel's own capacity-config field; the PER-ROUTING-CONFIG
+  // capacity weighting lives on `QueueRoutingConfig`, not here.
+  //
+  // `QueueRoutingConfig` (`queueRoutingConfigs/`, `.queueRoutingConfig-meta.xml`)
+  // is the routing behavior (LEAST_ACTIVE / MOST_AVAILABLE / EXTERNAL_ROUTING,
+  // capacity weight/type, push timeout) a `Queue` opts into via its
+  // `<queueRoutingConfig>` element. The existing `queue.ts` extractor already
+  // READ that element into `properties.queueRoutingConfig` (a bare string) but
+  // emitted no edge; R6-18 adds the `Queue -> QueueRoutingConfig` `references`
+  // edge (declared confidence) so "how are cases routed to agents" can walk
+  // from the Queue to its routing config. A `QueueRoutingConfig`'s own
+  // `<queueOverflowAssignee>` (verified via a real file to hold a Queue
+  // DEVELOPER NAME, e.g. `Agentforce_Fallback_Queue` — not the opaque record
+  // ID the Metadata API Developer Guide's prose implies) is likewise promoted
+  // to a `references` edge to `Queue:{Name}`, completing the overflow chain.
+  | 'ServiceChannel' //            Omni-Channel routable work-item type (`serviceChannels/{fullName}.serviceChannel-meta.xml`). Carries `label`, `relatedEntityType` (required; e.g. `Case`, `LiveChatTranscript`, `MessagingSession`, `VoiceCall` — NOT `salesforceObject`, corrected against real retrieves), `capacityModel`, `isInterruptible`, `hasAutoAcceptEnabled`, `doesMinimizeWidgetOnAccept`, `hasAfterConvoWorkTimer`. Id `ServiceChannel:{fullName}` — flat, no parent scope. Node-only; no edges of its own.
+  | 'QueueRoutingConfig' //        Omni-Channel routing behavior (`queueRoutingConfigs/{fullName}.queueRoutingConfig-meta.xml`). Carries `label`, `routingModel` (`LEAST_ACTIVE` | `MOST_AVAILABLE` | `EXTERNAL_ROUTING`), `routingPriority`, `capacityWeight`, `capacityType`, `pushTimeout`, `isAttributeBased`, `queueOverflowAssignee`. Id `QueueRoutingConfig:{fullName}` — flat, no parent scope. Emits a `references` edge to `Queue:{queueOverflowAssignee}` (`referenceKind: 'queueOverflowAssignee'`, declared) when set. The inbound `Queue -> QueueRoutingConfig` edge is emitted by `queue.ts`, not here.
+  // R6-22 — security-surface tier (2 of 3; CustomSite tracked separately).
+  // Certificate is org-wide TLS/signing key metadata (`.crt-meta.xml`,
+  // `certs/` folder) retrieved as TWO files: the `.crt` content file (the
+  // PEM/DER certificate or exported key material) and this `.crt-meta.xml`
+  // sidecar. ONLY the sidecar is parsed — the content file is metadata-only
+  // by design and is never read, matching this product's "never vault
+  // record/secret data" rule extended to key material. Flat, no parent
+  // scope, mirroring CustomPermission/RestrictionRule.
+  | 'Certificate' //                A stored certificate/key (`.crt-meta.xml`, `certs/` folder). Carries `caSigned`, `expirationDate`, and `keySize` (metadata only — the paired `.crt` content file's key/cert material is NEVER read). `label` = `masterLabel`. Id `Certificate:{DeveloperName}`. Flat, no parent scope, no edges.
+  // TransactionSecurityPolicy is an event-triggered security policy
+  // (`.transactionSecurityPolicy-meta.xml`, `transactionSecurityPolicies/`
+  // folder) — "when eventName X happens, take action Y". Its `<apexClass>`
+  // names a class implementing `TxnSecurity.PolicyCondition`/`EventCondition`
+  // that decides WHETHER the policy fires; that class is a real, resolvable
+  // ApexClass node, so it is modeled as a `references` edge (declared — an
+  // explicit metadata pointer) rather than a bare property string.
+  | 'TransactionSecurityPolicy' // Event-triggered security policy (`.transactionSecurityPolicy-meta.xml`). Carries `eventName`, `active`, and `action` (`{ block, endSession, freezeUser, twoFactorAuthentication, notificationCount }` — omitted when no `<action>` block). Emits a `declared references` edge to `ApexClass:{apexClass}` (referenceKind `conditionClass`) when `<apexClass>` is present. Id `TransactionSecurityPolicy:{DeveloperName}`. Flat, no parent scope.
+  | 'StandardValueSet' //           Org-wide standard-picklist value set (`.standardValueSet-meta.xml`). Carries `sorted`, `valueCount`, and `values` (array of `{ apiName, active }` — the Metadata API's `StandardValue` has no separate `label` field, so `apiName` doubles as the display value). Id `StandardValueSet:{Name}` (e.g. `StandardValueSet:LeadSource`). Node-only; no edges.
+  // R6-13 — Agentforce / Einstein GenAI tier. The org's OWN generative-AI
+  // surface, previously entirely unmodeled (zero ComponentType, zero
+  // extraction) — the gap the "the backend your Salesforce AI can trust"
+  // positioning could not see. Four flat file-based metadata families under
+  // their own DX directories (`genAiFunctions/`, `genAiPlugins/`,
+  // `genAiPlannerBundles/`, `genAiPromptTemplates/` — folders/suffixes verified
+  // against a live Agentforce dev org's `sf org list metadata-types` describe).
+  // All edges REUSE the generic `references` EdgeType tagged with a
+  // `properties.referenceKind` discriminator (no new EdgeType — mirroring
+  // CustomPermission / PlatformEventChannel); every edge is `declared` (an
+  // explicit metadata pointer, not a heuristic). Legacy Einstein `Bot` /
+  // `BotVersion` were deferred from the original R6-13 slice and landed as
+  // R7-C7 (see below); `sfi.ai_exposure_report` composes both tiers.
+  // Composed by `sfi.ai_exposure_report`. See `gen-ai.ts` / `bot.ts`.
+  | 'GenAiFunction' //             One Agentforce action (`.genAiFunction-meta.xml`, `genAiFunctions/`). Carries `masterLabel` (label), `description`, `invocationTarget` + `invocationTargetType` (`apex` | `flow` | `api` | `externalService`). Id `GenAiFunction:{Name}`. Emits a declared `references` edge to `ApexClass:{invocationTarget}` (`apex`) or `Flow:{invocationTarget}` (`flow`); other invocation types are properties-only (no phantom edge).
+  | 'GenAiPlugin' //               One Agentforce topic — a category of actions (`.genAiPlugin-meta.xml`, `genAiPlugins/`). Carries `masterLabel` (label), `description`, `pluginType` (`Topic` | `APICustomTopic`), `scope`, `language`, and `functionNames`. Id `GenAiPlugin:{Name}`. Emits one declared `references` edge per member `<genAiFunctions><functionName>` to `GenAiFunction:{name}` (referenceKind `genAiPluginFunction`).
+  | 'GenAiPlannerBundle' //        One Agentforce agent / planner definition (`.genAiPlannerBundle-meta.xml`, nested `genAiPlannerBundles/{agent}/`). Carries `masterLabel` (label), `description`, `plannerType`, `capabilities`, `pluginNames`, `functionNames`. Id `GenAiPlannerBundle:{Name}` (basename-derived, so nesting is transparent). Emits declared `references` edges to its topics (`<genAiPlugins><genAiPluginName>` → `GenAiPlugin:{name}`, referenceKind `plannerBundlePlugin`) and loose knowledge actions (`<genAiFunctions><genAiFunctionName>` → `GenAiFunction:{name}`, referenceKind `plannerBundleFunction`). Requires Metadata API v64.0+ (replaced GenAiPlanner at v63.0).
+  | 'GenAiPromptTemplate' //      One prompt template — the grounding surface (`.genAiPromptTemplate-meta.xml`, `genAiPromptTemplates/`). Carries `masterLabel` (label), `templateType`, `visibility`, `versionCount`, `groundingFieldRefs`, and (when present) `unresolvedGroundingRefs`. Id `GenAiPromptTemplate:{Name}`. Emits declared `references` edges for the object/field data the prompt grounds on: `<relatedEntity>`/`<relatedField>` (referenceKind `promptTemplateRelatedEntity`/`promptTemplateRelatedField`), grounding merge-fields `{!$Input:Ref.Field}` resolved via declared SObject `<inputs>` (`promptTemplateGroundingField`/`promptTemplateGroundingObject`), and `{!$Flow:..}`/`{!$Apex:..}`/`flow://`/`apex://` data providers (`promptTemplateDataProvider`). A merge-field whose input is undeclared/primitive/a relationship traversal is disclosed in `unresolvedGroundingRefs`, never minted as a phantom field edge.
+  // R6-17 — Experience Cloud community tier. Guest-user over-exposure on
+  // Experience Cloud sites is a notorious real-world Salesforce security
+  // failure class, and the community family was previously excluded entirely
+  // (see the NetworkAccess note above, now corrected). Three cooperating types
+  // model the surface WITHOUT parsing the (huge) Builder page tree — the
+  // `guest_exposure_report` tool composes them with the existing permissions
+  // engine + PII classifier.
+  | 'Network' //                   The Experience Cloud / community DEFINITION and the family anchor (`.network-meta.xml`, `networks/` folder). Carries the security posture: `status` (`Live`/`UnderConstruction`/…), `selfRegistration` (CRITICAL — `true` lets unauthenticated visitors create a login), and the guest-access switches present in the XML (`enableGuestFileAccess`, `enableGuestChatter`, `enableGuestMemberVisibility`, `allowInternalUserLogin` — each tri-state, an absent switch is `null`, never fabricated `false`), plus `urlPathPrefix` and member profile/perm-set counts. Id `Network:{Name}`. Emits DECLARED `references` edges to its `CustomSite` (`<site>`) and `ExperienceBundle` (`<picassoSite>`); both dangle-by-design when the target was not retrieved. No new EdgeType.
+  | 'CustomSite' //                The site container fronting a Force.com site or an Experience Cloud community (`.site-meta.xml`, `sites/` folder). Carries `active`, `siteType` (`ChatterNetwork` = Experience Cloud), `masterLabel`, `urlPathPrefix`, `guestRecordDefaultOwner`. Id `CustomSite:{Name}`. Emits ONE HEURISTIC `references` edge to the site's auto-provisioned guest-user profile `Profile:{Site Label} Profile` — a NAMING CONVENTION (the XML carries no `<guestProfile>` element; verified against a real production org where each Site owns exactly one `UserType='Guest'` profile named `"{label} Profile"`), so the edge carries `confidence: 'heuristic'`. No new EdgeType.
+  | 'ExperienceBundle' //         The Builder page tree's TOP-LEVEL meta only (`experiences/{Name}.site-meta.xml`, root `<ExperienceBundle>` — shares the `.site-meta.xml` suffix with CustomSite but a different directory + root). Carries `bundleLabel`, `type`, `urlPathPrefix`, and a best-effort `pageCount` (a count of `views/*.json`, no content parsed). The full JSON page tree (pages/components/audience rules — hundreds of files) is DELIBERATELY out of scope (`pageContentModeled: false`); this models the community's existence + size, not its pages. Id `ExperienceBundle:{Name}`. Node-only; the `Network` → `ExperienceBundle` wiring edge is emitted by the Network extractor.
+  // R7-C7 — Agentforce / Service Cloud extraction leftovers R6-13 and R6-18
+  // deferred. Three families, verified against REAL scoped retrieves
+  // (`sf project retrieve start --metadata Bot --metadata PresenceUserConfig
+  // --metadata EntitlementProcess`) from two live orgs (a production-scale
+  // university sandbox with 5 Bots / 15 BotVersions / 4 PresenceUserConfigs,
+  // and a small services org with 2 PresenceUserConfigs + 1 EntitlementProcess
+  // — that org reported `Bot` as "not available"). Real files corrected two
+  // assumptions in this tier's brief against ground truth rather than
+  // shipping a documentation guess: (1) neither `Bot` nor `BotVersion` carry
+  // any `status`/`active`/`versionNumber` element in real retrieves — a
+  // version's identity IS its own `fullName` (mirrors the `MilestoneType`
+  // precedent: no separate `<name>`, the file's own name is the display
+  // name); (2) modern (Agentforce-template) BotVersions carry ZERO
+  // `<botIntents>` and instead reference a `GenAiPlannerBundle` via
+  // `<conversationDefinitionPlanners><genAiPlannerName>` — the legacy
+  // dialog/intent tree and the R6-13 Agentforce planner tree coexist in one
+  // metadata type, generationally.
+  //
+  // `Bot` (`bots/{BotName}/{BotName}.bot-meta.xml`) is the bot/agent
+  // DEFINITION — nested folder-per-bot, like `GenAiPlannerBundle`, but unlike
+  // that type the FILE's own basename embeds the full bot name, so its
+  // apiName is basename-derived (nesting transparent) exactly like
+  // `GenAiPlannerBundle`. See `bot.ts`.
+  | 'Bot' //                       Einstein Bot / Agentforce agent definition (`bots/{BotName}/{BotName}.bot-meta.xml`). Carries `label` (top-level `<label>`, distinct from `botMlDomain.label`), `description`, `type` (`Bot` | `ExternalCopilot` | `InternalCopilot`), `agentType`/`agentTemplate` (Agentforce-template bots only), `botSource`, `botUser` (a username — NOT a `User` ComponentType edge; no such node type exists in this vault, mirroring `QueueRoutingConfig.userOverflowAssignee`), `richContentEnabled`, `logPrivateConversationData`, `sessionTimeout`, `contextVariableCount` (COUNT of `<contextVariables>` blocks), `contextVariableFieldRefs` (resolvable mapped fields), and `botMlDomain` (`{ label, name }`, omitted when absent). Id `Bot:{BotName}`. Emits DECLARED `references` edges for each resolvable `<contextVariableMappings>` field (`referenceKind: 'botContextVariableField'`, with `includeInPrompt` when the variable opts into the LLM prompt). The `Bot` → `BotVersion` `parentOf` edge is emitted by the BotVersion extractor (mirrors `PlatformEventChannel`/`Member`'s child-owns-the-parent-edge split, since Bot's own file cannot enumerate its version files without a directory scan). Composed as an AI surface by `sfi.ai_exposure_report`.
+  // `BotVersion` (`bots/{BotName}/{fullName}.botVersion-meta.xml`, e.g.
+  // `bots/Foo/v3.botVersion-meta.xml`) is one version of that bot. Unlike
+  // `Bot`, the FILE's own basename does NOT embed the bot name (real files
+  // are named bare `v1.botVersion-meta.xml`, `v2.botVersion-meta.xml`, …) —
+  // taking the basename alone as apiName would COLLIDE across every bot in
+  // the org (every bot has its own "v1"). The apiName is instead
+  // `{BotName}.{fileBasename}` (the immediate parent DIRECTORY name +
+  // the file's own version suffix — verified to match Salesforce's own
+  // retrieve-manifest `fullName` for this type EXACTLY, e.g.
+  // `University_Semantic_Search_Agent.v7`), mirroring the dot-joined
+  // convention `PathAssistant`/`deriveDotSplitObjectAndApiName` already use
+  // for a DIFFERENT nesting shape (object.name-in-filename) — here the
+  // disambiguating half comes from the DIRECTORY instead.
+  | 'BotVersion' //                One version of a Bot (`bots/{BotName}/{fullName}.botVersion-meta.xml`). Id `BotVersion:{BotName}.{fullName}` (dot-joined, directory-disambiguated — see above). `parentId` = `Bot:{BotName}`. Carries `dialogCount` (COUNT of `<botDialogs>` blocks — the full dialog/message trees are NOT extracted; out of scope by design, matching the R6-24 report-detail value-omission discipline extended to conversational content), `intentCount` (COUNT of legacy `<botIntents>` blocks — 0 on every Agentforce-template bot verified), `entryDialog`, `toneType`, `knowledgeFallbackEnabled`, `citationsEnabled` (each a raw XML string, omitted when the element is absent — never defaulted), and `plannerNames` (the `<conversationDefinitionPlanners><genAiPlannerName>` targets, deduplicated + sorted). Emits a DECLARED `parentOf` edge FROM `Bot:{BotName}` TO this node, and one DECLARED `references` edge per `plannerNames` entry to `GenAiPlannerBundle:{name}` (`referenceKind: 'botVersionPlanner'`) — the real, verified link between the legacy Bot metadata type and the R6-13 Agentforce GenAI tier. `sfi.ai_exposure_report` composes Bot (not BotVersion) as a surface: context-variable fields + the union of every version's planner reach.
+  //
+  // `PresenceUserConfig` (`presenceUserConfigs/{fullName}.presenceUserConfig-meta.xml`)
+  // is an Omni-Channel presence configuration: a capacity model + decline/
+  // sound toggles bound to a set of assigned Profiles and/or individual
+  // Users. R6-18 deferred this because the `<assignments><users>` sub-block
+  // has no `User` ComponentType to target. Real retrieves confirm the shape:
+  // ONE `<assignments>` block wrapping optional `<profiles><profile>`
+  // (repeatable) and optional `<users><user>` (repeatable) — either, both,
+  // or neither may be present (the org-default config in both verification
+  // orgs carries NO `<assignments>` block at all).
+  | 'PresenceUserConfig' //        Omni-Channel presence configuration (`presenceUserConfigs/{fullName}.presenceUserConfig-meta.xml`). Carries `label`, `capacity`, `enableAutoAccept`, `enableDecline`, `enableDeclineReason`, `enableDisconnectSound`, `enableRequestSound` (each a raw XML string, omitted when absent). `<assignments><profiles><profile>` names ARE a real `Profile` node — each emits a DECLARED `references` edge (`referenceKind: 'presenceProfileAssignment'`), mirrored onto `properties.assignedProfiles`. `<assignments><users><user>` names a username/email with NO corresponding ComponentType in this vault — captured VERBATIM (every occurrence, not just the first) as the `assignedUsernames` property array with NO edge minted, consistent with `QueueRoutingConfig.userOverflowAssignee`'s existing precedent of never fabricating a `User:` node/edge from an unconfirmed id shape. Id `PresenceUserConfig:{fullName}` — flat, no parent scope.
+  // Finding #38 — Field Service tier, corrected recipe. The report's
+  // suggested action ("recognize ServiceTerritory/WorkOrder/etc. via the
+  // cpq.ts namespace recipe") does NOT survive verification: those objects
+  // (`ServiceTerritory`, `WorkOrder`, `ServiceAppointment`, `ServiceResource`,
+  // `OperatingHours`, …) are documented under Object Reference, not Metadata
+  // API — standard SObjects holding record DATA, retrievable only via
+  // SOQL/REST, never `sf project retrieve`. There is also no `FSL__`
+  // namespace in modern (native) Field Service — that belonged to the
+  // legacy pre-Winter'18 managed package. The generic CustomObject/
+  // CustomField/ValidationRule/Layout/RecordType extractors already model
+  // any org-added customization on those standard objects once their API
+  // names are added to `STANDARD_OBJECTS_TO_MODEL`
+  // (`packages/cli/src/commands/refresh.ts`) — zero new extractor code for
+  // that half. The three ComponentTypes below are the genuine FSL Metadata
+  // API types (per the Metadata API / Field Service Developer Guides),
+  // fixture-buildable from documented XML schema, small-flat-XML shaped
+  // (mirroring `SessionSettings`/`CspTrustedSite`/`ExternalDataSource`, NOT
+  // `cpq.ts`'s namespace-recognition recipe). Explicitly OUT of this tier:
+  // territory hierarchy, resource-to-territory assignment, and scheduling-
+  // policy/work-rule records — those are live org DATA, not metadata; a
+  // future `sfi.live_fsl_*` tool is the honest way to answer them, not an
+  // extractor.
+  | 'FieldServiceSettings' //      Org-wide Field Service configuration (`settings/FieldService.settings-meta.xml`, root `<FieldServiceSettings>`). Carries `fieldServiceEnabled` (`<fieldServiceOrgPref>`), `workOrdersEnabled` (`<enableWorkOrders>`), `schedulingOptimizationEnabled` (`<o2EngineEnabled>`) — each tri-state (`null` when the element is absent, never defaulted). Id `FieldServiceSettings:default` (single org-level node; no parent scope, no edges of its own). Refresh-gated: needs a re-refresh with the new retrieve set to populate.
+  | 'Skill' //                     A skill definition used for FSL skill-based routing AND Omni-Channel/chat agent routing — the type is shared, not FSL-exclusive (`skills/{fullName}.skill-meta.xml`, root `<Skill>`, API v28.0+). Carries `description`, `skillType` (v58.0+), `assignedProfiles` (deduplicated + sorted `<assignments><profiles><profile>` values — each ALSO emits a DECLARED `references` edge to `Profile:{name}`, referenceKind `skillProfileAssignment`), and `assignedUsernames` (deduplicated + sorted `<assignments><users><user>` values — NO ComponentType exists for a bare username in this vault, so captured verbatim with no edge, mirroring `PresenceUserConfig`'s precedent). Both array properties omitted when empty. Id `Skill:{fullName}` — flat, no parent scope. `label` falls back to the API name when `<label>` is absent.
+  | 'TimeSheetTemplate' //         An FSL time-sheet generation template (`timeSheetTemplates/{fullName}.timeSheetTemplate-meta.xml`, root `<TimeSheetTemplate>`, API v46.0+). Carries the six documented-required elements — `active`, `frequency`, `masterLabel` (also used as `label`), `startDate`, `workWeekStartDay`, `workWeekEndDay` — plus optional `description` and `assignedTo` (deduplicated + sorted `<timeSheetTemplateAssignments><assignedTo>` values). `assignedTo` mints NO edge: the Field Service Developer Guide describes the value only as "the IDs of the user profiles" without confirming whether real orgs populate a Profile developer name or an opaque record Id, and this codebase's honesty discipline does not fabricate a `Profile:` edge from an unconfirmed id shape — an `[ORG]` retrieve would resolve the ambiguity. Id `TimeSheetTemplate:{fullName}` — flat, no parent scope.
+  // Finding #45 — CRM Analytics (Wave / Tableau CRM) slice. Three genuine
+  // Metadata API types, fixture-buildable from documented XML schemas. Adding
+  // them to SUPPORTED_TYPES automatically discloses coverage/blindspot via
+  // `buildCoverageEntries` (dynamic notModeled, not a hardcoded family list).
+  // WaveDashboard/WaveDataflow content blobs (`.wdash`/`.wdf` JSON) are out of
+  // scope for v1 — node + top-level meta only (`contentModeled: false`), same
+  // precedent as ExperienceBundle's page tree. WaveXmd field customizations
+  // emit `references` → `CustomField:{Object}.{Field}` so safe_to_delete_field
+  // / unused_fields_deep see CRMA consumption. Data Cloud (DataStream /
+  // CalculatedInsight) is deferred to v1.1 ([ORG]-gated).
+  | 'WaveDashboard' //             A CRM Analytics dashboard (`wave/{Name}.wdash-meta.xml`, root `<WaveDashboard>`, MetadataWithContent, API v37.0+). Carries `application`, `masterLabel` (also `label`), `description`, `templateAssetSourceName`, `dateVersion` — each null when absent. `contentModeled: false` (the companion `.wdash` JSON blob is not parsed). Id `WaveDashboard:{Name}` — flat, no parent scope, zero edges.
+  | 'WaveDataflow' //              A CRM Analytics dataflow/recipe definition (`wave/{Name}.wdf-meta.xml`, root `<WaveDataflow>`, MetadataWithContent, API v37.0+). Carries `application`, `masterLabel`, `description`, `dataflowType` (`User` | `Prepared`). `contentModeled: false` (the companion `.wdf` JSON blob is not parsed). Id `WaveDataflow:{Name}` — flat, no parent scope, zero edges.
+  | 'WaveXmd' //                   Extended metadata for a CRM Analytics dataset (`wave/{Name}.xmd-meta.xml`, root `<WaveXmd>`, plain Metadata, API v39.0+). Carries `application`, `dataset` (also used as `label` when present), `datasetConnector`, `datasetFullyQualifiedName`, `origin`, `xmdType` (`<type>`), `waveVisualization`, plus `dimensionCount`/`measureCount`/`dateCount`. Dimension/measure customizations whose `<origin>` or `<field>` is Object.Field-shaped each emit a DECLARED `references` edge to `CustomField:{Object}.{Field}` (`referenceKind: 'waveXmdFieldCustomization'`), mirrored onto `properties.referencedFields` (sorted; omitted when empty). Id `WaveXmd:{Name}` — flat, no parent scope.
 
 /**
  * A canonical component identifier.
@@ -500,7 +712,7 @@ export type EdgeType =
   // `properties.inheritance` carries role-hierarchy inheritance when present.
   | 'visibleTo'
   // v3.2 — OmniStudio declarative-process tier edge (intra-OmniStudio call chain only).
-  | 'dispatchesOmniAction'; //  {Caller} -> {OmniIntegrationProcedure | OmniDataTransform | OmniScript | OmniUiCard}. Caller can be `OmniScript` (Integration Procedure Action, DataRaptor Extract / Transform Action, navigate-to-OmniScript step), `OmniIntegrationProcedure` (Remote Action calling nested IP, DataRaptor Extract / Transform Action, chained IP Action), or `OmniUiCard` (Action widget whose `actionList[].stateAction.type` is `OmniScript` or `Integration Procedure`). Confidence: `declared` when the target name is in a top-level XML element (e.g., the `<bundle>` element of a DataRaptor Extract Action child), `parsed` when the target name is inside the `propertySetConfig` JSON blob (e.g., `integrationProcedureKey`, `actionList[].stateAction.omniType.Name`). Dangling references (target name present but no matching component in the vault) are emitted with `properties.targetMissing: true` so impact-analysis tools can surface them. The reserved Apex-to-OmniProcess edge `implementsOmniInterface` (for `implements omnistudio.VlocityOpenInterface` on Apex classes) is a v3.3 follow-up — NOT in v3.2. See PLAN-v3.2.md §4 and the per-type vendored docs.
+  | 'dispatchesOmniAction' //  {Caller} -> {OmniIntegrationProcedure | OmniDataTransform | OmniScript | OmniUiCard}. Caller can be `OmniScript` (Integration Procedure Action, DataRaptor Extract / Transform Action, navigate-to-OmniScript step), `OmniIntegrationProcedure` (Remote Action calling nested IP, DataRaptor Extract / Transform Action, chained IP Action), or `OmniUiCard` (Action widget whose `actionList[].stateAction.type` is `OmniScript` or `Integration Procedure`). Confidence: `declared` when the target name is in a top-level XML element (e.g., the `<bundle>` element of a DataRaptor Extract Action child), `parsed` when the target name is inside the `propertySetConfig` JSON blob (e.g., `integrationProcedureKey`, `actionList[].stateAction.omniType.Name`). Dangling references (target name present but no matching component in the vault) are emitted with `properties.targetMissing: true` so impact-analysis tools can surface them. The reserved Apex-to-OmniProcess edge `implementsOmniInterface` (for `implements omnistudio.VlocityOpenInterface` on Apex classes) is a v3.3 follow-up — NOT in v3.2. See PLAN-v3.2.md §4 and the per-type vendored docs.
 
 /**
  * Every {@link EdgeType} as a runtime tuple — the single source the Zod input
@@ -604,7 +816,7 @@ export interface ExtractorError {
     | 'file-not-found'
     | 'parse-error'
     | 'malformed-input'
-    | 'unsupported-version';
+    | 'unsupported-version'
   readonly message: string;
   readonly path: string;
   readonly cause?: unknown;
@@ -790,7 +1002,7 @@ export type PhantomClassification =
   | 'managed-extension' //     managed-package member (namespaced) — stub forever
   | 'standard-field-phantom' // standard object or a field on one — stub forever
   | 'grant-only' //            only permission grants reference it — stub forever
-  | 'unknown'; //              referenced, but not by automation and not a pure grant target
+  | 'unknown' //              referenced, but not by automation and not a pure grant target
 
 /** The knowledge tier the vault holds for a component: absent / L2 stub / L3 full. */
 export type KnowledgeTier = 'absent' | 'stub' | 'full';

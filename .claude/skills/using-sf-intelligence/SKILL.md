@@ -221,10 +221,11 @@ capability area (call `sfi.capabilities` for the full map):
   `sfi.outbound_message_catalog`.
 - **Docs / tour** — `sfi.org_overview`, `sfi.generate_*`.
 - **Health / audit** — `sfi.changed_since`, `sfi.last_modified`,
-  `sfi.trend`, `sfi.churn`, `sfi.diff_snapshots`,
-  `sfi.pii_inventory`, `sfi.tech_debt_score`.
-- **Synthesis** — `sfi.org_risk_report`, `sfi.field_cleanup_candidates`,
-  `sfi.permission_risk_report`, `sfi.release_readiness_report` (offline,
+  `sfi.trend`, `sfi.diff_snapshots` (add `summary: true` for the compact
+  churn digest), `sfi.pii_inventory`, `sfi.tech_debt_score`.
+- **Synthesis** — `sfi.org_risk_report` (add `gate: true` for the deploy
+  readiness gate), `sfi.unused_fields_deep` (add `format: 'cleanup'` for the
+  ranked deletion-candidate roster), `sfi.permission_risk_report` (offline,
   deterministic rankings).
 - **Live (opt-in, per-org consent)** — `sfi.live_count`, `sfi.live_sample`,
   `sfi.live_field_population`, `sfi.live_describe`, `sfi.live_org_limits`,

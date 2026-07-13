@@ -7,6 +7,10 @@
  *   - BEARER TOKEN required on every request (constant-time comparison —
  *     SHA-256 both sides then `timingSafeEqual`, so neither content nor
  *     length leaks). 401 without it.
+ *   - Optional `--tokens-file` map (R8-PERCALLER-TOKENS): each token resolves
+ *     to a caller identity threaded into Context for write attribution.
+ *     Solo `--token` / `--generate-token` remains the single-token default
+ *     (no identity). Identity attribution only — no role tiers.
  *   - Binds 127.0.0.1 by default. A non-loopback host is a deliberate,
  *     warned choice and REQUIRES a token (the CLI enforces both).
  *   - LIVE PLANE HARD-DISABLED over HTTP regardless of host consent or
@@ -22,13 +26,19 @@
  */
 
 import { timingSafeEqual, createHash, randomBytes } from 'node:crypto';
-import { statSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
 
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 
-import { buildContext, createServer as createMcpServer, shutdown } from './server.js';
+import {
+  bindCallerIdentity,
+  buildContext,
+  createServer as createMcpServer,
+  shutdown,
+  type CallerIdentity,
+} from './server.js';
 
 /** Constant-time bearer comparison: hash first so length never leaks. */
 export const tokenEquals = (presented: string, expected: string): boolean => {
@@ -40,12 +50,28 @@ export const tokenEquals = (presented: string, expected: string): boolean => {
 /** Generate a fresh URL-safe bearer token. */
 export const generateToken = (): string => randomBytes(24).toString('base64url');
 
+/** One row in a `--tokens-file` map (identity attribution only). */
+export interface TokenEntry {
+  readonly token: string;
+  readonly id: string;
+  readonly label?: string;
+}
+
 export interface ServeHttpOptions {
   /** Absolute path to the org-kb vault root. */
   readonly vaultRoot: string;
   readonly port: number;
   readonly host: string;
-  readonly token: string;
+  /**
+   * Solo path: one shared bearer for the process (no caller identity).
+   * Mutually exclusive with {@link tokens}.
+   */
+  readonly token?: string;
+  /**
+   * Team path: token→identity map from `--tokens-file`.
+   * Mutually exclusive with {@link token}.
+   */
+  readonly tokens?: readonly TokenEntry[];
 }
 
 export interface RunningHttpServer {
@@ -61,6 +87,119 @@ const unauthorized = (res: ServerResponse): void => {
   res.end(JSON.stringify({ error: 'unauthorized — pass Authorization: Bearer <token>' }));
 };
 
+const identityFromEntry = (entry: TokenEntry): CallerIdentity =>
+  entry.label !== undefined ? { id: entry.id, label: entry.label } : { id: entry.id };
+
+/**
+ * Match a presented bearer against a token→identity map.
+ * Compares every entry (no early return) so which row matched does not
+ * leak via short-circuit timing; each compare is itself length-safe.
+ */
+export const matchTokenEntry = (
+  presented: string,
+  entries: readonly TokenEntry[],
+): TokenEntry | undefined => {
+  let matched: TokenEntry | undefined;
+  for (const entry of entries) {
+    if (tokenEquals(presented, entry.token)) {
+      matched = entry;
+    }
+  }
+  return matched;
+};
+
+export type AuthResolution =
+  | { readonly ok: true; readonly identity: CallerIdentity | undefined }
+  | { readonly ok: false };
+
+/**
+ * Resolve a presented bearer against solo `token` or team `tokens`.
+ * Solo success yields `identity: undefined` (attribute writes as today).
+ */
+export const resolveBearerAuth = (
+  presented: string,
+  options: Pick<ServeHttpOptions, 'token' | 'tokens'>,
+): AuthResolution => {
+  if (presented.length === 0) return { ok: false };
+  if (options.tokens !== undefined) {
+    const entry = matchTokenEntry(presented, options.tokens);
+    if (entry === undefined) return { ok: false };
+    return { ok: true, identity: identityFromEntry(entry) };
+  }
+  if (options.token !== undefined && tokenEquals(presented, options.token)) {
+    return { ok: true, identity: undefined };
+  }
+  return { ok: false };
+};
+
+/**
+ * Load and validate a tokens file for `--tokens-file`.
+ * Accepts a bare array or `{ "tokens": [...] }`. Synthetic tokens only in tests.
+ */
+export const loadTokensFile = (filePath: string): readonly TokenEntry[] => {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(filePath, 'utf8')) as unknown;
+  } catch (cause) {
+    throw new Error(
+      `tokens-file: cannot read/parse ${filePath}: ${cause instanceof Error ? cause.message : String(cause)}`,
+    );
+  }
+  let list: unknown[] | undefined;
+  if (Array.isArray(raw)) {
+    list = raw;
+  } else if (
+    raw !== null &&
+    typeof raw === 'object' &&
+    Array.isArray((raw as { tokens?: unknown }).tokens)
+  ) {
+    list = (raw as { tokens: unknown[] }).tokens;
+  }
+  if (list === undefined) {
+    throw new Error('tokens-file: expected a JSON array or { "tokens": [...] }');
+  }
+  if (list.length === 0) {
+    throw new Error('tokens-file: must contain at least one entry');
+  }
+  const seen = new Set<string>();
+  const entries: TokenEntry[] = [];
+  for (let i = 0; i < list.length; i += 1) {
+    const row = list[i];
+    if (row === null || typeof row !== 'object') {
+      throw new Error(`tokens-file: entry[${i}] must be an object`);
+    }
+    const token = (row as { token?: unknown }).token;
+    const id = (row as { id?: unknown }).id;
+    const label = (row as { label?: unknown }).label;
+    if (typeof token !== 'string' || token.length === 0) {
+      throw new Error(`tokens-file: entry[${i}].token must be a non-empty string`);
+    }
+    if (typeof id !== 'string' || id.length === 0) {
+      throw new Error(`tokens-file: entry[${i}].id must be a non-empty string`);
+    }
+    if (label !== undefined && (typeof label !== 'string' || label.length === 0)) {
+      throw new Error(`tokens-file: entry[${i}].label must be a non-empty string when set`);
+    }
+    if (seen.has(token)) {
+      throw new Error(`tokens-file: duplicate token at entry[${i}]`);
+    }
+    seen.add(token);
+    entries.push(label !== undefined ? { token, id, label } : { token, id });
+  }
+  return entries;
+};
+
+const normalizeAuthOptions = (options: ServeHttpOptions): void => {
+  const hasToken = options.token !== undefined && options.token.length > 0;
+  const hasTokens = options.tokens !== undefined && options.tokens.length > 0;
+  if (hasToken && hasTokens) {
+    throw new Error('serve-http: pass either token or tokens, not both');
+  }
+  if (!hasToken && !hasTokens) {
+    throw new Error('serve-http: a bearer token or tokens map is required');
+  }
+};
+
 /**
  * Start the HTTP MCP server. The caller owns the lifecycle.
  *
@@ -72,6 +211,8 @@ const unauthorized = (res: ServerResponse): void => {
 export const startHttpServer = async (
   options: ServeHttpOptions,
 ): Promise<RunningHttpServer> => {
+  normalizeAuthOptions(options);
+
   // The live-plane gate reads this BEFORE any tool runs: HTTP callers can
   // never reach the org, regardless of the host machine's consent state.
   // (Also disarms the stdio per-dispatch epoch hook — this server owns its
@@ -120,17 +261,21 @@ export const startHttpServer = async (
   const httpServer: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const auth = req.headers.authorization ?? '';
     const presented = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : '';
-    if (presented.length === 0 || !tokenEquals(presented, options.token)) {
+    const resolved = resolveBearerAuth(presented, options);
+    if (!resolved.ok) {
       unauthorized(res);
       return;
     }
+    const { identity } = resolved;
     void (async () => {
       try {
         // Stateless TRANSPORT per request over the PERSISTENT shared
         // context (epoch-swapped above): the standing read connection
         // forces a concurrent refresh into its side-build path, so readers
         // never see a write lock and a refresh never sees readers.
-        const ctx = await ctxForRequest();
+        // Caller identity is a per-request overlay (never mutated onto shared).
+        const base = await ctxForRequest();
+        const ctx = bindCallerIdentity(base, identity);
         const mcp = createMcpServer(ctx);
         // The SDK's option/transport types predate exactOptionalPropertyTypes;
         // cast at the SDK boundary only (stateless mode = no session ids).

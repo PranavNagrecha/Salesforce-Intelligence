@@ -174,4 +174,48 @@ describe('snapshot trend tools', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it('trends securityScore from SnapshotMeta.metrics with null for pre-upgrade snaps (R8-SECURITY-TREND)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sfi-trend-sec-'));
+    try {
+      await saveSnapshot(root, {
+        ...emptySnapshot,
+        meta: {
+          ...emptySnapshot.meta,
+          label: 'legacy',
+          createdAt: '2026-05-28T12:00:00.000Z',
+        },
+      });
+      await saveSnapshot(root, {
+        ...emptySnapshot,
+        meta: {
+          ...emptySnapshot.meta,
+          label: 'with-score',
+          createdAt: '2026-05-29T12:00:00.000Z',
+          metrics: { securityScore: 75, securityGrade: 3 },
+        },
+      });
+      const defaultTrend = await trendHandler(makeCtx(root), {});
+      expect(defaultTrend.ok).toBe(true);
+      if (defaultTrend.ok) {
+        // Default keeps today's shape — no value/metric fields.
+        expect(defaultTrend.value.data.points[0]).not.toHaveProperty('value');
+        expect(defaultTrend.value.data.points[0]).not.toHaveProperty('metric');
+      }
+
+      const scored = await trendHandler(makeCtx(root), {
+        metric: 'securityScore',
+      });
+      expect(scored.ok).toBe(true);
+      if (!scored.ok) return;
+      expect(scored.value.data.points.map((p) => p.value)).toEqual([null, 75]);
+      expect(scored.value.data.points.every((p) => p.metric === 'securityScore')).toBe(
+        true,
+      );
+      expect(scored.value.data.disclosure).toMatch(/securityScore/);
+      expect(scored.value.data.disclosure).toMatch(/1 of 2/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

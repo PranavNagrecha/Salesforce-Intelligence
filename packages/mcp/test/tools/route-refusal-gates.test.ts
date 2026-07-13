@@ -145,6 +145,7 @@ describe('detectRefusalShape — negatives: permission/hypothetical reads NEVER 
     'difference between a profile and a permission set', // noun 'set' is not the verb
     'please show me every payment object right now', // 'show' is a read
     'should we split the Admin profile into two?', // metadata object present
+    'what should we clean up', // tech-debt battery phrasing — not an org-decision opinion
   ])('does not gate: %s', (q) => {
     expect(detectRefusalShape(q)).toBeNull();
   });
@@ -451,14 +452,12 @@ describe('detectRefusalShape — R3 §5b first-person identity gap', () => {
   });
 });
 
-describe('detectRefusalShape — R3 §5b audit-trail-plane arms', () => {
+describe('detectRefusalShape — R3 §5b audit-trail-plane / report-definition arms', () => {
   it.each([
-    'Who modified the field-level security on Lead.Tax_Id__c most recently, and when?',
-    'pull the setup audit trail for last month',
     'Do we have any reports or dashboards built on the Disability__c object?',
     'Do we have any reports that reference deleted or renamed fields and are silently broken?',
     'which dashboards are broken or point at a report that got deleted',
-  ])('discloses the audit-trail/report-definition gap: %s', (q) => {
+  ])('discloses the report-definition gap: %s', (q) => {
     const shape = detectRefusalShape(q);
     expect(shape?.kind).toBe('runtime-analytics');
     expect(shape?.disclosure).toMatch(/^HONEST GAP:/);
@@ -469,6 +468,14 @@ describe('detectRefusalShape — R3 §5b audit-trail-plane arms', () => {
     'who last modified the Zorp_Flow flow?', // component metadata stamp (last_modified)
     'which email templates are unused?',
     'who can see the Sales dashboard?', // folder access read
+    // R7-W6: the who-changed-a-Setup-setting arm was REMOVED — these two used
+    // to gate here, but sfi.live_setup_audit_trail (R6-27) now reads the
+    // SetupAuditTrail roster directly (field-level-security flips, and a
+    // temporally-qualified "setup audit trail" ask, are both in its scope), so
+    // both are answerable and must NOT gate — they route via
+    // intent-router.ts's `live-setup-audit-trail` intent instead.
+    'Who modified the field-level security on Lead.Tax_Id__c most recently, and when?',
+    'pull the setup audit trail for last month',
   ])('does not gate the covered read: %s', (q) => {
     expect(detectRefusalShape(q)).toBeNull();
   });

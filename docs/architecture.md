@@ -21,7 +21,11 @@ plane** (`sfi.live_*`) can answer capped record counts, samples, field
 population, inactive users, and org limits when you explicitly enable it (see
 [`docs/configuration.md`](./configuration.md)). The vault is checked in to
 git alongside your DX source so the team shares the same picture of the org.
-It is read-only by design — the product has no write path back to Salesforce.
+It has **no org write path** by design — it never deploys, edits metadata, or
+writes a byte back to Salesforce. It can emit deploy-ready *proposal artifacts*
+(a `package.xml` / `destructiveChanges.xml` plus an evidence trail) as **local
+files on your machine** for you to review and feed to your own deploy tool; sfi
+itself never deploys them.
 
 The MCP server exposes the full `sfi.*` roster (see `sfi.capabilities` for the
 live tool count) over a typed component graph. Coverage spans
@@ -45,7 +49,7 @@ over it with general Salesforce knowledge when it hits one of these.
 | Arbitrary live SOQL / Metadata API / Tooling API     | **Not supported.** Only curated `sfi.live_*` tools; offline remains default. |
 | Record-level questions ("how many Accounts closed…") | **Offline:** not in the vault. **Live (opt-in):** `sfi.live_count`, `sfi.live_sample`, `sfi.live_field_population` with hard caps and `provenance: live_org`. |
 | Runtime behaviour (dynamic SOQL, reflective Apex)    | Invisible to static analysis — "no references" means "no static evidence". |
-| Write side (propose, deploy, edit metadata)          | No write path. Read-only by design.                    |
+| Write side to the ORG (deploy, edit metadata)        | **No org write path.** Emits LOCAL deploy-ready proposals only (`package.xml` / `destructiveChanges.xml` + evidence) — never deploys. |
 | Multi-org consolidation                              | One org per vault (cross-vault compare needs a registry). |
 | Hosted SaaS layer                                    | Local-only by design.                                  |
 

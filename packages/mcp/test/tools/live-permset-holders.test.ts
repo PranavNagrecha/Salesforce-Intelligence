@@ -25,6 +25,7 @@ import { join } from 'node:path';
 import type { VaultManifest } from '@sf-intelligence/contracts';
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 
+import { mintLiveCapability } from '../../src/live-capability.js';
 import type { Context } from '../../src/server.js';
 import { livePermsetHoldersHandler } from '../../src/tools/live-plane.js';
 import { resetLiveSession } from '../../src/tools/live-session.js';
@@ -37,7 +38,7 @@ const MANIFEST: VaultManifest = {
   edges: { parentOf: 1 },
   sourceTreeHash: 'sha256:fixture',
 };
-const ctx = { manifest: MANIFEST } as Context;
+const ctx = { manifest: MANIFEST, liveCapability: mintLiveCapability('primary') } as Context;
 
 const PS_ID = '0PS0x0000000001AAA';
 const PSG_ID = '0PG0x0000000001AAA';

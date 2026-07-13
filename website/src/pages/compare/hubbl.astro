@@ -1,0 +1,102 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+
+const title = "sf-intelligence vs Hubbl - sf-intelligence";
+const description =
+  "Compare sf-intelligence with Hubbl: free offline MCP graph vs commercial Salesforce Intelligence Layer / AI-readiness org audits.";
+
+const jsonld = [
+  {
+    "@type": "FAQPage",
+    mainEntity: [
+      {
+        "@type": "Question",
+        name: "Is sf-intelligence the same as Hubbl's Intelligence Layer?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "No. Hubbl is a commercial cloud platform that brands itself as the Intelligence Layer for Salesforce and sells org audits, health/AI-readiness style packages, and related scanning products. sf-intelligence is a free, offline MCP server that builds a local confidence-tagged metadata graph for editor agents. Similar category language; different delivery and price.",
+        },
+      },
+      {
+        "@type": "Question",
+        name: "Which is better for an AI-readiness audit?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "Hubbl is built as a vendor audit / benchmark product with a shared deliverable. sf-intelligence composes the same job locally from tools like tech_debt_score, org_risk_report, unused_fields_deep, find_dead_code, and ai_exposure_report — free, offline, no dashboard. Choose Hubbl for a packaged commercial assessment; choose sfi for day-to-day grounded questions and a DIY agent-readiness pass.",
+        },
+      },
+    ],
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/compare/hubbl"
+  heading="sf-intelligence vs Hubbl"
+  intro="Hubbl's homepage leads with <strong>&quot;the Intelligence Layer for Salesforce&quot;</strong> — the same category phrase this project uses informally. Different products: theirs is a commercial audit/intelligence platform; ours is a free local MCP graph."
+  crumbs={[
+    { label: "compare", href: "/compare" },
+    { label: "vs Hubbl", href: "/compare/hubbl" },
+  ]}
+  breadcrumbs={[
+    { name: "Compare", path: "/compare" },
+    { name: "vs Hubbl", path: "/compare/hubbl" },
+  ]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container">
+      <div class="prose">
+        <div class="callout">
+          <p><strong>Short answer:</strong> Use <strong>Hubbl</strong> when you want a vendor-run org / AI-readiness assessment, cross-org benchmarking, or consultant Scan Request workflows with a commercial dashboard. Use <strong>sf-intelligence</strong> when you want a grounded backend in Claude/Cursor for free — we describe the job as <em>offline, confidence-tagged org intelligence for AI agents</em> rather than contesting a trademarked category line.</p>
+        </div>
+
+        <h2 id="summary">At a glance</h2>
+        <table class="doc-table">
+          <thead><tr><th>&nbsp;</th><th>sf-intelligence</th><th>Hubbl</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Category phrase</strong></td><td>Grounded offline backend for Salesforce AI agents</td><td>"Intelligence Layer for Salesforce" (their brand)</td></tr>
+            <tr><td><strong>Delivery</strong></td><td>Local MCP + CLI</td><td>Cloud SaaS / scan products</td></tr>
+            <tr><td><strong>Primary motion</strong></td><td>Day-to-day Q&amp;A in an editor</td><td>Org audits, health / AI-readiness packages</td></tr>
+            <tr><td><strong>Cost</strong></td><td>Free</td><td>Commercial (verify on hubbl.com)</td></tr>
+            <tr><td><strong>Where metadata goes</strong></td><td>Local vault</td><td>Vendor processing for scans / platform</td></tr>
+            <tr><td><strong>MCP</strong></td><td>Native server</td><td>Not the core public product story as of mid-2026</td></tr>
+            <tr><td><strong>Cross-org benchmarks</strong></td><td>Your registered vaults only</td><td>Marketed benchmarking vs many orgs</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="when-sfi">Choose sf-intelligence when you want to…</h2>
+        <ul>
+          <li>Ask impact / permissions / debt questions every day in an MCP client</li>
+          <li>Keep the vault local and source-available</li>
+          <li>Run a DIY <a href="/use-cases/agent-readiness-audit">agent-readiness audit</a> without a SaaS contract</li>
+        </ul>
+
+        <h2 id="when-hubbl">Choose Hubbl when you want to…</h2>
+        <ul>
+          <li>A packaged commercial audit deliverable for leadership</li>
+          <li>Consultant-friendly scan motions (e.g. Scan Requests) with clear customer control of credentials</li>
+          <li>Benchmarking and process-intelligence product lines beyond a single local graph</li>
+        </ul>
+
+        <h2 id="more">More comparisons</h2>
+        <p><a href="/compare">compare hub</a> · <a href="/compare/elements-cloud">Elements.cloud</a> · <a href="/compare/dx0">dx0</a> · <a href="/compare/metazoa">Metazoa</a> · <a href="/compare/salesforce-dx-mcp">Salesforce MCP</a>.</p>
+
+        <div class="callout"><p><strong>Disclaimer:</strong> Fair comparison from public Hubbl positioning as of mid-2026. Feature sets and compliance claims evolve — verify on hubbl.com. sf-intelligence is independent and not affiliated with Hubbl Technologies.</p></div>
+
+        <div style="padding-top:36px;">
+          <div class="cta-box">
+            <h2 class="screen-type">Editor-native. Free. Local.</h2>
+            <p>Same buying trigger (AI-ready org) — different shape of product.</p>
+            <div class="cta-actions">
+              <a class="btn btn-solid" href="/getting-started">install sf-intelligence</a>
+              <a class="btn btn-ghost" href="/use-cases/agent-readiness-audit">agent-readiness audit</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</DocPage>

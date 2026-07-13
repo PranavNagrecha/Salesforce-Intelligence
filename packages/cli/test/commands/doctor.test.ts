@@ -29,6 +29,7 @@ describe('runDoctor', () => {
     const cwd = await makeTempCwd();
     try {
       const report = await runDoctor({ cwd, exec: connectedStub });
+      expect(find(report, 'DuckDB native')?.status).toBe('pass');
       expect(find(report, 'Salesforce CLI')?.status).toBe('pass');
       expect(find(report, 'Vault')?.status).toBe('fail');
       expect(find(report, 'Vault')?.fix).toContain('sfi init');

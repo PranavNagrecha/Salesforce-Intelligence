@@ -60,6 +60,14 @@ eval/end-user-transcripts/
 # The guard reads it locally; it must never be committed.
 scripts/forbidden-names.local.json
 
+# Session / handoff notes that can contain org identifiers or private context.
+# Maintainer working notes only; never commit.
+*-HANDOFF.md
+HANDOFF*.md
+R6-HANDOFF.md
+*-SESSION.md
+*SESSION*.md
+
 # Maintainer-only tests/scripts that reference real private-org metadata.
 # They are harness-gated (need real-org fixtures not in this repo, so CI skips
 # them) and stay on the maintainer's machine. Keeping them out of the repo lets
@@ -79,7 +87,20 @@ tests/integration/*-smoke-*-report.md
 # Local maintainer reference (contains org blocklist terms) — never commit
 docs/plans/CLAUDE-CODE-MASTER-PROMPT.md
 
+# Maintainer adoption signals (GitHub traffic snapshots). The traffic API retains
+# ~14 days; periodic capture is required. Aggregate counts only — never commit.
+.sfi-local/adoption/
+
 # transient agent worktrees + local embedding model cache (never commit)
 .claude/worktrees/
 **/.sfi-embed-cache/
 # spike/embeddings: local model cache (downloaded once by packages/mcp/scripts/build-embedding-index.mjs)
+# spike/embeddings (static, option 4a): the model-download cache + the generated
+# static-embedding assets. The gate ships DEFAULT-OFF (measured sub-bar lift), so
+# these ~8.5 MB assets are NOT committed and NOT shipped — regenerate on demand
+# with `node packages/mcp/scripts/build-static-embedding-index.mjs` (deterministic).
+**/.sfi-static-model-cache/
+packages/mcp/data/static-embedding-table.bin
+packages/mcp/data/static-embedding-meta.json
+packages/mcp/data/static-embedding-index.json
+org-kb

@@ -1,0 +1,104 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+import site from "../../data/site.ts";
+
+const title = "Compare Salesforce org-intelligence tools - sf-intelligence";
+const description =
+  "Honest comparisons: sf-intelligence vs Salesforce DX/hosted MCP, Elements.cloud, dx0, Hubbl, Metazoa Snapshot, and Sweep — when to use each.";
+
+const pages = [
+  {
+    href: "/compare/salesforce-dx-mcp",
+    tag: "first-party",
+    title: "vs Salesforce DX / hosted MCP",
+    blurb:
+      "Official MCP is table-stakes describe, CRUD, and DevOps. sf-intelligence is the offline dependency/impact layer those servers still lack.",
+  },
+  {
+    href: "/compare/elements-cloud",
+    tag: "enterprise SaaS",
+    title: "vs Elements.cloud",
+    blurb:
+      "Hosted Change Intelligence + Conversational Org Intelligence (MCP targeted Spring 2026). Cloud governance vs free local vault.",
+  },
+  {
+    href: "/compare/dx0",
+    tag: "hosted chat",
+    title: "vs dx0",
+    blurb:
+      "Polished cloud org-chat with ISO 27001 and per-seat pricing. Contrast is MCP-native + offline + free — not 'cloud is insecure.'",
+  },
+  {
+    href: "/compare/hubbl",
+    tag: "AI-readiness",
+    title: "vs Hubbl",
+    blurb:
+      "Commercial 'Intelligence Layer for Salesforce' audits and benchmarks. Editor-native free graph vs vendor audit motion.",
+  },
+  {
+    href: "/compare/metazoa",
+    tag: "local commercial",
+    title: "vs Metazoa Snapshot",
+    blurb:
+      "Local MCP + full org-management suite. Privacy alone is shared — depth, honesty labels, and free OSS still differ.",
+  },
+  {
+    href: "/compare/sweep",
+    tag: "RevOps",
+    title: "vs Sweep",
+    blurb:
+      "Multi-system GTM/RevOps agentic layer. Different buyer than a single-org developer MCP.",
+  },
+];
+
+const jsonld = [
+  {
+    "@type": "CollectionPage",
+    name: "Compare Salesforce org-intelligence tools",
+    description,
+    isPartOf: { "@id": `${site.url}/#website` },
+  },
+  {
+    "@type": "ItemList",
+    itemListElement: pages.map((p, i) => ({
+      "@type": "ListItem",
+      position: i + 1,
+      name: p.title,
+      url: `${site.url}${p.href}`,
+    })),
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/compare"
+  heading="Compare"
+  intro="First-party MCP made shallow org access free. These pages spell out what still differs: offline dependency graph, impact, permissions math, confidence labels — and when a commercial or Salesforce-native tool is the better buy."
+  crumbs={[{ label: "compare", href: "/compare" }]}
+  breadcrumbs={[{ name: "Compare", path: "/compare" }]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container">
+      <div class="callout" style="margin-bottom:28px;">
+        <p><strong>How to read these:</strong> each page is written to help you pick the right tool (or both), not to win a feature checklist. Longer competitive framing lives in the repo's <a href="https://github.com/PranavNagrecha/Salesforce-Intelligence/blob/main/docs/POSITIONING.md">docs/POSITIONING.md</a>. For packing existing tools into an AI / Agentforce prep narrative, see the <a href="/use-cases/agent-readiness-audit">agent-readiness audit</a>.</p>
+      </div>
+      <div class="grid cols-3">
+        {pages.map((p) => (
+          <article class="card">
+            <div class="tagn">{p.tag}</div>
+            <h3><a href={p.href}>{p.title}</a></h3>
+            <p>{p.blurb}</p>
+          </article>
+        ))}
+      </div>
+      <p class="center" style="margin-top:36px; display:flex; gap:12px; justify-content:center; flex-wrap:wrap;">
+        <a class="btn btn-ghost" href="/use-cases">› use cases</a>
+        <a class="btn btn-ghost" href="/ai-safety">› is AI safe on my org?</a>
+        <a class="btn btn-solid" href="/getting-started">get started</a>
+      </p>
+    </div>
+  </section>
+</DocPage>

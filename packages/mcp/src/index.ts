@@ -13,6 +13,7 @@
  *   4. `await shutdown(ctx)` -> release the graph store on exit.
  */
 
+export { registerPrompts, MCP_PROMPTS, getMcpPrompt } from './prompts.js';
 export { registerResources } from './resources.js';
 // P13-FACTS-capture: the CLI's refresh-time data-shape capture shares the
 // canonical consent check (the capture is opt-in twice over: flag + consent).
@@ -34,12 +35,24 @@ export {
 // sweep. The MCP live_* tools keep their session budget untouched.
 export { resetLiveSession } from './tools/live-session.js';
 // Route-gap telemetry: the local question-gap log the router appends to when a
-// question hits a gap. `sfi doctor` reads it to report routeGap counts
-// (P12-ROUTER-confusion-report) — exported here so the CLI shares the canonical
-// path/shape instead of duplicating it.
-export { gapLogPath } from './intent-router.js';
-export type { GapLogEntry } from './intent-router.js';
+// question hits a gap. `sfi doctor` / `sfi gaps report` / `sfi.capabilities`
+// read it (P12-ROUTER-confusion-report / R8-GAPLOG-SURFACE) — exported here so
+// the CLI shares the canonical path/shape/summarizer instead of duplicating it.
 export {
+  gapLogPath,
+  ROUTE_GAP_NUDGE_THRESHOLD,
+  routeGapsNudge,
+  summarizeRouteGaps,
+} from './intent-router.js';
+export type {
+  GapLogEntry,
+  RouteGapCategoryCount,
+  RouteGapSummary,
+  RouteGapsNudge,
+  SummarizeRouteGapsOptions,
+} from './intent-router.js';
+export {
+  bindCallerIdentity,
   buildContext,
   createServer,
   shutdown,
@@ -47,12 +60,33 @@ export {
 } from './server.js';
 export {
   generateToken,
+  loadTokensFile,
+  matchTokenEntry,
+  resolveBearerAuth,
   startHttpServer,
   tokenEquals,
 } from './serve-http.js';
-export type { RunningHttpServer, ServeHttpOptions } from './serve-http.js';
-export type { Context, ServerError } from './server.js';
-export { V01_TOOLS, dispatchTool, registerTools } from './tools/index.js';
+export type {
+  AuthResolution,
+  RunningHttpServer,
+  ServeHttpOptions,
+  TokenEntry,
+} from './serve-http.js';
+export type { CallerIdentity, Context, ServerError } from './server.js';
+export {
+  V01_TOOLS,
+  dispatchTool,
+  registerTools,
+  MCP_LIVE_TOOL_ANNOTATIONS,
+  MCP_VAULT_TOOL_ANNOTATIONS,
+  MCP_TOOL_OUTPUT_SCHEMA,
+  mcpProtocolAnnotationsFor,
+} from './tools/index.js';
 export type { ToolDefinition } from './tools/index.js';
+export {
+  captureSecurityPostureMetrics,
+  gradeFromFindingCount,
+  securityPostureMetricsFromFindingCount,
+} from './tools/security-posture-metric.js';
 export { semanticCandidates } from './semantic-funnel.js';
 export type { ToolCandidate } from './semantic-funnel.js';

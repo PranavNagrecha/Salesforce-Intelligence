@@ -93,7 +93,7 @@ describe('extractDuplicateRule', () => {
       // The real Salesforce shape: <operationsOnInsert> repeats as a list of
       // DuplicateRuleOperation enum strings (NOT a container with <allowSave>),
       // and <alertText> is a single top-level element. This mirrors the
-      // mass.gov Standard_*_Duplicate_Rule files that the old container model
+      // real-org Standard_*_Duplicate_Rule files that the old container model
       // rejected.
       const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <DuplicateRule xmlns="http://soap.sforce.com/2006/04/metadata" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
@@ -289,7 +289,7 @@ describe('extractDuplicateRule', () => {
       // Real Salesforce emits an empty mapping as a nil self-closing
       // element. With `ignoreAttributes: true` the parser collapses it to
       // the empty string `""`, which is NOT a real object mapping — so the
-      // count must be 0, not 1. (The real mass.gov
+      // count must be 0, not 1. (The real gate-vault
       // Standard_*_Duplicate_Rule files all carry this nil form.)
       const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <DuplicateRule xmlns="http://soap.sforce.com/2006/04/metadata" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">

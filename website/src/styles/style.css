@@ -206,8 +206,15 @@ h2.head { font-family: var(--screen-font); font-size: clamp(2rem, 5vw, 3.2rem); 
 .chip { font-family: var(--mono); font-size: .76rem; color: var(--fg-dim); border: 1px solid var(--line); padding: 4px 10px; border-radius: 3px; }
 .chip b { color: var(--green); }
 .hero-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; }
-.hero-note { color: var(--fg-dim); font-size: .84rem; }
+.hero-note { color: var(--fg-dim); font-size: .84rem; margin-bottom: 0; }
 .hero-note code { color: var(--green); }
+
+.hero-demo { margin-top: 8px; padding: 14px 16px; border: 1px solid var(--green-soft); border-radius: 4px; background: var(--screen); box-shadow: var(--glow); }
+.hero-demo-kicker { font-family: var(--mono); font-size: .78rem; color: var(--green-soft); letter-spacing: .04em; margin: 0 0 10px; }
+.hero-demo-kicker::before { content: "$ "; color: var(--fg-dim); }
+.hero-demo .code-block { margin-bottom: 0; }
+.hero-demo-note { color: var(--fg-dim); font-size: .8rem; margin: 10px 0 0; }
+.hero-demo-note a { color: var(--green-soft); }
 
 /* the hero terminal "screen" */
 .screen {

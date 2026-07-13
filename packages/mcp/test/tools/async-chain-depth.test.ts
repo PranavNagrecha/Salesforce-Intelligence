@@ -23,6 +23,8 @@ import {
   asyncChainDepthInputSchema,
 } from '../../src/tools/async-chain-depth.js';
 
+import { measureGraphQueries } from './_graph-query-budget.js';
+
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
   refreshedAt: '2026-05-27T14:33:08Z',
@@ -506,5 +508,99 @@ describe('asyncChainDepthInputSchema', () => {
         rootId: 'Flow:Partner_Async',
       }).success,
     ).toBe(true);
+  });
+});
+
+// =============================================================================
+// N+1 query budget (finding C-1). walkDispatchesAsync issued one `listEdges`
+// per frontier node; it now issues ONE `listEdgesForNodes` per DEPTH LEVEL.
+// The BFS is depth-bounded, so the query count must scale with DEPTH, never
+// with frontier WIDTH. Plus a golden-output assertion over a dedup-sensitive
+// diamond chain (batching changes only WHEN edges are fetched, not the result).
+// =============================================================================
+describe('asyncChainDepthHandler — bounded graph queries (BFS)', () => {
+  // Golden fixture: A -> {B,C} (depth 1); B -> D and C -> D (diamond, depth 2,
+  // D deduped in the visited set); D -> E (depth 3). Batching must not change
+  // which edges are emitted or which nodes are expanded.
+  const goldenSeed: ExtractionResult = {
+    nodes: ['A', 'B', 'C', 'D', 'E'].map((n) =>
+      makeNode({ id: `ApexClass:${n}`, apiName: n }),
+    ),
+    edges: [
+      makeEdge({ fromId: 'ApexClass:A', toId: 'ApexClass:B', edgeType: 'dispatchesAsync' }),
+      makeEdge({ fromId: 'ApexClass:A', toId: 'ApexClass:C', edgeType: 'dispatchesAsync' }),
+      makeEdge({ fromId: 'ApexClass:B', toId: 'ApexClass:D', edgeType: 'dispatchesAsync' }),
+      makeEdge({ fromId: 'ApexClass:C', toId: 'ApexClass:D', edgeType: 'dispatchesAsync' }),
+      makeEdge({ fromId: 'ApexClass:D', toId: 'ApexClass:E', edgeType: 'dispatchesAsync' }),
+    ],
+  };
+
+  const withStore = async <T>(
+    seed: ExtractionResult,
+    run: (ctx: Context, s: GraphStore) => Promise<T>,
+  ): Promise<T> => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-acd-budget-'));
+    const opened = await openGraph(join(dir, 'acd.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const s = opened.value;
+    const imported = await importExtractionResults(s, [seed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const localCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s } as Context;
+    const out = await run(localCtx, s);
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+    return out;
+  };
+
+  it('golden: the diamond chain result is unchanged by batching', async () => {
+    const result = await withStore(goldenSeed, (localCtx) =>
+      asyncChainDepthHandler(localCtx, { rootApexClassId: 'ApexClass:A' }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    expect(d.maxDepth).toBe(3);
+    expect(d.truncated).toBe(false);
+    expect(d.cyclesDetected).toBe(false);
+    expect(d.chains).toEqual([
+      { fromId: 'ApexClass:A', toId: 'ApexClass:B', depth: 1 },
+      { fromId: 'ApexClass:A', toId: 'ApexClass:C', depth: 1 },
+      { fromId: 'ApexClass:B', toId: 'ApexClass:D', depth: 2 },
+      { fromId: 'ApexClass:C', toId: 'ApexClass:D', depth: 2 },
+      { fromId: 'ApexClass:D', toId: 'ApexClass:E', depth: 3 },
+    ]);
+    expect(d.branchPoints).toEqual([{ classId: 'ApexClass:A', branchCount: 2 }]);
+  });
+
+  // Root fans out to `width` leaf jobs at depth 1 (each leaf dispatches to
+  // nothing). Depth is fixed at 2 regardless of width; the query count is one
+  // batched fetch per depth level, so it must be FLAT as width grows.
+  const seedWideFrontier = (width: number): ExtractionResult => ({
+    nodes: [
+      makeNode({ id: 'ApexClass:Root', apiName: 'Root' }),
+      ...Array.from({ length: width }, (_u, i) =>
+        makeNode({ id: `ApexClass:Leaf${i}`, apiName: `Leaf${i}` }),
+      ),
+    ],
+    edges: Array.from({ length: width }, (_u, i) =>
+      makeEdge({ fromId: 'ApexClass:Root', toId: `ApexClass:Leaf${i}`, edgeType: 'dispatchesAsync' }),
+    ),
+  });
+
+  it('edge-query count does NOT scale with frontier width', async () => {
+    const measure = (width: number) =>
+      withStore(seedWideFrontier(width), (localCtx, s) =>
+        measureGraphQueries(s, () =>
+          asyncChainDepthHandler(localCtx, { rootApexClassId: 'ApexClass:Root' }),
+        ),
+      );
+    const narrow = await measure(60);
+    const wide = await measure(200);
+    expect(narrow.result.ok).toBe(true);
+    expect(wide.result.ok).toBe(true);
+    // Flat across width: one listEdgesForNodes per depth level (+ root resolve),
+    // NOT one listEdges per leaf. An N+1 would be ~width edge queries.
+    expect(wide.edgeQueries).toBe(narrow.edgeQueries);
+    expect(wide.edgeQueries).toBeLessThan(10);
   });
 });

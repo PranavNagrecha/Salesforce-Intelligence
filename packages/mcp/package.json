@@ -26,7 +26,8 @@
   ],
   "scripts": {
     "build": "tsc --build",
-    "test": "vitest run"
+    "test": "vitest run",
+    "embed:check": "node scripts/check-embedding-index.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
@@ -36,6 +37,7 @@
     "@sf-intelligence/graph": "workspace:*",
     "@sf-intelligence/parsers": "workspace:*",
     "@sf-intelligence/patterns": "workspace:*",
+    "@sf-intelligence/renderers": "workspace:*",
     "@sf-intelligence/tooling-api": "workspace:*",
     "@sf-intelligence/vault": "workspace:*",
     "fast-xml-parser": "^4.4.0",
@@ -43,6 +45,6 @@
   },
   "devDependencies": {
     "@huggingface/transformers": "^4.2.0",
-    "vitest": "^1.6.0"
+    "vitest": "^3.2.4"
   }
 }

@@ -24,7 +24,7 @@ describe('parseApexHeader', () => {
     it('parses an interface declaration (not just class)', () => {
       // An Apex interface has no `class` keyword but IS a real component (other
       // classes `implements` it) — it must parse, not error "no class
-      // declaration found" (4 such interfaces broke the mass.gov refresh).
+      // declaration found" (4 such interfaces broke the example.gov refresh).
       const result = parseApexHeader(
         'public interface IFoo {\n  void executeBatch(Integer jobSize);\n}',
       );
@@ -43,7 +43,7 @@ describe('parseApexHeader', () => {
     });
 
     it('recognizes a capitalized Interface/Class keyword (Apex keywords are case-insensitive)', () => {
-      // Apex keywords are case-insensitive. The real mass.gov interface
+      // Apex keywords are case-insensitive. The real example.gov interface
       // IIntegrationService declares `public Interface IIntegrationService{...}`
       // (capital I) — the parser must not require a lowercase `interface`.
       const iface = parseApexHeader(

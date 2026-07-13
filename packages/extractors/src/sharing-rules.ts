@@ -279,7 +279,7 @@ const HAS_CRITERIA: ReadonlySet<RuleType> = new Set<RuleType>([
  * CR-CAP-16 — GUEST-branch-LOCAL `<sharedTo>` resolver.
  *
  * A guest sharing rule's `<sharedTo>` carries a SINGLE `<guestUser>` child whose
- * INNER TEXT is the Experience-Cloud SITE NAME (e.g. `ClientPortal`) — it is
+ * INNER TEXT is the Experience-Cloud SITE NAME (e.g. `Customer_Site`) — it is
  * always named, never self-closing. The shared, exported `VARIANT_TABLE.guestUser`
  * entry is a SELF-CLOSING synthetic that DROPS that text and collapses every
  * guest rule to one `Group:GuestUser`; it is also shared with

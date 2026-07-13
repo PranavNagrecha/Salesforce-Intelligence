@@ -56,7 +56,15 @@ module.exports = {
     ],
     '@typescript-eslint/naming-convention': [
       'error',
-      { selector: 'variable', format: ['camelCase', 'UPPER_CASE'] },
+      // `leadingUnderscore: 'allow'` keeps this rule self-consistent with
+      // no-unused-vars' `varsIgnorePattern: '^_'`: a `_name` intentional
+      // discard (e.g. `const { liveCapability: _ignored, ...rest } = ctx`)
+      // is a permitted convention, not a naming violation.
+      {
+        selector: 'variable',
+        format: ['camelCase', 'UPPER_CASE'],
+        leadingUnderscore: 'allow',
+      },
       { selector: 'function', format: ['camelCase'] },
       { selector: 'typeLike', format: ['PascalCase'] },
       { selector: 'enumMember', format: ['PascalCase'] },

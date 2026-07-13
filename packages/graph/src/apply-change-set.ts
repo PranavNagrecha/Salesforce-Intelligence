@@ -5,6 +5,10 @@ import { err, ok, type Result } from '@sf-intelligence/core';
 import {
   buildMultiRowUpsertSql,
   canonicalizeApexCallEdgeTargets,
+  canonicalizeFieldEdgeTargets,
+  canonicalizeLabelEdgeTargets,
+  canonicalizeObjectEdgeTargets,
+  canonicalizeResourceEdgeTargets,
   EDGE_COLUMN_COUNT,
   edgeRowParams,
   IMPORT_BATCH_SIZE,
@@ -212,6 +216,22 @@ export const computeChangeSet = async (
   // GRF-01: mirror cold import — canonicalize Apex call targets before the
   // first-writer-wins dedupe so incremental apply matches full rebuild.
   canonicalizeApexCallEdgeTargets([...desiredNodes.values()], desiredEdgeList);
+  // R6-03: mirror cold import — remap case-variant CustomField targets onto
+  // the vaulted field id. INCREMENTAL GAP: only sees the change-set's node
+  // view, so a field node outside the change set can't anchor a remap and the
+  // edge stays dangling until a full rebuild; full `/sfi-refresh` is the
+  // ground truth (same bound as the GRF-01/CR-CAP-09 mirrors above).
+  canonicalizeFieldEdgeTargets([...desiredNodes.values()], desiredEdgeList);
+  // R7-W3: mirror cold import — remap case-variant CustomObject targets onto
+  // the vaulted object id. Same INCREMENTAL GAP as the CustomField mirror
+  // above: only sees the change-set's node view.
+  canonicalizeObjectEdgeTargets([...desiredNodes.values()], desiredEdgeList);
+  // C-2 (finding 25): mirror cold import — remap case-variant CustomLabel
+  // ($Label.foo) and StaticResource ($Resource.bar) targets onto the vaulted
+  // label/resource id. Same INCREMENTAL GAP as the CustomField/CustomObject
+  // mirrors above: only sees the change-set's node view.
+  canonicalizeLabelEdgeTargets([...desiredNodes.values()], desiredEdgeList);
+  canonicalizeResourceEdgeTargets([...desiredNodes.values()], desiredEdgeList);
   // CR-CAP-09: mirror cold import — mint class-granular @future dispatchesAsync
   // edges after canonicalize. INCREMENTAL GAP: this only sees the change-set's
   // node view (`desiredNodes`), so a future-holding target class outside the

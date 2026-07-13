@@ -673,3 +673,62 @@ describe('unusedComponentsHandler — coverage caveat (P13-STAGED-absence-batter
     expect(result.value.data.coverageCaveat?.message).toContain('not checked');
   });
 });
+
+// Perf regression guard: the "unused" verdict reads each scanned node's INCOMING
+// edges. It MUST fetch them in one batched `listEdgesForNodes` round-trip per
+// type, not an N+1 `listEdges`-per-node loop — that N+1 (one DuckDB round-trip
+// per CustomField) was the dominant cost in the >60s tech_debt_score /
+// org_risk_report timeout on a large org.
+describe('unusedComponentsHandler — batched incoming-edge lookups (no N+1)', () => {
+  const FIELD_COUNT = 60;
+  let dir: string;
+  let localStore: GraphStore;
+  let localCtx: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-unused-perf-'));
+    const opened = await openGraph(join(dir, 'perf.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    localStore = opened.value;
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: 'CustomObject:Perf__c', type: 'CustomObject', apiName: 'Perf__c' }),
+        ...Array.from({ length: FIELD_COUNT }, (_unused, i) =>
+          makeNode({
+            id: `CustomField:Perf__c.Dead${i}__c`,
+            type: 'CustomField',
+            apiName: `Dead${i}__c`,
+            parentId: 'CustomObject:Perf__c',
+          }),
+        ),
+      ],
+      edges: [],
+    };
+    const imported = await importExtractionResults(localStore, [seed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    localCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: localStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(localStore);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('issues a bounded number of edge queries regardless of node count', async () => {
+    const spy = vi.spyOn(localStore.connection, 'runAndReadAll');
+    const result = await unusedComponentsHandler(localCtx, {
+      types: ['CustomField'],
+      limit: 500,
+    });
+    const edgeQueries = spy.mock.calls.filter(([sql]) =>
+      String(sql).includes('FROM edges'),
+    ).length;
+    spy.mockRestore();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // All 60 fields are unreferenced (only a structural parentOf), so all are unused.
+    expect(result.value.data.byType['CustomField']).toBe(FIELD_COUNT);
+    // ONE batched listEdgesForNodes for the whole type — not one per field.
+    expect(edgeQueries).toBeLessThanOrEqual(2);
+  });
+});

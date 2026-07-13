@@ -16,11 +16,28 @@
  *
  * Upstream walk: starting from `fieldId`, query incoming `writesTo`
  * edges; each writer is a source. Recurse into each writer for "where
- * does THIS writer get its value FROM?" — Flow input parameters / Apex
- * `readsFrom` edges / formula upstream / WorkflowRule criteriaItems /
- * integration-inbound external system (terminal) / v2.9 source-of-truth
- * field (terminal). The walk depth is bounded by `maxDepth` (default
- * 3, max 5); cycles are detected by `(fromId, toId, edgeType)` keying.
+ * does THIS writer get its value FROM?" — formula upstream / WorkflowRule
+ * criteriaItems / integration-inbound external system (terminal) / v2.9
+ * source-of-truth field (terminal). The walk depth is bounded by
+ * `maxDepth` (default 3, max 5); cycles are detected by
+ * `(fromId, toId, edgeType)` keying.
+ *
+ * R6-11 flow dataflow: a FLOW writer no longer dead-ends the walk. The
+ * flow extractor traces each DML input assignment back through the
+ * flow's internal assignment chain and stamps the resolved source
+ * fields on the field-level `writesTo` edge
+ * (`properties.sourceFields` / `sourceFieldConfidence` /
+ * `unresolvedSourceCount`). The upstream walk follows those fields as
+ * `flow-input-field` sources one hop past the flow and RECURSES into
+ * each, so a field written by Flow A from a field written by Flow B
+ * chains end-to-end. Per-hop confidence is the extractor's per-field
+ * trace label (`declared` = direct $Record/record-lookup chain,
+ * `heuristic` = through a formula/loop/non-Assign operator); inputs the
+ * extractor could not statically resolve surface as a DISCLOSED count
+ * (`upstream.flowDataflow.unresolvedInputCount`), never as guessed
+ * fields. Flow write edges from a vault refreshed BEFORE the tracer
+ * existed carry no trace — they are counted in
+ * `flowDataflow.untracedFlowWriteEdges` and disclosed.
  *
  * Downstream walk: starting from `fieldId`, walk incoming `firesWhen`
  * (v2.0a) + `triggersOn` + `callsApex` from automation surfaces
@@ -46,6 +63,10 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
+import {
+  DATAFLOW_SOURCE_OPERATION,
+  FLOW_DATAFLOW_TRACE_DEPTH_CAP,
+} from '@sf-intelligence/extractors';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
@@ -108,6 +129,11 @@ export interface UpstreamSource {
     | 'apex-write'
     | 'process-builder-assignment'
     | 'formula-source'
+    // R6-11: a record field a FLOW writer reads to produce the written
+    // value — the flow's INPUT, surfaced one hop past the flow from the
+    // extractor's `sourceFields` trace on the writesTo edge. `confidence`
+    // is the per-field trace label (declared | heuristic).
+    | 'flow-input-field'
     | 'integration-inbound'
     | 'source-of-truth-field';
   readonly sourceId: ComponentId;
@@ -127,13 +153,24 @@ export interface DownstreamEffect {
     | 'validation-fire'
     | 'integration-outbound'
     | 'email-fire'
-    | 'formula-recompute';
+    | 'formula-recompute'
+    // R6-11: a Flow READS this field as a dataflow source and writes its
+    // value onward into `targetFields` — the downstream mirror of the
+    // upstream `flow-input-field` hop. The walk continues INTO each
+    // target field at depth + 1.
+    | 'flow-field-write';
   readonly effectId: ComponentId;
   readonly effectApiName: string;
   readonly depth: number;
   readonly confidence: ConfidenceLevel;
   readonly conditionId: ComponentId | null;
   readonly firesWhen: string | null;
+  /**
+   * R6-11: present ONLY on `flow-field-write` effects — the
+   * `{Object}.{Field}` short forms this flow writes the read value into
+   * (from the dataflow edge's `targetFields` property).
+   */
+  readonly targetFields?: readonly string[];
 }
 
 /** Upstream payload. */
@@ -155,6 +192,21 @@ export interface UpstreamPayload {
   readonly formulaChain: {
     readonly maxDepth: number;
     readonly crossesObject: boolean;
+  };
+  /**
+   * R6-11: the flow-dataflow trace summary for this walk.
+   * `inputFieldsTraced` counts the `flow-input-field` sources surfaced;
+   * `unresolvedInputCount` totals the flow input references the EXTRACTOR
+   * could not statically resolve (ambiguous variables, relationship
+   * traversals, action outputs, chains past the trace depth cap) —
+   * disclosed here, never guessed; `untracedFlowWriteEdges` counts flow
+   * write edges that predate the dataflow tracer (vault refreshed with an
+   * older extractor — re-refresh to trace them).
+   */
+  readonly flowDataflow: {
+    readonly inputFieldsTraced: number;
+    readonly unresolvedInputCount: number;
+    readonly untracedFlowWriteEdges: number;
   };
 }
 
@@ -313,7 +365,16 @@ const walkUpstream = async (
   includeSoT: boolean,
 ): Promise<
   Result<
-    { sources: UpstreamSource[]; truncated: boolean; cycles: boolean },
+    {
+      sources: UpstreamSource[];
+      truncated: boolean;
+      cycles: boolean;
+      flowDataflow: {
+        inputFieldsTraced: number;
+        unresolvedInputCount: number;
+        untracedFlowWriteEdges: number;
+      };
+    },
     McpError
   >
 > => {
@@ -321,6 +382,10 @@ const walkUpstream = async (
   const visited = new Set<ComponentId>([fieldId]);
   let truncated = false;
   let cycles = false;
+  // R6-11 flow-dataflow accumulators (see UpstreamPayload.flowDataflow).
+  let inputFieldsTraced = 0;
+  let unresolvedInputCount = 0;
+  let untracedFlowWriteEdges = 0;
 
   /**
    * One level of the recursion. The `path` parameter records the
@@ -378,15 +443,26 @@ const walkUpstream = async (
 
       // v2.9 source-of-truth fields are terminal — stop the walk.
       if (isSoT && includeSoT) continue;
+      // R6-11: a FLOW writer's next hop is its traced INPUT fields (the
+      // extractor's `sourceFields` on this very edge) — a Flow node has no
+      // incoming `writesTo` edges, so recursing into the flow itself (the
+      // pre-R6-11 behavior) always dead-ended.
+      if (sourceNode.type === 'Flow') {
+        const next = await followFlowInputs(edge, sourceNode, depth, [
+          ...path,
+          targetId,
+        ]);
+        if (!next.ok) return next;
+        continue;
+      }
       // Recurse only into writers that themselves write to other
-      // fields. Apex/Flow writers may write to multiple downstream
+      // fields. Apex writers may write to multiple downstream
       // fields, but for lineage we only follow further `writesTo`
       // edges into the writer's own field reads (which manifest as
       // incoming `writesTo` edges on the writer's target fields).
       if (
         sourceNode.type === 'CustomField' ||
-        sourceNode.type === 'ApexClass' ||
-        sourceNode.type === 'Flow'
+        sourceNode.type === 'ApexClass'
       ) {
         const next = await recurse(sourceNode.id, depth + 1, [
           ...path,
@@ -455,9 +531,102 @@ const walkUpstream = async (
     return ok(undefined);
   };
 
+  /**
+   * R6-11: follow a FLOW writer's traced input fields. The extractor
+   * stamped the flow's resolvable inputs on the field-level `writesTo`
+   * edge itself (`sourceFields` + parallel `sourceFieldConfidence`,
+   * `unresolvedSourceCount`); each resolved field becomes a
+   * `flow-input-field` source at `flowDepth + 1` and is recursed into,
+   * so multi-flow chains (A writes F1 from F2, B writes F2 from F3)
+   * walk end-to-end. Honesty: unresolved inputs and untraced
+   * (pre-tracer-vault) edges are COUNTED and disclosed, never guessed;
+   * an input field missing from the vault (standard/unmodeled) is
+   * surfaced by its short form but not walked further.
+   */
+  const followFlowInputs = async (
+    edge: Edge,
+    flowNode: Node,
+    flowDepth: number,
+    pathToFlow: ComponentId[],
+  ): Promise<Result<void, McpError>> => {
+    const rawUnresolved = edge.properties['unresolvedSourceCount'];
+    if (typeof rawUnresolved === 'number' && Number.isFinite(rawUnresolved)) {
+      unresolvedInputCount += rawUnresolved;
+    }
+    const rawFields = edge.properties['sourceFields'];
+    if (!Array.isArray(rawFields)) {
+      // No trace on this edge. Only a LITERAL write provably has zero field
+      // inputs; anything else — a reference-kind write extracted before the
+      // tracer existed, or an edge with no assignedValue at all (pre-R2-1
+      // vault, verified live on a production-scale gate vault) — has UNKNOWN
+      // inputs and is disclosed as untraced, never silently read as "the
+      // flow has no inputs".
+      if (edge.properties['assignedValueKind'] !== 'literal') {
+        untracedFlowWriteEdges += 1;
+      }
+      return ok(undefined);
+    }
+    const rawConfidence = edge.properties['sourceFieldConfidence'];
+    const pathViaFlow = [...pathToFlow, flowNode.id];
+    for (let i = 0; i < rawFields.length; i += 1) {
+      const shortForm = rawFields[i];
+      if (typeof shortForm !== 'string' || shortForm.length === 0) continue;
+      const inputFieldId = `${CUSTOM_FIELD_PREFIX}${shortForm}` as ComponentId;
+      if (visited.has(inputFieldId)) {
+        cycles = true;
+        continue;
+      }
+      if (flowDepth + 1 > maxDepth) {
+        truncated = true;
+        continue;
+      }
+      visited.add(inputFieldId);
+      const rawLabel = Array.isArray(rawConfidence)
+        ? rawConfidence[i]
+        : undefined;
+      const confidence: ConfidenceLevel =
+        rawLabel === 'declared' || rawLabel === 'heuristic'
+          ? rawLabel
+          : 'heuristic';
+      const nodeResult = await getNodeById(ctx.graph, inputFieldId);
+      if (!nodeResult.ok) {
+        return err({
+          kind: 'internal',
+          message: `graph query failed: ${nodeResult.error.message}`,
+        });
+      }
+      const inputNode = nodeResult.value;
+      const isSoT = inputNode !== null && isSourceOfTruthField(inputNode);
+      sources.push({
+        sourceKind: isSoT ? 'source-of-truth-field' : 'flow-input-field',
+        sourceId: inputFieldId,
+        sourceApiName: inputNode?.apiName ?? shortForm,
+        depth: flowDepth + 1,
+        confidence,
+        isSourceOfTruth: isSoT,
+        reachableVia: pathViaFlow,
+      });
+      inputFieldsTraced += 1;
+      if (isSoT && includeSoT) continue;
+      if (inputNode === null) continue;
+      const next = await recurse(inputFieldId, flowDepth + 2, pathViaFlow);
+      if (!next.ok) return next;
+    }
+    return ok(undefined);
+  };
+
   const r = await recurse(fieldId, 1, []);
   if (!r.ok) return r;
-  return ok({ sources, truncated, cycles });
+  return ok({
+    sources,
+    truncated,
+    cycles,
+    flowDataflow: {
+      inputFieldsTraced,
+      unresolvedInputCount,
+      untracedFlowWriteEdges,
+    },
+  });
 };
 
 /**
@@ -517,6 +686,44 @@ const walkDownstream = async (
       }
       if (sr.value === null) continue;
       const sourceNode = sr.value;
+
+      // R6-11: a flow-dataflow READ edge means this field's value is
+      // carried by the flow into `targetFields`. Surface the flow as a
+      // `flow-field-write` effect and continue the walk INTO each written
+      // field, so downstream chains cross flows symmetrically with the
+      // upstream `flow-input-field` hop. Must run BEFORE the generic
+      // classifier, which would mislabel this edge `flow-decision-branch`.
+      if (
+        edge.edgeType === 'readsFrom' &&
+        sourceNode.type === 'Flow' &&
+        edge.properties['operation'] === DATAFLOW_SOURCE_OPERATION
+      ) {
+        const rawTargets = edge.properties['targetFields'];
+        const targetFields = Array.isArray(rawTargets)
+          ? rawTargets.filter((t): t is string => typeof t === 'string')
+          : [];
+        effects.push({
+          effectKind: 'flow-field-write',
+          effectId: sourceNode.id,
+          effectApiName: sourceNode.apiName,
+          depth,
+          confidence: edge.confidence,
+          conditionId: null,
+          firesWhen: null,
+          targetFields,
+        });
+        for (const targetField of targetFields) {
+          const targetFieldId = `${CUSTOM_FIELD_PREFIX}${targetField}` as ComponentId;
+          if (visited.has(targetFieldId)) {
+            cycles = true;
+            continue;
+          }
+          visited.add(targetFieldId);
+          const next = await recurse(targetFieldId, depth + 1);
+          if (!next.ok) return next;
+        }
+        continue;
+      }
 
       const effectKind = classifyDownstreamEffect(edge, sourceNode);
       if (effectKind === null) continue;
@@ -640,6 +847,7 @@ export const fieldLineageHandler = async (
       sourceOfTruthCount: r.value.sources.filter((s) => s.isSourceOfTruth)
         .length,
       formulaChain,
+      flowDataflow: r.value.flowDataflow,
     };
   }
   if (input.direction === 'downstream' || input.direction === 'both') {
@@ -687,6 +895,27 @@ export const fieldLineageHandler = async (
     boundaries.push(
       'cycle detected in the lineage walk; back-edges were short-circuited per the v2.7 cycle discipline',
     );
+  }
+  // R6-11: disclose the flow-dataflow trace semantics whenever the upstream
+  // walk crossed (or failed to cross) a flow writer. Absence of trace data
+  // is disclosed, never silently treated as "the flow has no inputs".
+  if (upstreamPayload !== undefined) {
+    const fd = upstreamPayload.flowDataflow;
+    if (
+      fd.inputFieldsTraced > 0 ||
+      fd.unresolvedInputCount > 0 ||
+      fd.untracedFlowWriteEdges > 0
+    ) {
+      let flowDataflowBoundary =
+        `flow writers' INPUT fields are traced from each flow's parsed assignment chain ` +
+        `(per-hop confidence: declared = direct $Record / record-lookup chains, heuristic = through formulas/loops/non-Assign operators; ` +
+        `extractor trace depth cap ${FLOW_DATAFLOW_TRACE_DEPTH_CAP} hops); ` +
+        `${fd.unresolvedInputCount} flow input reference(s) could not be statically traced and are disclosed as a count, never guessed`;
+      if (fd.untracedFlowWriteEdges > 0) {
+        flowDataflowBoundary += `; ${fd.untracedFlowWriteEdges} flow write edge(s) predate the dataflow tracer (vault refreshed with an older extractor) — re-run \`sfi refresh\` to trace them`;
+      }
+      boundaries.push(flowDataflowBoundary);
+    }
   }
 
   // CR-CAP-03: DYNAMIC dataNotAvailable (same retrieved-vs-not logic as

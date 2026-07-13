@@ -1,5 +1,10 @@
 import type { DuckDBConnection, DuckDBValue } from '@duckdb/node-api';
-import type { Edge, ExtractionResult, Node } from '@sf-intelligence/contracts';
+import type {
+  ComponentType,
+  Edge,
+  ExtractionResult,
+  Node,
+} from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 
 import type { GraphError, GraphStore } from './store.js';
@@ -118,16 +123,45 @@ export const buildMultiRowUpsertSql = (
  * This recursive walk sorts every object's keys alphabetically before
  * serializing, while leaving arrays in their original order (arrays are
  * ordered; their order is data, not noise).
+ *
+ * C-3 (findings 28 + 34) — `canonicalJson(undefined)` crash-class sweep,
+ * THIS copy's variant. Unlike the compare-tool copies (which only ever use
+ * their output for in-memory string equality / hashing), this copy's
+ * return value is the literal string PERSISTED into the `properties_json`
+ * column and later re-parsed by `queries.ts`'s `parseProperties` — so it
+ * must stay syntactically valid JSON. Naively adopting R6-12's `'\0undefined
+ * \0'` sentinel here would corrupt the persisted column (an unquoted,
+ * NUL-containing token spliced into what must be JSON). Nothing type-level
+ * prevents an extractor from ever emitting `{foo: possiblyUndefined}`
+ * (`Node.properties`/`Edge.properties` are `Record<string, unknown>`), and
+ * the pre-fix fallthrough (`typeof undefined !== 'object'` →
+ * `JSON.stringify(undefined)` → the JS value `undefined`, not a string)
+ * would coerce to the bare word `undefined` when spliced into the parent's
+ * template-literal `${...}` — invalid JSON that crashes every subsequent
+ * read of that row (finding 34).
+ *
+ * Fix: match `JSON.stringify`'s OWN documented `undefined` semantics
+ * instead — an object key whose value is `undefined` is OMITTED (mirrors
+ * `JSON.stringify({a: undefined}) === '{}'`), and an array element that is
+ * `undefined` serializes as `null` (mirrors `JSON.stringify([undefined])
+ * === '[null]'`, since an array can't skip an index). Both keep the output
+ * valid JSON and — per the suggested action in finding 34 — are
+ * hash-compatible with every existing vault, since a bounded search found
+ * no current emitter of explicit-undefined properties: this branch never
+ * fires on real data, so no existing `properties_json` byte changes.
  */
 const canonicalJson = (value: unknown): string => {
+  if (value === undefined) return '{}';
   if (value === null || typeof value !== 'object') {
     return JSON.stringify(value);
   }
   if (Array.isArray(value)) {
-    return `[${value.map(canonicalJson).join(',')}]`;
+    return `[${value.map((v) => (v === undefined ? 'null' : canonicalJson(v))).join(',')}]`;
   }
   const record = value as Readonly<Record<string, unknown>>;
-  const keys = Object.keys(record).sort();
+  const keys = Object.keys(record)
+    .filter((k) => record[k] !== undefined)
+    .sort();
   const parts = keys.map(
     (k) => `${JSON.stringify(k)}:${canonicalJson(record[k])}`,
   );
@@ -347,6 +381,18 @@ const commitBatched = async <T>(
  * GRF-01: remap heuristic `callsApex` / `dispatchesAsync` targets to the
  * canonical vaulted ApexClass id when the scanner used a different casing
  * (`ApexClass:pkb_controller` → `ApexClass:pkb_Controller`).
+ *
+ * C-2 (finding 25): also covers `references`-type edges targeting
+ * `ApexClass:`/`ApexTrigger:` — Visualforce `controller=`/`extensions=`
+ * attributes are case-insensitive class names in Salesforce, and
+ * `visualforce-page.ts` mints those as `edgeType: 'references'` (not
+ * `callsApex`), so a VF page naming its controller in a different case used
+ * to dangle past this remap and `find_dead_code`/`find_apex_usages` would
+ * then read the class as unreferenced — the same false-"dead"
+ * destructive-verdict failure this canonicalizer exists to prevent. Other
+ * `references` edges (e.g. to `CustomLabel:`/`StaticResource:`/
+ * `CustomObject:`) are unaffected — the prefix check below only fires for
+ * `ApexClass:`/`ApexTrigger:` targets.
  */
 export const canonicalizeApexCallEdgeTargets = (
   nodes: readonly Node[],
@@ -363,7 +409,11 @@ export const canonicalizeApexCallEdgeTargets = (
   for (let i = 0; i < edges.length; i += 1) {
     const edge = edges[i];
     if (edge === undefined) continue;
-    if (edge.edgeType !== 'callsApex' && edge.edgeType !== 'dispatchesAsync') {
+    if (
+      edge.edgeType !== 'callsApex' &&
+      edge.edgeType !== 'dispatchesAsync' &&
+      edge.edgeType !== 'references'
+    ) {
       continue;
     }
     const prefix = edge.toId.startsWith('ApexTrigger:')
@@ -380,6 +430,145 @@ export const canonicalizeApexCallEdgeTargets = (
       nodeIds.add(canonical);
     }
   }
+};
+
+/**
+ * Shared engine behind {@link canonicalizeFieldEdgeTargets} and
+ * {@link canonicalizeObjectEdgeTargets} (R6-03 / R7-W3): remap a DANGLING edge
+ * target whose id starts with `idPrefix` onto the vaulted `nodeType` node that
+ * matches case-insensitively. Apex and SOQL are case-insensitive languages, so
+ * a scanner/AST edge minted from source-text casing (e.g.
+ * `CustomField:account.custom_flag__c`, `CustomObject:account`) can miss the
+ * graph's exact-match edge walk (`listEdges` filters on `to_id = ?`) even
+ * though the referenced component is real and vaulted under different
+ * casing. Edge-only consumers (`safe_to_delete_field`, `unused_fields_deep`
+ * tier 1, `find_dead_code`, impact/usage walks) would then read the component
+ * as unreferenced — a false "safe"/"dead" verdict.
+ *
+ * Producer-agnostic on purpose: apex-ast (parsed), apex-scanner (heuristic),
+ * and frontend scanners all key component usage by source-text casing;
+ * whatever the producer, a case-variant of a real component id means that
+ * component. The whole id (including any `ns__` namespace prefix) is
+ * case-folded as a single unit — a namespaced id only matches its own
+ * namespaced counterpart, never a bare same-named component.
+ *
+ * Honesty invariants:
+ *   - Only DANGLING targets are remapped (an exact node-id match is final).
+ *   - Salesforce component API names are case-insensitive unique within their
+ *     scope (fields per object, objects per org), so the lowercase key is
+ *     collision-free on real metadata; a synthetic collision (two vaulted ids
+ *     differing only by case) drops the key — an ambiguous target is never
+ *     guessed.
+ *   - An unknown component (no vaulted node under any casing) stays dangling
+ *     — absence is preserved (`targetMissing`), never invented.
+ *   - Edge `properties` are untouched: the verbatim source-text path remains
+ *     the raw evidence.
+ */
+const canonicalizeEdgeTargetsByCase = (
+  idPrefix: string,
+  nodeType: ComponentType,
+  nodes: readonly Node[],
+  edges: Edge[],
+): void => {
+  /** lowercased id → canonical id, or null when two ids collide on case. */
+  const byLower = new Map<string, string | null>();
+  const nodeIds = new Set<string>();
+  for (const node of nodes) {
+    nodeIds.add(node.id);
+    if (node.type !== nodeType) continue;
+    const lower = node.id.toLowerCase();
+    const existing = byLower.get(lower);
+    if (existing === undefined) byLower.set(lower, node.id);
+    else if (existing !== node.id) byLower.set(lower, null);
+  }
+  if (byLower.size === 0) return;
+  for (let i = 0; i < edges.length; i += 1) {
+    const edge = edges[i];
+    if (edge === undefined) continue;
+    if (!edge.toId.startsWith(idPrefix)) continue;
+    if (nodeIds.has(edge.toId)) continue;
+    const canonical = byLower.get(edge.toId.toLowerCase());
+    if (canonical !== undefined && canonical !== null && canonical !== edge.toId) {
+      edges[i] = { ...edge, toId: canonical as Edge['toId'] };
+    }
+  }
+};
+
+/**
+ * R6-03: remap `CustomField:` edge targets to the canonical vaulted field id
+ * when the producer used a different casing. See
+ * {@link canonicalizeEdgeTargetsByCase} for the shared mechanics and honesty
+ * invariants.
+ */
+export const canonicalizeFieldEdgeTargets = (
+  nodes: readonly Node[],
+  edges: Edge[],
+): void => {
+  canonicalizeEdgeTargetsByCase('CustomField:', 'CustomField', nodes, edges);
+};
+
+/**
+ * R7-W3: remap `CustomObject:` edge targets to the canonical vaulted object
+ * id when the producer used a different casing — mirrors R6-03's CustomField
+ * fix for the object side of the same problem. `[select id from account]`
+ * mints a heuristic `readsFrom` edge targeting `CustomObject:account`; the
+ * `EventBus.subscribe('x__e', ...)` `listensTo` edge and every other
+ * `CustomObject:`-prefixed target (trigger `on Account`, lookup/master-detail
+ * declarations, custom-tab bindings) are equally susceptible — none of them
+ * would ever attach to the vaulted `CustomObject:Account` node without this
+ * remap. Every object variant (CustomObject / CustomSetting /
+ * CustomMetadataType / PlatformEvent / BigObject / KnowledgeArticle) is
+ * extracted with node `type: 'CustomObject'` regardless of its declared
+ * variant, so a single `nodeType` match covers all of them. See
+ * {@link canonicalizeEdgeTargetsByCase} for the shared mechanics and honesty
+ * invariants (including the case-collision-drops-the-key ambiguity guard and
+ * the whole-id, namespace-inclusive case-fold).
+ */
+export const canonicalizeObjectEdgeTargets = (
+  nodes: readonly Node[],
+  edges: Edge[],
+): void => {
+  canonicalizeEdgeTargetsByCase('CustomObject:', 'CustomObject', nodes, edges);
+};
+
+/**
+ * C-2 (finding 25): remap `CustomLabel:` edge targets to the canonical
+ * vaulted label id when the producer used a different casing. `$Label.foo`
+ * value-provider tokens are case-insensitive in Salesforce (Aura/VF
+ * templates), but `buildResourceRefEdges` (apex-edges.ts) mints
+ * `CustomLabel:{apiName}` verbatim from the source-text casing captured by
+ * the frontend regex scanner — so a lowercase-typed `$Label.foo` reference
+ * used to dangle against the vaulted `CustomLabel:Foo` node, and
+ * `find_dead_code`/`unused_components` would then read the label as
+ * unreferenced. See {@link canonicalizeEdgeTargetsByCase} for the shared
+ * mechanics and honesty invariants (including the case-collision-drops-the-
+ * key ambiguity guard and the whole-id, namespace-inclusive case-fold).
+ */
+export const canonicalizeLabelEdgeTargets = (
+  nodes: readonly Node[],
+  edges: Edge[],
+): void => {
+  canonicalizeEdgeTargetsByCase('CustomLabel:', 'CustomLabel', nodes, edges);
+};
+
+/**
+ * C-2 (finding 25): remap `StaticResource:` edge targets to the canonical
+ * vaulted resource id when the producer used a different casing.
+ * `$Resource.bar` value-provider tokens are case-insensitive in Salesforce
+ * (Aura/VF templates), but `buildResourceRefEdges` (apex-edges.ts) mints
+ * `StaticResource:{apiName}` verbatim from the source-text casing captured
+ * by the frontend regex scanner — so a lowercase-typed `$Resource.bar`
+ * reference used to dangle against the vaulted `StaticResource:Bar` node,
+ * and `find_dead_code`/`unused_components` would then read the resource as
+ * unreferenced. See {@link canonicalizeEdgeTargetsByCase} for the shared
+ * mechanics and honesty invariants (including the case-collision-drops-the-
+ * key ambiguity guard and the whole-id, namespace-inclusive case-fold).
+ */
+export const canonicalizeResourceEdgeTargets = (
+  nodes: readonly Node[],
+  edges: Edge[],
+): void => {
+  canonicalizeEdgeTargetsByCase('StaticResource:', 'StaticResource', nodes, edges);
 };
 
 /**
@@ -481,6 +670,17 @@ export const importExtractionResults = async (
   }
 
   canonicalizeApexCallEdgeTargets(allNodes, allEdges);
+  // R6-03: remap case-variant CustomField targets (SOQL/Apex are case-
+  // insensitive; the graph's edge walk is not) onto the vaulted field id.
+  canonicalizeFieldEdgeTargets(allNodes, allEdges);
+  // R7-W3: same remap for CustomObject targets (SOQL FROM, listensTo, trigger
+  // `on Object`, etc.) onto the vaulted object id.
+  canonicalizeObjectEdgeTargets(allNodes, allEdges);
+  // C-2 (finding 25): same remap for CustomLabel ($Label.foo) and
+  // StaticResource ($Resource.bar) targets — both are case-insensitive
+  // value-provider tokens minted verbatim by the frontend regex scanner.
+  canonicalizeLabelEdgeTargets(allNodes, allEdges);
+  canonicalizeResourceEdgeTargets(allNodes, allEdges);
   // CR-CAP-09: mint class-granular @future dispatchesAsync edges AFTER targets
   // are canonicalized so the future-set membership test sees real node ids.
   mintFutureDispatchEdges(allNodes, allEdges);

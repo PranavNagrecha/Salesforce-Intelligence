@@ -12,14 +12,17 @@ description: |
   (incoming readsFrom/writesTo/callsApex/references edges from
   ApexClass, ApexTrigger, LightningComponentBundle,
   AuraDefinitionBundle, VisualforcePage, or VisualforceComponent
-  nodes) — the broader v1.4 tool. For strictly Apex-only questions
-  `sfi.find_apex_usages` remains available; the skill picks based on
-  user intent. Optionally follows up with `sfi.search_apex_source` to
+  nodes) — the single code-usage tool. For strictly Apex-only
+  questions, narrow it with `nodeTypes: ['ApexClass','ApexTrigger']`
+  (the former `find_apex_usages` Apex-only view, now folded in).
+  Optionally follows up with `sfi.search_apex_source` to
   surface the actual lines. Discloses the heuristic-confidence
-  boundary explicitly: SOQL strings, dynamic field access, reflective
-  `get()`, LWC `record[fieldName]` dynamic access, and Aura framework
-  attributes are invisible to the scanners; heuristic matches need a
-  human spot-check before refactor commits.
+  boundary explicitly: string-BUILT dynamic SOQL, dynamic field
+  access, reflective `get()`, LWC `record[fieldName]` dynamic access,
+  and Aura framework attributes are invisible to the scanners (inline
+  static SOQL and constant-string `Database.query` fields ARE
+  resolved at parsed confidence by the default-on AST pass);
+  heuristic matches need a human spot-check before refactor commits.
 ---
 
 # Developer Apex refactor
@@ -28,7 +31,7 @@ description: |
 
 For "where is X used / who references X / what depends on X" — for ANY component
 type — call `sfi.find_component_usages`, or the family specialist
-(`find_code_usages` / `find_apex_usages` for code, `find_field_anywhere` for a
+(`find_code_usages` for code, `find_field_anywhere` for a
 field, `layout_assignments` for a layout). Route by VERB: *describe* questions
 (what is / list / what values) use describe tools, NOT usage tools. Never
 improvise a multi-tool fan-out without citing evidence tiers (graph edge
@@ -37,30 +40,39 @@ vault" — NEVER "nothing uses this".
 
 ## Overview
 
-The developer persona has **two** headline tools and the skill picks
-between them by user intent.
+The developer persona has **one** headline tool, `sfi.find_code_usages`,
+with an Apex-only narrowing MODE.
 
 - **`sfi.find_code_usages`** (v1.4 broaden) is the default. Given a
   `targetId`, it walks **incoming** edges of type `readsFrom`,
   `writesTo`, `callsApex`, or `references` whose source node is any
   of `ApexClass`, `ApexTrigger`, `LightningComponentBundle`,
   `AuraDefinitionBundle`, `VisualforcePage`, or `VisualforceComponent`
-  and returns each referrer alongside the edge's metadata. It is the
-  strict superset of `sfi.find_apex_usages` and answers "which
-  *source files anywhere in the code surface* touch this component?".
-- **`sfi.find_apex_usages`** is the Apex-only narrowing. Same shape
-  but filters the source node set to `ApexClass:*` and
-  `ApexTrigger:*` only and drops `references` from the edge enum.
-  Use when the user's question is explicitly Apex-scoped ("where is
-  X used **in Apex**", "refactor Apex method", "Apex callers
-  only") — the smaller result list keeps the surface focused.
+  and returns each referrer alongside the edge's metadata. It answers
+  "which *source files anywhere in the code surface* touch this
+  component?".
+- **Apex-only narrowing.** Pass `nodeTypes: ['ApexClass','ApexTrigger']`
+  (and, if desired, `edgeTypes: ['readsFrom','writesTo','callsApex']`)
+  to get the Apex-source-only view — the same answer the former
+  `sfi.find_apex_usages` tool gave (now folded into this tool as a
+  hidden back-compat alias). Use when the user's question is explicitly
+  Apex-scoped ("where is X used **in Apex**", "refactor Apex method",
+  "Apex callers only") — the smaller result list keeps the surface
+  focused.
 
-Both tools answer the same developer-persona question — "which source
-files touch this component?" — that developers ask before renaming a
-field, refactoring a method, or removing dead code.
+`sfi.find_code_usages` answers the developer-persona question — "which
+source files touch this component?" — that developers ask before
+renaming a field, refactoring a method, or removing dead code.
 
-Edge confidence varies by producer and edge type. Every Apex-scanner
-edge carries `confidence: 'heuristic'` and `source: 'apex-scanner'`.
+Edge confidence varies by producer and edge type. Apex edges come
+from **two** producers. The default-on parser-grade Apex AST pass
+(`source: 'apex-ast'`, `confidence: 'parsed'`) resolves receivers
+through a symbol table and emits most of the field reads/writes and
+cross-class calls on a current vault; it is supplemented by a
+heuristic recall scanner (`source: 'apex-scanner'`, `confidence:
+'heuristic'`) that backfills files the AST could not parse and
+patterns it does not resolve. Cite each edge's own confidence — do
+not assume Apex means heuristic.
 The LWC/Aura/VF scanner emits **declared** confidence for the
 unambiguous cases (LWC `@salesforce/apex/Class.method` imports, VF
 `controller=`/`extensions=` attributes) and **heuristic** confidence
@@ -75,9 +87,9 @@ section below names what the scanners cannot see.
 
 `sfi.find_code_usages` is the v1.4 broader tool. Use it for any
 code-persona question that is not explicitly Apex-scoped — and even
-in many Apex-scoped questions, the broader tool's result is the
+in many Apex-scoped questions, the broad (default) result is the
 "right" answer because real refactors care about LWC and VF callers
-too. `sfi.find_apex_usages` remains available for questions where the
+too. Narrow to `nodeTypes: ['ApexClass','ApexTrigger']` only when the
 user pins the answer to Apex.
 
 Key confidence rules to cite when reporting v1.4 results:
@@ -112,8 +124,8 @@ When the user's question is broad ("what touches this from code?"),
 default to `sfi.find_code_usages` and surface the per-tier breakdown.
 When the user pins to a single tier ("what *LWC* components touch
 this?"), call `sfi.find_code_usages` with `nodeTypes:
-['LightningComponentBundle']`. Only fall back to `sfi.find_apex_usages`
-when the user is explicit about Apex-only.
+['LightningComponentBundle']`. Only narrow to `nodeTypes:
+['ApexClass','ApexTrigger']` when the user is explicit about Apex-only.
 
 ## When to fire
 
@@ -121,7 +133,7 @@ Fire on developer-flavored phrasing. Concrete triggers:
 
 - **"Where is X used in Apex…"** — "where is `Account.Industry__c`
   used in Apex?", "where do we read/write this field from code?",
-  "what Apex code touches this object?". → `sfi.find_apex_usages`.
+  "what Apex code touches this object?". → `sfi.find_code_usages`.
 - **"Where is X used in code…"** — "where is `Industry__c` touched
   from the codebase?", "what reads this field anywhere in code?",
   "every code reference to `MyClass`". → `sfi.find_code_usages`.
@@ -136,7 +148,8 @@ Fire on developer-flavored phrasing. Concrete triggers:
   `Contact.Tier__c`?", "what classes write to `Industry__c`?", "what
   classes call `OpportunityService.process`?", "who invokes
   `MyClass.run`?". → `sfi.find_code_usages` (default broad answer)
-  or `sfi.find_apex_usages` if the user pins to Apex.
+  or narrow to `nodeTypes: ['ApexClass','ApexTrigger']` if the user
+  pins to Apex.
 - **"What Apex/code references / touches…"** — "find all Apex
   references to this field", "what code touches this trigger?",
   "what references `MyClass`?". → broad vs. narrow split as above.
@@ -170,8 +183,8 @@ Defer to another skill when:
   class that mentions `Database.upsert`"). That's a grep question
   for `sfi.search_apex_source` directly — no graph lookup needed.
 - **The user wants Flow callers** ("what flows call this Apex
-  class?"). Both `sfi.find_apex_usages` and `sfi.find_code_usages`
-  deliberately exclude Flow-emitted `callsApex` edges; route through
+  class?"). `sfi.find_code_usages` (in any node-type narrowing)
+  deliberately excludes Flow-emitted `callsApex` edges; route through
   `architect-impact-analysis` for the full `callsApex` picture.
 
 ## Steps
@@ -202,7 +215,7 @@ If the user's phrasing is unambiguous, translate directly. If it
 could match multiple components, run `sfi.search_components` first
 and confirm the top match with the user before proceeding.
 
-### Step 2 — Call `sfi.find_code_usages` (or `sfi.find_apex_usages`)
+### Step 2 — Call `sfi.find_code_usages`
 
 Default invocation (broad — the v1.4 tool):
 
@@ -219,11 +232,16 @@ LWC-only narrowing:
 }
 ```
 
-Apex-only question (use the legacy v0.3 tool for the smaller
-surface):
+Apex-only question (narrow `nodeTypes` for the smaller, Apex-scoped
+surface — same parsed-plus-heuristic edges, just filtered to
+ApexClass/ApexTrigger referrers; this is the folded-in
+`find_apex_usages` view):
 
 ```json
-{ "targetId": "CustomField:Account.Industry__c" }
+{
+  "targetId": "CustomField:Account.Industry__c",
+  "nodeTypes": ["ApexClass", "ApexTrigger"]
+}
 ```
 
 Optional parameters (`sfi.find_code_usages`):
@@ -238,15 +256,17 @@ Optional parameters (`sfi.find_code_usages`):
 - **`nodeTypes`** — defaults to all six code node types. Narrow to a
   single tier when the user pins it (`['LightningComponentBundle']`
   for LWC-only, `['VisualforcePage', 'VisualforceComponent']` for VF,
-  `['ApexClass', 'ApexTrigger']` to mimic `sfi.find_apex_usages`'s
-  Apex-only view). An empty array is allowed and returns an empty
-  result.
+  `['ApexClass', 'ApexTrigger']` for the Apex-only view — the folded-in
+  `find_apex_usages` behavior). An empty array is allowed and returns an
+  empty result.
 
-`sfi.find_apex_usages` exposes the same `targetId`, `limit`, and
-`edgeTypes` (without `references`) — no `nodeTypes` because the
-Apex-only set is hard-coded.
+The hidden `sfi.find_apex_usages` back-compat alias still resolves by
+exact name (it delegates here with `nodeTypes` fixed to
+`['ApexClass','ApexTrigger']` and `edgeTypes` restricted to the Apex
+triad), but it is un-advertised — prefer `sfi.find_code_usages` with
+the narrowing above.
 
-The response shape (both tools share `usages`):
+The response shape:
 
 ```json
 {
@@ -257,7 +277,8 @@ The response shape (both tools share `usages`):
         "type": "ApexClass",
         "apiName": "OpportunityService",
         "edgeType": "readsFrom",
-        "source": "apex-scanner",
+        "source": "apex-ast",
+        "confidence": "parsed",
         "properties": { "offset": 412, "length": 18 }
       },
       {
@@ -266,6 +287,7 @@ The response shape (both tools share `usages`):
         "apiName": "accountTile",
         "edgeType": "readsFrom",
         "source": "lwc-aura-vf-scanner",
+        "confidence": "heuristic",
         "properties": { "wirePath": "Account.Industry" }
       }
     ]
@@ -285,7 +307,12 @@ already returns the list sorted by `(id, edgeType)` ASC; preserve
 that order).
 
 Every referrer gets its canonical `id` in backticks. Every edge gets
-its `confidence` cited as `heuristic` — explicitly, every time.
+its own `confidence` cited explicitly, every time — `parsed` (with
+`source: apex-ast`) for AST-resolved Apex edges, `heuristic` (with
+`source: apex-scanner`) for the recall-scanner backfill and for
+LWC/Aura/VF field reads, `declared` for LWC apex imports and VF
+controller/extension attributes. Never blanket-label the bucket
+`heuristic`.
 
 ### Step 4 — Optionally call `sfi.search_apex_source` to surface lines
 
@@ -308,62 +335,91 @@ surface.
 Worked example. User asks: *"Where do we write to
 `Account.Industry__c` from Apex?"*
 
-> Apex usages of `CustomField:Account.Industry__c` (v0.3 scanner,
-> all edges `confidence: heuristic`):
+> Apex usages of `CustomField:Account.Industry__c` (per-edge
+> confidence — most `parsed` from the default-on Apex AST, one
+> `heuristic` scanner-backfill):
 >
 > **Writes (writesTo) — 2 referrers**
-> - `ApexClass:AccountTriggerHandler` — `source: apex-scanner`,
->   `properties: { offset: 412, length: 23 }`.
-> - `ApexClass:OpportunityService` — `source: apex-scanner`,
->   `properties: { offset: 1287, length: 19 }`.
+> - `ApexClass:AccountTriggerHandler` — `source: apex-ast`,
+>   `confidence: parsed`, `properties: { offset: 412, length: 23 }`.
+>   The AST resolved the receiver to `Account`.
+> - `ApexClass:OpportunityService` — `source: apex-ast`,
+>   `confidence: parsed`, `properties: { offset: 1287, length: 19 }`.
 >
 > **Reads (readsFrom) — 1 referrer**
 > - `ApexClass:AccountReportBuilder` — `source: apex-scanner`,
->   `properties: { offset: 215, length: 18 }`.
+>   `confidence: heuristic`, `properties: { offset: 215, length: 18 }`.
+>   This file fell back to the recall scanner (AST parse failure), so
+>   the read is a heuristic match on `acc.Industry__c` with `acc`
+>   unresolved — spot-check with `sfi.search_apex_source({ query:
+>   'Industry__c' })`.
 >
-> All three are `heuristic`: the scanner saw `acc.Industry__c` but did
-> not resolve `acc`. Spot-check with `sfi.search_apex_source({ query:
-> 'Industry__c' })`.
+> The two `parsed` writes are high-confidence; the one `heuristic`
+> read needs verification.
 >
-> v0.3 boundary: the scanner does **not** see SOQL string queries
-> (`Database.query('SELECT Industry__c FROM Account')`), dynamic
-> field access (`record.get('Industry__c')`), or reflective writes
-> via `SObject.put`. Real references may exist that this list
-> misses.
+> Boundary: the default-on Apex AST pass resolves inline static
+> SOQL (`[SELECT ... WHERE Industry__c ...]`) and CONSTANT-string
+> `Database.query('SELECT Industry__c FROM Account')` field
+> references at `confidence: 'parsed'` — those appear as real edges
+> above. Still invisible: string-BUILT dynamic SOQL
+> (`Database.query('SELECT ' + f + ...)`), dynamic field access
+> (`record.get('Industry__c')`), and reflective writes via
+> `SObject.put`. Real references may exist that this list misses;
+> files the AST failed to parse fall back to the regex scanner only
+> (the manifest's `apexAst` block counts them).
 
 Group by `edgeType` with counts. Cite every component by canonical
-ID. State `confidence: heuristic` and `source: apex-scanner` per
-bucket. Name the boundary; point the developer at the second-step
-grep.
+ID. State each edge's own `confidence` and `source` (`parsed` /
+`apex-ast` for AST-resolved edges, `heuristic` / `apex-scanner` for
+scanner-backfill edges) — never blanket-label the bucket. Name the
+boundary; point the developer at the second-step grep.
 
 ## Boundary disclosure
 
-Both scanners (the v0.3 Apex scanner and the v1.4 LWC/Aura/VF
-scanner) are intentionally heuristic for the common cases — only the
-unambiguous declared cases (LWC `@salesforce/apex` imports, VF
-controller/extension attributes) carry `confidence: 'declared'`.
-Neither scanner is an AST. Surface this list whenever the developer
-is about to act on the result.
+The Apex tier runs a parser-grade AST pass by default (`source:
+apex-ast`, `confidence: parsed`) with a heuristic recall scanner
+(`source: apex-scanner`, `confidence: heuristic`) backfilling files
+the AST cannot parse and patterns it does not resolve. The frontend
+LWC/Aura/VF tier is a regex scanner — intentionally heuristic for the
+common cases, with only the unambiguous declared cases (LWC
+`@salesforce/apex` imports, VF controller/extension attributes) at
+`confidence: 'declared'`. The AST resolves dot-access, cross-class
+calls, and inline static SOQL, but it is a parser, not a full
+dataflow engine — the residual limits below stay invisible. Surface
+this list whenever the developer is about to act on the result.
 
-### Apex scanner (v0.3) limits
+### Apex tier limits (residual, after the default-on AST pass)
 
 - **Dynamic field access is invisible.** `record.get('Industry__c')`
   and `SObject.put('Industry__c', value)` are string arguments; the
   scanner blanks strings before pattern-matching. Zero edges.
-- **SOQL string queries are invisible.** `Database.query('SELECT
-  Industry__c FROM Account')` is a string literal. Static SOQL in
-  `[ ... ]` brackets is text the scanner *can* see, but it is
-  pattern-matched as `IDENT.IDENT` shapes, not parsed — hit-or-miss.
+- **Only string-BUILT SOQL is invisible.** The default-on AST pass
+  (source: `apex-ast`, `confidence: 'parsed'`) fully parses inline
+  static SOQL in `[ ... ]` brackets — SELECT, WHERE, ORDER BY, and
+  GROUP BY fields all yield field-level edges — and also parses
+  CONSTANT-string `Database.query('SELECT ...')` literals. What
+  remains invisible is SOQL assembled from string concatenation or
+  variables (`Database.query('SELECT ' + f + ' FROM ...')`). On a
+  file the AST failed to parse (counted in the manifest `apexAst`
+  block), only the regex scanner ran and SOQL field references for
+  that file are unreliable.
 - **Reflective method dispatch is invisible.** A helper like
   `getFieldValue(record, 'Industry__c')` produces no edges; the
   field name is a string argument.
-- **Bare self-method calls are invisible.** `doStuff(x)` without a
-  class prefix is not extracted in v0.3 — the scanner requires the
-  `ClassName.method(` shape.
-- **The field-access left identifier is a variable name, not a
-  resolved SObject.** The scanner emits
-  `toId: 'CustomField:acc.Industry__c'` for `acc.Industry__c` even
-  when `acc` is an `Account`. v0.4's AST layer will resolve these.
+- **Intra-class self-calls produce no cross-class edge.** The AST
+  recognizes a bare `doStuff(x)` as a self-call, but a class calling
+  its own method is not a `callsApex` graph edge (there's no second
+  class to point at), so it won't surface as a referrer of another
+  component. Cross-class calls (`ClassName.method(`) and instance
+  calls on a typed receiver ARE resolved and emit `parsed` edges.
+- **Receiver resolution is a symbol-table pass, not full type
+  inference.** The default-on AST resolves `acc.Industry__c` to
+  `CustomField:Account.Industry__c` (a `parsed` edge) when `acc` is
+  declared, parameter-typed, or for-each-bound as `Account`. A
+  receiver whose type the local symbol table cannot establish (deep
+  generics, chained returns, untyped `sObject`) falls to the recall
+  scanner, which emits a `heuristic` edge keyed on the variable name
+  (`CustomField:acc.Industry__c`) — treat those as approximate.
 
 ### LWC scanner (v1.4) limits
 
@@ -410,25 +466,28 @@ is about to act on the result.
   `controller=` and `extensions=` attributes ARE the declaration;
   the edge confidence is declared, not heuristic.
 
-Treat **missing** edges as "may exist; the scanner couldn't see
-them." Treat **present** edges as "the scanner saw them; verify
-before refactoring." Heuristic does not mean "approximately correct";
-it means "best-effort pattern match that needs a human pass before
-any irreversible change." Declared edges (LWC apex imports, VF
-controller/extension attributes) still need spot-checks when the
-referenced class is renamed, but they will not produce false
-positives — the import or attribute name IS the contract.
+Treat **missing** edges as "may exist; the static passes couldn't see
+them." For **present** edges, read the confidence: a `parsed`
+(`apex-ast`) edge is a high-confidence, symbol-resolved match; a
+`heuristic` (`apex-scanner` or frontend-scanner) edge is a best-effort
+pattern match that needs a human pass before any irreversible change.
+Heuristic does not mean "approximately correct." Declared edges (LWC
+apex imports, VF controller/extension attributes) still need
+spot-checks when the referenced class is renamed, but they will not
+produce false positives — the import or attribute name IS the
+contract.
 
 ## Anti-patterns
 
 | Mistake | Why it's wrong |
 |---|---|
-| Presenting a heuristic edge as ground truth ("`OpportunityService` writes to this field"). | The edge is `confidence: heuristic`. Say so explicitly: "the scanner saw `OpportunityService` write to a `.Industry__c` literal; verify the variable is an `Account` reference before acting." |
+| Blanket-labeling every Apex edge `heuristic`. | Read the per-edge confidence. Most Apex reads/writes/calls on a current vault are `parsed` (`source: apex-ast`) — the AST resolved the receiver. Only the recall-scanner backfill (`source: apex-scanner`) is `heuristic`. Cite each edge's own tier; don't demote a `parsed` edge. |
+| Presenting a `heuristic` scanner edge as ground truth ("`OpportunityService` writes to this field"). | A `heuristic` (`apex-scanner`) edge is a fallback pattern match. Say so: "the scanner saw `OpportunityService` write to a `.Industry__c` literal but couldn't resolve the receiver — verify the variable is an `Account` reference before acting." (A `parsed` `apex-ast` edge already resolved the receiver — cite it as high-confidence.) |
 | Omitting the `sfi.search_apex_source` follow-up on a non-trivial match. | The scanner gives the file; the grep gives the line. A developer who is about to rename a method needs the exact call sites, not just a list of files. |
-| Conflating Apex referrers with Flow referrers. | `sfi.find_apex_usages` and `sfi.find_code_usages` both exclude Flow-emitted `callsApex` edges by design. If the user wants "what calls this Apex from anywhere including Flow," route to `architect-impact-analysis` → `sfi.get_impact`. |
-| Defaulting to `sfi.find_apex_usages` when the user's question is code-broad. | `sfi.find_apex_usages` returns only ApexClass/ApexTrigger referrers. A rename that breaks an LWC `@salesforce/apex` import or a VF `controller=` attribute will not show up. Default to `sfi.find_code_usages` for any "where is X used in code" or "is it safe to rename" question; only narrow when the user pins to Apex. |
+| Conflating Apex referrers with Flow referrers. | `sfi.find_code_usages` excludes Flow-emitted `callsApex` edges by design (in any node-type narrowing). If the user wants "what calls this Apex from anywhere including Flow," route to `architect-impact-analysis` → `sfi.get_impact`. |
+| Narrowing to `nodeTypes: ['ApexClass','ApexTrigger']` when the user's question is code-broad. | The Apex-only narrowing returns only ApexClass/ApexTrigger referrers. A rename that breaks an LWC `@salesforce/apex` import or a VF `controller=` attribute will not show up. Default to the BROAD `sfi.find_code_usages` (all node types) for any "where is X used in code" or "is it safe to rename" question; only narrow when the user pins to Apex. |
 | Citing an LWC `callsApex` edge as `heuristic`. | LWC's `@salesforce/apex/Class.method` imports produce `confidence: 'declared'` edges. Cite them as such — the import path IS the declaration. Same for VF `controller=` and `extensions=` attribute references. |
-| Claiming "no code references this" when the result is empty. | An empty list means "the regex scanners saw nothing." SOQL strings, dynamic access, reflective calls, LWC `record[fieldName]`, Aura `v.{attr}`, and VF JS string expressions are all invisible. Restate the boundary; suggest `sfi.search_apex_source` to grep raw source. |
+| Claiming "no code references this" when the result is empty. | An empty list means "the static passes saw nothing" (the parsed AST pass covers dot-access + inline static SOQL + constant-string `Database.query`; the regex scanners cover the rest). String-BUILT dynamic SOQL, dynamic access, reflective calls, LWC `record[fieldName]`, Aura `v.{attr}`, and VF JS string expressions are all invisible. Restate the boundary; suggest `sfi.search_apex_source` to grep raw source. |
 | Going to `limit: 500` "to be thorough" by default. | The default 50 is the right call. Raise it only when the user asks for an exhaustive sweep. |
 | Skipping the boundary disclosure because the result list is non-empty. | The disclosure is the developer's protection against false confidence. A non-empty list is not a complete list — the developer needs both halves to make a safe refactor decision. |
 
@@ -440,21 +499,22 @@ User: *"Is it safe to rename `processOpportunity` on
 Claude's flow:
 
 1. **Translate** → `targetId: 'ApexClass:OpportunityService'`,
-   `edgeTypes: ['callsApex']` (the question pins to call sites).
-2. **Call** `sfi.find_apex_usages` with that input.
+   `edgeTypes: ['callsApex']` (the question pins to call sites),
+   `nodeTypes: ['ApexClass','ApexTrigger']` (pinned to Apex callers).
+2. **Call** `sfi.find_code_usages` with that input.
 3. **Receive** (hypothetical): two `callsApex` referrers.
 4. **Call** `sfi.search_apex_source` with `query:
    'OpportunityService.processOpportunity'` to surface the lines.
 5. **Respond:**
 
-> Apex call sites for `ApexClass:OpportunityService` (v0.3 scanner,
-> `confidence: heuristic`, filtered to `callsApex`):
+> Apex call sites for `ApexClass:OpportunityService` (filtered to
+> `callsApex`; both AST-resolved at `confidence: parsed`):
 >
 > **Calls (callsApex) — 2 referrers**
-> - `ApexClass:OpportunityController` — `source: apex-scanner`,
->   `properties.methodName: 'processOpportunity'`.
-> - `ApexTrigger:OpportunityTrigger` — `source: apex-scanner`,
->   `properties.methodName: 'processOpportunity'`.
+> - `ApexClass:OpportunityController` — `source: apex-ast`,
+>   `confidence: parsed`, `properties.methodName: 'processOpportunity'`.
+> - `ApexTrigger:OpportunityTrigger` — `source: apex-ast`,
+>   `confidence: parsed`, `properties.methodName: 'processOpportunity'`.
 >
 > Grep follow-up (`sfi.search_apex_source`, query
 > `OpportunityService.processOpportunity`):
@@ -463,11 +523,11 @@ Claude's flow:
 > - `source/triggers/OpportunityTrigger.trigger:8` —
 >   `OpportunityService.processOpportunity(Trigger.new);`
 >
-> Both edges are `heuristic`: the scanner sees the
-> `OpportunityService.processOpportunity(` shape but does not parse
-> argument types or resolve dynamic dispatch. Before renaming, check
-> for indirect invocation (`Type.forName(...).newInstance()`,
-> reflective dispatch). v0.3 does not see those patterns.
+> Both edges are `parsed`: the AST resolved the `OpportunityService`
+> receiver and the `processOpportunity` call-site. It does not,
+> however, resolve dynamic dispatch — before renaming, check for
+> indirect invocation (`Type.forName(...).newInstance()`, reflective
+> dispatch), which no static pass sees.
 
 ### Example interaction — code-broad field rename (v1.4)
 
@@ -492,8 +552,9 @@ Claude's flow:
 > code surfaces (default broad query, no `nodeTypes` filter):
 >
 > **Reads (readsFrom) — 3 referrers across 3 tiers**
-> - `ApexClass:AccountReportBuilder` — `source: apex-scanner`,
->   `confidence: heuristic`, `properties: { line: 215 }`.
+> - `ApexClass:AccountReportBuilder` — `source: apex-ast`,
+>   `confidence: parsed`, `properties: { line: 215 }`. The AST
+>   resolved `acc` to Account. High-confidence.
 > - `LightningComponentBundle:accountTile` — `source:
 >   lwc-aura-vf-scanner`, `confidence: heuristic`, `properties: {
 >   wirePath: 'Account.Industry' }`. The scanner saw the
@@ -506,20 +567,22 @@ Claude's flow:
 > - `source/classes/AccountReportBuilder.cls:215` —
 >   `report.industry = acc.Industry__c;`
 >
-> All three edges are `heuristic`. Before renaming:
+> The Apex read is `parsed` (high-confidence); the two frontend
+> edges are `heuristic`. Before renaming:
 > - The LWC `@wire(getRecord)` schema import must be updated; the
 >   v1.4 scanner could not distinguish schema-import from body-text
 >   reads, so check `accountTile/accountTile.js` for an
 >   `@salesforce/schema/Account.Industry` import line.
 > - The VF binding `{!account.Industry__c}` in
 >   `AccountReport.page:22` must be updated by hand.
-> - The Apex scanner does NOT see SOQL string queries
->   (`Database.query('SELECT Industry__c FROM Account')`), LWC
+> - Inline static SOQL and constant-string `Database.query`
+>   references ARE covered (parsed-confidence `apex-ast` edges).
+>   Still invisible: string-BUILT dynamic SOQL, LWC
 >   `record[fieldName]` dynamic access, Aura `v.{attr}` framework
->   attributes, or VF `<script>` JS string literals. Run
->   `sfi.search_apex_source` for `Industry__c` to catch SOQL
->   strings, and do a manual grep across LWC/Aura/VF source for
->   bracket and template-string references.
+>   attributes, and VF `<script>` JS string literals. Run
+>   `sfi.search_apex_source` for `Industry__c` to catch
+>   concatenated SOQL strings, and do a manual grep across
+>   LWC/Aura/VF source for bracket and template-string references.
 
 ### Example interaction — LWC-only narrowing (v1.4)
 
@@ -562,9 +625,11 @@ Before sending a response, confirm:
       `AuraDefinitionBundle:name`, `VisualforcePage:Name`, or
       `VisualforceComponent:Name`), confirming via
       `sfi.search_components` when ambiguous.
-- [ ] I picked the right tool by user intent: `sfi.find_code_usages`
-      for any code-broad question (default), `sfi.find_apex_usages`
-      only when the user explicitly pins to Apex.
+- [ ] I picked the right SCOPE by user intent: broad
+      `sfi.find_code_usages` (all node types) for any code-broad
+      question (default), narrowed to `nodeTypes:
+      ['ApexClass','ApexTrigger']` only when the user explicitly pins
+      to Apex.
 - [ ] When the user pinned to a single code tier (e.g., "what LWC
       bundles touch this?"), I narrowed with
       `nodeTypes: ['LightningComponentBundle']` (or the appropriate
@@ -575,10 +640,13 @@ Before sending a response, confirm:
 - [ ] For non-trivial result lists, I followed up with
       `sfi.search_apex_source` to surface the lines.
 - [ ] I cited every referrer by canonical ID and labeled the edges
-      with their actual confidence: `heuristic` for Apex-scanner
-      edges and LWC/Aura/VF field reads and dynamic expressions;
-      `declared` for LWC `@salesforce/apex` callsApex edges and VF
-      controller/extension references.
+      with their actual per-edge confidence: `parsed` for AST-resolved
+      Apex edges (`source: apex-ast` — the default and dominant case);
+      `heuristic` for the Apex recall-scanner backfill and for
+      LWC/Aura/VF field reads and dynamic expressions; `declared` for
+      LWC `@salesforce/apex` callsApex edges and VF controller/
+      extension references. I did NOT blanket-label Apex edges
+      `heuristic`.
 - [ ] I appended the boundary disclosure relevant to the result
       tier — Apex-scanner invisible patterns when Apex referrers are
       present; LWC scanner limits (`record[fieldName]`, schema-import

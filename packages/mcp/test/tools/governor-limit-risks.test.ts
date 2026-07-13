@@ -428,3 +428,91 @@ describe('governorLimitRisksInputSchema', () => {
     ).toBe(false);
   });
 });
+
+// =============================================================================
+// CR-22-B6 — the ENTRY_PATH_MAX_PATHS(=12) walk cap was previously JSDoc-only.
+// A risky class with a wide fan-in (13 distinct ApexTriggers each calling it
+// directly) forces the bounded walk to stop short of exploring every caller,
+// so `entryPathsTruncated` + the response-level boundary must both fire.
+// =============================================================================
+describe('governorLimitRisksHandler — entry-path walk cap disclosure (CR-22-B6)', () => {
+  const WIDE_FANIN_COUNT = 13;
+  const RISKY_CLASS = 'ApexClass:WideFanInSvc';
+  let dir: string;
+  let s: GraphStore;
+  let wideCtx: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-glr-entrypath-'));
+    const opened = await openGraph(join(dir, 'entrypath.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    s = opened.value;
+    const nodes: Node[] = [
+      makeNode({
+        id: RISKY_CLASS,
+        apiName: 'WideFanInSvc',
+        properties: {
+          qualityIssues: [
+            {
+              rule: 'soql-in-loop',
+              severity: 'critical',
+              location: 'line 3',
+              explanation: 'soql inside loop',
+              confidence: 'heuristic',
+            },
+          ],
+        },
+      }),
+    ];
+    const edges: Edge[] = [];
+    for (let i = 0; i < WIDE_FANIN_COUNT; i += 1) {
+      const triggerId = `ApexTrigger:Caller${String(i).padStart(2, '0')}`;
+      nodes.push(
+        makeNode({
+          id: triggerId,
+          type: 'ApexTrigger',
+          apiName: `Caller${String(i).padStart(2, '0')}`,
+          properties: {},
+        }),
+      );
+      edges.push(
+        makeEdge({ fromId: triggerId, toId: RISKY_CLASS, edgeType: 'callsApex' }),
+      );
+    }
+    const imp = await importExtractionResults(s, [{ nodes, edges }]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    wideCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s };
+  });
+
+  afterAll(async () => {
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('caps entryPaths at 12 and sets entryPathsTruncated when more callers exist', async () => {
+    const r = await governorLimitRisksHandler(wideCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const cls = r.value.data.classes.find((c) => c.componentId === RISKY_CLASS);
+    expect(cls).toBeDefined();
+    expect(cls?.entryPaths.length).toBe(12);
+    expect(cls?.entryPathsTruncated).toBe(true);
+  });
+
+  it('discloses the cap in the response-level boundaries', async () => {
+    const r = await governorLimitRisksHandler(wideCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.boundaries.join('\n')).toContain('Entry-path walk capped');
+    expect(r.value.data.boundaries.join('\n')).toContain('12');
+  });
+
+  it('does NOT set entryPathsTruncated for a class with callers under the cap (byte-identical happy path)', async () => {
+    const r = await governorLimitRisksHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const dangerSvc = r.value.data.classes.find((c) => c.componentId === 'ApexClass:DangerSvc');
+    expect(dangerSvc?.entryPathsTruncated).toBeUndefined();
+    expect(r.value.data.boundaries.join('\n')).not.toContain('Entry-path walk capped');
+  });
+});

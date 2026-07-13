@@ -5,6 +5,7 @@ export default defineConfig({
   test: {
     include: ['test/**/*.test.ts'],
     globals: true,
+    pool: 'threads',
     // Scaffold has no tests yet; Phase G tasks (init/refresh/status/mcp) add
     // them. Without this flag vitest exits with code 1 when zero test files
     // match, breaking the test gate for an empty shell package.

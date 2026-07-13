@@ -26,6 +26,28 @@
  * without re-parsing YAML, and cite edge targets as real component ids rather
  * than guessing from markdown prose — eliminating false hallucination flags on
  * referenced ids.
+ *
+ * R6-31 METADATA-PROBE MODE: `maxBodyBytes` historically bounded only `body`.
+ * `frontmatter` (the raw rendered YAML) and `properties`/`referenceIds` (the
+ * graph node's own data) were always returned in full — fine for an average
+ * component, but a Profile with thousands of `fieldPermissions` renders a
+ * frontmatter blob and a properties object each well past the ~40 KB global
+ * MCP response budget on their own. A caller passing `maxBodyBytes: 0` to
+ * probe "does this component exist, what does it look like" (the grounding
+ * pattern used by `synthesize_answer` and QA harnesses) got an oversize
+ * refusal instead of an answer — the one field it explicitly asked to skip
+ * was never the problem. When `maxBodyBytes` is 0 or small (below
+ * `METADATA_PROBE_MAX_BODY_BYTES`), the handler now builds the response from
+ * a bounded metadata PROJECTION instead: `frontmatter` capped the same way as
+ * `body`, `properties` reduced to whichever entries fit a small fixed budget
+ * (in practice the scalar fields survive and huge arrays/objects are the ones
+ * dropped), and `referenceIds` capped to a fixed budget with the true total
+ * disclosed via `referenceCount`. `data.metadataOnly` and `data.disclosure`
+ * name exactly what was omitted so the response is honest, never a silent
+ * subset. This guarantees `maxBodyBytes: 0` NEVER produces the global
+ * `oversize` error. The default call (no `maxBodyBytes`) and any explicit
+ * value at or above the threshold are untouched — full `frontmatter` /
+ * `properties` / `referenceIds`, exactly as before.
  */
 
 import { readFile } from 'node:fs/promises';
@@ -56,6 +78,31 @@ import { buildReferenceStub } from './phantom-taxonomy.js';
  * Zod-level rejection).
  */
 export const DEFAULT_COMPONENT_BODY_MAX_BYTES = 30_000;
+
+/**
+ * Below this `maxBodyBytes` threshold, `get_component` treats the call as a
+ * metadata/existence probe rather than a request for the rendered document
+ * and returns the bounded metadata PROJECTION (see R6-31 note above) instead
+ * of the full `frontmatter` / `properties` / `referenceIds`. `0` — the
+ * grounding-probe convention (`get_component({ id, maxBodyBytes: 0 })`) — is
+ * always inside this range; the threshold also covers small explicit values
+ * (e.g. a short body preview) so a huge node can't blow the response budget
+ * on `properties`/`frontmatter` alone just because the caller asked for a
+ * small body. Explicit values at or above this threshold keep the pre-R6-31
+ * behavior (full frontmatter/properties/referenceIds) unchanged.
+ */
+export const METADATA_PROBE_MAX_BODY_BYTES = 2_000;
+
+/**
+ * Byte budget for the bounded scalar-properties subset in metadata-probe
+ * mode. Deliberately independent of `maxBodyBytes` itself so `maxBodyBytes:
+ * 0` still returns the component's small scalar properties (a real answer to
+ * "what does this look like"), not an empty object.
+ */
+const METADATA_PROPERTIES_BUDGET_BYTES = 4_000;
+
+/** Byte budget for the bounded `referenceIds` subset in metadata-probe mode. */
+const METADATA_REFERENCE_IDS_BUDGET_BYTES = 2_000;
 
 const getComponentInputBaseSchema = z.object({
   id: z.string().min(1),
@@ -133,6 +180,50 @@ export interface GetComponentOutput {
    * vaults stay byte-identical.
    */
   readonly annotations?: AnnotationsBlock;
+  /**
+   * R6-31: `true` when this response is a bounded metadata PROJECTION
+   * (`maxBodyBytes` 0 or below `METADATA_PROBE_MAX_BODY_BYTES`) rather than
+   * the component's full frontmatter/properties/referenceIds. Absent
+   * (never `false`) on a normal response — the default call and any
+   * `maxBodyBytes` at/above the threshold are unaffected.
+   */
+  readonly metadataOnly?: true;
+  /**
+   * R6-31: property keys present on the underlying node but dropped from
+   * the bounded `properties` projection because they did not fit the
+   * metadata budget (e.g. a Profile's `fieldPermissions`/`objectPermissions`
+   * arrays). Sorted. Present only when `metadataOnly` is true AND at least
+   * one key was dropped.
+   */
+  readonly omittedPropertyKeys?: readonly string[];
+  /**
+   * R6-31: total outgoing edge count on the node, regardless of how many
+   * ids the metadata projection could fit into `referenceIds`. Present only
+   * when `metadataOnly` is true — on the default path `referenceIds` itself
+   * is already the full list, so its `.length` IS the count.
+   */
+  readonly referenceCount?: number;
+  /**
+   * R6-31: count of outgoing edges NOT included in `referenceIds` because
+   * the metadata projection bounded the list. Present only when
+   * `metadataOnly` is true.
+   */
+  readonly omittedReferenceCount?: number;
+  /** R6-31: `true` when `frontmatter` was capped by the metadata projection (present only when `metadataOnly` is true). */
+  readonly frontmatterTruncated?: boolean;
+  /** R6-31: original frontmatter byte length before capping (present only when `metadataOnly` is true). */
+  readonly frontmatterBytes?: number;
+  /** R6-31: returned frontmatter byte length after capping (present only when `metadataOnly` is true). */
+  readonly returnedFrontmatterBytes?: number;
+  /**
+   * R6-31: human-readable summary of exactly what the metadata projection
+   * omitted to guarantee this response fits the global byte budget, e.g.
+   * "Metadata-only response (grounding probe): body omitted (maxBodyBytes=0);
+   * frontmatter capped at maxBodyBytes=0; 2 of 4 properties not expanded
+   * (fieldPermissions, objectPermissions); 30 of 150 outgoing edges shown
+   * (see referenceCount)." Present only when `metadataOnly` is true.
+   */
+  readonly disclosure?: string;
 }
 
 /**
@@ -161,12 +252,21 @@ export const getComponentHandler = async (
       const split = { frontmatter: doc.frontmatter, body: doc.body.trimStart() };
       const maxBodyBytes = input.maxBodyBytes ?? DEFAULT_COMPONENT_BODY_MAX_BYTES;
       const boundedBody = truncateUtf8(split.body, maxBodyBytes);
+      // R6-31: this fallback already returns empty properties/referenceIds, so
+      // the only field that can blow the response budget in metadata-probe
+      // mode is `frontmatter` — bound it the same way `body` already is.
+      const isMetadataProbe =
+        input.maxBodyBytes !== undefined &&
+        input.maxBodyBytes <= METADATA_PROBE_MAX_BODY_BYTES;
+      const boundedFrontmatter = isMetadataProbe
+        ? truncateUtf8(split.frontmatter, maxBodyBytes)
+        : null;
       return ok({
         data: {
           id: input.id as ComponentId,
           type: doc.type,
           path: doc.path,
-          frontmatter: split.frontmatter,
+          frontmatter: boundedFrontmatter?.text ?? split.frontmatter,
           body: boundedBody.text,
           properties: {},
           referenceIds: [],
@@ -175,6 +275,22 @@ export const getComponentHandler = async (
           returnedBodyBytes: boundedBody.returnedBytes,
           omittedBodyBytes: boundedBody.originalBytes - boundedBody.returnedBytes,
           maxBodyBytes,
+          ...(isMetadataProbe && boundedFrontmatter !== null
+            ? {
+                metadataOnly: true as const,
+                referenceCount: 0,
+                frontmatterTruncated: boundedFrontmatter.truncated,
+                frontmatterBytes: boundedFrontmatter.originalBytes,
+                returnedFrontmatterBytes: boundedFrontmatter.returnedBytes,
+                disclosure: buildMetadataDisclosure({
+                  maxBodyBytes,
+                  omittedPropertyKeys: [],
+                  totalPropertyKeys: 0,
+                  omittedReferenceCount: 0,
+                  totalReferenceCount: 0,
+                }),
+              }
+            : {}),
         },
         vaultState: {
           sourceTreeHash: ctx.manifest.sourceTreeHash,
@@ -251,9 +367,69 @@ export const getComponentHandler = async (
   // canonical component ids without needing to parse markdown prose, eliminating
   // false hallucination flags in synthesize_answer on referenced ids.
   const edgesResult = await listEdges(ctx.graph, node.id, { direction: 'out' });
-  const referenceIds: ComponentId[] = edgesResult.ok
+  const allReferenceIds: ComponentId[] = edgesResult.ok
     ? [...new Set(edgesResult.value.map((e) => e.toId))].sort()
     : [];
+
+  // R6-31: `maxBodyBytes` 0 or small means the caller is probing existence /
+  // key metadata, not asking for the rendered document. Below this
+  // threshold, build the response from a bounded metadata PROJECTION so a
+  // huge node (a Profile with thousands of `fieldPermissions`) can never
+  // trip the global response-size guard on a probe call — see the R6-31
+  // header note for the full rationale.
+  const isMetadataProbe =
+    input.maxBodyBytes !== undefined &&
+    input.maxBodyBytes <= METADATA_PROBE_MAX_BODY_BYTES;
+
+  if (isMetadataProbe) {
+    const boundedFrontmatter = truncateUtf8(split.frontmatter, maxBodyBytes);
+    const propertyKeys = Object.keys(node.properties);
+    const propProjection = projectPropertiesForMetadata(
+      node.properties,
+      METADATA_PROPERTIES_BUDGET_BYTES,
+    );
+    const refProjection = projectReferenceIdsForMetadata(
+      allReferenceIds,
+      METADATA_REFERENCE_IDS_BUDGET_BYTES,
+    );
+    return ok({
+      data: {
+        id: node.id,
+        type: node.type,
+        path: relPath,
+        frontmatter: boundedFrontmatter.text,
+        body: boundedBody.text,
+        properties: propProjection.properties,
+        referenceIds: refProjection.referenceIds,
+        bodyTruncated: boundedBody.truncated,
+        bodyBytes: boundedBody.originalBytes,
+        returnedBodyBytes: boundedBody.returnedBytes,
+        omittedBodyBytes: boundedBody.originalBytes - boundedBody.returnedBytes,
+        maxBodyBytes,
+        metadataOnly: true,
+        ...(propProjection.omittedKeys.length > 0
+          ? { omittedPropertyKeys: propProjection.omittedKeys }
+          : {}),
+        referenceCount: allReferenceIds.length,
+        omittedReferenceCount: refProjection.omittedCount,
+        frontmatterTruncated: boundedFrontmatter.truncated,
+        frontmatterBytes: boundedFrontmatter.originalBytes,
+        returnedFrontmatterBytes: boundedFrontmatter.returnedBytes,
+        disclosure: buildMetadataDisclosure({
+          maxBodyBytes,
+          omittedPropertyKeys: propProjection.omittedKeys,
+          totalPropertyKeys: propertyKeys.length,
+          omittedReferenceCount: refProjection.omittedCount,
+          totalReferenceCount: allReferenceIds.length,
+        }),
+        ...(annotations !== undefined ? { annotations } : {}),
+      },
+      vaultState: {
+        sourceTreeHash: ctx.manifest.sourceTreeHash,
+        refreshedAt: ctx.manifest.refreshedAt,
+      },
+    });
+  }
 
   return ok({
     data: {
@@ -267,7 +443,7 @@ export const getComponentHandler = async (
       // `errorConditionFormula`, `conditions`, `errorMessage`, etc.
       properties: node.properties,
       // Canonical ids of every outgoing neighbour, deduplicated + sorted.
-      referenceIds,
+      referenceIds: allReferenceIds,
       bodyTruncated: boundedBody.truncated,
       bodyBytes: boundedBody.originalBytes,
       returnedBodyBytes: boundedBody.returnedBytes,
@@ -355,4 +531,115 @@ const truncateUtf8 = (
     originalBytes,
     returnedBytes: Buffer.byteLength(sliced, 'utf8'),
   };
+};
+
+/** JSON byte length of a value, tolerating values `JSON.stringify` can't encode (falls back to `'null'`, matching `JSON.stringify`'s own behavior when such a value sits inside an object). */
+const jsonBytes = (value: unknown): number =>
+  Buffer.byteLength(JSON.stringify(value) ?? 'null', 'utf8');
+
+/**
+ * R6-31: build a byte-budgeted PROJECTION of a node's `properties` for the
+ * metadata-probe response shape. Entries are considered smallest-first, so
+ * in practice the scalar fields (`active`, `description`, `userLicense`, …)
+ * survive and whichever large arrays/objects don't fit the budget (a
+ * Profile's `fieldPermissions`, `objectPermissions`, …) are the ones
+ * dropped — never silently truncated in place, always named in
+ * `omittedKeys` so the caller knows exactly what wasn't expanded. Surviving
+ * entries keep the node's own key order.
+ */
+const projectPropertiesForMetadata = (
+  properties: Readonly<Record<string, unknown>>,
+  maxBytes: number,
+): {
+  readonly properties: Record<string, unknown>;
+  readonly omittedKeys: readonly string[];
+} => {
+  const entries = Object.entries(properties);
+  const bySize = entries
+    .map(([key, value]) => ({
+      key,
+      bytes: jsonBytes(key) + jsonBytes(value) + 1, // +1 for the `:` separator
+    }))
+    .sort((a, b) => a.bytes - b.bytes);
+
+  const kept = new Set<string>();
+  let used = 2; // '{' + '}'
+  for (const { key, bytes } of bySize) {
+    const separator = kept.size > 0 ? 1 : 0; // ','
+    if (used + separator + bytes <= maxBytes) {
+      kept.add(key);
+      used += separator + bytes;
+    }
+  }
+
+  const boundedProperties: Record<string, unknown> = {};
+  const omittedKeys: string[] = [];
+  for (const [key, value] of entries) {
+    if (kept.has(key)) {
+      boundedProperties[key] = value;
+    } else {
+      omittedKeys.push(key);
+    }
+  }
+  return { properties: boundedProperties, omittedKeys: omittedKeys.sort() };
+};
+
+/**
+ * R6-31: build a byte-budgeted PREFIX of `referenceIds` for the
+ * metadata-probe response shape. `referenceIds` is already sorted for
+ * determinism, so keeping a byte-budgeted prefix (rather than resorting by
+ * size) keeps the truncation itself deterministic and cheap.
+ */
+const projectReferenceIdsForMetadata = (
+  referenceIds: readonly ComponentId[],
+  maxBytes: number,
+): {
+  readonly referenceIds: readonly ComponentId[];
+  readonly omittedCount: number;
+} => {
+  const kept: ComponentId[] = [];
+  let used = 2; // '[' + ']'
+  for (const id of referenceIds) {
+    const separator = kept.length > 0 ? 1 : 0; // ','
+    const bytes = jsonBytes(id);
+    if (used + separator + bytes > maxBytes) break;
+    kept.push(id);
+    used += separator + bytes;
+  }
+  return { referenceIds: kept, omittedCount: referenceIds.length - kept.length };
+};
+
+/**
+ * R6-31: compose the honest, human-readable summary attached as
+ * `data.disclosure` on every metadata-probe response — names exactly what
+ * was omitted (body, frontmatter, which property keys, how many edges)
+ * rather than leaving the caller to infer it from field absence.
+ */
+const buildMetadataDisclosure = (opts: {
+  readonly maxBodyBytes: number;
+  readonly omittedPropertyKeys: readonly string[];
+  readonly totalPropertyKeys: number;
+  readonly omittedReferenceCount: number;
+  readonly totalReferenceCount: number;
+}): string => {
+  const bodyPart =
+    opts.maxBodyBytes === 0
+      ? 'body omitted (maxBodyBytes=0)'
+      : `body capped at maxBodyBytes=${opts.maxBodyBytes}`;
+  const propsPart =
+    opts.omittedPropertyKeys.length > 0
+      ? `${opts.omittedPropertyKeys.length} of ${opts.totalPropertyKeys} properties not expanded (${opts.omittedPropertyKeys
+          .slice(0, 8)
+          .join(', ')}${opts.omittedPropertyKeys.length > 8 ? ', …' : ''})`
+      : `all ${opts.totalPropertyKeys} properties included`;
+  const edgesPart =
+    opts.omittedReferenceCount > 0
+      ? `${
+          opts.totalReferenceCount - opts.omittedReferenceCount
+        } of ${opts.totalReferenceCount} outgoing edges shown (see referenceCount)`
+      : `all ${opts.totalReferenceCount} outgoing edges shown`;
+  return (
+    `Metadata-only response (grounding probe): ${bodyPart}; frontmatter capped ` +
+    `at maxBodyBytes=${opts.maxBodyBytes}; ${propsPart}; ${edgesPart}.`
+  );
 };

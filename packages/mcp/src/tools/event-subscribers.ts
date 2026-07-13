@@ -63,7 +63,12 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges, listNodesByType } from '@sf-intelligence/graph';
+import {
+  listEdges,
+  listEdgesForNodes,
+  listNodesByIds,
+  listNodesByType,
+} from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -305,34 +310,24 @@ const validateEventId = (eventId: ComponentId): string | null => {
 };
 
 /**
- * Resolve one incoming `listensTo` edge into an `EventSubscriber`.
- * Returns `null` when the edge points at a node that is not present
- * in the graph (sparse-graph case) or whose type is outside the
- * subscriber set; the caller drops those rather than erroring,
+ * Build an `EventSubscriber` from a resolved node + its incoming `listensTo`
+ * edge. Returns `null` when the node is missing (sparse-graph case) or its type
+ * is outside the subscriber set; the caller drops those rather than erroring,
  * matching the v0.3 / v1.1 sharp-focus tool conventions.
  */
-const resolveSubscriber = async (
-  ctx: Context,
+const buildSubscriber = (
+  node: Node | undefined,
   edge: Edge,
-): Promise<Result<EventSubscriber | null, string>> => {
-  const nodeResult = await getNodeById(ctx.graph, edge.fromId);
-  if (!nodeResult.ok) {
-    return err(nodeResult.error.message);
-  }
-  const node: Node | null = nodeResult.value;
-  if (node === null) {
-    return ok(null);
-  }
-  if (!SUBSCRIBER_NODE_TYPES.has(node.type)) {
-    return ok(null);
-  }
-  return ok({
+): EventSubscriber | null => {
+  if (node === undefined) return null;
+  if (!SUBSCRIBER_NODE_TYPES.has(node.type)) return null;
+  return {
     id: node.id,
     type: node.type,
     apiName: node.apiName,
     source: edge.source,
     properties: edge.properties,
-  });
+  };
 };
 
 /**
@@ -372,51 +367,17 @@ const mergeSubscriber = (
   };
 };
 
-/**
- * GROUP C: resolve one incoming `writesTo` edge into an `EventPublisher`.
- * Returns `null` when the edge points at a node missing from the graph or whose
- * type is outside {@link PUBLISHER_NODE_TYPES} (e.g. a stray CustomField
- * writesTo edge); the caller drops those rather than erroring. The `source` and
- * `properties` come from the edge (the emitting extractor + the declared
- * operation/mechanism), the identity from the resolved node — mirroring
- * {@link resolveSubscriber}.
- */
-const resolvePublisher = async (
-  ctx: Context,
-  edge: Edge,
-): Promise<Result<EventPublisher | null, string>> => {
-  const nodeResult = await getNodeById(ctx.graph, edge.fromId);
-  if (!nodeResult.ok) {
-    return err(nodeResult.error.message);
-  }
-  const node: Node | null = nodeResult.value;
-  if (node === null) {
-    return ok(null);
-  }
-  if (!PUBLISHER_NODE_TYPES.has(node.type)) {
-    return ok(null);
-  }
-  const rawDesc = node.properties['description'];
-  const description =
-    typeof rawDesc === 'string' && rawDesc.length > 0 ? rawDesc : null;
-  return ok({
-    id: node.id,
-    type: node.type,
-    apiName: node.apiName,
-    source: edge.source,
-    properties: edge.properties,
-    description,
-  });
-};
-
 /** Deterministic comparator for publishers: id ASC (mirrors subscribers). */
 const comparePublishers = (a: EventPublisher, b: EventPublisher): number =>
   a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 
 /**
  * GROUP C: resolve every modeled publisher of `eventId` by walking its INBOUND
- * `writesTo` edges, resolving each `fromId`, and keeping only
- * {@link PUBLISHER_NODE_TYPES}. Sorted id-ASC for deterministic output.
+ * `writesTo` edges and keeping only {@link PUBLISHER_NODE_TYPES}. Sorted id-ASC
+ * for deterministic output. ONE `listNodesByIds` resolves every source node,
+ * replacing the former per-edge `getNodeById` N+1 (the `source`/`properties`
+ * come from the edge, the identity from the node; a missing/off-type node is
+ * dropped exactly as the old per-edge null/type filter did).
  */
 const resolvePublishers = async (
   ctx: Context,
@@ -428,11 +389,29 @@ const resolvePublishers = async (
   });
   if (!edgesResult.ok) return err(edgesResult.error.message);
 
+  const nodesResult = await listNodesByIds(
+    ctx.graph,
+    edgesResult.value.map((e) => e.fromId),
+  );
+  if (!nodesResult.ok) return err(nodesResult.error.message);
+  const byId = new Map(nodesResult.value.map((n) => [n.id, n]));
+
   const publishers: EventPublisher[] = [];
   for (const edge of edgesResult.value) {
-    const resolved = await resolvePublisher(ctx, edge);
-    if (!resolved.ok) return err(resolved.error);
-    if (resolved.value !== null) publishers.push(resolved.value);
+    const node = byId.get(edge.fromId);
+    if (node === undefined) continue;
+    if (!PUBLISHER_NODE_TYPES.has(node.type)) continue;
+    const rawDesc = node.properties['description'];
+    const description =
+      typeof rawDesc === 'string' && rawDesc.length > 0 ? rawDesc : null;
+    publishers.push({
+      id: node.id,
+      type: node.type,
+      apiName: node.apiName,
+      source: edge.source,
+      properties: edge.properties,
+      description,
+    });
   }
   publishers.sort(comparePublishers);
   return ok(publishers);
@@ -457,31 +436,48 @@ const resolveChannelBindings = async (
   });
   if (!memberEdges.ok) return err(memberEdges.error.message);
 
-  const bindings: EventChannelBinding[] = [];
-  for (const edge of memberEdges.value) {
-    if (edge.properties['referenceKind'] !== 'platformEventChannelMember') {
-      continue;
-    }
-    const memberId = edge.fromId;
-    const filterRaw = edge.properties['filterExpression'];
-    const filterExpression =
-      typeof filterRaw === 'string' ? filterRaw : null;
-
-    // member's INBOUND parentOf → its PlatformEventChannel.
-    const parentEdges = await listEdges(ctx.graph, memberId, {
-      direction: 'in',
-      edgeType: 'parentOf',
+  // Keep only channel-member references, preserving edge order + multiplicity.
+  const memberEntries = memberEdges.value
+    .filter((edge) => edge.properties['referenceKind'] === 'platformEventChannelMember')
+    .map((edge) => {
+      const filterRaw = edge.properties['filterExpression'];
+      return {
+        memberId: edge.fromId,
+        filterExpression: typeof filterRaw === 'string' ? filterRaw : null,
+      };
     });
-    if (!parentEdges.ok) return err(parentEdges.error.message);
 
+  // ONE batched fetch of every member's INBOUND parentOf edges, then ONE batched
+  // fetch of those parents' nodes — replacing the per-member `listEdges` +
+  // per-parent `getNodeById` nested N+1. Each member's parentOf bucket is sorted
+  // by the FULL (to_id, edge_type, from_id, source) order (to_id + edge_type
+  // fixed), matching the old per-member `listEdges` order, so the FIRST
+  // PlatformEventChannel match is the same edge.
+  const parentBatch = await listEdgesForNodes(
+    ctx.graph,
+    memberEntries.map((m) => m.memberId),
+    { direction: 'in', edgeTypes: ['parentOf'] },
+  );
+  if (!parentBatch.ok) return err(parentBatch.error.message);
+  const parentIds: ComponentId[] = [];
+  for (const entry of memberEntries) {
+    for (const pe of parentBatch.value.get(entry.memberId) ?? []) {
+      parentIds.push(pe.fromId);
+    }
+  }
+  const parentNodesResult = await listNodesByIds(ctx.graph, parentIds);
+  if (!parentNodesResult.ok) return err(parentNodesResult.error.message);
+  const parentById = new Map(parentNodesResult.value.map((n) => [n.id, n]));
+
+  const bindings: EventChannelBinding[] = [];
+  for (const { memberId, filterExpression } of memberEntries) {
     let channelId: ComponentId | null = null;
     let channelType: string | null = null;
-    for (const pe of parentEdges.value) {
-      const node = await getNodeById(ctx.graph, pe.fromId);
-      if (!node.ok) return err(node.error.message);
-      if (node.value !== null && node.value.type === 'PlatformEventChannel') {
-        channelId = node.value.id;
-        const ct = node.value.properties['channelType'];
+    for (const pe of parentBatch.value.get(memberId) ?? []) {
+      const node = parentById.get(pe.fromId);
+      if (node !== undefined && node.type === 'PlatformEventChannel') {
+        channelId = node.id;
+        const ct = node.properties['channelType'];
         channelType = typeof ct === 'string' ? ct : null;
         break;
       }
@@ -522,43 +518,72 @@ export const eventSubscribersHandler = async (
     if (!nodesResult.ok) {
       return err({ kind: 'internal', message: `graph query failed: ${nodesResult.error.message}` });
     }
+    // Batched catalog: replace the former per-event `listEdges` + per-subscriber
+    // / per-publisher `getNodeById` org-wide nested N+1 (O(events x fan-out)
+    // serial DuckDB queries) with THREE round-trips total — one
+    // `listEdgesForNodes` for every event's inbound `listensTo`, one for every
+    // event's inbound `writesTo`, and one `listNodesByIds` over the union of
+    // endpoint ids. Each per-event bucket is sorted by the FULL (to_id,
+    // edge_type, from_id, source) order (to_id + edge_type fixed per bucket), so
+    // the DISTINCT-subscriber Set and the per-edge publisher count are byte-
+    // identical to the old per-event walk.
+    const eventNodes = nodesResult.value.filter((node) =>
+      node.apiName.endsWith(EVENT_API_NAME_SUFFIX),
+    );
+    const eventIds = eventNodes.map((node) => node.id);
+    const listensToBatch = await listEdgesForNodes(ctx.graph, eventIds, {
+      direction: 'in',
+      edgeTypes: ['listensTo'],
+    });
+    if (!listensToBatch.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${listensToBatch.error.message}` });
+    }
+    const writesToBatch = await listEdgesForNodes(ctx.graph, eventIds, {
+      direction: 'in',
+      edgeTypes: ['writesTo'],
+    });
+    if (!writesToBatch.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${writesToBatch.error.message}` });
+    }
+    const endpointIds = new Set<ComponentId>();
+    for (const evId of eventIds) {
+      for (const edge of listensToBatch.value.get(evId) ?? []) endpointIds.add(edge.fromId);
+      for (const edge of writesToBatch.value.get(evId) ?? []) endpointIds.add(edge.fromId);
+    }
+    const endpointNodesResult = await listNodesByIds(ctx.graph, [...endpointIds]);
+    if (!endpointNodesResult.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${endpointNodesResult.error.message}` });
+    }
+    const endpointById = new Map(endpointNodesResult.value.map((n) => [n.id, n]));
+
     const events: EventCatalogEntry[] = [];
-    for (const node of nodesResult.value) {
-      if (!node.apiName.endsWith(EVENT_API_NAME_SUFFIX)) continue;
-      const inEdges = await listEdges(ctx.graph, node.id, {
-        direction: 'in',
-        edgeType: 'listensTo',
-      });
-      if (!inEdges.ok) {
-        return err({ kind: 'internal', message: `graph query failed: ${inEdges.error.message}` });
-      }
+    for (const node of eventNodes) {
       // Count DISTINCT subscriber node ids (ApexTrigger/ApexClass/Flow) so the
       // catalog count matches single-event mode. P3b de-dup: a node listening
       // via BOTH Triggerable AND EventBus.subscribe emits two `listensTo` edges
       // (different sources survive the edge PK); counting per-edge would
       // double-count it. Keep a per-event id set.
       const subscriberIds = new Set<ComponentId>();
-      for (const edge of inEdges.value) {
-        const sub = await getNodeById(ctx.graph, edge.fromId);
-        if (!sub.ok) {
-          return err({ kind: 'internal', message: `graph query failed: ${sub.error.message}` });
-        }
-        if (sub.value !== null && SUBSCRIBER_NODE_TYPES.has(sub.value.type)) {
-          subscriberIds.add(sub.value.id);
+      for (const edge of listensToBatch.value.get(node.id) ?? []) {
+        const sub = endpointById.get(edge.fromId);
+        if (sub !== undefined && SUBSCRIBER_NODE_TYPES.has(sub.type)) {
+          subscriberIds.add(sub.id);
         }
       }
-      const subscriberCount = subscriberIds.size;
       // GROUP C: count modeled `writesTo` publishers (Flow/Apex emitting the
-      // event) so the catalog flags published-but-unsubscribed events.
-      const publishersResult = await resolvePublishers(ctx, node.id);
-      if (!publishersResult.ok) {
-        return err({ kind: 'internal', message: `graph query failed: ${publishersResult.error}` });
+      // event) so the catalog flags published-but-unsubscribed events. Matches
+      // resolvePublishers: a per-EDGE count over publisher-typed sources (a
+      // publisher with two writesTo edges counts twice, as before).
+      let publisherCount = 0;
+      for (const edge of writesToBatch.value.get(node.id) ?? []) {
+        const pub = endpointById.get(edge.fromId);
+        if (pub !== undefined && PUBLISHER_NODE_TYPES.has(pub.type)) publisherCount += 1;
       }
       events.push({
         eventId: node.id,
         eventApiName: node.apiName,
-        subscriberCount,
-        publisherCount: publishersResult.value.length,
+        subscriberCount: subscriberIds.size,
+        publisherCount,
       });
     }
     events.sort((a, b) => (a.eventId < b.eventId ? -1 : a.eventId > b.eventId ? 1 : 0));
@@ -599,21 +624,31 @@ export const eventSubscribersHandler = async (
   // twice. Collapse by node id, keeping the first-resolved entry and MERGING
   // each subsequent edge's source + properties so no subscription signal is
   // lost (the surviving record discloses every path via `mechanisms`).
+  // ONE batched fetch of every listensTo source, replacing the per-edge
+  // `getNodeById` N+1. Iterate the edges in listEdges order (unchanged) so the
+  // P3b merge keeps the SAME first-resolved entry and folds subsequent edges'
+  // sources identically.
+  const subNodesResult = await listNodesByIds(
+    ctx.graph,
+    edgesResult.value.map((e) => e.fromId),
+  );
+  if (!subNodesResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${subNodesResult.error.message}`,
+    });
+  }
+  const subNodeById = new Map(subNodesResult.value.map((n) => [n.id, n]));
+
   const byId = new Map<ComponentId, EventSubscriber>();
   for (const edge of edgesResult.value) {
-    const resolved = await resolveSubscriber(ctx, edge);
-    if (!resolved.ok) {
-      return err({
-        kind: 'internal',
-        message: `graph query failed: ${resolved.error}`,
-      });
-    }
-    if (resolved.value === null) continue;
-    const existing = byId.get(resolved.value.id);
+    const resolved = buildSubscriber(subNodeById.get(edge.fromId), edge);
+    if (resolved === null) continue;
+    const existing = byId.get(resolved.id);
     if (existing === undefined) {
-      byId.set(resolved.value.id, resolved.value);
+      byId.set(resolved.id, resolved);
     } else {
-      byId.set(resolved.value.id, mergeSubscriber(existing, resolved.value));
+      byId.set(resolved.id, mergeSubscriber(existing, resolved));
     }
   }
   const sorted = [...byId.values()].sort(compareSubscribers).slice(0, limit);

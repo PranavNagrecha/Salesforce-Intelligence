@@ -37,7 +37,7 @@ finish for the vault to be usable:
    **`coverage`** per metadata type when the retrieve result is available).
 
 Optional after a successful refresh: **`sfi snapshot create --label <name>`**
-so `sfi.trend` / `sfi.churn` can compare structural history later.
+so `sfi.trend` / `sfi.diff_snapshots` can compare structural history later.
 
 A real org takes **5–15 minutes** end-to-end, dominated by stage 1.
 Tell the user this before you start — silence during a long retrieve

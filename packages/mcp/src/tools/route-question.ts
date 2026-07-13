@@ -1596,6 +1596,7 @@ const guidanceForMode = (
     default:
       return (
         'These toolCandidates are the meaning-ranked shortlist — they are PRIMARY and YOU decide. ' +
+        'Read ALL the candidates (up to 8) before picking: the ranking is advisory and the best tool is often mid-list, so never default to the first row. ' +
         'A deterministic `route` is also attached, but only as a HINT (a suggested tool order plus ' +
         'any resolved entity ids / suggestedArgs) — never follow it blindly. When a candidate carries ' +
         '`suggestedArgs`, treat them as heuristic bindings for that tool. Plan: read the question → ' +
@@ -1605,6 +1606,134 @@ const guidanceForMode = (
         consent
       );
   }
+};
+
+// ---------------------------------------------------------------------------
+// ROUTER DE-CROWD (0.2.0) — untriggered what_if shortlist demotion.
+//
+// The what_if_* simulation family shares heavy permission/field/flow
+// vocabulary with the plain-read tools, so its candidates crowd the top of the
+// shortlist on questions that carry NO action or hypothetical language at all.
+// The demotion is gated on trigger tokens: a non-`fromRoute` what_if candidate
+// in an ACTIVE family keeps its rank ONLY when the question carries a
+// hypothetical marker or that family's own action verb; otherwise it is moved
+// below the non-what_if candidates (demoted, never deleted — it can still
+// appear at the tail of the shortlist).
+//
+// SCOPE IS MEASURED, NOT PRINCIPLED. See DECROWD_ACTIVE_FAMILIES below: only
+// the two tools whose demotion was counterfactually PRICED on the real 3K
+// depth-10 traces are active. The mechanism (trigger check, fromRoute
+// exemption, reorder) and the corpus-derived lexicons for all 11 families are
+// kept so widening the scope is a one-line, measurement-gated change.
+// ---------------------------------------------------------------------------
+
+/** The candidate family the de-crowd demotion applies to. */
+export const WHAT_IF_CANDIDATE_FAMILY = /^sfi\.what_if_/;
+
+/**
+ * The ONLY what_if tools the de-crowd demotion is active for.
+ *
+ * Counterfactual pricing (independent replay of the built demote function over
+ * the real 3K depth-10 traces + relabeled-v2 gold, 2026-07-13): scoping the
+ * demotion to exactly these two tools measures +0.42pp recall@5, 27 turns
+ * gained, ZERO turns lost. These are precisely the top-2 measured slot
+ * parasites from the 0.2.0 audit — what_if_assign_permset /
+ * what_if_revoke_permset held 487+236 parasitic top-5 slots with zero gold
+ * questions corpus-wide (ROUTER-0.2.0-AUDIT-AND-ROADMAP.md item 2).
+ *
+ * The broad 11-family scope was MEASURED to be worse: net +0.25pp (below the
+ * +0.4pp bar) with 40 turns where gold fell OUT of top-5 — 34 of them
+ * follow-up turns whose action verb lives in the PREVIOUS turn (the funnel
+ * only sees the current turn's text) and 6 lexicon gaps.
+ *
+ * DO NOT add a family to this set without a fresh traces-replay measurement
+ * first (net >= +0.4pp recall@5 AND zero lost turns on the current trace
+ * corpus — see ROUTER-0.2.0-AUDIT-AND-ROADMAP.md item 2).
+ */
+export const DECROWD_ACTIVE_FAMILIES: ReadonlySet<string> = new Set([
+  'sfi.what_if_assign_permset',
+  'sfi.what_if_revoke_permset',
+]);
+
+/**
+ * Hypothetical/simulation markers shared across ALL what_if_* families.
+ * DERIVED from the families' own utterance corpora in funnel-utterances.ts
+ * (`sfi.what_if_*` blocks) — these are the framings those utterances actually
+ * use ("what happens if…", "what would break…", "if I…", "impact of…",
+ * "blast radius", "can I safely…", "simulate…", "consequences of…"), not a
+ * hand-invented list. Any one of them marks the question as an
+ * action/hypothetical ask, so every what_if candidate keeps its rank.
+ */
+export const WHAT_IF_HYPOTHETICAL_TRIGGERS =
+  /\bwhat\s+(?:if|happens|breaks?)\b|\bhappens?\s+if\b|\bif\s+(?:i|we|someone)\b|\bwould\b|\bimpact\b|\bblast\s+radius\b|\bsimulat(?:e|es|ed|ing|ion)\b|\bconsequences?\b|\bsafe(?:ly)?\s+to\b|\bsafely\b/i;
+
+/**
+ * Per-family ACTION verbs, DERIVED from each family's own utterance corpus in
+ * funnel-utterances.ts (the verbs those utterances actually use — e.g. the
+ * `sfi.what_if_assign_permset` corpus says assign/grant/add/gain/give, the
+ * `sfi.what_if_revoke_permset` corpus says revoke/remove/unassign/strip/
+ * take away/lose). A question carrying the family's own verb is an action ask
+ * for that family, so THAT tool keeps its rank even without a hypothetical
+ * marker. Keyed by tool name; a family with no entry falls back to the shared
+ * hypothetical markers only. Lexicons are kept for ALL 11 families as dormant
+ * plumbing, but only DECROWD_ACTIVE_FAMILIES entries gate a demotion today.
+ */
+export const WHAT_IF_ACTION_TRIGGERS: ReadonlyMap<string, RegExp> = new Map([
+  // corpus verbs: change/changing, bulk-update, set…to, simulate
+  ['sfi.what_if_change_field_value', /\bchang(?:e|es|ed|ing)\b|\bbulk[- ]?updat(?:e|es|ed|ing)\b|\bset(?:s|ting)?\b/i],
+  // corpus verbs: change (the type), convert, make…a <type>, data type
+  ['sfi.what_if_change_field_type', /\bchang(?:e|es|ed|ing)\b|\bconvert(?:s|ed|ing)?\b|\bmak(?:e|es|ing)\b|\bmade\b|\bdata\s+type\b/i],
+  // corpus verbs: delete, remove
+  ['sfi.what_if_remove_picklist_value', /\bremov(?:e|es|ed|ing)\b|\bdelet(?:e|es|ed|ing)\b/i],
+  // corpus verbs: make…required, mandatory, requiring, set…to required
+  ['sfi.what_if_make_field_required', /\bmak(?:e|es|ing)\b|\bmade\b|\brequir(?:e|es|ed|ing)\b|\bmandatory\b/i],
+  // corpus verbs: deactivate, turn off / turn it off, switch off
+  ['sfi.what_if_deactivate_flow', /\bdeactivat(?:e|es|ed|ing)\b|\bturn(?:s|ed|ing)?\b[^.?!]{0,16}\boff\b|\bswitch(?:es|ed|ing)?\b[^.?!]{0,16}\boff\b/i],
+  // corpus verbs: disable, turn off, was off
+  ['sfi.what_if_disable_trigger', /\bdisabl(?:e|es|ed|ing)\b|\bturn(?:s|ed|ing)?\b[^.?!]{0,16}\boff\b|\bwas\s+off\b/i],
+  // corpus verbs: change (signature), rename, add/remove a parameter
+  ['sfi.what_if_change_method_signature', /\bsignature\b|\brenam(?:e|es|ed|ing)\b|\bchang(?:e|es|ed|ing)\b|\b(?:add|remove)\b[^.?!]{0,20}\bparameter\b/i],
+  // corpus verbs/nouns: merge, combine, consolidate, conflicts, collisions
+  ['sfi.what_if_merge_profiles', /\bmerg(?:e|es|ed|ing)\b|\bcombin(?:e|es|ed|ing)\b|\bconsolidat(?:e|es|ed|ing)\b|\bconflicts?\b|\bcollisions?\b/i],
+  // corpus verbs: split, break…into
+  ['sfi.what_if_split_profile', /\bsplit(?:s|ting)?\b|\bbreak\b[^.?!]{0,32}\binto\b/i],
+  // corpus verbs: assign, grant, add, gain, give
+  ['sfi.what_if_assign_permset', /\bassign(?:s|ed|ing)?\b|\bgrant(?:s|ed|ing)?\b|\badd(?:s|ed|ing)?\b|\bgain(?:s|ed|ing)?\b|\bgiv(?:e|es|ing)\b|\bgave\b/i],
+  // corpus verbs: revoke, remove, unassign, strip, take away, lose/lost
+  ['sfi.what_if_revoke_permset', /\brevok(?:e|es|ed|ing)\b|\bremov(?:e|es|ed|ing)\b|\bunassign(?:s|ed|ing)?\b|\bstrip(?:s|ped|ping)?\b|\btak(?:e|es|ing)\s+away\b|\btook\s+away\b|\blos(?:e|es|ing)\b|\blost\b/i],
+]);
+
+/** Does the question license this what_if tool to keep its shortlist rank? */
+const whatIfTriggered = (tool: string, question: string): boolean =>
+  WHAT_IF_HYPOTHETICAL_TRIGGERS.test(question) ||
+  (WHAT_IF_ACTION_TRIGGERS.get(tool)?.test(question) ?? false);
+
+/**
+ * Demote every DECROWD_ACTIVE_FAMILIES candidate that (a) was NOT promoted by
+ * the deterministic route (`fromRoute` rows are exempt — the regex route is a
+ * coordinated plan) and (b) has no trigger token in the question, below all
+ * other candidates. what_if families OUTSIDE the active set are never touched
+ * (their demotion measured net-negative on the traces — see
+ * DECROWD_ACTIVE_FAMILIES). Pure REORDER: scores/cosines are never touched
+ * (the unrouted funnel-primary path keeps its pure-cosine invariant), rows are
+ * never dropped, and kept rows preserve their relative order. Runs BEFORE
+ * mode-reranking so an explicit `mode: 'plan'` (an action intent by
+ * construction) still leads with the plan family.
+ */
+export const demoteUntriggeredWhatIfs = (
+  cands: readonly ToolCandidate[],
+  question: string,
+): ToolCandidate[] => {
+  const kept: ToolCandidate[] = [];
+  const demoted: ToolCandidate[] = [];
+  for (const candidate of cands) {
+    const parasitic =
+      DECROWD_ACTIVE_FAMILIES.has(candidate.tool) &&
+      candidate.fromRoute !== true &&
+      !whatIfTriggered(candidate.tool, question);
+    (parasitic ? demoted : kept).push(candidate);
+  }
+  return [...kept, ...demoted];
 };
 
 /**
@@ -1627,11 +1756,16 @@ export const buildFunnelCandidates = (
   const funnelLimit = mode !== undefined ? 12 : 8;
   return resolvePlaneTie(
     rerankForMode(
-      mergeRouteHintsIntoCandidates(
-        route,
-        semanticCandidates(question, funnelLimit),
-        routeToolArgs,
-        funnelLimit,
+      // De-crowd AFTER the regex-hint fusion (so `fromRoute` rows are stamped
+      // and exempt) and BEFORE the mode rerank + final slice(0, 8).
+      demoteUntriggeredWhatIfs(
+        mergeRouteHintsIntoCandidates(
+          route,
+          semanticCandidates(question, funnelLimit),
+          routeToolArgs,
+          funnelLimit,
+        ),
+        question,
       ),
       mode,
     ),

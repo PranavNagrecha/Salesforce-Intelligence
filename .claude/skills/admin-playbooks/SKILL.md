@@ -54,7 +54,7 @@ The gate before a release. Run in order, then give a go / no-go with the blocker
 named:
 
 1. `sfi.coverage_report` — is the vault complete enough to trust the verdicts? Surface any `coverageCaveat` first.
-2. `sfi.release_readiness_report` — the composite gate.
+2. `sfi.org_risk_report` with `gate: true` — the composite deploy gate (emits `ready` + `blockers`).
 3. `sfi.test_coverage_gaps` — untested classes that will block deploy.
 4. `sfi.governor_limit_risks` — SOQL/DML-in-loop and unbounded queries.
 5. `sfi.find_hardcoded_values` — hardcoded IDs/URLs that break across orgs.
@@ -86,8 +86,10 @@ The access + exposure sweep:
 3. `sfi.unassigned_permission_sets` + `sfi.empty_queues_and_groups` — dead access cruft.
 4. `sfi.generate_sharing_summary` — OWD / sharing rules / role hierarchy.
 5. `sfi.pii_inventory` — where sensitive data lives (FERPA/GDPR framing if relevant).
-6. `sfi.generate_compliance_report` — the exposure write-up.
-7. **(live)** `sfi.live_inactive_users` — dormant accounts to reclaim/disable.
+6. `sfi.history_tracking_gaps` — which of those sensitive fields have no field-history
+   audit trail (and which objects can't even track history until `enableHistory` is fixed).
+7. `sfi.generate_compliance_report` — the exposure write-up.
+8. **(live)** `sfi.live_inactive_users` — dormant accounts to reclaim/disable.
 
 Report: an access matrix + the ranked risks + a tightening recommendation.
 
@@ -95,13 +97,12 @@ Report: an access matrix + the ranked risks + a tightening recommendation.
 
 The dead-vs-alive sweep (read-only — names candidates, never deletes):
 
-1. `sfi.unused_fields_deep` — fields with no static references.
-2. `sfi.field_cleanup_candidates` — ranked deletion candidates.
-3. `sfi.unused_components` — orphaned metadata.
-4. `sfi.find_dead_code` — unreachable Apex.
-5. **(live)** `sfi.live_report_usage` — reports not run in 90+ days.
-6. **(live)** `sfi.live_email_template_usage` — Classic/unused templates to retire.
-7. **(live)** `sfi.live_field_population` on the top candidates — confirm "defined AND empty in production" before recommending removal.
+1. `sfi.unused_fields_deep` — fields with no static references (add `format: 'cleanup'` for the ranked deletion-candidate roster).
+2. `sfi.unused_components` — orphaned metadata.
+3. `sfi.find_dead_code` — unreachable Apex.
+4. **(live)** `sfi.live_report_usage` — reports not run in 90+ days.
+5. **(live)** `sfi.live_email_template_usage` — Classic/unused templates to retire.
+6. **(live)** `sfi.live_field_population` on the top candidates — confirm "defined AND empty in production" before recommending removal.
 
 Report: a quantified dead-vs-alive list, ordered by safety, each with coverage
 caveats. **Never** say "safe to delete" without `sfi.coverage_report` complete.
@@ -184,7 +185,7 @@ Report: a dated change timeline with who / what, newest first.
 
 The focused go/no-go (lighter than the full `pre-deploy` sweep):
 
-1. `sfi.release_readiness_report` — the composite readiness gate.
+1. `sfi.org_risk_report` with `gate: true` — the composite readiness gate (emits `ready` + `blockers`).
 2. `sfi.promotion_readiness` — the promotion-specific check.
 3. `sfi.what_changed_since_refresh` — exactly what's in this release.
 4. `sfi.tests_for_change` — the minimal test set to run for the change.

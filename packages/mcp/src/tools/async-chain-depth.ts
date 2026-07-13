@@ -11,7 +11,7 @@ import type {
   McpResponse,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import { getNodeById, listEdges, listEdgesForNodes } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -145,19 +145,26 @@ const walkDispatchesAsync = async (
   for (let depth = firstDepth; depth <= lastDepth; depth++) {
     const next: ComponentId[] = [];
     let edgesEmittedAtThisDepth = false;
-    for (const sourceId of frontier) {
-      const edgesResult = await listEdges(ctx.graph, sourceId, {
-        direction: 'out',
-        edgeType: 'dispatchesAsync',
+    // ONE batched fetch of the WHOLE frontier's outgoing dispatchesAsync edges,
+    // replacing the per-frontier-node `listEdges` N+1. Iterating `frontier` in
+    // order and reading each source's bucket (sorted by the FULL (to_id,
+    // edge_type, from_id, source) order — a refinement of listEdges' order, and
+    // here from_id + edge_type are fixed per bucket) reproduces the exact chains
+    // push order, `visited` insertion order, and next-frontier order. The query
+    // count is now one per DEPTH LEVEL, independent of frontier WIDTH.
+    const edgeBatch = await listEdgesForNodes(ctx.graph, frontier, {
+      direction: 'out',
+      edgeTypes: ['dispatchesAsync'],
+    });
+    if (!edgeBatch.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${edgeBatch.error.message}`,
       });
-      if (!edgesResult.ok) {
-        return err({
-          kind: 'internal',
-          message: `graph query failed: ${edgesResult.error.message}`,
-        });
-      }
+    }
+    for (const sourceId of frontier) {
       const localTargets = branchTargets.get(sourceId) ?? new Set<ComponentId>();
-      for (const edge of edgesResult.value) {
+      for (const edge of edgeBatch.value.get(sourceId) ?? []) {
         localTargets.add(edge.toId);
         chains.push({ fromId: edge.fromId, toId: edge.toId, depth });
         edgesEmittedAtThisDepth = true;

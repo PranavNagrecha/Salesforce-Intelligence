@@ -1,6 +1,6 @@
 /// <reference types="vitest/globals" />
 
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -199,6 +199,61 @@ describe('prepareMcp', () => {
       await rm(cwd, { recursive: true, force: true });
     }
   });
+});
+
+/**
+ * CR-RV3b: `defaultListOrgs` (exercised here via `prepareMcp` WITHOUT a
+ * `listOrgs` override, so the real `sf org list --json` probe path runs)
+ * used to shell out through a bare `promisify(execFile)` with no timeout —
+ * a wedged `sf` subprocess could hang `sfi mcp` startup forever. It now
+ * routes through `execHelper`, the shared `SFI_SF_EXEC_TIMEOUT_MS`-backed
+ * exec seam (packages/core/src/exec-helper.ts), which already carries its
+ * own SIGTERM→SIGKILL escalation coverage — this test only pins that THIS
+ * call site inherits that budget rather than hanging indefinitely.
+ */
+describe('defaultListOrgs — SFI_SF_EXEC_TIMEOUT_MS backstop (CR-RV3b)', () => {
+  const PRIOR_PATH = process.env['PATH'];
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    if (PRIOR_PATH === undefined) delete process.env['PATH'];
+    else process.env['PATH'] = PRIOR_PATH;
+  });
+
+  it('degrades within the configured timeout budget instead of hanging on a wedged `sf`', async () => {
+    // A fake `sf` on PATH that execs into a 60s sleep — standing in for a
+    // real `sf` process wedged on an interactive re-auth prompt or similar.
+    // `exec` (not a bare `sleep 60` line) replaces the shell's process image
+    // so the SIGTERM the timeout sends reaches the sleep directly, without
+    // waiting on the SIGKILL escalation grace — keeping this test fast.
+    const binDir = await mkdtemp(join(tmpdir(), 'sfi-fake-sf-'));
+    const fakeSfPath = join(binDir, 'sf');
+    await writeFile(fakeSfPath, '#!/bin/sh\nexec sleep 60\n', 'utf8');
+    await chmod(fakeSfPath, 0o755);
+    process.env['PATH'] = `${binDir}:${PRIOR_PATH ?? ''}`;
+    vi.stubEnv('SFI_SF_EXEC_TIMEOUT_MS', '200');
+
+    const cwd = await makeTempCwd(); // empty — no org-kb, so prepareMcp falls to defaultListOrgs
+    const start = Date.now();
+    try {
+      const result = await prepareMcp({ cwd });
+      const elapsed = Date.now() - start;
+      // Resolved well under the fake sf's 60s sleep — proof the timeout
+      // backstop, not the script's own exit, ended the call.
+      expect(elapsed).toBeLessThan(5000);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        // No orgs discovered (the probe timed out and was caught) — the same
+        // graceful-degrade message as "sf CLI not installed", not a hang.
+        expect(result.error.kind).toBe('no-vault');
+        expect(result.error.message).not.toContain('org(s)');
+        expect(result.error.message).toContain('sfi init');
+      }
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+      await rm(binDir, { recursive: true, force: true });
+    }
+  }, 10000);
 });
 
 /**

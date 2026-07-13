@@ -76,7 +76,10 @@ const distIndex = path.join(PRODUCT, "packages/mcp/dist/src/tools/index.js");
 if (!fs.existsSync(distIndex)) die(`Built tool registry missing: ${distIndex}\n  Build the product first:  (cd "${PRODUCT}" && pnpm -r build)`);
 const { V01_TOOLS } = await import(pathToFileURL(distIndex).href);
 if (!Array.isArray(V01_TOOLS)) die("V01_TOOLS not found in the built registry.");
-const tools = V01_TOOLS.map((t) => ({ name: t.name, description: String(t.description || "").replace(/\s+/g, " ").trim() }));
+// Match the product's own advertisedTools logic (packages/mcp/src/tools/index.ts):
+// hidden back-compat aliases are filtered out so they never occupy a tools/list
+// schema slot — the site advertises the 196 distinct tools, not the 4 aliases.
+const tools = V01_TOOLS.filter((t) => !t.hidden).map((t) => ({ name: t.name, description: String(t.description || "").replace(/\s+/g, " ").trim() }));
 const toolCount = tools.length;
 log(`• tools (V01_TOOLS):            ${toolCount}`);
 

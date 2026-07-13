@@ -24,6 +24,7 @@ import { join } from 'node:path';
 import type { VaultManifest } from '@sf-intelligence/contracts';
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 
+import { mintLiveCapability } from '../../src/live-capability.js';
 import type { Context } from '../../src/server.js';
 import {
   liveZombieAccountsHandler,
@@ -39,7 +40,7 @@ const MANIFEST: VaultManifest = {
   edges: { parentOf: 1 },
   sourceTreeHash: 'sha256:fixture',
 };
-const ctx = { manifest: MANIFEST } as Context;
+const ctx = { manifest: MANIFEST, liveCapability: mintLiveCapability('primary') } as Context;
 
 const user = (id: string, name: string, lastLogin: string | null): Record<string, unknown> => ({
   Id: id,

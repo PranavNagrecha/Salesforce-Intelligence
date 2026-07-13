@@ -71,6 +71,13 @@ The old site had no build step. Astro needs one:
 `public/_headers` (cache/security) and the GSC verification file carry over
 verbatim. `404.astro` is auto-served by Cloudflare on unmatched routes.
 
+**Web Analytics readiness:** `_headers` CSP allows
+`https://static.cloudflareinsights.com` in `script-src` and
+`'self' https://cloudflareinsights.com` in `connect-src` — the minimum for
+Cloudflare Web Analytics' beacon (auto-inject via `/cdn-cgi/rum` or manual
+embed). Enabling the dashboard toggle remains a separate maintainer step; this
+only prevents a silent CSP block once it is flipped.
+
 ## SEO / crawler gate
 
 `npm run crawl-test` asserts, for every sitemap URL: 200 · one self-canonical ·

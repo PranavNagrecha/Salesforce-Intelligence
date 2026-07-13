@@ -127,8 +127,7 @@ Defer to another skill when:
 
 - **The user asks "where is `OpportunityService` used in source code?"**
   That's a code-reference question. Defer to
-  `developer-apex-refactor` → `sfi.find_code_usages` /
-  `sfi.find_apex_usages`.
+  `developer-apex-refactor` → `sfi.find_code_usages`.
 - **The user asks "what fields does Opportunity have?"** Schema
   lookup; defer to `answering-org-questions`.
 - **The user asks "audit my Apex for quality issues."** Defer to
@@ -149,9 +148,9 @@ Defer to another skill when:
 
 ## The cascade
 
-The 13 tools split by question shape. Pick the right entry point.
+The 16 tools split by question shape. Pick the right entry point.
 
-### Category A — What-if change projection (v2.3, 8 composers)
+### Category A — What-if change projection (v2.3, 11 composers)
 
 Each composer reads the v2.2-vintage vault state, applies its rule
 set from `WhatIfSemantics.md`, and returns:
@@ -169,10 +168,18 @@ Each `WhatIfImpactItem` carries `category`
 
 Walks every outgoing edge from the Flow: `triggersOn` (the object
 listened to), `readsFrom`/`writesTo` (record lookups + DML),
-`callsApex` (Apex action calls), `sendsEmail` (email templates).
-Each becomes a `WhatIfImpactItem`. Aggregate `verdict`: `safe` (no
-impacts) / `risky` (callsApex only) / `blocking` (record write,
-trigger, or email-send impact).
+`callsApex` (Apex action calls), `sendsEmail` (email templates), and
+the subflows THIS Flow invokes (`references` / `referenceKind:
+'subflow'`). Each becomes a `WhatIfImpactItem`. **R6-02 — the incoming
+side:** parent Flows that invoke THIS Flow as a subflow are BROKEN
+CALLERS on deactivation, surfaced as a distinct `broken-caller`
+category. Aggregate `verdict`: `safe` (no impacts) / `risky`
+(callsApex only, or broken callers that are all inactive Draft/Obsolete)
+/ `blocking` (record write, trigger, email-send, or subflow-invocation
+impact, OR any broken caller that is an ACTIVE parent Flow — a subflow
+with active parents must not read `safe`). Only `referenceKind:
+'subflow'` incoming edges count as broken callers; a FlexiPage that
+merely embeds the flow is access, not a broken caller.
 
 ```json
 { "flowId": "Flow:Set_Opportunity_Owner" }
@@ -181,32 +188,40 @@ trigger, or email-send impact).
 #### `sfi.what_if_disable_trigger`
 
 Similar walk for `ApexTrigger:`. Handler classes via outgoing
-`callsApex`; async dispatches via outgoing `dispatchesAsync`. Most
-findings will be `code-needs-update` (`confidence: heuristic`)
-because v0.3 apex-scanner edges dominate.
+`callsApex`; async dispatches via outgoing `dispatchesAsync`. The
+`callsApex` handler edges come from the default-on Apex AST pass, so
+most `code-needs-update` findings carry `confidence: parsed`; the
+`dispatchesAsync` async edges remain `heuristic` (that async-dispatch
+recognizer is still scanner-based). Cite each finding's own
+confidence.
 
 #### `sfi.what_if_change_method_signature`
 
-Identifies callers via v1.4 apex-scanner method-call-site index.
-Caller types:
+Identifies callers via the default-on Apex AST call-site index (the
+recall scanner backfills files the AST could not parse). The tool
+reports each finding at its own edge confidence. Caller types:
 - **Apex static caller** — `OpportunityService.processOpp(...)`
-  pattern. `code-needs-update`, `heuristic`.
+  pattern. `code-needs-update`; `parsed` for AST-resolved call-sites,
+  `heuristic` for scanner-backfill edges.
 - **Apex instance caller** — `obj.processOpp(...)` where `obj` is
-  typed as `OpportunityService`. Same.
+  typed as `OpportunityService`. Same (the AST resolves the receiver
+  type through the symbol table).
 - **Apex test caller** — `@isTest` class or `coversTest` edge to
-  target. `test-class-update`, `heuristic`.
+  target. `test-class-update`; `parsed` / `heuristic` as above.
 - **Flow caller** (when target is `@InvocableMethod`) — `callsApex`
   edge + matching `<actionName>`. `code-needs-update`, `declared`.
 
 Surface the verbatim Q105 disclosure:
 
-> Callers identified via the v1.4 apex-scanner are at heuristic
-> confidence; dynamic dispatch via Type.forName + invoke is
-> invisible. Test classes are identified by `@isTest` + naming
-> convention (className + 'Test' suffix) and by `coversTest`
-> edges; a test class that doesn't follow the naming convention
-> and doesn't carry a `@TestVisible`-tagged covering reference
-> may be missed.
+> Callers are identified via the default-on Apex AST call-site
+> index and surface at `parsed` confidence; the recall scanner
+> backfills files the AST could not parse at `heuristic`. Cite
+> each caller's own confidence. Dynamic dispatch via
+> Type.forName + invoke is invisible to both. Test classes are
+> identified by `@isTest` + naming convention (className +
+> 'Test' suffix) and by `coversTest` edges; a test class that
+> doesn't follow the naming convention and doesn't carry a
+> `@TestVisible`-tagged covering reference may be missed.
 
 #### `sfi.what_if_change_field_type`
 
@@ -235,6 +250,26 @@ The hard dependency on v2.0a: without `firesWhen` edges and
 `ConditionalContext` extraction, Flow decisions keyed on the value
 would be invisible. The composer surfaces an error if the vault
 is missing v2.0a extraction.
+
+#### `sfi.what_if_change_field_value`
+
+The Data-Steward / Identity lens: what breaks if a field's stored
+VALUE changes — NOT its schema (that is `change_field_type`).
+Returns impact buckets (identity / integration-key / uniqueness /
+automation / save-pipeline / display), an overall severity, and
+recommended pre-change checks. Identity / key / uniqueness verdicts
+come from the field's OWN metadata (`externalId` / `unique` /
+`idLookup`, identity catalog), so a value change is flagged even on
+a field with ZERO references (e.g. a SAML federation key). Derived
+fields (formula / roll-up / auto-number) return `mutable: false`
+and re-route to their source. Optional `newValue` adds a targeted
+collision/acceptance check.
+
+Surface verbatim: the vault cannot see external upsert systems, the
+IdP side of SSO, or dynamic / managed-package code; automation
+buckets surface only declarative value-literal couplings — Apex
+literal comparisons remain invisible. For the portfolio version
+across many fields on an object, use `sfi.value_change_audit`.
 
 #### `sfi.what_if_make_field_required`
 
@@ -278,6 +313,37 @@ to a future milestone.
 
 Surface verbatim: greedy + fail-conservative; per-org
 optimal-partitioning override is not supported.
+
+#### `sfi.what_if_assign_permset`
+
+The NET access a user would GAIN by assigning a target permission
+set (or PSG). Give the target (`permissionSetId` — a
+`PermissionSet:` / `PermissionSetGroup:` id or bare name) and a
+`baseline` container (`{ profileId?, permissionSetIds?[] }` — the
+user's current profile + already-assigned sets). It runs the SAME
+effective-permissions engine as `sfi.effective_permissions` TWICE
+(baseline WITH vs WITHOUT the target) and diffs the max-wins,
+muting-applied EFFECTIVE grant sets. NET-CHANGE CORRECTNESS is the
+whole value: a permission the baseline already holds via its
+profile or another set cancels out and is NOT counted as gained.
+Delta classes: `objectPermissions`, `fieldPermissions`,
+`systemPermissions`, `customPermissions`, `recordTypeVisibilities`.
+Verdict `safe` on a no-op, else `review`.
+
+Surface verbatim: the delta is the NET change under max-wins; this
+is a hypothetical READ (nothing is assigned); grants are `declared`
+metadata; object permission is not record access (visibility still
+depends on OWD + sharing).
+
+#### `sfi.what_if_revoke_permset`
+
+The mirror of `assign_permset`: the NET access a user would LOSE by
+revoking a target set whose baseline SHOULD include it. Same twice-
+run effective-permissions diff; a permission ALSO granted by the
+profile or another assigned set is NOT counted as lost (the user
+keeps it). Revoking a set not in the baseline is a disclosed no-op
+(`targetInBaseline: false`). Verdict `safe` on a no-op, else
+`review`. Same honesty surface as `assign_permset`.
 
 ### Category B — Reachability (v2.7, 5 tools)
 
@@ -393,8 +459,8 @@ order is: `heuristic` (worst) < `parsed` < `declared` (best).
 | Walk path | Confidence |
 |---|---|
 | Profile FLS, layout placement, XML-declared condition | `declared` |
-| Formula tokenizer, Flow walker, integration schema parser | `parsed` |
-| Apex scanner string-literal, Apex `if`-guard recognition, LWC scanner | `heuristic` |
+| Apex AST field reads/writes + cross-class calls (default-on), formula tokenizer, Flow walker, integration schema parser | `parsed` |
+| Apex recall scanner (parse-failure/gap backfill), `dispatchesAsync` async-dispatch recognizer, LWC/Aura/VF frontend scanner | `heuristic` |
 
 State the per-finding confidence explicitly; don't paraphrase
 `heuristic` as "likely".
@@ -406,9 +472,9 @@ State the per-finding confidence explicitly; don't paraphrase
 | `what_if_change_field_type` | "Lookup → Text and MasterDetail → Text are structurally compatible but lose foreign-key semantics. Roll-up summary fields, sharing-by-parent, and cascade-delete behavior change." |
 | `what_if_remove_picklist_value` | "Apex variable-based comparisons (`if (account.Industry__c == myVar)`) are invisible. Dynamic SOQL filters by picklist value are invisible. Reports / Dashboards / List Views filtered by this value are NOT extracted." |
 | `what_if_make_field_required` | "Apex `insert acc;` sites that may or may not set the field are invisible — dataflow analysis required." |
-| `what_if_deactivate_flow` | "Deactivation does NOT delete the Flow; its definition remains and a later reactivation restores every effect listed. Apex code that conditionally invokes the Flow via `Flow.Interview` or `@InvocableMethod` chains is invisible." |
+| `what_if_deactivate_flow` | "Deactivation does NOT delete the Flow; its definition remains and a later reactivation restores every effect listed. Parent Flows invoking this Flow as a declared `<subflows>` call ARE now modeled as broken callers (an Active parent forces `blocking`); the STILL-invisible path is Apex that invokes the Flow via `Flow.Interview` or `@InvocableMethod` chains, plus non-metadata launch points (buttons, quick actions)." |
 | `what_if_disable_trigger` | "Apex code that conditionally invokes the disabled trigger logic via a static utility wrapping the same handler is invisible. Test classes using `Test.startTest()` / `Test.stopTest()` semantics may depend on the trigger firing — review test setup before disabling." |
-| `what_if_change_method_signature` | "Callers identified via apex-scanner are heuristic; dynamic dispatch via Type.forName + invoke is invisible. Test classes identified by @isTest + naming convention; non-convention test classes may be missed." |
+| `what_if_change_method_signature` | "Callers come from the default-on Apex AST call-site index (`parsed`), with the recall scanner backfilling parse-failure files (`heuristic`) — cite each caller's own confidence; dynamic dispatch via Type.forName + invoke is invisible to both. Test classes identified by @isTest + naming convention; non-convention test classes may be missed." |
 | `what_if_merge_profiles` | "Multi-profile (3+) merge is not supported in v2.3 — exactly two profiles per call. Tie-break defaults to A wins for setting types where comparators are undefined." |
 | `what_if_split_profile` | "Greedy heuristic with no backtracking. Optimal partitioning (minimum overlap, maximum coverage) requires graph clustering; deferred to future milestone." |
 
@@ -529,9 +595,10 @@ verbatim v2.3 disclosure.
 ## See also
 
 - `developer-apex-refactor` — for code-reference questions ("where
-  is `OpportunityService` used in source"). The v0.3 / v1.4
-  scanners; what-if tools READ those scanner outputs as their
-  composition input.
+  is `OpportunityService` used in source"). The Apex tier is the
+  default-on parser-grade AST (`parsed`) plus a heuristic recall
+  scanner; the frontend LWC/Aura/VF tier stays `heuristic`. What-if
+  tools READ those graph edges as their composition input.
 - `developer-code-quality` — for quality / hygiene questions over
   the same `qualityIssues[]` mirror. `sfi.meaningful_test_audit`
   here and `sfi.test_coverage_gaps` there share the same

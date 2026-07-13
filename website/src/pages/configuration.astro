@@ -151,6 +151,16 @@ const description = "Configure sf-intelligence: live plane, HTTP serving, staged
           </tbody>
         </table>
 
+        <h2 id="tool-profile">Tool profile (advertised roster)</h2>
+        <p>Every <code>sfi.*</code> tool schema is advertised to the MCP client by default - tens of thousands of context tokens (~250 KB of <code>tools/list</code> JSON) in hosts that don't defer tool definitions. <code>SFI_TOOL_PROFILE=core</code> advertises only an <strong>18-schema core roster</strong> instead: orientation, resolve/route, the universal graph reads, and the catalog gateway (<code>list_analyses</code> / <code>describe_analysis</code> / <code>run_analysis</code>) through which every other analysis stays reachable with byte-identical output. The profile is fixed at server boot - clients fetch <code>tools/list</code> once - and dispatch is never narrowed: a non-advertised tool called directly still works.</p>
+        <table class="doc-table">
+          <thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td><code>SFI_TOOL_PROFILE</code></td><td><code>full</code></td><td><code>core</code> advertises the 18-schema roster; anything else (or unset) advertises everything. Zero behavior change under the default.</td></tr>
+          </tbody>
+        </table>
+        <p>Set it alongside <code>command</code> in your MCP client config: <code>"env": {'{'} "SFI_TOOL_PROFILE": "core" {'}'}</code>. See the <a href="/getting-started#install">install guide</a> for the full config block.</p>
+
         <h2 id="mcp">MCP server registration</h2>
         <p>The full register-once steps live in the <a href="/getting-started#install">install guide</a>. The MCP server resolves the vault as <code>org-kb/</code> relative to the <strong>current working directory</strong> (your Salesforce DX repo), not the install path.</p>
 

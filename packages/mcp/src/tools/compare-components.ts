@@ -211,8 +211,30 @@ export interface CompareComponentsOutput {
  * same canonicalization the snapshot pipeline uses, so the
  * compare tool's equality model is consistent with the diff tool's
  * "modified" check.
+ *
+ * C-3 (finding 28) — `canonicalJson(undefined)` crash-class sweep. This
+ * copy was missing the explicit `undefined` branch from R6-12's fix in
+ * `compare-vaults.ts`: a naive `typeof value !== 'object'` fall-through
+ * calls `JSON.stringify(undefined)`, which returns the JS value `undefined`
+ * (NOT a string) rather than throwing. `buildFieldDiffs` only calls
+ * `canonicalJson(valueA)`/`canonicalJson(valueB)` when `inA && inB` are
+ * both true, and both values are sourced from parsed JSON (never a real JS
+ * `undefined`) today, so this is latent rather than live — but a `Map` can
+ * store an explicit `undefined` at a present key (`out.set(prefix,
+ * undefined)`), so nothing type-level prevents a future flatten path from
+ * re-triggering the class. The explicit branch below (matching R6-12's
+ * fix) closes that landmine pre-emptively; the sentinel cannot collide
+ * with any real JSON value.
+ *
+ * Exported (only) so the C-3 regression test can exercise the `undefined`
+ * branch directly — `buildFieldDiffs`'s `inA`/`inB` guards mean no
+ * reachable end-to-end fixture built from real (JSON-round-tripped) vault
+ * data can currently trigger it, so an in-process unit call is the only
+ * way to prove the fix without waiting for a future caller to hit the
+ * landmine.
  */
-const canonicalJson = (value: unknown): string => {
+export const canonicalJson = (value: unknown): string => {
+  if (value === undefined) return '\0undefined\0';
   if (value === null || typeof value !== 'object') {
     return JSON.stringify(value);
   }

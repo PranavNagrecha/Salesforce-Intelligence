@@ -329,10 +329,14 @@ describe('renderApexMarkdown — markdown injection / escaping (CR-16c)', () => 
       // Heading newline collapsed + injected leading hash neutralized → one `# `.
       expect(lines.filter((l) => /^# /.test(l))).toHaveLength(1);
 
-      // API Name span not closed early by the backtick in apiName.
+      // API Name span not closed early by the backtick in apiName. CR-16d: a
+      // single embedded backtick forces a wider (2-backtick) fence, per
+      // CommonMark — backslash-escaping the backtick does NOT work inside a
+      // code span (backslash escapes are inert there), so the fence must be
+      // widened instead.
       const apiLine = lines.find((l) => l.startsWith('**API Name:**'));
       expect(apiLine).toBeDefined();
-      expect(apiLine).toContain('Evil\\`Class');
+      expect(apiLine).toContain('``Evil`Class``');
 
       // The apex source fence is left RAW — the backtick in source is verbatim.
       expect(result.value.body).toContain('String x = `raw`;');

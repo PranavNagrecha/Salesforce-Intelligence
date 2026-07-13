@@ -172,6 +172,7 @@ describe('dispatchTool', () => {
     'sfi.list_components',
     'sfi.get_edges',
     'sfi.get_subgraph',
+    'sfi.query_graph',
     'sfi.search_apex_source',
     'sfi.search_flow_metadata',
     'sfi.get_naming_convention_report',
@@ -194,13 +195,21 @@ describe('dispatchTool', () => {
     'sfi.live_aggregate',
     'sfi.live_duplicate_check',
     'sfi.live_owner_breakdown',
+    'sfi.live_record_access',
+    'sfi.live_record_shares',
+    'sfi.live_scheduled_jobs',
+    'sfi.live_field_history',
     'sfi.live_storage_by_object',
     'sfi.live_org_limits',
+    // decision 5 — wired the dark live pair (data-skew + security-exposure).
+    'sfi.live_data_skew',
+    'sfi.live_security_exposure',
     'sfi.live_inactive_users',
     'sfi.live_permset_holders',
     'sfi.live_zombie_accounts',
     'sfi.live_group_members',
     'sfi.live_user_permsets',
+    'sfi.live_setup_audit_trail',
     'sfi.live_license_usage',
     'sfi.live_consent',
     'sfi.live_report_usage',
@@ -222,6 +231,7 @@ describe('dispatchTool', () => {
     'sfi.effective_permissions',
     'sfi.who_can_run',
     'sfi.who_can_access_object',
+    'sfi.guest_exposure_report',
     'sfi.why_cant_user_see_record',
     'sfi.layout_for_user',
     'sfi.user_ability',
@@ -243,6 +253,8 @@ describe('dispatchTool', () => {
     'sfi.find_dependency_cycles',
     'sfi.apex_test_coverage',
     'sfi.automation_build_advisor',
+    'sfi.automation_collisions',
+    'sfi.ai_exposure_report',
     'sfi.apex_build_advisor',
     'sfi.field_change_advisor',
     'sfi.what_if_change_field_value',
@@ -264,7 +276,10 @@ describe('dispatchTool', () => {
     'sfi.what_happens_on_save',
     'sfi.why_field_changed',
     'sfi.order_of_execution',
+    // decision 5 — wired the dark record-provenance + flow-fault-hygiene tools.
+    'sfi.record_creation_paths',
     'sfi.explain_flow',
+    'sfi.flow_fault_audit',
     'sfi.explain_apex_method',
     'sfi.explain_formula',
     'sfi.unused_fields_deep',
@@ -289,6 +304,9 @@ describe('dispatchTool', () => {
     // v2.3 R2c — what-if profile-level tools.
     'sfi.what_if_merge_profiles',
     'sfi.what_if_split_profile',
+    // R7-C1 — what-if permission-set delta tools.
+    'sfi.what_if_assign_permset',
+    'sfi.what_if_revoke_permset',
     // v2.5 — documentation-generation tier.
     'sfi.generate_data_dictionary',
     'sfi.generate_admin_handbook',
@@ -304,6 +322,8 @@ describe('dispatchTool', () => {
     'sfi.method_reachability',
     // tests-for-change — smart test selection (test-impact analysis).
     'sfi.tests_for_change',
+    // R6-16 — pre-deploy change-review gate.
+    'sfi.review_change',
     // v2.8 R2 — async + integration deep tier.
     'sfi.cdc_subscribers',
     'sfi.async_chain_depth',
@@ -351,9 +371,22 @@ describe('dispatchTool', () => {
     // P13-ANNOT-tools — curated annotations overlay (read + AI propose).
     'sfi.annotations',
     'sfi.propose_annotation',
+    // R8-ANNOTATION-REVIEW — MCP review/confirm/reject loop.
+    'sfi.review_annotations',
+    'sfi.confirm_annotation',
+    'sfi.reject_annotation',
     // P13-GITHIST-tools — vault git history consumers.
     'sfi.component_history',
+    'sfi.component_change_attribution',
     'sfi.component_as_of',
+    // R6-09 — error-to-source decoder.
+    'sfi.explain_error',
+    // Finding #40 — debug-log / governor-limit runtime decoder.
+    'sfi.explain_debug_log',
+    // R7-W7 — field-history-tracking compliance-gap composer.
+    'sfi.history_tracking_gaps',
+    // R7-C6 — fleet digest across the vault registry.
+    'sfi.generate_fleet_report',
   ]);
 
   it('returns the not-implemented envelope for every stubbed tool name', async () => {
@@ -407,6 +440,42 @@ describe('dispatchTool', () => {
     expect(body.error.message.trimStart().startsWith('[')).toBe(false);
     expect(body.error.message).not.toContain('"code":');
   });
+
+  it('R6-27: sfi.live_setup_audit_trail is REGISTERED — dispatches to the real handler, not unknown-tool/not-implemented', async () => {
+    // Regression pin for the exact bug this task fixes: the handler + schema
+    // existed in live-plane.ts but the tool was never added to the
+    // tools/index.ts roster, so a live probe against a real vault returned
+    // `unknown-tool`. Dispatching through the REAL switch statement (not the
+    // handler directly) is the only way to catch that class of gap.
+    // Isolate the consent store so this dispatch is hermetic — never let the
+    // real ~/.sf-intelligence/live-consent.json leak in (would defeat the
+    // fail-closed assertion below) and never crash on a missing sourceOrg.
+    const prevConsentPath = process.env.SFI_CONSENT_PATH;
+    process.env.SFI_CONSENT_PATH = join(
+      tmpdir(),
+      `sfi-consent-server-test-${process.pid}-never.json`,
+    );
+    try {
+      const ctxWithManifest = {
+        manifest: { sourceTreeHash: 'sha256:test', sourceOrg: 'test-org' },
+      } as unknown as Context;
+      const result = await dispatchTool(ctxWithManifest, 'sfi.live_setup_audit_trail', {});
+      expect(result.content[0]?.type).toBe('text');
+      const body = JSON.parse(
+        (result.content[0] as { type: 'text'; text: string }).text,
+      ) as { error?: { kind?: string; message?: string } | string; toolName?: string };
+      expect(body.error).not.toBe('unknown-tool');
+      expect(body.error).not.toBe('not-implemented');
+      // No consent/liveEnabled passed — the registered handler still fails
+      // CLOSED (gateLive), never silently substituting a vault answer.
+      const err = body.error as { kind?: string; message?: string };
+      expect(err.kind).toBe('invalid-query');
+      expect(err.message).toMatch(/live org plane is not enabled/i);
+    } finally {
+      if (prevConsentPath === undefined) delete process.env.SFI_CONSENT_PATH;
+      else process.env.SFI_CONSENT_PATH = prevConsentPath;
+    }
+  });
 });
 
 describe('tool profiles (P13-GW-profiles)', () => {
@@ -414,10 +483,12 @@ describe('tool profiles (P13-GW-profiles)', () => {
     delete process.env['SFI_TOOL_PROFILE'];
   });
 
-  it('defaults to the FULL roster — zero behavior change without the env', () => {
+  it('defaults to the FULL roster minus hidden aliases — zero behavior change without the env', () => {
     delete process.env['SFI_TOOL_PROFILE'];
     expect(toolProfile()).toBe('full');
-    expect(advertisedTools()).toEqual(V01_TOOLS);
+    // `advertisedTools()` excludes hidden back-compat aliases; equal to the full
+    // roster with hidden filtered out (identical to V01_TOOLS when none hidden).
+    expect(advertisedTools()).toEqual(V01_TOOLS.filter((t) => !t.hidden));
   });
 
   it('core advertises exactly the 18 core schemas, in V01 order', () => {
@@ -441,12 +512,14 @@ describe('tool profiles (P13-GW-profiles)', () => {
   it('an unknown profile value falls back to full (never an empty roster)', () => {
     process.env['SFI_TOOL_PROFILE'] = 'tiny';
     expect(toolProfile()).toBe('full');
-    expect(advertisedTools()).toHaveLength(V01_TOOLS.length);
+    expect(advertisedTools()).toHaveLength(
+      V01_TOOLS.filter((t) => !t.hidden).length,
+    );
   });
 });
 
 describe('V01_TOOLS', () => {
-  it('advertises the 10 v0.1, 2 v0.2 architect, 1 v0.3 developer, 1 v1.1 admin, 1 v1.2 admin, 2 v1.5 architect, 1 v1.4 developer, 2 v1.6 business-user, 2 v2.0b composition, 2 v2.0c snapshot/compare, 2 v2.0d compliance/privacy, 2 v2.0g org-tour, 2 v1.7 freshness, 3 v2.0e lifecycle-narrator, 3 v2.0f explainer, 5 v2.4 hygiene, 5 v2.1 R3 code-quality composer, 3 v2.3 R2a what-if field-level, 2 value-change (what_if_change_field_value, value_change_audit), 3 v2.3 R2b what-if component-level, 2 v2.3 R2c what-if profile-level, 6 v2.5 documentation-generation, 5 v2.7 R2 deep code, 1 tests-for-change selection, 5 v2.8 R2 async/integration deep, 3 v2.9 R4 vocabulary, 5 v2.2 R2 find-anywhere, 1 package-impact boundary surface, 4 v3.1 cross-org, 5 v3.2 OmniStudio composer (datatransform-field-map, decision-table-browse, integration-procedure-chain, omniscript-flow, omniuicard-widget-breakdown), 1 capabilities self-description, 1 synthesize-answer answer-layer tool, 1 guidance knowledge-plane tool, 2 fleet/pulse tools (org-pulse, fleet-find), 1 universal usage dispatcher (find-component-usages), and 1 installed-package catalog (installed-package-catalog)', () => {
+  it('advertises the 10 v0.1, 2 v0.2 architect, 1 v0.3 developer, 1 v1.1 admin, 1 v1.2 admin, 2 v1.5 architect, 1 v1.4 developer, 2 v1.6 business-user, 2 v2.0b composition, 2 v2.0c snapshot/compare, 2 v2.0d compliance/privacy, 2 v2.0g org-tour, 2 v1.7 freshness, 3 v2.0e lifecycle-narrator, 3 v2.0f explainer, 5 v2.4 hygiene, 5 v2.1 R3 code-quality composer, 3 v2.3 R2a what-if field-level, 2 value-change (what_if_change_field_value, value_change_audit), 3 v2.3 R2b what-if component-level, 2 v2.3 R2c what-if profile-level, 6 v2.5 documentation-generation, 5 v2.7 R2 deep code, 1 tests-for-change selection, 1 review-change deploy gate, 5 v2.8 R2 async/integration deep, 3 v2.9 R4 vocabulary, 5 v2.2 R2 find-anywhere, 1 package-impact boundary surface, 4 v3.1 cross-org, 5 v3.2 OmniStudio composer (datatransform-field-map, decision-table-browse, integration-procedure-chain, omniscript-flow, omniuicard-widget-breakdown), 1 capabilities self-description, 1 synthesize-answer answer-layer tool, 1 guidance knowledge-plane tool, 2 fleet/pulse tools (org-pulse, fleet-find), 1 universal usage dispatcher (find-component-usages), 1 installed-package catalog (installed-package-catalog), 1 automation-collision detector (automation-collisions), 1 live setup-audit-trail tool (live_setup_audit_trail, R6-27), 1 AI-exposure audit (ai-exposure-report), 1 guest-exposure report (guest-exposure-report), and 1 history-tracking-gaps compliance audit (R7-W7)', () => {
     const names = V01_TOOLS.map((tool) => tool.name);
     expect(names).toEqual([
       'sfi.search_components',
@@ -461,10 +534,12 @@ describe('V01_TOOLS', () => {
       'sfi.org_card',
       'sfi.fleet_find',
       'sfi.fleet_drift_ranking',
+      'sfi.generate_fleet_report',
       'sfi.get_component',
       'sfi.list_components',
       'sfi.get_edges',
       'sfi.get_subgraph',
+      'sfi.query_graph',
       'sfi.search_apex_source',
       'sfi.search_flow_metadata',
       'sfi.get_naming_convention_report',
@@ -485,13 +560,20 @@ describe('V01_TOOLS', () => {
       'sfi.live_aggregate',
       'sfi.live_duplicate_check',
       'sfi.live_owner_breakdown',
+      'sfi.live_record_access',
+      'sfi.live_record_shares',
+      'sfi.live_scheduled_jobs',
+      'sfi.live_field_history',
       'sfi.live_storage_by_object',
       'sfi.live_org_limits',
+      'sfi.live_data_skew',
+      'sfi.live_security_exposure',
       'sfi.live_inactive_users',
       'sfi.live_permset_holders',
       'sfi.live_zombie_accounts',
       'sfi.live_group_members',
       'sfi.live_user_permsets',
+      'sfi.live_setup_audit_trail',
       'sfi.live_license_usage',
       'sfi.live_consent',
       'sfi.live_report_usage',
@@ -513,6 +595,7 @@ describe('V01_TOOLS', () => {
       'sfi.effective_permissions',
       'sfi.who_can_run',
       'sfi.who_can_access_object',
+      'sfi.guest_exposure_report',
       'sfi.why_cant_user_see_record',
       'sfi.layout_for_user',
       'sfi.user_ability',
@@ -534,6 +617,8 @@ describe('V01_TOOLS', () => {
       'sfi.find_dependency_cycles',
       'sfi.apex_test_coverage',
       'sfi.automation_build_advisor',
+      'sfi.automation_collisions',
+      'sfi.ai_exposure_report',
       'sfi.apex_build_advisor',
       'sfi.field_change_advisor',
       'sfi.what_if_change_field_value',
@@ -557,7 +642,9 @@ describe('V01_TOOLS', () => {
       'sfi.what_happens_on_save',
       'sfi.why_field_changed',
       'sfi.order_of_execution',
+      'sfi.record_creation_paths',
       'sfi.explain_flow',
+      'sfi.flow_fault_audit',
       'sfi.explain_apex_method',
       'sfi.explain_formula',
       'sfi.unused_fields_deep',
@@ -578,6 +665,8 @@ describe('V01_TOOLS', () => {
       'sfi.what_if_change_method_signature',
       'sfi.what_if_merge_profiles',
       'sfi.what_if_split_profile',
+      'sfi.what_if_assign_permset',
+      'sfi.what_if_revoke_permset',
       'sfi.generate_data_dictionary',
       'sfi.generate_admin_handbook',
       'sfi.generate_architecture_overview',
@@ -590,6 +679,7 @@ describe('V01_TOOLS', () => {
       'sfi.meaningful_test_audit',
       'sfi.method_reachability',
       'sfi.tests_for_change',
+      'sfi.review_change',
       'sfi.cdc_subscribers',
       'sfi.async_chain_depth',
       'sfi.scheduled_job_catalog',
@@ -623,8 +713,15 @@ describe('V01_TOOLS', () => {
       'sfi.installed_package_catalog',
       'sfi.annotations',
       'sfi.propose_annotation',
+      'sfi.review_annotations',
+      'sfi.confirm_annotation',
+      'sfi.reject_annotation',
       'sfi.component_history',
+      'sfi.component_change_attribution',
       'sfi.component_as_of',
+      'sfi.explain_error',
+      'sfi.explain_debug_log',
+      'sfi.history_tracking_gaps',
     ]);
   });
 });

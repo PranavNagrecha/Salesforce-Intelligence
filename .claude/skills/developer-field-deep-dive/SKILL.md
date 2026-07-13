@@ -103,7 +103,7 @@ Defer to another skill when:
   `developer-find-anywhere` → `sfi.find_semantic_field`.
 - **The user asks "where is `Industry__c` used in Apex?"** Apex-
   scoped reference question; defer to `developer-apex-refactor`
-  → `sfi.find_code_usages` / `sfi.find_apex_usages`.
+  → `sfi.find_code_usages`.
 - **The user asks "what breaks if I change `Industry__c`'s type?"**
   What-if projection; defer to
   `developer-impact-and-reachability` →
@@ -139,7 +139,7 @@ cuts. Section composition table (per `PLAN-v3.0` §4):
 |---|---|---|
 | `validates` | Incoming `references` from `ValidationRule` | `declared` |
 | `formulas` | Incoming `references` from formula-tokenizer `CustomField` | `parsed` |
-| `writers` | Incoming `writesTo` from Apex / Flow / WorkflowFieldUpdate / Process Builder | mixed |
+| `writers` | Incoming `writesTo` from Apex / Flow (DML `<inputAssignments>` AND R7-W2 before-save `$Record.<Field>` assignments) / WorkflowFieldUpdate / Process Builder | mixed |
 | `readers` | Incoming `readsFrom` from Apex / Flow / LWC / Aura / VF / SOQL string-literal scan | mixed (`heuristic`) |
 | `ui` | Incoming `usedInLayout` + frontend `readsFrom` to UI | `declared` / `heuristic` |
 | `integrations` | Incoming `references` / `exposes` from integration tier (NamedCredential / ExternalDataSource / ExternalService) | `declared` / `heuristic` |
@@ -195,7 +195,21 @@ hops (default 3, max 5).
 Starting from `fieldId`, queries incoming `writesTo` edges. Each
 writer is a source. Recurses into each writer for "where does
 THIS writer get its value FROM?":
-- Flow input parameters.
+- Flow INPUT fields (R6-11): a Flow writer's traced dataflow — the
+  record fields its DML input assignments (or a R7-W2 before-save
+  `$Record.<Field>` assignment) derive from — surfaces as
+  `flow-input-field` sources one hop past the flow, and the walk
+  recurses into each, so lineage chains end-to-end across multiple
+  flows (A writes F1 from F2; B writes F2 from F3 → lineage of F1
+  reaches F3). Per-hop confidence: `declared` for direct
+  $Record/record-lookup chains, `heuristic` through formulas/loops or a
+  non-`Assign` assignment operator; inputs the extractor could not
+  statically resolve are DISCLOSED in
+  `upstream.flowDataflow.unresolvedInputCount`, never guessed. A Flow
+  that writes a WHOLE record via a record-variable `<inputReference>`
+  (R7-W1) is an OBJECT-level writer only — it shows up in object impact,
+  not as a per-field writer (the fields are not enumerable; disclosed on
+  the edge).
 - Apex `readsFrom` edges.
 - Formula upstream.
 - WorkflowRule criteria items.
@@ -206,7 +220,8 @@ THIS writer get its value FROM?":
 Each source carries `sourceKind`:
 `'workflow-field-update' | 'flow-assignment' | 'apex-write' |
 'process-builder-assignment' | 'formula-source' |
-'integration-inbound' | 'source-of-truth-field'`.
+'flow-input-field' | 'integration-inbound' |
+'source-of-truth-field'`.
 
 **Downstream walk** — "what fires when this field changes?":
 
@@ -219,7 +234,13 @@ Starting from `fieldId`, walks incoming `firesWhen` (v2.0a) +
 field. Each effect carries `effectKind`:
 `'flow-decision-branch' | 'apex-if-clause' | 'workflow-fire' |
 'validation-fire' | 'integration-outbound' | 'email-fire' |
-'formula-recompute'`.
+'formula-recompute' | 'flow-field-write'`.
+
+A `flow-field-write` effect (R6-11) is the downstream mirror of
+the flow dataflow: a Flow READS this field as a dataflow source
+and writes its value onward into the fields listed in its
+`targetFields[]`; the walk continues into each written field at
+depth + 1.
 
 Each effect carries `conditionId` when the effect was sourced
 from a v2.0a `ConditionalContext`, and the verbatim `firesWhen`
@@ -257,6 +278,17 @@ the answer is the walk tree with per-step `sourceKind` /
 >   an `sfi refresh --with-reports` folds report *field usage* onto
 >   the field — no per-report node — so this category drops from
 >   `dataNotAvailable` and `field_360` shows the in-use signal.)
+>   R6-24: filter/grouping LOGIC — operator, boolean AND/OR
+>   combination, and whether a literal value is set (never the
+>   literal itself — a filter value is record data, which this
+>   product never vaults) — IS captured on the Report node at
+>   extraction time. It still does not reach field_360/field_lineage:
+>   the refresh pipeline folds every Report/Dashboard node into the
+>   field's `usedInReport`/`usedInDashboard` boolean and drops the
+>   per-report node (volume — thousands on a large org), so WHICH
+>   report filters/groups on this field, and how, stays unmodeled
+>   in synthesis even though the underlying logic is no longer
+>   entirely unparsed.
 > - **Dashboards.** Dashboard components referencing this field
 >   are not extracted by default (same `--with-reports` opt-in as
 >   Reports above).
@@ -277,9 +309,11 @@ When the response's `confidence` is `'mixed'`, the sections span
 more than one edge-confidence level. State per-section confidence
 in the response. Example: the `validates` section is `declared`
 (metadata XML), the `formulas` section is `parsed` (formula
-tokenizer), and the `readers` section is mixed because Apex reads
-are `heuristic` (v0.3 scanner) while Flow record-lookups are
-`parsed`.
+tokenizer), and the `readers` section is mixed — Apex reads are
+`parsed` when the default-on Apex AST resolved the receiver
+(dropping to `heuristic` only on the recall scanner's
+parse-failure backfill), Flow record-lookups are `parsed`, and
+LWC/Aura/VF frontend reads stay `heuristic`.
 
 ### v2.0a synthetic-id classification brittleness
 
@@ -358,12 +392,12 @@ Claude's flow:
         { "id": "CustomField:Account.Tier_Display__c", "type": "CustomField", "edgeConfidence": "parsed", "explanation": "Formula field references Industry__c via TEXT(Industry__c)" }
       ],
       "writers": [
-        { "id": "ApexClass:IndustryUpdater", "type": "ApexClass", "edgeConfidence": "heuristic", "explanation": "Apex scanner sees a write to acc.Industry__c on line 47" },
+        { "id": "ApexClass:IndustryUpdater", "type": "ApexClass", "edgeConfidence": "parsed", "source": "apex-ast", "explanation": "Apex AST resolved `acc` to Account and parsed a write to Industry__c on line 47" },
         { "id": "Flow:Sync_Account_From_External", "type": "Flow", "edgeConfidence": "parsed", "explanation": "Flow recordUpdate element 'update_industry' writes Industry__c" },
         { "id": "ExternalDataSource:SalesforceConnect_Industries", "type": "ExternalDataSource", "edgeConfidence": "declared", "explanation": "Integration writes via Salesforce Connect nightly sync" }
       ],
       "readers": [
-        { "id": "ApexClass:AccountReportBuilder", "type": "ApexClass", "edgeConfidence": "heuristic", "explanation": "Apex scanner sees acc.Industry__c read on line 215" },
+        { "id": "ApexClass:AccountReportBuilder", "type": "ApexClass", "edgeConfidence": "heuristic", "source": "apex-scanner", "explanation": "recall scanner saw acc.Industry__c read on line 215 — this file fell back to the scanner (AST parse failure), so confidence is heuristic" },
         { "id": "Flow:Tier_Account_By_Industry", "type": "Flow", "edgeConfidence": "parsed", "explanation": "Flow Get Records element reads Industry__c into the loop" },
         { "id": "LightningComponentBundle:industryDashboard", "type": "LightningComponentBundle", "edgeConfidence": "heuristic", "explanation": "LWC wire imports @salesforce/schema/Account.Industry" }
       ],
@@ -384,7 +418,7 @@ Claude's flow:
     "dataNotAvailable": ["list-view-filters", "reports", "dashboards"],
     "boundaries": [
       "v3.0 synthesis reads what v0.1-v2.9 already extracted. List-view filters, reports, dashboards, named-credential default-argument plumbing, and managed-package callers are NOT extracted; this field may have references in those categories that are invisible to this report.",
-      "Section confidence is mixed — see per-section labels. Heuristic-confidence edges (Apex scanner reads/writes, LWC scanner field reads) need source verification before refactoring."
+      "Section confidence is mixed — see per-section labels. Parsed Apex edges (source apex-ast) are high-confidence; the remaining heuristic edges (Apex recall-scanner backfill on parse-failure files, LWC scanner field reads) need source verification before refactoring."
     ]
   }
 }
@@ -410,9 +444,9 @@ Claude's flow:
 >   references Industry__c via `TEXT(Industry__c)`.
 >
 > **Writers (3, mixed)**
-> - `ApexClass:IndustryUpdater` (`heuristic`) — Apex scanner sees
->   a write to `acc.Industry__c` on line 47. Verify before
->   relying on this as the only writer.
+> - `ApexClass:IndustryUpdater` (`parsed`, `apex-ast`) — the Apex
+>   AST resolved `acc` to Account and parsed a write to
+>   `Industry__c` on line 47. High-confidence.
 > - `Flow:Sync_Account_From_External` (`parsed`) — Flow
 >   `recordUpdate` element `update_industry` writes Industry__c.
 > - `ExternalDataSource:SalesforceConnect_Industries`
@@ -420,8 +454,10 @@ Claude's flow:
 >   nightly sync. This is the primary writer.
 >
 > **Readers (3, mixed)**
-> - `ApexClass:AccountReportBuilder` (`heuristic`) — Apex scanner
->   sees `acc.Industry__c` read on line 215.
+> - `ApexClass:AccountReportBuilder` (`heuristic`, `apex-scanner`) —
+>   this file fell back to the recall scanner (AST parse failure),
+>   which saw `acc.Industry__c` read on line 215. Verify before
+>   relying on it.
 > - `Flow:Tier_Account_By_Industry` (`parsed`) — Flow Get Records
 >   element reads Industry__c into the loop.
 > - `LightningComponentBundle:industryDashboard` (`heuristic`) —

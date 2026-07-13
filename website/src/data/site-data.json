@@ -1,37 +1,42 @@
 {
-  "generatedAt": "2026-07-10T14:42:10.769Z",
-  "version": "0.1.26",
-  "toolCount": 176,
+  "generatedAt": "2026-07-13T14:47:04.161Z",
+  "version": "0.2.0",
+  "toolCount": 196,
   "skillCount": 25,
   "commandCount": 4,
-  "componentTypeCount": 78,
+  "componentTypeCount": 102,
   "edgeTypeCount": 23,
   "tests": {
     "packages": [
       {
         "name": "mcp",
-        "files": 219,
-        "cases": 3293
+        "files": 244,
+        "cases": 3768
       },
       {
         "name": "extractors",
-        "files": 69,
-        "cases": 866
+        "files": 78,
+        "cases": 936
       },
       {
         "name": "cli",
-        "files": 36,
-        "cases": 281
+        "files": 44,
+        "cases": 431
       },
       {
         "name": "graph",
-        "files": 24,
-        "cases": 235
+        "files": 25,
+        "cases": 288
       },
       {
         "name": "parsers",
-        "files": 4,
-        "cases": 143
+        "files": 5,
+        "cases": 163
+      },
+      {
+        "name": "renderers",
+        "files": 10,
+        "cases": 151
       },
       {
         "name": "patterns",
@@ -39,14 +44,9 @@
         "cases": 131
       },
       {
-        "name": "renderers",
-        "files": 7,
-        "cases": 101
-      },
-      {
         "name": "vault",
         "files": 8,
-        "cases": 87
+        "cases": 92
       },
       {
         "name": "tooling-api",
@@ -56,15 +56,15 @@
       {
         "name": "core",
         "files": 2,
-        "cases": 34
+        "cases": 41
       }
     ],
-    "totalCases": 5226,
-    "totalFiles": 376,
+    "totalCases": 6056,
+    "totalFiles": 423,
     "packageCount": 10,
-    "approx": 5200
+    "approx": 6000
   },
-  "integrationSuiteCount": 7,
+  "integrationSuiteCount": 3,
   "gates": [
     "Type-check",
     "Lint",
@@ -87,33 +87,39 @@
   "packageDescriptions": [
     {
       "name": "mcp",
-      "files": 219,
-      "cases": 3293,
-      "description": "The 176 read-only tools + router + grounding layer"
+      "files": 244,
+      "cases": 3768,
+      "description": "The 196 read-only tools + router + grounding layer"
     },
     {
       "name": "extractors",
-      "files": 69,
-      "cases": 866,
+      "files": 78,
+      "cases": 936,
       "description": "Metadata parsing for every Salesforce component type"
     },
     {
       "name": "cli",
-      "files": 36,
-      "cases": 281,
+      "files": 44,
+      "cases": 431,
       "description": "The sfi command-line tool"
     },
     {
       "name": "graph",
-      "files": 24,
-      "cases": 235,
+      "files": 25,
+      "cases": 288,
       "description": "The DuckDB dependency-graph engine"
     },
     {
       "name": "parsers",
-      "files": 4,
-      "cases": 143,
+      "files": 5,
+      "cases": 163,
       "description": "Formula / SOQL / source tokenizers"
+    },
+    {
+      "name": "renderers",
+      "files": 10,
+      "cases": 151,
+      "description": "Markdown vault rendering"
     },
     {
       "name": "patterns",
@@ -122,15 +128,9 @@
       "description": "Heuristic recognizers (PII, naming, code quality)"
     },
     {
-      "name": "renderers",
-      "files": 7,
-      "cases": 101,
-      "description": "Markdown vault rendering"
-    },
-    {
       "name": "vault",
       "files": 8,
-      "cases": 87,
+      "cases": 92,
       "description": "Vault layout, manifest, freshness"
     },
     {
@@ -142,7 +142,7 @@
     {
       "name": "core",
       "files": 2,
-      "cases": 34,
+      "cases": 41,
       "description": "core package tests"
     }
   ]

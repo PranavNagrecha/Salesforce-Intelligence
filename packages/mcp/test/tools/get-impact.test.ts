@@ -228,6 +228,72 @@ describe('getImpactHandler', () => {
     expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
   });
 
+  it('R6-19: renders a graph TD mermaid diagram when the impact slice is under the diagram node cap', async () => {
+    const result = await getImpactHandler(ctx, {
+      componentId: 'CustomField:Account.Industry__c',
+      hops: 1,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.impact.nodes.length).toBeLessThanOrEqual(30);
+    expect(result.value.data.diagram).toBeDefined();
+    expect(result.value.data.diagramOmittedReason).toBeUndefined();
+    const diagram = result.value.data.diagram ?? '';
+    expect(diagram.startsWith('```mermaid\ngraph TD\n')).toBe(true);
+    expect(diagram.endsWith('```')).toBe(true);
+  });
+
+  it('R6-19: the root node renders as a circle (double-paren shape), other nodes as boxes', async () => {
+    const result = await getImpactHandler(ctx, {
+      componentId: 'CustomField:Account.Industry__c',
+      hops: 1,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const diagram = result.value.data.diagram ?? '';
+    const lines = diagram.split('\n');
+    const rootLine = lines.find((l) => l.includes('CustomField: Industry__c'));
+    expect(rootLine).toBeDefined();
+    expect(rootLine).toContain('((');
+    const otherLine = lines.find((l) => l.includes('CustomObject: Account'));
+    expect(otherLine).toBeDefined();
+    expect(otherLine).not.toContain('((');
+    expect(otherLine).toContain('[');
+  });
+
+  it('R6-19: node labels carry the component-type prefix and edge labels carry edgeType', async () => {
+    const result = await getImpactHandler(ctx, {
+      componentId: 'CustomField:Account.Industry__c',
+      hops: 1,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const diagram = result.value.data.diagram ?? '';
+    expect(diagram).toContain('ValidationRule: IndustryVR');
+    expect(diagram).toContain('CustomObject: Account');
+    expect(diagram).toMatch(/-->\|parentOf\|/);
+    expect(diagram).toMatch(/-->\|references\|/);
+  });
+
+  it('R6-19: mermaid entity ids are sanitized (dots/colons never leak into an id token)', async () => {
+    const result = await getImpactHandler(ctx, {
+      componentId: 'CustomField:Account.Industry__c',
+      hops: 1,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const diagram = result.value.data.diagram ?? '';
+    const nodeDeclLine = diagram
+      .split('\n')
+      .find((l) => l.includes('CustomField: Industry__c'));
+    expect(nodeDeclLine).toBeDefined();
+    // The id token (before the shape bracket) has no `:` or `.`.
+    const idToken = nodeDeclLine?.trim().split(/[[(]/)[0]?.trim();
+    expect(idToken).toBeDefined();
+    expect(idToken).not.toContain(':');
+    expect(idToken).not.toContain('.');
+  });
+
   it('discloses that lookup relationships are modeled as lookupTo edges when the target is a CustomObject', async () => {
     const result = await getImpactHandler(ctx, {
       componentId: 'CustomObject:Account',
@@ -795,6 +861,81 @@ describe('getImpactHandler', () => {
       rmSync(ghostDir, { recursive: true, force: true });
     }
   });
+
+  // R6-19: the diagram cap (30) is deliberately far below the node cap (200)
+  // — a slice comfortably under the OVERALL truncation ceiling can still be
+  // too big to render readably, and must OMIT the diagram (never silently
+  // render a partial one) rather than reuse the node-cap truncation path.
+  it('R6-19: omits the diagram (with a reason naming the count) above IMPACT_DIAGRAM_MAX_NODES, even when the overall impact slice is NOT truncated', async () => {
+    const diagCapDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-get-impact-diagramcap-'));
+    try {
+      const dbPath = join(diagCapDir, 'diagramcap.db');
+      const opened = await openGraph(dbPath);
+      if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+      const diagStore = opened.value;
+
+      const fieldId = 'CustomField:Account.DiagField__c';
+      const refNodes: Node[] = [];
+      const refEdges: Edge[] = [];
+      // 35 referencers: over IMPACT_DIAGRAM_MAX_NODES (30) but well under
+      // IMPACT_MAX_NODES (200), so ONLY the diagram cap fires.
+      for (let i = 0; i < 35; i++) {
+        const vrId = `ValidationRule:Account.DiagVR${String(i).padStart(2, '0')}`;
+        refNodes.push(
+          makeNode({
+            id: vrId,
+            type: 'ValidationRule',
+            apiName: `DiagVR${String(i).padStart(2, '0')}`,
+            label: `Diag VR ${i}`,
+            parentId: 'CustomObject:Account',
+            sourcePath: `objects/Account/validationRules/DiagVR${i}.validationRule-meta.xml`,
+          }),
+        );
+        refEdges.push(
+          makeEdge({
+            fromId: vrId,
+            toId: fieldId,
+            edgeType: 'references',
+            confidence: 'parsed',
+            source: 'formula-tokenizer',
+          }),
+        );
+      }
+      const diagSeed: ExtractionResult = {
+        nodes: [
+          makeNode({ id: 'CustomObject:Account', apiName: 'Account', label: 'Account' }),
+          makeNode({
+            id: fieldId,
+            type: 'CustomField',
+            apiName: 'DiagField__c',
+            label: 'Diag Field',
+            parentId: 'CustomObject:Account',
+            sourcePath: 'objects/Account/fields/DiagField__c.field-meta.xml',
+          }),
+          ...refNodes,
+        ],
+        edges: refEdges,
+      };
+      const imported = await importExtractionResults(diagStore, [diagSeed]);
+      if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+      const diagCtx: Context = { vaultRoot: diagCapDir, manifest: FIXTURE_MANIFEST, graph: diagStore };
+
+      const result = await getImpactHandler(diagCtx, { componentId: fieldId, hops: 1 });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+
+      // 35 referencers + the root field = 36 nodes, under the 200-node cap.
+      expect(result.value.data.truncated).toBe(false);
+      expect(result.value.data.impact.nodes.length).toBeGreaterThan(30);
+      expect(result.value.data.diagram).toBeUndefined();
+      expect(result.value.data.diagramOmittedReason).toBeDefined();
+      expect(result.value.data.diagramOmittedReason).toMatch(/diagram omitted: 36 nodes exceeds cap \(30\)/);
+
+      await closeGraph(diagStore);
+    } finally {
+      rmSync(diagCapDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('getImpactInputSchema', () => {
@@ -967,5 +1108,82 @@ describe('getImpactHandler: method-level callers via callsApex methods[] (P4-C5)
     );
     expect(callEdge).toBeDefined();
     expect(callEdge?.properties['methods']).toEqual(['deleteRecord', 'save']);
+  });
+});
+
+describe('R6-24 Option B — get_impact names folded report/dashboard dependents', () => {
+  it('surfaces usedInReports/usedInDashboards on reportUsage + disclosure (no Report edges)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-impact-reportb-'));
+    const opened = await openGraph(join(dir, 'reportb.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const localStore = opened.value;
+    try {
+      const fieldId = 'CustomField:Account.ReportOnly__c';
+      const local: ExtractionResult = {
+        nodes: [
+          makeNode({
+            id: 'CustomObject:Account',
+            apiName: 'Account',
+            label: 'Account',
+          }),
+          makeNode({
+            id: fieldId,
+            type: 'CustomField',
+            apiName: 'ReportOnly__c',
+            label: 'Report Only',
+            parentId: 'CustomObject:Account',
+            sourcePath: 'objects/Account/fields/ReportOnly__c.field-meta.xml',
+            properties: {
+              dataType: 'Text',
+              usedInReport: true,
+              usedInDashboard: true,
+              usedInReports: ['Exec/Forecast', 'Sales/Pipeline'],
+              usedInDashboards: ['Exec/KPIs'],
+            },
+          }),
+        ],
+        edges: [
+          makeEdge({
+            fromId: 'CustomObject:Account',
+            toId: fieldId,
+            edgeType: 'parentOf',
+            confidence: 'declared',
+            source: 'extractor:custom-object',
+          }),
+        ],
+      };
+      const imp = await importExtractionResults(localStore, [local]);
+      if (!imp.ok) throw new Error(imp.error.message);
+      const localCtx: Context = {
+        vaultRoot: dir,
+        manifest: FIXTURE_MANIFEST,
+        graph: localStore,
+      };
+      const result = await getImpactHandler(localCtx, {
+        componentId: fieldId,
+        hops: 1,
+        edgeTypes: ['references', 'readsFrom', 'writesTo'],
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      // No Report/Dashboard nodes in the impact slice — they were never imported.
+      expect(
+        result.value.data.impact.nodes.some(
+          (n) => n.type === 'Report' || n.type === 'Dashboard',
+        ),
+      ).toBe(false);
+      expect(result.value.data.reportUsage?.reportNames).toEqual([
+        'Exec/Forecast',
+        'Sales/Pipeline',
+      ]);
+      expect(result.value.data.reportUsage?.dashboardNames).toEqual(['Exec/KPIs']);
+      expect(result.value.data.disclosure).toContain('Sales/Pipeline');
+      expect(result.value.data.disclosure).toContain('Exec/Forecast');
+      expect(result.value.data.disclosure).toContain('Exec/KPIs');
+      expect(result.value.data.disclosure).toMatch(/folded/i);
+    } finally {
+      await closeGraph(localStore);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

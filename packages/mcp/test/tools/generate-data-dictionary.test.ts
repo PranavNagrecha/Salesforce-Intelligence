@@ -58,6 +58,7 @@ const FIELD_INDUSTRY = 'CustomField:Account.Industry__c';
 const FIELD_OWNER = 'CustomField:Account.Owner__c';
 const FIELD_NOTES = 'CustomField:Account.Notes__c';
 const FIELD_SCORE = 'CustomField:Account.Score__c';
+const FIELD_REGION = 'CustomField:Account.Region__c';
 const VR_ID = 'ValidationRule:Account.MustHaveIndustry';
 const LAYOUT_ID = 'Layout:Account.Default';
 const TRIGGER_ID = 'ApexTrigger:AccountTrigger';
@@ -113,6 +114,18 @@ const seed: ExtractionResult = {
       },
     }),
     makeNode({
+      id: FIELD_REGION,
+      type: 'CustomField',
+      apiName: 'Region__c',
+      label: 'Region',
+      parentId: ACCOUNT_ID,
+      properties: {
+        dataType: 'MasterDetail',
+        referenceTo: 'Territory__c',
+        required: true,
+      },
+    }),
+    makeNode({
       id: VR_ID,
       type: 'ValidationRule',
       apiName: 'Account.MustHaveIndustry',
@@ -128,10 +141,36 @@ const seed: ExtractionResult = {
     makeEdge({ fromId: ACCOUNT_ID, toId: FIELD_OWNER, edgeType: 'parentOf' }),
     makeEdge({ fromId: ACCOUNT_ID, toId: FIELD_NOTES, edgeType: 'parentOf' }),
     makeEdge({ fromId: ACCOUNT_ID, toId: FIELD_SCORE, edgeType: 'parentOf' }),
+    makeEdge({ fromId: ACCOUNT_ID, toId: FIELD_REGION, edgeType: 'parentOf' }),
     makeEdge({ fromId: ACCOUNT_ID, toId: VR_ID, edgeType: 'parentOf' }),
     makeEdge({ fromId: LAYOUT_ID, toId: FIELD_INDUSTRY, edgeType: 'usedInLayout' }),
     makeEdge({ fromId: TRIGGER_ID, toId: ACCOUNT_ID, edgeType: 'triggersOn' }),
     makeEdge({ fromId: FLOW_ID, toId: ACCOUNT_ID, edgeType: 'triggersOn' }),
+    // Outgoing lookupTo edges (v3.3 first-class relationship tier) —
+    // deliberately mirror the CustomField properties above, since that's
+    // what `sfi refresh` would extract for Owner__c / Region__c.
+    makeEdge({
+      fromId: FIELD_OWNER,
+      toId: 'CustomObject:User',
+      edgeType: 'lookupTo',
+      properties: { relationshipType: 'Lookup' },
+    }),
+    makeEdge({
+      fromId: FIELD_REGION,
+      toId: 'CustomObject:Territory__c',
+      edgeType: 'lookupTo',
+      properties: { relationshipType: 'MasterDetail' },
+    }),
+    // R6-19: INBOUND lookupTo — a Contact.AccountId-style field on a
+    // DIFFERENT object pointing AT Account. No CustomField NODE for it is
+    // seeded (real orgs frequently omit standard-object fields from the
+    // vault) — the edge alone must be enough for the inbound ERD half.
+    makeEdge({
+      fromId: 'CustomField:Contact.AccountId',
+      toId: ACCOUNT_ID,
+      edgeType: 'lookupTo',
+      properties: { relationshipType: 'MasterDetail' },
+    }),
   ],
 };
 
@@ -359,6 +398,94 @@ describe('generateDataDictionaryHandler (seeded graph)', () => {
     expect(relSection).not.toContain('Industry__c');
   });
 
+  it('R6-19: renders an Entity Relationship Diagram section with a mermaid erDiagram fence', async () => {
+    const result = await generateDataDictionaryHandler(ctx, {
+      objectId: ACCOUNT_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.data.document.body;
+    expect(body).toContain('## Entity Relationship Diagram');
+    expect(body).toContain('```mermaid');
+    expect(body).toContain('erDiagram');
+  });
+
+  it('R6-19: renders the OUTGOING Lookup (Owner__c -> User) with the zero-or-more connector', async () => {
+    const result = await generateDataDictionaryHandler(ctx, {
+      objectId: ACCOUNT_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.data.document.body;
+    const erdIdx = body.indexOf('## Entity Relationship Diagram');
+    const erdSection = body.slice(erdIdx, body.indexOf('## Validation Rules'));
+    expect(erdSection).toContain('||--o{');
+    expect(erdSection).toContain('Lookup (Owner__c)');
+  });
+
+  it('R6-19: renders the OUTGOING Master-Detail (Region__c -> Territory__c) with the one-or-more connector', async () => {
+    const result = await generateDataDictionaryHandler(ctx, {
+      objectId: ACCOUNT_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.data.document.body;
+    const erdIdx = body.indexOf('## Entity Relationship Diagram');
+    const erdSection = body.slice(erdIdx, body.indexOf('## Validation Rules'));
+    expect(erdSection).toContain('||--|{');
+    expect(erdSection).toContain('MasterDetail (Region__c)');
+    expect(erdSection).toContain('Territory__c');
+  });
+
+  it('R6-19: renders the INBOUND lookupTo from Contact.AccountId even though no Contact CustomField node was seeded', async () => {
+    const result = await generateDataDictionaryHandler(ctx, {
+      objectId: ACCOUNT_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.data.document.body;
+    const erdIdx = body.indexOf('## Entity Relationship Diagram');
+    const erdSection = body.slice(erdIdx, body.indexOf('## Validation Rules'));
+    expect(erdSection).toContain('Contact');
+    expect(erdSection).toContain('AccountId');
+  });
+
+  it('R6-19: sanitizes api names into mermaid-safe entity ids (Region__c carries __)', async () => {
+    const result = await generateDataDictionaryHandler(ctx, {
+      objectId: ACCOUNT_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.data.document.body;
+    const erdIdx = body.indexOf('## Entity Relationship Diagram');
+    const erdSection = body.slice(erdIdx, body.indexOf('## Validation Rules'));
+    const relationshipLine = erdSection
+      .split('\n')
+      .find((l) => l.includes('||--|{') && l.includes('Territory__c'));
+    expect(relationshipLine).toBeDefined();
+    // Entity ids (outside the quoted labels) are plain identifiers.
+    expect(relationshipLine).toMatch(/^ {4}[A-Za-z_][A-Za-z0-9_]*\["/);
+  });
+
+  it('R6-19: always surfaces the ERD scope disclosure in boundaries', async () => {
+    const result = await generateDataDictionaryHandler(ctx, {
+      objectId: ACCOUNT_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const joined = result.value.data.document.boundaries.join('\n');
+    expect(joined).toContain('lookupTo` edges, extraction-time');
+  });
+
+  it('R6-19: sectionConfidence includes Entity Relationship Diagram', async () => {
+    const result = await generateDataDictionaryHandler(ctx, {
+      objectId: ACCOUNT_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.document.sectionConfidence['Entity Relationship Diagram']).toBeDefined();
+  });
+
   it('surfaces incoming usedInLayout edges as Page Layouts entries', async () => {
     const result = await generateDataDictionaryHandler(ctx, {
       objectId: ACCOUNT_ID,
@@ -411,5 +538,197 @@ describe('generateDataDictionaryHandler (seeded graph)', () => {
     const joined = boundaries.join('\n');
     expect(joined).toContain('offline vault');
     expect(joined).toContain('2026-05-27T14:33:08Z');
+  });
+
+  // R6-21: format: 'csv' — mirrors generate_architecture_overview's format:
+  // 'html' plumbing (the document is always returned; csv is additive).
+  it('omits csv unless format is csv (default markdown)', async () => {
+    const result = await generateDataDictionaryHandler(ctx, {
+      objectId: ACCOUNT_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.csv).toBeUndefined();
+  });
+
+  it('returns one CSV row per field when format is csv', async () => {
+    const result = await generateDataDictionaryHandler(ctx, {
+      objectId: ACCOUNT_ID,
+      format: 'csv',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // The markdown document is still returned alongside the csv.
+    expect(result.value.data.document.body).toContain('## Fields');
+    const csv = result.value.data.csv;
+    expect(csv).toBeDefined();
+    if (csv === undefined) return;
+    const lines = csv.trimEnd().split('\n');
+    const dataLines = lines.filter((l) => !l.startsWith('#'));
+    expect(dataLines[0]).toBe(
+      'objectApiName,label,apiName,dataType,formula,description,required',
+    );
+    // 5 fields seeded on Account: Industry__c, Owner__c, Notes__c, Score__c,
+    // and Region__c (added by the R6-19 ERD fixture on the shared graph).
+    expect(dataLines.length).toBe(6);
+    const joined = dataLines.join('\n');
+    expect(joined).toContain('Industry__c');
+    expect(joined).toContain('Owner__c');
+    expect(joined).toContain('Notes__c');
+    expect(joined).toContain('Score__c');
+    expect(joined).toContain('Region__c');
+  });
+
+  it('marks the formula column true only for the formula field', async () => {
+    const result = await generateDataDictionaryHandler(ctx, {
+      objectId: ACCOUNT_ID,
+      format: 'csv',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const csv = result.value.data.csv ?? '';
+    const scoreRow = csv.split('\n').find((l) => l.includes('Score__c'));
+    const industryRow = csv.split('\n').find((l) => l.includes('Industry__c'));
+    expect(scoreRow).toContain(',true,');
+    expect(industryRow).toContain(',false,');
+  });
+
+  it('embeds the object id and freshness disclosure as comment lines', async () => {
+    const result = await generateDataDictionaryHandler(ctx, {
+      objectId: ACCOUNT_ID,
+      format: 'csv',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const csv = result.value.data.csv ?? '';
+    expect(csv).toContain(`# object: ${ACCOUNT_ID}`);
+    expect(csv).toContain('# Generated from offline vault on');
+  });
+});
+
+// R6-21: an object with MANY fields must not overflow the response budget —
+// the csv is fitted independently of `document` (rows dropped tail-first with
+// a `# truncated: …` comment), never silently corrupted by the global guard's
+// blunt slimDataStrings head-cut (the same H7-class risk CR-08/CR-P3-4 guard
+// against for markdown/html elsewhere in this tool family).
+describe('generateDataDictionaryHandler csv byte budget (R6-21)', () => {
+  let store: GraphStore;
+  let ctx: Context;
+  const prevMax = process.env['SFI_MAX_RESPONSE_BYTES'];
+  const MANY_FIELDS_OBJECT = 'CustomObject:BigObject__c';
+
+  beforeAll(async () => {
+    // Small enough that 300 verbose field rows overflow, large enough that a
+    // TRIMMED csv can still fit alongside the (small) markdown document.
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '6000';
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-datadict-bigcsv-'));
+    const opened = await openGraph(join(dir, 'big.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    store = opened.value;
+    ctx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: store };
+    const nodes: Node[] = [
+      makeNode({ id: MANY_FIELDS_OBJECT, type: 'CustomObject', apiName: 'BigObject__c', label: 'Big Object' }),
+    ];
+    const edges: Edge[] = [];
+    for (let i = 0; i < 300; i += 1) {
+      const fieldId = `CustomField:BigObject__c.Field_${String(i)}__c`;
+      nodes.push(
+        makeNode({
+          id: fieldId,
+          type: 'CustomField',
+          apiName: `Field_${String(i)}__c`,
+          label: `Field ${String(i)}`,
+          parentId: MANY_FIELDS_OBJECT,
+          properties: {
+            dataType: 'Text',
+            description: `A fairly verbose description for field number ${String(i)} that pads out the row.`,
+          },
+        }),
+      );
+      edges.push({ fromId: MANY_FIELDS_OBJECT, toId: fieldId, edgeType: 'parentOf', confidence: 'declared', source: 'unit-test', properties: {} });
+    }
+    const imported = await importExtractionResults(store, [{ nodes, edges }]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    if (prevMax === undefined) delete process.env['SFI_MAX_RESPONSE_BYTES'];
+    else process.env['SFI_MAX_RESPONSE_BYTES'] = prevMax;
+  });
+
+  it('fits the csv under budget by dropping rows tail-first with a truncation comment', async () => {
+    const result = await generateDataDictionaryHandler(ctx, {
+      objectId: MANY_FIELDS_OBJECT,
+      format: 'csv',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const csv = result.value.data.csv;
+    expect(csv).toBeDefined();
+    if (csv === undefined) return;
+    // The honesty footer in the markdown document must still survive.
+    expect(result.value.data.document.body).toContain('## Boundaries');
+    // The earliest field (kept, tail-dropped) is present; a late one is not.
+    expect(csv).toContain('Field_0__c');
+    expect(csv).toContain('# truncated: showing');
+    // The full envelope (document + csv) must fit under the configured budget.
+    const envelopeBytes = Buffer.byteLength(
+      JSON.stringify({ data: result.value.data, vaultState: result.value.vaultState }),
+      'utf8',
+    );
+    expect(envelopeBytes).toBeLessThanOrEqual(6000);
+  });
+});
+
+describe('generateDataDictionaryHandler — R6-19 ERD cap behavior', () => {
+  const HUB_ID = 'CustomObject:Hub__c';
+  const INBOUND_COUNT = 50; // > erd-mermaid.ts's default maxRelationships (40)
+
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    const opened = await openGraph(join(tempDir, 'erd-cap.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    store = opened.value;
+    ctx = { vaultRoot: tempDir, manifest: FIXTURE_MANIFEST, graph: store };
+
+    const edges: Edge[] = [];
+    for (let i = 0; i < INBOUND_COUNT; i += 1) {
+      const suffix = i.toString().padStart(3, '0');
+      edges.push(
+        makeEdge({
+          fromId: `CustomField:Spoke_${suffix}__c.Hub__c`,
+          toId: HUB_ID,
+          edgeType: 'lookupTo',
+          properties: { relationshipType: 'Lookup' },
+        }),
+      );
+    }
+    const imported = await importExtractionResults(store, [
+      {
+        nodes: [makeNode({ id: HUB_ID, type: 'CustomObject', apiName: 'Hub__c', label: 'Hub' })],
+        edges,
+      },
+    ]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  it('caps the ERD at maxRelationships and discloses the truncation', async () => {
+    const result = await generateDataDictionaryHandler(ctx, { objectId: HUB_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.data.document.body;
+    const erdIdx = body.indexOf('## Entity Relationship Diagram');
+    const nextHeadingIdx = body.indexOf('## ', erdIdx + 1);
+    const erdSection = body.slice(erdIdx, nextHeadingIdx);
+    const relationshipLines = erdSection.split('\n').filter((l) => l.includes('||--'));
+    expect(relationshipLines.length).toBeLessThanOrEqual(40);
+    expect(erdSection).toMatch(/capped at 40 of 50/);
   });
 });

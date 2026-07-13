@@ -98,12 +98,17 @@ you meant** instead of letting the host silently commit. When nothing fits, it
 `logGap: true`). (A deterministic, no-LLM routing mode is available via
 `SFI_ROUTER_MODE=offline` for CI / air-gapped hosts.)
 
-An **experimental RRF hybrid embeddings layer** is available for early adopters
-(`SFI_EMBEDDINGS=1` + `npm i @huggingface/transformers`). It fuses the TF-IDF
-candidates with a locally cached neural model (`~23 MB`, downloaded once on
-first use) via Reciprocal Rank Fusion. Off by default — the lexical path is
-byte-identical when unset. The honesty/refusal decision and the deterministic
-`route.tools` plan are not affected. See
+An **experimental, opt-in RRF hybrid embeddings layer** is available for early
+adopters (`SFI_EMBEDDINGS=1` + `npm i @huggingface/transformers`). It fuses the
+TF-IDF candidates with a locally cached neural model (`~23 MB`) via Reciprocal
+Rank Fusion. The model is **not bundled** with the npm package and isn't
+fetched automatically — it requires the separate peer-dependency install
+above, and the download-on-first-use path is still being hardened, so treat it
+as a manual opt-in step, not something that happens for you. **Off by
+default** either way — the lexical path is byte-identical when unset, and if
+the model isn't installed or cached the funnel silently falls back to
+lexical-only. The honesty/refusal decision and the deterministic `route.tools`
+plan are not affected. See
 [`docs/configuration.md`](./docs/configuration.md) for details.
 
 ## Refusal behavior — fail closed, offer the read
@@ -221,7 +226,7 @@ Eight capability areas, each answerable in natural language (ask
 | **Understand** | "what does this validation rule do?" · "what happens when an Account is saved?" (automation on standard objects works even when the object file was not retrieved; `objectModeled: false` is surfaced) |
 | **Impact & dependencies** | "what breaks if I delete this field?" · "is it safe to deactivate this flow?" |
 | **Permissions & sharing** | "why can't this user see this record?" · "who can edit the Salary field?" · "who holds the Sales Manager permission set?" (live) · "what does user Jane hold?" (live) · "who's in the Support queue?" (live) · "which active users have zero permission-set assignments?" (live) |
-| **Automation & code** | "what runs on Case create?" · "which Apex methods have no real test coverage?" |
+| **Automation & code** | "what runs on Case create?" · "which Apex methods have no real test coverage?" · "decode this Apex debug log / governor-limit exception to the class that ran" |
 | **Decision-support (before you build/change)** | "before I add automation to this object, what already runs there?" · "building Apex here — what should I watch out for?" · "before I change/require this field, what breaks?" |
 | **Architect & developer** | "are there circular Apex dependencies?" · "which classes have no test reference?" · "does the vault still match the live org?" |
 | **Integrations** | "what external systems does this org talk to?" · "list every outbound endpoint" |
@@ -312,6 +317,25 @@ rather than papering over the gap with general Salesforce knowledge:
   - **Resolve:** p95 under 2s on the CI vault (`pnpm eval:scale`, `SCALE_BUDGET_MS`).
   Very large production orgs may still need narrowed retrieves or multiple vaults.
 
+## Review changes before you deploy (PR gate)
+
+`sfi.review_change` is the pre-deploy gate: hand it the components a PR /
+`package.xml` / `git diff` touches and it returns a per-component risk verdict
+(`blocking` / `risky` / `review` / `safe`), each one's direct dependents, and the
+tests to run — most-dangerous first, entirely offline against the target org's
+last vault refresh. A deleted component with any dependent fails **closed**
+(`blocking`); a modified component with firm dependents is `risky`; `overallVerdict`
+is the worst across the set. Point it at another vault (`againstVault`) to answer
+"will this changeset break anything in **prod**?" against that org's graph.
+
+The same analysis ships as a GitHub Action — the composite Action at
+[`.github/actions/review-change`](./.github/actions/review-change/README.md)
+emits SARIF 2.1.0 (findings show up inline on the PR's "Files changed" tab and in
+the Security tab) plus a markdown PR comment, with a 0/1/2 exit-code gate. Copy
+[`docs/ci/review-change-pr-gate.example.yml`](./docs/ci/review-change-pr-gate.example.yml)
+into your org repo to wire it up. It never runs `sfi refresh` and never calls the
+`sf` CLI — it only reads an already-built vault.
+
 ## Try it now — no Salesforce org needed
 
 Want to see it work before pointing it at your own org? One command serves a
@@ -377,6 +401,39 @@ for the live tool map.
 > PATH, so first-run setup is `sfi init` / `sfi refresh` instead of the longer
 > `npx -y sf-intelligence …` form.
 
+### Optional: full roster vs compact core
+
+Every `sfi.*` tool schema is advertised by default — most MCP hosts pay a real
+token tax for that (~250 KB of `tools/list` JSON) if they don't defer tool
+definitions. Set `SFI_TOOL_PROFILE=core` on the server process to advertise
+only an **18-tool core roster** instead (orientation, resolve/route, the
+universal graph reads, and a catalog gateway — `list_analyses` /
+`describe_analysis` / `run_analysis` — that reaches every other tool with
+byte-identical output). Dispatch is never narrowed — a non-advertised tool
+still works if called directly; only what's *advertised* at boot changes. Add
+`"env": { "SFI_TOOL_PROFILE": "core" }` alongside `"command"` in the config
+block above. Default stays `full` — this is purely opt-in. See
+[docs/configuration.md](./docs/configuration.md) for the full reference.
+
+### Install as a Claude Code plugin
+
+The MCP registration above gets you the `sfi.*` tools. Installing
+`sf-intelligence` as a **Claude Code plugin** additionally gets you **25
+skills** that auto-activate on Salesforce vocabulary (no need to remember tool
+names) and **4 slash commands** (`/sfi-onboard`, `/sfi-init`, `/sfi-refresh`,
+`/sfi-status`) that wrap the `sfi` CLI. Install it from this repo's
+marketplace:
+
+```sh
+/plugin marketplace add PranavNagrecha/Salesforce-Intelligence
+/plugin install sf-intelligence@sf-intelligence
+```
+
+Run `/reload-plugins` (or restart Claude Code) to pick it up in the current
+session; `/plugin list` confirms it's installed and enabled. The plugin
+manifest registers the same MCP server shown above, so once it's installed
+you don't need a separate `claude mcp add` step.
+
 ## First run
 
 Work from **your per-org repository** — the Salesforce DX project you want to
@@ -412,8 +469,13 @@ In a hurry on a big org? `sfi refresh --staged` serves a skeleton vault in
 seconds and the ten priority metadata families within minutes, then finishes
 the full build behind the scenes — see the
 [first-refresh guide](./docs/guides/first-refresh.md). Re-refreshes re-extract
-by default (results always match a cold build); `--incremental` reuses the
-per-file parse cache for the same result, faster.
+and rebuild the graph in full by default (results always match a cold build);
+`--incremental` reuses the per-file parse cache for the same result, faster,
+and `--incremental-graph` additionally re-imports only the changed nodes/edges
+into the graph instead of rebuilding it — combine both for the largest win.
+`--types <list>` scopes either flag to specific metadata types (e.g.
+`sfi refresh --types Flow --incremental-graph`); a scoped refresh only ever
+touches the requested type(s) — every other type in the vault is left as-is.
 
 No global install? Prefix each with `npx -y sf-intelligence`, e.g.
 `npx -y sf-intelligence init`.
@@ -431,7 +493,9 @@ Then ask anything the vault can answer, in whatever MCP client you registered:
 **Running sf-intelligence as a Claude Code plugin?** The same operations are
 available as slash commands — `/sfi-onboard` (guided first run), `/sfi-init`,
 `/sfi-refresh`, `/sfi-status` — and the coaching skills auto-activate when
-Salesforce vocabulary appears.
+Salesforce vocabulary appears. See [Install as a Claude Code
+plugin](#install-as-a-claude-code-plugin) above if you haven't installed it
+that way yet.
 
 ### Serve it over HTTP (read-only)
 
@@ -441,10 +505,14 @@ other machines or clients, the same server speaks streamable HTTP:
 ```sh
 # From the vault directory: prints a bearer token once, listens on 127.0.0.1:8787.
 sfi serve --http --generate-token
+
+# Team path: JSON token→identity map (annotation writes attribute to the caller).
+# sfi serve --http --tokens-file ./tokens.json
 ```
 
 The remote posture is deliberately strict: a bearer token is required on every
-request, the bind is loopback unless you pass `--host` (a non-loopback host
+request (solo `--token` / `--generate-token`, or `--tokens-file` for per-caller
+identity), the bind is loopback unless you pass `--host` (a non-loopback host
 warns and refuses to run tokenless), and the **live plane is hard-disabled over
 HTTP** — a remote caller can never spend your Salesforce API budget, even if
 the host has standing live consent. A refresh underneath a running server is

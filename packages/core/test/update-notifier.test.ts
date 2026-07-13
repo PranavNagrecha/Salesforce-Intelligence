@@ -17,11 +17,16 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  buildVersionCheckCounterPayload,
   checkForUpdate,
   compareVersions,
   formatUpdateNotice,
   getStateDir,
+  isVersionCheckCounterEnabled,
+  maybePingVersionCheckCounter,
+  versionCheckCounterBucket,
   type UpdateCheckResult,
+  type VersionCheckCounterPayload,
 } from '../src/update-notifier.js';
 
 describe('compareVersions', () => {
@@ -112,6 +117,9 @@ describe('checkForUpdate', () => {
     // marker they exercise.
     for (const marker of CI_MARKERS) vi.stubEnv(marker, '');
     vi.stubEnv('SFI_NO_UPDATE_CHECK', '');
+    // Default-off telemetry: clear opt-in gates so unrelated tests never ping.
+    vi.stubEnv('SFI_TELEMETRY_OPTIN', '');
+    vi.stubEnv('SFI_TELEMETRY_ENDPOINT', '');
   });
 
   afterEach(async () => {
@@ -253,5 +261,135 @@ describe('getStateDir', () => {
     const dir = getStateDir();
     expect(dir.endsWith('.sf-intelligence')).toBe(true);
     if (home.length > 0) expect(dir.startsWith(home)).toBe(true);
+  });
+});
+
+describe('opt-in version-check counter (default OFF)', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('isVersionCheckCounterEnabled is false unless BOTH env gates are set', () => {
+    vi.stubEnv('SFI_TELEMETRY_OPTIN', '');
+    vi.stubEnv('SFI_TELEMETRY_ENDPOINT', '');
+    expect(isVersionCheckCounterEnabled()).toBe(false);
+
+    vi.stubEnv('SFI_TELEMETRY_OPTIN', '1');
+    vi.stubEnv('SFI_TELEMETRY_ENDPOINT', '');
+    expect(isVersionCheckCounterEnabled()).toBe(false);
+
+    vi.stubEnv('SFI_TELEMETRY_OPTIN', '');
+    vi.stubEnv('SFI_TELEMETRY_ENDPOINT', 'https://example.test/c');
+    expect(isVersionCheckCounterEnabled()).toBe(false);
+
+    vi.stubEnv('SFI_TELEMETRY_OPTIN', '1');
+    vi.stubEnv('SFI_TELEMETRY_ENDPOINT', 'https://example.test/c');
+    expect(isVersionCheckCounterEnabled()).toBe(true);
+  });
+
+  it('buildVersionCheckCounterPayload is UTC day bucket only (documented shape)', () => {
+    const payload = buildVersionCheckCounterPayload(
+      new Date('2026-07-12T15:30:00.000Z'),
+    );
+    expect(payload).toEqual({ event: 'version_check', bucket: '2026-07-12' });
+    expect(versionCheckCounterBucket(new Date('2026-07-12T15:30:00.000Z'))).toBe(
+      '2026-07-12',
+    );
+  });
+
+  it('maybePingVersionCheckCounter is a no-op when opt-in is off', async () => {
+    vi.stubEnv('SFI_TELEMETRY_OPTIN', '');
+    vi.stubEnv('SFI_TELEMETRY_ENDPOINT', 'https://example.test/c');
+    const calls: VersionCheckCounterPayload[] = [];
+    const pinged = await maybePingVersionCheckCounter(async () => {
+      calls.push({ event: 'version_check', bucket: 'x' });
+    });
+    expect(pinged).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('maybePingVersionCheckCounter posts the documented payload when armed', async () => {
+    vi.stubEnv('SFI_TELEMETRY_OPTIN', '1');
+    vi.stubEnv('SFI_TELEMETRY_ENDPOINT', 'https://example.test/counter');
+    const calls: Array<{ endpoint: string; payload: VersionCheckCounterPayload }> =
+      [];
+    const pinged = await maybePingVersionCheckCounter(async (endpoint, payload) => {
+      calls.push({ endpoint, payload });
+    });
+    expect(pinged).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.endpoint).toBe('https://example.test/counter');
+    expect(calls[0]?.payload.event).toBe('version_check');
+    expect(calls[0]?.payload.bucket).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+});
+
+describe('checkForUpdate + opt-in counter seam', () => {
+  let dir: string;
+  let cachePath: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'sfi-update-telem-'));
+    cachePath = join(dir, 'update-check.json');
+    vi.stubEnv('SFI_UPDATE_CACHE_PATH', cachePath);
+    for (const marker of CI_MARKERS) vi.stubEnv(marker, '');
+    vi.stubEnv('SFI_NO_UPDATE_CHECK', '');
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('does not ping the counter on a fresh check when opt-in is off (default)', async () => {
+    vi.stubEnv('SFI_TELEMETRY_OPTIN', '');
+    vi.stubEnv('SFI_TELEMETRY_ENDPOINT', '');
+    const calls: unknown[] = [];
+    await checkForUpdate('0.1.0', {
+      fetcher: async () => '0.2.0',
+      counterPoster: async () => {
+        calls.push(1);
+      },
+    });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('pings the counter once after a fresh registry check when both gates are set', async () => {
+    vi.stubEnv('SFI_TELEMETRY_OPTIN', '1');
+    vi.stubEnv('SFI_TELEMETRY_ENDPOINT', 'https://example.test/counter');
+    const calls: VersionCheckCounterPayload[] = [];
+    await checkForUpdate('0.1.0', {
+      fetcher: async () => '0.2.0',
+      counterPoster: async (_endpoint, payload) => {
+        calls.push(payload);
+      },
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.event).toBe('version_check');
+  });
+
+  it('does not ping the counter on a cache hit (even when opted in)', async () => {
+    vi.stubEnv('SFI_TELEMETRY_OPTIN', '1');
+    vi.stubEnv('SFI_TELEMETRY_ENDPOINT', 'https://example.test/counter');
+    await writeFile(
+      cachePath,
+      JSON.stringify({
+        checkedAt: new Date().toISOString(),
+        latestVersion: '0.2.0',
+        shouldUpdate: true,
+      }),
+      'utf8',
+    );
+    const calls: unknown[] = [];
+    const r = await checkForUpdate('0.1.0', {
+      fetcher: async () => {
+        throw new Error('fetcher must not run on cache hit');
+      },
+      counterPoster: async () => {
+        calls.push(1);
+      },
+    });
+    expect(r.cached).toBe(true);
+    expect(calls).toHaveLength(0);
   });
 });

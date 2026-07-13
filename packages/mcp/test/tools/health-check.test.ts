@@ -207,6 +207,50 @@ describe('healthCheckHandler: staged build in progress (P13-STAGED-tiers)', () =
   });
 });
 
+describe('healthCheckHandler: profile-grant integrity degradation (PROFILE-COBATCH)', () => {
+  let vaultRoot: string;
+  let store: GraphStore;
+  let ctx: Context;
+  const REASON =
+    'profiles retrieved without permission grants — co-listing likely lost: 43 profile(s) extracted with only 0 grant edge(s) while permission sets carry 26849';
+
+  beforeAll(async () => {
+    vaultRoot = await mkdtemp(join(tmpdir(), 'sfi-mcp-health-progrant-'));
+    const realHash = await seedSourceTree(vaultRoot);
+    const built = await openContext(vaultRoot, {
+      ...baseManifest(realHash),
+      profileGrantIntegrity: {
+        degraded: true,
+        reason: REASON,
+        detectedAt: '2026-07-13T00:00:00Z',
+        profileCount: 43,
+        profileGrantEdges: 0,
+        permissionSetGrantEdges: 26_849,
+        grantedByEdges: 26_849,
+        priorGrantedByEdges: 83_798,
+      },
+    });
+    ctx = built.ctx;
+    store = built.store;
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    await rm(vaultRoot, { recursive: true, force: true });
+  });
+
+  it('reports degraded with the bare-profile disclosure — never healthy on a bared permission graph', async () => {
+    const result = await healthCheckHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.status).toBe('degraded');
+    const issue = result.value.data.issues.find((i) =>
+      i.includes('profiles retrieved without permission grants — co-listing likely lost'),
+    );
+    expect(issue).toBe(REASON);
+  });
+});
+
 describe('healthCheckHandler: stale source-tree hash', () => {
   let vaultRoot: string;
   let store: GraphStore;

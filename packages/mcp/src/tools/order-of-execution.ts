@@ -47,7 +47,12 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import {
+  getNodeById,
+  listEdges,
+  listEdgesForNodes,
+  listNodesByIds,
+} from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -67,19 +72,28 @@ import {
   soeNotAdmittedMessage,
 } from './soe-admission.js';
 import {
+  buildDuplicateRuleStep,
+  DUPLICATE_RULE_TYPES,
+} from './soe-duplicate-rules.js';
+import {
   type BoundableStep,
   enforceSoeByteBudget,
   soeTruncationNote,
 } from './soe-payload-bounds.js';
+import {
+  findRollupRecalcSteps,
+  rollupScanTruncationNote,
+  type RollupRecalcStep,
+} from './soe-rollup-recalc.js';
 
 /**
  * The verbatim honesty-axis disclosure surfaced in every response.
- * Identical to the `what_happens_on_save` disclosure — frozen here
- * so a caller-facing rephrasing during rendering is a code-review
- * concern, not a silent drift.
+ * BYTE-IDENTICAL to `what-happens-on-save.ts`'s `DISCLOSURE` — frozen here
+ * so a caller-facing rephrasing during rendering is a code-review concern,
+ * not a silent drift. The two SOE tools must stay in lockstep.
  */
 const DISCLOSURE =
-  "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once and does not expand that re-entrancy. A workflow rule's time-dependent actions (its workflowTimeTriggers) are SCHEDULED for an offset measured from a record field value the offline vault cannot evaluate; this composition lists the rule once in the synchronous post-save-workflows phase and does NOT claim its time-delayed actions fire at save. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.";
+  "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Duplicate rules are modeled as their own `duplicate-rules` phase, running after before-triggers and validation but BEFORE the save — evaluated on insert/update only, with the effective Block/Allow/Alert/Report operations surfaced per rule. Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once and does not expand that re-entrancy. A workflow rule's time-dependent actions (its workflowTimeTriggers) are SCHEDULED for an offset measured from a record field value the offline vault cannot evaluate; this composition lists the rule once in the synchronous post-save-workflows phase and does NOT claim its time-delayed actions fire at save. Parent Summary (roll-up) fields that aggregate this object recalculate in the `post-save-rollup-recalc` phase, capped to ONE level — a grandparent's own rollup on that recalculated parent is NOT walked — and the parent's own triggers/flows/workflows that its recalculated save would fire are NOT expanded (no re-entrancy). Entitlement-process and milestone-type METADATA is modeled elsewhere in the vault (R6-18: `EntitlementProcess`/`MilestoneType` nodes, queryable via `sfi.get_component` / `sfi.get_edges`, including each milestone's declared target `minutesToComplete` as of R7-C7) — but this composition does NOT simulate entitlement milestones as an order-of-execution phase: whether a specific record is currently on-track or breached against those target minutes is live, per-record timer data this offline vault cannot hold. Criteria-based sharing recalculation — the FINAL step in Salesforce's documented order-of-execution, evaluated after every phase modeled here (including post-save-async) — is also NOT modeled: a save that causes a record to newly match or stop matching a criteria-based sharing rule's criteria triggers a sharing recalculation this composition does not surface. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.";
 
 /**
  * The four DML events the generic SOE diagram surfaces. `upsert` is
@@ -95,12 +109,14 @@ export type SoePhase =
   | 'before-save-flows'
   | 'pre-save-triggers'
   | 'pre-save-validation'
+  | 'duplicate-rules'
   | 'save'
   | 'after-triggers'
   | 'post-save-assignment'
   | 'post-save-workflows'
   | 'post-save-flows'
   | 'post-save-approval'
+  | 'post-save-rollup-recalc'
   | 'post-save-async';
 
 /**
@@ -113,11 +129,13 @@ const AUTOMATION_PHASES: readonly Exclude<SoePhase, 'save'>[] = [
   'before-save-flows',
   'pre-save-triggers',
   'pre-save-validation',
+  'duplicate-rules',
   'after-triggers',
   'post-save-assignment',
   'post-save-workflows',
   'post-save-flows',
   'post-save-approval',
+  'post-save-rollup-recalc',
   'post-save-async',
 ];
 
@@ -194,6 +212,17 @@ export interface SoeStep {
    */
   readonly errorMessage?: string;
   readonly errorDisplayField?: string | null;
+  /**
+   * For a DuplicateRule step, its effective `DuplicateRuleOperation` set for
+   * THIS event (`Allow`/`Block`/`Alert`/`Report`, deduped). Omitted for
+   * non-DuplicateRule firers. Mirrors the what_happens_on_save SoeStep.
+   */
+  readonly duplicateRuleOperations?: readonly string[];
+  /**
+   * For a DuplicateRule step, whether the effective operation set includes
+   * `Block`. Omitted for non-DuplicateRule firers.
+   */
+  readonly blocksOnSave?: boolean;
 }
 
 /** One per-event entry inside the response's `byEvent` map. */
@@ -437,13 +466,23 @@ const fetchParentedFirers = async (
     edgeType: 'parentOf',
   });
   if (!edgesResult.ok) return err(edgesResult.error.message);
+  // ONE batched node fetch for every parentOf child, replacing the per-edge
+  // `getNodeById` N+1. The per-edge Map lookup below preserves the old loop's
+  // multiplicity (a duplicate edge pushes its node twice) and its null-skip
+  // (`listNodesByIds` drops ids with no row exactly like `getNodeById`); the
+  // trailing id-ASC sort makes push order irrelevant to the output.
+  const nodesResult = await listNodesByIds(
+    ctx.graph,
+    edgesResult.value.map((e) => e.toId),
+  );
+  if (!nodesResult.ok) return err(nodesResult.error.message);
+  const byId = new Map(nodesResult.value.map((n) => [n.id, n]));
   const firers: Node[] = [];
   for (const edge of edgesResult.value) {
-    const nodeResult = await getNodeById(ctx.graph, edge.toId);
-    if (!nodeResult.ok) return err(nodeResult.error.message);
-    if (nodeResult.value === null) continue;
-    if (!allowedTypes.has(nodeResult.value.type)) continue;
-    firers.push(nodeResult.value);
+    const node = byId.get(edge.toId);
+    if (node === undefined) continue;
+    if (!allowedTypes.has(node.type)) continue;
+    firers.push(node);
   }
   return ok([...firers].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)));
 };
@@ -458,13 +497,20 @@ const fetchTriggersOnFirers = async (
     edgeType: 'triggersOn',
   });
   if (!edgesResult.ok) return err(edgesResult.error.message);
+  // ONE batched node fetch for every triggersOn firer, replacing the per-edge
+  // `getNodeById` N+1 (mirrors fetchParentedFirers above).
+  const nodesResult = await listNodesByIds(
+    ctx.graph,
+    edgesResult.value.map((e) => e.fromId),
+  );
+  if (!nodesResult.ok) return err(nodesResult.error.message);
+  const byId = new Map(nodesResult.value.map((n) => [n.id, n]));
   const firers: Node[] = [];
   for (const edge of edgesResult.value) {
-    const nodeResult = await getNodeById(ctx.graph, edge.fromId);
-    if (!nodeResult.ok) return err(nodeResult.error.message);
-    if (nodeResult.value === null) continue;
-    if (!allowedTypes.has(nodeResult.value.type)) continue;
-    firers.push(nodeResult.value);
+    const node = byId.get(edge.fromId);
+    if (node === undefined) continue;
+    if (!allowedTypes.has(node.type)) continue;
+    firers.push(node);
   }
   return ok([...firers].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)));
 };
@@ -474,24 +520,31 @@ const buildAsyncSteps = async (
   sources: readonly Node[],
   startingStepIndex: number,
 ): Promise<Result<readonly SoeStep[], string>> => {
+  // ONE batched fetch of every source's OUTGOING dispatchesAsync edges, then ONE
+  // batched fetch of the distinct target job nodes — replacing the per-source
+  // `listEdges` + per-edge `getNodeById` double N+1. The distinct-toId set is
+  // collected in the same source→bucket order the old loop saw (irrelevant to
+  // the output, which sorts by id); `listNodesByIds` drops target ids with no
+  // row exactly like the old `getNodeById` null-skip, so `sorted` is the same
+  // distinct non-null job set.
+  const edgeBatch = await listEdgesForNodes(
+    ctx.graph,
+    sources.map((s) => s.id),
+    { direction: 'out', edgeTypes: ['dispatchesAsync'] },
+  );
+  if (!edgeBatch.ok) return err(edgeBatch.error.message);
   const seenIds = new Set<ComponentId>();
-  const seenJobs: Node[] = [];
+  const targetIds: ComponentId[] = [];
   for (const source of sources) {
-    const edgesResult = await listEdges(ctx.graph, source.id, {
-      direction: 'out',
-      edgeType: 'dispatchesAsync',
-    });
-    if (!edgesResult.ok) return err(edgesResult.error.message);
-    for (const edge of edgesResult.value) {
+    for (const edge of edgeBatch.value.get(source.id) ?? []) {
       if (seenIds.has(edge.toId)) continue;
-      const nodeResult = await getNodeById(ctx.graph, edge.toId);
-      if (!nodeResult.ok) return err(nodeResult.error.message);
-      if (nodeResult.value === null) continue;
       seenIds.add(edge.toId);
-      seenJobs.push(nodeResult.value);
+      targetIds.push(edge.toId);
     }
   }
-  const sorted = [...seenJobs].sort((a, b) =>
+  const jobsResult = await listNodesByIds(ctx.graph, targetIds);
+  if (!jobsResult.ok) return err(jobsResult.error.message);
+  const sorted = [...jobsResult.value].sort((a, b) =>
     a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
   );
   const steps: SoeStep[] = [];
@@ -524,6 +577,11 @@ const WORKFLOW_TYPES: ReadonlySet<ComponentType> = new Set(['WorkflowRule']);
  * per-event payload (steps + summary). Mirrors the per-phase walker
  * in `what_happens_on_save` exactly — see its module JSDoc for the
  * detailed cascade.
+ *
+ * `rollupSteps` is precomputed ONCE by the caller (`findRollupRecalcSteps`
+ * does not depend on `event` — a roll-up recalculates on every DML event
+ * identically) and threaded through so the org-wide Summary-field scan does
+ * not repeat per event.
  */
 const composeForEvent = async (
   ctx: Context,
@@ -531,6 +589,7 @@ const composeForEvent = async (
   objectApiName: string,
   event: SoeEvent,
   inactiveCollector: Map<ComponentId, InactiveConfiguredFirer>,
+  rollupSteps: readonly RollupRecalcStep[],
 ): Promise<Result<SoePerEvent, string>> => {
   const soe: SoeStep[] = [];
   let stepIndex = 0;
@@ -545,14 +604,21 @@ const composeForEvent = async (
   if (!allFlowsResult.ok) return err(allFlowsResult.error);
   const beforeSaveFlows: Array<{ firer: Node; recordTriggerType: unknown }> = [];
   const afterSaveFlows: Array<{ firer: Node; recordTriggerType: unknown }> = [];
+  // ONE batched fetch of every Flow's OUTGOING triggersOn edges, replacing the
+  // per-flow `listEdges` N+1 (mirrors what_happens_on_save). Each bucket is
+  // sorted by the FULL (to_id, edge_type, from_id, source) order — a refinement
+  // of listEdges' order — so `.find(e => e.toId === objectId)` returns the same
+  // first-matching edge.
+  const flowEdgeBatch = await listEdgesForNodes(
+    ctx.graph,
+    allFlowsResult.value.map((f) => f.id),
+    { direction: 'out', edgeTypes: ['triggersOn'] },
+  );
+  if (!flowEdgeBatch.ok) return err(flowEdgeBatch.error.message);
   for (const firer of allFlowsResult.value) {
     if (skipInactiveSoeFirer(inactiveCollector, firer)) continue;
-    const flowEdgesResult = await listEdges(ctx.graph, firer.id, {
-      direction: 'out',
-      edgeType: 'triggersOn',
-    });
-    if (!flowEdgesResult.ok) return err(flowEdgesResult.error.message);
-    const edgeToObject = flowEdgesResult.value.find((e) => e.toId === objectId);
+    const flowEdges = flowEdgeBatch.value.get(firer.id) ?? [];
+    const edgeToObject = flowEdges.find((e) => e.toId === objectId);
     if (edgeToObject === undefined) continue;
     const entry = { firer, recordTriggerType: edgeToObject.properties['recordTriggerType'] };
     if (edgeToObject.properties['triggerType'] === 'RecordBeforeSave') beforeSaveFlows.push(entry);
@@ -612,6 +678,44 @@ const composeForEvent = async (
       );
       if (!stepResult.ok) return err(stepResult.error);
       soe.push(stepResult.value);
+      stepIndex += 1;
+    }
+  }
+
+  // duplicate-rules. DuplicateRules parented to the object run AFTER
+  // before-triggers and validation, BEFORE the record is saved — per
+  // Salesforce's documented order-of-execution numbering. They evaluate on
+  // insert/update only (`order_of_execution` has no `upsert` event — it
+  // composes from insert + update on the client side).
+  if (event === 'insert' || event === 'update') {
+    const duplicateRulesResult = await fetchParentedFirers(
+      ctx,
+      objectId,
+      DUPLICATE_RULE_TYPES,
+    );
+    if (!duplicateRulesResult.ok) return err(duplicateRulesResult.error);
+    for (const firer of duplicateRulesResult.value) {
+      if (skipInactiveSoeFirer(inactiveCollector, firer)) continue;
+      const dupResult = await buildDuplicateRuleStep(ctx, firer, event);
+      if (!dupResult.ok) return err(dupResult.error);
+      // `null` means the rule's effective operations for THIS event are
+      // empty — it does not evaluate on this event, so it is excluded.
+      if (dupResult.value === null) continue;
+      const dup = dupResult.value;
+      soe.push({
+        phase: 'duplicate-rules',
+        stepIndex,
+        componentId: dup.componentId,
+        componentType: 'DuplicateRule',
+        apiName: dup.apiName,
+        actions: dup.matchingRules.map((toId) => ({
+          kind: 'references',
+          targetId: toId,
+          description: `references ${toId}`,
+        })),
+        duplicateRuleOperations: dup.operations,
+        blocksOnSave: dup.blocksOnSave,
+      });
       stepIndex += 1;
     }
   }
@@ -744,6 +848,30 @@ const composeForEvent = async (
     stepIndex += 1;
   }
 
+  // post-save-rollup-recalc. Parent Summary (roll-up summary) CustomFields
+  // that aggregate THIS object recalculate on every DML event — precomputed
+  // once by the caller (see `rollupSteps` JSDoc above) since the set is the
+  // same for insert/update/delete/undelete alike. Capped to ONE level and
+  // does not expand the parent's own automation (no re-entrancy) — see
+  // `soe-rollup-recalc.ts`.
+  for (const rollup of rollupSteps) {
+    soe.push({
+      phase: 'post-save-rollup-recalc',
+      stepIndex,
+      componentId: rollup.fieldId,
+      componentType: 'CustomField',
+      apiName: rollup.apiName,
+      actions: [
+        {
+          kind: 'recalculates',
+          targetId: rollup.parentObjectId,
+          description: `recalculates ${rollup.summaryOperation ?? 'unknown-operation'}(${rollup.summarizedField ?? 'record count'}) on ${rollup.parentObjectId}`,
+        },
+      ],
+    });
+    stepIndex += 1;
+  }
+
   // post-save-async.
   const asyncSourceSet: Node[] = [...beforeTriggers, ...afterTriggers];
   const asyncStepsResult = await buildAsyncSteps(
@@ -817,6 +945,15 @@ export const orderOfExecutionHandler = async (
   }
   const { objectModeled } = admission.value;
 
+  // Precompute the post-save-rollup-recalc set ONCE — it does not depend on
+  // the event (a roll-up recalculates on insert/update/delete/undelete
+  // alike), so scanning it four times (once per composeForEvent call) would
+  // repeat the same org-wide Summary-field scan for no reason.
+  const rollupResult = await findRollupRecalcSteps(ctx, input.objectApiName);
+  if (!rollupResult.ok) {
+    return err({ kind: 'internal', message: rollupResult.error });
+  }
+
   // Compose the SOE for each supported event. The four runs are
   // independent — the underlying graph state is stable across the
   // sequence — so the response carries the same per-event payload
@@ -845,6 +982,7 @@ export const orderOfExecutionHandler = async (
       input.objectApiName,
       event,
       inactiveCollector,
+      rollupResult.value.steps,
     );
     if (!perEventResult.ok) {
       return err({ kind: 'internal', message: perEventResult.error });
@@ -873,6 +1011,13 @@ export const orderOfExecutionHandler = async (
     byEvent,
     disclosure: composeSoeDisclosure(DISCLOSURE, objectModeled),
   };
+
+  // The org-wide Summary-field scan behind post-save-rollup-recalc hit the
+  // shared node-scan cap — the rollup list above may be INCOMPLETE. Disclose
+  // it rather than imply every aggregating parent was found.
+  if (rollupResult.value.scanTruncated) {
+    data.disclosure = `${data.disclosure} ${rollupScanTruncationNote()}`;
+  }
 
   // The four-event payload is the heaviest SOE surface in the product; on a
   // densely-automated standard object (e.g. Contact, ~120 KB) it blows the MCP

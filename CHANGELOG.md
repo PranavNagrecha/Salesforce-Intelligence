@@ -5,6 +5,1566 @@ adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-12
+
+> **Tool roster — the integrated totals.** 0.2.0 adds **24 new MCP tools**,
+> taking the roster from 176 advertised tools in 0.1.26 to **200 registered /
+> 196 advertised**: 4 pre-existing tools (`sfi.field_cleanup_candidates`,
+> `sfi.release_readiness_report`, `sfi.find_apex_usages`, `sfi.churn`) were
+> retired into hidden back-compat aliases — each folded into a surviving tool,
+> still dispatchable by name, but no longer occupying a `tools/list` schema
+> slot. Any per-entry running tool count below reflects the parallel branch it
+> was written on, not the integrated release; these totals are authoritative.
+
+### Added
+- **R7-F1 — Changelog fragment workflow.** Introduces `changelog.d/` for per-item
+  Keep-a-Changelog fragments. `scripts/assemble-changelog.mjs` merges all fragments
+  into `CHANGELOG.md` under `[Unreleased]` idempotently; `scripts/check-changelog-fragments.mjs`
+  fails CI when a `packages/**` or `scripts/**` diff ships without a matching fragment.
+  Wired as `pnpm changelog:assemble` / `pnpm changelog:check`; enforced in the QA
+  commit-gate as `ci:changelog-fragments` (fast + full).
+- **`sfi.generate_fleet_report` — the "state of my orgs" digest across every registered vault (R7-C6).**
+  A single `GeneratedDocument` composed from the existing fleet/pulse tools instead of a new analysis:
+  per-vault manifest facts (component counts, product version, source org, last-refresh timestamp) via
+  `@sf-intelligence/vault`'s `listRegisteredVaults` + `loadManifest` (the same registry read
+  `sfi.fleet_find` / `sfi.fleet_drift_ranking` use), and a per-vault "org-pulse digest" (freshness
+  coverage % + top contributor) reusing `@sf-intelligence/graph`'s `freshnessSummary` /
+  `contributorsSummary` — the exact functions `sfi.org_pulse` calls — against each OTHER vault's graph
+  store opened read-only via the same `openVaultReadOnly` helper `sfi.compare_vaults` uses. A
+  fleet-level Executive Summary names the total component count and which vault is "most behind" (an
+  OFFLINE age proxy — oldest `refreshedAt`, with a never-refreshed/unreadable vault ranked worst of
+  all) plus a Notable Divergences section (extractor-version splits, generalizing `sfi.compare_vaults`'s
+  pairwise `extractorVersionCaveat` to the whole fleet; component-count spread). Optional `limit`
+  (1..25, default 10) caps how many registered vaults get the graph-opening pulse digest — the
+  manifest-level Per-Org Inventory always covers every registered vault regardless. LIVE DRIFT IS
+  SKIPPED, NEVER SILENTLY SUBSTITUTED: the tool takes no org/consent arguments and makes no
+  Tooling-API calls; a dedicated Live Drift section discloses the skip and points at
+  `sfi.fleet_drift_ranking` (per-org consent) for the real live comparison. Fails closed with zero
+  registered vaults (a document saying so, never a fabricated "fleet is healthy"); a vault whose
+  manifest is unreadable, or whose graph store can't be opened for the pulse digest, is disclosed by
+  name, never dropped silently. Registered end to end: descriptor + JSON schema + dispatch case
+  (`tools/index.ts` — one of the 24 tools new in 0.2.0; see the roster note at
+  the top of this release), the `docs` capability category, a varied funnel-utterance
+  corpus, and a regenerated embedding index (only the new tool's vector added, existing vectors
+  re-synced to current descriptions). Follows the sibling `sfi.fleet_find` precedent of shipping
+  without a dedicated deterministic-router regex intent — its phrasing overlaps
+  `fleet_drift_ranking` / `generate_architecture_overview` too closely to hand-tune safely without
+  the eval harness — reachable instead via the semantic funnel and `sfi.capabilities`. It stays
+  grandfathered in the router↔roster CI contract: the R7-W6 router-v2 pass (below) wired 9 other
+  deferred tools but deliberately left this one un-routed pending eval-harness-informed tuning.
+
+- **`sfi.query_graph` — advanced, guard-railed graph query surface (R7-C4).**
+  A new power-user MCP tool that answers ad-hoc questions the purpose-built
+  tools do not expose, WITHOUT accepting raw SQL. The caller supplies a
+  STRUCTURED query — `select` (`'nodes'` | `'edges'`), an optional `where`
+  list of `{ column, op, value }` conditions (AND-ed), and an optional
+  `limit` — which the graph layer (`@sf-intelligence/graph`'s
+  `compileGraphQuery` / `runGraphQuery`) compiles into a single allowlisted,
+  parameterized, SELECT-only statement:
+  - **Columns** are a fixed per-table allowlist (nodes: `id`, `type`,
+    `apiName`, `label`, `parentId`, `sourcePath`, `lastModifiedDate`,
+    `lastModifiedBy`, `apiVersion`; edges: `fromId`, `toId`, `edgeType`,
+    `confidence`, `source`) plus `property:<key>` JSON access through the
+    same BOUND `json_extract_string(properties_json, ?)` idiom the rest of
+    the query layer uses (the `<key>` validated to a bare identifier). A
+    caller-supplied column name never reaches the SQL as text.
+  - **Operators** are a fixed allowlist (`=`, `!=`, `LIKE`, `ILIKE`, `IN`
+    (array, ≤50 values), `IS NULL`, `IS NOT NULL`) — each yields a hardcoded
+    SQL fragment; user text never becomes an operator.
+  - **Every value is a BOUND parameter**, never interpolated. An injection
+    payload aimed at a value (`'; DROP TABLE nodes; --`, `1 OR 1=1`,
+    `UNION SELECT …`, `ATTACH …`) is bound as an inert literal that matches
+    no row; one aimed at a column/operator is rejected fail-closed with the
+    allowlist named. The statement is always a single `SELECT` with a fixed
+    `ORDER BY` and a hard-capped bound `LIMIT` (default 50, max 500) — no
+    DDL/DML/PRAGMA/ATTACH/COPY, no semicolon, no second statement — and runs
+    on the server's READ-ONLY graph handle (`access_mode: READ_ONLY`), so
+    even a hypothetical escape could not write.
+  - **Honest output:** the response echoes the exact compiled SQL + bound
+    values (so the caller sees what ran) and carries a `disclosure` that this
+    is a RAW graph view — ids/edges exactly as stored, per-edge `confidence`,
+    NO synthesis/grounding/coverage reconciliation, and an absent row on a
+    partially-refreshed vault is not proof the org lacks it. Output is
+    byte-budgeted (fat node properties slimmed to an `{__omitted}` marker,
+    rows tail-trimmed) so a wide result cannot trip the MCP response limit.
+    Advertised in the `find` capability category and reachable via the
+    hybrid-mode semantic funnel; a deterministic regex route is deliberately
+    absent (it would steal phrasings from the grounded `get_edges` /
+    `list_components`) — the R7-W6 router-v2 pass kept it grandfathered as a
+    power-user escape hatch, not a primary answer to any natural question.
+    One of the 24 tools new in 0.2.0 (see the roster note at the top of this
+    release).
+
+- **Cross-vault deploy review — `sfi.review_change` `againstVault` /
+  `sfi review-change --against <alias|path>` (R7-C2).** The release-manager
+  question the default review could not answer: *"will this changeset break
+  anything in PROD?"* — the impact must be computed against prod's dependency
+  graph, not the sandbox's. `review_change` gains an optional `againstVault` (a
+  registered vault alias OR a path to an `org-kb`); the CLI gains `--against`.
+  When supplied, the tool opens that vault READ-ONLY via the existing
+  cross-vault machinery (`openVaultReadOnly`, the same helper `compare_vaults`
+  uses — never a second writer lock) and computes EVERY signal — dependents,
+  verdict, selected tests, coverage caveat — against ITS graph. Composes R6-16
+  (review_change) with R6-12 (cross-vault registry + extractor-version caveat).
+  New disclosures, all absent in the default path (which stays byte-for-byte
+  unchanged): a prominent `disclosure` prefix + `againstVault` field naming the
+  target and its last refresh ("impact is against that vault, NOT the current
+  one"); `absentInAgainstVault` — changeset ids labelled modified/deleted that
+  are ABSENT from the target (relative to it they would be ADDED, so nothing
+  there depends on them, and their OWN forward references are not analysed); and
+  `extractorVersionCaveat` when the two vaults' product versions differ (a
+  verdict difference may reflect an EXTRACTOR change, not a real org difference).
+  The CLI keeps the exit-1 CI-gate semantics — now blocking on breakage in the
+  NAMED vault. `sfi.route_question` continues to route "review this deploy
+  against prod" / "will my changeset break production" / "cross-vault deploy
+  review" to `review_change`.
+
+- **`edgeDrift` axis wired into `sfi.compare_object_across_vaults` (R7-W10).**
+  R6-12 added the `edgeDrift` axis (outgoing-edge-set diff, capped, with an
+  `extractorVersionCaveat` when the two vaults' product versions differ) to
+  `sfi.compare_vaults` but explicitly left `sfi.compare_object_across_vaults`
+  out — a separate diff code path. This closes that follow-up: the object
+  node itself (when present in both vaults) plus every field paired by
+  api-name (present in both vaults, independent of whether its own
+  properties matched) now gets the SAME `edgesAdded[]` / `edgesRemoved[]`
+  treatment, same comparison identity (`edgeType` + `toId` + `referenceKind`
+  when present), same caps (200 components / 50 rows), same
+  `extractorVersionCaveat` discipline. The diff primitive itself is REUSED,
+  not re-implemented: `EdgeDiffEntry` / `ComponentEdgeDrift` / `EdgeDriftOutput`,
+  `loadEdgesByFrom`, `buildEdgeDrift`, and `buildExtractorVersionCaveat` were
+  extracted from `compare-vaults.ts` into a new shared
+  `packages/mcp/src/tools/cross-vault-edge-drift.ts` module — `compare-vaults.ts`
+  now imports from it too (zero observable behavior change; its full 26-test
+  suite passes unchanged, confirming the extraction is byte-for-byte
+  equivalent). New response fields: `edgeDrift` (always present) and
+  `extractorVersionCaveat` (present only on a version mismatch). New
+  `boundaries[]` entry: the edge-drift scope disclosure. `architect-cross-org-compare`
+  skill and the tool description updated; the stale "does NOT share this axis
+  yet" note removed from `sfi.compare_vaults`'s own description.
+
+- **`sfi.history_tracking_gaps` — field-history-tracking compliance audit
+  (R7-W7).** "Which sensitive fields have no field-history tracking enabled?"
+  — a pure composition over the SAME classification engine that backs
+  `sfi.pii_inventory` (regulated-data recognizer over CustomField API name /
+  data type / description) with the extractors' own declared `trackHistory`
+  (CustomField) / `enableHistory` (CustomObject) booleans — no new
+  extraction, no live org read. Enumerates every CustomField (optionally
+  scoped to one `objectApiName`), classifies each `pii` / `sensitive` /
+  `public`, and flags a GAP: a regulated field whose declared `trackHistory`
+  is `false` or absent. Every gap additionally names whether its PARENT
+  OBJECT has history enabled at all — `enableHistory: false` means NO field
+  on it can be tracked, so that case is a DISTINCT, higher-severity
+  `gapKind: 'object-history-disabled'` (severity `critical`) finding rather
+  than an indistinguishable `field-not-tracked` (severity `high`) one.
+  Results are GROUPED by object (`groups[]`), each carrying a real
+  `CustomObject:` node id, `objectModeled`, and `objectHistoryEnabled`
+  (`true` / `false` / `null` when the object's own metadata was never
+  retrieved — UNKNOWN, never assumed). **Honesty axis:** the regulated-data
+  classification is HEURISTIC (same shape as `pii_inventory`'s); the
+  `trackHistory` / `enableHistory` readout is DECLARED (read verbatim, not
+  inferred); Salesforce does not support history tracking on every field
+  type regardless of the declared flags (formula fields hold no stored
+  value; some platform system/audit fields are never trackable) — such
+  fields can still appear in `gaps`, flagged via `isFormula` / `isSystem` so
+  the caller can filter rather than being silently dropped. Fails soft on an
+  object with zero fields or an unmodeled object (empty `groups`, no error).
+  `limit` (default 200, max 500) + `offset`/`cursor` CR-22 continuation
+  paginate the flattened field set with a ~45 KB byte-budget trim, mirroring
+  `pii_inventory` exactly. Registered in the `govern` capability category and
+  the funnel utterance corpus (surgical embedding-index append — the
+  quantized ONNX model is not bit-stable, so a full regeneration would
+  perturb every unrelated vector); deterministic-router wiring remains
+  deferred — its phrasing ("history tracking", "audit trail", "compliance
+  gap") overlaps the vocabulary the regex router already routes toward
+  `sfi.pii_inventory`, so the R7-W6 router-v2 pass (below) deliberately kept
+  it grandfathered pending eval-harness-informed tuning, even as that pass
+  wired `automation_collisions` and 8 other previously-deferred tools.
+
+
+- **Deterministic router intents for 8 grandfathered R6/R6B tools (R7-W6).**
+  `sfi.explain_error`, `sfi.automation_collisions`, `sfi.review_change`,
+  `sfi.ai_exposure_report`, `sfi.live_record_access`, `sfi.live_record_shares`,
+  `sfi.live_scheduled_jobs`, and `sfi.live_field_history` each gain a dedicated
+  `intent-router.ts` rule (`explain-error`, `automation-collisions`,
+  `review-change`, `ai-exposure`, `live-record-access`, `live-record-shares`,
+  `live-scheduled-jobs`, `live-field-history`) anchored on vocabulary that does
+  not collide with the neighboring intent each was previously deferred against
+  (automation-risk, why-cant-see / sharing-model, scheduled-jobs,
+  why-field-changed / runtime-audit-trail, release-readiness, pii-inventory).
+  `sfi.live_setup_audit_trail` also gains a rule (`live-setup-audit-trail`);
+  wiring it surfaced two now-stale `runtime-analytics` refusal-gate arms in
+  `refusal-gates.ts` ("setup audit trail" bare, and "who changed
+  FLS/sharing-settings/OWD/session-settings/password-policy/MFA") that
+  pre-dated the tool and refused questions it can now answer — both REMOVED
+  (documented in the "NON-triggers that HAVE tools are deliberately absent"
+  list, matching the existing pattern for live_inactive_users etc.). All 9
+  tools are removed from `intent-router.test.ts`'s `GRANDFATHERED_NON_ROUTABLE`
+  allowlist. `sfi.guest_exposure_report` was found to already have a
+  deterministic `guest-exposure` intent from R6-17 — no change needed there.
+  Three pre-existing broad rules (`sample-records`'s bare-record-ID pattern,
+  `recent-activity`'s "modified…recently" pattern, and `value-change`'s
+  "changed…value" pattern) gained narrow negative-lookahead carve-outs so they
+  stop shadowing the new record-access/share and field-history intents.
+  Harness (as measured when R7-W6 landed; the shared goldset has grown since):
+  27 additive gold rows in `sf-intelligence-qa/fixtures/router-goldset.json`
+  (2-3 varied phrasings per tool) — `router-goldset.mjs` 187/187 (100%, no
+  regression), `router-recall.mjs` 171/187 recall@8 (no regression, every new
+  tool reachable), `funnel-generalization.mjs` 900/1000 (no regression),
+  `router-collisions.mjs` clean.
+
+- **Flow record-variable `<inputReference>` DML edges (R7-W1).** A Flow
+  `recordCreate` / `recordUpdate` / `recordDelete` whose payload is a WHOLE
+  record VARIABLE (`<inputReference>myVar</inputReference>`, not per-field
+  `<inputAssignments>`) now emits an OBJECT-level `writesTo` edge from the Flow
+  to `CustomObject:{Object}` — resolving the variable to its declared
+  `<variables><objectType>` at `declared` confidence. Previously this whole-
+  record write produced NO edges at all (a false-safe: a field written via a
+  record variable read as unwritten to `get_impact` / `what_if_deactivate_flow`).
+  The specific fields are NOT enumerable from a bare record-variable DML, so the
+  edge carries `wholeRecord: true` + a `disclosure` property rather than any
+  fabricated per-field edges; when the variable was populated by an earlier
+  single-record `Get Records`, the edge notes the object-level `sourceObject`
+  provenance. (`$Record` inputReference remains the separate heuristic
+  trigger-record path, unchanged.)
+- **Flow before-save `$Record.<Field>` assignment writes (R7-W2).** In a
+  before-save record-triggered flow (`RecordBeforeSave`), an `<assignments>`
+  item that sets `$Record.<Field>` (and `{!$Record.<Field>}`) now emits a
+  FIELD-level `writesTo` edge to `CustomField:{TriggerObject}.{Field}` at
+  `declared` confidence — the classic "before-save flow sets a field" pattern,
+  previously invisible to impact/lineage. The assigned value is traced through
+  the R6-11 dataflow index (so `field_lineage` walks THROUGH the write to its
+  input fields, with the symmetric `readsFrom` dataflow-source edge); a
+  non-`Assign` operator demotes the traced SOURCE confidence to `heuristic`
+  while the write stays `declared`. After-save / before-delete `$Record`
+  assignments do NOT persist without an explicit Update Records and are DISCLOSED
+  (never emitted as a write); `$Record__Prior` and relationship-traversal targets
+  are likewise disclosed, not guessed. `explain_flow`'s record-writes axis is now
+  object-granular (field-level writes are excluded from it — a `field_lineage` /
+  `field_360` concern) so the new field write is not misclassified as an object
+  row.
+
+- **`sfi.what_if_assign_permset` / `sfi.what_if_revoke_permset` — permission-set
+  what-if delta tools (R7-C1).** The permission-set siblings of the profile
+  merge/split what-ifs answer "if I assign/revoke permission set X to/from a user
+  (a baseline of `{ profileId?, permissionSetIds?[] }`), what access do they GAIN
+  / LOSE?". Both compose the SAME effective-permissions engine as
+  `sfi.effective_permissions` — now factored into an exported
+  `computeEffectiveGrants` (profile + permission-set max-wins union with
+  group-scoped R6-06 muting subtraction) — TWICE, once WITH and once WITHOUT the
+  target set, and diff the two muting-applied EFFECTIVE grant sets. The whole
+  value is NET-CHANGE correctness under max-wins: a permission the baseline
+  ALSO holds via its profile or another assigned permission set is never counted
+  as gained (assign) or lost (revoke, the user keeps it). Muting composes
+  automatically — assigning a group member DIRECTLY re-confers a perm the group's
+  muting set had denied. Delta classes surfaced: object CRUD, per-field FLS,
+  system (`<userPermissions>`), custom permissions, and record-type visibility;
+  `summary.*` counts are complete, the detail lists paginate under a byte budget
+  with a CR-22 cursor. Revoking a set not in the baseline (and assigning one
+  already in it) is a disclosed no-op. Full `WhatIfEnvelope` (verdict/trust/
+  coverage-caveat/disclosure): `safe` when no net change, else `review`. Two
+  of the 24 tools new in 0.2.0 (see the roster note at the top of this
+  release).
+- **CSV export for the tabular tools (R6-21).** A new shared RFC 4180 CSV
+  encoder (`@sf-intelligence/renderers`'s `csv.ts` — `encodeCsvField` /
+  `encodeCsvRow` / `renderCsv` / `renderCsvWithDisclosures` /
+  `fitCsvRowsToBudget`) backs `format: 'csv'` on three tools:
+  - `sfi.generate_data_dictionary` gains an optional `format: 'markdown' |
+    'csv'` (mirrors `generate_architecture_overview`'s `format` plumbing —
+    the only other doc-generator with an alternate export format; the
+    module's own comments referencing a data-dictionary `format: 'html'`
+    precedent were aspirational, not existing code). `format: 'csv'` ADDS a
+    `csv` field (one row per field: `objectApiName,label,apiName,dataType,
+    formula,description,required`) alongside the always-returned
+    `document`, fitted independently under the response budget (rows
+    dropped tail-first with a `# truncated: …` comment, never silently
+    corrupted by the global guard's blunt string-slimming).
+  - `sfi.pii_inventory` and `sfi.unused_fields_deep` gain an optional
+    `format: 'json' | 'csv'` (default `'json'`, unchanged). `format: 'csv'`
+    REPLACES `fields` (which becomes `[]`) with a `csv` string carrying the
+    SAME already-paginated page of rows — never both encodings of the same
+    data in one response. `unused_fields_deep`'s eight-tier `checks` object
+    flattens into `checks_*` columns. `summary`/`totalCount`/`truncated`/
+    `nextOffset`/pagination fields are unchanged.
+  - Every csv path embeds its disclosures (freshness timestamp,
+    heuristic-recognizer caveats, truncation notes) as `#`-prefixed comment
+    lines at the top of the CSV text itself, so they survive even when only
+    the `.csv` file is saved and the rest of the MCP envelope is discarded.
+- **`sfi vault anonymize` — redacted vault export for external sharing (R6-20).**
+  New `sfi vault anonymize --out <dir> [--mode redact|pseudonymize]` subcommand
+  under the existing `sfi vault` group. `--mode redact` (default, SHIPPED):
+  copies `components/`, `docs/`, and `source/` (every text file; binary files
+  such as images/fonts/static-resource archives are excluded, never scrubbed)
+  plus an allowlisted subset of `meta/`, running each file through (1) org
+  identity replacement — the `targetOrg`/`sourceOrg` alias found in
+  `config.json`/`manifest.json`/`org-card.json` swapped everywhere it appears
+  as literal text for a stable placeholder — then (2) an extended `scrubText`
+  (the `sfi feedback export` precedent, now also catching phone numbers).
+  Component/field API names are KEPT in this mode; the generated `README.md`
+  in `--out` discloses that residual risk prominently. `graph/` (the binary
+  DuckDB dependency graph) and `snapshots/` are NEVER copied — a copied binary
+  db would carry the original un-redacted strings; the README points at
+  `sfi refresh --no-pull` inside `--out` to rebuild locally from the scrubbed
+  source. `--mode pseudonymize` (custom API names ALSO replaced with a stable,
+  non-reversible mapping kept in a separate file outside `--out`) is **not
+  shipped** — the command refuses it with a message explaining why (renaming
+  consistently across the DuckDB graph needs either a full re-extraction run
+  or an in-place binary rewrite, both real projects) rather than half-doing
+  it; the deterministic mapping primitives it will build on
+  (`buildPseudonymMapping`, `writeMappingTable`) are already built and tested.
+  Safety rails: `--out` must be outside the source vault (validated before any
+  write), the source vault is opened read-only, and a residual-leak scan of
+  the OUTPUT runs before the CLI exits (identity-literal check + a generic
+  email/URL/id/phone idempotency check + an optional maintainer-local
+  org-name-pattern check when `scripts/forbidden-names.local.json` exists).
+
+- **Mermaid ERD + impact-subgraph diagrams (R6-19).** Renderers were
+  markdown-only, with three generic mermaid fences total across the
+  product. Two additions, both inside existing ```` ```mermaid ``` ````
+  fences (rendered client-side or read as text, matching the product's
+  stated dual-consumption posture):
+  - **`buildErDiagram`** — a new `packages/renderers` module
+    (`erd-mermaid.ts`, plus a shared `mermaid-id.ts` collision-safe id
+    sanitizer) that turns Lookup/Master-Detail relationships into a
+    `mermaid erDiagram` fence: Lookup renders `||--o{`, Master-Detail
+    `||--|{`; api names are sanitized into mermaid-safe entity ids via
+    a collision-safe map (two different names that would sanitize to
+    the same code get distinct codes) while labels carry the real
+    names. `sfi.generate_data_dictionary` now includes an Entity
+    Relationship Diagram section per object (its own outgoing
+    Lookup/Master-Detail fields PLUS every other object's inbound
+    `lookupTo` reference to it — both directions are "direct"
+    relationships of the object), capped at 40 relationships.
+    `sfi.generate_architecture_overview` now includes an
+    org-wide ERD of the top 12 objects by Lookup/Master-Detail
+    relationship DEGREE (a ranking distinct from the existing Org
+    Structure diagram's inbound-reference-count ranking), showing only
+    relationships whose BOTH endpoints made the cut. Both cases
+    disclose the cap honestly (`ERD_SCOPE_DISCLOSURE` shared between
+    the two generators, plus a per-cap disclosure when truncated).
+  - **`sfi.get_impact`** now returns `diagram` — a `mermaid graph TD`
+    fence of the (already-capped) impact slice, root rendered as a
+    circle and every other node a box labeled
+    `{ComponentType}: {apiName}`, edges labeled by `edgeType` — when
+    the slice is at or under 30 nodes. Above that, `diagram` is OMITTED
+    (never a silently-partial diagram) and `diagramOmittedReason` names
+    the actual node count. The diagram mirrors exactly what
+    `impact.nodes`/`impact.edges` already contain — no separate,
+    uncapped query.
+  - The HTML export path (`html-document.ts`) needed no changes — it
+    already renders every ```` ```mermaid ``` ```` fence in a document's
+    body generically, verified for the new ERD section specifically.
+  - Tool descriptions (`sfi.generate_data_dictionary`,
+    `sfi.generate_architecture_overview`, `sfi.get_impact`) and the
+    `admin-documentation-generators` / `architect-impact-analysis`
+    skills updated to disclose the new fences and their caps.
+
+- **`edgeDrift` axis in `sfi.compare_vaults` (R6-12).** Cross-vault
+  comparison previously paired components by api-name and diffed a
+  SHA-256 property hash — EDGES were never compared, so dependency
+  drift between two vaults (a Flow that starts referencing a new
+  field, a validation rule that drops one) was invisible whenever the
+  node's own properties matched. `edgeDrift` closes that gap: for
+  every component present in BOTH vaults (independent of whether its
+  node hash matched), it diffs the two vaults' OUTGOING edge sets and
+  reports per-component `edgesAdded[]` / `edgesRemoved[]`. The
+  comparison identity is deliberately narrow — `edgeType` + `toId` +
+  the `referenceKind` property when present — mirroring the node-side
+  volatile-property exclusion, so a `referenceKind` change on an
+  otherwise-identical edge appears as one removed + one added row, not
+  a single "modified" row. Capped at 200 drifted components / 50 rows
+  per component (`summary` holds the true totals), with a verbatim
+  `edgeDrift` scope disclosure always in `boundaries[]`. Also adds
+  `extractorVersionCaveat`: when the two vaults' manifests report
+  different sf-intelligence product versions, the response names both
+  versions so a drift is never silently attributed to the org when it
+  might reflect an EXTRACTOR change between versions. Reuses the
+  existing cross-vault registry/open mechanics (`cross-vault-open.ts`,
+  `@sf-intelligence/vault`'s registry) — no new infrastructure.
+  `sfi.compare_object_across_vaults` is a SEPARATE diff code path (it
+  does not import from `compare-vaults.ts`) and did not share this
+  axis at the time; that follow-up was closed later in this release by
+  R7-W10 (above). `architect-cross-org-compare`
+  skill updated with the new axis and disclosure text.
+
+
+- **Experience Cloud community modeling + `sfi.guest_exposure_report` — the
+  unauthenticated guest-user exposure audit (R6-17).** The community family was
+  previously excluded entirely (the v1.5 `NetworkAccess` note explicitly scoped
+  it out); it is now modeled by three cooperating ComponentTypes and audited by
+  a dedicated tool.
+  - **Extraction:** `Network` (`networks/*.network-meta.xml`, the community
+    definition + the security posture — `status`, `selfRegistration` (the
+    critical self-signup switch), and the guest-access switches present in the
+    XML: `enableGuestFileAccess`/`enableGuestChatter`/
+    `enableGuestMemberVisibility`/`allowInternalUserLogin`, each tri-state so an
+    absent switch reads `null`, never a fabricated `false`), which emits
+    DECLARED `references` edges to its `CustomSite` (`<site>`) and
+    `ExperienceBundle` (`<picassoSite>`); `CustomSite`
+    (`sites/*.site-meta.xml`), which emits ONE HEURISTIC `references` edge to
+    the site's auto-provisioned guest profile `Profile:{Site Label} Profile` (a
+    Salesforce NAMING CONVENTION — the XML carries no `<guestProfile>` pointer —
+    so the edge is `heuristic`); and `ExperienceBundle`
+    (`experiences/{Name}.site-meta.xml`, top-level meta only: `label`/`type`/
+    `urlPathPrefix` + a best-effort `pageCount`). The bundle's JSON page tree
+    (hundreds of files) is DELIBERATELY out of scope and is suppressed from the
+    refresh coverage skip-counter (mirroring the `staticresources` precedent), so
+    it never reads as a false coverage gap. Guest sharing rules already parse
+    (CR-CAP-16 `SharingRule` `ruleType:'guest'`) — no new extraction there.
+  - **`sfi.guest_exposure_report`** (`access` category): for each modeled
+    community with an identifiable guest profile, COMPOSES the existing engine —
+    the guest profile's object CRUD (`grantedBy` edges), FLS on PII-classified
+    fields (reusing `pii_inventory`'s classifier, gated on the guest also having
+    object read), Apex-class access, and the community's guest sharing rules —
+    into RANKED findings (public write on an object carrying guest-readable PII =
+    `critical`). Every finding carries a REAL vault node id and per-claim
+    confidence: the CRUD/FLS/apex GRANT is `declared`, but the guest-profile
+    identity is `heuristic` (the naming convention), so the report confidence is
+    `heuristic` and each finding carries `guestLinkageConfidence:'heuristic'`.
+    FAILS CLOSED with no modeled surface ("no Experience Cloud surface in the
+    vault — re-run `/sfi-refresh`"), never "no exposure". Discloses that object
+    CRUD+FLS is the declared grant while record visibility also needs OWD + guest
+    sharing rules, and that Visualforce-page guest access (`<pageAccesses>`) is
+    not in the offline model. Byte-budgeted + paginated; carries a `TrustSummary`.
+  - **Vault-rebuild note:** the community family populates only on a fresh
+    `sfi refresh`; an existing vault answers `guest_exposure_report` as
+    "no Experience Cloud surface" until refreshed.
+
+- **`sfi.review_change` + `sfi review-change` — the pre-deploy change-review
+  gate (R6-16).** Turns the offline engine into a daily deploy gate. Given a
+  CHANGE SET (`components: [{ type, apiName, changeKind }]` a host assembles
+  from a PR / package.xml / `git diff`), the new MCP tool returns a per-component
+  risk verdict, its direct dependents, and the tests to run — ordered
+  most-dangerous first. It COMPOSES three existing signals (it reimplements
+  none): (a) IMPACT — the direct INCOMING-edge query `get_impact` /
+  `promotion_readiness` build on, EXCLUDING `grantedBy` (a Profile/PermissionSet
+  FLS grant is ACCESS, not a breakage dependency) and `parentOf` (structural) per
+  the access≠usage rule; (b) TESTS — the covering set from
+  `sfi.tests_for_change` (Apex only); (c) VERDICT from the shared
+  blocking/risky/review/safe vocabulary + coverage-caveat machinery. A DELETED
+  component with ANY dependent is `blocking` (a heuristic-only dependent still
+  blocks — a false positive fails CLOSED, the safe direction for a gate); a
+  MODIFIED component with firm dependents is `risky`, with heuristic-only readers
+  `review`; an ADDED component absent from the vault is `safe` (its own forward
+  references are NOT analysed — only name-collision + tests), an ADDED id that
+  already exists is `review`. A zero-dependent change in a family the vault does
+  not fully cover reads "not checked" (surfaced as a coverageCaveat, nudging an
+  otherwise-`safe` verdict to `review`). The new `sfi review-change` CLI command
+  assembles the change set from `--manifest <package.xml>` (change kinds are
+  UNKNOWN from a manifest, so every member is reviewed `modified` with a
+  disclosure) or `--diff <base> --project <dir>` (mapping `git diff
+  --name-status` paths → component ids by REUSING the refresh pipeline's
+  `componentTypeFromSourcePath` dispatcher), resolves against the current vault,
+  and **exits 1 when any component is `blocking`** — a drop-in CI gate. Honesty
+  axis (verbatim in the disclosure and printed on every CLI run): the analysis is
+  against the LAST VAULT REFRESH of the TARGET org, which may drift from what is
+  deployed — re-refresh before trusting a `safe`; dependents are DIRECT
+  (single-hop), the full transitive blast radius is `sfi.get_impact`; SELECTION ≠
+  VALIDATION.
+
+- **Agentforce / Einstein GenAI extraction — the org's own AI surface, now
+  modeled (R6-13).** The product positions itself as "the backend your
+  Salesforce AI can trust", yet it could not see the org's OWN generative-AI
+  configuration — zero coverage. Four GenAI metadata families are now
+  first-class ComponentTypes with dedicated extractors: `GenAiFunction` (an
+  Agentforce action; captures `invocationTarget`/`invocationTargetType` and
+  emits a declared `references` edge to the `ApexClass`/`Flow` it invokes),
+  `GenAiPlugin` (an agent topic; emits a declared `references` edge per member
+  `functionName` to its `GenAiFunction`s), `GenAiPlannerBundle` (an agent /
+  planner definition; emits declared `references` edges to the `GenAiPlugin`
+  topics and loose `GenAiFunction` knowledge actions it orchestrates), and
+  `GenAiPromptTemplate` (a prompt template; the privacy-critical grounding
+  surface — emits declared `references` edges for the object/field data the
+  prompt feeds an LLM: `<relatedEntity>`/`<relatedField>`, grounding
+  merge-fields `{!$Input:Ref.Field}` resolved via the template's declared
+  SObject `<inputs>`, and `{!$Flow:..}`/`{!$Apex:..}`/`flow://`/`apex://` data
+  providers). All edges REUSE the generic `references` EdgeType tagged with a
+  `properties.referenceKind` discriminator — no new EdgeType. Folders/suffixes
+  (`genAiFunctions/`, `genAiPlugins/`, `genAiPlannerBundles/` nested
+  folder-per-agent, `genAiPromptTemplates/`) were verified against a live
+  Agentforce dev org's `sf org list metadata-types` describe. **Honesty axis:**
+  a grounding merge-field resolves to a real `CustomField:{Object}.{Field}` id
+  ONLY when its input is a DECLARED SObject input — a merge-field whose input is
+  undeclared, a primitive, or a relationship traversal is disclosed in
+  `properties.unresolvedGroundingRefs`, never minted as a phantom field edge;
+  and every edge is DECLARED wiring, not a runtime execution trace (which topic
+  the planner selects, whether a grounded field is populated). Legacy Einstein
+  `Bot`/`BotVersion` were deliberately out of scope at this stage (the
+  verification org has Einstein Bots disabled, and Bot's nested folder-per-bot
+  layout does not fit the flat pattern) — that leftover was closed later in
+  this release by the R7-C7 Bot/BotVersion extraction (below). **Retrieval notes:** `GenAiPlannerBundle` surfaces in the
+  org describe at Metadata API v64.0+ (it replaced `GenAiPlanner` at v63.0)
+  but only actually retrieves at v65.0+, and the refresh manifest is
+  pinned at 62.0 (see the profile-grant-safety fix below), so `GenAiPlannerBundle`
+  is NOT retrieved by default — it drops gracefully via `selectManifestTypes`, and
+  the extractor models it only when a vault already contains it. The rest of the
+  Agentforce surface (`GenAiFunction` v60.0+, `GenAiPlugin` v62.0+,
+  `GenAiPromptTemplate`) does retrieve at 62.0. **Vault-rebuild note:** these types
+  populate only on a fresh `sfi refresh` — an existing vault carries no GenAI nodes
+  until refreshed.
+- **`sfi.ai_exposure_report` — the AI-exposure audit (R6-13 flagship).**
+  "What data can my org's OWN AI see?" — the audit "the backend your Salesforce
+  AI can trust" always implied but could not answer until the GenAI extraction
+  tier landed. It COMPOSES the extracted Agentforce surface (GenAiPromptTemplate
+  grounding fields, and the agent action tree GenAiPlannerBundle → GenAiPlugin →
+  GenAiFunction → the ApexClass/Flow it invokes and the fields THAT code
+  reads/writes, plus any prompt template an action invokes) with the SAME
+  `pii-detection` recognizer that backs `sfi.pii_inventory`, run over every
+  exposed field. Returns `surfaces[]` (per AI surface: the object/fields it
+  exposes, each with its heuristic PII classification, category, and the `via`
+  mechanism) and — the actionable headline — `piiExposures[]`, the
+  (surface, field) pairs classified pii/sensitive ("your Reservation agent's
+  prompt template grounds on Contact.SSN__c — PII"). No args audits org-wide;
+  `objectApiName` narrows to one object; `limit` (default 50, max 200) caps each
+  list with a truncation note. **Fail-closed:** when the vault carries ZERO
+  GenAI nodes the disposition is `no-ai-surface-modeled` with a message naming
+  BOTH possibilities (the org has none, OR the vault predates GenAI extraction —
+  re-run /sfi-refresh); it never implies an empty org. **Honesty axis:** the
+  AI-surface wiring is DECLARED metadata, NOT a runtime trace; PII
+  classification is HEURISTIC (a no-signal field reads `public`); a field the
+  vault does not model (a standard field, or an object not retrieved) is
+  `unknown`, never silently "not PII"; indirect exposure via an action's Apex is
+  heuristic static analysis; legacy Einstein Bot/BotVersion metadata is
+  extracted (R7-C7, below) but not yet composed into this report.
+  Registered in the `govern` capability category and the funnel utterance
+  corpus (surgical embedding-index append — the quantized ONNX model is not
+  bit-stable, so a full regeneration would perturb every unrelated vector);
+  deterministic-router wiring, initially deferred because the GenAI vocabulary
+  was brand-new to the regex router, landed later in this release: the R7-W6
+  router-v2 pass (above) added the dedicated `ai-exposure` intent.
+
+- **Legacy Einstein Bot / Agentforce agent extraction (R7-C7).** The R6-13
+  leftover — Bot's nested folder-per-bot layout that didn't fit the flat
+  generic pattern. Two new ComponentTypes: `Bot` (`bots/{BotName}/{BotName}.bot-meta.xml`
+  — the agent definition; label/description/type/agentType/agentTemplate/
+  botSource/botUser/richContentEnabled/sessionTimeout/a `contextVariableCount`/
+  `botMlDomain`) and `BotVersion` (`bots/{BotName}/{fullName}.botVersion-meta.xml`
+  — one version; a `dialogCount`/`intentCount`, `entryDialog`, `toneType`, and
+  the `<conversationDefinitionPlanners><genAiPlannerName>` targets). Verified
+  against a real scoped retrieve (`sf project retrieve start --metadata Bot`)
+  from a production-scale university sandbox (5 Bots / 15 BotVersions), which
+  corrected two assumptions against ground truth rather than shipping a
+  documentation guess: neither type carries a `status`/`active`/
+  `versionNumber` element in real files, and a modern Agentforce-template
+  BotVersion carries ZERO `<botIntents>` and instead references a
+  `GenAiPlannerBundle` — the real, verified link between this legacy metadata
+  type and the R6-13 GenAI tier, now wired as a declared `references` edge
+  (`referenceKind: 'botVersionPlanner'`). `BotVersion`'s apiName is
+  directory-disambiguated (`{BotName}.{fileBasename}`, matching Salesforce's
+  own manifest `fullName` for the type exactly) because real files are named
+  bare (`v1.botVersion-meta.xml`) — the basename alone collides across every
+  bot in the org. Emits a declared `parentOf` edge `Bot -> BotVersion`. Full
+  dialog/message trees and per-contextVariable field mappings are
+  deliberately NOT extracted — counted only. `sfi.ai_exposure_report`'s
+  "Bot/BotVersion not modeled" disclosure is corrected to "not yet composed
+  into this report" (composing Bot's own field exposure in is a follow-up,
+  not wired here). **Vault-rebuild note:** these types populate only on a
+  fresh `sfi refresh`.
+
+- **`PresenceUserConfig` — Omni-Channel presence configuration (R7-C7).** The
+  R6-18 leftover — the `<assignments><users>` sub-block had no `User`
+  ComponentType to target. New ComponentType
+  `presenceUserConfigs/{fullName}.presenceUserConfig-meta.xml`; carries
+  `label`/`capacity`/the enable* toggles. Real retrieves (a production-scale
+  university sandbox and a small services org) confirm the shape: one
+  `<assignments>` block wrapping optional `<profiles><profile>` (repeatable)
+  and optional `<users><user>` (repeatable) — either, both, or neither may be
+  present (an org-default config in both verification orgs carries no
+  `<assignments>` block at all). `<profiles><profile>` names a real `Profile`
+  node — emits a declared `references` edge (`referenceKind:
+  'presenceProfileAssignment'`). `<users><user>` names a username with no
+  corresponding ComponentType — captured VERBATIM (every occurrence, not
+  just the first, via a new generic `arrayProperties` extractor-config
+  mechanism) as the `assignedUsernames` property array with NO edge minted,
+  matching `QueueRoutingConfig.userOverflowAssignee`'s existing precedent of
+  never fabricating a `User:` node/edge from an unconfirmed id shape.
+
+- **Per-milestone `minutesToComplete` on `EntitlementProcess` (R7-C7).** The
+  R6-18 trap the original extractor explicitly avoided: the generic
+  `extractEnterpriseMetadata` scanner's `extraProperties` reads only the
+  FIRST occurrence of a repeated element, so a flat read of
+  `minutesToComplete` across a file with 2+ `<milestones>` blocks would
+  silently misattribute one milestone's target minutes to a different
+  milestone. A new dedicated block-scoped parser
+  (`extractMilestoneDetails`) now captures a `milestones` property array —
+  `{ milestoneName, minutesToComplete, useCriteriaStartTime }` per
+  `<milestones>` block, each read scoped to ITS OWN block, in file order —
+  alongside the pre-existing deduplicated `milestoneName` list and
+  `references` edges (unchanged). Verified against a real retrieve (a small
+  services org's `standard case` EntitlementProcess: three milestones at
+  240/1440/5760 minutes respectively, each captured correctly and
+  distinctly — the repeated-element correctness proof). `<timeTriggers>`
+  and `<exitCriteriaFilterItems>` remain out of scope (disclosed, not
+  silently dropped). Corrects the now-stale "target minutes … unmodeled"
+  disclosure text in `sfi.what_happens_on_save` / `sfi.order_of_execution`
+  (both the JSDoc and the byte-identical `DISCLOSURE` strings) — target
+  minutes ARE now modeled; only live per-record on-track/breached status
+  remains unmodeled.
+
+- **Reader-facing "showing N of M" disclosures for two JSDoc-only caps (CR-22-B6).**
+  `sfi.generate_architecture_overview`'s two mermaid diagrams cap their node
+  count (Org Structure: top 5 CustomObjects by inbound references;
+  Integration Topology: first 20 integration surfaces) — an org exceeding
+  either cap now gets an inline "showing the top/first N of M" line under
+  the affected diagram AND a matching `document.boundaries` entry, present
+  only when the cap actually truncated something. The Integration Topology
+  Type/Count table is untouched (it was never capped — only the diagram's
+  node list was). `sfi.governor_limit_risks`'s per-class `entryPaths`
+  entry-point-path walk (bounded depth 6, `ENTRY_PATH_MAX_PATHS`=12) now
+  carries `entryPathsTruncated: true` on a class whose real fan-in of
+  callers exceeds what the walk explored (present only when true), plus a
+  response-level `boundaries` disclosure when any class in the result hit
+  the cap — previously silent since the walk's own early-exit guards keep
+  the collected array itself bounded (a naive post-hoc length check could
+  never have detected the gap; the fix tracks the cap hit at its two actual
+  trigger sites during the walk). Byte-drop/hop-cursor pagination for a
+  many-thousand-object org's architecture overview is a separate, larger
+  concern and stays explicitly OUT of scope for this fix.
+  **Note on scope:** this item's constant `ENTRY_PATH_MAX_PATHS` lives in
+  `governor-limit-risks.ts`, not `generate-architecture-overview.ts` (which
+  has no governor-limit-risks composition) — fixed in the file the constant
+  actually lives in rather than silently skipped or force-fit into the
+  wrong module.
+- **`sfi.generate_sharing_summary` discloses its object-scan cap (CR-RV12).**
+  The `OBJECT_SCAN_CAP = 50` slice (an architect-tier convention capping how
+  many CustomObjects get a full per-object sharing entry built) previously
+  had NO reader-facing disclosure — a >50-object org's summary silently read
+  as complete. The response now carries `scanTruncated: true` +
+  `totalMatchingObjects` (the TRUE matching-object count) whenever the cap
+  actually truncated the scan (present only then, so a ≤50-object org's
+  response is byte-identical), mirrors `unassigned-permission-sets.ts`'s
+  established `scanTruncated` shape. The disclosure also surfaces inline for
+  a document reader: the Overview line reads "Scanned objects: 50 of 312
+  matching (capped at 50 — narrow with `objectFilter`...)" and
+  `document.boundaries` gets a verbatim "Object scan capped: showing the
+  first 50 of N..." entry recommending `objectFilter` (or a per-object
+  `who_can_access_object` call) for the objects the cap dropped.
+- **Live population cross-check on field-cleanup verdicts (CR-CAP-L5).**
+  `sfi.safe_to_delete_field` and `sfi.unused_fields_deep` each compute a
+  STATIC "this field looks unused" verdict from the offline vault graph — a
+  field with zero static references can still hold real production data
+  written by dynamic Apex, an integration, or another blind spot the scanner
+  cannot see. Both tools now cross-check a would-be-clean verdict against the
+  field's LIVE production population before trusting it: pass `liveEnabled:
+  true` (or grant consent). `safe_to_delete_field`'s `safe` verdict
+  DOWNGRADES to `review` when `populatedCount > 0`, attaching a
+  `livePopulation` evidence block (`objectApiName`/`fieldApiName`/
+  `totalCount`/`populatedCount`/`populationRate`/`liveQueriedAt`); a
+  zero-population result leaves `safe` standing but still attaches the
+  evidence, confirming the cross-check ran, and the response's `trust`
+  becomes `hybrid` (via the shared `hybridTrust` builder). `unused_fields_deep`
+  applies the same check to every `confidence: 'high'` field ON THE RETURNED
+  PAGE (never the full unfiltered scan, so live-query cost tracks `limit`) —
+  a populated field downgrades from `high` to `medium` (the tier `medium`
+  already meant "no static evidence, but a blind spot could hide a
+  reference"; this is now its first real producer). `byConfidence` /
+  `totalCount` stay the STATIC pre-cross-check totals regardless, disclosed
+  in `boundaries` when a downgrade occurs. The live plane is NEVER a hard
+  dependency: when it is off, unavailable, or a query errors (budget
+  exhausted, org unreachable), the response fails soft to the disclosed
+  static verdict with a `'static-only verdict; live population not checked'`
+  line (`trust.limitations` for safe_to_delete_field, `boundaries` for
+  unused_fields_deep) — offline stays fully functional. New shared module
+  `live-population-check.ts` (the `computeLivePopulation` primitive, reused
+  by both tools) reuses the exact availability check the live tools use
+  (`resolveLiveAccess`) and the shared session query budget/cache
+  (`liveCount`), mirroring `what-if-make-field-required.ts`'s established
+  `computeLiveNullRate` pattern.
+- **`sfi.live_setup_audit_trail` registered on the tool roster (R6-27).** The
+  handler and schema (SOQL over `SetupAuditTrail` — the runtime "who changed
+  what in Setup" question: profile/permission-set edits, field changes,
+  org-wide-default flips, and every other tracked configuration change) had
+  been built but never wired into `tools/index.ts`, so a live probe against a
+  real vault returned `unknown-tool`. Now registered end-to-end: schema entry,
+  dispatch case, and `sfi.capabilities` `live` category + `INTELLIGENCE_PLANES`
+  live plane, plus a synthetic ask-phrasing corpus in `funnel-utterances.ts`
+  ("who changed what in setup", "recent setup changes", "setup audit trail
+  for the last week", "who modified this in setup last month", and others)
+  so the tool is reachable via the hybrid-mode semantic funnel. The dedicated
+  deterministic-router rule, initially deferred (grandfathered in
+  `intent-router.test.ts`), landed later in this release: the R7-W6 router-v2
+  pass (above) added the `live-setup-audit-trail` intent and removed the
+  grandfathering. `days` bounds the
+  SetupAuditTrail window (default 30, max 180 — Salesforce's own retention
+  ceiling); `limit` (default 100, max 500) pages the detail rows. CR-P3-8
+  honesty axis carries over unchanged: the (un-gated) detail query can
+  budget-stop mid-tool while the gated count stays exact — `budgetStopped`
+  discloses the partial rather than reading it as zero changes. Opt-in live
+  plane, read-only.
+
+- **`sfi.live_field_history` — WHO changed a field on a record, live (R6-14).**
+  Queries the `{Object}History` table (Field, OldValue, NewValue,
+  CreatedBy.Name, CreatedDate) with optional `fieldApiName` / `recordId` /
+  `days` filters, reusing the `deriveSiblingObject` builder for the
+  standard-vs-custom `{Object}History` / parent-Id naming. This is the ONE live
+  tool family that returns runtime RECORD DATA (OldValue/NewValue are actual
+  field values), so rows are capped HARD (default 20, max 200) with a byte
+  budget and per-value length clamp, and the disclosure says so verbatim.
+  PRECONDITION COMPOSITION: field history only exists where tracking is enabled,
+  so the vault's per-field `trackHistory` (CustomField) and per-object
+  `enableHistory` (CustomObject) are checked FIRST — a vault-KNOWN off state
+  fails closed with a precise "history tracking is not enabled … (per last
+  refresh)" reason instead of a cryptic INVALID_TYPE SOQL error, while MISSING
+  vault metadata (a scoped refresh, a skipped managed object, or an unavailable
+  graph) proceeds with a live probe and discloses `trackingState: 'unknown'` (a
+  zero result then must NOT be read as "no changes"). Justification: failing
+  closed on missing vault data would make the tool useless on exactly the
+  scoped/partial vaults where a live probe is most valuable. Opt-in live plane,
+  read-only, fail-closed without consent; provenance `live_org`.
+- **`sfi.live_scheduled_jobs` — the RUNTIME schedule registry, live
+  (CR-CAP-L7).** Reads CronTrigger (with `CronJobDetail.Name` / `JobType`,
+  `State`, `CronExpression`, `NextFireTime`, `TimesTriggered`) — what is
+  ACTUALLY scheduled in the org right now — plus an optional recent
+  `AsyncApexJob` status summary (`GROUP BY Status`, default 7-day window). This
+  is the live half of the offline `sfi.scheduled_job_catalog`, which lists
+  Schedulable-CAPABLE Apex classes from metadata. Honesty axis: the two measure
+  DIFFERENT things and routinely differ — a Schedulable class may not currently
+  be scheduled, and a cron job may run managed-package or non-Apex work (Data
+  Export, Dashboard Refresh) no catalog class covers — so the cross-reference is
+  COUNT-ONLY (`staticSchedulableClassCount`, from the vault, vs
+  `liveScheduledApexCount`, an ORG-WIDE dedicated COUNT of Scheduled-Apex cron
+  registrations rather than the returned page), never a per-class-to-cron
+  pairing, and JobType matching is best-effort (the raw JobType is always
+  surfaced). True count first
+  (`totalCronJobs`); capped detail (default 200, max 500). Opt-in live plane,
+  read-only, fail-closed without consent; provenance `live_org`.
+- **`sfi.live_record_shares` — the explicit share rows on ONE record, live
+  (CR-CAP-L2).** Given `{ recordId }` (and optionally `objectApiName`), queries
+  the runtime `{Object}Share` table and returns each share row's UserOrGroupId
+  (resolved to a User/Group name), AccessLevel, and RowCause (Owner / Manual / a
+  sharing Rule / a Team / Apex managed sharing) — runtime sharing state the
+  offline vault never holds, complementing `sfi.live_record_access` (a user's
+  effective access) with the shares themselves. When `objectApiName` is omitted
+  it is derived from the record Id's key prefix via the org's global describe
+  (an ambiguous or unknown prefix is an honest error, never a guess). New shared,
+  reusable SOQL builder `deriveSiblingObject(objectApiName, 'Share' | 'History')`
+  encodes the standard-vs-custom naming rule (`AccountShare`/`AccountId` vs
+  `Widget__Share`/`ParentId`) and is the foundation for the field-history tool.
+  Honesty axis: an object whose OWD is Public Read/Write has NO Share table — a
+  non-queryable result is reported as `shareTableQueryable: false` with a note
+  ("no explicit shares apply", NOT "no one has access"), while a budget stop
+  stays a hard fail so a partial roster is never shown as complete. True count
+  first (`totalShares`); capped detail (default 200, max 500). Opt-in live plane,
+  read-only, fail-closed without consent; provenance `live_org`.
+- **`sfi.live_record_access` — a user's EFFECTIVE access to ONE record, live
+  (CR-CAP-L1).** Given `{ recordId, userId | username }`, queries the org's
+  runtime sharing calculation (`UserRecordAccess`) and returns the Read / Edit /
+  Delete / Transfer / Full (All) flags for that user on that record. A
+  `username` resolves to an Id via a capped exact-Username lookup (ambiguity or
+  no-match is an honest error, never a guess); both ids are shape-validated and
+  bound through the existing `soqlLiteral` escaper. This is the RUNTIME resolver
+  for the offline `sfi.why_cant_user_see_record`: when that vault cascade returns
+  `unknown` (manual shares, account/opportunity teams, Apex managed sharing, and
+  criteria sharing evaluated over record field VALUES are record-level state the
+  vault never holds), the metadata answer now carries a `boundaryNote` pointing
+  at this live tool, which answers definitively. Honesty axis: an empty result
+  (`noAccessRow: true` — record missing, wrong id, or invisible to the querying
+  user) is reported as "could not determine", NEVER a confirmed deny. Opt-in
+  live plane, read-only, fail-closed without consent; provenance `live_org`,
+  point-in-time as of `queriedAt`, never falls back to vault data.
+
+- **Field-level dataflow through Flows (R6-11) — `sfi.field_lineage` chains
+  end-to-end through declarative automation.** The flow extractor now parses
+  `<assignments>`, `<variables>`, `<formulas>`, `<recordLookups>` outputs, and
+  `<loops>` as dataflow plumbing and traces each DML `<inputAssignments>`
+  reference value back to the record fields it derives from. The trace lands
+  in two places: (1) the existing FIELD-level `writesTo` edges gain
+  `sourceFields` / `sourceFieldConfidence` (parallel arrays; `declared` =
+  direct `$Record`/single-record-lookup chains including clean single-`Assign`
+  variable hops, `heuristic` = through formulas/loops/non-`Assign` operators)
+  plus `unresolvedSourceCount` (ambiguous reassigned variables, relationship
+  traversals, action/screen/subflow outputs, and chains past the 5-hop trace
+  depth cap are DISCLOSED as a count — never guessed; `sourceTraceDepthCapped`
+  flags a capped chain); and (2) new FIELD-level `readsFrom` edges
+  (`operation: 'dataflowSource'`, `targetFields[]`) from the Flow to each
+  resolved source field — the same shape the apex-scanner emits for Apex field
+  reads, so field-usage consumers see flow reads too. `sfi.field_lineage`'s
+  upstream walk follows the trace: a Flow writer no longer dead-ends — its
+  input fields surface as `flow-input-field` sources one hop past the flow and
+  are recursed into, so a field written by Flow A from a field written by
+  Flow B chains to Flow B's inputs (upstream of F1 reaches F3). Downstream is
+  symmetric via the new `flow-field-write` effect kind (`targetFields[]`; the
+  walk continues into each written field). The upstream payload's new
+  `flowDataflow { inputFieldsTraced, unresolvedInputCount,
+  untracedFlowWriteEdges }` and a new boundary line disclose exactly what the
+  trace could and could not resolve; write edges from a vault refreshed with a
+  pre-tracer extractor are counted as untraced with a re-refresh nudge.
+  `sfi.explain_flow` filters the new dataflow read edges out of its
+  record-lookup rows (they are lineage plumbing, not lookups).
+  **Vault-rebuild note:** the trace properties and dataflow read edges are
+  populated only on a fresh `sfi refresh`.
+
+- **SOE disclosure additions beyond R6-07/R6-18 (R6-23).** `sfi.what_happens_on_save`
+  and `sfi.order_of_execution`'s (byte-identical, per their own doc contract)
+  `DISCLOSURE` constant now gives criteria-based sharing recalculation — the
+  FINAL step in Salesforce's documented order-of-execution, evaluated after
+  every phase modeled here including `post-save-async` — its own explicit
+  sentence (previously a terser clause lumped together with the
+  entitlement-milestone one that R6-18 had just split out), naming its
+  position and its practical consequence (a save that newly matches/un-matches
+  a criteria-based sharing rule triggers a recalculation this composition
+  never surfaces). Both tool descriptions in `index.ts` and the
+  `what-happens-on-save.ts` JSDoc honesty-axis bullet list were updated to
+  match. **New (`sfi.what_happens_on_save` only):** a light informational
+  `entitlementProcessNotes` rider — when the target object carries at least
+  one ACTIVE `EntitlementProcess` (R6-18), the response now names it
+  (`componentId`, `apiName`, a fixed message, `confidence: 'declared'`) —
+  a disclosure-PLUS-pointer, explicitly NOT a simulated order-of-execution
+  phase; milestone evaluation itself remains unmodeled per `DISCLOSURE`.
+  Capped at 20 entries (`entitlementProcessNotesTruncated` when hit); omitted
+  entirely when the object has none. Verified against the real gate vault:
+  `sfi.what_happens_on_save({objectApiName:'Case', event:'insert'})` returns
+  ok with the full disclosure text (both new sentences present) and no
+  `entitlementProcessNotes` key (the vault predates an R6-18 refresh, so it
+  legitimately holds zero `EntitlementProcess` nodes — the honest "omitted
+  when absent" path); `sfi.order_of_execution` on a lighter real custom
+  object returned the disclosure fully intact, while the same call on the
+  much busier `Case` object showed the pre-existing global response-size
+  guard (`responseBudget.applied`) trimming the (already-2.3KB) disclosure
+  string — confirmed via a byte-length check this trimming threshold predates
+  R6-23 and is not a regression it introduced.
+- **Certificate + TransactionSecurityPolicy security-surface extractors
+  (R6-22, 2 of 3 — `CustomSite` tracked separately).** Two new ComponentTypes,
+  wired end-to-end (contracts union, `SUPPORTED_TYPES`, `EXTRACTORS` map,
+  `dispatchFile` route) via the shared `extractEnterpriseMetadata` pattern:
+  - `Certificate` (`certs/*.crt-meta.xml`) — `caSigned`, `expirationDate`,
+    `keySize`, `label` = `masterLabel`. The Metadata API always retrieves a
+    Certificate as TWO files — this metadata sidecar and a separate `.crt`
+    content file carrying the actual PEM/DER certificate or exported key
+    material. Only the sidecar is ever parsed: the dispatcher matches
+    strictly on `.crt-meta.xml`, so the `.crt` content file never reaches an
+    extractor (falls through to the walk's existing skip-and-count path,
+    same as any unrecognized file). Verified LIVE against a production-scale
+    sandbox (`sf project retrieve start --metadata Certificate`) — all 4 real
+    certificates extracted with zero errors, confirming the two-file shape.
+  - `TransactionSecurityPolicy` (`transactionSecurityPolicies/*.transactionSecurityPolicy-meta.xml`)
+    — `eventName`, `active`, and `action` (boolean-flag summary:
+    `block`/`endSession`/`freezeUser`/`twoFactorAuthentication` +
+    `notificationCount` — never the notification recipients, which are
+    specific admin usernames rather than org-structural metadata). Emits a
+    `declared`-confidence `references` edge (`referenceKind: 'conditionClass'`)
+    to `ApexClass:{apexClass}` when `<apexClass>` is present — the class
+    implementing `TxnSecurity.PolicyCondition`/`EventCondition` that decides
+    whether the policy fires. Folder/suffix verified against the Metadata API
+    Developer Guide; NOT verified against a live org — TransactionSecurityPolicy
+    requires Salesforce Shield/Event Monitoring, unavailable in every
+    accessible sandbox in the fleet (`sf project retrieve start` returned
+    "Entity type 'TransactionSecurityPolicy' is not available in this
+    organization" for the same sandbox that yielded the real Certificates).
+    Verified end-to-end against synthetic fixtures instead, matching the
+    R6-01 SamlSsoConfig precedent for a type absent from every reachable org.
+
+  **Consumer check (as scoped):** `integration_map` was checked for an
+  additive slot — it does NOT have one. Its eight-bucket design
+  (`INTEGRATION_TYPES`, one dedicated output field + JSDoc paragraph per
+  type, a `filter` enum that maps each bucket to an architectural cut) is
+  about OUTBOUND integration topology (callout targets, auth mechanisms);
+  Certificate/TransactionSecurityPolicy are inbound-security surfaces (key
+  material, event-triggered policy) that don't fit that concept, and adding
+  them would mean two new output fields, a renumbered "eight" JSDoc, and new
+  `filter` semantics — not a small additive change. `org_risk_report` was
+  also checked — it composes OTHER tools' summaries (health/tech-debt/
+  permission-risk/PII) rather than enumerating a ComponentType roster, so
+  there is no list to append to; surfacing "certificate expiring soon" or
+  "policy with no configured action" as a risk finding would be a new
+  capability, not a wiring change. Both noted as follow-ups rather than
+  force-fit. `list_components`'s curated `COMPONENT_TYPES` enum and
+  `org_overview`'s curated `OVERVIEW_COMPONENT_TYPES` were left untouched for
+  the same reason (out of this tier's explicit consumer scope) — mirrors how
+  `SamlSsoConfig` was NOT added to either.
+
+- **Report structural depth beyond column identity (R6-24).** `extractReport`
+  now parses a Report's `<filter>` criteria (`field`/`operator`/`hasValue` —
+  the literal filter value is NEVER captured; a report filter value is
+  record-level data, and this product never vaults record data),
+  `booleanFilter` (the AND/OR logic string), `groupingsDown`/`groupingsAcross`
+  (`groupings[]`: field + `dateGranularity` + axis), `buckets[]` (bucket field
+  identity + label + source field — also emits a `declared`-confidence
+  `references` edge, `referenceKind: 'bucketSource'`, to the source field),
+  `crossFilters[]` (related object + operation + condition presence, same
+  value-omission rule), `chart` (type + summary-axis presence), and `format`
+  (Tabular/Summary/Matrix/…) onto the Report node's `properties`. Each list
+  property is capped at 100 entries with the drop count disclosed in
+  `properties.truncatedCounts` (a joined report's blocks can carry hundreds).
+  Report-only (`reportDetail` config flag) — Dashboard/ReportType/ListView are
+  unaffected. Verified error-free against 499 real report files from a
+  production-scale gate vault (492 carried filters, 476 groupings, 59
+  buckets, 26 crossFilters, 45 charts). **Boundary note:** the refresh
+  pipeline still folds every Report/Dashboard node into the field's
+  `usedInReport`/`usedInDashboard` boolean and drops the per-report node
+  (volume), so this richer shape does not yet reach `field_360`/
+  `field_lineage` composition — filter/grouping LOGIC is no longer entirely
+  unparsed, but per-field "which report filters on this, and how" stays a
+  `dataNotAvailable` boundary. Corrected the `developer-field-deep-dive`
+  skill's Q165 anchor wording that previously implied report filters were
+  wholly unextracted.
+- **Service Cloud entitlement/SLA metadata — `EntitlementProcess` +
+  `MilestoneType` (R6-18).** Closed an eval-refused gap: "what's the SLA on
+  this case?" previously got a blanket honest refusal because neither
+  ComponentType existed. New `EntitlementProcess`
+  (`entitlementProcesses/{fullName}.entitlementProcess-meta.xml`) captures
+  `SObjectType`, `active`, `businessHours` (name only), `versionNumber`/
+  `versionMaster`/`isVersionDefault`/`versionNotes`, `entryStartDateField`,
+  `description`, and the top-level `<name>` label — folder/suffix verified
+  against a real scoped retrieve from a live services org. **Versioning
+  honesty**: a process can have multiple files (one per version); each is
+  modeled as its own node keyed by that file's own `fullName`, never merged.
+  Its repeated `<milestones><milestoneName>` children are promoted to
+  `references` edges to `MilestoneType:{Name}` (`referenceKind:
+  'entitlementMilestone'`, declared) via the generic `childRefs` mechanism.
+  New `MilestoneType` (`milestoneTypes/{fullName}.milestoneType-meta.xml`)
+  captures `description` and `recurrenceType` — real org files carry no
+  `<name>` element at all, so the node's own `apiName` is the display name.
+  **Deliberately NOT captured at this stage**: per-milestone `minutesToComplete` /
+  `timeTriggers` (the generic extractor's flat property reader only sees the
+  FIRST of 2+ repeated `<milestones>` blocks, which would misattribute one
+  milestone's target minutes to another — a correct capture needs a bespoke
+  nested parser, deferred rather than shipped wrong; that parser landed later
+  in this release as R7-C7's block-scoped `extractMilestoneDetails`, above —
+  `minutesToComplete` IS now captured, `timeTriggers` remains out of scope)
+  and, more importantly,
+  ANY live/record-level milestone status: whether a specific case is
+  currently on-track or breached is per-record timer data this offline
+  vault cannot hold. `sfi.lifecycle_process` / `sfi.what_happens_on_save` /
+  `sfi.order_of_execution`'s honesty-axis disclosure has been corrected —
+  it previously claimed entitlement milestones were entirely unmodeled;
+  it now says the metadata IS modeled but the SOE phase / live status is
+  not. The `business-user-orientation` skill's SLA/entitlement intent moved
+  from a blanket honest refusal to a partial-answer-plus-honest-refusal
+  pattern (mirroring the existing process-explanation intent).
+- **Omni-Channel routing metadata — `ServiceChannel` + `QueueRoutingConfig`
+  (R6-18).** Closes the companion eval-refused "how are cases routed to
+  agents?" gap. New `ServiceChannel`
+  (`serviceChannels/{fullName}.serviceChannel-meta.xml`) captures `label`,
+  `relatedEntityType`, and `capacityModel` — verified against real retrieves
+  from two live orgs, which corrected an initial assumption that the
+  related-object field was named `salesforceObject`; the real Metadata API
+  field is `relatedEntityType`. New `QueueRoutingConfig`
+  (`queueRoutingConfigs/{fullName}.queueRoutingConfig-meta.xml`) captures
+  `routingModel`, `routingPriority`, `capacityWeight`, `capacityType`,
+  `pushTimeout`, and `isAttributeBased`, and emits a `references` edge to
+  `Queue:{Name}` for a set `<queueOverflowAssignee>` (verified against a
+  real file: the element holds a Queue DEVELOPER NAME, not the opaque
+  record id the Metadata API Developer Guide's prose describes).
+  Additionally, the pre-existing `queue.ts` extractor already read
+  `<queueRoutingConfig>` into a bare string property but never turned it
+  into an edge — it now also emits a declared `Queue -> QueueRoutingConfig`
+  `references` edge, verified against a real Queue file from a live org.
+  "How are cases routed to agents?" is now answerable end-to-end: Queue →
+  QueueRoutingConfig (routing model/capacity/overflow) and ServiceChannel
+  (which object routes through Omni-Channel). Real-time agent
+  presence/capacity remains live-only and unmodeled.
+- **Duplicate rules + roll-up recalculation in the save simulation (R6-07).**
+  `sfi.what_happens_on_save` and `sfi.order_of_execution` gained two new SOE
+  phases: `duplicate-rules` (DuplicateRules parented to the object, positioned
+  after before-triggers and validation, BEFORE the save — per Salesforce's own
+  documented order-of-execution numbering; evaluates on insert/update only,
+  each step surfacing `duplicateRuleOperations` (the effective
+  `Allow`/`Block`/`Alert`/`Report` set for the DML event), a derived
+  `blocksOnSave` boolean, and the referenced `MatchingRule` ids) and
+  `post-save-rollup-recalc` (parent Summary/roll-up-summary CustomFields that
+  aggregate the saved object, positioned after post-save-approval; fires on
+  EVERY DML event — insert/update/delete/undelete alike — capped to ONE level
+  and does not expand the recalculated parent's own automation, both disclosed
+  verbatim). `sfi.lifecycle_process` inherits both phases automatically (it
+  composes `order_of_execution`); its stale "excludes roll-up recalculation"
+  disclosure has been corrected. New shared modules `soe-duplicate-rules.ts`
+  and `soe-rollup-recalc.ts` keep the two SOE tools in lockstep, matching the
+  existing `soe-active.ts` / `soe-admission.ts` / `soe-payload-bounds.ts`
+  pattern.
+- **CustomField extractor captures roll-up-summary source metadata.** A
+  `type: Summary` CustomField now carries `summarizedField` (omitted for a
+  `count` operation, which aggregates no source field), `summaryForeignKey`
+  (the child-object master-detail field the rollup traces — the anchor the new
+  `post-save-rollup-recalc` phase matches against), and `summaryOperation`
+  (`count`/`sum`/`min`/`max`) in `properties`, following the existing
+  OMIT-when-null convention (every other CustomField stays byte-identical).
+  **Vault-rebuild note:** this metadata is populated only on a fresh
+  `sfi refresh` — an existing vault answers `post-save-rollup-recalc` as empty
+  for objects with real roll-up parents until refreshed.
+
+- **`sfi.automation_collisions` — field-level write-collision + save-recursion
+  cycle detector for ONE object.** `automation_build_advisor` only flags
+  OBJECT-level automation hazards (multiple Flows, mixed Apex+Flow); this new
+  tool looks at what those automations actually WRITE. Given `{ object,
+  limit? }`, it walks the same `triggersOn` firer set (record-triggered Flow,
+  ApexTrigger, WorkflowRule) plus each firer's `writesTo` edges: `collisions[]`
+  lists fields with 2+ DISTINCT writers (a silent last-writer-wins fight
+  Salesforce does not arbitrate), each writer carrying its componentType,
+  active flag, edge confidence (`parsed` for declared Flow/WorkflowRule XML,
+  `heuristic` for the Apex scanner), and firing timing; a finding's
+  `weakestConfidence` is the weakest across its writers. `cycles[]` is a
+  depth-capped (4 hops) walk for a write path that returns to the queried
+  object — `self-write` for the classic same-object after-trigger /
+  workflow-field-update re-trigger, `multi-object` for an A-writes-B /
+  B-writes-A loop, each with the full real-node `path`. Honesty axis:
+  conditions are NOT evaluated (mutually exclusive writers still collide in
+  this report); Salesforce's own recursion guards (a Flow's "do not
+  re-trigger" setting, workflow re-evaluation limits) are not modeled by the
+  extractors and are NOT evaluated here — a listed cycle is a POTENTIAL loop,
+  not proof it fires; a same-object write from a BEFORE-save automation is
+  excluded from cycle detection (it folds into the single pending save, not a
+  second one); ApprovalProcess field updates and Apex writes performed by a
+  helper class the trigger calls (rather than the trigger itself) are out of
+  scope for this v1. `limit` (default 50, max 200) caps each list
+  independently with a truncation disclosure. Registered in the `automation`
+  capability category and the funnel utterance corpus; deterministic-router
+  wiring, initially deferred pending disambiguation from the existing
+  org-wide `automation-risk` intent, landed later in this release: the R7-W6
+  router-v2 pass (above) added the dedicated `automation-collisions` intent,
+  anchored on vocabulary that does not collide with `automation-risk`.
+
+### Fixed
+- **`canonicalJson(undefined)` crash-class sweep across the cross-vault diff
+  tools (R7-W9).** R6-12's real-vault verification found a real crash in
+  `sfi.compare_vaults`: `JSON.stringify(undefined)` returns the JS value
+  `undefined` (not a string), so `canonicalJson`'s primitive-fallthrough
+  branch silently returned a non-string whenever a diffed property existed
+  on only one side, and the byte-capping `boundValue` helper then threw
+  calling `.length` on it — fixed there with an explicit `undefined` branch
+  that canonicalizes to a sentinel string, plus a regression test. That fix
+  flagged the IDENTICAL `canonicalJson` implementation copy-pasted into
+  `compare-object-across-vaults.ts` and `diff-snapshots.ts` as a follow-up.
+  Both now carry the same defensive branch, with a regression test each:
+  `compare-object-across-vaults.ts`'s `collectDrift` has the same
+  key-union-produces-`undefined` shape as `compare-vaults.ts` (traced and
+  confirmed it does not currently crash — no byte-capping step exists in
+  this file — but the same latent bug pattern is closed pre-emptively);
+  `diff-snapshots.ts`'s two `canonicalJson` call sites are not reachable
+  with an `undefined` value via any public code path today (`JSON.parse`
+  never produces `undefined`), so `canonicalJson` is now exported and
+  unit-tested directly. Also fixes a pre-existing vault-registry
+  misconfiguration R6-12 worked around rather than fixed: a registered
+  alias that named the `org-kb` PARENT directory (the project root) instead
+  of the vault itself (`{parent}/org-kb`, which `sfi init` creates by
+  default) resolved to a path with no `meta/manifest.json`, silently
+  reading as "never refreshed" instead of "wrong path". `resolveVault` /
+  `getVaultRef` / `listRegisteredVaults` in `@sf-intelligence/vault` now
+  normalize via a new `normalizeVaultRootPath` helper — an alias resolves
+  correctly whether or not the registered path included the `org-kb`
+  suffix, with no re-registration required for already-mis-registered
+  aliases.
+
+- **`why_cant_user_see_record` no longer OVERSTATES access when a
+  PermissionSetGroup mutes the object-CRUD precondition (R7-W4).** R6-06 made
+  `effective_permissions` subtract a group's muting permission set from its
+  member union, but `why_cant_user_see_record` still composed
+  profile ∪ permsets ∪ PSG WITHOUT subtracting muting — so its yes/no verdict
+  could say a user CAN see (or edit / delete / create) a record when a group's
+  muting set had actually removed the object CRUD that the operation requires.
+  For a security-diagnostic tool, overstating access is the wrong direction. The
+  operation-aware object-CRUD **precondition** (plane A) now composes the SAME
+  shared kernel R6-06 factored out (`expandPermissionSetGroup` +
+  `loadMutingPermissions`): each assigned PermissionSetGroup's grant is
+  `union(members) MINUS muting` (group-scoped — a grant from the profile or a
+  permission set assigned OUTSIDE the group is never muted), across object CRUD
+  flags AND the `ViewAllData`/`ModifyAllData` system perms, for read / edit /
+  delete / create. When muting flips a would-be "can access" into a
+  precondition failure the verdict is `restricted`, and both the `PermissionGrant`
+  reasoning step and a new top-level `mutedBy` name the muting set(s) so an
+  auditor sees WHY. Only the modeled permission classes a muting node carries are
+  subtracted; a muting node from a vault refreshed before the R6-06 extractor
+  (no muted-perm data) or referenced-but-absent CANNOT be subtracted and is
+  DISCLOSED as a possible overstatement (re-run `/sfi-refresh`), never silently
+  treated as "mutes nothing". Muting is NOT subtracted from the record-visibility
+  BYPASS stages (object/system View/Modify All) — use `effective_permissions` for
+  the full net grant. The record-level `unknown` stages
+  (RoleHierarchy/CriteriaSharing/Territory/ManualSharing) are unchanged.
+
+- **`unused_fields_deep` live cross-check no longer times out composites or a
+  large consented org (release-blocking perf).** The CR-CAP-L5 live-population
+  cross-check auto-fired ~2 live `SELECT COUNT()` reads per high-confidence
+  unused field WHENEVER the org had standing live consent — even with no
+  `liveEnabled` passed. On a production-scale org (hundreds of high-confidence
+  fields) that was hundreds of SERIAL live queries (~126 s measured, ≈9 s per
+  large-object COUNT) — past the MCP SDK's 60s client timeout, so the tool
+  hard-failed. Worse, three composites called the full handler and DISCARDED
+  the live data (they read only the static `totalCount`): `tech_debt_score`,
+  and `org_risk_report` / `release_readiness_report` which compose it — so all
+  transitively fired the discarded live storm and timed out. Two bounds fix it:
+  (A) `tech_debt_score` now passes an internal `staticOnly` guard so the whole
+  composition stays offline (ZERO live queries) — byte-identical output, since
+  the cross-check never changes `totalCount` / `byConfidence` / `byParentObject`;
+  (B) the direct tool caps the cross-check at the first `LIVE_CROSS_CHECK_CAP`
+  (3) high-confidence fields per page — sized from the measured ~9 s worst-case
+  per-read cost so the worst case stays well under 60 s — and discloses "live
+  population checked for the first N of M high-confidence fields on this page …"
+  when the page holds more. The user-facing `field_cleanup_candidates` keeps its
+  live enrichment (now bounded by the same cap). The eight-tier static logic,
+  confidence tiers, pagination, byte budget, CSV path, and other disclosures are
+  unchanged. This is a regression introduced by CR-CAP-L5; before it these paths
+  were pure-offline.
+- **`tech_debt_score` / `org_risk_report` / `release_readiness_report` no longer
+  blow the 60s MCP client timeout on a large org (release-blocking perf).** On a
+  production-scale gate vault (thousands of CustomFields) these three composites
+  exceeded the MCP SDK's 60s default client timeout and crashed real hosts with
+  `-32001`. Root cause was an N+1 query pattern in three composed hygiene
+  handlers: each issued one DuckDB `listEdges` round-trip *per node* to read
+  incoming edges — the composite chain fired ~17k separate queries (≈4-5 ms
+  each on a cold 90 MB+ graph = 70-85 s). The fix routes every one of those
+  incoming-edge reads through the existing batched `listEdgesForNodes` primitive
+  (one `IN (...)` round-trip for the whole scan instead of one per node):
+  - `unused_components` now batches each type's incoming edges (was one
+    `listEdges` per scanned node — thousands on the CustomField scan).
+  - `unused_fields_deep` fetches every matching field's incoming edges once and
+    computes all three incoming-edge tiers (structural, LWC/Aura/VF `references`,
+    integration `exposes`) in memory (was THREE `listEdges` per field).
+  - `pii_inventory` batches the formula-source `references` lookups, and
+    `collectPiiInventoryFields` (the composer path) classifies the corpus a
+    SINGLE time rather than re-fetching and re-classifying the whole org on every
+    output page. Every verdict is an existence / first-match check that does not
+    depend on edge order, so output is byte-identical (the full mcp suite passes
+    unchanged). Measured on the gate vault: `tech_debt_score` 9 978 → 410
+    queries (~7.9 s → ~0.9 s), `org_risk_report` / `release_readiness_report`
+    ~14 s → ~2 s end-to-end — an order of magnitude under the 60s budget.
+- **`org_risk_report` / `release_readiness_report` residual grantedBy N+1
+  batched (completes the perf fix above).** After the incoming-edge batching
+  landed, a SECOND N+1 remained in `permission_risk_report`'s org-wide
+  over-privilege scan (composed into both report tools): it looped over every
+  Profile / PermissionSet node and issued one `listEdges` round-trip *per node*
+  to read its outgoing `grantedBy` edges (object-level View All / Modify All).
+  On a production-scale gate vault (thousands of permission containers) that was
+  thousands of serial DuckDB queries, still pushing the two composites past the
+  60s budget (~70-74 s measured). The scan now collects every container id up
+  front and reads all their `grantedBy` edges through a SINGLE
+  `listEdgesForNodes` `IN (...)` round-trip, then accumulates per node over the
+  grouped edges in the SAME node-iteration → edge order as before. Because
+  `listEdgesForNodes` preserves the same `(to_id, edge_type, from_id, source)`
+  order `listEdges` returned and every verdict / roster / example is an
+  existence-or-capped-push check that does not depend on edge order, the report
+  output is byte-identical (the full mcp suite passes unchanged). A regression
+  guard spies the DuckDB connection and asserts the grantedBy scan issues a
+  bounded (O(1)) number of edge queries regardless of container count. The
+  single-profile `profileFilter` path is already O(1) (one already-resolved
+  node) and is left unbatched by design.
+- **`unused_fields_deep` corpus lower-casing hoisted out of the per-field loop
+  (completes the release-blocking perf fix — the residual cost was JS CPU, not
+  queries).** With the DuckDB round-trips batched (above), the first COLD
+  `unused_fields_deep` call — and therefore `tech_debt_score` / `org_risk_report`
+  / `release_readiness_report`, which compose it — still ran ~68 s on a
+  production-scale gate vault (hundreds of fields), tripping the 60s client
+  timeout. The remaining cost was an O(fields × corpus) `toLowerCase()` blowup:
+  the eight-tier text checks are case-insensitive, and each re-lower-cased every
+  (large) corpus string — Apex `soqlStrings` / `unresolvedFieldReferences`,
+  formula / validation-rule / workflow-rule text, layout placements,
+  conditional-context expressions — once PER candidate field, so every corpus
+  string was lower-cased ~N times for N fields. The scan now lower-cases each
+  corpus string EXACTLY ONCE, before the field loop (a new `buildLoweredCorpora`
+  pass: a lower-cased `Set` for the exact-equality layout tier → O(1) membership,
+  pre-lowered string arrays for the substring tiers); the per-field check then
+  lower-cases only the short apiName token and matches it against the pre-lowered
+  corpus. Because lower-casing is idempotent and these are order-independent
+  existence checks, the output is BYTE-IDENTICAL (verified by SHA over the full
+  `unused_fields_deep` and `org_risk_report` responses on the gate vault before /
+  after; the tool's unit suite passes unchanged). Measured cold on the gate
+  vault: `unused_fields_deep` ~68 s → ~2 s, and all four composed tools now
+  return in well under the 60s budget. A regression guard spies
+  `String.prototype.toLowerCase` and asserts the call count stays O(fields +
+  corpus), far below the O(fields × corpus) a re-introduced per-field
+  lower-casing would produce.
+- **Muting permission sets are now SUBTRACTED in `effective_permissions`
+  (security-correctness).** Previously a `PermissionSetGroup` was expanded to the
+  UNION of its member permission sets, but its muting permission set was only
+  DISCLOSED — never netted out — so the tool could OVERSTATE access ("says the
+  user can when they can't"). The `MutingPermissionSet` extractor now captures the
+  permissions each muting set DENIES (object CRUD, field-level security,
+  system/user permissions, custom permissions, Apex-class access) as node
+  properties (`extractMutingPermissionSet` moved to
+  `packages/extractors/src/muting-permission-set.ts`; a `true` flag means DENIED,
+  mirroring the permission-set XML with inverted semantics). `effective_permissions`
+  computes each group's grant as `union(members) MINUS its muting set(s)`, per
+  modeled class, BEFORE the containers union max-wins — muting is **group-scoped**,
+  so a grant conferred by the profile or a permission set assigned OUTSIDE the
+  group is never muted. Surviving attribution rows gain a `mutedBy` annotation
+  (which muting set(s) denied a would-be group grant); a grant no container
+  confers is removed and counted in the disclosure. A muting node from a vault
+  refreshed before this change (no muted-perm data), or referenced-but-absent,
+  CANNOT be subtracted and is DISCLOSED as a possible overstatement (re-run
+  `/sfi-refresh`) — never silently treated as "mutes nothing". Record-type
+  visibility is not mutable and is never subtracted. The shared PSG helper gains
+  `loadMutingPermissions` so other access tools can adopt the same subtraction;
+  `object_access_audit`, `why_cant_user_see_record`, and the god-mode roster in
+  `permission_risk_report` still show raw grant paths but now point at
+  `effective_permissions` for the muting-correct net grant.
+
+  > **Upgrade note:** muted permissions are captured at extraction time, so run
+  > `sfi refresh` once to model muting in an existing vault; until then those
+  > groups are disclosed as "muting not applied — possible overstatement".
+- **`sfi mcp` startup's `sf org list` probe can no longer hang forever
+  (CR-RV3b).** `defaultListOrgs` (the best-effort "which orgs are you
+  authenticated to?" probe that builds the no-vault hint's org list) shelled
+  out via a bare `promisify(execFile)` with no timeout — a wedged `sf`
+  subprocess (e.g. stuck on an interactive re-auth prompt) could hang `sfi
+  mcp` startup indefinitely; the existing try/catch degraded gracefully on a
+  *failed* exec but never fired on one that simply never returned. The probe
+  now routes through `execHelper` (`@sf-intelligence/core`), the shared
+  cross-platform `sf` exec seam already used by refresh/init/auth/live-exec:
+  it carries a `SFI_SF_EXEC_TIMEOUT_MS`-backed timeout (10-min default) with
+  a SIGTERM→SIGKILL escalation, so a hung process is force-killed and the
+  existing catch block degrades to an empty org list exactly as it does for
+  any other exec failure — same graceful-degrade contract, now with an upper
+  bound. Also gets Windows `sf.cmd` shim support for free (previously
+  `execFile('sf', …)` could not launch a `.cmd` shim at all on win32; caught
+  by the same try/catch, but silently, as a permanent empty-list result).
+- **GlobalValueSet values now carry honest per-value `isActive`/`label`/`default`
+  (CR-10b), instead of a bare fullName string.** The extractor's
+  `properties.values` was `string[]` — no activation status, no label, no
+  default flag — so `explain_field` had to wrap every GlobalValueSet-resolved
+  picklist value as `isActive: true` **UNVERIFIED** (a deactivated GVS value
+  could appear as selectable). `extractGlobalValueSet` now reads each
+  `<customValue>` into the SAME H10 object shape the CustomField inline
+  picklist and StandardValueSet extractors already emit — `{value, isActive,
+  label?, default?}` — with `<isActive>` absent defaulting to `true`
+  (Salesforce DX omits the element for active values, matching
+  `custom-field.ts`'s `coerceIsActiveDefaultTrue`). Deactivated values are
+  **RETAINED, never filtered**: dropping them would be the one inconsistent
+  exception to this vault's retain-and-mark rule for picklist-shaped values,
+  would lose the answer to "what values used to be in this set" for a value
+  existing records may still hold, and confirmed real (a production-scale
+  org's `GlobalValueSet` source carries deactivated entries side-by-side with
+  active ones). `explain_field`'s `resolveGlobalValueSetValues` now routes
+  through the shared `normalizePicklistValues` normalizer instead of a
+  bare-string map, so a GVS-resolved picklist value's `isActive` is honest
+  (matching an inline definition) and the `picklistValuesNote` UNVERIFIED
+  disclosure no longer fires for the resolved case — it still fires when
+  resolution fails (pre-0.1.10 vault or unretrieved value set). Back-compat:
+  a pre-CR-10b vault's bare-string `values` still normalizes correctly
+  (`{value, isActive: true}`) via the same shared normalizer.
+- **`escapeMarkdownInline` now correctly handles a value containing a
+  backtick (CR-16d).** The helper backslash-escaped an embedded backtick
+  before returning inner text for a caller-supplied single-backtick fence —
+  but per CommonMark, backslash escapes are inert INSIDE a code span (a span
+  closes at the next backtick run of the same length as its opening run,
+  full stop), so a value with an embedded backtick would still split the
+  span early despite the backslash. Latent in practice (every current caller
+  feeds a backtick-free Salesforce identifier), but the JSDoc's claim that
+  the backslash "closes the span early... never" was wrong. The helper now
+  OWNS the fence instead of assuming a fixed one: it picks a fence one
+  backtick longer than the longest backtick run already in the value (so
+  nothing in the value can match the fence length and close it early), and
+  pads with a single leading/trailing space when the value starts or ends
+  with a backtick (per CommonMark). A backtick-free value still gets the
+  minimal one-backtick fence with no padding, so existing SF-identifier
+  output is byte-identical. All five call sites (`component-markdown.ts`,
+  `apex-markdown.ts`, `flow-markdown.ts` ×2, `org-card.ts` ×2) updated to
+  stop wrapping the return value in their own literal backticks, since the
+  helper now supplies the fence itself.
+
+- **`componentTypeFromSourcePath` now resolves LWC/Aura bundle DIRECTORY paths
+  (R6-29).** The exported dispatcher used by coverage reporting and by `sfi
+  review-change`'s `git diff` path mapper computed `dirSegments` differently
+  for `isDirectory: true` than `walkAndExtract`'s own internal call site: it
+  kept the bundle's own basename (e.g. `orderCard`) as the last `dirSegments`
+  entry instead of stripping it, so `dispatchFile`'s bundle branch — which
+  reads the LAST segment expecting the PARENT dir name (`lwc`/`aura`) — always
+  missed and returned `null` for every LWC/Aura bundle directory passed
+  through the public dispatcher. `sfi review-change --diff` worked around this
+  with its own hardcoded `lwc`/`aura` → type map rather than reusing the
+  dispatcher (see below); the underlying dispatcher was otherwise silently
+  wrong for any other caller passing a bundle directory. `fileName`/
+  `dirSegments` are now derived identically regardless of `isDirectory` (last
+  path segment is always the dispatch unit's basename, matching the walker),
+  so `lwc/{bundle}/` -> `LightningComponentBundle` and `aura/{bundle}/` ->
+  `AuraDefinitionBundle` resolve correctly from either call shape.
+- **`sfi review-change --diff`'s bundle path mapping now reuses the fixed
+  dispatcher instead of a hand-maintained type map (completes R6-29).** The
+  `deriveComponentFromPath` bundle short-circuit previously duplicated the
+  `lwc`/`aura` → `ComponentType` mapping locally (a workaround for the
+  dispatcher bug above, landed with R6-16). It now truncates the changed-file
+  path to the bundle directory and calls the now-working
+  `componentTypeFromSourcePath(..., isDirectory: true)`, so the two bundle
+  types are resolved from ONE source of truth instead of two. `BUNDLE_PARENT_DIRS`
+  (`lwc`/`aura`) is exported from the refresh pipeline so this caller — and any
+  future one — shares the canonical list rather than hand-maintaining a copy.
+  Verified against real LWC and Aura bundle directories copied from a
+  production-scale gate vault's retrieved source tree (not committed).
+- **Retrieve manifest API version pinned at 62.0 (profile-grant safety).**
+  During 0.2.0 development the manifest version was briefly raised to 64.0 to
+  pick up `GenAiPlannerBundle` (R6-30), but a real-org retrieve proved that
+  unsafe: at 64.0 the org describe surfaces the v65-gated `GenAiPlannerBundle`
+  type, `selectManifestTypes` puts it in the combined manifest, and its
+  `UNSUPPORTED_API_VERSION` failure trips the retrieve's binary-split
+  fallback — which separates `Profile` (and the object-child types
+  `ListView` / `ValidationRule` / `RecordType` / `WebLink` / `FieldSet`) from
+  the `CustomObject` / `CustomField` / `ApexClass` members they must be
+  co-retrieved with, so Salesforce returns profiles stripped of their
+  `objectPermissions` / `fieldPermissions` / `classAccesses`. The version is
+  therefore kept at **62.0**, which keeps the version-gated GenAI type out of
+  the combined manifest so it stays whole and every co-listing-dependent type
+  retrieves fully. `GenAiPlannerBundle` support is deferred to a future
+  split-manifest pass (everything at 62.0 plus an isolated v65+ pass for the
+  GenAI types alone, so a version-gated type can never poison the main
+  retrieve). Verified on a real org — profile grants and object children fully
+  populate after a refresh. `buildPackageXml` is exported and version-floor-tested.
+- **Refresh manifest prunes standard objects the org lacks.**
+  `manifestMembersForType` now intersects the modeled standard-object list with
+  the org's describe-global, so a named-but-absent standard object (e.g. a Field
+  Service object in an org without FSL) can no longer make the `CustomObject`
+  retrieve fragile.
+
+### Added
+- **StandardValueSet extraction (R6-08).** Standard picklists (`Industry`,
+  `LeadSource`, `OpportunityStage`, `CaseStatus`, …) were entirely unmodeled —
+  zero `ComponentType`, zero extraction, no way to answer "what values does
+  the standard Industry picklist allow?" or feed
+  `what_if_remove_picklist_value` for a standard field. New `StandardValueSet`
+  `ComponentType` (edge-less; a standard field's binding to its value set is
+  implicit in Salesforce's own field typing, not a declared metadata pointer
+  an extractor can read — emitting a fabricated edge would be a guess, not a
+  parsed fact) with a generic extractor (`extractStandardValueSet`, mirroring
+  `GlobalValueSet`'s shape) capturing `sorted`, `valueCount`, and
+  `values: { apiName, active }[]` per entry — the Metadata API's
+  `StandardValue` has no separate `label` field (verified against the
+  Metadata API Developer Guide's field reference), unlike GlobalValueSet's
+  `customValue`, so `apiName` (the `fullName`) doubles as the display value.
+  Wired into `SUPPORTED_TYPES` + the extractor map + a `dispatchFile` route
+  for `standardValueSets/*.standardValueSet-meta.xml` (folder/suffix verified
+  against the same guide: "StandardValueSet components have the suffix
+  `.standardValueSet` and are stored in the `standardValueSets` folder").
+  **Known retrieval gap, disclosed rather than papered over:**
+  `StandardValueSet` does NOT support the `*` wildcard Salesforce uses for
+  every other metadata type in this pipeline's manifest — the Metadata API
+  requires each standard value set to be named individually, and Salesforce's
+  published name list runs into the hundreds and varies by which Industries
+  clouds are installed. This change does NOT hardcode that list (an
+  unverifiable or org-inapplicable name risks a worse failure — a malformed
+  manifest entry can abort the whole retrieve, not just skip the one type)
+  — see the `manifestMembersForType` doc in `refresh.ts` for the full
+  disclosure. The extractor and dispatch are real, tested, and ready; a
+  normal `sfi refresh` will request the type but come back with zero files
+  until the manifest enumeration is built as a separate follow-up. No org in
+  the gate-vault fleet retrieves `standardValueSets/` today, so this is
+  verified against a synthetic fixture, not a live vault.
+
+### Fixed
+- **SamlSsoConfig never actually retrieved or extracted (R6-01).** The
+  `SamlSsoConfig` extractor and `ComponentType` were written and exported, and
+  `value-change-risk.ts` / `value-change-audit.ts` already queried
+  `listNodesByType(ctx.graph, 'SamlSsoConfig', ...)` to gate the
+  `FederationIdentifier` value-change verdict — but the type was never added
+  to the refresh pipeline's `SUPPORTED_TYPES`, so it was never requested in
+  the retrieve manifest, and the dispatcher had no `samlssoconfigs/` route,
+  so even a manually-added file would have been silently skipped. The result:
+  the SSO value-change logic always saw zero `SamlSsoConfig` nodes, regardless
+  of whether the org had SSO configured. Fixed by adding `SamlSsoConfig` to
+  `SUPPORTED_TYPES` + the extractor map + a `dispatchFile` route for
+  `samlssoconfigs/*.samlssoconfig-meta.xml` in `refresh-pipeline.ts`. Suffix
+  verified against the Metadata API Developer Guide ("SamlSsoConfig
+  components have the suffix `.samlssoconfig` and are stored in the
+  `samlssoconfigs` folder") — confirms the extractor's existing (lowercase,
+  not camelCase) suffix expectation was already correct. No `METADATA_API_NAME`
+  alias needed (the internal type name already matches the Metadata API
+  `xmlName`). No org in the maintainer's gate-vault fleet has SAML SSO
+  configured, so this is verified against a synthetic fixture mirroring a
+  real Entra ID SSO config shape, not a live vault — flagged honestly rather
+  than claimed as real-org-verified.
+- **ListView legacy dotted addressing minted phantom field edges (R6-04).**
+  `ListView` `<columns>`/`<filters>` field-identity extraction (CR-CAP-13 /
+  CR-CAP-13b) was already shipped, but real gate-vault data from a large university org (580
+  ListView files) surfaced a real, systematic gap: Salesforce's legacy
+  dotted SOAP-style column addressing (`CONTACT.EMAIL`, `ACCOUNT.NAME`,
+  `CASES.STATUS`, `CORE.USERS.ALIAS`, `CORE.PROFILE.NAME`, and 91 more
+  distinct real tokens) slipped past the `<columns>` guard and minted
+  `references` edges to `CustomField:` ids that can never resolve (the real
+  node id is `CustomField:Contact.Email`, not `CustomField:CONTACT.EMAIL`).
+  The `<filters>` guard already excluded these correctly via its existing
+  blanket all-uppercase-no-`__` rule; only the `<columns>` guard
+  (`isWellFormedColumnField`), which deliberately omits that blanket rule to
+  keep real bare-uppercase standard fields (`NAME`/`TITLE`/`ABSTRACT`),
+  needed the narrower dotted-only version of it. New shared
+  `isLegacyDottedAddress` predicate skips (never guesses) these tokens on
+  both sweeps and the skip is now disclosed via a new
+  `properties.legacyAddressingRefsSkipped` count on the `ListView` node
+  (omitted when zero). Verified against all 580 real ListView files in that gate vault:
+  378 nodes (65%) carried at least one legacy token, 1,717 skipped in total,
+  zero phantom-shaped edges remain among the 3,730 `references` edges
+  produced, zero extraction failures. `field-lineage.ts`'s `list-view-filters`
+  `dataNotAvailable` entry and `safe-to-delete-field.ts`'s `ListView` →
+  `analytics`/`blocking` classification were already correct (verified, not
+  changed) — the former honestly scopes the *runtime predicate evaluation*
+  gap (not field identity, which is now composed), the latter classifies by
+  `fromType` alone so it already covers the (now-cleaner) edges.
+
+### Fixed
+- **Flow→flow subflow edges — closing a false-"safe" deactivation verdict
+  (R6-02).** The Flow extractor previously scoped out `<subflows>` entirely, so
+  NO flow→flow edge existed. A subflow called by N parent flows therefore had
+  zero surfaced dependents: `what_if_deactivate_flow` on that subflow read
+  `safe` to deactivate (a wrong, destructive verdict) and `get_impact` saw no
+  incoming callers. The extractor (`packages/extractors/src/flow.ts`) now emits
+  one `references` edge per `<subflows>` element to the target `Flow:{flowName}`
+  with `confidence: 'declared'` and `properties.referenceKind: 'subflow'` (plus
+  the calling element name). A subflow target not in the vault (managed /
+  uncaptured) is dangling-by-design — the edge is still emitted, exactly as
+  `callsApex` emits to a possibly-absent `ApexClass:{name}`; nothing is
+  fabricated.
+
+### Changed
+- **`what_if_deactivate_flow` now surfaces the INCOMING side.** Parent Flows
+  that invoke a Flow as a subflow are BROKEN CALLERS on its deactivation,
+  surfaced as a distinct `broken-caller` impact category. An **Active** parent
+  forces the verdict to `blocking` (a subflow with active parents must not read
+  `safe`); parents that are all inactive (Draft / Obsolete) are still surfaced
+  but stop at `risky`. Only `references` edges with `referenceKind: 'subflow'`
+  count — a FlexiPage that merely embeds the flow, or any `grantedBy` / `parentOf`
+  edge, is access/structure, not a broken subflow caller (access ≠ usage). The
+  OUTGOING subflow calls a Flow makes are also now surfaced (`metadata-blocker`).
+  Disclosure updated: the Apex `Flow.Interview` / `@InvocableMethod` invocation
+  path and non-metadata launch points remain invisible.
+- **`explain_flow` now models subflow calls.** A new `subflowCalls[]` axis lists
+  the declared `<subflows>` this Flow invokes, each naming the target
+  `Flow:{flowName}` and whether it `resolved` in the vault (a dangling
+  managed/uncaptured subflow surfaces `resolved: false`, never fabricated).
+  Previously subflow calls were unmodeled and thus invisible to the narrative.
+
+> **Upgrade note:** subflow edges are minted at extraction time, so run
+> `sfi refresh` once to backfill flow→flow subflow edges into an existing vault.
+
+### Added
+- **`sfi.explain_error` — decode a pasted Salesforce error to its source
+  component.** Support's first-line question ("a user got this error saving a
+  record — what caused it?") had no tool: the vault already holds every
+  `ValidationRule.errorMessage`, every Flow, every Apex class/trigger name, and
+  every `DuplicateRule`, but nothing mapped an error TEXT back to its source
+  node. The new tool takes `{ errorText, object? }` and runs ranked, **heuristic**
+  match strategies, each candidate carrying its own `confidence` + a `why`:
+  (1) validation rule — the message segment (after
+  `FIELD_CUSTOM_VALIDATION_EXCEPTION`, or a bare pasted banner) is compared to
+  every `ValidationRule.errorMessage`; an EXACT trimmed equality is `declared`,
+  a normalized/substring match is `heuristic`; returns the rule id, object,
+  `active` flag, and `errorConditionFormula`. (2) flow fault — recognizes
+  fault-email shapes ("An error occurred at element X", "Flow API Name: Y") and
+  resolves the flow API name to a real `Flow:` node (`declared`); the element
+  name is echoed and cross-checked against the flow's action calls but is not
+  fabricated as a node (flow elements are not separate graph nodes offline).
+  (3) apex — recognizes stack frames ("Class.X.method: line N",
+  "Trigger.T: line N", "System.XException") and resolves the class/trigger to a
+  real node (`declared`); the offending line is not resolvable offline.
+  (4) duplicate rules — "duplicate" phrasing + an `object` hint lists the ACTIVE
+  `DuplicateRule` nodes on that object (`heuristic` listing). (5) status-code
+  taxonomy — recognizes common REST/API statusCodes (`REQUIRED_FIELD_MISSING`,
+  `UNABLE_TO_LOCK_ROW`, `INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY`,
+  `CANNOT_INSERT_UPDATE_ACTIVATE_ENTITY`, …) and explains the CATEGORY + which
+  component TYPES produce it — clearly category-level, never a specific match;
+  automation-abort codes cross-reference the triggers/flows declared on the
+  hinted object (`triggersOn`). `disposition` mirrors `sfi.resolve`
+  (`matched` / `ambiguous` / `none`) and FAILS CLOSED — a source is never
+  fabricated; on `none`, `triedStrategies` + `nextSteps` guide the next move
+  (e.g. `sfi.what_happens_on_save`). Matching is against DECLARED metadata, not
+  a runtime trace — every candidate confidence and a verbatim `disclosure` say
+  so; the candidate list is byte-budgeted. Discoverable via the semantic funnel
+  (new utterance band in `funnel-utterances.ts`) and the `understand` capability
+  category.
+
+### Fixed
+- **Case-variant SOQL/Apex field references no longer dangle off the graph
+  (R6-03).** Apex and SOQL are case-insensitive, so `[select id from account
+  where custom_flag__c = true]` emitted parsed AST edges targeting
+  `CustomField:account.custom_flag__c` — a dangling id the exact-match edge
+  walk could never attach to the vaulted `CustomField:Account.Custom_Flag__c`
+  node. Edge-only consumers (`safe_to_delete_field`, `unused_fields_deep`
+  tier 1, `find_dead_code`) then read the field as unreferenced — a false
+  "safe" on a destructive verdict. A new import-time
+  `canonicalizeFieldEdgeTargets` pass (graph `import.ts`, mirrored on the
+  incremental `computeChangeSet` path) remaps a DANGLING `CustomField:` edge
+  target onto the vaulted field id when it matches case-insensitively —
+  producer-agnostic (apex-ast, apex-scanner, frontend scanners). Honesty
+  invariants: exact-id matches are final, an unknown field stays dangling
+  (absence preserved, never invented), a synthetic case-collision drops the
+  key (ambiguity is never guessed), and edge `properties` keep the verbatim
+  source-text casing as raw evidence.
+
+### Changed
+- **Inline-SOQL field-usage disclosures narrowed to the real blind spot
+  (R6-03).** The default-on Apex AST pass already resolves fields referenced
+  inside inline static SOQL (SELECT / WHERE / ORDER BY / GROUP BY / HAVING,
+  aggregate and date-function arguments) and CONSTANT-string
+  `Database.query` literals into `confidence: 'parsed'` field-level
+  readsFrom edges — but `unused_fields_deep`, `safe_to_delete_field`, and
+  the `developer-apex-refactor` / `developer-code-quality` skills still
+  disclosed ALL SOQL field usage as invisible. Disclosures now state
+  honestly: inline static SOQL is resolved at parsed confidence;
+  string-BUILT dynamic SOQL (`Database.query('SELECT ' + f + ...)`) remains
+  the disclosed blind spot; files the AST failed to parse fall back to the
+  regex scanner (counted in the manifest `apexAst` block). New parser tests
+  pin the clause-by-clause contract, including that concatenated dynamic
+  SOQL emits NO edges.
+
+### Docs
+
+- **Fixed Apex analysis documentation drift.** The parser-grade Apex AST pass
+  runs by default on every refresh (since P13-AST-flip), emitting `confidence:
+  parsed` edges for resolved field reads/writes and cross-class calls; the
+  regex/token scanner backfills with `confidence: heuristic` edges (parse
+  failures, recall gaps). Updated CLAUDE.md (boundary disclosure), README.md
+  trust glossary (already accurate), developer-code-quality skill (clarified
+  that the quality recognizer is heuristic, but Apex extraction uses AST),
+  and architect-impact-analysis skill (split Apex edge tiers into parsed and
+  heuristic rows in the confidence table, updated disclosures). All changes
+  are markdown-only; no product code or tool descriptions modified.
+
+### Fixed
+
+- **`get_component` no longer refuses `maxBodyBytes: 0` on a huge node
+  (R6-31 — recovers the agent-eval grounding metric).** `maxBodyBytes`
+  historically bounded only `body`; `frontmatter` (the raw rendered YAML)
+  and `properties`/`referenceIds` (the graph node's own data) were always
+  returned in full. Fine for an average component, but a Profile with
+  thousands of `fieldPermissions`/`objectPermissions` renders a frontmatter
+  blob and a `properties` object each well past the ~40 KB global MCP
+  response budget on their own — so a caller passing `maxBodyBytes: 0` to
+  probe "does this component exist, what does it look like" (the grounding
+  pattern used by `synthesize_answer` and QA harnesses) got the global
+  `oversize` refusal instead of an answer, even though the one field it
+  asked to skip (`body`) was never the problem. This was the sole cause of
+  ~8 of 9 new ungrounded citations in the agent-eval harness
+  (`groundedClaimRate` 0.921 < 0.95) — every answer citing a large Profile
+  lost its grounding probe. When `maxBodyBytes` is `0` or small (below the
+  new `METADATA_PROBE_MAX_BODY_BYTES` threshold), the handler now builds
+  the response from a bounded metadata PROJECTION instead: `frontmatter`
+  capped the same way `body` already was, `properties` reduced to whichever
+  entries fit a small fixed budget (in practice the scalar fields survive
+  and the huge arrays/objects are the ones dropped), and `referenceIds`
+  capped to a fixed budget with the true total disclosed via the new
+  `referenceCount` field. `data.metadataOnly` and a new `data.disclosure`
+  string name exactly what was omitted, so the response stays honest —
+  never a silent subset. This guarantees `maxBodyBytes: 0` never produces
+  the global `oversize` error again. The default call (no `maxBodyBytes`)
+  and any explicit value at/above the threshold are UNCHANGED — full
+  `frontmatter`/`properties`/`referenceIds`, exactly as before. Verified on
+  a production-scale gate vault: `get_component({ id: 'Profile:Admin',
+  maxBodyBytes: 0 })` went from `error.kind: 'oversize'` (230-byte error
+  envelope) to `ok` with a 5 336-byte metadata envelope disclosing 4 of 15
+  properties and 2 404 of 2 456 outgoing edges not expanded.
+
+- **Case-variant SOQL/Apex object references no longer dangle off the graph
+  (R7-W3).** Mirrors R6-03 on the object side of the same problem: `[select
+  id from account]` emitted a heuristic `readsFrom` edge targeting
+  `CustomObject:account` — a dangling id the exact-match edge walk could
+  never attach to the vaulted `CustomObject:Account` node. Any
+  `CustomObject:`-prefixed target is susceptible (SOQL FROM, platform-event
+  `listensTo`, trigger `on Object`, lookup/master-detail declarations), and
+  every object variant (CustomObject / CustomSetting / CustomMetadataType /
+  PlatformEvent / BigObject / KnowledgeArticle) shares the node type
+  `CustomObject` regardless of its declared variant, so a single check covers
+  all of them. A new `canonicalizeObjectEdgeTargets` pass (graph `import.ts`,
+  mirrored on the incremental `computeChangeSet` path) remaps a DANGLING
+  `CustomObject:` edge target onto the vaulted object id when it matches
+  case-insensitively. It shares its remap engine
+  (`canonicalizeEdgeTargetsByCase`) with the R6-03 `canonicalizeFieldEdgeTargets`
+  fix — same honesty invariants: exact-id matches are final, an unknown
+  object stays dangling (absence preserved, never invented), a synthetic
+  case-collision drops the key (ambiguity is never guessed), a namespaced id
+  (`ns__Obj__c`) is case-folded as one unit, and edge `properties` keep the
+  verbatim source-text casing as raw evidence. `canonicalizeFieldEdgeTargets`'s
+  observable behavior is unchanged (regression-tested).
+
+## [0.1.26] — 2026-07-10
+
+### Changed
+- **Metadata-only npm patch.** Homepage now points at the canonical domain
+  `https://sfi.auditforce.cloud` (migrated off the prior Pages URL). No product
+  code changed since 0.1.25 — only the publishable package metadata.
+
 ## [0.1.25] — 2026-07-02
 
 Headline: **the org's `<description>` text is now captured and queryable.** Four

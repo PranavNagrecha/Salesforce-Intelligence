@@ -106,7 +106,29 @@ const parsePropertiesJson = (
   }
 };
 
-const canonicalJson = (value: unknown): string => {
+/**
+ * C-3 (finding 28) — `canonicalJson(undefined)` crash-class sweep. This
+ * module's `canonicalJson` was a copy of `compare-vaults.ts`'s pre-R6-12
+ * implementation, missing the explicit `undefined` branch: a naive `typeof
+ * value !== 'object'` fall-through calls `JSON.stringify(undefined)`, which
+ * returns the JS value `undefined` (NOT a string) rather than throwing —
+ * any caller that concatenates or hashes the result would silently produce
+ * garbage instead of a comparable string. `diffCategory`'s `inA`/`inB`
+ * presence guards mean `va`/`vb` are usually defined when compared, but a
+ * grant map could legitimately carry an explicit `undefined` value (e.g. a
+ * malformed/partial extraction), so the branch is latent, not provably
+ * unreachable. The explicit `undefined` branch below (matching R6-12's fix
+ * in `compare-vaults.ts`) closes that landmine pre-emptively; the sentinel
+ * cannot collide with any real JSON value.
+ *
+ * Exported (only) so the C-3 regression test can exercise the `undefined`
+ * branch directly — `diffCategory`'s `inA`/`inB` guards mean no reachable
+ * end-to-end fixture built from real (JSON-round-tripped) vault data can
+ * currently trigger it, so an in-process unit call is the only way to
+ * prove the fix without waiting for a future caller to hit the landmine.
+ */
+export const canonicalJson = (value: unknown): string => {
+  if (value === undefined) return '\0undefined\0';
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   const record = value as Readonly<Record<string, unknown>>;

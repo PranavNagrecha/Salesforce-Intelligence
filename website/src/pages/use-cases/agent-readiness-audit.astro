@@ -1,0 +1,106 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+
+const title = "Agent-readiness audit for Salesforce - sf-intelligence";
+const description =
+  "Run an offline AI / Agentforce readiness audit with sf-intelligence: tech debt, unused metadata, org risk, PII, guest exposure, and AI exposure — free, local, read-only.";
+
+const jsonld = [
+  {
+    "@type": "FAQPage",
+    mainEntity: [
+      {
+        "@type": "Question",
+        name: "What is a Salesforce agent-readiness audit?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "A structured pass over technical debt, unused or risky metadata, permissions/exposure, and (where modeled) what GenAI / Agentforce assets can touch — before you widen what agents see. sf-intelligence runs that pass offline from a local vault using existing tools, not a new SaaS product.",
+        },
+      },
+      {
+        "@type": "Question",
+        name: "Does this replace Hubbl or Elements AI-readiness audits?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "No. Those vendors sell packaged commercial assessments and dashboards. This page is a free, local playbook for the same buying trigger using open tools. Use both when you need a vendor report for leadership and day-to-day editor questions for builders.",
+        },
+      },
+    ],
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/use-cases/agent-readiness-audit"
+  heading="Agent-readiness audit"
+  intro="2026 buyers ask whether the org is <strong>ready for Agentforce / agentic AI</strong>. sf-intelligence already ships the kit — this page is the playbook, not a new product."
+  crumbs={[
+    { label: "use-cases", href: "/use-cases" },
+    { label: "agent-readiness audit", href: "/use-cases/agent-readiness-audit" },
+  ]}
+  breadcrumbs={[
+    { name: "Use cases", path: "/use-cases" },
+    { name: "Agent-readiness audit", path: "/use-cases/agent-readiness-audit" },
+  ]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container">
+      <div class="prose">
+        <div class="callout">
+          <p><strong>Short answer:</strong> Refresh a vault, then run debt → unused → risk → exposure tools in order. Every answer stays on your machine, read-only, with confidence labels. For safety framing see <a href="/ai-safety">is AI safe on my org?</a>.</p>
+        </div>
+
+        <h2 id="why">Why this framing</h2>
+        <p>Industry commentary in 2026 treats technical debt as a top admin pain and "get AI-ready" as a budget line (Hubbl and Elements sell into it). The capabilities below already exist in the roster — packaging them as one narrative is the GTM move, not inventing new analysis.</p>
+
+        <h2 id="playbook">Playbook (compose existing tools)</h2>
+        <table class="doc-table">
+          <thead><tr><th>Step</th><th>Ask / tool</th><th>What you learn</th></tr></thead>
+          <tbody>
+            <tr><td>1. Debt score</td><td><code>sfi.tech_debt_score</code></td><td>Weighted debt with honest exclusions when an extractor didn't run</td></tr>
+            <tr><td>2. Org risk</td><td><code>sfi.org_risk_report</code></td><td>Synthesis of risk themes; optional <code>gate: true</code> for deploy readiness</td></tr>
+            <tr><td>3. Unused surface</td><td><code>sfi.unused_fields_deep</code>, <code>sfi.find_dead_code</code></td><td>Cleanup candidates before agents inherit ghost metadata</td></tr>
+            <tr><td>4. Hardcoded / quality</td><td><code>sfi.find_hardcoded_values</code>, <code>sfi.governor_limit_risks</code></td><td>IDs, injection-ish patterns, governor risk (heuristic)</td></tr>
+            <tr><td>5. PII map</td><td><code>sfi.pii_inventory</code></td><td>Which fields look sensitive by name/type/description</td></tr>
+            <tr><td>6. Guest exposure</td><td><code>sfi.guest_exposure_report</code></td><td>Experience Cloud / unauthenticated surface (when modeled)</td></tr>
+            <tr><td>7. AI exposure</td><td><code>sfi.ai_exposure_report</code></td><td>What modeled GenAI / Agentforce-related assets touch</td></tr>
+            <tr><td>8. Docs handoff</td><td><code>sfi.generate_onboarding_doc</code>, <code>sfi.generate_data_dictionary</code></td><td>Human-readable baseline for the cleanup backlog</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="prompts">Example prompts</h2>
+        <ul>
+          <li>"Score technical debt for this org and list the top cleanup themes."</li>
+          <li>"Which unused custom fields are safest to retire, and what still references them?"</li>
+          <li>"What PII could an agent see if we expose Account and Contact broadly?"</li>
+          <li>"Run an AI exposure report — what GenAI assets are modeled and what do they touch?"</li>
+        </ul>
+
+        <h2 id="limits">Honest limits</h2>
+        <ul>
+          <li>Static / vault-bound — not a runtime agent monitor.</li>
+          <li>Heuristic findings stay labeled; spot-check before executive claims.</li>
+          <li>Coverage depends on retrieve + extractors; gaps are disclosed, not invented as "none in org."</li>
+          <li>Commercial audits still win when you need a vendor logo on a board deck — see <a href="/compare/hubbl">vs Hubbl</a> and <a href="/compare/elements-cloud">vs Elements.cloud</a>.</li>
+        </ul>
+
+        <h2 id="next">Next</h2>
+        <p><a href="/getting-started">Install</a> · <a href="/capabilities">capability map</a> · <a href="/compare">compare hub</a> · repo <a href="https://github.com/PranavNagrecha/Salesforce-Intelligence/blob/main/docs/POSITIONING.md">POSITIONING.md</a>.</p>
+
+        <div style="padding-top:36px;">
+          <div class="cta-box">
+            <h2 class="screen-type">Audit locally. Then widen agents.</h2>
+            <p>Free on npm. One retrieve. Read-only by construction.</p>
+            <div class="cta-actions">
+              <a class="btn btn-solid" href="/getting-started">get started</a>
+              <a class="btn btn-ghost" href="/ai-safety">AI safety</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</DocPage>

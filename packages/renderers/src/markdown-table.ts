@@ -135,15 +135,39 @@ export const escapeMarkdownHeading = (text: string): string =>
     .replace(/^(#+)/, (m) => m.replace(/#/g, '\\#'));
 
 /**
- * Escape free-text metadata interpolated INSIDE a backtick code span (e.g. the
- * `**API Name:** \`...\`` line, or a Flow detail value). Collapses newlines and
- * escapes ONLY the backtick — a stray backtick would close the span early and
- * leak the tail into prose. Pipe/asterisk/hash are inert inside a code span, so
- * escaping them would corrupt the value; they are left untouched. Clean values
- * are returned byte-identical.
+ * Render free-text metadata as a complete, safe Markdown inline code span —
+ * fence included (e.g. for a `**API Name:** ...` line, or a Flow detail
+ * value). Collapses newlines to a single space first.
+ *
+ * CR-16d: an EARLIER version of this helper returned only the inner text and
+ * relied on callers to wrap it in a hardcoded single backtick, escaping an
+ * embedded backtick with a backslash (`` \` ``). That does NOT work — per
+ * CommonMark, backslash escapes are inert inside code spans (a code span
+ * closes at the next backtick RUN of the same length as its opening run,
+ * full stop), so a value containing a backtick would still split the span
+ * early despite the backslash. There is no way to hold an embedded backtick
+ * inside a fence that is fixed at one backtick, so this helper now OWNS the
+ * fence instead of assuming one: it picks a fence one backtick longer than
+ * the longest run of backticks already present in the value (so nothing in
+ * the value can ever match the fence length and close it early), and — per
+ * spec — pads the content with a single leading/trailing space when the
+ * value starts or ends with a backtick (otherwise that boundary backtick
+ * would visually fuse with the fence). A value with no backticks gets the
+ * minimal one-backtick fence and no padding, so existing SF-identifier
+ * output (which never contains a backtick) is byte-identical to before.
+ *
+ * Pipe/asterisk/hash are inert inside a code span, so they are left
+ * untouched — escaping them would corrupt the value.
  */
-export const escapeMarkdownInline = (text: string): string =>
-  text.replace(/\r\n|\r|\n/g, ' ').replace(/`/g, '\\`');
+export const escapeMarkdownInline = (text: string): string => {
+  const collapsed = text.replace(/\r\n|\r|\n/g, ' ');
+  const backtickRuns = collapsed.match(/`+/g) ?? [];
+  const longestRun = Math.max(0, ...backtickRuns.map((run) => run.length));
+  const fence = '`'.repeat(longestRun + 1);
+  const needsPadding = collapsed.startsWith('`') || collapsed.endsWith('`');
+  const content = needsPadding ? ` ${collapsed} ` : collapsed;
+  return `${fence}${content}${fence}`;
+};
 
 /**
  * Escape free-text metadata interpolated as a Markdown BLOCK (a description

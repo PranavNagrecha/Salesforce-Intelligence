@@ -35,7 +35,7 @@ import type { Context } from '../server.js';
 
 import { readFieldDataType } from './field-properties.js';
 import { hybridTrust, type HybridStaleness } from './hybrid-trust.js';
-import { assertSoqlIdentifier, checkVaultStaleness, resolveLiveAccess } from './live-plane.js';
+import { assertSoqlIdentifier, checkVaultStaleness, probeLiveAccess } from './live-plane.js';
 import { runLiveQuery } from './live-session.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import { normalizePicklistValues } from './picklist-values.js';
@@ -164,7 +164,10 @@ export const livePicklistUsageHandler = async (
   const fieldApiName = parts?.field ?? fieldNode.apiName;
 
   const org = input.orgAlias?.trim() || ctx.manifest.sourceOrg;
-  const access = await resolveLiveAccess(org, input.liveEnabled);
+  const access = await probeLiveAccess(ctx, {
+    liveEnabled: input.liveEnabled,
+    orgAlias: input.orgAlias,
+  });
 
   // No consent (or an unparseable id) → defined values only, with the caveat.
   if (!access.allowed || objOk === null || fieldOk === null || !objOk.ok || !fieldOk.ok) {

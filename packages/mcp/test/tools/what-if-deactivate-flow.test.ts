@@ -23,6 +23,8 @@ import {
   whatIfDeactivateFlowInputSchema,
 } from '../../src/tools/what-if-deactivate-flow.js';
 
+import { measureGraphQueries } from './_graph-query-budget.js';
+
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
   refreshedAt: '2026-05-28T10:00:00Z',
@@ -258,6 +260,104 @@ const platformEventSeed: ExtractionResult = {
   ],
 };
 
+// =============================================================================
+// Suite 5 (R6-02): subflow broken callers. A subflow with NO outgoing edges
+// would read `safe` to deactivate — the false-"safe" the R6 audit flagged. With
+// incoming `references` (referenceKind: 'subflow') edges from parent flows, the
+// parents are BROKEN CALLERS on deactivation. An ACTIVE parent flips the verdict
+// to `blocking`; an inactive-only parent set surfaces the callers but stops at
+// `risky`. A non-subflow incoming `references` (e.g. a FlexiPage embedding the
+// flow) is NOT a broken caller — only referenceKind 'subflow' counts.
+// =============================================================================
+
+const SUBFLOW_ACTIVE_PARENTS_ID = 'Flow:SharedSubflow';
+const PARENT_ACTIVE_1_ID = 'Flow:ParentActiveA';
+const PARENT_ACTIVE_2_ID = 'Flow:ParentActiveB';
+const FLEXIPAGE_EMBED_ID = 'FlexiPage:HomePage';
+
+const subflowActiveParentsSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: SUBFLOW_ACTIVE_PARENTS_ID,
+      type: 'Flow',
+      apiName: 'SharedSubflow',
+      properties: { status: 'Active' },
+    }),
+    makeNode({
+      id: PARENT_ACTIVE_1_ID,
+      type: 'Flow',
+      apiName: 'ParentActiveA',
+      properties: { status: 'Active' },
+    }),
+    makeNode({
+      id: PARENT_ACTIVE_2_ID,
+      type: 'Flow',
+      apiName: 'ParentActiveB',
+      properties: { status: 'Active' },
+    }),
+    makeNode({
+      id: FLEXIPAGE_EMBED_ID,
+      type: 'FlexiPage',
+      apiName: 'HomePage',
+      properties: {},
+    }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: PARENT_ACTIVE_1_ID,
+      toId: SUBFLOW_ACTIVE_PARENTS_ID,
+      edgeType: 'references',
+      confidence: 'declared',
+      properties: { referenceKind: 'subflow', subflowElementName: 'Call_A' },
+    }),
+    makeEdge({
+      fromId: PARENT_ACTIVE_2_ID,
+      toId: SUBFLOW_ACTIVE_PARENTS_ID,
+      edgeType: 'references',
+      confidence: 'declared',
+      properties: { referenceKind: 'subflow', subflowElementName: 'Call_B' },
+    }),
+    // A FlexiPage that embeds the flow — an incoming `references` with a
+    // NON-subflow referenceKind. Must NOT be counted as a broken caller.
+    makeEdge({
+      fromId: FLEXIPAGE_EMBED_ID,
+      toId: SUBFLOW_ACTIVE_PARENTS_ID,
+      edgeType: 'references',
+      confidence: 'declared',
+      properties: { referenceKind: 'flexiPageComponent' },
+    }),
+  ],
+};
+
+const SUBFLOW_OBSOLETE_PARENT_ID = 'Flow:SubflowObsoleteOnly';
+const PARENT_OBSOLETE_ID = 'Flow:ParentObsolete';
+
+const subflowObsoleteParentSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: SUBFLOW_OBSOLETE_PARENT_ID,
+      type: 'Flow',
+      apiName: 'SubflowObsoleteOnly',
+      properties: { status: 'Active' },
+    }),
+    makeNode({
+      id: PARENT_OBSOLETE_ID,
+      type: 'Flow',
+      apiName: 'ParentObsolete',
+      properties: { status: 'Obsolete' },
+    }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: PARENT_OBSOLETE_ID,
+      toId: SUBFLOW_OBSOLETE_PARENT_ID,
+      edgeType: 'references',
+      confidence: 'declared',
+      properties: { referenceKind: 'subflow', subflowElementName: 'Call_Old' },
+    }),
+  ],
+};
+
 let tempDir: string;
 let store: GraphStore;
 let ctx: Context;
@@ -275,6 +375,8 @@ beforeAll(async () => {
     bareSeed,
     emptySeed,
     platformEventSeed,
+    subflowActiveParentsSeed,
+    subflowObsoleteParentSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -465,6 +567,88 @@ describe('whatIfDeactivateFlowHandler', () => {
     expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
     expect(result.value.vaultState.refreshedAt).toBe('2026-05-28T10:00:00Z');
   });
+
+  // ---------------------------------------------------------------------------
+  // R6-02: subflow broken callers (the incoming side).
+  // ---------------------------------------------------------------------------
+
+  it('flips a would-be-safe subflow to `blocking` when an ACTIVE parent calls it', async () => {
+    const result = await whatIfDeactivateFlowHandler(ctx, {
+      flowId: SUBFLOW_ACTIVE_PARENTS_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    // The subflow has NO outgoing edges — pre-R6-02 this read `safe`.
+    expect(data.verdict).toBe('blocking');
+    const brokenCallers = data.impacts.filter(
+      (i) => i.category === 'broken-caller',
+    );
+    const ids = brokenCallers.map((i) => i.componentId).sort();
+    expect(ids).toEqual([PARENT_ACTIVE_1_ID, PARENT_ACTIVE_2_ID].sort());
+    for (const bc of brokenCallers) {
+      expect(bc.componentType).toBe('Flow');
+      expect(bc.confidence).toBe('declared');
+      expect(bc.explanation.toLowerCase()).toContain('subflow');
+    }
+  });
+
+  it('does NOT count a non-subflow incoming reference (FlexiPage) as a broken caller', async () => {
+    const result = await whatIfDeactivateFlowHandler(ctx, {
+      flowId: SUBFLOW_ACTIVE_PARENTS_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.impacts.map((i) => i.componentId);
+    expect(ids).not.toContain(FLEXIPAGE_EMBED_ID);
+  });
+
+  it('surfaces an obsolete-only parent as a broken caller but stops at `risky` (not blocking)', async () => {
+    const result = await whatIfDeactivateFlowHandler(ctx, {
+      flowId: SUBFLOW_OBSOLETE_PARENT_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    const brokenCallers = data.impacts.filter(
+      (i) => i.category === 'broken-caller',
+    );
+    expect(brokenCallers.map((i) => i.componentId)).toEqual([
+      PARENT_OBSOLETE_ID,
+    ]);
+    // The caller is surfaced (transparency) but its Obsolete status means the
+    // subflow is not currently invoked at runtime — verdict is `risky`, not
+    // `blocking`.
+    expect(data.verdict).toBe('risky');
+    expect(brokenCallers[0]?.explanation).toContain('Obsolete');
+  });
+
+  it('surfaces the OUTGOING subflow call as a metadata-blocker when a parent is deactivated', async () => {
+    const result = await whatIfDeactivateFlowHandler(ctx, {
+      flowId: PARENT_ACTIVE_1_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    const childImpact = data.impacts.find(
+      (i) => i.componentId === SUBFLOW_ACTIVE_PARENTS_ID,
+    );
+    expect(childImpact).toBeDefined();
+    expect(childImpact?.category).toBe('metadata-blocker');
+    // Deactivating the parent stops its subflow invocation → blocking.
+    expect(data.verdict).toBe('blocking');
+  });
+
+  it('discloses both the new subflow modeling and the still-invisible Apex Flow.Interview path', async () => {
+    const result = await whatIfDeactivateFlowHandler(ctx, {
+      flowId: SUBFLOW_ACTIVE_PARENTS_ID,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const disclosure = result.value.data.disclosure;
+    expect(disclosure).toContain('subflow');
+    expect(disclosure).toContain('Flow.Interview');
+  });
 });
 
 describe('whatIfDeactivateFlowInputSchema', () => {
@@ -492,5 +676,64 @@ describe('whatIfDeactivateFlowInputSchema', () => {
       flowId: 'NotAFlow',
     });
     expect(parsed.success).toBe(true);
+  });
+});
+
+// =============================================================================
+// N+1 query budget (finding C-1). The outgoing-impact walk,
+// collectFiringConditions, and collectBrokenCaller all resolved edge endpoints
+// with a `getNodeById` per edge (and the platform-event subscriber walk did a
+// per-event listEdges + per-subscriber getNodeById); all are batched. The count
+// must NOT scale with the flow's edge fan-out.
+// =============================================================================
+describe('whatIfDeactivateFlowHandler — bounded graph queries', () => {
+  // A wide flow: `fanOut` outgoing callsApex targets, `fanOut` firesWhen
+  // conditions, `fanOut` incoming subflow callers, AND `fanOut` subscribers to a
+  // platform event this flow publishes (exercises the nested subs walk too).
+  const seedWideFlow = async (fanOut: number) => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-widf-budget-'));
+    const opened = await openGraph(join(dir, 'widf.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const s = opened.value;
+    const EVENT = 'CustomObject:WideEvent__e';
+    const nodes: Node[] = [
+      makeNode({ id: 'Flow:Wide', type: 'Flow', apiName: 'Wide', properties: { status: 'Active' } }),
+      makeNode({ id: EVENT, type: 'CustomObject', apiName: 'WideEvent__e' }),
+    ];
+    const edges: Edge[] = [
+      makeEdge({ fromId: 'Flow:Wide', toId: EVENT, edgeType: 'writesTo' }),
+    ];
+    for (let i = 0; i < fanOut; i += 1) {
+      nodes.push(makeNode({ id: `ApexClass:Cls${i}`, type: 'ApexClass', apiName: `Cls${i}` }));
+      edges.push(makeEdge({ fromId: 'Flow:Wide', toId: `ApexClass:Cls${i}`, edgeType: 'callsApex' }));
+      nodes.push(makeNode({ id: `ConditionalContext:Cond${i}`, type: 'ConditionalContext', apiName: `Cond${i}` }));
+      edges.push(makeEdge({ fromId: 'Flow:Wide', toId: `ConditionalContext:Cond${i}`, edgeType: 'firesWhen' }));
+      nodes.push(makeNode({ id: `Flow:Parent${i}`, type: 'Flow', apiName: `Parent${i}`, properties: { status: 'Active' } }));
+      edges.push(makeEdge({ fromId: `Flow:Parent${i}`, toId: 'Flow:Wide', edgeType: 'references', properties: { referenceKind: 'subflow' } }));
+      nodes.push(makeNode({ id: `Flow:Sub${i}`, type: 'Flow', apiName: `Sub${i}`, properties: { status: 'Active' } }));
+      edges.push(makeEdge({ fromId: `Flow:Sub${i}`, toId: EVENT, edgeType: 'listensTo' }));
+    }
+    const imported = await importExtractionResults(s, [{ nodes, edges }]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const wideCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s } as Context;
+    const measured = await measureGraphQueries(s, () =>
+      whatIfDeactivateFlowHandler(wideCtx, { flowId: 'Wide' }),
+    );
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+    return measured;
+  };
+
+  it('issues a query count independent of the flow edge fan-out', async () => {
+    const small = await seedWideFlow(60);
+    const large = await seedWideFlow(200);
+    expect(small.result.ok).toBe(true);
+    expect(large.result.ok).toBe(true);
+    expect(large.nodeQueries).toBe(small.nodeQueries);
+    expect(large.edgeQueries).toBe(small.edgeQueries);
+    // A per-edge getNodeById across the walks would be >=180 node queries at
+    // fanOut=200; batched, each walk is one node/edge fetch.
+    expect(large.nodeQueries).toBeLessThan(60);
+    expect(large.edgeQueries).toBeLessThan(60);
   });
 });

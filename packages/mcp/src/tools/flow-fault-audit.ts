@@ -63,6 +63,18 @@ export interface FlowFaultAuditOutput {
   readonly totalFaultableElements: number;
   readonly totalUnhandledElements: number;
   readonly flows: readonly FlowFaultEntry[];
+  /**
+   * True when `flows` was cut at `limit` (worst-first ordering) —
+   * `flowsWithUnhandledFaults` is still the FULL offender count. No cursor:
+   * raise `limit` (max 500) to see the dropped tail.
+   */
+  readonly truncated: boolean;
+  /**
+   * True when the Flow scan stopped at the internal ceiling
+   * (`PAGE * MAX_PAGES` flows) — `totalFlows` and the totals may UNDERCOUNT.
+   * Only conceivable on an extreme vault; disclosed rather than silent.
+   */
+  readonly scanTruncated: boolean;
   readonly trust: TrustSummary;
   readonly rendered: string;
 }
@@ -103,12 +115,16 @@ export const flowFaultAuditHandler = async (
   const limit = input.limit ?? 100;
   const flows: Node[] = [];
   let offset = 0;
+  // scanTruncated: the last allowed page came back full, so flows beyond the
+  // PAGE * MAX_PAGES ceiling (if any) were never scanned — disclose, don't hide.
+  let scanTruncated = false;
   for (let i = 0; i < MAX_PAGES; i += 1) {
     const r = await listNodesByType(ctx.graph, 'Flow', { limit: PAGE, offset });
     if (!r.ok) break;
     flows.push(...r.value);
     if (r.value.length < PAGE) break;
     offset += PAGE;
+    if (i === MAX_PAGES - 1) scanTruncated = true;
   }
 
   // Is fault coverage even captured in this vault? (Pre-change vaults have none.)
@@ -136,15 +152,25 @@ export const flowFaultAuditHandler = async (
   }
   entries.sort((a, b) => b.elementsWithoutFault - a.elementsWithoutFault);
 
+  // Handler cap (P15 oversize-enumeration guard): offender list is sliced at
+  // `limit` after worst-first sort; full counts stay honest + the cut is disclosed.
+  const truncated = entries.length > limit;
+
   const trust = offlineTrust(ctx, { status: summarizeCoverage(ctx.manifest).status });
   const table = mdTable(
     ['Flow', 'Unhandled', 'Faultable'],
     entries.slice(0, limit).map((e) => [e.name, e.elementsWithoutFault, e.faultableElements]),
   );
+  const truncNote = truncated
+    ? `\n_List truncated to the worst ${limit} of ${entries.length} flagged flows — raise \`limit\` (max 500) to see the rest._\n`
+    : '';
+  const scanNote = scanTruncated
+    ? `\n_Flow scan stopped at the internal ${PAGE * MAX_PAGES}-flow ceiling — totals may undercount; narrow the audit or refresh a smaller vault._\n`
+    : '';
   const rendered = !propertyAvailable
     ? `Fault coverage is not in this vault yet — run \`/sfi-refresh\` to populate it (the Flow extractor now records it).\n\n${renderFooter(trust)}`
     : `**${entries.length}** of ${flows.length} flows have at least one DML/action element with no fault path ` +
-      `(${totalUnhandledElements} of ${totalFaultableElements} faultable elements unhandled).\n\n${table}\n\n` +
+      `(${totalUnhandledElements} of ${totalFaultableElements} faultable elements unhandled).\n\n${table}\n${truncNote}${scanNote}\n` +
       `_Offline — an unhandled fault is **surfaced, not silent**: screen flows show the running user an error screen, ` +
       `and autolaunched/record-triggered flows (including before-save and after-save) raise an unhandled-fault runtime ` +
       `error that rolls back the whole transaction so the triggering save fails with a visible error. Add a fault path ` +
@@ -158,6 +184,8 @@ export const flowFaultAuditHandler = async (
       totalFaultableElements,
       totalUnhandledElements,
       flows: entries.slice(0, limit),
+      truncated,
+      scanTruncated,
       trust,
       rendered,
     },

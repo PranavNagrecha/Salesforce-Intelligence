@@ -191,9 +191,9 @@ export interface ExplainFieldOutput {
    * NOT selectable for new records — existing records may still hold it — so
    * it is LISTED-and-marked, never dropped and never presented as current.
    * Old vaults (pre-CR-10) stored bare strings; those normalize to
-   * `isActive: true` (active). GVS-resolved values carry `isActive: true`
-   * UNVERIFIED — the GlobalValueSet extractor does not yet carry per-value
-   * isActive (sibling H10), so `picklistValuesNote` discloses the gap.
+   * `isActive: true` (active). GVS-resolved values carry the SAME honest
+   * `isActive` as an inline definition (CR-10b — the GlobalValueSet
+   * extractor now captures per-value activation status directly).
    */
   readonly picklistValues: readonly ExplainFieldPicklistValue[] | null;
   /**
@@ -204,14 +204,13 @@ export interface ExplainFieldOutput {
    */
   readonly picklistValuesSource?: string;
   /**
-   * Present in two picklist disclosure cases. (1) The field IS picklist-typed
-   * but `picklistValues` is `null`: the value set was not inline at extraction
-   * time AND the usesValueSet edge could not resolve it (pre-0.1.10 vault, or
-   * the GlobalValueSet was not retrieved) — without this note a `null` would
-   * silently read as "no values". (2) The values WERE resolved from a
-   * GlobalValueSet (`picklistValuesSource` set): the GVS extractor does not yet
-   * carry per-value `isActive` (sibling H10), so the note discloses that each
-   * GVS-resolved value's `isActive: true` is UNVERIFIED.
+   * Present when the field IS picklist-typed but `picklistValues` is `null`:
+   * the value set was not inline at extraction time AND the usesValueSet edge
+   * could not resolve it (pre-0.1.10 vault, or the GlobalValueSet was not
+   * retrieved) — without this note a `null` would silently read as
+   * "no values". Absent when the values WERE resolved from a GlobalValueSet
+   * (`picklistValuesSource` set) — CR-10b: those now carry the same honest
+   * `isActive` as an inline definition, so no disclosure is needed.
    */
   readonly picklistValuesNote?: string;
   readonly recordValues?: readonly ExplainFieldRecordValue[];  /** P13-ANNOT-tools: curated annotations (provenance `annotation`); absent when none. */
@@ -277,21 +276,6 @@ const NON_INLINE_VALUE_SET_NOTE =
   '0.1.10+ resolve it automatically); `null` here means "not inline", NOT "no values".';
 
 /**
- * Disclosure attached when `picklistValues` were resolved by following the
- * field's `usesValueSet` edge to a GlobalValueSet: the GVS extractor does not
- * yet carry per-value `isActive` (sibling H10), so every GVS-resolved entry is
- * reported `isActive: true` UNVERIFIED — a deactivated value in the value set
- * would still appear here as selectable until the GlobalValueSet extractor is
- * fixed. Inline definitions carry honest isActive; only GVS-resolved ones need
- * this caveat.
- */
-const GVS_ISACTIVE_PENDING_NOTE =
-  'Values were resolved from a GlobalValueSet; per-value active/inactive status ' +
-  'is not yet carried by the value-set extractor, so each value is reported as ' +
-  'selectable (isActive: true) UNVERIFIED — a deactivated value in the GlobalValueSet ' +
-  'could still appear here as active. Inline picklist definitions report isActive honestly.';
-
-/**
  * Pull the CustomField's `picklistValues` property — the declared value set
  * the extractor parsed from an inline `<valueSet><valueSetDefinition>`.
  * Routes through the shared H10 normalizer so BOTH the legacy bare-string
@@ -320,6 +304,15 @@ const readFieldPicklistValues = (node: Node): readonly ExplainFieldPicklistValue
  * values both land on vaults refreshed at 0.1.10+). Returns `null` when the
  * edge or the target node is absent (pre-0.1.10 vault, or the value set was
  * not retrieved) — the caller falls back to the honesty note.
+ *
+ * CR-10b: the GlobalValueSet extractor now emits the same H10 object shape
+ * `{value, isActive, label?, default?}` as the CustomField inline picklist
+ * reader, with an honestly-captured `isActive` (a deactivated GVS value is
+ * RETAINED, not filtered — see `global-value-set.ts`). Routing through the
+ * shared `normalizePicklistValues` gets that shape for free AND stays
+ * backward-compatible with a pre-CR-10b vault's bare-string `values` (each
+ * string normalizes to `{value, isActive: true}`), so an un-refreshed vault
+ * degrades to the old behavior instead of returning nothing.
  */
 const resolveGlobalValueSetValues = async (
   ctx: Context,
@@ -331,18 +324,9 @@ const resolveGlobalValueSetValues = async (
   if (edge === undefined) return null;
   const gvsRes = await getNodeById(ctx.graph, edge.toId);
   if (!gvsRes.ok || gvsRes.value === null) return null;
-  const raw = gvsRes.value.properties['values'];
-  if (!Array.isArray(raw)) return null;
-  // The GlobalValueSet extractor still emits bare-string `values` (sibling
-  // H10 — no per-value isActive). Wrap each into the uniform object shape with
-  // `isActive: true` UNVERIFIED so the merged output is consistently shaped;
-  // GVS_ISACTIVE_PENDING_NOTE discloses that the active flag is unverified.
-  return {
-    values: raw
-      .filter((v): v is string => typeof v === 'string')
-      .map((v) => ({ value: v, isActive: true })),
-    valueSetId: edge.toId,
-  };
+  const normalized = normalizePicklistValues(gvsRes.value.properties['values']);
+  if (normalized === null) return null;
+  return { values: normalized, valueSetId: edge.toId };
 };
 
 /**
@@ -595,14 +579,15 @@ export const explainFieldHandler = async (
     referenceTo: readFieldReferenceTo(node),
     picklistValues,
     ...(resolvedFromValueSet !== null ? { picklistValuesSource: resolvedFromValueSet } : {}),
-    // GVS-resolved values carry isActive UNVERIFIED (sibling H10) — disclose
-    // that. Inline definitions get no note. The not-inline / unresolved case
-    // still surfaces NON_INLINE_VALUE_SET_NOTE.
-    ...(resolvedFromValueSet !== null
-      ? { picklistValuesNote: GVS_ISACTIVE_PENDING_NOTE }
-      : picklistValues === null && PICKLIST_DATA_TYPES.includes(fieldType)
-        ? { picklistValuesNote: NON_INLINE_VALUE_SET_NOTE }
-        : {}),
+    // CR-10b: GVS-resolved values now carry an honestly-captured isActive
+    // (same as an inline definition), so no disclosure note is needed for
+    // that case anymore. The not-inline / unresolved case still surfaces
+    // NON_INLINE_VALUE_SET_NOTE.
+    ...(resolvedFromValueSet === null &&
+    picklistValues === null &&
+    PICKLIST_DATA_TYPES.includes(fieldType)
+      ? { picklistValuesNote: NON_INLINE_VALUE_SET_NOTE }
+      : {}),
     ...(annotations !== undefined ? { annotations } : {}),
   };
 

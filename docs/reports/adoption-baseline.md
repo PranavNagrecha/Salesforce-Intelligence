@@ -52,6 +52,26 @@ curl -s "https://api.npmjs.org/downloads/range/last-month/sf-intelligence" \
 # and record whether sf-intelligence is named.
 ```
 
+## GitHub traffic capture (14-day retention)
+
+GitHub's traffic API keeps views/clones for only ~14 days. Re-measure stars etc.
+whenever you like; **traffic must be captured on a cadence** or the signal is
+lost.
+
+**Cadence:** at least weekly (daily is fine). From the product repo root:
+
+```bash
+pnpm adoption:traffic
+# or: node scripts/capture-github-traffic.mjs
+```
+
+- Resolves the current repo via `gh repo view` (no hardcoded owner/repo).
+- Appends one JSONL row of **aggregate** `views` + `clones` counts only
+  (deliberately omits popular paths / referrers).
+- Writes to `.sfi-local/adoption/github-traffic.jsonl` (gitignored). Override
+  with `SFI_ADOPTION_TRAFFIC_PATH`.
+- Requires `gh` authenticated with access to the traffic endpoints (`repo` scope).
+
 ## Measurement log
 
 | Date | Stars | Forks | Contributors | npm dl/30d | Listings | Notes |

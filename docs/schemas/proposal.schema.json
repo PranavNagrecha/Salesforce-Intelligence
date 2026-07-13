@@ -1,0 +1,124 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/PranavNagrecha/Salesforce-Intelligence/blob/main/docs/schemas/proposal.schema.json",
+  "title": "ProposalArtifact",
+  "description": "A deploy-ready, self-justifying proposal emitted by a verdict tool when format='proposal' (Finding #35). Carries LOCAL metadata-API files (package.xml and/or destructiveChanges.xml) plus an evidence trail. sfi PROPOSES these files for a human to review and feed to their own deploy tool (Gearset / Copado / `sf project deploy`); it NEVER deploys, writes, or connects to the org. REVIEW before deploy: analysis is against the last vault refresh, not live prod.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "headline",
+    "files",
+    "summary",
+    "skipped",
+    "evidence",
+    "disclosure"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "description": "Version of this schema the payload conforms to."
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["destructive", "deploy"],
+      "description": "`destructive` = a destructiveChanges.xml delete bundle; `deploy` = a package.xml deploy bundle."
+    },
+    "headline": {
+      "type": "string",
+      "description": "One-line human summary of what the proposal does."
+    },
+    "files": {
+      "type": "array",
+      "description": "The local files the host writes (or prints). sfi never writes them itself.",
+      "items": { "$ref": "#/definitions/file" }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "componentCount", "byType"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["destructive", "deploy"] },
+        "componentCount": { "type": "integer" },
+        "byType": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "metadataName", "members"],
+            "properties": {
+              "type": { "type": "string" },
+              "metadataName": { "type": "string" },
+              "members": { "type": "integer" }
+            }
+          }
+        }
+      }
+    },
+    "skipped": {
+      "type": "array",
+      "description": "Ids dropped as malformed or synthetic/non-deployable graph nodes, with the reason.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "reason"],
+        "properties": {
+          "id": { "type": "string" },
+          "reason": { "type": "string" }
+        }
+      }
+    },
+    "evidence": { "$ref": "#/definitions/evidence" },
+    "disclosure": {
+      "type": "string",
+      "description": "Verbatim, always-present REVIEW-before-deploy / local-file-only disclosure. Also rendered as the leading XML comment inside every generated file."
+    }
+  },
+  "definitions": {
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "contents"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Relative file name, e.g. `destructiveChanges.xml` or `package.xml`."
+        },
+        "contents": {
+          "type": "string",
+          "description": "Full file text, including the leading `<!-- sfi proposal … -->` evidence comment."
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verdict", "sourceTreeHash", "refreshedAt", "reasons", "disclosures"],
+      "properties": {
+        "verdict": {
+          "type": "string",
+          "description": "The tool's verdict/confidence for this proposal (e.g. `safe`, `blocking`, `high`)."
+        },
+        "sourceTreeHash": {
+          "type": "string",
+          "description": "The vault sourceTreeHash the analysis ran against."
+        },
+        "refreshedAt": {
+          "type": "string",
+          "description": "The vault refreshedAt timestamp."
+        },
+        "reasons": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Per-finding evidence lines, each naming its confidence where relevant."
+        },
+        "disclosures": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "The tool's boundaries[] / coverage-caveat text, carried verbatim."
+        }
+      }
+    }
+  }
+}

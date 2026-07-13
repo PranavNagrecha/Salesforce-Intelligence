@@ -48,7 +48,7 @@ an individual is officially representing the community in public spaces.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the project team at **conduct@sf-intelligence.dev** (or via GitHub
+reported to the project team at **conduct@auditforce.cloud** (or via GitHub
 issue directed at maintainers if email is unavailable). All complaints will be
 reviewed and investigated promptly and fairly.
 

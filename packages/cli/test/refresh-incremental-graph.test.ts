@@ -277,3 +277,91 @@ describe('runRefresh default import — deletion reconciliation', () => {
     }
   });
 });
+
+const removeObject = async (vaultRoot: string, name: string): Promise<void> => {
+  const dir = join(vaultPaths(vaultRoot).source, 'main', 'default', 'objects', name);
+  await rm(dir, { recursive: true, force: true });
+};
+
+/**
+ * Finding #23 (P3guard) regression coverage: `--incremental-graph`'s
+ * `computeChangeSet(store, results)` call used to diff `results` (a SCOPED
+ * `--types` walk only extracts the requested type(s)) against the WHOLE
+ * graph, so every non-requested node read as "current but not desired" and
+ * was mass-deleted — or, past `INCREMENTAL_DELTA_CAP`, fell back to
+ * `fullRebuild`, which truncates the entire graph and reimports only the
+ * scoped `results`. Both are silent, severe data loss on a routine
+ * `sfi refresh --types <X> --incremental-graph` run.
+ */
+describe('runRefresh --incremental-graph scoped by --types (finding #23 / P3guard)', () => {
+  it('does NOT delete or truncate non-requested-type nodes', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'sfi-incgraph-scope-'));
+    try {
+      const vault = await seedVaultConfig(cwd);
+      await writeClass(vault, 'Survivor', 'public class Survivor {}');
+      await writeObject(vault, 'Thing__c');
+      expect((await runRefresh({ cwd, noPull: true })).status).toBe('success');
+      expect((await nodeIds(vault)).has('ApexClass:Survivor')).toBe(true);
+      expect((await nodeIds(vault)).has('CustomObject:Thing__c')).toBe(true);
+
+      await writeObject(vault, 'NewThing__c');
+
+      // A scoped + incremental-graph refresh that only re-extracts
+      // CustomObject must NOT touch ApexClass: the unguarded diff would see
+      // ApexClass:Survivor as "current but not desired" and delete it (or,
+      // past the cap, truncate the whole graph via fullRebuild).
+      const messages: string[] = [];
+      const result = await runRefresh({
+        cwd,
+        noPull: true,
+        types: 'CustomObject',
+        incrementalGraph: true,
+        onProgress: (m) => messages.push(m),
+      });
+      expect(result.status).toBe('success');
+      // Never the whole-graph rebuild/truncate fallback this guards against.
+      expect(messages.some((m) => m.includes('rebuilding full'))).toBe(false);
+
+      const after = await nodeIds(vault);
+      expect(after.has('CustomObject:NewThing__c')).toBe(true); // the new one landed
+      expect(after.has('ApexClass:Survivor')).toBe(true); // NOT wiped
+      expect(after.has('CustomObject:Thing__c')).toBe(true); // still present
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('still prunes a stale node WITHIN the requested type (not a no-op guard)', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'sfi-incgraph-scope-prune-'));
+    try {
+      const vault = await seedVaultConfig(cwd);
+      await writeClass(vault, 'Survivor', 'public class Survivor {}');
+      await writeObject(vault, 'Keep__c');
+      await writeObject(vault, 'Gone__c');
+      expect((await runRefresh({ cwd, noPull: true })).status).toBe('success');
+      expect((await nodeIds(vault)).has('CustomObject:Gone__c')).toBe(true);
+
+      await removeObject(vault, 'Gone__c');
+      const messages: string[] = [];
+      const result = await runRefresh({
+        cwd,
+        noPull: true,
+        types: 'CustomObject',
+        incrementalGraph: true,
+        onProgress: (m) => messages.push(m),
+      });
+      expect(result.status).toBe('success');
+      // The scoped prune branch actually ran (this run has a real delete, so
+      // unlike an add-only run it does not short-circuit on a zero delta).
+      expect(messages.some((m) => m.includes('Incremental graph (scoped):'))).toBe(true);
+      expect(messages.some((m) => m.includes('rebuilding full'))).toBe(false);
+
+      const after = await nodeIds(vault);
+      expect(after.has('CustomObject:Gone__c')).toBe(false); // pruned (same type)
+      expect(after.has('CustomObject:Keep__c')).toBe(true); // sibling survives
+      expect(after.has('ApexClass:Survivor')).toBe(true); // other type untouched
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+});

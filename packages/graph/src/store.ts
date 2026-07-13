@@ -1,7 +1,9 @@
-import { DuckDBInstance, type DuckDBConnection } from '@duckdb/node-api';
+import type { DuckDBConnection, DuckDBInstance } from '@duckdb/node-api';
 import { err, ok, type Result } from '@sf-intelligence/core';
 
 import { runMigrations } from './migrations.js';
+
+type DuckDBApi = typeof import('@duckdb/node-api');
 
 /**
  * The error variants that the graph package's operations can return.
@@ -10,7 +12,7 @@ import { runMigrations } from './migrations.js';
  *     graph-* tasks (import pipeline, query API) replace stubs with real
  *     implementations.
  *   - `open-failed`: the DuckDB instance could not be opened (I/O failure,
- *     corrupt file, permission denied, etc.).
+ *     corrupt file, permission denied, native-binding failure, etc.).
  *   - `schema-error`: opening succeeded but a migration or DDL step failed.
  *   - `query-failed`: a runtime query against the store failed.
  */
@@ -57,6 +59,131 @@ export const lockConflictMessage = (path: string, cause: string): string =>
   `the holding process and retry. Underlying error: ${cause}`;
 
 /**
+ * Detect a `@duckdb/node-api` native-binding load failure (INFRA-11).
+ *
+ * A missing/yanked/platform-mismatched `.node` binary surfaces as a raw
+ * `dlopen` / `ERR_DLOPEN_FAILED` / "library not loaded" error at import or
+ * first open. Match stable fragments so callers (and `sfi doctor`) can emit
+ * an actionable reinstall hint instead of the ELF/mach-o noise.
+ *
+ * Pure + exported for unit tests against representative strings.
+ */
+export const isNativeBindingFailure = (message: string): boolean => {
+  const m = message.toLowerCase();
+  return (
+    m.includes('dlopen') ||
+    m.includes('err_dlopen_failed') ||
+    m.includes('cannot open shared object') ||
+    m.includes('library not loaded') ||
+    m.includes('image not found') ||
+    m.includes('invalid elf header') ||
+    m.includes('not a valid win32 application') ||
+    m.includes('was compiled against a different node') ||
+    m.includes('no native build was found') ||
+    m.includes('could not locate the bindings') ||
+    (m.includes('cannot find module') && m.includes('duckdb')) ||
+    (m.includes('cannot find package') && m.includes('duckdb'))
+  );
+};
+
+/**
+ * Actionable message for a native-binding failure. Names platform/arch/Node
+ * and the reinstall remedy, then appends the underlying error.
+ */
+export const nativeBindingMessage = (cause: string): string => {
+  const platform = `${process.platform}-${process.arch}`;
+  return (
+    `@duckdb/node-api native bindings failed to load on ${platform} ` +
+    `(Node ${process.version}). Reinstall so the platform-matched binding is ` +
+    'fetched (`pnpm rebuild @duckdb/node-api`, or reinstall sf-intelligence). ' +
+    'The package pins an exact native release (no caret) — a yanked or ' +
+    'unsupported platform/arch has no patch-range fallback. ' +
+    `Underlying error: ${cause}`
+  );
+};
+
+/** Classify an open/load error: lock conflict, native binding, or generic open-failed. */
+const classifyOpenFailure = (
+  path: string,
+  msg: string,
+  mode: 'rw' | 'ro',
+): GraphError => {
+  if (isLockConflict(msg)) {
+    return { kind: 'locked', message: lockConflictMessage(path, msg) };
+  }
+  if (isNativeBindingFailure(msg)) {
+    return { kind: 'open-failed', message: nativeBindingMessage(msg) };
+  }
+  const prefix =
+    mode === 'ro'
+      ? `cannot open graph read-only at ${path}`
+      : `cannot open graph at ${path}`;
+  return { kind: 'open-failed', message: `${prefix}: ${msg}` };
+};
+
+let duckdbApi: DuckDBApi | undefined;
+let duckdbLoadError: GraphError | undefined;
+
+/**
+ * Lazy-load `@duckdb/node-api` so a native-binding failure is caught here
+ * (with {@link nativeBindingMessage}) instead of as a raw module-eval `dlopen`
+ * crash when this file is first imported.
+ */
+const loadDuckDB = async (): Promise<Result<DuckDBApi, GraphError>> => {
+  if (duckdbApi !== undefined) return ok(duckdbApi);
+  if (duckdbLoadError !== undefined) return err(duckdbLoadError);
+  try {
+    duckdbApi = await import('@duckdb/node-api');
+    return ok(duckdbApi);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    duckdbLoadError = {
+      kind: 'open-failed',
+      message: isNativeBindingFailure(msg)
+        ? nativeBindingMessage(msg)
+        : `cannot load @duckdb/node-api: ${msg}`,
+    };
+    return err(duckdbLoadError);
+  }
+};
+
+/**
+ * Probe whether the DuckDB native bindings load on this platform (INFRA-11).
+ * Used by `sfi doctor`; does not open a database file.
+ */
+export const probeDuckDBNative = async (): Promise<Result<void, GraphError>> => {
+  const loaded = await loadDuckDB();
+  if (!loaded.ok) return err(loaded.error);
+  return ok(undefined);
+};
+/**
+ * DuckDB instance config applied to EVERY graph open (read-write and read-only).
+ *
+ * `enable_external_access: 'false'` is a defense-in-depth, engine-level backstop
+ * for the `sfi.query_graph` power tool (and any future SQL path). DuckDB defaults
+ * this setting ON, which leaves `read_csv` / `read_parquet` / `ATTACH` / `COPY` /
+ * `INSTALL` / `LOAD` / httpfs reachable — the ONLY thing currently preventing a
+ * file/URL read is that the query_graph compiler never emits one. Nothing in this
+ * codebase legitimately needs external file/URL access: the import pipeline writes
+ * via prepared statements + appenders to the vault's OWN database file (which stays
+ * fully writable under this flag — only foreign files/URLs are blocked), and the
+ * cross-vault/fleet tools open SEPARATE instances rather than SQL `ATTACH`. Turning
+ * it off converts "trust the compiler" into a hard engine guarantee that survives
+ * any future SQL-composing edit.
+ *
+ * It is applied to BOTH opens deliberately: the read-only serve ladder
+ * ({@link openGraphServeReadOnly}) can fall back to the read-WRITE `openGraph`
+ * handle, so scoping the backstop to the read-only open alone would leave external
+ * access ON in exactly those fallback branches.
+ *
+ * NOTE: DuckDB config values are strings (`Record<string, string>`), so this is
+ * the STRING `'false'`, not a boolean.
+ */
+const EXTERNAL_ACCESS_DISABLED: Readonly<Record<string, string>> = Object.freeze({
+  enable_external_access: 'false',
+});
+
+/**
  * The handle returned by `openGraph` and consumed by every other graph
  * operation in v0.1.
  *
@@ -96,16 +223,16 @@ export interface GraphStore {
 export const openGraph = async (
   path: string,
 ): Promise<Result<GraphStore, GraphError>> => {
+  const loaded = await loadDuckDB();
+  if (!loaded.ok) return loaded;
+  // DuckDB's public export is PascalCase; rename the binding for naming-convention.
+  const { DuckDBInstance: duckDbInstance } = loaded.value;
+
   let instance: DuckDBInstance;
   try {
-    instance = await DuckDBInstance.create(path);
+    instance = await duckDbInstance.create(path, { ...EXTERNAL_ACCESS_DISABLED });
   } catch (e) {
-    const msg = (e as Error).message;
-    return err(
-      isLockConflict(msg)
-        ? { kind: 'locked', message: lockConflictMessage(path, msg) }
-        : { kind: 'open-failed', message: `cannot open graph at ${path}: ${msg}` },
-    );
+    return err(classifyOpenFailure(path, (e as Error).message, 'rw'));
   }
 
   let connection: DuckDBConnection;
@@ -113,9 +240,13 @@ export const openGraph = async (
     connection = await instance.connect();
   } catch (e) {
     instance.closeSync();
+    const msg = (e as Error).message;
+    if (isNativeBindingFailure(msg)) {
+      return err({ kind: 'open-failed', message: nativeBindingMessage(msg) });
+    }
     return err({
       kind: 'open-failed',
-      message: `cannot connect to graph at ${path}: ${(e as Error).message}`,
+      message: `cannot connect to graph at ${path}: ${msg}`,
     });
   }
 
@@ -138,7 +269,9 @@ export const openGraph = async (
  *
  * This is the correct mode for query-only consumers (the MCP server, the eval
  * harness, fleet read paths): the vault cannot be mutated or corrupted through
- * the handle, and multiple readers can open the same vault concurrently.
+ * the handle, and multiple readers can open the same vault concurrently. Like
+ * `openGraph`, it also disables DuckDB external file/URL access (see
+ * {@link EXTERNAL_ACCESS_DISABLED}).
  *
  * @example
  *   const r = await openGraphReadOnly('org-kb/graph/graph.duckdb');
@@ -147,19 +280,19 @@ export const openGraph = async (
 export const openGraphReadOnly = async (
   path: string,
 ): Promise<Result<GraphStore, GraphError>> => {
+  const loaded = await loadDuckDB();
+  if (!loaded.ok) return loaded;
+  // DuckDB's public export is PascalCase; rename the binding for naming-convention.
+  const { DuckDBInstance: duckDbInstance } = loaded.value;
+
   let instance: DuckDBInstance;
   try {
-    instance = await DuckDBInstance.create(path, { access_mode: 'READ_ONLY' });
+    instance = await duckDbInstance.create(path, {
+      access_mode: 'READ_ONLY',
+      ...EXTERNAL_ACCESS_DISABLED,
+    });
   } catch (e) {
-    const msg = (e as Error).message;
-    return err(
-      isLockConflict(msg)
-        ? { kind: 'locked', message: lockConflictMessage(path, msg) }
-        : {
-            kind: 'open-failed',
-            message: `cannot open graph read-only at ${path}: ${msg}`,
-          },
-    );
+    return err(classifyOpenFailure(path, (e as Error).message, 'ro'));
   }
 
   try {
@@ -167,9 +300,13 @@ export const openGraphReadOnly = async (
     return ok({ connection, instance });
   } catch (e) {
     instance.closeSync();
+    const msg = (e as Error).message;
+    if (isNativeBindingFailure(msg)) {
+      return err({ kind: 'open-failed', message: nativeBindingMessage(msg) });
+    }
     return err({
       kind: 'open-failed',
-      message: `cannot connect read-only to graph at ${path}: ${(e as Error).message}`,
+      message: `cannot connect read-only to graph at ${path}: ${msg}`,
     });
   }
 };

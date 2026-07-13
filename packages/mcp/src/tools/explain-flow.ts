@@ -25,16 +25,28 @@
  *      edges).
  *   3. **Action calls** — the Flow's outgoing `callsApex` edges
  *      (`<actionCalls>` elements with `actionType=apex`).
+ *   3b. **Subflow calls** (R6-02) — the Flow's outgoing `references`
+ *      edges with `referenceKind: 'subflow'` (`<subflows>` elements).
+ *      Each names the target `Flow:{flowName}` and whether it resolves
+ *      in the vault (a dangling managed/uncaptured subflow surfaces
+ *      `resolved: false`, never fabricated). Previously subflow calls
+ *      were unmodeled and thus invisible to this narrative; the only
+ *      STILL-invisible path is the Apex `Flow.Interview` invocation (not
+ *      a declared `<subflows>` edge), disclosed via the run-mode note.
  *   4. **Record lookups** — the Flow's outgoing `readsFrom` edges
  *      (`<recordLookups>` elements). The targets are
  *      `CustomObject:{ApiName}` ids; we collapse the per-lookup edges
  *      into one row per (object, filterCount) so the narrative renders
  *      "looks up Account (3 filters)" rather than three rows for the
  *      same object.
- *   5. **Record writes** — the Flow's outgoing `writesTo` edges
- *      (`<recordCreates>` / `<recordUpdates>` / `<recordDeletes>`).
- *      The `operation` discriminator on each edge surfaces as the
- *      per-row `'create' | 'update' | 'delete'` action.
+ *   5. **Record writes** — the Flow's OBJECT-level outgoing `writesTo`
+ *      edges (`<recordCreates>` / `<recordUpdates>` / `<recordDeletes>`,
+ *      including R7-W1 whole-record `<inputReference>` DML). The
+ *      `operation` discriminator on each edge surfaces as the per-row
+ *      `'create' | 'update' | 'delete'` action. FIELD-level writes (DML
+ *      `<inputAssignments>` and R7-W2 before-save `$Record.<Field>`
+ *      assignments) are excluded from this object-granular axis — they are a
+ *      `field_lineage` / `field_360` concern.
  *   6. **Decisions** — the v2.0a `properties.conditions[]` mirror,
  *      surfaced as `{ decisionName, conditions }` pairs. The
  *      `decisionName` reuses the synthetic ConditionalContext apiName
@@ -75,7 +87,7 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import { getNodeById, listEdges, listNodesByIds } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -181,6 +193,23 @@ export interface ExplainFlowActionCall {
 }
 
 /**
+ * One subflow this Flow invokes (R6-02). Sourced from the Flow's outgoing
+ * `references` edges whose `properties.referenceKind === 'subflow'` — the
+ * declared `<subflows>` calls. `targetFlowId` is the `Flow:{ApiName}` canonical
+ * id; `targetFlowName` is the bare ApiName; `subflowElementName` is the calling
+ * `<subflows><name>` (may be `null`). `resolved` is `true` when the target Flow
+ * node exists in the vault and `false` when it is dangling-by-design (a
+ * managed-package or otherwise uncaptured subflow) — surfaced honestly rather
+ * than fabricated, so the renderer can say "calls an uncaptured subflow".
+ */
+export interface ExplainFlowSubflowCall {
+  readonly targetFlowId: ComponentId;
+  readonly targetFlowName: string;
+  readonly subflowElementName: string | null;
+  readonly resolved: boolean;
+}
+
+/**
  * One record lookup. `object` is the bare `CustomObject` ApiName
  * (without the `CustomObject:` prefix) the lookup targets;
  * `filterCount` is the number of distinct lookups the Flow emits
@@ -193,10 +222,17 @@ export interface ExplainFlowRecordLookup {
 }
 
 /**
- * One record write. `object` is the bare CustomObject ApiName the
+ * One OBJECT-level record write. `object` is the bare CustomObject ApiName the
  * write targets; `operation` is the kind of DML the Flow performs
- * (`'create'` for `<recordCreates>`, `'update'` for
- * `<recordUpdates>`, `'delete'` for `<recordDeletes>`).
+ * (`'create'` for `<recordCreates>`, `'update'` for `<recordUpdates>`,
+ * `'delete'` for `<recordDeletes>`). A whole-record `<inputReference>` DML
+ * (R7-W1) surfaces here as its object row (the fields are not enumerable;
+ * that limitation lives on the underlying edge's `disclosure` property).
+ *
+ * This axis is object-granular: FIELD-level writes (DML `<inputAssignments>`
+ * and the R7-W2 before-save `$Record.<Field>` assignment) are NOT listed here —
+ * see {@link collectRecordWrites}. Query `field_lineage` / `field_360` for the
+ * per-field writer detail.
  */
 export interface ExplainFlowRecordWrite {
   readonly object: string;
@@ -316,6 +352,12 @@ export interface ExplainFlowOutput {
   readonly executionContext: ExplainFlowExecutionContext;
   readonly triggerInfo: ExplainFlowTriggerInfo;
   readonly actionCalls: readonly ExplainFlowActionCall[];
+  /**
+   * R6-02: the subflows this Flow invokes (declared `<subflows>` calls). Empty
+   * when the Flow calls no subflows. A dangling target (`resolved: false`) is a
+   * managed/uncaptured subflow — named, never fabricated.
+   */
+  readonly subflowCalls: readonly ExplainFlowSubflowCall[];
   readonly recordLookups: readonly ExplainFlowRecordLookup[];
   readonly recordWrites: readonly ExplainFlowRecordWrite[];
   readonly decisions: readonly ExplainFlowDecision[];
@@ -675,12 +717,19 @@ const collectTriggerConditions = async (
     edgeType: 'firesWhen',
   });
   if (!edgesResult.ok) return err(edgesResult.error.message);
+  // ONE batched fetch of every firesWhen target, replacing the per-edge
+  // `getNodeById` N+1. The per-edge Map lookup preserves edge order (this
+  // output is NOT re-sorted) and the null-skip.
+  const nodesResult = await listNodesByIds(
+    ctx.graph,
+    edgesResult.value.map((e) => e.toId),
+  );
+  if (!nodesResult.ok) return err(nodesResult.error.message);
+  const byId = new Map(nodesResult.value.map((n) => [n.id, n]));
   const out: ExplainFlowTriggerCondition[] = [];
   for (const edge of edgesResult.value) {
-    const conditionResult = await getNodeById(ctx.graph, edge.toId);
-    if (!conditionResult.ok) return err(conditionResult.error.message);
-    if (conditionResult.value === null) continue;
-    const conditionNode = conditionResult.value;
+    const conditionNode = byId.get(edge.toId);
+    if (conditionNode === undefined) continue;
     const expressionRaw = conditionNode.properties['expression'];
     // Surface the fields the condition evaluates (the ConditionalContext
     // node's `fieldRefs`) — without them a record-trigger / decision row is
@@ -820,14 +869,19 @@ const collectActionCalls = async (
     edgeType: 'callsApex',
   });
   if (!edgesResult.ok) return err(edgesResult.error.message);
+  // ONE batched fetch of every callsApex target, replacing the per-edge
+  // `getNodeById` N+1. Edge order is preserved; a missing node keeps the old
+  // `prefixOf(edge.toId)` targetType fallback.
+  const nodesResult = await listNodesByIds(
+    ctx.graph,
+    edgesResult.value.map((e) => e.toId),
+  );
+  if (!nodesResult.ok) return err(nodesResult.error.message);
+  const byId = new Map(nodesResult.value.map((n) => [n.id, n]));
   const out: ExplainFlowActionCall[] = [];
   for (const edge of edgesResult.value) {
-    const nodeResult = await getNodeById(ctx.graph, edge.toId);
-    if (!nodeResult.ok) return err(nodeResult.error.message);
-    const targetType =
-      nodeResult.value !== null
-        ? nodeResult.value.type
-        : prefixOf(edge.toId);
+    const target = byId.get(edge.toId);
+    const targetType = target !== undefined ? target.type : prefixOf(edge.toId);
     out.push({ targetId: edge.toId, targetType, actionType: 'apex' });
   }
 
@@ -849,6 +903,54 @@ const collectActionCalls = async (
     });
   }
 
+  return ok(out);
+};
+
+/**
+ * R6-02: collect the Flow's outgoing subflow calls. Walks outgoing `references`
+ * edges filtered to `properties.referenceKind === 'subflow'` (the declared
+ * `<subflows>` calls the flow extractor now emits) and projects each into an
+ * `ExplainFlowSubflowCall`. `resolved` reflects whether the target `Flow:{name}`
+ * node exists in the vault — a dangling (managed / uncaptured) subflow is
+ * surfaced with `resolved: false` rather than dropped or fabricated.
+ *
+ * Before R6-02 subflow calls were unmodeled, so `explain_flow` could not name a
+ * nested flow at all; this axis closes that gap. The still-invisible path is
+ * Apex `Flow.Interview.start()` invocation (not a declared `<subflows>` edge) —
+ * disclosed via the run-mode note, unchanged here.
+ */
+const collectSubflowCalls = async (
+  ctx: Context,
+  flowId: ComponentId,
+): Promise<Result<readonly ExplainFlowSubflowCall[], string>> => {
+  const edgesResult = await listEdges(ctx.graph, flowId, {
+    direction: 'out',
+    edgeType: 'references',
+  });
+  if (!edgesResult.ok) return err(edgesResult.error.message);
+  // ONE batched fetch of every subflow target, replacing the per-edge
+  // `getNodeById` N+1. Edge order (filtered to subflow references) is preserved;
+  // `resolved` reflects Map presence, matching the old `!== null` check.
+  const subflowEdges = edgesResult.value.filter(
+    (e) => e.properties['referenceKind'] === 'subflow',
+  );
+  const nodesResult = await listNodesByIds(
+    ctx.graph,
+    subflowEdges.map((e) => e.toId),
+  );
+  if (!nodesResult.ok) return err(nodesResult.error.message);
+  const resolvedIds = new Set(nodesResult.value.map((n) => n.id));
+  const out: ExplainFlowSubflowCall[] = [];
+  for (const edge of subflowEdges) {
+    const elementNameRaw = edge.properties['subflowElementName'];
+    out.push({
+      targetFlowId: edge.toId,
+      targetFlowName: stripObjectPrefix(edge.toId),
+      subflowElementName:
+        typeof elementNameRaw === 'string' ? elementNameRaw : null,
+      resolved: resolvedIds.has(edge.toId),
+    });
+  }
   return ok(out);
 };
 
@@ -881,6 +983,10 @@ const collectRecordLookups = async (
   const counts = new Map<string, number>();
   const order: string[] = [];
   for (const edge of edgesResult.value) {
+    // R6-11: FIELD-level dataflow-source reads (operation 'dataflowSource',
+    // toId CustomField:...) are lineage plumbing, not record lookups —
+    // folding them in here would render a field id as a bogus "object" row.
+    if (edge.properties?.['operation'] === 'dataflowSource') continue;
     const object = stripObjectPrefix(edge.toId);
     if (!counts.has(object)) order.push(object);
     counts.set(object, (counts.get(object) ?? 0) + 1);
@@ -909,12 +1015,21 @@ const classifyWriteOperation = (
 };
 
 /**
- * Collect the Flow's outgoing `writesTo` edges and project each into
- * an `ExplainFlowRecordWrite` row. Unlike record lookups we do NOT
+ * Collect the Flow's OBJECT-level outgoing `writesTo` edges and project each
+ * into an `ExplainFlowRecordWrite` row. Unlike record lookups we do NOT
  * collapse same-object writes — multiple `<recordCreates>` against
  * the same object are surfaced as separate rows so the renderer can
  * show distinct create steps. The order matches the underlying edge
  * list (sorted by `(toId, edgeType)` per `listEdges`'s contract).
+ *
+ * FIELD-level `writesTo` edges (targets prefixed `CustomField:` — the DML
+ * `<inputAssignments>` field writes and the R7-W2 before-save `$Record.<Field>`
+ * assignment writes) are DELIBERATELY excluded here: this axis is object-
+ * granular ("does the flow create/update/delete this object?"), and folding a
+ * `CustomField:Obj.Field` id into the `object` slot would misclassify a field
+ * write as a bogus object row. The per-field detail is a field-lineage /
+ * field_360 concern; mirrors {@link collectRecordLookups}'s exclusion of the
+ * `dataflowSource` field reads.
  */
 const collectRecordWrites = async (
   ctx: Context,
@@ -927,6 +1042,8 @@ const collectRecordWrites = async (
   if (!edgesResult.ok) return err(edgesResult.error.message);
   const out: ExplainFlowRecordWrite[] = [];
   for (const edge of edgesResult.value) {
+    // Object-granular axis: skip FIELD-level writes (CustomField targets).
+    if (!edge.toId.startsWith('CustomObject:')) continue;
     out.push({
       object: stripObjectPrefix(edge.toId),
       operation: classifyWriteOperation(edge),
@@ -1089,6 +1206,10 @@ export const explainFlowHandler = async (
   if (!actionCallsResult.ok) {
     return err({ kind: 'internal', message: actionCallsResult.error });
   }
+  const subflowCallsResult = await collectSubflowCalls(ctx, flowId);
+  if (!subflowCallsResult.ok) {
+    return err({ kind: 'internal', message: subflowCallsResult.error });
+  }
   const recordLookupsResult = await collectRecordLookups(ctx, flowId);
   if (!recordLookupsResult.ok) {
     return err({ kind: 'internal', message: recordLookupsResult.error });
@@ -1111,6 +1232,7 @@ export const explainFlowHandler = async (
       conditions: conditionsResult.value,
     },
     actionCalls: actionCallsResult.value,
+    subflowCalls: subflowCallsResult.value,
     recordLookups: recordLookupsResult.value,
     recordWrites: recordWritesResult.value,
     decisions: collectDecisions(node),

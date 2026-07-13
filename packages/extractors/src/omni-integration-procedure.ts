@@ -423,7 +423,7 @@ const walkElements = (
     // A `bundle` (DataRaptor) or `integrationProcedureKey` (nested IP) in ANY
     // element's propertySetConfig is a real dispatch — present on DataRaptor /
     // IP action steps AND embedded in Rest / Remote / Response actions (e.g. a
-    // response- or logging-DataRaptor on a callout, the shape real mass.gov IPs
+    // response- or logging-DataRaptor on a callout, the shape real example.gov IPs
     // use). Emit the dependency edge here regardless of the element's
     // actionType so it is never hidden; the type-specific branches below keep
     // only their non-dispatch bookkeeping (restEndpoints, remoteActions).

@@ -172,8 +172,12 @@ const collectSobjectTypes = (
  *
  * v1.1 does **not** turn `<members>` rows into edges — deep member
  * resolution is deferred to v1.2. The extractor only surfaces the row
- * count in `properties.memberCount`. `<queueRoutingConfig>` is read as a
- * string reference but produces no edge.
+ * count in `properties.memberCount`. `<queueRoutingConfig>`, when present,
+ * is read into `properties.queueRoutingConfig` (a bare string) AND (R6-18)
+ * emits a declared `references` edge to `QueueRoutingConfig:{Name}`
+ * (`edge.properties.referenceKind = 'queueRoutingConfig'`) — Omni-Channel's
+ * "how are cases routed to agents" walks this edge from the Queue to its
+ * routing behavior. Verified against a real Queue file from a live org.
  *
  * Returns an `ExtractorError` for any of the documented failure modes:
  * `file-not-found`, `parse-error`, or `malformed-input` (wrong root,
@@ -300,5 +304,30 @@ export const extractQueue = async (
     properties: { relationship: 'queueOwner' },
   }));
 
-  return ok({ nodes: [node], edges: [...edges, ...memberEdges] });
+  // R6-18: `<queueRoutingConfig>` was already read into
+  // `properties.queueRoutingConfig` (a bare string) but never turned into an
+  // edge. Verified against a real Queue file from a live org
+  // (`<queueRoutingConfig>cases_Routing_config</queueRoutingConfig>`
+  // resolving to a real `QueueRoutingConfig` fullName retrieved from the same
+  // org) — the value is a declared metadata pointer, not a heuristic guess.
+  // Queues REFERENCE routing configs, never the reverse; the routing config
+  // file itself carries no back-pointer to the queues that use it.
+  const routingConfigEdges: Edge[] =
+    rootObj['queueRoutingConfig'] !== undefined
+      ? [
+          {
+            fromId: nodeId,
+            toId: `QueueRoutingConfig:${String(unwrapSingle(rootObj['queueRoutingConfig']))}`,
+            edgeType: 'references' as const,
+            confidence: 'declared' as const,
+            source: EXTRACTOR_SOURCE,
+            properties: { referenceKind: 'queueRoutingConfig' },
+          },
+        ]
+      : [];
+
+  return ok({
+    nodes: [node],
+    edges: [...edges, ...memberEdges, ...routingConfigEdges],
+  });
 };

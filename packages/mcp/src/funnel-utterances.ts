@@ -179,6 +179,23 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'which org has changed the most since last baseline?',
     'which of our orgs is most out of date and needs a refresh first?',
   ],
+  'sfi.generate_fleet_report': [
+    'give me a report across all my orgs',
+    'fleet health digest',
+    'which of my orgs is most out of date?',
+    'state of the fleet',
+    'can you summarize every registered vault in one document?',
+    'generate a single report covering all our Salesforce orgs',
+    'I manage a bunch of orgs — give me one digest of all of them',
+    'roll up freshness and component counts across every vault',
+    'what does the whole fleet look like right now?',
+    'produce a fleet-wide status report I can share with the team',
+    'which registered org has the fewest components, and which has the most?',
+    'give me a one-page overview of every org we have registered',
+    'how many total components do we have across all our orgs combined?',
+    'summarize all my registered vaults — freshness, size, who touched what',
+    'build a digest of every org in the registry',
+  ],
   'sfi.get_component': [
     'show me the full metadata for the <FlowName> flow',
     'pull up the <ApexClass> class definition',
@@ -207,6 +224,8 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
   ],
   'sfi.list_components': [
     'whats on the Account object — give me the whole field list',
+    'what is the relationship between <Object> and <Object2>?',
+    'how are Account and Contact related in the schema?',
     'list all custom fields on Contact',
     'show me every flow on this org',
     'what record types exist on Case?',
@@ -223,6 +242,7 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     // "can i see the validation rules" type-noun phrasings.
     'which custom permissions exist and what do they gate?',
     'what custom permissions are defined in this org?',
+    'list every custom permission defined across the org',
     'pull the full custom permission inventory for the audit workpaper',
     'can i see the validation rules on the <Object> object',
     'is there validation on the <Object> object?',
@@ -254,6 +274,20 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'give me a slice of the graph centered on <FlowName>',
     'show me a 2-hop neighborhood around the Contact object',
   ],
+  'sfi.query_graph': [
+    'query the graph for every ApexClass whose api name starts with Billing',
+    'run a raw graph query for all grantedBy edges of heuristic confidence',
+    'run a custom lookup over nodes where type is Flow and property status is Active',
+    'advanced: find all edges where edgeType is triggersOn and confidence is declared',
+    'let me write my own filter over the dependency graph nodes and edges',
+    'ad-hoc query: list nodes that have no lastModifiedBy set',
+    'power-user graph query — every edge from this Apex class where confidence is parsed',
+    'raw graph lookup: nodes of type CustomField where property dataType is Picklist',
+    'the fixed tools don\'t cover this — can I query the nodes and edges tables directly?',
+    'give me a filtered enumeration of edges where source is like the apex scanner',
+    'custom structured query over the graph: edges with toId in this list of ids',
+    'i want an arbitrary filter the built-in tools don\'t expose over the graph',
+  ],
   'sfi.search_apex_source': [
     'search the Apex code for any reference to External_Id__c',
     'find all Apex that calls Database.insert on Contact',
@@ -262,6 +296,9 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'find Apex source that contains a hardcoded email address',
     'search Apex for any class that uses future methods',
     'look for Apex code that queries the Order object',
+    // R5 show-me utterances
+    'show me all Apex code that references <Field__c>',
+    'pull up the Apex that calls this method',
   ],
   'sfi.search_flow_metadata': [
     'I heard we have a flow that assigns Cases to the Support queue — which one and what\'s the criteria?',
@@ -278,6 +315,9 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'which custom permissions are checked inside flows?',
     'find the flow that fires the <SubflowName> subflow',
     'is there a flow that stamps <Field__c> when the record closes?',
+    // R5 show-me utterances
+    'show me every flow that references <Field__c>',
+    'pull up any flow that calls <ApexClass>',
   ],
   'sfi.get_naming_convention_report': [
     'do our field names follow any consistent pattern?',
@@ -319,6 +359,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'give me a health assessment',
     'check for obvious issues with this org',
     'is this org in good shape?',
+    // R5 show-me utterances
+    'show me the health check for this org',
+    'pull up the org health report',
+    'open a health assessment — what\'s wrong?',
   ],
   'sfi.baseline_acknowledge': [
     'acknowledge the current baseline',
@@ -379,6 +423,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'what\'s the fill rate for Amount__c on Opportunity?',
     'are users actually filling in the Description field on Case?',
     'what percentage of Contacts have the Mobile field filled in?',
+    // R5 show-me utterances
+    'show me how populated the <Field__c> field is',
+    'pull up the fill rate for <Field__c> on Account',
+    'open the field population stats for <Field__c>',
   ],
   'sfi.live_group_count': [
     'how many users are in the Support group?',
@@ -431,6 +479,61 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'how are Contacts distributed across sales reps?',
     'how many Cases does each queue own right now?',
   ],
+  // Runtime resolver for the offline why_cant_user_see_record `unknown` — the
+  // ACCESS direction (does user X have access to record Y right now). Vault
+  // sfi.why_cant_user_see_record still owns the metadata cascade / "why".
+  'sfi.live_record_access': [
+    'does user X have access to record Y?',
+    'can this user edit this specific record right now?',
+    'check whether <UserName> can see record <RecordId>',
+    'does <UserName> have delete access to this record?',
+    'what is this user\'s effective access to this record?',
+    'can the user actually read this record in the live org?',
+    'verify record-level access for a user against the live org',
+    'is this record visible to <UserName> — resolve the unknown from why cant user see record',
+    // R5 show-me utterances
+    'show me who can access this record',
+    'pull up the access breakdown for record <Id>',
+    'open the record access report for <Id>',
+  ],
+  // The shares-of-a-record complement to live_record_access. The WHO/WHY-shared
+  // direction (share rows), not the effective-access direction (a user's flags).
+  'sfi.live_record_shares': [
+    'who is this record shared with?',
+    'show me the sharing rows on record <RecordId>',
+    'who has been granted access to this record and why?',
+    'list the explicit shares on this Account record',
+    'what shares exist on record <RecordId> — owner, manual, or rule?',
+    'why does this user have access to this record — what share row grants it?',
+    'show the {Object}Share rows for this record',
+    'who did someone manually share this record with?',
+  ],
+  // Runtime field-change history ({Object}History). The offline
+  // sfi.why_field_changed reasons about WHAT COULD change a field from metadata;
+  // this family reports WHO actually changed it and to what value, live.
+  'sfi.live_field_history': [
+    'who changed this field on this record?',
+    'show me the change history for the Amount field on this Opportunity',
+    'what was the old value before this field changed?',
+    'who edited the Status field on record <RecordId> and when?',
+    'field history for <Object>.<Field> in the last 30 days',
+    'has anyone changed the Owner on this record recently?',
+    'show the audit trail of value changes for this field',
+    'who set this field and what was it before?',
+  ],
+  // The RUNTIME schedule registry (CronTrigger). "which classes CAN be
+  // scheduled" (metadata) stays owned by the offline sfi.scheduled_job_catalog;
+  // this family is what is ACTUALLY scheduled right now.
+  'sfi.live_scheduled_jobs': [
+    'what jobs are scheduled right now?',
+    'show me the scheduled jobs in this org',
+    'which Apex jobs are actually scheduled and when do they run next?',
+    'list the cron jobs registered in the org',
+    'what is running on a schedule — next fire times?',
+    'are there any scheduled jobs, and how many batch jobs ran recently?',
+    'show the live scheduled Apex, not just the schedulable classes',
+    'what does the CronTrigger registry look like right now?',
+  ],
   'sfi.live_storage_by_object': [
     'which objects are taking up the most storage?',
     'how much data storage is the Case object using?',
@@ -446,6 +549,26 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'are we near our data storage limit?',
     'what limits is this org approaching?',
     'how close are we to hitting any governor limits?',
+  ],
+  'sfi.live_data_skew': [
+    'which owners have data skew on <Object>?',
+    'check for ownership skew on Account',
+    'is there record ownership concentration on Case?',
+    'which owner holds more than 10000 records?',
+    'do we have a data skew problem on this object?',
+    'show me ownership skew risk in the org',
+  ],
+  'sfi.live_security_exposure': [
+    'run a live security exposure check on the org',
+    'how many permission sets currently grant Modify All Data?',
+    'live count of View All and Modify All grants',
+    'current runtime security exposure snapshot',
+    'how many users hold Modify All Data right now?',
+    'live Author Apex and View All Data exposure',
+    // R5 show-me utterances
+    'show me the security exposure report',
+    'pull up anything security-risky in the live org',
+    'open the live security exposure summary',
   ],
   'sfi.live_inactive_users': [
     'which users haven\'t logged in recently?',
@@ -488,6 +611,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'which users have nothing assigned beyond their profile?',
     'active accounts with zero permission set or group assignments',
     'audit accounts that can still log in but hold no perm sets',
+    // R5 show-me utterances
+    'show me zombie accounts',
+    'pull up inactive users that still have active licenses',
+    'open the zombie account report',
   ],
   // ENGINE-ARC §2b — runtime queue/public-group membership. "Which queues are
   // EMPTY" (hygiene sweep over declared metadata) stays owned by
@@ -514,6 +641,29 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'show me every permission set assigned to <UserName>, with expirations',
     'does <UserName> have any expiring permission set assignments?',
     'what perm sets is jane.doe@example.com assigned in the live org?',
+  ],
+  // R6-27 — the SetupAuditTrail "who changed what in Setup" sweep. Runtime
+  // configuration-change history is not in the vault (declared metadata only);
+  // this is the live_org read for it.
+  'sfi.live_setup_audit_trail': [
+    'who changed what in setup?',
+    'recent setup changes',
+    'setup audit trail for the last week',
+    'who modified this in setup last month',
+    'who edited the sharing settings recently?',
+    'has anyone changed a profile or permission set in the last 30 days?',
+    'who touched org-wide defaults recently?',
+    'give me the admin change history for the last 90 days',
+    'was a validation rule turned off recently, and by whom?',
+    'find out who deactivated that trigger',
+    'audit log of configuration changes made by administrators',
+    'which user account made this metadata change?',
+    'did someone flip a field-level security setting last week?',
+    'who granted themselves modify-all recently?',
+    // R5 show-me utterances
+    'show me the setup audit trail',
+    'pull up recent setup changes',
+    'open the audit trail for the last 24 hours',
   ],
   'sfi.live_consent': [
     'which Contacts have opted out of email?',
@@ -556,6 +706,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'anything actively broken in the org right now?',
     'live org health snapshot',
     'are there any failed async jobs or paused flow interviews right now?',
+    // R5 show-me utterances
+    'show me live org health',
+    'pull up the org health dashboard',
+    'open the live health check',
   ],
   'sfi.live_automation_fired': [
     'which flows have actually fired recently?',
@@ -595,15 +749,22 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     // biz-user register (router-v2 R2): quality asked as a grade.
     'is our Salesforce org well-architected? would you give it a passing grade?',
     'if an outside expert graded this org\'s setup, what would they flag?',
+    // STEP-2: release-readiness phrasings migrated off the retired
+    // release_readiness_report (its deploy gate is now org_risk_report's
+    // `gate: true` MODE).
+    'is this org ready for the next release?',
+    'give me a release readiness assessment',
+    'what blockers exist before we can deploy?',
+    'are we ready to promote to production?',
+    'show me the release readiness checklist',
+    'what do we need to fix before the next release?',
   ],
-  'sfi.field_cleanup_candidates': [
-    'which fields can we safely delete?',
-    'show me fields that are never populated',
-    'what custom fields are candidates for cleanup?',
-    'find fields that nobody uses and we could remove',
-    'which deprecated fields should we clean up?',
-    'list empty fields on Contact that are safe to remove',
-  ],
+  // STEP-2: sfi.release_readiness_report is a HIDDEN back-compat alias of
+  // sfi.org_risk_report (gate: true) — un-advertised and un-routed, so it
+  // carries NO utterance entry; its phrasings live in the org_risk block above.
+  // STEP-2: sfi.field_cleanup_candidates is a HIDDEN back-compat alias of
+  // sfi.unused_fields_deep (format: 'cleanup') — its cleanup phrasings migrated
+  // into the unused_fields_deep block below.
   'sfi.automation_risk_report': [
     'which of our flows and triggers are high risk?',
     'show me automation that could cause problems',
@@ -620,14 +781,6 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'which permission sets grant dangerous access?',
     'security risks from permissions — give me the highlights',
   ],
-  'sfi.release_readiness_report': [
-    'is this org ready for the next release?',
-    'give me a release readiness assessment',
-    'what blockers exist before we can deploy?',
-    'are we ready to promote to production?',
-    'show me the release readiness checklist',
-    'what do we need to fix before the next release?',
-  ],
   'sfi.get_impact': [
     'what\'s the impact of changing <ComponentName>?',
     'show me what gets affected if I delete <Field__c>',
@@ -643,6 +796,9 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'what\'s the blast radius of making Priority__c required on Case?',
     'if I change this picklist value, how many records does that hit?',
     'how many records would be affected if I remove the External_Id__c field?',
+    // R5 show-me utterances
+    'show me the live blast radius for changing <Field__c>',
+    'pull up what records would be affected by this change',
   ],
   'sfi.find_formula_references': [
     'which formula fields reference Priority__c?',
@@ -651,14 +807,30 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'are there any formulas that read from External_Id__c?',
     'which roll-up summary fields reference Order.Amount__c?',
     'which formula fields reference the Amount__c field on Opportunity?',
+    // R5 show-me utterances
+    'show me every formula that references <Field__c>',
+    'pull up formulas that use <Field__c>',
+    'open all formula references to <Field__c>',
   ],
-  'sfi.find_apex_usages': [
-    'where is <ApexClass> used in other Apex code?',
-    'find all callers of the <Method> method',
-    'which Apex classes instantiate <ApexClass>?',
-    'what code calls into the <ApexClass> service class?',
-    'who uses the <UtilityClass> utility class?',
-    'which Apex classes read or write to the Status__c field on Case?',
+  // STEP-2: sfi.find_apex_usages is a HIDDEN back-compat alias of
+  // sfi.find_code_usages (Apex-narrowed) — un-advertised and deliberately
+  // un-routed, so it carries NO utterance entry. Its Apex-flavored phrasings
+  // route to find_code_usages (see that tool's utterances below).
+  'sfi.flow_fault_audit': [
+    'which flows have no fault path on their DML elements?',
+    'find flows with unhandled faults',
+    'which flows are missing error handling?',
+    'show me flows whose create/update elements have no fault connector',
+    'audit flow fault handling across the org',
+    'which record-triggered flows could roll back the transaction on an error?',
+  ],
+  'sfi.record_creation_paths': [
+    'how do <Object> records get created?',
+    'what creates records of the Case object?',
+    'which automations create new records here?',
+    'how did this record get here — what created it?',
+    'what flows create records of this object?',
+    'what is the record creation path for this object?',
   ],
   'sfi.effective_permissions': [
     'does the <Profile> profile have access to the Account object?',
@@ -696,6 +868,26 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'which profiles can see the Sales dashboard?',
     'who can actually execute this scheduled job?',
     'which profiles have permission to run the <FlowName> flow?',
+    // R5 show-me utterances
+    'show me who can run the <FlowName> flow',
+    'pull up who is allowed to run <ComponentName>',
+    'open the run-access list for <ComponentName>',
+  ],
+  'sfi.guest_exposure_report': [
+    'what can guest users see',
+    'guest user exposure',
+    'is my community leaking data',
+    'unauthenticated access audit',
+    'experience cloud security',
+    'what can unauthenticated guest users see in my community',
+    'audit my Experience Cloud site guest profile exposure',
+    'is my public community exposing PII to guests',
+    'which objects can the guest user read or write',
+    'community guest access security report',
+    // R5 show-me utterances
+    'show me the guest exposure report',
+    'pull up what guest users can see',
+    'open the guest profile access report',
   ],
   'sfi.who_can_access_object': [
     'who can access the Order object?',
@@ -737,6 +929,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'a user says the Convert button is missing on a Lead — why?',
     'why does the send action fail for one user — do they need the <PermSet> permission set?',
     'which permission is this user missing to perform the action?',
+    // R5 show-me utterances
+    'show me what this user can do',
+    'pull up the abilities for <username>',
+    'open the effective permissions for user <username>',
   ],
   'sfi.profile_security': [
     'how locked down is the <Profile> profile?',
@@ -807,6 +1003,16 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'which third-party systems are connected?',
     'integration topology — what talks to what?',
     'what external systems is this org connected to?',
+    // Finding #44: martech connections — the friendly-name martechConnectors
+    // section (Marketing Cloud Connect / Pardot / Marketo / HubSpot).
+    'what marketing tools does this org have?',
+    'what martech connections does this org have?',
+    'does this org have Pardot or Account Engagement connected?',
+    'is Marketo installed in this org?',
+    'do we have Marketing Cloud Connect set up?',
+    'what marketing automation platforms is this org using?',
+    'is HubSpot connected to this Salesforce org?',
+    'show me our martech stack',
   ],
   'sfi.event_subscribers': [
     'what\'s subscribed to the Case platform event?',
@@ -831,6 +1037,9 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'where is the <ApexClass> class called from?',
     'find everything that references this utility class',
     'which LWC components reference the Account.AnnualRevenue field?',
+    // R5 show-me utterances
+    'show me all code usages of <ComponentName>',
+    'pull up every place <ComponentName> is referenced in code',
   ],
   'sfi.lookup_record': [
     'look up the Case record with ID 5001234',
@@ -847,6 +1056,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'what does this custom field do and where does it come from?',
     'explain the business meaning of Status__c on Order',
     'what are the picklist values on Opportunity.Stage?',
+    // R5 show-me utterances
+    'show me an explanation of the <Field__c> field',
+    'pull up the meaning of <Field__c>',
+    'open the field explanation for <Field__c>',
   ],
   'sfi.safe_to_delete_field': [
     'is it safe to delete Priority__c?',
@@ -855,6 +1068,16 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'is <Field__c> safe to delete?',
     'which fields are safe to remove from Contact?',
     'I want to clean up unused fields — is this one safe to drop?',
+    // CR-CAP-L5: reinforcement — the HYBRID live-population wiring lengthened
+    // this tool's description, diluting its match against removal-simulation
+    // phrasings (I6 margin-gate regression pin). Same pattern as a9eb65e.
+    'run a removal simulation on this field before I delete it',
+    'simulate removing this field — what breaks?',
+    'give me the removal simulation for Priority__c',
+    // R5 show-me utterances
+    'show me if <Field__c> is safe to delete',
+    'pull up the impact analysis for deleting <Field__c>',
+    'open the safe-to-delete check for <Field__c>',
   ],
   'sfi.unused_components': [
     'which components in this org are not used anywhere?',
@@ -891,6 +1114,37 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'advise me on the best way to automate account territory assignment',
     'how should I implement this business rule — flow, trigger, or process builder?',
     'before I add a new flow on Account, what already runs there?',
+  ],
+  'sfi.ai_exposure_report': [
+    'what data can my agent see',
+    'AI exposure audit',
+    'which fields do prompt templates use',
+    'is my Agentforce agent exposing PII',
+    'audit agentforce',
+    'what does my Einstein agent have access to',
+    'which PII does my AI agent ground on',
+    'what fields does my prompt template read',
+    'is my copilot leaking sensitive data',
+    'show the data my Agentforce topics can reach',
+    // R5 show-me utterances
+    'show me the AI exposure report',
+    'pull up what data Agentforce / AI can see',
+    'open the AI data exposure summary',
+  ],
+  'sfi.automation_collisions': [
+    'which automations write the same field on Account?',
+    'are two flows updating the same field?',
+    'is my org fighting itself on Case?',
+    'do we have conflicting automations on Opportunity?',
+    'is there an automation loop or recursion on Account?',
+    'could a workflow field update re-trigger itself on this object?',
+    'find field-level write collisions on Contact',
+    'is anything overwriting the field my flow just set?',
+    'check for save recursion between Account and Opportunity',
+    // R5 show-me utterances
+    'show me automation collisions on <Object>',
+    'pull up any automation conflicts on <Object>',
+    'open the collision report for <Object>',
   ],
   'sfi.apex_build_advisor': [
     'how should I structure this Apex class?',
@@ -955,15 +1209,16 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'show me the diff between our production and sandbox snapshots',
     'compare two org states and tell me what\'s different',
     'compare the pre-release snapshot to the post-release snapshot',
+    // STEP-2: churn phrasings migrated off the retired sfi.churn (now the
+    // `summary: true` MODE of this tool — a compact digest over two snapshots).
+    'which components changed the most between these two snapshots?',
+    'give me a compact churn summary of what changed between the last two snapshots',
+    'high-churn metadata — which components keep getting modified between snapshots?',
+    'which components are in flux across the two most recent snapshots?',
   ],
-  'sfi.churn': [
-    'which components change most frequently?',
-    'show me high-churn metadata — things we keep modifying',
-    'what parts of the org are in constant flux?',
-    'which Apex classes get touched every sprint?',
-    'high-churn fields on Case — what keeps changing?',
-    'which components had the most changes between these two snapshots?',
-  ],
+  // STEP-2: sfi.churn is a HIDDEN back-compat alias of sfi.diff_snapshots
+  // (summary: true) — un-advertised and un-routed, so it carries NO utterance
+  // entry; its digest phrasings live in the diff_snapshots block above.
   'sfi.trend': [
     'how has the number of Cases grown over time?',
     'show me the trend in Opportunity creation',
@@ -971,6 +1226,12 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'trend analysis for Account record creation',
     'how has our automation complexity changed over the last year?',
     'show me component count growth over time across all snapshots',
+    // R8-SECURITY-TREND: posture-over-time asks must reach sfi.trend
+    // (metric:securityScore via suggestArgs on the security-posture-trend intent).
+    'is our security posture getting better or worse across refreshes?',
+    'show the security score trend over time',
+    'has our security posture improved since the last few snapshots?',
+    'trend our securityScore across snapshot captures',
   ],
   'sfi.compare_components': [
     'compare the Contact layout between sandbox and production',
@@ -997,6 +1258,20 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'inventory of fields that could contain sensitive customer data',
     'which objects store PII that we need to mask in sandboxes?',
     'which fields in this org store personally identifiable information?',
+  ],
+  'sfi.history_tracking_gaps': [
+    'which sensitive fields aren\'t tracked for history?',
+    'audit field history coverage for regulated data',
+    'compliance: untracked SSN fields',
+    'where is history tracking missing on sensitive data?',
+    'do we have field history tracking enabled on our confidential fields?',
+    'which fields holding personal data have no audit trail?',
+    'find sensitive fields where trackHistory is off',
+    'is field history enabled for the fields that store customer data?',
+    'which objects have history tracking disabled entirely?',
+    'show me the compliance gap between our regulated fields and field history tracking',
+    'we need an audit trail on protected data — what\'s missing?',
+    'which SSN or financial fields have no change history?',
   ],
   'sfi.field_access_audit': [
     'who can read and write the Amount__c field?',
@@ -1040,6 +1315,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     // biz-user register (router-v2 R2): the new-joiner altitude idioms.
     'I just joined this team — what\'s the 10,000-foot view of what\'s in this Salesforce org?',
     'give me the bird\'s-eye view of this org for a newcomer',
+    // R5 show-me utterances
+    'show me an org overview',
+    'pull up the overview of this org',
+    'open the org summary',
   ],
   'sfi.domain_clusters': [
     'what functional areas does this org cover?',
@@ -1064,6 +1343,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'when was Priority__c last updated?',
     'last modified date for all custom fields on Contact',
     'when was the Account trigger last changed and by whom?',
+    // R5 show-me utterances
+    'show me who last modified <ComponentName>',
+    'pull up the last modification details for <ComponentName>',
+    'open the change history for <ComponentName>',
   ],
   'sfi.what_happens_on_save': [
     'I need everything that touches Case on save — flows, triggers, PB, validation. Full save cascade please.',
@@ -1104,6 +1387,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'the Status field keeps changing on its own — what\'s causing it?',
     'trace all the things that could write to Case.Status__c',
     'which automation is responsible for populating Amount__c?',
+    // R5 show-me utterances
+    'show me why <Field__c> changed',
+    'pull up the change history for <Field__c>',
+    'open the audit for changes to <Field__c>',
   ],
   'sfi.order_of_execution': [
     'in what order do triggers, flows, and validation rules fire on Case save?',
@@ -1112,6 +1399,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'is validation run before or after triggers?',
     'what\'s the order of operations when I save a Contact record?',
     'does the flow run before or after the Apex trigger?',
+    // R5 show-me utterances
+    'show me the order of execution for <Object>',
+    'pull up what runs when I save a <Object> record',
+    'open the execution order for <Object> on update',
   ],
   'sfi.explain_flow': [
     'walk me through <FlowName>\'s screens and decisions',
@@ -1149,6 +1440,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'why is the <FlowName> flow not sending the confirmation email — walk the decision branches',
     'the flow didnt stamp the date when the stage moved — why not?',
     'a reviewer says the <FlowName> flow is skipping records — what does it actually gate?',
+    // R5 show-me utterances
+    'show me an explanation of the <FlowName> flow',
+    'pull up what the <FlowName> flow does',
+    'open the <FlowName> flow and explain it to me',
   ],
   'sfi.explain_apex_method': [
     'what does the <MethodName> method in <ApexClass> do?',
@@ -1162,6 +1457,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'we have an Apex class called <ClassName> — what does it do and what objects does it touch?',
     'is <ClassName> an Apex test class or an actual trigger?',
     'that class has Trigger in its name — is it actually a test class?',
+    // R5 show-me utterances
+    'show me what the <MethodName> method does',
+    'pull up an explanation of <ClassName>.<MethodName>',
+    'open and explain the <MethodName> Apex method',
   ],
   'sfi.explain_formula': [
     'what does this formula field actually calculate?',
@@ -1170,6 +1469,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'what\'s this formula doing — it\'s hard to read',
     'explain the formula logic on Amount__c',
     'what does this formula evaluate to and when?',
+    // R5 show-me utterances
+    'show me what this formula does',
+    'pull up an explanation of the <Field__c> formula',
+    'open the formula for <Field__c> and explain it',
   ],
   'sfi.unused_fields_deep': [
     'which fields on Case have zero data and aren\'t referenced by anything?',
@@ -1178,6 +1481,12 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'find fields that appear in no layouts, no flows, no Apex',
     'which custom fields on Account are completely orphaned?',
     'which fields on Account have zero usage anywhere in the org?',
+    // STEP-2: cleanup phrasings migrated off the retired field_cleanup_candidates
+    // (now the `format: 'cleanup'` MODE of this tool).
+    'which fields can we safely delete?',
+    'what custom fields are candidates for cleanup?',
+    'find fields that nobody uses and we could remove',
+    'which deprecated fields should we clean up?',
   ],
   'sfi.process_builder_migration_candidates': [
     'which Process Builder processes should we migrate to Flow?',
@@ -1220,6 +1529,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'what\'s the overall technical debt score for this org?',
     // biz-user register (router-v2 R2): quality asked as a grade.
     'overall, is this org in good shape or carrying a lot of debt — passing grade or not?',
+    // R5 show-me utterances
+    'show me the tech debt score',
+    'pull up the technical debt report',
+    'open the tech debt summary for this org',
   ],
   'sfi.code_quality_audit': [
     'how good is our Apex code quality?',
@@ -1236,6 +1549,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'governor limit risk assessment for our Apex',
     'which batch jobs are close to the 50M record limit?',
     'find places where we\'re at risk of CPU timeout',
+    // R5 show-me utterances
+    'show me governor limit risks',
+    'pull up any governor limit violations',
+    'open the governor limit risk report',
   ],
   'sfi.find_hardcoded_values': [
     'find hardcoded IDs in the Apex code',
@@ -1252,6 +1569,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'CRUD and FLS audit for our triggers',
     'which classes are vulnerable to privilege escalation via missing FLS?',
     'which Apex classes skip CRUD or FLS checks?',
+    // R5 show-me utterances
+    'show me the CRUD/FLS audit',
+    'pull up who enforces field-level security',
+    'open the CRUD and FLS audit for <Object>',
   ],
   'sfi.test_coverage_gaps': [
     'where are the gaps in our test coverage?',
@@ -1260,6 +1581,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'coverage gaps across all Apex',
     'which classes would block a deployment due to low coverage?',
     'which Apex classes have fake or missing test coverage?',
+    // R5 show-me utterances
+    'show me test coverage gaps',
+    'pull up what code has no test coverage',
+    'open the test gap report',
   ],
   'sfi.what_if_change_field_type': [
     'what happens if I change the type of Case.Priority__c from picklist to text?',
@@ -1348,6 +1673,26 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'if I break this profile into two, what do I need to account for?',
     'how would I split the <Profile> profile into multiple permission sets?',
   ],
+  'sfi.what_if_assign_permset': [
+    'what does assigning the <PermSet> permission set give this user?',
+    'if I grant <PermSet> to a user on the <Profile> profile, what access do they gain?',
+    'delta of granting this permission set to someone who already has <PermSetB>',
+    'what new permissions would <PermSet> add on top of the profile?',
+    'what would this user gain by adding the <PermSet> permission set?',
+    'net access gained from assigning permission set <PermSet>',
+    'does assigning <PermSet> actually give any new access or is it all redundant?',
+    'what CRUD and field access does the <PermSet> permission set add for this user?',
+  ],
+  'sfi.what_if_revoke_permset': [
+    'if I remove permset <PermSet> what access is lost?',
+    'revoke impact of permission set <PermSet> for this user',
+    'what would this user lose if I unassign the <PermSet> permission set?',
+    'does taking away <PermSet> actually remove any access or do they keep it via the profile?',
+    'net access lost by revoking permission set <PermSet>',
+    'what permissions disappear if I strip <PermSet> from a user on <Profile>?',
+    'is it safe to remove the <PermSet> permission set — what do they lose?',
+    'what fields and objects become inaccessible if I revoke <PermSet>?',
+  ],
   'sfi.generate_data_dictionary': [
     'generate a data dictionary for this org',
     'create documentation of all our fields and objects',
@@ -1358,6 +1703,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     // biz-user register (router-v2 R2): "reference sheet" business phrasing.
     'our business team needs a reference sheet for the <Object> object — field names, types, required vs optional',
     'make a field reference sheet the business team can read',
+    // R5 show-me utterances
+    'show me the data dictionary',
+    'pull up the data dictionary for <Object>',
+    'open a data dictionary for this org',
   ],
   'sfi.generate_admin_handbook': [
     'write an admin handbook for this org',
@@ -1366,6 +1715,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'build an ops runbook for our Salesforce configuration',
     'document the admin processes in this org',
     'create an admin handbook for this org',
+    // R5 show-me utterances
+    'show me the admin handbook',
+    'pull up the admin documentation',
+    'open the auto-generated admin guide',
   ],
   'sfi.generate_architecture_overview': [
     'generate an architecture overview for this org',
@@ -1376,6 +1729,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'write an architecture overview document for this Salesforce org',
     // biz-user register (router-v2 R2): altitude idiom for leadership.
     'the leadership team wants the 10,000-foot architecture picture of our Salesforce org',
+    // R5 show-me utterances
+    'show me the architecture overview',
+    'pull up the system architecture diagram',
+    'open the architecture overview doc',
   ],
   'sfi.generate_sharing_summary': [
     'generate a sharing model summary for this org',
@@ -1384,6 +1741,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'write up the sharing architecture — OWD, roles, sharing rules',
     'generate a sharing model document I can review with security',
     'generate a sharing model summary for this org',
+    // R5 show-me utterances
+    'show me the sharing summary for <Object>',
+    'pull up the sharing model for <Object>',
+    'open the sharing configuration for <Object>',
   ],
   'sfi.generate_compliance_report': [
     'generate a compliance report for this org',
@@ -1392,6 +1753,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'produce a security and compliance report',
     'generate a report for an auditor about our data controls',
     'produce a compliance report for data privacy fields in this org',
+    // R5 show-me utterances
+    'show me the compliance report',
+    'pull up the PII / compliance summary',
+    'open the compliance audit report',
   ],
   'sfi.generate_onboarding_doc': [
     'generate an onboarding guide for new users',
@@ -1444,6 +1809,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'audit our test suite for meaningful assertions',
     'are these tests actually checking anything useful?',
     'which of our test classes have no real assertions — just System.assert(true)?',
+    // R5 show-me utterances
+    'show me the meaningful test audit',
+    'pull up which tests are actually meaningful',
+    'open the test quality report',
   ],
   'sfi.method_reachability': [
     'is <MethodName> reachable from any active flow or trigger?',
@@ -1460,6 +1829,18 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'which tests are relevant to my changes in <ApexClass>?',
     'give me the test suite to run before deploying <ComponentName>',
     'if I change the AccountService and CaseHandler classes, which tests should I run?',
+  ],
+  'sfi.review_change': [
+    'review this changeset',
+    'is this deploy safe?',
+    'review my deployment',
+    'what does this PR break?',
+    'pre-deploy review of these components',
+    'is it safe to ship these changes?',
+    'gate my deploy — will anything break?',
+    'review the components in this package.xml before I deploy',
+    'run a pre-deployment risk check on my diff',
+    'which of my changes are blocking, risky, or safe to deploy?',
   ],
   'sfi.cdc_subscribers': [
     'what\'s subscribed to Change Data Capture events on Contact?',
@@ -1513,6 +1894,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'what is the <Field__c> field really for in this org?',
     'the bad email field — what does it represent and who sets it?',
     'what does that field mean in context — is it set by automation or by users, and what object is it on?',
+    // R5 show-me utterances
+    'show me the meaning of <Field__c>',
+    'pull up what <Field__c> is used for',
+    'open the semantic meaning of <Field__c>',
   ],
   'sfi.disambiguate_concepts': [
     'we have both Priority__c and Case.Priority — which one should I use?',
@@ -1614,6 +1999,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'everything about Status__c on Case — definition, usage, writers, layouts',
     'field 360 for Contact.LeadSource — the full picture',
     'give me the complete picture of the Amount__c field on Opportunity — everything touching it',
+    // R5 show-me utterances
+    'show me a 360 view of <Field__c>',
+    'pull up everything about <Field__c>',
+    'open the field 360 for <Field__c>',
   ],
   'sfi.field_lineage': [
     'show me the lineage of Priority__c — where does it come from and where does it go?',
@@ -1704,6 +2093,8 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'what widgets are in the <FlexCardName> FlexCard?',
   ],
   'sfi.find_component_usages': [
+    'what depends on the <Object> object?',
+    'what depends on this component?',
     'why cant i see the <ComponentName> thing, is it a permission',
     'who has the <PermSet> perm set',
     'who\'s allowed to view the <ComponentName> component?',
@@ -1751,6 +2142,8 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
   ],
   'sfi.annotations': [
     'show me all annotations for <ComponentName>',
+    'who owns the <Field__c> field?',
+    'who is the annotated owner of this component?',
     'what notes have been added to this component?',
     'are there any annotations on the <FlowName> flow?',
     'list component annotations in this org',
@@ -1765,6 +2158,30 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'write a description I can add to <ComponentName>',
     'flag the Amount__c field as PII-sensitive so this is recorded',
   ],
+  'sfi.review_annotations': [
+    'show me unconfirmed annotation proposals',
+    'list AI annotation proposals waiting for review',
+    'which annotations are still unconfirmed?',
+    'review pending annotation proposals for this org',
+    'what proposed annotations need confirmation?',
+    'list unconfirmed ownership or status annotations',
+  ],
+  'sfi.confirm_annotation': [
+    'confirm the proposed annotation on <ComponentName>',
+    'approve the AI annotation proposal for this field',
+    'mark this annotation proposal as confirmed',
+    'human-confirm the status annotation on <ComponentName>',
+    'accept the proposed owner annotation',
+    'confirm annotation proposal for this component',
+  ],
+  'sfi.reject_annotation': [
+    'reject the proposed annotation on <ComponentName>',
+    'discard the AI annotation proposal for this field',
+    'delete the unconfirmed annotation proposal',
+    'reject the pending status annotation',
+    'remove this unconfirmed annotation proposal',
+    'decline the proposed owner annotation',
+  ],
   'sfi.component_history': [
     'show me the change history for <ComponentName>',
     'who has modified the <FlowName> flow over time?',
@@ -1773,6 +2190,18 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'has <ComponentName> changed recently?',
     'when was the AccountTrigger last changed and what did it look like before?',
   ],
+  'sfi.component_change_attribution': [
+    'who changed this validation rule according to the persisted setup audit trail?',
+    'offline setup change attribution for <ComponentName>',
+    'which admin changed <ValidationRule> and when from the vault audit trail?',
+    'attribute SetupAuditTrail rows to <ComponentName>',
+    'who touched this component in Setup based on persisted audit history?',
+    'correlate setup audit trail to <ObjectApiName>',
+    // R5 show-me utterances
+    'show me who changed <ComponentName>',
+    'pull up the change attribution for <ComponentName>',
+    'open the change history for <ComponentName>',
+  ],
   'sfi.component_as_of': [
     'show me what <ComponentName> looked like last month',
     'what did the <FlowName> flow look like before the last change?',
@@ -1780,5 +2209,47 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'what was the state of <ComponentName> at the time of the release?',
     'restore view of <ComponentName> from a specific date',
     'show me what the Account trigger looked like at the v1.0 tag',
+  ],
+  // R6-09 — error-to-source decoder. Support/business-user register: paste an
+  // error and ask what it means / where it came from.
+  'sfi.explain_error': [
+    'what does this error mean: FIELD_CUSTOM_VALIDATION_EXCEPTION?',
+    'why did I get this error when saving a <Object>?',
+    'decode this error message for me',
+    'a user got an error saving a record — which rule blocked it?',
+    'what validation rule is throwing "You must enter a close date"?',
+    'which flow threw this fault email?',
+    'I got a flow error email — what flow and element caused it?',
+    'what does this Apex stack trace point to: Class.<ApexClass>.method line 42?',
+    'what triggered CANNOT_INSERT_UPDATE_ACTIVATE_ENTITY on <Object>?',
+    'user pasted an error, help me find where it came from',
+    'what causes UNABLE_TO_LOCK_ROW?',
+    'which duplicate rule fired on this Contact save?',
+    'trace this save error back to a validation rule',
+    'what does REQUIRED_FIELD_MISSING mean and what produces it?',
+    'the error says INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY — what is that?',
+    'explain this Salesforce error and point me at the component',
+    // R5 show-me utterances
+    'show me an explanation of this error',
+    'pull up what this error message means',
+    'open the error explanation for <ErrorMessage>',
+  ],
+  'sfi.explain_debug_log': [
+    'explain this Apex debug log',
+    'I hit System.LimitException: Too many SOQL queries: 101 — what does it point to?',
+    'decode this governor limit exception and find the class that caused it',
+    'read this debug log and tell me which class ran',
+    'my transaction failed with Too many DML statements: 151 — where is the DML in a loop?',
+    'Apex CPU time limit exceeded — which class is the culprit?',
+    'trace this FATAL_ERROR stack trace back to a component',
+    'what does this debug log mean',
+    'I pasted an Apex debug log, help me find the source of the exception',
+    'which trigger threw this System.LimitException in the log?',
+    'Apex heap size too large — what in my code blew the heap?',
+    'the log shows Too many query rows: 50001 — what class queries that much?',
+    'walk me through this Apex log and point at the offending class',
+    'a governor limit fired at runtime — cross-reference it with my loop risks',
+    'this debug log has a Flow API Name in the fault — which flow errored?',
+    'interpret this CODE_UNIT_STARTED / LIMIT_USAGE debug log',
   ],
 };

@@ -130,7 +130,7 @@ describe('extractAuraDefinitionBundle', () => {
     it('extracts a DX-source bundle whose meta is {name}.cmp-meta.xml (not {name}-meta.xml)', async () => {
       // `sf project retrieve` names the bundle metadata after the bundle AND
       // its primary-definition suffix — e.g. `IEERecaptcha.cmp-meta.xml` (the
-      // real mass.gov aura layout), NOT the bare `IEERecaptcha-meta.xml`. The
+      // real example.gov aura layout), NOT the bare `IEERecaptcha-meta.xml`. The
       // extractor must locate that suffixed meta file, or every aura bundle in
       // a DX-retrieved org fails extraction.
       const tempDir = await mkdtemp(join(tmpdir(), 'sf-intel-aura-dx-'));

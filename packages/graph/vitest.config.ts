@@ -5,6 +5,7 @@ export default defineConfig({
   test: {
     include: ['test/**/*.test.ts'],
     globals: true,
+    pool: 'threads',
     // Large batched import tests can exceed the default 5s on busy CI hosts.
     testTimeout: 60_000,
     // Shell package — no tests yet. Phase D's graph-* tasks add the real

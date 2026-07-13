@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Bot xmlns="http://soap.sforce.com/2006/04/metadata">
+    <agentTemplate>AiCopilot__AgentforceAgent</agentTemplate>
+    <agentType>EinsteinServiceAgent</agentType>
+    <botMlDomain>
+        <label>Verdant Support Agent</label>
+        <name>Verdant_Support_Agent</name>
+    </botMlDomain>
+    <botSource>None</botSource>
+    <botUser>agentuser@verdantenergy.example</botUser>
+    <contextVariables>
+        <dataType>Text</dataType>
+        <developerName>ChannelType</developerName>
+        <includeInPrompt>true</includeInPrompt>
+        <label>Channel Type</label>
+    </contextVariables>
+    <description>Answers customer questions about solar projects and installations.</description>
+    <label>Verdant Support Agent</label>
+    <logPrivateConversationData>false</logPrivateConversationData>
+    <richContentEnabled>true</richContentEnabled>
+    <sessionTimeout>0</sessionTimeout>
+    <type>ExternalCopilot</type>
+</Bot>

@@ -189,8 +189,10 @@ const renderBody = (input: OrgCardInput, s: Sections): string => {
     lines.push('## Naming conventions (observed, heuristic)');
     lines.push('');
     for (const n of s.naming) {
-      // pattern is a generator-derived naming-convention string — inline-escape
-      // so a newline/backtick cannot split the bullet (CR-16c).
+      // pattern is a generator-derived naming-convention string — render as a
+      // fenced code span (escapeMarkdownInline now returns the fence too, sized
+      // to survive any embedded backtick) so it cannot inject bullet/heading/
+      // emphasis structure into the card (CR-16c / CR-16d).
       lines.push(`- ${escapeMarkdownInline(n.pattern)} (${n.matching}/${n.total} fields)`);
     }
     lines.push('');
@@ -207,9 +209,10 @@ const renderBody = (input: OrgCardInput, s: Sections): string => {
     lines.push('');
     lines.push(
       input.dataShape.counts
-        // name is an object api-name (free text) inside a code span — escape so a
-        // backtick can't close the span early (CR-16c).
-        .map(([name, count]) => `\`${escapeMarkdownInline(name)}\`: ${count}`)
+        // name is an object api-name (free text). escapeMarkdownInline returns
+        // the full fenced code span (fence included, adaptively sized) so an
+        // embedded backtick can't close it early (CR-16c / CR-16d).
+        .map(([name, count]) => `${escapeMarkdownInline(name)}: ${count}`)
         .join(' · '),
     );
   }

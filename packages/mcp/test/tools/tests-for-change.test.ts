@@ -23,6 +23,8 @@ import {
   testsForChangeInputSchema,
 } from '../../src/tools/tests-for-change.js';
 
+import { measureGraphQueries } from './_graph-query-budget.js';
+
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
   refreshedAt: '2026-05-29T10:00:00Z',
@@ -279,5 +281,114 @@ describe('testsForChangeInputSchema', () => {
     expect(
       testsForChangeInputSchema.safeParse({ changedComponents: [''] }).success,
     ).toBe(false);
+  });
+});
+
+// =============================================================================
+// N+1 query budget (finding C-1). upstreamWalk issued one `listEdges` per
+// (frontier node x edge type); it now issues ONE `listEdgesForNodes` (both
+// COVERAGE_EDGE_TYPES) per DEPTH LEVEL. The edge-query count must scale with
+// DEPTH, never frontier WIDTH. Plus a golden-output assertion over a multi-
+// level coverage tree with a test-sink and a dispatchesAsync relay — the
+// edge-type ordering + test-sink + visited dedup are exactly where a silent
+// output shift could hide.
+// =============================================================================
+describe('testsForChangeHandler — bounded graph queries (BFS)', () => {
+  const withStore = async <T>(
+    seed: ExtractionResult,
+    run: (ctx: Context, s: GraphStore) => Promise<T>,
+  ): Promise<T> => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-tfc-budget-'));
+    const opened = await openGraph(join(dir, 'tfc.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const s = opened.value;
+    const imported = await importExtractionResults(s, [seed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const localCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s } as Context;
+    const out = await run(localCtx, s);
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+    return out;
+  };
+
+  // Coverage tree upstream of Service:
+  //   Controller --callsApex--> Service         (relay, depth 1)
+  //   Helper     --dispatchesAsync--> Service    (async relay, depth 1)
+  //   ServiceTest --callsApex--> Service (isTest) (sink, depth 1)
+  //   ControllerTest --callsApex--> Controller (isTest) (sink, depth 2)
+  //   HelperTest --callsApex--> Helper (isTest)  (sink, depth 2)
+  const goldenSeed: ExtractionResult = {
+    nodes: [
+      makeNode({ id: 'ApexClass:Service', apiName: 'Service' }),
+      makeNode({ id: 'ApexClass:Controller', apiName: 'Controller' }),
+      makeNode({ id: 'ApexClass:Helper', apiName: 'Helper' }),
+      makeNode({ id: 'ApexClass:ServiceTest', apiName: 'ServiceTest', properties: { isTest: true } }),
+      makeNode({ id: 'ApexClass:ControllerTest', apiName: 'ControllerTest', properties: { isTest: true } }),
+      makeNode({ id: 'ApexClass:HelperTest', apiName: 'HelperTest', properties: { isTest: true } }),
+    ],
+    edges: [
+      makeEdge({ fromId: 'ApexClass:Controller', toId: 'ApexClass:Service', edgeType: 'callsApex' }),
+      makeEdge({ fromId: 'ApexClass:Helper', toId: 'ApexClass:Service', edgeType: 'dispatchesAsync' }),
+      makeEdge({ fromId: 'ApexClass:ServiceTest', toId: 'ApexClass:Service', edgeType: 'callsApex' }),
+      makeEdge({ fromId: 'ApexClass:ControllerTest', toId: 'ApexClass:Controller', edgeType: 'callsApex' }),
+      makeEdge({ fromId: 'ApexClass:HelperTest', toId: 'ApexClass:Helper', edgeType: 'callsApex' }),
+    ],
+  };
+
+  it('golden: the coverage-tree selection is unchanged by batching', async () => {
+    const result = await withStore(goldenSeed, (localCtx) =>
+      testsForChangeHandler(localCtx, { changedComponents: ['ApexClass:Service'] }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    expect(d.selectedTests).toEqual([
+      { id: 'ApexClass:ControllerTest', apiName: 'ControllerTest', minDepth: 2, coversChanges: ['ApexClass:Service'] },
+      { id: 'ApexClass:HelperTest', apiName: 'HelperTest', minDepth: 2, coversChanges: ['ApexClass:Service'] },
+      { id: 'ApexClass:ServiceTest', apiName: 'ServiceTest', minDepth: 1, coversChanges: ['ApexClass:Service'] },
+    ]);
+    expect(d.uncoveredChanges).toEqual([]);
+    expect(d.perChange).toHaveLength(1);
+    expect(d.perChange[0]?.id).toBe('ApexClass:Service');
+    expect(d.perChange[0]?.covered).toBe(true);
+    // coveringTests is sorted by (depth ASC, id ASC): the direct test first,
+    // then the two depth-2 relayed tests.
+    expect(d.perChange[0]?.coveringTests).toEqual([
+      { id: 'ApexClass:ServiceTest', apiName: 'ServiceTest', depth: 1 },
+      { id: 'ApexClass:ControllerTest', apiName: 'ControllerTest', depth: 2 },
+      { id: 'ApexClass:HelperTest', apiName: 'HelperTest', depth: 2 },
+    ]);
+  });
+
+  // Service has `width` direct non-test callers (a wide frontier at depth 1),
+  // each of which has no further callers (depth 2 empty). Depth is fixed; the
+  // edge-query count is one batched fetch per depth level, so it must be FLAT.
+  const seedWideFrontier = (width: number): ExtractionResult => ({
+    nodes: [
+      makeNode({ id: 'ApexClass:Service', apiName: 'Service' }),
+      ...Array.from({ length: width }, (_u, i) =>
+        makeNode({ id: `ApexClass:Caller${i}`, apiName: `Caller${i}`, properties: { isTest: true } }),
+      ),
+    ],
+    edges: Array.from({ length: width }, (_u, i) =>
+      makeEdge({ fromId: `ApexClass:Caller${i}`, toId: 'ApexClass:Service', edgeType: 'callsApex' }),
+    ),
+  });
+
+  it('edge-query count does NOT scale with frontier width', async () => {
+    const measure = (width: number) =>
+      withStore(seedWideFrontier(width), (localCtx, s) =>
+        measureGraphQueries(s, () =>
+          testsForChangeHandler(localCtx, { changedComponents: ['ApexClass:Service'] }),
+        ),
+      );
+    const narrow = await measure(60);
+    const wide = await measure(200);
+    expect(narrow.result.ok).toBe(true);
+    expect(wide.result.ok).toBe(true);
+    // Flat: one listEdgesForNodes per depth level, NOT one per (node x edgeType).
+    // An N+1 would be ~2 * width edge queries.
+    expect(wide.edgeQueries).toBe(narrow.edgeQueries);
+    expect(wide.edgeQueries).toBeLessThan(10);
   });
 });

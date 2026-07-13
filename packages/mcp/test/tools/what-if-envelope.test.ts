@@ -45,6 +45,11 @@ import {
   type WhatIfMergeProfilesOutput,
 } from '../../src/tools/what-if-merge-profiles.js';
 import {
+  whatIfAssignPermsetInputSchema,
+  whatIfRevokePermsetInputSchema,
+  type WhatIfPermsetOutput,
+} from '../../src/tools/what-if-permset.js';
+import {
   whatIfRemovePicklistValueInputSchema,
   type WhatIfRemovePicklistValueOutput,
 } from '../../src/tools/what-if-remove-picklist-value.js';
@@ -77,6 +82,8 @@ const WHAT_IF_TOOLS: ReadonlyArray<{
   { tool: 'what_if_merge_profiles', schema: whatIfMergeProfilesInputSchema, target: 'profileIdA' },
   { tool: 'what_if_remove_picklist_value', schema: whatIfRemovePicklistValueInputSchema, target: 'fieldId' },
   { tool: 'what_if_split_profile', schema: whatIfSplitProfileInputSchema, target: 'profileId' },
+  { tool: 'what_if_assign_permset', schema: whatIfAssignPermsetInputSchema, target: 'permissionSetId' },
+  { tool: 'what_if_revoke_permset', schema: whatIfRevokePermsetInputSchema, target: 'permissionSetId' },
 ];
 
 describe('P8-what-if-suite — unified what_if contract', () => {
@@ -90,7 +97,8 @@ describe('P8-what-if-suite — unified what_if contract', () => {
     assertEnvelope<WhatIfMergeProfilesOutput>();
     assertEnvelope<WhatIfRemovePicklistValueOutput>();
     assertEnvelope<WhatIfSplitProfileOutput>();
-    expect(WHAT_IF_TOOLS).toHaveLength(9);
+    assertEnvelope<WhatIfPermsetOutput>();
+    expect(WHAT_IF_TOOLS).toHaveLength(11);
   });
 
   it('the unified Verdict vocabulary is the documented superset', () => {

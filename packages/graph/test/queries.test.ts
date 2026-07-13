@@ -1241,3 +1241,90 @@ describe('descriptionPresence filter', () => {
     expect(present.value + absent.value).toBe(total.value);
   });
 });
+
+/**
+ * C-3 (finding 34) regression — `parseProperties` degrades a malformed
+ * `properties_json` value to `{}` instead of throwing an anonymous
+ * `SyntaxError` that crashes every query touching the row. The prior bare
+ * `JSON.parse(raw)` assumed `import.ts` only ever writes valid JSON (true
+ * for the fixed `canonicalJson`, but not a type-level guarantee, and not
+ * true for a hand-edited/corrupted DB file) — a single bad row used to
+ * poison the entire read path. The malformed value here is written via a
+ * raw `UPDATE`, bypassing `canonicalJson` entirely, to simulate exactly
+ * that "corrupted column" scenario independent of the import-side fix.
+ */
+describe('parseProperties — C-3 (finding 34) regression', () => {
+  it('degrades a malformed properties_json node column to {} instead of throwing', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-graph-malformed-props-'));
+    const dbPath = join(dir, 'malformed.db');
+    const instance = await DuckDBInstance.create(dbPath);
+    const connection = await instance.connect();
+    const initResult = await initSchema(connection);
+    expect(initResult.ok).toBe(true);
+    const localStore: GraphStore = { connection, instance };
+    const imported = await importExtractionResults(localStore, [
+      { nodes: [makeNode({ id: 'CustomObject:Broken', apiName: 'Broken', label: 'Broken' })], edges: [] },
+    ]);
+    expect(imported.ok).toBe(true);
+
+    // Corrupt the persisted column directly — bypasses canonicalJson
+    // entirely, so this reproduces the bug class regardless of whether
+    // the import-side fix ever lets it happen in practice.
+    await connection.run(`UPDATE nodes SET properties_json = ? WHERE id = ?`, [
+      '{"foo":undefined}',
+      'CustomObject:Broken',
+    ]);
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const r = await getNodeById(localStore, 'CustomObject:Broken');
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value).not.toBeNull();
+      // Degrades to {} — does not throw, does not poison the whole row.
+      expect(r.value?.properties).toEqual({});
+      expect(r.value?.id).toBe('CustomObject:Broken');
+    }
+    // The offending row's id is surfaced, not an anonymous SyntaxError.
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('CustomObject:Broken'));
+    warnSpy.mockRestore();
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('degrades a malformed properties_json edge column to {} instead of throwing', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-graph-malformed-edge-props-'));
+    const dbPath = join(dir, 'malformed-edge.db');
+    const instance = await DuckDBInstance.create(dbPath);
+    const connection = await instance.connect();
+    const initResult = await initSchema(connection);
+    expect(initResult.ok).toBe(true);
+    const localStore: GraphStore = { connection, instance };
+    const imported = await importExtractionResults(localStore, [
+      {
+        nodes: [
+          makeNode({ id: 'CustomObject:A', apiName: 'A', label: 'A' }),
+          makeNode({ id: 'CustomObject:B', apiName: 'B', label: 'B' }),
+        ],
+        edges: [makeEdge({ fromId: 'CustomObject:A', toId: 'CustomObject:B' })],
+      },
+    ]);
+    expect(imported.ok).toBe(true);
+
+    await connection.run(
+      `UPDATE edges SET properties_json = ? WHERE from_id = ? AND to_id = ?`,
+      ['not even json', 'CustomObject:A', 'CustomObject:B'],
+    );
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const r = await listEdges(localStore, 'CustomObject:A', { direction: 'out' });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.length).toBe(1);
+      expect(r.value[0]?.properties).toEqual({});
+    }
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

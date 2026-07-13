@@ -54,7 +54,12 @@ export interface OrgPulseOutput {
   readonly disclosure: string;
 }
 
-const ORG_PULSE_DISCLOSURE =
+/**
+ * Exported (not just used locally) so `sfi.generate_fleet_report`
+ * (`fleet-report.ts`) can surface the SAME verbatim honesty axis for its
+ * per-vault org-pulse-style digest, instead of drifting a second copy.
+ */
+export const ORG_PULSE_DISCLOSURE =
   "Freshness and contributor signals come from each component's lastModifiedDate / lastModifiedBy. A plain `sf project retrieve` does NOT populate those — they need a refresh enriched via the Tooling API. If coverage is ~0% and the contributor list is empty, that means the data was not captured at refresh time, NOT that the org has no history. Run a tooling-API-enabled refresh to populate it.";
 
 /**

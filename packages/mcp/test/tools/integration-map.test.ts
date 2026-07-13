@@ -686,6 +686,136 @@ describe('integrationMapHandler (callout authorization + orphaned named credenti
   });
 });
 
+// =============================================================================
+// Finding #44 — martech connectors: an InstalledPackage node whose namespace
+// matches a known martech vendor (Marketing Cloud Connect's `et4ae5`), an
+// unrelated InstalledPackage that must NOT match (a negative control), and a
+// NamedCredential whose declared endpoint host matches the Marketo hostname
+// heuristic. Uses its OWN store so it is independent of the shared-suite
+// seeding order above.
+// =============================================================================
+
+const PKG_MARKETING_CLOUD_CONNECT = 'InstalledPackage:et4ae5';
+const PKG_UNRELATED_ISV = 'InstalledPackage:hed';
+const NC_MARKETO_ENDPOINT = 'NamedCredential:Marketo_Prod_NC';
+
+const martechSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: PKG_MARKETING_CLOUD_CONNECT,
+      type: 'InstalledPackage',
+      apiName: 'et4ae5',
+      label: 'et4ae5',
+      properties: { namespace: 'et4ae5', versionNumber: '20.3' },
+    }),
+    makeNode({
+      id: PKG_UNRELATED_ISV,
+      type: 'InstalledPackage',
+      apiName: 'hed',
+      label: 'hed',
+      properties: { namespace: 'hed', versionNumber: '5.1' },
+    }),
+    makeNode({
+      id: NC_MARKETO_ENDPOINT,
+      type: 'NamedCredential',
+      apiName: 'Marketo_Prod_NC',
+      properties: { endpoint: 'https://example.mktorest.com' },
+    }),
+  ],
+  edges: [],
+};
+
+describe('integrationMapHandler (martech connectors — Finding #44)', () => {
+  let martechDir: string;
+  let martechStore: GraphStore;
+  let martechCtx: Context;
+
+  beforeAll(async () => {
+    martechDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-integration-map-martech-'));
+    const opened = await openGraph(join(martechDir, 'martech.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    martechStore = opened.value;
+    const imported = await importExtractionResults(martechStore, [martechSeed]);
+    if (!imported.ok) {
+      throw new Error(`seed import failed: ${imported.error.message}`);
+    }
+    martechCtx = { vaultRoot: martechDir, manifest: FIXTURE_MANIFEST, graph: martechStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(martechStore);
+    rmSync(martechDir, { recursive: true, force: true });
+  });
+
+  it('surfaces the InstalledPackage namespace match with the friendly product name', async () => {
+    const result = await integrationMapHandler(martechCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const match = result.value.data.martechConnectors.find(
+      (m) => m.componentId === PKG_MARKETING_CLOUD_CONNECT,
+    );
+    expect(match).toBeDefined();
+    expect(match?.productName).toBe('Marketing Cloud Connect');
+    expect(match?.vendor).toBe('Salesforce');
+    expect(match?.source).toBe('installed-package');
+    expect(match?.confidence).toBe('declared');
+  });
+
+  it('does not flag an unrelated InstalledPackage namespace as a martech connector', async () => {
+    const result = await integrationMapHandler(martechCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.martechConnectors.map((m) => m.componentId);
+    expect(ids).not.toContain(PKG_UNRELATED_ISV);
+  });
+
+  it('surfaces a NamedCredential endpoint match against the Marketo hostname heuristic', async () => {
+    const result = await integrationMapHandler(martechCtx, { filter: 'all' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const match = result.value.data.martechConnectors.find(
+      (m) => m.componentId === NC_MARKETO_ENDPOINT,
+    );
+    expect(match).toBeDefined();
+    expect(match?.productName).toBe('Marketo');
+    expect(match?.source).toBe('named-credential-endpoint');
+    expect(match?.confidence).toBe('heuristic');
+  });
+
+  it('always includes a non-empty martechConnectorDisclosure', async () => {
+    const result = await integrationMapHandler(martechCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.martechConnectorDisclosure.length).toBeGreaterThan(0);
+  });
+
+  it('does NOT report "No integration metadata found" when only a martech InstalledPackage is present', async () => {
+    // filter='auth' scopes NamedCredential out entirely (so the endpoint
+    // match disappears), but InstalledPackage detection is filter-
+    // independent — the et4ae5 match alone must keep the honest-empty note
+    // from firing.
+    const result = await integrationMapHandler(martechCtx, { filter: 'auth' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.authProviders).toEqual([]);
+    expect(result.value.data.connectedApps).toEqual([]);
+    expect(
+      result.value.data.martechConnectors.some(
+        (m) => m.componentId === PKG_MARKETING_CLOUD_CONNECT,
+      ),
+    ).toBe(true);
+    expect(result.value.data.note).toBeUndefined();
+  });
+
+  it('omits the NamedCredential endpoint match when filter scopes NamedCredential out', async () => {
+    const result = await integrationMapHandler(martechCtx, { filter: 'auth' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.martechConnectors.map((m) => m.componentId);
+    expect(ids).not.toContain(NC_MARKETO_ENDPOINT);
+  });
+});
+
 describe('integrationMapInputSchema', () => {
   it('accepts an empty input (filter defaults to all)', () => {
     expect(integrationMapInputSchema.safeParse({}).success).toBe(true);

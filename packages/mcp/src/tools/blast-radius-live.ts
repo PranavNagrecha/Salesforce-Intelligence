@@ -46,7 +46,7 @@ import {
   renderHybridStalenessWarning,
   type HybridStaleness,
 } from './hybrid-trust.js';
-import { assertSoqlIdentifier, checkVaultStaleness, resolveLiveAccess } from './live-plane.js';
+import { assertSoqlIdentifier, checkVaultStaleness, probeLiveAccess } from './live-plane.js';
 import { liveBudgetStatus, liveCount } from './live-session.js';
 
 /** Default cap on live COUNT queries per call (env `SFI_BLAST_RADIUS_MAX_LIVE`). */
@@ -175,7 +175,10 @@ export const blastRadiusLiveHandler = async (
   } as const;
 
   const org = input.orgAlias?.trim() || ctx.manifest.sourceOrg;
-  const access = await resolveLiveAccess(org, input.liveEnabled);
+  const access = await probeLiveAccess(ctx, {
+    liveEnabled: input.liveEnabled,
+    orgAlias: input.orgAlias,
+  });
 
   // 2a. NO consent → vault-only with the caveat. The static answer still stands.
   if (!access.allowed) {

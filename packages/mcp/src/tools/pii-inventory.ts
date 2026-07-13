@@ -30,6 +30,14 @@
  *     the full count even when truncated so the caller knows how much
  *     is hidden.
  *
+ *   - `format` (R6-21, `'json' | 'csv'`, default `'json'`): `'csv'`
+ *     returns `csv` instead of `fields` (`fields` is `[]` on that page —
+ *     the row data lives in `csv`, not duplicated in both encodings) —
+ *     one row per matched field, with the heuristic-recognizer and
+ *     freshness disclosures embedded as `#`-prefixed comment lines so
+ *     they survive even if only the `.csv` text is saved. `summary` /
+ *     `truncated` / `nextOffset` / pagination fields are unchanged.
+ *
  * Honesty axis (per the v2.0d spec): the recognizer is heuristic.
  *
  *   - A field name without any PII token classifies as `public` —
@@ -64,18 +72,20 @@
 
 import type {
   ComponentId,
+  Edge,
   McpError,
   McpResponse,
   Node,
   PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listEdges, listNodesByType } from '@sf-intelligence/graph';
+import { listEdgesForNodes, listNodesByType } from '@sf-intelligence/graph';
 import {
   detectPiiClassificationWithReason,
   type PiiCategory,
   type PiiClassification,
 } from '@sf-intelligence/patterns';
+import { fitCsvRowsToBudget, type CsvCell } from '@sf-intelligence/renderers';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -141,6 +151,8 @@ const piiInventoryInputBaseSchema = z.object({
   // CR-22 continuation cursor: opaque token from a prior truncated page's
   // nextCursor; supplies the resume offset. Omit for today's behavior.
   cursor: z.string().min(1).optional(),
+  // R6-21: 'csv' returns `csv` (rows serialized as CSV) instead of `fields`.
+  format: z.enum(['json', 'csv']).optional(),
 });
 
 export const piiInventoryInputSchema = z.preprocess((raw) => {
@@ -196,7 +208,18 @@ export interface PiiInventorySummary {
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface PiiInventoryOutput {
+  /**
+   * The matched fields. Empty (`[]`) when `format: 'csv'` was requested —
+   * the same rows are then carried in `csv` instead, so the response does
+   * not pay for both encodings of the same data.
+   */
   readonly fields: readonly PiiField[];
+  /**
+   * A CSV rendering of `fields` (with the freshness + heuristic-recognizer
+   * disclosures embedded as `#`-prefixed comment lines). Present only when
+   * the caller passed `format: 'csv'`.
+   */
+  readonly csv?: string;
   readonly summary: PiiInventorySummary;
   /** Page size applied to this response (echoes the request; default 200). */
   readonly limit: number;
@@ -302,6 +325,30 @@ const readDescription = (
   return typeof d === 'string' && d.length > 0 ? d : null;
 };
 
+/** CSV header for the R6-21 `format: 'csv'` export. Column order matches `PiiField`'s field order. */
+const PII_CSV_HEADER: readonly string[] = [
+  'id',
+  'apiName',
+  'label',
+  'type',
+  'classification',
+  'category',
+  'description',
+  'reason',
+];
+
+/** Build one CSV row per `PiiField`, in the same column order as {@link PII_CSV_HEADER}. */
+const csvRowForPiiField = (field: PiiField): readonly CsvCell[] => [
+  field.id,
+  field.apiName,
+  field.label,
+  field.type,
+  field.classification,
+  field.category,
+  field.description,
+  field.reason,
+];
+
 /**
  * Comparator for the deterministic output sort. Orders by
  * `classification` ASC, then `category` ASC, then `id` ASC. Matches
@@ -342,23 +389,32 @@ const fetchAllCustomFields = async (
   return ok(all);
 };
 
+/** The full classified field set plus its stable per-axis breakdowns. */
+interface ClassifiedPiiFields {
+  /** Every matching field, sorted by `(classification, category, id)` ASC. */
+  readonly sorted: readonly PiiField[];
+  readonly byClassification: Readonly<Record<PiiClassification, number>>;
+  readonly byCategory: Readonly<Record<PiiCategory, number>>;
+}
+
 /**
- * The `sfi.pii_inventory` MCP tool. Returns the structured PII
- * inventory across every CustomField in the vault, filtered by the
- * caller's `classification` and `category` parameters. See the module
- * JSDoc for the honesty-axis caveats.
- *
- * @example
- *   const r = await piiInventoryHandler(ctx, { classification: 'pii' });
- *   if (r.ok) console.log(r.value.data.summary.total);
+ * Classify every CustomField in scope ONCE — fetch the corpus, batch the
+ * formula-source `references` edges, run the recognizer, filter by the
+ * classification/category axes, and sort. Both `piiInventoryHandler` (which
+ * paginates this) and `collectPiiInventoryFields` (which returns all of it) call
+ * this, so the full-org classification runs a SINGLE time per request instead of
+ * once per output page — the page walk used to re-fetch and re-classify the
+ * whole org on every page (the dominant residual cost in `org_risk_report`).
  */
-export const piiInventoryHandler = async (
+const classifyPiiFields = async (
   ctx: Context,
-  input: PiiInventoryInput,
-): Promise<Result<McpResponse<PiiInventoryOutput>, McpError>> => {
+  input: Pick<
+    PiiInventoryInput,
+    'classification' | 'category' | 'objectId' | 'objectApiName'
+  >,
+): Promise<Result<ClassifiedPiiFields, McpError>> => {
   const classificationFilter = input.classification ?? 'all';
   const categoryFilter = input.category ?? 'all';
-  const limit = input.limit ?? PII_INVENTORY_DEFAULT_LIMIT;
   const objectScopeParentId = resolveObjectScopeParentId(input);
 
   const allFieldsResult = await fetchAllCustomFields(ctx);
@@ -384,21 +440,42 @@ export const piiInventoryHandler = async (
     const f = node.properties['formula'];
     return typeof f === 'string' && f.trim().length > 0;
   };
-  const resolvePii = async (
+
+  // Formula-source PII propagation needs each formula field's OUTGOING
+  // `references` edges. Fetch them for EVERY formula field in ONE batched
+  // `listEdgesForNodes` round-trip up front instead of a per-formula-field
+  // `listEdges` call inside the loop — that N+1 was the dominant cost in the
+  // >60s org_risk_report timeout. A field whose direct classification is already
+  // pii/sensitive never consults its bucket, so batching over all formula fields
+  // (a superset of what's needed) is at worst a few unused map entries and stays
+  // a single query.
+  const formulaFieldIds = allFieldsResult.value
+    .filter(isFormulaField)
+    .map((n) => n.id);
+  const referencesByField = new Map<string, readonly Edge[]>();
+  if (formulaFieldIds.length > 0) {
+    const batched = await listEdgesForNodes(ctx.graph, formulaFieldIds, {
+      direction: 'out',
+      edgeTypes: ['references'],
+    });
+    if (batched.ok) {
+      for (const [id, edges] of batched.value) referencesByField.set(id, edges);
+    }
+  }
+
+  const resolvePii = (
     node: Node,
-  ): Promise<ReturnType<typeof detectPiiClassificationWithReason>> => {
+  ): ReturnType<typeof detectPiiClassificationWithReason> => {
     const direct = detectPiiClassificationWithReason(node);
     // Only propagate when the field shows NO direct signal and is a formula —
     // a directly-classified field keeps its own (stronger or equal) verdict.
     if (direct.piiClassification !== 'public' || !isFormulaField(node)) {
       return direct;
     }
-    const refs = await listEdges(ctx.graph, node.id, {
-      direction: 'out',
-      edgeType: 'references',
-    });
-    if (!refs.ok) return direct;
-    for (const edge of refs.value) {
+    // Same `(to_id, edge_type, from_id, source)` order the per-field
+    // `listEdges` returned, so the first pii/sensitive source named in the
+    // `reason` is unchanged.
+    for (const edge of referencesByField.get(node.id) ?? []) {
       const src = fieldById.get(edge.toId);
       if (src === undefined) continue;
       const srcDet = detectPiiClassificationWithReason(src);
@@ -423,7 +500,7 @@ export const piiInventoryHandler = async (
     ) {
       continue;
     }
-    const detection = await resolvePii(node);
+    const detection = resolvePii(node);
     if (
       !classificationMatches(classificationFilter, detection.piiClassification)
     ) {
@@ -446,7 +523,34 @@ export const piiInventoryHandler = async (
     });
   }
 
-  const sorted = [...matched].sort(compareFields);
+  return ok({
+    sorted: [...matched].sort(compareFields),
+    byClassification,
+    byCategory,
+  });
+};
+
+/**
+ * The `sfi.pii_inventory` MCP tool. Returns the structured PII
+ * inventory across every CustomField in the vault, filtered by the
+ * caller's `classification` and `category` parameters. See the module
+ * JSDoc for the honesty-axis caveats.
+ *
+ * @example
+ *   const r = await piiInventoryHandler(ctx, { classification: 'pii' });
+ *   if (r.ok) console.log(r.value.data.summary.total);
+ */
+export const piiInventoryHandler = async (
+  ctx: Context,
+  input: PiiInventoryInput,
+): Promise<Result<McpResponse<PiiInventoryOutput>, McpError>> => {
+  const classificationFilter = input.classification ?? 'all';
+  const categoryFilter = input.category ?? 'all';
+  const limit = input.limit ?? PII_INVENTORY_DEFAULT_LIMIT;
+
+  const classified = await classifyPiiFields(ctx, input);
+  if (!classified.ok) return classified;
+  const { sorted, byClassification, byCategory } = classified.value;
 
   // CR-22: resolve the resume offset (echoed cursor wins over explicit offset);
   // a stale/forged cursor (changed objectId/classification/category, different
@@ -486,39 +590,76 @@ export const piiInventoryHandler = async (
   const truncated = paged.hasMore;
   const emitCursor = paged.nextCursor !== null;
 
-  return ok({
-    data: {
-      fields: kept,
-      summary: {
-        total: matched.length,
-        byClassification,
-        byCategory,
-      },
-      limit,
-      offset,
-      truncated,
-      ...(truncated ? { nextOffset: offset + kept.length } : {}),
-      ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
-      ...(trimmed
-        ? {
-            note:
-              `Response trimmed to ${kept.length} of ${windowSize} matched ` +
-              `fields to stay under the ~45 KB MCP response limit. Advance ` +
-              `with offset += ${kept.length} for the rest.`,
-          }
-        : {}),
+  const vaultState = {
+    sourceTreeHash: ctx.manifest.sourceTreeHash,
+    refreshedAt: ctx.manifest.refreshedAt,
+  };
+  const dataWithoutCsv = {
+    fields: input.format === 'csv' ? [] : kept,
+    summary: {
+      total: sorted.length,
+      byClassification,
+      byCategory,
     },
-    vaultState: {
-      sourceTreeHash: ctx.manifest.sourceTreeHash,
-      refreshedAt: ctx.manifest.refreshedAt,
-    },
-  });
+    limit,
+    offset,
+    truncated,
+    ...(truncated ? { nextOffset: offset + kept.length } : {}),
+    ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
+    ...(trimmed
+      ? {
+          note:
+            `Response trimmed to ${kept.length} of ${windowSize} matched ` +
+            `fields to stay under the ~45 KB MCP response limit. Advance ` +
+            `with offset += ${kept.length} for the rest.`,
+        }
+      : {}),
+  };
+
+  if (input.format !== 'csv') {
+    return ok({ data: dataWithoutCsv, vaultState });
+  }
+
+  // R6-21: 'csv' carries this page's rows in `csv` instead of `fields` — the
+  // pagination/byte-budget decisions above (kept/truncated/note) are already
+  // final, so the csv is an alternate encoding of the SAME `kept` rows, not a
+  // second independent row-selection pass. `fitCsvRowsToBudget` bounds the RAW
+  // csv text, but JSON.stringify-ing it into the envelope escapes every `\n`
+  // (inflating past the raw byte count) — measure the ACTUAL envelope and
+  // shrink until it fits, mirroring `generate_data_dictionary`'s csv path.
+  const csvDisclosures = [
+    `generatedAt: ${ctx.manifest.refreshedAt}`,
+    `sourceTreeHash: ${ctx.manifest.sourceTreeHash}`,
+    'The pii-detection recognizer is heuristic: a field with no name-token or description signal classifies public even if it stores PII at runtime; EncryptedText always classifies sensitive.',
+    `total matched: ${sorted.length}; this page: ${kept.length} (offset ${offset})`,
+    ...(truncated ? [`truncated: more matching fields remain past offset ${offset + kept.length}`] : []),
+  ];
+  const csvRows = kept.map(csvRowForPiiField);
+  const byteLenOf = (v: unknown): number => Buffer.byteLength(JSON.stringify(v), 'utf8');
+  const envelopeBytes = (csv: string): number =>
+    byteLenOf({ data: { ...dataWithoutCsv, csv }, vaultState });
+  let csvBudget = Math.max(200, PII_PAYLOAD_BUDGET_BYTES - byteLenOf({ data: dataWithoutCsv, vaultState }));
+  let csvFit = fitCsvRowsToBudget(csvDisclosures, PII_CSV_HEADER, csvRows, csvBudget);
+  while (envelopeBytes(csvFit.csv) > PII_PAYLOAD_BUDGET_BYTES && csvFit.keptRows > 0) {
+    const overshoot = envelopeBytes(csvFit.csv) - PII_PAYLOAD_BUDGET_BYTES;
+    csvBudget = Math.max(100, csvBudget - Math.max(256, overshoot));
+    csvFit = fitCsvRowsToBudget(csvDisclosures, PII_CSV_HEADER, csvRows, csvBudget);
+  }
+
+  return ok({ data: { ...dataWithoutCsv, csv: csvFit.csv }, vaultState });
 };
 
 /**
- * Walk every page of `pii_inventory` and return the full classified field list.
- * Composers (e.g. `generate_compliance_report`) must use this instead of a
+ * Return the full classified field list. Composers (e.g.
+ * `generate_compliance_report`, `org_risk_report`) must use this instead of a
  * single handler call — the default page is capped at 200 rows.
+ *
+ * Classifies the whole org ONCE via the shared {@link classifyPiiFields} rather
+ * than re-invoking the paginated handler per page (which re-fetched and
+ * re-classified every field on every page — with the response byte-trim shrinking
+ * pages well below 500, that was tens of full org scans per call and the biggest
+ * residual cost in `org_risk_report`). The returned set is the same complete,
+ * sort-ordered field list the page walk accumulated.
  */
 export const collectPiiInventoryFields = async (
   ctx: Context,
@@ -526,25 +667,11 @@ export const collectPiiInventoryFields = async (
 ): Promise<
   Result<{ readonly fields: readonly PiiField[]; readonly summary: PiiInventorySummary }, McpError>
 > => {
-  const all: PiiField[] = [];
-  let offset = 0;
-  let summary: PiiInventorySummary | undefined;
-  for (;;) {
-    const page = await piiInventoryHandler(ctx, {
-      ...input,
-      limit: PII_INVENTORY_MAX_LIMIT,
-      offset,
-    });
-    if (!page.ok) return page;
-    summary = page.value.data.summary;
-    all.push(...page.value.data.fields);
-    if (!page.value.data.truncated) break;
-    const next = page.value.data.nextOffset;
-    if (next === undefined || next <= offset) break;
-    offset = next;
-  }
-  if (summary === undefined) {
-    return err({ kind: 'internal', message: 'pii inventory produced no summary' });
-  }
-  return ok({ fields: all, summary });
+  const classified = await classifyPiiFields(ctx, input);
+  if (!classified.ok) return classified;
+  const { sorted, byClassification, byCategory } = classified.value;
+  return ok({
+    fields: sorted,
+    summary: { total: sorted.length, byClassification, byCategory },
+  });
 };

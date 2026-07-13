@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<SamlSsoConfig xmlns="http://soap.sforce.com/2006/04/metadata">
+    <identityLocation>SubjectNameId</identityLocation>
+    <identityMapping>FederationId</identityMapping>
+    <issuer>https://sts.verdantenergy.example/saml</issuer>
+    <samlEntityId>https://verdantenergy.my.salesforce.com</samlEntityId>
+    <validationCert>Verdant_Community</validationCert>
+</SamlSsoConfig>

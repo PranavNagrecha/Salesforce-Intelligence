@@ -41,6 +41,12 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listChildren, listEdges } from '@sf-intelligence/graph';
+import {
+  buildErDiagram,
+  fitCsvRowsToBudget,
+  type CsvCell,
+  type ErdRelationship,
+} from '@sf-intelligence/renderers';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -89,6 +95,15 @@ export const STRUCTURAL_DISCLOSURE =
 export const INHERITED_CONFIDENCE_DISCLOSURE =
   'Section confidence is inherited from the source edges; spot-check heuristic entries before treating as authoritative.';
 
+/**
+ * R6-19 mermaid `erDiagram` scope disclosure — shared by `generate_data_dictionary`
+ * (per-object) and `generate_architecture_overview` (top-N objects by
+ * relationship degree). ALWAYS present, not only when a cap is hit, so a
+ * reader never mistakes the diagram for a complete data model.
+ */
+export const ERD_SCOPE_DISCLOSURE =
+  "Entity-relationship diagram reflects only Lookup / Master-Detail relationships (`lookupTo` edges, extraction-time) — it does not model junction objects, formula-field references, or indirect relationships. A vault refreshed before `lookupTo` extraction landed (0.1.7+) will show an empty or incomplete diagram; re-run `/sfi-refresh`.";
+
 /** Canonical id prefix for the CustomObject node type. */
 const CUSTOM_OBJECT_PREFIX = 'CustomObject:';
 
@@ -102,9 +117,16 @@ const CUSTOM_OBJECT_PREFIX = 'CustomObject:';
  *     (which takes a bare name). A wrong-type prefix (e.g. `ApexClass:Foo`)
  *     surfaces as `invalid-query`; unknown objects surface as
  *     `component-not-found`.
+ *   - `format` (R6-21): optional, `'markdown'` (default) or `'csv'`.
+ *     `'markdown'` returns just the structured `document`. `'csv'` ALSO
+ *     returns `csv` — one row per field (label, api name, type, description,
+ *     required) — meant to be written to a `.csv` file for a spreadsheet.
+ *     Mirrors `sfi.generate_architecture_overview`'s `format: 'html'` plumbing
+ *     (the only other doc-generator with an alternate export format today).
  */
 export const generateDataDictionaryInputSchema = z.object({
   objectId: z.string().min(1),
+  format: z.enum(['markdown', 'csv']).optional(),
 });
 
 /** Parsed input shape, inferred from `generateDataDictionaryInputSchema`. */
@@ -115,6 +137,12 @@ export type GenerateDataDictionaryInput = z.infer<
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface GenerateDataDictionaryOutput {
   readonly document: GeneratedDocument;
+  /**
+   * A CSV rendering of the Fields table (one row per field). Present only
+   * when the caller passed `format: 'csv'`. The `document` (markdown) is
+   * always returned.
+   */
+  readonly csv?: string;
 }
 
 /** Pull a string property from a node's properties blob, with a fallback. */
@@ -160,6 +188,34 @@ const renderFieldRow = (field: Node): string => {
 /** Comparator for stable field ordering: apiName ASC. */
 const compareByApiName = (a: Node, b: Node): number =>
   a.apiName < b.apiName ? -1 : a.apiName > b.apiName ? 1 : 0;
+
+/** CSV header for the R6-21 `format: 'csv'` Fields export. Column order matches the Fields markdown table. */
+const FIELDS_CSV_HEADER: readonly string[] = [
+  'objectApiName',
+  'label',
+  'apiName',
+  'dataType',
+  'formula',
+  'description',
+  'required',
+];
+
+/**
+ * Build one CSV row per field, matching {@link renderFieldRow}'s column
+ * selection (label / api name / type / description / required) but with the
+ * formula flag broken into its own boolean column (a CSV consumer filters on
+ * a column value more easily than a `"Currency (formula)"` compound string)
+ * and an `objectApiName` column so a row is self-describing when the CSV is
+ * combined with other objects' exports downstream.
+ */
+const csvRowForField = (objectApiName: string, field: Node): readonly CsvCell[] => {
+  const label = stringProp(field.properties, 'label', field.label ?? field.apiName);
+  const dataType = stringProp(field.properties, 'dataType', 'Unknown');
+  const isFormula = stringProp(field.properties, 'formula', '') !== '';
+  const description = stringProp(field.properties, 'description', '');
+  const required = boolProp(field.properties, 'required');
+  return [objectApiName, label, field.apiName, dataType, isFormula, description, required];
+};
 
 /**
  * Render the Fields section as a markdown table. An empty fields list
@@ -219,6 +275,75 @@ const renderRelationshipsSection = (fields: readonly Node[]): string => {
     ),
   ];
   return lines.join('\n');
+};
+
+/**
+ * R6-19: this object's OWN Lookup/Master-Detail fields, expressed as
+ * {@link ErdRelationship} rows (`childObjectApiName` = this object;
+ * `parentObjectApiName` = the field's `referenceTo`). Reuses the same
+ * dataType/referenceTo extraction {@link renderRelationshipsSection} uses,
+ * kept as a separate small pass (rather than refactoring the tested
+ * table renderer) so this addition cannot perturb that function's
+ * existing output.
+ */
+const collectOutgoingErdRelationships = (
+  objectApiName: string,
+  fields: readonly Node[],
+): ErdRelationship[] => {
+  const rels: ErdRelationship[] = [];
+  for (const field of fields) {
+    const dataType = stringProp(field.properties, 'dataType', '');
+    if (dataType !== 'Lookup' && dataType !== 'MasterDetail') continue;
+    const referenceTo = field.properties['referenceTo'];
+    if (typeof referenceTo !== 'string' || referenceTo.length === 0) continue;
+    rels.push({
+      childObjectApiName: objectApiName,
+      childFieldApiName: field.apiName,
+      parentObjectApiName: referenceTo,
+      relationshipKind: dataType === 'MasterDetail' ? 'MasterDetail' : 'Lookup',
+    });
+  }
+  return rels;
+};
+
+/** Canonical id prefix for a CustomField node. */
+const CUSTOM_FIELD_PREFIX = 'CustomField:';
+
+/**
+ * Split a `CustomField:{Object}.{Field}` id into its object + field parts.
+ * Splits on the FIRST `.` after the prefix — the object may be a custom
+ * object (`XREF_Academic_Program__c`, no dot) and the field may be
+ * namespaced (`ns__Federation_Email__c`, no dot), so neither side itself
+ * contains a `.`. Returns `null` for a non-CustomField id or one missing
+ * the `.` (defensive — every real `lookupTo` `fromId` has this shape).
+ */
+const parseCustomFieldId = (id: string): { readonly object: string; readonly field: string } | null => {
+  if (!id.startsWith(CUSTOM_FIELD_PREFIX)) return null;
+  const rest = id.slice(CUSTOM_FIELD_PREFIX.length);
+  const dot = rest.indexOf('.');
+  if (dot < 0) return null;
+  return { object: rest.slice(0, dot), field: rest.slice(dot + 1) };
+};
+
+/**
+ * R6-19: Entity-Relationship Diagram section — the object's OWN outgoing
+ * Lookup/Master-Detail relationships PLUS every OTHER object's inbound
+ * `lookupTo` reference to it, rendered as a mermaid `erDiagram` fence via
+ * `@sf-intelligence/renderers`. Both directions are "direct" relationships
+ * of this object; the existing Relationships TABLE above only shows the
+ * outgoing half, so this section is deliberately the fuller picture.
+ */
+const renderErdSection = (
+  relationships: readonly ErdRelationship[],
+): { readonly section: string; readonly truncated: boolean; readonly disclosure?: string } => {
+  const erd = buildErDiagram(relationships);
+  const lines = ['## Entity Relationship Diagram', '', erd.mermaid];
+  if (erd.disclosure !== undefined) lines.push('', `> ${erd.disclosure}`);
+  return {
+    section: lines.join('\n'),
+    truncated: erd.truncated,
+    ...(erd.disclosure !== undefined ? { disclosure: erd.disclosure } : {}),
+  };
 };
 
 /**
@@ -745,6 +870,39 @@ export const generateDataDictionaryHandler = async (
     else if (edge.fromId.startsWith('Flow:')) flowIds.push(edge.fromId);
   }
 
+  // R6-19: Entity Relationship Diagram. Outgoing = this object's OWN
+  // Lookup/Master-Detail fields (already computed for the Relationships
+  // table above). Inbound = every OTHER object's `lookupTo` edge pointing
+  // AT this object — the object's incoming `lookupTo` edges, sourced from
+  // the referencing CustomField.
+  const inboundLookupsResult = await listEdges(ctx.graph, objectId, {
+    direction: 'in',
+    edgeType: 'lookupTo',
+  });
+  if (!inboundLookupsResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${inboundLookupsResult.error.message}`,
+    });
+  }
+  const inboundErdRelationships: ErdRelationship[] = [];
+  for (const edge of inboundLookupsResult.value) {
+    const parsed = parseCustomFieldId(edge.fromId);
+    if (parsed === null) continue;
+    const relationshipType = edge.properties['relationshipType'];
+    inboundErdRelationships.push({
+      childObjectApiName: parsed.object,
+      childFieldApiName: parsed.field,
+      parentObjectApiName: object.apiName,
+      relationshipKind: relationshipType === 'MasterDetail' ? 'MasterDetail' : 'Lookup',
+    });
+  }
+  const erdRelationships: ErdRelationship[] = [
+    ...collectOutgoingErdRelationships(object.apiName, fields),
+    ...inboundErdRelationships,
+  ];
+  const erd = renderErdSection(erdRelationships);
+
   // Compose the body.
   const objectLabel = object.label ?? object.apiName;
   const sourceTreeHash = ctx.manifest.sourceTreeHash;
@@ -775,6 +933,8 @@ export const generateDataDictionaryHandler = async (
     '',
     renderRelationshipsSection(fields),
     '',
+    erd.section,
+    '',
     renderValidationRulesSection(validationRules),
     '',
     renderPageLayoutsSection([...layoutIds]),
@@ -791,6 +951,7 @@ export const generateDataDictionaryHandler = async (
     'Object Overview': 'declared',
     Fields: 'declared',
     Relationships: 'declared',
+    'Entity Relationship Diagram': 'declared',
     'Validation Rules': 'declared',
     'Page Layouts': 'declared',
     'Related Triggers and Flows': 'parsed',
@@ -800,8 +961,11 @@ export const generateDataDictionaryHandler = async (
     Q125_FRESHNESS_DISCLOSURE.replace('{TIMESTAMP}', refreshedAt),
     INHERITED_CONFIDENCE_DISCLOSURE,
     STRUCTURAL_DISCLOSURE,
+    ERD_SCOPE_DISCLOSURE,
+    ...(erd.disclosure !== undefined ? [erd.disclosure] : []),
   ];
 
+  const budget = generatedDocByteBudget();
   const document: GeneratedDocument = fitDocumentToBudget(
     {
       frontmatter: {
@@ -814,14 +978,45 @@ export const generateDataDictionaryHandler = async (
       sectionConfidence,
       boundaries,
     },
-    generatedDocByteBudget(),
+    budget,
   );
 
-  return ok({
-    data: { document },
-    vaultState: {
-      sourceTreeHash,
-      refreshedAt,
-    },
-  });
+  const vaultState = { sourceTreeHash, refreshedAt };
+
+  if (input.format !== 'csv') {
+    return ok({ data: { document }, vaultState });
+  }
+
+  // R6-21 csv path. Unlike `generate_architecture_overview`'s `html` (which is
+  // rendered FROM `document.body` and so scales with it), the csv is built
+  // from the independent `fields` list — shrinking `document` does not shrink
+  // `csv`, so it gets its own budget carved out of what `document` left
+  // behind, then fits itself (dropping rows tail-first, never mid-row) rather
+  // than risking the global guard's blunt `slimDataStrings` head-cut on a raw
+  // CSV string (H7-class silent corruption).
+  const csvDisclosures = [
+    `object: ${objectId}`,
+    Q125_FRESHNESS_DISCLOSURE.replace('{TIMESTAMP}', refreshedAt),
+    'columns: objectApiName,label,apiName,dataType,formula,description,required',
+  ];
+  const csvRows = [...fields]
+    .sort(compareByApiName)
+    .map((f) => csvRowForField(object.apiName, f));
+
+  // CR-08/CR-P3-4-style measured fit: `fitCsvRowsToBudget` bounds the RAW csv
+  // text, but the assembled envelope re-serializes it through JSON.stringify
+  // (which escapes every `\n` to `\\n`, inflating past the raw byte count).
+  // Measure the ACTUAL envelope and shrink the csv budget until it fits —
+  // never trust a single reserve subtraction on a string this size.
+  const envelopeBytes = (csv: string): number =>
+    byteLenOf({ data: { document, csv }, vaultState });
+  let csvBudget = Math.max(200, budget - byteLenOf({ data: { document }, vaultState }));
+  let csvFit = fitCsvRowsToBudget(csvDisclosures, FIELDS_CSV_HEADER, csvRows, csvBudget);
+  while (envelopeBytes(csvFit.csv) > budget && csvFit.keptRows > 0) {
+    const overshoot = envelopeBytes(csvFit.csv) - budget;
+    csvBudget = Math.max(100, csvBudget - Math.max(256, overshoot));
+    csvFit = fitCsvRowsToBudget(csvDisclosures, FIELDS_CSV_HEADER, csvRows, csvBudget);
+  }
+
+  return ok({ data: { document, csv: csvFit.csv }, vaultState });
 };

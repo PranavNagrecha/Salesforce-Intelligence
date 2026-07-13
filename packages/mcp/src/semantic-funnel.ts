@@ -25,6 +25,7 @@
 // direction — verified at build time by the I1 contract test + tsc.)
 import { FUNNEL_UTTERANCES } from './funnel-utterances.js';
 import type { Plane } from './intent-router.js';
+import { fuseScoresRrf, staticEmbedRanking, staticIndexAvailable } from './static-embed.js';
 import { CATEGORIES } from './tools/capabilities.js';
 import { V01_TOOLS } from './tools/index.js';
 
@@ -75,11 +76,14 @@ export interface ToolCandidate {
    */
   readonly cosine?: number;
   /**
-   * SPIKE (spike/embeddings): neural-embedding cosine similarity of this tool's
-   * document to the question, present ONLY when the embeddings gate is on
-   * (`SFI_EMBEDDINGS=1` + model available) and the row was scored by the hybrid
-   * path. Never set on the lexical-only path — gate-off output is byte-identical
-   * to `semanticCandidates` (pinned by test/embedding-funnel.test.ts).
+   * SPIKE (spike/embeddings): embedding cosine similarity of this tool's document
+   * to the question, present ONLY when an embeddings gate is on and the row was
+   * scored by an embedding path — either the async MiniLM hybrid
+   * (`SFI_EMBEDDINGS=1` + model available, embedding-funnel.ts) or the sync
+   * static-embedding fusion (`SFI_STATIC_EMBED=1` + index available,
+   * static-embed.ts). Never set on the lexical-only path — with both gates off
+   * (the shipped default) output is byte-identical to the pre-spike funnel
+   * (pinned by test/static-embed.test.ts + test/embedding-funnel.test.ts).
    */
   readonly embedCosine?: number;
 }
@@ -451,7 +455,10 @@ const TOOL_KEYWORDS: Readonly<Record<string, string>> = {
   'sfi.what_if_change_method_signature': 'change method signature parameter argument breaks',
   'sfi.layout_for_user': 'which layout does the profile user see page on object',
   'sfi.integration_map': 'api limits at risk integration volume callout capacity external',
-  'sfi.find_apex_usages': 'which flows invoke call use apex classes methods from',
+  // STEP-2: migrated off the (now hidden) sfi.find_apex_usages onto its survivor
+  // sfi.find_code_usages, so "which flows invoke Apex classes" still surfaces the
+  // code-usage tool (the repointed gold row depends on this).
+  'sfi.find_code_usages': 'which flows invoke call use apex classes methods from',
   'sfi.live_folder_access': 'who can access report dashboard folder pipeline see view shared',
   // router-v2 P3: the two labeled miss families for this tool are "who has this
   // permission set" (assignment/grant phrasing) and "what references this
@@ -624,10 +631,17 @@ export const expandWeighted = (tokens: readonly string[]): Map<string, number> =
 // meta-vocabulary, and dropping them would strand their utterance corpus.)
 const CORPUS_EXCLUDED: ReadonlySet<string> = new Set(['sfi.route_question']);
 
-const buildToolDocs = (): Map<string, string> => {
+// Exported so the static-embedding build script embeds the IDENTICAL per-tool
+// document corpus the lexical index uses — a fair, single-source-of-truth A/B.
+export const buildToolDocs = (): Map<string, string> => {
   const docs = new Map<string, string>();
   for (const tool of V01_TOOLS) {
     if (CORPUS_EXCLUDED.has(tool.name)) continue;
+    // Hidden back-compat aliases (STEP-2) are un-advertised and deliberately
+    // un-routed: keep them OUT of the funnel corpus so route_question never
+    // recommends a retired name (their capability folded into a survivor which
+    // carries the utterances). They stay dispatchable by exact name only.
+    if (tool.hidden) continue;
     // The tool NAME encodes the intent (object_access_audit, live_count,
     // find_component_usages). Weight it by repeating it, so a question whose
     // words match the name ranks the tool even when the prose description does
@@ -774,6 +788,105 @@ const funnelConfidence = (top1: number, top2: number, coverage: number): FunnelC
   return 'medium';
 };
 
+/** A scored candidate row before the shortlist confidence is stamped on it. */
+type ScoredRow = Omit<ToolCandidate, 'confidence'>;
+
+/**
+ * Static-embedding fusion gate (spike/embeddings, option 4a). DEFAULT OFF —
+ * opt-in via `SFI_STATIC_EMBED=1`.
+ *
+ * MEASURED DECISION (measure-then-decide): with a lexical-favouring asymmetric
+ * RRF (kL=10, kE=60), the static layer lifts recall on both harnesses with ZERO
+ * goldset regression — but only marginally: generalization recall@8 +0.9 pt
+ * (90.5→91.4), recall@3 +0.4 pt; goldset recall@8 flat, recall@3 +0.5 pt. That
+ * is just UNDER the ~1 pt ship bar, and does not justify a 12× tarball swing
+ * (0.69→~8.5 MB) against the funnel's "zero package weight" positioning. So the
+ * gate ships DEFAULT-OFF and the shipped path stays byte-identical to the
+ * pre-spike lexical funnel. The code + build script are kept, deterministic, for
+ * a future iteration (cleaner doc corpus / retrieval-tuned model). `=1` turns it
+ * on for the A/B and for that future work.
+ */
+const staticEmbedEnabled = (): boolean => process.env['SFI_STATIC_EMBED'] === '1';
+
+/**
+ * Fold a static-embedding ranking into the lexical shortlist via RRF (spike/
+ * embeddings). Synchronous — a static embedding is a pure integer-table lookup +
+ * mean-pool + normalize (static-embed.ts), which is precisely why this fuses into
+ * the SYNC funnel where the async MiniLM hybrid never could.
+ *
+ * CONTRACT — deliberately conservative so the shipped router is not silently
+ * recalibrated by a spike:
+ *  - Each lexical row KEEPS its `score`/`cosine` (lexical evidence) untouched, so
+ *    route_question's MARGIN gate + FUNNEL_PRIMARY threshold keep operating on
+ *    the calibrated lexical scale. RRF decides only WHICH tools occupy — and the
+ *    order of — the returned shortlist (the recall lever the two harnesses
+ *    measure). `embedCosine` is stamped on every row for transparency.
+ *  - A tool surfaced ONLY by the embedding (lexical funnel missed it) enters with
+ *    `cosine: 0` — zero LEXICAL evidence, the honesty contract — plus its
+ *    `embedCosine`. Meta/orchestration tools stay filtered (EXCLUDED_FROM_CANDIDATES).
+ *  - HEAD PIN: the strongest-lexical row is forced to index 0, so the one
+ *    consumer that reads `candidates[0].score` in raw funnel order without
+ *    re-sorting — the unrouted FUNNEL_PRIMARY upgrade — still sees the top lexical
+ *    score exactly as on the pure-lexical path.
+ *
+ * Gate OFF or index unavailable / empty embedding ⇒ returns `lexical` unchanged
+ * (byte-identical lexical funnel).
+ */
+const fuseStaticEmbeddings = (question: string, lexical: ScoredRow[]): ScoredRow[] => {
+  if (!staticEmbedEnabled() || !staticIndexAvailable()) return lexical;
+  const embedCos = staticEmbedRanking(question);
+  if (embedCos.size === 0) return lexical;
+
+  const embedRanked = [...embedCos.entries()]
+    .filter(([tool, c]) => c > 0 && !EXCLUDED_FROM_CANDIDATES.has(tool))
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([tool]) => tool);
+
+  const idx = getFunnelIndex();
+  const planes = getPlaneByTool();
+  const lexByTool = new Set(lexical.map((r) => r.tool));
+  const embedCosOf = (tool: string): number => Math.round((embedCos.get(tool) ?? 0) * 1000) / 1000;
+
+  // Pool = every lexical row (embedCosine stamped) + any embedding-only tool the
+  // lexical funnel missed (cosine 0 — zero lexical evidence).
+  const pool: ScoredRow[] = lexical.map((r) => ({ ...r, embedCosine: embedCosOf(r.tool) }));
+  for (const tool of embedRanked) {
+    if (lexByTool.has(tool)) continue;
+    const planeEntry = planes.get(tool) ?? { plane: 'vault' as const, liveRequired: false };
+    pool.push({
+      tool,
+      score: 0,
+      cosine: 0,
+      embedCosine: embedCosOf(tool),
+      category: idx.toolCategory.get(tool) ?? null,
+      plane: planeEntry.plane,
+      liveRequired: planeEntry.liveRequired,
+    });
+  }
+
+  const rrf = fuseScoresRrf(
+    lexical.map((r) => r.tool),
+    embedRanked,
+  );
+  pool.sort((a, b) => {
+    const fa = rrf.get(a.tool) ?? 0;
+    const fb = rrf.get(b.tool) ?? 0;
+    if (fb !== fa) return fb - fa;
+    if (b.score !== a.score) return b.score - a.score;
+    return a.tool.localeCompare(b.tool);
+  });
+
+  const lexTop = lexical[0];
+  if (lexTop !== undefined) {
+    const at = pool.findIndex((r) => r.tool === lexTop.tool);
+    if (at > 0) {
+      const [row] = pool.splice(at, 1);
+      if (row !== undefined) pool.unshift(row);
+    }
+  }
+  return pool;
+};
+
 /**
  * Rank tools by meaning against `question`, returning the top `k` candidates
  * (cosine > 0), highest score first. Empty when the question has no indexable
@@ -819,7 +932,6 @@ export const semanticCandidates = (question: string, k = 8): ToolCandidate[] => 
 
   // Score rows WITHOUT confidence first — confidence needs the ranked head
   // (top1 / top2), known only after the sort below.
-  type ScoredRow = Omit<ToolCandidate, 'confidence'>;
   const scored: ScoredRow[] = [];
   for (const [tool, vec] of idx.vectors) {
     let dot = 0;
@@ -854,12 +966,19 @@ export const semanticCandidates = (question: string, k = 8): ToolCandidate[] => 
   // ranking, so confidence reflects the actual candidate set the host LLM reads.
   const candidates = scored.filter((row) => !EXCLUDED_FROM_CANDIDATES.has(row.tool));
 
-  // One confidence for the shortlist, derived from the ranked head + coverage,
-  // then stamped on every returned candidate (I2 may make this per-row).
+  // One confidence for the shortlist, derived from the LEXICAL ranked head +
+  // coverage, then stamped on every returned candidate (I2 may make this
+  // per-row). Computed BEFORE any embedding fusion so the calibrated bands
+  // (tuned on lexical cosine distributions) keep their exact meaning — fusion
+  // reorders/selects the shortlist, it never moves the confidence bands.
   const top1 = candidates[0]?.score ?? 0;
   const top2 = candidates[1]?.score ?? 0;
   const confidence = funnelConfidence(top1, top2, coverage);
-  return candidates.slice(0, k).map((row) => ({ ...row, confidence }));
+  // spike/embeddings: fold the static-embedding ranking into the shortlist
+  // (default OFF, opt-in via SFI_STATIC_EMBED=1). Gate off / index absent ⇒
+  // `candidates` returned unchanged.
+  const ranked = fuseStaticEmbeddings(question, candidates);
+  return ranked.slice(0, k).map((row) => ({ ...row, confidence }));
 };
 
 /**

@@ -23,6 +23,8 @@ import {
   downstreamEffectsInputSchema,
 } from '../../src/tools/downstream-effects.js';
 
+import { measureGraphQueries } from './_graph-query-budget.js';
+
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
   refreshedAt: '2026-05-28T09:12:00Z',
@@ -660,5 +662,102 @@ describe('downstreamEffectsHandler: method filter (P15)', () => {
       .filter((e) => e.category === 'field-write')
       .map((e) => e.targetId);
     expect(targets).toEqual(['CustomField:Account.SaveField__c']);
+  });
+});
+
+// =============================================================================
+// N+1 query budget (finding C-1). collectReachableClasses (BFS) is batched one
+// listEdgesForNodes per depth level; collectEffectsForClasses batches the whole
+// reachable closure's outgoing edges + effect targets into two round-trips;
+// resolveApiNames + collectAutomationNodesForObject batch their node fetches.
+// The query count must scale with DEPTH, never frontier WIDTH. Plus a golden-
+// output assertion over a transitive chain with an effect at every level.
+// =============================================================================
+describe('downstreamEffectsHandler — bounded graph queries (transitive)', () => {
+  const withStore = async <T>(
+    seedData: ExtractionResult,
+    run: (ctx: Context, s: GraphStore) => Promise<T>,
+  ): Promise<T> => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-de-budget-'));
+    const opened = await openGraph(join(dir, 'de.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const s = opened.value;
+    const imported = await importExtractionResults(s, [seedData]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const localCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s } as Context;
+    const out = await run(localCtx, s);
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+    return out;
+  };
+
+  // Root --callsApex--> Mid --callsApex--> Leaf. Effects at every level:
+  //   Root writesTo F1__c, Mid dispatchesAsync Job, Leaf sendsEmail Welcome.
+  const goldenSeed: ExtractionResult = {
+    nodes: [
+      makeNode({ id: 'ApexClass:Root', apiName: 'Root' }),
+      makeNode({ id: 'ApexClass:Mid', apiName: 'Mid' }),
+      makeNode({ id: 'ApexClass:Leaf', apiName: 'Leaf' }),
+      makeNode({ id: 'ApexClass:Job', apiName: 'Job' }),
+      makeNode({ id: 'CustomField:Account.F1__c', type: 'CustomField', apiName: 'F1__c' }),
+      makeNode({ id: 'EmailTemplate:Welcome', type: 'EmailTemplate', apiName: 'Welcome' }),
+    ],
+    edges: [
+      makeEdge({ fromId: 'ApexClass:Root', toId: 'ApexClass:Mid', edgeType: 'callsApex' }),
+      makeEdge({ fromId: 'ApexClass:Mid', toId: 'ApexClass:Leaf', edgeType: 'callsApex' }),
+      makeEdge({ fromId: 'ApexClass:Root', toId: 'CustomField:Account.F1__c', edgeType: 'writesTo' }),
+      makeEdge({ fromId: 'ApexClass:Mid', toId: 'ApexClass:Job', edgeType: 'dispatchesAsync' }),
+      makeEdge({ fromId: 'ApexClass:Leaf', toId: 'EmailTemplate:Welcome', edgeType: 'sendsEmail' }),
+    ],
+  };
+
+  it('golden: transitive effects are unchanged by batching', async () => {
+    const result = await withStore(goldenSeed, (localCtx) =>
+      downstreamEffectsHandler(localCtx, { classApiName: 'ApexClass:Root' }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    expect(d.reachableClassCount).toBe(3); // Root, Mid, Leaf (Job is not callsApex-reachable)
+    expect(d.summary).toEqual({ fieldWrite: 1, asyncDispatch: 1, email: 1 });
+    expect(
+      d.effects.map((e) => ({ sourceClassId: e.sourceClassId, category: e.category, targetId: e.targetId })),
+    ).toEqual([
+      { sourceClassId: 'ApexClass:Leaf', category: 'email', targetId: 'EmailTemplate:Welcome' },
+      { sourceClassId: 'ApexClass:Mid', category: 'async-dispatch', targetId: 'ApexClass:Job' },
+      { sourceClassId: 'ApexClass:Root', category: 'field-write', targetId: 'CustomField:Account.F1__c' },
+    ]);
+  });
+
+  // Root callsApex `width` leaf classes (wide frontier at depth 1); each leaf
+  // has no outgoing edges. Depth is fixed; the edge-query count is bounded by
+  // depth (one listEdgesForNodes per BFS level + one for the effects closure).
+  const seedWideFrontier = (width: number): ExtractionResult => ({
+    nodes: [
+      makeNode({ id: 'ApexClass:Root', apiName: 'Root' }),
+      ...Array.from({ length: width }, (_u, i) =>
+        makeNode({ id: `ApexClass:Leaf${i}`, apiName: `Leaf${i}` }),
+      ),
+    ],
+    edges: Array.from({ length: width }, (_u, i) =>
+      makeEdge({ fromId: 'ApexClass:Root', toId: `ApexClass:Leaf${i}`, edgeType: 'callsApex' }),
+    ),
+  });
+
+  it('edge-query count does NOT scale with frontier width', async () => {
+    const measure = (width: number) =>
+      withStore(seedWideFrontier(width), (localCtx, s) =>
+        measureGraphQueries(s, () =>
+          downstreamEffectsHandler(localCtx, { classApiName: 'ApexClass:Root' }),
+        ),
+      );
+    const narrow = await measure(60);
+    const wide = await measure(200);
+    expect(narrow.result.ok).toBe(true);
+    expect(wide.result.ok).toBe(true);
+    // Flat: one listEdgesForNodes per BFS depth level + one effects-closure
+    // batch, NOT one listEdges per reachable class. An N+1 would be ~width.
+    expect(wide.edgeQueries).toBe(narrow.edgeQueries);
+    expect(wide.edgeQueries).toBeLessThan(15);
   });
 });

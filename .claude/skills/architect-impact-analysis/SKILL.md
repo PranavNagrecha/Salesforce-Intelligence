@@ -44,16 +44,18 @@ The graph records roughly two dozen edge types across three confidence
 levels. **`declared`** edges come straight from Salesforce metadata
 (`parentOf`, `usedInLayout`, `grantedBy`, `lookupTo`, `triggersOn` for
 Apex triggers). **`parsed`** edges come from the formula tokenizer
-(validation rules, formula fields) and the Flow XML walker (`readsFrom`,
-`writesTo`, `triggersOn`, `callsApex`). **`heuristic`** edges come from
-the regex/token Apex scanner and the frontend (LWC / Aura / Visualforce)
-scanner — Apex method-body field reads/writes, `callsApex` between Apex
-classes, and frontend `references` — and they **do** enter the impact
-graph. The boundary that matters for architects: those Apex and frontend
-edges are heuristic, not compiler-precise, so dynamic SOQL/SOSL string
-queries, reflective field access (`get()` / `put()`), and cross-method
-dataflow can be missed. Apex method bodies are **scanned** (not stored as
-text only) — but cite the `heuristic` tier, and treat a thin Apex result
+(validation rules, formula fields), the Flow XML walker (`readsFrom`,
+`writesTo`, `triggersOn`, `callsApex`), and the **parser-grade Apex pass
+that runs by default** (`readsFrom`/`writesTo` on fields, `callsApex`
+between classes, field-level SOQL reads). **`heuristic`** edges come from
+the regex/token Apex recall scanner (backfill for parse failures) and the
+frontend (LWC / Aura / Visualforce) scanner — supplemental Apex field
+reads/writes, and frontend `references` — and they **do** enter the impact
+graph. The boundary that matters for architects: Apex edges blend parsed
+(compiler-backed) and heuristic (pattern-recognized) tiers; dynamic
+SOQL/SOSL strings, reflective field access (`get()` / `put()`), and
+cross-method dataflow remain invisible. Apex method bodies are parsed and
+scanned — cite the per-edge confidence tier, and treat a thin Apex result
 as a coverage signal rather than proof of no dependents.
 
 `sfi.get_impact` carries a `soundness` envelope (`complete` / `blindSpots[]`
@@ -194,7 +196,9 @@ The response shape:
       "nodes": [ /* sorted by id ASC, includes the root */ ],
       "edges": [ /* incoming edges visited during BFS */ ]
     },
-    "traversedEdgeTypes": [ /* edge types that appeared */ ]
+    "traversedEdgeTypes": [ /* edge types that appeared */ ],
+    "diagram": "```mermaid\ngraph TD\n...\n```",
+    "diagramOmittedReason": "diagram omitted: 84 nodes exceeds cap (30)"
   },
   "vaultState": { "sourceTreeHash": "...", "refreshedAt": "..." }
 }
@@ -204,6 +208,20 @@ The response shape:
 zero dependents). An impact set of size 1 (just the root) means
 **"nothing in the emitted edge graph references this"** — see
 the *Honest-incomplete script* section below.
+
+**R6-19 — `diagram`.** When the (already-capped) impact slice has
+30 or fewer nodes, the response ALSO carries `diagram`: a
+```` ```mermaid graph TD ``` ```` fence — the root as a circle,
+every other node a box labeled `{ComponentType}: {apiName}`, edges
+labeled by `edgeType`. Surface it verbatim when the user's client
+renders mermaid (a chat UI, an exported `.html`/`.md` file); it is a
+visual complement to the bucketed breakdown in Step 5, not a
+replacement — the bucketed narrative still carries confidence /
+source per edge, which the diagram does not. Above 30 nodes,
+`diagram` is ABSENT and `diagramOmittedReason` names the actual node
+count — never present a stale or partial diagram; tell the user the
+count exceeded the cap and narrow with `hops` / `edgeTypes` if they
+want a diagram-sized slice.
 
 ### Step 4 — Optionally call `sfi.find_formula_references`
 
@@ -272,8 +290,8 @@ The `confidence` vocabulary, for this skill:
 | Confidence | Means | Surface as |
 |---|---|---|
 | `declared` | The edge is in Salesforce metadata directly (parent/child, layout placement, permission grant, trigger header). | "Salesforce metadata directly records …" |
-| `parsed` | The edge came from a parser (formula tokenizer, Flow walker). High reliability but not metadata-asserted. | "Parsed from the {formula tokenizer / Flow walker} — high reliability but not metadata-asserted." |
-| `heuristic` | The edge came from the regex/token Apex or frontend scanner — Apex method-body field reads/writes, class-to-class `callsApex`, LWC/Aura references. Real, but not compiler-precise. | "Heuristic — from the Apex/frontend scanner; spot-check the source before acting on it." |
+| `parsed` | The edge came from a parser: formula tokenizer, Flow XML walker, or **Apex AST** (the parser-grade pass that runs by default). High reliability but not metadata-asserted. | "Parsed from the {formula tokenizer / Flow walker / Apex AST} — high reliability but not metadata-asserted." |
+| `heuristic` | The edge came from the regex/token Apex recall scanner or frontend scanner. Apex heuristic edges supplement parsed edges (parse failures / recall gaps); frontend refs are LWC/Aura pattern-matches. Real, but not compiler-precise. | "Heuristic — from the scanner; spot-check the source before acting on it." |
 
 ### Step 7 — Disclose the coverage boundary
 
@@ -287,9 +305,9 @@ Template:
 > Impact analysis covers declared and parsed graph edges such as
 > `references`, `readsFrom` / `writesTo`, `triggersOn`, `callsApex`,
 > `usedInLayout`, `lookupTo`, `grantedBy`, and `parentOf`. Apex edges
-> are heuristic rather than compiler-backed, and dynamic Apex,
-> string-built SOQL/SOSL, reflective field access, and metadata families
-> missing from the vault coverage report can still be blind spots.
+> blend parsed (AST-backed) and heuristic (scanner-backed) tiers; dynamic
+> Apex, string-built SOQL/SOSL, reflective field access, and metadata
+> families missing from the vault coverage report can still be blind spots.
 
 If the impact set has fewer dependents than the architect would
 expect from intuition, escalate the disclosure to the
@@ -390,12 +408,14 @@ The architect-facing summary of what's modeled, at what confidence:
 | `triggersOn` | flow start blocks, ApexTrigger headers | yes | `declared` / `parsed` | Trigger metadata is `declared`; Flow start is `parsed`. |
 | `references` | formula tokenizer | yes | `parsed` | Validation rule formulas, formula-field formulas. |
 | `readsFrom` | flow XML walker | yes | `parsed` | Flow recordLookups, recordUpdates (read fields). |
-| `writesTo` | flow XML walker | yes | `parsed` | Flow recordCreates, recordUpdates (write fields). |
+| `writesTo` | flow XML walker | yes | `parsed` / `declared` | Flow recordCreates, recordUpdates (write fields); R7-W1 whole-record `<inputReference>` DML → OBJECT-level `declared`; R7-W2 before-save `$Record.<Field>` assignment → FIELD-level `declared`. |
 | `callsApex` | flow XML walker | yes | `parsed` | Flow `actionCalls` with `actionType=apex`. |
 | `listensTo` | (reserved) | partial | n/a | Generic event listener edge; not all sources emit it yet. |
-| Apex `readsFrom` / `writesTo` | regex/token Apex scanner | yes | `heuristic` | Apex method-body field reads/writes. Heuristic, not AST-precise. |
-| Apex `callsApex` (class → class) | regex/token Apex scanner | yes | `heuristic` | Which Apex class calls which (see also `sfi.call_graph`). |
-| Flow `inputReference` resolution | flow walker | partial | `parsed` | `$Record` resolves to the trigger object; deeper variable indirection is partial. |
+| Apex `readsFrom` / `writesTo` | **Apex AST parser** (default) | yes | **`parsed`** | **Apex method-body field reads/writes, AST-resolved. High confidence.** |
+| Apex `readsFrom` / `writesTo` | regex/token Apex scanner (backfill) | yes | `heuristic` | Apex method-body field reads/writes for parse failures / recall gaps. Heuristic, not compiler-precise. |
+| Apex `callsApex` (class → class) | **Apex AST parser** (default) | yes | **`parsed`** | **Which Apex class calls which (AST-resolved, per-class granular).** |
+| Apex `callsApex` (class → class) | regex/token Apex scanner (backfill) | yes | `heuristic` | Which Apex class calls which (scanner-detected). Supplemental to parsed tier. |
+| Flow `inputReference` resolution | flow walker | partial | `heuristic` / `declared` | `$Record` resolves to the trigger object (`heuristic`); a whole record VARIABLE resolves to its declared `<objectType>` at OBJECT level (`declared`, R7-W1) with a "fields not enumerable" disclosure; an undeclared loop/collection ref stays unresolved (disclosed, skipped). |
 | **Apex SOQL / SOSL string queries** | (none) | **no** | n/a | `Database.query('SELECT ...')` — dynamic query strings stay invisible. |
 | LWC component references | regex/token frontend scanner | yes | `heuristic` | `@wire`, `@api`, template field refs. Dynamic `record[fieldName]` still invisible. |
 | Aura component references | regex/token frontend scanner | yes | `heuristic` | Aura `<lightning:input field="...">`. Framework attrs invisible. |
@@ -486,6 +506,11 @@ Before sending a response, confirm:
       parser.
 - [ ] If the user was about to act on the report, I restated the
       boundary first.
+- [ ] When `diagram` was present, I surfaced it as a COMPLEMENT to
+      the bucketed breakdown (not a replacement for confidence/source
+      citations). When absent, I named `diagramOmittedReason`'s node
+      count rather than silently omitting the diagram with no
+      explanation.
 
 ---
 

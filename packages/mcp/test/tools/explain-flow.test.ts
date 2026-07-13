@@ -23,6 +23,8 @@ import {
   explainFlowInputSchema,
 } from '../../src/tools/explain-flow.js';
 
+import { measureGraphQueries } from './_graph-query-budget.js';
+
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
   refreshedAt: '2026-05-27T14:33:08Z',
@@ -583,9 +585,151 @@ const triggerSeed: ExtractionResult = {
   edges: [],
 };
 
+// =============================================================================
+// Seed (R6-02): a parent Flow that invokes two subflows — one resolvable (the
+// target Flow node exists) and one dangling-by-design (a managed / uncaptured
+// subflow with no vault node). Verifies the subflowCalls axis surfaces both,
+// with `resolved` distinguishing them, and never fabricates the missing target.
+// =============================================================================
+
+const SUBFLOW_PARENT_ID = 'Flow:Parent_With_Subs';
+const SUBFLOW_RESOLVABLE_ID = 'Flow:Resolvable_Sub';
+const SUBFLOW_DANGLING_ID = 'Flow:mpns__Managed_Sub';
+
+const subflowCallerSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: SUBFLOW_PARENT_ID,
+      type: 'Flow',
+      apiName: 'Parent_With_Subs',
+      label: 'Parent With Subs',
+      properties: {
+        label: 'Parent With Subs',
+        description: null,
+        processType: 'Flow',
+        status: 'Active',
+        interviewLabel: null,
+        runInMode: null,
+        triggerObject: null,
+        triggerType: null,
+        recordTriggerType: null,
+        flowExtractionWarnings: [],
+        conditions: [],
+      },
+    }),
+    makeNode({
+      id: SUBFLOW_RESOLVABLE_ID,
+      type: 'Flow',
+      apiName: 'Resolvable_Sub',
+      label: 'Resolvable Sub',
+      properties: { status: 'Active' },
+    }),
+    // NOTE: no node for SUBFLOW_DANGLING_ID — it is dangling-by-design.
+  ],
+  edges: [
+    makeEdge({
+      fromId: SUBFLOW_PARENT_ID,
+      toId: SUBFLOW_RESOLVABLE_ID,
+      edgeType: 'references',
+      confidence: 'declared',
+      properties: { referenceKind: 'subflow', subflowElementName: 'Call_Resolvable' },
+    }),
+    makeEdge({
+      fromId: SUBFLOW_PARENT_ID,
+      toId: SUBFLOW_DANGLING_ID,
+      edgeType: 'references',
+      confidence: 'declared',
+      properties: { referenceKind: 'subflow', subflowElementName: 'Call_Managed' },
+    }),
+  ],
+};
+
 // One shared graph store + Context across the suite.
 let tempDir: string;
 let store: GraphStore;
+// =============================================================================
+// Seed R7: a before-save flow that both (a) inserts a whole record VARIABLE via
+// <inputReference> — an OBJECT-level writesTo (R7-W1) — and (b) sets
+// $Record.<Field> via an assignment — a FIELD-level writesTo (R7-W2). The
+// object-level write must surface in recordWrites; the field-level write must
+// NOT (that axis is object-granular).
+// =============================================================================
+
+const R7_FLOW_ID = 'Flow:R7_Before_Save';
+const R7_CASE_ID = 'CustomObject:Case';
+const R7_FIELD_ID = 'CustomField:Lead.Rank_Value__c';
+
+const r7FlowSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: R7_CASE_ID,
+      type: 'CustomObject',
+      apiName: 'Case',
+      label: 'Case',
+      properties: {},
+    }),
+    makeNode({
+      id: R7_FIELD_ID,
+      type: 'CustomField',
+      apiName: 'Lead.Rank_Value__c',
+      label: 'Score',
+      properties: {},
+    }),
+    makeNode({
+      id: R7_FLOW_ID,
+      type: 'Flow',
+      apiName: 'R7_Before_Save',
+      label: 'R7 Before Save',
+      properties: {
+        label: 'R7 Before Save',
+        description: null,
+        processType: 'AutoLaunchedFlow',
+        status: 'Active',
+        interviewLabel: null,
+        runInMode: null,
+        triggerObject: 'CustomObject:Lead',
+        triggerType: 'RecordBeforeSave',
+        recordTriggerType: 'Create',
+        flowExtractionWarnings: [],
+        faultableElementCount: 0,
+        elementsWithoutFault: 0,
+        hasUnhandledFaults: false,
+        conditions: [],
+      },
+    }),
+  ],
+  edges: [
+    // R7-W1: object-level whole-record insert of a Case variable.
+    makeEdge({
+      fromId: R7_FLOW_ID,
+      toId: R7_CASE_ID,
+      edgeType: 'writesTo',
+      source: 'flow-extractor',
+      properties: {
+        operation: 'recordCreate',
+        inputReferenceKind: 'recordVariable',
+        inputReference: 'newCaseVar',
+        wholeRecord: true,
+        fieldsEnumerable: false,
+        disclosure:
+          'whole-record write; individual fields not enumerable from a record-variable DML',
+      },
+    }),
+    // R7-W2: field-level before-save assignment write.
+    makeEdge({
+      fromId: R7_FLOW_ID,
+      toId: R7_FIELD_ID,
+      edgeType: 'writesTo',
+      source: 'flow-extractor',
+      properties: {
+        operation: 'beforeSaveFieldAssignment',
+        assignedValue: '100',
+        assignedValueKind: 'literal',
+      },
+    }),
+  ],
+};
+
 let ctx: Context;
 
 beforeAll(async () => {
@@ -645,6 +789,8 @@ beforeAll(async () => {
     sessionPermFlowSeed,
     sessionPermLegacyFlowSeed,
     triggerSeed,
+    subflowCallerSeed,
+    r7FlowSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -899,6 +1045,20 @@ describe('explainFlowHandler', () => {
     expect(operations).toEqual(['create', 'delete']);
   });
 
+  it('lists an R7-W1 object-level record-variable write but excludes the R7-W2 field-level $Record write', async () => {
+    // recordWrites is object-granular: the whole-record inputReference insert
+    // (CustomObject:Case) surfaces as a create; the before-save
+    // $Record.Rank_Value__c field write (CustomField:Lead.Rank_Value__c) must NOT appear
+    // as a bogus "object" row.
+    const result = await explainFlowHandler(ctx, { flowId: R7_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const writes = result.value.data.recordWrites;
+    expect(writes).toEqual([{ object: 'Case', operation: 'create' }]);
+    // No field-path leaked into the object slot.
+    expect(writes.some((w) => w.object.includes('.'))).toBe(false);
+  });
+
   it('surfaces decisions from the properties.conditions mirror', async () => {
     const result = await explainFlowHandler(ctx, { flowId: FULL_FLOW_ID });
     expect(result.ok).toBe(true);
@@ -940,10 +1100,30 @@ describe('explainFlowHandler', () => {
     expect(data.triggerInfo.conditions).toEqual([]);
     // No outgoing edges in any category.
     expect(data.actionCalls).toEqual([]);
+    expect(data.subflowCalls).toEqual([]);
     expect(data.recordLookups).toEqual([]);
     expect(data.recordWrites).toEqual([]);
     // No conditions mirror → empty decisions array.
     expect(data.decisions).toEqual([]);
+  });
+
+  it('surfaces subflow calls (R6-02), distinguishing resolvable from dangling targets', async () => {
+    const result = await explainFlowHandler(ctx, { flowId: SUBFLOW_PARENT_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    const byId = new Map(data.subflowCalls.map((s) => [s.targetFlowId, s]));
+    expect(data.subflowCalls).toHaveLength(2);
+    // Resolvable target: the Flow node exists in the vault.
+    const resolvable = byId.get(SUBFLOW_RESOLVABLE_ID);
+    expect(resolvable?.resolved).toBe(true);
+    expect(resolvable?.targetFlowName).toBe('Resolvable_Sub');
+    expect(resolvable?.subflowElementName).toBe('Call_Resolvable');
+    // Dangling target: no node exists — surfaced honestly, not fabricated.
+    const dangling = byId.get(SUBFLOW_DANGLING_ID);
+    expect(dangling?.resolved).toBe(false);
+    expect(dangling?.targetFlowName).toBe('mpns__Managed_Sub');
+    expect(dangling?.subflowElementName).toBe('Call_Managed');
   });
 
   it('returns component-not-found for an unknown flow id', async () => {
@@ -1066,5 +1246,58 @@ describe('explainFlowInputSchema', () => {
   it('rejects a missing flowId', () => {
     const parsed = explainFlowInputSchema.safeParse({});
     expect(parsed.success).toBe(false);
+  });
+});
+
+// =============================================================================
+// N+1 query budget (finding C-1). collectTriggerConditions /
+// collectActionCalls / collectSubflowCalls each resolved edge targets with a
+// `getNodeById` per edge; all three are now single `listNodesByIds` batches.
+// The count must NOT scale with the flow's outgoing fan-out.
+// =============================================================================
+describe('explainFlowHandler — bounded graph queries', () => {
+  const seedWideFlow = async (fanOut: number) => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-explainflow-budget-'));
+    const opened = await openGraph(join(dir, 'ef.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const s = opened.value;
+    const nodes: Node[] = [makeNode({ id: 'Flow:Wide', apiName: 'Wide' })];
+    const edges: Edge[] = [];
+    for (let i = 0; i < fanOut; i += 1) {
+      nodes.push(makeNode({ id: `ApexClass:Cls${i}`, type: 'ApexClass', apiName: `Cls${i}` }));
+      edges.push(makeEdge({ fromId: 'Flow:Wide', toId: `ApexClass:Cls${i}`, edgeType: 'callsApex' }));
+      nodes.push(makeNode({ id: `ConditionalContext:Cond${i}`, type: 'ConditionalContext', apiName: `Cond${i}` }));
+      edges.push(makeEdge({ fromId: 'Flow:Wide', toId: `ConditionalContext:Cond${i}`, edgeType: 'firesWhen' }));
+      nodes.push(makeNode({ id: `Flow:Sub${i}`, apiName: `Sub${i}` }));
+      edges.push(
+        makeEdge({
+          fromId: 'Flow:Wide',
+          toId: `Flow:Sub${i}`,
+          edgeType: 'references',
+          properties: { referenceKind: 'subflow' },
+        }),
+      );
+    }
+    const imported = await importExtractionResults(s, [{ nodes, edges }]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const wideCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s } as Context;
+    const measured = await measureGraphQueries(s, () =>
+      explainFlowHandler(wideCtx, { flowId: 'Wide' }),
+    );
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+    return measured;
+  };
+
+  it('issues a query count independent of the flow fan-out', async () => {
+    const small = await seedWideFlow(60);
+    const large = await seedWideFlow(200);
+    expect(small.result.ok).toBe(true);
+    expect(large.result.ok).toBe(true);
+    expect(large.nodeQueries).toBe(small.nodeQueries);
+    expect(large.edgeQueries).toBe(small.edgeQueries);
+    // A per-edge getNodeById across the three collectors would be >=180 node
+    // queries at fanOut=200; batched, each collector is one node fetch.
+    expect(large.nodeQueries).toBeLessThan(60);
   });
 });

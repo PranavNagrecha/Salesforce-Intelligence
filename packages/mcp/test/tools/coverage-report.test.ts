@@ -2,6 +2,7 @@
 
 import type { VaultManifest } from '@sf-intelligence/contracts';
 
+import { mintLiveCapability } from '../../src/live-capability.js';
 import type { Context } from '../../src/server.js';
 import { coverageReportHandler } from '../../src/tools/coverage-report.js';
 
@@ -43,6 +44,8 @@ const ctx: Context = {
   vaultRoot: '/tmp/not-used',
   manifest,
   graph: {} as Context['graph'],
+  // INFRA-12-DEEP: coverage_report is livePlane:opt-in; unit tests bypass dispatch.
+  liveCapability: mintLiveCapability('opt-in'),
 };
 
 describe('coverageReportHandler', () => {

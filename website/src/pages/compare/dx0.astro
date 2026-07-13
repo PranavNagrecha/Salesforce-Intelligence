@@ -1,0 +1,112 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+
+const title = "sf-intelligence vs dx0 - sf-intelligence";
+const description =
+  "Compare sf-intelligence with dx0: free offline MCP + local dependency graph vs hosted Salesforce org chat (ISO 27001, per-seat SaaS).";
+
+const jsonld = [
+  {
+    "@type": "FAQPage",
+    mainEntity: [
+      {
+        "@type": "Question",
+        name: "What is the difference between sf-intelligence and dx0?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "dx0 is a cloud product that answers Salesforce org questions in a hosted chat experience, with enterprise InfoSec packaging (ISO 27001) and per-seat pricing. sf-intelligence is a free, source-available MCP server that answers from a local confidence-tagged vault in your editor — no vendor cloud for metadata.",
+        },
+      },
+      {
+        "@type": "Question",
+        name: "Is dx0 less secure because it is cloud?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "Not automatically. dx0 publicly markets ISO/IEC 27001 certification and enterprise security documentation. For many buyers that closes the naive 'cloud is insecure' objection. Choose based on whether metadata may leave your machine, whether you need MCP in Claude/Cursor, and cost — not scare tactics.",
+        },
+      },
+      {
+        "@type": "Question",
+        name: "Does dx0 offer an MCP server?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "As of mid-2026, dx0's public changelog emphasizes hosted product features (change capture, knowledge hub, slash commands) rather than an MCP server. sf-intelligence is built as an MCP server for Claude Code, Cursor, and other hosts.",
+        },
+      },
+    ],
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/compare/dx0"
+  heading="sf-intelligence vs dx0"
+  intro="dx0 sells polished <strong>hosted</strong> Salesforce org chat. sf-intelligence sells a <strong>local MCP graph</strong>. Do not argue 'their cloud is unsafe' — argue locality, MCP-native workflow, depth, and price."
+  crumbs={[
+    { label: "compare", href: "/compare" },
+    { label: "vs dx0", href: "/compare/dx0" },
+  ]}
+  breadcrumbs={[
+    { name: "Compare", path: "/compare" },
+    { name: "vs dx0", path: "/compare/dx0" },
+  ]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container">
+      <div class="prose">
+        <div class="callout">
+          <p><strong>Short answer:</strong> Prefer <strong>dx0</strong> when you want a hosted chat product with enterprise security paperwork and zero local install. Prefer <strong>sf-intelligence</strong> when metadata must stay local, you already live in an MCP client, you want confidence-tagged impact/permissions tools, or budget is zero. Per dx0's May 2026 changelog: new customers at <strong>€85/user/month</strong>; <strong>ISO/IEC 27001</strong> certified (Certificate 26ISMS-1158) — verify current terms on dx0.io.</p>
+        </div>
+
+        <h2 id="summary">At a glance</h2>
+        <table class="doc-table">
+          <thead><tr><th>&nbsp;</th><th>sf-intelligence</th><th>dx0</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Category</strong></td><td>Offline MCP + CLI</td><td>Hosted Salesforce org AI chat</td></tr>
+            <tr><td><strong>Delivery</strong></td><td>Local npm package</td><td>Cloud SaaS</td></tr>
+            <tr><td><strong>Where metadata lives</strong></td><td>Your machine</td><td>Vendor cloud (EU-hosted per their InfoSec page)</td></tr>
+            <tr><td><strong>Cost</strong></td><td>Free</td><td>€85/user/mo for new customers (May 2026; grandfathering for existing)</td></tr>
+            <tr><td><strong>Enterprise cert</strong></td><td>Self-host / audit the code</td><td>ISO 27001 (publicly marketed)</td></tr>
+            <tr><td><strong>MCP in IDE agents</strong></td><td>Native</td><td>Not the public product story (mid-2026)</td></tr>
+            <tr><td><strong>Change capture</strong></td><td>Vault git + optional SetupAuditTrail tools</td><td>Hosted automated change capture (product feature)</td></tr>
+            <tr><td><strong>Write to org</strong></td><td>None</td><td>Product is conversational / analysis-oriented — verify current write scope on their site</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="when-sfi">Choose sf-intelligence when you want to…</h2>
+        <ul>
+          <li>Keep org metadata off vendor infrastructure</li>
+          <li>Call tools from Claude Code / Cursor / Agentforce allowlists via MCP</li>
+          <li>Run impact, permissions, SAST, and exposure audits with confidence labels</li>
+          <li>Avoid per-seat cost</li>
+        </ul>
+
+        <h2 id="when-dx0">Choose dx0 when you want to…</h2>
+        <ul>
+          <li>A hosted chat UI with minimal local setup</li>
+          <li>ISO 27001 and a vendor security pack for procurement</li>
+          <li>Their change-capture / knowledge features without maintaining a vault</li>
+        </ul>
+
+        <h2 id="more">More comparisons</h2>
+        <p><a href="/compare">compare hub</a> · <a href="/compare/salesforce-dx-mcp">Salesforce MCP</a> · <a href="/compare/elements-cloud">Elements.cloud</a> · <a href="/compare/hubbl">Hubbl</a> · <a href="/compare/metazoa">Metazoa</a>.</p>
+
+        <div class="callout"><p><strong>Disclaimer:</strong> Pricing and certification cited from dx0's public changelog / InfoSec pages as of mid-2026 — confirm on <a href="https://dx0.io/" rel="noopener">dx0.io</a>. sf-intelligence is independent and not affiliated with dx0.</p></div>
+
+        <div style="padding-top:36px;">
+          <div class="cta-box">
+            <h2 class="screen-type">MCP-native. Offline. Free.</h2>
+            <p>Same job class — different trust model and price.</p>
+            <div class="cta-actions">
+              <a class="btn btn-solid" href="/getting-started">install sf-intelligence</a>
+              <a class="btn btn-ghost" href="/compare">all comparisons</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</DocPage>

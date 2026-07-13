@@ -95,6 +95,38 @@ describe('isActiveSoeFirer', () => {
       ),
     ).toBe(true);
   });
+
+  it('respects DuplicateRule.isActive — false is excluded, true is included, missing defaults active', () => {
+    // DuplicateRule carries its own `<isActive>` XML element, distinct from the
+    // `active` boolean the workflow/validation/approval trio use.
+    expect(
+      isActiveSoeFirer(
+        makeNode({
+          id: 'DuplicateRule:Account.Block_Domain_Dupes',
+          type: 'DuplicateRule',
+          properties: { isActive: true },
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isActiveSoeFirer(
+        makeNode({
+          id: 'DuplicateRule:Account.Retired_Rule',
+          type: 'DuplicateRule',
+          properties: { isActive: false },
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      isActiveSoeFirer(
+        makeNode({
+          id: 'DuplicateRule:Account.LegacyRule',
+          type: 'DuplicateRule',
+          properties: {},
+        }),
+      ),
+    ).toBe(true);
+  });
 });
 
 describe('inactive collector', () => {
@@ -115,6 +147,25 @@ describe('inactive collector', () => {
         componentType: 'Flow',
         apiName: 'DraftFlow',
         inactiveReason: 'status: Draft',
+      },
+    ]);
+  });
+
+  it('records an inactive DuplicateRule with the isActive: false reason', () => {
+    const collector = new Map();
+    const inactiveRule = makeNode({
+      id: 'DuplicateRule:Account.Retired_Rule',
+      type: 'DuplicateRule',
+      apiName: 'Account.Retired_Rule',
+      properties: { isActive: false },
+    });
+    expect(skipInactiveSoeFirer(collector, inactiveRule)).toBe(true);
+    expect(sortedInactiveConfigured(collector)).toEqual([
+      {
+        componentId: 'DuplicateRule:Account.Retired_Rule',
+        componentType: 'DuplicateRule',
+        apiName: 'Account.Retired_Rule',
+        inactiveReason: 'isActive: false',
       },
     ]);
   });

@@ -157,10 +157,14 @@ sfi status                             # freshness, source-tree hash, counts
 ```
 
 The first refresh runs `sf project retrieve` then the extractor → renderer →
-graph-import pipeline; it takes a few minutes on a typical sandbox, and later
-refreshes are incremental. (No global install? Prefix each command with
-`npx -y sf-intelligence`.) For the manual walkthrough and the `org-kb/`
-git policy, see [`first-refresh.md`](./first-refresh.md).
+graph-import pipeline; it takes a few minutes on a typical sandbox. Later
+refreshes re-extract and rebuild the graph in full by default (results always
+match a cold build) — pass `--incremental` to reuse the previous run's
+per-file parse cache, and `--incremental-graph` to also re-import only the
+changed nodes/edges into the graph, for the same result, faster. (No global
+install? Prefix each command with `npx -y sf-intelligence`.) For the manual
+walkthrough and the `org-kb/` git policy, see
+[`first-refresh.md`](./first-refresh.md).
 
 ### Keeping the vault current
 

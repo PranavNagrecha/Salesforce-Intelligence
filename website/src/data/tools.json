@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-07-10T14:42:10.769Z",
-  "toolCount": 176,
+  "generatedAt": "2026-07-13T14:47:04.161Z",
+  "toolCount": 196,
   "sections": [
     {
       "label": "Orientation & routing",
@@ -59,10 +59,6 @@
           "description": "List the incoming `references` edges to a field with the source nodes and edge-level metadata (e.g., formula tokenizer properties)."
         },
         {
-          "name": "sfi.find_apex_usages",
-          "description": "List the Apex source files (classes and triggers) that read, write, or call into a component."
-        },
-        {
           "name": "sfi.find_code_usages",
           "description": "List the code source files (ApexClass, ApexTrigger, LightningComponentBundle, AuraDefinitionBundle, VisualforcePage, VisualforceComponent) that read, write, call,..."
         },
@@ -113,7 +109,7 @@
         },
         {
           "name": "sfi.what_happens_on_save",
-          "description": "What ALREADY runs when a record on this object is created or updated - every existing automation (flows, triggers, validation rules, workflow, approvals, assignme..."
+          "description": "What ALREADY runs when a record on this object is created or updated - every existing automation (flows, triggers, validation rules, duplicate rules, workflow, ap..."
         },
         {
           "name": "sfi.order_of_execution",
@@ -138,6 +134,14 @@
         {
           "name": "sfi.field_provenance",
           "description": "v2.9 vocabulary + semantic-disambiguation tier - the 'is this field manually entered or automated?' surface."
+        },
+        {
+          "name": "sfi.explain_error",
+          "description": "Decode a PASTED Salesforce error string back to the org component that produced it - the support desk's first-line tool."
+        },
+        {
+          "name": "sfi.explain_debug_log",
+          "description": "Decode a PASTED Apex DEBUG LOG, flow fault text, or governor-limit exception back to the org component that ran - the developer/support runtime-triage wedge, ZERO..."
         }
       ]
     },
@@ -211,6 +215,14 @@
         {
           "name": "sfi.what_if_split_profile",
           "description": "v2.3 R2c profile what-if tool: given a Profile id (`Profile:{Name}`) and an ordered array of target PermissionSet ids (`PermissionSet:{Name}`), proposes a per-gra..."
+        },
+        {
+          "name": "sfi.what_if_assign_permset",
+          "description": "Permission-set what-if tool: given a target permission set (`permissionSetId` - a `PermissionSet:` or `PermissionSetGroup:` id, or a bare name) and a `baseline` c..."
+        },
+        {
+          "name": "sfi.what_if_revoke_permset",
+          "description": "Permission-set what-if tool (the mirror of `sfi.what_if_assign_permset`): given a target permission set (`permissionSetId` - a `PermissionSet:` or `PermissionSetG..."
         },
         {
           "name": "sfi.call_graph",
@@ -398,6 +410,10 @@
       "label": "Documentation generators",
       "tools": [
         {
+          "name": "sfi.generate_fleet_report",
+          "description": "The \"state of my orgs\" digest: ONE GeneratedDocument composed across EVERY vault in the multi-vault registry, so you get a single artifact instead of running sfi...."
+        },
+        {
           "name": "sfi.get_naming_convention_report",
           "description": "Return the naming-convention pattern observations, optionally scoped to a glob."
         },
@@ -471,14 +487,6 @@
           "description": "Deterministic org risk synthesis: health, tech debt, and coverage gaps ranked with trust metadata."
         },
         {
-          "name": "sfi.field_cleanup_candidates",
-          "description": "Ranked unused-field cleanup candidates composed from sfi.unused_fields_deep."
-        },
-        {
-          "name": "sfi.release_readiness_report",
-          "description": "Release readiness gate composed from org risk and coverage completeness."
-        },
-        {
           "name": "sfi.unused_components",
           "description": "Scan the vault for components with no incoming USAGE edges (excluding the parentOf containment edge and grantedBy access grants - a Profile / PermissionSet granti..."
         },
@@ -495,12 +503,8 @@
           "description": "Compare two captured vault snapshots and report the structural diff."
         },
         {
-          "name": "sfi.churn",
-          "description": "Compare two persisted snapshots and return added/removed/modified counts plus top churn ids."
-        },
-        {
           "name": "sfi.trend",
-          "description": "Timeline of persisted snapshot captures (component/edge counts per label)."
+          "description": "Timeline of persisted snapshot captures."
         },
         {
           "name": "sfi.pii_inventory",
@@ -609,12 +613,36 @@
           "description": "Opt-in live org: record counts by OwnerId with User/Queue names resolved."
         },
         {
+          "name": "sfi.live_record_access",
+          "description": "Opt-in live org: a specific user's EFFECTIVE access to ONE record right now - Read / Edit / Delete / Transfer / Full (All) - from the org's live sharing calculati..."
+        },
+        {
+          "name": "sfi.live_record_shares",
+          "description": "Opt-in live org: the explicit sharing rows on ONE record - WHO it is shared with and WHY - from the runtime `{Object}Share` table (each row is a UserOrGroupId + A..."
+        },
+        {
+          "name": "sfi.live_scheduled_jobs",
+          "description": "Opt-in live org: the RUNTIME schedule registry - what is ACTUALLY scheduled right now - from CronTrigger (+ CronJobDetail.Name / JobType, State, CronExpression, N..."
+        },
+        {
+          "name": "sfi.live_field_history",
+          "description": "Opt-in live org: WHO changed a field on a record and to what - from the `{Object}History` table (Field, OldValue, NewValue, CreatedBy.Name, CreatedDate)."
+        },
+        {
           "name": "sfi.live_storage_by_object",
           "description": "Opt-in live org: record counts across objects via the Salesforce recordCount REST API - top N by volume, optional objectApiNames filter."
         },
         {
           "name": "sfi.live_org_limits",
           "description": "Opt-in live org: current org governor limits via REST."
+        },
+        {
+          "name": "sfi.live_data_skew",
+          "description": "Opt-in live org: ownership / data-skew concentration - which `ownerField` value (default `OwnerId`) holds MORE than `threshold` records (default 10,000) of `objec..."
+        },
+        {
+          "name": "sfi.live_security_exposure",
+          "description": "Opt-in live org: the RUNTIME security-exposure snapshot - how many permission sets currently grant Modify All Data / View All Data / Author Apex, and how many use..."
         },
         {
           "name": "sfi.live_inactive_users",
@@ -635,6 +663,10 @@
         {
           "name": "sfi.live_user_permsets",
           "description": "Opt-in live org: WHAT does USER X hold - the reverse of sfi.live_permset_holders (input = a user, output = the grantors they hold: profile + direct permission set..."
+        },
+        {
+          "name": "sfi.live_setup_audit_trail",
+          "description": "Opt-in live org (R6-27): WHO CHANGED WHAT in Setup - the SetupAuditTrail roster (profile/permission-set edits, field changes, org-wide-default flips, and every ot..."
         },
         {
           "name": "sfi.live_license_usage",
@@ -698,12 +730,20 @@
           "description": "Serve the refresh-time ORG CARD - the ≤16KB orientation snapshot to load BEFORE your first question: identity & freshness, coverage and blind spots up front, scal..."
         },
         {
+          "name": "sfi.query_graph",
+          "description": "ADVANCED / power-user: a read-only, guard-railed STRUCTURED query over the vault's dependency graph, for ad-hoc questions the purpose-built tools don't cover (e.g."
+        },
+        {
           "name": "sfi.who_can_run",
           "description": "The REVERSE of `sfi.user_ability`: given a `Flow:X` (`componentId`), which Profiles / PermissionSets grant RUN access to it (from the `flowAccess` `grantedBy` edges)."
         },
         {
           "name": "sfi.who_can_access_object",
           "description": "The REVERSE of `sfi.why_cant_user_see_record`: given a `CustomObject:X` (`componentId`), ENUMERATE which profiles / permission sets / roles / groups statically ga..."
+        },
+        {
+          "name": "sfi.guest_exposure_report",
+          "description": "\"What can UNAUTHENTICATED GUEST users see in my Experience Cloud / Site communities?\" - the audit for one of the most notorious real-world Salesforce leaks (over-..."
         },
         {
           "name": "sfi.user_ability",
@@ -738,6 +778,14 @@
           "description": "The REVERSE of `sfi.layout_for_user`: given a page Layout canonical id (`componentId`, e.g."
         },
         {
+          "name": "sfi.automation_collisions",
+          "description": "Field-level write-collision + save-recursion cycle detector for ONE object - 'is my org fighting itself on this object?'."
+        },
+        {
+          "name": "sfi.ai_exposure_report",
+          "description": "AI-exposure audit (the R6-13 flagship): 'what data can my org's own AI see?'."
+        },
+        {
           "name": "sfi.export_manifest",
           "description": "Group a set of canonical component ids into a well-formed `package.xml` snippet (P8-manifest-export) a human can hand to Gearset / Copado / `sf project deploy`."
         },
@@ -748,6 +796,18 @@
         {
           "name": "sfi.recordtype_availability",
           "description": "Given a Profile or PermissionSet canonical id (`Profile:{Name}` / `PermissionSet:{Name}`), report which record types the user can CREATE / see, grouped by object,..."
+        },
+        {
+          "name": "sfi.record_creation_paths",
+          "description": "\"How do records of this object get created?\" - the record-provenance trace an admin needs to answer \"how did this record get here?\"."
+        },
+        {
+          "name": "sfi.flow_fault_audit",
+          "description": "Which Flows have a DML/action element with NO fault path - the flow error-handling hygiene sweep."
+        },
+        {
+          "name": "sfi.review_change",
+          "description": "Pre-deploy change review (the CI/deploy gate): given `components` (1..500 `{ type, apiName, changeKind }` entries a host assembles from a PR / package.xml / `git..."
         },
         {
           "name": "sfi.installed_package_catalog",
@@ -762,12 +822,32 @@
           "description": "Record an AI-PROPOSED annotation (owner / status / glossary / domain / note) for a component."
         },
         {
+          "name": "sfi.review_annotations",
+          "description": "List UNCONFIRMED annotation proposals from `meta/annotations.jsonl` (AI proposals awaiting human sign-off)."
+        },
+        {
+          "name": "sfi.confirm_annotation",
+          "description": "Confirm an AI-proposed annotation: re-writes the existing (componentId, key) value as `source: 'human', confirmed: true` - the same write as CLI `sfi annotate con..."
+        },
+        {
+          "name": "sfi.reject_annotation",
+          "description": "Reject (discard) an UNCONFIRMED annotation proposal by writing `op: 'unset'` for the (componentId, key) pair - dedicated reject verb wrapping CLI `sfi annotate <i..."
+        },
+        {
           "name": "sfi.component_history",
           "description": "The component's change timeline from the vault's OWN git history (`sfi vault git enable`): `git log --follow` over its source file - one entry per source-changing..."
         },
         {
+          "name": "sfi.component_change_attribution",
+          "description": "Who changed this component in Setup, and when - OFFLINE, from persisted SetupAuditTrail rows (`meta/setup-audit-trail.jsonl` written by `sfi refresh --with-audit-..."
+        },
+        {
           "name": "sfi.component_as_of",
           "description": "The component AS IT WAS at a git ref in the vault's own history: `git show <ref>:<sourcePath>` re-run through the SAME extractor the refresh uses for that type →..."
+        },
+        {
+          "name": "sfi.history_tracking_gaps",
+          "description": "Compliance audit: 'which sensitive fields have no field-history tracking enabled?'."
         }
       ]
     }

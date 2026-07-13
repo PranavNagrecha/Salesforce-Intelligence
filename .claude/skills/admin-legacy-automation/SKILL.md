@@ -114,7 +114,7 @@ Defer to another skill when:
   `sfi.layout_for_user`.
 - **The user asks "where is this field used in Apex?"** —
   code-side reference question. Defer to `developer-apex-refactor`
-  → `sfi.find_apex_usages`.
+  → `sfi.find_code_usages`.
 - **The user asks "what does this flow do?"** — Flow narration is
   outside v1.3 (and outside the legacy-automation skill regardless;
   Flow is the *modern* automation tier). Defer to

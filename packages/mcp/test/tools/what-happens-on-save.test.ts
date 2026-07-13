@@ -23,6 +23,8 @@ import {
   whatHappensOnSaveInputSchema,
 } from '../../src/tools/what-happens-on-save.js';
 
+import { measureGraphQueries } from './_graph-query-budget.js';
+
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
   refreshedAt: '2026-05-27T14:33:08Z',
@@ -590,6 +592,252 @@ const realOrgShapeSeed: ExtractionResult = {
   ],
 };
 
+// =============================================================================
+// Seed 8 (R6-07): duplicate-rules phase. DupObj has an ACTIVE DuplicateRule
+// whose operationsOnInsert includes `Block` (referencing one MatchingRule)
+// and an INACTIVE DuplicateRule (isActive: false) that must be excluded from
+// the phase and disclosed in inactiveConfigured, mirroring the
+// Draft/Obsolete-Flow and active:false-rule convention every other SOE phase
+// follows.
+// =============================================================================
+
+const DUP_OBJ = 'CustomObject:DupObj';
+const DUP_ACTIVE_RULE = 'DuplicateRule:DupObj.ActiveBlockRule';
+const DUP_INACTIVE_RULE = 'DuplicateRule:DupObj.RetiredRule';
+const DUP_MATCHING_RULE = 'MatchingRule:DupObj.NameMatch';
+
+const duplicateRuleSeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: DUP_OBJ, apiName: 'DupObj' }),
+    makeNode({
+      id: DUP_ACTIVE_RULE,
+      type: 'DuplicateRule',
+      apiName: 'DupObj.ActiveBlockRule',
+      parentId: DUP_OBJ,
+      properties: {
+        isActive: true,
+        actionOnInsert: 'Block',
+        actionOnUpdate: 'Allow',
+        operationsOnInsert: ['Block'],
+        operationsOnUpdate: ['Report'],
+      },
+    }),
+    makeNode({
+      id: DUP_INACTIVE_RULE,
+      type: 'DuplicateRule',
+      apiName: 'DupObj.RetiredRule',
+      parentId: DUP_OBJ,
+      properties: {
+        isActive: false,
+        operationsOnInsert: ['Report'],
+        operationsOnUpdate: ['Report'],
+      },
+    }),
+    makeNode({
+      id: DUP_MATCHING_RULE,
+      type: 'MatchingRule',
+      apiName: 'DupObj.NameMatch',
+      parentId: DUP_OBJ,
+    }),
+  ],
+  edges: [
+    makeEdge({ fromId: DUP_OBJ, toId: DUP_ACTIVE_RULE, edgeType: 'parentOf' }),
+    makeEdge({ fromId: DUP_OBJ, toId: DUP_INACTIVE_RULE, edgeType: 'parentOf' }),
+    makeEdge({
+      fromId: DUP_ACTIVE_RULE,
+      toId: DUP_MATCHING_RULE,
+      edgeType: 'references',
+      properties: { matcherIndex: 0, objectMappingCount: 0 },
+    }),
+    makeEdge({
+      fromId: DUP_INACTIVE_RULE,
+      toId: DUP_MATCHING_RULE,
+      edgeType: 'references',
+      properties: { matcherIndex: 0, objectMappingCount: 0 },
+    }),
+  ],
+};
+
+// =============================================================================
+// Seed 9 (R6-07): post-save-rollup-recalc phase. RollupChild is the detail
+// side of a master-detail relationship; RollupParent carries a `type:
+// Summary` CustomField (`Total_Amount__c`) whose `summaryForeignKey` names
+// RollupChild as the child object. Saving RollupChild must name the parent
+// field in the rollup phase.
+// =============================================================================
+
+const ROLLUP_PARENT = 'CustomObject:RollupParent';
+const ROLLUP_CHILD = 'CustomObject:RollupChild';
+const ROLLUP_FIELD = 'CustomField:RollupParent.Total_Amount__c';
+const ROLLUP_COUNT_FIELD = 'CustomField:RollupParent.Child_Count__c';
+
+const rollupRecalcSeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: ROLLUP_PARENT, apiName: 'RollupParent' }),
+    makeNode({ id: ROLLUP_CHILD, apiName: 'RollupChild' }),
+    makeNode({
+      id: ROLLUP_FIELD,
+      type: 'CustomField',
+      apiName: 'Total_Amount__c',
+      parentId: ROLLUP_PARENT,
+      properties: {
+        dataType: 'Summary',
+        summarizedField: 'RollupChild.Amount__c',
+        summaryForeignKey: 'RollupChild.Parent__c',
+        summaryOperation: 'sum',
+      },
+    }),
+    makeNode({
+      id: ROLLUP_COUNT_FIELD,
+      type: 'CustomField',
+      apiName: 'Child_Count__c',
+      parentId: ROLLUP_PARENT,
+      properties: {
+        dataType: 'Summary',
+        summaryForeignKey: 'RollupChild.Parent__c',
+        summaryOperation: 'count',
+      },
+    }),
+  ],
+  edges: [
+    makeEdge({ fromId: ROLLUP_PARENT, toId: ROLLUP_FIELD, edgeType: 'parentOf' }),
+    makeEdge({ fromId: ROLLUP_PARENT, toId: ROLLUP_COUNT_FIELD, edgeType: 'parentOf' }),
+  ],
+};
+
+// =============================================================================
+// Seed 10 (R6-07): combined phase-order fixture. R607Obj exercises
+// pre-save-triggers, pre-save-validation, duplicate-rules, save,
+// after-triggers, post-save-workflows, and post-save-rollup-recalc (as the
+// rollup child of R607RollupParent) together, so the EXACT documented
+// Salesforce phase order — duplicate rules ahead of save, rollup recalc near
+// the end — is a regression-guarded assertion, not an inference from two
+// separate single-phase fixtures.
+// =============================================================================
+
+const R607_OBJ = 'CustomObject:R607Obj';
+const R607_VR = 'ValidationRule:R607Obj.IsValid';
+const R607_DUP = 'DuplicateRule:R607Obj.ActiveBlockRule';
+const R607_TRIGGER = 'ApexTrigger:R607Trigger';
+const R607_WORKFLOW = 'WorkflowRule:R607Obj.NotifyOnCreate';
+const R607_ROLLUP_PARENT = 'CustomObject:R607RollupParent';
+const R607_ROLLUP_FIELD = 'CustomField:R607RollupParent.Total__c';
+
+const r607OrderSeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: R607_OBJ, apiName: 'R607Obj' }),
+    makeNode({
+      id: R607_VR,
+      type: 'ValidationRule',
+      apiName: 'IsValid',
+      parentId: R607_OBJ,
+      properties: { errorMessage: 'Invalid.', active: true },
+    }),
+    makeNode({
+      id: R607_DUP,
+      type: 'DuplicateRule',
+      apiName: 'R607Obj.ActiveBlockRule',
+      parentId: R607_OBJ,
+      properties: { isActive: true, operationsOnInsert: ['Block'], operationsOnUpdate: ['Block'] },
+    }),
+    makeNode({
+      id: R607_TRIGGER,
+      type: 'ApexTrigger',
+      apiName: 'R607Trigger',
+      properties: { triggerObject: 'R607Obj', events: ['before insert', 'after insert'] },
+    }),
+    makeNode({
+      id: R607_WORKFLOW,
+      type: 'WorkflowRule',
+      apiName: 'R607Obj.NotifyOnCreate',
+      parentId: R607_OBJ,
+      properties: { triggerType: 'onCreateOnly' },
+    }),
+    makeNode({ id: R607_ROLLUP_PARENT, apiName: 'R607RollupParent' }),
+    makeNode({
+      id: R607_ROLLUP_FIELD,
+      type: 'CustomField',
+      apiName: 'Total__c',
+      parentId: R607_ROLLUP_PARENT,
+      properties: {
+        dataType: 'Summary',
+        summarizedField: 'R607Obj.Amount__c',
+        summaryForeignKey: 'R607Obj.Parent__c',
+        summaryOperation: 'sum',
+      },
+    }),
+  ],
+  edges: [
+    makeEdge({ fromId: R607_OBJ, toId: R607_VR, edgeType: 'parentOf' }),
+    makeEdge({ fromId: R607_OBJ, toId: R607_DUP, edgeType: 'parentOf' }),
+    makeEdge({
+      fromId: R607_TRIGGER,
+      toId: R607_OBJ,
+      edgeType: 'triggersOn',
+      properties: { events: ['before insert', 'after insert'] },
+    }),
+    makeEdge({ fromId: R607_OBJ, toId: R607_WORKFLOW, edgeType: 'parentOf' }),
+    makeEdge({
+      fromId: R607_WORKFLOW,
+      toId: R607_OBJ,
+      edgeType: 'triggersOn',
+      properties: { triggerType: 'onCreateOnly' },
+    }),
+    makeEdge({ fromId: R607_ROLLUP_PARENT, toId: R607_ROLLUP_FIELD, edgeType: 'parentOf' }),
+  ],
+};
+
+// =============================================================================
+// Seed 11 (R6-23): entitlementProcessNotes informational rider. R623Obj
+// carries one ACTIVE EntitlementProcess (must surface), one INACTIVE
+// EntitlementProcess on the SAME object (must NOT surface — active:false),
+// and one ACTIVE EntitlementProcess on a DIFFERENT object (must NOT surface
+// — SObjectType mismatch). R623ManyObj carries more than
+// ENTITLEMENT_PROCESS_NOTE_CAP active processes to exercise the truncation
+// flag.
+// =============================================================================
+
+const ENTITLEMENT_OBJ = 'CustomObject:R623Obj';
+const ENTITLEMENT_PROCESS_ACTIVE = 'EntitlementProcess:Gold_Support';
+const ENTITLEMENT_PROCESS_INACTIVE = 'EntitlementProcess:Old_Support';
+const ENTITLEMENT_PROCESS_OTHER_OBJECT = 'EntitlementProcess:Other_Obj_Support';
+const ENTITLEMENT_MANY_OBJ = 'CustomObject:R623ManyObj';
+
+const entitlementNoteSeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: ENTITLEMENT_OBJ, apiName: 'R623Obj' }),
+    makeNode({
+      id: ENTITLEMENT_PROCESS_ACTIVE,
+      type: 'EntitlementProcess',
+      apiName: 'Gold_Support',
+      label: 'Gold Support',
+      properties: { SObjectType: 'R623Obj', active: 'true' },
+    }),
+    makeNode({
+      id: ENTITLEMENT_PROCESS_INACTIVE,
+      type: 'EntitlementProcess',
+      apiName: 'Old_Support',
+      properties: { SObjectType: 'R623Obj', active: 'false' },
+    }),
+    makeNode({
+      id: ENTITLEMENT_PROCESS_OTHER_OBJECT,
+      type: 'EntitlementProcess',
+      apiName: 'Other_Obj_Support',
+      properties: { SObjectType: 'SomeOtherObj', active: 'true' },
+    }),
+    makeNode({ id: ENTITLEMENT_MANY_OBJ, apiName: 'R623ManyObj' }),
+    ...Array.from({ length: 25 }, (_, i) =>
+      makeNode({
+        id: `EntitlementProcess:Many_Support_${i}`,
+        type: 'EntitlementProcess',
+        apiName: `Many_Support_${i}`,
+        properties: { SObjectType: 'R623ManyObj', active: 'true' },
+      }),
+    ),
+  ],
+  edges: [],
+};
+
 beforeAll(async () => {
   tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-whos-'));
   const dbPath = join(tempDir, 'whos.db');
@@ -606,6 +854,10 @@ beforeAll(async () => {
     inactiveFlowSeed,
     absentRecordTriggerTypeSeed,
     realOrgShapeSeed,
+    duplicateRuleSeed,
+    rollupRecalcSeed,
+    r607OrderSeed,
+    entitlementNoteSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -975,7 +1227,7 @@ describe('whatHappensOnSaveHandler', () => {
     if (!result.ok) return;
     // The disclosure must be the exact string the spec mandates.
     expect(result.value.data.disclosure).toBe(
-      "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once and does not expand that re-entrancy. A workflow rule's time-dependent actions (its workflowTimeTriggers) are SCHEDULED for an offset measured from a record field value the offline vault cannot evaluate; this composition lists the rule once in the synchronous post-save-workflows phase and does NOT claim its time-delayed actions fire at save. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.",
+      "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Duplicate rules are modeled as their own `duplicate-rules` phase, running after before-triggers and validation but BEFORE the save — evaluated on insert/update only, with the effective Block/Allow/Alert/Report operations surfaced per rule. Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once and does not expand that re-entrancy. A workflow rule's time-dependent actions (its workflowTimeTriggers) are SCHEDULED for an offset measured from a record field value the offline vault cannot evaluate; this composition lists the rule once in the synchronous post-save-workflows phase and does NOT claim its time-delayed actions fire at save. Parent Summary (roll-up) fields that aggregate this object recalculate in the `post-save-rollup-recalc` phase, capped to ONE level — a grandparent's own rollup on that recalculated parent is NOT walked — and the parent's own triggers/flows/workflows that its recalculated save would fire are NOT expanded (no re-entrancy). Entitlement-process and milestone-type METADATA is modeled elsewhere in the vault (R6-18: `EntitlementProcess`/`MilestoneType` nodes, queryable via `sfi.get_component` / `sfi.get_edges`, including each milestone's declared target `minutesToComplete` as of R7-C7) — but this composition does NOT simulate entitlement milestones as an order-of-execution phase: whether a specific record is currently on-track or breached against those target minutes is live, per-record timer data this offline vault cannot hold. Criteria-based sharing recalculation — the FINAL step in Salesforce's documented order-of-execution, evaluated after every phase modeled here (including post-save-async) — is also NOT modeled: a save that causes a record to newly match or stop matching a criteria-based sharing rule's criteria triggers a sharing recalculation this composition does not surface. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.",
     );
   });
 
@@ -1016,11 +1268,13 @@ describe('whatHappensOnSaveHandler', () => {
       'before-save-flows': 1,
       'pre-save-triggers': 1,
       'pre-save-validation': 1,
+      'duplicate-rules': 0,
       'after-triggers': 1,
       'post-save-assignment': 1,
       'post-save-workflows': 1,
       'post-save-flows': 1,
       'post-save-approval': 1,
+      'post-save-rollup-recalc': 0,
       'post-save-async': 1,
     });
     expect('save' in summary.phaseCounts).toBe(false);
@@ -1149,6 +1403,247 @@ describe('whatHappensOnSaveHandler', () => {
     expect(entry?.componentType).toBe('ApexTrigger');
     expect(entry?.inactiveReason).toBe('status: Inactive');
   });
+
+  // ===========================================================================
+  // R6-07: duplicate-rules phase (Seed 8).
+  // ===========================================================================
+
+  it('includes only the active DuplicateRule in the duplicate-rules phase and discloses the inactive one', async () => {
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'DupObj',
+      event: 'insert',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { soe, inactiveConfigured } = result.value.data;
+    const dupSteps = soe.filter((s) => s.phase === 'duplicate-rules');
+    expect(dupSteps.map((s) => s.componentId)).toEqual([DUP_ACTIVE_RULE]);
+    expect(
+      inactiveConfigured?.some((ic) => ic.componentId === DUP_INACTIVE_RULE),
+    ).toBe(true);
+    expect(
+      inactiveConfigured?.find((ic) => ic.componentId === DUP_INACTIVE_RULE)
+        ?.inactiveReason,
+    ).toBe('isActive: false');
+  });
+
+  it('surfaces blocksOnSave, duplicateRuleOperations, and the referenced MatchingRule for a DuplicateRule step', async () => {
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'DupObj',
+      event: 'insert',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const step = result.value.data.soe.find((s) => s.componentId === DUP_ACTIVE_RULE);
+    expect(step).toBeDefined();
+    expect(step?.blocksOnSave).toBe(true);
+    expect(step?.duplicateRuleOperations).toEqual(['Block']);
+    expect(step?.actions).toEqual([
+      {
+        kind: 'references',
+        targetId: DUP_MATCHING_RULE,
+        description: `references ${DUP_MATCHING_RULE}`,
+      },
+    ]);
+  });
+
+  it('the same DuplicateRule does not block on update — operationsOnUpdate has no Block', async () => {
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'DupObj',
+      event: 'update',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const step = result.value.data.soe.find((s) => s.componentId === DUP_ACTIVE_RULE);
+    expect(step).toBeDefined();
+    expect(step?.blocksOnSave).toBe(false);
+    expect(step?.duplicateRuleOperations).toEqual(['Report']);
+  });
+
+  it('excludes duplicate-rules on delete — duplicate rules only evaluate on insert/update', async () => {
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'DupObj',
+      event: 'delete',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.soe.some((s) => s.phase === 'duplicate-rules')).toBe(
+      false,
+    );
+  });
+
+  // ===========================================================================
+  // R6-07: post-save-rollup-recalc phase (Seed 9).
+  // ===========================================================================
+
+  it('names the parent Summary field(s) in post-save-rollup-recalc when this object is a rollup child', async () => {
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'RollupChild',
+      event: 'insert',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const rollupSteps = result.value.data.soe.filter(
+      (s) => s.phase === 'post-save-rollup-recalc',
+    );
+    // Both the sum field and the count field on RollupParent name RollupChild
+    // as their summaryForeignKey child object.
+    const fieldIds = rollupSteps.map((s) => s.componentId).sort();
+    expect(fieldIds).toEqual([ROLLUP_COUNT_FIELD, ROLLUP_FIELD].sort());
+    const sumStep = rollupSteps.find((s) => s.componentId === ROLLUP_FIELD);
+    expect(sumStep?.apiName).toBe('Total_Amount__c');
+    expect(sumStep?.actions).toEqual([
+      {
+        kind: 'recalculates',
+        targetId: ROLLUP_PARENT,
+        description: `recalculates sum(RollupChild.Amount__c) on ${ROLLUP_PARENT}`,
+      },
+    ]);
+    const countStep = rollupSteps.find((s) => s.componentId === ROLLUP_COUNT_FIELD);
+    // A count rollup has no summarizedField — the description honestly says
+    // "record count" rather than fabricating a source field.
+    expect(countStep?.actions[0]?.description).toBe(
+      `recalculates count(record count) on ${ROLLUP_PARENT}`,
+    );
+  });
+
+  it('post-save-rollup-recalc fires on delete and undelete too (unlike duplicate-rules)', async () => {
+    for (const event of ['delete', 'undelete'] as const) {
+      const result = await whatHappensOnSaveHandler(ctx, {
+        objectApiName: 'RollupChild',
+        event,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) continue;
+      const rollupSteps = result.value.data.soe.filter(
+        (s) => s.phase === 'post-save-rollup-recalc',
+      );
+      expect(rollupSteps.length).toBe(2);
+    }
+  });
+
+  it('does not name RollupChild itself, or an unrelated object, in the rollup phase', async () => {
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'RollupParent',
+      event: 'insert',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // RollupParent is the PARENT, not a rollup child of anything in this fixture.
+    expect(
+      result.value.data.soe.some((s) => s.phase === 'post-save-rollup-recalc'),
+    ).toBe(false);
+  });
+
+  it('omits both duplicate-rules and post-save-rollup-recalc for an object with neither (convention: absent phase, not empty placeholder)', async () => {
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'EmptyObj',
+      event: 'insert',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const phasesPresent = new Set(result.value.data.soe.map((s) => s.phase));
+    expect(phasesPresent.has('duplicate-rules')).toBe(false);
+    expect(phasesPresent.has('post-save-rollup-recalc')).toBe(false);
+    expect(result.value.data.summary.phaseCounts['duplicate-rules']).toBe(0);
+    expect(result.value.data.summary.phaseCounts['post-save-rollup-recalc']).toBe(0);
+  });
+
+  // ===========================================================================
+  // R6-07: combined phase-order assertion (Seed 10).
+  // ===========================================================================
+
+  it('emits duplicate-rules ahead of save and post-save-rollup-recalc near the end, in the documented order', async () => {
+    const result = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'R607Obj',
+      event: 'insert',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { soe } = result.value.data;
+    expect(soe.map((s) => s.phase)).toEqual([
+      'pre-save-triggers',
+      'pre-save-validation',
+      'duplicate-rules',
+      'save',
+      'after-triggers',
+      'post-save-workflows',
+      'post-save-rollup-recalc',
+    ]);
+    for (let i = 0; i < soe.length; i += 1) {
+      expect(soe[i]!.stepIndex).toBe(i);
+    }
+    const rollupStep = soe.find((s) => s.phase === 'post-save-rollup-recalc');
+    expect(rollupStep?.componentId).toBe(R607_ROLLUP_FIELD);
+  });
+
+  // R6-23: entitlementProcessNotes informational rider — a disclosure-plus-
+  // pointer, NOT a simulated order-of-execution phase.
+  describe('R6-23: entitlementProcessNotes rider', () => {
+    it('surfaces a note for an active EntitlementProcess targeting the object, excluding inactive and other-object processes', async () => {
+      const result = await whatHappensOnSaveHandler(ctx, {
+        objectApiName: 'R623Obj',
+        event: 'insert',
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const { entitlementProcessNotes, entitlementProcessNotesTruncated } = result.value.data;
+      expect(entitlementProcessNotes).toEqual([
+        {
+          componentId: ENTITLEMENT_PROCESS_ACTIVE,
+          apiName: 'Gold_Support',
+          message:
+            'entitlement process Gold_Support is active on this object — milestone evaluation not simulated',
+          confidence: 'declared',
+        },
+      ]);
+      // The inactive process and the process on a different object never
+      // appear — confirms the active + SObjectType filters, not just presence.
+      expect(
+        entitlementProcessNotes?.some((n) => n.componentId === ENTITLEMENT_PROCESS_INACTIVE),
+      ).toBe(false);
+      expect(
+        entitlementProcessNotes?.some((n) => n.componentId === ENTITLEMENT_PROCESS_OTHER_OBJECT),
+      ).toBe(false);
+      expect(entitlementProcessNotesTruncated).toBeUndefined();
+    });
+
+    it('OMITS entitlementProcessNotes for an object with no active EntitlementProcess', async () => {
+      const result = await whatHappensOnSaveHandler(ctx, {
+        objectApiName: 'EmptyObj',
+        event: 'insert',
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect('entitlementProcessNotes' in result.value.data).toBe(false);
+      expect('entitlementProcessNotesTruncated' in result.value.data).toBe(false);
+    });
+
+    it('caps entitlementProcessNotes and sets entitlementProcessNotesTruncated when the cap is hit', async () => {
+      const result = await whatHappensOnSaveHandler(ctx, {
+        objectApiName: 'R623ManyObj',
+        event: 'insert',
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const { entitlementProcessNotes, entitlementProcessNotesTruncated } = result.value.data;
+      expect(entitlementProcessNotes?.length).toBe(20);
+      expect(entitlementProcessNotesTruncated).toBe(true);
+    });
+
+    it('still carries the refined criteria-based-sharing disclosure alongside the rider', async () => {
+      const result = await whatHappensOnSaveHandler(ctx, {
+        objectApiName: 'R623Obj',
+        event: 'insert',
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.data.disclosure).toContain(
+        "Criteria-based sharing recalculation — the FINAL step in Salesforce's documented order-of-execution",
+      );
+      expect(result.value.data.disclosure).toContain('EntitlementProcess');
+    });
+  });
 });
 
 describe('whatHappensOnSaveInputSchema', () => {
@@ -1205,5 +1700,62 @@ describe('whatHappensOnSaveInputSchema', () => {
       expect(parsed.success).toBe(true);
       if (parsed.success) expect(parsed.data.event).toBe(expected);
     }
+  });
+});
+
+// =============================================================================
+// N+1 query budget (finding C-1). Mirror of the order_of_execution guard:
+// fetchParentedFirers / fetchTriggersOnFirers / buildAsyncSteps and the flow-
+// partition loop are batched, so the total edge+node round-trip count must NOT
+// scale with the object's child fan-out. A wide object whose children are all
+// filtered-out non-firers produces zero steps but exercises every firer
+// resolution over the full fan-out.
+// =============================================================================
+describe('whatHappensOnSaveHandler — bounded graph queries', () => {
+  const seedWideObject = async (childCount: number) => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-whos-budget-'));
+    const opened = await openGraph(join(dir, 'whos.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const s = opened.value;
+    const nodes: Node[] = [makeNode({ id: 'CustomObject:Wide', apiName: 'Wide' })];
+    const edges: Edge[] = [];
+    for (let i = 0; i < childCount; i += 1) {
+      nodes.push(
+        makeNode({
+          id: `CustomField:Wide.F${i}__c`,
+          type: 'CustomField',
+          apiName: `F${i}__c`,
+          parentId: 'CustomObject:Wide',
+        }),
+      );
+      edges.push(
+        makeEdge({
+          fromId: 'CustomObject:Wide',
+          toId: `CustomField:Wide.F${i}__c`,
+          edgeType: 'parentOf',
+        }),
+      );
+    }
+    const imported = await importExtractionResults(s, [{ nodes, edges }]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const wideCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s } as Context;
+    const measured = await measureGraphQueries(s, () =>
+      whatHappensOnSaveHandler(wideCtx, { objectApiName: 'Wide', event: 'insert' }),
+    );
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+    return measured;
+  };
+
+  it('issues a query count independent of the object child fan-out', async () => {
+    const small = await seedWideObject(60);
+    const large = await seedWideObject(200);
+    expect(small.result.ok).toBe(true);
+    expect(large.result.ok).toBe(true);
+    // Independence: a reintroduced per-child getNodeById loop would add ~140
+    // node queries going 60 -> 200. Batched, both counts are identical.
+    expect(large.nodeQueries).toBe(small.nodeQueries);
+    expect(large.edgeQueries).toBe(small.edgeQueries);
+    expect(large.nodeQueries).toBeLessThan(60);
   });
 });

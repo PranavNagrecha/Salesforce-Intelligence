@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomSite xmlns="http://soap.sforce.com/2006/04/metadata">
+    <active>true</active>
+    <masterLabel>VerdantPortal</masterLabel>
+    <siteAdmin>siteadmin@verdantenergy.example</siteAdmin>
+    <siteGuestRecordDefaultOwner>guest@verdantenergy.example</siteGuestRecordDefaultOwner>
+    <siteType>ChatterNetwork</siteType>
+    <urlPathPrefix>portal</urlPathPrefix>
+</CustomSite>

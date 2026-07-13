@@ -16,4 +16,5 @@ pnpm eval:scale
 SCALE_IMPORT_BUDGET_MS="${SCALE_IMPORT_BUDGET_MS:-90000}" pnpm --filter @sf-intelligence/graph test test/scale-import.test.ts
 SCALE_REFRESH_FIELD_COUNT="${SCALE_REFRESH_FIELD_COUNT:-1000}" SCALE_REFRESH_BUDGET_MS="${SCALE_REFRESH_BUDGET_MS:-600000}" pnpm --filter @sf-intelligence/cli test test/scale-refresh.test.ts
 pnpm guard
+pnpm check:version-consistency
 echo "=== v4.0 done gate: PASS ==="

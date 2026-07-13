@@ -14,13 +14,25 @@
  * actions run anymore. The composer walks each outgoing edge type the
  * Flow emits and projects a per-edge `WhatIfImpactItem`:
  *
- *   | Outgoing edge | What it represented | Impact category    | Verdict   |
- *   |---------------|---------------------|--------------------|-----------|
- *   | triggersOn    | The object the Flow listened to | metadata-blocker | blocking |
- *   | callsApex     | Apex action calls the Flow made | code-needs-update | risky |
- *   | readsFrom     | Record lookups the Flow performed | metadata-blocker | blocking |
- *   | writesTo      | Record writes (creates/updates/deletes) | metadata-blocker | blocking |
- *   | sendsEmail    | Email templates the Flow sent     | metadata-blocker | blocking |
+ *   | Edge (direction) | What it represented | Impact category    | Verdict   |
+ *   |------------------|---------------------|--------------------|-----------|
+ *   | triggersOn (out) | The object the Flow listened to | metadata-blocker | blocking |
+ *   | callsApex (out)  | Apex action calls the Flow made | code-needs-update | risky |
+ *   | readsFrom (out)  | Record lookups the Flow performed | metadata-blocker | blocking |
+ *   | writesTo (out)   | Record writes (creates/updates/deletes) | metadata-blocker | blocking |
+ *   | sendsEmail (out) | Email templates the Flow sent     | metadata-blocker | blocking |
+ *   | references/subflow (out) | Subflows THIS Flow invokes    | metadata-blocker | blocking |
+ *   | references/subflow (IN)  | Parent Flows that invoke THIS Flow as a subflow | broken-caller | blocking if any Active |
+ *
+ * R6-02 adds the INCOMING side. Before it the composer walked only
+ * OUTGOING edges, so a subflow called by N parents had zero surfaced
+ * dependents and read `safe` to deactivate — a wrong destructive verdict.
+ * The incoming `references` edges (confidence `declared`, `referenceKind:
+ * 'subflow'`) are now walked: each parent Flow is a BROKEN CALLER whose
+ * subflow-call step fails at runtime on deactivation. Only
+ * `referenceKind: 'subflow'` counts — a FlexiPage that merely EMBEDS the
+ * flow, or any `grantedBy` / `parentOf` edge, is access/structure, not a
+ * broken subflow caller (access ≠ usage).
  *
  * Outgoing structural edges (`parentOf`, `firesWhen`) are NOT impacts:
  * they describe the Flow's own composition, not its downstream effect.
@@ -35,11 +47,14 @@
  *   - `safe` if there are NO impacts at all (a Flow that exists but
  *     does nothing — the deactivation has no observable effect).
  *   - `blocking` if ANY `metadata-blocker` impact appears (record
- *     writes / reads / triggers / email sends would silently stop).
- *   - `risky` if no `metadata-blocker` but at least one
- *     `code-needs-update` impact (Apex calls the Flow made are now
- *     skipped; downstream callers may not realise the side-effect path
- *     stopped).
+ *     writes / reads / triggers / email sends / subflow invocations would
+ *     silently stop), OR any `broken-caller` is an ACTIVE parent Flow
+ *     (R6-02: a live parent breaks at runtime — a subflow with active
+ *     parents must not read `safe`).
+ *   - `risky` if no blocker but at least one `code-needs-update` impact
+ *     (Apex calls the Flow made are now skipped), or a `broken-caller`
+ *     whose parents are all inactive (Draft / Obsolete — surfaced, but
+ *     not currently running).
  *   - `unknown` is reserved (never returned by this tool — the Flow
  *     either has impacts or it doesn't).
  *
@@ -48,9 +63,10 @@
  * delete the Flow — its definition remains in the org and a later
  * reactivation restores every effect listed. Apex code that conditionally
  * invokes the Flow's outputs (via `Flow.Interview` or an
- * `@InvocableMethod` chain) is invisible to the heuristic walker; the
- * caller should spot-check Apex callers via `sfi.find_code_usages`
- * targeting the Flow id.
+ * `@InvocableMethod` chain) remains invisible to the heuristic walker —
+ * the subflow modeling is DECLARED `<subflows>` metadata only, not the
+ * Apex `Flow.Interview` invocation path; the caller should spot-check Apex
+ * callers via `sfi.find_code_usages` targeting the Flow id.
  *
  * Implementation notes:
  *   - `flowId` is required to start with `Flow:`. Other prefixes return
@@ -84,7 +100,13 @@ import type {
   TrustSummary,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges, resolveComponents } from '@sf-intelligence/graph';
+import {
+  getNodeById,
+  listEdges,
+  listEdgesForNodes,
+  listNodesByIds,
+  resolveComponents,
+} from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -106,6 +128,13 @@ const FLOW_PREFIX = 'Flow:';
  * R2a's `what-if-change-field-type.ts` definition. The composer module
  * uses the same union across every v2.3 tool so the
  * `architect-what-if-analysis` skill can group by category uniformly.
+ *
+ * `broken-caller` is a Flow-deactivation-specific EXTENSION of the shared
+ * union (R6-02): it names an INCOMING dependent — a parent Flow that invokes
+ * THIS Flow as a subflow and would break at runtime on deactivation. It is
+ * distinct from `metadata-blocker` (which names this Flow's own OUTGOING
+ * effects that stop). A `broken-caller` from an ACTIVE parent forces the
+ * headline verdict to `blocking`; see {@link aggregateVerdict}.
  */
 type Category =
   | 'metadata-blocker'
@@ -113,7 +142,8 @@ type Category =
   | 'integration-touch'
   | 'test-class-update'
   | 'invisible-risk'
-  | 'configuration-only';
+  | 'configuration-only'
+  | 'broken-caller';
 
 /**
  * One impact entry in the response's `impacts` array. Mirrors the
@@ -166,7 +196,7 @@ export interface WhatIfDeactivateFlowOutput {
  * tool surface uniform.
  */
 const DISCLOSURE =
-  "v2.3 what-if analysis is composition over the v2.2 vault state. Deactivating a Flow stops every action listed in impacts; the Flow's definition remains in the org and a later reactivation restores the effects. Apex code that conditionally invokes the Flow via Flow.Interview or @InvocableMethod chains is invisible to the heuristic walker; review callers via sfi.find_code_usages targeting the Flow id before relying on this finding.";
+  "v2.3 what-if analysis is composition over the v2.2 vault state. Deactivating a Flow stops every action listed in impacts; the Flow's definition remains in the org and a later reactivation restores the effects. R6-02: parent Flows that invoke this Flow as a subflow (declared <subflows> calls) are now surfaced as broken-caller impacts — an ACTIVE parent forces a blocking verdict because its subflow-call step fails at runtime. Apex code that invokes the Flow via Flow.Interview or @InvocableMethod chains is STILL invisible to the heuristic walker, as are non-metadata launch points (quick actions, buttons, screen-flow entry); review callers via sfi.find_code_usages targeting the Flow id before relying on this finding.";
 
 /**
  * Zod schema for the `sfi.what_if_deactivate_flow` tool input.
@@ -235,6 +265,16 @@ const classifyOutgoingEdge = (
       return { category: 'metadata-blocker', verdict: 'blocking' };
     case 'sendsEmail':
       return { category: 'metadata-blocker', verdict: 'blocking' };
+    case 'references':
+      // R6-02: an OUTGOING subflow reference (`referenceKind: 'subflow'`) is
+      // this Flow invoking ANOTHER Flow. Deactivating this Flow silently stops
+      // that subflow (and every effect it performs) from running in this Flow's
+      // path — a metadata-blocker, same tier as a lost DML/trigger. Non-subflow
+      // `references` fall through to the generic configuration-only bucket.
+      if (edge.properties['referenceKind'] === 'subflow') {
+        return { category: 'metadata-blocker', verdict: 'blocking' };
+      }
+      return { category: 'configuration-only', verdict: 'risky' };
     default:
       return { category: 'configuration-only', verdict: 'risky' };
   }
@@ -251,6 +291,14 @@ const buildExplanation = (
   edge: Edge,
   flowApiName: string,
 ): string => {
+  // R6-02: an outgoing subflow reference reads as "invokes subflow" so the
+  // renderer distinguishes a nested-Flow call from a generic reference.
+  if (
+    edge.edgeType === 'references' &&
+    edge.properties['referenceKind'] === 'subflow'
+  ) {
+    return `Flow '${flowApiName}' invokes subflow '${toNode.apiName}'; deactivating the Flow stops that subflow from running in this path.`;
+  }
   const verb =
     edge.edgeType === 'writesTo'
       ? 'writes to'
@@ -272,8 +320,16 @@ const buildExplanation = (
  *   - empty impacts → `safe`.
  *   - any `metadata-blocker` → `blocking`.
  *   - any non-blocker `code-needs-update` / `integration-touch` → `risky`.
- *   - only `configuration-only` → `risky` (the finding still warrants
- *     attention even though the deploy itself won't fail).
+ *   - only `configuration-only` / `broken-caller` → `risky` (the finding
+ *     still warrants attention even though the deploy itself won't fail).
+ *
+ * R6-02: `broken-caller` impacts (parent Flows that call THIS Flow as a
+ * subflow) fall through to `risky` HERE — the escalation to `blocking` for
+ * an ACTIVE parent is applied by the caller
+ * ({@link whatIfDeactivateFlowFromNode}) via `escalateForActiveCallers`,
+ * because whether a parent is currently live depends on its `status`, which
+ * this category-only cascade does not carry. A subflow whose only callers are
+ * inactive (Draft / Obsolete) is surfaced but stays `risky`, not `safe`.
  */
 const aggregateVerdict = (impacts: readonly WhatIfImpactItem[]): Verdict => {
   if (impacts.length === 0) return 'safe';
@@ -290,6 +346,19 @@ const aggregateVerdict = (impacts: readonly WhatIfImpactItem[]): Verdict => {
   }
   return 'risky';
 };
+
+/**
+ * Escalate a computed verdict to `blocking` when at least one broken caller is
+ * an ACTIVE parent Flow (R6-02). An active parent invokes this subflow in a
+ * currently-running path, so deactivating the subflow breaks that parent at
+ * runtime — the verdict must not sit below `blocking`. Non-active parents
+ * (Draft / Obsolete / InvalidDraft) are still surfaced as `broken-caller`
+ * impacts but do not force the escalation here.
+ */
+const escalateForActiveCallers = (
+  verdict: Verdict,
+  hasActiveBrokenCaller: boolean,
+): Verdict => (hasActiveBrokenCaller ? 'blocking' : verdict);
 
 /**
  * Comparator for the deterministic impact sort. Sort first by
@@ -321,18 +390,112 @@ const collectFiringConditions = async (
     edgeType: 'firesWhen',
   });
   if (!edgesResult.ok) return err(edgesResult.error.message);
+  // ONE batched fetch of every firesWhen target, replacing the per-edge
+  // `getNodeById` N+1. Edge order is preserved (this output is not re-sorted).
+  const nodesResult = await listNodesByIds(
+    ctx.graph,
+    edgesResult.value.map((e) => e.toId),
+  );
+  if (!nodesResult.ok) return err(nodesResult.error.message);
+  const byId = new Map(nodesResult.value.map((n) => [n.id, n]));
   const out: WhatIfDeactivateFlowFiringCondition[] = [];
   for (const edge of edgesResult.value) {
-    const nodeResult = await getNodeById(ctx.graph, edge.toId);
-    if (!nodeResult.ok) return err(nodeResult.error.message);
-    if (nodeResult.value === null) continue;
-    const expressionRaw = nodeResult.value.properties['expression'];
+    const node = byId.get(edge.toId);
+    if (node === undefined) continue;
+    const expressionRaw = node.properties['expression'];
     out.push({
-      conditionContextId: nodeResult.value.id,
+      conditionContextId: node.id,
       expression: typeof expressionRaw === 'string' ? expressionRaw : '',
     });
   }
   return ok(out);
+};
+
+/** Result of the incoming broken-caller walk. */
+interface BrokenCallerScan {
+  readonly impacts: readonly WhatIfImpactItem[];
+  /** True when at least one broken caller has `status === 'Active'`. */
+  readonly hasActiveBrokenCaller: boolean;
+}
+
+/**
+ * Read a Flow node's `status` property (`Active` / `Draft` / `Obsolete` /
+ * `InvalidDraft`), defaulting to `'unknown'` so the explanation never renders
+ * an empty status.
+ */
+const readCallerStatus = (node: Node): string => {
+  const raw = node.properties['status'];
+  return typeof raw === 'string' && raw.length > 0 ? raw : 'unknown';
+};
+
+/**
+ * R6-02: the INCOMING side. Walk `references` edges pointing AT this Flow and
+ * keep only the ones a PARENT Flow emitted to invoke it as a subflow
+ * (`properties.referenceKind === 'subflow'`). Each such parent is a BROKEN
+ * CALLER on deactivation — deactivating this subflow makes the parent's
+ * subflow-call step fail at runtime.
+ *
+ * Honesty (access ≠ usage): only `references` edges with `referenceKind:
+ * 'subflow'` are counted. Other incoming edge types (`grantedBy`, `parentOf`,
+ * `firesWhen`) and non-subflow `references` (e.g. a FlexiPage that merely
+ * EMBEDS the flow) are NOT broken callers and are excluded — matching the
+ * find_component_usages access-vs-usage discipline.
+ *
+ * Every parent caller is surfaced as a `broken-caller` impact (full
+ * transparency, with the parent's `status` in the explanation), but only an
+ * ACTIVE parent sets `hasActiveBrokenCaller` — the signal
+ * {@link escalateForActiveCallers} uses to force `blocking`. A subflow whose
+ * only callers are inactive is surfaced but does not read `safe`.
+ *
+ * Sparse-graph misses (an edge whose source node was dropped) and non-Flow
+ * sources (a malformed subflow edge) are skipped defensively.
+ */
+const collectBrokenCallers = async (
+  ctx: Context,
+  flowId: ComponentId,
+  flowApiName: string,
+): Promise<Result<BrokenCallerScan, string>> => {
+  const edgesResult = await listEdges(ctx.graph, flowId, {
+    direction: 'in',
+    edgeType: 'references',
+  });
+  if (!edgesResult.ok) return err(edgesResult.error.message);
+  // ONE batched fetch of every subflow caller, replacing the per-edge
+  // `getNodeById` N+1. Filter to subflow references first, then batch their
+  // sources; edge order is preserved (final response re-sorts by compareImpacts).
+  const subflowEdges = edgesResult.value.filter(
+    (e) => e.properties['referenceKind'] === 'subflow',
+  );
+  const parentNodesResult = await listNodesByIds(
+    ctx.graph,
+    subflowEdges.map((e) => e.fromId),
+  );
+  if (!parentNodesResult.ok) return err(parentNodesResult.error.message);
+  const parentById = new Map(parentNodesResult.value.map((n) => [n.id, n]));
+  const impacts: WhatIfImpactItem[] = [];
+  let hasActiveBrokenCaller = false;
+  for (const edge of subflowEdges) {
+    const parentNode = parentById.get(edge.fromId);
+    if (parentNode === undefined) continue; // sparse-graph miss
+    if (parentNode.type !== 'Flow') continue; // defensive: subflow callers are Flows
+    const status = readCallerStatus(parentNode);
+    if (status === 'Active') hasActiveBrokenCaller = true;
+    const activeNote =
+      status === 'Active'
+        ? 'this parent is Active, so deactivation breaks it at runtime'
+        : `this parent is ${status}, so it is not currently running — verify before relying on it`;
+    impacts.push({
+      category: 'broken-caller',
+      componentId: parentNode.id,
+      componentType: parentNode.type,
+      apiName: parentNode.apiName,
+      confidence: edge.confidence,
+      explanation:
+        `Flow '${parentNode.apiName}' (${status}) invokes '${flowApiName}' as a subflow; ` +
+        `deactivating '${flowApiName}' makes that subflow call fail — ${activeNote}.`,
+    });
+  }
+  return ok({ impacts, hasActiveBrokenCaller });
 };
 
 /**
@@ -357,21 +520,32 @@ const whatIfDeactivateFlowFromNode = async (
     });
   }
 
+  // ONE batched fetch of every non-structural outgoing target, replacing the
+  // per-edge `getNodeById` N+1. The per-edge Map lookup preserves edge order
+  // (the impacts are re-sorted by compareImpacts below) and the sparse-graph
+  // null-skip.
+  const outTargetsResult = await listNodesByIds(
+    ctx.graph,
+    edgesResult.value
+      .filter((e) => e.edgeType !== 'parentOf' && e.edgeType !== 'firesWhen')
+      .map((e) => e.toId),
+  );
+  if (!outTargetsResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${outTargetsResult.error.message}`,
+    });
+  }
+  const outTargetById = new Map(outTargetsResult.value.map((n) => [n.id, n]));
+
   const impacts: WhatIfImpactItem[] = [];
   for (const edge of edgesResult.value) {
     // Structural edges: `parentOf` is the Flow's container relationship,
     // `firesWhen` is the gating-condition primitive surfaced separately
     // in `firingConditions`. Neither is a downstream impact.
     if (edge.edgeType === 'parentOf' || edge.edgeType === 'firesWhen') continue;
-    const toResult = await getNodeById(ctx.graph, edge.toId);
-    if (!toResult.ok) {
-      return err({
-        kind: 'internal',
-        message: `graph query failed: ${toResult.error.message}`,
-      });
-    }
-    const toNode = toResult.value;
-    if (toNode === null) {
+    const toNode = outTargetById.get(edge.toId);
+    if (toNode === undefined) {
       // Sparse-graph case: the edge points at an id the graph has no
       // node row for. Drop silently — matches the tolerance every
       // other composition tool uses.
@@ -395,39 +569,75 @@ const whatIfDeactivateFlowFromNode = async (
   // subscribers are not reachable by the single outgoing-edge walk above —
   // they sit one hop past the event object — so surface them explicitly.
   const seenSubscribers = new Set<string>(impacts.map((i) => i.componentId));
-  for (const edge of edgesResult.value) {
-    if (edge.edgeType !== 'writesTo') continue;
-    if (!edge.toId.startsWith('CustomObject:') || !edge.toId.endsWith('__e')) continue;
-    const subsResult = await listEdges(ctx.graph, edge.toId, {
-      direction: 'in',
-      edgeType: 'listensTo',
-    });
-    if (!subsResult.ok) {
-      return err({ kind: 'internal', message: subsResult.error.message });
-    }
+  // Batched second hop. Collect the published-event objects in outer-edge order,
+  // fetch ALL their incoming listensTo edges in ONE `listEdgesForNodes`, then
+  // resolve the distinct subscriber nodes in ONE `listNodesByIds` — replacing
+  // the per-event `listEdges` + per-subscriber `getNodeById` double N+1. The two
+  // passes reproduce the old dedup EXACTLY: pass 1 walks events (then each
+  // event's listensTo bucket, sorted by the same total order `listEdges`
+  // returned) applying the identical `fromId === flowId` / `seenSubscribers`
+  // skips, recording the FIRST event that surfaces each subscriber so the
+  // per-event `eventApiName` in the explanation is unchanged; pass 2 resolves
+  // those ids (a null id is dropped just like the old null-skip) and emits.
+  const eventEdges = edgesResult.value.filter(
+    (e) =>
+      e.edgeType === 'writesTo' &&
+      e.toId.startsWith('CustomObject:') &&
+      e.toId.endsWith('__e'),
+  );
+  const listensToBatch = await listEdgesForNodes(
+    ctx.graph,
+    eventEdges.map((e) => e.toId),
+    { direction: 'in', edgeTypes: ['listensTo'] },
+  );
+  if (!listensToBatch.ok) {
+    return err({ kind: 'internal', message: listensToBatch.error.message });
+  }
+  const pendingSubscribers: { fromId: ComponentId; eventApiName: string }[] = [];
+  for (const edge of eventEdges) {
     const eventApiName = edge.toId.slice('CustomObject:'.length);
-    for (const sub of subsResult.value) {
+    for (const sub of listensToBatch.value.get(edge.toId) ?? []) {
       if (sub.fromId === flowId || seenSubscribers.has(sub.fromId)) continue;
-      const subResult = await getNodeById(ctx.graph, sub.fromId);
-      if (!subResult.ok) {
-        return err({ kind: 'internal', message: subResult.error.message });
-      }
-      const subNode = subResult.value;
-      if (subNode === null) continue;
-      seenSubscribers.add(subNode.id);
-      impacts.push({
-        category: 'metadata-blocker',
-        componentId: subNode.id,
-        componentType: subNode.type,
-        apiName: subNode.apiName,
-        confidence: 'heuristic',
-        explanation:
-          `Subscribes to the platform event ${eventApiName}, which this flow ` +
-          `publishes. Deactivating this flow stops that event, so this ` +
-          `subscriber will no longer be triggered by it.`,
-      });
+      seenSubscribers.add(sub.fromId);
+      pendingSubscribers.push({ fromId: sub.fromId, eventApiName });
     }
   }
+  const subNodesResult = await listNodesByIds(
+    ctx.graph,
+    pendingSubscribers.map((p) => p.fromId),
+  );
+  if (!subNodesResult.ok) {
+    return err({ kind: 'internal', message: subNodesResult.error.message });
+  }
+  const subNodeById = new Map(subNodesResult.value.map((n) => [n.id, n]));
+  for (const { fromId, eventApiName } of pendingSubscribers) {
+    const subNode = subNodeById.get(fromId);
+    if (subNode === undefined) continue;
+    impacts.push({
+      category: 'metadata-blocker',
+      componentId: subNode.id,
+      componentType: subNode.type,
+      apiName: subNode.apiName,
+      confidence: 'heuristic',
+      explanation:
+        `Subscribes to the platform event ${eventApiName}, which this flow ` +
+        `publishes. Deactivating this flow stops that event, so this ` +
+        `subscriber will no longer be triggered by it.`,
+    });
+  }
+
+  // R6-02: the INCOMING side. Parent Flows that invoke THIS Flow as a subflow
+  // are broken callers on deactivation — the single outgoing-edge walk above is
+  // blind to them, which is exactly why a called subflow used to read `safe`.
+  const brokenCallersResult = await collectBrokenCallers(
+    ctx,
+    flowId,
+    flowNode.apiName,
+  );
+  if (!brokenCallersResult.ok) {
+    return err({ kind: 'internal', message: brokenCallersResult.error });
+  }
+  impacts.push(...brokenCallersResult.value.impacts);
 
   const sortedImpacts = [...impacts].sort(compareImpacts);
 
@@ -436,7 +646,10 @@ const whatIfDeactivateFlowFromNode = async (
     return err({ kind: 'internal', message: firingConditionsResult.error });
   }
 
-  const rawVerdict = aggregateVerdict(sortedImpacts);
+  const rawVerdict = escalateForActiveCallers(
+    aggregateVerdict(sortedImpacts),
+    brokenCallersResult.value.hasActiveBrokenCaller,
+  );
   const coverage = attachCoverageToWhatIf(
     ctx,
     FLOW_DEACTIVATION_REQUIRED_COVERAGE,

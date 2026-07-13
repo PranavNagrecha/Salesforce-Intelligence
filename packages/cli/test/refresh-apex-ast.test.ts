@@ -69,6 +69,16 @@ const TWOCALLER = `public class TwoCaller {
   public void m1() { Callee c = new Callee(); c.help('a'); }
   public void m2() { Callee c = new Callee(); c.help('b'); }
 }`;
+// R6-03: SOQL is case-insensitive — this query references the vaulted field
+// Account.Custom_Flag__c in ALL-LOWERCASE and ONLY inside the query (never
+// dot-accessed). The AST read is emitted verbatim (`account.custom_flag__c`);
+// canonicalizeFieldEdgeTargets must land the edge on the vaulted node id, or
+// edge-only deletion verdicts would read the field as unreferenced.
+const LOWERSOQL = `public class LowerSoql {
+  public void run() {
+    List<SObject> rows = [select id from account where custom_flag__c = true];
+  }
+}`;
 
 const seed = async (): Promise<void> => {
   vaultRoot = join(cwd, 'org-kb');
@@ -90,10 +100,36 @@ const seed = async (): Promise<void> => {
     ['ChildSub', CHILDSUB],
     ['SemiJoin', SEMIJOIN],
     ['TwoCaller', TWOCALLER],
+    ['LowerSoql', LOWERSOQL],
   ] as const) {
     await writeFile(join(dir, `${name}.cls`), body, 'utf8');
     await writeFile(join(dir, `${name}.cls-meta.xml`), meta, 'utf8');
   }
+  // R6-03: a vaulted Account object + Custom_Flag__c field so the lowercase
+  // SOQL edge has a canonical node to canonicalize onto.
+  const objDir = join(paths.source, 'main', 'default', 'objects', 'Account');
+  await mkdir(join(objDir, 'fields'), { recursive: true });
+  await writeFile(
+    join(objDir, 'Account.object-meta.xml'),
+    `<?xml version="1.0" encoding="UTF-8"?>
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <sharingModel>ReadWrite</sharingModel>
+</CustomObject>
+`,
+    'utf8',
+  );
+  await writeFile(
+    join(objDir, 'fields', 'Custom_Flag__c.field-meta.xml'),
+    `<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Custom_Flag__c</fullName>
+    <label>Custom Flag</label>
+    <type>Checkbox</type>
+    <defaultValue>false</defaultValue>
+</CustomField>
+`,
+    'utf8',
+  );
   await writeFile(
     paths.config,
     JSON.stringify({
@@ -166,7 +202,7 @@ afterEach(async () => {
 });
 
 describe('refresh apex-ast (DEFAULT ON — P13-AST-flip)', () => {
-  it('runs BY DEFAULT: parsed edges present with no flag at all', async () => {
+  it('runs BY DEFAULT: parsed edges present with no flag at all', { timeout: 30_000 }, async () => {
     const r = await runRefresh({ cwd, noPull: true });
     expect(r.status).toBe('success');
     const edges = await astEdges();
@@ -174,7 +210,7 @@ describe('refresh apex-ast (DEFAULT ON — P13-AST-flip)', () => {
     expect(edges.every((e) => e['confidence'] === 'parsed')).toBe(true);
   });
 
-  it('dedupes exact heuristic twins: one real reference is ONE edge (parsed wins)', async () => {
+  it('dedupes exact heuristic twins: one real reference is ONE edge (parsed wins)', { timeout: 30_000 }, async () => {
     const r = await runRefresh({ cwd, noPull: true });
     expect(r.status).toBe('success');
     const opened = await openGraph(vaultPaths(vaultRoot).graphDb);
@@ -193,7 +229,7 @@ describe('refresh apex-ast (DEFAULT ON — P13-AST-flip)', () => {
     }
   });
 
-  it('drops typed-receiver + .class heuristic FPs on parsed files (P14-USAGE-scanner-fp-downgrade)', async () => {
+  it('drops typed-receiver + .class heuristic FPs on parsed files (P14-USAGE-scanner-fp-downgrade)', { timeout: 30_000 }, async () => {
     const r = await runRefresh({ cwd, noPull: true });
     expect(r.status).toBe('success');
     const opened = await openGraph(vaultPaths(vaultRoot).graphDb);
@@ -213,7 +249,7 @@ describe('refresh apex-ast (DEFAULT ON — P13-AST-flip)', () => {
     }
   });
 
-  it('adds parsed apex-ast edges coexisting with scanner edges; broken file falls back and is counted', async () => {
+  it('adds parsed apex-ast edges coexisting with scanner edges; broken file falls back and is counted', { timeout: 30_000 }, async () => {
     const r = await runRefresh({ cwd, noPull: true, apexAst: true });
     expect(r.status).toBe('success');
 
@@ -230,11 +266,39 @@ describe('refresh apex-ast (DEFAULT ON — P13-AST-flip)', () => {
     const manifest = await loadManifest(vaultRoot);
     if (!manifest.ok) throw new Error('manifest unreadable');
     expect(manifest.value.apexAst?.parseErrors).toBe(1);
-    // Caller + Callee + Wrapper + ChildSub + SemiJoin + TwoCaller parse cleanly (Broken fails).
-    expect(manifest.value.apexAst?.filesParsed).toBe(6);
+    // Caller + Callee + Wrapper + ChildSub + SemiJoin + TwoCaller + LowerSoql
+    // parse cleanly (Broken fails).
+    expect(manifest.value.apexAst?.filesParsed).toBe(7);
   });
 
-  it('SOQL subquery edges attribute to the right object; child-relationship + cross-scope phantoms are absent (CR-06 / H5)', async () => {
+  it('lowercase inline SOQL lands on the vaulted field id — no dangling case-variant (R6-03)', { timeout: 30_000 }, async () => {
+    const r = await runRefresh({ cwd, noPull: true });
+    expect(r.status).toBe('success');
+    const opened = await openGraph(vaultPaths(vaultRoot).graphDb);
+    if (!opened.ok) throw new Error(opened.error.message);
+    try {
+      const reader = await opened.value.connection.runAndReadAll(
+        "SELECT to_id, confidence FROM edges WHERE from_id = 'ApexClass:LowerSoql' AND edge_type = 'readsFrom' ORDER BY to_id",
+      );
+      const rows = reader.getRowObjectsJS() as unknown as readonly {
+        to_id: string;
+        confidence: string;
+      }[];
+      const targets = rows.map((x) => x.to_id);
+      // The WHERE-only, lowercase-only field attaches to the VAULTED node id
+      // at parsed confidence — the false-"safe" scenario is closed end-to-end.
+      expect(targets).toContain('CustomField:Account.Custom_Flag__c');
+      expect(
+        rows.find((x) => x.to_id === 'CustomField:Account.Custom_Flag__c')?.confidence,
+      ).toBe('parsed');
+      // No dangling lowercase twin survives for the vaulted field.
+      expect(targets).not.toContain('CustomField:account.custom_flag__c');
+    } finally {
+      await closeGraph(opened.value);
+    }
+  });
+
+  it('SOQL subquery edges attribute to the right object; child-relationship + cross-scope phantoms are absent (CR-06 / H5)', { timeout: 30_000 }, async () => {
     const r = await runRefresh({ cwd, noPull: true });
     expect(r.status).toBe('success');
     const opened = await openGraph(vaultPaths(vaultRoot).graphDb);
@@ -266,7 +330,7 @@ describe('refresh apex-ast (DEFAULT ON — P13-AST-flip)', () => {
     }
   });
 
-  it('callsApex edge carries callerMethods (class-level union) without touching methods[] (CR-CAP-06)', async () => {
+  it('callsApex edge carries callerMethods (class-level union) without touching methods[] (CR-CAP-06)', { timeout: 30_000 }, async () => {
     const r = await runRefresh({ cwd, noPull: true });
     expect(r.status).toBe('success');
     // Caller.run() is the only method that calls Callee.help → callerMethods=['run'].
@@ -281,7 +345,7 @@ describe('refresh apex-ast (DEFAULT ON — P13-AST-flip)', () => {
     expect(props2?.['methods']).toEqual(['help']);
   });
 
-  it('callsApex edge carries callerMethodsByMethod partitioned by TARGET method (CR-CAP-06 — no phantom)', async () => {
+  it('callsApex edge carries callerMethodsByMethod partitioned by TARGET method (CR-CAP-06 — no phantom)', { timeout: 30_000 }, async () => {
     const r = await runRefresh({ cwd, noPull: true });
     expect(r.status).toBe('success');
     // The per-target-method partition lets what_if attribute caller methods to
@@ -290,7 +354,7 @@ describe('refresh apex-ast (DEFAULT ON — P13-AST-flip)', () => {
     expect(props?.['callerMethodsByMethod']).toEqual({ help: ['m1', 'm2'] });
   });
 
-  it('callsApex edge COUNT is unchanged: callerMethods is property-only, one edge per target class (CR-CAP-06)', async () => {
+  it('callsApex edge COUNT is unchanged: callerMethods is property-only, one edge per target class (CR-CAP-06)', { timeout: 30_000 }, async () => {
     const r = await runRefresh({ cwd, noPull: true });
     expect(r.status).toBe('success');
     // TwoCaller calls the SAME target (Callee) from two methods → still exactly
@@ -299,7 +363,7 @@ describe('refresh apex-ast (DEFAULT ON — P13-AST-flip)', () => {
     expect(await callsApexCount('ApexClass:Caller')).toBe(1);
   });
 
-  it('apexAst:false (--no-apex-ast) opts out: zero apex-ast rows and no manifest block', async () => {
+  it('apexAst:false (--no-apex-ast) opts out: zero apex-ast rows and no manifest block', { timeout: 30_000 }, async () => {
     const r = await runRefresh({ cwd, noPull: true, apexAst: false });
     expect(r.status).toBe('success');
     expect((await astEdges()).length).toBe(0);

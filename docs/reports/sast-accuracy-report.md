@@ -1,8 +1,10 @@
 # SAST accuracy report — heuristic code-quality recognizers
 
 Measured against a **labeled synthetic Apex corpus** (`eval/sast-corpus.json`). Every
-finding the product emits is tagged `confidence: heuristic`; this report makes that
-honesty *measurable*. Synthetic data only — re-run with `node eval/sast-accuracy.mjs`.
+SAST code-quality finding is tagged `confidence: heuristic` (these token-pattern
+recognizers are heuristic by design — distinct from the default-on parser-grade Apex
+AST pass that emits `parsed` dependency edges); this report makes that honesty
+*measurable*. Synthetic data only — re-run with `node eval/sast-accuracy.mjs`.
 
 Corpus: **20 cases** across 6 rules (positives, negatives, FP-traps, and FN-blindspots).
 

@@ -41,7 +41,7 @@ import { deriveComponentApiName } from './path-utils.js';
  *         `type` is `DataRaptor` → `OmniDataTransform:{value.bundle}`.
  *         This is the card's passive data-load on render; without it,
  *         impact analysis silently omits cards that load through a
- *         DataRaptor (8 such cards in the mass.gov recon, e.g.
+ *         DataRaptor (8 such cards in a real state-agency org recon, e.g.
  *         openPdfPOC_Developer_2 → IEEGetDocContentVersion).
  *
  * Edge emission rules (and disclosed boundaries):
@@ -58,7 +58,7 @@ import { deriveComponentApiName } from './path-utils.js';
  *     dependency expressed through the `dataSource` (`type:
  *     IntegrationProcedures`, `value.ipMethod`) or a DataAction `message`
  *     (inner `type: IntegrationProcedures`) — 225 + 57 such references in
- *     the mass.gov recon — and a card→Apex dependency via an `ApexRemote`
+ *     a real state-agency org recon — and a card→Apex dependency via an `ApexRemote`
  *     dataSource / DataAction message. These are tracked as follow-up;
  *     only DataRaptor edges land here.
  *   - The DataRaptor edge target uses the unversioned `bundle` name
@@ -408,7 +408,7 @@ const buildDataActionEdge = (
  * downstream dependency the OmniScript / Integration Procedure extractors
  * model as `dispatchesOmniAction` -> `OmniDataTransform:{bundle}`. Without
  * this edge, "what uses DataRaptor X?" silently omits every card that
- * loads through it (8 cards in the mass.gov recon, including the
+ * loads through it (8 cards in a real state-agency org recon, including the
  * openPdfPOC cards -> IEEGetDocContentVersion).
  *
  * Only the DataRaptor dataSource type emits here. `IntegrationProcedures`

@@ -18,7 +18,7 @@ const HARNESS_ROOT = findHarnessRoot() ?? '';
 // `Sales_Process` is a record-type-specific path (its `<recordTypeName>` names
 // a custom record type); `Default_Opportunity` is an object-level default path
 // (its `<recordTypeName>` is the `__MASTER__` sentinel), mirroring the real
-// mass.gov `Default_Opportunity.pathAssistant-meta.xml`.
+// example.gov `Default_Opportunity.pathAssistant-meta.xml`.
 const SALES_FIXTURE_REL =
   'tests/fixtures/synthetic-v1.2/pathAssistants/Sales_Process.pathAssistant-meta.xml';
 const SALES_GOLDEN_REL =
@@ -63,7 +63,7 @@ const RECORD_TYPE_SPECIFIC_XML = `<?xml version="1.0" encoding="UTF-8"?>
 </PathAssistant>`;
 
 /**
- * An object-level default path shaped exactly like the real mass.gov
+ * An object-level default path shaped exactly like the real gate-vault
  * `Default_Opportunity.pathAssistant-meta.xml`: the object lives in
  * `<entityName>`, the picklist driver in `<fieldName>`, and the record type is
  * the `__MASTER__` sentinel (meaning "no specific record type").
@@ -87,7 +87,7 @@ describe('extractPathAssistant', () => {
       // The crux of the fix: the filename `Default_Opportunity` has no object
       // prefix and no dot. The bound object MUST come from `<entityName>`. The
       // old filename-dot-split model errored on this file; the new model
-      // extracts it. This is the real mass.gov shape.
+      // extracts it. This is the real gate-vault shape.
       const { dir, path } = await writeTempPathAssistantXml(
         'Default_Opportunity',
         MASTER_DEFAULT_XML,

@@ -428,6 +428,17 @@ export const generateComplianceReportHandler = async (
     'DISCLOSED GAP: god-mode granted via a Permission Set GROUP or a muting permission set is NOT resolved here — the vault models `userPermissions` on Profile/PermissionSet nodes only; PSG aggregation / muting is not folded into this exposure pass.',
   ];
 
+  // Finding 33: the per-field access-audit fan-out is capped at
+  // MAX_AUDITED_FIELDS to keep the response bounded — a fact previously
+  // disclosed only in the tool description. Surface it IN the generated
+  // document's boundaries[] whenever the cap actually bit, so a reader who
+  // acts on this report knows the exposure pass is incomplete.
+  if (regulatedFields.length > MAX_AUDITED_FIELDS) {
+    boundaries.push(
+      `Per-field access audit is CAPPED to the first ${MAX_AUDITED_FIELDS.toString()} of ${regulatedFields.length.toString()} regulated (PII/sensitive) fields to keep the response bounded — the remaining ${(regulatedFields.length - MAX_AUDITED_FIELDS).toString()} are listed in the inventory but were NOT access-audited here; narrow the scope (e.g. per object) to audit them.`,
+    );
+  }
+
   const componentIds: ComponentId[] = regulatedFields.map((f) => f.id);
 
   const document: GeneratedDocument = fitDocumentToBudget(

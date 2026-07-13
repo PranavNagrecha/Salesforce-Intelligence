@@ -1,0 +1,11 @@
+{
+  "_comment": "Copy this file to scripts/forbidden-names.local.json (gitignored) and fill in your real org identifiers. Categories: (1) scannerPatterns — regex patterns matched against every tracked file (org names, community names, usernames, feature-flag slugs); (2) patterns — alias for scannerPatterns (back-compat); (3) historyTerms — plain string terms for git-history scan (--git-history flag). Use \\b word-boundary anchors and escape dots for domains.",
+  "scannerPatterns": [
+    "\\bExampleOrgName\\b",
+    "\\bexample\\.example\\b"
+  ],
+  "patterns": [],
+  "historyTerms": [
+    "ExampleOrgName"
+  ]
+}

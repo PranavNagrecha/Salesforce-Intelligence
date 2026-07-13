@@ -1,0 +1,107 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+
+const title = "sf-intelligence vs Metazoa Snapshot - sf-intelligence";
+const description =
+  "Compare sf-intelligence with Metazoa Snapshot MCP: both can run locally — free OSS graph vs commercial org-management suite with local MCP.";
+
+const jsonld = [
+  {
+    "@type": "FAQPage",
+    mainEntity: [
+      {
+        "@type": "Question",
+        name: "Is sf-intelligence the only local / privacy-first Salesforce MCP?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "No. Metazoa Snapshot ships a local MCP server pitched with the same workstation / Zero Trust framing. Offline + read-only is a real differentiator versus cloud incumbents, but it is not a category of one. Choose on depth, honesty labels, write/deploy scope, and price.",
+        },
+      },
+      {
+        "@type": "Question",
+        name: "When should I buy Metazoa instead of using sf-intelligence?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "When you need Metazoa's full commercial org-management surface — visual admin tooling, deployment/compare, data migration, and their metadata-intelligence reports — plus a local MCP companion. sf-intelligence is free and MCP-first but is not a replace-the-admin-console product.",
+        },
+      },
+    ],
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/compare/metazoa"
+  heading="sf-intelligence vs Metazoa Snapshot"
+  intro="Metazoa proves that <strong>local MCP + privacy</strong> is a shared pitch. Lead with <em>depth you can verify, offline</em> — not privacy alone."
+  crumbs={[
+    { label: "compare", href: "/compare" },
+    { label: "vs Metazoa", href: "/compare/metazoa" },
+  ]}
+  breadcrumbs={[
+    { name: "Compare", path: "/compare" },
+    { name: "vs Metazoa", path: "/compare/metazoa" },
+  ]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container">
+      <div class="prose">
+        <div class="callout">
+          <p><strong>Short answer:</strong> Both can keep intelligence on the workstation. <strong>Metazoa Snapshot</strong> is a commercial org-management suite (dictionary, dependencies, deploy/compare, migration, admin UI) with a local MCP. <strong>sf-intelligence</strong> is a free, source-available MCP-first graph with confidence tags and refusal discipline — not a full admin console or deploy tool.</p>
+        </div>
+
+        <h2 id="summary">At a glance</h2>
+        <table class="doc-table">
+          <thead><tr><th>&nbsp;</th><th>sf-intelligence</th><th>Metazoa Snapshot</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Category</strong></td><td>Free MCP org-intelligence graph</td><td>Commercial org-management + local MCP</td></tr>
+            <tr><td><strong>Privacy pitch</strong></td><td>Offline vault by default</td><td>Local workstation / Zero Trust MCP (their framing)</td></tr>
+            <tr><td><strong>Cost</strong></td><td>Free (MIT + Commons Clause)</td><td>Commercial product (verify on metazoa.com)</td></tr>
+            <tr><td><strong>Open source</strong></td><td>Yes</td><td>No</td></tr>
+            <tr><td><strong>Deploy / migrate</strong></td><td>No — read-only</td><td>Yes — core Snapshot capabilities</td></tr>
+            <tr><td><strong>Admin UI</strong></td><td>No hosted UI</td><td>Yes — desktop / product UI</td></tr>
+            <tr><td><strong>Confidence / refusal</strong></td><td>First-class labels + fail-closed gates</td><td>Product-specific assistant UX (see Metazoa docs)</td></tr>
+            <tr><td><strong>Primary user</strong></td><td>Developers &amp; IDE agents</td><td>Admins &amp; developers in Snapshot workflows</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="when-sfi">Choose sf-intelligence when you want to…</h2>
+        <ul>
+          <li>A free MCP server with no commercial license</li>
+          <li>Editor-native questions with explicit confidence tiers</li>
+          <li>Read-only guarantee (no deploy path in the product)</li>
+          <li>Compose an <a href="/use-cases/agent-readiness-audit">agent-readiness audit</a> from open tools</li>
+        </ul>
+
+        <h2 id="when-metazoa">Choose Metazoa when you want to…</h2>
+        <ul>
+          <li>A full paid org-management workstation (reports, deploy, data tools)</li>
+          <li>Local MCP as a companion to that suite</li>
+          <li>Vendor support and an established admin product line</li>
+        </ul>
+
+        <h2 id="moat">What still differentiates</h2>
+        <p>Against cloud tools, both win on locality. Against each other, durable contrasts are <strong>price</strong>, <strong>open source</strong>, <strong>read-only vs act</strong>, and how explicitly findings are labeled. Do not claim unique ownership of "metadata never leaves the workstation."</p>
+
+        <h2 id="more">More comparisons</h2>
+        <p><a href="/compare">compare hub</a> · <a href="/compare/salesforce-dx-mcp">Salesforce MCP</a> · <a href="/compare/elements-cloud">Elements.cloud</a> · <a href="/compare/dx0">dx0</a> · <a href="/compare/hubbl">Hubbl</a>.</p>
+
+        <div class="callout"><p><strong>Disclaimer:</strong> Based on Metazoa's public MCP / Snapshot positioning as of mid-2026. Verify current capabilities and licensing on metazoa.com. sf-intelligence is independent and not affiliated with Metazoa.</p></div>
+
+        <div style="padding-top:36px;">
+          <div class="cta-box">
+            <h2 class="screen-type">Depth you can verify, offline.</h2>
+            <p>Privacy is necessary — not sufficient. Free graph + confidence labels.</p>
+            <div class="cta-actions">
+              <a class="btn btn-solid" href="/getting-started">install sf-intelligence</a>
+              <a class="btn btn-ghost" href="/ai-safety">is AI safe on my org?</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</DocPage>

@@ -214,16 +214,25 @@ export interface FindCodeUsagesOutput {
    */
   readonly coverageCaveat?: CoverageCaveat;
   /**
-   * Page size applied to this response. Present ONLY on a PAGED response
-   * (`hasMore` or a resumed `offset > 0`); omitted on a whole-fits no-cursor
-   * call so that response stays byte-identical to the pre-CR-22 shape
-   * (`{ usages, boundaries }`).
+   * ALWAYS-ON pagination envelope (STEP-2 shape shim). find_code_usages emits
+   * the full `totalCount`/`offset`/`limit`/`hasMore`/`nextOffset` scalars on
+   * every response — matching the folded-in `find_apex_usages` twin so its
+   * hidden back-compat alias is a pure pass-through and a programmatic consumer
+   * relying on an always-present `totalCount` never breaks.
+   *
+   * The TRUE total number of code usages matching the filters BEFORE
+   * `offset`/`limit` paging. `totalCount > usages.length` means the page is a
+   * partial slice; a truncation note in `boundaries[]` says so explicitly.
    */
-  readonly limit?: number;
-  /** Zero-based offset of this page. Present only when paged (see `limit`). */
-  readonly offset?: number;
-  /** Offset to pass on the next call to fetch the following page. Present only when truncated. */
-  readonly nextOffset?: number;
+  readonly totalCount: number;
+  /** Zero-based offset of this page. */
+  readonly offset: number;
+  /** Page size applied (the effective `limit`). */
+  readonly limit: number;
+  /** True when more usages remain past this page. */
+  readonly hasMore: boolean;
+  /** Next offset to fetch the following page, or `null` when the list is exhausted. */
+  readonly nextOffset: number | null;
   /**
    * CR-22 opaque continuation token, present ONLY when this page is truncated.
    * Echo it back as `cursor` to resume. Absent on a complete page so an
@@ -235,7 +244,7 @@ export interface FindCodeUsagesOutput {
 }
 
 const CODE_USAGE_HEURISTIC_DISCLOSURE =
-  'Apex referrers come from the parser-grade Apex pass (confidence: parsed — the default since 0.1.9) plus the heuristic recall scanner; frontend referrers from the heuristic LWC/Aura/VF scanner. Still NOT modeled as edges: DYNAMIC SOQL built at runtime, reflective field access (`get()`/`put()`), LWC `record[fieldName]` dynamic access, and string-built references. Confidence per edge is on each usage; verify heuristic edges before acting.';
+  'Apex referrers come from the parser-grade Apex pass (confidence: parsed — the default since 0.1.9) plus the heuristic recall scanner; frontend referrers from the heuristic LWC/Aura/VF scanner. The Apex AST is NOT a compiler: symbol resolution is single-file and method-scoped (params/locals shadow fields; own-method return types propagate in-file only) — cross-class return types, overloads, cross-file inheritance fields, DYNAMIC SOQL built at runtime, reflective field access (`get()`/`put()`), LWC `record[fieldName]` dynamic access, and string-built references are still NOT modeled. Confidence per edge is on each usage; verify heuristic edges before acting.';
 const CODE_USAGE_EMPTY_DISCLOSURE =
   'No code usages found in the vault — this is NOT proof that no code uses it. The scanner is heuristic (dynamic/reflective references are invisible) and managed-package code is not retrieved. Cross-check `find_component_usages` (graph + grep) before concluding it is unused.';
 
@@ -388,39 +397,47 @@ export const findCodeUsagesHandler = async (
     },
   });
   const page = paged.items;
-  const truncated = paged.hasMore;
+  const total = paged.totalCount;
+  const hasMore = paged.hasMore;
+  const returned = offset + page.length;
   const emitCursor = paged.nextCursor !== null;
-  // Diverges from the B1 twin's always-on emit shape: find_code_usages today
-  // emits ONLY { usages, boundaries }, so paging fields are spread CONDITIONALLY
-  // (only when truncated OR resumed) to keep a whole-fits no-cursor call
-  // byte-identical to pre-CR-22.
-  const isPaged = truncated || offset > 0;
 
-  // The empty-disclosure is keyed on the FULL result count (paged.totalCount),
-  // not the page, so a non-first page that happens to be empty still discloses
-  // honestly and a target with usages never trips the empty note mid-walk.
-  // I3b (empty ≠ none): on an empty FULL result also name the code families the
+  // STEP-2 shape shim: emit the pagination envelope ALWAYS (see the twin
+  // find_apex_usages, whose folded-in alias delegates here) rather than
+  // conditionally, so a consumer of the always-present `totalCount`/`hasMore`
+  // never breaks on a whole-fits page.
+  // The empty-disclosure is keyed on the FULL result count (`total`), not the
+  // page, so a non-first page that happens to be empty still discloses honestly
+  // and a target with usages never trips the empty note mid-walk. I3b
+  // (empty ≠ none): on an empty FULL result also name the code families the
   // vault did NOT fully retrieve, so "no code uses this" carries "…among the
   // families the vault covers". Non-empty output is untouched.
   const coverageCaveat =
-    paged.totalCount === 0
+    total === 0
       ? buildEmptyTraversalCoverageCaveat(ctx, CODE_USAGE_REQUIRED_COVERAGE)
       : undefined;
-  const boundaries =
-    paged.totalCount === 0
-      ? [
-          CODE_USAGE_HEURISTIC_DISCLOSURE,
-          CODE_USAGE_EMPTY_DISCLOSURE,
-          ...(coverageCaveat !== undefined ? [coverageCaveat.message] : []),
-        ]
-      : [CODE_USAGE_HEURISTIC_DISCLOSURE];
+  const boundaries: string[] = [CODE_USAGE_HEURISTIC_DISCLOSURE];
+  if (total === 0) {
+    boundaries.push(CODE_USAGE_EMPTY_DISCLOSURE);
+    if (coverageCaveat !== undefined) boundaries.push(coverageCaveat.message);
+  }
+  if (hasMore) {
+    boundaries.push(
+      `Showing ${page.length} of ${total} code usage(s) (offset=${offset}). ` +
+        `MORE remain — advance with offset=${returned}. This list is ` +
+        `INCOMPLETE; do not treat it as the full blast radius.`,
+    );
+  }
 
   return ok({
     data: {
       usages: page,
       boundaries,
-      ...(isPaged ? { limit, offset } : {}),
-      ...(truncated ? { nextOffset: offset + page.length } : {}),
+      totalCount: total,
+      offset,
+      limit,
+      hasMore,
+      nextOffset: hasMore ? returned : null,
       ...(emitCursor
         ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo }
         : {}),

@@ -366,10 +366,10 @@ export const parseApexHeader = (
   // (`public interface IFoo { ... }`) has no `class` keyword, but it IS a real
   // component — other classes `implements` it — and must parse as an ApexClass
   // node, not error "no class declaration found" (4 interfaces broke the
-  // mass.gov refresh). The name / modifiers / extends parsing below is
+  // example.gov refresh). The name / modifiers / extends parsing below is
   // keyword-agnostic; an interface's `extends` parent is captured as superclass.
   // Apex keywords are CASE-INSENSITIVE: `public Interface IFoo{}` (capital I,
-  // as in the real mass.gov IIntegrationService) is valid and must parse like
+  // as in the real gate-vault IIntegrationService) is valid and must parse like
   // lowercase `interface`. Match the keyword case-insensitively.
   const classIndex = tokens.findIndex((t) => {
     const lower = t.text.toLowerCase();

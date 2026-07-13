@@ -127,6 +127,21 @@ describe('analyzeOversizeEnumeration', () => {
     }
   });
 
+  // 0.2.0 gate regression: record_creation_paths and flow_fault_audit shipped
+  // with a `limit` input but were never registered in HIGH_FANOUT_INVENTORY,
+  // so the release gate (check-oversize-enumeration.mjs) flagged them as
+  // unaudited enumerators. Both are limit-capped truncators with NO resume
+  // knob (they disclose the cut via *Truncated flags + full counts), so the
+  // truthful classification is `handler-capped`.
+  it('FAIL-BEFORE/PASS-AFTER: the two 0.2.0 limit enumerators are inventoried as handler-capped', () => {
+    for (const name of ['sfi.record_creation_paths', 'sfi.flow_fault_audit']) {
+      const entry = HIGH_FANOUT_INVENTORY[name];
+      expect(entry, `${name} must be in HIGH_FANOUT_INVENTORY`).toBeDefined();
+      expect(entry?.bound, `${name} must be handler-capped`).toBe('handler-capped');
+      expect(LIMIT_TOOL_EXCLUSIONS.has(name), `${name} must not be excluded`).toBe(false);
+    }
+  });
+
   it('every `paginated` inventory tool exposes a real resume knob in V01_TOOLS', () => {
     const roster = new Map(V01_TOOLS.map((t) => [t.name, t]));
     const offenders: string[] = [];

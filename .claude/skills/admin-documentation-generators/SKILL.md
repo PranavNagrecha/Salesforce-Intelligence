@@ -152,6 +152,12 @@ document covering:
   type, required flag, description.
 - **Relationships** — outgoing lookups + master-details from this
   object to others; incoming lookups from others to this object.
+- **Entity Relationship Diagram** (R6-19) — a `mermaid erDiagram`
+  fence covering the SAME two directions (this object's own
+  outgoing Lookup/Master-Detail fields, plus every other object's
+  inbound `lookupTo` reference to it), rendered visually rather
+  than tabulated. Capped at 40 relationships; the cap and the
+  `lookupTo`-extraction-time scope are disclosed in `boundaries[]`.
 - **Validation Rules** — every ValidationRule whose `parentId`
   matches.
 - **Page Layouts** — every Layout whose `parentId` matches.
@@ -216,8 +222,9 @@ hints).
 
 Composes `sfi.org_overview` + `sfi.domain_clusters` +
 `sfi.integration_map` into a structured markdown document with
-three mermaid diagrams (org structure, domain clustering,
-integration topology) and supporting tables.
+FOUR mermaid diagrams (org structure, an entity-relationship
+diagram, domain clustering, integration topology) and supporting
+tables.
 
 ```json
 {}
@@ -227,6 +234,26 @@ Takes no arguments. Fire this when the admin asks for the
 high-level architecture map. The mermaid diagrams render
 inline in most markdown viewers; the supporting tables list
 the top components per cluster.
+
+Two of the diagrams cap their node count (Org Structure: top
+5 CustomObjects by inbound references; Integration Topology:
+first 20 integration surfaces — its Type/Count table is never
+capped, only the diagram). When an org exceeds either cap, an
+inline "showing the top/first N of M" line renders under the
+diagram and `document.boundaries` gets a matching entry — a
+large org's overview never silently reads as a complete
+picture.
+
+The Entity Relationship Diagram (R6-19) is a SEPARATE ranking from
+Org Structure: Org Structure ranks by total inbound-reference
+count (any edge type); the ERD ranks by Lookup/Master-Detail
+relationship DEGREE (in + out `lookupTo` edges only) and shows the
+top 12 objects — a relationship line renders ONLY when BOTH its
+endpoints made that top-12 cut, so a disconnected or thinly-linked
+object can be ranked-in but show no lines. Both the object cap and
+the true object count are disclosed. For a complete relationship
+picture of ONE object, use `sfi.generate_data_dictionary` instead
+— its ERD is not object-count-capped.
 
 ### 5. `sfi.generate_sharing_summary` — per-object or org-wide sharing doc
 
@@ -240,6 +267,12 @@ mermaid diagram when Role nodes are present.
 {}                              // org-wide (capped at 50 objects)
 { "objectFilter": "Account" }   // single-object focus
 ```
+
+A >50-object org's response carries `scanTruncated: true` +
+`totalMatchingObjects` (the TRUE count), disclosed inline in the
+document's Overview line and `boundaries` too — never silently
+read as complete; narrow with `objectFilter` for full per-object
+coverage of the objects the cap dropped.
 
 Fire this when the admin asks for the sharing-model write-up. For
 "why can't user X see record Y?" cascades, defer to

@@ -172,7 +172,7 @@ describe('extractOmniScript', () => {
     it('emits a dispatchesOmniAction IP edge for a Step that invokes an IP on Next', async () => {
       // A non-"Integration Procedure Action" element can still invoke an IP:
       // the integrationProcedureKey lives in its propertySetConfig. Real shape:
-      // mass.gov AccountLinking_Existing has a "Next" Navigate Action whose
+      // example.gov AccountLinking_Existing has a "Next" Navigate Action whose
       // config carries integrationProcedureKey=AccountLiniking_MPPValidation,
       // which the type/targetType gate dropped. The dependency must surface for
       // ANY element carrying the key (a Step here, as the simplest isolated

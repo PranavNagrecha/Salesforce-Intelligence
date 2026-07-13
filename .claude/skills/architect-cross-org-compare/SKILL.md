@@ -80,6 +80,7 @@ Defer to another skill when:
 | "Compare Account between sandbox and prod" | `sfi.compare_object_across_vaults({ objectApiName: 'Account', vaultA, vaultB })` |
 | "Does System Administrator have the same permissions in sandbox as in prod?" | `sfi.compare_profile_across_vaults({ profileName: 'System Administrator', vaultA, vaultB })` |
 | "Map Lead fields to Contact for conversion" / "Lead conversion mapping" | `sfi.field_mapping_between_objects({ vault, objectA: 'Lead', objectB: 'Contact' })` |
+| "Will this changeset break prod?" / "review this deploy against prod" / "cross-vault deploy review" | `sfi.review_change({ components, againstVault: '{prodAlias}' })` — the deploy-gate verdict computed against the NAMED vault's graph |
 
 When the user's question is ambiguous ("compare my orgs" without
 naming which two), ASK ONE disambiguation question listing the
@@ -117,7 +118,15 @@ per PLAN-v3.1 §10.
 - **Compare-vaults followed by impact analysis** — when the user asks
   "what breaks in prod if I deploy this from sandbox?", chain through
   `architect-impact-analysis` after `sfi.compare_vaults` identifies
-  the changeset.
+  the changeset. When the user ALREADY HAS the changeset (a PR /
+  package.xml / `git diff`) and just wants the deploy verdict against
+  the target org, skip straight to `sfi.review_change({ components,
+  againstVault: '{prodAlias}' })` (or `sfi review-change --against
+  {prodAlias}` on the CLI) — it opens that vault READ-ONLY and computes
+  every dependent / verdict / test against ITS graph, and discloses the
+  target vault, ids absent from it (added relative to it), and a
+  product-version caveat. A `blocking` verdict there means the change
+  breaks something IN THAT org — the CLI exits 1, gating the deploy.
 - **Compare-profile followed by sharing troubleshooting** — when the
   user asks "why can user X see this in sandbox but not prod?", chain
   through `admin-sharing-troubleshooting` after
@@ -129,13 +138,49 @@ per PLAN-v3.1 §10.
 
 | Tool result | Default render |
 |---|---|
-| `sfi.compare_vaults` happy path | Table of added / removed / shape-modified per type family; cite per-row confidence; surface the volatile-property filter disclosure verbatim. |
+| `sfi.compare_vaults` happy path | Table of added / removed / shape-modified per type family; cite per-row confidence; surface the volatile-property filter disclosure verbatim; when `edgeDrift.components` is non-empty, ALSO show which components gained/lost dependency edges (this is often the more actionable finding when node properties are unchanged — e.g. "Flow X now also references Field Y"). |
 | `sfi.compare_vaults` empty result | Single-line "no differences" + the filter caveat verbatim. |
-| `sfi.compare_object_across_vaults` happy path | Object-level drift table first; then added / removed / shape-modified field tables; surface the api-name-match disclosure verbatim. |
+| `sfi.compare_object_across_vaults` happy path | Object-level drift table first; then added / removed / shape-modified field tables; surface the api-name-match disclosure verbatim; when `edgeDrift.components` is non-empty (R7-W10), ALSO show which fields (or the object itself) gained/lost dependency edges. |
 | `sfi.compare_profile_across_vaults` happy path | Per-grant-category drift summary; surface the v0.1 profile-edition-rollup disclosure verbatim. |
 | `sfi.field_mapping_between_objects` happy path | Suggested-pairs table ordered by `labelSimilarity` descending; ALWAYS preface with the Q174 verbatim heuristic-mapping disclosure. |
 | `sfi.field_mapping_between_objects` no pairs above threshold | "No pairs above similarity threshold X — try lowering the threshold or invoke with `includeTypeIncompatible: true` to see label-only matches" + the Q174 disclosure. |
 | Any tool with vault-not-found | "Vault alias '{alias}' is not registered. Run `sfi register-vault {alias} <path>` first, or `sfi list-vaults` to see what's registered." |
+
+## Edge drift (R6-12 / R7-W10) — compare_vaults AND compare_object_across_vaults
+
+Node-hash comparison alone is blind to DEPENDENCY drift: a Flow that
+starts referencing a new field, or a validation rule that drops a
+reference, changes nothing in the node's own properties, so it never
+showed up as `shapeModified`. `sfi.compare_vaults`'s `edgeDrift` axis
+closes that gap: for every component present in BOTH vaults
+(regardless of whether its own node hash matched), it diffs the two
+vaults' OUTGOING edge sets and reports `edgesAdded[]` / `edgesRemoved[]`
+per component — capped at 200 drifted components / 50 rows per
+component, with `summary` holding the true totals. The comparison
+identity is `edgeType` + `toId` + `referenceKind` (when the edge
+carries one); a `referenceKind` change on an otherwise-identical edge
+therefore shows as one removed row + one added row, not a single
+"modified" row — the same remove+add correspondence convention as a
+renamed component.
+
+**R7-W10:** `sfi.compare_object_across_vaults` now shares the IDENTICAL
+`edgeDrift` axis (same diff primitive, same caps, same disclosure
+text), scoped to the ONE object's own components — the CustomObject
+node itself (when present in both vaults) plus every field paired by
+api-name (present in both vaults, independent of whether its own
+properties matched). If the user asks "did Account's dependencies
+change between sandbox and prod?" or "does Discount__c reference
+anything new in prod?", call `sfi.compare_object_across_vaults` and
+read `edgeDrift` directly — no need to fall back to
+`sfi.compare_vaults({ objectFilter })` for a single-object ask anymore
+(that whole-vault route still works and returns the identical shape for
+that object, but the object-scoped tool is the more direct answer).
+
+When the two vaults' manifests report DIFFERENT sf-intelligence product
+versions, BOTH tools return `extractorVersionCaveat` — surface it
+before any edge-drift (or node-shape) finding: a difference between
+differently-extracted vaults can reflect an EXTRACTOR change, not a
+real change in the org.
 
 ## The four honesty disclosures (verbatim)
 

@@ -34,7 +34,38 @@ const jsonld = [
 >
   <section>
     <div class="container">
+      <div class="grid cols-2" style="margin-bottom:8px;">
+        <article class="card" style="border-color:var(--green-soft);">
+          <div class="tagn">no org needed</div>
+          <h3>Try the demo first</h3>
+          <p>A synthetic "Verdant Energy" solar-installer org, served fully offline with no Salesforce auth. First run builds it in seconds; every run after is instant.</p>
+          <a class="btn btn-ghost" href="#demo">↓ 2-minute demo</a>
+        </article>
+        <article class="card">
+          <div class="tagn">your org</div>
+          <h3>Connect your own org</h3>
+          <p>Vault your real Salesforce org's metadata - read-only - and ask real questions about your real schema, Apex, Flows, and permissions.</p>
+          <a class="btn btn-ghost" href="#prerequisites">↓ full install guide</a>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section style="padding-top:0;">
+    <div class="container">
       <div class="prose">
+        <h2 id="demo">Track 1 - try it now, no org needed</h2>
+        <p>Want to see it work before pointing it at your own org? One command serves a built-in <strong>synthetic demo org</strong> ("Verdant Energy," a fictional solar installer) over MCP - fully offline, no auth, no <code>sf</code> CLI required.</p>
+        <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo</pre></div>
+        <p>Then ask it things like:</p>
+        <div class="code-block"><div class="cb-head"><span class="fname">examples</span></div><pre><span class="tok-p">›</span> What happens when I save a Project?
+<span class="tok-p">›</span> What breaks if I delete Invoice__c.Amount__c?
+<span class="tok-p">›</span> Why can't an Installer see an Invoice?
+<span class="tok-p">›</span> Which Apex has governor-limit risk?</pre></div>
+        <p>The first run builds the demo vault in a few seconds (cached under <code>~/.sf-intelligence/demo</code>); every run after is instant. Nothing leaves your machine.</p>
+        <div class="callout"><p><strong>Ready for your real org?</strong> Track 2 below - prerequisites through your first refresh - walks through connecting your own Salesforce org.</p></div>
+
+        <p class="sec-label" style="margin-top:40px; padding-top:26px; border-top:1px solid var(--line);">track 2 - connect your own org</p>
         <h2 id="prerequisites">1. Prerequisites</h2>
         <p>You need two things on the machine that runs your MCP client. Versions are minimums.</p>
 
@@ -71,6 +102,20 @@ const jsonld = [
   {'}'}
 {'}'}</pre></div>
         <div class="callout"><p><strong>Cursor &amp; other IDE clients:</strong> after editing the MCP config you must reload it - Cursor does not pick up <code>.cursor/mcp.json</code> changes live. Toggle the server off/on in Settings → MCP (or restart the IDE), or the <code>sfi.*</code> tools won't appear.</p></div>
+
+        <h3>Optional: a compact tool roster (<code>SFI_TOOL_PROFILE=core</code>)</h3>
+        <p>Every <code>sfi.*</code> tool schema is advertised by default - most MCP hosts pay a real token tax for that (~250 KB of <code>tools/list</code> JSON) if they don't defer tool definitions. Set <code>SFI_TOOL_PROFILE=core</code> on the server process to advertise only an <strong>18-tool core roster</strong> instead - orientation, resolve/route, the universal graph reads, and a catalog gateway (<code>list_analyses</code> / <code>describe_analysis</code> / <code>run_analysis</code>) that reaches every other tool with byte-identical output. Nothing is removed - a non-advertised tool still works if called directly; only what's <em>advertised</em> at boot changes. Add it to the config block above:</p>
+        <div class="code-block"><div class="cb-head"><span class="fname">claude_desktop_config.json</span></div><pre>{'{'}
+  <span class="tok-s">"mcpServers"</span>: {'{'}
+    <span class="tok-s">"sf-intelligence"</span>: {'{'}
+      <span class="tok-s">"type"</span>: <span class="tok-s">"stdio"</span>,
+      <span class="tok-s">"command"</span>: <span class="tok-s">"npx"</span>,
+      <span class="tok-s">"args"</span>: [<span class="tok-s">"-y"</span>, <span class="tok-s">"sf-intelligence"</span>, <span class="tok-s">"mcp"</span>],
+      <span class="tok-s">"env"</span>: {'{'} <span class="tok-s">"SFI_TOOL_PROFILE"</span>: <span class="tok-s">"core"</span> {'}'}
+    {'}'}
+  {'}'}
+{'}'}</pre></div>
+        <p>Default stays <code>full</code> - this is purely opt-in. See the <a href="/configuration">configuration reference</a> for the full tool-profile details.</p>
 
         <h3>Optional: a shorter <code>sfi</code> command</h3>
         <p><code>npx -y sf-intelligence …</code> works without installing anything, but it's verbose and re-checks the registry each run. A global install gives you a short <code>sfi</code> command for setup; or add it to the repo and call it via <code>npx</code> (which resolves the local copy, no re-download):</p>
@@ -127,7 +172,11 @@ const jsonld = [
 
         <h2 id="more">Configuration, live data &amp; the plugin</h2>
         <p>Vault answers are offline by default. To enable the read-only live plane (record counts, samples, org limits), set environment variables, or wire up multiple orgs, see the <a href="/configuration">configuration reference</a>.</p>
-        <p>Running it as a <strong>Claude Code plugin</strong>? The same operations are slash commands - <code>/sfi-onboard</code> (guided first run), <code>/sfi-init</code>, <code>/sfi-refresh</code>, <code>/sfi-status</code> - and the coaching skills auto-activate when Salesforce vocabulary appears.</p>
+        <h3 id="plugin">Install as a Claude Code plugin</h3>
+        <p>The MCP registration above gets you the <code>sfi.*</code> tools. Installing <code>sf-intelligence</code> as a <strong>Claude Code plugin</strong> additionally gets you <strong>25 skills</strong> that auto-activate on Salesforce vocabulary - no need to remember tool names - and <strong>4 slash commands</strong> (<code>/sfi-onboard</code> guided first run, <code>/sfi-init</code>, <code>/sfi-refresh</code>, <code>/sfi-status</code>) that wrap the <code>sfi</code> CLI. Install it from this repo's marketplace:</p>
+        <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">/plugin</span> marketplace add PranavNagrecha/Salesforce-Intelligence
+<span class="tok-k">/plugin</span> install sf-intelligence@sf-intelligence</pre></div>
+        <p>Run <code>/reload-plugins</code> (or restart Claude Code) to pick it up in the current session; <code>/plugin list</code> confirms it's installed and enabled. The plugin manifest registers the same MCP server shown above, so once it's installed you don't need a separate <code>claude mcp add</code> step.</p>
 
         <div style="padding-top:36px;">
           <div class="cta-box">

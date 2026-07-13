@@ -18,6 +18,8 @@ import {
   findDependencyCyclesInputSchema,
 } from '../../src/tools/find-dependency-cycles.js';
 
+import { measureGraphQueries } from './_graph-query-budget.js';
+
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
   refreshedAt: '2026-05-29T00:00:00Z',
@@ -180,5 +182,63 @@ describe('findDependencyCyclesHandler — output cursor (CR-22)', () => {
     }
     expect(seen).toEqual(fullOrder);
     expect(new Set(seen).size).toBe(seen.length);
+  });
+});
+
+// =============================================================================
+// N+1 query budget (finding C-1). buildAdjacency used to run one `listEdges`
+// per Apex node; it now issues ONE batched `listEdgesForNodes`. The edge+node
+// round-trip count must stay a small constant independent of Apex-node count —
+// a reintroduced per-node loop would be ~N edge queries and fail here.
+// =============================================================================
+describe('findDependencyCyclesHandler — bounded graph queries', () => {
+  // A single N-node callsApex ring: every node has exactly one outgoing edge,
+  // so the pre-batch code issued N `listEdges` calls. Fits in one scan window
+  // (N <= 500) so the node scan stays a constant 2 queries (ApexClass +
+  // ApexTrigger types), independent of N.
+  const seedRing = async (n: number) => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-cycles-budget-'));
+    const opened = await openGraph(join(dir, 'ring.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const s = opened.value;
+    const ringSeed: ExtractionResult = {
+      nodes: Array.from({ length: n }, (_unused, i) => cls(`Ring${i}`)),
+      edges: Array.from({ length: n }, (_unused, i) =>
+        calls(`Ring${i}`, `Ring${(i + 1) % n}`),
+      ),
+    };
+    const imported = await importExtractionResults(s, [ringSeed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const ringCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s } as Context;
+    const { result, edgeQueries, nodeQueries } = await measureGraphQueries(s, () =>
+      findDependencyCyclesHandler(ringCtx, { limit: 200 }),
+    );
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+    return { result, edgeQueries, nodeQueries };
+  };
+
+  it('issues a constant edge+node query count regardless of Apex-node count', async () => {
+    const small = await seedRing(60);
+    const large = await seedRing(200);
+    expect(small.result.ok).toBe(true);
+    expect(large.result.ok).toBe(true);
+    // ONE batched edge round-trip (not one per node).
+    expect(small.edgeQueries).toBe(1);
+    expect(large.edgeQueries).toBe(1);
+    // Constant fan-out budget: a couple of node-scan windows + one edge batch.
+    expect(small.edgeQueries + small.nodeQueries).toBeLessThanOrEqual(4);
+    // Independence: same query count at N=60 and N=200 (does NOT scale with N).
+    expect(large.edgeQueries).toBe(small.edgeQueries);
+    expect(large.nodeQueries).toBe(small.nodeQueries);
+  });
+
+  it('still detects the ring as one N-node cycle (result unchanged by batching)', async () => {
+    const { result } = await seedRing(60);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ring = result.value.data.cycles.find((c) => c.size === 60);
+    expect(ring).toBeDefined();
+    expect(result.value.data.summary.callsApexEdgesConsidered).toBe(60);
   });
 });

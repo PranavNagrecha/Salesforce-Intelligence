@@ -17,16 +17,27 @@
  *     whose result is then cached in `~/.sf-intelligence/update-check.json`
  *     (the same state dir the live-plane consent store uses).
  *
- * ## What it never does
+ * ## Opt-in adoption counter (default OFF)
  *
- *   - No telemetry, user identifiers, or org data leave the machine — the only
- *     request is a plain GET of the public registry document.
+ * After a **fresh** registry check (never on a cache hit), if — and only if —
+ * `SFI_TELEMETRY_OPTIN=1` **and** `SFI_TELEMETRY_ENDPOINT` is set, a second
+ * fire-and-forget POST may ping a hit-counter endpoint. Payload is a UTC day
+ * bucket only (`{ event: "version_check", bucket: "YYYY-MM-DD" }`) — no client
+ * id, no org/vault data, no IP storage on the client. See
+ * `docs/configuration.md` ("Opt-in version-check counter"). The Cloudflare
+ * Worker + KV backend is deferred; without an endpoint the opt-in flag is a
+ * no-op.
+ *
+ * ## What it never does by default
+ *
+ *   - No telemetry leaves the machine unless both opt-in env vars are set.
+ *   - The default path is still a plain GET of the public registry document.
  *   - No vault or org metadata is read or written.
  */
 
 import { existsSync, mkdirSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
-import { get as httpsGet } from 'node:https';
+import { get as httpsGet, request as httpsRequest } from 'node:https';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -64,6 +75,151 @@ const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** Default network budget for the registry GET (fail-silent past this). */
 const DEFAULT_FETCH_TIMEOUT_MS = 3000;
+
+/** Default network budget for the opt-in adoption counter POST. */
+const DEFAULT_TELEMETRY_TIMEOUT_MS = 2000;
+
+/**
+ * Body shape for the opt-in version-check counter. Documented in
+ * docs/configuration.md — keep this the only payload the client ever sends.
+ */
+export interface VersionCheckCounterPayload {
+  /** Fixed event name — a hit means "a fresh npm version-check happened". */
+  readonly event: 'version_check';
+  /** UTC calendar day (`YYYY-MM-DD`) for bucketed increments; not a client id. */
+  readonly bucket: string;
+}
+
+/**
+ * Injectable POST for the opt-in counter (tests stub this; production uses
+ * a bounded HTTPS POST). Failures must never reject into the update path.
+ */
+export type VersionCheckCounterPoster = (
+  endpoint: string,
+  payload: VersionCheckCounterPayload,
+) => Promise<void>;
+
+/**
+ * Whether the opt-in adoption counter is armed: explicit `SFI_TELEMETRY_OPTIN=1`
+ * **and** a non-empty `SFI_TELEMETRY_ENDPOINT`. Default is off; missing endpoint
+ * keeps the flag a documented no-op until Worker+KV ships.
+ */
+export const isVersionCheckCounterEnabled = (): boolean => {
+  if (process.env['SFI_TELEMETRY_OPTIN'] !== '1') return false;
+  const endpoint = process.env['SFI_TELEMETRY_ENDPOINT'];
+  return endpoint !== undefined && endpoint !== '';
+};
+
+/** UTC day bucket string for the counter payload. */
+export const versionCheckCounterBucket = (now: Date = new Date()): string =>
+  now.toISOString().slice(0, 10);
+
+/**
+ * Build the documented counter payload. Exported so docs/tests stay in sync
+ * with the only shape the client will ever send.
+ */
+export const buildVersionCheckCounterPayload = (
+  now: Date = new Date(),
+): VersionCheckCounterPayload => ({
+  event: 'version_check',
+  bucket: versionCheckCounterBucket(now),
+});
+
+/**
+ * POST `{ event, bucket }` to an https endpoint with a hard timeout. Resolves
+ * on any outcome (including network failure) — the adoption counter is
+ * best-effort and must never affect the update check.
+ */
+const defaultCounterPoster = (
+  endpoint: string,
+  payload: VersionCheckCounterPayload,
+  timeoutMs: number = DEFAULT_TELEMETRY_TIMEOUT_MS,
+): Promise<void> =>
+  new Promise((resolve) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+
+    let url: URL;
+    try {
+      url = new URL(endpoint);
+    } catch {
+      finish();
+      return;
+    }
+    // Production Worker will be https; refuse anything else in the default poster.
+    if (url.protocol !== 'https:') {
+      finish();
+      return;
+    }
+
+    const body = JSON.stringify(payload);
+    const timer = setTimeout(() => {
+      req.destroy();
+      finish();
+    }, timeoutMs);
+    timer.unref?.();
+
+    const req = httpsRequest(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port === '' ? undefined : url.port,
+        path: `${url.pathname}${url.search}`,
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(body),
+          accept: 'application/json',
+        },
+        timeout: timeoutMs,
+      },
+      (res) => {
+        res.resume();
+        res.on('end', () => {
+          clearTimeout(timer);
+          finish();
+        });
+        res.on('error', () => {
+          clearTimeout(timer);
+          finish();
+        });
+      },
+    );
+    req.on('error', () => {
+      clearTimeout(timer);
+      finish();
+    });
+    req.on('timeout', () => {
+      req.destroy();
+      clearTimeout(timer);
+      finish();
+    });
+    req.write(body);
+    req.end();
+  });
+
+/**
+ * Fire-and-forget opt-in counter ping. No-op unless both env gates pass.
+ * Never throws; never awaits into the caller's critical path when used via
+ * `void maybePing…`.
+ */
+export const maybePingVersionCheckCounter = async (
+  poster: VersionCheckCounterPoster = defaultCounterPoster,
+): Promise<boolean> => {
+  if (!isVersionCheckCounterEnabled()) return false;
+  const endpoint = process.env['SFI_TELEMETRY_ENDPOINT'];
+  if (endpoint === undefined || endpoint === '') return false;
+  try {
+    await poster(endpoint, buildVersionCheckCounterPayload());
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 /**
  * Directory for the plugin's persistent local state (update-check cache,
@@ -256,24 +412,42 @@ const shouldDisableCheck = (): boolean => {
 };
 
 /**
+ * Optional hooks for {@link checkForUpdate}. Tests inject a hermetic fetcher
+ * and/or counter poster; production uses the defaults.
+ */
+export interface CheckForUpdateOptions {
+  /** Override the registry fetch (hermetic tests). */
+  readonly fetcher?: LatestVersionFetcher;
+  /** Override the opt-in counter POST (hermetic tests). */
+  readonly counterPoster?: VersionCheckCounterPoster;
+}
+
+/**
  * Run the update check for the given running version. Fail-silent and
  * offline-first: a disabled check, a cache hit, or any network failure all
  * return a well-formed {@link UpdateCheckResult} rather than throwing.
  *
  * Order: opt-out / CI short-circuit → fresh cache → one bounded registry GET
- * (whose result is cached).
+ * (whose result is cached) → optional opt-in counter ping on a fresh hit.
  *
  * @param currentVersion The running build's version (e.g. from `package.json`).
- * @param fetcher Override the registry fetch (tests inject a stub for hermetic
- *   runs); defaults to the real npm-registry GET.
+ * @param fetcherOrOptions Override the registry fetch, or an options bag with
+ *   fetcher + counterPoster. The 2-arg fetcher form is preserved for callers.
  * @example
  *   const r = await checkForUpdate('0.1.18');
  *   if (r.shouldUpdate) console.error(formatUpdateNotice(r));
  */
 export const checkForUpdate = async (
   currentVersion: string,
-  fetcher: LatestVersionFetcher = () => fetchLatestVersion(),
+  fetcherOrOptions: LatestVersionFetcher | CheckForUpdateOptions = {},
 ): Promise<UpdateCheckResult> => {
+  const options: CheckForUpdateOptions =
+    typeof fetcherOrOptions === 'function'
+      ? { fetcher: fetcherOrOptions }
+      : fetcherOrOptions;
+  const fetcher = options.fetcher ?? (() => fetchLatestVersion());
+  const counterPoster = options.counterPoster ?? defaultCounterPoster;
+
   if (shouldDisableCheck()) {
     return { shouldUpdate: false, latestVersion: null, cached: false, error: null };
   }
@@ -308,6 +482,10 @@ export const checkForUpdate = async (
     latestVersion: latest,
     shouldUpdate,
   });
+
+  // Fresh registry check only — never on cache hit / disable. Awaited but
+  // fail-silent + bounded (~2s); when opt-in is off this is a sync no-op.
+  await maybePingVersionCheckCounter(counterPoster);
 
   return { shouldUpdate, latestVersion: latest, cached: false, error: null };
 };

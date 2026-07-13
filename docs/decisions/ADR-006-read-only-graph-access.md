@@ -32,8 +32,20 @@ Query-only consumers open the graph through `openGraphReadOnly`
 
 This is the correct mode for the MCP server, the eval harness, and fleet reads.
 The read-write path (`openGraph`, which creates + migrates) is reserved for
-`refresh`, the sole writer. The MCP server is therefore read-only by design and
-no longer needs a "pkill the server before the harness" dance.
+`refresh`, the sole writer. The MCP server's primary vault handle — the one it
+opens at startup and holds for the life of the process, including what
+power-user query surfaces like `sfi.query_graph` execute against — is
+therefore read-only by design and no longer needs a "pkill the server before
+the harness" dance.
+
+That guarantee is scoped to the primary handle. It is a per-call-site design
+rule (call `openGraphReadOnly`, not `openGraph`), not a property the graph
+layer enforces globally on every connection in the codebase — a tool that
+opens a *different*, non-primary vault mid-call (e.g. a cross-vault
+comparison) is responsible for choosing the read-only opener itself, and not
+every call site does today. So: describe the connection a specific tool
+actually holds as read-only, not "the graph connection" as a blanket,
+always-true property.
 
 ## Alternatives Considered
 
@@ -59,4 +71,9 @@ no longer needs a "pkill the server before the harness" dance.
   the **same** vault (a documented gotcha, not a bug).
 - `locked` vs `open-failed` are distinct errors so callers can give the right
   remedy ("another process holds the lock" vs "the file is missing").
-- Reinforces ADR-002: there is no write path back through the query handle.
+- Reinforces ADR-002: there is no write path back through the server's primary
+  query handle.
+- The rule is enforced per call site, not by a single chokepoint, so it is not
+  a blanket guarantee about every graph connection anywhere in the codebase —
+  host-facing prose should say "this tool's connection is read-only," not
+  "the graph connection is always read-only."

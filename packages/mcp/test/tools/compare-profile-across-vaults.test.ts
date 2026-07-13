@@ -30,6 +30,7 @@ import {
 
 import type { Context } from '../../src/server.js';
 import {
+  canonicalJson,
   compareProfileAcrossVaultsHandler,
   compareProfileAcrossVaultsInputSchema,
 } from '../../src/tools/compare-profile-across-vaults.js';
@@ -309,5 +310,34 @@ describe('compareProfileAcrossVaultsHandler — tabVisibilities self-heal', () =
     expect(
       r.value.data.grantDiffs.tabVisibilities.some((d) => d.targetId === 'Account'),
     ).toBe(true);
+  });
+});
+
+/**
+ * C-3 (finding 28) regression — `canonicalJson(undefined)` crash-class
+ * sweep. `diffCategory`'s `inA`/`inB` presence guards mean no reachable
+ * end-to-end fixture built from real (JSON-round-tripped) vault data can
+ * trigger the `undefined` branch today (matching the audit's "latent, not
+ * live" classification), so this exercises the exported helper directly —
+ * proving the fix without waiting for a future caller to hit the landmine.
+ */
+describe('canonicalJson — C-3 (finding 28) regression', () => {
+  it('returns a string sentinel for undefined instead of the raw JS `undefined` value', () => {
+    const result = canonicalJson(undefined);
+    expect(typeof result).toBe('string');
+    expect(result).toBe('\0undefined\0');
+  });
+
+  it('the undefined sentinel does not collide with any real JSON value', () => {
+    expect(canonicalJson(undefined)).not.toBe(canonicalJson(null));
+    expect(canonicalJson(undefined)).not.toBe(canonicalJson('undefined'));
+    expect(canonicalJson(undefined)).not.toBe(canonicalJson('\0undefined\0'));
+  });
+
+  it('an object with an explicit undefined property value does not throw', () => {
+    const withUndefined = { a: 1, b: undefined as unknown };
+    expect(() => canonicalJson(withUndefined)).not.toThrow();
+    // `b`'s value canonicalizes to the sentinel, not the bare word `undefined`.
+    expect(canonicalJson(withUndefined)).toContain('\0undefined\0');
   });
 });

@@ -42,6 +42,6 @@
     "@sf-intelligence/core": "workspace:*"
   },
   "devDependencies": {
-    "vitest": "^1.6.0"
+    "vitest": "^3.2.4"
   }
 }

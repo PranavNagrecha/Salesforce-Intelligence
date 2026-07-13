@@ -51,6 +51,7 @@ import {
   countNodesByType,
   getNodeById,
   listEdges,
+  listNodesByIds,
   listNodesByType,
 } from '@sf-intelligence/graph';
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
@@ -63,7 +64,7 @@ import { type CoverageCaveat, type Verdict } from './coverage-trust.js';
 import { readFactBlock, type FactsBlock } from './facts-block.js';
 import { fieldNotFoundError } from './field-not-found-suggest.js';
 import { hybridTrust, type HybridStaleness } from './hybrid-trust.js';
-import { assertSoqlIdentifier, checkVaultStaleness, resolveLiveAccess } from './live-plane.js';
+import { assertSoqlIdentifier, checkVaultStaleness, probeLiveAccess } from './live-plane.js';
 import { liveCount } from './live-session.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import { resolveToFieldOrSuggest } from './resolve-field-or-suggest.js';
@@ -261,7 +262,10 @@ const computeLiveNullRate = async (
   exec?: ExecCommand,
 ): Promise<LiveEnrichment | null> => {
   const org = input.orgAlias?.trim() || ctx.manifest.sourceOrg;
-  const access = await resolveLiveAccess(org, input.liveEnabled);
+  const access = await probeLiveAccess(ctx, {
+    liveEnabled: input.liveEnabled,
+    orgAlias: input.orgAlias,
+  });
   if (!access.allowed) return null;
 
   const parentId = fieldNode.parentId;
@@ -509,12 +513,20 @@ const fieldPopulators = async (
   });
   if (!edgesResult.ok) return err(edgesResult.error.message);
 
+  // ONE batched fetch of every writesTo source, replacing the per-edge
+  // `getNodeById` N+1. The per-edge Map lookup preserves the null-skip; the
+  // trailing componentId sort makes push order irrelevant.
+  const fromNodesResult = await listNodesByIds(
+    ctx.graph,
+    edgesResult.value.map((e) => e.fromId),
+  );
+  if (!fromNodesResult.ok) return err(fromNodesResult.error.message);
+  const fromById = new Map(fromNodesResult.value.map((n) => [n.id, n]));
+
   const populators: DeclarativePopulator[] = [];
   for (const edge of edgesResult.value) {
-    const fromResult = await getNodeById(ctx.graph, edge.fromId);
-    if (!fromResult.ok) return err(fromResult.error.message);
-    const from = fromResult.value;
-    if (from === null) continue;
+    const from = fromById.get(edge.fromId);
+    if (from === undefined) continue;
     if (from.type !== 'WorkflowRule' && from.type !== 'ApprovalProcess') {
       continue;
     }
@@ -554,14 +566,24 @@ const integrationReferencesParent = async (
     direction: 'out',
   });
   if (!edgesResult.ok) return err(edgesResult.error.message);
+  // Cheap pre-scan with NO node fetch: a direct edge to the parent object is a
+  // hit on its own. The function returns a boolean over an OR of all edges, so
+  // scanning this condition first is order-insensitive and preserves the old
+  // early-return semantics.
   for (const edge of edgesResult.value) {
     if (edge.toId === parentObjectId) return ok(true);
-    // Also check whether the integration references a field on the
-    // parent.
-    const targetResult = await getNodeById(ctx.graph, edge.toId);
-    if (!targetResult.ok) return err(targetResult.error.message);
-    const targetNode = targetResult.value;
-    if (targetNode === null) continue;
+  }
+  // ONE batched fetch of the remaining targets, replacing the per-edge
+  // `getNodeById` N+1, then the same CustomField-on-parent check.
+  const targetNodesResult = await listNodesByIds(
+    ctx.graph,
+    edgesResult.value.map((e) => e.toId),
+  );
+  if (!targetNodesResult.ok) return err(targetNodesResult.error.message);
+  const targetById = new Map(targetNodesResult.value.map((n) => [n.id, n]));
+  for (const edge of edgesResult.value) {
+    const targetNode = targetById.get(edge.toId);
+    if (targetNode === undefined) continue;
     if (
       targetNode.type === 'CustomField' &&
       targetNode.parentId === parentObjectId
@@ -871,16 +893,22 @@ export const whatIfMakeFieldRequiredHandler = async (
       message: `graph query failed: ${fieldRefEdges.error.message}`,
     });
   }
+  // ONE batched fetch of every references source, replacing the per-edge
+  // `getNodeById` N+1. `impacts` is re-sorted by componentId below.
+  const refSrcNodesResult = await listNodesByIds(
+    ctx.graph,
+    fieldRefEdges.value.map((e) => e.fromId),
+  );
+  if (!refSrcNodesResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${refSrcNodesResult.error.message}`,
+    });
+  }
+  const refSrcById = new Map(refSrcNodesResult.value.map((n) => [n.id, n]));
   for (const refEdge of fieldRefEdges.value) {
-    const srcResult = await getNodeById(ctx.graph, refEdge.fromId);
-    if (!srcResult.ok) {
-      return err({
-        kind: 'internal',
-        message: `graph query failed: ${srcResult.error.message}`,
-      });
-    }
-    const src = srcResult.value;
-    if (src === null || src.type !== 'ListView') continue;
+    const src = refSrcById.get(refEdge.fromId);
+    if (src === undefined || src.type !== 'ListView') continue;
     impacts.push({
       category: 'configuration-only',
       componentId: src.id,

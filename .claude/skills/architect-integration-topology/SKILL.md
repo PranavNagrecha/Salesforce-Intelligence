@@ -148,7 +148,7 @@ Defer to another skill when:
 - **"Where is `OrderService` used in Apex / LWC code?"** — that's
   a code-side reference question. Defer to
   `developer-apex-refactor` → `sfi.find_code_usages` or
-  `sfi.find_apex_usages`.
+  `sfi.find_code_usages`.
 - **"Why can't user X see this Connected App?"** — that's a
   visibility question. Defer to `admin-sharing-troubleshooting` →
   `sfi.why_cant_user_see_record`.

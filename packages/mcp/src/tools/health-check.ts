@@ -444,6 +444,16 @@ export const healthCheckHandler = async (
     );
   }
 
+  // PROFILE-COBATCH detect+disclose (trust-critical): the last refresh
+  // produced profiles WITHOUT their permission grant sections (a split
+  // retrieve likely separated Profile from its co-listed types). The vault
+  // must NOT report healthy — permission answers sourced from profiles are
+  // untrustworthy until a clean refresh writes a manifest without the field.
+  const profileGrantIntegrity = ctx.manifest.profileGrantIntegrity;
+  if (profileGrantIntegrity !== undefined && profileGrantIntegrity.degraded) {
+    issues.push(profileGrantIntegrity.reason);
+  }
+
   // P13-STAGED-tiers: a staged refresh is mid-build. Degraded with explicit
   // tier progress, so consumers qualify every answer until the final tier
   // clears the marker.

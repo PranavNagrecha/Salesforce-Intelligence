@@ -65,7 +65,12 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import {
+  getNodeById,
+  listEdges,
+  listEdgesForNodes,
+  listNodesByIds,
+} from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -224,12 +229,20 @@ const collectAutomationNodesForObject = async (
     edgeType: 'triggersOn',
   });
   if (!triggersOnResult.ok) return err(triggersOnResult.error.message);
+  // ONE batched fetch of every triggersOn source, replacing the per-edge
+  // `getNodeById` N+1. `byId` is keyed by node id and re-sorted below, so the
+  // per-edge Map lookup preserves the old null-skip + type-filter result.
+  const triggerNodesResult = await listNodesByIds(
+    ctx.graph,
+    triggersOnResult.value.map((e) => e.fromId),
+  );
+  if (!triggerNodesResult.ok) return err(triggerNodesResult.error.message);
+  const triggerNodeById = new Map(triggerNodesResult.value.map((n) => [n.id, n]));
   for (const edge of triggersOnResult.value) {
-    const nodeResult = await getNodeById(ctx.graph, edge.fromId);
-    if (!nodeResult.ok) return err(nodeResult.error.message);
-    if (nodeResult.value === null) continue;
-    if (!TRIGGERS_ON_AUTOMATION_TYPES.has(nodeResult.value.type)) continue;
-    byId.set(nodeResult.value.id, nodeResult.value);
+    const node = triggerNodeById.get(edge.fromId);
+    if (node === undefined) continue;
+    if (!TRIGGERS_ON_AUTOMATION_TYPES.has(node.type)) continue;
+    byId.set(node.id, node);
   }
 
   const parentOfResult = await listEdges(ctx.graph, objectId, {
@@ -237,12 +250,19 @@ const collectAutomationNodesForObject = async (
     edgeType: 'parentOf',
   });
   if (!parentOfResult.ok) return err(parentOfResult.error.message);
+  // ONE batched fetch of every parentOf child, replacing the per-edge
+  // `getNodeById` N+1.
+  const parentNodesResult = await listNodesByIds(
+    ctx.graph,
+    parentOfResult.value.map((e) => e.toId),
+  );
+  if (!parentNodesResult.ok) return err(parentNodesResult.error.message);
+  const parentNodeById = new Map(parentNodesResult.value.map((n) => [n.id, n]));
   for (const edge of parentOfResult.value) {
-    const nodeResult = await getNodeById(ctx.graph, edge.toId);
-    if (!nodeResult.ok) return err(nodeResult.error.message);
-    if (nodeResult.value === null) continue;
-    if (!PARENTED_AUTOMATION_TYPES.has(nodeResult.value.type)) continue;
-    byId.set(nodeResult.value.id, nodeResult.value);
+    const node = parentNodeById.get(edge.toId);
+    if (node === undefined) continue;
+    if (!PARENTED_AUTOMATION_TYPES.has(node.type)) continue;
+    byId.set(node.id, node);
   }
 
   return ok(
@@ -266,13 +286,19 @@ const collectReachableClasses = async (
   let frontier: ComponentId[] = [rootId];
   for (let depth = 0; depth < maxDepth && frontier.length > 0; depth += 1) {
     const next: ComponentId[] = [];
+    // ONE batched fetch of the WHOLE frontier's outgoing callsApex edges,
+    // replacing the per-frontier-node `listEdges` N+1. The returned reachability
+    // is a Set — order-independent — and each per-node bucket carries the same
+    // edges the old per-node `listEdges` returned, so the method-narrowed root
+    // filter and the visited-set dedup produce the identical closure. Query
+    // count is now one per DEPTH LEVEL, not one per frontier node.
+    const edgeBatch = await listEdgesForNodes(ctx.graph, frontier, {
+      direction: 'out',
+      edgeTypes: ['callsApex'],
+    });
+    if (!edgeBatch.ok) return err(edgeBatch.error.message);
     for (const id of frontier) {
-      const r = await listEdges(ctx.graph, id, {
-        direction: 'out',
-        edgeType: 'callsApex',
-      });
-      if (!r.ok) return err(r.error.message);
-      for (const edge of r.value) {
+      for (const edge of edgeBatch.value.get(id) ?? []) {
         if (
           id === rootId &&
           method !== undefined &&
@@ -299,43 +325,68 @@ const categoryOf = (edgeType: EdgeType): DownstreamEffectCategory | null => {
 };
 
 /**
- * For one reachable class, collect every outgoing edge whose type
- * categorises as a side effect. Resolves each target node's identity
- * for the `targetType` / `targetApiName` fields.
+ * Batched form: for EVERY (class id, apiName) entry, collect every outgoing
+ * edge whose type categorises as a side effect, resolving each target node's
+ * identity for the `targetType` / `targetApiName` fields.
+ *
+ * Two round-trips total regardless of class count: ONE `listEdgesForNodes` over
+ * all class ids' outgoing edges, then ONE `listNodesByIds` over the distinct
+ * effect-edge targets — replacing the former per-class `listEdges` + per-edge
+ * `getNodeById` double N+1. Each per-class bucket is sorted by the FULL
+ * (to_id, edge_type, from_id, source) order (from_id fixed per bucket), matching
+ * the old per-class `listEdges(out)` order; the null-target skip is preserved
+ * via a Map miss. The caller sorts (and, for the object path, dedupes) the
+ * result, so effect order across classes is normalised regardless.
  */
-const collectEffectsForClass = async (
+const collectEffectsForClasses = async (
   ctx: Context,
-  classId: ComponentId,
-  classApiName: string,
+  entries: readonly { readonly id: ComponentId; readonly apiName: string }[],
 ): Promise<Result<DownstreamEffect[], string>> => {
-  const r = await listEdges(ctx.graph, classId, { direction: 'out' });
-  if (!r.ok) return err(r.error.message);
+  if (entries.length === 0) return ok([]);
+  const edgeBatch = await listEdgesForNodes(
+    ctx.graph,
+    entries.map((e) => e.id),
+    { direction: 'out' },
+  );
+  if (!edgeBatch.ok) return err(edgeBatch.error.message);
+  // Collect every categorised effect-edge target for ONE node batch.
+  const targetIds: ComponentId[] = [];
+  for (const entry of entries) {
+    for (const edge of edgeBatch.value.get(entry.id) ?? []) {
+      if (categoryOf(edge.edgeType) === null) continue;
+      targetIds.push(edge.toId);
+    }
+  }
+  const targetsRes = await listNodesByIds(ctx.graph, targetIds);
+  if (!targetsRes.ok) return err(targetsRes.error.message);
+  const targetById = new Map(targetsRes.value.map((n) => [n.id, n]));
+
   const effects: DownstreamEffect[] = [];
-  for (const edge of r.value) {
-    const category = categoryOf(edge.edgeType);
-    if (category === null) continue;
-    const targetRes = await getNodeById(ctx.graph, edge.toId);
-    if (!targetRes.ok) return err(targetRes.error.message);
-    const target = targetRes.value;
-    // Sparse-graph / unresolved-target case: the v0.3 apex-scanner emits
-    // heuristic `writesTo` / `readsFrom` edges to `CustomField:<localVar>.*`
-    // when it cannot resolve the receiver's object (the edge carries
-    // `targetMissing: true`); that target node does not exist in the graph.
-    // Mirror `what_if_disable_trigger`'s null-target handling and drop these
-    // rather than surfacing a downstream effect with a null
-    // `targetType`/`targetApiName` — counting a "field-write" to a field
-    // that isn't in the graph over-reports the downstream surface.
-    if (target === null) continue;
-    effects.push({
-      sourceClassId: classId,
-      sourceClassApiName: classApiName,
-      category,
-      targetId: edge.toId,
-      targetType: target.type,
-      targetApiName: target.apiName,
-      edgeType: edge.edgeType,
-      edgeSource: edge.source,
-    });
+  for (const entry of entries) {
+    for (const edge of edgeBatch.value.get(entry.id) ?? []) {
+      const category = categoryOf(edge.edgeType);
+      if (category === null) continue;
+      const target = targetById.get(edge.toId);
+      // Sparse-graph / unresolved-target case: the v0.3 apex-scanner emits
+      // heuristic `writesTo` / `readsFrom` edges to `CustomField:<localVar>.*`
+      // when it cannot resolve the receiver's object (the edge carries
+      // `targetMissing: true`); that target node does not exist in the graph.
+      // Mirror `what_if_disable_trigger`'s null-target handling and drop these
+      // rather than surfacing a downstream effect with a null
+      // `targetType`/`targetApiName` — counting a "field-write" to a field
+      // that isn't in the graph over-reports the downstream surface.
+      if (target === undefined) continue;
+      effects.push({
+        sourceClassId: entry.id,
+        sourceClassApiName: entry.apiName,
+        category,
+        targetId: edge.toId,
+        targetType: target.type,
+        targetApiName: target.apiName,
+        edgeType: edge.edgeType,
+        edgeSource: edge.source,
+      });
+    }
   }
   return ok(effects);
 };
@@ -403,11 +454,15 @@ const resolveApiNames = async (
   classIds: Iterable<ComponentId>,
   apiNameByClass: Map<ComponentId, string>,
 ): Promise<Result<Map<ComponentId, string>, string>> => {
-  for (const classId of classIds) {
-    if (apiNameByClass.has(classId)) continue;
-    const r = await getNodeById(ctx.graph, classId);
-    if (!r.ok) return err(r.error.message);
-    if (r.value !== null) apiNameByClass.set(classId, r.value.apiName);
+  // ONE batched fetch of every not-yet-resolved class node, replacing the
+  // per-class `getNodeById` N+1. A missing id is dropped (its apiName stays
+  // unset), matching the old null-skip; `apiNameByClass` is a Map so order is
+  // irrelevant.
+  const missing = [...classIds].filter((id) => !apiNameByClass.has(id));
+  const nodesResult = await listNodesByIds(ctx.graph, missing);
+  if (!nodesResult.ok) return err(nodesResult.error.message);
+  for (const node of nodesResult.value) {
+    apiNameByClass.set(node.id, node.apiName);
   }
   return ok(apiNameByClass);
 };
@@ -480,25 +535,25 @@ export const downstreamEffectsHandler = async (
     const allEffects: DownstreamEffect[] = [];
     const reachableUnion = new Set<ComponentId>();
 
-    for (const node of automationNodes) {
-      // Direct declarative side effects (Flow writes, WorkflowRule /
-      // ApprovalProcess emails, etc.). ApexTrigger body effects are picked
-      // up via the callsApex walk below to avoid double-counting.
-      if (node.type !== 'ApexTrigger') {
-        const directRes = await collectEffectsForClass(
-          ctx,
-          node.id,
-          node.apiName,
-        );
-        if (!directRes.ok) {
-          return err({
-            kind: 'internal',
-            message: `graph query failed: ${directRes.error}`,
-          });
-        }
-        allEffects.push(...directRes.value);
-      }
+    // Direct declarative side effects (Flow writes, WorkflowRule /
+    // ApprovalProcess emails, etc.) for every non-ApexTrigger firer, batched.
+    // ApexTrigger body effects are picked up via the callsApex walk below to
+    // avoid double-counting.
+    const directRes = await collectEffectsForClasses(
+      ctx,
+      automationNodes
+        .filter((node) => node.type !== 'ApexTrigger')
+        .map((node) => ({ id: node.id, apiName: node.apiName })),
+    );
+    if (!directRes.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${directRes.error}`,
+      });
+    }
+    allEffects.push(...directRes.value);
 
+    for (const node of automationNodes) {
       const reachableRes = await collectReachableClasses(
         ctx,
         node.id,
@@ -523,17 +578,20 @@ export const downstreamEffectsHandler = async (
       });
     }
 
-    for (const classId of reachableUnion) {
-      const name = apiNameByClass.get(classId) ?? '';
-      const r = await collectEffectsForClass(ctx, classId, name);
-      if (!r.ok) {
-        return err({
-          kind: 'internal',
-          message: `graph query failed: ${r.error}`,
-        });
-      }
-      allEffects.push(...r.value);
+    const reachableEffectsRes = await collectEffectsForClasses(
+      ctx,
+      [...reachableUnion].map((classId) => ({
+        id: classId,
+        apiName: apiNameByClass.get(classId) ?? '',
+      })),
+    );
+    if (!reachableEffectsRes.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${reachableEffectsRes.error}`,
+      });
     }
+    allEffects.push(...reachableEffectsRes.value);
 
     const dedupedEffects = dedupeEffects(allEffects);
     dedupedEffects.sort(compareEffects);
@@ -588,18 +646,20 @@ export const downstreamEffectsHandler = async (
     });
   }
 
-  const allEffects: DownstreamEffect[] = [];
-  for (const classId of reachable) {
-    const name = apiNameByClass.get(classId) ?? '';
-    const r = await collectEffectsForClass(ctx, classId, name);
-    if (!r.ok) {
-      return err({
-        kind: 'internal',
-        message: `graph query failed: ${r.error}`,
-      });
-    }
-    allEffects.push(...r.value);
+  const effectsRes = await collectEffectsForClasses(
+    ctx,
+    [...reachable].map((classId) => ({
+      id: classId,
+      apiName: apiNameByClass.get(classId) ?? '',
+    })),
+  );
+  if (!effectsRes.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${effectsRes.error}`,
+    });
   }
+  const allEffects = [...effectsRes.value];
   allEffects.sort(compareEffects);
 
   return ok({

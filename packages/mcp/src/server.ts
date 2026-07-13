@@ -1,5 +1,6 @@
-import { statSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -17,6 +18,8 @@ import {
   type ExtendedVaultManifest,
 } from '@sf-intelligence/vault';
 
+import type { LiveCapability } from './live-capability.js';
+import { registerPrompts } from './prompts.js';
 import { registerResources } from './resources.js';
 import { registerTools } from './tools/index.js';
 
@@ -25,7 +28,37 @@ import { registerTools } from './tools/index.js';
  * with the package version when the server's contract changes.
  */
 const SERVER_NAME = 'sf-intelligence';
-const SERVER_VERSION = '0.1.0';
+
+/**
+ * Injected by the CLI's esbuild `define` (SFI_BUILD_VERSION) when server.ts is
+ * bundled into the shipped `sfi` bin — the client-facing handshake path. When
+ * running unbundled (dev, vitest), the identifier is absent and `typeof` reads
+ * 'undefined' safely, so we fall back to the nearest package.json version.
+ */
+declare const SFI_BUILD_VERSION: string | undefined;
+
+/**
+ * The shipped product version reported in the MCP `initialize` handshake.
+ * Prefer the bundled define (the shipped path reports the CLI/product version);
+ * fall back to reading the nearest package.json at runtime (dev/tests) so the
+ * handshake never hard-codes a stale literal (finding 10). Never throws.
+ */
+const resolveServerVersion = (): string => {
+  if (typeof SFI_BUILD_VERSION !== 'undefined' && SFI_BUILD_VERSION) {
+    return SFI_BUILD_VERSION;
+  }
+  for (const rel of ['../package.json', '../../package.json'] as const) {
+    try {
+      const raw = readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+      const parsed = JSON.parse(raw) as { version?: string };
+      if (parsed.version !== undefined) return parsed.version;
+    } catch {
+      // dist/ bundle layout differs from src/ — try the next candidate.
+    }
+  }
+  return '0.0.0';
+};
+const SERVER_VERSION = resolveServerVersion();
 
 /**
  * Server-level usage guidance returned to the client in the `initialize`
@@ -57,6 +90,21 @@ How to use it well:
  *   - `graph`: open `GraphStore` handle. Queries (`searchNodes`,
  *     `getNodeById`, etc.) route through this connection. The server owns
  *     the lifecycle; tools must never close it.
+ *   - `callerIdentity` (optional): HTTP bearer identity from `--tokens-file`.
+ *   - `liveCapability` (optional): minted at dispatch from registry `livePlane`.
+ */
+
+/**
+ * Resolved HTTP caller from a `--tokens-file` entry (R8-PERCALLER-TOKENS).
+ * Identity attribution only — no role/permission tiers.
+ */
+export interface CallerIdentity {
+  readonly id: string;
+  readonly label?: string;
+}
+
+/**
+ * The runtime dependencies every MCP tool needs at invocation time.
  */
 export interface Context {
   readonly vaultRoot: string;
@@ -67,7 +115,47 @@ export interface Context {
    */
   readonly manifest: ExtendedVaultManifest;
   readonly graph: GraphStore;
+  /**
+   * Per-request HTTP caller identity when authenticated via `--tokens-file`.
+   * Absent on stdio and on the solo `--token` / `--generate-token` path.
+   */
+  readonly callerIdentity?: CallerIdentity;
+  /**
+   * INFRA-12-DEEP — live-plane capability minted at `dispatchTool` from the
+   * invoked tool's registry `livePlane` tag. Absent / undefined means the
+   * tool is `livePlane: 'never'`: `resolveLiveAccess` / `gateLive` fail-closed
+   * and cannot read ambient standing consent. Composed sub-handlers inherit
+   * this token from the top-level invoke (they never mint their own).
+   */
+  readonly liveCapability?: LiveCapability;
 }
+
+/**
+ * Overlay a caller identity onto a shared vault context without sharing
+ * mutable identity across concurrent HTTP requests (same graph handle).
+ */
+export const bindCallerIdentity = (
+  ctx: Context,
+  identity: CallerIdentity | undefined,
+): Context => {
+  const base =
+    identity === undefined
+      ? {
+          vaultRoot: ctx.vaultRoot,
+          manifest: ctx.manifest,
+          graph: ctx.graph,
+        }
+      : {
+          vaultRoot: ctx.vaultRoot,
+          manifest: ctx.manifest,
+          graph: ctx.graph,
+          callerIdentity: identity,
+        };
+  // exactOptionalPropertyTypes: omit the key when absent (do not assign undefined).
+  return ctx.liveCapability === undefined
+    ? base
+    : { ...base, liveCapability: ctx.liveCapability };
+};
 
 /**
  * The error variants `buildContext` can return.
@@ -219,12 +307,13 @@ export const createServer = (ctx: Context): Server => {
   const server = new Server(
     { name: SERVER_NAME, version: SERVER_VERSION },
     {
-      capabilities: { tools: {}, resources: {} },
+      capabilities: { tools: {}, resources: {}, prompts: {} },
       instructions: SERVER_INSTRUCTIONS,
     },
   );
   registerTools(server, ctx);
   registerResources(server, ctx);
+  registerPrompts(server);
   return server;
 };
 

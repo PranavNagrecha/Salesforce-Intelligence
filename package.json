@@ -18,7 +18,7 @@
   ],
   "scripts": {
     "prepare": "node scripts/install-hooks.mjs",
-    "tsc": "pnpm -r --workspace-concurrency=1 exec tsc",
+    "tsc": "tsc -b",
     "lint": "ESLINT_USE_FLAT_CONFIG=false eslint . --ext .ts",
     "test": "pnpm -r test && pnpm test:integration",
     "test:integration": "vitest run --config tests/integration/vitest.config.ts",
@@ -38,16 +38,22 @@
     "onboard:smoke": "node packages/mcp/onboard-smoke.mjs",
     "check:slash-parity": "node scripts/check-slash-parity.mjs",
     "check:response-consistency": "node scripts/check-response-consistency.mjs",
+    "check:cli-bundle": "node scripts/check-cli-bundle.mjs",
     "guard": "node scripts/release-guard.mjs",
     "scan:leaks": "node scripts/scan-org-leaks.mjs --strict",
     "scan:leaks:history": "node scripts/scan-org-leaks.mjs --git-history --strict",
     "check:public-interface": "node scripts/check-public-interface.mjs",
-    "qa:commit-gate": "node ../sf-intelligence-qa/scripts/commit-gate.mjs",
+    "check:version-consistency": "node scripts/check-version-consistency.mjs",
     "product-surface": "node scripts/product-surface.mjs",
     "snapshot": "node scripts/release-snapshot.mjs",
     "release": "pnpm -r build && pnpm -r publish --access public",
     "sast": "node scripts/sast-gate.mjs",
-    "fleet": "node scripts/fleet-find.mjs"
+    "fleet": "node scripts/fleet-find.mjs",
+    "adoption:traffic": "node scripts/capture-github-traffic.mjs",
+    "changelog:assemble": "node scripts/assemble-changelog.mjs",
+    "changelog:check": "node scripts/check-changelog-fragments.mjs",
+    "check:embedding-index": "node packages/mcp/scripts/check-embedding-index.mjs",
+    "regen:embedding-index": "node scripts/regen-embedding-index.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.12.7",
@@ -57,6 +63,6 @@
     "eslint-plugin-import": "^2.29.0",
     "tsx": "^4.7.0",
     "typescript": "^5.4.0",
-    "vitest": "^1.6.0"
+    "vitest": "^3.2.4"
   }
 }

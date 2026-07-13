@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<AuthProvider xmlns="http://soap.sforce.com/2006/04/metadata">
+    <friendlyName>Verdant Corporate SSO</friendlyName>
+    <providerType>OpenIdConnect</providerType>
+    <executionUser>integration@verdantenergy.example</executionUser>
+    <defaultScopes>profile email openid</defaultScopes>
+    <registrationHandler>VerdantSsoRegHandler</registrationHandler>
+    <sendAccessTokenInHeader>true</sendAccessTokenInHeader>
+    <sendClientCredentialsInHeader>false</sendClientCredentialsInHeader>
+    <includeOrgIdInIdentifier>false</includeOrgIdInIdentifier>
+</AuthProvider>

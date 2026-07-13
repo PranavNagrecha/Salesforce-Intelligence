@@ -1,5 +1,6 @@
 /// <reference types="vitest/globals" />
 
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -14,6 +15,8 @@ import {
 } from '@sf-intelligence/vault';
 
 import {
+  canonicalJson,
+  captureSnapshotGraph,
   runSnapshotCreate,
   runSnapshotDelete,
   runSnapshotList,
@@ -119,6 +122,10 @@ describe('runSnapshotCreate', () => {
       expect(meta.componentCount).toBe(2);
       expect(meta.edgeCount).toBe(1);
       expect(meta.sourceTreeHash).toBe('sha256:fixture');
+      // R8-SECURITY-TREND: capture-time metrics bag (empty fixture → A / 100).
+      expect(meta.metrics).toBeDefined();
+      expect(meta.metrics?.['securityScore']).toBe(100);
+      expect(meta.metrics?.['securityGrade']).toBe(4);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
@@ -236,6 +243,118 @@ describe('runSnapshotDelete', () => {
       expect(deleted.ok).toBe(false);
       if (deleted.ok) return;
       expect(deleted.error.kind).toBe('snapshot-missing');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * C-3 (finding 28) regression — `canonicalJson(undefined)` crash-class
+ * sweep, snapshot.ts variant. CAUTION: this copy's hash feeds
+ * `diff_snapshots`' "modified" verdict, so the fix must NOT change any
+ * hash for the common (non-undefined) path.
+ */
+describe('canonicalJson — C-3 (finding 28) regression', () => {
+  it('returns a string sentinel for undefined instead of the raw JS `undefined` value', () => {
+    const result = canonicalJson(undefined);
+    expect(typeof result).toBe('string');
+    expect(result).toBe('\0undefined\0');
+  });
+
+  it('an object with an explicit undefined property value does not throw', () => {
+    const withUndefined = { a: 1, b: undefined as unknown };
+    expect(() => canonicalJson(withUndefined)).not.toThrow();
+    expect(canonicalJson(withUndefined)).toContain('\0undefined\0');
+  });
+
+  it('HASH-PARITY: the common (non-undefined) path serializes byte-identically to the pre-fix algorithm', () => {
+    // Reproduces the pre-fix algorithm inline (no `undefined` branch —
+    // exactly what shipped before this fix) and confirms it agrees with
+    // the exported `canonicalJson` for ordinary, real-world input that
+    // never contains an explicit `undefined`. The two algorithms only
+    // diverge on the `undefined` branch this fix adds, so agreement here
+    // is proof the fix is byte-identical on the common path.
+    const preFixCanonicalJson = (value: unknown): string => {
+      if (value === null || typeof value !== 'object') return JSON.stringify(value);
+      if (Array.isArray(value)) return `[${value.map(preFixCanonicalJson).join(',')}]`;
+      const record = value as Readonly<Record<string, unknown>>;
+      const keys = Object.keys(record).sort();
+      return `{${keys.map((k) => `${JSON.stringify(k)}:${preFixCanonicalJson(record[k])}`).join(',')}}`;
+    };
+    const representativeHashInput = {
+      type: 'CustomObject',
+      apiName: 'Account',
+      label: 'Account',
+      properties: { sharingModel: 'ReadWrite', nested: { a: 1, b: [1, 2, 'x'] } },
+    };
+    expect(canonicalJson(representativeHashInput)).toBe(
+      preFixCanonicalJson(representativeHashInput),
+    );
+  });
+
+  it('HASH-PARITY: captureSnapshotGraph produces the same propertiesHash as the pre-fix algorithm for a real (non-undefined) node', async () => {
+    const cwd = await makeTempCwd();
+    try {
+      const vaultRoot = join(cwd, 'org-kb');
+      const paths = vaultPaths(vaultRoot);
+      for (const dir of [paths.meta, paths.graph]) {
+        await mkdir(dir, { recursive: true });
+      }
+      const opened = await openGraph(paths.graphDb);
+      if (!opened.ok) throw new Error(opened.error.message);
+      try {
+        const imported = await importExtractionResults(opened.value, [
+          {
+            nodes: [
+              {
+                id: 'CustomObject:Account',
+                type: 'CustomObject',
+                apiName: 'Account',
+                label: 'Account',
+                parentId: null,
+                sourcePath: 'objects/Account/Account.object-meta.xml',
+                lastModifiedDate: null,
+                lastModifiedBy: null,
+                apiVersion: null,
+                properties: { sharingModel: 'ReadWrite' },
+              },
+            ],
+            edges: [],
+          },
+        ]);
+        if (!imported.ok) throw new Error(imported.error.message);
+
+        const captured = await captureSnapshotGraph(opened.value);
+        expect(captured.ok).toBe(true);
+        if (!captured.ok) return;
+        const node = captured.value.nodes.find((n) => n.id === 'CustomObject:Account');
+        expect(node).toBeDefined();
+
+        // Reconstruct the exact hashInput shape captureSnapshotGraph builds
+        // for a node (type/apiName/label/properties — see the JSDoc above
+        // captureSnapshotGraph) and hash it with the pre-fix algorithm.
+        const preFixCanonicalJson = (value: unknown): string => {
+          if (value === null || typeof value !== 'object') return JSON.stringify(value);
+          if (Array.isArray(value)) return `[${value.map(preFixCanonicalJson).join(',')}]`;
+          const record = value as Readonly<Record<string, unknown>>;
+          const keys = Object.keys(record).sort();
+          return `{${keys.map((k) => `${JSON.stringify(k)}:${preFixCanonicalJson(record[k])}`).join(',')}}`;
+        };
+        const expectedHash = createHash('sha256')
+          .update(
+            preFixCanonicalJson({
+              type: 'CustomObject',
+              apiName: 'Account',
+              label: 'Account',
+              properties: { sharingModel: 'ReadWrite' },
+            }),
+          )
+          .digest('hex');
+        expect(node?.propertiesHash).toBe(expectedHash);
+      } finally {
+        await closeGraph(opened.value);
+      }
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

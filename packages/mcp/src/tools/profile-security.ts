@@ -13,8 +13,8 @@
  * Two data planes, both `declared` metadata:
  *   - Profile-scoped: `loginIpRanges` (already extracted into
  *     `properties.loginIpRanges`, previously unsurfaced) + `loginHoursByDay`
- *     (DEFERRED behind the SessionSettings tier — always `[]` today; the v0.1
- *     extractor stores only the `loginHoursDefined` boolean).
+ *     (the per-weekday `<loginHours>` windows, extracted into
+ *     `properties.loginHours`).
  *   - Org-wide: `sessionSecuritySettings` from the single `SessionSettings:default`
  *     node (required-MFA, strong-auth, session-timeout). REFRESH-GATED — a vault
  *     built before the SessionSettings type shipped carries no such node, so this
@@ -70,8 +70,8 @@ export interface ProfileSecurityOutput {
   readonly loginIpRanges: readonly LoginIpRange[];
   readonly loginIpRangeCount: number;
   /**
-   * Login-hours per-weekday windows. DEFERRED behind the SessionSettings tier
-   * — always `[]` today; `loginHoursRestricted` still reports whether ANY
+   * Login-hours per-weekday windows (`[]` when the profile declares no
+   * `<loginHours>` restriction). `loginHoursRestricted` reports whether ANY
    * login-hours window is defined (from the extracted `loginHoursDefined` flag).
    */
   readonly loginHoursByDay: readonly LoginHourWindow[];
@@ -152,7 +152,7 @@ export const profileSecurityHandler = async (
   }
 
   const boundaryNote =
-    'Login IP ranges are declared Profile metadata (the user must be ASSIGNED this profile at runtime to be restricted by them, and IP ranges combine with org-wide network access). Login-hours weekday windows are DEFERRED behind the SessionSettings tier, so `loginHoursByDay` is empty even when `loginHoursRestricted` is true. '
+    'Login IP ranges are declared Profile metadata (the user must be ASSIGNED this profile at runtime to be restricted by them, and IP ranges combine with org-wide network access). Login-hours weekday windows (`loginHoursByDay`) are the declared `<loginHours>` start/end minutes-since-midnight (GMT) per restricted weekday; a weekday absent from the list is unrestricted. '
     + (sessionSecuritySettings === null
       ? 'Org-wide MFA / session settings are NOT in this vault (`sessionSecuritySettings: null`) — the SessionSettings type is refresh-gated; re-run `/sfi-refresh` to pull it.'
       : 'Org-wide MFA / session settings come from the single SessionSettings:default node (declared, org-level).');

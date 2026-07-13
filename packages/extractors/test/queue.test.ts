@@ -159,6 +159,72 @@ describe('extractQueue', () => {
     });
   });
 
+  describe('R6-18: queueRoutingConfig reference edge', () => {
+    it('emits a declared references edge to QueueRoutingConfig when <queueRoutingConfig> is present', async () => {
+      // Verified against a real Queue file from a live org:
+      // `<queueRoutingConfig>cases_Routing_config</queueRoutingConfig>`
+      // resolving to a real QueueRoutingConfig fullName retrieved from the
+      // same org. The value is a declared metadata pointer to a
+      // QueueRoutingConfig fullName, not a heuristic guess.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Queue xmlns="http://soap.sforce.com/2006/04/metadata">
+  <doesIncludeBosses>true</doesIncludeBosses>
+  <doesSendEmailToMembers>false</doesSendEmailToMembers>
+  <name>Case_Routing_Queue</name>
+  <queueRoutingConfig>Standard_Case_Routing</queueRoutingConfig>
+  <queueSobject>
+    <sobjectType>Case</sobjectType>
+  </queueSobject>
+</Queue>`;
+      const { dir, path } = await writeTempQueueXml(
+        'Case_Routing_Queue.queue-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractQueue(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.nodes[0]?.properties['queueRoutingConfig']).toBe(
+          'Standard_Case_Routing',
+        );
+        expect(result.value.edges).toContainEqual(
+          expect.objectContaining({
+            fromId: 'Queue:Case_Routing_Queue',
+            toId: 'QueueRoutingConfig:Standard_Case_Routing',
+            edgeType: 'references',
+            confidence: 'declared',
+            source: 'queue-extractor',
+            properties: { referenceKind: 'queueRoutingConfig' },
+          }),
+        );
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits no QueueRoutingConfig edge when <queueRoutingConfig> is absent', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Queue xmlns="http://soap.sforce.com/2006/04/metadata">
+  <name>No_Routing</name>
+  <doesSendEmailToMembers>false</doesSendEmailToMembers>
+</Queue>`;
+      const { dir, path } = await writeTempQueueXml(
+        'No_Routing.queue-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractQueue(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(
+          result.value.edges.some((e) => e.edgeType === 'references'),
+        ).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('optional properties', () => {
     it('defaults missing optional fields to null and memberCount to 0 with empty memberEmails', async () => {
       const xml = `<?xml version="1.0" encoding="UTF-8"?>

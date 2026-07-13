@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import type { VaultManifest } from '@sf-intelligence/contracts';
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 
+import { mintLiveCapability } from '../src/live-capability.js';
 import {
   consentStorePath,
   grantLiveConsent,
@@ -87,7 +88,7 @@ const FIXTURE_MANIFEST: VaultManifest = {
   edges: { parentOf: 1 },
   sourceTreeHash: 'sha256:fixture',
 };
-const ctx = { manifest: FIXTURE_MANIFEST } as Context;
+const ctx = { manifest: FIXTURE_MANIFEST, liveCapability: mintLiveCapability('primary') } as Context;
 
 describe('sfi.live_consent tool', () => {
   it('defaults to REPORTING status — a bare call never enables anything', async () => {

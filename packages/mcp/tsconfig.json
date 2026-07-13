@@ -11,6 +11,7 @@
     { "path": "../vault" },
     { "path": "../graph" },
     { "path": "../parsers" },
-    { "path": "../patterns" }
+    { "path": "../patterns" },
+    { "path": "../renderers" }
   ]
 }

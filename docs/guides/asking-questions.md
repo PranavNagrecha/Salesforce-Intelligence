@@ -355,13 +355,14 @@ means dependencies in missing families were **not checked**, not that the field
 is unused. Only act on `safe` when coverage is complete and you have read the
 full reasoning chain.
 
-Enterprise synthesis tools (`sfi.org_risk_report`, `sfi.field_cleanup_candidates`,
-`sfi.release_readiness_report`, etc.) rank offline evidence only unless you
-explicitly composed live tools in the same answer. Call `sfi.coverage_report` before
+Enterprise synthesis tools (`sfi.org_risk_report` — add `gate: true` for the
+deploy readiness gate — `sfi.unused_fields_deep` with `format: 'cleanup'`, etc.)
+rank offline evidence only unless you explicitly composed live tools in the same answer. Call `sfi.coverage_report` before
 acting on ranked risks. Ordering is deterministic across calls with the same vault
-state. For change-over-time, use `sfi.trend` / `sfi.churn` (persisted snapshots;
-`sfi refresh` captures a snapshot by default unless `snapshotOnRefresh: false` in
-`meta/config.json`) and `sfi.org_history` for refresh timelines.
+state. For change-over-time, use `sfi.trend` / `sfi.diff_snapshots` (persisted
+snapshots; `sfi refresh` captures a snapshot by default unless
+`snapshotOnRefresh: false` in `meta/config.json` — add `summary: true` to
+diff_snapshots for the compact churn digest) and `sfi.org_history` for refresh timelines.
 
 ## 3c. Hybrid questions (metadata + runtime)
 

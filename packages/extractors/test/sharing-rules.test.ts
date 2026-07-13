@@ -341,15 +341,15 @@ describe('extractSharingRules', () => {
     it('extracts a <sharingGuestRules> rule with the site name as the named Group target', async () => {
       // CR-CAP-16: a guest rule's <guestUser> inner text is the Experience-Cloud
       // SITE NAME. The extractor emits ONE SharingRule node (ruleType 'guest',
-      // sharedToType 'guestUser', siteName ClientPortal) + a parentOf edge + a
-      // sharedWith edge to a NAMED Group:ClientPortal carrying synthetic:true.
+      // sharedToType 'guestUser', siteName Customer_Site) + a parentOf edge + a
+      // sharedWith edge to a NAMED Group:Customer_Site carrying synthetic:true.
       // Before CR-CAP-16 this asserted empty nodes/edges — fails today.
       const xml = `<?xml version="1.0"?>
 <SharingRules xmlns="http://soap.sforce.com/2006/04/metadata">
   <sharingGuestRules>
     <fullName>Share_To_Guest</fullName>
     <accessLevel>Read</accessLevel>
-    <sharedTo><guestUser>ClientPortal</guestUser></sharedTo>
+    <sharedTo><guestUser>Customer_Site</guestUser></sharedTo>
     <criteriaItems>
       <field>Account.Type</field>
       <operation>equals</operation>
@@ -370,17 +370,17 @@ describe('extractSharingRules', () => {
         expect(node.id).toBe('SharingRule:Account.Share_To_Guest');
         expect(node.properties['ruleType']).toBe('guest');
         expect(node.properties['sharedToType']).toBe('guestUser');
-        expect(node.properties['sharedToName']).toBe('ClientPortal');
-        expect(node.properties['siteName']).toBe('ClientPortal');
+        expect(node.properties['sharedToName']).toBe('Customer_Site');
+        expect(node.properties['siteName']).toBe('Customer_Site');
         expect(node.properties['criteriaItemCount']).toBe(1);
         const parentEdge = result.value.edges.find((e) => e.edgeType === 'parentOf');
         expect(parentEdge?.fromId).toBe('CustomObject:Account');
         expect(parentEdge?.toId).toBe('SharingRule:Account.Share_To_Guest');
         const sharedWith = result.value.edges.find((e) => e.edgeType === 'sharedWith');
-        expect(sharedWith?.toId).toBe('Group:ClientPortal');
+        expect(sharedWith?.toId).toBe('Group:Customer_Site');
         expect(sharedWith?.confidence).toBe('declared');
         expect(sharedWith?.properties['synthetic']).toBe(true);
-        expect(sharedWith?.properties['siteName']).toBe('ClientPortal');
+        expect(sharedWith?.properties['siteName']).toBe('Customer_Site');
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

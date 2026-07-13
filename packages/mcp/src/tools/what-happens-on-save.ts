@@ -21,28 +21,45 @@
  *   2. **pre-save-validation** — ValidationRules parented to the
  *      target object. Each emits its `firesWhen` ConditionalContext so
  *      callers can see the condition gate before the rule runs.
- *   3. **save** — the database write itself (a documented placeholder
+ *   3. **duplicate-rules** — DuplicateRules parented to the target
+ *      object, evaluated on insert/update only. Each step surfaces the
+ *      rule's effective `DuplicateRuleOperation` set for this event
+ *      (`Allow`/`Block`/`Alert`/`Report`) as `duplicateRuleOperations`,
+ *      the derived `blocksOnSave` boolean, and the `MatchingRule` ids
+ *      it references (via `actions`). Duplicate rules run AFTER
+ *      before-triggers and validation, BEFORE the record is saved —
+ *      per Salesforce's own numbered order-of-execution doc.
+ *   4. **save** — the database write itself (a documented placeholder
  *      step the platform performs; no SfIntelligence node represents it).
- *   4. **after-triggers** — ApexTriggers whose `events` property
+ *   5. **after-triggers** — ApexTriggers whose `events` property
  *      contains a matching `after <event>` lifecycle event. These run
  *      after the record is written but ahead of the post-save automation.
- *   5. **post-save-assignment** — Lead/Case AssignmentRules,
+ *   6. **post-save-assignment** — Lead/Case AssignmentRules,
  *      AutoResponseRules, and EscalationRules parented to the target
  *      object (`parentOf` from CustomObject to firer). Assignment and
  *      auto-response rules run ahead of workflow rules. Each rule's
  *      ConditionalContext is surfaced.
- *   6. **post-save-workflows** — WorkflowRules whose `triggersOn` edge
+ *   7. **post-save-workflows** — WorkflowRules whose `triggersOn` edge
  *      points at the target object AND whose `triggerType` matches the
  *      DML event (workflows only fire on insert/update). Each rule's
  *      `firesWhen` ConditionalContext is surfaced alongside the rule.
- *   7. **post-save-flows** — record-triggered (after-save) Flows whose
+ *   8. **post-save-flows** — record-triggered (after-save) Flows whose
  *      `triggersOn` edge points at the target object AND whose
  *      `recordTriggerType` matches the DML event. After-save flows run
  *      after workflow rules.
- *   8. **post-save-approval** — ApprovalProcesses parented to the
+ *   9. **post-save-approval** — ApprovalProcesses parented to the
  *      target object (`parentOf` from CustomObject) with their entry
  *      criteria ConditionalContext.
- *   9. **post-save-async** — ApexClasses called via the
+ *   10. **post-save-rollup-recalc** — parent Summary (roll-up summary)
+ *      CustomFields that aggregate this object, found by matching this
+ *      object's api name against the child-object prefix of every
+ *      Summary field's `summaryForeignKey` property (R6-07; there is no
+ *      edge for this — see `soe-rollup-recalc.ts`). Fires on EVERY DML
+ *      event (insert/update/delete/undelete all change the child record
+ *      set a rollup aggregates), capped to ONE level (a grandparent's own
+ *      rollup on the recalculated parent is NOT walked) and does NOT
+ *      expand the parent's own triggers/flows/workflows (no re-entrancy).
+ *   11. **post-save-async** — ApexClasses called via the
  *      `dispatchesAsync` edge from any trigger or Apex class identified
  *      in the earlier phases (the queueable / batchable / schedulable
  *      / @future jobs the save dispatches).
@@ -54,6 +71,19 @@
  *     expression and the field-ref count from the ConditionalContext
  *     node, but it does not know whether a specific record at runtime
  *     satisfies the condition.
+ *   - Roll-up recalculation is capped to one level and does not expand
+ *     the recalculated parent's own automation (no re-entrancy).
+ *   - Entitlement-process/milestone-type METADATA is modeled elsewhere
+ *     in the vault (R6-18), but this composition does NOT simulate
+ *     entitlement milestones as an order-of-execution phase — target
+ *     minutes and live on-track/breached status are NOT modeled. When
+ *     the target object has an active `EntitlementProcess`, the
+ *     response carries an `entitlementProcessNotes` entry (R6-23)
+ *     naming it — a disclosure-plus-pointer, not a simulated phase.
+ *   - Criteria-based sharing recalculation — the FINAL step in
+ *     Salesforce's documented order-of-execution, evaluated after
+ *     every phase modeled here (including post-save-async) — is
+ *     also NOT modeled (R6-23).
  *   - Manual sharing, sharing sets, account teams, and Apex callouts
  *     after save are out of scope.
  *   - Pre-save validation includes only ValidationRules; system
@@ -93,7 +123,13 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import {
+  getNodeById,
+  listEdges,
+  listEdgesForNodes,
+  listNodesByIds,
+  listNodesByType,
+} from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -113,19 +149,28 @@ import {
   soeNotAdmittedMessage,
 } from './soe-admission.js';
 import {
+  buildDuplicateRuleStep,
+  DUPLICATE_RULE_TYPES,
+} from './soe-duplicate-rules.js';
+import {
   type BoundableStep,
   enforceSoeByteBudget,
   soeTruncationNote,
 } from './soe-payload-bounds.js';
+import {
+  findRollupRecalcSteps,
+  rollupScanTruncationNote,
+} from './soe-rollup-recalc.js';
 
 /**
  * The verbatim honesty-axis disclosure surfaced in every response.
  * Frozen here so the test suite can assert the exact string and so a
  * caller-facing rephrasing during rendering is a code-review concern,
- * not a silent drift.
+ * not a silent drift. BYTE-IDENTICAL to `order-of-execution.ts`'s
+ * `DISCLOSURE` — the two SOE tools must stay in lockstep.
  */
 const DISCLOSURE =
-  "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once and does not expand that re-entrancy. A workflow rule's time-dependent actions (its workflowTimeTriggers) are SCHEDULED for an offset measured from a record field value the offline vault cannot evaluate; this composition lists the rule once in the synchronous post-save-workflows phase and does NOT claim its time-delayed actions fire at save. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.";
+  "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Duplicate rules are modeled as their own `duplicate-rules` phase, running after before-triggers and validation but BEFORE the save — evaluated on insert/update only, with the effective Block/Allow/Alert/Report operations surfaced per rule. Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once and does not expand that re-entrancy. A workflow rule's time-dependent actions (its workflowTimeTriggers) are SCHEDULED for an offset measured from a record field value the offline vault cannot evaluate; this composition lists the rule once in the synchronous post-save-workflows phase and does NOT claim its time-delayed actions fire at save. Parent Summary (roll-up) fields that aggregate this object recalculate in the `post-save-rollup-recalc` phase, capped to ONE level — a grandparent's own rollup on that recalculated parent is NOT walked — and the parent's own triggers/flows/workflows that its recalculated save would fire are NOT expanded (no re-entrancy). Entitlement-process and milestone-type METADATA is modeled elsewhere in the vault (R6-18: `EntitlementProcess`/`MilestoneType` nodes, queryable via `sfi.get_component` / `sfi.get_edges`, including each milestone's declared target `minutesToComplete` as of R7-C7) — but this composition does NOT simulate entitlement milestones as an order-of-execution phase: whether a specific record is currently on-track or breached against those target minutes is live, per-record timer data this offline vault cannot hold. Criteria-based sharing recalculation — the FINAL step in Salesforce's documented order-of-execution, evaluated after every phase modeled here (including post-save-async) — is also NOT modeled: a save that causes a record to newly match or stop matching a criteria-based sharing rule's criteria triggers a sharing recalculation this composition does not surface. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.";
 
 /**
  * The set of DML events the input axis accepts. Mirrors the
@@ -217,12 +262,14 @@ export type SoePhase =
   | 'before-save-flows'
   | 'pre-save-triggers'
   | 'pre-save-validation'
+  | 'duplicate-rules'
   | 'save'
   | 'after-triggers'
   | 'post-save-assignment'
   | 'post-save-workflows'
   | 'post-save-flows'
   | 'post-save-approval'
+  | 'post-save-rollup-recalc'
   | 'post-save-async';
 
 /**
@@ -235,11 +282,13 @@ const AUTOMATION_PHASES: readonly Exclude<SoePhase, 'save'>[] = [
   'before-save-flows',
   'pre-save-triggers',
   'pre-save-validation',
+  'duplicate-rules',
   'after-triggers',
   'post-save-assignment',
   'post-save-workflows',
   'post-save-flows',
   'post-save-approval',
+  'post-save-rollup-recalc',
   'post-save-async',
 ];
 
@@ -317,6 +366,46 @@ export interface SoeStep {
    */
   readonly errorMessage?: string;
   readonly errorDisplayField?: string | null;
+  /**
+   * For a DuplicateRule step, its effective `DuplicateRuleOperation` set for
+   * THIS event (`Allow`/`Block`/`Alert`/`Report`, deduped). Omitted for
+   * non-DuplicateRule firers.
+   */
+  readonly duplicateRuleOperations?: readonly string[];
+  /**
+   * For a DuplicateRule step, whether the effective operation set includes
+   * `Block` — the derived "does this stop the save" answer. Omitted for
+   * non-DuplicateRule firers.
+   */
+  readonly blocksOnSave?: boolean;
+}
+
+/**
+ * R6-23: cap on the number of entitlement-process informational notes
+ * surfaced per response. An object realistically carries a handful of
+ * distinct entitlement processes at most (e.g. Gold/Silver/Bronze SLA
+ * tiers on Case); this defends against a pathological org without
+ * materially limiting the real case.
+ */
+const ENTITLEMENT_PROCESS_NOTE_CAP = 20;
+
+/**
+ * R6-23: one active `EntitlementProcess` targeting this object — a
+ * disclosure-PLUS-pointer, deliberately NOT a simulated order-of-execution
+ * phase. Live milestone EVALUATION (whether a specific record is currently
+ * on-track or breached) stays unmodeled per `DISCLOSURE`; this only tells
+ * the caller WHERE to look (`sfi.get_component` / `sfi.get_edges` on
+ * `componentId` surfaces the referenced `MilestoneType`s AND — as of R7-C7
+ * — each milestone's declared target `minutesToComplete`, on the
+ * EntitlementProcess node's own `properties.milestones`). `confidence` is
+ * always `'declared'` — the match is a direct read of the EntitlementProcess
+ * node's own `SObjectType` / `active` properties, not an inference.
+ */
+export interface EntitlementProcessNote {
+  readonly componentId: ComponentId;
+  readonly apiName: string;
+  readonly message: string;
+  readonly confidence: 'declared';
 }
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
@@ -359,6 +448,17 @@ export interface WhatHappensOnSaveOutput {
    * Absent when the full response fit.
    */
   readonly truncated?: boolean;
+  /**
+   * R6-23: active `EntitlementProcess`(es) targeting this object — an
+   * informational pointer, NOT a simulated order-of-execution phase (see
+   * {@link EntitlementProcessNote}). Omitted when the object carries no
+   * active EntitlementProcess. Capped at {@link ENTITLEMENT_PROCESS_NOTE_CAP};
+   * `entitlementProcessNotesTruncated` is present (`true`) only when the
+   * cap was hit.
+   */
+  readonly entitlementProcessNotes?: readonly EntitlementProcessNote[];
+  /** Present (`true`) only when `entitlementProcessNotes` hit the cap. */
+  readonly entitlementProcessNotesTruncated?: boolean;
 }
 
 /**
@@ -640,13 +740,22 @@ const fetchParentedFirers = async (
     edgeType: 'parentOf',
   });
   if (!edgesResult.ok) return err(edgesResult.error.message);
+  // ONE batched node fetch for every parentOf child, replacing the per-edge
+  // `getNodeById` N+1. The per-edge Map lookup preserves the old loop's
+  // multiplicity and null-skip (`listNodesByIds` drops ids with no row exactly
+  // like `getNodeById`); the trailing id-ASC sort makes push order irrelevant.
+  const nodesResult = await listNodesByIds(
+    ctx.graph,
+    edgesResult.value.map((e) => e.toId),
+  );
+  if (!nodesResult.ok) return err(nodesResult.error.message);
+  const byId = new Map(nodesResult.value.map((n) => [n.id, n]));
   const firers: Node[] = [];
   for (const edge of edgesResult.value) {
-    const nodeResult = await getNodeById(ctx.graph, edge.toId);
-    if (!nodeResult.ok) return err(nodeResult.error.message);
-    if (nodeResult.value === null) continue;
-    if (!allowedTypes.has(nodeResult.value.type)) continue;
-    firers.push(nodeResult.value);
+    const node = byId.get(edge.toId);
+    if (node === undefined) continue;
+    if (!allowedTypes.has(node.type)) continue;
+    firers.push(node);
   }
   // Deterministic order by id so the response is stable across runs.
   return ok([...firers].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)));
@@ -668,13 +777,20 @@ const fetchTriggersOnFirers = async (
     edgeType: 'triggersOn',
   });
   if (!edgesResult.ok) return err(edgesResult.error.message);
+  // ONE batched node fetch for every triggersOn firer, replacing the per-edge
+  // `getNodeById` N+1 (mirrors fetchParentedFirers above).
+  const nodesResult = await listNodesByIds(
+    ctx.graph,
+    edgesResult.value.map((e) => e.fromId),
+  );
+  if (!nodesResult.ok) return err(nodesResult.error.message);
+  const byId = new Map(nodesResult.value.map((n) => [n.id, n]));
   const firers: Node[] = [];
   for (const edge of edgesResult.value) {
-    const nodeResult = await getNodeById(ctx.graph, edge.fromId);
-    if (!nodeResult.ok) return err(nodeResult.error.message);
-    if (nodeResult.value === null) continue;
-    if (!allowedTypes.has(nodeResult.value.type)) continue;
-    firers.push(nodeResult.value);
+    const node = byId.get(edge.fromId);
+    if (node === undefined) continue;
+    if (!allowedTypes.has(node.type)) continue;
+    firers.push(node);
   }
   return ok([...firers].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)));
 };
@@ -693,24 +809,31 @@ const buildAsyncSteps = async (
   sources: readonly Node[],
   startingStepIndex: number,
 ): Promise<Result<readonly SoeStep[], string>> => {
+  // ONE batched fetch of every source's OUTGOING dispatchesAsync edges, then ONE
+  // batched fetch of the distinct target job nodes — replacing the per-source
+  // `listEdges` + per-edge `getNodeById` double N+1. The distinct-toId set is
+  // collected in the same source→bucket order the old loop saw (irrelevant to
+  // the output, which sorts by id); `listNodesByIds` drops target ids with no
+  // row exactly like the old null-skip, so `sorted` is the same distinct
+  // non-null job set.
+  const edgeBatch = await listEdgesForNodes(
+    ctx.graph,
+    sources.map((s) => s.id),
+    { direction: 'out', edgeTypes: ['dispatchesAsync'] },
+  );
+  if (!edgeBatch.ok) return err(edgeBatch.error.message);
   const seenIds = new Set<ComponentId>();
-  const seenJobs: Node[] = [];
+  const targetIds: ComponentId[] = [];
   for (const source of sources) {
-    const edgesResult = await listEdges(ctx.graph, source.id, {
-      direction: 'out',
-      edgeType: 'dispatchesAsync',
-    });
-    if (!edgesResult.ok) return err(edgesResult.error.message);
-    for (const edge of edgesResult.value) {
+    for (const edge of edgeBatch.value.get(source.id) ?? []) {
       if (seenIds.has(edge.toId)) continue;
-      const nodeResult = await getNodeById(ctx.graph, edge.toId);
-      if (!nodeResult.ok) return err(nodeResult.error.message);
-      if (nodeResult.value === null) continue;
       seenIds.add(edge.toId);
-      seenJobs.push(nodeResult.value);
+      targetIds.push(edge.toId);
     }
   }
-  const sorted = [...seenJobs].sort((a, b) =>
+  const jobsResult = await listNodesByIds(ctx.graph, targetIds);
+  if (!jobsResult.ok) return err(jobsResult.error.message);
+  const sorted = [...jobsResult.value].sort((a, b) =>
     a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
   );
   const steps: SoeStep[] = [];
@@ -807,16 +930,22 @@ export const whatHappensOnSaveHandler = async (
   }
   const beforeSaveFlows: Array<{ firer: Node; recordTriggerType: unknown }> = [];
   const afterSaveFlows: Array<{ firer: Node; recordTriggerType: unknown }> = [];
+  // ONE batched fetch of every Flow's OUTGOING triggersOn edges, replacing the
+  // per-flow `listEdges` N+1. Each bucket is sorted by the FULL (to_id,
+  // edge_type, from_id, source) order — a refinement of listEdges' order — so
+  // `.find(e => e.toId === objectId)` returns the same first-matching edge.
+  const flowEdgeBatch = await listEdgesForNodes(
+    ctx.graph,
+    allFlowsResult.value.map((f) => f.id),
+    { direction: 'out', edgeTypes: ['triggersOn'] },
+  );
+  if (!flowEdgeBatch.ok) {
+    return err({ kind: 'internal', message: flowEdgeBatch.error.message });
+  }
   for (const firer of allFlowsResult.value) {
     if (skipInactiveSoeFirer(inactiveCollector, firer)) continue;
-    const flowEdgesResult = await listEdges(ctx.graph, firer.id, {
-      direction: 'out',
-      edgeType: 'triggersOn',
-    });
-    if (!flowEdgesResult.ok) {
-      return err({ kind: 'internal', message: flowEdgesResult.error.message });
-    }
-    const edgeToObject = flowEdgesResult.value.find((e) => e.toId === objectId);
+    const flowEdges = flowEdgeBatch.value.get(firer.id) ?? [];
+    const edgeToObject = flowEdges.find((e) => e.toId === objectId);
     if (edgeToObject === undefined) continue;
     const entry = { firer, recordTriggerType: edgeToObject.properties['recordTriggerType'] };
     if (edgeToObject.properties['triggerType'] === 'RecordBeforeSave') beforeSaveFlows.push(entry);
@@ -891,7 +1020,50 @@ export const whatHappensOnSaveHandler = async (
     }
   }
 
-  // Phase 3: save. A documented placeholder; the platform's
+  // Phase 3: duplicate-rules. DuplicateRules parented to the object run
+  // AFTER before-triggers and validation, BEFORE the record is saved — per
+  // Salesforce's documented order-of-execution numbering. They evaluate on
+  // insert/update only (same event gate as validation rules).
+  if (input.event === 'insert' || input.event === 'update' || input.event === 'upsert') {
+    const duplicateRulesResult = await fetchParentedFirers(
+      ctx,
+      objectId,
+      DUPLICATE_RULE_TYPES,
+    );
+    if (!duplicateRulesResult.ok) {
+      return err({ kind: 'internal', message: duplicateRulesResult.error });
+    }
+    for (const firer of duplicateRulesResult.value) {
+      if (skipInactiveSoeFirer(inactiveCollector, firer)) continue;
+      const dupResult = await buildDuplicateRuleStep(ctx, firer, input.event);
+      if (!dupResult.ok) {
+        return err({ kind: 'internal', message: dupResult.error });
+      }
+      // `null` means the rule's effective operations for THIS event are empty
+      // (e.g. only operationsOnUpdate configured, called on insert) — it does
+      // not evaluate on this event, so it is excluded, mirroring how the
+      // workflow/flow event gates drop a non-matching firer.
+      if (dupResult.value === null) continue;
+      const dup = dupResult.value;
+      soe.push({
+        phase: 'duplicate-rules',
+        stepIndex,
+        componentId: dup.componentId,
+        componentType: 'DuplicateRule',
+        apiName: dup.apiName,
+        actions: dup.matchingRules.map((toId) => ({
+          kind: 'references',
+          targetId: toId,
+          description: `references ${toId}`,
+        })),
+        duplicateRuleOperations: dup.operations,
+        blocksOnSave: dup.blocksOnSave,
+      });
+      stepIndex += 1;
+    }
+  }
+
+  // Phase 4: save. A documented placeholder; the platform's
   // system-validation + database-write step has no per-org node.
   // Stable id under the CustomObject so the step is renderable.
   soe.push({
@@ -910,7 +1082,7 @@ export const whatHappensOnSaveHandler = async (
   });
   stepIndex += 1;
 
-  // Phase 4: after-triggers. ApexTriggers whose `events` includes a
+  // Phase 5: after-triggers. ApexTriggers whose `events` includes a
   // `after <event>` lifecycle entry.
   const afterTriggers: Node[] = [];
   for (const firer of beforeTriggersResult.value) {
@@ -931,7 +1103,7 @@ export const whatHappensOnSaveHandler = async (
     }
   }
 
-  // Phase 5: post-save-assignment. Assignment / AutoResponse rules
+  // Phase 6: post-save-assignment. Assignment / AutoResponse rules
   // parented to the object run ahead of workflow rules. EscalationRules
   // are bundled into this phase too; in the strict SOE escalation runs
   // AFTER workflow rules, but the tool does not split the bundle — a
@@ -958,7 +1130,7 @@ export const whatHappensOnSaveHandler = async (
     stepIndex += 1;
   }
 
-  // Phase 6: post-save-workflows. WorkflowRules whose `triggerType`
+  // Phase 7: post-save-workflows. WorkflowRules whose `triggerType`
   // property matches the DML event.
   const workflowsResult = await fetchTriggersOnFirers(
     ctx,
@@ -985,7 +1157,7 @@ export const whatHappensOnSaveHandler = async (
     }
   }
 
-  // Phase 7: post-save-flows. Record-triggered AFTER-save Flows whose
+  // Phase 8: post-save-flows. Record-triggered AFTER-save Flows whose
   // `recordTriggerType` matches the DML event. After-save flows run after
   // workflow rules. Before-save flows were already emitted in Phase 0, so only
   // the after-save partition is walked here.
@@ -1021,7 +1193,7 @@ export const whatHappensOnSaveHandler = async (
     stepIndex += 1;
   }
 
-  // Phase 8: post-save-approval. ApprovalProcesses parented to the
+  // Phase 9: post-save-approval. ApprovalProcesses parented to the
   // object.
   const approvalsResult = await fetchParentedFirers(
     ctx,
@@ -1046,7 +1218,37 @@ export const whatHappensOnSaveHandler = async (
     stepIndex += 1;
   }
 
-  // Phase 9: post-save-async. Walk dispatchesAsync from every
+  // Phase 10: post-save-rollup-recalc. Parent Summary (roll-up summary)
+  // CustomFields that aggregate THIS object recalculate on every DML event —
+  // insert/update/delete/undelete all change the child record set a rollup
+  // aggregates, unlike duplicate rules/validation which evaluate on
+  // insert/update only. Found by scanning `summaryForeignKey` (R6-07; there
+  // is no edge for this walk — see `soe-rollup-recalc.ts`), capped to ONE
+  // level (a grandparent's own rollup is NOT walked) and does not expand the
+  // parent's own automation (no re-entrancy).
+  const rollupResult = await findRollupRecalcSteps(ctx, input.objectApiName);
+  if (!rollupResult.ok) {
+    return err({ kind: 'internal', message: rollupResult.error });
+  }
+  for (const rollup of rollupResult.value.steps) {
+    soe.push({
+      phase: 'post-save-rollup-recalc',
+      stepIndex,
+      componentId: rollup.fieldId,
+      componentType: 'CustomField',
+      apiName: rollup.apiName,
+      actions: [
+        {
+          kind: 'recalculates',
+          targetId: rollup.parentObjectId,
+          description: `recalculates ${rollup.summaryOperation ?? 'unknown-operation'}(${rollup.summarizedField ?? 'record count'}) on ${rollup.parentObjectId}`,
+        },
+      ],
+    });
+    stepIndex += 1;
+  }
+
+  // Phase 11: post-save-async. Walk dispatchesAsync from every
   // ApexTrigger that fired in phase 1 / 4. Dedupes targets.
   // Also emit scheduled-only after-save Flows here: these flows have no
   // direct <connector> in <start> (hasImmediateConnector === false) so they
@@ -1081,6 +1283,33 @@ export const whatHappensOnSaveHandler = async (
   // active org-configured component that fires.
   const activeComponents = soe.filter((s) => s.phase !== 'save').length;
 
+  // R6-23: informational rider — active EntitlementProcess(es) targeting
+  // this object. Disclosure-PLUS-pointer only: milestone evaluation itself
+  // is NOT simulated as an order-of-execution phase (see DISCLOSURE above)
+  // — this just tells the caller an active process exists and where to
+  // read its milestones from. `SObjectType`/`active` are read directly off
+  // the EntitlementProcess node's own properties (R6-18), so the match is
+  // `declared` confidence, not inferred. Fetch one past the cap to detect
+  // truncation honestly rather than silently dropping the tail.
+  const entitlementResult = await listNodesByType(ctx.graph, 'EntitlementProcess', {
+    propertyStringEquals: { SObjectType: input.objectApiName },
+    propertyEquals: { active: true },
+    limit: ENTITLEMENT_PROCESS_NOTE_CAP + 1,
+  });
+  if (!entitlementResult.ok) {
+    return err({ kind: 'internal', message: entitlementResult.error.message });
+  }
+  const entitlementProcessNotesTruncated =
+    entitlementResult.value.length > ENTITLEMENT_PROCESS_NOTE_CAP;
+  const entitlementProcessNotes: EntitlementProcessNote[] = entitlementResult.value
+    .slice(0, ENTITLEMENT_PROCESS_NOTE_CAP)
+    .map((node) => ({
+      componentId: node.id,
+      apiName: node.apiName,
+      message: `entitlement process ${node.apiName} is active on this object — milestone evaluation not simulated`,
+      confidence: 'declared' as const,
+    }));
+
   const data: {
     objectApiName: string;
     event: DmlEvent;
@@ -1097,6 +1326,8 @@ export const whatHappensOnSaveHandler = async (
     disclosure: string;
     inactiveConfigured?: readonly InactiveConfiguredFirer[];
     truncated?: boolean;
+    entitlementProcessNotes?: readonly EntitlementProcessNote[];
+    entitlementProcessNotesTruncated?: boolean;
   } = {
     objectApiName: input.objectApiName,
     event: input.event,
@@ -1108,6 +1339,8 @@ export const whatHappensOnSaveHandler = async (
           inactiveHeadline: `Excluded inactive: ${inactiveConfigured.map((i) => i.apiName).join(', ')}`,
         }
       : {}),
+    ...(entitlementProcessNotes.length > 0 ? { entitlementProcessNotes } : {}),
+    ...(entitlementProcessNotesTruncated ? { entitlementProcessNotesTruncated } : {}),
     summary: {
       totalSteps: soe.length,
       activeComponents,
@@ -1118,6 +1351,13 @@ export const whatHappensOnSaveHandler = async (
     soe,
     disclosure: composeSoeDisclosure(DISCLOSURE, objectModeled),
   };
+
+  // The org-wide Summary-field scan behind post-save-rollup-recalc hit the
+  // shared node-scan cap — the rollup list above may be INCOMPLETE. Disclose
+  // it rather than imply every aggregating parent was found.
+  if (rollupResult.value.scanTruncated) {
+    data.disclosure = `${data.disclosure} ${rollupScanTruncationNote()}`;
+  }
 
   // On a densely-automated standard object (e.g. Contact) the per-step action
   // enumeration can push the payload past the MCP response budget. Trim the

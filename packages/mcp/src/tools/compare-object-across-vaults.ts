@@ -12,16 +12,49 @@
  *     non-volatile property differing.
  *   - `objectLevelDrift`: CustomObject-level property differences
  *     (sharingModel, description, deploymentStatus, etc.).
+ *   - `edgeDrift` (R7-W10): outgoing-edge drift for the object's own
+ *     components — see below.
  *
  * Honesty axes (verbatim in `boundaries[]`):
  *
  *   1. Volatile-property filter — inherited from v2.0c.
  *   2. API-name-match field correspondence — renamed fields appear as
  *      remove+add, NOT as modified.
+ *   3. Edge-drift scope (R7-W10) — only OUTGOING edges of THIS
+ *      object's components (the object node itself, plus fields
+ *      present in BOTH vaults) are compared.
+ *   4. Extractor-version caveat (R7-W10) — when the two vaults'
+ *      manifests report different sf-intelligence product versions,
+ *      `extractorVersionCaveat` names both.
  *
  * Composition recipe (PLAN-v3.1 §4): loads both vaults; reads the
  * CustomObject node for `objectApiName`; walks parented CustomField
  * children in each; pairs and classifies.
+ *
+ * **R7-W10 — `edgeDrift` axis.** `sfi.compare_vaults`'s R6-12 `edgeDrift`
+ * axis closes a blind spot node-hash comparison alone has: a Flow that
+ * starts referencing a new field, or a validation rule that drops a
+ * reference, changes NOTHING in the node's own `properties`, so it never
+ * showed up as `shapeModifiedFields`. R6-12 explicitly did NOT wire this
+ * axis into this tool (a separate diff code path) — that follow-up lands
+ * here. For the object node itself (when present in BOTH vaults) and every
+ * field paired by api-name (present in BOTH vaults, independent of whether
+ * its own node hash matched), `edgeDrift` diffs the two vaults' OUTGOING
+ * edge sets and reports `edgesAdded[]` / `edgesRemoved[]` per component —
+ * same comparison identity, same caps, and the same
+ * `extractorVersionCaveat` discipline as `compare_vaults`. The diff logic
+ * itself is REUSED (not re-implemented) from the shared
+ * `cross-vault-edge-drift.ts` module `compare-vaults.ts` was refactored to
+ * use in the same change.
+ *
+ * **R7-W9 — `canonicalJson(undefined)` crash-class sweep.** This module's
+ * `canonicalJson` is a copy of the implementation `compare-vaults.ts` shipped
+ * with R6-12, which crashed for real (`boundValue` threw calling `.length` on
+ * the non-string `undefined` that `canonicalJson(undefined)` returned). This
+ * file has no byte-capping step, so the crash never reproduced here, but the
+ * same defensive `undefined` branch was applied to eliminate the underlying
+ * bug pattern before any future caller (e.g. output size-capping) hits it —
+ * see the function's own JSDoc for the full trace.
  */
 
 import { createHash } from 'node:crypto';
@@ -45,6 +78,13 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  buildEdgeDrift,
+  buildExtractorVersionCaveat,
+  EDGE_DRIFT_SCOPE_DISCLOSURE,
+  loadEdgesByFrom,
+  type EdgeDriftOutput,
+} from './cross-vault-edge-drift.js';
 import { openVaultReadOnly } from './cross-vault-open.js';
 
 const VOLATILE_PROPERTY_PATHS = new Set<string>([
@@ -88,10 +128,28 @@ export interface CompareObjectAcrossVaultsOutput {
   readonly addedFields: readonly FieldDiff[];
   readonly removedFields: readonly FieldDiff[];
   readonly shapeModifiedFields: readonly FieldDiff[];
+  /**
+   * R7-W10: outgoing-edge drift scoped to THIS object's own components (the
+   * object node itself, plus fields present in both vaults) — independent
+   * of `shapeModifiedFields`, since an edge can change while every field
+   * property stays byte-identical. See the module JSDoc's `edgeDrift`
+   * section.
+   */
+  readonly edgeDrift: EdgeDriftOutput;
   readonly unchangedFieldCount: number;
   readonly totalFieldCountA: number;
   readonly totalFieldCountB: number;
   readonly boundaries: readonly string[];
+  /**
+   * R7-W10: present ONLY when vaultA's and vaultB's manifests report
+   * different sf-intelligence product versions — an edge-set (or node)
+   * difference between differently-extracted vaults can reflect an
+   * EXTRACTOR change, not a real change in the org. Absent when both
+   * versions match or either manifest could not be read (a read failure is
+   * disclosed separately in `boundaries[]`, never silently treated as
+   * "versions match").
+   */
+  readonly extractorVersionCaveat?: string;
 }
 
 interface NodeRow {
@@ -124,7 +182,29 @@ const parsePropertiesJson = (
   }
 };
 
+/**
+ * R7-W9 crash-class sweep: the identical `canonicalJson` implementation in
+ * `compare-vaults.ts` shipped with R6-12 hit a real crash — `JSON.stringify(undefined)`
+ * returns the JS value `undefined`, NOT the string `"undefined"`, so the
+ * primitive-fallthrough branch silently returned a non-string, and that
+ * sibling's `boundValue` helper threw calling `.length` on it. `collectDrift`
+ * below has the SAME `undefined`-producing shape (its `keys` set is the union
+ * of both sides' property keys, so a key present on only one side reads back
+ * as `undefined` on the other), but this file has no `boundValue`-equivalent
+ * byte-capping step, so the crash never actually reproduces here today — a
+ * direct trace confirms `canonicalJson(va) !== canonicalJson(vb)` compares
+ * fine against a raw `undefined`, and `hashProperties` only ever calls
+ * `canonicalJson` on a populated Record (never on `undefined` itself). This
+ * is nonetheless the SAME latent bug shape as the file that DID crash — any
+ * future consumer of `canonicalJson`'s return value that assumes a string
+ * (byte-capping, `.slice()`, hashing directly) would hit the identical
+ * failure. The explicit `undefined` branch below (matching R6-12's fix)
+ * closes that landmine pre-emptively; the sentinel cannot collide with any
+ * real JSON value (`null`, the literal string `"undefined"`, etc. all
+ * canonicalize differently).
+ */
 const canonicalJson = (value: unknown): string => {
+  if (value === undefined) return '\0undefined\0';
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   const record = value as Readonly<Record<string, unknown>>;
@@ -209,6 +289,11 @@ const VOLATILE_FILTER_DISCLOSURE =
 const FIELD_CORRESPONDENCE_DISCLOSURE =
   'field correspondence is by api-name match; a field renamed between A and B will appear as removed-from-A + added-to-B.';
 
+// R7-W10: EDGE_DRIFT_SCOPE_DISCLOSURE, loadEdgesByFrom, buildEdgeDrift, and
+// buildExtractorVersionCaveat are imported from the shared
+// ./cross-vault-edge-drift.js module (the same primitive compare-vaults.ts's
+// R6-12 edgeDrift axis uses) rather than re-implemented here.
+
 /**
  * A vault alias could not be resolved (or its graph could not be read).
  * Return a structured `component-not-found` error rather than an `ok`
@@ -283,16 +368,28 @@ export const compareObjectAcrossVaultsHandler = async (
 
   try {
     const objectId = `CustomObject:${input.objectApiName}` as ComponentId;
-    const objA = await loadObject(openA.value.store, objectId);
-    const objB = await loadObject(openB.value.store, objectId);
+    const [objA, objB, edgesByFromA, edgesByFromB, versionCaveat] = await Promise.all([
+      loadObject(openA.value.store, objectId),
+      loadObject(openB.value.store, objectId),
+      // R7-W10: whole-vault edge scan, mirroring compare_vaults' R6-12
+      // edgeDrift axis (see cross-vault-edge-drift.ts's loadEdgesByFrom
+      // JSDoc for why a whole-vault scan is an accepted cost here) — the
+      // `commonNodes` map built below narrows which of these buckets are
+      // ever consulted to THIS object's own components.
+      loadEdgesByFrom(openA.value.store),
+      loadEdgesByFrom(openB.value.store),
+      buildExtractorVersionCaveat(pathAResult.value, pathBResult.value, input.vaultA, input.vaultB),
+    ]);
 
     const objectLevelDrift: PropertyDrift[] =
       objA !== null && objB !== null
         ? collectDrift(objA.properties, objB.properties, includeVolatile)
         : [];
 
-    const fieldsA = objA !== null ? await loadFields(openA.value.store, objectId) : [];
-    const fieldsB = objB !== null ? await loadFields(openB.value.store, objectId) : [];
+    const [fieldsA, fieldsB] = await Promise.all([
+      objA !== null ? loadFields(openA.value.store, objectId) : Promise.resolve([]),
+      objB !== null ? loadFields(openB.value.store, objectId) : Promise.resolve([]),
+    ]);
 
     // Pair fields by api-name (the field portion, after the object).
     const keyOf = (n: CompactNode): string => {
@@ -304,6 +401,14 @@ export const compareObjectAcrossVaultsHandler = async (
     for (const n of fieldsA) mapA.set(keyOf(n), n);
     const mapB = new Map<string, CompactNode>();
     for (const n of fieldsB) mapB.set(keyOf(n), n);
+
+    // R7-W10: every component present in BOTH vaults that this tool is
+    // scoped to — the object node itself, plus every field paired above —
+    // regardless of node-hash drift, since edgeDrift needs the FULL
+    // intersection (an edge can change while every node property stays
+    // byte-identical). Mirrors compare-vaults.ts's `commonNodes` build.
+    const commonNodes = new Map<ComponentId, CompactNode>();
+    if (objA !== null && objB !== null) commonNodes.set(objB.id, objB);
 
     const addedFields: FieldDiff[] = [];
     const removedFields: FieldDiff[] = [];
@@ -319,6 +424,7 @@ export const compareObjectAcrossVaultsHandler = async (
           type: { in_a: null, in_b: fieldTypeOf(nodeB.properties) },
         });
       } else {
+        commonNodes.set(nodeB.id, nodeB);
         const hashA = hashProperties(nodeA.properties, includeVolatile);
         const hashB = hashProperties(nodeB.properties, includeVolatile);
         if (hashA !== hashB) {
@@ -361,6 +467,19 @@ export const compareObjectAcrossVaultsHandler = async (
     removedFields.sort(compareByName);
     shapeModifiedFields.sort(compareByName);
 
+    // R7-W10: reuses compare-vaults.ts's R6-12 diff primitive, scoped to
+    // `commonNodes` (this object + its paired fields) instead of a
+    // whole-vault typeFilter/objectFilter intersection.
+    const edgeDrift = buildEdgeDrift(commonNodes, edgesByFromA, edgesByFromB);
+
+    const boundaries: string[] = [
+      VOLATILE_FILTER_DISCLOSURE,
+      FIELD_CORRESPONDENCE_DISCLOSURE,
+      EDGE_DRIFT_SCOPE_DISCLOSURE,
+    ];
+    if (versionCaveat.readFailureNote !== undefined) boundaries.push(versionCaveat.readFailureNote);
+    if (versionCaveat.caveat !== undefined) boundaries.push(versionCaveat.caveat);
+
     return ok({
       data: {
         objectApiName: input.objectApiName,
@@ -372,10 +491,12 @@ export const compareObjectAcrossVaultsHandler = async (
         addedFields,
         removedFields,
         shapeModifiedFields,
+        edgeDrift,
         unchangedFieldCount,
         totalFieldCountA: fieldsA.length,
         totalFieldCountB: fieldsB.length,
-        boundaries: [VOLATILE_FILTER_DISCLOSURE, FIELD_CORRESPONDENCE_DISCLOSURE],
+        boundaries,
+        ...(versionCaveat.caveat !== undefined ? { extractorVersionCaveat: versionCaveat.caveat } : {}),
       },
       vaultState: {
         sourceTreeHash: ctx.manifest.sourceTreeHash,

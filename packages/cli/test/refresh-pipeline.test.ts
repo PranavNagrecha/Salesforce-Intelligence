@@ -7,12 +7,16 @@ import { join } from 'node:path';
 import type { Edge, ExtractionResult, Node } from '@sf-intelligence/contracts';
 import {
   closeGraph,
+  getNodeById,
   importExtractionResults,
+  listNodesByType,
   openGraph,
   type GraphStore,
 } from '@sf-intelligence/graph';
 
 import {
+  componentTypeFromSourcePath,
+  FOLDED_REPORT_DASHBOARD_NAME_CAP,
   foldReportDashboardUsageIntoFields,
   renderVault,
   walkAndExtract,
@@ -103,6 +107,173 @@ describe('foldReportDashboardUsageIntoFields', () => {
       { nodes: [mkNode('CustomField:A.B__c', 'CustomField')], edges: [] },
     ];
     expect(foldReportDashboardUsageIntoFields(results)).toBe(results);
+  });
+
+  // Finding #36: "which reports break if I change this field" was structurally
+  // unanswerable from the boolean alone. These two cases prove the fold now
+  // preserves a capped, named list — with an honest truncation disclosure once
+  // a field crosses the per-field cap.
+  it('Finding #36 — preserves a capped, sorted name list for a field used by 2+ reports/dashboards', () => {
+    const results: readonly ExtractionResult[] = [
+      {
+        nodes: [mkNode('CustomField:Account.Multi__c', 'CustomField')],
+        edges: [],
+      },
+      {
+        nodes: [
+          mkNode('Report:Sales/Pipeline', 'Report'),
+          mkNode('Report:Exec/Forecast', 'Report'),
+        ],
+        edges: [
+          mkRef('Report:Sales/Pipeline', 'CustomField:Account.Multi__c'),
+          mkRef('Report:Exec/Forecast', 'CustomField:Account.Multi__c'),
+        ],
+      },
+      {
+        nodes: [mkNode('Dashboard:Exec/KPIs', 'Dashboard')],
+        edges: [mkRef('Dashboard:Exec/KPIs', 'CustomField:Account.Multi__c')],
+      },
+    ];
+
+    const out = foldReportDashboardUsageIntoFields(results);
+    const field = out
+      .flatMap((r) => r.nodes)
+      .find((n) => n.id === 'CustomField:Account.Multi__c');
+
+    expect(field?.properties['usedInReport']).toBe(true);
+    // Sorted (not encounter-order) so the answer is deterministic.
+    expect(field?.properties['usedInReports']).toEqual(['Exec/Forecast', 'Sales/Pipeline']);
+    expect(field?.properties['usedInReportsTruncated']).toBeUndefined();
+    expect(field?.properties['usedInDashboard']).toBe(true);
+    expect(field?.properties['usedInDashboards']).toEqual(['Exec/KPIs']);
+    expect(field?.properties['usedInDashboardsTruncated']).toBeUndefined();
+    // Report/Dashboard nodes still dropped — only the capped name list survives.
+    const outNodes = out.flatMap((r) => r.nodes);
+    expect(outNodes.some((n) => n.type === 'Report' || n.type === 'Dashboard')).toBe(false);
+  });
+
+  it('Finding #36 — discloses truncation when a field exceeds the per-field name cap', () => {
+    const reportCount = 55;
+    const reportNodes = Array.from({ length: reportCount }, (_, i) =>
+      mkNode(`Report:Bulk/Report${String(i).padStart(3, '0')}`, 'Report'),
+    );
+    const reportEdges = reportNodes.map((n) =>
+      mkRef(n.id, 'CustomField:Account.HeavilyUsed__c'),
+    );
+    const results: readonly ExtractionResult[] = [
+      {
+        nodes: [mkNode('CustomField:Account.HeavilyUsed__c', 'CustomField')],
+        edges: [],
+      },
+      { nodes: reportNodes, edges: reportEdges },
+    ];
+
+    const out = foldReportDashboardUsageIntoFields(results);
+    const field = out
+      .flatMap((r) => r.nodes)
+      .find((n) => n.id === 'CustomField:Account.HeavilyUsed__c');
+
+    const names = field?.properties['usedInReports'] as string[] | undefined;
+    expect(names).toHaveLength(FOLDED_REPORT_DASHBOARD_NAME_CAP);
+    // Truncated total discloses the TRUE count, not just "capped".
+    expect(field?.properties['usedInReportsTruncated']).toBe(55);
+    // The capped 50 are the alphabetically-first 50 (deterministic, not
+    // dependent on file-walk / edge-emission order).
+    expect(names?.[0]).toBe('Bulk/Report000');
+    expect(names?.[49]).toBe('Bulk/Report049');
+  });
+
+  it('R6-24 Option B — folded names survive import so impact tools can read them', async () => {
+    const results: readonly ExtractionResult[] = [
+      {
+        nodes: [mkNode('CustomField:Account.OptionB__c', 'CustomField')],
+        edges: [],
+      },
+      {
+        nodes: [
+          mkNode('Report:Sales/Pipeline', 'Report'),
+          mkNode('Report:Exec/Forecast', 'Report'),
+        ],
+        edges: [
+          mkRef('Report:Sales/Pipeline', 'CustomField:Account.OptionB__c'),
+          mkRef('Report:Exec/Forecast', 'CustomField:Account.OptionB__c'),
+        ],
+      },
+      {
+        nodes: [mkNode('Dashboard:Exec/KPIs', 'Dashboard')],
+        edges: [mkRef('Dashboard:Exec/KPIs', 'CustomField:Account.OptionB__c')],
+      },
+    ];
+    const folded = foldReportDashboardUsageIntoFields(results);
+    const dir = await makeTempRoot();
+    try {
+      const opened = await openGraph(join(dir, 'option-b.db'));
+      if (!opened.ok) throw new Error(opened.error.message);
+      const store: GraphStore = opened.value;
+      try {
+        const imp = await importExtractionResults(store, folded);
+        if (!imp.ok) throw new Error(imp.error.message);
+        // No Report/Dashboard nodes in the graph — identity is field properties only.
+        const reports = await listNodesByType(store, 'Report');
+        const dashboards = await listNodesByType(store, 'Dashboard');
+        expect(reports.ok).toBe(true);
+        expect(dashboards.ok).toBe(true);
+        if (reports.ok) expect(reports.value).toHaveLength(0);
+        if (dashboards.ok) expect(dashboards.value).toHaveLength(0);
+        const fieldResult = await getNodeById(store, 'CustomField:Account.OptionB__c');
+        expect(fieldResult.ok).toBe(true);
+        if (!fieldResult.ok || fieldResult.value === null) return;
+        expect(fieldResult.value.properties['usedInReports']).toEqual([
+          'Exec/Forecast',
+          'Sales/Pipeline',
+        ]);
+        expect(fieldResult.value.properties['usedInDashboards']).toEqual(['Exec/KPIs']);
+      } finally {
+        await closeGraph(store);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('componentTypeFromSourcePath bundle directory resolution (R6-29)', () => {
+  // Regression guard: a prior version computed `dirSegments` differently for
+  // `isDirectory: true` than for `isDirectory: false`, leaving the bundle's
+  // OWN basename (e.g. `orderCard`) as the last `dirSegments` entry instead
+  // of its parent (`lwc`/`aura`). `dispatchFile`'s bundle branch reads
+  // `segments[segments.length - 1]` expecting the parent dir name, so it
+  // always missed and returned `null` — every LWC/Aura bundle directory
+  // silently failed to resolve, both from `walkAndExtract`'s own coverage
+  // reporting AND from `sfi review-change`'s git-diff path mapper (worked
+  // around there until this fix — see review-change.ts `deriveComponentFromPath`).
+
+  it('resolves an LWC bundle directory to LightningComponentBundle', () => {
+    const root = '/vault/source';
+    const bundleDir = `${root}/lwc/orderCard`;
+    expect(componentTypeFromSourcePath(root, bundleDir, true)).toBe(
+      'LightningComponentBundle',
+    );
+  });
+
+  it('resolves an Aura bundle directory to AuraDefinitionBundle', () => {
+    const root = '/vault/source';
+    const bundleDir = `${root}/aura/orderForm`;
+    expect(componentTypeFromSourcePath(root, bundleDir, true)).toBe(
+      'AuraDefinitionBundle',
+    );
+  });
+
+  it('still resolves a file-shaped type when isDirectory is false (no regression)', () => {
+    const root = '/vault/source';
+    const filePath = `${root}/classes/OrderService.cls`;
+    expect(componentTypeFromSourcePath(root, filePath, false)).toBe('ApexClass');
+  });
+
+  it('returns null for a directory that is not a recognised bundle parent', () => {
+    const root = '/vault/source';
+    const dir = `${root}/omniProcesses/SomeProcess`;
+    expect(componentTypeFromSourcePath(root, dir, true)).toBeNull();
   });
 });
 
@@ -220,6 +391,373 @@ describe('walkAndExtract skip-counter (architectural-bug-fix observability)', ()
       expect(
         walked.skippedDirectories.platformEventChannelMembers,
       ).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('dispatches a top-level SamlSsoConfig file to a node (R6-01)', async () => {
+    const root = await makeTempRoot();
+    try {
+      // samlssoconfigs/{Name}.samlssoconfig-meta.xml is a flat top-level
+      // dispatch. Fail-before: the extractor + ComponentType existed but no
+      // dispatch branch routed the file to it — the file was walked but
+      // never extracted, so value-change-risk.ts's `listNodesByType(...,
+      // 'SamlSsoConfig', ...)` silently saw zero configs. Pass-after: a
+      // SamlSsoConfig:Entra_ID_SSO node exists and the directory is never
+      // counted as an uncovered-type skip.
+      await writeAt(
+        root,
+        'samlssoconfigs/Entra_ID_SSO.samlssoconfig-meta.xml',
+        '<?xml version="1.0"?><SamlSsoConfig xmlns="http://soap.sforce.com/2006/04/metadata"><identityMapping>FederationId</identityMapping></SamlSsoConfig>',
+      );
+
+      const walked = await walkAndExtract(root, null);
+      const ids = walked.results.flatMap((r) => r.nodes.map((n) => n.id));
+      expect(ids).toContain('SamlSsoConfig:Entra_ID_SSO');
+      expect(walked.skippedDirectories.samlssoconfigs).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('dispatches a top-level Certificate file to a node and never dispatches the paired .crt content file (R6-22)', async () => {
+    const root = await makeTempRoot();
+    try {
+      // certs/{Name}.crt-meta.xml is a flat top-level dispatch. The Metadata
+      // API always retrieves a Certificate as TWO files: this sidecar and a
+      // {Name}.crt content file (the actual PEM/DER cert/key material). The
+      // strict `.crt-meta.xml` suffix check must dispatch the sidecar and
+      // MUST NOT dispatch the bare `.crt` file — verified against a real
+      // production-scale sandbox retrieve.
+      await writeAt(
+        root,
+        'certs/EC_Community.crt-meta.xml',
+        '<?xml version="1.0"?><Certificate xmlns="http://soap.sforce.com/2006/04/metadata"><caSigned>true</caSigned><expirationDate>2026-11-12T14:40:53.000Z</expirationDate><keySize>2048</keySize></Certificate>',
+      );
+      await writeAt(root, 'certs/EC_Community.crt', '-----BEGIN CERTIFICATE-----\nMIIG...\n-----END CERTIFICATE-----');
+
+      const walked = await walkAndExtract(root, null);
+      const ids = walked.results.flatMap((r) => r.nodes.map((n) => n.id));
+      expect(ids).toContain('Certificate:EC_Community');
+      // Exactly one Certificate node — the .crt content file never produced
+      // its own extraction result (it was never dispatched at all).
+      expect(ids.filter((id) => id.startsWith('Certificate:')).length).toBe(1);
+      // The bare .crt content file is honestly counted as skipped (unlike
+      // SamlSsoConfig/StandardValueSet, where 100% of a covered directory's
+      // files dispatch, `certs/` legitimately carries one undispatched file
+      // per component BY DESIGN — the skip-counter tracking that is the
+      // correct, honest behavior, not a coverage gap).
+      expect(walked.skippedDirectories.certs).toBe(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('dispatches a top-level TransactionSecurityPolicy file to a node with an ApexClass condition edge (R6-22)', async () => {
+    const root = await makeTempRoot();
+    try {
+      // transactionSecurityPolicies/{Name}.transactionSecurityPolicy-meta.xml
+      // is a flat top-level dispatch. Folder + suffix verified against the
+      // Metadata API Developer Guide (no real org in the accessible sandbox
+      // fleet has Shield/Event Monitoring enabled to retrieve one live).
+      await writeAt(
+        root,
+        'transactionSecurityPolicies/Block_Suspicious_Login.transactionSecurityPolicy-meta.xml',
+        '<?xml version="1.0"?><TransactionSecurityPolicy xmlns="http://soap.sforce.com/2006/04/metadata"><active>true</active><apexClass>SuspiciousLoginCondition</apexClass><eventName>LoginEvent</eventName></TransactionSecurityPolicy>',
+      );
+
+      const walked = await walkAndExtract(root, null);
+      const ids = walked.results.flatMap((r) => r.nodes.map((n) => n.id));
+      expect(ids).toContain('TransactionSecurityPolicy:Block_Suspicious_Login');
+      const edges = walked.results.flatMap((r) => r.edges);
+      expect(
+        edges.some(
+          (e) =>
+            e.fromId === 'TransactionSecurityPolicy:Block_Suspicious_Login' &&
+            e.toId === 'ApexClass:SuspiciousLoginCondition',
+        ),
+      ).toBe(true);
+      expect(walked.skippedDirectories.transactionSecurityPolicies).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('dispatches a top-level StandardValueSet file to a node (R6-08)', async () => {
+    const root = await makeTempRoot();
+    try {
+      // standardValueSets/{Name}.standardValueSet-meta.xml is a flat top-level
+      // dispatch. Fail-before: no ComponentType, no dispatch branch -> the
+      // directory is walked but never routed. Pass-after: a
+      // StandardValueSet:LeadSource node exists and the directory is never
+      // counted as an uncovered-type skip.
+      await writeAt(
+        root,
+        'standardValueSets/LeadSource.standardValueSet-meta.xml',
+        '<?xml version="1.0"?><StandardValueSet xmlns="http://soap.sforce.com/2006/04/metadata"><standardValue><fullName>Web</fullName></standardValue></StandardValueSet>',
+      );
+
+      const walked = await walkAndExtract(root, null);
+      const ids = walked.results.flatMap((r) => r.nodes.map((n) => n.id));
+      expect(ids).toContain('StandardValueSet:LeadSource');
+      expect(walked.skippedDirectories.standardValueSets).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('dispatches the four R6-18 Service Cloud top-level types, wiring EntitlementProcess->MilestoneType and Queue->QueueRoutingConfig', async () => {
+    const root = await makeTempRoot();
+    try {
+      // All four are flat top-level dispatches under their own DX directory —
+      // folder/suffix verified via real scoped retrieves from two live orgs.
+      // Fail-before: no dispatch branch -> files walked but never routed
+      // (inflated skip count, zero nodes). Pass-after: all four nodes exist,
+      // the entitlement process's declared milestone reference resolves, and
+      // the pre-existing Queue extractor's <queueRoutingConfig> string now
+      // also emits a references edge.
+      await writeAt(
+        root,
+        'entitlementProcesses/standard_case.entitlementProcess-meta.xml',
+        '<?xml version="1.0"?><EntitlementProcess xmlns="http://soap.sforce.com/2006/04/metadata"><SObjectType>Case</SObjectType><active>true</active><milestones><milestoneName>First Response to Customer</milestoneName></milestones></EntitlementProcess>',
+      );
+      await writeAt(
+        root,
+        'milestoneTypes/First Response to Customer.milestoneType-meta.xml',
+        '<?xml version="1.0"?><MilestoneType xmlns="http://soap.sforce.com/2006/04/metadata"><recurrenceType>none</recurrenceType></MilestoneType>',
+      );
+      await writeAt(
+        root,
+        'serviceChannels/sfdc_phone.serviceChannel-meta.xml',
+        '<?xml version="1.0"?><ServiceChannel xmlns="http://soap.sforce.com/2006/04/metadata"><label>Phone</label><relatedEntityType>VoiceCall</relatedEntityType></ServiceChannel>',
+      );
+      await writeAt(
+        root,
+        'queueRoutingConfigs/agent_routing.queueRoutingConfig-meta.xml',
+        '<?xml version="1.0"?><QueueRoutingConfig xmlns="http://soap.sforce.com/2006/04/metadata"><label>agent routing</label><routingModel>MOST_AVAILABLE</routingModel><routingPriority>1</routingPriority></QueueRoutingConfig>',
+      );
+      await writeAt(
+        root,
+        'queues/Case_Queue.queue-meta.xml',
+        '<?xml version="1.0"?><Queue xmlns="http://soap.sforce.com/2006/04/metadata"><name>Case Queue</name><doesSendEmailToMembers>false</doesSendEmailToMembers><queueRoutingConfig>agent_routing</queueRoutingConfig></Queue>',
+      );
+
+      const walked = await walkAndExtract(root, null);
+      const ids = walked.results.flatMap((r) => r.nodes.map((n) => n.id));
+      expect(ids).toContain('EntitlementProcess:standard_case');
+      expect(ids).toContain('MilestoneType:First Response to Customer');
+      expect(ids).toContain('ServiceChannel:sfdc_phone');
+      expect(ids).toContain('QueueRoutingConfig:agent_routing');
+      expect(ids).toContain('Queue:Case_Queue');
+
+      const edges = walked.results.flatMap((r) => r.edges);
+      expect(edges).toContainEqual(
+        expect.objectContaining({
+          fromId: 'EntitlementProcess:standard_case',
+          toId: 'MilestoneType:First Response to Customer',
+          edgeType: 'references',
+        }),
+      );
+      expect(edges).toContainEqual(
+        expect.objectContaining({
+          fromId: 'Queue:Case_Queue',
+          toId: 'QueueRoutingConfig:agent_routing',
+          edgeType: 'references',
+        }),
+      );
+
+      expect(walked.skippedDirectories.entitlementProcesses).toBeUndefined();
+      expect(walked.skippedDirectories.milestoneTypes).toBeUndefined();
+      expect(walked.skippedDirectories.serviceChannels).toBeUndefined();
+      expect(walked.skippedDirectories.queueRoutingConfigs).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('dispatches the GenAI tier — including a nested GenAiPlannerBundle (R6-13)', async () => {
+    const root = await makeTempRoot();
+    try {
+      // The four Agentforce GenAI families are flat file-based dispatches under
+      // their own DX directory; GenAiPlannerBundle additionally nests one level
+      // (genAiPlannerBundles/{agent}/...). Fail-before: no ComponentType, no
+      // dispatch branch -> the directories are walked but never routed. Names
+      // are SYNTHETIC.
+      await writeAt(
+        root,
+        'genAiFunctions/Get_Order_Status.genAiFunction-meta.xml',
+        '<?xml version="1.0"?><GenAiFunction xmlns="http://soap.sforce.com/2006/04/metadata"><masterLabel>get_order_status</masterLabel><invocationTarget>Get_Order_Status</invocationTarget><invocationTargetType>apex</invocationTargetType></GenAiFunction>',
+      );
+      await writeAt(
+        root,
+        'genAiPlugins/Order_Management.genAiPlugin-meta.xml',
+        '<?xml version="1.0"?><GenAiPlugin xmlns="http://soap.sforce.com/2006/04/metadata"><masterLabel>Order Management</masterLabel><pluginType>Topic</pluginType><genAiFunctions><functionName>Get_Order_Status</functionName></genAiFunctions></GenAiPlugin>',
+      );
+      await writeAt(
+        root,
+        'genAiPlannerBundles/Order_Support_Agent/Order_Support_Agent.genAiPlannerBundle-meta.xml',
+        '<?xml version="1.0"?><GenAiPlannerBundle xmlns="http://soap.sforce.com/2006/04/metadata"><masterLabel>Order Support Agent</masterLabel><plannerType>AiCopilot__ReAct</plannerType><genAiPlugins><genAiPluginName>Order_Management</genAiPluginName></genAiPlugins></GenAiPlannerBundle>',
+      );
+      await writeAt(
+        root,
+        'genAiPromptTemplates/Draft_Followup.genAiPromptTemplate-meta.xml',
+        '<?xml version="1.0"?><GenAiPromptTemplate xmlns="http://soap.sforce.com/2006/04/metadata"><masterLabel>Draft Followup</masterLabel><type>einstein_gpt__flex</type><templateVersions><content>Hi {!$Input:Guest.Loyalty_Number__c}</content><inputs><apiName>Guest</apiName><definition>SOBJECT://Contact</definition><referenceName>Input:Guest</referenceName></inputs></templateVersions></GenAiPromptTemplate>',
+      );
+
+      const walked = await walkAndExtract(root, null);
+      const ids = walked.results.flatMap((r) => r.nodes.map((n) => n.id));
+      expect(ids).toContain('GenAiFunction:Get_Order_Status');
+      expect(ids).toContain('GenAiPlugin:Order_Management');
+      expect(ids).toContain('GenAiPlannerBundle:Order_Support_Agent');
+      expect(ids).toContain('GenAiPromptTemplate:Draft_Followup');
+      // The grounding merge-field resolved to a real field edge.
+      const edges = walked.results.flatMap((r) => r.edges);
+      expect(edges.some((e) => e.toId === 'CustomField:Contact.Loyalty_Number__c')).toBe(true);
+      expect(walked.skippedDirectories.genAiFunctions).toBeUndefined();
+      expect(walked.skippedDirectories.genAiPromptTemplates).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('dispatches a nested Bot definition + two BotVersions, wiring Bot->BotVersion parentOf (R7-C7)', async () => {
+    const root = await makeTempRoot();
+    try {
+      // Bot's own file basename embeds the bot name (nesting transparent,
+      // like GenAiPlannerBundle); BotVersion files are bare (v1/v2), NOT
+      // basename-disambiguated — folder/suffix verified via a real scoped
+      // retrieve (`sf project retrieve start --metadata Bot`) that landed
+      // BOTH shapes from a single request. All names SYNTHETIC.
+      await writeAt(
+        root,
+        'bots/Campus_Support_Agent/Campus_Support_Agent.bot-meta.xml',
+        '<?xml version="1.0"?><Bot xmlns="http://soap.sforce.com/2006/04/metadata"><label>Agent Plum</label><type>ExternalCopilot</type></Bot>',
+      );
+      await writeAt(
+        root,
+        'bots/Campus_Support_Agent/v1.botVersion-meta.xml',
+        '<?xml version="1.0"?><BotVersion xmlns="http://soap.sforce.com/2006/04/metadata"><fullName>v1</fullName><botDialogs><developerName>Welcome</developerName></botDialogs></BotVersion>',
+      );
+      await writeAt(
+        root,
+        'bots/Campus_Support_Agent/v2.botVersion-meta.xml',
+        '<?xml version="1.0"?><BotVersion xmlns="http://soap.sforce.com/2006/04/metadata"><fullName>v2</fullName><conversationDefinitionPlanners><genAiPlannerName>Campus_Support_Agent_v2</genAiPlannerName></conversationDefinitionPlanners></BotVersion>',
+      );
+
+      const walked = await walkAndExtract(root, null);
+      const ids = walked.results.flatMap((r) => r.nodes.map((n) => n.id));
+      expect(ids).toContain('Bot:Campus_Support_Agent');
+      expect(ids).toContain('BotVersion:Campus_Support_Agent.v1');
+      expect(ids).toContain('BotVersion:Campus_Support_Agent.v2');
+
+      const edges = walked.results.flatMap((r) => r.edges);
+      expect(edges).toContainEqual(
+        expect.objectContaining({
+          fromId: 'Bot:Campus_Support_Agent',
+          toId: 'BotVersion:Campus_Support_Agent.v1',
+          edgeType: 'parentOf',
+        }),
+      );
+      expect(edges).toContainEqual(
+        expect.objectContaining({
+          fromId: 'Bot:Campus_Support_Agent',
+          toId: 'BotVersion:Campus_Support_Agent.v2',
+          edgeType: 'parentOf',
+        }),
+      );
+      expect(edges).toContainEqual(
+        expect.objectContaining({
+          fromId: 'BotVersion:Campus_Support_Agent.v2',
+          toId: 'GenAiPlannerBundle:Campus_Support_Agent_v2',
+          edgeType: 'references',
+        }),
+      );
+
+      expect(walked.skippedDirectories.bots).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('dispatches a top-level PresenceUserConfig file, wiring a Profile references edge (R7-C7)', async () => {
+    const root = await makeTempRoot();
+    try {
+      // Flat top-level dispatch under its own DX directory — folder/suffix
+      // verified via real scoped retrieves from two live orgs. All names
+      // SYNTHETIC.
+      await writeAt(
+        root,
+        'presenceUserConfigs/agentforce.presenceUserConfig-meta.xml',
+        '<?xml version="1.0"?><PresenceUserConfig xmlns="http://soap.sforce.com/2006/04/metadata"><assignments><profiles><profile>einstein agent user</profile></profiles><users><user>agentuser@example.invalid</user></users></assignments><capacity>10</capacity><label>agentforce</label></PresenceUserConfig>',
+      );
+
+      const walked = await walkAndExtract(root, null);
+      const ids = walked.results.flatMap((r) => r.nodes.map((n) => n.id));
+      expect(ids).toContain('PresenceUserConfig:agentforce');
+
+      const edges = walked.results.flatMap((r) => r.edges);
+      expect(edges).toContainEqual(
+        expect.objectContaining({
+          fromId: 'PresenceUserConfig:agentforce',
+          toId: 'Profile:einstein agent user',
+          edgeType: 'references',
+        }),
+      );
+      const node = walked.results.flatMap((r) => r.nodes).find((n) => n.id === 'PresenceUserConfig:agentforce');
+      expect(node?.properties['assignedUsernames']).toEqual(['agentuser@example.invalid']);
+
+      expect(walked.skippedDirectories.presenceUserConfigs).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('dispatches the Experience Cloud community family (Network / CustomSite / ExperienceBundle) and suppresses the bundle page tree (R6-17)', async () => {
+    const root = await makeTempRoot();
+    try {
+      // Network (networks/) is the anchor; CustomSite (sites/) and
+      // ExperienceBundle (experiences/{Name}.site-meta.xml) share the
+      // `.site-meta.xml` suffix but are told apart by directory. The bundle's
+      // JSON page tree under experiences/{Name}/... is OUT OF SCOPE and must
+      // NOT inflate the skip-counter. All names synthetic.
+      await writeAt(
+        root,
+        'networks/MemberPortal.network-meta.xml',
+        '<?xml version="1.0"?><Network xmlns="http://soap.sforce.com/2006/04/metadata"><status>Live</status><selfRegistration>false</selfRegistration><site>MemberPortal</site><picassoSite>MemberPortal1</picassoSite></Network>',
+      );
+      await writeAt(
+        root,
+        'sites/MemberPortal.site-meta.xml',
+        '<?xml version="1.0"?><CustomSite xmlns="http://soap.sforce.com/2006/04/metadata"><active>true</active><masterLabel>MemberPortal</masterLabel><siteType>ChatterNetwork</siteType></CustomSite>',
+      );
+      await writeAt(
+        root,
+        'experiences/MemberPortal1.site-meta.xml',
+        '<?xml version="1.0"?><ExperienceBundle xmlns="http://soap.sforce.com/2006/04/metadata"><label>Member Portal</label><type>ChatterNetworkPicasso</type></ExperienceBundle>',
+      );
+      // The (out-of-scope) page tree — must be suppressed from the skip-counter.
+      await writeAt(root, 'experiences/MemberPortal1/views/home.json', '{}');
+      await writeAt(root, 'experiences/MemberPortal1/routes/home.json', '{}');
+      await writeAt(root, 'experiences/MemberPortal1/config/main.json', '{}');
+
+      const walked = await walkAndExtract(root, null);
+      const ids = walked.results.flatMap((r) => r.nodes.map((n) => n.id));
+      expect(ids).toContain('Network:MemberPortal');
+      expect(ids).toContain('CustomSite:MemberPortal');
+      expect(ids).toContain('ExperienceBundle:MemberPortal1');
+      // The bundle's JSON page tree is covered-by-design (not a coverage gap).
+      expect(walked.skippedDirectories.experiences).toBeUndefined();
+      expect(walked.skippedDirectories.views).toBeUndefined();
+      expect(walked.skippedDirectories.routes).toBeUndefined();
+      expect(walked.skippedDirectories.config).toBeUndefined();
+      // The heuristic guest-profile linkage edge is emitted from the CustomSite.
+      const edges = walked.results.flatMap((r) => r.edges);
+      const guestEdge = edges.find(
+        (e) => e.fromId === 'CustomSite:MemberPortal' && e.toId === 'Profile:MemberPortal Profile',
+      );
+      expect(guestEdge).toBeDefined();
+      expect(guestEdge!.confidence).toBe('heuristic');
     } finally {
       await rm(root, { recursive: true, force: true });
     }

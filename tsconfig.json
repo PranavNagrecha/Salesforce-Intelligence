@@ -1,0 +1,16 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/contracts" },
+    { "path": "packages/core" },
+    { "path": "packages/parsers" },
+    { "path": "packages/patterns" },
+    { "path": "packages/extractors" },
+    { "path": "packages/graph" },
+    { "path": "packages/vault" },
+    { "path": "packages/renderers" },
+    { "path": "packages/tooling-api" },
+    { "path": "packages/mcp" },
+    { "path": "packages/cli" }
+  ]
+}

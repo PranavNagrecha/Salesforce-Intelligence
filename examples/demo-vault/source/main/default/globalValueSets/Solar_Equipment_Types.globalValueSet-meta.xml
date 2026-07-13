@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<GlobalValueSet xmlns="http://soap.sforce.com/2006/04/metadata">
+    <masterLabel>Solar Equipment Types</masterLabel>
+    <description>Equipment categories used across solar and battery picklists.</description>
+    <customValue>
+        <fullName>Panel</fullName>
+        <default>false</default>
+        <label>Solar Panel</label>
+        <isActive>true</isActive>
+    </customValue>
+    <customValue>
+        <fullName>Battery</fullName>
+        <default>false</default>
+        <label>Battery Storage</label>
+        <isActive>true</isActive>
+    </customValue>
+    <customValue>
+        <fullName>Inverter</fullName>
+        <default>true</default>
+        <label>Inverter</label>
+        <isActive>true</isActive>
+    </customValue>
+</GlobalValueSet>

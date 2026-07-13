@@ -18,6 +18,8 @@ Claude Code plugin.
 | [Routing](./routing.md) | The host contract: advisory routing, refusal gates, clarifications, conversation context |
 | [Configuration](./configuration.md) | Environment variables, live consent, audit log |
 | [Positioning](./POSITIONING.md) | Honest competitive framing — when to use something else |
+| [Compare pages (website)](https://sfi.auditforce.cloud/compare) | Scannable vs Salesforce MCP, Elements, dx0, Hubbl, Metazoa, Sweep |
+| [Agent-readiness audit](https://sfi.auditforce.cloud/use-cases/agent-readiness-audit) | Compose existing tools into an AI / Agentforce prep playbook |
 
 ---
 
@@ -27,6 +29,8 @@ Claude Code plugin.
 | --- | --- | --- |
 | [Architecture](./architecture.md) | Admins, architects | Data flow, vault layout, MCP tools, determinism, upgrades |
 | [Repository structure](../REPO-STRUCTURE.md) | Contributors | Monorepo layout, packages, build commands |
+| [review-change PR gate (Action)](../.github/actions/review-change/README.md) | DevOps, release engineers | The `sfi.review_change` deploy gate as a GitHub Action — offline SARIF + PR-comment risk verdicts |
+| [PR-gate CI workflow (template)](./ci/review-change-pr-gate.example.yml) | DevOps, release engineers | Drop-in `.github/workflows` template wiring the review-change Action into a PR gate |
 
 ---
 
@@ -61,7 +65,7 @@ Run `sfi.capabilities` in a session for the live tool map and count.
 ```sh
 pnpm install && pnpm build   # compile
 pnpm test                    # unit + integration
-node ../sf-intelligence-qa/scripts/commit-gate.mjs  # one gate
+pnpm tsc                     # project-reference typecheck (tsc -b)
 pnpm guard                   # privacy scan
 ```
 

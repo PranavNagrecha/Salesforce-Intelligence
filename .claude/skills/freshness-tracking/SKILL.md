@@ -79,8 +79,9 @@ Fire this skill on freshness-shaped phrasing. Concrete triggers:
    timestamp against the event date.
 6. **Structural drift over time** — "How has the org grown?", "What
    changed between last week's snapshot and now?". Use **`sfi.trend`**
-   (needs `sfi snapshot create` after refreshes) and **`sfi.churn`** or
-   **`sfi.diff_snapshots`** for label-to-label diffs. Freshness timestamps
+   (needs `sfi snapshot create` after refreshes) and **`sfi.diff_snapshots`**
+   for label-to-label diffs (omit labels to auto-diff the latest two; add
+   `summary: true` for a compact churn digest). Freshness timestamps
    and snapshot diffs answer different questions — use both when needed.
 
 7. **"What's stale / abandoned?"** — "Show me Apex classes
@@ -122,7 +123,7 @@ Defer to another skill when:
   this one can be cited.)
 - **The user asks "where is this field used in Apex?"** — code-side
   reference question. Defer to `developer-apex-refactor` →
-  `sfi.find_apex_usages`.
+  `sfi.find_code_usages`.
 - **The user asks "what changed *structurally*?"** — diff question,
   not freshness. Defer to whatever handles `sfi.diff_snapshots` /
   `sfi.compare_components`. Freshness tells you *when* something

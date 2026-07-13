@@ -159,3 +159,54 @@ Field notation: `Name__c (Type[, detail])`. Lookups/MD name the target.
 - IntegrationProcedure `omniIntegrationProcedures/Project_Provision_1.oip-meta.xml`.
 - DataTransform `omniDataTransforms/Quote_To_Project_Map_1.rpt-meta.xml`.
 - CPQ: `objects/SBQQ__ProductRule__c/` + a couple `SBQQ__`-prefixed records (or customMetadata) to trip the heuristic CPQ detector. Keep minimal — presence over depth.
+
+## R6/R6B Fixture Coverage (added R7-F5)
+
+The following metadata families were added to cover R6/R6B extractor gaps. Each has
+one minimal-but-valid synthetic stub. All names are Verdant Energy fictional; zero
+real org data.
+
+| Metadata family | DX folder | File(s) added | Extractor |
+| --- | --- | --- | --- |
+| SamlSsoConfig | `samlssoconfigs/` | `Verdant_Energy_SSO.samlssoconfig-meta.xml` | `extractSamlSsoConfig` |
+| StandardValueSet | `standardValueSets/` | `Status__c.standardValueSet-meta.xml` | `extractStandardValueSet` |
+| MutingPermissionSet | `mutingpermissionsets/` | `Sales_Muting.mutingpermissionset-meta.xml` | `extractMutingPermissionSet` |
+| Network | `networks/` | `VerdantPortal.network-meta.xml` | `extractNetwork` |
+| CustomSite | `sites/` | `VerdantPortal.site-meta.xml` | `extractCustomSite` |
+| ExperienceBundle | `experiences/` | `VerdantPortal1.site-meta.xml` + `views/home.json` | `extractExperienceBundle` |
+| Bot | `bots/Verdant_Support_Agent/` | `Verdant_Support_Agent.bot-meta.xml` | `extractBot` |
+| BotVersion | `bots/Verdant_Support_Agent/` | `v1.botVersion-meta.xml` | `extractBotVersion` |
+| GenAiPlannerBundle | `genAiPlannerBundles/Verdant_Support_Agent_v1/` | `Verdant_Support_Agent_v1.genAiPlannerBundle-meta.xml` | `extractGenAiPlannerBundle` |
+| WaveDashboard | `wave/` | `Ops_Overview.wdash-meta.xml` | `extractWaveDashboard` |
+| WaveXmd | `wave/` | `Project_Pipeline.xmd-meta.xml` | `extractWaveXmd` |
+| Skill | `skills/` | `Solar_Installation.skill-meta.xml` | `extractSkill` |
+| TimeSheetTemplate | `timeSheetTemplates/` | `Field_Crew_Weekly.timeSheetTemplate-meta.xml` | `extractTimeSheetTemplate` |
+| AuthProvider | `authproviders/` | `Verdant_SSO_Provider.authprovider-meta.xml` | `extractAuthProvider` |
+| NamedCredential | `namedCredentials/` | `Verdant_Permitting_API.namedCredential-meta.xml` | `extractNamedCredential` |
+| ConnectedApp | `connectedApps/` | `Verdant_Marketing_Suite.connectedApp-meta.xml` | `extractConnectedApp` |
+| Certificate | `certs/` | `Verdant_Community.crt-meta.xml` + `Verdant_Community.crt` | `extractCertificate` |
+| TransactionSecurityPolicy | `transactionSecurityPolicies/` | `Block_Suspicious_Login.transactionSecurityPolicy-meta.xml` | `extractTransactionSecurityPolicy` |
+| PlatformEventChannel | `platformEventChannels/` | `Verdant_Event_Channel__chn.platformEventChannel-meta.xml` | `extractPlatformEventChannel` |
+| PlatformEventChannelMember | `platformEventChannelMembers/` | `Verdant_Event_Member__chn.platformEventChannelMember-meta.xml` | `extractPlatformEventChannelMember` |
+| GlobalValueSet | `globalValueSets/` | `Solar_Equipment_Types.globalValueSet-meta.xml` | `extractGlobalValueSet` |
+| NetworkAccess | `networkAccesses/` | `Office_VPN.networkAccess-meta.xml` | `extractNetworkAccess` |
+
+### Supported types NOT yet stubbed in this vault
+
+These types have extractors on this branch but no demo-vault fixture yet:
+
+| Type | Reason |
+| --- | --- |
+| `GenAiFunction`, `GenAiPlugin`, `GenAiPromptTemplate` | Covered by BotVersion→GenAiPlannerBundle chain above; standalone stubs deferred |
+| `WaveDataflow` | CRMA dataflow JSON is large; WaveDashboard + WaveXmd cover the CRMA read path |
+| `AssignmentRule`, `AutoResponseRule`, `EscalationRule` | Exist in v1.3 builder fixtures; deferred as low-priority for demo story |
+| `CustomApplication`, `CustomTab`, `CustomLabel`, `StaticResource`, `PathAssistant`, `QuickAction` | Exist in v1.2/v1.3 builder fixtures; present in some builder synthetics but not yet ported to demo-vault |
+| `Letterhead`, `EmailTemplate` | Low demo-story priority |
+| `OmniUiCard` | OmniStudio tier partially covered; deferred |
+| `DuplicateRule`, `MatchingRule` | Low demo-story priority |
+| `FieldServiceSettings` | Single-singleton extractor; deferred |
+| `PresenceUserConfig`, `ServiceChannel`, `QueueRoutingConfig`, `EntitlementProcess`, `MilestoneType` | Service Cloud tier; deferred |
+| `InstalledPackage`, `ReportType`, `Report`, `Dashboard` | Complex/large; low demo priority |
+| `PermissionSetGroup`, `ScopingRule`, `RestrictionRule`, `ValidationRule`, `RecordType`, `BusinessProcess`, `CompactLayout`, `FieldSet`, `Index`, `ListView`, `WebLink` | Sub-object types extracted from objects/; already implicit via objects/ stubs |
+| `AuraDefinitionBundle`, `LightningComponentBundle`, `VisualforceComponent`, `VisualforcePage`, `FlexiPage`, `DecisionTable` | UI/markup tier; deferred |
+| `ExternalDataSource`, `ExternalService`, `CspTrustedSite`, `RemoteSiteSetting`, `SessionSettings` | Integration/security tier; NetworkAccess + NamedCredential + ConnectedApp + AuthProvider cover the priority surface |

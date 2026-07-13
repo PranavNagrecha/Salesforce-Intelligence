@@ -1,15 +1,19 @@
 /// <reference types="vitest/globals" />
 
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { VaultManifest } from '@sf-intelligence/contracts';
+import type { ExtractionResult, Node, VaultManifest } from '@sf-intelligence/contracts';
+import { importExtractionResults, openGraph, type GraphStore } from '@sf-intelligence/graph';
 import type { ExecCommand, ToolingApiAuth } from '@sf-intelligence/tooling-api';
 
+import { mintLiveCapability } from '../../src/live-capability.js';
 import type { Context } from '../../src/server.js';
 import {
   apiPath,
   assertSoqlIdentifier,
+  deriveSiblingObject,
   isLivePlaneEnabled,
   STALE_CHECK_TYPES,
   liveCountHandler,
@@ -19,12 +23,16 @@ import {
   liveFolderAccessHandler,
   liveAggregateHandler,
   liveDuplicateCheckHandler,
+  liveFieldHistoryHandler,
   liveGroupCountHandler,
   liveInactiveUsersHandler,
   liveLicenseUsageHandler,
   liveOrgHealthHandler,
   liveOrgLimitsHandler,
   liveOwnerBreakdownHandler,
+  liveRecordAccessHandler,
+  liveRecordSharesHandler,
+  liveScheduledJobsHandler,
   liveRecentActivityHandler,
   liveReportUsageHandler,
   liveSampleHandler,
@@ -52,6 +60,9 @@ const FIXTURE_MANIFEST: VaultManifest = {
 
 const ctx = {
   manifest: FIXTURE_MANIFEST,
+  // INFRA-12-DEEP: unit tests call handlers directly (bypass dispatchTool),
+  // so attach the primary capability the dispatcher would mint for live_*.
+  liveCapability: mintLiveCapability('primary'),
 } as Context;
 
 // Isolate the per-org consent store so the live gate is hermetic — the real
@@ -675,6 +686,549 @@ describe('liveOwnerBreakdownHandler', () => {
   });
 });
 
+describe('liveRecordAccessHandler', () => {
+  // Dispatch on the SOQL: User lookup vs the UserRecordAccess probe.
+  const makeExec = (accessRow: Record<string, unknown> | null): ExecCommand =>
+    async (_b, args) => {
+      const soql = soqlOf(args);
+      if (/from\s+userrecordaccess/i.test(soql)) {
+        return {
+          stdout: JSON.stringify({
+            result: { totalSize: accessRow === null ? 0 : 1, records: accessRow === null ? [] : [accessRow] },
+          }),
+          stderr: '',
+        };
+      }
+      if (/from\s+user/i.test(soql)) {
+        return {
+          stdout: JSON.stringify({
+            result: { totalSize: 1, records: [{ Id: '005000000000001', Name: 'Jane Doe', Username: 'jane@example.com' }] },
+          }),
+          stderr: '',
+        };
+      }
+      return { stdout: JSON.stringify({ result: { records: [] } }), stderr: '' };
+    };
+
+  it('resolves a username and reports the effective access flags with live_org provenance', async () => {
+    const exec = makeExec({
+      RecordId: '001000000000001',
+      HasReadAccess: true,
+      HasEditAccess: true,
+      HasDeleteAccess: false,
+      HasTransferAccess: false,
+      HasAllAccess: false,
+    });
+    const r = await liveRecordAccessHandler(
+      ctx,
+      { liveEnabled: true, recordId: '001000000000001', username: 'jane@example.com' },
+      exec,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.hasReadAccess).toBe(true);
+    expect(r.value.data.hasEditAccess).toBe(true);
+    expect(r.value.data.hasDeleteAccess).toBe(false);
+    expect(r.value.data.noAccessRow).toBe(false);
+    expect(r.value.data.user.username).toBe('jane@example.com');
+    expect(r.value.data.trust.provenance).toBe('live_org');
+  });
+
+  it('accepts a userId directly (best-effort name resolution)', async () => {
+    const exec = makeExec({ RecordId: '001000000000001', HasReadAccess: true });
+    const r = await liveRecordAccessHandler(
+      ctx,
+      { liveEnabled: true, recordId: '001000000000001', userId: '005000000000001' },
+      exec,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.user.id).toBe('005000000000001');
+    expect(r.value.data.hasReadAccess).toBe(true);
+  });
+
+  it('reports noAccessRow honestly when the org returns no UserRecordAccess row (not a confirmed deny)', async () => {
+    const exec = makeExec(null);
+    const r = await liveRecordAccessHandler(
+      ctx,
+      { liveEnabled: true, recordId: '001000000000001', userId: '005000000000001' },
+      exec,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.noAccessRow).toBe(true);
+    expect(r.value.data.hasReadAccess).toBe(false);
+    expect(r.value.data.rendered).toMatch(/could NOT determine/i);
+  });
+
+  it('requires userId or username', async () => {
+    const r = await liveRecordAccessHandler(
+      ctx,
+      { liveEnabled: true, recordId: '001000000000001' },
+      makeExec(null),
+    );
+    expect(r.ok).toBe(false);
+  });
+
+  it('rejects a malformed recordId before any SOQL runs', async () => {
+    const throwExec: ExecCommand = async () => {
+      throw new Error('must not query on a bad record id');
+    };
+    const r = await liveRecordAccessHandler(
+      ctx,
+      { liveEnabled: true, recordId: "001' OR Id != null", userId: '005000000000001' },
+      throwExec,
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('binds the record and user ids through soqlLiteral (no raw interpolation)', async () => {
+    const captured: string[] = [];
+    const exec: ExecCommand = async (_b, args) => {
+      const soql = soqlOf(args);
+      captured.push(soql);
+      if (/from\s+userrecordaccess/i.test(soql)) {
+        return { stdout: JSON.stringify({ result: { records: [{ HasReadAccess: true }] } }), stderr: '' };
+      }
+      return { stdout: JSON.stringify({ result: { records: [{ Id: '005000000000001' }] } }), stderr: '' };
+    };
+    await liveRecordAccessHandler(
+      ctx,
+      { liveEnabled: true, recordId: '001000000000009', userId: '005000000000001' },
+      exec,
+    );
+    const probe = captured.find((s) => /userrecordaccess/i.test(s)) ?? '';
+    expect(probe).toContain("RecordId = '001000000000009'");
+    expect(probe).toContain("UserId = '005000000000001'");
+  });
+});
+
+describe('deriveSiblingObject', () => {
+  it('derives the standard share/history sibling with {Object}Id parent', () => {
+    expect(deriveSiblingObject('Account', 'Share')).toEqual({
+      object: 'AccountShare',
+      parentField: 'AccountId',
+      isCustom: false,
+    });
+    expect(deriveSiblingObject('Account', 'History')).toEqual({
+      object: 'AccountHistory',
+      parentField: 'AccountId',
+      isCustom: false,
+    });
+  });
+
+  it('derives the custom sibling with ParentId (strips __c)', () => {
+    expect(deriveSiblingObject('Widget__c', 'Share')).toEqual({
+      object: 'Widget__Share',
+      parentField: 'ParentId',
+      isCustom: true,
+    });
+    expect(deriveSiblingObject('Widget__c', 'History')).toEqual({
+      object: 'Widget__History',
+      parentField: 'ParentId',
+      isCustom: true,
+    });
+  });
+
+  it('returns null for an unsafe (SOQL-injection) object name', () => {
+    expect(deriveSiblingObject("Account WHERE Id='x'", 'Share')).toBeNull();
+  });
+});
+
+describe('liveRecordSharesHandler', () => {
+  const shareExec = (rows: readonly Record<string, unknown>[]): ExecCommand =>
+    async (_b, args) => {
+      const soql = soqlOf(args);
+      if (/count\(\)/i.test(soql)) {
+        return { stdout: JSON.stringify({ result: { totalSize: rows.length } }), stderr: '' };
+      }
+      if (/from\s+accountshare/i.test(soql)) {
+        return { stdout: JSON.stringify({ result: { records: rows } }), stderr: '' };
+      }
+      if (/from\s+user\b/i.test(soql)) {
+        return { stdout: JSON.stringify({ result: { records: [{ Id: '005000000000001', Name: 'Alice Admin' }] } }), stderr: '' };
+      }
+      if (/from\s+group\b/i.test(soql)) {
+        return { stdout: JSON.stringify({ result: { records: [{ Id: '00G000000000001', Name: 'Sales Team' }] } }), stderr: '' };
+      }
+      return { stdout: JSON.stringify({ result: { records: [] } }), stderr: '' };
+    };
+
+  it('lists explicit share rows with resolved names and live_org provenance', async () => {
+    const exec = shareExec([
+      { UserOrGroupId: '005000000000001', AccessLevel: 'Edit', RowCause: 'Manual' },
+      { UserOrGroupId: '00G000000000001', AccessLevel: 'Read', RowCause: 'Rule' },
+    ]);
+    const r = await liveRecordSharesHandler(
+      ctx,
+      { liveEnabled: true, recordId: '001000000000001', objectApiName: 'Account' },
+      exec,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.shareTableQueryable).toBe(true);
+    expect(r.value.data.shareObject).toBe('AccountShare');
+    expect(r.value.data.totalShares).toBe(2);
+    expect(r.value.data.shares[0]?.userOrGroupName).toBe('Alice Admin');
+    expect(r.value.data.shares[1]?.userOrGroupName).toBe('Sales Team');
+    expect(r.value.data.trust.provenance).toBe('live_org');
+  });
+
+  it('binds the parent field via soqlLiteral (AccountId = recordId)', async () => {
+    const captured: string[] = [];
+    const exec: ExecCommand = async (_b, args) => {
+      const soql = soqlOf(args);
+      captured.push(soql);
+      if (/count\(\)/i.test(soql)) return { stdout: JSON.stringify({ result: { totalSize: 0 } }), stderr: '' };
+      return { stdout: JSON.stringify({ result: { records: [] } }), stderr: '' };
+    };
+    await liveRecordSharesHandler(
+      ctx,
+      { liveEnabled: true, recordId: '001000000000009', objectApiName: 'Account' },
+      exec,
+    );
+    const detail = captured.find((s) => /from\s+accountshare/i.test(s)) ?? '';
+    expect(detail).toContain("AccountId = '001000000000009'");
+  });
+
+  it('reports shareTableQueryable:false honestly when the Share object is not queryable (Public OWD)', async () => {
+    const exec: ExecCommand = async (_b, args) => {
+      const soql = soqlOf(args);
+      if (/from\s+accountshare/i.test(soql)) {
+        return { stdout: '', stderr: "sObject type 'AccountShare' is not supported." };
+      }
+      return { stdout: JSON.stringify({ result: { records: [] } }), stderr: '' };
+    };
+    const r = await liveRecordSharesHandler(
+      ctx,
+      { liveEnabled: true, recordId: '001000000000001', objectApiName: 'Account' },
+      exec,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.shareTableQueryable).toBe(false);
+    expect(r.value.data.shares).toHaveLength(0);
+    expect(r.value.data.note ?? '').toMatch(/Public Read\/Write|not sharable/i);
+  });
+
+  it('derives the object from the record Id key prefix via the global describe', async () => {
+    const authExec: ExecCommand = async (_b, args) => {
+      // runLiveRest resolves auth via `sf org display --json`; only that exec path is hit.
+      if ((args as readonly string[])[0] === 'org') {
+        return {
+          stdout: JSON.stringify({
+            status: 0,
+            result: { accessToken: 'tok', instanceUrl: 'https://x.my.salesforce.com', apiVersion: '67.0' },
+          }),
+          stderr: '',
+        };
+      }
+      // The Share detail + count SOQL queries after derivation.
+      const soql = soqlOf(args);
+      if (/count\(\)/i.test(soql)) return { stdout: JSON.stringify({ result: { totalSize: 0 } }), stderr: '' };
+      return { stdout: JSON.stringify({ result: { records: [] } }), stderr: '' };
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({ sobjects: [{ name: 'Account', keyPrefix: '001' }, { name: 'Contact', keyPrefix: '003' }] }),
+      })),
+    );
+    const r = await liveRecordSharesHandler(
+      ctx,
+      { liveEnabled: true, recordId: '001000000000001' },
+      authExec,
+    );
+    vi.unstubAllGlobals();
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.objectApiName).toBe('Account');
+    expect(r.value.data.shareObject).toBe('AccountShare');
+  });
+
+  it('rejects a malformed recordId before any query runs', async () => {
+    const throwExec: ExecCommand = async () => {
+      throw new Error('must not query on a bad record id');
+    };
+    const r = await liveRecordSharesHandler(
+      ctx,
+      { liveEnabled: true, recordId: 'nope', objectApiName: 'Account' },
+      throwExec,
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+});
+
+describe('liveScheduledJobsHandler', () => {
+  const exec: ExecCommand = async (_b, args) => {
+    const soql = soqlOf(args);
+    if (/count\(\)\s*from\s+crontrigger\s+where.*jobtype/i.test(soql)) {
+      // Org-wide Scheduled-Apex count (dedicated COUNT with the JobType filter).
+      return { stdout: JSON.stringify({ result: { totalSize: 5 } }), stderr: '' };
+    }
+    if (/count\(\)\s*from\s+crontrigger/i.test(soql)) {
+      return { stdout: JSON.stringify({ result: { totalSize: 2 } }), stderr: '' };
+    }
+    if (/from\s+crontrigger/i.test(soql)) {
+      return {
+        stdout: JSON.stringify({
+          result: {
+            records: [
+              {
+                Id: '08e000000000001',
+                CronJobDetail: { Name: 'Nightly Rollup', JobType: '7' },
+                State: 'WAITING',
+                CronExpression: '0 0 2 * * ?',
+                NextFireTime: '2026-07-11T02:00:00.000+0000',
+                PreviousFireTime: '2026-07-10T02:00:00.000+0000',
+                StartTime: '2026-01-01T00:00:00.000+0000',
+                EndTime: null,
+                TimesTriggered: 190,
+              },
+              {
+                Id: '08e000000000002',
+                CronJobDetail: { Name: 'Data Export', JobType: '1' },
+                State: 'WAITING',
+                CronExpression: '0 0 4 ? * SUN',
+                NextFireTime: '2026-07-12T04:00:00.000+0000',
+                PreviousFireTime: null,
+                StartTime: '2026-01-01T00:00:00.000+0000',
+                EndTime: null,
+                TimesTriggered: 3,
+              },
+            ],
+          },
+        }),
+        stderr: '',
+      };
+    }
+    if (/from\s+asyncapexjob/i.test(soql)) {
+      return {
+        stdout: JSON.stringify({
+          result: { records: [{ Status: 'Completed', cnt: 12 }, { Status: 'Failed', cnt: 1 }] },
+        }),
+        stderr: '',
+      };
+    }
+    return { stdout: JSON.stringify({ result: { records: [] } }), stderr: '' };
+  };
+
+  it('lists cron jobs with parsed CronJobDetail and live_org provenance', async () => {
+    const r = await liveScheduledJobsHandler(ctx, { liveEnabled: true }, exec);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalCronJobs).toBe(2);
+    expect(r.value.data.jobs[0]?.name).toBe('Nightly Rollup');
+    expect(r.value.data.jobs[0]?.jobType).toBe('7');
+    expect(r.value.data.jobs[0]?.timesTriggered).toBe(190);
+    // Org-wide dedicated COUNT (5), NOT the per-page filter — the page cap would
+    // understate it on a large org (verified live at ~15k cron rows).
+    expect(r.value.data.liveScheduledApexCount).toBe(5);
+    expect(r.value.data.trust.provenance).toBe('live_org');
+  });
+
+  it('includes the recent AsyncApexJob status summary by default', async () => {
+    const r = await liveScheduledJobsHandler(ctx, { liveEnabled: true }, exec);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.asyncApexJobSummary?.total).toBe(13);
+    expect(r.value.data.asyncApexJobSummary?.byStatus).toContainEqual({ status: 'Failed', count: 1 });
+  });
+
+  it('omits the AsyncApexJob summary when includeAsyncApexJobs is false', async () => {
+    const r = await liveScheduledJobsHandler(
+      ctx,
+      { liveEnabled: true, includeAsyncApexJobs: false },
+      exec,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.asyncApexJobSummary).toBeUndefined();
+  });
+
+  it('degrades the static cross-reference to null when the vault graph is unavailable (no fabricated 0)', async () => {
+    // The shared test ctx has no graph — the count-only cross-reference must
+    // degrade to null (disclosed as "not checked"), never a fabricated 0.
+    const r = await liveScheduledJobsHandler(ctx, { liveEnabled: true }, exec);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.staticSchedulableClassCount).toBeNull();
+  });
+
+  it('fails closed (not "no jobs") when CronTrigger is not queryable', async () => {
+    const badExec: ExecCommand = async () => ({ stdout: '', stderr: 'CronTrigger not supported' });
+    const r = await liveScheduledJobsHandler(ctx, { liveEnabled: true }, badExec);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+});
+
+describe('liveFieldHistoryHandler', () => {
+  // A vault graph seeded with known tracking states so the precondition can be
+  // exercised: a custom object with history ON + a tracked and an untracked
+  // field, and a standard object with history OFF.
+  const node = (overrides: Partial<Node> & Pick<Node, 'id'>): Node => ({
+    type: 'CustomObject',
+    apiName: 'X',
+    label: null,
+    parentId: null,
+    sourcePath: 'unused.xml',
+    lastModifiedDate: null,
+    lastModifiedBy: null,
+    apiVersion: null,
+    properties: {},
+    ...overrides,
+  });
+  const seed: ExtractionResult = {
+    nodes: [
+      node({ id: 'CustomObject:Widget__c', apiName: 'Widget__c', properties: { enableHistory: true } }),
+      node({
+        id: 'CustomField:Widget__c.Tracked__c',
+        type: 'CustomField',
+        apiName: 'Tracked__c',
+        parentId: 'CustomObject:Widget__c',
+        properties: { trackHistory: true },
+      }),
+      node({
+        id: 'CustomField:Widget__c.Untracked__c',
+        type: 'CustomField',
+        apiName: 'Untracked__c',
+        parentId: 'CustomObject:Widget__c',
+        properties: { trackHistory: false },
+      }),
+      node({ id: 'CustomObject:Account', apiName: 'Account', properties: { enableHistory: false } }),
+    ],
+    edges: [],
+  };
+  let histTempDir: string;
+  let histStore: GraphStore;
+  let histCtx: Context;
+  beforeAll(async () => {
+    histTempDir = mkdtempSync(join(tmpdir(), 'sfi-live-field-history-'));
+    const opened = await openGraph(join(histTempDir, 'g.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    histStore = opened.value;
+    const imported = await importExtractionResults(histStore, [seed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    histCtx = {
+      manifest: FIXTURE_MANIFEST,
+      graph: histStore,
+      liveCapability: mintLiveCapability('primary'),
+    } as Context;
+  });
+  afterAll(() => {
+    rmSync(histTempDir, { recursive: true, force: true });
+  });
+
+  const historyExec = (rows: readonly Record<string, unknown>[]): ExecCommand =>
+    async (_b, args) => {
+      const soql = soqlOf(args);
+      if (/from\s+\w*history/i.test(soql)) {
+        return { stdout: JSON.stringify({ result: { records: rows } }), stderr: '' };
+      }
+      return { stdout: JSON.stringify({ result: { records: [] } }), stderr: '' };
+    };
+
+  it('returns record-value history with live_org provenance when tracking is vault-ENABLED', async () => {
+    const exec = historyExec([
+      {
+        Field: 'Tracked__c',
+        OldValue: 'old',
+        NewValue: 'new',
+        CreatedBy: { Name: 'Alice Admin' },
+        CreatedDate: '2026-07-09T10:00:00.000+0000',
+      },
+    ]);
+    const r = await liveFieldHistoryHandler(
+      histCtx,
+      { liveEnabled: true, objectApiName: 'Widget__c', fieldApiName: 'Tracked__c' },
+      exec,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.trackingState).toBe('enabled');
+    expect(r.value.data.historyObject).toBe('Widget__History');
+    expect(r.value.data.entries[0]?.oldValue).toBe('old');
+    expect(r.value.data.entries[0]?.newValue).toBe('new');
+    expect(r.value.data.entries[0]?.changedBy).toBe('Alice Admin');
+    expect(r.value.data.trust.provenance).toBe('live_org');
+    expect(r.value.data.disclosure).toMatch(/RECORD DATA/i);
+  });
+
+  it('binds recordId to the custom ParentId field and fieldApiName to Field via soqlLiteral', async () => {
+    const captured: string[] = [];
+    const exec: ExecCommand = async (_b, args) => {
+      const soql = soqlOf(args);
+      captured.push(soql);
+      return { stdout: JSON.stringify({ result: { records: [] } }), stderr: '' };
+    };
+    await liveFieldHistoryHandler(
+      histCtx,
+      { liveEnabled: true, objectApiName: 'Widget__c', fieldApiName: 'Tracked__c', recordId: 'a01000000000001', days: 30 },
+      exec,
+    );
+    const q = captured.find((s) => /widget__history/i.test(s)) ?? '';
+    expect(q).toContain("Field = 'Tracked__c'");
+    expect(q).toContain("ParentId = 'a01000000000001'");
+    expect(q).toContain('LAST_N_DAYS:30');
+  });
+
+  it('FAILS CLOSED with a precise reason when the vault knows FIELD tracking is off', async () => {
+    const r = await liveFieldHistoryHandler(
+      histCtx,
+      { liveEnabled: true, objectApiName: 'Widget__c', fieldApiName: 'Untracked__c' },
+      historyExec([]),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toMatch(/history tracking is not enabled/i);
+  });
+
+  it('FAILS CLOSED when the vault knows OBJECT history is off', async () => {
+    const r = await liveFieldHistoryHandler(
+      histCtx,
+      { liveEnabled: true, objectApiName: 'Account' },
+      historyExec([]),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.message).toMatch(/history tracking is not enabled for the object/i);
+  });
+
+  it('PROCEEDS with trackingState:unknown + disclosure when the vault has no metadata for the object', async () => {
+    const r = await liveFieldHistoryHandler(
+      histCtx,
+      { liveEnabled: true, objectApiName: 'Contact', fieldApiName: 'Foo__c' },
+      historyExec([{ Field: 'Foo__c', OldValue: null, NewValue: 'x', CreatedBy: { Name: 'Bob' }, CreatedDate: '2026-07-01T00:00:00Z' }]),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.trackingState).toBe('unknown');
+    expect(r.value.data.note ?? '').toMatch(/no history-tracking metadata/i);
+    expect(r.value.data.entries).toHaveLength(1);
+  });
+
+  it('clamps an over-long field value and flags valueTruncated', async () => {
+    const long = 'x'.repeat(400);
+    const r = await liveFieldHistoryHandler(
+      histCtx,
+      { liveEnabled: true, objectApiName: 'Widget__c', fieldApiName: 'Tracked__c' },
+      historyExec([{ Field: 'Tracked__c', OldValue: long, NewValue: 'short', CreatedBy: { Name: 'A' }, CreatedDate: '2026-07-01T00:00:00Z' }]),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.entries[0]?.valueTruncated).toBe(true);
+    expect((r.value.data.entries[0]?.oldValue ?? '').length).toBe(255);
+  });
+});
+
 describe('liveStorageByObjectHandler', () => {
   const authExec: ExecCommand = async () => ({
     stdout: JSON.stringify({
@@ -1191,6 +1745,10 @@ describe('CR-09 — live-plane budget routing (H9)', () => {
       ['live_aggregate', () => liveAggregateHandler(ctx, { objectApiName: 'Opportunity', fieldApiName: 'Amount' }, throwExec)],
       ['live_duplicate_check', () => liveDuplicateCheckHandler(ctx, { objectApiName: 'Contact', fieldApiName: 'Email' }, throwExec)],
       ['live_owner_breakdown', () => liveOwnerBreakdownHandler(ctx, { objectApiName: 'Account' }, throwExec)],
+      ['live_record_access', () => liveRecordAccessHandler(ctx, { recordId: '001000000000001', userId: '005000000000001' }, throwExec)],
+      ['live_record_shares', () => liveRecordSharesHandler(ctx, { recordId: '001000000000001', objectApiName: 'Account' }, throwExec)],
+      ['live_scheduled_jobs', () => liveScheduledJobsHandler(ctx, {}, throwExec)],
+      ['live_field_history', () => liveFieldHistoryHandler(ctx, { objectApiName: 'Account' }, throwExec)],
       ['live_report_usage', () => liveReportUsageHandler(ctx, {}, throwExec)],
       ['live_folder_access', () => liveFolderAccessHandler(ctx, {}, throwExec)],
       ['live_email_template_usage', () => liveEmailTemplateUsageHandler(ctx, {}, throwExec)],
@@ -1199,6 +1757,7 @@ describe('CR-09 — live-plane budget routing (H9)', () => {
       ['live_org_limits', () => liveOrgLimitsHandler(ctx, {}, throwExec)],
       ['live_storage_by_object', () => liveStorageByObjectHandler(ctx, {}, throwExec)],
       ['live_license_usage', () => liveLicenseUsageHandler(ctx, {}, throwExec)],
+      ['live_setup_audit_trail', () => liveSetupAuditTrailHandler(ctx, {}, throwExec)],
     ];
     for (const [name, run] of calls) {
       const r = await run();

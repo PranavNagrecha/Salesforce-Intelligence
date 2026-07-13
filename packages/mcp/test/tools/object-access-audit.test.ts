@@ -15,6 +15,8 @@ import {
 import type { Context } from '../../src/server.js';
 import { objectAccessAuditHandler } from '../../src/tools/object-access-audit.js';
 
+import { measureGraphQueries } from './_graph-query-budget.js';
+
 const MANIFEST: VaultManifest = {
   version: '0.1.0',
   refreshedAt: '2026-06-08T00:00:00Z',
@@ -166,5 +168,56 @@ describe('objectAccessAuditHandler', () => {
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.error.kind).toBe('component-not-found');
+  });
+});
+
+// =============================================================================
+// N+1 query budget (finding C-1). Grantor resolution used to `getNodeById`
+// once per inbound grantedBy edge — Account-class hubs fan out to hundreds of
+// grants. It is now a single `listNodesByIds` batch, so the count must NOT
+// scale with the granter count. (The reverse-PSG walk stays per-pair — its
+// expand/find helpers dominate — so this fixture uses only direct grants.)
+// =============================================================================
+describe('objectAccessAuditHandler — bounded graph queries', () => {
+  const seedWideObject = async (granterCount: number) => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-oaa-budget-'));
+    const opened = await openGraph(join(dir, 'oaa.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const s = opened.value;
+    const nodes: Node[] = [
+      node({ id: 'CustomObject:Wide__c', type: 'CustomObject', apiName: 'Wide__c' }),
+    ];
+    const edges: Edge[] = [];
+    for (let i = 0; i < granterCount; i += 1) {
+      nodes.push(node({ id: `Profile:P${i}`, type: 'Profile', apiName: `P${i}` }));
+      edges.push(
+        edge({
+          fromId: `Profile:P${i}`,
+          toId: 'CustomObject:Wide__c',
+          edgeType: 'grantedBy',
+          properties: { allowRead: true },
+        }),
+      );
+    }
+    const imported = await importExtractionResults(s, [{ nodes, edges }]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const wideCtx = { vaultRoot: dir, manifest: MANIFEST, graph: s };
+    const measured = await measureGraphQueries(s, () =>
+      objectAccessAuditHandler(wideCtx, { componentId: 'CustomObject:Wide__c' }),
+    );
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+    return measured;
+  };
+
+  it('issues a query count independent of the granter count', async () => {
+    const small = await seedWideObject(60);
+    const large = await seedWideObject(200);
+    expect(small.result.ok).toBe(true);
+    expect(large.result.ok).toBe(true);
+    // ONE batched grantor fetch — not one per grant.
+    expect(large.nodeQueries).toBe(small.nodeQueries);
+    expect(large.edgeQueries).toBe(small.edgeQueries);
+    expect(large.nodeQueries + large.edgeQueries).toBeLessThanOrEqual(4);
   });
 });

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TimeSheetTemplate xmlns="http://soap.sforce.com/2006/04/metadata">
+    <active>true</active>
+    <description>Standard weekly time sheet for field installation crews</description>
+    <frequency>Weekly</frequency>
+    <masterLabel>Field Crew Weekly</masterLabel>
+    <startDate>2024-01-01</startDate>
+    <workWeekEndDay>Sunday</workWeekEndDay>
+    <workWeekStartDay>Monday</workWeekStartDay>
+</TimeSheetTemplate>

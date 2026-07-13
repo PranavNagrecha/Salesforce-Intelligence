@@ -1,19 +1,20 @@
 /// <reference types="vitest/globals" />
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { VaultManifest } from '@sf-intelligence/contracts';
 import { closeGraph, openGraph, type GraphStore } from '@sf-intelligence/graph';
 
-import { classifyQuestion } from '../../src/intent-router.js';
+import { classifyQuestion, ROUTE_GAP_NUDGE_THRESHOLD } from '../../src/intent-router.js';
 import type { Context } from '../../src/server.js';
 import {
   capabilitiesHandler,
   capabilitiesInputSchema,
 } from '../../src/tools/capabilities.js';
 import { V01_TOOLS } from '../../src/tools/index.js';
+import { routeQuestionInputSchema } from '../../src/tools/route-question.js';
 
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -44,12 +45,13 @@ afterAll(async () => {
 });
 
 describe('capabilitiesHandler', () => {
-  it('reports the LIVE tool count (matches the dispatcher registry)', async () => {
+  it('reports the LIVE ADVERTISED tool count (non-hidden, matches tools/list)', async () => {
     const r = await capabilitiesHandler(ctx, {});
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    // Derived dynamically so it can never drift from the real registry.
-    expect(r.value.data.toolCount).toBe(V01_TOOLS.length);
+    // Derived dynamically from the registry so it can never drift; excludes the
+    // hidden back-compat aliases so it matches the advertised tools/list surface.
+    expect(r.value.data.toolCount).toBe(V01_TOOLS.filter((t) => !t.hidden).length);
     expect(r.value.data.toolCount).toBeGreaterThan(50);
   });
 
@@ -275,9 +277,59 @@ describe('capabilitiesHandler', () => {
   });
 
   it('is deterministic across two calls', async () => {
-    const a = await capabilitiesHandler(ctx, {});
-    const b = await capabilitiesHandler(ctx, {});
+    const emptyLog = join(tempDir, 'empty-gaps.jsonl');
+    writeFileSync(emptyLog, '', 'utf8');
+    const a = await capabilitiesHandler(ctx, {}, null, { gapLogFile: emptyLog });
+    const b = await capabilitiesHandler(ctx, {}, null, { gapLogFile: emptyLog });
     expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+  });
+
+  it('surfaces an open-gap nudge above threshold and stays quiet below (R8-GAPLOG-SURFACE)', async () => {
+    const quiet = join(tempDir, 'quiet-gaps.jsonl');
+    writeFileSync(quiet, '', 'utf8');
+    const quietR = await capabilitiesHandler(ctx, {}, null, { gapLogFile: quiet });
+    expect(quietR.ok).toBe(true);
+    if (!quietR.ok) return;
+    expect(quietR.value.data.routeGaps.openCount).toBe(0);
+    expect(quietR.value.data.routeGaps.threshold).toBe(ROUTE_GAP_NUDGE_THRESHOLD);
+    expect(quietR.value.data.routeGaps.nudge).toBeNull();
+
+    const noisy = join(tempDir, 'noisy-gaps.jsonl');
+    const lines = Array.from({ length: ROUTE_GAP_NUDGE_THRESHOLD }, (_, i) =>
+      JSON.stringify({
+        at: new Date().toISOString(),
+        question: `secret org question ${i} about /work/a/org-kb`,
+        category: 'unrouted',
+        intent: 'unrouted',
+        plane: 'unknown',
+        note: 'n',
+        vaultRoot: '/work/a/org-kb',
+      }),
+    );
+    writeFileSync(noisy, `${lines.join('\n')}\n`, 'utf8');
+    const noisyR = await capabilitiesHandler(ctx, {}, null, { gapLogFile: noisy });
+    expect(noisyR.ok).toBe(true);
+    if (!noisyR.ok) return;
+    expect(noisyR.value.data.routeGaps.openCount).toBe(ROUTE_GAP_NUDGE_THRESHOLD);
+    expect(noisyR.value.data.routeGaps.nudge).toContain('sfi gaps report');
+    expect(noisyR.value.data.routeGaps.nudge).toContain(String(ROUTE_GAP_NUDGE_THRESHOLD));
+    // Privacy: nudge is count-only — no question text / vault paths.
+    const blob = JSON.stringify(noisyR.value.data.routeGaps);
+    expect(blob).not.toContain('secret org');
+    expect(blob).not.toContain('/work/a');
+    expect(blob).not.toContain('question');
+  });
+});
+
+describe('logGap privacy posture (R8-GAPLOG-SURFACE)', () => {
+  it('keeps logGap opt-in: optional boolean with no default true', () => {
+    const omitted = routeQuestionInputSchema.safeParse({ question: 'x' });
+    expect(omitted.success).toBe(true);
+    if (omitted.success) {
+      expect(omitted.data.logGap).toBeUndefined();
+    }
+    expect(routeQuestionInputSchema.safeParse({ question: 'x', logGap: true }).success).toBe(true);
+    expect(routeQuestionInputSchema.safeParse({ question: 'x', logGap: false }).success).toBe(true);
   });
 });
 

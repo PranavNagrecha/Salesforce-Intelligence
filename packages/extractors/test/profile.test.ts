@@ -144,6 +144,40 @@ describe('extractProfile', () => {
           { startAddress: '10.0.0.1', endAddress: '10.0.0.255' },
         ]);
         expect(props['loginHoursDefined']).toBe(false);
+        expect(props['loginHours']).toEqual([]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('extracts <loginHours> per-weekday windows into properties.loginHours, skipping unrestricted days', async () => {
+      const xml = `<?xml version="1.0"?>
+<Profile xmlns="http://soap.sforce.com/2006/04/metadata">
+  <userLicense>Salesforce</userLicense>
+  <loginHours>
+    <mondayStart>480</mondayStart>
+    <mondayEnd>1020</mondayEnd>
+    <tuesdayStart>480</tuesdayStart>
+    <tuesdayEnd>1020</tuesdayEnd>
+    <fridayStart>480</fridayStart>
+    <fridayEnd>780</fridayEnd>
+  </loginHours>
+</Profile>`;
+      const { dir, path } = await writeProfileXml('LoginHours.profile-meta.xml', xml);
+      try {
+        const result = await extractProfile(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const props = result.value.nodes[0]!.properties;
+        expect(props['loginHoursDefined']).toBe(true);
+        // Monday/Tuesday/Friday are restricted; Wed/Thu/Sat/Sun have no pair in
+        // the source (unrestricted), so only the three declared windows appear,
+        // in weekday-declaration order.
+        expect(props['loginHours']).toEqual([
+          { day: 'Monday', startTime: '480', endTime: '1020' },
+          { day: 'Tuesday', startTime: '480', endTime: '1020' },
+          { day: 'Friday', startTime: '480', endTime: '780' },
+        ]);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

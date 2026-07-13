@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import type { VaultManifest } from '@sf-intelligence/contracts';
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
 
+import { mintLiveCapability } from '../../src/live-capability.js';
 import type { Context } from '../../src/server.js';
 import {
   liveLicenseUsageHandler,
@@ -21,7 +22,7 @@ const FIXTURE_MANIFEST: VaultManifest = {
   sourceTreeHash: 'sha256:fixture',
 };
 
-const ctx = { manifest: FIXTURE_MANIFEST } as Context;
+const ctx = { manifest: FIXTURE_MANIFEST, liveCapability: mintLiveCapability('primary') } as Context;
 
 // Isolate per-org consent so the fail-closed gate is hermetic — test-org is
 // never consented at this temp path, so the "refuses when disabled" test holds.

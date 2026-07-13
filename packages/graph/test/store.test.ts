@@ -11,9 +11,12 @@ import { getNodeById } from '../src/queries.js';
 import {
   closeGraph,
   isLockConflict,
+  isNativeBindingFailure,
   lockConflictMessage,
+  nativeBindingMessage,
   openGraph,
   openGraphReadOnly,
+  probeDuckDBNative,
 } from '../src/store.js';
 
 let tempDir: string;
@@ -118,5 +121,39 @@ describe('DuckDB lock-conflict detection (P5-duckdb-lock / B15)', () => {
     }
     expect(r.error.kind).toBe('open-failed');
     expect(r.error.kind).not.toBe('locked');
+  });
+});
+
+describe('DuckDB native-binding detection (INFRA-11)', () => {
+  const REAL_DLOPEN_ERR =
+    "Error: dlopen(/path/node_modules/@duckdb/node-bindings-darwin-arm64/duckdb.node, 0x0001): tried: '/path/duckdb.node' (no such file)";
+
+  it('isNativeBindingFailure matches dlopen / missing-binding shapes and ignores unrelated errors', () => {
+    expect(isNativeBindingFailure(REAL_DLOPEN_ERR)).toBe(true);
+    expect(isNativeBindingFailure('ERR_DLOPEN_FAILED: file too short')).toBe(true);
+    expect(isNativeBindingFailure('Library not loaded: @rpath/libduckdb.dylib')).toBe(true);
+    expect(isNativeBindingFailure('Cannot find module @duckdb/node-api')).toBe(true);
+    expect(isNativeBindingFailure('was compiled against a different Node.js version')).toBe(
+      true,
+    );
+    expect(isNativeBindingFailure('No such file or directory')).toBe(false);
+    expect(
+      isNativeBindingFailure(
+        'IO Error: Could not set lock on file "/x/graph.duckdb": Conflicting lock is held',
+      ),
+    ).toBe(false);
+  });
+
+  it('nativeBindingMessage names platform/arch and the reinstall remedy', () => {
+    const msg = nativeBindingMessage(REAL_DLOPEN_ERR);
+    expect(msg).toContain('@duckdb/node-api');
+    expect(msg).toContain(`${process.platform}-${process.arch}`);
+    expect(msg).toContain('rebuild');
+    expect(msg).toContain(REAL_DLOPEN_ERR);
+  });
+
+  it('probeDuckDBNative succeeds when native bindings are installed', async () => {
+    const r = await probeDuckDBNative();
+    expect(r.ok).toBe(true);
   });
 });

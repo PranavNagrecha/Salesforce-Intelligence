@@ -1,6 +1,6 @@
 /// <reference types="vitest/globals" />
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -10,6 +10,7 @@ import type {
   Node,
   VaultManifest,
 } from '@sf-intelligence/contracts';
+import { extractFlow } from '@sf-intelligence/extractors';
 import {
   closeGraph,
   importExtractionResults,
@@ -659,5 +660,329 @@ describe('fieldLineageHandler: cross-object formula chain depth (P4-formula-chai
     const fc = r.value.data.upstream?.formulaChain;
     expect(fc?.maxDepth).toBe(1);
     expect(fc?.crossesObject).toBe(false);
+  });
+});
+
+describe('fieldLineageHandler — flow field-level dataflow (R6-11)', () => {
+  // End-to-end across TWO flows, driven by the REAL extractor (not
+  // hand-built edges): FlowA writes F1 from F2; FlowB writes F2 from F3.
+  // Upstream lineage of F1 must reach F3 through both flows, with the
+  // flows' INPUT fields surfaced as walkable hops.
+  const F1 = 'CustomField:Ledger__c.Amount_Mirror__c';
+  const F2 = 'CustomField:Invoice__c.Amount_Copy__c';
+  const F3 = 'CustomField:Order__c.Amount__c';
+
+  const FLOW_A_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <apiVersion>59.0</apiVersion>
+  <label>Mirror Invoice Amount</label>
+  <processType>AutoLaunchedFlow</processType>
+  <status>Active</status>
+  <recordUpdates>
+    <name>Update_Ledger</name>
+    <label>Update Ledger</label>
+    <object>Ledger__c</object>
+    <inputAssignments>
+      <field>Amount_Mirror__c</field>
+      <value><elementReference>$Record.Amount_Copy__c</elementReference></value>
+    </inputAssignments>
+  </recordUpdates>
+  <start>
+    <object>Invoice__c</object>
+    <recordTriggerType>CreateAndUpdate</recordTriggerType>
+    <triggerType>RecordAfterSave</triggerType>
+  </start>
+</Flow>`;
+
+  const FLOW_B_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <apiVersion>59.0</apiVersion>
+  <label>Copy Order Amount</label>
+  <processType>AutoLaunchedFlow</processType>
+  <status>Active</status>
+  <recordUpdates>
+    <name>Update_Invoice</name>
+    <label>Update Invoice</label>
+    <object>Invoice__c</object>
+    <inputAssignments>
+      <field>Amount_Copy__c</field>
+      <value><elementReference>$Record.Amount__c</elementReference></value>
+    </inputAssignments>
+  </recordUpdates>
+  <start>
+    <object>Order__c</object>
+    <recordTriggerType>CreateAndUpdate</recordTriggerType>
+    <triggerType>RecordAfterSave</triggerType>
+  </start>
+</Flow>`;
+
+  let dir3: string;
+  let store3: GraphStore;
+  let ctx3: Context;
+
+  beforeAll(async () => {
+    dir3 = mkdtempSync(join(tmpdir(), 'sfi-mcp-fl-flowdata-'));
+    const flowDir = join(dir3, 'flows');
+    mkdirSync(flowDir, { recursive: true });
+    writeFileSync(join(flowDir, 'Mirror_Invoice_Amount.flow-meta.xml'), FLOW_A_XML);
+    writeFileSync(join(flowDir, 'Copy_Order_Amount.flow-meta.xml'), FLOW_B_XML);
+    const resA = await extractFlow(join(flowDir, 'Mirror_Invoice_Amount.flow-meta.xml'));
+    const resB = await extractFlow(join(flowDir, 'Copy_Order_Amount.flow-meta.xml'));
+    if (!resA.ok || !resB.ok) throw new Error('extractFlow fixture failed');
+
+    const fieldSeed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: F1, type: 'CustomField', apiName: 'Amount_Mirror__c', parentId: 'CustomObject:Ledger__c' }),
+        makeNode({ id: F2, type: 'CustomField', apiName: 'Amount_Copy__c', parentId: 'CustomObject:Invoice__c' }),
+        makeNode({ id: F3, type: 'CustomField', apiName: 'Amount__c', parentId: 'CustomObject:Order__c' }),
+        // An extra flow writer whose inputs could NOT be traced — proves the
+        // walk DISCLOSES rather than guesses.
+        makeNode({ id: 'Flow:Opaque_Enricher', type: 'Flow', apiName: 'Opaque_Enricher' }),
+        makeNode({ id: 'CustomField:Order__c.Enriched__c', type: 'CustomField', apiName: 'Enriched__c', parentId: 'CustomObject:Order__c' }),
+        // A flow writer whose edge predates the dataflow tracer entirely
+        // (pre-R2-1 vault shape: bare `operation`, no assignedValue at all —
+        // verified live against a production-scale gate vault). Its inputs
+        // are UNKNOWN, which must be disclosed as untraced, not read as
+        // "zero inputs".
+        makeNode({ id: 'Flow:Legacy_Vault_Writer', type: 'Flow', apiName: 'Legacy_Vault_Writer' }),
+        makeNode({ id: 'CustomField:Order__c.Legacy__c', type: 'CustomField', apiName: 'Legacy__c', parentId: 'CustomObject:Order__c' }),
+      ],
+      edges: [
+        makeEdge({
+          fromId: 'Flow:Opaque_Enricher',
+          toId: 'CustomField:Order__c.Enriched__c',
+          edgeType: 'writesTo',
+          confidence: 'parsed',
+          source: 'flow-extractor',
+          properties: {
+            operation: 'recordUpdate',
+            assignedValue: 'Score_It.result',
+            assignedValueKind: 'reference',
+            sourceFields: [],
+            sourceFieldConfidence: [],
+            unresolvedSourceCount: 2,
+          },
+        }),
+        makeEdge({
+          fromId: 'Flow:Legacy_Vault_Writer',
+          toId: 'CustomField:Order__c.Legacy__c',
+          edgeType: 'writesTo',
+          confidence: 'parsed',
+          source: 'flow-extractor',
+          properties: { operation: 'recordUpdate' },
+        }),
+      ],
+    };
+    const opened = await openGraph(join(dir3, 'fl.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    store3 = opened.value;
+    const imp = await importExtractionResults(store3, [resA.value, resB.value, fieldSeed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    ctx3 = { vaultRoot: dir3, manifest: FIXTURE_MANIFEST, graph: store3 };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store3);
+    rmSync(dir3, { recursive: true, force: true });
+  });
+
+  it('upstream lineage of F1 reaches F3 across TWO flows with per-hop confidence', async () => {
+    const r = await fieldLineageHandler(ctx3, {
+      fieldId: F1,
+      direction: 'upstream',
+      maxDepth: 5,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sources = r.value.data.upstream?.sources ?? [];
+    const byId = (id: string) => sources.find((s) => s.sourceId === id);
+
+    const flowA = byId('Flow:Mirror_Invoice_Amount');
+    expect(flowA?.sourceKind).toBe('flow-assignment');
+    expect(flowA?.depth).toBe(1);
+
+    // FlowA's traced INPUT field is the next upstream hop — previously the
+    // walk dead-ended at the flow node (no incoming writesTo on a Flow).
+    const f2 = byId(F2);
+    expect(f2?.sourceKind).toBe('flow-input-field');
+    expect(f2?.depth).toBe(2);
+    expect(f2?.confidence).toBe('declared');
+
+    const flowB = byId('Flow:Copy_Order_Amount');
+    expect(flowB?.sourceKind).toBe('flow-assignment');
+    expect(flowB?.depth).toBe(3);
+
+    const f3 = byId(F3);
+    expect(f3?.sourceKind).toBe('flow-input-field');
+    expect(f3?.depth).toBe(4);
+    expect(f3?.confidence).toBe('declared');
+
+    const fd = r.value.data.upstream?.flowDataflow;
+    expect(fd?.inputFieldsTraced).toBe(2);
+    expect(fd?.unresolvedInputCount).toBe(0);
+  });
+
+  it('downstream lineage of F3 crosses both flows via flow-field-write effects', async () => {
+    const r = await fieldLineageHandler(ctx3, {
+      fieldId: F3,
+      direction: 'downstream',
+      maxDepth: 3,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const effects = r.value.data.downstream?.effects ?? [];
+
+    const flowB = effects.find((e) => e.effectId === 'Flow:Copy_Order_Amount');
+    expect(flowB?.effectKind).toBe('flow-field-write');
+    expect(flowB?.depth).toBe(1);
+    expect(flowB?.targetFields).toEqual(['Invoice__c.Amount_Copy__c']);
+
+    // The walk continues INTO the written field: F2's own dataflow consumer
+    // (FlowA) surfaces at depth 2.
+    const flowA = effects.find((e) => e.effectId === 'Flow:Mirror_Invoice_Amount');
+    expect(flowA?.effectKind).toBe('flow-field-write');
+    expect(flowA?.depth).toBe(2);
+    expect(flowA?.targetFields).toEqual(['Ledger__c.Amount_Mirror__c']);
+  });
+
+  it('discloses unresolved flow inputs as a count, never guesses', async () => {
+    const r = await fieldLineageHandler(ctx3, {
+      fieldId: 'CustomField:Order__c.Enriched__c',
+      direction: 'upstream',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sources = r.value.data.upstream?.sources ?? [];
+    // The flow writer itself is surfaced...
+    expect(sources.some((s) => s.sourceId === 'Flow:Opaque_Enricher')).toBe(true);
+    // ...but NO fabricated input fields.
+    expect(sources.some((s) => s.sourceKind === 'flow-input-field')).toBe(false);
+    const fd = r.value.data.upstream?.flowDataflow;
+    expect(fd?.inputFieldsTraced).toBe(0);
+    expect(fd?.unresolvedInputCount).toBe(2);
+    expect(
+      r.value.data.boundaries.some((b) => b.includes('could not be statically traced')),
+    ).toBe(true);
+  });
+
+  it('discloses a pre-tracer vault edge as untraced instead of "zero inputs"', async () => {
+    // The edge carries ONLY `operation` (pre-R2-1 vault shape — no
+    // assignedValue, no trace). Its inputs are unknown: the walk must count
+    // it as untraced and nudge a re-refresh, never read the absence of
+    // trace data as "the flow has no inputs".
+    const r = await fieldLineageHandler(ctx3, {
+      fieldId: 'CustomField:Order__c.Legacy__c',
+      direction: 'upstream',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sources = r.value.data.upstream?.sources ?? [];
+    expect(sources.some((s) => s.sourceId === 'Flow:Legacy_Vault_Writer')).toBe(true);
+    expect(sources.some((s) => s.sourceKind === 'flow-input-field')).toBe(false);
+    const fd = r.value.data.upstream?.flowDataflow;
+    expect(fd?.untracedFlowWriteEdges).toBe(1);
+    expect(
+      r.value.data.boundaries.some((b) => b.includes('predate the dataflow tracer')),
+    ).toBe(true);
+  });
+});
+
+describe('fieldLineageHandler — R7-W2 before-save $Record field write', () => {
+  // A RecordBeforeSave flow assigns $Record.Combined_Name__c = {!$Record.Given_Part__c}
+  // via an <assignments> element (no DML). Driven by the REAL extractor: the
+  // before-save field write must be a first-class writer in field_lineage, and
+  // its traced input field must be a walkable upstream hop.
+  const WROTE = 'CustomField:Widget__c.Combined_Name__c';
+  const SRC = 'CustomField:Widget__c.Given_Part__c';
+
+  const FLOW_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <apiVersion>59.0</apiVersion>
+  <label>Copy Widget Name</label>
+  <processType>AutoLaunchedFlow</processType>
+  <status>Active</status>
+  <start>
+    <object>Widget__c</object>
+    <recordTriggerType>CreateAndUpdate</recordTriggerType>
+    <triggerType>RecordBeforeSave</triggerType>
+  </start>
+  <assignments>
+    <name>Copy_Name</name>
+    <label>Copy Name</label>
+    <assignmentItems>
+      <assignToReference>$Record.Combined_Name__c</assignToReference>
+      <operator>Assign</operator>
+      <value><elementReference>$Record.Given_Part__c</elementReference></value>
+    </assignmentItems>
+  </assignments>
+</Flow>`;
+
+  let dir4: string;
+  let store4: GraphStore;
+  let ctx4: Context;
+
+  beforeAll(async () => {
+    dir4 = mkdtempSync(join(tmpdir(), 'sfi-mcp-fl-w2-'));
+    const flowDir = join(dir4, 'flows');
+    mkdirSync(flowDir, { recursive: true });
+    writeFileSync(join(flowDir, 'Copy_Widget_Name.flow-meta.xml'), FLOW_XML);
+    const res = await extractFlow(join(flowDir, 'Copy_Widget_Name.flow-meta.xml'));
+    if (!res.ok) throw new Error('extractFlow fixture failed');
+
+    const fieldSeed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: WROTE, type: 'CustomField', apiName: 'Combined_Name__c', parentId: 'CustomObject:Widget__c' }),
+        makeNode({ id: SRC, type: 'CustomField', apiName: 'Given_Part__c', parentId: 'CustomObject:Widget__c' }),
+      ],
+      edges: [],
+    };
+    const opened = await openGraph(join(dir4, 'fl.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    store4 = opened.value;
+    const imp = await importExtractionResults(store4, [res.value, fieldSeed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    ctx4 = { vaultRoot: dir4, manifest: FIXTURE_MANIFEST, graph: store4 };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store4);
+    rmSync(dir4, { recursive: true, force: true });
+  });
+
+  it('surfaces the before-save flow as an upstream writer and traces its $Record input field', async () => {
+    const r = await fieldLineageHandler(ctx4, {
+      fieldId: WROTE,
+      direction: 'upstream',
+      maxDepth: 5,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sources = r.value.data.upstream?.sources ?? [];
+    const flow = sources.find((s) => s.sourceId === 'Flow:Copy_Widget_Name');
+    expect(flow?.sourceKind).toBe('flow-assignment');
+    expect(flow?.depth).toBe(1);
+    // The traced $Record.Given_Part__c input is a walkable hop (declared).
+    const src = sources.find((s) => s.sourceId === SRC);
+    expect(src?.sourceKind).toBe('flow-input-field');
+    expect(src?.depth).toBe(2);
+    expect(src?.confidence).toBe('declared');
+    const fd = r.value.data.upstream?.flowDataflow;
+    expect(fd?.inputFieldsTraced).toBe(1);
+    expect(fd?.unresolvedInputCount).toBe(0);
+    expect(fd?.untracedFlowWriteEdges).toBe(0);
+  });
+
+  it('surfaces the write as a downstream flow-field-write effect on the source field', async () => {
+    const r = await fieldLineageHandler(ctx4, {
+      fieldId: SRC,
+      direction: 'downstream',
+      maxDepth: 3,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const effects = r.value.data.downstream?.effects ?? [];
+    const flow = effects.find((e) => e.effectId === 'Flow:Copy_Widget_Name');
+    expect(flow?.effectKind).toBe('flow-field-write');
+    expect(flow?.targetFields).toEqual(['Widget__c.Combined_Name__c']);
   });
 });

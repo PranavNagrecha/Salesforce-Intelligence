@@ -41,7 +41,14 @@
  *     itself can be `parsed` (declared by Flow / LWC `apex:` imports)
  *     or `heuristic` (apex-scanner inference). The tool does not
  *     surface the per-edge confidence on the trigger-context list;
- *     callers wanting that detail should use `sfi.find_apex_usages`.
+ *     callers wanting that detail should use `sfi.find_code_usages`.
+ *   - CR-22-B6: `entryPaths` is bounded (depth `ENTRY_PATH_MAX_DEPTH`=6,
+ *     `ENTRY_PATH_MAX_PATHS`=12 paths) — previously JSDoc-only. A class
+ *     entry now carries `entryPathsTruncated: true` (present only when
+ *     true) when its real fan-in of callers exceeds what the walk
+ *     explored, and the response `boundaries` gets a matching
+ *     "showing... N" disclosure whenever ANY class in the (full,
+ *     pre-page) result hit the cap.
  *
  * Implementation notes:
  *   - Walks both `ApexClass` and `ApexTrigger` ComponentTypes; the
@@ -116,7 +123,7 @@ const SEVERITY_SET: ReadonlySet<string> = new Set([
 const GOVERNOR_LIMIT_HEURISTIC_DISCLOSURE =
   'pattern recognition is heuristic — every finding carries confidence: heuristic. Static SOQL / DML inside a static method called from a loop is invisible to the scanner; dynamic SOQL strings (Database.query(...)) are stripped before pattern passes.';
 const GOVERNOR_LIMIT_TRIGGER_CONTEXT_DISCLOSURE =
-  'trigger-context callers are listed when the class is the target of an incoming callsApex edge from an ApexTrigger. The per-edge confidence is NOT surfaced in this tool; use sfi.find_apex_usages for the per-edge detail.';
+  'trigger-context callers are listed when the class is the target of an incoming callsApex edge from an ApexTrigger. The per-edge confidence is NOT surfaced in this tool; use sfi.find_code_usages for the per-edge detail.';
 
 /**
  * Zod schema for the `sfi.governor_limit_risks` tool input.
@@ -169,6 +176,15 @@ export interface GovernorLimitRisksClassEntry {
    * just the class in isolation. Bounded (depth 6, 12 paths); cycle-safe.
    */
   readonly entryPaths: readonly (readonly ComponentId[])[];
+  /**
+   * CR-22-B6: TRUE when the bounded walk (depth `ENTRY_PATH_MAX_DEPTH`=6,
+   * `ENTRY_PATH_MAX_PATHS`=12) found MORE entry-point paths than it explored —
+   * the cap was previously JSDoc-only (see `entryPaths` above), so a class
+   * with a wide fan-in of callers silently read as if `entryPaths` were the
+   * complete inventory. Present ONLY when true, so a class with genuinely
+   * ≤12 real entry paths keeps its pre-existing shape.
+   */
+  readonly entryPathsTruncated?: boolean;
 }
 
 /** Output payload. */
@@ -271,6 +287,21 @@ const collectTriggerCallers = async (
 const ENTRY_PATH_MAX_DEPTH = 6;
 const ENTRY_PATH_MAX_PATHS = 12;
 
+/** {@link collectEntryPaths}'s result: the bounded path list plus whether the cap cut the search short. */
+interface EntryPathsResult {
+  readonly paths: readonly (readonly ComponentId[])[];
+  /**
+   * CR-22-B6: true when the walk hit `ENTRY_PATH_MAX_PATHS` (or `errored`)
+   * BEFORE genuinely exhausting every caller — i.e. more real entry-point
+   * paths exist than were explored. The walk's own early-exit guards cap
+   * `paths` DURING collection, so a plain post-hoc `out.length > cap` check
+   * can never fire (out.length is already ≤ cap by construction) — this
+   * flag is set at the exact two call sites where the cap causes real work
+   * to be skipped, which is the only honest signal.
+   */
+  readonly truncated: boolean;
+}
+
 /**
  * Walk backwards over incoming `callsApex` edges from `classId` to collect the
  * entry-point PATHS that reach it (P4-graph-sast). Each path is ordered
@@ -283,16 +314,24 @@ const ENTRY_PATH_MAX_PATHS = 12;
 const collectEntryPaths = async (
   ctx: Context,
   classId: ComponentId,
-): Promise<Result<readonly (readonly ComponentId[])[], string>> => {
+): Promise<Result<EntryPathsResult, string>> => {
   const paths: ComponentId[][] = [];
   let errored: string | null = null;
+  // CR-22-B6: set at the two spots where the ENTRY_PATH_MAX_PATHS cap
+  // actually skips unexplored work — the only reliable "more paths exist"
+  // signal (see EntryPathsResult).
+  let hitCap = false;
 
   // `trail` is class-first: [classId, caller, callerOfCaller, ...].
   const walk = async (
     node: ComponentId,
     trail: readonly ComponentId[],
   ): Promise<void> => {
-    if (errored !== null || paths.length >= ENTRY_PATH_MAX_PATHS) return;
+    if (errored !== null) return;
+    if (paths.length >= ENTRY_PATH_MAX_PATHS) {
+      hitCap = true;
+      return;
+    }
     if (trail.length >= ENTRY_PATH_MAX_DEPTH) {
       paths.push([...trail].reverse());
       return;
@@ -318,7 +357,10 @@ const collectEntryPaths = async (
       return;
     }
     for (const from of callers) {
-      if (paths.length >= ENTRY_PATH_MAX_PATHS) break;
+      if (paths.length >= ENTRY_PATH_MAX_PATHS) {
+        hitCap = true;
+        break;
+      }
       if (from.startsWith('ApexTrigger:') || from.startsWith('Flow:')) {
         paths.push([...trail, from].reverse());
       } else {
@@ -339,7 +381,7 @@ const collectEntryPaths = async (
     }
   }
   out.sort((a, b) => (a.join('>') < b.join('>') ? -1 : 1));
-  return ok(out.slice(0, ENTRY_PATH_MAX_PATHS));
+  return ok({ paths: out.slice(0, ENTRY_PATH_MAX_PATHS), truncated: hitCap });
 };
 
 /**
@@ -411,6 +453,7 @@ export const governorLimitRisksHandler = async (
     // ApexTrigger doesn't have a "trigger caller" upstream.
     let triggerContext: readonly ComponentId[] = [];
     let entryPaths: readonly (readonly ComponentId[])[] = [];
+    let entryPathsTruncated = false;
     if (node.type === 'ApexClass') {
       const tcRes = await collectTriggerCallers(ctx, node.id);
       if (!tcRes.ok) {
@@ -422,7 +465,8 @@ export const governorLimitRisksHandler = async (
       if (!epRes.ok) {
         return err({ kind: 'internal', message: epRes.error });
       }
-      entryPaths = epRes.value;
+      entryPaths = epRes.value.paths;
+      entryPathsTruncated = epRes.value.truncated;
     }
 
     perClass.set(node.id, {
@@ -432,6 +476,7 @@ export const governorLimitRisksHandler = async (
       risks: [...partitioned.active],
       triggerContext,
       entryPaths,
+      ...(entryPathsTruncated ? { entryPathsTruncated: true } : {}),
     });
   }
 
@@ -485,6 +530,16 @@ export const governorLimitRisksHandler = async (
   if (scan.value.scanIncomplete) {
     boundaries.push(
       scanTruncationNote(scan.value.incompleteTypes, clampedNodeScanLimit()),
+    );
+  }
+  // CR-22-B6: the ENTRY_PATH_MAX_PATHS(=12)/ENTRY_PATH_MAX_DEPTH(=6) walk cap
+  // was previously JSDoc-only — a class with a wide fan-in of callers showed
+  // exactly 12 entry paths with no signal that more existed. Reflects the
+  // FULL (pre-page) `classes` list so it fires regardless of which page a
+  // caller is viewing.
+  if (classes.some((c) => c.entryPathsTruncated === true)) {
+    boundaries.push(
+      `Entry-path walk capped: one or more classes have MORE entry-point paths reaching them than the ${ENTRY_PATH_MAX_PATHS.toString()} shown (bounded depth ${ENTRY_PATH_MAX_DEPTH.toString()}) — see that class's \`entryPathsTruncated\` flag. The listed \`entryPaths\` are a representative sample, not the full call-path inventory.`,
     );
   }
 

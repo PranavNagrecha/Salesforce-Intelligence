@@ -6,6 +6,7 @@ import type {
   ComponentId,
   CoverageEntry,
   ComponentType,
+  Edge,
   EdgeType,
   ExtractionResult,
   Node,
@@ -38,6 +39,7 @@ import {
   persistResolveIndexArtifact,
   countNodesByType,
   listEdges,
+  listEdgesForNodes,
   listNodesByType,
   openGraph,
   openGraphReadOnly,
@@ -49,6 +51,7 @@ import { recognizeNamingConventions } from '@sf-intelligence/patterns';
 import { renderOrgCard, serializeFrontmatter } from '@sf-intelligence/renderers';
 import {
   createToolingApiClient,
+  enrichDependencies,
   enrichLastModified,
   getAuthFromSfCli,
   type EnrichmentResult,
@@ -69,6 +72,7 @@ import {
 } from '@sf-intelligence/vault';
 import { Command } from 'commander';
 
+import { parseApexAstInPool } from '../apex-ast-pool.js';
 import { captureDataShape } from '../data-shape-capture.js';
 import { buildOrgCardInput } from '../org-card-input.js';
 import { readCliPackageVersion } from '../package-version.js';
@@ -83,6 +87,12 @@ import {
   type ExtractCache,
   type RefreshExtractionFailure,
 } from '../refresh-pipeline.js';
+import {
+  createSfSetupAuditTrailSoql,
+  persistSetupAuditTrail,
+  type SetupAuditTrailPersistSummary,
+  type SetupAuditTrailSoql,
+} from '../setup-audit-trail.js';
 import {
   reconcileSourceDeletions,
   syncAuthoritativeRetrieveIntoSource,
@@ -104,7 +114,54 @@ type RawExecFile = (
   options: { readonly maxBuffer?: number; readonly cwd?: string; readonly timeout?: number; readonly killSignal?: string },
 ) => Promise<{ stdout: string; stderr: string }>;
 
-/** Default Salesforce metadata API version stamped into the generated package.xml. */
+/**
+ * Default Salesforce metadata API version stamped into the generated
+ * package.xml / throwaway `sfdx-project.json` for every retrieve this
+ * pipeline issues (main pull, on-demand object expansion, additive manifest).
+ *
+ * Pinned at 62.0 — bumping to 64.0 caused a HIGH-severity vault regression
+ * (empirically bisected + reproduced). The mechanism is NOT that v64 strips
+ * Profiles: a Profile co-retrieved with its referenced types returns identical
+ * grants at v62 and v64. The mechanism is a POISON-TYPE cascade unique to 64.0:
+ *
+ *   1. At v64 the org `list metadata-types` describe surfaces
+ *      `GenAiPlannerBundle` (at v62 it lists `GenAiPlanner` instead and the
+ *      Bundle is absent), so `selectManifestTypes` includes it in the single
+ *      combined retrieve manifest.
+ *   2. `GenAiPlannerBundle` cannot actually be retrieved until Metadata API
+ *      v65.0+ — at v64 it fails with `UNSUPPORTED_API_VERSION`, which fails the
+ *      WHOLE combined `sf project retrieve`.
+ *   3. `classifyRetrieveError` treats that as `per-type`, so
+ *      `retrieveWithFallback` BINARY-SPLITS the ~290 types into ever-smaller
+ *      batches to isolate the culprit — scattering the types across batches.
+ *   4. `Profile` grants (`fieldPermissions`/`objectPermissions`/`classAccesses`
+ *      /`applicationVisibilities`/`tabVisibilities`/`customPermissions`/
+ *      `recordTypeVisibilities`) ONLY serialize for objects/classes/apps that
+ *      are co-named in the SAME retrieve; likewise the CustomObject child types
+ *      (`ListView`/`ValidationRule`/`RecordType`/`WebLink`/`FieldSet`) only
+ *      fully land when co-retrieved with `CustomObject`. The split separates
+ *      `Profile` and those child types from `CustomObject`/`ApexClass`/… so
+ *      they come back BARE — collapsing `grantedBy` and the object children.
+ *
+ * Pinning at 62.0 keeps the un-retrievable poison type out of the manifest, so
+ * the combined retrieve stays whole (one call, everything co-named) and grants
+ * survive. NOTE the residual fragility this reveals: ANY per-type retrieve
+ * failure that trips the binary split can silently bare-out Profiles the same
+ * way — a durable fix should keep `Profile` (and the object child types)
+ * co-batched with `CustomObject`/`ApexClass`, independent of the split.
+ *
+ * DEFERRED — `GenAiPlannerBundle` (R6-30 / R6-13's Agentforce planner type):
+ * it needs Metadata API v65.0+, so it stays unretrieved until the pipeline
+ * grows a SPLIT manifest — Profiles and everything else pulled at 62.0, plus a
+ * separate isolated pass at v65.0+ for `GenAiPlannerBundle` ALONE (so its
+ * version can never poison the main combined retrieve). Every other type this
+ * pipeline extracts is retrievable at 62.0 (`GenAiFunction`/`GenAiPromptTemplate`
+ * v60.0+, `GenAiPlugin` v62.0+; Bot / GenAiFunction / StandardValueSet /
+ * Certificate / Wave / FieldServiceSettings all <= 62.0), so pinning here drops
+ * nothing except the already-unretrievable `GenAiPlannerBundle`. The
+ * manifest-selection logic (`selectManifestTypes`) and the generated XML/JSON
+ * are covered by tests.
+ */
 const SF_API_VERSION = '62.0';
 
 /** Pipeline status. `success` = clean. `partial` = per-file extractor failures but vault coherent. `failed` = fatal step aborted. */
@@ -129,6 +186,16 @@ export interface RefreshResult {
    * and on a clean pull.
    */
   readonly retrieveFailures?: readonly RetrieveTypeFailure[];
+  /**
+   * PROFILE-COBATCH detect+disclose: present when this refresh produced
+   * profiles WITHOUT their permission grant sections (co-listing likely lost
+   * to a split retrieve, or grantedBy collapsed an order of magnitude vs the
+   * prior manifest — see `assessProfileGrantIntegrity`). Non-null forces
+   * `status: 'partial'`, marks the Profile coverage row errored, and is
+   * persisted on the manifest (`profileGrantIntegrity`) so `health_check` /
+   * `coverage_report` degrade instead of reporting healthy.
+   */
+  readonly profileGrantDisclosure?: string;
   /**
    * Populated only when `--with-tooling-api` (PLAN-v1.7 R2) runs. The
    * per-run summary surfaces the live-data axis as a separate block in
@@ -171,6 +238,12 @@ export interface RefreshResult {
     readonly reports: { readonly total: number; readonly requested: number; readonly retrieved: number };
     readonly dashboards: { readonly total: number; readonly requested: number; readonly retrieved: number };
   };
+  /**
+   * Populated only when `--with-audit-trail` (#39) runs. Summary of the
+   * SetupAuditTrail JSONL append (`meta/setup-audit-trail.jsonl`). Absent on
+   * the default offline refresh.
+   */
+  readonly auditTrail?: SetupAuditTrailPersistSummary;
 }
 
 /**
@@ -256,6 +329,17 @@ export interface ToolingApiRefreshSummary {
    * `errors`, which are surfaced inside the runner's result.
    */
   readonly fatalMessage?: string;
+  /**
+   * Pre-existing edges stamped `properties.confirmedByApi: true` by the
+   * dependency enrichment sibling pass (R4). Absent when that pass did
+   * not run or confirmed nothing.
+   */
+  readonly dependencyConfirmedCount?: number;
+  /**
+   * New `dependsOnFromApi` edges appended from MetadataComponentDependency.
+   * Absent when that pass did not run or found no API-only edges.
+   */
+  readonly dependencyNewEdgeCount?: number;
 }
 
 /** Options accepted by `runRefresh`. */
@@ -278,8 +362,10 @@ export interface RunRefreshOptions {
    * Opt-in to the v1.7 Tooling API enrichment pass. Off by default —
    * the default refresh stays fully offline. When set, the pipeline
    * runs the offline path to completion, then drives the
-   * `tooling-api` enrichment against the in-memory graph and re-imports
-   * the patched node rows.
+   * `tooling-api` freshness enrichment against the in-memory graph and
+   * re-imports the patched node rows, then runs the sibling dependency
+   * confirmation pass (`enrichDependencies`) that stamps
+   * `confirmedByApi` and appends `dependsOnFromApi` edges.
    */
   readonly withToolingApi?: boolean;
   /**
@@ -288,6 +374,19 @@ export interface RunRefreshOptions {
    * without it). Best-effort: capture failure never flips refresh status.
    */
   readonly withDataShape?: boolean;
+  /**
+   * Opt-in (#39): query SetupAuditTrail during refresh and append new rows
+   * (deduped by Id) to `meta/setup-audit-trail.jsonl` so
+   * `sfi.component_change_attribution` can answer "who changed this and when"
+   * offline. Off by default — touches the org and adds refresh latency
+   * (same posture as `--with-tooling-api`).
+   */
+  readonly withAuditTrail?: boolean;
+  /**
+   * Inject a SetupAuditTrail SOQL runner. Tests pass a stub; production
+   * leaves this `undefined`, which uses `sf data query --json`.
+   */
+  readonly auditTrailSoql?: SetupAuditTrailSoql;
   /**
    * Inject a pre-built Tooling API client. Tests pass a stub; production
    * code leaves this `undefined`, which triggers the
@@ -489,6 +588,11 @@ const saveExtractCache = async (
  * cross-class calls map to `callsApex` on known vault classes (system
  * allowlist calls carry no graph node and are skipped). A parse failure
  * leaves that file scanner-only.
+ *
+ * INFRA-05: the CPU-bound ANTLR parse is fanned across a worker_threads pool
+ * (`availableParallelism() - 1`). Edge merge stays on this thread and walks
+ * pending files in INPUT order so vault output stays byte-stable. Graph
+ * import + renderVault remain single-threaded callers of this function.
  */
 const applyApexAstEdges = async (
   results: readonly ExtractionResult[],
@@ -499,43 +603,78 @@ const applyApexAstEdges = async (
   readonly parseErrors: number;
   readonly edgesAdded: number;
 }> => {
-  const { extractApexAstEdges } = await import(
-    '@sf-intelligence/parsers/apex-ast'
-  );
   const knownClasses = new Set<string>();
   for (const r of results) {
     for (const n of r.nodes) {
       if (n.type === 'ApexClass' || n.type === 'ApexTrigger') knownClasses.add(n.apiName);
     }
   }
-  let filesParsed = 0;
-  let parseErrors = 0;
-  let edgesAdded = 0;
-  const out: ExtractionResult[] = [];
-  for (const r of results) {
+
+  type PendingApex = {
+    readonly resultIndex: number;
+    readonly result: ExtractionResult;
+    readonly apexNode: Node;
+    readonly source: string;
+    readonly kind: 'class' | 'trigger';
+  };
+
+  const out: (ExtractionResult | undefined)[] = new Array(results.length);
+  const pending: PendingApex[] = [];
+
+  // Phase 1 — identify Apex files + read sources (I/O). Non-Apex / unreadable
+  // rows pass through unchanged at their original index.
+  for (let i = 0; i < results.length; i += 1) {
+    const r = results[i];
+    if (r === undefined) continue;
     const apexNode = r.nodes.find(
       (n) => (n.type === 'ApexClass' || n.type === 'ApexTrigger') && /\.(cls|trigger)$/.test(n.sourcePath),
     );
     if (apexNode === undefined) {
-      out.push(r);
+      out[i] = r;
       continue;
     }
     let source: string;
     try {
       source = await readFile(apexNode.sourcePath, 'utf8');
     } catch {
-      out.push(r);
+      out[i] = r;
       continue;
     }
-    const extracted = extractApexAstEdges(source, apexNode.apiName, {
-      knownClasses,
+    pending.push({
+      resultIndex: i,
+      result: r,
+      apexNode,
+      source,
       // kind from the EXTENSION — content sniffing breaks on comment-first triggers
       kind: apexNode.sourcePath.endsWith('.trigger') ? 'trigger' : 'class',
     });
+  }
+
+  // Phase 2 — parallel ANTLR parse; results array is INPUT-ordered.
+  const extractedList = await parseApexAstInPool(
+    pending.map((p, index) => ({
+      index,
+      source: p.source,
+      apiName: p.apexNode.apiName,
+      kind: p.kind,
+    })),
+    knownClasses,
+  );
+
+  // Phase 3 — merge edges serially in pending (input) order.
+  let filesParsed = 0;
+  let parseErrors = 0;
+  let edgesAdded = 0;
+  for (let j = 0; j < pending.length; j += 1) {
+    const p = pending[j];
+    const extracted = extractedList[j];
+    if (p === undefined || extracted === undefined) continue;
+    const { result: r, apexNode, resultIndex } = p;
+
     if (extracted.parseError !== undefined) {
       parseErrors += 1;
       progress(`  apex-ast fallback (scanner-only): ${apexNode.apiName} — ${extracted.parseError}`);
-      out.push(r);
+      out[resultIndex] = r;
       continue;
     }
     filesParsed += 1;
@@ -660,9 +799,15 @@ const applyApexAstEdges = async (
           !parsedKeys.has(`${edge.fromId}|${edge.toId}|${edge.edgeType}`)) &&
           !isTypedReceiverFp(edge as { toId: string; edgeType: string; confidence: string }),
     );
-    out.push({ ...r, edges: deduped });
+    out[resultIndex] = { ...r, edges: deduped };
   }
-  return { results: out, filesParsed, parseErrors, edgesAdded };
+
+  return {
+    results: out.map((r, i) => r ?? results[i]!),
+    filesParsed,
+    parseErrors,
+    edgesAdded,
+  };
 };
 
 export const runRefresh = async (opts: RunRefreshOptions): Promise<RefreshResult> => {
@@ -1050,6 +1195,132 @@ const aggregateFailuresByType = (
   return byType;
 };
 
+/**
+ * PROFILE-COBATCH detection input: how many Profile components this refresh
+ * extracted and how many `grantedBy` edges each permission container family
+ * contributed. Computed in one pass over the walked extraction results.
+ */
+export interface ProfileGrantStats {
+  /** Profile nodes extracted this run. */
+  readonly profileCount: number;
+  /** `grantedBy` edges whose source is a `Profile:*` component. */
+  readonly profileGrantEdges: number;
+  /** `grantedBy` edges whose source is a `PermissionSet:*` component. */
+  readonly permissionSetGrantEdges: number;
+}
+
+/** One-pass roll-up of {@link ProfileGrantStats} from the walked extractions. */
+export const computeProfileGrantStats = (
+  results: readonly ExtractionResult[],
+): ProfileGrantStats => {
+  let profileCount = 0;
+  let profileGrantEdges = 0;
+  let permissionSetGrantEdges = 0;
+  for (const result of results) {
+    for (const node of result.nodes) {
+      if (node.type === 'Profile') profileCount += 1;
+    }
+    for (const edge of result.edges) {
+      if (edge.edgeType !== 'grantedBy') continue;
+      if (edge.fromId.startsWith('Profile:')) profileGrantEdges += 1;
+      else if (edge.fromId.startsWith('PermissionSet:')) permissionSetGrantEdges += 1;
+    }
+  }
+  return { profileCount, profileGrantEdges, permissionSetGrantEdges };
+};
+
+/**
+ * The stable, grep-able core of the bare-profile disclosure. Kept as its own
+ * exported constant so the CLI summary, the manifest, the coverage row, and
+ * `sfi.health_check` all carry the identical phrase.
+ */
+export const PROFILE_GRANT_DISCLOSURE =
+  'profiles retrieved without permission grants — co-listing likely lost';
+
+/**
+ * Ignore the prior-manifest comparison below this floor: an org whose whole
+ * permission graph is under 100 `grantedBy` edges is small enough that normal
+ * churn can move the count 10x without any retrieve defect.
+ */
+const PRIOR_GRANTED_BY_FLOOR = 100;
+
+/**
+ * PROFILE-COBATCH detection (trust-critical): decide whether this refresh
+ * produced BARE profiles — profile files that retrieved "successfully" but
+ * lost their grant sections because a split retrieve separated `Profile` from
+ * its co-listing partners (see {@link PROFILE_COBATCH_GROUP}). Returns the
+ * disclosure string when degraded, else `null`. Two independent signals:
+ *
+ *  1. CONTRAST — profiles were extracted but carry fewer `grantedBy` edges
+ *     than there are profiles (~zero; even one real profile normally carries
+ *     hundreds) while PermissionSets DO carry grants. PermissionSets are
+ *     immune to the co-listing loss (Metadata API v40+), so "permsets have
+ *     grants, profiles don't" is the co-listing fingerprint, not org shape.
+ *     Caveat: an org run strictly permset-first could in principle hold
+ *     genuinely bare profiles — the disclosure says "likely" and a clean
+ *     re-run clears it, so over-disclosing here is the honest failure mode.
+ *  2. COLLAPSE — the prior manifest recorded an order of magnitude more
+ *     `grantedBy` edges than this run produced (the shipped regression's
+ *     exact signature: 83,798 → 26,849 would have needed only a 3.1x drop to
+ *     fire had profiles zeroed; a full bare-out is >10x). Guarded by a floor
+ *     so tiny vaults' normal churn cannot trip it, and by `profileCount > 0`
+ *     so a scoped `--types` run without Profile never compares.
+ *
+ * Pure decision logic — callers wire the result into the coverage row, the
+ * manifest, and the CLI summary so no surface reports healthy.
+ */
+export const assessProfileGrantIntegrity = (
+  stats: ProfileGrantStats,
+  priorGrantedByEdges: number | null,
+  currentGrantedByEdges: number,
+): string | null => {
+  if (stats.profileCount === 0) return null;
+  if (stats.profileGrantEdges < stats.profileCount && stats.permissionSetGrantEdges > 0) {
+    return (
+      `${PROFILE_GRANT_DISCLOSURE}: ${stats.profileCount} profile(s) extracted with only ` +
+      `${stats.profileGrantEdges} grant edge(s) while permission sets carry ` +
+      `${stats.permissionSetGrantEdges} — Profile was likely retrieved apart from ` +
+      `CustomObject/ApexClass/… so its permission sections did not serialize. ` +
+      `Profile-sourced permission answers are untrustworthy until a clean \`sfi refresh\`.`
+    );
+  }
+  if (
+    priorGrantedByEdges !== null &&
+    priorGrantedByEdges >= PRIOR_GRANTED_BY_FLOOR &&
+    currentGrantedByEdges * 10 <= priorGrantedByEdges
+  ) {
+    return (
+      `${PROFILE_GRANT_DISCLOSURE}: permission grants collapsed from ` +
+      `${priorGrantedByEdges} grantedBy edge(s) in the previous refresh to ` +
+      `${currentGrantedByEdges} — an order-of-magnitude drop consistent with Profile ` +
+      `retrieved apart from its co-listed types. Profile-sourced permission answers ` +
+      `are untrustworthy until a clean \`sfi refresh\`.`
+    );
+  }
+  return null;
+};
+
+/**
+ * PROFILE-COBATCH disclosure on the coverage surface: when detection fired,
+ * the `Profile` row must NOT read as cleanly covered. Marks it `errored` with
+ * the disclosure as `errorReason` and strips `retrieveConfirmed`, so
+ * `summarizeCoverage`/`coverage_report` route it into `partial` (absence
+ * caveats fire, `health_check` degrades) exactly like a mid-retrieve failure —
+ * the existing honest-disclosure machinery, no new reader logic. Follows the
+ * `decoratePendingCoverage`/`decorateReportsCapCoverage` post-pass pattern.
+ */
+export const decorateProfileGrantCoverage = (
+  entries: readonly CoverageEntry[],
+  disclosure: string | null,
+): readonly CoverageEntry[] => {
+  if (disclosure === null) return entries;
+  return entries.map((entry) => {
+    if (entry.type !== 'Profile') return entry;
+    const { retrieveConfirmed: _dropped, ...rest } = entry;
+    return { ...rest, errored: true, errorReason: disclosure };
+  });
+};
+
 const buildCoverageEntries = (
   counts: RefreshResult['counts'],
   skippedDirectories: Readonly<Record<string, number>>,
@@ -1218,13 +1489,26 @@ const fullRebuild = async (
  *  - `--incremental-graph`: a `ChangeSet` diff against the current graph applied
  *    in one all-or-nothing transaction, re-importing ONLY changed rows.
  *
- * The incremental path falls back to a full rebuild (truncate + full import) on
- * a diff-read failure, an over-`INCREMENTAL_DELTA_CAP` delta (an empty or
- * largely-changed graph — a full batched rebuild is correct AND avoids a large
- * single-transaction working set), or any apply failure — including the
- * apply's own post-write count self-check. So the incremental path's result is
+ * The whole-graph incremental path falls back to a full rebuild (truncate +
+ * full import) on a diff-read failure, an over-`INCREMENTAL_DELTA_CAP` delta
+ * (an empty or largely-changed graph — a full batched rebuild is correct AND
+ * avoids a large single-transaction working set), or any apply failure —
+ * including the apply's own post-write count self-check. So its result is
  * always byte-identical to a cold rebuild; it only ever changes HOW the same
  * end state is reached.
+ *
+ * `--incremental-graph` COMBINED with `--types` (`requestedTypes !== null`) is
+ * a distinct, SCOPED sub-path (finding #23 / P3guard): `results` only holds
+ * the requested type(s), so a whole-graph diff would see every non-requested
+ * node as "current but not desired" and mass-delete it — or, past the cap,
+ * fall back to `fullRebuild`, which TRUNCATES the entire graph and reimports
+ * only the scoped `results`. Both are silent, severe data loss. This mirrors
+ * the DEFAULT (non-incremental-graph) scoped reconcile above: upsert `results`
+ * unconditionally, then compute a change set SCOPED to `requestedTypes`
+ * (`pruneNodeTypes`) and prune with `pruneStaleNodes`, NOT `applyChangeSet` —
+ * `applyChangeSet`'s post-apply self-check compares the GLOBAL row count to
+ * the scoped `desiredNodeCount`, which would always mismatch here and force a
+ * fallback into the very `fullRebuild` this guards against.
  */
 const importGraph = async (
   store: GraphStore,
@@ -1298,6 +1582,39 @@ const importGraph = async (
       return imported;
     }
     return importExtractionResults(store, results);
+  }
+
+  if (requestedTypes !== null) {
+    // Scoped incremental-graph refresh (finding #23 / P3guard) — see the
+    // function doc comment above. Upsert the requested type(s)' fresh rows
+    // first (its own per-batch transactions), then prune ONLY the stale rows
+    // of those SAME requested types: `computeChangeSet({ pruneNodeTypes })`
+    // returns delete lists already type-scoped, so a surviving,
+    // never-re-extracted type can never appear in them. `pruneStaleNodes`
+    // sidesteps `applyChangeSet`'s whole-graph self-check, so
+    // INCREMENTAL_DELTA_CAP is informational only on this branch: an
+    // over-cap scoped prune still runs in full (never a whole-graph rebuild
+    // that would defeat `--types`), because leaving orphans would corrupt
+    // the vault.
+    const imported = await importExtractionResults(store, results);
+    if (!imported.ok) return imported;
+    const csResult = await computeChangeSet(store, results, { pruneNodeTypes: requestedTypes });
+    if (!csResult.ok) return csResult;
+    const delta = changeSetSize(csResult.value);
+    if (delta === 0) return imported;
+    if (delta > INCREMENTAL_DELTA_CAP) {
+      progress(
+        `Incremental graph (scoped): delta ${delta} rows exceeds cap ${INCREMENTAL_DELTA_CAP}; ` +
+          `pruning in batches (scoped — a whole-graph rebuild would defeat --types).`,
+      );
+    }
+    const pruned = await pruneStaleNodes(store, csResult.value);
+    if (!pruned.ok) return pruned;
+    progress(
+      `Incremental graph (scoped): dropped ${pruned.value.nodesDeleted} stale node(s) and ` +
+        `${pruned.value.edgesDeleted} stale edge(s) for the requested type(s); other types untouched.`,
+    );
+    return imported;
   }
 
   const csResult = await computeChangeSet(store, results);
@@ -1478,19 +1795,46 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
   // The map is always written — even when empty — so consumers can
   // distinguish "this vault used the counter and saw no skips" from
   // "this vault predates the counter".
-  const coverage = decorateReportsCapCoverage(
-    decoratePendingCoverage(
-      buildCoverageEntries(
-        counts,
-        walked.skippedDirectories,
-        requestedTypes,
-        paths.source,
-        walked.failures,
-        confirmedTypes,
+  // Load the previous manifest ONCE, before saveManifest overwrites it: the
+  // profile-grant integrity check compares against its grantedBy count, and
+  // the change summary below diffs against it.
+  const previousManifestResult = await loadManifest(paths.root);
+  const previousManifest = previousManifestResult.ok ? previousManifestResult.value : null;
+
+  // PROFILE-COBATCH detect + disclose: a split retrieve that separated Profile
+  // from its co-listing partners lands BARE profiles (zero grant sections)
+  // with a clean exit code — without this check the vault would report
+  // healthy while the permission graph is silently gone (the shipped
+  // grantedBy 83,798→26,849 regression). Skipped mid-staged-build: a tier's
+  // partial extraction would compare partial counts and false-fire; the final
+  // tier is a full monolithic refresh and runs the check normally.
+  let profileGrantDisclosure: string | null = null;
+  let profileGrantStats: ProfileGrantStats | null = null;
+  if (!midBuild) {
+    profileGrantStats = computeProfileGrantStats(walked.results);
+    profileGrantDisclosure = assessProfileGrantIntegrity(
+      profileGrantStats,
+      previousManifest?.edges['grantedBy'] ?? null,
+      counts.edges['grantedBy'] ?? 0,
+    );
+  }
+
+  const coverage = decorateProfileGrantCoverage(
+    decorateReportsCapCoverage(
+      decoratePendingCoverage(
+        buildCoverageEntries(
+          counts,
+          walked.skippedDirectories,
+          requestedTypes,
+          paths.source,
+          walked.failures,
+          confirmedTypes,
+        ),
+        opts.stagedMarker,
       ),
-      opts.stagedMarker,
+      args.reportsCapStats,
     ),
-    args.reportsCapStats,
+    profileGrantDisclosure,
   );
 
   let phantomSummary: ExtendedVaultManifest['phantomSummary'];
@@ -1522,6 +1866,20 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
     ...(opts.stagedMarker !== undefined ? { staged: opts.stagedMarker } : {}),
     ...(args.apexAstStats !== undefined ? { apexAst: args.apexAstStats } : {}),
     ...(args.reportsCapStats !== undefined ? { reportsCap: args.reportsCapStats } : {}),
+    ...(profileGrantDisclosure !== null && profileGrantStats !== null
+      ? {
+          profileGrantIntegrity: {
+            degraded: true as const,
+            reason: profileGrantDisclosure,
+            detectedAt: new Date().toISOString(),
+            profileCount: profileGrantStats.profileCount,
+            profileGrantEdges: profileGrantStats.profileGrantEdges,
+            permissionSetGrantEdges: profileGrantStats.permissionSetGrantEdges,
+            grantedByEdges: counts.edges['grantedBy'] ?? 0,
+            priorGrantedByEdges: previousManifest?.edges['grantedBy'] ?? null,
+          },
+        }
+      : {}),
     ...(phantomSummary !== undefined ? { phantomSummary } : {}),
     ...(toolingApiSummary !== undefined && toolingApiSummary.enrichedCount > 0
       ? {
@@ -1535,11 +1893,7 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
   // deltas in the history/pulse timeline.
   let changeSummary: ChangeSummary | undefined;
   if (!midBuild) {
-    const previousManifest = await loadManifest(paths.root);
-    changeSummary = computeChangeSummary(
-      previousManifest.ok ? previousManifest.value : null,
-      manifest,
-    );
+    changeSummary = computeChangeSummary(previousManifest, manifest);
   }
 
   const saved = await saveManifest(paths.root, manifest);
@@ -1569,10 +1923,52 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
   // Continuous-learning store + pulse: skipped mid-staged-build (partial
   // counts would pollute the timeline); the final tier writes both normally.
   let pulse: RefreshPulse | undefined;
+  let auditTrailSummary: SetupAuditTrailPersistSummary | undefined;
   if (!midBuild && changeSummary !== undefined) {
     // Append this refresh's deltas to the history log so answers can reason
     // over "what was true before + what changed". Non-fatal on write failure.
     await appendRefreshHistory(paths.meta, manifest, changeSummary);
+
+    // #39: opt-in SetupAuditTrail persistence (SOQL-during-refresh → JSONL).
+    // Non-fatal; default refresh stays fully offline.
+    if (opts.withAuditTrail === true) {
+      try {
+        progress('Persisting SetupAuditTrail (--with-audit-trail)...');
+        const soql =
+          opts.auditTrailSoql ??
+          createSfSetupAuditTrailSoql(
+            targetOrg,
+            (args, options) =>
+              runSf(args, {
+                maxBuffer: options?.maxBuffer ?? SF_MAX_BUFFER,
+                timeout: options?.timeout ?? SF_QUERY_TIMEOUT_MS,
+              }),
+            {
+              maxBuffer: SF_MAX_BUFFER,
+              timeout: SF_QUERY_TIMEOUT_MS,
+            },
+          );
+        auditTrailSummary = await persistSetupAuditTrail({
+          metaDir: paths.meta,
+          soql,
+        });
+        progress(
+          `SetupAuditTrail: ${auditTrailSummary.outcome} — queried ${auditTrailSummary.queried}, appended ${auditTrailSummary.appended} (total ${auditTrailSummary.totalPersisted})` +
+            (auditTrailSummary.message !== undefined
+              ? ` — ${auditTrailSummary.message}`
+              : ''),
+        );
+      } catch (cause) {
+        auditTrailSummary = {
+          outcome: 'query-failed',
+          queried: 0,
+          appended: 0,
+          skippedDuplicate: 0,
+          totalPersisted: 0,
+          message: cause instanceof Error ? cause.message : String(cause),
+        };
+      }
+    }
 
     // P13-GITHIST-enable: when the vault keeps its own git history AND the
     // source tree actually changed, auto-commit the new state with a delta
@@ -1684,16 +2080,25 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
   }
 
   return {
-    status: walked.failures.length === 0 && args.retrieveFailures.length === 0 ? 'success' : 'partial',
+    // A profile-grant integrity disclosure forces `partial`: the vault built,
+    // but its permission graph is untrustworthy — never report clean success.
+    status:
+      walked.failures.length === 0 &&
+      args.retrieveFailures.length === 0 &&
+      profileGrantDisclosure === null
+        ? 'success'
+        : 'partial',
     counts,
     skippedDirectories: walked.skippedDirectories,
     errors: walked.failures,
     durationMs: Date.now() - started,
     ...(args.retrieveFailures.length > 0 ? { retrieveFailures: args.retrieveFailures } : {}),
+    ...(profileGrantDisclosure !== null ? { profileGrantDisclosure } : {}),
     ...(changeSummary !== undefined ? { changeSummary } : {}),
     ...(pulse !== undefined ? { pulse } : {}),
     ...(toolingApiSummary !== undefined ? { toolingApi: toolingApiSummary } : {}),
     ...(args.reportsCapStats !== undefined ? { reportsCap: args.reportsCapStats } : {}),
+    ...(auditTrailSummary !== undefined ? { auditTrail: auditTrailSummary } : {}),
   };
 };
 
@@ -1985,12 +2390,17 @@ const TOOLING_API_ENRICHED_TYPES = [
 const ENRICH_CANDIDATE_PAGE_SIZE = 500;
 
 /**
- * Drive the v1.7 R2 enrichment pass against the open graph. Returns a
- * structured `ToolingApiRefreshSummary` regardless of outcome so the
- * CLI can render the live-data axis as a separate block. Authentication
- * failures, malformed responses, and per-type query errors all surface
- * here without flipping the overall refresh status (the offline vault
- * is the source of truth; the enrichment is additive).
+ * Drive the v1.7 R2 (+ R4 dependency) enrichment pass against the open
+ * graph. Returns a structured `ToolingApiRefreshSummary` regardless of
+ * outcome so the CLI can render the live-data axis as a separate block.
+ * Authentication failures, malformed responses, and per-type query
+ * errors all surface here without flipping the overall refresh status
+ * (the offline vault is the source of truth; the enrichment is additive).
+ *
+ * After the R2 freshness pass (`enrichLastModified`), a sibling R4 pass
+ * (`enrichDependencies`) reuses the same candidates + client to stamp
+ * `properties.confirmedByApi` on matching edges and append new
+ * `dependsOnFromApi` edges from MetadataComponentDependency.
  */
 export const runToolingApiEnrichment = async (
   store: GraphStore,
@@ -2117,10 +2527,136 @@ export const runToolingApiEnrichment = async (
     }
   }
 
+  // R4 dependency enrichment — same candidates + client. Collect every
+  // edge incident to a candidate so (fromId, toId) confirmation can
+  // match both outgoing (Apex→Field) and incoming (Field←Apex) shapes.
+  const candidateIds = candidates.map((n) => n.id);
+  const edgeBatch = await listEdgesForNodes(store, candidateIds, {
+    direction: 'both',
+  });
+  const existingEdges: Edge[] = [];
+  if (edgeBatch.ok) {
+    const seenPk = new Set<string>();
+    for (const bucket of edgeBatch.value.values()) {
+      for (const edge of bucket) {
+        const pk = `${edge.fromId}\0${edge.toId}\0${edge.edgeType}\0${edge.source}`;
+        if (seenPk.has(pk)) continue;
+        seenPk.add(pk);
+        existingEdges.push(edge);
+      }
+    }
+  }
+
+  // Injected clients are test stubs — skip the 200ms per-node throttle so
+  // large candidate fixtures (pagination tests) stay within the suite budget.
+  // Production (live auth path) keeps the default citizen throttle.
+  const rateLimitPauseMs = opts.toolingApiClient !== undefined ? 0 : undefined;
+  const toolingApiRefreshedAt = new Date().toISOString();
+  let dependencyConfirmedCount = 0;
+  let dependencyNewEdgeCount = 0;
+  let dependencyErrorCount = 0;
+  try {
+    const depResult = await enrichDependencies(
+      {
+        client,
+        types: TOOLING_API_ENRICHED_TYPES,
+        toolingApiRefreshedAt,
+        ...(rateLimitPauseMs !== undefined ? { rateLimitPauseMs } : {}),
+      },
+      candidates,
+      existingEdges,
+    );
+    dependencyErrorCount = depResult.errors.length;
+
+    const confirmedIndexes = new Set(
+      depResult.confirmations.map((c) => c.edgeIndex),
+    );
+    const patchedEdges: Edge[] = [];
+    for (const idx of confirmedIndexes) {
+      const edge = existingEdges[idx];
+      if (edge === undefined) continue;
+      patchedEdges.push({
+        ...edge,
+        properties: { ...edge.properties, confirmedByApi: true },
+      });
+    }
+    dependencyConfirmedCount = patchedEdges.length;
+    dependencyNewEdgeCount = depResult.newEdges.length;
+
+    // New edges: cold-import INSERT OR IGNORE via the same overlay pattern
+    // as freshness node patches. Confirmations need INSERT OR REPLACE
+    // (cold import ignores existing edge PKs), so they ride applyChangeSet.
+    if (depResult.newEdges.length > 0) {
+      const edgeOverlay: ExtractionResult = {
+        nodes: [],
+        edges: depResult.newEdges,
+      };
+      const mergedNew = await importExtractionResults(store, [edgeOverlay]);
+      if (!mergedNew.ok) {
+        return {
+          enrichedCount: enrichmentResult.enrichedCount,
+          errorCount: enrichmentResult.errors.length + dependencyErrorCount,
+          outcome: 'dependency-merge-failed',
+          fatalMessage: mergedNew.error.message,
+          dependencyConfirmedCount,
+          dependencyNewEdgeCount: 0,
+        };
+      }
+    }
+
+    if (patchedEdges.length > 0) {
+      const countReader = await store.connection.runAndReadAll(
+        'SELECT (SELECT COUNT(*) FROM nodes) AS n, (SELECT COUNT(*) FROM edges) AS e',
+      );
+      const countRow = (
+        countReader.getRowObjectsJS() as readonly Record<string, unknown>[]
+      )[0];
+      const nodeCount = Number(countRow?.['n'] ?? 0);
+      const edgeCount = Number(countRow?.['e'] ?? 0);
+      const idReader = await store.connection.runAndReadAll('SELECT id FROM nodes');
+      const finalNodeIds = new Set(
+        (idReader.getRowObjectsJS() as readonly Record<string, unknown>[]).map(
+          (r) => String(r['id']),
+        ),
+      );
+      const applied = await applyChangeSet(store, {
+        upsertNodes: [],
+        deleteNodeIds: [],
+        upsertEdges: patchedEdges,
+        deleteEdgeKeys: [],
+        finalNodeIds,
+        desiredNodeCount: nodeCount,
+        desiredEdgeCount: edgeCount,
+      });
+      if (!applied.ok) {
+        return {
+          enrichedCount: enrichmentResult.enrichedCount,
+          errorCount: enrichmentResult.errors.length + dependencyErrorCount,
+          outcome: 'dependency-confirm-failed',
+          fatalMessage: applied.error.message,
+          dependencyConfirmedCount: 0,
+          dependencyNewEdgeCount,
+        };
+      }
+    }
+  } catch (cause) {
+    const msg = cause instanceof Error ? cause.message : String(cause);
+    return {
+      enrichedCount: enrichmentResult.enrichedCount,
+      errorCount: enrichmentResult.errors.length,
+      outcome: 'dependency-enrichment-threw',
+      fatalMessage: msg,
+    };
+  }
+
   return {
     enrichedCount: enrichmentResult.enrichedCount,
-    errorCount: enrichmentResult.errors.length,
+    errorCount: enrichmentResult.errors.length + dependencyErrorCount,
     outcome: 'ok',
+    ...(dependencyConfirmedCount > 0
+      ? { dependencyConfirmedCount }
+      : {}),
+    ...(dependencyNewEdgeCount > 0 ? { dependencyNewEdgeCount } : {}),
   };
 };
 
@@ -2213,12 +2749,31 @@ const METADATA_API_NAME: Partial<Record<ComponentType, string>> = {
   // file into the SessionSettings extractor; the container's other settings
   // files are counted as uncovered (honest, not silently swallowed).
   SessionSettings: 'Settings',
+  // Finding #38: FieldServiceSettings is, per the Metadata API's Settings
+  // architecture (`meta_settings.htm`), one more member of the SAME generic
+  // `Settings` container as SessionSettings above — the org describe does
+  // NOT expose "FieldServiceSettings" as its own top-level xmlName, only the
+  // umbrella `Settings` type, with the member name `FieldService` (the
+  // `[FeatureName].settings` file-naming convention). Without this alias,
+  // `selectManifestTypes` would drop it exactly like the SessionSettings B20
+  // class above. PRE-SHIP VERIFY: not confirmed against a live FSL org in
+  // this change (recommended, not required — see the ComponentType doc
+  // comment in @sf-intelligence/contracts).
+  FieldServiceSettings: 'Settings',
   // CR-CAP-18: PlatformEventChannel / PlatformEventChannelMember are exposed
   // by the org describe under their own singular xmlNames (added API v45.0 /
   // v47.0), so they need NO alias — `toApiName` falls through to the type name.
   // PRE-SHIP VERIFY: confirm against a real-org `sf org list metadata-types`
   // that both are PRESENT singular (the B20 class above); add an alias here if
   // a describe shows otherwise. Not verifiable in this read-only pass.
+  //
+  // Finding #38: Skill and TimeSheetTemplate are documented as independent
+  // top-level Metadata API types (own directory + suffix, not grouped under
+  // the `Settings` umbrella like FieldServiceSettings above), so — per the
+  // same reasoning as PlatformEventChannel — they need NO alias here.
+  // PRE-SHIP VERIFY: not confirmed against a live FSL org's `sf org list
+  // metadata-types` describe in this change; add an alias here if a real
+  // describe shows otherwise.
 };
 
 /** Internal `ComponentType` → the Metadata API `xmlName` used in manifests / describe. */
@@ -2300,9 +2855,33 @@ export const runSf = (
  * to answer for standard objects (they correctly refuse to compose a save
  * sequence around an object whose definition the vault doesn't hold). Naming
  * the commonly-automated standard objects pulls their `object-meta.xml` so
- * they become real, fully-modeled nodes. These objects exist in every org, so
- * naming them is safe; a standard object the org doesn't expose is skipped by
- * the retrieve rather than failing it.
+ * they become real, fully-modeled nodes. These are NOT all universal — `Order`
+ * needs Orders enabled, the Field Service tier below needs Field Service — and
+ * naming an object the org lacks makes the CustomObject retrieve fragile, so
+ * `manifestMembersForType` intersects this list with the org's live
+ * `describeGlobal` set (see the guard there) and only names objects that
+ * actually exist.
+ *
+ * Finding #38 — Field Service tier, corrected recipe. The report's suggested
+ * action treated `WorkOrder`/`ServiceAppointment`/`ServiceResource`/
+ * `ServiceTerritory`/etc. like CPQ's managed-package namespace-recognition
+ * pattern; that premise does not survive verification. Per the Object
+ * Reference (not the Metadata API Developer Guide), these eleven FSL objects
+ * are STANDARD SObjects holding record DATA — never retrievable via
+ * `sf project retrieve` regardless of namespace. This is exactly the
+ * `STANDARD_OBJECTS_TO_MODEL` mechanism already documented above: naming them
+ * here costs zero new extractor code — the existing generic
+ * CustomObject/CustomField/ValidationRule/Layout/RecordType/BusinessProcess
+ * extractors pick up any org-added FSL customization (custom fields,
+ * validation rules, layouts, record types) exactly as they do for
+ * Account/Contact today. An org without Field Service enabled has these
+ * pruned from the manifest by `manifestMembersForType`'s describeGlobal
+ * intersection before the retrieve runs, so they never risk destabilising it.
+ * Record-level DATA (territory hierarchy, resource-to-territory assignment,
+ * scheduling-policy/work-rule records) stays out of scope — see the
+ * `FieldServiceSettings`/`Skill`/`TimeSheetTemplate` ComponentType doc
+ * comments in @sf-intelligence/contracts for the genuine FSL Metadata API
+ * types this tier also adds.
  */
 const STANDARD_OBJECTS_TO_MODEL: readonly string[] = [
   'Account',
@@ -2319,6 +2898,18 @@ const STANDARD_OBJECTS_TO_MODEL: readonly string[] = [
   'Product2',
   'Pricebook2',
   'User',
+  // Finding #38 — Field Service standard-object tier.
+  'WorkOrder',
+  'WorkOrderLineItem',
+  'ServiceAppointment',
+  'ServiceResource',
+  'ServiceResourceSkill',
+  'ServiceTerritory',
+  'ServiceTerritoryMember',
+  'ServiceTerritoryWorkType',
+  'OperatingHours',
+  'TimeSlot',
+  'WorkType',
 ];
 
 /**
@@ -2326,10 +2917,54 @@ const STANDARD_OBJECTS_TO_MODEL: readonly string[] = [
  * additionally names the standard objects (which `*` excludes) so automation
  * on Account/Contact/Case is modeled with real nodes.
  *
+ * KNOWN GAP (R6-08): `StandardValueSet` does NOT support the `*` wildcard at
+ * all — the Metadata API requires every standard value set to be named
+ * individually (confirmed against the Metadata API Developer Guide's
+ * "StandardValueSet Names and Standard Picklist Fields" reference and
+ * multiple `forcedotcom/cli` issues reporting the type silently returns
+ * nothing under `*`). Salesforce's published name list runs into the
+ * hundreds and varies by which Industries clouds (Health/Financial
+ * Services/Manufacturing/etc.) are installed — this file intentionally does
+ * NOT hardcode it: an unverifiable, possibly-stale or org-inapplicable list
+ * risks a WORSE failure mode than "not retrieved" (a malformed manifest can
+ * abort the whole retrieve, not just skip the one type — the
+ * `STANDARD_OBJECTS_TO_MODEL` "skipped rather than failing" guarantee above
+ * is CustomObject-specific, not verified for StandardValueSet). Until this
+ * is enumerated (and re-verified per API version), `StandardValueSet` is
+ * extracted and dispatch-ready but effectively never populated by a normal
+ * `sfi refresh` — a real vault will request the type (it is a
+ * `SUPPORTED_TYPES` member) yet come back with zero files, which
+ * `sfi.coverage_report` should surface as retrieved-but-empty rather than
+ * an outright gap; not independently verified end-to-end against a live org
+ * in this change.
+ *
+ * NAMED-BUT-ABSENT GUARD (26c103e hygiene): `STANDARD_OBJECTS_TO_MODEL` names
+ * standard objects that are NOT universal — `Order` needs Orders enabled, and
+ * the eleven Field Service objects need Field Service enabled. Naming an object
+ * the org lacks makes `sf project retrieve` emit an `Entity of type
+ * 'CustomObject' named 'X' cannot be found` warning for each. In this org's
+ * CLI that is non-fatal (the retrieve still exits 0 and other objects land), so
+ * it is NOT the cause of the v64 grant collapse — but it is noise, and relying
+ * on the CLI staying tolerant of invalid named members is fragile. When the
+ * caller supplies `orgObjects` (the org's live `describeGlobal` sObject set)
+ * the named members are intersected with it, so the manifest only ever names
+ * objects that actually exist; `*` (all custom objects) is always kept. With no
+ * describe (`orgObjects` undefined/null) the full list passes through unchanged
+ * — same null-safe legacy contract as `selectManifestTypes`.
+ *
  * @example manifestMembersForType('CustomObject') // ['*', 'Account', 'Contact', ...]
  */
-export const manifestMembersForType = (type: ComponentType): readonly string[] =>
-  type === 'CustomObject' ? ['*', ...STANDARD_OBJECTS_TO_MODEL] : ['*'];
+export const manifestMembersForType = (
+  type: ComponentType,
+  orgObjects?: ReadonlySet<string> | null,
+): readonly string[] => {
+  if (type !== 'CustomObject') return ['*'];
+  const named =
+    orgObjects == null
+      ? STANDARD_OBJECTS_TO_MODEL
+      : STANDARD_OBJECTS_TO_MODEL.filter((name) => orgObjects.has(name));
+  return ['*', ...named];
+};
 
 /**
  * FLD-05: after source extraction, enrich the five core standard objects with
@@ -2456,14 +3091,25 @@ export const objectsToExpandManifest = (
   return [...missing].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 };
 
-/** Construct a package.xml in memory from the given (already API-named) types. */
-const buildPackageXml = (types: readonly ComponentType[]): string =>
+/**
+ * Construct a package.xml in memory from the given (already API-named)
+ * types. Exported (R6-30) so the `<version>` tag this pipeline stamps into
+ * every retrieve manifest — and therefore the metadata-API floor — is directly
+ * testable without shelling out. `orgObjects` (optional) is the org's live
+ * `describeGlobal` sObject set: when supplied it prunes named CustomObject
+ * members the org lacks (see `manifestMembersForType`); omitted/null keeps the
+ * full named list (legacy behaviour).
+ */
+export const buildPackageXml = (
+  types: readonly ComponentType[],
+  orgObjects?: ReadonlySet<string> | null,
+): string =>
   [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<Package xmlns="http://soap.sforce.com/2006/04/metadata">',
     ...types.flatMap((type) => [
       '  <types>',
-      ...manifestMembersForType(type).map((m) => `    <members>${m}</members>`),
+      ...manifestMembersForType(type, orgObjects).map((m) => `    <members>${m}</members>`),
       `    <name>${toApiName(type)}</name>`,
       '  </types>',
     ]),
@@ -2495,6 +3141,34 @@ const getOrgSupportedTypes = async (targetOrg: string): Promise<ReadonlySet<stri
       for (const child of obj.childXmlNames ?? []) {
         if (typeof child === 'string') names.add(child);
       }
+    }
+    return names.size > 0 ? names : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Best-effort probe of the sObjects the target org actually has, via
+ * `sf sobject list --sobject all --json` (a `describeGlobal`). Returns the set
+ * of sObject API names, or `null` when the describe is unavailable — never
+ * throws. Used to intersect the named `STANDARD_OBJECTS_TO_MODEL` members so
+ * the CustomObject manifest never names an object the org lacks (26c103e added
+ * eleven Field Service standard objects unconditionally, and `Order` predates
+ * it; an org without those features enabled has them absent, and naming an
+ * absent member makes the retrieve fragile). Mirrors `getOrgSupportedTypes`'
+ * null-safe contract: a null result falls back to the full named list.
+ */
+const getOrgObjectNames = async (targetOrg: string): Promise<ReadonlySet<string> | null> => {
+  try {
+    const { stdout } = await runSf(
+      ['sobject', 'list', '--sobject', 'all', '--target-org', targetOrg, '--json'],
+      { maxBuffer: SF_MAX_BUFFER, timeout: SF_QUERY_TIMEOUT_MS },
+    );
+    const parsed = JSON.parse(stdout) as { result?: readonly string[] };
+    const names = new Set<string>();
+    for (const name of parsed.result ?? []) {
+      if (typeof name === 'string') names.add(name);
     }
     return names.size > 0 ? names : null;
   } catch {
@@ -2592,12 +3266,108 @@ export const classifyRetrieveError = (message: string): 'global' | 'per-type' =>
   return GLOBAL_SIGNALS.some((re) => re.test(message)) ? 'global' : 'per-type';
 };
 
-/** Split a type batch in half for the binary-search isolation of a bad type. */
+/**
+ * PROFILE-COBATCH (trust-critical): the metadata types that must travel in the
+ * SAME `sf project retrieve` batch as `Profile`, as one indivisible unit the
+ * binary split can never divide.
+ *
+ * WHY: the Metadata API serializes Profile grant sections ONLY for components
+ * co-named in the same retrieve — `objectPermissions`/`fieldPermissions` need
+ * `CustomObject`/`CustomField`, `classAccesses` needs `ApexClass`,
+ * `applicationVisibilities`/`tabVisibilities`/`customPermissions`/
+ * `recordTypeVisibilities` need `CustomApplication`/`CustomTab`/
+ * `CustomPermission`/`RecordType`, and `layoutAssignments` needs `Layout`. A
+ * split that separates `Profile` from those partners returns profiles that are
+ * syntactically valid but BARE (zero grants) — the retrieve reports success,
+ * `retrieveConfirmed` reads healthy, and the vault silently loses the
+ * permission graph (shipped regression: `grantedBy` 83,798 → 26,849, caught
+ * only by a real-org probe; see the SF_API_VERSION comment above).
+ *
+ * The CustomObject child types (`CustomField`/`ListView`/`ValidationRule`/
+ * `RecordType`/`WebLink`/`FieldSet`/`CompactLayout`/`Index`/`BusinessProcess`)
+ * are in the group for the same co-listing reason in the other direction: each
+ * batch writes `{Object}.object-meta.xml`, so an object-child batch separated
+ * from `CustomObject` lands object files carrying ONLY that child section and
+ * the sync clobbers the full object source.
+ *
+ * `PermissionSet` is deliberately NOT in the group: unlike Profile, a
+ * retrieved permission set includes all its content regardless of what else is
+ * in the manifest (Metadata API v40.0+) — confirmed empirically by the
+ * regression itself, where PermissionSets kept their grants in the very split
+ * that bared the Profiles. Same for `MutingPermissionSet`/`PermissionSetGroup`.
+ */
+export const PROFILE_COBATCH_GROUP: ReadonlySet<ComponentType> = new Set<ComponentType>([
+  'Profile',
+  // Grant partners — the types Profile sections only serialize alongside.
+  'ApexClass',
+  'CustomApplication',
+  'CustomField',
+  'CustomObject',
+  'CustomPermission',
+  'CustomTab',
+  'Layout',
+  'RecordType',
+  // CustomObject child types — separated from CustomObject they land
+  // child-only object files that clobber the full object source.
+  'BusinessProcess',
+  'CompactLayout',
+  'FieldSet',
+  'Index',
+  'ListView',
+  'ValidationRule',
+  'WebLink',
+]);
+
+/** The default no-group value for the splitters below (no atomic co-batching). */
+const NO_ATOMIC_GROUP: ReadonlySet<ComponentType> = new Set();
+
+/**
+ * Partition a type batch into the indivisible units the binary split operates
+ * on. Every member of `atomicGroup` present in `types` collapses into ONE unit
+ * (placed where its first member appears, preserving overall order); every
+ * other type is its own single-element unit. With an empty group — or when the
+ * batch holds at most one group member, where there is nothing to co-batch —
+ * every type is its own unit (the legacy per-type split).
+ *
+ * @example
+ *   toAtomicUnits(['ApexClass', 'Flow', 'Profile'], PROFILE_COBATCH_GROUP)
+ *   // => [['ApexClass', 'Profile'], ['Flow']]
+ */
+export const toAtomicUnits = (
+  types: readonly ComponentType[],
+  atomicGroup: ReadonlySet<ComponentType>,
+): readonly (readonly ComponentType[])[] => {
+  const members = types.filter((type) => atomicGroup.has(type));
+  if (members.length <= 1) return types.map((type) => [type]);
+  const units: (readonly ComponentType[])[] = [];
+  let groupPlaced = false;
+  for (const type of types) {
+    if (atomicGroup.has(type)) {
+      if (!groupPlaced) {
+        units.push(members);
+        groupPlaced = true;
+      }
+    } else {
+      units.push([type]);
+    }
+  }
+  return units;
+};
+
+/**
+ * Split a type batch in half for the binary-search isolation of a bad type.
+ * The split operates on ATOMIC UNITS, not raw types: members of `atomicGroup`
+ * (default: none) always land together in the same half, so the profile
+ * co-batch invariant survives every split. With no group this is the legacy
+ * midpoint split.
+ */
 export const splitTypeBatch = (
   types: readonly ComponentType[],
+  atomicGroup: ReadonlySet<ComponentType> = NO_ATOMIC_GROUP,
 ): readonly [readonly ComponentType[], readonly ComponentType[]] => {
-  const mid = Math.floor(types.length / 2);
-  return [types.slice(0, mid), types.slice(mid)];
+  const units = toAtomicUnits(types, atomicGroup);
+  const mid = Math.floor(units.length / 2);
+  return [units.slice(0, mid).flat(), units.slice(mid).flat()];
 };
 
 /**
@@ -2659,10 +3429,21 @@ export interface RetrieveFallbackOutcome {
  * (auth / no DX project / no target-org) is not split, since splitting cannot fix
  * it — so a dead-auth org costs one call, not `2N-1`. The sf shelling is injected
  * as `retrieveBatch`, keeping this decision logic pure and unit-testable.
+ *
+ * PROFILE-COBATCH invariant: the split operates on atomic units, and every
+ * `atomicGroup` member (default {@link PROFILE_COBATCH_GROUP}) travels as ONE
+ * unit through every split — `Profile` can never be separated from the
+ * co-listing partners its grant sections need (see the group's doc comment).
+ * When the group itself is the failing unit it is retried together at each
+ * smaller enclosing batch and, if it still cannot land, dropped WHOLE as a
+ * disclosed unit (every member recorded in `failures`, which forces
+ * `status: 'partial'` and un-confirms their coverage rows) — never landed
+ * bare. Pass an empty set to opt out (legacy per-type split).
  */
 export const retrieveWithFallback = async (
   allTypes: readonly ComponentType[],
   retrieveBatch: RetrieveBatchFn,
+  atomicGroup: ReadonlySet<ComponentType> = PROFILE_COBATCH_GROUP,
 ): Promise<RetrieveFallbackOutcome> => {
   const succeeded: ComponentType[] = [];
   const failures: RetrieveTypeFailure[] = [];
@@ -2676,11 +3457,18 @@ export const retrieveWithFallback = async (
       deletedCount += result.value.deletedCount;
       return;
     }
-    if (types.length === 1 || classifyRetrieveError(result.error) === 'global') {
+    // Terminal when the batch cannot be divided further — a single type OR a
+    // single atomic unit (the whole profile co-batch group, which must drop
+    // together, disclosed, rather than be split into bare pieces) — and on a
+    // global cause splitting cannot fix.
+    if (
+      toAtomicUnits(types, atomicGroup).length <= 1 ||
+      classifyRetrieveError(result.error) === 'global'
+    ) {
       for (const type of types) failures.push({ type, error: result.error });
       return;
     }
-    const [left, right] = splitTypeBatch(types);
+    const [left, right] = splitTypeBatch(types, atomicGroup);
     await attempt(left);
     await attempt(right);
   };
@@ -2698,6 +3486,7 @@ const retrieveTypeBatch = async (
   targetOrg: string,
   sourceDir: string,
   types: readonly ComponentType[],
+  orgObjects?: ReadonlySet<string> | null,
 ): Promise<Result<{ readonly deletedCount: number }, string>> => {
   // Disjoint splits never share a first type, so this names temp paths uniquely
   // even when several batches start within the same millisecond.
@@ -2722,7 +3511,7 @@ const retrieveTypeBatch = async (
     `{"packageDirectories":[{"path":"force-app","default":true}],"sourceApiVersion":"${SF_API_VERSION}"}\n`,
     'utf8',
   );
-  await writeFile(manifestPath, buildPackageXml(types), 'utf8');
+  await writeFile(manifestPath, buildPackageXml(types, orgObjects), 'utf8');
   try {
     await runSf(
       ['project', 'retrieve', 'start', '--manifest', manifestPath, '--target-org', targetOrg],
@@ -2751,6 +3540,10 @@ const runSfRetrieve = async (
       `Warning: could not probe ${targetOrg} metadata types; retrieving the full supported set (may fail on types the org lacks).\n`,
     );
   }
+  // describeGlobal sObject set, used to prune named CustomObject members the org
+  // lacks (`Order` / Field Service objects). Null-safe: a failed probe falls
+  // back to naming the full list (legacy behaviour), same as `orgTypes` above.
+  const orgObjects = await getOrgObjectNames(targetOrg);
   const { included: manifestTypes, dropped } = selectManifestTypes(requestedTypes, orgTypes);
   if (dropped.length > 0) {
     // Show the Metadata API xmlName each internal type was checked against, so
@@ -2768,7 +3561,7 @@ const runSfRetrieve = async (
   }
 
   const outcome = await retrieveWithFallback(manifestTypes, (types) =>
-    retrieveTypeBatch(targetOrg, sourceDir, types),
+    retrieveTypeBatch(targetOrg, sourceDir, types, orgObjects),
   );
   // Total failure (every type failed — typically a shared auth/network cause)
   // is still fatal: a vault with zero retrieved types is worse than none.
@@ -3353,11 +4146,21 @@ export const formatRefreshSummary = (result: RefreshResult): string => {
       ...result.retrieveFailures.map((f) => `  ${f.type}: ${salientErrorLine(f.error)}`),
     );
   }
+  if (result.profileGrantDisclosure !== undefined) {
+    lines.push('', `WARNING — ${result.profileGrantDisclosure}`);
+  }
   if (result.fatalError !== undefined) {
     lines.push('', `Fatal: ${result.fatalError}`);
   }
   if (result.toolingApi !== undefined) {
     lines.push('', formatToolingApiSummary(result.toolingApi));
+  }
+  if (result.auditTrail !== undefined) {
+    lines.push(
+      '',
+      `SetupAuditTrail: ${result.auditTrail.outcome} — queried ${result.auditTrail.queried}, appended ${result.auditTrail.appended} (persisted total ${result.auditTrail.totalPersisted})` +
+        (result.auditTrail.message !== undefined ? ` — ${result.auditTrail.message}` : ''),
+    );
   }
   if (result.reportsCap !== undefined) {
     lines.push('', ...formatReportsCapSummary(result.reportsCap));
@@ -3453,7 +4256,15 @@ const formatToolingApiSummary = (summary: ToolingApiRefreshSummary): string => {
   if (summary.fatalMessage !== undefined) {
     return `Tooling API: ${summary.outcome} — ${summary.fatalMessage}`;
   }
-  return `Tooling API: enriched ${summary.enrichedCount} components, ${summary.errorCount} errors`;
+  const depBits: string[] = [];
+  if (summary.dependencyConfirmedCount !== undefined) {
+    depBits.push(`${summary.dependencyConfirmedCount} deps confirmed`);
+  }
+  if (summary.dependencyNewEdgeCount !== undefined) {
+    depBits.push(`${summary.dependencyNewEdgeCount} API-only edges`);
+  }
+  const depSuffix = depBits.length > 0 ? `; ${depBits.join(', ')}` : '';
+  return `Tooling API: enriched ${summary.enrichedCount} components, ${summary.errorCount} errors${depSuffix}`;
 };
 
 /**
@@ -3468,6 +4279,8 @@ interface RefreshCliFlags {
   readonly withToolingApi?: boolean;
   /** P13-FACTS-capture: opt-in record-data capture into the facts table. */
   readonly withDataShape?: boolean;
+  /** #39: opt-in SetupAuditTrail persistence to meta/setup-audit-trail.jsonl. */
+  readonly withAuditTrail?: boolean;
   readonly incremental?: boolean;
   /** P7-incremental-graph-update: transactional change-set graph apply. */
   readonly incrementalGraph?: boolean;
@@ -3489,9 +4302,10 @@ interface RefreshCliFlags {
  * Register the `sfi refresh` subcommand on `program`. Exits 0 on success,
  * 1 on partial or failed. Thin shim around `runRefresh`.
  *
- * The optional `--with-tooling-api` flag (PLAN-v1.7 R2) triggers the
- * live freshness enrichment pass after the offline pipeline completes;
- * default refresh is fully offline.
+ * The optional `--with-tooling-api` flag (PLAN-v1.7 R2/R4) triggers the
+ * live freshness enrichment pass and the MetadataComponentDependency
+ * confirmation pass after the offline pipeline completes; default refresh
+ * is fully offline.
  *
  * @example
  *   registerRefreshCommand(new Command());
@@ -3750,7 +4564,11 @@ export const registerRefreshCommand = (program: Command): void => {
     )
     .option(
       '--with-tooling-api',
-      'After the offline refresh completes, run the v1.7 R2 Tooling API enrichment pass to hydrate `lastModifiedDate` / `lastModifiedBy` / `apiVersion` on enrichable nodes. Requires `sf` CLI installed and the target org alias authenticated.',
+      'After the offline refresh completes, run the v1.7 Tooling API enrichment pass to hydrate `lastModifiedDate` / `lastModifiedBy` / `apiVersion` on enrichable nodes, and now also confirms declared dependencies (stamps `confirmedByApi` on matching edges and appends `dependsOnFromApi` edges from MetadataComponentDependency). Requires `sf` CLI installed and the target org alias authenticated.',
+    )
+    .option(
+      '--with-audit-trail',
+      'During refresh, query SetupAuditTrail and append new rows (deduped by Id) to meta/setup-audit-trail.jsonl so sfi.component_change_attribution can answer who-changed-this offline. Opt-in — touches the org and adds latency. First run pulls LAST_N_DAYS:180; later runs are incremental. Additive-only: persisted history survives after Salesforce drops rows from the live 180-day window.',
     )
     .option(
       '--incremental',
@@ -3850,6 +4668,7 @@ export const registerRefreshCommand = (program: Command): void => {
         ...(flags.types !== undefined ? { types: flags.types } : {}),
         ...(flags.withToolingApi === true ? { withToolingApi: true } : {}),
         ...(flags.withDataShape === true ? { withDataShape: true } : {}),
+        ...(flags.withAuditTrail === true ? { withAuditTrail: true } : {}),
         ...(flags.incremental === true ? { incremental: true } : {}),
         ...(flags.incrementalGraph === true ? { incrementalGraph: true } : {}),
         ...(flags.withReports === true ? { withReports: true } : flags.reports === false ? { withReports: false } : {}),

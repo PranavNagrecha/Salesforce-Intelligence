@@ -45,8 +45,12 @@ const NON_DEPLOYABLE_TYPES: ReadonlySet<string> = new Set([
 
 const toMetadataName = (type: string): string => METADATA_API_NAME[type] ?? type;
 
-/** Escape the five XML special characters so member/name text stays well-formed. */
-const escapeXml = (s: string): string =>
+/**
+ * Escape the five XML special characters so member/name text stays well-formed.
+ * Exported so the `proposal-artifact` sibling (destructiveChanges.xml emitter)
+ * escapes member text with the SAME rules as the package.xml generator.
+ */
+export const escapeXml = (s: string): string =>
   s
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -94,14 +98,35 @@ const DISCLOSURE =
 const sortStrings = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
- * Pure builder: group canonical `Type:Member` ids into a package.xml. Members
- * are de-duplicated and sorted; types are sorted; XML special characters in
- * member / name text are escaped so the output parses.
+ * The grouped, rendered `<types>` body shared by the package.xml generator and
+ * its destructiveChanges.xml sibling in `proposal-artifact.ts`. Both need the
+ * SAME canonical `Type:Member` grouping, de-dupe/sort, NON_DEPLOYABLE_TYPES
+ * skip, metadata-name mapping, and XML escaping — only the surrounding
+ * `<Package>` wrapper (version vs no-version, package vs destructiveChanges)
+ * differs. Extracting this keeps the two emitters byte-identical on the part
+ * that matters (which members land under which `<name>`).
  */
-export const buildExportManifest = (
+export interface ManifestGrouping {
+  /** Fully rendered `  <types>…</types>` lines, ready to splice into a Package. */
+  readonly typesXml: readonly string[];
+  /** Per-type rollup (type, deployable metadata name, member count). */
+  readonly byType: readonly ExportManifestTypeBucket[];
+  /** Total members across all types (post de-dupe). */
+  readonly memberCount: number;
+  /** Ids that were malformed or synthetic/non-deployable, with the reason. */
+  readonly skipped: readonly ExportManifestSkipped[];
+}
+
+/**
+ * Pure grouping+render helper shared by {@link buildExportManifest} and the
+ * proposal-artifact destructiveChanges emitter. Groups canonical `Type:Member`
+ * ids by type, de-dupes + sorts members and types, skips synthetic/malformed
+ * ids, maps each type to its deployable metadata `<name>`, and escapes XML
+ * special characters. Emits only the `<types>` block — the caller wraps it.
+ */
+export const groupComponentIds = (
   componentIds: readonly string[],
-  apiVersion: string,
-): ExportManifestOutput => {
+): ManifestGrouping => {
   const byType = new Map<string, Set<string>>();
   const skipped: ExportManifestSkipped[] = [];
 
@@ -136,15 +161,6 @@ export const buildExportManifest = (
     ];
   });
 
-  const packageXml = [
-    '<?xml version="1.0" encoding="UTF-8"?>',
-    '<Package xmlns="http://soap.sforce.com/2006/04/metadata">',
-    ...typesXml,
-    `  <version>${escapeXml(apiVersion)}</version>`,
-    '</Package>',
-    '',
-  ].join('\n');
-
   const byTypeSummary: ExportManifestTypeBucket[] = sortedTypes.map((type) => ({
     type,
     metadataName: toMetadataName(type),
@@ -152,11 +168,38 @@ export const buildExportManifest = (
   }));
   const memberCount = byTypeSummary.reduce((n, b) => n + b.members, 0);
 
+  return { typesXml, byType: byTypeSummary, memberCount, skipped };
+};
+
+/**
+ * Pure builder: group canonical `Type:Member` ids into a package.xml. Members
+ * are de-duplicated and sorted; types are sorted; XML special characters in
+ * member / name text are escaped so the output parses.
+ */
+export const buildExportManifest = (
+  componentIds: readonly string[],
+  apiVersion: string,
+): ExportManifestOutput => {
+  const grouping = groupComponentIds(componentIds);
+
+  const packageXml = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<Package xmlns="http://soap.sforce.com/2006/04/metadata">',
+    ...grouping.typesXml,
+    `  <version>${escapeXml(apiVersion)}</version>`,
+    '</Package>',
+    '',
+  ].join('\n');
+
   return {
     packageXml,
     version: apiVersion,
-    summary: { typeCount: sortedTypes.length, memberCount, byType: byTypeSummary },
-    skipped,
+    summary: {
+      typeCount: grouping.byType.length,
+      memberCount: grouping.memberCount,
+      byType: grouping.byType,
+    },
+    skipped: grouping.skipped,
     disclosure: DISCLOSURE,
   };
 };

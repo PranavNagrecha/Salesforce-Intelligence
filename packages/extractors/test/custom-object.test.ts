@@ -117,7 +117,7 @@ describe('extractCustomObject', () => {
   describe('sharing model enum', () => {
     it('accepts ReadSelect / ReadWriteTransfer / ControlledByCampaign OWD values', async () => {
       // All valid Salesforce SharingModel enum values the extractor wrongly
-      // rejected: ReadSelect (the STANDARD Pricebook2 object — failed mass.gov
+      // rejected: ReadSelect (the STANDARD Pricebook2 object — failed a real-org
       // extraction with 'invalid sharingModel: ReadSelect'), ReadWriteTransfer
       // (Lead/Case/Opportunity transfer OWD), ControlledByCampaign
       // (CampaignMember). The consumer why_cant_user_see_record already knows

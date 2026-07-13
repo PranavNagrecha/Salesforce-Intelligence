@@ -611,18 +611,33 @@ describe('findCodeUsagesInputSchema', () => {
 });
 
 // =============================================================================
-// CR-22 B4 — output cursor. find_code_usages emitted ONLY { usages, boundaries }
-// pre-CR-22, so paging fields are spread CONDITIONALLY (B3 shape, not B1's
-// always-on totalCount/hasMore). A whole-fits no-cursor call stays
-// byte-identical; a truncated page resumes the full set with no gaps / dupes.
+// CR-22 B4 — output cursor. STEP-2 shape shim: find_code_usages now emits the
+// ALWAYS-ON pagination envelope (totalCount/offset/limit/hasMore/nextOffset)
+// like its folded-in twin find_apex_usages, so the hidden alias is a pure
+// pass-through. The nextCursor/pageInfo pair stays conditional (truncation
+// only); a truncated page resumes the full set with no gaps / dupes.
 // =============================================================================
 describe('findCodeUsagesHandler — output cursor (CR-22)', () => {
-  it('whole-fits no-cursor call emits exactly { usages, boundaries }', async () => {
+  it('whole-fits no-cursor call emits the always-on pagination envelope (no cursor)', async () => {
     const r = await findCodeUsagesHandler(ctx, { targetId: FIELD_ID });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const d = r.value.data as unknown as Record<string, unknown>;
-    expect(Object.keys(d).sort()).toEqual(['boundaries', 'usages']);
+    expect(Object.keys(d).sort()).toEqual([
+      'boundaries',
+      'hasMore',
+      'limit',
+      'nextOffset',
+      'offset',
+      'totalCount',
+      'usages',
+    ]);
+    // The full set fits: totalCount == page length, no more, no next cursor.
+    expect(d.totalCount).toBe((d.usages as unknown[]).length);
+    expect(d.hasMore).toBe(false);
+    expect(d.nextOffset).toBeNull();
+    expect('nextCursor' in d).toBe(false);
+    expect('pageInfo' in d).toBe(false);
   });
 
   it('a truncated page emits a cursor that resumes with no gaps or dupes', async () => {

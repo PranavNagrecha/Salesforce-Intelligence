@@ -167,9 +167,34 @@ export interface SearchNodesOptions {
 
 type Row = Readonly<Record<string, unknown>>;
 
-const parseProperties = (raw: unknown): Readonly<Record<string, unknown>> => {
+/**
+ * C-3 (finding 34) — defensive try/catch around `JSON.parse`. The prior bare
+ * `JSON.parse(raw)` assumed `import.ts` only ever writes valid-JSON objects
+ * via `canonicalJson` — true for the common path, but `canonicalJson`'s
+ * pre-fix `undefined`-value handling could (latently) emit an invalid
+ * `properties_json` string, and a hand-edited/corrupted DB file is also not
+ * impossible. Without a catch, a single malformed row threw an anonymous
+ * `SyntaxError` that crashed EVERY query touching it. Degrading to `{}` (the
+ * same fallback already used for a structurally-wrong-but-parseable value,
+ * e.g. a JSON array) keeps one bad row from poisoning the whole read path;
+ * `idHint` (the row's own id, when the caller has it) is folded into the
+ * `console.warn` so the offending row is identifiable instead of an
+ * anonymous parse failure.
+ */
+const parseProperties = (
+  raw: unknown,
+  idHint?: string,
+): Readonly<Record<string, unknown>> => {
   if (typeof raw !== 'string' || raw.length === 0) return {};
-  const parsed = JSON.parse(raw) as unknown;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch (e) {
+    console.warn(
+      `sf-intelligence: malformed properties_json${idHint !== undefined ? ` on ${idHint}` : ''} — degrading to {} (${(e as Error).message})`,
+    );
+    return {};
+  }
   // import.ts only writes objects via canonicalJson; treat anything else as
   // an upstream invariant violation rather than poisoning the caller.
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed))
@@ -187,7 +212,7 @@ const rowToNode = (r: Row): Node => ({
   lastModifiedDate: (r['last_modified_date'] ?? null) as string | null,
   lastModifiedBy: (r['last_modified_by'] ?? null) as string | null,
   apiVersion: (r['api_version'] ?? null) as number | null,
-  properties: parseProperties(r['properties_json']),
+  properties: parseProperties(r['properties_json'], r['id'] as string | undefined),
 });
 
 const rowToEdge = (r: Row): Edge => ({
@@ -196,7 +221,12 @@ const rowToEdge = (r: Row): Edge => ({
   edgeType: r['edge_type'] as EdgeType,
   confidence: r['confidence'] as ConfidenceLevel,
   source: r['source'] as string,
-  properties: parseProperties(r['properties_json']),
+  properties: parseProperties(
+    r['properties_json'],
+    r['from_id'] !== undefined && r['to_id'] !== undefined
+      ? `${r['from_id'] as string} -> ${r['to_id'] as string}`
+      : undefined,
+  ),
 });
 
 const queryFailed = (label: string, e: unknown): GraphError => ({

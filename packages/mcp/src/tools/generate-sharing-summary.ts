@@ -17,9 +17,18 @@
  *   - `objectFilter` (optional string): when supplied, narrows the
  *     scan to the single CustomObject whose api name matches. Default
  *     scans every extracted CustomObject (capped at 50 per the
- *     architect-tier convention).
+ *     architect-tier convention — CR-RV12: a >50-object org's response
+ *     discloses the truncation, see Output below, rather than silently
+ *     reading as complete).
  *
- * Output: `{ document: GeneratedDocument }`.
+ * Output: `{ document: GeneratedDocument, scanTruncated?, totalMatchingObjects? }`.
+ *   `scanTruncated` (CR-RV12) is present ONLY when the org has more than 50
+ *   matching CustomObjects — the OBJECT_SCAN_CAP silently dropped the rest
+ *   BEFORE this tool existed to say so. `totalMatchingObjects` carries the
+ *   TRUE count alongside it. The same disclosure also appears inline in
+ *   `document.body`'s Overview line ("N of M matching (capped...)") and as a
+ *   verbatim entry in `document.boundaries` — a reader scanning the rendered
+ *   markdown sees it without inspecting the structured fields.
  *
  * Honesty axis: per-object sharing details come from declared metadata
  * (`properties.sharingModel` on the CustomObject; the SharingRule nodes
@@ -101,6 +110,16 @@ export interface GenerateSharingSummaryOutput {
     /** How many components reference the phantom (inbound edges). */
     readonly referencedBy: number;
   };
+  /**
+   * CR-RV12: TRUE when the `OBJECT_SCAN_CAP` (50) slice dropped matching
+   * CustomObjects BEFORE the per-object sharing entries were built — so the
+   * document covers only the first 50 (by return order). Present ONLY when
+   * actually true, mirroring `unassigned-permission-sets.ts`'s `scanTruncated`
+   * shape, so a ≤50-object org's golden response is byte-identical.
+   */
+  readonly scanTruncated?: boolean;
+  /** CR-RV12: the TRUE matching-object count (only when the scan was capped). */
+  readonly totalMatchingObjects?: number;
 }
 
 /** Escape a markdown table cell. */
@@ -464,6 +483,11 @@ export const generateSharingSummaryHandler = async (
     const filter = filterName;
     scanObjects = scanObjects.filter((o) => o.apiName === filter);
   }
+  // CR-RV12: capture the TRUE matching count BEFORE the architect-tier
+  // OBJECT_SCAN_CAP slice, so a >50-object org's summary discloses that it
+  // covers only the first 50 rather than silently reading as complete.
+  const totalMatchingObjects = scanObjects.length;
+  const objectScanTruncated = totalMatchingObjects > OBJECT_SCAN_CAP;
   scanObjects = scanObjects.slice(0, OBJECT_SCAN_CAP);
 
   // B29: a filter that matched no RETRIEVED CustomObject may still name a
@@ -563,7 +587,12 @@ export const generateSharingSummaryHandler = async (
     '',
     '## Overview',
     '',
-    `Scanned objects: ${sortedEntries.length.toString()}  `,
+    // CR-RV12: when the OBJECT_SCAN_CAP truncated the scan, show "first N of M"
+    // inline in the Overview a reader sees first — never let the plain scanned
+    // count silently read as the org's complete object inventory.
+    objectScanTruncated
+      ? `Scanned objects: ${sortedEntries.length.toString()} of ${totalMatchingObjects.toString()} matching (capped at ${OBJECT_SCAN_CAP.toString()} — narrow with \`objectFilter\` to cover a specific object)  `
+      : `Scanned objects: ${sortedEntries.length.toString()}  `,
     input.objectFilter === undefined
       ? '_(no objectFilter applied)_'
       : `objectFilter: \`${input.objectFilter}\``,
@@ -593,6 +622,15 @@ export const generateSharingSummaryHandler = async (
     'Profile / PermissionSet "with grants" counts are OBJECT-level CRUD grants (incoming `grantedBy` edges on the object carrying allowCreate / allowRead / allowEdit / allowDelete or View / Modify-All), deduped by grantor. Field-level security (FLS) is a SEPARATE plane and is NOT counted here — use `field_access_audit` for per-field grants.',
     UNMODELED_SHARING_DIMENSIONS_DISCLOSURE,
   ];
+  // CR-RV12: the OBJECT_SCAN_CAP=50 slice (~L467) had NO reader-facing
+  // disclosure — on a >50-object org the summary silently read as complete.
+  // Mirrors the scanTruncated / "showing first N of M" shape
+  // `unassigned-permission-sets.ts` established for its own per-type scan cap.
+  if (objectScanTruncated) {
+    boundaries.push(
+      `Object scan capped: showing the first ${OBJECT_SCAN_CAP.toString()} of ${totalMatchingObjects.toString()} matching CustomObject(s) — the rest are NOT covered by this summary (not "no sharing", simply not scanned). Narrow with \`objectFilter\` to a single object for full coverage, or run \`sfi.who_can_access_object\` per object for the ones this summary omitted.`,
+    );
+  }
   if (targetMissing !== undefined) {
     boundaries.push(
       `targetMissing: \`${targetMissing.id}\` is a phantom — referenced by ${targetMissing.referencedBy.toString()} component(s) but not retrieved; its sharing/FLS could not be computed. Refresh to retrieve it (B29).`,
@@ -656,7 +694,11 @@ export const generateSharingSummaryHandler = async (
   );
 
   return ok({
-    data: { document, ...(targetMissing !== undefined ? { targetMissing } : {}) },
+    data: {
+      document,
+      ...(targetMissing !== undefined ? { targetMissing } : {}),
+      ...(objectScanTruncated ? { scanTruncated: true, totalMatchingObjects } : {}),
+    },
     vaultState: {
       sourceTreeHash,
       refreshedAt,

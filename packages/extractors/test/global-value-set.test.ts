@@ -296,7 +296,13 @@ describe('restricted property (CR-GVS-RESTRICTED)', () => {
       expect(node.properties['restricted']).toBe(false);
       expect(node.properties['sorted']).toBe(false);
       expect(node.properties['valueCount']).toBe(2);
-      expect(node.properties['values']).toContain('Deferred Offer');
+      // CR-10b: each value is the H10 object shape, not a bare string.
+      expect(node.properties['values']).toContainEqual({
+        value: 'Deferred Offer',
+        isActive: true,
+        label: 'Deferred Offer',
+        default: false,
+      });
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -354,7 +360,90 @@ describe('per-value fullNames (P14-USAGE-gvs-edge)', () => {
       expect(result.ok).toBe(true);
       if (!result.ok) return;
       expect(result.value.nodes[0]?.properties['valueCount']).toBe(3);
-      expect(result.value.nodes[0]?.properties['values']).toEqual(['EMEA', 'APAC', 'AMER']);
+      // CR-10b: each value is the H10 object shape `{value, isActive, default}`
+      // — no `<isActive>` element on any of these three, so all default to
+      // active; no `<label>` element, so `label` is OMITTED (not present as
+      // `undefined` or `null`) per the OMIT-when-absent convention shared with
+      // the CustomField inline picklist reader.
+      expect(result.value.nodes[0]?.properties['values']).toEqual([
+        { value: 'EMEA', isActive: true, default: false },
+        { value: 'APAC', isActive: true, default: false },
+        { value: 'AMER', isActive: true, default: true },
+      ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('per-value isActive/label/default capture (CR-10b)', () => {
+  it('retains a deactivated value with isActive:false instead of filtering it out', async () => {
+    // Mirrors a real production-scale org's GlobalValueSet shape: active
+    // entries carry no <isActive> element at all (Salesforce DX omits it for
+    // the common case); a deactivated one carries <isActive>false</isActive>
+    // but is NOT removed from the file — existing records may still hold it.
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<GlobalValueSet xmlns="http://soap.sforce.com/2006/04/metadata">
+    <customValue>
+        <fullName>2025</fullName>
+        <default>false</default>
+        <label>2025</label>
+    </customValue>
+    <customValue>
+        <fullName>2017</fullName>
+        <default>false</default>
+        <isActive>false</isActive>
+        <label>2017</label>
+    </customValue>
+    <masterLabel>Term Year</masterLabel>
+    <sorted>false</sorted>
+</GlobalValueSet>`;
+    const { dir, path } = await writeTempXml('Term_Year.globalValueSet-meta.xml', xml);
+    try {
+      const result = await extractGlobalValueSet(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const node = result.value.nodes[0];
+      expect(node).toBeDefined();
+      if (!node) return;
+      // Both values LISTED — valueCount counts the deactivated entry too
+      // (matching StandardValueSet's convention: count everything, active
+      // and inactive alike).
+      expect(node.properties['valueCount']).toBe(2);
+      expect(node.properties['values']).toEqual([
+        { value: '2025', isActive: true, label: '2025', default: false },
+        { value: '2017', isActive: false, label: '2017', default: false },
+      ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('captures default:true on the designated default value', async () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<GlobalValueSet xmlns="http://soap.sforce.com/2006/04/metadata">
+    <customValue>
+        <fullName>Draft</fullName>
+        <default>true</default>
+        <label>Draft</label>
+    </customValue>
+    <customValue>
+        <fullName>Published</fullName>
+        <default>false</default>
+        <label>Published</label>
+    </customValue>
+    <masterLabel>Doc Status</masterLabel>
+</GlobalValueSet>`;
+    const { dir, path } = await writeTempXml('Doc_Status.globalValueSet-meta.xml', xml);
+    try {
+      const result = await extractGlobalValueSet(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const values = result.value.nodes[0]?.properties['values'];
+      expect(values).toEqual([
+        { value: 'Draft', isActive: true, label: 'Draft', default: true },
+        { value: 'Published', isActive: true, label: 'Published', default: false },
+      ]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

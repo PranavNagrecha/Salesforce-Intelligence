@@ -20,6 +20,7 @@ import {
 
 import type { Context } from '../../src/server.js';
 import {
+  canonicalJson,
   diffSnapshotsHandler,
   diffSnapshotsInputSchema,
 } from '../../src/tools/diff-snapshots.js';
@@ -405,6 +406,42 @@ describe('diffSnapshotsHandler — CR-22 section cursor', () => {
   });
 });
 
+describe('canonicalJson — R7-W9 crash-class sweep regression', () => {
+  // The identical `canonicalJson` implementation in `compare-vaults.ts`
+  // crashed for real under R6-12: `JSON.stringify(undefined)` returns the
+  // JS value `undefined` (not a string), and a downstream `.length` call
+  // threw. This module's two `hashRecord` call sites never pass `undefined`
+  // through any reachable public path (every hash-input record here is a
+  // fully-populated literal, unlike `compare-vaults.ts`'s key-union diff),
+  // so there is no handler-level reproduction — this unit-tests the fixed
+  // primitive directly.
+  it('returns a stable STRING (not the JS value undefined) for canonicalJson(undefined)', () => {
+    const result = canonicalJson(undefined);
+    expect(typeof result).toBe('string');
+    expect(result.length).toBeGreaterThan(0);
+  });
+
+  it('a node/edge record with an undefined property canonicalizes without crashing', () => {
+    // Simulates the shape a `hashRecord` call site would carry if a caller
+    // (now or in the future) fed it a record where a key was explicitly
+    // `undefined` — e.g. a schema-evolution gap between two snapshot
+    // formats. `JSON.parse` itself never produces `undefined`, so this
+    // exercises the defensive branch a real caller cannot currently reach.
+    const withUndefined: Readonly<Record<string, unknown>> = {
+      type: 'CustomField',
+      apiName: 'Test__c',
+      label: undefined,
+      properties: { helpText: undefined, dataType: 'Text' },
+    };
+    expect(() => canonicalJson(withUndefined)).not.toThrow();
+    const encoded = canonicalJson(withUndefined);
+    expect(typeof encoded).toBe('string');
+    // The undefined-property sentinel must not collide with the literal
+    // string "undefined" (a real property value).
+    expect(canonicalJson(undefined)).not.toBe(canonicalJson('undefined'));
+  });
+});
+
 describe('diffSnapshotsInputSchema', () => {
   it('accepts a minimal well-formed input', () => {
     const parsed = diffSnapshotsInputSchema.safeParse({
@@ -414,9 +451,18 @@ describe('diffSnapshotsInputSchema', () => {
     expect(parsed.success).toBe(true);
   });
 
-  it('rejects missing fromLabel', () => {
-    const parsed = diffSnapshotsInputSchema.safeParse({ toLabel: 'b' });
-    expect(parsed.success).toBe(false);
+  it('accepts a missing fromLabel (STEP-2: defaults to the latest two snapshots)', () => {
+    // Labels are OPTIONAL now — omitting them auto-defaults to the two most-recent
+    // persisted snapshots (the folded-in churn ergonomic). A one-label call
+    // defaults only the missing side.
+    expect(diffSnapshotsInputSchema.safeParse({ toLabel: 'b' }).success).toBe(true);
+    expect(diffSnapshotsInputSchema.safeParse({}).success).toBe(true);
+  });
+
+  it('accepts the summary MODE flag (folded-in churn)', () => {
+    expect(
+      diffSnapshotsInputSchema.safeParse({ fromLabel: 'a', toLabel: 'b', summary: true }).success,
+    ).toBe(true);
   });
 
   it('rejects a limit above 500', () => {

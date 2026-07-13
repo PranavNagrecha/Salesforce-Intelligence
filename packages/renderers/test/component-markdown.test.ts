@@ -563,11 +563,14 @@ describe('renderComponentMarkdown — markdown injection / escaping (CR-16c)', (
     const headingLines = lines.filter((l) => /^# /.test(l));
     expect(headingLines).toHaveLength(1);
 
-    // (b) The API Name code span is not closed early by the backtick in apiName:
-    // the whole apiName stays inside the span (escaped backtick).
+    // (b) The API Name code span is not closed early by the backtick in
+    // apiName: the whole apiName stays inside the span. CR-16d: a single
+    // embedded backtick forces a wider (2-backtick) fence, per CommonMark —
+    // backslash-escaping the backtick does NOT work inside a code span
+    // (backslash escapes are inert there), so the fence must be widened.
     const apiLine = lines.find((l) => l.startsWith('**API Name:**'));
     expect(apiLine).toBeDefined();
-    expect(apiLine).toContain('Ev\\`il__c');
+    expect(apiLine).toContain('``Ev`il__c``');
 
     // (c) No description line is parsed as a heading / table-delimiter / fence —
     // the line-leading specials are backslash-escaped.

@@ -329,10 +329,13 @@ describe('renderFlowMarkdown — markdown injection / escaping (CR-16c)', () => 
     expect(lines.filter((l) => /^# /.test(l))).toHaveLength(1);
 
     // The Status bullet's backtick is escaped so the inline span is intact on
-    // one line; the value tail is not leaked into prose.
+    // one line; the value tail is not leaked into prose. CR-16d: a single
+    // embedded backtick forces a wider (2-backtick) fence, per CommonMark —
+    // backslash-escaping the backtick does NOT work inside a code span
+    // (backslash escapes are inert there), so the fence must be widened.
     const statusLine = lines.find((l) => l.startsWith('- **Status:**'));
     expect(statusLine).toBeDefined();
-    expect(statusLine).toContain('Ac\\`tive');
+    expect(statusLine).toContain('``Ac`tive``');
 
     // Clean detail values are untouched.
     expect(result.value.body).toContain('- **Trigger object:** `OA_Engagements__c`');

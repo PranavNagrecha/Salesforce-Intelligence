@@ -20,4 +20,9 @@ function run(label, cmd) {
 
 run('scan-org-leaks (--strict)', 'node scripts/scan-org-leaks.mjs --strict');
 run('release-guard', 'node scripts/release-guard.mjs');
+run(
+  'version-consistency (cli == server.json == SERVER_VERSION + CHANGELOG)',
+  'node scripts/check-version-consistency.mjs',
+);
+run('check-cli-bundle (INFRA-11)', 'node scripts/check-cli-bundle.mjs');
 console.error('\nprepublish: OK — safe to pack/publish sf-intelligence.');

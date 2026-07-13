@@ -21,7 +21,7 @@
  * the library grows toward real demand.
  */
 
-import { appendFile, mkdir } from 'node:fs/promises';
+import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -1428,6 +1428,48 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // decision 5 — live ownership/data skew: which owner (or grouping-field)
+    // value holds more than N records of an object (the LDV concentration
+    // check). Record counts are runtime-only, never in the offline vault, so
+    // this is inherently a live_org read. "skew" is a rare, high-signal token
+    // absent from every earlier rule — a low-collision addition.
+    intent: 'data-skew',
+    plane: 'live',
+    tools: ['sfi.live_data_skew'],
+    liveRequired: true,
+    needsResolve: false,
+    reason:
+      'Ownership/data skew — which owner (or field) value concentrates more than the threshold records of an object — is live runtime telemetry (record counts are never in the offline vault).',
+    suggestArgs: (q, question) => {
+      const objectApiName = deriveObjectApiFromQuestion(q, question);
+      return objectApiName !== undefined ? { objectApiName } : undefined;
+    },
+    patterns: [
+      /\b(?:data|ownership|owner|record|account)\s+skew\b/,
+      /\bskew(?:ed)?\b[^.?!]{0,40}\b(?:records?|owner|account|object|data)\b/,
+      /\b(?:ownership|owner)\b[^.?!]{0,40}\bconcentrat\w*\b/,
+    ],
+  },
+  {
+    // decision 5 — live security exposure: the runtime COUNT of ModifyAll /
+    // ViewAll / AuthorApex permission-set grants + who currently holds Modify
+    // All Data, via SOQL COUNT. Distinct from the offline permission_risk_report
+    // (vault metadata); anchored on the "security exposure" phrase + live/runtime
+    // cues that the permission-risk rule never uses.
+    intent: 'live-security-exposure',
+    plane: 'live',
+    tools: ['sfi.live_security_exposure'],
+    liveRequired: true,
+    needsResolve: false,
+    reason:
+      'A LIVE count of ModifyAll/ViewAll/AuthorApex grants (and current Modify-All-Data holders) via SOQL COUNT — the runtime security-exposure snapshot, distinct from the offline permission_risk_report over vault metadata.',
+    patterns: [
+      /\b(?:live|current|runtime)\b[^.?!]{0,40}\bsecurity\s+exposure\b/,
+      /\bsecurity\s+exposure\b[^.?!]{0,40}\b(?:live|scan|check|report|org|right\s+now)\b/,
+      /\blive\b[^.?!]{0,40}\b(?:modify\s*all|view\s*all|author\s*apex)\b[^.?!]{0,40}\bgrants?\b/,
+    ],
+  },
+  {
     intent: 'sample-records',
     plane: 'live',
     tools: ['sfi.live_sample'],
@@ -1439,14 +1481,21 @@ const RULES: readonly Rule[] = [
       // live rows — carve them out so "show the values in the X__mdt records"
       // never burns live consent (P14-ROUTER-cmdt-record-values). No leading
       // \b before __mdt: suffixed api names have no boundary at underscores.
-      /^(?!.*(__mdt\b|\bcustom\s+metadata\b|\bcustom\s+settings?\b)).*\b(show|give|sample|example)s?\b.*\b(records?|rows?)\b/,
+      // R7-W6: a record ACCESS/SHARING ask ("show me the sharing rows on
+      // record X", "who is this record shared with") is live-record-access /
+      // live-record-shares (below), not a generic sample-rows dump — carved
+      // out the same way so the bare "rows"/record-id patterns here don't
+      // swallow it.
+      /^(?!.*(__mdt\b|\bcustom\s+metadata\b|\bcustom\s+settings?\b|\bshared?\s+with\b|\bsharing\s+rows?\b|\bshare\s+rows?\b|\beffective\s+access\b|\brecord[-\s]level\s+access\b)).*\b(show|give|sample|example)s?\b.*\b(records?|rows?)\b/,
       /\b(show|give)\s+me\s+\d+\b/,
       /\bsample\s+\d+\b/,
       /\b\d+\s+(sample|example)\s+\w+\b/,
       // Router-v2 P4: a literal Salesforce record ID (15/18 chars, leading 0 +
       // keyprefix — "did lead 00Q5x000004abcd convert?") is a live row lookup;
-      // the vault never holds record data.
-      /\b0[0-9a-z]{2}[0-9a-z]{12}(?:[0-9a-z]{3})?\b/,
+      // the vault never holds record data. R7-W6: excludes the same
+      // access/sharing vocabulary so "show the sharing rows on record
+      // 001XX0000123ABC" is not stolen from live-record-shares.
+      /^(?!.*\b(?:shared?\s+with|sharing\s+rows?|share\s+rows?|effective\s+access|record[-\s]level\s+access)\b).*\b0[0-9a-z]{2}[0-9a-z]{12}(?:[0-9a-z]{3})?\b/,
     ],
   },
   {
@@ -1696,8 +1745,13 @@ const RULES: readonly Rule[] = [
     needsResolve: false,
     reason: 'Recently created or modified records are live-only runtime state.',
     patterns: [
-      /\b(recent(ly)?|last\s+\d+\s+days?|this\s+week|past\s+week)\b.*\b(created|modified|updated|changed|added)\b/,
-      /\b(created|modified|updated|new)\b.*\b(recent(ly)?|last\s+\d+\s+days?|this\s+week)\b/,
+      // R7-W6: excludes Setup-CONFIG vocabulary (field-level security / sharing
+      // settings / OWD / session settings / password policy / MFA / profile /
+      // permission set / setup audit trail) — "who modified the field-level
+      // security … most recently" is a SetupAuditTrail ask (live-setup-audit-
+      // trail, below), not a record-activity sweep over a business object.
+      /^(?!.*\b(?:field-?level\s+security|\bfls\b|sharing\s+settings?|org-?wide\s+defaults?|\bowd\b|session\s+settings?|password\s+polic\w*|\bmfa\b|permission\s+sets?|profiles?|setup\s+audit\s+trail)\b).*\b(recent(ly)?|last\s+\d+\s+days?|this\s+week|past\s+week)\b.*\b(created|modified|updated|changed|added)\b/,
+      /^(?!.*\b(?:field-?level\s+security|\bfls\b|sharing\s+settings?|org-?wide\s+defaults?|\bowd\b|session\s+settings?|password\s+polic\w*|\bmfa\b|permission\s+sets?|profiles?|setup\s+audit\s+trail)\b).*\b(created|modified|updated|new)\b.*\b(recent(ly)?|last\s+\d+\s+days?|this\s+week)\b/,
       /\bwhat\s+(was|were)\b.*\b(created|modified|updated|changed)\b.*\b(recent|last)\b/,
       // Router-v2 P4: "who's been making the most changes lately" / "busiest
       // user by record edits" — the same recent-modified read, cut by editor.
@@ -2123,6 +2177,62 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // R7-W6: a user's ACTUAL/EFFECTIVE access to ONE record, right now, from
+    // the live sharing calculation (UserRecordAccess) — the runtime resolver
+    // for why_cant_user_see_record's `unknown` verdict. Sits BEFORE
+    // effective-permissions, which used to first-match "effective access" —
+    // that vault rule answers the profile+permset GRANT union, not a live
+    // per-record read, so the "record" anchor here must win first-match. Does
+    // NOT steal why-cant-see's negative "why can't X see" framing (a later
+    // rule, vault) — these patterns require a POSITIVE actual/current/live
+    // framing instead.
+    intent: 'live-record-access',
+    plane: 'live',
+    tools: ['sfi.live_record_access'],
+    liveRequired: true,
+    needsResolve: false,
+    reason:
+      "A user's EFFECTIVE access to ONE record right now (Read/Edit/Delete/Transfer/Full) is runtime sharing state — live_record_access reads UserRecordAccess directly; it never falls back to the vault's declared sharing model.",
+    patterns: [
+      /\beffective\s+access\b[^.?!]{0,40}\brecord\b/,
+      /\brecord\b[^.?!]{0,40}\beffective\s+access\b/,
+      /\bcan\b[^.?!]{0,60}\b(?:edit|access|see|view|delete|read)\b[^.?!]{0,40}\brecord\b[^.?!]{0,30}\b(?:right\s+now|currently|today)\b/,
+      /\bhave\s+(?:delete|edit|read|transfer|full)?\s*access\s+to\s+(?:this|that|a)?\s*record\b/,
+      /\bcheck\s+(?:whether|if)\b[^.?!]{0,60}\b(?:access|see|view|edit|read)\b[^.?!]{0,40}\brecord\b/,
+      /\bactually\s+(?:read|see|access|edit)\b[^.?!]{0,40}\brecord\b/,
+      /\brecord[-\s]level\s+access\b/,
+      /\blive_record_access\b/,
+    ],
+  },
+  {
+    // R7-W6: the explicit sharing ROWS on ONE record ({Object}Share: Owner /
+    // Manual / Rule / Team / Apex) — the complement to live-record-access
+    // (a user's flags) enumerating WHO/WHY. Sits BEFORE sharing-model, whose
+    // bare "how is X shared" pattern would otherwise swallow "how is this
+    // record shared" — the "record" anchor here keeps the org-level OWD/
+    // sharing-rule config question on sharing-model and the one-record
+    // question here.
+    intent: 'live-record-shares',
+    plane: 'live',
+    tools: ['sfi.live_record_shares'],
+    liveRequired: true,
+    needsResolve: false,
+    reason:
+      'The explicit sharing rows on ONE record (Owner / Manual / Rule / Team / Apex-managed) are runtime {Object}Share state — live_record_shares enumerates them; the vault never holds record-level share rows.',
+    patterns: [
+      /\bwho\s+is\s+(?:this|that|the)\s+record\s+shared\s+with\b/,
+      /\brecord\b[^.?!]{0,40}\bshared\s+with\b/,
+      /\bhow\s+is\b[^.?!]{0,20}\brecord\b[^.?!]{0,20}\bshared\b/,
+      /\b(?:sharing\s+rows?|share\s+rows?)\b[^.?!]{0,40}\brecord\b/,
+      /\brecord\b[^.?!]{0,40}\b(?:sharing\s+rows?|share\s+rows?)\b/,
+      /\bshares?\s+(?:exist|apply)\b[^.?!]{0,40}\brecord\b/,
+      /\bexplicit\s+shares?\b[^.?!]{0,40}\brecord\b/,
+      /\bmanually\s+shar\w*\b[^.?!]{0,40}\brecord\b/,
+      /\bwho\s+(?:has\s+been\s+granted|was\s+granted)\s+access\s+to\s+(?:this|that|the)\s+record\b/,
+      /\blive_record_shares\b/,
+    ],
+  },
+  {
     intent: 'effective-permissions',
     plane: 'vault',
     tools: ['sfi.resolve', 'sfi.effective_permissions'],
@@ -2284,6 +2394,26 @@ const RULES: readonly Rule[] = [
       // to <container>" so it never grabs a layout ("is Account.Name visible on
       // the layout") or a schema ("is Payment__c an object") question.
       /\bis\b[^.?!]{0,20}\b\w+__c\b[^.?!]{0,20}\b(?:visible|accessible|available|readable|editable)\b[^.?!]{0,20}\bto\b[^.?!]{0,30}\b(?:profile|perm\s*sets?|permission\s+sets?|role|user)\b/,
+    ],
+  },
+  {
+    // R6-17: unauthenticated GUEST-user exposure across Experience Cloud / Site
+    // communities. Anchored on the guest/community/unauthenticated vocabulary so
+    // it does not steal a generic object-access ("who can access") question,
+    // which who_can_access_object owns.
+    intent: 'guest-exposure',
+    plane: 'vault',
+    tools: ['sfi.guest_exposure_report'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      "What UNAUTHENTICATED guest users can see across the org's Experience Cloud / Site communities — each site's guest profile object CRUD, PII FLS, Apex, and guest sharing rules, ranked (guest_exposure_report).",
+    patterns: [
+      /\bguest\s+(user|profile|access|exposure)\b/,
+      /\bwhat\s+can\s+(the\s+)?guest\s+users?\s+(see|access|read|do)\b/,
+      /\bunauthenticated\b.*\b(access|user|audit|expos)/,
+      /\b(experience\s+cloud|community|communities|portal|public\s+site)\b.*\b(leak|expos|guest|secur)/,
+      /\b(leak|expos|secur)\w*\b.*\b(experience\s+cloud|community|communities|guest)\b/,
     ],
   },
   {
@@ -2866,6 +2996,76 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // The NET access a user GAINS by ASSIGNING a permission set to their current
+    // baseline (profile + already-assigned sets), max-wins so a perm already
+    // held elsewhere is not double-counted. Placed AFTER the unassigned /
+    // holder / migration rules so those keep their heads; every pattern pairs an
+    // ASSIGN/GRANT verb with the permission-set noun so it never grazes a
+    // roster/inventory ask. Hypothetical READ — routes normally (not a refusal).
+    intent: 'permset-assign-impact',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.what_if_assign_permset'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'Net access a user would GAIN by assigning a permission set on top of a baseline (profile + current sets); max-wins, so a permission already held via the profile or another set is not counted as gained (what_if_assign_permset).',
+    patterns: [
+      /\b(assign|assigning|grant|granting|adding|give|giving)\b[^.?!]*\b(permission\s+sets?|perm\s?sets?|permsets?)\b/,
+      /\b(permission\s+sets?|perm\s?sets?|permsets?)\b[^.?!]*\b(assign|assigning|grant|granting)\b/,
+      /\b(delta|impact|gains?|new\s+access)\b[^.?!]*\bgrant\w*\b[^.?!]*\b(permission\s+sets?|perm\s?sets?|permsets?)\b/,
+      /\bwhat\b[^.?!]*\b(gains?|get|new\s+access)\b[^.?!]*\b(permission\s+sets?|perm\s?sets?|permsets?)\b/,
+    ],
+  },
+  {
+    // The mirror: the NET access a user LOSES by REVOKING a permission set from
+    // their baseline. Max-wins, so a perm ALSO granted by the profile or another
+    // set is not counted as lost. Same verb+noun discipline as the assign rule;
+    // a conditional "what is lost if I remove X" is a hypothetical READ, so it
+    // is an explicit excluder from the write-imperative refusal gate.
+    intent: 'permset-revoke-impact',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.what_if_revoke_permset'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'Net access a user would LOSE by revoking a permission set from a baseline; max-wins, so a permission also granted by the profile or another set is not counted as lost (what_if_revoke_permset).',
+    patterns: [
+      /\b(revoke|revoking|remove|removing|unassign|unassigning|strip|stripping|take\s+away|taking\s+away)\b[^.?!]*\b(permission\s+sets?|perm\s?sets?|permsets?)\b/,
+      /\b(permission\s+sets?|perm\s?sets?|permsets?)\b[^.?!]*\b(revoked?|revoking|removed?|removing|unassign\w*|stripped?|lose|lost)\b/,
+      /\bwhat\b[^.?!]*\b(lose|lost)\b[^.?!]*\b(permission\s+sets?|perm\s?sets?|permsets?)\b/,
+    ],
+  },
+  {
+    // R7-W6: AI/Agentforce exposure — "what data can my org's own AI see".
+    // Anchored on Agentforce/GenAI/prompt-template/AI-agent vocabulary so it
+    // never steals a generic PII/sensitive-data question (pii-inventory,
+    // below) — a bare "sensitive data" or "pii" ask with no AI noun keeps
+    // falling through to pii-inventory / compliance as before. Placed BEFORE
+    // pii-flow/pii-inventory/compliance so an "is my AI agent exposing PII"
+    // ask — which also carries the bare "pii" keyword those rules key on —
+    // resolves to the AI-specific audit first.
+    intent: 'ai-exposure',
+    plane: 'vault',
+    tools: ['sfi.ai_exposure_report'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      "What data the org's own Agentforce/GenAI surface (prompt templates, agent actions) can reach, cross-referenced against the PII/sensitive classifier (ai_exposure_report).",
+    suggestArgs: (q, question) => {
+      const objectApiName = deriveObjectApiFromQuestion(q, question);
+      return objectApiName !== undefined ? { objectApiName } : undefined;
+    },
+    patterns: [
+      /\b(agentforce|genai|gen\s*ai)\b/,
+      /\bcopilot\b[^.?!]{0,60}\b(leak\w*|expos\w*|pii|sensitive|access|see|read|ground\w*)\b/,
+      /\b(ai|einstein)\s+agents?\b[^.?!]{0,60}\b(access|see|expose|exposure|read|ground\w*|leak\w*|pii|sensitive|have|has)\b/,
+      /\bwhat\s+data\s+can\s+(my|our|the)\s+(ai|agent|agentforce|copilot)\b/,
+      /\bai\s+exposure\b/,
+      /\bprompt\s+templates?\b[^.?!]{0,60}\b(field|data|use|read|ground\w*|access)\b/,
+      /\bai_exposure_report\b/,
+    ],
+  },
+  {
     // Checked before pii-inventory: a "...flow/lineage/downstream" question is
     // about movement, not just the "ssn"/"pii" keyword inventory.
     intent: 'pii-flow',
@@ -3010,6 +3210,51 @@ const RULES: readonly Rule[] = [
       new RegExp(
         `\\bsuppose\\s+we\\s+deactivat\\w+\\b[^.?!]{0,60}\\b${NAMED_COMPONENT_ID}\\b`,
       ),
+    ],
+  },
+  {
+    // "how do records of this object get created" — the record-provenance
+    // trace (which automations INSERT records of an object + which triggers
+    // fire on it). Distinct from trigger-order/what_happens_on_save (the full
+    // save-time automation tree): this answers the narrower who-inserts-this
+    // question, anchored on create/insert PROVENANCE vocabulary rather than the
+    // "what runs on save" frame, so it does not shadow the save-order rule
+    // below (checked first only because it is more specific).
+    intent: 'record-creation-paths',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.record_creation_paths'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'How records of an object get created — the Flow record-creates (writesTo operation=recordCreate) plus the triggers that fire on it (record_creation_paths). Apex DML inserts are NOT modeled, so an Apex-only creator reports zero — cross-check Apex before concluding nothing creates it.',
+    suggestArgs: (q, question) => {
+      const objectApiName = deriveObjectApiFromQuestion(q, question);
+      return objectApiName !== undefined ? { objectApiName } : undefined;
+    },
+    patterns: [
+      /\bhow\s+(?:do|does|are)\b[^.?!]{0,40}\brecords?\b[^.?!]{0,40}\b(?:created|inserted|get\s+created)\b/,
+      /\bwhat\s+(?:creates|inserts)\b[^.?!]{0,40}\brecords?\b/,
+      /\b(?:record\s+creation\s+paths?|creation\s+paths?)\b/,
+      /\bwhich\s+(?:automations?|flows?)\b[^.?!]{0,40}\b(?:create|insert)\b[^.?!]{0,40}\brecords?\b/,
+    ],
+  },
+  {
+    // Flow error-handling hygiene: which flows have a DML/action element with
+    // no fault path. Anchored on "fault" + flow vocabulary (and flow + missing
+    // error handling) — none of which the save-order / flow-apex-bridge /
+    // flow-metadata rules use — a low-collision addition.
+    intent: 'flow-fault-audit',
+    plane: 'vault',
+    tools: ['sfi.flow_fault_audit'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Which flows have a faultable DML/action element with no fault path (flow_fault_audit). An unhandled fault is surfaced, not silent — the tool flags missing fault connectors, worst-first.',
+    patterns: [
+      /\bflows?\b[^.?!]{0,60}\bfaults?\b/,
+      /\bfaults?\b[^.?!]{0,60}\bflows?\b/,
+      /\bflows?\b[^.?!]{0,60}\b(?:no|missing|without|lack\w*)\b[^.?!]{0,30}\b(?:fault|error\s+handling|error\s+path|error\s+connector)\b/,
+      /\bflows?\b[^.?!]{0,60}\berror\s+handling\b/,
     ],
   },
   {
@@ -3210,6 +3455,33 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // R7-W6: the RUNTIME schedule registry (CronTrigger) — what is ACTUALLY
+    // scheduled right now. Anchored on a temporal/actual cue (mirrors the
+    // automation-fired / picklist-usage live-vs-vault idiom) or a literal
+    // CronTrigger/CronJobDetail API name, so a bare "what jobs are scheduled"
+    // (no actual/currently/right-now cue) still defaults to the offline
+    // scheduled_job_catalog below (Schedulable-CAPABLE classes; schedule-
+    // capable != scheduled) — placed BEFORE it so the temporal cue wins.
+    intent: 'live-scheduled-jobs',
+    plane: 'live',
+    tools: ['sfi.live_scheduled_jobs'],
+    liveRequired: true,
+    needsResolve: false,
+    reason:
+      'What is ACTUALLY scheduled right now (CronTrigger + CronJobDetail, next fire times, recent AsyncApexJob status) is live runtime state — live_scheduled_jobs reads it; the vault only lists Schedulable-CAPABLE Apex classes.',
+    patterns: [
+      /\b(?:currently|actually|right\s+now|today|recently)\b[^.?!]{0,40}\bscheduled\b/,
+      /\bscheduled\b[^.?!]{0,40}\b(?:currently|actually|right\s+now|today|recently)\b/,
+      /\bcron\s*trigger(?:s)?\b/,
+      /\bcronjobdetail\b/,
+      /\bnext\s+fire\s+times?\b/,
+      /\blive\s+scheduled\s+(?:jobs?|apex)\b/,
+      /\bwhat(?:'?s| is)\s+running\s+on\s+a\s+schedule\b/,
+      /\bcron\b[^.?!]{0,30}\bregist(?:er|ered|ry)\b/,
+      /\blive_scheduled_jobs\b/,
+    ],
+  },
+  {
     intent: 'scheduled-jobs',
     plane: 'vault',
     tools: ['sfi.scheduled_job_catalog'],
@@ -3289,6 +3561,42 @@ const RULES: readonly Rule[] = [
       new RegExp(
         `\\bdoes\\s+${NAMED_COMPONENT_ID}\\b[^.?!]{0,40}\\b(active\\s+version|any\\s+active)\\b`,
       ),
+    ],
+  },
+  {
+    // R7-W6: FIELD-LEVEL write-collision + save-recursion cycle detector for
+    // ONE object — "is my org fighting itself on this object?". Its phrasing
+    // space heavily overlaps automation-risk's ORG-WIDE "overlapping/duplicate/
+    // conflict automation" language (R6-15 grandfather note), so this rule is
+    // anchored SPECIFICALLY on same-FIELD write collisions and recursion/loop
+    // language — vocabulary automation-risk's patterns never use (it keys on
+    // "overlapping"/"duplicate"/"conflict"/"same object", never "same field" or
+    // "recursion"/"loop"/"fighting itself") — and placed BEFORE automation-risk
+    // so the narrower field-level ask wins first-match; a genuine object-wide
+    // "are there overlapping automations that might conflict" question still
+    // falls through untouched.
+    intent: 'automation-collisions',
+    plane: 'vault',
+    tools: ['sfi.automation_collisions'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Field-level write collisions (2+ automations writing the SAME field) and save-recursion cycles on ONE object are a targeted diagnosis automation_risk_report does not compute — automation_collisions walks the writesTo edges of the same firer set.',
+    suggestArgs: (q, question) => {
+      const objectApiName = deriveObjectApiFromQuestion(q, question);
+      return objectApiName !== undefined ? { object: objectApiName } : undefined;
+    },
+    patterns: [
+      /\b(?:write|writes|writing|update|updates|updating|set|sets|setting)\b[^.?!]{0,40}\bsame\s+field\b/,
+      /\bfield[-\s]level\b[^.?!]{0,40}\b(?:collision|conflict|overwrit\w*)/,
+      /\b(?:save\s+)?recursion\s+(?:cycle|loop)\b/,
+      /\bsave\s+recursion\b/,
+      /\brecursion\s+between\b/,
+      /\b(?:automation|flow|workflow)\s+loop\b/,
+      /\bre-?trigger\w*\s+itself\b/,
+      /\boverwrit\w*\b[^.?!]{0,40}\bfield\b/,
+      /\bfighting\s+itself\b/,
+      /\bautomation_collisions\b/,
     ],
   },
   {
@@ -3394,7 +3702,10 @@ const RULES: readonly Rule[] = [
   {
     intent: 'flow-apex-bridge',
     plane: 'vault',
-    tools: ['sfi.find_apex_usages', 'sfi.search_flow_metadata', 'sfi.resolve'],
+    // STEP-2: find_apex_usages retired to a hidden alias; the survivor
+    // find_code_usages (Apex-narrowable superset) leads this rule now. The
+    // repointed gold row ("Which flows invoke Apex classes?") expects it here.
+    tools: ['sfi.find_code_usages', 'sfi.search_flow_metadata', 'sfi.resolve'],
     liveRequired: false,
     needsResolve: false,
     reason:
@@ -3406,6 +3717,69 @@ const RULES: readonly Rule[] = [
   },
 
   // === Apex / code (vault) ==================================================
+  {
+    // Finding #40: decode a PASTED Apex DEBUG LOG / runtime governor-limit
+    // exception back to the class/trigger/flow that ran (explain_debug_log).
+    // Placed BEFORE explain-error so a runtime LimitException / debug-log paste
+    // (which explain-error's generic `System.<X>Exception` pattern would
+    // otherwise catch) routes here. Anchored on debug-log STRUCTURE markers
+    // (pipe-delimited event tokens) and RUNTIME limit-exception signatures with
+    // their concrete `: N` counts — NOT the bare phrase "governor limit(s)",
+    // which stays with governor_limit_risks' proactive "which of my queries
+    // MIGHT hit limits" ask. Low-collision: no earlier rule uses these tokens.
+    intent: 'explain-debug-log',
+    plane: 'vault',
+    tools: ['sfi.explain_debug_log'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Decoding a pasted Apex debug log / runtime governor-limit exception back to the class/trigger/flow that ran is a ranked resolution over the log\'s stack frames + a cross-reference against the static governor_limit_risks scan (explain_debug_log). Needs the raw logText — supply the pasted log/exception verbatim.',
+    patterns: [
+      // Debug-log structure markers (pipe-delimited event tokens) — a pasted log.
+      /\|(?:CODE_UNIT_STARTED|METHOD_ENTRY|LIMIT_USAGE(?:_FOR_NS)?|CUMULATIVE_LIMIT_USAGE|FATAL_ERROR|EXCEPTION_THROWN|SOQL_EXECUTE_BEGIN|DML_BEGIN|USER_DEBUG)\|/,
+      // Runtime governor-LIMIT exception signatures (a limit that ALREADY fired).
+      /\bsystem\.limitexception\b/i,
+      /\btoo many (?:soql queries|dml statements|dml rows|query rows|callouts|future calls|email invocations)\s*:/i,
+      /\bapex cpu time limit exceeded\b/i,
+      /\bapex heap size too large\b/i,
+      /\bmaximum (?:trigger|stack) depth\b/i,
+      // Explicit "debug log" asks.
+      /\b(?:explain|read|decode|interpret|walk me through|what(?:'s| is) in)\b[^.?!]{0,30}\bdebug log\b/i,
+      /\bdebug log\b[^.?!]{0,30}\b(?:mean|say|show|point|caus)/i,
+      /\bexplain_debug_log\b/,
+    ],
+  },
+  {
+    // R7-W6: decode a PASTED Salesforce error string back to its source
+    // component — the support-desk "what does this error mean" ask. Anchored
+    // on the concrete error-signature vocabulary (status-code taxonomy tokens,
+    // Apex stack frames, flow-fault-email shapes) plus generic explain/decode
+    // verbs on "this error" — none of which any earlier rule uses (the
+    // explain-validation-rule intent narrates a NAMED rule's condition, not a
+    // pasted error string), so this is a low-collision addition.
+    intent: 'explain-error',
+    plane: 'vault',
+    tools: ['sfi.explain_error'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Decoding a pasted error/fault-email/stack-trace string back to the org component that produced it is a ranked heuristic match over validation rules, flows, Apex, and the status-code taxonomy (explain_error). Needs the raw errorText — supply the pasted error verbatim.',
+    patterns: [
+      /\b(?:FIELD_CUSTOM_VALIDATION_EXCEPTION|REQUIRED_FIELD_MISSING|UNABLE_TO_LOCK_ROW|INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY|CANNOT_INSERT_UPDATE_ACTIVATE_ENTITY|DUPLICATE_VALUE|STORAGE_LIMIT_EXCEEDED|MIXED_DML_OPERATION)\b/i,
+      /\bsystem\.\w*exception\b/i,
+      /\bclass\.\w+\.\w+\s*:\s*line\s*\d+/i,
+      /\btrigger\.\w+\s*:\s*line\s*\d+/i,
+      /\ban\s+error\s+occurred\s+at\s+element\b/i,
+      /\bflow\s+api\s+name\s*:/i,
+      /\bwhat\s+does\s+this\s+error\s+mean\b/,
+      /\b(?:explain|decode)\s+this\s+(?:error|stack\s+trace)\b/,
+      /\bwhy\s+(?:did|do)\s+i\s+(?:get|see)\s+this\s+error\b/,
+      /\bwhat\s+caused\s+this\s+error\b/,
+      /\bwhich\s+(?:rule|flow|class|trigger|component)\b[^.?!]{0,40}\b(?:threw|caused|blocked|fired)\b[^.?!]{0,40}\berror\b/,
+      /\btrace\s+this\s+(?:save\s+)?error\b/,
+      /\bexplain_error\b/,
+    ],
+  },
   {
     intent: 'tests-for-change',
     plane: 'vault',
@@ -3683,13 +4057,46 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
-    intent: 'release-readiness',
+    // R7-W6: pre-deploy change review over a CALLER-ASSEMBLED change set (a
+    // PR / package.xml / git diff) — never a bare question's primary answer
+    // since it needs the `components` array as input, but the deploy-gate
+    // vocabulary ("review this PR/changeset", "is this deploy safe", "what
+    // does this PR break") is distinct CI/deploy language no earlier rule
+    // claims. Anchored on a NAMED deploy artifact (PR/changeset/deployment/
+    // package.xml/diff) so it never fires on the ORG-WIDE "is the org ready to
+    // go live" ask (release-readiness, below) — none of these patterns use
+    // "ready"/"readiness". Placed BEFORE release-readiness so the specific
+    // artifact-scoped ask wins first-match.
+    intent: 'review-change',
     plane: 'vault',
-    tools: ['sfi.release_readiness_report', 'sfi.org_risk_report', 'sfi.tech_debt_score'],
+    tools: ['sfi.review_change'],
     liveRequired: false,
     needsResolve: false,
     reason:
-      'Release / go-live readiness is a vault synthesis (release_readiness_report + org risk + tech debt).',
+      'A per-component risk verdict (blocking/risky/review/safe), direct dependents, and tests-to-run for a SPECIFIC change set — review_change composes get_impact + tests_for_change over the components a host assembles from a PR / package.xml / git diff. Needs that `components` array supplied by the caller.',
+    patterns: [
+      /\breview\s+(?:this|my|the)\s+(?:changeset|change\s+set|deploy(?:ment)?|pr|pull\s+request|package)\b/,
+      /\bis\s+(?:this|my)\s+deploy(?:ment)?\s+safe\b/,
+      /\bis\s+it\s+safe\s+to\s+(?:ship|deploy)\b/,
+      /\bwhat\s+(?:does|will|would)\s+this\s+(?:pr|pull\s+request|change\s*set|deploy(?:ment)?)\s+break\b/,
+      /\bpre[-\s]?deploy(?:ment)?\s+(?:review|risk\s+check|gate)\b/,
+      /\bgate\s+my\s+deploy\b/,
+      /\brisk\s+check\s+on\s+(?:my|this)\s+diff\b/,
+      /\bwhich\s+of\s+(?:my|these)\s+changes\s+are\s+(?:blocking|risky|safe)\b/,
+      /\breview\s+(?:the\s+)?components?\s+in\s+(?:this\s+|my\s+)?package\.xml\b/,
+      /\breview_change\b/,
+    ],
+  },
+  {
+    intent: 'release-readiness',
+    plane: 'vault',
+    // STEP-2: release_readiness_report retired to a hidden alias; org_risk_report
+    // (its `gate: true` MODE emits ready+blockers) leads this rule now.
+    tools: ['sfi.org_risk_report', 'sfi.tech_debt_score'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Release / go-live readiness is a vault synthesis (org_risk_report gate mode + tech debt).',
     patterns: [
       /\brelease\s+readiness\b/,
       /\b(ready|readiness)\b.*\b(release|deploy|go[-\s]?live|cutover|production)\b/,
@@ -3828,7 +4235,7 @@ const RULES: readonly Rule[] = [
     // E.4-6 / BL-13 interface filters).
     intent: 'interface-implementers',
     plane: 'vault',
-    tools: ['sfi.search_apex_source', 'sfi.find_apex_usages'],
+    tools: ['sfi.search_apex_source', 'sfi.find_code_usages'],
     liveRequired: false,
     needsResolve: false,
     reason:
@@ -3844,7 +4251,7 @@ const RULES: readonly Rule[] = [
   {
     intent: 'apex-search',
     plane: 'vault',
-    tools: ['sfi.search_apex_source', 'sfi.find_apex_usages'],
+    tools: ['sfi.search_apex_source', 'sfi.find_code_usages'],
     liveRequired: false,
     needsResolve: false,
     reason: 'Text grep over Apex source + usage edges.',
@@ -3987,7 +4394,7 @@ const RULES: readonly Rule[] = [
     // "endpoints" and misroute to the outbound catalog (B21.15).
     intent: 'rest-endpoints',
     plane: 'vault',
-    tools: ['sfi.search_apex_source', 'sfi.find_apex_usages'],
+    tools: ['sfi.search_apex_source', 'sfi.find_code_usages'],
     liveRequired: false,
     needsResolve: false,
     reason:
@@ -4020,7 +4427,10 @@ const RULES: readonly Rule[] = [
   {
     intent: 'unused-fields',
     plane: 'hybrid',
-    tools: ['sfi.unused_fields_deep', 'sfi.field_cleanup_candidates', 'sfi.live_field_population'],
+    // STEP-2: field_cleanup_candidates retired to a hidden alias; its ranked
+    // cleanup roster is now unused_fields_deep's `format: 'cleanup'` MODE, so the
+    // survivor (already leading) absorbs the cleanup phrasings.
+    tools: ['sfi.unused_fields_deep', 'sfi.live_field_population'],
     liveRequired: false,
     needsResolve: false,
     reason: 'Dead-vs-alive: vault references say "unreferenced"; live population confirms truly unused.',
@@ -4079,7 +4489,11 @@ const RULES: readonly Rule[] = [
       "Changing a field's stored VALUE (not its schema) has a distinct blast radius — identity / integration-key / uniqueness / automation / cross-object — surfaced by value_change_audit (a set of fields on an object) or what_if_change_field_value (one field). Distinct from the type/required/delete what-ifs.",
     patterns: [
       /\bvalue[-\s]changes?\b/,
-      /\b(chang|updat|edit|modif|bulk[-\s]?updat)\w*\b[^.?!]{0,40}\bvalues?\b/,
+      // R7-W6: excludes the HISTORICAL "old value … new value" / "what was the
+      // value before" framing — that is a runtime read of an actual past
+      // change (live-field-history, earlier), not this HYPOTHETICAL what-if-
+      // change-the-value simulator ask.
+      /^(?!.*\b(?:old\s+value|previous\s+value|new\s+value|what\s+was\s+the\s+(?:old|previous)\s+value)\b).*\b(chang|updat|edit|modif|bulk[-\s]?updat)\w*\b[^.?!]{0,40}\bvalues?\b/,
       /\bvalues?\b[^.?!]{0,40}\b(impact|affect|break|desync|safe|risk)\w*/,
       /\b(impact|affect|safe|risky?)\b[^.?!]{0,70}\b(chang|updat|edit|modif)\w*\b[^.?!]{0,40}\bvalues?\b/,
     ],
@@ -4299,6 +4713,99 @@ const RULES: readonly Rule[] = [
   },
 
   // === Change / history / cross-org (vault, snapshots) ======================
+  // R7-W6: live_field_history and live_setup_audit_trail now cover TWO of the
+  // three runtime-audit-trail gaps (field history, Setup Audit Trail — debug
+  // logs / Event Monitoring stay genuinely out of scope). Both are placed
+  // BEFORE runtime-audit-trail and anchored on STRONGER signals than its bare
+  // "who changed/field history/setup audit trail" patterns, so the existing
+  // honest-disclosure default is preserved for the ambiguous/generic phrasings
+  // it is regression-tested on ("who changed this record", "show me the field
+  // history for Account", bare "setup audit trail") — those name no specific
+  // FIELD, no temporal/config qualifier, so they fall through unchanged.
+  {
+    // A NAMED field ("who changed Account.Status", "field history for
+    // Discount__c") or an explicit old/new-value framing is unambiguous:
+    // {Object}History runtime data, not the generic disclosure.
+    intent: 'live-field-history',
+    plane: 'live',
+    tools: ['sfi.live_field_history'],
+    liveRequired: true,
+    needsResolve: false,
+    reason:
+      'WHO changed a NAMED field on a record, and to what value, is runtime {Object}History data — live_field_history reads it (subject to the vault field-history-tracking precondition check); the vault only reasons about which automation COULD write the field.',
+    suggestArgs: (q, question) => {
+      const source = question ?? q;
+      const fieldMatch = source.match(new RegExp(NAMED_FIELD_ID, 'i'));
+      const args: Record<string, unknown> = {};
+      const objectApiName = deriveObjectApiFromQuestion(q, question);
+      if (objectApiName !== undefined) args['objectApiName'] = objectApiName;
+      if (fieldMatch?.[0] !== undefined) {
+        const raw = fieldMatch[0];
+        const dotted = raw.split('.');
+        args['fieldApiName'] = dotted.length === 2 ? dotted[1] : raw;
+      }
+      return Object.keys(args).length > 0 ? args : undefined;
+    },
+    patterns: [
+      new RegExp(`\\bwho\\s+(?:changed|edited|updated|set)\\b[^.?!]{0,40}\\b${NAMED_FIELD_ID}\\b`),
+      new RegExp(`\\bfield\\s+history\\b[^.?!]{0,40}\\bfor\\b[^.?!]{0,40}\\b${NAMED_FIELD_ID}\\b`),
+      /\bold\s+value\b[^.?!]{0,60}\bnew\s+value\b/,
+      /\bwhat\s+was\s+the\s+(?:old|previous)\s+value\b[^.?!]{0,40}\bfield\b/,
+      /\bchange\s+history\s+for\s+the\s+\w+\s+field\b/,
+      /\b(?:changed|edited)\s+the\s+\w+\s+on\s+(?:this|that)\s+record\b/,
+      /\baudit\s+trail\s+of\s+value\s+changes?\b/,
+      /\bwho\s+set\s+(?:this|that)\s+field\b/,
+      /\blive_field_history\b/,
+    ],
+  },
+  {
+    // A NAMED setup-config target (profile / permission set / OWD / sharing /
+    // security setting) or "setup audit trail"/"setup changes" WITH a temporal
+    // qualifier is unambiguous SetupAuditTrail data; the bare, unqualified
+    // "setup audit trail" phrasing (no temporal cue, no named target) stays on
+    // runtime-audit-trail's honest disclosure below.
+    intent: 'live-setup-audit-trail',
+    plane: 'live',
+    tools: ['sfi.live_setup_audit_trail'],
+    liveRequired: true,
+    needsResolve: false,
+    reason:
+      'WHO changed a profile / permission set / org-wide default / sharing setting — or a temporally-scoped Setup Audit Trail read — is the runtime SetupAuditTrail roster; live_setup_audit_trail reads it directly.',
+    patterns: [
+      /\bsetup\s+audit\s+trail\b[^.?!]{0,40}\b(?:recent(?:ly)?|last\s+(?:\d+\s+days?|week|month|quarter)|this\s+(?:week|month)|today|past\s+\w+)\b/,
+      /\b(?:recent|last\s+(?:\d+\s+days?|week|month)|this\s+week|today)\b[^.?!]{0,40}\bsetup\s+(?:changes?|audit\s+trail)\b/,
+      /\bchanged\b[^.?!]{0,30}\bin\s+setup\b/,
+      /\bwho\s+(?:changed|modified|edited|touched|flipped)\b[^.?!]{0,60}\b(?:profile|permission\s+set|org[-\s]?wide\s+default|owd|security\s+settings?|sharing\s+settings?|field-?level\s+security|fls|session\s+settings?|password\s+polic\w*|mfa)\b/,
+      /\b(?:deactivated|activated|turned\s+off|turned\s+on|disabled|enabled)\b[^.?!]{0,40}\b(?:trigger|validation\s+rule|flow|automation)\b/,
+      /\b(?:trigger|validation\s+rule|flow|automation)\b[^.?!]{0,40}\b(?:deactivated|turned\s+off|disabled)\b/,
+      /\badmin\s+change\s+history\b/,
+      /\bconfiguration\s+changes?\b[^.?!]{0,40}\bmade\s+by\b[^.?!]{0,20}\badministrators?\b/,
+      /\bwho\s+granted\b[^.?!]{0,40}\bmodify[-\s]?all\b/,
+      /\bflip(?:ped)?\b[^.?!]{0,40}\bfield[-\s]level\s+security\b/,
+      /\blive_setup_audit_trail\b/,
+    ],
+  },
+  {
+    // #39 — offline SetupAuditTrail attribution from persisted JSONL.
+    // MUST sit before runtime-audit-trail: that rule's bare
+    // `\b(setup\s+)?audit\s+trail\b` would otherwise swallow "persisted /
+    // offline / vault setup audit trail" asks.
+    intent: 'component-change-attribution',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.component_change_attribution'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'Offline who-changed-this from persisted SetupAuditTrail (component_change_attribution); vault never ran --with-audit-trail answers available:false with the enable hint. Distinct from live_setup_audit_trail (live 180-day) and component_history (vault git).',
+    patterns: [
+      /\b(?:persisted|offline|vault)\s+setup\s+audit\s+trail\b/,
+      /\bsetup\s+audit\s+trail\b[^.?!]{0,40}\b(?:persisted|offline|vault|attribut)/,
+      /\b(?:attribute|attribut(?:e|ion)|correlate)\b[^.?!]{0,40}\b(?:setup\s+)?audit\s+trail\b/,
+      /\bcomponent_change_attribution\b/,
+      /\boffline\s+(?:setup\s+)?change\s+attribution\b/,
+      /\bwho\s+changed\b[^.?!]{0,60}\baccording\s+to\s+(?:the\s+)?(?:persisted|vault)\s+(?:setup\s+)?audit\b/,
+    ],
+  },
   // Runtime audit trail — placed BEFORE `history-change` so its broad
   // `\bhistory\b` pattern does not swallow "field history" (which is a runtime
   // audit-trail ask, not a metadata diff). These questions are about WHO did
@@ -4431,7 +4938,9 @@ const RULES: readonly Rule[] = [
     // wins; generic churn/trend phrasings keep the snapshot tools.
     intent: 'what-changed-since-refresh',
     plane: 'vault',
-    tools: ['sfi.what_changed_since_refresh', 'sfi.churn'],
+    // STEP-2: churn retired to a hidden alias of diff_snapshots (summary: true);
+    // the survivor takes its secondary slot behind the refresh anchor.
+    tools: ['sfi.what_changed_since_refresh', 'sfi.diff_snapshots'],
     liveRequired: false,
     needsResolve: false,
     reason:
@@ -4446,12 +4955,34 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
-    intent: 'snapshot-diff',
+    intent: 'security-posture-trend',
     plane: 'vault',
-    tools: ['sfi.diff_snapshots', 'sfi.churn', 'sfi.trend'],
+    tools: ['sfi.trend'],
     liveRequired: false,
     needsResolve: false,
-    reason: 'Structural diff / churn / trend between captured snapshots.',
+    reason:
+      'Security posture over time — sfi.trend with metric:securityScore reads capture-time grades persisted on SnapshotMeta.metrics at snapshot create / refresh.',
+    suggestArgs: () => ({ metric: 'securityScore' }),
+    // BEFORE snapshot-diff: that rule's /\btrend\b/ would otherwise steal
+    // "security score trend" asks.
+    patterns: [
+      /\bsecurity\s+posture\b.*\b(trend|over\s+time|better|worse|improv|degrad)/,
+      /\b(trend|over\s+time|better|worse|improv|degrad).*\bsecurity\s+posture\b/,
+      /\bis\s+our\s+security\b.*\b(better|worse|improv|degrad)/,
+      /\bsecurity\b.*\b(getting\s+)?(better|worse)\b/,
+      /\b(security\s+score|securityScore)\b.*\b(trend|over\s+time|history)\b/,
+      /\b(trend|over\s+time|history)\b.*\b(security\s+score|securityScore)\b/,
+    ],
+  },
+  {
+    intent: 'snapshot-diff',
+    plane: 'vault',
+    // STEP-2: churn retired to a hidden alias of diff_snapshots (summary: true) —
+    // dropped here (diff_snapshots already leads). trend is KEPT (distinct store).
+    tools: ['sfi.diff_snapshots', 'sfi.trend'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Structural diff / churn digest / trend between captured snapshots.',
     patterns: [
       /\b(churn|trend|snapshot)\b/,
       /\bhow\s+much\b.*\b(changed|growth)\b.*\bover\s+time\b/,
@@ -4733,6 +5264,38 @@ const RULES: readonly Rule[] = [
       // it keeps this off the cleanup-catalog tools (which take no named id).
       /\b(?:even|still)\s+(?:needed|used|referenced)\b[^?!]{0,20}\b(?:anymore\s+)?based\s+on\s+usage\b/,
       /\bstill\s+(?:used|referenced)\s+anywhere\b/,
+    ],
+  },
+  {
+    // Finding #44: martech (marketing-technology) connections — "what
+    // marketing tools/martech does this org have", "does this org use
+    // Pardot/Marketo/HubSpot/Marketing Cloud Connect". Distinct from the
+    // "is <NamedObject> connected to Marketo" USAGE ask above (that stays a
+    // component-usage lookup on a named component); this rule is the
+    // ORG-WIDE catalog question with no named component to resolve, so it
+    // is placed AFTER component-usage — a phrasing specific enough to hit
+    // the "is X connected to Marketo" pattern keeps answering from there.
+    // integration_map now composes `martechConnectors` (Finding #44) from
+    // InstalledPackage namespace + NamedCredential/ExternalDataSource
+    // endpoint signals — see known-integration-packages.ts.
+    intent: 'martech-connections',
+    plane: 'vault',
+    tools: ['sfi.integration_map'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      "Martech (marketing-technology) connectors — Marketing Cloud Connect / Pardot / Account Engagement / Marketo / HubSpot — are surfaced in integration_map's martechConnectors section (namespace + endpoint heuristic, disclosed confidence).",
+    patterns: [
+      /\bmartech\b/,
+      /\bmarketing\s+(?:tech(?:nology)?\s+)?stack\b/,
+      /\b(?:what|which)\b[^.?!]{0,30}\bmarketing\s+(?:tools?|platforms?|automation(?:\s+platforms?)?|clouds?|connectors?)\b/,
+      /\bmarketing\s+(?:tools?|platforms?|automation)\b[^.?!]{0,40}\b(?:does|do)\b[^.?!]{0,20}\borg\b/,
+      /\b(?:marketing\s+cloud\s+connect|account\s+engagement)\b/,
+      /\bdoes\s+(?:this|our|the)\s+org\s+(?:have|use)\b[^.?!]{0,40}\b(?:pardot|marketo|hubspot|marketing\s+cloud)\b/,
+      /\b(?:do|does)\s+we\s+(?:have|use)\b[^.?!]{0,30}\b(?:pardot|marketo|hubspot|marketing\s+cloud\s+connect)\b/,
+      /\b(?:pardot|marketo|hubspot)\b[^.?!]{0,30}\b(?:installed|connector|connection|integration)\b/,
+      /\bwhat\s+martech\b/,
+      /\bmarketing\s+connectors?\b/,
     ],
   },
   {
@@ -5493,4 +6056,133 @@ export const logGapIfAny = async (
   } catch {
     return null;
   }
+};
+
+/** One category bucket in a {@link RouteGapSummary}. */
+export interface RouteGapCategoryCount {
+  readonly category: string;
+  readonly count: number;
+}
+
+/**
+ * Aggregated view of the local route-gap log. Category counts only — never
+ * echoes question text or vault paths (those can name org-specific components).
+ * Used by `sfi doctor`, `sfi gaps report`, and the `sfi.capabilities` nudge
+ * (R8-GAPLOG-SURFACE).
+ */
+export interface RouteGapSummary {
+  readonly exists: boolean;
+  readonly count: number;
+  readonly topCategory: string | null;
+  readonly topCount: number;
+  /** Categories ranked by count descending (optionally truncated via `top`). */
+  readonly categories: readonly RouteGapCategoryCount[];
+}
+
+/** Options for {@link summarizeRouteGaps}. */
+export interface SummarizeRouteGapsOptions {
+  /**
+   * Only count entries whose `at` is on/after this instant. Accepts a `Date`
+   * or an ISO-8601 string. Entries missing/unparseable `at` are excluded when
+   * a since filter is set.
+   */
+  readonly since?: Date | string;
+  /** Max categories to return in `categories` (all when omitted). */
+  readonly top?: number;
+}
+
+/**
+ * Summarize the local route-gap log (`question-gaps.jsonl`): how many questions
+ * hit a router gap, and the ranked gap categories. Best-effort and never
+ * throws — a missing/garbled log just reports zero gaps. Local-only telemetry;
+ * the file never leaves the machine. (P12-ROUTER-confusion-report /
+ * R8-GAPLOG-SURFACE.)
+ */
+export const summarizeRouteGaps = async (
+  logFile: string,
+  opts?: SummarizeRouteGapsOptions,
+): Promise<RouteGapSummary> => {
+  let raw: string;
+  try {
+    raw = await readFile(logFile, 'utf8');
+  } catch {
+    // No log at all ≠ "ran clean": the MCP server has not logged anything on
+    // this machine, so the check must not read as a passing routing audit.
+    return { exists: false, count: 0, topCategory: null, topCount: 0, categories: [] };
+  }
+  const sinceMs =
+    opts?.since === undefined
+      ? null
+      : opts.since instanceof Date
+        ? opts.since.getTime()
+        : Date.parse(opts.since);
+  const byCategory = new Map<string, number>();
+  let count = 0;
+  for (const line of raw.split('\n')) {
+    if (line.trim() === '') continue;
+    try {
+      const entry = JSON.parse(line) as { category?: unknown; at?: unknown };
+      if (sinceMs !== null) {
+        if (Number.isNaN(sinceMs)) {
+          // Invalid since → treat as no matches (caller should validate first).
+          continue;
+        }
+        const atMs = typeof entry.at === 'string' ? Date.parse(entry.at) : Number.NaN;
+        if (Number.isNaN(atMs) || atMs < sinceMs) continue;
+      }
+      const cat = typeof entry.category === 'string' ? entry.category : 'unknown';
+      byCategory.set(cat, (byCategory.get(cat) ?? 0) + 1);
+      count += 1;
+    } catch {
+      // skip a malformed line; never break the diagnostic
+    }
+  }
+  const ranked = [...byCategory.entries()]
+    .map(([category, n]) => ({ category, count: n }))
+    .sort((a, b) => b.count - a.count || a.category.localeCompare(b.category));
+  const limit = opts?.top !== undefined && opts.top >= 0 ? opts.top : ranked.length;
+  const categories = ranked.slice(0, limit);
+  const top = categories[0];
+  return {
+    exists: true,
+    count,
+    topCategory: top?.category ?? null,
+    topCount: top?.count ?? 0,
+    categories,
+  };
+};
+
+/**
+ * Open-gap count at which `sfi.capabilities` surfaces a review nudge
+ * (R8-GAPLOG-SURFACE). Below this, the count is still reported but `nudge`
+ * stays null so a quiet machine is not noisy.
+ */
+export const ROUTE_GAP_NUDGE_THRESHOLD = 5;
+
+/** Capabilities / host-facing open-gap nudge payload. */
+export interface RouteGapsNudge {
+  readonly openCount: number;
+  readonly threshold: number;
+  /** Non-null only when `openCount >= threshold`. */
+  readonly nudge: string | null;
+}
+
+/**
+ * Build the open-gap nudge for `sfi.capabilities`. Category/count only — never
+ * includes question text or vault paths. Best-effort; a missing log → count 0.
+ */
+export const routeGapsNudge = async (
+  logFile: string = gapLogPath(),
+  threshold: number = ROUTE_GAP_NUDGE_THRESHOLD,
+): Promise<RouteGapsNudge> => {
+  const summary = await summarizeRouteGaps(logFile);
+  const openCount = summary.count;
+  return {
+    openCount,
+    threshold,
+    nudge:
+      openCount >= threshold
+        ? `${openCount.toLocaleString()} open route gaps — run \`sfi gaps report\` to review`
+        : null,
+  };
 };

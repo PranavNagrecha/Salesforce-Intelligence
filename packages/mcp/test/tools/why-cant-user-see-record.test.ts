@@ -23,6 +23,8 @@ import {
   whyCantUserSeeRecordInputSchema,
 } from '../../src/tools/why-cant-user-see-record.js';
 
+import { measureGraphQueries } from './_graph-query-budget.js';
+
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
   refreshedAt: '2026-05-27T14:33:08Z',
@@ -339,7 +341,7 @@ const criteriaSharingRuleSeed: ExtractionResult = {
 // =============================================================================
 
 const GUEST_OBJ = 'CustomObject:GuestObj';
-const GUEST_RULE_ID = 'SharingRule:GuestObj.Share_To_ClientPortal';
+const GUEST_RULE_ID = 'SharingRule:GuestObj.Share_To_Customer_Site';
 
 const guestSharingRuleSeed: ExtractionResult = {
   nodes: [
@@ -351,21 +353,21 @@ const guestSharingRuleSeed: ExtractionResult = {
     makeNode({
       id: GUEST_RULE_ID,
       type: 'SharingRule',
-      apiName: 'GuestObj.Share_To_ClientPortal',
+      apiName: 'GuestObj.Share_To_Customer_Site',
       parentId: GUEST_OBJ,
       properties: {
         ruleType: 'guest',
         accessLevel: 'Read',
         sharedToType: 'guestUser',
-        sharedToName: 'ClientPortal',
+        sharedToName: 'Customer_Site',
         sharedFromType: null,
         sharedFromName: null,
         booleanFilter: '1 AND 2',
         criteriaItemCount: 2,
-        siteName: 'ClientPortal',
+        siteName: 'Customer_Site',
       },
     }),
-    makeNode({ id: 'Group:ClientPortal', type: 'Group', apiName: 'ClientPortal' }),
+    makeNode({ id: 'Group:Customer_Site', type: 'Group', apiName: 'Customer_Site' }),
   ],
   edges: [
     makeEdge({
@@ -375,9 +377,9 @@ const guestSharingRuleSeed: ExtractionResult = {
     }),
     makeEdge({
       fromId: GUEST_RULE_ID,
-      toId: 'Group:ClientPortal',
+      toId: 'Group:Customer_Site',
       edgeType: 'sharedWith',
-      properties: { synthetic: true, siteName: 'ClientPortal' },
+      properties: { synthetic: true, siteName: 'Customer_Site' },
     }),
   ],
 };
@@ -755,6 +757,139 @@ const hardDenyRestrictionSeed: ExtractionResult = {
     }),
   ],
   edges: [],
+};
+
+// =============================================================================
+// Seed (R7-W4 — PermissionSetGroup MUTING). A Public-Read object where a PSG's
+// two members BOTH grant object Read, but the group's muting permission set
+// DENIES object Read. Muting is group-scoped, so:
+//   - a user assigned ONLY the muting group has NO net object Read → the
+//     object-CRUD precondition FAILS (verdict `restricted`, `mutedBy` names the
+//     muting set) even though the OWD is Public Read — the pre-R7-W4 overstatement.
+//   - a SECOND group with no muting keeps its member's Read (survives).
+//   - a profile granting Read OUTSIDE any group is never muted (survives).
+// Plus a create object where the group mutes object Create, and a legacy muting
+// node (no muted-perm data) that CANNOT be subtracted (disclosed overstatement).
+// =============================================================================
+
+const MUTE_OBJ = 'CustomObject:MuteObj';
+const MUTE_CREATE_OBJ = 'CustomObject:MuteCreateObj';
+const LEGACY_MUTE_OBJ = 'CustomObject:LegacyMuteObj';
+const MUTE_GROUP = 'PermissionSetGroup:MuteG';
+const CLEAN_GROUP = 'PermissionSetGroup:CleanG';
+const MUTE_CREATE_GROUP = 'PermissionSetGroup:MuteCreateG';
+const LEGACY_MUTE_GROUP = 'PermissionSetGroup:LegacyG';
+const MUTE_READ_SET = 'MutingPermissionSet:MuteRead';
+const MUTE_CREATE_SET = 'MutingPermissionSet:MuteCreate';
+const OUTSIDE_READER_PROFILE = 'Profile:OutsideReader';
+
+const mutingSeed: ExtractionResult = {
+  nodes: [
+    // Public-Read object: without muting, object Read via the group → visible.
+    makeNode({ id: MUTE_OBJ, apiName: 'MuteObj', properties: { sharingModel: 'Read' } }),
+    // Group members: BOTH grant object Read on MuteObj.
+    makeNode({ id: 'PermissionSet:MuteM1', type: 'PermissionSet', apiName: 'MuteM1' }),
+    makeNode({ id: 'PermissionSet:MuteM2', type: 'PermissionSet', apiName: 'MuteM2' }),
+    // Muting set — R6-06 muted-perm node properties: denies object Read on MuteObj.
+    makeNode({
+      id: MUTE_READ_SET,
+      type: 'MutingPermissionSet',
+      apiName: 'MuteRead',
+      properties: {
+        mutedObjectPermissions: [
+          {
+            object: 'MuteObj',
+            allowCreate: false,
+            allowRead: true,
+            allowEdit: false,
+            allowDelete: false,
+            viewAllRecords: false,
+            modifyAllRecords: false,
+          },
+        ],
+        mutedFieldPermissions: [],
+        mutedUserPermissions: [],
+        mutedCustomPermissions: [],
+        mutedApexClasses: [],
+      },
+    }),
+    makeNode({
+      id: MUTE_GROUP,
+      type: 'PermissionSetGroup',
+      apiName: 'MuteG',
+      properties: { permissionSets: ['MuteM1', 'MuteM2'], mutingPermissionSets: ['MuteRead'] },
+    }),
+    // A second group with NO muting — its member's Read must survive intact.
+    makeNode({ id: 'PermissionSet:MuteM3', type: 'PermissionSet', apiName: 'MuteM3' }),
+    makeNode({
+      id: CLEAN_GROUP,
+      type: 'PermissionSetGroup',
+      apiName: 'CleanG',
+      properties: { permissionSets: ['MuteM3'] },
+    }),
+    // A profile granting Read OUTSIDE any group — muting is group-scoped, so it
+    // is never subtracted.
+    makeNode({ id: OUTSIDE_READER_PROFILE, type: 'Profile', apiName: 'OutsideReader' }),
+    // Create object: a member grants object Create, the group mutes it.
+    makeNode({ id: MUTE_CREATE_OBJ, apiName: 'MuteCreateObj', properties: { sharingModel: 'Private' } }),
+    makeNode({ id: 'PermissionSet:MuteCM1', type: 'PermissionSet', apiName: 'MuteCM1' }),
+    makeNode({
+      id: MUTE_CREATE_SET,
+      type: 'MutingPermissionSet',
+      apiName: 'MuteCreate',
+      properties: {
+        mutedObjectPermissions: [
+          {
+            object: 'MuteCreateObj',
+            allowCreate: true,
+            allowRead: false,
+            allowEdit: false,
+            allowDelete: false,
+            viewAllRecords: false,
+            modifyAllRecords: false,
+          },
+        ],
+        mutedFieldPermissions: [],
+        mutedUserPermissions: [],
+        mutedCustomPermissions: [],
+        mutedApexClasses: [],
+      },
+    }),
+    makeNode({
+      id: MUTE_CREATE_GROUP,
+      type: 'PermissionSetGroup',
+      apiName: 'MuteCreateG',
+      properties: { permissionSets: ['MuteCM1'], mutingPermissionSets: ['MuteCreate'] },
+    }),
+    // Legacy muting node (vault refreshed before R6-06): NO muted-perm props, so
+    // it CANNOT be subtracted — access may be overstated (disclosed).
+    makeNode({ id: LEGACY_MUTE_OBJ, apiName: 'LegacyMuteObj', properties: { sharingModel: 'Read' } }),
+    makeNode({ id: 'PermissionSet:LegacyM1', type: 'PermissionSet', apiName: 'LegacyM1' }),
+    makeNode({ id: 'MutingPermissionSet:LegacyMute', type: 'MutingPermissionSet', apiName: 'LegacyMute' }),
+    makeNode({
+      id: LEGACY_MUTE_GROUP,
+      type: 'PermissionSetGroup',
+      apiName: 'LegacyG',
+      properties: { permissionSets: ['LegacyM1'], mutingPermissionSets: ['LegacyMute'] },
+    }),
+  ],
+  edges: [
+    makeEdge({ fromId: 'PermissionSet:MuteM1', toId: MUTE_OBJ, edgeType: 'grantedBy', properties: { allowRead: true } }),
+    makeEdge({ fromId: 'PermissionSet:MuteM2', toId: MUTE_OBJ, edgeType: 'grantedBy', properties: { allowRead: true } }),
+    makeEdge({ fromId: 'PermissionSet:MuteM3', toId: MUTE_OBJ, edgeType: 'grantedBy', properties: { allowRead: true } }),
+    makeEdge({ fromId: OUTSIDE_READER_PROFILE, toId: MUTE_OBJ, edgeType: 'grantedBy', properties: { allowRead: true } }),
+    makeEdge({ fromId: 'PermissionSet:MuteCM1', toId: MUTE_CREATE_OBJ, edgeType: 'grantedBy', properties: { allowCreate: true } }),
+    makeEdge({ fromId: 'PermissionSet:LegacyM1', toId: LEGACY_MUTE_OBJ, edgeType: 'grantedBy', properties: { allowRead: true } }),
+    // PSG membership + muting reference edges (real runtime shapes).
+    makeEdge({ fromId: MUTE_GROUP, toId: 'PermissionSet:MuteM1', edgeType: 'references', properties: { referenceKind: 'permissionSetGroupMember' } }),
+    makeEdge({ fromId: MUTE_GROUP, toId: 'PermissionSet:MuteM2', edgeType: 'references', properties: { referenceKind: 'permissionSetGroupMember' } }),
+    makeEdge({ fromId: MUTE_GROUP, toId: MUTE_READ_SET, edgeType: 'references', properties: { referenceKind: 'mutingPermissionSet' } }),
+    makeEdge({ fromId: CLEAN_GROUP, toId: 'PermissionSet:MuteM3', edgeType: 'references', properties: { referenceKind: 'permissionSetGroupMember' } }),
+    makeEdge({ fromId: MUTE_CREATE_GROUP, toId: 'PermissionSet:MuteCM1', edgeType: 'references', properties: { referenceKind: 'permissionSetGroupMember' } }),
+    makeEdge({ fromId: MUTE_CREATE_GROUP, toId: MUTE_CREATE_SET, edgeType: 'references', properties: { referenceKind: 'mutingPermissionSet' } }),
+    makeEdge({ fromId: LEGACY_MUTE_GROUP, toId: 'PermissionSet:LegacyM1', edgeType: 'references', properties: { referenceKind: 'permissionSetGroupMember' } }),
+    makeEdge({ fromId: LEGACY_MUTE_GROUP, toId: 'MutingPermissionSet:LegacyMute', edgeType: 'references', properties: { referenceKind: 'mutingPermissionSet' } }),
+  ],
 };
 
 // One shared graph store + Context across the suite. All seeds use
@@ -1229,6 +1364,7 @@ beforeAll(async () => {
     ownerSubordinateTruncatedSeed,
     restrictionRuleSeed,
     hardDenyRestrictionSeed,
+    mutingSeed,
     godModeSeed,
     godModeRestrictedSeed,
     modifyAllSeed,
@@ -1667,7 +1803,7 @@ describe('whyCantUserSeeRecordHandler', () => {
   it('CR-CAP-16: a GUEST sharing rule surfaces an unknown TerritoryAndGuestRules step with rule id / site / predicate', async () => {
     const result = await whyCantUserSeeRecordHandler(ctx, {
       componentId: GUEST_OBJ,
-      userContext: { groupIds: ['Group:ClientPortal'] },
+      userContext: { groupIds: ['Group:Customer_Site'] },
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -1677,7 +1813,7 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(tg[0]?.verdict).toBe('unknown');
     // Declared detail surfaced: rule id, site name, and predicate.
     expect(tg[0]?.reason).toContain(GUEST_RULE_ID);
-    expect(tg[0]?.reason).toContain('ClientPortal');
+    expect(tg[0]?.reason).toContain('Customer_Site');
     expect(tg[0]?.reason).toContain('1 AND 2');
     // Aggregate stays unknown — the rule's applicability is record-level.
     expect(verdict).toBe('unknown');
@@ -2343,5 +2479,184 @@ describe('whyCantUserSeeRecordHandler: userContext apiName coercion', () => {
     // A CustomObject id never matches a grantedBy edge -> not visible-by-grant,
     // and crucially: no crash, honest cascade.
     expect(r.value.data.verdict).not.toBe('visible');
+  });
+
+  // ===========================================================================
+  // R7-W4 — PermissionSetGroup MUTING subtracts from the object-CRUD precondition.
+  // ===========================================================================
+  describe('R7-W4 group-scoped muting of the object-CRUD precondition', () => {
+    it('mutes object Read within the group → precondition FAILS, verdict restricted, mutedBy names the set', async () => {
+      // Both group members grant object Read on a Public-Read object, but the
+      // group's muting set denies object Read. Pre-R7-W4 the object-Read
+      // precondition passed (member grant counted) and the Public-Read OWD made
+      // this `visible` — the OVERSTATEMENT. Now muting removes the members' Read
+      // net, so the precondition fails and the honest answer is `restricted`.
+      const r = await whyCantUserSeeRecordHandler(ctx, {
+        componentId: MUTE_OBJ,
+        userContext: { permissionSetIds: [MUTE_GROUP] },
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.verdict).toBe('restricted');
+      // The muting set is named at the top level and on the PermissionGrant step.
+      expect(r.value.data.mutedBy).toEqual([MUTE_READ_SET]);
+      const grant = r.value.data.reasoning.find((s) => s.stage === 'PermissionGrant');
+      expect(grant?.verdict).toBe('restricted');
+      expect(grant?.mutedBy).toEqual([MUTE_READ_SET]);
+      expect(grant?.reason).toMatch(/muted/i);
+      expect(grant?.reason).toContain(MUTE_READ_SET);
+      // OWD stage is Public-Read (visible in isolation) but the hard deny wins.
+      const owd = r.value.data.reasoning.find((s) => s.stage === 'OWD');
+      expect(owd?.verdict).toBe('visible');
+      expect(r.value.data.hardDenyReason).toMatch(/muted/i);
+    });
+
+    it('REGRESSION: a PSG member Read with NO muting on the group is unchanged (visible)', async () => {
+      // The second group has no muting set; its member grants object Read, so the
+      // Public-Read OWD legitimately makes the record visible — no behavior change.
+      const r = await whyCantUserSeeRecordHandler(ctx, {
+        componentId: MUTE_OBJ,
+        userContext: { permissionSetIds: [CLEAN_GROUP] },
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.verdict).toBe('visible');
+      expect(r.value.data.mutedBy).toBeUndefined();
+      const owd = r.value.data.reasoning.find((s) => s.stage === 'OWD');
+      expect(owd?.verdict).toBe('visible');
+    });
+
+    it('a grant surviving via the profile OUTSIDE the group is NOT muted (visible)', async () => {
+      // Even assigned the muting group, a profile granting object Read outside any
+      // group survives (muting is group-scoped) → precondition passes → visible.
+      const r = await whyCantUserSeeRecordHandler(ctx, {
+        componentId: MUTE_OBJ,
+        userContext: {
+          profileId: OUTSIDE_READER_PROFILE,
+          permissionSetIds: [MUTE_GROUP],
+        },
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.verdict).toBe('visible');
+      expect(r.value.data.mutedBy).toBeUndefined();
+    });
+
+    it('mutes object Create within the group → create verdict restricted, mutedBy named', async () => {
+      const r = await whyCantUserSeeRecordHandler(ctx, {
+        componentId: MUTE_CREATE_OBJ,
+        accessLevel: 'create',
+        userContext: { permissionSetIds: [MUTE_CREATE_GROUP] },
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.verdict).toBe('restricted');
+      expect(r.value.data.mutedBy).toEqual([MUTE_CREATE_SET]);
+      const grant = r.value.data.reasoning.find((s) => s.stage === 'PermissionGrant');
+      expect(grant?.verdict).toBe('restricted');
+      expect(grant?.mutedBy).toEqual([MUTE_CREATE_SET]);
+    });
+
+    it('a legacy muting node (no muted-perm data) CANNOT be subtracted → access preserved but disclosed as overstated', async () => {
+      // The muting node predates the R6-06 extractor (no muted* properties), so
+      // its Read mute cannot be applied. Honesty: do NOT drop the grant (would be
+      // a false deny) — keep it visible but DISCLOSE the possible overstatement.
+      const r = await whyCantUserSeeRecordHandler(ctx, {
+        componentId: LEGACY_MUTE_OBJ,
+        userContext: { permissionSetIds: [LEGACY_MUTE_GROUP] },
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.verdict).toBe('visible');
+      expect(r.value.data.mutedBy).toBeUndefined();
+      const psg = r.value.data.reasoning.find((s) => s.stage === 'PermissionSetGroup');
+      expect(psg?.reason).toMatch(/OVERSTATED/);
+      expect(psg?.reason).toContain('MutingPermissionSet:LegacyMute');
+      expect(r.value.data.boundaryNote).toMatch(/OVERSTATED/);
+    });
+
+    it('PermissionSetGroup step reports muting WAS applied to the precondition', async () => {
+      const r = await whyCantUserSeeRecordHandler(ctx, {
+        componentId: MUTE_OBJ,
+        userContext: { permissionSetIds: [MUTE_GROUP] },
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const psg = r.value.data.reasoning.find((s) => s.stage === 'PermissionSetGroup');
+      expect(psg?.reason).toMatch(/subtracted from the object-CRUD precondition/i);
+      expect(psg?.reason).toContain(MUTE_READ_SET);
+    });
+  });
+});
+
+// =============================================================================
+// N+1 query budget (finding C-1). fetchSharingRules (parentOf children) and
+// the owner-rule sharedWith walk (per-rule listEdges inside ownerRuleMatches)
+// used to scale with the number of sharing rules on the object; both are now
+// batched. The query count must NOT scale with the owner-rule count.
+// =============================================================================
+describe('whyCantUserSeeRecordHandler — bounded graph queries', () => {
+  const seedWideObject = async (ruleCount: number) => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-wcusr-budget-'));
+    const opened = await openGraph(join(dir, 'wcusr.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const s = opened.value;
+    const OBJ = 'CustomObject:Wide';
+    const GROUP = 'Group:Wide_PG';
+    const nodes: Node[] = [
+      makeNode({ id: OBJ, apiName: 'Wide', properties: { sharingModel: 'Private' } }),
+      makeNode({ id: GROUP, type: 'Group', apiName: 'Wide_PG' }),
+    ];
+    const edges: Edge[] = [];
+    for (let i = 0; i < ruleCount; i += 1) {
+      const ruleId = `SharingRule:Wide.Rule${i}`;
+      nodes.push(
+        makeNode({
+          id: ruleId,
+          type: 'SharingRule',
+          apiName: `Wide.Rule${i}`,
+          parentId: OBJ,
+          properties: { ruleType: 'owner', accessLevel: 'Read' },
+        }),
+      );
+      edges.push(makeEdge({ fromId: OBJ, toId: ruleId, edgeType: 'parentOf' }));
+      edges.push(
+        makeEdge({
+          fromId: ruleId,
+          toId: GROUP,
+          edgeType: 'sharedWith',
+          properties: { direction: 'to' },
+        }),
+      );
+    }
+    const imported = await importExtractionResults(s, [{ nodes, edges }]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const wideCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s } as Context;
+    const measured = await measureGraphQueries(s, () =>
+      // A userContext with NO group membership so the cascade walks EVERY owner
+      // rule (none short-circuits to visible) — exercising the full fan-out.
+      whyCantUserSeeRecordHandler(wideCtx, {
+        componentId: OBJ,
+        userContext: { profileId: 'Profile:Std' },
+      }),
+    );
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+    return measured;
+  };
+
+  it('issues a query count independent of the owner-rule count', async () => {
+    const small = await seedWideObject(60);
+    const large = await seedWideObject(200);
+    expect(small.result.ok).toBe(true);
+    expect(large.result.ok).toBe(true);
+    // Batched fetchSharingRules + one listEdgesForNodes over all rules'
+    // sharedWith edges — not one listEdges per rule.
+    expect(large.edgeQueries).toBe(small.edgeQueries);
+    expect(large.nodeQueries).toBe(small.nodeQueries);
+    // A per-rule listEdges (>=200) or per-child getNodeById (>=200) would blow
+    // this; batched, the counts are a small constant.
+    expect(large.edgeQueries).toBeLessThan(60);
+    expect(large.nodeQueries).toBeLessThan(60);
   });
 });

@@ -16,6 +16,18 @@
       "sfi.call_graph",
       "sfi.get_subgraph"
     ],
+    "recordId": [
+      "sfi.live_field_history",
+      "sfi.live_record_access",
+      "sfi.live_record_shares",
+      "sfi.lookup_record"
+    ],
+    "userId": [
+      "sfi.live_record_access"
+    ],
+    "afterId": [
+      "sfi.live_permset_holders"
+    ],
     "fieldId": [
       "sfi.explain_field",
       "sfi.explain_formula",
@@ -39,6 +51,7 @@
       "sfi.field_cleanup_candidates",
       "sfi.find_dead_code",
       "sfi.generate_data_dictionary",
+      "sfi.history_tracking_gaps",
       "sfi.pii_inventory",
       "sfi.unused_fields_deep"
     ],
@@ -50,7 +63,11 @@
     "profileId": [
       "sfi.effective_permissions",
       "sfi.layout_for_user",
+      "sfi.profile_security",
       "sfi.what_if_split_profile"
+    ],
+    "communityId": [
+      "sfi.guest_exposure_report"
     ],
     "recordTypeId": [
       "sfi.layout_for_user",
@@ -59,15 +76,16 @@
     "eventId": [
       "sfi.event_subscribers"
     ],
-    "recordId": [
-      "sfi.lookup_record"
-    ],
     "flowId": [
       "sfi.explain_flow",
       "sfi.what_if_deactivate_flow"
     ],
     "triggerId": [
       "sfi.what_if_disable_trigger"
+    ],
+    "permissionSetId": [
+      "sfi.what_if_assign_permset",
+      "sfi.what_if_revoke_permset"
     ],
     "rootApexClassId": [
       "sfi.async_chain_depth"

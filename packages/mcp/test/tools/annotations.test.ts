@@ -1,6 +1,6 @@
 /// <reference types="vitest/globals" />
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -16,14 +16,17 @@ import { appendAnnotationEvent, readAnnotations } from '@sf-intelligence/vault';
 import type { Context } from '../../src/server.js';
 import {
   annotationsHandler,
+  confirmAnnotationHandler,
   proposeAnnotationHandler,
   PROPOSE_SESSION_CAP,
+  rejectAnnotationHandler,
   resetProposalSessionCap,
+  reviewAnnotationsHandler,
 } from '../../src/tools/annotations.js';
 
 /**
- * P13-ANNOT-tools — sfi.annotations (read) + sfi.propose_annotation
- * (AI proposal: ALWAYS source:'ai' confirmed:false; session rate-cap).
+ * P13-ANNOT-tools + R8-ANNOTATION-REVIEW — sfi.annotations (read) +
+ * sfi.propose_annotation + review/confirm/reject.
  */
 
 const FIXTURE_MANIFEST: VaultManifest = {
@@ -157,6 +160,177 @@ describe('sfi.propose_annotation', () => {
     expect(over.ok).toBe(false);
     if (over.ok) return;
     expect(over.error.message).toContain('session cap');
-    expect(over.error.message).toContain('sfi annotate');
+    expect(over.error.message).toContain('sfi.confirm_annotation');
+  });
+});
+
+describe('sfi.review_annotations / confirm / reject (R8-ANNOTATION-REVIEW)', () => {
+  it('lists only unconfirmed proposals and filters by componentId/key/author', async () => {
+    const at = '2026-06-10T01:00:00.000Z';
+    await appendAnnotationEvent(tempDir, {
+      componentId: 'ApexClass:Alpha', key: 'owner', value: 'Platform',
+      author: 'pranav', source: 'human', confirmed: true, at, op: 'set',
+    });
+    await appendAnnotationEvent(tempDir, {
+      componentId: 'ApexClass:Alpha', key: 'status', value: 'deprecated',
+      author: 'ai (lifecycle)', source: 'ai', confirmed: false, at, op: 'set',
+    });
+    await appendAnnotationEvent(tempDir, {
+      componentId: 'CustomObject:Other', key: 'note', value: 'x',
+      author: 'ai', source: 'ai', confirmed: false, at, op: 'set',
+    });
+
+    const all = await reviewAnnotationsHandler(ctx, {});
+    expect(all.ok).toBe(true);
+    if (!all.ok) return;
+    expect(all.value.data.totalCount).toBe(2);
+    expect(all.value.data.proposals.every((p) => !p.confirmed)).toBe(true);
+
+    const scoped = await reviewAnnotationsHandler(ctx, {
+      componentId: 'ApexClass:Alpha',
+      key: 'status',
+      author: 'lifecycle',
+    });
+    expect(scoped.ok).toBe(true);
+    if (!scoped.ok) return;
+    expect(scoped.value.data.proposals.map((p) => p.value)).toEqual(['deprecated']);
+  });
+
+  it('confirm promotes an AI proposal to human-confirmed; idempotent when already confirmed', async () => {
+    await appendAnnotationEvent(tempDir, {
+      componentId: 'ApexClass:Alpha',
+      key: 'status',
+      value: 'deprecated',
+      author: 'ai',
+      source: 'ai',
+      confirmed: false,
+      at: '2026-06-10T01:00:00.000Z',
+      op: 'set',
+    });
+    const r = await confirmAnnotationHandler(ctx, {
+      componentId: 'ApexClass:Alpha',
+      key: 'status',
+      author: 'reviewer',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.confirmed).toBe(true);
+    expect(r.value.data.alreadyConfirmed).toBe(false);
+    expect(r.value.data.annotation.source).toBe('human');
+    const stored = await readAnnotations(tempDir);
+    const status = stored.find((a) => a.key === 'status');
+    expect(status?.confirmed).toBe(true);
+    expect(status?.source).toBe('human');
+    expect(status?.author).toBe('reviewer');
+
+    const again = await confirmAnnotationHandler(ctx, {
+      componentId: 'ApexClass:Alpha',
+      key: 'status',
+    });
+    expect(again.ok).toBe(true);
+    if (!again.ok) return;
+    expect(again.value.data.alreadyConfirmed).toBe(true);
+  });
+
+  it('reject unsets an unconfirmed proposal and refuses confirmed entries', async () => {
+    await appendAnnotationEvent(tempDir, {
+      componentId: 'ApexClass:Alpha',
+      key: 'note',
+      value: 'temp proposal',
+      author: 'ai',
+      source: 'ai',
+      confirmed: false,
+      at: '2026-06-10T01:00:00.000Z',
+      op: 'set',
+    });
+    const rejected = await rejectAnnotationHandler(ctx, {
+      componentId: 'ApexClass:Alpha',
+      key: 'note',
+    });
+    expect(rejected.ok).toBe(true);
+    if (!rejected.ok) return;
+    expect(rejected.value.data.rejected).toBe(true);
+    expect(rejected.value.data.previousValue).toBe('temp proposal');
+    expect(await readAnnotations(tempDir)).toEqual([]);
+
+    await appendAnnotationEvent(tempDir, {
+      componentId: 'ApexClass:Alpha',
+      key: 'owner',
+      value: 'Platform',
+      author: 'pranav',
+      source: 'human',
+      confirmed: true,
+      at: '2026-06-10T02:00:00.000Z',
+      op: 'set',
+    });
+    const refuse = await rejectAnnotationHandler(ctx, {
+      componentId: 'ApexClass:Alpha',
+      key: 'owner',
+    });
+    expect(refuse.ok).toBe(false);
+    if (refuse.ok) return;
+    expect(refuse.error.message).toContain('already confirmed');
+  });
+
+  it('confirm/reject fail closed when the pair is missing', async () => {
+    const missingConfirm = await confirmAnnotationHandler(ctx, {
+      componentId: 'ApexClass:Alpha',
+      key: 'status',
+    });
+    expect(missingConfirm.ok).toBe(false);
+    const missingReject = await rejectAnnotationHandler(ctx, {
+      componentId: 'ApexClass:Alpha',
+      key: 'status',
+    });
+    expect(missingReject.ok).toBe(false);
+  });
+
+  it('attributes propose/confirm/reject to Context.callerIdentity when known (R8-PERCALLER-TOKENS)', async () => {
+    const identified: Context = {
+      ...ctx,
+      callerIdentity: { id: 'synth-alice', label: 'Alice Synth' },
+    };
+    const proposed = await proposeAnnotationHandler(identified, {
+      componentId: 'ApexClass:Alpha',
+      key: 'status',
+      value: 'deprecated',
+      rationale: 'lifecycle',
+    });
+    expect(proposed.ok).toBe(true);
+    expect((await readAnnotations(tempDir))[0]?.author).toBe('Alice Synth (lifecycle)');
+
+    const confirmed = await confirmAnnotationHandler(identified, {
+      componentId: 'ApexClass:Alpha',
+      key: 'status',
+    });
+    expect(confirmed.ok).toBe(true);
+    expect((await readAnnotations(tempDir))[0]?.author).toBe('Alice Synth');
+    expect((await readAnnotations(tempDir))[0]?.confirmed).toBe(true);
+
+    rmSync(join(tempDir, 'meta', 'annotations.jsonl'), { force: true });
+    const bob: Context = { ...ctx, callerIdentity: { id: 'synth-bob' } };
+    await proposeAnnotationHandler(bob, {
+      componentId: 'ApexClass:Alpha',
+      key: 'note',
+      value: 'temp',
+    });
+    const rejected = await rejectAnnotationHandler(bob, {
+      componentId: 'ApexClass:Alpha',
+      key: 'note',
+    });
+    expect(rejected.ok).toBe(true);
+    const raw = readFileSync(join(tempDir, 'meta', 'annotations.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { op: string; author: string });
+    expect(raw.some((e) => e.op === 'unset' && e.author === 'synth-bob')).toBe(true);
+
+    rmSync(join(tempDir, 'meta', 'annotations.jsonl'), { force: true });
+    const idOnly = await proposeAnnotationHandler(
+      { ...ctx, callerIdentity: { id: 'synth-carol' } },
+      { componentId: 'ApexClass:Alpha', key: 'owner', value: 'Platform' },
+    );
+    expect(idOnly.ok).toBe(true);
+    expect((await readAnnotations(tempDir))[0]?.author).toBe('synth-carol');
   });
 });

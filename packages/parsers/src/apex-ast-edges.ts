@@ -2,14 +2,25 @@
  * P13-AST-edges — parser-grade Apex edge extraction (flag-gated).
  *
  * Two passes over the ANTLR tree the spike vendored:
- *   1. SYMBOLS — field/local/parameter/for-each declarations (name → type),
- *      own + inner class names, method names, the extends target.
- *   2. RESOLUTION — dot-chains resolve their receiver through the symbol
- *      table: SObject-typed receivers yield field reads/writes (assignment
- *      LHS = write, everything else = read), class-typed receivers yield
- *      method calls; bare calls matching own methods are self-calls; SOQL
- *      blocks (inline AND constant-string `Database.query` /
- *      `getQueryLocator` literals) yield field-level reads.
+ *   1. SYMBOLS — class fields/properties (file-wide); method params / locals /
+ *      for-each vars scoped per MethodDeclaration (params shadow fields);
+ *      own-method return types; own + inner class names; extends target.
+ *   2. RESOLUTION — dot-chains resolve their receiver through the scoped
+ *      symbol table: SObject-typed receivers yield field reads/writes
+ *      (assignment LHS = write, everything else = read), class-typed
+ *      receivers yield method calls; own-method return types propagate
+ *      through same-file call chains (`getAccount().Name`,
+ *      `this.getAccount().Industry`); bare calls matching own methods are
+ *      self-calls; SOQL blocks (inline AND constant-string `Database.query`
+ *      / `getQueryLocator` literals) yield field-level reads.
+ *
+ * AST ≠ compiler (honesty floor — never over-claim):
+ *   - Single-file only; cross-file inheritance fields/methods unresolved
+ *     beyond the `knownClasses` name set + same-file `extends` token.
+ *   - Own-method return types only (no cross-class return-type table;
+ *     overloads collapse to last declaration).
+ *   - Dynamic SOQL, reflection (`get`/`put`), and Type.forName dispatch
+ *     remain invisible by design.
  *
  * Validated against the 30-class golden corpus (100% — the gate's
  * `harness:ast-goldens` judges this module on every run). Like the spike,
@@ -161,8 +172,17 @@ export const extractApexAstEdges = (
   }
 
   // ---- pass 1: symbols -----------------------------------------------------
-  const varTypes = new Map<string, string>();
+  // Fields/properties are file-wide. Params + locals + for-each vars are
+  // scoped per MethodDeclaration so `Account rec` in a() cannot collide with
+  // `Contact rec` in b() (CTO #7 — file-global table was minting wrong
+  // parsed-confidence field edges). Locals outside any method (static /
+  // instance initializers) land in orphanLocals.
+  const fieldTypes = new Map<string, string>();
+  const methodLocals = new Map<Ctx, Map<string, string>>();
+  const orphanLocals = new Map<string, string>();
   const ownMethods = new Set<string>();
+  /** Own-method return types (lowercase name → type). Overloads: last wins. */
+  const methodReturnTypes = new Map<string, string>();
   const innerClasses = new Map<string, string>();
   let extendsType: string | null = null;
 
@@ -173,33 +193,76 @@ export const extractApexAstEdges = (
     const ext = kidList.findIndex((k) => k.getText?.() === 'extends');
     if (idx === 0 && ext >= 0) extendsType = (kidList[ext + 1]?.getText() as string) ?? null;
   });
+
+  const scopeFor = (node: Ctx): Map<string, string> => {
+    const md = ancestorWhere(node, (c) => ctxName(c) === 'MethodDeclaration');
+    if (md === null) return orphanLocals;
+    let scope = methodLocals.get(md);
+    if (scope === undefined) {
+      scope = new Map<string, string>();
+      methodLocals.set(md, scope);
+    }
+    return scope;
+  };
+  const declareVar = (
+    typeText: string | undefined,
+    varName: string | undefined,
+    scope: Map<string, string>,
+  ): void => {
+    if (typeText === undefined || varName === undefined || typeText.length === 0) return;
+    scope.set(varName.toLowerCase(), typeText.trim());
+  };
+
   for (const md of findAll(tree, 'MethodDeclaration')) {
     const id = kids(md).find((k) => ctxName(k) === 'Id')?.getText() as string | undefined;
-    if (id !== undefined) ownMethods.add(id.toLowerCase());
+    if (id === undefined) continue;
+    ownMethods.add(id.toLowerCase());
+    const ret = kids(md).find((k) => ctxName(k) === 'TypeRef')?.getText() as string | undefined;
+    if (ret !== undefined && ret.length > 0) {
+      methodReturnTypes.set(id.toLowerCase(), ret.trim());
+    }
   }
-  const declareVar = (typeText: string | undefined, varName: string | undefined): void => {
-    if (typeText === undefined || varName === undefined || typeText.length === 0) return;
-    varTypes.set(varName.toLowerCase(), typeText.trim());
-  };
   for (const fd of findAll(tree, 'FieldDeclaration')) {
     const t = kids(fd)[0]?.getText() as string | undefined;
-    for (const vd of findAll(fd, 'VariableDeclarator')) declareVar(t, findAll(vd, 'Id')[0]?.getText());
+    for (const vd of findAll(fd, 'VariableDeclarator')) {
+      declareVar(t, findAll(vd, 'Id')[0]?.getText(), fieldTypes);
+    }
+  }
+  for (const pd of findAll(tree, 'PropertyDeclaration')) {
+    declareVar(kids(pd)[0]?.getText(), findAll(pd, 'Id')[0]?.getText(), fieldTypes);
   }
   for (const lv of findAll(tree, 'LocalVariableDeclaration')) {
     const t = (kids(lv).find((k) => ctxName(k) === 'TypeRef')?.getText() ?? kids(lv)[0]?.getText()) as string | undefined;
-    for (const vd of findAll(lv, 'VariableDeclarator')) declareVar(t, findAll(vd, 'Id')[0]?.getText());
+    for (const vd of findAll(lv, 'VariableDeclarator')) {
+      declareVar(t, findAll(vd, 'Id')[0]?.getText(), scopeFor(lv));
+    }
   }
   for (const fp of findAll(tree, 'FormalParameter')) {
-    const ks = kids(fp);
-    declareVar(ks[ks.length - 2]?.getText(), ks[ks.length - 1]?.getText());
+    const typeText =
+      (kids(fp).find((k) => ctxName(k) === 'TypeRef')?.getText() as string | undefined) ??
+      (kids(fp)[kids(fp).length - 2]?.getText() as string | undefined);
+    const varName =
+      (kids(fp).find((k) => ctxName(k) === 'Id')?.getText() as string | undefined) ??
+      (kids(fp)[kids(fp).length - 1]?.getText() as string | undefined);
+    declareVar(typeText, varName, scopeFor(fp));
   }
   for (const fc of findAll(tree, 'EnhancedForControl')) {
     const ks = kids(fc);
-    declareVar(ks[0]?.getText(), ks[1]?.getText());
+    declareVar(ks[0]?.getText(), ks[1]?.getText(), scopeFor(fc));
   }
-  for (const pd of findAll(tree, 'PropertyDeclaration')) {
-    declareVar(kids(pd)[0]?.getText(), findAll(pd, 'Id')[0]?.getText());
-  }
+
+  /** Resolve a variable at a use-site: method locals/params shadow fields. */
+  const resolveVarType = (name: string, at: Ctx): string | null => {
+    const lower = name.toLowerCase();
+    const md = ancestorWhere(at, (c) => ctxName(c) === 'MethodDeclaration');
+    if (md !== null) {
+      const scope = methodLocals.get(md);
+      if (scope?.has(lower)) return scope.get(lower) ?? null;
+    } else if (orphanLocals.has(lower)) {
+      return orphanLocals.get(lower) ?? null;
+    }
+    return fieldTypes.get(lower) ?? null;
+  };
 
   const calls = new Set<string>();
   const reads = new Set<string>();
@@ -314,23 +377,116 @@ export const extractApexAstEdges = (
   }
 
   // ---- assignments (writes) --------------------------------------------------
-  interface DotSeg { root: string; rootNode: Ctx; path: string[] }
+  interface PathSeg { name: string; isCall: boolean }
+  interface DotSeg { root: string; rootNode: Ctx; path: PathSeg[] }
   const dotSegments = (dot: Ctx): DotSeg | null => {
-    const path: string[] = [];
+    const path: PathSeg[] = [];
     let cur: Ctx = dot;
     while (cur !== undefined && ctxName(cur) === 'DotExpression') {
       const ks = kids(cur);
       const tail = ks[ks.length - 1];
       if (ctxName(tail) === 'DotMethodCall') {
         const id = (findAll(tail, 'AnyId')[0]?.getText() ?? findAll(tail, 'Id')[0]?.getText()) as string | undefined;
-        path.unshift(id ?? '');
+        path.unshift({ name: id ?? '', isCall: true });
       } else {
-        path.unshift(tail.getText() as string);
+        path.unshift({ name: tail.getText() as string, isCall: false });
       }
       cur = ks[0];
     }
     if (cur === undefined) return null;
     return { root: cur.getText() as string, rootNode: cur, path };
+  };
+
+  /**
+   * Resolve the root of a dot-chain to a type name. Own-method call roots
+   * (`getAccount().Name`) use the return-type table; variables use the
+   * scoped symbol table.
+   */
+  const resolveRootType = (seg: DotSeg): string | null => {
+    const rootLower = seg.root.toLowerCase();
+    if (/^new\s*/i.test(seg.root) || ctxName(seg.rootNode) === 'NewExpression') {
+      return seg.root.replace(/^new\s*/i, '').replace(/\(.*\)$/, '').replace(/[<>].*$/, '');
+    }
+    if (rootLower === 'this') return className;
+    if (rootLower === 'super') return extendsType;
+    if (ctxName(seg.rootNode) === 'MethodCallExpression') {
+      const mid = findAll(seg.rootNode, 'Id')[0]?.getText() as string | undefined;
+      if (mid === undefined || !ownMethods.has(mid.toLowerCase())) return null;
+      return methodReturnTypes.get(mid.toLowerCase()) ?? null;
+    }
+    return resolveVarType(seg.root, seg.rootNode);
+  };
+
+  /**
+   * Walk leading call segments. Same-file own-class receivers advance through
+   * `methodReturnTypes`; cross-class / unknown receivers stop honestly (no
+   * invented return type). When `record` is true, emits call edges for every
+   * resolved call segment — including mid-chain calls that older code skipped
+   * because they lived under a nested DotExpression.
+   */
+  const advanceCalls = (
+    startType: string | null,
+    path: PathSeg[],
+    at: Ctx,
+    record: boolean,
+  ): { type: string | null; fieldStart: number } => {
+    let type = startType;
+    let i = 0;
+    for (; i < path.length; i++) {
+      const seg = path[i];
+      if (seg === undefined || !seg.isCall) break;
+      const method = seg.name;
+      if (type === null) break;
+      if (isUserClass(type)) {
+        if (record) recordCall(`${resolveType(type)}.${method}`, at);
+        // Only `className` has a return-type table in this file.
+        if (type === className || resolveType(type) === className) {
+          type = methodReturnTypes.get(method.toLowerCase()) ?? null;
+        } else {
+          type = null; // cross-class: no return-type table
+        }
+      } else if (allowSystemCall(type, method)) {
+        if (record) recordCall(`${type}.${method}`, at);
+        type = null;
+      } else {
+        type = null;
+      }
+    }
+    return { type, fieldStart: i };
+  };
+
+  /**
+   * Peel own-class instance fields (`this.mine.Name` → Account.Name). Only
+   * `className`'s fieldTypes table is known — cross-file parent fields via
+   * `super.x` stay unresolved (AST ≠ compiler).
+   */
+  const peelOwnFields = (
+    startType: string | null,
+    path: PathSeg[],
+    from: number,
+  ): { type: string | null; fieldStart: number } => {
+    let type = startType;
+    let i = from;
+    while (i < path.length) {
+      const seg = path[i];
+      if (seg === undefined || seg.isCall) break;
+      if (type !== className) break;
+      const ft = fieldTypes.get(seg.name.toLowerCase());
+      if (ft === undefined) break;
+      type = ft;
+      i += 1;
+    }
+    return { type, fieldStart: i };
+  };
+
+  const resolveChain = (
+    rootType: string | null,
+    path: PathSeg[],
+    at: Ctx,
+    record: boolean,
+  ): { type: string | null; fieldStart: number } => {
+    const afterCalls = advanceCalls(rootType, path, at, record);
+    return peelOwnFields(afterCalls.type, path, afterCalls.fieldStart);
   };
 
   const writeRoots = new Set<Ctx>();
@@ -340,8 +496,13 @@ export const extractApexAstEdges = (
       writeRoots.add(lhs);
       const seg = dotSegments(lhs);
       if (seg !== null) {
-        const t = varTypes.get(seg.root.toLowerCase());
-        if (isSObjectish(t) && seg.path.length > 0) writes.add(`${t}.${seg.path.join('.')}`);
+        const rootType = resolveRootType(seg);
+        // record=false: the read/call pass below owns callSites (avoids dupes).
+        const { type, fieldStart } = resolveChain(rootType, seg.path, lhs, false);
+        const fieldPath = seg.path.slice(fieldStart).filter((p) => !p.isCall).map((p) => p.name);
+        if (isSObjectish(type) && fieldPath.length > 0) {
+          writes.add(`${type}.${fieldPath.join('.')}`);
+        }
       }
     }
   }
@@ -355,34 +516,41 @@ export const extractApexAstEdges = (
     if (nestedDots.has(dot)) continue;
     const seg = dotSegments(dot);
     if (seg === null) continue;
-    const rootLower = seg.root.toLowerCase();
-    const tailIsCall = ctxName(kids(dot)[kids(dot).length - 1]) === 'DotMethodCall';
-    const last = seg.path[seg.path.length - 1] ?? '';
+    const rootType = resolveRootType(seg);
 
-    let recvType: string | null;
-    if (/^new\s*/i.test(seg.root) || ctxName(seg.rootNode) === 'NewExpression') {
-      recvType = seg.root.replace(/^new\s*/i, '').replace(/\(.*\)$/, '').replace(/[<>].*$/, '');
-    } else if (rootLower === 'this') {
-      recvType = className;
-    } else if (rootLower === 'super') {
-      recvType = extendsType;
-    } else {
-      recvType = varTypes.get(rootLower) ?? null;
+    // Static Class.method() with no prior receiver type (Database.query, etc.)
+    const tailIsCall =
+      seg.path.length > 0 && (seg.path[seg.path.length - 1]?.isCall === true);
+    if (
+      rootType === null &&
+      resolveVarType(seg.root, seg.rootNode) === null &&
+      /^[A-Z]/.test(seg.root) &&
+      seg.path.length === 1 &&
+      tailIsCall
+    ) {
+      const last = seg.path[0]?.name ?? '';
+      if (allowSystemCall(seg.root, last)) recordCall(`${seg.root}.${last}`, dot);
+      else if (isUserClass(seg.root)) recordCall(`${resolveType(seg.root)}.${last}`, dot);
+      continue;
     }
 
-    if (tailIsCall) {
-      if (recvType !== null) {
-        if (isUserClass(recvType)) recordCall(`${resolveType(recvType)}.${last}`, dot);
-        else if (allowSystemCall(recvType, last)) recordCall(`${recvType}.${last}`, dot);
-      } else if (!varTypes.has(rootLower) && /^[A-Z]/.test(seg.root) && seg.path.length === 1) {
-        if (allowSystemCall(seg.root, last)) recordCall(`${seg.root}.${last}`, dot);
-        else if (isUserClass(seg.root)) recordCall(`${resolveType(seg.root)}.${last}`, dot);
-      }
-      if (isSObjectish(recvType) && seg.path.length > 1) {
-        reads.add(`${recvType}.${seg.path.slice(0, -1).join('.')}`);
-      }
-    } else if (isSObjectish(recvType) && !writeRoots.has(dot)) {
-      reads.add(`${recvType}.${seg.path.join('.')}`);
+    const { type, fieldStart } = resolveChain(rootType, seg.path, dot, true);
+    const fieldPath = seg.path.slice(fieldStart).filter((p) => !p.isCall).map((p) => p.name);
+
+    if (fieldPath.length > 0 && isSObjectish(type) && !writeRoots.has(dot)) {
+      reads.add(`${type}.${fieldPath.join('.')}`);
+    }
+
+    // SObject receiver with a trailing method (e.g. acc.Parent.clone()) — keep
+    // prior behavior: field path before the call is a read.
+    if (
+      isSObjectish(rootType) &&
+      tailIsCall &&
+      seg.path.length > 1 &&
+      seg.path.slice(0, -1).every((p) => !p.isCall)
+    ) {
+      const before = seg.path.slice(0, -1).map((p) => p.name);
+      if (before.length > 0) reads.add(`${rootType}.${before.join('.')}`);
     }
   }
 

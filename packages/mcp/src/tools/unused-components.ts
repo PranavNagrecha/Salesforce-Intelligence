@@ -3,10 +3,11 @@
  *
  * The v2.0b headline tool — the buyer-facing answer to admin #7 on the
  * top-10 questions list: "what's unused in this org?". Composes one
- * per-type `listNodesByType` call followed by a per-instance
- * `listEdges(... { direction: 'in' })` check; instances with zero
- * incoming USAGE edges are classified as unused (`parentOf` structural
- * edges and `grantedBy` access grants do not count — see below).
+ * per-type `listNodesByType` call followed by a single batched
+ * `listEdgesForNodes(... { direction: 'in' })` fetch of every scanned
+ * node's incoming edges; instances with zero incoming USAGE edges are
+ * classified as unused (`parentOf` structural edges and `grantedBy`
+ * access grants do not count — see below).
  *
  * Per-type scope:
  *   - When `types` is omitted, the tool defaults to a curated subset
@@ -53,10 +54,11 @@
  * Implementation notes:
  *   - The tool's per-instance work is bounded by the size of the
  *     curated default subset; each type is paged to EXHAUSTION (in
- *     500-node pages) so a >500-of-a-type org is fully enumerated, and
- *     the per-instance `listEdges` is a single indexed lookup.
- *     Worst-case, the response is dominated by the CustomField scan
- *     (one DuckDB round-trip per field).
+ *     500-node pages) so a >500-of-a-type org is fully enumerated. Every
+ *     scanned node's INCOMING edges are then fetched in ONE batched
+ *     `listEdgesForNodes` round-trip per type — not the former N+1
+ *     `listEdges`-per-node loop (one DuckDB round-trip per field, which
+ *     dominated the >60s tech-debt/org-risk composite on a large org).
  *   - Result truncation: per the contract, the `truncated` flag is
  *     true when the total unused-instance count exceeds `limit`. The
  *     emitted slice is sorted globally by (type, id ASC) and trimmed
@@ -69,6 +71,7 @@
 import type {
   ComponentId,
   ComponentType,
+  Edge,
   McpError,
   McpResponse,
   Node,
@@ -76,7 +79,11 @@ import type {
   TrustSummary,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { countNodesByType, listEdges, listNodesByType } from '@sf-intelligence/graph';
+import {
+  countNodesByType,
+  listEdgesForNodes,
+  listNodesByType,
+} from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -410,27 +417,25 @@ const isInactiveEntryPoint = (
 };
 
 /**
- * Decide whether a node is currently classified as "unused". The
- * decision skips `parentOf` (the owning object — structural, not a
- * dependency) and `grantedBy` (a Profile / PermissionSet ACCESS grant —
- * access is not usage: a component nobody references is still unused even
- * when profiles grant access to it; the same split the dead-code /
- * what-if tools make). Any OTHER incoming edge means the component is in
- * use.
+ * Decide whether a node is "unused" from its already-fetched INCOMING edge set.
+ * Skips `parentOf` (the owning object — structural, not a dependency) and
+ * `grantedBy` (a Profile / PermissionSet ACCESS grant — access is not usage: a
+ * component nobody references is still unused even when profiles grant access to
+ * it; the same split the dead-code / what-if tools make). Any OTHER incoming
+ * edge means the component is in use.
+ *
+ * Pure over the edge set so the caller can batch every node's incoming edges in
+ * ONE `listEdgesForNodes` round-trip (see {@link scanType}) rather than an N+1
+ * `listEdges`-per-node loop; the verdict is an existence check that does not
+ * depend on edge order, so the batched path is byte-identical to the per-node
+ * one.
  */
-const isUnused = async (
-  ctx: Context,
-  id: ComponentId,
-): Promise<Result<boolean, string>> => {
-  const edgesResult = await listEdges(ctx.graph, id, { direction: 'in' });
-  if (!edgesResult.ok) {
-    return err(edgesResult.error.message);
-  }
-  for (const edge of edgesResult.value) {
+const isUnusedFromEdges = (incoming: readonly Edge[]): boolean => {
+  for (const edge of incoming) {
     if (edge.edgeType === 'parentOf' || edge.edgeType === 'grantedBy') continue;
-    return ok(false);
+    return false;
   }
-  return ok(true);
+  return true;
 };
 
 /**
@@ -496,6 +501,26 @@ const scanType = async (
   }
   const note = noteForType(type);
   const isEntryPoint = ENTRY_POINT_TYPES.has(type);
+
+  // Reference types decide "unused" from their INCOMING edges. Fetch every
+  // node's incoming edges in ONE batched `listEdgesForNodes` round-trip instead
+  // of an N+1 `listEdges`-per-node loop (the CustomField scan alone was one
+  // DuckDB round-trip per field — thousands on a large org, the dominant cost in
+  // the >60s tech_debt_score/org_risk_report timeout). Entry-point types never
+  // touch the edge set (their verdict is INACTIVE status), so they skip it.
+  let incomingByNode: ReadonlyMap<ComponentId, readonly Edge[]> = new Map();
+  if (!isEntryPoint) {
+    const batched = await listEdgesForNodes(
+      ctx.graph,
+      nodes.map((n) => n.id),
+      { direction: 'in' },
+    );
+    if (!batched.ok) {
+      return err(batched.error.message);
+    }
+    incomingByNode = batched.value;
+  }
+
   const out: UnusedComponent[] = [];
   for (const node of nodes) {
     // Test-class exemption per the v2.0b spec.
@@ -508,11 +533,7 @@ const scanType = async (
       // unreferenced. Unknown activity is treated as in-use.
       unused = isInactiveEntryPoint(type, node.properties) === true;
     } else {
-      const unusedResult = await isUnused(ctx, node.id);
-      if (!unusedResult.ok) {
-        return err(unusedResult.error);
-      }
-      unused = unusedResult.value;
+      unused = isUnusedFromEdges(incomingByNode.get(node.id) ?? []);
     }
     if (!unused) continue;
     out.push({

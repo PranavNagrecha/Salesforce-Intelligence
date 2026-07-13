@@ -177,10 +177,10 @@ describe('extractFlow', () => {
 
   describe('optional apiVersion', () => {
     it('extracts a flow that omits the optional <apiVersion> (apiVersion=null)', async () => {
-      // <apiVersion> is OPTIONAL — auto-generated flows (e.g. the mass.gov
+      // <apiVersion> is OPTIONAL — auto-generated flows (e.g. the example.gov
       // PolicyCondition_* flows and customer_satisfaction) omit it entirely.
       // The extractor wrongly listed it in REQUIRED_ELEMENTS (5 errors on the
-      // mass.gov refresh) AND the read site did `Number(undefined)` → NaN.
+      // example.gov refresh) AND the read site did `Number(undefined)` → NaN.
       // An absent <apiVersion> must extract cleanly with apiVersion === null,
       // matching the `number | null` graph column (queries.ts api_version).
       const xml = `<?xml version="1.0"?>
@@ -576,6 +576,9 @@ describe('extractFlow', () => {
         // Amount__c via an elementReference (kind 'reference'), the
         // Status__c via a stringValue literal (kind 'literal'). The
         // object-level edge carries no assignedValue.
+        // R6-11: reference-kind assignments additionally carry the dataflow
+        // trace. `vAmount` is not declared anywhere in this flow, so the
+        // trace resolves NOTHING and discloses one unresolved input.
         expect(writesTo).toEqual([
           {
             fromId: flowId,
@@ -587,6 +590,9 @@ describe('extractFlow', () => {
               operation: 'recordCreate',
               assignedValue: 'vAmount',
               assignedValueKind: 'reference',
+              sourceFields: [],
+              sourceFieldConfidence: [],
+              unresolvedSourceCount: 1,
             },
           },
           {
@@ -658,12 +664,18 @@ describe('extractFlow', () => {
           assignedValueKind: 'literal',
         });
         // elementReference assignment: kind 'reference' (NOT a literal).
+        // R6-11: this AUTOLAUNCHED flow has no <start><object>, so `$Record`
+        // has no statically-known type — the trace discloses one unresolved
+        // input instead of guessing an object for Region__c.
         expect(
           byTo.get('CustomField:Payment__c.Owner_Region__c')?.properties,
         ).toEqual({
           operation: 'recordCreate',
           assignedValue: '$Record.Region__c',
           assignedValueKind: 'reference',
+          sourceFields: [],
+          sourceFieldConfidence: [],
+          unresolvedSourceCount: 1,
         });
       } finally {
         await rm(dir, { recursive: true, force: true });
@@ -722,9 +734,10 @@ describe('extractFlow', () => {
       }
     });
 
-    it('skips an <inputReference> update that is NOT a resolvable trigger record', async () => {
-      // An AutoLaunchedFlow (no record-trigger <start>) whose update targets a
-      // non-`$Record` reference can't be resolved offline — skip and warn.
+    it('skips an <inputReference> update that is neither $Record nor a typed record variable', async () => {
+      // An AutoLaunchedFlow (no record-trigger <start>) whose update targets an
+      // undeclared reference (not in <variables>) can't be resolved offline —
+      // skip and warn.
       const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Flow xmlns="http://soap.sforce.com/2006/04/metadata">
     <apiVersion>59.0</apiVersion>
@@ -745,7 +758,7 @@ describe('extractFlow', () => {
         expect(
           result.value.nodes[0]?.properties['flowExtractionWarnings'],
         ).toEqual([
-          '<recordUpdates>[0] has no <object> and its <inputReference> is not the trigger record ($Record); skipped',
+          '<recordUpdates>[0] has no <object>; its <inputReference> is neither the trigger record ($Record) nor a typed record variable; skipped',
         ]);
       } finally {
         await rm(dir, { recursive: true, force: true });
@@ -1336,6 +1349,747 @@ describe('extractFlow', () => {
         expect(props?.['scheduleFrequency']).toBeNull();
         expect(props?.['scheduleStartDate']).toBeNull();
         expect(props?.['scheduleStartTime']).toBeNull();
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  // R6-02 — subflow references. A `<subflows>` element calls another Flow as a
+  // subflow; each emits a `references` edge from the calling Flow to
+  // `Flow:{flowName}` with confidence `declared` (the `<flowName>` is stated
+  // metadata) and `properties.referenceKind: 'subflow'`. Before R6-02 subflows
+  // were scoped out entirely, so NO flow→flow edge existed and a subflow called
+  // by N parents read as having zero dependents (a false-"safe" deactivation
+  // verdict). The target Flow may be dangling-by-design (a managed / uncaptured
+  // subflow not in the vault) — the extractor emits the edge either way, exactly
+  // as `callsApex` emits to a possibly-absent `ApexClass:{name}`.
+  describe('R6-02 — subflow references', () => {
+    it('emits one declared references edge per <subflows> element (resolvable + dangling)', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Parent With Subflows</label>
+    <processType>Flow</processType>
+    <status>Active</status>
+    <subflows>
+        <name>Call_Send_Email</name>
+        <label>Call: Send Email</label>
+        <flowName>Send_Email_Subflow</flowName>
+    </subflows>
+    <subflows>
+        <name>Call_Managed_Helper</name>
+        <label>Call: Managed Helper</label>
+        <flowName>mpns__Managed_Helper_Flow</flowName>
+    </subflows>
+</Flow>`;
+      const { dir, path } = await writeTempXml('ParentWithSubflows.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const flowId = 'Flow:ParentWithSubflows';
+        const subflowEdges = result.value.edges.filter(
+          (e) => e.edgeType === 'references',
+        );
+        // Both subflow elements emit an edge — the resolvable-looking target
+        // and the managed (dangling-by-design) target are treated identically
+        // by the extractor; resolvability is a graph-layer concern.
+        expect(subflowEdges).toEqual([
+          {
+            fromId: flowId,
+            toId: 'Flow:Send_Email_Subflow',
+            edgeType: 'references',
+            confidence: 'declared',
+            source: 'flow-extractor',
+            properties: {
+              referenceKind: 'subflow',
+              subflowElementName: 'Call_Send_Email',
+            },
+          },
+          {
+            fromId: flowId,
+            toId: 'Flow:mpns__Managed_Helper_Flow',
+            edgeType: 'references',
+            confidence: 'declared',
+            source: 'flow-extractor',
+            properties: {
+              referenceKind: 'subflow',
+              subflowElementName: 'Call_Managed_Helper',
+            },
+          },
+        ]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('collapses two <subflows> pointing at the SAME target into one edge (dedup)', async () => {
+      // A parent that calls the same subflow from two different call sites
+      // dedups to one (fromId,toId,edgeType,source) edge; the first element's
+      // name wins, matching how `callsApex` collapses repeat calls to one class.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Double Caller</label>
+    <processType>Flow</processType>
+    <status>Active</status>
+    <subflows>
+        <name>First_Call</name>
+        <flowName>Shared_Subflow</flowName>
+    </subflows>
+    <subflows>
+        <name>Second_Call</name>
+        <flowName>Shared_Subflow</flowName>
+    </subflows>
+</Flow>`;
+      const { dir, path } = await writeTempXml('DoubleCaller.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const subflowEdges = result.value.edges.filter(
+          (e) => e.edgeType === 'references',
+        );
+        expect(subflowEdges).toHaveLength(1);
+        expect(subflowEdges[0]?.toId).toBe('Flow:Shared_Subflow');
+        expect(subflowEdges[0]?.properties['subflowElementName']).toBe(
+          'First_Call',
+        );
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('warns and skips a <subflows> element with no <flowName>', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Bad Subflow</label>
+    <processType>Flow</processType>
+    <status>Active</status>
+    <subflows>
+        <name>Broken_Call</name>
+        <label>Broken</label>
+    </subflows>
+</Flow>`;
+      const { dir, path } = await writeTempXml('BadSubflow.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(
+          result.value.edges.filter((e) => e.edgeType === 'references'),
+        ).toEqual([]);
+        expect(
+          result.value.nodes[0]?.properties['flowExtractionWarnings'],
+        ).toContain('<subflows>[0] has no <flowName>');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits no references edge for a Flow without <subflows> (regression)', async () => {
+      // A plain flow with no <subflows> must not gain a spurious references edge.
+      const { dir, path } = await writeTempXml(
+        'NoSubflow.flow-meta.xml',
+        VALID_XML,
+      );
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(
+          result.value.edges.filter((e) => e.edgeType === 'references'),
+        ).toEqual([]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('R7-W1 — record-variable <inputReference> DML', () => {
+    it('emits an OBJECT-level declared writesTo with the whole-record disclosure for a recordCreate that inserts a record variable', async () => {
+      // "Create Records → use a record/collection variable" carries an
+      // <inputReference> (no <object>, no <inputAssignments>). Before R7-W1 this
+      // emitted NO edge — a false-safe. Now the variable's declared objectType
+      // is the write target; the fields are NOT enumerable, so we emit only the
+      // object-level edge and disclose that.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Insert Cases</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <variables>
+        <name>newCaseVar</name>
+        <dataType>SObject</dataType>
+        <isCollection>false</isCollection>
+        <objectType>Case</objectType>
+    </variables>
+    <recordCreates>
+        <name>Insert_Case</name>
+        <inputReference>newCaseVar</inputReference>
+    </recordCreates>
+</Flow>`;
+      const { dir, path } = await writeTempXml('InsertCases.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const flowId = 'Flow:InsertCases';
+        const writes = result.value.edges.filter((e) => e.edgeType === 'writesTo');
+        // ONE object-level edge, no field-level edges (whole-record write).
+        expect(writes).toEqual([
+          {
+            fromId: flowId,
+            toId: 'CustomObject:Case',
+            edgeType: 'writesTo',
+            confidence: 'declared',
+            source: 'flow-extractor',
+            properties: {
+              operation: 'recordCreate',
+              inputReferenceKind: 'recordVariable',
+              inputReference: 'newCaseVar',
+              wholeRecord: true,
+              fieldsEnumerable: false,
+              disclosure:
+                'whole-record write; individual fields not enumerable from a record-variable DML',
+            },
+          },
+        ]);
+        // No fabricated per-field edges.
+        expect(
+          result.value.edges.filter((e) => e.toId.startsWith('CustomField:')),
+        ).toEqual([]);
+        // No skip warning — it resolved.
+        expect(
+          result.value.nodes[0]?.properties['flowExtractionWarnings'],
+        ).toEqual([]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits declared readsFrom + writesTo for a recordUpdate on a record variable, with sourceObject provenance from a populating lookup', async () => {
+      // "Update Records → use the IDs and all field values from a record
+      // collection variable" that was populated by an earlier Get Records:
+      // object-level edges only, declared, with object-level lookup provenance.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Update Fetched Accounts</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <variables>
+        <name>fetchedAccount</name>
+        <dataType>SObject</dataType>
+        <isCollection>false</isCollection>
+        <objectType>Account</objectType>
+    </variables>
+    <recordLookups>
+        <name>Get_Account</name>
+        <object>Account</object>
+        <getFirstRecordOnly>true</getFirstRecordOnly>
+        <outputReference>fetchedAccount</outputReference>
+    </recordLookups>
+    <recordUpdates>
+        <name>Update_Account</name>
+        <inputReference>fetchedAccount</inputReference>
+    </recordUpdates>
+</Flow>`;
+      const { dir, path } = await writeTempXml('UpdateFetched.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const writeEdge = result.value.edges.find(
+          (e) =>
+            e.edgeType === 'writesTo' &&
+            e.toId === 'CustomObject:Account' &&
+            e.properties?.['operation'] === 'recordUpdate',
+        );
+        expect(writeEdge?.confidence).toBe('declared');
+        // The write edge carries the verbatim whole-record disclosure AND the
+        // object-level lookup provenance (Get_Account populated the variable).
+        expect(writeEdge?.properties).toEqual({
+          operation: 'recordUpdate',
+          inputReferenceKind: 'recordVariable',
+          inputReference: 'fetchedAccount',
+          wholeRecord: true,
+          fieldsEnumerable: false,
+          sourceObject: 'Account',
+          disclosure:
+            'whole-record write; individual fields not enumerable from a record-variable DML',
+        });
+        // A readsFrom to Account exists (the read is represented). The
+        // recordLookup readsFrom and the recordUpdate readsFrom share the
+        // (from,to,type,source) dedup key, so the first-pushed lookup edge wins —
+        // that is fine: the disclosure lives on the writesTo edge above.
+        expect(
+          result.value.edges.some(
+            (e) => e.edgeType === 'readsFrom' && e.toId === 'CustomObject:Account',
+          ),
+        ).toBe(true);
+        // No fabricated field-level writes.
+        expect(
+          result.value.edges.filter(
+            (e) => e.edgeType === 'writesTo' && e.toId.startsWith('CustomField:'),
+          ),
+        ).toEqual([]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits a declared writesTo with the disclosure for a recordDelete on a record variable', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Delete Contacts</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <variables>
+        <name>staleContacts</name>
+        <dataType>SObject</dataType>
+        <isCollection>true</isCollection>
+        <objectType>Contact</objectType>
+    </variables>
+    <recordDeletes>
+        <name>Delete_Contacts</name>
+        <inputReference>staleContacts</inputReference>
+    </recordDeletes>
+</Flow>`;
+      const { dir, path } = await writeTempXml('DeleteContacts.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.edges).toEqual([
+          {
+            fromId: 'Flow:DeleteContacts',
+            toId: 'CustomObject:Contact',
+            edgeType: 'writesTo',
+            confidence: 'declared',
+            source: 'flow-extractor',
+            properties: {
+              operation: 'recordDelete',
+              inputReferenceKind: 'recordVariable',
+              inputReference: 'staleContacts',
+              wholeRecord: true,
+              fieldsEnumerable: false,
+              disclosure:
+                'whole-record write; individual fields not enumerable from a record-variable DML',
+            },
+          },
+        ]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('leaves the $Record trigger-record inputReference path unchanged (heuristic, no whole-record props)', async () => {
+      // Regression guard: the existing $Record update path (bug 17) must NOT
+      // gain any R7-W1 whole-record props — that would break the golden.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Before Save Stamp</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <start>
+        <object>Widget__c</object>
+        <recordTriggerType>CreateAndUpdate</recordTriggerType>
+        <triggerType>RecordBeforeSave</triggerType>
+    </start>
+    <recordUpdates>
+        <name>Stamp_Fields</name>
+        <inputReference>$Record</inputReference>
+        <inputAssignments>
+            <field>Verified_Flag__c</field>
+            <value><stringValue>Verified</stringValue></value>
+        </inputAssignments>
+    </recordUpdates>
+</Flow>`;
+      const { dir, path } = await writeTempXml('BeforeSaveStamp.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const objEdges = result.value.edges.filter(
+          (e) =>
+            e.toId === 'CustomObject:Widget__c' &&
+            e.properties?.['operation'] === 'recordUpdate',
+        );
+        for (const e of objEdges) {
+          expect(e.confidence).toBe('heuristic');
+          // Byte-identical to pre-R7: only { operation }.
+          expect(e.properties).toEqual({ operation: 'recordUpdate' });
+        }
+        // The inputAssignment field write is still emitted (fields ARE
+        // enumerable for a $Record update).
+        expect(
+          result.value.edges.some(
+            (e) =>
+              e.edgeType === 'writesTo' &&
+              e.toId === 'CustomField:Widget__c.Verified_Flag__c',
+          ),
+        ).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('R7-W2 — before-save $Record.<Field> assignment writes', () => {
+    it('emits a declared FIELD-level writesTo for a before-save $Record.<Field> literal assignment', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Stamp Status</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <start>
+        <object>Case</object>
+        <recordTriggerType>Create</recordTriggerType>
+        <triggerType>RecordBeforeSave</triggerType>
+    </start>
+    <assignments>
+        <name>Set_Status</name>
+        <assignmentItems>
+            <assignToReference>$Record.Status</assignToReference>
+            <operator>Assign</operator>
+            <value><stringValue>New</stringValue></value>
+        </assignmentItems>
+    </assignments>
+</Flow>`;
+      const { dir, path } = await writeTempXml('StampStatus.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const fieldWrite = result.value.edges.find(
+          (e) =>
+            e.edgeType === 'writesTo' &&
+            e.toId === 'CustomField:Case.Status',
+        );
+        expect(fieldWrite).toEqual({
+          fromId: 'Flow:StampStatus',
+          toId: 'CustomField:Case.Status',
+          edgeType: 'writesTo',
+          confidence: 'declared',
+          source: 'flow-extractor',
+          properties: {
+            operation: 'beforeSaveFieldAssignment',
+            assignedValue: 'New',
+            assignedValueKind: 'literal',
+          },
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('traces a before-save $Record.<Field> reference assignment to its source field and emits the symmetric dataflow readsFrom', async () => {
+      // $Record.Combined_Name__c = {!$Record.Given_Part__c} — a reference-valued
+      // assignment. The write is declared; the value traces to Given_Part__c
+      // (declared) and a symmetric readsFrom(dataflowSource) is emitted so
+      // field_lineage walks THROUGH the flow. Also exercises the {! } wrapper.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Copy Name</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <start>
+        <object>Contact</object>
+        <recordTriggerType>CreateAndUpdate</recordTriggerType>
+        <triggerType>RecordBeforeSave</triggerType>
+    </start>
+    <assignments>
+        <name>Copy</name>
+        <assignmentItems>
+            <assignToReference>{!$Record.Combined_Name__c}</assignToReference>
+            <operator>Assign</operator>
+            <value><elementReference>$Record.Given_Part__c</elementReference></value>
+        </assignmentItems>
+    </assignments>
+</Flow>`;
+      const { dir, path } = await writeTempXml('CopyName.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const flowId = 'Flow:CopyName';
+        const write = result.value.edges.find(
+          (e) =>
+            e.edgeType === 'writesTo' &&
+            e.toId === 'CustomField:Contact.Combined_Name__c',
+        );
+        expect(write?.confidence).toBe('declared');
+        expect(write?.properties).toEqual({
+          operation: 'beforeSaveFieldAssignment',
+          assignedValue: '$Record.Given_Part__c',
+          assignedValueKind: 'reference',
+          sourceFields: ['Contact.Given_Part__c'],
+          sourceFieldConfidence: ['declared'],
+          unresolvedSourceCount: 0,
+        });
+        // Symmetric dataflow readsFrom on the source field.
+        const readEdge = result.value.edges.find(
+          (e) =>
+            e.edgeType === 'readsFrom' &&
+            e.toId === 'CustomField:Contact.Given_Part__c',
+        );
+        expect(readEdge).toEqual({
+          fromId: flowId,
+          toId: 'CustomField:Contact.Given_Part__c',
+          edgeType: 'readsFrom',
+          confidence: 'declared',
+          source: 'flow-extractor',
+          properties: {
+            operation: 'dataflowSource',
+            targetFields: ['Contact.Combined_Name__c'],
+          },
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('demotes the traced source confidence to heuristic for a non-Assign ($Record) operator', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Accumulate</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <start>
+        <object>Account</object>
+        <recordTriggerType>Update</recordTriggerType>
+        <triggerType>RecordBeforeSave</triggerType>
+    </start>
+    <assignments>
+        <name>Add_Amount</name>
+        <assignmentItems>
+            <assignToReference>$Record.Running_Total__c</assignToReference>
+            <operator>Add</operator>
+            <value><elementReference>$Record.Increment__c</elementReference></value>
+        </assignmentItems>
+    </assignments>
+</Flow>`;
+      const { dir, path } = await writeTempXml('Accumulate.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const write = result.value.edges.find(
+          (e) =>
+            e.edgeType === 'writesTo' &&
+            e.toId === 'CustomField:Account.Running_Total__c',
+        );
+        // The WRITE is still declared (it definitely happens); the SOURCE trace
+        // is demoted to heuristic (Add is not a clean copy).
+        expect(write?.confidence).toBe('declared');
+        expect(write?.properties?.['sourceFieldConfidence']).toEqual([
+          'heuristic',
+        ]);
+        const readEdge = result.value.edges.find(
+          (e) =>
+            e.edgeType === 'readsFrom' &&
+            e.toId === 'CustomField:Account.Increment__c',
+        );
+        expect(readEdge?.confidence).toBe('heuristic');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('does NOT emit a write for an after-save $Record assignment; discloses it as in-memory only', async () => {
+      // Salesforce semantics: in an AFTER-save flow, assigning $Record.<Field>
+      // mutates only the in-memory copy — it does NOT persist without an
+      // explicit Update Records on $Record. So no writesTo, but disclosed.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>After Save Set</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <start>
+        <object>Case</object>
+        <recordTriggerType>Create</recordTriggerType>
+        <triggerType>RecordAfterSave</triggerType>
+    </start>
+    <assignments>
+        <name>Set_Field</name>
+        <assignmentItems>
+            <assignToReference>$Record.Status</assignToReference>
+            <operator>Assign</operator>
+            <value><stringValue>New</stringValue></value>
+        </assignmentItems>
+    </assignments>
+</Flow>`;
+      const { dir, path } = await writeTempXml('AfterSaveSet.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        // No field write to Case.Status.
+        expect(
+          result.value.edges.some(
+            (e) => e.toId === 'CustomField:Case.Status',
+          ),
+        ).toBe(false);
+        const warnings =
+          (result.value.nodes[0]?.properties['flowExtractionWarnings'] as
+            | readonly string[]
+            | undefined) ?? [];
+        expect(
+          warnings.some(
+            (w) =>
+              w.includes('RecordAfterSave') &&
+              w.includes('in-memory only') &&
+              w.includes('no writesTo edge emitted'),
+          ),
+        ).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('skips $Record__Prior and relationship-traversal assignment targets, disclosing the count', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Odd Targets</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <start>
+        <object>Contact</object>
+        <recordTriggerType>Update</recordTriggerType>
+        <triggerType>RecordBeforeSave</triggerType>
+    </start>
+    <assignments>
+        <name>Odd</name>
+        <assignmentItems>
+            <assignToReference>$Record.Account.Name</assignToReference>
+            <operator>Assign</operator>
+            <value><stringValue>x</stringValue></value>
+        </assignmentItems>
+        <assignmentItems>
+            <assignToReference>$Record.Email</assignToReference>
+            <operator>Assign</operator>
+            <value><stringValue>a@b.co</stringValue></value>
+        </assignmentItems>
+    </assignments>
+</Flow>`;
+      const { dir, path } = await writeTempXml('OddTargets.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        // Only the direct Email write is emitted.
+        const fieldWrites = result.value.edges.filter(
+          (e) => e.edgeType === 'writesTo' && e.toId.startsWith('CustomField:'),
+        );
+        expect(fieldWrites.map((e) => e.toId)).toEqual([
+          'CustomField:Contact.Email',
+        ]);
+        const warnings =
+          (result.value.nodes[0]?.properties['flowExtractionWarnings'] as
+            | readonly string[]
+            | undefined) ?? [];
+        expect(
+          warnings.some(
+            (w) =>
+              w.includes('relationship path') &&
+              w.includes('not direct trigger-record field writes'),
+          ),
+        ).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('discloses when a before-save flow assigns $Record fields but <start> has no <object>', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>No Object</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <start>
+        <triggerType>RecordBeforeSave</triggerType>
+    </start>
+    <assignments>
+        <name>Set</name>
+        <assignmentItems>
+            <assignToReference>$Record.Status</assignToReference>
+            <operator>Assign</operator>
+            <value><stringValue>New</stringValue></value>
+        </assignmentItems>
+    </assignments>
+</Flow>`;
+      const { dir, path } = await writeTempXml('NoObject.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(
+          result.value.edges.some((e) => e.toId.startsWith('CustomField:')),
+        ).toBe(false);
+        const warnings =
+          (result.value.nodes[0]?.properties['flowExtractionWarnings'] as
+            | readonly string[]
+            | undefined) ?? [];
+        expect(
+          warnings.some(
+            (w) =>
+              w.includes('trigger object unknown') &&
+              w.includes('no field writesTo edge emitted'),
+          ),
+        ).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits no extra edges for a before-save flow with neither an inputReference DML nor a $Record assignment', async () => {
+      // Control: a before-save flow that only does a decision — the R7
+      // productions must add nothing.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Just Decide</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <start>
+        <object>Lead</object>
+        <recordTriggerType>Create</recordTriggerType>
+        <triggerType>RecordBeforeSave</triggerType>
+    </start>
+    <assignments>
+        <name>Set_Local</name>
+        <assignmentItems>
+            <assignToReference>localVar</assignToReference>
+            <operator>Assign</operator>
+            <value><stringValue>x</stringValue></value>
+        </assignmentItems>
+    </assignments>
+</Flow>`;
+      const { dir, path } = await writeTempXml('JustDecide.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        // A local-variable assignment ($Record NOT involved) produces no field
+        // writes and no disclosure.
+        expect(
+          result.value.edges.filter((e) => e.edgeType === 'writesTo'),
+        ).toEqual([]);
+        expect(
+          result.value.nodes[0]?.properties['flowExtractionWarnings'],
+        ).toEqual([]);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

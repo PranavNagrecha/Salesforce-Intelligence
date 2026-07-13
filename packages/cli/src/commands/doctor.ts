@@ -3,7 +3,11 @@ import { readFile, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
 import { execHelper } from '@sf-intelligence/core';
-import { gapLogPath } from '@sf-intelligence/mcp';
+import { probeDuckDBNative } from '@sf-intelligence/graph';
+import { gapLogPath, summarizeRouteGaps } from '@sf-intelligence/mcp';
+// Re-export so `sfi gaps report` (and tests) keep a stable CLI-side import of
+// the canonical summarizer (R8-GAPLOG-SURFACE).
+export { summarizeRouteGaps } from '@sf-intelligence/mcp';
 import {
   computeSourceTreeHash,
   findRegistryFile,
@@ -123,47 +127,6 @@ export interface RunDoctorOptions {
   readonly gapLogFile?: string;
 }
 
-/**
- * Summarize the local route-gap log (`question-gaps.jsonl`): how many questions
- * hit a router gap, and the most common gap category. Best-effort and never
- * throws — a missing/garbled log just reports zero gaps. Local-only telemetry;
- * the file never leaves the machine. (P12-ROUTER-confusion-report.)
- */
-export const summarizeRouteGaps = async (
-  logFile: string,
-): Promise<{ exists: boolean; count: number; topCategory: string | null; topCount: number }> => {
-  let raw: string;
-  try {
-    raw = await readFile(logFile, 'utf8');
-  } catch {
-    // No log at all ≠ "ran clean": the MCP server has not logged anything on
-    // this machine, so the check must not read as a passing routing audit.
-    return { exists: false, count: 0, topCategory: null, topCount: 0 };
-  }
-  const byCategory = new Map<string, number>();
-  let count = 0;
-  for (const line of raw.split('\n')) {
-    if (line.trim() === '') continue;
-    try {
-      const entry = JSON.parse(line) as { category?: unknown };
-      const cat = typeof entry.category === 'string' ? entry.category : 'unknown';
-      byCategory.set(cat, (byCategory.get(cat) ?? 0) + 1);
-      count += 1;
-    } catch {
-      // skip a malformed line; never break the diagnostic
-    }
-  }
-  let topCategory: string | null = null;
-  let topCount = 0;
-  for (const [cat, n] of byCategory) {
-    if (n > topCount) {
-      topCategory = cat;
-      topCount = n;
-    }
-  }
-  return { exists: true, count, topCategory, topCount };
-};
-
 const pathExists = async (p: string): Promise<boolean> => {
   try {
     await stat(p);
@@ -213,6 +176,24 @@ export const runDoctor = async (opts: RunDoctorOptions): Promise<DoctorReport> =
   const checks: DoctorCheck[] = [];
   const vaultRoot = resolve(opts.cwd, DEFAULT_VAULT_ROOT);
   const paths = vaultPaths(vaultRoot);
+
+  // 0. DuckDB native bindings (INFRA-11). Fail fast with a clear reinstall
+  // hint instead of a raw dlopen/ELF error the first time a vault opens.
+  const duck = await probeDuckDBNative();
+  checks.push(
+    duck.ok
+      ? {
+          name: 'DuckDB native',
+          status: 'pass',
+          detail: `loaded on ${process.platform}-${process.arch} (Node ${process.version})`,
+        }
+      : {
+          name: 'DuckDB native',
+          status: 'fail',
+          detail: duck.error.message,
+          fix: 'Run `pnpm rebuild @duckdb/node-api` (or reinstall sf-intelligence) so the platform-matched native binding is fetched.',
+        },
+  );
 
   // 1. sf CLI present. IDE/MCP subprocesses often don't inherit /usr/local/bin
   // or /opt/homebrew/bin, so a bare `sf` can fail even when it IS installed.

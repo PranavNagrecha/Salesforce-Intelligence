@@ -20,10 +20,24 @@ Import is roughly linear with component count (10k ≈ 8 s, 50k ≈ 40 s here); 
 batched inserts keep it sub-budget. Resolve latency stays low at scale because the
 front door queries the indexed graph, not a linear scan.
 
+## What this certification does NOT cover
+
+This is a **bulk import + name resolution** benchmark on a **zero-edge graph**
+(`eval/scale-cert.mjs` imports the 50k nodes with `edges: []`). It does not exercise:
+
+- **Graph traversal / BFS** (`sfi.get_impact`, `sfi.get_edges`, `sfi.get_subgraph`,
+  and the reachability/dependency tools that walk edges) — untested at this scale
+  because there are no edges in the certified graph to walk.
+- **`sfi.search_components` / ILIKE substring search** — not part of this benchmark.
+
+Both are bounded instead by their own per-tool caps (result limits, pagination,
+depth/fan-out caps), not by a measured scale benchmark. Do not extrapolate the
+40.5s import / ~73ms resolve numbers above to traversal- or search-heavy workloads.
+
 ## Method
 
-`eval/scale-cert.mjs` generates a synthetic org (objects + fields), imports it into a
-throwaway DuckDB graph via the real `importExtractionResults`, then runs
+`eval/scale-cert.mjs` generates a synthetic org (objects + fields, no edges), imports
+it into a throwaway DuckDB graph via the real `importExtractionResults`, then runs
 `resolveComponents` against it — the same engine code the product ships. No fixtures,
 no network, no real org.
 

@@ -35,7 +35,7 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { hybridTrust, type HybridStaleness } from './hybrid-trust.js';
-import { assertSoqlIdentifier, checkVaultStaleness, resolveLiveAccess } from './live-plane.js';
+import { assertSoqlIdentifier, checkVaultStaleness, probeLiveAccess } from './live-plane.js';
 import { liveCount } from './live-session.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 
@@ -160,7 +160,10 @@ export const liveAutomationFiredHandler = async (
   }
 
   const org = input.orgAlias?.trim() || ctx.manifest.sourceOrg;
-  const access = await resolveLiveAccess(org, input.liveEnabled);
+  const access = await probeLiveAccess(ctx, {
+    liveEnabled: input.liveEnabled,
+    orgAlias: input.orgAlias,
+  });
   if (!access.allowed) {
     return ok({
       data: {

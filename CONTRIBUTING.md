@@ -139,6 +139,50 @@ Update [`docs/README.md`](./docs/README.md) when adding new doc files.
 Agent skills live in `.claude/skills/*/SKILL.md`. The build harness sometimes
 stages skill rewrites in `skill-updates/` for manual review before copy.
 
+## Privacy guard — org identifiers
+
+The scanner in `scripts/scan-org-leaks.mjs` reads a gitignored local config
+(`scripts/forbidden-names.local.json`) that lists your org-specific identifiers.
+**If you maintain a real org vault, create this file before pushing:**
+
+```sh
+cp scripts/forbidden-names.local.example.json scripts/forbidden-names.local.json
+# fill in your org names, domains, community slugs, and usernames
+```
+
+See [`scripts/FORBIDDEN-NAMES.md`](./scripts/FORBIDDEN-NAMES.md) for the full
+config reference and category guide.
+
+## Changelog fragments (required for code changes)
+
+Every PR that touches `packages/**` or `scripts/**` **must** include a
+changelog fragment. Create a file `changelog.d/<item-id>.md` with
+Keep-a-Changelog subsections:
+
+```markdown
+### Added
+- What you added and why.
+
+### Changed
+- What you changed.
+
+### Fixed
+- Bug you fixed.
+```
+
+Only include the subsections that apply. The fragment is assembled into
+`CHANGELOG.md` under `## [Unreleased]` by:
+
+```sh
+pnpm changelog:assemble   # regenerate CHANGELOG.md [Unreleased] block
+pnpm changelog:check      # CI guard — exits 1 if code diff lacks a fragment
+```
+
+The CI gate enforces fragment presence automatically. Docs-only, website-only,
+and examples-only diffs are exempt. See [`changelog.d/README.md`](./changelog.d/README.md)
+for the full specification and [`changelog.d/r7-f1.md`](./changelog.d/r7-f1.md)
+for a complete example.
+
 ## Pull request checklist
 
 - [ ] `pnpm lint` passes
@@ -146,7 +190,7 @@ stages skill rewrites in `skill-updates/` for manual review before copy.
 - [ ] New behavior has tests (unit or eval cases where appropriate)
 - [ ] Docs updated if user-visible behavior changed
 - [ ] No org-specific data, vault paths, or secrets in the diff
-- [ ] CHANGELOG entry under `[Unreleased]` or the next version section
+- [ ] `changelog.d/<item-id>.md` fragment added (required for `packages/` or `scripts/` changes)
 - [ ] If it answers a "where used / who references / depends on" question, it
       follows the reverse-lookup contract above (resolve-first, verb-routed,
       evidence-tiered, empty≠absent, caps readable)
@@ -164,8 +208,25 @@ External contributors do not need to publish; maintainers handle tagging and the
 npm publish.
 
 Before `npm publish` from `packages/cli`, the **`prepublishOnly`** hook runs
-`scripts/prepublish-check.mjs` (`pnpm scan:leaks` + `pnpm guard`). Publish
-aborts if either check fails — fix leaks or complete Phase 1 SCRUB work first.
+`scripts/prepublish-check.mjs` (`pnpm scan:leaks` + `pnpm guard` +
+`pnpm check:version-consistency`). Publish aborts if any check fails — fix
+leaks, complete Phase 1 SCRUB work, or reconcile versions first.
+
+**Version source of truth:** `packages/cli/package.json` is the published
+product version. It must match `packages/cli/server.json` and the shipped MCP
+handshake (`SFI_BUILD_VERSION` / `resolveServerVersion()`). `CHANGELOG.md` must
+have a dated `## [X.Y.Z] — YYYY-MM-DD` entry for that version, or pass
+`--metadata-only` on the consistency script for an explicit packaging-only
+exemption. Internal `@sf-intelligence/*` workspace `package.json` versions are
+not independently published and are not required to match.
+
+## Known-failures allowlist (QA gate)
+
+Pre-existing, accepted test failures are tracked with expiry dates in
+`sf-intelligence-qa/config/known-failures.json` (in the QA harness repo).
+These suppress specific gate step failures without masking NEW regressions.
+Add an entry only for a failure that is explicitly documented and backlog-tracked;
+include a clear `reason` and a near-term `expires` date.
 
 ## Code of conduct
 

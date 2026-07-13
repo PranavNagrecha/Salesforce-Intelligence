@@ -149,7 +149,10 @@ const newVaultPicklistFieldSeed: ExtractionResult = {
 // =============================================================================
 // Seed 1c: A GlobalValueSet-DRIVEN picklist (P14-USAGE-gvs-edge): inline
 // picklistValues null, but a usesValueSet edge leads to the GlobalValueSet
-// node carrying the declared values — explain_field follows it.
+// node carrying the declared values — explain_field follows it. The GVS node
+// carries pre-CR-10b bare-string `values` (a vault refreshed before the GVS
+// extractor captured per-value isActive/label/default) to pin the back-compat
+// path: normalizePicklistValues treats each bare string as an active value.
 // =============================================================================
 
 const GVS_FIELD_ID = 'CustomField:Account.Region__c';
@@ -188,6 +191,61 @@ const gvsDrivenFieldSeed: ExtractionResult = {
     {
       fromId: GVS_FIELD_ID,
       toId: GVS_ID,
+      edgeType: 'usesValueSet',
+      confidence: 'declared',
+      source: 'custom-field-extractor',
+      properties: {},
+    },
+  ],
+};
+
+// =============================================================================
+// Seed 1d (CR-10b): A GlobalValueSet-DRIVEN picklist whose GVS node carries
+// the CURRENT extractor's rich per-value shape `{value, isActive, label,
+// default}`, INCLUDING a deactivated entry — proves explain_field surfaces an
+// honest isActive for a GVS-resolved value (retained, not filtered, not
+// UNVERIFIED) end to end through the usesValueSet edge.
+// =============================================================================
+
+const GVS_RICH_FIELD_ID = 'CustomField:Account.Term_Year__c';
+const GVS_RICH_ID = 'GlobalValueSet:Term_Year';
+
+const gvsRichDrivenFieldSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: GVS_RICH_FIELD_ID,
+      type: 'CustomField',
+      apiName: 'Term_Year__c',
+      label: 'Term Year',
+      parentId: ACCOUNT_ID,
+      properties: {
+        label: 'Term Year',
+        dataType: 'Picklist',
+        description: null,
+        required: false,
+        picklistValues: null,
+        valueSetName: 'Term_Year',
+      },
+    }),
+    makeNode({
+      id: GVS_RICH_ID,
+      type: 'GlobalValueSet',
+      apiName: 'Term_Year',
+      label: 'Term Year',
+      properties: {
+        masterLabel: 'Term Year',
+        valueCount: 2,
+        values: [
+          { value: '2025', isActive: true, label: '2025', default: false },
+          { value: '2017', isActive: false, label: '2017', default: false },
+        ],
+      },
+    }),
+  ],
+  edges: [
+    {
+      fromId: GVS_RICH_FIELD_ID,
+      toId: GVS_RICH_ID,
       edgeType: 'usesValueSet',
       confidence: 'declared',
       source: 'custom-field-extractor',
@@ -432,6 +490,7 @@ beforeAll(async () => {
     inlinePicklistFieldSeed,
     newVaultPicklistFieldSeed,
     gvsDrivenFieldSeed,
+    gvsRichDrivenFieldSeed,
     noDescriptionFieldSeed,
     formulaFieldSeed,
     mdtFieldSeed,
@@ -570,23 +629,37 @@ describe('explainFieldHandler', () => {
     expect(result.value.data.picklistValuesNote).toContain('not inline');
   });
 
-  it('resolves a GlobalValueSet-driven picklist through the usesValueSet edge (P14-USAGE-gvs-edge); H10: isActive UNVERIFIED note', async () => {
+  it('resolves a GlobalValueSet-driven picklist through the usesValueSet edge (P14-USAGE-gvs-edge); back-compat with a pre-CR-10b bare-string GVS', async () => {
     const result = await explainFieldHandler(ctx, { fieldId: GVS_FIELD_ID });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    // The declared values come from the LINKED GlobalValueSet, cited by id —
-    // each wrapped as {value, isActive: true} for shape uniformity (the GVS
-    // extractor does not yet carry per-value isActive — sibling H10).
+    // The declared values come from the LINKED GlobalValueSet, cited by id.
+    // This GVS node's `values` are pre-CR-10b bare strings (an un-refreshed
+    // vault) — normalizePicklistValues wraps each as {value, isActive: true}
+    // for shape uniformity, same back-compat rule as the inline reader.
     expect(result.value.data.picklistValues).toEqual([
       { value: 'EMEA', isActive: true },
       { value: 'APAC', isActive: true },
       { value: 'AMER', isActive: true },
     ]);
     expect(result.value.data.picklistValuesSource).toBe(GVS_ID);
-    // H10: GVS-resolved values report isActive UNVERIFIED → the note discloses
-    // that (the "not inline" note does NOT fire because the values resolved).
-    expect(result.value.data.picklistValuesNote).toContain('GlobalValueSet');
-    expect(result.value.data.picklistValuesNote).toContain('UNVERIFIED');
+    // CR-10b: no disclosure note fires for a resolved GlobalValueSet anymore
+    // — the "not inline" note only fires when resolution FAILS.
+    expect(result.value.data.picklistValuesNote).toBeUndefined();
+  });
+
+  it('CR-10b: surfaces an honest isActive:false for a GVS-resolved deactivated value, never dropping it', async () => {
+    const result = await explainFieldHandler(ctx, { fieldId: GVS_RICH_FIELD_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Both values LISTED — the deactivated one carried with isActive:false,
+    // label and default threaded through unchanged. Nothing filtered.
+    expect(result.value.data.picklistValues).toEqual([
+      { value: '2025', isActive: true, label: '2025', default: false },
+      { value: '2017', isActive: false, label: '2017', default: false },
+    ]);
+    expect(result.value.data.picklistValuesSource).toBe(GVS_RICH_ID);
+    expect(result.value.data.picklistValuesNote).toBeUndefined();
   });
 
   it('returns null picklistValues with NO note for a non-picklist field', async () => {

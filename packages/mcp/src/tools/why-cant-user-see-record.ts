@@ -34,20 +34,26 @@
  *
  * The cascade, in this exact order:
  *
- *   0. **Object-CRUD precondition (plane A, operation-aware)** — evaluated in
- *      the handler BEFORE any record-visibility verdict. `hasObjectAccess(level)`
- *      checks whether the profile-UNION-permsets set holds the object CRUD for
- *      THIS operation: object Read for read; object Edit (or Modify All) for
- *      edit; object Delete (or Modify All) for delete; plus the system perm that
- *      covers the level (`ViewAllData`/`ModifyAllData` for read, `ModifyAllData`
- *      only for edit/delete — View All Data is read-only). When a profile or
- *      permission set was supplied and the precondition is NOT met, the handler
- *      returns `restricted` immediately (the ONLY precondition-driven
- *      `restricted`) — this kills both H1 (zero-perm user on a Public-Read OWD)
- *      and CR-RV6 (Read-only user told they can EDIT a ReadWriteTransfer OWD
- *      object / Edit-only user told they can DELETE a FullAccess OWD object). A
- *      role/group-only context cannot decide object perms, so the gate is
- *      skipped and the cascade runs to an honest answer.
+ *   0. **Object-CRUD precondition (plane A, operation-aware, muting-aware)** —
+ *      evaluated in the handler BEFORE any record-visibility verdict.
+ *      `computeMutedObjectAccess(level)` checks whether the profile-UNION-permsets
+ *      set holds the object CRUD for THIS operation: object Read for read; object
+ *      Edit (or Modify All) for edit; object Delete (or Modify All) for delete;
+ *      plus the system perm that covers the level (`ViewAllData`/`ModifyAllData`
+ *      for read, `ModifyAllData` only for edit/delete — View All Data is
+ *      read-only). R7-W4: it SUBTRACTS group-scoped muting — a CRUD bit a
+ *      PermissionSetGroup member grants but the group's muting permission set
+ *      denies is NOT counted (composing the R6-06 shared kernel), so the gate no
+ *      longer OVERSTATES access. When a profile or permission set was supplied and
+ *      the precondition is NOT met, the handler returns `restricted` (the ONLY
+ *      precondition-driven `restricted`) — this kills H1 (zero-perm user on a
+ *      Public-Read OWD), CR-RV6 (Read-only user told they can EDIT a
+ *      ReadWriteTransfer OWD object / Edit-only user told they can DELETE a
+ *      FullAccess OWD object), and now the muted-CRUD overstatement (a group's
+ *      object Read muted away, so the record is not visible after all — the
+ *      hard-deny reason + `mutedBy` name the muting set). A role/group-only
+ *      context cannot decide object perms, so the gate is skipped and the cascade
+ *      runs to an honest answer.
  *
  *   1. **OWD** (Organization-Wide Default) — read `componentId`'s
  *      `properties.sharingModel`.
@@ -182,14 +188,26 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges, listNodesByType } from '@sf-intelligence/graph';
+import {
+  getNodeById,
+  listEdges,
+  listEdgesForNodes,
+  listNodesByIds,
+  listNodesByType,
+} from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
 import { coercePrefix } from './coerce-id.js';
 import { expandGroupMembership } from './group-membership.js';
-import { expandPermissionSetGroup } from './permission-set-group.js';
+import {
+  expandPermissionSetGroup,
+  loadMutingPermissions,
+  MUTING_OBJECT_FLAGS,
+  type LoadedMuting,
+  type MutingObjectFlag,
+} from './permission-set-group.js';
 
 /**
  * The set of OWD values that imply records are private and access
@@ -274,8 +292,9 @@ const grantSatisfiesObjectRead = (edge: Edge): boolean => {
  * and plain `allowRead` must NOT satisfy edit/delete. Mirrors the system-perm
  * bypass encoded in `systemPermsForLevel` (ModifyAllData only for edit/delete).
  *
- * `create` is OFF this precondition (it has its own `allowCreate` path in the
- * create branch) and never reaches `hasObjectAccess`, so it is not handled here.
+ * `create` is OFF this per-edge predicate (it has its own `allowCreate` path);
+ * the muting-aware precondition helper (`computeMutedObjectAccess`) handles the
+ * create gate directly, so `create` is not handled here.
  */
 const grantSatisfiesObjectLevel = (edge: Edge, level: AccessLevel): boolean => {
   const p = edge.properties;
@@ -439,6 +458,14 @@ export interface AccessReasoningStep {
   readonly verdict: 'visible' | 'restricted' | 'unknown';
   readonly reason: string;
   readonly traversed?: readonly string[];
+  /**
+   * R7-W4: muting permission set id(s) that DENIED a would-be object-CRUD grant
+   * this stage relied on, within its owning PermissionSetGroup. Present ONLY on
+   * the object-CRUD precondition stage(s) (PermissionGrant / SystemPermission)
+   * when group-scoped muting flipped the grant off, so an auditor sees WHICH
+   * muting set removed access. Omitted when nothing was muted.
+   */
+  readonly mutedBy?: readonly string[];
 }
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
@@ -450,8 +477,32 @@ export interface WhyCantUserSeeRecordOutput {
    * downstream prose does not bury it under sharing stages.
    */
   readonly hardDenyReason?: string;
+  /**
+   * R7-W4: muting permission set id(s) that flipped the object-CRUD precondition
+   * from a would-be grant to a deny within a PermissionSetGroup. Present ONLY
+   * when group-scoped muting is the determinative reason the precondition failed
+   * (read/edit/delete) — or the create gate was muted — so a caller can render
+   * "muted by X" without re-deriving it. Omitted otherwise.
+   */
+  readonly mutedBy?: readonly string[];
   readonly boundaryNote?: string;
 }
+
+/**
+ * Text-level pointer surfaced on an `unknown` verdict: the offline cascade
+ * cannot decide (manual shares, teams, Apex sharing, and criteria sharing over
+ * record field VALUES are record-level state the vault never holds), but the
+ * live plane can resolve it definitively. Purely a disclosure — this tool stays
+ * offline and never issues a live query itself; it names the live tool the host
+ * can call if read-only live access is enabled.
+ */
+const LIVE_ACCESS_RESOLVER_NOTE =
+  'Verdict is `unknown`: the offline vault cannot decide record-level access ' +
+  '(manual shares, account/opportunity teams, Apex managed sharing, and criteria ' +
+  'sharing evaluated over record field values are not in the vault). If read-only ' +
+  'live access is enabled, sfi.live_record_access { recordId, userId | username } ' +
+  'resolves this to a definitive Read/Edit/Delete verdict by querying the live ' +
+  "org's UserRecordAccess.";
 
 /** Parsed `userContext` field. Carried in a typed shape to keep helpers honest. */
 type UserContext = WhyCantUserSeeRecordInput['userContext'];
@@ -512,7 +563,7 @@ const evaluateOWD = (
     return step(
       'OWD',
       'visible',
-      // RV11: the precondition is now operation-aware (hasObjectAccess(level)),
+      // RV11: the precondition is now operation-aware (computeMutedObjectAccess),
       // so this claim is finally TRUE for edit/delete — and we name the actual
       // bit checked (object ${level}), not the old "object-Read precondition"
       // misnomer that lied for edit/delete.
@@ -538,7 +589,7 @@ const evaluateOWD = (
  * "Modify All" records (`grantSatisfiesRecordVisible`). A grant that carries
  * only plain object CRUD (`allowRead` / `allowEdit` / `allowDelete`) satisfies
  * the object precondition (plane A, evaluated separately in
- * `hasObjectAccess(level)`) but does NOT by itself make a Private record visible —
+ * `computeMutedObjectAccess(level)`) but does NOT by itself make a Private record visible —
  * on a Private object that comes from OWD or a sharing grant — so it reports
  * `restricted` here, with a reason that distinguishes "object CRUD present,
  * record visibility depends on OWD/sharing" from "View/Modify All grants all
@@ -648,78 +699,360 @@ const evaluatePermissionGrants = async (
   );
 };
 
+/** A per-object CRUD flag map (all six object-permission bits). */
+type ObjectFlagMap = Record<MutingObjectFlag, boolean>;
+
+/** All-false object-flag map. */
+const noObjectFlags = (): ObjectFlagMap => ({
+  allowCreate: false,
+  allowRead: false,
+  allowEdit: false,
+  allowDelete: false,
+  viewAllRecords: false,
+  modifyAllRecords: false,
+});
+
+/** The two org-wide system permissions that bypass OWD/sharing (subtractable by muting). */
+const SYSTEM_BYPASS_PERMS = ['ViewAllData', 'ModifyAllData'] as const;
+
 /**
- * Plane A — the operation-aware OBJECT-CRUD PRECONDITION. To ACT on a record a
- * user needs the object-level CRUD for THAT OPERATION, drawn from the profile
- * UNION any assigned permission set:
- *   - read   needs object Read   (Edit/Delete/Create all imply Read);
- *   - edit   needs object Edit   (or object Modify All);
- *   - delete needs object Delete (or object Modify All).
+ * Do NET object flags satisfy the object-CRUD precondition for `level`? Mirrors
+ * `grantSatisfiesObjectLevel` but over a UNIONED flag map (∃x P(x)∨Q(x) is
+ * equivalent to (∃x P(x))∨(∃x Q(x)), so a per-edge OR and a union-then-check are
+ * identical when muting subtracts nothing):
+ *   - read   → any of the six object bits (Edit/Delete/Create imply Read; View
+ *              All reads every record);
+ *   - edit   → object Edit OR object Modify All;
+ *   - delete → object Delete OR object Modify All;
+ *   - create → object Create OR object Modify All.
+ */
+const objectFlagsSatisfyLevel = (flags: ObjectFlagMap, level: AccessLevel): boolean => {
+  if (level === 'read') return MUTING_OBJECT_FLAGS.some((f) => flags[f]);
+  if (level === 'edit') return flags.allowEdit || flags.modifyAllRecords;
+  if (level === 'delete') return flags.allowDelete || flags.modifyAllRecords;
+  // create
+  return flags.allowCreate || flags.modifyAllRecords;
+};
+
+/**
+ * Do NET system bypass perms satisfy `level`? `ViewAllData` is read-only, so it
+ * passes ONLY the read precondition; `ModifyAllData` passes every operation
+ * (mirrors `systemPermsForLevel`). For `create` only `ModifyAllData` counts,
+ * matching `evaluateModifyAllDataForCreate` (View All Data does not grant create).
+ */
+const systemPermsSatisfyLevel = (perms: ReadonlySet<string>, level: AccessLevel): boolean =>
+  level === 'read' ? perms.has('ViewAllData') || perms.has('ModifyAllData') : perms.has('ModifyAllData');
+
+/** The object-flag keys that satisfy `level` (used to attribute a muted flip). */
+const levelRelevantObjectFlags = (level: AccessLevel): readonly MutingObjectFlag[] => {
+  if (level === 'read') return MUTING_OBJECT_FLAGS;
+  if (level === 'edit') return ['allowEdit', 'modifyAllRecords'];
+  if (level === 'delete') return ['allowDelete', 'modifyAllRecords'];
+  return ['allowCreate', 'modifyAllRecords'];
+};
+
+/**
+ * The muting-aware, group-scoped result of the object-CRUD gate for one object +
+ * operation. `granted` reflects muting SUBTRACTION (R7-W4); `wouldGrantRaw`
+ * ignores muting, so a `wouldGrantRaw && !granted` pair is a muting-caused FLIP.
+ */
+interface MutedObjectAccess {
+  /** Object-CRUD gate satisfied for `level` AFTER group-scoped muting subtraction. */
+  readonly granted: boolean;
+  /** Same gate IGNORING muting — a would-be grant. `true && !granted` = muted flip. */
+  readonly wouldGrantRaw: boolean;
+  /** Muting set id(s) that caused the flip (level-relevant grants they denied). */
+  readonly mutedBy: readonly string[];
+  /** Muting set id(s) that removed ≥1 would-be group grant on this object (any level). */
+  readonly mutingApplied: readonly string[];
+  /** Muting nodes present but carrying no muted-perm data (pre-R6-06) — cannot subtract. */
+  readonly presentWithoutData: readonly string[];
+  /** Muting ids a group references but that are absent from the vault — cannot subtract. */
+  readonly missingMutingIds: readonly string[];
+}
+
+/**
+ * Plane A — the operation-aware OBJECT-CRUD PRECONDITION, now MUTING-AWARE
+ * (R7-W4). To ACT on a record a user needs the object-level CRUD for THAT
+ * OPERATION, drawn from the profile UNION any assigned permission set (read
+ * needs object Read — Edit/Delete/Create imply it; edit needs object Edit or
+ * Modify All; delete needs object Delete or Modify All), OR the system perm that
+ * covers the level (ViewAllData/ModifyAllData for read; ModifyAllData only for
+ * edit/delete — View All Data is read-only). CR-RV6 made this per-operation.
  *
- * CR-RV6: the precondition was previously READ-ONLY regardless of `level`, so a
- * Read-only user passed the precondition for `edit`/`delete` and the FIRST
- * cascade step (OWD) could then visible an operation the user had no CRUD for —
- * a false-PERMISSIVE access answer. The precondition is now satisfied only by:
- *   - an object `grantedBy` edge satisfying the per-level CRUD bit
- *     (`grantSatisfiesObjectLevel`); OR
- *   - the system perm that satisfies `level` (`systemPermsForLevel`:
- *     ViewAllData OR ModifyAllData for read; ModifyAllData ONLY for edit/delete
- *     — View All Data is read-only, so it must NOT pass the edit/delete
- *     precondition).
+ * R7-W4 — group-scoped muting SUBTRACTION. A PermissionSetGroup may reference a
+ * MutingPermissionSet whose perms are REMOVED from that group's member union
+ * (muting is group-scoped — it never touches the profile or a permission set
+ * assigned OUTSIDE the group). R6-06 made `effective_permissions` subtract these;
+ * this precondition previously did NOT, so a CRUD bit a group member granted but
+ * the group's muting set denied was still counted — the yes/no verdict could
+ * OVERSTATE access (say a user CAN see a record when muting removed the object
+ * Read precondition). This helper composes the SAME shared kernel
+ * (`expandPermissionSetGroup` + `loadMutingPermissions`) that R6-06 factored out:
+ *   - the profile + directly-assigned permission sets are DIRECT containers
+ *     (never muted);
+ *   - each `PermissionSetGroup:` id (passed in `permissionSetIds`) is expanded
+ *     into its member permission sets, and that group's muting set(s) subtract
+ *     from the members' contribution BEFORE the union — a bit muted for every
+ *     member of the owning group (and not re-granted by any direct container or
+ *     unmuted group) is NOT counted as granted.
  *
- * Returns `false` when neither path is present — the user lacks object CRUD for
- * the operation, so no OWD value and no record-level sharing can make the record
- * actionable (record sharing layers on TOP of object access; it never confers
- * it). `create` is off this precondition (its own `allowCreate` path) and never
- * calls this helper.
+ * Only the MODELED permission classes a muting node carries (object CRUD flags,
+ * ViewAllData/ModifyAllData system perms) are subtracted here; a muting node
+ * refreshed before the R6-06 extractor (no muted-perm data) or referenced but
+ * absent CANNOT be subtracted — it is DISCLOSED (`presentWithoutData` /
+ * `missingMutingIds`), never silently treated as "mutes nothing" (per R6-06's
+ * honesty). Record-type visibility is not mutable and is out of this gate.
+ *
+ * Reads from the RAW (uncoerced-but-still-unfolded) userContext so the group
+ * boundary survives — the folded `permissionSetIds` the rest of the cascade uses
+ * has flattened PSG members into the flat list, losing which member came from
+ * which group; muting is group-scoped, so that boundary is load-bearing here.
+ *
+ * `create` uses the SAME gate (object Create / Modify All / ModifyAllData),
+ * muting-aware — the create branch reuses this so a muted `allowCreate` inside a
+ * group is not counted.
  *
  * FLS note: this reads ONLY the object's own incoming `grantedBy` edges
- * (`direction: 'in'`, `edgeType: 'grantedBy'` on the CustomObject id). FLS
- * grants target CustomField ids, never the CustomObject, so field-level
- * security can never leak into the record-visibility precondition.
+ * (`direction: 'in'`, `edgeType: 'grantedBy'` on the CustomObject id). FLS grants
+ * target CustomField ids, never the CustomObject, so field-level security can
+ * never leak into the record-visibility precondition.
  */
-const hasObjectAccess = async (
+const computeMutedObjectAccess = async (
   ctx: Context,
   componentId: ComponentId,
+  objectApiName: string,
   userContext: UserContext,
   level: AccessLevel,
-): Promise<Result<boolean, string>> => {
-  const granterIds: string[] = [];
-  if (userContext.profileId !== undefined) granterIds.push(userContext.profileId);
-  if (userContext.permissionSetIds !== undefined) {
-    granterIds.push(...userContext.permissionSetIds);
+): Promise<Result<MutedObjectAccess, string>> => {
+  // Split the RAW context into DIRECT containers (never muted) + PSG units
+  // (member union MINUS group muting). Mirrors effective_permissions' grant
+  // units so the group boundary muting relies on survives.
+  const directIds: string[] = [];
+  const directSeen = new Set<string>();
+  const pushDirect = (id: string): void => {
+    if (directSeen.has(id)) return;
+    directSeen.add(id);
+    directIds.push(id);
+  };
+  if (userContext.profileId !== undefined) {
+    pushDirect(coercePrefix(userContext.profileId, [PROFILE_PREFIX]));
   }
-  if (granterIds.length === 0) return ok(false);
-  const granterSet: ReadonlySet<string> = new Set(granterIds);
+  interface PsgUnit {
+    readonly memberIds: readonly string[];
+    readonly mutingIds: readonly ComponentId[];
+    muting?: LoadedMuting;
+  }
+  const groups: PsgUnit[] = [];
+  for (const raw of userContext.permissionSetIds ?? []) {
+    const id = coercePrefix(raw, [PERMISSION_SET_PREFIX]);
+    if (id.startsWith(PERMISSION_SET_GROUP_PREFIX)) {
+      const expanded = await expandPermissionSetGroup(ctx, id as ComponentId);
+      if (!expanded.ok) return err(expanded.error.message);
+      if (expanded.value !== null) {
+        groups.push({
+          memberIds: expanded.value.memberPermissionSetIds,
+          mutingIds: expanded.value.mutingPermissionSetIds,
+        });
+        // The PSG id is not a grantor; only its members are.
+        continue;
+      }
+      // Not a real PSG node — treat as a phantom direct id (matches nothing),
+      // exactly as the folded flat list would.
+    }
+    pushDirect(id);
+  }
 
-  // Object-level grants: incoming `grantedBy` edges on the CustomObject.
+  const presentWithoutData = new Set<string>();
+  const missingMutingIds = new Set<string>();
+  for (const g of groups) {
+    if (g.mutingIds.length === 0) continue;
+    const loaded = await loadMutingPermissions(ctx, g.mutingIds);
+    if (!loaded.ok) return err(loaded.error.message);
+    g.muting = loaded.value;
+    for (const id of loaded.value.presentWithoutData) presentWithoutData.add(id);
+    for (const id of loaded.value.missingMutingIds) missingMutingIds.add(id);
+  }
+
+  if (directIds.length === 0 && groups.length === 0) {
+    return ok({
+      granted: false,
+      wouldGrantRaw: false,
+      mutedBy: [],
+      mutingApplied: [],
+      presentWithoutData: [],
+      missingMutingIds: [],
+    });
+  }
+
+  // Object-flag grants: read the object's incoming `grantedBy` edges ONCE and
+  // bucket the OR'd flags per container.
   const edgesResult = await listEdges(ctx.graph, componentId, {
     direction: 'in',
     edgeType: 'grantedBy',
   });
   if (!edgesResult.ok) return err(edgesResult.error.message);
+  const objFlagsByContainer = new Map<string, ObjectFlagMap>();
   for (const edge of edgesResult.value) {
-    if (!granterSet.has(edge.fromId)) continue;
-    if (grantSatisfiesObjectLevel(edge, level)) return ok(true);
+    const f = objFlagsByContainer.get(edge.fromId) ?? noObjectFlags();
+    for (const flag of MUTING_OBJECT_FLAGS) {
+      if (edge.properties[flag] === true) f[flag] = true;
+    }
+    objFlagsByContainer.set(edge.fromId, f);
   }
 
-  // System View All Data / Modify All Data also satisfies the precondition for
-  // the levels they cover (read: View/Modify All Data; edit/delete: Modify All
-  // Data only). `systemPermsForLevel` already encodes the read-only nature of
-  // View All Data, so this branch can never let it pass the edit/delete gate.
-  const relevantPerms = systemPermsForLevel(level);
-  for (const id of granterIds) {
-    const nodeResult = await getNodeById(ctx.graph, id as ComponentId);
-    if (!nodeResult.ok) return err(nodeResult.error.message);
-    const node = nodeResult.value;
-    if (node === null) continue;
-    const perms = node.properties['userPermissions'];
-    if (!Array.isArray(perms)) continue;
-    if (relevantPerms.some((p) => perms.includes(p))) {
-      return ok(true);
+  // System bypass perms per container (from userPermissions), fetched once.
+  const sysPermsByContainer = new Map<string, ReadonlySet<string>>();
+  const containersToLoad = new Set<string>(directIds);
+  for (const g of groups) for (const m of g.memberIds) containersToLoad.add(m);
+  // ONE batched fetch of every container node, replacing the per-container
+  // `getNodeById` N+1. A missing id maps to an empty perm set, exactly like the
+  // old null branch; `sysPermsByContainer` is a Map so iteration order is
+  // irrelevant.
+  const containerNodesResult = await listNodesByIds(
+    ctx.graph,
+    [...containersToLoad].map((id) => id as ComponentId),
+  );
+  if (!containerNodesResult.ok) return err(containerNodesResult.error.message);
+  const containerById = new Map(containerNodesResult.value.map((n) => [n.id, n]));
+  for (const id of containersToLoad) {
+    const node = containerById.get(id as ComponentId);
+    const set = new Set<string>();
+    if (node !== undefined) {
+      const perms = node.properties['userPermissions'];
+      if (Array.isArray(perms)) {
+        for (const p of SYSTEM_BYPASS_PERMS) if (perms.includes(p)) set.add(p);
+      }
+    }
+    sysPermsByContainer.set(id, set);
+  }
+
+  // Compose the NET (muting-aware) and RAW (muting-ignored) unions.
+  const netFlags = noObjectFlags();
+  const rawFlags = noObjectFlags();
+  const flagMuters = new Map<MutingObjectFlag, Set<string>>();
+  const netSys = new Set<string>();
+  const rawSys = new Set<string>();
+  const sysMuters = new Map<string, Set<string>>();
+  const mutingApplied = new Set<string>();
+
+  // Direct containers contribute unconditionally.
+  for (const id of directIds) {
+    const f = objFlagsByContainer.get(id);
+    if (f !== undefined) {
+      for (const flag of MUTING_OBJECT_FLAGS) {
+        if (f[flag]) {
+          netFlags[flag] = true;
+          rawFlags[flag] = true;
+        }
+      }
+    }
+    for (const p of sysPermsByContainer.get(id) ?? []) {
+      netSys.add(p);
+      rawSys.add(p);
     }
   }
-  return ok(false);
+
+  // Groups: member union MINUS this group's muting (per object + per system perm).
+  for (const g of groups) {
+    const mutedFlags = new Map<MutingObjectFlag, Set<string>>();
+    const mutedSys = new Map<string, Set<string>>();
+    for (const mg of g.muting?.grants ?? []) {
+      const om = mg.objects.get(objectApiName);
+      if (om !== undefined) {
+        for (const flag of MUTING_OBJECT_FLAGS) {
+          if (!om[flag]) continue;
+          let s = mutedFlags.get(flag);
+          if (s === undefined) {
+            s = new Set();
+            mutedFlags.set(flag, s);
+          }
+          s.add(mg.mutingId);
+        }
+      }
+      for (const p of mg.userPermissions) {
+        if (!SYSTEM_BYPASS_PERMS.includes(p as (typeof SYSTEM_BYPASS_PERMS)[number])) continue;
+        let s = mutedSys.get(p);
+        if (s === undefined) {
+          s = new Set();
+          mutedSys.set(p, s);
+        }
+        s.add(mg.mutingId);
+      }
+    }
+    for (const memberId of g.memberIds) {
+      const f = objFlagsByContainer.get(memberId);
+      if (f !== undefined) {
+        for (const flag of MUTING_OBJECT_FLAGS) {
+          if (!f[flag]) continue;
+          rawFlags[flag] = true;
+          const deniers = mutedFlags.get(flag);
+          if (deniers !== undefined && deniers.size > 0) {
+            let fm = flagMuters.get(flag);
+            if (fm === undefined) {
+              fm = new Set();
+              flagMuters.set(flag, fm);
+            }
+            for (const d of deniers) {
+              fm.add(d);
+              mutingApplied.add(d);
+            }
+          } else {
+            netFlags[flag] = true;
+          }
+        }
+      }
+      for (const p of sysPermsByContainer.get(memberId) ?? []) {
+        rawSys.add(p);
+        const deniers = mutedSys.get(p);
+        if (deniers !== undefined && deniers.size > 0) {
+          let sm = sysMuters.get(p);
+          if (sm === undefined) {
+            sm = new Set();
+            sysMuters.set(p, sm);
+          }
+          for (const d of deniers) {
+            sm.add(d);
+            mutingApplied.add(d);
+          }
+        } else {
+          netSys.add(p);
+        }
+      }
+    }
+  }
+
+  const granted = objectFlagsSatisfyLevel(netFlags, level) || systemPermsSatisfyLevel(netSys, level);
+  const wouldGrantRaw =
+    objectFlagsSatisfyLevel(rawFlags, level) || systemPermsSatisfyLevel(rawSys, level);
+
+  // Attribute the FLIP: which muting set(s) removed a grant that would otherwise
+  // have satisfied `level`. Only meaningful when muting turned a grant into a deny.
+  const mutedBy = new Set<string>();
+  if (wouldGrantRaw && !granted) {
+    for (const flag of levelRelevantObjectFlags(level)) {
+      if (rawFlags[flag] && !netFlags[flag]) {
+        const s = flagMuters.get(flag);
+        if (s !== undefined) for (const d of s) mutedBy.add(d);
+      }
+    }
+    const relSys = level === 'read' ? SYSTEM_BYPASS_PERMS : (['ModifyAllData'] as const);
+    for (const p of relSys) {
+      if (rawSys.has(p) && !netSys.has(p)) {
+        const s = sysMuters.get(p);
+        if (s !== undefined) for (const d of s) mutedBy.add(d);
+      }
+    }
+  }
+
+  return ok({
+    granted,
+    wouldGrantRaw,
+    mutedBy: [...mutedBy].sort(),
+    mutingApplied: [...mutingApplied].sort(),
+    presentWithoutData: [...presentWithoutData].sort(),
+    missingMutingIds: [...missingMutingIds].sort(),
+  });
 };
 
 /**
@@ -759,12 +1092,18 @@ const evaluateSystemPermissions = async (
   }
   // For edit/delete only ModifyAllData bypasses; ViewAllData is read-only.
   const relevantPerms = systemPermsForLevel(level);
+  // ONE batched fetch of every granter node, replacing the per-granter
+  // `getNodeById` N+1. Iterate granterIds order so `holders` is unchanged.
+  const granterNodesResult = await listNodesByIds(
+    ctx.graph,
+    granterIds.map((id) => id as ComponentId),
+  );
+  if (!granterNodesResult.ok) return err(granterNodesResult.error.message);
+  const granterById = new Map(granterNodesResult.value.map((n) => [n.id, n]));
   const holders: string[] = [];
   for (const id of granterIds) {
-    const nodeResult = await getNodeById(ctx.graph, id as ComponentId);
-    if (!nodeResult.ok) return err(nodeResult.error.message);
-    const node = nodeResult.value;
-    if (node === null) continue;
+    const node = granterById.get(id as ComponentId);
+    if (node === undefined) continue;
     const perms = node.properties['userPermissions'];
     if (!Array.isArray(perms)) continue;
     const found = relevantPerms.filter((p) => perms.includes(p));
@@ -944,13 +1283,20 @@ const fetchSharingRules = async (
   if (!edgesResult.ok) {
     return err(edgesResult.error.message);
   }
+  // ONE batched fetch of every parentOf child, replacing the per-edge
+  // `getNodeById` N+1; filtered to SharingRule and re-sorted by id below.
+  const childNodesResult = await listNodesByIds(
+    ctx.graph,
+    edgesResult.value.map((e) => e.toId),
+  );
+  if (!childNodesResult.ok) return err(childNodesResult.error.message);
+  const childById = new Map(childNodesResult.value.map((n) => [n.id, n]));
   const rules: Node[] = [];
   for (const edge of edgesResult.value) {
-    const nodeResult = await getNodeById(ctx.graph, edge.toId);
-    if (!nodeResult.ok) return err(nodeResult.error.message);
-    if (nodeResult.value === null) continue;
-    if (nodeResult.value.type !== 'SharingRule') continue;
-    rules.push(nodeResult.value);
+    const node = childById.get(edge.toId);
+    if (node === undefined) continue;
+    if (node.type !== 'SharingRule') continue;
+    rules.push(node);
   }
   // Deterministic order by id so the reasoning output is stable
   // across runs, mirroring the (id ASC) convention every other tool
@@ -1014,25 +1360,23 @@ type OwnerRuleMatch =
  * Bounded by the SINGLE user ancestor chain (computed once by the
  * caller), regardless of how large the rule's role subtree is.
  */
-const ownerRuleMatches = async (
-  ctx: Context,
-  ruleNode: Node,
+const ownerRuleMatches = (
+  sharedWithEdges: readonly Edge[],
   membership: ReadonlySet<string>,
   userAncestorRoleIds: ReadonlySet<string>,
   userAncestorChainTruncated: boolean,
   groupMembershipTruncated: boolean,
-): Promise<Result<OwnerRuleMatch, string>> => {
-  const edgesResult = await listEdges(ctx.graph, ruleNode.id, {
-    direction: 'out',
-    edgeType: 'sharedWith',
-  });
-  if (!edgesResult.ok) {
-    return err(edgesResult.error.message);
-  }
+): Result<OwnerRuleMatch, string> => {
+  // `sharedWithEdges` is the rule's OUTGOING `sharedWith` bucket, pre-fetched by
+  // the caller in ONE batched `listEdgesForNodes` (replacing a per-rule
+  // `listEdges` N+1). The bucket is sorted by the FULL (to_id, edge_type,
+  // from_id, source) order — a refinement of the per-rule `listEdges` order —
+  // and every edge here shares from_id + edge_type, so the iteration order (and
+  // thus the first-match short-circuit) is byte-identical.
   // Defer a possible `indeterminate` so a definite match on ANOTHER edge of
   // the same rule always wins (a rule can carry several sharedTo targets).
   let indeterminate: { readonly targetId: string } | null = null;
-  for (const edge of edgesResult.value) {
+  for (const edge of sharedWithEdges) {
     if (edge.properties['direction'] === 'from') continue;
     // Exact membership match always wins (covers the named role itself,
     // groups [incl. CR-CAP-12 enclosing groups folded into `membership`],
@@ -1139,11 +1483,19 @@ const evaluateOwnerSharingRules = async (
     userAncestorRoleIds = new Set<string>(walk.value.chain);
     userAncestorChainTruncated = walk.value.truncated;
   }
+  // ONE batched fetch of every owner rule's OUTGOING sharedWith edges, replacing
+  // the per-rule `listEdges` inside `ownerRuleMatches` (a per-rule N+1 on this
+  // loop). Each bucket is threaded into the now-synchronous matcher.
+  const sharedWithBatch = await listEdgesForNodes(
+    ctx.graph,
+    ownerRules.map((r) => r.id),
+    { direction: 'out', edgeTypes: ['sharedWith'] },
+  );
+  if (!sharedWithBatch.ok) return err(sharedWithBatch.error.message);
   const steps: AccessReasoningStep[] = [];
   for (const rule of ownerRules) {
-    const matchResult = await ownerRuleMatches(
-      ctx,
-      rule,
+    const matchResult = ownerRuleMatches(
+      sharedWithBatch.value.get(rule.id) ?? [],
       membership,
       userAncestorRoleIds,
       userAncestorChainTruncated,
@@ -1413,11 +1765,19 @@ const evaluateScopingRules = async (
  * CR-CAP-04: PermissionSetGroup is now MODELED. Any PSG passed in the user's
  * `permissionSetIds` has already been EXPANDED into its member permission sets
  * by `coerceUserContext`, and those members flow through the real grant cascade
- * (object-Read precondition + PermissionGrant + SystemPermission) — so the
+ * (object-CRUD precondition + PermissionGrant + SystemPermission) — so the
  * verdict is decided there, not here. This step is INFORMATIONAL: it reports how
  * many assigned PSGs were expanded into how many member permission sets, and
- * carries a muting caveat where a group references a muting set (muting is
- * disclosed but NEVER subtracted — declared confidence).
+ * carries a muting caveat where a group references a muting set.
+ *
+ * R7-W4: muting IS now subtracted from the object-CRUD PRECONDITION (plane A) —
+ * `computeMutedObjectAccess` removes a group's muted CRUD bits before deciding
+ * whether the user holds object Read/Edit/Delete/Create on this object. So the
+ * caveat here reports what muting DID (via the passed `netAccess`): which sets
+ * removed a would-be object grant, which could NOT be applied (pre-R6-06 / absent
+ * → possible OVERSTATEMENT), and that muting is still NOT subtracted from the
+ * record-visibility BYPASS stages (object/system View/Modify All) — for the full
+ * muting-correct net grant use `sfi.effective_permissions`.
  *
  * `restricted` (not `unknown`): the step itself confers no record-visibility
  * BYPASS, and PSG membership is no longer an undecidable gap — the grant stages
@@ -1428,6 +1788,7 @@ const evaluateScopingRules = async (
 const evaluatePermissionSetGroups = async (
   ctx: Context,
   userContext: UserContext,
+  netAccess: MutedObjectAccess | null,
 ): Promise<Result<AccessReasoningStep, string>> => {
   // The coerced+folded permissionSetIds still carry the PSG ids alongside their
   // expanded members, so the assigned PSGs are read straight off the context.
@@ -1445,10 +1806,30 @@ const evaluatePermissionSetGroups = async (
       memberCount += expanded.value.memberPermissionSetIds.length;
       if (expanded.value.hasMuting) mutingPsgs.push(psgId);
     }
-    const caveat =
-      mutingPsgs.length > 0
-        ? ` ${mutingPsgs.length} of them reference a muting permission set (${[...new Set(mutingPsgs)].sort().join(', ')}); muting is NOT subtracted, so effective access may be lower.`
-        : '';
+    let caveat = '';
+    if (mutingPsgs.length > 0) {
+      const refd = [...new Set(mutingPsgs)].sort().join(', ');
+      const applied =
+        netAccess !== null && netAccess.mutingApplied.length > 0
+          ? `it removed object-CRUD grant(s) on this object (${netAccess.mutingApplied.join(', ')})`
+          : 'no object-CRUD grant on this object was muted';
+      const notApplied: string[] = [];
+      if (netAccess !== null && netAccess.presentWithoutData.length > 0) {
+        notApplied.push(
+          `${netAccess.presentWithoutData.length} present but carrying no muted-permission data (vault refreshed before muting extraction — re-run \`/sfi-refresh\`): ${netAccess.presentWithoutData.join(', ')}`,
+        );
+      }
+      if (netAccess !== null && netAccess.missingMutingIds.length > 0) {
+        notApplied.push(
+          `${netAccess.missingMutingIds.length} referenced but absent from this vault: ${netAccess.missingMutingIds.join(', ')}`,
+        );
+      }
+      const overstate =
+        notApplied.length > 0
+          ? ` NOTE: muting could NOT be applied for some set(s) — ${notApplied.join('; ')} — so object access may be OVERSTATED for the owning group.`
+          : '';
+      caveat = ` ${mutingPsgs.length} of them reference a muting permission set (${refd}); muting IS subtracted from the object-CRUD precondition (plane A) in this verdict (${applied}) — muting is group-scoped and is NOT subtracted from the record-visibility BYPASS stages (object/system View/Modify All); use \`sfi.effective_permissions\` for the full muting-correct net grant (R6-06/R7-W4).${overstate}`;
+    }
     return ok(
       step(
         'PermissionSetGroup',
@@ -1683,12 +2064,18 @@ const evaluateModifyAllDataForCreate = async (
   if (granterIds.length === 0) {
     return ok(step('SystemPermission', 'restricted', 'no profile or permission sets supplied'));
   }
+  // ONE batched fetch of every granter node, replacing the per-granter
+  // `getNodeById` N+1. Iterate granterIds order so `holders` is unchanged.
+  const granterNodesResult = await listNodesByIds(
+    ctx.graph,
+    granterIds.map((id) => id as ComponentId),
+  );
+  if (!granterNodesResult.ok) return err(granterNodesResult.error.message);
+  const granterById = new Map(granterNodesResult.value.map((n) => [n.id, n]));
   const holders: string[] = [];
   for (const id of granterIds) {
-    const nodeResult = await getNodeById(ctx.graph, id as ComponentId);
-    if (!nodeResult.ok) return err(nodeResult.error.message);
-    const node = nodeResult.value;
-    if (node === null) continue;
+    const node = granterById.get(id as ComponentId);
+    if (node === undefined) continue;
     const perms = node.properties['userPermissions'];
     if (Array.isArray(perms) && perms.includes('ModifyAllData')) holders.push(id);
   }
@@ -1764,13 +2151,19 @@ const evaluateRecordTypeForCreate = async (
   if (userContext.permissionSetIds !== undefined) {
     granterIds.push(...userContext.permissionSetIds);
   }
+  // ONE batched fetch of every granter node, replacing the per-granter
+  // `getNodeById` N+1. Iterate granterIds order so accumulation is unchanged.
+  const granterNodesResult = await listNodesByIds(
+    ctx.graph,
+    granterIds.map((id) => id as ComponentId),
+  );
+  if (!granterNodesResult.ok) return err(granterNodesResult.error.message);
+  const granterById = new Map(granterNodesResult.value.map((n) => [n.id, n]));
   const visibleNames: string[] = [];
   let entriesForObject = 0;
   for (const id of granterIds) {
-    const nodeResult = await getNodeById(ctx.graph, id as ComponentId);
-    if (!nodeResult.ok) return err(nodeResult.error.message);
-    const node = nodeResult.value;
-    if (node === null) continue;
+    const node = granterById.get(id as ComponentId);
+    if (node === undefined) continue;
     const raw = node.properties['recordTypeVisibilities'];
     if (!Array.isArray(raw)) continue;
     for (const item of raw) {
@@ -1822,21 +2215,47 @@ const evaluateRecordTypeForCreate = async (
  * object/system Modify-All) AND — if the object has record types — at least one
  * visible record type. The record-type gate is ANDed onto the permission gate,
  * so a Create grant with no visible record type is `restricted`, not `visible`.
+ *
+ * R7-W4: the object-Create permission gate is now MUTING-AWARE. `netAccess`
+ * (computed with `level: 'create'` from the RAW context so the PSG boundary
+ * survives) subtracts a group's muting set from its members' Create grant. When
+ * a group member WOULD grant object Create but the owning group's muting set
+ * removed it, the raw PermissionGrant / SystemPermission `visible` steps are
+ * flipped to `restricted` with `mutedBy`, and the create verdict drops to
+ * `restricted` — muting can only REMOVE access, never add it, so `netAccess`
+ * gates but never widens `permVisible`.
  */
 const evaluateCreateAccess = async (
   ctx: Context,
   componentId: ComponentId,
   objectNode: Node,
   userContext: UserContext,
+  netAccess: MutedObjectAccess | null,
 ): Promise<
   Result<
-    { verdict: 'visible' | 'restricted' | 'unknown'; reasoning: AccessReasoningStep[] },
+    {
+      verdict: 'visible' | 'restricted' | 'unknown';
+      reasoning: AccessReasoningStep[];
+      mutedBy: readonly string[];
+    },
     string
   >
 > => {
   const reasoning: AccessReasoningStep[] = [];
 
-  // 1. Object Create permission (`allowCreate`) or object Modify All.
+  // R7-W4: did group-scoped muting flip a would-be object-Create grant off?
+  const muted =
+    netAccess !== null &&
+    netAccess.wouldGrantRaw &&
+    !netAccess.granted &&
+    netAccess.mutedBy.length > 0;
+  const mutedSuffix = muted
+    ? ` — but object Create is MUTED within its permission set group by ${netAccess!.mutedBy.join(', ')} (muting is group-scoped), so this does not confer create`
+    : '';
+
+  // 1. Object Create permission (`allowCreate`) or object Modify All. Muting
+  // demotes a raw `visible` here to `restricted` (the group's Create grant was
+  // removed by its muting set).
   const grantResult = await evaluatePermissionGrants(
     ctx,
     componentId,
@@ -1845,18 +2264,35 @@ const evaluateCreateAccess = async (
   );
   if (!grantResult.ok) return err(grantResult.error);
   const g = grantResult.value;
+  const gVerdict: AccessReasoningStep['verdict'] =
+    muted && g.verdict === 'visible' ? 'restricted' : g.verdict;
   reasoning.push(
-    step(
-      'PermissionGrant',
-      g.verdict,
-      `${g.reason} — create is gated by object Create permission, NOT by OWD / sharing rules / role hierarchy (you don't need access to existing records to create one)`,
-    ),
+    muted && g.verdict === 'visible'
+      ? {
+          stage: 'PermissionGrant',
+          verdict: 'restricted',
+          reason: `${g.reason} — create is gated by object Create permission, NOT by OWD / sharing rules / role hierarchy (you don't need access to existing records to create one)${mutedSuffix}`,
+          mutedBy: netAccess!.mutedBy,
+        }
+      : step(
+          'PermissionGrant',
+          g.verdict,
+          `${g.reason} — create is gated by object Create permission, NOT by OWD / sharing rules / role hierarchy (you don't need access to existing records to create one)`,
+        ),
   );
 
-  // 2. Modify All Data god-mode (no restriction-rule caveat for create).
+  // 2. Modify All Data god-mode (no restriction-rule caveat for create). Muting
+  // can also remove ModifyAllData within a group, so demote a raw `visible`.
   const madResult = await evaluateModifyAllDataForCreate(ctx, userContext);
   if (!madResult.ok) return err(madResult.error);
-  reasoning.push(madResult.value);
+  const mad = madResult.value;
+  const madVerdict: AccessReasoningStep['verdict'] =
+    muted && mad.verdict === 'visible' ? 'restricted' : mad.verdict;
+  reasoning.push(
+    muted && mad.verdict === 'visible'
+      ? { stage: 'SystemPermission', verdict: 'restricted', reason: `${mad.reason}${mutedSuffix}`, mutedBy: netAccess!.mutedBy }
+      : mad,
+  );
 
   // 3. Record-type availability (ANDed onto the permission gate).
   const rtResult = await evaluateRecordTypeForCreate(
@@ -1869,7 +2305,11 @@ const evaluateCreateAccess = async (
   const rt = rtResult.value;
   reasoning.push(rt);
 
-  const permVisible = g.verdict === 'visible' || madResult.value.verdict === 'visible';
+  // Muting gates but never widens: the raw permission gate must hold AND survive
+  // the group's muting.
+  const permVisible =
+    (gVerdict === 'visible' || madVerdict === 'visible') &&
+    (netAccess === null || netAccess.granted);
   let verdict: 'visible' | 'restricted' | 'unknown';
   if (!permVisible) {
     verdict = 'restricted';
@@ -1880,7 +2320,7 @@ const evaluateCreateAccess = async (
   } else {
     verdict = 'restricted';
   }
-  return ok({ verdict, reasoning });
+  return ok({ verdict, reasoning, mutedBy: muted ? netAccess!.mutedBy : [] });
 };
 
 /**
@@ -1938,11 +2378,34 @@ export const whyCantUserSeeRecordHandler = async (
   // types, a visible record type. Short-circuit the whole sharing cascade.
   if (level === 'create') {
     const userContext = await coerceUserContext(ctx, input.userContext);
+    // R7-W4: muting-aware object-Create gate, computed from the RAW context so
+    // the PermissionSetGroup boundary survives (only when a profile / permission
+    // set was supplied — a role/group-only context cannot decide object perms).
+    const createProfileOrPermSet =
+      input.userContext.profileId !== undefined ||
+      (input.userContext.permissionSetIds !== undefined &&
+        input.userContext.permissionSetIds.length > 0);
+    let createNetAccess: MutedObjectAccess | null = null;
+    if (createProfileOrPermSet) {
+      const objApi = objectApiNameOf(nodeResult.value, componentId);
+      const naResult = await computeMutedObjectAccess(
+        ctx,
+        componentId,
+        objApi,
+        input.userContext,
+        'create',
+      );
+      if (!naResult.ok) {
+        return err({ kind: 'internal', message: `graph query failed: ${naResult.error}` });
+      }
+      createNetAccess = naResult.value;
+    }
     const createResult = await evaluateCreateAccess(
       ctx,
       componentId,
       nodeResult.value,
       userContext,
+      createNetAccess,
     );
     if (!createResult.ok) {
       return err({
@@ -1954,6 +2417,12 @@ export const whyCantUserSeeRecordHandler = async (
       data: {
         verdict: createResult.value.verdict,
         reasoning: createResult.value.reasoning,
+        ...(createResult.value.mutedBy.length > 0
+          ? { mutedBy: createResult.value.mutedBy }
+          : {}),
+        ...(createResult.value.verdict === 'unknown'
+          ? { boundaryNote: LIVE_ACCESS_RESOLVER_NOTE }
+          : {}),
       },
       vaultState: {
         sourceTreeHash: ctx.manifest.sourceTreeHash,
@@ -1973,7 +2442,11 @@ export const whyCantUserSeeRecordHandler = async (
   const owdStep = evaluateOWD(nodeResult.value, level);
   if (owdStep.verdict === 'unknown') {
     return ok({
-      data: { verdict: owdStep.verdict, reasoning: [owdStep] },
+      data: {
+        verdict: owdStep.verdict,
+        reasoning: [owdStep],
+        boundaryNote: LIVE_ACCESS_RESOLVER_NOTE,
+      },
       vaultState: {
         sourceTreeHash: ctx.manifest.sourceTreeHash,
         refreshedAt: ctx.manifest.refreshedAt,
@@ -2018,19 +2491,45 @@ export const whyCantUserSeeRecordHandler = async (
   // surfaced in `reasoning` for an honest, complete chain — they simply cannot
   // OVERTURN the hard deny. The verdict is forced below, after the cascade.
   let objectCrudHardDenyReason: string | null = null;
+  // R7-W4: muting set(s) that flipped the precondition from a would-be grant to
+  // a deny within a PermissionSetGroup. Surfaced on the PermissionGrant hard-deny
+  // step + the output so an auditor sees WHICH muting set removed access.
+  let mutedByForDeny: readonly string[] = [];
+  // R7-W4: the muting-aware object-CRUD gate result, computed from the RAW
+  // userContext so the PermissionSetGroup boundary muting is scoped to survives.
+  // Threaded into the PermissionSetGroup step so its caveat can report what
+  // muting did (and disclose any muting it could not apply).
+  let netAccess: MutedObjectAccess | null = null;
   if (profileOrPermSetSupplied) {
-    const objectAccessResult = await hasObjectAccess(ctx, componentId, userContext, level);
-    if (!objectAccessResult.ok) {
+    const objectApiName = objectApiNameOf(nodeResult.value, componentId);
+    const netAccessResult = await computeMutedObjectAccess(
+      ctx,
+      componentId,
+      objectApiName,
+      input.userContext,
+      level,
+    );
+    if (!netAccessResult.ok) {
       return err({
         kind: 'internal',
-        message: `graph query failed: ${objectAccessResult.error}`,
+        message: `graph query failed: ${netAccessResult.error}`,
       });
     }
-    if (!objectAccessResult.value) {
+    netAccess = netAccessResult.value;
+    if (!netAccess.granted) {
       // RV11: name the CRUD bit actually required for THIS operation, not Read.
       const levelLabel =
         level === 'read' ? 'Read' : level === 'edit' ? 'Edit' : 'Delete';
-      objectCrudHardDenyReason = `no object ${levelLabel} permission on the supplied profile / permission sets — object ${levelLabel} is a precondition for record ${level}, so no OWD value or sharing grant can make the record ${level === 'read' ? 'visible' : level + 'able'}`;
+      if (netAccess.wouldGrantRaw && netAccess.mutedBy.length > 0) {
+        // R7-W4: the user's group member(s) WOULD grant object ${level}, but the
+        // owning PermissionSetGroup's muting set removed it — so the precondition
+        // fails. Muting is group-scoped: a grant from the profile or a permission
+        // set assigned OUTSIDE the group would have survived.
+        objectCrudHardDenyReason = `object ${levelLabel} is MUTED within its permission set group by ${netAccess.mutedBy.join(', ')} — the muting permission set removes object ${levelLabel} from that group's member union, so the object-${levelLabel} precondition for record ${level} is NOT met (muting is group-scoped; a grant from the profile or a permission set assigned outside the group would survive)`;
+        mutedByForDeny = netAccess.mutedBy;
+      } else {
+        objectCrudHardDenyReason = `no object ${levelLabel} permission on the supplied profile / permission sets — object ${levelLabel} is a precondition for record ${level}, so no OWD value or sharing grant can make the record ${level === 'read' ? 'visible' : level + 'able'}`;
+      }
     }
   }
 
@@ -2056,10 +2555,13 @@ export const whyCantUserSeeRecordHandler = async (
   }
   // When the object-CRUD precondition hard-denied, surface that exact reason on
   // the PermissionGrant stage (the RV11 wording) instead of the generic
-  // "no read-or-better grant" reason, so the chain explains the hard deny.
+  // "no read-or-better grant" reason, so the chain explains the hard deny. R7-W4:
+  // when muting caused the deny, attach `mutedBy` so the step names the set.
   reasoning.push(
     objectCrudHardDenyReason !== null
-      ? step('PermissionGrant', 'restricted', objectCrudHardDenyReason)
+      ? mutedByForDeny.length > 0
+        ? { stage: 'PermissionGrant', verdict: 'restricted', reason: objectCrudHardDenyReason, mutedBy: mutedByForDeny }
+        : step('PermissionGrant', 'restricted', objectCrudHardDenyReason)
       : grantStepResult.value,
   );
 
@@ -2075,7 +2577,7 @@ export const whyCantUserSeeRecordHandler = async (
   }
   reasoning.push(systemPermResult.value);
 
-  const psgStepResult = await evaluatePermissionSetGroups(ctx, userContext);
+  const psgStepResult = await evaluatePermissionSetGroups(ctx, userContext, netAccess);
   if (!psgStepResult.ok) {
     return err({
       kind: 'internal',
@@ -2162,21 +2664,46 @@ export const whyCantUserSeeRecordHandler = async (
   // `unknown` off the tail. The full reasoning chain is still returned so the
   // admin sees every stage that was evaluated (e.g. an attached RestrictionRule)
   // even though none of them changes the verdict.
+  const finalVerdict: WhyCantUserSeeRecordOutput['verdict'] =
+    objectCrudHardDenyReason !== null ? 'restricted' : aggregateVerdict(reasoning);
+  // R7-W4: expose the muting set(s) that flipped the precondition (top-level, so
+  // a caller need not walk the reasoning chain). Present only on a muted deny.
+  const mutedByField =
+    mutedByForDeny.length > 0 ? { mutedBy: mutedByForDeny } : {};
+  // R7-W4: when the verdict is NOT a hard deny but a group's muting could not be
+  // applied (pre-R6-06 / absent), object access may be OVERSTATED — disclose it
+  // even though the PermissionSetGroup step already carries the detail.
+  const mutingCouldNotApply =
+    netAccess !== null &&
+    (netAccess.presentWithoutData.length > 0 || netAccess.missingMutingIds.length > 0);
+  const overstatementNote =
+    mutingCouldNotApply && finalVerdict !== 'restricted'
+      ? ` NOTE: a permission set group referenced muting permission set(s) that could not be applied (${[...netAccess!.presentWithoutData, ...netAccess!.missingMutingIds].sort().join(', ')} — pre-R6-06 or absent), so object access may be OVERSTATED; re-run \`/sfi-refresh\` and see the PermissionSetGroup step.`
+      : '';
   return ok({
     data: {
-      verdict:
-        objectCrudHardDenyReason !== null ? 'restricted' : aggregateVerdict(reasoning),
+      verdict: finalVerdict,
       reasoning,
+      ...mutedByField,
       ...(objectCrudHardDenyReason !== null
         ? {
             hardDenyReason: objectCrudHardDenyReason,
             boundaryNote:
-              `Object-level CRUD hard deny is determinative: ${objectCrudHardDenyReason}. ` +
-              `Restriction rules (when present) may further narrow visible records but cannot ` +
-              `grant access when object Read is missing — evaluate RestrictionRule stages for ` +
-              `non-granting filters such as Hide_External even though they do not overturn the deny.`,
+              mutedByForDeny.length > 0
+                ? `Object-level CRUD hard deny is determinative: ${objectCrudHardDenyReason}. ` +
+                  `The object-CRUD grant existed but was muted within its permission set group ` +
+                  `(muting is group-scoped) — use sfi.effective_permissions for the full net grant. ` +
+                  `Restriction rules and sharing stages cannot revive a muted object-CRUD precondition.`
+                : `Object-level CRUD hard deny is determinative: ${objectCrudHardDenyReason}. ` +
+                  `Restriction rules (when present) may further narrow visible records but cannot ` +
+                  `grant access when object Read is missing — evaluate RestrictionRule stages for ` +
+                  `non-granting filters such as Hide_External even though they do not overturn the deny.`,
           }
-        : {}),
+        : finalVerdict === 'unknown'
+          ? { boundaryNote: LIVE_ACCESS_RESOLVER_NOTE + overstatementNote }
+          : overstatementNote !== ''
+            ? { boundaryNote: overstatementNote.trimStart() }
+            : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

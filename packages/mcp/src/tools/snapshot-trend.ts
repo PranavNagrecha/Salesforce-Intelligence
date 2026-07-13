@@ -4,14 +4,28 @@
 
 import type { McpError, McpResponse } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listSnapshots, loadSnapshot } from '@sf-intelligence/vault';
+import { listSnapshots } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-export const trendInputSchema = z.object({});
+import {
+  diffSnapshotsHandler,
+  type DiffSnapshotsOutput,
+} from './diff-snapshots.js';
+
+export const trendMetricSchema = z.enum([
+  'componentCount',
+  'edgeCount',
+  'securityScore',
+]);
+
+export const trendInputSchema = z.object({
+  metric: trendMetricSchema.optional(),
+});
 
 export type TrendInput = z.infer<typeof trendInputSchema>;
+export type TrendMetric = z.infer<typeof trendMetricSchema>;
 
 export interface TrendPoint {
   readonly label: string;
@@ -19,6 +33,12 @@ export interface TrendPoint {
   readonly sourceTreeHash: string;
   readonly componentCount: number;
   readonly edgeCount: number;
+  /**
+   * Present when the caller requested a specific `metric`. `null` means the
+   * snapshot predates that metric (e.g. no `metrics.securityScore` bag).
+   */
+  readonly value?: number | null;
+  readonly metric?: TrendMetric;
 }
 
 export interface TrendOutput {
@@ -29,35 +49,78 @@ export interface TrendOutput {
 const TREND_DISCLOSURE =
   'Trend points come from persisted `sfi snapshot create` captures. Successful `sfi refresh` auto-captures a snapshot unless `meta/config.json` sets `snapshotOnRefresh: false`.';
 
+const SECURITY_SCORE_DISCLOSURE =
+  ' securityScore is captured at snapshot-create time from permission-risk findings (higher is better, 0–100). Snapshots created before this metric shipped have value: null — posture cannot be recomputed from hash-only snapshot nodes.';
+
+const resolveMetricValue = (
+  metric: TrendMetric,
+  meta: {
+    readonly componentCount: number;
+    readonly edgeCount: number;
+    readonly metrics?: Readonly<Record<string, number>>;
+  },
+): number | null => {
+  if (metric === 'componentCount') return meta.componentCount;
+  if (metric === 'edgeCount') return meta.edgeCount;
+  const score = meta.metrics?.['securityScore'];
+  return typeof score === 'number' && Number.isFinite(score) ? score : null;
+};
+
 export const trendHandler = async (
   ctx: Context,
-  _input: TrendInput,
+  input: TrendInput,
 ): Promise<Result<McpResponse<TrendOutput>, McpError>> => {
   const listed = await listSnapshots(ctx.vaultRoot);
   if (!listed.ok) {
     return err({ kind: 'internal', message: listed.error.message });
   }
+  const metric = input.metric;
   const points: TrendPoint[] = [];
+  let missingSecurityScore = 0;
   for (const meta of listed.value) {
-    points.push({
+    const base = {
       label: meta.label,
       createdAt: meta.createdAt,
       sourceTreeHash: meta.sourceTreeHash,
       componentCount: meta.componentCount,
       edgeCount: meta.edgeCount,
-    });
+    };
+    if (metric === undefined) {
+      points.push(base);
+      continue;
+    }
+    const value = resolveMetricValue(metric, meta);
+    if (metric === 'securityScore' && value === null) missingSecurityScore += 1;
+    points.push({ ...base, metric, value });
   }
   points.sort((a, b) =>
     a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0,
   );
+  let disclosure = TREND_DISCLOSURE;
+  if (metric === 'securityScore') {
+    disclosure += SECURITY_SCORE_DISCLOSURE;
+    if (missingSecurityScore > 0) {
+      disclosure += ` ${String(missingSecurityScore)} of ${String(points.length)} snapshot(s) lack a persisted securityScore.`;
+    }
+  }
   return ok({
-    data: { points, disclosure: TREND_DISCLOSURE },
+    data: { points, disclosure },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
       refreshedAt: ctx.manifest.refreshedAt,
     },
   });
 };
+
+// ---------------------------------------------------------------------------
+// sfi.churn — HIDDEN back-compat alias (STEP-2)
+//
+// The structural snapshot digest folded into `diff_snapshots`'s `summary: true`
+// MODE (which also gained optional labels defaulting to the latest two). This is
+// now a THIN alias delegating with summary forced on; the survivor owns the
+// auto-latest-two default + the compact counts/topChurn. Un-advertised on
+// tools/list, dispatchable by name / run_analysis.
+// ---------------------------------------------------------------------------
 
 export const churnInputSchema = z.object({
   fromLabel: z.string().min(1).optional(),
@@ -66,9 +129,14 @@ export const churnInputSchema = z.object({
 
 export type ChurnInput = z.infer<typeof churnInputSchema>;
 
-export interface ChurnOutput {
-  readonly fromLabel: string;
-  readonly toLabel: string;
+/**
+ * The churn digest the (hidden) alias returns — `diff_snapshots` in
+ * `summary: true` MODE always populates `addedCount` / `removedCount` /
+ * `modifiedCount` / `topChurn` / `disclosure` (redeclared required; optional on
+ * the base). A structural superset of the historical churn shape (also carries
+ * the full added/removed/modified slices).
+ */
+export interface ChurnOutput extends DiffSnapshotsOutput {
   readonly addedCount: number;
   readonly removedCount: number;
   readonly modifiedCount: number;
@@ -79,82 +147,17 @@ export interface ChurnOutput {
   readonly disclosure: string;
 }
 
-const CHURN_DISCLOSURE =
-  'Churn compares two persisted snapshot labels by structural id/hash only — not semantic "risk". Use `sfi.diff_snapshots` for the full slice.';
-
-const diffNodeSets = (
-  fromNodes: readonly { readonly id: string; readonly propertiesHash: string }[],
-  toNodes: readonly { readonly id: string; readonly propertiesHash: string }[],
-): { added: string[]; removed: string[]; modified: string[] } => {
-  const fromById = new Map(fromNodes.map((node) => [node.id, node.propertiesHash]));
-  const toById = new Map(toNodes.map((node) => [node.id, node.propertiesHash]));
-  const added: string[] = [];
-  const removed: string[] = [];
-  const modified: string[] = [];
-  for (const [id, hash] of toById) {
-    if (!fromById.has(id)) added.push(id);
-    else if (fromById.get(id) !== hash) modified.push(id);
-  }
-  for (const id of fromById.keys()) {
-    if (!toById.has(id)) removed.push(id);
-  }
-  const sortAsc = (ids: string[]) => ids.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-  return {
-    added: sortAsc(added),
-    removed: sortAsc(removed),
-    modified: sortAsc(modified),
-  };
-};
-
 export const churnHandler = async (
   ctx: Context,
   input: ChurnInput,
 ): Promise<Result<McpResponse<ChurnOutput>, McpError>> => {
-  const listed = await listSnapshots(ctx.vaultRoot);
-  if (!listed.ok) {
-    return err({ kind: 'internal', message: listed.error.message });
-  }
-  if (listed.value.length < 2) {
-    return err({
-      kind: 'invalid-query',
-      message:
-        'Need at least two persisted snapshots. Run `sfi snapshot create --label <name>` after refreshes.',
-    });
-  }
-  const byTime = [...listed.value].sort((a, b) =>
-    a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0,
-  );
-  const fromLabel = input.fromLabel ?? byTime[byTime.length - 2]!.label;
-  const toLabel = input.toLabel ?? byTime[byTime.length - 1]!.label;
-  const fromLoaded = await loadSnapshot(ctx.vaultRoot, fromLabel);
-  if (!fromLoaded.ok) {
-    return err({ kind: 'invalid-query', message: fromLoaded.error.message });
-  }
-  const toLoaded = await loadSnapshot(ctx.vaultRoot, toLabel);
-  if (!toLoaded.ok) {
-    return err({ kind: 'invalid-query', message: toLoaded.error.message });
-  }
-  const diff = diffNodeSets(fromLoaded.value.nodes, toLoaded.value.nodes);
-  const topChurn = [
-    ...diff.added.map((id) => ({ id, change: 'added' as const })),
-    ...diff.removed.map((id) => ({ id, change: 'removed' as const })),
-    ...diff.modified.map((id) => ({ id, change: 'modified' as const })),
-  ]
-    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-    .slice(0, 25);
-  return ok({
-    data: {
-      fromLabel,
-      toLabel,
-      addedCount: diff.added.length,
-      removedCount: diff.removed.length,
-      modifiedCount: diff.modified.length,
-      topChurn,
-      disclosure: CHURN_DISCLOSURE,
-    },
-    vaultState: {
-      sourceTreeHash: ctx.manifest.sourceTreeHash,
-      refreshedAt: ctx.manifest.refreshedAt,
-    },
+  // Forward the optional labels (diff_snapshots defaults them to the latest two
+  // when omitted) with `summary: true` to get the compact churn digest.
+  const r = await diffSnapshotsHandler(ctx, {
+    ...(input.fromLabel !== undefined ? { fromLabel: input.fromLabel } : {}),
+    ...(input.toLabel !== undefined ? { toLabel: input.toLabel } : {}),
+    summary: true,
   });
+  // `summary: true` guarantees the churn fields are populated.
+  return r as Result<McpResponse<ChurnOutput>, McpError>;
 };

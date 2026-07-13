@@ -363,3 +363,116 @@ describe('callSites enclosing-method attribution (CR-CAP-06)', () => {
     });
   });
 });
+
+/**
+ * CTO #7 / S-6 — cheap AST precision: method-scoped symbol table + own-method
+ * return-type propagation. The old file-global `varTypes` map let the last
+ * `rec` declaration win class-wide, minting wrong parsed-confidence field
+ * edges; call-chained field access (`getAccount().Name`) emitted nothing.
+ * AST ≠ compiler: cross-class return types stay unresolved.
+ */
+describe('method-scoped symbols + own-method return types (CTO #7)', () => {
+  let extract: typeof import('../src/apex-ast-edges.js').extractApexAstEdges;
+  beforeAll(async () => {
+    ({ extractApexAstEdges: extract } = await import('../src/apex-ast-edges.js'));
+  });
+
+  it('cross-method variable-name collision: each method keeps its own type', () => {
+    // Pre-fix: last FormalParameter `Contact rec` won file-wide, so a()'s
+    // rec.Name became Contact.Name (wrong parsed edge).
+    const src = [
+      'public class Collision {',
+      '  void a(Account rec) { String x = rec.Name; }',
+      '  void b(Contact rec) { String y = rec.Email; rec.Phone = \'1\'; }',
+      '}',
+    ].join('\n');
+    const out = extract(src, 'Collision', {});
+    expect(out.reads).toContain('Account.Name');
+    expect(out.reads).toContain('Contact.Email');
+    expect(out.writes).toContain('Contact.Phone');
+    expect(out.reads).not.toContain('Contact.Name');
+    expect(out.reads).not.toContain('Account.Email');
+    expect(out.writes).not.toContain('Account.Phone');
+  });
+
+  it('method params shadow class fields; sibling methods still see the field', () => {
+    const src = [
+      'public class Shadow {',
+      '  Contact rec;',
+      '  void a(Account rec) { String x = rec.Name; }',
+      '  void b() { String y = rec.Email; }',
+      '}',
+    ].join('\n');
+    const out = extract(src, 'Shadow', {});
+    expect(out.reads).toContain('Account.Name');
+    expect(out.reads).toContain('Contact.Email');
+    expect(out.reads).not.toContain('Account.Email');
+    expect(out.reads).not.toContain('Contact.Name');
+  });
+
+  it('own-method return type propagates through bare / this / same-class chains', () => {
+    const src = [
+      'public class Ret {',
+      '  Account getAccount() { return null; }',
+      '  void use() {',
+      '    String n = getAccount().Name;',
+      '    String m = this.getAccount().Industry;',
+      '    Ret svc = this;',
+      '    String p = svc.getAccount().Type;',
+      '  }',
+      '}',
+    ].join('\n');
+    const out = extract(src, 'Ret', {});
+    expect(out.reads).toContain('Account.Name');
+    expect(out.reads).toContain('Account.Industry');
+    expect(out.reads).toContain('Account.Type');
+    expect(out.calls).toContain('Ret.getAccount');
+    expect(out.callSites ?? []).toContainEqual({
+      callee: 'Ret.getAccount',
+      callerMethod: 'use',
+    });
+  });
+
+  it('own-method return type on assignment LHS yields a write', () => {
+    const src = [
+      'public class Ret {',
+      '  Account getAccount() { return null; }',
+      '  void use() { getAccount().Description = \'x\'; }',
+      '}',
+    ].join('\n');
+    const out = extract(src, 'Ret', {});
+    expect(out.writes).toContain('Account.Description');
+    expect(out.calls).toContain('Ret.getAccount');
+  });
+
+  it('honesty: cross-class return types do NOT invent field edges', () => {
+    // OtherSvc.getAccount() is a call we can see (known class), but we have
+    // no return-type table for OtherSvc — must not mint Account.* reads.
+    const src = [
+      'public class Ret {',
+      '  void use(OtherSvc svc) {',
+      '    String n = svc.getAccount().Name;',
+      '  }',
+      '}',
+    ].join('\n');
+    const out = extract(src, 'Ret', { knownClasses: new Set(['OtherSvc']) });
+    expect(out.calls).toContain('OtherSvc.getAccount');
+    expect(out.reads.some((r) => r.endsWith('.Name'))).toBe(false);
+    expect(out.reads.some((r) => r.startsWith('Account.'))).toBe(false);
+  });
+
+  it('this.field.sObjectField peels own instance fields; super.method records extends target', () => {
+    const src = [
+      'public class Child extends Parent {',
+      '  Account mine;',
+      '  void use() {',
+      '    String a = this.mine.Name;',
+      '    super.helper();',
+      '  }',
+      '}',
+    ].join('\n');
+    const out = extract(src, 'Child', { knownClasses: new Set(['Parent']) });
+    expect(out.reads).toContain('Account.Name');
+    expect(out.calls).toContain('Parent.helper');
+  });
+});

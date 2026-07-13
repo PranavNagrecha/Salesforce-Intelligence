@@ -25,13 +25,20 @@
  *     to find every PSG that confers it. There is no node property for
  *     "groups that contain me", so the reverse direction must use edges.
  *
- * MUTING honesty boundary: the helper returns `mutingPermissionSetIds` for
- * DISCLOSURE only and NEVER nets them out. A MutingPermissionSet node carries
- * no enumerable denied perms (the generic extractor parses no permissions), so
- * there is literally nothing to subtract; honest subtraction would require a
- * dedicated MutingPermissionSet extractor, which is out of scope here.
- * Consumers that expand a PSG with `hasMuting === true` must emit a muting
- * caveat, and must NEVER claim muting was subtracted.
+ * MUTING (R6-06): `expandPermissionSetGroup` returns `mutingPermissionSetIds`
+ * (the ids); `loadMutingPermissions` turns those ids into the actual permission
+ * classes each muting set DENIES — object CRUD, FLS, system/user perms, custom
+ * perms, Apex — read from the muted-perm node properties the dedicated
+ * MutingPermissionSet extractor now emits. A consumer that expands a PSG and
+ * then subtracts these (within the OWNING group — muting is group-scoped, never
+ * org-wide) confers the group's REAL net grant. `effective_permissions` does
+ * this. A muting node from a vault refreshed BEFORE the R6-06 extractor carries
+ * NO muted-perm properties: it lands in `presentWithoutData` (cannot subtract —
+ * DISCLOSE, re-run `/sfi-refresh`), never silently treated as "mutes nothing".
+ * A muting id referenced by a PSG but ABSENT from the vault lands in
+ * `missingMutingIds` (same honesty). Consumers that do NOT yet subtract muting
+ * (e.g. the who-has-access rosters) must still emit a muting caveat and must
+ * NEVER claim muting was subtracted.
  */
 
 import type {
@@ -73,6 +80,48 @@ export interface ExpandedPsg {
   readonly mutingPermissionSetIds: readonly ComponentId[];
   /** True when the PSG references ≥1 muting permission set (forces a caveat). */
   readonly hasMuting: boolean;
+}
+
+/** The six object-permission flags a muting set can deny, canonical order. */
+export const MUTING_OBJECT_FLAGS = [
+  'allowCreate',
+  'allowRead',
+  'allowEdit',
+  'allowDelete',
+  'viewAllRecords',
+  'modifyAllRecords',
+] as const;
+export type MutingObjectFlag = (typeof MUTING_OBJECT_FLAGS)[number];
+
+/**
+ * The permission classes ONE muting permission set denies, parsed from the
+ * muted-perm node properties. A `true` object/field flag means DENIED; a name
+ * in a Set means that system/custom permission (or Apex class) is DENIED.
+ */
+export interface MutingGrant {
+  readonly mutingId: ComponentId;
+  /** object -> per-flag denied map (`true` = the group loses that flag). */
+  readonly objects: ReadonlyMap<string, Readonly<Record<MutingObjectFlag, boolean>>>;
+  /** field -> denied read/edit (`true` = the group loses that access). */
+  readonly fields: ReadonlyMap<string, { readonly readable: boolean; readonly editable: boolean }>;
+  readonly userPermissions: ReadonlySet<string>;
+  readonly customPermissions: ReadonlySet<string>;
+  readonly apexClasses: ReadonlySet<string>;
+}
+
+/** Result of resolving a PSG's muting permission set ids into denied perms. */
+export interface LoadedMuting {
+  /** Muting sets present in the vault WITH R6-06 muted-perm data — subtractable. */
+  readonly grants: readonly MutingGrant[];
+  /**
+   * Muting sets present in the vault but carrying NO muted-perm properties (a
+   * node extracted before the R6-06 muting extractor). They CANNOT be
+   * subtracted and must be DISCLOSED (re-run `/sfi-refresh`), never treated as
+   * "mutes nothing".
+   */
+  readonly presentWithoutData: readonly ComponentId[];
+  /** Muting ids referenced by a PSG but ABSENT from the vault (cannot subtract). */
+  readonly missingMutingIds: readonly ComponentId[];
 }
 
 /** Read a node property that should be an array of bare member names. */
@@ -176,4 +225,113 @@ export const findPermissionSetGroupsContaining = async (
     groups.add(edge.fromId);
   }
   return ok([...groups].sort());
+};
+
+/** Parse one muting node's `mutedObjectPermissions` property into a flag map. */
+const parseMutedObjects = (
+  raw: unknown,
+): Map<string, Record<MutingObjectFlag, boolean>> => {
+  const out = new Map<string, Record<MutingObjectFlag, boolean>>();
+  if (!Array.isArray(raw)) return out;
+  for (const entry of raw) {
+    if (entry === null || typeof entry !== 'object') continue;
+    const object = (entry as { object?: unknown }).object;
+    if (typeof object !== 'string' || object.length === 0) continue;
+    const flags = {} as Record<MutingObjectFlag, boolean>;
+    for (const flag of MUTING_OBJECT_FLAGS) {
+      flags[flag] = (entry as Record<string, unknown>)[flag] === true;
+    }
+    out.set(object, flags);
+  }
+  return out;
+};
+
+/** Parse one muting node's `mutedFieldPermissions` property into a r/e map. */
+const parseMutedFields = (
+  raw: unknown,
+): Map<string, { readable: boolean; editable: boolean }> => {
+  const out = new Map<string, { readable: boolean; editable: boolean }>();
+  if (!Array.isArray(raw)) return out;
+  for (const entry of raw) {
+    if (entry === null || typeof entry !== 'object') continue;
+    const field = (entry as { field?: unknown }).field;
+    if (typeof field !== 'string' || field.length === 0) continue;
+    out.set(field, {
+      readable: (entry as { readable?: unknown }).readable === true,
+      editable: (entry as { editable?: unknown }).editable === true,
+    });
+  }
+  return out;
+};
+
+/** Parse a muting node's string-array muted-name property into a Set. */
+const parseMutedNames = (raw: unknown): Set<string> => {
+  const out = new Set<string>();
+  if (!Array.isArray(raw)) return out;
+  for (const v of raw) if (typeof v === 'string' && v.length > 0) out.add(v);
+  return out;
+};
+
+/**
+ * Resolve a set of muting permission set ids into the permission classes they
+ * DENY, so a caller can subtract them from a PermissionSetGroup's member union.
+ * The R6-06 muting extractor emits the denied perms as node properties
+ * (`mutedObjectPermissions`, `mutedFieldPermissions`, `mutedUserPermissions`,
+ * `mutedCustomPermissions`, `mutedApexClasses`); this reads them back into a
+ * typed {@link MutingGrant} per set.
+ *
+ * Three honest buckets (all disclosed by the consumer):
+ *   - `grants`             — present + carries muted-perm data (subtractable)
+ *   - `presentWithoutData` — present but pre-R6-06 node (no muted properties;
+ *                            CANNOT subtract — re-run `/sfi-refresh`)
+ *   - `missingMutingIds`   — referenced by the PSG but absent from the vault
+ *
+ * De-dupes ids first (a set referenced twice loads once). Ids are expected to
+ * be `MutingPermissionSet:` ids as returned by `expandPermissionSetGroup`.
+ *
+ * @example
+ *   const psg = await expandPermissionSetGroup(ctx, 'PermissionSetGroup:Sales');
+ *   if (psg.ok && psg.value?.hasMuting) {
+ *     const muting = await loadMutingPermissions(ctx, psg.value.mutingPermissionSetIds);
+ *     // subtract muting.value.grants[i].objects/fields/... within the group
+ *   }
+ */
+export const loadMutingPermissions = async (
+  ctx: Context,
+  mutingIds: readonly ComponentId[],
+): Promise<Result<LoadedMuting, GraphError>> => {
+  const grants: MutingGrant[] = [];
+  const presentWithoutData: ComponentId[] = [];
+  const missingMutingIds: ComponentId[] = [];
+  const seen = new Set<string>();
+  for (const mutingId of mutingIds) {
+    if (seen.has(mutingId)) continue;
+    seen.add(mutingId);
+    const nodeResult = await getNodeById(ctx.graph, mutingId);
+    if (!nodeResult.ok) return nodeResult;
+    const node = nodeResult.value;
+    if (node === null) {
+      missingMutingIds.push(mutingId);
+      continue;
+    }
+    // The R6-06 extractor always writes `mutedObjectPermissions` (even `[]`);
+    // its ABSENCE marks a node from a vault refreshed before that extractor.
+    if (!('mutedObjectPermissions' in node.properties)) {
+      presentWithoutData.push(mutingId);
+      continue;
+    }
+    grants.push({
+      mutingId,
+      objects: parseMutedObjects(node.properties['mutedObjectPermissions']),
+      fields: parseMutedFields(node.properties['mutedFieldPermissions']),
+      userPermissions: parseMutedNames(node.properties['mutedUserPermissions']),
+      customPermissions: parseMutedNames(node.properties['mutedCustomPermissions']),
+      apexClasses: parseMutedNames(node.properties['mutedApexClasses']),
+    });
+  }
+  return ok({
+    grants,
+    presentWithoutData: [...presentWithoutData].sort(),
+    missingMutingIds: [...missingMutingIds].sort(),
+  });
 };

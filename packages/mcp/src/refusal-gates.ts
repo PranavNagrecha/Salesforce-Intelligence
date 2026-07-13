@@ -466,6 +466,8 @@ const PROVENANCE_DISCLOSURE =
 // tools are deliberately absent: inactive/stale users (live_inactive_users),
 // report usage (live_report_usage), recent activity (live_recent_activity),
 // automation fired (live_automation_fired), org limits (live_org_limits).
+// R7-W6: who-changed-a-Setup-setting (FLS/sharing/OWD/session/password-policy/
+// MFA) and bare "setup audit trail" are ALSO now absent (live_setup_audit_trail).
 const RUNTIME_TRIGGERS: readonly (readonly [RegExp, string])[] = [
   [/\blogin\s+history\b|\baudit\s+trail\s+of\s+logins?\b/i, 'login history'],
   // Per-user LOGIN EVENTS (hon-031/hon-036/hon-060): who logged in when,
@@ -580,17 +582,21 @@ const RUNTIME_TRIGGERS: readonly (readonly [RegExp, string])[] = [
     /\bwho\b[^.?!]{0,30}\b(?:accessed|viewed|opened|looked\s+at)\b[^.?!]{0,60}\b(?:records?|fields?|data)\b/i,
     'record-access audit events (who accessed what)',
   ],
-  // R3 §5b AUDIT-TRAIL-PLANE arms (8-question over-route cluster): Setup
-  // Audit Trail asks — who changed a SETTING (FLS, sharing, OWD, session/
-  // password policy) and when. Component lastModifiedBy IS metadata
-  // (sfi.last_modified stays routed — those asks say "who changed <component>",
-  // no settings noun); FLS/OWD/policy flips are only in the Setup Audit
-  // Trail, which neither the vault nor the live plane reads.
-  [/\bsetup\s+audit\s+trail\b/i, 'Setup Audit Trail entries'],
-  [
-    /\bwho\s+(?:modified|changed|flipped|updated|edited)\b[^.?!]{0,50}\b(?:field-?level\s+security|fls|sharing\s+settings?|org-?wide\s+defaults?|owd|session\s+settings?|password\s+polic\w*|mfa)\b/i,
-    'who changed org security settings and when (Setup Audit Trail data)',
-  ],
+  // R3 §5b AUDIT-TRAIL-PLANE arms: Setup Audit Trail asks — who changed a
+  // SETTING (FLS, sharing, OWD, session/password policy) and when — used to
+  // gate here as a genuine gap. R7-W6: sfi.live_setup_audit_trail (R6-27) now
+  // reads the SetupAuditTrail roster directly (profile/permission-set edits,
+  // field-level-security flips, org-wide-default changes, session/password-
+  // policy changes — "every other tracked configuration change" per its own
+  // description), so both arms are REMOVED — they are now in the "NON-triggers
+  // that HAVE tools are deliberately absent" list above, alongside
+  // live_inactive_users / live_report_usage / etc. Component lastModifiedBy
+  // stays separately routed to sfi.last_modified (a "who changed <component>"
+  // ask with no settings noun never matched these arms anyway). A bare, target-
+  // less "setup audit trail" mention (no temporal/named-setting qualifier) now
+  // falls through to classifyQuestion's `runtime-audit-trail` metadata-side
+  // disclosure rather than a hard refusal — strictly more useful, since that
+  // disclosure itself now points at live_setup_audit_trail.
   // R3 §5b: report/dashboard DEFINITIONS (source object, columns, broken
   // references) are not retrieved into the vault — "which reports are
   // stale/unused" (live_report_usage) and "who can see the dashboard"
@@ -632,6 +638,10 @@ const SHOULD_WE = /\bshould\s+we\b/i;
 // the Admin profile" is a real (routable) org question.
 const METADATA_NOUN =
   /\b(?:field|object|flow|trigger|class|profile|permission|layout|validation|record\s+type|apex|report|dashboard|picklist|component|rule)\b|__(?:c|mdt|e|x|b|kav)\b/i;
+// Battery RIGHT techDebt family: "what should we clean up" is the org-wide
+// tech-debt ask (intent-router tech-debt rule), not an org-decision opinion.
+const TECH_DEBT_CLEANUP_ASK =
+  /\b(?:clean\s*up|cleanup|tech(?:nical)?\s+debt|org\s+risk)\b/i;
 const DELIVERY_ASK = /\bemail\s+me\b|\bsend\s+(?:this|it)\s+to\b|\bpost\s+(?:this\s+|it\s+)?to\s+slack\b/i;
 // "write me an apex trigger that…" — code GENERATION is out of scope;
 // sfi.apex_build_advisor asks ("what should I know before building…") carry no
@@ -808,7 +818,9 @@ export const detectRefusalShape = (question: string): RefusalShape | null => {
                     ? 'Document authorship (agreements, policies, memos)'
                     : CAREER_ASK.test(q)
                       ? 'Career/self-improvement guidance'
-                      : SHOULD_WE.test(q) && !METADATA_NOUN.test(q)
+                      : SHOULD_WE.test(q) &&
+                          !METADATA_NOUN.test(q) &&
+                          !TECH_DEBT_CLEANUP_ASK.test(q)
                         ? 'An org-decision recommendation'
                         : undefined;
   if (outOfScopeTopic !== undefined) {

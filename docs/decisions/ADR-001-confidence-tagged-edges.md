@@ -1,10 +1,32 @@
 # ADR-001: Every graph edge carries a confidence tier (`declared | parsed | heuristic`)
 
 ## Status
-Accepted
+Accepted — amended 2026-07-11 (see Amendment; the three-tier confidence
+decision stands, but the Context's "no Apex AST" premise is superseded).
 
 ## Date
 2026-06-07 (retroactively recording a decision in force since v1.0)
+
+## Amendment (2026-07-11)
+The parser-grade Apex AST pass shipped and has been **default-on since 0.1.9**
+(vendored ANTLR grammar; `sfi refresh` runs it unless `--no-apex-ast`). Resolved
+field reads/writes, cross-class calls, and field-level SOQL now land as
+`confidence: 'parsed'`, `source: 'apex-ast'` edges, and on a current vault those
+parsed edges dominate the Apex evidence. The Context bullet below that says the
+product "has no real Apex AST/compiler" describes the state at the time of the
+decision and is **superseded** — the regex/token scanner still runs, but only as
+a recall *backfill* for files the AST cannot parse and for patterns it does not
+resolve (dynamic SOQL, reflective `get()`/`put()`, `Type.forName` dispatch,
+cross-method dataflow, managed-package internals). The three-tier
+`declared | parsed | heuristic` contract this ADR establishes is unchanged; the
+Apex tier simply moved most of its edges from `heuristic` to `parsed`.
+
+### Amendment (2026-07-12) — AST precision ≠ compiler fidelity
+Cheap symbol-table precision landed (method-scoped params/locals, own-method
+return-type chaining, `this.field` peeling). `parsed` still means
+**parser-grade**, not compiler-grade: single-file scope only; no cross-class
+return-type table; overloads collapse; cross-file inheritance fields remain
+unresolved. Hosts must not narrate AST edges as "the compiler proved this."
 
 ## Context
 SfIntelligence answers dependency and impact questions from a graph of org
@@ -15,9 +37,13 @@ very different reliability:
   parent, the Tooling API's `MetadataComponentDependency` endpoint).
 - Some are recovered by structured parsing of source (XML elements, the formula
   tokenizer).
-- Some are recovered by a regex/token scanner over Apex, because the product has
-  no real Apex AST/compiler. That scanner cannot see cross-method dataflow,
-  dynamic SOQL, or reflective field access, and it can mint false positives.
+- Some are recovered by a regex/token scanner over Apex. At the time of this
+  decision the product had no real Apex AST/compiler, so this scanner was the
+  *only* source of Apex edges — see the Amendment above: a parser-grade AST
+  pass is now default-on and supplies most Apex edges as `parsed`, with this
+  scanner remaining as a heuristic backfill for what the AST cannot resolve.
+  The scanner itself still cannot see cross-method dataflow, dynamic SOQL, or
+  reflective field access, and it can still mint false positives.
 
 If all three look identical to a consumer, the product silently presents a
 heuristic guess as ground truth. For a tool whose entire value proposition is

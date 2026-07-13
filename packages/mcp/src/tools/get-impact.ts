@@ -46,6 +46,7 @@ import {
   listEdgesForNodes,
   listNodesByIds,
 } from '@sf-intelligence/graph';
+import { buildSafeMermaidIdMap, safeMermaidLabel } from '@sf-intelligence/renderers';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -62,6 +63,11 @@ import {
   GRAPH_MAX_PAYLOAD_BYTES,
   slimGraphNodes,
 } from './graph-payload-bounds.js';
+import {
+  formatNamedUsageClause,
+  reportDashboardUsageDetail,
+  type ReportDashboardUsageDetail,
+} from './report-dashboard-usage.js';
 import { soundnessFromNodes, type Soundness } from './soundness.js';
 
 /**
@@ -90,6 +96,15 @@ const IMPACT_MAX_EDGES = 400;
  * JSON size when Profile/PermissionSet grantedBy edges dominate.
  */
 const IMPACT_COMFORT_PAYLOAD_BYTES = 250_000;
+
+/**
+ * R6-19: node cap for the `diagram` mermaid fence — deliberately much
+ * smaller than `IMPACT_MAX_NODES` (200). A 200-box `graph TD` is unreadable
+ * in a chat UI or a rendered HTML page; above this cap the diagram is
+ * OMITTED (never silently truncated to a partial, misleadingly-complete
+ * picture) and `diagramOmittedReason` names the actual node count.
+ */
+const IMPACT_DIAGRAM_MAX_NODES = 30;
 
 /**
  * Zod schema for the `sfi.get_impact` tool input.
@@ -160,6 +175,34 @@ export interface GetImpactOutput {
    */
   readonly coverageCaveat?: CoverageCaveat;
   readonly disclosure: string;
+  /**
+   * R6-19: a ```` ```mermaid graph TD ``` ```` fence visualizing the impact
+   * slice — nodes labeled `{ComponentType}: {apiName}` (the root rendered as
+   * a circle, everything else a box), edges labeled by `edgeType`. Present
+   * ONLY when `impact.nodes.length` is at or under `IMPACT_DIAGRAM_MAX_NODES`
+   * (30); see `diagramOmittedReason` when absent. Mirrors the already-capped
+   * `impact.nodes`/`impact.edges` — never a separate, uncapped query.
+   */
+  readonly diagram?: string;
+  /**
+   * Present ONLY when `diagram` is omitted because `impact.nodes.length`
+   * exceeded `IMPACT_DIAGRAM_MAX_NODES`. Names the actual count so a caller
+   * knows how far over the cap the slice is (fewer `hops` / a narrower
+   * `edgeTypes` would bring it back under).
+   */
+  readonly diagramOmittedReason?: string;
+  /**
+   * R6-24 Option B / Finding #36: when the root is a `CustomField` whose
+   * refresh fold stamped capped report/dashboard name lists (`usedInReports` /
+   * `usedInDashboards`), surface those names here. Report/Dashboard nodes are
+   * dropped at refresh (volume), so they never appear as graph edges in
+   * `impact` — without this field, "which reports break?" is unanswerable
+   * from `get_impact` alone. Absent when the root is not a field, or the
+   * field has no folded analytics usage (including pre-#36 vaults that only
+   * carry the boolean flags — then `reportNames`/`dashboardNames` are empty
+   * and callers should fall back to boolean phrasing).
+   */
+  readonly reportUsage?: ReportDashboardUsageDetail;
 }
 
 /**
@@ -182,6 +225,65 @@ const compareEdges = (a: Edge, b: Edge): number => {
  */
 const edgeKey = (e: Edge): string =>
   `${e.fromId}\0${e.toId}\0${e.edgeType}\0${e.source}`;
+
+/** Split a canonical id into its `{Type}` prefix and the rest, for a diagram label. */
+const describeId = (id: string): { readonly typePrefix: string; readonly rest: string } => {
+  const colon = id.indexOf(':');
+  return colon === -1 ? { typePrefix: '', rest: id } : { typePrefix: id.slice(0, colon), rest: id.slice(colon + 1) };
+};
+
+/**
+ * R6-19: build the ```` ```mermaid graph TD ``` ```` fence for the (already
+ * capped) impact slice. Declares every node first (root as a circle,
+ * everything else a box, labeled `{ComponentType}: {apiName}`), then every
+ * edge as a bare `code -->|edgeType| code` line — the same two-pass shape
+ * `generate_architecture_overview`'s existing diagrams use. Node ids come
+ * from a collision-safe sanitizer (`@sf-intelligence/renderers`) since
+ * canonical component ids carry `:` and `.`, neither mermaid-identifier-safe.
+ *
+ * `nodes`/`edges` are the FINAL, already-budgeted slice the caller is about
+ * to return — the diagram never re-queries or widens beyond what the JSON
+ * payload itself contains.
+ */
+const buildImpactDiagram = (
+  nodes: readonly Node[],
+  edges: readonly Edge[],
+  rootId: ComponentId,
+): string => {
+  const nodeById = new Map<string, Node>();
+  for (const n of nodes) nodeById.set(n.id, n);
+
+  // Dangling edge endpoints (a target with no corresponding Node row) still
+  // need a diagram box — collect every id that appears anywhere.
+  const allIds = new Set<string>();
+  for (const n of nodes) allIds.add(n.id);
+  for (const e of edges) {
+    allIds.add(e.fromId);
+    allIds.add(e.toId);
+  }
+  const sortedIds = [...allIds].sort();
+  const idMap = buildSafeMermaidIdMap(sortedIds);
+
+  const lines: string[] = ['```mermaid', 'graph TD'];
+  for (const id of sortedIds) {
+    const code = idMap.get(id);
+    if (code === undefined) continue;
+    const node = nodeById.get(id);
+    const { typePrefix, rest } = describeId(id);
+    const labelName = node !== undefined ? node.apiName : rest;
+    const label = safeMermaidLabel(`${typePrefix}: ${labelName}`);
+    const shape = id === rootId ? `(("${label}"))` : `["${label}"]`;
+    lines.push(`    ${code}${shape}`);
+  }
+  for (const edge of edges) {
+    const fromCode = idMap.get(edge.fromId);
+    const toCode = idMap.get(edge.toId);
+    if (fromCode === undefined || toCode === undefined) continue;
+    lines.push(`    ${fromCode} -->|${edge.edgeType}| ${toCode}`);
+  }
+  lines.push('```');
+  return lines.join('\n');
+};
 
 /** Human-readable payload size for disclosure text. */
 const formatPayloadSize = (bytes: number): string => {
@@ -223,6 +325,48 @@ const describePayloadHeavyContributors = (
   return parts.length > 0 ? parts.join('; ') : null;
 };
 
+/**
+ * R6-24 Option B: prose clause naming folded report/dashboard dependents.
+ * Empty when the root has no folded analytics usage (or only pre-#36 booleans
+ * with empty name lists — then we still disclose the boolean-only signal).
+ */
+const formatFoldedReportUsageNote = (
+  detail: ReportDashboardUsageDetail | undefined,
+): string => {
+  if (detail === undefined) return '';
+  if (!detail.usedInReport && !detail.usedInDashboard) return '';
+  const where = [
+    detail.usedInReport
+      ? formatNamedUsageClause(
+          'report(s)',
+          detail.reportNames,
+          detail.reportsTruncatedTotal,
+        )
+      : null,
+    detail.usedInDashboard
+      ? formatNamedUsageClause(
+          'dashboard(s)',
+          detail.dashboardNames,
+          detail.dashboardsTruncatedTotal,
+        )
+      : null,
+  ].filter((x): x is string => x !== null);
+  const hasNames =
+    detail.reportNames.length > 0 || detail.dashboardNames.length > 0;
+  if (!hasNames) {
+    return (
+      ' Folded report/dashboard usage is present as a field property' +
+      ' (boolean only — names need a re-refresh); Report/Dashboard nodes are' +
+      ' not kept as graph edges.'
+    );
+  }
+  return (
+    ` Also depends on folded ${where.join(' and ')}` +
+    ' (capped name lists on the field — Report/Dashboard nodes are dropped at' +
+    ' refresh to avoid graph bloat, so they do not appear as impact edges).'
+  );
+};
+
 /** Verbatim honesty note combining count caps, truncation, and payload size. */
 const buildImpactDisclosure = (params: {
   readonly componentId: string;
@@ -236,6 +380,7 @@ const buildImpactDisclosure = (params: {
   readonly slimmedCount: number;
   readonly byteTrimmed: boolean;
   readonly rootIsObject: boolean;
+  readonly reportUsage?: ReportDashboardUsageDetail;
 }): string => {
   const payloadLabel = formatPayloadSize(params.payloadBytes);
   const countSummary = `${params.nodeCount} node(s) / ${params.edgeCount} edge(s)`;
@@ -259,6 +404,7 @@ const buildImpactDisclosure = (params: {
       ' `/sfi-refresh`; the field-level `referenceTo` is also surfaced by' +
       ' `sfi.field_360` / `sfi.generate_data_dictionary`.'
     : '';
+  const reportNote = formatFoldedReportUsageNote(params.reportUsage);
 
   if (params.truncated) {
     const cap = params.byteTrimmed
@@ -269,7 +415,8 @@ const buildImpactDisclosure = (params: {
       `\`${params.componentId}\` is a hub or has a wide dependency fan-in (${countSummary}; ` +
       `estimated JSON payload ${payloadLabel}).${slimNote} ` +
       `Re-query with fewer hops or a narrower edgeTypes filter for a complete view.` +
-      lookupCaveat
+      lookupCaveat +
+      reportNote
     );
   }
 
@@ -279,14 +426,16 @@ const buildImpactDisclosure = (params: {
       `Impact slice within ${params.hops} hop(s): ${countSummary} (within count cap), ` +
       `but estimated JSON payload is still ${payloadLabel} after per-node slimming.${heavyNote}${slimNote} ` +
       `Re-query with fewer hops or edgeTypes excluding grantedBy to shrink the response.` +
-      lookupCaveat
+      lookupCaveat +
+      reportNote
     );
   }
 
   return (
     `Complete impact slice within ${params.hops} hop(s): ${countSummary} under the ` +
     `${IMPACT_MAX_NODES}-node / ${IMPACT_MAX_EDGES}-edge cap; estimated JSON payload ${payloadLabel}.${slimNote}` +
-    lookupCaveat
+    lookupCaveat +
+    reportNote
   );
 };
 
@@ -513,6 +662,19 @@ export const getImpactHandler = async (
   const sortedTypes = [...traversedTypes].sort();
   const impact = { nodes: budgeted.nodes, edges: budgeted.edges };
   const estimatedPayloadBytes = estimateGraphPayloadBytes(impact);
+
+  // R6-24 Option B / Finding #36: Report/Dashboard dependents are folded onto
+  // the CustomField as capped name lists (no graph edges). Read from the
+  // pre-slim root so payload slimming cannot erase the identity signal.
+  const rootNode = sortedNodes.find((n) => n.id === rootId);
+  const reportUsage =
+    rootNode?.type === 'CustomField'
+      ? (() => {
+          const detail = reportDashboardUsageDetail(rootNode);
+          return detail.usedInReport || detail.usedInDashboard ? detail : undefined;
+        })()
+      : undefined;
+
   const disclosure = buildImpactDisclosure({
     componentId: input.componentId,
     rootIsObject: rootId.startsWith('CustomObject:'),
@@ -525,6 +687,7 @@ export const getImpactHandler = async (
     edges: budgeted.edges,
     slimmedCount,
     byteTrimmed: budgeted.trimmed,
+    ...(reportUsage !== undefined ? { reportUsage } : {}),
   });
 
   // I3b (empty ≠ none): an impact walk with NO dependent edges is exactly where
@@ -532,6 +695,9 @@ export const getImpactHandler = async (
   // vault did NOT fully retrieve so the host discloses the boundary. Keyed on
   // the edge set (the root node is always present, so node count is not the
   // emptiness signal). Non-empty impact slices are untouched.
+  // When folded report/dashboard names are present, the empty edge set is NOT
+  // "nothing depends on this" for analytics — still emit coverageCaveat for
+  // other missing families, but `reportUsage` carries the named dependents.
   const coverageCaveat =
     budgeted.edges.length === 0
       ? buildEmptyTraversalCoverageCaveat(ctx, GRAPH_TRAVERSAL_REQUIRED_COVERAGE)
@@ -554,6 +720,19 @@ export const getImpactHandler = async (
       }
     : undefined;
 
+  // R6-19: diagram gated on the FINAL (already-capped) node count — never a
+  // separate, uncapped query. Above the cap: OMIT + name the actual count
+  // rather than silently render a partial (and misleadingly-complete-looking)
+  // picture.
+  const diagram =
+    budgeted.nodes.length <= IMPACT_DIAGRAM_MAX_NODES
+      ? buildImpactDiagram(budgeted.nodes, budgeted.edges, rootId)
+      : undefined;
+  const diagramOmittedReason =
+    diagram === undefined
+      ? `diagram omitted: ${budgeted.nodes.length.toString()} nodes exceeds cap (${IMPACT_DIAGRAM_MAX_NODES.toString()})`
+      : undefined;
+
   return ok({
     data: {
       impact,
@@ -565,6 +744,9 @@ export const getImpactHandler = async (
       soundness,
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       disclosure,
+      ...(diagram !== undefined ? { diagram } : {}),
+      ...(diagramOmittedReason !== undefined ? { diagramOmittedReason } : {}),
+      ...(reportUsage !== undefined ? { reportUsage } : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

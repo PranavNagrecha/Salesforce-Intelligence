@@ -55,11 +55,15 @@ export const HIGH_FANOUT_INVENTORY: Readonly<
   'sfi.tab_availability': { bound: 'paginated', note: 'Admin ~59 tabs' },
   'sfi.lightning_pages': { bound: 'paginated' },
   'sfi.lifecycle_process': { bound: 'paginated' },
+  'sfi.guest_exposure_report': { bound: 'paginated', note: 'offset + cursor over per-community findings (R6-17)' },
   'sfi.pii_inventory': { bound: 'paginated', note: 'offset + byte trim + CR-22 cursor' },
+  'sfi.history_tracking_gaps': { bound: 'paginated', note: 'offset + byte trim + CR-22 cursor (R7-W7, mirrors pii_inventory)' },
   'sfi.test_coverage_gaps': { bound: 'paginated', note: 'offset + byte trim + CR-22 cursor' },
   'sfi.crud_fls_audit': { bound: 'paginated', note: 'offset + byte trim + CR-22 cursor' },
   'sfi.what_if_merge_profiles': { bound: 'paginated', note: 'Admin merge page-500 repro' },
   'sfi.what_if_split_profile': { bound: 'paginated' },
+  'sfi.what_if_assign_permset': { bound: 'paginated', note: 'delta lists offset+cursor (R7-C1)' },
+  'sfi.what_if_revoke_permset': { bound: 'paginated', note: 'delta lists offset+cursor (R7-C1)' },
   'sfi.user_ability': { bound: 'paginated' },
   // --- Top-N truncators: a `limit` caps the result but there is NO resume
   //     (no offset/cursor to fetch the dropped tail). Tagged `handler-capped`
@@ -69,8 +73,12 @@ export const HIGH_FANOUT_INVENTORY: Readonly<
   //     were tagged `paginated` but expose only `limit`); reclassified here so
   //     the real-schema gate passes truthfully. ---
   'sfi.search_components': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.automation_collisions': { bound: 'handler-capped', note: 'limit + byte-budget truncator on both findings lists; narrow the object or raise limit, no cursor (R6-15)' },
+  'sfi.review_change': { bound: 'handler-capped', note: 'limit + most-dangerous-first ordering; narrow the changeset or raise limit, no cursor (R6-16)' },
+  'sfi.ai_exposure_report': { bound: 'handler-capped', note: 'limit + byte-budget truncator on surfaces + piiExposures; narrow by objectApiName or raise limit, no cursor (R6-13)' },
   'sfi.search_apex_source': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
   'sfi.search_flow_metadata': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.query_graph': { bound: 'handler-capped', note: 'structured-query limit hard-capped at QUERY_GRAPH_MAX_LIMIT, no cursor (R7-C4)' },
   'sfi.find_code_usages': { bound: 'paginated', note: 'offset + CR-22 cursor' },
   'sfi.find_field_anywhere': { bound: 'paginated', note: 'nested-section cursor: pages one ComponentType bucket + discloses the rest, rolls forward (CR-22)' },
   'sfi.find_semantic_field': { bound: 'paginated', note: 'top-N slice + CR-22 cursor' },
@@ -82,6 +90,8 @@ export const HIGH_FANOUT_INVENTORY: Readonly<
   'sfi.diff_snapshots': { bound: 'paginated', note: 'section cursor: pages the largest of added/removed/modified + discloses the others (CR-22)' },
   'sfi.domain_clusters': { bound: 'paginated', note: 'per-cluster member section cursor + cluster-count byte budget + CR-RV12 candidateTruncated (CR-22)' },
   'sfi.org_history': { bound: 'handler-capped', note: 'top-N truncator, limit caps but no resume (CR-22)' },
+  'sfi.record_creation_paths': { bound: 'handler-capped', note: 'limit (default 100, max 500) caps creators+triggers lists; full counts + creatorsTruncated/triggersTruncated disclosure, no cursor (0.2.0)' },
+  'sfi.flow_fault_audit': { bound: 'handler-capped', note: 'limit (default 100, max 500) caps the worst-first offender list; full counts + truncated/scanTruncated disclosure, no cursor (0.2.0)' },
   'sfi.unused_components': { bound: 'paginated', note: 'offset + CR-22 cursor' },
   'sfi.unused_fields_deep': { bound: 'paginated', note: 'offset + byte trim + CR-22 cursor' },
   'sfi.governor_limit_risks': { bound: 'paginated', note: 'limit + offset + CR-22 cursor; B3 full-type scan windows past 500' },
@@ -124,6 +134,7 @@ export const LIMIT_TOOL_EXCLUSIONS: ReadonlySet<string> = new Set([
   'sfi.resolve',
   'sfi.list_analyses',
   'sfi.component_history',
+  'sfi.component_change_attribution',
   'sfi.disambiguate_concepts',
   'sfi.field_cleanup_candidates',
   'sfi.package_impact',
@@ -150,6 +161,10 @@ export const LIMIT_TOOL_EXCLUSIONS: ReadonlySet<string> = new Set([
   'sfi.live_sample',
   'sfi.live_stale_records',
   'sfi.live_storage_by_object',
+  // R7-C6: `limit` caps how many registered vaults get the graph-opening
+  // pulse digest (a report-generation fan-out bound, mirroring org_pulse's
+  // list-size cap above) — not a raw graph-derived row/edge enumeration.
+  'sfi.generate_fleet_report',
 ]);
 
 export interface OversizeEnumerationViolation {

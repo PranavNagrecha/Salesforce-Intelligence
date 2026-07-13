@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Network xmlns="http://soap.sforce.com/2006/04/metadata">
+    <allowInternalUserLogin>false</allowInternalUserLogin>
+    <enableGuestChatter>false</enableGuestChatter>
+    <enableGuestFileAccess>true</enableGuestFileAccess>
+    <enableGuestMemberVisibility>false</enableGuestMemberVisibility>
+    <networkMemberGroups>
+        <permissionSet>Customer_Portal_Access</permissionSet>
+        <profile>Customer Community User</profile>
+    </networkMemberGroups>
+    <picassoSite>VerdantPortal1</picassoSite>
+    <selfRegistration>false</selfRegistration>
+    <site>VerdantPortal</site>
+    <status>Live</status>
+    <urlPathPrefix>portal</urlPathPrefix>
+</Network>

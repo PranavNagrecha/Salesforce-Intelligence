@@ -44,17 +44,30 @@
  *   - `risky` if no `blocking` but at least one non-unknown `risky`.
  *   - `unknown` if every reason is in the `unknown` category.
  *
- * **Honesty axis** (per the v2.0b spec): the tool does NOT consult the
- * Tooling API for runtime dependency confirmation (that capability is
- * deferred to v1.7+'s `dependsOnFromApi` enrichment). It does NOT
- * surface false positives from heuristic scanners (Apex regex scanner,
- * LWC field-access scanner) with declared confidence — the verdict
- * `risky` literally means "the scanner flagged a reference; spot-check
- * before deleting", whereas `blocking` means "the metadata declaration
- * IS a hard dependency the platform will refuse to drop". The
- * developer always gets the full referrer list (capped at 5 examples
+ * **Honesty axis** (per the v2.0b spec): when an incoming edge carries
+ * `properties.confirmedByApi === true` (stamped by `sfi refresh
+ * --with-tooling-api`'s MetadataComponentDependency pass), the tool
+ * surfaces that as additive evidence (`apiConfirmed: true` on the
+ * reasoning entry / example) — it does NOT change the verdict cascade.
+ * A confirmation can only add trust, never remove a check. The tool does
+ * NOT call the Tooling API at query time (ADR-002: refresh-time only).
+ * It does NOT surface false positives from heuristic scanners (Apex regex
+ * scanner, LWC field-access scanner) with declared confidence — the
+ * verdict `risky` literally means "the scanner flagged a reference;
+ * spot-check before deleting", whereas `blocking` means "the metadata
+ * declaration IS a hard dependency the platform will refuse to drop".
+ * The developer always gets the full referrer list (capped at 5 examples
  * per category to keep the response small) so they can verify
  * heuristic matches by hand.
+ *
+ * Apex evidence granularity (R6-03): the default-on Apex AST pass emits
+ * `confidence: 'parsed'` readsFrom/writesTo edges for dot-access AND for
+ * fields referenced inside inline static SOQL (SELECT / WHERE / ORDER BY /
+ * GROUP BY) or constant-string `Database.query` literals — a field used
+ * ONLY inside a query still shows up as an apex referrer. Case-variant
+ * SOQL spellings are canonicalized onto the vaulted field id at import
+ * (`canonicalizeFieldEdgeTargets`), so the incoming-edge walk here sees
+ * them. String-BUILT dynamic SOQL remains the disclosed blind spot.
  *
  * Implementation notes:
  *   - `fieldId` is required to start with `CustomField:`. Other prefixes
@@ -95,6 +108,7 @@ import {
   detectPiiClassification,
   type PiiCategory,
 } from '@sf-intelligence/patterns';
+import type { ExecCommand } from '@sf-intelligence/tooling-api';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
@@ -103,10 +117,23 @@ import type { Context } from '../server.js';
 
 import { readFactBlock, type FactsBlock } from './facts-block.js';
 import { fieldNotFoundError } from './field-not-found-suggest.js';
+import { hybridTrust } from './hybrid-trust.js';
+import {
+  computeLivePopulation,
+  LIVE_POPULATION_NOT_CHECKED_DISCLOSURE,
+  type LivePopulationEvidence,
+} from './live-population-check.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import {
+  buildDeleteProposal,
+  type ProposalArtifact,
+  type ProposalEvidence,
+} from './proposal-artifact.js';
+import {
+  formatReportDashboardBreakEvidence,
   REPORT_DASHBOARD_USAGE_CAVEAT,
-  reportDashboardUsage,
+  reportDashboardUsageDetail,
+  type ReportDashboardUsageDetail,
 } from './report-dashboard-usage.js';
 import { resolveToFieldOrSuggest } from './resolve-field-or-suggest.js';
 
@@ -193,10 +220,24 @@ export const safeToDeleteFieldInputSchema = z.object({
   /**
    * `'checklist'` adds a `checklist` field (P8-destructive-checklist): a
    * "before you delete X" Markdown checklist rendered from the verdict +
-   * reasoning, with the coverageCaveat surfaced FIRST. Default `'json'`
-   * returns only the structured reasoning.
+   * reasoning, with the coverageCaveat surfaced FIRST. `'proposal'`
+   * (Finding #35) adds a `proposal` — a LOCAL, deploy-ready
+   * `destructiveChanges.xml` (+ empty `package.xml`) for the field with the
+   * verdict + evidence + coverage caveat inline as XML comments, for a human
+   * to feed to their own deploy tool. Default `'json'` returns only the
+   * structured reasoning.
    */
-  format: z.enum(['json', 'checklist']).optional(),
+  format: z.enum(['json', 'checklist', 'proposal']).optional(),
+  /**
+   * CR-CAP-L5: opt-in live plane. When the STATIC verdict would be `safe`,
+   * cross-check the field's live production population before trusting that
+   * verdict — a field with real data despite zero static references may be
+   * written by dynamic Apex, an integration, or another blind spot the
+   * scanner cannot see. Never a hard dependency: offline stays fully
+   * functional without it.
+   */
+  liveEnabled: z.boolean().optional(),
+  orgAlias: z.string().min(1).optional(),
 });
 
 /** Parsed input shape, inferred from `safeToDeleteFieldInputSchema`. */
@@ -214,6 +255,13 @@ export interface SafeToDeleteFieldExample {
   readonly id: ComponentId;
   readonly type: ComponentType;
   readonly apiName: string;
+  /**
+   * Present when the inbound edge was confirmed by the Tooling API
+   * MetadataComponentDependency enricher (`properties.confirmedByApi`).
+   * Additive evidence only — does not change the per-edge or aggregate
+   * verdict.
+   */
+  readonly apiConfirmed?: true;
 }
 
 /**
@@ -230,6 +278,12 @@ export interface SafeToDeleteFieldReason {
   readonly count: number;
   readonly examples: readonly SafeToDeleteFieldExample[];
   readonly note: string;
+  /**
+   * Present when at least one referrer in this category carries
+   * Tooling-API confirmation (`properties.confirmedByApi`). Additive
+   * evidence only — does not move the category or aggregate verdict.
+   */
+  readonly apiConfirmed?: true;
 }
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
@@ -251,6 +305,14 @@ export interface SafeToDeleteFieldOutput {
   /** Present only when `format: 'checklist'` (P8-destructive-checklist). */
   readonly checklist?: string;
   /**
+   * Present only when `format: 'proposal'` (Finding #35): a LOCAL, deploy-ready
+   * `destructiveChanges.xml` (+ empty `package.xml`) for this field, with the
+   * verdict + evidence + coverage caveat inline as XML comments. sfi NEVER
+   * deploys it — the host writes the strings; a human feeds them to Gearset /
+   * Copado / `sf project deploy`.
+   */
+  readonly proposal?: ProposalArtifact;
+  /**
    * P13-FACTS-consumers: captured fill rate for this field (`data_snapshot`),
    * when one exists. CONTEXT ONLY — the verdict above is computed purely from
    * the metadata graph and NEVER moves toward safe because of a sampled
@@ -262,6 +324,26 @@ export interface SafeToDeleteFieldOutput {
    * Excluded from `reasoning` — aligns with `unused_fields_deep`.
    */
   readonly flsGrantCount?: number;
+  /**
+   * CR-CAP-L5: live production population evidence, present ONLY when the
+   * static verdict was `safe` AND the live plane answered (consent granted
+   * or `liveEnabled: true`). A `populatedCount > 0` DOWNGRADES `verdict` from
+   * `safe` to `review` — real data despite zero static references is a
+   * signal, not proof of a bug, but "no references found" should not read as
+   * "safe to delete" when the field is actively populated. Absence of this
+   * block means the live check was not attempted (verdict was not `safe`) or
+   * could not run (see `trust.limitations` for the disclosed reason) — it is
+   * NEVER a substitute for the static analysis, only a cross-check on top of
+   * it.
+   */
+  readonly livePopulation?: LivePopulationEvidence;
+  /**
+   * Finding #36 / R6-24-WIRE: WHICH reports/dashboards reference this field
+   * (capped fold-time name lists). Present only when folded usage is set —
+   * feeds `format:'proposal'` evidence comments so a delete bundle names what
+   * would break, not just a boolean.
+   */
+  readonly reportUsage?: ReportDashboardUsageDetail;
 }
 
 export interface CoverageCaveat {
@@ -392,7 +474,7 @@ const classifyEdge = (
  */
 const CATEGORY_NOTES: Readonly<Record<ReasonCategory, string>> = Object.freeze(
   {
-    apex: 'Apex classes and triggers reference this field. Heuristic-confidence matches (apex-scanner regex) may include false positives in dynamic SOQL or reflective access; spot-check before deleting.',
+    apex: 'Apex classes and triggers reference this field. Parsed-confidence matches (the default-on Apex AST pass — dot-access plus inline static SOQL SELECT/WHERE/ORDER BY/GROUP BY fields and constant-string Database.query literals) are real references; heuristic-confidence matches (apex-scanner regex fallback) may include false positives — spot-check those before deleting. String-BUILT dynamic SOQL remains invisible either way.',
     flow: 'Flow definitions read or write this field. The Flow XML names the field literally; deleting the field will break the Flow at runtime.',
     workflow:
       'A WorkflowRule field-update action writes this field. The action will fail at runtime if the field is removed.',
@@ -450,12 +532,14 @@ const buildReasoning = (
     const sortedExamples = [...bucket.examples]
       .sort(compareExamples)
       .slice(0, EXAMPLES_PER_CATEGORY_LIMIT);
+    const apiConfirmed = bucket.examples.some((e) => e.apiConfirmed === true);
     out.push({
       category,
       verdict: bucket.verdict,
       count: bucket.count,
       examples: sortedExamples,
       note: CATEGORY_NOTES[category],
+      ...(apiConfirmed ? { apiConfirmed: true as const } : {}),
     });
   }
   return out;
@@ -607,7 +691,8 @@ export const renderDeleteChecklist = (out: SafeToDeleteFieldOutput): string => {
   } else {
     lines.push('### Resolve these before deleting (most severe first)');
     for (const r of ordered) {
-      lines.push(`- [ ] **${r.category}** (${r.count}) — ${r.note}`);
+      const apiNote = r.apiConfirmed === true ? ' [Tooling API confirmed]' : '';
+      lines.push(`- [ ] **${r.category}** (${r.count})${apiNote} — ${r.note}`);
     }
     lines.push(
       '',
@@ -617,7 +702,11 @@ export const renderDeleteChecklist = (out: SafeToDeleteFieldOutput): string => {
           r.category,
           r.verdict,
           r.count,
-          r.examples.map((e) => e.id).join(', ') || '—',
+          r.examples
+            .map((e) =>
+              e.apiConfirmed === true ? `${e.id} (API-confirmed)` : e.id,
+            )
+            .join(', ') || '—',
         ]),
       ),
     );
@@ -629,9 +718,62 @@ export const renderDeleteChecklist = (out: SafeToDeleteFieldOutput): string => {
   return lines.join('\n');
 };
 
+/**
+ * Finding #35: build a LOCAL, deploy-ready delete proposal for the field from a
+ * safe-to-delete result. Emits `destructiveChanges.xml` (the field) + an empty
+ * `package.xml`, each led by an evidence comment carrying the verdict, every
+ * dependency finding, and the tool's verbatim coverage/limitation disclosures.
+ * PURE — it PROPOSES local files a human feeds to their own deploy tool; it
+ * never deploys or writes to the org. The proposal is emitted for EVERY verdict
+ * (including `blocking`): the evidence comment leads with the verdict so a field
+ * that is NOT safe reads loudly as such rather than being silently withheld.
+ */
+export const buildSafeToDeleteFieldProposal = (
+  out: SafeToDeleteFieldOutput,
+  vaultState: { readonly sourceTreeHash: string; readonly refreshedAt: string },
+): ProposalArtifact => {
+  const reasons: string[] = [];
+  // R6-24-WIRE: lead with named report/dashboard break evidence when the fold
+  // stamped usedInReports / usedInDashboards — the differentiator vs a boolean.
+  if (out.reportUsage !== undefined) {
+    reasons.push(
+      ...formatReportDashboardBreakEvidence(out.reportUsage, {
+        fieldId: out.fieldId,
+      }),
+    );
+  }
+  reasons.push(
+    ...out.reasoning.map((r) => {
+      const examples = r.examples
+        .map((e) => (e.apiConfirmed === true ? `${e.id} (API-confirmed)` : e.id))
+        .join(', ');
+      const apiTag = r.apiConfirmed === true ? ', API-confirmed' : '';
+      return `${r.category} (${r.verdict}, ${r.count}${apiTag})${examples ? `: ${examples}` : ''} — ${r.note}`;
+    }),
+  );
+  if (out.piiCompliance !== undefined) {
+    reasons.unshift(
+      `PII compliance (${out.piiCompliance.classification}/${out.piiCompliance.category}): ${out.piiCompliance.message}`,
+    );
+  }
+  const evidence: ProposalEvidence = {
+    verdict: out.verdict,
+    sourceTreeHash: vaultState.sourceTreeHash,
+    refreshedAt: vaultState.refreshedAt,
+    reasons,
+    disclosures: [...out.trust.limitations],
+  };
+  return buildDeleteProposal([out.fieldId], evidence, {
+    headline:
+      `Proposes deleting ${out.fieldId} (verdict: ${out.verdict}). ` +
+      `Review the ${out.reasoning.length} dependency finding(s) in the evidence comment before deploying.`,
+  });
+};
+
 const coreSafeToDeleteFieldHandler = async (
   ctx: Context,
   input: SafeToDeleteFieldInput,
+  exec?: ExecCommand,
 ): Promise<Result<McpResponse<SafeToDeleteFieldOutput>, McpError>> => {
   // FLD-02: graceful object→field routing.
   const suggestionResult = await resolveToFieldOrSuggest(ctx, input.fieldId);
@@ -842,27 +984,24 @@ const coreSafeToDeleteFieldHandler = async (
       continue;
     }
     const { category, verdict } = classifyEdge(edge, fromNode);
+    const apiConfirmed = edge.properties['confirmedByApi'] === true;
+    const example: SafeToDeleteFieldExample = {
+      id: fromNode.id,
+      type: fromNode.type,
+      apiName: fromNode.apiName,
+      ...(apiConfirmed ? { apiConfirmed: true as const } : {}),
+    };
     const existing = buckets.get(category);
     if (existing === undefined) {
       buckets.set(category, {
         verdict,
-        examples: [
-          {
-            id: fromNode.id,
-            type: fromNode.type,
-            apiName: fromNode.apiName,
-          },
-        ],
+        examples: [example],
         count: 1,
       });
     } else {
       existing.verdict = promoteVerdict(existing.verdict, verdict);
       existing.count += 1;
-      existing.examples.push({
-        id: fromNode.id,
-        type: fromNode.type,
-        apiName: fromNode.apiName,
-      });
+      existing.examples.push(example);
     }
   }
 
@@ -870,13 +1009,38 @@ const coreSafeToDeleteFieldHandler = async (
   // node/edge — see foldReportDashboardUsageIntoFields), so the edge walk above
   // can't see it. Inject it as an `analytics` (blocking) reason so a field used
   // only in a report column / dashboard component never reads as `safe`.
-  const rdUsage = reportDashboardUsage(nodeResult.value);
+  // Finding #36 / R6-24-WIRE: when the fold stamped capped name lists, surface
+  // those as examples (and later as proposal evidence) so the answer names WHICH
+  // reports/dashboards would break — not just a boolean.
+  const rdUsage = reportDashboardUsageDetail(nodeResult.value);
   if (rdUsage.usedInReport || rdUsage.usedInDashboard) {
     const existing = buckets.get('analytics');
-    const added = (rdUsage.usedInReport ? 1 : 0) + (rdUsage.usedInDashboard ? 1 : 0);
+    const foldExamples: SafeToDeleteFieldExample[] = [
+      ...rdUsage.reportNames.map(
+        (name): SafeToDeleteFieldExample => ({
+          id: `Report:${name}` as ComponentId,
+          type: 'Report',
+          apiName: name,
+        }),
+      ),
+      ...rdUsage.dashboardNames.map(
+        (name): SafeToDeleteFieldExample => ({
+          id: `Dashboard:${name}` as ComponentId,
+          type: 'Dashboard',
+          apiName: name,
+        }),
+      ),
+    ];
+    const reportCount =
+      rdUsage.reportsTruncatedTotal ??
+      (rdUsage.usedInReport ? Math.max(rdUsage.reportNames.length, 1) : 0);
+    const dashboardCount =
+      rdUsage.dashboardsTruncatedTotal ??
+      (rdUsage.usedInDashboard ? Math.max(rdUsage.dashboardNames.length, 1) : 0);
+    const added = reportCount + dashboardCount;
     buckets.set('analytics', {
       verdict: 'blocking',
-      examples: existing?.examples ?? [],
+      examples: [...(existing?.examples ?? []), ...foldExamples],
       count: (existing?.count ?? 0) + added,
     });
   }
@@ -885,9 +1049,69 @@ const coreSafeToDeleteFieldHandler = async (
   const coverageCaveat = buildCoverageCaveat(ctx);
   // GROUP-A PII-safety: a non-verdict-lowering compliance escalation.
   const piiCompliance = buildPiiCompliance(nodeResult.value);
-  const verdict = applyCoverageToVerdict(aggregateVerdict(reasoning), coverageCaveat);
+  const staticVerdict = applyCoverageToVerdict(aggregateVerdict(reasoning), coverageCaveat);
 
   const dataShape = await readFactBlock(ctx, fieldId, 'fillRate');
+
+  const baseConfidence = reasoning.some((r) => r.verdict === 'risky')
+    ? ('heuristic' as const)
+    : ('declared' as const);
+  const baseCompleteness = {
+    status: coverageCaveat === undefined ? ('complete' as const) : coverageCaveat.status,
+    ...(coverageCaveat !== undefined
+      ? { missingCoverage: coverageCaveat.missingCoverage }
+      : {}),
+  };
+  const baseLimitations: string[] = [
+    'Dependency evidence comes from the last offline vault refresh. String-built dynamic SOQL, reflective Apex, and runtime metadata access remain invisible to static analysis; inline static SOQL and constant-string Database.query field references ARE resolved (parsed-confidence Apex AST edges).',
+    REPORT_DASHBOARD_USAGE_CAVEAT,
+    ...(flsGrantCount > 0
+      ? [
+          `${flsGrantCount} Profile/PermissionSet FLS grant(s) exist on this field (access, not usage) — excluded from the verdict; see \`sfi.field_access_audit\` or \`sfi.unused_fields_deep\`. Deleting the field drops grants automatically.`,
+        ]
+      : []),
+    ...(coverageCaveat !== undefined ? [coverageCaveat.message] : []),
+    ...(piiCompliance !== undefined ? [piiCompliance.message] : []),
+  ];
+
+  // CR-CAP-L5: cross-check a `safe` static verdict against live production
+  // population. NEVER attempted for a non-`safe` verdict — the live plane is
+  // a cross-check on "no static evidence found", not a general enrichment.
+  let verdict: Verdict = staticVerdict;
+  let livePopulation: LivePopulationEvidence | undefined;
+  let liveQueriedAt: string | undefined;
+  if (staticVerdict === 'safe') {
+    const live = await computeLivePopulation(ctx, objectApi, node.apiName, input, exec);
+    if (live.status === 'ok') {
+      livePopulation = live.evidence;
+      liveQueriedAt = live.evidence.liveQueriedAt;
+      if (live.evidence.populatedCount > 0) {
+        verdict = 'review';
+        baseLimitations.push(
+          `Verdict downgraded from safe to review: ${live.evidence.populatedCount} of ${live.evidence.totalCount} live record(s) on ${live.evidence.objectApiName} currently populate ${live.evidence.fieldApiName} (${Math.round(live.evidence.populationRate * 100)}%) despite no static references found — investigate dynamic Apex, an integration, or a UI path the scanner cannot see before deleting.`,
+        );
+      }
+    } else {
+      baseLimitations.push(LIVE_POPULATION_NOT_CHECKED_DISCLOSURE);
+    }
+  }
+
+  const trust =
+    liveQueriedAt !== undefined
+      ? hybridTrust({
+          vaultRefreshedAt: ctx.manifest.refreshedAt,
+          liveQueriedAt,
+          vaultConfidence: baseConfidence,
+          completeness: baseCompleteness,
+          limitations: baseLimitations,
+        })
+      : {
+          provenance: 'offline_snapshot' as const,
+          confidence: baseConfidence,
+          freshness: { snapshotRefreshedAt: ctx.manifest.refreshedAt },
+          completeness: baseCompleteness,
+          limitations: baseLimitations,
+        };
 
   return ok({
     data: {
@@ -898,28 +1122,11 @@ const coreSafeToDeleteFieldHandler = async (
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       ...(piiCompliance !== undefined ? { piiCompliance } : {}),
       ...(flsGrantCount > 0 ? { flsGrantCount } : {}),
-      trust: {
-        provenance: 'offline_snapshot',
-        confidence: reasoning.some((r) => r.verdict === 'risky') ? 'heuristic' : 'declared',
-        freshness: { snapshotRefreshedAt: ctx.manifest.refreshedAt },
-        completeness: {
-          status: coverageCaveat === undefined ? 'complete' : coverageCaveat.status,
-          ...(coverageCaveat !== undefined
-            ? { missingCoverage: coverageCaveat.missingCoverage }
-            : {}),
-        },
-        limitations: [
-          'Dependency evidence comes from the last offline vault refresh. Dynamic SOQL, reflective Apex, and runtime metadata access remain invisible to static analysis.',
-          REPORT_DASHBOARD_USAGE_CAVEAT,
-          ...(flsGrantCount > 0
-            ? [
-                `${flsGrantCount} Profile/PermissionSet FLS grant(s) exist on this field (access, not usage) — excluded from the verdict; see \`sfi.field_access_audit\` or \`sfi.unused_fields_deep\`. Deleting the field drops grants automatically.`,
-              ]
-            : []),
-          ...(coverageCaveat !== undefined ? [coverageCaveat.message] : []),
-          ...(piiCompliance !== undefined ? [piiCompliance.message] : []),
-        ],
-      },
+      ...(livePopulation !== undefined ? { livePopulation } : {}),
+      ...(rdUsage.usedInReport || rdUsage.usedInDashboard
+        ? { reportUsage: rdUsage }
+        : {}),
+      trust,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
@@ -929,22 +1136,41 @@ const coreSafeToDeleteFieldHandler = async (
 };
 
 /**
- * P8-destructive-checklist: thin wrapper over the core handler. When
- * `format: 'checklist'`, it renders the Markdown delete checklist onto the
- * result via post-processing — so every verdict path (main / system-field /
- * not-modeled) carries it without touching the individual return sites.
+ * Thin wrapper over the core handler that post-processes the result by
+ * `format` — so every verdict path (main / system-field / not-modeled) carries
+ * the extra rendering without touching the individual return sites.
+ *   - `'checklist'` (P8-destructive-checklist): a Markdown delete checklist.
+ *   - `'proposal'` (Finding #35): a LOCAL, deploy-ready destructiveChanges.xml
+ *     (+ empty package.xml) with the verdict + evidence inline as XML comments.
+ *     PURE local-file emit — nothing is deployed or written to the org.
  */
 export const safeToDeleteFieldHandler = async (
   ctx: Context,
   input: SafeToDeleteFieldInput,
+  exec?: ExecCommand,
 ): Promise<Result<McpResponse<SafeToDeleteFieldOutput>, McpError>> => {
-  const result = await coreSafeToDeleteFieldHandler(ctx, input);
-  if (!result.ok || input.format !== 'checklist') return result;
-  return ok({
-    ...result.value,
-    data: {
-      ...result.value.data,
-      checklist: renderDeleteChecklist(result.value.data),
-    },
-  });
+  const result = await coreSafeToDeleteFieldHandler(ctx, input, exec);
+  if (!result.ok) return result;
+  if (input.format === 'checklist') {
+    return ok({
+      ...result.value,
+      data: {
+        ...result.value.data,
+        checklist: renderDeleteChecklist(result.value.data),
+      },
+    });
+  }
+  if (input.format === 'proposal') {
+    return ok({
+      ...result.value,
+      data: {
+        ...result.value.data,
+        proposal: buildSafeToDeleteFieldProposal(
+          result.value.data,
+          result.value.vaultState,
+        ),
+      },
+    });
+  }
+  return result;
 };

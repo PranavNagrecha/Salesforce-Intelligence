@@ -10,9 +10,11 @@ description: |
   `test_coverage_gaps`) and the v2.4 hygiene tool `find_dead_code`.
   Every finding is `confidence: 'heuristic'` — pattern recognition is
   recognition, not declaration. Discloses the v2.1 boundary verbatim:
-  AST not available, cross-class blindness, custom security utility
-  helpers invisible, dynamic SOQL invisible, reflective field access
-  invisible, custom test-assertion frameworks invisible.
+  the recognizer pattern-matches on tokenized Apex source (not a compiler AST),
+  so cross-class blindness, custom security utility helpers invisible, dynamic
+  SOQL invisible, reflective field access invisible, custom test-assertion
+  frameworks invisible. (Note: Apex extraction itself uses a parser-grade AST by
+  default for confidence: parsed edges; the recognizer's scope is narrower.)
 ---
 
 # Developer code quality
@@ -40,21 +42,26 @@ mirror, they do not re-run the recognizer at request time. A vault
 refreshed before v2.1 ran returns empty `issues` lists; that IS the
 honest "nothing to report" answer.
 
-The boundary that matters for developers: **the recognizer is not an
-AST.** It pattern-matches on the v0.3 apex-scanner's tokenization
-output (string-stripped Apex source). Dataflow analysis,
-control-flow analysis, type-inference, cross-class transitive
-analysis, custom security utility helpers, and dynamic SOQL all
-return as false positives or false negatives. The skill surfaces the
-boundary disclosure verbatim on every finding.
+The boundary that matters for developers: **the quality recognizer
+is a pattern matcher, not a compiler AST.** It tokenizes Apex source
+(string-stripped) and pattern-matches on the output. Dataflow analysis,
+control-flow analysis, type-inference, cross-class transitive analysis,
+custom security utility helpers, and dynamic SOQL all return as false
+positives or false negatives. (Note: Apex extraction uses a parser-grade
+AST for graph edges; this recognizer's constraint is its own scope.)
+The skill surfaces the boundary disclosure verbatim on every finding.
 
 `sfi.find_dead_code` and `sfi.governor_limit_risks` carry a `soundness`
 envelope (`complete` / `blindSpots[]` / `staticCoverage`): when a candidate
 or scanned class uses dynamic Apex they return `complete: false` with a
 `dynamic-apex` blind spot naming those classes. A `dead` verdict (or a clean
 governor scan) on a flagged class needs a human read of the source — a
-reflectively-invoked method looks dead, and a SOQL hidden in a
-`Database.query(...)` string is invisible to the recognizer.
+reflectively-invoked method looks dead, and a SOQL BUILT from string
+concatenation (`Database.query('SELECT ' + f + ...)`) is invisible to
+the recognizer. (Field references in inline static SOQL and
+constant-string `Database.query` literals ARE resolved into
+parsed-confidence edges by the default-on Apex AST pass, so a field
+used only inside such a query does not look dead.)
 
 ## Baseline suppression (v4.0)
 
@@ -100,7 +107,7 @@ Defer to another skill when:
   `architect-impact-analysis` → `sfi.get_impact`.
 - **The user asks "where is `X` used in Apex?"** That's a code
   reference question. Defer to `developer-apex-refactor` →
-  `sfi.find_code_usages` / `sfi.find_apex_usages`.
+  `sfi.find_code_usages`.
 - **The user asks "what tests cover this method?"** That's a
   reachability question. Defer to
   `developer-impact-and-reachability` →
@@ -323,8 +330,11 @@ developer needs them to interpret findings honestly.
 
 ### Code-quality + governor-limit specific
 
-- **AST not available.** Dataflow analyses ("this user input reaches
-  this SOQL string"), control-flow analyses ("this code is
+- **No dataflow / control-flow / type-inference.** These recognizers
+  run on token patterns, not on the parser-grade Apex AST that backs
+  dependency-edge extraction — that AST resolves receivers and calls,
+  but is not a dataflow engine. So dataflow analyses ("this user input
+  reaches this SOQL string"), control-flow analyses ("this code is
   unreachable"), and type-inference analyses ("this variable's type
   doesn't match the SObject field") are NOT supported. SOQL inside a
   method called FROM a loop is invisible — the recognizer scopes
@@ -506,8 +516,9 @@ appends the verbatim boundary disclosures.
 ## See also
 
 - `developer-apex-refactor` — for code-reference questions ("where
-  is `OpportunityService` used", "is it safe to rename"). v0.3 /
-  v1.4 scanner; same `heuristic` confidence floor.
+  is `OpportunityService` used", "is it safe to rename"). Apex tier is
+  parser-grade AST by default (`parsed`) with a heuristic scanner
+  backfill; the LWC/Aura/VF frontend tier stays `heuristic`.
 - `developer-impact-and-reachability` — for what-if questions and
   dead-code drill-in via `method_reachability`. v2.3 + v2.7.
 - `architect-impact-analysis` — for cross-component impact ("what

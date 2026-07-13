@@ -85,7 +85,7 @@ Defer to another skill when:
   or `sfi.get_component`.
 - **The user asks "where is this field used in Apex?"** That's a
   code-side reference question. Defer to `developer-apex-refactor` →
-  `sfi.find_apex_usages`.
+  `sfi.find_code_usages`.
 - **The user wants to refresh, init, or check vault status.** Fire
   `refreshing-the-org-vault`, `/sfi-init`, or `pre-flight-checks`.
 - **The user asks a record-level question** ("how many records does
@@ -366,6 +366,22 @@ any step returned `unknown`:
   returns `restricted` and you know the user has elevated
   privileges (e.g., System Administrator profile, "Modify All Data"
   permission), check those manually before acting.
+- **PermissionSetGroup MUTING (R7-W4).** When a user is assigned a
+  PermissionSetGroup, the cascade SUBTRACTS the group's muting
+  permission set(s) from the **object-CRUD precondition** — a CRUD
+  bit (or View/Modify All Data) a group member grants but the
+  group's muting set denies is NOT counted. So a user whose object
+  Read is muted away inside the group returns `restricted`, and the
+  `PermissionGrant` step plus a top-level `mutedBy` name the muting
+  set. Muting is **group-scoped** (a grant from the profile or a
+  permission set assigned OUTSIDE the group survives) and is NOT
+  subtracted from the record-visibility BYPASS stages (object/system
+  View/Modify All) — for the full muting-correct net grant use
+  `sfi.effective_permissions`. A muting set present in a pre-R6-06
+  vault (no muted-perm data) or referenced-but-absent CANNOT be
+  subtracted; the tool DISCLOSES this as a possible overstatement
+  (re-run `/sfi-refresh`), so never read a muting-present verdict as
+  guaranteed-tight.
 - **User → Role mapping.** v1.1 does not extract `User` records; the
   cascade's role-hierarchy step is `unknown` if the user's role
   can't be resolved from the input context. v1.7's Tooling API tier

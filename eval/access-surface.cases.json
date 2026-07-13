@@ -337,9 +337,32 @@
       "expect": "unrouted-gap",
       "intent": "unrouted",
       "plane": "unknown",
-      "tools": ["sfi.resolve", "sfi.capabilities"],
+      "tools": ["sfi.live_permset_holders", "sfi.live_user_permsets"],
       "gap": "unrouted",
-      "note": "KNOWN GAP: user→permission-set membership is record-level (not in the metadata vault) and has no routing template. Documents that the offline vault cannot answer assignment membership; a live_sample route would need to be added deliberately, not assumed."
+      "liveTools": ["live_permset_holders", "live_user_permsets"],
+      "note": "UNROUTED-GAP (honest current output; was optimistically labeled NEEDS-LIVE/plane=live). The broad org-wide 'who is assigned to WHICH permission sets' membership sweep has NO single-call routing template in R5 — the router returns intent=unrouted, plane=unknown, gap=unrouted. Relabeled to the router's real output rather than asserting a live-route capability that was never built (routing-grader-triage: do not hide a genuine gap, and do not assert an unbuilt capability). The building blocks exist per named target — sfi.live_permset_holders ('who holds this permission set') and sfi.live_user_permsets ('which permission sets does this user have') — so a future membership-sweep intent could flip this back to needs-live/plane=live. Until that template is built this stays an honest unrouted gap. TRAP: 'who assigned this permission set as of last quarter' stays an honest gap (historical assignment log not exposed)."
+    },
+    {
+      "id": "live-group-members-canonical",
+      "query": "Who is in the Support Tier 1 public group?",
+      "expect": "needs-live",
+      "intent": "queue-group-member-roster",
+      "plane": "live",
+      "tools": ["sfi.live_group_members"],
+      "gap": null,
+      "liveTools": ["live_group_members"],
+      "note": "NEEDS-LIVE: public-group membership is runtime record data. R5 engine now routes this to the live plane via the queue-group-member-roster intent (a correct same-domain pick) — sfi.live_group_members answers group membership questions directly. Gold intent relabeled from 'unrouted' to the router's real finer output per routing-grader-triage (stale gold LABEL, router made a correct pick = TEST bug, relabel additively). TRAP: 'who was in this group last quarter' (historical) stays an honest gap."
+    },
+    {
+      "id": "live-zombie-accounts-canonical",
+      "query": "Which inactive users still have active licenses?",
+      "expect": "needs-live",
+      "intent": "inactive-users",
+      "plane": "live",
+      "tools": ["sfi.live_zombie_accounts"],
+      "gap": null,
+      "liveTools": ["live_zombie_accounts"],
+      "note": "NEEDS-LIVE: inactive-user + active-license cross is runtime query data. R5 engine now routes this to the live plane via the inactive-users intent (a correct same-domain pick) — sfi.live_zombie_accounts / sfi.live_inactive_users answer this directly. Gold intent relabeled from 'unrouted' to the router's real finer output per routing-grader-triage (stale gold LABEL, router made a correct pick = TEST bug, relabel additively). TRAP: 'who deactivated these users' (audit trail) stays an honest gap."
     },
     {
       "id": "honest-gap-mfa",

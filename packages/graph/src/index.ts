@@ -10,6 +10,10 @@
 
 export {
   canonicalizeApexCallEdgeTargets,
+  canonicalizeFieldEdgeTargets,
+  canonicalizeLabelEdgeTargets,
+  canonicalizeObjectEdgeTargets,
+  canonicalizeResourceEdgeTargets,
   IMPORT_BATCH_SIZE,
   importExtractionResults,
 } from './import.js';
@@ -59,6 +63,28 @@ export type {
   SearchNodesOptions,
   Subgraph,
 } from './queries.js';
+export {
+  compileGraphQuery,
+  runGraphQuery,
+  QUERY_GRAPH_ALLOWED_OPS,
+  QUERY_GRAPH_DEFAULT_LIMIT,
+  QUERY_GRAPH_DEFAULT_TIMEOUT_MS,
+  QUERY_GRAPH_MAX_CONDITIONS,
+  QUERY_GRAPH_MAX_IN_VALUES,
+  QUERY_GRAPH_MAX_LIMIT,
+} from './query-graph.js';
+export type {
+  CompiledGraphQuery,
+  GraphQuery,
+  GraphQueryCompileError,
+  GraphQueryCondition,
+  GraphQueryError,
+  GraphQueryOp,
+  GraphQueryResult,
+  GraphQueryScalar,
+  GraphQuerySelect,
+  RunGraphQueryOptions,
+} from './query-graph.js';
 export {
   classifyPhantom,
   managedNamespaceOf,
@@ -114,9 +140,12 @@ export { openGraphServeReadOnly } from './serve-readonly.js';
 export {
   closeGraph,
   isLockConflict,
+  isNativeBindingFailure,
   lockConflictMessage,
+  nativeBindingMessage,
   openGraph,
   openGraphReadOnly,
+  probeDuckDBNative,
 } from './store.js';
 export type { GraphError, GraphStore } from './store.js';
 export {

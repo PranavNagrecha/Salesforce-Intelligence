@@ -402,6 +402,36 @@ not scoped).
 If a refresh ends `failed`, read the `Fatal:` line and the manifest's
 `errors` array (§4) before re-running.
 
+## 9. Sharing a vault externally
+
+Sometimes you need to hand the vault to someone outside the org — a
+consultant, a support ticket, a demo. Don't just zip up `org-kb/`: it
+contains the org alias, and (depending what you ask it to answer)
+component descriptions can carry emails, URLs, or other free text. Use:
+
+```sh
+sfi vault anonymize --out ../shared-copy
+```
+
+This writes a REDACTED copy to `--out` (which must be outside the source
+vault): the org alias is replaced everywhere it appears as literal text
+with a stable placeholder, and free text is scrubbed for emails, URLs,
+Salesforce record ids, and phone numbers. Component/field API names are
+KEPT (the default `--mode redact`) — most consultants need them, and a
+generated `README.md` in the output spells out that residual risk (an API
+name can itself be identifying if your naming convention embeds a company
+name). `graph/` (the binary dependency graph) and `snapshots/` are never
+copied — rebuild the graph locally with `sfi refresh --no-pull` inside
+`--out` if the recipient needs it.
+
+`--mode pseudonymize` (custom API names ALSO replaced with a stable,
+non-reversible mapping) is not yet implemented; the command explains why
+and exits non-zero if you ask for it.
+
+The command prints a residual-scan summary before exiting — read it before
+sending the copy anywhere. Your source vault is never modified; every
+write happens under `--out`.
+
 ## Where to go next
 
 - [`docs/guides/asking-questions.md`](./asking-questions.md) — the

@@ -17,8 +17,11 @@ import {
   openGraph,
   type GraphStore,
 } from '@sf-intelligence/graph';
+import type { ExecCommand } from '@sf-intelligence/tooling-api';
 
+import { mintLiveCapability } from '../../src/live-capability.js';
 import type { Context } from '../../src/server.js';
+import { resetLiveSession } from '../../src/tools/live-session.js';
 import {
   safeToDeleteFieldHandler,
   safeToDeleteFieldInputSchema,
@@ -508,6 +511,7 @@ beforeAll(async () => {
     vaultRoot: tempDir,
     manifest: FIXTURE_MANIFEST,
     graph: store,
+      liveCapability: mintLiveCapability('opt-in'),
   };
 });
 
@@ -694,9 +698,60 @@ describe('safeToDeleteFieldHandler', () => {
     expect(apex?.verdict).toBe('risky');
     expect(apex?.count).toBe(1);
     expect(apex?.examples[0]?.id).toBe(APEX_READER);
+    // Unconfirmed heuristic edges must NOT claim API confirmation.
+    expect(apex?.apiConfirmed).toBeUndefined();
+    expect(apex?.examples[0]?.apiConfirmed).toBeUndefined();
     // The note must spell out the heuristic-confidence boundary
     // so the caller knows to spot-check before deleting.
     expect(apex?.note).toMatch(/heuristic|false positives|spot-check/i);
+  });
+
+  it('surfaces apiConfirmed additive evidence when an inbound edge has properties.confirmedByApi (#16)', async () => {
+    // Seed a sibling field whose Apex readsFrom edge was stamped by the
+    // Tooling-API dependency enricher. Verdict stays risky — confirmation
+    // is evidence only.
+    const fieldId = 'CustomField:Account.ApiConfirmed__c';
+    const readerId = 'ApexClass:ConfirmedReader';
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: fieldId, apiName: 'ApiConfirmed__c', parentId: ACCOUNT_ID }),
+        makeNode({ id: readerId, type: 'ApexClass', apiName: 'ConfirmedReader' }),
+      ],
+      edges: [
+        makeEdge({
+          fromId: readerId,
+          toId: fieldId,
+          edgeType: 'readsFrom',
+          source: 'apex-scanner',
+          confidence: 'heuristic',
+          properties: { confirmedByApi: true, line: 7 },
+        }),
+      ],
+    };
+    const imported = await importExtractionResults(store, [seed]);
+    expect(imported.ok).toBe(true);
+
+    const result = await safeToDeleteFieldHandler(ctx, { fieldId });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, reasoning, checklist } = result.value.data;
+    // Verdict cascade unchanged — still risky (heuristic Apex read).
+    expect(verdict).toBe('risky');
+    const apex = reasoning.find((r) => r.category === 'apex');
+    expect(apex).toBeDefined();
+    expect(apex?.verdict).toBe('risky');
+    expect(apex?.apiConfirmed).toBe(true);
+    expect(apex?.examples[0]?.id).toBe(readerId);
+    expect(apex?.examples[0]?.apiConfirmed).toBe(true);
+
+    const checklistResult = await safeToDeleteFieldHandler(ctx, {
+      fieldId,
+      format: 'checklist',
+    });
+    expect(checklistResult.ok).toBe(true);
+    if (!checklistResult.ok) return;
+    const rendered = checklistResult.value.data.checklist ?? checklist ?? '';
+    expect(rendered).toMatch(/API-confirmed|Tooling API confirmed/i);
   });
 
   it('returns blocking when an Apex class writesTo the field (writesTo is structurally stronger than readsFrom)', async () => {
@@ -828,6 +883,7 @@ describe('safeToDeleteFieldHandler', () => {
       vaultRoot: localDir,
       manifest: FIXTURE_MANIFEST,
       graph: localStore,
+      liveCapability: mintLiveCapability('opt-in'),
     };
     const r = await safeToDeleteFieldHandler(localCtx, {
       fieldId: 'CustomField:Contact.Email',
@@ -910,7 +966,7 @@ describe('safeToDeleteFieldHandler', () => {
       };
       const imp = await importExtractionResults(s, [local]);
       if (!imp.ok) throw new Error(imp.error.message);
-      const localCtx: Context = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s };
+      const localCtx: Context = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s, liveCapability: mintLiveCapability('opt-in') };
       const result = await safeToDeleteFieldHandler(localCtx, { fieldId: reportField });
       expect(result.ok).toBe(true);
       if (!result.ok) return;
@@ -951,5 +1007,282 @@ describe('safeToDeleteFieldInputSchema', () => {
       fieldId: 'NotAField',
     });
     expect(parsed.success).toBe(true);
+  });
+
+  it('accepts the live params (CR-CAP-L5)', () => {
+    const parsed = safeToDeleteFieldInputSchema.safeParse({
+      fieldId: 'CustomField:Account.Industry__c',
+      liveEnabled: true,
+      orgAlias: 'prod',
+    });
+    expect(parsed.success).toBe(true);
+  });
+});
+
+// =============================================================================
+// CR-CAP-L5 — live population cross-check on a `safe` static verdict.
+// SAFE_FIELD (`CustomField:Account.Safe__c`, apiName `Safe__c`, parent
+// `CustomObject:Account`) has zero incoming edges, so its STATIC verdict is
+// always `safe` — the fixture the live cross-check is designed to run against.
+// =============================================================================
+describe('safeToDeleteFieldHandler — live population cross-check (CR-CAP-L5)', () => {
+  beforeEach(() => resetLiveSession());
+  afterEach(() => resetLiveSession());
+
+  /** 100 total records; `populatedCount` controls how many are non-null. */
+  const makePopulationExec = (populatedCount: number): ExecCommand =>
+    (async (_bin, args) => {
+      const soql = String(args[args.indexOf('--query') + 1] ?? '');
+      const count = soql.includes('= null') ? 100 - populatedCount : 100;
+      return { stdout: JSON.stringify({ result: { totalSize: count } }), stderr: '' };
+    }) as ExecCommand;
+
+  it('populated → downgrades safe to review with a livePopulation evidence block', async () => {
+    const exec = makePopulationExec(40);
+    const result = await safeToDeleteFieldHandler(
+      ctx,
+      { fieldId: SAFE_FIELD, liveEnabled: true },
+      exec,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, livePopulation, trust } = result.value.data;
+    expect(verdict).toBe('review');
+    expect(livePopulation).toBeDefined();
+    expect(livePopulation?.totalCount).toBe(100);
+    expect(livePopulation?.populatedCount).toBe(40);
+    expect(livePopulation?.objectApiName).toBe('Account');
+    expect(livePopulation?.fieldApiName).toBe('Safe__c');
+    expect(trust.provenance).toBe('hybrid');
+    expect(trust.limitations.some((l) => l.includes('downgraded from safe to review'))).toBe(true);
+  });
+
+  it('zero population → safe stands, with the live evidence block still attached', async () => {
+    const exec = makePopulationExec(0);
+    const result = await safeToDeleteFieldHandler(
+      ctx,
+      { fieldId: SAFE_FIELD, liveEnabled: true },
+      exec,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, livePopulation, trust } = result.value.data;
+    expect(verdict).toBe('safe');
+    expect(livePopulation).toBeDefined();
+    expect(livePopulation?.populatedCount).toBe(0);
+    expect(livePopulation?.totalCount).toBe(100);
+    // The cross-check RAN (evidence attached) — trust reflects the fused answer.
+    expect(trust.provenance).toBe('hybrid');
+  });
+
+  it('live unavailable (no consent, no liveEnabled) → static verdict stands with a disclosure', async () => {
+    const throwExec: ExecCommand = (async () => {
+      throw new Error('sf must NOT be spawned — live plane is not enabled');
+    }) as ExecCommand;
+    const result = await safeToDeleteFieldHandler(ctx, { fieldId: SAFE_FIELD }, throwExec);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { verdict, livePopulation, trust } = result.value.data;
+    expect(verdict).toBe('safe');
+    expect(livePopulation).toBeUndefined();
+    expect(trust.provenance).toBe('offline_snapshot');
+    expect(trust.limitations).toContain('static-only verdict; live population not checked');
+  });
+
+  it('live error (budget exhausted) → fails soft to the static verdict with a disclosure, never crashes', async () => {
+    const prevBudget = process.env.SFI_LIVE_QUERY_BUDGET;
+    process.env.SFI_LIVE_QUERY_BUDGET = '0';
+    try {
+      const exec = makePopulationExec(40);
+      const result = await safeToDeleteFieldHandler(
+        ctx,
+        { fieldId: SAFE_FIELD, liveEnabled: true },
+        exec,
+      );
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const { verdict, livePopulation, trust } = result.value.data;
+      // Never a downgrade, never a crash — the offline answer stands alone.
+      expect(verdict).toBe('safe');
+      expect(livePopulation).toBeUndefined();
+      expect(trust.provenance).toBe('offline_snapshot');
+      expect(trust.limitations).toContain('static-only verdict; live population not checked');
+    } finally {
+      if (prevBudget === undefined) delete process.env.SFI_LIVE_QUERY_BUDGET;
+      else process.env.SFI_LIVE_QUERY_BUDGET = prevBudget;
+    }
+  });
+
+  it('never attempts a live call when the static verdict is NOT safe (budget-neutral)', async () => {
+    // FLOW_FIELD is `blocking` (a Flow reads it) — the live cross-check must
+    // never fire regardless of liveEnabled, so a throwing exec here would only
+    // matter if the (wrongly) reached call spawned it.
+    const throwExec: ExecCommand = (async () => {
+      throw new Error('live must NEVER be reached for a non-safe verdict');
+    }) as ExecCommand;
+    const result = await safeToDeleteFieldHandler(
+      ctx,
+      { fieldId: FLOW_FIELD, liveEnabled: true },
+      throwExec,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.verdict).toBe('blocking');
+    expect(result.value.data.livePopulation).toBeUndefined();
+    expect(result.value.data.trust.provenance).toBe('offline_snapshot');
+  });
+});
+
+// =============================================================================
+// Finding #35 — format: 'proposal' emits a LOCAL destructiveChanges.xml bundle.
+// =============================================================================
+
+/** Strip XML comments + prolog so the tag-balance check ignores comment bodies. */
+const stripCommentsAndProlog = (xml: string): string =>
+  xml.replace(/<!--[\s\S]*?-->/g, '').replace(/<\?xml[^>]*\?>/g, '');
+
+/** Minimal well-formedness check: tags balance and nest. */
+const isWellFormed = (xml: string): boolean => {
+  const body = stripCommentsAndProlog(xml);
+  const stack: string[] = [];
+  for (const m of body.matchAll(/<(\/?)([A-Za-z][\w.-]*)(\s[^>]*)?(\/?)>/g)) {
+    const closing = m[1] === '/';
+    const name = m[2] ?? '';
+    const selfClose = m[4] === '/';
+    if (selfClose) continue;
+    if (closing) {
+      if (stack.pop() !== name) return false;
+    } else {
+      stack.push(name);
+    }
+  }
+  return stack.length === 0;
+};
+
+const fileByPath = (
+  files: readonly { path: string; contents: string }[],
+  path: string,
+): string => files.find((f) => f.path === path)?.contents ?? '';
+
+describe('safeToDeleteFieldHandler — format: proposal (Finding #35)', () => {
+  it('emits a well-formed destructiveChanges.xml naming the field, with a safe-verdict evidence comment', async () => {
+    const result = await safeToDeleteFieldHandler(ctx, {
+      fieldId: SAFE_FIELD,
+      format: 'proposal',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const proposal = result.value.data.proposal;
+    expect(proposal).toBeDefined();
+    if (proposal === undefined) return;
+
+    const destructive = fileByPath(proposal.files, 'destructiveChanges.xml');
+    const pkg = fileByPath(proposal.files, 'package.xml');
+    expect(destructive).toContain('<members>Account.Safe__c</members>');
+    expect(destructive).toContain('<name>CustomField</name>');
+    expect(destructive).not.toContain('<version>');
+    expect(pkg).toContain('<version>62.0</version>');
+    expect(isWellFormed(destructive)).toBe(true);
+    expect(isWellFormed(pkg)).toBe(true);
+
+    // Evidence is self-justifying: verdict + vault hash + REVIEW banner inline.
+    expect(destructive).toContain('verdict: safe');
+    expect(destructive).toContain('sha256:fixture');
+    expect(destructive).toMatch(/REVIEW BEFORE DEPLOY/i);
+    expect(proposal.evidence.verdict).toBe('safe');
+    expect(proposal.summary.componentCount).toBe(1);
+  });
+
+  it('still emits a proposal for a BLOCKING field, leading the evidence with verdict: blocking', async () => {
+    const result = await safeToDeleteFieldHandler(ctx, {
+      fieldId: FLOW_FIELD,
+      format: 'proposal',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const proposal = result.value.data.proposal;
+    expect(proposal).toBeDefined();
+    if (proposal === undefined) return;
+    expect(result.value.data.verdict).toBe('blocking');
+    expect(proposal.evidence.verdict).toBe('blocking');
+    const destructive = fileByPath(proposal.files, 'destructiveChanges.xml');
+    expect(destructive).toContain('verdict: blocking');
+    // The Flow dependency is named in the evidence so the proposal self-justifies.
+    expect(proposal.evidence.reasons.join(' ')).toMatch(/flow/i);
+    expect(isWellFormed(destructive)).toBe(true);
+  });
+
+  it('R6-24-WIRE — proposal evidence names folded report/dashboard ids that would break', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-std-wire24-'));
+    const opened = await openGraph(join(dir, 'wire.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const s = opened.value;
+    try {
+      const acct = 'CustomObject:Account';
+      const reportField = 'CustomField:Account.ReportNamed__c';
+      const local: ExtractionResult = {
+        nodes: [
+          makeNode({ id: acct, type: 'CustomObject', apiName: 'Account' }),
+          makeNode({
+            id: reportField,
+            apiName: 'ReportNamed__c',
+            parentId: acct,
+            properties: {
+              dataType: 'Text',
+              usedInReport: true,
+              usedInDashboard: true,
+              usedInReports: ['Exec/Forecast', 'Sales/Pipeline'],
+              usedInDashboards: ['Exec/KPIs'],
+            },
+          }),
+        ],
+        edges: [makeEdge({ fromId: acct, toId: reportField, edgeType: 'parentOf' })],
+      };
+      const imp = await importExtractionResults(s, [local]);
+      if (!imp.ok) throw new Error(imp.error.message);
+      const localCtx: Context = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s, liveCapability: mintLiveCapability('opt-in') };
+      const result = await safeToDeleteFieldHandler(localCtx, {
+        fieldId: reportField,
+        format: 'proposal',
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.data.verdict).toBe('blocking');
+      expect(result.value.data.reportUsage?.reportNames).toEqual([
+        'Exec/Forecast',
+        'Sales/Pipeline',
+      ]);
+      expect(result.value.data.reportUsage?.dashboardNames).toEqual(['Exec/KPIs']);
+      const analytics = result.value.data.reasoning.find((r) => r.category === 'analytics');
+      expect(analytics?.examples.map((e) => e.id)).toEqual(
+        expect.arrayContaining([
+          'Report:Exec/Forecast',
+          'Report:Sales/Pipeline',
+          'Dashboard:Exec/KPIs',
+        ]),
+      );
+      const proposal = result.value.data.proposal;
+      expect(proposal).toBeDefined();
+      if (proposal === undefined) return;
+      const evidenceBlob = proposal.evidence.reasons.join(' ');
+      expect(evidenceBlob).toContain('Sales/Pipeline');
+      expect(evidenceBlob).toContain('Exec/Forecast');
+      expect(evidenceBlob).toContain('Exec/KPIs');
+      expect(evidenceBlob).toMatch(/would break/i);
+      const destructive = fileByPath(proposal.files, 'destructiveChanges.xml');
+      expect(destructive).toContain('Sales/Pipeline');
+      expect(destructive).toContain('Exec/KPIs');
+      expect(isWellFormed(destructive)).toBe(true);
+    } finally {
+      await closeGraph(s);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not attach a proposal for the default json format', async () => {
+    const result = await safeToDeleteFieldHandler(ctx, { fieldId: SAFE_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.proposal).toBeUndefined();
   });
 });

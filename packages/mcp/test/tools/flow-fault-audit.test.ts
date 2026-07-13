@@ -174,4 +174,29 @@ describe('flowFaultAuditHandler — fault surfacing honesty (Bug batch 6)', () =
       'Flow:UserScreenFlow',
     ]);
   });
+
+  // P15 oversize-enumeration guard (0.2.0 gate): the handler cap must DISCLOSE
+  // truncation — the full offender count stays honest, the cut list carries an
+  // explicit `truncated` flag, and rendered text tells the caller the way out.
+  it('FAIL-BEFORE/PASS-AFTER: limit caps the worst-first list with explicit truncation disclosure', async () => {
+    const r = await flowFaultAuditHandler(ctx, { limit: 1 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Full count survives the cap; the list is cut worst-first.
+    expect(r.value.data.flowsWithUnhandledFaults).toBe(2);
+    expect(r.value.data.flows).toHaveLength(1);
+    expect(r.value.data.flows[0]?.id).toBe('Flow:BeforeSaveAutomation');
+    expect(r.value.data.truncated).toBe(true);
+    expect(r.value.data.rendered).toMatch(/truncated to the worst 1 of 2/i);
+    expect(r.value.data.rendered).toMatch(/raise `limit`/i);
+  });
+
+  it('does not claim truncation when everything fits (and the scan completed)', async () => {
+    const r = await flowFaultAuditHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.truncated).toBe(false);
+    expect(r.value.data.scanTruncated).toBe(false);
+    expect(r.value.data.rendered).not.toMatch(/truncated/i);
+  });
 });

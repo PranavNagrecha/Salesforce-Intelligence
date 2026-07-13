@@ -128,9 +128,10 @@ const buildBody = (node: Node, edges: readonly Edge[], source: string): string =
   blocks.push(`# ${escapeMarkdownHeading(node.label ?? node.apiName)}`);
   // Block 2: API name + Type. Two trailing spaces on the API-name line
   // produce a Markdown line break, keeping both labels in one paragraph.
-  // apiName is escaped inside its code span so a backtick can't close it early.
+  // escapeMarkdownInline returns the full fenced code span (fence included,
+  // adaptively sized) so an embedded backtick in apiName can't close it early.
   blocks.push(
-    `**API Name:** \`${escapeMarkdownInline(node.apiName)}\`  \n**Type:** ${node.type}`,
+    `**API Name:** ${escapeMarkdownInline(node.apiName)}  \n**Type:** ${node.type}`,
   );
   // Block 3 (optional): description paragraph. Escape line-leading structural
   // chars so the free-text prose cannot inject headings/tables/fences. The

@@ -51,10 +51,11 @@ const renderPropertiesTable = (
 // don't need to think about booleans or numbers here.
 const formatFlowDetailValue = (value: unknown): string => {
   if (value === null || value === undefined) return EM_DASH;
-  // Escape inside the code span so a backtick in a Flow detail value (status,
-  // processType, triggerObject/type, recordTriggerType) can't close it early
-  // and leak the tail into prose (CR-16c).
-  return `\`${escapeMarkdownInline(String(value))}\``;
+  // escapeMarkdownInline returns the full fenced code span (fence included) —
+  // it picks a fence long enough that an embedded backtick in a Flow detail
+  // value (status, processType, triggerObject/type, recordTriggerType) can't
+  // close it early and leak the tail into prose (CR-16c / CR-16d).
+  return escapeMarkdownInline(String(value));
 };
 
 const renderFlowDetailsSection = (
@@ -159,9 +160,10 @@ const buildBody = (node: Node, edges: readonly Edge[]): string => {
   blocks.push(`# ${escapeMarkdownHeading(node.label ?? node.apiName)}`);
   // Block 2: API name + Type. Two trailing spaces on the API-name line
   // produce a Markdown line break, keeping both labels in one paragraph.
-  // apiName is escaped inside its code span so a backtick can't close it early.
+  // escapeMarkdownInline returns the full fenced code span (fence included,
+  // adaptively sized) so an embedded backtick in apiName can't close it early.
   blocks.push(
-    `**API Name:** \`${escapeMarkdownInline(node.apiName)}\`  \n**Type:** ${node.type}`,
+    `**API Name:** ${escapeMarkdownInline(node.apiName)}  \n**Type:** ${node.type}`,
   );
   // Block 3 (optional): description paragraph. Escape line-leading structural
   // chars so the free-text prose cannot inject headings/tables/fences.

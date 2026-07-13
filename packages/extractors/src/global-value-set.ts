@@ -39,6 +39,24 @@ const coerceBoolean = (value: unknown): boolean => {
   return false;
 };
 
+/**
+ * Coerce a `<customValue>`'s `<isActive>` element with a default of `true` —
+ * the INVERSE default of {@link coerceBoolean}. Salesforce DX-source OMITS
+ * `<isActive>` for ACTIVE values and only writes `<isActive>false</isActive>`
+ * on a value an admin has explicitly deactivated (confirmed against a real
+ * production-scale org's GlobalValueSet source: active entries carry no
+ * `<isActive>` element at all; deactivated ones carry `false`). Identical in
+ * spirit to `coerceIsActiveDefaultTrue` in custom-field.ts — kept as a
+ * separate local helper (not shared) matching this package's per-file
+ * convention (see `toNullableString` et al., duplicated per extractor rather
+ * than centralized). Reusing the `false`-defaulting `coerceBoolean` here
+ * would mark every active value inactive on every real GlobalValueSet.
+ */
+const coerceIsActiveDefaultTrue = (value: unknown): boolean => {
+  const v = unwrapSingle(value);
+  return v === undefined ? true : coerceBoolean(v);
+};
+
 /** Return `<element>` value as a string, or `null` when absent. */
 const optionalString = (rootObj: Record<string, unknown>, key: string): string | null => {
   const raw = unwrapSingle(rootObj[key]);
@@ -106,21 +124,47 @@ const validateRoot = (
 };
 
 /**
- * Validate each `<customValue>` entry carries the required scalars
- * (`<fullName>`, `<default>`) per `GlobalValueSet.md`. v1.2 surfaces
- * only the count in `properties.valueCount`; per-value details are
- * out of scope, but the well-formedness check still runs so a
- * truncated source file doesn't silently produce a healthy-looking
- * node with an under-counted `valueCount`.
+ * One resolved `<customValue>` entry (H10 shape — CR-10b): the value's API
+ * name, activation status, and the optional display label / default flag
+ * when the source recorded them. Mirrors `PicklistValue` in custom-field.ts
+ * (the CustomField inline picklist) and `StandardValueEntry` in
+ * standard-value-set.ts exactly, so a GlobalValueSet-resolved value and an
+ * inline-defined one are shaped alike for downstream consumers.
+ *
+ * `isActive: false` marks a DEACTIVATED value — RETAINED, not selectable for
+ * new records, but existing records may still hold it. Deactivated values
+ * are NEVER filtered out of `properties.values`: an admin asking "what
+ * values are (or were) in this value set?" needs the full picture, and
+ * every other picklist-value-shaped property this vault emits (CustomField
+ * inline `picklistValues`, `StandardValueSet.values`) follows the same
+ * retain-and-mark rule — silently dropping GlobalValueSet's inactive
+ * entries would be the one inconsistent exception.
  */
-const validateCustomValues = (
+interface GlobalValueSetValueEntry {
+  readonly value: string;
+  readonly isActive: boolean;
+  readonly label?: string;
+  readonly default?: boolean;
+}
+
+/**
+ * Validate each `<customValue>` entry carries the required scalars
+ * (`<fullName>`, `<default>`) per `GlobalValueSet.md`, and read each into
+ * the H10 value shape `{value, isActive, label?, default?}` (CR-10b —
+ * `label`/`default` are OMIT-when-absent, mirroring custom-field.ts's inline
+ * picklist reader, though `default` is validated required above so it is
+ * present on every well-formed entry in practice). The well-formedness check
+ * still runs first so a truncated source file doesn't silently produce a
+ * healthy-looking node with an under-counted `valueCount`.
+ */
+const validateAndReadCustomValues = (
   rootObj: Record<string, unknown>,
   path: string,
-): Result<readonly string[], ExtractorError> => {
-  const values = toArray(rootObj['customValue']).filter(
+): Result<readonly GlobalValueSetValueEntry[], ExtractorError> => {
+  const rawValues = toArray(rootObj['customValue']).filter(
     (v): v is Record<string, unknown> => typeof v === 'object' && v !== null,
   );
-  for (const value of values) {
+  for (const value of rawValues) {
     for (const required of PER_VALUE_REQUIRED_ELEMENTS) {
       if (value[required] === undefined) {
         return err({
@@ -131,10 +175,24 @@ const validateCustomValues = (
       }
     }
   }
-  // P14-USAGE-gvs-edge: surface the per-value fullNames, not just the count —
+  // P14-USAGE-gvs-edge: surface the per-value entries, not just the count —
   // a GlobalValueSet that only said "valueCount: 4" could never answer
   // "what values are in this picklist?" for the fields that use it.
-  return ok(values.map((v) => String(unwrapSingle(v['fullName']))));
+  return ok(
+    rawValues.map((v) => {
+      const value = String(unwrapSingle(v['fullName']));
+      const isActive = coerceIsActiveDefaultTrue(v['isActive']);
+      const label = optionalString(v, 'label');
+      const out: GlobalValueSetValueEntry = { value, isActive };
+      return {
+        ...out,
+        ...(label !== null ? { label } : {}),
+        ...(unwrapSingle(v['default']) !== undefined
+          ? { default: coerceBoolean(unwrapSingle(v['default'])) }
+          : {}),
+      };
+    }),
+  );
 };
 
 /**
@@ -142,12 +200,15 @@ const validateCustomValues = (
  *
  * Reads `<masterLabel>` (required) and optional `<description>` and
  * `<sorted>` into the node's properties. Per-value entries (`<customValue>`)
- * are counted into `properties.valueCount` AND their `<fullName>`s surfaced
- * as `properties.values` (P14-USAGE-gvs-edge — the answer to "what values
- * are in this picklist?" for GlobalValueSet-driven fields); each entry is
- * validated for its required sub-elements (`<fullName>`, `<default>`), with
- * other per-value details (label, default, isActive) still out of scope. A
- * file with zero `<customValue>` entries is the documented happy path for
+ * are counted into `properties.valueCount` AND read into `properties.values`
+ * as `{value, isActive, label?, default?}` (P14-USAGE-gvs-edge + CR-10b —
+ * the answer to "what values are in this picklist?" for GlobalValueSet-driven
+ * fields, now with the same honest activation status the CustomField inline
+ * picklist and StandardValueSet extractors carry — see
+ * {@link GlobalValueSetValueEntry}); each entry is validated for its
+ * required sub-elements (`<fullName>`, `<default>`). Deactivated values
+ * (`<isActive>false</isActive>`) are RETAINED, never filtered out. A file
+ * with zero `<customValue>` entries is the documented happy path for
  * placeholder sets and yields `valueCount: 0`.
  *
  * Returns one `Node` of type `'GlobalValueSet'` and zero edges. The
@@ -167,8 +228,8 @@ const validateCustomValues = (
  *   const result = await extractGlobalValueSet(
  *     'force-app/main/default/globalValueSets/Country_Codes.globalValueSet-meta.xml',
  *   );
- *   if (result.ok) console.log(result.value.nodes[0].id);
- *   // => 'GlobalValueSet:Country_Codes'
+ *   if (result.ok) console.log(result.value.nodes[0].properties['values']);
+ *   // => [{ value: 'US', isActive: true, label: 'United States', default: false }, ...]
  */
 export const extractGlobalValueSet = async (
   path: string,
@@ -205,7 +266,7 @@ export const extractGlobalValueSet = async (
   if (!rootResult.ok) return rootResult;
   const rootObj = rootResult.value;
 
-  const valuesResult = validateCustomValues(rootObj, path);
+  const valuesResult = validateAndReadCustomValues(rootObj, path);
   if (!valuesResult.ok) return valuesResult;
   const values = valuesResult.value;
   const valueCount = values.length;

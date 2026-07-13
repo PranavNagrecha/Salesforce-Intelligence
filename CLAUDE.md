@@ -40,18 +40,25 @@ non-profile permission sets (`sfi.live_zombie_accounts`). All are read-only,
 consent- and budget-gated SOQL — see `docs/configuration.md`. It does NOT:
 
 - Call Salesforce unless the live plane is enabled (`sfi.live_consent`,
-  `SFI_LIVE_PLANE_ENABLED=1`, or `liveEnabled: true`). Vault tools never
-  call the org. (Optional Tooling-API enrichment runs only at refresh time,
-  behind a flag.)
-- Run arbitrary live SOQL — only the curated `sfi.live_*` roster.
+  `SFI_LIVE_PLANE_ENABLED=1`, or `liveEnabled: true`) **and** the invoked
+  tool is registry-tagged `livePlane: 'opt-in' | 'primary'` (INFRA-12-DEEP —
+  `dispatchTool` mints a `LiveCapability` onto Context; `never` tools cannot
+  read ambient standing consent even when consent is on file). Vault tools
+  never call the org. (Optional Tooling-API enrichment runs only at refresh
+  time, behind a flag.)
+- Run arbitrary live SOQL — only the curated `sfi.live_*` roster (plus a
+  small audited opt-in set such as hybrid field-cleanup tools).
 - Read business record data from the vault ("how many Accounts…"). Live
   tools can return capped runtime counts/samples when enabled. It DOES
   surface configured Custom Metadata Type and Custom Setting *records* via
   `sfi.lookup_record` from the vault.
-- Analyze Apex with a real AST/compiler. Apex is read by a heuristic
-  regex/token scanner, so those edges are `confidence: heuristic` and
-  cross-method dataflow, dynamic SOQL, and reflective field access are
-  invisible. Always cite the confidence tier.
+- Analyze Apex with real AST parsing (default) + heuristic recall. Apex
+  extraction runs the parser-grade ANTLR pass by default (`confidence:
+  parsed` edges: resolved field reads/writes, cross-class calls, field-level
+  SOQL). Per-file parse failures and recall gaps are backfilled by the regex
+  scanner (`confidence: heuristic`). Cross-method dataflow, dynamic SOQL /
+  SOSL strings, and reflective field access remain invisible. Always cite
+  the per-edge confidence tier.
 
 It DOES cover a broad surface well beyond the original v0.1 nine types:
 schema (objects, fields, record types, value sets, lookup / master-detail

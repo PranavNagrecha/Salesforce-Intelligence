@@ -54,12 +54,24 @@ const makeEdge = (
 const WIDGET = 'CustomObject:Widget__c';
 const CREATOR_FLOW = 'Flow:Create_Widget';
 const WIDGET_TRIGGER = 'ApexTrigger:WidgetTrigger';
+// Hub-shaped second object: multiple creators + triggers to exercise the
+// P15 handler cap + truncation disclosure.
+const GADGET = 'CustomObject:Gadget__c';
+const GADGET_FLOW_A = 'Flow:Create_Gadget_A';
+const GADGET_FLOW_B = 'Flow:Create_Gadget_B';
+const GADGET_TRIGGER_A = 'ApexTrigger:GadgetTriggerA';
+const GADGET_TRIGGER_B = 'ApexTrigger:GadgetTriggerB';
 
 const seed: ExtractionResult = {
   nodes: [
     makeNode({ id: WIDGET, type: 'CustomObject', apiName: 'Widget__c' }),
     makeNode({ id: CREATOR_FLOW, type: 'Flow', apiName: 'Create_Widget' }),
     makeNode({ id: WIDGET_TRIGGER, type: 'ApexTrigger', apiName: 'WidgetTrigger' }),
+    makeNode({ id: GADGET, type: 'CustomObject', apiName: 'Gadget__c' }),
+    makeNode({ id: GADGET_FLOW_A, type: 'Flow', apiName: 'Create_Gadget_A' }),
+    makeNode({ id: GADGET_FLOW_B, type: 'Flow', apiName: 'Create_Gadget_B' }),
+    makeNode({ id: GADGET_TRIGGER_A, type: 'ApexTrigger', apiName: 'GadgetTriggerA' }),
+    makeNode({ id: GADGET_TRIGGER_B, type: 'ApexTrigger', apiName: 'GadgetTriggerB' }),
   ],
   edges: [
     // A Flow that inserts Widget__c records (the only modeled creator class).
@@ -72,6 +84,23 @@ const seed: ExtractionResult = {
     }),
     // A trigger that fires on save.
     makeEdge({ fromId: WIDGET_TRIGGER, toId: WIDGET, edgeType: 'triggersOn' }),
+    // Gadget__c: two creators + two triggers.
+    makeEdge({
+      fromId: GADGET_FLOW_A,
+      toId: GADGET,
+      edgeType: 'writesTo',
+      confidence: 'parsed',
+      properties: { operation: 'recordCreate' },
+    }),
+    makeEdge({
+      fromId: GADGET_FLOW_B,
+      toId: GADGET,
+      edgeType: 'writesTo',
+      confidence: 'parsed',
+      properties: { operation: 'recordCreate' },
+    }),
+    makeEdge({ fromId: GADGET_TRIGGER_A, toId: GADGET, edgeType: 'triggersOn' }),
+    makeEdge({ fromId: GADGET_TRIGGER_B, toId: GADGET, edgeType: 'triggersOn' }),
   ],
 };
 
@@ -117,5 +146,36 @@ describe('recordCreationPathsHandler', () => {
     expect(r.value.data.rendered).toMatch(/Flow automation/);
     expect(r.value.data.rendered).toMatch(/Apex/);
     expect(r.value.data.rendered).toMatch(/insert/i);
+  });
+
+  // P15 oversize-enumeration guard (0.2.0 gate): the handler cap must DISCLOSE
+  // truncation — full counts stay honest, cut lists carry explicit flags, and
+  // the rendered text tells the caller how to see the tail.
+  it('FAIL-BEFORE/PASS-AFTER: limit caps both lists with explicit truncation disclosure', async () => {
+    const r = await recordCreationPathsHandler(ctx, {
+      objectApiName: 'Gadget__c',
+      limit: 1,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Full counts survive the cap.
+    expect(r.value.data.creatorCount).toBe(2);
+    expect(r.value.data.triggerCount).toBe(2);
+    // Lists are capped and the cut is flagged, never silent.
+    expect(r.value.data.creators).toHaveLength(1);
+    expect(r.value.data.creatorsTruncated).toBe(true);
+    expect(r.value.data.triggers).toHaveLength(1);
+    expect(r.value.data.triggersTruncated).toBe(true);
+    expect(r.value.data.rendered).toMatch(/truncated to 1 of 2/i);
+    expect(r.value.data.rendered).toMatch(/raise `limit`/i);
+  });
+
+  it('does not claim truncation when the lists fit within limit', async () => {
+    const r = await recordCreationPathsHandler(ctx, { objectApiName: 'Widget__c' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.creatorsTruncated).toBe(false);
+    expect(r.value.data.triggersTruncated).toBe(false);
+    expect(r.value.data.rendered).not.toMatch(/truncated/i);
   });
 });

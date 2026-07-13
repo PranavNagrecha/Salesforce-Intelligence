@@ -77,6 +77,31 @@ export interface ExtendedVaultManifest extends VaultManifest {
     readonly dashboards: { readonly total: number; readonly requested?: number; readonly retrieved: number };
   };
   /**
+   * PROFILE-COBATCH detect+disclose (trust-critical): present only when the
+   * last refresh produced profiles WITHOUT their permission grant sections —
+   * either profiles carried ~zero `grantedBy` edges while PermissionSets
+   * carried grants (the co-listing-lost fingerprint: a split retrieve
+   * separated `Profile` from `CustomObject`/`ApexClass`/…), or the vault's
+   * `grantedBy` count collapsed an order of magnitude vs the prior manifest.
+   * Consumers: `sfi.health_check` reports `degraded` with `reason`, and the
+   * refresh also marks the Profile coverage row `errored` so
+   * `sfi.coverage_report` routes it into `partial`. A clean refresh writes a
+   * manifest WITHOUT this field, clearing the degradation.
+   */
+  readonly profileGrantIntegrity?: {
+    readonly degraded: true;
+    /** Human-readable disclosure ("profiles retrieved without permission grants — co-listing likely lost: …"). */
+    readonly reason: string;
+    readonly detectedAt: string;
+    readonly profileCount: number;
+    readonly profileGrantEdges: number;
+    readonly permissionSetGrantEdges: number;
+    /** Total grantedBy edges this refresh produced. */
+    readonly grantedByEdges: number;
+    /** grantedBy count from the previous manifest (null on a first refresh). */
+    readonly priorGrantedByEdges: number | null;
+  };
+  /**
    * P15-PHANTOM-manifest-summary: refresh-time roll-up of dangling edge
    * targets by phantom taxonomy bucket (ADR-004 — counts only, no stub nodes).
    */

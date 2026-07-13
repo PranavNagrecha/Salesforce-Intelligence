@@ -10,8 +10,43 @@ on:
   workflow_dispatch:
 
 jobs:
+  # INFRA-09: unit tests on Node 20 + 22. Kept as its own job (not folded into
+  # build-test's matrix) so the expensive eval/e2e steps stay single-Node.
+  unit-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - name: Install Node ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (all packages)
+        run: pnpm -r build
+
+      - name: Typecheck (tsc -b project references)
+        run: pnpm tsc
+
+      - name: Unit tests
+        run: pnpm -r test
+
   build-test:
     runs-on: ubuntu-latest
+    needs: unit-test
     env:
       EVAL_STRICT: '1'
       SF_INTELLIGENCE_REGISTRY_PATH: eval/registry.ci.json
@@ -55,11 +90,13 @@ jobs:
       - name: Build (all packages)
         run: pnpm -r build
 
+      - name: CLI bundle size / ANTLR externalization (INFRA-11)
+        run: pnpm check:cli-bundle
+
       - name: Lint
         run: pnpm lint
 
-      - name: Unit tests
-        run: pnpm -r test
+      # Unit tests run on Node 20+22 in the unit-test job (INFRA-09).
 
       - name: NL routing gate (front-door router → real tools, deterministic)
         run: pnpm eval:routing-gate
@@ -84,3 +121,140 @@ jobs:
 
       - name: Scale gate (10k batched import budget)
         run: pnpm eval:scale:import
+
+  # G-5 (0.1.19 finding): the product is npm-distributed to run locally and
+  # the admin base is Windows-heavy, but until now CI only ran on ubuntu-latest
+  # — the Windows `sf.cmd` exec path (packages/core/src/exec-helper.ts) shipped
+  # UNTESTED. This job runs the portable subset of the ubuntu gate above
+  # (checkout → pnpm/node setup → install → build → unit tests) on a real
+  # windows-latest runner as a REAL gate (no continue-on-error). Deliberately
+  # NOT a fold-in via `strategy.matrix`: the ubuntu job's remaining steps
+  # (org-leak git-history scan, public-interface guard, NL routing gate, e2e
+  # MCP smoke, CI vault build, the retrieval/analytical/scale evals) need
+  # maintainer vaults, the `sf` CLI, network access, or bash-scripted secret
+  # handling — none of that is reproducible on a hosted runner, matrix or
+  # not, so a separate minimal job is cleaner than threading
+  # `if: matrix.os == 'ubuntu-latest'` through a dozen steps. Lint is
+  # intentionally skipped here too: `pnpm lint` (ESLint over TypeScript
+  # sources) is OS-independent — the ubuntu job's run already covers it, and
+  # duplicating it on Windows would just burn runner time. duckdb has
+  # prebuilt win32-x64 bindings (`@duckdb/node-bindings-win32-x64` is pinned
+  # in pnpm-lock.yaml), so the native module load is not expected to be a
+  # blocker on this (x64) runner image.
+  #
+  # Four pre-existing suites hardcode unix-only exec/path assumptions that
+  # only ever ran on a non-Windows CI host, so they never surfaced there —
+  # each is scoped OUT of this job's run rather than soft-passed, and is
+  # flagged as follow-up work to make platform-aware instead of dropped
+  # silently:
+  #   - packages/core/test/exec-helper.test.ts, describe block "execHelper —
+  #     win32 branch (cmd.exe assembly, platform stubbed)" (2 tests): one
+  #     points COMSPEC at `/bin/echo` to observe assembled argv — `/bin/echo`
+  #     does not exist on Windows; the other deletes COMSPEC and expects the
+  #     `cmd.exe` fallback spawn to reject ENOENT, which only holds when the
+  #     REAL host has no `cmd.exe` (a genuine win32 runner always does).
+  #     Excluded via a `-t` negative-lookahead on the full test name — this
+  #     remains the closest surgical (non-file-level) exclusion available for
+  #     the Windows job; verified locally that it skips exactly these 2 tests
+  #     and nothing else in the file.
+  #   - packages/cli/test/commands/mcp.test.ts, "defaultListOrgs —
+  #     SFI_SF_EXEC_TIMEOUT_MS backstop" (1 test): writes a `#!/bin/sh`
+  #     shebang script, `chmod 0o755`s it, and joins PATH with `:` — no
+  #     /bin/sh, chmod is a no-op on NTFS, and win32 PATH uses `;`.
+  #   - packages/cli/test/commands/register-vault.test.ts, "resolves relative
+  #     vault paths against cwd" (1 test): asserts
+  #     `resolve('/tmp/foo', 'my-vault') === '/tmp/foo/my-vault'` — node:path
+  #     resolves to backslash-separated `\tmp\foo\my-vault` on win32, so the
+  #     literal forward-slash equality fails.
+  #   - packages/cli/test/commands/doctor.test.ts, "detects sf installed but
+  #     not on PATH and still runs via the absolute path (B9)" (1 test): its
+  #     mock only recognizes the macOS/Linux fallback probe paths
+  #     (`/usr/local/bin/sf`, `/opt/homebrew/bin/sf`), but the code under
+  #     test (`sfFallbackPaths()`) branches on `process.platform === 'win32'`
+  #     to return real Windows install paths instead, so the mock never sees
+  #     a matching probe on a genuine win32 runner.
+  # vitest 3 still effectively wants one `--exclude` glob in this
+  # pnpm-filtered invocation, so the three cli files are combined via brace expansion; that's
+  # file-level (~35 of 38 cli test files still run on Windows, dropping ~38
+  # of 374 cli-package assertions — the failing assertion in each excluded
+  # file is one test among many otherwise-passing ones in that file). A
+  # follow-up to add `it.skipIf(process.platform === 'win32')` on just the
+  # four specific tests above (rather than excluding whole files here) is
+  # tracked separately so Windows regains that coverage without a fragile
+  # CI-only filter.
+  windows-build-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        # No fetch-depth: 0 here — this job doesn't run the org-leak history
+        # scan, so a shallow checkout is fine and faster.
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (all packages)
+        run: pnpm -r build
+
+      - name: Unit tests (all packages except cli — excludes the exec-helper win32-branch tests, see job comment)
+        run: pnpm --filter '!sf-intelligence' -r test -t "^(?!.*win32 branch).*$"
+
+      - name: Unit tests (cli package — excludes 3 POSIX-only test files, see job comment)
+        run: pnpm --filter ./packages/cli test --exclude "**/test/commands/{mcp,register-vault,doctor}.test.ts"
+
+  # #11: the dev box is macOS and darwin-arm64/darwin-x64 are shipped DuckDB
+  # native binaries (@duckdb/node-bindings-darwin-arm64 / -darwin-x64 are
+  # pinned in pnpm-lock.yaml alongside the win32/linux ones), yet until now CI
+  # only ever ran on ubuntu-latest and windows-latest — no macOS runner ever
+  # exercised the native module load or the POSIX exec path on Darwin
+  # specifically. This job mirrors the windows-build-test job's PORTABLE
+  # subset (checkout → pnpm/node setup → install → build → unit tests) on a
+  # real macos-latest runner as a REAL gate (no continue-on-error). Same
+  # rationale as the Windows job for keeping this separate rather than a
+  # `strategy.matrix` fold-in: the ubuntu job's remaining steps (org-leak
+  # git-history scan, public-interface guard, NL routing gate, e2e MCP smoke,
+  # CI vault build, the retrieval/analytical/scale evals) need maintainer
+  # vaults, the `sf` CLI, network access, or bash-scripted secret handling —
+  # none of that is reproducible on a hosted runner, matrix or not. Lint is
+  # skipped here too, same reasoning as the Windows job: `pnpm lint` is
+  # OS-independent and already covered by the ubuntu job.
+  #
+  # Unlike Windows, macOS is POSIX — none of the four Windows-only exclusions
+  # documented above apply here, so the full unit-test suite (all packages,
+  # including cli) runs unmodified.
+  macos-build-test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        # No fetch-depth: 0 here — this job doesn't run the org-leak history
+        # scan, so a shallow checkout is fine and faster.
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (all packages)
+        run: pnpm -r build
+
+      - name: Unit tests
+        run: pnpm -r test

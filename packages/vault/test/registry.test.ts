@@ -273,6 +273,102 @@ describe('resolveVault', () => {
   });
 });
 
+describe('R7-W9 — org-kb suffix normalization', () => {
+  // `sfi init`'s default vault directory name is `org-kb` (see
+  // packages/cli/src/commands/init.ts). A registration that named the
+  // PROJECT root (the `org-kb` PARENT) instead of the vault itself
+  // previously resolved to a path with no `meta/manifest.json` — a
+  // pre-existing misconfiguration R6-12's real-vault verification hit and
+  // worked around by registering corrected aliases (R6-HANDOFF.md,
+  // wt2-vizdiff). These tests prove BOTH forms now resolve to the same
+  // working vault, without requiring re-registration.
+
+  it('resolveVault: an alias registered at the org-kb PARENT resolves to {parent}/org-kb', async () => {
+    const root = await makeRoot();
+    try {
+      const projectRoot = join(root, 'my-project');
+      const vaultDir = join(projectRoot, 'org-kb');
+      await seedVault(vaultDir, sampleManifest({ sourceTreeHash: 'sha256:parent-reg' }));
+      // Register the PARENT (missing suffix) — the pre-existing misconfiguration.
+      const registered = await registerVault(root, 'acme-prod', projectRoot);
+      expect(registered.ok).toBe(true);
+      const r = await resolveVault(root, 'acme-prod');
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.value).toBe(vaultDir);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('resolveVault: an alias registered directly at the org-kb dir resolves unchanged', async () => {
+    const root = await makeRoot();
+    try {
+      const projectRoot = join(root, 'my-project-2');
+      const vaultDir = join(projectRoot, 'org-kb');
+      await seedVault(vaultDir, sampleManifest({ sourceTreeHash: 'sha256:direct-reg' }));
+      const registered = await registerVault(root, 'acme-prod', vaultDir);
+      expect(registered.ok).toBe(true);
+      const r = await resolveVault(root, 'acme-prod');
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.value).toBe(vaultDir);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('resolveVault: a path with NEITHER form present is returned unchanged (never fabricated)', async () => {
+    const root = await makeRoot();
+    try {
+      const bogus = join(root, 'never-refreshed-anywhere');
+      await mkdir(bogus, { recursive: true });
+      await registerVault(root, 'nope', bogus);
+      const r = await resolveVault(root, 'nope');
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.value).toBe(bogus);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('getVaultRef: reports real freshness for a parent-registered alias (not a false "never refreshed")', async () => {
+    const root = await makeRoot();
+    try {
+      const projectRoot = join(root, 'my-project-3');
+      const vaultDir = join(projectRoot, 'org-kb');
+      await seedVault(vaultDir, sampleManifest({ sourceTreeHash: 'sha256:getref' }));
+      await registerVault(root, 'acme-prod', projectRoot);
+      const r = await getVaultRef(root, 'acme-prod');
+      expect(r.ok).toBe(true);
+      if (r.ok) {
+        expect(r.value.path).toBe(vaultDir);
+        expect(r.value.sourceTreeHash).toBe('sha256:getref');
+        expect(r.value.lastRefreshedAt).not.toBeNull();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('listRegisteredVaults: reports real freshness for a parent-registered alias', async () => {
+    const root = await makeRoot();
+    try {
+      const projectRoot = join(root, 'my-project-4');
+      const vaultDir = join(projectRoot, 'org-kb');
+      await seedVault(vaultDir, sampleManifest({ sourceTreeHash: 'sha256:listreg' }));
+      await registerVault(root, 'acme-prod', projectRoot);
+      const r = await listRegisteredVaults(root);
+      expect(r.ok).toBe(true);
+      if (r.ok) {
+        const entry = r.value.find((v) => v.alias === 'acme-prod');
+        expect(entry?.path).toBe(vaultDir);
+        expect(entry?.sourceTreeHash).toBe('sha256:listreg');
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('listRegisteredVaults', () => {
   it('returns empty list when registry does not exist', async () => {
     const root = await makeRoot();

@@ -23,6 +23,8 @@ import {
   methodReachabilityInputSchema,
 } from '../../src/tools/method-reachability.js';
 
+import { measureGraphQueries } from './_graph-query-budget.js';
+
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
   refreshedAt: '2026-05-28T09:12:00Z',
@@ -326,5 +328,112 @@ describe('methodReachabilityInputSchema', () => {
     expect(
       methodReachabilityInputSchema.safeParse({ classApiName: '' }).success,
     ).toBe(false);
+  });
+});
+
+// =============================================================================
+// N+1 query budget (finding #6a). `upstreamWalk`'s per-frontier-node
+// `listEdges` AND the per-discovered-node `getNodeById` classifier loop were
+// batched through `listEdgesForNodes` / `listNodesByIds`. The query count must
+// scale with the walk DEPTH, NEVER frontier WIDTH. A golden-output assertion
+// over a two-hop upstream fixture (trigger + REST entry point at different
+// depths, plus a reaching test class) locks the batched result byte-for-byte
+// against the pre-batch output captured before the change.
+// =============================================================================
+describe('methodReachabilityHandler — bounded graph queries (transitive)', () => {
+  const withStore = async <T>(
+    seedData: ExtractionResult,
+    run: (ctx: Context, s: GraphStore) => Promise<T>,
+  ): Promise<T> => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-mr-budget-'));
+    const opened = await openGraph(join(dir, 'mr.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const s = opened.value;
+    const imported = await importExtractionResults(s, [seedData]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const localCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s } as Context;
+    const out = await run(localCtx, s);
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+    return out;
+  };
+
+  // RestTop --calls--> MidCaller --calls--> Target (two-hop upstream), a
+  // Trigger directly into Target (entry point at depth 1), and a TestClass
+  // directly into Target. Exercises multi-hop discovery, entry points at
+  // different depths, and a reaching test class in one shot.
+  const goldenSeed: ExtractionResult = {
+    nodes: [
+      makeNode({ id: 'ApexClass:Target', apiName: 'Target', properties: { isTest: false } }),
+      makeNode({ id: 'ApexClass:MidCaller', apiName: 'MidCaller', properties: { isTest: false } }),
+      makeNode({
+        id: 'ApexClass:RestTop',
+        apiName: 'RestTop',
+        properties: { isRestResource: true, isTest: false },
+      }),
+      makeNode({ id: 'ApexClass:TestClass', apiName: 'TestClass', properties: { isTest: true } }),
+      makeNode({ id: 'ApexTrigger:Trig', type: 'ApexTrigger', apiName: 'Trig', properties: {} }),
+    ],
+    edges: [
+      makeEdge({ fromId: 'ApexClass:MidCaller', toId: 'ApexClass:Target', edgeType: 'callsApex' }),
+      makeEdge({ fromId: 'ApexClass:RestTop', toId: 'ApexClass:MidCaller', edgeType: 'callsApex' }),
+      makeEdge({ fromId: 'ApexTrigger:Trig', toId: 'ApexClass:Target', edgeType: 'callsApex' }),
+      makeEdge({ fromId: 'ApexClass:TestClass', toId: 'ApexClass:Target', edgeType: 'callsApex' }),
+    ],
+  };
+
+  it('golden: the batched upstream reachability is byte-identical to the pre-batch output', async () => {
+    const result = await withStore(goldenSeed, (localCtx) =>
+      methodReachabilityHandler(localCtx, { classApiName: 'ApexClass:Target' }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Captured from the pre-batch handler on this exact fixture.
+    expect(result.value.data).toEqual({
+      classApiName: 'ApexClass:Target',
+      verdict: 'entry-point-reachable',
+      entryPoints: [
+        { id: 'ApexTrigger:Trig', apiName: 'Trig', kind: 'apex-trigger', depth: 1 },
+        { id: 'ApexClass:RestTop', apiName: 'RestTop', kind: 'rest-resource', depth: 2 },
+      ],
+      reachingTestClasses: [{ id: 'ApexClass:TestClass', apiName: 'TestClass', depth: 1 }],
+      soundness: { complete: true, blindSpots: [], staticCoverage: 'full' },
+      disclosure: result.value.data.disclosure,
+    });
+  });
+
+  // Target has `width` direct callers (a wide frontier at depth 1); none are
+  // entry points or tests. Depth is fixed; the query count is bounded by depth
+  // (one listEdgesForNodes per BFS level + one listNodesByIds classifier
+  // resolve + the target/soundness single-id fetches), not the caller count.
+  const seedWideFrontier = (width: number): ExtractionResult => ({
+    nodes: [
+      makeNode({ id: 'ApexClass:Target', apiName: 'Target', properties: { isTest: false } }),
+      ...Array.from({ length: width }, (_u, i) =>
+        makeNode({ id: `ApexClass:Caller${i}`, apiName: `Caller${i}`, properties: { isTest: false } }),
+      ),
+    ],
+    edges: Array.from({ length: width }, (_u, i) =>
+      makeEdge({ fromId: `ApexClass:Caller${i}`, toId: 'ApexClass:Target', edgeType: 'callsApex' }),
+    ),
+  });
+
+  it('query count is depth-bounded, NOT frontier-width-scaled (N=60 vs N=200)', async () => {
+    const measure = (width: number) =>
+      withStore(seedWideFrontier(width), (localCtx, s) =>
+        measureGraphQueries(s, () =>
+          methodReachabilityHandler(localCtx, { classApiName: 'ApexClass:Target' }),
+        ),
+      );
+    const narrow = await measure(60);
+    const wide = await measure(200);
+    expect(narrow.result.ok).toBe(true);
+    expect(wide.result.ok).toBe(true);
+    // Flat: one listEdgesForNodes per BFS depth level + one listNodesByIds
+    // classifier resolve + the single-id target/soundness fetches, NOT one
+    // listEdges/getNodeById per caller. An N+1 would be ~2*width queries.
+    expect(wide.edgeQueries).toBe(narrow.edgeQueries);
+    expect(wide.nodeQueries).toBe(narrow.nodeQueries);
+    expect(wide.edgeQueries + wide.nodeQueries).toBeLessThan(15);
   });
 });

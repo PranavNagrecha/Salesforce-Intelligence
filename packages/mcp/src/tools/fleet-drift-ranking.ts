@@ -10,7 +10,7 @@
  *
  * Three honesty/safety properties make a fleet sweep safe:
  *   - **Per-org consent.** Each vault's `sourceOrg` is gated independently
- *     (`resolveLiveAccess`). A vault whose org has no consent is an honest
+ *     (`probeLiveAccess`). A vault whose org has no consent is an honest
  *     `no-consent` SKIP, never an error and never a silent live call.
  *   - **Shared session budget.** Every staleness query routes through
  *     `runLiveQuery`, so N orgs × 6 queries decrement the same P6 budget that
@@ -38,7 +38,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-import { resolveLiveAccess, STALE_CHECK_TYPES } from './live-plane.js';
+import { probeLiveAccess, STALE_CHECK_TYPES } from './live-plane.js';
 import { liveBudgetStatus, runLiveQuery, type LiveBudgetStatus } from './live-session.js';
 
 export const FLEET_DRIFT_DISCLOSURE =
@@ -174,7 +174,10 @@ export const fleetDriftRankingHandler = async (
       });
       continue;
     }
-    const access = await resolveLiveAccess(sourceOrg, input.liveEnabled);
+    const access = await probeLiveAccess(ctx, {
+      liveEnabled: input.liveEnabled,
+      orgAlias: sourceOrg,
+    });
     if (!access.allowed) {
       skipped.push({
         alias: vault.alias,

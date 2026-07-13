@@ -131,7 +131,7 @@ Defer to another skill when:
   `sfi.test_coverage_for_method`.
 - **The user asks "where is this used in Apex?"** When the question
   is strictly Apex-scoped, `developer-apex-refactor` →
-  `sfi.find_apex_usages` / `sfi.find_code_usages` is the right
+  `sfi.find_code_usages` is the right
   call. `sfi.find_field_anywhere` is the broader sweep across every
   edge type and every node type.
 - **The user asks for a schema dump** ("what fields does Account
@@ -365,10 +365,13 @@ Additional v2.2 disclosures the skill surfaces:
   are silently dropped. If a referrer exists on disk but wasn't
   extracted (managed package, unsupported metadata type), it
   won't surface here.
-- **Cross-corpus consistency.** Apex reads/writes are
-  `confidence: heuristic` (v0.3 scanner); Flow record-ops are
-  `parsed`; layout placements and validation references are
-  `declared`. State the per-bucket confidence when reporting.
+- **Cross-corpus consistency.** Apex reads/writes are predominantly
+  `confidence: parsed` (the default-on Apex AST pass, `source:
+  apex-ast`), dropping to `heuristic` only on the recall scanner's
+  backfill edges (files the AST could not parse, or unresolved
+  patterns); Flow record-ops are `parsed`; layout placements and
+  validation references are `declared`. Confidence is per-edge — state
+  it per bucket, and don't assume Apex means heuristic.
 
 ### v2.9 vocabulary tools — classifier-not-run boundary (verbatim)
 
@@ -502,7 +505,7 @@ and offers three concrete next-step tool calls.
 | Treating a `unknown` v2.9 classification as "the answer is unknown." | `unknown` means the v2.9 classifier didn't run (pre-v2.9 vault) or the inference fell through. The structural trace (writers list, formula declaration, integration tagging) IS the source-of-truth answer the developer needs; surface it. |
 | Trying to disambiguate two concepts that are the same token. | When `conceptA === conceptB` the tool returns identical buckets. The Q150 refusal pattern says: do not fabricate a distinction. Tell the user the two concepts you named are the same. |
 | Treating a `find_field_anywhere` result as a closed list. | The graph cannot see managed-package callers, dynamic SOQL, reflective field access, or LWC `record[fieldName]` dynamic access. Surface the boundary disclosure on every response, especially empty / near-empty ones. |
-| Defaulting to `find_field_anywhere` when the user asks for an Apex-only refactor question. | When the user pins to Apex ("is it safe to rename `processOpp` in Apex?"), the narrower `sfi.find_code_usages` / `sfi.find_apex_usages` in `developer-apex-refactor` is the right fit. `find_field_anywhere` over-reports. |
+| Defaulting to `find_field_anywhere` when the user asks for an Apex-only refactor question. | When the user pins to Apex ("is it safe to rename `processOpp` in Apex?"), the narrower `sfi.find_code_usages` in `developer-apex-refactor` is the right fit. `find_field_anywhere` over-reports. |
 | Treating a `find_hardcoded_values_anywhere` numeric match as a bug. | The numeric category has very high FP rate. Suppress by default; surface only when the user explicitly asks. |
 | Skipping the Q155 vocabulary-is-org-specific disclosure on `disambiguate_concepts`. | The disclosure is the developer's protection against treating a token's industry convention as the answer in this org. Always surface. |
 | Conflating v2.2's `confidence: heuristic` semantic-search ranking with v2.9's `confidence: heuristic` classification confidence. | They're independent axes. v2.2 confidence is about THE MATCH (this field may or may not be the answer); v2.9 confidence is about THE CLASSIFICATION (this field's source-of-truth may or may not be `derived`). Cite each in its own context. |

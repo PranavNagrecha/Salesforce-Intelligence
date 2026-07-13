@@ -18,6 +18,7 @@ import {
 
 import type { Context } from '../../src/server.js';
 import {
+  collectPiiInventoryFields,
   piiInventoryHandler,
   piiInventoryInputSchema,
 } from '../../src/tools/pii-inventory.js';
@@ -373,6 +374,71 @@ describe('piiInventoryHandler', () => {
       }
     }
   });
+
+  // R6-21: format: 'csv' — fields moves to csv; JSON-facing fields stay.
+  it('omits csv unless format is csv (default json)', async () => {
+    const result = await piiInventoryHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.csv).toBeUndefined();
+    expect(result.value.data.fields.length).toBeGreaterThan(0);
+  });
+
+  it('returns fields:[] and a csv with one row per matched field when format is csv', async () => {
+    const result = await piiInventoryHandler(ctx, {
+      classification: 'pii',
+      format: 'csv',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.fields).toEqual([]);
+    const csv = result.value.data.csv;
+    expect(csv).toBeDefined();
+    if (csv === undefined) return;
+    const dataLines = csv.trimEnd().split('\n').filter((l) => !l.startsWith('#'));
+    expect(dataLines[0]).toBe('id,apiName,label,type,classification,category,description,reason');
+    // summary.total for the pii-only filter names how many rows to expect.
+    const summaryResult = await piiInventoryHandler(ctx, { classification: 'pii' });
+    expect(summaryResult.ok).toBe(true);
+    if (!summaryResult.ok) return;
+    expect(dataLines.length - 1).toBe(summaryResult.value.data.summary.total);
+    for (const line of dataLines.slice(1)) {
+      expect(line.split(',')[4]).toBe('pii');
+    }
+  });
+
+  it('embeds the freshness + heuristic-recognizer disclosures as comment lines', async () => {
+    const result = await piiInventoryHandler(ctx, { format: 'csv' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const csv = result.value.data.csv ?? '';
+    expect(csv).toContain('# generatedAt: 2026-05-27T14:33:08Z');
+    expect(csv).toContain('# sourceTreeHash: sha256:fixture');
+    expect(csv).toContain('heuristic');
+  });
+
+  it('every data row is well-formed CSV with exactly 8 columns (RFC 4180 quote-aware parse)', async () => {
+    const result = await piiInventoryHandler(ctx, { format: 'csv' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const csv = result.value.data.csv ?? '';
+    const dataLines = csv.trimEnd().split('\n').filter((l) => !l.startsWith('#'));
+    // Minimal RFC 4180 quote-aware cell counter — mirrors what a real CSV
+    // parser does, unlike a naive `.split(',')` that miscounts quoted commas.
+    const countCells = (line: string): number => {
+      let cells = 1;
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i += 1) {
+        const c = line[i];
+        if (c === '"') inQuotes = !inQuotes;
+        else if (c === ',' && !inQuotes) cells += 1;
+      }
+      return cells;
+    };
+    for (const line of dataLines) {
+      expect(countCells(line)).toBe(8);
+    }
+  });
 });
 
 describe('piiInventoryInputSchema', () => {
@@ -575,5 +641,111 @@ describe('piiInventoryHandler — pagination + byte budget (B25)', () => {
     expect(result.value.data.truncated).toBe(false);
     expect('nextCursor' in result.value.data).toBe(false);
     expect('pageInfo' in result.value.data).toBe(false);
+  });
+
+  // R6-21: format: 'csv' — the byte-trimmed BULK_COUNT (120) page must fit the
+  // csv too, dropping rows tail-first with a truncation comment rather than
+  // overflowing the global guard.
+  it('fits a csv export of the byte-trimmed bulk page under the global guard', async () => {
+    const result = await piiInventoryHandler(bulkCtx, { format: 'csv' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const bytes = Buffer.byteLength(JSON.stringify(result.value), 'utf8');
+    expect(bytes).toBeLessThanOrEqual(GLOBAL_RESPONSE_GUARD_BYTES);
+    expect(result.value.data.fields).toEqual([]);
+    expect(result.value.data.csv).toBeDefined();
+    expect(result.value.data.csv).toContain('# sourceTreeHash:');
+  });
+});
+
+// Perf regression guard: the formula-source PII cross-walk reads each formula
+// field's outgoing `references` edges, and the composer collector returns the
+// full classified set. BOTH must be single-pass — one batched
+// `listEdgesForNodes`, and ONE corpus classification (not one per output page).
+// The former N+1 (one `listEdges` per formula field), multiplied by the
+// per-page re-scan in `collectPiiInventoryFields`, was the biggest residual cost
+// in the >60s org_risk_report timeout.
+describe('pii_inventory — single-pass classification + batched edge lookups (no N+1)', () => {
+  const FORMULA_COUNT = 60;
+  let dir: string;
+  let localStore: GraphStore;
+  let localCtx: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-pii-perf-'));
+    const opened = await openGraph(join(dir, 'perf.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    localStore = opened.value;
+    const sourceId = 'CustomField:Perf__c.SSN__c';
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: 'CustomObject:Perf__c', type: 'CustomObject', apiName: 'Perf__c' }),
+        // Regulated source field (name token → pii) the formula fields derive from.
+        makeNode({
+          id: sourceId,
+          apiName: 'SSN__c',
+          parentId: 'CustomObject:Perf__c',
+          properties: { dataType: 'Text' },
+        }),
+        // Formula fields with a public name/description; each ~2 KB so the OLD
+        // page-walk collector would have byte-trimmed into many pages (and
+        // re-scanned the whole corpus for each). They inherit SSN's pii verdict
+        // via their outgoing `references` edge.
+        ...Array.from({ length: FORMULA_COUNT }, (_unused, i) =>
+          makeNode({
+            id: `CustomField:Perf__c.Calc${i}__c`,
+            apiName: `Calc${i}__c`,
+            parentId: 'CustomObject:Perf__c',
+            properties: {
+              dataType: 'Text',
+              formula: `${'SSN__c'} & ""`,
+              description: `Derived value. ${'x'.repeat(2000)}`,
+            },
+          }),
+        ),
+      ],
+      edges: Array.from({ length: FORMULA_COUNT }, (_unused, i) => ({
+        fromId: `CustomField:Perf__c.Calc${i}__c`,
+        toId: sourceId,
+        edgeType: 'references' as const,
+        confidence: 'declared' as const,
+        source: 'unit-test',
+        properties: {},
+      })),
+    };
+    const imported = await importExtractionResults(localStore, [seed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    localCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: localStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(localStore);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('classifies the corpus once and batches formula-source edge lookups', async () => {
+    const spy = vi.spyOn(localStore.connection, 'runAndReadAll');
+    const result = await collectPiiInventoryFields(localCtx, {});
+    const edgeQueries = spy.mock.calls.filter(([sql]) =>
+      String(sql).includes('FROM edges'),
+    ).length;
+    const customFieldScans = spy.mock.calls.filter(
+      ([sql, params]) =>
+        String(sql).includes('FROM nodes') &&
+        String(sql).includes('type = ?') &&
+        Array.isArray(params) &&
+        params[0] === 'CustomField',
+    ).length;
+    spy.mockRestore();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Every formula field inherits the SSN source's pii classification.
+    expect(result.value.summary.byClassification.pii).toBeGreaterThanOrEqual(
+      FORMULA_COUNT,
+    );
+    // ONE batched references fetch — not one listEdges per formula field.
+    expect(edgeQueries).toBeLessThanOrEqual(2);
+    // ONE corpus scan — not one fetchAllCustomFields per byte-trimmed page.
+    expect(customFieldScans).toBeLessThanOrEqual(2);
   });
 });

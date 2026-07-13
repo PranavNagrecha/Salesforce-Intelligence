@@ -48,7 +48,7 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import { getNodeById, listEdgesForNodes } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -191,22 +191,34 @@ const upstreamWalk = async (
   const visited = new Set<ComponentId>([targetId]);
   for (let depth = 0; depth < maxDepth && frontier.length > 0; depth += 1) {
     const next: ComponentId[] = [];
+    // ONE batched fetch of the WHOLE frontier's incoming coverage edges (both
+    // COVERAGE_EDGE_TYPES at once), replacing the per-frontier-node × per-edge-
+    // type `listEdges` N+1. Each per-node bucket is sorted by the FULL (to_id,
+    // edge_type, from_id, source) order; since to_id is fixed per bucket, that
+    // reduces to (edge_type, from_id, source). COVERAGE_EDGE_TYPES is
+    // edge_type-ASCENDING ('callsApex' < 'dispatchesAsync'), so the bucket lists
+    // all callsApex edges (by from_id, source) THEN all dispatchesAsync edges —
+    // EXACTLY the old `for edgeType { for edge }` visitation order. The test-sink
+    // rule (don't expand through a test node) and the visited-set dedup are thus
+    // reproduced identically. Query count is now one per DEPTH LEVEL, not one per
+    // (frontier node × edge type).
+    const edgeBatch = await listEdgesForNodes(ctx.graph, frontier, {
+      direction: 'in',
+      edgeTypes: COVERAGE_EDGE_TYPES,
+    });
+    if (!edgeBatch.ok) return err({ kind: 'internal', message: edgeBatch.error.message });
     for (const id of frontier) {
-      for (const edgeType of COVERAGE_EDGE_TYPES) {
-        const r = await listEdges(ctx.graph, id, { direction: 'in', edgeType });
-        if (!r.ok) return err({ kind: 'internal', message: r.error.message });
-        for (const edge of r.value) {
-          if (visited.has(edge.fromId)) continue;
-          visited.add(edge.fromId);
-          discovered.set(edge.fromId, depth + 1);
-          // Only non-test relays expand the frontier. A test class is a sink:
-          // record it, but never walk THROUGH it (a test has no real callers).
-          const nodeRes = await loadNode(edge.fromId);
-          if (!nodeRes.ok) return nodeRes;
-          const node = nodeRes.value;
-          if (node !== null && isTestClass(node)) continue;
-          next.push(edge.fromId);
-        }
+      for (const edge of edgeBatch.value.get(id) ?? []) {
+        if (visited.has(edge.fromId)) continue;
+        visited.add(edge.fromId);
+        discovered.set(edge.fromId, depth + 1);
+        // Only non-test relays expand the frontier. A test class is a sink:
+        // record it, but never walk THROUGH it (a test has no real callers).
+        const nodeRes = await loadNode(edge.fromId);
+        if (!nodeRes.ok) return nodeRes;
+        const node = nodeRes.value;
+        if (node !== null && isTestClass(node)) continue;
+        next.push(edge.fromId);
       }
     }
     frontier = next;

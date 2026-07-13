@@ -92,6 +92,12 @@ const LOOKUP_FIELD = 'CustomField:Payment__c.Sample_Connection__c';
 // disclose that (and point to field_access_audit) so the count is explained.
 const FLS_FIELD = 'CustomField:Account.FLS_Only_Field__c';
 const REPORT_USED_FIELD = 'CustomField:Account.Report_Used__c';
+// Finding #36: a field carrying the fold-time capped NAME lists (not just the
+// boolean) — used by 2 reports + 1 dashboard, well under the 50-name cap.
+const REPORT_NAMED_FIELD = 'CustomField:Account.Report_Named__c';
+// Finding #36: a field whose fold-time name list was truncated by the 50-name
+// per-field cap — carries `usedInReportsTruncated` with the true total.
+const REPORT_TRUNCATED_FIELD = 'CustomField:Account.Report_Truncated__c';
 // CR-CAP-02: a ListView that references the TARGET field as a column. The
 // ListView->CustomField `references` edge exists in the graph (heuristic, regex
 // column extraction) but pre-fix field_360 had no branch for it, so the edge was
@@ -193,6 +199,37 @@ const seed: ExtractionResult = {
       label: 'Report Used',
       parentId: 'CustomObject:Account',
       properties: { dataType: 'Text', usedInReport: true },
+    }),
+    // Finding #36: a field carrying the fold-time capped NAME lists — proves
+    // field_360 enumerates WHICH reports/dashboards, not just the boolean.
+    makeNode({
+      id: REPORT_NAMED_FIELD,
+      type: 'CustomField',
+      apiName: 'Report_Named__c',
+      label: 'Report Named',
+      parentId: 'CustomObject:Account',
+      properties: {
+        dataType: 'Text',
+        usedInReport: true,
+        usedInReports: ['Exec/Forecast', 'Sales/Pipeline'],
+        usedInDashboard: true,
+        usedInDashboards: ['Exec/KPIs'],
+      },
+    }),
+    // Finding #36: a field whose fold-time name list was truncated by the
+    // per-field 50-name cap — `usedInReportsTruncated` carries the true total.
+    makeNode({
+      id: REPORT_TRUNCATED_FIELD,
+      type: 'CustomField',
+      apiName: 'Report_Truncated__c',
+      label: 'Report Truncated',
+      parentId: 'CustomObject:Account',
+      properties: {
+        dataType: 'Text',
+        usedInReport: true,
+        usedInReports: Array.from({ length: 50 }, (_, i) => `Bulk/Report${String(i).padStart(3, '0')}`),
+        usedInReportsTruncated: 73,
+      },
     }),
     // CR-CAP-02: a ListView that shows the TARGET field as a column.
     makeNode({
@@ -548,6 +585,43 @@ describe('field360Handler', () => {
         b.includes('report column / filter references are NOT extracted'),
       ),
     ).toBe(false);
+  });
+
+  it('Finding #36 — enumerates the specific report/dashboard names when the fold provides them', async () => {
+    const result = await field360Handler(ctx, { fieldId: REPORT_NAMED_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.value.data;
+    // Structured companion field — the "WHICH reports" answer, not just the boolean.
+    expect(out.reportUsage).toEqual({
+      reportNames: ['Exec/Forecast', 'Sales/Pipeline'],
+      dashboardNames: ['Exec/KPIs'],
+    });
+    // The boundaries prose also names them inline.
+    expect(
+      out.boundaries.some(
+        (b) =>
+          b.includes('IS referenced') &&
+          b.includes('Sales/Pipeline') &&
+          b.includes('Exec/Forecast') &&
+          b.includes('Exec/KPIs'),
+      ),
+    ).toBe(true);
+  });
+
+  it('Finding #36 — discloses truncation beyond the per-field 50-name cap', async () => {
+    const result = await field360Handler(ctx, { fieldId: REPORT_TRUNCATED_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.value.data;
+    expect(out.reportUsage?.reportNames).toHaveLength(50);
+    expect(out.reportUsage?.reportsTruncatedTotal).toBe(73);
+    // Dashboards were never referenced for this field — absent, not fabricated.
+    expect(out.reportUsage?.dashboardNames).toEqual([]);
+    expect(out.reportUsage?.dashboardsTruncatedTotal).toBeUndefined();
+    expect(
+      out.boundaries.some((b) => b.includes('+23 more beyond the 50-name cap')),
+    ).toBe(true);
   });
 
   it('discloses the --with-reports caveat when a field has no folded report/dashboard usage', async () => {

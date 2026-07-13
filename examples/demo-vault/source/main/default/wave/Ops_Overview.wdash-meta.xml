@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<WaveDashboard xmlns="http://soap.sforce.com/2006/04/metadata" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <content xsi:nil="true"/>
+    <application>Verdant_Analytics</application>
+    <masterLabel>Ops Overview</masterLabel>
+    <description>Operational KPIs for solar project pipeline and installation throughput.</description>
+    <dateVersion>1</dateVersion>
+</WaveDashboard>

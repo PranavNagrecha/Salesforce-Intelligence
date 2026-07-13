@@ -39,6 +39,9 @@
  *   - `truncated: true` always indicates that more entries exist than
  *     the cap — callers can re-run with a higher `limit` or fall
  *     through to `sfi.list_components` for the full enumeration.
+ *   - R7-W9: this module's `canonicalJson` carries the same defensive
+ *     `undefined` branch added to `compare-vaults.ts` (R6-12) and
+ *     `compare-object-across-vaults.ts` — see that function's own JSDoc.
  */
 
 import { createHash } from 'node:crypto';
@@ -54,6 +57,7 @@ import type {
 import { err, ok, type Result } from '@sf-intelligence/core';
 import type { GraphStore } from '@sf-intelligence/graph';
 import {
+  listSnapshots,
   loadSnapshot,
   type Snapshot,
   type SnapshotEdge,
@@ -97,24 +101,39 @@ const DIFF_SNAPSHOTS_DEFAULT_LIMIT = 100;
 const CURRENT_LABEL = 'current';
 
 /**
+ * Disclosure for the STEP-2 `summary: true` MODE (folded-in `churn`): the digest
+ * is structural (id/hash), not semantic risk. The full slices ride along in the
+ * same response (`added`/`removed`/`modified`).
+ */
+const SUMMARY_DISCLOSURE =
+  'Summary compares two snapshots by structural id / propertiesHash only — not semantic "risk". The full added / removed / modified slices are in this same response.';
+
+/**
  * Zod schema for the `sfi.diff_snapshots` tool input.
  *
- *   - `fromLabel`: required non-empty string. Must name a persisted
+ *   - `fromLabel`: OPTIONAL non-empty string. Must name a persisted
  *     snapshot under `{vaultRoot}/snapshots/`; missing snapshots
- *     surface as `invalid-query`.
- *   - `toLabel`: required non-empty string. The special value
+ *     surface as `invalid-query`. When BOTH labels are omitted the diff
+ *     auto-defaults to the two most-recent persisted snapshots (STEP-2:
+ *     the folded-in `churn` ergonomic).
+ *   - `toLabel`: OPTIONAL non-empty string. The special value
  *     `'current'` triggers a transient live-state capture; otherwise
  *     same missing-snapshot semantics as `fromLabel`.
  *   - `limit`: optional integer in [1, 500]. Defaults to 100.
+ *   - `summary`: optional (STEP-2, the folded-in `churn` MODE). When
+ *     `true`, the output additionally carries compact `addedCount` /
+ *     `removedCount` / `modifiedCount` scalars + a `topChurn` top-25
+ *     mixed id list + a `disclosure` — the churn shape.
  */
 export const diffSnapshotsInputSchema = z.object({
-  fromLabel: z.string().min(1),
-  toLabel: z.string().min(1),
+  fromLabel: z.string().min(1).optional(),
+  toLabel: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(DIFF_SNAPSHOTS_MAX_LIMIT).optional(),
   // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
   // truncated page's `nextCursor`; carries the resume offset + which list
   // (added | removed | modified) it advances. Omit = today's behavior.
   cursor: z.string().min(1).optional(),
+  summary: z.boolean().optional(),
 });
 
 /** Parsed input shape, inferred from `diffSnapshotsInputSchema`. */
@@ -160,6 +179,25 @@ export interface DiffSnapshotsOutput {
   readonly designatedList?: string;
   /** The two non-designated lists, disclosed with their full counts; truncation only. */
   readonly otherSections?: readonly SectionDisclosure[];
+  /**
+   * STEP-2 `summary: true` MODE (folded-in `churn`): compact top-level counts
+   * that mirror `summary.*` so a churn consumer reads `addedCount` directly.
+   * Present ONLY when `summary: true`.
+   */
+  readonly addedCount?: number;
+  readonly removedCount?: number;
+  readonly modifiedCount?: number;
+  /**
+   * STEP-2 `summary: true` MODE: the top-25 CHANGED ids across all three lists
+   * (added | removed | modified), sorted by id ASC — the compact churn digest.
+   * Present ONLY when `summary: true`.
+   */
+  readonly topChurn?: readonly {
+    readonly id: string;
+    readonly change: 'added' | 'removed' | 'modified';
+  }[];
+  /** STEP-2 `summary: true` MODE: the churn disclosure. Present ONLY when `summary: true`. */
+  readonly disclosure?: string;
 }
 
 /** Compact projection from a `SnapshotNode` to the response shape. */
@@ -180,8 +218,26 @@ const compareComponents = (a: DiffSnapshotComponent, b: DiffSnapshotComponent): 
  * graph layer's `canonicalJson` so per-row hashes from a live capture
  * line up character-for-character with the hashes stored in any
  * persisted snapshot of equivalent state.
+ *
+ * R7-W9 crash-class sweep: `compare-vaults.ts`'s identical implementation
+ * crashed for real under R6-12 — `JSON.stringify(undefined)` returns the JS
+ * value `undefined`, NOT the string `"undefined"`, so the primitive
+ * fallthrough silently returned a non-string, and that sibling's
+ * `boundValue` helper threw calling `.length` on it. This file's two call
+ * sites (`hashRecord`, below, invoked only on fully-populated inline object
+ * literals in `captureLiveSnapshot`) have no currently-reachable path that
+ * passes `canonicalJson` an `undefined` value — `JSON.parse` can never
+ * produce `undefined`, and every hash-input record here is built from
+ * required fields, not a key-union diff like `compare-vaults.ts`'s
+ * `collectDrift`. The explicit `undefined` branch is applied anyway, for
+ * consistency with the other two (patched) implementations of this exact
+ * function shape and to close the landmine for any future caller. Exported
+ * so the branch can be unit-tested directly (see
+ * `diff-snapshots.test.ts` — there is no handler-level path that reproduces
+ * an `undefined` input to exercise here).
  */
-const canonicalJson = (value: unknown): string => {
+export const canonicalJson = (value: unknown): string => {
+  if (value === undefined) return '\0undefined\0';
   if (value === null || typeof value !== 'object') {
     return JSON.stringify(value);
   }
@@ -359,9 +415,35 @@ export const diffSnapshotsHandler = async (
   ctx: Context,
   input: DiffSnapshotsInput,
 ): Promise<Result<McpResponse<DiffSnapshotsOutput>, McpError>> => {
-  const fromResult = await resolveSnapshot(ctx, input.fromLabel);
+  // STEP-2 (folded-in churn ergonomic): when a label is omitted, default it to
+  // the most-recent (`toLabel`) / second-most-recent (`fromLabel`) PERSISTED
+  // snapshot. Only touch the snapshot list when a default is actually needed, so
+  // an explicit two-label call is unchanged.
+  let fromLabel = input.fromLabel;
+  let toLabel = input.toLabel;
+  if (fromLabel === undefined || toLabel === undefined) {
+    const listed = await listSnapshots(ctx.vaultRoot);
+    if (!listed.ok) {
+      return err({ kind: 'internal', message: listed.error.message });
+    }
+    if (listed.value.length < 2) {
+      return err({
+        kind: 'invalid-query',
+        message:
+          'Need at least two persisted snapshots to diff without explicit labels. ' +
+          'Run `sfi snapshot create --label <name>` after refreshes, or pass fromLabel + toLabel.',
+      });
+    }
+    const byTime = [...listed.value].sort((a, b) =>
+      a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0,
+    );
+    fromLabel = fromLabel ?? byTime[byTime.length - 2]!.label;
+    toLabel = toLabel ?? byTime[byTime.length - 1]!.label;
+  }
+
+  const fromResult = await resolveSnapshot(ctx, fromLabel);
   if (!fromResult.ok) return fromResult;
-  const toResult = await resolveSnapshot(ctx, input.toLabel);
+  const toResult = await resolveSnapshot(ctx, toLabel);
   if (!toResult.ok) return toResult;
 
   const fromSnapshot = fromResult.value;
@@ -411,7 +493,9 @@ export const diffSnapshotsHandler = async (
   // and disclose the others honestly. On resume the handler feeds token.listId
   // back as designatedListId (paginateSection does NOT cross-check — B0 note).
   const TOOL = 'sfi.diff_snapshots';
-  const fingerprint = argsFingerprint({ fromLabel: input.fromLabel, toLabel: input.toLabel });
+  // Bind the cursor to the RESOLVED labels (post-default) so a defaulted-latest-two
+  // page resumes against the same pair.
+  const fingerprint = argsFingerprint({ fromLabel, toLabel });
   const sections: readonly PageableSection<DiffSnapshotComponent>[] = [
     { listId: 'added', items: added },
     { listId: 'removed', items: removed },
@@ -454,14 +538,34 @@ export const diffSnapshotsHandler = async (
   const pageFor = (listId: string, full: readonly DiffSnapshotComponent[]): readonly DiffSnapshotComponent[] =>
     listId === designatedListId ? paged.items : full.slice(0, limit);
 
+  // STEP-2 `summary: true` MODE (folded-in churn): the compact top-level counts +
+  // a top-25 mixed CHANGED-id digest across all three lists + the churn
+  // disclosure. Added additively; a non-summary call is byte-unchanged.
+  const summaryMode =
+    input.summary === true
+      ? {
+          addedCount: added.length,
+          removedCount: removed.length,
+          modifiedCount: modified.length,
+          topChurn: [
+            ...added.map((c) => ({ id: c.id, change: 'added' as const })),
+            ...removed.map((c) => ({ id: c.id, change: 'removed' as const })),
+            ...modified.map((c) => ({ id: c.id, change: 'modified' as const })),
+          ]
+            .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+            .slice(0, 25),
+          disclosure: SUMMARY_DISCLOSURE,
+        }
+      : {};
+
   // The slice strategy: per-bucket trim proportional to the limit,
   // but never trim below the actual entry counts. The simple shape
   // — slice each bucket independently to `limit` — keeps each
   // category's signal intact even when one category dominates.
   return ok({
     data: {
-      fromLabel: input.fromLabel,
-      toLabel: input.toLabel,
+      fromLabel,
+      toLabel,
       added: pageFor('added', added),
       removed: pageFor('removed', removed),
       modified: pageFor('modified', modified),
@@ -479,6 +583,7 @@ export const diffSnapshotsHandler = async (
             otherSections: paged.otherSections,
           }
         : {}),
+      ...summaryMode,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

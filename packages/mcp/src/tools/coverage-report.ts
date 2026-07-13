@@ -27,7 +27,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-import { resolveLiveAccess } from './live-plane.js';
+import { probeLiveAccess } from './live-plane.js';
 import { ASSIGNMENT_DATA_LIVE_TOOLS } from './vault-assignment-disclosure.js';
 
 /** CR-CAP-20 — cap on the ranked uncovered-families list. */
@@ -132,7 +132,7 @@ export const buildAssignmentDataCoverage = async (
   } catch {
     // A missing/corrupt facts table must not fail the coverage report.
   }
-  const liveConsent = (await resolveLiveAccess(ctx.manifest.sourceOrg)).allowed;
+  const liveConsent = (await probeLiveAccess(ctx)).allowed;
   return {
     vaultModeled: false,
     reason: ASSIGNMENT_DATA_NOT_A_GAP_REASON,

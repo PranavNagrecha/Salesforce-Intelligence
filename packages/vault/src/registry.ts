@@ -486,11 +486,70 @@ export const registerVault = async (
 };
 
 /**
+ * Vault-directory name `sfi init` creates by default (see
+ * `packages/cli/src/commands/init.ts`'s `DEFAULT_VAULT_ROOT`). A vault
+ * directly holds `meta/manifest.json` and `graph/graph.duckdb` — see
+ * {@link normalizeVaultRootPath} for why a registered PARENT of one needs
+ * this name at resolution time.
+ */
+const VAULT_DIR_NAME = 'org-kb' as const;
+
+/**
+ * R7-W9 — normalize a registered vault path so an alias resolves whether
+ * or not the path the caller registered included the `org-kb` suffix.
+ *
+ * `vaultPaths()` (in `layout.ts`) expects its input to be the vault ROOT
+ * directly — the directory holding `meta/manifest.json` and
+ * `graph/graph.duckdb` — but `sfi init`'s default vault directory name is
+ * `org-kb` sitting INSIDE a project checkout, so a user (or script) can
+ * naturally register either:
+ *
+ *   - the project root (e.g. `/repo`, the `org-kb` PARENT) — forgetting
+ *     the suffix, OR
+ *   - `/repo/org-kb` directly (the actual vault root) — the form every
+ *     consumer (`openVaultReadOnly`, `loadManifest`) requires.
+ *
+ * A parent-only registration previously resolved to a path with no
+ * `meta/manifest.json`, which downstream silently read as "never
+ * refreshed" rather than "wrong path" (see R6-12's real-vault
+ * verification, which discovered exactly this on a live registry and
+ * worked around it by registering CORRECTED aliases rather than fixing
+ * resolution — R6-HANDOFF.md, `wt2-vizdiff`).
+ *
+ * Both forms now resolve to the same working vault root:
+ *
+ *   - `rawPath` already IS the vault root (holds `meta/manifest.json`
+ *     directly) → returned unchanged.
+ *   - `rawPath` is the PARENT of an `org-kb/` vault (`rawPath/org-kb`
+ *     holds `meta/manifest.json`) → `rawPath/org-kb` is returned instead.
+ *   - neither exists (a genuinely fresh/unrefreshed vault, or a bogus
+ *     path) → `rawPath` is returned UNCHANGED; this normalization never
+ *     fabricates a path that isn't there — `loadManifest` /
+ *     `openVaultReadOnly` already disclose "manifest missing" / open
+ *     failure honestly for that case.
+ *
+ * Applied at every read site (`resolveVault`, `getVaultRef`,
+ * `listRegisteredVaults`) rather than only at `registerVault`, so it also
+ * repairs entries a caller already registered without the suffix —
+ * re-registration is not required.
+ */
+const normalizeVaultRootPath = (rawPath: string): string => {
+  if (existsSync(join(rawPath, 'meta', 'manifest.json'))) return rawPath;
+  const withOrgKb = join(rawPath, VAULT_DIR_NAME);
+  if (existsSync(join(withOrgKb, 'meta', 'manifest.json'))) return withOrgKb;
+  return rawPath;
+};
+
+/**
  * Resolve an alias to its absolute vault path. The companion lookup
  * primitive for the cross-vault MCP tools. Returns
  * `err({kind: 'alias-not-found'})` when the alias is not registered,
  * carrying the verbatim pointer the skill surfaces (`sfi register-vault
  * <alias> <path>`).
+ *
+ * R7-W9: the returned path is normalized via {@link normalizeVaultRootPath}
+ * so a registration that named the `org-kb` PARENT directory instead of the
+ * vault itself still resolves to a working vault root.
  *
  * @example
  *   const r = await resolveVault('/home/me/sf-intelligence-vaults', 'acme-prod');
@@ -518,7 +577,7 @@ export const resolveVault = async (
       message: `vault alias '${alias}' is not registered. Run \`sfi register-vault ${alias} <path>\` first, or \`sfi list-vaults\` to see what's registered.`,
     });
   }
-  return ok(entry.path);
+  return ok(normalizeVaultRootPath(entry.path));
 };
 
 /**
@@ -529,6 +588,10 @@ export const resolveVault = async (
  * fabricating a timestamp.
  *
  * Sorted by alias ASC for stable rendering.
+ *
+ * R7-W9: each entry's `path` is normalized via {@link normalizeVaultRootPath}
+ * before the manifest read, so an `org-kb`-parent registration reports real
+ * freshness data instead of a false "never refreshed" (`null` fields).
  *
  * @example
  *   const r = await listRegisteredVaults('/home/me/sf-intelligence-vaults');
@@ -549,7 +612,8 @@ export const listRegisteredVaults = async (
   );
   const out: VaultRef[] = [];
   for (const [alias, entry] of entries) {
-    const manifestResult = await loadManifest(entry.path);
+    const resolvedPath = normalizeVaultRootPath(entry.path);
+    const manifestResult = await loadManifest(resolvedPath);
     let lastRefreshedAt: string | null = null;
     let sourceTreeHash: string | null = null;
     let componentCount: number | null = null;
@@ -564,7 +628,7 @@ export const listRegisteredVaults = async (
     }
     out.push({
       alias,
-      path: entry.path,
+      path: resolvedPath,
       registeredAt: entry.registeredAt,
       lastRefreshedAt,
       sourceTreeHash,
@@ -580,6 +644,9 @@ export const listRegisteredVaults = async (
  * walker uses. The MCP cross-vault tools use this to populate the
  * `vaultA: VaultRef` / `vaultB: VaultRef` fields in their responses
  * — callers see the freshness skew explicitly.
+ *
+ * R7-W9: `path` is normalized via {@link normalizeVaultRootPath}, matching
+ * `resolveVault` / `listRegisteredVaults` — see that helper's JSDoc.
  */
 export const getVaultRef = async (
   rootDir: string,
@@ -602,7 +669,8 @@ export const getVaultRef = async (
       message: `vault alias '${alias}' is not registered. Run \`sfi register-vault ${alias} <path>\` first, or \`sfi list-vaults\` to see what's registered.`,
     });
   }
-  const manifestResult = await loadManifest(entry.path);
+  const resolvedPath = normalizeVaultRootPath(entry.path);
+  const manifestResult = await loadManifest(resolvedPath);
   let lastRefreshedAt: string | null = null;
   let sourceTreeHash: string | null = null;
   let componentCount: number | null = null;
@@ -617,7 +685,7 @@ export const getVaultRef = async (
   }
   return ok({
     alias,
-    path: entry.path,
+    path: resolvedPath,
     registeredAt: entry.registeredAt,
     lastRefreshedAt,
     sourceTreeHash,

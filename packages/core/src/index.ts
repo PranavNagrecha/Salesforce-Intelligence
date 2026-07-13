@@ -26,10 +26,17 @@ export {
 } from './exec-helper.js';
 
 export {
+  buildVersionCheckCounterPayload,
   checkForUpdate,
   compareVersions,
   formatUpdateNotice,
   getStateDir,
+  isVersionCheckCounterEnabled,
+  maybePingVersionCheckCounter,
+  versionCheckCounterBucket,
+  type CheckForUpdateOptions,
   type LatestVersionFetcher,
   type UpdateCheckResult,
+  type VersionCheckCounterPayload,
+  type VersionCheckCounterPoster,
 } from './update-notifier.js';

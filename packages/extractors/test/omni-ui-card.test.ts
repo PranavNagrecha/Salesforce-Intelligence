@@ -226,7 +226,7 @@ describe('extractOmniUiCard', () => {
     //      wraps a DataRaptor load.
     // These tests are fixture-free (plain `it`) so they run in the
     // published product copy too. Real-world shapes are taken verbatim
-    // from the mass.gov recon (openPdfPOC_Developer_2 ->
+    // from a real state-agency org recon (openPdfPOC_Developer_2 ->
     // IEEGetDocContentVersion via dataSource; IEEClientSearchResultChildFC
     // _Developer_7 -> IEEUpdateContactInfoforMA21 via a DataAction).
 

@@ -160,6 +160,8 @@ A few cues to break ties:
 | **Naming / convention** | `sfi.get_naming_convention_report` (with `scope`) | none — if the report is empty, say so |
 | **Apex source** | `sfi.search_apex_source` (with `regex` if needed) | `sfi.get_component` on each hit's containing class for context |
 | **Flow metadata** | `sfi.search_flow_metadata` | `sfi.get_component` on each hit's containing Flow |
+| **Error message (a pasted save error / flow-fault email / Apex stack trace)** | `sfi.explain_error` (pass `errorText`; add `object` when known) — decodes it to the validation rule / flow / trigger / duplicate rule that produced it | `sfi.what_happens_on_save` on the object when `explain_error` returns `none` |
+| **Apex debug log / governor-limit exception (a pasted debug log, `System.LimitException`, or Apex stack trace)** | `sfi.explain_debug_log` (pass `logText`; add `object` when known) — decodes it to the Apex class/trigger/flow that ran and, for a `LimitException`, cross-references `sfi.governor_limit_risks` for the likely SOQL/DML-in-loop source | `sfi.governor_limit_risks` / `sfi.call_graph` on a resolved class when it returns `none` |
 | **Manifest / health** | `sfi.get_manifest` for the data; `sfi.health_check` for the diagnosis | none |
 
 **Before any primary call**, confirm vault freshness. The
@@ -280,7 +282,7 @@ surface freshness:
 | Question shape | Tool |
 |---|---|
 | "How has the org grown?" / component counts over time | `sfi.trend` (needs persisted `sfi snapshot create` after refreshes) |
-| "What changed between last week and now?" | `sfi.churn` (two snapshot labels; defaults to the two newest) or `sfi.diff_snapshots` for the full slice |
+| "What changed between last week and now?" | `sfi.diff_snapshots` — omit labels to auto-diff the two newest snapshots; add `summary: true` for the compact churn digest, or read the full added/removed/modified slices |
 | "What changed since date X?" / "who modified this?" | `sfi.changed_since` with ISO `since`; `sfi.last_modified` for one component |
 
 If no snapshots exist, say so and offer `sfi snapshot create --label <name>` after
@@ -297,7 +299,7 @@ Refuse honestly. Offer the partial answer you *can* give. Examples:
 | "Which Flow branch runs for this record?" | `sfi.explain_flow` lists structure; it does not evaluate runtime record state. |
 | "If I rename this field, what breaks?" | `sfi.get_impact`, `sfi.safe_to_delete_field` — check `sfi.coverage_report` first; cite `coverageCaveat` if present. |
 | "How many Accounts have Industry='Tech'?" | Opt-in `sfi.live_count` when enabled; otherwise `sf data query`. Never infer counts from the vault. |
-| "Show me the latest changes to this field." | `sfi.last_modified`, `sfi.changed_since`, or `sfi.churn` / `sfi.diff_snapshots` when snapshots exist. |
+| "Show me the latest changes to this field." | `sfi.last_modified`, `sfi.changed_since`, or `sfi.diff_snapshots` when snapshots exist. |
 | "Which EmailTemplate does this flow send?" | Grep Flow XML or `sfi.search_flow_metadata`; cite template id from metadata if extracted. |
 
 Pattern: name the boundary (offline vs live, static vs runtime, coverage gap),
@@ -361,7 +363,7 @@ Before sending a response, confirm:
       instead of answering.
 - [ ] For destructive or absence-based answers, I checked coverage and
       surfaced any `coverageCaveat` before the verdict.
-- [ ] For change-over-time questions, I used `sfi.trend` / `sfi.churn` /
+- [ ] For change-over-time questions, I used `sfi.trend` / `sfi.diff_snapshots` /
       `sfi.changed_since` (or named the snapshot prerequisite) instead of
       inventing history.
 - [ ] I did not blend vault data with generic Salesforce memory. Every

@@ -1,0 +1,160 @@
+# Pre-deploy PR gate — TEMPLATE (Finding #37).
+#
+# Copy this file to `.github/workflows/review-change.yml` in YOUR Salesforce
+# org repo to turn `sfi review-change` into a PR-native distribution channel:
+# every pull request gets (a) a SARIF report uploaded to GitHub code scanning
+# (findings show up inline on the "Files changed" tab and in the Security
+# tab) and (b) a compact markdown summary posted as a PR comment — both from
+# ONE offline analysis, with the SAME 0/1/2 exit-code contract as running
+# `sfi review-change` at a terminal.
+#
+# It lives under docs/ (not .github/workflows/) on purpose, same as
+# nightly-sast.example.yml beside it: it needs a pre-built vault this repo's
+# own CI does not have, and would fail if it ran here unmodified.
+#
+# ---------------------------------------------------------------------------
+# HARD GUARANTEE: this job NEVER connects to a Salesforce org.
+# ---------------------------------------------------------------------------
+# It never runs `sfi refresh` and never invokes the `sf` CLI. The ONLY thing
+# it does with a vault is READ it (`sfi review-change`, a pure graph query).
+# That means a vault has to already exist, fully built (source AND the
+# `graph/graph.duckdb` DuckDB file `sfi refresh` produces), before this job
+# starts. Two supported ways to get one onto the runner — pick ONE:
+#
+#   OPTION A — cached artifact (recommended default, used below).
+#     A SEPARATE, trusted job (scheduled, or triggered on merge to your
+#     default branch) that DOES have org access runs `sfi refresh` and
+#     uploads the resulting `org-kb/` directory as a build artifact (or a
+#     release asset, or an object-storage upload — anything the PR-gate job
+#     can read without org credentials). This job downloads that artifact.
+#     Freshness = however often the trusted job runs; `sfi review-change`'s
+#     own disclosure always names the vault's last-refresh timestamp, so a
+#     stale vault is visible in the report, never silently trusted.
+#
+#   OPTION B — `sfi vault git` clone.
+#     If the vault has git history enabled (`sfi vault git enable` — see
+#     packages/cli/src/commands/vault-git.ts), `source/`, `components/`,
+#     `meta/manifest.json`, and `meta/history.jsonl` are committed on every
+#     refresh whose source tree changed. Push that history to a git remote
+#     the PR-gate runner can read (a PRIVATE repo distinct from your org's
+#     source-code repo — a deploy key or a fine-grained PAT with read-only
+#     access), then `git clone` it here.
+#     CAVEAT: `sfi vault git enable`'s generated `.gitignore` excludes
+#     `graph/` (it is rebuildable, so committing a binary DuckDB file on
+#     every refresh is wasteful) — a plain clone gives you source but NOT
+#     the graph `sfi review-change` needs. Do NOT rebuild it here with
+#     `sfi refresh --no-pull`: even with `--no-pull`, refresh still attempts
+#     a best-effort standard-object `sf sobject describe` call (FLD-05 —
+#     see refresh.ts), which needs the `sf` CLI to resolve a target org and
+#     is exactly the org-touching code path this job must never reach, even
+#     as a non-fatal best-effort attempt. Instead, have the SAME trusted job
+#     that pushes the vault-git history also cache `graph/` separately
+#     (`actions/cache`, keyed on the vault repo's commit sha) and restore it
+#     alongside the clone here — see the commented block below.
+#
+# Either option keeps this job's Salesforce CLI footprint at exactly zero:
+# no `sf` binary, no org alias, no auth secret.
+#
+# Prerequisites:
+#   - A vault made available per Option A or B above.
+#   - Repo permissions: `security-events: write` (SARIF upload),
+#     `pull-requests: write` (posting the PR comment via `gh`).
+#   - This example checks out with `fetch-depth: 0` so `--diff
+#     origin/<base>` can resolve; a shallower checkout works too if you
+#     fetch just the base ref instead.
+#
+# Fork PRs: `pull_request` (used below, not `pull_request_target`) never
+# executes anything from the PR head — it only reads `git diff --name-status`
+# output and a local vault — but on a fork PR the default `GITHUB_TOKEN` is
+# read-only, so the `gh pr comment` step below will just no-op with a
+# permission error; the SARIF upload still works. Switch to
+# `pull_request_target` only if you need PR comments from forks too, and
+# note that trigger runs with your BASE branch's workflow file by default —
+# review GitHub's docs on the risks before widening this job's permissions.
+
+name: review-change-pr-gate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write # required for github/codeql-action/upload-sarif
+  pull-requests: write   # required for `gh pr comment`
+
+jobs:
+  review-change:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so `--diff origin/${{ github.base_ref }}` resolves
+
+      # --- Option A: download a pre-built vault artifact (see header comment) ---
+      - name: Download the org-kb vault artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: org-kb-vault
+          path: org-kb
+          # `run-id`/`github-token` here if the vault was built in a
+          # DIFFERENT workflow run than this one (cross-workflow artifact
+          # download) — omit for a same-run producer/consumer setup.
+
+      # --- Option B (alternative to Option A above — pick ONE, not both) ---
+      # - name: Clone the vault-git history (source + manifest, no graph/)
+      #   run: |
+      #     git clone --depth 1 "${{ secrets.VAULT_GIT_URL }}" org-kb
+      # - name: Restore the cached graph/ (built by the same trusted job that pushed vault-git)
+      #   uses: actions/cache/restore@v4
+      #   with:
+      #     path: org-kb/graph
+      #     key: org-kb-graph-${{ <vault-repo-commit-sha-here> }}
+      #     fail-on-cache-miss: true # no fallback rebuild here — see the header caveat
+
+      - name: sfi review-change (SARIF + PR-comment markdown)
+        id: review-change
+        uses: PranavNagrecha/Salesforce-Intelligence/.github/actions/review-change@main
+        # Pin to a released tag instead of @main for a stable, reviewable
+        # dependency, e.g. @v0.2.0 — see the repo's release list. You can
+        # also vendor this action locally (copy
+        # .github/actions/review-change/action.yml into your own repo and
+        # reference it as `uses: ./.github/actions/review-change`) if you
+        # would rather not depend on a cross-repo action at all.
+        with:
+          vault-path: org-kb
+          diff-base: origin/${{ github.base_ref }}
+          sarif-path: review-change.sarif.json
+          markdown-path: review-change-comment.md
+          fail-on-blocking: 'false' # let the two steps below run first; we gate explicitly at the end
+
+      # `exit-code != '2'` excludes a usage/environment error (bad vault path,
+      # unreadable manifest, …), where sfi review-change wrote nothing useful
+      # to either output file — nothing worth uploading/posting in that case.
+      - name: Upload SARIF to code scanning
+        if: always() && steps.review-change.outputs.exit-code != '2' && steps.review-change.outputs.sarif-path != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ steps.review-change.outputs.sarif-path }}
+          category: sfi-review-change
+
+      - name: Post the PR-comment summary
+        if: always() && steps.review-change.outputs.exit-code != '2' && steps.review-change.outputs.markdown-path != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --body-file "${{ steps.review-change.outputs.markdown-path }}"
+
+      - name: Gate on the review verdict
+        if: always()
+        run: |
+          echo "sfi review-change exit code: ${{ steps.review-change.outputs.exit-code }}"
+          if [ "${{ steps.review-change.outputs.exit-code }}" = "1" ]; then
+            echo "::error::Blocking change(s) found — see the PR comment / code scanning alerts."
+            exit 1
+          fi
+          if [ "${{ steps.review-change.outputs.exit-code }}" = "2" ]; then
+            echo "::error::sfi review-change usage/environment error — see the action log above."
+            exit 2
+          fi
