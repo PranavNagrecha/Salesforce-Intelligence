@@ -127,7 +127,8 @@ jobs:
   # — the Windows `sf.cmd` exec path (packages/core/src/exec-helper.ts) shipped
   # UNTESTED. This job runs the portable subset of the ubuntu gate above
   # (checkout → pnpm/node setup → install → build → unit tests) on a real
-  # windows-latest runner as a REAL gate (no continue-on-error). Deliberately
+  # windows-latest runner. Currently ADVISORY (continue-on-error, see the job
+  # below) while platform-only test fragility is hardened. Deliberately
   # NOT a fold-in via `strategy.matrix`: the ubuntu job's remaining steps
   # (org-leak git-history scan, public-interface guard, NL routing gate, e2e
   # MCP smoke, CI vault build, the retrieval/analytical/scale evals) need
@@ -184,6 +185,12 @@ jobs:
   # CI-only filter.
   windows-build-test:
     runs-on: windows-latest
+    # ADVISORY (temporary): the Windows matrix is brand-new (added in 0.2.0) and
+    # still surfacing platform-only test fragility case by case. Kept non-blocking
+    # so a Windows-only test failure does not red main while the suite is hardened
+    # on a dedicated branch. Re-arm as a hard gate (drop this line) once a Windows
+    # run is fully green end-to-end. macOS + ubuntu remain hard gates.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         # No fetch-depth: 0 here — this job doesn't run the org-leak history

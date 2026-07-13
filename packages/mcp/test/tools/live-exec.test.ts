@@ -40,7 +40,10 @@ describe('nodeExecFile — un-timed live-plane sf exec backstop (RV3 / H8)', () 
   // after the grace, so a wedged `sf` subtree cannot outlive the timeout. The
   // native execFile timeout sends ONE SIGTERM and never escalates, so such a
   // child runs forever and the promise never settles.
-  it('FAIL-BEFORE/PASS-AFTER: escalates to SIGKILL when a child ignores SIGTERM', async () => {
+  // POSIX-only: spawns a real child that ignores SIGTERM and asserts the grace
+  // timer escalates to SIGKILL. Windows has no such child-signal semantics
+  // (node reports 'SIGTERM'), so skip on win32.
+  it.skipIf(process.platform === 'win32')('FAIL-BEFORE/PASS-AFTER: escalates to SIGKILL when a child ignores SIGTERM', async () => {
     process.env['SFI_SF_EXEC_TIMEOUT_MS'] = '200';
     process.env['SFI_SF_EXEC_KILL_GRACE_MS'] = '300';
     vi.resetModules();
