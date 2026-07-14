@@ -1311,24 +1311,44 @@ const buildBeforeSaveFieldAssignmentEdges = (
   }
   if (writes.length === 0 && skippedNonDirect === 0) return [];
 
-  // Trigger-context gating.
+  // Trigger-context gating. In a RecordBeforeSave flow an <assignments> write
+  // to $Record.<Field> persists directly (confidence: declared). In an
+  // after-save / scheduled / before-delete record-triggered flow the same
+  // in-memory assignment persists ONLY when the flow ALSO runs an explicit
+  // whole-record Update Records on $Record downstream — the precondition the
+  // pre-fix code named in its own warning but never checked, so it silently
+  // dropped every real after-save $Record field write. When that persisting
+  // update element exists we emit the field writes at HEURISTIC confidence
+  // (persistence is inferred from the element's presence, not proven per
+  // execution path); when it does not, we still suppress and disclose.
+  let writeConfidence: Edge['confidence'] = 'declared';
   if (startProps.triggerType !== BEFORE_SAVE_TRIGGER_TYPE) {
-    // A record-triggered (after-save / before-delete) flow: an in-memory
-    // $Record assignment does NOT persist. Disclose the skipped count; emit
-    // nothing. (Non-record-triggered flows have no $Record — nothing to say.)
     if (
-      startProps.triggerType !== null &&
-      RECORD_TRIGGER_TYPES.has(startProps.triggerType)
+      startProps.triggerType === null ||
+      !RECORD_TRIGGER_TYPES.has(startProps.triggerType)
     ) {
+      // Not record-triggered → there is no $Record to persist; nothing to say.
+      return [];
+    }
+    const persistsToTriggerRecord = toArray(rootObj['recordUpdates']).some(
+      (raw) => {
+        const upd = asRecord(raw);
+        const ref =
+          upd === null ? null : toNonEmptyString(upd['inputReference']);
+        return ref === '$Record' || ref === '$Record__Prior';
+      },
+    );
+    if (!persistsToTriggerRecord) {
       warnings.push(
         `${writes.length + skippedNonDirect} <assignments> to $Record field(s) in a ${startProps.triggerType} flow are in-memory only and do not persist without an explicit Update Records on $Record; no writesTo edge emitted`,
       );
+      return [];
     }
-    return [];
+    writeConfidence = 'heuristic';
   }
   if (startProps.triggerObject === null) {
     warnings.push(
-      `<assignments> set $Record field(s) in a before-save flow but <start> has no <object>; trigger object unknown, no field writesTo edge emitted`,
+      `<assignments> set $Record field(s) in a record-triggered flow but <start> has no <object>; trigger object unknown, no field writesTo edge emitted`,
     );
     return [];
   }
@@ -1363,7 +1383,7 @@ const buildBeforeSaveFieldAssignmentEdges = (
       fromId: flowId,
       toId: `CustomField:${triggerObject}.${w.field}`,
       edgeType: 'writesTo',
-      confidence: 'declared',
+      confidence: writeConfidence,
       source: EDGE_SOURCE,
       properties,
     });
@@ -1438,6 +1458,24 @@ const parseFlowConditionTriplet = (raw: unknown): CriteriaItem | null => {
  * Source order is preserved so the synthetic-id indices are stable
  * across extraction runs.
  */
+/**
+ * Compose the human-readable `sourceName` for a Flow decision's condition
+ * source from the decision element `<name>` and the matched rule `<name>`.
+ * Renders `Decision (Rule)` when both are present, the non-null one alone
+ * when only one is, and `null` when neither is — in which case explain_flow
+ * falls back to the synthetic `condition-N` handle. Both names come straight
+ * from the Flow XML (`declared`); no identifier is fabricated.
+ */
+const buildFlowDecisionSourceName = (
+  decisionName: string | null,
+  ruleName: string | null,
+): string | null => {
+  if (decisionName !== null && ruleName !== null) {
+    return `${decisionName} (${ruleName})`;
+  }
+  return decisionName ?? ruleName;
+};
+
 const collectFlowConditionSources = (
   rootObj: Record<string, unknown>,
 ): readonly ConditionSource[] => {
@@ -1448,6 +1486,11 @@ const collectFlowConditionSources = (
   for (const decision of decisions) {
     if (typeof decision !== 'object' || decision === null) continue;
     const decisionObj = decision as Record<string, unknown>;
+    // The decision element's API name (`<decisions><name>`) — the real name a
+    // reader recognises (e.g. `My_Decision`), vs the synthetic `condition-N`
+    // handle. Captured here and threaded onto the ConditionalContext node +
+    // mirror so explain_flow can label the decision row with it.
+    const decisionName = toNonEmptyString(decisionObj['name']);
     const rules = toArray(decisionObj['rules']);
     for (const rule of rules) {
       if (typeof rule !== 'object' || rule === null) continue;
@@ -1459,7 +1502,16 @@ const collectFlowConditionSources = (
       }
       if (conditions.length === 0) continue;
       const conditionLogic = toNullableString(ruleObj['conditionLogic']);
-      sources.push({ kind: 'flow-decision', conditions, conditionLogic });
+      // The rule (outcome) name (`<rules><name>`) disambiguates the multiple
+      // sources a multi-outcome decision produces (each `<rules>` is one
+      // source → one `condition-N`). Combine decision + rule for the label.
+      const ruleName = toNonEmptyString(ruleObj['name']);
+      sources.push({
+        kind: 'flow-decision',
+        conditions,
+        conditionLogic,
+        sourceName: buildFlowDecisionSourceName(decisionName, ruleName),
+      });
     }
   }
 
@@ -1519,11 +1571,34 @@ const collectFlowConditionSources = (
 };
 
 /**
+ * Read an edge's DML `operation` marker (`recordLookup` / `recordCreate` /
+ * `recordUpdate` / `recordDelete` / …) as a string, or `''` when the edge
+ * carries no `operation` property. Used as the fourth dedup/sort dimension so
+ * distinct DML operations on the SAME object stay DISTINCT edges.
+ */
+const edgeOperation = (edge: Edge): string => {
+  const op = edge.properties && edge.properties['operation'];
+  return op === undefined || op === null ? '' : String(op);
+};
+
+/**
  * Deduplicate edges by the composite key
- * `(fromId, toId, edgeType, source)` and sort the result for stable
- * output: by `toId` ascending, then by `edgeType` ascending. The first
- * occurrence of each key wins (which preserves the original
- * `properties` payload for that key).
+ * `(fromId, toId, edgeType, source, operation)` and sort the result for
+ * stable output: by `toId` ascending, then by `edgeType` ascending, then by
+ * `operation` ascending. The first occurrence of each key wins (which
+ * preserves the original `properties` payload for that key).
+ *
+ * The `operation` dimension is load-bearing: a Flow that does a
+ * `recordLookup` + `recordCreate` + `recordUpdate` on the SAME object emits
+ * `readsFrom`(recordLookup), `writesTo`(recordCreate), `readsFrom`(recordUpdate)
+ * and `writesTo`(recordUpdate) edges to that object. Keying only on
+ * `(from, to, type, source)` collapsed the two `writesTo` edges into one —
+ * only the first-emitted operation (recordCreate) survived — and likewise
+ * merged the two `readsFrom` reads. Including `operation` keeps each distinct
+ * DML operation as its own edge while genuine same-operation duplicates (two
+ * `<recordLookups>` on one object) still share a key and dedup. Non-DML edges
+ * (triggersOn / callsApex / references / …) have no `operation` property, so
+ * their key suffix is `''` and their behaviour is byte-identical to before.
  *
  * Sorting matters because golden tests do deep equality; without it,
  * the order of edges would depend on the order of the source XML's
@@ -1534,7 +1609,7 @@ const dedupeAndSortEdges = (edges: readonly Edge[]): Edge[] => {
   const seen = new Set<string>();
   const out: Edge[] = [];
   for (const edge of edges) {
-    const key = `${edge.fromId}|${edge.toId}|${edge.edgeType}|${edge.source}`;
+    const key = `${edge.fromId}|${edge.toId}|${edge.edgeType}|${edge.source}|${edgeOperation(edge)}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(edge);
@@ -1542,6 +1617,9 @@ const dedupeAndSortEdges = (edges: readonly Edge[]): Edge[] => {
   out.sort((a, b) => {
     if (a.toId !== b.toId) return a.toId < b.toId ? -1 : 1;
     if (a.edgeType !== b.edgeType) return a.edgeType < b.edgeType ? -1 : 1;
+    const opA = edgeOperation(a);
+    const opB = edgeOperation(b);
+    if (opA !== opB) return opA < opB ? -1 : 1;
     return 0;
   });
   return out;

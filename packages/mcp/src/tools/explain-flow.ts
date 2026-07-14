@@ -49,9 +49,11 @@
  *      `field_lineage` / `field_360` concern.
  *   6. **Decisions** — the v2.0a `properties.conditions[]` mirror,
  *      surfaced as `{ decisionName, conditions }` pairs. The
- *      `decisionName` reuses the synthetic ConditionalContext apiName
- *      (e.g., `Flow:Account_Notify.condition-2`); the `conditions`
- *      array is the rendered expression text.
+ *      `decisionName` is the firer's real element name (a Flow decision's
+ *      `<name>` + rule `<name>`, from the mirror's `sourceName`), falling
+ *      back to the synthetic ConditionalContext apiName
+ *      (e.g., `Flow:Account_Notify.condition-2`) when none was captured;
+ *      the `conditions` array is the rendered expression text.
  *
  * Implementation notes:
  *   - One `getNodeById(flowId)` resolves the Flow. `Flow:` prefix is
@@ -66,10 +68,11 @@
  *   - The Flow's `properties.conditions` mirror (the v2.0a synthetic
  *     ConditionalContext metadata stamped onto the Flow node) is the
  *     source of truth for the `decisions` axis. The mirror entries
- *     carry `kind`, `expression`, and `conditionContextId`; we surface
- *     `expression` directly and use the synthetic apiName as the
- *     decisionName so callers can cross-reference back to the
- *     ConditionalContext nodes.
+ *     carry `kind`, `expression`, `conditionContextId`, and (for Flow
+ *     decisions) `sourceName`; we surface `expression` directly and use
+ *     `sourceName` as the decisionName — falling back to the synthetic
+ *     apiName — so callers see the real decision name yet can still
+ *     cross-reference back to the ConditionalContext nodes via the id.
  *   - Sparse-graph misses (an outgoing edge whose target was dropped
  *     between extractions) are silently skipped — matches every other
  *     composition tool's tolerance pattern. Missing edges do NOT
@@ -240,14 +243,17 @@ export interface ExplainFlowRecordWrite {
 }
 
 /**
- * One decision in the Flow body. The `decisionName` is the synthetic
- * ConditionalContext apiName (e.g., `Flow:Account_Notify.condition-2`)
- * so the renderer can cross-reference back to the gating node;
- * `conditions` carries the rendered expression text from the mirror
- * entry. Multi-condition decisions surface every expression in the
- * array. `fieldReferences` carries the fields the decision actually
- * evaluates — without them the row is just the bare connector (`"and"`),
- * which says nothing about WHAT the flow branches on.
+ * One decision in the Flow body. The `decisionName` is the firer's REAL
+ * element name when the extractor captured one — for a Flow decision, the
+ * `<decisions><name>` + matched `<rules><name>` (e.g.
+ * `My_Decision (My_Outcome)`), surfaced verbatim from the mirror
+ * entry's `sourceName`. It falls back to the synthetic ConditionalContext
+ * apiName (e.g., `Flow:Account_Notify.condition-2`) only when no name was
+ * captured (an older vault, or a nameless firer surface). `conditions`
+ * carries the rendered expression text from the mirror entry.
+ * Multi-condition decisions surface every expression in the array.
+ * `fieldReferences` carries the fields the decision actually evaluates —
+ * without them the row would say nothing about WHAT the flow branches on.
  */
 export interface ExplainFlowDecision {
   readonly decisionName: string;
@@ -1087,7 +1093,16 @@ const collectDecisions = (node: Node): readonly ExplainFlowDecision[] => {
     const conditionContextId = obj['conditionContextId'];
     const expression = obj['expression'];
     if (typeof conditionContextId !== 'string') continue;
-    const decisionName = decisionNameOf(conditionContextId);
+    // Prefer the firer's REAL element name (a Flow decision's `<name>` + rule
+    // `<name>`, captured into the mirror as `sourceName`) over the synthetic
+    // `condition-N` handle. Fall back to the synthetic apiName when the source
+    // never captured a name (a criteria / formula / record-trigger firer, or
+    // an older vault built before this fix).
+    const sourceName = obj['sourceName'];
+    const decisionName =
+      typeof sourceName === 'string' && sourceName.length > 0
+        ? sourceName
+        : decisionNameOf(conditionContextId);
     const expressionText = typeof expression === 'string' ? expression : '';
     // Surface the fields the decision evaluates (mirror entry `fieldRefs`).
     // Dropping them left every decision row as a bare connector ("and").

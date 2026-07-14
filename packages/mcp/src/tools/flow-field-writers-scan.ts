@@ -40,7 +40,15 @@ const parseSObjectVariables = (xml: string): ReadonlyMap<string, string> => {
   return out;
 };
 
-const scanFlowXml = (
+/**
+ * Scan one Flow's XML for writes to `{objectApiName}.{fieldApiName}`.
+ *
+ * Exported for unit tests: the read/write scoping (only `<inputAssignments>`
+ * inside a `<recordCreates>` / `<recordUpdates>` DML denotes a WRITE — a
+ * `<field>` inside `<filters>` / `<outputAssignments>` is a READ) is the
+ * invariant these tests lock, without needing a fixture vault + graph.
+ */
+export const scanFlowXml = (
   xml: string,
   objectApiName: string,
   fieldApiName: string,
@@ -49,12 +57,34 @@ const scanFlowXml = (
     [];
   const sobjectVars = parseSObjectVariables(xml);
 
-  // recordCreates/recordUpdates `<inputAssignments><field>`.
-  const inputFieldPattern = new RegExp(
-    `<field>(${fieldApiName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})<\\/field>`,
-    'g',
+  // recordCreates/recordUpdates `<inputAssignments><field>` — the ONLY place a
+  // bare `<field>` denotes a WRITE. The same tag also appears in `<filters>`
+  // (a read predicate on the start element / a record lookup / a decision) and
+  // in `<outputAssignments>` (reading a queried record's field into a var), so
+  // an UNSCOPED `<field>NAME</field>` match reported reads as writes — e.g. a
+  // field that only appears in a start-filter predicate became a phantom
+  // writer. Scope the match to `<inputAssignments>` blocks nested inside a
+  // record-create / record-update DML element. ($Record.<field> assignment
+  // writes are emitted by the graph extractor's after-save/before-save
+  // handler, which applies the persistence precondition; the supplemental scan
+  // deliberately does not re-derive them here.)
+  const escapedField = fieldApiName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const fieldTagPattern = new RegExp(`<field>${escapedField}</field>`);
+  const writesViaInputAssignments = (['recordCreates', 'recordUpdates'] as const).some(
+    (tag) => {
+      const dmlPattern = new RegExp(`<${tag}>[\\s\\S]*?</${tag}>`, 'g');
+      let dml: RegExpExecArray | null;
+      while ((dml = dmlPattern.exec(xml)) !== null) {
+        const iaPattern = /<inputAssignments>[\s\S]*?<\/inputAssignments>/g;
+        let ia: RegExpExecArray | null;
+        while ((ia = iaPattern.exec(dml[0])) !== null) {
+          if (fieldTagPattern.test(ia[0])) return true;
+        }
+      }
+      return false;
+    },
   );
-  if (inputFieldPattern.test(xml)) {
+  if (writesViaInputAssignments) {
     hits.push({ fieldApiName, mechanism: 'inputAssignments' });
   }
 

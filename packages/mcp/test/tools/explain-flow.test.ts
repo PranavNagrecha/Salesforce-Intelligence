@@ -1301,3 +1301,82 @@ describe('explainFlowHandler — bounded graph queries', () => {
     expect(large.nodeQueries).toBeLessThan(60);
   });
 });
+
+// =============================================================================
+// BUG 7 — the decision row must surface the firer's REAL name (the Flow
+// decision `<name>` + rule `<name>`, captured onto the mirror as `sourceName`)
+// instead of the synthetic `condition-N` handle. When no name was captured,
+// it falls back to the synthetic apiName (unchanged behaviour / older vaults).
+// =============================================================================
+describe('explainFlowHandler — decision names (BUG 7)', () => {
+  const runWith = async (
+    mirrorEntry: Record<string, unknown>,
+  ): Promise<readonly { decisionName: string }[]> => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-explainflow-bug7-'));
+    const opened = await openGraph(join(dir, 'ef.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const s = opened.value;
+    const flowId = 'Flow:Decide';
+    const condId = 'ConditionalContext:Flow:Decide.condition-0';
+    const nodes: Node[] = [
+      makeNode({
+        id: flowId,
+        apiName: 'Decide',
+        properties: { conditions: [mirrorEntry] },
+      }),
+      makeNode({
+        id: condId,
+        type: 'ConditionalContext',
+        apiName: 'Flow:Decide.condition-0',
+        properties: {
+          kind: 'flow-decision',
+          expression: 'Ns__Obj__c.Status__c EqualTo Approved',
+          fieldRefs: ['CustomField:Ns__Obj__c.Status__c'],
+          synthesized: false,
+        },
+      }),
+    ];
+    const edges: Edge[] = [
+      makeEdge({
+        fromId: flowId,
+        toId: condId,
+        edgeType: 'firesWhen',
+        source: 'condition-extractor',
+        properties: { kind: 'flow-decision', conditionIndex: 0 },
+      }),
+    ];
+    const imported = await importExtractionResults(s, [{ nodes, edges }]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const c = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s } as Context;
+    const result = await explainFlowHandler(c, { flowId });
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+    if (!result.ok) throw new Error('explainFlowHandler failed');
+    return result.value.data.decisions;
+  };
+
+  it('renders the mirror `sourceName` as the decision row name', async () => {
+    const decisions = await runWith({
+      kind: 'flow-decision',
+      conditionContextId: 'ConditionalContext:Flow:Decide.condition-0',
+      expression: 'Ns__Obj__c.Status__c EqualTo Approved',
+      fieldRefs: ['CustomField:Ns__Obj__c.Status__c'],
+      sourceName: 'My_Decision (My_Outcome)',
+    });
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]?.decisionName).toBe('My_Decision (My_Outcome)');
+    // Not the synthetic handle.
+    expect(decisions[0]?.decisionName).not.toBe('Flow:Decide.condition-0');
+  });
+
+  it('falls back to the synthetic condition-N name when no sourceName captured', async () => {
+    const decisions = await runWith({
+      kind: 'flow-decision',
+      conditionContextId: 'ConditionalContext:Flow:Decide.condition-0',
+      expression: 'Ns__Obj__c.Status__c EqualTo Approved',
+      fieldRefs: ['CustomField:Ns__Obj__c.Status__c'],
+    });
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]?.decisionName).toBe('Flow:Decide.condition-0');
+  });
+});

@@ -684,3 +684,36 @@ describe('scanApexSource — determinism and real fixture', () => {
     expect(reads.some((r) => r.object === 'mainMarketoSetting')).toBe(true);
   });
 });
+
+describe('scanApexSource — managed-package namespaced local types (LOCAL_DECL_PATTERN)', () => {
+  it('resolves a lowercase-namespaced for-each loop variable to its api name, not the alias', () => {
+    // `ns__Obj__c` is a managed-package namespaced api name: it starts
+    // LOWERCASE and contains `__`. Before the namespace branch, LOCAL_DECL_PATTERN
+    // learned only PascalCase types, so `rec` stayed untyped and
+    // `rec.My_Field__c = …` fell back to the literal-receiver phantom
+    // (`CustomField:rec.My_Field__c`). Now the loop var resolves to the object.
+    const result = scanApexSource(
+      'public class W {\n  void run(List<ns__Obj__c> items) {\n' +
+        '    for (ns__Obj__c rec : items) {\n' +
+        '      rec.My_Field__c = 1;\n' +
+        '    }\n  }\n}',
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const write = result.value.fieldAccesses.find((a) => a.field === 'My_Field__c');
+    expect(write?.type).toBe('write');
+    expect(write?.object).toBe('ns__Obj__c');
+    // the alias receiver is gone — no phantom keyed on the loop variable name.
+    expect(result.value.fieldAccesses.map((a) => a.object)).not.toContain('rec');
+  });
+
+  it('the __-less guard: a primitive local and a bare keyword mint no phantom access', () => {
+    // The lowercase-type branch REQUIRES `__`, so `Integer i` (a primitive,
+    // no `__`) and `return foo` (a bare lowercase keyword, no `__`) can never
+    // be misread as a namespaced declaration → no field access at all.
+    const result = scanApexSource(wrapClass('Integer i = 0; return foo;'));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.fieldAccesses).toEqual([]);
+  });
+});

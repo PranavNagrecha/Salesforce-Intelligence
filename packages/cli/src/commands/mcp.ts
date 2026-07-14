@@ -206,6 +206,45 @@ const isEnoent = (cause: unknown): boolean =>
   'code' in cause &&
   (cause as { code?: unknown }).code === 'ENOENT';
 
+/** The resolved vault binding for `sfi mcp`: the chosen root (or `undefined`
+ *  to signal the `./org-kb` default) plus the human-readable source label the
+ *  startup log announces on stderr. */
+export interface VaultBinding {
+  /** The vault root passed to {@link prepareMcp}, or `undefined` for `./org-kb`. */
+  readonly vaultRoot: string | undefined;
+  /** Which mechanism selected it, verbatim for the stderr announcement. */
+  readonly bindSource: '--vault' | 'SFI_VAULT' | 'default ./org-kb';
+}
+
+/**
+ * Resolve the vault-binding precedence for `sfi mcp`, most explicit first: the
+ * `--vault` flag, then the `SFI_VAULT` env var (trimmed; blank/whitespace-only
+ * is ignored so `plugin.json` can ship with an empty default), then the launch
+ * directory's `./org-kb`. Pure + exported so the precedence — and the
+ * `bindSource` label the server prints so an auto-selected bind is never silent
+ * — is unit-testable without driving the blocking stdio server.
+ *
+ * @example
+ *   resolveVaultBinding(undefined, '/srv/org-kb'); // env wins → { vaultRoot: '/srv/org-kb', bindSource: 'SFI_VAULT' }
+ */
+export const resolveVaultBinding = (
+  flagVault: string | undefined,
+  envVault: string | undefined,
+): VaultBinding => {
+  const trimmedEnv =
+    envVault !== undefined && envVault.trim().length > 0
+      ? envVault.trim()
+      : undefined;
+  const vaultRoot = flagVault ?? trimmedEnv;
+  const bindSource =
+    flagVault !== undefined
+      ? '--vault'
+      : vaultRoot !== undefined
+        ? 'SFI_VAULT'
+        : 'default ./org-kb';
+  return { vaultRoot, bindSource };
+};
+
 /**
  * Register the `sfi mcp` subcommand on `program`.
  *
@@ -224,12 +263,23 @@ export const registerMcpCommand = (program: Command): void => {
     .description('Run the MCP server backing the org-kb vault')
     .option(
       '--vault <path>',
-      'Serve a specific org-kb vault instead of ./org-kb (bind a project to the right org)',
+      'Serve a specific org-kb vault instead of ./org-kb (bind a project to the right org). ' +
+        'Also settable via the SFI_VAULT env var; precedence: --vault > SFI_VAULT > ./org-kb.',
     )
     .action(async (cmdOpts: { readonly vault?: string }): Promise<void> => {
+      // Vault-binding precedence, most explicit first: the `--vault` flag, then
+      // the `SFI_VAULT` env var (so `plugin.json` can ship as-is and a user
+      // sets the path ONCE in their MCP config's `env` block instead of editing
+      // the plugin), then the launch directory's `./org-kb`. Whichever wins is
+      // named on stderr below, so an auto-selected bind is never silent — the
+      // core cure for "which repo is bound to which org?" confusion.
+      const { vaultRoot: boundVault, bindSource } = resolveVaultBinding(
+        cmdOpts.vault,
+        process.env['SFI_VAULT'],
+      );
       const prepared = await prepareMcp({
         cwd: process.cwd(),
-        ...(cmdOpts.vault !== undefined ? { vaultRoot: cmdOpts.vault } : {}),
+        ...(boundVault !== undefined ? { vaultRoot: boundVault } : {}),
       });
       if (!prepared.ok) {
         process.stderr.write(`sfi mcp: ${prepared.error.message}\n`);
@@ -244,7 +294,7 @@ export const registerMcpCommand = (program: Command): void => {
       // A wrong-org session is otherwise silent — the server serves whatever
       // vault its launch directory holds, so make that choice impossible to miss.
       process.stderr.write(
-        `sfi mcp: serving vault ${vaultRoot}` +
+        `sfi mcp: serving vault ${vaultRoot} [bound via ${bindSource}]` +
           `${targetOrg !== null ? ` (org: ${targetOrg})` : ' (no targetOrg in config)'}\n`,
       );
       // One-time "update available" nudge on stderr (stdout is reserved for

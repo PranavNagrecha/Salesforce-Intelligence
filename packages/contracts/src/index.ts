@@ -984,6 +984,25 @@ export interface McpResponse<T> {
     readonly sourceTreeHash: string;
     /** Manifest refresh timestamp. */
     readonly refreshedAt: string;
+    /**
+     * The Salesforce org alias/username this vault was built from
+     * (`manifest.sourceOrg`). Surfaced so a reader can tell — on the FIRST
+     * tool call — WHICH org an answer describes, instead of silently trusting
+     * whatever vault the server happened to bind to. Optional in the type
+     * (handlers omit it; it is stamped centrally at dispatch) but present on
+     * every real success response.
+     */
+    readonly targetOrg?: string;
+    /** Absolute path to the on-disk `org-kb` vault this answer came from. */
+    readonly vaultPath?: string;
+    /**
+     * The sf-intelligence version that BUILT this vault (`manifest.version`).
+     * When older than the running tool, the vault predates newer extraction —
+     * answers reflect the OLD analysis until re-refreshed. Makes a
+     * stale-vault wrong answer self-evident rather than indistinguishable
+     * from a code bug.
+     */
+    readonly builderVersion?: string;
   }>;
 }
 

@@ -9,6 +9,8 @@
  * @see index.ts   — thin re-exports + registerTools
  */
 
+import { homedir } from 'node:os';
+
 import {
   type CallToolResult,
 } from '@modelcontextprotocol/sdk/types.js';
@@ -1912,6 +1914,62 @@ export const dispatchTool = async (
 };
 
 /**
+ * Stamp the vault's ORG, on-disk PATH, and BUILDER VERSION onto every success
+ * response's `vaultState` at the single dispatch choke point every tool passes
+ * through, so a reader sees WHICH org / WHICH vault / WHICH extractor version
+ * produced the answer on the FIRST call — the fix for silently answering from
+ * the wrong org or a stale-builder vault. Central here rather than in ~157
+ * inline handler sites; `run_analysis` re-dispatches through `runTool` so its
+ * verbatim envelope is stamped too, and error envelopes (no `vaultState`) are
+ * untouched. The three fields are optional in the contract so handlers need
+ * not set them; they are always present on real success responses.
+ */
+/**
+ * Render a vault path for disclosure with the user's HOME directory collapsed
+ * to `~`, so the `vaultPath` field can name WHICH on-disk vault produced an
+ * answer WITHOUT ever leaking the OS username (macOS/Linux home paths embed it,
+ * e.g. `/Users/<name>/…`). The raw home prefix must never reach a client —
+ * especially over the HTTP transport — so this redaction is the invariant, not
+ * a cosmetic. Paths outside HOME (a system tmpdir in tests, a shared mount) are
+ * returned as-is: they carry no username.
+ */
+const toDisclosedVaultPath = (absPath: string): string => {
+  const home = homedir();
+  return home.length > 0 && (absPath === home || absPath.startsWith(`${home}/`))
+    ? `~${absPath.slice(home.length)}`
+    : absPath;
+};
+
+const stampVaultDisclosure = <T>(
+  resp: McpResponse<T>,
+  ctx: Context,
+): McpResponse<T> => {
+  // `ctx.manifest` is always present in a real server (buildContext loads it),
+  // but the response-size / leak unit tests drive `runTool` with a synthetic
+  // `{} as Context`. Read defensively and stamp only the fields we actually
+  // have, so a minimal ctx cannot turn a happy-path response into an internal
+  // error, and the stamp stays byte-transparent when there is nothing to add.
+  const manifest = ctx.manifest as
+    | { readonly sourceOrg?: string; readonly version?: string }
+    | undefined;
+  return {
+    ...resp,
+    vaultState: {
+      ...resp.vaultState,
+      ...(typeof manifest?.sourceOrg === 'string'
+        ? { targetOrg: manifest.sourceOrg }
+        : {}),
+      ...(typeof ctx.vaultRoot === 'string'
+        ? { vaultPath: toDisclosedVaultPath(ctx.vaultRoot) }
+        : {}),
+      ...(typeof manifest?.version === 'string'
+        ? { builderVersion: manifest.version }
+        : {}),
+    },
+  };
+};
+
+/**
  * Generic per-tool dispatch helper. Each `dispatchTool` case calls this
  * with its Zod schema and handler; `runTool` Zod-parses the args (emits
  * an `invalid-query` envelope on failure), then invokes the handler and
@@ -1962,11 +2020,16 @@ export const runTool = async <S extends z.ZodTypeAny, T>(
   }
   try {
     const result = await handler(ctx, parsed.data);
-    return jsonResult(result.ok ? result.value : { error: result.error }, {
-      args: parsed.data as unknown as Readonly<Record<string, unknown>>,
-      knobs: narrowingKnobs(schema),
-      vaultRoot: ctx.vaultRoot,
-    });
+    return jsonResult(
+      result.ok
+        ? stampVaultDisclosure(result.value, ctx)
+        : { error: result.error },
+      {
+        args: parsed.data as unknown as Readonly<Record<string, unknown>>,
+        knobs: narrowingKnobs(schema),
+        vaultRoot: ctx.vaultRoot,
+      },
+    );
   } catch (error) {
     // An unexpected throw escaped the handler (or the serialize step). Log
     // the FULL error (incl. stack, which may carry org content) to stderr

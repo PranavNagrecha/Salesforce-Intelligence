@@ -8,7 +8,7 @@ import type { VaultManifest } from '@sf-intelligence/contracts';
 import { checkForUpdate, formatUpdateNotice } from '@sf-intelligence/core';
 import { saveManifest, vaultPaths } from '@sf-intelligence/vault';
 
-import { prepareMcp } from '../../src/commands/mcp.js';
+import { prepareMcp, resolveVaultBinding } from '../../src/commands/mcp.js';
 
 /** Build a unique temp working directory for each test. */
 const makeTempCwd = async (): Promise<string> => mkdtemp(join(tmpdir(), 'sfi-mcp-'));
@@ -198,6 +198,49 @@ describe('prepareMcp', () => {
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * BINDING (SFI_VAULT) — the `sfi mcp` vault-binding precedence, most explicit
+ * first: `--vault` flag > `SFI_VAULT` env > `./org-kb`. The action reads
+ * `process.env['SFI_VAULT']` and hands both values to `resolveVaultBinding`,
+ * which is pure + exported so the precedence (and the `bindSource` label the
+ * startup log announces) is testable without driving the blocking stdio server.
+ */
+describe('resolveVaultBinding — SFI_VAULT precedence', () => {
+  it('selects SFI_VAULT when --vault is absent', () => {
+    expect(resolveVaultBinding(undefined, '/srv/org-kb')).toEqual({
+      vaultRoot: '/srv/org-kb',
+      bindSource: 'SFI_VAULT',
+    });
+  });
+
+  it('lets --vault win over SFI_VAULT', () => {
+    expect(resolveVaultBinding('/flag/org-kb', '/srv/org-kb')).toEqual({
+      vaultRoot: '/flag/org-kb',
+      bindSource: '--vault',
+    });
+  });
+
+  it('falls back to ./org-kb when neither --vault nor SFI_VAULT is present', () => {
+    expect(resolveVaultBinding(undefined, undefined)).toEqual({
+      vaultRoot: undefined,
+      bindSource: 'default ./org-kb',
+    });
+  });
+
+  it('ignores a blank/whitespace-only SFI_VAULT and trims a real one', () => {
+    // A blank env var is treated as unset (so `plugin.json` can ship an empty
+    // default); a real value is trimmed of surrounding whitespace.
+    expect(resolveVaultBinding(undefined, '   ')).toEqual({
+      vaultRoot: undefined,
+      bindSource: 'default ./org-kb',
+    });
+    expect(resolveVaultBinding(undefined, '  /srv/org-kb  ')).toEqual({
+      vaultRoot: '/srv/org-kb',
+      bindSource: 'SFI_VAULT',
+    });
   });
 });
 

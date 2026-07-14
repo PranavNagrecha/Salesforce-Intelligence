@@ -286,7 +286,15 @@ export const extractApexAstEdges = (
   const resolveType = (t: string): string => innerClasses.get(t) ?? t;
   const isSObjectish = (t: string | null | undefined): t is string =>
     t !== null && t !== undefined && !SYSTEM_TYPES.has(t) && !innerClasses.has(t) &&
-    t !== className && !/[<>]/.test(t) && /^[A-Z]/.test(t) && !known.has(t);
+    t !== className && !/[<>]/.test(t) &&
+    // An sObject api name is PascalCase (`Account`, `MyObject__c`) OR a
+    // managed-package namespaced name, which starts LOWERCASE and contains a
+    // `__` namespace separator (`ns__Object__c`). The old `/^[A-Z]/`-only test
+    // silently rejected every namespaced object, so a resolved `ns__Object__c`
+    // receiver was dropped and the write fell to the scanner's literal-receiver
+    // phantom. A true local alias (`record`, `payment`, `i`) never contains
+    // `__`, so the namespace branch cannot re-admit one.
+    (/^[A-Z]/.test(t) || /^[a-z][A-Za-z0-9]*__/.test(t)) && !known.has(t);
   const isUserClass = (t: string): boolean =>
     t === className || innerClasses.has(t) || t === extendsType || known.has(t);
   const allowSystemCall = (cls: string, method: string): boolean => {

@@ -92,6 +92,17 @@ export type ConditionSource =
       readonly kind: 'flow-decision';
       readonly conditions: readonly CriteriaItem[];
       readonly conditionLogic: string | null;
+      /**
+       * The firer's own human-readable element name — for a Flow decision
+       * this is the `<decisions><name>` element API name combined with the
+       * matched `<rules><name>` (e.g. `My_Decision (My_Outcome)`).
+       * `null` when the source XML carried neither. Surfaced onto the
+       * ConditionalContext node + condition mirror as `sourceName` so
+       * `explain_flow` can label the decision row with the REAL decision name
+       * instead of the synthetic `condition-N` handle. The synthetic id is
+       * left untouched (it anchors `firesWhen` edges + tests).
+       */
+      readonly sourceName: string | null;
     }
   | {
       readonly kind: 'flow-recordtrigger';
@@ -123,6 +134,15 @@ export interface ConditionMirror {
   readonly conditionContextId: ComponentId;
   readonly expression: string;
   readonly fieldRefs: readonly ComponentId[];
+  /**
+   * The firer's own element name (e.g. a Flow decision's `<name>` + rule
+   * `<name>`), when the source captured one. OMITTED when the firer surface
+   * carried no name (criteria / formula / flow-recordtrigger sources), so
+   * existing mirror consumers that assert an exact shape are unaffected.
+   * `explain_flow` renders THIS as the decision row's name in preference to
+   * the synthetic `condition-N` handle.
+   */
+  readonly sourceName?: string;
 }
 
 /**
@@ -175,6 +195,20 @@ const joinCriteriaItems = (
   if (items.length === 0) return '';
   const rendered = items.map(renderCriteriaItem);
   if (combinator !== null && combinator.length > 0) {
+    // A DEFAULT bare logic keyword (`and` / `or`, case-insensitive) carries
+    // no 1-based index tokens, so the index-substitution pass below would
+    // find no digits and return the keyword verbatim — rendering a real
+    // decision / criteria predicate as the literal word "and" (or "or").
+    // Every default-logic Flow decision uses `conditionLogic = 'and'`, and a
+    // WorkflowRule / rule-entry with a bare `<booleanFilter>and</booleanFilter>`
+    // is the same shape. Join the rendered items with the keyword instead
+    // (the `and` branch matches the null-combinator default below exactly).
+    // Real custom logic (`1 AND (2 OR 3)`) still flows through the
+    // index-substitution path because it contains digit tokens.
+    const keyword = combinator.trim().toLowerCase();
+    if (keyword === 'and' || keyword === 'or') {
+      return rendered.join(keyword === 'and' ? ' AND ' : ' OR ');
+    }
     // The combinator references the items by 1-based index. Render it
     // with the rendered items inlined so the produced expression is
     // self-describing (e.g., `(field op value) OR (field op value)`).
@@ -358,11 +392,23 @@ const buildConditionTriple = (
   parentSourcePath: string,
   parentApiVersion: number | null,
   extraProperties: Readonly<Record<string, unknown>>,
+  sourceName: string | null,
 ): { readonly node: Node; readonly edge: Edge; readonly mirror: ConditionMirror } => {
   const conditionContextId: ComponentId =
     `ConditionalContext:${parentId}.condition-${index}`;
   const apiName = `${parentId}.condition-${index}`;
   const label = buildLabel(expression.length > 0 ? expression : apiName);
+  const nodeProperties: Record<string, unknown> = {
+    kind,
+    expression,
+    fieldRefs,
+    synthesized: false,
+    ...extraProperties,
+  };
+  // Only stamp `sourceName` when the firer surface actually carried a name.
+  // Omitting it for the nameless kinds (criteria / formula / recordtrigger)
+  // keeps their node.properties + mirror byte-identical to pre-fix output.
+  if (sourceName !== null) nodeProperties['sourceName'] = sourceName;
   const node: Node = {
     id: conditionContextId,
     type: 'ConditionalContext',
@@ -373,13 +419,7 @@ const buildConditionTriple = (
     lastModifiedDate: null,
     lastModifiedBy: null,
     apiVersion: parentApiVersion,
-    properties: {
-      kind,
-      expression,
-      fieldRefs,
-      synthesized: false,
-      ...extraProperties,
-    },
+    properties: nodeProperties,
   };
   const edge: Edge = {
     fromId: parentId,
@@ -397,6 +437,7 @@ const buildConditionTriple = (
     conditionContextId,
     expression,
     fieldRefs,
+    ...(sourceName !== null ? { sourceName } : {}),
   };
   return { node, edge, mirror };
 };
@@ -501,6 +542,10 @@ export const extractConditions = (
     let fieldRefs: readonly ComponentId[];
     let confidence: ConfidenceLevel;
     let extraProperties: Readonly<Record<string, unknown>> = {};
+    // The firer's own element name, captured by the `flow-decision` source
+    // (the Flow decision `<name>` + rule `<name>`). Stays null for the
+    // nameless kinds so their node.properties + mirror are unchanged.
+    let sourceName: string | null = null;
     switch (source.kind) {
       case 'criteria': {
         kind = 'criteria';
@@ -538,6 +583,7 @@ export const extractConditions = (
           itemCount: source.conditions.length,
           conditionLogic: source.conditionLogic,
         };
+        sourceName = source.sourceName;
         break;
       }
       case 'flow-recordtrigger': {
@@ -585,6 +631,7 @@ export const extractConditions = (
       parentSourcePath,
       parentApiVersion,
       extraProperties,
+      sourceName,
     );
     conditionNodes.push(triple.node);
     firesWhenEdges.push(triple.edge);

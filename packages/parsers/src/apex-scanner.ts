@@ -284,8 +284,16 @@ const NEW_PATTERN = /\bnew\s+([A-Za-z_][A-Za-z_0-9]*)\s*\(/g;
 // declaration is still surfaced as a (heuristic) access — usage alone never
 // infers a local. A trailing `(` (method declaration `Type name(`) is
 // excluded by the lookahead, so method names are not mistaken for locals.
+// The declared TYPE (group 1) is either a PascalCase name (`Account`,
+// `MyObject__c`) OR a managed-package NAMESPACED api name, which starts
+// lowercase and always contains a `__` namespace separator (`ns__Object__c`).
+// The lowercase-with-`__` branch is deliberately narrow: a bare lowercase
+// keyword (`return foo`, `throw x`) has no `__`, so it can never be misread
+// as a declaration. Without this branch the scanner never learned that
+// `ns__Object__c rec` typed `rec`, so a `rec.Field = …` write fell back to
+// the literal-receiver phantom.
 const LOCAL_DECL_PATTERN =
-  /\b([A-Z][A-Za-z0-9_]*)(?:\s*<[^;{}()]*>)?(?:\s*\[\s*\])?\s+([a-z][A-Za-z0-9_]*)\s*(?=[=;:),])/g;
+  /\b((?:[A-Z][A-Za-z0-9_]*|[a-z][A-Za-z0-9]*__[A-Za-z0-9_]*))(?:\s*<[^;{}()]*>)?(?:\s*\[\s*\])?\s+([a-z][A-Za-z0-9_]*)\s*(?=[=;:),])/g;
 
 // Capture an INLINE SOQL statement `[SELECT ... ]`. Anchored on `[` followed
 // by optional whitespace and the `SELECT` keyword so plain list/array indexing

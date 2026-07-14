@@ -1,7 +1,7 @@
 /// <reference types="vitest/globals" />
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -176,7 +176,7 @@ describe('stdio↔HTTP parity + leak check', () => {
     }
   });
 
-  it('responses leak no absolute host paths', async () => {
+  it('discloses only the home-redacted vault path, never the raw home dir / username, and leaks no other host path', async () => {
     const client = await httpClient(token);
     try {
       for (const [name, args] of [
@@ -187,8 +187,23 @@ describe('stdio↔HTTP parity + leak check', () => {
       ] as const) {
         const r = await client.callTool({ name, arguments: args as Record<string, unknown> });
         const text = (r.content as { text: string }[])[0]?.text ?? '';
-        expect(text.includes(vaultRoot)).toBe(false);
-        expect(text.includes(tmpdir())).toBe(false);
+        // INVARIANT: the OS home directory (which embeds the username) must
+        // NEVER appear — the disclosure `vaultPath` is emitted home-relative
+        // (`~/…`) precisely so it cannot leak the username over any transport.
+        expect(text.includes(homedir())).toBe(false);
+        // The absolute vault path may appear ONLY as the deliberate
+        // `vaultState.vaultPath` disclosure field (this test's vault lives in
+        // tmpdir, which is outside HOME so it is disclosed verbatim). Strip
+        // that one field and assert no OTHER stray host-path leak survives
+        // (error messages, stack frames, data).
+        const parsed = JSON.parse(text) as {
+          readonly vaultState?: { readonly vaultPath?: string };
+        };
+        const disclosed = parsed.vaultState?.vaultPath;
+        const withoutDisclosure =
+          disclosed === undefined ? text : text.split(disclosed).join('');
+        expect(withoutDisclosure.includes(vaultRoot)).toBe(false);
+        expect(withoutDisclosure.includes(tmpdir())).toBe(false);
       }
     } finally {
       await client.close();

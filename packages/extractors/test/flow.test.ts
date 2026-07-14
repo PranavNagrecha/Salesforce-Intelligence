@@ -109,6 +109,20 @@ describe('extractFlow', () => {
         expect(firesWhen!.fromId).toBe('Flow:Decide_Stage');
         expect(firesWhen!.confidence).toBe('declared');
         expect(firesWhen!.properties.kind).toBe('flow-decision');
+        // BUG 6 — the bare `<conditionLogic>and</conditionLogic>` must render
+        // the real predicate, NOT the literal word "and".
+        expect(conditionNode!.properties.expression).toBe(
+          '$Record.Amount GreaterThan 100000',
+        );
+        // BUG 7 — the decision `<name>` + rule `<name>` are captured as
+        // `sourceName` (the synthetic `condition-0` id is left untouched).
+        expect(conditionNode!.properties.sourceName).toBe(
+          'Choose_Path (HighValue)',
+        );
+        const mirror = result.value.nodes.find(
+          (n) => n.type === 'Flow',
+        )!.properties.conditions as Array<Record<string, unknown>>;
+        expect(mirror[0]?.sourceName).toBe('Choose_Path (HighValue)');
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
@@ -1135,6 +1149,92 @@ describe('extractFlow', () => {
       }
     });
 
+    it('keeps distinct DML operations on the SAME object as distinct edges (BUG 5)', async () => {
+      // A Flow that does recordLookup + recordCreate + recordUpdate on ONE
+      // object used to collapse to a single readsFrom + single writesTo,
+      // because the dedup key was only (fromId,toId,edgeType,source) — the
+      // first-emitted operation won and the rest vanished. The operation
+      // dimension keeps each distinct DML operation as its own edge.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>DML Same Object</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <recordLookups>
+        <name>Get_Ns__Obj__c</name>
+        <object>Ns__Obj__c</object>
+    </recordLookups>
+    <recordCreates>
+        <name>Create_Ns__Obj__c</name>
+        <object>Ns__Obj__c</object>
+    </recordCreates>
+    <recordUpdates>
+        <name>Update_Ns__Obj__c</name>
+        <object>Ns__Obj__c</object>
+    </recordUpdates>
+</Flow>`;
+      const { dir, path } = await writeTempXml('DmlSameObject.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const toObj = (e: { toId: string }) => e.toId === 'CustomObject:Ns__Obj__c';
+        // Both writes survive: the create AND the update are distinct edges.
+        const writes = result.value.edges.filter(
+          (e) => e.edgeType === 'writesTo' && toObj(e),
+        );
+        expect(
+          writes.map((e) => e.properties?.['operation']).sort(),
+        ).toEqual(['recordCreate', 'recordUpdate']);
+        // Both reads survive: the lookup AND the update-read are distinct.
+        const reads = result.value.edges.filter(
+          (e) => e.edgeType === 'readsFrom' && toObj(e),
+        );
+        expect(
+          reads.map((e) => e.properties?.['operation']).sort(),
+        ).toEqual(['recordLookup', 'recordUpdate']);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('still dedupes genuine same-operation duplicate writes to one object (BUG 5 guard)', async () => {
+      // Two recordCreates on the SAME object share (from,to,type,source,operation)
+      // — so they still collapse to a single object-level writesTo. The
+      // operation dimension must not turn genuine duplicates into two edges.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Two Creates One Object</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <recordCreates>
+        <name>Create_A</name>
+        <object>Ns__Obj__c</object>
+    </recordCreates>
+    <recordCreates>
+        <name>Create_B</name>
+        <object>Ns__Obj__c</object>
+    </recordCreates>
+</Flow>`;
+      const { dir, path } = await writeTempXml('TwoCreates.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const writes = result.value.edges.filter(
+          (e) =>
+            e.edgeType === 'writesTo' &&
+            e.toId === 'CustomObject:Ns__Obj__c' &&
+            e.properties?.['operation'] === 'recordCreate',
+        );
+        expect(writes).toHaveLength(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
     it('ignores non-apex action types without warning', async () => {
       // emailAlert, chatterPost, etc. are normal Flow constructs that
       // v0.2 explicitly defers. They produce no edge and no warning.
@@ -1623,14 +1723,16 @@ describe('extractFlow', () => {
             'whole-record write; individual fields not enumerable from a record-variable DML',
         });
         // A readsFrom to Account exists (the read is represented). The
-        // recordLookup readsFrom and the recordUpdate readsFrom share the
-        // (from,to,type,source) dedup key, so the first-pushed lookup edge wins —
-        // that is fine: the disclosure lives on the writesTo edge above.
+        // recordLookup readsFrom (operation: recordLookup) and the recordUpdate
+        // readsFrom (operation: recordUpdate) now differ in the operation
+        // dimension of the dedup key, so BOTH survive as distinct edges — the
+        // recordLookup read is no longer masked by the update read.
+        const accountReads = result.value.edges.filter(
+          (e) => e.edgeType === 'readsFrom' && e.toId === 'CustomObject:Account',
+        );
         expect(
-          result.value.edges.some(
-            (e) => e.edgeType === 'readsFrom' && e.toId === 'CustomObject:Account',
-          ),
-        ).toBe(true);
+          accountReads.map((e) => e.properties?.['operation']).sort(),
+        ).toEqual(['recordLookup', 'recordUpdate']);
         // No fabricated field-level writes.
         expect(
           result.value.edges.filter(
@@ -2090,6 +2192,135 @@ describe('extractFlow', () => {
         expect(
           result.value.nodes[0]?.properties['flowExtractionWarnings'],
         ).toEqual([]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('BUG-3 — after-save $Record persistence gating', () => {
+    // The precondition the pre-fix code named in its warning but never checked:
+    // in an AFTER-save flow an in-memory `$Record.<Field>` assignment persists
+    // ONLY when the flow ALSO runs an explicit Update Records on $Record. With
+    // that recordUpdates present the field write is emitted at HEURISTIC
+    // confidence; without it, NO edge is emitted and the skip is disclosed.
+    const afterSaveXml = (withUpdate: boolean): string => `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Persist After Save</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <start>
+        <object>Ns__Obj__c</object>
+        <recordTriggerType>Create</recordTriggerType>
+        <triggerType>RecordAfterSave</triggerType>
+    </start>
+    <assignments>
+        <name>Set_Field</name>
+        <assignmentItems>
+            <assignToReference>$Record.My_Field__c</assignToReference>
+            <operator>Assign</operator>
+            <value><stringValue>Done</stringValue></value>
+        </assignmentItems>
+    </assignments>${
+      withUpdate
+        ? `
+    <recordUpdates>
+        <name>Save_Record</name>
+        <inputReference>$Record</inputReference>
+    </recordUpdates>`
+        : ''
+    }
+</Flow>`;
+
+    it('(a) emits a HEURISTIC field write when an after-save flow updates $Record downstream', async () => {
+      const { dir, path } = await writeTempXml(
+        'PersistAfterSave.flow-meta.xml',
+        afterSaveXml(true),
+      );
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const fieldWrite = result.value.edges.find(
+          (e) =>
+            e.edgeType === 'writesTo' &&
+            e.toId === 'CustomField:Ns__Obj__c.My_Field__c',
+        );
+        expect(fieldWrite).toBeDefined();
+        expect(fieldWrite?.confidence).toBe('heuristic');
+        expect(fieldWrite?.properties?.['operation']).toBe(
+          'beforeSaveFieldAssignment',
+        );
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('(b) emits NO field write and discloses "in-memory only" when the after-save flow does NOT update $Record', async () => {
+      const { dir, path } = await writeTempXml(
+        'NoPersistAfterSave.flow-meta.xml',
+        afterSaveXml(false),
+      );
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(
+          result.value.edges.some(
+            (e) => e.toId === 'CustomField:Ns__Obj__c.My_Field__c',
+          ),
+        ).toBe(false);
+        const warnings =
+          (result.value.nodes[0]?.properties['flowExtractionWarnings'] as
+            | readonly string[]
+            | undefined) ?? [];
+        expect(
+          warnings.some(
+            (w) =>
+              w.includes('RecordAfterSave') &&
+              w.includes('in-memory only') &&
+              w.includes('no writesTo edge emitted'),
+          ),
+        ).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('(c) still emits a DECLARED field write on the before-save path (no downstream update needed)', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Before Save Stamp</label>
+    <processType>AutoLaunchedFlow</processType>
+    <status>Active</status>
+    <start>
+        <object>Ns__Obj__c</object>
+        <recordTriggerType>Create</recordTriggerType>
+        <triggerType>RecordBeforeSave</triggerType>
+    </start>
+    <assignments>
+        <name>Set_Field</name>
+        <assignmentItems>
+            <assignToReference>$Record.My_Field__c</assignToReference>
+            <operator>Assign</operator>
+            <value><stringValue>Done</stringValue></value>
+        </assignmentItems>
+    </assignments>
+</Flow>`;
+      const { dir, path } = await writeTempXml('BeforeSaveStamp.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const fieldWrite = result.value.edges.find(
+          (e) =>
+            e.edgeType === 'writesTo' &&
+            e.toId === 'CustomField:Ns__Obj__c.My_Field__c',
+        );
+        expect(fieldWrite).toBeDefined();
+        expect(fieldWrite?.confidence).toBe('declared');
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

@@ -361,6 +361,7 @@ describe('extractConditions', () => {
             },
           ],
           conditionLogic: 'and',
+          sourceName: null,
         },
       ];
       const result = extractConditions({
@@ -381,6 +382,157 @@ describe('extractConditions', () => {
       expect(result.conditionNodes[0]!.properties.fieldRefs).toEqual([
         'CustomField:Opportunity.Status__c',
       ]);
+    });
+
+    // BUG 6 — a bare `and` / `or` conditionLogic (the DEFAULT for every
+    // Flow decision) carries no index tokens, so the old index-substitution
+    // pass returned the keyword verbatim, rendering the predicate as the
+    // literal word "and". The expression must be the real `field op value`.
+    it('renders a bare `and` decision as the actual predicate, not the word "and" (BUG 6)', () => {
+      const sources: ConditionSource[] = [
+        {
+          kind: 'flow-decision',
+          conditions: [
+            { field: '$Record.Status__c', operation: 'EqualTo', value: 'Approved' },
+          ],
+          conditionLogic: 'and',
+          sourceName: null,
+        },
+      ];
+      const result = extractConditions({
+        parentId: 'Flow:Set_Status',
+        sources,
+        parentSourcePath: '/abs/Set_Status.flow-meta.xml',
+        parentObjectApiName: 'Opportunity',
+      });
+      expect(result.conditionNodes[0]!.properties.expression).toBe(
+        '$Record.Status__c EqualTo Approved',
+      );
+      expect(result.conditionNodes[0]!.properties.expression).not.toBe('and');
+    });
+
+    it('joins multi-condition bare-`and` decisions with AND (BUG 6)', () => {
+      const sources: ConditionSource[] = [
+        {
+          kind: 'flow-decision',
+          conditions: [
+            { field: '$Record.Amount', operation: 'GreaterThan', value: '1000000' },
+            { field: '$Record.Stage', operation: 'EqualTo', value: 'Negotiation' },
+          ],
+          conditionLogic: 'and',
+          sourceName: null,
+        },
+      ];
+      const result = extractConditions({
+        parentId: 'Flow:Watch_Deal',
+        sources,
+        parentSourcePath: '/abs/Watch_Deal.flow-meta.xml',
+        parentObjectApiName: 'Opportunity',
+      });
+      expect(result.conditionNodes[0]!.properties.expression).toBe(
+        '$Record.Amount GreaterThan 1000000 AND $Record.Stage EqualTo Negotiation',
+      );
+    });
+
+    it('joins multi-condition bare-`or` decisions with OR, case-insensitively (BUG 6)', () => {
+      const sources: ConditionSource[] = [
+        {
+          kind: 'flow-decision',
+          conditions: [
+            { field: '$Record.Type', operation: 'EqualTo', value: 'A' },
+            { field: '$Record.Type', operation: 'EqualTo', value: 'B' },
+          ],
+          // Uppercase keyword must still take the join path (case-insensitive).
+          conditionLogic: 'OR',
+          sourceName: null,
+        },
+      ];
+      const result = extractConditions({
+        parentId: 'Flow:Type_Branch',
+        sources,
+        parentSourcePath: '/abs/Type_Branch.flow-meta.xml',
+        parentObjectApiName: 'Opportunity',
+      });
+      expect(result.conditionNodes[0]!.properties.expression).toBe(
+        '$Record.Type EqualTo A OR $Record.Type EqualTo B',
+      );
+    });
+
+    it('still index-substitutes real custom conditionLogic (BUG 6 guard)', () => {
+      const sources: ConditionSource[] = [
+        {
+          kind: 'flow-decision',
+          conditions: [
+            { field: '$Record.A', operation: 'EqualTo', value: 'x' },
+            { field: '$Record.B', operation: 'EqualTo', value: 'y' },
+          ],
+          conditionLogic: '1 OR 2',
+          sourceName: null,
+        },
+      ];
+      const result = extractConditions({
+        parentId: 'Flow:Custom_Logic',
+        sources,
+        parentSourcePath: '/abs/Custom_Logic.flow-meta.xml',
+        parentObjectApiName: 'Opportunity',
+      });
+      expect(result.conditionNodes[0]!.properties.expression).toBe(
+        '($Record.A EqualTo x) OR ($Record.B EqualTo y)',
+      );
+    });
+
+    // BUG 7 — the decision's real name must survive onto the node + mirror as
+    // `sourceName`, so explain_flow can label the row with it instead of the
+    // synthetic `condition-N` handle.
+    it('threads the flow-decision sourceName onto the node properties and mirror (BUG 7)', () => {
+      const sources: ConditionSource[] = [
+        {
+          kind: 'flow-decision',
+          conditions: [
+            { field: '$Record.Status__c', operation: 'EqualTo', value: 'Approved' },
+          ],
+          conditionLogic: 'and',
+          sourceName: 'My_Decision (My_Outcome)',
+        },
+      ];
+      const result = extractConditions({
+        parentId: 'Flow:Set_Status',
+        sources,
+        parentSourcePath: '/abs/Set_Status.flow-meta.xml',
+        parentObjectApiName: 'Opportunity',
+      });
+      expect(result.conditionNodes[0]!.properties.sourceName).toBe(
+        'My_Decision (My_Outcome)',
+      );
+      expect(result.conditionsMirror[0]!.sourceName).toBe(
+        'My_Decision (My_Outcome)',
+      );
+      // The synthetic id is UNCHANGED — firesWhen edges + downstream ids still
+      // resolve; only a NEW property was added.
+      expect(result.conditionNodes[0]!.id).toBe(
+        'ConditionalContext:Flow:Set_Status.condition-0',
+      );
+    });
+
+    it('omits sourceName entirely when the flow-decision has no name (BUG 7)', () => {
+      const sources: ConditionSource[] = [
+        {
+          kind: 'flow-decision',
+          conditions: [
+            { field: '$Record.Status__c', operation: 'EqualTo', value: 'Approved' },
+          ],
+          conditionLogic: 'and',
+          sourceName: null,
+        },
+      ];
+      const result = extractConditions({
+        parentId: 'Flow:Set_Status',
+        sources,
+        parentSourcePath: '/abs/Set_Status.flow-meta.xml',
+        parentObjectApiName: 'Opportunity',
+      });
+      expect('sourceName' in result.conditionNodes[0]!.properties).toBe(false);
+      expect('sourceName' in result.conditionsMirror[0]!).toBe(false);
     });
   });
 
