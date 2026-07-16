@@ -246,7 +246,7 @@ field.
 
 ## Tool profile (advertised roster)
 
-The full roster's 196 advertised tool schemas (200 registered; 4 back-compat
+The full roster's 198 advertised tool schemas (202 registered; 4 back-compat
 aliases stay hidden) cost tens of thousands of context tokens in MCP clients
 that do not defer tool definitions. `SFI_TOOL_PROFILE=core` advertises only
 the 18-schema core roster (orientation, resolve/route, the universal graph

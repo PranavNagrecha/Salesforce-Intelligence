@@ -3,7 +3,7 @@
 **Purpose.** A diligence pass that clones the repo and reads `packages/mcp/src/tools/`
 sees a big TypeScript monorepo with a lot of MCP tool handlers. What it does not see —
 because none of it lives in a single file a reviewer opens — is the eval/gate harness
-that keeps 200 tools (196 advertised) from silently regressing, the confidence discipline threaded through
+that keeps 202 tools (198 advertised) from silently regressing, the confidence discipline threaded through
 every graph edge, and the honesty posture that refuses rather than guesses. This document
 assembles those invisible assets from artifacts that already exist in this repo. **Every
 number below is either measured live against this worktree (method and command given
@@ -168,7 +168,7 @@ authority) — none of it visible from reading tool source alone.
 
 The `ComponentType` union in `packages/contracts/src/index.ts:111-463` currently declares
 **102 distinct component types** (verified live: `node scripts/product-surface.mjs` reports
-`componentTypeCount: 102`, `edgeTypeCount: 23`, `toolCount: 200`, `skillCount: 25` against
+`componentTypeCount: 102`, `edgeTypeCount: 23`, `toolCount: 202`, `skillCount: 25` against
 this worktree, 2026-07-13). This is not a flat list — it's a chronological build-out
 documented inline in the union itself, spanning:
 

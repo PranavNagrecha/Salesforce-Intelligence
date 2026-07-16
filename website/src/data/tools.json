@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-07-13T14:47:04.161Z",
-  "toolCount": 196,
+  "generatedAt": "2026-07-16T14:15:36.718Z",
+  "toolCount": 198,
   "sections": [
     {
       "label": "Orientation & routing",
@@ -800,6 +800,14 @@
         {
           "name": "sfi.record_creation_paths",
           "description": "\"How do records of this object get created?\" - the record-provenance trace an admin needs to answer \"how did this record get here?\"."
+        },
+        {
+          "name": "sfi.flow_graph",
+          "description": "The FAITHFUL, LOSSLESS structural graph of a Flow - every canvas element with its REAL <name>, the full element-to-element connector graph (what runs next), decis..."
+        },
+        {
+          "name": "sfi.flow_trace",
+          "description": "Honest PROJECTION of a Flow over a caller-supplied record state - the \"what happens to THIS record\" debugger."
         },
         {
           "name": "sfi.flow_fault_audit",

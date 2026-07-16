@@ -1,7 +1,7 @@
 {
-  "generatedAt": "2026-07-13T14:47:04.161Z",
+  "generatedAt": "2026-07-16T14:15:36.718Z",
   "version": "0.2.0",
-  "toolCount": 196,
+  "toolCount": 198,
   "skillCount": 25,
   "commandCount": 4,
   "componentTypeCount": 102,
@@ -10,18 +10,18 @@
     "packages": [
       {
         "name": "mcp",
-        "files": 244,
-        "cases": 3768
+        "files": 249,
+        "cases": 3844
       },
       {
         "name": "extractors",
-        "files": 78,
-        "cases": 936
+        "files": 85,
+        "cases": 1066
       },
       {
         "name": "cli",
         "files": 44,
-        "cases": 431
+        "cases": 435
       },
       {
         "name": "graph",
@@ -30,8 +30,8 @@
       },
       {
         "name": "parsers",
-        "files": 5,
-        "cases": 163
+        "files": 6,
+        "cases": 167
       },
       {
         "name": "renderers",
@@ -51,20 +51,20 @@
       {
         "name": "tooling-api",
         "files": 4,
-        "cases": 55
+        "cases": 54
       },
       {
         "name": "core",
         "files": 2,
-        "cases": 41
+        "cases": 40
       }
     ],
-    "totalCases": 6056,
-    "totalFiles": 423,
+    "totalCases": 6268,
+    "totalFiles": 436,
     "packageCount": 10,
-    "approx": 6000
+    "approx": 6200
   },
-  "integrationSuiteCount": 3,
+  "integrationSuiteCount": 7,
   "gates": [
     "Type-check",
     "Lint",
@@ -87,20 +87,20 @@
   "packageDescriptions": [
     {
       "name": "mcp",
-      "files": 244,
-      "cases": 3768,
-      "description": "The 196 read-only tools + router + grounding layer"
+      "files": 249,
+      "cases": 3844,
+      "description": "The 198 read-only tools + router + grounding layer"
     },
     {
       "name": "extractors",
-      "files": 78,
-      "cases": 936,
+      "files": 85,
+      "cases": 1066,
       "description": "Metadata parsing for every Salesforce component type"
     },
     {
       "name": "cli",
       "files": 44,
-      "cases": 431,
+      "cases": 435,
       "description": "The sfi command-line tool"
     },
     {
@@ -111,8 +111,8 @@
     },
     {
       "name": "parsers",
-      "files": 5,
-      "cases": 163,
+      "files": 6,
+      "cases": 167,
       "description": "Formula / SOQL / source tokenizers"
     },
     {
@@ -136,13 +136,13 @@
     {
       "name": "tooling-api",
       "files": 4,
-      "cases": 55,
+      "cases": 54,
       "description": "Optional Tooling-API enrichment"
     },
     {
       "name": "core",
       "files": 2,
-      "cases": 41,
+      "cases": 40,
       "description": "core package tests"
     }
   ]
