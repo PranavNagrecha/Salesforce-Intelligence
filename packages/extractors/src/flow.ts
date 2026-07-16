@@ -26,6 +26,22 @@ import { deriveComponentApiName } from './path-utils.js';
 
 const FLOW_FILE_SUFFIX = '.flow-meta.xml';
 const ROOT_ELEMENT = 'Flow';
+
+/**
+ * The fast-xml-parser options shared by every Flow-XML entry point —
+ * {@link extractFlow} and the flow-graph projection (`flow-graph.ts`). Flow
+ * metadata files are local trusted disk content sourced from `sf project
+ * retrieve`, so XXE is not a concern; the default 1000 entity-expansion limit
+ * is too tight for real production Flows, so it is raised to 10000 while
+ * preserving a pathological-input ceiling. Exported (rather than re-declared)
+ * so the two entry points parse byte-identically.
+ */
+export const FLOW_XML_PARSER_OPTIONS = {
+  ignoreAttributes: true,
+  parseTagValue: false,
+  trimValues: true,
+  processEntities: { maxTotalExpansions: 10000 },
+};
 // <apiVersion> is OPTIONAL: auto-generated flows (record-triggered
 // PolicyCondition_* helpers, screen flows like customer_satisfaction) omit
 // it. It is NOT required for extraction — the node carries `number | null`
@@ -72,7 +88,7 @@ type FlowStatus = (typeof ALLOWED_STATUS)[number];
  * scalar/object otherwise. Flow elements the extractor reads are all
  * single-occurrence; this helper tolerates either shape.
  */
-const unwrapSingle = (value: unknown): unknown =>
+export const unwrapSingle = (value: unknown): unknown =>
   Array.isArray(value) ? value[0] : value;
 
 /**
@@ -82,7 +98,7 @@ const unwrapSingle = (value: unknown): unknown =>
  * etc. may appear any number of times, so call sites consume an array.
  * Returns `[]` for `undefined`/`null`.
  */
-const toArray = (value: unknown): unknown[] => {
+export const toArray = (value: unknown): unknown[] => {
   if (value === undefined || value === null) return [];
   return Array.isArray(value) ? value : [value];
 };
@@ -92,7 +108,7 @@ const toArray = (value: unknown): unknown[] => {
  * `undefined` becomes `null`; everything else stringifies. Used for
  * optional string-valued elements that default to `null`.
  */
-const toNullableString = (value: unknown): string | null => {
+export const toNullableString = (value: unknown): string | null => {
   const v = unwrapSingle(value);
   if (v === undefined || v === null) return null;
   return String(v);
@@ -104,7 +120,7 @@ const toNullableString = (value: unknown): string | null => {
  * Edge-emission rules treat such values as "no object specified" and
  * record a warning rather than emit a malformed-id edge.
  */
-const toNonEmptyString = (value: unknown): string | null => {
+export const toNonEmptyString = (value: unknown): string | null => {
   const v = unwrapSingle(value);
   if (v === undefined || v === null) return null;
   const s = String(v).trim();
@@ -936,7 +952,7 @@ const WHOLE_RECORD_DISCLOSURE =
  *     and the caller suppresses per-field edges and stamps
  *     {@link WHOLE_RECORD_DISCLOSURE}.
  */
-interface InputReferenceResolution {
+export interface InputReferenceResolution {
   readonly object: string;
   readonly kind: 'triggerRecord' | 'recordVariable';
   readonly confidence: Edge['confidence'];
@@ -966,7 +982,7 @@ interface InputReferenceResolution {
  * name, or a `$Record` on a flow that is not record-scoped / has no trigger
  * object) — those remain unresolvable offline and the caller skips + discloses.
  */
-const resolveInputReferenceObject = (
+export const resolveInputReferenceObject = (
   dmlObj: Record<string, unknown>,
   rootObj: Record<string, unknown>,
   dataflowIndex: FlowDataflowIndex,
@@ -1205,13 +1221,13 @@ const buildRecordDeleteEdges = (
 const BEFORE_SAVE_TRIGGER_TYPE = 'RecordBeforeSave';
 
 /** Coerce an already-unwrapped XML child into a record, else null (no unwrapSingle — call sites iterate `toArray` output). */
-const asRecord = (value: unknown): Record<string, unknown> | null =>
+export const asRecord = (value: unknown): Record<string, unknown> | null =>
   typeof value === 'object' && value !== null
     ? (value as Record<string, unknown>)
     : null;
 
 /** Strip an optional `{! ... }` merge wrapper from a reference string. */
-const stripMergeWrapper = (ref: string): string => {
+export const stripMergeWrapper = (ref: string): string => {
   const t = ref.trim();
   return t.startsWith('{!') && t.endsWith('}') ? t.slice(2, -1).trim() : t;
 };
@@ -1753,19 +1769,9 @@ export const extractFlow = async (
   const xmlResult = await readAndValidateXml(path);
   if (!xmlResult.ok) return xmlResult;
 
-  /**
-   * Flow metadata files are local trusted disk content sourced from
-   * `sf project retrieve`; XXE is not a concern. The default 1000
-   * limit is too tight for real Flows in production orgs. Raising to
-   * 10000 to accept legitimate complex flows while preserving a
-   * pathological-input ceiling.
-   */
-  const parser = new XMLParser({
-    ignoreAttributes: true,
-    parseTagValue: false,
-    trimValues: true,
-    processEntities: { maxTotalExpansions: 10000 },
-  });
+  // Shared options (see {@link FLOW_XML_PARSER_OPTIONS}) so this and the
+  // flow-graph projection parse Flow XML byte-identically.
+  const parser = new XMLParser(FLOW_XML_PARSER_OPTIONS);
   // `XMLValidator.validate` above catches structural errors, but
   // `parser.parse()` still throws at runtime on guards the validator
   // doesn't enforce — e.g., the `maxTotalExpansions` entity-reference
