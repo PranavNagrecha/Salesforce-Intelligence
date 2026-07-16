@@ -282,6 +282,8 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
     tools: [
       'sfi.explain_field',
       'sfi.explain_flow',
+      'sfi.flow_graph',
+      'sfi.flow_trace',
       'sfi.explain_apex_method',
       'sfi.explain_formula',
       'sfi.field_meaning',

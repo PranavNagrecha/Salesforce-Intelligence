@@ -852,6 +852,46 @@ describe('explainFlowHandler', () => {
     expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
   });
 
+  // ---------------------------------------------------------------------------
+  // sfi.flow_graph cross-reference (spec §9 Q2 — KEEP + cross-ref, non-
+  // destructive). explain_flow is a SUMMARY over six axes; it must defer to
+  // flow_graph for the full element/connector structure and must never claim
+  // (via any field) to be that complete structural projection.
+  // ---------------------------------------------------------------------------
+  it('surfaces a seeAlso cross-reference pointing structure/connector questions at sfi.flow_graph', async () => {
+    const result = await explainFlowHandler(ctx, { flowId: FULL_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    expect(data.seeAlso).toContain('sfi.flow_graph');
+    // Names what THIS tool is (a summary) and what it does NOT enumerate —
+    // never implies the narrative is the complete element/connector graph.
+    expect(data.seeAlso).toMatch(/SUMMARY/);
+    expect(data.seeAlso).toMatch(/does NOT enumerate every element/);
+    expect(data.seeAlso).toMatch(/connector graph/);
+  });
+
+  it('surfaces the same seeAlso cross-reference for a minimal Flow (present regardless of body content)', async () => {
+    const result = await explainFlowHandler(ctx, { flowId: MINIMAL_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.seeAlso).toContain('sfi.flow_graph');
+  });
+
+  it('never claims completeness anywhere in the output (no "complete"/"entire"/"full structure" claim)', async () => {
+    // Non-destructive guard: explain_flow must not regress into re-adding a
+    // false-completeness claim now that flow_graph exists to defer to.
+    const result = await explainFlowHandler(ctx, { flowId: FULL_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    expect(data.disclosure).not.toMatch(/complete|entire structure|full structure/i);
+    expect(data.conditionsRuntimeNote).not.toMatch(/complete|entire structure/i);
+    // seeAlso is exempt: it explicitly negates completeness ("does NOT
+    // enumerate every element") rather than claiming it.
+    expect(data.seeAlso).toMatch(/does NOT enumerate/);
+  });
+
   it('surfaces the declared run mode, unhandled-fault flag, and a correct run-mode note', async () => {
     const result = await explainFlowHandler(ctx, { flowId: FULL_FLOW_ID });
     expect(result.ok).toBe(true);

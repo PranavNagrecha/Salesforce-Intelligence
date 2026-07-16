@@ -306,6 +306,14 @@ import {
   flowFaultAuditInputSchema,
 } from './flow-fault-audit.js';
 import {
+  flowGraphHandler,
+  flowGraphInputSchema,
+} from './flow-graph.js';
+import {
+  flowTraceHandler,
+  flowTraceInputSchema,
+} from './flow-trace.js';
+import {
   generateAdminHandbookHandler,
   generateAdminHandbookInputSchema,
 } from './generate-admin-handbook.js';
@@ -1382,6 +1390,10 @@ export const dispatchTool = async (
         flowFaultAuditInputSchema,
         flowFaultAuditHandler,
       );
+    case 'sfi.flow_graph':
+      return runTool(ctx, args, flowGraphInputSchema, flowGraphHandler);
+    case 'sfi.flow_trace':
+      return runTool(ctx, args, flowTraceInputSchema, flowTraceHandler);
     case 'sfi.explain_apex_method':
       return runTool(
         ctx,

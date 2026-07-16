@@ -279,6 +279,8 @@ describe('dispatchTool', () => {
     // decision 5 — wired the dark record-provenance + flow-fault-hygiene tools.
     'sfi.record_creation_paths',
     'sfi.explain_flow',
+    'sfi.flow_graph',
+    'sfi.flow_trace',
     'sfi.flow_fault_audit',
     'sfi.explain_apex_method',
     'sfi.explain_formula',
@@ -644,6 +646,8 @@ describe('V01_TOOLS', () => {
       'sfi.order_of_execution',
       'sfi.record_creation_paths',
       'sfi.explain_flow',
+      'sfi.flow_graph',
+      'sfi.flow_trace',
       'sfi.flow_fault_audit',
       'sfi.explain_apex_method',
       'sfi.explain_formula',

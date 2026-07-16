@@ -2290,6 +2290,61 @@ const EXPLAIN_FLOW_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   });
 
 /**
+ * Concrete JSON Schema for `sfi.flow_graph`. Mirrors `flowGraphInputSchema`
+ * (flow-graph.ts). `flowRef` accepts a canonical `Flow:{ApiName}` id, a bare
+ * Flow API name, or a Flow record id — the shared resolver reconciles them and
+ * fails closed on a record id without a Tooling-API index. `include` narrows to
+ * a subset of body sections; `element` returns the subgraph for one canvas
+ * element. Drift between this schema and the Zod schema is a code-review concern.
+ */
+const FLOW_GRAPH_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
+  Object.freeze({
+    type: 'object',
+    properties: {
+      flowRef: { type: 'string', minLength: 1 },
+      include: {
+        type: 'array',
+        items: {
+          type: 'string',
+          enum: [
+            'connectors',
+            'decisions',
+            'assignments',
+            'recordOps',
+            'formulas',
+            'variables',
+            'loops',
+            'actions',
+          ],
+        },
+      },
+      element: { type: 'string', minLength: 1 },
+    },
+    required: ['flowRef'],
+  });
+
+/**
+ * Concrete JSON Schema for `sfi.flow_trace`. Mirrors `flowTraceInputSchema`
+ * (flow-trace.ts). `flowRef` accepts a canonical `Flow:{ApiName}` id, a bare
+ * Flow API name, or a Flow record id (the shared resolver reconciles them and
+ * fails closed on a record id without a Tooling-API index). `recordState` is the
+ * starting field-value map; `priorState` is the optional `$Record__Prior` map for
+ * `ISCHANGED` / `PRIORVALUE`; `maxSteps` guards loops/cycles (default 500, hard
+ * cap 100000 mirroring the Zod `.max(100000)` so the guard can't be de-fanged).
+ * Drift between this schema and the Zod schema is a code-review concern.
+ */
+const FLOW_TRACE_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
+  type: 'object',
+  properties: {
+    flowRef: { type: 'string', minLength: 1 },
+    recordState: { type: 'object' },
+    priorState: { type: 'object' },
+    maxSteps: { type: 'integer', minimum: 1, maximum: 100000 },
+  },
+  required: ['flowRef', 'recordState'],
+});
+
+/**
  * Concrete JSON Schema for `sfi.explain_apex_method`. Mirrors
  * `explainApexMethodInputSchema`. The `classApiName` prefix
  * constraint (must start with `ApexClass:` or `ApexTrigger:`) is not
@@ -4753,8 +4808,20 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.explain_flow',
     description:
-      "Explain what a Flow does in plain business terms — what it is FOR, when it runs, and what it changes. The go-to answer for \"what does this flow do\", \"what is this automation for\", \"walk me through this process\", or \"explain the {Name} flow\". Given a Flow canonical id (`Flow:{ApiName}`), return a structured narrative payload that the caller (Claude / an explainer skill) composes into a natural-language explanation. The payload covers: identity (apiName, label, status, processType), trigger info (triggerType, the resolved `triggersOn` CustomObject, and the list of v2.0a `firesWhen` ConditionalContexts gating the trigger), action calls (outgoing `callsApex` edges with each target's ApexClass id + type), subflow calls (R6-02: outgoing `references` edges with `referenceKind: 'subflow'` — the declared `<subflows>` calls — each naming the target `Flow:{flowName}` and whether it `resolved` in the vault; a dangling managed/uncaptured subflow surfaces `resolved: false`, never fabricated), record lookups (outgoing `readsFrom` edges collapsed by target object with per-object filter counts), record writes (outgoing `writesTo` edges classified by `operation` into `create | update | delete`), and decisions (the v2.0a `properties.conditions[]` mirror surfaced one row per condition with the rendered expression text). Subflow calls were previously unmodeled and invisible here; the only STILL-invisible nested-flow path is the Apex `Flow.Interview` invocation (not a declared `<subflows>` edge). A `conditionsRuntimeNote` flags that the trigger/decision conditions are the statically-declared criteria (heuristic), NOT a runtime trace — whether a path executes is data-dependent and is not evaluated. The tool does NOT compose prose — see the `disclosure` field. Invalid prefix surfaces as `invalid-query`; unknown ids surface as `component-not-found`.",
+      "Explain what a Flow does in plain business terms — what it is FOR, when it runs, and what it changes. The go-to answer for \"what does this flow do\", \"what is this automation for\", \"walk me through this process\", or \"explain the {Name} flow\". Given a Flow canonical id (`Flow:{ApiName}`), return a structured narrative payload that the caller (Claude / an explainer skill) composes into a natural-language explanation. The payload covers: identity (apiName, label, status, processType), trigger info (triggerType, the resolved `triggersOn` CustomObject, and the list of v2.0a `firesWhen` ConditionalContexts gating the trigger), action calls (outgoing `callsApex` edges with each target's ApexClass id + type), subflow calls (R6-02: outgoing `references` edges with `referenceKind: 'subflow'` — the declared `<subflows>` calls — each naming the target `Flow:{flowName}` and whether it `resolved` in the vault; a dangling managed/uncaptured subflow surfaces `resolved: false`, never fabricated), record lookups (outgoing `readsFrom` edges collapsed by target object with per-object filter counts), record writes (outgoing `writesTo` edges classified by `operation` into `create | update | delete`), and decisions (the v2.0a `properties.conditions[]` mirror surfaced one row per condition with the rendered expression text). Subflow calls were previously unmodeled and invisible here; the only STILL-invisible nested-flow path is the Apex `Flow.Interview` invocation (not a declared `<subflows>` edge). A `conditionsRuntimeNote` flags that the trigger/decision conditions are the statically-declared criteria (heuristic), NOT a runtime trace — whether a path executes is data-dependent and is not evaluated. The tool does NOT compose prose — see the `disclosure` field. For the FULL structure (every canvas element by its REAL name + the complete element-to-element connector graph of what runs next, decision rule branches, loops, formulas, and variables), call `sfi.flow_graph` — this tool is a business SUMMARY, not the raw graph. Invalid prefix surfaces as `invalid-query`; unknown ids surface as `component-not-found`.",
     inputSchema: EXPLAIN_FLOW_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.flow_graph',
+    description:
+      "The FAITHFUL, LOSSLESS structural graph of a Flow — every canvas element with its REAL <name>, the full element-to-element connector graph (what runs next), decision rules, assignment items, record-op filters, loops, formulas, variables, subflows, actions, and the <start> element with its entry criteria + scheduled paths. This is the tool for \"show me the structure of <Flow>\", \"what are the branches / decisions in <Flow>\", \"trace the connectors\", \"what elements does <Flow> have\", or \"give me the full element graph\" — where `sfi.explain_flow` gives a plain-business SUMMARY (and historically renamed decisions to condition-N, collapsed conditions to the word \"and\", and emitted ZERO connectors), flow_graph exposes the RAW graph so the host LLM composes the answer. `flowRef` accepts a canonical `Flow:{ApiName}` id, a bare Flow API name (fuzzy-resolved; an AMBIGUOUS bare name returns candidates as a success envelope, never a silent pick), or a Flow record id (300…/301… — fails closed with an actionable message unless a Tooling-API id index exists). The Flow source is read ON DEMAND from the vault and projected; nothing is persisted. Each `connectors[]` edge carries `from`, `to`, and `kind` (`immediate` for the start's first element, `default`, `rule` with the decision outcome `ruleName`, `fault`, `nextValue`/`noMoreValues` for a loop's two branches, `scheduled` with the `scheduledPathName`), plus `isGoTo` for reconnect / loop-back edges; `connectors[]` is authoritative and the per-element `connectsTo` fields are conveniences. Subflow `resolved` is overlaid from the vault (a dangling managed/uncaptured subflow surfaces `resolved: false`, never fabricated). HONESTY (spec §4.3, verbatim in `disclosure`): NO runtime inference — reachability, dead-branch detection, and ordering are NOT computed here (that is the host LLM's or `flow_trace`'s job); any canvas-element type the parser does not model lands in `unmodeled[]` by name, never silently dropped. Large flows: `include` narrows to a subset of body sections (`connectors|decisions|assignments|recordOps|formulas|variables|loops|actions`) and `element` returns the subgraph for ONE element (it + its immediate connectors + neighbors); any narrowing is DISCLOSED in a `narrowing` block (with `omittedSections`), and the central byte budget truncates disclosed, never silent. Invalid `Type:` prefix or a record id without an index → `invalid-query`; an unknown name / non-Flow → `component-not-found`.",
+    inputSchema: FLOW_GRAPH_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.flow_trace',
+    description:
+      "Honest PROJECTION of a Flow over a caller-supplied record state — the \"what happens to THIS record\" debugger. Given `flowRef` and a `recordState` field-value map (e.g. `{ \"Status__c\": \"Active\", \"Amount__c\": 10 }`), it walks the Flow's DECLARED graph from `<start>` and returns WHICH PATH executes (`path[]` — the ordered elements, each decision with its `matchedRule` + per-condition evaluation) and WHAT it writes (`writes[]` — each `FieldWrite` with `object`/`field`/`value`/`valueKind`/`viaElement`/`persists`). This is the tool for \"what happens to this record in <Flow> if Status is Active\", \"trace <Flow> with these field values\", \"which branch runs in <Flow> when <field> is X\", \"what does <Flow> write when …\", or \"simulate <Flow> for a record where …\" — where `sfi.flow_graph` gives the raw STRUCTURE and `sfi.explain_flow` the plain-business summary, flow_trace evaluates the tractable common subset over your state. Optional `priorState` supplies `$Record__Prior` for `ISCHANGED`/`PRIORVALUE`; `maxSteps` (default 500) guards loops/cycles. It is NOT a Salesforce runtime (verbatim in `disclosure`): it never executes Apex, callouts, DML, or subflows, and never reaches across to other automation's order-of-execution. A branch that depends on data NOT in `recordState` is `unknown`, NEVER assumed — when the executed path hits such a decision, an Apex/invocable action, a subflow, or an unmodeled (wait/dynamic) element, the walk STOPS honestly with `stoppedReason:'unevaluated-branch'` and the element is listed in `unevaluated[]` with a `why`. Entry criteria are evaluated first (`entered` + `entryEvaluation[]`); a false result stops with `stoppedReason:'no-entry'`. `assumptions[]` records honest gaps (e.g. a loop collection not supplied is \"assumed empty\"; a record lookup's results are unknown). `persists` mirrors the Bug-3 precondition — an in-memory `$Record.<field>` assignment reaches the database only when the flow also performs a whole-record `$Record` update (before-save flows persist automatically); record-op writes are real DML and always persist. `flowRef` resolution + failure modes are identical to `sfi.flow_graph` (canonical id / bare name / record id; ambiguous bare name → candidates as a success envelope, never a silent pick; invalid `Type:` prefix or index-less record id → `invalid-query`; unknown name / non-Flow → `component-not-found`).",
+    inputSchema: FLOW_TRACE_INPUT_SCHEMA,
   },
   {
     name: 'sfi.flow_fault_audit',

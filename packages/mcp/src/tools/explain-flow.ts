@@ -55,6 +55,19 @@
  *      (e.g., `Flow:Account_Notify.condition-2`) when none was captured;
  *      the `conditions` array is the rendered expression text.
  *
+ * Cross-reference to `sfi.flow_graph` (spec §9 Q2 — KEEP + cross-ref,
+ * decided non-destructively): this tool is deliberately a SUMMARY over
+ * six narrative axes (identity, trigger info, action/subflow calls,
+ * record lookups/writes, decisions) — it does NOT enumerate every
+ * element or the element-to-element connector graph. `sfi.flow_graph`
+ * is the lossless structural projection (every element by its real
+ * name, the full connector graph from→to→kind, loop next-value/no-
+ * more-values edges, formula expressions, variable declarations). The
+ * `seeAlso` field on the output makes this explicit so a caller asking
+ * "what's the full structure" / "what are the branches" / "show me the
+ * connectors" is routed to `flow_graph` instead of over-trusting this
+ * narrative as exhaustive.
+ *
  * Implementation notes:
  *   - One `getNodeById(flowId)` resolves the Flow. `Flow:` prefix is
  *     enforced at the handler boundary; non-`Flow:` ids surface as
@@ -110,6 +123,18 @@ const FLOW_PREFIX = 'Flow:';
  * v2.0f explainer-tier wording.
  */
 const DISCLOSURE = 'Structured narrative; Claude composes prose';
+
+/**
+ * Cross-reference note (spec §9 Q2) surfaced verbatim on every response.
+ * Points structure/connector questions at `sfi.flow_graph` — this tool's
+ * six narrative axes are a SUMMARY, not the complete element/connector
+ * graph, and this note says so explicitly rather than leaving a caller to
+ * assume the narrative is exhaustive. Frozen here for the same reason as
+ * {@link DISCLOSURE}: a caller-facing rephrasing is a code-review concern,
+ * not a silent drift between what the tool claims and what it returns.
+ */
+const SEE_ALSO_FLOW_GRAPH =
+  'This is a SUMMARY narrative (trigger info, action/subflow calls, record lookups/writes, decisions) — it does NOT enumerate every element or the element-to-element connector graph. For the full structure (every element by real name, the complete from→to→kind connector graph, decision rule branches, loops, formulas, and variables), call sfi.flow_graph(flowRef) instead.';
 
 /**
  * Zod schema for the `sfi.explain_flow` tool input.
@@ -375,7 +400,15 @@ export interface ExplainFlowOutput {
    * data-dependent at runtime and is not evaluated here. Always present so a
    * host never reads a declared condition as "this path runs".
    */
-  readonly conditionsRuntimeNote: string;  /** P13-ANNOT-tools: curated annotations (provenance `annotation`); absent when none. */
+  readonly conditionsRuntimeNote: string;
+  /**
+   * Cross-reference to `sfi.flow_graph` (spec §9 Q2). Always present, verbatim
+   * — see {@link SEE_ALSO_FLOW_GRAPH}. States plainly that this narrative is a
+   * SUMMARY over six axes, not the complete element/connector graph, and names
+   * the tool that returns the lossless structural projection.
+   */
+  readonly seeAlso: string;
+  /** P13-ANNOT-tools: curated annotations (provenance `annotation`); absent when none. */
   readonly annotations?: AnnotationsBlock;
 }
 
@@ -1126,6 +1159,10 @@ const collectDecisions = (node: Node): readonly ExplainFlowDecision[] => {
  * decision conditions. See the module JSDoc for the cascade and the
  * honesty-axis design.
  *
+ * DEFERS to `sfi.flow_graph` for full structure: this is a SUMMARY over
+ * six narrative axes, not every element or the connector graph. The
+ * `seeAlso` field on the output says so explicitly (spec §9 Q2).
+ *
  * @example
  *   const r = await explainFlowHandler(ctx, { flowId: 'Flow:Account_Notify' });
  *   if (r.ok) {
@@ -1253,6 +1290,7 @@ export const explainFlowHandler = async (
     decisions: collectDecisions(node),
     disclosure: DISCLOSURE,
     conditionsRuntimeNote: CONDITIONS_RUNTIME_NOTE,
+    seeAlso: SEE_ALSO_FLOW_GRAPH,
   };
   const annotations = await annotationsBlockFor(ctx, node.id);
 
