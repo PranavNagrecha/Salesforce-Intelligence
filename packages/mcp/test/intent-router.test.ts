@@ -121,7 +121,7 @@ const CASES: readonly Case[] = [
   { q: 'What CRUD access does this permission set allow?', intent: 'what-permissions-profile-has', plane: 'vault' },
   // P1c — passive voice: "what if two profiles ARE MERGED" (active "if I merge
   // profiles" already routed).
-  { q: 'What if two profiles are merged?', intent: 'profile-migration', plane: 'vault' },
+  { q: 'What if two profiles are merged?', intent: 'what-if-merge-profiles', plane: 'vault' },
   // P1e — generic state transitions beyond the Opportunity/Lead hardcoded list.
   { q: 'What happens when an Application becomes Submitted?', intent: 'lifecycle-process', plane: 'vault' },
   { q: 'What runs when an Enrollment is disqualified?', intent: 'lifecycle-process', plane: 'vault' },
@@ -220,7 +220,7 @@ const CASES: readonly Case[] = [
   { q: 'Can you let me know if changing any of these fields will have an impact on the User object — not removing the fields but changing the values?', intent: 'value-change', plane: 'vault' },
   // B21 over-route control: a field-type CHANGE is a what-if, NOT save-order —
   // the trigger-order "status changes" pattern must not steal it.
-  { q: 'What happens when I change a field type?', intent: 'what-if-field', plane: 'vault' },
+  { q: 'What happens when I change a field type?', intent: 'what-if-change-field-type', plane: 'vault' },
   { q: 'What formulas reference the Amount field?', intent: 'formula-references', plane: 'vault' },
 
   // Onboarding / docs / overview
@@ -232,19 +232,19 @@ const CASES: readonly Case[] = [
   { q: 'What functional domains is the org structured into?', intent: 'domain-clusters', plane: 'vault' },
 
   // Change / history / cross-org
-  { q: 'What changed in the org since last week?', intent: 'history-change', plane: 'vault' },
+  { q: 'What changed in the org since last week?', intent: 'changed-since-timeframe', plane: 'vault' },
   { q: 'Who changed this record?', intent: 'runtime-audit-trail', plane: 'vault' },
   { q: 'Show me the field history for Account.', intent: 'runtime-audit-trail', plane: 'vault' },
   { q: 'When was the Status field last modified?', intent: 'last-modified', plane: 'vault' },
   { q: "What's different between UAT and prod?", intent: 'cross-org-diff', plane: 'vault' },
-  { q: 'Show me the churn between snapshots', intent: 'snapshot-diff', plane: 'vault' },
+  { q: 'Show me the churn between snapshots', intent: 'metadata-churn', plane: 'vault' },
   // R8-SECURITY-TREND — posture-over-time must beat generic snapshot-diff and
   // suggest metric:securityScore.
   { q: 'Is our security posture getting better or worse?', intent: 'security-posture-trend', plane: 'vault' },
 
   // CPQ / OmniStudio
   { q: 'Explain the CPQ price rules', intent: 'cpq', plane: 'vault' },
-  { q: 'Break down the OmniScript flow', intent: 'omnistudio', plane: 'vault' },
+  { q: 'Break down the OmniScript flow', intent: 'omniscript-flow', plane: 'vault' },
 
   // Field mapping / meaning
   { q: 'How do fields map between Lead and Contact?', intent: 'field-mapping', plane: 'vault' },
@@ -272,7 +272,7 @@ const CASES: readonly Case[] = [
   // Collision guards: record-type value diffs keep their specialist route
   // (rule order), and removal simulations stay what-if.
   { q: 'Which picklist values are available for the Support record type?', intent: 'record-type-picklist', plane: 'vault' },
-  { q: 'What happens if I remove the Closed Won picklist value?', intent: 'what-if-field', plane: 'vault' },
+  { q: 'What happens if I remove the Closed Won picklist value?', intent: 'what-if-remove-picklist-value', plane: 'vault' },
 
   // P14-ROUTER-cmdt-record-values — configured CMDT / Custom Setting RECORD values
   { q: 'What is the Default record of Marketo_Api_Setting__mdt set to?', intent: 'cmdt-record-values', plane: 'vault' },
@@ -370,7 +370,7 @@ const CASES: readonly Case[] = [
   // "what changed since…" stays with the EARLIER history-change rule
   // (org_history — also no-arg callable), an established route.
   { q: 'What changed since the last refresh?', intent: 'history-change', plane: 'vault' },
-  { q: 'How much churn did we have over time?', intent: 'snapshot-diff', plane: 'vault' },
+  { q: 'How much churn did we have over time?', intent: 'metadata-churn', plane: 'vault' },
 
   // P14-ROUTER-method-signature-impact — the specialist simulator wins the
   // signature phrasings the generic blast-radius rule was swallowing.
@@ -1112,27 +1112,31 @@ describe('router ↔ roster contract (CI gate)', () => {
     'sfi.review_annotations',
     'sfi.confirm_annotation',
     'sfi.reject_annotation',
-    // P13-GITHIST-tools — `component_as_of` is a drill reached AFTER a
-    // component is in hand; sfi.component_history is now router-reachable
-    // ("when did X change" — P14-ROUTER-goldset-expand).
-    'sfi.component_as_of',
+    // P13-GITHIST-tools — sfi.component_history is now router-reachable
+    // ("when did X change" — P14-ROUTER-goldset-expand); sfi.component_as_of
+    // is now router-reachable too ("show <X> as of the last snapshot" —
+    // offline-router hardening).
     // Opt-in live-plane helpers the agent invokes directly inside a live flow.
-    // sfi.live_automation_fired ("did the flow fire yesterday") and
-    // sfi.live_picklist_usage ("which values are never used") are now
-    // router-reachable (router-v2 P4 needs-live reachability).
-    'sfi.blast_radius_live', 'sfi.live_describe', 'sfi.live_stale_check',
+    // sfi.live_automation_fired ("did the flow fire yesterday"),
+    // sfi.live_picklist_usage ("which values are never used") and
+    // sfi.blast_radius_live ("live blast radius if I change this field") are
+    // now router-reachable (router-v2 P4 needs-live reachability / hardening).
+    'sfi.live_describe', 'sfi.live_stale_check',
     // Sub-tools / specialized drills reached via a bundle or after `resolve`:
-    'sfi.decision_table_browse',
-    // sfi.explain_formula is now router-reachable (QA-Bundle-2 save-behavior rule).
-    'sfi.field_meaning',
+    // sfi.explain_formula is now router-reachable (QA-Bundle-2 save-behavior rule);
+    // sfi.decision_table_browse ("show me the decision tables") and
+    // sfi.field_meaning ("meaning of <field>") are now router-reachable too
+    // (offline-router hardening).
     // sfi.find_semantic_field is now router-reachable (USAGE/FIELD-FORENSICS
     // REACH — the find-semantic-field intent: "do we have a field for X" /
-    // "where do we store <concept> data across the org").
-    'sfi.fleet_find',
+    // "where do we store <concept> data across the org"); sfi.fleet_find is
+    // now router-reachable too ("find orgs in the fleet with <pkg>" — hardening).
     // sfi.layout_assignments is now router-reachable (P12-ROUTER-layout-assignments).
     // sfi.lookup_record is now router-reachable (P14-ROUTER-cmdt-record-values).
-    'sfi.org_pulse',
-    'sfi.promotion_readiness', 'sfi.test_coverage_for_method',
+    // sfi.org_pulse ("quick health snapshot of the org") and
+    // sfi.promotion_readiness ("is the sandbox ready to promote") are now
+    // router-reachable too (offline-router hardening).
+    'sfi.test_coverage_for_method',
     // sfi.profile_security is now router-reachable (eval family C — the
     // profile-security intent: IP relaxation / login IP / login hours), and
     // sfi.what_if_disable_trigger is now router-reachable (eval family C —
@@ -1142,7 +1146,8 @@ describe('router ↔ roster contract (CI gate)', () => {
     // is now router-reachable (P14-ROUTER-stress-20).
     // sfi.what_if_deactivate_flow is now router-reachable (RESIDUAL 2 —
     // "what breaks if I deactivate the X flow" / "turn off FlowA and FlowB").
-    'sfi.what_if_split_profile',
+    // sfi.what_if_split_profile is now router-reachable too ("what if I split
+    // the <X> profile into focused permission sets" — offline-router hardening).
     // ENGINE-ARC: the four live assignment-data tools are now router-reachable
     // via the §4 retargets (permset-user-roster / profile-user-roster /
     // unassigned-permset-groups / permset-group-grants flips, the NEW
@@ -1207,6 +1212,12 @@ describe('router ↔ roster contract (CI gate)', () => {
     // intent is deferred to the orchestrator's router-v2 pass, exactly as
     // R6-15/R6-16.
     'sfi.generate_fleet_report',
+    // (sfi.flow_graph is NOT grandfathered: per the owner directive that the
+    // OFFLINE deterministic fallback must handle the new flow tools, it has its
+    // own 'flow-structure' intent rule in intent-router.ts — precision-tuned to
+    // structure/connector-graph/branches/element-graph vocabulary so it does not
+    // steal explain_flow's "what does <Flow> DO / explain / walk me through"
+    // narration. It is routable, so it must stay out of this grandfather set.)
   ]);
 
   it('every V01 tool is router-reachable OR explicitly grandfathered (no silently-unrouted tool)', () => {
@@ -1580,7 +1591,11 @@ describe('Family D — wrong-plane / missing-candidate routes', () => {
       "What's different between UAT and prod?",
     ]) {
       const r = classifyQuestion(q);
-      expect(r.intent).toBe('cross-org-diff');
+      // The object-scoped phrasing ("compare the Account object …") now lands on
+      // the precise cross-org-diff-object intent (primary tool
+      // compare_object_across_vaults per the gold-set); the org-wide phrasings
+      // stay on cross-org-diff. Both are cross-vault-compare routes.
+      expect(['cross-org-diff', 'cross-org-diff-object']).toContain(r.intent);
       // Disclosure rides on the route; the tools stay executable (not a hard block).
       expect(r.tools).toContain('sfi.compare_vaults');
       expect(r.gap?.category).toBe('cross-vault-registry');
@@ -1880,7 +1895,7 @@ describe('Family C — qualifier words never outrank the head-noun intent', () =
     const r = classifyQuestion(
       'If the field type changed on Shipment_Weight__c, what integrations blow up?',
     );
-    expect(r.intent).toBe('what-if-field');
+    expect(r.intent).toBe('what-if-change-field-type');
     expect(r.tools).toContain('sfi.what_if_change_field_type');
     expect(r.tools).not.toContain('sfi.integration_map');
     // The genuine topology catalog is untouched.
@@ -2264,14 +2279,14 @@ describe('flow-family REACH routing', () => {
     it('routes "what\'s subscribing to Change Data Capture"', () => {
       routesTo(
         "What's subscribing to Change Data Capture in this org? Will turning on CDC for Contact fan out?",
-        'event-subscribers',
+        'cdc-subscribers',
         'sfi.cdc_subscribers',
       );
     });
     it('routes "CDC or platform-event subscribers feeding <system>"', () => {
       routesTo(
         'Do we have any CDC or platform-event subscribers feeding the warehouse, or is that all API polling?',
-        'event-subscribers',
+        'cdc-subscribers',
         'sfi.cdc_subscribers',
       );
     });
@@ -2610,7 +2625,7 @@ describe('usage/impact/field-forensics REACH routing', () => {
     it('"change <Object.field> from a picklist to a text field" → what_if_change_field_type', () => {
       routesTo(
         'Can you walk me through what happens if I change Case.Ticket_Code__c from a picklist to a text field?',
-        'what-if-field',
+        'what-if-change-field-type',
         'sfi.what_if_change_field_type',
       );
     });
@@ -2630,7 +2645,7 @@ describe('usage/impact/field-forensics REACH routing', () => {
     it('"what would break if I merged the <A> and <B> profiles" (past tense) → what_if_merge_profiles', () => {
       routesTo(
         'What would break if I merged the Sales and Support profiles? They look 90% identical.',
-        'profile-migration',
+        'what-if-merge-profiles',
         'sfi.what_if_merge_profiles',
       );
     });
@@ -2644,11 +2659,14 @@ describe('usage/impact/field-forensics REACH routing', () => {
   });
 
   describe('usage — "which <type> write/touch X" stays find_component_usages', () => {
-    it('"Which flows write to <Object.field>" → find_component_usages', () => {
+    it('"Which flows write to <Object.field>" → why_field_changed', () => {
+      // Gold-set ground truth: a "which <type> WRITE to <field>" ask is
+      // field-write forensics — why_field_changed enumerates the writers —
+      // not the generic component_usages reference dump.
       routesTo(
         'Which flows write to Contact.Order_Sync_Flag__c?',
-        'component-usage',
-        'sfi.find_component_usages',
+        'why-field-changed',
+        'sfi.why_field_changed',
       );
     });
     it('"is <NamedFlow> triggered by <OtherFlow> or standalone" → find_component_usages', () => {
