@@ -1,0 +1,163 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+import site from "../../data/site.ts";
+
+const title = "How sf-intelligence reasons about your Salesforce org (0.2.0 → 0.2.1)";
+const description =
+  "Inside sf-intelligence's deterministic, offline reasoning model: a two-graph join of your org vault against a 94-concept, 143-rule org-independent Concept Model that turns metadata into cited, confidence-tiered structural claims - no LLM. What shipped in 0.2.0 and 0.2.1.";
+
+const jsonld = [
+  {
+    "@type": "TechArticle",
+    headline: "How sf-intelligence reasons about your Salesforce org",
+    description:
+      "The deterministic, offline reasoning model behind sfi.interpret: a two-graph join of the grounded org vault against an org-independent Concept Model (94 concepts / 143 rules) that returns cited, confidence-tiered structural claims - no LLM, no live org read.",
+    author: { "@id": `${site.url}/#org` },
+    publisher: { "@id": `${site.url}/#org` },
+    datePublished: "2026-07-20",
+    dateModified: "2026-07-20",
+    inLanguage: "en",
+    keywords:
+      "Salesforce reasoning model, sfi.interpret, deterministic metadata analysis, Concept Model, structural implications, offline MCP, Salesforce dependency analysis",
+    articleSection: "Engineering",
+    mainEntityOfPage: `${site.url}/blog/deterministic-reasoning-model`,
+    image: `${site.url}/assets/img/og-image.png`,
+    isPartOf: { "@id": `${site.url}/#website` },
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/blog/deterministic-reasoning-model"
+  heading="Reasoning about your org, not just retrieving it"
+  intro={`sf-intelligence 0.2.x adds a deterministic, offline reasoning layer on top of retrieval. Here is how <code>sfi.interpret</code> turns your org's real metadata into <strong>cited, confidence-tiered structural claims</strong> - and what shipped across 0.2.0 and 0.2.1.`}
+  crumbs={[{ label: "blog", href: "/blog" }, { label: "deterministic-reasoning-model", href: "/blog/deterministic-reasoning-model" }]}
+  breadcrumbs={[{ name: "Blog", path: "/blog" }, { name: "The deterministic reasoning model", path: "/blog/deterministic-reasoning-model" }]}
+  jsonld={jsonld}
+>
+  <section style="padding-top:clamp(20px,3vw,28px); padding-bottom:0;">
+    <div class="container">
+      <div class="hero-meta">
+        <span class="chip">2026-07-20</span>
+        <span class="chip"><b>94</b> concepts</span>
+        <span class="chip"><b>143</b> rules</span>
+        <span class="chip">deterministic · offline</span>
+        <span class="chip">no LLM · no live read</span>
+      </div>
+    </div>
+  </section>
+
+  <section style="padding-top:clamp(18px,3vw,26px);">
+    <div class="container">
+      <div class="prose">
+
+        <div class="callout">
+          <p><strong>In one line:</strong> retrieval tells you <em>what your org contains</em>; the reasoning model tells you <em>what that structure implies</em> - deletes that cascade, automations that race, an entry point that runs without sharing - as claims cited to the exact component IDs they are grounded in, computed offline with no language model in the loop.</p>
+        </div>
+
+        <h2 id="retrieval-to-reasoning">From retrieval to reasoning</h2>
+        <p>The first job of sf-intelligence is retrieval: pull one read-only metadata snapshot of a Salesforce org, build a local graph, and answer "what is this field / who references it / where is this used" - grounded in real metadata and cited to canonical IDs, never a training-data guess.</p>
+        <p>But the questions that actually block a change are <em>implication</em> questions. Does deleting this master-detail parent cascade-delete its children? Do these three record-triggered flows run in a defined order? Is this Apex class an unenforced entry point? Answering those means going one step past retrieval - from <em>facts</em> to <em>consequences</em>. That step is <code>resolve → interpret → synthesize</code>: resolve the component, interpret its structure, fold the result into the answer.</p>
+
+        <h2 id="two-graphs">Two graphs, one deterministic join</h2>
+        <p>The reasoning model is built on two separate graphs that never mix:</p>
+        <ul>
+          <li><strong>Graph A - your org's grounded vault slice.</strong> A minimal slice of your real metadata graph assembled around the component in question. It carries the org specificity, and everything it contributes is citable by canonical ID.</li>
+          <li><strong>Graph B - the Concept Model.</strong> A curated, <strong>org-independent</strong> library of general Salesforce truth: <strong>94 concepts / 143 rules</strong> about how the platform behaves - save order, sharing posture, cascade semantics, async boundaries, and more. <strong>No org data ever lives in it.</strong></li>
+        </ul>
+        <p><code>sfi.interpret</code> is the deterministic <strong>join</strong> of the two: it fires the Concept Model's rules against your grounded slice and returns the structural implications that hold. No inference engine, no language model, no live org call - the same inputs always produce the same claims.</p>
+
+        <div class="code-block diagram-block">
+          <div class="cb-head"><span class="fname">sfi.interpret — the join</span></div>
+          <pre class="diagram">     <span class="dim">Graph A (your org)                 Graph B (ships with the package)</span>
+  ┌────────────────────┐          ┌──────────────────────────┐
+  │ grounded vault     │          │ Concept Model            │
+  │ slice — real IDs   │          │ 94 concepts / 143 rules  │
+  │ CustomField:...    │          │ <span class="dim">org-independent, no</span>      │
+  │ Flow:...  Apex:... │          │ <span class="dim">org data — ever</span>          │
+  └─────────┬──────────┘          └────────────┬─────────────┘
+            └──────────────┬───────────────┘
+                     <span class="amber">▼  sfi.interpret  (deterministic · offline)</span>
+            ┌───────────────────────────────────┐
+            │ cited, confidence-tiered claims   │
+            │ groundedIn: [CustomField:...]     │
+            └───────────────────────────────────┘</pre>
+        </div>
+
+        <h2 id="cited-claims">Every claim is cited and confidence-tiered</h2>
+        <p>Two honesty properties are baked into the output:</p>
+        <ul>
+          <li><strong>No citation, no claim.</strong> Every interpretation carries a <code>groundedIn</code> list - the exact component IDs it matched. A claim the engine cannot ground is never emitted.</li>
+          <li><strong>Claim confidence is a second axis.</strong> It reuses the <code>declared | parsed | heuristic</code> words but is <em>computed, not read off one edge</em>: the weakest of the concept rule's ceiling and the grounding edges the claim matched. It is deliberately distinct from the per-edge confidence of a single relationship.</li>
+        </ul>
+
+        <h2 id="honesty">Honesty is load-bearing</h2>
+        <table class="doc-table">
+          <thead><tr><th>Principle</th><th>What it means</th></tr></thead>
+          <tbody>
+            <tr><td><strong>No citation, no claim</strong></td><td>Each claim names the IDs it is grounded in; ungrounded claims are never emitted.</td></tr>
+            <tr><td><strong>Empty ≠ none</strong></td><td>An empty result means "no concept rule fired here" - <em>not</em> "nothing depends on this component".</td></tr>
+            <tr><td><strong>Static shape, not proof</strong></td><td>It names a cascade, an undefined order, an unenforced surface - a structural shape, not a proven runtime breach or vulnerability.</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="0-2-0">What 0.2.0 shipped</h2>
+        <p>0.2.0 was a capability-and-correctness release. It expanded the advertised tool roster to <strong>196</strong>, broadened metadata coverage across schema, automation, sharing, frontend, integration, and OmniStudio, added what-if / impact analysis and coverage-aware destructive verdicts, and introduced the opt-in, read-only <strong>live plane</strong> (<code>sfi.live_*</code>) for the assignment questions an offline vault cannot answer - all consent- and budget-gated.</p>
+
+        <h2 id="0-2-1">What 0.2.1 added</h2>
+        <ul>
+          <li><strong>Concept Model grew to 94 concepts / 143 rules</strong> (from 48 / 84) - all org-independent, curated general-Salesforce truth. The shape of <code>sfi.interpret</code> output is unchanged; there is simply more it can reason about.</li>
+          <li><strong>18 adversarially-verified correctness fixes.</strong> Every already-correct rule is byte-identical; only the over-claiming cases were fixed - e.g. a <code>without sharing</code> class no longer implies it enforces CRUD/FLS, and a unique-field violation reports the right status code.</li>
+          <li><strong>New endpoint-type predicate.</strong> Edge rules now fire only when the endpoint node is of the intended type (fail-closed), so a permission-set grant is never mislabelled a Profile grant, nor an Apex callout a named-credential binding.</li>
+          <li><strong>Two lossless Flow tools</strong> - <code>sfi.flow_graph</code> (a lossless structural projection of a Flow) and <code>sfi.flow_trace</code> (declared-logic tracing over a caller-supplied record map). Advertised roster 196 → <strong>198</strong>.</li>
+          <li><strong>Truthful concept disambiguation.</strong> <code>disambiguate_concepts</code> now computes counts and recommendations over the full match set with an explicit boundary disclosure, instead of an alphabetically-biased slice.</li>
+        </ul>
+
+        <h2 id="example">A worked example</h2>
+        <p>Ask about a master-detail field and interpret returns the cascade implication, grounded in the field's own ID:</p>
+        <div class="code-block">
+          <div class="cb-head"><span class="fname">sfi.interpret</span></div>
+          <pre><span class="tok-c"># resolve → interpret → synthesize (deterministic, offline)</span>
+<span class="tok-k">interpret</span>(<span class="tok-p">componentId</span>: <span class="tok-s">"CustomField:Invoice_Line__c.Invoice__c"</span>)
+
+<span class="tok-c">→ claim:</span> deleting the master (<span class="tok-s">Invoice__c</span>) cascade-deletes its
+        detail records; the child cannot exist without a parent.
+<span class="tok-c">→ groundedIn:</span> [<span class="tok-s">CustomField:Invoice_Line__c.Invoice__c</span>]
+<span class="tok-c">→ confidence:</span> declared   <span class="tok-c"># from the field's declared master-detail relationship</span></pre>
+        </div>
+        <p class="muted">Placeholder component IDs - the model carries no org data; your real IDs come only from your own grounded slice.</p>
+
+        <h2 id="learn-more">Learn more</h2>
+        <ul>
+          <li><a href="/capabilities">The full capability map</a> - the eight areas you can ask about, plus the live plane.</li>
+          <li><a href="/glossary#concept-model">Glossary: the reasoning / concept model</a> and <a href="/glossary#claim-confidence">claim confidence</a>.</li>
+          <li><a href="/trust">Quality &amp; trust</a> - how it is tested and the explicit boundaries of static analysis.</li>
+        </ul>
+
+        <div class="cta-box">
+          <h2 class="screen-type">Reason over your own org.</h2>
+          <p>Free, read-only, offline. One metadata retrieve, then ask implication questions in plain language from Claude, Cursor, or any MCP host.</p>
+          <div class="cta-actions">
+            <a class="btn btn-solid" href="/getting-started">get started</a>
+            <a class="btn btn-ghost" href="/capabilities">all capabilities</a>
+            <a class="btn btn-ghost" href={site.npm} rel="noopener">npm install</a>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+</DocPage>
+
+<style>
+  .diagram-block pre.diagram {
+    white-space: pre;
+    overflow-x: auto;
+    line-height: 1.5;
+    color: var(--fg);
+  }
+  .diagram .dim { color: var(--fg-dim); }
+  .diagram .amber { color: var(--amber); }
+</style>

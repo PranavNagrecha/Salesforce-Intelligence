@@ -1,0 +1,67 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+import site from "../../data/site.ts";
+
+const title = "Blog - sf-intelligence";
+const description =
+  "Engineering notes from sf-intelligence: how the offline, read-only Salesforce reasoning model works, and what ships in each release.";
+
+const posts = [
+  {
+    slug: "deterministic-reasoning-model",
+    tag: "0.2.0 → 0.2.1",
+    date: "2026-07-20",
+    title: "How sf-intelligence reasons about your org",
+    blurb:
+      "The deterministic, offline reasoning model behind sfi.interpret - a two-graph join of your org vault against a 94-concept, 143-rule org-independent Concept Model that returns cited, confidence-tiered structural claims. Plus what shipped in 0.2.0 and 0.2.1.",
+  },
+];
+
+const jsonld = [
+  {
+    "@type": "Blog",
+    name: "sf-intelligence blog",
+    description,
+    isPartOf: { "@id": `${site.url}/#website` },
+  },
+  {
+    "@type": "ItemList",
+    itemListElement: posts.map((p, i) => ({
+      "@type": "ListItem",
+      position: i + 1,
+      name: p.title,
+      url: `${site.url}/blog/${p.slug}`,
+    })),
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/blog"
+  heading="Blog"
+  intro={`Engineering notes on how sf-intelligence works under the hood - the offline reasoning model, the trust model, and what changes in each release. Read-only, grounded, deterministic.`}
+  crumbs={[{ label: "blog", href: "/blog" }]}
+  breadcrumbs={[{ name: "Blog", path: "/blog" }]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container">
+      <div class="grid cols-2">
+        {posts.map((p) => (
+          <article class="card">
+            <div class="tagn">{p.tag} · {p.date}</div>
+            <h3><a href={`/blog/${p.slug}`}>{p.title}</a></h3>
+            <p>{p.blurb}</p>
+            <p style="margin:0;"><a href={`/blog/${p.slug}`}>› read the post</a></p>
+          </article>
+        ))}
+      </div>
+      <p style="margin-top:32px; display:flex; gap:12px; flex-wrap:wrap;">
+        <a class="btn btn-ghost" href="/capabilities">› full capability map</a>
+        <a class="btn btn-solid" href="/getting-started">get started</a>
+      </p>
+    </div>
+  </section>
+</DocPage>

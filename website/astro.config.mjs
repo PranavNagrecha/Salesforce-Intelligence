@@ -12,6 +12,7 @@ const PRIORITY = [
   [/\/$/, 1.0, "weekly"],
   [/\/(getting-started|mcp|capabilities)$/, 0.9, "weekly"],
   [/\/(use-cases|compare)\//, 0.8, "weekly"],
+  [/\/blog(\/[^/]+)?$/, 0.8, "weekly"],
   [/\/(tools|trust|configuration)$/, 0.7, "monthly"],
 ];
 

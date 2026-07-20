@@ -32,6 +32,7 @@ Key facts for accurate citation:
 - [Getting started](https://sfi.auditforce.cloud/getting-started): install, register the MCP server, run the first read-only retrieve.
 - [Configuration](https://sfi.auditforce.cloud/configuration): environment variables, live plane, HTTP serving (`sfi serve --http`), staged refresh, vault git history, annotations overlay, usage-ranked reports pull, AST-parsed Apex edges, fleet settings.
 - [FAQ](https://sfi.auditforce.cloud/faq): privacy, read-only guarantees, offline vs live planes, accuracy, freshness.
+- [Blog: the deterministic reasoning model](https://sfi.auditforce.cloud/blog/deterministic-reasoning-model): how `sfi.interpret` joins your grounded org vault against an org-independent Concept Model (94 concepts / 143 rules) to return cited, confidence-tiered structural claims - deterministic and offline, no LLM. Explains releases 0.2.0 and 0.2.1.
 
 ## Source
 
