@@ -16,6 +16,7 @@ import type { Context } from '../../src/server.js';
 import {
   collectApexIdentifiers,
   explainDebugLogHandler,
+  explainDebugLogInputSchema,
   isDebugLog,
   parseGovernorLimit,
 } from '../../src/tools/explain-debug-log.js';
@@ -229,5 +230,52 @@ describe('explainDebugLogHandler', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.detectedStatusCode).toBe('UNABLE_TO_LOCK_ROW');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Natural input aliases (EXPLAIN-DEBUG-LOG-REJECTS-TEXT-ALIAS): a host that
+// pasted the log under `debugLog` / `log` / `text` / `content` is resolved to
+// the same answer as canonical `logText`; canonical wins on a collision; a
+// genuinely-empty input fails closed with a named invalid-query.
+// ---------------------------------------------------------------------------
+
+describe('explain_debug_log — natural input aliases', () => {
+  const CANON =
+    'System.LimitException: Too many SOQL queries: 101\nClass.AccountHandler.recalc: line 12, column 1';
+
+  const runVia = async (raw: Record<string, unknown>) => {
+    const parsed = explainDebugLogInputSchema.safeParse(raw);
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) throw new Error('schema rejected a valid alias input');
+    const r = await explainDebugLogHandler(ctx, parsed.data);
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error('handler failed');
+    return r.value.data;
+  };
+
+  it('debugLog / log / text / content resolve byte-identically to canonical logText', async () => {
+    const canonical = await runVia({ logText: CANON });
+    for (const key of ['debugLog', 'log', 'text', 'content']) {
+      const viaAlias = await runVia({ [key]: CANON });
+      expect(viaAlias).toEqual(canonical);
+    }
+  });
+
+  it('canonical logText wins when both logText and an alias are present', () => {
+    const parsed = explainDebugLogInputSchema.safeParse({
+      logText: CANON,
+      text: 'unrelated log zzz',
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(parsed.data.logText).toBe(CANON);
+  });
+
+  it('empty input (no canonical, no alias) fails closed with a named logText invalid-query', () => {
+    const parsed = explainDebugLogInputSchema.safeParse({ object: 'Account' });
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return;
+    expect(parsed.error.issues.some((i) => i.path.join('.') === 'logText')).toBe(true);
   });
 });

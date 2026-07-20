@@ -266,6 +266,114 @@ describe('jsonResult global response budget', () => {
 });
 
 /**
+ * SOE-omission honesty at the GLOBAL budget seam
+ * (WHAT-HAPPENS-ON-SAVE-TRUNCATION-DROPS-LATER-PHASES / W5.1 GLOBAL residual).
+ *
+ * When `jsonResult` tail-truncates a composed-SOE `data.soe` to fit the byte
+ * budget, it must recompute + stamp `phasesOmitted` (via the ONE shared
+ * `computePhasesOmitted`) so a globally-trimmed payload can never silently
+ * contradict its own `summary.phaseCounts` — a host must never read a trimmed
+ * `soe` as "no duplicate rules fire on save". These lock the seam directly on
+ * `jsonResult` (the full end-to-end fixture lives in what-happens-on-save.test).
+ */
+describe('jsonResult SOE phase-omission at the global budget seam', () => {
+  const soeStep = (
+    phase: string,
+    i: number,
+  ): Record<string, unknown> => ({
+    phase,
+    stepIndex: i,
+    componentId: `ValidationRule:SeamObj.${phase}_${String(i).padStart(3, '0')}`,
+    componentType: phase === 'duplicate-rules' ? 'DuplicateRule' : 'ValidationRule',
+    apiName: `${phase}_${String(i).padStart(3, '0')}`,
+    actions: [],
+  });
+
+  // A composed-SOE data shape: 60 early pre-save-validation steps (the head that
+  // survives) followed by 3 duplicate-rules at the tail (dropped first).
+  const soeData = (
+    extra: Record<string, unknown> = {},
+  ): Record<string, unknown> => {
+    const soe: Record<string, unknown>[] = [];
+    let idx = 0;
+    for (let i = 0; i < 60; i += 1) soe.push(soeStep('pre-save-validation', idx++));
+    for (let i = 0; i < 3; i += 1) soe.push(soeStep('duplicate-rules', idx++));
+    return {
+      objectApiName: 'SeamObj',
+      soe,
+      summary: {
+        totalSteps: soe.length,
+        phaseCounts: { 'pre-save-validation': 60, 'duplicate-rules': 3 },
+      },
+      ...extra,
+    };
+  };
+
+  it('recomputes phasesOmitted naming every dropped non-zero phase after the global soe tail-truncation', () => {
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '8000';
+    const body = { data: soeData(), vaultState: VAULT_STATE };
+    const text = envelopeText(jsonResult(body));
+    expect(bytesOf(text)).toBeLessThanOrEqual(8000);
+    const parsed = JSON.parse(text) as {
+      readonly data: {
+        readonly soe: readonly { readonly phase: string }[];
+        readonly phasesOmitted?: readonly {
+          readonly phase: string;
+          readonly declared: number;
+          readonly present: number;
+        }[];
+      };
+      readonly responseBudget: { readonly truncated?: boolean };
+    };
+    // The tail-truncation really fired and dropped the duplicate-rules tail.
+    expect(parsed.responseBudget.truncated).toBe(true);
+    expect(parsed.data.soe.some((s) => s.phase === 'duplicate-rules')).toBe(false);
+    // …and the payload NAMES it rather than lying by omission.
+    const byPhase = new Map(
+      (parsed.data.phasesOmitted ?? []).map((o) => [o.phase, o]),
+    );
+    expect(byPhase.get('duplicate-rules')).toEqual({
+      phase: 'duplicate-rules',
+      declared: 3,
+      present: 0,
+    });
+  });
+
+  it('leaves a phase-filtered SOE payload (appliedPhaseFilter set) unstamped — its soe is an intentional subset', () => {
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '8000';
+    const body = {
+      data: soeData({ appliedPhaseFilter: 'pre-save-validation' }),
+      vaultState: VAULT_STATE,
+    };
+    const parsed = JSON.parse(envelopeText(jsonResult(body))) as {
+      readonly data: { readonly phasesOmitted?: unknown };
+      readonly responseBudget: { readonly truncated?: boolean };
+    };
+    expect(parsed.responseBudget.truncated).toBe(true);
+    expect(parsed.data.phasesOmitted).toBeUndefined();
+  });
+
+  it('does NOT stamp phasesOmitted on a non-SOE payload that merely has a same-named array (no summary.phaseCounts)', () => {
+    process.env['SFI_MAX_RESPONSE_BYTES'] = '8000';
+    const soe = Array.from({ length: 400 }, (_, i) => ({
+      id: `Row:${i}`,
+      label: `row number ${i} with some padding text`,
+    }));
+    const body = {
+      data: { objectApiName: 'NotSoe', soe, summary: { totalSteps: 80 } },
+      vaultState: VAULT_STATE,
+    };
+    const parsed = JSON.parse(envelopeText(jsonResult(body))) as {
+      readonly data: { readonly phasesOmitted?: unknown };
+      readonly responseBudget: { readonly truncated?: boolean };
+    };
+    // Global trim still fires on the big array, but nothing SOE-shaped ⇒ no stamp.
+    expect(parsed.responseBudget.truncated).toBe(true);
+    expect(parsed.data.phasesOmitted).toBeUndefined();
+  });
+});
+
+/**
  * Unit tests for `runTool`'s defensive try/catch (CR-14, Systemic #5). The
  * sole tool-handler call site previously had NO try/catch: a thrown handler
  * (a renderer that throws by design, a `JSON.stringify` TypeError on a

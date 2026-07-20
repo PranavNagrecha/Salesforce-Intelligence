@@ -276,6 +276,55 @@ const HAS_CRITERIA: ReadonlySet<RuleType> = new Set<RuleType>([
 ]);
 
 /**
+ * One record-match predicate of a criteria-shaped sharing rule: the field it
+ * predicates on, the comparison operation, and the compared value. `value` is
+ * `null` when the XML omits `<value>` (e.g. a null/not-null operation).
+ */
+export interface CriteriaItem {
+  readonly field: string;
+  readonly operation: string;
+  readonly value: string | null;
+}
+
+/**
+ * Parse a rule's `<criteriaItems>` blocks into the ordered predicate list.
+ *
+ * The extractor previously counted these (`criteriaItemCount`) but DROPPED the
+ * field/operation/value payload, so "which records does this rule share?" could
+ * not be answered from the node (SHARING-RULE-OMITS-CRITERIA-ITEMS). Each item
+ * carries the declared `<field>` / `<operation>` / `<value>`; malformed entries
+ * (no field OR no operation) are skipped so a partial item never masquerades as
+ * a complete predicate.
+ */
+const parseCriteriaItems = (rule: Record<string, unknown>): CriteriaItem[] => {
+  const items: CriteriaItem[] = [];
+  for (const raw of toArray(rule['criteriaItems'])) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const container = raw as Record<string, unknown>;
+    const fieldRaw = unwrapSingle(container['field']);
+    const operationRaw = unwrapSingle(container['operation']);
+    if (
+      fieldRaw === undefined ||
+      fieldRaw === null ||
+      fieldRaw === '' ||
+      operationRaw === undefined ||
+      operationRaw === null ||
+      operationRaw === ''
+    ) {
+      continue;
+    }
+    const valueRaw = unwrapSingle(container['value']);
+    items.push({
+      field: String(fieldRaw),
+      operation: String(operationRaw),
+      value:
+        valueRaw === undefined || valueRaw === null ? null : String(valueRaw),
+    });
+  }
+  return items;
+};
+
+/**
  * CR-CAP-16 — GUEST-branch-LOCAL `<sharedTo>` resolver.
  *
  * A guest sharing rule's `<sharedTo>` carries a SINGLE `<guestUser>` child whose
@@ -496,8 +545,9 @@ const buildRule = (
   const label = labelRaw === undefined ? null : String(labelRaw);
 
   // CR-CAP-16: criteria / guest / territory / territoryGroup are all
-  // criteria-shaped, so surface `booleanFilter` + `criteriaItemCount` for every
-  // family in HAS_CRITERIA (owner rules stay null/0).
+  // criteria-shaped, so surface `booleanFilter` + `criteriaItemCount` +
+  // `criteriaItems` (the field/operation/value payload) for every family in
+  // HAS_CRITERIA (owner rules stay null / 0 / empty).
   const hasCriteria = HAS_CRITERIA.has(ruleType);
   const booleanFilterRaw = hasCriteria
     ? unwrapSingle(rule['booleanFilter'])
@@ -506,6 +556,7 @@ const buildRule = (
     booleanFilterRaw === undefined || booleanFilterRaw === null
       ? null
       : String(booleanFilterRaw);
+  const criteriaItems = hasCriteria ? parseCriteriaItems(rule) : [];
   const criteriaItemCount = hasCriteria
     ? toArray(rule['criteriaItems']).length
     : 0;
@@ -539,6 +590,11 @@ const buildRule = (
       sharedFromName: sharedFromResolved?.variantName ?? null,
       booleanFilter,
       criteriaItemCount,
+      // SHARING-RULE-OMITS-CRITERIA-ITEMS: emit the actual predicate payload
+      // (field / operation / value), not just the count, so consumers can answer
+      // "which records does this rule share?" from the node. Owner rules carry
+      // none (empty array, mirroring criteriaItemCount 0).
+      criteriaItems,
       ...(siteName !== null ? { siteName } : {}),
     },
   };

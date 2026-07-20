@@ -34,6 +34,8 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { coercePrefix } from './coerce-id.js';
+import { firstNonEmpty } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { clampedNodeScanLimit, scanTruncationNote } from './scan-cap.js';
@@ -45,10 +47,26 @@ const MAX_LIMIT = 200;
 /** The Apex node types whose `callsApex` edges form the dependency graph. */
 const APEX_TYPES: readonly ComponentType[] = ['ApexClass', 'ApexTrigger'];
 
+/** Apex id prefixes a `componentId` scope may carry. */
+const APEX_CLASS_PREFIX = 'ApexClass:';
+const APEX_TRIGGER_PREFIX = 'ApexTrigger:';
+
 const FIND_DEPENDENCY_CYCLES_TOOL = 'sfi.find_dependency_cycles';
 
-/** Zod schema for the `sfi.find_dependency_cycles` tool input. */
+/**
+ * Zod schema for the `sfi.find_dependency_cycles` tool input.
+ *
+ *   - `componentId` / `nameContains`: optional SCOPE. `componentId`
+ *     (`ApexClass:`/`ApexTrigger:` id or bare class name) narrows to the cyclic
+ *     cluster THAT component belongs to (honest empty when it is in none);
+ *     `nameContains` keeps only clusters with a member whose id matches the
+ *     substring. Both AND together; the scan itself stays org-wide (an SCC needs
+ *     the full graph), but the RETURNED clusters + counts reflect the scope, and
+ *     `appliedScope` is echoed. Omit both for the org-wide cycle list.
+ */
 export const findDependencyCyclesInputSchema = z.object({
+  componentId: z.string().min(1).optional(),
+  nameContains: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
   // CR-22: page cursor for walking the full cycle list when truncated.
   offset: z.number().int().min(0).optional(),
@@ -58,6 +76,42 @@ export const findDependencyCyclesInputSchema = z.object({
 export type FindDependencyCyclesInput = z.infer<
   typeof findDependencyCyclesInputSchema
 >;
+
+/** The resolved cycle scope: an optional component filter and name filter. */
+interface ResolvedCycleScope {
+  /** Canonical `ApexClass:`/`ApexTrigger:` id to require in a cluster, or null. */
+  readonly componentId: ComponentId | null;
+  /** Case-insensitive member-id substring filter, or null. */
+  readonly nameContains: string | null;
+}
+
+/**
+ * Resolve the optional `componentId` / `nameContains` scope, NEVER silently
+ * stripping one. `componentId` is coerced through `coercePrefix` (bare name →
+ * `ApexClass:`; `ApexClass:`/`ApexTrigger:` kept); a WRONG-type prefix is
+ * `invalid-query`. Both omitted → org-wide.
+ */
+const resolveCycleScope = (
+  input: FindDependencyCyclesInput,
+): Result<ResolvedCycleScope, McpError> => {
+  const cidRaw = firstNonEmpty(input.componentId);
+  let componentId: ComponentId | null = null;
+  if (cidRaw !== undefined) {
+    const coerced = coercePrefix(cidRaw, [APEX_CLASS_PREFIX, APEX_TRIGGER_PREFIX]);
+    if (
+      !coerced.startsWith(APEX_CLASS_PREFIX) &&
+      !coerced.startsWith(APEX_TRIGGER_PREFIX)
+    ) {
+      return err({
+        kind: 'invalid-query',
+        message: `componentId must be an ApexClass / ApexTrigger id (e.g. '${APEX_CLASS_PREFIX}Foo') or a bare class name; got '${cidRaw}'`,
+        path: 'componentId',
+      });
+    }
+    componentId = coerced as ComponentId;
+  }
+  return ok({ componentId, nameContains: firstNonEmpty(input.nameContains) ?? null });
+};
 
 /** One cyclic cluster: an SCC of the Apex `callsApex` graph. */
 export interface DependencyCycle {
@@ -71,6 +125,18 @@ export interface DependencyCycle {
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface FindDependencyCyclesOutput {
+  /**
+   * Echoes the scope ACTUALLY applied so a host never assumes a `componentId` /
+   * `nameContains` filter it passed was silently stripped (the always-org-wide
+   * bug this closes). `component` is the resolved Apex id filter (or null),
+   * `nameContains` the member-substring filter (or null); `mode` is `scoped`
+   * when either is set, else `all`.
+   */
+  readonly appliedScope: {
+    readonly component: string | null;
+    readonly nameContains: string | null;
+    readonly mode: 'all' | 'scoped';
+  };
   readonly cycles: readonly DependencyCycle[];
   readonly summary: {
     readonly apexNodesScanned: number;
@@ -219,6 +285,13 @@ export const findDependencyCyclesHandler = async (
 ): Promise<Result<McpResponse<FindDependencyCyclesOutput>, McpError>> => {
   const limit = input.limit ?? DEFAULT_LIMIT;
 
+  // Optional SCOPE (componentId / nameContains). Resolve up front so an invalid
+  // componentId prefix fails fast; never a silent org-wide fallback.
+  const scopeRes = resolveCycleScope(input);
+  if (!scopeRes.ok) return scopeRes;
+  const { componentId: scopeComponent, nameContains: scopeName } = scopeRes.value;
+  const scoped = scopeComponent !== null || scopeName !== null;
+
   // CR-22 B4: scan EVERY Apex node by paging the SQL OFFSET forward (window-by-
   // window) so cycles touching node 501+ are computed — the old single capped
   // `listNodesByType` silently dropped Apex nodes past 500, dropping any cycle
@@ -265,12 +338,30 @@ export const findDependencyCyclesHandler = async (
     return aj < bj ? -1 : aj > bj ? 1 : 0;
   });
 
-  const largestClusterSize = allCycles.reduce((m, c) => Math.max(m, c.size), 0);
+  // Apply the SCOPE to the cluster list (the SCC computation stayed org-wide — a
+  // cluster needs the whole graph — but the RETURNED clusters + counts reflect
+  // the caller's filter). `componentId` keeps the cluster CONTAINING it (empty
+  // when it is in none — an honest empty, not the org list); `nameContains`
+  // keeps clusters with a member id matching the substring. Both AND together.
+  const nameLc = scopeName === null ? null : scopeName.toLowerCase();
+  const scopedCycles = !scoped
+    ? allCycles
+    : allCycles.filter(
+        (c) =>
+          (scopeComponent === null || c.members.includes(scopeComponent)) &&
+          (nameLc === null ||
+            c.members.some((m) => m.toLowerCase().includes(nameLc))),
+      );
+
+  const largestClusterSize = scopedCycles.reduce((m, c) => Math.max(m, c.size), 0);
 
   // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
-  // The narrowing arg set is empty (only paging knobs exist), so the fingerprint
-  // is a constant — the cursor is still bound to tool + vaultHash.
-  const fingerprint = argsFingerprint({});
+  // Bind the fingerprint to the scope so a cursor minted for one scope cannot
+  // resume against a different (differently-filtered) cluster list.
+  const fingerprint = argsFingerprint({
+    componentId: scopeComponent,
+    nameContains: scopeName,
+  });
   let offset = input.offset ?? 0;
   if (input.cursor !== undefined) {
     const decoded = decodeCursor(input.cursor, {
@@ -282,7 +373,7 @@ export const findDependencyCyclesHandler = async (
     offset = decoded.value.o;
   }
 
-  const paged = paginateLegacy(allCycles, {
+  const paged = paginateLegacy(scopedCycles, {
     offset,
     limit,
     keyOf: (c) => c.members.join(','),
@@ -308,11 +399,16 @@ export const findDependencyCyclesHandler = async (
 
   return ok({
     data: {
+      appliedScope: {
+        component: scopeComponent,
+        nameContains: scopeName,
+        mode: scoped ? 'scoped' : 'all',
+      },
       cycles,
       summary: {
         apexNodesScanned: apexNodes.length,
         callsApexEdgesConsidered: edgeCount,
-        cyclicClusters: allCycles.length,
+        cyclicClusters: scopedCycles.length,
         largestClusterSize,
         truncated: paged.hasMore || scan.value.scanIncomplete,
       },

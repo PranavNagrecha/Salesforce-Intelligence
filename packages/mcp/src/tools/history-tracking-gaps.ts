@@ -43,14 +43,17 @@
  *     vault has `objectHistoryEnabled: null` (unknown) on its group — NEVER
  *     silently assumed `true` (enabled) or `false` (disabled).
  *   - Salesforce does not support history tracking on every field type
- *     regardless of the declared flags (formula fields hold no stored
- *     value; certain platform system/audit fields are not trackable at
- *     all). This tool does NOT model those per-type trackability rules — a
- *     formula or synthesized-system field can still appear in `gaps` when
- *     PII-classified with `trackHistory` false, flagged via `isFormula` /
- *     `isSystem` so the caller can filter, rather than being silently
- *     dropped (which would hide a real "no change history exists for this
- *     PII value" fact).
+ *     regardless of the declared flags (formula and roll-up-summary fields
+ *     hold no stored value, auto-number fields are assigned once and never
+ *     edited, and synthesized platform system/audit fields are ineligible).
+ *     Turning on history tracking for those is impossible, so emitting them
+ *     as `field-not-tracked` gaps is a remediation-shaped false positive.
+ *     This tool SEGREGATES them into `untrackable[]` with `severity: 'none'`
+ *     (excluded from `groups` and from `summary.totalGapFields`, which counts
+ *     only actionable gaps) rather than silently dropping them — the "no
+ *     change history exists for this PII value" fact is still disclosed, just
+ *     not as a fixable gap. `summary.untrackableFields` / `byUntrackableReason`
+ *     carry the full counts.
  *   - Only CustomField-declared signals are checked. A field the vault does
  *     not model (a standard field whose object was never retrieved) is
  *     invisible here — never silently treated as compliant.
@@ -137,6 +140,35 @@ export type HistoryTrackingGapsInput = z.infer<typeof historyTrackingGapsInputSc
 /** Why the field's parent object counts as a higher-severity gap, or not. */
 export type HistoryGapKind = 'object-history-disabled' | 'field-not-tracked';
 
+/**
+ * Why Salesforce cannot field-history-track this field REGARDLESS of the
+ * declared flags — a formula/roll-up holds no stored value, an auto-number is
+ * assigned once and never edited, and synthesized platform system/audit fields
+ * are not eligible. Such a field is NOT an actionable "turn on tracking" gap;
+ * it is segregated into `untrackable[]` with `severity: 'none'` rather than
+ * emitted as a remediation-shaped `field-not-tracked` finding.
+ */
+export type HistoryUntrackableReason =
+  | 'formula'
+  | 'roll-up-summary'
+  | 'auto-number'
+  | 'system-field';
+
+/** One PII/sensitive CustomField that CANNOT be history-tracked by field type (informational, never a fixable gap). */
+export interface HistoryUntrackableField {
+  readonly id: ComponentId;
+  readonly apiName: string;
+  readonly objectApiName: string;
+  /** Declared field data type (Summary, AutoNumber, or the formula's return type). */
+  readonly type: string;
+  readonly classification: 'pii' | 'sensitive';
+  readonly category: PiiCategory;
+  /** Which platform rule makes this field non-trackable. */
+  readonly reason: HistoryUntrackableReason;
+  /** Fixed `'none'` — Salesforce offers no field history on this field type, so there is nothing to remediate. */
+  readonly severity: 'none';
+}
+
 /** One PII/sensitive CustomField with no history tracking. */
 export interface HistoryGapField {
   readonly id: ComponentId;
@@ -182,19 +214,34 @@ export type HistoryTrackingGapsScope =
 
 /** Aggregated counts over the FULL gap set (before the page slice is trimmed). */
 export interface HistoryTrackingGapsSummary {
+  /** Count of ACTIONABLE gaps only — untrackable-by-type fields are excluded (they are counted in `untrackableFields`). */
   readonly totalGapFields: number;
   readonly objectsWithGaps: number;
   /** Distinct objects contributing at least one `object-history-disabled` finding. */
   readonly objectsWithHistoryDisabled: number;
   readonly byClassification: Readonly<Record<'pii' | 'sensitive', number>>;
   readonly byGapKind: Readonly<Record<HistoryGapKind, number>>;
+  /** Count of PII/sensitive fields Salesforce CANNOT history-track by field type — informational, NOT actionable gaps. */
+  readonly untrackableFields: number;
+  readonly byUntrackableReason: Readonly<Record<HistoryUntrackableReason, number>>;
 }
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface HistoryTrackingGapsOutput {
   readonly scope: HistoryTrackingGapsScope;
-  /** Gap fields grouped by parent object, sorted `(objectApiName, severity, id)` ASC. */
+  /** ACTIONABLE gap fields grouped by parent object, sorted `(objectApiName, severity, id)` ASC. */
   readonly groups: readonly ObjectHistoryGapGroup[];
+  /**
+   * PII/sensitive fields that Salesforce CANNOT history-track by field type
+   * (formula / roll-up / auto-number / system) — segregated here with
+   * `severity: 'none'` so they are never presented as fixable gaps, while the
+   * "no change history exists for this PII value" fact is still disclosed
+   * (not silently dropped). A capped, first-page-only sample; the full count is
+   * `summary.untrackableFields`.
+   */
+  readonly untrackable: readonly HistoryUntrackableField[];
+  /** True when `untrackable` is a truncated sample of the full untrackable set (see `summary.untrackableFields`). */
+  readonly untrackableTruncated: boolean;
   readonly summary: HistoryTrackingGapsSummary;
   /** Fixed per the module JSDoc honesty axis — every row shares the same two confidences. */
   readonly confidenceAxis: {
@@ -215,7 +262,7 @@ const STATIC_LIMITATIONS: readonly string[] = Object.freeze([
   'PII/sensitive classification reuses the pii_inventory heuristic recognizer over the field\'s declared API name, data type, and description — a field with no matching signal classifies public even if it stores PII at runtime; treat every flag as a starting point for compliance review, not the final word.',
   'trackHistory / enableHistory absence is a DECLARED fact read directly from the field\'s / object\'s own metadata (the extractor\'s Salesforce-matching false default for an omitted XML element) — not inferred.',
   'An object whose CustomObject metadata was never retrieved into the vault reports objectHistoryEnabled: null (unknown) — never silently assumed enabled or disabled.',
-  'Salesforce does not support history tracking on every field type regardless of the declared flags (formula fields hold no stored value; some platform system/audit fields are never trackable). This tool does not model those per-type trackability rules; a formula or synthesized system field can still appear in gaps — filter on isFormula / isSystem if only fixable gaps are wanted.',
+  'Salesforce does not support history tracking on formula, roll-up-summary, auto-number, or synthesized platform system/audit fields regardless of the declared flags — turning tracking on for them is impossible. Such PII/sensitive fields are segregated into untrackable[] (severity none) and excluded from groups and from summary.totalGapFields (which counts only actionable gaps); their full count is summary.untrackableFields / byUntrackableReason.',
   'Only CustomField-declared signals are checked. A field the vault does not model (a standard field whose object was never retrieved) is invisible here — never silently treated as compliant.',
 ]);
 
@@ -236,6 +283,73 @@ const readIsFormula = (properties: Readonly<Record<string, unknown>>): boolean =
 /** Whether the field is a synthesized platform system/audit field (never declared in DX source). */
 const readIsSystem = (properties: Readonly<Record<string, unknown>>): boolean =>
   properties['system'] === true;
+
+/**
+ * Whether Salesforce CANNOT field-history-track this field type regardless of
+ * the declared `trackHistory` flag, and if so, why. Returns `null` for a
+ * normally trackable field (Text, Email, Picklist, EncryptedText, …).
+ *
+ *   - Formula fields hold no stored value (`isFormula: true`).
+ *   - Roll-up summary fields are computed from child records (`dataType: 'Summary'`).
+ *   - Auto-number fields are assigned once at insert and never edited (`dataType: 'AutoNumber'`).
+ *   - Synthesized platform system/audit fields are not eligible (`system: true`).
+ *
+ * These are the field types the Salesforce "Set History Tracking" UI refuses,
+ * so flagging them as `field-not-tracked` gaps is a remediation-shaped false
+ * positive. See the module JSDoc honesty axis.
+ */
+const classifyUntrackable = (
+  properties: Readonly<Record<string, unknown>>,
+): HistoryUntrackableReason | null => {
+  if (readIsFormula(properties)) return 'formula';
+  const dataType = readDataType(properties);
+  if (dataType === 'Summary') return 'roll-up-summary';
+  if (dataType === 'AutoNumber') return 'auto-number';
+  if (readIsSystem(properties)) return 'system-field';
+  return null;
+};
+
+/** Hard cap on how many `untrackable[]` rows a first page samples. Full count is `summary.untrackableFields`. */
+const UNTRACKABLE_SAMPLE_CAP = 50;
+
+/** Ceiling on how many bytes the `untrackable[]` first-page sample may add to a response. */
+const UNTRACKABLE_SAMPLE_MAX_BYTES = 4_000;
+
+/** Mirrors `MAX_RESPONSE_BYTES` — the global dispatch guard the untrackable sample must never crowd. */
+const GLOBAL_RESPONSE_GUARD_BYTES = 45_000;
+
+/** Safety margin kept clear under the global guard when sizing the untrackable sample. */
+const UNTRACKABLE_GUARD_MARGIN_BYTES = 1_000;
+
+/** Comparator for the untrackable list: `(objectApiName, id)` ASC. */
+const compareUntrackable = (a: HistoryUntrackableField, b: HistoryUntrackableField): number => {
+  if (a.objectApiName !== b.objectApiName) {
+    return a.objectApiName < b.objectApiName ? -1 : 1;
+  }
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+};
+
+/**
+ * Fill the first-page `untrackable[]` sample within a row cap AND a byte budget
+ * so an informational appendix can never push the response over the global
+ * response guard. Returns `truncated: true` when the full set did not fit.
+ */
+const sampleUntrackable = (
+  all: readonly HistoryUntrackableField[],
+  maxBytes: number,
+  cap: number,
+): { readonly kept: readonly HistoryUntrackableField[]; readonly truncated: boolean } => {
+  const kept: HistoryUntrackableField[] = [];
+  let bytes = 2; // the enclosing "[]"
+  for (const row of all) {
+    if (kept.length >= cap) break;
+    const rowBytes = Buffer.byteLength(JSON.stringify(row), 'utf8') + 1; // + element separator
+    if (bytes + rowBytes > maxBytes) break;
+    kept.push(row);
+    bytes += rowBytes;
+  }
+  return { kept, truncated: kept.length < all.length };
+};
 
 /** Whether the CustomObject's declared `enableHistory` is `true`. */
 const readEnableHistory = (properties: Readonly<Record<string, unknown>>): boolean =>
@@ -289,6 +403,8 @@ const compareGapFields = (
 /** Everything the handler needs pre-classification: the full ordered gap set plus its stable summary. */
 interface ClassifiedGaps {
   readonly sorted: readonly { readonly objectApiName: string; readonly field: HistoryGapField }[];
+  /** The full untrackable-by-type set, sorted `(objectApiName, id)` ASC — segregated out of `sorted`. */
+  readonly untrackableSorted: readonly HistoryUntrackableField[];
   readonly enableHistoryByObjectId: ReadonlyMap<ComponentId, boolean>;
   readonly objectApiNameById: ReadonlyMap<ComponentId, string>;
   readonly fieldsScanned: number;
@@ -331,10 +447,17 @@ const classifyHistoryGaps = async (
   }
 
   const matched: { objectApiName: string; field: HistoryGapField }[] = [];
+  const untrackable: HistoryUntrackableField[] = [];
   const byClassification: Record<'pii' | 'sensitive', number> = { pii: 0, sensitive: 0 };
   const byGapKind: Record<HistoryGapKind, number> = {
     'object-history-disabled': 0,
     'field-not-tracked': 0,
+  };
+  const byUntrackableReason: Record<HistoryUntrackableReason, number> = {
+    formula: 0,
+    'roll-up-summary': 0,
+    'auto-number': 0,
+    'system-field': 0,
   };
   let fieldsScanned = 0;
 
@@ -357,6 +480,26 @@ const classifyHistoryGaps = async (
     const objectHistoryEnabled = objectId === null ? undefined : enableHistoryByObjectId.get(objectId);
     const objectApiNameResolved =
       objectId !== null ? (objectApiNameById.get(objectId) ?? toObjectApiName(objectId)) : 'Unknown';
+
+    // Fields Salesforce cannot history-track by type are NOT actionable gaps —
+    // segregate them into `untrackable[]` (severity none) instead of emitting a
+    // remediation-shaped `field-not-tracked` finding. The PII fact is still
+    // disclosed (not silently dropped). See the module JSDoc honesty axis.
+    const untrackableReason = classifyUntrackable(node.properties);
+    if (untrackableReason !== null) {
+      byUntrackableReason[untrackableReason] += 1;
+      untrackable.push({
+        id: node.id,
+        apiName: node.apiName,
+        objectApiName: objectApiNameResolved,
+        type: readDataType(node.properties),
+        classification: detection.piiClassification,
+        category: detection.piiCategory,
+        reason: untrackableReason,
+        severity: 'none',
+      });
+      continue;
+    }
 
     const gapKind: HistoryGapKind =
       objectHistoryEnabled === false ? 'object-history-disabled' : 'field-not-tracked';
@@ -384,6 +527,7 @@ const classifyHistoryGaps = async (
   }
 
   const sorted = [...matched].sort(compareGapFields);
+  const untrackableSorted = [...untrackable].sort(compareUntrackable);
   const objectsWithGaps = new Set(sorted.map((m) => m.objectApiName)).size;
   const objectsWithHistoryDisabled = new Set(
     sorted.filter((m) => m.field.gapKind === 'object-history-disabled').map((m) => m.objectApiName),
@@ -391,6 +535,7 @@ const classifyHistoryGaps = async (
 
   return ok({
     sorted,
+    untrackableSorted,
     enableHistoryByObjectId,
     objectApiNameById,
     fieldsScanned,
@@ -400,6 +545,8 @@ const classifyHistoryGaps = async (
       objectsWithHistoryDisabled,
       byClassification,
       byGapKind,
+      untrackableFields: untrackableSorted.length,
+      byUntrackableReason,
     },
   });
 };
@@ -477,8 +624,14 @@ export const historyTrackingGapsHandler = async (
 
   const classified = await classifyHistoryGaps(ctx, input);
   if (!classified.ok) return classified;
-  const { sorted, enableHistoryByObjectId, objectApiNameById, fieldsScanned, summary } =
-    classified.value;
+  const {
+    sorted,
+    untrackableSorted,
+    enableHistoryByObjectId,
+    objectApiNameById,
+    fieldsScanned,
+    summary,
+  } = classified.value;
 
   // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
   const fingerprint = argsFingerprint({
@@ -529,9 +682,14 @@ export const historyTrackingGapsHandler = async (
     refreshedAt: ctx.manifest.refreshedAt,
   };
 
-  const data: HistoryTrackingGapsOutput = {
+  const buildData = (
+    untrackable: readonly HistoryUntrackableField[],
+    untrackableTruncated: boolean,
+  ): HistoryTrackingGapsOutput => ({
     scope,
     groups,
+    untrackable,
+    untrackableTruncated,
     summary,
     confidenceAxis: { piiClassification: 'heuristic', trackHistoryReadout: 'declared' },
     limit,
@@ -548,7 +706,28 @@ export const historyTrackingGapsHandler = async (
         }
       : {}),
     trust: buildTrust(ctx, anyUnmodeledObject),
-  };
+  });
 
-  return ok({ data, vaultState });
+  // The untrackable-by-type set is an informational appendix (severity none)
+  // shown ONCE, on the first page. Fill it within whatever byte room remains
+  // under the global response guard so it can never push the response over the
+  // limit; later pages omit the rows but `summary.untrackableFields` keeps the
+  // full count on every page.
+  let untrackable: readonly HistoryUntrackableField[] = [];
+  let untrackableTruncated = untrackableSorted.length > 0;
+  if (offset === 0 && untrackableSorted.length > 0) {
+    const baseBytes = Buffer.byteLength(
+      JSON.stringify({ data: buildData([], false), vaultState }),
+      'utf8',
+    );
+    const remainingBytes = Math.min(
+      UNTRACKABLE_SAMPLE_MAX_BYTES,
+      GLOBAL_RESPONSE_GUARD_BYTES - UNTRACKABLE_GUARD_MARGIN_BYTES - baseBytes,
+    );
+    const sampled = sampleUntrackable(untrackableSorted, remainingBytes, UNTRACKABLE_SAMPLE_CAP);
+    untrackable = sampled.kept;
+    untrackableTruncated = sampled.truncated;
+  }
+
+  return ok({ data: buildData(untrackable, untrackableTruncated), vaultState });
 };

@@ -2250,16 +2250,42 @@ export const liveOwnerBreakdownHandler = async (
 
 // ---------------------------------------------------------------------------
 // sfi.live_report_usage — "how many reports are useless?" (Report.LastRunDate)
+// Optional `nameContains` (Name LIKE '%...%') / `folderName` (FolderName = ...)
+// scope the total, stale-count, AND detail queries so a targeted question
+// ("is one named report used?") is answered scoped, not with the
+// org-wide stale dump; `appliedScope` echoes what was applied and the schema is
+// STRICT so a mis-named filter is a loud invalid-query
+// (LIVE-REPORT-AND-FOLDER-USAGE-NO-NAME-SCOPE).
 // ---------------------------------------------------------------------------
 
 const DEFAULT_REPORT_STALE_DAYS = 90;
 
-export const liveReportUsageInputSchema = liveEnabledSchema.extend({
-  staleDays: z.number().int().min(1).max(3650).optional(),
-  limit: z.number().int().min(1).max(MAX_DETAIL_ROWS).optional(),
-  orgAlias: z.string().min(1).optional(),
-});
+export const liveReportUsageInputSchema = liveEnabledSchema
+  .extend({
+    staleDays: z.number().int().min(1).max(3650).optional(),
+    limit: z.number().int().min(1).max(MAX_DETAIL_ROWS).optional(),
+    /** Case-sensitive substring match on the report Name (`Name LIKE '%...%'`). */
+    nameContains: z.string().min(1).optional(),
+    /** Exact match on the report's FolderName (`FolderName = '...'`). */
+    folderName: z.string().min(1).optional(),
+    orgAlias: z.string().min(1).optional(),
+  })
+  // STRICT: reject unrecognized keys. A support request like "is one named
+  // report used?" that passes a scoping filter under a NAME the tool does
+  // not accept (`query`, `folder`, `report`, `name`) must get a loud
+  // invalid-query — not have the param silently stripped by Zod and then receive
+  // the org-wide stale dump as if it were the scoped answer
+  // (LIVE-REPORT-AND-FOLDER-USAGE-NO-NAME-SCOPE).
+  .strict();
 export type LiveReportUsageInput = z.infer<typeof liveReportUsageInputSchema>;
+
+/** The filters actually applied to the live query — echoed so a host never mistakes an unfiltered stale dump for a scoped answer. */
+export interface ReportUsageScope {
+  readonly nameContains: string | null;
+  readonly folderName: string | null;
+  readonly staleDays: number;
+  readonly limit: number;
+}
 
 interface ReportRow {
   readonly Id?: string;
@@ -2283,6 +2309,8 @@ export interface LiveReportUsageOutput {
   readonly staleDays: number;
   readonly returned: number;
   readonly capped: boolean;
+  /** The name/folder scope applied to ALL of the total, stale-count, and detail queries (LIVE-REPORT-AND-FOLDER-USAGE-NO-NAME-SCOPE). */
+  readonly appliedScope: ReportUsageScope;
   readonly reports: readonly ReportUsageEntry[];
   readonly trust: TrustSummary;
   /**
@@ -2308,16 +2336,29 @@ export const liveReportUsageHandler = async (
   const limit = input.limit ?? 100;
   const cutoff = daysAgoSoql(staleDays);
 
-  const totalQ = await liveQuery(org, 'SELECT COUNT() FROM Report', exec);
+  // Build a SOQL WHERE from the name/folder scope, applied to the total, stale,
+  // AND detail queries so a scoped call (e.g. "is one named report
+  // used?") never returns the org-wide stale dump. Values are escaped via
+  // soqlLiteral (LIVE-REPORT-AND-FOLDER-USAGE-NO-NAME-SCOPE).
+  const scopeConditions: string[] = [];
+  if (input.nameContains !== undefined) {
+    scopeConditions.push(`Name LIKE ${soqlLiteral(`%${input.nameContains}%`)}`);
+  }
+  if (input.folderName !== undefined) {
+    scopeConditions.push(`FolderName = ${soqlLiteral(input.folderName)}`);
+  }
+  const whereSql = scopeConditions.length > 0 ? ` WHERE ${scopeConditions.join(' AND ')}` : '';
+  // The stale predicate is parenthesized before the scope is ANDed on, so a
+  // scoped stale count means "stale AND in scope", not "stale OR in scope".
+  const stalePredicate = `(LastRunDate < ${cutoff} OR LastRunDate = null)`;
+  const staleWhere = ` WHERE ${[stalePredicate, ...scopeConditions].join(' AND ')}`;
+
+  const totalQ = await liveQuery(org, `SELECT COUNT() FROM Report${whereSql}`, exec);
   if (!totalQ.available) return err(UNAVAILABLE_ERROR('Report', org, totalQ.reason));
-  const staleQ = await liveQuery(
-    org,
-    `SELECT COUNT() FROM Report WHERE LastRunDate < ${cutoff} OR LastRunDate = null`,
-    exec,
-  );
+  const staleQ = await liveQuery(org, `SELECT COUNT() FROM Report${staleWhere}`, exec);
   const detailQ = await liveQuery(
     org,
-    `SELECT Id, Name, FolderName, Format, LastRunDate FROM Report ORDER BY LastRunDate ASC NULLS FIRST LIMIT ${limit}`,
+    `SELECT Id, Name, FolderName, Format, LastRunDate FROM Report${whereSql} ORDER BY LastRunDate ASC NULLS FIRST LIMIT ${limit}`,
     exec,
   );
   const rows = detailQ.records as readonly ReportRow[];
@@ -2352,8 +2393,12 @@ export const liveReportUsageHandler = async (
   const staleHeadline = budgetStopped
     ? `Stale-report count is **n/a** (partial) of ${totalQ.total.toLocaleString('en-US')} reports`
     : `**${staleQ.total.toLocaleString('en-US')}** of ${totalQ.total.toLocaleString('en-US')} reports are stale`;
+  const scopeParts: string[] = [];
+  if (input.nameContains !== undefined) scopeParts.push(`name contains "${input.nameContains}"`);
+  if (input.folderName !== undefined) scopeParts.push(`folder = "${input.folderName}"`);
+  const scopeLine = scopeParts.length > 0 ? ` Scoped to ${scopeParts.join(' AND ')}.` : '';
   const rendered =
-    `${staleHeadline} (not run in ${staleDays} days, or never).` +
+    `${staleHeadline} (not run in ${staleDays} days, or never).${scopeLine}` +
     (budgetStopped
       ? `\n\n> ${BUDGET_SIGNAL} The stale-report count is a partial floor, not a clean zero — the budget stopped before the count query completed.`
       : '') +
@@ -2365,6 +2410,12 @@ export const liveReportUsageHandler = async (
       staleDays,
       returned: reports.length,
       capped: totalQ.total > reports.length,
+      appliedScope: {
+        nameContains: input.nameContains ?? null,
+        folderName: input.folderName ?? null,
+        staleDays,
+        limit,
+      },
       reports,
       trust,
       budgetStopped,
@@ -2376,14 +2427,35 @@ export const liveReportUsageHandler = async (
 
 // ---------------------------------------------------------------------------
 // sfi.live_folder_access — "what folders do people have access to?" (Folder)
+// Optional `nameContains` (Name LIKE '%...%') scopes BOTH the detail and count
+// queries (alongside the existing `folderType`) so "one named folder's
+// privileges" is answered scoped, not with the org-wide first page;
+// `appliedScope` echoes what was applied and the schema is STRICT so a mis-named
+// filter (e.g. `folderNameContains`) is a loud invalid-query
+// (LIVE-REPORT-AND-FOLDER-USAGE-NO-NAME-SCOPE).
 // ---------------------------------------------------------------------------
 
-export const liveFolderAccessInputSchema = liveEnabledSchema.extend({
-  folderType: z.enum(['Report', 'Dashboard', 'Email', 'Document', 'all']).optional(),
-  limit: z.number().int().min(1).max(MAX_DETAIL_ROWS).optional(),
-  orgAlias: z.string().min(1).optional(),
-});
+export const liveFolderAccessInputSchema = liveEnabledSchema
+  .extend({
+    folderType: z.enum(['Report', 'Dashboard', 'Email', 'Document', 'all']).optional(),
+    limit: z.number().int().min(1).max(MAX_DETAIL_ROWS).optional(),
+    /** Case-sensitive substring match on the folder Name (`Name LIKE '%...%'`). */
+    nameContains: z.string().min(1).optional(),
+    orgAlias: z.string().min(1).optional(),
+  })
+  // STRICT: a name filter under an unsupported key (`folderNameContains`,
+  // `query`, `name`, `folder`) must get a loud invalid-query, not be stripped
+  // and answered with the org-wide first page
+  // (LIVE-REPORT-AND-FOLDER-USAGE-NO-NAME-SCOPE).
+  .strict();
 export type LiveFolderAccessInput = z.infer<typeof liveFolderAccessInputSchema>;
+
+/** The filters actually applied to the live query — echoed so a host never mistakes an unfiltered first page for a scoped answer. */
+export interface FolderAccessScope {
+  readonly nameContains: string | null;
+  readonly folderType: string;
+  readonly limit: number;
+}
 
 interface FolderRow {
   readonly Name?: string;
@@ -2404,6 +2476,8 @@ export interface LiveFolderAccessOutput {
   readonly byAccessType: Readonly<Record<string, number>>;
   readonly returned: number;
   readonly capped: boolean;
+  /** The name/type scope applied to BOTH the detail and count queries (LIVE-REPORT-AND-FOLDER-USAGE-NO-NAME-SCOPE). */
+  readonly appliedScope: FolderAccessScope;
   readonly folders: readonly FolderAccessEntry[];
   readonly trust: TrustSummary;
   /**
@@ -2425,17 +2499,26 @@ export const liveFolderAccessHandler = async (
   const org = gate.value;
   const queriedAt = new Date().toISOString();
   const limit = input.limit ?? 200;
-  const typeClause =
+  // Type condition (Zod enum, so the literal is injection-safe) plus an optional
+  // name substring — combined and applied to BOTH the detail and count queries
+  // so "one named folder's privileges" scopes instead of returning the org-wide
+  // first page (LIVE-REPORT-AND-FOLDER-USAGE-NO-NAME-SCOPE).
+  const conditions: string[] = [
     input.folderType && input.folderType !== 'all'
-      ? ` WHERE Type = '${input.folderType}'`
-      : ` WHERE Type IN ('Report','Dashboard','Email','Document')`;
+      ? `Type = '${input.folderType}'`
+      : `Type IN ('Report','Dashboard','Email','Document')`,
+  ];
+  if (input.nameContains !== undefined) {
+    conditions.push(`Name LIKE ${soqlLiteral(`%${input.nameContains}%`)}`);
+  }
+  const whereClause = ` WHERE ${conditions.join(' AND ')}`;
   const detailQ = await liveQuery(
     org,
-    `SELECT Name, DeveloperName, Type, AccessType FROM Folder${typeClause} ORDER BY Type, Name LIMIT ${limit}`,
+    `SELECT Name, DeveloperName, Type, AccessType FROM Folder${whereClause} ORDER BY Type, Name LIMIT ${limit}`,
     exec,
   );
   if (!detailQ.available) return err(UNAVAILABLE_ERROR('Folder', org, detailQ.reason));
-  const totalQ = await liveQuery(org, `SELECT COUNT() FROM Folder${typeClause}`, exec);
+  const totalQ = await liveQuery(org, `SELECT COUNT() FROM Folder${whereClause}`, exec);
   // CR-P3-8: totalQ is NOT gated; a mid-tool budget stop makes totalQ.total=0,
   // silently understating the universe (the verdict publicFolders is from the
   // gated detail rows and stays correct). Surface the stop.
@@ -2462,9 +2545,15 @@ export const liveFolderAccessHandler = async (
     ['Folder', 'Type', 'Access'],
     folders.slice(0, LIVE_TABLE_ROW_CAP).map((f) => [f.name, f.type, f.accessType]),
   );
+  const scopeParts: string[] = [];
+  if (input.nameContains !== undefined) scopeParts.push(`name contains "${input.nameContains}"`);
+  if (input.folderType !== undefined && input.folderType !== 'all') {
+    scopeParts.push(`type = "${input.folderType}"`);
+  }
+  const scopeLine = scopeParts.length > 0 ? ` Scoped to ${scopeParts.join(' AND ')}.` : '';
   const rendered =
     `${(totalQ.total || folders.length).toLocaleString('en-US')} folders — ` +
-    `**${publicFolders}** in the returned set are publicly accessible.` +
+    `**${publicFolders}** in the returned set are publicly accessible.${scopeLine}` +
     (budgetStopped
       ? `\n\n> ${BUDGET_SIGNAL} Folder total is the returned set only, not the full count.`
       : '') +
@@ -2476,6 +2565,11 @@ export const liveFolderAccessHandler = async (
       byAccessType,
       returned: folders.length,
       capped: (totalQ.total || folders.length) > folders.length,
+      appliedScope: {
+        nameContains: input.nameContains ?? null,
+        folderType: input.folderType ?? 'all',
+        limit,
+      },
       folders,
       trust,
       budgetStopped,
@@ -2492,11 +2586,23 @@ export const liveFolderAccessHandler = async (
 const DEFAULT_TEMPLATE_STALE_DAYS = 180;
 const CLASSIC_TEMPLATE_TYPES = new Set(['text', 'html', 'custom', 'visualforce']);
 
-export const liveEmailTemplateUsageInputSchema = liveEnabledSchema.extend({
-  staleDays: z.number().int().min(1).max(3650).optional(),
-  limit: z.number().int().min(1).max(MAX_DETAIL_ROWS).optional(),
-  orgAlias: z.string().min(1).optional(),
-});
+export const liveEmailTemplateUsageInputSchema = liveEnabledSchema
+  .extend({
+    staleDays: z.number().int().min(1).max(3650).optional(),
+    limit: z.number().int().min(1).max(MAX_DETAIL_ROWS).optional(),
+    /** Case-sensitive substring match on the template Name (`Name LIKE '%...%'`). */
+    nameContains: z.string().min(1).optional(),
+    /** Exact match on the template's FolderName (`FolderName = '...'`). */
+    folderName: z.string().min(1).optional(),
+    orgAlias: z.string().min(1).optional(),
+  })
+  // STRICT: reject unrecognized keys. A release manager asking "is the ADA
+  // template used?" who passes a filter under a NAME the tool does not accept
+  // (`query`, `folder`, `template`, `name`) must get a loud invalid-query — not
+  // have the param silently stripped by Zod and then receive the org-wide
+  // never-used leaderboard as if it were the scoped answer
+  // (LIVE-EMAIL-TEMPLATE-USAGE-NO-NAME-SCOPE).
+  .strict();
 export type LiveEmailTemplateUsageInput = z.infer<typeof liveEmailTemplateUsageInputSchema>;
 
 interface TemplateRow {
@@ -2518,6 +2624,13 @@ export interface TemplateUsageEntry {
   readonly daysSinceUse: number | null;
   readonly migrationCandidate: boolean;
 }
+/** The filters actually applied to the live query — echoed so a host never mistakes an unfiltered leaderboard for a scoped answer. */
+export interface EmailTemplateUsageScope {
+  readonly nameContains: string | null;
+  readonly folderName: string | null;
+  readonly staleDays: number;
+  readonly limit: number;
+}
 export interface LiveEmailTemplateUsageOutput {
   readonly totalTemplates: number;
   readonly classicTemplates: number;
@@ -2525,6 +2638,8 @@ export interface LiveEmailTemplateUsageOutput {
   readonly staleDays: number;
   readonly returned: number;
   readonly capped: boolean;
+  /** The name/folder scope applied to BOTH the detail and total-count queries (LIVE-EMAIL-TEMPLATE-USAGE-NO-NAME-SCOPE). */
+  readonly appliedScope: EmailTemplateUsageScope;
   readonly templates: readonly TemplateUsageEntry[];
   readonly trust: TrustSummary;
   /**
@@ -2548,13 +2663,26 @@ export const liveEmailTemplateUsageHandler = async (
   const staleDays = input.staleDays ?? DEFAULT_TEMPLATE_STALE_DAYS;
   const limit = input.limit ?? 200;
 
+  // Build a SOQL WHERE from the name/folder scope, applied to BOTH the detail
+  // and total-count queries so a scoped call (e.g. "is the ADA template used?")
+  // never returns the org-wide never-used leaderboard. Values are escaped via
+  // soqlLiteral (LIVE-EMAIL-TEMPLATE-USAGE-NO-NAME-SCOPE).
+  const scopeConditions: string[] = [];
+  if (input.nameContains !== undefined) {
+    scopeConditions.push(`Name LIKE ${soqlLiteral(`%${input.nameContains}%`)}`);
+  }
+  if (input.folderName !== undefined) {
+    scopeConditions.push(`FolderName = ${soqlLiteral(input.folderName)}`);
+  }
+  const whereSql = scopeConditions.length > 0 ? ` WHERE ${scopeConditions.join(' AND ')}` : '';
+
   const detailQ = await liveQuery(
     org,
-    `SELECT Name, FolderName, TemplateType, IsActive, TimesUsed, LastUsedDate FROM EmailTemplate ORDER BY LastUsedDate ASC NULLS FIRST LIMIT ${limit}`,
+    `SELECT Name, FolderName, TemplateType, IsActive, TimesUsed, LastUsedDate FROM EmailTemplate${whereSql} ORDER BY LastUsedDate ASC NULLS FIRST LIMIT ${limit}`,
     exec,
   );
   if (!detailQ.available) return err(UNAVAILABLE_ERROR('EmailTemplate', org, detailQ.reason));
-  const totalQ = await liveQuery(org, 'SELECT COUNT() FROM EmailTemplate', exec);
+  const totalQ = await liveQuery(org, `SELECT COUNT() FROM EmailTemplate${whereSql}`, exec);
   // CR-P3-8: totalQ is NOT gated; a mid-tool budget stop makes totalQ.total=0,
   // understating the total (classic/migration verdicts come from the gated
   // detail rows and stay correct). Surface the stop.
@@ -2591,10 +2719,14 @@ export const liveEmailTemplateUsageHandler = async (
     ['Template', 'Type', 'Used', 'Last used', 'Migrate?'],
     templates.slice(0, LIVE_TABLE_ROW_CAP).map((t) => [t.name, t.templateType, t.timesUsed, t.lastUsedDate ?? 'never', t.migrationCandidate ? 'yes' : '']),
   );
+  const scopeParts: string[] = [];
+  if (input.nameContains !== undefined) scopeParts.push(`name contains "${input.nameContains}"`);
+  if (input.folderName !== undefined) scopeParts.push(`folder = "${input.folderName}"`);
+  const scopeLine = scopeParts.length > 0 ? ` Scoped to ${scopeParts.join(' AND ')}.` : '';
   const rendered =
     `${(totalQ.total || templates.length).toLocaleString('en-US')} email templates — ` +
     `**${classicTemplates}** Classic, **${migrationCandidates}** are migration candidates ` +
-    `(Classic + unused/stale > ${staleDays}d).` +
+    `(Classic + unused/stale > ${staleDays}d).${scopeLine}` +
     (budgetStopped
       ? `\n\n> ${BUDGET_SIGNAL} Template total is the returned set only.`
       : '') +
@@ -2607,6 +2739,12 @@ export const liveEmailTemplateUsageHandler = async (
       staleDays,
       returned: templates.length,
       capped: (totalQ.total || templates.length) > templates.length,
+      appliedScope: {
+        nameContains: input.nameContains ?? null,
+        folderName: input.folderName ?? null,
+        staleDays,
+        limit,
+      },
       templates,
       trust,
       budgetStopped,

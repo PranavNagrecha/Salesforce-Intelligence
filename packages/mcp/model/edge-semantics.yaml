@@ -1,0 +1,140 @@
+# Concept model — safe-to-delete-field edge semantics (RM-1b DATA track).
+#
+# CURATOR-OWNED source of truth. General Salesforce truth only: bare
+# ComponentType names, bare edge-type names, one extractor source marker
+# (`formula-tokenizer`), and the (category, verdict) pair each combination maps
+# to. NO org identifiers, NO canonical-id (Type:Name) strings.
+#
+# This is the per-edge classification `sfi.safe_to_delete_field` applies to each
+# incoming dependency edge (`classifyEdge`). It is DATA the tool looks up, not a
+# reasoning-engine rule set — the verdict lattice, per-category aggregation,
+# coverage caveat, and PII logic stay in the tool. Unifying only the per-edge
+# (edgeType, sourceType) -> {category, verdict} mapping here keeps the tool's
+# response byte-identical while making the semantics a single curated table.
+#
+# Compiled to TypeScript by packages/mcp/scripts/build-concept-model.mjs
+#   ->  packages/mcp/src/knowledge/generated/concept-model.ts  (DO NOT hand-edit).
+# Regenerate:  pnpm regen:concept-model      Parity gate:  pnpm check:concept-model
+#
+# Evaluation order (mirrors classifyEdge exactly):
+#   1. formulaTokenizer  - the SPECIAL case, checked FIRST: an incoming
+#      `references` edge whose extractor `source` marker is `formula-tokenizer`
+#      is a formula reference (blocking), regardless of the source node's type.
+#   2. byEdgeType[edgeType].bySourceType[sourceType]  - the per-edge-type table
+#      keyed by the referrer node's ComponentType.
+#   3. byEdgeType[edgeType].default  - fallback when the edge type is known but
+#      the source ComponentType is not in bySourceType.
+#   4. default  - fallback when the edge type itself is not in byEdgeType.
+#
+# Key ORDER is significant and preserved verbatim into the generated artifact.
+
+edgeSemantics:
+  # 1. SPECIAL case, evaluated before the per-edge-type table. The `references`
+  #    edgeType overlaps validation rules and frontend components; the `source`
+  #    marker is the source of truth for what the formula tokenizer extracted.
+  formulaTokenizer:
+    edgeType: references
+    source: formula-tokenizer
+    category: formula
+    verdict: blocking
+
+  # 2/3. Per-edge-type classification. Each entry:
+  #   bySourceType - referrer ComponentType -> {category, verdict}
+  #   default      - fallback for a source ComponentType not listed above
+  byEdgeType:
+    readsFrom:
+      bySourceType:
+        ApexClass:
+          category: apex
+          verdict: risky
+        ApexTrigger:
+          category: apex
+          verdict: risky
+        Flow:
+          category: flow
+          verdict: blocking
+        LightningComponentBundle:
+          category: frontend
+          verdict: risky
+        AuraDefinitionBundle:
+          category: frontend
+          verdict: risky
+      default:
+        category: unknown
+        verdict: risky
+    writesTo:
+      bySourceType:
+        ApexClass:
+          category: apex
+          verdict: blocking
+        ApexTrigger:
+          category: apex
+          verdict: blocking
+        Flow:
+          category: flow
+          verdict: blocking
+        WorkflowRule:
+          category: workflow
+          verdict: blocking
+        LightningComponentBundle:
+          category: frontend
+          verdict: risky
+        AuraDefinitionBundle:
+          category: frontend
+          verdict: risky
+      default:
+        category: unknown
+        verdict: blocking
+    references:
+      bySourceType:
+        ValidationRule:
+          category: validation
+          verdict: blocking
+        VisualforcePage:
+          category: frontend
+          verdict: risky
+        VisualforceComponent:
+          category: frontend
+          verdict: risky
+        QuickAction:
+          category: layout
+          verdict: risky
+        Report:
+          category: analytics
+          verdict: blocking
+        Dashboard:
+          category: analytics
+          verdict: blocking
+        ListView:
+          category: analytics
+          verdict: blocking
+        ReportType:
+          category: analytics
+          verdict: blocking
+        FlexiPage:
+          category: ui
+          verdict: blocking
+        RestrictionRule:
+          category: sharing
+          verdict: blocking
+        ScopingRule:
+          category: sharing
+          verdict: blocking
+      default:
+        category: unknown
+        verdict: risky
+    usedInLayout:
+      bySourceType: {}
+      default:
+        category: layout
+        verdict: review
+    grantedBy:
+      bySourceType: {}
+      default:
+        category: permission
+        verdict: review
+
+  # 4. Fallback when the edge type itself is not in byEdgeType.
+  default:
+    category: unknown
+    verdict: risky

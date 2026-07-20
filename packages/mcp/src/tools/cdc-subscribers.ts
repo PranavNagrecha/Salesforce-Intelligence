@@ -131,9 +131,15 @@ const sObjectApiNameToCdcEventName = (apiName: string): string => {
  *     to narrow the scan to (e.g., `'Account'` or `'Order__c'`). When
  *     omitted the tool scans every CustomObject whose apiName matches
  *     the CDC name-pattern rule.
+ *   - `objectApiName`: optional, non-empty string. A natural host alias
+ *     for `sObjectFilter` (the name most hosts reach for after resolve).
+ *     Previously an unknown key stripped by Zod, so `{ objectApiName:
+ *     'Contact' }` silently degraded to the org-wide scan. Now accepted
+ *     as a synonym; when BOTH are supplied, `sObjectFilter` wins.
  */
 export const cdcSubscribersInputSchema = z.object({
   sObjectFilter: z.string().min(1).optional(),
+  objectApiName: z.string().min(1).optional(),
 });
 
 /** Parsed input shape, inferred from `cdcSubscribersInputSchema`. */
@@ -153,11 +159,47 @@ export interface CdcSubscriber {
   readonly source: string;
 }
 
+/**
+ * One CDC channel-membership binding — a `PlatformEventChannelMember`
+ * whose `selectedEntity` is a Change Event. Surfaces the fact that CDC
+ * is ENABLED for the object (the channel selects its ChangeEvent) even
+ * when no Apex/Flow emits a modeled `listensTo` subscription. Before
+ * this, an object with CDC enabled but no code subscriber returned
+ * `totalSubscribers: 0` with no membership section, so "0" read as
+ * "CDC not used" — the false-empty this closes.
+ *
+ * `filterExpression` is the DECLARED per-member XML text (CR-CAP-18),
+ * NOT runtime filter evaluation of which records flow.
+ */
+export interface CdcChannelMember {
+  readonly memberId: ComponentId;
+  readonly channelId: ComponentId | null;
+  readonly channelType: string | null;
+  readonly changeEventName: string;
+  readonly selectedEntity: string;
+  readonly filterExpression: string | null;
+}
+
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface CdcSubscribersOutput {
   readonly subscribers: readonly CdcSubscriber[];
+  /**
+   * CDC channel enablement: the `PlatformEventChannelMember` rows that
+   * select a Change Event for the scoped object(s). Present (possibly
+   * empty) always; a non-empty list with empty `subscribers` means CDC
+   * is ENABLED with no modeled code subscriber (surfaced in
+   * `disclosure`), not "CDC unused".
+   */
+  readonly channelMembers: readonly CdcChannelMember[];
   readonly summary: {
     readonly totalSubscribers: number;
+    readonly totalChannelMembers: number;
+    /**
+     * Count of DISTINCT Change Events that are enabled — via a modeled
+     * `listensTo` subscriber OR a channel-member selection. Counting
+     * membership (not only subscribed events) is what stops an
+     * enabled-but-unsubscribed CDC stream from reading as `0`.
+     */
     readonly uniqueChangeEvents: number;
   };
   readonly disclosure: string;
@@ -174,7 +216,17 @@ export interface CdcSubscribersOutput {
  * filter EVALUATION of which records flow through the channel.
  */
 const CDC_SUBSCRIBERS_DISCLOSURE =
-  'v2.8 recognizes CDC subscribers by name pattern on the `listensTo` edge target (objects ending in `ChangeEvent` or `__ChangeEvent`). The `EventBus.subscribe(...)` registration is NOT modeled, so subscribers may exist that this tool cannot see. CR-CAP-18: per-member filter expressions in `*.platformEventChannelMember-meta.xml` ARE now extracted (declared XML text — NOT runtime filter evaluation of which records flow).';
+  'v2.8 recognizes CDC subscribers by name pattern on the `listensTo` edge target (objects ending in `ChangeEvent` or `__ChangeEvent`). The `EventBus.subscribe(...)` registration is NOT modeled, so subscribers may exist that this tool cannot see. `channelMembers` surfaces CDC ENABLEMENT: a `PlatformEventChannelMember` that selects a Change Event means CDC is on for that object even when no code subscribes — an empty `subscribers` list with a non-empty `channelMembers` list is "enabled, no modeled subscribers", NOT "CDC unused". CR-CAP-18: per-member filter expressions in `*.platformEventChannelMember-meta.xml` ARE extracted (declared XML text — NOT runtime filter evaluation of which records flow).';
+
+/**
+ * Extra disclosure line appended when CDC is ENABLED (channel members
+ * present) yet no modeled `listensTo` subscriber exists — the exact
+ * false-empty this fix closes. Makes the "0 subscribers ≠ 0 usage"
+ * distinction explicit for a host that would otherwise read totalSubscribers=0
+ * as "Contact CDC not used".
+ */
+const CDC_ENABLED_NO_SUBSCRIBERS_NOTE =
+  ' NOTE: CDC is ENABLED for the scoped object (a channel member selects its Change Event) but no modeled subscriber was found — this is "enabled, no modeled subscriber", not proof the CDC stream is unused.';
 
 /**
  * Deterministic subscriber comparator: subscriberId ASC, then
@@ -245,19 +297,98 @@ const collectChangeEventIds = async (
 
 /**
  * Resolve the set of Change Event ids to scan given the caller's
- * input. When `sObjectFilter` is supplied we compute the synthetic
- * id from the filter; when omitted we scan every CustomObject in the
- * graph whose apiName matches the CDC pattern.
+ * object filter. When a filter is supplied we compute the synthetic
+ * id from it; when omitted we scan every CustomObject in the graph
+ * whose apiName matches the CDC pattern.
  */
 const resolveChangeEventIds = async (
   ctx: Context,
-  input: CdcSubscribersInput,
+  objectFilter: string | undefined,
 ): Promise<Result<readonly ComponentId[], string>> => {
-  if (input.sObjectFilter !== undefined) {
-    const cdcEventName = sObjectApiNameToCdcEventName(input.sObjectFilter);
+  if (objectFilter !== undefined) {
+    const cdcEventName = sObjectApiNameToCdcEventName(objectFilter);
     return ok([`${CHANGE_EVENT_ID_PREFIX}${cdcEventName}`]);
   }
   return collectChangeEventIds(ctx);
+};
+
+/**
+ * Defensive ceiling on the `PlatformEventChannelMember` scan. A real
+ * org declares a handful of channel members, not hundreds — this cap
+ * only guards a pathological metadata set.
+ */
+const CHANNEL_MEMBER_SCAN_LIMIT = 500;
+
+/**
+ * Collect the CDC channel-membership rows in scope. Scans every
+ * `PlatformEventChannelMember` node and keeps those whose
+ * `selectedEntity` is a Change Event (name-pattern — the same rule the
+ * subscriber scan uses, so an `event`-channel member selecting a
+ * Platform Event like `Application_Event__e` is correctly excluded).
+ * When `objectFilter` is set, keeps only the member selecting that
+ * object's Change Event. The channel node (resolved via the member's
+ * `parentId`) supplies `channelType`; the per-member declared
+ * `filterExpression` is read from the member node's properties.
+ *
+ * This is member-centric on purpose: a `data` channel's Change Event
+ * target is often a stub/missing node in an offline vault, so keying
+ * off the member node (which is always present) surfaces enablement
+ * even when the ChangeEvent node itself was never retrieved.
+ */
+const collectChannelMembers = async (
+  ctx: Context,
+  objectFilter: string | undefined,
+): Promise<Result<readonly CdcChannelMember[], string>> => {
+  const wantedEventName =
+    objectFilter !== undefined
+      ? sObjectApiNameToCdcEventName(objectFilter)
+      : null;
+
+  const membersResult = await listNodesByType(
+    ctx.graph,
+    'PlatformEventChannelMember',
+    { limit: CHANNEL_MEMBER_SCAN_LIMIT },
+  );
+  if (!membersResult.ok) return err(membersResult.error.message);
+
+  const members: CdcChannelMember[] = [];
+  const channelCache = new Map<ComponentId, string | null>();
+  for (const node of membersResult.value) {
+    const rawSelected = node.properties['selectedEntity'];
+    if (typeof rawSelected !== 'string' || rawSelected.length === 0) continue;
+    // CDC discriminator: the selected entity must be a Change Event.
+    if (!isChangeEventApiName(rawSelected)) continue;
+    if (wantedEventName !== null && rawSelected !== wantedEventName) continue;
+
+    const channelId = node.parentId;
+    let channelType: string | null = null;
+    if (channelId !== null) {
+      if (channelCache.has(channelId)) {
+        channelType = channelCache.get(channelId) ?? null;
+      } else {
+        const channelResult = await getNodeById(ctx.graph, channelId);
+        if (!channelResult.ok) return err(channelResult.error.message);
+        const ct = channelResult.value?.properties['channelType'];
+        channelType = typeof ct === 'string' ? ct : null;
+        channelCache.set(channelId, channelType);
+      }
+    }
+
+    const rawFilter = node.properties['filterExpression'];
+    members.push({
+      memberId: node.id,
+      channelId,
+      channelType,
+      changeEventName: rawSelected,
+      selectedEntity: rawSelected,
+      filterExpression: typeof rawFilter === 'string' ? rawFilter : null,
+    });
+  }
+
+  members.sort((a, b) =>
+    a.memberId < b.memberId ? -1 : a.memberId > b.memberId ? 1 : 0,
+  );
+  return ok(members);
 };
 
 /**
@@ -276,7 +407,10 @@ export const cdcSubscribersHandler = async (
   ctx: Context,
   input: CdcSubscribersInput,
 ): Promise<Result<McpResponse<CdcSubscribersOutput>, McpError>> => {
-  const eventIdsResult = await resolveChangeEventIds(ctx, input);
+  // Accept `objectApiName` as a synonym for `sObjectFilter` (host alias);
+  // `sObjectFilter` wins when both are supplied.
+  const objectFilter = input.sObjectFilter ?? input.objectApiName;
+  const eventIdsResult = await resolveChangeEventIds(ctx, objectFilter);
   if (!eventIdsResult.ok) {
     return err({
       kind: 'internal',
@@ -325,14 +459,36 @@ export const cdcSubscribersHandler = async (
 
   const sorted = subscribers.sort(compareSubscribers);
 
+  // CDC ENABLEMENT plane: channel members that select a Change Event for
+  // the scoped object(s). Counted toward uniqueChangeEvents so an
+  // enabled-but-unsubscribed stream no longer reads as `0`.
+  const channelMembersResult = await collectChannelMembers(ctx, objectFilter);
+  if (!channelMembersResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${channelMembersResult.error}`,
+    });
+  }
+  const channelMembers = channelMembersResult.value;
+  for (const member of channelMembers) uniqueEvents.add(member.changeEventName);
+
+  // When CDC is enabled (members present) but no code subscribes, make the
+  // "0 subscribers ≠ 0 usage" distinction explicit in the disclosure.
+  const disclosure =
+    channelMembers.length > 0 && sorted.length === 0
+      ? CDC_SUBSCRIBERS_DISCLOSURE + CDC_ENABLED_NO_SUBSCRIBERS_NOTE
+      : CDC_SUBSCRIBERS_DISCLOSURE;
+
   return ok({
     data: {
       subscribers: sorted,
+      channelMembers,
       summary: {
         totalSubscribers: sorted.length,
+        totalChannelMembers: channelMembers.length,
         uniqueChangeEvents: uniqueEvents.size,
       },
-      disclosure: CDC_SUBSCRIBERS_DISCLOSURE,
+      disclosure,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

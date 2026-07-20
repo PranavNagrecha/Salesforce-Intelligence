@@ -81,6 +81,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { firstNonEmpty, resolveObjectAlias, toCustomObjectId } from './input-aliases.js';
 import {
   argsFingerprint,
   decodeCursor,
@@ -142,6 +143,19 @@ export const domainClustersInputSchema = z.object({
   // `nextCursor`; carries the member offset + which cluster (Domain.id) it
   // advances. Omit = today's behavior.
   cursor: z.string().min(1).optional(),
+  // DOMAIN-CLUSTERS-IGNORES-SEED: a seed component a host names on "which domain
+  // owns {X}?". When present the tool returns the cluster CONTAINING that node
+  // (or an honest not-clustered empty) + `appliedScope`, instead of the org-wide
+  // dump. A canonical `Type:` id is used verbatim; a bare name matches a
+  // candidate by apiName (falling back to a `CustomObject:` id for the note).
+  componentId: z.string().min(1).optional(),
+  seedComponentId: z.string().min(1).optional(),
+  seed: z.string().min(1).optional(),
+  // DOMAIN-CLUSTERS-IGNORES-OBJECTAPINAME: object identifiers honored as a SEED
+  // alias (`CustomObject:` id) — `{ objectApiName: X }` ≡ `{ seed: X }`, not stripped.
+  objectApiName: z.string().min(1).optional(),
+  object: z.string().min(1).optional(),
+  objectId: z.string().min(1).optional(),
 });
 
 /** Parsed input shape, inferred from `domainClustersInputSchema`. */
@@ -187,6 +201,16 @@ export interface Domain {
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface DomainClustersOutput {
+  /**
+   * Present ONLY on a SEEDED call (DOMAIN-CLUSTERS-IGNORES-SEED / -OBJECTAPINAME) —
+   * echoes the seed honored (an `objectApiName` resolves to a `CustomObject:` id,
+   * echoed like a `seed`) so a host never assumes it was silently stripped into the
+   * org-wide dump. Absent on the bare call, keeping that response byte-identical.
+   */
+  readonly appliedScope?: {
+    readonly seed: string;
+    readonly mode: 'seeded';
+  };
   readonly clusters: readonly Domain[];
   /** Count of candidates that didn't join any cluster. */
   readonly unclustered: number;
@@ -459,6 +483,27 @@ const greedyCluster = (
 };
 
 /**
+ * Resolve the optional SEED selector (`componentId` / `seedComponentId` /
+ * `seed`) to a canonical component id, or `null` when unseeded
+ * (DOMAIN-CLUSTERS-IGNORES-SEED). A value carrying a `Type:` prefix is used
+ * verbatim; a bare name is matched against the domain candidates by apiName
+ * (case-insensitive), falling back to a `CustomObject:` id so the honest
+ * not-found note names a concrete id.
+ */
+const resolveSeedId = (
+  input: DomainClustersInput,
+  candidates: readonly Candidate[],
+): string | null => {
+  const raw = firstNonEmpty(input.componentId, input.seedComponentId, input.seed);
+  if (raw === undefined) return null;
+  if (raw.includes(':')) return raw;
+  const match = candidates.find(
+    (c) => c.node.apiName.toLowerCase() === raw.toLowerCase(),
+  );
+  return match !== undefined ? match.node.id : toCustomObjectId(raw);
+};
+
+/**
  * Comparator for the cluster ordering returned to the caller:
  * member count DESC, then centre id ASC for ties.
  */
@@ -547,6 +592,72 @@ export const domainClustersHandler = async (
       candidateTruncated = true;
       trueCandidateCounts[type as 'CustomObject' | 'ApexClass' | 'Flow'] = c.value;
     }
+  }
+
+  // DOMAIN-CLUSTERS-IGNORES-SEED / -OBJECTAPINAME: a seed OR object identifier
+  // returns the cluster CONTAINING that node (or honest empty) + `appliedScope`,
+  // not the org-wide dump. `objectApiName` / `object` / `objectId` are honored as a
+  // seed alias — the shared resolver coerces them to a `CustomObject:` id
+  // (`bareComponentIdIsObject: false` keeps a bare `componentId` a generic seed).
+  const objectScope = resolveObjectAlias(input, {
+    required: false,
+    bareComponentIdIsObject: false,
+  });
+  if (!objectScope.ok) return err(objectScope.error);
+  const objectScopeId =
+    objectScope.value === null ? null : objectScope.value.componentId;
+  const seedKeyId = resolveSeedId(input, candidates);
+  if (
+    objectScopeId !== null &&
+    seedKeyId !== null &&
+    objectScopeId !== seedKeyId
+  ) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        `object scope (${objectScopeId}) and seed (${seedKeyId}) name different components; pass exactly one`,
+      path: 'objectApiName',
+    });
+  }
+  const seedId = objectScopeId ?? seedKeyId;
+  if (seedId !== null) {
+    const containing = sorted.find((c) =>
+      (fullMembersById.get(c.id) ?? c.members).some((m) => m.id === seedId),
+    );
+    const truncationFields = candidateTruncated
+      ? { candidateTruncated: true, trueCandidateCounts }
+      : {};
+    if (containing === undefined) {
+      const isCandidate = candidates.some((c) => c.node.id === seedId);
+      const note = isCandidate
+        ? `${seedId} is a domain candidate but did not cluster with any other component at minDensity ${minDensity.toString()} — it is unclustered (too few shared edges). Lower minDensity to loosen the grouping.`
+        : `no CustomObject / ApexClass / Flow named ${seedId} participates in domain clustering — it is absent from the vault, or is not one of the three domain-shaped types (domain clusters are built only from CustomObject / ApexClass / Flow nodes).`;
+      return ok({
+        data: {
+          appliedScope: { seed: seedId, mode: 'seeded' },
+          clusters: [],
+          unclustered,
+          note,
+          ...truncationFields,
+        },
+        vaultState: {
+          sourceTreeHash: ctx.manifest.sourceTreeHash,
+          refreshedAt: ctx.manifest.refreshedAt,
+        },
+      });
+    }
+    return ok({
+      data: {
+        appliedScope: { seed: seedId, mode: 'seeded' },
+        clusters: [containing],
+        unclustered,
+        ...truncationFields,
+      },
+      vaultState: {
+        sourceTreeHash: ctx.manifest.sourceTreeHash,
+        refreshedAt: ctx.manifest.refreshedAt,
+      },
+    });
   }
 
   // CR-22 member-axis cursor: page ONE designated cluster's members (sectionId =

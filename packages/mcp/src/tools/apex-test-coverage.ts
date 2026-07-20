@@ -57,17 +57,28 @@ const APEX_TEST_COVERAGE_TOOL = 'sfi.apex_test_coverage';
 /**
  * Zod schema for the `sfi.apex_test_coverage` tool input.
  *
- * `apexClass` is accepted as an explicit alias for `classApiName`: sibling
- * Apex tools name this parameter differently, and because `classApiName` is
- * OPTIONAL (omitting it selects org-wide mode), a caller who passed the wrong
- * key used to have it silently stripped and get the whole-org backlog instead
- * of the single class they asked about. Naming the alias here makes
- * `{ apexClass: 'Foo' }` resolve to single-class mode (see the handler's
- * coalesce) rather than answering a different question with no error.
+ * Every class-selector alias is accepted so a scoped question ("coverage for
+ * CourseOfferingTriggerHelper?") reaches single-class mode no matter which key
+ * the router / host supplies. `classApiName` / `apexClass` / `className` /
+ * `apiName` take a bare name; `componentId` / `classId` / `apexClassId` take a
+ * canonical `ApexClass:{name}` id (the `ApexClass:` prefix is stripped). Because
+ * `classApiName` is OPTIONAL (omitting every selector selects org-wide mode), a
+ * caller who passed one of the previously-unrecognised keys used to have it
+ * Zod-stripped and get the whole-org backlog instead of the single class they
+ * asked about. Naming the aliases here (plus the handler's coalesce) makes any
+ * of them resolve to single-class mode rather than silently answering a
+ * different question; a value carrying a non-`ApexClass:` type prefix is
+ * `invalid-query`.
  */
 export const apexTestCoverageInputSchema = z.object({
   classApiName: z.string().min(1).optional(),
   apexClass: z.string().min(1).optional(),
+  className: z.string().min(1).optional(),
+  apiName: z.string().min(1).optional(),
+  /** Canonical `ApexClass:{name}` id (the router's shape); prefix is stripped. */
+  componentId: z.string().min(1).optional(),
+  classId: z.string().min(1).optional(),
+  apexClassId: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
   // CR-22: page cursor for walking the full untested-class list (org-wide mode
   // only) when truncated. Single-class mode never paginates.
@@ -80,6 +91,16 @@ export type ApexTestCoverageInput = z.infer<typeof apexTestCoverageInputSchema>;
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface ApexTestCoverageOutput {
   readonly mode: 'single-class' | 'org-wide';
+  /**
+   * Echoes the scope ACTUALLY applied so a host never assumes a class selector
+   * it passed was silently stripped (the org-wide-instead-of-single-class bug
+   * this closes). `class` is the resolved bare class api name in single-class
+   * mode, null in org-wide mode.
+   */
+  readonly appliedScope: {
+    readonly class: string | null;
+    readonly mode: 'single-class' | 'org-wide';
+  };
   /** Present in single-class mode. */
   readonly target?: {
     readonly classApiName: string;
@@ -121,6 +142,41 @@ const BOUNDARIES: readonly string[] = Object.freeze([
   'Dynamic invocation (Type.forName, mocking frameworks, indirect dispatch) is invisible to the v1.x scanner, so a class shown as untested may still be covered at runtime — verify before assuming zero coverage.',
   'A test class is identified by `properties.isTest === true` (set by the extractor); managed-package and SeeAllData tests are out of scope.',
 ]);
+
+const APEX_CLASS_PREFIX = 'ApexClass:';
+
+/**
+ * Resolve the single class the caller scoped to from any of the class-selector
+ * aliases. Precedence (highest first): `classApiName`, `apexClass`, `className`,
+ * `apiName`, `componentId`, `classId`, `apexClassId` — so the pre-existing
+ * `classApiName ?? apexClass` contract (classApiName wins) is preserved and the
+ * new keys extend it. Bare names pass through; a `ApexClass:{name}` id has its
+ * prefix stripped (keeping `singleClass`, which prepends it, correct); a value
+ * carrying a NON-`ApexClass:` type prefix is `invalid-query` (never a silent
+ * org-wide fallback). `undefined` (no selector) selects org-wide mode.
+ */
+const resolveRequestedClass = (
+  input: ApexTestCoverageInput,
+): Result<string | undefined, McpError> => {
+  const raw =
+    input.classApiName ??
+    input.apexClass ??
+    input.className ??
+    input.apiName ??
+    input.componentId ??
+    input.classId ??
+    input.apexClassId;
+  if (raw === undefined) return ok(undefined);
+  if (raw.startsWith(APEX_CLASS_PREFIX)) return ok(raw.slice(APEX_CLASS_PREFIX.length));
+  if (raw.includes(':')) {
+    return err({
+      kind: 'invalid-query',
+      message: `'${raw}' is not an ApexClass — pass a bare class api name or an 'ApexClass:{name}' id`,
+      path: 'componentId',
+    });
+  }
+  return ok(raw);
+};
 
 const isTest = (n: Node): boolean => n.properties['isTest'] === true;
 
@@ -191,9 +247,13 @@ export const apexTestCoverageHandler = async (
   input: ApexTestCoverageInput,
 ): Promise<Result<McpResponse<ApexTestCoverageOutput>, McpError>> => {
   const limit = input.limit ?? DEFAULT_LIMIT;
-  // Accept `apexClass` as an alias for `classApiName` so a wrong-but-plausible
-  // key selects the single class instead of silently dropping to org-wide mode.
-  const requestedClass = input.classApiName ?? input.apexClass;
+  // Accept every class-selector alias (bare name OR `ApexClass:{name}` id) so a
+  // scoped question reaches single-class mode instead of silently dropping to
+  // the org-wide backlog. A non-`ApexClass:` type prefix or disagreeing aliases
+  // are `invalid-query`, never a silent org-wide fallback.
+  const requestedResult = resolveRequestedClass(input);
+  if (!requestedResult.ok) return requestedResult;
+  const requestedClass = requestedResult.value;
 
   // Single-class mode: a bounded "does ANY test reference this class?" check via
   // the UNCAPPED inbound `callsApex` edges of the one target. This never loads
@@ -267,6 +327,7 @@ export const apexTestCoverageHandler = async (
   return ok({
     data: {
       mode: 'org-wide',
+      appliedScope: { class: null, mode: 'org-wide' },
       untestedClasses,
       summary: {
         testClasses: tests.length,
@@ -340,6 +401,7 @@ const singleClass = async (
   return ok({
     data: {
       mode: 'single-class',
+      appliedScope: { class: requestedClass, mode: 'single-class' },
       target: {
         classApiName: requestedClass,
         coveringTests,

@@ -99,6 +99,24 @@ export interface SoeBudgetOptions {
    * @default true
    */
   readonly allowStepDrop?: boolean;
+  /**
+   * Ceiling this pass trims the payload to, in bytes. Defaults to
+   * {@link SOE_MAX_PAYLOAD_BYTES}.
+   *
+   * A caller that appends HONESTY scaffolding to the payload AFTER enforcement
+   * — the four-event `order_of_execution` view attaches per-event
+   * `phasesOmitted` and a phases-dropped disclosure note once it knows what the
+   * step-drop shed — passes a value BELOW {@link SOE_MAX_PAYLOAD_BYTES} to
+   * reserve headroom for those additions. Without the reserve the post-
+   * enforcement additions push the payload back over budget, forcing the global
+   * dispatch guard to mangle the (load-bearing) disclosure or — since the nested
+   * per-event `soe` arrays are not reducible by that guard — reject the whole
+   * answer. Reserving here keeps the FINAL `data` (scaffolding included) within
+   * budget, so both save-order tools obey one envelope law
+   * (ORDER-OF-EXECUTION-OVERSIZE-HARD-FAIL). Never raised above
+   * {@link SOE_MAX_PAYLOAD_BYTES}.
+   */
+  readonly budgetBytes?: number;
 }
 
 /**
@@ -126,7 +144,12 @@ export const enforceSoeByteBudget = (
   options: SoeBudgetOptions = {},
 ): SoeBudgetResult => {
   const allowStepDrop = options.allowStepDrop ?? true;
-  if (sizeOf(payload) <= SOE_MAX_PAYLOAD_BYTES) {
+  // Never above the global SOE ceiling; a caller may reserve headroom below it.
+  const budgetBytes = Math.min(
+    options.budgetBytes ?? SOE_MAX_PAYLOAD_BYTES,
+    SOE_MAX_PAYLOAD_BYTES,
+  );
+  if (sizeOf(payload) <= budgetBytes) {
     return { truncated: false, actionsOmitted: 0, conditionalsTrimmed: 0, stepsOmitted: 0 };
   }
 
@@ -149,7 +172,7 @@ export const enforceSoeByteBudget = (
     0,
   );
   const nonActionBytes = Math.max(0, sizeOf(payload) - actionBytes);
-  const budgetForActions = SOE_MAX_PAYLOAD_BYTES - nonActionBytes;
+  const budgetForActions = budgetBytes - nonActionBytes;
   if (budgetForActions <= 0) {
     // Even zero actions may not fit (pathological step count); strip the
     // large lists and let the confirming pass / global guard handle the rest.
@@ -166,7 +189,7 @@ export const enforceSoeByteBudget = (
   // leave us a little over; halve the largest remaining action list until the
   // serialized payload is under budget or nothing trimmable remains.
   for (let guard = 0; guard < 100_000; guard += 1) {
-    if (sizeOf(payload) <= SOE_MAX_PAYLOAD_BYTES) break;
+    if (sizeOf(payload) <= budgetBytes) break;
     let target: BoundableStep | undefined;
     for (const s of steps) {
       if (s.actions.length <= KEEP_ALL_AT_OR_BELOW) continue;
@@ -186,7 +209,7 @@ export const enforceSoeByteBudget = (
   // the payload fits.
   let conditionalsTrimmed = 0;
   for (let guard = 0; guard < 100_000; guard += 1) {
-    if (sizeOf(payload) <= SOE_MAX_PAYLOAD_BYTES) break;
+    if (sizeOf(payload) <= budgetBytes) break;
     let target: BoundableStep | undefined;
     let targetBytes = 0;
     for (const s of steps) {
@@ -220,7 +243,7 @@ export const enforceSoeByteBudget = (
   // so `stepsOmitted` is an honest "N more not shown".
   let stepsOmitted = 0;
   for (let guard = 0; allowStepDrop && guard < 1_000_000; guard += 1) {
-    if (sizeOf(payload) <= SOE_MAX_PAYLOAD_BYTES) break;
+    if (sizeOf(payload) <= budgetBytes) break;
     let target: BoundableStep[] | undefined;
     let targetBytes = 0;
     for (const c of containers) {
@@ -272,4 +295,204 @@ export const soeTruncationNote = (result: SoeBudgetResult): string => {
       ? `Response trimmed to fit the ~${budgetKb} KB MCP response budget`
       : `Response trimmed to fit the ~${budgetKb} KB MCP response budget: every save-order STEP is present and in order, but`;
   return `${lead} ${parts.join('; ')}. Query a single object/event for full detail.`;
+};
+
+// ---------------------------------------------------------------------------
+// Shared phase-omission contract (the truncation-honesty half of the envelope
+// law). BOTH save-order tools — `what_happens_on_save` (single event) and
+// `order_of_execution` (four events) — must agree on which automation phases a
+// composed SOE has, how to count them, and how a byte-budget-truncated payload
+// discloses a phase it could no longer fully represent. Previously each tool
+// carried its own copy of these types + helpers; a divergence between the two
+// copies would let one tool's truncated payload silently contradict its own
+// `phaseCounts` while the other stayed honest. They live here so there is ONE
+// definition (WHAT-HAPPENS-ON-SAVE-TRUNCATION-DROPS-LATER-PHASES /
+// ORDER-OF-EXECUTION-OVERSIZE-HARD-FAIL). Each tool re-exports them so its
+// public type surface is unchanged.
+// ---------------------------------------------------------------------------
+
+/**
+ * Which phase of the documented Salesforce order of execution a step comes
+ * from. The order matches the platform's evaluation sequence; `save` is a
+ * placeholder representing the database write itself (not org automation).
+ */
+export type SoePhase =
+  | 'before-save-flows'
+  | 'pre-save-triggers'
+  | 'pre-save-validation'
+  | 'duplicate-rules'
+  | 'save'
+  | 'after-triggers'
+  | 'post-save-assignment'
+  | 'post-save-workflows'
+  | 'post-save-flows'
+  | 'post-save-approval'
+  | 'post-save-rollup-recalc'
+  | 'post-save-async';
+
+/**
+ * Every {@link SoePhase} except the `save` placeholder, frozen in documented
+ * SOE order so a per-phase count map iterates in firing sequence. `as const` so
+ * it doubles as the `phase`-filter enum on both tools' input schemas.
+ */
+export const AUTOMATION_PHASES = [
+  'before-save-flows',
+  'pre-save-triggers',
+  'pre-save-validation',
+  'duplicate-rules',
+  'after-triggers',
+  'post-save-assignment',
+  'post-save-workflows',
+  'post-save-flows',
+  'post-save-approval',
+  'post-save-rollup-recalc',
+  'post-save-async',
+] as const satisfies readonly Exclude<SoePhase, 'save'>[];
+
+/**
+ * Grounded per-phase active-component counts for a composed SOE. Each key is an
+ * automation phase (the `save` placeholder excluded — it is the platform's own
+ * write, not org automation); each value is the number of ACTIVE components
+ * emitted into that phase. Every phase is present (zero when empty) for a
+ * stable, indexable map.
+ */
+export type SoePhaseCounts = Readonly<Record<Exclude<SoePhase, 'save'>, number>>;
+
+/**
+ * Tally the active components emitted into each automation phase. The `save`
+ * placeholder is never counted. Phases with zero emitted steps are present with
+ * a `0` so the map is a complete, stable shape every caller can index.
+ */
+export const tallyPhaseCounts = (
+  soe: readonly { readonly phase: SoePhase }[],
+): SoePhaseCounts => {
+  const counts = Object.fromEntries(
+    AUTOMATION_PHASES.map((p) => [p, 0]),
+  ) as Record<Exclude<SoePhase, 'save'>, number>;
+  for (const step of soe) {
+    if (step.phase === 'save') continue;
+    counts[step.phase] += 1;
+  }
+  return counts;
+};
+
+/**
+ * One phase whose full step roster could not fit the returned `soe` after
+ * byte-budget enforcement dropped trailing steps: `declared` is the true
+ * per-phase count (still in `summary.phaseCounts`), `present` is how many of
+ * that phase's steps survived in `soe`. Surfaced so a truncated payload can
+ * NEVER silently contradict `phaseCounts` — a phase the counts claim but the
+ * sequence omits is named here, with a pointer to the `phase` filter for
+ * recovery.
+ */
+export interface SoePhaseOmission {
+  readonly phase: Exclude<SoePhase, 'save'>;
+  readonly declared: number;
+  readonly present: number;
+}
+
+/**
+ * Compute the phases whose `soe` representation fell below their true
+ * `phaseCounts` after enforcement dropped steps. Empty when the sequence still
+ * fully represents every phase (the norm for `what_happens_on_save`, which
+ * never drops steps; the four-event `order_of_execution` view is where
+ * step-drop actually bites).
+ */
+export const computePhasesOmitted = (
+  declared: SoePhaseCounts,
+  survivingSoe: readonly { readonly phase: SoePhase }[],
+): SoePhaseOmission[] => {
+  const survived = tallyPhaseCounts(survivingSoe);
+  const omitted: SoePhaseOmission[] = [];
+  for (const phase of AUTOMATION_PHASES) {
+    if (declared[phase] > survived[phase]) {
+      omitted.push({ phase, declared: declared[phase], present: survived[phase] });
+    }
+  }
+  return omitted;
+};
+
+/**
+ * Reconcile `phasesOmitted` on a composed-SOE payload AFTER the GLOBAL response
+ * budget (`jsonResult`) tail-truncated its `data.soe` array — the second half of
+ * the envelope law, closing the residual the tool-local guard cannot reach.
+ *
+ * The single-event `what_happens_on_save` view runs {@link enforceSoeByteBudget}
+ * with `allowStepDrop: false`, so it never drops a firing STEP — but it can hand
+ * the dispatcher a payload that is STILL over budget when the step COUNT alone
+ * blows it (dozens of firers each with a tiny action list nothing can trim). The
+ * global `jsonResult` guard then tail-truncates the largest `data` array —
+ * `soe` — to fit, and because SOE order runs pre-save → save → post-save →
+ * async, tail-dropping sheds the LATER phases first (after-triggers,
+ * duplicate-rules relative to the survivors, post-save-flows, async). Left
+ * unreconciled the trimmed `soe` lets a host invent "no duplicate rules / no
+ * after-triggers fire on save" while `summary.phaseCounts` still reports them —
+ * the exact honesty break this closes.
+ *
+ * This recomputes {@link computePhasesOmitted} from the SURVIVING `soe` against
+ * the (untouched) `summary.phaseCounts` and stamps `phasesOmitted`, so a
+ * globally-trimmed SOE payload obeys the SAME shared omission contract the
+ * tool-local path and `order_of_execution` already do — ONE definition, never a
+ * divergent copy (WHAT-HAPPENS-ON-SAVE-TRUNCATION-DROPS-LATER-PHASES).
+ *
+ * No-op unless `data` is a composed-SOE payload (an `soe` array of phase-tagged
+ * steps + a `summary.phaseCounts` map) on the FULL, un-filtered view
+ * (`appliedPhaseFilter` absent — a phase-filtered `soe` is an intentional subset
+ * whose cross-phase delta is not an omission). Every non-SOE payload is left
+ * byte-identical. Mutates `data` in place.
+ *
+ * @returns `true` when it changed `phasesOmitted`, else `false`.
+ */
+export const reconcileSoePhasesOmittedAfterGlobalTrim = (
+  data: unknown,
+): boolean => {
+  if (data === null || typeof data !== 'object' || Array.isArray(data)) {
+    return false;
+  }
+  const rec = data as Record<string, unknown>;
+  // A phase-filtered view narrows `soe` on purpose while `phaseCounts` stays the
+  // whole composition, so a cross-phase delta there is not an omission.
+  if (rec['appliedPhaseFilter'] !== undefined) return false;
+  const soe = rec['soe'];
+  const summary = rec['summary'];
+  if (
+    !Array.isArray(soe) ||
+    summary === null ||
+    typeof summary !== 'object' ||
+    Array.isArray(summary)
+  ) {
+    return false;
+  }
+  const phaseCounts = (summary as Record<string, unknown>)['phaseCounts'];
+  if (
+    phaseCounts === null ||
+    typeof phaseCounts !== 'object' ||
+    Array.isArray(phaseCounts)
+  ) {
+    return false;
+  }
+  // Only touch a genuine SOE step list — every element must be a phase-tagged
+  // step. Guards against a same-named non-SOE `soe` array on another tool.
+  const isSoeSteps = soe.every(
+    (s): s is { readonly phase: SoePhase } =>
+      s !== null &&
+      typeof s === 'object' &&
+      typeof (s as Record<string, unknown>)['phase'] === 'string',
+  );
+  if (!isSoeSteps) return false;
+  const omitted = computePhasesOmitted(
+    phaseCounts as SoePhaseCounts,
+    soe as readonly { readonly phase: SoePhase }[],
+  );
+  if (omitted.length > 0) {
+    rec['phasesOmitted'] = omitted;
+    return true;
+  }
+  // Survivors still fully represent every phase — drop any stale marker so a
+  // globally-trimmed payload never carries a contradictory omission list.
+  if ('phasesOmitted' in rec) {
+    delete rec['phasesOmitted'];
+    return true;
+  }
+  return false;
 };

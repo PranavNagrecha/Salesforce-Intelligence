@@ -16,9 +16,11 @@
  *     `WITH SECURITY_ENFORCED` / `USER_MODE` clause on the source
  *     query.
  *   - `missing-fls-check` — SOQL inline query without
- *     `WITH SECURITY_ENFORCED` / `WITH USER_MODE`. The naive heuristic
- *     flags every inline `[SELECT ... FROM ...]` that omits the
- *     clause.
+ *     `WITH SECURITY_ENFORCED` / `WITH USER_MODE`. The heuristic flags
+ *     every inline `[SELECT ... FROM ...]` that omits the clause AND
+ *     whose result is not sanitized with a read-path field-FLS strip
+ *     (`Security.stripInaccessible(AccessType.READABLE, <resultVar>)` —
+ *     the modern read-FLS pattern, equivalent to `WITH SECURITY_ENFORCED`).
  *
  * Both rules are skipped for test classes (`properties.isTest:
  * true`) — the v2.1 recognizer's own honesty boundary.
@@ -64,11 +66,13 @@ import type {
   PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
+import { getNodeById } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
 import { partitionByBaseline } from './finding-suppression.js';
+import { firstNonEmpty, resolveApexClassAlias } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { fullScanTruncationNote } from './scan-cap.js';
@@ -122,6 +126,12 @@ const DYNAMIC_SOQL_DISCLOSURE =
 /**
  * Zod schema for the `sfi.crud_fls_audit` tool input.
  *
+ *   - `componentId` (`ApexClass:{name}` / `ApexTrigger:{name}`) / `classApiName`
+ *     / `apiName`: optional CLASS SCOPE. When supplied the audit returns ONLY
+ *     that class's CRUD/FLS findings (+ `appliedScope`); an unresolved id is
+ *     `component-not-found` and a non-Apex type prefix is `invalid-query` —
+ *     never a silent org-wide fallback (the always-org-wide strip this closes).
+ *     Omit all three for the org-wide audit.
  *   - `limit`: optional integer in `[1, 500]`. Defaults to 100 in
  *     the handler. The slice is over classes, not findings.
  *   - `offset`: optional integer (>= 0); defaults to 0. Class-level page
@@ -129,6 +139,9 @@ const DYNAMIC_SOQL_DISCLOSURE =
  *     advance by `nextOffset`.
  */
 export const crudFlsAuditInputSchema = z.object({
+  componentId: z.string().min(1).optional(),
+  classApiName: z.string().min(1).optional(),
+  apiName: z.string().min(1).optional(),
   limit: z
     .number()
     .int()
@@ -143,6 +156,55 @@ export const crudFlsAuditInputSchema = z.object({
 
 /** Parsed input shape. */
 export type CrudFlsAuditInput = z.infer<typeof crudFlsAuditInputSchema>;
+
+/** Apex id prefixes — the two ComponentTypes CRUD/FLS fires on. */
+const APEX_CLASS_PREFIX = 'ApexClass:';
+const APEX_TRIGGER_PREFIX = 'ApexTrigger:';
+
+/**
+ * Resolve the optional CLASS SCOPE. No selector (`componentId` / `classApiName`
+ * / `apiName`) → org-wide (`null`). A selector routes through the shared
+ * `resolveApexClassAlias` normalizer so `componentId` / `classApiName` /
+ * `apiName` are interchangeable, conflict-detected, and NEVER silently stripped.
+ * A `componentId` carrying a non-Apex type prefix (e.g. `CustomObject:`) is a
+ * category error, not a missing component, so it is rejected as `invalid-query`
+ * (mirrors `governor_limit_risks`) rather than coerced into a bogus `ApexClass:`
+ * id that resolves to nothing. An `ApexTrigger:` `componentId` is a valid
+ * CRUD/FLS scope — the recognizer fires on triggers — so it is passed through
+ * verbatim rather than coerced to an `ApexClass:` id.
+ */
+const resolveClassScope = (
+  input: CrudFlsAuditInput,
+): Result<string | null, McpError> => {
+  const selector = firstNonEmpty(
+    input.componentId,
+    input.classApiName,
+    input.apiName,
+  );
+  if (selector === undefined) return ok(null);
+  const cid = firstNonEmpty(input.componentId);
+  if (
+    cid !== undefined &&
+    cid.includes(':') &&
+    !cid.startsWith(APEX_CLASS_PREFIX) &&
+    !cid.startsWith(APEX_TRIGGER_PREFIX)
+  ) {
+    return err({
+      kind: 'invalid-query',
+      message: `\`${cid}\` is not an ApexClass / ApexTrigger — pass a bare class api name or an 'ApexClass:{name}' / 'ApexTrigger:{name}' id`,
+      path: 'componentId',
+    });
+  }
+  if (
+    cid?.startsWith(APEX_TRIGGER_PREFIX) === true &&
+    firstNonEmpty(input.classApiName, input.apiName) === undefined
+  ) {
+    return ok(cid);
+  }
+  const resolved = resolveApexClassAlias(input);
+  if (!resolved.ok) return resolved;
+  return ok(resolved.value.componentId);
+};
 
 /** One finding inside a per-class entry. */
 export interface CrudFlsAuditFinding {
@@ -168,6 +230,16 @@ export interface CrudFlsAuditClassEntry {
 
 /** Output payload. */
 export interface CrudFlsAuditOutput {
+  /**
+   * Echoes the scope ACTUALLY applied so a host never assumes a class selector
+   * it passed was silently stripped (the always-org-wide bug this closes).
+   * `component` is the resolved `ApexClass:`/`ApexTrigger:` id in class scope,
+   * `null` org-wide; `mode` names the axis in force.
+   */
+  readonly appliedScope: {
+    readonly component: string | null;
+    readonly mode: 'all' | 'component';
+  };
   readonly classes: readonly CrudFlsAuditClassEntry[];
   /** Per-class entry count BEFORE the `limit` slice. */
   readonly totalClassCount: number;
@@ -303,21 +375,56 @@ export const crudFlsAuditHandler = async (
 ): Promise<Result<McpResponse<CrudFlsAuditOutput>, McpError>> => {
   const limit = input.limit ?? CRUD_FLS_DEFAULT_LIMIT;
 
+  // Optional CLASS SCOPE. When supplied, audit ONLY that class (skip the org
+  // scan); an unresolved id is `component-not-found`, a non-Apex type prefix is
+  // `invalid-query` — never a silent org-wide fallback (the strip this closes).
+  const scopeResult = resolveClassScope(input);
+  if (!scopeResult.ok) return scopeResult;
+  const scopeId = scopeResult.value;
+
   const perClass = new Map<ComponentId, CrudFlsAuditClassEntry>();
   const byRule: Record<string, number> = {};
   let totalFindingCount = 0;
   let suppressedFindingCount = 0;
 
-  // CR-22 B3: scan EVERY ApexClass / ApexTrigger by paging the SQL OFFSET
-  // forward (window-by-window at the clamped cap) so unchecked-CRUD/FLS classes
-  // on node 501+ are reachable — the single capped page used to drop the scan
-  // TAIL silently. The output `classes` is then the COMPLETE list, paged by the
-  // existing output cursor below; the scan completes inside this call.
-  const scan = await scanAllNodesOfTypes(ctx.graph, SCANNED_TYPES);
-  if (!scan.ok) {
-    return err({ kind: 'internal', message: `graph query failed: ${scan.error.message}` });
+  // Class-scope: fetch just the one node; org-wide: scan EVERY ApexClass /
+  // ApexTrigger (CR-22 B3 — page the SQL OFFSET forward window-by-window at the
+  // clamped cap so unchecked-CRUD/FLS classes on node 501+ are reachable). The
+  // output `classes` is then the COMPLETE matched list, paged by the output
+  // cursor below.
+  let nodesToProcess: readonly Node[];
+  let scanIncomplete = false;
+  let incompleteTypes: readonly string[] = [];
+  if (scopeId !== null) {
+    const nodeRes = await getNodeById(ctx.graph, scopeId as ComponentId);
+    if (!nodeRes.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${nodeRes.error.message}` });
+    }
+    if (nodeRes.value === null) {
+      return err({
+        kind: 'component-not-found',
+        message: `no ApexClass / ApexTrigger matches \`${scopeId}\` in this vault`,
+        path: scopeId,
+      });
+    }
+    if (!SCANNED_TYPES.includes(nodeRes.value.type)) {
+      return err({
+        kind: 'invalid-query',
+        message: `\`${scopeId}\` is a ${nodeRes.value.type}, not an ApexClass / ApexTrigger — CRUD/FLS audit is Apex-only`,
+        path: 'componentId',
+      });
+    }
+    nodesToProcess = [nodeRes.value];
+  } else {
+    const scan = await scanAllNodesOfTypes(ctx.graph, SCANNED_TYPES);
+    if (!scan.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${scan.error.message}` });
+    }
+    nodesToProcess = scan.value.nodes;
+    scanIncomplete = scan.value.scanIncomplete;
+    incompleteTypes = scan.value.incompleteTypes;
   }
-  for (const node of scan.value.nodes) {
+  for (const node of nodesToProcess) {
     const raw = (node as Node).properties['qualityIssues'];
     if (!Array.isArray(raw)) continue;
     const findings: CrudFlsAuditFinding[] = [];
@@ -354,11 +461,12 @@ export const crudFlsAuditHandler = async (
 
   const classes = [...perClass.values()].sort(compareClassById);
 
-  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset);
-  // crud_fls_audit has no narrowing args beyond paging, so the fingerprint is
-  // over the empty arg set — a stale token (different tool / refreshed vault)
-  // is still rejected via the tool+vaultHash bind-check.
-  const fingerprint = argsFingerprint({});
+  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // Bind the fingerprint to the class scope so a cursor minted for a scoped call
+  // cannot resume against the (differently-shaped) org-wide list, and vice versa.
+  const fingerprint = argsFingerprint(
+    scopeId !== null ? { componentId: scopeId } : {},
+  );
   let offset = input.offset ?? 0;
   if (input.cursor !== undefined) {
     const decoded = decodeCursor(input.cursor, {
@@ -407,12 +515,16 @@ export const crudFlsAuditHandler = async (
   // and completes. Lives OUTSIDE the zero-findings gate because risky classes
   // could be among the unscanned residual tail. (`truncated` is the OUTPUT
   // offset/limit cursor; this is the INPUT-scan saturation, a separate axis.)
-  if (scan.value.scanIncomplete) {
-    boundaries.push(fullScanTruncationNote(scan.value.incompleteTypes));
+  if (scanIncomplete) {
+    boundaries.push(fullScanTruncationNote(incompleteTypes));
   }
 
   return ok({
     data: {
+      appliedScope: {
+        component: scopeId,
+        mode: scopeId !== null ? 'component' : 'all',
+      },
       classes: kept,
       totalClassCount: classes.length,
       totalFindingCount,

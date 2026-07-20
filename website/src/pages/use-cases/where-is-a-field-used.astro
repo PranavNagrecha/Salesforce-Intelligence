@@ -54,7 +54,7 @@ const jsonld = [
         </div>
 
         <h2 id="how">How it works</h2>
-        <p>When you name a field, the router resolves it to a canonical ID (and asks a clarifying question if several match), then walks the incoming edges in the dependency graph and grep-scans the source for any reference the graph doesn't already model:</p>
+        <p>When you name a field, the router resolves it to a canonical ID (and asks a clarifying question if several match), then walks the incoming edges in the dependency graph and grep-scans the source for any reference the graph doesn't already model. You can hand it whatever you already have - a bare field name, an object plus field, or a fuzzy substring - and the answer echoes the resolved scope it applied back as <code>appliedScope</code>, so you can confirm it landed on the field you meant rather than a same-named neighbour:</p>
         <div class="code-block"><div class="cb-head"><span class="fname">claude - sf-intelligence</span></div><pre><span class="tok-p">›</span> where is the Industry field on Account used?
 ▸ 7 components reference <span class="tok-k">CustomField:Account.Industry__c</span>:
   ValidationRule · Flow · ApexClass(2) · Layout · Report · FieldSet

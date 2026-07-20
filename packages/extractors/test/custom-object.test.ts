@@ -942,6 +942,163 @@ describe('extractCustomObject', () => {
       expect(result.value.edges).toEqual([]);
     });
   });
+
+  describe('listViewButtons WebLink edge (OBJECT-SEARCHLAYOUT-LISTVIEWBUTTONS-UNGRAPHED)', () => {
+    // An object's `<searchLayouts><listViewButtons>` names the custom List
+    // Button (a WebLink) placed on its list views. Before the fix the extractor
+    // emitted no edge for it, so a WebLink referenced ONLY as a list-view button
+    // read as orphaned and `unused_components` flagged it deletable — deleting it
+    // removes a live list-view button.
+    it('emits a declared references edge CustomObject -> WebLink per listViewButton', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <deploymentStatus>Deployed</deploymentStatus>
+    <label>Widget</label>
+    <nameField>
+        <label>Widget Name</label>
+        <type>Text</type>
+    </nameField>
+    <pluralLabel>Widgets</pluralLabel>
+    <sharingModel>ReadWrite</sharingModel>
+    <searchLayouts>
+        <listViewButtons>My_Button</listViewButtons>
+        <searchResultsAdditionalFields>NAME</searchResultsAdditionalFields>
+    </searchLayouts>
+</CustomObject>`;
+      const { dir, path } = await writeTempXml('Widget__c.object-meta.xml', xml);
+      try {
+        const result = await extractCustomObject(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const buttonEdge = result.value.edges.find(
+          (e) => e.toId === 'WebLink:Widget__c.My_Button',
+        );
+        // RED pre-fix: no such edge exists (the placement was ungraphed).
+        expect(buttonEdge).toBeDefined();
+        if (!buttonEdge) return;
+        expect(buttonEdge.fromId).toBe('CustomObject:Widget__c');
+        expect(buttonEdge.edgeType).toBe('references');
+        expect(buttonEdge.confidence).toBe('declared');
+        expect(buttonEdge.source).toBe('custom-object-extractor');
+        expect(buttonEdge.properties).toEqual({
+          via: 'listViewButtons',
+          targetKind: 'listViewButton',
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('dedupes repeated listViewButtons and emits none for an absent/empty block', async () => {
+      const withDupes = `<?xml version="1.0" encoding="UTF-8"?>
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <deploymentStatus>Deployed</deploymentStatus>
+    <label>Widget</label>
+    <nameField>
+        <label>Widget Name</label>
+        <type>Text</type>
+    </nameField>
+    <pluralLabel>Widgets</pluralLabel>
+    <sharingModel>ReadWrite</sharingModel>
+    <searchLayouts>
+        <listViewButtons>My_Button</listViewButtons>
+        <listViewButtons>My_Button</listViewButtons>
+    </searchLayouts>
+</CustomObject>`;
+      const a = await writeTempXml('Widget__c.object-meta.xml', withDupes);
+      try {
+        const result = await extractCustomObject(a.path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(
+          result.value.edges.filter(
+            (e) => e.toId === 'WebLink:Widget__c.My_Button',
+          ),
+        ).toHaveLength(1);
+      } finally {
+        await rm(a.dir, { recursive: true, force: true });
+      }
+      // No searchLayouts block at all -> no listViewButton edges.
+      const b = await writeTempXml('Widget__c.object-meta.xml', VALID_XML);
+      try {
+        const result = await extractCustomObject(b.path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(
+          result.value.edges.some((e) => e.toId.startsWith('WebLink:')),
+        ).toBe(false);
+      } finally {
+        await rm(b.dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('compactLayoutAssignment CompactLayout edge (COMPACT-LAYOUT-ASSIGNMENT-UNGRAPHED)', () => {
+    // An object's `<compactLayoutAssignment>` names its PRIMARY compact layout —
+    // the one users see in the Lightning highlights panel. Before the fix the
+    // extractor emitted no edge for it, so an assigned compact layout carried no
+    // inbound usage edge, read as orphaned, and `unused_components` flagged it
+    // deletable — deleting it removes the layout users actually see.
+    it('emits a declared references edge CustomObject -> CompactLayout for a named assignment', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <compactLayoutAssignment>My_Compact_Layout</compactLayoutAssignment>
+    <deploymentStatus>Deployed</deploymentStatus>
+    <label>Widget</label>
+    <nameField>
+        <label>Widget Name</label>
+        <type>Text</type>
+    </nameField>
+    <pluralLabel>Widgets</pluralLabel>
+    <sharingModel>ReadWrite</sharingModel>
+</CustomObject>`;
+      const { dir, path } = await writeTempXml('Widget__c.object-meta.xml', xml);
+      try {
+        const result = await extractCustomObject(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const clEdge = result.value.edges.find(
+          (e) => e.toId === 'CompactLayout:Widget__c.My_Compact_Layout',
+        );
+        // RED pre-fix: no such edge exists (the assignment was ungraphed).
+        expect(clEdge).toBeDefined();
+        if (!clEdge) return;
+        expect(clEdge.fromId).toBe('CustomObject:Widget__c');
+        expect(clEdge.edgeType).toBe('references');
+        expect(clEdge.confidence).toBe('declared');
+        expect(clEdge.source).toBe('custom-object-extractor');
+        expect(clEdge.properties).toEqual({ via: 'compactLayoutAssignment' });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('skips the reserved SYSTEM default (never mints a CompactLayout phantom)', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <compactLayoutAssignment>SYSTEM</compactLayoutAssignment>
+    <deploymentStatus>Deployed</deploymentStatus>
+    <label>Widget</label>
+    <nameField>
+        <label>Widget Name</label>
+        <type>Text</type>
+    </nameField>
+    <pluralLabel>Widgets</pluralLabel>
+    <sharingModel>ReadWrite</sharingModel>
+</CustomObject>`;
+      const { dir, path } = await writeTempXml('Widget__c.object-meta.xml', xml);
+      try {
+        const result = await extractCustomObject(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(
+          result.value.edges.some((e) => e.toId.startsWith('CompactLayout:')),
+        ).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
 });
 
 describe('deriveEntityVariant', () => {

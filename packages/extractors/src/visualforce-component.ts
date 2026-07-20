@@ -330,6 +330,12 @@ const buildScannerEdges = (
  * declared-vs-heuristic origin doesn't influence output order — golden
  * tests do deep equality.
  *
+ * `node.properties.apexCallCount` is the count of DISTINCT Apex classes
+ * the component is wired to — the declared `controller=` / `extensions=`
+ * bindings plus the scanner's inline `{!Class.method()}` calls, deduped by
+ * class id. A controller-bound component with no inline call therefore
+ * reports `>= 1`, not 0 (VISUALFORCE-APEXCALLCOUNT-ZERO-WITH-CONTROLLER-EDGE).
+ *
  * Scanner errors surface as `node.properties.vfScannerWarnings: string[]`,
  * never as hard failures. Omitted entirely on the success path so the
  * golden's positive case stays free of an empty-array property (matching
@@ -409,6 +415,17 @@ export const extractVisualforceComponent = async (
   // a scanner-emitted duplicate.
   const edges = mergeAndSortEdges([...declaredEdges, ...scannerOutput.edges]);
 
+  // apexCallCount = distinct Apex classes this component is wired to, across
+  // the declared `controller=` / `extensions=` bindings AND the scanner's
+  // inline `{!Class.method()}` calls (VISUALFORCE-APEXCALLCOUNT-ZERO-WITH-
+  // CONTROLLER-EDGE). Counting from the deduped edge set means a class that
+  // is both the controller and an inline callee is counted once. Prior to
+  // this fix the count reflected only the scanner calls, so a controller-
+  // bound component with no inline `{!Class.method()}` reported 0.
+  const apexCallCount = new Set(
+    edges.filter((e) => e.toId.startsWith('ApexClass:')).map((e) => e.toId),
+  ).size;
+
   const baseProperties = {
     apiVersion: meta.apiVersion,
     label: meta.label,
@@ -416,7 +433,7 @@ export const extractVisualforceComponent = async (
     markupBytes: Buffer.byteLength(markup, 'utf-8'),
     componentRefCount: scannerOutput.componentRefCount,
     fieldAccessCount: scannerOutput.fieldAccessCount,
-    apexCallCount: scannerOutput.apexCallCount,
+    apexCallCount,
   };
   const properties =
     scannerOutput.warnings.length === 0

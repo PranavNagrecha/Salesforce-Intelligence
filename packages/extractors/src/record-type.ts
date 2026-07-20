@@ -130,6 +130,12 @@ const validateRoot = (
  * the enclosing CustomObject, and an optional `references` edge to a
  * BusinessProcess when `<businessProcess>` is set.
  *
+ * `properties.picklistFieldCount` is the count of `<picklistValues>` blocks;
+ * `properties.picklists` is the per-field value payload
+ * (`[{ field, defaultValue, values }]`) — RECORD-TYPE-OMITS-PICKLIST-VALUES.
+ * The payload is frontmatter depth-4 safe (`values` is a scalar array,
+ * `defaultValue` a single scalar), so it renders in component markdown.
+ *
  * The canonical ID derives from the path (grandparent directory) and
  * filename, not from the `<fullName>` element — the doc explicitly notes
  * that the filename wins for canonical ID construction and `<fullName>`
@@ -141,11 +147,11 @@ const validateRoot = (
  *
  * @example
  *   const result = await extractRecordType(
- *     'tests/fixtures/edu-org/source/main/default/objects/Faculty_List__c/recordTypes/Course.recordType-meta.xml',
+ *     'tests/fixtures/sample-org/source/main/default/objects/Widget_List__c/recordTypes/Standard.recordType-meta.xml',
  *   );
  *   if (result.ok) {
  *     console.log(result.value.nodes[0].id);
- *     // => 'RecordType:Faculty_List__c.Course'
+ *     // => 'RecordType:Widget_List__c.Standard'
  *   }
  */
 export const extractRecordType = async (
@@ -205,6 +211,39 @@ export const extractRecordType = async (
   const active = coerceBoolean(unwrapSingle(rootObj['active']));
   const businessProcess = optionalString(rootObj, 'businessProcess');
   const picklistFieldCount = toArray(rootObj['picklistValues']).length;
+  // RECORD-TYPE-OMITS-PICKLIST-VALUES: project each `<picklistValues>` block
+  // into `{ field, defaultValue, values }` so "which values can users pick on
+  // this record type?" is answerable from the node (previously only the block
+  // COUNT survived). Each block's `<picklist>` is the field the record type
+  // scopes, `<values><fullName>` are the available picklist values, and
+  // `<values><default>true</default>` marks the record type's default value.
+  //
+  // Shape is FRONTMATTER DEPTH-4 SAFE (array -> object -> inner SCALAR array):
+  // `values` is a string array and `field`/`defaultValue` are scalars, so it
+  // renders like the supported `conditionsMirror` shape. A per-value object
+  // (`values: [{ fullName, default }]`) would push to depth 5 and break the
+  // component-markdown render (the OPEN approval-process regression) — hence
+  // `defaultValue` is a single scalar naming the default, not a per-value flag.
+  const picklists = toArray(rootObj['picklistValues']).flatMap((rawBlock) => {
+    if (typeof rawBlock !== 'object' || rawBlock === null) return [];
+    const block = rawBlock as Record<string, unknown>;
+    const field = optionalString(block, 'picklist');
+    if (field === null) return [];
+    const valueEntries = toArray(block['values']).flatMap((rawValue) => {
+      if (typeof rawValue !== 'object' || rawValue === null) return [];
+      const valueObj = rawValue as Record<string, unknown>;
+      const fullName = optionalString(valueObj, 'fullName');
+      if (fullName === null) return [];
+      return [{ fullName, isDefault: coerceBoolean(unwrapSingle(valueObj['default'])) }];
+    });
+    return [
+      {
+        field,
+        defaultValue: valueEntries.find((v) => v.isDefault)?.fullName ?? null,
+        values: valueEntries.map((v) => v.fullName),
+      },
+    ];
+  });
 
   const node: Node = {
     id: nodeId,
@@ -223,6 +262,7 @@ export const extractRecordType = async (
       description: optionalString(rootObj, 'description'),
       businessProcess,
       picklistFieldCount,
+      picklists,
     },
   };
 

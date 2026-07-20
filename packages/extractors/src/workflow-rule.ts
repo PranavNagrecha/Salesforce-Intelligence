@@ -192,8 +192,14 @@ const validateRoot = (
  * addressable by name, so they cannot be referenced by a rule. Alerts
  * without a `<template>` are included with `null` so the caller can
  * distinguish "alert exists but has no template" from "alert not found".
+ *
+ * Exported so `approval-process.ts` (W4.3) can reuse the SAME builder when it
+ * resolves an ApprovalProcess `Alert` hook action's EmailTemplate against the
+ * sibling `workflows/{Object}.workflow-meta.xml` file's `<alerts>` collection
+ * (mirroring the {@link buildFieldUpdateTargetMap} cross-file reuse). Single
+ * source of truth — do NOT copy-paste into the approval extractor.
  */
-const buildAlertTemplateMap = (
+export const buildAlertTemplateMap = (
   rootObj: Record<string, unknown>,
 ): Readonly<Map<string, string | null>> => {
   const result = new Map<string, string | null>();
@@ -327,6 +333,7 @@ const buildWorkflowAlertNodes = (
     }
     const name = String(fullNameRaw);
     const alertId = `WorkflowAlert:${objectApiName}.${name}`;
+    const template = optionalString(alert, 'template');
     const ccEmailsRaw = toArray(alert['ccEmails']);
     const ccEmails = ccEmailsRaw
       .map((entry) =>
@@ -349,7 +356,7 @@ const buildWorkflowAlertNodes = (
         name,
         description: optionalString(alert, 'description'),
         senderType: optionalString(alert, 'senderType'),
-        template: optionalString(alert, 'template'),
+        template,
         ccEmails,
       },
     });
@@ -361,6 +368,26 @@ const buildWorkflowAlertNodes = (
       source: EXTRACTOR_SOURCE,
       properties: {},
     });
+    // W4.3 — the alert's `<template>` names the EmailTemplate this alert
+    // sends. Pre-W4.3 the template lived ONLY on `properties.template` as a
+    // string, so `get_edges` on the alert reached no EmailTemplate and
+    // "safe to delete EmailTemplate X" invented no WorkflowAlert dependent
+    // (the object-scoped alert node is the direct dependent even when NO
+    // WorkflowRule references the alert — the rule-level `sendsEmail` edge
+    // only fires for rule-referenced alerts). Emit a DECLARED `references`
+    // edge alert -> `EmailTemplate:{Folder.Name}` so the alert node is a
+    // counted usage of the template. `referenceKind: 'alertTemplate'`
+    // discriminates it from other `references` edges.
+    if (template !== null) {
+      edges.push({
+        fromId: alertId,
+        toId: `EmailTemplate:${templateRefToCanonicalTail(template)}`,
+        edgeType: 'references',
+        confidence: 'declared',
+        source: EXTRACTOR_SOURCE,
+        properties: { referenceKind: 'alertTemplate' },
+      });
+    }
   }
   return { nodes, edges };
 };
@@ -1096,6 +1123,10 @@ export const extractWorkflowRule = async (
   // captures them so alert-level properties (`senderType`,
   // `description`, `template`, `ccEmails`) are queryable via graph
   // queries (`sfi.get_component`, `sfi.find_component_usages`).
+  // W4.3 additionally emits a DECLARED `references` edge from each alert
+  // node to the `EmailTemplate:{Folder.Name}` its `<template>` names, so
+  // the alert is a counted usage of the template and "safe to delete
+  // EmailTemplate X?" sees the WorkflowAlert dependent.
   // Emission happens regardless of whether the file has any `<rules>` —
   // a workflow file with only `<alerts>` is a documented orphan-
   // collection happy path.

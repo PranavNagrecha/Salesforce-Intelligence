@@ -147,6 +147,93 @@ const validateRoot = (
 };
 
 /**
+ * CUSTOM-METADATA-VALUE-FIELD-REFS-UNGRAPHED: a value cell that carries an
+ * object/field API name must be shaped like one before it becomes a graph
+ * edge — a bare identifier optionally carrying the `__c`/`__mdt`/namespace
+ * `__` markers, NEVER a display label with spaces or a dotted path. This gate
+ * keeps a free-text cell (`"Copy on create"`) from minting a phantom
+ * `CustomObject:` edge while accepting `Widget__c`, `Contact`, `Gadget__c`.
+ */
+const API_NAME_SHAPE_RE = /^[A-Za-z][A-Za-z0-9_]*$/;
+const isApiNameShaped = (value: string): boolean => API_NAME_SHAPE_RE.test(value);
+
+const OBJECT_CELL_SUFFIX = 'Object__c';
+const FIELD_CELL_SUFFIX = 'Field__c';
+
+/**
+ * CUSTOM-METADATA-VALUE-FIELD-REFS-UNGRAPHED: resolve object/field-shaped value
+ * cells into `references` edges so a mapping/field-copy CMDT is visible to
+ * usage, lineage, and blast-radius tools.
+ *
+ * A cell whose FIELD name ends in `Object__c` (e.g. `Source_Object__c`,
+ * `Target_Object__c`) and whose string VALUE is API-name-shaped emits
+ * `CustomMetadataRecord -> CustomObject:{value}`. A cell whose field name ends
+ * in `Field__c` (e.g. `Source_Field__c`) emits `CustomMetadataRecord ->
+ * CustomField:{object}.{value}` where `{object}` is resolved from the SIBLING
+ * cell that shares the same prefix but ends in `Object__c` (`Source_Field__c`
+ * pairs with `Source_Object__c`). When no sibling object cell resolves the
+ * object, NO field edge is minted — the object is not guessed.
+ *
+ * Confidence is `heuristic`: the object/field linkage is inferred from the
+ * `*Object__c` / `*Field__c` naming convention + value shape, not a declared
+ * typed metadata relationship. Masked (`***`) and non-string cells are
+ * skipped; edge targets are deduplicated so two cells naming the same object
+ * do not collide on the `(fromId,toId,edgeType,source)` graph PK.
+ */
+const extractValueRefEdges = (
+  values: readonly ValueEntry[],
+  nodeId: string,
+): Edge[] => {
+  // Field name -> its string value, for pairing a `*Field__c` cell with its
+  // `*Object__c` sibling. Only non-masked string cells are eligible.
+  const stringValueByField = new Map<string, string>();
+  for (const entry of values) {
+    if (!entry.isMasked && typeof entry.value === 'string' && entry.value.length > 0) {
+      stringValueByField.set(entry.field, entry.value);
+    }
+  }
+
+  const edges: Edge[] = [];
+  const seenTargets = new Set<string>();
+  const pushEdge = (toId: string, properties: Readonly<Record<string, unknown>>): void => {
+    if (seenTargets.has(toId)) return;
+    seenTargets.add(toId);
+    edges.push({
+      fromId: nodeId,
+      toId,
+      edgeType: 'references',
+      confidence: 'heuristic',
+      source: EXTRACTOR_SOURCE,
+      properties,
+    });
+  };
+
+  for (const entry of values) {
+    if (entry.isMasked || typeof entry.value !== 'string' || entry.value.length === 0) {
+      continue;
+    }
+    const value = entry.value;
+    if (entry.field.endsWith(OBJECT_CELL_SUFFIX) && isApiNameShaped(value)) {
+      pushEdge(`CustomObject:${value}`, {
+        referenceKind: 'cmdtValueObject',
+        valueField: entry.field,
+      });
+    } else if (entry.field.endsWith(FIELD_CELL_SUFFIX) && isApiNameShaped(value)) {
+      const prefix = entry.field.slice(0, entry.field.length - FIELD_CELL_SUFFIX.length);
+      const objectValue = stringValueByField.get(`${prefix}${OBJECT_CELL_SUFFIX}`);
+      if (objectValue !== undefined && isApiNameShaped(objectValue)) {
+        pushEdge(`CustomField:${objectValue}.${value}`, {
+          referenceKind: 'cmdtValueField',
+          valueField: entry.field,
+          object: objectValue,
+        });
+      }
+    }
+  }
+  return edges;
+};
+
+/**
  * Map an `xsi:type` wire-format discriminator to the extractor's
  * `valueType` token. Salesforce serializes types as `xsd:double`,
  * `xsd:string`, `xsd:boolean`, `xsd:date`, etc. Per the doc table,
@@ -297,9 +384,13 @@ const extractValueEntry = (
  *
  * Reads the file, parses it as XML, validates the `<CustomMetadata>` root
  * per the vendored `CustomMetadataRecord.md` spec, and returns an
- * `ExtractionResult` containing one `Node` of type `'CustomMetadataRecord'`
- * and one `parentOf` edge from `CustomObject:{TypeApiName}` (mirroring
- * v1.0's CustomField parentOf pattern).
+ * `ExtractionResult` containing one `Node` of type `'CustomMetadataRecord'`,
+ * one `parentOf` edge from `CustomObject:{TypeApiName}` (mirroring v1.0's
+ * CustomField parentOf pattern), and — CUSTOM-METADATA-VALUE-FIELD-REFS-
+ * UNGRAPHED — one `references` edge (heuristic) per object/field-shaped value
+ * cell (`*Object__c` -> `CustomObject:{value}`, `*Field__c` ->
+ * `CustomField:{sibling *Object__c value}.{value}`). See
+ * {@link extractValueRefEdges}.
  *
  * The canonical ID derives from the filename — `{TypeApiName}` and
  * `{RecordName}` are obtained by splitting the basename (minus
@@ -423,5 +514,10 @@ export const extractCustomMetadataRecord = async (
     properties: {},
   };
 
-  return ok({ nodes: [node], edges: [parentEdge] });
+  // CUSTOM-METADATA-VALUE-FIELD-REFS-UNGRAPHED: object/field-shaped value cells
+  // become `references` edges (heuristic) so a mapping/field-copy CMDT shows up
+  // in CustomObject / CustomField usages and blast-radius.
+  const valueRefEdges = extractValueRefEdges(values, nodeId);
+
+  return ok({ nodes: [node], edges: [parentEdge, ...valueRefEdges] });
 };

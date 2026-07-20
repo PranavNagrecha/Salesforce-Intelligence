@@ -5,6 +5,77 @@ adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-07-20
+
+> **Reasoning-model deepening + two lossless Flow tools.** The org-independent
+> Concept Model behind `sfi.interpret` grows to **94 concepts / 143 rules** and
+> lands 18 adversarially-verified correctness fixes (no behaviour change to any
+> already-correct rule). `sfi.flow_graph` / `sfi.flow_trace` add lossless Flow
+> structure and declared-logic tracing. Deterministic and offline throughout —
+> no LLM, no live org read.
+
+### Added
+- **`sfi.flow_graph` — lossless structural projection of a Flow.** Returns every
+  element by its real name, the full connector graph (from -> to -> kind: default,
+  rule, fault, loop next-value/no-more-values, scheduled path, go-to), decision
+  rules, assignment items, formula expressions, variable declarations, record-op
+  filters, and the `<start>` element including scheduled paths. No inference, no
+  summarization — honest gaps surface in `unmodeled[]` rather than being dropped
+  silently. Accepts a Flow ID *or* API Name through a shared resolver that fails
+  closed (rather than guessing) when given a bare 15/18-char record id without an
+  id-to-API-name index.
+- **`sfi.flow_trace` — walks a Flow's declared logic over a caller-supplied
+  record-value map.** Evaluates decisions, assignments, formulas, and
+  loops-over-supplied-collections, returning the executed path and the field
+  writes it performs. Every un-evaluable node (Apex actions, subflows, callouts,
+  dynamic references) is marked `unevaluated` with a reason rather than simulated
+  or guessed — this is a projection of declared logic, not a Flow execution engine.
+- **Roster: +2 MCP tools.** Advertised roster grows from 196 to **198**; registered
+  roster (advertised + hidden back-compat aliases) grows from 200 to **202**.
+- **Reasoning model — endpoint-type predicate (`toTypeIn` / `fromTypeIn`).** A new
+  concept-rule binding gate fires an edge rule only when the endpoint node is of an
+  allowed type (fail-closed). Five cluster rules previously matched on the wrong query
+  root because `componentTypes` scopes only which endpoints are *cited*, not which
+  edges *match* — so a permission-set grant could be mislabelled a Profile grant, an
+  ordinary Apex `callout:{NamedCredential}` a named-credential binding, or a Flow
+  subflow reference a CustomPermission gate. The predicate closes all five.
+
+### Changed
+- `sfi.explain_flow` now cross-references `sfi.flow_graph` for full connector-level
+  structure and drops its prior false-completeness footer; it keeps its own
+  narrative role and removes no routing.
+- **Concept Model grows to 94 concepts / 143 rules** (from 48 / 84). Every addition
+  is org-independent, curated general-Salesforce truth joined against the grounded
+  vault slice at query time — no org data lives in the model. `sfi.interpret` output
+  is unchanged in shape: cited (`groundedIn`), confidence-tiered structural-implication
+  claims, with claim confidence a second axis (the weakest of the concept rule's
+  ceiling and the grounding edges), deterministic and offline.
+
+### Fixed
+- **18 adversarially-verified reasoning-model correctness fixes** (Graph B /
+  `sfi.interpret`). No behaviour change to any rule that was already correct — only the
+  fabricating / over-claiming cases are fixed:
+  - **SF-fidelity corrections.** `flow-run-mode/system-without-sharing` drops the false
+    claim that an Apex `without sharing` class enforces object CRUD/FLS; the dead
+    `role-access/case-controlled-by-parent` rule (an enum value Salesforce never emits)
+    is removed; `custom-permission-gating` no longer asserts an ungrounded gate
+    *direction*; `unique-constraint` reports `StatusCode.DUPLICATE_VALUE` (not
+    `FIELD_INTEGRITY_EXCEPTION`); OWD posture fixes (Controlled-by-Parent ≠
+    master-detail, Public Read/Write/Transfer keeps its transfer grant, Public Full
+    Access acknowledges restriction rules); `recursive-self-write` distinguishes before-
+    vs after-save re-entry; `stacked-record-triggered-flows` hedges Flow Trigger Order;
+    the async queueable / `@future` rules list all cited targets instead of truncating;
+    `test-class-without-assertions` ships at `heuristic`, not `parsed`.
+  - **`disambiguate_concepts` honesty.** Field counts, differences, and the "when to use
+    each" inference are computed over the FULL match set, not the display-capped slice;
+    each bucket exposes `totalMatchCount` / `truncated` with a boundary disclosure, so
+    surfaced counts are true and disjoint recommendations are no longer fabricated from
+    an alphabetically-biased subset.
+  - **Leak-gate + proof completeness.** The concept-model parity gate now scans
+    witnessPartition prose templates, endpoint predicates, and operator operands for
+    canonical ids; a new rule-proof completeness gate fails the suite if any shipped rule
+    has no firing proof, and the three previously unproven rules are backfilled.
+
 ## [0.2.0] — 2026-07-12
 
 > **Tool roster — the integrated totals.** 0.2.0 adds **24 new MCP tools**,

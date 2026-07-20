@@ -146,6 +146,30 @@ const seed: ExtractionResult = {
           '/* On 9/30/2024 award years differ */ IF(TODAY() <= DATE(YEAR(TODAY()), 9, 30), 1, 0)',
       },
     }),
+    // HARDCODED-ID-SCAN-OMITS-RESTRICTION-RULE-AND-CUSTOMLABEL: a RestrictionRule
+    // whose <userCriteria> bakes a Profile Id, and a CustomLabel storing a
+    // RecordType Id — both invisible to the pre-fix Apex+formula scan. Ids are
+    // synthetic (00e = Profile, 012 = RecordType key prefixes).
+    makeNode({
+      id: 'RestrictionRule:Widget_Offering_Restrict',
+      type: 'RestrictionRule',
+      apiName: 'Widget_Offering_Restrict',
+      properties: {
+        enforcementType: 'Restrict',
+        userCriteria: "$User.ProfileId='00eZZZ000000000AAA'",
+        recordFilter: '',
+        active: true,
+      },
+    }),
+    makeNode({
+      id: 'CustomLabel:WidgetCaseRecordTypeId',
+      type: 'CustomLabel',
+      apiName: 'WidgetCaseRecordTypeId',
+      properties: {
+        value: '012ZZZ000000000AAA',
+        language: 'en_US',
+      },
+    }),
   ],
   edges: [],
 };
@@ -353,6 +377,69 @@ describe('findHardcodedValuesAnywhereHandler', () => {
       expect(m.contextSnippet.length).toBeGreaterThan(0);
     }
   });
+
+  describe('HARDCODED-ID-SCAN-OMITS-RESTRICTION-RULE-AND-CUSTOMLABEL', () => {
+    it('id-shape scan surfaces the RestrictionRule userCriteria Profile Id and the CustomLabel value RecordType Id', async () => {
+      // Red pre-fix: category:id scanned only apex/formula/validation-rule/
+      // workflow-rule, so the Profile Id in the RestrictionRule userCriteria
+      // and the RecordType Id in the CustomLabel value were invisible and
+      // bySource had no restriction-rule / custom-label keys.
+      const r = await findHardcodedValuesAnywhereHandler(ctx, { category: 'id' });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.bySource['restriction-rule']).toBeGreaterThan(0);
+      expect(r.value.data.bySource['custom-label']).toBeGreaterThan(0);
+      const rr = r.value.data.matches.find(
+        (m) => m.componentId === 'RestrictionRule:Widget_Offering_Restrict',
+      );
+      expect(rr).toBeDefined();
+      expect(rr!.source).toBe('restriction-rule');
+      expect(rr!.matchedValue).toBe('00eZZZ000000000AAA');
+      expect(rr!.confidence).toBe('heuristic');
+      const cl = r.value.data.matches.find(
+        (m) => m.componentId === 'CustomLabel:WidgetCaseRecordTypeId',
+      );
+      expect(cl).toBeDefined();
+      expect(cl!.source).toBe('custom-label');
+      expect(cl!.matchedValue).toBe('012ZZZ000000000AAA');
+    });
+
+    it('exact value lookup finds the RestrictionRule Profile Id (declared)', async () => {
+      const r = await findHardcodedValuesAnywhereHandler(ctx, {
+        value: '00eZZZ000000000AAA',
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.totalCount).toBeGreaterThan(0);
+      const rr = r.value.data.matches.find((m) => m.source === 'restriction-rule');
+      expect(rr).toBeDefined();
+      expect(rr!.confidence).toBe('declared');
+    });
+
+    it('exact value lookup finds the CustomLabel RecordType Id', async () => {
+      const r = await findHardcodedValuesAnywhereHandler(ctx, {
+        value: '012ZZZ000000000AAA',
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(
+        r.value.data.matches.some((m) => m.source === 'custom-label'),
+      ).toBe(true);
+    });
+
+    it('scope narrows to custom-label only', async () => {
+      const r = await findHardcodedValuesAnywhereHandler(ctx, {
+        category: 'id',
+        scope: ['custom-label'],
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.matches.length).toBeGreaterThan(0);
+      expect(
+        r.value.data.matches.every((m) => m.source === 'custom-label'),
+      ).toBe(true);
+    });
+  });
 });
 
 describe('findHardcodedValuesAnywhereInputSchema', () => {
@@ -505,37 +592,37 @@ describe('findHardcodedValuesAnywhereHandler — $Permission.* guard searchabili
   const permSeed: ExtractionResult = {
     nodes: [
       makeNode({ id: 'CustomObject:Contact', type: 'CustomObject', apiName: 'Contact' }),
-      makeNode({ id: 'CustomObject:Qualified_Faculty__c', type: 'CustomObject', apiName: 'Qualified_Faculty__c' }),
+      makeNode({ id: 'CustomObject:Qualified_Widget__c', type: 'CustomObject', apiName: 'Qualified_Widget__c' }),
       makeNode({
-        id: 'ValidationRule:Contact.Prevent_SMS_Optin_for_Admissions',
+        id: 'ValidationRule:Contact.Prevent_SMS_Optin_One',
         type: 'ValidationRule',
-        apiName: 'Prevent_SMS_Optin_for_Admissions',
+        apiName: 'Prevent_SMS_Optin_One',
         parentId: 'CustomObject:Contact',
         properties: {
-          errorConditionFormula: "NOT($Permission.SkipValidation) && SMS_Opt_In__c = TRUE",
+          errorConditionFormula: "NOT($Permission.SkipValidation) && Widget_Opt_In__c = TRUE",
           errorMessage: 'Cannot opt in without consent',
           active: true,
         },
       }),
       makeNode({
-        id: 'ValidationRule:Contact.Prevent_SMS_Optin_for_Advising',
+        id: 'ValidationRule:Contact.Prevent_SMS_Optin_Two',
         type: 'ValidationRule',
-        apiName: 'Prevent_SMS_Optin_for_Advising',
+        apiName: 'Prevent_SMS_Optin_Two',
         parentId: 'CustomObject:Contact',
         properties: {
-          errorConditionFormula: "NOT($Permission.SkipValidation) && Advisory_SMS_Opt_In__c = TRUE",
+          errorConditionFormula: "NOT($Permission.SkipValidation) && Advisory_Widget_Opt_In__c = TRUE",
           errorMessage: 'Cannot opt in without consent',
           active: true,
         },
       }),
       makeNode({
-        id: 'ValidationRule:Qualified_Faculty__c.FERPA_Training_Required',
+        id: 'ValidationRule:Qualified_Widget__c.Sample_Training_Required',
         type: 'ValidationRule',
-        apiName: 'FERPA_Training_Required',
-        parentId: 'CustomObject:Qualified_Faculty__c',
+        apiName: 'Sample_Training_Required',
+        parentId: 'CustomObject:Qualified_Widget__c',
         properties: {
-          errorConditionFormula: "NOT($Permission.SkipValidation) && ISBLANK(FERPA_Training_Date__c)",
-          errorMessage: 'FERPA training is required',
+          errorConditionFormula: "NOT($Permission.SkipValidation) && ISBLANK(Sample_Training_Date__c)",
+          errorMessage: 'Sample training is required',
           active: true,
         },
       }),
@@ -573,9 +660,9 @@ describe('findHardcodedValuesAnywhereHandler — $Permission.* guard searchabili
     expect(r.ok).toBe(true); if (!r.ok) return;
     const ids = r.value.data.matches.map((m) => m.componentId).sort();
     // Must find 3 matching validation rules, not 0 (the product's wrong answer).
-    expect(ids).toContain('ValidationRule:Contact.Prevent_SMS_Optin_for_Admissions');
-    expect(ids).toContain('ValidationRule:Contact.Prevent_SMS_Optin_for_Advising');
-    expect(ids).toContain('ValidationRule:Qualified_Faculty__c.FERPA_Training_Required');
+    expect(ids).toContain('ValidationRule:Contact.Prevent_SMS_Optin_One');
+    expect(ids).toContain('ValidationRule:Contact.Prevent_SMS_Optin_Two');
+    expect(ids).toContain('ValidationRule:Qualified_Widget__c.Sample_Training_Required');
     // Must NOT include the unrelated $Permission.SomeOtherPermission guard.
     expect(ids).not.toContain('ValidationRule:Contact.Other_Guard');
     expect(r.value.data.bySource['validation-rule']).toBe(3);

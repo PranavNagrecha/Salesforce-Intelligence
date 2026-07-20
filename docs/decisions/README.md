@@ -18,11 +18,19 @@ when a decision changes, write a new one that supersedes it
 | [ADR-005](./ADR-005-mcp-response-byte-budget.md) | A global MCP response byte budget with per-family sub-budgets | `mcp/tools/index` `jsonResult`, graph/SOE payload bounds |
 | [ADR-006](./ADR-006-read-only-graph-access.md) | Query consumers open the DuckDB graph in READ-ONLY mode | `graph/store` `openGraphReadOnly`, the MCP server |
 | [ADR-007](./ADR-007-canonical-response-envelope.md) | Canonical `{data, vaultState}` envelope + `componentId` id key; additive, gate-guarded | `mcp/tools/index`, `mcp/response-consistency`, `check-response-consistency` |
+| [ADR-008](./ADR-008-deterministic-concept-model-reasoning.md) | Deterministic concept-model reasoning: an org-independent Concept Model joined against the vault via `sfi.interpret`; claim confidence is a second axis floored by edge confidence | `mcp/model/*.yaml`, `mcp/knowledge`, `mcp/tools/interpret`, `synthesize-answer` |
+| [ADR-009](./ADR-009-selector-scope-honesty.md) | Scope-aware tools accept natural selectors, echo the resolved `appliedScope`, and refuse conflicts/misses with `invalid-query` — byte-identical when unscoped | scope-aware `mcp/tools/*`, `docs/configuration.md` § input scope |
 
 ## Relationships
 
 ADR-001 (confidence tiers) is the root of the trust posture; ADR-003 (edge
-contract) and ADR-004 (phantom taxonomy) build on it. ADR-002 (offline/live
-boundary) and ADR-006 (read-only access) together make the product non-mutating
-by design. ADR-005 (byte budget) is independent but cross-references the graph
-budgets that ADR-003's tools emit.
+contract) and ADR-004 (phantom taxonomy) build on it. ADR-008 (concept-model
+reasoning) also builds on ADR-001: its **claim** confidence is a second axis
+floored by ADR-001's per-**edge** confidence — a reasoning claim can never
+exceed the weakest edge it rests on. ADR-002 (offline/live boundary) and ADR-006
+(read-only access) together make the product non-mutating by design. ADR-005
+(byte budget) is independent but cross-references the graph budgets that
+ADR-003's tools emit. ADR-009 (selector-scope honesty) extends ADR-007: ADR-007
+fixed the canonical *name* of the target id; ADR-009 fixes the *behaviour* when a
+caller scopes by any natural selector — honoured and echoed, or refused, never
+silently mis-scoped.

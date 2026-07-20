@@ -314,6 +314,41 @@ describe('methodReachabilityHandler', () => {
     if (r.ok) return;
     expect(r.error.kind).toBe('component-not-found');
   });
+
+  // GUARD (METHOD-REACHABILITY-REJECTS-COMPONENTID): pre-fix `componentId` /
+  // `apiName` were Zod-stripped → `classApiName: Required`. Post-fix all three
+  // resolve to the same target, echo `appliedScope`, and return byte-identical
+  // verdict/entryPoints.
+  it('componentId ≡ apiName ≡ classApiName (byte-equal + appliedScope)', async () => {
+    const viaClassApiName = await methodReachabilityHandler(ctx, {
+      classApiName: 'ApexClass:TriggerReachable',
+    });
+    const viaComponentId = await methodReachabilityHandler(ctx, {
+      componentId: 'ApexClass:TriggerReachable',
+    });
+    const viaApiName = await methodReachabilityHandler(ctx, {
+      apiName: 'TriggerReachable',
+    });
+    expect(viaClassApiName.ok && viaComponentId.ok && viaApiName.ok).toBe(true);
+    if (!viaClassApiName.ok || !viaComponentId.ok || !viaApiName.ok) return;
+    expect(viaClassApiName.value.data.appliedScope).toEqual({
+      component: 'ApexClass:TriggerReachable',
+      mode: 'component',
+    });
+    for (const alt of [viaComponentId, viaApiName]) {
+      expect(alt.value.data).toEqual(viaClassApiName.value.data);
+    }
+  });
+
+  it('disagreeing class selectors → invalid-query (never a silent pick)', async () => {
+    const r = await methodReachabilityHandler(ctx, {
+      classApiName: 'ApexClass:TriggerReachable',
+      componentId: 'ApexClass:RestReachable',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
 });
 
 describe('methodReachabilityInputSchema', () => {
@@ -328,6 +363,16 @@ describe('methodReachabilityInputSchema', () => {
     expect(
       methodReachabilityInputSchema.safeParse({ classApiName: '' }).success,
     ).toBe(false);
+  });
+
+  it('accepts componentId / apiName as the target selector', () => {
+    expect(
+      methodReachabilityInputSchema.safeParse({ componentId: 'ApexClass:X' })
+        .success,
+    ).toBe(true);
+    expect(
+      methodReachabilityInputSchema.safeParse({ apiName: 'X' }).success,
+    ).toBe(true);
   });
 });
 
@@ -388,8 +433,10 @@ describe('methodReachabilityHandler — bounded graph queries (transitive)', () 
     );
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    // Captured from the pre-batch handler on this exact fixture.
+    // Captured from the pre-batch handler on this exact fixture (+ appliedScope
+    // echo added by METHOD-REACHABILITY-REJECTS-COMPONENTID).
     expect(result.value.data).toEqual({
+      appliedScope: { component: 'ApexClass:Target', mode: 'component' },
       classApiName: 'ApexClass:Target',
       verdict: 'entry-point-reachable',
       entryPoints: [

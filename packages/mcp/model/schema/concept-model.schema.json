@@ -1,0 +1,307 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://sf-intelligence.dev/model/schema/concept-model.schema.json",
+  "title": "SfIntelligence concept model — status-code taxonomy + edge semantics + reasoning concepts",
+  "description": "Contract for the curator-owned concept-model YAML: packages/mcp/model/status-taxonomy.yaml (RM-0, key `statusCodes`), packages/mcp/model/edge-semantics.yaml (RM-1b, key `edgeSemantics`), packages/mcp/model/concepts.yaml (RM-2, key `concepts`), and packages/mcp/model/concept-rules.yaml (RM-2, key `conceptRules`). A single YAML file carries exactly one of these top-level keys. General Salesforce truth only: REST/API status codes, bare ComponentType and edge-type names, one extractor source marker (`formula-tokenizer`), save-order phase names, source-of-truth classes, and plain-English explanations / (category, verdict) pairs / reasoning summaries / structural rule predicates. This schema documents the shape the codegen (build-concept-model.mjs) validates in plain JS; it carries the same required-keys, type, and no-canonical-id constraints. Key ORDER in the YAML is significant and preserved into the generated artifact.",
+  "type": "object",
+  "additionalProperties": false,
+  "minProperties": 1,
+  "anyOf": [
+    { "required": ["statusCodes"] },
+    { "required": ["edgeSemantics"] },
+    { "required": ["concepts"] },
+    { "required": ["conceptRules"] }
+  ],
+  "properties": {
+    "statusCodes": {
+      "type": "object",
+      "description": "Map of UPPER_SNAKE REST/API status code to its category-level explanation.",
+      "minProperties": 1,
+      "propertyNames": { "pattern": "^[A-Z][A-Z0-9_]*$" },
+      "additionalProperties": { "$ref": "#/definitions/statusCodeEntry" }
+    },
+    "edgeSemantics": {
+      "$ref": "#/definitions/edgeSemantics"
+    },
+    "concepts": {
+      "type": "object",
+      "description": "RM-2 concept dictionary. Map of ConceptId (kebab-case, `concept:`-prefixed — NEVER a canonical `Type:Name` id) to its Concept entry.",
+      "minProperties": 1,
+      "propertyNames": { "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" } },
+      "additionalProperties": { "$ref": "#/definitions/concept" }
+    },
+    "conceptRules": {
+      "type": "array",
+      "description": "RM-2 ordered list of ConceptRules binding a Concept to a structural predicate over a grounded slice.",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/conceptRule" }
+    }
+  },
+  "definitions": {
+    "docLink": {
+      "type": "object",
+      "description": "A pointer to official Salesforce documentation for a Concept.",
+      "additionalProperties": false,
+      "required": ["label", "url"],
+      "properties": {
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" }
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" }
+        }
+      }
+    },
+    "concept": {
+      "type": "object",
+      "description": "A unit of generic, org-agnostic Salesforce reasoning knowledge. Carries NO canonical component ids.",
+      "additionalProperties": false,
+      "required": ["kind", "label", "summary"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "description": "The ConceptKind category (a small closed union mirrored from @sf-intelligence/contracts).",
+          "enum": [
+            "status-code",
+            "save-order-phase",
+            "field-provenance",
+            "relationship",
+            "automation-collision",
+            "access-mechanism",
+            "firing-condition",
+            "async-boundary"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Short human title.",
+          "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" }
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain-English generic Salesforce truth. Never org-specific.",
+          "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" }
+        },
+        "docs": {
+          "type": "array",
+          "description": "Optional pointers to official documentation.",
+          "items": { "$ref": "#/definitions/docLink" }
+        }
+      }
+    },
+    "rulePredicate": {
+      "type": "object",
+      "description": "A STRUCTURAL matcher over a grounded slice. Matches by type and category ONLY — no component ids. Every supplied field is a conjunctive constraint. At least one field must be present.",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "edgeType": {
+          "type": "string",
+          "description": "Match edges of this type (and constrain the predicate to an edge predicate).",
+          "minLength": 1,
+          "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" }
+        },
+        "componentTypes": {
+          "type": "array",
+          "description": "Match nodes of these bare ComponentTypes (edge predicate: an endpoint must be one of these).",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" }
+          }
+        },
+        "conditionKind": {
+          "type": "string",
+          "enum": ["criteria", "formula", "flow-decision", "flow-recordtrigger"]
+        },
+        "whereProperty": {
+          "type": "object",
+          "description": "Match elements whose properties[key] strictly equals `equals`.",
+          "additionalProperties": false,
+          "required": ["key", "equals"],
+          "properties": {
+            "key": {
+              "type": "string",
+              "minLength": 1,
+              "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" }
+            },
+            "equals": {
+              "description": "The value to strictly equal (string, number, or boolean)."
+            }
+          }
+        },
+        "order": {
+          "type": "integer",
+          "description": "Match elements whose properties.order equals this value (a save-order phase index)."
+        }
+      }
+    },
+    "conceptRule": {
+      "type": "object",
+      "description": "Binds a Concept (by id) to a structural RulePredicate and the interpretation to emit when it matches.",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "concept",
+        "bind",
+        "interpretation",
+        "maxConfidence",
+        "absenceShaped",
+        "dependsOnCoverage"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Rule id (`rule:`-prefixed slug — never a canonical component id).",
+          "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" }
+        },
+        "concept": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The ConceptId this rule interprets (must exist in concepts.yaml).",
+          "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" }
+        },
+        "bind": { "$ref": "#/definitions/rulePredicate" },
+        "interpretation": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Template with `{ids}` / positional `{0}` tokens filled from matched ids.",
+          "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" }
+        },
+        "maxConfidence": {
+          "type": "string",
+          "enum": ["declared", "parsed", "heuristic"]
+        },
+        "absenceShaped": { "type": "boolean" },
+        "dependsOnCoverage": {
+          "type": "array",
+          "description": "Bare ComponentType families the rule's honesty hinges on (may be empty).",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" }
+          }
+        }
+      }
+    },
+    "statusCodeEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "explanation", "producedByTypes", "crossRefObjectAutomation"],
+      "properties": {
+        "category": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Short category slug for the status code (e.g. validation-rule, access).",
+          "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" }
+        },
+        "explanation": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain-English cause. General Salesforce guidance; never org-specific.",
+          "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" }
+        },
+        "producedByTypes": {
+          "type": "array",
+          "description": "Bare Salesforce ComponentType names that can produce this code (may be empty for org-limit codes).",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" }
+          }
+        },
+        "crossRefObjectAutomation": {
+          "type": "boolean",
+          "description": "True when the usual producer is object automation (trigger / flow), so consumers cross-reference the object's triggersOn sources."
+        }
+      }
+    },
+    "verdictPair": {
+      "type": "object",
+      "description": "The (category, verdict) classification the safe_to_delete_field tool assigns to one incoming dependency edge.",
+      "additionalProperties": false,
+      "required": ["category", "verdict"],
+      "properties": {
+        "category": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Reasoning category slug (e.g. apex, flow, validation, unknown).",
+          "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" }
+        },
+        "verdict": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Per-edge verdict slug (e.g. blocking, risky, review).",
+          "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" }
+        }
+      }
+    },
+    "edgeRule": {
+      "type": "object",
+      "description": "Per-edge-type rule: a referrer-ComponentType-keyed verdict table plus a fallback verdict.",
+      "additionalProperties": false,
+      "required": ["bySourceType", "default"],
+      "properties": {
+        "bySourceType": {
+          "type": "object",
+          "description": "Map of bare referrer ComponentType name to its verdict pair (may be empty).",
+          "propertyNames": { "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" } },
+          "additionalProperties": { "$ref": "#/definitions/verdictPair" }
+        },
+        "default": { "$ref": "#/definitions/verdictPair" }
+      }
+    },
+    "edgeSemantics": {
+      "type": "object",
+      "description": "The safe-to-delete-field edge-semantics table (RM-1b). Lookup order: formulaTokenizer special case, then byEdgeType[edgeType].bySourceType[sourceType], then that edge type's default, then the top-level default.",
+      "additionalProperties": false,
+      "required": ["formulaTokenizer", "byEdgeType", "default"],
+      "properties": {
+        "formulaTokenizer": {
+          "type": "object",
+          "description": "The SPECIAL case checked first: a `references` edge whose extractor source marker matches classifies as a formula reference regardless of the source node's type.",
+          "additionalProperties": false,
+          "required": ["edgeType", "source", "category", "verdict"],
+          "properties": {
+            "edgeType": {
+              "type": "string",
+              "minLength": 1,
+              "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" }
+            },
+            "source": {
+              "type": "string",
+              "minLength": 1,
+              "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" }
+            },
+            "category": {
+              "type": "string",
+              "minLength": 1,
+              "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" }
+            },
+            "verdict": {
+              "type": "string",
+              "minLength": 1,
+              "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" }
+            }
+          }
+        },
+        "byEdgeType": {
+          "type": "object",
+          "description": "Map of bare edge-type name to its per-edge-type rule.",
+          "minProperties": 1,
+          "propertyNames": { "not": { "pattern": "^[A-Z][A-Za-z0-9]+:" } },
+          "additionalProperties": { "$ref": "#/definitions/edgeRule" }
+        },
+        "default": { "$ref": "#/definitions/verdictPair" }
+      }
+    }
+  }
+}

@@ -21,7 +21,7 @@ const cls = (
   object,
   field,
   mutability: opts.derived
-    ? { mutability: 'derived', reason: 'Formula field — computed.', sourceFormula: 'Pay_To__r.Faculty_ID__c' }
+    ? { mutability: 'derived', reason: 'Formula field — computed.', sourceFormula: 'Related_Widget__r.Member_ID__c' }
     : { mutability: 'writable', reason: 'Directly editable field.' },
   upsertKey: { isUpsertKey: (opts.signals?.length ?? 0) > 0, signals: opts.signals ?? [] },
   role: { role: 'x', severity: 'low', confidence: 'confirmed', signals: [] },
@@ -52,7 +52,7 @@ describe('buildBuckets', () => {
   });
 
   it('short-circuits a derived field to a single info note (no impact buckets)', () => {
-    const buckets = buildBuckets(cls('Education__c', 'Faculty_ID__c', { derived: true }), NO_EDGES);
+    const buckets = buildBuckets(cls('Education__c', 'Member_ID__c', { derived: true }), NO_EDGES);
     expect(buckets).toHaveLength(1);
     expect(buckets[0]!.severity).toBe('info');
     expect(buckets[0]!.summary).toMatch(/Not directly changeable/);

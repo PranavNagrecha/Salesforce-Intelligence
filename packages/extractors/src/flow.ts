@@ -26,6 +26,22 @@ import { deriveComponentApiName } from './path-utils.js';
 
 const FLOW_FILE_SUFFIX = '.flow-meta.xml';
 const ROOT_ELEMENT = 'Flow';
+
+/**
+ * The fast-xml-parser options shared by every Flow-XML entry point —
+ * {@link extractFlow} and the flow-graph projection (`flow-graph.ts`). Flow
+ * metadata files are local trusted disk content sourced from `sf project
+ * retrieve`, so XXE is not a concern; the default 1000 entity-expansion limit
+ * is too tight for real production Flows, so it is raised to 10000 while
+ * preserving a pathological-input ceiling. Exported (rather than re-declared)
+ * so the two entry points parse byte-identically.
+ */
+export const FLOW_XML_PARSER_OPTIONS = {
+  ignoreAttributes: true,
+  parseTagValue: false,
+  trimValues: true,
+  processEntities: { maxTotalExpansions: 10000 },
+};
 // <apiVersion> is OPTIONAL: auto-generated flows (record-triggered
 // PolicyCondition_* helpers, screen flows like customer_satisfaction) omit
 // it. It is NOT required for extraction — the node carries `number | null`
@@ -72,7 +88,7 @@ type FlowStatus = (typeof ALLOWED_STATUS)[number];
  * scalar/object otherwise. Flow elements the extractor reads are all
  * single-occurrence; this helper tolerates either shape.
  */
-const unwrapSingle = (value: unknown): unknown =>
+export const unwrapSingle = (value: unknown): unknown =>
   Array.isArray(value) ? value[0] : value;
 
 /**
@@ -82,7 +98,7 @@ const unwrapSingle = (value: unknown): unknown =>
  * etc. may appear any number of times, so call sites consume an array.
  * Returns `[]` for `undefined`/`null`.
  */
-const toArray = (value: unknown): unknown[] => {
+export const toArray = (value: unknown): unknown[] => {
   if (value === undefined || value === null) return [];
   return Array.isArray(value) ? value : [value];
 };
@@ -92,7 +108,7 @@ const toArray = (value: unknown): unknown[] => {
  * `undefined` becomes `null`; everything else stringifies. Used for
  * optional string-valued elements that default to `null`.
  */
-const toNullableString = (value: unknown): string | null => {
+export const toNullableString = (value: unknown): string | null => {
   const v = unwrapSingle(value);
   if (v === undefined || v === null) return null;
   return String(v);
@@ -104,7 +120,7 @@ const toNullableString = (value: unknown): string | null => {
  * Edge-emission rules treat such values as "no object specified" and
  * record a warning rather than emit a malformed-id edge.
  */
-const toNonEmptyString = (value: unknown): string | null => {
+export const toNonEmptyString = (value: unknown): string | null => {
   const v = unwrapSingle(value);
   if (v === undefined || v === null) return null;
   const s = String(v).trim();
@@ -936,7 +952,7 @@ const WHOLE_RECORD_DISCLOSURE =
  *     and the caller suppresses per-field edges and stamps
  *     {@link WHOLE_RECORD_DISCLOSURE}.
  */
-interface InputReferenceResolution {
+export interface InputReferenceResolution {
   readonly object: string;
   readonly kind: 'triggerRecord' | 'recordVariable';
   readonly confidence: Edge['confidence'];
@@ -966,7 +982,7 @@ interface InputReferenceResolution {
  * name, or a `$Record` on a flow that is not record-scoped / has no trigger
  * object) — those remain unresolvable offline and the caller skips + discloses.
  */
-const resolveInputReferenceObject = (
+export const resolveInputReferenceObject = (
   dmlObj: Record<string, unknown>,
   rootObj: Record<string, unknown>,
   dataflowIndex: FlowDataflowIndex,
@@ -1205,13 +1221,13 @@ const buildRecordDeleteEdges = (
 const BEFORE_SAVE_TRIGGER_TYPE = 'RecordBeforeSave';
 
 /** Coerce an already-unwrapped XML child into a record, else null (no unwrapSingle — call sites iterate `toArray` output). */
-const asRecord = (value: unknown): Record<string, unknown> | null =>
+export const asRecord = (value: unknown): Record<string, unknown> | null =>
   typeof value === 'object' && value !== null
     ? (value as Record<string, unknown>)
     : null;
 
 /** Strip an optional `{! ... }` merge wrapper from a reference string. */
-const stripMergeWrapper = (ref: string): string => {
+export const stripMergeWrapper = (ref: string): string => {
   const t = ref.trim();
   return t.startsWith('{!') && t.endsWith('}') ? t.slice(2, -1).trim() : t;
 };
@@ -1311,24 +1327,44 @@ const buildBeforeSaveFieldAssignmentEdges = (
   }
   if (writes.length === 0 && skippedNonDirect === 0) return [];
 
-  // Trigger-context gating.
+  // Trigger-context gating. In a RecordBeforeSave flow an <assignments> write
+  // to $Record.<Field> persists directly (confidence: declared). In an
+  // after-save / scheduled / before-delete record-triggered flow the same
+  // in-memory assignment persists ONLY when the flow ALSO runs an explicit
+  // whole-record Update Records on $Record downstream — the precondition the
+  // pre-fix code named in its own warning but never checked, so it silently
+  // dropped every real after-save $Record field write. When that persisting
+  // update element exists we emit the field writes at HEURISTIC confidence
+  // (persistence is inferred from the element's presence, not proven per
+  // execution path); when it does not, we still suppress and disclose.
+  let writeConfidence: Edge['confidence'] = 'declared';
   if (startProps.triggerType !== BEFORE_SAVE_TRIGGER_TYPE) {
-    // A record-triggered (after-save / before-delete) flow: an in-memory
-    // $Record assignment does NOT persist. Disclose the skipped count; emit
-    // nothing. (Non-record-triggered flows have no $Record — nothing to say.)
     if (
-      startProps.triggerType !== null &&
-      RECORD_TRIGGER_TYPES.has(startProps.triggerType)
+      startProps.triggerType === null ||
+      !RECORD_TRIGGER_TYPES.has(startProps.triggerType)
     ) {
+      // Not record-triggered → there is no $Record to persist; nothing to say.
+      return [];
+    }
+    const persistsToTriggerRecord = toArray(rootObj['recordUpdates']).some(
+      (raw) => {
+        const upd = asRecord(raw);
+        const ref =
+          upd === null ? null : toNonEmptyString(upd['inputReference']);
+        return ref === '$Record' || ref === '$Record__Prior';
+      },
+    );
+    if (!persistsToTriggerRecord) {
       warnings.push(
         `${writes.length + skippedNonDirect} <assignments> to $Record field(s) in a ${startProps.triggerType} flow are in-memory only and do not persist without an explicit Update Records on $Record; no writesTo edge emitted`,
       );
+      return [];
     }
-    return [];
+    writeConfidence = 'heuristic';
   }
   if (startProps.triggerObject === null) {
     warnings.push(
-      `<assignments> set $Record field(s) in a before-save flow but <start> has no <object>; trigger object unknown, no field writesTo edge emitted`,
+      `<assignments> set $Record field(s) in a record-triggered flow but <start> has no <object>; trigger object unknown, no field writesTo edge emitted`,
     );
     return [];
   }
@@ -1363,7 +1399,7 @@ const buildBeforeSaveFieldAssignmentEdges = (
       fromId: flowId,
       toId: `CustomField:${triggerObject}.${w.field}`,
       edgeType: 'writesTo',
-      confidence: 'declared',
+      confidence: writeConfidence,
       source: EDGE_SOURCE,
       properties,
     });
@@ -1438,6 +1474,24 @@ const parseFlowConditionTriplet = (raw: unknown): CriteriaItem | null => {
  * Source order is preserved so the synthetic-id indices are stable
  * across extraction runs.
  */
+/**
+ * Compose the human-readable `sourceName` for a Flow decision's condition
+ * source from the decision element `<name>` and the matched rule `<name>`.
+ * Renders `Decision (Rule)` when both are present, the non-null one alone
+ * when only one is, and `null` when neither is — in which case explain_flow
+ * falls back to the synthetic `condition-N` handle. Both names come straight
+ * from the Flow XML (`declared`); no identifier is fabricated.
+ */
+const buildFlowDecisionSourceName = (
+  decisionName: string | null,
+  ruleName: string | null,
+): string | null => {
+  if (decisionName !== null && ruleName !== null) {
+    return `${decisionName} (${ruleName})`;
+  }
+  return decisionName ?? ruleName;
+};
+
 const collectFlowConditionSources = (
   rootObj: Record<string, unknown>,
 ): readonly ConditionSource[] => {
@@ -1448,6 +1502,11 @@ const collectFlowConditionSources = (
   for (const decision of decisions) {
     if (typeof decision !== 'object' || decision === null) continue;
     const decisionObj = decision as Record<string, unknown>;
+    // The decision element's API name (`<decisions><name>`) — the real name a
+    // reader recognises (e.g. `My_Decision`), vs the synthetic `condition-N`
+    // handle. Captured here and threaded onto the ConditionalContext node +
+    // mirror so explain_flow can label the decision row with it.
+    const decisionName = toNonEmptyString(decisionObj['name']);
     const rules = toArray(decisionObj['rules']);
     for (const rule of rules) {
       if (typeof rule !== 'object' || rule === null) continue;
@@ -1459,7 +1518,16 @@ const collectFlowConditionSources = (
       }
       if (conditions.length === 0) continue;
       const conditionLogic = toNullableString(ruleObj['conditionLogic']);
-      sources.push({ kind: 'flow-decision', conditions, conditionLogic });
+      // The rule (outcome) name (`<rules><name>`) disambiguates the multiple
+      // sources a multi-outcome decision produces (each `<rules>` is one
+      // source → one `condition-N`). Combine decision + rule for the label.
+      const ruleName = toNonEmptyString(ruleObj['name']);
+      sources.push({
+        kind: 'flow-decision',
+        conditions,
+        conditionLogic,
+        sourceName: buildFlowDecisionSourceName(decisionName, ruleName),
+      });
     }
   }
 
@@ -1519,11 +1587,34 @@ const collectFlowConditionSources = (
 };
 
 /**
+ * Read an edge's DML `operation` marker (`recordLookup` / `recordCreate` /
+ * `recordUpdate` / `recordDelete` / …) as a string, or `''` when the edge
+ * carries no `operation` property. Used as the fourth dedup/sort dimension so
+ * distinct DML operations on the SAME object stay DISTINCT edges.
+ */
+const edgeOperation = (edge: Edge): string => {
+  const op = edge.properties && edge.properties['operation'];
+  return op === undefined || op === null ? '' : String(op);
+};
+
+/**
  * Deduplicate edges by the composite key
- * `(fromId, toId, edgeType, source)` and sort the result for stable
- * output: by `toId` ascending, then by `edgeType` ascending. The first
- * occurrence of each key wins (which preserves the original
- * `properties` payload for that key).
+ * `(fromId, toId, edgeType, source, operation)` and sort the result for
+ * stable output: by `toId` ascending, then by `edgeType` ascending, then by
+ * `operation` ascending. The first occurrence of each key wins (which
+ * preserves the original `properties` payload for that key).
+ *
+ * The `operation` dimension is load-bearing: a Flow that does a
+ * `recordLookup` + `recordCreate` + `recordUpdate` on the SAME object emits
+ * `readsFrom`(recordLookup), `writesTo`(recordCreate), `readsFrom`(recordUpdate)
+ * and `writesTo`(recordUpdate) edges to that object. Keying only on
+ * `(from, to, type, source)` collapsed the two `writesTo` edges into one —
+ * only the first-emitted operation (recordCreate) survived — and likewise
+ * merged the two `readsFrom` reads. Including `operation` keeps each distinct
+ * DML operation as its own edge while genuine same-operation duplicates (two
+ * `<recordLookups>` on one object) still share a key and dedup. Non-DML edges
+ * (triggersOn / callsApex / references / …) have no `operation` property, so
+ * their key suffix is `''` and their behaviour is byte-identical to before.
  *
  * Sorting matters because golden tests do deep equality; without it,
  * the order of edges would depend on the order of the source XML's
@@ -1534,7 +1625,7 @@ const dedupeAndSortEdges = (edges: readonly Edge[]): Edge[] => {
   const seen = new Set<string>();
   const out: Edge[] = [];
   for (const edge of edges) {
-    const key = `${edge.fromId}|${edge.toId}|${edge.edgeType}|${edge.source}`;
+    const key = `${edge.fromId}|${edge.toId}|${edge.edgeType}|${edge.source}|${edgeOperation(edge)}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(edge);
@@ -1542,6 +1633,9 @@ const dedupeAndSortEdges = (edges: readonly Edge[]): Edge[] => {
   out.sort((a, b) => {
     if (a.toId !== b.toId) return a.toId < b.toId ? -1 : 1;
     if (a.edgeType !== b.edgeType) return a.edgeType < b.edgeType ? -1 : 1;
+    const opA = edgeOperation(a);
+    const opB = edgeOperation(b);
+    if (opA !== opB) return opA < opB ? -1 : 1;
     return 0;
   });
   return out;
@@ -1669,25 +1763,52 @@ const analyzeFaultCoverage = (
   };
 };
 
+/**
+ * CUSTOM-LABEL-USAGES-MISS-FLOW-LABEL-REFS: build heuristic `references` edges
+ * from a Flow to every Custom Label it references via the `$Label.{ApiName}`
+ * merge syntax (e.g. a formula `<expression>{!$Label.Sample_Label}
+ * </expression>` in an Active flow).
+ *
+ * These references live in `<expression>` / text-template / default-value
+ * strings that no existing flow builder scans, so `find_component_usages` on
+ * the label returned 0 graph + 0 grep (the grep tier discloses Apex/LWC/Aura/VF
+ * only — Flow XML excluded) and `review_change` delete read `safe` — even
+ * though `search_flow_metadata` DID find the same `$Label` string on another
+ * path. Emitting the edge closes that gap: label usages and the change gate now
+ * see the binding Flow.
+ *
+ * Scans the raw flow XML for `$Label.{name}` (name = `[A-Za-z0-9_]+`, covering
+ * a namespaced `ns__Label`). Deduped + sorted; `heuristic` confidence — a raw
+ * value scan, not a parsed formula AST. `referenceKind: 'flowLabelRef'`.
+ */
+const FLOW_LABEL_REF_PATTERN = /\$Label\.([A-Za-z0-9_]+)/g;
+const buildLabelReferenceEdges = (flowId: string, xmlText: string): Edge[] => {
+  const names = new Set<string>();
+  FLOW_LABEL_REF_PATTERN.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = FLOW_LABEL_REF_PATTERN.exec(xmlText)) !== null) {
+    const name = m[1];
+    if (name !== undefined && name.length > 0) names.add(name);
+  }
+  return [...names].sort().map((name) => ({
+    fromId: flowId,
+    toId: `CustomLabel:${name}`,
+    edgeType: 'references',
+    confidence: 'heuristic',
+    source: EDGE_SOURCE,
+    properties: { referenceKind: 'flowLabelRef' },
+  }));
+};
+
 export const extractFlow = async (
   path: string,
 ): Promise<Result<ExtractionResult, ExtractorError>> => {
   const xmlResult = await readAndValidateXml(path);
   if (!xmlResult.ok) return xmlResult;
 
-  /**
-   * Flow metadata files are local trusted disk content sourced from
-   * `sf project retrieve`; XXE is not a concern. The default 1000
-   * limit is too tight for real Flows in production orgs. Raising to
-   * 10000 to accept legitimate complex flows while preserving a
-   * pathological-input ceiling.
-   */
-  const parser = new XMLParser({
-    ignoreAttributes: true,
-    parseTagValue: false,
-    trimValues: true,
-    processEntities: { maxTotalExpansions: 10000 },
-  });
+  // Shared options (see {@link FLOW_XML_PARSER_OPTIONS}) so this and the
+  // flow-graph projection parse Flow XML byte-identically.
+  const parser = new XMLParser(FLOW_XML_PARSER_OPTIONS);
   // `XMLValidator.validate` above catches structural errors, but
   // `parser.parse()` still throws at runtime on guards the validator
   // doesn't enforce — e.g., the `maxTotalExpansions` entity-reference
@@ -1782,6 +1903,11 @@ export const extractFlow = async (
     ),
   );
   rawEdges.push(...buildDataflowReadEdges(flowId, dataflowCollector));
+  // CUSTOM-LABEL-USAGES-MISS-FLOW-LABEL-REFS: `$Label.{ApiName}` merge refs in
+  // formulas / text templates → heuristic `references` edges to the CustomLabel
+  // node. Scans the raw XML (the refs live in string content no other builder
+  // reads).
+  rawEdges.push(...buildLabelReferenceEdges(flowId, xmlResult.value));
   const edges = dedupeAndSortEdges(rawEdges);
 
   // v2.0a — Build the per-Flow ConditionalContext nodes. The Flow's

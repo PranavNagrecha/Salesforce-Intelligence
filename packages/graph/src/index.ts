@@ -36,6 +36,7 @@ export type { Migration } from './migrations.js';
 export {
   contributorsSummary,
   countNodesByType,
+  danglingTargetIdsMatching,
   danglingTargetSummary,
   freshnessSummary,
   getNodeById,

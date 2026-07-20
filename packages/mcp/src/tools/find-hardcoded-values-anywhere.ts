@@ -22,6 +22,13 @@
  *     pattern catalog.
  *   - **WorkflowRule**: scans the optional `properties.formula`
  *     string for the same pattern catalog.
+ *   - **RestrictionRule / ScopingRule**: scans `properties.userCriteria`
+ *     and `properties.recordFilter` — where an active rule bakes a
+ *     hardcoded `$User.ProfileId='00e…'` gate or a RecordType/Profile Id
+ *     into its SOQL filter (HARDCODED-ID-SCAN-OMITS-RESTRICTION-RULE-AND-
+ *     CUSTOMLABEL). These bodies are NOT comment-stripped.
+ *   - **CustomLabel**: scans `properties.value` — where admins stash a
+ *     RecordType/Profile Id as a configurable string (same finding).
  *
  * **Match modes** (per `SemanticSearchSemantics.md` § "Hardcoded-
  * value detection patterns"):
@@ -232,7 +239,15 @@ const findHardcodedValuesAnywhereInputBaseSchema = z.object({
   category: z.enum(['id', 'email', 'date', 'numeric']).optional(),
   scope: z
     .array(
-      z.enum(['apex', 'formula', 'validation-rule', 'workflow-rule']),
+      z.enum([
+        'apex',
+        'formula',
+        'validation-rule',
+        'workflow-rule',
+        // HARDCODED-ID-SCAN-OMITS-RESTRICTION-RULE-AND-CUSTOMLABEL.
+        'restriction-rule',
+        'custom-label',
+      ]),
     )
     .optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
@@ -256,7 +271,15 @@ export interface HardcodedValueAnywhereMatch {
   readonly componentId: ComponentId;
   readonly componentType: ComponentType;
   readonly apiName: string;
-  readonly source: 'apex' | 'formula' | 'validation-rule' | 'workflow-rule';
+  readonly source:
+    | 'apex'
+    | 'formula'
+    | 'validation-rule'
+    | 'workflow-rule'
+    // HARDCODED-ID-SCAN-OMITS-RESTRICTION-RULE-AND-CUSTOMLABEL: RestrictionRule /
+    // ScopingRule `userCriteria` + `recordFilter`, and CustomLabel `value`.
+    | 'restriction-rule'
+    | 'custom-label';
   readonly location: string;
   readonly matchedValue: string;
   readonly confidence: 'declared' | 'heuristic';
@@ -281,6 +304,8 @@ export interface FindHardcodedValuesAnywhereOutput {
     formula: number;
     'validation-rule': number;
     'workflow-rule': number;
+    'restriction-rule': number;
+    'custom-label': number;
   }>;
   readonly boundaries: readonly string[];
   readonly truncated: boolean;
@@ -489,7 +514,18 @@ export const findHardcodedValuesAnywhereHandler = async (
   }
 
   const scope = new Set(
-    input.scope ?? ['apex', 'formula', 'validation-rule', 'workflow-rule'],
+    input.scope ?? [
+      'apex',
+      'formula',
+      'validation-rule',
+      'workflow-rule',
+      // HARDCODED-ID-SCAN-OMITS-RESTRICTION-RULE-AND-CUSTOMLABEL: RestrictionRule /
+      // ScopingRule user-criteria + record-filter and CustomLabel values are in
+      // the default scan set so hardcoded Profile / RecordType Ids there are no
+      // longer invisible to Id-hygiene queries.
+      'restriction-rule',
+      'custom-label',
+    ],
   );
   const valueFilter = input.value;
   const categoryFilter = input.category;
@@ -694,6 +730,70 @@ export const findHardcodedValuesAnywhereHandler = async (
     }
   }
 
+  // HARDCODED-ID-SCAN-OMITS-RESTRICTION-RULE-AND-CUSTOMLABEL: scan one string
+  // property of a node for hardcoded literals. Unlike the formula corpora, the
+  // text is NOT comment-stripped — an Id baked into a RestrictionRule filter or
+  // a CustomLabel value is a hygiene finding wherever it sits, and neither
+  // property uses the formula `/* */` comment convention. `location` carries the
+  // property name so a rule scanned on two properties yields distinct rows.
+  const scanNodeProperty = (
+    node: Node,
+    source: HardcodedValueAnywhereMatch['source'],
+    componentType: ComponentType,
+    propName: string,
+  ): void => {
+    const raw = node.properties[propName];
+    if (typeof raw !== 'string' || raw.length === 0) return;
+    for (const hit of scanText(raw, categoryFilter, valueFilter)) {
+      collected.push({
+        componentId: node.id,
+        componentType,
+        apiName: node.apiName,
+        source,
+        location: `${propName}:${node.id}`,
+        matchedValue: hit.value,
+        confidence: valueFilter !== undefined ? 'declared' : 'heuristic',
+        category: hit.matchedCategory,
+        contextSnippet: snippetAround(raw, hit.index, hit.value.length),
+        inTestClass: false,
+      });
+    }
+  };
+
+  // --- RestrictionRule / ScopingRule scope: scan userCriteria + recordFilter. ---
+  if (scope.has('restriction-rule')) {
+    const scan = await scanAllNodesOfTypes(ctx.graph, [
+      'RestrictionRule',
+      'ScopingRule',
+    ]);
+    if (!scan.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${scan.error.message}`,
+      });
+    }
+    incompleteTypes.push(...scan.value.incompleteTypes);
+    for (const node of scan.value.nodes) {
+      scanNodeProperty(node, 'restriction-rule', node.type, 'userCriteria');
+      scanNodeProperty(node, 'restriction-rule', node.type, 'recordFilter');
+    }
+  }
+
+  // --- CustomLabel scope: scan the label's value string. ---
+  if (scope.has('custom-label')) {
+    const scan = await scanAllNodesOfTypes(ctx.graph, ['CustomLabel']);
+    if (!scan.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${scan.error.message}`,
+      });
+    }
+    incompleteTypes.push(...scan.value.incompleteTypes);
+    for (const node of scan.value.nodes) {
+      scanNodeProperty(node, 'custom-label', 'CustomLabel', 'value');
+    }
+  }
+
   const sorted = collected.sort(compareMatches);
 
   const byCategory = { id: 0, email: 0, date: 0, numeric: 0, string: 0 };
@@ -702,6 +802,8 @@ export const findHardcodedValuesAnywhereHandler = async (
     formula: 0,
     'validation-rule': 0,
     'workflow-rule': 0,
+    'restriction-rule': 0,
+    'custom-label': 0,
   };
   for (const m of sorted) {
     byCategory[m.category] += 1;

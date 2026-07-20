@@ -14,6 +14,14 @@
  * formula tokenizer, and does NOT account for references encoded in
  * non-string fields. False positives and false negatives are both
  * expected — the boundary disclosure surfaces verbatim.
+ *
+ * Absence axis: an empty dependency map is ambiguous — it can mean CPQ is
+ * installed but nothing references it, OR that CPQ is not installed at all. The
+ * response carries `cpqPresent` (true when any CPQ-typed node was scanned OR an
+ * `InstalledPackage:SBQQ` node exists) and, when `false`, appends an explicit
+ * "CPQ is not installed/modeled" sentence to the disclosure so an empty map is
+ * never misread as "installed CPQ has zero dependencies"
+ * (CPQ-DEPENDENCY-MAP-EMPTY-WITHOUT-PACKAGE-ABSENCE).
  */
 
 import type {
@@ -53,8 +61,22 @@ const CPQ_NODE_TYPES: readonly ComponentType[] = [
 
 const CPQ_PREFIXES: readonly string[] = CPQ_NODE_TYPES.map((t) => `${t}:`);
 
+/** The Salesforce CPQ managed-package namespace. Its InstalledPackage id is `InstalledPackage:SBQQ`. */
+const CPQ_NAMESPACE = 'SBQQ';
+const CPQ_INSTALLED_PACKAGE_ID = `InstalledPackage:${CPQ_NAMESPACE}` as ComponentId;
+
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
+
+/**
+ * Disclosure appended when NO CPQ is present in the vault — so an empty
+ * dependency map reads as "CPQ is not installed", not "installed CPQ has zero
+ * dependencies" (CPQ-DEPENDENCY-MAP-EMPTY-WITHOUT-PACKAGE-ABSENCE).
+ */
+const CPQ_ABSENT_DISCLOSURE =
+  'No Salesforce CPQ (SBQQ) rule/template components and no SBQQ InstalledPackage ' +
+  'were found in this vault: an empty dependency map here means CPQ is NOT installed ' +
+  '(or was not retrieved), NOT that installed CPQ components have no dependencies.';
 
 /**
  * Verbatim boundary disclosure per CpqSemantics.md §4.3.
@@ -100,6 +122,14 @@ export interface CpqDependencyEntry {
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface CpqDependencyMapOutput {
+  /**
+   * Whether Salesforce CPQ (SBQQ) is present in this vault at all — true when
+   * any CPQ-typed component was scanned OR an `InstalledPackage:SBQQ` node
+   * exists. When `false`, an empty `dependencies` map means CPQ is NOT
+   * installed/modeled, NOT that installed CPQ has zero dependencies
+   * (CPQ-DEPENDENCY-MAP-EMPTY-WITHOUT-PACKAGE-ABSENCE); the `disclosure` says so.
+   */
+  readonly cpqPresent: boolean;
   readonly scannedComponentCount: number;
   readonly dependencies: readonly CpqDependencyEntry[];
   readonly truncated: boolean;
@@ -216,6 +246,18 @@ const dependencyEntriesForNode = (
  * the same (fromComponentId, token) — a CR-22 offset resume then cannot dup or
  * skip.
  */
+/**
+ * Whether the CPQ (SBQQ) managed package is present as an `InstalledPackage`
+ * node in the vault. Used only as the fallback presence signal when the full
+ * scan found ZERO CPQ-typed components, to distinguish "CPQ not installed"
+ * from "installed CPQ has no dependencies".
+ */
+const cpqPackageInstalled = async (ctx: Context): Promise<Result<boolean, string>> => {
+  const r = await getNodeById(ctx.graph, CPQ_INSTALLED_PACKAGE_ID);
+  if (!r.ok) return err(r.error.message);
+  return ok(r.value !== null);
+};
+
 const compareDependencies = (
   a: CpqDependencyEntry,
   b: CpqDependencyEntry,
@@ -272,6 +314,8 @@ export const cpqDependencyMapHandler = async (
     );
     return ok({
       data: {
+        // A CPQ-typed node was resolved and scanned, so CPQ is present by definition.
+        cpqPresent: true,
         scannedComponentCount: 1,
         dependencies,
         truncated: false,
@@ -339,12 +383,27 @@ export const cpqDependencyMapHandler = async (
   const emitCursor = paged.nextCursor !== null;
   const isPaged = truncated || offset > 0;
 
-  const disclosure = scan.value.scanIncomplete
-    ? `${DEPENDENCY_MAP_DISCLOSURE} ${scanTruncationNote(scan.value.incompleteTypes, clampedNodeScanLimit())}`
-    : DEPENDENCY_MAP_DISCLOSURE;
+  // Presence: any scanned CPQ node proves CPQ is here; on a ZERO-node scan,
+  // fall back to the InstalledPackage:SBQQ signal so an empty map is never
+  // silently read as "installed CPQ has no dependencies".
+  let cpqPresent = scan.value.nodes.length > 0;
+  if (!cpqPresent) {
+    const pkg = await cpqPackageInstalled(ctx);
+    if (!pkg.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${pkg.error}` });
+    }
+    cpqPresent = pkg.value;
+  }
+
+  const scanNote = scan.value.scanIncomplete
+    ? ` ${scanTruncationNote(scan.value.incompleteTypes, clampedNodeScanLimit())}`
+    : '';
+  const absenceNote = cpqPresent ? '' : ` ${CPQ_ABSENT_DISCLOSURE}`;
+  const disclosure = `${DEPENDENCY_MAP_DISCLOSURE}${scanNote}${absenceNote}`;
 
   return ok({
     data: {
+      cpqPresent,
       scannedComponentCount: scan.value.nodes.length,
       dependencies: pageDeps,
       truncated,

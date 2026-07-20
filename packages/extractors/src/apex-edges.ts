@@ -31,6 +31,53 @@ const UNRESOLVABLE_CALL_CLASSES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * A Salesforce sObject / custom-object API name carries a reserved metadata
+ * suffix — `__c` (custom object / setting / custom-metadata record), `__mdt`
+ * (custom metadata type), `__e` (platform event), `__b` (big object), `__x`
+ * (external object). An Apex class name NEVER carries one, so a token ending in
+ * a reserved suffix is an OBJECT reference, never an `ApexClass`.
+ *
+ * APEX-SOBJECT-REF-MINTED-AS-APEXCLASS: `Custom_Setting__c.getOrgDefaults()`,
+ * `new Widget__c()`, and a SOQL field token like `Gadget_Calc__c` were
+ * projected as `callsApex` / `references` to `ApexClass:{token}` phantoms while
+ * the real `CustomObject:{token}` node stayed graph-orphan (its usages / delete
+ * verdict read "unused / safe"). Recognising the suffix reroutes them to the
+ * object node.
+ */
+const CUSTOM_OBJECT_SUFFIX = /__(?:c|mdt|e|b|x)$/;
+const hasCustomObjectSuffix = (token: string): boolean =>
+  CUSTOM_OBJECT_SUFFIX.test(token);
+
+/**
+ * A receiver token that looks like an Apex CLASS name: PascalCase (upper-initial)
+ * and NOT an object-suffixed api name. camelCase receivers are locals the
+ * heuristic scanner could not resolve; an object-suffixed receiver is an sObject.
+ */
+const looksLikeApexClassName = (token: string): boolean =>
+  /^[A-Z]/.test(token) && !hasCustomObjectSuffix(token);
+
+/**
+ * A Salesforce FIELD api name is PascalCase (`Name`, `Industry`), custom
+ * (`X__c`), or managed-namespaced (`ns__X__c`) — it always either starts
+ * UPPERCASE or carries a `__` marker. An Apex static / instance field follows the
+ * camelCase convention (`guardBefore`, `cachedValue`) — lowercase-initial with NO
+ * `__`. Such a token can never be a schema field, so a `TypeName.camelField`
+ * access is an Apex member reference, not an sObject field read/write.
+ *
+ * `class` is excluded: a `Type.class` literal is a reserved-word type token, not
+ * a member field — it is left on its existing path (the AST/scanner merge already
+ * downgrades the `CustomField:{Type}.class` FP on parsed files), so this change
+ * introduces no churn for `.class` literals.
+ *
+ * APEX-STATIC-FIELD-CUSTOMFIELD-PHANTOMS: an Apex static boolean like
+ * `WidgetGuard.guardBefore` / `.guardAfter` was minted as a
+ * `CustomField:WidgetGuard.guardBefore` phantom, stealing the usage from the
+ * real `ApexClass:WidgetGuard`.
+ */
+const isApexMemberFieldName = (field: string): boolean =>
+  field !== 'class' && /^[a-z]/.test(field) && !field.includes('__');
+
+/**
  * Strip Apex line / block comments and single-quoted string literals
  * from `source`, replacing them with same-length runs of spaces so
  * caller-side offsets stay valid. Mirrors the helper of the same name
@@ -282,6 +329,78 @@ export const buildDispatchesAsyncEdges = (
 };
 
 /**
+ * Strip Apex line / block comments ONLY, replacing them with same-length runs
+ * of spaces so caller-side offsets stay valid. Unlike
+ * {@link stripApexCommentsAndStrings}, string literals are KEPT — the
+ * `callout:{NamedCredential}` endpoint scheme lives INSIDE a string literal
+ * (`req.setEndpoint('callout:My_NC/path')`), so blanking strings (as the
+ * scanner and the async-dispatch pass do) is exactly why the callout was
+ * invisible to the graph. A commented-out callout still mints no edge.
+ */
+const stripApexCommentsOnly = (source: string): string =>
+  source.replace(
+    /\/\/[^\n]*|\/\*[\s\S]*?\*\//g,
+    (match) => match.replace(/[^\n]/g, ' '),
+  );
+
+/**
+ * The `callout:{NamedCredential}` endpoint scheme. The Named Credential name is
+ * the identifier run immediately after `callout:` — a leading `/path`, query
+ * string, or `.` merge suffix terminates it. Runs on comment-stripped (but
+ * string-KEPT) source, so a static `callout:Foo` in an endpoint literal is
+ * captured while a dynamic `'callout:' + ncName` (variable concatenation) is
+ * not — the char after `callout:` is `'`, matching nothing. Case-sensitive
+ * lowercase `callout:` matches Salesforce's scheme literal.
+ */
+const CALLOUT_PATTERN = /callout:([A-Za-z0-9_]+)/g;
+
+/**
+ * NAMED-CREDENTIAL-APEX-CALLOUT-UNGRAPHED: build heuristic `references` edges
+ * from an ApexClass / ApexTrigger (`ownerId`) to every Named Credential it
+ * invokes via the `callout:{NamedCredential}` endpoint scheme.
+ *
+ * These references live INSIDE string literals, which every existing Apex pass
+ * (the heuristic scanner AND `buildDispatchesAsyncEdges`) blanks before
+ * scanning — so the callout produced NO graph edge even though
+ * `find_component_usages` grep and `search_apex_source` surfaced it.
+ * Downstream, `find_code_usages` returned empty, `integration_map` /
+ * `endpoint_catalog` marked the credential `orphaned: true` /
+ * `referenceCount: 0`, and `review_change` delete read `safe`. Emitting this
+ * edge feeds all four graph-backed consumers from the same evidence the grep
+ * tier already had.
+ *
+ * `confidence: 'heuristic'` — the endpoint is a runtime string, not a declared
+ * metadata pointer. Edges are deduped by target at the call site via
+ * {@link mergeAndSortEdges}; the first occurrence's offset/length is kept.
+ */
+export const buildApexCalloutEdges = (
+  ownerId: string,
+  source: string,
+): readonly Edge[] => {
+  const scanned = stripApexCommentsOnly(source);
+  const raw: Edge[] = [];
+  CALLOUT_PATTERN.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = CALLOUT_PATTERN.exec(scanned)) !== null) {
+    const name = m[1];
+    if (name === undefined || name.length === 0) continue;
+    raw.push({
+      fromId: ownerId,
+      toId: `NamedCredential:${name}`,
+      edgeType: 'references',
+      confidence: 'heuristic',
+      source: SCANNER_SOURCE,
+      properties: {
+        referenceKind: 'apexCallout',
+        offset: m.index,
+        length: m[0].length,
+      },
+    });
+  }
+  return raw;
+};
+
+/**
  * Result of running the heuristic Apex scanner and projecting its output
  * onto graph edges. `edges` is the deduped, sorted edge list ready to
  * merge into an extractor's `ExtractionResult.edges`. `warnings` is a
@@ -372,16 +491,26 @@ export const mergeAndSortEdges = (edges: readonly Edge[]): readonly Edge[] => {
  *
  *   - `FieldAccess { type: 'read' }`  → `readsFrom` from `ownerId` to
  *     `CustomField:{object}.{field}` with
- *     `properties: { offset, length }`.
+ *     `properties: { offset, length }`. EXCEPTION
+ *     (APEX-STATIC-FIELD-CUSTOMFIELD-PHANTOMS): a camelCase-no-`__` member on a
+ *     PascalCase class token (`WidgetGuard.guardBefore`) is an Apex
+ *     static/instance field — it is emitted as `references` →
+ *     `ApexClass:{object}` (`properties.mechanism: 'apexStaticField'`) instead of
+ *     a `CustomField:{Class}.{field}` phantom.
  *   - `FieldAccess { type: 'write' }` → `writesTo`  from `ownerId` to
  *     `CustomField:{object}.{field}` with
- *     `properties: { offset, length }`.
+ *     `properties: { offset, length }` (same static-field exception as reads).
  *   - `MethodCallSite`                → one `callsApex` from `ownerId` to
  *     `ApexClass:{className}` per target class, with
  *     `properties: { methods: string[], methodName, offset, length }` —
  *     `methods` is the complete sorted set of that target's methods this
  *     owner calls (P4-C5 method-level), `methodName` the first for
  *     back-compat, `offset`/`length` the span of the first call site.
+ *     EXCEPTION (APEX-SOBJECT-REF-MINTED-AS-APEXCLASS): when `className` is an
+ *     object-suffixed api name (`Custom_Setting__c.getOrgDefaults()`), the call
+ *     is a static reference to that sObject / custom setting — emitted as
+ *     `references` → `CustomObject:{className}`
+ *     (`properties.mechanism: 'apexStaticObjectRef'`), NOT `callsApex ApexClass`.
  *   - `Instantiation`                 → `references` from `ownerId` to
  *     `ApexClass:{className}` with
  *     `properties: { mechanism: 'instantiation', offset, length }`.
@@ -389,7 +518,9 @@ export const mergeAndSortEdges = (edges: readonly Edge[]): readonly Edge[] => {
  *     `IDENT.IDENT(` method-call sweep is blind to (e.g. a `new X()`
  *     passed as a method argument). `references` is the right edge
  *     here: `dispatchesAsync` is async-only and `callsApex` would
- *     conflate constructor invocations with method calls.
+ *     conflate constructor invocations with method calls. An object-suffixed
+ *     `new Widget__c()` targets `CustomObject:{className}` instead of
+ *     `ApexClass:` (APEX-SOBJECT-REF-MINTED-AS-APEXCLASS).
  *   - `SoqlFromObject`                → `readsFrom` from `ownerId` to
  *     `CustomObject:{object}` with
  *     `properties: { mechanism: 'soql', offset, length }` — the primary
@@ -397,6 +528,13 @@ export const mergeAndSortEdges = (edges: readonly Edge[]): readonly Edge[] => {
  *     is the OBJECT-level counterpart to the field-level `readsFrom` above;
  *     it surfaces SOQL usage that the field-access sweep alone misses (a
  *     `[SELECT Id FROM Account]` that touches no `acc.Field`).
+ *   - `callout:{NamedCredential}` endpoint literal → `references` from
+ *     `ownerId` to `NamedCredential:{name}` with
+ *     `properties: { referenceKind: 'apexCallout', offset, length }`
+ *     (heuristic). Read from the string-KEPT source (see
+ *     {@link buildApexCalloutEdges}) — the one Apex reference that lives
+ *     inside a string literal and is therefore invisible to the field/call
+ *     sweeps, which blank strings.
  *
  * The scanner does no symbol resolution: `object` is a variable name as
  * it appears in source (e.g., `this`, `acc`, `mainMarketoSetting`). The
@@ -428,7 +566,10 @@ export const buildApexScannerEdges = (
   if (!scanResult.ok) {
     const { kind, offset, message } = scanResult.error;
     return {
-      edges: [],
+      // NAMED-CREDENTIAL-APEX-CALLOUT-UNGRAPHED: callout edges do not depend on
+      // the brace-balanced scan succeeding (they are a raw string scan), so a
+      // class the scanner rejects still surfaces its Named Credential callouts.
+      edges: mergeAndSortEdges(buildApexCalloutEdges(ownerId, source)),
       // Format documented in v0.3 wiring spec; consumers parse this
       // by prefix to surface scanner failures in the vault UI.
       warnings: [`apex-scanner: ${kind} at offset ${offset}: ${message}`],
@@ -436,9 +577,39 @@ export const buildApexScannerEdges = (
   }
 
   const raw: Edge[] = [];
+  // NAMED-CREDENTIAL-APEX-CALLOUT-UNGRAPHED: `callout:{NamedCredential}`
+  // references (string-literal endpoints the scanner blanks) → heuristic
+  // `references` edges to the Named Credential node.
+  raw.push(...buildApexCalloutEdges(ownerId, source));
   for (const access of scanResult.value.fieldAccesses) {
     // Drop field accesses on unresolvable receivers (Trigger context / this / super).
     if (UNRESOLVABLE_FIELD_RECEIVERS.has(access.object)) continue;
+    // APEX-STATIC-FIELD-CUSTOMFIELD-PHANTOMS: a camelCase-no-`__` member on a
+    // PascalCase class token (`WidgetGuard.guardBefore`) is an Apex
+    // static/instance field, not a schema field. Emit the real class dependency
+    // (`references ApexClass:{Class}`) instead of a `CustomField:{Class}.{field}`
+    // phantom that steals the usage from the actual class node. A non-class-shaped
+    // receiver (a camelCase local, an object-suffixed token) falls through to the
+    // existing CustomField path — this reroutes ONLY the static-field shape.
+    if (
+      isApexMemberFieldName(access.field) &&
+      looksLikeApexClassName(access.object)
+    ) {
+      raw.push({
+        fromId: ownerId,
+        toId: `ApexClass:${access.object}`,
+        edgeType: 'references',
+        confidence: 'heuristic',
+        source: SCANNER_SOURCE,
+        properties: {
+          mechanism: 'apexStaticField',
+          field: access.field,
+          offset: access.offset,
+          length: access.length,
+        },
+      });
+      continue;
+    }
     raw.push({
       fromId: ownerId,
       toId: `CustomField:${access.object}.${access.field}`,
@@ -462,9 +633,24 @@ export const buildApexScannerEdges = (
     string,
     { methods: Set<string>; offset: number; length: number }
   >();
+  // APEX-SOBJECT-REF-MINTED-AS-APEXCLASS: a static call whose receiver is an
+  // object-suffixed token (`Custom_Setting__c.getOrgDefaults()`,
+  // `ns__Widget__c.foo()`) is a reference to that sObject / custom setting, NOT a
+  // call to an Apex class. Route it to the object node (deduped by object; first
+  // call site's span wins) instead of an `ApexClass:{__c}` phantom.
+  const objectRefs = new Map<string, { offset: number; length: number }>();
   for (const call of scanResult.value.methodCalls) {
     // Drop calls on unresolvable pseudo-classes (Trigger.newMap → `newMap`, etc.).
     if (UNRESOLVABLE_CALL_CLASSES.has(call.className)) continue;
+    if (hasCustomObjectSuffix(call.className)) {
+      if (!objectRefs.has(call.className)) {
+        objectRefs.set(call.className, {
+          offset: call.offset,
+          length: call.length,
+        });
+      }
+      continue;
+    }
     const existing = callsByClass.get(call.className);
     if (existing === undefined) {
       callsByClass.set(call.className, {
@@ -475,6 +661,20 @@ export const buildApexScannerEdges = (
     } else {
       existing.methods.add(call.methodName);
     }
+  }
+  for (const [objectName, span] of objectRefs) {
+    raw.push({
+      fromId: ownerId,
+      toId: `CustomObject:${objectName}`,
+      edgeType: 'references',
+      confidence: 'heuristic',
+      source: SCANNER_SOURCE,
+      properties: {
+        mechanism: 'apexStaticObjectRef',
+        offset: span.offset,
+        length: span.length,
+      },
+    });
   }
   for (const [className, agg] of callsByClass) {
     const methods = [...agg.methods].sort();
@@ -493,9 +693,18 @@ export const buildApexScannerEdges = (
     });
   }
   for (const inst of scanResult.value.instantiations) {
+    // APEX-SOBJECT-REF-MINTED-AS-APEXCLASS: `new Widget__c()` constructs an
+    // sObject record, not an Apex class instance — route the reference to the
+    // real `CustomObject:{name}` node instead of an `ApexClass:{__c}` phantom.
+    // A standard-object / user-class instantiation (`new Account()`, `new
+    // Handler()`) keeps the `ApexClass:` target (import-time targetMissing hides
+    // the standard-object case, as before).
+    const toId = hasCustomObjectSuffix(inst.className)
+      ? `CustomObject:${inst.className}`
+      : `ApexClass:${inst.className}`;
     raw.push({
       fromId: ownerId,
-      toId: `ApexClass:${inst.className}`,
+      toId,
       edgeType: 'references',
       confidence: 'heuristic',
       source: SCANNER_SOURCE,

@@ -2660,3 +2660,53 @@ describe('whyCantUserSeeRecordHandler — bounded graph queries', () => {
     expect(large.nodeQueries).toBeLessThan(60);
   });
 });
+
+// =============================================================================
+// GUARD (WHY-CANT-USER-SEE-REJECTS-OBJECTAPINAME): the router's #1 support tool
+// required a canonical `componentId` + `userContext.profileId` and Zod-stripped
+// the natural `objectApiName` / `userContext.profileApiName`, hard-failing with
+// `componentId: Required` / `profileId` required. The aliases must now (a) pass
+// the input schema and (b) yield the SAME verdict + reasoning as the canonical
+// CustomObject / Profile ids. PrivateObj + System Administrator (View/Modify All
+// grant) => visible. Pre-fix the schema rejects the alias-only shape, so the
+// schema assertion is RED before the fix.
+describe('whyCantUserSeeRecordHandler — objectApiName / profileApiName aliases (guard)', () => {
+  it('accepts objectApiName + profileApiName at the schema layer (were stripped)', () => {
+    const parsed = whyCantUserSeeRecordInputSchema.safeParse({
+      objectApiName: 'PrivateObj',
+      userContext: { profileApiName: 'System Administrator' },
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('objectApiName + profileApiName ≡ CustomObject / Profile ids path', async () => {
+    const byAlias = await whyCantUserSeeRecordHandler(ctx, {
+      objectApiName: 'PrivateObj',
+      userContext: { profileApiName: 'System Administrator' },
+    });
+    const byId = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: 'CustomObject:PrivateObj',
+      userContext: { profileId: 'Profile:System Administrator' },
+    });
+    expect(byAlias.ok && byId.ok).toBe(true);
+    if (!byAlias.ok || !byId.ok) return;
+    expect(byAlias.value.data.verdict).toBe('visible');
+    expect(byAlias.value.data.verdict).toBe(byId.value.data.verdict);
+    expect(byAlias.value.data.reasoning).toEqual(byId.value.data.reasoning);
+    expect(byAlias.value.data.appliedScope).toEqual({
+      object: 'CustomObject:PrivateObj',
+      profile: 'Profile:System Administrator',
+    });
+  });
+
+  it('rejects componentId/objectApiName that disagree with invalid-query', async () => {
+    const r = await whyCantUserSeeRecordHandler(ctx, {
+      componentId: 'CustomObject:PrivateObj',
+      objectApiName: 'ReadObj',
+      userContext: { profileId: 'Profile:System Administrator' },
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+});

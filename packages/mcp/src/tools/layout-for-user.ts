@@ -95,6 +95,8 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { firstNonEmpty, toProfileOrPermSetId } from './input-aliases.js';
+
 /**
  * Zod schema for the `sfi.layout_for_user` tool input.
  *
@@ -105,18 +107,61 @@ import type { Context } from '../server.js';
  *   - `recordTypeId`: optional. Canonical id form
  *     `'RecordType:{ObjectApiName}.{RecordTypeName}'`. Omit to
  *     resolve the profile's default record type for the object.
- *   - `profileId`: required, non-empty. Canonical id form
- *     `'Profile:{ProfileName}'`. Unknown ids surface as a single
+ *   - `profileId` / `profileApiName` / `profileName` / `profile`: the profile
+ *     whose layout routing is resolved, interchangeable — a bare api name (e.g.
+ *     `'Standard User'`) or a canonical `'Profile:{ProfileName}'` id. Resolved to
+ *     a single `Profile:` id and echoed as `appliedScope`; disagreeing selectors
+ *     → `invalid-query`; at least one is required
+ *     (LAYOUT-FOR-USER-REJECTS-PROFILEAPINAME). Unknown ids surface as a single
  *     `not-found` step, not a Zod rejection.
  */
 export const layoutForUserInputSchema = z.object({
   objectApiName: z.string().min(1),
   recordTypeId: z.string().min(1).optional(),
-  profileId: z.string().min(1),
+  profileId: z.string().min(1).optional(),
+  profileApiName: z.string().min(1).optional(),
+  profileName: z.string().min(1).optional(),
+  profile: z.string().min(1).optional(),
 });
 
 /** Parsed input shape, inferred from `layoutForUserInputSchema`. */
 export type LayoutForUserInput = z.infer<typeof layoutForUserInputSchema>;
+
+/**
+ * Resolve the single Profile from the interchangeable `profileId` /
+ * `profileApiName` / `profileName` / `profile` selectors — the alias residual
+ * this closes (a host naturally passes a bare `profileApiName` as on the
+ * recordtype_availability sibling). Each value is coerced to a `Profile:` id
+ * (a bare name → `Profile:{name}`; an explicit `Profile:`/`PermissionSet:` id is
+ * kept). Disagreeing selectors → `invalid-query` (never a silent pick); none →
+ * `invalid-query`.
+ */
+const resolveProfileId = (input: LayoutForUserInput): Result<string, McpError> => {
+  const distinct = [
+    ...new Set(
+      [input.profileId, input.profileApiName, input.profileName, input.profile]
+        .map((v) => firstNonEmpty(v))
+        .filter((v): v is string => v !== undefined)
+        .map((v) => toProfileOrPermSetId(v)),
+    ),
+  ];
+  if (distinct.length === 0) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        'name the profile — pass `profileApiName` (e.g. "Standard User") or a `Profile:` `profileId`',
+      path: 'profileId',
+    });
+  }
+  if (distinct.length > 1) {
+    return err({
+      kind: 'invalid-query',
+      message: `profile selectors name different targets (${distinct.join(', ')}); pass exactly one of profileId / profileApiName / profileName`,
+      path: 'profileId',
+    });
+  }
+  return ok(distinct[0] as string);
+};
 
 /**
  * One step in the layout-routing cascade. The structure mirrors the
@@ -149,6 +194,17 @@ export interface LayoutRoutingStep {
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface LayoutForUserOutput {
+  /**
+   * Echoes the scope ACTUALLY resolved so a host that passed a `profileApiName`
+   * alias sees it was honored, not silently rejected
+   * (LAYOUT-FOR-USER-REJECTS-PROFILEAPINAME). `profileId` is the resolved
+   * `Profile:` id; `objectApiName` / `recordTypeId` the object + record-type axes.
+   */
+  readonly appliedScope: {
+    readonly profileId: ComponentId;
+    readonly objectApiName: string;
+    readonly recordTypeId: string | null;
+  };
   readonly layoutId: ComponentId | null;
   /** Lightning record page when the vault models FlexiPages for this object. */
   readonly flexiPageId: ComponentId | null;
@@ -437,22 +493,68 @@ const findLayoutAssignment = (
   };
 };
 
-/** Prefer record pages whose apiName matches `{Object}_*` patterns. */
+/** Read a string property off a node, or null when absent/non-string. */
+const strProp = (node: Node, key: string): string | null =>
+  typeof node.properties[key] === 'string' ? (node.properties[key] as string) : null;
+
+/**
+ * Strip an object api name to the bare base used in FlexiPage naming: drop a
+ * trailing custom suffix (`__c`, `__b`, `__e`, …) and any leading managed
+ * namespace (`ns__`). `Case` → `Case`, `Evaluation__c` → `Evaluation`,
+ * `hed__Application__c` → `Application`. Used only to recognise the
+ * conventional `{base}_Record_Page` default page.
+ */
+const flexiPageBaseName = (objectApiName: string): string =>
+  objectApiName.replace(/__[A-Za-z]+$/, '').replace(/^\w+__/, '');
+
+/**
+ * Pick the FlexiPage that models the Lightning surface for `objectApiName`.
+ *
+ * LAYOUT-FOR-USER-MISSES-CUSTOM-OBJECT-FLEXIPAGES: the old apiName-prefix
+ * heuristic (`{Object}_*`) misses CUSTOM-object pages, because their name has
+ * no `__c` in it (`Evaluation__c`'s page is `Evaluation_Record_Page`, which
+ * does NOT start with `Evaluation__c_`). Match on the page's declared
+ * `sobjectType` FIRST — the same signal `sfi.lightning_pages` uses — so this
+ * tool resolves a FlexiPage whenever `lightning_pages` would list one for the
+ * object. The apiName-prefix match is kept only as a fallback for any page
+ * that predates `sobjectType` extraction.
+ *
+ * When an object has several record pages (which one a given user is ACTIVATED
+ * on is not in the metadata — the boundaryNote discloses this), the pick is
+ * DETERMINISTIC: prefer the conventional `{base}_Record_Page` default, then an
+ * apiName that reads as a record page, then any RecordPage — all over an
+ * apiName-sorted candidate list so the choice is stable across refreshes.
+ */
 const pickFlexiPageForObject = (
   pages: readonly Node[],
   objectApiName: string,
 ): Node | null => {
-  const forObject = pages.filter(
-    (page) =>
-      page.apiName.startsWith(`${objectApiName}_`) ||
-      page.apiName.startsWith(`${objectApiName}.`),
-  );
+  const byObject = pages.filter((page) => strProp(page, 'sobjectType') === objectApiName);
+  const forObject = (
+    byObject.length > 0
+      ? byObject
+      : pages.filter(
+          (page) =>
+            page.apiName.startsWith(`${objectApiName}_`) ||
+            page.apiName.startsWith(`${objectApiName}.`),
+        )
+  )
+    .slice()
+    .sort((a, b) => (a.apiName < b.apiName ? -1 : a.apiName > b.apiName ? 1 : 0));
   if (forObject.length === 0) return null;
-  const recordPage = forObject.find(
-    (page) =>
-      page.apiName.includes('Record') ||
-      page.apiName.toLowerCase().includes('record_page'),
-  );
+  const base = flexiPageBaseName(objectApiName);
+  const isRecordish = (page: Node): boolean =>
+    page.apiName.includes('Record') ||
+    page.apiName.toLowerCase().includes('record_page') ||
+    strProp(page, 'pageType') === 'RecordPage';
+  const recordPage =
+    // 1. the conventional `{base}_Record_Page` default.
+    forObject.find((page) => page.apiName === `${base}_Record_Page`) ??
+    // 2. a record page whose name leads with the object base (keeps the
+    //    previously-working apiName-prefixed match for standard objects).
+    forObject.find((page) => page.apiName.startsWith(`${base}_`) && isRecordish(page)) ??
+    // 3. any record-shaped page, then any candidate at all.
+    forObject.find(isRecordish);
   return recordPage ?? forObject[0] ?? null;
 };
 
@@ -508,7 +610,22 @@ export const layoutForUserHandler = async (
   ctx: Context,
   input: LayoutForUserInput,
 ): Promise<Result<McpResponse<LayoutForUserOutput>, McpError>> => {
-  const { objectApiName, recordTypeId, profileId } = input;
+  const { objectApiName, recordTypeId } = input;
+
+  // Resolve the single Profile from the interchangeable profileId /
+  // profileApiName / profileName selectors (never silently rejecting a bare
+  // `profileApiName`, the alias residual this closes).
+  const profileRes = resolveProfileId(input);
+  if (!profileRes.ok) return profileRes;
+  const profileId = profileRes.value as ComponentId;
+
+  // Echoed on every return so a host sees the profile/object it passed was
+  // honored, not silently stripped.
+  const appliedScope = {
+    profileId,
+    objectApiName,
+    recordTypeId: recordTypeId ?? null,
+  };
 
   // Stage 1: ProfileLookup. Short-circuit on missing profile — the
   // cascade has nothing to walk without one.
@@ -523,6 +640,7 @@ export const layoutForUserHandler = async (
   if (profile === null) {
     return ok({
       data: {
+        appliedScope,
         layoutId: null,
         flexiPageId: null,
         uiSurface: 'unknown',
@@ -553,6 +671,7 @@ export const layoutForUserHandler = async (
     );
     return ok({
       data: {
+        appliedScope,
         layoutId: null,
         flexiPageId: null,
         uiSurface: 'unknown',
@@ -610,6 +729,7 @@ export const layoutForUserHandler = async (
     reasoning.push(lightningResult.value.step);
     return ok({
       data: {
+        appliedScope,
         layoutId: null,
         flexiPageId: lightningResult.value.flexiPageId,
         uiSurface:
@@ -645,6 +765,7 @@ export const layoutForUserHandler = async (
 
   return ok({
     data: {
+      appliedScope,
       layoutId,
       flexiPageId,
       uiSurface,

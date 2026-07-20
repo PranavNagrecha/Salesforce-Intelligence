@@ -13,7 +13,7 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
-import { userAbilityHandler } from '../../src/tools/user-ability.js';
+import { userAbilityHandler, userAbilityInputSchema } from '../../src/tools/user-ability.js';
 
 const MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -55,8 +55,18 @@ const seed: ExtractionResult = {
     node({ id: 'Flow:Alpha', type: 'Flow', apiName: 'Alpha' }),
     node({ id: 'Flow:Beta', type: 'Flow', apiName: 'Beta' }),
     node({ id: 'Flow:Gamma', type: 'Flow', apiName: 'Gamma' }),
+    // USER-ABILITY-REJECTS-FIELD-SCOPE: a profile with declared FLS grants, plus
+    // real field nodes. Contact.Email = read+edit; Contact.Phone = read only;
+    // Contact.Fax = a real field the profile grants NOTHING on (honest no-FLS,
+    // not invalid-query).
+    node({ id: 'Profile:FieldEditor', type: 'Profile', apiName: 'FieldEditor', properties: { userPermissions: [] } }),
+    node({ id: 'CustomField:Contact.Email', type: 'CustomField', apiName: 'Contact.Email' }),
+    node({ id: 'CustomField:Contact.Phone', type: 'CustomField', apiName: 'Contact.Phone' }),
+    node({ id: 'CustomField:Contact.Fax', type: 'CustomField', apiName: 'Contact.Fax' }),
   ],
   edges: [
+    edge({ fromId: 'Profile:FieldEditor', toId: 'CustomField:Contact.Email', edgeType: 'grantedBy', properties: { readable: true, editable: true } }),
+    edge({ fromId: 'Profile:FieldEditor', toId: 'CustomField:Contact.Phone', edgeType: 'grantedBy', properties: { readable: true } }),
     edge({ fromId: 'Profile:Sales', toId: 'Flow:Onboard_Contact', edgeType: 'grantedBy', properties: { flowAccess: true } }),
     edge({ fromId: 'PermissionSet:FlowRunner', toId: 'Flow:Onboard_Contact', edgeType: 'grantedBy', properties: { flowAccess: true } }),
     edge({ fromId: 'Profile:MultiFlow', toId: 'Flow:Alpha', edgeType: 'grantedBy', properties: { flowAccess: true } }),
@@ -137,6 +147,221 @@ describe('userAbilityHandler', () => {
     expect(r.ok).toBe(true); if (!r.ok) return;
     expect(r.value.data.customPermissions).toEqual([]);
     expect(r.value.data.summary.customPermissions).toBe(0);
+  });
+});
+
+// =============================================================================
+// GUARD (USER-ABILITY-REJECTS-FIELD-SCOPE): a natural "can {profile} edit
+// {Object}.{field}?" passes a field scope (`objectApiName`+`fieldApiName`, or a
+// `fieldId`). Pre-fix these were rejected (componentId required) and the tool
+// only answered the profile-only ability inventory. Post-fix the field resolves,
+// a `fieldAccess` FLS block + `appliedScope` are added, an unresolvable field is
+// invalid-query, and a call without a field scope is byte-identical.
+// =============================================================================
+describe('userAbilityHandler — field scope (guard)', () => {
+  it('objectApiName + fieldApiName answers FLS read/edit + echoes appliedScope', async () => {
+    const r = await userAbilityHandler(ctx, {
+      componentId: 'Profile:FieldEditor',
+      objectApiName: 'Contact',
+      fieldApiName: 'Email',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedScope).toEqual({ field: 'CustomField:Contact.Email' });
+    expect(r.value.data.fieldAccess).toEqual({
+      field: 'CustomField:Contact.Email',
+      readable: true,
+      editable: true,
+    });
+    expect(r.value.data.boundaryNote).toContain('fieldAccess');
+  });
+
+  it('a read-only FLS grant is readable:true, editable:false', async () => {
+    const r = await userAbilityHandler(ctx, {
+      componentId: 'Profile:FieldEditor',
+      fieldId: 'CustomField:Contact.Phone',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.fieldAccess).toEqual({
+      field: 'CustomField:Contact.Phone',
+      readable: true,
+      editable: false,
+    });
+  });
+
+  it('fieldId ≡ objectApiName+fieldApiName (byte-equal data)', async () => {
+    const viaId = await userAbilityHandler(ctx, {
+      componentId: 'Profile:FieldEditor',
+      fieldId: 'CustomField:Contact.Email',
+    });
+    const viaParts = await userAbilityHandler(ctx, {
+      componentId: 'Profile:FieldEditor',
+      objectApiName: 'Contact',
+      fieldApiName: 'Email',
+    });
+    expect(viaId.ok && viaParts.ok).toBe(true);
+    if (!viaId.ok || !viaParts.ok) return;
+    expect(JSON.stringify(viaId.value.data)).toBe(JSON.stringify(viaParts.value.data));
+  });
+
+  it('a real field the container grants no FLS on is an honest {readable:false, editable:false}, not invalid-query', async () => {
+    const r = await userAbilityHandler(ctx, {
+      componentId: 'Profile:FieldEditor',
+      fieldId: 'CustomField:Contact.Fax',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.fieldAccess).toEqual({
+      field: 'CustomField:Contact.Fax',
+      readable: false,
+      editable: false,
+    });
+  });
+
+  it('an unresolvable field (no node, no grant) → invalid-query, never a silent field-dropped answer', async () => {
+    const r = await userAbilityHandler(ctx, {
+      componentId: 'Profile:FieldEditor',
+      objectApiName: 'Contact',
+      fieldApiName: 'Ghost__c',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('CustomField:Contact.Ghost__c');
+  });
+
+  it('a bare field name with no object → invalid-query naming the object', async () => {
+    const r = await userAbilityHandler(ctx, {
+      componentId: 'Profile:FieldEditor',
+      fieldApiName: 'Email',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('objectApiName');
+  });
+
+  it('a call WITHOUT a field scope is byte-identical — no appliedScope / fieldAccess keys', async () => {
+    const r = await userAbilityHandler(ctx, { componentId: 'Profile:Sales' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect('appliedScope' in r.value.data).toBe(false);
+    expect('fieldAccess' in r.value.data).toBe(false);
+  });
+});
+
+// =============================================================================
+// GUARD (USER-ABILITY-REJECTS-FIELD-SCOPE — narrowed residual): the container
+// used to be nameable ONLY by its canonical `componentId` — a natural
+// `profileApiName` / `permissionSetApiName` (the form a router-driven host
+// passes) hard-failed with "componentId: Required". Post-fix the selector is
+// merged into `componentId` by the schema preprocess (canonical `componentId`
+// still wins), the field+profile natural shape resolves the profile AND returns
+// FLS, a call naming NO container is a NAMED invalid-query (never a bare Zod
+// error), and the canonical `componentId` path stays byte-identical.
+// =============================================================================
+describe('userAbilityInputSchema — profileApiName / permissionSetApiName selector', () => {
+  it('coerces a bare profileApiName / permissionSetApiName / id alias to the container prefix', () => {
+    expect(userAbilityInputSchema.parse({ profileApiName: 'StandardUser' }).componentId).toBe(
+      'Profile:StandardUser',
+    );
+    expect(userAbilityInputSchema.parse({ permissionSetApiName: 'FlowRunner' }).componentId).toBe(
+      'PermissionSet:FlowRunner',
+    );
+    expect(userAbilityInputSchema.parse({ profileId: 'StandardUser' }).componentId).toBe(
+      'Profile:StandardUser',
+    );
+    expect(userAbilityInputSchema.parse({ permissionSetId: 'FlowRunner' }).componentId).toBe(
+      'PermissionSet:FlowRunner',
+    );
+    // An already-canonical componentId is left untouched.
+    expect(userAbilityInputSchema.parse({ componentId: 'Profile:Sales' }).componentId).toBe(
+      'Profile:Sales',
+    );
+    // Canonical componentId WINS over a disagreeing alias (never silently overwritten).
+    expect(
+      userAbilityInputSchema.parse({ componentId: 'Profile:Sales', profileApiName: 'Other' })
+        .componentId,
+    ).toBe('Profile:Sales');
+  });
+
+  it('{ profileApiName } ≡ { componentId: Profile:X } (byte-identical data)', async () => {
+    const natural = await userAbilityHandler(
+      ctx,
+      userAbilityInputSchema.parse({ profileApiName: 'Sales' }),
+    );
+    const canonical = await userAbilityHandler(
+      ctx,
+      userAbilityInputSchema.parse({ componentId: 'Profile:Sales' }),
+    );
+    expect(natural.ok && canonical.ok).toBe(true);
+    if (!natural.ok || !canonical.ok) return;
+    expect(JSON.stringify(natural.value.data)).toBe(JSON.stringify(canonical.value.data));
+  });
+
+  it('{ profileApiName, objectApiName, fieldApiName } resolves the profile AND returns field FLS', async () => {
+    const r = await userAbilityHandler(
+      ctx,
+      userAbilityInputSchema.parse({
+        profileApiName: 'FieldEditor',
+        objectApiName: 'Contact',
+        fieldApiName: 'Email',
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.componentId).toBe('Profile:FieldEditor');
+    expect(r.value.data.appliedScope).toEqual({ field: 'CustomField:Contact.Email' });
+    expect(r.value.data.fieldAccess).toEqual({
+      field: 'CustomField:Contact.Email',
+      readable: true,
+      editable: true,
+    });
+  });
+
+  it('field+profile natural shape ≡ canonical componentId + fieldId (byte-identical data)', async () => {
+    const natural = await userAbilityHandler(
+      ctx,
+      userAbilityInputSchema.parse({
+        profileApiName: 'FieldEditor',
+        objectApiName: 'Contact',
+        fieldApiName: 'Email',
+      }),
+    );
+    const canonical = await userAbilityHandler(
+      ctx,
+      userAbilityInputSchema.parse({
+        componentId: 'Profile:FieldEditor',
+        fieldId: 'CustomField:Contact.Email',
+      }),
+    );
+    expect(natural.ok && canonical.ok).toBe(true);
+    if (!natural.ok || !canonical.ok) return;
+    expect(JSON.stringify(natural.value.data)).toBe(JSON.stringify(canonical.value.data));
+  });
+
+  it('a call naming NO container (field scope but no profile) → a NAMED invalid-query, not a bare Zod error', async () => {
+    const r = await userAbilityHandler(
+      ctx,
+      userAbilityInputSchema.parse({ objectApiName: 'Contact', fieldApiName: 'Email' }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    // The message names the natural selectors, never the raw "componentId: Required".
+    expect(r.error.message).toContain('profileApiName');
+    expect(r.error.message).not.toBe('componentId: Required');
+  });
+
+  it('an unknown profile named by its natural api name still → component-not-found (selector resolved, node absent)', async () => {
+    const r = await userAbilityHandler(
+      ctx,
+      userAbilityInputSchema.parse({ profileApiName: 'GhostProfile' }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
   });
 });
 

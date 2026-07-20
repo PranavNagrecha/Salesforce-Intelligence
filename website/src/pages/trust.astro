@@ -114,6 +114,10 @@ const jsonld = [
           <div class="tag-row"><span class="badge mid">unknown</span><span class="desc">Coverage couldn't be determined.</span></div>
         </div>
       </div>
+      <div class="grid cols-2" style="gap:8px 32px; margin-top:26px; align-items:start;">
+        <div class="bound"><span class="mk">▸</span><div><b>Two confidence axes, never conflated.</b><p>The three tiers above grade a single <em>edge</em> - how one relationship was derived. An interpreted claim from <span class="mono">interpret</span> carries a separate <em>claim confidence</em>: the weakest of the firing rule's ceiling and the grounding edges it cites, so a claim is never asserted above the evidence beneath it - and with no citation there is no claim.</p></div></div>
+        <div class="bound"><span class="mk">▸</span><div><b>It answers the scope you asked for, or refuses.</b><p>Scope-aware tools resolve a natural selector and echo the resolved <span class="mono">appliedScope</span> back. If selectors disagree or none resolves, the tool returns a named <span class="mono">invalid-query</span> instead of silently answering org-wide against the wrong target. Omitting scope returns the full, byte-identical default.</p></div></div>
+      </div>
     </div>
   </section>
 

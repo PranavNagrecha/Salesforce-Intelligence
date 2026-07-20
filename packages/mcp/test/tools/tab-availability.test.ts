@@ -13,7 +13,10 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
-import { tabAvailabilityHandler } from '../../src/tools/tab-availability.js';
+import {
+  tabAvailabilityHandler,
+  tabAvailabilityInputSchema,
+} from '../../src/tools/tab-availability.js';
 
 const MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -40,6 +43,14 @@ const seed: ExtractionResult = {
     } }),
     // A profile with no tabVisibilities extracted → disclose "not modeled".
     node({ id: 'Profile:Bare', type: 'Profile', apiName: 'Bare' }),
+    // A profile whose tabs use the `standard-<Object>` convention (standard
+    // objects) alongside a custom-object tab named after the object.
+    node({ id: 'Profile:Std', type: 'Profile', apiName: 'Std', properties: {
+      tabVisibilities: [
+        { tab: 'standard-Case', visibility: 'DefaultOn' },
+        { tab: 'Widgets__c', visibility: 'DefaultOff' },
+      ],
+    } }),
   ],
   edges: [],
 };
@@ -76,6 +87,133 @@ describe('tabAvailabilityHandler', () => {
     expect(r.ok).toBe(true); if (!r.ok) return;
     expect(r.value.data.summary.total).toBe(0);
     expect(r.value.data.boundaryNote).toContain('not modeled');
+  });
+});
+
+// TAB-AVAILABILITY-PREFIXES-NON-PROFILE-AS-PROFILE: the bug lives in the Zod
+// preprocess (which the handler-direct tests above bypass), so these drive the
+// schema. Pre-fix, a `CustomTab:` id was coerced to `Profile:CustomTab:…` and
+// 404-ed as a phantom Profile; the guard requires it to pass through untouched
+// so the handler rejects it with `invalid-query` (mirroring app_access).
+describe('tabAvailabilityInputSchema — non-Profile canonical id is NOT Profile-prefixed', () => {
+  it('leaves a CustomTab: id untouched (does not mint Profile:CustomTab:…)', () => {
+    const parsed = tabAvailabilityInputSchema.parse({
+      componentId: 'CustomTab:standard-Case',
+    });
+    expect(parsed.componentId).toBe('CustomTab:standard-Case');
+    expect(parsed.componentId).not.toBe('Profile:CustomTab:standard-Case');
+  });
+
+  it('a CustomTab: id parsed through the schema then reaches invalid-query, not component-not-found', async () => {
+    const parsed = tabAvailabilityInputSchema.parse({
+      componentId: 'CustomTab:standard-Case',
+    });
+    const r = await tabAvailabilityHandler(ctx, parsed);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('still coerces a BARE granter name to a canonical Profile id (regression)', () => {
+    expect(tabAvailabilityInputSchema.parse({ componentId: 'Admin' }).componentId).toBe(
+      'Profile:Admin',
+    );
+    // An explicit permissionSetId alias still routes to PermissionSet.
+    expect(
+      tabAvailabilityInputSchema.parse({ permissionSetId: 'Sales_Ops' }).componentId,
+    ).toBe('PermissionSet:Sales_Ops');
+    // Already-canonical granter ids are unchanged.
+    expect(
+      tabAvailabilityInputSchema.parse({ componentId: 'Profile:Admin' }).componentId,
+    ).toBe('Profile:Admin');
+    expect(
+      tabAvailabilityInputSchema.parse({ componentId: 'PermissionSet:Sales_Ops' })
+        .componentId,
+    ).toBe('PermissionSet:Sales_Ops');
+  });
+});
+
+// =============================================================================
+// GUARD (TAB-AVAILABILITY-REJECTS-PROFILEAPINAME): a natural "is {object}'s tab
+// available to {profile}?" passes `profileApiName` (+ `objectApiName`). Pre-fix
+// profileApiName was rejected (componentId required) and objectApiName was
+// ignored (full-profile tab dump). Post-fix the profile resolves via the alias,
+// the object narrows the tab list by naming convention, and `appliedScope` is
+// echoed; a bare call stays byte-identical.
+// =============================================================================
+describe('tabAvailabilityInputSchema — profileApiName / permissionSetApiName aliases', () => {
+  it('coerces profileApiName / permissionSetApiName to the container prefix', () => {
+    expect(tabAvailabilityInputSchema.parse({ profileApiName: 'Admin' }).componentId).toBe(
+      'Profile:Admin',
+    );
+    expect(
+      tabAvailabilityInputSchema.parse({ permissionSetApiName: 'Sales_Ops' }).componentId,
+    ).toBe('PermissionSet:Sales_Ops');
+    // Canonical componentId still wins when both are present.
+    expect(
+      tabAvailabilityInputSchema.parse({ componentId: 'Profile:Admin', profileApiName: 'Other' })
+        .componentId,
+    ).toBe('Profile:Admin');
+  });
+});
+
+describe('tabAvailabilityHandler — object scope (guard)', () => {
+  it('objectApiName narrows to the object tab (custom object, tab == object api name) + appliedScope', async () => {
+    const r = await tabAvailabilityHandler(
+      ctx,
+      tabAvailabilityInputSchema.parse({ profileApiName: 'Admin', objectApiName: 'Deals__c' }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedScope).toEqual({ componentId: 'Profile:Admin', object: 'Deals__c' });
+    expect(r.value.data.tabs.map((t) => t.tab)).toEqual(['Deals__c']);
+    expect(r.value.data.summary.total).toBe(1); // NOT the full 3-tab dump
+  });
+
+  it('objectApiName matches the `standard-<Object>` tab for a standard object', async () => {
+    const r = await tabAvailabilityHandler(
+      ctx,
+      tabAvailabilityInputSchema.parse({ componentId: 'Profile:Std', objectApiName: 'Case' }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.tabs.map((t) => t.tab)).toEqual(['standard-Case']);
+    expect(r.value.data.appliedScope?.object).toBe('Case');
+  });
+
+  it('an object with no matching tab is an honest empty for that profile, not the full dump', async () => {
+    const r = await tabAvailabilityHandler(
+      ctx,
+      tabAvailabilityInputSchema.parse({ componentId: 'Profile:Admin', objectApiName: 'Nonexistent__c' }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.tabs).toEqual([]);
+    expect(r.value.data.summary.total).toBe(0);
+    expect(r.value.data.appliedScope?.object).toBe('Nonexistent__c');
+  });
+
+  it('natural profileApiName+object ≡ canonical componentId+object (byte-equal data)', async () => {
+    const natural = await tabAvailabilityHandler(
+      ctx,
+      tabAvailabilityInputSchema.parse({ profileApiName: 'Admin', objectApiName: 'Account' }),
+    );
+    const canonical = await tabAvailabilityHandler(
+      ctx,
+      tabAvailabilityInputSchema.parse({ componentId: 'Profile:Admin', objectApiName: 'Account' }),
+    );
+    expect(natural.ok && canonical.ok).toBe(true);
+    if (!natural.ok || !canonical.ok) return;
+    expect(JSON.stringify(natural.value.data)).toBe(JSON.stringify(canonical.value.data));
+    expect(natural.value.data.tabs.map((t) => t.tab)).toEqual(['Account']);
+  });
+
+  it('a bare (no-object) call is byte-identical to before — no appliedScope key', async () => {
+    const r = await tabAvailabilityHandler(ctx, { componentId: 'Profile:Admin' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect('appliedScope' in r.value.data).toBe(false);
+    expect(r.value.data.summary.total).toBe(3);
   });
 });
 

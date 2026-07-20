@@ -37,6 +37,14 @@
  *     Tooling API surface and is invisible to the offline DX-source
  *     scanner. A class flagged "schedulable" may NOT be currently
  *     scheduled — the schedule is a runtime registration.
+ *   - Scope filter (SCHEDULED-JOB-CATALOG-IGNORES-NAMECONTAINS): the
+ *     optional `nameContains` input narrows BOTH the Schedulable-class
+ *     catalog and the scheduled-Flow section to entries whose apiName
+ *     contains the substring (case-insensitive). When present the
+ *     response echoes `appliedScope` so a host never mistakes an
+ *     unfiltered org-wide catalog for a scoped answer; a bare no-filter
+ *     call omits `appliedScope` and stays byte-identical. A filter that
+ *     matches nothing returns an honest empty catalog, NOT the full list.
  */
 
 import type {
@@ -59,12 +67,20 @@ import type { Context } from '../server.js';
 const SCHEDULED_JOB_CATALOG_MAX_CLASSES = 500;
 
 /**
- * Zod schema for the `sfi.scheduled_job_catalog` tool input. The
- * tool takes no arguments — the catalog is intentionally org-wide so
- * the architect's "show me everything that's scheduled" question
- * resolves in one call.
+ * Zod schema for the `sfi.scheduled_job_catalog` tool input.
+ *
+ *   - `nameContains`: optional. Narrows both the Schedulable-class
+ *     catalog and the scheduled-Flow section to entries whose apiName
+ *     contains the substring (case-insensitive). Omitted means the
+ *     intentionally org-wide catalog (the architect's "show me
+ *     everything that's scheduled" question resolves in one call).
+ *     SCHEDULED-JOB-CATALOG-IGNORES-NAMECONTAINS: previously the tool
+ *     took no arguments and a `nameContains` was silently stripped; it
+ *     is now honored and echoed as `appliedScope`.
  */
-export const scheduledJobCatalogInputSchema = z.object({});
+export const scheduledJobCatalogInputSchema = z.object({
+  nameContains: z.string().min(1).optional(),
+});
 
 /** Parsed input shape, inferred from `scheduledJobCatalogInputSchema`. */
 export type ScheduledJobCatalogInput = z.infer<
@@ -164,6 +180,17 @@ export interface ScheduledJobCatalogOutput {
   };
   readonly disclosure: string;
   readonly flowScheduleDisclosure: string;
+  /**
+   * SCHEDULED-JOB-CATALOG-IGNORES-NAMECONTAINS: the scope ACTUALLY applied to
+   * this catalog. Present ONLY when the caller passed a `nameContains` filter —
+   * a bare org-wide call omits it entirely so its response stays byte-identical
+   * to the pre-filter shape. A host that sees no `appliedScope` MUST treat the
+   * result as the full org-wide catalog, not a scoped answer.
+   */
+  readonly appliedScope?: {
+    readonly nameContains: string;
+    readonly mode: 'nameContains';
+  };
 }
 
 /**
@@ -314,10 +341,14 @@ const compareCalls = (a: ScheduledCall, b: ScheduledCall): number =>
       : 0;
 
 /**
- * The `sfi.scheduled_job_catalog` MCP tool. Takes no arguments;
- * returns one entry per Schedulable class with the per-class
- * "scheduledByCalls" surfaced from inbound `dispatchesAsync` edges
- * with `dispatchMechanism === 'schedule'`.
+ * The `sfi.scheduled_job_catalog` MCP tool. Returns one entry per
+ * Schedulable class with the per-class "scheduledByCalls" surfaced from
+ * inbound `dispatchesAsync` edges with `dispatchMechanism === 'schedule'`,
+ * plus the scheduled-Flow section. The optional `nameContains` narrows both
+ * sections to entries whose apiName contains the substring
+ * (case-insensitive) and echoes `appliedScope`
+ * (SCHEDULED-JOB-CATALOG-IGNORES-NAMECONTAINS); omitted means the org-wide
+ * catalog.
  *
  * @example
  *   const r = await scheduledJobCatalogHandler(ctx, {});
@@ -325,13 +356,15 @@ const compareCalls = (a: ScheduledCall, b: ScheduledCall): number =>
  */
 export const scheduledJobCatalogHandler = async (
   ctx: Context,
-  _input: ScheduledJobCatalogInput,
+  input: ScheduledJobCatalogInput,
 ): Promise<Result<McpResponse<ScheduledJobCatalogOutput>, McpError>> => {
-  // Underscore parameter signals "input intentionally unused"; the
-  // signature still mirrors the other handlers for the
-  // `dispatchTool` switch's homogeneous Result<McpResponse<T>, ...>
-  // return shape.
-  void _input;
+  // SCHEDULED-JOB-CATALOG-IGNORES-NAMECONTAINS: honor the caller name filter
+  // (case-insensitive substring over apiName) across BOTH the Schedulable-class
+  // catalog and the scheduled-Flow section. A filter that matches nothing
+  // returns an honest empty catalog ("no scheduled jobs named X"), never the
+  // full org-wide list.
+  const nameNeedle =
+    input.nameContains !== undefined ? input.nameContains.toLowerCase() : null;
 
   const apexClassesResult = await listNodesByType(ctx.graph, 'ApexClass', {
     limit: SCHEDULED_JOB_CATALOG_MAX_CLASSES,
@@ -349,6 +382,12 @@ export const scheduledJobCatalogHandler = async (
   let classesLikelyUnscheduled = 0;
   for (const node of apexClassesResult.value as readonly Node[]) {
     if (!readIsSchedulable(node.properties)) continue;
+    // Apply the caller name scope before reading callers/cron so a scoped call
+    // reports only its matching jobs (and an empty result honestly means "no
+    // scheduled jobs named X", not "none scheduled").
+    if (nameNeedle !== null && !node.apiName.toLowerCase().includes(nameNeedle)) {
+      continue;
+    }
     const callsResult = await collectScheduledCalls(ctx, node.id);
     if (!callsResult.ok) {
       return err({
@@ -395,6 +434,9 @@ export const scheduledJobCatalogHandler = async (
   const scheduledFlows: ScheduledFlowEntry[] = [];
   for (const node of flowsResult.value as readonly Node[]) {
     if (!isScheduledFlow(node.properties)) continue;
+    if (nameNeedle !== null && !node.apiName.toLowerCase().includes(nameNeedle)) {
+      continue;
+    }
     scheduledFlows.push({
       flowId: node.id,
       apiName: node.apiName,
@@ -418,6 +460,16 @@ export const scheduledJobCatalogHandler = async (
       },
       disclosure: SCHEDULED_JOB_CATALOG_DISCLOSURE,
       flowScheduleDisclosure: SCHEDULED_FLOW_DISCLOSURE,
+      // Present ONLY when a name filter was passed, so a bare org-wide call
+      // stays byte-identical to the pre-filter golden.
+      ...(input.nameContains !== undefined
+        ? {
+            appliedScope: {
+              nameContains: input.nameContains,
+              mode: 'nameContains' as const,
+            },
+          }
+        : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

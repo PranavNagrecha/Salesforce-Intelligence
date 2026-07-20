@@ -298,6 +298,64 @@ describe('findFormulaReferencesHandler', () => {
   });
 });
 
+// FIND-FORMULA-REFERENCES-REJECTS-COMPONENTID: a host forwarding sfi.resolve's
+// CustomField id (as `componentId`, or a dotted `fieldApiName`) must reach the
+// SAME referencer list as the canonical `fieldId`.
+describe('findFormulaReferencesHandler — componentId / fieldApiName selectors', () => {
+  const FIELD = 'CustomField:Account.Industry__c';
+
+  it('resolves a componentId selector to the SAME result as the canonical fieldId', async () => {
+    const canonical = await findFormulaReferencesHandler(ctx, { fieldId: FIELD });
+    const viaComponentId = await findFormulaReferencesHandler(ctx, { componentId: FIELD });
+    expect(canonical.ok).toBe(true);
+    expect(viaComponentId.ok).toBe(true);
+    if (!canonical.ok || !viaComponentId.ok) return;
+    // Byte-identical payload whichever selector the host supplied.
+    expect(viaComponentId.value.data).toEqual(canonical.value.data);
+    expect(viaComponentId.value.data.referencers.length).toBe(2);
+  });
+
+  it('resolves a dotted fieldApiName selector to the same field', async () => {
+    const canonical = await findFormulaReferencesHandler(ctx, { fieldId: FIELD });
+    const viaApiName = await findFormulaReferencesHandler(ctx, {
+      fieldApiName: 'Account.Industry__c',
+    });
+    expect(canonical.ok).toBe(true);
+    expect(viaApiName.ok).toBe(true);
+    if (!canonical.ok || !viaApiName.ok) return;
+    expect(viaApiName.value.data).toEqual(canonical.value.data);
+  });
+
+  it('rejects a wrong-type componentId with invalid-query (never a silent empty list)', async () => {
+    const result = await findFormulaReferencesHandler(ctx, {
+      componentId: 'ApexClass:SomeClass',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+    expect(result.error.message).toContain('CustomField');
+  });
+
+  it('rejects disagreeing selectors with invalid-query', async () => {
+    const result = await findFormulaReferencesHandler(ctx, {
+      fieldId: FIELD,
+      componentId: 'CustomField:Account.Other__c',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+    expect(result.error.message).toContain('different targets');
+  });
+
+  it('rejects a call with no selector at all', async () => {
+    const result = await findFormulaReferencesHandler(ctx, {});
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+    expect(result.error.path).toBe('fieldId');
+  });
+});
+
 describe('findFormulaReferencesHandler — CR-22 continuation cursor', () => {
   const FIELD = 'CustomField:Account.Industry__c';
 

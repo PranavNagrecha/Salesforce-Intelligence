@@ -150,6 +150,64 @@ describe('extractBusinessProcess', () => {
     });
   });
 
+  describe('stage values (BUSINESS-PROCESS-OMITS-STAGE-VALUES)', () => {
+    it('FAIL-BEFORE/PASS-AFTER: emits the ordered stages with fullName + default alongside stageCount', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<BusinessProcess xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Priority Process</fullName>
+    <isActive>true</isActive>
+    <values>
+        <fullName>Closed</fullName>
+        <default>false</default>
+    </values>
+    <values>
+        <fullName>Open</fullName>
+        <default>true</default>
+    </values>
+</BusinessProcess>`;
+      const { dir, path } = await writeNestedBusinessProcessXml('Case', 'Priority_Process', xml);
+      try {
+        const result = await extractBusinessProcess(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const props = result.value.nodes[0]!.properties as {
+          stageCount: number;
+          stages: ReadonlyArray<{ fullName: string; default: boolean }>;
+        };
+        // The count is unchanged, but the VALUES are now surfaced (dropped pre-fix).
+        expect(props.stageCount).toBe(2);
+        expect(props.stages).toEqual([
+          { fullName: 'Closed', default: false },
+          { fullName: 'Open', default: true },
+        ]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits an empty stages array (not undefined) when the process declares no values', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<BusinessProcess xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Empty Process</fullName>
+    <isActive>false</isActive>
+</BusinessProcess>`;
+      const { dir, path } = await writeNestedBusinessProcessXml('Case', 'Empty_Process', xml);
+      try {
+        const result = await extractBusinessProcess(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const props = result.value.nodes[0]!.properties as {
+          stageCount: number;
+          stages: readonly unknown[];
+        };
+        expect(props.stageCount).toBe(0);
+        expect(props.stages).toEqual([]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('error cases', () => {
     it('returns file-not-found when the path does not exist', async () => {
       const path =

@@ -195,25 +195,89 @@ flowchart TB
     subgraph REFRESH["Refresh — once, and whenever the org changes"]
         direction LR
         ORG[("Salesforce org")] -->|"sf project retrieve (read-only)"| SRC["source/ raw metadata"]
-        SRC -->|"extract + parse Apex / Flow / XML"| VAULT[("Local vault<br/>Markdown + DuckDB graph")]
+        SRC -->|"extract + parse Apex / Flow / XML"| VAULT[("Graph A · Local vault<br/>your org, grounded<br/>Markdown + DuckDB graph")]
     end
 
-    subgraph ASK["Ask — every question, offline by default"]
+    subgraph CONCEPT["Concept Model — ships with the package · no org data, ever"]
+        CM[["Graph B · Concept Model<br/>94 org-independent concepts / 143 rules<br/>save-order · relationships · sharing · code-shape"]]
+    end
+
+    subgraph ASK["Ask — every question, offline on your machine"]
         direction TB
         Q["Your question<br/>(plain language)"] --> HOST["Host LLM<br/>(Claude, etc.)"]
         HOST -->|"1 · route_question"| FUNNEL["Semantic funnel<br/>offline TF-IDF — no network"]
         FUNNEL -->|"toolCandidates + guidance<br/>(ranked shortlist — advises)"| HOST
-        HOST -->|"2 · picks and runs"| TOOLS["sfi.* tools"]
-        TOOLS -->|"3 · read"| VAULT
+        HOST -->|"2a · retrieve: picks and runs"| TOOLS["sfi.* retrieval tools"]
+        TOOLS -->|"read"| VAULT
         TOOLS -.->|"opt-in, read-only, capped"| LIVE[("Live org")]
-        TOOLS -->|"4 · synthesize_answer"| ANS["Grounded answer<br/>+ provenance + freshness<br/>+ cited canonical ids"]
+        HOST -->|"2b · reason: resolve"| RESOLVE["sfi.resolve<br/>fix the component"]
+        RESOLVE -->|"interpret"| INTERPRET["sfi.interpret · deterministic OFFLINE JOIN<br/>Concept Model × grounded vault slice<br/>no LLM · no live org read"]
+        INTERPRET -->|"cited, confidence-tiered<br/>structural-implication claims"| SYNTH["3 · synthesize_answer"]
+        TOOLS --> SYNTH
+        SYNTH --> ANS["Grounded answer<br/>+ provenance + freshness<br/>+ cited canonical ids"]
     end
+
+    VAULT ==>|"grounded slice · Graph A"| INTERPRET
+    CM ==>|"concept rules · Graph B"| INTERPRET
 ```
 
 Every box on the **Ask** path runs on your machine; the dotted edge to the live
-org is the only one that can touch Salesforce, and only after you opt in. The
-deterministic `SFI_ROUTER_MODE=offline` mode collapses step 1 to a single routed
-plan for hosts with no LLM in the loop.
+org is the only one that can touch Salesforce, and only after you opt in.
+Retrieval (`route_question → sfi.* → synthesize_answer`) reports *what's in the
+org*; the reasoning path (`resolve → interpret → synthesize_answer`) reports
+*what its shape implies*. `sfi.interpret` is a deterministic, offline **join** of
+the org-independent **Concept Model** (Graph B — 94 concepts / 143 rules, which
+never touches your org) against a grounded slice of the vault (Graph A); it runs
+with no LLM and no live read, and every claim it feeds `synthesize_answer` is
+cited and confidence-tiered. The deterministic `SFI_ROUTER_MODE=offline` mode
+collapses step 1 to a single routed plan for hosts with no LLM in the loop.
+
+## Reasoning, not just retrieval
+
+Retrieval tells you *what's in the org*. It doesn't tell you what a structure
+**implies** — that a master-detail parent delete cascade-deletes its children,
+that two active before-save flows on one object run in an **undefined order**, or
+that an `@AuraEnabled` method is an entry point where Apex does not auto-enforce
+field-level security. SfIntelligence answers those with a small second graph.
+
+Alongside the org's grounded vault, the product ships a **Concept Model**: **94**
+org-independent, curated concepts and **143** rules that encode general Salesforce
+truth — save-order phases, relationship semantics, sharing posture, code-shape
+signals. No org data lives in it; the org enters reasoning **only** through the
+grounded slice at query time. The `sfi.interpret` tool **joins** the two: it
+assembles a minimal graph slice around one component and fires the applicable
+rules to produce **cited, confidence-tiered structural-implication claims**. It
+is **deterministic and offline** — no LLM, no live org read — and its claims are
+also folded into `sfi.synthesize_answer` so they reach a normal answer, hedged
+and attributed, on any MCP host.
+
+The concept families are curated structural patterns, not vulnerability
+detection. A sample of what fires today:
+
+- **Relationships** — master-detail cascade-delete + read-only roll-up summary;
+  junction (two-master) many-to-many; formula/roll-up fields are read-only, so a
+  write to one is write-hostile.
+- **Automation** — multiple active record-triggered flows in one trigger context
+  (undefined execution order); a firing condition that tests a field another
+  automation writes in the same save (cross-phase coupling); before/after trigger
+  phases; a flow fault-path rollback gap.
+- **Sharing & security surface** — organization-wide default (OWD) posture;
+  `without sharing` system-context Apex; an external API surface
+  (`@RestResource` / `@AuraEnabled` / `@InvocableMethod`) where FLS/CRUD are not
+  auto-enforced; async boundaries; connected-app OAuth scope.
+- **Code shape** — Apex SOQL-injection / bulkification / CRUD-FLS / swallowed-
+  exception / hardcoded-id gaps; a test with no assertions.
+
+Every claim is **grounded or it does not exist**. Each interpretation carries a
+`groundedIn` list of the exact component ids it matched — **no citation ⇒ no
+claim** — and its confidence is **computed, never asserted**: the *weakest* of
+the rule's ceiling and the grounding edges it matched (see the two-axis note
+below). An empty result means **"no concept rule fired,"** never "nothing depends
+on it." And the governor/security concepts reason about **static code shape** —
+they name a surface or a coupling, not a live limit breach or a proven runtime
+vulnerability. For a worked resolve → interpret → synthesize example, see
+[`docs/guides/asking-questions.md`](./docs/guides/asking-questions.md) §2b; for
+the design rationale, [ADR-008](./docs/decisions/ADR-008-deterministic-concept-model-reasoning.md).
 
 ## What you can ask
 
@@ -250,7 +314,8 @@ Every answer is tagged so you know how much to lean on it. These tags match the
 runtime values verbatim (the `trust` block on analysis tools, the per-edge
 `confidence`, and `synthesize_answer`'s `provenance.stamp`).
 
-**Confidence** — how a relationship or finding was derived:
+**Edge confidence** — how a *relationship* was derived. This is the per-edge tier
+you see on dependency answers:
 
 - `declared` — Salesforce metadata states it directly (a layout assignment, a
   field's `referenceTo`, a permission grant). Highest trust.
@@ -261,6 +326,15 @@ runtime values verbatim (the `trust` block on analysis tools, the per-edge
 - `heuristic` — produced by regex / token / dynamic-string analysis (the Apex
   recall scanner that supplements the parsed pass, name-pattern detection). May
   have false positives — spot-check before acting.
+
+**Claim confidence** — a *different* axis: how well a **reasoning claim** from
+`sfi.interpret` is grounded. It uses the same `declared | parsed | heuristic`
+words, but it is **computed, not read off one edge**: a claim's confidence is the
+*weakest* of the concept rule's ceiling and the grounding edges the claim matched.
+An absence-shaped claim under non-complete coverage reads `unknown`. Do not
+conflate the two — edge confidence describes a single relationship; claim
+confidence describes an interpretation that *rests on* one or more such edges and
+can never exceed the weakest of them.
 
 **Provenance** — where the answer came from:
 
@@ -287,7 +361,8 @@ answer carries a known-coverage caveat instead of a silent blind spot.
 | | |
 | --- | --- |
 | **MCP roster** | Every `sfi.*` tool is registered in code; run `sfi.capabilities` for the live count and workflow map |
-| **Graph model** | A broad `ComponentType` union (objects, fields, Flows, Apex, layouts, permissions, sharing, UI, legacy automation, integrations, CPQ, OmniStudio, reports, FlexiPages, and more) connected by typed edges — see `sfi.capabilities` for how tools group those families |
+| **Graph model** | A broad `ComponentType` union across **102** component types (objects, fields, Flows, Apex, layouts, permissions, sharing, UI, legacy automation, integrations, CPQ, OmniStudio, reports, FlexiPages, and more) connected by **23** typed edge types — see `sfi.capabilities` for how tools group those families |
+| **Concept Model** | **94** org-independent, curated reasoning concepts and **143** rules that JOIN against the grounded vault to produce cited structural-implication claims via `sfi.interpret` — no org data lives in the model |
 | **25** | skills + **4** slash commands (Claude Code plugin layer) that auto-activate in a session |
 
 ## What it does NOT do
@@ -310,6 +385,14 @@ rather than papering over the gap with general Salesforce knowledge:
   and source. Dynamic SOQL, reflective Apex, and runtime metadata lookups are
   invisible to static analysis — a "no references found" result means "no static
   evidence", not "definitely unused".
+- **Reasoning is deterministic rule-match, not an LLM and not a live check.**
+  `sfi.interpret` fires curated concept rules against the offline grounded slice.
+  Its claims are structural implications of the *code and metadata shape* — it
+  names a pattern (a cascade-delete, an undefined flow order, an unenforced entry
+  point), and cites the ids it matched. A governor or security concept is a
+  **static-shape signal, not a proven runtime limit breach or a proven
+  vulnerability**; a claim with no citation is never made, and an empty result
+  means "no rule fired," not "nothing depends on it."
 - **Read-only.** The product never writes to your org. It has no write path.
 - **Tested scale (CI budgets).** Three separate ceilings are gated in CI:
   - **Graph import:** 10,000 nodes in &lt;90s (`packages/graph/test/scale-import.test.ts`, `SCALE_IMPORT_BUDGET_MS`).

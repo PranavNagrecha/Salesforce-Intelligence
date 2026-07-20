@@ -76,12 +76,18 @@ const distIndex = path.join(PRODUCT, "packages/mcp/dist/src/tools/index.js");
 if (!fs.existsSync(distIndex)) die(`Built tool registry missing: ${distIndex}\n  Build the product first:  (cd "${PRODUCT}" && pnpm -r build)`);
 const { V01_TOOLS } = await import(pathToFileURL(distIndex).href);
 if (!Array.isArray(V01_TOOLS)) die("V01_TOOLS not found in the built registry.");
-// Match the product's own advertisedTools logic (packages/mcp/src/tools/index.ts):
-// hidden back-compat aliases are filtered out so they never occupy a tools/list
-// schema slot — the site advertises the 196 distinct tools, not the 4 aliases.
+// The rendered tool catalog lists only the ADVERTISED tools: hidden back-compat
+// aliases never occupy a tools/list schema slot, so they are not shown as separate
+// cards (matches packages/mcp/src/tools/index.ts advertisedTools logic).
 const tools = V01_TOOLS.filter((t) => !t.hidden).map((t) => ({ name: t.name, description: String(t.description || "").replace(/\s+/g, " ").trim() }));
-const toolCount = tools.length;
-log(`• tools (V01_TOOLS):            ${toolCount}`);
+// The HEADLINE count is the full REGISTERED surface (V01_TOOLS.length), matching
+// scripts/product-surface.mjs and the scripts/verify-doc-sync.mjs gate
+// (site-data.toolCount === V01_TOOLS.length). The hidden aliases are registered and
+// callable — they fold into their canonical tool — so they count toward the
+// registered total even though they are not rendered as separate cards.
+const advertisedCount = tools.length;
+const toolCount = V01_TOOLS.length;
+log(`• tools registered (V01_TOOLS): ${toolCount}  (advertised ${advertisedCount})`);
 
 let surface = {};
 try {
@@ -176,7 +182,7 @@ const bare = (n) => n.replace(/^sfi\./, "");
 const GROUPS = [
   ["Orientation & routing", (n) => ["capabilities","route_question","synthesize_answer","resolve","disambiguate_concepts","guidance"].includes(n)],
   ["Search & find", (n) => n.startsWith("search_") || n.startsWith("find_") || ["get_component","list_components","lookup_record"].includes(n)],
-  ["Explain & understand", (n) => n.startsWith("explain_") || ["field_meaning","field_provenance","what_happens_on_save","order_of_execution"].includes(n)],
+  ["Explain & understand", (n) => n.startsWith("explain_") || ["interpret","field_meaning","field_provenance","what_happens_on_save","order_of_execution"].includes(n)],
   ["Impact, dependencies & what-if", (n) => n.startsWith("what_if_") || ["get_impact","get_edges","get_subgraph","downstream_effects","field_lineage","field_360","call_graph","method_reachability","find_dependency_cycles","safe_to_delete_field","value_change_audit","why_field_changed","tests_for_change","blast_radius_live","field_change_advisor","package_impact"].includes(n)],
   ["Permissions, sharing & access", (n) => n.includes("permission") || ["why_cant_user_see_record","crud_fls_audit","field_access_audit","generate_sharing_summary","unassigned_permission_sets","layout_for_user"].includes(n)],
   ["Code & quality", (n) => ["code_quality_audit","governor_limit_risks","find_dead_code","test_coverage_gaps","test_coverage_for_method","meaningful_test_audit","apex_test_coverage","apex_build_advisor","process_builder_migration_candidates"].includes(n)],

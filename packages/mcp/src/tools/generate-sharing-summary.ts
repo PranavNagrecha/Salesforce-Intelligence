@@ -10,8 +10,12 @@
  * roles)" via the shared `expandRoleSubordinates` helper that
  * `who_can_access_object` also uses, so the two surfaces never drift),
  * and the Profile / PermissionSet OBJECT-level CRUD grants that surface
- * as incoming `grantedBy` edges to the object itself. The Role hierarchy
- * is rendered as a mermaid diagram when Role nodes are present.
+ * as incoming `grantedBy` edges to the object itself. Restriction & Scoping
+ * rules (RestrictionRule / ScopingRule nodes whose `parentId` is the object)
+ * are listed per object with their enforcement type, active state, and record
+ * filter — they NARROW visibility on top of OWD + sharing, so omitting them
+ * (as this tool previously did) invented an OWD-only access posture. The Role
+ * hierarchy is rendered as a mermaid diagram when Role nodes are present.
  *
  * Input:
  *   - `objectFilter` (optional string): when supplied, narrows the
@@ -20,6 +24,14 @@
  *     architect-tier convention — CR-RV12: a >50-object org's response
  *     discloses the truncation, see Output below, rather than silently
  *     reading as complete).
+ *   - `objectApiName` / `componentId` (optional string, aliases —
+ *     GENERATE-SHARING-SUMMARY-ALIAS-SKEW): equivalent object selectors
+ *     to `objectFilter`. `componentId` accepts the canonical
+ *     `CustomObject:{ApiName}` id (or a bare api name); `objectFilter`
+ *     wins when more than one is supplied. WHICHEVER scope is applied is
+ *     echoed honestly in the Overview (`objectFilter: \`...\``) and the
+ *     re-run footer — the tool never reports a scoped single-object doc
+ *     as "no objectFilter applied".
  *
  * Output: `{ document: GeneratedDocument, scanTruncated?, totalMatchingObjects? }`.
  *   `scanTruncated` (CR-RV12) is present ONLY when the org has more than 50
@@ -89,7 +101,33 @@ export const generateSharingSummaryInputSchema = z.object({
   objectFilter: z.string().min(1).optional(),
   /** Alias for `objectFilter` (NI-3). */
   objectApiName: z.string().min(1).optional(),
+  /**
+   * Object selector alias (GENERATE-SHARING-SUMMARY-ALIAS-SKEW). Accepts the
+   * canonical `CustomObject:{ApiName}` id the router and sibling access tools
+   * hand hosts, or a bare object api name. Previously Zod-stripped, so a
+   * `componentId`-scoped call silently fell through to the org-wide scan.
+   */
+  componentId: z.string().min(1).optional(),
 });
+
+/** The `CustomObject:` id prefix a `componentId` selector may carry. */
+const CUSTOM_OBJECT_ID_PREFIX = 'CustomObject:';
+
+/**
+ * Resolve a `componentId` object selector (GENERATE-SHARING-SUMMARY-ALIAS-SKEW)
+ * into a bare object api name equivalent to `objectFilter` / `objectApiName`.
+ * Strips a leading `CustomObject:` id prefix; a value without that prefix is
+ * treated as a bare api name. Returns `undefined` when no `componentId` was
+ * supplied so it never fabricates a scope.
+ */
+const objectApiNameFromComponentId = (
+  componentId: string | undefined,
+): string | undefined => {
+  if (componentId === undefined) return undefined;
+  return componentId.startsWith(CUSTOM_OBJECT_ID_PREFIX)
+    ? componentId.slice(CUSTOM_OBJECT_ID_PREFIX.length)
+    : componentId;
+};
 
 /** Parsed input shape. */
 export type GenerateSharingSummaryInput = z.infer<
@@ -193,6 +231,15 @@ interface ObjectSharing {
    */
   readonly externalOwd: string | null;
   readonly sharingRules: readonly Node[];
+  /**
+   * RESTRICTION-RULE-MISSING-OBJECT-GRAPH-AND-SHARING-SUMMARY: the
+   * RestrictionRule / ScopingRule nodes whose `parentId` is this object.
+   * Restriction (Restrict) and Scoping rules NARROW record visibility even for
+   * users who otherwise have access, so an OWD-only summary that omitted them
+   * invented a broader access posture. Keyed on `parentId` (the extractor sets
+   * it from `<targetEntity>`), so this surfaces on the CURRENT vault.
+   */
+  readonly restrictionRules: readonly Node[];
   readonly profilesWithGrants: number;
   readonly permSetsWithGrants: number;
   /**
@@ -329,6 +376,30 @@ const renderObjectSection = (
       );
     }
   }
+
+  // RESTRICTION-RULE-MISSING-OBJECT-GRAPH-AND-SHARING-SUMMARY: Restriction /
+  // Scoping rules NARROW visibility on top of OWD + sharing rules, so a summary
+  // that omitted them read as OWD-only visibility. List every RestrictionRule /
+  // ScopingRule on this object with its enforcement type, active state, and
+  // record filter (the SOQL predicate that scopes which records stay visible).
+  lines.push('', '### Restriction & Scoping Rules', '');
+  if (entry.restrictionRules.length === 0) {
+    lines.push('_(no restriction or scoping rules)_');
+  } else {
+    lines.push('| Rule | Kind | Enforcement | Active | Record Filter |');
+    lines.push('| --- | --- | --- | --- | --- |');
+    const sortedRr = [...entry.restrictionRules].sort((a, b) =>
+      a.apiName < b.apiName ? -1 : a.apiName > b.apiName ? 1 : 0,
+    );
+    for (const rule of sortedRr) {
+      const enforcement = stringProp(rule.properties, 'enforcementType', 'Unknown');
+      const active = stringProp(rule.properties, 'active', 'unknown');
+      const recordFilter = stringProp(rule.properties, 'recordFilter', '—');
+      lines.push(
+        `| \`${escapeCell(rule.apiName)}\` | ${escapeCell(rule.type)} | ${escapeCell(enforcement)} | ${escapeCell(active)} | ${escapeCell(recordFilter)} |`,
+      );
+    }
+  }
   return lines.join('\n');
 };
 
@@ -371,16 +442,37 @@ const renderRoleHierarchySection = (
 };
 
 /**
- * Walk all SharingRule nodes once and return a map of sobjectType ApiName
- * to its applicable rules. v1.1 sharing-rule nodes carry the parent
- * object's api name in `properties.sObjectType`.
+ * The parent CustomObject api name a SharingRule applies to. The v1.1 sharing
+ * extractor sets the rule's `parentId` to `CustomObject:{Object}` and its
+ * `apiName` to `{Object}.{RuleName}`; it does NOT emit a `properties.sObjectType`.
+ * The previous index keyed on that non-existent `sObjectType`, so it matched
+ * NOTHING and every object rendered "_(no sharing rules)_" even when dozens of
+ * `SharingRule:{Object}.*` nodes existed (the false-empty C2-class lie). Derive
+ * the object from `parentId` first, then the `apiName` head, then the legacy
+ * `sObjectType` property for any producer that still sets it.
+ */
+const sharingRuleObjectApiName = (rule: Node): string => {
+  const parentId = rule.parentId;
+  if (typeof parentId === 'string' && parentId.startsWith('CustomObject:')) {
+    return parentId.slice('CustomObject:'.length);
+  }
+  const dot = rule.apiName.indexOf('.');
+  if (dot > 0) return rule.apiName.slice(0, dot);
+  return stringProp(rule.properties, 'sObjectType', '');
+};
+
+/**
+ * Walk all SharingRule nodes once and return a map of parent CustomObject
+ * ApiName to its applicable rules. The object is derived via
+ * {@link sharingRuleObjectApiName} (parentId / apiName), NOT the never-emitted
+ * `properties.sObjectType`.
  */
 const buildSharingRulesIndex = (
   rules: readonly Node[],
 ): Map<string, Node[]> => {
   const index = new Map<string, Node[]>();
   for (const rule of rules) {
-    const sobj = stringProp(rule.properties, 'sObjectType', '');
+    const sobj = sharingRuleObjectApiName(rule);
     if (sobj.length === 0) continue;
     const list = index.get(sobj) ?? [];
     list.push(rule);
@@ -475,10 +567,48 @@ export const generateSharingSummaryHandler = async (
       message: `graph query failed: ${rolesResult.error.message}`,
     });
   }
+  // RESTRICTION-RULE-MISSING-OBJECT-GRAPH-AND-SHARING-SUMMARY: Restriction /
+  // Scoping rules narrow record visibility on top of OWD + sharing rules; the
+  // summary previously never mentioned them, inventing OWD-only visibility.
+  // Fetch both types (Scoping enforcement may live under either type) and index
+  // by `parentId` — the extractor stamps it from `<targetEntity>`, so this
+  // surfaces on the CURRENT vault without a re-extract.
+  const restrictionByParent = new Map<string, Node[]>();
+  for (const rrType of ['RestrictionRule', 'ScopingRule'] as const) {
+    const rrResult = await listNodesByType(ctx.graph, rrType, {
+      limit: TYPE_SCAN_CAP,
+    });
+    if (!rrResult.ok) {
+      return err({
+        kind: 'internal',
+        message: `graph query failed: ${rrResult.error.message}`,
+      });
+    }
+    for (const rule of rrResult.value) {
+      const parentId = rule.parentId;
+      if (typeof parentId !== 'string' || parentId.length === 0) continue;
+      const list = restrictionByParent.get(parentId) ?? [];
+      list.push(rule);
+      restrictionByParent.set(parentId, list);
+    }
+  }
+
+  // GENERATE-SHARING-SUMMARY-ALIAS-SKEW: treat `objectFilter`, `objectApiName`,
+  // and `componentId` (`CustomObject:{ApiName}` or a bare api name) as equivalent
+  // object selectors. `objectFilter` wins so an existing caller's output stays
+  // byte-identical; the aliases fill in only when it is absent. The resolved
+  // `appliedScope` drives BOTH the object filter below AND the honest scope echo
+  // in the Overview / footer — previously `objectApiName` scoped the scan yet the
+  // body still claimed "no objectFilter applied", and `componentId` was ignored
+  // entirely and answered org-wide.
+  const appliedScope =
+    input.objectFilter ??
+    input.objectApiName ??
+    objectApiNameFromComponentId(input.componentId);
 
   // Apply the optional filter.
   let scanObjects = objectsResult.value;
-  const filterName = input.objectFilter ?? input.objectApiName;
+  const filterName = appliedScope;
   if (filterName !== undefined) {
     const filter = filterName;
     scanObjects = scanObjects.filter((o) => o.apiName === filter);
@@ -538,6 +668,7 @@ export const generateSharingSummaryHandler = async (
       owd,
       externalOwd,
       sharingRules: rules,
+      restrictionRules: restrictionByParent.get(object.id) ?? [],
       profilesWithGrants: grantsResult.value.profiles.size,
       permSetsWithGrants: grantsResult.value.permSets.size,
       ruleRecipients,
@@ -593,9 +724,9 @@ export const generateSharingSummaryHandler = async (
     objectScanTruncated
       ? `Scanned objects: ${sortedEntries.length.toString()} of ${totalMatchingObjects.toString()} matching (capped at ${OBJECT_SCAN_CAP.toString()} — narrow with \`objectFilter\` to cover a specific object)  `
       : `Scanned objects: ${sortedEntries.length.toString()}  `,
-    input.objectFilter === undefined
+    appliedScope === undefined
       ? '_(no objectFilter applied)_'
-      : `objectFilter: \`${input.objectFilter}\``,
+      : `objectFilter: \`${appliedScope}\``,
     '',
     objectSections,
     '',
@@ -603,15 +734,16 @@ export const generateSharingSummaryHandler = async (
     '',
     renderFooter(
       refreshedAt,
-      input.objectFilter === undefined
+      appliedScope === undefined
         ? 'Re-run `sfi.generate_sharing_summary({})` after the next `sfi refresh`.'
-        : `Re-run \`sfi.generate_sharing_summary({ objectFilter: '${input.objectFilter}' })\` after the next \`sfi refresh\`.`,
+        : `Re-run \`sfi.generate_sharing_summary({ objectFilter: '${appliedScope}' })\` after the next \`sfi refresh\`.`,
     ),
   ].join('\n');
 
   const sectionConfidence: Record<string, ConfidenceLevel> = {
     Overview: 'declared',
     'Sharing Rules': 'declared',
+    'Restriction & Scoping Rules': 'declared',
     'Role Hierarchy': 'declared',
   };
 
@@ -620,6 +752,7 @@ export const generateSharingSummaryHandler = async (
     INHERITED_CONFIDENCE_DISCLOSURE,
     STRUCTURAL_DISCLOSURE,
     'Profile / PermissionSet "with grants" counts are OBJECT-level CRUD grants (incoming `grantedBy` edges on the object carrying allowCreate / allowRead / allowEdit / allowDelete or View / Modify-All), deduped by grantor. Field-level security (FLS) is a SEPARATE plane and is NOT counted here — use `field_access_audit` for per-field grants.',
+    'Restriction & Scoping rules (Restrict / Scoping enforcement) NARROW record visibility on top of OWD + sharing rules — a user who otherwise has access still only sees records matching the rule\'s `recordFilter`. They are listed per object with their enforcement type and active state; whether a given record/user is scoped needs record-level + requester context the offline metadata lacks. An empty "Restriction & Scoping Rules" section means none were retrieved for that object, not a guarantee the object is unrestricted.',
     UNMODELED_SHARING_DIMENSIONS_DISCLOSURE,
   ];
   // CR-RV12: the OBJECT_SCAN_CAP=50 slice (~L467) had NO reader-facing
@@ -670,6 +803,7 @@ export const generateSharingSummaryHandler = async (
   const componentIds: ComponentId[] = [
     ...sortedEntries.map((e) => e.object.id),
     ...sortedEntries.flatMap((e) => e.sharingRules.map((r) => r.id)),
+    ...sortedEntries.flatMap((e) => e.restrictionRules.map((r) => r.id)),
     ...rolesResult.value.map((r) => r.id),
   ];
 

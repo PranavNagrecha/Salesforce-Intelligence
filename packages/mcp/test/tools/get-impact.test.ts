@@ -317,17 +317,19 @@ describe('getImpactHandler', () => {
     if (!result.ok) return;
     const nodeIds = result.value.data.impact.nodes.map((n) => n.id);
     expect(nodeIds).toContain('Flow:SegmentFlow');
-    // 2-hop also drags in the `triggersOn` edge from UnrelatedTrigger to
-    // Account (which is a hop-1 dependent of Industry__c).
-    expect(nodeIds).toContain('ApexTrigger:UnrelatedTrigger');
-    // 5 incoming edges total: 3 to Industry + 1 to Segment + 1 to
-    // Account. Edges are deduped on (from, to, type, source).
-    expect(result.value.data.impact.edges.length).toBe(5);
+    // GET-IMPACT-PARENT-FANIN-BLEED: the hop-1 `parentOf` edge to Account is
+    // RECORDED (Account is a node in the slice) but never EXPANDED, so the
+    // object's own fan-in (`UnrelatedTrigger --triggersOn--> Account`) does NOT
+    // bleed into the field's impact. Account is structural, not a dependency hop.
+    expect(nodeIds).toContain('CustomObject:Account');
+    expect(nodeIds).not.toContain('ApexTrigger:UnrelatedTrigger');
+    // 4 incoming edges: 3 to Industry (parentOf + 2× references) + 1 to Segment
+    // (readsFrom). The triggersOn edge to Account is no longer walked.
+    expect(result.value.data.impact.edges.length).toBe(4);
     expect(result.value.data.traversedEdgeTypes).toEqual([
       'parentOf',
       'readsFrom',
       'references',
-      'triggersOn',
     ]);
   });
 
@@ -1184,6 +1186,123 @@ describe('R6-24 Option B — get_impact names folded report/dashboard dependents
     } finally {
       await closeGraph(localStore);
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// =============================================================================
+// GET-IMPACT-PARENT-FANIN-BLEED — a QuickAction impact walk must NOT cross the
+// structural `parentOf` edge up to the parent object and then surface the
+// OBJECT's inbound fan-in (Apex / triggers / lookups) as the QuickAction's
+// dependents. FAILS pre-fix: the object's referrers appear in the slice.
+// =============================================================================
+
+describe('GET-IMPACT-PARENT-FANIN-BLEED — parentOf is recorded but never expanded', () => {
+  let dir: string;
+  let localStore: GraphStore;
+  let localCtx: Context;
+
+  // Synthetic (no real org names). A QuickAction on a custom object, a Layout
+  // that PLACES it (real inbound `references` dependent), and the object's OWN
+  // fan-in (an Apex class + a trigger) that must stay OUT of the QuickAction's
+  // impact — they depend on the object, not on the action.
+  const QA = 'QuickAction:Ticket__c.Change_State';
+  const OBJ = 'CustomObject:Ticket__c';
+  const LAYOUT = 'Layout:Ticket__c.Ticket Layout';
+  const FANIN_APEX = 'ApexClass:TicketService';
+  const FANIN_TRIGGER = 'ApexTrigger:TicketTrigger';
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-impact-parentbleed-'));
+    const opened = await openGraph(join(dir, 'bleed.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    localStore = opened.value;
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: OBJ, type: 'CustomObject', apiName: 'Ticket__c', label: 'Ticket' }),
+        makeNode({ id: QA, type: 'QuickAction', apiName: 'Ticket__c.Change_State', label: 'Change State', parentId: OBJ }),
+        makeNode({ id: LAYOUT, type: 'Layout', apiName: 'Ticket__c.Ticket Layout', label: 'Ticket Layout' }),
+        makeNode({ id: FANIN_APEX, type: 'ApexClass', apiName: 'TicketService', label: 'TicketService' }),
+        makeNode({ id: FANIN_TRIGGER, type: 'ApexTrigger', apiName: 'TicketTrigger', label: 'TicketTrigger' }),
+      ],
+      edges: [
+        // Structural: object is the parent of the QuickAction. Recorded, not expanded.
+        makeEdge({ fromId: OBJ, toId: QA, edgeType: 'parentOf', confidence: 'declared', source: 'extractor:custom-object' }),
+        // Real dependent: a Layout PLACES the QuickAction (platformActionListItems).
+        makeEdge({ fromId: LAYOUT, toId: QA, edgeType: 'references', confidence: 'declared', source: 'extractor:layout', properties: { targetKind: 'quickAction' } }),
+        // The object's OWN fan-in — must NOT leak into the QuickAction's impact.
+        makeEdge({ fromId: FANIN_APEX, toId: OBJ, edgeType: 'references', confidence: 'parsed', source: 'apex-scanner' }),
+        makeEdge({ fromId: FANIN_TRIGGER, toId: OBJ, edgeType: 'triggersOn', confidence: 'parsed', source: 'extractor:apex-trigger' }),
+      ],
+    };
+    const imp = await importExtractionResults(localStore, [seed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    localCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: localStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(localStore);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('does not surface the parent object fan-in (TicketService / TicketTrigger) as QuickAction dependents', async () => {
+    const result = await getImpactHandler(localCtx, { componentId: QA, hops: 2 });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const nodeIds = result.value.data.impact.nodes.map((n) => n.id);
+    // FAIL-BEFORE: the walk crossed QA <-parentOf- Ticket__c and pulled in the
+    // object's referrers, so these two appeared as QuickAction "dependents".
+    expect(nodeIds).not.toContain(FANIN_APEX);
+    expect(nodeIds).not.toContain(FANIN_TRIGGER);
+    // The structural parent stays visible (recorded, not expanded)...
+    expect(nodeIds).toContain(OBJ);
+    // ...and a genuine inbound dependent (the Layout placing the action) survives.
+    expect(nodeIds).toContain(LAYOUT);
+    // Edges: parentOf (Ticket__c→QA) + references (Layout→QA). No fan-in edges.
+    expect(result.value.data.impact.edges.length).toBe(2);
+    expect(
+      result.value.data.impact.edges.some(
+        (e) => e.fromId === FANIN_APEX || e.fromId === FANIN_TRIGGER,
+      ),
+    ).toBe(false);
+  });
+
+  it('when ONLY the structural parent is inbound, discloses "no usage dependents" and omits the object fan-in', async () => {
+    // A QuickAction whose only inbound edge is its parent object (layout
+    // placement not modeled) — the object fan-in must still not bleed in, and
+    // the disclosure must call out that this is structural-only.
+    const bareDir = mkdtempSync(join(tmpdir(), 'sfi-impact-parentbleed-bare-'));
+    try {
+      const opened = await openGraph(join(bareDir, 'bare.db'));
+      if (!opened.ok) throw new Error(opened.error.message);
+      const bareStore = opened.value;
+      const seed: ExtractionResult = {
+        nodes: [
+          makeNode({ id: OBJ, type: 'CustomObject', apiName: 'Ticket__c', label: 'Ticket' }),
+          makeNode({ id: QA, type: 'QuickAction', apiName: 'Ticket__c.Change_State', label: 'Change State', parentId: OBJ }),
+          makeNode({ id: FANIN_APEX, type: 'ApexClass', apiName: 'TicketService', label: 'TicketService' }),
+        ],
+        edges: [
+          makeEdge({ fromId: OBJ, toId: QA, edgeType: 'parentOf', confidence: 'declared', source: 'extractor:custom-object' }),
+          makeEdge({ fromId: FANIN_APEX, toId: OBJ, edgeType: 'references', confidence: 'parsed', source: 'apex-scanner' }),
+        ],
+      };
+      const imp = await importExtractionResults(bareStore, [seed]);
+      if (!imp.ok) throw new Error(imp.error.message);
+      const bareCtx: Context = { vaultRoot: bareDir, manifest: FIXTURE_MANIFEST, graph: bareStore };
+      const result = await getImpactHandler(bareCtx, { componentId: QA, hops: 2 });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const nodeIds = result.value.data.impact.nodes.map((n) => n.id);
+      expect(nodeIds).not.toContain(FANIN_APEX);
+      expect(nodeIds).toContain(OBJ);
+      // Only the parentOf edge survives.
+      expect(result.value.data.impact.edges.map((e) => e.edgeType)).toEqual(['parentOf']);
+      expect(result.value.data.disclosure).toMatch(/STRUCTURAL parent/);
+      expect(result.value.data.disclosure).toMatch(/no dependents found/i);
+      await closeGraph(bareStore);
+    } finally {
+      rmSync(bareDir, { recursive: true, force: true });
     }
   });
 });

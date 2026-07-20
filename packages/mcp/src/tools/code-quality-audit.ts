@@ -70,6 +70,7 @@ import type {
   PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
+import { getNodeById } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -137,6 +138,12 @@ const SEVERITY_CONSENSUS_DISCLOSURE =
 /**
  * Zod schema for the `sfi.code_quality_audit` tool input.
  *
+ *   - `componentId` (`ApexClass:{name}` / `ApexTrigger:{name}`) /
+ *     `classApiName` / `apiName`: optional CLASS SCOPE. When supplied the audit
+ *     returns ONLY that class's quality issues (+ `appliedScope`); an unresolved
+ *     id is `component-not-found` and a non-Apex type prefix is `invalid-query`
+ *     — never a silent org-wide fallback (CODE-QUALITY-AUDIT-IGNORES-CLASS-SCOPE).
+ *     Omit all three for the org-wide audit.
  *   - `severityFilter`: optional. `'all'` (default) surfaces every
  *     severity tier; any specific tier narrows to that level.
  *   - `ruleFilter`: optional array of rule ids (e.g.
@@ -146,6 +153,9 @@ const SEVERITY_CONSENSUS_DISCLOSURE =
  *     handler.
  */
 export const codeQualityAuditInputSchema = z.object({
+  componentId: z.string().min(1).optional(),
+  classApiName: z.string().min(1).optional(),
+  apiName: z.string().min(1).optional(),
   severityFilter: z
     .enum(['critical', 'high', 'medium', 'low', 'info', 'all'])
     .optional(),
@@ -163,8 +173,43 @@ export const codeQualityAuditInputSchema = z.object({
 
 const CODE_QUALITY_AUDIT_TOOL = 'sfi.code_quality_audit';
 
+const APEX_CLASS_PREFIX = 'ApexClass:';
+const APEX_TRIGGER_PREFIX = 'ApexTrigger:';
+
+/** The Apex ComponentTypes a CLASS SCOPE may resolve to. */
+const CLASS_SCOPE_TYPES: readonly ComponentType[] = [
+  'ApexClass',
+  'ApexTrigger',
+];
+
 /** Parsed input shape. */
 export type CodeQualityAuditInput = z.infer<typeof codeQualityAuditInputSchema>;
+
+/**
+ * Resolve the optional CLASS SCOPE from `componentId` / `classApiName` /
+ * `apiName` (precedence in that order). `componentId` may be an
+ * `ApexClass:`/`ApexTrigger:` id; bare `classApiName`/`apiName` coerce to
+ * `ApexClass:{name}`. A value carrying a non-Apex type prefix (e.g. `Flow:`,
+ * `CustomObject:`) is `invalid-query` — a class scope is Apex-only.
+ * `undefined` (no selector) → org-wide (returns `null`).
+ */
+const resolveScopeId = (
+  input: CodeQualityAuditInput,
+): Result<ComponentId | null, McpError> => {
+  const raw = input.componentId ?? input.classApiName ?? input.apiName;
+  if (raw === undefined) return ok(null);
+  if (raw.startsWith(APEX_CLASS_PREFIX) || raw.startsWith(APEX_TRIGGER_PREFIX)) {
+    return ok(raw as ComponentId);
+  }
+  if (raw.includes(':')) {
+    return err({
+      kind: 'invalid-query',
+      message: `'${raw}' is not an ApexClass / ApexTrigger — pass a bare class api name or an 'ApexClass:{name}' / 'ApexTrigger:{name}' id`,
+      path: 'componentId',
+    });
+  }
+  return ok(`${APEX_CLASS_PREFIX}${raw}` as ComponentId);
+};
 
 /**
  * One entry in the response's `issues` array. Carries both the
@@ -193,6 +238,17 @@ export interface CodeQualityAuditSummary {
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface CodeQualityAuditOutput {
+  /**
+   * The CLASS SCOPE actually applied. Present ONLY when the caller passed a
+   * `componentId` / `classApiName` / `apiName` scope — an unscoped org-wide call
+   * omits it entirely so its response stays byte-identical to the pre-scope
+   * shape. `component` is the resolved `ApexClass:`/`ApexTrigger:` id; a host
+   * that sees no `appliedScope` MUST treat the result as the full org-wide audit.
+   */
+  readonly appliedScope?: {
+    readonly component: string | null;
+    readonly mode: 'component';
+  };
   readonly issues: readonly CodeQualityAuditIssue[];
   /** FULL count of matched findings before slicing to `limit`. */
   readonly totalCount: number;
@@ -328,20 +384,56 @@ export const codeQualityAuditHandler = async (
       ? new Set(input.ruleFilter)
       : null;
 
+  // Optional CLASS SCOPE. When supplied, audit ONLY that class (skip the org
+  // scan); an unresolved id is `component-not-found`, a non-Apex type prefix is
+  // `invalid-query` — never a silent org-wide fallback
+  // (CODE-QUALITY-AUDIT-IGNORES-CLASS-SCOPE).
+  const scopeResult = resolveScopeId(input);
+  if (!scopeResult.ok) return scopeResult;
+  const scopeId = scopeResult.value;
+
   const collected: CodeQualityAuditIssue[] = [];
 
-  // CR-22 B3: scan EVERY node of each quality type by paging the SQL OFFSET
-  // forward (window-by-window at the clamped cap) so findings on node 501+ are
-  // reachable — the single capped page used to drop the scan TAIL silently. The
-  // FULL issue set is then sorted (severity-first) and paged on the output axis
+  // Class-scope: read just the one node; org-wide: scan EVERY quality type by
+  // paging the SQL OFFSET forward (CR-22 B3 — window-by-window at the clamped
+  // cap) so findings on node 501+ are reachable rather than dropped. The FULL
+  // issue set is then sorted (severity-first) and paged on the output axis
   // below. Because the complete set is sorted BEFORE paging, the severity-first
   // order is a true total order over a fixed set (no incremental-scan merge), so
   // it is safe to page even though the sort is not scan-order.
-  const scan = await scanAllNodesOfTypes(ctx.graph, QUALITY_SCANNED_TYPES);
-  if (!scan.ok) {
-    return err({ kind: 'internal', message: `graph query failed: ${scan.error.message}` });
+  let nodesToProcess: readonly Node[];
+  let scanIncomplete = false;
+  let incompleteTypes: readonly string[] = [];
+  if (scopeId !== null) {
+    const nodeRes = await getNodeById(ctx.graph, scopeId);
+    if (!nodeRes.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${nodeRes.error.message}` });
+    }
+    if (nodeRes.value === null) {
+      return err({
+        kind: 'component-not-found',
+        message: `no ApexClass / ApexTrigger matches \`${scopeId}\` in this vault`,
+        path: scopeId,
+      });
+    }
+    if (!CLASS_SCOPE_TYPES.includes(nodeRes.value.type)) {
+      return err({
+        kind: 'invalid-query',
+        message: `\`${scopeId}\` is a ${nodeRes.value.type}, not an ApexClass / ApexTrigger — the code_quality_audit class scope is Apex-only`,
+        path: 'componentId',
+      });
+    }
+    nodesToProcess = [nodeRes.value];
+  } else {
+    const scan = await scanAllNodesOfTypes(ctx.graph, QUALITY_SCANNED_TYPES);
+    if (!scan.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${scan.error.message}` });
+    }
+    nodesToProcess = scan.value.nodes;
+    scanIncomplete = scan.value.scanIncomplete;
+    incompleteTypes = scan.value.incompleteTypes;
   }
-  for (const node of scan.value.nodes) {
+  for (const node of nodesToProcess) {
     const raw = (node as Node).properties['qualityIssues'];
     if (!Array.isArray(raw)) continue;
     for (const rawIssue of raw) {
@@ -385,6 +477,7 @@ export const codeQualityAuditHandler = async (
   // The fingerprint covers the narrowing args (severityFilter / ruleFilter) so a
   // token can't be replayed against a different filter.
   const fingerprintArgs: Record<string, unknown> = {};
+  if (scopeId !== null) fingerprintArgs['componentId'] = scopeId;
   if (input.severityFilter !== undefined) fingerprintArgs['severityFilter'] = input.severityFilter;
   if (input.ruleFilter !== undefined) fingerprintArgs['ruleFilter'] = input.ruleFilter;
   const fingerprint = argsFingerprint(fingerprintArgs);
@@ -425,9 +518,9 @@ export const codeQualityAuditHandler = async (
   // Residual scan-incompleteness only fires for a PATHOLOGICAL type past
   // FULL_SCAN_MAX_NODES — the normal full scan reaches node 501+ and completes.
   // Lives OUTSIDE the zero-findings gate because findings could be among the
-  // unscanned residual tail.
-  if (scan.value.scanIncomplete) {
-    boundaries.push(fullScanTruncationNote(scan.value.incompleteTypes));
+  // unscanned residual tail. Never fires in class scope (single node, no scan).
+  if (scanIncomplete) {
+    boundaries.push(fullScanTruncationNote(incompleteTypes));
   }
 
   // Emit paging fields ONLY on a paged response (truncated OR resumed offset>0).
@@ -435,6 +528,11 @@ export const codeQualityAuditHandler = async (
 
   return ok({
     data: {
+      // Emit appliedScope ONLY when a class scope was passed, so a bare org-wide
+      // call stays byte-identical to the pre-scope golden.
+      ...(scopeId !== null
+        ? { appliedScope: { component: scopeId, mode: 'component' as const } }
+        : {}),
       issues: slice,
       totalCount: sorted.length,
       summary: { bySeverity, byRule, byType },

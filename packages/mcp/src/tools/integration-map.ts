@@ -89,6 +89,8 @@ import {
 } from '../known-integration-packages.js';
 import type { Context } from '../server.js';
 
+import { firstNonEmpty } from './input-aliases.js';
+
 /**
  * Inclusive upper bound on `limit`. Mirrors the
  * `FIND_APEX_USAGES_MAX_LIMIT` and `FORMULA_REFS_MAX_LIMIT` ceilings so
@@ -178,6 +180,16 @@ export const integrationMapInputSchema = z.object({
     .enum(['auth', 'sites', 'sources', 'services', 'access', 'all'])
     .optional(),
   limit: z.number().int().min(1).max(INTEGRATION_MAP_MAX_LIMIT).optional(),
+  // INTEGRATION-MAP-IGNORES-OBJECT-SCOPE: object / component scope keys a host
+  // reaches for on "integrations that touch {object}". Accepted here ONLY so the
+  // handler can REFUSE with the org-wide-only pointer instead of silently
+  // returning the whole-org catalog (which was byte-identical for Contact vs
+  // Opportunity vs bare). NEVER a valid scope — the integration surface is
+  // org-wide and is not indexed by the SObject it ultimately touches.
+  objectApiName: z.string().min(1).optional(),
+  object: z.string().min(1).optional(),
+  objectId: z.string().min(1).optional(),
+  componentId: z.string().min(1).optional(),
 });
 
 /** Parsed input shape, inferred from `integrationMapInputSchema`. */
@@ -290,14 +302,16 @@ export interface MartechConnectorMatch {
   /**
    * `'installed-package'`: matched an `InstalledPackage` node's namespace
    * (declared confidence). `'named-credential-endpoint'` /
-   * `'external-data-source-endpoint'`: matched a NamedCredential /
-   * ExternalDataSource node's declared endpoint host against a known martech
+   * `'external-data-source-endpoint'` / `'remote-site-setting-endpoint'`:
+   * matched a NamedCredential / ExternalDataSource / (Active)
+   * RemoteSiteSetting node's declared endpoint host against a known martech
    * domain (heuristic confidence — see {@link confidence}).
    */
   readonly source:
     | 'installed-package'
     | 'named-credential-endpoint'
-    | 'external-data-source-endpoint';
+    | 'external-data-source-endpoint'
+    | 'remote-site-setting-endpoint';
   /** What actually matched (`namespace:et4ae5` / `endpoint:https://…`), for audit. */
   readonly matchedOn: string;
   readonly confidence: 'declared' | 'heuristic';
@@ -307,6 +321,17 @@ export interface MartechConnectorMatch {
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface IntegrationMapOutput {
+  /**
+   * Echoes the scope ACTUALLY applied so a host never assumes an object /
+   * component key it passed was honored — this map is ORG-WIDE, so `object` is
+   * always `null` and `mode` is always `'all'`. A call that DID pass an object /
+   * component scope is rejected upstream with `invalid-query`
+   * (INTEGRATION-MAP-IGNORES-OBJECT-SCOPE), never silently answered org-wide.
+   */
+  readonly appliedScope: {
+    readonly object: string | null;
+    readonly mode: 'all';
+  };
   readonly authProviders: readonly IntegrationMapNode[];
   readonly namedCredentials: readonly IntegrationMapNode[];
   readonly remoteSiteSettings: readonly IntegrationMapNode[];
@@ -648,16 +673,29 @@ const readDeclaredEndpoint = (
  * Two independent signal sources, never conflated:
  *   - `InstalledPackage.namespace` against {@link lookupKnownMartechNamespace}
  *     — `declared` confidence (the org's own retrieved package metadata).
- *   - NamedCredential / ExternalDataSource declared endpoint host against
- *     {@link lookupKnownMartechEndpoint} — `heuristic` confidence (a hostname
- *     regex, not declared package metadata).
+ *   - NamedCredential / ExternalDataSource / (Active) RemoteSiteSetting
+ *     declared endpoint host against {@link lookupKnownMartechEndpoint} —
+ *     `heuristic` confidence (a hostname regex, not declared package
+ *     metadata). RemoteSiteSetting is the pre-NamedCredential callout pattern
+ *     (still common for Marketo SOAP/REST): the host is present in the same
+ *     map payload, so an org whose only martech signal is a `*.mktoapi.com`
+ *     RemoteSite now lights up a connector row instead of being invisible.
+ *     Only ACTIVE remote sites are classified — a deactivated site authorizes
+ *     nothing.
  */
 const collectMartechConnectors = async (
   ctx: Context,
   namedCredentials: readonly IntegrationMapNode[],
   externalDataSources: readonly IntegrationMapNode[],
+  remoteSiteSettings: readonly IntegrationMapNode[],
 ): Promise<Result<readonly MartechConnectorMatch[], McpError>> => {
   const matches: MartechConnectorMatch[] = [];
+
+  // Only Active remote sites authorize a callout; an inactive one is dead
+  // metadata and must not mint a connector row.
+  const activeRemoteSites = remoteSiteSettings.filter(
+    (node) => node.properties['isActive'] === true,
+  );
 
   const pkgResult = await listNodesByType(ctx.graph, 'InstalledPackage', {
     limit: MARTECH_PACKAGE_SCAN_LIMIT,
@@ -694,6 +732,7 @@ const collectMartechConnectors = async (
   > = [
     [namedCredentials, 'named-credential-endpoint'],
     [externalDataSources, 'external-data-source-endpoint'],
+    [activeRemoteSites, 'remote-site-setting-endpoint'],
   ];
   for (const [nodes, source] of endpointBuckets) {
     for (const node of nodes) {
@@ -739,6 +778,28 @@ export const integrationMapHandler = async (
   ctx: Context,
   input: IntegrationMapInput,
 ): Promise<Result<McpResponse<IntegrationMapOutput>, McpError>> => {
+  // INTEGRATION-MAP-IGNORES-OBJECT-SCOPE: refuse an object / component scope
+  // rather than silently returning the whole-org catalog (byte-identical for
+  // Contact vs Opportunity vs bare). The declared integration surface is not
+  // indexed by the SObject it touches, so there is no honest object-scoped answer
+  // to give — point the caller at the tools that ARE object-scoped.
+  const scopeKey = firstNonEmpty(
+    input.objectApiName,
+    input.object,
+    input.objectId,
+    input.componentId,
+  );
+  if (scopeKey !== undefined) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        `integration_map returns the ORG-WIDE integration topology; it cannot scope to a single object or component (\`${scopeKey}\`). ` +
+        'The declared integration surface (AuthProvider / NamedCredential / RemoteSiteSetting / ExternalDataSource / …) is not indexed by the SObject it ultimately touches. ' +
+        'To find callouts / connectors tied to a specific object, use `find_code_usages` on that object, or `endpoint_catalog` for the URL surface. Call integration_map with only `filter` / `limit` for the whole-org map.',
+      path: 'objectApiName',
+    });
+  }
+
   const filter = input.filter ?? 'all';
   const limit = input.limit ?? INTEGRATION_MAP_DEFAULT_LIMIT;
   // The eight integration ComponentTypes share the cap fairly; the
@@ -871,12 +932,16 @@ export const integrationMapHandler = async (
 
   // Stage 2c: martech connector detection (Finding #44). Filter-independent
   // for the InstalledPackage half (always scanned — small, bounded); reuses
-  // whichever NamedCredential / ExternalDataSource buckets `filter` already
-  // populated for the endpoint half (no extra query).
+  // whichever NamedCredential / ExternalDataSource / RemoteSiteSetting buckets
+  // `filter` already populated for the endpoint half (no extra query). The
+  // RemoteSiteSetting host is the pre-NamedCredential callout pattern
+  // (INTEGRATION-MAP-MARTECH-IGNORES-REMOTE-SITE-HOSTS): Active Marketo SOAP/REST
+  // sites now light up a connector instead of hiding in `remoteSiteSettings`.
   const martechResult = await collectMartechConnectors(
     ctx,
     buckets.get('NamedCredential') ?? [],
     buckets.get('ExternalDataSource') ?? [],
+    buckets.get('RemoteSiteSetting') ?? [],
   );
   if (!martechResult.ok) return martechResult;
   const martechConnectors = martechResult.value;
@@ -886,6 +951,7 @@ export const integrationMapHandler = async (
   // matching bucket initialization surfaces as an empty array rather
   // than a runtime error.
   const data: IntegrationMapOutput = {
+    appliedScope: { object: null, mode: 'all' },
     authProviders: buckets.get('AuthProvider') ?? [],
     namedCredentials: buckets.get('NamedCredential') ?? [],
     remoteSiteSettings: buckets.get('RemoteSiteSetting') ?? [],

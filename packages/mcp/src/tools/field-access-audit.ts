@@ -77,6 +77,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { resolveFieldAlias } from './input-aliases.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 
 /** Canonical id prefix for the CustomField node type. */
@@ -134,16 +135,23 @@ const APEX_NODE_TYPES: ReadonlySet<ComponentType> = new Set([
 /**
  * Zod schema for the `sfi.field_access_audit` tool input.
  *
- *   - `fieldId`: required, non-empty string. The canonical CustomField
- *     id (`CustomField:{Object}.{Field}`). Non-`CustomField:` prefixes
- *     surface as `invalid-query`; unknown ids surface as
- *     `component-not-found`.
+ *   - field identity (required): the canonical CustomField id
+ *     (`CustomField:{Object}.{Field}`) as either `fieldId` (canonical) or the
+ *     `componentId` alias a host reaches for (L2 Alias OS). Disagreeing values
+ *     are an `invalid-query`. Non-`CustomField:` prefixes surface as
+ *     `invalid-query`; unknown ids surface as `component-not-found`.
  *   - `permissionType`: optional; defaults to `'all'` in the handler.
  */
-export const fieldAccessAuditInputSchema = z.object({
-  fieldId: z.string().min(1),
-  permissionType: z.enum(PERMISSION_TYPE_VALUES).optional(),
-});
+export const fieldAccessAuditInputSchema = z
+  .object({
+    fieldId: z.string().min(1).optional(),
+    componentId: z.string().min(1).optional(),
+    permissionType: z.enum(PERMISSION_TYPE_VALUES).optional(),
+  })
+  .refine((i) => i.fieldId !== undefined || i.componentId !== undefined, {
+    message: 'name the field — pass `fieldId` or `componentId` (e.g. "CustomField:Account.My_Field__c")',
+    path: ['fieldId'],
+  });
 
 /** Parsed input shape, inferred from `fieldAccessAuditInputSchema`. */
 export type FieldAccessAuditInput = z.infer<
@@ -374,15 +382,20 @@ export const fieldAccessAuditHandler = async (
   ctx: Context,
   input: FieldAccessAuditInput,
 ): Promise<Result<McpResponse<FieldAccessAuditOutput>, McpError>> => {
-  if (!input.fieldId.startsWith(CUSTOM_FIELD_PREFIX)) {
+  // L2 Alias OS: accept the `componentId` alias for `fieldId`. Disagreeing
+  // values -> invalid-query (never a silent pick).
+  const fieldAlias = resolveFieldAlias(input);
+  if (!fieldAlias.ok) return err(fieldAlias.error);
+  const resolvedFieldId = fieldAlias.value.fieldId;
+  if (!resolvedFieldId.startsWith(CUSTOM_FIELD_PREFIX)) {
     return err({
       kind: 'invalid-query',
-      message: `fieldId must start with '${CUSTOM_FIELD_PREFIX}'; got '${input.fieldId}'`,
+      message: `fieldId must start with '${CUSTOM_FIELD_PREFIX}'; got '${resolvedFieldId}'`,
       path: 'fieldId',
     });
   }
 
-  const fieldId = input.fieldId as ComponentId;
+  const fieldId = resolvedFieldId as ComponentId;
   const permissionFilter = input.permissionType ?? 'all';
 
   const fieldResult = await getNodeById(ctx.graph, fieldId);

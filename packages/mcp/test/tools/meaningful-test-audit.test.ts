@@ -279,6 +279,242 @@ describe('meaningfulTestAuditHandler', () => {
 });
 
 // =============================================================================
+// MEANINGFUL-TEST-AUDIT-SILENTLY-IGNORES-TARGET — production-target mode.
+// A caller who names a PRODUCTION class (via componentId/classApiName/targetId)
+// used to have that id silently Zod-stripped and got the org-wide fake-assert
+// leaderboard. Now the tool resolves the target's COVERING tests (inbound
+// callsApex from isTest classes) and scores THOSE, echoing appliedScope.
+// =============================================================================
+describe('meaningfulTestAuditHandler — production-target / covering-tests mode', () => {
+  const PROD = 'ApexClass:ProdBatch';
+  const COVERING_TEST = 'ApexClass:ProdBatchTest';
+  const UNRELATED_TEST = 'ApexClass:UnrelatedTest';
+  const NON_TEST_CALLER = 'ApexClass:HelperCaller';
+  const LONELY_PROD = 'ApexClass:LonelyProdClass';
+
+  const targetSeed: ExtractionResult = {
+    nodes: [
+      makeNode({ id: PROD, apiName: 'ProdBatch', properties: { isTest: false } }),
+      makeNode({ id: LONELY_PROD, apiName: 'LonelyProdClass', properties: { isTest: false } }),
+      makeNode({
+        id: COVERING_TEST,
+        apiName: 'ProdBatchTest',
+        properties: {
+          isTest: true,
+          assertionCount: 2,
+          sourceBytes: 1000,
+          qualityIssues: [{ rule: 'fake-assertion', location: 'line 7' }],
+        },
+      }),
+      makeNode({
+        id: UNRELATED_TEST,
+        apiName: 'UnrelatedTest',
+        properties: { isTest: true, assertionCount: 9, sourceBytes: 1000, qualityIssues: [] },
+      }),
+      // A NON-test class that also references the target — must NOT count as a
+      // covering test.
+      makeNode({ id: NON_TEST_CALLER, apiName: 'HelperCaller', properties: { isTest: false } }),
+    ],
+    edges: [
+      {
+        fromId: COVERING_TEST,
+        toId: PROD,
+        edgeType: 'callsApex',
+        confidence: 'heuristic',
+        source: 'apex-scanner',
+        properties: {},
+      },
+      {
+        fromId: NON_TEST_CALLER,
+        toId: PROD,
+        edgeType: 'callsApex',
+        confidence: 'heuristic',
+        source: 'apex-scanner',
+        properties: {},
+      },
+    ],
+  };
+
+  const withStore = async <T>(
+    run: (ctx: Context) => Promise<T>,
+  ): Promise<T> => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-mta-target-'));
+    const opened = await openGraph(join(dir, 'mta-target.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    const s = opened.value;
+    const imp = await importExtractionResults(s, [targetSeed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    const localCtx: Context = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s };
+    const out = await run(localCtx);
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+    return out;
+  };
+
+  it('scores only the covering tests of the production target (componentId alias, not stripped)', async () => {
+    // FAIL-before: componentId was Zod-stripped, so the tool ran org-wide and
+    // returned BOTH ProdBatchTest AND UnrelatedTest. PASS-after: only the
+    // covering test is scored, and appliedScope echoes covering-tests mode.
+    const r = await withStore((localCtx) =>
+      meaningfulTestAuditHandler(
+        localCtx,
+        meaningfulTestAuditInputSchema.parse({ componentId: PROD }),
+      ),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ids = r.value.data.tests.map((t) => t.testClassId);
+    expect(ids).toEqual([COVERING_TEST]);
+    expect(ids).not.toContain(UNRELATED_TEST);
+    // A non-test caller of the target is never counted as a covering test.
+    expect(ids).not.toContain(NON_TEST_CALLER);
+    // The covering test's fake-assert metrics are surfaced.
+    expect(r.value.data.tests[0]?.fakeAssertionCount).toBe(1);
+    expect(r.value.data.appliedScope).toEqual({
+      mode: 'covering-tests',
+      targetClassId: PROD,
+      coveringTestCount: 1,
+    });
+  });
+
+  it('accepts a bare production class name (classApiName alias) and coerces the id', async () => {
+    const r = await withStore((localCtx) =>
+      meaningfulTestAuditHandler(
+        localCtx,
+        meaningfulTestAuditInputSchema.parse({ classApiName: 'ProdBatch' }),
+      ),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.tests.map((t) => t.testClassId)).toEqual([COVERING_TEST]);
+    expect(r.value.data.appliedScope).toEqual({
+      mode: 'covering-tests',
+      targetClassId: PROD,
+      coveringTestCount: 1,
+    });
+  });
+
+  it('returns an honest empty list (NOT the org-wide dump) when the target has no covering tests', async () => {
+    const r = await withStore((localCtx) =>
+      meaningfulTestAuditHandler(localCtx, { targetClass: LONELY_PROD }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.tests).toEqual([]);
+    expect(r.value.data.totalTestClassCount).toBe(0);
+    expect(r.value.data.appliedScope).toEqual({
+      mode: 'covering-tests',
+      targetClassId: LONELY_PROD,
+      coveringTestCount: 0,
+    });
+  });
+
+  it('returns component-not-found for a target class absent from the vault', async () => {
+    const r = await withStore((localCtx) =>
+      meaningfulTestAuditHandler(localCtx, {
+        targetClass: 'ApexClass:NoSuchClass',
+      }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+    expect(r.error.path).toBe('targetClass');
+  });
+
+  it('refuses targetClass + classFilter together (ambiguous scope)', async () => {
+    const r = await withStore((localCtx) =>
+      meaningfulTestAuditHandler(localCtx, {
+        targetClass: PROD,
+        classFilter: [COVERING_TEST],
+      }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.path).toBe('targetClass');
+  });
+});
+
+// =============================================================================
+// MEANINGFUL-TEST-AUDIT-NAMECONTAINS-SILENT-ORGWIDE — a case-insensitive
+// `nameContains` substring on the test-class api name used to be Zod-stripped,
+// so a scoped call returned the full org-wide leaderboard. It now narrows the
+// scan, echoes `appliedScope: { mode: 'name-filter' }`, and a needle matching
+// nothing returns an HONEST empty list (never the full roster).
+// =============================================================================
+describe('meaningfulTestAuditHandler — nameContains scope', () => {
+  it('narrows to the test classes whose name contains the needle + echoes appliedScope', async () => {
+    const r = await meaningfulTestAuditHandler(ctx, { nameContains: 'Fake' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ids = r.value.data.tests.map((t) => t.testClassId).sort();
+    // Only HighFakeTest + OneFakeTest carry "Fake" in the name — NOT the full
+    // 5-class org-wide roster.
+    expect(ids).toEqual(['ApexClass:HighFakeTest', 'ApexClass:OneFakeTest']);
+    expect(r.value.data.totalTestClassCount).toBe(2);
+    expect(r.value.data.appliedScope).toEqual({
+      mode: 'name-filter',
+      nameContains: 'Fake',
+    });
+  });
+
+  it('matches the name substring case-insensitively', async () => {
+    const r = await meaningfulTestAuditHandler(ctx, { nameContains: 'clean' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ids = r.value.data.tests.map((t) => t.testClassId).sort();
+    expect(ids).toEqual([
+      'ApexClass:CleanDenseTest',
+      'ApexClass:CleanSparseTest',
+    ]);
+  });
+
+  it('returns an HONEST empty list (NOT the org-wide dump) when the needle matches nothing', async () => {
+    const r = await meaningfulTestAuditHandler(ctx, {
+      nameContains: 'Zzz_NoSuchTestName',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.tests).toEqual([]);
+    expect(r.value.data.totalTestClassCount).toBe(0);
+    expect(r.value.data.appliedScope).toEqual({
+      mode: 'name-filter',
+      nameContains: 'Zzz_NoSuchTestName',
+    });
+  });
+
+  it('refuses nameContains + classFilter together (ambiguous scope)', async () => {
+    const r = await meaningfulTestAuditHandler(ctx, {
+      nameContains: 'Fake',
+      classFilter: ['ApexClass:HighFakeTest'],
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.path).toBe('nameContains');
+  });
+
+  it('refuses nameContains + targetClass together (ambiguous scope)', async () => {
+    const r = await meaningfulTestAuditHandler(ctx, {
+      nameContains: 'Fake',
+      targetClass: 'ApexClass:SomeProdClass',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.path).toBe('nameContains');
+  });
+
+  it('bare call is unaffected by the nameContains addition (byte-identical org-wide)', async () => {
+    const r = await meaningfulTestAuditHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedScope).toEqual({ mode: 'org-wide' });
+    expect(r.value.data.totalTestClassCount).toBe(5);
+  });
+});
+
+// =============================================================================
 // CR-12 — page-to-exhaustion. The ApexClass roster is walked to the end, not
 // just the first page; a test class sorted PAST the cap by id ASC used to be
 // dropped from both the ranking and totalTestClassCount. With
@@ -311,14 +547,17 @@ describe('meaningfulTestAuditHandler — past-cap roster (CR-12 de-cap)', () => 
     expect(r.value.data.tests[0]?.testClassId).toBe('ApexClass:HighFakeTest');
   });
 
-  it('preserves the disclosure field and adds no new top-level field (output-shape)', async () => {
+  it('preserves the disclosure field and the stable top-level shape (output-shape)', async () => {
     const r = await meaningfulTestAuditHandler(ctx, {});
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(typeof r.value.data.disclosure).toBe('string');
+    // `appliedScope` is the one deliberate addition (target-scope honesty);
+    // it is always present so the target is never silently ignored.
     expect(Object.keys(r.value.data).sort()).toEqual(
-      ['disclosure', 'tests', 'totalTestClassCount'].sort(),
+      ['appliedScope', 'disclosure', 'tests', 'totalTestClassCount'].sort(),
     );
+    expect(r.value.data.appliedScope).toEqual({ mode: 'org-wide' });
   });
 });
 
@@ -345,6 +584,38 @@ describe('meaningfulTestAuditInputSchema', () => {
   it('rejects empty string entries in classFilter', () => {
     expect(
       meaningfulTestAuditInputSchema.safeParse({ classFilter: [''] }).success,
+    ).toBe(false);
+  });
+
+  it('merges the componentId alias into targetClass (no longer silently stripped)', () => {
+    const parsed = meaningfulTestAuditInputSchema.safeParse({
+      componentId: 'ApexClass:SomeProdBatch',
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(parsed.data.targetClass).toBe('ApexClass:SomeProdBatch');
+  });
+
+  it('merges classApiName / targetId / apexClass aliases into targetClass', () => {
+    for (const key of ['classApiName', 'targetId', 'targetClassId', 'apexClass']) {
+      const parsed = meaningfulTestAuditInputSchema.safeParse({ [key]: 'SomeProdClass' });
+      expect(parsed.success).toBe(true);
+      if (!parsed.success) continue;
+      expect(parsed.data.targetClass).toBe('SomeProdClass');
+    }
+  });
+
+  it('accepts nameContains and keeps it distinct from targetClass (not merged)', () => {
+    const parsed = meaningfulTestAuditInputSchema.safeParse({ nameContains: 'Course' });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(parsed.data.nameContains).toBe('Course');
+    expect(parsed.data.targetClass).toBeUndefined();
+  });
+
+  it('rejects an empty-string nameContains', () => {
+    expect(
+      meaningfulTestAuditInputSchema.safeParse({ nameContains: '' }).success,
     ).toBe(false);
   });
 });

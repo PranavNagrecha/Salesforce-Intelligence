@@ -796,6 +796,53 @@ export const danglingTargetSummary = async (
   }
 };
 
+/**
+ * The COMPLETE (un-sampled) set of distinct `to_id`s of edges whose target
+ * resolves to NO node — references to a component the last refresh did not
+ * retrieve — pre-filtered to ids containing `substring` (case-insensitive).
+ *
+ * Unlike {@link danglingTargetSummary}, this is NOT capped by a per-group
+ * sample: a caller counting a package's phantom touchpoints (a managed Apex
+ * class granted by a PermissionSet whose class node was never retrieved) needs
+ * EVERY dangling target in the namespace, not a truncated prefix — a busy vault
+ * has far more than 50 dangling `ApexClass` grant targets across its packages,
+ * and a namespace whose members sort late (e.g. `SparkTable__*`) would fall
+ * outside a smallest-50 sample and be under-counted
+ * (PACKAGE-IMPACT-TWO-SEGMENT-NAMESPACE-BLIND count residual). The `substring`
+ * is a cheap, case-insensitive pre-filter that bounds the result to the
+ * namespace of interest — it is deliberately LOOSE (matches the namespace token
+ * anywhere in the id): it can never drop a genuine member (whose id necessarily
+ * contains the namespace token), and the caller applies the AUTHORITATIVE
+ * namespace rule on top. An empty `substring` returns `[]` (a namespace is
+ * always non-empty in the caller). Ids come back sorted ASC for determinism.
+ *
+ * @example
+ *   const r = await danglingTargetIdsMatching(store, 'SparkTable');
+ *   if (r.ok) for (const id of r.value) console.log(id); // ApexClass:SparkTable__…
+ */
+export const danglingTargetIdsMatching = async (
+  store: GraphStore,
+  substring: string,
+): Promise<Result<readonly ComponentId[], GraphError>> => {
+  const needle = substring.trim();
+  if (needle.length === 0) return ok([]);
+  try {
+    const rows = await fetchRows(
+      store,
+      `SELECT DISTINCT e.to_id AS to_id
+         FROM edges e
+         LEFT JOIN nodes n ON e.to_id = n.id
+        WHERE n.id IS NULL
+          AND e.to_id ILIKE ?
+        ORDER BY 1`,
+      [`%${needle}%`],
+    );
+    return ok(rows.map((r) => String(r['to_id'] ?? '')) as ComponentId[]);
+  } catch (e) {
+    return err(queryFailed('danglingTargetIdsMatching', e));
+  }
+};
+
 const buildSnippet = (
   query: string,
   apiName: string,

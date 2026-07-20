@@ -309,13 +309,32 @@ const readHtmlSource = async (
 };
 
 /**
+ * Origins whose `object` is a real SObject API name by construction: an
+ * `@salesforce/schema/Object.Field` import and a `getRecord({ fields:
+ * ['Object.Field'] })` wire array both name the object literally. An
+ * in-body `receiver.Field` access (`js-member`) does NOT — its receiver
+ * is whatever JS identifier preceded the dot.
+ */
+const RESOLVABLE_ORIGINS: ReadonlySet<string> = new Set(['schema-import', 'wire-fields']);
+
+/**
  * Project scanner output (`fieldAccesses`, `apexCalls`) onto graph edges
- * owned by `ownerId`. Schema-import discrimination isn't visible in the
- * scanner output (the scanner emits all reads identically), so the
- * extractor defaults every field-access edge to `'heuristic'`. The
- * `@salesforce/apex/...` import shape is unambiguous, so `callsApex`
- * edges land at `'declared'` per `LightningWebComponent.md`'s edge
- * table.
+ * owned by `ownerId`.
+ *
+ * LWC-JS-RECEIVER-FIELD-PHANTOMS: the scanner recognises any
+ * `identifier.UpperCaseProp` in the JS body as a field access, but in an
+ * LWC that `identifier` is almost always a JS local / loop var / event
+ * detail (`newRow.Id`, `row.Id`, `app.CON_x`, `record.Id`, …), NOT an
+ * SObject. Minting `CustomField:{local}.{prop}` for those invents fields
+ * that do not exist and pollutes blast-radius / field-usage answers. A
+ * `CustomField` edge is therefore emitted ONLY when `access.object`
+ * resolves to a real SObject — i.e. the access came from a
+ * `@salesforce/schema` import or a `getRecord` wire array (both name the
+ * object literally, {@link RESOLVABLE_ORIGINS}), or its receiver matches
+ * an object the bundle tracks via `<targetConfig><objects>`
+ * (`trackedObjects`). Unresolved `js-member` receivers emit no field
+ * edge (the `callsApex` wiring below is unaffected — the Apex-import
+ * shape is unambiguous and lands at `'declared'`).
  *
  * Edges are deduped + sorted by `(toId asc, edgeType asc)` to match
  * the precedent set by the Apex extractors.
@@ -323,6 +342,7 @@ const readHtmlSource = async (
 const buildScannerEdges = (
   jsSource: string,
   ownerId: string,
+  trackedObjects: ReadonlySet<string>,
 ): { readonly edges: readonly Edge[]; readonly warnings: readonly string[] } => {
   const result = scanFrontendSource(jsSource, 'lwc');
   if (!result.ok) {
@@ -337,8 +357,21 @@ const buildScannerEdges = (
     };
   }
 
+  // The set of object names known to be real SObjects for THIS bundle:
+  // every literal object from a schema import / wire array, plus the
+  // `<targetConfig>` objects. A `js-member` receiver only mints a field
+  // edge when it matches one of these (a rare but legitimate case where a
+  // developer writes `Account.Field` directly against a bound object).
+  const resolvableObjects = new Set<string>(trackedObjects);
+  for (const access of result.value.fieldAccesses) {
+    if (RESOLVABLE_ORIGINS.has(access.origin)) resolvableObjects.add(access.object);
+  }
+
   const raw: Edge[] = [];
   for (const access of result.value.fieldAccesses) {
+    // Drop phantom edges to unresolved JS receivers (locals, loop vars,
+    // event detail) — LWC-JS-RECEIVER-FIELD-PHANTOMS.
+    if (!resolvableObjects.has(access.object)) continue;
     raw.push({
       fromId: ownerId,
       toId: `CustomField:${access.object}.${access.field}`,
@@ -388,7 +421,11 @@ const buildScannerEdges = (
  *   - One `references` edge per `<targetConfig><objects><object>` to
  *     `CustomObject:{ObjectApiName}` at `confidence: 'declared'`.
  *   - `readsFrom` / `writesTo` edges to `CustomField:{object}.{field}`
- *     for each scanner field access (`confidence: 'heuristic'`).
+ *     (`confidence: 'heuristic'`) ONLY for field accesses whose `object`
+ *     resolves to a real SObject — a `@salesforce/schema` import, a
+ *     `getRecord` wire array, or a `<targetConfig>` object. In-body
+ *     `receiver.Field` accesses against unresolved JS locals emit NO
+ *     field edge (LWC-JS-RECEIVER-FIELD-PHANTOMS).
  *   - `callsApex` edges to `ApexClass:{className}` for each scanner
  *     `@salesforce/apex/...` import (`confidence: 'declared'`).
  *
@@ -446,7 +483,14 @@ export const extractLightningComponentBundle = async (
   const htmlSource = htmlResult.value;
 
   const ownerId = `${ROOT_ELEMENT}:${apiName}`;
-  const scannerOutput = buildScannerEdges(jsSource, ownerId);
+  // Objects the bundle declares via `<targetConfig><objects>` are known-real
+  // SObjects — pass them so a `js-member` body access against one of them
+  // survives the phantom filter (LWC-JS-RECEIVER-FIELD-PHANTOMS).
+  const scannerOutput = buildScannerEdges(
+    jsSource,
+    ownerId,
+    new Set(meta.targetConfigObjects),
+  );
 
   // Declared `references` to bound SObjects come from `<targetConfigs>`
   // and are independent of the scanner. Emit one per unique object name.

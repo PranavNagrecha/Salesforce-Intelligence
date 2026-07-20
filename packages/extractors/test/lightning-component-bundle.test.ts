@@ -196,6 +196,101 @@ describe('extractLightningComponentBundle', () => {
     });
   });
 
+  // LWC-JS-RECEIVER-FIELD-PHANTOMS: an in-body `receiver.Field` access whose
+  // receiver is a JS local / loop var / event detail (`newRow.Id`, `row.Id`,
+  // …) is NOT an SObject field. The extractor must NOT mint a
+  // `CustomField:{local}.{prop}` phantom edge for it; only accesses that
+  // resolve to a real SObject (schema import / wire array / targetConfig
+  // object) become field edges. Generic synthetic bundles (no org identifiers).
+  describe('LWC-JS-RECEIVER-FIELD-PHANTOMS', () => {
+    it('drops CustomField edges for JS-local receivers, keeps callsApex', async () => {
+      const jsBody = [
+        `import getRows from '@salesforce/apex/RowTableController.getRows';`,
+        `export default class RowTable {`,
+        `  addRow(newRow) {`,
+        `    newRow.Id = this.mint();`, // write on a JS local — phantom pre-fix
+        `    return newRow.Id;`, //        read on a JS local — phantom pre-fix
+        `  }`,
+        `  pick(row) { return row.Id; }`, // read on a JS local — phantom pre-fix
+        `}`,
+      ].join('\n');
+      const { tempDir, bundleDir } = await writeTempLwcBundle('RowTable', {
+        jsBody,
+      });
+      try {
+        const result = await extractLightningComponentBundle(bundleDir);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const edges = result.value.edges;
+        // No phantom CustomField edges against the JS locals.
+        const phantoms = edges.filter(
+          (e) =>
+            e.toId.startsWith('CustomField:newRow.') ||
+            e.toId.startsWith('CustomField:row.'),
+        );
+        expect(phantoms).toEqual([]);
+        expect(
+          edges.filter((e) => e.toId.startsWith('CustomField:')),
+        ).toEqual([]);
+        // The real Apex wiring survives untouched.
+        expect(
+          edges.some(
+            (e) =>
+              e.edgeType === 'callsApex' &&
+              e.toId === 'ApexClass:RowTableController',
+          ),
+        ).toBe(true);
+        const node = result.value.nodes[0];
+        expect(node?.properties['fieldAccessCount']).toBe(0);
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps schema-import + targetConfig-backed field edges', async () => {
+      const metaXml = `<?xml version="1.0" encoding="UTF-8"?>
+<LightningComponentBundle xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>58.0</apiVersion>
+    <isExposed>true</isExposed>
+    <targetConfigs>
+        <targetConfig targets="lightning__RecordPage">
+            <objects>
+                <object>Account</object>
+            </objects>
+        </targetConfig>
+    </targetConfigs>
+</LightningComponentBundle>`;
+      const jsBody = [
+        `import NAME_FIELD from '@salesforce/schema/Account.Name';`,
+        `export default class Card {`,
+        `  refresh(rec) { rec.Status__c = 'x'; }`, // JS local `rec` — phantom pre-fix
+        `}`,
+      ].join('\n');
+      const { tempDir, bundleDir } = await writeTempLwcBundle('AccountCard', {
+        metaXml,
+        jsBody,
+      });
+      try {
+        const result = await extractLightningComponentBundle(bundleDir);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const fieldEdges = result.value.edges.filter((e) =>
+          e.toId.startsWith('CustomField:'),
+        );
+        // The schema-import read against the real object survives.
+        expect(fieldEdges.map((e) => e.toId)).toEqual([
+          'CustomField:Account.Name',
+        ]);
+        // The JS-local write (`rec.Status__c`) is NOT minted.
+        expect(
+          result.value.edges.some((e) => e.toId === 'CustomField:rec.Status__c'),
+        ).toBe(false);
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('error cases', () => {
     it('returns file-not-found when the bundle directory is missing', async () => {
       const result = await extractLightningComponentBundle(

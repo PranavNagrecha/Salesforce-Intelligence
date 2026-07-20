@@ -460,7 +460,7 @@ describe('extractAssignmentRule', () => {
       <criteriaItems>
         <field>Case.RecordTypeId</field>
         <operation>equals</operation>
-        <value>Student Retention</value>
+        <value>Priority Review</value>
       </criteriaItems>
     </ruleEntry>
     <ruleEntry>
@@ -484,9 +484,150 @@ describe('extractAssignmentRule', () => {
         expect(
           result.value.nodes.filter((n) => n.type === 'ConditionalContext'),
         ).toHaveLength(1);
-        const refEdges = result.value.edges.filter((e) => e.edgeType === 'references');
-        expect(refEdges).toHaveLength(1);
-        expect(refEdges[0]!.toId).toBe('Queue:Support_Queue');
+        // The assignee reference edge still resolves.
+        expect(
+          result.value.edges.some(
+            (e) => e.edgeType === 'references' && e.toId === 'Queue:Support_Queue',
+          ),
+        ).toBe(true);
+        // ASSIGNMENT-RULE-OMITS-RECORDTYPE-VALUE-EDGE: the RecordTypeId
+        // criterion now also wires the named RecordType.
+        expect(
+          result.value.edges.some(
+            (e) =>
+              e.edgeType === 'references' &&
+              e.toId === 'RecordType:Case.Priority_Review',
+          ),
+        ).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('ASSIGNMENT-RULE-OMITS-RECORDTYPE-VALUE-EDGE: edges a RecordTypeId criterion to RecordType:{Object}.{DeveloperName}', async () => {
+      // Red pre-fix: a criterion comparing Case.RecordTypeId to a record-type
+      // label produced only the CustomField:Case.RecordTypeId fieldRef — the
+      // named RecordType was never edged, so RT retirement/blast-radius and
+      // "why did this Case land in the ADA queue?" missed the AssignmentRule.
+      // Green post-fix: a heuristic references edge whose developer name is
+      // derived from the label (spaces -> underscores).
+      const xml = `<?xml version="1.0"?>
+<AssignmentRules xmlns="http://soap.sforce.com/2006/04/metadata">
+  <assignmentRule>
+    <fullName>Priority_Routing</fullName>
+    <active>true</active>
+    <ruleEntry>
+      <criteriaItems>
+        <field>Case.RecordTypeId</field>
+        <operation>equals</operation>
+        <value>Priority Review</value>
+      </criteriaItems>
+      <assignedTo>Priority_Queue</assignedTo>
+      <assignedToType>Queue</assignedToType>
+    </ruleEntry>
+  </assignmentRule>
+</AssignmentRules>`;
+      const { dir, path } = await writeTempXml(
+        'Case.assignmentRules-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractAssignmentRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const ruleId = 'AssignmentRule:Case.Priority_Routing';
+        const rtEdge = result.value.edges.find(
+          (e) =>
+            e.edgeType === 'references' &&
+            e.fromId === ruleId &&
+            e.toId === 'RecordType:Case.Priority_Review',
+        );
+        expect(rtEdge).toBeDefined();
+        expect(rtEdge!.confidence).toBe('heuristic');
+        expect(rtEdge!.properties).toMatchObject({
+          referenceKind: 'assignmentRecordTypeCriteria',
+          criteriaField: 'Case.RecordTypeId',
+          criteriaValue: 'Priority Review',
+          derivedFrom: 'label',
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('ASSIGNMENT-RULE-OMITS-RECORDTYPE-VALUE-EDGE: takes RecordType.DeveloperName value verbatim and splits multi-value', async () => {
+      const xml = `<?xml version="1.0"?>
+<AssignmentRules xmlns="http://soap.sforce.com/2006/04/metadata">
+  <assignmentRule>
+    <fullName>DevName_Routing</fullName>
+    <active>true</active>
+    <ruleEntry>
+      <criteriaItems>
+        <field>Case.RecordType.DeveloperName</field>
+        <operation>equals</operation>
+        <value>First_RT,Second_RT</value>
+      </criteriaItems>
+      <assignedTo>Some_Queue</assignedTo>
+      <assignedToType>Queue</assignedToType>
+    </ruleEntry>
+  </assignmentRule>
+</AssignmentRules>`;
+      const { dir, path } = await writeTempXml(
+        'Case.assignmentRules-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractAssignmentRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const rtTargets = result.value.edges
+          .filter(
+            (e) =>
+              e.edgeType === 'references' &&
+              e.properties['referenceKind'] === 'assignmentRecordTypeCriteria',
+          )
+          .map((e) => e.toId);
+        expect(rtTargets).toEqual([
+          'RecordType:Case.First_RT',
+          'RecordType:Case.Second_RT',
+        ]);
+        const first = result.value.edges.find(
+          (e) => e.toId === 'RecordType:Case.First_RT',
+        );
+        expect(first!.properties['derivedFrom']).toBe('developerName');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('ASSIGNMENT-RULE-OMITS-RECORDTYPE-VALUE-EDGE: a non-RecordType criterion mints no RecordType edge', async () => {
+      const xml = `<?xml version="1.0"?>
+<AssignmentRules xmlns="http://soap.sforce.com/2006/04/metadata">
+  <assignmentRule>
+    <fullName>Status_Routing</fullName>
+    <active>true</active>
+    <ruleEntry>
+      <criteriaItems>
+        <field>Case.Status</field>
+        <operation>equals</operation>
+        <value>New</value>
+      </criteriaItems>
+      <assignedTo>Some_Queue</assignedTo>
+      <assignedToType>Queue</assignedToType>
+    </ruleEntry>
+  </assignmentRule>
+</AssignmentRules>`;
+      const { dir, path } = await writeTempXml(
+        'Case.assignmentRules-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractAssignmentRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(
+          result.value.edges.some((e) => e.toId.startsWith('RecordType:')),
+        ).toBe(false);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

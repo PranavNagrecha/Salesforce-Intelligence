@@ -268,6 +268,7 @@ describe('extractPathAssistant', () => {
           recordTypeName: null,
           fieldName: 'StageName',
           stepCount: 1,
+          steps: [{ picklistValueName: 'Closed Won' }],
         });
       } finally {
         await rm(dir, { recursive: true, force: true });
@@ -317,6 +318,105 @@ describe('extractPathAssistant', () => {
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
+    });
+
+    describe('ordered steps (PATH-ASSISTANT-OMITS-STEPS)', () => {
+      it('FAIL-BEFORE/PASS-AFTER: emits the ordered picklist-value steps (+ capped guidance) alongside stepCount', async () => {
+        const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<PathAssistant xmlns="http://soap.sforce.com/2006/04/metadata">
+    <active>true</active>
+    <entityName>Case</entityName>
+    <fieldName>Status</fieldName>
+    <masterLabel>Standard Path</masterLabel>
+    <pathAssistantSteps>
+        <info>&lt;p&gt;Call 1&lt;/p&gt;&lt;ul&gt;&lt;li&gt;Leave open&lt;/li&gt;&lt;/ul&gt;</info>
+        <picklistValueName>New</picklistValueName>
+    </pathAssistantSteps>
+    <pathAssistantSteps>
+        <info>&lt;p&gt;Call 2&lt;/p&gt;</info>
+        <picklistValueName>Open - Tier 1</picklistValueName>
+    </pathAssistantSteps>
+    <pathAssistantSteps>
+        <picklistValueName>Open - Tier 2</picklistValueName>
+    </pathAssistantSteps>
+</PathAssistant>`;
+        const { dir, path } = await writeTempPathAssistantXml('Standard_Path', xml);
+        try {
+          const result = await extractPathAssistant(path);
+          expect(result.ok).toBe(true);
+          if (!result.ok) return;
+          const props = result.value.nodes[0]!.properties as {
+            stepCount: number;
+            steps: ReadonlyArray<{ picklistValueName: string; guidance?: string }>;
+          };
+          expect(props.stepCount).toBe(3);
+          // The ordered Status step NAMES are surfaced (dropped pre-fix).
+          expect(props.steps.map((s) => s.picklistValueName)).toEqual([
+            'New',
+            'Open - Tier 1',
+            'Open - Tier 2',
+          ]);
+          // Guidance is HTML-stripped + collapsed; a step with no <info> omits it.
+          expect(props.steps[0]?.guidance).toBe('Call 1 Leave open');
+          expect(props.steps[2]?.guidance).toBeUndefined();
+        } finally {
+          await rm(dir, { recursive: true, force: true });
+        }
+      });
+
+      it('caps a long guidance snippet and flags guidanceTruncated', async () => {
+        const longInfo = 'A'.repeat(600);
+        const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<PathAssistant xmlns="http://soap.sforce.com/2006/04/metadata">
+    <active>true</active>
+    <entityName>Case</entityName>
+    <fieldName>Status</fieldName>
+    <masterLabel>Long Path</masterLabel>
+    <pathAssistantSteps>
+        <info>${longInfo}</info>
+        <picklistValueName>New</picklistValueName>
+    </pathAssistantSteps>
+</PathAssistant>`;
+        const { dir, path } = await writeTempPathAssistantXml('Long_Path', xml);
+        try {
+          const result = await extractPathAssistant(path);
+          expect(result.ok).toBe(true);
+          if (!result.ok) return;
+          const step = (
+            result.value.nodes[0]!.properties as {
+              steps: ReadonlyArray<{ guidance?: string; guidanceTruncated?: boolean }>;
+            }
+          ).steps[0]!;
+          expect(step.guidance?.length).toBe(280);
+          expect(step.guidanceTruncated).toBe(true);
+        } finally {
+          await rm(dir, { recursive: true, force: true });
+        }
+      });
+
+      it('emits an empty steps array (not undefined) when the path declares no steps', async () => {
+        const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<PathAssistant xmlns="http://soap.sforce.com/2006/04/metadata">
+    <active>true</active>
+    <entityName>Case</entityName>
+    <fieldName>Status</fieldName>
+    <masterLabel>Empty Path</masterLabel>
+</PathAssistant>`;
+        const { dir, path } = await writeTempPathAssistantXml('Empty_Path', xml);
+        try {
+          const result = await extractPathAssistant(path);
+          expect(result.ok).toBe(true);
+          if (!result.ok) return;
+          const props = result.value.nodes[0]!.properties as {
+            stepCount: number;
+            steps: readonly unknown[];
+          };
+          expect(props.stepCount).toBe(0);
+          expect(props.steps).toEqual([]);
+        } finally {
+          await rm(dir, { recursive: true, force: true });
+        }
+      });
     });
   });
 

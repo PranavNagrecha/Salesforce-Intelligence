@@ -63,6 +63,46 @@ describe('installedPackageCatalogHandler', () => {
     expect(d.packages.find((p) => p.namespace === 'Beta')?.versionNumber).toBeNull();
     expect(d.confidence).toBe('declared');
     expect(d.boundaryNote).toMatch(/installedPackages/);
+    // Bare call omits appliedScope entirely — byte-identical to the pre-filter
+    // shape (the ONLY additive field is spread in only when the filter is set).
+    expect('appliedScope' in d).toBe(false);
+  });
+
+  // INSTALLED-PACKAGE-CATALOG-IGNORES-NAMESPACEPREFIX
+  it('a matching namespacePrefix returns the SUBSET (case-insensitive) with appliedScope echoed', async () => {
+    const bare = await installedPackageCatalogHandler(ctx, {});
+    const scoped = await installedPackageCatalogHandler(ctx, { namespacePrefix: 'HED' });
+    expect(bare.ok).toBe(true); expect(scoped.ok).toBe(true);
+    if (!bare.ok || !scoped.ok) return;
+    const d = scoped.value.data;
+    // Exact token, case-insensitive: 'HED' resolves to the single `hed` package.
+    expect(d.packages.map((p) => p.namespace)).toEqual(['hed']);
+    expect(d.summary.count).toBe(1);
+    expect(d.packages.length).toBeLessThan(bare.value.data.packages.length);
+    expect(d.appliedScope).toEqual({ namespacePrefix: 'HED', mode: 'namespacePrefix' });
+    // Real packages present, so the note is the normal extracted note.
+    expect(d.boundaryNote).toMatch(/installedPackages/);
+  });
+
+  it('matches the namespace EXACTLY, not as a substring', async () => {
+    // 'he' is a prefix-substring of 'hed' but NOT the token — exact match only.
+    const r = await installedPackageCatalogHandler(ctx, { namespacePrefix: 'he' });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    expect(r.value.data.packages).toEqual([]);
+    expect(r.value.data.summary.count).toBe(0);
+  });
+
+  it('a non-matching namespacePrefix returns an honest empty SCOPE (not "not modeled", not the full list)', async () => {
+    const r = await installedPackageCatalogHandler(ctx, { namespacePrefix: 'nosuchns' });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.packages).toEqual([]);
+    expect(d.summary.count).toBe(0);
+    expect(d.appliedScope).toEqual({ namespacePrefix: 'nosuchns', mode: 'namespacePrefix' });
+    // The vault HAS packages — this is an empty scope, NOT the package-less
+    // "not modeled" disclosure.
+    expect(d.boundaryNote).toMatch(/empty SCOPE/);
+    expect(d.boundaryNote).not.toMatch(/not modeled/);
   });
 
   it('discloses an empty catalog as "not modeled", not a verified "no packages"', async () => {

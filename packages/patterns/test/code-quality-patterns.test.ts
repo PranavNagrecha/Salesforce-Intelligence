@@ -374,6 +374,60 @@ describe('detectCodeQualityIssues — missing-crud-check', () => {
     expect(rulesOf(run(src))).not.toContain('missing-crud-check');
   });
 
+  // The 3-arg `Database.insert(list, allOrNone, AccessLevel.USER_MODE)` form
+  // enforces CRUD/FLS just like the 2-arg form — the AccessLevel arg is scanned
+  // across the WHOLE call-site argument list, not just the second position.
+  it('does not flag `Database.insert(x, false, AccessLevel.USER_MODE)` (3-arg user-mode DML)', () => {
+    const src = `public class Svc {
+      public static void create(List<Account> a) { Database.insert(a, false, AccessLevel.USER_MODE); }
+    }`;
+    expect(rulesOf(run(src))).not.toContain('missing-crud-check');
+  });
+
+  // W7.3 — Explicit `AccessLevel.SYSTEM_MODE` is a DELIBERATE system-context
+  // bypass, NOT a missing-crud omission. It must NOT be a high `missing-crud-check`:
+  // a developer who consciously chose SYSTEM_MODE has not "forgotten" a check, and
+  // a high alarm gets remediated by adding the isUpdateable() guard the bypass
+  // deliberately skips. It is reclassified to an `intentional-system-mode-dml`
+  // REVIEW finding at `info` severity — still surfacing the bypass, with honest
+  // "switch to USER_MODE" remediation. Pre-fix this DML was a HIGH
+  // `missing-crud-check`, so these assertions fail without the fix
+  // (red-before / green-after).
+  it('reclassifies `Database.update(x, AccessLevel.SYSTEM_MODE)` as an intentional-system-mode-dml review finding, not a high missing-crud-check', () => {
+    const src = `public class Svc {
+      public static void run(List<Account> a) { Database.update(a, AccessLevel.SYSTEM_MODE); }
+    }`;
+    const issues = run(src);
+    // It is NOT a missing-crud omission.
+    expect(rulesOf(issues)).not.toContain('missing-crud-check');
+    // It IS surfaced as an intentional system-mode bypass for review.
+    const bypass = issues.find((i) => i.rule === 'intentional-system-mode-dml');
+    expect(bypass).toBeDefined();
+    // Review severity, never high.
+    expect(bypass?.severity).toBe('info');
+    expect(bypass?.severity).not.toBe('high');
+    // Honest, bypass-aware remediation (no generic "add a Schema check" text).
+    expect(bypass?.explanation).toContain('AccessLevel.SYSTEM_MODE');
+    expect(bypass?.explanation).toContain('DELIBERATE system-context bypass');
+    expect(bypass?.explanation).not.toContain(
+      'without a preceding object-level CRUD check',
+    );
+  });
+
+  // `Security.stripInaccessible(AccessType.UPSERTABLE, …)` is the write-FLS strip
+  // for an upsert. UPSERTABLE is a first-class System.AccessType value; before
+  // the fix the hint pattern recognized only CREATABLE/UPDATABLE, so a legitimate
+  // strip-then-upsert was a HIGH-severity false positive.
+  it('does not flag an `upsert` gated by Security.stripInaccessible(AccessType.UPSERTABLE, …)', () => {
+    const src = `public class Svc {
+      public static void save(Account acc) {
+        SObjectAccessDecision d = Security.stripInaccessible(AccessType.UPSERTABLE, new List<Account>{acc});
+        upsert acc;
+      }
+    }`;
+    expect(rulesOf(run(src))).not.toContain('missing-crud-check');
+  });
+
   // `as system` runs in system mode and does NOT enforce CRUD/FLS — still flagged.
   it('FLAGS `insert x as system` (system mode does not enforce CRUD/FLS)', () => {
     const src = `public class Svc {
@@ -542,6 +596,59 @@ describe('detectCodeQualityIssues — missing-fls-check', () => {
     expect(rulesOf(run(src, { isTest: true }))).not.toContain(
       'missing-fls-check',
     );
+  });
+
+  // CRUD-FLS-IGNORES-ACCESSLEVEL-AND-STRIPINACCESSIBLE — a query whose result
+  // is sanitized with the modern read-FLS strip
+  // `Security.stripInaccessible(AccessType.READABLE, <resultVar>)` DOES enforce
+  // field security; flagging it as missing-FLS is a false positive.
+  it('does not flag a read sanitized with Security.stripInaccessible(AccessType.READABLE, …)', () => {
+    const src = `public class C {
+      public static List<Invoice__c> load(Id cid) {
+        List<Invoice__c> invoices = [SELECT Id, Sku__c FROM Invoice__c WHERE Id = :cid];
+        SObjectAccessDecision d = Security.stripInaccessible(AccessType.READABLE, invoices);
+        return d.getRecords();
+      }
+    }`;
+    expect(rulesOf(run(src))).not.toContain('missing-fls-check');
+  });
+
+  it('does not flag a cast read sanitized with a READABLE strip', () => {
+    const src = `public class C {
+      public static void load(Id cid) {
+        List<Account> a = (List<Account>) [SELECT Id, Name FROM Account WHERE Id = :cid];
+        Security.stripInaccessible(AccessType.READABLE, a);
+      }
+    }`;
+    expect(rulesOf(run(src))).not.toContain('missing-fls-check');
+  });
+
+  // Control: a READABLE strip of a DIFFERENT variable must NOT clear an
+  // actually-unguarded query — the unguarded read still fires.
+  it('still flags an unguarded query when a READABLE strip targets a different variable', () => {
+    const src = `public class C {
+      public static void load(Id cid) {
+        List<Account> a = [SELECT Id, Name FROM Account WHERE Id = :cid];
+        List<Contact> b = [SELECT Email FROM Contact WHERE AccountId = :cid];
+        Security.stripInaccessible(AccessType.READABLE, a);
+      }
+    }`;
+    const issues = run(src);
+    expect(rulesOf(issues)).toContain('missing-fls-check');
+    // Exactly one survives — the guarded read (a) is cleared, the unguarded (b) fires.
+    expect(issues.filter((i) => i.rule === 'missing-fls-check')).toHaveLength(1);
+  });
+
+  // Control: a WRITE-path strip (CREATABLE/UPDATABLE/UPSERTABLE) is NOT a read
+  // enforcement and must NOT clear a missing-FLS read.
+  it('still flags a read when only a WRITE-path strip (UPDATABLE) is present', () => {
+    const src = `public class C {
+      public static void load(Id cid) {
+        List<Account> a = [SELECT Id, Name FROM Account WHERE Id = :cid];
+        Security.stripInaccessible(AccessType.UPDATABLE, a);
+      }
+    }`;
+    expect(rulesOf(run(src))).toContain('missing-fls-check');
   });
 });
 

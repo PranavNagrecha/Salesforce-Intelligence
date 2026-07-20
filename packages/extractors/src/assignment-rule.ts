@@ -181,6 +181,12 @@ interface ResolvedRuleEntry {
   readonly template: string | null;
   /** v2.0a — the per-entry condition source for `extractConditions`. */
   readonly conditionSource: ConditionSource | null;
+  /**
+   * ASSIGNMENT-RULE-OMITS-RECORDTYPE-VALUE-EDGE — the RecordTypes this
+   * entry's criteria gate on (resolved from `RecordTypeId` / `RecordType.*`
+   * comparisons). Empty for entries with no RecordType criterion.
+   */
+  readonly recordTypeRefs: readonly RecordTypeRef[];
 }
 
 /**
@@ -208,6 +214,101 @@ const parseCriteriaItem = (raw: unknown): CriteriaItem | null => {
         ? null
         : String(valueRaw),
   };
+};
+
+/**
+ * ASSIGNMENT-RULE-OMITS-RECORDTYPE-VALUE-EDGE: a RecordType a rule's
+ * criteria gates on. A `<criteriaItems>` comparing `{Object}.RecordTypeId`
+ * (or `RecordType.DeveloperName` / `RecordType.Name`) names a RecordType by
+ * value, but only the `CustomField:{Object}.RecordTypeId` field ref was
+ * edged — so RT retirement / rename / "why did this land in the ADA queue?"
+ * missed the AssignmentRule and RT usages read empty.
+ */
+interface RecordTypeRef {
+  /** Canonical target `RecordType:{Object}.{DeveloperName}`. */
+  readonly toId: string;
+  /** The criteria field verbatim (`Case.RecordTypeId`). */
+  readonly criteriaField: string;
+  /** The criteria value verbatim (the RT label, or developer name). */
+  readonly criteriaValue: string;
+  /** Whether the developer name was derived from a label or taken verbatim. */
+  readonly derivedFrom: 'label' | 'developerName';
+}
+
+/** Criteria field is `{Object}.RecordTypeId` / bare `RecordTypeId`. */
+const RECORD_TYPE_ID_FIELD_RE = /(^|\.)RecordTypeId$/i;
+/** Criteria field is `{path}.RecordType.DeveloperName` (value IS the API name). */
+const RECORD_TYPE_DEVNAME_FIELD_RE = /(^|\.)RecordType\.DeveloperName$/i;
+/** Criteria field is `{path}.RecordType.Name` (value is the label). */
+const RECORD_TYPE_NAME_FIELD_RE = /(^|\.)RecordType\.Name$/i;
+
+/**
+ * ASSIGNMENT-RULE-OMITS-RECORDTYPE-VALUE-EDGE: derive a RecordType developer
+ * name (the `RecordType:{Object}.{DeveloperName}` node key) from a criteria
+ * value. Salesforce auto-generates a RecordType's `DeveloperName` from its
+ * label by replacing each run of non-alphanumeric characters with a single
+ * underscore and trimming leading/trailing underscores (`Priority Review`
+ * → `Priority_Review`). This is the standard convention but an admin CAN
+ * override the developer name after creation, which is why the resulting edge
+ * is `heuristic`, not `declared`.
+ */
+const toRecordTypeDeveloperName = (value: string): string =>
+  value
+    .trim()
+    .replace(/[^A-Za-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
+/**
+ * ASSIGNMENT-RULE-OMITS-RECORDTYPE-VALUE-EDGE: scan a `<ruleEntry>`'s
+ * `<criteriaItems>` for RecordType comparisons and resolve each to a
+ * `RecordType:{Object}.{DeveloperName}` target. The RecordType is scoped to
+ * the rule's own object (`objectApiName`) — cross-object RT criteria (rare)
+ * are not object-resolved. A multi-value `equals` comparison serialises its
+ * record types as a comma-separated `<value>`, so the value is split on
+ * commas. `RecordType.DeveloperName` fields carry the API name verbatim;
+ * `RecordTypeId` / `RecordType.Name` fields carry the label (normalised).
+ */
+const collectRecordTypeRefs = (
+  entry: Record<string, unknown>,
+  objectApiName: string,
+): readonly RecordTypeRef[] => {
+  const refs: RecordTypeRef[] = [];
+  const seen = new Set<string>();
+  for (const raw of toArray(entry['criteriaItems'])) {
+    const item = parseCriteriaItem(raw);
+    if (item === null || item.value === null) continue;
+    const field = item.field.trim();
+    let derivedFrom: 'label' | 'developerName';
+    if (RECORD_TYPE_DEVNAME_FIELD_RE.test(field)) {
+      derivedFrom = 'developerName';
+    } else if (
+      RECORD_TYPE_ID_FIELD_RE.test(field) ||
+      RECORD_TYPE_NAME_FIELD_RE.test(field)
+    ) {
+      derivedFrom = 'label';
+    } else {
+      continue;
+    }
+    for (const part of item.value.split(',')) {
+      const rawValue = part.trim();
+      if (rawValue === '') continue;
+      const developerName =
+        derivedFrom === 'developerName'
+          ? rawValue
+          : toRecordTypeDeveloperName(rawValue);
+      if (developerName === '') continue;
+      const toId = `RecordType:${objectApiName}.${developerName}`;
+      if (seen.has(toId)) continue;
+      seen.add(toId);
+      refs.push({
+        toId,
+        criteriaField: field,
+        criteriaValue: rawValue,
+        derivedFrom,
+      });
+    }
+  }
+  return refs;
 };
 
 /**
@@ -252,7 +353,9 @@ const collectEntryConditionSource = (
 const resolveRuleEntry = (
   entry: Record<string, unknown>,
   path: string,
+  objectApiName: string,
 ): Result<ResolvedRuleEntry, ExtractorError> => {
+  const recordTypeRefs = collectRecordTypeRefs(entry, objectApiName);
   const assignedToRaw = unwrapSingle(entry['assignedTo']);
   const assignedToTypeRaw = unwrapSingle(entry['assignedToType']);
   const hasAssignedTo =
@@ -283,6 +386,7 @@ const resolveRuleEntry = (
       notifyAssignee: coerceBoolean(unwrapSingle(entry['notifyAssignee'])),
       template,
       conditionSource: collectEntryConditionSource(entry),
+      recordTypeRefs,
     });
   }
 
@@ -332,6 +436,7 @@ const resolveRuleEntry = (
     notifyAssignee: coerceBoolean(unwrapSingle(entry['notifyAssignee'])),
     template,
     conditionSource: collectEntryConditionSource(entry),
+    recordTypeRefs,
   });
 };
 
@@ -380,7 +485,7 @@ const buildRule = (
   );
   const resolvedEntries: ResolvedRuleEntry[] = [];
   for (const entry of ruleEntries) {
-    const resolved = resolveRuleEntry(entry, path);
+    const resolved = resolveRuleEntry(entry, path, objectApiName);
     if (!resolved.ok) return resolved;
     resolvedEntries.push(resolved.value);
   }
@@ -472,6 +577,33 @@ const buildRule = (
     }
   }
 
+  // ASSIGNMENT-RULE-OMITS-RECORDTYPE-VALUE-EDGE: one `references` edge per
+  // DISTINCT RecordType named across the rule's criteria (deduplicated by
+  // target id, first-seen order). Heuristic confidence — the developer name
+  // is derived from the criteria label by Salesforce's standard auto-name
+  // convention, which an admin can override. Emitted before the firesWhen
+  // edges so the RT dependency is a first-class outbound edge on the rule.
+  const seenRecordTypes = new Set<string>();
+  for (const entry of resolvedEntries) {
+    for (const rtRef of entry.recordTypeRefs) {
+      if (seenRecordTypes.has(rtRef.toId)) continue;
+      seenRecordTypes.add(rtRef.toId);
+      edges.push({
+        fromId: ruleId,
+        toId: rtRef.toId,
+        edgeType: 'references',
+        confidence: 'heuristic',
+        source: EXTRACTOR_SOURCE,
+        properties: {
+          referenceKind: 'assignmentRecordTypeCriteria',
+          criteriaField: rtRef.criteriaField,
+          criteriaValue: rtRef.criteriaValue,
+          derivedFrom: rtRef.derivedFrom,
+        },
+      });
+    }
+  }
+
   // v2.0a — Append the firesWhen edges at the tail. The synthetic
   // ConditionalContext nodes are returned alongside the rule node.
   edges.push(...firesWhenEdges);
@@ -497,6 +629,15 @@ const buildRule = (
  * `EmailTemplate:{Folder}.{TemplateName}`). `entryIndex` on each
  * per-entry edge preserves the XML evaluation order — Salesforce picks
  * the first matching entry top-to-bottom, so order is load-bearing.
+ *
+ * ASSIGNMENT-RULE-OMITS-RECORDTYPE-VALUE-EDGE: when a `<criteriaItems>`
+ * compares `{Object}.RecordTypeId` (or `RecordType.DeveloperName` /
+ * `RecordType.Name`) the extractor also emits one `heuristic` `references`
+ * edge per DISTINCT named RecordType (`RecordType:{Object}.{DeveloperName}`,
+ * the developer name derived from the criteria label by Salesforce's
+ * auto-name convention), so RT retirement / rename / queue-routing
+ * explanations resolve the AssignmentRule instead of only the RecordTypeId
+ * field ref.
  *
  * Returns an `ExtractorError` for any of the documented failure modes:
  * `file-not-found`, `parse-error`, or `malformed-input` (wrong root,

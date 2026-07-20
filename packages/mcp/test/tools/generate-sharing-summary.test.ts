@@ -96,12 +96,18 @@ const seed: ExtractionResult = {
       apiName: 'Manager',
       properties: { parentRoleId: 'Role:Executive' },
     }),
+    // REALISTIC shape: the extractor carries the parent object on `parentId`
+    // (`CustomObject:Account`) and `apiName` (`Account.AccountRule`) — it does
+    // NOT emit `properties.sObjectType`. Keying the summary on that phantom
+    // property matched nothing and rendered "(no sharing rules)"
+    // (GENERATE-SHARING-SUMMARY-FALSE-EMPTY-SHARING-RULES). These fixtures now
+    // mirror the real node, so the matching assertions are genuine guards.
     makeNode({
       id: 'SharingRule:Account.AccountRule',
       type: 'SharingRule',
       apiName: 'Account.AccountRule',
+      parentId: 'CustomObject:Account',
       properties: {
-        sObjectType: 'Account',
         accessLevel: 'Read',
         ruleType: 'criteria',
         booleanFilter: 'Account.Industry = "Banking"',
@@ -114,10 +120,25 @@ const seed: ExtractionResult = {
       id: 'SharingRule:Account.ExecRule',
       type: 'SharingRule',
       apiName: 'Account.ExecRule',
+      parentId: 'CustomObject:Account',
       properties: {
-        sObjectType: 'Account',
         accessLevel: 'Edit',
         ruleType: 'owner',
+      },
+    }),
+    // RESTRICTION-RULE-MISSING-OBJECT-GRAPH-AND-SHARING-SUMMARY: an active
+    // RestrictionRule on Contact must appear in the summary — its parentId ties
+    // it to the object (the extractor sets it from <targetEntity>), so the
+    // summary surfaces it on the CURRENT vault without a re-extract.
+    makeNode({
+      id: 'RestrictionRule:Contact.Viewer_Is_Owner',
+      type: 'RestrictionRule',
+      apiName: 'Contact.Viewer_Is_Owner',
+      parentId: 'CustomObject:Contact',
+      properties: {
+        enforcementType: 'Scoping',
+        active: 'true',
+        recordFilter: 'OwnerId=$User.Id',
       },
     }),
   ],
@@ -278,6 +299,41 @@ describe('generateSharingSummaryHandler (seeded graph)', () => {
     expect(body).toContain('Account.AccountRule');
   });
 
+  // RESTRICTION-RULE-MISSING-OBJECT-GRAPH-AND-SHARING-SUMMARY guard: the summary
+  // previously never mentioned restriction / scoping rules, inventing OWD-only
+  // visibility. Assert the Contact section names its active RestrictionRule with
+  // enforcement type and record filter.
+  it('surfaces active restriction / scoping rules per object', async () => {
+    const result = await generateSharingSummaryHandler(ctx, {
+      objectFilter: 'Contact',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.data.document.body;
+    expect(body).toContain('### Restriction & Scoping Rules');
+    expect(body).toContain('Contact.Viewer_Is_Owner');
+    expect(body).toContain('Scoping');
+    expect(body).toContain('OwnerId=$User.Id');
+  });
+
+  // GENERATE-SHARING-SUMMARY-FALSE-EMPTY-SHARING-RULES regression guard: the
+  // real extractor never emits `properties.sObjectType` — it carries the parent
+  // object on `parentId`/`apiName` only. The seed rules above deliberately OMIT
+  // `sObjectType`, so a summary that still keyed on it would render Account with
+  // "(no sharing rules)" despite the two SharingRule nodes present. Assert the
+  // Account section is NOT the false-empty text and that the rules table renders.
+  it('does not invent "(no sharing rules)" for an object whose SharingRule nodes lack sObjectType', async () => {
+    const result = await generateSharingSummaryHandler(ctx, {
+      objectFilter: 'Account',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.data.document.body;
+    expect(body).toContain('Account.AccountRule');
+    expect(body).toContain('Account.ExecRule');
+    expect(body).not.toContain('_(no sharing rules)_');
+  });
+
   it('surfaces a criteria-based rule type and its predicate (P11-G5)', async () => {
     const result = await generateSharingSummaryHandler(ctx, {});
     expect(result.ok).toBe(true);
@@ -346,6 +402,46 @@ describe('generateSharingSummaryHandler (seeded graph)', () => {
     expect(body).toContain('Account');
     expect(body).toContain('Scanned objects: 1');
     expect(body).toContain("objectFilter: `Account`");
+  });
+
+  // GENERATE-SHARING-SUMMARY-ALIAS-SKEW guard (componentId): a `componentId`
+  // object selector was Zod-stripped, so the call silently fell through to the
+  // org-wide scan (Scanned objects: 2, "_(no objectFilter applied)_"). It must
+  // now scope identically to `objectFilter: 'Account'`.
+  it('scopes to a single object via componentId CustomObject:{api} (was silently org-wide)', async () => {
+    const scoped = await generateSharingSummaryHandler(ctx, {
+      componentId: 'CustomObject:Account',
+    });
+    expect(scoped.ok).toBe(true);
+    if (!scoped.ok) return;
+    const body = scoped.value.data.document.body;
+    expect(body).toContain('Scanned objects: 1');
+    expect(body).toContain('objectFilter: `Account`');
+    expect(body).not.toContain('_(no objectFilter applied)_');
+    // Equivalent to the objectFilter path: same Overview scope echo.
+    const viaFilter = await generateSharingSummaryHandler(ctx, {
+      objectFilter: 'Account',
+    });
+    expect(viaFilter.ok).toBe(true);
+    if (!viaFilter.ok) return;
+    expect(body).toContain('objectFilter: `Account`');
+    expect(viaFilter.value.data.document.body).toContain('Scanned objects: 1');
+  });
+
+  // GENERATE-SHARING-SUMMARY-ALIAS-SKEW guard (objectApiName disclosure): the
+  // `objectApiName` alias DID scope the scan, but the Overview still printed the
+  // false "_(no objectFilter applied)_" — the disclosure lied. It must now echo
+  // the applied scope honestly.
+  it('echoes the applied scope for objectApiName (no longer claims "no objectFilter applied")', async () => {
+    const result = await generateSharingSummaryHandler(ctx, {
+      objectApiName: 'Account',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const body = result.value.data.document.body;
+    expect(body).toContain('Scanned objects: 1');
+    expect(body).toContain('objectFilter: `Account`');
+    expect(body).not.toContain('_(no objectFilter applied)_');
   });
 
   it('always surfaces the Q125 freshness disclosure in boundaries', async () => {

@@ -112,4 +112,43 @@ describe('computePhantomBucketSummary', () => {
       await closeGraph(store);
     }
   });
+
+  it('counts the dangling targets WITHOUT materializing stub nodes (ADR-004)', async () => {
+    const store = await buildGraph({
+      nodes: [
+        node('ApexTrigger:Acme_OrderTrigger', 'ApexTrigger'),
+        node('CustomObject:Acme_Order__c', 'CustomObject'),
+      ],
+      edges: [
+        edge('ApexTrigger:Acme_OrderTrigger', 'triggersOn', 'CustomObject:Acme_Order__c', 'declared'),
+        edge('ApexTrigger:Acme_OrderTrigger', 'triggersOn', 'CustomObject:Acme_Missing__c', 'declared'),
+        edge('ApexTrigger:Acme_OrderTrigger', 'callsApex', 'ApexClass:Acme_MissingSvc', 'declared'),
+      ],
+    });
+    try {
+      const nodeCount = async (): Promise<number> => {
+        const r = await store.connection.runAndReadAll('SELECT count(*)::INT AS n FROM nodes', []);
+        return (r.getRowObjectsJS() as { n: number }[])[0]!.n;
+      };
+      const before = await nodeCount();
+      const summary = await computePhantomBucketSummary(store, coverageOf);
+      const after = await nodeCount();
+      // The two missing targets were counted…
+      expect(summary.distinctPhantoms).toBe(2);
+      expect(summary.buckets['automation-critical']).toBe(2);
+      // …but the roll-up inserted NOTHING: only the two real nodes remain, so
+      // the dangling edges stay dangling and the targetMissing /
+      // retrieve_blindspot / on-demand-taxonomy semantics are preserved.
+      expect(before).toBe(2);
+      expect(after).toBe(before);
+      const stubProbe = await store.connection.runAndReadAll(
+        `SELECT count(*)::INT AS n FROM nodes
+         WHERE id IN ('CustomObject:Acme_Missing__c', 'ApexClass:Acme_MissingSvc')`,
+        [],
+      );
+      expect((stubProbe.getRowObjectsJS() as { n: number }[])[0]!.n).toBe(0);
+    } finally {
+      await closeGraph(store);
+    }
+  });
 });

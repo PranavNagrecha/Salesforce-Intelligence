@@ -632,6 +632,135 @@ describe('extractApprovalProcess', () => {
     });
   });
 
+  describe('W4.3 — Alert hook EmailTemplate references via sibling workflow', () => {
+    const APPROVAL_WITH_ALERT = `<?xml version="1.0"?>
+<ApprovalProcess xmlns="http://soap.sforce.com/2006/04/metadata">
+  <label>Widget Approval</label>
+  <active>true</active>
+  <finalApprovalActions>
+    <action>
+      <name>My_Alert</name>
+      <type>Alert</type>
+    </action>
+  </finalApprovalActions>
+</ApprovalProcess>`;
+    const WORKFLOW_WITH_ALERT = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <alerts>
+    <fullName>My_Alert</fullName>
+    <senderType>CurrentUser</senderType>
+    <template>My_Folder/My_Template</template>
+  </alerts>
+</Workflow>`;
+
+    it('emits a DIRECT `references` edge to the EmailTemplate the Alert hook sends AND keeps the WorkflowAlert reference (KEEP+ADD)', async () => {
+      // Pre-W4.3 an Alert hook emitted ONLY the `references` to the
+      // WorkflowAlert scaffolding node; the EmailTemplate the alert sends was
+      // 2 hops away, so "safe to delete EmailTemplate X?" (a 1-hop referrer
+      // check) missed this ApprovalProcess dependent. This asserts the new
+      // DIRECT ApprovalProcess -> EmailTemplate edge (fails pre-fix).
+      const { dir, path } = await writeTempApprovalWithWorkflow(
+        'Widget__c.Approve',
+        'Widget__c',
+        APPROVAL_WITH_ALERT,
+        WORKFLOW_WITH_ALERT,
+      );
+      try {
+        const result = await extractApprovalProcess(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const processId = 'ApprovalProcess:Widget__c.Approve';
+        // KEEP: the WorkflowAlert scaffolding references edge still emits.
+        expect(
+          result.value.edges.some(
+            (e) =>
+              e.edgeType === 'references' &&
+              e.fromId === processId &&
+              e.toId === 'WorkflowAlert:Widget__c.My_Alert',
+          ),
+        ).toBe(true);
+        // ADD: the DIRECT EmailTemplate references edge.
+        const templateRef = result.value.edges.find(
+          (e) =>
+            e.edgeType === 'references' &&
+            e.fromId === processId &&
+            e.toId === 'EmailTemplate:My_Folder.My_Template',
+        );
+        expect(templateRef).toBeDefined();
+        expect(templateRef?.confidence).toBe('declared');
+        expect(templateRef?.properties).toMatchObject({
+          referenceKind: 'alertTemplate',
+          viaAlert: 'My_Alert',
+          hookType: 'finalApproval',
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('fail-soft: no sibling workflow file → no EmailTemplate edge, WorkflowAlert reference survives', async () => {
+      const { dir, path } = await writeTempApprovalXml(
+        'Widget__c.Approve',
+        APPROVAL_WITH_ALERT,
+      );
+      try {
+        const result = await extractApprovalProcess(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(
+          result.value.edges.filter((e) =>
+            e.toId.startsWith('EmailTemplate:'),
+          ),
+        ).toHaveLength(0);
+        expect(
+          result.value.edges.some(
+            (e) => e.toId === 'WorkflowAlert:Widget__c.My_Alert',
+          ),
+        ).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('dedups the EmailTemplate edge when the same alert fires in multiple hooks', async () => {
+      const approval = `<?xml version="1.0"?>
+<ApprovalProcess xmlns="http://soap.sforce.com/2006/04/metadata">
+  <label>Widget Approval</label>
+  <active>true</active>
+  <initialSubmissionActions>
+    <action>
+      <name>My_Alert</name>
+      <type>Alert</type>
+    </action>
+  </initialSubmissionActions>
+  <finalApprovalActions>
+    <action>
+      <name>My_Alert</name>
+      <type>Alert</type>
+    </action>
+  </finalApprovalActions>
+</ApprovalProcess>`;
+      const { dir, path } = await writeTempApprovalWithWorkflow(
+        'Widget__c.Approve',
+        'Widget__c',
+        approval,
+        WORKFLOW_WITH_ALERT,
+      );
+      try {
+        const result = await extractApprovalProcess(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(
+          result.value.edges.filter(
+            (e) => e.toId === 'EmailTemplate:My_Folder.My_Template',
+          ),
+        ).toHaveLength(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('error cases', () => {
     it('returns file-not-found when the path does not exist', async () => {
       const path = '/nonexistent/X.Y.approvalProcess-meta.xml';
@@ -781,7 +910,7 @@ describe('extractApprovalProcess', () => {
     <active>true</active>
     <allowRecall>false</allowRecall>
     <allowedSubmitters>
-        <submitter>FM_Payment_Edit</submitter>
+        <submitter>Widget_Payment_Edit</submitter>
         <type>group</type>
     </allowedSubmitters>
     <allowedSubmitters>
@@ -791,7 +920,7 @@ describe('extractApprovalProcess', () => {
         <allowDelegate>false</allowDelegate>
         <assignedApprover>
             <approver>
-                <name>Clinical_Instruction_Payment_Approval</name>
+                <name>Sample_Payment_Approval</name>
                 <type>queue</type>
             </approver>
             <whenMultipleApprovers>FirstResponse</whenMultipleApprovers>
@@ -880,20 +1009,20 @@ describe('extractApprovalProcess', () => {
     <active>true</active>
     <allowRecall>false</allowRecall>
     <allowedSubmitters>
-        <submitter>FM_Payment_Edit</submitter>
+        <submitter>Widget_Payment_Edit</submitter>
         <type>group</type>
     </allowedSubmitters>
     <allowedSubmitters>
         <type>owner</type>
     </allowedSubmitters>
     <allowedSubmitters>
-        <submitter>Faculty_Management</submitter>
+        <submitter>Widget_Management</submitter>
         <type>role</type>
     </allowedSubmitters>
     <approvalStep>
         <assignedApprover>
             <approver>
-                <name>Clinical_Instruction_Payment_Approval</name>
+                <name>Sample_Payment_Approval</name>
                 <type>queue</type>
             </approver>
             <whenMultipleApprovers>FirstResponse</whenMultipleApprovers>
@@ -924,19 +1053,19 @@ describe('extractApprovalProcess', () => {
         const submitters = processNode!.properties
           .allowedSubmitters as Array<{ type: string; name: string | null }>;
         // group entry
-        expect(submitters).toContainEqual({ type: 'group', name: 'FM_Payment_Edit' });
+        expect(submitters).toContainEqual({ type: 'group', name: 'Widget_Payment_Edit' });
         // owner entry: no <submitter> child → name is null
         expect(submitters).toContainEqual({ type: 'owner', name: null });
         // role entry
-        expect(submitters).toContainEqual({ type: 'role', name: 'Faculty_Management' });
+        expect(submitters).toContainEqual({ type: 'role', name: 'Widget_Management' });
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
     });
 
-    it('emits a references edge from the process to Group:FM_Payment_Edit with referenceKind=allowedSubmitter', async () => {
+    it('emits a references edge from the process to Group:Widget_Payment_Edit with referenceKind=allowedSubmitter', async () => {
       // goldenAssertion: a references edge exists from the process node to
-      // Group:FM_Payment_Edit with referenceKind='allowedSubmitter'.
+      // Group:Widget_Payment_Edit with referenceKind='allowedSubmitter'.
       const { dir, path } = await writeTempApprovalXml(
         'Payment__c.Payment_Requiring_Approval_V2',
         SUBMITTER_XML,
@@ -954,18 +1083,18 @@ describe('extractApprovalProcess', () => {
         // group + role = 2 named submitters; owner has no edge
         expect(submitterEdges).toHaveLength(2);
         const groupEdge = submitterEdges.find(
-          (e) => e.toId === 'Group:FM_Payment_Edit',
+          (e) => e.toId === 'Group:Widget_Payment_Edit',
         );
         expect(groupEdge).toBeDefined();
         expect(groupEdge).toMatchObject({
           fromId: 'ApprovalProcess:Payment__c.Payment_Requiring_Approval_V2',
-          toId: 'Group:FM_Payment_Edit',
+          toId: 'Group:Widget_Payment_Edit',
           edgeType: 'references',
           confidence: 'declared',
           properties: { referenceKind: 'allowedSubmitter', submitterType: 'group' },
         });
         const roleEdge = submitterEdges.find(
-          (e) => e.toId === 'Role:Faculty_Management',
+          (e) => e.toId === 'Role:Widget_Management',
         );
         expect(roleEdge).toBeDefined();
       } finally {
@@ -1010,6 +1139,114 @@ describe('extractApprovalProcess', () => {
               'allowedSubmitter',
         );
         expect(submitterEdges).toHaveLength(0);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('structured step breakdown (APPROVAL-PROCESS-OMITS-STEP-APPROVER-BREAKDOWN)', () => {
+    it('FAIL-BEFORE/PASS-AFTER: emits ordered steps with approvers + entry criteria + reject behavior, and structured final-rejection actions', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<ApprovalProcess xmlns="http://soap.sforce.com/2006/04/metadata">
+    <active>true</active>
+    <label>Widget Approval</label>
+    <finalApprovalActions>
+        <action><name>Widget_Approved_Alert</name><type>Alert</type></action>
+        <action><name>Widget_Status_Approved</name><type>FieldUpdate</type></action>
+    </finalApprovalActions>
+    <finalRejectionActions>
+        <action><name>Widget_Rejected_Alert</name><type>Alert</type></action>
+        <action><name>Widget_Status_Rejected</name><type>FieldUpdate</type></action>
+    </finalRejectionActions>
+    <approvalStep>
+        <assignedApprover>
+            <approver><name>first_reviewer</name><type>user</type></approver>
+        </assignedApprover>
+        <entryCriteria>
+            <booleanFilter>1 OR 2</booleanFilter>
+            <criteriaItems><field>Obj__c.CreatedBy</field><operation>equals</operation><value>Alice</value></criteriaItems>
+            <criteriaItems><field>Obj__c.CreatedBy</field><operation>equals</operation><value>Bob</value></criteriaItems>
+        </entryCriteria>
+        <ifCriteriaNotMet>GotoNextStep</ifCriteriaNotMet>
+        <label>First Reviewer</label>
+        <name>First_Reviewer</name>
+    </approvalStep>
+    <approvalStep>
+        <assignedApprover>
+            <approver><name>second_reviewer</name><type>user</type></approver>
+        </assignedApprover>
+        <label>Second Reviewer</label>
+        <name>Second_Reviewer</name>
+        <rejectBehavior><type>RejectRequest</type></rejectBehavior>
+    </approvalStep>
+</ApprovalProcess>`;
+      const { dir, path } = await writeTempApprovalXml('Obj__c.Widget_Approval', xml);
+      try {
+        const result = await extractApprovalProcess(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const props = result.value.nodes[0]!.properties as {
+          stepCount: number;
+          steps: ReadonlyArray<{
+            stepIndex: number;
+            name: string | null;
+            approvers: ReadonlyArray<{ name: string | null; type: string | null }>;
+            entryCriteriaItemCount: number;
+            ifCriteriaNotMet: string | null;
+            rejectBehaviorType: string | null;
+          }>;
+          finalRejectionActions: ReadonlyArray<{ name: string | null; type: string | null }>;
+          finalApprovalActions: ReadonlyArray<{ name: string | null; type: string | null }>;
+        };
+
+        // stepCount unchanged, but the per-step breakdown is now surfaced.
+        expect(props.stepCount).toBe(2);
+        expect(props.steps).toHaveLength(2);
+
+        // Step 1: approver + entry criteria + GotoNextStep.
+        expect(props.steps[0]?.name).toBe('First_Reviewer');
+        expect(props.steps[0]?.approvers).toEqual([{ name: 'first_reviewer', type: 'user' }]);
+        expect(props.steps[0]?.entryCriteriaItemCount).toBe(2);
+        expect(props.steps[0]?.ifCriteriaNotMet).toBe('GotoNextStep');
+
+        // Step 2: its reject behavior is structured (not just an alert name).
+        expect(props.steps[1]?.approvers).toEqual([{ name: 'second_reviewer', type: 'user' }]);
+        expect(props.steps[1]?.rejectBehaviorType).toBe('RejectRequest');
+
+        // The reject path is answerable from facts: the Rejected alert + field update.
+        expect(props.finalRejectionActions).toEqual([
+          { name: 'Widget_Rejected_Alert', type: 'Alert' },
+          { name: 'Widget_Status_Rejected', type: 'FieldUpdate' },
+        ]);
+        expect(props.finalApprovalActions).toEqual([
+          { name: 'Widget_Approved_Alert', type: 'Alert' },
+          { name: 'Widget_Status_Approved', type: 'FieldUpdate' },
+        ]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits empty steps + action lists (not undefined) for a stepless process', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<ApprovalProcess xmlns="http://soap.sforce.com/2006/04/metadata">
+    <active>false</active>
+    <label>Empty Approval</label>
+</ApprovalProcess>`;
+      const { dir, path } = await writeTempApprovalXml('Obj__c.Empty_Approval', xml);
+      try {
+        const result = await extractApprovalProcess(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const props = result.value.nodes[0]!.properties as {
+          stepCount: number;
+          steps: readonly unknown[];
+          finalRejectionActions: readonly unknown[];
+        };
+        expect(props.stepCount).toBe(0);
+        expect(props.steps).toEqual([]);
+        expect(props.finalRejectionActions).toEqual([]);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

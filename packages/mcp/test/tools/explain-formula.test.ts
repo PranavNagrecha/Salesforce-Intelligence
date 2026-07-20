@@ -129,19 +129,19 @@ describe('explainFormulaHandler', () => {
   });
 
   it('does NOT mint a CustomField id for a __r relationship-traversal path', async () => {
-    // `Faculty_Contact__r` is a RELATIONSHIP name, not an object API
-    // name. The old code minted `CustomField:Faculty_Contact__r.Faculty_ID__c`,
+    // `Widget_Contact__r` is a RELATIONSHIP name, not an object API
+    // name. The old code minted `CustomField:Widget_Contact__r.Widget_ID__c`,
     // an id that never resolves. The fix keeps the raw path with
     // toId: null and tags it kind: 'relationship'.
     const result = await explainFormulaHandler(ctx, {
-      formulaExpression: 'Faculty_Contact__r.Faculty_ID__c',
+      formulaExpression: 'Widget_Contact__r.Widget_ID__c',
       parentObjectApiName: 'Course__c',
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const refs = result.value.data.fieldReferences;
     expect(refs.length).toBe(1);
-    expect(refs[0]?.path).toBe('Faculty_Contact__r.Faculty_ID__c');
+    expect(refs[0]?.path).toBe('Widget_Contact__r.Widget_ID__c');
     expect(refs[0]?.toId).toBeNull();
     expect(refs[0]?.kind).toBe('relationship');
   });

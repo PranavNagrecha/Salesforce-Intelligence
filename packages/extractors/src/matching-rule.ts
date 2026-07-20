@@ -142,6 +142,25 @@ interface ResolvedRuleItem {
 }
 
 /**
+ * MATCHING-RULE-OMITS-FIELD-EDGES: resolve a `<matchingRuleItems>`
+ * `<fieldName>` to its canonical `CustomField:` id. A matching-rule item
+ * compares one field ON the rule's parent object, so a bare field name
+ * (`Email`) is scoped by the rule's `objectApiName` (`Contact.Email`). A
+ * cross-object dotted path (rare, but the metadata does not forbid it) is
+ * preserved verbatim, mirroring the criteria-field resolution in
+ * `condition-extractor.ts`.
+ */
+const resolveMatchFieldId = (
+  fieldName: string,
+  objectApiName: string,
+): string => {
+  const trimmed = fieldName.trim();
+  return trimmed.includes('.')
+    ? `CustomField:${trimmed}`
+    : `CustomField:${objectApiName}.${trimmed}`;
+};
+
+/**
  * Validate and resolve a single `<matchingRuleItems>` object. Per
  * `MatchingRule.md`, `<fieldName>` and `<matchingMethod>` are required;
  * if `<blankValueBehavior>` is present it must be one of `{MatchBlanks,
@@ -193,10 +212,14 @@ const resolveRuleItem = (
 };
 
 /**
- * Build a per-rule Node + one `parentOf` edge. Each rule contributes
- * exactly one node and one edge — MatchingRules emit no `references`
- * edges in v1.3 (the duplicate-rule -> matching-rule link is the
- * **inbound** reference produced by the DuplicateRule extractor).
+ * Build a per-rule Node + its outgoing edges: one `parentOf` from the
+ * parent object, plus one `references` edge per DISTINCT compared field
+ * (MATCHING-RULE-OMITS-FIELD-EDGES). The duplicate-rule -> matching-rule
+ * link is still the **inbound** reference produced by the DuplicateRule
+ * extractor; the outbound `references` edges added here wire the matcher
+ * to the `CustomField:` nodes it compares, so field-usage / blast-radius
+ * queries see MatchingRule dependents instead of only a flattened
+ * `fieldsCompared` string property.
  */
 const buildRule = (
   rule: Record<string, unknown>,
@@ -311,6 +334,29 @@ const buildRule = (
     },
   ];
 
+  // MATCHING-RULE-OMITS-FIELD-EDGES: one `references` edge per DISTINCT
+  // compared field, in first-seen XML order. Deduplicated by target id so a
+  // field compared by two items (different matching methods) still edges
+  // once; the per-edge `matchingMethod` records the first item's method.
+  const seenFieldTargets = new Set<string>();
+  for (const item of resolvedItems) {
+    const toId = resolveMatchFieldId(item.fieldName, objectApiName);
+    if (seenFieldTargets.has(toId)) continue;
+    seenFieldTargets.add(toId);
+    edges.push({
+      fromId: ruleId,
+      toId,
+      edgeType: 'references',
+      confidence: 'declared',
+      source: EXTRACTOR_SOURCE,
+      properties: {
+        referenceKind: 'matchingField',
+        fieldName: item.fieldName,
+        matchingMethod: item.matchingMethod,
+      },
+    });
+  }
+
   return ok({ node, edges });
 };
 
@@ -332,10 +378,13 @@ const buildRule = (
  * shipped convention.
  *
  * For each rule the extractor emits one `parentOf` edge from
- * `CustomObject:{ObjectApiName}` to the rule. MatchingRules emit no
- * `references` edges in v1.3 — the duplicate-rule -> matching-rule link
- * is the **inbound** `references` edge produced by the DuplicateRule
- * extractor (the matcher itself is a leaf consumer in the rule graph).
+ * `CustomObject:{ObjectApiName}` to the rule, plus one `declared`
+ * `references` edge per DISTINCT compared field
+ * (`CustomField:{ObjectApiName}.{fieldName}`, or the verbatim dotted path
+ * for a cross-object field) — MATCHING-RULE-OMITS-FIELD-EDGES, so
+ * field-usage / blast-radius queries resolve MatchingRule dependents. The
+ * duplicate-rule -> matching-rule link remains the **inbound** `references`
+ * edge produced by the DuplicateRule extractor.
  *
  * Returns an `ExtractorError` for any of the documented failure modes:
  * `file-not-found`, `parse-error`, or `malformed-input` (wrong root,

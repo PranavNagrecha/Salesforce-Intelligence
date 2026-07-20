@@ -13,7 +13,10 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
-import { lightningPagesHandler } from '../../src/tools/lightning-pages.js';
+import {
+  lightningPagesHandler,
+  lightningPagesInputSchema,
+} from '../../src/tools/lightning-pages.js';
 
 const MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -85,6 +88,64 @@ describe('lightningPagesHandler', () => {
     expect(r.value.data.mode).toBe('flexipage');
     expect(r.value.data.forObject).toBe('Account');
     expect(r.value.data.pageType).toBe('RecordPage');
+    expect(r.value.data.appliedScope).toEqual({
+      componentId: 'FlexiPage:Account_Record_Page',
+      object: 'Account',
+    });
+  });
+
+  // GUARD (L2 alias OS / ADMIN-SURFACE-ALIAS-SKEW-CLUSTER): pre-fix the schema
+  // required `componentId` and Zod-STRIPPED `objectApiName` -> `componentId:
+  // Required`. Post-fix a natural object alias resolves to the SAME object-mode
+  // result as the canonical CustomObject: componentId, with appliedScope echoed.
+  it('natural objectApiName ≡ canonical CustomObject componentId (byte-equal + appliedScope)', async () => {
+    const run = async (raw: unknown) => {
+      const parsed = lightningPagesInputSchema.safeParse(raw);
+      if (!parsed.success) return null;
+      return lightningPagesHandler(ctx, parsed.data);
+    };
+    const canonical = await run({ componentId: 'CustomObject:Account' });
+    const byObjectApiName = await run({ objectApiName: 'Account' });
+    const byObject = await run({ object: 'Account' });
+    const byObjectId = await run({ objectId: 'CustomObject:Account' });
+    for (const r of [canonical, byObjectApiName, byObject, byObjectId]) {
+      expect(r).not.toBeNull();
+      expect(r?.ok).toBe(true);
+    }
+    if (!canonical?.ok || !byObjectApiName?.ok || !byObject?.ok || !byObjectId?.ok) return;
+    expect(canonical.value.data.appliedScope).toEqual({
+      componentId: 'CustomObject:Account',
+      object: 'Account',
+    });
+    for (const r of [byObjectApiName, byObject, byObjectId]) {
+      expect(r.value.data.pages).toEqual(canonical.value.data.pages);
+      expect(r.value.data.summary).toEqual(canonical.value.data.summary);
+      expect(r.value.data.appliedScope).toEqual(canonical.value.data.appliedScope);
+    }
+  });
+
+  it('disagreeing object aliases → invalid-query', async () => {
+    const parsed = lightningPagesInputSchema.safeParse({
+      objectApiName: 'Account',
+      object: 'Contact',
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    const r = await lightningPagesHandler(ctx, parsed.data);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('a FlexiPage: componentId + an object alias is ambiguous → invalid-query', async () => {
+    const parsed = lightningPagesInputSchema.safeParse({
+      componentId: 'FlexiPage:Account_Record_Page',
+      objectApiName: 'Account',
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    const r = await lightningPagesHandler(ctx, parsed.data);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe('invalid-query');
   });
 
   it('always discloses that activation is not in the metadata', async () => {
@@ -96,6 +157,46 @@ describe('lightningPagesHandler', () => {
   it('component-not-found for an unknown object', async () => {
     const r = await lightningPagesHandler(ctx, { componentId: 'CustomObject:Nope__c' });
     expect(r.ok).toBe(false); if (r.ok) return; expect(r.error.kind).toBe('component-not-found');
+  });
+
+  // GUARD (LIGHTNING-PAGES-SILENTLY-DROPS-PROFILE-ARGS): pre-fix an object +
+  // profile call was BYTE-IDENTICAL to the bare object call (profile Zod-stripped)
+  // and read as "{profile} is served these pages". Post-fix a profile* key is
+  // REFUSED with the activation-gap pointer instead of a silent bare inventory.
+  it('a profile* key is refused (activation not modeled), never silently stripped', async () => {
+    for (const profileArg of [
+      { profileApiName: 'Sales_Rep' },
+      { profileId: 'Profile:Sales_Rep' },
+      { profileName: 'Sales_Rep' },
+      { profile: 'Sales_Rep' },
+    ]) {
+      const parsed = lightningPagesInputSchema.safeParse({
+        objectApiName: 'Account',
+        ...profileArg,
+      });
+      expect(parsed.success).toBe(true);
+      if (!parsed.success) continue;
+      const r = await lightningPagesHandler(ctx, parsed.data);
+      expect(r.ok).toBe(false);
+      if (r.ok) continue;
+      expect(r.error.kind).toBe('invalid-query');
+      expect(r.error.message).toMatch(/layout_for_user|App Builder/);
+    }
+  });
+
+  // The refusal must DIFFER from the bare object inventory (which still succeeds),
+  // proving the profile scope is honored (rejected), not dropped.
+  it('bare object call still succeeds and differs from the profile-scoped refusal', async () => {
+    const bare = await lightningPagesHandler(ctx, { objectApiName: 'Account' });
+    expect(bare.ok).toBe(true);
+    const parsed = lightningPagesInputSchema.safeParse({
+      objectApiName: 'Account',
+      profileApiName: 'Sales_Rep',
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    const scoped = await lightningPagesHandler(ctx, parsed.data);
+    expect(scoped.ok).toBe(false);
   });
 });
 

@@ -10,6 +10,7 @@ import type {
 import { err, ok } from '@sf-intelligence/core';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
+import { UNRESOLVED_PROFILE_PREFIX } from './enterprise-metadata.js';
 import { deriveDotSplitObjectAndApiName } from './path-utils.js';
 
 const DUPLICATE_RULE_FILE_SUFFIX = '.duplicateRule-meta.xml';
@@ -176,6 +177,123 @@ const resolveFilterExpression = (rule: Record<string, unknown>): string | null =
 };
 
 /**
+ * DUPLICATE-RULE-FILTER-PROFILE-UNGRAPHED: a Profile the rule's
+ * `<duplicateRuleFilter>` scopes matching by. Duplicate rules routinely
+ * EXCLUDE an integration/admin Profile from matching (`Profile notEqual
+ * Integration` on the User table); that exclusion stayed buried in the
+ * opaque `filterExpression` JSON string, so the Profile looked unused and
+ * "does Integration bypass portal duplicate matching?" had no graph answer.
+ */
+interface FilterProfileRef {
+  /**
+   * Canonical target — `Profile:{name}` for a `Profile` (name) filter, or an
+   * honest `UnresolvedProfile:{id}` stub for a `ProfileId` (opaque id) filter. A
+   * single-file extractor cannot resolve the id to the name-keyed
+   * `Profile:{apiName}` node, and a `Profile:{id}` node would masquerade as a
+   * real Profile — so the id stays in the distinct `UnresolvedProfile:`
+   * namespace until `resolveRestrictionRuleProfileEdges` resolves it downstream.
+   */
+  readonly toId: string;
+  /** The profile name (or id) verbatim from the filter value. */
+  readonly profileValue: string;
+  /** The filter operation (`equals` / `notEqual` / `contains` / …). */
+  readonly operation: string;
+  /** True when the filter field was `ProfileId` (opaque id, name unresolved). */
+  readonly idBased: boolean;
+  /** `declared` for exact-match ops on a name; `heuristic` otherwise. */
+  readonly confidence: 'declared' | 'heuristic';
+}
+
+/**
+ * Exact-match filter operations whose `<value>` is a Profile NAME the
+ * `Profile:{name}` node is keyed by. `contains` / `startsWith` / etc. carry
+ * a substring, so the resolved edge is `heuristic` (best-effort) rather than
+ * `declared`.
+ */
+const EXACT_PROFILE_FILTER_OPS: ReadonlySet<string> = new Set([
+  'equals',
+  'notEqual',
+]);
+
+/**
+ * DUPLICATE-RULE-FILTER-PROFILE-UNGRAPHED: parse the `<duplicateRuleFilter>`
+ * for `Profile` / `ProfileId` filter items on the `User` table and resolve
+ * each named Profile to a `Profile:` edge target.
+ *
+ * A multi-value `equals` / `notEqual` filter serialises its profiles as a
+ * comma-separated `<value>` (`Integration, System Administrator`), so the
+ * value is split on commas and trimmed; each part becomes ONE edge, in
+ * first-seen order and deduplicated by target id. `field == 'Profile'`
+ * carries the Profile NAME (matches the `Profile:{Name}` node key →
+ * `declared` for exact ops); `field == 'ProfileId'` carries an opaque id the
+ * single-file extractor cannot resolve to the name-keyed node, so it emits an
+ * honest `UnresolvedProfile:{id}` stub at `heuristic` confidence — NEVER a
+ * `Profile:{id}` node that would masquerade as a real Profile (the
+ * RESTRICTION-RULE-OMITS-PROFILE-USERCRITERIA-EDGE sibling; see
+ * {@link UNRESOLVED_PROFILE_PREFIX}). The downstream
+ * `resolveRestrictionRuleProfileEdges` refresh pass rewrites the stub to a real
+ * `Profile:{apiName}` edge when an Id->apiName index resolves it.
+ */
+const extractFilterProfileRefs = (
+  rule: Record<string, unknown>,
+): readonly FilterProfileRef[] => {
+  const filterRaw = unwrapSingle(rule['duplicateRuleFilter']);
+  if (typeof filterRaw !== 'object' || filterRaw === null) return [];
+  const filterObj = filterRaw as Record<string, unknown>;
+  const refs: FilterProfileRef[] = [];
+  const seen = new Set<string>();
+  for (const rawItem of toArray(filterObj['duplicateRuleFilterItems'])) {
+    if (typeof rawItem !== 'object' || rawItem === null) continue;
+    const item = rawItem as Record<string, unknown>;
+    const fieldRaw = unwrapSingle(item['field']);
+    if (fieldRaw === undefined || fieldRaw === null) continue;
+    const field = String(fieldRaw).trim();
+    const isId = field === 'ProfileId';
+    if (field !== 'Profile' && !isId) continue;
+    // The standard `Profile` relationship lives on the User table. Require
+    // `<table>User</table>` when present so a hypothetical custom field named
+    // `Profile` on another object cannot mint a bogus Profile edge; an absent
+    // table is tolerated (older serialisations).
+    const tableRaw = unwrapSingle(item['table']);
+    if (tableRaw !== undefined && tableRaw !== null && String(tableRaw).trim() !== 'User') {
+      continue;
+    }
+    const valueRaw = unwrapSingle(item['value']);
+    if (valueRaw === undefined || valueRaw === null || String(valueRaw) === '') {
+      continue;
+    }
+    const operationRaw = unwrapSingle(item['operation']);
+    const operation =
+      operationRaw === undefined || operationRaw === null
+        ? ''
+        : String(operationRaw);
+    const exact = EXACT_PROFILE_FILTER_OPS.has(operation);
+    for (const part of String(valueRaw).split(',')) {
+      const value = part.trim();
+      if (value === '') continue;
+      // A `Profile` name filter targets the real name-keyed `Profile:{name}`
+      // node. A `ProfileId` filter's opaque id cannot be resolved to that node
+      // here, so it targets an honest `UnresolvedProfile:{id}` stub in a
+      // DISTINCT namespace — NEVER a `Profile:{id}` phantom that would
+      // masquerade as a real Profile.
+      const toId = isId ? `${UNRESOLVED_PROFILE_PREFIX}${value}` : `Profile:${value}`;
+      if (seen.has(toId)) continue;
+      seen.add(toId);
+      refs.push({
+        toId,
+        profileValue: value,
+        operation,
+        idBased: isId,
+        // A name under an exact op resolves to the `Profile:{name}` node
+        // (declared); an id, or a substring op, is a best-effort stub.
+        confidence: !isId && exact ? 'declared' : 'heuristic',
+      });
+    }
+  }
+  return refs;
+};
+
+/**
  * The resolved form of a `<duplicateRuleMatchRules>` entry: the canonical
  * target id of the matching rule and the count of real (object-shaped)
  * `<objectMapping>` entries — nil/empty mappings excluded — used as an edge
@@ -248,6 +366,21 @@ const resolveMatcher = (
  *    `objectMappingCount` (the count of real object-shaped `<objectMapping>`
  *    entries; nil/empty mappings excluded) as properties. Duplicate matcher
  *    references (same matching rule named twice) are deduplicated.
+ * 3. One `references` edge per Profile named in the `<duplicateRuleFilter>`
+ *    (`Profile:{name}` for a `Profile` filter — `declared` for exact ops,
+ *    `referenceKind: 'duplicateFilterProfile'`; an honest
+ *    `UnresolvedProfile:{id}` stub for a `ProfileId` filter — `heuristic`,
+ *    `referenceKind: 'duplicateRuleProfileUnresolved'`, NEVER a `Profile:{id}`
+ *    node that would masquerade as a real Profile — the
+ *    RESTRICTION-RULE-OMITS-PROFILE-USERCRITERIA-EDGE sibling) —
+ *    DUPLICATE-RULE-FILTER-PROFILE-UNGRAPHED. Multi-value `equals`/`notEqual`
+ *    filters split their comma-separated `<value>` into one edge each. The
+ *    edge carries `operation` (so a `notEqual` EXCLUSION is distinguishable),
+ *    and the names/ids mirror onto `properties.filterProfiles`. A `ProfileId`
+ *    stub is rewritten to a real `Profile:{apiName}` edge downstream by
+ *    `resolveRestrictionRuleProfileEdges` when an Id->apiName index resolves it.
+ *    The opaque `filterExpression` string is still emitted for backward
+ *    compatibility.
  *
  * The two-segment filename `{Obj}.{Rule}` is split on the **first** dot
  * to recover both parts; rule names containing dots round-trip correctly.
@@ -443,6 +576,10 @@ export const extractDuplicateRule = async (
   }
 
   const filterExpression = resolveFilterExpression(rootObj);
+  // DUPLICATE-RULE-FILTER-PROFILE-UNGRAPHED: Profiles the filter scopes
+  // matching by. Emitted as `references` edges (below) and mirrored onto
+  // `properties.filterProfiles` (scalar array — depth-4 render-safe).
+  const filterProfileRefs = extractFilterProfileRefs(rootObj);
 
   const ruleId = `DuplicateRule:${objectApiName}.${ruleName}`;
   const parentId = `CustomObject:${objectApiName}`;
@@ -470,6 +607,9 @@ export const extractDuplicateRule = async (
       filterExpression,
       matchingRuleCount: resolvedMatchers.length,
       sortOrder,
+      ...(filterProfileRefs.length > 0
+        ? { filterProfiles: filterProfileRefs.map((r) => r.profileValue) }
+        : {}),
     },
   };
 
@@ -502,6 +642,41 @@ export const extractDuplicateRule = async (
         matcherIndex,
         objectMappingCount: matcher.objectMappingCount,
       },
+    });
+  }
+
+  // DUPLICATE-RULE-FILTER-PROFILE-UNGRAPHED: one `references` edge per Profile
+  // named in the `<duplicateRuleFilter>`. Emitted AFTER the matcher edges so
+  // existing consumers that index the matcher references by position are
+  // unaffected. `operation` is carried so a consumer can tell an EXCLUSION
+  // (`notEqual` — the profile bypasses matching) from an inclusion.
+  //
+  // A `ProfileId` filter targets an honest `UnresolvedProfile:{id}` stub
+  // (`referenceKind: 'duplicateRuleProfileUnresolved'`) — NEVER a `Profile:{id}`
+  // node that masquerades as a real Profile (RESTRICTION-RULE-OMITS-PROFILE-
+  // USERCRITERIA-EDGE sibling). The downstream `resolveRestrictionRuleProfileEdges`
+  // refresh pass rewrites the stub to a real `Profile:{apiName}` edge when an Id
+  // index resolves it; unresolved ids stay explicit stubs.
+  for (const ref of filterProfileRefs) {
+    edges.push({
+      fromId: ruleId,
+      toId: ref.toId,
+      edgeType: 'references',
+      confidence: ref.confidence,
+      source: EXTRACTOR_SOURCE,
+      properties: ref.idBased
+        ? {
+            referenceKind: 'duplicateRuleProfileUnresolved',
+            filterField: 'ProfileId',
+            operation: ref.operation,
+            unresolvedProfileId: ref.profileValue,
+            idBasedTarget: true,
+          }
+        : {
+            referenceKind: 'duplicateFilterProfile',
+            filterField: 'Profile',
+            operation: ref.operation,
+          },
     });
   }
 

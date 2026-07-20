@@ -15,10 +15,12 @@ import {
 } from '@sf-intelligence/graph';
 
 import {
+  buildProfileIdIndex,
   componentTypeFromSourcePath,
   FOLDED_REPORT_DASHBOARD_NAME_CAP,
   foldReportDashboardUsageIntoFields,
   renderVault,
+  resolveRestrictionRuleProfileEdges,
   walkAndExtract,
 } from '../src/refresh-pipeline.js';
 
@@ -234,6 +236,257 @@ describe('foldReportDashboardUsageIntoFields', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// RESTRICTION-RULE-OMITS-PROFILE-USERCRITERIA-EDGE: the extractor emits an
+// explicit `UnresolvedProfile:{id}` stub for a userCriteria `$User.ProfileId`
+// gate (a single-file extractor cannot resolve the opaque id, and a
+// `Profile:{id}` phantom would masquerade as a real Profile). This cross-file
+// pass resolves the stub into a real `Profile:{apiName}` edge when a Profile
+// node carries its Salesforce id — and leaves the honest stub in place when it
+// does not (the real offline vault: Profile metadata carries no id). All ids /
+// apiNames below are SYNTHETIC and verified absent from org-kb.
+describe('resolveRestrictionRuleProfileEdges (RESTRICTION-RULE-OMITS-PROFILE-USERCRITERIA-EDGE)', () => {
+  const SYN_PROFILE_SID18 = '00eSYNTHETIC001AAA';
+  const SYN_PROFILE_APINAME = 'Synthetic_Widget_Reviewer';
+  const SYN_UNMAPPED_ID = '00eSYNTHNOMATCH999';
+
+  const mkNode = (
+    id: string,
+    type: Node['type'],
+    properties: Record<string, unknown> = {},
+  ): Node => ({
+    id,
+    type,
+    apiName: id.slice(id.indexOf(':') + 1),
+    label: null,
+    parentId: null,
+    sourcePath: 'x',
+    lastModifiedDate: null,
+    lastModifiedBy: null,
+    apiVersion: null,
+    properties,
+  });
+
+  /** A synthetic Profile node carrying its Salesforce id (offline vaults do NOT). */
+  const profileWithId = (apiName: string, salesforceId: string): Node => ({
+    ...mkNode(`Profile:${apiName}`, 'Profile', { salesforceId }),
+  });
+
+  /** A RestrictionRule result shaped exactly like the extractor emits. */
+  const ruleResultWithStub = (ruleName: string, profileId: string): ExtractionResult => ({
+    nodes: [
+      mkNode(`RestrictionRule:${ruleName}`, 'RestrictionRule', {
+        active: 'true',
+        userCriteriaProfileIds: [profileId],
+        unresolvedProfileIds: [profileId],
+      }),
+    ],
+    edges: [
+      {
+        fromId: `RestrictionRule:${ruleName}`,
+        toId: `UnresolvedProfile:${profileId}`,
+        edgeType: 'references',
+        confidence: 'heuristic',
+        source: 'enterprise-metadata-extractor',
+        properties: {
+          referenceKind: 'restrictionUserProfileUnresolved',
+          unresolvedProfileId: profileId,
+          idBasedTarget: true,
+        },
+      },
+    ],
+  });
+
+  it('rewrites the stub to a real Profile:{apiName} edge when the id resolves', () => {
+    const results: readonly ExtractionResult[] = [
+      { nodes: [profileWithId(SYN_PROFILE_APINAME, SYN_PROFILE_SID18)], edges: [] },
+      ruleResultWithStub('Limit_Widget_Reviewer', SYN_PROFILE_SID18),
+    ];
+
+    const out = resolveRestrictionRuleProfileEdges(results);
+    const edges = out.flatMap((r) => r.edges);
+
+    // The stub is gone; a real Profile edge takes its place.
+    expect(edges.some((e) => e.toId.startsWith('UnresolvedProfile:'))).toBe(false);
+    const profileEdge = edges.find(
+      (e) => e.toId === `Profile:${SYN_PROFILE_APINAME}`,
+    );
+    expect(profileEdge).toBeDefined();
+    if (!profileEdge) return;
+    expect(profileEdge.fromId).toBe('RestrictionRule:Limit_Widget_Reviewer');
+    expect(profileEdge.edgeType).toBe('references');
+    // "that Profile's usages include the RestrictionRule" — the inbound
+    // reference now lands on the real Profile node, not a phantom.
+    expect(profileEdge.properties).toEqual({
+      referenceKind: 'restrictionUserProfile',
+      profileId: SYN_PROFILE_SID18,
+      resolvedFromProfileId: true,
+    });
+
+    // Node props are trimmed in lockstep: resolved id moves into the map, the
+    // now-empty `unresolvedProfileIds` disclosure is dropped, and the full gated
+    // list survives.
+    const ruleNode = out
+      .flatMap((r) => r.nodes)
+      .find((n) => n.id === 'RestrictionRule:Limit_Widget_Reviewer')!;
+    expect(ruleNode.properties['userCriteriaResolvedProfiles']).toEqual({
+      [SYN_PROFILE_SID18]: SYN_PROFILE_APINAME,
+    });
+    expect(ruleNode.properties['unresolvedProfileIds']).toBeUndefined();
+    expect(ruleNode.properties['userCriteriaProfileIds']).toEqual([SYN_PROFILE_SID18]);
+  });
+
+  it('leaves an UNRESOLVABLE id as an explicit stub — never mints a Profile:{id} phantom', () => {
+    const results: readonly ExtractionResult[] = [
+      // A real profile exists, but its id does NOT match the rule's gated id.
+      { nodes: [profileWithId(SYN_PROFILE_APINAME, SYN_PROFILE_SID18)], edges: [] },
+      ruleResultWithStub('Limit_Orphan_Access', SYN_UNMAPPED_ID),
+    ];
+
+    const out = resolveRestrictionRuleProfileEdges(results);
+    const edges = out.flatMap((r) => r.edges);
+
+    // No Profile:{id} phantom, and the unmatched id does NOT collide with the
+    // real profile node.
+    expect(edges.some((e) => e.toId === `Profile:${SYN_UNMAPPED_ID}`)).toBe(false);
+    expect(edges.some((e) => e.toId === `Profile:${SYN_PROFILE_APINAME}`)).toBe(false);
+    const stub = edges.find((e) => e.toId === `UnresolvedProfile:${SYN_UNMAPPED_ID}`);
+    expect(stub).toBeDefined();
+    expect(stub?.properties['referenceKind']).toBe('restrictionUserProfileUnresolved');
+    const ruleNode = out
+      .flatMap((r) => r.nodes)
+      .find((n) => n.id === 'RestrictionRule:Limit_Orphan_Access')!;
+    expect(ruleNode.properties['unresolvedProfileIds']).toEqual([SYN_UNMAPPED_ID]);
+    expect(ruleNode.properties['userCriteriaResolvedProfiles']).toBeUndefined();
+  });
+
+  it('resolves across a 15-vs-18-char id width mismatch', () => {
+    const sid15 = SYN_PROFILE_SID18.slice(0, 15);
+    const results: readonly ExtractionResult[] = [
+      // Profile keyed on the 15-char form; rule gates on the 18-char form.
+      { nodes: [profileWithId(SYN_PROFILE_APINAME, sid15)], edges: [] },
+      ruleResultWithStub('Limit_Width_Mismatch', SYN_PROFILE_SID18),
+    ];
+    const out = resolveRestrictionRuleProfileEdges(results);
+    const edges = out.flatMap((r) => r.edges);
+    expect(edges.some((e) => e.toId === `Profile:${SYN_PROFILE_APINAME}`)).toBe(true);
+    expect(edges.some((e) => e.toId.startsWith('UnresolvedProfile:'))).toBe(false);
+  });
+
+  it('is an identity no-op on a real offline vault — profiles carry no id, so the stub survives', () => {
+    const results: readonly ExtractionResult[] = [
+      // Profile WITHOUT a salesforceId — the real offline shape.
+      { nodes: [mkNode(`Profile:${SYN_PROFILE_APINAME}`, 'Profile')], edges: [] },
+      ruleResultWithStub('Limit_Real_Vault', SYN_PROFILE_SID18),
+    ];
+    // Empty index → returns the SAME array ref (observably free no-op).
+    expect(buildProfileIdIndex(results).size).toBe(0);
+    expect(resolveRestrictionRuleProfileEdges(results)).toBe(results);
+  });
+
+  it('builds an Id->apiName index (both id widths) from a profile that carries its id', () => {
+    const results: readonly ExtractionResult[] = [
+      { nodes: [profileWithId(SYN_PROFILE_APINAME, SYN_PROFILE_SID18)], edges: [] },
+    ];
+    const index = buildProfileIdIndex(results);
+    expect(index.get(SYN_PROFILE_SID18)).toBe(SYN_PROFILE_APINAME);
+    expect(index.get(SYN_PROFILE_SID18.slice(0, 15))).toBe(SYN_PROFILE_APINAME);
+  });
+
+  // DUPLICATE-RULE-FILTER-PROFILE-UNGRAPHED sibling: a DuplicateRule
+  // `<duplicateRuleFilter>` `ProfileId` item emits the SAME honest
+  // `UnresolvedProfile:{id}` stub (referenceKind `duplicateRuleProfileUnresolved`),
+  // and this SAME pass resolves it — preserving the duplicate edge's
+  // `filterField` / `operation` and leaving the DuplicateRule node untouched
+  // (no restriction-specific `unresolvedProfileIds` disclosure array to trim).
+  const dupRuleResultWithStub = (
+    ruleName: string,
+    profileId: string,
+    operation = 'notEqual',
+  ): ExtractionResult => ({
+    nodes: [
+      mkNode(`DuplicateRule:${ruleName}`, 'DuplicateRule', {
+        filterProfiles: [profileId],
+      }),
+    ],
+    edges: [
+      {
+        fromId: `DuplicateRule:${ruleName}`,
+        toId: `UnresolvedProfile:${profileId}`,
+        edgeType: 'references',
+        confidence: 'heuristic',
+        source: 'duplicate-rule-extractor',
+        properties: {
+          referenceKind: 'duplicateRuleProfileUnresolved',
+          filterField: 'ProfileId',
+          operation,
+          unresolvedProfileId: profileId,
+          idBasedTarget: true,
+        },
+      },
+    ],
+  });
+
+  it('rewrites a DuplicateRule ProfileId stub to Profile:{apiName}, preserving filterField/operation', () => {
+    const results: readonly ExtractionResult[] = [
+      { nodes: [profileWithId(SYN_PROFILE_APINAME, SYN_PROFILE_SID18)], edges: [] },
+      dupRuleResultWithStub('Account.Block_Portal_Dup', SYN_PROFILE_SID18, 'notEqual'),
+    ];
+
+    const out = resolveRestrictionRuleProfileEdges(results);
+    const edges = out.flatMap((r) => r.edges);
+
+    // The stub is gone; a real Profile edge takes its place.
+    expect(edges.some((e) => e.toId.startsWith('UnresolvedProfile:'))).toBe(false);
+    const profileEdge = edges.find((e) => e.toId === `Profile:${SYN_PROFILE_APINAME}`);
+    expect(profileEdge).toBeDefined();
+    if (!profileEdge) return;
+    expect(profileEdge.fromId).toBe('DuplicateRule:Account.Block_Portal_Dup');
+    // Reads as a duplicateFilterProfile (parity with a name-based filter), keeps
+    // the exclusion operation + source field, and records the resolved id.
+    expect(profileEdge.properties).toEqual({
+      referenceKind: 'duplicateFilterProfile',
+      profileId: SYN_PROFILE_SID18,
+      resolvedFromProfileId: true,
+      filterField: 'ProfileId',
+      operation: 'notEqual',
+    });
+
+    // DuplicateRule node carries no restriction-specific disclosure array, so
+    // the pass leaves its properties untouched.
+    const dupNode = out
+      .flatMap((r) => r.nodes)
+      .find((n) => n.id === 'DuplicateRule:Account.Block_Portal_Dup')!;
+    expect(dupNode.properties['userCriteriaResolvedProfiles']).toBeUndefined();
+    expect(dupNode.properties['filterProfiles']).toEqual([SYN_PROFILE_SID18]);
+  });
+
+  it('leaves an UNRESOLVABLE DuplicateRule ProfileId as a stub — never a Profile:{id} phantom', () => {
+    const results: readonly ExtractionResult[] = [
+      { nodes: [profileWithId(SYN_PROFILE_APINAME, SYN_PROFILE_SID18)], edges: [] },
+      dupRuleResultWithStub('Account.Orphan_Dup', SYN_UNMAPPED_ID, 'equals'),
+    ];
+
+    const out = resolveRestrictionRuleProfileEdges(results);
+    const edges = out.flatMap((r) => r.edges);
+
+    expect(edges.some((e) => e.toId === `Profile:${SYN_UNMAPPED_ID}`)).toBe(false);
+    expect(edges.some((e) => e.toId === `Profile:${SYN_PROFILE_APINAME}`)).toBe(false);
+    const stub = edges.find((e) => e.toId === `UnresolvedProfile:${SYN_UNMAPPED_ID}`);
+    expect(stub).toBeDefined();
+    expect(stub?.properties['referenceKind']).toBe('duplicateRuleProfileUnresolved');
+  });
+
+  it('is an identity no-op for a DuplicateRule ProfileId stub on a real offline vault', () => {
+    const results: readonly ExtractionResult[] = [
+      // Profile WITHOUT a salesforceId — the real offline shape.
+      { nodes: [mkNode(`Profile:${SYN_PROFILE_APINAME}`, 'Profile')], edges: [] },
+      dupRuleResultWithStub('Account.Real_Vault_Dup', SYN_PROFILE_SID18),
+    ];
+    expect(buildProfileIdIndex(results).size).toBe(0);
+    expect(resolveRestrictionRuleProfileEdges(results)).toBe(results);
   });
 });
 

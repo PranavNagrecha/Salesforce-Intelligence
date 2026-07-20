@@ -6,6 +6,16 @@
  * — the OPPOSITE direction from `getSubgraph`, which walks both. The
  * result is the slice of nodes and edges that *depend on* the target.
  *
+ * GET-IMPACT-PARENT-FANIN-BLEED: the walk RECORDS an incoming `parentOf`
+ * edge (so the structural parent object is visible in the slice) but never
+ * EXPANDS through it. `parentOf` is structural containment (object → its
+ * field / QuickAction / RecordType), not a dependency; expanding it would
+ * cross up to the parent object and mint the OBJECT's referrers (Apex,
+ * triggers, inbound lookups) as false dependents of the child. A
+ * QuickAction whose only inbound edge is its parent object therefore
+ * returns an empty-dependent slice with a structural-parent disclosure,
+ * not the object's fan-in.
+ *
  * Implementation notes:
  *   - Each hop expands the frontier with ONE batched
  *     `listEdgesForNodes(frontier, { direction: 'in', edgeTypes })`
@@ -406,6 +416,21 @@ const buildImpactDisclosure = (params: {
     : '';
   const reportNote = formatFoldedReportUsageNote(params.reportUsage);
 
+  // GET-IMPACT-PARENT-FANIN-BLEED: when the ONLY edges reaching the root are
+  // structural `parentOf` (its parent object), there are NO usage dependents in
+  // the slice. Disclose that plainly rather than letting the parent object read
+  // as a "dependent" — and name that UI placements (layouts / FlexiPages / apps)
+  // may not be modeled yet, so "no dependents" is "not found", not proven "none".
+  const structuralParentOnly =
+    params.edges.length > 0 && params.edges.every((e) => e.edgeType === 'parentOf');
+  const structuralNote = structuralParentOnly
+    ? ' The only inbound edge is the STRUCTURAL parent object (`parentOf`) — no usage' +
+      ' dependents were found. The impact walk does NOT cross `parentOf` into the' +
+      ' parent object’s own referrers (those depend on the object, not on this' +
+      ' component). UI placements (Layouts / FlexiPages / apps) may not be modeled;' +
+      ' treat this as "no dependents found", not a proven "nothing uses it".'
+    : '';
+
   if (params.truncated) {
     const cap = params.byteTrimmed
       ? `trimmed to fit the ~${Math.round(GRAPH_MAX_PAYLOAD_BYTES / 1000)} KB response budget`
@@ -416,7 +441,8 @@ const buildImpactDisclosure = (params: {
       `estimated JSON payload ${payloadLabel}).${slimNote} ` +
       `Re-query with fewer hops or a narrower edgeTypes filter for a complete view.` +
       lookupCaveat +
-      reportNote
+      reportNote +
+      structuralNote
     );
   }
 
@@ -427,7 +453,8 @@ const buildImpactDisclosure = (params: {
       `but estimated JSON payload is still ${payloadLabel} after per-node slimming.${heavyNote}${slimNote} ` +
       `Re-query with fewer hops or edgeTypes excluding grantedBy to shrink the response.` +
       lookupCaveat +
-      reportNote
+      reportNote +
+      structuralNote
     );
   }
 
@@ -435,7 +462,8 @@ const buildImpactDisclosure = (params: {
     `Complete impact slice within ${params.hops} hop(s): ${countSummary} under the ` +
     `${IMPACT_MAX_NODES}-node / ${IMPACT_MAX_EDGES}-edge cap; estimated JSON payload ${payloadLabel}.${slimNote}` +
     lookupCaveat +
-    reportNote
+    reportNote +
+    structuralNote
   );
 };
 
@@ -513,7 +541,16 @@ const expandIncoming = async (
             break;
           }
           visitedNodes.add(edge.fromId);
-          next.push(edge.fromId);
+          // GET-IMPACT-PARENT-FANIN-BLEED: `parentOf` is a STRUCTURAL
+          // containment edge (parent object → child field/QuickAction/…), not a
+          // usage/dependency. Record the edge and the parent node so the
+          // structural parent stays visible, but NEVER expand the parent's OWN
+          // inbound fan-in — otherwise a QuickAction/field impact walk crosses up
+          // to the parent object and drags the object's referrers (Apex,
+          // triggers, inbound lookups) in as false dependents of the child.
+          if (edge.edgeType !== 'parentOf') {
+            next.push(edge.fromId);
+          }
         }
       }
       if (truncated) break;

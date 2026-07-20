@@ -44,6 +44,8 @@
  *     subscriber lists. Use `sfi.integration_map` for the wired
  *     topology and `sfi.outbound_message_catalog` for per-message
  *     invokers.
+ *   - Intentionally ORG-WIDE: an object / component argument is REFUSED
+ *     (ENDPOINT-CATALOG-IGNORES-OBJECT-SCOPE) — no endpoint→object edge.
  *   - Honesty axis (verbatim in `disclosure`): URLs are captured
  *     verbatim — v2.8 does NOT probe or validate any of them.
  *     Runtime callouts whose destination is computed dynamically
@@ -65,6 +67,8 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { firstNonEmpty } from './input-aliases.js';
+
 /**
  * Hard cap on the per-category scan. Mirrors the
  * `OUTBOUND_MESSAGE_CATALOG_MAX_ENTRIES` ceiling so the v2.8
@@ -73,10 +77,16 @@ import type { Context } from '../server.js';
 const ENDPOINT_CATALOG_MAX_PER_CATEGORY = 500;
 
 /**
- * Zod schema for the `sfi.endpoint_catalog` tool input. Takes no
- * arguments — the catalog is intentionally org-wide.
+ * Zod schema for the `sfi.endpoint_catalog` tool input. Intentionally ORG-WIDE;
+ * the object / component keys exist ONLY so the handler can REFUSE them
+ * (ENDPOINT-CATALOG-IGNORES-OBJECT-SCOPE) — see the handler.
  */
-export const endpointCatalogInputSchema = z.object({});
+export const endpointCatalogInputSchema = z.object({
+  objectApiName: z.string().min(1).optional(),
+  object: z.string().min(1).optional(),
+  objectId: z.string().min(1).optional(),
+  componentId: z.string().min(1).optional(),
+});
 
 /** Parsed input shape, inferred from `endpointCatalogInputSchema`. */
 export type EndpointCatalogInput = z.infer<typeof endpointCatalogInputSchema>;
@@ -449,9 +459,27 @@ const compareEntries = (a: EndpointEntry, b: EndpointEntry): number => {
  */
 export const endpointCatalogHandler = async (
   ctx: Context,
-  _input: EndpointCatalogInput,
+  input: EndpointCatalogInput,
 ): Promise<Result<McpResponse<EndpointCatalogOutput>, McpError>> => {
-  void _input;
+  // ENDPOINT-CATALOG-IGNORES-OBJECT-SCOPE: refuse an object / component scope
+  // instead of silently returning the whole-org catalog (byte-identical for Contact
+  // vs Account vs bare). No endpoint→object edge exists — mirror the closed
+  // `integration_map` refusal. A bare call falls through, keeping today's golden.
+  const scopeKey = firstNonEmpty(
+    input.objectApiName,
+    input.object,
+    input.objectId,
+    input.componentId,
+  );
+  if (scopeKey !== undefined) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        `endpoint_catalog cannot scope by object — endpoints aren't associated to a single object (\`${scopeKey}\`); drop objectApiName. ` +
+        'It is ORG-WIDE; for endpoints on a specific object use `find_code_usages`.',
+      path: 'objectApiName',
+    });
+  }
 
   const inboundResult = await collectInboundApis(ctx);
   if (!inboundResult.ok) {

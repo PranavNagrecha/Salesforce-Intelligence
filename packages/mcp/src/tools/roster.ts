@@ -25,6 +25,10 @@ import {
   type LivePlaneTag,
 } from '../live-capability.js';
 
+// LIST-COMPONENTS-ENUM-OMITS-RETRIEVED-TYPES: the advertised list_components
+// `type` enum is spread from this single source of truth, not hand-duplicated.
+import { COMPONENT_TYPES } from './list-components.js';
+
 /**
  * MCP protocol `Tool.annotations` for vault-plane tools (MCP-01).
  *
@@ -403,99 +407,22 @@ const QUERY_GRAPH_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freez
 
 /**
  * Concrete JSON Schema for `sfi.list_components`. Mirrors
- * `listComponentsInputSchema`. The `type` enum is duplicated from the
- * contracts `ComponentType` union; the source of truth lives in
- * `list-components.ts` (Zod) and any drift between Zod and this schema is
- * a code-review concern.
+ * `listComponentsInputSchema`. The `type` enum is SPREAD from the single source
+ * of truth `COMPONENT_TYPES` in `list-components.ts` (the same array the Zod
+ * validator enumerates) rather than hand-duplicated — so the advertised schema
+ * and the handler's accepted set can never drift again
+ * (LIST-COMPONENTS-ENUM-OMITS-RETRIEVED-TYPES: a stale hand-copy here is exactly
+ * how `CustomPermission` — and later `SamlSsoConfig` / `Skill` / … — shipped
+ * retrievable but unlistable). The `list-components advertised inputSchema enum
+ * ↔ Zod validator parity` test still guards against a hand-edit slipping the two
+ * apart.
  */
 const LIST_COMPONENTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
   type: 'object',
   properties: {
     type: {
       type: 'string',
-      enum: [
-        'CustomObject',
-        'CustomField',
-        'ValidationRule',
-        'Flow',
-        'ApexClass',
-        'ApexTrigger',
-        'Layout',
-        'Profile',
-        'PermissionSet',
-        'PermissionSetAssignment',
-        'NamedCredential',
-        'ConnectedApp',
-        // v1.1 — sharing & visibility tier.
-        'Group',
-        'Queue',
-        'Role',
-        'SharingRule',
-        // v1.2 — record types + UI surfaces tier.
-        'RecordType',
-        'BusinessProcess',
-        'CustomTab',
-        'CustomApplication',
-        'QuickAction',
-        'PathAssistant',
-        'GlobalValueSet',
-        'CustomLabel',
-        'StaticResource',
-        // v1.3 — legacy automation + communications tier.
-        'WorkflowRule',
-        'ApprovalProcess',
-        'AssignmentRule',
-        'AutoResponseRule',
-        'EscalationRule',
-        'DuplicateRule',
-        'MatchingRule',
-        'EmailTemplate',
-        'Letterhead',
-        // v1.4 — developer frontend + test mapping tier.
-        'LightningComponentBundle',
-        'AuraDefinitionBundle',
-        'VisualforcePage',
-        'VisualforceComponent',
-        // v1.5 — integration topology + event/async/API surface tier.
-        'AuthProvider',
-        'RemoteSiteSetting',
-        'CspTrustedSite',
-        'ExternalDataSource',
-        'ExternalService',
-        'NetworkAccess',
-        // Custom permissions — grant targets referenced by profiles / permission sets.
-        'CustomPermission',
-        // v1.6 — business-user record-value tier.
-        'CustomMetadataRecord',
-        'CustomSettingRecord',
-        // v2.0a — conditional-context tier.
-        'ConditionalContext',
-        // v2.8 — async + integration deep tier.
-        'OutboundMessage',
-        // v3.2 — OmniStudio and decision-table tier.
-        'OmniScript',
-        'OmniIntegrationProcedure',
-        'OmniDataTransform',
-        'OmniUiCard',
-        'DecisionTable',
-        // v4.0 — enterprise safety coverage tier.
-        'Report',
-        'Dashboard',
-        'ListView',
-        'ReportType',
-        'FlexiPage',
-        'PermissionSetGroup',
-        'MutingPermissionSet',
-        'RestrictionRule',
-        'ScopingRule',
-        // Decomposed child types the vault also lists (kept in sync with the
-        // Zod COMPONENT_TYPES validator in list-components.ts).
-        'CompactLayout',
-        'WebLink',
-        'FieldSet',
-        'Index',
-        'InstalledPackage',
-      ],
+      enum: [...COMPONENT_TYPES],
     },
     parentId: { type: 'string', minLength: 1 },
     limit: { type: 'integer', minimum: 1, maximum: 500 },
@@ -1201,6 +1128,25 @@ const SYNTHESIS_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze(
 });
 
 /**
+ * Concrete JSON Schema for `sfi.automation_risk_report`. Mirrors
+ * `automationRiskReportInputSchema`: the generic `limit` plus an optional OBJECT
+ * SCOPE (AUTOMATION-RISK-REPORT-IGNORES-OBJECT-SCOPE). A scope narrows the
+ * legacy-automation half to that object and excludes the org-wide Apex
+ * governor-limit half (disclosed), never silently returning the org-wide report.
+ */
+const AUTOMATION_RISK_REPORT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
+  Object.freeze({
+    type: 'object',
+    properties: {
+      limit: { type: 'integer', minimum: 1, maximum: 500 },
+      objectApiName: { type: 'string', minLength: 1 },
+      object: { type: 'string', minLength: 1 },
+      objectId: { type: 'string', minLength: 1 },
+      componentId: { type: 'string', minLength: 1 },
+    },
+  });
+
+/**
  * Concrete JSON Schema for `sfi.org_risk_report`. Mirrors
  * `orgRiskReportInputSchema`: the generic `limit` plus the optional `gate`
  * deploy-gate MODE (STEP-2: absorbed from the retired
@@ -1289,13 +1235,18 @@ const FIND_FORMULA_REFERENCES_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
     type: 'object',
     properties: {
+      // The target field — interchangeable: a `CustomField:` id via `fieldId` or
+      // `componentId`, or a dotted `<Object>.<Field>` via `fieldApiName` (all
+      // resolve to the same field). Pass exactly one; disagreeing selectors →
+      // `invalid-query` (FIND-FORMULA-REFERENCES-REJECTS-COMPONENTID).
       fieldId: { type: 'string', minLength: 1 },
+      componentId: { type: 'string', minLength: 1 },
+      fieldApiName: { type: 'string', minLength: 1 },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
       // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
     },
-    required: ['fieldId'],
   });
 
 /**
@@ -1380,6 +1331,13 @@ const FLOW_FAULT_AUDIT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     type: 'object',
     properties: {
       limit: { type: 'integer', minimum: 1, maximum: 500 },
+      // FLOW-FAULT-AUDIT-IGNORES-OBJECT-SCOPE: object identifiers narrow the
+      // sweep to record-triggered flows on that object (+ `appliedScope`),
+      // never silently stripped.
+      objectApiName: { type: 'string', minLength: 1 },
+      object: { type: 'string', minLength: 1 },
+      objectId: { type: 'string', minLength: 1 },
+      componentId: { type: 'string', minLength: 1 },
     },
   });
 
@@ -1405,15 +1363,23 @@ const RECORD_CREATION_PATHS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
  */
 /**
  * Concrete JSON Schema for `sfi.effective_permissions`. Mirrors
- * `effectivePermissionsInputSchema` — a profile and/or permission sets
- * (at least one, enforced at the Zod step) plus optional `limit`/`offset`.
+ * `effectivePermissionsInputSchema` — a profile (via `profileId` or the
+ * `profileApiName` / `profileName` alias) and/or permission sets (at least one,
+ * enforced at the Zod step), an optional OBJECT scope (`object` /
+ * `objectApiName` / `objectId`), plus optional `limit`/`offset`.
  */
 const EFFECTIVE_PERMISSIONS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
     type: 'object',
     properties: {
       profileId: { type: 'string', minLength: 1 },
+      profileApiName: { type: 'string', minLength: 1 },
+      profileName: { type: 'string', minLength: 1 },
       permissionSetIds: { type: 'array', items: { type: 'string', minLength: 1 } },
+      // Optional OBJECT scope — "effective permissions for {profile} ON {object}?".
+      object: { type: 'string', minLength: 1 },
+      objectApiName: { type: 'string', minLength: 1 },
+      objectId: { type: 'string', minLength: 1 },
       limit: { type: 'number', minimum: 1, maximum: 200 },
       offset: { type: 'number', minimum: 0 },
       // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
@@ -1459,12 +1425,19 @@ const WHO_CAN_RUN_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freez
 /**
  * Concrete JSON Schema for `sfi.explain_error` (R6-09). Mirrors
  * `explainErrorInputSchema` — a required `errorText` (the pasted error string)
- * plus an optional `object` SObject narrowing hint.
+ * plus an optional `object` SObject narrowing hint. The natural aliases
+ * `error` / `message` / `errorMessage` / `text` are accepted for `errorText`
+ * (merged before validation, canonical wins) so a host that pasted the banner
+ * under a guessed key is not hard-failed (EXPLAIN-ERROR-REJECTS-NATURAL-ALIASES).
  */
 const EXPLAIN_ERROR_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
   type: 'object',
   properties: {
     errorText: { type: 'string', minLength: 1 },
+    error: { type: 'string', minLength: 1 },
+    message: { type: 'string', minLength: 1 },
+    errorMessage: { type: 'string', minLength: 1 },
+    text: { type: 'string', minLength: 1 },
     object: { type: 'string', minLength: 1 },
   },
   required: ['errorText'],
@@ -1474,12 +1447,19 @@ const EXPLAIN_ERROR_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.fre
  * Concrete JSON Schema for `sfi.explain_debug_log` (Finding #40). Mirrors
  * `explainDebugLogInputSchema` — a required `logText` (the pasted Apex debug
  * log / flow fault / governor-limit exception) plus an optional `object`
- * SObject narrowing hint.
+ * SObject narrowing hint. The natural aliases `debugLog` / `log` / `text` /
+ * `content` are accepted for `logText` (merged before validation, canonical
+ * wins) so a host that pasted the log under a guessed key is not hard-failed
+ * (EXPLAIN-DEBUG-LOG-REJECTS-TEXT-ALIAS).
  */
 const EXPLAIN_DEBUG_LOG_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
   type: 'object',
   properties: {
     logText: { type: 'string', minLength: 1 },
+    debugLog: { type: 'string', minLength: 1 },
+    log: { type: 'string', minLength: 1 },
+    text: { type: 'string', minLength: 1 },
+    content: { type: 'string', minLength: 1 },
     object: { type: 'string', minLength: 1 },
   },
   required: ['logText'],
@@ -1504,16 +1484,32 @@ const WHO_CAN_ACCESS_OBJECT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
 
 /**
  * Concrete JSON Schema for `sfi.guest_exposure_report` (R6-17). Mirrors
- * `guestExposureReportInputSchema` — an optional `communityId`
- * (`Network:X`/`CustomSite:X`) to scope to one community, plus optional
- * `limit`/`offset`/`cursor` for the paged `findings` list. No required field:
- * a bare call audits every modeled Experience Cloud / Site surface.
+ * `guestExposureReportInputSchema`. Two optional, composable scope axes plus
+ * paging — no required field (a bare call audits every modeled Experience
+ * Cloud / Site surface):
+ *   - COMMUNITY scope: `communityId` (`Network:X`/`CustomSite:X`) or the bare
+ *     `networkApiName` / `networkName` / `siteApiName` aliases.
+ *   - OBJECT scope: `objectApiName` (bare, e.g. `Contact`) or `objectId`
+ *     (`CustomObject:Contact`).
+ *   - `componentId` is dispatched BY PREFIX: `Network:` / `CustomSite:` →
+ *     community scope; `CustomObject:` → object scope (equivalent to
+ *     `objectApiName`); any other prefix is `invalid-query`.
+ * Plus optional `limit`/`offset`/`cursor` for the paged `findings` list. Any
+ * unsupported prefix or disagreeing selectors → `invalid-query`, never a
+ * silent org-wide fallback. Drift between Zod and this schema is a code-review
+ * concern.
  */
 const GUEST_EXPOSURE_REPORT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
     type: 'object',
     properties: {
       communityId: { type: 'string', minLength: 1 },
+      networkApiName: { type: 'string', minLength: 1 },
+      networkName: { type: 'string', minLength: 1 },
+      siteApiName: { type: 'string', minLength: 1 },
+      componentId: { type: 'string', minLength: 1 },
+      objectApiName: { type: 'string', minLength: 1 },
+      objectId: { type: 'string', minLength: 1 },
       limit: { type: 'number', minimum: 1, maximum: 200 },
       offset: { type: 'number', minimum: 0 },
       cursor: { type: 'string', minLength: 1 },
@@ -1559,15 +1555,22 @@ const LAYOUT_FOR_USER_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     properties: {
       objectApiName: { type: 'string', minLength: 1 },
       recordTypeId: { type: 'string', minLength: 1 },
+      // The profile — interchangeable: a bare api name or a `Profile:` id via
+      // `profileId`, `profileApiName`, `profileName`, or `profile` (resolved +
+      // echoed as `appliedScope`). Pass exactly one; disagreeing → `invalid-query`.
       profileId: { type: 'string', minLength: 1 },
+      profileApiName: { type: 'string', minLength: 1 },
+      profileName: { type: 'string', minLength: 1 },
+      profile: { type: 'string', minLength: 1 },
     },
-    required: ['objectApiName', 'profileId'],
+    required: ['objectApiName'],
   });
 
 /**
  * Concrete JSON Schema for `sfi.layout_assignments`. Mirrors
  * `layoutAssignmentsInputSchema` — a single required `componentId`
- * naming the page Layout (`Layout:{Object}.{LayoutName}`).
+ * naming EITHER a page Layout (`Layout:{Object}.{LayoutName}`, layout mode)
+ * OR a `CustomObject:{Object}` (object mode — every layout of the object).
  */
 const LAYOUT_ASSIGNMENTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
@@ -1584,32 +1587,47 @@ const LAYOUT_ASSIGNMENTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
 
 /**
  * Concrete JSON Schema for `sfi.user_ability`. Mirrors
- * `userAbilityInputSchema` — a required `componentId`
- * (`Profile:X`/`PermissionSet:X`) + optional `limit`/`offset`.
+ * `userAbilityInputSchema` — the Profile / PermissionSet subject via
+ * `componentId` (`Profile:X`/`PermissionSet:X`) or the natural `profileApiName`
+ * / `profileId` / `permissionSetApiName` / `permissionSetId` selector (a bare
+ * name is coerced to the container prefix; `componentId` wins), an optional
+ * FIELD scope (`fieldId`, or `fieldApiName` + `objectApiName`) that adds a
+ * `fieldAccess` FLS block, plus optional `limit`/`offset`. No field is
+ * schema-required; a call that names no container is refused by the handler with
+ * a named `invalid-query` (USER-ABILITY-REJECTS-FIELD-SCOPE).
  */
 const USER_ABILITY_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
   type: 'object',
   properties: {
     componentId: { type: 'string', minLength: 1 },
+    profileApiName: { type: 'string', minLength: 1 },
+    profileId: { type: 'string', minLength: 1 },
+    permissionSetApiName: { type: 'string', minLength: 1 },
+    permissionSetId: { type: 'string', minLength: 1 },
+    fieldId: { type: 'string', minLength: 1 },
+    fieldApiName: { type: 'string', minLength: 1 },
+    objectApiName: { type: 'string', minLength: 1 },
     limit: { type: 'number', minimum: 1, maximum: 500 },
     offset: { type: 'number', minimum: 0 },
     // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
     cursor: { type: 'string', minLength: 1 },
   },
-  required: ['componentId'],
 });
 
 /**
  * Concrete JSON Schema for `sfi.profile_security`. Mirrors
- * `profileSecurityInputSchema` — a required `profileId` (`Profile:X` or a bare
- * apiName, coerced). Profile-only; a permission set is refused.
+ * `profileSecurityInputSchema` — the profile is interchangeable across
+ * `profileId` / `componentId` (`Profile:X`) / `profileApiName` (a bare apiName,
+ * coerced). Pass exactly one; disagreeing selectors → `invalid-query`
+ * (PROFILE-SECURITY-REJECTS-COMPONENTID). Profile-only; a permission set is refused.
  */
 const PROFILE_SECURITY_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
   type: 'object',
   properties: {
     profileId: { type: 'string', minLength: 1 },
+    componentId: { type: 'string', minLength: 1 },
+    profileApiName: { type: 'string', minLength: 1 },
   },
-  required: ['profileId'],
 });
 
 /**
@@ -1632,35 +1650,53 @@ const LIGHTNING_PAGES_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.f
 
 /**
  * Concrete JSON Schema for `sfi.app_access`. Mirrors `appAccessInputSchema` —
- * a required `componentId` (`CustomApplication:X`) + optional `limit`/`offset`.
+ * a `componentId` (`CustomApplication:`/`Profile:`/`PermissionSet:` id) OR a
+ * natural app-name selector (`apiName`/`app`/`nameContains`), plus optional
+ * `limit`/`offset`. No field is schema-required; the handler resolves the app
+ * from whichever selector is given and refuses with a named `invalid-query`
+ * when none resolves (APP-ACCESS-REJECTS-NATURAL-ARGS).
  */
 const APP_ACCESS_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
   type: 'object',
   properties: {
     componentId: { type: 'string', minLength: 1 },
+    apiName: { type: 'string', minLength: 1 },
+    appApiName: { type: 'string', minLength: 1 },
+    app: { type: 'string', minLength: 1 },
+    application: { type: 'string', minLength: 1 },
+    nameContains: { type: 'string', minLength: 1 },
     limit: { type: 'number', minimum: 1, maximum: 250 },
     offset: { type: 'number', minimum: 0 },
     // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
     cursor: { type: 'string', minLength: 1 },
   },
-  required: ['componentId'],
 });
 
 /**
  * Concrete JSON Schema for `sfi.tab_availability`. Mirrors
- * `tabAvailabilityInputSchema` — a required `componentId`
- * (`Profile:X`/`PermissionSet:X`) + optional `limit`/`offset`.
+ * `tabAvailabilityInputSchema` — the Profile / PermissionSet subject via
+ * `componentId` (`Profile:X`/`PermissionSet:X`) or the natural `profileApiName`
+ * / `profileId` / `permissionSetApiName` / `permissionSetId` selector (a bare
+ * name is coerced to the container prefix), an optional OBJECT scope (`object` /
+ * `objectApiName` / `objectId`) that narrows to that object's tab, plus optional
+ * `limit`/`offset`.
  */
 const TAB_AVAILABILITY_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
   type: 'object',
   properties: {
     componentId: { type: 'string', minLength: 1 },
+    profileApiName: { type: 'string', minLength: 1 },
+    profileId: { type: 'string', minLength: 1 },
+    permissionSetApiName: { type: 'string', minLength: 1 },
+    permissionSetId: { type: 'string', minLength: 1 },
+    object: { type: 'string', minLength: 1 },
+    objectApiName: { type: 'string', minLength: 1 },
+    objectId: { type: 'string', minLength: 1 },
     limit: { type: 'number', minimum: 1, maximum: 500 },
     offset: { type: 'number', minimum: 0 },
     // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
     cursor: { type: 'string', minLength: 1 },
   },
-  required: ['componentId'],
 });
 
 /**
@@ -1703,6 +1739,10 @@ const INTEGRATION_MAP_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       limit: { type: 'integer', minimum: 1, maximum: 500 },
     },
   });
+// NOTE: `integrationMapInputSchema` (Zod) ALSO accepts `objectApiName` / `object`
+// / `objectId` / `componentId` ONLY to refuse them with an org-wide-only
+// `invalid-query` (INTEGRATION-MAP-IGNORES-OBJECT-SCOPE); they are deliberately
+// NOT advertised here because they are never a valid scope for this org-wide map.
 
 /**
  * Concrete JSON Schema for `sfi.event_subscribers`. Mirrors
@@ -1861,6 +1901,8 @@ const UNUSED_COMPONENTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
             'NetworkAccess',
             'CustomMetadataRecord',
             'CustomSettingRecord',
+            // v4.x — decomposed object-child metadata (button/link placement).
+            'WebLink',
             // v2.0a — conditional-context tier.
             'ConditionalContext',
             // v2.8 — async + integration deep tier.
@@ -1868,6 +1910,14 @@ const UNUSED_COMPONENTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
           ],
         },
       },
+      // Singular type alias — folded into a one-element `types` scope; an
+      // unknown value is invalid-query, never a silent default-family fallback.
+      type: { type: 'string', minLength: 1 },
+      componentType: { type: 'string', minLength: 1 },
+      typeFilter: { type: 'string', minLength: 1 },
+      // Object scope — narrow the scan to that object's children.
+      object: { type: 'string', minLength: 1 },
+      objectApiName: { type: 'string', minLength: 1 },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
       cursor: { type: 'string', minLength: 1 },
@@ -2013,9 +2063,18 @@ const RECORDTYPE_AVAILABILITY_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
     type: 'object',
     properties: {
+      // The Profile / PermissionSet visibility SUBJECT — pass any one selector.
       componentId: { type: 'string', minLength: 1 },
+      profileApiName: { type: 'string', minLength: 1 },
+      profileId: { type: 'string', minLength: 1 },
+      profileName: { type: 'string', minLength: 1 },
+      permissionSetApiName: { type: 'string', minLength: 1 },
+      permissionSetId: { type: 'string', minLength: 1 },
+      // Optional OBJECT filter — "record types on <object> for <profile>?".
+      objectApiName: { type: 'string', minLength: 1 },
+      object: { type: 'string', minLength: 1 },
+      objectId: { type: 'string', minLength: 1 },
     },
-    required: ['componentId'],
   });
 
 /**
@@ -2116,6 +2175,16 @@ const DOMAIN_CLUSTERS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       limit: { type: 'integer', minimum: 1, maximum: 50 },
       // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
+      // Optional SEED — "which domain owns {X}?". A canonical `Type:` id or a
+      // bare api name; returns the cluster CONTAINING it (+ `appliedScope`).
+      componentId: { type: 'string', minLength: 1 },
+      seedComponentId: { type: 'string', minLength: 1 },
+      seed: { type: 'string', minLength: 1 },
+      // DOMAIN-CLUSTERS-IGNORES-OBJECTAPINAME: object identifiers honored as a
+      // seed alias (resolved to a `CustomObject:` id), never silently stripped.
+      objectApiName: { type: 'string', minLength: 1 },
+      object: { type: 'string', minLength: 1 },
+      objectId: { type: 'string', minLength: 1 },
     },
   });
 
@@ -2240,19 +2309,24 @@ const WHAT_HAPPENS_ON_SAVE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
 
 /**
  * Concrete JSON Schema for `sfi.why_field_changed`. Mirrors
- * `whyFieldChangedInputSchema`. The `fieldId` prefix constraint
- * (must start with `CustomField:`) is not expressible in JSON Schema,
- * so callers that supply a non-CustomField id will be rejected at the
- * handler boundary with `error.kind: 'invalid-query'`. Drift between
- * Zod and this schema is a code-review concern.
+ * `whyFieldChangedInputSchema`. The tool traces ONE field, named via any of the
+ * interchangeable identifiers (`fieldId`, a `CustomField:`/`CustomObject:`
+ * `componentId`, or `objectApiName` + `fieldApiName`). The one-distinct-field /
+ * prefix constraints are not expressible in JSON Schema, so an object-only,
+ * mis-prefixed, or disagreeing scope is rejected at the handler boundary with
+ * `error.kind: 'invalid-query'`; unknown but well-formed ids surface as
+ * `component-not-found`. The "at least one identifier" refine is likewise
+ * handler-enforced. Drift between Zod and this schema is a code-review concern.
  */
 const WHY_FIELD_CHANGED_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
     type: 'object',
     properties: {
       fieldId: { type: 'string', minLength: 1 },
+      componentId: { type: 'string', minLength: 1 },
+      objectApiName: { type: 'string', minLength: 1 },
+      fieldApiName: { type: 'string', minLength: 1 },
     },
-    required: ['fieldId'],
   });
 
 /**
@@ -2274,20 +2348,78 @@ const ORDER_OF_EXECUTION_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
 
 /**
  * Concrete JSON Schema for `sfi.explain_flow`. Mirrors
- * `explainFlowInputSchema`. The `flowId` prefix constraint (must
- * start with `Flow:`) is not expressible in JSON Schema, so callers
- * that supply a non-Flow id are rejected at the handler boundary
- * with `error.kind: 'invalid-query'`. Drift between Zod and this
- * schema is a code-review concern.
+ * `explainFlowInputSchema`. The Flow is interchangeable across `flowId` /
+ * `componentId` (`Flow:X`) / `apiName` (a bare flow name, coerced); pass exactly
+ * one, disagreeing selectors → `invalid-query`
+ * (EXPLAIN-FLOW-REJECTS-COMPONENTID). The `Flow:` prefix constraint is not
+ * expressible in JSON Schema, so callers that supply a non-Flow id are rejected
+ * at the handler boundary with `error.kind: 'invalid-query'`. Drift between Zod
+ * and this schema is a code-review concern.
  */
 const EXPLAIN_FLOW_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
     type: 'object',
     properties: {
       flowId: { type: 'string', minLength: 1 },
+      componentId: { type: 'string', minLength: 1 },
+      apiName: { type: 'string', minLength: 1 },
     },
-    required: ['flowId'],
   });
+
+/**
+ * Concrete JSON Schema for `sfi.flow_graph`. Mirrors `flowGraphInputSchema`
+ * (flow-graph.ts). `flowRef` accepts a canonical `Flow:{ApiName}` id, a bare
+ * Flow API name, or a Flow record id — the shared resolver reconciles them and
+ * fails closed on a record id without a Tooling-API index. `include` narrows to
+ * a subset of body sections; `element` returns the subgraph for one canvas
+ * element. Drift between this schema and the Zod schema is a code-review concern.
+ */
+const FLOW_GRAPH_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
+  Object.freeze({
+    type: 'object',
+    properties: {
+      flowRef: { type: 'string', minLength: 1 },
+      include: {
+        type: 'array',
+        items: {
+          type: 'string',
+          enum: [
+            'connectors',
+            'decisions',
+            'assignments',
+            'recordOps',
+            'formulas',
+            'variables',
+            'loops',
+            'actions',
+          ],
+        },
+      },
+      element: { type: 'string', minLength: 1 },
+    },
+    required: ['flowRef'],
+  });
+
+/**
+ * Concrete JSON Schema for `sfi.flow_trace`. Mirrors `flowTraceInputSchema`
+ * (flow-trace.ts). `flowRef` accepts a canonical `Flow:{ApiName}` id, a bare
+ * Flow API name, or a Flow record id (the shared resolver reconciles them and
+ * fails closed on a record id without a Tooling-API index). `recordState` is the
+ * starting field-value map; `priorState` is the optional `$Record__Prior` map for
+ * `ISCHANGED` / `PRIORVALUE`; `maxSteps` guards loops/cycles (default 500, hard
+ * cap 100000 mirroring the Zod `.max(100000)` so the guard can't be de-fanged).
+ * Drift between this schema and the Zod schema is a code-review concern.
+ */
+const FLOW_TRACE_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
+  type: 'object',
+  properties: {
+    flowRef: { type: 'string', minLength: 1 },
+    recordState: { type: 'object' },
+    priorState: { type: 'object' },
+    maxSteps: { type: 'integer', minimum: 1, maximum: 100000 },
+  },
+  required: ['flowRef', 'recordState'],
+});
 
 /**
  * Concrete JSON Schema for `sfi.explain_apex_method`. Mirrors
@@ -2424,6 +2556,13 @@ const PROCESS_BUILDER_MIGRATION_CANDIDATES_INPUT_SCHEMA: Readonly<
     limit: { type: 'integer', minimum: 1, maximum: 500 },
     // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
     cursor: { type: 'string', minLength: 1 },
+    // PROCESS-BUILDER-MIGRATION-IGNORES-OBJECT-SCOPE: object identifiers narrow
+    // each list to candidates parented to that object (+ `appliedScope`),
+    // never silently stripped.
+    objectApiName: { type: 'string', minLength: 1 },
+    object: { type: 'string', minLength: 1 },
+    objectId: { type: 'string', minLength: 1 },
+    componentId: { type: 'string', minLength: 1 },
   },
 });
 
@@ -2446,13 +2585,17 @@ const UNASSIGNED_PERMISSION_SETS_INPUT_SCHEMA: Readonly<
 
 /**
  * Concrete JSON Schema for `sfi.installed_package_catalog`. Mirrors
- * `installedPackageCatalogInputSchema` (no input).
+ * `installedPackageCatalogInputSchema`.
  */
 const INSTALLED_PACKAGE_CATALOG_INPUT_SCHEMA: Readonly<
   Record<string, unknown>
 > = Object.freeze({
   type: 'object',
-  properties: {},
+  properties: {
+    // INSTALLED-PACKAGE-CATALOG-IGNORES-NAMESPACEPREFIX: exact (case-insensitive)
+    // namespace match; echoed as appliedScope. Omit for the full catalog.
+    namespacePrefix: { type: 'string', minLength: 1 },
+  },
 });
 
 /** Concrete JSON Schema for `sfi.annotations`. Mirrors `annotationsInputSchema`. */
@@ -2643,6 +2786,9 @@ const EMPTY_QUEUES_AND_GROUPS_INPUT_SCHEMA: Readonly<
   type: 'object',
   properties: {
     type: { type: 'string', enum: ['Queue', 'Group', 'both'] },
+    // EMPTY-QUEUES-AND-GROUPS-IGNORES-NAMECONTAINS: case-insensitive substring
+    // over apiName/label; echoed as appliedScope. Omit for the full inventory.
+    nameContains: { type: 'string', minLength: 1 },
     includeManagedPackage: { type: 'boolean' },
     limit: { type: 'integer', minimum: 1, maximum: 500 },
     // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
@@ -2687,6 +2833,10 @@ const TECH_DEBT_SCORE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       },
     },
   });
+// NOTE: `techDebtScoreInputSchema` (Zod) ALSO accepts `objectApiName` / `object`
+// / `objectId` / `componentId` ONLY to refuse them with an org-wide-only
+// `invalid-query` (TECH-DEBT-SCORE-IGNORES-OBJECT-SCOPE); they are deliberately
+// NOT advertised here because they are never a valid scope for this org-wide score.
 
 /**
  * Concrete JSON Schema for `sfi.code_quality_audit`. Mirrors
@@ -2701,6 +2851,12 @@ const CODE_QUALITY_AUDIT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
     type: 'object',
     properties: {
+      // Optional CLASS SCOPE: audit ONLY that ApexClass / ApexTrigger + echo
+      // appliedScope. `componentId` is an `ApexClass:`/`ApexTrigger:` id;
+      // `classApiName` / `apiName` are bare class-name aliases. Omit for org-wide.
+      componentId: { type: 'string', minLength: 1 },
+      classApiName: { type: 'string', minLength: 1 },
+      apiName: { type: 'string', minLength: 1 },
       severityFilter: {
         type: 'string',
         enum: ['critical', 'high', 'medium', 'low', 'info', 'all'],
@@ -2767,6 +2923,11 @@ const CRUD_FLS_AUDIT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
     type: 'object',
     properties: {
+      // Optional CLASS SCOPE (interchangeable): audit ONLY that class + echo
+      // appliedScope. Omit all three for the org-wide audit.
+      componentId: { type: 'string', minLength: 1 },
+      classApiName: { type: 'string', minLength: 1 },
+      apiName: { type: 'string', minLength: 1 },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
       // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
@@ -2823,13 +2984,18 @@ const VALUE_CHANGE_AUDIT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     type: 'object',
     properties: {
       object: { type: 'string', minLength: 1 },
+      // Interchangeable object selector; a `fieldId` (`CustomField:Object.Field`)
+      // also names the object via its parent. `object` is therefore not
+      // `required` — the handler returns `invalid-query` when none names one.
+      objectApiName: { type: 'string', minLength: 1 },
+      fieldId: { type: 'string', minLength: 1 },
+      fieldApiName: { type: 'string', minLength: 1 },
       fields: { type: 'array', items: { type: 'string' } },
       verbosity: { type: 'string', enum: ['summary', 'detail'] },
       limit: { type: 'integer', minimum: 1, maximum: 200 },
       // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
     },
-    required: ['object'],
     additionalProperties: false,
   });
 
@@ -2923,9 +3089,13 @@ const WHAT_IF_DEACTIVATE_FLOW_INPUT_SCHEMA: Readonly<
 > = Object.freeze({
   type: 'object',
   properties: {
+    // The Flow to analyse — interchangeable selectors (a host naturally passes
+    // componentId: Flow:… as on get_impact); at least one is required.
     flowId: { type: 'string', minLength: 1 },
+    componentId: { type: 'string', minLength: 1 },
+    flowApiName: { type: 'string', minLength: 1 },
+    apiName: { type: 'string', minLength: 1 },
   },
-  required: ['flowId'],
 });
 
 /**
@@ -2960,11 +3130,16 @@ const WHAT_IF_CHANGE_METHOD_SIGNATURE_INPUT_SCHEMA: Readonly<
 > = Object.freeze({
   type: 'object',
   properties: {
+    // The target Apex class — interchangeable: a bare name or an `ApexClass:` id
+    // via `classApiName`, `componentId`, or `apiName` (resolved + echoed as
+    // `appliedScope`). Pass exactly one; disagreeing selectors → `invalid-query`.
     classApiName: { type: 'string', minLength: 1 },
+    componentId: { type: 'string', minLength: 1 },
+    apiName: { type: 'string', minLength: 1 },
     methodName: { type: 'string', minLength: 1 },
     newSignature: { type: 'string' },
   },
-  required: ['classApiName', 'methodName'],
+  required: ['methodName'],
 });
 
 /**
@@ -3197,6 +3372,23 @@ const DOWNSTREAM_EFFECTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   });
 
 /**
+ * Concrete JSON Schema for `sfi.interpret` (RM-wire). Mirrors
+ * `interpretInputSchema`. `componentId` is any canonical id; `concepts` /
+ * `ruleIds` are optional ADDITIVE filters over the curated `CONCEPT_RULES`
+ * (an empty array matches no rule). Drift between Zod and this schema is a
+ * code-review concern.
+ */
+const INTERPRET_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
+  type: 'object',
+  properties: {
+    componentId: { type: 'string', minLength: 1 },
+    concepts: { type: 'array', items: { type: 'string' } },
+    ruleIds: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['componentId'],
+});
+
+/**
  * Concrete JSON Schema for `sfi.test_coverage_for_method`. Mirrors
  * `testCoverageForMethodInputSchema`. The `classApiName` prefix
  * constraint (must start with `ApexClass:` or `ApexTrigger:`) is not
@@ -3210,17 +3402,23 @@ const TEST_COVERAGE_FOR_METHOD_INPUT_SCHEMA: Readonly<
 > = Object.freeze({
   type: 'object',
   properties: {
+    // The target class / trigger — interchangeable selectors (a host naturally
+    // passes componentId as on sibling Apex tools); at least one is required.
     classApiName: { type: 'string', minLength: 1 },
+    componentId: { type: 'string', minLength: 1 },
+    apiName: { type: 'string', minLength: 1 },
     methodName: { type: 'string', minLength: 1 },
   },
-  required: ['classApiName'],
 });
 
 /**
  * Concrete JSON Schema for `sfi.meaningful_test_audit`. Mirrors
  * `meaningfulTestAuditInputSchema`. The optional `classFilter` array
- * is capped at 500 items; absent means "audit every test ApexClass".
- * Drift between Zod and this schema is a code-review concern.
+ * is capped at 500 items; `targetClass` (+ its `componentId` / `classApiName`
+ * host aliases) scopes to a production class's covering tests; `nameContains`
+ * scopes by a case-insensitive test-class name substring. Absent means "audit
+ * every test ApexClass". Drift between Zod and this schema is a code-review
+ * concern.
  */
 const MEANINGFUL_TEST_AUDIT_INPUT_SCHEMA: Readonly<
   Record<string, unknown>
@@ -3232,6 +3430,10 @@ const MEANINGFUL_TEST_AUDIT_INPUT_SCHEMA: Readonly<
       items: { type: 'string', minLength: 1 },
       maxItems: 500,
     },
+    targetClass: { type: 'string', minLength: 1 },
+    componentId: { type: 'string', minLength: 1 },
+    classApiName: { type: 'string', minLength: 1 },
+    nameContains: { type: 'string', minLength: 1 },
   },
 });
 
@@ -3247,18 +3449,27 @@ const METHOD_REACHABILITY_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
     type: 'object',
     properties: {
+      // The target ApexClass / ApexTrigger — interchangeable: a bare name or an
+      // `ApexClass:` / `ApexTrigger:` id via `classApiName`, `componentId`, or
+      // `apiName` (resolved + echoed as `appliedScope`). Pass exactly one;
+      // disagreeing selectors → `invalid-query`.
       classApiName: { type: 'string', minLength: 1 },
+      componentId: { type: 'string', minLength: 1 },
+      apiName: { type: 'string', minLength: 1 },
     },
-    required: ['classApiName'],
   });
 
 /**
  * Concrete JSON Schema for `sfi.tests_for_change`. Mirrors
  * `testsForChangeInputSchema`. Each `changedComponents` item is an
- * `ApexClass:` / `ApexTrigger:` id or a bare class name; non-Apex `Type:`
- * prefixes bucket into `unsupportedChanges` rather than failing the call.
- * The 1..500 array bound matches `meaningful_test_audit`'s `classFilter`.
- * Drift between Zod and this schema is a code-review concern.
+ * `ApexClass:` / `ApexTrigger:` id or a bare class name, OR a
+ * `review_change`-shaped selector object (`{ componentId }` / `{ type, apiName }`,
+ * plus an ignored `changeKind`); non-Apex `Type:` prefixes bucket into
+ * `unsupportedChanges` rather than failing the call. A single component may
+ * instead be passed as a TOP-LEVEL `componentId` / `{ type, apiName }` (folded
+ * into a one-item set), so `changedComponents` is not strictly required. The
+ * 1..500 array bound matches `meaningful_test_audit`'s `classFilter`. Drift
+ * between Zod and this schema is a code-review concern.
  */
 const TESTS_FOR_CHANGE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
@@ -3266,19 +3477,36 @@ const TESTS_FOR_CHANGE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     properties: {
       changedComponents: {
         type: 'array',
-        items: { type: 'string', minLength: 1 },
+        items: {
+          oneOf: [
+            { type: 'string', minLength: 1 },
+            {
+              type: 'object',
+              properties: {
+                componentId: { type: 'string', minLength: 1 },
+                type: { type: 'string', minLength: 1 },
+                apiName: { type: 'string', minLength: 1 },
+                changeKind: { type: 'string', minLength: 1 },
+              },
+            },
+          ],
+        },
         minItems: 1,
         maxItems: 500,
       },
+      componentId: { type: 'string', minLength: 1 },
+      type: { type: 'string', minLength: 1 },
+      apiName: { type: 'string', minLength: 1 },
     },
-    required: ['changedComponents'],
   });
 
 /**
  * Concrete JSON Schema for `sfi.review_change`. Mirrors
- * `reviewChangeInputSchema`. `components` is a 1..500 change set; each item is
- * `{ type, apiName, changeKind }` where `changeKind` ∈ added|modified|deleted
- * and the analysed id is `${type}:${apiName}`. `limit` caps the DETAILED
+ * `reviewChangeInputSchema`. `components` is a 1..500 change set; each item
+ * carries `changeKind` ∈ added|modified|deleted plus its selector — EITHER the
+ * `{ type, apiName }` pair OR a single `componentId` (`Type:ApiName`, the
+ * canonical id from `sfi.resolve`) — normalised to the analysed id
+ * `${type}:${apiName}`. `limit` caps the DETAILED
  * `reviewed[]` rows (summary tallies stay full; the deploy-gate verdict is never
  * hidden by the cap). `againstVault` (a registered vault alias OR a path to an
  * org-kb) reviews the changeset against THAT vault's graph instead of the
@@ -3297,9 +3525,14 @@ const REVIEW_CHANGE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
           properties: {
             type: { type: 'string', minLength: 1 },
             apiName: { type: 'string', minLength: 1 },
+            componentId: { type: 'string', minLength: 1 },
             changeKind: { type: 'string', enum: ['added', 'modified', 'deleted'] },
           },
-          required: ['type', 'apiName', 'changeKind'],
+          required: ['changeKind'],
+          anyOf: [
+            { required: ['type', 'apiName'] },
+            { required: ['componentId'] },
+          ],
         },
       },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
@@ -3310,7 +3543,8 @@ const REVIEW_CHANGE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
 
 /**
  * Concrete JSON Schema for `sfi.package_impact`. Mirrors
- * `packageImpactInputSchema`. `namespace` absent → INVENTORY mode; present →
+ * `packageImpactInputSchema`. No selector → INVENTORY mode; a `namespace` (or a
+ * `namespacePrefix` / `packageId` / `componentId` selector resolving to one) →
  * IMPACT mode for that managed-package namespace. `limit` caps detail/sample
  * rows. Drift between Zod and this schema is a code-review concern.
  */
@@ -3319,6 +3553,9 @@ const PACKAGE_IMPACT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     type: 'object',
     properties: {
       namespace: { type: 'string', minLength: 1 },
+      namespacePrefix: { type: 'string', minLength: 1 },
+      packageId: { type: 'string', minLength: 1 },
+      componentId: { type: 'string', minLength: 1 },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
     },
   });
@@ -3358,16 +3595,20 @@ const ASYNC_CHAIN_DEPTH_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   });
 
 /**
- * Concrete JSON Schema for `sfi.scheduled_job_catalog`. The tool
- * takes no arguments; the schema mirrors the empty `z.object({})`
- * validator declared in the tool's own module. Declared as a named
- * constant so the `tools/list` payload stays symmetric with the
- * other tools.
+ * Concrete JSON Schema for `sfi.scheduled_job_catalog`. Mirrors
+ * `scheduledJobCatalogInputSchema`. The optional `nameContains` narrows
+ * both the Schedulable-class catalog and the scheduled-Flow section; omit
+ * for the org-wide catalog. Declared as a named constant so the
+ * `tools/list` payload stays symmetric with the other tools.
  */
 const SCHEDULED_JOB_CATALOG_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
     type: 'object',
-    properties: {},
+    properties: {
+      // SCHEDULED-JOB-CATALOG-IGNORES-NAMECONTAINS: case-insensitive substring
+      // over apiName; echoed as appliedScope. Omit for the org-wide catalog.
+      nameContains: { type: 'string', minLength: 1 },
+    },
   });
 
 /**
@@ -3387,14 +3628,20 @@ const OUTBOUND_MESSAGE_CATALOG_INPUT_SCHEMA: Readonly<
 });
 
 /**
- * Concrete JSON Schema for `sfi.endpoint_catalog`. The tool takes no
- * arguments; the schema mirrors the empty `z.object({})` validator
- * declared in the tool's own module.
+ * Concrete JSON Schema for `sfi.endpoint_catalog`. ORG-WIDE, no narrowing
+ * scope; the object / component keys are advertised ONLY so the handler can
+ * REFUSE them (ENDPOINT-CATALOG-IGNORES-OBJECT-SCOPE) instead of silently
+ * answering whole-org. Mirrors `endpointCatalogInputSchema`.
  */
 const ENDPOINT_CATALOG_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
     type: 'object',
-    properties: {},
+    properties: {
+      objectApiName: { type: 'string', minLength: 1 },
+      object: { type: 'string', minLength: 1 },
+      objectId: { type: 'string', minLength: 1 },
+      componentId: { type: 'string', minLength: 1 },
+    },
   });
 
 /**
@@ -3557,6 +3804,12 @@ const FIND_DEAD_CODE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
     type: 'object',
     properties: {
+      // Optional COMPONENT scope: one component's verdict instead of the org-wide
+      // top-N. `componentId` is an `ApexClass:`/`ApexTrigger:`/`Flow:`/`CustomField:`
+      // id; `classApiName` / `apiName` are bare ApexClass-name aliases.
+      componentId: { type: 'string', minLength: 1 },
+      classApiName: { type: 'string', minLength: 1 },
+      apiName: { type: 'string', minLength: 1 },
       objectId: { type: 'string', minLength: 1 },
       objectApiName: { type: 'string', minLength: 1 },
       types: {
@@ -3875,6 +4128,10 @@ const FIND_DEPENDENCY_CYCLES_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
     type: 'object',
     properties: {
+      // Optional scope: componentId narrows to the cluster containing it,
+      // nameContains keeps clusters with a member id matching the substring.
+      componentId: { type: 'string', minLength: 1 },
+      nameContains: { type: 'string', minLength: 1 },
       limit: { type: 'integer', minimum: 1, maximum: 200 },
       offset: { type: 'integer', minimum: 0 },
       cursor: { type: 'string', minLength: 1 },
@@ -3953,6 +4210,12 @@ const APEX_BUILD_ADVISOR_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
     type: 'object',
     properties: {
+      // Optional CLASS SCOPE: narrow the briefing to ONE ApexClass / ApexTrigger.
+      // `componentId` is an `ApexClass:`/`ApexTrigger:` id; `classApiName` /
+      // `apiName` are bare class-name aliases. Omit for the org-wide advisor.
+      componentId: { type: 'string', minLength: 1 },
+      classApiName: { type: 'string', minLength: 1 },
+      apiName: { type: 'string', minLength: 1 },
       objectApiName: { type: 'string', minLength: 1 },
     },
     additionalProperties: false,
@@ -3960,17 +4223,24 @@ const APEX_BUILD_ADVISOR_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
 
 /**
  * Concrete JSON Schema for `sfi.field_change_advisor`. Mirrors
- * `fieldChangeAdvisorInputSchema` in `field-change-advisor.ts`.
+ * `fieldChangeAdvisorInputSchema` in `field-change-advisor.ts`. `fieldId` is not
+ * `required` because the field can also be named via the interchangeable
+ * `componentId` / `fieldApiName` / `apiName` selectors (precedence `fieldId >
+ * componentId > fieldApiName > apiName`); the handler returns `invalid-query`
+ * when none is given. A bare `Object.Field` and a `CustomField:Object.Field` id
+ * both resolve.
  */
 const FIELD_CHANGE_ADVISOR_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
     type: 'object',
     properties: {
       fieldId: { type: 'string', minLength: 1 },
+      componentId: { type: 'string', minLength: 1 },
+      fieldApiName: { type: 'string', minLength: 1 },
+      apiName: { type: 'string', minLength: 1 },
       newType: { type: 'string', minLength: 1 },
       ...LIVE_ENABLED_PROPERTY,
     },
-    required: ['fieldId'],
     additionalProperties: false,
   });
 
@@ -4088,7 +4358,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.get_component',
     description:
-      "Fetch a single component by canonical id. Returns its frontmatter and a response-safe Markdown body slice; large bodies are truncated with explicit bodyBytes/returnedBodyBytes/omittedBodyBytes metadata. Optional maxBodyBytes (0..30000) narrows the body slice. `maxBodyBytes: 0` (or any small value) is the EXISTENCE/METADATA-PROBE pattern — the response becomes a bounded metadata envelope (`metadataOnly: true`) instead of the full document: frontmatter is capped the same way body is, `properties` keeps whichever entries fit a small budget (scalars survive, huge arrays like a Profile's fieldPermissions/objectPermissions are the ones dropped and named in `omittedPropertyKeys`), and `referenceIds` is capped with the true total in `referenceCount` — a `disclosure` string names exactly what was omitted. This guarantees `maxBodyBytes: 0` never trips the global oversize guard, even on a huge node (e.g. a Profile with thousands of grants). A PHANTOM id (referenced by retrieved metadata but never itself retrieved) returns component-not-found with a classified reference stub — and an AUTOMATION-CRITICAL phantom hit is also queued in meta/demand-queue.jsonl so `sfi refresh --drain-demand-queue` (or the watch daemon with --drain-demand-queue) can pull exactly the components real questions needed.",
+      "Fetch a single component by canonical id. Returns its frontmatter and a response-safe Markdown body slice; large bodies are truncated with explicit bodyBytes/returnedBodyBytes/omittedBodyBytes metadata. Optional maxBodyBytes (0..30000) narrows the body slice. `maxBodyBytes: 0` (or any small value) is the EXISTENCE/METADATA-PROBE pattern — the response becomes a bounded metadata envelope (`metadataOnly: true`) instead of the full document: frontmatter is capped the same way body is, `properties` keeps whichever entries fit a small budget (scalars survive, huge arrays like a Profile's fieldPermissions/objectPermissions are the ones dropped and named in `omittedPropertyKeys`), and `referenceIds` is capped with the true total in `referenceCount` — a `disclosure` string names exactly what was omitted. This guarantees `maxBodyBytes: 0` never trips the global oversize guard, even on a huge node (e.g. a Profile with thousands of grants). A PHANTOM id (referenced by retrieved metadata but never itself retrieved) returns component-not-found with a classified reference stub — and an AUTOMATION-CRITICAL phantom hit is also queued in meta/demand-queue.jsonl so `sfi refresh --drain-demand-queue` (or the watch daemon with --drain-demand-queue) can pull exactly the components real questions needed. An `UnresolvedProfile:{id}` stub (a Profile Id a RestrictionRule/DuplicateRule referenced but the vault could not resolve to an api name) classifies as `unresolved-profile-id`: its remedy is a Profile Id→apiName index / live Tooling, NOT a wider retrieve manifest.",
     inputSchema: GET_COMPONENT_INPUT_SCHEMA,
   },
   {
@@ -4154,7 +4424,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.health_check',
     description:
-      'Report self-assessed server health, render consistency, and coverage completeness, plus a freshness block (vault age, a stale flag, the most recent refresh\'s change count, and a yellow-flag nudge when the vault is old or local source drifted). While a staged refresh (`sfi refresh --staged`) is mid-build, status is degraded with explicit tier progress ("building tier i/n") until the final tier clears the marker. Also carries an INFORMATIONAL `assignmentData` block (runtime assignment data is live-first by design — its absence never degrades status; a stale counts snapshot >30 days old earns an advisory only).',
+      'Report self-assessed server health, render consistency, and coverage completeness, plus a freshness block (vault age, a stale flag, the most recent refresh\'s change count, and a yellow-flag nudge when the vault is old or local source drifted). While a staged refresh (`sfi refresh --staged`) is mid-build, status is degraded with explicit tier progress ("building tier i/n") until the final tier clears the marker. Also carries an INFORMATIONAL `assignmentData` block (runtime assignment data is live-first by design — its absence never degrades status; a stale counts snapshot >30 days old earns an advisory only) and a `vaultHistory` block (whether local vault git history is enabled, with a one-line `sfi vault git enable` hint when disabled so change-over-time questions become answerable). When the last refresh computed it, echoes a `phantomSummary` roll-up of dangling-edge targets by phantom taxonomy bucket (counts only — no stub nodes; `null` until the next `sfi refresh` populates it).',
     inputSchema: HEALTH_CHECK_INPUT_SCHEMA,
   },
   {
@@ -4392,8 +4662,8 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.automation_risk_report',
     description:
-      'Ranked automation risks: Process Builder migration candidates and governor-limit findings.',
-    inputSchema: SYNTHESIS_INPUT_SCHEMA,
+      "Ranked automation risks: Process Builder migration candidates and governor-limit findings. Optional object scope (`objectApiName` / `object` / `objectId` / `CustomObject:` `componentId`) is HONORED: the legacy-automation half narrows to Process Builders parented to that object and the response echoes `appliedScope`; the Apex governor-limit half is EXCLUDED from the object-scoped view (Apex classes aren't attributable to one object) and that exclusion is disclosed — never silently returning the org-wide report. An object absent from the vault is refused with `invalid-query`. A bare call stays org-wide and byte-identical.",
+    inputSchema: AUTOMATION_RISK_REPORT_INPUT_SCHEMA,
   },
   {
     name: 'sfi.permission_risk_report',
@@ -4443,7 +4713,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.effective_permissions',
     description:
-      "Compute a user's EFFECTIVE access — the UNION of a profile + assigned permission sets, max-wins, with each permission attributed to the container(s) that grant it. `why_cant_user_see_record` evaluates a single record question against a bundle; nothing else rolls the containers up into one combined ability — this does. Input: `profileId` and/or `permissionSetIds[]` (at least one). A `PermissionSetGroup:` id may be passed in `permissionSetIds[]` — it is EXPANDED into its member permission sets (declared membership) and unioned in, so a PSG-assigned user gets a real answer (a permset reachable both directly and via a group is unioned once, not double-counted). MUTING permission sets are now SUBTRACTED (R6-06): each group's grant = union(members) MINUS its muting set(s), per modeled class (object CRUD, FLS, system/user perms, custom perms, Apex-class access), BEFORE the containers union max-wins — muting is group-scoped, never org-wide, so a grant conferred by the profile or a permission set assigned OUTSIDE the group is never muted. It composes each container's outgoing `grantedBy` edges (object + field + apex + custom permission), `properties.userPermissions` (system perms), and `properties.recordTypeVisibilities` (record-type visibility). `objectPermissions[]` carries the OR'd `allowCreate`/`allowRead`/`allowEdit`/`allowDelete`/`viewAllRecords`/`modifyAllRecords` per object plus `grantedBy` (the containers contributing a surviving flag) and, when a group would-be grant was muted, `mutedBy` (the muting set(s) that denied a flag — present only when non-empty); `systemPermissions[]` lists each user-permission with its `grantedBy` (+ `mutedBy` when a group muted a would-be grant that survives elsewhere); `customPermissions[]` (CR-CAP-10) lists each granted custom permission with its `grantedBy` (+ `mutedBy`) + `targetMissing` (true when the granted name has no `CustomPermission` definition in the vault — managed-package / not-retrieved; declared but not resolvable, and NOT folded into systemPermissions); `recordTypeVisibilities[]` unions each container's declared record-type visibility (max-wins — visible=true wins; `<visible>` omitted in older metadata counts as visible, only an explicit false hides), each entry `{recordType, visible, grantedBy}` — record-type visibility is part of THIS union now, no longer only the separate `recordtype_availability` surface (that tool remains for the per-object grouped view); a container carrying no extracted `recordTypeVisibilities` property (a vault refreshed before record-type extraction) contributes nothing and is DISCLOSED (re-run /sfi-refresh), never fabricated as 'no record types'; `summary` reports objects / fieldsWithFls / apexClasses / systemPermissions / customPermissions / recordTypeVisibilities counts. The object list PAGES (`limit` default 100 / max 200, `offset`/`hasMore`/`truncated`). `declared` confidence. `disclosures` is explicit about the boundaries: permission-set GROUP membership IS expanded and its muting set(s) SUBTRACTED per modeled class; a muting node from a vault refreshed before R6-06 (no muted-perm data) or referenced-but-absent CANNOT be subtracted and is DISCLOSED as a possible OVERSTATEMENT (re-run /sfi-refresh); record-type visibility is not mutable and is never subtracted; app/tab visibility is a SEPARATE surface (now extracted — see `app_access` / `tab_availability`), not part of this union; field-level detail is summarised (use `field_access_audit`); object permission is NOT record access (record visibility needs OWD + sharing); custom permissions are declared grants, NOT system userPermissions, so they are never double-counted. Missing containers are ignored with a disclosure; if none exist → `component-not-found`. DIRECTION: this answers WHAT a given container bundle GRANTS (vault metadata); WHICH sets/PSGs a specific USER actually holds right now is runtime assignment state — use sfi.live_user_permsets (live, read-only) and feed its grantors back into this tool for a dual-provenance answer.",
+      "Compute a user's EFFECTIVE access — the UNION of a profile + assigned permission sets, max-wins, with each permission attributed to the container(s) that grant it. `why_cant_user_see_record` evaluates a single record question against a bundle; nothing else rolls the containers up into one combined ability — this does. Input: `profileId` (or the natural `profileApiName` / `profileName` alias — a bare name is coerced to `Profile:{Name}`, the canonical `profileId` winning when both are given) and/or `permissionSetIds[]` (at least one). Pass an optional OBJECT scope (`object` / `objectApiName` / `objectId`) to narrow to one object (\"effective permissions for {profile} ON {object}?\"): objectPermissions, the fieldsWithFls count, and recordTypeVisibilities are filtered to it and the resolved object is echoed in `appliedScope` (systemPermissions / customPermissions / apexClasses are container-wide and stay whole); an object that resolves to nothing real in this vault is `invalid-query`, NEVER a silent org-wide dump, and a bare (no-object) call is byte-identical to before. A `PermissionSetGroup:` id may be passed in `permissionSetIds[]` — it is EXPANDED into its member permission sets (declared membership) and unioned in, so a PSG-assigned user gets a real answer (a permset reachable both directly and via a group is unioned once, not double-counted). MUTING permission sets are now SUBTRACTED (R6-06): each group's grant = union(members) MINUS its muting set(s), per modeled class (object CRUD, FLS, system/user perms, custom perms, Apex-class access), BEFORE the containers union max-wins — muting is group-scoped, never org-wide, so a grant conferred by the profile or a permission set assigned OUTSIDE the group is never muted. It composes each container's outgoing `grantedBy` edges (object + field + apex + custom permission), `properties.userPermissions` (system perms), and `properties.recordTypeVisibilities` (record-type visibility). `objectPermissions[]` carries the OR'd `allowCreate`/`allowRead`/`allowEdit`/`allowDelete`/`viewAllRecords`/`modifyAllRecords` per object plus `grantedBy` (the containers contributing a surviving flag) and, when a group would-be grant was muted, `mutedBy` (the muting set(s) that denied a flag — present only when non-empty); `systemPermissions[]` lists each user-permission with its `grantedBy` (+ `mutedBy` when a group muted a would-be grant that survives elsewhere); `customPermissions[]` (CR-CAP-10) lists each granted custom permission with its `grantedBy` (+ `mutedBy`) + `targetMissing` (true when the granted name has no `CustomPermission` definition in the vault — managed-package / not-retrieved; declared but not resolvable, and NOT folded into systemPermissions); `recordTypeVisibilities[]` unions each container's declared record-type visibility (max-wins — visible=true wins; `<visible>` omitted in older metadata counts as visible, only an explicit false hides), each entry `{recordType, visible, grantedBy}` — record-type visibility is part of THIS union now, no longer only the separate `recordtype_availability` surface (that tool remains for the per-object grouped view); a container carrying no extracted `recordTypeVisibilities` property (a vault refreshed before record-type extraction) contributes nothing and is DISCLOSED (re-run /sfi-refresh), never fabricated as 'no record types'; `summary` reports objects / fieldsWithFls / apexClasses / systemPermissions / customPermissions / recordTypeVisibilities counts. The object list PAGES (`limit` default 100 / max 200, `offset`/`hasMore`/`truncated`). `declared` confidence. `disclosures` is explicit about the boundaries: permission-set GROUP membership IS expanded and its muting set(s) SUBTRACTED per modeled class; a muting node from a vault refreshed before R6-06 (no muted-perm data) or referenced-but-absent CANNOT be subtracted and is DISCLOSED as a possible OVERSTATEMENT (re-run /sfi-refresh); record-type visibility is not mutable and is never subtracted; app/tab visibility is a SEPARATE surface (now extracted — see `app_access` / `tab_availability`), not part of this union; field-level detail is summarised (use `field_access_audit`); object permission is NOT record access (record visibility needs OWD + sharing); custom permissions are declared grants, NOT system userPermissions, so they are never double-counted. Missing containers are ignored with a disclosure; if none exist → `component-not-found`. DIRECTION: this answers WHAT a given container bundle GRANTS (vault metadata); WHICH sets/PSGs a specific USER actually holds right now is runtime assignment state — use sfi.live_user_permsets (live, read-only) and feed its grantors back into this tool for a dual-provenance answer.",
     inputSchema: EFFECTIVE_PERMISSIONS_INPUT_SCHEMA,
   },
   {
@@ -4461,7 +4731,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.guest_exposure_report',
     description:
-      "\"What can UNAUTHENTICATED GUEST users see in my Experience Cloud / Site communities?\" — the audit for one of the most notorious real-world Salesforce leaks (over-permissioned site guest profiles exposing PII to the open internet). Enumerates every modeled community surface (the R6-17 `Network`/`CustomSite`/`ExperienceBundle` family), resolves each site's guest profile via the `Profile:{Site Label} Profile` NAMING CONVENTION (heuristic — the XML carries no `<guestProfile>` pointer), and COMPOSES the guest profile's exposure from the existing engine: object CRUD (the profile's `grantedBy` edges), FLS on PII-classified fields (reusing `pii_inventory`'s classifier, gated on the guest ALSO having object read so a field grant without object access is not counted), Apex-class access, and the community's guest sharing rules (CR-CAP-16 `SharingRule` nodes with `ruleType:'guest'`). `findings[]` is RANKED by severity: `critical` = guest can WRITE an object carrying guest-readable PII; `high` = guest READ on a PII object OR write on any object OR editable PII field; `medium` = readable PII field; `low` = read w/o PII, Apex access, guest sharing rules. Every finding carries a REAL vault `nodeId` (CustomObject/CustomField/ApexClass/SharingRule) and PER-CLAIM confidence: the CRUD/FLS/apex GRANT is `declared`, but the guest-profile identity is `heuristic` (naming convention) — so the report `confidence` is `heuristic` and each finding carries `guestLinkageConfidence:'heuristic'`. `communities[]` (COMPLETE) carries per-site metadata — `status`, `selfRegistration` (the CRITICAL self-signup switch), `enableGuestFileAccess`, correlated `networkId`/`experienceBundleId`, and `guestProfileResolved`. `findings` PAGES (`limit` default 50 / max 200, `offset`/`cursor`/`hasMore`); `summary` holds complete per-severity counts. Optional `communityId` (`Network:X` or `CustomSite:X`) scopes to one community (a Network id resolves through its `<site>`). FAIL CLOSED: with NO `Network`/`CustomSite` modeled it reports \"no Experience Cloud surface in the vault — re-run `/sfi-refresh`\", never \"no exposure\". Honesty axis (`disclosures`): object CRUD+FLS is the DECLARED grant — actual record visibility also needs OWD + guest sharing rules (record level); Visualforce-page guest access (`<pageAccesses>`) is NOT modeled (only Apex is); an unresolved guest profile is disclosed per community, never treated as \"no exposure\". A non-`Network:`/`CustomSite:` `communityId` → `invalid-query`; a scoped id resolving to no modeled site → `component-not-found`.",
+      "\"What can UNAUTHENTICATED GUEST users see in my Experience Cloud / Site communities?\" — the audit for one of the most notorious real-world Salesforce leaks (over-permissioned site guest profiles exposing PII to the open internet). Enumerates every modeled community surface (the R6-17 `Network`/`CustomSite`/`ExperienceBundle` family), resolves each site's guest profile via the `Profile:{Site Label} Profile` NAMING CONVENTION (heuristic — the XML carries no `<guestProfile>` pointer), and COMPOSES the guest profile's exposure from the existing engine: object CRUD (the profile's `grantedBy` edges), FLS on PII-classified fields (reusing `pii_inventory`'s classifier, gated on the guest ALSO having object read so a field grant without object access is not counted), Apex-class access, and the community's guest sharing rules (CR-CAP-16 `SharingRule` nodes with `ruleType:'guest'`). `findings[]` is RANKED by severity: `critical` = guest can WRITE an object carrying guest-readable PII; `high` = guest READ on a PII object OR write on any object OR editable PII field; `medium` = readable PII field; `low` = read w/o PII, Apex access, guest sharing rules. Every finding carries a REAL vault `nodeId` (CustomObject/CustomField/ApexClass/SharingRule) and PER-CLAIM confidence: the CRUD/FLS/apex GRANT is `declared`, but the guest-profile identity is `heuristic` (naming convention) — so the report `confidence` is `heuristic` and each finding carries `guestLinkageConfidence:'heuristic'`. `communities[]` (COMPLETE) carries per-site metadata — `status`, `selfRegistration` (the CRITICAL self-signup switch), `enableGuestFileAccess`, correlated `networkId`/`experienceBundleId`, and `guestProfileResolved`. `findings` PAGES (`limit` default 50 / max 200, `offset`/`cursor`/`hasMore`); `summary` holds complete per-severity counts. TWO optional, composable scope axes (the applied scope is always echoed back as `appliedScope: { community, object, mode }`, so a host never assumes a filter that was silently dropped): (1) COMMUNITY — `communityId` (`Network:X` or `CustomSite:X`; a Network id resolves through its `<site>`) or the bare `networkApiName` / `networkName` / `siteApiName` aliases; (2) OBJECT (the dominant \"guest exposure for {Object}\" shape) — `objectApiName` (bare, e.g. `Contact`) or `objectId` (`CustomObject:Contact`), which filters `findings` + each community's `findingCount` to that object's guest CRUD, its fields' FLS, and its guest sharing rules (object-independent Apex findings drop out). `componentId` is dispatched BY PREFIX: `Network:` / `CustomSite:` scopes the community; `CustomObject:` scopes the object identically to `objectApiName` (so `componentId: CustomObject:Contact` is object scope, `mode: 'object'`, NEVER the org-wide `mode: 'all'`). FAIL CLOSED: with NO `Network`/`CustomSite` modeled it reports \"no Experience Cloud surface in the vault — re-run `/sfi-refresh`\", never \"no exposure\". Honesty axis (`disclosures`): object CRUD+FLS is the DECLARED grant — actual record visibility also needs OWD + guest sharing rules (record level); Visualforce-page guest access (`<pageAccesses>`) is NOT modeled (only Apex is); an unresolved guest profile is disclosed per community, never treated as \"no exposure\". A `componentId` whose prefix is not `Network:` / `CustomSite:` / `CustomObject:` (or a non-`Network:`/`CustomSite:` `communityId`, or disagreeing selectors) → `invalid-query`, never a silent org-wide fallback; a scoped community id resolving to no modeled site → `component-not-found`.",
     inputSchema: GUEST_EXPOSURE_REPORT_INPUT_SCHEMA,
   },
   {
@@ -4473,13 +4743,13 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.layout_for_user',
     description:
-      "Walk the Salesforce layout-routing cascade (ProfileLookup → LayoutAssignment → RecordTypeResolution) for a given object, optional record type, and profile. Returns the resolved layout id (or null), the record type the cascade ended up using, and a structured reasoning trail. When the Profile node does not yet carry extracted `layoutAssignments` data (the v0.1 extractor's honesty boundary), the cascade reports `unknown` with an explanation rather than fabricating.",
+      "Walk the Salesforce layout-routing cascade (ProfileLookup → LayoutAssignment → RecordTypeResolution) for a given object, optional record type, and profile (`profileId` / `profileApiName` / `profileName` / `profile` — a bare api name or a `Profile:` id, interchangeable, resolved + echoed as `appliedScope`). Returns the resolved layout id (or null), the record type the cascade ended up using, and a structured reasoning trail. When the Profile node does not yet carry extracted `layoutAssignments` data (the v0.1 extractor's honesty boundary), the cascade reports `unknown` with an explanation rather than fabricating.",
     inputSchema: LAYOUT_FOR_USER_INPUT_SCHEMA,
   },
   {
     name: 'sfi.user_ability',
     description:
-      "\"What can this Profile / PermissionSet RUN or DO?\" — beyond record CRUD (which `object_access_audit` / `why_cant_user_see_record` cover). Given a `Profile:X` or `PermissionSet:X` (`componentId`): `runnableFlows` (the `Flow:` ids the container grants run access to, via the `flowAccess` grantedBy edges, paginated); `loginRestrictions` (`ipRangeCount` + `loginHoursRestricted` scalars PLUS the full `ipRanges[]` of `{startAddress, endAddress}` windows and `loginHours[]` of `{day, startTime, endTime}` per-weekday windows — Profile-only, `applies:false` and empty lists for a permission set; for a focused login/session security audit use `profile_security`); `actionPermissions` (the run/export/transfer/convert/mass-edit class of system permissions present, filtered from `userPermissions`); and `customPermissions` (CR-CAP-10 — the custom permissions the container CONFERS via its `<customPermissions>` grants, each with `targetMissing` when the granted name has no `CustomPermission` definition in the vault; custom permissions are NOT system userPermissions, so they are not double-counted with actionPermissions). `summary` tallies runnableFlows + actionPermissions + customPermissions. `declared` confidence. `boundaryNote`: the user must be ASSIGNED the container to gain these (runtime, not modeled), and flow run access also needs the flow active. `flowAccess` grant edges are extracted at every refresh (PermissionSet `<flowAccesses>`); a vault refreshed before that extraction reports no runnable flows — re-run `/sfi-refresh` rather than reading it as a verified empty. Unknown id → `component-not-found`; non-Profile/PermissionSet prefix → `invalid-query`.",
+      "\"What can this Profile / PermissionSet RUN or DO?\" — beyond record CRUD (which `object_access_audit` / `why_cant_user_see_record` cover). Given a `Profile:X` or `PermissionSet:X` — via `componentId` or the natural `profileApiName` / `profileId` / `permissionSetApiName` / `permissionSetId` selector (a bare name is coerced to the container prefix; `componentId` wins; the field scope and the container are SEPARATE axes, so a profile key is never stripped by a field mention): `runnableFlows` (the `Flow:` ids the container grants run access to, via the `flowAccess` grantedBy edges, paginated); `loginRestrictions` (`ipRangeCount` + `loginHoursRestricted` scalars PLUS the full `ipRanges[]` of `{startAddress, endAddress}` windows and `loginHours[]` of `{day, startTime, endTime}` per-weekday windows — Profile-only, `applies:false` and empty lists for a permission set; for a focused login/session security audit use `profile_security`); `actionPermissions` (the run/export/transfer/convert/mass-edit class of system permissions present, filtered from `userPermissions`); and `customPermissions` (CR-CAP-10 — the custom permissions the container CONFERS via its `<customPermissions>` grants, each with `targetMissing` when the granted name has no `CustomPermission` definition in the vault; custom permissions are NOT system userPermissions, so they are not double-counted with actionPermissions). `summary` tallies runnableFlows + actionPermissions + customPermissions. Pass an optional FIELD scope (`fieldId` — `CustomField:Object.Field` or bare `Object.Field` — or `fieldApiName` + `objectApiName`) to also answer \"can this container edit {Object}.{field}?\": the response adds `fieldAccess` (`{field, readable, editable}` — the container's declared FLS on that field, edit implying read, both false = no FLS granted) + echoes `appliedScope`; an unresolvable field is `invalid-query`, never a silent field-dropped answer, and a call without the field scope is byte-identical (for the full grantor breakdown on a field use `field_access_audit`). `declared` confidence. `boundaryNote`: the user must be ASSIGNED the container to gain these (runtime, not modeled), and flow run access also needs the flow active; FLS is NOT record access (record visibility still needs OWD + sharing). `flowAccess` grant edges are extracted at every refresh (PermissionSet `<flowAccesses>`); a vault refreshed before that extraction reports no runnable flows — re-run `/sfi-refresh` rather than reading it as a verified empty. A call that names NO container (no `componentId` and no profile/permission-set selector) → a named `invalid-query`; unknown id → `component-not-found`; non-Profile/PermissionSet prefix → `invalid-query`.",
     inputSchema: USER_ABILITY_INPUT_SCHEMA,
   },
   {
@@ -4491,7 +4761,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.lightning_pages',
     description:
-      "Lightning record pages (FlexiPage), both directions. Given a `CustomObject:X` (`componentId`) it returns the Lightning pages FOR that object (`pages[]` of `{flexiPageId, masterLabel, pageType}`, from the `flexiPageObject` `references` edges, paginated); given a `FlexiPage:X` it returns that page's `forObject` / `pageType` / `masterLabel`. `declared` confidence. CRITICAL honesty axis (`activationDisclosure`, always present): which profile / record type / app / form factor ACTIVATES (is served) a page is NOT in the retrieved FlexiPage metadata — it is a separate Lightning App Builder assignment — so this reports the pages that EXIST for an object, NOT which one a given user sees (`layout_for_user` covers CLASSIC layouts). Unknown id → `component-not-found`; a non-`CustomObject:`/`FlexiPage:` prefix → `invalid-query`.",
+      "Lightning record pages (FlexiPage), both directions. Given a `CustomObject:X` (`componentId`) it returns the Lightning pages FOR that object (`pages[]` of `{flexiPageId, masterLabel, pageType}`, from the `flexiPageObject` `references` edges, paginated); given a `FlexiPage:X` it returns that page's `forObject` / `pageType` / `masterLabel`. `declared` confidence. CRITICAL honesty axis (`activationDisclosure`, always present): which profile / record type / app / form factor ACTIVATES (is served) a page is NOT in the retrieved FlexiPage metadata — it is a separate Lightning App Builder assignment — so this reports the pages that EXIST for an object, NOT which one a given user sees (`layout_for_user` covers CLASSIC layouts). Object mode also accepts the natural object aliases `objectApiName` / `object` / `objectId` (resolved and echoed as `appliedScope`). A profile* argument (`profileApiName` / `profileId` / `profileName` / `profile`) is REFUSED with `invalid-query` — profile activation is not in FlexiPage metadata, so the tool never silently strips it into a bare object inventory; pass just the object, then use `layout_for_user` (Classic) or Lightning App Builder for the per-profile page. Unknown id → `component-not-found`; a non-`CustomObject:`/`FlexiPage:` prefix → `invalid-query`.",
     inputSchema: LIGHTNING_PAGES_INPUT_SCHEMA,
   },
   {
@@ -4503,13 +4773,13 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.app_access',
     description:
-      "Given a `CustomApplication` (`componentId`, e.g. `CustomApplication:Sales`), return what's IN the app and WHO can use it: `navType` (Standard/Console/Classic), `tabs` (the app's `CustomTab:` ids in document order, from `belongsToApp` edges), `canOpen` (the Profiles/PermissionSets whose `applicationVisibilities` mark the app `visible: true`, paginated via `limit`/`offset`), and `defaultedBy` (the granters for which this is the DEFAULT app — complete). `summary` tallies tabs / canOpen / defaultedBy. `declared` confidence. `boundaryNote`: who-can-open is the applicationVisibilities grant — actual access also needs the user to be ASSIGNED the profile/permission set (runtime, not modeled); if no granter carries an extracted `applicationVisibilities` the list is disclosed as 'not modeled', not a verified empty. `scanTruncated: true` (with a `boundaryNote`) when the Profile/PermissionSet scan hits the per-type node cap (500, `SFI_NODE_SCAN_LIMIT`) — the granter list may be incomplete. App visibility (`applicationVisibilities`) is extracted at every refresh; only a vault refreshed before the P11 extraction answers 'not modeled' (re-run `/sfi-refresh`). Unknown app → `component-not-found`; non-`CustomApplication:` prefix → `invalid-query`. INVERSE direction (P14-APP-default-reverse): pass a `Profile:` or `PermissionSet:` id instead and the response answers FROM the granter's own applicationVisibilities — `openableApps[]` (visible: true) and `defaultApp` (or null), one node read; a granter without the extracted property answers \"not modeled\", never a verified empty. `PermissionSetGroup:` ids are refused with the honest union explanation (PSG visibility = union of member permission sets, not directly extracted).",
+      "Given a `CustomApplication` (`componentId`, e.g. `CustomApplication:Sales`), return what's IN the app and WHO can use it: `navType` (Standard/Console/Classic), `tabs` (the app's `CustomTab:` ids in document order, from `belongsToApp` edges), `canOpen` (the Profiles/PermissionSets whose `applicationVisibilities` mark the app `visible: true`, paginated via `limit`/`offset`), and `defaultedBy` (the granters for which this is the DEFAULT app — complete). `summary` tallies tabs / canOpen / defaultedBy. `declared` confidence. NATURAL ARGS (APP-ACCESS-REJECTS-NATURAL-ARGS): instead of the `CustomApplication:` id you may pass an app `apiName` / `app` / `application` (a bare app name → the `CustomApplication:` node when one exists, else an app-label/api-name search) or a fuzzy `nameContains` — one match resolves and echoes `appliedScope` (`{componentId, resolvedFrom, matched}`); several return an `invalid-query` pick list (never a silent pick); none → `component-not-found`. A canonical `CustomApplication:` `componentId` call carries NO `appliedScope` (byte-identical). `boundaryNote`: who-can-open is the applicationVisibilities grant — actual access also needs the user to be ASSIGNED the profile/permission set (runtime, not modeled); if no granter carries an extracted `applicationVisibilities` the list is disclosed as 'not modeled', not a verified empty. `scanTruncated: true` (with a `boundaryNote`) when the Profile/PermissionSet scan hits the per-type node cap (500, `SFI_NODE_SCAN_LIMIT`) — the granter list may be incomplete. App visibility (`applicationVisibilities`) is extracted at every refresh; only a vault refreshed before the P11 extraction answers 'not modeled' (re-run `/sfi-refresh`). Unknown app → `component-not-found`; non-`CustomApplication:` prefix → `invalid-query`. INVERSE direction (P14-APP-default-reverse): pass a `Profile:` or `PermissionSet:` id instead and the response answers FROM the granter's own applicationVisibilities — `openableApps[]` (visible: true) and `defaultApp` (or null), one node read; a granter without the extracted property answers \"not modeled\", never a verified empty. `PermissionSetGroup:` ids are refused with the honest union explanation (PSG visibility = union of member permission sets, not directly extracted).",
     inputSchema: APP_ACCESS_INPUT_SCHEMA,
   },
   {
     name: 'sfi.tab_availability',
     description:
-      "Given a `Profile:X` or `PermissionSet:X` (`componentId`), list the tabs it can see: each row carries the `tab`, the verbatim `visibility` enum (`DefaultOn`/`DefaultOff`/`Hidden` on a profile; `Available`/`Visible`/`None` on a permission set), and an `available` flag normalising 'the user can reach this tab'. `summary` tallies total / available / hidden; the list pages (`limit` default 200 / max 500, `offset`/`hasMore`/`truncated`). `declared` confidence. `boundaryNote`: a tab being available does NOT grant object access (use `object_access_audit`), and the user must be ASSIGNED this profile/permission set (runtime, not modeled); an un-extracted `tabVisibilities` is disclosed as 'not modeled'. Tab visibility is extracted at every refresh (Profile `<tabVisibilities>` and PermissionSet `<tabSettings>` both land on `properties.tabVisibilities`); only a vault refreshed before the P11 extraction answers 'not modeled' (re-run `/sfi-refresh`). Unknown id → `component-not-found`; non-Profile/PermissionSet prefix → `invalid-query`.",
+      "Given a `Profile:X` or `PermissionSet:X` — via `componentId` or the natural `profileApiName` / `profileId` / `permissionSetApiName` / `permissionSetId` selector (a bare name is coerced to the container prefix; the object and the profile are SEPARATE axes, so a profile key is never stripped by an object mention) — list the tabs it can see: each row carries the `tab`, the verbatim `visibility` enum (`DefaultOn`/`DefaultOff`/`Hidden` on a profile; `Available`/`Visible`/`None` on a permission set), and an `available` flag normalising 'the user can reach this tab'. Pass an optional `objectApiName` / `object` / `objectId` to narrow to one object's tab (\"is Case's tab available to {profile}?\") — matched by Salesforce tab-naming convention (the object api name, or `standard-<Object>`); an object with no matching tab is an honest empty for that profile, not the whole tab dump, and the resolved subject + object are echoed in `appliedScope`. `summary` tallies total / available / hidden; the list pages (`limit` default 200 / max 500, `offset`/`hasMore`/`truncated`). `declared` confidence. `boundaryNote`: a tab being available does NOT grant object access (use `object_access_audit`), and the user must be ASSIGNED this profile/permission set (runtime, not modeled); an un-extracted `tabVisibilities` is disclosed as 'not modeled'. Tab visibility is extracted at every refresh (Profile `<tabVisibilities>` and PermissionSet `<tabSettings>` both land on `properties.tabVisibilities`); only a vault refreshed before the P11 extraction answers 'not modeled' (re-run `/sfi-refresh`). Unknown id → `component-not-found`; non-Profile/PermissionSet prefix → `invalid-query`.",
     inputSchema: TAB_AVAILABILITY_INPUT_SCHEMA,
   },
   {
@@ -4521,13 +4791,13 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.layout_assignments',
     description:
-      "The REVERSE of `sfi.layout_for_user`: given a page Layout canonical id (`componentId`, e.g. `Layout:Account.Account Layout`), enumerate every (Profile × RecordType) assignment that targets it — the question an admin asks before editing or deleting a layout. Reads the same `properties.layoutAssignments` surface the forward tool routes through (so the two agree by construction). Each assignment carries the `profileId`, `profileLabel`, the `recordType` axis (the bare `{Object}.{RT}` form, or `null` for the object's default/master assignment), and the canonical `recordTypeId`. `summary` reports distinct profiles + total assignments (COMPLETE, not paginated). A widely-shared standard-object layout (e.g. Account) is assigned by every profile × record type — hundreds of rows past the MCP response limit — so the inline `assignments` list PAGES via `limit` (default 120, max 250) / `offset` / `hasMore` / `truncated`. `declared` confidence. Honesty axis: CLASSIC page-layout assignments via Profiles only — Lightning record pages (FlexiPage) and the org-wide default layout assign differently and are not covered (`boundaryNote`); if no profile in the vault carries an extracted `layoutAssignments` property, `boundaryNote` discloses the result is \"not modeled\", not a verified \"no assignments\". `scanTruncated: true` (with a `boundaryNote`) when the Profile scan hits the per-type node cap (500, `SFI_NODE_SCAN_LIMIT`) — assignments may be incomplete on a very large org. Unknown layout id → `component-not-found`; a non-`Layout:` prefix → `invalid-query`.",
+      "The REVERSE of `sfi.layout_for_user`: enumerate every (Profile × RecordType) assignment that targets a page layout — the question an admin asks before editing or deleting a layout. `componentId` is EITHER a Layout canonical id (`Layout:Account.Account Layout`, LAYOUT mode — assignments for that ONE layout) OR a CustomObject id (`CustomObject:Account`, OBJECT mode — assignments across EVERY layout of the object, the SAME id `sfi.lightning_pages` accepts; a `CustomObject:` id is NOT mangled into a bogus `Layout:CustomObject:X`). `mode` echoes which was used. Reads the same `properties.layoutAssignments` surface the forward tool routes through (so the two agree by construction). Each assignment carries the `profileId`, `profileLabel`, the `recordType` axis (the bare `{Object}.{RT}` form, or `null` for the object's default/master assignment), and the canonical `recordTypeId`; in OBJECT mode each row ALSO carries its own `layoutId` and the response adds `layouts[]` + `summary.layouts` (the distinct layouts of the object). `summary` reports distinct profiles + total assignments (COMPLETE, not paginated). A widely-shared standard-object layout (e.g. Account) is assigned by every profile × record type — hundreds of rows past the MCP response limit — so the inline `assignments` list PAGES via `limit` (default 120, max 250) / `offset` / `hasMore` / `truncated`. `declared` confidence. Honesty axis: CLASSIC page-layout assignments via Profiles only — Lightning record pages (FlexiPage) and the org-wide default layout assign differently and are not covered (`boundaryNote`); if no profile in the vault carries an extracted `layoutAssignments` property, `boundaryNote` discloses the result is \"not modeled\", not a verified \"no assignments\". `scanTruncated: true` (with a `boundaryNote`) when the Profile scan hits the per-type node cap (500, `SFI_NODE_SCAN_LIMIT`) — assignments may be incomplete on a very large org. Unknown Layout OR CustomObject id → `component-not-found`; a prefix that is neither `Layout:` nor `CustomObject:` → `invalid-query`.",
     inputSchema: LAYOUT_ASSIGNMENTS_INPUT_SCHEMA,
   },
   {
     name: 'sfi.integration_map',
     description:
-      "Return a structured topology of the org's integration surfaces: AuthProviders, NamedCredentials, RemoteSiteSettings, CspTrustedSites, ExternalDataSources, ExternalServices, ConnectedApps, NetworkAccess entries, plus the cross-type `references` edges connecting them (e.g., ExternalDataSource → AuthProvider). Optional `filter` narrows the result to one architectural cut (auth / sites / sources / services / access); default `all` returns every category.",
+      "Return a structured topology of the org's integration surfaces: AuthProviders, NamedCredentials, RemoteSiteSettings, CspTrustedSites, ExternalDataSources, ExternalServices, ConnectedApps, NetworkAccess entries, plus the cross-type `references` edges connecting them (e.g., ExternalDataSource → AuthProvider). Optional `filter` narrows the result to one architectural cut (auth / sites / sources / services / access); default `all` returns every category. This map is ORG-WIDE (`appliedScope.mode: 'all'`): it cannot scope to one object or component — an `objectApiName` / `object` / `objectId` / `componentId` argument is REFUSED with `invalid-query` (the integration surface is not indexed by the SObject it touches), never silently answered whole-org. For callouts / connectors tied to a specific object use `find_code_usages`; for the URL surface use `endpoint_catalog`.",
     inputSchema: INTEGRATION_MAP_INPUT_SCHEMA,
   },
   {
@@ -4569,13 +4839,13 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.unused_components',
     description:
-      "Scan the vault for components with no incoming USAGE edges (excluding the parentOf containment edge and grantedBy access grants — a Profile / PermissionSet granting access is not usage, so a component nobody references is still unused). Default `types` is a curated subset (CustomField, ApexClass, ApexTrigger, Flow, PermissionSet, Queue, Group, Role, EmailTemplate, Letterhead, GlobalValueSet, CustomLabel, StaticResource, ValidationRule, WorkflowRule); supply `types` to narrow. Test ApexClasses (properties.isTest === true) are NEVER flagged as unused. Each entry carries a per-type `invisibleReferencesNote` enumerating what the v1.x extractors cannot see (dynamic SOQL, reflective Apex, permission-set assignments, runtime callouts). `byType` carries the full per-type counts (not the truncated slice); `truncated` is true when the global slice was trimmed to `limit`, and a truncated page returns a `nextCursor` to resume. When any REFERRER family (Reports, Flows, layouts, LWC, …) has incomplete coverage — errored retrieve, scoped refresh, or an in-progress staged build — the response carries a `coverageCaveat` naming the families: \"unused\" then means \"no RETRIEVED metadata references it\", never proven absence.",
+      "Scan the vault for components with no incoming USAGE edges (excluding the parentOf containment edge and grantedBy access grants — a Profile / PermissionSet granting access is not usage, so a component nobody references is still unused). Default `types` is a curated subset (CustomField, ApexClass, ApexTrigger, Flow, PermissionSet, Queue, Group, Role, EmailTemplate, Letterhead, GlobalValueSet, CustomLabel, StaticResource, ValidationRule, WorkflowRule); supply `types` to narrow, or the SINGULAR `type` / `componentType` / `typeFilter` alias for one family (e.g. \"unused WebLinks\") — an unknown type is `invalid-query`, never silently answered with the default family. Pass `object` / `objectApiName` to narrow to one object's children (e.g. \"unused WebLinks on Contact\"); a type with no object parent honestly returns empty under an object filter rather than the org-wide list. The response echoes `appliedScope` ({ types, object, mode }) so a host can confirm the scope actually applied. Test ApexClasses (properties.isTest === true) are NEVER flagged as unused. Each entry carries a per-type `invisibleReferencesNote` enumerating what the v1.x extractors cannot see (dynamic SOQL, reflective Apex, permission-set assignments, runtime callouts). `byType` carries the full per-type counts (not the truncated slice); `truncated` is true when the global slice was trimmed to `limit`, and a truncated page returns a `nextCursor` to resume. When any REFERRER family (Reports, Flows, layouts, LWC, …) has incomplete coverage — errored retrieve, scoped refresh, or an in-progress staged build — the response carries a `coverageCaveat` naming the families: \"unused\" then means \"no RETRIEVED metadata references it\", never proven absence.",
     inputSchema: UNUSED_COMPONENTS_INPUT_SCHEMA,
   },
   {
     name: 'sfi.find_dependency_cycles',
     description:
-      "Architect tool: find cyclic dependency clusters in the org's Apex. Runs Tarjan's strongly-connected-components over `callsApex` edges among ApexClass + ApexTrigger nodes and returns every cyclic cluster (SCC of size > 1) plus self-recursive classes (size-1 SCCs with a self-edge), ordered by size descending. Each `cycles[]` entry carries the member component ids, the cluster `size`, and `selfRecursive`. `summary` reports apexNodesScanned, callsApexEdgesConsidered, cyclicClusters, largestClusterSize, and truncated. Honesty axis: `callsApex` is heuristic static analysis — dynamic dispatch (Type.forName, interface polymorphism) is invisible, so the reported set is a LOWER BOUND; a cluster means the listed components statically reference one another in a loop (investigate fragility / deploy-order / test-isolation), not proven runtime recursion. `limit` (default 50, max 200) caps the returned clusters; a truncated page returns a `nextCursor` to resume.",
+      "Architect tool: find cyclic dependency clusters in the org's Apex. Runs Tarjan's strongly-connected-components over `callsApex` edges among ApexClass + ApexTrigger nodes and returns every cyclic cluster (SCC of size > 1) plus self-recursive classes (size-1 SCCs with a self-edge), ordered by size descending. Optional SCOPE: pass `componentId` (`ApexClass:`/`ApexTrigger:` id or bare class name) to narrow to the cluster CONTAINING that component (honest empty when it is in no cycle — never the org list), and/or `nameContains` to keep only clusters with a member id matching the substring; both AND together, the SCC scan stays org-wide but the returned clusters + counts reflect the scope, and `appliedScope` ({ component, nameContains, mode }) is echoed. Each `cycles[]` entry carries the member component ids, the cluster `size`, and `selfRecursive`. `summary` reports apexNodesScanned, callsApexEdgesConsidered, cyclicClusters, largestClusterSize, and truncated. Honesty axis: `callsApex` is heuristic static analysis — dynamic dispatch (Type.forName, interface polymorphism) is invisible, so the reported set is a LOWER BOUND; a cluster means the listed components statically reference one another in a loop (investigate fragility / deploy-order / test-isolation), not proven runtime recursion. `limit` (default 50, max 200) caps the returned clusters; a truncated page returns a `nextCursor` to resume.",
     inputSchema: FIND_DEPENDENCY_CYCLES_INPUT_SCHEMA,
   },
   {
@@ -4593,7 +4863,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.automation_collisions',
     description:
-      "Field-level write-collision + save-recursion cycle detector for ONE object — 'is my org fighting itself on this object?'. Where automation_build_advisor flags OBJECT-level hazards (multiple flows, mixed paradigms), this tool looks at what those automations actually WRITE. Given `object`, walks the SAME `triggersOn` firer set (record-triggered Flow, ApexTrigger, WorkflowRule) build-advisor gathers, plus each firer's `writesTo` edges. `collisions[]`: 2+ DISTINCT automations writing the SAME field — a silent last-writer-wins fight Salesforce does not arbitrate; each writer carries componentType, active, confidence (`parsed` for declared Flow/WorkflowRule XML, `heuristic` for the Apex scanner), and timing (before/after/post-save when modeled); the finding's `weakestConfidence` is the WEAKEST across its writers. `cycles[]`: a depth-capped (4 hops) walk for a write path that returns to the queried object — `kind: 'self-write'` for the classic same-object after-trigger/workflow-field-update re-trigger (the depth-1 case), `kind: 'multi-object'` for an A-writes-B / B-writes-A loop, each with the full real-node `path`. Conditions on every automation are NOT evaluated (two writers with mutually exclusive entry criteria still collide in this report); Salesforce's own recursion GUARDS (a Flow's 'do not re-trigger' setting, workflow re-evaluation limits) are not modeled — a listed cycle is a POTENTIAL loop, not proof it fires. Only ApprovalProcess field updates and Apex writes performed by a helper class the trigger CALLS (not the trigger itself) are out of scope for this v1. `limit` (default 50, max 200) caps each list independently with a `boundaries[]` truncation note; inactive automation is still LISTED (never silently dropped) but lowers the finding's severity. Does NOT build or fix anything — read-only diagnosis.",
+      "Field-level write-collision + save-recursion cycle detector for ONE object — 'is my org fighting itself on this object?'. Where automation_build_advisor flags OBJECT-level hazards (multiple flows, mixed paradigms), this tool looks at what those automations actually WRITE. Given `object`, walks the SAME `triggersOn` firer set (record-triggered Flow, ApexTrigger, WorkflowRule) build-advisor gathers, plus each firer's `writesTo` edges. `collisions[]`: 2+ DISTINCT automations writing the SAME field on the SAME execution path — a silent last-writer-wins fight Salesforce does not arbitrate; each writer carries componentType, active, confidence (`parsed` for declared Flow/WorkflowRule XML, `heuristic` for the Apex scanner), and timing (before-save / after-save / post-save, or before-delete when modeled). Collisions are partitioned by execution PATH (`collisionPath`): save-timing writers collide with each other, while a before-delete Flow runs on the DELETE path and is bucketed separately (`collisionPath: 'delete'`) — it is NEVER reported as colliding with a save-timing writer, so a delete-path collision is never a save collision. The finding's `weakestConfidence` is the WEAKEST across its writers. `cycles[]`: a depth-capped (4 hops) walk for a write path that returns to the queried object — `kind: 'self-write'` for the classic same-object after-trigger/workflow-field-update re-trigger (the depth-1 case), `kind: 'multi-object'` for an A-writes-B / B-writes-A loop, each with the full real-node `path`. Conditions on every automation are NOT evaluated (two writers with mutually exclusive entry criteria still collide in this report); Salesforce's own recursion GUARDS (a Flow's 'do not re-trigger' setting, workflow re-evaluation limits) are not modeled — a listed cycle is a POTENTIAL loop, not proof it fires. Only ApprovalProcess field updates and Apex writes performed by a helper class the trigger CALLS (not the trigger itself) are out of scope for this v1. `limit` (default 50, max 200) caps each list independently with a `boundaries[]` truncation note; inactive automation is still LISTED (never silently dropped) but lowers the finding's severity. Does NOT build or fix anything — read-only diagnosis.",
     inputSchema: AUTOMATION_COLLISIONS_INPUT_SCHEMA,
   },
   {
@@ -4605,13 +4875,13 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.apex_build_advisor',
     description:
-      "Decision-support tool: before a developer writes Apex, brief them on what the org's existing Apex teaches. Synthesises `governorPitfalls` (the soql-in-loop / dml-in-loop risks ALREADY in the org — the patterns to avoid), `testExpectations` (the 75% production-deploy coverage gate + the org's untested-class backlog), `flsCrudNorms` (whether existing Apex enforces CRUD/FLS and how often it skips it), and — when `objectApiName` is given — `similarLogic` (the Apex that already touches that object, so you reuse instead of duplicate), plus synthesised `recommendations`. Composes governor_limit_risks + apex_test_coverage + crud_fls_audit; each section degrades to null with a note if its scan can't run. Does NOT write code (backend knowledge layer). Honesty axis: heuristic static analysis over the last refresh — 'what the org's Apex shows', not a guarantee about new code.",
+      "Decision-support tool: before a developer writes Apex, brief them on what the org's existing Apex teaches. Synthesises `governorPitfalls` (the soql-in-loop / dml-in-loop risks ALREADY in the org — the patterns to avoid), `testExpectations` (the 75% production-deploy coverage gate + the org's untested-class backlog), `flsCrudNorms` (whether existing Apex enforces CRUD/FLS and how often it skips it), and — when `objectApiName` is given — `similarLogic` (the Apex that already touches that object, so you reuse instead of duplicate), plus synthesised `recommendations`. Pass a CLASS SCOPE (`componentId` = `ApexClass:{name}`/`ApexTrigger:{name}`, or bare `classApiName`/`apiName`) to brief ONE class — its pitfalls, coverage, CRUD/FLS — with `appliedScope` echoed; an unresolved/non-Apex scope is a named error, never a silent org-wide answer; omit for the org-wide briefing. Composes governor_limit_risks + apex_test_coverage + crud_fls_audit; each section degrades to null with a note if its scan can't run. Does NOT write code (backend knowledge layer). Honesty axis: heuristic static analysis over the last refresh — 'what the org's Apex shows', not a guarantee about new code.",
     inputSchema: APEX_BUILD_ADVISOR_INPUT_SCHEMA,
   },
   {
     name: 'sfi.field_change_advisor',
     description:
-      "Decision-support tool: before changing a field, see the whole blast radius in one briefing. Given `fieldId`, synthesises `makeRequired` (verdict + create-path impact count from what_if_make_field_required), `deletion` (verdict + blocking/risky dependency counts from safe_to_delete_field), and — when `newType` is given — `changeType` (compatibility + verdict + reference count from what_if_change_field_type), plus combined `recommendations`. Does NOT change anything (backend knowledge layer). Honesty axis: inherits the composed tools' boundaries — dataflow into Apex insert/update and dynamic/reflective field access are invisible, so verdicts mean 'investigate', not guarantees. `component-not-found` when the fieldId is not a CustomField in the vault. HYBRID (P6-live-advisor-wire): pass `liveEnabled: true` (or grant consent) and `makeRequired` additionally carries the field's LIVE production null-rate (`liveNullRate`), and the `recommendations` cite the live record population alongside the vault impact (with a staleness lead when the org is ahead of the vault).",
+      "Decision-support tool: before changing a field, see the whole blast radius in one briefing. Name the field with `fieldId` OR any interchangeable selector — `componentId`, `fieldApiName`, or `apiName` (precedence fieldId > componentId > fieldApiName > apiName); a bare `Object.Field` and a `CustomField:Object.Field` id both resolve, and naming no field returns a named `invalid-query`. Synthesises `makeRequired` (verdict + create-path impact count from what_if_make_field_required), `deletion` (verdict + blocking/risky dependency counts from safe_to_delete_field), and — when `newType` is given — `changeType` (compatibility + verdict + reference count from what_if_change_field_type), plus combined `recommendations`. Does NOT change anything (backend knowledge layer). Honesty axis: inherits the composed tools' boundaries — dataflow into Apex insert/update and dynamic/reflective field access are invisible, so verdicts mean 'investigate', not guarantees. `component-not-found` when the fieldId is not a CustomField in the vault. HYBRID (P6-live-advisor-wire): pass `liveEnabled: true` (or grant consent) and `makeRequired` additionally carries the field's LIVE production null-rate (`liveNullRate`), and the `recommendations` cite the live record population alongside the vault impact (with a staleness lead when the org is ahead of the vault).",
     inputSchema: FIELD_CHANGE_ADVISOR_INPUT_SCHEMA,
   },
   {
@@ -4623,7 +4893,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.value_change_audit',
     description:
-      "Batch value-change audit (Data Steward lens): given an `object` and optionally a list of `fields`, risk-ranks the impact of changing each field's stored VALUE — the portfolio version of what_if_change_field_value. WITHOUT `fields`, auto-detects the value-sensitive fields on the object (upsert keys via externalId/unique/idLookup, identity-catalog fields, name-lexicon matches). Each row carries an overall severity, role, top impact reasons, confidence, and disclosure count; `verbosity:'detail'` inlines full buckets. Returns a severity summary + global disclosures; unknown explicit fields come back in `notFound`. This answers 'tell me if changing any of these has an impact on {object}'. Honesty axis: auto-detect can miss a value-sensitive field carrying none of those signals; per-row blast radius inherits what_if_change_field_value's boundaries (external upsert systems, IdP side of SSO, dynamic/managed-package code invisible).",
+      "Batch value-change audit (Data Steward lens): given an `object` and optionally a list of `fields`, risk-ranks the impact of changing each field's stored VALUE — the portfolio version of what_if_change_field_value. Name the object with `object` or `objectApiName`, or pass a `fieldId` (`CustomField:Object.Field`) whose parent IS the object (its field also seeds a one-field audit); `fieldApiName` names a single field. A `fieldId` whose parent disagrees with an explicit `object` returns a named `invalid-query` (never a silent mismatch); naming no object returns `invalid-query`. WITHOUT `fields`, auto-detects the value-sensitive fields on the object (upsert keys via externalId/unique/idLookup, identity-catalog fields, name-lexicon matches). Each row carries an overall severity, role, top impact reasons, confidence, and disclosure count; `verbosity:'detail'` inlines full buckets. Returns a severity summary + global disclosures; unknown explicit fields come back in `notFound`. This answers 'tell me if changing any of these has an impact on {object}'. Honesty axis: auto-detect can miss a value-sensitive field carrying none of those signals; per-row blast radius inherits what_if_change_field_value's boundaries (external upsert systems, IdP side of SSO, dynamic/managed-package code invisible).",
     inputSchema: VALUE_CHANGE_AUDIT_INPUT_SCHEMA,
   },
   {
@@ -4699,7 +4969,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.recordtype_availability',
     description:
-      "Given a Profile or PermissionSet canonical id (`Profile:{Name}` / `PermissionSet:{Name}`), report which record types the user can CREATE / see, grouped by object, from the granter's `recordTypeVisibilities`. Each record type carries `visible` (a visible record type is one the user can pick when creating a record — i.e. it gates \"who can create a record\" together with the object's Create permission from `object_access_audit`) and `default` (the user's default for that object); each object surfaces its `defaultRecordType`. `summary` tallies objects + visible record types. Confidence: `declared` (record-type visibility is declared profile metadata). `boundaryNote`: when the granter carries no extracted `recordTypeVisibilities` property (a pre-extraction / stale vault), the empty result is disclosed as \"not modeled\" (re-run `/sfi-refresh`), NOT a verified \"no record types\" — like `tab_availability`. A non-Profile/PermissionSet id is `invalid-query`; an unknown id is `component-not-found`.",
+      "Given a Profile or PermissionSet canonical id (`Profile:{Name}` / `PermissionSet:{Name}`) — or the natural `profileApiName` / `profileId` / `permissionSetApiName` / `permissionSetId` selector (a bare name is coerced to the container prefix; the object and the profile are resolved as SEPARATE axes, so a profile key is never stripped by an object mention) — report which record types the user can CREATE / see, grouped by object, from the granter's `recordTypeVisibilities`. Pass an optional `objectApiName` / `object` / `objectId` to narrow to one object (\"record types on Case for {profile}?\") — an unmatched object is an honest empty for that profile, not the whole map; the resolved subject + object filter are echoed in `appliedScope`. Each record type carries `visible` (a visible record type is one the user can pick when creating a record — i.e. it gates \"who can create a record\" together with the object's Create permission from `object_access_audit`) and `default` (the user's default for that object); each object surfaces its `defaultRecordType`. `summary` tallies objects + visible record types. Confidence: `declared` (record-type visibility is declared profile metadata). `boundaryNote`: when the granter carries no extracted `recordTypeVisibilities` property (a pre-extraction / stale vault), the empty result is disclosed as \"not modeled\" (re-run `/sfi-refresh`), NOT a verified \"no record types\" — like `tab_availability`. A non-Profile/PermissionSet id is `invalid-query`; an unknown id is `component-not-found`.",
     inputSchema: RECORDTYPE_AVAILABILITY_INPUT_SCHEMA,
   },
   {
@@ -4711,13 +4981,13 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.domain_clusters',
     description:
-      "Cluster the org's CustomObject + ApexClass + Flow nodes into SUGGESTED domain groupings using a greedy shared-edge-density algorithm. Pairs candidate components, computes density as `|shared neighbors| / max(degree(A), degree(B))`, and groups candidates whose density meets the `minDensity` threshold (default 0.3, range [0.0, 1.0]). Each cluster is named after its highest-degree CustomObject (\"{ApiName}-centered domain (suggested grouping)\") so the heuristic provenance is visible in the label itself. Returns up to `limit` clusters (default 10, max 50), sorted by member count DESC, plus an `unclustered` count of candidates that didn't meet the density bar with anyone. Each cluster lists up to 40 `members` with the true `memberCount` + `membersTruncated` (so one large domain can't blow the response), and a per-response ~36 KB byte budget trims the cluster count further if needed (with a `note`) so the result never trips the global ~45 KB MCP response limit. When a cluster has more than 40 members, that cluster is paged via `nextCursor` (echo it back as `cursor` to walk its members); `candidateTruncated` flags a >500-per-type candidate scan. Honesty axis (load-bearing): clusters are HEURISTIC — they reflect topology, not semantics. A real org's domain boundaries are decided by humans; this tool surfaces \"these components share many edges\" as a starting point for further investigation, never as a confirmed domain assignment.",
+      "Cluster the org's CustomObject + ApexClass + Flow nodes into SUGGESTED domain groupings using a greedy shared-edge-density algorithm. Pairs candidate components, computes density as `|shared neighbors| / max(degree(A), degree(B))`, and groups candidates whose density meets the `minDensity` threshold (default 0.3, range [0.0, 1.0]). Each cluster is named after its highest-degree CustomObject (\"{ApiName}-centered domain (suggested grouping)\") so the heuristic provenance is visible in the label itself. Returns up to `limit` clusters (default 10, max 50), sorted by member count DESC, plus an `unclustered` count of candidates that didn't meet the density bar with anyone. Pass a SEED (`componentId` / `seedComponentId` / `seed` — a canonical `Type:` id or bare api name — or an `objectApiName` / `object` / `objectId`, honored identically as a `CustomObject:` seed) to answer \"which domain owns {X}?\": the response narrows to the single cluster CONTAINING that node (or an honest empty `note`) and carries `appliedScope: { seed, mode: 'seeded' }` — never silently dropped into the org dump. Each cluster lists up to 40 `members` with the true `memberCount` + `membersTruncated` (so one large domain can't blow the response), and a per-response ~36 KB byte budget trims the cluster count further if needed (with a `note`) so the result never trips the global ~45 KB MCP response limit. When a cluster has more than 40 members, that cluster is paged via `nextCursor` (echo it back as `cursor` to walk its members); `candidateTruncated` flags a >500-per-type candidate scan. Honesty axis (load-bearing): clusters are HEURISTIC — they reflect topology, not semantics. A real org's domain boundaries are decided by humans; this tool surfaces \"these components share many edges\" as a starting point for further investigation, never as a confirmed domain assignment.",
     inputSchema: DOMAIN_CLUSTERS_INPUT_SCHEMA,
   },
   {
     name: 'sfi.changed_since',
     description:
-      "Enumerate every vault node whose `lastModifiedDate` is at or after `since` (ISO 8601 — date-only `YYYY-MM-DD` or full UTC timestamp). Optional `types` narrows the scan; default scans every ComponentType. Optional `limit` (1-500, default 100) truncates the response; a truncated page returns a `nextCursor` to resume. Each entry carries `id`, `type`, `apiName`, `lastModifiedDate`, and `lastModifiedBy: { id, name }`. The output's `unenrichedCount` reports how many nodes (within the requested types) carry `lastModifiedDate: null` — these are the nodes the offline DX-source extractor produced without freshness data. Honesty axis (load-bearing): a non-zero `unenrichedCount` means the answer is PARTIAL. Run `sfi refresh --with-tooling-api` to enrich the freshness fields via the v1.7 Tooling API integration; the tool remains fully functional against an un-enriched vault (returns `changed: []` plus the full `unenrichedCount` so consumers see the gap rather than assuming nothing has changed). The v1.7 R2 Tooling API enricher covers ApexClass, ApexTrigger, Flow, Layout, CustomField, and ValidationRule; future v1.7+ R3 expands coverage to the remaining types.",
+      "Enumerate every vault node whose `lastModifiedDate` is at or after `since` (ISO 8601 — date-only `YYYY-MM-DD` or full UTC timestamp; the natural token `last-refresh` / `last refresh` / `last_refresh` / `refresh` (separator-insensitive) is ALSO accepted and resolves to the vault's `refreshedAt`, echoed back as `since` — for the component TYPES the last refresh itself brought in, use `what_changed_since_refresh`). Optional `types` narrows the scan; default scans every ComponentType. Optional `limit` (1-500, default 100) truncates the response; a truncated page returns a `nextCursor` to resume. Each entry carries `id`, `type`, `apiName`, `lastModifiedDate`, and `lastModifiedBy: { id, name }`. The output's `unenrichedCount` reports how many nodes (within the requested types) carry `lastModifiedDate: null` — these are the nodes the offline DX-source extractor produced without freshness data. Honesty axis (load-bearing): a non-zero `unenrichedCount` means the answer is PARTIAL. Run `sfi refresh --with-tooling-api` to enrich the freshness fields via the v1.7 Tooling API integration; the tool remains fully functional against an un-enriched vault (returns `changed: []` plus the full `unenrichedCount` so consumers see the gap rather than assuming nothing has changed). The v1.7 R2 Tooling API enricher covers ApexClass, ApexTrigger, Flow, Layout, CustomField, and ValidationRule; future v1.7+ R3 expands coverage to the remaining types.",
     inputSchema: CHANGED_SINCE_INPUT_SCHEMA,
   },
   {
@@ -4735,7 +5005,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.why_field_changed',
     description:
-      "Trace every writer to a CustomField. Walks every incoming `writesTo` edge to `fieldId` and surfaces each writer with its identity (`id`/`type`/`apiName`), its edge-level confidence (`declared` for metadata-declared writes — Flow recordCreates/Updates, WorkflowRule field-update actions; `parsed` for formula-tokenizer references; `heuristic` for Apex-scanner-emitted writes that may include false positives), the gating `firesWhen` ConditionalContext when one exists, and (for ApexTrigger writers) the trigger's lifecycle events. Returns a categorisation summary (`declaredCount` / `heuristicCount`) so callers can show the confidence boundary. Honesty axis (verbatim): conditions ARE listed but NOT EVALUATED — the tool does not know whether the runtime record satisfies them; heuristic-confidence Apex writes need spot-checking before refactoring. Invalid `fieldId` prefix surfaces as `invalid-query`; unknown but well-formed ids surface as `component-not-found`.",
+      "Trace every writer to a CustomField. Name the field with `fieldId` (`CustomField:{Object}.{Field}`), a `componentId` (a `CustomField:` id resolves to that field; a `CustomObject:` id scopes the object but must be paired with a field), or `objectApiName` + `fieldApiName` — the same identifiers a support host reaches for. Walks every incoming `writesTo` edge to the resolved field and surfaces each writer with its identity (`id`/`type`/`apiName`), its edge-level confidence (`declared` for metadata-declared writes — Flow recordCreates/Updates, WorkflowRule field-update actions; `parsed` for formula-tokenizer references; `heuristic` for Apex-scanner-emitted writes that may include false positives), the gating `firesWhen` ConditionalContext when one exists, and (for ApexTrigger writers) the trigger's lifecycle events. Each writer carries a `runnable` flag + declared `status` partitioning ACTIVE automation from dead automation (non-Active Flows / inactive rules / Inactive triggers / test-only Apex are `runnable:false` — listed for completeness, never the sole live suspect), and Active-Flow field writes made via an `<assignToReference>` the graph never stamped as a primary edge are folded in from the same supplemental source scan `sfi.field_360` uses (heuristic, `source: flow-field-writers-scan:*`). Returns a categorisation summary (`declaredCount` / `heuristicCount` / `runnableCount` / `nonRunnableCount` / `supplementalCount`); when EVERY candidate writer is non-runnable a `note` says so plainly rather than let a host read dead automation as the live cause. When a scope alias (`componentId`/`objectApiName`/`fieldApiName`) was passed, `appliedScope` (`{ component, mode: 'component' }`) echoes the resolved field. Honesty axis (verbatim): conditions ARE listed but NOT EVALUATED — the tool does not know whether the runtime record satisfies them; heuristic-confidence Apex writes need spot-checking before refactoring. An object-only, mis-prefixed, or disagreeing scope surfaces as a NAMED `invalid-query` (never a silent org-wide fallback); unknown but well-formed ids surface as `component-not-found`.",
     inputSchema: WHY_FIELD_CHANGED_INPUT_SCHEMA,
   },
   {
@@ -4753,13 +5023,25 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.explain_flow',
     description:
-      "Explain what a Flow does in plain business terms — what it is FOR, when it runs, and what it changes. The go-to answer for \"what does this flow do\", \"what is this automation for\", \"walk me through this process\", or \"explain the {Name} flow\". Given a Flow canonical id (`Flow:{ApiName}`), return a structured narrative payload that the caller (Claude / an explainer skill) composes into a natural-language explanation. The payload covers: identity (apiName, label, status, processType), trigger info (triggerType, the resolved `triggersOn` CustomObject, and the list of v2.0a `firesWhen` ConditionalContexts gating the trigger), action calls (outgoing `callsApex` edges with each target's ApexClass id + type), subflow calls (R6-02: outgoing `references` edges with `referenceKind: 'subflow'` — the declared `<subflows>` calls — each naming the target `Flow:{flowName}` and whether it `resolved` in the vault; a dangling managed/uncaptured subflow surfaces `resolved: false`, never fabricated), record lookups (outgoing `readsFrom` edges collapsed by target object with per-object filter counts), record writes (outgoing `writesTo` edges classified by `operation` into `create | update | delete`), and decisions (the v2.0a `properties.conditions[]` mirror surfaced one row per condition with the rendered expression text). Subflow calls were previously unmodeled and invisible here; the only STILL-invisible nested-flow path is the Apex `Flow.Interview` invocation (not a declared `<subflows>` edge). A `conditionsRuntimeNote` flags that the trigger/decision conditions are the statically-declared criteria (heuristic), NOT a runtime trace — whether a path executes is data-dependent and is not evaluated. The tool does NOT compose prose — see the `disclosure` field. Invalid prefix surfaces as `invalid-query`; unknown ids surface as `component-not-found`.",
+      "Explain what a Flow does in plain business terms — what it is FOR, when it runs, and what it changes. The go-to answer for \"what does this flow do\", \"what is this automation for\", \"walk me through this process\", or \"explain the {Name} flow\". Given a Flow canonical id (`Flow:{ApiName}`), return a structured narrative payload that the caller (Claude / an explainer skill) composes into a natural-language explanation. The payload covers: identity (apiName, label, status, processType), trigger info (triggerType, the resolved `triggersOn` CustomObject, and the list of v2.0a `firesWhen` ConditionalContexts gating the trigger), action calls (outgoing `callsApex` edges with each target's ApexClass id + type), subflow calls (R6-02: outgoing `references` edges with `referenceKind: 'subflow'` — the declared `<subflows>` calls — each naming the target `Flow:{flowName}` and whether it `resolved` in the vault; a dangling managed/uncaptured subflow surfaces `resolved: false`, never fabricated), record lookups (outgoing `readsFrom` edges collapsed by target object with per-object filter counts), record writes (outgoing `writesTo` edges classified by `operation` into `create | update | delete`), and decisions (the v2.0a `properties.conditions[]` mirror surfaced one row per condition with the rendered expression text). Subflow calls were previously unmodeled and invisible here; the only STILL-invisible nested-flow path is the Apex `Flow.Interview` invocation (not a declared `<subflows>` edge). A `conditionsRuntimeNote` flags that the trigger/decision conditions are the statically-declared criteria (heuristic), NOT a runtime trace — whether a path executes is data-dependent and is not evaluated. The tool does NOT compose prose — see the `disclosure` field. For the FULL structure (every canvas element by its REAL name + the complete element-to-element connector graph of what runs next, decision rule branches, loops, formulas, and variables), call `sfi.flow_graph` — this tool is a business SUMMARY, not the raw graph. Invalid prefix surfaces as `invalid-query`; unknown ids surface as `component-not-found`.",
     inputSchema: EXPLAIN_FLOW_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.flow_graph',
+    description:
+      "The FAITHFUL, LOSSLESS structural graph of a Flow — every canvas element with its REAL <name>, the full element-to-element connector graph (what runs next), decision rules, assignment items, record-op filters, loops, formulas, variables, subflows, actions, and the <start> element with its entry criteria + scheduled paths. This is the tool for \"show me the structure of <Flow>\", \"what are the branches / decisions in <Flow>\", \"trace the connectors\", \"what elements does <Flow> have\", or \"give me the full element graph\" — where `sfi.explain_flow` gives a plain-business SUMMARY (and historically renamed decisions to condition-N, collapsed conditions to the word \"and\", and emitted ZERO connectors), flow_graph exposes the RAW graph so the host LLM composes the answer. `flowRef` accepts a canonical `Flow:{ApiName}` id, a bare Flow API name (fuzzy-resolved; an AMBIGUOUS bare name returns candidates as a success envelope, never a silent pick), or a Flow record id (300…/301… — fails closed with an actionable message unless a Tooling-API id index exists). The Flow source is read ON DEMAND from the vault and projected; nothing is persisted. Each `connectors[]` edge carries `from`, `to`, and `kind` (`immediate` for the start's first element, `default`, `rule` with the decision outcome `ruleName`, `fault`, `nextValue`/`noMoreValues` for a loop's two branches, `scheduled` with the `scheduledPathName`), plus `isGoTo` for reconnect / loop-back edges; `connectors[]` is authoritative and the per-element `connectsTo` fields are conveniences. Subflow `resolved` is overlaid from the vault (a dangling managed/uncaptured subflow surfaces `resolved: false`, never fabricated). HONESTY (spec §4.3, verbatim in `disclosure`): NO runtime inference — reachability, dead-branch detection, and ordering are NOT computed here (that is the host LLM's or `flow_trace`'s job); any canvas-element type the parser does not model lands in `unmodeled[]` by name, never silently dropped. Large flows: `include` narrows to a subset of body sections (`connectors|decisions|assignments|recordOps|formulas|variables|loops|actions`) and `element` returns the subgraph for ONE element (it + its immediate connectors + neighbors); any narrowing is DISCLOSED in a `narrowing` block (with `omittedSections`), and the central byte budget truncates disclosed, never silent. Invalid `Type:` prefix or a record id without an index → `invalid-query`; an unknown name / non-Flow → `component-not-found`.",
+    inputSchema: FLOW_GRAPH_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.flow_trace',
+    description:
+      "Honest PROJECTION of a Flow over a caller-supplied record state — the \"what happens to THIS record\" debugger. Given `flowRef` and a `recordState` field-value map (e.g. `{ \"Status__c\": \"Active\", \"Amount__c\": 10 }`), it walks the Flow's DECLARED graph from `<start>` and returns WHICH PATH executes (`path[]` — the ordered elements, each decision with its `matchedRule` + per-condition evaluation) and WHAT it writes (`writes[]` — each `FieldWrite` with `object`/`field`/`value`/`valueKind`/`viaElement`/`persists`). This is the tool for \"what happens to this record in <Flow> if Status is Active\", \"trace <Flow> with these field values\", \"which branch runs in <Flow> when <field> is X\", \"what does <Flow> write when …\", or \"simulate <Flow> for a record where …\" — where `sfi.flow_graph` gives the raw STRUCTURE and `sfi.explain_flow` the plain-business summary, flow_trace evaluates the tractable common subset over your state. Optional `priorState` supplies `$Record__Prior` for `ISCHANGED`/`PRIORVALUE`; `maxSteps` (default 500) guards loops/cycles. It is NOT a Salesforce runtime (verbatim in `disclosure`): it never executes Apex, callouts, DML, or subflows, and never reaches across to other automation's order-of-execution. A branch that depends on data NOT in `recordState` is `unknown`, NEVER assumed — when the executed path hits such a decision, an Apex/invocable action, a subflow, or an unmodeled (wait/dynamic) element, the walk STOPS honestly with `stoppedReason:'unevaluated-branch'` and the element is listed in `unevaluated[]` with a `why`. Entry criteria are evaluated first (`entered` + `entryEvaluation[]`); a false result stops with `stoppedReason:'no-entry'`. `assumptions[]` records honest gaps (e.g. a loop collection not supplied is \"assumed empty\"; a record lookup's results are unknown). `persists` mirrors the Bug-3 precondition — an in-memory `$Record.<field>` assignment reaches the database only when the flow also performs a whole-record `$Record` update (before-save flows persist automatically); record-op writes are real DML and always persist. `flowRef` resolution + failure modes are identical to `sfi.flow_graph` (canonical id / bare name / record id; ambiguous bare name → candidates as a success envelope, never a silent pick; invalid `Type:` prefix or index-less record id → `invalid-query`; unknown name / non-Flow → `component-not-found`).",
+    inputSchema: FLOW_TRACE_INPUT_SCHEMA,
   },
   {
     name: 'sfi.flow_fault_audit',
     description:
-      "Which Flows have a DML/action element with NO fault path — the flow error-handling hygiene sweep. Reads the fault coverage the Flow extractor records per node (`faultableElementCount` / `elementsWithoutFault` / `hasUnhandledFaults`) and flags flows where a faultable element (a create/update/delete/action element that can throw) has no fault connector, sorted worst-first. Each flagged flow carries a `faultSurface` — `screen` (a screen flow shows the running user an error screen) or `transactional` (an autolaunched/record-triggered flow, including before/after-save, rolls back the whole transaction and raises a surfaced runtime error). Read-only, offline. IMPORTANT HONESTY (verbatim): an unhandled fault is **surfaced, not silent** — it is UNHANDLED (surfaced and uncaught), never suppressed; adding a fault path lets you replace the default surfaced error with a graceful, retryable message, it does not change WHETHER errors surface. A vault built before the extractor captured fault coverage reports `propertyAvailable: false` (re-`/sfi-refresh` to populate) — honest, never a false zero. `limit` (default 100, max 500) caps the returned worst-first list — `flowsWithUnhandledFaults` and the element totals stay FULL counts, and a cut list is disclosed via `truncated` (no cursor; raise `limit` to see the tail); an extreme vault that saturates the internal flow-scan ceiling is disclosed via `scanTruncated`, never silently undercounted.",
+      "Which Flows have a DML/action element with NO fault path — the flow error-handling hygiene sweep. Reads the fault coverage the Flow extractor records per node (`faultableElementCount` / `elementsWithoutFault` / `hasUnhandledFaults`) and flags flows where a faultable element (a create/update/delete/action element that can throw) has no fault connector, sorted worst-first. Each flagged flow carries a `faultSurface` — `screen` (a screen flow shows the running user an error screen) or `transactional` (an autolaunched/record-triggered flow, including before/after-save, rolls back the whole transaction and raises a surfaced runtime error). Read-only, offline. IMPORTANT HONESTY (verbatim): an unhandled fault is **surfaced, not silent** — it is UNHANDLED (surfaced and uncaught), never suppressed; adding a fault path lets you replace the default surfaced error with a graceful, retryable message, it does not change WHETHER errors surface. A vault built before the extractor captured fault coverage reports `propertyAvailable: false` (re-`/sfi-refresh` to populate) — honest, never a false zero. `limit` (default 100, max 500) caps the returned worst-first list — `flowsWithUnhandledFaults` and the element totals stay FULL counts, and a cut list is disclosed via `truncated` (no cursor; raise `limit` to see the tail); an extreme vault that saturates the internal flow-scan ceiling is disclosed via `scanTruncated`, never silently undercounted. Optional object scope (`objectApiName` / `object` / `objectId` / `CustomObject:` `componentId`) is HONORED: the sweep narrows to record-triggered flows that RUN ON that object (`triggerObject`) and echoes `appliedScope` — screen / autolaunched flows have no single object and are excluded under scope; an object absent from the vault is refused with `invalid-query`. A bare call stays org-wide and byte-identical.",
     inputSchema: FLOW_FAULT_AUDIT_INPUT_SCHEMA,
   },
   {
@@ -4783,7 +5065,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.process_builder_migration_candidates',
     description:
-      "v2.4 legacy-automation tool: list active Process Builder (Flow with `processType: 'Workflow'`), WorkflowRule, and ApprovalProcess nodes as migration candidates with per-rule complexity ('simple' / 'moderate' / 'complex') and a migration-notes paragraph. Defaults: `activeOnly: true` (inactive rules are deletion candidates surfaced by `sfi.unused_components`), `includeWorkflowRules: true`, `includeApprovalProcesses: true`, `sortBy: 'complexity'` (easy migrations first). Complexity is heuristic based on edge counts, criteria-item count, and time-trigger presence. Honesty axis (verbatim): the migration tool itself (Setup → Migrate to Flow) does not run here — this tool produces the inventory. Complexity classification may rank a single-decision rule as 'simple' even when its business logic requires manual rewrite. When a list is large, ONE list is paged via `nextCursor` and the other two are disclosed by full count + `otherSections`; `scanTruncated` flags a >500-node type scan. Emits a `coverageCaveat` naming any of Flow/WorkflowRule/ApprovalProcess the refresh did not retrieve; empty lists under it are 'not checked', not 'none'.",
+      "v2.4 legacy-automation tool: list active Process Builder (Flow with `processType: 'Workflow'`), WorkflowRule, and ApprovalProcess nodes as migration candidates with per-rule complexity ('simple' / 'moderate' / 'complex') and a migration-notes paragraph. Defaults: `activeOnly: true` (inactive rules are deletion candidates surfaced by `sfi.unused_components`), `includeWorkflowRules: true`, `includeApprovalProcesses: true`, `sortBy: 'complexity'` (easy migrations first). Complexity is heuristic based on edge counts, criteria-item count, and time-trigger presence. Honesty axis (verbatim): the migration tool itself (Setup → Migrate to Flow) does not run here — this tool produces the inventory. Complexity classification may rank a single-decision rule as 'simple' even when its business logic requires manual rewrite. When a list is large, ONE list is paged via `nextCursor` and the other two are disclosed by full count + `otherSections`; `scanTruncated` flags a >500-node type scan. Emits a `coverageCaveat` naming any of Flow/WorkflowRule/ApprovalProcess the refresh did not retrieve; empty lists under it are 'not checked', not 'none'. Optional object scope (`objectApiName` / `object` / `objectId` / `CustomObject:` `componentId`) is HONORED: each list narrows to candidates PARENTED to that object (`parentObjectId`) and the response echoes `appliedScope` — WorkflowRules / ApprovalProcesses always carry an object parent, a Process Builder does when the vault captured it; an object absent from the vault is refused with `invalid-query`. A bare call stays org-wide and byte-identical.",
     inputSchema: PROCESS_BUILDER_MIGRATION_CANDIDATES_INPUT_SCHEMA,
   },
   {
@@ -4795,19 +5077,19 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.empty_queues_and_groups',
     description:
-      "v2.4 hygiene tool: list Queue and Group nodes with zero members. Walks `properties.memberCount` (the v1.1+ extractor convention) and falls back to `properties.queueMembers` / `properties.groupMembers` array length. The 'routing trap' case — a Queue with zero members but multiple incoming AssignmentRule references — surfaces with `incomingAssignmentRuleCount > 0`; admins must reassign routing before deletion. The `isLikelyStale` flag combines zero members + incoming refs + `lastModifiedAt > 180 days`. Member resolution that cannot decide ('unknown') is counted in `unknownMemberCountQueues` / `unknownMemberCountGroups`, NEVER toward emptiness. Honesty axis (verbatim): runtime membership changes via the Setup UI since the last vault refresh are not reflected — for the CURRENT runtime roster (and a measured vault-vs-live drift check), use sfi.live_group_members (opt-in, read-only). Emits a `coverageCaveat` (scoped to the type filter) when Queue/Group was not retrieved; empty lists under it are 'not checked', not 'none'.",
+      "v2.4 hygiene tool: list Queue and Group nodes with zero members. Walks `properties.memberCount` (the v1.1+ extractor convention) and falls back to `properties.queueMembers` / `properties.groupMembers` array length. Optional `nameContains` narrows both lists to queues/groups whose apiName OR label contains the substring (case-insensitive) and echoes `appliedScope: { nameContains, mode: 'nameContains' }`; omit it for the full inventory, and a filter that matches nothing returns an honest empty result, never the bare list. The 'routing trap' case — a Queue with zero members but multiple incoming AssignmentRule references — surfaces with `incomingAssignmentRuleCount > 0`; admins must reassign routing before deletion. The `isLikelyStale` flag combines zero members + incoming refs + `lastModifiedAt > 180 days`. Member resolution that cannot decide ('unknown') is counted in `unknownMemberCountQueues` / `unknownMemberCountGroups`, NEVER toward emptiness. Honesty axis (verbatim): runtime membership changes via the Setup UI since the last vault refresh are not reflected — for the CURRENT runtime roster (and a measured vault-vs-live drift check), use sfi.live_group_members (opt-in, read-only). Emits a `coverageCaveat` (scoped to the type filter) when Queue/Group was not retrieved; empty lists under it are 'not checked', not 'none'.",
     inputSchema: EMPTY_QUEUES_AND_GROUPS_INPUT_SCHEMA,
   },
   {
     name: 'sfi.tech_debt_score',
     description:
-      "v2.4 composite: aggregate the v2.0b unused_components, v2.4 unused_fields_deep / process_builder_migration_candidates / unassigned_permission_sets / empty_queues_and_groups, v2.1 qualityIssues data (when present), v1.7 freshness data (when present), and the Apex API-version distribution into one weighted 0-100 score plus a category breakdown. Score direction is INVERTED — higher means MORE debt (worse), with bands low (0-25), moderate (26-50), high (51-75), critical (76-100). Default weights: deadWeight 0.20, legacyAutomation 0.20, codeQuality 0.15, freshness 0.15, apiVersions 0.15, unassignedGrants 0.15. Categories whose underlying extractor has not run are EXCLUDED via `excludedCategories[]` (with reason 'extractor-not-run' or 'user-opted-out'), never assumed to be zero — the Q115 honesty anchor. When the codeQuality axis contributes, `boundaries[]` cites that its input is the heuristic Apex scanner (confidence: heuristic), so that axis is read as indicative, not exact (P10-A4). Pass `weights` to re-weight any subset. Pass `excludeCategories` to opt out of a category. Surfaces top-5 `recommendedActions` ordered by contribution. When `meta/risk-scores.jsonl` holds a prior refresh's score (the CLI logs the score at refresh time — snapshots can't be re-scored on demand), the response also carries `scoreDelta` / `previousScore` / `previousRefreshedAt`: the signed change in tech-debt vs the prior refresh (P9-risk-delta; positive = debt grew).",
+      "v2.4 composite: aggregate the v2.0b unused_components, v2.4 unused_fields_deep / process_builder_migration_candidates / unassigned_permission_sets / empty_queues_and_groups, v2.1 qualityIssues data (when present), v1.7 freshness data (when present), and the Apex API-version distribution into one weighted 0-100 score plus a category breakdown. Score direction is INVERTED — higher means MORE debt (worse), with bands low (0-25), moderate (26-50), high (51-75), critical (76-100). Default weights: deadWeight 0.20, legacyAutomation 0.20, codeQuality 0.15, freshness 0.15, apiVersions 0.15, unassignedGrants 0.15. Categories whose underlying extractor has not run are EXCLUDED via `excludedCategories[]` (with reason 'extractor-not-run' or 'user-opted-out'), never assumed to be zero — the Q115 honesty anchor. When the codeQuality axis contributes, `boundaries[]` cites that its input is the heuristic Apex scanner (confidence: heuristic), so that axis is read as indicative, not exact (P10-A4). Pass `weights` to re-weight any subset. Pass `excludeCategories` to opt out of a category. Surfaces top-5 `recommendedActions` ordered by contribution. This score is ORG-WIDE (`appliedScope.mode: 'all'`): it cannot scope to a single object or domain — an `objectApiName` / `object` / `objectId` / `componentId` argument is REFUSED with `invalid-query` (the composite rolls up whole-org extractors), never silently answered fleet-wide. For per-object debt run `object_access_audit` / `safe_to_delete_field` / `find_component_usages` on that object. When `meta/risk-scores.jsonl` holds a prior refresh's score (the CLI logs the score at refresh time — snapshots can't be re-scored on demand), the response also carries `scoreDelta` / `previousScore` / `previousRefreshedAt`: the signed change in tech-debt vs the prior refresh (P9-risk-delta; positive = debt grew).",
     inputSchema: TECH_DEBT_SCORE_INPUT_SCHEMA,
   },
   {
     name: 'sfi.code_quality_audit',
     description:
-      "v2.1 R3 general-purpose code-quality entry point. Walks every ApexClass / ApexTrigger / Flow node, reads each node's `properties.qualityIssues[]` array (populated by the v2.1 `code-quality-patterns` recognizer family at extraction time), applies optional severity and rule filters, and returns the matching issues sorted by severity DESC then componentId ASC. Each issue carries `componentId` / `type` / `apiName` plus the recognizer's `rule` / `severity` / `location` / `explanation` / `confidence: 'heuristic'`. `summary` reports the FULL per-severity / per-rule / per-type counts (not the truncated slice). `severityFilter: 'all'` is the default; specific severities (`critical` / `high` / `medium` / `low` / `info`) narrow the slice. `ruleFilter: ['soql-in-loop', 'dml-in-loop']` narrows to specific rule ids. `limit` defaults to 100 (max 500); `truncated` flips true when matches exceed `limit`. CR-22: a truncated page returns an opaque `nextCursor` (echo back as `cursor`) to walk the rest; the scan now windows past the per-type cap so findings on a node past 500 are reachable (not dropped). Honesty axis (verbatim, surfaced in `boundaries[]` when at least one finding qualifies): pattern recognition is heuristic — false positives are expected; static recognition has dynamic blind spots (dynamic SOQL, reflective field access invisible) — the `dynamic-apex` info rule now FLAGS the classes that use those constructs so the blind spot is visible (impact/usage/dead-code results for them may be incomplete); severity is industry-consensus, not per-org overridable in v2.1.",
+      "v2.1 R3 general-purpose code-quality entry point. Walks every ApexClass / ApexTrigger / Flow node, reads each node's `properties.qualityIssues[]` array (populated by the v2.1 `code-quality-patterns` recognizer family at extraction time), applies optional severity and rule filters, and returns the matching issues sorted by severity DESC then componentId ASC. Each issue carries `componentId` / `type` / `apiName` plus the recognizer's `rule` / `severity` / `location` / `explanation` / `confidence: 'heuristic'`. `summary` reports the FULL per-severity / per-rule / per-type counts (not the truncated slice). `severityFilter: 'all'` is the default; specific severities (`critical` / `high` / `medium` / `low` / `info`) narrow the slice. `ruleFilter: ['soql-in-loop', 'dml-in-loop']` narrows to specific rule ids. Pass a CLASS SCOPE (`componentId` = `ApexClass:{name}`/`ApexTrigger:{name}`, or bare `classApiName`/`apiName`) to audit ONE class + echo `appliedScope`; an unresolved/non-Apex scope is a named error, never a silent org-wide answer; omit for the org-wide audit. `limit` defaults to 100 (max 500); `truncated` flips true when matches exceed `limit`. CR-22: a truncated page returns an opaque `nextCursor` (echo back as `cursor`) to walk the rest; the scan now windows past the per-type cap so findings on a node past 500 are reachable (not dropped). Honesty axis (verbatim, surfaced in `boundaries[]` when at least one finding qualifies): pattern recognition is heuristic — false positives are expected; static recognition has dynamic blind spots (dynamic SOQL, reflective field access invisible) — the `dynamic-apex` info rule now FLAGS the classes that use those constructs so the blind spot is visible (impact/usage/dead-code results for them may be incomplete); severity is industry-consensus, not per-org overridable in v2.1.",
     inputSchema: CODE_QUALITY_AUDIT_INPUT_SCHEMA,
   },
   {
@@ -4825,7 +5107,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.crud_fls_audit',
     description:
-      "v2.1 R3 CRUD/FLS enforcement audit. Walks every ApexClass / ApexTrigger node's `properties.qualityIssues[]`, narrows to the two CRUD/FLS rules (`missing-crud-check`, `missing-fls-check`), groups findings by class, and surfaces the verbatim Q80 disclosure naming the HIGH false-positive rate inherited from ApexQualitySemantics.md §§ 6-7. Each class entry carries its identity and a per-finding list (rule / severity / location / explanation). `totalFindingCount` / `byRule` report the FULL pre-slice counts. The class list is paginated: `limit` defaults to 100 (max 500) and `offset` (default 0) page over CLASSES, and a per-response ~36 KB byte budget trims the page further when a page would exceed it, so the result never trips the global ~45 KB MCP response limit; `truncated` flips true when more classes remain, with `nextOffset` to advance (plus a `note` when byte-trimmed, and a per-class `findingsTruncated` flag in the rare case one class's findings alone overflow). Honesty axis (verbatim, surfaced in `boundaries[]` when at least one finding qualifies): the Q80 false-positive disclosure — 'custom security utility methods are invisible to the recognizer; this finding may be a false positive if your org uses a helper like SecurityUtils.canCreate(account)' — is the load-bearing honesty surface for this tool. Also surfaced: cross-method dataflow is invisible; dynamic SOQL strings (Database.query) are stripped before pattern passes.",
+      "v2.1 R3 CRUD/FLS enforcement audit. Walks every ApexClass / ApexTrigger node's `properties.qualityIssues[]`, narrows to the two CRUD/FLS rules (`missing-crud-check`, `missing-fls-check`), groups findings by class, and surfaces the verbatim Q80 disclosure naming the HIGH false-positive rate inherited from ApexQualitySemantics.md §§ 6-7. Optional CLASS SCOPE: pass `componentId` (`ApexClass:{name}` / `ApexTrigger:{name}`) or the interchangeable `classApiName` / `apiName` to audit ONLY that class — the response echoes `appliedScope` ({ component, mode }), an unresolved id is `component-not-found`, a non-Apex type prefix is `invalid-query`, and the selector is NEVER silently stripped to an org-wide answer; omit all three for the org-wide audit. Each class entry carries its identity and a per-finding list (rule / severity / location / explanation). `totalFindingCount` / `byRule` report the FULL pre-slice counts. The class list is paginated: `limit` defaults to 100 (max 500) and `offset` (default 0) page over CLASSES, and a per-response ~36 KB byte budget trims the page further when a page would exceed it, so the result never trips the global ~45 KB MCP response limit; `truncated` flips true when more classes remain, with `nextOffset` to advance (plus a `note` when byte-trimmed, and a per-class `findingsTruncated` flag in the rare case one class's findings alone overflow). Honesty axis (verbatim, surfaced in `boundaries[]` when at least one finding qualifies): the Q80 false-positive disclosure — 'custom security utility methods are invisible to the recognizer; this finding may be a false positive if your org uses a helper like SecurityUtils.canCreate(account)' — is the load-bearing honesty surface for this tool. Also surfaced: cross-method dataflow is invisible; dynamic SOQL strings (Database.query) are stripped before pattern passes.",
     inputSchema: CRUD_FLS_AUDIT_INPUT_SCHEMA,
   },
   {
@@ -4855,7 +5137,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.what_if_deactivate_flow',
     description:
-      "v2.3 R2b component-level what-if tool: given a Flow canonical id (`Flow:{ApiName}`), bare API name, or flow label / partial name (e.g. 'Consent Flow'), enumerates the downstream impact of deactivating the Flow by walking every outgoing edge. When a non-canonical input is passed, the tool performs an internal fuzzy lookup (resolveComponents filtered to Flow type): if exactly one match is found it auto-resolves; if multiple candidates match it returns them for the caller to pick from; if none match it returns a helpful error with a hint to use sfi.list_components. Surfaces OUTGOING effects — `triggersOn` (the object the Flow listens to), `readsFrom` / `writesTo` (record lookups + DML), `callsApex` (Apex action calls the Flow made), `sendsEmail` (email templates the Flow sent), and subflows THIS Flow invokes (`references` / `referenceKind: 'subflow'`) — AND (R6-02) the INCOMING side: parent Flows that invoke THIS Flow as a subflow are BROKEN CALLERS on deactivation, surfaced as a distinct `broken-caller` category. Each impact carries category, source ComponentId, edge-level `confidence`, and a one-sentence explanation. The response also carries the Flow's current `firingConditions` (the v2.0a `firesWhen` ConditionalContext list — the gating conditions the deactivation would silence). Aggregate `verdict` is `safe` (no impacts) / `risky` (callsApex only, or broken callers that are all inactive Draft/Obsolete) / `blocking` (any record write, trigger, email-send, or subflow-invocation impact, OR any broken caller that is an ACTIVE parent Flow — a subflow with active parents must not read safe). Honesty axis (verbatim): deactivation does NOT delete the Flow — its definition remains and a later reactivation restores every effect listed; only ACTIVE parent broken callers force blocking; the subflow modeling covers DECLARED <subflows> only — Apex code that invokes the Flow via Flow.Interview or @InvocableMethod chains, and non-metadata launch points (buttons, quick actions), remain invisible to the heuristic walker.",
+      "v2.3 R2b component-level what-if tool: given a Flow canonical id (`Flow:{ApiName}`), bare API name, or flow label / partial name (e.g. 'Consent Flow') — passed interchangeably as `flowId`, `componentId`, `flowApiName`, or `apiName` (a host naturally reaches for `componentId: Flow:…` as on get_impact; disagreeing selectors are `invalid-query`, and the resolved id is echoed in `appliedScope`) — enumerates the downstream impact of deactivating the Flow by walking every outgoing edge. When a non-canonical input is passed, the tool performs an internal fuzzy lookup (resolveComponents filtered to Flow type): if exactly one match is found it auto-resolves; if multiple candidates match it returns them for the caller to pick from; if none match it returns a helpful error with a hint to use sfi.list_components. Surfaces OUTGOING effects — `triggersOn` (the object the Flow listens to), `readsFrom` / `writesTo` (record lookups + DML), `callsApex` (Apex action calls the Flow made), `sendsEmail` (email templates the Flow sent), and subflows THIS Flow invokes (`references` / `referenceKind: 'subflow'`) — AND (R6-02) the INCOMING side: parent Flows that invoke THIS Flow as a subflow are BROKEN CALLERS on deactivation, surfaced as a distinct `broken-caller` category. Each impact carries category, source ComponentId, edge-level `confidence`, and a one-sentence explanation. The response also carries the Flow's current `firingConditions` (the v2.0a `firesWhen` ConditionalContext list — the gating conditions the deactivation would silence). Aggregate `verdict` is `safe` (no impacts) / `risky` (callsApex only, or broken callers that are all inactive Draft/Obsolete) / `blocking` (any record write, trigger, email-send, or subflow-invocation impact, OR any broken caller that is an ACTIVE parent Flow — a subflow with active parents must not read safe). Honesty axis (verbatim): deactivation does NOT delete the Flow — its definition remains and a later reactivation restores every effect listed; only ACTIVE parent broken callers force blocking; the subflow modeling covers DECLARED <subflows> only — Apex code that invokes the Flow via Flow.Interview or @InvocableMethod chains, and non-metadata launch points (buttons, quick actions), remain invisible to the heuristic walker.",
     inputSchema: WHAT_IF_DEACTIVATE_FLOW_INPUT_SCHEMA,
   },
   {
@@ -4867,7 +5149,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.what_if_change_method_signature',
     description:
-      "v2.3 R2b component-level what-if tool: given an ApexClass id (`ApexClass:{Name}`), a method name, and an optional new signature string, enumerates every direct caller of the named method plus every test class exercising the target class. Walks incoming `callsApex` edges filtering by `properties.methodName === methodName` (Flow callers are accepted without methodName matching — Flow XML declares the action name at class level), then walks incoming `coversTest` edges. Each caller surfaces in `callingClasses[]` as a `WhatIfImpactItem` with `category` (`code-needs-update` for non-test code callers; `test-class-update` for test classes), source ComponentId, edge-level `confidence` (`heuristic` for the apex-scanner / Visualforce callers; `parsed` for Flow callers parsed out of the Flow `<actionCalls>` XML; `declared` for LWC/Aura `@salesforce/apex/{Class}.{method}` imports), and a one-sentence explanation. Test classes also surface in a parallel `testClassesNeedingUpdate[]` scalar array. The `newSignature` parameter is accepted for renderer context and echoed verbatim in the response — the tool does NOT parse it. Aggregate `verdict` is `safe` (no callers) / `risky` (callers present — every caller is flagged for human review because signature COMPATIBILITY is not statically proven: the caller SET is exact, but whether each call-site's arguments still type-check against the new signature is not analysed). Honesty axis (verbatim, surfaced ALWAYS): caller confidence varies by source — Apex callers are `parsed` where the default-on Apex AST resolved the call-site (`callerMethods` then names the calling method), `heuristic` where only the regex apex-scanner matched; Visualforce callers are heuristic; Flow callers are parsed from the <actionCalls> XML; LWC/Aura callers are declared via the @salesforce/apex import; dynamic dispatch via Type.forName + invoke is invisible. Test classes are identified by @isTest + naming convention (className + 'Test' suffix) and by coversTest edges; a test class that doesn't follow the naming convention and doesn't carry a @TestVisible-tagged covering reference may be missed. When an Apex caller's edge was AST-extracted, `callerMethods` names which method(s) of that caller hold a call-site to THIS specific method (enrichment only — overloaded callers collapse to one NAME, so every caller is still flagged for human review at class granularity and the verdict is unchanged); absent callerMethods means the call-site method is unknown (heuristic scanner, Flow, or LWC/Aura caller).",
+      "v2.3 R2b component-level what-if tool: given an ApexClass (`classApiName` / `componentId` / `apiName` — a bare name or an `ApexClass:` id, interchangeable, resolved + echoed as `appliedScope`), a method name, and an optional new signature string, enumerates every direct caller of the named method plus every test class exercising the target class. Walks incoming `callsApex` edges filtering by `properties.methodName === methodName` (Flow callers are accepted without methodName matching — Flow XML declares the action name at class level), then walks incoming `coversTest` edges. Each caller surfaces in `callingClasses[]` as a `WhatIfImpactItem` with `category` (`code-needs-update` for non-test code callers; `test-class-update` for test classes), source ComponentId, edge-level `confidence` (`heuristic` for the apex-scanner / Visualforce callers; `parsed` for Flow callers parsed out of the Flow `<actionCalls>` XML; `declared` for LWC/Aura `@salesforce/apex/{Class}.{method}` imports), and a one-sentence explanation. Test classes also surface in a parallel `testClassesNeedingUpdate[]` scalar array. The `newSignature` parameter is accepted for renderer context and echoed verbatim in the response — the tool does NOT parse it. Aggregate `verdict` is `safe` (no callers) / `risky` (callers present — every caller is flagged for human review because signature COMPATIBILITY is not statically proven: the caller SET is exact, but whether each call-site's arguments still type-check against the new signature is not analysed). Honesty axis (verbatim, surfaced ALWAYS): caller confidence varies by source — Apex callers are `parsed` where the default-on Apex AST resolved the call-site (`callerMethods` then names the calling method), `heuristic` where only the regex apex-scanner matched; Visualforce callers are heuristic; Flow callers are parsed from the <actionCalls> XML; LWC/Aura callers are declared via the @salesforce/apex import; dynamic dispatch via Type.forName + invoke is invisible. Test classes are identified by @isTest + naming convention (className + 'Test' suffix) and by coversTest edges; a test class that doesn't follow the naming convention and doesn't carry a @TestVisible-tagged covering reference may be missed. When an Apex caller's edge was AST-extracted, `callerMethods` names which method(s) of that caller hold a call-site to THIS specific method (enrichment only — overloaded callers collapse to one NAME, so every caller is still flagged for human review at class granularity and the verdict is unchanged); absent callerMethods means the call-site method is unknown (heuristic scanner, Flow, or LWC/Aura caller).",
     inputSchema: WHAT_IF_CHANGE_METHOD_SIGNATURE_INPUT_SCHEMA,
   },
   {
@@ -4949,31 +5231,31 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.test_coverage_for_method',
     description:
-      "Deep code tool: given an `ApexClass:` or `ApexTrigger:` id and an optional `methodName`, walks upstream `callsApex` + `dispatchesAsync` BFS (capped at depth 3) and surfaces every test class (nodes with `properties.isTest === true`) that reaches the target. Each `coveringTestClasses` entry carries the test class id, apiName, and shortest-path depth. **P4-test-reachability:** when `methodName` is supplied, each covering test ALSO carries `exercisesMethod` — true when its shortest reaching path enters the target via a `callsApex` edge whose `methods[]` (P4-C5) includes that method, i.e. the test actually exercises the CHANGED method, not just the class — and the payload carries `methodCoveringCount` (tests with `exercisesMethod === true`; `null` for a class-level query). So a changed method names the test(s) that cover IT. Heuristic + shortest-path (a method reachable only via a longer alternate path may read false; `dispatchesAsync` hops carry no method index); `methods[]` populates on vaults refreshed after P4-C5, older vaults fall back to the scalar `methodName`. The depth-3 cap and dynamic-dispatch invisibility surface verbatim in `disclosure`. Invalid prefix surfaces as `invalid-query`; unknown target surfaces as `component-not-found`. Carries a `soundness` envelope: `complete: false` with a `dynamic-apex` blind spot when the analyzed class uses dynamic Apex, since reflective invocation can make the test→method mapping incomplete.",
+      "Deep code tool: given an `ApexClass:` or `ApexTrigger:` id (accepted interchangeably as `classApiName`, `componentId`, or `apiName` — a bare name or the canonical id; disagreeing selectors are `invalid-query`, and the resolved id is echoed in `appliedScope`) and an optional `methodName`, walks upstream `callsApex` + `dispatchesAsync` BFS (capped at depth 3) and surfaces every test class (nodes with `properties.isTest === true`) that reaches the target. Each `coveringTestClasses` entry carries the test class id, apiName, and shortest-path depth. **P4-test-reachability:** when `methodName` is supplied, each covering test ALSO carries `exercisesMethod` — true when its shortest reaching path enters the target via a `callsApex` edge whose `methods[]` (P4-C5) includes that method, i.e. the test actually exercises the CHANGED method, not just the class — and the payload carries `methodCoveringCount` (tests with `exercisesMethod === true`; `null` for a class-level query). So a changed method names the test(s) that cover IT. Heuristic + shortest-path (a method reachable only via a longer alternate path may read false; `dispatchesAsync` hops carry no method index); `methods[]` populates on vaults refreshed after P4-C5, older vaults fall back to the scalar `methodName`. The depth-3 cap and dynamic-dispatch invisibility surface verbatim in `disclosure`. Invalid prefix surfaces as `invalid-query`; unknown target surfaces as `component-not-found`. Carries a `soundness` envelope: `complete: false` with a `dynamic-apex` blind spot when the analyzed class uses dynamic Apex, since reflective invocation can make the test→method mapping incomplete.",
     inputSchema: TEST_COVERAGE_FOR_METHOD_INPUT_SCHEMA,
   },
   {
     name: 'sfi.meaningful_test_audit',
     description:
-      "v2.7 R2 deep code tool: lists every ApexClass with `properties.isTest === true` with a heuristic assertion-meaningfulness score. Each `tests[]` entry carries `assertionCount` (from `properties.assertionCount` when the v2.1 R2 recognizer ran; 0 otherwise), `fakeAssertionCount` (count of `qualityIssues[]` entries with `rule === 'fake-assertion'`), `sourceBytes`, a per-KB `density` metric, and the verbatim per-test fake-assertion locations for follow-up triage. Ranking: `fakeAssertionCount` DESC, then `density` ASC (sparse asserts surface higher). Optional `classFilter` narrows to specific ApexClass ids. Honesty axis (verbatim): `assertionCount` counts `System.assert*` and the modern `Assert.*` class; the fake-assertion recognizer is still scoped to `System.assertEquals` shapes — helper methods (`MyTestHelper.assertField`) and framework wrappers are invisible to both. A test with high fakeAssertionCount MAY actually have meaningful tests via a custom assertion helper.",
+      "v2.7 R2 deep code tool: lists every ApexClass with `properties.isTest === true` with a heuristic assertion-meaningfulness score. Each `tests[]` entry carries `assertionCount` (from `properties.assertionCount` when the v2.1 R2 recognizer ran; 0 otherwise), `fakeAssertionCount` (count of `qualityIssues[]` entries with `rule === 'fake-assertion'`), `sourceBytes`, a per-KB `density` metric, and the verbatim per-test fake-assertion locations for follow-up triage. Ranking: `fakeAssertionCount` DESC, then `density` ASC (sparse asserts surface higher). Optional `classFilter` narrows to specific ApexClass ids; `nameContains` narrows to the test classes whose api name contains a case-insensitive substring (a needle matching nothing returns an honest empty list, never the org-wide leaderboard); `targetClass` (or its `componentId` / `classApiName` aliases) instead scores the covering tests of a PRODUCTION class. The applied scope is always echoed as `appliedScope` (`org-wide` / `class-filter` / `name-filter` / `covering-tests`) so a scoped answer is never mistaken for the full roster. Honesty axis (verbatim): `assertionCount` counts `System.assert*` and the modern `Assert.*` class; the fake-assertion recognizer is still scoped to `System.assertEquals` shapes — helper methods (`MyTestHelper.assertField`) and framework wrappers are invisible to both. A test with high fakeAssertionCount MAY actually have meaningful tests via a custom assertion helper.",
     inputSchema: MEANINGFUL_TEST_AUDIT_INPUT_SCHEMA,
   },
   {
     name: 'sfi.method_reachability',
     description:
-      "v2.7 R2 deep code tool: given an `ApexClass:` or `ApexTrigger:` id, walks upstream `callsApex` BFS (capped at depth 3) and classifies the reachable upstream set against the entry-point taxonomy: `ApexTrigger` (any), `ApexClass` with `properties.isRestResource === true` (REST), `properties.hasAuraEnabledMethod === true` (Aura), `properties.hasInvocableMethod === true` (Flow / Process Builder), or any of `properties.isQueueable` / `properties.isBatchable` / `properties.isSchedulable` (async dispatch). Verdict cascade: `entry-point-reachable` (at least one entry point reaches the target), else `test-only-reachable` (at least one test class reaches it), else `likely-dead-code` (neither). Honesty axis (verbatim): dynamic dispatch (Type.forName) and reflective invocation are invisible — a class genuinely invoked at runtime via reflection will surface as `likely-dead-code`. Trigger framework base classes (TriggerHandler, fflib) may be partially invisible. Invalid prefix surfaces as `invalid-query`; unknown target surfaces as `component-not-found`. Carries a `soundness` envelope: `complete: false` with a `dynamic-apex` blind spot when the analyzed class uses dynamic Apex, since a reflective caller can make the reachability verdict wrong.",
+      "v2.7 R2 deep code tool: given an ApexClass / ApexTrigger (`classApiName` / `componentId` / `apiName` — a bare name or an `ApexClass:` / `ApexTrigger:` id, interchangeable, resolved + echoed as `appliedScope`), walks upstream `callsApex` BFS (capped at depth 3) and classifies the reachable upstream set against the entry-point taxonomy: `ApexTrigger` (any), `ApexClass` with `properties.isRestResource === true` (REST), `properties.hasAuraEnabledMethod === true` (Aura), `properties.hasInvocableMethod === true` (Flow / Process Builder), or any of `properties.isQueueable` / `properties.isBatchable` / `properties.isSchedulable` (async dispatch). Verdict cascade: `entry-point-reachable` (at least one entry point reaches the target), else `test-only-reachable` (at least one test class reaches it), else `likely-dead-code` (neither). Honesty axis (verbatim): dynamic dispatch (Type.forName) and reflective invocation are invisible — a class genuinely invoked at runtime via reflection will surface as `likely-dead-code`. Trigger framework base classes (TriggerHandler, fflib) may be partially invisible. Invalid prefix surfaces as `invalid-query`; unknown target surfaces as `component-not-found`. Carries a `soundness` envelope: `complete: false` with a `dynamic-apex` blind spot when the analyzed class uses dynamic Apex, since a reflective caller can make the reachability verdict wrong.",
     inputSchema: METHOD_REACHABILITY_INPUT_SCHEMA,
   },
   {
     name: 'sfi.tests_for_change',
     description:
-      "Smart test selection (test-impact analysis): given `changedComponents` (1..500 ApexClass / ApexTrigger ids or bare class names), returns the MINIMAL set of test classes to run plus the inverse risk signal — changed components no test reaches. For each changed Apex component, BFS upstream over INCOMING `callsApex` AND `dispatchesAsync` edges (depth-3 capped, same as `sfi.test_coverage_for_method`) and collects every reached `properties.isTest === true` node. `selectedTests` is the union (each entry carries `minDepth` and the `coversChanges` ids it exercises). `perChange` reports per-component coverage; `uncoveredChanges` lists changed non-test classes NO test reaches (the unguarded surface). A changed component that is itself a test class is added at depth 0 (run it directly) and never counted as uncovered. Non-Apex `Type:` prefixes bucket into `unsupportedChanges`; well-formed-but-absent Apex ids bucket into `notFoundChanges` — neither fails the batch. Honesty axis (verbatim): CLASS granularity (method-level promised v2.7.1); dynamic dispatch (Type.forName), reflective invocation, and managed-package test classes are invisible; BFS depth-3 capped — deeper coverage chains surface as uncovered. A component in uncoveredChanges is UNGUARDED — run the full suite when any change is uncovered or a deep chain is suspected.",
+      "Smart test selection (test-impact analysis): given `changedComponents` (1..500 ApexClass / ApexTrigger ids or bare class names — each entry may also be a `review_change`-shaped selector object `{ componentId }` / `{ type, apiName }` with an ignored `changeKind`; a single component may instead be passed as a TOP-LEVEL `componentId` / `{ type, apiName }`, folded into a one-item set — the canonical string-array call is byte-identical), returns the MINIMAL set of test classes to run plus the inverse risk signal — changed components no test reaches. For each changed Apex component, BFS upstream over INCOMING `callsApex` AND `dispatchesAsync` edges (depth-3 capped, same as `sfi.test_coverage_for_method`) and collects every reached `properties.isTest === true` node. `selectedTests` is the union (each entry carries `minDepth` and the `coversChanges` ids it exercises). `perChange` reports per-component coverage; `uncoveredChanges` lists changed non-test classes NO test reaches (the unguarded surface). A changed component that is itself a test class is added at depth 0 (run it directly) and never counted as uncovered. Non-Apex `Type:` prefixes bucket into `unsupportedChanges`; well-formed-but-absent Apex ids bucket into `notFoundChanges` — neither fails the batch. Honesty axis (verbatim): CLASS granularity (method-level promised v2.7.1); dynamic dispatch (Type.forName), reflective invocation, and managed-package test classes are invisible; BFS depth-3 capped — deeper coverage chains surface as uncovered. A component in uncoveredChanges is UNGUARDED — run the full suite when any change is uncovered or a deep chain is suspected.",
     inputSchema: TESTS_FOR_CHANGE_INPUT_SCHEMA,
   },
   {
     name: 'sfi.review_change',
     description:
-      "Pre-deploy change review (the CI/deploy gate): given `components` (1..500 `{ type, apiName, changeKind }` entries a host assembles from a PR / package.xml / `git diff`), returns a per-component risk verdict, its direct dependents, and the tests to run — ordered most-dangerous first. For each component it composes THREE existing signals, not reimplemented: (a) IMPACT — direct INCOMING edges (the query `sfi.get_impact` / `sfi.promotion_readiness` build on), EXCLUDING grantedBy (a Profile/PermissionSet FLS grant is ACCESS, not a breakage dependency) and parentOf (structural) per the access≠usage rule; (b) TESTS — the covering set from `sfi.tests_for_change` (Apex only; everything else is not-applicable); (c) VERDICT from the shared blocking/risky/review/safe vocabulary. Classification: a DELETED component with ANY dependent = `blocking` (removing it breaks them; a heuristic-only dependent still blocks — a false positive fails CLOSED, the safe direction for a gate); a MODIFIED component with firm (declared/parsed) dependents = `risky`, with heuristic-only readers = `review`; a zero-dependent change in a family the vault does not fully cover = `review` (absence is 'not checked', surfaced as coverageCaveat); an ADDED component absent from the vault = `safe` (its OWN forward references are NOT analysed — only name-collision + tests), an ADDED id that already exists = `review` (collision). A modified/deleted id the vault lacks = `review`, never fabricated. `overallVerdict` is the worst across the set; `summary` tallies are always full (the `limit` cap only trims the inlined `reviewed[]` detail, and the most-dangerous rows sort first so the gate is never hidden). Honesty: analysis is against the LAST VAULT REFRESH of the TARGET org, which may drift from what is deployed — re-refresh before trusting a `safe`. Dependents are DIRECT (single-hop); the full transitive blast radius is `sfi.get_impact`. SELECTION ≠ VALIDATION. CROSS-VAULT (`againstVault`, a registered alias OR a path to an org-kb): composes R6-12 to answer 'will this changeset break anything in PROD?' — it opens that vault READ-ONLY and computes EVERY signal (dependents, verdict, tests, coverage) against ITS graph instead of the current (sandbox) one. It discloses `againstVault` (the target + its last refresh) with a prominent 'impact is against that vault, NOT the current one' note, `absentInAgainstVault` (changeset ids labelled modified/deleted that are ABSENT from the target — added relative to it, own contents not analysed), and an `extractorVersionCaveat` when the two vaults' product versions differ. Omitting `againstVault` keeps the default current-vault review byte-for-byte unchanged.",
+      "Pre-deploy change review (the CI/deploy gate): given `components` (1..500 change entries a host assembles from a PR / package.xml / `git diff`; each carries `changeKind` plus its selector — EITHER `{ type, apiName }` OR a single `componentId` (`Type:ApiName`, the canonical id straight from `sfi.resolve`) — the two are equivalent), returns a per-component risk verdict, its direct dependents, and the tests to run — ordered most-dangerous first. For each component it composes THREE existing signals, not reimplemented: (a) IMPACT — direct INCOMING edges (the query `sfi.get_impact` / `sfi.promotion_readiness` build on), EXCLUDING grantedBy (a Profile/PermissionSet FLS grant is ACCESS, not a breakage dependency) and parentOf (structural) per the access≠usage rule; (b) TESTS — the covering set from `sfi.tests_for_change` (Apex only; everything else is not-applicable); (c) VERDICT from the shared blocking/risky/review/safe vocabulary. Classification: a DELETED component with ANY dependent = `blocking` (removing it breaks them; a heuristic-only dependent still blocks — a false positive fails CLOSED, the safe direction for a gate); a MODIFIED component with firm (declared/parsed) dependents = `risky`, with heuristic-only readers = `review`; a zero-dependent change in a family the vault does not fully cover = `review` (absence is 'not checked', surfaced as coverageCaveat); an ADDED component absent from the vault = `safe` (its OWN forward references are NOT analysed — only name-collision + tests), an ADDED id that already exists = `review` (collision). A modified/deleted id the vault lacks = `review`, never fabricated. FRONTEND BUNDLES (LightningComponentBundle / Aura / Visualforce) also compose OUTBOUND risk the inbound-dependent model misses: a modified/added bundle with (almost) no incoming dependents is floored at `review` (never a bare `safe`) when it `callsApex` a controller or `references` a CustomPermission / FlexiPage — `outboundApex` / `outboundWires` name them and `selectedTests` carries the covering tests of the called Apex controllers (the bundle has no Apex tests of its own). `overallVerdict` is the worst across the set; `summary` tallies are always full (the `limit` cap only trims the inlined `reviewed[]` detail, and the most-dangerous rows sort first so the gate is never hidden). Honesty: analysis is against the LAST VAULT REFRESH of the TARGET org, which may drift from what is deployed — re-refresh before trusting a `safe`. Dependents are DIRECT (single-hop); the full transitive blast radius is `sfi.get_impact`. SELECTION ≠ VALIDATION. CROSS-VAULT (`againstVault`, a registered alias OR a path to an org-kb): composes R6-12 to answer 'will this changeset break anything in PROD?' — it opens that vault READ-ONLY and computes EVERY signal (dependents, verdict, tests, coverage) against ITS graph instead of the current (sandbox) one. It discloses `againstVault` (the target + its last refresh) with a prominent 'impact is against that vault, NOT the current one' note, `absentInAgainstVault` (changeset ids labelled modified/deleted that are ABSENT from the target — added relative to it, own contents not analysed), and an `extractorVersionCaveat` when the two vaults' product versions differ. Omitting `againstVault` keeps the default current-vault review byte-for-byte unchanged.",
     inputSchema: REVIEW_CHANGE_INPUT_SCHEMA,
   },
   {
@@ -4991,7 +5273,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.scheduled_job_catalog',
     description:
-      "v2.8 async-deep-tier surface: returns one entry per ApexClass with `properties.isSchedulable === true`, with the per-class `scheduledByCalls` array surfaced from inbound `dispatchesAsync` edges whose `properties.dispatchMechanism === 'schedule'`. Each entry carries the class id, apiName, `isSchedulable: true`, the `scheduledByCalls` (caller class plus per-edge cron expression when available), and any `cronExpressions[]` property the apex-scanner populated. Takes no arguments — the catalog is intentionally org-wide. T7: the response also carries a `scheduledFlows` section — Flows whose `<start><schedule>` declares a design-time schedule (`scheduleFrequency` e.g. `Weekly`, `scheduleStartDate`, `scheduleStartTime`). `scheduleStartTime` is UTC (trailing `Z`); the local wall-clock run time depends on the org's default timezone, which the vault does not hold, so it is disclosed in UTC framing. This declarative Flow schedule is DISTINCT from the Apex Schedulable CronTrigger runtime registration (which lives only in the Tooling API). Honesty axis (verbatim): scanning for System.schedule() invocations is heuristic — the v0.3 Apex scanner detects literal call sites only, NOT runtime registration via Tooling API. A class flagged `isSchedulable: true` may not currently be scheduled; conversely, a class scheduled via a helper-wrapper or dynamic class load is invisible to the scanner. The Flow schedule is the design-time metadata declaration, not proof the Flow is currently active.",
+      "v2.8 async-deep-tier surface: returns one entry per ApexClass with `properties.isSchedulable === true`, with the per-class `scheduledByCalls` array surfaced from inbound `dispatchesAsync` edges whose `properties.dispatchMechanism === 'schedule'`. Each entry carries the class id, apiName, `isSchedulable: true`, the `scheduledByCalls` (caller class plus per-edge cron expression when available), and any `cronExpressions[]` property the apex-scanner populated. Optional `nameContains` narrows BOTH the Schedulable-class catalog and the scheduledFlows section to entries whose apiName contains the substring (case-insensitive) and echoes `appliedScope: { nameContains, mode: 'nameContains' }`; omit it for the intentionally org-wide catalog, and a filter that matches nothing returns an honest empty catalog, never the bare list. T7: the response also carries a `scheduledFlows` section — Flows whose `<start><schedule>` declares a design-time schedule (`scheduleFrequency` e.g. `Weekly`, `scheduleStartDate`, `scheduleStartTime`). `scheduleStartTime` is UTC (trailing `Z`); the local wall-clock run time depends on the org's default timezone, which the vault does not hold, so it is disclosed in UTC framing. This declarative Flow schedule is DISTINCT from the Apex Schedulable CronTrigger runtime registration (which lives only in the Tooling API). Honesty axis (verbatim): scanning for System.schedule() invocations is heuristic — the v0.3 Apex scanner detects literal call sites only, NOT runtime registration via Tooling API. A class flagged `isSchedulable: true` may not currently be scheduled; conversely, a class scheduled via a helper-wrapper or dynamic class load is invisible to the scanner. The Flow schedule is the design-time metadata declaration, not proof the Flow is currently active.",
     inputSchema: SCHEDULED_JOB_CATALOG_INPUT_SCHEMA,
   },
   {
@@ -5003,7 +5285,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.endpoint_catalog',
     description:
-      "v2.8 async-deep-tier composite: returns every URL / endpoint participating in an integration in one structured response, split four ways — `inboundApis` (from v1.5 `exposes` edges to synthetic ExternalApi:{kind}/{path} targets; REST / Aura / Invocable), `outboundMessages` (from OutboundMessage `endpointUrl` properties), `externalDataSources` (from ExternalDataSource `endpoint` properties), and `namedCredentials` (from NamedCredential `url` properties). Each entry carries `endpointKind` discriminator, `direction` (inbound / outbound), `sourceComponentId`, and `url`. The URL-axis sibling of `sfi.integration_map` (which surfaces nodes + wiring) and `sfi.outbound_message_catalog` (which surfaces one category in depth). Takes no arguments. Honesty axis (verbatim): URLs are captured verbatim; v2.8 does NOT probe, does NOT validate, and does NOT confirm the destination exists or is reachable. Runtime registrations (e.g., a NamedCredential resolved via custom metadata at runtime) may carry a stored URL that differs from the actual production destination.",
+      "v2.8 async-deep-tier composite: returns every URL / endpoint participating in an integration in one structured response, split four ways — `inboundApis` (from v1.5 `exposes` edges to synthetic ExternalApi:{kind}/{path} targets; REST / Aura / Invocable), `outboundMessages` (from OutboundMessage `endpointUrl` properties), `externalDataSources` (from ExternalDataSource `endpoint` properties), and `namedCredentials` (from NamedCredential `url` properties). Each entry carries `endpointKind` discriminator, `direction` (inbound / outbound), `sourceComponentId`, and `url`. The URL-axis sibling of `sfi.integration_map` (which surfaces nodes + wiring) and `sfi.outbound_message_catalog` (which surfaces one category in depth). ORG-WIDE: an object / component argument is REFUSED with `invalid-query` (no endpoint→object association), never silently answered whole-org. Honesty axis (verbatim): URLs are captured verbatim; v2.8 does NOT probe, does NOT validate, and does NOT confirm the destination exists or is reachable. Runtime registrations (e.g., a NamedCredential resolved via custom metadata at runtime) may carry a stored URL that differs from the actual production destination.",
     inputSchema: ENDPOINT_CATALOG_INPUT_SCHEMA,
   },
   {
@@ -5023,6 +5305,12 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
     description:
       "v2.9 vocabulary + semantic-disambiguation tier — the 'is this field manually entered or automated?' surface. Given a CustomField canonical id, returns the v2.9 `sourceOfTruth` classification + confidence plus the full structural trace: `declaredAsFormula` (formula expression when the field has one), `declaredAsAutoNumber` (displayFormat when the field is auto-number), ALL `apexWriters` (with v2.0a `isIntegrationTagged` from outgoing `references` edges to NamedCredential / ExternalDataSource — the integration-synced classifier signal), ALL `flowWriters`, ALL `triggerWriters`, and the `noWritersDetected` boolean (false for formula / auto-number fields per PLAN-v2.9 Q151 — the declaration IS the source). The trace lists EVERY writer, not just the ones used in the classification cascade, so callers can verify the classification's basis. `boundaries` carries the verbatim 'dynamic SOQL, reflective field access, and managed-package writers may be invisible' disclosure; when classification is heuristic the additional 'classification is heuristic on writes-fabric inference' boundary surfaces. Invalid prefix → `invalid-query`; unknown id → `component-not-found`.",
     inputSchema: FIELD_PROVENANCE_INPUT_SCHEMA,
+  },
+  {
+    name: 'sfi.interpret',
+    description:
+      "WHEN to reach for this: the user asks what a component structurally IMPLIES, or the CONSEQUENCES of a design — 'what happens to child records if I delete this parent?', 'is this field derived/formula or a roll-up (read-only)?', 'why can't I see these records by default?', 'do I have stacked record-triggered automations on this object (execution order undefined)?', 'why did my save fail with this status code?'. Resolve the component to its canonical id first (via `sfi.resolve`), call this tool, then fold the returned `claim` text into your answer with `sfi.synthesize_answer` (which carries the `groundedIn` ids as citations). RM-wire reasoning surface — the 'what does this component STRUCTURALLY imply?' tool. Given ONE component `componentId` (any canonical id, e.g. `CustomField:Account.Amount__c`, `CustomObject:Order__c`, `Flow:Order_Sync`), runs the DETERMINISTIC concept-rule reasoning engine over an offline graph slice assembled for it and returns grounded, CITED interpretations — never an LLM inference, never a live read. For each applicable curated `ConceptRule` (status-code cross-reference, master-detail cascade + roll-up, junction structural-pattern detection (an object with two master-detail parents — the many-to-many signature, not a proven pure-connector intent), field derived/formula source detection, automation collision [stacked / co-resident record-triggered automations, execution order undefined], OWD sharing posture, coupled-write [firer-anchored], async-boundary [Queueable/Batch/Scheduled/@future Apex, and dispatchesAsync call sites, run in a SEPARATE transaction — writes not visible to the enqueuing save, effect deferred], external-api-surface [an Apex class annotated @RestResource / @AuraEnabled / @InvocableMethod exposes an entry point reachable OUTSIDE the record UI and its automation — an integration/security surface where FLS/CRUD are NOT auto-enforced in Apex and must be coded, while record-level sharing depends on the class-level with/without-sharing declaration — a separate concern; it does NOT assert the endpoint is insecure or WHO calls it], apex-sharing-mode [an Apex class declared `without sharing` runs in SYSTEM context and does NOT enforce the running user's record-level sharing (often intentional, not by itself a vulnerability); `inherited sharing` enforces the caller's sharing only when the class is the entry point, so enforcement depends on the execution context; FLS/CRUD are a SEPARATE concern and the declaration is class-level, not per-method — the DECLARED posture, not a proven access outcome], system-context-external-surface [an Apex class that is BOTH declared `without sharing` AND externally reachable via @RestResource / @AuraEnabled / @InvocableMethod — an external caller can reach code that runs in SYSTEM context and does NOT enforce the running user's record-level sharing, so the COMBINATION is a security-REVIEW priority; it may still be intentional and is NOT by itself a vulnerability, FLS/CRUD are a SEPARATE concern, and it is the DECLARED posture, not a proven access outcome], view-modify-all object grant [a permission set or profile that grants object-level View All Records / Modify All Records on an object — holders can READ (View All), or read/edit/delete (Modify All), EVERY record of that object regardless of the org-wide default, sharing rules, role hierarchy, or manual shares, so it OVERRIDES record-level sharing even when OWD reads Private (closing the OWD concept's acknowledged gap); Modify All is the stronger form that INCLUDES View All, so on a Modify-All grant both fire as one escalating grant; object-level only — does NOT bypass field-level security, is NOT the org-wide View All Data / Modify All Data SYSTEM permission, says nothing about other objects, and does NOT assert WHO HOLDS the permission set/profile (an assignment/live question) — the DECLARED grant, not a proven per-user access outcome; many grantors on one object read as an ENUMERATED SET]) it emits at most one `Interpretation` carrying the `claim`, the `groundedIn` component ids it is grounded in (no citation ⇒ no claim), a `confidence` that is the WEAKEST of the rule ceiling and its matched edges (never asserted above its ground), the firing `ruleId`/`concept`, and a per-rule `coverageCaveat`. Optional ADDITIVE filters narrow which rules run: `concepts` (keep only rules for these concept ids) and `ruleIds` (keep only these rule ids) — an EMPTY array matches NO rule. Output carries `rulesConsidered` / `rulesFired`, a `sliceTruncated` flag (a hub whose edge count exceeds the cap forces coverage to at most `partial` so an absence rule can never read `complete` over a clipped slice), a `trust` block (`provenance: 'offline_snapshot'`, confidence = weakest across fired interpretations or `unknown` when none, completeness from coverage), and a `disclosure`. HONESTY: when NO rule fires, `rendered` + `disclosure` say 'no concept rule fired for this component — this is NOT a claim that nothing depends on it', so an absence of matched rules is never read as an absence of dependencies. Unknown id surfaces as `component-not-found` (phantom-aware).",
+    inputSchema: INTERPRET_INPUT_SCHEMA,
   },
   // v2.2 R2 — universal find-anywhere + discovery surface.
   {
@@ -5052,13 +5340,13 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.find_dead_code',
     description:
-      "v2.2 cross-cutting dead-code surface — composes v2.7 `method_reachability` verdict, entry-point taxonomy (REST / Aura / Invocable / Queueable / Batchable / Schedulable / triggers), and zero-usage detection into a single cascade verdict per candidate: `definitely_dead` (zero incoming USAGE edges and not own entry point), `likely_dead` (test-class-only reach), `uncertain` (entry-point reach or own entry point). A Flow is its OWN entry point unless its status is Obsolete/InvalidDraft (R2-12): an Active, Draft, or unknown-status Flow is `uncertain` (never definitely_dead/likely_dead), because Flow edges are all OUTGOING so a live flow has ~0 incoming edges by nature — flagging it dead would delete running automation; only Obsolete/InvalidDraft flows fall through to definitely_dead. R6-02: subflow invocation (flow-calls-flow) IS now modeled as an incoming `references` edge, so an Obsolete/InvalidDraft flow still invoked as a subflow by another flow reads `uncertain` (it has a live dependent) instead of definitely_dead — delete the referencing flow first. `parentOf` (structural) and `grantedBy` (Profile / PermissionSet access grants) edges are excluded — access is not usage, so a class nobody calls or a field nothing references is dead even when profiles grant access to it. Default `types` covers ApexClass / ApexTrigger / Flow / CustomField. `includeUncertain` (default false) suppresses the noisy uncertain bucket. Test classes (properties.isTest === true) are NEVER flagged as dead — they ARE entry points for the test-runner. Returns `byVerdict` and `byType` tallies across the FULL set; truncated slice flips `truncated: true` and a truncated page returns a `nextCursor` to resume. Honesty axis (verbatim): dynamic dispatch, reflective invocation, framework wiring (TriggerHandler / fflib), and managed-package callers are invisible to the graph edges this tool walks. Carries a `soundness` envelope: `complete: false` with a `dynamic-apex` blind spot when a candidate class uses dynamic Apex — a class reached only reflectively will read as dead — so a `dead` verdict on a flagged class needs a human check before deletion. When any CALLER family (LWC, Aura, Flows, FlexiPages, Visualforce, …) has incomplete coverage — errored retrieve, scoped refresh, or an in-progress staged build — the response adds a `coverageCaveat` naming the families: an un-retrieved caller would fake death.",
+      "v2.2 cross-cutting dead-code surface — composes v2.7 `method_reachability` verdict, entry-point taxonomy (REST / Aura / Invocable / Queueable / Batchable / Schedulable / triggers), and zero-usage detection into a single cascade verdict per candidate: `definitely_dead` (zero incoming USAGE edges and not own entry point), `likely_dead` (test-class-only reach), `uncertain` (entry-point reach or own entry point). A Flow is its OWN entry point unless its status is Obsolete/InvalidDraft (R2-12): an Active, Draft, or unknown-status Flow is `uncertain` (never definitely_dead/likely_dead), because Flow edges are all OUTGOING so a live flow has ~0 incoming edges by nature — flagging it dead would delete running automation; only Obsolete/InvalidDraft flows fall through to definitely_dead. R6-02: subflow invocation (flow-calls-flow) IS now modeled as an incoming `references` edge, so an Obsolete/InvalidDraft flow still invoked as a subflow by another flow reads `uncertain` (it has a live dependent) instead of definitely_dead — delete the referencing flow first. `parentOf` (structural) and `grantedBy` (Profile / PermissionSet access grants) edges are excluded — access is not usage, so a class nobody calls or a field nothing references is dead even when profiles grant access to it. Scope to ONE component with `componentId` (`ApexClass:`/`ApexTrigger:`/`Flow:`/`CustomField:` id) — or a bare class name via `classApiName`/`apiName` — to get just that node's verdict (`uncertain` included) + `appliedScope`; an unresolved id is `component-not-found`, a non-dead-code prefix is `invalid-query`, never a silent org-wide top-N. Default `types` covers ApexClass / ApexTrigger / Flow / CustomField. `includeUncertain` (default false) suppresses the noisy uncertain bucket. Test classes (properties.isTest === true) are NEVER flagged as dead — they ARE entry points for the test-runner. Returns `byVerdict` and `byType` tallies across the FULL set; truncated slice flips `truncated: true` and a truncated page returns a `nextCursor` to resume. Honesty axis (verbatim): dynamic dispatch, reflective invocation, framework wiring (TriggerHandler / fflib), and managed-package callers are invisible to the graph edges this tool walks. Carries a `soundness` envelope: `complete: false` with a `dynamic-apex` blind spot when a candidate class uses dynamic Apex — a class reached only reflectively will read as dead — so a `dead` verdict on a flagged class needs a human check before deletion. When any CALLER family (LWC, Aura, Flows, FlexiPages, Visualforce, …) has incomplete coverage — errored retrieve, scoped refresh, or an in-progress staged build — the response adds a `coverageCaveat` naming the families: an un-retrieved caller would fake death.",
     inputSchema: FIND_DEAD_CODE_INPUT_SCHEMA,
   },
   {
     name: 'sfi.package_impact',
     description:
-      "Managed-package boundary surface — 'what does the {namespace} package touch, and what of MINE breaks if I uninstall/upgrade it?'. No InstalledPackage metadata is modelled; package membership is derived from the API-name NAMESPACE PREFIX (a leaf name splitting into >= 3 '__'-segments — `NS__Object__c` — is namespaced; `Object__c` and standard names are not). INVENTORY mode (no `namespace`) scans every node and lists the packages visible in the vault with component counts, most-entangled first — including packages present ONLY via your EXTENSIONS (`extensionCount` > 0 with `componentCount` 0: components you parented under a package's objects), so a package whose own objects are phantoms (e.g. HEDA `hed`, whose managed objects come down as phantom references) is still surfaced as installed instead of reading as 'no packages'. IMPACT mode (`namespace`, e.g. 'SBQQ') returns the package's visible components, `yourDependencies` (incoming non-parentOf edges from components OUTSIDE the namespace — the uninstall blast radius, each carrying fromId/fromType/edgeType/confidence), and `yourExtensions` (your components parented UNDER a package component — custom fields you added to `SBQQ__Quote__c`, orphaned on uninstall). Verdict is `has-dependencies` or the deliberately hedged `no-detected-dependencies` (NEVER 'safe to uninstall'). Honesty axis (verbatim): managed Apex referenced via dot-notation (NS.ClassName) and namespaced components without a standard suffix are invisible; a package's INTERNAL components are usually never retrieved, so packageComponentCount reflects what you can SEE; 'no-detected-dependencies' means no STATIC evidence in retrieved metadata (dynamic SOQL, Type.forName, merge-field references, and unretrieved metadata are invisible) — validate every uninstall in a sandbox first.",
+      "Managed-package boundary surface — 'what does the {namespace} package touch, and what of MINE breaks if I uninstall/upgrade it?'. No InstalledPackage metadata is modelled; package membership is derived from the API-name NAMESPACE PREFIX (a leaf name splitting into >= 3 '__'-segments — `NS__Object__c` — is namespaced; `Object__c` and standard names are not). INVENTORY mode (no `namespace`) scans every node and lists the packages visible in the vault with component counts, most-entangled first — including packages present ONLY via your EXTENSIONS (`extensionCount` > 0 with `componentCount` 0: components you parented under a package's objects), so a package whose own objects are phantoms (e.g. HEDA `hed`, whose managed objects come down as phantom references) is still surfaced as installed instead of reading as 'no packages'. IMPACT mode (`namespace`, e.g. 'SBQQ' — OR a `namespacePrefix` / `packageId` / `componentId` selector: the Salesforce-shaped `namespacePrefix` synonym a host reaches for, a bare namespace, or the `InstalledPackage:<namespace>` id the catalog returns, each resolved to the namespace instead of silently falling back to INVENTORY; an unrecognized selector is an `invalid-query`, never a silent full inventory) returns the package's visible components, `yourDependencies` (incoming non-parentOf edges from components OUTSIDE the namespace — the uninstall blast radius, each carrying fromId/fromType/edgeType/confidence), and `yourExtensions` (your components parented UNDER a package component — custom fields you added to `SBQQ__Quote__c`, orphaned on uninstall). Verdict is staged so it can NEVER read soft-safe while a touchpoint or blind spot is present: `has-dependencies`; `members-present-no-static-inbound` (the package HAS visible members but no STATIC inbound reference — you are carrying its metadata, NOT 'safe to uninstall'); `incomplete-scan` (the node/edge scan was truncated); `review` (no visible members but the absence is un-provable — a producer family was not fully retrieved); or the bare `no-detected-dependencies` ONLY when nothing hides a touchpoint (no members, complete scan, no coverage gap) — the caveat and the verdict AGREE (NEVER 'safe to uninstall'). Honesty axis (verbatim): managed Apex referenced via dot-notation (NS.ClassName) and namespaced components without a standard suffix are invisible; a package's INTERNAL components are usually never retrieved, so packageComponentCount reflects what you can SEE; even `no-detected-dependencies` means no STATIC evidence in retrieved metadata (dynamic SOQL, Type.forName, merge-field references, and unretrieved metadata are invisible) — validate every uninstall in a sandbox first.",
     inputSchema: PACKAGE_IMPACT_INPUT_SCHEMA,
   },
   // v2.6a R2 — CPQ specialist tier. Three tools layered on top of the
@@ -5219,7 +5507,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.installed_package_catalog',
     description:
-      "Answer \"what packages are installed in this org?\" from the `InstalledPackage` metadata the refresh extracts (`installedPackages/<namespace>.installedPackage-meta.xml`). Each `packages[]` row is a managed/unlocked package: `namespace` (the prefix its components carry — `hed__Course__c` -> `hed`) and the installed `versionNumber` (e.g. `8.293`, or `null` when not declared). `summary.count` is the total; the list is COMPLETE (orgs have tens of packages, not thousands) and sorted by namespace. `declared` confidence. This is the package INVENTORY with real version + namespace data — not inferred from component prefixes — and grounds the managed-extension taxonomy; for what a namespace's components TOUCH use `package_impact`. `boundaryNote`: an empty list is disclosed as 'not modeled' (no InstalledPackage metadata / pre-extraction refresh), not a verified 'no packages'; component namespace prefixes still indicate ownership without this catalog. Emits a `coverageCaveat` when InstalledPackage was not retrieved; an empty catalog under it is 'not retrieved', not a verified 'no packages'.",
+      "Answer \"what packages are installed in this org?\" from the `InstalledPackage` metadata the refresh extracts (`installedPackages/<namespace>.installedPackage-meta.xml`). Each `packages[]` row is a managed/unlocked package: `namespace` (the prefix its components carry — `hed__Course__c` -> `hed`) and the installed `versionNumber` (e.g. `8.293`, or `null` when not declared). `summary.count` is the total; the list is COMPLETE (orgs have tens of packages, not thousands) and sorted by namespace. Optional `namespacePrefix` narrows the catalog to the package whose namespace EXACTLY equals it (case-insensitive — a namespace prefix is a single token like `hed`, not a substring) and echoes `appliedScope: { namespacePrefix, mode: 'namespacePrefix' }`; omit it for the full catalog, and a prefix that matches nothing returns an honest empty scope (with a scoped `boundaryNote`), never the full list. `declared` confidence. This is the package INVENTORY with real version + namespace data — not inferred from component prefixes — and grounds the managed-extension taxonomy; for what a namespace's components TOUCH use `package_impact`. `boundaryNote`: an empty list is disclosed as 'not modeled' (no InstalledPackage metadata / pre-extraction refresh), not a verified 'no packages'; component namespace prefixes still indicate ownership without this catalog. Emits a `coverageCaveat` when InstalledPackage was not retrieved; an empty catalog under it is 'not retrieved', not a verified 'no packages'.",
     inputSchema: INSTALLED_PACKAGE_CATALOG_INPUT_SCHEMA,
   },
   {
@@ -5273,13 +5561,13 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
   {
     name: 'sfi.explain_error',
     description:
-      "Decode a PASTED Salesforce error string back to the org component that produced it — the support desk's first-line tool. Input: `errorText` (the raw error / fault-email / stack trace) + optional `object` SObject narrowing hint. Runs RANKED, HEURISTIC match strategies, each candidate carrying its own `confidence` + a `why`: (1) VALIDATION RULE — the message segment (after `FIELD_CUSTOM_VALIDATION_EXCEPTION`, or a bare pasted banner) is compared to every `ValidationRule.errorMessage`; an EXACT (trimmed) equality is `declared`, a normalized/substring match is `heuristic`; returns the rule id, object, `active` flag, and `errorConditionFormula`. (2) FLOW FAULT — recognizes fault-email shapes ('An error occurred at element X', 'Flow API Name: Y') and resolves the flow API name to a real `Flow:` node (`declared`); the element name is echoed and cross-checked against the flow's action calls, but flow ELEMENTS are not separate graph nodes offline (disclosed, not fabricated). (3) APEX — recognizes stack frames ('Class.MyClass.myMethod: line N', 'Trigger.MyTrigger: line N', 'System.XException') and resolves the class/trigger to a real node (`declared`); the offending LINE is not resolvable offline. (4) DUPLICATE RULES — 'duplicate' phrasing + an `object` hint lists the ACTIVE `DuplicateRule` nodes on that object (`heuristic` listing — the error text does not name which rule fired). (5) STATUS-CODE TAXONOMY — recognizes common REST/API statusCodes (`REQUIRED_FIELD_MISSING`, `UNABLE_TO_LOCK_ROW`, `INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY`, `CANNOT_INSERT_UPDATE_ACTIVATE_ENTITY`, …) and explains the CATEGORY + which component TYPES can produce it — clearly category-level, NOT a specific match; for automation-abort codes it cross-references the triggers/flows declared on the hinted object (`triggersOn`). `disposition` mirrors `sfi.resolve`: `matched` (one confident source), `ambiguous` (several ranked candidates), or `none` — FAIL CLOSED, a source is never fabricated. On `none`, `triedStrategies` + `nextSteps` guide the next move (e.g. `sfi.what_happens_on_save` on the object). Matching is against DECLARED metadata, not a runtime trace — every candidate confidence + a verbatim `disclosure` say so; the candidate list is byte-budgeted (`truncated`).",
+      "Decode a PASTED Salesforce error string back to the org component that produced it — the support desk's first-line tool. Input: `errorText` (the raw error / fault-email / stack trace; the aliases `error` / `message` / `errorMessage` / `text` are also accepted) + optional `object` SObject narrowing hint. Runs RANKED, HEURISTIC match strategies, each candidate carrying its own `confidence` + a `why`: (1) VALIDATION RULE — the message segment (after `FIELD_CUSTOM_VALIDATION_EXCEPTION`, or a bare pasted banner) is compared to every `ValidationRule.errorMessage`; an EXACT (trimmed) equality is `declared`, a normalized/substring match is `heuristic`; returns the rule id, object, `active` flag, and `errorConditionFormula`. (2) FLOW FAULT — recognizes fault-email shapes ('An error occurred at element X', 'Flow API Name: Y') and resolves the flow API name to a real `Flow:` node (`declared`); the element name is echoed and cross-checked against the flow's action calls, but flow ELEMENTS are not separate graph nodes offline (disclosed, not fabricated). (3) APEX — recognizes stack frames ('Class.MyClass.myMethod: line N', 'Trigger.MyTrigger: line N', 'System.XException') and resolves the class/trigger to a real node (`declared`); the offending LINE is not resolvable offline. (4) DUPLICATE RULES — 'duplicate' phrasing + an `object` hint lists the ACTIVE `DuplicateRule` nodes on that object (`heuristic` listing — the error text does not name which rule fired). (5) STATUS-CODE TAXONOMY — recognizes common REST/API statusCodes (`REQUIRED_FIELD_MISSING`, `UNABLE_TO_LOCK_ROW`, `INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY`, `CANNOT_INSERT_UPDATE_ACTIVATE_ENTITY`, …) and explains the CATEGORY + which component TYPES can produce it — clearly category-level, NOT a specific match; for automation-abort codes it cross-references the triggers/flows declared on the hinted object (`triggersOn`). `disposition` mirrors `sfi.resolve`: `matched` (one confident source), `ambiguous` (several ranked candidates), or `none` — FAIL CLOSED, a source is never fabricated. On `none`, `triedStrategies` + `nextSteps` guide the next move (e.g. `sfi.what_happens_on_save` on the object). Matching is against DECLARED metadata, not a runtime trace — every candidate confidence + a verbatim `disclosure` say so; the candidate list is byte-budgeted (`truncated`).",
     inputSchema: EXPLAIN_ERROR_INPUT_SCHEMA,
   },
   {
     name: 'sfi.explain_debug_log',
     description:
-      "Decode a PASTED Apex DEBUG LOG, flow fault text, or governor-limit exception back to the org component that ran — the developer/support runtime-triage wedge, ZERO org access. Where `sfi.explain_error` decodes a SAVE-time error banner (validation/duplicate rule) back to the rule that blocked the write, THIS tool decodes a DEVELOPER debug log and a RUNTIME governor-limit exception back to the Apex class/trigger/flow that executed. Input: `logText` (the pasted log / stack trace / `System.LimitException` line) + optional `object` SObject hint. Strategies, each candidate carrying its own `confidence` + a `why`: (1) APEX IDENTITY — every class/trigger named in the log (stack frames `Class.X.method: line N` / `Trigger.Y: line N`, debug-log `CODE_UNIT_STARTED`/`METHOD_ENTRY` event lines, `__sfdc_trigger/Y` markers) resolves to a real `ApexClass:`/`ApexTrigger:` node (`declared`); the offending LINE is not resolvable offline (disclosed); unresolved names (managed/not-retrieved) are reported, never fabricated. (2) GOVERNOR LIMIT — a runtime `System.LimitException` (`Too many SOQL queries: 101`, `Too many DML statements`, `Apex CPU time limit exceeded`, `Apex heap size too large`, or an exceeding `LIMIT_USAGE` block) is classified to a limit TYPE and cross-referenced against `sfi.governor_limit_risks`: for each resolved Apex class in the log the static loop-risk findings are surfaced, with the ones whose rule maps to the fired limit (`soql-in-loop` for a SOQL limit, `dml-in-loop` for a DML limit) ranked first — a HEURISTIC correlation, the static scan is where the limit MOST LIKELY came from, not a runtime proof. (3) FLOW FAULT — a `Flow API Name:` embedded in the log resolves to a real `Flow:` node (`declared`). (4) STATUS-CODE taxonomy — a recognized REST/API status code is explained at the CATEGORY level (reused from explain_error, never a specific match). `disposition` mirrors `sfi.resolve`: `matched` (one confident source), `ambiguous` (several ranked), or `none` — FAIL CLOSED, a source is never fabricated; on `none`, `triedStrategies` + `nextSteps` (e.g. `sfi.governor_limit_risks`, `sfi.call_graph`) guide the next move. Matching is offline string-matching against declared metadata + the static governor-risk scan, not a runtime trace — every candidate confidence + a verbatim `disclosure` say so; the candidate list is byte-budgeted (`truncated`).",
+      "Decode a PASTED Apex DEBUG LOG, flow fault text, or governor-limit exception back to the org component that ran — the developer/support runtime-triage wedge, ZERO org access. Where `sfi.explain_error` decodes a SAVE-time error banner (validation/duplicate rule) back to the rule that blocked the write, THIS tool decodes a DEVELOPER debug log and a RUNTIME governor-limit exception back to the Apex class/trigger/flow that executed. Input: `logText` (the pasted log / stack trace / `System.LimitException` line; the aliases `debugLog` / `log` / `text` / `content` are also accepted) + optional `object` SObject hint. Strategies, each candidate carrying its own `confidence` + a `why`: (1) APEX IDENTITY — every class/trigger named in the log (stack frames `Class.X.method: line N` / `Trigger.Y: line N`, debug-log `CODE_UNIT_STARTED`/`METHOD_ENTRY` event lines, `__sfdc_trigger/Y` markers) resolves to a real `ApexClass:`/`ApexTrigger:` node (`declared`); the offending LINE is not resolvable offline (disclosed); unresolved names (managed/not-retrieved) are reported, never fabricated. (2) GOVERNOR LIMIT — a runtime `System.LimitException` (`Too many SOQL queries: 101`, `Too many DML statements`, `Apex CPU time limit exceeded`, `Apex heap size too large`, or an exceeding `LIMIT_USAGE` block) is classified to a limit TYPE and cross-referenced against `sfi.governor_limit_risks`: for each resolved Apex class in the log the static loop-risk findings are surfaced, with the ones whose rule maps to the fired limit (`soql-in-loop` for a SOQL limit, `dml-in-loop` for a DML limit) ranked first — a HEURISTIC correlation, the static scan is where the limit MOST LIKELY came from, not a runtime proof. (3) FLOW FAULT — a `Flow API Name:` embedded in the log resolves to a real `Flow:` node (`declared`). (4) STATUS-CODE taxonomy — a recognized REST/API status code is explained at the CATEGORY level (reused from explain_error, never a specific match). `disposition` mirrors `sfi.resolve`: `matched` (one confident source), `ambiguous` (several ranked), or `none` — FAIL CLOSED, a source is never fabricated; on `none`, `triedStrategies` + `nextSteps` (e.g. `sfi.governor_limit_risks`, `sfi.call_graph`) guide the next move. Matching is offline string-matching against declared metadata + the static governor-risk scan, not a runtime trace — every candidate confidence + a verbatim `disclosure` say so; the candidate list is byte-budgeted (`truncated`).",
     inputSchema: EXPLAIN_DEBUG_LOG_INPUT_SCHEMA,
   },
   {

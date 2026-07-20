@@ -537,6 +537,15 @@ describe('buildPackageXml API version floor (profile-safe)', () => {
     expect(xml).toContain('<members>*</members>');
     expect(xml).toContain('<version>62.0</version>');
   });
+
+  it('WORKFLOWRULE-RETRIEVED-ZERO: aliases WorkflowRule to the Workflow xmlName in package.xml', () => {
+    // The org describe exposes `Workflow`, not `WorkflowRule`. Without the alias
+    // selectManifestTypes drops the internal type and the retrieve plane never
+    // lands — RM-A14 workflow concepts become un-witnessable / undisclosed.
+    const xml = buildPackageXml(['WorkflowRule']);
+    expect(xml).toContain('<name>Workflow</name>');
+    expect(xml).not.toContain('<name>WorkflowRule</name>');
+  });
 });
 
 describe('manifestMembersForType', () => {

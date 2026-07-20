@@ -127,6 +127,25 @@ describe('isActiveSoeFirer', () => {
       ),
     ).toBe(true);
   });
+
+  it('respects active:false on Assignment / AutoResponse / Escalation rules (they each emit an `active` boolean)', () => {
+    // These three rule types carry a required `<active>` element (see the
+    // extractors) just like the workflow/validation/approval trio. The reasoning
+    // engine's coupled-field-write liveness gate relies on the shared predicate
+    // marking a provably-inactive one of them as inactive.
+    for (const type of ['AssignmentRule', 'AutoResponseRule', 'EscalationRule'] as const) {
+      expect(
+        isActiveSoeFirer(makeNode({ id: `${type}:Case.Rule`, type, properties: { active: false } })),
+      ).toBe(false);
+      expect(
+        isActiveSoeFirer(makeNode({ id: `${type}:Case.Rule`, type, properties: { active: true } })),
+      ).toBe(true);
+      // Missing `active` defaults to live (conservative prior).
+      expect(
+        isActiveSoeFirer(makeNode({ id: `${type}:Case.Legacy`, type, properties: {} })),
+      ).toBe(true);
+    }
+  });
 });
 
 describe('inactive collector', () => {

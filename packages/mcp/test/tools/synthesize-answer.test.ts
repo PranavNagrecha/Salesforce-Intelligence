@@ -451,9 +451,9 @@ describe('SYNTH bundle — surfaces flow/sharing/VR/false-premise facts', () => 
           errorConditionFormula: 'ISCHANGED(StageName)',
         },
         {
-          id: 'ValidationRule:Account.FacultyEdit',
+          id: 'ValidationRule:Account.WidgetEdit',
           active: true,
-          errorConditionFormula: "$Profile.Name = 'Faculty'",
+          errorConditionFormula: "$Profile.Name = 'Sample_Profile'",
         },
       ],
     };
@@ -463,11 +463,11 @@ describe('SYNTH bundle — surfaces flow/sharing/VR/false-premise facts', () => 
     const b = r.value.data.bullets;
     expect(b).toContain('evaluatesAllActiveRules: true');
     expect(b).toContain('active: true');
-    expect(b).toContain("errorConditionFormula: $Profile.Name = 'Faculty'");
+    expect(b).toContain("errorConditionFormula: $Profile.Name = 'Sample_Profile'");
     // Both VR ids are cited, so the answer can name them.
     const ids = r.value.data.citations.map((c) => c.id);
     expect(ids).toContain('ValidationRule:Account.No_updates_to_Open');
-    expect(ids).toContain('ValidationRule:Account.FacultyEdit');
+    expect(ids).toContain('ValidationRule:Account.WidgetEdit');
     // The cascade is no longer an empty skeleton.
     expect(r.value.data.bullets.length).toBeGreaterThan(0);
   });
@@ -1227,5 +1227,482 @@ describe('bundle-6 structural caveats', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.caveats.some((c) => c.includes('MATCHING RULE'))).toBe(false);
+  });
+});
+
+// RM-3 (steps 3b–3e). synthesize_answer folds the typed Interpretation[] that
+// sfi.interpret produces into the assembled answer: the shape-gated collector
+// populates evidence.interpretations, the claim(s) take PRECEDENCE over the
+// key-name scrape for likelyCause/nextAction, coverageCaveat surfaces, and an
+// interpret-explicit incompleteness signal (confidence unknown / non-null
+// coverageCaveat / fired-nothing empty) degrades the absence guard. An EMPTY
+// interpret result is disclosed as "no concept rule fired", never a safe verdict.
+describe('RM-3 interpret fold', () => {
+  // A realistic sfi.interpret payload, McpResponse-nested under `data`.
+  const interpret = (
+    interpretations: readonly Record<string, unknown>[],
+    over: Record<string, unknown> = {},
+  ): Record<string, unknown> => ({
+    data: {
+      componentId: 'CustomField:Account.Amount__c',
+      componentType: 'CustomField',
+      interpretations,
+      rulesConsidered: 7,
+      rulesFired: interpretations.length,
+      sliceTruncated: false,
+      trust: {
+        provenance: 'offline_snapshot',
+        completeness: { status: 'complete' },
+      },
+      disclosure: 'deterministic offline interpretation',
+      rendered: 'rendered text',
+      ...over,
+    },
+    vaultState: {
+      sourceTreeHash: 'sha256:fixture',
+      refreshedAt: '2026-05-27T14:33:08Z',
+    },
+  });
+  const formulaClaim = {
+    ruleId: 'rule:field-provenance/is-formula',
+    concept: 'concept:field-provenance',
+    claim:
+      'CustomField:Account.Amount__c is a formula field; its value is computed ' +
+      'and cannot be written by Flow or Apex.',
+    groundedIn: ['CustomField:Account.Amount__c'],
+    confidence: 'declared',
+    coverageCaveat: null,
+    modelVersion: '1.0.0',
+    provenance: 'offline_snapshot',
+  };
+
+  // 3b — the shape-gated collector populates evidence.interpretations and the
+  // groundedIn ids flow into citations via the existing recursion.
+  it('populates evidence.interpretations from a typed Interpretation[] (groundedIn → citations)', async () => {
+    const r = await synthesizeAnswerHandler(ctx, { input: interpret([formulaClaim]) });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const e = r.value.data.evidence;
+    expect(e.interpretations).toHaveLength(1);
+    expect(e.interpretations[0]?.ruleId).toBe('rule:field-provenance/is-formula');
+    expect(e.interpretations[0]?.concept).toBe('concept:field-provenance');
+    expect(e.interpretations[0]?.claim).toContain('formula field');
+    expect(e.interpretations[0]?.groundedIn).toEqual(['CustomField:Account.Amount__c']);
+    // groundedIn id is a grounded citation via the existing whole-id recursion.
+    expect(r.value.data.citations.map((c) => c.id)).toContain(
+      'CustomField:Account.Amount__c',
+    );
+  });
+
+  it('does NOT collect an unrelated array that only partially matches the Interpretation shape', async () => {
+    // An `interpretations`-named array whose elements lack the full key-set
+    // (no groundedIn / provenance) must NOT be folded — shape-gating, not a
+    // bare key match.
+    const decoy = {
+      data: {
+        interpretations: [
+          { claim: 'this is not a real interpretation', concept: 'x' },
+        ],
+        rulesFired: 1,
+        rulesConsidered: 1,
+      },
+    };
+    const r = await synthesizeAnswerHandler(ctx, { input: decoy });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.evidence.interpretations).toEqual([]);
+  });
+
+  // FIX-F3 — a NON-EMPTY interpret payload whose interpretation entries ALL fail
+  // the shape gate (cross-version/shape drift) lifts zero valid claims. It must
+  // be DISCLOSED as "could not be parsed", never resolved silently to nothing —
+  // and it is NOT the "no concept rule fired" framing (a rule did produce output).
+  it('discloses a shape-drifted (non-empty but unparseable) interpretations array', async () => {
+    const drifted = {
+      data: {
+        componentId: 'CustomField:Account.Amount__c',
+        componentType: 'CustomField',
+        // Non-empty, but every element is missing the required key-set (drift).
+        interpretations: [
+          { claim: 'renamed-key result', kind: 'formula' },
+          { note: 'another reshaped element' },
+        ],
+        rulesConsidered: 4,
+        rulesFired: 2,
+        trust: {
+          provenance: 'offline_snapshot',
+          completeness: { status: 'complete' },
+        },
+      },
+    };
+    const r = await synthesizeAnswerHandler(ctx, { input: drifted });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Nothing valid was lifted ...
+    expect(r.value.data.evidence.interpretations).toEqual([]);
+    // ... but the drift is DISCLOSED (not swallowed) ...
+    expect(
+      r.value.data.caveats.some((c) => /could NOT be parsed/i.test(c)),
+    ).toBe(true);
+    // ... and it is NOT laundered into the fired-nothing framing.
+    expect(
+      r.value.data.caveats.some((c) => c.includes('NO concept rule fired')),
+    ).toBe(false);
+  });
+
+  // FIX-F4 — a NON-interpret payload that coincidentally carries `interpretations: []`
+  // beside a SINGLE numeric counter must NOT trip the empty-interpretation caveat:
+  // every real InterpretOutput carries BOTH `rulesFired` and `rulesConsidered`, so
+  // the interpretation-free byte-identity claim holds strictly.
+  it('stays byte-identical for a coincidental non-interpret payload (single counter, empty array)', async () => {
+    const coincidental = {
+      data: {
+        // A rules-engine-shaped result that is NOT an interpret payload.
+        verdict: 'ok',
+        interpretations: [],
+        rulesFired: 3,
+      },
+    };
+    const r = await synthesizeAnswerHandler(ctx, { input: coincidental });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.evidence.interpretations).toEqual([]);
+    // No empty-interpretation caveat (the payload is not interpret-shaped) ...
+    expect(
+      r.value.data.caveats.some((c) => c.includes('NO concept rule fired')),
+    ).toBe(false);
+    // ... and no shape-drift caveat either.
+    expect(
+      r.value.data.caveats.some((c) => /could NOT be parsed/i.test(c)),
+    ).toBe(false);
+  });
+
+  // 3c (FIX-F1/F2, a deliberate design correction toward calibrated honesty) —
+  // NON-CLOBBER: an on-topic SCRAPED cause KEEPS `likelyCause`; the interpretation
+  // claim is surfaced as a hedged SUPPLEMENTARY note, never overwriting the
+  // scraped evidence. A structural claim is a CAUSE, not an ACTION, so
+  // `nextAction` reverts to the scrape.
+  it('does NOT clobber a scraped cause: claim → hedged supplementary note, nextAction stays the scrape', async () => {
+    const hedged = {
+      ...formulaClaim,
+      confidence: 'heuristic',
+      coverageCaveat:
+        'Apex coverage is partial; a dynamic SOQL write to this field would be ' +
+        'invisible to the engine.',
+    };
+    const r = await synthesizeAnswerHandler(ctx, {
+      input: interpret([hedged], {
+        // An on-topic scraped cause + next-step the fold must NOT overwrite. This
+        // mirrors a mixed input where a sharing tool supplied the real cause and
+        // an off-topic formula interpretation also fired.
+        reason: 'OWD is Private and no sharing rule grants the caller access',
+        nextStep: 'run who_can_access_object to confirm the sharing path',
+      }),
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const e = r.value.data.evidence;
+    // The scraped cause WINS likelyCause (non-clobber) — the claim does not bury it.
+    expect(e.likelyCause).toBe(
+      'OWD is Private and no sharing rule grants the caller access',
+    );
+    expect(e.likelyCause).not.toContain('formula field');
+    // nextAction is the scrape — a structural claim is never presented as an action.
+    expect(e.nextAction).toBe('run who_can_access_object to confirm the sharing path');
+    expect(e.nextAction).not.toContain('formula field');
+    // The claim is surfaced as a hedged supplementary note (not clobbered away) ...
+    expect(e.interpretationNotes.some((n) => n.includes('formula field'))).toBe(true);
+    // ... and the hedge travels WITH it, so it never reads as a bare hard fact.
+    expect(
+      e.interpretationNotes.some(
+        (n) => n.includes('dynamic SOQL write') || n.includes('heuristic'),
+      ),
+    ).toBe(true);
+    // The typed interpretation surface is intact; per-item confidence preserved.
+    expect(e.interpretations).toHaveLength(1);
+    expect(e.interpretations[0]?.confidence).toBe('heuristic');
+    // The coverageCaveat is still surfaced as risk here (no scraped caveat present).
+    expect(e.risk).toContain('dynamic SOQL write');
+    expect(r.value.data.citations.map((c) => c.id)).toContain(
+      'CustomField:Account.Amount__c',
+    );
+  });
+
+  // FIX-F1 — the pure reasoning flow (NO scraped cause): the claim FILLS
+  // `likelyCause` (a cause, never `nextAction`), carrying its hedge inline.
+  it('a claim with no scraped cause fills likelyCause (not nextAction), hedge attached', async () => {
+    const hedged = {
+      ...formulaClaim,
+      confidence: 'heuristic',
+      coverageCaveat: 'rollup coverage is partial',
+    };
+    const r = await synthesizeAnswerHandler(ctx, { input: interpret([hedged]) });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const e = r.value.data.evidence;
+    // The claim fills likelyCause (there was no scraped cause) ...
+    expect(e.likelyCause).toContain('formula field');
+    // ... carrying its hedge inline (never a bare hard fact) ...
+    expect(e.likelyCause).toMatch(/heuristic|rollup coverage is partial/);
+    // ... and it is NOT surfaced as the next action (a claim is a cause, not a step).
+    expect(e.nextAction).toBeNull();
+    // Not double-surfaced as a note when it already holds likelyCause.
+    expect(e.interpretationNotes).toEqual([]);
+  });
+
+  // FIX-F2 — calibration, not blanket hedging: a FULLY-GROUNDED claim (declared,
+  // no coverageCaveat) surfaces as a firm fact with NO spurious hedge appended.
+  it('a fully-grounded (declared) claim surfaces WITHOUT a hedge', async () => {
+    const r = await synthesizeAnswerHandler(ctx, { input: interpret([formulaClaim]) });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const e = r.value.data.evidence;
+    expect(e.likelyCause).toContain('formula field');
+    expect(e.likelyCause).not.toContain('confidence:');
+    expect(e.likelyCause).not.toContain('[');
+  });
+
+  it('presents a compound security concept once while preserving its constituent interpretations', async () => {
+    const componentId = 'ApexClass:ExternalController';
+    const base = {
+      groundedIn: [componentId],
+      confidence: 'declared',
+      coverageCaveat: null,
+      modelVersion: '1.0.0',
+      provenance: 'offline_snapshot',
+    };
+    const external = {
+      ...base,
+      ruleId: 'rule:external-api-surface/aura-enabled',
+      concept: 'concept:external-api-surface',
+      claim: `${componentId} exposes an Aura endpoint.`,
+    };
+    const sharing = {
+      ...base,
+      ruleId: 'rule:apex-sharing/without-sharing',
+      concept: 'concept:apex-sharing-mode',
+      claim: `${componentId} is declared without sharing.`,
+    };
+    const compound = {
+      ...base,
+      ruleId: 'rule:system-context-external-surface/aura-enabled',
+      concept: 'concept:system-context-external-surface',
+      claim: `${componentId} is an externally reachable system-context security-review priority.`,
+    };
+
+    const r = await synthesizeAnswerHandler(ctx, {
+      input: interpret([external, sharing, compound]),
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const e = r.value.data.evidence;
+
+    // Audit fidelity is unchanged: all source interpretations remain typed.
+    expect(e.interpretations).toHaveLength(3);
+    expect(e.interpretations.map((i) => i.ruleId)).toEqual([
+      external.ruleId,
+      sharing.ruleId,
+      compound.ruleId,
+    ]);
+    // Presentation uses the conjunction once rather than repeating its parts.
+    expect(e.likelyCause).toContain('security-review priority');
+    expect(e.likelyCause).not.toContain('exposes an Aura endpoint');
+    expect(e.likelyCause).not.toContain('declared without sharing');
+    expect(e.interpretationNotes).toEqual([]);
+    expect(e.orphanComponentIds).toEqual([]);
+  });
+
+  // 3d — the coverageCaveat (which the anchored CAVEAT_KEY does not match) is
+  // surfaced through the shape-gated collector, both per-interpretation and at
+  // the payload level.
+  it('surfaces the per-interpretation and payload-level coverageCaveat as caveats', async () => {
+    const hedged = {
+      ...formulaClaim,
+      confidence: 'heuristic',
+      coverageCaveat: 'PER-INTERPRETATION: rollup coverage is partial.',
+    };
+    const r = await synthesizeAnswerHandler(ctx, {
+      input: interpret([hedged], {
+        coverageCaveat: 'PAYLOAD-LEVEL: this interpret run had incomplete coverage.',
+      }),
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(
+      r.value.data.caveats.some((c) => c.includes('PER-INTERPRETATION')),
+    ).toBe(true);
+    expect(
+      r.value.data.caveats.some((c) => c.includes('PAYLOAD-LEVEL')),
+    ).toBe(true);
+  });
+
+  // 3e — an interpret-EXPLICIT incompleteness signal (confidence "unknown")
+  // degrades an absence draft to grounded:false even when the heuristic coverage
+  // scan is silent (trust.completeness is "complete", no coverageCaveat).
+  it('confidence "unknown" degrades an absence draft even when the heuristic scan is silent', async () => {
+    const unknownClaim = {
+      ...formulaClaim,
+      confidence: 'unknown',
+      coverageCaveat: null,
+    };
+    const r = await synthesizeAnswerHandler(ctx, {
+      input: interpret([unknownClaim]), // trust.completeness = complete → heuristic silent
+      draft:
+        'Nothing depends on CustomField:Account.Amount__c, so it is safe to delete.',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.grounded).toBe(false);
+    expect(r.value.data.ungroundedAbsenceClaims?.length).toBeGreaterThan(0);
+    expect(r.value.data.summary).toContain('grounded=false');
+  });
+
+  it('a fully-grounded interpretation (declared, complete, no caveat) does NOT over-fire the guard', async () => {
+    // Control: the override adds signal, it must not flip a legitimately
+    // complete answer. An absence draft over a complete interpretation stays true.
+    const r = await synthesizeAnswerHandler(ctx, {
+      input: interpret([formulaClaim]), // declared + complete + coverageCaveat null
+      draft: 'Nothing else depends on CustomField:Account.Amount__c.',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.grounded).toBe(true);
+    expect(r.value.data.ungroundedAbsenceClaims).toEqual([]);
+  });
+
+  // 3e / absence-honesty guardrail — an EMPTY interpret result is disclosed as
+  // "no concept rule fired", NEVER a "safe"/"no-dependency" verdict.
+  it('an EMPTY interpret result renders the honest no-rule-fired framing (guardrail)', async () => {
+    const r = await synthesizeAnswerHandler(ctx, { input: interpret([]) });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.evidence.interpretations).toEqual([]);
+    // The honest framing is surfaced; it explicitly denies a "safe" reading.
+    expect(
+      r.value.data.caveats.some((c) => c.includes('NO concept rule fired')),
+    ).toBe(true);
+    expect(
+      r.value.data.caveats.some((c) => /not.*safe|change\/delete is safe/i.test(c)),
+    ).toBe(true);
+  });
+
+  it('an EMPTY interpret result cannot certify an absence draft (grounded=false)', async () => {
+    // The guardrail's teeth: honest silence must not become "safe to delete".
+    const r = await synthesizeAnswerHandler(ctx, {
+      input: interpret([]),
+      draft:
+        'Nothing depends on CustomField:Account.Amount__c; it is safe to delete.',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.grounded).toBe(false);
+    expect(r.value.data.ungroundedAbsenceClaims?.length).toBeGreaterThan(0);
+  });
+
+  // SYNTHESIZE-BURIES-INTERPRET-CLAIMS (Graph-B product honesty). The shipped
+  // reasoning model fires correctly (concept:flow-run-mode →
+  // SystemModeWithoutSharing), but the HOST answer path renders summary +
+  // bullets. Before the fix, the generic scalar walk lifted only the bare
+  // `confidence: declared` COUNTER from the interpret payload; the claim TEXT
+  // survived only inside `evidence.*` and never reached the summary/bullets.
+  // The fix PROMOTES the claim into the bullets, cited with concept/rule id +
+  // confidence tier, without dropping any disclosure. A no-interpretations
+  // control proves the non-reasoning path is unchanged.
+  const flowRunMode = {
+    ruleId: 'rule:flow-run-mode/system-without-sharing',
+    concept: 'concept:flow-run-mode',
+    claim:
+      'Flow:Account_System_Automation declares `runInMode` `SystemModeWithoutSharing` ' +
+      "— it runs in SYSTEM context and does NOT enforce the running user's " +
+      'record-level sharing; it also does not enforce object CRUD or field-level ' +
+      'security, so it can read and write any object and field.',
+    groundedIn: ['Flow:Account_System_Automation'],
+    confidence: 'declared',
+    coverageCaveat: null,
+    modelVersion: '1.0.0',
+    provenance: 'offline_snapshot',
+  };
+
+  it('promotes a SystemModeWithoutSharing Flow claim into the host-facing bullets (SYNTHESIZE-BURIES-INTERPRET-CLAIMS)', async () => {
+    const r = await synthesizeAnswerHandler(ctx, {
+      input: interpret([flowRunMode], {
+        componentId: 'Flow:Account_System_Automation',
+        componentType: 'Flow',
+      }),
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // A bullet carries the CLAIM text (system context / sharing not enforced) —
+    // NOT just a `confidence: declared` / `status: partial` counter alone.
+    const claimBullet = d.bullets.find(
+      (b) => /system context/i.test(b) && /sharing/i.test(b),
+    );
+    expect(claimBullet).toBeDefined();
+    // ... cited with the concept id, the rule id, and the confidence tier.
+    expect(claimBullet).toContain('concept:flow-run-mode');
+    expect(claimBullet).toContain('rule:flow-run-mode/system-without-sharing');
+    expect(claimBullet).toContain('confidence: declared');
+    // The reasoning surface is more than the bare counter the scalar walk lifts.
+    expect(d.bullets).not.toEqual(['confidence: declared']);
+    // The summary acknowledges the promoted reasoning claim too.
+    expect(d.summary).toContain('1 reasoning claim(s)');
+    // Disclosures are PRESERVED, not dropped: the typed interpretation, its
+    // confidence tier, and the grounded citation all remain intact.
+    expect(d.evidence.interpretations).toHaveLength(1);
+    expect(d.evidence.interpretations[0]?.confidence).toBe('declared');
+    expect(d.citations.map((c) => c.id)).toContain('Flow:Account_System_Automation');
+  });
+
+  it('carries a heuristic Flow claim with its confidence tier AND coverage caveat inline', async () => {
+    // Calibration: a hedged (heuristic + coverageCaveat) claim promotes with its
+    // tier and its caveat attached, so the bullet never reads as a bare fact.
+    const hedgedFlow = {
+      ...flowRunMode,
+      confidence: 'heuristic',
+      coverageCaveat: 'Subflow run modes were not modeled in this snapshot.',
+    };
+    const r = await synthesizeAnswerHandler(ctx, {
+      input: interpret([hedgedFlow], {
+        componentId: 'Flow:Account_System_Automation',
+        componentType: 'Flow',
+      }),
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const claimBullet = r.value.data.bullets.find((b) => b.startsWith('REASONING ['));
+    expect(claimBullet).toBeDefined();
+    expect(claimBullet).toContain('confidence: heuristic');
+    expect(claimBullet).toContain('coverage caveat: Subflow run modes were not modeled');
+    // The coverageCaveat is ALSO still surfaced as a caveat (disclosure intact).
+    expect(
+      r.value.data.caveats.some((c) => c.includes('Subflow run modes were not modeled')),
+    ).toBe(true);
+  });
+
+  it('leaves a NON-reasoning answer unchanged: no promoted bullet, no reasoning summary segment (control)', async () => {
+    // A plain tool output with a `confidence` scalar but NO interpret payload
+    // (no interpretations[] / rulesFired / rulesConsidered). The scalar walk
+    // still lifts `confidence: parsed` as a bullet exactly as before; nothing is
+    // promoted and the summary carries no reasoning segment — byte-identical.
+    const nonReasoning = {
+      data: {
+        componentId: 'ApexClass:Fixture_Sharing_Probe',
+        confidence: 'parsed',
+        edges: [{ from: 'ApexClass:Fixture_Sharing_Probe', to: 'CustomObject:Account' }],
+        trust: { provenance: 'offline_snapshot', completeness: { status: 'complete' } },
+      },
+    };
+    const r = await synthesizeAnswerHandler(ctx, { input: nonReasoning });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // The `confidence` counter still renders as a plain bullet (unchanged) ...
+    expect(d.bullets).toContain('confidence: parsed');
+    // ... NO reasoning claim was promoted (no REASONING-tagged bullet) ...
+    expect(d.bullets.some((b) => b.startsWith('REASONING ['))).toBe(false);
+    // ... and the summary carries NO reasoning-claim segment.
+    expect(d.summary).not.toContain('reasoning claim(s)');
+    expect(d.evidence.interpretations).toEqual([]);
   });
 });

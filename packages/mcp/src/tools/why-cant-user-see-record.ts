@@ -388,38 +388,59 @@ const ROLE_HIERARCHY_MAX_DEPTH = 100;
  *     get a Zod-level rejection for the genuinely-empty case rather
  *     than a misleading "no PermissionGrant" reasoning step.
  */
-export const whyCantUserSeeRecordInputSchema = z.object({
-  componentId: z.string().min(1),
-  /**
-   * Which record operation to evaluate. `read` (default) = can the user VIEW
-   * the record; `edit` = can they UPDATE it (needs ReadWrite OWD or an Edit
-   * grant / ModifyAll, never a read-only path); `delete` = can they DELETE it
-   * (needs Delete object perm + FullAccess/ModifyAll/ownership — sharing rules
-   * never grant delete); `create` = can they CREATE a record (needs object
-   * Create permission / Modify-All AND, if the object has record types, a
-   * visible record type — create does NOT flow through OWD / sharing / role
-   * hierarchy). Read-only access must not read as edit-capable.
-   */
-  accessLevel: z.enum(['read', 'edit', 'delete', 'create']).optional(),
-  userContext: z
-    .object({
-      profileId: z.string().min(1).optional(),
-      permissionSetIds: z.array(z.string().min(1)).optional(),
-      roleId: z.string().min(1).optional(),
-      groupIds: z.array(z.string().min(1)).optional(),
-    })
-    .refine(
-      (uc) =>
-        uc.profileId !== undefined ||
-        (uc.permissionSetIds !== undefined && uc.permissionSetIds.length > 0) ||
-        uc.roleId !== undefined ||
-        (uc.groupIds !== undefined && uc.groupIds.length > 0),
-      {
-        message:
-          'userContext must supply at least one of: profileId, permissionSetIds, roleId, groupIds',
-      },
-    ),
-});
+export const whyCantUserSeeRecordInputSchema = z
+  .object({
+    componentId: z.string().min(1).optional(),
+    /**
+     * Bare object api name (`Widget__c`) — the alias the router + the
+     * sibling object-access tools standardize on. Equivalent to a
+     * `componentId: CustomObject:{name}`; pass EITHER. Supplying both that
+     * disagree is `invalid-query`. This closes the router→tool contract break
+     * where `objectApiName` was Zod-stripped and the tool hard-failed with
+     * `componentId: Required`.
+     */
+    objectApiName: z.string().min(1).optional(),
+    /**
+     * Which record operation to evaluate. `read` (default) = can the user VIEW
+     * the record; `edit` = can they UPDATE it (needs ReadWrite OWD or an Edit
+     * grant / ModifyAll, never a read-only path); `delete` = can they DELETE it
+     * (needs Delete object perm + FullAccess/ModifyAll/ownership — sharing rules
+     * never grant delete); `create` = can they CREATE a record (needs object
+     * Create permission / Modify-All AND, if the object has record types, a
+     * visible record type — create does NOT flow through OWD / sharing / role
+     * hierarchy). Read-only access must not read as edit-capable.
+     */
+    accessLevel: z.enum(['read', 'edit', 'delete', 'create']).optional(),
+    userContext: z
+      .object({
+        profileId: z.string().min(1).optional(),
+        /**
+         * Bare profile api name (`Sample_Profile`) — the alias to `profileId`. A
+         * `profileApiName` is coerced to `Profile:{name}`; pass either. Both
+         * present that disagree is `invalid-query`.
+         */
+        profileApiName: z.string().min(1).optional(),
+        permissionSetIds: z.array(z.string().min(1)).optional(),
+        roleId: z.string().min(1).optional(),
+        groupIds: z.array(z.string().min(1)).optional(),
+      })
+      .refine(
+        (uc) =>
+          uc.profileId !== undefined ||
+          uc.profileApiName !== undefined ||
+          (uc.permissionSetIds !== undefined && uc.permissionSetIds.length > 0) ||
+          uc.roleId !== undefined ||
+          (uc.groupIds !== undefined && uc.groupIds.length > 0),
+        {
+          message:
+            'userContext must supply at least one of: profileId, profileApiName, permissionSetIds, roleId, groupIds',
+        },
+      ),
+  })
+  .refine((i) => i.componentId !== undefined || i.objectApiName !== undefined, {
+    message: 'provide componentId or objectApiName',
+    path: ['componentId'],
+  });
 
 /** Parsed input shape, inferred from `whyCantUserSeeRecordInputSchema`. */
 export type WhyCantUserSeeRecordInput = z.infer<
@@ -486,6 +507,17 @@ export interface WhyCantUserSeeRecordOutput {
    */
   readonly mutedBy?: readonly string[];
   readonly boundaryNote?: string;
+  /**
+   * Echoes the scope ACTUALLY applied after resolving the `componentId` /
+   * `objectApiName` and `profileId` / `profileApiName` aliases, so a host never
+   * assumes an alias it passed was silently stripped. `object` is the resolved
+   * CustomObject id being checked; `profile` is the resolved profile id (or null
+   * when the context supplied no profile).
+   */
+  readonly appliedScope: {
+    readonly object: string;
+    readonly profile: string | null;
+  };
 }
 
 /**
@@ -1938,6 +1970,8 @@ const aggregateVerdict = (
   return 'restricted';
 };
 
+/** Canonical id prefix for the object being checked (`objectApiName` coerces to it). */
+const CUSTOM_OBJECT_PREFIX = 'CustomObject:';
 /** Canonical-id prefixes for the four userContext id families. */
 const PROFILE_PREFIX = 'Profile:';
 const PERMISSION_SET_PREFIX = 'PermissionSet:';
@@ -2343,7 +2377,68 @@ export const whyCantUserSeeRecordHandler = async (
   ctx: Context,
   input: WhyCantUserSeeRecordInput,
 ): Promise<Result<McpResponse<WhyCantUserSeeRecordOutput>, McpError>> => {
-  const { componentId } = input;
+  // Resolve the object being checked from the `componentId` / `objectApiName`
+  // aliases. The tool is object-only, so a bare name coerces to
+  // `CustomObject:{name}`; aliases that disagree are `invalid-query` (never a
+  // silent pick). This is the router→tool contract fix — `objectApiName` used to
+  // be Zod-stripped and the tool hard-failed with `componentId: Required`.
+  const objectIds = new Set<string>();
+  if (input.componentId !== undefined) {
+    objectIds.add(coercePrefix(input.componentId, [CUSTOM_OBJECT_PREFIX]));
+  }
+  if (input.objectApiName !== undefined) {
+    objectIds.add(coercePrefix(input.objectApiName, [CUSTOM_OBJECT_PREFIX]));
+  }
+  if (objectIds.size === 0) {
+    return err({
+      kind: 'invalid-query',
+      message: 'provide componentId or objectApiName',
+      path: 'componentId',
+    });
+  }
+  if (objectIds.size > 1) {
+    return err({
+      kind: 'invalid-query',
+      message: `componentId and objectApiName name different objects (${[...objectIds].join(', ')}); pass one`,
+      path: 'componentId',
+    });
+  }
+  const componentId = [...objectIds][0] as ComponentId;
+
+  // Fold the `userContext.profileApiName` alias into `profileId` so the whole
+  // cascade (coerceUserContext, the object-CRUD precondition, PermissionGrant,
+  // SystemPermission) reads it. Both present that disagree is `invalid-query`.
+  const uc0 = input.userContext;
+  let resolvedProfileId: string | undefined = uc0.profileId;
+  if (uc0.profileApiName !== undefined) {
+    const aliasProfileId = coercePrefix(uc0.profileApiName, [PROFILE_PREFIX]);
+    if (
+      uc0.profileId !== undefined &&
+      coercePrefix(uc0.profileId, [PROFILE_PREFIX]) !== aliasProfileId
+    ) {
+      return err({
+        kind: 'invalid-query',
+        message:
+          'userContext.profileId and userContext.profileApiName name different profiles; pass one',
+        path: 'userContext.profileApiName',
+      });
+    }
+    resolvedProfileId = aliasProfileId;
+  }
+  const rawUserContext: UserContext =
+    resolvedProfileId !== undefined
+      ? { ...uc0, profileId: resolvedProfileId }
+      : uc0;
+
+  // Echo the scope actually applied after alias resolution (never assume a
+  // stripped alias took effect). `profile` is the coerced canonical profile id.
+  const appliedScope: WhyCantUserSeeRecordOutput['appliedScope'] = {
+    object: componentId,
+    profile:
+      rawUserContext.profileId !== undefined
+        ? coercePrefix(rawUserContext.profileId, [PROFILE_PREFIX])
+        : null,
+  };
 
   // Resolve the target node up front. A nonexistent `componentId`
   // previously surfaced as a single OWD step with `verdict: 'unknown'`
@@ -2377,14 +2472,14 @@ export const whyCantUserSeeRecordHandler = async (
   // object Create permission (or Modify-All) AND, if the object has record
   // types, a visible record type. Short-circuit the whole sharing cascade.
   if (level === 'create') {
-    const userContext = await coerceUserContext(ctx, input.userContext);
+    const userContext = await coerceUserContext(ctx, rawUserContext);
     // R7-W4: muting-aware object-Create gate, computed from the RAW context so
     // the PermissionSetGroup boundary survives (only when a profile / permission
     // set was supplied — a role/group-only context cannot decide object perms).
     const createProfileOrPermSet =
-      input.userContext.profileId !== undefined ||
-      (input.userContext.permissionSetIds !== undefined &&
-        input.userContext.permissionSetIds.length > 0);
+      rawUserContext.profileId !== undefined ||
+      (rawUserContext.permissionSetIds !== undefined &&
+        rawUserContext.permissionSetIds.length > 0);
     let createNetAccess: MutedObjectAccess | null = null;
     if (createProfileOrPermSet) {
       const objApi = objectApiNameOf(nodeResult.value, componentId);
@@ -2392,7 +2487,7 @@ export const whyCantUserSeeRecordHandler = async (
         ctx,
         componentId,
         objApi,
-        input.userContext,
+        rawUserContext,
         'create',
       );
       if (!naResult.ok) {
@@ -2417,6 +2512,7 @@ export const whyCantUserSeeRecordHandler = async (
       data: {
         verdict: createResult.value.verdict,
         reasoning: createResult.value.reasoning,
+        appliedScope,
         ...(createResult.value.mutedBy.length > 0
           ? { mutedBy: createResult.value.mutedBy }
           : {}),
@@ -2445,6 +2541,7 @@ export const whyCantUserSeeRecordHandler = async (
       data: {
         verdict: owdStep.verdict,
         reasoning: [owdStep],
+        appliedScope,
         boundaryNote: LIVE_ACCESS_RESOLVER_NOTE,
       },
       vaultState: {
@@ -2459,7 +2556,7 @@ export const whyCantUserSeeRecordHandler = async (
   // OWD-unknown short-circuit so a null/unrecognised OWD skips the group graph
   // lookups. Verdict-preserving (see coerceUserContext): the coerced verdict
   // equals the equivalent prefixed-id verdict.
-  const userContext = await coerceUserContext(ctx, input.userContext);
+  const userContext = await coerceUserContext(ctx, rawUserContext);
 
   // Plane A — the operation-aware OBJECT-CRUD PRECONDITION. To ACT on a record
   // the user needs object CRUD for THIS OPERATION (from the profile UNION any
@@ -2506,7 +2603,7 @@ export const whyCantUserSeeRecordHandler = async (
       ctx,
       componentId,
       objectApiName,
-      input.userContext,
+      rawUserContext,
       level,
     );
     if (!netAccessResult.ok) {
@@ -2684,6 +2781,7 @@ export const whyCantUserSeeRecordHandler = async (
     data: {
       verdict: finalVerdict,
       reasoning,
+      appliedScope,
       ...mutedByField,
       ...(objectCrudHardDenyReason !== null
         ? {

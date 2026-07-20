@@ -15,7 +15,7 @@
  *   - **`triggerObject` filter**: when set, further narrows line matches
  *     (or status summary) to flow files that contain a
  *     `<object>` element whose value matches the supplied API name (e.g.
- *     `hed__Example_Course__c`). Used to enumerate active RTFs on a
+ *     `ns__Widget__c`). Used to enumerate active RTFs on a
  *     given SObject.
  */
 
@@ -70,7 +70,7 @@ export const searchFlowMetadataInputSchema = z.object({
   /**
    * CR-06: when set, restrict results (and summary) to flow files that
    * declare `<object>THIS_API_NAME</object>` in their XML — i.e. record-
-   * triggered flows on the given SObject. Example: `hed__Example_Course__c`.
+   * triggered flows on the given SObject. Example: `ns__Widget__c`.
    */
   triggerObject: z.string().min(1).optional(),
 }).refine(

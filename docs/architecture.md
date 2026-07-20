@@ -38,6 +38,64 @@ integration tier (named credentials, external services and data sources,
 outbound messages, auth providers), CPQ, and OmniStudio. Documentation
 generators and what-if simulations sit on top of that graph.
 
+### Two graphs: the org vault and the Concept Model
+
+There is a second, much smaller graph that never touches your org. The
+**Concept Model** is a curated, org-independent set of **94** reasoning
+concepts and **143** rules encoding general Salesforce truth — save-order
+phases, relationship semantics, sharing posture, code-shape signals. It holds
+**no org data**: no canonical ids, no counts, nothing org-specific. The org
+enters reasoning *only* through the grounded slice passed to the engine at query
+time.
+
+`sfi.interpret` joins the two at query time — the grounded org slice (Graph A)
+against the org-independent Concept Model (Graph B):
+
+```
+   Graph A · org vault slice          Graph B · Concept Model
+   (grounded, org-specific)           (org-independent, in the package)
+     CustomObject:Account               94 concepts / 143 rules
+     Flow:Account_Set_Defaults          save-order · relationships ·
+     Flow:Account_Enrich_Billing        sharing · code-shape
+     CustomField:Invoice__c.Total__c    NO org data (no ids, no counts)
+              │                                    │
+              └──────────────┬─────────────────────┘
+                             ▼
+                       sfi.interpret
+              deterministic, offline JOIN — no LLM, no live org read
+                             │
+                             ▼
+         cited, confidence-tiered structural-implication claims
+         groundedIn = [exact matched ids]      (no citation ⇒ no claim)
+         claim confidence = weakest(rule ceiling, grounding edges)
+```
+
+Given one component, the tool assembles a minimal slice of the org vault graph
+around it (Graph A), fires the applicable concept rules (Graph B), and returns
+**cited, confidence-tiered structural-implication claims** — "this master-detail
+parent cascade-deletes its children", "two active before-save flows on this
+object run in an undefined order", "this `@AuraEnabled` class is an entry point
+where Apex does not auto-enforce FLS/CRUD". It runs offline with **no LLM and no
+live org read**.
+
+Two honesty invariants ride on every claim, plus a **second confidence axis**:
+
+- **No citation, no claim.** Each claim carries a `groundedIn` list of the exact
+  ids it matched; a claim the engine cannot ground is never emitted. An empty
+  interpretation list means "no concept rule fired for this component," never
+  "nothing depends on it."
+- **Static shape, not proof.** Governor and security concepts name a code or
+  metadata *shape* (a cascade, an undefined order, an unenforced surface), not a
+  proven runtime limit breach or vulnerability.
+- **Claim confidence is a second axis, distinct from edge confidence.** It
+  reuses the `declared | parsed | heuristic` words but is *computed* — the
+  weakest of the concept rule's ceiling and the grounding edges the claim matched
+  (`unknown` for an absence-shaped claim under non-complete coverage) — so it can
+  never exceed the weakest grounding edge (see §6).
+
+This is retrieval's complement: retrieval reports what exists; the join reports
+what the shape *implies*. See [ADR-008](./decisions/ADR-008-deterministic-concept-model-reasoning.md).
+
 ## 2. What it does NOT do
 
 Be honest about the boundary. SfIntelligence is a read tool with clear,
@@ -218,6 +276,14 @@ API name up front:
 | `sfi.search_flow_metadata`           | regex or literal query                               | matched Flow XML files with line snippets               | Grep across raw Flow XML under `org-kb/source/`.                        |
 | `sfi.get_manifest`                   | (none)                                               | the contents of `org-kb/meta/manifest.json`             | Inspect refresh time, hashes, component counts, version.                |
 | `sfi.health_check`                   | (none)                                               | `{ok|stale|missing}` plus reason                        | Diagnostic. Tells the caller whether the vault is usable right now.     |
+| `sfi.interpret`                      | canonical component ID, optional `concepts` / `ruleIds` filters | cited structural-implication claims (`interpretations[]` with `groundedIn` + claim confidence) + `trust` block | Join the Concept Model against the component's vault slice — deterministic, offline reasoning (no LLM, no live read). |
+
+`sfi.interpret` is the reasoning tool: it fires the curated Concept Model
+(94 concepts / 143 rules — see §1) against a minimal graph slice assembled around
+the target component. Each returned claim cites the exact ids it matched, and an
+empty list means "no rule fired," not "nothing depends on it." Its per-claim
+confidence is a *distinct* axis from per-edge confidence and can never exceed the
+weakest grounding edge (§6).
 
 Every **offline** tool returns deterministic results for a given vault state.
 If you call `sfi.search_components` twice in a row without refreshing in
@@ -285,6 +351,19 @@ The honesty boundary from §2 applies here: edges come from static analysis of
 metadata and source. Dynamic SOQL, reflective field access, and runtime
 metadata lookups are invisible, so an empty edge set means "no static
 evidence", not "definitely unused".
+
+### Edge confidence vs claim confidence
+
+The `declared | parsed | heuristic` tier above is **edge confidence** — it grades
+a single *relationship*. `sfi.interpret` (§1, §5) adds a second, separate axis:
+**claim confidence**, grading a *reasoning claim* that rests on one or more edges.
+It reuses the same three words, but it is **computed, not read off one edge**: a
+claim's confidence is the *weakest* of the concept rule's own ceiling and every
+grounding edge the claim matched, so **claim confidence can never exceed edge
+confidence**. A claim grounded on a `heuristic` edge is at best `heuristic`, even
+if the rule would otherwise allow more; an absence-shaped claim under
+non-complete coverage reads `unknown`. Do not conflate the two axes when
+rendering a claim.
 
 ## 7. Determinism guarantees
 

@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 
 import type {
+  ComponentType,
   Edge,
   ExtractionResult,
   ExtractorError,
@@ -32,6 +33,28 @@ const TAB_VARIANTS = [
 ] as const;
 
 type TabType = (typeof TAB_VARIANTS)[number]['tabType'];
+
+/**
+ * CUSTOM-TAB-TARGET-UNGRAPHED: the destination ComponentType a tab's
+ * `targetName` resolves to, keyed by `tabType`. A page/flexiPage/lwc/aura tab
+ * opens a specific in-org UI component; the extractor must emit a
+ * `CustomTab -> {target}` `references` edge so that component is not read as
+ * unused (`unused_components` treats a no-inbound-edge VF/Lightning page as
+ * deletable) and "what does this tab open?" can hop tab -> page on the graph.
+ *
+ * `object` and `url` map to `null`: an object-variant tab already carries its
+ * object relationship through the `parentOf` edge (and its name-matches-object
+ * convention), and a `url` (web) tab has no in-org destination component. Both
+ * carry `targetName: null` from {@link detectVariant} anyway.
+ */
+const TAB_TARGET_TYPE: Readonly<Record<TabType, ComponentType | null>> = {
+  page: 'VisualforcePage',
+  flexiPage: 'FlexiPage',
+  lwc: 'LightningComponentBundle',
+  aura: 'AuraDefinitionBundle',
+  object: null,
+  url: null,
+};
 
 /**
  * Unwrap a possibly-array single-occurrence XML child. fast-xml-parser
@@ -189,13 +212,19 @@ const detectVariant = (
  *
  * Reads the file, parses it as XML, validates the `<CustomTab>` root per
  * the vendored `CustomTab.md` spec, and returns an `ExtractionResult`
- * containing one `Node` of type `'CustomTab'` and at most one `parentOf`
- * edge — emitted only for object-variant tabs whose API name ends in
- * `__c` (the heuristic for "the underlying CustomObject is a custom
- * object the org actually owns, not a standard object the platform
- * provides"). The `belongsToApp` edge is **not** emitted by this
- * extractor; the CustomApplication extractor owns that direction per
- * `CustomApplication.md`.
+ * containing one `Node` of type `'CustomTab'` and its incident edges:
+ * - at most one `parentOf` edge (CustomObject -> CustomTab), emitted only
+ *   for object-variant tabs whose API name ends in `__c` (the heuristic for
+ *   "the underlying CustomObject is a custom object the org actually owns,
+ *   not a standard object the platform provides"); and
+ * - one `references` edge (CustomTab -> target) for a page / flexiPage / lwc
+ *   / aura variant, pointing at the `VisualforcePage` / `FlexiPage` /
+ *   `LightningComponentBundle` / `AuraDefinitionBundle` its `targetName`
+ *   opens (CUSTOM-TAB-TARGET-UNGRAPHED — without it a tabbed page read as
+ *   unused). `url` (web) tabs carry no in-org destination, so no target edge.
+ *
+ * The `belongsToApp` edge is **not** emitted by this extractor; the
+ * CustomApplication extractor owns that direction per `CustomApplication.md`.
  *
  * The canonical ID is `CustomTab:{TabName}` where `{TabName}` derives
  * from the filename, not from any XML element. For object-variant tabs,
@@ -283,25 +312,45 @@ export const extractCustomTab = async (
     },
   };
 
-  // Per the task spec: emit a `parentOf` edge from CustomObject -> CustomTab
-  // only when the tab is an object variant **and** the TabName ends in
-  // `__c` (the heuristic for "real custom object, not a standard one").
-  // Standard-object tabs (e.g., a tab named `Account`) produce no edge —
-  // the platform owns those names and emitting a dangling edge from a node
-  // the extractor never produces would clutter the graph.
-  const edges: Edge[] =
-    tabType === 'object' && apiName.endsWith('__c')
-      ? [
-          {
-            fromId: `CustomObject:${apiName}`,
-            toId: nodeId,
-            edgeType: 'parentOf',
-            confidence: 'declared',
-            source: EXTRACTOR_SOURCE,
-            properties: {},
-          },
-        ]
-      : [];
+  const edges: Edge[] = [];
+
+  // Emit a `parentOf` edge from CustomObject -> CustomTab only when the tab is
+  // an object variant **and** the TabName ends in `__c` (the heuristic for
+  // "real custom object, not a standard one"). Standard-object tabs (e.g., a
+  // tab named `Account`) produce no edge — the platform owns those names and
+  // emitting a dangling edge from a node the extractor never produces would
+  // clutter the graph.
+  if (tabType === 'object' && apiName.endsWith('__c')) {
+    edges.push({
+      fromId: `CustomObject:${apiName}`,
+      toId: nodeId,
+      edgeType: 'parentOf',
+      confidence: 'declared',
+      source: EXTRACTOR_SOURCE,
+      properties: {},
+    });
+  }
+
+  // CUSTOM-TAB-TARGET-UNGRAPHED: emit a `references` edge from the tab to the
+  // UI component its `targetName` opens (a Visualforce page, Lightning page,
+  // LWC, or Aura bundle). `targetName` is null for object / url variants (see
+  // {@link detectVariant}) and `TAB_TARGET_TYPE` is null for those tabTypes, so
+  // this fires only for the four component-target variants. Declared confidence
+  // — `<page>` / `<flexiPage>` / `<lwcComponent>` / `<auraComponent>` names the
+  // destination directly. The target node may not be in the vault (dangling
+  // references are tolerated); a resolvable target is now excluded from
+  // `unused_components` because it carries this inbound edge.
+  const targetType = TAB_TARGET_TYPE[tabType];
+  if (targetType !== null && targetName !== null) {
+    edges.push({
+      fromId: nodeId,
+      toId: `${targetType}:${targetName}`,
+      edgeType: 'references',
+      confidence: 'declared',
+      source: EXTRACTOR_SOURCE,
+      properties: { referenceKind: 'tabTarget', tabType },
+    });
+  }
 
   return ok({ nodes: [node], edges });
 };

@@ -117,20 +117,47 @@ const COMPONENT_TYPES = [
 ] as const satisfies readonly ComponentType[];
 
 /**
+ * Natural "since my last refresh" tokens a host reaches for when the router
+ * ranked `changed_since` for a refresh-relative ask
+ * (CHANGED-SINCE-REJECTS-LAST-REFRESH-TOKEN). Each resolves to the vault's
+ * `manifest.refreshedAt` — the moment this vault was built — so the answer is
+ * grounded in a real timestamp rather than hard-failing on ISO validation.
+ *
+ * The separator is normalised (hyphen ≡ underscore ≡ space) so `last-refresh`,
+ * `last_refresh`, and `last refresh` are all accepted — the residual the
+ * hyphen-only fix left open.
+ */
+const REFRESH_SINCE_TOKENS: ReadonlySet<string> = new Set([
+  'last-refresh',
+  'lastrefresh',
+  'refresh',
+]);
+
+/**
+ * Whether `raw` is a refresh-relative `since` token. Case-insensitive, and any
+ * run of hyphen / underscore / whitespace collapses to a single `-` so the
+ * hyphen, underscore, and SPACE forms (`last refresh`) all resolve.
+ */
+const isRefreshToken = (raw: string): boolean =>
+  REFRESH_SINCE_TOKENS.has(raw.trim().toLowerCase().replace(/[\s_-]+/g, '-'));
+
+/**
  * Zod schema for the `sfi.changed_since` tool input.
  *
- *   - `since`: required ISO 8601 timestamp (date-only `YYYY-MM-DD` or
- *     full `YYYY-MM-DDTHH:mm:ssZ`). The validator accepts any string
- *     that parses as a date; the runtime normalises non-Z-suffixed
- *     inputs to UTC midnight so the boundary is unambiguous.
+ *   - `since`: required — an ISO 8601 timestamp (date-only `YYYY-MM-DD` or
+ *     full `YYYY-MM-DDTHH:mm:ssZ`), OR the natural token `last-refresh` /
+ *     `last refresh` / `last_refresh` / `refresh` (separator-insensitive) which
+ *     the handler resolves to the vault's `refreshedAt`. The runtime normalises
+ *     non-Z-suffixed inputs to UTC so the boundary is unambiguous; the resolved
+ *     boundary is echoed back as `since`.
  *   - `types`: optional array; when omitted, the handler scans every
  *     ComponentType in the v1.x contract.
  *   - `limit`: optional integer in `[1, 500]`. Defaults to 100.
  */
 export const changedSinceInputSchema = z.object({
   since: z.string().min(1).refine(
-    (s) => !Number.isNaN(Date.parse(s)),
-    { message: 'since must be a valid ISO 8601 date string' },
+    (s) => isRefreshToken(s) || !Number.isNaN(Date.parse(s)),
+    { message: 'since must be a valid ISO 8601 date string, or the token "last-refresh"' },
   ),
   types: z.array(z.enum(COMPONENT_TYPES)).optional(),
   limit: z.number().int().min(1).max(CHANGED_SINCE_MAX_LIMIT).optional(),
@@ -285,7 +312,23 @@ export const changedSinceHandler = async (
 ): Promise<Result<McpResponse<ChangedSinceOutput>, McpError>> => {
   const limit = input.limit ?? CHANGED_SINCE_DEFAULT_LIMIT;
   const types = input.types ?? COMPONENT_TYPES;
-  const since = normalizeSince(input.since);
+
+  // CHANGED-SINCE-REJECTS-LAST-REFRESH-TOKEN: resolve a natural "last refresh"
+  // token to the vault's refresh timestamp. The resolution is transparent —
+  // `since` in the output echoes the resolved boundary, so passing the token is
+  // byte-identical to passing that ISO instant. (For the component TYPES the
+  // refresh itself pulled in, use `what_changed_since_refresh`.)
+  const rawSince = isRefreshToken(input.since)
+    ? ctx.manifest.refreshedAt
+    : input.since;
+  if (Number.isNaN(Date.parse(rawSince))) {
+    return err({
+      kind: 'invalid-query',
+      message: `cannot anchor "${input.since}" — the vault manifest has no valid refreshedAt; pass an explicit ISO 8601 date`,
+      path: 'since',
+    });
+  }
+  const since = normalizeSince(rawSince);
 
   const matched: ChangedComponent[] = [];
   let unenrichedCount = 0;

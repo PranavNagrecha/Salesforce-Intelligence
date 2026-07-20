@@ -59,6 +59,7 @@ import {
   buildEnumerationCoverageCaveatFor,
   type CoverageCaveat,
 } from './coverage-trust.js';
+import { resolveExistingObjectScope } from './input-aliases.js';
 import {
   argsFingerprint,
   decodeCursor,
@@ -113,6 +114,16 @@ export const processBuilderMigrationCandidatesInputSchema = z.object({
   // truncated page's `nextCursor`; carries the resume offset + which list it
   // advances. Omit = today's behavior.
   cursor: z.string().min(1).optional(),
+  // PROCESS-BUILDER-MIGRATION-IGNORES-OBJECT-SCOPE: honor an object scope
+  // instead of silently returning the whole-org candidate inventory. Every
+  // candidate is a WorkflowRule / ApprovalProcess (parented to a CustomObject)
+  // or a Process Builder, so the inventory CAN be narrowed to one object: with a
+  // scope each list keeps only candidates whose `parentObjectId` matches, and
+  // `appliedScope` is echoed. Accepts the interchangeable object identifiers.
+  objectApiName: z.string().min(1).optional(),
+  object: z.string().min(1).optional(),
+  objectId: z.string().min(1).optional(),
+  componentId: z.string().min(1).optional(),
 });
 
 export type ProcessBuilderMigrationCandidatesInput = z.infer<
@@ -173,6 +184,18 @@ export interface ApprovalProcessCandidate {
 
 /** Output payload. */
 export interface ProcessBuilderMigrationCandidatesOutput {
+  /**
+   * Present ONLY on an object-scoped call
+   * (PROCESS-BUILDER-MIGRATION-IGNORES-OBJECT-SCOPE) — echoes the object each
+   * list was narrowed to (candidates whose `parentObjectId` is that object) so a
+   * host never reads a scoped answer as org-wide. Absent on the bare call,
+   * keeping that response byte-identical. `object` is the canonical
+   * `CustomObject:` id; `mode` is always `component` when present.
+   */
+  readonly appliedScope?: {
+    readonly object: string;
+    readonly mode: 'component';
+  };
   readonly processBuilders: readonly ProcessBuilderCandidate[];
   readonly workflowRules: readonly WorkflowRuleCandidate[];
   readonly approvalProcesses: readonly ApprovalProcessCandidate[];
@@ -425,6 +448,14 @@ export const processBuilderMigrationCandidatesHandler = async (
   const activeOnly = input.activeOnly ?? true;
   const sortBy = input.sortBy ?? 'complexity';
 
+  // PROCESS-BUILDER-MIGRATION-IGNORES-OBJECT-SCOPE: resolve the optional object
+  // scope (and verify it exists). `null` = bare org-wide call (byte-identical);
+  // a resolved scope narrows each list to candidates on that object; an
+  // unresolvable / absent object → `invalid-query`.
+  const scopeResult = await resolveExistingObjectScope(ctx.graph, input);
+  if (!scopeResult.ok) return err(scopeResult.error);
+  const scope = scopeResult.value;
+
   const flowsRes = await listNodesByType(ctx.graph, 'Flow', {
     limit: LIST_PAGE_SIZE,
   });
@@ -586,9 +617,18 @@ export const processBuilderMigrationCandidatesHandler = async (
     }
   }
 
-  const sortedPbs = sortFor(processBuilders, sortBy);
-  const sortedWrs = sortFor(workflowRules, sortBy);
-  const sortedAps = sortFor(approvalProcesses, sortBy);
+  // Object-scoped: keep only candidates PARENTED to the scoped object
+  // (`parentObjectId` is a `CustomObject:` id for WorkflowRule / ApprovalProcess,
+  // and for a Process Builder Flow when the vault captured it; null otherwise, so
+  // an unattributed candidate is correctly excluded under scope). Bare: no filter.
+  const onScope = <T extends { parentObjectId: ComponentId | null }>(
+    arr: readonly T[],
+  ): readonly T[] =>
+    scope === null ? arr : arr.filter((c) => c.parentObjectId === scope.componentId);
+
+  const sortedPbs = sortFor(onScope(processBuilders), sortBy);
+  const sortedWrs = sortFor(onScope(workflowRules), sortBy);
+  const sortedAps = sortFor(onScope(approvalProcesses), sortBy);
 
   // KEEP pre-CR-22 `truncated` semantics byte-for-byte (any list over limit);
   // the cursor block is layered on top, emitted only when the designated list
@@ -634,6 +674,12 @@ export const processBuilderMigrationCandidatesHandler = async (
     includeApprovalProcesses,
     activeOnly,
     sortBy,
+    // Bind the cursor to the object scope so a token minted for a scoped page
+    // can never resume against a different (or org-wide) result. The key is
+    // added ONLY when scoped — a bare call omits it so its fingerprint (and the
+    // nextCursor it mints) stays byte-identical to pre-fix (argsFingerprint
+    // skips undefined but NOT null, so a spread — not `?? null` — is required).
+    ...(scope !== null ? { object: scope.componentId } : {}),
   });
   const sections: readonly PageableSection<
     ProcessBuilderCandidate | WorkflowRuleCandidate | ApprovalProcessCandidate
@@ -699,6 +745,11 @@ export const processBuilderMigrationCandidatesHandler = async (
 
   return ok({
     data: {
+      // appliedScope FIRST + only when scoped, so a bare call omits the whole
+      // block and its serialized response stays byte-identical to pre-fix.
+      ...(scope !== null
+        ? { appliedScope: { object: scope.componentId, mode: 'component' as const } }
+        : {}),
       processBuilders: pbPage,
       workflowRules: wrPage,
       approvalProcesses: apPage,

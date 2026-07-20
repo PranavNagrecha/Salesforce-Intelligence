@@ -25,6 +25,7 @@ export type {
   FrontendComponentRef,
   FrontendDialect,
   FrontendFieldAccess,
+  FrontendFieldAccessOrigin,
   FrontendResourceRef,
   FrontendScannerError,
   FrontendScannerErrorKind,

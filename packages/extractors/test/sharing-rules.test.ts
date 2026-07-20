@@ -449,7 +449,111 @@ describe('extractSharingRules', () => {
         await rm(dir, { recursive: true, force: true });
       }
     });
+  });
 
+  // SHARING-RULE-OMITS-CRITERIA-ITEMS: the extractor set `criteriaItemCount`
+  // but dropped the field/operation/value payload, so "which records does this
+  // rule share?" was unanswerable from the node. Assert the criteria items are
+  // emitted verbatim (generic synthetic predicates — no org identifiers).
+  describe('criteria items payload (SHARING-RULE-OMITS-CRITERIA-ITEMS)', () => {
+    it('emits criteriaItems[] with field/operation/value for a multi-criteria rule', async () => {
+      const xml = `<?xml version="1.0"?>
+<SharingRules xmlns="http://soap.sforce.com/2006/04/metadata">
+  <sharingCriteriaRules>
+    <fullName>Share_By_Type</fullName>
+    <accessLevel>Read</accessLevel>
+    <sharedTo><roleAndSubordinates>Sales</roleAndSubordinates></sharedTo>
+    <booleanFilter>1 AND 2</booleanFilter>
+    <criteriaItems>
+      <field>RecordTypeId</field>
+      <operation>equals</operation>
+      <value>Partner</value>
+    </criteriaItems>
+    <criteriaItems>
+      <field>Account.Type</field>
+      <operation>notEqual</operation>
+      <value>Prospect</value>
+    </criteriaItems>
+  </sharingCriteriaRules>
+</SharingRules>`;
+      const { dir, path } = await writeTempXml(
+        'Account.sharingRules-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractSharingRules(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0]!;
+        expect(node.properties['criteriaItemCount']).toBe(2);
+        expect(node.properties['criteriaItems']).toEqual([
+          { field: 'RecordTypeId', operation: 'equals', value: 'Partner' },
+          { field: 'Account.Type', operation: 'notEqual', value: 'Prospect' },
+        ]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('sets value null when <value> is omitted (null/not-null operations)', async () => {
+      const xml = `<?xml version="1.0"?>
+<SharingRules xmlns="http://soap.sforce.com/2006/04/metadata">
+  <sharingCriteriaRules>
+    <fullName>Share_Non_Null</fullName>
+    <accessLevel>Read</accessLevel>
+    <sharedTo><group>G</group></sharedTo>
+    <criteriaItems>
+      <field>Custom_Field__c</field>
+      <operation>notEqual</operation>
+    </criteriaItems>
+  </sharingCriteriaRules>
+</SharingRules>`;
+      const { dir, path } = await writeTempXml(
+        'Account.sharingRules-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractSharingRules(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0]!;
+        expect(node.properties['criteriaItems']).toEqual([
+          { field: 'Custom_Field__c', operation: 'notEqual', value: null },
+        ]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits an empty criteriaItems[] for an owner rule (no predicate)', async () => {
+      const xml = `<?xml version="1.0"?>
+<SharingRules xmlns="http://soap.sforce.com/2006/04/metadata">
+  <sharingOwnerRules>
+    <fullName>Owner_Share</fullName>
+    <accessLevel>Edit</accessLevel>
+    <sharedFrom><group>Src</group></sharedFrom>
+    <sharedTo><group>Dst</group></sharedTo>
+  </sharingOwnerRules>
+</SharingRules>`;
+      const { dir, path } = await writeTempXml(
+        'Account.sharingRules-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractSharingRules(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0]!;
+        expect(node.properties['ruleType']).toBe('owner');
+        expect(node.properties['criteriaItems']).toEqual([]);
+        expect(node.properties['criteriaItemCount']).toBe(0);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('guest & territory rule kinds — value/back-compat', () => {
     it('back-compat: a self-closing <guestUser/> still resolves to the synthetic Group:GuestUser', async () => {
       // A standard criteria rule whose <sharedTo> is a self-closing <guestUser/>
       // (the shared VARIANT_TABLE entry) must STILL collapse to Group:GuestUser —

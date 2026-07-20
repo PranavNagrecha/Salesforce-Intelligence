@@ -21,7 +21,7 @@
  */
 
 import type { McpError, McpResponse, Node, TrustSummary } from '@sf-intelligence/contracts';
-import { ok, type Result } from '@sf-intelligence/core';
+import { err, ok, type Result } from '@sf-intelligence/core';
 import { listNodesByType } from '@sf-intelligence/graph';
 import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
@@ -30,12 +30,23 @@ import { mdTable } from '../answer-render.js';
 import type { Context } from '../server.js';
 
 import { offlineTrust } from './coverage-trust.js';
+import { resolveExistingObjectScope } from './input-aliases.js';
 
 const PAGE = 500;
 const MAX_PAGES = 40;
 
 export const flowFaultAuditInputSchema = z.object({
   limit: z.number().int().min(1).max(500).optional(),
+  // FLOW-FAULT-AUDIT-IGNORES-OBJECT-SCOPE: honor an object scope instead of
+  // silently stripping it and returning the org-wide fault inventory. A
+  // record-triggered Flow runs ON an object (`properties.triggerObject`), so the
+  // audit CAN attribute its findings to it: with a scope the sweep narrows to
+  // flows on that object and echoes `appliedScope`. Accepts the interchangeable
+  // object identifiers a host/router reaches for.
+  objectApiName: z.string().min(1).optional(),
+  object: z.string().min(1).optional(),
+  objectId: z.string().min(1).optional(),
+  componentId: z.string().min(1).optional(),
 });
 export type FlowFaultAuditInput = z.infer<typeof flowFaultAuditInputSchema>;
 
@@ -57,6 +68,18 @@ export interface FlowFaultEntry {
   readonly faultSurface: FaultSurface;
 }
 export interface FlowFaultAuditOutput {
+  /**
+   * Present ONLY on an object-scoped call (FLOW-FAULT-AUDIT-IGNORES-OBJECT-SCOPE)
+   * — echoes the object the sweep was narrowed to (record-triggered flows whose
+   * `triggerObject` is that object) so a host never reads a scoped answer as
+   * org-wide. Absent on the bare call, keeping that response byte-identical.
+   * `object` is the canonical `CustomObject:` id; `mode` is always `component`
+   * when present (a bare call omits the whole block, i.e. the `all` reading).
+   */
+  readonly appliedScope?: {
+    readonly object: string;
+    readonly mode: 'component';
+  };
   readonly propertyAvailable: boolean;
   readonly totalFlows: number;
   readonly flowsWithUnhandledFaults: number;
@@ -113,6 +136,15 @@ export const flowFaultAuditHandler = async (
   input: FlowFaultAuditInput,
 ): Promise<Result<McpResponse<FlowFaultAuditOutput>, McpError>> => {
   const limit = input.limit ?? 100;
+
+  // FLOW-FAULT-AUDIT-IGNORES-OBJECT-SCOPE: resolve the optional object scope
+  // (and verify it exists) BEFORE scanning. `null` = bare org-wide call
+  // (byte-identical); a resolved scope narrows the sweep to record-triggered
+  // flows on that object; an unresolvable / absent object → `invalid-query`.
+  const scopeResult = await resolveExistingObjectScope(ctx.graph, input);
+  if (!scopeResult.ok) return err(scopeResult.error);
+  const scope = scopeResult.value;
+
   const flows: Node[] = [];
   let offset = 0;
   // scanTruncated: the last allowed page came back full, so flows beyond the
@@ -121,7 +153,16 @@ export const flowFaultAuditHandler = async (
   for (let i = 0; i < MAX_PAGES; i += 1) {
     const r = await listNodesByType(ctx.graph, 'Flow', { limit: PAGE, offset });
     if (!r.ok) break;
-    flows.push(...r.value);
+    // Object-scoped: keep only flows that RUN ON the scoped object — a
+    // record-triggered flow's `triggerObject` (bare api name). Screen /
+    // autolaunched / scheduled flows have no `triggerObject` and are correctly
+    // excluded (they don't run on a single object). Bare call: no filter.
+    for (const flow of r.value) {
+      if (scope !== null && flow.properties['triggerObject'] !== scope.object) {
+        continue;
+      }
+      flows.push(flow);
+    }
     if (r.value.length < PAGE) break;
     offset += PAGE;
     if (i === MAX_PAGES - 1) scanTruncated = true;
@@ -178,6 +219,11 @@ export const flowFaultAuditHandler = async (
 
   return ok({
     data: {
+      // appliedScope FIRST + only when scoped, so a bare call omits the whole
+      // block and its serialized response stays byte-identical to pre-fix.
+      ...(scope !== null
+        ? { appliedScope: { object: scope.componentId, mode: 'component' as const } }
+        : {}),
       propertyAvailable,
       totalFlows: flows.length,
       flowsWithUnhandledFaults: entries.length,

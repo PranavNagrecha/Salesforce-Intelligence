@@ -78,6 +78,36 @@ export const guestProfileNameForSite = (siteLabel: string): string =>
   `${siteLabel} Profile`;
 
 /**
+ * SITE-INDEXPAGE-AND-TEMPLATE-UNGRAPHED — the CustomSite metadata elements
+ * that each name a `VisualforcePage` by API name. `<indexPage>` is the site's
+ * entry point and `<siteTemplate>` its wrapper template; the remaining
+ * elements are the standard error / special pages a site can override. A VF
+ * page referenced ONLY as a site page carries no other inbound edge, so
+ * without an edge here it reads as orphaned and `unused_components` /
+ * `review_change` flags it deletable — deleting a live site's index or
+ * template takes down the community entry point.
+ *
+ * Every element in this set is a VisualforcePage reference in the CustomSite
+ * metadata type; `<favoriteIcon>` (a StaticResource, handled separately) and
+ * non-page elements (`<subdomain>`, `<siteAdmin>`, …) are deliberately absent.
+ */
+const SITE_PAGE_ELEMENTS = [
+  'indexPage',
+  'siteTemplate',
+  'changePasswordPage',
+  'forgotPasswordPage',
+  'fileNotFoundPage',
+  'inMaintenancePage',
+  'inactiveIndexPage',
+  'myProfilePage',
+  'selfRegPage',
+  'serverIsDownPage',
+  'authorizationRequiredPage',
+  'bandwidthExceededPage',
+  'genericErrorPage',
+] as const;
+
+/**
  * Extract a `CustomSite` Node from a single Salesforce `*.site-meta.xml`
  * file under `sites/` (the site container that fronts a Force.com site or an
  * Experience Cloud community — NOT the `experiences/` ExperienceBundle, which
@@ -99,6 +129,13 @@ export const guestProfileNameForSite = (siteLabel: string): string =>
  * target is dangling-by-design when the guest profile was not retrieved into
  * the vault — `guest_exposure_report` discloses that rather than treating an
  * absent profile as "no exposure".
+ *
+ * Emits ONE DECLARED `references` edge to the site's favicon StaticResource
+ * (`StaticResource:{favoriteIcon}`, `properties.via: 'favoriteIcon'`) when
+ * `<favoriteIcon>` is present — SITE-FAVICON-STATICRESOURCE-UNGRAPHED. Unlike
+ * the guest-profile edge this is DECLARED (the XML names the resource
+ * directly). Without it a resource referenced only by a site's favicon reads
+ * as unused and `unused_components` flags it deletable.
  *
  * Error cases mirror the other declarative extractors: `file-not-found`,
  * `parse-error`, `malformed-input` (root not `<CustomSite>`).
@@ -143,6 +180,12 @@ export const extractCustomSite = async (
   // api name when the label is absent so a bare site still resolves a guess.
   const siteLabel = masterLabel ?? apiName;
   const guestProfileName = guestProfileNameForSite(siteLabel);
+  // SITE-FAVICON-STATICRESOURCE-UNGRAPHED: `<favoriteIcon>` names a
+  // StaticResource (the site's browser favicon). A resource referenced ONLY by
+  // a site's favicon carries no other inbound edge, so without this edge it
+  // reads as orphaned and `unused_components` flags it deletable — deleting it
+  // breaks the live site favicon. Null when absent (never a dangling edge).
+  const favoriteIcon = optionalString(rootObj, 'favoriteIcon');
 
   const node: Node = {
     id: `${ROOT_ELEMENT}:${apiName}`,
@@ -164,6 +207,9 @@ export const extractCustomSite = async (
       // convention without re-deriving it (kept in lock-step with the edge).
       guestProfileName,
       guestProfileConvention: 'heuristic',
+      // SITE-FAVICON-STATICRESOURCE-UNGRAPHED: the favicon static-resource name
+      // surfaced directly (null when absent), kept in lock-step with the edge.
+      favoriteIcon,
     },
   };
 
@@ -181,6 +227,38 @@ export const extractCustomSite = async (
       },
     },
   ];
+
+  // SITE-FAVICON-STATICRESOURCE-UNGRAPHED: emit the declared favicon ->
+  // StaticResource edge. Declared confidence — `<favoriteIcon>` names the
+  // resource directly (unlike the heuristic guest-profile naming convention
+  // above). Dangling-tolerated when the resource was not retrieved.
+  if (favoriteIcon !== null) {
+    edges.push({
+      fromId: node.id,
+      toId: `StaticResource:${favoriteIcon}`,
+      edgeType: 'references',
+      confidence: 'declared',
+      source: EXTRACTOR_SOURCE,
+      properties: { via: 'favoriteIcon' },
+    });
+  }
+
+  // SITE-INDEXPAGE-AND-TEMPLATE-UNGRAPHED: emit a declared VisualforcePage
+  // reference per site-page element (index / template / error pages). Declared
+  // confidence — the element names the page directly (like `<favoriteIcon>`).
+  // Dangling-tolerated when the page was not retrieved.
+  for (const element of SITE_PAGE_ELEMENTS) {
+    const pageName = optionalString(rootObj, element);
+    if (pageName === null) continue;
+    edges.push({
+      fromId: node.id,
+      toId: `VisualforcePage:${pageName}`,
+      edgeType: 'references',
+      confidence: 'declared',
+      source: EXTRACTOR_SOURCE,
+      properties: { via: element },
+    });
+  }
 
   return ok({ nodes: [node], edges });
 };

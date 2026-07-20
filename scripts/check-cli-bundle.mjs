@@ -22,8 +22,17 @@ const bundlePath = join(root, 'packages/cli/dist/index.js');
 const workerPath = join(root, 'packages/cli/dist/apex-ast-worker.js');
 const buildPath = join(root, 'packages/cli/build.mjs');
 
-/** Soft ceiling: post-externalize is ~4.1 MB; pre-INFRA-11 was ~5.6 MB. Catch full grammar re-inline. */
-const MAX_BYTES = 5_000_000;
+/**
+ * Soft size backstop for a full grammar re-inline. The PRECISE grammar-inline
+ * guard is `MAX_ANTLR_REFS` below (a re-inline mints ~1,700 ApexParser/antlr
+ * refs); this byte ceiling is only defense-in-depth. The externalized bundle
+ * grows with legitimate feature surface (the Graph-B concept model + the tool
+ * roster) — it was ~4.1 MB at INFRA-11, ~5.0 MB now — while a real grammar
+ * re-inline would add the ~5.4 MB ANTLR grammar (bundle > 10 MB). Ceiling set
+ * with headroom above current legitimate size and far below any re-inline; the
+ * antlr-ref guard, not this number, is what actually catches a re-inline.
+ */
+const MAX_BYTES = 5_600_000;
 /** Leftover string mentions of the external import path are fine; grammar class bodies are not. */
 const MAX_ANTLR_REFS = 80;
 /** Worker ships parsers/apex-ast logic but must not re-inline the ANTLR grammar. */

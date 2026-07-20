@@ -18,6 +18,7 @@ import {
 } from './condition-extractor.js';
 import { deriveDotSplitObjectAndApiName } from './path-utils.js';
 import {
+  buildAlertTemplateMap,
   buildFieldUpdateTargetMap,
   isWellFormedFieldRef,
   type FieldUpdateTarget,
@@ -423,36 +424,142 @@ const stepEdges = (
 };
 
 /**
- * CR-CAP-07 — load the OBJECT's `<fieldUpdates>` name→target map from the
- * SIBLING `workflows/{Object}.workflow-meta.xml` file. This is a
- * first-of-its-kind cross-file load for an extractor: the `Extractor` type
- * hands each extractor ONLY its own `path`, so we DERIVE the sibling path.
- * `approvalProcesses/` and `workflows/` are sibling directories under
- * `main/default/`, so the workflow file is
- * `dirname(dirname(approvalPath))/workflows/{Object}.workflow-meta.xml`.
- *
- * MUST fail-soft: a missing sibling workflow file is NORMAL (not every
- * object that has an approval process also defines workflow field-updates),
- * and an unparseable one must not sink the ApprovalProcess extraction. On
- * ENOENT, parse-error, or any other read failure, return an EMPTY map — the
- * node, approver edges, sendsEmail edges, and the `references` scaffolding
- * edge all survive; absence simply means no field-level `writesTo` is minted
- * (the `references` edge already documents the action). Reuses
- * `buildFieldUpdateTargetMap` from workflow-rule.ts (single source of truth)
- * so the resolution + cross-object `<targetObject>` semantics never drift.
+ * A `{ name, type }` pair as it appears in an `<approver>` / hook `<action>`
+ * element — the structured, edge-free view of an approval step's participants
+ * and side-effects (APPROVAL-PROCESS-OMITS-STEP-APPROVER-BREAKDOWN). `name` /
+ * `type` are `null` when the element omits them (e.g. an implicit standard
+ * Manager hierarchy approver carries a `type` but no `name`).
  */
-const loadObjectFieldUpdateMap = async (
+interface NamedTypedRef {
+  readonly name: string | null;
+  readonly type: string | null;
+}
+
+/**
+ * The structured per-step breakdown surfaced on `properties.steps` — the
+ * approver assignment, entry criteria, reject behavior, and per-step
+ * approve/reject actions of ONE `<approvalStep>`, in declared order. Answers
+ * "who approves at each step and what happens on reject?" from the node's own
+ * facts, not from unordered `references` edges.
+ */
+interface ApprovalStepSummary {
+  readonly stepIndex: number;
+  readonly name: string | null;
+  readonly label: string | null;
+  readonly approvers: readonly NamedTypedRef[];
+  readonly entryCriteriaFormula: string | null;
+  readonly entryCriteriaItemCount: number;
+  readonly ifCriteriaNotMet: string | null;
+  readonly rejectBehaviorType: string | null;
+  readonly approvalActions: readonly NamedTypedRef[];
+  readonly rejectionActions: readonly NamedTypedRef[];
+}
+
+/**
+ * Read a `{ name, type }` list from a container element's repeated `childKey`
+ * children (e.g. `<assignedApprover>`'s `<approver>`s, or a hook list's
+ * `<action>`s). Lenient by design — the strict validation stays in the edge
+ * builders (`stepEdges` / `hookListEdges`); this structured mirror never fails
+ * extraction, it just skips entirely-empty entries.
+ */
+const readNamedTypedList = (container: unknown, childKey: string): NamedTypedRef[] => {
+  if (typeof container !== 'object' || container === null) return [];
+  return toArray((container as Record<string, unknown>)[childKey]).flatMap((item) => {
+    if (typeof item !== 'object' || item === null) return [];
+    const obj = item as Record<string, unknown>;
+    const name = optionalString(obj, 'name');
+    const type = optionalString(obj, 'type');
+    if (name === null && type === null) return [];
+    return [{ name, type }];
+  });
+};
+
+/** Summarize one `<approvalStep>` into its structured, edge-free breakdown. */
+const summarizeApprovalStep = (stepRaw: unknown, stepIndex: number): ApprovalStepSummary => {
+  const step =
+    typeof stepRaw === 'object' && stepRaw !== null
+      ? (stepRaw as Record<string, unknown>)
+      : {};
+  const assigned = unwrapSingle(step['assignedApprover']);
+  const entryCriteriaRaw = unwrapSingle(step['entryCriteria']);
+  const entryCriteria =
+    typeof entryCriteriaRaw === 'object' && entryCriteriaRaw !== null
+      ? (entryCriteriaRaw as Record<string, unknown>)
+      : null;
+  const rejectBehaviorRaw = unwrapSingle(step['rejectBehavior']);
+  const rejectBehavior =
+    typeof rejectBehaviorRaw === 'object' && rejectBehaviorRaw !== null
+      ? (rejectBehaviorRaw as Record<string, unknown>)
+      : null;
+  return {
+    stepIndex,
+    name: optionalString(step, 'name'),
+    label: optionalString(step, 'label'),
+    approvers: readNamedTypedList(assigned, 'approver'),
+    entryCriteriaFormula: entryCriteria === null ? null : optionalString(entryCriteria, 'formula'),
+    entryCriteriaItemCount:
+      entryCriteria === null ? 0 : toArray(entryCriteria['criteriaItems']).length,
+    ifCriteriaNotMet: optionalString(step, 'ifCriteriaNotMet'),
+    rejectBehaviorType: rejectBehavior === null ? null : optionalString(rejectBehavior, 'type'),
+    approvalActions: readNamedTypedList(unwrapSingle(step['approvalActions']), 'action'),
+    rejectionActions: readNamedTypedList(unwrapSingle(step['rejectionActions']), 'action'),
+  };
+};
+
+/**
+ * The two name→target maps the sibling workflow file resolves for an
+ * ApprovalProcess: the `<fieldUpdates>` field-update targets (CR-CAP-07) and
+ * the `<alerts>` template map (W4.3). Both keys are the action `<name>` an
+ * ApprovalProcess hook `<action>` carries.
+ */
+interface ObjectWorkflowMaps {
+  readonly fieldUpdateMap: Readonly<Map<string, FieldUpdateTarget>>;
+  readonly alertTemplateMap: Readonly<Map<string, string | null>>;
+}
+
+/**
+ * CR-CAP-07 / W4.3 — load the OBJECT's `<fieldUpdates>` name→target map AND its
+ * `<alerts>` name→template map from the SIBLING
+ * `workflows/{Object}.workflow-meta.xml` file. This is a cross-file load for an
+ * extractor: the `Extractor` type hands each extractor ONLY its own `path`, so
+ * we DERIVE the sibling path. `approvalProcesses/` and `workflows/` are sibling
+ * directories under `main/default/`, so the workflow file is
+ * `dirname(dirname(approvalPath))/workflows/{Object}.workflow-meta.xml`. The
+ * file is read + parsed ONCE and both maps are built from it.
+ *
+ * An ApprovalProcess `Alert` hook `<action>` carries only the alert NAME; the
+ * alert's `<template>` (which names the EmailTemplate) lives in this sibling
+ * workflow file's `<alerts>` collection — exactly the same cross-file shape as
+ * the FieldUpdate case. Resolving it here lets each Alert hook emit a DIRECT
+ * `references` edge to the EmailTemplate (W4.3), so the template's delete
+ * blast-radius sees the ApprovalProcess dependent (the alert node is 2 hops
+ * away; `find_component_usages` / delete verdicts count only 1-hop referrers).
+ *
+ * MUST fail-soft: a missing sibling workflow file is NORMAL (not every object
+ * that has an approval process also defines workflows), and an unparseable one
+ * must not sink the ApprovalProcess extraction. On ENOENT, parse-error, or any
+ * other read failure, return EMPTY maps — the node, approver edges, sendsEmail
+ * edges, and the `references` scaffolding edge all survive; absence simply
+ * means no field-level `writesTo` and no alert-template `references` are minted
+ * (the alert `references` scaffolding edge already documents the action).
+ * Reuses `buildFieldUpdateTargetMap` + `buildAlertTemplateMap` from
+ * workflow-rule.ts (single source of truth) so resolution semantics never drift.
+ */
+const loadObjectWorkflowMaps = async (
   approvalPath: string,
   objectApiName: string,
-): Promise<Readonly<Map<string, FieldUpdateTarget>>> => {
-  const empty: Readonly<Map<string, FieldUpdateTarget>> = new Map();
+): Promise<ObjectWorkflowMaps> => {
+  const empty: ObjectWorkflowMaps = {
+    fieldUpdateMap: new Map(),
+    alertTemplateMap: new Map(),
+  };
   const workflowPath = join(
     dirname(dirname(approvalPath)),
     'workflows',
     `${objectApiName}${WORKFLOW_FILE_SUFFIX}`,
   );
   const xmlResult = await readAndValidateXml(workflowPath);
-  // Fail-soft: ENOENT (no sibling workflow file) or parse-error → empty map.
+  // Fail-soft: ENOENT (no sibling workflow file) or parse-error → empty maps.
   if (!xmlResult.ok) return empty;
 
   const parser = new XMLParser({
@@ -469,7 +576,11 @@ const loadObjectFieldUpdateMap = async (
   }
   const root = unwrapSingle(parsed['Workflow']);
   if (typeof root !== 'object' || root === null) return empty;
-  return buildFieldUpdateTargetMap(root as Record<string, unknown>);
+  const rootObj = root as Record<string, unknown>;
+  return {
+    fieldUpdateMap: buildFieldUpdateTargetMap(rootObj),
+    alertTemplateMap: buildAlertTemplateMap(rootObj),
+  };
 };
 
 /**
@@ -491,6 +602,8 @@ const hookListEdges = (
   processId: string,
   objectApiName: string,
   fieldUpdateMap: Readonly<Map<string, FieldUpdateTarget>>,
+  alertTemplateMap: Readonly<Map<string, string | null>>,
+  seenEmailTemplates: Set<string>,
   _path: string,
 ): Result<readonly Edge[], ExtractorError> => {
   const hookContainerRaw = unwrapSingle(rootObj[hookElement]);
@@ -531,6 +644,38 @@ const hookListEdges = (
         source: EXTRACTOR_SOURCE,
         properties: { hookType, actionType: type },
       });
+    }
+
+    // W4.3: an `Alert` hook action names a WorkflowAlert whose `<template>`
+    // (resolved from the sibling workflow file's `<alerts>` collection) names
+    // the EmailTemplate the approval sends. The `references` above points at
+    // the `WorkflowAlert:{Object}.{name}` scaffolding node (which is itself 1
+    // hop from the EmailTemplate via the alert-node edge W4.3 adds in
+    // workflow-rule.ts) — but `find_component_usages` / delete verdicts count
+    // only DIRECT (1-hop) referrers, so without a DIRECT edge the template's
+    // delete blast-radius would miss this ApprovalProcess dependent. Emit the
+    // DIRECT `references` edge here (KEEP the WorkflowAlert `references`, ADD
+    // the EmailTemplate one). Deduped per (process, template) across all four
+    // hook lists via the shared `seenEmailTemplates` set so an alert reused in
+    // several hooks emits ONE template edge. Fail-soft: a missing/unresolved
+    // template (no sibling workflow file, or the alert has no `<template>`)
+    // emits no edge — the WorkflowAlert `references` already documents the hook.
+    if (type === 'Alert') {
+      const template = alertTemplateMap.get(name);
+      if (template !== undefined && template !== null) {
+        const emailId = `EmailTemplate:${templateRefToCanonicalTail(template)}`;
+        if (!seenEmailTemplates.has(emailId)) {
+          seenEmailTemplates.add(emailId);
+          edges.push({
+            fromId: processId,
+            toId: emailId,
+            edgeType: 'references',
+            confidence: 'declared',
+            source: EXTRACTOR_SOURCE,
+            properties: { referenceKind: 'alertTemplate', viaAlert: name, hookType },
+          });
+        }
+      }
     }
 
     // CR-CAP-07: FieldUpdate hook actions additionally emit a FIELD-level
@@ -587,7 +732,12 @@ const hookListEdges = (
  * `{ProcessName}` are split on the first dot. Each `<approvalStep>`
  * entry contributes one `references` edge per `<approver>` (the
  * approver chain), preserving step order via the `stepIndex`
- * property. A step's optional `<notificationTemplate>` emits a
+ * property. It ALSO contributes a structured, edge-free summary to
+ * `properties.steps` (approver assignment, entry criteria, reject
+ * behavior, and per-step actions per step), and the four process-level
+ * action hooks are mirrored as structured
+ * `initialSubmission/finalApproval/finalRejection/recallActions` lists —
+ * so the approve/reject path is answerable from the node's own facts. A step's optional `<notificationTemplate>` emits a
  * `sendsEmail` edge with `role: 'notification'`. The top-level
  * `<emailTemplate>` (when present) emits a `sendsEmail` edge with
  * `role: 'default'`. The four hook lists
@@ -596,7 +746,15 @@ const hookListEdges = (
  * `<action>` children to the edge set with `hookType` set to the
  * originating hook name and the WorkflowRule variant-table edge
  * shapes (`callsApex` for `Apex`, `references` for everything else;
- * `Send` and unknown types silently skipped).
+ * `Send` and unknown types silently skipped). W4.3: an `Alert` hook
+ * action additionally emits a DIRECT `references` edge to the
+ * `EmailTemplate:{Folder.Name}` its WorkflowAlert sends — the alert's
+ * `<template>` is resolved from the sibling
+ * `workflows/{Object}.workflow-meta.xml` file's `<alerts>` collection
+ * (the same cross-file load used for FieldUpdate `writesTo`), so
+ * "safe to delete EmailTemplate X?" sees the ApprovalProcess as a
+ * direct dependent (deduped per template across the four hook lists;
+ * fail-soft when the sibling file or the alert `<template>` is absent).
  *
  * Approver references are dangling-by-design for `user` (User nodes
  * are not extracted in v1.3) and `userHierarchyField` /
@@ -660,11 +818,19 @@ export const extractApprovalProcess = async (
   if (!rootResult.ok) return rootResult;
   const rootObj = rootResult.value;
 
-  // CR-CAP-07 — resolve the sibling object's workflow `<fieldUpdates>` ONCE so
-  // each FieldUpdate hook action can emit a field-level `writesTo`. Fail-soft:
-  // a missing/unparseable sibling workflow file yields an empty map (the
+  // CR-CAP-07 / W4.3 — resolve the sibling object's workflow `<fieldUpdates>`
+  // AND `<alerts>` maps ONCE (single file read) so each FieldUpdate hook action
+  // can emit a field-level `writesTo` and each Alert hook action can emit a
+  // DIRECT `references` to the EmailTemplate its alert sends. Fail-soft: a
+  // missing/unparseable sibling workflow file yields empty maps (the
   // ApprovalProcess node + all other edges are unaffected).
-  const fieldUpdateMap = await loadObjectFieldUpdateMap(path, objectApiName);
+  const { fieldUpdateMap, alertTemplateMap } = await loadObjectWorkflowMaps(
+    path,
+    objectApiName,
+  );
+  // W4.3 — dedup EmailTemplate `references` across the four hook lists so an
+  // alert reused in several hooks emits ONE template edge per (process, template).
+  const seenEmailTemplates = new Set<string>();
 
   const processId = `ApprovalProcess:${objectApiName}.${processName}`;
   const parentId = `CustomObject:${objectApiName}`;
@@ -778,6 +944,28 @@ export const extractApprovalProcess = async (
       entryCriteriaFormula,
       entryCriteriaItemCount,
       stepCount: steps.length,
+      // Structured per-step breakdown (APPROVAL-PROCESS-OMITS-STEP-APPROVER-
+      // BREAKDOWN): approver assignment, entry criteria, reject behavior, and
+      // per-step actions in declared order — so the approval chain is
+      // answerable from the node's own facts, not by re-deriving it from
+      // unordered `references` edges. The edges are still emitted below.
+      steps: steps.map((step, i) => summarizeApprovalStep(step, i)),
+      // Process-level action hooks, structured (the same actions the hook edges
+      // model) so "what happens on final approval / rejection?" is answerable
+      // from facts — e.g. the Rejected email alert + status field update.
+      initialSubmissionActions: readNamedTypedList(
+        unwrapSingle(rootObj['initialSubmissionActions']),
+        'action',
+      ),
+      finalApprovalActions: readNamedTypedList(
+        unwrapSingle(rootObj['finalApprovalActions']),
+        'action',
+      ),
+      finalRejectionActions: readNamedTypedList(
+        unwrapSingle(rootObj['finalRejectionActions']),
+        'action',
+      ),
+      recallActions: readNamedTypedList(unwrapSingle(rootObj['recallActions']), 'action'),
       allowedSubmitters: toArray(rootObj['allowedSubmitters']).flatMap(
         (rawEntry) => {
           if (typeof rawEntry !== 'object' || rawEntry === null) return [];
@@ -844,6 +1032,8 @@ export const extractApprovalProcess = async (
       processId,
       objectApiName,
       fieldUpdateMap,
+      alertTemplateMap,
+      seenEmailTemplates,
       path,
     );
     if (!hookResult.ok) return hookResult;

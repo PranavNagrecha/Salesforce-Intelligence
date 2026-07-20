@@ -173,6 +173,16 @@ const flexiPageSeed: ExtractionResult = {
       type: 'FlexiPage',
       apiName: 'Account_Record_Page',
     }),
+    // LAYOUT-FOR-USER-MISSES-CUSTOM-OBJECT-FLEXIPAGES: a CUSTOM-object record
+    // page whose apiName has no `__c` in it (so the old `{Object}_` prefix
+    // heuristic — `Evaluation__c_` — never matches). Carries `sobjectType`, the
+    // signal `lightning_pages` matches on.
+    makeNode({
+      id: 'FlexiPage:Evaluation_Record_Page',
+      type: 'FlexiPage',
+      apiName: 'Evaluation_Record_Page',
+      properties: { sobjectType: 'Evaluation__c', pageType: 'RecordPage' },
+    }),
   ],
   edges: [],
 };
@@ -398,6 +408,72 @@ describe('layoutForUserHandler', () => {
       result.value.data.reasoning.some((s) => s.stage === 'LightningPageLookup'),
     ).toBe(true);
   });
+
+  // LAYOUT-FOR-USER-MISSES-CUSTOM-OBJECT-FLEXIPAGES: a custom object's record
+  // page must resolve via its `sobjectType` — the apiName-prefix heuristic
+  // (`Evaluation__c_`) never matched `Evaluation_Record_Page`, so the tool
+  // reported classic-only while `lightning_pages` listed the page. FAILS
+  // pre-fix (flexiPageId null / uiSurface unknown).
+  it('resolves a CUSTOM-object FlexiPage by sobjectType (not apiName prefix)', async () => {
+    const result = await layoutForUserHandler(ctx, {
+      objectApiName: 'Evaluation__c',
+      profileId: ADMIN_PROFILE,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.flexiPageId).toBe('FlexiPage:Evaluation_Record_Page');
+    expect(result.value.data.uiSurface).toBe('lightning-flexipage');
+    const pageStep = result.value.data.reasoning.find(
+      (s) => s.stage === 'LightningPageLookup',
+    );
+    expect(pageStep?.verdict).toBe('matched');
+  });
+
+  // GUARD (LAYOUT-FOR-USER-REJECTS-PROFILEAPINAME): pre-fix a natural
+  // `profileApiName` hard-failed `profileId: Required`. Post-fix a bare profile
+  // name resolves to the `Profile:` id — BYTE-IDENTICAL to the profileId path —
+  // and `appliedScope` echoes the resolved profile + object.
+  it('profileApiName ≡ profileId (byte-equal + appliedScope echo)', async () => {
+    const viaProfileId = await layoutForUserHandler(ctx, {
+      objectApiName: 'Account',
+      recordTypeId: ACCOUNT_B2B_RECORD_TYPE,
+      profileId: ADMIN_PROFILE,
+    });
+    const viaProfileApiName = await layoutForUserHandler(ctx, {
+      objectApiName: 'Account',
+      recordTypeId: ACCOUNT_B2B_RECORD_TYPE,
+      profileApiName: 'System Administrator',
+    });
+    expect(viaProfileId.ok && viaProfileApiName.ok).toBe(true);
+    if (!viaProfileId.ok || !viaProfileApiName.ok) return;
+    expect(viaProfileId.value.data.appliedScope).toEqual({
+      profileId: ADMIN_PROFILE,
+      objectApiName: 'Account',
+      recordTypeId: ACCOUNT_B2B_RECORD_TYPE,
+    });
+    expect(viaProfileApiName.value.data).toEqual(viaProfileId.value.data);
+  });
+
+  it('refuses when no profile selector is supplied', async () => {
+    const parsed = layoutForUserInputSchema.safeParse({ objectApiName: 'Account' });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    const r = await layoutForUserHandler(ctx, parsed.data);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('disagreeing profile selectors → invalid-query (never a silent pick)', async () => {
+    const r = await layoutForUserHandler(ctx, {
+      objectApiName: 'Account',
+      profileId: ADMIN_PROFILE,
+      profileApiName: 'Standard User',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
 });
 
 describe('layoutForUserInputSchema', () => {
@@ -443,11 +519,29 @@ describe('layoutForUserInputSchema', () => {
     expect(parsed.success).toBe(false);
   });
 
-  it('rejects a missing profileId', () => {
+  // LAYOUT-FOR-USER-REJECTS-PROFILEAPINAME: profileId is now OPTIONAL at the Zod
+  // level (a profile alias may supply it); the handler enforces "at least one
+  // profile selector" and rejects a truly profile-less call with invalid-query.
+  it('accepts a missing profileId at the schema level (handler enforces presence)', () => {
     const parsed = layoutForUserInputSchema.safeParse({
       objectApiName: 'Account',
     });
-    expect(parsed.success).toBe(false);
+    expect(parsed.success).toBe(true);
+  });
+
+  it('accepts profileApiName / profileName as the profile selector', () => {
+    expect(
+      layoutForUserInputSchema.safeParse({
+        objectApiName: 'Account',
+        profileApiName: 'Standard User',
+      }).success,
+    ).toBe(true);
+    expect(
+      layoutForUserInputSchema.safeParse({
+        objectApiName: 'Account',
+        profileName: 'Standard User',
+      }).success,
+    ).toBe(true);
   });
 
   it('rejects a missing objectApiName', () => {

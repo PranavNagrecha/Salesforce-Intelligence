@@ -55,12 +55,22 @@ describe('extractMatchingRule', () => {
         nodes: golden.nodes.map((n) => ({ ...n, sourcePath: fixtureAbsPath })),
       };
       expect(result.value).toEqual(goldenPatched);
-      // Multi-rule: 1 file -> 2 nodes + 2 parentOf edges.
+      // Multi-rule: 1 file -> 2 nodes + 2 parentOf edges + one `references`
+      // edge per DISTINCT compared field (Email, Phone, LastName)
+      // — MATCHING-RULE-OMITS-FIELD-EDGES.
       expect(result.value.nodes).toHaveLength(2);
-      expect(result.value.edges).toHaveLength(2);
-      expect(
-        result.value.edges.every((e) => e.edgeType === 'parentOf'),
-      ).toBe(true);
+      const parentOfEdges = result.value.edges.filter(
+        (e) => e.edgeType === 'parentOf',
+      );
+      const fieldEdges = result.value.edges.filter(
+        (e) => e.edgeType === 'references',
+      );
+      expect(parentOfEdges).toHaveLength(2);
+      expect(fieldEdges.map((e) => e.toId).sort()).toEqual([
+        'CustomField:Lead.Email',
+        'CustomField:Lead.LastName',
+        'CustomField:Lead.Phone',
+      ]);
     });
 
     itHarness('produces the golden output for Account (single rule)', async () => {
@@ -84,16 +94,21 @@ describe('extractMatchingRule', () => {
   });
 
   describe('property derivation', () => {
-    itHarness('emits MatchingRules-not-references — only the inbound parentOf, no references edges', async () => {
-      // Per MatchingRule.md, MatchingRule emits no references or
-      // triggersOn edges in v1.3. The matcher is a leaf in the rule graph.
+    itHarness('emits a CustomField references edge per compared field, no triggersOn edges', async () => {
+      // MATCHING-RULE-OMITS-FIELD-EDGES: the matcher now wires each compared
+      // field to its `CustomField:` node (`references`); it still emits no
+      // `triggersOn` edge (the matcher does not fire on record events).
       const fixtureAbsPath = resolve(HARNESS_ROOT, LEAD_FIXTURE_REL);
       const result = await extractMatchingRule(fixtureAbsPath);
       expect(result.ok).toBe(true);
       if (!result.ok) return;
-      expect(
-        result.value.edges.some((e) => e.edgeType === 'references'),
-      ).toBe(false);
+      const references = result.value.edges.filter(
+        (e) => e.edgeType === 'references',
+      );
+      expect(references.length).toBeGreaterThan(0);
+      expect(references.every((e) => e.toId.startsWith('CustomField:'))).toBe(
+        true,
+      );
       expect(
         result.value.edges.some((e) => e.edgeType === 'triggersOn'),
       ).toBe(false);
@@ -135,6 +150,97 @@ describe('extractMatchingRule', () => {
         // matchingMethods de-duplicates while preserving first-seen order.
         expect(node.properties['matchingMethods']).toBe('Exact,Fuzzy:Person Name');
         expect(node.properties['itemCount']).toBe(3);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('MATCHING-RULE-OMITS-FIELD-EDGES: emits one references edge per compared field to CustomField', async () => {
+      // Red pre-fix: matching-rule emitted ONLY the inbound parentOf — the
+      // compared fields lived in the `fieldsCompared` string with no graph
+      // wiring, so "which fields does this matcher use?" / Email-retirement
+      // blast-radius invented no MatchingRule dependents. Green post-fix:
+      // one declared `references` edge per DISTINCT compared field.
+      const xml = `<?xml version="1.0"?>
+<MatchingRules xmlns="http://soap.sforce.com/2006/04/metadata">
+  <matchingRules>
+    <fullName>Portal_Duplicates</fullName>
+    <label>Portal Duplicate Matching</label>
+    <ruleStatus>Active</ruleStatus>
+    <matchingRuleItems>
+      <fieldName>FirstName</fieldName>
+      <matchingMethod>Exact</matchingMethod>
+    </matchingRuleItems>
+    <matchingRuleItems>
+      <fieldName>LastName</fieldName>
+      <matchingMethod>Exact</matchingMethod>
+    </matchingRuleItems>
+    <matchingRuleItems>
+      <fieldName>Email</fieldName>
+      <matchingMethod>Exact</matchingMethod>
+    </matchingRuleItems>
+  </matchingRules>
+</MatchingRules>`;
+      const { dir, path } = await writeTempXml(
+        'Contact.matchingRule-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractMatchingRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const ruleId = 'MatchingRule:Contact.Portal_Duplicates';
+        const fieldEdges = result.value.edges.filter(
+          (e) => e.edgeType === 'references' && e.fromId === ruleId,
+        );
+        expect(fieldEdges.map((e) => e.toId)).toEqual([
+          'CustomField:Contact.FirstName',
+          'CustomField:Contact.LastName',
+          'CustomField:Contact.Email',
+        ]);
+        expect(fieldEdges.every((e) => e.confidence === 'declared')).toBe(true);
+        expect(fieldEdges[2]!.properties).toMatchObject({
+          referenceKind: 'matchingField',
+          fieldName: 'Email',
+          matchingMethod: 'Exact',
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('MATCHING-RULE-OMITS-FIELD-EDGES: deduplicates a field compared by two items into one edge', async () => {
+      const xml = `<?xml version="1.0"?>
+<MatchingRules xmlns="http://soap.sforce.com/2006/04/metadata">
+  <matchingRules>
+    <fullName>Email_Twice</fullName>
+    <label>Email compared two ways</label>
+    <ruleStatus>Active</ruleStatus>
+    <matchingRuleItems>
+      <fieldName>Email</fieldName>
+      <matchingMethod>Exact</matchingMethod>
+    </matchingRuleItems>
+    <matchingRuleItems>
+      <fieldName>Email</fieldName>
+      <matchingMethod>Fuzzy:Person Name</matchingMethod>
+    </matchingRuleItems>
+  </matchingRules>
+</MatchingRules>`;
+      const { dir, path } = await writeTempXml(
+        'Lead.matchingRule-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractMatchingRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const fieldEdges = result.value.edges.filter(
+          (e) => e.edgeType === 'references',
+        );
+        expect(fieldEdges).toHaveLength(1);
+        expect(fieldEdges[0]!.toId).toBe('CustomField:Lead.Email');
+        // First-seen item's matching method wins.
+        expect(fieldEdges[0]!.properties['matchingMethod']).toBe('Exact');
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

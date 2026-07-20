@@ -132,8 +132,10 @@ const validateRoot = (
  * The node `label` mirrors the basename-derived `BusinessProcessName`
  * because BusinessProcess metadata has no separate `<label>` element.
  * `properties.stageCount` is the count of `<values>` entries (each one
- * declares a stage in the process); v1.2 does not emit field-level
- * picklist-value edges, that lands in v1.3.
+ * declares a stage in the process) and `properties.stages` is the ordered
+ * list of those stages (`{ fullName, default }`) — the status values a record
+ * in this process can move through, and which one is the default entry stage.
+ * Field-level picklist-value EDGES are still not emitted.
  *
  * Returns an `ExtractorError` for any of the documented failure modes:
  * `file-not-found`, `parse-error`, or `malformed-input` (wrong root,
@@ -197,6 +199,20 @@ export const extractBusinessProcess = async (
   const compositeApiName = `${objectApiName}.${businessProcessName}`;
   const fullName = String(unwrapSingle(rootObj['fullName']));
   const isActive = coerceBoolean(unwrapSingle(rootObj['isActive']));
+  // Each `<values>` entry declares one stage the process moves through: its
+  // `<fullName>` is the picklist value (e.g. Open / Closed) and `<default>`
+  // marks the entry stage. v1.2 counted these but dropped the value names, so
+  // "what statuses can a record in this process go through?" could not be
+  // answered from the node (BUSINESS-PROCESS-OMITS-STAGE-VALUES). Emit the
+  // ordered stage list alongside the count. `default` collapses to `false` for
+  // any entry that isn't the literal `true` (the Salesforce default).
+  const stages = toArray(rootObj['values']).flatMap((rawValue) => {
+    if (typeof rawValue !== 'object' || rawValue === null) return [];
+    const valueObj = rawValue as Record<string, unknown>;
+    const stageName = optionalString(valueObj, 'fullName');
+    if (stageName === null) return [];
+    return [{ fullName: stageName, default: coerceBoolean(unwrapSingle(valueObj['default'])) }];
+  });
   const stageCount = toArray(rootObj['values']).length;
 
   const node: Node = {
@@ -214,6 +230,7 @@ export const extractBusinessProcess = async (
       isActive,
       description: optionalString(rootObj, 'description'),
       stageCount,
+      stages,
     },
   };
 

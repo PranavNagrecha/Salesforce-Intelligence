@@ -164,7 +164,7 @@ describe('detectPiiClassification: constrained-type (Checkbox/Picklist) contact-
     // The suppression is gated on the Boolean type: a real Text field that
     // could actually hold the value is unaffected.
     const r = detectPiiClassification(
-      field('Account', 'Faculty_Email__c', { dataType: 'Text' }),
+      field('Account', 'Widget_Email__c', { dataType: 'Text' }),
     );
     expect(r.piiClassification).toBe('pii');
     expect(r.piiCategory).toBe('contact');

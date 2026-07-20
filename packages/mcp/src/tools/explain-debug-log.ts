@@ -78,6 +78,7 @@ import {
   governorLimitRisksHandler,
   type GovernorLimitRiskFinding,
 } from './governor-limit-risks.js';
+import { mergeInputAliases } from './input-aliases.js';
 
 /** Byte-budget guard: the candidate list is capped, with a `truncated` flag. */
 const MAX_CANDIDATES = 25;
@@ -96,11 +97,29 @@ const EXPLAIN_DEBUG_LOG_DISCLOSURE =
 // Input schema
 // ---------------------------------------------------------------------------
 
-export const explainDebugLogInputSchema = z.object({
+const explainDebugLogInputBaseSchema = z.object({
   logText: z.string().min(1),
   /** Optional SObject narrowing hint (the object the transaction was on). */
   object: z.string().min(1).optional(),
 });
+
+/**
+ * `sfi.explain_debug_log` input. A router / host that pasted the log naturally
+ * reaches for `debugLog` / `log` / `text` / `content` instead of the canonical
+ * `logText` (EXPLAIN-DEBUG-LOG-REJECTS-TEXT-ALIAS). Those are merged into
+ * `logText` before validation via the shared alias normalizer (precedence:
+ * canonical `logText` wins, then `debugLog`, `log`, `text`, `content`). A call
+ * that already carries `logText` is byte-identical to the pre-alias contract
+ * (the merge is a no-op when the canonical is present); a call with NO log text
+ * at all still fails closed with the named `logText: Required` `invalid-query`.
+ */
+export const explainDebugLogInputSchema = z.preprocess(
+  (raw) =>
+    mergeInputAliases(raw, [
+      { canonical: 'logText', aliases: ['debugLog', 'log', 'text', 'content'] },
+    ]),
+  explainDebugLogInputBaseSchema,
+);
 
 export type ExplainDebugLogInput = z.infer<typeof explainDebugLogInputSchema>;
 

@@ -30,9 +30,9 @@ describe('extractNetwork', () => {
     <enableGuestFileAccess>true</enableGuestFileAccess>
     <enableGuestMemberVisibility>false</enableGuestMemberVisibility>
     <networkMemberGroups>
-        <permissionSet>Member_Access</permissionSet>
-        <profile>member profile</profile>
-        <profile>admin</profile>
+        <permissionSet>Reviewer_Access</permissionSet>
+        <profile>Partner Community User</profile>
+        <profile>Admin</profile>
     </networkMemberGroups>
     <picassoSite>MemberPortal1</picassoSite>
     <selfRegistration>false</selfRegistration>
@@ -62,7 +62,10 @@ describe('extractNetwork', () => {
         expect(node.properties['picassoSite']).toBe('MemberPortal1');
         expect(node.properties['memberProfileCount']).toBe(2);
         expect(node.properties['memberPermissionSetCount']).toBe(1);
-        // Two DECLARED references wire the family together.
+        expect(node.properties['memberProfiles']).toEqual(['Partner Community User', 'Admin']);
+        expect(node.properties['memberPermissionSets']).toEqual(['Reviewer_Access']);
+        // DECLARED references wire the whole family together: site + Builder page
+        // tree + each authenticated member Profile / PermissionSet.
         expect(result.value.edges).toEqual([
           {
             fromId: 'Network:MemberPortal',
@@ -79,6 +82,30 @@ describe('extractNetwork', () => {
             confidence: 'declared',
             source: 'network-extractor',
             properties: { via: 'picassoSite' },
+          },
+          {
+            fromId: 'Network:MemberPortal',
+            toId: 'Profile:Partner Community User',
+            edgeType: 'references',
+            confidence: 'declared',
+            source: 'network-extractor',
+            properties: { via: 'memberProfile' },
+          },
+          {
+            fromId: 'Network:MemberPortal',
+            toId: 'Profile:Admin',
+            edgeType: 'references',
+            confidence: 'declared',
+            source: 'network-extractor',
+            properties: { via: 'memberProfile' },
+          },
+          {
+            fromId: 'Network:MemberPortal',
+            toId: 'PermissionSet:Reviewer_Access',
+            edgeType: 'references',
+            confidence: 'declared',
+            source: 'network-extractor',
+            properties: { via: 'memberPermissionSet' },
           },
         ]);
       } finally {
@@ -124,7 +151,67 @@ describe('extractNetwork', () => {
         expect(node.properties['enableGuestFileAccess']).toBeNull();
         expect(node.properties['site']).toBeNull();
         expect(node.properties['memberProfileCount']).toBe(0);
+        expect(node.properties['memberProfiles']).toEqual([]);
+        expect(node.properties['memberPermissionSets']).toEqual([]);
         expect(result.value.edges).toEqual([]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('wires member Profiles and PermissionSets as declared edges, deduped (NETWORK-OMITS-MEMBER-PROFILE-AND-PERMSET-EDGES guard)', async () => {
+      // A community whose only linkage is its member groups: two member
+      // profiles (one repeated → deduped) and one permission set. Pre-fix the
+      // extractor emitted counts but ZERO member edges, so "who can access this
+      // community?" and Profile / PermissionSet usages never reached the Network.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Network xmlns="http://soap.sforce.com/2006/04/metadata">
+    <networkMemberGroups>
+        <permissionSet>Reviewer_Access</permissionSet>
+        <profile>Partner Community User</profile>
+        <profile>Reviewer Profile</profile>
+        <profile>Partner Community User</profile>
+    </networkMemberGroups>
+    <status>Live</status>
+</Network>`;
+      const { dir, path } = await writeTempXml('Partner_Community.network-meta.xml', xml);
+      try {
+        const result = await extractNetwork(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const memberEdges = result.value.edges.filter(
+          (e) => e.toId.startsWith('Profile:') || e.toId.startsWith('PermissionSet:'),
+        );
+        expect(memberEdges).toEqual([
+          {
+            fromId: 'Network:Partner_Community',
+            toId: 'Profile:Partner Community User',
+            edgeType: 'references',
+            confidence: 'declared',
+            source: 'network-extractor',
+            properties: { via: 'memberProfile' },
+          },
+          {
+            fromId: 'Network:Partner_Community',
+            toId: 'Profile:Reviewer Profile',
+            edgeType: 'references',
+            confidence: 'declared',
+            source: 'network-extractor',
+            properties: { via: 'memberProfile' },
+          },
+          {
+            fromId: 'Network:Partner_Community',
+            toId: 'PermissionSet:Reviewer_Access',
+            edgeType: 'references',
+            confidence: 'declared',
+            source: 'network-extractor',
+            properties: { via: 'memberPermissionSet' },
+          },
+        ]);
+        // Repeated profile collapsed to a single edge.
+        expect(
+          memberEdges.filter((e) => e.toId === 'Profile:Partner Community User'),
+        ).toHaveLength(1);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

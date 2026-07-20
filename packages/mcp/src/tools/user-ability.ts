@@ -23,7 +23,15 @@
  *
  * `declared` confidence — all of this is declared profile/permset metadata.
  *
- * Input: `{ componentId: 'Profile:X' | 'PermissionSet:X', limit?, offset? }`.
+ * Input: `{ componentId: 'Profile:X' | 'PermissionSet:X', limit?, offset? }` —
+ * or the natural `profileApiName` / `permissionSetApiName` selector (a bare name
+ * is coerced to the container prefix; `profileId` / `permissionSetId` are
+ * accepted too, canonical `componentId` wins). A call that names NO container is
+ * a NAMED `invalid-query`, never a bare Zod "componentId: Required".
+ * Pass an optional FIELD scope (`fieldId`, or `fieldApiName` + `objectApiName`)
+ * to answer "can this container edit {Object}.{field}?" — the response adds a
+ * `fieldAccess` block (the container's declared FLS read/edit) + `appliedScope`;
+ * an unresolvable field is `invalid-query`.
  * `declared` confidence — all of this is declared profile/permset metadata.
  */
 
@@ -40,6 +48,12 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  mergeInputAliases,
+  resolveFieldAlias,
+  toObjectApiName,
+  toProfileOrPermSetId,
+} from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 
 const GRANTER_PREFIXES = ['Profile:', 'PermissionSet:'] as const;
@@ -152,8 +166,25 @@ export const readLoginHours = (
   return out;
 };
 
-export const userAbilityInputSchema = z.object({
-  componentId: z.string().min(1),
+const userAbilityInputBaseSchema = z.object({
+  // USER-ABILITY-REJECTS-FIELD-SCOPE (narrowed residual): `componentId` is now
+  // OPTIONAL at the schema level — the natural `profileApiName` /
+  // `permissionSetApiName` (and `profileId` / `permissionSetId`) selectors are
+  // merged into it by the `z.preprocess` wrapper below. A call that names NO
+  // container at all is refused by the handler with a NAMED `invalid-query`
+  // (never a bare Zod "componentId: Required"). A canonical `componentId` call
+  // is byte-identical to before.
+  componentId: z.string().min(1).optional(),
+  // USER-ABILITY-REJECTS-FIELD-SCOPE: optional FIELD scope — "can {profile}
+  // edit {Object}.{field}?". Pass `fieldId` (`CustomField:Object.Field` or bare
+  // `Object.Field`) OR `fieldApiName` + `objectApiName`. When present the handler
+  // adds a `fieldAccess` block (the container's FLS read/edit on that field) and
+  // echoes `appliedScope`; an unresolvable field is `invalid-query`, never a
+  // silent profile-only inventory that ignored the field. Omit all three for the
+  // pre-existing ability inventory (byte-identical).
+  fieldId: z.string().min(1).optional(),
+  fieldApiName: z.string().min(1).optional(),
+  objectApiName: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
   // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
@@ -161,6 +192,42 @@ export const userAbilityInputSchema = z.object({
   // omitting it = today's behavior (offset 0 / explicit `offset`).
   cursor: z.string().min(1).optional(),
 });
+
+export const userAbilityInputSchema = z.preprocess((raw) => {
+  // USER-ABILITY-REJECTS-FIELD-SCOPE (narrowed residual): accept the natural
+  // `profileApiName` / `permissionSetApiName` selectors (and the `profileId` /
+  // `permissionSetId` id aliases) alongside the canonical `componentId` — the
+  // container is the ability SUBJECT, resolved to its `Profile:` / `PermissionSet:`
+  // prefix (canonical `componentId` wins). Mirrors `tab_availability`, so a host
+  // that route→`user_ability`s a "can {profile} edit {Object}.{field}?" question
+  // and passes the profile by its NATURAL name no longer hard-fails.
+  const merged = mergeInputAliases(raw, [
+    {
+      canonical: 'componentId',
+      aliases: ['profileId', 'profileApiName', 'permissionSetId', 'permissionSetApiName'],
+    },
+  ]);
+  if (merged !== null && typeof merged === 'object' && !Array.isArray(merged)) {
+    const o = merged as Record<string, unknown>;
+    const id = typeof o.componentId === 'string' ? o.componentId : '';
+    // Only coerce a BARE granter name (no `Type:` prefix — Salesforce API names
+    // never contain a colon) up to a canonical Profile/PermissionSet id. An id
+    // that already carries a component-type prefix (`CustomObject:…`, and even
+    // the already-canonical `Profile:`/`PermissionSet:` forms) contains a `:`, so
+    // it is LEFT UNTOUCHED — a non-granter id then falls through to the handler's
+    // Profile/PermissionSet prefix check and is rejected with `invalid-query`,
+    // instead of being silently rewritten to `Profile:CustomObject:…` and 404-ing
+    // as a phantom Profile. Mirrors `tab_availability`.
+    if (id.length > 0 && !id.includes(':')) {
+      const rawObj = raw as Record<string, unknown>;
+      const fromPs =
+        typeof rawObj.permissionSetId === 'string' ||
+        typeof rawObj.permissionSetApiName === 'string';
+      o.componentId = fromPs ? `PermissionSet:${id}` : toProfileOrPermSetId(id);
+    }
+  }
+  return merged;
+}, userAbilityInputBaseSchema);
 
 export type UserAbilityInput = z.infer<typeof userAbilityInputSchema>;
 
@@ -200,6 +267,24 @@ export interface UserAbilityOutput {
     readonly actionPermissions: number;
     readonly customPermissions: number;
   };
+  /**
+   * USER-ABILITY-REJECTS-FIELD-SCOPE: echoes the FIELD scope ACTUALLY applied.
+   * Present ONLY when the caller passed a `fieldId` / `fieldApiName` field
+   * scope; a bare ability-inventory call omits it (byte-identical).
+   */
+  readonly appliedScope?: { readonly field: string };
+  /**
+   * The container's field-level security on the scoped field. Present ONLY on a
+   * field-scoped call. `readable` / `editable` are the declared FLS grants
+   * (edit implies read); both false means this profile/permission set grants no
+   * FLS on the field. `declared` — FLS is declared profile/permset metadata; it
+   * is NOT record access (record visibility still needs OWD + sharing).
+   */
+  readonly fieldAccess?: {
+    readonly field: string;
+    readonly readable: boolean;
+    readonly editable: boolean;
+  };
   readonly limit: number;
   readonly offset: number;
   readonly hasMore: boolean;
@@ -221,7 +306,20 @@ export const userAbilityHandler = async (
   ctx: Context,
   input: UserAbilityInput,
 ): Promise<Result<McpResponse<UserAbilityOutput>, McpError>> => {
-  if (!GRANTER_PREFIXES.some((p) => input.componentId.startsWith(p))) {
+  // USER-ABILITY-REJECTS-FIELD-SCOPE (narrowed residual): a call that resolved
+  // to NO container (no `componentId` and no `profileApiName` / `permissionSetApiName`
+  // / `profileId` / `permissionSetId` selector for the preprocess to merge) is
+  // refused with a NAMED `invalid-query`, never a bare Zod "componentId: Required"
+  // and never a silent field-only inventory.
+  if (input.componentId === undefined || input.componentId.length === 0) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        'name the profile or permission set — pass `componentId` (`Profile:X` / `PermissionSet:X`) or the natural `profileApiName` / `permissionSetApiName` selector',
+      path: 'componentId',
+    });
+  }
+  if (!GRANTER_PREFIXES.some((p) => input.componentId!.startsWith(p))) {
     return err({
       kind: 'invalid-query',
       message: `componentId must be a Profile: or PermissionSet: id; got '${input.componentId}'`,
@@ -294,6 +392,73 @@ export const userAbilityHandler = async (
   }
   const missingCustomPerms = customPermissions.filter((c) => c.targetMissing).length;
 
+  // USER-ABILITY-REJECTS-FIELD-SCOPE: optional FIELD scope — "can {profile} edit
+  // {Object}.{field}?". Build a canonical CustomField id from `fieldId` (or
+  // `fieldApiName` + `objectApiName`), let the shared resolveFieldAlias enforce a
+  // single distinct target, verify the field is real, and read the container's
+  // declared FLS on it from its outgoing grantedBy edge (already fetched). An
+  // unresolvable field is `invalid-query`, never a silent field-dropped answer.
+  const fieldScopeRequested =
+    input.fieldId !== undefined || input.fieldApiName !== undefined;
+  let fieldAccess: { field: ComponentId; readable: boolean; editable: boolean } | null = null;
+  if (fieldScopeRequested) {
+    // `undefined` = source not passed; `null` = a bare field name with no object
+    // to qualify it (→ invalid-query); a string = a canonical CustomField id.
+    const buildCandidate = (raw: string | undefined): string | null | undefined => {
+      if (raw === undefined) return undefined;
+      const bare = raw.startsWith('CustomField:') ? raw.slice('CustomField:'.length) : raw;
+      if (bare.includes('.')) return `CustomField:${bare}`;
+      if (input.objectApiName !== undefined) {
+        return `CustomField:${toObjectApiName(input.objectApiName)}.${bare}`;
+      }
+      return null;
+    };
+    const cFieldId = buildCandidate(input.fieldId);
+    const cFieldApiName = buildCandidate(input.fieldApiName);
+    if (cFieldId === null || cFieldApiName === null) {
+      return err({
+        kind: 'invalid-query',
+        message:
+          'name the object for the field — pass `objectApiName`, or a fully-qualified `fieldId` / `fieldApiName` (`Object.Field` or `CustomField:Object.Field`)',
+        path: 'fieldApiName',
+      });
+    }
+    const distinct = [
+      ...new Set([cFieldId, cFieldApiName].filter((v): v is string => typeof v === 'string')),
+    ];
+    if (distinct.length > 1) {
+      return err({
+        kind: 'invalid-query',
+        message: `fieldId / fieldApiName name different fields (${distinct.join(', ')}); pass exactly one`,
+        path: 'fieldId',
+      });
+    }
+    const fieldAlias = resolveFieldAlias({ fieldId: distinct[0] as string });
+    if (!fieldAlias.ok) return err(fieldAlias.error);
+    const fieldId = fieldAlias.value.fieldId as ComponentId;
+
+    const fieldNode = await getNodeById(ctx.graph, fieldId);
+    if (!fieldNode.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${fieldNode.error.message}` });
+    }
+    const flsEdge = edgesResult.value.find((e) => e.toId === fieldId);
+    // Real = a field node exists OR the container carries an FLS grant edge to
+    // it (a phantom field referenced only by grants is still answerable). Neither
+    // → a typo, and a scoped FLS answer for it must fail, not silently omit it.
+    if (fieldNode.value === null && flsEdge === undefined) {
+      return err({
+        kind: 'invalid-query',
+        message: `no field matches \`${fieldId}\` in this vault — check the object + field api names`,
+        path: 'fieldId',
+      });
+    }
+    const p = flsEdge?.properties ?? {};
+    // FLS edit implies read (Salesforce never grants edit without read).
+    const editable = p['editable'] === true || p['edit'] === true;
+    const readable = editable || p['readable'] === true || p['read'] === true;
+    fieldAccess = { field: fieldId, readable, editable };
+  }
+
   // Login restrictions (Profile only). Surface the FULL ip-range AND
   // login-hours windows structurally. A permission set carries no login
   // security, so both lists stay empty regardless of any stray property.
@@ -307,8 +472,12 @@ export const userAbilityHandler = async (
 
   // CR-22: resolve the resume offset — an echoed cursor wins over an explicit
   // `offset`; a stale/forged cursor (changed componentId, different tool, or
-  // refreshed vault) is rejected with `invalid-query`.
-  const fingerprint = argsFingerprint({ componentId: input.componentId });
+  // refreshed vault) is rejected with `invalid-query`. The field scope binds the
+  // fingerprint too, so a field-scoped cursor cannot resume an unscoped call.
+  const fingerprint = argsFingerprint({
+    componentId: input.componentId,
+    ...(fieldAccess !== null ? { field: fieldAccess.field } : {}),
+  });
   let offset = input.offset ?? 0;
   if (input.cursor !== undefined) {
     const decoded = decodeCursor(input.cursor, {
@@ -354,6 +523,10 @@ export const userAbilityHandler = async (
       },
       actionPermissions,
       customPermissions,
+      ...(fieldAccess !== null ? { appliedScope: { field: fieldAccess.field } } : {}),
+      ...(fieldAccess !== null
+        ? { fieldAccess: { field: fieldAccess.field, readable: fieldAccess.readable, editable: fieldAccess.editable } }
+        : {}),
       summary: {
         runnableFlows: total,
         actionPermissions: actionPermissions.length,
@@ -367,6 +540,9 @@ export const userAbilityHandler = async (
       confidence: 'declared',
       boundaryNote:
         'runnableFlows = the flowAccess grants on this container; actionPermissions are declared system permissions; customPermissions are declared `<customPermissions>` grants (custom permissions are NOT system userPermissions, so they are not double-counted with actionPermissions). The user must be ASSIGNED this profile/permission set to gain them (runtime, not modeled). Login restrictions are Profile-only (`applies: false` for a permission set). Flow run access also requires the flow to be active.'
+        + (fieldAccess !== null
+          ? ` fieldAccess = this container's declared FLS on \`${fieldAccess.field}\` (read/edit; edit implies read; both false = no FLS granted). FLS is NOT record access — record visibility still needs OWD + sharing; for the full grantor breakdown on a field use \`field_access_audit\`.`
+          : '')
         + (missingCustomPerms > 0
           ? ` ${missingCustomPerms} granted custom permission(s) name a definition not present in this vault (targetMissing) — likely managed-package or not retrieved; the grant is declared but the definition is not resolvable here.`
           : ''),

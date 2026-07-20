@@ -89,10 +89,11 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import {
-  buildCoverageCaveat,
+  assertUsageCompleteness,
   offlineTrust,
   type CoverageCaveat,
 } from './coverage-trust.js';
+import { firstNonEmpty, toObjectApiName } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { nodeScanLimit } from './scan-cap.js';
 
@@ -173,6 +174,7 @@ const COMPONENT_TYPES = [
   'RecordType',
   'BusinessProcess',
   'CustomTab',
+  'WebLink',
   'CustomApplication',
   'QuickAction',
   'PathAssistant',
@@ -209,11 +211,27 @@ const COMPONENT_TYPES = [
  *     omitted, the handler falls back to `DEFAULT_UNUSED_TYPES`. An
  *     empty array means "scan nothing" — returns an empty response —
  *     which keeps the boundary predictable.
+ *   - `type` / `componentType` / `typeFilter`: optional SINGULAR type
+ *     alias — the shape a host reaches for ("unused WebLinks"). Folded
+ *     into a one-element `types` scope by the handler; an unrecognized
+ *     value is `invalid-query` (NEVER silently stripped to the default
+ *     Apex family). Ignored when the array `types` is present.
+ *   - `object` / `objectApiName`: optional OBJECT SCOPE — narrow the scan
+ *     to the components parented by that object ("unused WebLinks on
+ *     Contact"). Echoed in `appliedScope`.
  *   - `limit`: optional integer in `[1, 500]`. Defaults to 100 inside
  *     the handler when omitted.
  */
 export const unusedComponentsInputSchema = z.object({
   types: z.array(z.enum(COMPONENT_TYPES)).optional(),
+  // Singular type aliases — validated in the handler so an unknown value is a
+  // reasoned `invalid-query`, not a silent fall-through to the default family.
+  type: z.string().min(1).optional(),
+  componentType: z.string().min(1).optional(),
+  typeFilter: z.string().min(1).optional(),
+  // Object scope — narrows the scan to that object's children.
+  object: z.string().min(1).optional(),
+  objectApiName: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(UNUSED_MAX_LIMIT).optional(),
   // CR-22: page cursor for walking the full unused list when truncated.
   offset: z.number().int().min(0).optional(),
@@ -224,6 +242,67 @@ export const unusedComponentsInputSchema = z.object({
 export type UnusedComponentsInput = z.infer<
   typeof unusedComponentsInputSchema
 >;
+
+/** Fast membership set over the scannable ComponentType enum. */
+const COMPONENT_TYPE_SET: ReadonlySet<string> = new Set(COMPONENT_TYPES);
+
+/** The resolved scan scope: the types to walk and the optional object filter. */
+interface ResolvedUnusedScope {
+  readonly types: readonly ComponentType[];
+  /** Canonical `CustomObject:{ApiName}` object filter, or null when unscoped. */
+  readonly objectId: string | null;
+  /** Bare object api name for `appliedScope`, or null when unscoped. */
+  readonly object: string | null;
+  /** Whether the caller narrowed the type set (array OR singular alias). */
+  readonly typesExplicit: boolean;
+}
+
+/**
+ * Resolve the scan scope from the (interchangeable) type + object args, NEVER
+ * silently stripping one. Precedence for the TYPE axis: an explicit `types`
+ * array (even empty — "scan nothing") wins; else a singular `type` /
+ * `componentType` / `typeFilter` alias, validated against the scannable enum
+ * (unknown → `invalid-query`, so a bad type is a reasoned error, not a silent
+ * fall-through to the default Apex family); else the curated default set. The
+ * OBJECT axis reads `object` / `objectApiName` (bare or `CustomObject:` form).
+ */
+const resolveUnusedScope = (
+  input: UnusedComponentsInput,
+): Result<ResolvedUnusedScope, McpError> => {
+  const rawObject = firstNonEmpty(input.object, input.objectApiName);
+  const object = rawObject === undefined ? null : toObjectApiName(rawObject);
+  const objectId = object === null ? null : `CustomObject:${object}`;
+
+  if (input.types !== undefined) {
+    return ok({ types: input.types, objectId, object, typesExplicit: true });
+  }
+  const singular = firstNonEmpty(
+    input.type,
+    input.componentType,
+    input.typeFilter,
+  );
+  if (singular !== undefined) {
+    if (!COMPONENT_TYPE_SET.has(singular)) {
+      return err({
+        kind: 'invalid-query',
+        message: `\`${singular}\` is not a component type this tool scans for unused instances — pass a valid ComponentType (e.g. "WebLink", "CustomField", "ApexClass") via \`type\` or \`types\`, or omit to scan the curated default set`,
+        path: 'type',
+      });
+    }
+    return ok({
+      types: [singular as ComponentType],
+      objectId,
+      object,
+      typesExplicit: true,
+    });
+  }
+  return ok({
+    types: DEFAULT_UNUSED_TYPES,
+    objectId,
+    object,
+    typesExplicit: false,
+  });
+};
 
 /**
  * One entry in the response's `components` array. Carries the
@@ -241,6 +320,18 @@ export interface UnusedComponent {
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface UnusedComponentsOutput {
+  /**
+   * Echoes the scope ACTUALLY applied so a host never assumes a `type` / `object`
+   * filter it passed was silently stripped (the wrong-family bug this closes).
+   * `types` is the concrete list scanned; `object` is the bare object filter (or
+   * null); `mode` is `scoped` when the caller narrowed type or object, else
+   * `default` (the curated set, no object filter).
+   */
+  readonly appliedScope: {
+    readonly types: readonly string[];
+    readonly object: string | null;
+    readonly mode: 'default' | 'scoped';
+  };
   readonly components: readonly UnusedComponent[];
   /** Per-type unused-instance counts (FULL counts, not truncated). */
   readonly byType: Readonly<Record<string, number>>;
@@ -280,12 +371,26 @@ export interface UnusedComponentsOutput {
  * Referrer families whose absence can FAKE an "unused" verdict: a component
  * is unused only relative to what was retrieved, so incomplete coverage of
  * any family that can reference components must qualify the claim.
+ *
+ * GATE-HONESTY-EMPTY-GRAPH-EQUALS-SAFE: includes the PLACEMENT-source families
+ * whose omission the false-safe cluster proved blind — CustomSite (a site's
+ * `<indexPage>` / `<siteTemplate>` / favicon placement of a VF page or
+ * StaticResource), WebLink (an object's list-view / search-layout buttons),
+ * RecordType and CustomTab (compact-layout / tab placement) — so an "unused"
+ * claim over a vault that never retrieved those planes reads "not checked", not
+ * a proven "none". Fed as the RETRIEVE axis into the SHARED
+ * `assertUsageCompleteness` contract (`coverage-trust.ts`), the same completeness
+ * helper `review_change`, `package_impact` and `safe_to_delete_field` use — which
+ * ALSO folds in the EXTRACTOR-BLIND axis (known-blind planes for the scanned
+ * types) that no retrieve list can express.
  */
 const UNUSED_REQUIRED_COVERAGE: readonly string[] = [
   'ApexClass',
   'ApexTrigger',
   'AuraDefinitionBundle',
   'CompactLayout',
+  'CustomSite',
+  'CustomTab',
   'Dashboard',
   'EmailTemplate',
   'FieldSet',
@@ -295,11 +400,13 @@ const UNUSED_REQUIRED_COVERAGE: readonly string[] = [
   'LightningComponentBundle',
   'ListView',
   'QuickAction',
+  'RecordType',
   'Report',
   'SharingRule',
   'ValidationRule',
   'VisualforceComponent',
   'VisualforcePage',
+  'WebLink',
   'WorkflowRule',
 ];
 
@@ -474,10 +581,17 @@ const compareGlobally = (a: UnusedComponent, b: UnusedComponent): number => {
  * per-instance list (sorted by id ASC). Test ApexClasses are
  * excluded inside this loop so the caller's downstream logic does
  * not need to special-case ApexClass.
+ *
+ * When `objectScopeId` is a canonical `CustomObject:{ApiName}` id, the scan is
+ * narrowed to nodes parented by that object (`parentId` match) BEFORE the
+ * incoming-edge fetch — so an object-scoped query answers only that object's
+ * children (fields, WebLinks, validation rules, …) and a type with no object
+ * parent (e.g. ApexClass) honestly returns empty rather than the org-wide list.
  */
 const scanType = async (
   ctx: Context,
   type: ComponentType,
+  objectScopeId: string | null,
 ): Promise<Result<readonly UnusedComponent[], string>> => {
   // Page this type to EXHAUSTION, not just the first 500. The `unused` verdict
   // is destructive and `byType` is a tally; a single `listNodesByType` page
@@ -490,15 +604,22 @@ const scanType = async (
     return err(totalRes.error.message);
   }
   const limit = pageSize();
-  const nodes: Node[] = [];
+  const allNodes: Node[] = [];
   for (let offset = 0; ; offset += limit) {
     const page = await listNodesByType(ctx.graph, type, { limit, offset });
     if (!page.ok) {
       return err(page.error.message);
     }
-    nodes.push(...page.value);
-    if (page.value.length < limit || nodes.length >= totalRes.value) break;
+    allNodes.push(...page.value);
+    if (page.value.length < limit || allNodes.length >= totalRes.value) break;
   }
+  // Object scope: keep only this object's children (parentId match). A type with
+  // no object parent (ApexClass, EmailTemplate, …) filters to empty — an honest
+  // "no such component on that object", never the wrong-family org-wide list.
+  const nodes =
+    objectScopeId === null
+      ? allNodes
+      : allNodes.filter((n) => n.parentId === objectScopeId);
   const note = noteForType(type);
   const isEntryPoint = ENTRY_POINT_TYPES.has(type);
 
@@ -564,13 +685,18 @@ export const unusedComponentsHandler = async (
   input: UnusedComponentsInput,
 ): Promise<Result<McpResponse<UnusedComponentsOutput>, McpError>> => {
   const limit = input.limit ?? UNUSED_DEFAULT_LIMIT;
-  const types = input.types ?? DEFAULT_UNUSED_TYPES;
+
+  // Resolve the (interchangeable) type + object scope, NEVER silently stripping
+  // one. An unknown singular `type` is `invalid-query`, not a wrong-family list.
+  const scopeResult = resolveUnusedScope(input);
+  if (!scopeResult.ok) return scopeResult;
+  const { types, objectId, object, typesExplicit } = scopeResult.value;
 
   const allUnused: UnusedComponent[] = [];
   const byType: Record<string, number> = {};
 
   for (const type of types) {
-    const result = await scanType(ctx, type);
+    const result = await scanType(ctx, type, objectId);
     if (!result.ok) {
       return err({
         kind: 'internal',
@@ -584,11 +710,9 @@ export const unusedComponentsHandler = async (
   const sorted = [...allUnused].sort(compareGlobally);
 
   // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
-  // The one narrowing arg is `types`; argsFingerprint binds the token to it so a
-  // token minted for one type set can't be replayed against another.
-  const fingerprint = argsFingerprint(
-    input.types !== undefined ? { types: input.types } : {},
-  );
+  // Bind the token to the RESOLVED scope (types + object) so a token minted for
+  // one scope can't be replayed against another.
+  const fingerprint = argsFingerprint({ types: [...types], object });
   let offset = input.offset ?? 0;
   if (input.cursor !== undefined) {
     const decoded = decodeCursor(input.cursor, {
@@ -616,17 +740,35 @@ export const unusedComponentsHandler = async (
   const isPaged = truncated || offset > 0;
 
   // "Unused" is an absence claim: it is only as strong as the coverage of the
-  // families that could hold the reference. Incomplete referrer coverage
-  // (errored retrieve, scoped refresh, mid-staged-build pending tiers) must
-  // qualify the answer — P13-STAGED-absence-battery red without this.
-  const coverageCaveat = buildCoverageCaveat(
-    ctx,
-    UNUSED_REQUIRED_COVERAGE,
-    'Unused status',
-  );
+  // families that could hold the reference AND the extractor's ability to see
+  // those references. Routed through the SHARED L1 completeness contract
+  // (GATE-HONESTY-EMPTY-GRAPH-EQUALS-SAFE) so this tool, review_change,
+  // package_impact and safe_to_delete_field share ONE definition of "incomplete":
+  //   - RETRIEVE axis — incomplete referrer coverage (errored retrieve, scoped
+  //     refresh, mid-staged-build pending tiers) qualifies the answer, exactly as
+  //     before (fireOnUnknownCoverage: a pre-coverage vault is not-provably-clean).
+  //     P13-STAGED-absence-battery red without this.
+  //   - EXTRACTOR-BLIND axis (residual) — a SCANNED type whose referrers include a
+  //     KNOWN-BLIND plane (e.g. a StaticResource reached only via a dynamically
+  //     built LWC/Aura resourceUrl) carries a structured `extractor-blind`
+  //     blindSpot EVEN on a fully-covered vault, so its "unused" reads "not
+  //     checked", not proven "none". `blindPlaneTypes` is the scanned type set.
+  const coverageCaveat = assertUsageCompleteness(ctx, {
+    usageFamilies: UNUSED_REQUIRED_COVERAGE,
+    blindPlaneTypes: types,
+    purpose: 'Unused status',
+    fireOnUnknownCoverage: true,
+  }).caveat;
+
+  const scoped = typesExplicit || objectId !== null;
 
   return ok({
     data: {
+      appliedScope: {
+        types: [...types],
+        object,
+        mode: scoped ? 'scoped' : 'default',
+      },
       components,
       byType,
       truncated,

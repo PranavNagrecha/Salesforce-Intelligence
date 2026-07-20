@@ -197,6 +197,96 @@ describe('extractAuraDefinitionBundle', () => {
     });
   });
 
+  describe('apex controller attribute (AURA-OMITS-APEX-CONTROLLER-ATTRIBUTE)', () => {
+    it('emits a declared references edge to the ApexClass named in controller=', async () => {
+      // Aura bundles bind a server-side Apex controller via the root markup
+      // `controller="X"` attribute so the component can call @AuraEnabled
+      // methods. Before this fix the extractor only tracked the *JS*
+      // controller file (`hasController`) and never wired the Apex class,
+      // so "what Apex does this Aura component call" and change-impact
+      // gates on the controller missed every Aura dependent.
+      const markup =
+        '<aura:component controller="SyntheticApexCtrl" implements="flexipage:availableForAllPageTypes">\n' +
+        '  <aura:attribute name="recordId" type="String" />\n' +
+        '</aura:component>\n';
+      const { tempDir, bundleDir } = await writeTempAuraBundle('CtrlBinder', {
+        markupBody: markup,
+      });
+      try {
+        const result = await extractAuraDefinitionBundle(bundleDir);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const controllerEdge = result.value.edges.find(
+          (e) => e.toId === 'ApexClass:SyntheticApexCtrl',
+        );
+        expect(controllerEdge).toBeDefined();
+        expect(controllerEdge).toMatchObject({
+          fromId: 'AuraDefinitionBundle:CtrlBinder',
+          toId: 'ApexClass:SyntheticApexCtrl',
+          edgeType: 'references',
+          confidence: 'declared',
+          source: 'aura-extractor',
+          properties: { role: 'controller' },
+        });
+        const node = result.value.nodes[0];
+        expect(node?.properties['apexController']).toBe('SyntheticApexCtrl');
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('parses controller= from a multi-line root tag (attribute order-independent)', async () => {
+      // Real DX-retrieved bundles wrap the opening tag across lines with
+      // `controller=` as the last attribute; the parser must span newlines.
+      const markup =
+        '<aura:component\n' +
+        '  access="global"\n' +
+        '  implements="force:appHostable"\n' +
+        '  controller="LateCtrl"\n' +
+        '>\n' +
+        '  <p>markup</p>\n' +
+        '</aura:component>\n';
+      const { tempDir, bundleDir } = await writeTempAuraBundle('LateBinder', {
+        markupBody: markup,
+      });
+      try {
+        const result = await extractAuraDefinitionBundle(bundleDir);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(
+          result.value.edges.some((e) => e.toId === 'ApexClass:LateCtrl'),
+        ).toBe(true);
+        expect(result.value.nodes[0]?.properties['apexController']).toBe(
+          'LateCtrl',
+        );
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits no controller edge or apexController prop when controller= is absent', async () => {
+      // A bundle with only a JS controller file (hasController) but no
+      // markup `controller=` attribute must stay Apex-edge-free — the prop
+      // is omitted entirely (not null) so golden output is unchanged.
+      const { tempDir, bundleDir } = await writeTempAuraBundle('NoApexCtrl', {
+        controllerBody: "({ doInit: function () {} })\n",
+      });
+      try {
+        const result = await extractAuraDefinitionBundle(bundleDir);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(
+          result.value.edges.some((e) => e.toId.startsWith('ApexClass:')),
+        ).toBe(false);
+        expect(result.value.nodes[0]?.properties).not.toHaveProperty(
+          'apexController',
+        );
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('scanner tolerance', () => {
     it('tolerates an empty controller without erroring or warning', async () => {
       const { tempDir, bundleDir } = await writeTempAuraBundle('EmptyCtrl', {

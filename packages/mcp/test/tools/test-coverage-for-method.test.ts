@@ -540,3 +540,70 @@ describe('testCoverageForMethodHandler: method-level exercise flag (P4-test-reac
     expect(r.value.data.methodCoveringCount).toBe(1);
   });
 });
+
+// =============================================================================
+// GUARD (TEST-COVERAGE-FOR-METHOD-REJECTS-COMPONENTID): a dev "which tests cover
+// {method}?" after route_question naturally passes `componentId` (as on sibling
+// Apex tools), but the schema required `classApiName` only and hard-failed
+// `classApiName: Required`. componentId / apiName must now be interchangeable
+// with classApiName (same covering tests, byte-equal), disagreeing selectors
+// reject, and the resolved scope is echoed in appliedScope.
+// =============================================================================
+describe('testCoverageForMethodHandler — classApiName / componentId / apiName alias (guard)', () => {
+  it('componentId ≡ classApiName ≡ bare apiName resolve to the same covering tests (byte-equal data)', async () => {
+    const byComponentId = await testCoverageForMethodHandler(ctx, {
+      componentId: 'ApexClass:Target',
+    });
+    const byClassApiName = await testCoverageForMethodHandler(ctx, {
+      classApiName: 'ApexClass:Target',
+    });
+    const byApiName = await testCoverageForMethodHandler(ctx, { apiName: 'Target' });
+    const byBare = await testCoverageForMethodHandler(ctx, { classApiName: 'Target' });
+    expect(byComponentId.ok && byClassApiName.ok && byApiName.ok && byBare.ok).toBe(true);
+    if (!byComponentId.ok || !byClassApiName.ok || !byApiName.ok || !byBare.ok) return;
+    const canonical = JSON.stringify(byClassApiName.value.data);
+    expect(JSON.stringify(byComponentId.value.data)).toBe(canonical);
+    expect(JSON.stringify(byApiName.value.data)).toBe(canonical);
+    expect(JSON.stringify(byBare.value.data)).toBe(canonical);
+    expect(byComponentId.value.data.appliedScope).toEqual({
+      component: 'ApexClass:Target',
+      mode: 'component',
+    });
+  });
+
+  it('componentId scope is actually honored — a different class returns ITS tests', async () => {
+    const target = await testCoverageForMethodHandler(ctx, {
+      componentId: 'ApexClass:Target',
+    });
+    const batch = await testCoverageForMethodHandler(ctx, {
+      componentId: 'ApexClass:OrderBatch',
+    });
+    expect(target.ok && batch.ok).toBe(true);
+    if (!target.ok || !batch.ok) return;
+    const batchIds = batch.value.data.coveringTestClasses.map((c) => c.id);
+    expect(batchIds).toContain('ApexClass:BatchTest');
+    // The two scopes yield DIFFERENT covering sets — proof the alias is used,
+    // not ignored in favor of a fixed default.
+    expect(JSON.stringify(batch.value.data.coveringTestClasses)).not.toBe(
+      JSON.stringify(target.value.data.coveringTestClasses),
+    );
+    expect(batch.value.data.appliedScope.component).toBe('ApexClass:OrderBatch');
+  });
+
+  it('disagreeing classApiName / componentId is invalid-query (never a silent pick)', async () => {
+    const r = await testCoverageForMethodHandler(ctx, {
+      classApiName: 'ApexClass:Target',
+      componentId: 'ApexClass:OrderBatch',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('no class selector at all is invalid-query', async () => {
+    const r = await testCoverageForMethodHandler(ctx, {});
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+});

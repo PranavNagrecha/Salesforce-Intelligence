@@ -66,7 +66,10 @@ import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges, listNodesByType } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
+import { STATUS_CODE_TAXONOMY } from '../knowledge/loader.js';
 import type { Context } from '../server.js';
+
+import { mergeInputAliases } from './input-aliases.js';
 
 /** Page size for the full ValidationRule scan (LIST_MAX_LIMIT is 500). */
 const VR_SCAN_PAGE_SIZE = 500;
@@ -92,11 +95,30 @@ const EXPLAIN_ERROR_DISCLOSURE =
 // Input schema
 // ---------------------------------------------------------------------------
 
-export const explainErrorInputSchema = z.object({
+const explainErrorInputBaseSchema = z.object({
   errorText: z.string().min(1),
   /** Optional SObject narrowing hint (the object the save was on). */
   object: z.string().min(1).optional(),
 });
+
+/**
+ * `sfi.explain_error` input. A router / host that pasted the banner naturally
+ * reaches for `error` / `message` / `errorMessage` / `text` instead of the
+ * canonical `errorText` (EXPLAIN-ERROR-REJECTS-NATURAL-ALIASES). Those are
+ * merged into `errorText` before validation via the shared alias normalizer
+ * (precedence: canonical `errorText` wins, then `error`, `message`,
+ * `errorMessage`, `text`). A call that already carries `errorText` is
+ * byte-identical to the pre-alias contract (the merge is a no-op when the
+ * canonical is present); a call with NO error text at all still fails closed
+ * with the named `errorText: Required` `invalid-query`.
+ */
+export const explainErrorInputSchema = z.preprocess(
+  (raw) =>
+    mergeInputAliases(raw, [
+      { canonical: 'errorText', aliases: ['error', 'message', 'errorMessage', 'text'] },
+    ]),
+  explainErrorInputBaseSchema,
+);
 
 export type ExplainErrorInput = z.infer<typeof explainErrorInputSchema>;
 
@@ -189,113 +211,18 @@ export interface ExplainErrorOutput {
 // ---------------------------------------------------------------------------
 
 /**
- * The status-code taxonomy. `crossRefObjectAutomation` marks codes whose most
- * common producer is object automation (trigger / flow), so the handler lists
- * the object's `triggersOn` sources as a category-level cross-reference.
+ * The status-code taxonomy — now sourced from the generated concept-model
+ * (curated in `packages/mcp/model/status-taxonomy.yaml`, compiled to
+ * `../knowledge/generated/concept-model.ts` by `scripts/build-concept-model.mjs`).
+ * Re-exported UNCHANGED under the same name so existing consumers — e.g.
+ * `explain-debug-log.ts` — keep importing it from this module, and the runtime
+ * value stays byte-identical to the former inline literal.
+ *
+ * `crossRefObjectAutomation` marks codes whose most common producer is object
+ * automation (trigger / flow), so the handler lists the object's `triggersOn`
+ * sources as a category-level cross-reference.
  */
-export const STATUS_CODE_TAXONOMY: Readonly<
-  Record<
-    string,
-    {
-      readonly category: string;
-      readonly explanation: string;
-      readonly producedByTypes: readonly string[];
-      readonly crossRefObjectAutomation: boolean;
-    }
-  >
-> = Object.freeze({
-  FIELD_CUSTOM_VALIDATION_EXCEPTION: {
-    category: 'validation-rule',
-    explanation:
-      'A validation rule (or a flow/Apex addError with a field) rejected the save because a field failed a declared condition.',
-    producedByTypes: ['ValidationRule', 'Flow', 'ApexTrigger', 'ApexClass'],
-    crossRefObjectAutomation: false,
-  },
-  REQUIRED_FIELD_MISSING: {
-    category: 'required-field',
-    explanation:
-      'A field required at the API/layout/schema level was left empty. Sources: a universally-required custom field, a required field on the page layout, a master-detail relationship field, or a flow/Apex that sets a field required.',
-    producedByTypes: ['CustomField', 'Layout', 'Flow', 'ApexTrigger'],
-    crossRefObjectAutomation: false,
-  },
-  CANNOT_INSERT_UPDATE_ACTIVATE_ENTITY: {
-    category: 'automation-abort',
-    explanation:
-      "An Apex trigger or a record-triggered flow on this object threw/aborted the DML (an addError, a thrown exception, or a flow fault). The status code is the DML's generic wrapper — the real cause is the automation that ran on save.",
-    producedByTypes: ['ApexTrigger', 'Flow', 'ApexClass'],
-    crossRefObjectAutomation: true,
-  },
-  UNABLE_TO_LOCK_ROW: {
-    category: 'lock-contention',
-    explanation:
-      'A row-lock could not be obtained — two transactions contended for the same record (often parent record contention from triggers/flows updating a shared parent, or a bulk load racing itself). This is runtime contention, not a single component defect.',
-    producedByTypes: ['ApexTrigger', 'Flow', 'ApexClass'],
-    crossRefObjectAutomation: true,
-  },
-  INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY: {
-    category: 'access',
-    explanation:
-      'The running user lacks access to a RELATED record referenced by this save (a lookup/master-detail target), not necessarily this object. Sharing/OWD/CRUD on the referenced object is the constraint.',
-    producedByTypes: ['Profile', 'PermissionSet', 'SharingRule'],
-    crossRefObjectAutomation: false,
-  },
-  INSUFFICIENT_ACCESS_OR_READONLY: {
-    category: 'access',
-    explanation:
-      'The running user lacks object/field CRUD or record-level edit access, or the record is read-only (locked by an approval process or a validation on a closed record).',
-    producedByTypes: ['Profile', 'PermissionSet', 'ApprovalProcess'],
-    crossRefObjectAutomation: false,
-  },
-  DUPLICATES_DETECTED: {
-    category: 'duplicate',
-    explanation:
-      'A duplicate rule blocked (or alerted on) the save because a matching rule found an existing similar record.',
-    producedByTypes: ['DuplicateRule', 'MatchingRule'],
-    crossRefObjectAutomation: false,
-  },
-  DUPLICATE_VALUE: {
-    category: 'duplicate',
-    explanation:
-      'A unique/External-Id field already holds this value on another record (a schema uniqueness constraint), distinct from a DuplicateRule alert.',
-    producedByTypes: ['CustomField'],
-    crossRefObjectAutomation: false,
-  },
-  STRING_TOO_LONG: {
-    category: 'field-integrity',
-    explanation:
-      'A text value exceeded the field length declared on the schema (often a formula/flow/Apex writing more characters than the target field allows).',
-    producedByTypes: ['CustomField', 'Flow', 'ApexClass'],
-    crossRefObjectAutomation: false,
-  },
-  FIELD_INTEGRITY_EXCEPTION: {
-    category: 'field-integrity',
-    explanation:
-      'A value violated a field-integrity constraint (bad picklist value, incompatible field-dependency, or a malformed compound field).',
-    producedByTypes: ['CustomField'],
-    crossRefObjectAutomation: false,
-  },
-  INVALID_CROSS_REFERENCE_KEY: {
-    category: 'field-integrity',
-    explanation:
-      'A lookup/master-detail field was set to an id that is invalid, wrong object type, or inaccessible — the referenced record could not be resolved.',
-    producedByTypes: ['CustomField', 'Flow', 'ApexClass'],
-    crossRefObjectAutomation: false,
-  },
-  ENTITY_IS_DELETED: {
-    category: 'field-integrity',
-    explanation:
-      'The record being updated/deleted is already in the Recycle Bin — a concurrent delete, or automation acting on a stale id.',
-    producedByTypes: ['ApexClass', 'Flow'],
-    crossRefObjectAutomation: false,
-  },
-  STORAGE_LIMIT_EXCEEDED: {
-    category: 'org-limit',
-    explanation:
-      "The org's data storage allocation is exhausted — an org-wide limit, not a component defect.",
-    producedByTypes: [],
-    crossRefObjectAutomation: false,
-  },
-});
+export { STATUS_CODE_TAXONOMY };
 
 /**
  * Detect a recognized REST/API status code token in the error text. Returns the

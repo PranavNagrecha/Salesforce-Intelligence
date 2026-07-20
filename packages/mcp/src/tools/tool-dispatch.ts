@@ -9,6 +9,8 @@
  * @see index.ts   — thin re-exports + registerTools
  */
 
+import { homedir } from 'node:os';
+
 import {
   type CallToolResult,
 } from '@modelcontextprotocol/sdk/types.js';
@@ -304,6 +306,14 @@ import {
   flowFaultAuditInputSchema,
 } from './flow-fault-audit.js';
 import {
+  flowGraphHandler,
+  flowGraphInputSchema,
+} from './flow-graph.js';
+import {
+  flowTraceHandler,
+  flowTraceInputSchema,
+} from './flow-trace.js';
+import {
   generateAdminHandbookHandler,
   generateAdminHandbookInputSchema,
 } from './generate-admin-handbook.js';
@@ -373,6 +383,7 @@ import {
   integrationProcedureChainHandler,
   integrationProcedureChainInputSchema,
 } from './integration-procedure-chain.js';
+import { interpretHandler, interpretInputSchema } from './interpret.js';
 import {
   lastModifiedHandler,
   lastModifiedInputSchema,
@@ -609,6 +620,7 @@ import {
   trendHandler,
   trendInputSchema,
 } from './snapshot-trend.js';
+import { reconcileSoePhasesOmittedAfterGlobalTrim } from './soe-payload-bounds.js';
 import {
   automationRiskReportHandler,
   automationRiskReportInputSchema,
@@ -1380,6 +1392,10 @@ export const dispatchTool = async (
         flowFaultAuditInputSchema,
         flowFaultAuditHandler,
       );
+    case 'sfi.flow_graph':
+      return runTool(ctx, args, flowGraphInputSchema, flowGraphHandler);
+    case 'sfi.flow_trace':
+      return runTool(ctx, args, flowTraceInputSchema, flowTraceHandler);
     case 'sfi.explain_apex_method':
       return runTool(
         ctx,
@@ -1748,6 +1764,9 @@ export const dispatchTool = async (
         fieldProvenanceInputSchema,
         fieldProvenanceHandler,
       );
+    // RM-wire — deterministic reasoning-engine surface (offline, cited).
+    case 'sfi.interpret':
+      return runTool(ctx, args, interpretInputSchema, interpretHandler);
     // v2.2 R2 — universal find-anywhere + discovery surface.
     case 'sfi.find_field_anywhere':
       return runTool(
@@ -1912,6 +1931,62 @@ export const dispatchTool = async (
 };
 
 /**
+ * Stamp the vault's ORG, on-disk PATH, and BUILDER VERSION onto every success
+ * response's `vaultState` at the single dispatch choke point every tool passes
+ * through, so a reader sees WHICH org / WHICH vault / WHICH extractor version
+ * produced the answer on the FIRST call — the fix for silently answering from
+ * the wrong org or a stale-builder vault. Central here rather than in ~157
+ * inline handler sites; `run_analysis` re-dispatches through `runTool` so its
+ * verbatim envelope is stamped too, and error envelopes (no `vaultState`) are
+ * untouched. The three fields are optional in the contract so handlers need
+ * not set them; they are always present on real success responses.
+ */
+/**
+ * Render a vault path for disclosure with the user's HOME directory collapsed
+ * to `~`, so the `vaultPath` field can name WHICH on-disk vault produced an
+ * answer WITHOUT ever leaking the OS username (macOS/Linux home paths embed it,
+ * e.g. `/Users/<name>/…`). The raw home prefix must never reach a client —
+ * especially over the HTTP transport — so this redaction is the invariant, not
+ * a cosmetic. Paths outside HOME (a system tmpdir in tests, a shared mount) are
+ * returned as-is: they carry no username.
+ */
+const toDisclosedVaultPath = (absPath: string): string => {
+  const home = homedir();
+  return home.length > 0 && (absPath === home || absPath.startsWith(`${home}/`))
+    ? `~${absPath.slice(home.length)}`
+    : absPath;
+};
+
+const stampVaultDisclosure = <T>(
+  resp: McpResponse<T>,
+  ctx: Context,
+): McpResponse<T> => {
+  // `ctx.manifest` is always present in a real server (buildContext loads it),
+  // but the response-size / leak unit tests drive `runTool` with a synthetic
+  // `{} as Context`. Read defensively and stamp only the fields we actually
+  // have, so a minimal ctx cannot turn a happy-path response into an internal
+  // error, and the stamp stays byte-transparent when there is nothing to add.
+  const manifest = ctx.manifest as
+    | { readonly sourceOrg?: string; readonly version?: string }
+    | undefined;
+  return {
+    ...resp,
+    vaultState: {
+      ...resp.vaultState,
+      ...(typeof manifest?.sourceOrg === 'string'
+        ? { targetOrg: manifest.sourceOrg }
+        : {}),
+      ...(typeof ctx.vaultRoot === 'string'
+        ? { vaultPath: toDisclosedVaultPath(ctx.vaultRoot) }
+        : {}),
+      ...(typeof manifest?.version === 'string'
+        ? { builderVersion: manifest.version }
+        : {}),
+    },
+  };
+};
+
+/**
  * Generic per-tool dispatch helper. Each `dispatchTool` case calls this
  * with its Zod schema and handler; `runTool` Zod-parses the args (emits
  * an `invalid-query` envelope on failure), then invokes the handler and
@@ -1962,11 +2037,16 @@ export const runTool = async <S extends z.ZodTypeAny, T>(
   }
   try {
     const result = await handler(ctx, parsed.data);
-    return jsonResult(result.ok ? result.value : { error: result.error }, {
-      args: parsed.data as unknown as Readonly<Record<string, unknown>>,
-      knobs: narrowingKnobs(schema),
-      vaultRoot: ctx.vaultRoot,
-    });
+    return jsonResult(
+      result.ok
+        ? stampVaultDisclosure(result.value, ctx)
+        : { error: result.error },
+      {
+        args: parsed.data as unknown as Readonly<Record<string, unknown>>,
+        knobs: narrowingKnobs(schema),
+        vaultRoot: ctx.vaultRoot,
+      },
+    );
   } catch (error) {
     // An unexpected throw escaped the handler (or the serialize step). Log
     // the FULL error (incl. stack, which may carry org content) to stderr
@@ -2256,6 +2336,18 @@ export const jsonResult = (
   // the check applies to the final serialized envelope, not only its body.
   const reductionCap = Math.max(1, cap - Math.min(1_024, Math.floor(cap / 4)));
   const { dropped, keptOfLargest } = truncateDataArrays(clone, reductionCap);
+  // SOE-omission honesty (WHAT-HAPPENS-ON-SAVE-TRUNCATION-DROPS-LATER-PHASES):
+  // when the global tail-truncation just shortened a composed-SOE `data.soe`, a
+  // later automation phase `summary.phaseCounts` still claims may have been
+  // dropped. Recompute + stamp `phasesOmitted` from the surviving steps (via the
+  // ONE shared computePhasesOmitted) so a globally-trimmed SOE payload can never
+  // silently contradict its own phaseCounts — the same envelope law the
+  // tool-local `enforceSoeByteBudget` path and `order_of_execution` obey. Runs
+  // BEFORE string-slimming so its bytes are inside the budget check (and the
+  // long disclosure string absorbs them); a no-op on every non-SOE payload.
+  if (dropped > 0) {
+    reconcileSoePhasesOmittedAfterGlobalTrim((clone as { data?: unknown }).data);
+  }
   let stringsSlimmed = 0;
   if (utf8Bytes(clone) > reductionCap) {
     stringsSlimmed = slimDataStrings(clone);

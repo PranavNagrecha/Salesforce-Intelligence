@@ -30,6 +30,7 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
+import { DEFAULT_USAGE_SOURCE_FAMILIES } from '../../src/tools/coverage-trust.js';
 import {
   classify,
   reviewChangeHandler,
@@ -56,12 +57,63 @@ const partialRow = (type: string): CoverageEntry => ({
   neverModeled: false,
 });
 
-const FAMILIES = ['ApexClass', 'ApexTrigger', 'CustomField', 'Flow', 'CustomObject', 'Profile'];
+// GATE-HONESTY-EMPTY-GRAPH-EQUALS-SAFE: "complete" now means every family that
+// could REFERENCE a changed component (its usage-source families) is attested —
+// not merely the component's own family. So COMPLETE_COVERAGE covers the union of
+// USAGE_SOURCE_FAMILIES for every type these tests exercise (Apex / field / flow
+// / VF / compact-layout referrers + the placement planes CustomSite / CustomTab /
+// CustomApplication / RecordType the false-safe cluster proved blind).
+const FAMILIES = [
+  'ApexClass',
+  'ApexTrigger',
+  'CustomField',
+  'Flow',
+  'CustomObject',
+  'Profile',
+  'LightningComponentBundle',
+  'AuraDefinitionBundle',
+  'VisualforcePage',
+  'VisualforceComponent',
+  'CustomPermission',
+  // REVIEW-CHANGE-SAFE-ON-DELETE-QUICKACTION
+  'QuickAction',
+  'Layout',
+  // REVIEW-CHANGE-SAFE-ON-DELETE-DUPLICATE-RULE
+  'DuplicateRule',
+  'MatchingRule',
+  // REVIEW-CHANGE-SAFE-ON-DELETE-CUSTOM-PERMISSION
+  'PermissionSet',
+  // Usage-source / placement families the destructive verdict now attests.
+  'ValidationRule',
+  'WorkflowRule',
+  'SharingRule',
+  'Report',
+  'Dashboard',
+  'ListView',
+  'ReportType',
+  'FlexiPage',
+  'CustomSite',
+  'CustomTab',
+  'CustomApplication',
+  'RecordType',
+  // The changed components' OWN families (so the flip fixtures fail PRE-fix,
+  // where the gate checked only the component's own coverage): a covered own
+  // family + a MISSING referrer plane is exactly the false-safe the fix closes.
+  'CompactLayout',
+];
 const COMPLETE_COVERAGE: readonly CoverageEntry[] = FAMILIES.map(coveredRow);
 /** CustomField NOT retrieved, the rest covered → a field change with 0 deps = not-checked. */
 const FIELD_PARTIAL_COVERAGE: readonly CoverageEntry[] = FAMILIES.map((t) =>
   t === 'CustomField' ? partialRow(t) : coveredRow(t),
 );
+/**
+ * COMPLETE_COVERAGE with the named usage-source families dropped to `partial`
+ * (retrieved:0, un-confirmed) — the "graph does not model this usage source"
+ * shape the gate must NOT read as a proven "none". Used by the fixtures A/F/G
+ * flip guards (omit the plane that would place the component).
+ */
+const coveragePartialFor = (...omit: readonly string[]): readonly CoverageEntry[] =>
+  FAMILIES.map((t) => (omit.includes(t) ? partialRow(t) : coveredRow(t)));
 
 const manifestWith = (coverage: readonly CoverageEntry[] | undefined): VaultManifest => ({
   version: '0.1.0',
@@ -117,16 +169,118 @@ const SEED: ExtractionResult = {
     makeNode({ id: 'ApexClass:HeuristicReader', apiName: 'HeuristicReader', properties: { isTest: false } }),
     makeNode({ id: 'Flow:FirmFlow', type: 'Flow', apiName: 'FirmFlow' }),
     makeNode({ id: 'Profile:Admin', type: 'Profile', apiName: 'Admin' }),
+    // REVIEW-CHANGE-LWC-SAFE-IGNORES-CONTROLLER-AND-PAGE-WIRE: an exposed LWC
+    // with OUTBOUND wiring (its own controller + a CustomPermission gate) but
+    // ZERO incoming dependents. PromoController is separate from OrderService so
+    // the existing OrderService dependent-count assertions are unaffected.
+    makeNode({ id: 'LightningComponentBundle:promoPanel', type: 'LightningComponentBundle', apiName: 'promoPanel' }),
+    makeNode({ id: 'ApexClass:PromoController', apiName: 'PromoController', properties: { isTest: false } }),
+    makeNode({ id: 'ApexClass:PromoControllerTest', apiName: 'PromoControllerTest', properties: { isTest: true } }),
+    makeNode({ id: 'CustomPermission:See_promoPanel', type: 'CustomPermission', apiName: 'See_promoPanel' }),
+    // ---- REVIEW-CHANGE-SAFE-ON-DELETE-QUICKACTION ------------------------
+    // A laid-out Update QuickAction placed by a Layout (`references`, targetKind
+    // quickAction — the edge the layout extractor emits). Its only OTHER
+    // incoming edge is the structural parentOf from its object. On an
+    // unrefreshed vault the layout edge is ABSENT (Lonely_Action models that
+    // state); once refreshed it materializes and the delete genuinely flips.
+    makeNode({ id: 'CustomObject:Widget__c', type: 'CustomObject', apiName: 'Widget__c' }),
+    makeNode({ id: 'QuickAction:Widget__c.My_Action', type: 'QuickAction', apiName: 'Widget__c.My_Action' }),
+    makeNode({ id: 'QuickAction:Widget__c.Lonely_Action', type: 'QuickAction', apiName: 'Widget__c.Lonely_Action' }),
+    makeNode({ id: 'Layout:Widget__c.Widget Layout', type: 'Layout', apiName: 'Widget__c.Widget Layout' }),
+    // ---- REVIEW-CHANGE-SAFE-ON-DELETE-DUPLICATE-RULE ---------------------
+    // Active dup rule fires on insert (Allow + Report); its only edges are the
+    // structural parentOf (from the object) and an OUTBOUND references to a
+    // MatchingRule — so the inbound gate sees 0 dependents. Off_Dup_Rule is the
+    // inactive control (must stay safe).
+    makeNode({ id: 'CustomObject:Contact', type: 'CustomObject', apiName: 'Contact' }),
+    makeNode({ id: 'DuplicateRule:Contact.My_Dup_Rule', type: 'DuplicateRule', apiName: 'Contact.My_Dup_Rule', parentId: 'CustomObject:Contact', properties: { isActive: true, actionOnInsert: 'Allow' } }),
+    makeNode({ id: 'DuplicateRule:Contact.Off_Dup_Rule', type: 'DuplicateRule', apiName: 'Contact.Off_Dup_Rule', parentId: 'CustomObject:Contact', properties: { isActive: false } }),
+    makeNode({ id: 'MatchingRule:Contact.My_Match', type: 'MatchingRule', apiName: 'Contact.My_Match', properties: { ruleStatus: 'Active' } }),
+    // ---- REVIEW-CHANGE-SAFE-ON-DELETE-CUSTOM-PERMISSION -----------------
+    // A CustomPermission granted by a PermissionSet AND a Profile. Both granter
+    // edges are inbound `grantedBy` — for a CustomPermission (unlike a field's
+    // FLS grant) they ARE breakage dependents: the granters reference it by name.
+    makeNode({ id: 'CustomPermission:My_Perm', type: 'CustomPermission', apiName: 'My_Perm' }),
+    makeNode({ id: 'PermissionSet:Reviewer_PS', type: 'PermissionSet', apiName: 'Reviewer_PS' }),
+    makeNode({ id: 'Profile:Reviewer_Profile', type: 'Profile', apiName: 'Reviewer_Profile' }),
+    // ---- GATE-HONESTY-EMPTY-GRAPH-EQUALS-SAFE fixtures A / F / G -----------
+    // Three components with ZERO inbound usage edges — a Screen Flow embedded on
+    // a FlexiPage, a VF page placed as a site index/template, and a CompactLayout
+    // assigned on an object. In each case the PLACEMENT edge is unmodelled (the
+    // extractor gap the finding cites), so the inbound gate sees 0 dependents.
+    // Whether the delete is `safe` or `review` must hinge on whether the vault
+    // COVERS the family that could place them — not on the empty edge set alone.
+    makeNode({ id: 'Flow:Orphan_Screen_Flow', type: 'Flow', apiName: 'Orphan_Screen_Flow', properties: { status: 'Active' } }),
+    makeNode({ id: 'VisualforcePage:Orphan_Site_Page', type: 'VisualforcePage', apiName: 'Orphan_Site_Page' }),
+    makeNode({ id: 'CompactLayout:Widget__c.Orphan_Compact', type: 'CompactLayout', apiName: 'Widget__c.Orphan_Compact', parentId: 'CustomObject:Widget__c' }),
+    // ---- W11: INTEGRATION-ORPHAN-UNDER-THE-GATE --------------------------
+    // My_NamedCred is an UNUSED callout credential (zero inbound references) —
+    // the "AWS_US_East_1 is unused" orphan shape. Used_NamedCred is referenced
+    // by an Apex `callout:` (an inbound `references` edge), so deleting it is
+    // `blocking`. AuthProvider is the kin trust anchor (also gated).
+    makeNode({ id: 'NamedCredential:My_NamedCred', type: 'NamedCredential', apiName: 'My_NamedCred' }),
+    makeNode({ id: 'NamedCredential:Used_NamedCred', type: 'NamedCredential', apiName: 'Used_NamedCred' }),
+    makeNode({ id: 'ApexClass:CalloutClient', apiName: 'CalloutClient', properties: { isTest: false } }),
+    makeNode({ id: 'AuthProvider:My_AuthProvider', type: 'AuthProvider', apiName: 'My_AuthProvider' }),
+    // ---- REVIEW-CHANGE-RECORD-TRIGGERED-AUTOMATION-FALSE-SAFE -------------
+    // ACTIVE save-bound automation whose binding to Ticket__c is OUTBOUND
+    // (`triggersOn`, for the Flow/Trigger) or STRUCTURAL (`parentOf` from the
+    // object, for the VR) — never an inbound usage edge, so the inbound gate
+    // sees 0 dependents and the table calls a delete bare `safe`. Deleting a
+    // LIVE save participant must floor to `blocking` (never bare `safe`). The
+    // matched inactive siblings are the state-driven controls (must stay safe).
+    makeNode({ id: 'CustomObject:Ticket__c', type: 'CustomObject', apiName: 'Ticket__c' }),
+    makeNode({ id: 'Flow:BeforeSave_Stamp_Priority', type: 'Flow', apiName: 'BeforeSave_Stamp_Priority', properties: { status: 'Active', triggerType: 'RecordBeforeSave', processType: 'AutoLaunchedFlow' } }),
+    makeNode({ id: 'Flow:AfterSave_Sync_Status', type: 'Flow', apiName: 'AfterSave_Sync_Status', properties: { status: 'Active', triggerType: 'RecordAfterSave', processType: 'AutoLaunchedFlow' } }),
+    // Obsolete record-triggered Flow — dead plane; delete must STAY safe.
+    makeNode({ id: 'Flow:Obsolete_BeforeSave_Flow', type: 'Flow', apiName: 'Obsolete_BeforeSave_Flow', properties: { status: 'Obsolete', triggerType: 'RecordBeforeSave', processType: 'AutoLaunchedFlow' } }),
+    // Active ApexTrigger (status Active) + inactive control (status Inactive).
+    makeNode({ id: 'ApexTrigger:TicketTrigger', type: 'ApexTrigger', apiName: 'TicketTrigger', properties: { status: 'Active' } }),
+    makeNode({ id: 'ApexTrigger:LegacyTicketTrigger', type: 'ApexTrigger', apiName: 'LegacyTicketTrigger', properties: { status: 'Inactive' } }),
+    // Active ValidationRule on the object (inbound only parentOf) + inactive control.
+    makeNode({ id: 'ValidationRule:Ticket__c.Require_Close_Reason', type: 'ValidationRule', apiName: 'Require_Close_Reason', parentId: 'CustomObject:Ticket__c', properties: { active: true } }),
+    makeNode({ id: 'ValidationRule:Ticket__c.Legacy_Rule', type: 'ValidationRule', apiName: 'Legacy_Rule', parentId: 'CustomObject:Ticket__c', properties: { active: false } }),
   ],
   edges: [
     makeEdge({ fromId: 'ApexClass:CheckoutController', toId: 'ApexClass:OrderService', edgeType: 'callsApex' }),
     makeEdge({ fromId: 'ApexClass:OrderServiceTest', toId: 'ApexClass:OrderService', edgeType: 'callsApex' }),
+    // LWC → controller (outbound callsApex) + permission wire; test covers controller.
+    makeEdge({ fromId: 'ApexClass:PromoControllerTest', toId: 'ApexClass:PromoController', edgeType: 'callsApex' }),
+    makeEdge({ fromId: 'LightningComponentBundle:promoPanel', toId: 'ApexClass:PromoController', edgeType: 'callsApex' }),
+    makeEdge({ fromId: 'LightningComponentBundle:promoPanel', toId: 'CustomPermission:See_promoPanel', edgeType: 'references' }),
     makeEdge({ fromId: 'ApexClass:HeuristicReader', toId: 'CustomField:Account.Rating__c', edgeType: 'readsFrom', confidence: 'heuristic', source: 'apex-scanner' }),
     makeEdge({ fromId: 'CustomObject:Account', toId: 'CustomField:Account.Rating__c', edgeType: 'parentOf' }),
     makeEdge({ fromId: 'Flow:FirmFlow', toId: 'CustomField:Account.Firm__c', edgeType: 'readsFrom', confidence: 'parsed', source: 'flow-extractor' }),
     makeEdge({ fromId: 'CustomObject:Account', toId: 'CustomField:Account.Firm__c', edgeType: 'parentOf' }),
     makeEdge({ fromId: 'Profile:Admin', toId: 'CustomField:Account.Granted__c', edgeType: 'grantedBy' }),
     makeEdge({ fromId: 'CustomObject:Account', toId: 'CustomField:Account.Granted__c', edgeType: 'parentOf' }),
+    // QuickAction: Layout places My_Action (references) + structural parentOf.
+    makeEdge({ fromId: 'Layout:Widget__c.Widget Layout', toId: 'QuickAction:Widget__c.My_Action', edgeType: 'references', properties: { targetKind: 'quickAction' } }),
+    makeEdge({ fromId: 'CustomObject:Widget__c', toId: 'QuickAction:Widget__c.My_Action', edgeType: 'parentOf' }),
+    makeEdge({ fromId: 'CustomObject:Widget__c', toId: 'QuickAction:Widget__c.Lonely_Action', edgeType: 'parentOf' }),
+    // DuplicateRule: structural parentOf + OUTBOUND references to MatchingRule.
+    makeEdge({ fromId: 'CustomObject:Contact', toId: 'DuplicateRule:Contact.My_Dup_Rule', edgeType: 'parentOf' }),
+    makeEdge({ fromId: 'DuplicateRule:Contact.My_Dup_Rule', toId: 'MatchingRule:Contact.My_Match', edgeType: 'references' }),
+    makeEdge({ fromId: 'CustomObject:Contact', toId: 'DuplicateRule:Contact.Off_Dup_Rule', edgeType: 'parentOf' }),
+    // CustomPermission: PermissionSet + Profile granters (grantedBy, inbound).
+    makeEdge({ fromId: 'PermissionSet:Reviewer_PS', toId: 'CustomPermission:My_Perm', edgeType: 'grantedBy' }),
+    makeEdge({ fromId: 'Profile:Reviewer_Profile', toId: 'CustomPermission:My_Perm', edgeType: 'grantedBy' }),
+    // Compact layout's only edge is the structural parentOf (excluded) — its
+    // placement assignment on the object XML is unmodelled, so 0 usage deps.
+    makeEdge({ fromId: 'CustomObject:Widget__c', toId: 'CompactLayout:Widget__c.Orphan_Compact', edgeType: 'parentOf' }),
+    // W11: Apex `callout:Used_NamedCred` → an inbound `references` dependency.
+    makeEdge({ fromId: 'ApexClass:CalloutClient', toId: 'NamedCredential:Used_NamedCred', edgeType: 'references' }),
+    // REVIEW-CHANGE-RECORD-TRIGGERED-AUTOMATION-FALSE-SAFE: save-firer bindings.
+    // Flows / ApexTriggers bind OUTBOUND to their object via `triggersOn`; the
+    // VRs bind via the object's structural `parentOf` (excluded as a dependent).
+    // Every firer therefore has ZERO inbound usage edges — the whole point.
+    makeEdge({ fromId: 'Flow:BeforeSave_Stamp_Priority', toId: 'CustomObject:Ticket__c', edgeType: 'triggersOn', properties: { triggerType: 'RecordBeforeSave' } }),
+    makeEdge({ fromId: 'Flow:AfterSave_Sync_Status', toId: 'CustomObject:Ticket__c', edgeType: 'triggersOn', properties: { triggerType: 'RecordAfterSave' } }),
+    makeEdge({ fromId: 'Flow:Obsolete_BeforeSave_Flow', toId: 'CustomObject:Ticket__c', edgeType: 'triggersOn', properties: { triggerType: 'RecordBeforeSave' } }),
+    makeEdge({ fromId: 'ApexTrigger:TicketTrigger', toId: 'CustomObject:Ticket__c', edgeType: 'triggersOn' }),
+    makeEdge({ fromId: 'ApexTrigger:LegacyTicketTrigger', toId: 'CustomObject:Ticket__c', edgeType: 'triggersOn' }),
+    makeEdge({ fromId: 'CustomObject:Ticket__c', toId: 'ValidationRule:Ticket__c.Require_Close_Reason', edgeType: 'parentOf' }),
+    makeEdge({ fromId: 'CustomObject:Ticket__c', toId: 'ValidationRule:Ticket__c.Legacy_Rule', edgeType: 'parentOf' }),
   ],
 };
 
@@ -179,6 +333,32 @@ describe('reviewChangeHandler — classification', () => {
     expect(c?.dependentCount).toBe(0);
     expect(r.value.data.coverageCaveat).toBeUndefined();
     expect(r.value.data.overallVerdict).toBe('safe');
+  });
+
+  // REVIEW-CHANGE-LWC-SAFE-IGNORES-CONTROLLER-AND-PAGE-WIRE: a modified LWC with
+  // ZERO incoming dependents is `safe` under the inbound-only gate, but its
+  // outbound wiring (controller callsApex + permission ref) is real promotion
+  // risk. FAILS pre-fix (verdict safe, selectedTests [], no outboundApex).
+  it('modified frontend bundle floors at review, selects controller tests, surfaces outbound wiring', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [
+        { type: 'LightningComponentBundle', apiName: 'promoPanel', changeKind: 'modified' },
+      ],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.reviewed[0];
+    // Not a bare `safe`: outbound wiring floors it at review.
+    expect(c?.verdict).toBe('review');
+    expect(c?.dependentCount).toBe(0); // no incoming dependents — the whole point
+    // Outbound callsApex + permission/page wiring is surfaced.
+    expect(c?.outboundApex).toContain('ApexClass:PromoController');
+    expect(c?.outboundWires).toContain('CustomPermission:See_promoPanel');
+    // The controller's covering test is selected for the LWC promotion.
+    expect(c?.selectedTests).toContain('ApexClass:PromoControllerTest');
+    expect(r.value.data.selectedTests).toContain('ApexClass:PromoControllerTest');
+    expect(r.value.data.summary.testsToRun).toBeGreaterThanOrEqual(1);
+    expect(r.value.data.overallVerdict).toBe('review');
   });
 
   it('modified field with HEURISTIC-only readers = review (not risky)', async () => {
@@ -266,6 +446,441 @@ describe('reviewChangeHandler — classification', () => {
     expect(c?.verdict).toBe('review');
     expect(c?.inVault).toBe(false);
     expect(r.value.data.summary.notInVault).toBe(1);
+  });
+});
+
+describe('reviewChangeHandler — placement / active-rule / grant dependents', () => {
+  // REVIEW-CHANGE-SAFE-ON-DELETE-QUICKACTION. The Layout→QuickAction
+  // `references` edge exists in the extractor but realizes on a real vault only
+  // after refresh, so the flip is exercised offline against a synthetic edge:
+  // with a Layout placing it, deleting the QuickAction genuinely flips to
+  // blocking (a real referrer, not a caveat). Lonely_Action models the
+  // unrefreshed (edge-absent) state that the extractor+refresh resolves.
+  it('deleting a QuickAction a Layout places (references edge) flips to blocking', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [{ type: 'QuickAction', apiName: 'Widget__c.My_Action', changeKind: 'deleted' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.reviewed[0];
+    expect(c?.verdict).not.toBe('safe');
+    expect(c?.verdict).toBe('blocking');
+    // Only the Layout counts — the structural parentOf from Widget__c is excluded.
+    expect(c?.dependentCount).toBe(1);
+    expect(c?.dependents).toContain('Layout:Widget__c.Widget Layout');
+  });
+
+  // REVIEW-CHANGE-SAFE-ON-DELETE-DUPLICATE-RULE. An ACTIVE dup rule fires on
+  // insert; its only edges are the excluded parentOf and an OUTBOUND
+  // references, so the inbound gate saw 0 dependents and called delete `safe`.
+  // The active-state floors it at review (never bare safe). FAILS pre-fix.
+  it('deleting an ACTIVE DuplicateRule is not bare-safe (floors at review)', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [{ type: 'DuplicateRule', apiName: 'Contact.My_Dup_Rule', changeKind: 'deleted' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.reviewed[0];
+    expect(c?.verdict).not.toBe('safe');
+    expect(c?.verdict).toBe('review');
+    expect(c?.dependentCount).toBe(0); // inbound-blind — the point
+    expect(c?.reason).toMatch(/active/i);
+  });
+
+  // An INACTIVE dup rule stays safe — the floor is state-driven, not a blanket
+  // type floor (proves the fix is not camouflage).
+  it('deleting an INACTIVE DuplicateRule stays safe', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [{ type: 'DuplicateRule', apiName: 'Contact.Off_Dup_Rule', changeKind: 'deleted' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.reviewed[0]?.verdict).toBe('safe');
+  });
+
+  // A modified ACTIVE DuplicateRule is also not bare-safe.
+  it('modifying an ACTIVE DuplicateRule is not bare-safe (floors at review)', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [{ type: 'DuplicateRule', apiName: 'Contact.My_Dup_Rule', changeKind: 'modified' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.reviewed[0]?.verdict).toBe('review');
+  });
+
+  // REVIEW-CHANGE-SAFE-ON-DELETE-CUSTOM-PERMISSION. A CustomPermission's inbound
+  // grantedBy granters (PermissionSet + Profile) ARE breakage dependents — the
+  // granters reference it by name. Delete must genuinely flip to blocking.
+  // FAILS pre-fix (grantedBy was globally excluded → 0 deps → safe).
+  it('deleting a CustomPermission counts grantedBy granters as dependents (blocking)', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [{ type: 'CustomPermission', apiName: 'My_Perm', changeKind: 'deleted' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.reviewed[0];
+    expect(c?.verdict).not.toBe('safe');
+    expect(c?.verdict).toBe('blocking');
+    expect(c?.dependentCount).toBe(2);
+    expect(c?.dependents).toEqual(
+      expect.arrayContaining(['PermissionSet:Reviewer_PS', 'Profile:Reviewer_Profile']),
+    );
+  });
+
+  // A CustomField's grantedBy FLS grant stays EXCLUDED (access ≠ usage) — the
+  // grant un-exclusion is scoped to CustomPermission only.
+  it('a CustomField grantedBy grant is still excluded (access ≠ usage) after the CustomPermission fix', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [{ type: 'CustomField', apiName: 'Account.Granted__c', changeKind: 'deleted' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.reviewed[0];
+    expect(c?.dependentCount).toBe(0);
+    expect(c?.verdict).toBe('safe');
+  });
+});
+
+// ===========================================================================
+// REVIEW-CHANGE-RECORD-TRIGGERED-AUTOMATION-FALSE-SAFE (P0 destructive trust)
+//
+// An ACTIVE save-bound automation binds to its object OUTSIDE the inbound-
+// dependent model: a record-triggered (before/after-save) Flow and an
+// ApexTrigger bind OUTBOUND via `triggersOn`; a ValidationRule binds via the
+// object's structural `parentOf` (excluded as a dependent). Each therefore has
+// ZERO inbound usage edges, so the classification table under-called a delete
+// bare `safe` — a false-safe destructive verdict on a live save participant.
+// The firing-binding floor lifts a delete to `blocking` and a modify to
+// `review`; an Inactive/Obsolete automation does NOT fire and keeps its table
+// verdict (state-driven, not a blanket type floor). All controls use
+// COMPLETE_COVERAGE so the flip is driven by the LIVENESS floor, not a coverage
+// caveat (ApexTrigger / ValidationRule have EMPTY usage-source families, so a
+// 0-dep delete is `safe` on ANY coverage pre-fix — the whole point).
+// ===========================================================================
+describe('reviewChangeHandler — active save-firer floor (record-triggered Flow / ApexTrigger / VR)', () => {
+  // FAILS pre-fix: an Active RecordBeforeSave Flow with only an OUTBOUND
+  // triggersOn binding shows 0 inbound dependents → table `safe`.
+  it('deleting an ACTIVE before-save Flow (triggersOn a CustomObject) is not bare-safe (blocking)', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [{ type: 'Flow', apiName: 'BeforeSave_Stamp_Priority', changeKind: 'deleted' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.reviewed[0];
+    expect(c?.dependentCount).toBe(0); // inbound-blind — the whole point
+    expect(c?.verdict).not.toBe('safe');
+    expect(c?.verdict).toBe('blocking');
+    expect(c?.reason).toMatch(/fires on save|save transaction|record-triggered/i);
+    expect(r.value.data.overallVerdict).toBe('blocking');
+  });
+
+  it('deleting an ACTIVE after-save Flow is also not bare-safe (blocking)', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [{ type: 'Flow', apiName: 'AfterSave_Sync_Status', changeKind: 'deleted' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.reviewed[0]?.verdict).toBe('blocking');
+  });
+
+  // FAILS pre-fix: an Active ApexTrigger has EMPTY usage-source families, so a
+  // 0-dep delete was bare `safe` on ANY coverage — now floored on liveness.
+  it('deleting an ACTIVE ApexTrigger (triggersOn a CustomObject) is not bare-safe (blocking)', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [{ type: 'ApexTrigger', apiName: 'TicketTrigger', changeKind: 'deleted' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.reviewed[0];
+    expect(c?.dependentCount).toBe(0);
+    expect(c?.verdict).not.toBe('safe');
+    expect(c?.verdict).toBe('blocking');
+    expect(c?.reason).toMatch(/ApexTrigger|fires on save/i);
+  });
+
+  // FAILS pre-fix: an Active VR's ONLY inbound edge is the structural parentOf
+  // from its object (excluded as a dependent) → 0 deps → bare `safe`.
+  it('deleting an ACTIVE ValidationRule on an object (inbound only parentOf) is not bare-safe (blocking)', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [
+        { type: 'ValidationRule', apiName: 'Ticket__c.Require_Close_Reason', changeKind: 'deleted' },
+      ],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.reviewed[0];
+    expect(c?.dependentCount).toBe(0); // parentOf excluded — the whole point
+    expect(c?.verdict).not.toBe('safe');
+    expect(c?.verdict).toBe('blocking');
+    expect(c?.reason).toMatch(/ValidationRule|save/i);
+  });
+
+  // MODIFY of a live save participant floors at `review` (never bare safe) — a
+  // behaviour change, not a removal. Proves the delete/modify split.
+  it('modifying an ACTIVE before-save Flow is not bare-safe (floors at review)', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [{ type: 'Flow', apiName: 'BeforeSave_Stamp_Priority', changeKind: 'modified' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.reviewed[0];
+    expect(c?.verdict).not.toBe('safe');
+    expect(c?.verdict).toBe('review');
+  });
+
+  // STATE-DRIVEN control 1: an OBSOLETE record-triggered Flow does NOT fire —
+  // it stays `safe` (dead plane), proving the floor is not a blanket type floor.
+  it('deleting an OBSOLETE record-triggered Flow stays safe (dead plane)', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [{ type: 'Flow', apiName: 'Obsolete_BeforeSave_Flow', changeKind: 'deleted' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.reviewed[0]?.verdict).toBe('safe');
+  });
+
+  // STATE-DRIVEN control 2: an INACTIVE ApexTrigger does not fire → stays safe.
+  it('deleting an INACTIVE ApexTrigger stays safe (dead plane)', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [{ type: 'ApexTrigger', apiName: 'LegacyTicketTrigger', changeKind: 'deleted' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.reviewed[0]?.verdict).toBe('safe');
+  });
+
+  // STATE-DRIVEN control 3: an INACTIVE ValidationRule does not fire → stays safe.
+  it('deleting an INACTIVE ValidationRule stays safe (dead plane)', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [
+        { type: 'ValidationRule', apiName: 'Ticket__c.Legacy_Rule', changeKind: 'deleted' },
+      ],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.reviewed[0]?.verdict).toBe('safe');
+  });
+
+  // CALIBRATION: a NON-record-triggered Active Flow (screen/scheduled — no save
+  // triggerType, no triggersOn binding) is NOT a save participant, so it keeps
+  // its table verdict. Orphan_Screen_Flow (status Active, no triggerType) stays
+  // `safe` under full coverage — the floor targets save firers only.
+  it('CALIBRATED: an Active screen Flow (no save trigger) is NOT floored — stays safe', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [{ type: 'Flow', apiName: 'Orphan_Screen_Flow', changeKind: 'deleted' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.reviewed[0]?.verdict).toBe('safe');
+  });
+});
+
+describe('reviewChangeHandler — GATE-HONESTY-EMPTY-GRAPH-EQUALS-SAFE (usage-source coverage)', () => {
+  // The central honesty contract: a 0-inbound-usage-edge component is `safe` to
+  // delete ONLY when the vault covers every family that could REFERENCE it. When
+  // the family that would PLACE it (FlexiPage / CustomSite / CustomObject) was
+  // not modelled, the empty edge set is "not checked", not proven "none" — the
+  // verdict must FLIP to `review` with a coverageCaveat naming the plane. The
+  // matched full-coverage control proves this is a calibrated contract, not a
+  // blanket floor (both directions asserted, per the DoD).
+
+  // ---- Fixture A: Screen Flow embedded on a FlexiPage, embed plane omitted ---
+  it('FLIP: deleting a 0-edge Flow with FlexiPage coverage MISSING is not safe (review + caveat)', async () => {
+    const r = await reviewChangeHandler(
+      { ...ctxWith(coveragePartialFor('FlexiPage')) },
+      { components: [{ type: 'Flow', apiName: 'Orphan_Screen_Flow', changeKind: 'deleted' }] },
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.reviewed[0];
+    expect(c?.dependentCount).toBe(0); // inbound-blind — the whole point
+    expect(c?.verdict).not.toBe('safe');
+    expect(c?.verdict).toBe('review');
+    // The caveat names the un-retrieved plane that could embed the flow.
+    expect(c?.coverageCaveat).toBeDefined();
+    expect(c?.coverageCaveat?.missingCoverage).toContain('FlexiPage');
+    expect(r.value.data.overallVerdict).toBe('review');
+  });
+
+  it('STAYS SAFE: deleting the SAME 0-edge Flow with FULL coverage is safe, no caveat', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [{ type: 'Flow', apiName: 'Orphan_Screen_Flow', changeKind: 'deleted' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.reviewed[0];
+    expect(c?.dependentCount).toBe(0);
+    expect(c?.verdict).toBe('safe');
+    expect(c?.coverageCaveat).toBeUndefined();
+    expect(r.value.data.overallVerdict).toBe('safe');
+  });
+
+  // ---- Fixture F: VF page placed as a site index/template, site plane omitted -
+  it('FLIP: deleting a 0-edge VisualforcePage with CustomSite coverage MISSING is not safe', async () => {
+    const r = await reviewChangeHandler(
+      { ...ctxWith(coveragePartialFor('CustomSite')) },
+      { components: [{ type: 'VisualforcePage', apiName: 'Orphan_Site_Page', changeKind: 'deleted' }] },
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.reviewed[0];
+    expect(c?.dependentCount).toBe(0);
+    expect(c?.verdict).toBe('review');
+    expect(c?.coverageCaveat?.missingCoverage).toContain('CustomSite');
+  });
+
+  it('STAYS SAFE: deleting the SAME 0-edge VisualforcePage with FULL coverage is safe', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [{ type: 'VisualforcePage', apiName: 'Orphan_Site_Page', changeKind: 'deleted' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.reviewed[0];
+    expect(c?.verdict).toBe('safe');
+    expect(c?.coverageCaveat).toBeUndefined();
+  });
+
+  // ---- Fixture G: CompactLayout assigned on an object, assignment plane omitted
+  it('FLIP: deleting a 0-edge CompactLayout with CustomObject coverage MISSING is not safe', async () => {
+    const r = await reviewChangeHandler(
+      { ...ctxWith(coveragePartialFor('CustomObject')) },
+      { components: [{ type: 'CompactLayout', apiName: 'Widget__c.Orphan_Compact', changeKind: 'deleted' }] },
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.reviewed[0];
+    expect(c?.dependentCount).toBe(0); // only parentOf inbound — excluded
+    expect(c?.verdict).toBe('review');
+    expect(c?.coverageCaveat?.missingCoverage).toContain('CustomObject');
+  });
+
+  it('STAYS SAFE: deleting the SAME 0-edge CompactLayout with FULL coverage is safe', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [{ type: 'CompactLayout', apiName: 'Widget__c.Orphan_Compact', changeKind: 'deleted' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.reviewed[0]?.verdict).toBe('safe');
+    expect(r.value.data.reviewed[0]?.coverageCaveat).toBeUndefined();
+  });
+
+  // Calibration proof that an IRRELEVANT coverage gap does NOT flip the verdict:
+  // a CompactLayout is placed only by CustomObject / RecordType, so a missing
+  // FlexiPage plane (which cannot place a compact layout) leaves it `safe`. This
+  // is what separates the calibrated per-type contract from a blanket floor.
+  it('CALIBRATED: a gap in an IRRELEVANT plane (FlexiPage) leaves a CompactLayout safe', async () => {
+    const r = await reviewChangeHandler(
+      { ...ctxWith(coveragePartialFor('FlexiPage')) },
+      { components: [{ type: 'CompactLayout', apiName: 'Widget__c.Orphan_Compact', changeKind: 'deleted' }] },
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.reviewed[0]?.verdict).toBe('safe');
+    expect(r.value.data.reviewed[0]?.coverageCaveat).toBeUndefined();
+  });
+});
+
+// ===========================================================================
+// W11 — INTEGRATION-ORPHAN-UNDER-THE-GATE
+// A callout NamedCredential that Apex uses returns `blocking` (the inbound
+// `references` gate already catches it — the positive control). The residual:
+// an UNUSED credential returned bare `safe` to delete even when the callout
+// plane's coverage was UNKNOWN, AND over-fired to `review` when an IRRELEVANT
+// plane (Report/Dashboard/Layout — which cannot reference a credential) was
+// partial. The fix routes these types through the L1 gate with the precise
+// callout-site families + the fail-harder `fireOnUnknownCoverage` stance.
+// ===========================================================================
+describe('reviewChangeHandler — W11 integration-orphan gate (NamedCredential / kin)', () => {
+  // Callout-site families a credential can be referenced through, all COMPLETE,
+  // with every other DEFAULT producer plane also covered so the ONLY partial
+  // plane in the over-fire test is the irrelevant one.
+  const CALLOUT_COMPLETE_UNIVERSE = [
+    ...new Set([
+      ...DEFAULT_USAGE_SOURCE_FAMILIES,
+      'ExternalService',
+      'OmniIntegrationProcedure',
+      'NamedCredential',
+      'ExternalDataSource',
+    ]),
+  ];
+
+  // POSITIVE CONTROL: a referenced credential is `blocking` (unchanged) — the
+  // gate never touches the has-dependents path.
+  it('CONTROL: deleting a USED NamedCredential (Apex callout) is blocking', async () => {
+    const r = await reviewChangeHandler(ctxWith(CALLOUT_COMPLETE_UNIVERSE.map(coveredRow)), {
+      components: [{ type: 'NamedCredential', apiName: 'Used_NamedCred', changeKind: 'deleted' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.reviewed[0];
+    expect(c?.verdict).toBe('blocking');
+    expect(c?.dependentCount).toBe(1);
+  });
+
+  // FLIP (fail-harder on UNKNOWN coverage): an unused credential on a vault that
+  // carries NO coverage rows must NOT be bare `safe` — the callout plane it
+  // depends on is the most under-extracted. FAILS pre-fix (verdict `safe`, no
+  // caveat, because review_change tolerated legacy vaults for every type).
+  it('FLIP: unused NamedCredential on an UNKNOWN-coverage vault is review, not bare safe', async () => {
+    const r = await reviewChangeHandler(ctxWith(undefined), {
+      components: [{ type: 'NamedCredential', apiName: 'My_NamedCred', changeKind: 'deleted' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.reviewed[0];
+    expect(c?.dependentCount).toBe(0); // inbound-blind — the whole point
+    expect(c?.verdict).not.toBe('safe');
+    expect(c?.verdict).toBe('review');
+    expect(c?.coverageCaveat).toBeDefined();
+    // The caveat names the callout-usage plane, not the broad producer union.
+    expect(c?.coverageCaveat?.missingCoverage).toContain('ApexClass');
+    expect(r.value.data.overallVerdict).toBe('review');
+  });
+
+  // STAYS SAFE + precise calibration (over-fire fixed): with the callout-site
+  // planes COMPLETE, a partial IRRELEVANT plane (Dashboard — which cannot
+  // reference a credential) must leave the delete `safe`. FAILS pre-fix, where
+  // the DEFAULT-union gate downgraded it to `review` on the Dashboard gap alone.
+  it('STAYS SAFE: unused NamedCredential with callout planes covered is safe despite an irrelevant Dashboard gap', async () => {
+    const coverage = CALLOUT_COMPLETE_UNIVERSE.map((t) =>
+      t === 'Dashboard' ? partialRow(t) : coveredRow(t),
+    );
+    const r = await reviewChangeHandler(ctxWith(coverage), {
+      components: [{ type: 'NamedCredential', apiName: 'My_NamedCred', changeKind: 'deleted' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.reviewed[0];
+    expect(c?.dependentCount).toBe(0);
+    expect(c?.verdict).toBe('safe');
+    expect(c?.coverageCaveat).toBeUndefined();
+  });
+
+  // STAYS SAFE (both callout planes fully attested): a genuinely-unused
+  // credential on a fully-covered callout surface still reads `safe` — the gate
+  // is calibrated, not a blanket floor on the type.
+  it('STAYS SAFE: unused NamedCredential with the full callout surface covered is safe', async () => {
+    const r = await reviewChangeHandler(ctxWith(CALLOUT_COMPLETE_UNIVERSE.map(coveredRow)), {
+      components: [{ type: 'NamedCredential', apiName: 'My_NamedCred', changeKind: 'deleted' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.reviewed[0];
+    expect(c?.verdict).toBe('safe');
+    expect(c?.coverageCaveat).toBeUndefined();
+  });
+
+  // KIN: the same gate covers AuthProvider (and ExternalDataSource) — an unused
+  // trust anchor on an unknown-coverage vault is review, not bare safe.
+  it('KIN: unused AuthProvider on an UNKNOWN-coverage vault is review, not bare safe', async () => {
+    const r = await reviewChangeHandler(ctxWith(undefined), {
+      components: [{ type: 'AuthProvider', apiName: 'My_AuthProvider', changeKind: 'deleted' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.reviewed[0];
+    expect(c?.verdict).toBe('review');
+    expect(c?.coverageCaveat).toBeDefined();
   });
 });
 
@@ -405,6 +1020,87 @@ describe('reviewChangeInputSchema', () => {
     expect(
       reviewChangeInputSchema.safeParse({
         components: [{ type: 'ApexClass', apiName: 'X', changeKind: 'renamed' }],
+      }).success,
+    ).toBe(false);
+  });
+
+  // REVIEW-CHANGE-REJECTS-COMPONENTID: a host that forwards the canonical id
+  // from sfi.resolve (`componentId: Type:ApiName`) must be accepted and
+  // normalised to the SAME { type, apiName, changeKind } as the explicit pair.
+  it('normalises a componentId selector to the same shape as the explicit pair', () => {
+    const viaId = reviewChangeInputSchema.safeParse({
+      components: [{ componentId: 'ApexClass:X', changeKind: 'deleted' }],
+    });
+    const viaPair = reviewChangeInputSchema.safeParse({
+      components: [{ type: 'ApexClass', apiName: 'X', changeKind: 'deleted' }],
+    });
+    expect(viaId.success).toBe(true);
+    expect(viaPair.success).toBe(true);
+    if (!viaId.success || !viaPair.success) return;
+    expect(viaId.data.components[0]).toEqual({
+      type: 'ApexClass',
+      apiName: 'X',
+      changeKind: 'deleted',
+    });
+    expect(viaId.data.components[0]).toEqual(viaPair.data.components[0]);
+  });
+
+  it('splits a componentId on the FIRST colon (dotted apiName survives)', () => {
+    const res = reviewChangeInputSchema.safeParse({
+      components: [{ componentId: 'CustomField:Account.Industry__c', changeKind: 'modified' }],
+    });
+    expect(res.success).toBe(true);
+    if (!res.success) return;
+    expect(res.data.components[0]).toEqual({
+      type: 'CustomField',
+      apiName: 'Account.Industry__c',
+      changeKind: 'modified',
+    });
+  });
+
+  it('accepts a mixed batch of pair and componentId selectors', () => {
+    const res = reviewChangeInputSchema.safeParse({
+      components: [
+        { type: 'ApexClass', apiName: 'X', changeKind: 'modified' },
+        { componentId: 'ApexClass:Y', changeKind: 'deleted' },
+      ],
+    });
+    expect(res.success).toBe(true);
+    if (!res.success) return;
+    expect(res.data.components).toEqual([
+      { type: 'ApexClass', apiName: 'X', changeKind: 'modified' },
+      { type: 'ApexClass', apiName: 'Y', changeKind: 'deleted' },
+    ]);
+  });
+
+  it('rejects an entry with neither selector', () => {
+    expect(
+      reviewChangeInputSchema.safeParse({
+        components: [{ changeKind: 'deleted' }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('rejects a componentId with no colon', () => {
+    expect(
+      reviewChangeInputSchema.safeParse({
+        components: [{ componentId: 'ApexClass', changeKind: 'deleted' }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('rejects a componentId with a trailing colon (empty apiName)', () => {
+    expect(
+      reviewChangeInputSchema.safeParse({
+        components: [{ componentId: 'ApexClass:', changeKind: 'deleted' }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('rejects a componentId with a leading colon (empty type)', () => {
+    expect(
+      reviewChangeInputSchema.safeParse({
+        components: [{ componentId: ':X', changeKind: 'deleted' }],
       }).success,
     ).toBe(false);
   });

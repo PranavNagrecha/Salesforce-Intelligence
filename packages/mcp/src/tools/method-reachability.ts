@@ -60,6 +60,7 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { coercePrefix } from './coerce-id.js';
+import { firstNonEmpty } from './input-aliases.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import { soundnessFromIds, type Soundness } from './soundness.js';
 
@@ -97,18 +98,68 @@ export type ReachabilityVerdict =
 /**
  * Zod schema for the `sfi.method_reachability` tool input.
  *
- *   - `classApiName`: required, non-empty string. The canonical
- *     ApexClass / ApexTrigger id; non-matching prefixes surface as
- *     `invalid-query` at the handler boundary.
+ *   - `classApiName` / `componentId` / `apiName`: the target ApexClass /
+ *     ApexTrigger, interchangeable (a host naturally reaches for `componentId`
+ *     as on the sibling Apex tools) — METHOD-REACHABILITY-REJECTS-COMPONENTID.
+ *     Each accepts a bare name or a canonical `ApexClass:` / `ApexTrigger:` id;
+ *     non-matching prefixes surface as `invalid-query`. Disagreeing selectors →
+ *     `invalid-query` (never a silent pick); at least one is required.
  */
 export const methodReachabilityInputSchema = z.object({
-  classApiName: z.string().min(1),
+  classApiName: z.string().min(1).optional(),
+  componentId: z.string().min(1).optional(),
+  apiName: z.string().min(1).optional(),
 });
 
 /** Parsed input shape. */
 export type MethodReachabilityInput = z.infer<
   typeof methodReachabilityInputSchema
 >;
+
+/** The Apex id prefixes this tool accepts as a target. */
+const APEX_TARGET_PREFIXES: readonly string[] = [
+  APEX_CLASS_PREFIX,
+  APEX_TRIGGER_PREFIX,
+];
+
+/**
+ * Resolve the single target class / trigger from the interchangeable
+ * `classApiName` / `componentId` / `apiName` selectors — the alias residual this
+ * closes (a host naturally passes `componentId` as on the sibling Apex tools).
+ * Each value is coerced through `coercePrefix` so a bare name, an `ApexClass:`
+ * id, and an `ApexTrigger:` id all resolve while a WRONG-type prefix
+ * (`CustomField:…`) still reaches the handler's precise `invalid-query`.
+ * Disagreeing selectors → `invalid-query` (never a silent pick); none →
+ * `invalid-query`.
+ */
+const resolveTargetId = (
+  input: MethodReachabilityInput,
+): Result<string, McpError> => {
+  const distinct = [
+    ...new Set(
+      [input.classApiName, input.componentId, input.apiName]
+        .map((v) => firstNonEmpty(v))
+        .filter((v): v is string => v !== undefined)
+        .map((v) => coercePrefix(v, APEX_TARGET_PREFIXES)),
+    ),
+  ];
+  if (distinct.length === 0) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        'name the Apex class — pass `classApiName` (e.g. "LegacyService"), `componentId` (`ApexClass:LegacyService`), or `apiName`',
+      path: 'classApiName',
+    });
+  }
+  if (distinct.length > 1) {
+    return err({
+      kind: 'invalid-query',
+      message: `class selectors name different targets (${distinct.join(', ')}); pass exactly one of classApiName / componentId / apiName`,
+      path: 'classApiName',
+    });
+  }
+  return ok(distinct[0] as string);
+};
 
 /** One entry-point hit found in the upstream walk. */
 export interface EntryPointHit {
@@ -128,6 +179,16 @@ export interface ReachingTestClass {
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface MethodReachabilityOutput {
+  /**
+   * Echoes the class scope ACTUALLY resolved so a host that passed a
+   * `componentId` / `apiName` alias sees it was honored, not silently rejected
+   * (METHOD-REACHABILITY-REJECTS-COMPONENTID). Always `component` mode — the
+   * tool is single-class by contract.
+   */
+  readonly appliedScope: {
+    readonly component: ComponentId;
+    readonly mode: 'component';
+  };
   readonly classApiName: ComponentId;
   readonly verdict: ReachabilityVerdict;
   readonly entryPoints: readonly EntryPointHit[];
@@ -230,14 +291,13 @@ export const methodReachabilityHandler = async (
   ctx: Context,
   input: MethodReachabilityInput,
 ): Promise<Result<McpResponse<MethodReachabilityOutput>, McpError>> => {
-  const classApiName = coercePrefix(input.classApiName, [
-    APEX_CLASS_PREFIX,
-    APEX_TRIGGER_PREFIX,
-  ]);
+  const scopeRes = resolveTargetId(input);
+  if (!scopeRes.ok) return scopeRes;
+  const classApiName = scopeRes.value;
   if (!isApexCallable(classApiName)) {
     return err({
       kind: 'invalid-query',
-      message: `classApiName must be an ApexClass/ApexTrigger id (e.g. '${APEX_CLASS_PREFIX}Foo') or a bare class name (e.g. 'Foo'); got '${input.classApiName}'`,
+      message: `classApiName must be an ApexClass/ApexTrigger id (e.g. '${APEX_CLASS_PREFIX}Foo') or a bare class name (e.g. 'Foo'); got '${classApiName}'`,
       path: 'classApiName',
     });
   }
@@ -323,6 +383,7 @@ export const methodReachabilityHandler = async (
 
   return ok({
     data: {
+      appliedScope: { component: targetId, mode: 'component' },
       classApiName: targetId,
       verdict,
       entryPoints,

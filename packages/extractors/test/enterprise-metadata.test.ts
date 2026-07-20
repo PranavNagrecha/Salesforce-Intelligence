@@ -43,6 +43,15 @@ describe('enterprise metadata extractors', () => {
       // why_cant_user_see_record / who_can_access_object key their restriction
       // caveats on parentId, so null here = the caveat never fires on real orgs.
       expect(result.value.nodes[0]?.parentId).toBe('CustomObject:Account');
+      // RESTRICTION-RULE-MISSING-OBJECT-GRAPH: a traversable object→rule
+      // `parentOf` edge must also be emitted (parentId alone left get_edges
+      // empty and object-scoped surfaces blind to the rule).
+      const parentEdge = result.value.edges.find(
+        (e) => e.edgeType === 'parentOf',
+      );
+      expect(parentEdge?.fromId).toBe('CustomObject:Account');
+      expect(parentEdge?.toId).toBe('RestrictionRule:Limit_Course_Access');
+      expect(parentEdge?.confidence).toBe('declared');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -86,6 +95,11 @@ describe('enterprise metadata extractors', () => {
       expect(result.ok).toBe(true);
       if (!result.ok) return;
       expect(result.value.nodes[0]?.parentId).toBe(null);
+      // No parent object resolved → no object→rule parentOf edge (never a
+      // dangling `CustomObject:` edge from a missing targetEntity).
+      expect(
+        result.value.edges.some((e) => e.edgeType === 'parentOf'),
+      ).toBe(false);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -105,6 +119,13 @@ describe('enterprise metadata extractors', () => {
       if (!result.ok) return;
       expect(result.value.nodes[0]?.id).toBe('ScopingRule:Best_Advisor_Scope');
       expect(result.value.nodes[0]?.parentId).toBe('CustomObject:Contact');
+      // RESTRICTION-RULE-MISSING-OBJECT-GRAPH: ScopingRule also emits the
+      // object→rule parentOf edge.
+      const parentEdge = result.value.edges.find(
+        (e) => e.edgeType === 'parentOf',
+      );
+      expect(parentEdge?.fromId).toBe('CustomObject:Contact');
+      expect(parentEdge?.toId).toBe('ScopingRule:Best_Advisor_Scope');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -247,17 +268,17 @@ describe('enterprise metadata extractors', () => {
       const path = join(
         dir,
         'objects',
-        'Training_Assignments__c',
+        'Widget_Assignments__c',
         'listViews',
         'Completed.listView-meta.xml',
       );
-      await mkdir(join(dir, 'objects', 'Training_Assignments__c', 'listViews'), {
+      await mkdir(join(dir, 'objects', 'Widget_Assignments__c', 'listViews'), {
         recursive: true,
       });
       await writeFile(
         path,
         '<ListView><columns>NAME</columns>' +
-          '<filters><field>UserFacultyId__c</field><operation>equals</operation><value>1</value></filters>' +
+          '<filters><field>UserWidgetId__c</field><operation>equals</operation><value>1</value></filters>' +
           '</ListView>',
       );
 
@@ -265,7 +286,7 @@ describe('enterprise metadata extractors', () => {
       expect(result.ok).toBe(true);
       if (!result.ok) return;
       const edge = result.value.edges.find(
-        (e) => e.toId === 'CustomField:Training_Assignments__c.UserFacultyId__c',
+        (e) => e.toId === 'CustomField:Widget_Assignments__c.UserWidgetId__c',
       );
       expect(edge).toBeDefined();
       expect(edge?.edgeType).toBe('references');
@@ -276,7 +297,7 @@ describe('enterprise metadata extractors', () => {
       // It must NOT also surface as a column row (no duplicate edge).
       const sameTarget = result.value.edges.filter(
         (e) =>
-          e.toId === 'CustomField:Training_Assignments__c.UserFacultyId__c' &&
+          e.toId === 'CustomField:Widget_Assignments__c.UserWidgetId__c' &&
           e.edgeType === 'references',
       );
       expect(sameTarget).toHaveLength(1);
@@ -692,6 +713,92 @@ describe('enterprise metadata extractors', () => {
     }
   });
 
+  // FLEXIPAGE-FIELDREFS-RECORD-PREFIX-PHANTOM: a FlexiPage `<fieldItem>` names a
+  // field on the page's record context with the literal `Record.` pseudo-object
+  // head. `Record` is not an SObject, so a `CustomField:Record.Field` id is a
+  // phantom that never resolves and hides the real field's reverse usage. The
+  // extractor must rewrite `Record.` to the page's `sobjectType`. Generic
+  // synthetic object (no org identifiers).
+  it('rescopes a Record.* fieldItem to the page sobjectType (no Record. phantom)', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'Widget_Record_Page.flexipage-meta.xml');
+      await writeFile(
+        path,
+        '<FlexiPage><sobjectType>Widget__c</sobjectType>' +
+          '<fieldInstance><fieldItem>Record.Resolution__c</fieldItem></fieldInstance>' +
+          '<fieldInstance><fieldItem>Record.Name</fieldItem></fieldInstance>' +
+          '</FlexiPage>',
+      );
+      const result = await extractFlexiPage(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const toIds = result.value.edges.map((e) => e.toId);
+      // The direct record field is now object-qualified and resolvable…
+      expect(toIds).toContain('CustomField:Widget__c.Resolution__c');
+      expect(toIds).toContain('CustomField:Widget__c.Name');
+      // …and NO `Record.*` phantom id survives.
+      expect(toIds.filter((id) => id.startsWith('CustomField:Record.'))).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // FLEXIPAGE-EMBEDDED-FLOW-UNGRAPHED: a Lightning record page embeds Screen
+  // Flows via `flowruntime:interview` components naming the Flow through a
+  // `flowName` property. Those were invisible to the field/permission sweeps, so
+  // an active embedded Flow read 0-usage / safe-to-delete. The extractor must
+  // emit FlexiPage -> Flow:{flowName} edges. Generic synthetic flow names.
+  it('emits FlexiPage -> Flow edges for flowruntime:interview embedded flows (FLEXIPAGE-EMBEDDED-FLOW-UNGRAPHED)', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'Widget_Record_Page.flexipage-meta.xml');
+      await writeFile(
+        path,
+        '<FlexiPage><sobjectType>Widget__c</sobjectType>' +
+          '<flexiPageRegions><itemInstances><componentInstance>' +
+          '<componentInstanceProperties><name>flowLayout</name><value>oneColumn</value></componentInstanceProperties>' +
+          '<componentInstanceProperties><name>flowName</name><value>Widget_Screen_Flow</value></componentInstanceProperties>' +
+          '<componentName>flowruntime:interview</componentName>' +
+          '<identifier>flowruntime_interview</identifier>' +
+          '</componentInstance></itemInstances>' +
+          '<itemInstances><componentInstance>' +
+          '<componentInstanceProperties><name>flowName</name><value>Widget_Approval_Screen_Flow</value></componentInstanceProperties>' +
+          '<componentName>flowruntime:interview</componentName>' +
+          '</componentInstance></itemInstances></flexiPageRegions>' +
+          // A non-flow component that happens to carry a `flowName`-shaped prop
+          // on a bespoke LWC must NOT mint a Flow edge (precise scoping).
+          '<flexiPageRegions><itemInstances><componentInstance>' +
+          '<componentInstanceProperties><name>flowName</name><value>Not_A_Flow_Ref</value></componentInstanceProperties>' +
+          '<componentName>c:myCustomWidget</componentName>' +
+          '</componentInstance></itemInstances></flexiPageRegions>' +
+          '</FlexiPage>',
+      );
+      const result = await extractFlexiPage(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const flowEdges = result.value.edges.filter((e) =>
+        e.toId.startsWith('Flow:'),
+      );
+      const flowTargets = flowEdges.map((e) => e.toId).sort();
+      expect(flowTargets).toEqual([
+        'Flow:Widget_Approval_Screen_Flow',
+        'Flow:Widget_Screen_Flow',
+      ]);
+      // Declared confidence + embeddedFlow kind, and the node lists them.
+      expect(flowEdges[0]?.confidence).toBe('declared');
+      expect(flowEdges[0]?.properties['referenceKind']).toBe('embeddedFlow');
+      expect(result.value.nodes[0]?.properties['embeddedFlows']).toEqual([
+        'Widget_Approval_Screen_Flow',
+        'Widget_Screen_Flow',
+      ]);
+      // The bespoke-LWC `flowName` prop did NOT mint a Flow edge.
+      expect(flowTargets).not.toContain('Flow:Not_A_Flow_Ref');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('captures FlexiPage sobjectType / pageType / masterLabel + object edge (P11-UI-flexipage-activation)', async () => {
     const dir = await makeTemp();
     try {
@@ -764,13 +871,111 @@ describe('enterprise metadata extractors', () => {
     }
   });
 
+  // PERMISSIONSETGROUP-OMITS-STATUS-AND-ACTIVATION: <status> and
+  // <hasActivationRequired> were dropped, so "is this PSG ready /
+  // session-activated?" could not be answered from structured facts.
+  it('projects PermissionSetGroup <status> and <hasActivationRequired>', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'Sample_Perm_Group.permissionsetgroup-meta.xml');
+      await writeFile(
+        path,
+        `<?xml version="1.0" encoding="UTF-8"?>
+<PermissionSetGroup xmlns="http://soap.sforce.com/2006/04/metadata">
+    <description>Bundle for sample users.</description>
+    <hasActivationRequired>false</hasActivationRequired>
+    <label>Sample Perm Group</label>
+    <permissionSets>Widget_Base</permissionSets>
+    <status>Updated</status>
+</PermissionSetGroup>`,
+        'utf8',
+      );
+      const result = await extractPermissionSetGroup(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const node = result.value.nodes[0]!;
+      expect(node.properties['status']).toBe('Updated');
+      expect(node.properties['hasActivationRequired']).toBe('false');
+      // Membership capture (pre-existing) must not regress.
+      expect(node.properties['permissionSets']).toEqual(['Widget_Base']);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // REPORT-TYPE-OMITS-BASE-OBJECT-JOIN-AND-COLUMNS: the report type was
+  // description-only; base object, joined relationships, and column count were
+  // invisible. Real-org shape: Account base with Contacts → pkg__Related_Items__r
+  // joins and hundreds of section columns.
+  it('surfaces ReportType baseObject (+ edge), join relationships, and column count', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'Accounts_with_Related_Items.reportType-meta.xml');
+      await writeFile(
+        path,
+        `<?xml version="1.0" encoding="UTF-8"?>
+<ReportType xmlns="http://soap.sforce.com/2006/04/metadata">
+    <baseObject>Account</baseObject>
+    <category>accounts</category>
+    <deployed>true</deployed>
+    <label>Accounts with Related Items</label>
+    <join>
+        <join>
+            <relationship>pkg__Related_Items__r</relationship>
+        </join>
+        <outerJoin>false</outerJoin>
+        <relationship>Contacts</relationship>
+    </join>
+    <sections>
+        <columns><field>Name</field><table>Account</table></columns>
+        <columns><field>Industry</field><table>Account</table></columns>
+        <columns><field>Email</field><table>Contacts</table></columns>
+        <masterLabel>Account Columns</masterLabel>
+    </sections>
+</ReportType>`,
+        'utf8',
+      );
+      const result = await extractReportType(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const node = result.value.nodes[0]!;
+      expect(node.properties['baseObject']).toBe('Account');
+      expect(node.properties['category']).toBe('accounts');
+      expect(node.properties['deployed']).toBe('true');
+      // Join relationships (Account base + Contacts + pkg__Related_Items__r).
+      expect(node.properties['joinRelationships']).toEqual([
+        'Contacts',
+        'pkg__Related_Items__r',
+      ]);
+      // Column COUNT with the honest coverage caveat (per-column identity deferred).
+      expect(node.properties['columnCount']).toBe(3);
+      expect(node.properties['columnsModeled']).toBe(false);
+      // A declared edge to the base object (so object blast-radius sees it).
+      expect(result.value.edges).toContainEqual(
+        expect.objectContaining({
+          fromId: 'ReportType:Accounts_with_Related_Items',
+          toId: 'CustomObject:Account',
+          edgeType: 'references',
+          confidence: 'declared',
+          properties: { referenceKind: 'reportTypeBaseObject' },
+        }),
+      );
+      // Relationship names must NOT be minted as phantom CustomObject edges.
+      expect(
+        result.value.edges.some((e) => e.toId === 'CustomObject:Contacts'),
+      ).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   // Bug fix: ReportType <label> was never extracted — makeNode always set label: null
   // because extractReportType passed no labelXmlElement config. Real org shape from
-  // org-kb/source/main/default/reportTypes/Bot_Metrics_Daily_v2.reportType-meta.xml.
+  // org-kb/source/main/default/reportTypes/Sample_Report_Daily_v2.reportType-meta.xml.
   it('extracts the <label> from a real ReportType XML and surfaces it as node.label', async () => {
     const dir = await makeTemp();
     try {
-      const path = join(dir, 'Bot_Metrics_Daily_v2.reportType-meta.xml');
+      const path = join(dir, 'Sample_Report_Daily_v2.reportType-meta.xml');
       // Real-org XML shape: top-level <label> with a literal apostrophe distinguishes
       // versioned clones (the real file uses a literal ' not an XML entity).
       await writeFile(
@@ -792,7 +997,7 @@ describe('enterprise metadata extractors', () => {
       expect(result.ok).toBe(true);
       if (!result.ok) return;
       const node = result.value.nodes[0]!;
-      expect(node.id).toBe('ReportType:Bot_Metrics_Daily_v2');
+      expect(node.id).toBe('ReportType:Sample_Report_Daily_v2');
       // Previously always null — must now carry the seasonal-release label.
       expect(node.label).toBe("Bot Metrics Daily Summer '22");
     } finally {
@@ -821,11 +1026,11 @@ describe('enterprise metadata extractors', () => {
   // Bug fix: extractRestrictionRule never read enforcementType / recordFilter /
   // userCriteria / active — the generic extractor only produced fieldRefs.
   // Real-org XML shape from:
-  // org-kb/source/main/default/restrictionRules/Limit_Access_to_Example_Course_for_Faculty.rule-meta.xml
+  // org-kb/source/main/default/restrictionRules/Limit_Access_to_Sample_Records.rule-meta.xml
   it('extracts enforcementType, recordFilter, userCriteria, and active from a real RestrictionRule', async () => {
     const dir = await makeTemp();
     try {
-      const path = join(dir, 'Limit_Access_to_Example_Course_for_Faculty.rule-meta.xml');
+      const path = join(dir, 'Limit_Access_to_Sample_Records.rule-meta.xml');
       // Exact real-org XML shape. RestrictionRule files are top-level (not nested
       // under an object folder), so the node id is just the file stem — the
       // parentId comes from <targetEntity> via parentFromXmlElement. The
@@ -836,12 +1041,12 @@ describe('enterprise metadata extractors', () => {
         `<?xml version="1.0" encoding="UTF-8"?>
 <RestrictionRule xmlns="http://soap.sforce.com/2006/04/metadata">
     <active>true</active>
-    <description>Faculty should be allowed to see only records where they are the assigned faculty.</description>
+    <description>Reviewers should be allowed to see only records where they are the assigned reviewer.</description>
     <enforcementType>Restrict</enforcementType>
-    <masterLabel>Limit Access to Course Offering for Faculty</masterLabel>
-    <recordFilter>hed__Faculty__r.Faculty_User_Record__c=$User.Id</recordFilter>
-    <targetEntity>hed__Example_Course__c</targetEntity>
-    <userCriteria>$User.ProfileId=&apos;00e4O000001ADFpQAO&apos;</userCriteria>
+    <masterLabel>Limit Access to Sample Records</masterLabel>
+    <recordFilter>Widget_Contact__r.Widget_User_Record__c=$User.Id</recordFilter>
+    <targetEntity>ns__Widget__c</targetEntity>
+    <userCriteria>$User.ProfileId=&apos;00eXX0000000001AAA&apos;</userCriteria>
     <version>1</version>
 </RestrictionRule>`,
         'utf8',
@@ -851,39 +1056,102 @@ describe('enterprise metadata extractors', () => {
       if (!result.ok) return;
       const node = result.value.nodes[0]!;
       // Top-level file: id is just the stem; parentId comes from <targetEntity>.
-      expect(node.id).toBe('RestrictionRule:Limit_Access_to_Example_Course_for_Faculty');
-      expect(node.parentId).toBe('CustomObject:hed__Example_Course__c');
+      expect(node.id).toBe('RestrictionRule:Limit_Access_to_Sample_Records');
+      expect(node.parentId).toBe('CustomObject:ns__Widget__c');
       // Previously missing — must now be present.
       expect(node.properties['enforcementType']).toBe('Restrict');
       expect(node.properties['active']).toBe('true');
-      expect(node.properties['recordFilter']).toBe('hed__Faculty__r.Faculty_User_Record__c=$User.Id');
+      expect(node.properties['recordFilter']).toBe('Widget_Contact__r.Widget_User_Record__c=$User.Id');
       // extractXmlValues uses a plain regex (no XML entity decoding) so &apos;
       // is returned verbatim from the raw text, not decoded to '.
-      expect(node.properties['userCriteria']).toBe("$User.ProfileId=&apos;00e4O000001ADFpQAO&apos;");
+      expect(node.properties['userCriteria']).toBe("$User.ProfileId=&apos;00eXX0000000001AAA&apos;");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // RESTRICTION-RULE-OMITS-PROFILE-USERCRITERIA-EDGE: an active RestrictionRule
+  // gates on a hardcoded Profile Id in <userCriteria>, but the graph never edged
+  // RestrictionRule -> Profile, so "which profiles are constrained by this rule?"
+  // could not be answered and the profile looked unused. A single-file extractor
+  // CANNOT resolve the opaque id to the name-keyed Profile node (that is an
+  // org-wide mapping, and real Profile metadata carries no id), so it emits an
+  // explicit `UnresolvedProfile:{id}` STUB with disclosure — it must NEVER mint a
+  // `Profile:{id}` node that masquerades as a real Profile. The cross-file
+  // resolution to `Profile:{apiName}` runs downstream
+  // (`resolveRestrictionRuleProfileEdges`). Synthetic ProfileId.
+  it('emits an UNRESOLVED Profile stub from a userCriteria $User.ProfileId, never a Profile:{id} phantom (RESTRICTION-RULE-OMITS-PROFILE-USERCRITERIA-EDGE)', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'Limit_Widget_Access.rule-meta.xml');
+      // &apos; is returned verbatim by the regex extractor (no entity decoding),
+      // so the ProfileId parser must tolerate the &apos; delimiter.
+      await writeFile(
+        path,
+        `<?xml version="1.0" encoding="UTF-8"?>
+<RestrictionRule xmlns="http://soap.sforce.com/2006/04/metadata">
+    <active>true</active>
+    <enforcementType>Restrict</enforcementType>
+    <recordFilter>OwnerId=$User.Id</recordFilter>
+    <targetEntity>Widget__c</targetEntity>
+    <userCriteria>$User.ProfileId=&apos;00eZZZ000000000AAA&apos;</userCriteria>
+</RestrictionRule>`,
+        'utf8',
+      );
+      const result = await extractRestrictionRule(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const node = result.value.nodes[0]!;
+      expect(node.properties['userCriteriaProfileIds']).toEqual([
+        '00eZZZ000000000AAA',
+      ]);
+      // Disclosure: at extract time every gated id is unresolved.
+      expect(node.properties['unresolvedProfileIds']).toEqual([
+        '00eZZZ000000000AAA',
+      ]);
+      // A `Profile:{id}` phantom must NEVER be minted — the opaque id can be
+      // mistaken for a real Profile in profile-scoped queries.
+      expect(
+        result.value.edges.some((e) => e.toId === 'Profile:00eZZZ000000000AAA'),
+      ).toBe(false);
+      const stubEdge = result.value.edges.find(
+        (e) => e.toId === 'UnresolvedProfile:00eZZZ000000000AAA',
+      );
+      expect(stubEdge).toBeDefined();
+      if (!stubEdge) return;
+      expect(stubEdge.fromId).toBe('RestrictionRule:Limit_Widget_Access');
+      expect(stubEdge.edgeType).toBe('references');
+      expect(stubEdge.confidence).toBe('heuristic');
+      expect(stubEdge.source).toBe('enterprise-metadata-extractor');
+      expect(stubEdge.properties).toEqual({
+        referenceKind: 'restrictionUserProfileUnresolved',
+        unresolvedProfileId: '00eZZZ000000000AAA',
+        idBasedTarget: true,
+      });
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
 
   // ScopingRule uses the same XML schema as RestrictionRule (real-org shape from
-  // org-kb/source/main/default/restrictionRules/Viewer_is_Best_Academic_Advisor.rule-meta.xml
+  // org-kb/source/main/default/restrictionRules/Viewer_is_Best_Widget.rule-meta.xml
   // — note: that file has <enforcementType>Scoping</enforcementType> despite living
   // in the restrictionRules/ folder; Salesforce stores both types as .rule-meta.xml).
   it('extracts enforcementType=Scoping and extra properties from a real ScopingRule', async () => {
     const dir = await makeTemp();
     try {
-      const path = join(dir, 'Viewer_is_Best_Academic_Advisor.rule-meta.xml');
+      const path = join(dir, 'Viewer_is_Best_Widget.rule-meta.xml');
       await writeFile(
         path,
         `<?xml version="1.0" encoding="UTF-8"?>
 <RestrictionRule xmlns="http://soap.sforce.com/2006/04/metadata">
     <active>true</active>
-    <description>Used to filter a list view when the user is the best academic advisor</description>
+    <description>Used to filter a list view when the user is the best reviewer</description>
     <enforcementType>Scoping</enforcementType>
-    <masterLabel>Viewer is Best Academic Advisor</masterLabel>
-    <recordFilter>Best_Academic_Advisor__r.Id=$User.Id</recordFilter>
+    <masterLabel>Viewer is Best Widget</masterLabel>
+    <recordFilter>Best_Widget__r.Id=$User.Id</recordFilter>
     <targetEntity>Contact</targetEntity>
-    <userCriteria>$User.ProfileId=&apos;00e0B000000uM1N&apos;</userCriteria>
+    <userCriteria>$User.ProfileId=&apos;00eXX0000000002&apos;</userCriteria>
     <version>1</version>
 </RestrictionRule>`,
         'utf8',
@@ -892,14 +1160,14 @@ describe('enterprise metadata extractors', () => {
       expect(result.ok).toBe(true);
       if (!result.ok) return;
       const node = result.value.nodes[0]!;
-      expect(node.id).toBe('ScopingRule:Viewer_is_Best_Academic_Advisor');
+      expect(node.id).toBe('ScopingRule:Viewer_is_Best_Widget');
       expect(node.parentId).toBe('CustomObject:Contact');
       // Previously missing — must now be present.
       expect(node.properties['enforcementType']).toBe('Scoping');
       expect(node.properties['active']).toBe('true');
-      expect(node.properties['recordFilter']).toBe('Best_Academic_Advisor__r.Id=$User.Id');
+      expect(node.properties['recordFilter']).toBe('Best_Widget__r.Id=$User.Id');
       // userCriteria uses &apos; which is returned verbatim by the regex extractor.
-      expect(node.properties['userCriteria']).toBe("$User.ProfileId=&apos;00e0B000000uM1N&apos;");
+      expect(node.properties['userCriteria']).toBe("$User.ProfileId=&apos;00eXX0000000002&apos;");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -915,13 +1183,13 @@ describe('enterprise metadata extractors', () => {
     // silently dropped and no graph edge was emitted.
     const dir = await makeTemp();
     try {
-      const path = join(dir, 'Clinical_Record_Page.flexipage-meta.xml');
+      const path = join(dir, 'Sample_Record_Page.flexipage-meta.xml');
       await writeFile(
         path,
         `<?xml version="1.0" encoding="UTF-8"?>
 <FlexiPage xmlns="http://soap.sforce.com/2006/04/metadata">
-    <masterLabel>Course Offering Record Page</masterLabel>
-    <sobjectType>hed__Example_Course__c</sobjectType>
+    <masterLabel>Sample Record Page</masterLabel>
+    <sobjectType>ns__Widget__c</sobjectType>
     <type>RecordPage</type>
     <flexiPageRegions>
         <componentInstances>
@@ -929,12 +1197,12 @@ describe('enterprise metadata extractors', () => {
                 <name>visibilityRule</name>
                 <value>
                     <criteria>
-                        <leftValue>{!$Permission.CustomPermission.AssignClinicalLead}</leftValue>
+                        <leftValue>{!$Permission.CustomPermission.AssignSampleLead}</leftValue>
                         <operator>EQUAL</operator>
                         <rightValue>true</rightValue>
                     </criteria>
                     <criteria>
-                        <leftValue>{!$Permission.CustomPermission.ViewClinicalDashboard}</leftValue>
+                        <leftValue>{!$Permission.CustomPermission.ViewSampleDashboard}</leftValue>
                         <operator>EQUAL</operator>
                         <rightValue>true</rightValue>
                     </criteria>
@@ -957,8 +1225,8 @@ describe('enterprise metadata extractors', () => {
       expect(permEdges).toHaveLength(2);
       const permIds = permEdges.map((e) => e.toId).sort();
       expect(permIds).toEqual([
-        'CustomPermission:AssignClinicalLead',
-        'CustomPermission:ViewClinicalDashboard',
+        'CustomPermission:AssignSampleLead',
+        'CustomPermission:ViewSampleDashboard',
       ]);
       // Edge properties: declared confidence + visibilityRulePermission kind.
       for (const edge of permEdges) {
@@ -968,8 +1236,8 @@ describe('enterprise metadata extractors', () => {
       // permissionRefs mirrored on the node.
       const node = result.value.nodes[0]!;
       expect((node.properties['permissionRefs'] as string[]).sort()).toEqual([
-        'CustomPermission:AssignClinicalLead',
-        'CustomPermission:ViewClinicalDashboard',
+        'CustomPermission:AssignSampleLead',
+        'CustomPermission:ViewSampleDashboard',
       ]);
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -1887,6 +2155,43 @@ describe('enterprise metadata extractors', () => {
         expect(result.ok).toBe(true);
         if (!result.ok) return;
         expect(result.value.nodes[0]?.properties['capacityModel']).toBe('StatusBased');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    // SERVICE-CHANNEL-RELATED-ENTITY-UNGRAPHED: relatedEntityType was extracted
+    // as a scalar string but emitted no edge, so "which Omni channel owns
+    // MessagingSession?" and MessagingSession blast-radius missed the channel.
+    it('emits a declared references edge ServiceChannel -> CustomObject for relatedEntityType', async () => {
+      const dir = await makeTemp();
+      try {
+        const path = join(dir, 'My_Messaging_Channel.serviceChannel-meta.xml');
+        await writeFile(
+          path,
+          `<?xml version="1.0" encoding="UTF-8"?>
+<ServiceChannel xmlns="http://soap.sforce.com/2006/04/metadata">
+    <label>Messaging</label>
+    <relatedEntityType>MessagingSession</relatedEntityType>
+</ServiceChannel>`,
+          'utf8',
+        );
+        const result = await extractServiceChannel(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0]!;
+        // The scalar property is preserved (NOT turned into an array).
+        expect(node.properties['relatedEntityType']).toBe('MessagingSession');
+        const edge = result.value.edges.find(
+          (e) => e.toId === 'CustomObject:MessagingSession',
+        );
+        expect(edge).toBeDefined();
+        if (!edge) return;
+        expect(edge.fromId).toBe('ServiceChannel:My_Messaging_Channel');
+        expect(edge.edgeType).toBe('references');
+        expect(edge.confidence).toBe('declared');
+        expect(edge.source).toBe('enterprise-metadata-extractor');
+        expect(edge.properties).toEqual({ referenceKind: 'serviceChannelEntity' });
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

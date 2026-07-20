@@ -13,12 +13,19 @@
  * tool's `readLayoutAssignments` / `canonicaliseLayoutId` /
  * `layoutTargetsObject` rather than re-deriving the format).
  *
- * Input: `{ componentId: 'Layout:{Object}.{LayoutName}', limit?, offset? }`.
- * Output: the profiles + record types that assign this layout. `declared`
+ * Input: `{ componentId, limit?, offset? }` where `componentId` is EITHER a
+ * `Layout:{Object}.{LayoutName}` id (LAYOUT mode — assignments for that one
+ * layout) OR a `CustomObject:{Object}` id (OBJECT mode — assignments across
+ * EVERY layout of the object, the same id `sfi.lightning_pages` accepts). A
+ * `CustomObject:` id is NO LONGER mangled into `Layout:CustomObject:X`
+ * (LAYOUT-ASSIGNMENTS-MANGLES-CUSTOMOBJECT-ID).
+ * Output: the profiles + record types that assign the layout(s). `declared`
  * confidence — layout assignments are declared Profile metadata. A widely
  * shared standard-object layout is assigned by every profile × record type
  * (hundreds of rows past the MCP response limit), so the inline list PAGES
- * (`limit`/`offset`/`hasMore`/`truncated`) while `summary` stays complete.
+ * (`limit`/`offset`/`hasMore`/`truncated`) while `summary` stays complete. In
+ * OBJECT mode each row carries its own `layoutId` and `summary.layouts` counts
+ * the distinct layouts.
  *
  * Honesty axis:
  *   - **Classic page layouts only.** Lightning record pages (FlexiPage)
@@ -43,7 +50,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-import { mergeInputAliases, toLayoutId } from './input-aliases.js';
+import { mergeInputAliases, resolveObjectAlias, toLayoutId } from './input-aliases.js';
 import {
   canonicaliseLayoutId,
   layoutTargetsObject,
@@ -57,6 +64,15 @@ import { clampedNodeScanLimit, scanTruncationNote } from './scan-cap.js';
 const LAYOUT_PREFIX = 'Layout:';
 
 /**
+ * Canonical id prefix for the object-mode lookup. Accepting `CustomObject:X`
+ * (the SAME id `sfi.lightning_pages` / `sfi.list_view_sharing` accept for
+ * object mode) lists assignments across every layout of the object, rather
+ * than mangling the id into a bogus `Layout:CustomObject:X`
+ * (LAYOUT-ASSIGNMENTS-MANGLES-CUSTOMOBJECT-ID).
+ */
+const OBJECT_PREFIX = 'CustomObject:';
+
+/**
  * Per-page assignment cap. A widely-shared standard-object layout (e.g.
  * Account) is assigned by every profile × every record type — hundreds of
  * rows that serialise past the ~45 KB MCP response limit, so the inline list
@@ -68,13 +84,32 @@ const MAX_LIMIT = 250;
 
 const LAYOUT_ASSIGNMENTS_TOOL = 'sfi.layout_assignments';
 
-const layoutAssignmentsInputBaseSchema = z.object({
-  componentId: z.string().min(1),
-  limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
-  offset: z.number().int().min(0).optional(),
-  // CR-22 continuation cursor from a prior truncated page's nextCursor.
-  cursor: z.string().min(1).optional(),
-});
+const layoutAssignmentsInputBaseSchema = z
+  .object({
+    // LAYOUT mode: a `Layout:` id (or a bare name coerced to one) / `layoutId`
+    // alias. OBJECT mode: a `CustomObject:` id, or any of the object aliases
+    // below (L2 Alias OS). At least one identifier is required.
+    componentId: z.string().min(1).optional(),
+    object: z.string().min(1).optional(),
+    objectApiName: z.string().min(1).optional(),
+    objectId: z.string().min(1).optional(),
+    limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
+    offset: z.number().int().min(0).optional(),
+    // CR-22 continuation cursor from a prior truncated page's nextCursor.
+    cursor: z.string().min(1).optional(),
+  })
+  .refine(
+    (i) =>
+      i.componentId !== undefined ||
+      i.object !== undefined ||
+      i.objectApiName !== undefined ||
+      i.objectId !== undefined,
+    {
+      message:
+        'name the layout or object — pass a `componentId` (`Layout:` for one layout, `CustomObject:` for the object) or an object alias (`objectApiName` / `object` / `objectId`)',
+      path: ['componentId'],
+    },
+  );
 
 /** Zod schema for the `sfi.layout_assignments` tool input. */
 export const layoutAssignmentsInputSchema = z.preprocess((raw) => {
@@ -84,7 +119,12 @@ export const layoutAssignmentsInputSchema = z.preprocess((raw) => {
   if (merged !== null && typeof merged === 'object' && !Array.isArray(merged)) {
     const o = merged as Record<string, unknown>;
     const id = typeof o.componentId === 'string' ? o.componentId : '';
-    if (id.length > 0 && !id.startsWith(LAYOUT_PREFIX)) {
+    // A bare name → `Layout:` id, but a `CustomObject:` id is left intact for
+    // object mode — mangling it to `Layout:CustomObject:X` was the bug
+    // (LAYOUT-ASSIGNMENTS-MANGLES-CUSTOMOBJECT-ID). Object aliases are resolved
+    // in the handler (L2), not coerced here, so a bare `object` never becomes a
+    // `Layout:` id.
+    if (id.length > 0 && !id.startsWith(LAYOUT_PREFIX) && !id.startsWith(OBJECT_PREFIX)) {
       o.componentId = toLayoutId(id);
     }
   }
@@ -106,18 +146,46 @@ export interface LayoutAssignmentRef {
   readonly recordType: string | null;
   /** Canonical record-type id, or `null` for the default assignment. */
   readonly recordTypeId: ComponentId | null;
+  /**
+   * Which layout this assignment targets. Present in OBJECT mode (rows span
+   * every layout of the object); omitted in LAYOUT mode, where every row
+   * targets the single top-level `layoutId`.
+   */
+  readonly layoutId?: ComponentId;
 }
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface LayoutAssignmentsOutput {
-  readonly layoutId: ComponentId;
+  /**
+   * `layout` when the caller passed a `Layout:` id (assignments for ONE
+   * layout); `object` when they passed a `CustomObject:` id (assignments for
+   * every layout of the object — LAYOUT-ASSIGNMENTS-MANGLES-CUSTOMOBJECT-ID).
+   */
+  readonly mode: 'layout' | 'object';
+  /**
+   * Echoes the id ACTUALLY resolved so a host never assumes an alias it passed
+   * (`objectApiName` / `object` / `objectId`) was silently stripped — the
+   * `componentId: Required` bug this closes. `componentId` is the `Layout:` id
+   * (layout mode) or `CustomObject:` id (object mode); `object` is the object
+   * the layout(s) belong to.
+   */
+  readonly appliedScope: {
+    readonly componentId: string;
+    readonly object: string;
+  };
+  /** The specific layout in LAYOUT mode; `null` in OBJECT mode. */
+  readonly layoutId: ComponentId | null;
   readonly object: string;
+  /** OBJECT mode only: the distinct layouts of the object that carry assignments (sorted). */
+  readonly layouts?: readonly ComponentId[];
   readonly assignments: readonly LayoutAssignmentRef[];
   readonly summary: {
     /** Distinct profiles that assign this layout (COMPLETE, not paginated). */
     readonly profiles: number;
     /** Total (profile × record type) assignments (COMPLETE, not paginated). */
     readonly assignments: number;
+    /** OBJECT mode only: distinct layouts of the object that carry assignments. */
+    readonly layouts?: number;
   };
   /** The applied page size. */
   readonly limit: number;
@@ -151,44 +219,92 @@ const SCOPE_NOTE =
 
 /**
  * The `sfi.layout_assignments` MCP tool. Enumerates the profiles + record
- * types that assign a given page Layout.
+ * types that assign a page Layout (LAYOUT mode) or every layout of an object
+ * (OBJECT mode, via a `CustomObject:` id).
  *
  * @example
+ *   // LAYOUT mode — assignments for one layout.
  *   await layoutAssignmentsHandler(ctx, {
  *     componentId: 'Layout:Account.Account Layout',
  *   });
+ *   // OBJECT mode — assignments across every layout of the object.
+ *   await layoutAssignmentsHandler(ctx, { componentId: 'CustomObject:Account' });
  */
 export const layoutAssignmentsHandler = async (
   ctx: Context,
   input: LayoutAssignmentsInput,
 ): Promise<Result<McpResponse<LayoutAssignmentsOutput>, McpError>> => {
-  if (!input.componentId.startsWith(LAYOUT_PREFIX)) {
+  // L2 Alias OS: resolve an OBJECT scope from object / objectApiName / objectId
+  // or a CustomObject: componentId (a reverse-mode Layout: componentId is NOT
+  // an object alias). Disagreeing object aliases -> invalid-query.
+  const objScope = resolveObjectAlias(input, {
+    bareComponentIdIsObject: false,
+    required: false,
+  });
+  if (!objScope.ok) return err(objScope.error);
+  const rawComponentId = input.componentId;
+  let componentId: string;
+  if (objScope.value !== null) {
+    // OBJECT mode. A Layout: componentId alongside an object is ambiguous.
+    if (rawComponentId !== undefined && rawComponentId.startsWith(LAYOUT_PREFIX)) {
+      return err({
+        kind: 'invalid-query',
+        message:
+          'pass either a Layout: componentId (layout mode) or an object (object mode), not both',
+        path: 'componentId',
+      });
+    }
+    componentId = objScope.value.componentId;
+  } else if (rawComponentId !== undefined) {
+    componentId = rawComponentId;
+  } else {
     return err({
       kind: 'invalid-query',
-      message: `componentId must be a Layout: id (e.g. 'Layout:Account.Account Layout'); got '${input.componentId}'`,
+      message:
+        'name the layout or object — pass a `componentId` (Layout: or CustomObject:) or an object alias (objectApiName / object / objectId)',
       path: 'componentId',
     });
   }
-  const layoutId = input.componentId as ComponentId;
-
-  // Resolve the layout node so a typo is a clear `component-not-found`
-  // rather than a confident "no profile assigns this layout".
-  const layoutNode = await getNodeById(ctx.graph, layoutId);
-  if (!layoutNode.ok) {
-    return err({ kind: 'internal', message: `graph query failed: ${layoutNode.error.message}` });
+  const isObjectMode = componentId.startsWith(OBJECT_PREFIX);
+  const isLayoutMode = componentId.startsWith(LAYOUT_PREFIX);
+  if (!isObjectMode && !isLayoutMode) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        `componentId must be a Layout: id (e.g. 'Layout:Account.Account Layout') ` +
+        `or a CustomObject: id for object mode (e.g. 'CustomObject:Account'); got '${componentId}'`,
+      path: 'componentId',
+    });
   }
-  if (layoutNode.value === null) {
+  const targetId = componentId as ComponentId;
+
+  // Resolve the target node so a typo is a clear `component-not-found` rather
+  // than a confident "no profile assigns this layout / object".
+  const targetNode = await getNodeById(ctx.graph, targetId);
+  if (!targetNode.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${targetNode.error.message}` });
+  }
+  if (targetNode.value === null) {
     return err({
       kind: 'component-not-found',
-      message: `no Layout matches \`${layoutId}\` in this vault`,
-      path: layoutId,
+      message: isObjectMode
+        ? `no CustomObject matches \`${targetId}\` in this vault`
+        : `no Layout matches \`${targetId}\` in this vault`,
+      path: targetId,
     });
   }
 
-  // The object api name is the segment between `Layout:` and the first dot.
-  const afterPrefix = layoutId.slice(LAYOUT_PREFIX.length);
-  const dot = afterPrefix.indexOf('.');
-  const object = dot > 0 ? afterPrefix.slice(0, dot) : afterPrefix;
+  // LAYOUT mode narrows to the one layout; OBJECT mode keeps every layout the
+  // object owns. `layoutId` is the single layout (layout mode) or null.
+  const layoutId: ComponentId | null = isLayoutMode ? targetId : null;
+  const object = isObjectMode
+    ? targetId.slice(OBJECT_PREFIX.length)
+    : (() => {
+        // The object api name is the segment between `Layout:` and the first dot.
+        const afterPrefix = targetId.slice(LAYOUT_PREFIX.length);
+        const dot = afterPrefix.indexOf('.');
+        return dot > 0 ? afterPrefix.slice(0, dot) : afterPrefix;
+      })();
 
   // CR-22 B3: scan EVERY Profile by paging the SQL OFFSET forward (window-by-
   // window at the clamped cap) so assignments owned by Profile 501+ are
@@ -202,6 +318,7 @@ export const layoutAssignmentsHandler = async (
 
   const assignments: LayoutAssignmentRef[] = [];
   const distinctProfiles = new Set<string>();
+  const distinctLayouts = new Set<string>();
   let anyProfileHadAssignments = false;
 
   for (const profile of scan.value.nodes) {
@@ -210,25 +327,33 @@ export const layoutAssignmentsHandler = async (
     anyProfileHadAssignments = true;
     for (const entry of entries) {
       if (!layoutTargetsObject(entry.layout, object)) continue;
-      if (canonicaliseLayoutId(entry.layout, object) !== layoutId) continue;
+      const canonical = canonicaliseLayoutId(entry.layout, object);
+      // LAYOUT mode: only the one layout. OBJECT mode: every layout of the object.
+      if (isLayoutMode && canonical !== layoutId) continue;
       const recordType = entry.recordType ?? null;
       assignments.push({
         profileId: profile.id as ComponentId,
         profileLabel: profile.label ?? profile.apiName,
         recordType,
         recordTypeId: recordType !== null ? (`RecordType:${recordType}` as ComponentId) : null,
+        // Tag the targeted layout only in object mode (redundant in layout mode,
+        // where it equals the top-level `layoutId` — kept byte-identical there).
+        ...(isObjectMode ? { layoutId: canonical } : {}),
       });
       distinctProfiles.add(profile.id);
+      distinctLayouts.add(canonical);
     }
   }
 
-  // CR-22: total-order tiebreak. profileId then recordType then the raw record-
-  // type id makes the order a STRICT TOTAL order — two rows sharing profileId
-  // AND recordType previously compared equal (returned 0), so an offset resume
-  // could dup/skip at that tie. `recordTypeId` is the last distinguishing key;
-  // if even it ties, the rows are genuine duplicates (same profile, same RT,
-  // same layout) and ordering between them is immaterial.
+  // CR-22: total-order tiebreak. In OBJECT mode the layout is the leading key
+  // (rows span multiple layouts); then profileId, recordType, and the raw
+  // record-type id make the order a STRICT TOTAL order so an offset/cursor
+  // resume cannot dup or skip at a tie. In LAYOUT mode every row shares the one
+  // layout, so the leading key is inert and the order is byte-identical.
   assignments.sort((a, b) => {
+    const la = a.layoutId ?? '';
+    const lb = b.layoutId ?? '';
+    if (la !== lb) return la < lb ? -1 : 1;
     if (a.profileId !== b.profileId) return a.profileId < b.profileId ? -1 : 1;
     const ra = a.recordType ?? '';
     const rb = b.recordType ?? '';
@@ -245,9 +370,10 @@ export const layoutAssignmentsHandler = async (
   const limit = input.limit ?? DEFAULT_LIMIT;
 
   // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
-  // The fingerprint covers the narrowing arg `componentId` so a token minted for
-  // one layout can't be replayed against another.
-  const fingerprint = argsFingerprint({ componentId: layoutId });
+  // The fingerprint covers the narrowing arg `componentId` (the layout OR object
+  // id) so a token minted for one target can't be replayed against another. In
+  // layout mode `targetId === layoutId`, so this stays byte-identical.
+  const fingerprint = argsFingerprint({ componentId: targetId });
   let offset = input.offset ?? 0;
   if (input.cursor !== undefined) {
     const decoded = decodeCursor(input.cursor, {
@@ -262,7 +388,12 @@ export const layoutAssignmentsHandler = async (
   const paged = paginateLegacy(assignments, {
     offset,
     limit,
-    keyOf: (a) => `${a.profileId}|${a.recordType ?? ''}|${a.recordTypeId ?? ''}`,
+    // OBJECT mode prepends the layout (rows span layouts); LAYOUT mode keeps the
+    // exact pre-existing key (`layoutId` is undefined there) so it stays byte-identical.
+    keyOf: (a) =>
+      isObjectMode
+        ? `${a.layoutId ?? ''}|${a.profileId}|${a.recordType ?? ''}|${a.recordTypeId ?? ''}`
+        : `${a.profileId}|${a.recordType ?? ''}|${a.recordTypeId ?? ''}`,
     binding: {
       tool: LAYOUT_ASSIGNMENTS_TOOL,
       vaultHash: ctx.manifest.sourceTreeHash,
@@ -280,16 +411,31 @@ export const layoutAssignmentsHandler = async (
   const scanNote = scanTruncated
     ? ` ${scanTruncationNote(['Profile'], clampedNodeScanLimit())}`
     : '';
+  // OBJECT mode lists assignments across EVERY layout of the object; disclose it.
+  const objectModeNote = isObjectMode
+    ? `Object mode: assignments across all ${distinctLayouts.size} layout(s) of \`${object}\` (each row carries its \`layoutId\`). `
+    : '';
   const boundaryNote = anyProfileHadAssignments
-    ? `${SCOPE_NOTE}${pageNote}${scanNote}`
-    : `No profile in this vault carries an extracted \`layoutAssignments\` property, so layout assignments could not be evaluated — the result is "not modeled", not a verified "no assignments". Re-run \`/sfi-refresh\` to populate it. ${SCOPE_NOTE}${scanNote}`;
+    ? `${objectModeNote}${SCOPE_NOTE}${pageNote}${scanNote}`
+    : `${objectModeNote}No profile in this vault carries an extracted \`layoutAssignments\` property, so layout assignments could not be evaluated — the result is "not modeled", not a verified "no assignments". Re-run \`/sfi-refresh\` to populate it. ${SCOPE_NOTE}${scanNote}`;
 
   return ok({
     data: {
+      mode: isObjectMode ? 'object' : 'layout',
+      // Echo the scope ACTUALLY resolved so a host never assumes an alias it
+      // passed (`objectApiName` / `object` / `objectId`) was honored. In layout
+      // mode `componentId` is the `Layout:` id; `object` is the object the
+      // layout belongs to.
+      appliedScope: { componentId: targetId, object },
       layoutId,
       object,
+      ...(isObjectMode ? { layouts: [...distinctLayouts].sort() as ComponentId[] } : {}),
       assignments: page,
-      summary: { profiles: distinctProfiles.size, assignments: totalAssignments },
+      summary: {
+        profiles: distinctProfiles.size,
+        assignments: totalAssignments,
+        ...(isObjectMode ? { layouts: distinctLayouts.size } : {}),
+      },
       limit,
       offset,
       hasMore,

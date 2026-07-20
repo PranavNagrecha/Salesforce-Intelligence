@@ -139,6 +139,23 @@ describe('changedSinceInputSchema', () => {
     expect(r.success).toBe(false);
   });
 
+  // CHANGED-SINCE-REJECTS-LAST-REFRESH-TOKEN: the natural refresh tokens parse
+  // (they resolve to refreshedAt at the handler), a bare non-date does not. The
+  // separator is normalized, so the hyphen, underscore, AND space forms — the
+  // residual the hyphen-only fix left open — all parse, case-insensitively.
+  it('accepts the "last-refresh" refresh tokens (hyphen / underscore / space, any case)', () => {
+    for (const since of [
+      'last-refresh',
+      'last_refresh',
+      'last refresh',
+      'Last Refresh',
+      'refresh',
+      'Last-Refresh',
+    ]) {
+      expect(changedSinceInputSchema.safeParse({ since }).success).toBe(true);
+    }
+  });
+
   it('rejects an unknown component type', () => {
     const r = changedSinceInputSchema.safeParse({
       since: '2026-05-01',
@@ -266,6 +283,44 @@ describe('changedSinceHandler — boundary filter and partial-data axis', () => 
     const ids = result.value.data.changed.map((c) => c.id);
     expect(ids).not.toContain('ApexClass:UnenrichedBaz');
     expect(result.value.data.unenrichedCount).toBeGreaterThanOrEqual(1);
+  });
+
+  // GUARD (CHANGED-SINCE-REJECTS-LAST-REFRESH-TOKEN): pre-fix `since:
+  // "last-refresh"` hard-failed the ISO refine. Post-fix it resolves to the
+  // manifest's refreshedAt — BYTE-IDENTICAL to passing that ISO instant — and the
+  // echoed `since` reflects the resolved boundary (proving the token was honored,
+  // not epoch-defaulted: it differs from a far-past date, which matches more).
+  it('"last-refresh" ≡ the explicit refreshedAt ISO (byte-equal) and differs from a far-past date', async () => {
+    const viaToken = await changedSinceHandler(ctx, { since: 'last-refresh' });
+    const viaIso = await changedSinceHandler(ctx, {
+      since: FIXTURE_MANIFEST.refreshedAt,
+    });
+    const viaFarPast = await changedSinceHandler(ctx, { since: '2000-01-01' });
+    expect(viaToken.ok && viaIso.ok && viaFarPast.ok).toBe(true);
+    if (!viaToken.ok || !viaIso.ok || !viaFarPast.ok) return;
+    // Token resolved to refreshedAt → byte-identical to the explicit ISO call.
+    expect(viaToken.value.data).toEqual(viaIso.value.data);
+    // The echoed boundary is the resolved refresh instant, NOT the raw token.
+    expect(viaToken.value.data.since).toBe(
+      new Date(FIXTURE_MANIFEST.refreshedAt).toISOString(),
+    );
+    // Scope honored: a far-past `since` surfaces changes the refresh boundary excludes.
+    expect(viaFarPast.value.data.changed.length).toBeGreaterThan(
+      viaToken.value.data.changed.length,
+    );
+  });
+
+  // RESIDUAL (CHANGED-SINCE-REJECTS-LAST-REFRESH-TOKEN): the SPACE form
+  // "last refresh" (and its cased variant) resolves identically to the hyphen
+  // token — the hyphen-only fix left the space form hard-failing.
+  it('the space form "last refresh" ≡ "last-refresh" (byte-equal)', async () => {
+    const viaHyphen = await changedSinceHandler(ctx, { since: 'last-refresh' });
+    for (const since of ['last refresh', 'Last Refresh', 'last_refresh']) {
+      const viaSpace = await changedSinceHandler(ctx, { since });
+      expect(viaHyphen.ok && viaSpace.ok).toBe(true);
+      if (!viaHyphen.ok || !viaSpace.ok) return;
+      expect(viaSpace.value.data).toEqual(viaHyphen.value.data);
+    }
   });
 
   it('reads lastModifiedDate from the top-level node field when properties does not carry one', async () => {

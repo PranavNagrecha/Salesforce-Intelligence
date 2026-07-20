@@ -47,11 +47,25 @@ const isStandardObjectApiName = (apiName: string): boolean =>
   STANDARD_OBJECT_API_NAMES.has(apiName);
 
 /**
- * The component types `sfi.list_components` accepts. Mirrors the
- * `ComponentType` union in `@sf-intelligence/contracts`; declared inline so
- * Zod can validate against a real enum rather than `z.string()` (clients
- * with a typo learn `invalid-query` instead of receiving `{ components: [] }`
- * and concluding the org has nothing of that type).
+ * The component types `sfi.list_components` accepts. This is the FULL
+ * `ComponentType` set from `@sf-intelligence/contracts` — declared inline so
+ * Zod can validate against a real enum rather than `z.string()` (clients with a
+ * typo learn `invalid-query` instead of receiving `{ components: [] }` and
+ * concluding the org has nothing of that type).
+ *
+ * LIST-COMPONENTS-ENUM-OMITS-RETRIEVED-TYPES: this array is the single source
+ * of truth for the accepted `type` set — the advertised JSON Schema in
+ * `roster.ts` spreads it, so the two can never advertise different sets. It had
+ * silently drifted BEHIND the `ComponentType` union (missing `SamlSsoConfig`,
+ * `Skill`, `ServiceChannel`, `Network`, `CustomSite`, the Bot / OmniStudio /
+ * CPQ / GenAI / Wave tiers, …), so nodes those extractors retrieved and modeled
+ * into the graph were rejected at the Zod boundary — an architect could not
+ * `list_components { type: 'SamlSsoConfig' }` even with three configs vaulted.
+ * The `satisfies` below proves every entry IS a `ComponentType`; the
+ * {@link ComponentTypesComplete} guard proves every `ComponentType` IS listed,
+ * so a new type added to the contracts union can never again ship retrievable
+ * but unlistable — the build fails until it is added here. Order mirrors the
+ * contracts union so a drift check can stay a textual diff.
  */
 export const COMPONENT_TYPES = [
   'CustomObject',
@@ -66,14 +80,12 @@ export const COMPONENT_TYPES = [
   'PermissionSetAssignment',
   'NamedCredential',
   'ConnectedApp',
-  // v1.1 — sharing & visibility tier. Order matches the contracts union
-  // so a future automated comparison can be a textual diff.
+  // v1.1 — sharing & visibility tier.
   'Group',
   'Queue',
   'Role',
   'SharingRule',
-  // v1.2 — record types + UI surfaces tier. Order matches the contracts
-  // union for the same reason.
+  // v1.2 — record types + UI surfaces tier.
   'RecordType',
   'BusinessProcess',
   'CustomTab',
@@ -83,8 +95,7 @@ export const COMPONENT_TYPES = [
   'GlobalValueSet',
   'CustomLabel',
   'StaticResource',
-  // v1.3 — legacy automation + communications tier. Order matches the
-  // contracts union for the same reason.
+  // v1.3 — legacy automation + communications tier.
   'WorkflowRule',
   'ApprovalProcess',
   'AssignmentRule',
@@ -94,32 +105,38 @@ export const COMPONENT_TYPES = [
   'MatchingRule',
   'EmailTemplate',
   'Letterhead',
-  // v1.4 — developer frontend + test mapping tier. Order matches the
-  // contracts union for the same reason.
+  // v1.4 — developer frontend + test mapping tier.
   'LightningComponentBundle',
   'AuraDefinitionBundle',
   'VisualforcePage',
   'VisualforceComponent',
-  // v1.5 — integration topology + event/async/API surface tier. Order
-  // matches the contracts union for the same reason.
+  // v1.5 — integration topology + event/async/API surface tier.
   'AuthProvider',
+  'SamlSsoConfig',
   'RemoteSiteSetting',
   'CspTrustedSite',
   'ExternalDataSource',
   'ExternalService',
   'NetworkAccess',
   // v1.6 — declarative custom-permission definition (CR-CAP-15) +
-  // business-user record-value tier. Order matches the contracts union
-  // for the same reason.
+  // business-user record-value tier.
   'CustomPermission',
   'CustomMetadataRecord',
   'CustomSettingRecord',
   // v2.0a — conditional-context tier. Synthetic; emitted by the seven
-  // declarative firer extractors. Order matches the contracts union.
+  // declarative firer extractors.
   'ConditionalContext',
   // v2.8 — async + integration deep tier. Promoted from dangling-by-
-  // design v1.3 references. Order matches the contracts union.
+  // design v1.3 references.
   'OutboundMessage',
+  // v2.9 — WorkflowAlert promotion (email alerts inside *.workflow-meta.xml).
+  'WorkflowAlert',
+  // v2.6a — CPQ specialist tier (SBQQ__ namespace recognition).
+  'CpqProductRule',
+  'CpqPriceRule',
+  'CpqQuoteTemplate',
+  'CpqLookupQuery',
+  'CpqConfigurationAttribute',
   // v3.2 — OmniStudio and decision-table tier.
   'OmniScript',
   'OmniIntegrationProcedure',
@@ -136,14 +153,66 @@ export const COMPONENT_TYPES = [
   'MutingPermissionSet',
   'RestrictionRule',
   'ScopingRule',
-  // v4.x — decomposed CustomObject child metadata. Order matches the
-  // contracts union for the same reason.
+  // v4.x — decomposed CustomObject child metadata.
   'CompactLayout',
   'WebLink',
   'FieldSet',
   'Index',
   'InstalledPackage',
+  // CR-CAP-18 — platform-event publish/stream-routing topology.
+  'PlatformEventChannel',
+  'PlatformEventChannelMember',
+  // Session / MFA security + standard-picklist tiers.
+  'SessionSettings',
+  'StandardValueSet',
+  // R6-18 — Service Cloud entitlement/SLA + Omni-Channel routing tier.
+  'EntitlementProcess',
+  'MilestoneType',
+  'ServiceChannel',
+  'QueueRoutingConfig',
+  // R6-22 — security-surface tier.
+  'Certificate',
+  'TransactionSecurityPolicy',
+  // R6-13 — Agentforce / Einstein GenAI tier.
+  'GenAiFunction',
+  'GenAiPlugin',
+  'GenAiPlannerBundle',
+  'GenAiPromptTemplate',
+  // R6-17 — Experience Cloud community tier.
+  'Network',
+  'CustomSite',
+  'ExperienceBundle',
+  // R7-C7 — Bot / presence extraction leftovers.
+  'Bot',
+  'BotVersion',
+  'PresenceUserConfig',
+  // Field Service tier.
+  'FieldServiceSettings',
+  'Skill',
+  'TimeSheetTemplate',
+  // CRM Analytics (Wave / Tableau CRM) slice.
+  'WaveDashboard',
+  'WaveDataflow',
+  'WaveXmd',
 ] as const satisfies readonly ComponentType[];
+
+/**
+ * LIST-COMPONENTS-ENUM-OMITS-RETRIEVED-TYPES compile-time completeness guard for
+ * {@link COMPONENT_TYPES}: resolves to `true` only when every `ComponentType` is
+ * listed above; a missing member resolves it to a tuple naming the gap, which
+ * breaks the `= true` assignment and fails the build. Paired with the
+ * `satisfies` above, this makes `COMPONENT_TYPES` and `ComponentType` provably
+ * the same set — the roster-drift that let retrieved types (SamlSsoConfig,
+ * Skill, ServiceChannel, …) be rejected as `invalid-query` can no longer recur:
+ * the next unlisted type addition is a compile error, not a silent capability
+ * gap. Mirrors the `EdgeTypesComplete` guard in `@sf-intelligence/contracts`.
+ */
+type ComponentTypesComplete =
+  Exclude<ComponentType, (typeof COMPONENT_TYPES)[number]> extends never
+    ? true
+    : ['ComponentType(s) missing from COMPONENT_TYPES:', Exclude<ComponentType, (typeof COMPONENT_TYPES)[number]>];
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- compile-time-only completeness assertion
+const componentTypesComplete: ComponentTypesComplete = true;
 
 /** Cap mirrored from `graph.listNodesByType`. */
 const LIST_MAX_LIMIT = 500;

@@ -13,7 +13,10 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
-import { listViewSharingHandler } from '../../src/tools/list-view-sharing.js';
+import {
+  listViewSharingHandler,
+  listViewSharingInputSchema,
+} from '../../src/tools/list-view-sharing.js';
 
 const MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -93,6 +96,57 @@ describe('listViewSharingHandler', () => {
     expect(d.listViews.every((row) => row.componentId.startsWith('ListView:Account.'))).toBe(true);
   });
 
+  // GUARD (L2 alias OS / ADMIN-SURFACE-ALIAS-SKEW-CLUSTER): pre-fix the schema
+  // required `componentId` and Zod-STRIPPED `objectApiName` -> `componentId:
+  // Required`. Post-fix a natural object alias resolves to the SAME object-mode
+  // result as the canonical CustomObject: componentId (echoed via componentId).
+  it('natural objectApiName ≡ canonical CustomObject componentId (byte-equal object mode)', async () => {
+    const run = async (raw: unknown) => {
+      const parsed = listViewSharingInputSchema.safeParse(raw);
+      if (!parsed.success) return null;
+      return listViewSharingHandler(ctx, parsed.data);
+    };
+    const canonical = await run({ componentId: 'CustomObject:Account' });
+    const byObjectApiName = await run({ objectApiName: 'Account' });
+    const byObject = await run({ object: 'Account' });
+    const byObjectId = await run({ objectId: 'CustomObject:Account' });
+    for (const r of [canonical, byObjectApiName, byObject, byObjectId]) {
+      expect(r).not.toBeNull();
+      expect(r?.ok).toBe(true);
+    }
+    if (!canonical?.ok || !byObjectApiName?.ok || !byObject?.ok || !byObjectId?.ok) return;
+    expect(canonical.value.data.componentId).toBe('CustomObject:Account');
+    for (const r of [byObjectApiName, byObject, byObjectId]) {
+      expect(r.value.data.componentId).toBe('CustomObject:Account');
+      expect(r.value.data.listViews).toEqual(canonical.value.data.listViews);
+      expect(r.value.data.summary).toEqual(canonical.value.data.summary);
+    }
+  });
+
+  it('disagreeing object aliases → invalid-query', async () => {
+    const parsed = listViewSharingInputSchema.safeParse({
+      objectApiName: 'Account',
+      object: 'Contact',
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    const r = await listViewSharingHandler(ctx, parsed.data);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('a ListView: componentId + an object alias is ambiguous → invalid-query', async () => {
+    const parsed = listViewSharingInputSchema.safeParse({
+      componentId: 'ListView:Account.Shared',
+      objectApiName: 'Account',
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    const r = await listViewSharingHandler(ctx, parsed.data);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe('invalid-query');
+  });
+
   it('object mode: classifies visibility + surfaces inheritance/synthetic markers', async () => {
     const r = await listViewSharingHandler(ctx, { componentId: 'CustomObject:Account' });
     expect(r.ok).toBe(true); if (!r.ok) return;
@@ -141,6 +195,160 @@ describe('listViewSharingHandler', () => {
     const r = await listViewSharingHandler(ctx, { componentId: 'CustomObject:Account' });
     expect(r.ok).toBe(true); if (!r.ok) return;
     expect(r.value.data.boundaryNote).toContain('directRoleShareCount');
+  });
+});
+
+// =============================================================================
+// LIST-VIEW-SHARING-SILENTLY-IGNORES-SHARE-FILTERS -- "which Case list views are
+// shared to the Advising group?" must FILTER the rows to that target, not
+// silently strip the filter arg and return every list view for the object.
+// Pre-fix `sharedToId`/`nameContains` were Zod-stripped: the "filtered" call was
+// byte-identical to the bare call (all rows) with no appliedScope echo.
+// =============================================================================
+describe('listViewSharingHandler — sharedTo/name filter (LIST-VIEW-SHARING-SILENTLY-IGNORES-SHARE-FILTERS)', () => {
+  it('unfiltered call echoes appliedScope with filtered=false and full counts', async () => {
+    const r = await listViewSharingHandler(ctx, { componentId: 'CustomObject:Account' });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    expect(r.value.data.appliedScope).toEqual({
+      sharedToId: null,
+      nameContains: null,
+      filtered: false,
+      totalBeforeFilter: 3,
+      matched: 3,
+    });
+    expect(r.value.data.listViews).toHaveLength(3);
+  });
+
+  it('sharedToId (canonical target id) returns ONLY list views shared to that target', async () => {
+    const r = await listViewSharingHandler(ctx, {
+      componentId: 'CustomObject:Account',
+      sharedToId: 'Role:VP_Sales',
+    });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    // Only 'Shared' has a VP_Sales entry — Public/MineOnly are excluded.
+    expect(d.listViews.map((v) => v.componentId)).toEqual(['ListView:Account.Shared']);
+    expect(d.summary.listViews).toBe(1);
+    expect(d.appliedScope).toEqual({
+      sharedToId: 'Role:VP_Sales',
+      nameContains: null,
+      filtered: true,
+      totalBeforeFilter: 3,
+      matched: 1,
+    });
+    // Every returned row genuinely carries the target.
+    expect(d.listViews.every((v) => v.sharedTo.some((t) => t.targetId === 'Role:VP_Sales'))).toBe(true);
+  });
+
+  it('sharedToId matches a group target too', async () => {
+    const r = await listViewSharingHandler(ctx, {
+      componentId: 'CustomObject:Account',
+      sharedToId: 'Group:AllInternalUsers',
+    });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    expect(r.value.data.listViews.map((v) => v.componentId)).toEqual(['ListView:Account.Shared']);
+    expect(r.value.data.summary.listViews).toBe(1);
+  });
+
+  it('sharedToId matches by display NAME (case-insensitive), not just id', async () => {
+    const r = await listViewSharingHandler(ctx, {
+      componentId: 'CustomObject:Account',
+      sharedToId: 'vp_sales',
+    });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    expect(r.value.data.listViews.map((v) => v.componentId)).toEqual(['ListView:Account.Shared']);
+    expect(r.value.data.appliedScope.matched).toBe(1);
+  });
+
+  it('a target that matches nothing yields ZERO rows + honest disclosure (never a full-object dump)', async () => {
+    const r = await listViewSharingHandler(ctx, {
+      componentId: 'CustomObject:Account',
+      sharedToId: 'Role:Nonexistent',
+    });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.listViews).toHaveLength(0);
+    expect(d.summary.listViews).toBe(0);
+    expect(d.appliedScope).toEqual({
+      sharedToId: 'Role:Nonexistent',
+      nameContains: null,
+      filtered: true,
+      totalBeforeFilter: 3,
+      matched: 0,
+    });
+    expect(d.boundaryNote).toContain('FILTER APPLIED');
+    expect(d.boundaryNote).toContain('Zero matches');
+  });
+
+  it('nameContains filters by list-view api name (case-insensitive)', async () => {
+    const r = await listViewSharingHandler(ctx, {
+      componentId: 'CustomObject:Account',
+      nameContains: 'mine',
+    });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    expect(r.value.data.listViews.map((v) => v.componentId)).toEqual(['ListView:Account.MineOnly']);
+    expect(r.value.data.appliedScope.nameContains).toBe('mine');
+  });
+
+  it('sharedToId AND nameContains compose (both must match)', async () => {
+    const bothMiss = await listViewSharingHandler(ctx, {
+      componentId: 'CustomObject:Account',
+      sharedToId: 'Role:VP_Sales',
+      nameContains: 'Public',
+    });
+    expect(bothMiss.ok).toBe(true); if (!bothMiss.ok) return;
+    expect(bothMiss.value.data.listViews).toHaveLength(0); // Shared has VP_Sales but name != Public
+
+    const bothHit = await listViewSharingHandler(ctx, {
+      componentId: 'CustomObject:Account',
+      sharedToId: 'Role:VP_Sales',
+      nameContains: 'Shared',
+    });
+    expect(bothHit.ok).toBe(true); if (!bothHit.ok) return;
+    expect(bothHit.value.data.listViews.map((v) => v.componentId)).toEqual(['ListView:Account.Shared']);
+  });
+
+  it('accepts the sharedTo / groupId aliases (natural host arg names)', async () => {
+    const viaSharedTo = await listViewSharingHandler(ctx, {
+      componentId: 'CustomObject:Account',
+      sharedTo: 'Role:VP_Sales',
+    });
+    expect(viaSharedTo.ok).toBe(true); if (!viaSharedTo.ok) return;
+    expect(viaSharedTo.value.data.listViews.map((v) => v.componentId)).toEqual(['ListView:Account.Shared']);
+    expect(viaSharedTo.value.data.appliedScope.sharedToId).toBe('Role:VP_Sales');
+
+    const viaGroupId = await listViewSharingHandler(ctx, {
+      componentId: 'CustomObject:Account',
+      groupId: 'Group:AllInternalUsers',
+    });
+    expect(viaGroupId.ok).toBe(true); if (!viaGroupId.ok) return;
+    expect(viaGroupId.value.data.listViews.map((v) => v.componentId)).toEqual(['ListView:Account.Shared']);
+  });
+
+  it('conflicting sharedToId / sharedTo aliases are an invalid-query, not a silent strip', async () => {
+    const r = await listViewSharingHandler(ctx, {
+      componentId: 'CustomObject:Account',
+      sharedToId: 'Role:VP_Sales',
+      sharedTo: 'Role:Reps',
+    });
+    expect(r.ok).toBe(false); if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('a filter cursor cannot be replayed against a different filter (fingerprint bind)', async () => {
+    // Force a truncated page under a filter is hard with 1 match; instead assert
+    // that a bare-call cursor is rejected when a filter is later added.
+    const first = await listViewSharingHandler(ctx, { componentId: 'CustomObject:Account', limit: 1 });
+    expect(first.ok).toBe(true); if (!first.ok) return;
+    const cursor = first.value.data.nextCursor;
+    if (typeof cursor !== 'string') return;
+    const replay = await listViewSharingHandler(ctx, {
+      componentId: 'CustomObject:Account',
+      sharedToId: 'Role:VP_Sales',
+      cursor,
+    });
+    expect(replay.ok).toBe(false); if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
   });
 });
 

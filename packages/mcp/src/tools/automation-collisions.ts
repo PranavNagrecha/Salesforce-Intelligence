@@ -11,7 +11,10 @@
  *      (record-triggered Flow, ApexTrigger, WorkflowRule) writing the SAME
  *      field on the SAME object. Salesforce does not arbitrate between them;
  *      whichever runs last in the (often unordered) sequence wins, silently
- *      discarding the other's write.
+ *      discarding the other's write. Grouped per execution PATH: save-timing
+ *      writers (before-save / after-save / post-save) collide with each other,
+ *      while a before-delete Flow runs on the DELETE path and collides ONLY
+ *      with another before-delete Flow — never with a save-timing writer.
  *   2. **Save-recursion cycles** — an automation on object O writes a field
  *      back onto O itself (the classic workflow-field-update / after-trigger
  *      re-trigger), or writes a field on object P whose own automation writes
@@ -22,8 +25,10 @@
  *   - Gathers the object's incoming `triggersOn` edges (record-triggered
  *     Flows, ApexTriggers, WorkflowRules — the SAME gathering approach as
  *     `automation_build_advisor`) and each firer's outgoing `writesTo` edges.
- *   - **Collisions**: groups same-object field writes by target `CustomField`
- *     id; 2+ distinct writer components on one field is a finding.
+ *   - **Collisions**: groups same-object field writes by (target `CustomField`
+ *     id, execution PATH — save vs delete); 2+ distinct writer components in
+ *     one (field, path) bucket is a finding. A before-delete Flow buckets on
+ *     the DELETE path, disjoint from save-timing writers.
  *   - **Cycles**: a bounded (depth-capped) walk over `triggersOn` +
  *     `writesTo` edges, starting at the queried object, looking for a write
  *     path that returns to the object it started from. A same-object
@@ -51,7 +56,11 @@
  *   - A same-object write from a BEFORE-save automation (before-trigger,
  *     before-save Flow) is excluded from cycle detection: it folds into the
  *     record's single pending INSERT/UPDATE rather than causing a second
- *     save, so it is not a recursion candidate.
+ *     save, so it is not a recursion candidate. A BEFORE-delete Flow is
+ *     excluded from cycle detection entirely — it runs on the DELETE path,
+ *     not the save order-of-execution, so it is never a save-recursion hop
+ *     (two before-delete Flows writing one field are a delete-path COLLISION,
+ *     not a cycle).
  */
 
 import type {
@@ -67,6 +76,7 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { isUnresolvedFieldReceiver } from './apex-receiver.js';
+import { resolveObjectAlias } from './input-aliases.js';
 import { argsFingerprint, paginate, type PaginateBinding } from './page-cursor.js';
 import { isActiveSoeFirer } from './soe-active.js';
 
@@ -83,14 +93,60 @@ const TOOL_NAME = 'sfi.automation_collisions';
 /** The `triggersOn` firer families this tool walks — mirrors `automation_build_advisor`. */
 type AutomationKind = 'Flow' | 'ApexTrigger' | 'WorkflowRule';
 
-/** When (relative to the database write) a firer's writes take effect. */
-type WriteTiming = 'before' | 'after' | 'post-save' | 'unknown';
+/**
+ * When (relative to the database write) a firer's writes take effect. The
+ * SAVE-path timings — `before`/`after` (before-save / after-save Flow or Apex
+ * trigger), `post-save` (WorkflowRule), `unknown` — all run during a record
+ * SAVE. `before-delete` runs on the DELETE path and can NEVER co-execute with
+ * any of them (see {@link pathOfTiming}). Mirrors the reasoning engine's 3-way
+ * trigger context (`knowledge/reason.ts` `triggerContextOf`).
+ */
+type WriteTiming = 'before' | 'after' | 'post-save' | 'before-delete' | 'unknown';
 
-/** Zod schema for the `sfi.automation_collisions` tool input. */
-export const automationCollisionsInputSchema = z.object({
-  object: z.string().min(1),
-  limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
-});
+/**
+ * The execution PATH a {@link WriteTiming} runs on. Every save-timing
+ * (`before`/`after` save, `post-save` workflow, `unknown`) runs on the SAVE
+ * path; `before-delete` runs on the DELETE path. Two writers can collide only
+ * when they share a path: a before-delete Flow (DELETE path) can NEVER race a
+ * save-timing writer, so it buckets separately — folding it into a save bucket
+ * (the pre-fix behaviour) fabricated false "save collisions" between an
+ * after-save Flow and a before-delete Flow. Mirrors the DISJOINT trigger
+ * contexts in `knowledge/reason.ts` (`triggerContextOf`).
+ */
+type CollisionPath = 'save' | 'delete';
+
+/** Map a firer's {@link WriteTiming} to the execution path its writes race on. */
+const pathOfTiming = (timing: WriteTiming): CollisionPath =>
+  timing === 'before-delete' ? 'delete' : 'save';
+
+/**
+ * Zod schema for the `sfi.automation_collisions` tool input. Name the object
+ * ANY way the router / a sibling tool would (L2 Alias OS): the bare `object`
+ * (the canonical key), `objectApiName`, `objectId`, or a `CustomObject:`
+ * `componentId`. Exactly one target must survive resolution — disagreeing
+ * aliases are an `invalid-query` (never a silent pick), and the resolved scope
+ * is echoed as `appliedScope`.
+ */
+export const automationCollisionsInputSchema = z
+  .object({
+    object: z.string().min(1).optional(),
+    objectApiName: z.string().min(1).optional(),
+    objectId: z.string().min(1).optional(),
+    componentId: z.string().min(1).optional(),
+    limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
+  })
+  .refine(
+    (i) =>
+      i.object !== undefined ||
+      i.objectApiName !== undefined ||
+      i.objectId !== undefined ||
+      i.componentId !== undefined,
+    {
+      message:
+        'name the object — pass `object` (e.g. "Account"), `objectApiName`, `objectId`, or a `CustomObject:` `componentId`',
+      path: ['object'],
+    },
+  );
 
 export type AutomationCollisionsInput = z.infer<typeof automationCollisionsInputSchema>;
 
@@ -101,14 +157,28 @@ export interface AutomationWriter {
   readonly active: boolean;
   /** The `writesTo` edge's own confidence — `parsed` (Flow/WorkflowRule XML) or `heuristic` (Apex scanner). */
   readonly confidence: ConfidenceLevel;
-  /** Firing timing relative to the database write, when modeled; `'unknown'` otherwise. */
+  /**
+   * Firing timing relative to the database write, when modeled; `'unknown'`
+   * otherwise. `'before-delete'` runs on the DELETE path, not the save path.
+   */
   readonly timing: WriteTiming;
 }
 
-/** A field with 2+ distinct automations writing it on the same trigger event. */
+/**
+ * A field with 2+ distinct automations writing it on the SAME execution path.
+ * `collisionPath: 'save'` groups save-timing writers (before-save / after-save
+ * / post-save workflow); `collisionPath: 'delete'` groups before-delete Flows
+ * that race on the DELETE path. The two paths are DISJOINT — a before-delete
+ * write is never reported as colliding with a save-timing write.
+ */
 export interface FieldCollision {
   readonly fieldId: ComponentId;
   readonly fieldApiName: string;
+  /**
+   * Which execution path the colliding writers race on. A `'delete'` collision
+   * is a DELETE-path (before-delete) collision — never a save collision.
+   */
+  readonly collisionPath: CollisionPath;
   readonly writers: readonly AutomationWriter[];
   readonly activeWriterCount: number;
   /** The WEAKEST confidence across `writers` — a heuristic Apex write drags the whole finding down. */
@@ -139,6 +209,17 @@ export interface RecursionCycle {
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface AutomationCollisionsOutput {
   readonly object: string;
+  /**
+   * Echoes the object scope ACTUALLY resolved so a host never assumes an alias
+   * it passed (`objectApiName` / `objectId` / `componentId`) was honored — the
+   * silent Zod-strip that surfaced as `object: Required` was the bug this
+   * closes. `componentId` is the canonical `CustomObject:` id; `object` is its
+   * bare api name.
+   */
+  readonly appliedScope: {
+    readonly componentId: string;
+    readonly object: string;
+  };
   readonly objectModeled: boolean;
   readonly collisions: readonly FieldCollision[];
   readonly cycles: readonly RecursionCycle[];
@@ -204,8 +285,25 @@ const gatherFirersForObject = async (
     if (firerNode === null) continue;
 
     if (firerNode.type === 'Flow') {
+      // Map the record-trigger `triggerType` 3 ways — mirroring the reasoning
+      // engine's `triggerContextOf` (`knowledge/reason.ts`) and the extractor's
+      // `RECORD_TRIGGER_TYPES` (`extractors/src/flow.ts`, the only 3 types that
+      // emit a `triggersOn` edge): RecordBeforeSave -> before-save,
+      // RecordAfterSave -> after-save, RecordBeforeDelete -> before-delete (the
+      // DELETE path). An absent/unknown value is `'unknown'` — NEVER folded into
+      // a save bucket, so a non-save trigger can never read as a save timing.
+      // (The pre-fix `=== 'RecordBeforeSave' ? 'before' : 'after'` collapse
+      // mislabeled a before-delete Flow as after-SAVE, fabricating false save
+      // collisions with save-timing flows on the same field.)
+      const triggerType = triggerEdge.properties['triggerType'];
       const timing: WriteTiming =
-        triggerEdge.properties['triggerType'] === 'RecordBeforeSave' ? 'before' : 'after';
+        triggerType === 'RecordBeforeSave'
+          ? 'before'
+          : triggerType === 'RecordAfterSave'
+            ? 'after'
+            : triggerType === 'RecordBeforeDelete'
+              ? 'before-delete'
+              : 'unknown';
       firers.push({
         id: firerNode.id,
         type: 'Flow',
@@ -288,7 +386,9 @@ const cycleSeverity = (
 const collisionSort = (a: FieldCollision, b: FieldCollision): number => {
   const rank = (c: FieldCollision): number => (c.severity === 'high' ? 0 : c.severity === 'medium' ? 1 : 2);
   if (rank(a) !== rank(b)) return rank(a) - rank(b);
-  return a.fieldApiName < b.fieldApiName ? -1 : a.fieldApiName > b.fieldApiName ? 1 : 0;
+  if (a.fieldApiName !== b.fieldApiName) return a.fieldApiName < b.fieldApiName ? -1 : 1;
+  // Deterministic tiebreaker when the same field collides on BOTH paths.
+  return a.collisionPath < b.collisionPath ? -1 : a.collisionPath > b.collisionPath ? 1 : 0;
 };
 
 const cycleSort = (a: RecursionCycle, b: RecursionCycle): number => {
@@ -304,9 +404,11 @@ const cycleSort = (a: RecursionCycle, b: RecursionCycle): number => {
  * Bounded BFS from `originObject` over `triggersOn` -> `writesTo` edges,
  * looking for a field-write path that returns to `originObject`. Depth
  * capped at {@link CYCLE_DEPTH_CAP} hops; a same-object write from a
- * BEFORE-timing firer is excluded (see module JSDoc). Defensively capped at
- * {@link CYCLE_EXPLORE_CAP} firer expansions so a densely-automated org
- * cannot make one call scan unboundedly.
+ * BEFORE-save firer is excluded (folds into the pending save), and a
+ * before-DELETE firer is skipped entirely (it runs on the DELETE path, not the
+ * save order-of-execution this walk models — see module JSDoc). Defensively
+ * capped at {@link CYCLE_EXPLORE_CAP} firer expansions so a densely-automated
+ * org cannot make one call scan unboundedly.
  */
 const findRecursionCycles = async (
   ctx: Context,
@@ -339,6 +441,14 @@ const findRecursionCycles = async (
     }
 
     for (const firer of firers) {
+      // A before-DELETE firer runs on the DELETE path, not the save
+      // order-of-execution this walk models — its writes never form a
+      // save-recursion hop (neither a re-entrant same-object save nor a
+      // save-order chain), so it is skipped entirely. This keeps before-delete
+      // its own context: a delete-path write is never chained into a
+      // save-recursion cycle. (Two before-delete Flows writing one field are a
+      // delete-path COLLISION, surfaced in `collisions[]`, not a cycle.)
+      if (firer.timing === 'before-delete') continue;
       if (explored >= CYCLE_EXPLORE_CAP) {
         capHit = true;
         break;
@@ -397,10 +507,11 @@ const findRecursionCycles = async (
 
 const STATIC_BOUNDARIES: readonly string[] = Object.freeze([
   'Every listed automation is a real vault node reached via `triggersOn` / `writesTo` edges — not a fabricated execution trace. Field-update and entry CONDITIONS on Flows, WorkflowRules, and ApexTriggers are NOT evaluated: two writers with mutually exclusive criteria are still listed as a collision.',
+  'Field-write collisions are partitioned by EXECUTION PATH (`collisionPath`): save-timing writers (before-save / after-save Flow or trigger, post-save WorkflowRule) collide with one another on the SAVE path, while a before-delete Flow runs on the DELETE path and collides ONLY with another before-delete Flow. A before-delete Flow is NEVER reported as colliding with a save-timing writer — a `collisionPath: "delete"` finding is a DELETE-path collision, never a save collision.',
   'Confidence varies per writer: Flow and WorkflowRule field writes are `parsed` from declared XML; ApexTrigger writes are `heuristic` static analysis (regex/AST field-access scanning) that may include false positives or miss dynamic/reflective writes. Every collision and cycle finding carries the WEAKEST confidence among its contributing writers.',
   "Only automation wired directly via `triggersOn` on the object is scanned (record-triggered Flow, ApexTrigger, WorkflowRule) — ApprovalProcess field updates and Apex writes performed by a HELPER CLASS the trigger calls (rather than the trigger itself) are out of scope for this v1 and are not walked.",
   `Recursion cycles are a BOUNDED graph walk: depth capped at ${CYCLE_DEPTH_CAP} hops from the queried object, and at most ${CYCLE_EXPLORE_CAP} automation expansions. Salesforce's own recursion guards — a record-triggered Flow's "do not re-trigger the flow that started this update" setting, and the platform's workflow-rule re-evaluation limits — are NOT captured by the extractors and are NOT evaluated here. A listed cycle is a POTENTIAL loop the org's structure allows, not proof it fires at runtime.`,
-  'A same-object write from a BEFORE-save automation (before-trigger, before-save Flow) is excluded from cycle detection — it modifies the record before the single pending INSERT/UPDATE rather than causing a second save. Only AFTER-trigger / after-save-Flow / post-save-workflow writes back to the same object are flagged as potential recursion.',
+  'A same-object write from a BEFORE-save automation (before-trigger, before-save Flow) is excluded from cycle detection — it modifies the record before the single pending INSERT/UPDATE rather than causing a second save. A before-DELETE Flow is excluded from cycle detection entirely: it runs on the DELETE path, not the save order-of-execution, so it is never a save-recursion hop. Only AFTER-trigger / after-save-Flow / post-save-workflow writes back to the same object are flagged as potential recursion.',
 ]);
 
 /**
@@ -415,8 +526,24 @@ export const automationCollisionsHandler = async (
   ctx: Context,
   input: AutomationCollisionsInput,
 ): Promise<Result<McpResponse<AutomationCollisionsOutput>, McpError>> => {
-  const objectApiName = input.object;
-  const objectId: ComponentId = `CustomObject:${objectApiName}`;
+  // L2 Alias OS: resolve the object from any of object / objectApiName /
+  // objectId / CustomObject: componentId. Disagreeing aliases -> invalid-query.
+  const scopeResult = resolveObjectAlias(input);
+  if (!scopeResult.ok) return err(scopeResult.error);
+  if (scopeResult.value === null) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        'name the object — pass `object`, `objectApiName`, `objectId`, or a `CustomObject:` `componentId`',
+      path: 'object',
+    });
+  }
+  const objectApiName = scopeResult.value.object;
+  const objectId = scopeResult.value.componentId as ComponentId;
+  const appliedScope = {
+    componentId: scopeResult.value.componentId,
+    object: objectApiName,
+  };
 
   const objNodeResult = await getNodeById(ctx.graph, objectId);
   if (!objNodeResult.ok) {
@@ -431,17 +558,31 @@ export const automationCollisionsHandler = async (
   const objectModeled = objNodeResult.value !== null || firers.length > 0;
 
   // --- Field-level write collisions (same-object writes only) ---
-  const fieldWriters = new Map<ComponentId, AutomationWriter[]>();
+  // Writers are bucketed by (execution PATH, field): a before-delete Flow runs
+  // on the DELETE path and can NEVER race a save-timing writer, so it collides
+  // ONLY with another before-delete Flow on the same field — never with a
+  // save-timing (before-save / after-save / post-save) writer. Two before-delete
+  // Flows writing one field DO collide (undefined delete-path order); a
+  // before-delete + a save writer do not. Folding the two paths together (the
+  // pre-fix behaviour) fabricated false "save collisions".
+  interface FieldWriterBucket {
+    readonly path: CollisionPath;
+    readonly fieldId: ComponentId;
+    readonly writers: AutomationWriter[];
+  }
+  const fieldWriters = new Map<string, FieldWriterBucket>();
   for (const firer of firers) {
     const writesResult = await gatherFieldWritesForFirer(ctx, firer.id);
     if (!writesResult.ok) {
       return err({ kind: 'internal', message: `graph query failed: ${writesResult.error}` });
     }
+    const path = pathOfTiming(firer.timing);
     for (const write of writesResult.value) {
       if (objectOfFieldId(write.toId) !== objectApiName) continue;
-      const bucket = fieldWriters.get(write.toId) ?? [];
-      if (!bucket.some((w) => w.componentId === firer.id)) {
-        bucket.push({
+      const key = `${path} ${write.toId}`;
+      const bucket = fieldWriters.get(key) ?? { path, fieldId: write.toId, writers: [] };
+      if (!bucket.writers.some((w) => w.componentId === firer.id)) {
+        bucket.writers.push({
           componentId: firer.id,
           componentType: firer.type,
           active: firer.active,
@@ -449,23 +590,26 @@ export const automationCollisionsHandler = async (
           timing: firer.timing,
         });
       }
-      fieldWriters.set(write.toId, bucket);
+      fieldWriters.set(key, bucket);
     }
   }
 
   const fieldPrefix = `CustomField:${objectApiName}.`;
   const allCollisions: FieldCollision[] = [];
-  for (const [fieldId, writers] of fieldWriters) {
-    if (writers.length < 2) continue;
-    const sortedWriters = [...writers].sort(byComponentId);
+  for (const bucket of fieldWriters.values()) {
+    if (bucket.writers.length < 2) continue;
+    const sortedWriters = [...bucket.writers].sort(byComponentId);
     const weakestConfidence = sortedWriters.reduce<ConfidenceLevel>(
       (acc, w) => weaker(acc, w.confidence),
       'declared',
     );
     const activeWriterCount = sortedWriters.filter((w) => w.active).length;
     allCollisions.push({
-      fieldId,
-      fieldApiName: fieldId.startsWith(fieldPrefix) ? fieldId.slice(fieldPrefix.length) : fieldId,
+      fieldId: bucket.fieldId,
+      fieldApiName: bucket.fieldId.startsWith(fieldPrefix)
+        ? bucket.fieldId.slice(fieldPrefix.length)
+        : bucket.fieldId,
+      collisionPath: bucket.path,
       writers: sortedWriters,
       activeWriterCount,
       weakestConfidence,
@@ -516,6 +660,7 @@ export const automationCollisionsHandler = async (
   return ok({
     data: {
       object: objectApiName,
+      appliedScope,
       objectModeled,
       collisions: collisionsPage.items,
       cycles: cyclesPage.items,

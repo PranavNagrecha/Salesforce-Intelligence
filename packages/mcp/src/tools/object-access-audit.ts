@@ -20,12 +20,21 @@
  * (OWD + sharing + role hierarchy) use `sfi.why_cant_user_see_record`. The two
  * compose: a user needs the object grant here AND record access there.
  *
- * Input:
- *   - `componentId` (required, `CustomObject:<ApiName>`): the object to audit.
- *     A non-`CustomObject:` prefix is `invalid-query`. An object with no node of
- *     its own but referenced by permission edges is audited from those edges
- *     with `notModeled: true`; an id with no node AND no inbound edges is
- *     `component-not-found`.
+ * Input (name the object EITHER way — the natural api name or the canonical id):
+ *   - `objectApiName` (`Contact`) / `objectId` (`CustomObject:Contact`): the
+ *     bare-name and canonical aliases the router + sibling access tools
+ *     standardize on. Both resolve to the same `CustomObject:` scope; passing
+ *     several that disagree is `invalid-query`.
+ *   - `componentId` (`CustomObject:<ApiName>` OR `PermissionSet:<ApiName>`): the
+ *     canonical id. A non-`CustomObject:` / non-`PermissionSet:` prefix is
+ *     `invalid-query`. Exactly one of `componentId` / `objectApiName` / `objectId`
+ *     is required. An object with no node of its own but referenced by permission
+ *     edges is audited from those edges with `notModeled: true`; an id with no
+ *     node AND no inbound edges is `component-not-found`.
+ *
+ * The resolved scope is echoed back as `appliedScope.componentId` so a caller
+ * never has to assume which alias took effect (a silently-stripped `objectApiName`
+ * that fell through to `componentId: Required` was the bug this closes).
  *
  * Output: per-granter CRUD matrix + summary counts. `declared` confidence —
  * object permissions are declared profile/permission-set metadata.
@@ -44,6 +53,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { coercePrefix } from './coerce-id.js';
 import { expandPermissionSetGroup, findPermissionSetGroupsContaining } from './permission-set-group.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import {
@@ -63,11 +73,30 @@ const GRANTOR_TYPES: ReadonlySet<ComponentType> = new Set<ComponentType>([
 ]);
 
 /** Zod schema for the `sfi.object_access_audit` tool input. */
-export const objectAccessAuditInputSchema = z.object({
-  componentId: z.string().min(1),
-  /** Other permission sets referenced in a user-intersection question (disclosure only). */
-  relatedPermissionSetIds: z.array(z.string().min(1)).optional(),
-});
+export const objectAccessAuditInputSchema = z
+  .object({
+    /**
+     * The canonical id — `CustomObject:<ApiName>` (object mode) OR
+     * `PermissionSet:<ApiName>` (permission-set disclosure mode).
+     */
+    componentId: z.string().min(1).optional(),
+    /** Bare object api name (`Contact`) — the alias the router + sibling tools use. */
+    objectApiName: z.string().min(1).optional(),
+    /** Canonical object id (`CustomObject:Contact`) — equivalent to `objectApiName`. */
+    objectId: z.string().min(1).optional(),
+    /** Other permission sets referenced in a user-intersection question (disclosure only). */
+    relatedPermissionSetIds: z.array(z.string().min(1)).optional(),
+  })
+  .refine(
+    (i) =>
+      i.componentId !== undefined ||
+      i.objectApiName !== undefined ||
+      i.objectId !== undefined,
+    {
+      message: 'provide one of componentId, objectApiName, or objectId',
+      path: ['componentId'],
+    },
+  );
 
 /** Parsed input shape. */
 export type ObjectAccessAuditInput = z.infer<typeof objectAccessAuditInputSchema>;
@@ -94,6 +123,17 @@ export interface ObjectAccessGrant {
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface ObjectAccessAuditOutput {
   readonly componentId: string;
+  /**
+   * Echoes the scope ACTUALLY applied so a host never assumes an alias it passed
+   * (`objectApiName` / `objectId`) was honored — the silent-strip that surfaced
+   * as `componentId: Required` was the bug this closes. `componentId` is the
+   * resolved canonical id; `object` is the bare object api name when the resolved
+   * id is a `CustomObject:` (null in permission-set mode).
+   */
+  readonly appliedScope: {
+    readonly componentId: string;
+    readonly object: string | null;
+  };
   readonly objectLabel: string;
   readonly notModeled: boolean;
   readonly notModeledNote?: string;
@@ -120,6 +160,43 @@ export interface ObjectAccessAuditOutput {
   readonly assignmentDisclosure?: string;
 }
 
+/**
+ * Resolve the single target id from the `componentId` / `objectApiName` /
+ * `objectId` aliases. `objectApiName` / `objectId` are coerced to a
+ * `CustomObject:` id (a bare name gets the prefix; an already-canonical value
+ * passes through); `componentId` keeps its raw value so its existing
+ * `CustomObject:` / `PermissionSet:` prefix check still governs. Several aliases
+ * that disagree are an `invalid-query` — never a silent pick.
+ */
+const resolveTargetId = (
+  input: ObjectAccessAuditInput,
+): Result<string, McpError> => {
+  const ids: string[] = [];
+  if (input.componentId !== undefined) ids.push(input.componentId);
+  if (input.objectId !== undefined) {
+    ids.push(coercePrefix(input.objectId, [CUSTOM_OBJECT_PREFIX]));
+  }
+  if (input.objectApiName !== undefined) {
+    ids.push(coercePrefix(input.objectApiName, [CUSTOM_OBJECT_PREFIX]));
+  }
+  const distinct = [...new Set(ids)];
+  if (distinct.length === 0) {
+    return err({
+      kind: 'invalid-query',
+      message: 'provide one of componentId, objectApiName, or objectId',
+      path: 'componentId',
+    });
+  }
+  if (distinct.length > 1) {
+    return err({
+      kind: 'invalid-query',
+      message: `componentId / objectApiName / objectId name different targets (${distinct.join(', ')}); pass one`,
+      path: 'componentId',
+    });
+  }
+  return ok(distinct[0] as string);
+};
+
 /** Read a boolean edge property, defaulting to false when absent. */
 const flag = (props: Readonly<Record<string, unknown>>, key: string): boolean =>
   props[key] === true;
@@ -140,8 +217,12 @@ export const objectAccessAuditHandler = async (
   ctx: Context,
   input: ObjectAccessAuditInput,
 ): Promise<Result<McpResponse<ObjectAccessAuditOutput>, McpError>> => {
-  if (input.componentId.startsWith(PERMISSION_SET_PREFIX)) {
-    const componentId = input.componentId as ComponentId;
+  const targetResult = resolveTargetId(input);
+  if (!targetResult.ok) return targetResult;
+  const targetId = targetResult.value;
+
+  if (targetId.startsWith(PERMISSION_SET_PREFIX)) {
+    const componentId = targetId as ComponentId;
     const psResult = await getNodeById(ctx.graph, componentId);
     if (!psResult.ok) {
       return err({ kind: 'internal', message: `graph query failed: ${psResult.error.message}` });
@@ -164,6 +245,7 @@ export const objectAccessAuditHandler = async (
     return ok({
       data: {
         componentId,
+        appliedScope: { componentId, object: null },
         objectLabel: psNode.label ?? psNode.apiName,
         notModeled: false,
         grants: [],
@@ -186,15 +268,15 @@ export const objectAccessAuditHandler = async (
     });
   }
 
-  if (!input.componentId.startsWith(CUSTOM_OBJECT_PREFIX)) {
+  if (!targetId.startsWith(CUSTOM_OBJECT_PREFIX)) {
     return err({
       kind: 'invalid-query',
       message:
-        `componentId must start with '${CUSTOM_OBJECT_PREFIX}' or '${PERMISSION_SET_PREFIX}'; got '${input.componentId}'`,
+        `componentId must start with '${CUSTOM_OBJECT_PREFIX}' or '${PERMISSION_SET_PREFIX}'; got '${targetId}'`,
       path: 'componentId',
     });
   }
-  const componentId = input.componentId as ComponentId;
+  const componentId = targetId as ComponentId;
 
   const objectResult = await getNodeById(ctx.graph, componentId);
   if (!objectResult.ok) {
@@ -336,6 +418,10 @@ export const objectAccessAuditHandler = async (
   return ok({
     data: {
       componentId,
+      appliedScope: {
+        componentId,
+        object: componentId.slice(CUSTOM_OBJECT_PREFIX.length),
+      },
       objectLabel: objectNode?.label ?? objectNode?.apiName ?? componentId.slice(CUSTOM_OBJECT_PREFIX.length),
       notModeled,
       ...(notModeled

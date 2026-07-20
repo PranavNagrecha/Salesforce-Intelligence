@@ -876,3 +876,41 @@ describe('explainFieldInputSchema', () => {
     expect(parsed.success).toBe(false);
   });
 });
+
+// GUARD (L2 alias OS / ADMIN-SURFACE-ALIAS-SKEW-CLUSTER): pre-fix the schema
+// required `fieldId` and Zod-STRIPPED `componentId: CustomField:…` -> `fieldId:
+// Required`. Post-fix the componentId alias resolves to the SAME result as the
+// canonical fieldId; disagreeing values -> invalid-query.
+describe('explainFieldHandler — componentId ↔ fieldId alias', () => {
+  const run = async (raw: unknown) => {
+    const parsed = explainFieldInputSchema.safeParse(raw);
+    if (!parsed.success) return null;
+    return explainFieldHandler(ctx, parsed.data);
+  };
+
+  it('natural componentId ≡ canonical fieldId (byte-equal data)', async () => {
+    const byField = await run({ fieldId: ACCOUNT_INDUSTRY_ID });
+    const byComponent = await run({ componentId: ACCOUNT_INDUSTRY_ID });
+    expect(byField).not.toBeNull();
+    expect(byComponent).not.toBeNull();
+    if (!byField?.ok || !byComponent?.ok) return;
+    expect(byComponent.value.data.fieldId).toBe(ACCOUNT_INDUSTRY_ID);
+    expect(byComponent.value.data).toEqual(byField.value.data);
+  });
+
+  it('disagreeing fieldId / componentId → invalid-query', async () => {
+    const parsed = explainFieldInputSchema.safeParse({
+      fieldId: ACCOUNT_INDUSTRY_ID,
+      componentId: 'CustomField:Account.Other_Field__c',
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    const r = await explainFieldHandler(ctx, parsed.data);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('neither fieldId nor componentId → schema rejects', () => {
+    expect(explainFieldInputSchema.safeParse({}).success).toBe(false);
+  });
+});

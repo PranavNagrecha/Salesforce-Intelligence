@@ -1550,6 +1550,66 @@ describe('extractWorkflowRule', () => {
       }
     });
 
+    it('W4.3 — emits a `references` edge from the WorkflowAlert node to the EmailTemplate its <template> names', async () => {
+      // Pre-W4.3 the alert node carried the template ONLY on
+      // `properties.template` (a string) and had a single `parentOf` edge — so
+      // `get_edges` on the alert reached no EmailTemplate and "safe to delete
+      // EmailTemplate X?" invented no WorkflowAlert dependent. This asserts the
+      // new DECLARED alert -> EmailTemplate `references` edge (fails pre-fix).
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <alerts>
+    <fullName>My_Alert</fullName>
+    <senderType>CurrentUser</senderType>
+    <template>My_Folder/My_Template</template>
+  </alerts>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Widget__c', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const alertId = 'WorkflowAlert:Widget__c.My_Alert';
+        expect(result.value.nodes.some((n) => n.id === alertId)).toBe(true);
+        const templateEdge = result.value.edges.find(
+          (e) =>
+            e.edgeType === 'references' &&
+            e.fromId === alertId &&
+            // folder '/' → '.' canonical id.
+            e.toId === 'EmailTemplate:My_Folder.My_Template',
+        );
+        expect(templateEdge).toBeDefined();
+        expect(templateEdge?.confidence).toBe('declared');
+        expect(templateEdge?.properties).toMatchObject({
+          referenceKind: 'alertTemplate',
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('W4.3 — a template-less alert emits NO EmailTemplate edge (no phantom)', async () => {
+      const xml = `<?xml version="1.0"?>
+<Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <alerts>
+    <fullName>No_Template_Alert</fullName>
+    <senderType>CurrentUser</senderType>
+  </alerts>
+</Workflow>`;
+      const { dir, path } = await writeTempWorkflowXml('Widget__c', xml);
+      try {
+        const result = await extractWorkflowRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const emailEdges = result.value.edges.filter((e) =>
+          e.toId.startsWith('EmailTemplate:'),
+        );
+        expect(emailEdges).toHaveLength(0);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
     it('WorkflowRule alert action references edge resolves to the promoted WorkflowAlert node id', async () => {
       // The Alert action variant already emits a `references` edge to
       // `WorkflowAlert:{Object}.{name}`; v2.9 gives that target a real node.

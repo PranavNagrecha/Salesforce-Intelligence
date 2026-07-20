@@ -163,6 +163,131 @@ describe('extractVisualforcePage', () => {
     });
   });
 
+  describe('standardController object edge (VF-STANDARDCONTROLLER-UNGRAPHED)', () => {
+    // A page's `standardController="X"` binds it to the object whose records it
+    // renders. Before the fix the extractor emitted no edge for it, so the bound
+    // object's usages omitted the page (and the page read as unused). The
+    // `controller` matcher is case-sensitive and does NOT match the `Controller`
+    // suffix of `standardController`, so no phantom ApexClass edge is minted.
+    it('emits a declared references edge VisualforcePage -> CustomObject for standardController=', async () => {
+      const body = `<apex:page standardController="Widget__c" extensions="MyExt">
+  <p>Bound to the Widget object.</p>
+</apex:page>`;
+      const { dir, pagePath } = await writeTempVfPage('My_Page', body);
+      try {
+        const result = await extractVisualforcePage(pagePath);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const objEdge = result.value.edges.find(
+          (e) => e.toId === 'CustomObject:Widget__c',
+        );
+        // RED pre-fix: no CustomObject edge exists (standardController ungraphed).
+        expect(objEdge).toBeDefined();
+        if (!objEdge) return;
+        expect(objEdge.fromId).toBe('VisualforcePage:My_Page');
+        expect(objEdge.edgeType).toBe('references');
+        expect(objEdge.confidence).toBe('declared');
+        expect(objEdge.source).toBe('vf-page-extractor');
+        expect(objEdge.properties).toEqual({ role: 'standardController' });
+        // extensions -> ApexClass still resolves in the same pass, and no
+        // phantom ApexClass:Widget__c controller edge is minted.
+        const extEdge = result.value.edges.find(
+          (e) => e.toId === 'ApexClass:MyExt',
+        );
+        expect(extEdge?.properties['role']).toBe('extension');
+        expect(
+          result.value.edges.some((e) => e.toId === 'ApexClass:Widget__c'),
+        ).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits no standardController edge for a custom-controller page', async () => {
+      const body = `<apex:page controller="MyController">
+  <p>Custom controller only.</p>
+</apex:page>`;
+      const { dir, pagePath } = await writeTempVfPage('My_Page', body);
+      try {
+        const result = await extractVisualforcePage(pagePath);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(
+          result.value.edges.some((e) => e.toId.startsWith('CustomObject:')),
+        ).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('apexCallCount reflects apex bindings (VISUALFORCE-APEXCALLCOUNT-ZERO-WITH-CONTROLLER-EDGE)', () => {
+    it('counts a declared controller with no inline {!Class.method()} as apexCallCount >= 1', async () => {
+      // A page that binds a controller purely through the root attribute
+      // (its actions referenced as bare `{!action}` binds, not
+      // `{!Class.method()}`) produced a `references` controller edge but
+      // reported apexCallCount 0 — so hosts sorting/filtering by
+      // apexCallCount read a wired page as Apex-free.
+      const body = `<apex:page controller="SyntheticCtrl" action="{!forwardToStart}" title="Login">
+  <p>Static content, no inline Class.method() call.</p>
+</apex:page>`;
+      const { dir, pagePath } = await writeTempVfPage('CtrlOnly', body);
+      try {
+        const result = await extractVisualforcePage(pagePath);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        // Sanity: the controller edge exists but the scanner found no
+        // inline apex call — the exact shape of the finding.
+        expect(
+          result.value.edges.some(
+            (e) => e.toId === 'ApexClass:SyntheticCtrl' && e.edgeType === 'references',
+          ),
+        ).toBe(true);
+        expect(
+          result.value.edges.some((e) => e.edgeType === 'callsApex'),
+        ).toBe(false);
+        const node = result.value.nodes[0];
+        expect(node?.properties['apexCallCount']).toBe(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('counts distinct apex classes across controller, extensions, and inline calls', async () => {
+      // controller=A (also called inline as A.getRecord()), extensions=B,C
+      // → three DISTINCT apex classes; the inline call to A must not
+      // double-count.
+      const body = `<apex:page controller="CtrlA" extensions="ExtB,ExtC">
+  <p>{!CtrlA.getRecord()}</p>
+</apex:page>`;
+      const { dir, pagePath } = await writeTempVfPage('Distinct', body);
+      try {
+        const result = await extractVisualforcePage(pagePath);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0];
+        expect(node?.properties['apexCallCount']).toBe(3);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps apexCallCount 0 for a page with no apex wiring at all', async () => {
+      const body = `<apex:page>
+  <p>{!Account.Name}</p>
+</apex:page>`;
+      const { dir, pagePath } = await writeTempVfPage('NoApex', body);
+      try {
+        const result = await extractVisualforcePage(pagePath);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.nodes[0]?.properties['apexCallCount']).toBe(0);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('scanner output integration', () => {
     it('emits heuristic readsFrom for {!Object.Field} merge tokens', async () => {
       const body = `<apex:page>

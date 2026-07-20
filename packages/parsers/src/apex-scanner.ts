@@ -239,6 +239,22 @@ const SOBJECT_INSTANCE_METHODS = new Set<string>([
   'recalculateFormulas',
 ]);
 
+/**
+ * Schema describe MEMBER accessors that surface as a method-call RECEIVER in
+ * the chained describe idiom — `X.getDescribe().fields.getMap()`,
+ * `describeResult.fieldSets.getMap()`. The `IDENT.IDENT(` sweep sees
+ * `fields.getMap(` and would otherwise mint a phantom `callsApex ApexClass:fields`,
+ * which `sfi.call_graph` renders as a real callee and `sfi.get_component`
+ * mis-classifies as a missing / managed-package class. These names denote a
+ * `Map<String, Schema.SObjectField>` / `Map<String, Schema.FieldSet>` from the
+ * describe API, NEVER a user Apex class — Apex class names are PascalCase or
+ * namespaced (`ns__X`), so a bare lowercase `fields` / `fieldSets` receiver can
+ * never shadow one. Siblings of the `newMap` / `oldMap` / `this` / `super`
+ * local-phantom filter, which did not cover Schema describe members
+ * (CALL-GRAPH-PHANTOM-SCHEMA-FIELDS).
+ */
+const SCHEMA_DESCRIBE_MEMBERS = new Set<string>(['fields', 'fieldSets']);
+
 // Match line comments, block comments, and single-quoted strings.
 // Block comments do not nest in Apex; strings honor `\` escapes.
 const COMMENT_OR_STRING = /\/\/[^\n]*|\/\*[\s\S]*?\*\/|'(?:\\[\s\S]|[^'\\])*'/g;
@@ -284,8 +300,16 @@ const NEW_PATTERN = /\bnew\s+([A-Za-z_][A-Za-z_0-9]*)\s*\(/g;
 // declaration is still surfaced as a (heuristic) access — usage alone never
 // infers a local. A trailing `(` (method declaration `Type name(`) is
 // excluded by the lookahead, so method names are not mistaken for locals.
+// The declared TYPE (group 1) is either a PascalCase name (`Account`,
+// `MyObject__c`) OR a managed-package NAMESPACED api name, which starts
+// lowercase and always contains a `__` namespace separator (`ns__Object__c`).
+// The lowercase-with-`__` branch is deliberately narrow: a bare lowercase
+// keyword (`return foo`, `throw x`) has no `__`, so it can never be misread
+// as a declaration. Without this branch the scanner never learned that
+// `ns__Object__c rec` typed `rec`, so a `rec.Field = …` write fell back to
+// the literal-receiver phantom.
 const LOCAL_DECL_PATTERN =
-  /\b([A-Z][A-Za-z0-9_]*)(?:\s*<[^;{}()]*>)?(?:\s*\[\s*\])?\s+([a-z][A-Za-z0-9_]*)\s*(?=[=;:),])/g;
+  /\b((?:[A-Z][A-Za-z0-9_]*|[a-z][A-Za-z0-9]*__[A-Za-z0-9_]*))(?:\s*<[^;{}()]*>)?(?:\s*\[\s*\])?\s+([a-z][A-Za-z0-9_]*)\s*(?=[=;:),])/g;
 
 // Capture an INLINE SOQL statement `[SELECT ... ]`. Anchored on `[` followed
 // by optional whitespace and the `SELECT` keyword so plain list/array indexing
@@ -567,6 +591,13 @@ const emitAccess = (
 // Translate a pair-match into a MethodCallSite and push it iff
 // `(className, methodName)` is new.
 const emitCall = (ctx: BodyContext, match: PairMatch): void => {
+  // `X.fields.getMap()` / `X.fieldSets.getMap()` — the receiver is a Schema
+  // describe member MAP, not an Apex class. Drop the call so the chained
+  // describe idiom never mints a phantom `callsApex ApexClass:fields`
+  // (CALL-GRAPH-PHANTOM-SCHEMA-FIELDS). A declared local named `fields` is
+  // already dropped by the `ctx.locals` branch below; this covers the
+  // member-accessor form where `fields` is not a declared local.
+  if (SCHEMA_DESCRIBE_MEMBERS.has(match.left)) return;
   let className = match.left;
   if (ctx.locals.has(match.left)) {
     // `match.left` is a declared local. If its declared type was constructed

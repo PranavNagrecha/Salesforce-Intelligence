@@ -70,10 +70,13 @@ const jsonld = [
           </tbody>
         </table>
 
+        <p>Dependents are one half of the answer; the other is the <em>structural consequence</em> of the shape itself. <code>interpret</code> reads that from the graph deterministically: a master-detail field is what makes its child records cascade-delete with the parent, and an object whose two master-detail fields make it a junction (many-to-many) behaves differently again. Those are cited, confidence-tiered claims - not an LLM guess - folded in alongside the dependent list.</p>
+
         <h2 id="tools">The tools behind it</h2>
         <ul>
           <li><code>safe_to_delete_field</code> - the delete simulation with a verdict and coverage caveat.</li>
           <li><code>get_impact</code> - the raw dependency subgraph (what references this, N hops out).</li>
+          <li><code>interpret</code> - the structural consequence of the shape (master-detail cascade, junction object), as a cited claim.</li>
           <li><code>what_if_change_field_type</code> - the sibling question for a type change rather than a delete.</li>
         </ul>
 

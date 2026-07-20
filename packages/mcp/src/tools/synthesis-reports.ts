@@ -12,7 +12,7 @@ import type {
   Node,
   TrustSummary,
 } from '@sf-intelligence/contracts';
-import { ok, type Result } from '@sf-intelligence/core';
+import { err, ok, type Result } from '@sf-intelligence/core';
 import {
   listEdges,
   listEdgesForNodes,
@@ -34,6 +34,7 @@ import {
   type GovernorLimitRisksOutput,
 } from './governor-limit-risks.js';
 import { healthCheckHandler } from './health-check.js';
+import { resolveExistingObjectScope } from './input-aliases.js';
 import { expandPermissionSetGroup } from './permission-set-group.js';
 import { collectPiiInventoryFields } from './pii-inventory.js';
 import {
@@ -85,7 +86,26 @@ export const orgRiskReportInputSchema = synthesisInputSchema.extend({
   gate: z.boolean().optional(),
 });
 export type OrgRiskReportInput = z.infer<typeof orgRiskReportInputSchema>;
-export const automationRiskReportInputSchema = synthesisInputSchema;
+/**
+ * `sfi.automation_risk_report` accepts the generic `limit` plus an optional
+ * OBJECT SCOPE (AUTOMATION-RISK-REPORT-IGNORES-OBJECT-SCOPE). The report
+ * composes two sub-analyses: legacy-automation migration candidates (Process
+ * Builders — parented to an object) and governor-limit findings (Apex classes —
+ * NOT object-attributable). When an object is named the report is HONORED by
+ * narrowing the legacy-automation half to that object; the Apex governor-limit
+ * half is EXCLUDED from the object-scoped view (it is org-wide, not attributable
+ * to one object) and that exclusion is disclosed — never silently returning the
+ * org-wide report. Accepts the interchangeable object identifiers.
+ */
+export const automationRiskReportInputSchema = synthesisInputSchema.extend({
+  objectApiName: z.string().min(1).optional(),
+  object: z.string().min(1).optional(),
+  objectId: z.string().min(1).optional(),
+  componentId: z.string().min(1).optional(),
+});
+export type AutomationRiskReportInput = z.infer<
+  typeof automationRiskReportInputSchema
+>;
 /**
  * `sfi.permission_risk_report` accepts the generic `limit` plus an optional
  * `profileFilter` — a Profile api name / label to SCOPE the report to one
@@ -429,16 +449,42 @@ export const fieldCleanupCandidatesHandler = async (
 
 export interface AutomationRiskReportOutput extends SynthesisBase {
   readonly governorClasses: GovernorLimitRisksOutput['classes'] | null;
+  /**
+   * Present ONLY on an object-scoped call
+   * (AUTOMATION-RISK-REPORT-IGNORES-OBJECT-SCOPE) — echoes the object the
+   * legacy-automation half was narrowed to so a host never reads a scoped
+   * answer as org-wide. Absent on the bare call, keeping that response
+   * byte-identical. `object` is the canonical `CustomObject:` id; `mode` is
+   * always `component` when present.
+   */
+  readonly appliedScope?: {
+    readonly object: string;
+    readonly mode: 'component';
+  };
 }
 
 export const automationRiskReportHandler = async (
   ctx: Context,
-  input: SynthesisInput,
+  input: AutomationRiskReportInput,
 ): Promise<Result<McpResponse<AutomationRiskReportOutput>, McpError>> => {
   const limit = input.limit ?? 50;
   const findings: RankedFinding[] = [];
 
-  const pb = await processBuilderMigrationCandidatesHandler(ctx, { limit });
+  // AUTOMATION-RISK-REPORT-IGNORES-OBJECT-SCOPE: resolve the optional object
+  // scope (and verify it exists). `null` = bare org-wide call (byte-identical);
+  // a resolved scope narrows the legacy-automation half to that object; an
+  // unresolvable / absent object → `invalid-query`.
+  const scopeResult = await resolveExistingObjectScope(ctx.graph, input);
+  if (!scopeResult.ok) return err(scopeResult.error);
+  const scope = scopeResult.value;
+
+  // Legacy-automation half: Process Builders are parented to an object, so it
+  // narrows honestly. Forward the object scope to the composed sub-handler when
+  // scoped (it re-resolves + filters by `parentObjectId`).
+  const pb = await processBuilderMigrationCandidatesHandler(ctx, {
+    limit,
+    ...(scope !== null ? { componentId: scope.componentId } : {}),
+  });
   if (pb.ok) {
     for (const item of pb.value.data.processBuilders.slice(0, limit)) {
       findings.push({
@@ -452,30 +498,49 @@ export const automationRiskReportHandler = async (
     }
   }
 
-  const gov = await governorLimitRisksHandler(ctx, { limit });
+  // Governor-limit half: findings live in Apex classes, which are NOT
+  // attributable to a single object. Under an object scope they are EXCLUDED
+  // (returning them scoped-to-an-object would be a lie) and the exclusion is
+  // disclosed; a bare call keeps them exactly as before.
   let governorClasses: GovernorLimitRisksOutput['classes'] | null = null;
-  if (gov.ok) {
-    governorClasses = gov.value.data.classes;
-    for (const entry of governorClasses.slice(0, limit)) {
-      for (const risk of entry.risks) {
-        findings.push({
-          rank: 0,
-          severity: risk.severity === 'critical' ? 'critical' : 'high',
-          category: 'governor-limit',
-          summary: `${entry.apiName}: ${risk.rule}`,
-          evidence: [entry.componentId, risk.location],
-          confidence: 'heuristic',
-        });
+  if (scope === null) {
+    const gov = await governorLimitRisksHandler(ctx, { limit });
+    if (gov.ok) {
+      governorClasses = gov.value.data.classes;
+      for (const entry of governorClasses.slice(0, limit)) {
+        for (const risk of entry.risks) {
+          findings.push({
+            rank: 0,
+            severity: risk.severity === 'critical' ? 'critical' : 'high',
+            category: 'governor-limit',
+            summary: `${entry.apiName}: ${risk.rule}`,
+            evidence: [entry.componentId, risk.location],
+            confidence: 'heuristic',
+          });
+        }
       }
     }
   }
 
+  const disclosure =
+    scope === null
+      ? SYNTHESIS_DISCLOSURE
+      : `Scoped to ${scope.componentId}: only legacy automation (Process Builders) parented to this object is shown. ` +
+        'Governor-limit findings live in Apex classes, which are not attributable to a single object, so they are ' +
+        'EXCLUDED from this object-scoped view — run sfi.governor_limit_risks (org-wide or per-class), or the bare ' +
+        `automation_risk_report, for those. ${SYNTHESIS_DISCLOSURE}`;
+
   return ok({
     data: {
+      // appliedScope FIRST + only when scoped, so a bare call omits the whole
+      // block and its serialized response stays byte-identical to pre-fix.
+      ...(scope !== null
+        ? { appliedScope: { object: scope.componentId, mode: 'component' as const } }
+        : {}),
       findings: sortFindings(findings),
       governorClasses,
       trust: coverageTrust(ctx),
-      disclosure: SYNTHESIS_DISCLOSURE,
+      disclosure,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

@@ -1185,3 +1185,41 @@ describe('field360InputSchema', () => {
     expect(parsed.success).toBe(false);
   });
 });
+
+// GUARD (L2 alias OS / ADMIN-SURFACE-ALIAS-SKEW-CLUSTER): pre-fix the schema
+// required `fieldId` and Zod-STRIPPED `componentId: CustomField:…` -> `fieldId:
+// Required`. Post-fix the componentId alias resolves to the SAME result as the
+// canonical fieldId; disagreeing values -> invalid-query.
+describe('field360Handler — componentId ↔ fieldId alias', () => {
+  const run = async (raw: unknown) => {
+    const parsed = field360InputSchema.safeParse(raw);
+    if (!parsed.success) return null;
+    return field360Handler(ctx, parsed.data);
+  };
+
+  it('natural componentId ≡ canonical fieldId (byte-equal data)', async () => {
+    const byField = await run({ fieldId: TARGET });
+    const byComponent = await run({ componentId: TARGET });
+    expect(byField).not.toBeNull();
+    expect(byComponent).not.toBeNull();
+    if (!byField?.ok || !byComponent?.ok) return;
+    expect(byComponent.value.data.fieldId).toBe(TARGET);
+    expect(byComponent.value.data).toEqual(byField.value.data);
+  });
+
+  it('disagreeing fieldId / componentId → invalid-query', async () => {
+    const parsed = field360InputSchema.safeParse({
+      fieldId: TARGET,
+      componentId: 'CustomField:Account.Other_Field__c',
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    const r = await field360Handler(ctx, parsed.data);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('neither fieldId nor componentId → schema rejects', () => {
+    expect(field360InputSchema.safeParse({}).success).toBe(false);
+  });
+});

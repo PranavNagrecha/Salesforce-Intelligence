@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 
 import type {
+  Edge,
   ExtractionResult,
   ExtractorError,
   Node,
@@ -13,7 +14,22 @@ import { deriveComponentApiName } from './path-utils.js';
 
 const LETTERHEAD_FILE_SUFFIX = '.letter-meta.xml';
 const ROOT_ELEMENT = 'Letterhead';
+const EXTRACTOR_SOURCE = 'letterhead-extractor';
 const REQUIRED_ELEMENTS = ['name', 'available', 'bodyColor'] as const;
+
+/**
+ * LETTERHEAD-LOGO-UNGRAPHED — a Letterhead `<header><logo>` / `<footer><logo>`
+ * references a classic Salesforce Document (the letterhead's brand image),
+ * declared as a folder path `Folder/DocumentName.ext` (or a bare name).
+ * Convert it to the `Document:{Folder.Name}` id — mirroring the folder→id
+ * `slash → dot` convention the EmailTemplate id uses — so the reference is a
+ * graph target rather than an opaque string. Documents are not extracted into
+ * the vault, so the target is dangling-by-design (a phantom classified
+ * `unknown` / `managed-extension`), exactly like the `User:{ref}` /
+ * `Territory:{ref}` dangling targets other extractors emit.
+ */
+const logoRefToDocumentId = (logoRef: string): string =>
+  `Document:${logoRef.includes('/') ? logoRef.replace(/\//g, '.') : logoRef}`;
 
 /**
  * Unwrap a possibly-array single-occurrence XML child. fast-xml-parser
@@ -123,12 +139,18 @@ const validateRoot = (
  *
  * Reads the file, parses it as XML, validates the `<Letterhead>` root
  * per the vendored `Letterhead.md` spec, and returns an
- * `ExtractionResult` containing one `Node` of type `'Letterhead'` and
- * zero edges.
+ * `ExtractionResult` containing one `Node` of type `'Letterhead'` plus,
+ * when a logo is declared, an outgoing `references` edge per logo.
  *
- * Letterhead is a v1.3 **leaf node**: it produces no outgoing edges.
- * Inbound `references` edges from EmailTemplate are produced by the
- * EmailTemplate extractor — see `EmailTemplate.md` §"Edges".
+ * LETTERHEAD-LOGO-UNGRAPHED: a `<header><logo>` / `<footer><logo>` names the
+ * classic Document holding the letterhead's brand image. It emits a declared
+ * `references` edge `Letterhead:{name}` -> `Document:{Folder.Name}`
+ * (`properties.via` = `header.logo` / `footer.logo`) so a Document referenced
+ * only as a letterhead logo counts as usage in find_component_usages /
+ * get_edges instead of reading as orphaned and delete-safe. A letterhead with
+ * no logo stays a leaf (zero edges). Inbound `references` edges from
+ * EmailTemplate are produced by the EmailTemplate extractor — see
+ * `EmailTemplate.md` §"Edges".
  *
  * The canonical ID is `Letterhead:{LetterheadName}` where
  * `LetterheadName` is the filename minus `.letter-meta.xml`.
@@ -223,9 +245,33 @@ export const extractLetterhead = async (
   const footerLogoRef = readStructuredScalar(rootObj, 'footer', 'logo');
 
   const apiName = deriveComponentApiName(path, LETTERHEAD_FILE_SUFFIX);
+  const nodeId = `${ROOT_ELEMENT}:${apiName}`;
+
+  // LETTERHEAD-LOGO-UNGRAPHED: emit the declared Letterhead -> Document usage
+  // edge per logo ref. Empty refs are skipped; identical header/footer refs are
+  // deduped so a single-Document logo isn't double-counted.
+  const edges: Edge[] = [];
+  const seenLogoTargets = new Set<string>();
+  for (const [logoRef, via] of [
+    [headerLogoRef, 'header.logo'],
+    [footerLogoRef, 'footer.logo'],
+  ] as const) {
+    if (logoRef === null || logoRef === '') continue;
+    const toId = logoRefToDocumentId(logoRef);
+    if (seenLogoTargets.has(toId)) continue;
+    seenLogoTargets.add(toId);
+    edges.push({
+      fromId: nodeId,
+      toId,
+      edgeType: 'references',
+      confidence: 'declared',
+      source: EXTRACTOR_SOURCE,
+      properties: { via },
+    });
+  }
 
   const node: Node = {
-    id: `${ROOT_ELEMENT}:${apiName}`,
+    id: nodeId,
     type: 'Letterhead',
     apiName,
     label: String(unwrapSingle(rootObj['name'])),
@@ -248,5 +294,5 @@ export const extractLetterhead = async (
     },
   };
 
-  return ok({ nodes: [node], edges: [] });
+  return ok({ nodes: [node], edges });
 };

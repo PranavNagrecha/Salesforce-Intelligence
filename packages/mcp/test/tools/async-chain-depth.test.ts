@@ -366,15 +366,91 @@ describe('asyncChainDepthHandler', () => {
     const d = result.value.data;
     expect(d.rootFlowId).toBe(FLOW_ROOT);
     expect(d.rootClassId).toBeNull();
-    expect(d.maxDepth).toBe(2);
+    // The Flow→Apex `callsApex` entry is SYNCHRONOUS (depth 0, async false) and
+    // does NOT count toward async maxDepth; only the one downstream
+    // `dispatchesAsync` hop does, so maxDepth is 1 (not 2).
+    expect(d.maxDepth).toBe(1);
     expect(d.chains[0]).toEqual({
       fromId: FLOW_ROOT,
       toId: APEX_ENTRY,
-      depth: 1,
+      depth: 0,
+      edgeType: 'callsApex',
+      async: false,
     });
-    expect(d.chains.some((c) => c.fromId === APEX_ENTRY && c.toId === APEX_NEXT)).toBe(
-      true,
+    const asyncHop = d.chains.find(
+      (c) => c.fromId === APEX_ENTRY && c.toId === APEX_NEXT,
     );
+    expect(asyncHop).toBeDefined();
+    expect(asyncHop?.depth).toBe(1);
+    expect(asyncHop?.edgeType).toBe('dispatchesAsync');
+    expect(asyncHop?.async).toBe(true);
+  });
+
+  it('ASYNC-CHAIN-DEPTH-COUNTS-SYNC-FLOW-INVOCABLE: a Flow calling only a synchronous invocable reports async maxDepth 0', async () => {
+    // Regression guard (GENERIC synthetic fixture): a Flow whose ONLY reachable
+    // Apex is an `@InvocableMethod` class with NO downstream `dispatchesAsync`
+    // edge. The Flow→Apex hop is synchronous (same-transaction invocable), so
+    // the async chain depth must be 0 — NOT 1. Before the fix the Flow entry
+    // `callsApex` hop was counted as depth 1 and bumped maxDepth, overstating a
+    // synchronous field-copy invocable as an async hop.
+    const FLOW_SYNC = 'Flow:SyncInvocableFlow';
+    const INVOCABLE = 'ApexClass:SyncInvocableAction';
+    const syncSeed: ExtractionResult = {
+      nodes: [
+        makeNode({
+          id: FLOW_SYNC,
+          type: 'Flow',
+          apiName: 'SyncInvocableFlow',
+          label: 'Sync Invocable Flow',
+          sourcePath: 'flows/SyncInvocableFlow.flow-meta.xml',
+        }),
+        makeNode({
+          id: INVOCABLE,
+          apiName: 'SyncInvocableAction',
+          properties: { hasInvocableMethod: true },
+        }),
+      ],
+      edges: [
+        // ONLY a Flow→Apex callsApex edge — no dispatchesAsync anywhere.
+        makeEdge({
+          fromId: FLOW_SYNC,
+          toId: INVOCABLE,
+          edgeType: 'callsApex',
+          source: 'flow-extractor',
+        }),
+      ],
+    };
+    const localDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-async-sync-'));
+    const opened = await openGraph(join(localDir, 'sync-invocable.db'));
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const localStore = opened.value;
+    const imported = await importExtractionResults(localStore, [syncSeed]);
+    expect(imported.ok).toBe(true);
+    const localCtx: Context = {
+      vaultRoot: localDir,
+      manifest: FIXTURE_MANIFEST,
+      graph: localStore,
+    };
+    const result = await asyncChainDepthHandler(localCtx, { rootId: FLOW_SYNC });
+    await closeGraph(localStore);
+    rmSync(localDir, { recursive: true, force: true });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    // The KEY assertion: async depth is 0, not 1.
+    expect(d.maxDepth).toBe(0);
+    // The entry hop is still surfaced, but flagged synchronous.
+    expect(d.chains).toHaveLength(1);
+    expect(d.chains[0]).toEqual({
+      fromId: FLOW_SYNC,
+      toId: INVOCABLE,
+      depth: 0,
+      edgeType: 'callsApex',
+      async: false,
+    });
+    // No async hop, so no branch points either.
+    expect(d.branchPoints).toEqual([]);
   });
 
   it('returns invalid-query when rootApexClassId lacks the ApexClass: prefix', async () => {
@@ -562,12 +638,13 @@ describe('asyncChainDepthHandler — bounded graph queries (BFS)', () => {
     expect(d.maxDepth).toBe(3);
     expect(d.truncated).toBe(false);
     expect(d.cyclesDetected).toBe(false);
+    const asyncHop = { edgeType: 'dispatchesAsync' as const, async: true };
     expect(d.chains).toEqual([
-      { fromId: 'ApexClass:A', toId: 'ApexClass:B', depth: 1 },
-      { fromId: 'ApexClass:A', toId: 'ApexClass:C', depth: 1 },
-      { fromId: 'ApexClass:B', toId: 'ApexClass:D', depth: 2 },
-      { fromId: 'ApexClass:C', toId: 'ApexClass:D', depth: 2 },
-      { fromId: 'ApexClass:D', toId: 'ApexClass:E', depth: 3 },
+      { fromId: 'ApexClass:A', toId: 'ApexClass:B', depth: 1, ...asyncHop },
+      { fromId: 'ApexClass:A', toId: 'ApexClass:C', depth: 1, ...asyncHop },
+      { fromId: 'ApexClass:B', toId: 'ApexClass:D', depth: 2, ...asyncHop },
+      { fromId: 'ApexClass:C', toId: 'ApexClass:D', depth: 2, ...asyncHop },
+      { fromId: 'ApexClass:D', toId: 'ApexClass:E', depth: 3, ...asyncHop },
     ]);
     expect(d.branchPoints).toEqual([{ classId: 'ApexClass:A', branchCount: 2 }]);
   });

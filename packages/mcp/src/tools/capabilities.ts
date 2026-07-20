@@ -282,6 +282,8 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
     tools: [
       'sfi.explain_field',
       'sfi.explain_flow',
+      'sfi.flow_graph',
+      'sfi.flow_trace',
       'sfi.explain_apex_method',
       'sfi.explain_formula',
       'sfi.field_meaning',
@@ -316,6 +318,29 @@ export const CATEGORIES: readonly CapabilityCategory[] = [
       'sfi.what_if_deactivate_flow',
       'sfi.package_impact',
       'sfi.review_change',
+    ],
+  },
+  {
+    id: 'reasoning',
+    title: 'Structural reasoning & consequences',
+    description:
+      'Deterministic, CITED answers to "what does this component structurally IMPLY?" — the consequences of a design, not just the raw dependency list. A curated concept-rule engine reads only the offline graph slice for one component and returns grounded interpretations: master-detail cascade delete & roll-up, the junction structural pattern (an object with two master-detail parents — the many-to-many signature, not a proven pure-connector intent), whether a field is derived/formula or a roll-up (read-only), status-code save aborts, stacked / co-resident record-triggered automations (execution order undefined), default (OWD) sharing posture, coupled-write (firer-anchored), the async boundary (Queueable/Batch/Scheduled/@future Apex and dispatchesAsync call sites run in a SEPARATE transaction — their writes are not visible to the enqueuing save and their effect is deferred), and the external-API surface (an Apex class annotated @RestResource / @AuraEnabled / @InvocableMethod exposes an entry point reachable OUTSIDE the record UI and its automation — an integration/security surface where FLS/CRUD are NOT auto-enforced in Apex and must be coded, while record-level sharing depends on the class-level with/without-sharing declaration — a separate concern; it does not assert the endpoint is insecure or who calls it), and the Apex class sharing mode (a class declared `without sharing` runs in SYSTEM context and does NOT enforce the running user\'s record-level sharing — often intentional and not by itself a vulnerability; `inherited sharing` enforces sharing only when the class is the entry point, so it depends on the caller; FLS/CRUD are a SEPARATE concern and the declaration is class-level, not per-method — the declared posture, not a proven access outcome), and the system-context external surface (an Apex class that is BOTH declared `without sharing` AND externally reachable via @RestResource / @AuraEnabled / @InvocableMethod — an external caller can reach code that runs in SYSTEM context and does NOT enforce the running user\'s record-level sharing, so the combination is a security-REVIEW priority; it may still be intentional and is not by itself a vulnerability, FLS/CRUD are a separate concern, and it is the declared posture, not a proven access outcome), and the object-level View All / Modify All grant (a permission set or profile that grants object-level View All Records / Modify All Records on an object — holders can read, or read/edit/delete, EVERY record of that object regardless of the org-wide default, sharing rules, role hierarchy, or manual shares, so it OVERRIDES record-level sharing even when OWD reads Private — closing the OWD gap; Modify All is the stronger form that INCLUDES View All; object-level only, so it does NOT bypass field-level security, is NOT the org-wide View/Modify All Data system permission, and does NOT assert who HOLDS the permission set/profile — the declared grant, not a proven per-user outcome). It never guesses — when no rule fires it returns an honest "no concept fired", never "nothing depends on it". Fold the claims into your answer via sfi.synthesize_answer.',
+    exampleQuestions: [
+      'What happens to child records if I delete this parent?',
+      'Does this object have the junction pattern (two master-detail parents)?',
+      'Is this field derived/formula or a read-only roll-up?',
+      'Why can’t I see these records by default?',
+      'Do I have stacked record-triggered automations on this object (execution order undefined)?',
+      'Why does saving this record abort with that status code?',
+      'Does this Apex class run asynchronously — is its effect deferred to a separate transaction?',
+      'Does this Apex class expose an external API / integration surface (REST / Aura-LWC / Flow-invocable)?',
+      'Does this Apex class run without sharing / in system context — does it enforce the running user’s record-level sharing?',
+      'Which Apex classes are both without-sharing and externally reachable (a system-context external surface to security-review)?',
+      'Which permission sets or profiles can see every record of this object regardless of sharing (object-level View All / Modify All)?',
+    ],
+    tools: [
+      'sfi.interpret',
+      'sfi.synthesize_answer',
     ],
   },
   {

@@ -54,6 +54,7 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { coercePrefix } from './coerce-id.js';
+import { firstNonEmpty } from './input-aliases.js';
 
 /** BFS depth cap. Matches `sfi.test_coverage_for_method` / `sfi.method_reachability`. */
 const TESTS_FOR_CHANGE_BFS_DEPTH = 3;
@@ -79,19 +80,112 @@ const TESTS_FOR_CHANGE_DISCLOSURE =
   'tests_for_change selects at CLASS granularity (a changed method on a covered class still selects that class’s tests; method-level resolution promised in v2.7.1). The upstream walk follows both callsApex and dispatchesAsync incoming edges, so coverage via async dispatch (Database.executeBatch, System.enqueueJob, System.schedule) is included. A test class is a coverage SINK: it is recorded as a covering test but the walk never traverses THROUGH it, so a test is never credited with covering a class its own production code never references. Dynamic dispatch (Type.forName) and reflective invocation are invisible — a test reaching the change only via reflection is missed. Managed-package test classes are invisible. BFS is capped at depth 3; coverage chains longer than 3 hops surface as uncovered even when they exist. SELECTION ≠ VALIDATION: a selected test that merely runs the changed code does NOT prove the change is correct. In particular, Apex tests run with FULL system-context FLS unless the method wraps the path in System.runAs with a restricted user, so .size()/row-count assertions will NOT detect a WITH SECURITY_ENFORCED / stripInaccessible field-access regression — no field is filtered in the test runtime. A changed component in uncoveredChanges is UNGUARDED — running the selected set will NOT exercise it; run the full suite when any change is uncovered or you suspect a deep chain.';
 
 /**
+ * Normalize a `review_change`-shaped component selector object to its canonical
+ * `Type:ApiName` string id, or `null` when it names no component. A
+ * `componentId` wins when both it and a `{ type, apiName }` pair are present
+ * (mirrors `review_change`'s per-entry normalization). Any `changeKind` a host
+ * forwards from its diff label is accepted but IGNORED — `tests_for_change`
+ * selects the covering tests of a component regardless of HOW it changed.
+ */
+const objectSelectorToId = (val: {
+  readonly componentId?: string | undefined;
+  readonly type?: string | undefined;
+  readonly apiName?: string | undefined;
+}): string | null => {
+  const cid = firstNonEmpty(val.componentId);
+  if (cid !== undefined) return cid;
+  const type = firstNonEmpty(val.type);
+  const apiName = firstNonEmpty(val.apiName);
+  return type !== undefined && apiName !== undefined ? `${type}:${apiName}` : null;
+};
+
+/** Named refusal for an entry that resolves to no component. */
+const CHANGED_ITEM_ERROR =
+  'each changed component needs a string id, a `componentId` (`Type:ApiName`), or a `{ type, apiName }` pair';
+
+/**
+ * One `changedComponents` entry: EITHER a bare string id (the canonical shape —
+ * passed through untouched so an all-strings call is byte-identical) OR the
+ * `review_change`-shaped selector object a router naturally forwards
+ * (`{ componentId }` or `{ type, apiName }`, plus an ignored `changeKind`),
+ * normalized to its `Type:ApiName` string in a preprocess step. An object that
+ * names no component stays a non-string and fails the string schema with the
+ * NAMED {@link CHANGED_ITEM_ERROR} message — surfaced verbatim as `invalid-query`
+ * at the top-level issue (a `z.union` would bury it under a generic "Invalid
+ * input"), not a bare "Expected string" Zod error
+ * (TESTS-FOR-CHANGE-REJECTS-NATURAL-COMPONENT-ARGS).
+ */
+const changedComponentItemSchema = z.preprocess((item) => {
+  if (typeof item === 'string') return item;
+  if (item !== null && typeof item === 'object' && !Array.isArray(item)) {
+    const src = item as Record<string, unknown>;
+    const resolved = objectSelectorToId({
+      componentId: typeof src['componentId'] === 'string' ? src['componentId'] : undefined,
+      type: typeof src['type'] === 'string' ? src['type'] : undefined,
+      apiName: typeof src['apiName'] === 'string' ? src['apiName'] : undefined,
+    });
+    // Resolvable → the canonical string id; unresolvable → leave the object so
+    // the string schema rejects it with the NAMED message.
+    return resolved ?? item;
+  }
+  return item;
+}, z.string({ invalid_type_error: CHANGED_ITEM_ERROR }).min(1));
+
+/**
+ * Fold a single TOP-LEVEL component selector the router emits — `{ componentId:
+ * "ApexClass:X" }` or `{ type, apiName }` — into a one-item `changedComponents`
+ * set, so a host that forwards the natural single-component shape no longer
+ * hard-fails on `changedComponents: Required`
+ * (TESTS-FOR-CHANGE-REJECTS-NATURAL-COMPONENT-ARGS). An explicit
+ * `changedComponents` (of any shape) wins untouched, so the canonical array call
+ * is byte-identical.
+ */
+const foldTopLevelChangeSelector = (raw: unknown): unknown => {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+  const src = raw as Record<string, unknown>;
+  if (src['changedComponents'] !== undefined) return raw;
+  const componentId = firstNonEmpty(
+    typeof src['componentId'] === 'string' ? src['componentId'] : undefined,
+  );
+  const type = firstNonEmpty(typeof src['type'] === 'string' ? src['type'] : undefined);
+  const apiName = firstNonEmpty(
+    typeof src['apiName'] === 'string' ? src['apiName'] : undefined,
+  );
+  if (componentId === undefined && !(type !== undefined && apiName !== undefined)) {
+    // No foldable top-level selector — leave the input alone so the base schema
+    // reports the missing `changedComponents` (never silently invent one).
+    return raw;
+  }
+  const selector: Record<string, unknown> = {};
+  if (componentId !== undefined) selector['componentId'] = componentId;
+  if (type !== undefined) selector['type'] = type;
+  if (apiName !== undefined) selector['apiName'] = apiName;
+  return { changedComponents: [selector] };
+};
+
+/**
  * Zod schema for the `sfi.tests_for_change` tool input.
  *
- *   - `changedComponents`: 1..500 non-empty strings. Each is an
- *     `ApexClass:` / `ApexTrigger:` canonical id or a bare class name
- *     (coerced to an `ApexClass:` id). Non-Apex `Type:` prefixes are
- *     bucketed into `unsupportedChanges`, not rejected batch-wide.
+ *   - `changedComponents`: 1..500 entries. Each is an `ApexClass:` /
+ *     `ApexTrigger:` canonical id or a bare class name (coerced to an
+ *     `ApexClass:` id), OR a `review_change`-shaped selector object
+ *     (`{ componentId }` / `{ type, apiName }`, plus an ignored `changeKind`)
+ *     normalized to that string id. Non-Apex `Type:` prefixes are bucketed into
+ *     `unsupportedChanges`, not rejected batch-wide.
+ *   - A single TOP-LEVEL `componentId` / `{ type, apiName }` (the shape a router
+ *     forwards for one component) is folded into a one-item change set. An
+ *     explicit `changedComponents` array is passed through untouched, so the
+ *     canonical string-array call is byte-identical.
  */
-export const testsForChangeInputSchema = z.object({
-  changedComponents: z
-    .array(z.string().min(1))
-    .min(1)
-    .max(MAX_CHANGED_ITEMS),
-});
+export const testsForChangeInputSchema = z.preprocess(
+  foldTopLevelChangeSelector,
+  z.object({
+    changedComponents: z
+      .array(changedComponentItemSchema)
+      .min(1)
+      .max(MAX_CHANGED_ITEMS),
+  }),
+);
 
 /** Parsed input shape. */
 export type TestsForChangeInput = z.infer<typeof testsForChangeInputSchema>;

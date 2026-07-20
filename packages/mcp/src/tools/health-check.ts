@@ -40,6 +40,7 @@ import {
   readSkippedDirectories,
   summarizeCoverage,
   type CoverageSummary,
+  type ExtendedVaultManifest,
 } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
@@ -150,12 +151,26 @@ export interface HealthCheckOutput {
   readonly freshness: HealthFreshness;
   /**
    * Whether local vault git history is enabled (`org-kb/.git`). Advisory —
-   * never changes `status`.
+   * never changes `status`. `enableHint` carries the one-line enable command
+   * AND its plain-English value prop ("answer 'when did this change?' from
+   * local git history") when disabled, so a host can nudge the user toward the
+   * feature; it is `null` once enabled (nothing to prompt).
    */
   readonly vaultHistory: {
     readonly enabled: boolean;
     readonly enableHint: string | null;
   };
+  /**
+   * P15-PHANTOM-manifest-summary (VAULT-PHANTOM-MANIFEST-SUMMARY) — echo of the
+   * refresh-time roll-up of dangling-edge targets by phantom taxonomy bucket
+   * (`automation-critical`, `grant-only`, …), written into the manifest by
+   * `sfi refresh` (ADR-004 — COUNTS ONLY, never materialized as stub nodes).
+   * INFORMATIONAL: never changes `status`. `null` when the last refresh did not
+   * compute it — a vault built before the roll-up shipped, or a staged/mid-build
+   * manifest. REFRESH-REQUIRED: it populates on the next `sfi refresh`. Gives
+   * architects the org-wide phantom picture without an on-demand taxonomy sweep.
+   */
+  readonly phantomSummary: ExtendedVaultManifest['phantomSummary'] | null;
   /**
    * ENGINE-ARC §6 — runtime assignment data (User / PermissionSetAssignment /
    * GroupMember). INFORMATIONAL ONLY: assignment data is excluded from the
@@ -528,8 +543,13 @@ export const healthCheckHandler = async (
         enabled: vaultHistoryEnabled,
         enableHint: vaultHistoryEnabled
           ? null
-          : 'Run `sfi vault git enable` once for `sfi.component_history` / `sfi.component_as_of`.',
+          : "Run `sfi vault git enable` once to answer 'when did this change?' from local git history (`sfi.component_history` / `sfi.component_as_of`).",
       },
+      // VAULT-PHANTOM-MANIFEST-SUMMARY: echo the refresh-computed phantom
+      // taxonomy roll-up if the manifest carries one. Purely informational
+      // (never influences `status`); `null` on a manifest that predates the
+      // roll-up or a mid-build one — REFRESH-REQUIRED to populate.
+      phantomSummary: ctx.manifest.phantomSummary ?? null,
       ...(uncoveredReason !== undefined ? { reason: uncoveredReason } : {}),
     },
     vaultState: {

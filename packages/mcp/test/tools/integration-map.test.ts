@@ -293,6 +293,34 @@ describe('integrationMapHandler (full topology)', () => {
     expect(d.networkAccesses.map((n) => n.id)).toEqual([NA_OFFICE]);
   });
 
+  // GUARD (INTEGRATION-MAP-IGNORES-OBJECT-SCOPE): pre-fix an object scope was
+  // Zod-stripped, so Contact / Opportunity / bare all returned the SAME whole-org
+  // catalog. Post-fix the bare call succeeds with `appliedScope.mode: 'all'`, and
+  // ANY object / component scope key is refused (never silently answered).
+  it('bare call echoes org-wide appliedScope; an object scope is refused', async () => {
+    const bare = await integrationMapHandler(ctx, {});
+    expect(bare.ok).toBe(true);
+    if (!bare.ok) return;
+    expect(bare.value.data.appliedScope).toEqual({ object: null, mode: 'all' });
+
+    for (const scoped of [
+      { objectApiName: 'Contact' },
+      { objectApiName: 'Opportunity' },
+      { object: 'Contact' },
+      { objectId: 'CustomObject:Contact' },
+      { componentId: 'CustomObject:Contact' },
+    ]) {
+      const parsed = integrationMapInputSchema.safeParse(scoped);
+      expect(parsed.success).toBe(true);
+      if (!parsed.success) continue;
+      const r = await integrationMapHandler(ctx, parsed.data);
+      expect(r.ok).toBe(false);
+      if (r.ok) continue;
+      expect(r.error.kind).toBe('invalid-query');
+      expect(r.error.message).toMatch(/org-wide|find_code_usages|endpoint_catalog/);
+    }
+  });
+
   it('returns the cross-type references edges connecting integration nodes', async () => {
     const result = await integrationMapHandler(ctx, { filter: 'all' });
     expect(result.ok).toBe(true);
@@ -698,6 +726,13 @@ describe('integrationMapHandler (callout authorization + orphaned named credenti
 const PKG_MARKETING_CLOUD_CONNECT = 'InstalledPackage:et4ae5';
 const PKG_UNRELATED_ISV = 'InstalledPackage:hed';
 const NC_MARKETO_ENDPOINT = 'NamedCredential:Marketo_Prod_NC';
+// INTEGRATION-MAP-MARTECH-IGNORES-REMOTE-SITE-HOSTS witnesses: an Active Marketo
+// RemoteSiteSetting (the pre-NamedCredential callout pattern), an INACTIVE
+// Marketo RemoteSiteSetting (must not classify — dead metadata), and an Active
+// non-martech RemoteSiteSetting (negative control).
+const RSS_MARKETO_ACTIVE = 'RemoteSiteSetting:MarketoSoapAPI';
+const RSS_MARKETO_INACTIVE = 'RemoteSiteSetting:Marketo_Legacy_Off';
+const RSS_NONMARTECH_ACTIVE = 'RemoteSiteSetting:Internal_SF';
 
 const martechSeed: ExtractionResult = {
   nodes: [
@@ -720,6 +755,24 @@ const martechSeed: ExtractionResult = {
       type: 'NamedCredential',
       apiName: 'Marketo_Prod_NC',
       properties: { endpoint: 'https://example.mktorest.com' },
+    }),
+    makeNode({
+      id: RSS_MARKETO_ACTIVE,
+      type: 'RemoteSiteSetting',
+      apiName: 'MarketoSoapAPI',
+      properties: { url: 'https://example.mktoapi.com', isActive: true },
+    }),
+    makeNode({
+      id: RSS_MARKETO_INACTIVE,
+      type: 'RemoteSiteSetting',
+      apiName: 'Marketo_Legacy_Off',
+      properties: { url: 'https://legacy.mktorest.com', isActive: false },
+    }),
+    makeNode({
+      id: RSS_NONMARTECH_ACTIVE,
+      type: 'RemoteSiteSetting',
+      apiName: 'Internal_SF',
+      properties: { url: 'https://internal.my.salesforce.com', isActive: true },
     }),
   ],
   edges: [],
@@ -814,6 +867,55 @@ describe('integrationMapHandler (martech connectors — Finding #44)', () => {
     const ids = result.value.data.martechConnectors.map((m) => m.componentId);
     expect(ids).not.toContain(NC_MARKETO_ENDPOINT);
   });
+
+  // ===========================================================================
+  // INTEGRATION-MAP-MARTECH-IGNORES-REMOTE-SITE-HOSTS guards. Pre-fix these
+  // FAIL: the martech classifier matched only NamedCredential/ExternalDataSource
+  // URLs, so an Active Marketo `*.mktoapi.com` RemoteSiteSetting appeared under
+  // remoteSiteSettings but never as a martechConnector row.
+  // ===========================================================================
+
+  it('classifies an Active Marketo RemoteSiteSetting host as a martech connector', async () => {
+    const result = await integrationMapHandler(martechCtx, { filter: 'all' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const match = result.value.data.martechConnectors.find(
+      (m) => m.componentId === RSS_MARKETO_ACTIVE,
+    );
+    expect(match).toBeDefined();
+    expect(match?.componentType).toBe('RemoteSiteSetting');
+    expect(match?.productName).toBe('Marketo');
+    expect(match?.vendor).toBe('Adobe (Marketo Engage)');
+    expect(match?.source).toBe('remote-site-setting-endpoint');
+    expect(match?.confidence).toBe('heuristic');
+    expect(match?.matchedOn).toContain('mktoapi.com');
+  });
+
+  it('does NOT classify an INACTIVE Marketo RemoteSiteSetting', async () => {
+    const result = await integrationMapHandler(martechCtx, { filter: 'all' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.martechConnectors.map((m) => m.componentId);
+    expect(ids).not.toContain(RSS_MARKETO_INACTIVE);
+  });
+
+  it('does NOT classify an Active non-martech RemoteSiteSetting (negative control)', async () => {
+    const result = await integrationMapHandler(martechCtx, { filter: 'all' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.martechConnectors.map((m) => m.componentId);
+    expect(ids).not.toContain(RSS_NONMARTECH_ACTIVE);
+  });
+
+  it("classifies the RemoteSiteSetting host under filter='sites' (RemoteSiteSetting in scope)", async () => {
+    const result = await integrationMapHandler(martechCtx, { filter: 'sites' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.martechConnectors.map((m) => m.componentId);
+    expect(ids).toContain(RSS_MARKETO_ACTIVE);
+    // The NamedCredential match drops out (NC scoped out of 'sites').
+    expect(ids).not.toContain(NC_MARKETO_ENDPOINT);
+  });
 });
 
 describe('integrationMapInputSchema', () => {
@@ -849,5 +951,18 @@ describe('integrationMapInputSchema', () => {
 
   it('rejects a non-integer limit', () => {
     expect(integrationMapInputSchema.safeParse({ limit: 12.5 }).success).toBe(false);
+  });
+
+  // The object / component scope keys parse (so the handler can refuse them with
+  // a helpful message) rather than being silently stripped at the Zod boundary.
+  it('accepts object / component scope keys at the schema level (handler refuses them)', () => {
+    for (const scoped of [
+      { objectApiName: 'Contact' },
+      { object: 'Contact' },
+      { objectId: 'CustomObject:Contact' },
+      { componentId: 'CustomObject:Contact' },
+    ]) {
+      expect(integrationMapInputSchema.safeParse(scoped).success).toBe(true);
+    }
   });
 });

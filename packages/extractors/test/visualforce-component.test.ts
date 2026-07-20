@@ -138,6 +138,46 @@ describe('extractVisualforceComponent', () => {
     });
   });
 
+  describe('apexCallCount reflects apex bindings (VISUALFORCE-APEXCALLCOUNT-ZERO-WITH-CONTROLLER-EDGE)', () => {
+    it('counts a declared controller with no inline {!Class.method()} as apexCallCount >= 1', async () => {
+      const body = `<apex:component controller="SyntheticCompCtrl">
+  <p>Static content, no inline Class.method() call.</p>
+</apex:component>`;
+      const { dir, componentPath } = await writeTempVfComponent('CtrlOnly', body);
+      try {
+        const result = await extractVisualforceComponent(componentPath);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(
+          result.value.edges.some(
+            (e) => e.toId === 'ApexClass:SyntheticCompCtrl' && e.edgeType === 'references',
+          ),
+        ).toBe(true);
+        expect(
+          result.value.edges.some((e) => e.edgeType === 'callsApex'),
+        ).toBe(false);
+        expect(result.value.nodes[0]?.properties['apexCallCount']).toBe(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('counts distinct apex classes across controller, extensions, and inline calls', async () => {
+      const body = `<apex:component controller="CtrlA" extensions="ExtB,ExtC">
+  <p>{!CtrlA.getRecord()}</p>
+</apex:component>`;
+      const { dir, componentPath } = await writeTempVfComponent('Distinct', body);
+      try {
+        const result = await extractVisualforceComponent(componentPath);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.nodes[0]?.properties['apexCallCount']).toBe(3);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('scanner output integration', () => {
     it('emits heuristic readsFrom for {!Object.Field} merge tokens', async () => {
       const body = `<apex:component>

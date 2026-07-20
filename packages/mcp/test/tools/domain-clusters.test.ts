@@ -191,6 +191,119 @@ describe('domainClustersHandler (two disjoint components)', () => {
       expect(cluster.centerComponent.type).toBe('CustomObject');
     }
   });
+
+  // GUARD (DOMAIN-CLUSTERS-IGNORES-SEED): pre-fix a `seed` / `componentId` was
+  // Zod-stripped, so a seeded call was byte-identical to the bare org-wide dump
+  // (the seed absent from the payload). Post-fix a seed returns ONLY the cluster
+  // CONTAINING it (or an honest empty) + `appliedScope`, and differs from bare.
+  it('a seed returns only the cluster containing it + appliedScope (≠ bare dump)', async () => {
+    const bare = await domainClustersHandler(ctx, { minDensity: 0.1 });
+    expect(bare.ok).toBe(true);
+    if (!bare.ok) return;
+    expect(bare.value.data.clusters.length).toBe(2);
+    expect('appliedScope' in bare.value.data).toBe(false); // bare path byte-identical
+
+    // Canonical id and bare api name both resolve to the SUPPORT cluster.
+    for (const seedInput of [
+      { seedComponentId: SUPPORT_CASE },
+      { componentId: SUPPORT_CASE },
+      { seed: 'SupportCase' },
+    ]) {
+      const r = await domainClustersHandler(ctx, { minDensity: 0.1, ...seedInput });
+      expect(r.ok).toBe(true);
+      if (!r.ok) continue;
+      const d = r.value.data;
+      expect(d.appliedScope).toEqual({ seed: SUPPORT_CASE, mode: 'seeded' });
+      expect(d.clusters.length).toBe(1);
+      // The returned cluster CONTAINS the seed and is drawn from the Support tree.
+      const memberIds = new Set(d.clusters[0]?.members.map((m) => m.id));
+      expect(memberIds.has(SUPPORT_CASE)).toBe(true);
+      for (const id of memberIds) expect(SUPPORT_IDS.has(id as string)).toBe(true);
+    }
+  });
+
+  it('a seed for a component absent from any cluster returns an honest empty + note', async () => {
+    const r = await domainClustersHandler(ctx, {
+      minDensity: 0.1,
+      seedComponentId: 'CustomObject:NotInAnyDomain__c',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedScope).toEqual({
+      seed: 'CustomObject:NotInAnyDomain__c',
+      mode: 'seeded',
+    });
+    expect(r.value.data.clusters).toEqual([]);
+    expect(r.value.data.note).toBeDefined();
+  });
+
+  // GUARD (DOMAIN-CLUSTERS-IGNORES-OBJECTAPINAME): after the seed path was fixed,
+  // `objectApiName` was still Zod-stripped, so an object-scoped call was byte-
+  // identical to the bare org-wide dump. Post-fix `objectApiName` / `object` /
+  // `objectId` are honored as a SEED alias — resolved to a `CustomObject:` id and
+  // narrowed to the single cluster CONTAINING that object, with `appliedScope`.
+  it('objectApiName is honored as a seed alias (≡ seeded behavior, ≠ bare dump)', async () => {
+    const bare = await domainClustersHandler(ctx, { minDensity: 0.1 });
+    expect(bare.ok).toBe(true);
+    if (!bare.ok) return;
+    expect(bare.value.data.clusters.length).toBe(2);
+    expect('appliedScope' in bare.value.data).toBe(false); // bare path byte-identical
+
+    // The bare api name (matches the SupportCase CustomObject) and the canonical
+    // `CustomObject:` id both resolve to the SUPPORT cluster, exactly like a seed.
+    for (const scopeInput of [
+      { objectApiName: 'SupportCase' },
+      { object: 'SupportCase' },
+      { objectId: 'CustomObject:SupportCase' },
+    ]) {
+      const r = await domainClustersHandler(ctx, { minDensity: 0.1, ...scopeInput });
+      expect(r.ok).toBe(true);
+      if (!r.ok) continue;
+      const d = r.value.data;
+      expect(d.appliedScope).toEqual({ seed: SUPPORT_CASE, mode: 'seeded' });
+      expect(d.clusters.length).toBe(1);
+      const memberIds = new Set(d.clusters[0]?.members.map((m) => m.id));
+      expect(memberIds.has(SUPPORT_CASE)).toBe(true);
+      for (const id of memberIds) expect(SUPPORT_IDS.has(id as string)).toBe(true);
+    }
+  });
+
+  it('an objectApiName that resolves to no vault object returns an honest empty + note (never a silent org-wide dump)', async () => {
+    const r = await domainClustersHandler(ctx, {
+      minDensity: 0.1,
+      objectApiName: 'NotAnObject__c',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedScope).toEqual({
+      seed: 'CustomObject:NotAnObject__c',
+      mode: 'seeded',
+    });
+    expect(r.value.data.clusters).toEqual([]);
+    expect(r.value.data.note).toBeDefined();
+  });
+
+  it('refuses an objectApiName that conflicts with a seed (never a silent pick)', async () => {
+    const r = await domainClustersHandler(ctx, {
+      minDensity: 0.1,
+      objectApiName: 'SupportCase',
+      seed: 'SalesAccount',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('refuses two disagreeing object aliases (never a silent pick)', async () => {
+    const r = await domainClustersHandler(ctx, {
+      minDensity: 0.1,
+      objectApiName: 'SupportCase',
+      object: 'SalesAccount',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
 });
 
 describe('domainClustersHandler (dense connected single component)', () => {
@@ -385,6 +498,28 @@ describe('domainClustersInputSchema', () => {
 
   it('rejects a non-integer limit', () => {
     expect(domainClustersInputSchema.safeParse({ limit: 2.5 }).success).toBe(false);
+  });
+
+  it('accepts the seed selectors (componentId / seedComponentId / seed)', () => {
+    expect(
+      domainClustersInputSchema.safeParse({ componentId: 'CustomObject:Account' })
+        .success,
+    ).toBe(true);
+    expect(
+      domainClustersInputSchema.safeParse({ seedComponentId: 'CustomObject:Account' })
+        .success,
+    ).toBe(true);
+    expect(domainClustersInputSchema.safeParse({ seed: 'Account' }).success).toBe(true);
+  });
+
+  it('accepts the object-scope selectors (objectApiName / object / objectId)', () => {
+    expect(
+      domainClustersInputSchema.safeParse({ objectApiName: 'Account' }).success,
+    ).toBe(true);
+    expect(domainClustersInputSchema.safeParse({ object: 'Account' }).success).toBe(true);
+    expect(
+      domainClustersInputSchema.safeParse({ objectId: 'CustomObject:Account' }).success,
+    ).toBe(true);
   });
 });
 

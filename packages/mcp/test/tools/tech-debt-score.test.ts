@@ -666,6 +666,33 @@ describe('techDebtScoreHandler — unknown weight key refusal', () => {
     if (!r.ok) return;
     expect(r.value.data.weightingDisclosure.weightsApplied.deadWeight).toBe(0.5);
   });
+
+  // GUARD (TECH-DEBT-SCORE-IGNORES-OBJECT-SCOPE): pre-fix an object scope was
+  // Zod-stripped, so `{ objectApiName: X }` was byte-identical to `{}`. Post-fix
+  // the bare call echoes `appliedScope.mode: 'all'` and any object/component
+  // scope is refused (never silently answered fleet-wide).
+  it('bare call echoes org-wide appliedScope; an object scope is refused', async () => {
+    const bare = await techDebtScoreHandler(ctx, {});
+    expect(bare.ok).toBe(true);
+    if (!bare.ok) return;
+    expect(bare.value.data.appliedScope).toEqual({ object: null, mode: 'all' });
+
+    for (const scoped of [
+      { objectApiName: 'Account' },
+      { object: 'Opportunity' },
+      { objectId: 'CustomObject:Account' },
+      { componentId: 'CustomObject:Account' },
+    ]) {
+      const parsed = techDebtScoreInputSchema.safeParse(scoped);
+      expect(parsed.success).toBe(true);
+      if (!parsed.success) continue;
+      const r = await techDebtScoreHandler(ctx, parsed.data);
+      expect(r.ok).toBe(false);
+      if (r.ok) continue;
+      expect(r.error.kind).toBe('invalid-query');
+      expect(r.error.message).toMatch(/org-wide|per-object/i);
+    }
+  });
 });
 
 describe('techDebtScoreInputSchema', () => {
@@ -703,6 +730,19 @@ describe('techDebtScoreInputSchema', () => {
         weights: { legacyAutomation: 0.4 },
       }).success,
     ).toBe(true);
+  });
+
+  // The object / component scope keys parse (so the handler can refuse them with
+  // a helpful message) rather than being silently stripped at the Zod boundary.
+  it('accepts object / component scope keys at the schema level (handler refuses them)', () => {
+    for (const scoped of [
+      { objectApiName: 'Account' },
+      { object: 'Account' },
+      { objectId: 'CustomObject:Account' },
+      { componentId: 'CustomObject:Account' },
+    ]) {
+      expect(techDebtScoreInputSchema.safeParse(scoped).success).toBe(true);
+    }
   });
 });
 

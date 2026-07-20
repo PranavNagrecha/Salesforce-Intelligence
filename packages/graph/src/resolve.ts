@@ -226,6 +226,96 @@ const queryNamesComponentType = (q: string): ComponentType | null => {
 };
 
 /**
+ * OmniStudio family vocabulary. A query word/phrase naming one of these
+ * families ("omniscript", "integration procedure", "flexcard", "dataraptor")
+ * is a TYPE-CONSTRAINING signal, not name content: "omniscript application"
+ * means an OmniStudio component, not the `Application__c` object. When the
+ * named family is UNCOVERED in the vault (0 nodes of the type), the family
+ * word anchors to nothing in the corpus, drops below `STRONG_ANCHOR`, and is
+ * silently excluded from the coverage denominator — letting the remaining noun
+ * ("application") reach `base` 1.0 and produce a FALSE `exact` on an unrelated
+ * object/field (RESOLVE-OMNISCRIPT-TOKEN-DROPPED-FALSE-EXACT). Matched on the
+ * RAW query so multi-word forms ("integration procedure", "flex card") are
+ * caught before tokenization splits them. Each surface form maps to the
+ * ComponentType(s) it constrains.
+ */
+const OMNI_FAMILY_VOCAB: ReadonlyArray<{
+  readonly pattern: RegExp;
+  readonly types: readonly ComponentType[];
+}> = [
+  { pattern: /\bomni\s?scripts?\b/, types: ['OmniScript'] },
+  { pattern: /\bintegration\s+procedures?\b/, types: ['OmniIntegrationProcedure'] },
+  { pattern: /\bflex\s?cards?\b/, types: ['OmniUiCard'] },
+  { pattern: /\bomni\s?ui\s?cards?\b/, types: ['OmniUiCard'] },
+  { pattern: /\bdata\s?raptors?\b/, types: ['OmniDataTransform'] },
+  { pattern: /\bomni\s?data\s?transforms?\b/, types: ['OmniDataTransform'] },
+];
+
+/** The OmniStudio family ComponentTypes a raw query names (empty if none). */
+const queryNamesOmniFamilies = (raw: string): ReadonlySet<ComponentType> => {
+  const lower = raw.toLowerCase();
+  const out = new Set<ComponentType>();
+  for (const { pattern, types } of OMNI_FAMILY_VOCAB) {
+    if (pattern.test(lower)) for (const t of types) out.add(t);
+  }
+  return out;
+};
+
+/**
+ * Metadata TYPE-NAME vocabulary (RESOLVE-NETWORK-TOKEN-MISBINDS-CMDT). A bare
+ * query word that IS the name of a component TYPE — "network" is the Experience
+ * Cloud `Network` (community) type — is a TYPE signal, not schema-name content.
+ * A merely SAME-NAMED schema component (a CustomMetadataType `Network_*__mdt`, a
+ * field, or a layout) must not silently win a confident `exact` when real
+ * components of the named type exist in the vault; the host would be routed to
+ * the wrong family with no way back. Mirrors {@link OMNI_FAMILY_VOCAB}: a
+ * CURATED map (not every ComponentType) covering the genuinely confusable
+ * platform-type-vs-schema-name collisions, keyed on the type's own name — so it
+ * is org-INDEPENDENT (no org-specific component names baked in). The guard that
+ * consumes it (below) only demotes a false `exact`; it never fabricates a pick.
+ */
+const TYPE_NAME_VOCAB: ReadonlyArray<{
+  readonly pattern: RegExp;
+  readonly types: readonly ComponentType[];
+}> = [{ pattern: /\bnetworks?\b/, types: ['Network'] }];
+
+/** The metadata-type-name ComponentTypes a raw query names (empty if none). */
+const queryNamesTypeVocab = (raw: string): ReadonlySet<ComponentType> => {
+  const lower = raw.toLowerCase();
+  const out = new Set<ComponentType>();
+  for (const { pattern, types } of TYPE_NAME_VOCAB) {
+    if (pattern.test(lower)) for (const t of types) out.add(t);
+  }
+  return out;
+};
+
+/**
+ * RESOLVE-NETWORK-TOKEN-MISBINDS-CMDT (recall half). Max named-type members to
+ * surface when the query names a metadata TYPE ({@link TYPE_NAME_VOCAB}) whose
+ * real components are named after their subject (e.g. an Experience Cloud
+ * `Network` named after the community — no "network" token), so the token
+ * prefilter never gathered them. A small cap: enough to reach the family,
+ * bounded so a large type can't flood the candidate list.
+ */
+const TYPE_VOCAB_INJECT_CAP = 5;
+
+/**
+ * RESOLVE-STUDENT-APPLICATION-DROPS-OBJECT (rescue tiebreak). When a business
+ * phrase names an object and MULTIPLE same-named objects are directly named
+ * (e.g. "application" → both `Application__c` and the platform event
+ * `Application_Event__e`), the object rescue must prefer the record-bearing
+ * business object. Synthetic non-record variants — platform events (`__e`),
+ * change events, big objects (`__b`), external objects (`__x`), CMDT (`__mdt`),
+ * and the standard `__Share`/`__History`/`__Feed` sidecar objects — that merely
+ * share the noun are de-prioritized so a look-alike occupying a slot never masks
+ * the base object. Keyed on Salesforce platform SUFFIX conventions, not org
+ * names, so it stays org-independent. Rank 0 = record object; 1 = synthetic.
+ */
+const OBJECT_RESCUE_DEPRIORITIZE = /(?:__(?:e|b|x|mdt)|ChangeEvent|__Share|__History|__Feed)$/i;
+const objectRescueRank = (apiName: string): number =>
+  OBJECT_RESCUE_DEPRIORITIZE.test(apiName) ? 1 : 0;
+
+/**
  * Schema nouns a user attaches to a name as a TYPE hint, not name content —
  * "SSN field", "the payment object", "Contact trigger". Left in the token
  * stream they fuzzy-match unrelated corpus tokens ("object"≈"project") and
@@ -424,6 +514,11 @@ export const resolveComponents = async (
   // query still drives the whole-name exact pass and the type-intent ranking.
   const strippedQuery = stripTypeHintNouns(query);
   const queryTokens = tokenizeText(strippedQuery, { expandPhrases: true });
+  // OmniStudio family vocabulary the query names ("omniscript", "flexcard",
+  // "integration procedure", …). A type-constraining signal that must not let
+  // the remaining noun produce a false `exact` on an off-family component (see
+  // the disposition guard below — RESOLVE-OMNISCRIPT-TOKEN-DROPPED-FALSE-EXACT).
+  const queryOmniFamilies = queryNamesOmniFamilies(query);
   // Whole-query comparison key for the exact/prefix boost (see the per-node loop).
   const normQuery = normalizeName(query);
   // Bug 3 — exact api-name match wins over a superset/substring rival.
@@ -455,6 +550,26 @@ export const resolveComponents = async (
     const n = normalizeName(afterColon);
     return n.length >= 2 ? n : normQuery;
   })();
+  // A CONFIRMED multi-word business phrase ("social security number" -> `ssn`,
+  // "date of birth" -> `dob`) is collapsed to its canonical Salesforce token by
+  // the expandPhrases pass that built `queryTokens`. The ABBREVIATION form
+  // ("SSN") whole-name-matches a field named `SSN__c` (normQuery === normName)
+  // and resolves `exact`; the PHRASE form's normQuery ("socialsecuritynumber")
+  // does not, so the synonym hit only ever reached TOKEN scoring and — tied by
+  // sibling fields sharing the `ssn` token — fell to `ambiguous`. Feed the
+  // expanded form into the whole-name exact pass so a UNIQUE synonym target
+  // resolves `exact` like the abbreviation. Gated to the case where phrase
+  // expansion ACTUALLY changed the tokens (vs the no-expand tokenization) — a
+  // no-op for every non-phrase query, so no existing calibration shifts.
+  const unexpandedTokens = tokenizeText(strippedQuery);
+  const phraseExpanded =
+    queryTokens.length > 0 &&
+    (unexpandedTokens.length !== queryTokens.length ||
+      unexpandedTokens.some((t, i) => t !== queryTokens[i]));
+  const normPhraseExpanded = phraseExpanded
+    ? normalizeName(queryTokens.join(' '))
+    : normQuery;
+
   // Space-delimited words of the raw query, each normalized. Used to detect
   // when the query names an OBJECT as its own word (see `namedObjectWords`
   // once the index loads): "Contact Email" names the object Contact, so a field
@@ -537,6 +652,19 @@ export const resolveComponents = async (
   }
   if (normAfterTypePrefix !== normQuery && normAfterTypePrefix !== normStrippedQuery) {
     const extra = index.byNormName.get(normAfterTypePrefix);
+    if (extra !== undefined) for (const i of extra) candidateIdxSet.add(i);
+  }
+  // A confirmed phrase-synonym target (`SSN__c` for "social security number")
+  // is reached by its `ssn` token bucket already, but add the byNormName lookup
+  // for parity with the other norm keys so the whole-name-exact node is never
+  // missed from scoring.
+  if (
+    phraseExpanded &&
+    normPhraseExpanded !== normQuery &&
+    normPhraseExpanded !== normStrippedQuery &&
+    normPhraseExpanded !== normAfterTypePrefix
+  ) {
+    const extra = index.byNormName.get(normPhraseExpanded);
     if (extra !== undefined) for (const i of extra) candidateIdxSet.add(i);
   }
   const candidateIdx = [...candidateIdxSet];
@@ -682,7 +810,13 @@ export const resolveComponents = async (
         node.normName === normStrippedQuery) ||
       (normAfterTypePrefix !== normQuery &&
         normAfterTypePrefix.length >= 2 &&
-        node.normName === normAfterTypePrefix);
+        node.normName === normAfterTypePrefix) ||
+      // Confirmed phrase-synonym whole-name match ("social security number" ->
+      // `ssn` == `SSN__c`.normName). Only when phrase expansion actually fired.
+      (phraseExpanded &&
+        normPhraseExpanded !== normQuery &&
+        normPhraseExpanded.length >= 2 &&
+        node.normName === normPhraseExpanded);
     const wholeExact =
       dottedExact ||
       (wholeExactNormMatch &&
@@ -716,6 +850,22 @@ export const resolveComponents = async (
   // so "the field on the stated object" wins over a same-tier field whose name
   // merely contains the object token, regardless of which is more popular.
   const parentMatchedIds = new Set<string>();
+  // RESOLVE-STUDENT-APPLICATION-DROPS-OBJECT: ids of CustomObjects the multi-token
+  // phrase DIRECTLY NAMES — an ANCHOR query token exactly equals one of the
+  // object's OWN name tokens ("student application" names the Application object
+  // via `application`). Such an object is a legitimate resolution target that a
+  // flood of its own qualifier fields (which borrow the object's name via
+  // parent-credit to reach full coverage) can otherwise slice out of the
+  // candidate set entirely, leaving a fields-only result. Consulted post-slice
+  // to guarantee the object a slot (see the inclusion pass before return).
+  const directlyNamedObjectIds = new Set<string>();
+  // Per-object name-CENTRALITY (id -> fraction of the object's own name tokens
+  // an anchor query token exactly names). Ranks WHICH directly-named object the
+  // rescue surfaces, so the object the phrase most centrally names wins over an
+  // incidental same-noun look-alike (`hed__Application__c` 0.5 over
+  // `Ns__Application_Template_Item__c` 0.25) rather than whichever fluked a
+  // higher fuzzy score into the top-N.
+  const directlyNamedObjectCentrality = new Map<string, number>();
 
   // Generic-type-word suppression: when the query is a bare singular type word
   // (Profile, Permission Set, Record Type, etc.), suppress candidates whose
@@ -771,7 +921,27 @@ export const resolveComponents = async (
     const coverage = anchorCount > 0 ? matchedAnchors / anchorCount : 1;
     let base = meanMatched * Math.pow(coverage, COVERAGE_EXP);
     if (c.wholeExact) base = 1;
-    if (base < minBase) continue;
+
+    // RESOLVE-STUDENT-APPLICATION-DROPS-OBJECT — is this a CustomObject the
+    // multi-token phrase DIRECTLY NAMES (an ANCHOR query token exactly equals
+    // one of the object's OWN name tokens, e.g. "student application" names the
+    // Application object via `application`)? Such an object is a legitimate
+    // resolution target even though it cannot contain the phrase's QUALIFIER
+    // token ("student") in its own name — so its anchor coverage (and thus
+    // `base`) is penalized below the qualifier FIELDS, which borrow the object's
+    // name via parent-credit to cover BOTH tokens and reach `base` 1.0. Detected
+    // HERE, before the min-base drop, so a long qualifier phrase can never evict
+    // the object from `scored` entirely (leaving nothing to surface). Reused
+    // below to flag the object and to score its name-centrality for the rescue.
+    const nodeTokenSet = new Set(c.node.tokens);
+    const isDirectlyNamedObject =
+      c.node.type === 'CustomObject' &&
+      queryTokens.length >= 2 &&
+      anchorIdx.some((i) => nodeTokenSet.has(queryTokens[i]!));
+
+    // Keep a directly-named object in `scored` even below min-base: it is the
+    // subject the phrase names, and the tail-inclusion pass reserves it a slot.
+    if (base < minBase && !isDirectlyNamedObject) continue;
 
     const type = c.node.type as ComponentType;
     const refs = c.node.inbound;
@@ -798,7 +968,6 @@ export const resolveComponents = async (
     // whole-name exact match covers the whole name (coverage 1). Parent-credit
     // matches land on the PARENT's tokens, not this node's, so they are
     // excluded here — coverage measures how much of the node's OWN name matched.
-    const nodeTokenSet = new Set(c.node.tokens);
     const matchedNodeTokens = new Set(
       matched.map((m) => m.matchedToken).filter((t) => nodeTokenSet.has(t)),
     );
@@ -808,6 +977,24 @@ export const resolveComponents = async (
     coverageById.set(c.node.id, nameCoverage);
     if (c.wholeExact) wholeExactIds.add(c.node.id);
     if (c.parentMatched) parentMatchedIds.add(c.node.id);
+    // RESOLVE-STUDENT-APPLICATION-DROPS-OBJECT: record the CustomObject the
+    // phrase DIRECTLY NAMES plus its object-name CENTRALITY — the fraction of
+    // the object's OWN name tokens an anchor query token exactly names. The noun
+    // `application` names 1 of the 2 tokens of `hed__Application__c` (0.5) but
+    // only 1 of the 4 of `Ns__Application_Template_Item__c` (0.25), so the
+    // record object the phrase most centrally names outranks an incidental
+    // same-noun look-alike whose name is mostly OTHER words. Exact-token (not
+    // fuzzy) so a stray `student`≈`template` graze can't inflate a look-alike's
+    // centrality. (A single-token query already surfaces the object; parent-
+    // credit fields never qualify — their type is not CustomObject.)
+    if (isDirectlyNamedObject) {
+      directlyNamedObjectIds.add(c.node.id);
+      const named = anchorIdx.filter((i) => nodeTokenSet.has(queryTokens[i]!)).length;
+      directlyNamedObjectCentrality.set(
+        c.node.id,
+        c.node.tokens.length > 0 ? named / c.node.tokens.length : 0,
+      );
+    }
 
     scored.push({
       id: c.node.id as ComponentId,
@@ -952,5 +1139,138 @@ export const resolveComponents = async (
         : 'ambiguous';
   }
 
-  return ok({ disposition, candidates, queryTokens });
+  // RESOLVE-OMNISCRIPT-TOKEN-DROPPED-FALSE-EXACT: the query named an OmniStudio
+  // family ("omniscript application", "flexcard …") — a TYPE-CONSTRAINING word.
+  // When the family is uncovered in the vault, that word anchors to nothing,
+  // is silently dropped from the coverage denominator, and the remaining noun
+  // ("application") reaches `base` 1.0 to fake an `exact` on an unrelated
+  // object/field. A confident `exact` for such a query therefore REQUIRES the
+  // top match to actually be of the named family (the query's own type
+  // constraint) — otherwise the family word was ignored and the answer is not
+  // confident. Demote to `ambiguous` so the host disambiguates (and the resolve
+  // tool can attach its Omni coverage caveat) instead of being sent into
+  // object/save tools with a wrong id. A literal whole-name-exact hit (the user
+  // typed a real component's exact name) is exempt.
+  if (
+    disposition === 'exact' &&
+    queryOmniFamilies.size > 0 &&
+    top !== undefined &&
+    !wholeExactIds.has(top.id) &&
+    !queryOmniFamilies.has(top.type)
+  ) {
+    disposition = 'ambiguous';
+  }
+
+  // RESOLVE-NETWORK-TOKEN-MISBINDS-CMDT: the query names a metadata TYPE ("network"
+  // → the Experience Cloud `Network`/community type) whose real components exist
+  // in the vault, but the confident `exact` landed on a DIFFERENT, merely
+  // same-named family — e.g. a `Network_*__mdt` CustomMetadataType for a bare
+  // "Network". Silently binding the schema look-alike routes the host to the
+  // wrong component family with no way back; demote to `ambiguous` so both the
+  // named type's components and the look-alike surface for disambiguation.
+  // Gated on the named type actually HAVING members (an org with no such family
+  // legitimately keeps its exact). A literal whole-name-exact hit (the user typed
+  // a real component's exact name) and a top that IS of the named type are exempt.
+  if (disposition === 'exact' && top !== undefined && !wholeExactIds.has(top.id)) {
+    const queryTypeVocab = queryNamesTypeVocab(query);
+    if (
+      queryTypeVocab.size > 0 &&
+      !queryTypeVocab.has(top.type) &&
+      index.nodes.some((n) => queryTypeVocab.has(n.type as ComponentType))
+    ) {
+      disposition = 'ambiguous';
+    }
+  }
+
+  // RESOLVE-STUDENT-APPLICATION-DROPS-OBJECT: a business phrase that NAMES an
+  // object ("student application" → the Application object, qualified by
+  // "student") ranks the object's qualifier FIELDS above the object itself
+  // (they borrow the object's name via parent-credit to reach full coverage,
+  // while the object's partial coverage sinks it below the `limit` cut) — a
+  // fields-only result the host cannot turn into an object-level answer
+  // (what_happens_on_save) without inventing the api name. When such a directly
+  // named object was sliced out while its own fields survived, guarantee it a
+  // slot in the tail so the candidate set is never object-omitted. Runs AFTER
+  // disposition + slicing and only when NOT `exact`, so it never changes the
+  // verdict, the top candidate, or any surviving candidate's rank — it only
+  // rescues an omitted object. General: keyed on structure, not org names.
+  let finalCandidates: readonly ResolveCandidate[] = candidates;
+  if (
+    disposition !== 'exact' &&
+    limit > 1 &&
+    directlyNamedObjectIds.size > 0 &&
+    candidates.length >= limit
+  ) {
+    // Pick WHICH directly-named object to surface. `scored` is already
+    // rank-ordered, and a STABLE sort keeps that order within each tie band:
+    //   1. record-bearing object before an event/CDC/CMDT/sidecar look-alike
+    //      that merely shares the noun (`Application_Event__e` for "application");
+    //   2. object-name CENTRALITY — the object whose OWN name the phrase most
+    //      fully names (`hed__Application__c` 0.5 over the incidental
+    //      `Ns__Application_Template_Item__c` 0.25). This is the fix's crux: the
+    //      base score buries the record object below its own qualifier fields AND
+    //      below a same-noun look-alike that fluked a fuzzy graze into the top-N,
+    //      so a score-only pick rescued the WRONG object (and, finding it already
+    //      present, did nothing). Centrality restores the object the phrase names.
+    //   3. within a tie, the score-ranked `scored` order (popularity/type-weight)
+    //      breaks it deterministically (stable sort, comparator returns 0).
+    const directlyNamed = scored.filter((c) => directlyNamedObjectIds.has(c.id));
+    const preferred = [...directlyNamed].sort((a, b) => {
+      const r = objectRescueRank(a.apiName) - objectRescueRank(b.apiName);
+      if (r !== 0) return r;
+      const cvA = directlyNamedObjectCentrality.get(a.id) ?? 0;
+      const cvB = directlyNamedObjectCentrality.get(b.id) ?? 0;
+      if (cvA !== cvB) return cvB - cvA;
+      return 0;
+    })[0];
+    if (preferred !== undefined && !candidates.some((c) => c.id === preferred.id)) {
+      finalCandidates = [...candidates.slice(0, limit - 1), preferred];
+    }
+  }
+
+  // RESOLVE-NETWORK-TOKEN-MISBINDS-CMDT (recall half): the query names a metadata
+  // TYPE ("network" → the Experience Cloud `Network`/community type) whose real
+  // components are named after the community, so their names carry no "network"
+  // token, the prefilter never gathered them, and the demotion above had nothing
+  // of the named type to offer — leaving a same-named CMDT as the only candidate.
+  // Surface the named type's members (capped, id-sorted for determinism) so the
+  // host reaches the right family. Gated exactly like the demotion: the query
+  // names such a type, real members exist, NONE are already present, and the top
+  // is NOT the user's literal whole-name-exact hit. Appended at the tail (they
+  // matched by type name, not string similarity) and never left `exact` on the
+  // wrong family.
+  const queryTypeVocab = queryNamesTypeVocab(query);
+  if (
+    queryTypeVocab.size > 0 &&
+    (top === undefined || !wholeExactIds.has(top.id)) &&
+    !finalCandidates.some((c) => queryTypeVocab.has(c.type))
+  ) {
+    const members = index.nodes
+      .filter((n) => queryTypeVocab.has(n.type as ComponentType))
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .slice(0, TYPE_VOCAB_INJECT_CAP);
+    if (members.length > 0) {
+      const typeLabel = [...queryTypeVocab].join('/');
+      const injected: ResolveCandidate[] = members.map((n) => ({
+        id: n.id as ComponentId,
+        type: n.type as ComponentType,
+        apiName: n.apiName,
+        label: n.label,
+        parentApiName: n.parentApiName,
+        score: 0,
+        base: 0,
+        nameCoverage: 0,
+        matchKind: 'fuzzy',
+        evidence: `names the "${typeLabel}" metadata type (surfaced by type name, not a string match)`,
+      }));
+      const room = Math.max(0, limit - injected.length);
+      finalCandidates = [...finalCandidates.slice(0, room), ...injected];
+      // A confident single hit on the WRONG family is not confident once the
+      // named type's own members are in play; an honest disambiguation between
+      // the look-alike and the real family is `ambiguous`, never `exact`/`none`.
+      disposition = 'ambiguous';
+    }
+  }
+
+  return ok({ disposition, candidates: finalCandidates, queryTokens });
 };

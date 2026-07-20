@@ -19,8 +19,10 @@ import {
   liveCountHandler,
   liveDescribeHandler,
   liveEmailTemplateUsageHandler,
+  liveEmailTemplateUsageInputSchema,
   liveFieldPopulationHandler,
   liveFolderAccessHandler,
+  liveFolderAccessInputSchema,
   liveAggregateHandler,
   liveDuplicateCheckHandler,
   liveFieldHistoryHandler,
@@ -35,6 +37,7 @@ import {
   liveScheduledJobsHandler,
   liveRecentActivityHandler,
   liveReportUsageHandler,
+  liveReportUsageInputSchema,
   liveSampleHandler,
   liveSecurityExposureHandler,
   liveSetupAuditTrailHandler,
@@ -1354,6 +1357,76 @@ describe('liveReportUsageHandler', () => {
     expect(r.error.message).toContain('consent');
     expect(queried).toBe(false); // gate blocked it before any org call
   });
+
+  // LIVE-REPORT-AND-FOLDER-USAGE-NO-NAME-SCOPE — name/folder scope must reach
+  // the SOQL WHERE (total + stale-count + detail) and be echoed as appliedScope.
+  describe('name/folder scope', () => {
+    const capturingExec = (): { exec: ExecCommand; queries: string[] } => {
+      const queries: string[] = [];
+      const exec: ExecCommand = async (_b, args) => {
+        const soql = soqlOf(args);
+        queries.push(soql);
+        if (/count\(\)/i.test(soql)) return { stdout: JSON.stringify({ result: { totalSize: 1 } }), stderr: '' };
+        return { stdout: JSON.stringify({ result: { records: [
+          { Id: '00O9', Name: 'Widget Report', FolderName: 'Reports_Folder', Format: 'Summary', LastRunDate: null },
+        ] } }), stderr: '' };
+      };
+      return { exec, queries };
+    };
+
+    it('applies nameContains to the total, stale, AND detail queries and echoes appliedScope', async () => {
+      const { exec: cap, queries } = capturingExec();
+      const r = await liveReportUsageHandler(ctx, { liveEnabled: true, nameContains: 'Widget' }, cap);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      // Every query carries the name scope — none is the org-wide dump.
+      expect(queries.length).toBeGreaterThanOrEqual(3);
+      expect(queries.every((q) => /Name LIKE '%Widget%'/.test(q))).toBe(true);
+      // The stale count is "stale AND in scope", not "stale OR in scope".
+      const stale = queries.find((q) => /LastRunDate <|LastRunDate = null/.test(q) && /count\(\)/i.test(q));
+      expect(stale).toMatch(/\(LastRunDate <[^)]*OR LastRunDate = null\) AND Name LIKE '%Widget%'/);
+      expect(r.value.data.appliedScope.nameContains).toBe('Widget');
+      expect(r.value.data.appliedScope.folderName).toBeNull();
+      expect(r.value.data.rendered).toContain('Widget');
+    });
+
+    it('applies folderName as an exact-match WHERE clause', async () => {
+      const { exec: cap, queries } = capturingExec();
+      const r = await liveReportUsageHandler(ctx, { liveEnabled: true, folderName: 'Reports_Folder' }, cap);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const detail = queries.find((q) => /select\s+id/i.test(q));
+      expect(detail).toMatch(/FolderName = 'Reports_Folder'/);
+      expect(r.value.data.appliedScope.folderName).toBe('Reports_Folder');
+    });
+
+    it('escapes single quotes in the filter value (SOQL-injection safe)', async () => {
+      const { exec: cap, queries } = capturingExec();
+      const r = await liveReportUsageHandler(ctx, { liveEnabled: true, nameContains: "O'Brien" }, cap);
+      expect(r.ok).toBe(true);
+      const detail = queries.find((q) => /select\s+id/i.test(q));
+      expect(detail).toContain("Name LIKE '%O\\'Brien%'");
+    });
+
+    it('emits no scope WHERE and a null appliedScope when unscoped (unchanged default)', async () => {
+      const { exec: cap, queries } = capturingExec();
+      const r = await liveReportUsageHandler(ctx, { liveEnabled: true }, cap);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      // The total COUNT has no WHERE at all; no query carries a name/folder scope.
+      expect(queries.some((q) => /count\(\)\s*from\s+report\s*$/i.test(q.trim()))).toBe(true);
+      expect(queries.every((q) => !/Name LIKE|FolderName =/.test(q))).toBe(true);
+      expect(r.value.data.appliedScope.nameContains).toBeNull();
+      expect(r.value.data.appliedScope.folderName).toBeNull();
+    });
+
+    it('rejects an unknown filter key (e.g. `query`) with a strict parse error', () => {
+      expect(liveReportUsageInputSchema.safeParse({ liveEnabled: true, query: 'Widget' }).success).toBe(false);
+      expect(
+        liveReportUsageInputSchema.safeParse({ liveEnabled: true, nameContains: 'Widget', folderName: 'Reports_Folder' }).success,
+      ).toBe(true);
+    });
+  });
 });
 
 describe('liveFolderAccessHandler', () => {
@@ -1388,6 +1461,63 @@ describe('liveFolderAccessHandler', () => {
     expect(r.value.data.rendered.toLowerCase()).toContain('budget');
     // publicFolders comes from the gated detail rows — still correct, not zeroed.
     expect(r.value.data.publicFolders).toBe(1);
+  });
+
+  // LIVE-REPORT-AND-FOLDER-USAGE-NO-NAME-SCOPE — name scope must reach BOTH the
+  // detail and count queries and be echoed as appliedScope.
+  describe('name scope', () => {
+    const capturingExec = (): { exec: ExecCommand; queries: string[] } => {
+      const queries: string[] = [];
+      const exec: ExecCommand = async (_b, args) => {
+        const soql = soqlOf(args);
+        queries.push(soql);
+        if (/count\(\)/i.test(soql)) return { stdout: JSON.stringify({ result: { totalSize: 1 } }), stderr: '' };
+        return { stdout: JSON.stringify({ result: { records: [
+          { Name: 'Widget Folder', DeveloperName: 'Widget_Folder', Type: 'Report', AccessType: 'Hidden' },
+        ] } }), stderr: '' };
+      };
+      return { exec, queries };
+    };
+
+    it('applies nameContains to BOTH the detail and count queries and echoes appliedScope', async () => {
+      const { exec: cap, queries } = capturingExec();
+      const r = await liveFolderAccessHandler(ctx, { liveEnabled: true, nameContains: 'Widget' }, cap);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const detail = queries.find((q) => /select\s+name/i.test(q));
+      const count = queries.find((q) => /count\(\)/i.test(q));
+      expect(detail).toMatch(/Name LIKE '%Widget%'/);
+      expect(count).toMatch(/Name LIKE '%Widget%'/);
+      expect(r.value.data.appliedScope.nameContains).toBe('Widget');
+      expect(r.value.data.rendered).toContain('Widget');
+    });
+
+    it('escapes single quotes in the filter value (SOQL-injection safe)', async () => {
+      const { exec: cap, queries } = capturingExec();
+      const r = await liveFolderAccessHandler(ctx, { liveEnabled: true, nameContains: "O'Brien" }, cap);
+      expect(r.ok).toBe(true);
+      const detail = queries.find((q) => /select\s+name/i.test(q));
+      expect(detail).toContain("Name LIKE '%O\\'Brien%'");
+    });
+
+    it('emits no name scope and a null appliedScope.nameContains when unscoped (unchanged default)', async () => {
+      const { exec: cap, queries } = capturingExec();
+      const r = await liveFolderAccessHandler(ctx, { liveEnabled: true }, cap);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(queries.every((q) => !/Name LIKE/.test(q))).toBe(true);
+      expect(r.value.data.appliedScope.nameContains).toBeNull();
+      expect(r.value.data.appliedScope.folderType).toBe('all');
+    });
+
+    it('rejects an unknown filter key (e.g. `folderNameContains`) with a strict parse error', () => {
+      expect(
+        liveFolderAccessInputSchema.safeParse({ liveEnabled: true, folderNameContains: 'Widget' }).success,
+      ).toBe(false);
+      expect(
+        liveFolderAccessInputSchema.safeParse({ liveEnabled: true, nameContains: 'Widget', folderType: 'Report' }).success,
+      ).toBe(true);
+    });
   });
 });
 
@@ -1428,6 +1558,98 @@ describe('liveEmailTemplateUsageHandler', () => {
     // classic/migration verdicts come from the gated detail rows — still correct.
     expect(r.value.data.classicTemplates).toBe(2);
     expect(r.value.data.migrationCandidates).toBe(2);
+  });
+
+  // LIVE-EMAIL-TEMPLATE-USAGE-NO-NAME-SCOPE — name/folder scope must reach the
+  // SOQL WHERE (both detail + count) and be echoed as appliedScope.
+  describe('name/folder scope', () => {
+    /** Captures every SOQL query the handler issues so we can assert the WHERE clause. */
+    const capturingExec = (): { exec: ExecCommand; queries: string[] } => {
+      const queries: string[] = [];
+      const exec: ExecCommand = async (_b, args) => {
+        const soql = soqlOf(args);
+        queries.push(soql);
+        if (/count\(\)\s*from\s+emailtemplate/i.test(soql)) {
+          return { stdout: JSON.stringify({ result: { totalSize: 1 } }), stderr: '' };
+        }
+        return {
+          stdout: JSON.stringify({
+            result: {
+              records: [
+                { Name: 'ADA Case Email', FolderName: 'Support', TemplateType: 'html', IsActive: true, TimesUsed: 4, LastUsedDate: new Date().toISOString() },
+              ],
+            },
+          }),
+          stderr: '',
+        };
+      };
+      return { exec, queries };
+    };
+
+    it('applies nameContains to BOTH the detail and count queries and echoes appliedScope', async () => {
+      const { exec: cap, queries } = capturingExec();
+      const r = await liveEmailTemplateUsageHandler(ctx, { liveEnabled: true, nameContains: 'ADA' }, cap);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const detail = queries.find((q) => /select\s+name/i.test(q));
+      const count = queries.find((q) => /count\(\)/i.test(q));
+      expect(detail).toMatch(/WHERE Name LIKE '%ADA%'/);
+      expect(count).toMatch(/WHERE Name LIKE '%ADA%'/);
+      expect(r.value.data.appliedScope.nameContains).toBe('ADA');
+      expect(r.value.data.appliedScope.folderName).toBeNull();
+      expect(r.value.data.rendered).toContain('ADA');
+    });
+
+    it('applies folderName as an exact-match WHERE clause', async () => {
+      const { exec: cap, queries } = capturingExec();
+      const r = await liveEmailTemplateUsageHandler(
+        ctx,
+        { liveEnabled: true, folderName: 'Support', nameContains: 'ADA' },
+        cap,
+      );
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const detail = queries.find((q) => /select\s+name/i.test(q));
+      expect(detail).toMatch(/FolderName = 'Support'/);
+      expect(detail).toMatch(/Name LIKE '%ADA%'/);
+      expect(r.value.data.appliedScope.folderName).toBe('Support');
+    });
+
+    it('escapes single quotes in the filter value (SOQL-injection safe)', async () => {
+      const { exec: cap, queries } = capturingExec();
+      const r = await liveEmailTemplateUsageHandler(
+        ctx,
+        { liveEnabled: true, nameContains: "O'Brien" },
+        cap,
+      );
+      expect(r.ok).toBe(true);
+      const detail = queries.find((q) => /select\s+name/i.test(q));
+      expect(detail).toContain("Name LIKE '%O\\'Brien%'");
+    });
+
+    it('emits no WHERE clause and a null appliedScope when unscoped (unchanged default)', async () => {
+      const { exec: cap, queries } = capturingExec();
+      const r = await liveEmailTemplateUsageHandler(ctx, { liveEnabled: true }, cap);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(queries.every((q) => !/WHERE/i.test(q))).toBe(true);
+      expect(r.value.data.appliedScope.nameContains).toBeNull();
+      expect(r.value.data.appliedScope.folderName).toBeNull();
+    });
+
+    it('rejects an unknown filter key (e.g. `query`) with a strict parse error instead of silently ignoring it', () => {
+      expect(
+        liveEmailTemplateUsageInputSchema.safeParse({ liveEnabled: true, query: 'ADA' }).success,
+      ).toBe(false);
+      // The supported keys still parse.
+      expect(
+        liveEmailTemplateUsageInputSchema.safeParse({
+          liveEnabled: true,
+          nameContains: 'ADA',
+          folderName: 'Support',
+        }).success,
+      ).toBe(true);
+    });
   });
 });
 

@@ -61,6 +61,14 @@ const GADGET_FLOW_A = 'Flow:Create_Gadget_A';
 const GADGET_FLOW_B = 'Flow:Create_Gadget_B';
 const GADGET_TRIGGER_A = 'ApexTrigger:GadgetTriggerA';
 const GADGET_TRIGGER_B = 'ApexTrigger:GadgetTriggerB';
+// Sprocket__c: mixes ACTIVE and INACTIVE creators + triggers so the active-status
+// filter (RECORD-CREATION-PATHS-CITES-OBSOLETE-TRIGGERS) can be exercised.
+const SPROCKET = 'CustomObject:Sprocket__c';
+const SPROCKET_CREATOR_ACTIVE = 'Flow:Create_Sprocket_Active';
+const SPROCKET_CREATOR_OBSOLETE = 'Flow:Create_Sprocket_Obsolete';
+const SPROCKET_FLOW_TRIGGER_ACTIVE = 'Flow:Sprocket_Save_Flow_Active';
+const SPROCKET_FLOW_TRIGGER_OBSOLETE = 'Flow:Sprocket_Email_Flow_Obsolete';
+const SPROCKET_APEX_TRIGGER_INACTIVE = 'ApexTrigger:SprocketTriggerInactive';
 
 const seed: ExtractionResult = {
   nodes: [
@@ -72,6 +80,37 @@ const seed: ExtractionResult = {
     makeNode({ id: GADGET_FLOW_B, type: 'Flow', apiName: 'Create_Gadget_B' }),
     makeNode({ id: GADGET_TRIGGER_A, type: 'ApexTrigger', apiName: 'GadgetTriggerA' }),
     makeNode({ id: GADGET_TRIGGER_B, type: 'ApexTrigger', apiName: 'GadgetTriggerB' }),
+    makeNode({ id: SPROCKET, type: 'CustomObject', apiName: 'Sprocket__c' }),
+    makeNode({
+      id: SPROCKET_CREATOR_ACTIVE,
+      type: 'Flow',
+      apiName: 'Create_Sprocket_Active',
+      properties: { status: 'Active' },
+    }),
+    makeNode({
+      id: SPROCKET_CREATOR_OBSOLETE,
+      type: 'Flow',
+      apiName: 'Create_Sprocket_Obsolete',
+      properties: { status: 'Obsolete' },
+    }),
+    makeNode({
+      id: SPROCKET_FLOW_TRIGGER_ACTIVE,
+      type: 'Flow',
+      apiName: 'Sprocket_Save_Flow_Active',
+      properties: { status: 'Active' },
+    }),
+    makeNode({
+      id: SPROCKET_FLOW_TRIGGER_OBSOLETE,
+      type: 'Flow',
+      apiName: 'Sprocket_Email_Flow_Obsolete',
+      properties: { status: 'Obsolete' },
+    }),
+    makeNode({
+      id: SPROCKET_APEX_TRIGGER_INACTIVE,
+      type: 'ApexTrigger',
+      apiName: 'SprocketTriggerInactive',
+      properties: { status: 'Inactive' },
+    }),
   ],
   edges: [
     // A Flow that inserts Widget__c records (the only modeled creator class).
@@ -101,6 +140,25 @@ const seed: ExtractionResult = {
     }),
     makeEdge({ fromId: GADGET_TRIGGER_A, toId: GADGET, edgeType: 'triggersOn' }),
     makeEdge({ fromId: GADGET_TRIGGER_B, toId: GADGET, edgeType: 'triggersOn' }),
+    // Sprocket__c: one active + one obsolete creator; one active flow trigger,
+    // one obsolete flow trigger, one inactive apex trigger.
+    makeEdge({
+      fromId: SPROCKET_CREATOR_ACTIVE,
+      toId: SPROCKET,
+      edgeType: 'writesTo',
+      confidence: 'parsed',
+      properties: { operation: 'recordCreate' },
+    }),
+    makeEdge({
+      fromId: SPROCKET_CREATOR_OBSOLETE,
+      toId: SPROCKET,
+      edgeType: 'writesTo',
+      confidence: 'parsed',
+      properties: { operation: 'recordCreate' },
+    }),
+    makeEdge({ fromId: SPROCKET_FLOW_TRIGGER_ACTIVE, toId: SPROCKET, edgeType: 'triggersOn' }),
+    makeEdge({ fromId: SPROCKET_FLOW_TRIGGER_OBSOLETE, toId: SPROCKET, edgeType: 'triggersOn' }),
+    makeEdge({ fromId: SPROCKET_APEX_TRIGGER_INACTIVE, toId: SPROCKET, edgeType: 'triggersOn' }),
   ],
 };
 
@@ -177,5 +235,53 @@ describe('recordCreationPathsHandler', () => {
     expect(r.value.data.creatorsTruncated).toBe(false);
     expect(r.value.data.triggersTruncated).toBe(false);
     expect(r.value.data.rendered).not.toMatch(/truncated/i);
+  });
+
+  // RECORD-CREATION-PATHS-CITES-OBSOLETE-TRIGGERS (P1 honesty). A creation path
+  // is a RUNTIME path, so a Draft/Obsolete Flow or an Inactive ApexTrigger must
+  // NOT be listed among the live creators/triggers — it is segregated into
+  // `inactiveCreators`/`inactiveTriggers` with its reason. FAIL-BEFORE: the old
+  // handler mapped every `triggersOn` / recordCreate `writesTo` edge into the
+  // main lists with no active-status filter.
+  it('FAIL-BEFORE/PASS-AFTER: excludes obsolete/inactive creators and triggers, segregating them', async () => {
+    const r = await recordCreationPathsHandler(ctx, { objectApiName: 'Sprocket__c' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+
+    // Only the ACTIVE creator/trigger survive in the live lists.
+    expect(d.creators.map((c) => c.sourceId)).toEqual([SPROCKET_CREATOR_ACTIVE]);
+    expect(d.creatorCount).toBe(1);
+    expect(d.triggers.map((t) => t.sourceId)).toEqual([SPROCKET_FLOW_TRIGGER_ACTIVE]);
+    expect(d.triggerCount).toBe(1);
+
+    // The inactive firers are segregated (not dropped), with their reason.
+    expect(d.inactiveCreators?.map((i) => i.componentId)).toEqual([
+      SPROCKET_CREATOR_OBSOLETE,
+    ]);
+    expect(d.inactiveCreators?.[0]?.inactiveReason).toMatch(/Obsolete/);
+    expect(d.inactiveTriggers?.map((i) => i.componentId)).toEqual([
+      SPROCKET_APEX_TRIGGER_INACTIVE,
+      SPROCKET_FLOW_TRIGGER_OBSOLETE,
+    ]);
+
+    // The obsolete/inactive firers never appear in the live lists.
+    const liveIds = [...d.creators, ...d.triggers].map((s) => s.sourceId);
+    expect(liveIds).not.toContain(SPROCKET_CREATOR_OBSOLETE);
+    expect(liveIds).not.toContain(SPROCKET_FLOW_TRIGGER_OBSOLETE);
+    expect(liveIds).not.toContain(SPROCKET_APEX_TRIGGER_INACTIVE);
+
+    // Rendered text discloses the exclusion.
+    expect(d.rendered).toMatch(/Excluded as inactive/i);
+    expect(d.rendered).toMatch(/Sprocket_Email_Flow_Obsolete/);
+  });
+
+  it('omits inactive disclosure keys when every creator/trigger is active', async () => {
+    const r = await recordCreationPathsHandler(ctx, { objectApiName: 'Widget__c' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.inactiveCreators).toBeUndefined();
+    expect(r.value.data.inactiveTriggers).toBeUndefined();
+    expect(r.value.data.rendered).not.toMatch(/Excluded as inactive/i);
   });
 });

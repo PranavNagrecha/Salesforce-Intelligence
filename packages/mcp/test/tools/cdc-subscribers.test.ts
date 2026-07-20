@@ -208,6 +208,98 @@ const filteredCdcSeed: ExtractionResult = {
   ],
 };
 
+// =============================================================================
+// Seed 5 (CDC-SUBSCRIBERS-OMITS-CHANNEL-MEMBERSHIP guard): a CDC `data` channel
+// whose member selects ContactChangeEvent with ZERO listensTo subscribers. The
+// ChangeEvent CustomObject node is deliberately ABSENT (a stub/missing target,
+// as in an offline vault) — membership must still surface. Contact is a generic
+// standard object, not an org identifier.
+// =============================================================================
+
+const CDC_DATA_CHANNEL = 'PlatformEventChannel:ChangeEvents__chn';
+const CONTACT_CDC_MEMBER = 'PlatformEventChannelMember:ChangeEvents_ContactChangeEvent';
+const CONTACT_CDC_EVENT = 'CustomObject:ContactChangeEvent';
+const CONTACT_CDC_FILTER = "City = 'SF'";
+
+const contactCdcMembershipSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: CDC_DATA_CHANNEL,
+      type: 'PlatformEventChannel',
+      apiName: 'ChangeEvents__chn',
+      properties: { channelType: 'data', label: 'Change Events' },
+    }),
+    makeNode({
+      id: CONTACT_CDC_MEMBER,
+      type: 'PlatformEventChannelMember',
+      apiName: 'ChangeEvents_ContactChangeEvent',
+      parentId: CDC_DATA_CHANNEL,
+      properties: {
+        eventChannel: 'ChangeEvents__chn',
+        selectedEntity: 'ContactChangeEvent',
+        filterExpression: CONTACT_CDC_FILTER,
+      },
+    }),
+    // NB: no CustomObject:ContactChangeEvent node — target is a stub/missing.
+  ],
+  edges: [
+    makeEdge({
+      fromId: CDC_DATA_CHANNEL,
+      toId: CONTACT_CDC_MEMBER,
+      edgeType: 'parentOf',
+      source: 'platform-event-channel-extractor',
+    }),
+    makeEdge({
+      fromId: CONTACT_CDC_MEMBER,
+      toId: CONTACT_CDC_EVENT,
+      edgeType: 'references',
+      source: 'platform-event-channel-extractor',
+      properties: {
+        referenceKind: 'platformEventChannelMember',
+        filterExpression: CONTACT_CDC_FILTER,
+      },
+    }),
+  ],
+};
+
+// =============================================================================
+// Seed 6: an EVENT channel (channelType 'event') whose member selects a Platform
+// Event (Order_Placed__e), NOT a ChangeEvent. It must NOT surface as a CDC
+// channel member — the CDC discriminator is the ChangeEvent name pattern.
+// =============================================================================
+
+const EVENT_CHANNEL = 'PlatformEventChannel:AppStream__chn';
+const EVENT_CHANNEL_MEMBER = 'PlatformEventChannelMember:AppStream_OrderPlaced';
+
+const eventChannelSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: EVENT_CHANNEL,
+      type: 'PlatformEventChannel',
+      apiName: 'AppStream__chn',
+      properties: { channelType: 'event', label: 'App Stream' },
+    }),
+    makeNode({
+      id: EVENT_CHANNEL_MEMBER,
+      type: 'PlatformEventChannelMember',
+      apiName: 'AppStream_OrderPlaced',
+      parentId: EVENT_CHANNEL,
+      properties: {
+        eventChannel: 'AppStream__chn',
+        selectedEntity: 'Order_Placed__e',
+      },
+    }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: EVENT_CHANNEL,
+      toId: EVENT_CHANNEL_MEMBER,
+      edgeType: 'parentOf',
+      source: 'platform-event-channel-extractor',
+    }),
+  ],
+};
+
 let tempDir: string;
 let store: GraphStore;
 let ctx: Context;
@@ -222,6 +314,8 @@ beforeAll(async () => {
     orderCdcSeed,
     platformEventSeed,
     filteredCdcSeed,
+    contactCdcMembershipSeed,
+    eventChannelSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -351,6 +445,81 @@ describe('cdcSubscribersHandler', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.vaultState.sourceTreeHash).toBe('sha256:cdc-fixture');
+  });
+
+  // ===========================================================================
+  // CDC-SUBSCRIBERS-OMITS-CHANNEL-MEMBERSHIP guards. Pre-fix these FAIL: the
+  // tool composed only `listensTo`, so a CDC-enabled object with no code
+  // subscriber returned totalSubscribers:0 with NO channelMembers section, and
+  // `objectApiName` was silently stripped.
+  // ===========================================================================
+
+  it('surfaces CDC channel membership for an enabled-but-unsubscribed object (Contact)', async () => {
+    const result = await cdcSubscribersHandler(ctx, {
+      sObjectFilter: 'Contact',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    // Zero code subscribers, but CDC IS enabled via the channel member.
+    expect(d.subscribers).toEqual([]);
+    expect(d.summary.totalSubscribers).toBe(0);
+    expect(d.channelMembers).toHaveLength(1);
+    const m = d.channelMembers[0];
+    expect(m?.memberId).toBe(CONTACT_CDC_MEMBER);
+    expect(m?.channelId).toBe(CDC_DATA_CHANNEL);
+    expect(m?.channelType).toBe('data');
+    expect(m?.selectedEntity).toBe('ContactChangeEvent');
+    expect(m?.changeEventName).toBe('ContactChangeEvent');
+    expect(m?.filterExpression).toBe(CONTACT_CDC_FILTER);
+    // uniqueChangeEvents must count the enabled event, not only subscribed ones.
+    expect(d.summary.totalChannelMembers).toBe(1);
+    expect(d.summary.uniqueChangeEvents).toBe(1);
+    // Disclosure makes "enabled, no modeled subscriber" explicit.
+    expect(d.disclosure).toContain('enabled, no modeled subscriber');
+  });
+
+  it('accepts objectApiName as a synonym for sObjectFilter (no silent strip)', async () => {
+    const viaAlias = await cdcSubscribersHandler(ctx, {
+      objectApiName: 'Contact',
+    });
+    const viaFilter = await cdcSubscribersHandler(ctx, {
+      sObjectFilter: 'Contact',
+    });
+    expect(viaAlias.ok && viaFilter.ok).toBe(true);
+    if (!viaAlias.ok || !viaFilter.ok) return;
+    // The alias must NOT degrade to the org-wide scan.
+    expect(viaAlias.value.data.channelMembers).toHaveLength(1);
+    expect(viaAlias.value.data.channelMembers[0]?.memberId).toBe(
+      CONTACT_CDC_MEMBER,
+    );
+    expect(viaAlias.value.data.summary.uniqueChangeEvents).toBe(
+      viaFilter.value.data.summary.uniqueChangeEvents,
+    );
+  });
+
+  it('excludes event-channel members (Platform Events) from CDC membership', async () => {
+    const result = await cdcSubscribersHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.data.channelMembers.map((m) => m.memberId);
+    // The Contact CDC member surfaces org-wide...
+    expect(ids).toContain(CONTACT_CDC_MEMBER);
+    // ...but the Order_Placed__e event-channel member must NOT (not a ChangeEvent).
+    expect(ids).not.toContain(EVENT_CHANNEL_MEMBER);
+  });
+
+  it('scopes channel membership to the requested object', async () => {
+    const result = await cdcSubscribersHandler(ctx, {
+      sObjectFilter: 'Account',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Account CDC has code subscribers but no channel member in the fixture.
+    expect(result.value.data.channelMembers).toEqual([]);
+    expect(result.value.data.summary.totalChannelMembers).toBe(0);
+    // The Contact member must not leak into an Account-scoped call.
+    expect(result.value.data.subscribers.length).toBe(3);
   });
 });
 

@@ -108,7 +108,16 @@ export interface ConceptFieldMatch {
 export interface ConceptBucket {
   readonly name: string;
   readonly tokenizedForm: string;
+  /**
+   * Fields matched for this concept. Capped to the display `limit` in the
+   * emitted output, but every ANALYSIS (differences, when-to-use, counts) runs
+   * over the FULL match set BEFORE capping — see {@link totalMatchCount}.
+   */
   readonly matchingFields: readonly ConceptFieldMatch[];
+  /** True number of matched fields BEFORE any display cap. */
+  readonly totalMatchCount: number;
+  /** True when `matchingFields` was capped below `totalMatchCount` for display. */
+  readonly truncated: boolean;
 }
 
 /** One per-axis difference between the two buckets. */
@@ -235,14 +244,15 @@ const matchAxes = (
 
 /**
  * Build one concept bucket: enumerate every CustomField, score each
- * for a match against the concept's tokens, return the matching set
- * (capped to `limit`). The fields are sorted by id ASC for stable
- * output.
+ * for a match against the concept's tokens, return the FULL matching set
+ * (sorted by id ASC for stable output). The display cap is applied
+ * downstream by {@link capForDisplay}, AFTER the analysis has run over the
+ * full set — capping here (the old behaviour) fed a truncated, id-sorted
+ * subset to the counts/differences/when-to-use inference (RM-review F6).
  */
 const buildBucket = (
   conceptName: string,
   fields: readonly Node[],
-  limit: number,
 ): ConceptBucket => {
   const tokens = tokenize(conceptName);
   const conceptValueLower = conceptName.trim().toLowerCase();
@@ -265,9 +275,32 @@ const buildBucket = (
   return {
     name: conceptName,
     tokenizedForm: renderTokenizedForm(tokens),
-    matchingFields: matchingFields.slice(0, limit),
+    // FULL match set — every downstream analysis runs over this; the display
+    // cap is applied by capForDisplay() at serialization time only.
+    matchingFields,
+    totalMatchCount: matchingFields.length,
+    truncated: false,
   };
 };
+
+/**
+ * Cap a bucket's `matchingFields` to `limit` for the emitted payload WITHOUT
+ * perturbing the analysis (which already ran over the full set). Preserves the
+ * true `totalMatchCount` and sets `truncated` so the caller never mistakes the
+ * shown subset for the whole match set.
+ */
+const capForDisplay = (bucket: ConceptBucket, limit: number): ConceptBucket => {
+  if (bucket.matchingFields.length <= limit) return bucket;
+  return {
+    ...bucket,
+    matchingFields: bucket.matchingFields.slice(0, limit),
+    truncated: true,
+  };
+};
+
+/** Disclosure appended when either bucket's field list was display-capped. */
+const BOUNDARY_TRUNCATED =
+  "The matchingFields lists are capped for display (see each bucket's totalMatchCount and truncated flag); the counts, differences, and when-to-use inference are computed over the FULL match set, not the shown subset.";
 
 /**
  * Collect distinct parent-object ApiNames from a bucket's matching
@@ -427,19 +460,26 @@ export const disambiguateConceptsHandler = async (
     if (fieldsResult.value.length < CUSTOM_FIELD_PAGE_SIZE) break;
   }
 
-  const bucketA = buildBucket(input.conceptA, fields, limit);
-  const bucketB = buildBucket(input.conceptB, fields, limit);
+  // Buckets carry the FULL match set; the analysis below runs over it and the
+  // display cap is applied only when serialising (capForDisplay).
+  const bucketA = buildBucket(input.conceptA, fields);
+  const bucketB = buildBucket(input.conceptB, fields);
+  const anyTruncated =
+    bucketA.totalMatchCount > limit || bucketB.totalMatchCount > limit;
+  const boundaries = anyTruncated
+    ? [BOUNDARY_Q155, BOUNDARY_TRUNCATED]
+    : [BOUNDARY_Q155];
 
   // Same-concept short-circuit. Return mirror buckets + empty
   // differences + null suggested-when-to-use; skill refuses upstream.
   if (isSameConcept(input.conceptA, input.conceptB)) {
     return ok({
       data: {
-        conceptA: bucketA,
-        conceptB: bucketB,
+        conceptA: capForDisplay(bucketA, limit),
+        conceptB: capForDisplay(bucketB, limit),
         differences: [],
         suggestedWhenToUseEach: null,
-        boundaries: [BOUNDARY_Q155],
+        boundaries,
       },
       vaultState: {
         sourceTreeHash: ctx.manifest.sourceTreeHash,
@@ -453,11 +493,11 @@ export const disambiguateConceptsHandler = async (
 
   return ok({
     data: {
-      conceptA: bucketA,
-      conceptB: bucketB,
+      conceptA: capForDisplay(bucketA, limit),
+      conceptB: capForDisplay(bucketB, limit),
       differences,
       suggestedWhenToUseEach: suggested,
-      boundaries: [BOUNDARY_Q155],
+      boundaries,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

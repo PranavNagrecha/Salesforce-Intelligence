@@ -98,6 +98,128 @@ describe('extractCustomSite', () => {
     });
   });
 
+  describe('favoriteIcon static-resource edge (SITE-FAVICON-STATICRESOURCE-UNGRAPHED)', () => {
+    // A site's `<favoriteIcon>` names a StaticResource. Before the fix the
+    // extractor emitted no edge for it, so a resource referenced ONLY by a
+    // site's favicon read as orphaned and `unused_components` flagged it
+    // deletable — deleting it would break the site's browser favicon.
+    it('emits a declared references edge CustomSite -> StaticResource for <favoriteIcon>', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<CustomSite xmlns="http://soap.sforce.com/2006/04/metadata">
+    <active>true</active>
+    <favoriteIcon>My_Favicon</favoriteIcon>
+    <masterLabel>MemberPortal</masterLabel>
+    <siteType>ChatterNetwork</siteType>
+</CustomSite>`;
+      const { dir, path } = await writeTempXml('MemberPortal.site-meta.xml', xml);
+      try {
+        const result = await extractCustomSite(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0]!;
+        expect(node.properties['favoriteIcon']).toBe('My_Favicon');
+        const faviconEdge = result.value.edges.find(
+          (e) => e.toId === 'StaticResource:My_Favicon',
+        );
+        expect(faviconEdge).toBeDefined();
+        if (!faviconEdge) return;
+        expect(faviconEdge.fromId).toBe('CustomSite:MemberPortal');
+        expect(faviconEdge.edgeType).toBe('references');
+        expect(faviconEdge.confidence).toBe('declared');
+        expect(faviconEdge.source).toBe('custom-site-extractor');
+        expect(faviconEdge.properties).toEqual({ via: 'favoriteIcon' });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits no favicon edge and null property when <favoriteIcon> is absent', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<CustomSite xmlns="http://soap.sforce.com/2006/04/metadata">
+    <active>true</active>
+    <masterLabel>MemberPortal</masterLabel>
+    <siteType>ChatterNetwork</siteType>
+</CustomSite>`;
+      const { dir, path } = await writeTempXml('MemberPortal.site-meta.xml', xml);
+      try {
+        const result = await extractCustomSite(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0]!;
+        expect(node.properties['favoriteIcon']).toBeNull();
+        expect(
+          result.value.edges.some((e) => e.toId.startsWith('StaticResource:')),
+        ).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('site-page VisualforcePage edges (SITE-INDEXPAGE-AND-TEMPLATE-UNGRAPHED)', () => {
+    // A site's `<indexPage>` / `<siteTemplate>` (and the standard error pages)
+    // each name a VisualforcePage. Before the fix the extractor emitted no edge
+    // for them, so a VF page referenced ONLY as a site page read as orphaned and
+    // `unused_components` flagged it deletable — deleting a live site's index or
+    // template takes down the community entry point.
+    it('emits declared references edges CustomSite -> VisualforcePage for indexPage / siteTemplate / changePasswordPage', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<CustomSite xmlns="http://soap.sforce.com/2006/04/metadata">
+    <active>true</active>
+    <changePasswordPage>My_ChangePassword_Page</changePasswordPage>
+    <indexPage>My_Index_Page</indexPage>
+    <masterLabel>MemberPortal</masterLabel>
+    <siteTemplate>My_Site_Template</siteTemplate>
+    <siteType>ChatterNetwork</siteType>
+</CustomSite>`;
+      const { dir, path } = await writeTempXml('MemberPortal.site-meta.xml', xml);
+      try {
+        const result = await extractCustomSite(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const byTarget = (toId: string) =>
+          result.value.edges.find((e) => e.toId === toId);
+        for (const [toId, via] of [
+          ['VisualforcePage:My_Index_Page', 'indexPage'],
+          ['VisualforcePage:My_Site_Template', 'siteTemplate'],
+          ['VisualforcePage:My_ChangePassword_Page', 'changePasswordPage'],
+        ] as const) {
+          const edge = byTarget(toId);
+          // RED pre-fix: none of these edges exist (the page refs were ungraphed).
+          expect(edge).toBeDefined();
+          if (!edge) return;
+          expect(edge.fromId).toBe('CustomSite:MemberPortal');
+          expect(edge.edgeType).toBe('references');
+          expect(edge.confidence).toBe('declared');
+          expect(edge.source).toBe('custom-site-extractor');
+          expect(edge.properties).toEqual({ via });
+        }
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits no VisualforcePage edge when no site-page element is present', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<CustomSite xmlns="http://soap.sforce.com/2006/04/metadata">
+    <active>true</active>
+    <masterLabel>MemberPortal</masterLabel>
+    <siteType>ChatterNetwork</siteType>
+</CustomSite>`;
+      const { dir, path } = await writeTempXml('MemberPortal.site-meta.xml', xml);
+      try {
+        const result = await extractCustomSite(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(
+          result.value.edges.some((e) => e.toId.startsWith('VisualforcePage:')),
+        ).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('error cases', () => {
     it('returns file-not-found for a missing file', async () => {
       const result = await extractCustomSite('/does/not/exist.site-meta.xml');

@@ -34,6 +34,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { resolveObjectAlias } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { scanTruncationNote } from './scan-cap.js';
 
@@ -56,15 +57,52 @@ const SCAN_PAGE = 500;
 const SCAN_MAX = 20_000;
 const LIST_VIEW_SHARING_TOOL = 'sfi.list_view_sharing';
 
-export const listViewSharingInputSchema = z.object({
-  componentId: z.string().min(1),
+export const listViewSharingInputSchema = z
+  .object({
+    // OBJECT mode: a `CustomObject:` id, or any object alias below (L2 Alias
+    // OS). LISTVIEW mode: a `ListView:` componentId. At least one is required.
+    componentId: z.string().min(1).optional(),
+    object: z.string().min(1).optional(),
+    objectApiName: z.string().min(1).optional(),
+    objectId: z.string().min(1).optional(),
   /** Count list views shared directly to this role api name (summary only). */
   sharedWithRoleApiName: z.string().min(1).optional(),
+  /**
+   * FILTER the returned list views to only those shared to this target — a
+   * canonical `sharedTo` target id (`Group:X` / `Role:X` / …) OR a group/role
+   * NAME (case-insensitive). Unlike `sharedWithRoleApiName` (a summary-only
+   * count that leaves every row in place), this narrows `listViews[]` AND the
+   * `summary`. A target that matches nothing yields ZERO rows — never a silent
+   * full-object dump — and the applied filter is echoed in `appliedScope`.
+   * `sharedTo` and `groupId` are accepted aliases (the natural arg names a host
+   * reaches for) — supply ONE; conflicting values are an invalid-query, never a
+   * silent strip.
+   */
+  sharedToId: z.string().min(1).optional(),
+  sharedTo: z.string().min(1).optional(),
+  groupId: z.string().min(1).optional(),
+  /**
+   * FILTER the returned list views to those whose api name contains this
+   * substring (case-insensitive). Composable with `sharedToId` (AND).
+   */
+  nameContains: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
   // CR-22 continuation cursor from a prior truncated page's nextCursor.
   cursor: z.string().min(1).optional(),
-});
+  })
+  .refine(
+    (i) =>
+      i.componentId !== undefined ||
+      i.object !== undefined ||
+      i.objectApiName !== undefined ||
+      i.objectId !== undefined,
+    {
+      message:
+        'name the object or list view — pass a `componentId` (`CustomObject:` for an object, `ListView:` for one view) or an object alias (`objectApiName` / `object` / `objectId`)',
+      path: ['componentId'],
+    },
+  );
 
 export type ListViewSharingInput = z.infer<typeof listViewSharingInputSchema>;
 
@@ -109,6 +147,21 @@ export interface ListViewSharingOutput {
     /** When `sharedWithRoleApiName` is supplied — views with a direct role share to that role. */
     readonly sharedToRoleCount?: number;
     readonly sharedToRoleApiName?: string;
+  };
+  /**
+   * Echoes the row filter ACTUALLY applied so a host never assumes a
+   * `sharedToId`/`nameContains` it passed took effect (a silently-stripped
+   * filter arg — returning the whole object — was the bug this closes).
+   * `filtered` is true when any filter narrowed the rows; `totalBeforeFilter`
+   * is the object's full list-view count; `matched` is how many passed the
+   * filter (== `summary.listViews` when filtered).
+   */
+  readonly appliedScope: {
+    readonly sharedToId: string | null;
+    readonly nameContains: string | null;
+    readonly filtered: boolean;
+    readonly totalBeforeFilter: number;
+    readonly matched: number;
   };
   readonly limit: number;
   readonly offset: number;
@@ -169,6 +222,31 @@ const toRow = (node: Node): ListViewSharingRow => {
   };
 };
 
+/**
+ * Does a list-view row match the optional `sharedToId` / `nameContains` filter?
+ * `sharedToId` matches a `sharedTo` entry by canonical target id (`Group:X` /
+ * `Role:X`, exact) OR by its display name (case-insensitive) — a host asking
+ * "shared to the Advising group" can pass either the id or the label. Filters
+ * compose with AND. Called only when at least one filter is present.
+ */
+const rowMatchesFilter = (
+  row: ListViewSharingRow,
+  sharedToId: string | undefined,
+  nameContains: string | undefined,
+): boolean => {
+  if (sharedToId !== undefined) {
+    const needle = sharedToId.toLowerCase();
+    const hit = row.sharedTo.some(
+      (t) => t.targetId === sharedToId || (t.name !== null && t.name.toLowerCase() === needle),
+    );
+    if (!hit) return false;
+  }
+  if (nameContains !== undefined) {
+    if (!row.apiName.toLowerCase().includes(nameContains.toLowerCase())) return false;
+  }
+  return true;
+};
+
 const buildSummary = (
   rows: readonly ListViewSharingRow[],
   sharedWithRoleApiName?: string,
@@ -216,19 +294,51 @@ export const listViewSharingHandler = async (
   input: ListViewSharingInput,
 ): Promise<Result<McpResponse<ListViewSharingOutput>, McpError>> => {
   const limit = input.limit ?? DEFAULT_LIMIT;
-  const isObject = input.componentId.startsWith(OBJECT_PREFIX);
-  const isListView = input.componentId.startsWith(LISTVIEW_PREFIX);
+
+  // L2 Alias OS: resolve an OBJECT scope from object / objectApiName / objectId
+  // or a CustomObject: componentId (a reverse-mode ListView: componentId is NOT
+  // an object alias). Disagreeing object aliases -> invalid-query.
+  const objScope = resolveObjectAlias(input, {
+    bareComponentIdIsObject: false,
+    required: false,
+  });
+  if (!objScope.ok) return err(objScope.error);
+  const rawComponentId = input.componentId;
+  let resolvedId: string;
+  if (objScope.value !== null) {
+    // OBJECT mode. A ListView: componentId alongside an object is ambiguous.
+    if (rawComponentId !== undefined && rawComponentId.startsWith(LISTVIEW_PREFIX)) {
+      return err({
+        kind: 'invalid-query',
+        message:
+          'pass either a ListView: componentId (one view) or an object (all of the object’s views), not both',
+        path: 'componentId',
+      });
+    }
+    resolvedId = objScope.value.componentId;
+  } else if (rawComponentId !== undefined) {
+    resolvedId = rawComponentId;
+  } else {
+    return err({
+      kind: 'invalid-query',
+      message:
+        'name the object or list view — pass a `componentId` (CustomObject: or ListView:) or an object alias (objectApiName / object / objectId)',
+      path: 'componentId',
+    });
+  }
+  const isObject = resolvedId.startsWith(OBJECT_PREFIX);
+  const isListView = resolvedId.startsWith(LISTVIEW_PREFIX);
 
   if (!isObject && !isListView) {
     return err({
       kind: 'invalid-query',
       message:
         `list_view_sharing answers "who is this list view shared with" — componentId must be a CustomObject: id ` +
-        `(all of the object’s list views) or a ListView: id (one list view); got '${input.componentId}'.`,
+        `(all of the object’s list views) or a ListView: id (one list view); got '${resolvedId}'.`,
       path: 'componentId',
     });
   }
-  const componentId = input.componentId as ComponentId;
+  const componentId = resolvedId as ComponentId;
 
   // Collect the relevant ListView nodes (all, for an accurate object-wide
   // summary), then paginate the OUTPUT rows.
@@ -279,14 +389,54 @@ export const listViewSharingHandler = async (
     allRows = [toRow(node.value)];
   }
 
-  const summary = buildSummary(allRows, input.sharedWithRoleApiName);
+  // Resolve the shared-to target from its canonical name + the two aliases a
+  // host naturally reaches for (`sharedTo` / `groupId`). Exactly one distinct
+  // value may be supplied — conflicting aliases are an invalid-query, not a
+  // silent strip (the whole class of bug this closes).
+  const sharedToInputs = [input.sharedToId, input.sharedTo, input.groupId].filter(
+    (v): v is string => v !== undefined,
+  );
+  if (new Set(sharedToInputs).size > 1) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        'sharedToId / sharedTo / groupId were given conflicting values; pass one shared-to target.',
+      path: 'sharedToId',
+    });
+  }
+  const sharedToFilter = sharedToInputs[0];
+
+  // Apply the optional row filter (sharedTo target / nameContains). When
+  // present, it narrows BOTH the returned rows AND the summary — the whole point
+  // of "which views are shared to X". When absent, `scopedRows === allRows`, so
+  // an unfiltered call is behaviourally unchanged (the summary stays
+  // whole-object and the response is byte-identical to pre-filter). A filter
+  // that matches nothing yields zero rows — never a silent full-object dump.
+  const filtered = sharedToFilter !== undefined || input.nameContains !== undefined;
+  const scopedRows = filtered
+    ? allRows.filter((row) => rowMatchesFilter(row, sharedToFilter, input.nameContains))
+    : allRows;
+
+  const summary = buildSummary(scopedRows, input.sharedWithRoleApiName);
+  const appliedScope: ListViewSharingOutput['appliedScope'] = {
+    sharedToId: sharedToFilter ?? null,
+    nameContains: input.nameContains ?? null,
+    filtered,
+    totalBeforeFilter: allRows.length,
+    matched: scopedRows.length,
+  };
 
   // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
-  // The fingerprint covers `componentId` so a token minted for one object/view
-  // can't be replayed against another. The output sort key (componentId) is the
-  // unique node id and matches the SQL id-ASC order, so the order is a strict
-  // total order — a resume neither dups nor skips.
-  const fingerprint = argsFingerprint({ componentId });
+  // The fingerprint covers `componentId` + the filter args so a token minted for
+  // one object/view/filter can't be replayed against another (a differently
+  // filtered set would otherwise skip or duplicate rows on resume). The output
+  // sort key (componentId) is the unique node id and matches the SQL id-ASC
+  // order, so the order is a strict total order — a resume neither dups nor skips.
+  const fingerprint = argsFingerprint({
+    componentId,
+    ...(sharedToFilter !== undefined ? { sharedToId: sharedToFilter } : {}),
+    ...(input.nameContains !== undefined ? { nameContains: input.nameContains } : {}),
+  });
   let offset = input.offset ?? 0;
   if (input.cursor !== undefined) {
     const decoded = decodeCursor(input.cursor, {
@@ -298,7 +448,7 @@ export const listViewSharingHandler = async (
     offset = decoded.value.o;
   }
 
-  const paged = paginateLegacy(allRows, {
+  const paged = paginateLegacy(scopedRows, {
     offset,
     limit,
     keyOf: (row) => row.componentId,
@@ -312,9 +462,15 @@ export const listViewSharingHandler = async (
   const hasMore = paged.hasMore;
   const emitCursor = paged.nextCursor !== null;
 
+  // When a filter is applied, `listViews[]` and `summary` reflect ONLY the
+  // matching set — override the "summary covers all list views" clause of the
+  // base note so the honesty axis stays accurate.
+  const filterNote = filtered
+    ? ` FILTER APPLIED (see \`appliedScope\`): \`listViews[]\` and \`summary\` reflect ONLY the ${scopedRows.length} of ${allRows.length} list view(s) matching${sharedToFilter !== undefined ? ` sharedTo '${sharedToFilter}'` : ''}${input.nameContains !== undefined ? ` nameContains '${input.nameContains}'` : ''} — NOT the whole object. ${scopedRows.length === 0 ? 'Zero matches (the requested target shares none of this object’s list views) — this is an honest empty result, not a full-object dump.' : ''}`
+    : '';
   const boundaryNote = scanTruncated
-    ? `${BOUNDARY_NOTE} ${scanTruncationNote(['ListView'], SCAN_MAX)}`
-    : BOUNDARY_NOTE;
+    ? `${BOUNDARY_NOTE}${filterNote} ${scanTruncationNote(['ListView'], SCAN_MAX)}`
+    : `${BOUNDARY_NOTE}${filterNote}`;
 
   return ok({
     data: {
@@ -322,6 +478,7 @@ export const listViewSharingHandler = async (
       scope,
       listViews: page,
       summary,
+      appliedScope,
       limit,
       offset,
       hasMore,

@@ -32,11 +32,11 @@ const seed: ExtractionResult = {
   nodes: [
     mk({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' }),
     mk({ id: 'CustomObject:Contact', type: 'CustomObject', apiName: 'Contact' }),
-    mk({ id: 'CustomObject:Registered_Courses_Exam__c', type: 'CustomObject', apiName: 'Registered_Courses_Exam__c' }),
-    // SIS key: External ID on Account + Contact (masters), plain copy on Registered_Courses_Exam__c.
+    mk({ id: 'CustomObject:Sample_Exam__c', type: 'CustomObject', apiName: 'Sample_Exam__c' }),
+    // SIS key: External ID on Account + Contact (masters), plain copy on Sample_Exam__c.
     fld('Account', SIS, { externalId: true }),
     fld('Contact', SIS, { externalId: true }),
-    fld('Registered_Courses_Exam__c', SIS, { externalId: false }),
+    fld('Sample_Exam__c', SIS, { externalId: false }),
     // Region_Code__c: keyish NAME on two objects but NO External ID -> NOT a shadow join.
     fld('Account', 'Region_Code__c', { externalId: false }),
     fld('Contact', 'Region_Code__c', { externalId: false }),
@@ -44,7 +44,7 @@ const seed: ExtractionResult = {
   edges: [
     { fromId: 'CustomObject:Account', toId: `CustomField:Account.${SIS}`, edgeType: 'parentOf', confidence: 'declared', source: 't', properties: {} },
     { fromId: 'CustomObject:Contact', toId: `CustomField:Contact.${SIS}`, edgeType: 'parentOf', confidence: 'declared', source: 't', properties: {} },
-    { fromId: 'CustomObject:Registered_Courses_Exam__c', toId: `CustomField:Registered_Courses_Exam__c.${SIS}`, edgeType: 'parentOf', confidence: 'declared', source: 't', properties: {} },
+    { fromId: 'CustomObject:Sample_Exam__c', toId: `CustomField:Sample_Exam__c.${SIS}`, edgeType: 'parentOf', confidence: 'declared', source: 't', properties: {} },
     { fromId: 'CustomObject:Account', toId: 'CustomField:Account.Region_Code__c', edgeType: 'parentOf', confidence: 'declared', source: 't', properties: {} },
     { fromId: 'CustomObject:Contact', toId: 'CustomField:Contact.Region_Code__c', edgeType: 'parentOf', confidence: 'declared', source: 't', properties: {} },
   ] as Edge[],
@@ -83,7 +83,7 @@ describe('cross-object shadow-join detection', () => {
   });
 
   it('flags the plain copy as medium cross-object', async () => {
-    const x = xobj(await assess(`CustomField:Registered_Courses_Exam__c.${SIS}`))!;
+    const x = xobj(await assess(`CustomField:Sample_Exam__c.${SIS}`))!;
     expect(x).toBeDefined();
     expect(x.severity).toBe('medium');
   });

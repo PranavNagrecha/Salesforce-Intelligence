@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-07-13T14:47:04.161Z",
-  "toolCount": 196,
+  "generatedAt": "2026-07-18T18:25:06.079Z",
+  "toolCount": 203,
   "sections": [
     {
       "label": "Orientation & routing",
@@ -136,6 +136,10 @@
           "description": "v2.9 vocabulary + semantic-disambiguation tier - the 'is this field manually entered or automated?' surface."
         },
         {
+          "name": "sfi.interpret",
+          "description": "Deterministic, offline reasoning: joins your grounded org graph against a curated, org-independent Concept Model (94 concepts / 143 rules) to answer what a component structurally IMPLIES - cascade deletes, junction objects, undefined flow order - as cited, confidence-tiered claims. No LLM, no live call."
+        },
+        {
           "name": "sfi.explain_error",
           "description": "Decode a PASTED Salesforce error string back to the org component that produced it - the support desk's first-line tool."
         },
@@ -206,7 +210,7 @@
         },
         {
           "name": "sfi.what_if_change_method_signature",
-          "description": "v2.3 R2b component-level what-if tool: given an ApexClass id (`ApexClass:{Name}`), a method name, and an optional new signature string, enumerates every direct ca..."
+          "description": "v2.3 R2b component-level what-if tool: given an ApexClass (`classApiName` / `componentId` / `apiName` - a bare name or an `ApexClass:` id, interchangeable, resolv..."
         },
         {
           "name": "sfi.what_if_merge_profiles",
@@ -234,11 +238,11 @@
         },
         {
           "name": "sfi.method_reachability",
-          "description": "v2.7 R2 deep code tool: given an `ApexClass:` or `ApexTrigger:` id, walks upstream `callsApex` BFS (capped at depth 3) and classifies the reachable upstream set a..."
+          "description": "v2.7 R2 deep code tool: given an ApexClass / ApexTrigger (`classApiName` / `componentId` / `apiName` - a bare name or an `ApexClass:` / `ApexTrigger:` id, interch..."
         },
         {
           "name": "sfi.tests_for_change",
-          "description": "Smart test selection (test-impact analysis): given `changedComponents` (1..500 ApexClass / ApexTrigger ids or bare class names), returns the MINIMAL set of test c..."
+          "description": "Smart test selection (test-impact analysis): given `changedComponents` (1..500 ApexClass / ApexTrigger ids or bare class names - each entry may also be a `review_..."
         },
         {
           "name": "sfi.package_impact",
@@ -271,7 +275,7 @@
         },
         {
           "name": "sfi.layout_for_user",
-          "description": "Walk the Salesforce layout-routing cascade (ProfileLookup → LayoutAssignment → RecordTypeResolution) for a given object, optional record type, and profile."
+          "description": "Walk the Salesforce layout-routing cascade (ProfileLookup → LayoutAssignment → RecordTypeResolution) for a given object, optional record type, and profile (`profi..."
         },
         {
           "name": "sfi.field_access_audit",
@@ -320,7 +324,7 @@
         },
         {
           "name": "sfi.test_coverage_for_method",
-          "description": "Deep code tool: given an `ApexClass:` or `ApexTrigger:` id and an optional `methodName`, walks upstream `callsApex` + `dispatchesAsync` BFS (capped at depth 3) an..."
+          "description": "Deep code tool: given an `ApexClass:` or `ApexTrigger:` id (accepted interchangeably as `classApiName`, `componentId`, or `apiName` - a bare name or the canonical..."
         },
         {
           "name": "sfi.meaningful_test_audit",
@@ -512,7 +516,7 @@
         },
         {
           "name": "sfi.changed_since",
-          "description": "Enumerate every vault node whose `lastModifiedDate` is at or after `since` (ISO 8601 - date-only `YYYY-MM-DD` or full UTC timestamp)."
+          "description": "Enumerate every vault node whose `lastModifiedDate` is at or after `since` (ISO 8601 - date-only `YYYY-MM-DD` or full UTC timestamp; the natural token `last-refre..."
         },
         {
           "name": "sfi.last_modified",
@@ -767,7 +771,7 @@
         },
         {
           "name": "sfi.tab_availability",
-          "description": "Given a `Profile:X` or `PermissionSet:X` (`componentId`), list the tabs it can see: each row carries the `tab`, the verbatim `visibility` enum (`DefaultOn`/`Defau..."
+          "description": "Given a `Profile:X` or `PermissionSet:X` - via `componentId` or the natural `profileApiName` / `profileId` / `permissionSetApiName` / `permissionSetId` selector (..."
         },
         {
           "name": "sfi.lifecycle_process",
@@ -775,7 +779,7 @@
         },
         {
           "name": "sfi.layout_assignments",
-          "description": "The REVERSE of `sfi.layout_for_user`: given a page Layout canonical id (`componentId`, e.g."
+          "description": "The REVERSE of `sfi.layout_for_user`: enumerate every (Profile × RecordType) assignment that targets a page layout - the question an admin asks before editing or..."
         },
         {
           "name": "sfi.automation_collisions",
@@ -795,11 +799,19 @@
         },
         {
           "name": "sfi.recordtype_availability",
-          "description": "Given a Profile or PermissionSet canonical id (`Profile:{Name}` / `PermissionSet:{Name}`), report which record types the user can CREATE / see, grouped by object,..."
+          "description": "Given a Profile or PermissionSet canonical id (`Profile:{Name}` / `PermissionSet:{Name}`) - or the natural `profileApiName` / `profileId` / `permissionSetApiName`..."
         },
         {
           "name": "sfi.record_creation_paths",
           "description": "\"How do records of this object get created?\" - the record-provenance trace an admin needs to answer \"how did this record get here?\"."
+        },
+        {
+          "name": "sfi.flow_graph",
+          "description": "The FAITHFUL, LOSSLESS structural graph of a Flow - every canvas element with its REAL <name>, the full element-to-element connector graph (what runs next), decis..."
+        },
+        {
+          "name": "sfi.flow_trace",
+          "description": "Honest PROJECTION of a Flow over a caller-supplied record state - the \"what happens to THIS record\" debugger."
         },
         {
           "name": "sfi.flow_fault_audit",
@@ -807,7 +819,7 @@
         },
         {
           "name": "sfi.review_change",
-          "description": "Pre-deploy change review (the CI/deploy gate): given `components` (1..500 `{ type, apiName, changeKind }` entries a host assembles from a PR / package.xml / `git..."
+          "description": "Pre-deploy change review (the CI/deploy gate): given `components` (1..500 change entries a host assembles from a PR / package.xml / `git diff`; each carries `chan..."
         },
         {
           "name": "sfi.installed_package_catalog",

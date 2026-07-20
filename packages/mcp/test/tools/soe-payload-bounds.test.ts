@@ -166,6 +166,41 @@ describe('enforceSoeByteBudget', () => {
     expect(payload.soe).toHaveLength(400); // every step survives
   });
 
+  it('budgetBytes reserves headroom — trims to the LOWER ceiling so a caller can fit honesty scaffolding it appends afterward (ORDER-OF-EXECUTION-OVERSIZE-HARD-FAIL)', () => {
+    const heavy = stepWithActions(2000, 'Heavy');
+    const alsoHeavy = stepWithActions(1500, 'Also');
+    const steps = [heavy, alsoHeavy];
+    const payload = { soe: steps, summary: { totalSteps: steps.length } };
+
+    expect(sizeOf(payload)).toBeGreaterThan(SOE_MAX_PAYLOAD_BYTES); // precondition
+
+    const reserve = 6_000;
+    const target = SOE_MAX_PAYLOAD_BYTES - reserve;
+    const result = enforceSoeByteBudget(payload, [steps], { budgetBytes: target });
+
+    // Trimmed to the RESERVED ceiling, not the full budget — leaving room for
+    // scaffolding the caller appends before the payload reaches the wire.
+    expect(sizeOf(payload)).toBeLessThanOrEqual(target);
+    expect(result.truncated).toBe(true);
+    // Even after the reserve, a ~`reserve`-byte disclosure note still fits under
+    // the hard SOE ceiling.
+    expect(sizeOf(payload) + reserve).toBeLessThanOrEqual(SOE_MAX_PAYLOAD_BYTES);
+  });
+
+  it('budgetBytes is clamped to SOE_MAX_PAYLOAD_BYTES — a caller can never RAISE the ceiling above the global guard', () => {
+    const heavy = stepWithActions(2000, 'Heavy');
+    const payload = { soe: [heavy] };
+    expect(sizeOf(payload)).toBeGreaterThan(SOE_MAX_PAYLOAD_BYTES); // precondition
+
+    // Ask for a budget well above the hard ceiling; it must still enforce the
+    // ceiling (the option only ever RESERVES headroom, never grants more).
+    const result = enforceSoeByteBudget(payload, [payload.soe], {
+      budgetBytes: SOE_MAX_PAYLOAD_BYTES * 10,
+    });
+    expect(sizeOf(payload)).toBeLessThanOrEqual(SOE_MAX_PAYLOAD_BYTES);
+    expect(result.truncated).toBe(true);
+  });
+
   it('soeTruncationNote names the action count and the budget', () => {
     const note = soeTruncationNote({ truncated: true, actionsOmitted: 42, conditionalsTrimmed: 0, stepsOmitted: 0 });
     expect(note).toContain('42');

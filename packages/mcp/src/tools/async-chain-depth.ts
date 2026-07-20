@@ -43,10 +43,31 @@ export const asyncChainDepthInputSchema = z.preprocess(
 
 export type AsyncChainDepthInput = z.infer<typeof asyncChainDepthInputSchema>;
 
+/**
+ * Which graph edge produced a chain hop. `dispatchesAsync` is a genuine async
+ * boundary (Queueable / Batch / Schedulable / `@future`); `callsApex` is the
+ * SYNCHRONOUS Flow→ApexClass entry hop that seeds a Flow-rooted walk.
+ */
+export type AsyncChainEdgeType = 'callsApex' | 'dispatchesAsync';
+
 export interface AsyncChainEdge {
   readonly fromId: ComponentId;
   readonly toId: ComponentId;
+  /**
+   * ASYNC depth of this hop: the number of `dispatchesAsync` boundaries between
+   * the nearest ApexClass and this edge. The synchronous Flow→ApexClass entry
+   * hop is depth `0` (it crosses no async boundary); the first real async
+   * dispatch from that Apex class is depth `1`.
+   */
   readonly depth: number;
+  /** The graph edge type that produced this hop. */
+  readonly edgeType: AsyncChainEdgeType;
+  /**
+   * True ONLY for `dispatchesAsync` hops. A synchronous Flow→Apex
+   * `@InvocableMethod` entry (a Flow calling invocable Apex runs in the SAME
+   * transaction) is `false` and does NOT increment `maxDepth`.
+   */
+  readonly async: boolean;
 }
 
 export interface AsyncChainBranchPoint {
@@ -57,6 +78,12 @@ export interface AsyncChainBranchPoint {
 export interface AsyncChainOutput {
   readonly rootClassId: ComponentId | null;
   readonly rootFlowId: ComponentId | null;
+  /**
+   * Maximum ASYNC chain depth — the longest run of `dispatchesAsync` hops.
+   * A Flow root whose only outbound hop is a synchronous `callsApex` entry to
+   * an `@InvocableMethod` (with no downstream async dispatch) reports `0`, NOT
+   * `1`: invoking Apex from a Flow is same-transaction, not an async boundary.
+   */
   readonly maxDepth: number;
   readonly cyclesDetected: boolean;
   readonly truncated: boolean;
@@ -66,7 +93,7 @@ export interface AsyncChainOutput {
 }
 
 const ASYNC_CHAIN_DISCLOSURE =
-  'v2.8 walks the chain via `dispatchesAsync` edges only. The v0.3 Apex scanner that produces those edges is heuristic — reflective async dispatch (`Type.forName + invoke`) and helper-wrapper dispatch (`MyHelper.enqueue(new MyJob())`) are invisible, so the walked chain may UNDERSTATE the runtime chain depth. `@future` dispatch IS now surfaced (CR-CAP-09) but is CLASS-GRANULAR and heuristic: the edge fires when the called class has SOME `@future` method (`properties.dispatchMechanism: "future"`, `granularity: "class"`), not necessarily the method actually invoked — so it may OVER-attribute an async hop to a synchronous call. Depth is capped at 10 hops; chains deeper than that surface with `truncated: true`. When the root is a Flow, depth 1 edges are Flow→ApexClass `callsApex` entry points; async dispatch is walked from each Apex class.';
+  'v2.8 measures ASYNC depth via `dispatchesAsync` edges only, and `maxDepth` counts those async boundaries. The v0.3 Apex scanner that produces those edges is heuristic — reflective async dispatch (`Type.forName + invoke`) and helper-wrapper dispatch (`MyHelper.enqueue(new MyJob())`) are invisible, so the walked chain may UNDERSTATE the runtime chain depth. `@future` dispatch IS now surfaced (CR-CAP-09) but is CLASS-GRANULAR and heuristic: the edge fires when the called class has SOME `@future` method (`properties.dispatchMechanism: "future"`, `granularity: "class"`), not necessarily the method actually invoked — so it may OVER-attribute an async hop to a synchronous call. Depth is capped at 10 hops; chains deeper than that surface with `truncated: true`. When the root is a Flow, the depth-0 hops are SYNCHRONOUS Flow→ApexClass `callsApex` entry points (`edgeType: "callsApex"`, `async: false`) — a Flow invoking `@InvocableMethod` Apex runs in the SAME transaction, so it is NOT an async boundary and does NOT count toward `maxDepth`. Async dispatch is then walked from each Apex entry class, and only those `dispatchesAsync` hops (`async: true`, depth ≥ 1) increment `maxDepth`. A Flow whose only reachable Apex is a synchronous invocable therefore reports `maxDepth: 0`.';
 
 const compareChainEdges = (a: AsyncChainEdge, b: AsyncChainEdge): number => {
   if (a.depth !== b.depth) return a.depth - b.depth;
@@ -166,7 +193,13 @@ const walkDispatchesAsync = async (
       const localTargets = branchTargets.get(sourceId) ?? new Set<ComponentId>();
       for (const edge of edgeBatch.value.get(sourceId) ?? []) {
         localTargets.add(edge.toId);
-        chains.push({ fromId: edge.fromId, toId: edge.toId, depth });
+        chains.push({
+          fromId: edge.fromId,
+          toId: edge.toId,
+          depth,
+          edgeType: 'dispatchesAsync',
+          async: true,
+        });
         edgesEmittedAtThisDepth = true;
         if (!visited.has(edge.toId)) {
           visited.add(edge.toId);
@@ -233,11 +266,21 @@ export const asyncChainDepthHandler = async (
     visited.add(rootFlowId);
     for (const edge of apexCalls.value) {
       if (!edge.toId.startsWith(APEX_CLASS_PREFIX)) continue;
-      chains.push({ fromId: rootFlowId, toId: edge.toId, depth: 1 });
-      maxDepth = Math.max(maxDepth, 1);
+      // The Flow→ApexClass hop is a SYNCHRONOUS `callsApex` entry (a Flow
+      // invoking `@InvocableMethod` Apex runs in the SAME transaction), so it
+      // is depth 0, `async: false`, and must NOT bump `maxDepth`. Only the
+      // `dispatchesAsync` walk below — starting at async depth 0 so the first
+      // real dispatch is depth 1 — increments the async depth.
+      chains.push({
+        fromId: rootFlowId,
+        toId: edge.toId,
+        depth: 0,
+        edgeType: 'callsApex',
+        async: false,
+      });
       if (visited.has(edge.toId)) continue;
       visited.add(edge.toId);
-      const walk = await walkDispatchesAsync(ctx, edge.toId, 1, visited);
+      const walk = await walkDispatchesAsync(ctx, edge.toId, 0, visited);
       if (!walk.ok) return walk;
       chains.push(...walk.value.chains);
       maxDepth = Math.max(maxDepth, walk.value.maxDepth);

@@ -110,9 +110,90 @@ describe('apexBuildAdvisorHandler', () => {
   });
 });
 
+// =============================================================================
+// GUARD (APEX-BUILD-ADVISOR-IGNORES-CLASS-SCOPE): "apex build advisor for SvcA"
+// passes componentId / classApiName / apiName, but the schema stripped them and
+// every call returned the same org-wide briefing. A class scope must now narrow
+// the composed sub-scans to that ONE class + echo appliedScope; the bare call
+// stays byte-identical (no appliedScope key).
+describe('apexBuildAdvisorHandler — class scope (guard)', () => {
+  it('bare call omits appliedScope (byte-identical shape)', async () => {
+    const r = await apexBuildAdvisorHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect('appliedScope' in r.value.data).toBe(false);
+    // Org-wide: SvcB is untested → at least one untested class.
+    expect(r.value.data.testExpectations?.untestedClasses).toBeGreaterThanOrEqual(1);
+  });
+
+  it('componentId scope narrows the briefing to that class + echoes appliedScope', async () => {
+    const bare = await apexBuildAdvisorHandler(ctx, {});
+    const scoped = await apexBuildAdvisorHandler(ctx, {
+      componentId: 'ApexClass:SvcA',
+    });
+    expect(bare.ok && scoped.ok).toBe(true);
+    if (!bare.ok || !scoped.ok) return;
+    expect(scoped.value.data.appliedScope).toEqual({
+      component: 'ApexClass:SvcA',
+      mode: 'component',
+    });
+    // SvcA has a covering test (SvcATest) → 0 untested in scope, vs the bare
+    // org-wide briefing which counts SvcB as untested. Scoped ≠ bare.
+    expect(scoped.value.data.testExpectations?.untestedClasses).toBe(0);
+    expect(scoped.value.data.testExpectations?.untestedClasses).not.toBe(
+      bare.value.data.testExpectations?.untestedClasses,
+    );
+  });
+
+  it('classApiName and apiName aliases resolve identically to componentId', async () => {
+    const byComponentId = await apexBuildAdvisorHandler(ctx, {
+      componentId: 'ApexClass:SvcA',
+    });
+    const byClassApiName = await apexBuildAdvisorHandler(ctx, { classApiName: 'SvcA' });
+    const byApiName = await apexBuildAdvisorHandler(ctx, { apiName: 'SvcA' });
+    expect(byComponentId.ok && byClassApiName.ok && byApiName.ok).toBe(true);
+    if (!byComponentId.ok || !byClassApiName.ok || !byApiName.ok) return;
+    expect(byClassApiName.value.data.appliedScope).toEqual(
+      byComponentId.value.data.appliedScope,
+    );
+    expect(byApiName.value.data.appliedScope).toEqual(
+      byComponentId.value.data.appliedScope,
+    );
+    expect(byClassApiName.value.data.testExpectations).toEqual(
+      byComponentId.value.data.testExpectations,
+    );
+  });
+
+  it('an unresolved class scope is component-not-found (not a silent org-wide briefing)', async () => {
+    const r = await apexBuildAdvisorHandler(ctx, {
+      componentId: 'ApexClass:GhostSvc',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+  });
+
+  it('a non-Apex type prefix is invalid-query', async () => {
+    const r = await apexBuildAdvisorHandler(ctx, {
+      componentId: 'CustomObject:Foo__c',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+});
+
 describe('apexBuildAdvisorInputSchema', () => {
   it('accepts empty input and an objectApiName', () => {
     expect(apexBuildAdvisorInputSchema.safeParse({}).success).toBe(true);
     expect(apexBuildAdvisorInputSchema.safeParse({ objectApiName: 'Account' }).success).toBe(true);
+  });
+
+  it('accepts the class-scope selectors', () => {
+    expect(
+      apexBuildAdvisorInputSchema.safeParse({ componentId: 'ApexClass:SvcA' }).success,
+    ).toBe(true);
+    expect(apexBuildAdvisorInputSchema.safeParse({ classApiName: 'SvcA' }).success).toBe(true);
+    expect(apexBuildAdvisorInputSchema.safeParse({ apiName: 'SvcA' }).success).toBe(true);
   });
 });

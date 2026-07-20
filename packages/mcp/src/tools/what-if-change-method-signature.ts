@@ -139,6 +139,7 @@ import {
   METHOD_SIGNATURE_REQUIRED_COVERAGE,
   type Verdict,
 } from './coverage-trust.js';
+import { firstNonEmpty } from './input-aliases.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 
 
@@ -186,6 +187,16 @@ export interface WhatIfImpactItem {
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface WhatIfChangeMethodSignatureOutput {
+  /**
+   * Echoes the class scope ACTUALLY resolved so a host that passed a
+   * `componentId` / `apiName` alias sees it was honored, not silently rejected
+   * (WHAT-IF-CHANGE-METHOD-SIGNATURE-REJECTS-COMPONENTID). Always `component`
+   * mode — the tool is single-class by contract.
+   */
+  readonly appliedScope: {
+    readonly component: ComponentId;
+    readonly mode: 'component';
+  };
   readonly classApiName: ComponentId;
   readonly methodName: string;
   readonly newSignature: string | null;
@@ -219,7 +230,13 @@ const DISCLOSURE =
  *     string.
  */
 export const whatIfChangeMethodSignatureInputSchema = z.object({
-  classApiName: z.string().min(1),
+  classApiName: z.string().min(1).optional(),
+  // Interchangeable class selectors a host naturally reaches for (as on the
+  // sibling Apex tools) — WHAT-IF-CHANGE-METHOD-SIGNATURE-REJECTS-COMPONENTID.
+  // Resolved to the single target through `resolveTargetId`; disagreeing
+  // selectors → `invalid-query`; at least one is required.
+  componentId: z.string().min(1).optional(),
+  apiName: z.string().min(1).optional(),
   methodName: z.string().min(1),
   newSignature: z.string().optional(),
 });
@@ -228,6 +245,44 @@ export const whatIfChangeMethodSignatureInputSchema = z.object({
 export type WhatIfChangeMethodSignatureInput = z.infer<
   typeof whatIfChangeMethodSignatureInputSchema
 >;
+
+/**
+ * Resolve the single target class from the interchangeable `classApiName` /
+ * `componentId` / `apiName` selectors — the alias residual this closes (a host
+ * naturally passes `componentId` as on get_impact / the Track B-fixed siblings).
+ * Each value is coerced through `coercePrefix` so a bare name and an `ApexClass:`
+ * id both resolve while a WRONG-type prefix (`CustomObject:` / `ApexTrigger:`)
+ * still reaches the handler's precise `invalid-query`. Disagreeing selectors →
+ * `invalid-query` (never a silent pick); none → `invalid-query`.
+ */
+const resolveTargetId = (
+  input: WhatIfChangeMethodSignatureInput,
+): Result<string, McpError> => {
+  const distinct = [
+    ...new Set(
+      [input.classApiName, input.componentId, input.apiName]
+        .map((v) => firstNonEmpty(v))
+        .filter((v): v is string => v !== undefined)
+        .map((v) => coercePrefix(v, [APEX_CLASS_PREFIX])),
+    ),
+  ];
+  if (distinct.length === 0) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        'name the Apex class — pass `classApiName` (e.g. "OrderService"), `componentId` (`ApexClass:OrderService`), or `apiName`',
+      path: 'classApiName',
+    });
+  }
+  if (distinct.length > 1) {
+    return err({
+      kind: 'invalid-query',
+      message: `class selectors name different targets (${distinct.join(', ')}); pass exactly one of classApiName / componentId / apiName`,
+      path: 'classApiName',
+    });
+  }
+  return ok(distinct[0] as string);
+};
 
 /**
  * Whether a `callsApex` edge invokes `methodName` on its target class.
@@ -542,11 +597,13 @@ export const whatIfChangeMethodSignatureHandler = async (
 ): Promise<
   Result<McpResponse<WhatIfChangeMethodSignatureOutput>, McpError>
 > => {
-  const classApiName = coercePrefix(input.classApiName, [APEX_CLASS_PREFIX]);
+  const scopeRes = resolveTargetId(input);
+  if (!scopeRes.ok) return scopeRes;
+  const classApiName = scopeRes.value;
   if (!classApiName.startsWith(APEX_CLASS_PREFIX)) {
     return err({
       kind: 'invalid-query',
-      message: `classApiName must be an ApexClass id (e.g. '${APEX_CLASS_PREFIX}Foo') or a bare class name (e.g. 'Foo'); got '${input.classApiName}'`,
+      message: `classApiName must be an ApexClass id (e.g. '${APEX_CLASS_PREFIX}Foo') or a bare class name (e.g. 'Foo'); got '${classApiName}'`,
       path: 'classApiName',
     });
   }
@@ -637,6 +694,7 @@ export const whatIfChangeMethodSignatureHandler = async (
 
   return ok({
     data: {
+      appliedScope: { component: classId, mode: 'component' },
       classApiName: classId,
       methodName,
       newSignature,

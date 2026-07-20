@@ -225,10 +225,21 @@ Gearset/Copado/DX MCP still ship the change.
    component IDs.
 4. **Free (MIT + Commons Clause).** No per-seat meter. Run `sfi.capabilities`
    for the live roster.
+5. **Two graphs, joined — reasoning, not just retrieval.** The grounded org
+   graph (graph A) is joined to a curated, org-independent **concept model**
+   (graph B — master-detail cascade, junction objects, read-only formula/roll-up
+   fields, stacked record-triggered flows, OWD posture, `without sharing` +
+   external surface, and more). `sfi.interpret` runs graph B as a deterministic
+   rule engine over an offline slice of graph A and returns *cited,
+   confidence-tiered claims* about what a component structurally implies — no LLM
+   inference, no live call. That is a step past "supply the facts to the model":
+   the structural conclusion is computed and grounded, with a citation for every
+   claim (no citation, no claim). Cloud NL competitors reason inside a hosted
+   model you cannot audit; this reasons in a rule engine you can read.
 
 The wedge is not "better SAST than Clayton" or "better deploys than Gearset."
 It is **convergence + locality + honesty** after first-party MCP made shallow
-access free.
+access free — now with a second, org-independent reasoning graph joined on top.
 
 ### Market framing buyers already use
 

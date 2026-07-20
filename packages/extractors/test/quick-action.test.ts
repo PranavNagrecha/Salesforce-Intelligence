@@ -400,6 +400,7 @@ describe('extractQuickAction', () => {
           icon: null,
           height: null,
           width: null,
+          fields: [],
         });
       } finally {
         await rm(dir, { recursive: true, force: true });
@@ -437,6 +438,137 @@ describe('extractQuickAction', () => {
       try {
         const result = await extractQuickAction(path);
         expect(result.ok).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('quickActionLayout fields (QUICK-ACTION-OMITS-FIELD-LAYOUT)', () => {
+    it('emits fields[] prop and references edges to the edited CustomFields', async () => {
+      // Update actions carry a <quickActionLayout> field list — the fields the
+      // button edits. Pre-fix the extractor kept only actionType/label and a
+      // single parentOf edge, so "what does this button update?" was
+      // unanswerable. Synthetic fixture mirrors the SHAPE of the real
+      // Case.Change_Status action (generic field names, no org identifiers).
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<QuickAction xmlns="http://soap.sforce.com/2006/04/metadata">
+  <quickActionLayout>
+    <layoutSectionStyle>TwoColumnsLeftToRight</layoutSectionStyle>
+    <quickActionLayoutColumns>
+      <quickActionLayoutItems>
+        <emptySpace>false</emptySpace>
+        <field>Status</field>
+        <uiBehavior>Required</uiBehavior>
+      </quickActionLayoutItems>
+      <quickActionLayoutItems>
+        <emptySpace>false</emptySpace>
+        <field>Description</field>
+        <uiBehavior>Edit</uiBehavior>
+      </quickActionLayoutItems>
+    </quickActionLayoutColumns>
+    <quickActionLayoutColumns/>
+  </quickActionLayout>
+  <standardLabel>ChangeStatus</standardLabel>
+  <type>Update</type>
+</QuickAction>`;
+      const { dir, path } = await writeTempTopLevelQuickAction(
+        'Case.Change_Status.quickAction-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractQuickAction(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0]!;
+        // Prop preserves source order, with uiBehavior.
+        expect(node.properties.fields).toEqual([
+          { apiName: 'Status', uiBehavior: 'Required' },
+          { apiName: 'Description', uiBehavior: 'Edit' },
+        ]);
+        // Field edges (sorted by toId), carrying uiBehavior.
+        const fieldEdges = result.value.edges.filter(
+          (e) => e.edgeType === 'references' && e.toId.startsWith('CustomField:'),
+        );
+        expect(
+          fieldEdges.map((e) => ({ toId: e.toId, uiBehavior: e.properties['uiBehavior'] })),
+        ).toEqual([
+          { toId: 'CustomField:Case.Description', uiBehavior: 'Edit' },
+          { toId: 'CustomField:Case.Status', uiBehavior: 'Required' },
+        ]);
+        for (const e of fieldEdges) {
+          expect(e.fromId).toBe('QuickAction:Case.Change_Status');
+          expect(e.confidence).toBe('declared');
+          expect(e.source).toBe('quick-action-extractor');
+        }
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('resolves field object from <targetObject> for a global Create action', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<QuickAction xmlns="http://soap.sforce.com/2006/04/metadata">
+  <label>New Case</label>
+  <type>Create</type>
+  <targetObject>Case</targetObject>
+  <quickActionLayout>
+    <quickActionLayoutColumns>
+      <quickActionLayoutItems>
+        <field>Subject</field>
+        <uiBehavior>Edit</uiBehavior>
+      </quickActionLayoutItems>
+    </quickActionLayoutColumns>
+  </quickActionLayout>
+</QuickAction>`;
+      const { dir, path } = await writeTempTopLevelQuickAction(
+        'Global.NewCaseWithLayout.quickAction-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractQuickAction(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const fieldEdges = result.value.edges.filter((e) =>
+          e.toId.startsWith('CustomField:'),
+        );
+        // Field object comes from <targetObject> (Case), not the literal Global.
+        expect(fieldEdges.map((e) => e.toId)).toEqual(['CustomField:Case.Subject']);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits no field edges for a global action with no targetObject', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<QuickAction xmlns="http://soap.sforce.com/2006/04/metadata">
+  <label>Orphan Layout</label>
+  <type>Create</type>
+  <quickActionLayout>
+    <quickActionLayoutColumns>
+      <quickActionLayoutItems>
+        <field>Subject</field>
+        <uiBehavior>Edit</uiBehavior>
+      </quickActionLayoutItems>
+    </quickActionLayoutColumns>
+  </quickActionLayout>
+</QuickAction>`;
+      const { dir, path } = await writeTempTopLevelQuickAction(
+        'Global.OrphanLayout.quickAction-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractQuickAction(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        // The field is still surfaced on the prop, but with no resolvable
+        // object we do not fabricate a CustomField:Global.* edge.
+        expect(result.value.nodes[0]!.properties.fields).toEqual([
+          { apiName: 'Subject', uiBehavior: 'Edit' },
+        ]);
+        expect(
+          result.value.edges.some((e) => e.toId.startsWith('CustomField:')),
+        ).toBe(false);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

@@ -7,7 +7,11 @@
  * `Hidden` on a profile; `Available` / `Visible` / `None` on a permission set),
  * with an `available` flag normalising "the user can reach this tab".
  *
- * Input: `{ componentId: 'Profile:X' | 'PermissionSet:X', limit?, offset? }`.
+ * Input: `{ componentId: 'Profile:X' | 'PermissionSet:X', limit?, offset? }` —
+ * or the natural `profileApiName` / `permissionSetApiName` selector (a bare name
+ * is coerced to the container prefix). Pass an optional `objectApiName` /
+ * `object` / `objectId` to narrow to that object's tab (matched by
+ * tab-naming convention), echoed in `appliedScope`.
  * `declared` confidence — tab visibility is declared profile metadata.
  */
 
@@ -24,7 +28,11 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-import { mergeInputAliases, toProfileOrPermSetId } from './input-aliases.js';
+import {
+  mergeInputAliases,
+  resolveObjectAlias,
+  toProfileOrPermSetId,
+} from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 
 const GRANTER_PREFIXES = ['Profile:', 'PermissionSet:'] as const;
@@ -36,6 +44,12 @@ const AVAILABLE_VISIBILITIES = new Set(['DefaultOn', 'DefaultOff', 'Visible', 'A
 
 const tabAvailabilityInputBaseSchema = z.object({
   componentId: z.string().min(1),
+  // TAB-AVAILABILITY-REJECTS-PROFILEAPINAME: optional OBJECT scope — "is {object}'s
+  // tab available to {profile}?". The handler narrows the tab list to the object's
+  // tab (by Salesforce tab-naming convention) and echoes `appliedScope`.
+  object: z.string().min(1).optional(),
+  objectApiName: z.string().min(1).optional(),
+  objectId: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
   // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
@@ -45,22 +59,34 @@ const tabAvailabilityInputBaseSchema = z.object({
 });
 
 export const tabAvailabilityInputSchema = z.preprocess((raw) => {
+  // TAB-AVAILABILITY-REJECTS-PROFILEAPINAME: accept the natural `profileApiName`
+  // / `permissionSetApiName` selectors alongside the prior `profileId` /
+  // `permissionSetId` aliases — the container is the visibility SUBJECT, resolved
+  // to its `Profile:` / `PermissionSet:` prefix (canonical `componentId` wins).
   const merged = mergeInputAliases(raw, [
     {
       canonical: 'componentId',
-      aliases: ['profileId', 'permissionSetId'],
+      aliases: ['profileId', 'profileApiName', 'permissionSetId', 'permissionSetApiName'],
     },
   ]);
   if (merged !== null && typeof merged === 'object' && !Array.isArray(merged)) {
     const o = merged as Record<string, unknown>;
     const id = typeof o.componentId === 'string' ? o.componentId : '';
-    if (
-      id.length > 0 &&
-      !id.startsWith('Profile:') &&
-      !id.startsWith('PermissionSet:')
-    ) {
+    // TAB-AVAILABILITY-PREFIXES-NON-PROFILE-AS-PROFILE: only coerce a BARE
+    // granter name (no `Type:` prefix — Salesforce API names never contain a
+    // colon) up to a canonical Profile/PermissionSet id. An id that already
+    // carries a component-type prefix (`CustomTab:standard-Case`,
+    // `CustomObject:…`, and even the already-canonical `Profile:`/
+    // `PermissionSet:` forms) contains a `:`, so it is LEFT UNTOUCHED — a
+    // non-granter id then falls through to the handler's Profile/PermissionSet
+    // prefix check and is rejected with `invalid-query`, instead of being
+    // silently rewritten to `Profile:CustomTab:standard-Case` and 404-ing as a
+    // phantom Profile. Mirrors `app_access`'s prefix validation.
+    if (id.length > 0 && !id.includes(':')) {
+      const rawObj = raw as Record<string, unknown>;
       const fromPs =
-        typeof (raw as Record<string, unknown>).permissionSetId === 'string';
+        typeof rawObj.permissionSetId === 'string' ||
+        typeof rawObj.permissionSetApiName === 'string';
       o.componentId = fromPs ? `PermissionSet:${id}` : toProfileOrPermSetId(id);
     }
   }
@@ -82,6 +108,18 @@ export interface TabAvailabilityOutput {
   readonly componentId: string;
   readonly granterType: 'Profile' | 'PermissionSet';
   readonly granterLabel: string;
+  /**
+   * Echoes the OBJECT scope ACTUALLY applied. Present ONLY when the caller
+   * passed an `object` / `objectApiName` / `objectId` selector — a bare
+   * profile/permission-set call omits it so the response stays byte-identical.
+   * When present, `tabs` and `summary` are narrowed to the object's tab (matched
+   * by Salesforce tab-naming convention); an object with no matching tab is an
+   * honest empty, never the full-profile tab dump.
+   */
+  readonly appliedScope?: {
+    readonly componentId: string;
+    readonly object: string;
+  };
   readonly tabs: readonly TabVisibilityRow[];
   readonly summary: {
     readonly total: number;
@@ -165,14 +203,39 @@ export const tabAvailabilityHandler = async (
             : 0,
   );
 
-  const available = rows.filter((r) => r.available).length;
-  const total = rows.length;
+  // TAB-AVAILABILITY-REJECTS-PROFILEAPINAME: optional OBJECT scope. Salesforce
+  // names an object's tab after the object api name (custom objects) or
+  // `standard-<Object>` (standard objects), so narrow the tab list to those two
+  // forms (case-insensitive). `bareComponentIdIsObject:false` keeps the profile
+  // `componentId` from ever being read as the object. No matching tab → honest
+  // empty, never the full-profile tab dump.
+  const objScope = resolveObjectAlias(input, {
+    required: false,
+    bareComponentIdIsObject: false,
+  });
+  if (!objScope.ok) return err(objScope.error);
+  const scopedObject = objScope.value;
+  const scopedRows =
+    scopedObject === null
+      ? rows
+      : rows.filter((r) => {
+          const t = r.tab.toLowerCase();
+          const o = scopedObject.object.toLowerCase();
+          return t === o || t === `standard-${o}`;
+        });
+
+  const available = scopedRows.filter((r) => r.available).length;
+  const total = scopedRows.length;
   const limit = input.limit ?? DEFAULT_LIMIT;
 
   // CR-22: resolve the resume offset — an echoed cursor wins over an explicit
   // `offset`; a stale/forged cursor (changed componentId, different tool, or
-  // refreshed vault) is rejected with `invalid-query`.
-  const fingerprint = argsFingerprint({ componentId: input.componentId });
+  // refreshed vault) is rejected with `invalid-query`. The object scope is part
+  // of the fingerprint so a scoped cursor cannot resume the unscoped list.
+  const fingerprint = argsFingerprint({
+    componentId: input.componentId,
+    ...(scopedObject !== null ? { object: scopedObject.object } : {}),
+  });
   let offset = input.offset ?? 0;
   if (input.cursor !== undefined) {
     const decoded = decodeCursor(input.cursor, {
@@ -188,7 +251,7 @@ export const tabAvailabilityHandler = async (
   // unbounded byteBudget so `paginate()` truncates ONLY on `limit`
   // (byte-identical to the prior open-coded slice). The global jsonResult guard
   // remains the byte backstop.
-  const paged = paginateLegacy(rows, {
+  const paged = paginateLegacy(scopedRows, {
     offset,
     limit,
     byteBudget: Number.MAX_SAFE_INTEGER,
@@ -206,15 +269,22 @@ export const tabAvailabilityHandler = async (
   const truncated = hasMore || offset > 0;
   const emitCursor = paged.nextCursor !== null;
 
-  const boundaryNote = extracted
-    ? 'Tab visibility is declared profile/permission-set metadata. A tab being "available" does not by itself grant object access — the user also needs the object permission (`object_access_audit`). The user must be ASSIGNED this profile/permission set (runtime, not modeled).'
-    : 'This Profile/PermissionSet carries no extracted `tabVisibilities` property — re-run `/sfi-refresh`; the empty list is "not modeled", not a verified "no tabs".';
+  const boundaryNote =
+    (extracted
+      ? 'Tab visibility is declared profile/permission-set metadata. A tab being "available" does not by itself grant object access — the user also needs the object permission (`object_access_audit`). The user must be ASSIGNED this profile/permission set (runtime, not modeled).'
+      : 'This Profile/PermissionSet carries no extracted `tabVisibilities` property — re-run `/sfi-refresh`; the empty list is "not modeled", not a verified "no tabs".') +
+    (scopedObject !== null
+      ? ` Scoped to object \`${scopedObject.object}\`: matched by tab-naming convention (the object api name, or \`standard-<Object>\`); an empty result means no such tab is declared on this container, not that the object has no tab.`
+      : '');
 
   return ok({
     data: {
       componentId,
       granterType: node.type === 'PermissionSet' ? 'PermissionSet' : 'Profile',
       granterLabel: node.label ?? node.apiName,
+      ...(scopedObject !== null
+        ? { appliedScope: { componentId, object: scopedObject.object } }
+        : {}),
       tabs: page,
       summary: { total, available, hidden: total - available },
       limit,

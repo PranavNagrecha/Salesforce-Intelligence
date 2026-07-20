@@ -48,20 +48,20 @@ describe('parseFieldId', () => {
 });
 
 describe('classifyMutability — the formula trap', () => {
-  it('flags a formula-named-like-a-key field as DERIVED (Faculty_ID__c = Pay_To__r.Faculty_ID__c)', () => {
-    const node = fieldNode('CustomField:Education__c.Faculty_ID__c', {
+  it('flags a formula-named-like-a-key field as DERIVED (Member_ID__c = Related_Widget__r.Member_ID__c)', () => {
+    const node = fieldNode('CustomField:Education__c.Member_ID__c', {
       dataType: 'Text',
-      formula: 'Pay_To__r.Faculty_ID__c',
+      formula: 'Related_Widget__r.Member_ID__c',
       externalId: false,
       unique: false,
     });
     const m = classifyMutability(node);
     expect(m.mutability).toBe('derived');
-    expect(m.sourceFormula).toBe('Pay_To__r.Faculty_ID__c');
+    expect(m.sourceFormula).toBe('Related_Widget__r.Member_ID__c');
   });
 
-  it('treats a real writable external-ID key as writable (Contact.Faculty_ID__c)', () => {
-    const node = fieldNode('CustomField:Contact.Faculty_ID__c', {
+  it('treats a real writable external-ID key as writable (Contact.Member_ID__c)', () => {
+    const node = fieldNode('CustomField:Contact.Member_ID__c', {
       dataType: 'Text',
       formula: null,
       externalId: true,
@@ -89,12 +89,12 @@ describe('classifyUpsertKey — metadata signals, per instance', () => {
   });
 
   it('does NOT treat a same-named externalId=false shadow copy as a key', () => {
-    const node = fieldNode('CustomField:Registered_Courses_Exam__c.External_Ref_Id__c', {
+    const node = fieldNode('CustomField:Sample_Exam__c.External_Ref_Id__c', {
       dataType: 'Text',
       externalId: false,
       unique: false,
     });
-    expect(classifyUpsertKey(node, 'Registered_Courses_Exam__c', 'External_Ref_Id__c').isUpsertKey).toBe(false);
+    expect(classifyUpsertKey(node, 'Sample_Exam__c', 'External_Ref_Id__c').isUpsertKey).toBe(false);
   });
 
   it('treats User.Username as an idLookup upsert key even with no metadata flag', () => {
@@ -138,9 +138,9 @@ describe('classifyRole — identity/integration blast radius', () => {
   });
 
   it('short-circuits a derived field to low (not changeable)', () => {
-    const r = roleOf('CustomField:Education__c.Faculty_ID__c', 'Education__c', 'Faculty_ID__c', {
+    const r = roleOf('CustomField:Education__c.Member_ID__c', 'Education__c', 'Member_ID__c', {
       dataType: 'Text',
-      formula: 'Pay_To__r.Faculty_ID__c',
+      formula: 'Related_Widget__r.Member_ID__c',
     });
     expect(r.severity).toBe('low');
     expect(r.role).toMatch(/Derived/);

@@ -77,6 +77,7 @@ import type { Context } from '../server.js';
 
 import { annotationsBlockFor, type AnnotationsBlock } from './annotations.js';
 import { fieldNotFoundError } from './field-not-found-suggest.js';
+import { resolveFieldAlias } from './input-aliases.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import { normalizePicklistValues } from './picklist-values.js';
 import { resolveToFieldOrSuggest } from './resolve-field-or-suggest.js';
@@ -108,10 +109,18 @@ const CUSTOM_METADATA_DEFINITION_SUFFIX = '__mdt';
  *     useful when the caller only wants the field's intrinsic
  *     metadata and would otherwise pay the listChildren round-trip.
  */
-export const explainFieldInputSchema = z.object({
-  fieldId: z.string().min(1),
-  includeRecordValues: z.boolean().optional(),
-});
+export const explainFieldInputSchema = z
+  .object({
+    // Field identity: `fieldId` (canonical `CustomField:…` or `<Object>.<Field>`
+    // short form) or the `componentId` alias a host reaches for (L2 Alias OS).
+    fieldId: z.string().min(1).optional(),
+    componentId: z.string().min(1).optional(),
+    includeRecordValues: z.boolean().optional(),
+  })
+  .refine((i) => i.fieldId !== undefined || i.componentId !== undefined, {
+    message: 'name the field — pass `fieldId` or `componentId` (e.g. "CustomField:Account.My_Field__c")',
+    path: ['fieldId'],
+  });
 
 /** Parsed input shape, inferred from `explainFieldInputSchema`. */
 export type ExplainFieldInput = z.infer<typeof explainFieldInputSchema>;
@@ -498,8 +507,13 @@ const collectRecordValues = async (
  */
 export const explainFieldHandler = async (
   ctx: Context,
-  input: ExplainFieldInput,
+  rawInput: ExplainFieldInput,
 ): Promise<Result<McpResponse<ExplainFieldOutput>, McpError>> => {
+  // L2 Alias OS: accept the `componentId` alias for `fieldId`. Disagreeing
+  // values -> invalid-query (never a silent pick). Normalize into `fieldId`.
+  const fieldAlias = resolveFieldAlias(rawInput);
+  if (!fieldAlias.ok) return err(fieldAlias.error);
+  const input = { ...rawInput, fieldId: fieldAlias.value.fieldId };
   // FLD-02: graceful object→field routing.
   const suggestionResult = await resolveToFieldOrSuggest(ctx, input.fieldId);
   if (!suggestionResult.ok) return suggestionResult;

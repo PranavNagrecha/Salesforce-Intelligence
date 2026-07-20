@@ -97,6 +97,115 @@ describe('buildApexScannerEdges callsApex method-level aggregation (P4-C5)', () 
   });
 });
 
+// APEX-SOBJECT-REF-MINTED-AS-APEXCLASS: sObject / custom-setting tokens used in
+// Apex (a static custom-setting call, an sObject constructor) were projected as
+// callsApex/references to ApexClass:{token} phantoms while the real CustomObject
+// node stayed graph-orphan. Object-suffixed tokens must route to CustomObject.
+describe('buildApexScannerEdges — sObject/custom-setting tokens route to CustomObject, not ApexClass (APEX-SOBJECT-REF-MINTED-AS-APEXCLASS)', () => {
+  it('routes a static custom-setting call (X__c.getOrgDefaults()) to references CustomObject, not callsApex ApexClass', () => {
+    const source = [
+      'public class CalcBatch {',
+      '  void run() {',
+      '    Widget_Setting__c cfg = Widget_Setting__c.getOrgDefaults();',
+      '  }',
+      '}',
+    ].join('\n');
+    const result = buildApexScannerEdges(source, 'ApexClass:CalcBatch');
+    // No phantom ApexClass for the custom-setting token.
+    expect(
+      result.edges.some((e) => e.toId === 'ApexClass:Widget_Setting__c'),
+    ).toBe(false);
+    // The real object node gets a references edge instead.
+    const objRef = result.edges.find(
+      (e) => e.toId === 'CustomObject:Widget_Setting__c' && e.edgeType === 'references',
+    );
+    expect(objRef).toBeDefined();
+    expect(objRef?.properties['mechanism']).toBe('apexStaticObjectRef');
+  });
+
+  it('routes a new X__c() sObject constructor to references CustomObject, not ApexClass', () => {
+    const source =
+      'public class Maker { void run() { Widget__c p = new Widget__c(); } }';
+    const result = buildApexScannerEdges(source, 'ApexClass:Maker');
+    expect(result.edges.some((e) => e.toId === 'ApexClass:Widget__c')).toBe(false);
+    const objRef = result.edges.find(
+      (e) => e.toId === 'CustomObject:Widget__c' && e.edgeType === 'references',
+    );
+    expect(objRef).toBeDefined();
+    expect(objRef?.properties['mechanism']).toBe('instantiation');
+  });
+
+  it('keeps a managed-namespaced object token (ns__Widget__c) off the ApexClass family', () => {
+    const source =
+      'public class Svc { void run() { ns__Widget__c.getAll(); } }';
+    const result = buildApexScannerEdges(source, 'ApexClass:Svc');
+    expect(
+      result.edges.some((e) => e.toId === 'ApexClass:ns__Widget__c'),
+    ).toBe(false);
+    expect(
+      result.edges.some((e) => e.toId === 'CustomObject:ns__Widget__c'),
+    ).toBe(true);
+  });
+
+  it('does NOT reroute a real Apex class call/instantiation (no false CustomObject)', () => {
+    const source =
+      'public class Foo { void run() { Handler.go(); Helper h = new Helper(); } }';
+    const result = buildApexScannerEdges(source, 'ApexClass:Foo');
+    expect(
+      result.edges.some((e) => e.toId === 'ApexClass:Handler' && e.edgeType === 'callsApex'),
+    ).toBe(true);
+    expect(
+      result.edges.some((e) => e.toId === 'ApexClass:Helper' && e.edgeType === 'references'),
+    ).toBe(true);
+    expect(result.edges.some((e) => e.toId.startsWith('CustomObject:'))).toBe(false);
+  });
+});
+
+// APEX-STATIC-FIELD-CUSTOMFIELD-PHANTOMS: Apex static fields on utility classes
+// (WidgetGuard.guardBefore) were minted as CustomField:{Class}.{field} phantoms,
+// stealing the usage from the real ApexClass:{Class}. A camelCase-no-`__` member
+// on a PascalCase class token must route to references ApexClass instead.
+describe('buildApexScannerEdges — Apex static fields route to references ApexClass, not CustomField (APEX-STATIC-FIELD-CUSTOMFIELD-PHANTOMS)', () => {
+  it('routes ClassName.camelCaseStaticField to references ApexClass, dropping the CustomField phantom', () => {
+    const source = [
+      'public class WidgetTrigger {',
+      '  void run() {',
+      '    WidgetGuard.guardBefore = true;',
+      '    Boolean b = WidgetGuard.guardAfter;',
+      '  }',
+      '}',
+    ].join('\n');
+    const result = buildApexScannerEdges(source, 'ApexClass:WidgetTrigger');
+    // No CustomField phantoms on the Apex class' static fields.
+    expect(
+      result.edges.some((e) => e.toId.startsWith('CustomField:WidgetGuard.')),
+    ).toBe(false);
+    // The real class dependency is emitted instead (usages land on it).
+    const ref = result.edges.find(
+      (e) => e.toId === 'ApexClass:WidgetGuard' && e.edgeType === 'references',
+    );
+    expect(ref).toBeDefined();
+    expect(ref?.properties['mechanism']).toBe('apexStaticField');
+  });
+
+  it('keeps a genuine schema field access (Type.Field / Type.Attr__c) as CustomField', () => {
+    const source = [
+      'public class Repo {',
+      '  void run(Account a) {',
+      '    String n = a.Name;',
+      '    Object v = a.Sector__c;',
+      '  }',
+      '}',
+    ].join('\n');
+    const result = buildApexScannerEdges(source, 'ApexClass:Repo');
+    const targets = result.edges.map((e) => e.toId);
+    expect(targets).toContain('CustomField:Account.Name');
+    expect(targets).toContain('CustomField:Account.Sector__c');
+    // PascalCase / __c fields are NOT rerouted to ApexClass.
+    expect(targets).not.toContain('ApexClass:Account');
+  });
+});
+
 describe('buildApexScannerEdges — drops unresolvable trigger-context phantoms (G3)', () => {
   it('does not emit callsApex to newMap/oldMap (Trigger.newMap/.oldMap parse artifacts)', () => {
     const source = [
@@ -172,5 +281,50 @@ describe('buildApexScannerEdges — EventBus.subscribe → listensTo (P3b)', () 
       "public class CdcSub { void run() { EventBus.subscribe('Account_ChangeEvent', this); } }";
     const result = buildApexScannerEdges(source, 'ApexClass:CdcSub');
     expect(result.edges.some((e) => e.edgeType === 'listensTo')).toBe(false);
+  });
+});
+
+// NAMED-CREDENTIAL-APEX-CALLOUT-UNGRAPHED: `callout:{NamedCredential}` endpoint
+// literals live INSIDE strings (which the scanner blanks), so they produced no
+// graph edge — the credential read as orphaned / safe-to-delete despite the
+// grep tier surfacing it. buildApexScannerEdges must now emit the edge.
+describe('buildApexScannerEdges — callout:NamedCredential → references (NAMED-CREDENTIAL-APEX-CALLOUT-UNGRAPHED)', () => {
+  it('emits a heuristic references edge to the Named Credential named in a callout: endpoint', () => {
+    const source =
+      "public class DataIngestController { void run() { HttpRequest req = new HttpRequest(); req.setEndpoint('callout:My_Named_Credential/services/data'); } }";
+    const result = buildApexScannerEdges(source, 'ApexClass:DataIngestController');
+    const edge = result.edges.find(
+      (e) => e.edgeType === 'references' && e.toId === 'NamedCredential:My_Named_Credential',
+    );
+    expect(edge).toBeDefined();
+    expect(edge?.confidence).toBe('heuristic');
+    expect(edge?.properties['referenceKind']).toBe('apexCallout');
+  });
+
+  it('captures a bare callout:Name with no trailing path', () => {
+    const source =
+      "public class Caller { void run() { String ep = 'callout:Payments_API'; } }";
+    const result = buildApexScannerEdges(source, 'ApexClass:Caller');
+    expect(
+      result.edges.some((e) => e.toId === 'NamedCredential:Payments_API'),
+    ).toBe(true);
+  });
+
+  it('mints NO edge for a dynamic callout: built by string concatenation', () => {
+    const source =
+      "public class Dyn { void run() { String ep = 'callout:' + ncName; } }";
+    const result = buildApexScannerEdges(source, 'ApexClass:Dyn');
+    expect(
+      result.edges.some((e) => e.toId.startsWith('NamedCredential:')),
+    ).toBe(false);
+  });
+
+  it('mints NO edge for a commented-out callout', () => {
+    const source =
+      "public class C { void run() { // req.setEndpoint('callout:Ghost_NC');\n Integer x = 1; } }";
+    const result = buildApexScannerEdges(source, 'ApexClass:C');
+    expect(
+      result.edges.some((e) => e.toId === 'NamedCredential:Ghost_NC'),
+    ).toBe(false);
   });
 });

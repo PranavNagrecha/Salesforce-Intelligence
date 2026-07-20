@@ -80,6 +80,7 @@ import {
   foldReportDashboardUsageIntoFields,
   parseTypeFilter,
   renderVault,
+  resolveRestrictionRuleProfileEdges,
   SUPPORTED_TYPES,
   walkAndExtract,
   componentTypeFromSourcePath,
@@ -978,6 +979,14 @@ export const runRefresh = async (opts: RunRefreshOptions): Promise<RefreshResult
   // (folder-based, high-volume) report/dashboard nodes — the usage lives on the
   // field, with no per-report node bloat. No-op when none were retrieved.
   walked = { ...walked, results: foldReportDashboardUsageIntoFields(walked.results) };
+
+  // RESTRICTION-RULE-OMITS-PROFILE-USERCRITERIA-EDGE: resolve RestrictionRule /
+  // ScopingRule `UnresolvedProfile:{id}` userCriteria stubs to real
+  // `Profile:{apiName}` edges when a Profile node carries its Salesforce Id.
+  // Identity no-op on a normal offline vault (Profile metadata carries no Id →
+  // the honest `UnresolvedProfile:` stubs are left intact); resolvable only when
+  // the profile Id becomes available (e.g. future enrichment).
+  walked = { ...walked, results: resolveRestrictionRuleProfileEdges(walked.results) };
 
   // FLD-05: org describe snapshot for standard-object fields (Account, Contact, …).
   // Read-only `sf sobject describe` — safe on --no-pull (no metadata retrieve).
@@ -4350,6 +4359,8 @@ const DEMAND_REFUSAL_REASON: Record<PhantomClassification, string> = {
     'a standard object/field — referenced, not retrieved into the custom vault',
   'grant-only':
     'only permission grants reference it — not worth retrieving (the 700+ grant-only trap)',
+  'unresolved-profile-id':
+    'a Profile Id with no api name — enrich via an Id→apiName index / live Tooling, not a retrieve',
   unknown:
     'not an automation-critical reference — nothing depends on it that demand-retrieve would fix',
 };

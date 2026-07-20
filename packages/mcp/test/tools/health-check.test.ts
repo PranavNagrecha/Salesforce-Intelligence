@@ -102,10 +102,88 @@ describe('healthCheckHandler: healthy', () => {
     });
     expect(result.value.data.reason).toBeUndefined();
     expect(result.value.data.vaultHistory.enabled).toBe(false);
+    // Disabled vault → the hint carries BOTH the enable command and its
+    // plain-English value prop (VAULT-GIT-ADOPTION discoverability).
     expect(result.value.data.vaultHistory.enableHint).toContain('sfi vault git enable');
+    expect(result.value.data.vaultHistory.enableHint).toContain('when did this change?');
+    // A manifest with no phantomSummary (baseManifest) echoes null — not a
+    // fabricated empty roll-up (REFRESH-REQUIRED to populate).
+    expect(result.value.data.phantomSummary).toBeNull();
     expect(result.value.vaultState.sourceTreeHash).toBe(
       ctx.manifest.sourceTreeHash,
     );
+  });
+});
+
+describe('healthCheckHandler: phantomSummary echo (VAULT-PHANTOM-MANIFEST-SUMMARY)', () => {
+  let vaultRoot: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    vaultRoot = await mkdtemp(join(tmpdir(), 'sfi-mcp-health-phantom-'));
+    const realHash = await seedSourceTree(vaultRoot);
+    const built = await openContext(vaultRoot, {
+      ...baseManifest(realHash),
+      phantomSummary: {
+        computedAt: '2026-05-27T14:33:08Z',
+        distinctPhantoms: 3,
+        buckets: { 'automation-critical': 2, 'grant-only': 1 },
+      },
+    });
+    ctx = built.ctx;
+    store = built.store;
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    await rm(vaultRoot, { recursive: true, force: true });
+  });
+
+  it('echoes the refresh-computed manifest phantomSummary verbatim, without changing status', async () => {
+    const result = await healthCheckHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.phantomSummary).toEqual({
+      computedAt: '2026-05-27T14:33:08Z',
+      distinctPhantoms: 3,
+      buckets: { 'automation-critical': 2, 'grant-only': 1 },
+    });
+    // Informational only — a phantom roll-up never degrades the verdict.
+    expect(result.value.data.status).toBe('healthy');
+  });
+});
+
+describe('healthCheckHandler: vaultHistory enabled (VAULT-GIT-ADOPTION)', () => {
+  let vaultRoot: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    vaultRoot = await mkdtemp(join(tmpdir(), 'sfi-mcp-health-git-'));
+    const realHash = await seedSourceTree(vaultRoot);
+    // `sfi vault git enable` records its state as `org-kb/.git`; the handler
+    // detects the feature by that directory's presence. Simulate an enabled
+    // vault by creating it (an empty dir is enough for the existsSync probe).
+    await mkdir(join(vaultRoot, '.git'), { recursive: true });
+    const built = await openContext(vaultRoot, baseManifest(realHash));
+    ctx = built.ctx;
+    store = built.store;
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    await rm(vaultRoot, { recursive: true, force: true });
+  });
+
+  it('reports vaultHistory.enabled=true with no enable hint once org-kb/.git exists', async () => {
+    const result = await healthCheckHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.vaultHistory.enabled).toBe(true);
+    expect(result.value.data.vaultHistory.enableHint).toBeNull();
+    // Enabling git history never changes the health verdict — advisory only.
+    expect(result.value.data.status).toBe('healthy');
   });
 });
 

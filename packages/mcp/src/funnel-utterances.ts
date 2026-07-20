@@ -1445,6 +1445,36 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'pull up what the <FlowName> flow does',
     'open the <FlowName> flow and explain it to me',
   ],
+  'sfi.flow_graph': [
+    'show me the structure of <FlowName>',
+    'what are the branches in <FlowName>',
+    'trace the connectors of <FlowName>',
+    'what elements and decisions are in <FlowName>',
+    'give me the full element graph of <FlowName>',
+    'what runs after the <FlowName> start element',
+    'map the connector graph for <FlowName> — every from and to edge',
+    'list every element in <FlowName> with its real name and type',
+    'what does each decision rule in <FlowName> connect to next',
+    'show the assignments, record ops, and loops in <FlowName>',
+    'which element does the <FlowName> loop go to on next value vs no more values',
+    'give me the raw structural graph of <FlowName> so I can see the wiring',
+    'what are the fault-path connectors in <FlowName>',
+    'diagram the flow of control through <FlowName>',
+  ],
+  'sfi.flow_trace': [
+    'what happens to this record in <FlowName> if Status is Active',
+    'trace <FlowName> with these field values',
+    'which branch runs in <FlowName> when <FieldName> is High',
+    'what does <FlowName> write when the amount is over 1000',
+    'simulate <FlowName> for a record where Status is Closed',
+    'walk this record through <FlowName> and tell me which path it takes',
+    'if <FieldName> equals Approved, which decision branch does <FlowName> take',
+    'what fields does <FlowName> update for a record with these values',
+    'trace the executed path of <FlowName> for this record state',
+    'which rule fires in the <FlowName> decision when Priority is Urgent',
+    'does the record enter <FlowName> when Status is Draft',
+    'what path does <FlowName> run for an Account where Type is Customer',
+  ],
   'sfi.explain_apex_method': [
     'what does the <MethodName> method in <ApexClass> do?',
     'explain the <MethodName> method — inputs, outputs, side effects',
@@ -1918,6 +1948,388 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'trace the origin of values in <Field__c>',
     // biz-user register (router-v2 R2): "how does it get its value" shape.
     'how does the <Field__c> field get its value — is it a formula or is something writing to it?',
+  ],
+  // RM-wire — the reasoning-engine surface. Vocabulary deliberately centered on
+  // "interpret / interpretation / reasoning engine / concept rule / reason
+  // about / structurally imply" so it self-recalls without poaching the
+  // error-decode (explain_error), source-of-truth (field_provenance), or
+  // save-cascade (order_of_execution) vocabularies.
+  'sfi.interpret': [
+    'interpret this component for me — what does the reasoning engine conclude about it?',
+    'run the concept-rule reasoning engine over CustomObject:<Object>__c',
+    'what interpretations does the reasoning model emit for this component?',
+    'reason about <Component> and cite what each conclusion is grounded in',
+    'which concept rules fire for this component?',
+    'give me the deterministic offline interpretation of this master-detail field',
+    'what does this roll-up summary field structurally imply, per the concept model?',
+    'apply the curated reasoning rules to <FlowName> and show the grounded claims',
+    'what can the reasoning engine tell me about this field from the vault snapshot alone?',
+    // ROUTE-UNDER-RANKS-SHIPPED-A2-FIELD-CONSTRAINT-CONCEPT — "Can two records
+    // share this External Id?" ranked live_record_shares / record_creation_paths
+    // above interpret, so unique-field-constraint / external-id-field reasoning
+    // was present-not-primary. Bind duplicate-value / external-id / unique-field
+    // consequence wording to the reasoning surface (generic placeholders only).
+    'Can two records share this External Id?',
+    'can two records share the same value on this unique field?',
+    'if this field is marked unique, can two records hold the same external id value?',
+    'does this external id field allow duplicate values, or must each record have a distinct value?',
+    'can two records share the same external id on this field, or does upsert require a unique key?',
+    'is this field marked unique so duplicate values across records are rejected at save time?',
+    'interpret this object — which concepts attach to it and what do they imply?',
+    'structural reasoning about this lookup relationship, with cited component ids',
+    'run interpret on this component and list every reasoning rule that fired',
+    'what grounded interpretations apply to <Component>, and how confident are they?',
+    // Real-user concept questions. These deliberately describe the Salesforce
+    // consequence rather than naming the internal "interpret" / "concept rule"
+    // machinery: an MCP user should not need product vocabulary to reach it.
+    'what makes <Object> a junction object, and what happens to the join records if either parent is deleted?',
+    'does this object have exactly two master-detail parents, making it a many-to-many junction?',
+    'does <ApexClass> run in the same transaction as its caller, or is its work deferred asynchronously?',
+    'does this schedulable run in the same transaction as the code that schedules it?',
+    'is <ApexClass> callable from Lightning, Flow, or REST, and what security posture does that create?',
+    'does <ApexClass> enforce the running user record sharing, or is it declared without sharing?',
+    'these active record-triggered flows share one trigger context — is their execution order deterministic?',
+    'what risk comes from several active before-save or after-save flows on the same object?',
+    'what does this object OWD posture imply, and what does it not prove about a specific user or record?',
+    'why could a save on this object fail, and which save-time automations are plausible causes?',
+    // REASONING-SEMANTIC-FUNNEL-REAL-PHRASING-GAPS: verbatim consequence
+    // wording (generic placeholders only) for four shapes whose natural
+    // phrasing was captured by broad specialists before interpret entered the
+    // top-8. Each mirrors a real user question but with placeholder / standard
+    // entities (NightlyRecalcBatch, Account, Asset, Case).
+    // (1) async-boundary + write-visibility of a batch/queueable.
+    'does NightlyRecalcBatch enqueue more asynchronous work, and when do its writes become visible?',
+    'does this batch class chain into further async jobs, and when can the caller see its record writes?',
+    // (2) Controlled by Parent OWD → record visibility.
+    'what does a Controlled by Parent sharing setting mean for record visibility on this object?',
+    'the OWD on Asset is Controlled by Parent — what does that imply for who can see the records?',
+    // (3) multiple active flows sharing one trigger phase → ordering risk.
+    'do multiple active flows on this object share the same trigger phase, and what ordering risk follows?',
+    'several active flows fire in the same save phase on Account — what ordering risk does that create?',
+    'multiple active flows share a trigger phase on this object — what ordering risk follows from their nondeterministic order?',
+    'do two or more active flows occupy the same trigger phase, so their relative ordering is not guaranteed?',
+    'when active flows stack in one trigger phase, what ordering risk should I reason about?',
+    // (4) a save failed with a status code → which configured automations.
+    'a save failed with a status code — which configured automations are the plausible sources?',
+    'a Case save aborted with a status code; which configured automations could be responsible?',
+    // ROUTE-MISSES-SHIPPED-MULTIPLICITY-CONCEPT — the SHIPPED reasoning concepts
+    // in the apex-trigger-multiplicity + scheduled-path / async family fire, but
+    // the funnel never ranked interpret for their natural COUNT / ordering-risk
+    // wording ("how many active triggers", "multiple triggers", "scheduled path
+    // after commit", "platform-event triggered"), so the reasoning never reached
+    // the host. These consequence phrasings (generic placeholders / standard
+    // Account/Contact only) bind that vocabulary to the reasoning surface.
+    // (a) concept:apex-trigger-per-object-multiplicity — two-or-more ACTIVE
+    //     triggers ⇒ undefined relative order. The COUNT is the honest signal.
+    'how many active Apex triggers fire on this object, and is their execution order undefined?',
+    'how many active triggers are on Contact, and could their order change between releases?',
+    'does this object have more than one active Apex trigger, so their relative order is not guaranteed?',
+    'does Account have multiple active Apex triggers, and what ordering risk does that create?',
+    'this object has two or more active Apex triggers on the same event — is their run order deterministic?',
+    'are there several active triggers on this object, making their execution order undefined?',
+    'is there more than one active trigger on Contact, and should they be consolidated into a single handler?',
+    // (b) concept:flow-scheduled-path-post-commit-fault — an async scheduled path
+    //     runs in a SEPARATE transaction after the save commits; a fault on it
+    //     cannot roll back the already-committed save.
+    'this record-triggered flow has a scheduled path that runs after the save commits — can a fault on it roll back the original save?',
+    'a scheduled path runs asynchronously after the record commits — are its writes visible to the original save transaction?',
+    'what risk comes from a flow scheduled path that runs in a separate transaction after the save commits?',
+    // ROUTE-UNDER-RANKS-SHIPPED-SCHEDULED-PATH-CONCEPT — the NAMED-flow natural
+    // phrasing ("does <Flow> run after the save commits in a separate
+    // transaction?") ranked what_happens_on_save / order_of_execution above
+    // interpret, so the shipped scheduled-path-post-commit-fault concept was
+    // present-not-primary. These bind the "run after the save commits in a
+    // separate transaction" / "asynchronous after-commit" / "outside the save
+    // transaction" wording to the reasoning surface so interpret reaches top-2.
+    'does this flow run after the save commits, in a separate transaction from the save?',
+    'this flow has an asynchronous after-commit scheduled path — does it run outside the save transaction?',
+    'does the scheduled path on this flow run after the commit, so a fault there cannot roll back the save?',
+    'is this an async flow that runs in its own transaction after the record commits, decoupled from the save?',
+    // (c) concept:flow-platform-event-triggered-async — a platform-event-triggered
+    //     flow runs asynchronously as the Automated Process user.
+    'is this flow platform-event triggered, so it runs asynchronously as the Automated Process user?',
+    'what does a platform-event-triggered flow imply for the transaction and the running user?',
+    // ROUTE-UNDER-RANKS-SHIPPED-PE-ASYNC-CONCEPT — the acceptance phrasing
+    // ("Does this platform-event Flow run async as Automated Process?") ranked
+    // event_subscribers / async_chain_depth / order_of_execution above interpret,
+    // so flow-platform-event-triggered-async and apex-trigger-platform-event-async
+    // were present-not-primary. Bind platform-event + async + Automated Process
+    // wording to the reasoning surface (generic placeholders only).
+    'Does this platform-event Flow run async as Automated Process?',
+    'does this platform-event flow run asynchronously as the Automated Process user?',
+    'when a flow is triggered by a platform event, does it run async as Automated Process outside the publisher transaction?',
+    'does this Apex trigger on a platform event run async as Automated Process?',
+    'is this platform-event Apex trigger asynchronous — does it run as the Automated Process user after publish?',
+    'what user context runs a platform-event-triggered flow — is it Automated Process rather than the publisher?',
+    // ROUTE-MISSES-SHIPPED-APEX-CODE-QUALITY-CONCEPTS / -FLOW-FAULT-ROLLBACK /
+    // -TEST-WITHOUT-ASSERTIONS — five SHIPPED Graph-B concepts fire on the oracle
+    // but their natural code-defect vocabulary (injection / dynamic SOQL / DML-in-
+    // loop / unhandled fault / zero assertions) was owned by broad specialists, so
+    // interpret never entered the funnel top-8. Generic placeholders only.
+    // (5a) apex-soql-injection-surface
+    'does this Apex class build a dynamic SOQL query from user input, creating a SOQL injection risk?',
+    'is this class concatenating user input into a dynamic SOQL string — is that a SOQL injection risk?',
+    'does this class assemble a query from unsanitized user input, exposing a SOQL injection surface?',
+    'is there a SOQL injection risk where user input flows into a dynamic database query in this class?',
+    // (5b) apex-bulkification-gap — SOQL/DML in a loop, not bulkified.
+    'does this Apex class run SOQL or DML inside a loop, so it is not bulkified and risks governor limits?',
+    'which Apex classes query or write to the database inside a loop and risk governor limits on bulk data?',
+    'does this class do per-record SOQL or DML in a loop instead of bulkifying, risking governor limits?',
+    'is this Apex class bulkified, or does it put SOQL and DML inside loops?',
+    // (5f) bulkification-gap-in-trigger-reachable (C19) — loop gap reachable via callsApex.
+    'is in-loop SOQL or DML in a class reachable from a trigger amplified to 200 rows?',
+    'is in-loop SOQL or DML reachable from a trigger amplified to 200 rows per the concept model?',
+    'does a trigger-reachable bulkification gap amplify in-loop SOQL or DML to 200 rows?',
+    'does this trigger call Apex that queries or writes inside a loop, risking governor limits on a bulk load?',
+    'does this trigger call Apex that queries or writes inside a loop — is that an amplified bulkification gap at trigger scale?',
+    'when a trigger calls Apex with SOQL or DML in a loop, does the reasoning engine flag governor-limit amplification on bulk load?',
+    'when a trigger invokes a handler with SOQL in a loop, is the governor limit risk amplified across up to 200 records?',
+    'is loop-based SOQL or DML in a class called by this trigger a bulkification gap at trigger scale?',
+    'does this Apex trigger reach a class with dml-in-loop or soql-in-loop, so the anti-pattern scales with trigger batch size?',
+    'does this Apex trigger reach a handler class with soql-in-loop or dml-in-loop so the loop anti-pattern scales with the trigger batch?',
+    'can a trigger that calls a non-bulkified Apex handler fail with a LimitException under a 200-record import?',
+    'does the reasoning engine conclude a trigger calls a handler with an in-loop SOQL or DML bulkification gap amplified to trigger row count?',
+    // (5c) apex-crud-fls-unenforced
+    'does this Apex class run without enforcing CRUD or field-level security on the records it touches?',
+    // (5d) flow-fault-path-rollback-gap
+    'does this record-triggered flow have unhandled fault paths that could roll back the whole save transaction?',
+    'this flow has DML with no fault connector — could an unhandled fault roll back the original save?',
+    // (5e) test-class-without-assertions
+    'does this Apex test class have zero meaningful assertions and just inflate coverage without verifying behavior?',
+    'is this test class asserting nothing — running code only to pad coverage numbers?',
+    // Arc-2 Wave 2/3/4 NL hooks — six concept families whose natural consequence
+    // wording was owned by broad specialists (effective_permissions,
+    // what_happens_on_save, generate_sharing_summary, profile_security,
+    // live_duplicate_check) so interpret never reached top-5. Generic
+    // placeholders / standard objects only.
+    // (6a) object-crud-grant-layer (A15) — table-level CRUD is not row/column access.
+    'Is object-level Read permission table-level only — does it not by itself grant record visibility?',
+    'does object-level Create permission grant table access without opening every row?',
+    'is the Read grant on this object table-level only, separate from record sharing and field-level security?',
+    'does Edit permission on an object mean table-level access, not visibility into every record?',
+    'object CRUD on Account — is that a table-level grant that still needs sharing for record access?',
+    // A15 reachability boost — concentrate the distinctive consequence tokens
+    // ("table-level", "by itself", "grant record visibility") so interpret ranks
+    // top-5 for the object-CRUD-is-not-record-access implication (was rank 6).
+    'does object-level Read grant record visibility by itself, or is it a table-level grant only?',
+    'is object Read a table-level grant that by itself does not grant record visibility?',
+    'object-level Read is table-level only — it does not by itself grant record visibility, correct?',
+    'is object-level Read table-level access only, granting no record visibility by itself?',
+    // (6b) duplicate-rule-blocks-save (A20) — Block dup rule can fail the save.
+    'Can a duplicate rule set to Block fail the save when a matching record exists?',
+    'does this blocking duplicate rule abort the insert before the record is saved?',
+    'if the duplicate rule action is Block, can the save fail when a match is found?',
+    'can a duplicate rule with Block action stop the save before commit?',
+    'does a Block duplicate rule on Contact prevent the insert when a match exists?',
+    // (6c) territory-sharing-rule (B2) — territory assignment widens access.
+    'Does this territory sharing rule grant access based on the user\'s territory assignment?',
+    'who gains record access when a territory sharing rule fires on Account?',
+    'does a territory rule widen sharing by territory membership rather than role alone?',
+    'how does a territory sharing rule decide which records a rep can see?',
+    // (6d) scoping-rule-not-security (B4) — default scope, not a boundary.
+    'Is an active scoping rule just a default record scope, not a security boundary?',
+    'does a scoping rule narrow what users see by default without being a permission grant?',
+    'is a scoping rule a default list filter rather than a hard security wall?',
+    'can users still access records outside a scoping rule if sharing grants it?',
+    // (6e) flow-inactive-dead-automation (B22) — Draft/Obsolete never runs on save.
+    'Does a Draft or Obsolete flow ever run during save — should it be excluded from save order?',
+    'is this inactive flow dead metadata that never executes on record save?',
+    'does a flow in Draft or Obsolete status run on save, or is it excluded from the order of execution?',
+    'should Draft and Obsolete flows be omitted from what fires when I save a record?',
+    'is an obsolete record-triggered flow dead automation that never participates in save?',
+    // (6f) login-hours-restriction (B18) — profile login-hours block auth outside windows.
+    'Does this profile block login outside its configured login hours window?',
+    'are login hours on this profile a hard block preventing authentication outside those time windows?',
+    'can users with this profile log in on weekends if login hours restrict weekdays only?',
+    'does the Sales profile restrict login to specific hours — is auth blocked outside them?',
+    // EC-6 / C11 — recursive-automation-self-write (dualEdge sameObject).
+    'Does this flow write fields on the same object it triggers on — can it re-enter the save order?',
+    'can this automation re-enter because it both fires on an object and writes that object?',
+    'is there a recursive self-write risk when a flow updates the same object that triggered it?',
+    'does this record-triggered flow write back to its trigger object and risk re-entry?',
+    'does this record-triggered automation update the same object that triggered it, risking recursive re-entry?',
+    'can a flow that triggers on Account and writes Account fields cause the save order to run again?',
+    // Arc-2 Track Funnel DoD — C8–C12 + D5 NL hooks. Natural consequence wording
+    // for recently shipped concept families was owned by broad specialists
+    // (field_lineage, explain_formula, what_happens_on_save, order_of_execution,
+    // history_tracking_gaps, governor_limit_risks) so interpret never reached
+    // top-5. Generic placeholders / standard objects only.
+    // (7a) formula-on-derived (C8 / EC-4) — formula referencing formula or Summary.
+    'is a formula referencing another formula field a second-order derivation per the concept model?',
+    'is a formula that references a roll-up summary field a second-order derivation per the concept model?',
+    'does this formula field structurally imply a second-order derivation chain?',
+    'does a formula that references another derived field create a second-order dependency chain?',
+    'this formula pulls in another formula — does that make it a second-order derived field?',
+    // (7b) rollup-recalc-source-coupling (C9 / EC-13) — names child relationship + op.
+    'which child relationship field does this roll-up summary aggregate from?',
+    'does this roll-up summary name the specific child relationship and aggregate operation it uses?',
+    'what summary operation and child relationship does this roll-up summary field recalculate from?',
+    'which master-detail child relationship does this Summary field roll up, and is it COUNT, SUM, MIN, or MAX?',
+    'does this roll-up summary recalculate when child records on its relationship are inserted, updated, or deleted?',
+    // (7c) cross-phase-write-invisibility (C10 / EC-5) — later-phase write unseen by gate.
+    'can a validation rule ever observe a field value written by an after-save flow on the same save?',
+    'if a flow writes a field in a later save phase, can an earlier validation rule see that write?',
+    'why did my validation rule not see the after-save flow update on the same save?',
+    'does a before-save gate test the pre-write value when an after-save automation writes the field?',
+    'can a firing condition in an earlier phase ever observe a write from a later save-order phase?',
+    // (7d) mixed-dml-setup-vs-nonsetup (C12 / EC-7) — setup-object DML in same txn.
+    'does this Apex class write to User in the same transaction as business object DML, risking MIXED_DML_OPERATION?',
+    'can DML on User in the same transaction as Account updates throw a mixed DML error?',
+    'does writing a setup object like User alongside non-setup object DML risk MIXED_DML_OPERATION?',
+    'is this Apex a mixed DML risk because it writes both User and business records in one transaction?',
+    'does DML targeting User in the same synchronous transaction as custom object writes violate mixed DML rules?',
+    // (7e) field-history-tracking-20-field-limit (D5) — 20 tracked fields per object cap.
+    'does this object structurally imply it is at the 20-field field history tracking cap?',
+    'can the reasoning engine tell if this object is at the field history tracking cap?',
+    'what does the reasoning engine conclude about field history tracking count on this object?',
+    'is this object structurally at the Salesforce 20-field history tracking ceiling?',
+    'can I enable field history tracking on another field when this object already has 20 tracked fields?',
+    // Arc-2 Track Funnel DoD wave 2 — C13/C15/C17 + D1/D2 NL hooks. Natural
+    // consequence wording for recently shipped concept families was owned by
+    // broad specialists (crud_fls_audit, field_lineage, async_chain_depth,
+    // governor_limit_risks, explain_formula, order_of_execution) so interpret
+    // never reached top-5. Generic placeholders / standard objects only.
+    // (8a) crud-fls-consistency-anti-join (C15 / EC-8) — field EDIT without
+    // object EDIT (or vice-versa) is an inert grant.
+    'is field-level Edit on a custom field without matching object Edit on its parent object an inert permission grant?',
+    'does Edit on a field without object Edit mean the grantor cannot actually modify that column?',
+    'can a permission set grant field Edit without object Edit and have that grant be inert?',
+    'is object Edit without a matching field-level Edit grant on a specific column also inert?',
+    'does object-level Edit without field Edit on a column mean that field cannot be modified?',
+    // (8b) deep-creation-gap (C17 / EC-8) — required+no-default with no
+    // before-save writer is a hard creation blocker.
+    'is a required field with no default a hard creation blocker when no before-save automation writes it?',
+    'does a universally required field with no default fail insert when nothing sets it before validation?',
+    'can a record be created when a required field has no default and no before-save flow writes it?',
+    'does an after-save flow writing a required field close the creation gap, or does validation already run?',
+    'is a required custom field with no default value a creation blocker unless a before-save writer supplies it?',
+    // (8c) queueable-chain-depth (C13 / EC-4) — queueable dispatches queueable.
+    'when one Queueable dispatches another Queueable, does each hop run in its own transaction?',
+    'does a queueable-to-queueable dispatch form a strictly linear async chain with separate transactions?',
+    'is a queueable dispatching another queueable a linear async chain where governor limits reset each hop?',
+    'does enqueueing another queueable from a queueable mean child DML is not visible until each prior transaction commits?',
+    // (8d) future-invoked-from-async-illegal (D1 / EC-4) — @future from Batch
+    // or @future context throws at runtime.
+    'is calling an @future method from a Batch class illegal at runtime?',
+    'does invoking @future from another @future method throw at runtime?',
+    'can a batch job call a future method, or does Salesforce forbid that async pattern?',
+    'does a future method called from batch Apex throw "Future method cannot be called from a future or batch method"?',
+    // D1 reachability boost — concentrate "illegal at runtime" + "@future from a
+    // Batch/async context" so interpret ranks top-5 for the illegal-async-call
+    // implication (was rank 6, edged out by the apex-method specialists).
+    'is calling an @future method from a Batch class illegal at runtime per the concept model?',
+    'is invoking a future method from batch Apex illegal at runtime — an illegal async call?',
+    'does an @future call from an async Batch or Queueable context become illegal at runtime?',
+    // (8e) validation-gates-on-rollup-recalculated-later (D2 / EC-4) —
+    // validation referencing a roll-up sees pre-save aggregate.
+    'does a validation rule on a roll-up summary field test the pre-save aggregate?',
+    'when a validation rule references a roll-up summary, does it see the value before child DML is rolled up?',
+    'can a validation rule gate on a roll-up summary and see the recalculated post-save value on the same save?',
+    'does a validation error condition on a Summary field evaluate before roll-up recalculation completes?',
+    'is a validation rule referencing a roll-up summary testing a stale pre-recalc value?',
+    // Arc-2 Track Funnel DoD — C16 NL hook (EC-9 set-difference). Natural
+    // consequence wording for permission-set-group-muting-calculation was owned
+    // by broad specialists (effective_permissions, what_if_assign_permset,
+    // live_permset_holders) so interpret never reached top-5. Generic
+    // placeholders / standard permission metadata only.
+    // (8f) permission-set-group-muting-calculation (C16 / EC-9) — PSG effective
+    // grants are member UNION minus muting denials (structural set-difference).
+    'which concept rules fire for permission set group muting calculation on this group?',
+    'what grounded interpretations does interpret emit for the PSG member-union-minus-muting set-difference shape?',
+    'apply the curated reasoning rules to this permission set group and show the muting calculation grounded claims',
+    'structural reasoning about permission set group muting — does the reasoning engine see include members minus subtract muting sets?',
+    'run the concept-rule reasoning engine over this permission set group muting calculation',
+    'what does the reasoning engine conclude about muting calculation when a permission set group has both members and muting sets?',
+    'per the concept model, is permission set group muting calculation structurally member union minus muting denials?',
+    'reason about this permission set group muting calculation and cite what each grounded conclusion is based on',
+    // Arc-2 Track Funnel DoD — D3/D4/D7 NL hooks (EC-11 crossObjectCascade +
+    // dualEdge sameObject:false + isEmpty). Natural consequence wording for
+    // cross-object-cascade-save, before-save-flow-cross-record-write, and
+    // profile-ip-restriction-absence was owned by broad specialists
+    // (what_happens_on_save, order_of_execution, explain_flow, profile_security,
+    // effective_permissions) so interpret never reached top-5. Generic placeholders /
+    // standard objects only.
+    // (9a) cross-object-cascade-save (D3 / EC-11) — writer on A writesTo B≠A and
+    // B has incoming automation — cascades B's full save order; shared budget.
+    "If automation on one object writes another object, does that trigger the target object's full save order?",
+    "when a flow on Account writes Contact fields and Contact has its own after-save automation, does that cascade Contact's save order?",
+    "does a cross-object write to an object with record-triggered flows run that object's full before and after-save stack in the same transaction?",
+    'if an after-save flow on Deal writes Line items and Line has its own triggers, do both objects share the governor budget?',
+    "does writing another object from automation cascade that target object's triggers and flows inside one transaction?",
+    'when automation writes a different object that also has incoming record automation, does the reasoning engine flag a cross-object cascade save?',
+    'is a cross-object DML from one object to another object with its own save-order automation a shared-budget cascade risk?',
+    // (9b) before-save-flow-cross-record-write (D4 / EC-11) — RecordBeforeSave
+    // Flow triggers on A but writesTo B≠A; cross-object write is a silent no-op.
+    'Does this before-save flow write to a different object than the one it triggers on?',
+    'can a RecordBeforeSave flow update fields on another object, or does that cross-record write silently no-op?',
+    'does this record-before-save flow carry a cross-object write that Salesforce cannot apply in the before-save window?',
+    'this before-save flow fires on Account but writes Contact — is that cross-record DML invalid on the before-save path?',
+    'when a before-save flow triggers on one object and writes another, does the cross-object write get rejected or no-op?',
+    'is a before-save flow that writes a different object than its trigger object structurally invalid?',
+    'does the reasoning engine flag a RecordBeforeSave flow whose writesTo target differs from its triggersOn object?',
+    // (9c) profile-ip-restriction-absence (D7 / EC-11) — present empty
+    // loginIpRanges[] = no profile-level IP allowlist (weak login-IP posture).
+    'Does this profile have empty login IP ranges so users can log in from any IP?',
+    'does this profile restrict login by IP when its loginIpRanges array is empty?',
+    'when a profile declares an empty loginIpRanges allowlist, are users unrestricted by profile-level login IP ranges?',
+    'is an empty loginIpRanges array on this profile a weak login-IP posture signal?',
+    'does the Sales profile have no login IP allowlist because loginIpRanges is empty?',
+    'can users assigned this profile authenticate from any IP because the profile login IP ranges list is empty?',
+    'does the reasoning engine conclude this profile has no declared login-IP restriction when loginIpRanges is present but empty?',
+    // D7 reachability boost — concentrate "empty login IP ranges" + "log in from
+    // any IP" so interpret ranks top-5 for the absent-login-IP-restriction posture
+    // (was rank 7, edged out by the profile/permission specialists).
+    'does an empty login IP ranges list let users log in from any IP on this profile?',
+    'are the login IP ranges empty so any IP can log in — no login IP restriction?',
+    'empty login IP ranges on this profile — can users log in from any IP address?',
+    // Arc-2 Track Funnel DoD — D8/C18 NL hooks (EC-12 propertyCompare +
+    // EC-10 fieldJoin orphan set-diff). Natural consequence wording for
+    // external-owd-exceeds-internal and dependent-picklist-orphaned-value was
+    // owned by broad specialists (generate_sharing_summary, guest_exposure_report,
+    // explain_field, field_lineage) so interpret never reached top-5. Generic
+    // placeholders / standard objects only.
+    // (10a) external-owd-exceeds-internal (D8 / EC-12) — external OWD must not
+    // rank above internal OWD on the permissiveness scale.
+    'Is the external organization-wide default more permissive than the internal OWD on this object?',
+    'does externalSharingModel exceed sharingModel on the OWD permissiveness scale for this custom object?',
+    'is the external sharing model strictly more open than the internal organization-wide default?',
+    'can the external OWD be ReadWrite while internal OWD stays Private — is that an invalid posture?',
+    'does this object declare an external sharing model that ranks above its internal sharing model?',
+    'is external OWD more permissive than internal OWD — a forbidden Salesforce sharing posture?',
+    'when externalSharingModel is Read and sharingModel is Private, does the reasoning engine flag external-owd-exceeds-internal?',
+    // (10b) dependent-picklist-orphaned-value (C18 / EC-10) — dependent
+    // valueSettings reference a controlling value absent/inactive on sibling.
+    'Does this dependent picklist reference a controlling value that is no longer active on the controlling field?',
+    'are any dependent picklist valueSettings orphaned because the controlling picklist value was removed?',
+    'does a dependent picklist map to a controllingFieldValue missing from the active controlling picklist?',
+    'can a dependent picklist value gated by a removed controlling value ever become selectable?',
+    'is there an unreachable dependent picklist mapping where the controlling value is inactive on the sibling field?',
+    'does this dependent field have orphaned controllingFieldValues that fail the set-diff against the controlling picklist?',
+    'when a controlling picklist value is deactivated, do dependent valueSettings referencing it become structurally unreachable?',
+    // Arc-2 Track Funnel DoD — D9 NL hooks (property-equals-endpoint).
+    // flow-self-dml-reentry FIRES on the oracle, but natural re-entry wording
+    // was owned by order_of_execution / explain_flow so interpret never reached
+    // top-5 until routing utterances shipped. Generic placeholders only.
+    // (11) flow-self-dml-reentry (D9) — record-triggered Flow DML on own object.
+    'Can this flow\'s DML on its own trigger object cause the flow to re-enter?',
+    'does a record-triggered flow that updates records on its trigger object risk re-entering the save order?',
+    'when a flow performs Update Records on the same object it triggers on, can it loop back into itself?',
+    'is a self-DML write on the flow trigger object a structural re-entry risk for this record-triggered flow?',
+    'does this after-save flow DML on its own trigger object start a fresh save that re-invokes record-triggered automation?',
+    'can an Update Records element targeting the flow trigger object cause the flow to fire again on the same save path?',
+    'when triggerObject matches a writesTo DML endpoint on the same object, does the reasoning engine flag flow-self-dml-reentry?',
+    // Arc-2 Track Funnel DoD — D10 NL hooks (EC-14 firstMatchOrdinal).
+    // Assignment/escalation first-match ordering: a broad catch-all entry at the
+    // top of an assignment rule starves later specific entries. Natural wording
+    // was owned by search_components / what_happens_on_save so interpret never
+    // reached top-5. Generic placeholders / standard objects only.
+    'does this assignment rule evaluate entries top-down so a catch-all entry at the top starves later specific entries?',
+    'why would a Case assignment rule send every record to the default queue before priority rules are considered?',
+    'is the first rule entry a catch-all with no criteria that blocks later assignment rule entries from ever matching?',
+    'does a broad assignment rule entry with no criteria appear before more specific queue routing entries?',
+    'assignment rule first-match ordering — can an early catch-all entry make later entries unreachable?',
+    'when an assignment rule has a catch-all entry first, are later specific entries structurally starved by first-match evaluation?',
+    'does entry order on this assignment rule mean a no-criteria row wins before targeted queue rules below it?',
   ],
   'sfi.find_field_anywhere': [
     'find all objects that have a field called External_Id__c',

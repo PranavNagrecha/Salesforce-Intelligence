@@ -73,7 +73,7 @@ import type {
   PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listEdges } from '@sf-intelligence/graph';
+import { getNodeById, listEdges } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -128,10 +128,18 @@ const GOVERNOR_LIMIT_TRIGGER_CONTEXT_DISCLOSURE =
 /**
  * Zod schema for the `sfi.governor_limit_risks` tool input.
  *
+ *   - `componentId` (`ApexClass:{name}` / `ApexTrigger:{name}`) / `classApiName`
+ *     / `apiName`: optional CLASS SCOPE. When supplied the audit returns ONLY
+ *     that class's governor-limit findings (+ `appliedScope`); an unresolved id
+ *     is `component-not-found` and a non-Apex type prefix is `invalid-query` —
+ *     never a silent org-wide fallback. Omit all three for the org-wide audit.
  *   - `limit`: optional integer in `[1, 500]`. Defaults to 100 inside
  *     the handler. The slice is over classes, not individual findings.
  */
 export const governorLimitRisksInputSchema = z.object({
+  componentId: z.string().min(1).optional(),
+  classApiName: z.string().min(1).optional(),
+  apiName: z.string().min(1).optional(),
   limit: z
     .number()
     .int()
@@ -189,6 +197,16 @@ export interface GovernorLimitRisksClassEntry {
 
 /** Output payload. */
 export interface GovernorLimitRisksOutput {
+  /**
+   * Echoes the scope ACTUALLY applied so a host never assumes a class selector
+   * it passed was silently stripped (the always-org-wide bug this closes).
+   * `component` is the resolved `ApexClass:`/`ApexTrigger:` id in class scope,
+   * null org-wide; `mode` names the axis in force.
+   */
+  readonly appliedScope: {
+    readonly component: string | null;
+    readonly mode: 'all' | 'component';
+  };
   readonly classes: readonly GovernorLimitRisksClassEntry[];
   /** Per-class entry count BEFORE the `limit` slice. */
   readonly totalClassCount: number;
@@ -224,6 +242,34 @@ export interface GovernorLimitRisksOutput {
 }
 
 const GOVERNOR_LIMIT_TOOL_NAME = 'sfi.governor_limit_risks';
+
+const APEX_CLASS_PREFIX = 'ApexClass:';
+const APEX_TRIGGER_PREFIX = 'ApexTrigger:';
+
+/**
+ * Resolve the optional CLASS SCOPE from `componentId` / `classApiName` /
+ * `apiName` (precedence in that order). `componentId` may be an
+ * `ApexClass:`/`ApexTrigger:` id; bare `classApiName`/`apiName` coerce to
+ * `ApexClass:{name}`. A value carrying a non-Apex type prefix is `invalid-query`.
+ * `undefined` (no selector) → org-wide (returns `null`).
+ */
+const resolveScopeId = (
+  input: GovernorLimitRisksInput,
+): Result<ComponentId | null, McpError> => {
+  const raw = input.componentId ?? input.classApiName ?? input.apiName;
+  if (raw === undefined) return ok(null);
+  if (raw.startsWith(APEX_CLASS_PREFIX) || raw.startsWith(APEX_TRIGGER_PREFIX)) {
+    return ok(raw as ComponentId);
+  }
+  if (raw.includes(':')) {
+    return err({
+      kind: 'invalid-query',
+      message: `'${raw}' is not an ApexClass / ApexTrigger — pass a bare class api name or an 'ApexClass:{name}' / 'ApexTrigger:{name}' id`,
+      path: 'componentId',
+    });
+  }
+  return ok(`${APEX_CLASS_PREFIX}${raw}` as ComponentId);
+};
 
 interface QualityIssueLike {
   readonly rule: string;
@@ -401,6 +447,13 @@ export const governorLimitRisksHandler = async (
 ): Promise<Result<McpResponse<GovernorLimitRisksOutput>, McpError>> => {
   const limit = input.limit ?? GOVERNOR_LIMIT_DEFAULT_LIMIT;
 
+  // Optional CLASS SCOPE. When supplied, audit ONLY that class (skip the org
+  // scan); an unresolved id is `component-not-found`, a non-Apex type prefix is
+  // `invalid-query` — never a silent org-wide fallback.
+  const scopeResult = resolveScopeId(input);
+  if (!scopeResult.ok) return scopeResult;
+  const scopeId = scopeResult.value;
+
   const perClass = new Map<ComponentId, GovernorLimitRisksClassEntry>();
   const byRule: Record<string, number> = {};
   // Classes whose governor-risk scan is undermined by dynamic Apex (a SOQL/DML
@@ -409,17 +462,43 @@ export const governorLimitRisksHandler = async (
   let totalRiskCount = 0;
   let suppressedRiskCount = 0;
 
-  // CR-22 B3: scan EVERY ApexClass / ApexTrigger by paging the SQL OFFSET
-  // forward (window-by-window at the clamped cap) so risky classes on node 501+
-  // are reachable — the single capped page used to drop the scan TAIL silently.
-  // The output `classes` is then the COMPLETE list, paged on the output axis
-  // below; the scan completes inside this call so no second `s` cursor is
-  // needed.
-  const scan = await scanAllNodesOfTypes(ctx.graph, SCANNED_TYPES);
-  if (!scan.ok) {
-    return err({ kind: 'internal', message: `graph query failed: ${scan.error.message}` });
+  // Class-scope: fetch just the one node; org-wide: scan EVERY ApexClass /
+  // ApexTrigger (CR-22 B3 — page the SQL OFFSET forward so risky classes on node
+  // 501+ are reachable). The output `classes` is the COMPLETE matched list, paged
+  // on the output axis below.
+  let nodesToProcess: readonly Node[];
+  let scanIncomplete = false;
+  let incompleteTypes: readonly string[] = [];
+  if (scopeId !== null) {
+    const nodeRes = await getNodeById(ctx.graph, scopeId);
+    if (!nodeRes.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${nodeRes.error.message}` });
+    }
+    if (nodeRes.value === null) {
+      return err({
+        kind: 'component-not-found',
+        message: `no ApexClass / ApexTrigger matches \`${scopeId}\` in this vault`,
+        path: scopeId,
+      });
+    }
+    if (!SCANNED_TYPES.includes(nodeRes.value.type)) {
+      return err({
+        kind: 'invalid-query',
+        message: `\`${scopeId}\` is a ${nodeRes.value.type}, not an ApexClass / ApexTrigger — governor-limit risks are Apex-only`,
+        path: 'componentId',
+      });
+    }
+    nodesToProcess = [nodeRes.value];
+  } else {
+    const scan = await scanAllNodesOfTypes(ctx.graph, SCANNED_TYPES);
+    if (!scan.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${scan.error.message}` });
+    }
+    nodesToProcess = scan.value.nodes;
+    scanIncomplete = scan.value.scanIncomplete;
+    incompleteTypes = scan.value.incompleteTypes;
   }
-  for (const node of scan.value.nodes) {
+  for (const node of nodesToProcess) {
     const raw = (node as Node).properties['qualityIssues'];
     if (!Array.isArray(raw)) continue;
     const risks: GovernorLimitRiskFinding[] = [];
@@ -486,10 +565,11 @@ export const governorLimitRisksHandler = async (
   const classes = [...perClass.values()].sort(compareClassById);
 
   // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
-  // governor_limit_risks has no narrowing args beyond paging, so the fingerprint
-  // is over the empty arg set — a stale token is still rejected via the
-  // tool+vaultHash bind-check.
-  const fingerprint = argsFingerprint({});
+  // Bind the fingerprint to the class scope so a cursor minted for a scoped call
+  // cannot resume against the (differently-shaped) org-wide list, and vice versa.
+  const fingerprint = argsFingerprint(
+    scopeId !== null ? { componentId: scopeId } : {},
+  );
   let offset = input.offset ?? 0;
   if (input.cursor !== undefined) {
     const decoded = decodeCursor(input.cursor, {
@@ -527,9 +607,9 @@ export const governorLimitRisksHandler = async (
   // FULL_SCAN_MAX_NODES — the normal full scan reaches node 501+ and completes.
   // Lives OUTSIDE the zero-findings gate because risky classes could be among
   // the unscanned residual tail.
-  if (scan.value.scanIncomplete) {
+  if (scanIncomplete) {
     boundaries.push(
-      scanTruncationNote(scan.value.incompleteTypes, clampedNodeScanLimit()),
+      scanTruncationNote(incompleteTypes, clampedNodeScanLimit()),
     );
   }
   // CR-22-B6: the ENTRY_PATH_MAX_PATHS(=12)/ENTRY_PATH_MAX_DEPTH(=6) walk cap
@@ -549,6 +629,10 @@ export const governorLimitRisksHandler = async (
 
   return ok({
     data: {
+      appliedScope: {
+        component: scopeId,
+        mode: scopeId !== null ? 'component' : 'all',
+      },
       classes: slice,
       totalClassCount: classes.length,
       totalRiskCount,

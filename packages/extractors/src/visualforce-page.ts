@@ -180,13 +180,23 @@ const parseMetaXml = (
 
 interface RootAttributes {
   readonly controller: string | null;
+  readonly standardController: string | null;
   readonly extensions: readonly string[];
 }
 
 /**
- * Pull `controller` and `extensions` from the markup's `<apex:page>` root
- * tag via a single regex sweep. Returns `null` controller / empty
- * extensions when either attribute is absent — both are optional per
+ * Match `standardController="X"` as a distinct token so the broader
+ * `controller` matcher (whose `\bcontroller\b` boundary sits AFTER
+ * `standard`) does not also fire on it. Anchored on `standardController`'s
+ * own identifier boundary.
+ */
+const STANDARD_CONTROLLER_PATTERN =
+  /\bstandardController\s*=\s*"([^"]*)"|\bstandardController\s*=\s*'([^']*)'/;
+
+/**
+ * Pull `controller`, `standardController`, and `extensions` from the markup's
+ * `<apex:page>` root tag via a single regex sweep. Returns `null` /
+ * empty for any attribute that is absent — all three are optional per
  * `ApexPage.md` (a page may render from static markup alone).
  *
  * The first `<apex:page ...>` tag occurrence wins. The body of the
@@ -194,16 +204,38 @@ interface RootAttributes {
  * `scanFrontendSource` for `{!...}` expression extraction; the tag
  * itself is *not* re-scanned, so the `controller="X"` attribute can't
  * yield a spurious scanner edge.
+ *
+ * NOTE: `controller` and `standardController` are matched independently.
+ * The `controller` matcher's `\bcontroller\b` word boundary DOES match the
+ * `controller` suffix inside `standardController=`, so on a
+ * `standardController`-only page it would spuriously capture the object
+ * name as a custom controller. To prevent that double-read, the object name
+ * is stripped from the standardController capture and the controller capture
+ * is ignored when it equals the standardController value.
  */
 const parseRootAttributes = (markup: string): RootAttributes | null => {
   const tagMatch = APEX_PAGE_TAG.exec(markup);
   if (tagMatch === null) return null;
   const tagBody = tagMatch[1] ?? '';
 
+  const standardControllerMatch = STANDARD_CONTROLLER_PATTERN.exec(tagBody);
+  const standardControllerRaw =
+    standardControllerMatch?.[1] ?? standardControllerMatch?.[2] ?? null;
+  const standardController =
+    standardControllerRaw !== null && standardControllerRaw.length > 0
+      ? standardControllerRaw
+      : null;
+
   const controllerMatch = ATTR_PATTERN('controller').exec(tagBody);
   const controllerRaw = controllerMatch?.[1] ?? controllerMatch?.[2] ?? null;
   const controller =
-    controllerRaw !== null && controllerRaw.length > 0 ? controllerRaw : null;
+    controllerRaw !== null &&
+    controllerRaw.length > 0 &&
+    // `\bcontroller\b` also matches the tail of `standardController=`; when the
+    // capture is the standardController value, it is not a custom controller.
+    controllerRaw !== standardController
+      ? controllerRaw
+      : null;
 
   const extensionsMatch = ATTR_PATTERN('extensions').exec(tagBody);
   const extensionsRaw = extensionsMatch?.[1] ?? extensionsMatch?.[2] ?? '';
@@ -212,7 +244,7 @@ const parseRootAttributes = (markup: string): RootAttributes | null => {
     .map((e) => e.trim())
     .filter((e) => e.length > 0);
 
-  return { controller, extensions };
+  return { controller, standardController, extensions };
 };
 
 /**
@@ -347,6 +379,11 @@ const buildScannerEdges = (
  *   - One `references` edge per `controller=` attribute to
  *     `ApexClass:{controllerName}` with `properties: { role: 'controller' }`,
  *     `confidence: 'declared'`.
+ *   - One `references` edge for a `standardController=` attribute to
+ *     `CustomObject:{objectApiName}` with
+ *     `properties: { role: 'standardController' }`, `confidence: 'declared'`
+ *     (VF-STANDARDCONTROLLER-UNGRAPHED) — so the bound object's usages include
+ *     the page instead of the page reading as unused / delete-safe.
  *   - One `references` edge per comma-split `extensions=` value to
  *     `ApexClass:{extensionName}` with `properties: { role: 'extension' }`,
  *     `confidence: 'declared'`.
@@ -361,6 +398,12 @@ const buildScannerEdges = (
  * Edges are deduped + sorted by `(toId asc, edgeType asc)` so the
  * declared-vs-heuristic origin doesn't influence output order — golden
  * tests do deep equality.
+ *
+ * `node.properties.apexCallCount` is the count of DISTINCT Apex classes
+ * the page is wired to — the declared `controller=` / `extensions=`
+ * bindings plus the scanner's inline `{!Class.method()}` calls, deduped by
+ * class id. A controller-bound page with no inline call therefore reports
+ * `>= 1`, not 0 (VISUALFORCE-APEXCALLCOUNT-ZERO-WITH-CONTROLLER-EDGE).
  *
  * Scanner errors surface as `node.properties.vfScannerWarnings: string[]`,
  * never as hard failures — a parse glitch in the markup body shouldn't
@@ -422,6 +465,22 @@ export const extractVisualforcePage = async (
         properties: { role: 'controller' },
       });
     }
+    // VF-STANDARDCONTROLLER-UNGRAPHED: a `standardController="X"` binds the
+    // page to CustomObject:X (the object whose records it renders). Emit the
+    // declared VF -> CustomObject edge so the object's usages include the page
+    // (and deleting the object is no longer bare-safe). The target may be a
+    // standard / managed object not retrieved into the vault (dangling by
+    // design, like the controller / extension ApexClass edges).
+    if (headerAttrs.standardController !== null) {
+      declaredEdges.push({
+        fromId: ownerId,
+        toId: `CustomObject:${headerAttrs.standardController}`,
+        edgeType: 'references',
+        confidence: 'declared',
+        source: EDGE_SOURCE,
+        properties: { role: 'standardController' },
+      });
+    }
     for (const extName of headerAttrs.extensions) {
       declaredEdges.push({
         fromId: ownerId,
@@ -443,6 +502,18 @@ export const extractVisualforcePage = async (
   // a declared `references` survives a scanner-emitted duplicate.
   const edges = mergeAndSortEdges([...declaredEdges, ...scannerOutput.edges]);
 
+  // apexCallCount = distinct Apex classes this page is wired to, across the
+  // declared `controller=` / `extensions=` bindings AND the scanner's inline
+  // `{!Class.method()}` calls (VISUALFORCE-APEXCALLCOUNT-ZERO-WITH-CONTROLLER-EDGE).
+  // Counting from the deduped edge set means a class that is both the
+  // controller and an inline callee is counted once. Prior to this fix the
+  // count reflected only the scanner calls, so a controller-bound page with
+  // no inline `{!Class.method()}` (its actions bound as bare `{!action}`)
+  // reported 0 and read as Apex-free.
+  const apexCallCount = new Set(
+    edges.filter((e) => e.toId.startsWith('ApexClass:')).map((e) => e.toId),
+  ).size;
+
   const baseProperties = {
     apiVersion: meta.apiVersion,
     label: meta.label,
@@ -451,7 +522,7 @@ export const extractVisualforcePage = async (
     markupBytes: Buffer.byteLength(markup, 'utf-8'),
     componentRefCount: scannerOutput.componentRefCount,
     fieldAccessCount: scannerOutput.fieldAccessCount,
-    apexCallCount: scannerOutput.apexCallCount,
+    apexCallCount,
   };
   const properties =
     scannerOutput.warnings.length === 0

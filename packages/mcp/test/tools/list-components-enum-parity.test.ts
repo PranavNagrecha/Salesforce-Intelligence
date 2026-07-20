@@ -1,7 +1,10 @@
 /// <reference types="vitest/globals" />
 
 import { V01_TOOLS } from '../../src/tools/index.js';
-import { COMPONENT_TYPES } from '../../src/tools/list-components.js';
+import {
+  COMPONENT_TYPES,
+  listComponentsInputSchema,
+} from '../../src/tools/list-components.js';
 
 /**
  * Guard against advertised-schema drift. `list_components` validates its `type`
@@ -46,5 +49,49 @@ describe('list_components advertised inputSchema enum ↔ Zod validator parity',
     // CustomPermission enum drift caused. Assert presence AND boolean type.
     expect(props['missingDescription']).toEqual({ type: 'boolean' });
     expect(props['hasDescription']).toEqual({ type: 'boolean' });
+  });
+});
+
+// LIST-COMPONENTS-ENUM-OMITS-RETRIEVED-TYPES: the accepted `type` enum had
+// drifted BEHIND the ComponentType union, so metadata families the extractors
+// retrieve and model into the graph (SamlSsoConfig, Skill, ServiceChannel,
+// Network, CustomSite, the Bot / OmniStudio / CPQ / GenAI / Wave tiers, …) were
+// rejected at the Zod boundary with `invalid-query` — retrievable but
+// unlistable. The enum is now the FULL union (proven exhaustive by the
+// compile-time ComponentTypesComplete guard). These previously-omitted types
+// must parse; genuine typos must still be rejected.
+describe('listComponentsInputSchema type enum covers retrieved-but-formerly-rejected types (LIST-COMPONENTS-ENUM-OMITS-RETRIEVED-TYPES)', () => {
+  // A representative sample of the types the stale allowlist omitted — one per
+  // affected tier. Each is a real modeled ComponentType whose extractor writes
+  // graph nodes, so `list_components { type }` must reach the handler (where the
+  // honest empty/coverage handling lives), not fail input validation.
+  const FORMERLY_OMITTED: readonly string[] = [
+    'SamlSsoConfig',
+    'WorkflowAlert',
+    'CpqProductRule',
+    'OmniScript',
+    'PlatformEventChannel',
+    'SessionSettings',
+    'StandardValueSet',
+    'ServiceChannel',
+    'Certificate',
+    'GenAiFunction',
+    'Network',
+    'CustomSite',
+    'Bot',
+    'Skill',
+    'WaveDashboard',
+  ];
+
+  it.each(FORMERLY_OMITTED)('accepts type=%s at the Zod boundary', (type) => {
+    expect(COMPONENT_TYPES).toContain(type);
+    const parsed = listComponentsInputSchema.safeParse({ type });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('still rejects a genuinely unknown type as invalid input', () => {
+    expect(listComponentsInputSchema.safeParse({ type: 'NotARealType' }).success).toBe(
+      false,
+    );
   });
 });

@@ -334,6 +334,134 @@ describe('processBuilderMigrationCandidatesHandler', () => {
     if (stale.ok) return;
     expect(stale.error.kind).toBe('invalid-query');
   });
+
+  // Bare-call byte-identity guard for the object-scope fix.
+  it('BARE CALL: no appliedScope on an unscoped org-wide call', async () => {
+    const result = await processBuilderMigrationCandidatesHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect('appliedScope' in result.value.data).toBe(false);
+  });
+});
+
+// PROCESS-BUILDER-MIGRATION-IGNORES-OBJECT-SCOPE: an object scope narrows each
+// list to candidates parented to that object and echoes appliedScope; an object
+// absent from the vault is refused with invalid-query.
+const OBJ_ACCOUNT = 'CustomObject:Account';
+const OBJ_OPPORTUNITY = 'CustomObject:Opportunity';
+
+const makeObjectNode = (id: string): Node => ({
+  id,
+  type: 'CustomObject',
+  apiName: id.slice('CustomObject:'.length),
+  label: null,
+  parentId: null,
+  sourcePath: 'unused.object-meta.xml',
+  lastModifiedDate: null,
+  lastModifiedBy: null,
+  apiVersion: null,
+  properties: {},
+});
+
+const scopeSeed: ExtractionResult = {
+  nodes: [
+    makeObjectNode(OBJ_ACCOUNT),
+    makeObjectNode(OBJ_OPPORTUNITY),
+    // WorkflowRule + ApprovalProcess carry a real CustomObject parent (mirrors
+    // the extractor: `parentId = CustomObject:{objectApiName}`).
+    makeNode({
+      id: 'WorkflowRule:Account.Scoped_Notify',
+      type: 'WorkflowRule',
+      apiName: 'Account.Scoped_Notify',
+      parentId: OBJ_ACCOUNT,
+      properties: { active: true, triggerType: 'onCreateOnly', criteriaItemCount: 1 },
+    }),
+    makeNode({
+      id: 'WorkflowRule:Opportunity.Scoped_Discount',
+      type: 'WorkflowRule',
+      apiName: 'Opportunity.Scoped_Discount',
+      parentId: OBJ_OPPORTUNITY,
+      properties: { active: true, triggerType: 'onAllChanges', criteriaItemCount: 2 },
+    }),
+    makeNode({
+      id: 'ApprovalProcess:Account.Scoped_Approval',
+      type: 'ApprovalProcess',
+      apiName: 'Account.Scoped_Approval',
+      parentId: OBJ_ACCOUNT,
+      properties: { active: true, stepCount: 1 },
+    }),
+    // A Process Builder Flow with a captured object parent (fixture: real PB
+    // flows often have a null parentId, in which case they simply do not attach
+    // to an object scope — this one demonstrates the PB list narrows when it IS
+    // captured).
+    makeNode({
+      id: 'Flow:Account_PB',
+      type: 'Flow',
+      apiName: 'Account_PB',
+      parentId: OBJ_ACCOUNT,
+      properties: { processType: 'Workflow', active: true, decisionCount: 1, actionCount: 1 },
+    }),
+  ],
+  edges: [],
+};
+
+describe('processBuilderMigrationCandidatesHandler — object scope (PROCESS-BUILDER-MIGRATION-IGNORES-OBJECT-SCOPE)', () => {
+  let scopeDir: string;
+  let scopeStore: GraphStore;
+  let scopeCtx: Context;
+
+  beforeAll(async () => {
+    scopeDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-pbmc-scope-'));
+    const opened = await openGraph(join(scopeDir, 'pbmc-scope.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    scopeStore = opened.value;
+    const imp = await importExtractionResults(scopeStore, [scopeSeed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    scopeCtx = { vaultRoot: scopeDir, manifest: FIXTURE_MANIFEST, graph: scopeStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(scopeStore);
+    rmSync(scopeDir, { recursive: true, force: true });
+  });
+
+  it('HONOR: objectApiName narrows every list to candidates parented to that object + emits appliedScope', async () => {
+    const r = await processBuilderMigrationCandidatesHandler(scopeCtx, { objectApiName: 'Account' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedScope).toEqual({ object: OBJ_ACCOUNT, mode: 'component' });
+    expect(r.value.data.workflowRules.map((w) => w.id)).toEqual(['WorkflowRule:Account.Scoped_Notify']);
+    expect(r.value.data.approvalProcesses.map((a) => a.id)).toEqual(['ApprovalProcess:Account.Scoped_Approval']);
+    expect(r.value.data.processBuilders.map((p) => p.id)).toEqual(['Flow:Account_PB']);
+    // Opportunity candidates are excluded.
+    expect(r.value.data.totalWorkflowRules).toBe(1);
+  });
+
+  it('NARROWS DIFFERENTLY per object — Account ≠ Opportunity ≠ bare', async () => {
+    const [acct, opp, bare] = await Promise.all([
+      processBuilderMigrationCandidatesHandler(scopeCtx, { objectApiName: 'Account' }),
+      processBuilderMigrationCandidatesHandler(scopeCtx, { objectApiName: 'Opportunity' }),
+      processBuilderMigrationCandidatesHandler(scopeCtx, {}),
+    ]);
+    expect(acct.ok && opp.ok && bare.ok).toBe(true);
+    if (!acct.ok || !opp.ok || !bare.ok) return;
+    expect(opp.value.data.workflowRules.map((w) => w.id)).toEqual(['WorkflowRule:Opportunity.Scoped_Discount']);
+    expect(opp.value.data.approvalProcesses).toEqual([]);
+    // Bare is org-wide: both WRs, and NO appliedScope.
+    expect(bare.value.data.totalWorkflowRules).toBe(2);
+    expect('appliedScope' in bare.value.data).toBe(false);
+    expect(JSON.stringify(acct.value.data.workflowRules)).not.toBe(
+      JSON.stringify(opp.value.data.workflowRules),
+    );
+  });
+
+  it('REFUSE: an object absent from the vault → named invalid-query (never org-wide)', async () => {
+    const r = await processBuilderMigrationCandidatesHandler(scopeCtx, { objectApiName: 'NoSuchObject__c' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toMatch(/no object named 'NoSuchObject__c'/i);
+  });
 });
 
 describe('processBuilderMigrationCandidatesInputSchema', () => {

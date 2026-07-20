@@ -666,9 +666,19 @@ describe('whatIfDeactivateFlowInputSchema', () => {
     expect(parsed.success).toBe(false);
   });
 
-  it('rejects a missing flowId', () => {
+  it('accepts a componentId alias in place of flowId', () => {
+    const parsed = whatIfDeactivateFlowInputSchema.safeParse({
+      componentId: FLOW_RICH_ID,
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('accepts an empty object at the schema layer (the "name a Flow" check is in the handler)', () => {
+    // flowId is now optional because componentId / flowApiName / apiName are
+    // interchangeable selectors; the "at least one" requirement is enforced by
+    // the handler (invalid-query), not the schema.
     const parsed = whatIfDeactivateFlowInputSchema.safeParse({});
-    expect(parsed.success).toBe(false);
+    expect(parsed.success).toBe(true);
   });
 
   it('accepts the empty-prefix case at the schema layer (prefix check is in the handler)', () => {
@@ -735,5 +745,62 @@ describe('whatIfDeactivateFlowHandler — bounded graph queries', () => {
     // fanOut=200; batched, each walk is one node/edge fetch.
     expect(large.nodeQueries).toBeLessThan(60);
     expect(large.edgeQueries).toBeLessThan(60);
+  });
+});
+
+// =============================================================================
+// GUARD (WHAT-IF-DEACTIVATE-FLOW-REJECTS-COMPONENTID): a dev "if I deactivate
+// Flow X, what breaks?" after route_question naturally passes componentId
+// (works on get_impact / most tools), but the schema only accepted `flowId` and
+// hard-failed `flowId: Required`. componentId / flowApiName / apiName must now
+// be interchangeable with flowId (same deactivation impact, byte-equal),
+// disagreeing selectors reject, and the resolved id is echoed in appliedScope.
+// =============================================================================
+describe('whatIfDeactivateFlowHandler — flowId / componentId / flowApiName / apiName alias (guard)', () => {
+  it('componentId ≡ flowId ≡ flowApiName ≡ apiName resolve to the same impact (byte-equal data)', async () => {
+    const byFlowId = await whatIfDeactivateFlowHandler(ctx, { flowId: FLOW_RICH_ID });
+    const byComponentId = await whatIfDeactivateFlowHandler(ctx, { componentId: FLOW_RICH_ID });
+    const byFlowApiName = await whatIfDeactivateFlowHandler(ctx, { flowApiName: 'AccountNotify' });
+    const byApiName = await whatIfDeactivateFlowHandler(ctx, { apiName: 'AccountNotify' });
+    expect(byFlowId.ok && byComponentId.ok && byFlowApiName.ok && byApiName.ok).toBe(true);
+    if (!byFlowId.ok || !byComponentId.ok || !byFlowApiName.ok || !byApiName.ok) return;
+    const canonical = JSON.stringify(byFlowId.value.data);
+    expect(JSON.stringify(byComponentId.value.data)).toBe(canonical);
+    expect(JSON.stringify(byFlowApiName.value.data)).toBe(canonical);
+    expect(JSON.stringify(byApiName.value.data)).toBe(canonical);
+    expect(byComponentId.value.data.appliedScope).toEqual({
+      component: FLOW_RICH_ID,
+      mode: 'component',
+    });
+  });
+
+  it('componentId scope is actually honored — a different Flow returns ITS impact', async () => {
+    const rich = await whatIfDeactivateFlowHandler(ctx, { componentId: FLOW_RICH_ID });
+    const empty = await whatIfDeactivateFlowHandler(ctx, { componentId: FLOW_EMPTY_ID });
+    expect(rich.ok && empty.ok).toBe(true);
+    if (!rich.ok || !empty.ok) return;
+    expect(empty.value.data.flowId).toBe(FLOW_EMPTY_ID);
+    expect(empty.value.data.appliedScope.component).toBe(FLOW_EMPTY_ID);
+    // Different Flows → different impact payloads: proof the alias is used.
+    expect(JSON.stringify(empty.value.data.impacts)).not.toBe(
+      JSON.stringify(rich.value.data.impacts),
+    );
+  });
+
+  it('disagreeing flowId / componentId is invalid-query (never a silent pick)', async () => {
+    const r = await whatIfDeactivateFlowHandler(ctx, {
+      flowId: FLOW_RICH_ID,
+      componentId: FLOW_EMPTY_ID,
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('no flow selector at all is invalid-query', async () => {
+    const r = await whatIfDeactivateFlowHandler(ctx, {});
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
   });
 });

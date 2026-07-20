@@ -200,6 +200,70 @@ describe('appAccessHandler', () => {
     expect(new Set(seen).size).toBe(seen.length);
   });
 
+  // APP-ACCESS-REJECTS-NATURAL-ARGS — the router ranks app_access #1 for
+  // "who can use the Sales app?" but the host had no natural app-name arg.
+  it('accepts a natural `apiName` alias ≡ explicit CustomApplication componentId (byte-identical payload + appliedScope)', async () => {
+    const canonical = await appAccessHandler(ctx, { componentId: APP });
+    const alias = await appAccessHandler(ctx, { apiName: 'Sales' });
+    expect(canonical.ok && alias.ok).toBe(true);
+    if (!canonical.ok || !alias.ok) return;
+    const c = canonical.value.data as AppAccessOutput;
+    const a = alias.value.data as AppAccessOutput;
+    // Canonical path carries NO appliedScope (byte-identical).
+    expect('appliedScope' in (c as unknown as Record<string, unknown>)).toBe(false);
+    // Alias path resolves the SAME app and echoes how it got there.
+    expect(a.appliedScope).toEqual({ componentId: APP, resolvedFrom: 'apiName', matched: 'Sales' });
+    // The access payload MINUS appliedScope is identical to the canonical call.
+    const { appliedScope: _drop, ...aCore } = a as AppAccessOutput & Record<string, unknown>;
+    expect(aCore).toEqual(c);
+  });
+
+  it('accepts `app` / `application` aliases too', async () => {
+    for (const input of [{ app: 'Sales' }, { application: 'Sales' }]) {
+      const r = await appAccessHandler(ctx, input);
+      expect(r.ok).toBe(true); if (!r.ok) return;
+      expect((r.value.data as AppAccessOutput).componentId).toBe(APP);
+    }
+  });
+
+  it('accepts a fuzzy `nameContains` app-label search (case/separator-insensitive)', async () => {
+    const r = await appAccessHandler(ctx, { nameContains: 'sale' });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data as AppAccessOutput;
+    expect(d.componentId).toBe(APP);
+    expect(d.appliedScope?.resolvedFrom).toBe('nameContains');
+  });
+
+  it('an ambiguous name returns an honest pick list, never a silent pick', async () => {
+    await importExtractionResults(store, [{
+      nodes: [
+        node({ id: 'CustomApplication:Sales_Console', type: 'CustomApplication', apiName: 'Sales_Console', label: 'Sales Console', properties: { navType: 'Console' } }),
+      ],
+      edges: [],
+    }]);
+    // "sale" substring-matches BOTH apps but exact-matches neither → ambiguous.
+    const r = await appAccessHandler(ctx, { nameContains: 'sale' });
+    expect(r.ok).toBe(false); if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toMatch(/matches 2 apps/);
+    expect(r.error.message).toMatch(/CustomApplication:Sales\b/);
+    expect(r.error.message).toMatch(/CustomApplication:Sales_Console/);
+  });
+
+  it('an unresolvable natural name returns a NAMED component-not-found (not "componentId Required")', async () => {
+    const r = await appAccessHandler(ctx, { apiName: 'DefinitelyNotAnApp' });
+    expect(r.ok).toBe(false); if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+    expect(r.error.message).toMatch(/DefinitelyNotAnApp/);
+  });
+
+  it('no selector at all refuses with a named invalid-query, not a bare Zod "Required"', async () => {
+    const r = await appAccessHandler(ctx, {});
+    expect(r.ok).toBe(false); if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toMatch(/name the app/);
+  });
+
   it('rejects a cursor minted for a DIFFERENT app (argsFingerprint bind)', async () => {
     const first = await appAccessHandler(ctx, { componentId: APP, limit: 1 });
     expect(first.ok).toBe(true); if (!first.ok) return;

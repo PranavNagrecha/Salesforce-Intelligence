@@ -22,8 +22,16 @@ import {
   orderOfExecutionHandler,
   orderOfExecutionInputSchema,
 } from '../../src/tools/order-of-execution.js';
+import {
+  SOE_MAX_PAYLOAD_BYTES,
+  tallyPhaseCounts,
+} from '../../src/tools/soe-payload-bounds.js';
+import { jsonResult } from '../../src/tools/tool-dispatch.js';
 
 import { measureGraphQueries } from './_graph-query-budget.js';
+
+const utf8Bytes = (value: unknown): number =>
+  Buffer.byteLength(JSON.stringify(value), 'utf8');
 
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -385,6 +393,72 @@ const phantomSeed: ExtractionResult = {
   ],
 };
 
+// =============================================================================
+// Seed 7 (WHAT-HAPPENS-ON-SAVE-TRUNCATION-DROPS-LATER-PHASES): a densely-
+// automated object whose four-event payload blows the ~40 KB byte budget and
+// forces the last-resort tail step-drop — dropping whole later phases from
+// `soe` while `summary.phaseCounts` still reports them. Many pre-save
+// ValidationRules fill the budget (early phase); a DuplicateRule + an
+// after-insert ApexTrigger sit later in save-order and get tail-dropped.
+// =============================================================================
+
+const TRUNC_OBJ = 'CustomObject:TruncObj';
+const TRUNC_DUP = 'DuplicateRule:TruncObj.LaterDupRule';
+const TRUNC_AFTER_TRIGGER = 'ApexTrigger:TruncAfterTrigger';
+
+const truncSeed: ExtractionResult = (() => {
+  const nodes: Node[] = [makeNode({ id: TRUNC_OBJ, apiName: 'TruncObj' })];
+  const edges: Edge[] = [];
+  // 90 active validation rules — enough distinct steps that, even after actions
+  // and conditionals are trimmed, the four-event step COUNT alone exceeds the
+  // budget and the tail step-drop engages.
+  for (let i = 0; i < 90; i += 1) {
+    const id = `ValidationRule:TruncObj.Rule_${String(i).padStart(3, '0')}`;
+    nodes.push(
+      makeNode({
+        id,
+        type: 'ValidationRule',
+        apiName: `Rule_${String(i).padStart(3, '0')}`,
+        parentId: TRUNC_OBJ,
+        properties: {
+          active: true,
+          errorMessage: `Rule ${i} failed with a deliberately long message to add payload bytes so the enforcer must trim before it drops steps.`,
+          errorDisplayField: null,
+        },
+      }),
+    );
+    edges.push(makeEdge({ fromId: TRUNC_OBJ, toId: id, edgeType: 'parentOf' }));
+  }
+  // A later-phase DuplicateRule (duplicate-rules phase) and an after-insert
+  // ApexTrigger (after-triggers phase) — these sit AFTER the validation bulk in
+  // save-order, so the tail-drop sheds them first.
+  nodes.push(
+    makeNode({
+      id: TRUNC_DUP,
+      type: 'DuplicateRule',
+      apiName: 'TruncObj.LaterDupRule',
+      parentId: TRUNC_OBJ,
+      properties: { isActive: true, operationsOnInsert: ['Block'], operationsOnUpdate: ['Block'] },
+    }),
+    makeNode({
+      id: TRUNC_AFTER_TRIGGER,
+      type: 'ApexTrigger',
+      apiName: 'TruncAfterTrigger',
+      properties: { triggerObject: 'TruncObj', events: ['after insert'] },
+    }),
+  );
+  edges.push(
+    makeEdge({ fromId: TRUNC_OBJ, toId: TRUNC_DUP, edgeType: 'parentOf' }),
+    makeEdge({
+      fromId: TRUNC_AFTER_TRIGGER,
+      toId: TRUNC_OBJ,
+      edgeType: 'triggersOn',
+      properties: { events: ['after insert'] },
+    }),
+  );
+  return { nodes, edges };
+})();
+
 let tempDir: string;
 let store: GraphStore;
 let ctx: Context;
@@ -404,6 +478,7 @@ beforeAll(async () => {
     nodelessSeed,
     orderSeed,
     phantomSeed,
+    truncSeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -420,7 +495,209 @@ afterAll(async () => {
   rmSync(tempDir, { recursive: true, force: true });
 });
 
+describe('orderOfExecutionHandler — truncation phase honesty (WHAT-HAPPENS-ON-SAVE-TRUNCATION-DROPS-LATER-PHASES)', () => {
+  it('FAIL-BEFORE/PASS-AFTER: a truncated payload discloses phasesOmitted instead of silently contradicting phaseCounts', async () => {
+    const result = await orderOfExecutionHandler(ctx, { objectApiName: 'TruncObj' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    // Precondition: the payload truncated (tail step-drop engaged).
+    expect(data.truncated).toBe(true);
+    const insert = data.byEvent.insert;
+    // The dropped later phases are still CLAIMED by phaseCounts...
+    expect(insert.summary.phaseCounts['duplicate-rules']).toBe(1);
+    expect(insert.summary.phaseCounts['after-triggers']).toBe(1);
+    // ...but their steps were tail-dropped from soe. That contradiction must be
+    // DISCLOSED via phasesOmitted (the field did not exist pre-fix).
+    expect(insert.phasesOmitted).toBeDefined();
+    const omittedPhases = (insert.phasesOmitted ?? []).map((p) => p.phase);
+    expect(omittedPhases).toContain('duplicate-rules');
+    expect(omittedPhases).toContain('after-triggers');
+    // Each omission carries the true declared count and the (smaller) present count.
+    const dupOmission = insert.phasesOmitted?.find((p) => p.phase === 'duplicate-rules');
+    expect(dupOmission?.declared).toBe(1);
+    expect(dupOmission?.present).toBe(0);
+    // The disclosure names the truncation-vs-counts contradiction.
+    expect(data.disclosure).toMatch(/still reports them/i);
+  });
+
+  it('the `phase` filter recovers a phase dropped from the full view', async () => {
+    const result = await orderOfExecutionHandler(ctx, {
+      objectApiName: 'TruncObj',
+      phase: 'duplicate-rules',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    expect(data.appliedPhaseFilter).toBe('duplicate-rules');
+    const insert = data.byEvent.insert;
+    // The narrowed view surfaces the DuplicateRule the full view had to drop.
+    expect(insert.soe.map((s) => s.componentId)).toContain(TRUNC_DUP);
+    expect(insert.soe.every((s) => s.phase === 'duplicate-rules')).toBe(true);
+    // summary still reflects the WHOLE composition (not the filtered slice).
+    expect(insert.summary.phaseCounts['pre-save-validation']).toBe(90);
+    // A single-phase slice is tiny — no truncation, no phasesOmitted.
+    expect(data.truncated).toBeFalsy();
+    expect(insert.phasesOmitted).toBeUndefined();
+  });
+});
+
+describe('orderOfExecutionHandler — one envelope law (ORDER-OF-EXECUTION-OVERSIZE-HARD-FAIL)', () => {
+  it('an oversize four-event OOE returns a PARTIAL envelope (never a hard-fail) whose data stays within budget with the disclosure intact', async () => {
+    const result = await orderOfExecutionHandler(ctx, { objectApiName: 'TruncObj' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    // Precondition — this object is genuinely oversize and truncated.
+    expect(data.truncated).toBe(true);
+
+    // FAIL-BEFORE: the honesty scaffolding (per-event `phasesOmitted` + the
+    // phases-dropped disclosure note) was appended AFTER enforcement measured
+    // `data`, re-inflating it PAST its own SOE budget (~40826 B observed).
+    // PASS-AFTER: the scaffolding is reserved for, so the FINAL `data` — notes
+    // and phasesOmitted included — stays within SOE_MAX_PAYLOAD_BYTES.
+    expect(utf8Bytes(data)).toBeLessThanOrEqual(SOE_MAX_PAYLOAD_BYTES);
+
+    // The load-bearing disclosure survives WHOLE through the real dispatch guard
+    // — it is neither slimmed nor forced into an oversize error. Before the fix
+    // the re-inflated payload made the global guard mangle the disclosure (only
+    // the nested per-event `soe` arrays are un-reducible, so a denser object hit
+    // the guard's Pass-3 oversize rejection = the hard-fail this closes).
+    const wrapped = jsonResult(result.value);
+    const env = JSON.parse((wrapped.content[0] as { text: string }).text) as {
+      error?: { kind?: string };
+      responseBudget?: unknown;
+      data?: { disclosure?: string };
+    };
+    expect('error' in env).toBe(false); // no oversize hard-fail
+    expect(env.responseBudget).toBeUndefined(); // global guard never engaged
+    expect(env.data?.disclosure).toBe(data.disclosure); // disclosure byte-identical
+    expect(env.data?.disclosure ?? '').not.toContain('bytes trimmed');
+  });
+
+  it('a truncated OOE payload never hides a dropped NON-ZERO phase — every shortfall is named in phasesOmitted', async () => {
+    const result = await orderOfExecutionHandler(ctx, { objectApiName: 'TruncObj' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    expect(data.truncated).toBe(true);
+
+    const events = ['insert', 'update', 'delete', 'undelete'] as const;
+    let anyNonZeroPhaseOmitted = false;
+    for (const event of events) {
+      const perEvent = data.byEvent[event];
+      const declared = perEvent.summary.phaseCounts;
+      const survived = tallyPhaseCounts(perEvent.soe);
+      const named = new Map(
+        (perEvent.phasesOmitted ?? []).map((o) => [o.phase, o]),
+      );
+      for (const phase of Object.keys(declared) as (keyof typeof declared)[]) {
+        if (declared[phase] > survived[phase]) {
+          // A phase the counts claim but the sequence no longer fully holds
+          // MUST be named — a truncated payload can never imply "0 of these"
+          // for a phase that really fires. This is the "0 phases / no
+          // phasesOmitted" contradiction the finding forbids.
+          const omission = named.get(phase);
+          expect(omission).toBeDefined();
+          expect(omission?.declared).toBe(declared[phase]);
+          expect(omission?.present).toBe(survived[phase]);
+          if (declared[phase] > 0) anyNonZeroPhaseOmitted = true;
+        } else {
+          // Not dropped ⇒ not falsely named as omitted.
+          expect(named.has(phase)).toBe(false);
+        }
+      }
+      // Whenever this event carries a phasesOmitted list, it is non-empty and
+      // each entry is a real shortfall (present strictly below declared).
+      for (const o of perEvent.phasesOmitted ?? []) {
+        expect(o.present).toBeLessThan(o.declared);
+      }
+    }
+    // This fixture drops later phases (duplicate-rules / after-triggers) whose
+    // declared count is non-zero, so the honesty path is genuinely exercised.
+    expect(anyNonZeroPhaseOmitted).toBe(true);
+  });
+});
+
 describe('orderOfExecutionHandler', () => {
+  it('accepts an optional phase filter in the input schema', () => {
+    // FAIL-BEFORE: `phase` was not in the schema and was Zod-stripped.
+    const parsed = orderOfExecutionInputSchema.safeParse({
+      objectApiName: 'OrderObj',
+      phase: 'duplicate-rules',
+    });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.phase).toBe('duplicate-rules');
+    // An unknown phase is rejected rather than silently ignored.
+    expect(
+      orderOfExecutionInputSchema.safeParse({ objectApiName: 'OrderObj', phase: 'not-a-phase' })
+        .success,
+    ).toBe(false);
+  });
+
+  // GUARD (L2 alias OS / ADMIN-SURFACE-ALIAS-SKEW-CLUSTER): pre-fix the schema
+  // declared only `objectApiName`, so `object` / `objectId` / a `CustomObject:`
+  // `componentId` was Zod-STRIPPED -> `objectApiName: Required`. Post-fix each
+  // alias resolves to the SAME byEvent composition, with `appliedScope` echoed.
+  it('natural object aliases ≡ canonical objectApiName (byte-equal byEvent + appliedScope)', async () => {
+    const run = async (raw: unknown) => {
+      const parsed = orderOfExecutionInputSchema.safeParse(raw);
+      if (!parsed.success) return null;
+      return orderOfExecutionHandler(ctx, parsed.data);
+    };
+    const canonical = await run({ objectApiName: 'OrderObj' });
+    const byObject = await run({ object: 'OrderObj' });
+    const byObjectId = await run({ objectId: 'CustomObject:OrderObj' });
+    const byComponent = await run({ componentId: 'CustomObject:OrderObj' });
+    for (const r of [canonical, byObject, byObjectId, byComponent]) {
+      expect(r).not.toBeNull();
+      expect(r?.ok).toBe(true);
+    }
+    if (!canonical?.ok || !byObject?.ok || !byObjectId?.ok || !byComponent?.ok) return;
+    expect(canonical.value.data.appliedScope).toEqual({
+      componentId: 'CustomObject:OrderObj',
+      object: 'OrderObj',
+    });
+    for (const r of [byObject, byObjectId, byComponent]) {
+      expect(r.value.data.byEvent).toEqual(canonical.value.data.byEvent);
+      expect(r.value.data.appliedScope).toEqual(canonical.value.data.appliedScope);
+    }
+  });
+
+  it('disagreeing object aliases → invalid-query', async () => {
+    const parsed = orderOfExecutionInputSchema.safeParse({
+      objectApiName: 'OrderObj',
+      object: 'MixedObj',
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    const r = await orderOfExecutionHandler(ctx, parsed.data);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('phase filter on OrderObj returns only that phase; full view returns all phases', async () => {
+    const full = await orderOfExecutionHandler(ctx, { objectApiName: 'OrderObj' });
+    const filtered = await orderOfExecutionHandler(ctx, {
+      objectApiName: 'OrderObj',
+      phase: 'pre-save-validation',
+    });
+    expect(full.ok && filtered.ok).toBe(true);
+    if (!full.ok || !filtered.ok) return;
+    // Full (un-filtered) view: no phase filter echoed, multiple phases present.
+    expect(full.value.data.appliedPhaseFilter).toBeUndefined();
+    const fullInsertPhases = new Set(full.value.data.byEvent.insert.soe.map((s) => s.phase));
+    expect(fullInsertPhases.size).toBeGreaterThan(2);
+    // Filtered view: only the requested phase in soe; full counts retained.
+    expect(filtered.value.data.appliedPhaseFilter).toBe('pre-save-validation');
+    const fInsert = filtered.value.data.byEvent.insert;
+    expect(fInsert.soe.every((s) => s.phase === 'pre-save-validation')).toBe(true);
+    expect(fInsert.soe.length).toBe(1);
+    expect(fInsert.summary.phaseCounts['pre-save-validation']).toBe(1);
+    // Counts stay the whole-composition truth even though soe is narrowed.
+    expect(fInsert.summary.phaseCounts['duplicate-rules']).toBe(1);
+  });
+
   it('returns component-not-found for an unknown object', async () => {
     const result = await orderOfExecutionHandler(ctx, {
       objectApiName: 'NoSuchObject',

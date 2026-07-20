@@ -1,6 +1,6 @@
 /// <reference types="vitest/globals" />
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -368,7 +368,7 @@ describe('whyFieldChangedHandler', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.data.disclosure).toBe(
-      "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.",
+      "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Each writer carries a runnable flag and its declared status: a non-Active Flow (Obsolete/Draft/Inactive/InvalidDraft), an Inactive trigger, an inactive rule, or a TEST class (isTest, status:test-only) is listed with runnable:false and could NOT have written the field in the org's current production state — it is never the sole live suspect. Active-Flow field writes made via an SObject-variable assignment (assignToReference) that the graph did not stamp as a primary writesTo edge are folded in from a supplemental source scan at heuristic confidence (source: flow-field-writers-scan:*). Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.",
     );
   });
 
@@ -410,5 +410,507 @@ describe('whyFieldChangedInputSchema', () => {
       fieldId: 'Flow:NotAField',
     });
     expect(parsed.success).toBe(true);
+  });
+});
+
+// =============================================================================
+// Active-Flow assignment writers + non-runnable partition —
+// WHY-FIELD-CHANGED-MISSES-ASSIGNMENT-WRITERS.
+//
+//   Widget__c.Flag__c    : written by an OBSOLETE Flow via a primary writesTo
+//                          edge (dead), AND by an ACTIVE Flow via an
+//                          <assignToReference> the graph never stamped
+//                          (supplemental source scan). The Active writer must
+//                          appear; the Obsolete one must be runnable:false.
+//   Widget__c.OnlyDead__c: written ONLY by the OBSOLETE Flow. The sole writer is
+//                          non-runnable, so the response must disclose that (note).
+// =============================================================================
+
+const WIDGET_OBJ = 'CustomObject:Widget__c';
+const FLAG_FIELD = 'CustomField:Widget__c.Flag__c';
+const ONLY_DEAD_FIELD = 'CustomField:Widget__c.OnlyDead__c';
+const OBSOLETE_FLOW = 'Flow:CloseWidgetObsolete';
+const ACTIVE_ASSIGN_FLOW = 'Flow:CloseWidgetActive';
+
+const ACTIVE_FLOW_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+  <status>Active</status>
+  <variables>
+    <name>recordVar</name>
+    <dataType>SObject</dataType>
+    <isCollection>false</isCollection>
+    <objectType>Widget__c</objectType>
+  </variables>
+  <assignments>
+    <name>SetFlag</name>
+    <assignmentItems>
+      <assignToReference>recordVar.Flag__c</assignToReference>
+      <operator>Assign</operator>
+      <value><stringValue>Resolved</stringValue></value>
+    </assignmentItems>
+  </assignments>
+  <recordUpdates>
+    <name>SaveWidget</name>
+    <inputReference>recordVar</inputReference>
+  </recordUpdates>
+</Flow>`;
+
+describe('whyFieldChangedHandler — assignment writers + non-runnable partition', () => {
+  let dir: string;
+  let s: GraphStore;
+  let c: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-why-fc-assign-'));
+    mkdirSync(join(dir, 'flows'), { recursive: true });
+    writeFileSync(join(dir, 'flows', 'CloseWidgetActive.flow-meta.xml'), ACTIVE_FLOW_XML, 'utf8');
+
+    const opened = await openGraph(join(dir, 'why-fc-assign.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    s = opened.value;
+
+    const assignSeed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: WIDGET_OBJ, apiName: 'Widget__c' }),
+        makeNode({ id: FLAG_FIELD, type: 'CustomField', apiName: 'Flag__c', parentId: WIDGET_OBJ }),
+        makeNode({
+          id: ONLY_DEAD_FIELD,
+          type: 'CustomField',
+          apiName: 'OnlyDead__c',
+          parentId: WIDGET_OBJ,
+        }),
+        // Obsolete Flow — a dead writer, reachable only via its primary writesTo edges.
+        makeNode({
+          id: OBSOLETE_FLOW,
+          type: 'Flow',
+          apiName: 'CloseWidgetObsolete',
+          sourcePath: 'flows/CloseWidgetObsolete.flow-meta.xml', // intentionally not written -> scan skips
+          properties: { status: 'Obsolete' },
+        }),
+        // Active Flow — writes Flag__c only via <assignToReference> (no primary edge).
+        makeNode({
+          id: ACTIVE_ASSIGN_FLOW,
+          type: 'Flow',
+          apiName: 'CloseWidgetActive',
+          sourcePath: 'flows/CloseWidgetActive.flow-meta.xml',
+          properties: { status: 'Active' },
+        }),
+      ],
+      edges: [
+        makeEdge({ fromId: WIDGET_OBJ, toId: FLAG_FIELD, edgeType: 'parentOf' }),
+        makeEdge({ fromId: WIDGET_OBJ, toId: ONLY_DEAD_FIELD, edgeType: 'parentOf' }),
+        makeEdge({
+          fromId: OBSOLETE_FLOW,
+          toId: FLAG_FIELD,
+          edgeType: 'writesTo',
+          source: 'flow-extractor',
+          properties: { operation: 'recordUpdate' },
+        }),
+        makeEdge({
+          fromId: OBSOLETE_FLOW,
+          toId: ONLY_DEAD_FIELD,
+          edgeType: 'writesTo',
+          source: 'flow-extractor',
+          properties: { operation: 'recordUpdate' },
+        }),
+      ],
+    };
+    const imported = await importExtractionResults(s, [assignSeed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    c = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s };
+  });
+
+  afterAll(async () => {
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('folds in the Active-Flow assignToReference writer the graph never stamped', async () => {
+    const result = await whyFieldChangedHandler(c, { fieldId: FLAG_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const byId = new Map(result.value.data.writers.map((w) => [w.id, w]));
+    const active = byId.get(ACTIVE_ASSIGN_FLOW);
+    expect(active).toBeDefined();
+    expect(active?.mechanism).toBe('assignToReference');
+    expect(active?.confidence).toBe('heuristic');
+    expect(active?.runnable).toBe(true);
+    expect(active?.status).toBe('Active');
+    expect(active?.source.startsWith('flow-field-writers-scan')).toBe(true);
+    expect(result.value.data.summary.supplementalCount).toBe(1);
+  });
+
+  it('lists the Obsolete Flow as runnable:false with its status, never as the sole live suspect', async () => {
+    const result = await whyFieldChangedHandler(c, { fieldId: FLAG_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const byId = new Map(result.value.data.writers.map((w) => [w.id, w]));
+    const obsolete = byId.get(OBSOLETE_FLOW);
+    expect(obsolete?.runnable).toBe(false);
+    expect(obsolete?.status).toBe('Obsolete');
+    const { summary, note } = result.value.data;
+    expect(summary.runnableCount).toBe(1);
+    expect(summary.nonRunnableCount).toBe(1);
+    // A live writer exists (the Active assignment Flow), so no all-dead note.
+    expect(note).toBeUndefined();
+  });
+
+  it('discloses a non-runnable note when the field\'s ONLY writer is dead automation', async () => {
+    const result = await whyFieldChangedHandler(c, { fieldId: ONLY_DEAD_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { writers, summary, note } = result.value.data;
+    expect(writers.length).toBe(1);
+    expect(writers[0]?.id).toBe(OBSOLETE_FLOW);
+    expect(writers[0]?.runnable).toBe(false);
+    expect(summary.runnableCount).toBe(0);
+    expect(summary.nonRunnableCount).toBe(1);
+    expect(summary.supplementalCount).toBe(0);
+    expect(note).toBeDefined();
+    expect(note).toMatch(/non-runnable|Obsolete/i);
+  });
+});
+
+// =============================================================================
+// Test-class Apex writers are NOT live production writers —
+// WHY-FIELD-CHANGED-TEST-WRITERS-MARKED-RUNNABLE.
+//
+//   Contact.Email : written by a PRODUCTION ApexClass (isTest:false) AND by a
+//                   TEST ApexClass (isTest:true). The production writer stays
+//                   runnable:true; the test writer must be runnable:false with
+//                   status 'test-only' (disclosed, never the sole live suspect).
+//   Contact.TestOnly__c : written ONLY by a TEST ApexClass → the sole writer is
+//                   non-runnable, so the response discloses that (note).
+// =============================================================================
+
+const CONTACT_OBJ = 'CustomObject:Contact';
+const EMAIL_FIELD = 'CustomField:Contact.Email';
+const TESTONLY_FIELD = 'CustomField:Contact.TestOnly__c';
+const PROD_WRITER = 'ApexClass:ContactMergeHandler'; // isTest:false → live
+const TEST_WRITER = 'ApexClass:ContactMergeHandlerTest'; // isTest:true → non-runnable
+
+describe('whyFieldChangedHandler — test-class Apex writer partition', () => {
+  let dir: string;
+  let s: GraphStore;
+  let c: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-why-fc-test-'));
+    const opened = await openGraph(join(dir, 'why-fc-test.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    s = opened.value;
+
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: CONTACT_OBJ, apiName: 'Contact' }),
+        makeNode({ id: EMAIL_FIELD, type: 'CustomField', apiName: 'Email', parentId: CONTACT_OBJ }),
+        makeNode({
+          id: TESTONLY_FIELD,
+          type: 'CustomField',
+          apiName: 'TestOnly__c',
+          parentId: CONTACT_OBJ,
+        }),
+        // Production Apex writer — a live automation writer.
+        makeNode({
+          id: PROD_WRITER,
+          type: 'ApexClass',
+          apiName: 'ContactMergeHandler',
+          properties: { isTest: false },
+        }),
+        // Test Apex writer — writes the field only while a test runs; NOT a live
+        // production writer, so runnable must be false (status 'test-only').
+        makeNode({
+          id: TEST_WRITER,
+          type: 'ApexClass',
+          apiName: 'ContactMergeHandlerTest',
+          properties: { isTest: true },
+        }),
+      ],
+      edges: [
+        makeEdge({ fromId: CONTACT_OBJ, toId: EMAIL_FIELD, edgeType: 'parentOf' }),
+        makeEdge({ fromId: CONTACT_OBJ, toId: TESTONLY_FIELD, edgeType: 'parentOf' }),
+        makeEdge({
+          fromId: PROD_WRITER,
+          toId: EMAIL_FIELD,
+          edgeType: 'writesTo',
+          source: 'apex-scanner',
+          confidence: 'heuristic',
+        }),
+        makeEdge({
+          fromId: TEST_WRITER,
+          toId: EMAIL_FIELD,
+          edgeType: 'writesTo',
+          source: 'apex-scanner',
+          confidence: 'heuristic',
+        }),
+        makeEdge({
+          fromId: TEST_WRITER,
+          toId: TESTONLY_FIELD,
+          edgeType: 'writesTo',
+          source: 'apex-scanner',
+          confidence: 'heuristic',
+        }),
+      ],
+    };
+    const imported = await importExtractionResults(s, [seed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    c = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s };
+  });
+
+  afterAll(async () => {
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('marks a *_Test ApexClass writer runnable:false with status test-only, never the sole live suspect', async () => {
+    const result = await whyFieldChangedHandler(c, { fieldId: EMAIL_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const byId = new Map(result.value.data.writers.map((w) => [w.id, w]));
+    const test = byId.get(TEST_WRITER);
+    expect(test).toBeDefined();
+    expect(test?.runnable).toBe(false);
+    expect(test?.status).toBe('test-only');
+  });
+
+  it('leaves a production (non-test) ApexClass writer runnable:true — UNCHANGED', async () => {
+    const result = await whyFieldChangedHandler(c, { fieldId: EMAIL_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const byId = new Map(result.value.data.writers.map((w) => [w.id, w]));
+    const prod = byId.get(PROD_WRITER);
+    expect(prod).toBeDefined();
+    expect(prod?.runnable).toBe(true);
+    const { summary, note } = result.value.data;
+    expect(summary.runnableCount).toBe(1); // only the production writer
+    expect(summary.nonRunnableCount).toBe(1); // the test writer, disclosed
+    // A live writer exists, so no all-dead note.
+    expect(note).toBeUndefined();
+  });
+
+  it('discloses a non-runnable note when the field\'s ONLY writer is a test class', async () => {
+    const result = await whyFieldChangedHandler(c, { fieldId: TESTONLY_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { writers, summary, note } = result.value.data;
+    expect(writers.length).toBe(1);
+    expect(writers[0]?.id).toBe(TEST_WRITER);
+    expect(writers[0]?.runnable).toBe(false);
+    expect(writers[0]?.status).toBe('test-only');
+    expect(summary.runnableCount).toBe(0);
+    expect(summary.nonRunnableCount).toBe(1);
+    expect(note).toBeDefined();
+    expect(note).toMatch(/non-runnable|test-only/i);
+  });
+});
+
+// =============================================================================
+// FIX 1 — componentId / object+field scope (WHY-FIELD-CHANGED-REJECTS-COMPONENTID).
+// The tool now names its ONE field via `fieldId`, a `CustomField:`/`CustomObject:`
+// `componentId`, or `objectApiName` + `fieldApiName`; echoes `appliedScope` when a
+// scope alias was passed; and returns a NAMED invalid-query (never an org-wide
+// answer) when a componentId can't resolve to a single field. The bare
+// `{ fieldId }` call stays byte-identical. Reuses the main `seed` (Account.Industry
+// with 4 writers) via the module-level `ctx`.
+// =============================================================================
+
+describe('whyFieldChangedHandler — componentId / object+field scope', () => {
+  it('accepts a CustomField componentId as a fieldId alias and echoes appliedScope', async () => {
+    const result = await whyFieldChangedHandler(ctx, {
+      componentId: INDUSTRY_FIELD,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.fieldId).toBe(INDUSTRY_FIELD);
+    expect(result.value.data.appliedScope).toEqual({
+      component: INDUSTRY_FIELD,
+      mode: 'component',
+    });
+    // Same 4 writers as the canonical fieldId call — the alias only renamed the arg.
+    expect(result.value.data.writers.length).toBe(4);
+  });
+
+  it('resolves objectApiName + fieldApiName into the canonical field (object scope applies)', async () => {
+    const result = await whyFieldChangedHandler(ctx, {
+      objectApiName: 'Account',
+      fieldApiName: 'Industry',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.fieldId).toBe(INDUSTRY_FIELD);
+    expect(result.value.data.appliedScope).toEqual({
+      component: INDUSTRY_FIELD,
+      mode: 'component',
+    });
+    expect(result.value.data.writers.length).toBe(4);
+  });
+
+  it('accepts a CustomObject componentId + fieldApiName as the object scope (field-scope applies)', async () => {
+    const result = await whyFieldChangedHandler(ctx, {
+      componentId: ACCOUNT_OBJ,
+      fieldApiName: 'Industry',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.fieldId).toBe(INDUSTRY_FIELD);
+    expect(result.value.data.appliedScope).toEqual({
+      component: INDUSTRY_FIELD,
+      mode: 'component',
+    });
+  });
+
+  it('returns a NAMED invalid-query for a CustomObject componentId with no field — never org-wide', async () => {
+    const result = await whyFieldChangedHandler(ctx, { componentId: ACCOUNT_OBJ });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+    expect(result.error.message).toMatch(/OBJECT/);
+    // The object name is echoed so the host knows the scope was SEEN, not stripped.
+    expect(result.error.message).toContain('Account');
+  });
+
+  it('rejects a non-CustomField/-CustomObject componentId prefix with invalid-query on that arg', async () => {
+    const result = await whyFieldChangedHandler(ctx, {
+      componentId: 'Flow:NotAField',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+    expect(result.error.path).toBe('componentId');
+  });
+
+  it('rejects disagreeing fieldId / componentId aliases (never a silent pick)', async () => {
+    const result = await whyFieldChangedHandler(ctx, {
+      fieldId: INDUSTRY_FIELD,
+      componentId: REVENUE_FIELD,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+    expect(result.error.message).toMatch(/different fields/);
+  });
+
+  it('rejects an object scope that disagrees with the field\'s own object', async () => {
+    const result = await whyFieldChangedHandler(ctx, {
+      objectApiName: 'Contact',
+      fieldApiName: INDUSTRY_FIELD, // CustomField:Account.Industry — object mismatch
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+    expect(result.error.message).toMatch(/disagrees/);
+  });
+
+  it('keeps the unscoped { fieldId } call byte-identical (no appliedScope key)', async () => {
+    const bare = await whyFieldChangedHandler(ctx, { fieldId: INDUSTRY_FIELD });
+    const scoped = await whyFieldChangedHandler(ctx, {
+      componentId: INDUSTRY_FIELD,
+    });
+    expect(bare.ok).toBe(true);
+    expect(scoped.ok).toBe(true);
+    if (!bare.ok || !scoped.ok) return;
+    // Unscoped omits appliedScope entirely.
+    expect('appliedScope' in bare.value.data).toBe(false);
+    expect(bare.value.data.appliedScope).toBeUndefined();
+    // Scoped data === unscoped data once appliedScope is removed (byte-identical).
+    const { appliedScope, ...scopedRest } = scoped.value.data;
+    expect(appliedScope).toEqual({ component: INDUSTRY_FIELD, mode: 'component' });
+    expect(JSON.stringify(scopedRest)).toBe(JSON.stringify(bare.value.data));
+  });
+});
+
+// =============================================================================
+// FIX 2 — active vs inactive WorkflowRule field-update writer partition. The SAME
+// active-writer treatment field_360 gives, applied here via the shared
+// `isActiveSoeFirer` predicate (soe-active.ts): an ACTIVE WorkflowRule field
+// update stays runnable:true; an inactive (active:false) one is runnable:false
+// with status 'Inactive' — listed for completeness, never the sole live suspect.
+//   Ticket__c.Owner__c : written by an ACTIVE and an INACTIVE WorkflowRule.
+// =============================================================================
+
+const TICKET_OBJ = 'CustomObject:Ticket__c';
+const OWNER_FIELD = 'CustomField:Ticket__c.Owner__c';
+const ACTIVE_WF = 'WorkflowRule:Ticket__c.AssignOwner';
+const INACTIVE_WF = 'WorkflowRule:Ticket__c.LegacyAssignOwner';
+
+describe('whyFieldChangedHandler — active vs inactive WorkflowRule writer partition', () => {
+  let dir: string;
+  let s: GraphStore;
+  let c: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-why-fc-wf-'));
+    const opened = await openGraph(join(dir, 'why-fc-wf.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    s = opened.value;
+
+    const wfSeed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: TICKET_OBJ, apiName: 'Ticket__c' }),
+        makeNode({
+          id: OWNER_FIELD,
+          type: 'CustomField',
+          apiName: 'Owner__c',
+          parentId: TICKET_OBJ,
+        }),
+        // Active WorkflowRule field update — a live writer.
+        makeNode({
+          id: ACTIVE_WF,
+          type: 'WorkflowRule',
+          apiName: 'Ticket__c.AssignOwner',
+          parentId: TICKET_OBJ,
+          properties: { active: true },
+        }),
+        // Inactive WorkflowRule field update — configured but dead.
+        makeNode({
+          id: INACTIVE_WF,
+          type: 'WorkflowRule',
+          apiName: 'Ticket__c.LegacyAssignOwner',
+          parentId: TICKET_OBJ,
+          properties: { active: false },
+        }),
+      ],
+      edges: [
+        makeEdge({ fromId: TICKET_OBJ, toId: OWNER_FIELD, edgeType: 'parentOf' }),
+        makeEdge({
+          fromId: ACTIVE_WF,
+          toId: OWNER_FIELD,
+          edgeType: 'writesTo',
+          source: 'workflow-rule-extractor',
+        }),
+        makeEdge({
+          fromId: INACTIVE_WF,
+          toId: OWNER_FIELD,
+          edgeType: 'writesTo',
+          source: 'workflow-rule-extractor',
+        }),
+      ],
+    };
+    const imported = await importExtractionResults(s, [wfSeed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    c = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s };
+  });
+
+  afterAll(async () => {
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('partitions an active WorkflowRule field-update writer from an inactive one', async () => {
+    const result = await whyFieldChangedHandler(c, { fieldId: OWNER_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const byId = new Map(result.value.data.writers.map((w) => [w.id, w]));
+    const active = byId.get(ACTIVE_WF);
+    const inactive = byId.get(INACTIVE_WF);
+    expect(active?.runnable).toBe(true);
+    expect(active?.status).toBe('Active');
+    expect(inactive?.runnable).toBe(false);
+    expect(inactive?.status).toBe('Inactive');
+    const { summary, note } = result.value.data;
+    expect(summary.runnableCount).toBe(1);
+    expect(summary.nonRunnableCount).toBe(1);
+    // A live writer exists, so no all-dead note.
+    expect(note).toBeUndefined();
   });
 });

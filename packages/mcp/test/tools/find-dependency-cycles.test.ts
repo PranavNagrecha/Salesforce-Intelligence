@@ -242,3 +242,88 @@ describe('findDependencyCyclesHandler — bounded graph queries', () => {
     expect(result.value.data.summary.callsApexEdgesConsidered).toBe(60);
   });
 });
+
+// =============================================================================
+// GUARD (FIND-DEPENDENCY-CYCLES-IGNORES-SCOPE): an architect "dependency cycles
+// around {class/name}?" passes componentId / nameContains, but both were
+// Zod-stripped and every call returned the same org-wide cluster list with no
+// appliedScope. A componentId scope must now return ONLY the cluster CONTAINING
+// it (honest empty when it is in none), nameContains must filter by member id,
+// and the bare call stays org-wide. Pre-fix each scoped call equals the bare
+// payload, so the "differs" assertions are RED before the fix.
+// =============================================================================
+describe('findDependencyCyclesHandler — component / name scope (guard)', () => {
+  it('bare call is org-wide (both clusters, appliedScope mode: all)', async () => {
+    const r = await findDependencyCyclesHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.summary.cyclicClusters).toBe(2);
+    expect(r.value.data.appliedScope).toEqual({
+      component: null,
+      nameContains: null,
+      mode: 'all',
+    });
+  });
+
+  it('componentId scope returns ONLY the cluster containing it (differs from bare)', async () => {
+    const r = await findDependencyCyclesHandler(ctx, {
+      componentId: 'ApexClass:A',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.cycles.map((c) => c.members)).toEqual([
+      ['ApexClass:A', 'ApexClass:B', 'ApexClass:C'],
+    ]);
+    expect(r.value.data.summary.cyclicClusters).toBe(1);
+    // The self-loop cluster R is NOT in A's cluster.
+    expect(r.value.data.cycles.flatMap((c) => c.members)).not.toContain('ApexClass:R');
+    expect(r.value.data.appliedScope).toEqual({
+      component: 'ApexClass:A',
+      nameContains: null,
+      mode: 'scoped',
+    });
+  });
+
+  it('bare-name componentId ≡ canonical ApexClass: id (byte-equal data)', async () => {
+    const byBare = await findDependencyCyclesHandler(ctx, { componentId: 'A' });
+    const byCanonical = await findDependencyCyclesHandler(ctx, {
+      componentId: 'ApexClass:A',
+    });
+    expect(byBare.ok && byCanonical.ok).toBe(true);
+    if (!byBare.ok || !byCanonical.ok) return;
+    expect(JSON.stringify(byBare.value.data)).toBe(
+      JSON.stringify(byCanonical.value.data),
+    );
+  });
+
+  it('a componentId in NO cycle returns an honest empty (differs from the org list)', async () => {
+    const r = await findDependencyCyclesHandler(ctx, {
+      componentId: 'ApexClass:X',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.cycles).toEqual([]);
+    expect(r.value.data.summary.cyclicClusters).toBe(0);
+    expect(r.value.data.summary.largestClusterSize).toBe(0);
+    expect(r.value.data.appliedScope.component).toBe('ApexClass:X');
+  });
+
+  it('nameContains filters clusters by member id substring', async () => {
+    const r = await findDependencyCyclesHandler(ctx, { nameContains: 'R' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Only the self-loop member id contains 'R'.
+    expect(r.value.data.cycles.map((c) => c.members)).toEqual([['ApexClass:R']]);
+    expect(r.value.data.appliedScope.nameContains).toBe('R');
+    expect(r.value.data.appliedScope.mode).toBe('scoped');
+  });
+
+  it('a wrong-type componentId prefix is invalid-query', async () => {
+    const r = await findDependencyCyclesHandler(ctx, {
+      componentId: 'CustomObject:A',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+});

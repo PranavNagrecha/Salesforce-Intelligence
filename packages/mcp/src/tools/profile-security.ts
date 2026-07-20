@@ -36,6 +36,7 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { coercePrefix } from './coerce-id.js';
+import { firstNonEmpty } from './input-aliases.js';
 import {
   readLoginHours,
   readLoginIpRanges,
@@ -46,11 +47,59 @@ import {
 /** The single org-wide session-security node id (one per org). */
 const SESSION_SETTINGS_ID = 'SessionSettings:default' as ComponentId;
 
+const PROFILE_PREFIX = 'Profile:';
+
+/**
+ * Zod schema for the `sfi.profile_security` tool input.
+ *
+ *   - `profileId`: the canonical `Profile:{ApiName}` id or a bare apiName
+ *     (coerced). A `PermissionSet:` / non-Profile id is refused at the handler.
+ *   - `componentId` / `profileApiName`: interchangeable aliases a host naturally
+ *     forwards from `sfi.resolve` (PROFILE-SECURITY-REJECTS-COMPONENTID).
+ *     Resolved to the single profile through {@link resolveProfileRef}; the
+ *     canonical `profileId` wins, disagreeing selectors → `invalid-query`, at
+ *     least one is required.
+ */
 export const profileSecurityInputSchema = z.object({
-  profileId: z.string().min(1),
+  profileId: z.string().min(1).optional(),
+  componentId: z.string().min(1).optional(),
+  profileApiName: z.string().min(1).optional(),
 });
 
 export type ProfileSecurityInput = z.infer<typeof profileSecurityInputSchema>;
+
+/**
+ * Reconcile the interchangeable Profile selectors a host reaches for —
+ * `profileId` (canonical), `componentId` (`Profile:{name}`), and
+ * `profileApiName` (PROFILE-SECURITY-REJECTS-COMPONENTID). Each is coerced to a
+ * `Profile:` id for the distinctness check; the canonical `profileId` wins when
+ * several agree. Disagreeing selectors → `invalid-query` (never a silent pick);
+ * none → `invalid-query`. The RAW winning value is returned so the handler's
+ * existing coercion + Profile-only refusal stay byte-identical for a bare
+ * `{ profileId }` call.
+ */
+const resolveProfileRef = (input: ProfileSecurityInput): Result<string, McpError> => {
+  const candidates = [input.profileId, input.componentId, input.profileApiName]
+    .map((v) => firstNonEmpty(v))
+    .filter((v): v is string => v !== undefined);
+  if (candidates.length === 0) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        'name the profile — pass `profileId` (e.g. "StandardUser"), `componentId` (`Profile:StandardUser`), or `profileApiName`',
+      path: 'profileId',
+    });
+  }
+  const distinct = [...new Set(candidates.map((v) => coercePrefix(v, [PROFILE_PREFIX])))];
+  if (distinct.length > 1) {
+    return err({
+      kind: 'invalid-query',
+      message: `profile selectors name different targets (${distinct.join(', ')}); pass exactly one of profileId / componentId / profileApiName`,
+      path: 'profileId',
+    });
+  }
+  return ok(candidates[0] as string);
+};
 
 /**
  * Org-wide session-security policy, read from the single `SessionSettings:default`
@@ -107,12 +156,15 @@ export const profileSecurityHandler = async (
   ctx: Context,
   input: ProfileSecurityInput,
 ): Promise<Result<McpResponse<ProfileSecurityOutput>, McpError>> => {
-  const profileId = coercePrefix(input.profileId, ['Profile:']);
-  if (!profileId.startsWith('Profile:')) {
+  const profileRefResult = resolveProfileRef(input);
+  if (!profileRefResult.ok) return profileRefResult;
+  const profileRef = profileRefResult.value;
+  const profileId = coercePrefix(profileRef, [PROFILE_PREFIX]);
+  if (!profileId.startsWith(PROFILE_PREFIX)) {
     return err({
       kind: 'invalid-query',
       message:
-        `profileId must be a Profile: id; got '${input.profileId}'. ` +
+        `profileId must be a Profile: id; got '${profileRef}'. ` +
         'Permission sets carry no login security — login IP ranges / hours are a Profile-only surface.',
       path: 'profileId',
     });

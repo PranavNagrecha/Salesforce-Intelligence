@@ -406,3 +406,150 @@ describe('historyTrackingGapsHandler — pagination + byte budget', () => {
     expect(seen.size).toBe(BULK_COUNT);
   });
 });
+
+// =============================================================================
+// Untrackable-by-type segregation — HISTORY-TRACKING-GAPS-FLAGS-UNTRACKABLE-FORMULAS.
+// Salesforce cannot field-history-track formula / roll-up-summary / auto-number /
+// synthesized-system fields regardless of the declared flags, so they must NOT be
+// emitted as remediation-shaped `field-not-tracked` gaps. They are segregated into
+// `untrackable[]` (severity none), excluded from `groups` and `summary.totalGapFields`.
+// =============================================================================
+
+const UNTRACK_OBJ = 'CustomObject:Untrackable__c';
+const FORMULA_ONLY_OBJ = 'CustomObject:FormulaOnly__c';
+
+const STORED_PII_GAP = 'CustomField:Untrackable__c.SSN_Stored__c'; // stored Text PII, untracked -> ACTIONABLE gap
+const FORMULA_PII = 'CustomField:Untrackable__c.SSN_Formula__c'; // isFormula -> untrackable
+const ROLLUP_PII = 'CustomField:Untrackable__c.SSN_Rollup__c'; // dataType Summary -> untrackable
+const AUTONUM_PII = 'CustomField:Untrackable__c.SSN_AutoNum__c'; // dataType AutoNumber -> untrackable
+const SYSTEM_PII = 'CustomField:Untrackable__c.SSN_System__c'; // system: true -> untrackable
+const FORMULA_ONLY_PII = 'CustomField:FormulaOnly__c.SSN_Faculty__c'; // object whose ONLY gap is a formula
+
+const untrackableSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: UNTRACK_OBJ,
+      type: 'CustomObject',
+      apiName: 'Untrackable__c',
+      properties: { enableHistory: true },
+    }),
+    makeNode({
+      id: FORMULA_ONLY_OBJ,
+      type: 'CustomObject',
+      apiName: 'FormulaOnly__c',
+      properties: { enableHistory: true },
+    }),
+    makeNode({
+      id: STORED_PII_GAP,
+      apiName: 'SSN_Stored__c',
+      parentId: UNTRACK_OBJ,
+      properties: { dataType: 'Text', trackHistory: false },
+    }),
+    makeNode({
+      id: FORMULA_PII,
+      apiName: 'SSN_Formula__c',
+      parentId: UNTRACK_OBJ,
+      // DX-source stores a formula's RETURN type in <type>, not "Formula";
+      // isFormula is the authoritative computed-field signal.
+      properties: { dataType: 'Text', trackHistory: false, isFormula: true },
+    }),
+    makeNode({
+      id: ROLLUP_PII,
+      apiName: 'SSN_Rollup__c',
+      parentId: UNTRACK_OBJ,
+      properties: { dataType: 'Summary', trackHistory: false },
+    }),
+    makeNode({
+      id: AUTONUM_PII,
+      apiName: 'SSN_AutoNum__c',
+      parentId: UNTRACK_OBJ,
+      properties: { dataType: 'AutoNumber', trackHistory: false },
+    }),
+    makeNode({
+      id: SYSTEM_PII,
+      apiName: 'SSN_System__c',
+      parentId: UNTRACK_OBJ,
+      properties: { dataType: 'Text', trackHistory: false, system: true },
+    }),
+    makeNode({
+      id: FORMULA_ONLY_PII,
+      apiName: 'SSN_Faculty__c',
+      parentId: FORMULA_ONLY_OBJ,
+      properties: { dataType: 'Text', trackHistory: false, isFormula: true },
+    }),
+  ],
+  edges: [],
+};
+
+describe('historyTrackingGapsHandler — untrackable-by-type segregation', () => {
+  let dir: string;
+  let s: GraphStore;
+  let c: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-history-gaps-untrackable-'));
+    const opened = await openGraph(join(dir, 'untrackable.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    s = opened.value;
+    const imported = await importExtractionResults(s, [untrackableSeed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    c = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s };
+  });
+
+  afterAll(async () => {
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('does NOT emit formula / roll-up / auto-number / system PII fields as field-not-tracked gaps', async () => {
+    const result = await historyTrackingGapsHandler(c, { objectApiName: 'Untrackable__c' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const gapIds = result.value.data.groups.flatMap((g) => g.fields.map((f) => f.id));
+    expect(gapIds).not.toContain(FORMULA_PII);
+    expect(gapIds).not.toContain(ROLLUP_PII);
+    expect(gapIds).not.toContain(AUTONUM_PII);
+    expect(gapIds).not.toContain(SYSTEM_PII);
+    // The stored Text PII field is still a real, fixable gap.
+    expect(gapIds).toContain(STORED_PII_GAP);
+    expect(result.value.data.summary.totalGapFields).toBe(1);
+    expect(result.value.data.summary.byGapKind).toEqual({
+      'object-history-disabled': 0,
+      'field-not-tracked': 1,
+    });
+  });
+
+  it('segregates untrackable-by-type fields into untrackable[] with severity none and a reason', async () => {
+    const result = await historyTrackingGapsHandler(c, { objectApiName: 'Untrackable__c' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const byId = new Map(result.value.data.untrackable.map((u) => [u.id, u]));
+    expect(byId.get(FORMULA_PII)?.reason).toBe('formula');
+    expect(byId.get(ROLLUP_PII)?.reason).toBe('roll-up-summary');
+    expect(byId.get(AUTONUM_PII)?.reason).toBe('auto-number');
+    expect(byId.get(SYSTEM_PII)?.reason).toBe('system-field');
+    for (const u of result.value.data.untrackable) {
+      expect(u.severity).toBe('none');
+      expect(u.classification).toBe('pii');
+    }
+    expect(result.value.data.summary.untrackableFields).toBe(4);
+    expect(result.value.data.summary.byUntrackableReason).toEqual({
+      formula: 1,
+      'roll-up-summary': 1,
+      'auto-number': 1,
+      'system-field': 1,
+    });
+    expect(result.value.data.untrackableTruncated).toBe(false);
+  });
+
+  it('reports 0 ACTIONABLE gaps for an object whose only gap is an untrackable formula (the Evaluation witness shape)', async () => {
+    const result = await historyTrackingGapsHandler(c, { objectApiName: 'FormulaOnly__c' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.groups).toEqual([]);
+    expect(result.value.data.summary.totalGapFields).toBe(0);
+    expect(result.value.data.summary.untrackableFields).toBe(1);
+    expect(result.value.data.untrackable.map((u) => u.id)).toEqual([FORMULA_ONLY_PII]);
+    expect(result.value.data.untrackable[0]?.reason).toBe('formula');
+  });
+});

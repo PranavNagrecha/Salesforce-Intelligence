@@ -145,6 +145,43 @@ describe('profileSecurityHandler', () => {
     expect(r.error.kind).toBe('component-not-found');
   });
 
+  // PROFILE-SECURITY-REJECTS-COMPONENTID: a host forwarding sfi.resolve's
+  // Profile id (as `componentId` / `profileApiName`) must reach the SAME answer.
+  it('resolves a componentId / profileApiName selector to the SAME result as profileId', async () => {
+    const canonical = await profileSecurityHandler(ctx, { profileId: 'Profile:Restricted' });
+    const viaComponentId = await profileSecurityHandler(ctx, { componentId: 'Profile:Restricted' });
+    const viaApiName = await profileSecurityHandler(ctx, { profileApiName: 'Restricted' });
+    expect(canonical.ok && viaComponentId.ok && viaApiName.ok).toBe(true);
+    if (!canonical.ok || !viaComponentId.ok || !viaApiName.ok) return;
+    // Byte-identical payload whichever selector the host supplied.
+    expect(viaComponentId.value.data).toEqual(canonical.value.data);
+    expect(viaApiName.value.data).toEqual(canonical.value.data);
+    expect(viaComponentId.value.data.profileId).toBe('Profile:Restricted');
+  });
+
+  it('rejects a wrong-type componentId (a PermissionSet) with invalid-query', async () => {
+    const r = await profileSecurityHandler(ctx, { componentId: 'PermissionSet:Custom' });
+    expect(r.ok).toBe(false); if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('rejects disagreeing selectors with invalid-query', async () => {
+    const r = await profileSecurityHandler(ctx, {
+      profileId: 'Profile:Restricted',
+      componentId: 'Profile:Open',
+    });
+    expect(r.ok).toBe(false); if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('different targets');
+  });
+
+  it('rejects a call with no selector at all with invalid-query', async () => {
+    const r = await profileSecurityHandler(ctx, {});
+    expect(r.ok).toBe(false); if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.path).toBe('profileId');
+  });
+
   it('populates sessionSecuritySettings from the org SessionSettings:default node', async () => {
     const r = await profileSecurityHandler(ctxWithSession, { profileId: 'Profile:Sales' });
     expect(r.ok).toBe(true); if (!r.ok) return;

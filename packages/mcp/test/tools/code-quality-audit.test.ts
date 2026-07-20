@@ -344,9 +344,87 @@ describe('codeQualityAuditHandler — output cursor (CR-22)', () => {
   });
 });
 
+// =============================================================================
+// GUARD (CODE-QUALITY-AUDIT-IGNORES-CLASS-SCOPE): "code quality audit for
+// CriticalCls" passes componentId / classApiName / apiName, but the schema
+// stripped them and every call returned the same org-wide issue leaderboard. A
+// class scope must now return ONLY that class's issues + appliedScope; the bare
+// call stays byte-identical (no appliedScope key).
+describe('codeQualityAuditHandler — class scope (guard)', () => {
+  it('bare call is org-wide and omits appliedScope (byte-identical shape)', async () => {
+    const r = await codeQualityAuditHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalCount).toBe(4);
+    expect('appliedScope' in r.value.data).toBe(false);
+  });
+
+  it('componentId scope returns ONLY that class (differs from bare)', async () => {
+    const r = await codeQualityAuditHandler(ctx, {
+      componentId: 'ApexClass:CriticalCls',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalCount).toBe(2);
+    for (const i of r.value.data.issues) {
+      expect(i.componentId).toBe('ApexClass:CriticalCls');
+    }
+    expect(r.value.data.appliedScope).toEqual({
+      component: 'ApexClass:CriticalCls',
+      mode: 'component',
+    });
+  });
+
+  it('classApiName and apiName aliases resolve identically', async () => {
+    const byClassApiName = await codeQualityAuditHandler(ctx, {
+      classApiName: 'CriticalCls',
+    });
+    const byApiName = await codeQualityAuditHandler(ctx, { apiName: 'CriticalCls' });
+    expect(byClassApiName.ok && byApiName.ok).toBe(true);
+    if (!byClassApiName.ok || !byApiName.ok) return;
+    expect(byClassApiName.value.data.totalCount).toBe(2);
+    expect(byApiName.value.data.issues).toEqual(byClassApiName.value.data.issues);
+    expect(byApiName.value.data.appliedScope).toEqual(
+      byClassApiName.value.data.appliedScope,
+    );
+  });
+
+  it('a scoped clean class returns zero issues (differs from bare org list)', async () => {
+    const r = await codeQualityAuditHandler(ctx, { componentId: 'ApexClass:Clean' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalCount).toBe(0);
+    expect(r.value.data.appliedScope?.mode).toBe('component');
+  });
+
+  it('an unresolved class id is component-not-found (not a silent org-wide answer)', async () => {
+    const r = await codeQualityAuditHandler(ctx, { componentId: 'ApexClass:GhostCls' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+  });
+
+  it('a non-Apex type prefix is invalid-query', async () => {
+    const r = await codeQualityAuditHandler(ctx, { componentId: 'CustomObject:CriticalCls' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+});
+
 describe('codeQualityAuditInputSchema', () => {
   it('accepts empty input', () => {
     expect(codeQualityAuditInputSchema.safeParse({}).success).toBe(true);
+  });
+
+  it('accepts the class-scope selectors', () => {
+    expect(
+      codeQualityAuditInputSchema.safeParse({ componentId: 'ApexClass:CriticalCls' }).success,
+    ).toBe(true);
+    expect(codeQualityAuditInputSchema.safeParse({ classApiName: 'CriticalCls' }).success).toBe(
+      true,
+    );
+    expect(codeQualityAuditInputSchema.safeParse({ apiName: 'CriticalCls' }).success).toBe(true);
   });
 
   it('accepts all severityFilter values including "all"', () => {

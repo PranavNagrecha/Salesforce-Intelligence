@@ -516,3 +516,90 @@ describe('governorLimitRisksHandler — entry-path walk cap disclosure (CR-22-B6
     expect(r.value.data.boundaries.join('\n')).not.toContain('Entry-path walk capped');
   });
 });
+
+// =============================================================================
+// GUARD (GOVERNOR-LIMIT-RISKS-IGNORES-CLASS-SCOPE): a dev "governor risks for
+// {class}?" passes componentId / classApiName / apiName, but the schema stripped
+// them and every call returned the same org-wide list. A class scope must now
+// return ONLY that class + appliedScope; the bare call stays org-wide. Pre-fix
+// each scoped call equals the bare org-wide payload, so the "differs" and
+// per-class-count assertions are RED before the fix.
+describe('governorLimitRisksHandler — class scope (guard)', () => {
+  it('bare call is org-wide (both risky components, appliedScope mode: all)', async () => {
+    const r = await governorLimitRisksHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.classes.map((c) => c.componentId).sort()).toEqual([
+      'ApexClass:DangerSvc',
+      'ApexTrigger:LoopTrigger',
+    ]);
+    expect(r.value.data.totalRiskCount).toBe(4);
+    expect(r.value.data.appliedScope).toEqual({ component: null, mode: 'all' });
+  });
+
+  it('componentId scope returns ONLY that class (differs from bare)', async () => {
+    const r = await governorLimitRisksHandler(ctx, {
+      componentId: 'ApexClass:DangerSvc',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.classes.map((c) => c.componentId)).toEqual(['ApexClass:DangerSvc']);
+    expect(r.value.data.totalClassCount).toBe(1);
+    expect(r.value.data.totalRiskCount).toBe(3);
+    expect(r.value.data.appliedScope).toEqual({
+      component: 'ApexClass:DangerSvc',
+      mode: 'component',
+    });
+  });
+
+  it('classApiName and apiName aliases resolve identically', async () => {
+    const byClassApiName = await governorLimitRisksHandler(ctx, { classApiName: 'DangerSvc' });
+    const byApiName = await governorLimitRisksHandler(ctx, { apiName: 'DangerSvc' });
+    expect(byClassApiName.ok && byApiName.ok).toBe(true);
+    if (!byClassApiName.ok || !byApiName.ok) return;
+    expect(byClassApiName.value.data.classes.map((c) => c.componentId)).toEqual([
+      'ApexClass:DangerSvc',
+    ]);
+    expect(byApiName.value.data.classes).toEqual(byClassApiName.value.data.classes);
+  });
+
+  it('an ApexTrigger scope works too', async () => {
+    const r = await governorLimitRisksHandler(ctx, {
+      componentId: 'ApexTrigger:LoopTrigger',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.classes.map((c) => c.componentId)).toEqual([
+      'ApexTrigger:LoopTrigger',
+    ]);
+    expect(r.value.data.totalRiskCount).toBe(1);
+  });
+
+  it('a scoped clean class returns zero risks (differs from bare org list)', async () => {
+    const r = await governorLimitRisksHandler(ctx, {
+      componentId: 'ApexClass:CleanCls',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.classes).toEqual([]);
+    expect(r.value.data.totalRiskCount).toBe(0);
+  });
+
+  it('an unresolved class id is component-not-found (not a silent org-wide answer)', async () => {
+    const r = await governorLimitRisksHandler(ctx, {
+      componentId: 'ApexClass:GhostCls',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+  });
+
+  it('a non-Apex type prefix is invalid-query', async () => {
+    const r = await governorLimitRisksHandler(ctx, {
+      componentId: 'CustomObject:DangerSvc',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+});

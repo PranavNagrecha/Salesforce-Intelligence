@@ -5,7 +5,21 @@
  * LLM hosts often guess sibling-tool names (`componentId`, `objectId`, `query`).
  * Each tool keeps its canonical key; aliases are merged in a Zod preprocess
  * step before validation when the canonical value is absent or empty.
+ *
+ * L2 "Alias OS" (ADMIN-SURFACE-ALIAS-SKEW-CLUSTER): a router recommends an
+ * admin/support tool, the host passes the natural identifier for the thing
+ * (`objectApiName`, `componentId: CustomObject:…`, `fieldId`), and the tool
+ * must accept it, ECHO the scope it resolved (`appliedScope`), and NEVER
+ * silently strip a mismatched alias. The `resolveObjectAlias` /
+ * `resolveFieldAlias` / `resolveApexClassAlias` resolvers below are the ONE
+ * shared normalizer every object- / field- / class-scoped tool routes through:
+ * one distinct target → `ok`; disagreeing aliases or (when required) none →
+ * `invalid-query`.
  */
+
+import type { ComponentId, McpError } from '@sf-intelligence/contracts';
+import { err, ok, type Result } from '@sf-intelligence/core';
+import { getNodeById, type GraphStore } from '@sf-intelligence/graph';
 
 /** First non-empty trimmed string among `values`. */
 export const firstNonEmpty = (
@@ -63,6 +77,253 @@ export const toProfileOrPermSetId = (raw: string): string =>
   raw.startsWith('Profile:') || raw.startsWith('PermissionSet:')
     ? raw
     : `Profile:${raw}`;
+
+/** Bare Apex class api name or `ApexClass:X` → `ApexClass:X`. */
+export const toApexClassId = (raw: string): string =>
+  raw.startsWith('ApexClass:') ? raw : `ApexClass:${raw}`;
+
+/** Bare app api name or `CustomApplication:X` → `CustomApplication:X`. */
+export const toCustomApplicationId = (raw: string): string =>
+  raw.startsWith('CustomApplication:') ? raw : `CustomApplication:${raw}`;
+
+/** Coerce `raw` (or `undefined`) to its trimmed string form when it is a string. */
+const asString = (raw: unknown): string | undefined =>
+  typeof raw === 'string' ? raw : undefined;
+
+/** Read `key` off a raw object as a trimmed non-empty string, else `undefined`. */
+const readNonEmpty = (
+  src: Record<string, unknown>,
+  key: string,
+): string | undefined => firstNonEmpty(asString(src[key]));
+
+/** Narrow arbitrary tool input to a plain record (empty when not an object). */
+const asRecord = (raw: unknown): Record<string, unknown> =>
+  raw !== null && typeof raw === 'object' && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)
+    : {};
+
+/**
+ * Collapse a candidate list to distinct entries in first-seen order, then
+ * return `ok(value)` when exactly one distinct id survives. Zero →
+ * `invalid-query` with `emptyMessage` (unless `required` is false, which yields
+ * `ok(null)` for a legitimately-unscoped reverse mode). Two or more DISTINCT
+ * ids → `invalid-query` naming them (never a silent pick — the strip this
+ * whole module exists to kill).
+ */
+const oneDistinct = (
+  candidates: readonly string[],
+  opts: {
+    readonly required: boolean;
+    readonly emptyMessage: string;
+    readonly conflictMessage: (distinct: readonly string[]) => string;
+    readonly path: string;
+  },
+): Result<string | null, McpError> => {
+  const distinct = [...new Set(candidates)];
+  if (distinct.length === 0) {
+    if (!opts.required) return ok(null);
+    return err({ kind: 'invalid-query', message: opts.emptyMessage, path: opts.path });
+  }
+  if (distinct.length > 1) {
+    return err({
+      kind: 'invalid-query',
+      message: opts.conflictMessage(distinct),
+      path: opts.path,
+    });
+  }
+  return ok(distinct[0] as string);
+};
+
+/** A resolved object scope: the canonical id AND its bare api name, for `appliedScope`. */
+export interface ResolvedObjectScope {
+  /** Canonical `CustomObject:<ApiName>`. */
+  readonly componentId: string;
+  /** Bare object api name (`Contact`). */
+  readonly object: string;
+}
+
+/** Options for {@link resolveObjectAlias}. */
+export interface ResolveObjectAliasOptions {
+  /**
+   * Whether a `componentId` with NO `:` (a bare api name) is treated as an
+   * object. `true` for object-only tools (`automation_collisions`,
+   * `what_happens_on_save`, …). `false` for POLYMORPHIC tools whose bare /
+   * other-prefix `componentId` is their own reverse mode (`layout_assignments`
+   * treats a bare id as a `Layout:`; `lightning_pages` / `list_view_sharing`
+   * carry `FlexiPage:` / `ListView:` reverse modes) — there only a
+   * `CustomObject:` `componentId` counts as an object alias. Default `true`.
+   */
+  readonly bareComponentIdIsObject?: boolean;
+  /**
+   * Whether "no object named" is an error. `true` (default) → `invalid-query`.
+   * `false` → `ok(null)` so a polymorphic tool in reverse mode can proceed.
+   */
+  readonly required?: boolean;
+}
+
+/**
+ * Resolve a single object scope from the interchangeable object identifiers a
+ * router / host may pass: `object`, `objectApiName`, `objectId`, and a
+ * `componentId` that is a `CustomObject:` id (or a bare api name when
+ * `bareComponentIdIsObject`). Every value is coerced to canonical
+ * `CustomObject:<ApiName>` and de-duplicated. Echo the returned
+ * `componentId` / `object` back as `appliedScope`.
+ *
+ * Reverse-mode `componentId` prefixes (`Layout:` / `FlexiPage:` / `ListView:`)
+ * are NOT object aliases — they are ignored here so the tool's own reverse
+ * branch keeps them.
+ */
+export const resolveObjectAlias = (
+  raw: unknown,
+  opts: ResolveObjectAliasOptions = {},
+): Result<ResolvedObjectScope | null, McpError> => {
+  const bareIsObject = opts.bareComponentIdIsObject ?? true;
+  const required = opts.required ?? true;
+  const src = asRecord(raw);
+
+  const candidates: string[] = [];
+  for (const key of ['object', 'objectApiName', 'objectId'] as const) {
+    const v = readNonEmpty(src, key);
+    if (v !== undefined) candidates.push(toCustomObjectId(v));
+  }
+  const cid = readNonEmpty(src, 'componentId');
+  if (cid !== undefined) {
+    if (cid.startsWith('CustomObject:')) candidates.push(cid);
+    else if (bareIsObject && !cid.includes(':')) candidates.push(toCustomObjectId(cid));
+    // else: a reverse-mode prefix (Layout:/FlexiPage:/ListView:) — not an object alias.
+  }
+
+  const resolved = oneDistinct(candidates, {
+    required,
+    emptyMessage:
+      'name the object — pass `objectApiName` (e.g. "Account"), `object`, `objectId`, or a `CustomObject:` `componentId`',
+    conflictMessage: (distinct) =>
+      `object aliases name different targets (${distinct.join(', ')}); pass exactly one of object / objectApiName / objectId / componentId`,
+    path: 'objectApiName',
+  });
+  if (!resolved.ok) return resolved;
+  if (resolved.value === null) return ok(null);
+  const componentId = resolved.value;
+  return ok({ componentId, object: toObjectApiName(componentId) });
+};
+
+/**
+ * Resolve an OPTIONAL object scope for an object-scoped analysis tool and
+ * VERIFY the named object exists in the vault. The honor half of the
+ * silent-object-scope-ignore fix: a tool that CAN attribute its findings to an
+ * object routes its `objectApiName` / `object` / `objectId` / `CustomObject:`
+ * `componentId` through here, then filters to the returned id and emits
+ * `appliedScope`. Returns:
+ *   - `ok(null)` — the caller named NO object (bare call); the tool stays
+ *     org-wide and its response is byte-identical to the pre-scope shape.
+ *   - `ok({componentId, object})` — exactly one object was named AND a
+ *     `CustomObject:` node for it exists in the graph.
+ *   - `err(invalid-query)` — object aliases disagree, or the named object is
+ *     absent from the vault. An unresolvable scope is REFUSED, never silently
+ *     widened back to the org-wide result (the whole point of the fix).
+ */
+export const resolveExistingObjectScope = async (
+  graph: GraphStore,
+  raw: unknown,
+): Promise<Result<ResolvedObjectScope | null, McpError>> => {
+  const resolved = resolveObjectAlias(raw, {
+    required: false,
+    bareComponentIdIsObject: true,
+  });
+  if (!resolved.ok) return resolved;
+  if (resolved.value === null) return ok(null);
+  const { componentId, object } = resolved.value;
+  const node = await getNodeById(graph, componentId as ComponentId);
+  if (!node.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${node.error.message}` });
+  }
+  if (node.value === null) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        `no object named '${object}' exists in this vault (resolved to ${componentId}); ` +
+        'verify the object api name, or run /sfi-refresh if the vault may be stale',
+      path: 'objectApiName',
+    });
+  }
+  return ok(resolved.value);
+};
+
+/** A resolved field scope: the field identifier to hand to the tool's field resolver. */
+export interface ResolvedFieldScope {
+  /**
+   * The `CustomField:<Object>.<Field>` canonical id or `<Object>.<Field>`
+   * short form — whatever the caller supplied. The tool's own
+   * `normalizeFieldId` / `resolveToFieldOrSuggest` still governs prefix rules
+   * and object→field routing; this resolver only picks the single value.
+   */
+  readonly fieldId: string;
+}
+
+/**
+ * Resolve a single field scope from `fieldId` and its `componentId` alias (the
+ * `CustomField:…` id a host reaches for). One value → `ok`; both present and
+ * DISAGREEING → `invalid-query`; neither → `invalid-query`. The winning value
+ * is echoed by the tool as its output `fieldId`.
+ */
+export const resolveFieldAlias = (
+  raw: unknown,
+): Result<ResolvedFieldScope, McpError> => {
+  const src = asRecord(raw);
+  const candidates: string[] = [];
+  for (const key of ['fieldId', 'componentId'] as const) {
+    const v = readNonEmpty(src, key);
+    if (v !== undefined) candidates.push(v);
+  }
+  const resolved = oneDistinct(candidates, {
+    required: true,
+    emptyMessage:
+      'name the field — pass `fieldId` or `componentId` (e.g. "CustomField:Account.My_Field__c")',
+    conflictMessage: (distinct) =>
+      `fieldId / componentId name different targets (${distinct.join(', ')}); pass exactly one`,
+    path: 'fieldId',
+  });
+  if (!resolved.ok) return resolved;
+  return ok({ fieldId: resolved.value as string });
+};
+
+/** A resolved Apex-class scope: canonical id AND bare api name, for `appliedScope`. */
+export interface ResolvedApexClassScope {
+  /** Canonical `ApexClass:<ApiName>`. */
+  readonly componentId: string;
+  /** Bare class api name (`AccountService`). */
+  readonly apexClass: string;
+}
+
+/**
+ * Resolve a single Apex class from `componentId` (`ApexClass:X`) and the
+ * `classApiName` / `apiName` aliases a host reaches for. Bare names are coerced
+ * to `ApexClass:<ApiName>`; one distinct target → `ok`; disagreeing → conflict;
+ * none → `invalid-query`.
+ */
+export const resolveApexClassAlias = (
+  raw: unknown,
+): Result<ResolvedApexClassScope, McpError> => {
+  const src = asRecord(raw);
+  const candidates: string[] = [];
+  const cid = readNonEmpty(src, 'componentId');
+  if (cid !== undefined) candidates.push(toApexClassId(cid));
+  for (const key of ['classApiName', 'apiName'] as const) {
+    const v = readNonEmpty(src, key);
+    if (v !== undefined) candidates.push(toApexClassId(v));
+  }
+  const resolved = oneDistinct(candidates, {
+    required: true,
+    emptyMessage:
+      'name the Apex class — pass `classApiName` (e.g. "AccountService") or an `ApexClass:` `componentId`',
+    conflictMessage: (distinct) =>
+      `class aliases name different targets (${distinct.join(', ')}); pass exactly one of componentId / classApiName / apiName`,
+    path: 'classApiName',
+  });
+  if (!resolved.ok) return resolved;
+  const componentId = resolved.value as string;
+  return ok({ componentId, apexClass: componentId.slice('ApexClass:'.length) });
+};
 
 /** Parse `CustomField:ObjectApi.FieldApi` → bare object api name. */
 export const parseFieldParentObjectApiName = (fieldId: string): string | null => {

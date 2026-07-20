@@ -109,15 +109,21 @@ import {
   type PiiCategory,
 } from '@sf-intelligence/patterns';
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
-import { summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import { mdTable } from '../answer-render.js';
+import { EDGE_SEMANTICS } from '../knowledge/loader.js';
 import type { Context } from '../server.js';
 
+import {
+  applyCoverageToVerdict as applyCoverageToVerdictShared,
+  buildUsageSourceCoverageCaveat,
+  type CoverageCaveat,
+} from './coverage-trust.js';
 import { readFactBlock, type FactsBlock } from './facts-block.js';
 import { fieldNotFoundError } from './field-not-found-suggest.js';
 import { hybridTrust } from './hybrid-trust.js';
+import { resolveFieldAlias } from './input-aliases.js';
 import {
   computeLivePopulation,
   LIVE_POPULATION_NOT_CHECKED_DISCLOSURE,
@@ -176,47 +182,20 @@ type ReasonCategory = (typeof CATEGORY_ORDER)[number];
 /** One of the per-edge or aggregate verdicts the tool emits. */
 type Verdict = 'safe' | 'review' | 'risky' | 'blocking' | 'unknown';
 
-const FIELD_DELETION_REQUIRED_COVERAGE = [
-  'CustomField',
-  'ValidationRule',
-  'Flow',
-  'ApexClass',
-  'ApexTrigger',
-  'Layout',
-  'LightningComponentBundle',
-  'AuraDefinitionBundle',
-  'VisualforcePage',
-  'VisualforceComponent',
-  'QuickAction',
-  'WorkflowRule',
-  'SharingRule',
-  'Report',
-  'Dashboard',
-  'ListView',
-  'ReportType',
-  'FlexiPage',
-] as const;
-
-/**
- * Source-name marker used by the formula-tokenizer extractor. The
- * v0.2 formula tokenizer emits incoming `references` edges to fields
- * with `source: 'formula-tokenizer'`; that marker distinguishes a
- * formula reference (always `blocking` — the formula will not
- * compile without the field) from a generic metadata-dependency
- * reference of the same edge type.
- */
-const FORMULA_TOKENIZER_SOURCE = 'formula-tokenizer';
-
 /**
  * Zod schema for the `sfi.safe_to_delete_field` tool input.
  *
- *   - `fieldId`: required, non-empty string. The canonical CustomField
- *     id (`CustomField:{Object}.{Field}`). Non-`CustomField:` prefixes
- *     surface as `invalid-query` from the handler; unknown but
- *     well-formed ids surface as `component-not-found`.
+ *   - field identity (required): the canonical CustomField id
+ *     (`CustomField:{Object}.{Field}`) as either `fieldId` (canonical) or the
+ *     `componentId` alias a host reaches for (L2 Alias OS). Disagreeing values
+ *     are an `invalid-query`. Non-`CustomField:` prefixes surface as
+ *     `invalid-query` from the handler; unknown but well-formed ids surface as
+ *     `component-not-found`.
  */
-export const safeToDeleteFieldInputSchema = z.object({
-  fieldId: z.string().min(1),
+export const safeToDeleteFieldInputSchema = z
+  .object({
+    fieldId: z.string().min(1).optional(),
+    componentId: z.string().min(1).optional(),
   /**
    * `'checklist'` adds a `checklist` field (P8-destructive-checklist): a
    * "before you delete X" Markdown checklist rendered from the verdict +
@@ -238,7 +217,11 @@ export const safeToDeleteFieldInputSchema = z.object({
    */
   liveEnabled: z.boolean().optional(),
   orgAlias: z.string().min(1).optional(),
-});
+  })
+  .refine((i) => i.fieldId !== undefined || i.componentId !== undefined, {
+    message: 'name the field — pass `fieldId` or `componentId` (e.g. "CustomField:Account.My_Field__c")',
+    path: ['fieldId'],
+  });
 
 /** Parsed input shape, inferred from `safeToDeleteFieldInputSchema`. */
 export type SafeToDeleteFieldInput = z.infer<
@@ -346,12 +329,6 @@ export interface SafeToDeleteFieldOutput {
   readonly reportUsage?: ReportDashboardUsageDetail;
 }
 
-export interface CoverageCaveat {
-  readonly status: 'partial' | 'unknown';
-  readonly missingCoverage: readonly string[];
-  readonly message: string;
-}
-
 /**
  * GROUP-A PII-safety: a heuristic PII/sensitive compliance escalation for a
  * field whose deletion is otherwise judged safe. Does NOT alter the verdict.
@@ -363,106 +340,53 @@ export interface PiiCompliance {
 }
 
 /**
- * Classify one incoming edge into a (category, verdict) pair. The
- * `null` return signals "this edge does not contribute to the
- * reasoning chain" — used today only when the referrer node went
- * missing (sparse-graph case); every other edge is materialised so
- * the caller sees the full coverage.
+ * Classify one incoming edge into a (category, verdict) pair.
+ *
+ * RM-1b: the per-edge `(edgeType, sourceType) → {category, verdict}` mapping —
+ * the formula-tokenizer special case (checked first), every per-source-type
+ * result, and every per-edgeType default — is curated DATA in the two-track
+ * concept model (`packages/mcp/model/edge-semantics.yaml` → the generated,
+ * frozen `EDGE_SEMANTICS`). This function only applies that lookup; the mapping
+ * it yields is byte-identical to the former inline switch. The verdict lattice,
+ * per-category aggregation, coverage caveat, and PII escalation stay in this
+ * file.
+ *
+ * Lookup order (mirrors the data table):
+ *   1. formula-tokenizer special case — a `references` edge whose extractor
+ *      `source` marker is `formula-tokenizer` is a formula reference
+ *      (`{formula, blocking}`), regardless of the source node's type. The
+ *      `references` edgeType overlaps validation rules and frontend components,
+ *      but the marker is the source of truth for what the tokenizer extracted.
+ *   2. `byEdgeType[edgeType].bySourceType[sourceType]` — keyed by the referrer
+ *      node's ComponentType (e.g. `usedInLayout`/`grantedBy` classify to
+ *      `review`: the platform auto-handles the field's removal and nothing
+ *      breaks — a heads-up, not a hard dependency).
+ *   3. `byEdgeType[edgeType].default` — the edge type is known but the source
+ *      ComponentType is not listed.
+ *   4. `EDGE_SEMANTICS.default` — the edge type itself is not in the table.
  */
-const classifyEdge = (
+export const classifyEdge = (
   edge: Edge,
   fromNode: Node,
 ): { category: ReasonCategory; verdict: Verdict } => {
-  const fromType = fromNode.type;
-  // Special-case the formula-tokenizer references first — the
-  // edgeType (`references`) overlaps with validation rules and
-  // frontend components, but the `source` marker is the source of
-  // truth for what the formula tokenizer extracted.
   if (
-    edge.edgeType === 'references' &&
-    edge.source === FORMULA_TOKENIZER_SOURCE
+    edge.edgeType === EDGE_SEMANTICS.formulaTokenizer.edgeType &&
+    edge.source === EDGE_SEMANTICS.formulaTokenizer.source
   ) {
-    return { category: 'formula', verdict: 'blocking' };
+    return {
+      category: EDGE_SEMANTICS.formulaTokenizer.category as ReasonCategory,
+      verdict: EDGE_SEMANTICS.formulaTokenizer.verdict as Verdict,
+    };
   }
-  switch (edge.edgeType) {
-    case 'readsFrom':
-      if (fromType === 'ApexClass' || fromType === 'ApexTrigger') {
-        return { category: 'apex', verdict: 'risky' };
-      }
-      if (fromType === 'Flow') {
-        return { category: 'flow', verdict: 'blocking' };
-      }
-      if (
-        fromType === 'LightningComponentBundle' ||
-        fromType === 'AuraDefinitionBundle'
-      ) {
-        return { category: 'frontend', verdict: 'risky' };
-      }
-      return { category: 'unknown', verdict: 'risky' };
-    case 'writesTo':
-      if (fromType === 'ApexClass' || fromType === 'ApexTrigger') {
-        return { category: 'apex', verdict: 'blocking' };
-      }
-      if (fromType === 'Flow') {
-        return { category: 'flow', verdict: 'blocking' };
-      }
-      if (fromType === 'WorkflowRule') {
-        return { category: 'workflow', verdict: 'blocking' };
-      }
-      if (
-        fromType === 'LightningComponentBundle' ||
-        fromType === 'AuraDefinitionBundle'
-      ) {
-        return { category: 'frontend', verdict: 'risky' };
-      }
-      return { category: 'unknown', verdict: 'blocking' };
-    case 'references':
-      if (fromType === 'ValidationRule') {
-        return { category: 'validation', verdict: 'blocking' };
-      }
-      if (
-        fromType === 'VisualforcePage' ||
-        fromType === 'VisualforceComponent'
-      ) {
-        return { category: 'frontend', verdict: 'risky' };
-      }
-      if (fromType === 'QuickAction') {
-        return { category: 'layout', verdict: 'risky' };
-      }
-      if (
-        fromType === 'Report' ||
-        fromType === 'Dashboard' ||
-        fromType === 'ListView' ||
-        fromType === 'ReportType'
-      ) {
-        return { category: 'analytics', verdict: 'blocking' };
-      }
-      if (fromType === 'FlexiPage') {
-        return { category: 'ui', verdict: 'blocking' };
-      }
-      if (
-        fromType === 'RestrictionRule' ||
-        fromType === 'ScopingRule'
-      ) {
-        return { category: 'sharing', verdict: 'blocking' };
-      }
-      return { category: 'unknown', verdict: 'risky' };
-    case 'usedInLayout':
-      // A field on a page layout is auto-removed when the field is deleted —
-      // Salesforce does NOT block the delete and nothing breaks (the layout
-      // keeps working; users just no longer see the field). A UI heads-up
-      // ('review'), not 'blocking' — consistent with the grantedBy case below,
-      // which applies the same "platform auto-handles it, nothing breaks" logic.
-      return { category: 'layout', verdict: 'review' };
-    case 'grantedBy':
-      // FLS grant (Profile / PermissionSet → field). Deleting the field removes
-      // these grants automatically; the platform does NOT block the delete and
-      // nothing breaks, so this is informational, not a risk. (`parentOf`, the
-      // structural object→field ownership edge, is filtered out before this.)
-      return { category: 'permission', verdict: 'review' };
-    default:
-      return { category: 'unknown', verdict: 'risky' };
-  }
+  const rule = EDGE_SEMANTICS.byEdgeType[edge.edgeType];
+  const resolved =
+    rule === undefined
+      ? EDGE_SEMANTICS.default
+      : (rule.bySourceType[fromNode.type] ?? rule.default);
+  return {
+    category: resolved.category as ReasonCategory,
+    verdict: resolved.verdict as Verdict,
+  };
 };
 
 /**
@@ -596,29 +520,25 @@ const aggregateVerdict = (
   return 'risky';
 };
 
-const buildCoverageCaveat = (
-  ctx: Context,
-): CoverageCaveat | undefined => {
-  const coverage = summarizeCoverage(ctx.manifest, FIELD_DELETION_REQUIRED_COVERAGE);
-  if (coverage.status === 'complete') return undefined;
-  const missingCoverage = coverage.missingCoverage.length > 0
-    ? coverage.missingCoverage
-    : [...FIELD_DELETION_REQUIRED_COVERAGE];
-  return {
-    status: coverage.status === 'partial' ? 'partial' : 'unknown',
-    missingCoverage,
-    message:
-      `Deletion safety cannot be confirmed because the vault has incomplete coverage for: ${missingCoverage.join(', ')}. Treat absence of dependencies in those families as "not checked", not "none".`,
-  };
-};
+/**
+ * GATE-HONESTY-EMPTY-GRAPH-EQUALS-SAFE: the field-deletion coverage caveat now
+ * flows through the SHARED usage-source contract (`coverage-trust.ts`), so this
+ * tool and `review_change` / `unused_components` enforce ONE completeness rule
+ * rather than three copies. `USAGE_SOURCE_FAMILIES.CustomField` is the vetted
+ * field-referrer set; `fireOnUnknownCoverage: true` keeps this tool's fail-harder
+ * stance (a vault with no coverage rows at all is not-provably-complete, so a
+ * bare `safe` is still downgraded). The message + missingCoverage are
+ * byte-identical to the former local helper.
+ */
+const buildCoverageCaveat = (ctx: Context): CoverageCaveat | undefined =>
+  buildUsageSourceCoverageCaveat(ctx, 'CustomField', 'Deletion safety', {
+    fireOnUnknownCoverage: true,
+  });
 
 const applyCoverageToVerdict = (
   verdict: Verdict,
   caveat: CoverageCaveat | undefined,
-): Verdict => {
-  if (caveat === undefined) return verdict;
-  return verdict === 'safe' ? 'review' : verdict;
-};
+): Verdict => applyCoverageToVerdictShared(verdict, caveat, 'safe', 'review');
 
 /**
  * GROUP-A PII-safety: build a non-verdict-lowering PII compliance escalation
@@ -772,9 +692,14 @@ export const buildSafeToDeleteFieldProposal = (
 
 const coreSafeToDeleteFieldHandler = async (
   ctx: Context,
-  input: SafeToDeleteFieldInput,
+  rawInput: SafeToDeleteFieldInput,
   exec?: ExecCommand,
 ): Promise<Result<McpResponse<SafeToDeleteFieldOutput>, McpError>> => {
+  // L2 Alias OS: accept the `componentId` alias for `fieldId`. Disagreeing
+  // values -> invalid-query (never a silent pick). Normalize into `fieldId`.
+  const fieldAlias = resolveFieldAlias(rawInput);
+  if (!fieldAlias.ok) return err(fieldAlias.error);
+  const input = { ...rawInput, fieldId: fieldAlias.value.fieldId };
   // FLD-02: graceful object→field routing.
   const suggestionResult = await resolveToFieldOrSuggest(ctx, input.fieldId);
   if (!suggestionResult.ok) return suggestionResult;

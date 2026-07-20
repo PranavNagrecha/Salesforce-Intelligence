@@ -78,6 +78,19 @@ const edge = (
 //     false, severity 'info'.
 // (g) WfCollide__c: a WorkflowRule + a Flow both write Score__c -> exercises
 //     the third `triggersOn` firer family end-to-end.
+// (h) MixedDelete__c: a RecordAfterSave Flow AND a RecordBeforeDelete Flow both
+//     write Status__c. They run on DIFFERENT execution paths (save vs delete),
+//     so they must NOT be bucketed together -> ZERO collisions. This is the
+//     regression the fix targets: the pre-fix `!= 'RecordBeforeSave' ? 'after'`
+//     collapse folded the before-delete Flow into the save bucket and reported
+//     a FALSE save collision here.
+// (i) DeleteCollide__c: two RecordBeforeDelete Flows both write Flag__c -> a
+//     legitimate DELETE-path collision (undefined delete-path order),
+//     collisionPath 'delete', never labeled a save collision.
+// (j) DeleteSelfLoop__c: an AFTER trigger self-writes Total__c -> self-write
+//     cycle (cycles still work); a RecordBeforeDelete Flow self-writes
+//     Computed__c -> must NOT produce a cycle (delete path is not save
+//     recursion).
 const seed: ExtractionResult = {
   nodes: [
     // (a)
@@ -118,6 +131,21 @@ const seed: ExtractionResult = {
     node('CustomObject:WfCollide__c', 'CustomObject'),
     node('WorkflowRule:WfRule', 'WorkflowRule', { active: true }),
     node('Flow:WfFlow', 'Flow', { status: 'Active' }),
+    // (h)
+    node('CustomObject:MixedDelete__c', 'CustomObject'),
+    node('Flow:MixedAfterFlow', 'Flow', { status: 'Active' }),
+    node('Flow:MixedDeleteFlow', 'Flow', { status: 'Active' }),
+    // (i)
+    node('CustomObject:DeleteCollide__c', 'CustomObject'),
+    node('Flow:DeleteFlowA', 'Flow', { status: 'Active' }),
+    node('Flow:DeleteFlowB', 'Flow', { status: 'Active' }),
+    // (j)
+    node('CustomObject:DeleteSelfLoop__c', 'CustomObject'),
+    node('ApexTrigger:DeleteSelfTrigger', 'ApexTrigger', {
+      status: 'Active',
+      events: ['after update'],
+    }),
+    node('Flow:DeleteSelfFlow', 'Flow', { status: 'Active' }),
   ],
   edges: [
     // (a)
@@ -229,6 +257,52 @@ const seed: ExtractionResult = {
     edge('Flow:WfFlow', 'CustomField:WfCollide__c.Score__c', 'writesTo', 'parsed', {
       operation: 'recordUpdate',
     }),
+    // (h) after-save + before-delete write the same field -> DIFFERENT paths
+    edge('Flow:MixedAfterFlow', 'CustomObject:MixedDelete__c', 'triggersOn', 'declared', {
+      recordTriggerType: 'Update',
+      triggerType: 'RecordAfterSave',
+    }),
+    edge('Flow:MixedDeleteFlow', 'CustomObject:MixedDelete__c', 'triggersOn', 'declared', {
+      recordTriggerType: 'Delete',
+      triggerType: 'RecordBeforeDelete',
+    }),
+    edge('Flow:MixedAfterFlow', 'CustomField:MixedDelete__c.Status__c', 'writesTo', 'parsed', {
+      operation: 'recordUpdate',
+    }),
+    edge('Flow:MixedDeleteFlow', 'CustomField:MixedDelete__c.Status__c', 'writesTo', 'parsed', {
+      operation: 'recordUpdate',
+    }),
+    // (i) two before-delete flows write the same field -> delete-path collision
+    edge('Flow:DeleteFlowA', 'CustomObject:DeleteCollide__c', 'triggersOn', 'declared', {
+      recordTriggerType: 'Delete',
+      triggerType: 'RecordBeforeDelete',
+    }),
+    edge('Flow:DeleteFlowB', 'CustomObject:DeleteCollide__c', 'triggersOn', 'declared', {
+      recordTriggerType: 'Delete',
+      triggerType: 'RecordBeforeDelete',
+    }),
+    edge('Flow:DeleteFlowA', 'CustomField:DeleteCollide__c.Flag__c', 'writesTo', 'parsed', {
+      operation: 'recordUpdate',
+    }),
+    edge('Flow:DeleteFlowB', 'CustomField:DeleteCollide__c.Flag__c', 'writesTo', 'parsed', {
+      operation: 'recordUpdate',
+    }),
+    // (j) after-trigger self-write (a cycle) + before-delete self-write (NOT a cycle)
+    edge('ApexTrigger:DeleteSelfTrigger', 'CustomObject:DeleteSelfLoop__c', 'triggersOn', 'declared', {}),
+    edge(
+      'ApexTrigger:DeleteSelfTrigger',
+      'CustomField:DeleteSelfLoop__c.Total__c',
+      'writesTo',
+      'heuristic',
+      { offset: 3, length: 4 },
+    ),
+    edge('Flow:DeleteSelfFlow', 'CustomObject:DeleteSelfLoop__c', 'triggersOn', 'declared', {
+      recordTriggerType: 'Delete',
+      triggerType: 'RecordBeforeDelete',
+    }),
+    edge('Flow:DeleteSelfFlow', 'CustomField:DeleteSelfLoop__c.Computed__c', 'writesTo', 'parsed', {
+      operation: 'recordUpdate',
+    }),
   ],
 };
 
@@ -262,6 +336,56 @@ describe('automationCollisionsInputSchema', () => {
     expect(
       automationCollisionsInputSchema.safeParse({ object: 'Account', limit: 0 }).success,
     ).toBe(false);
+  });
+});
+
+describe('automationCollisionsHandler — L2 alias OS (ADMIN-SURFACE-ALIAS-SKEW-CLUSTER)', () => {
+  // GUARD: pre-fix the Zod schema declared only `object`, so a natural
+  // `objectApiName` / `objectId` / `CustomObject:` `componentId` was STRIPPED
+  // and the tool returned `object: Required`. Post-fix each alias resolves to
+  // the SAME findings as the canonical `object`, with the scope echoed.
+  const run = async (raw: unknown) => {
+    const parsed = automationCollisionsInputSchema.safeParse(raw);
+    if (!parsed.success) return { schemaOk: false as const };
+    return { schemaOk: true as const, r: await automationCollisionsHandler(ctx, parsed.data) };
+  };
+
+  it('natural objectApiName ≡ canonical object (byte-equal findings + appliedScope)', async () => {
+    const natural = await run({ objectApiName: 'Collide__c' });
+    const canonical = await run({ object: 'Collide__c' });
+    expect(natural.schemaOk).toBe(true);
+    expect(canonical.schemaOk).toBe(true);
+    if (!natural.schemaOk || !canonical.schemaOk) return;
+    expect(natural.r.ok && canonical.r.ok).toBe(true);
+    if (!natural.r.ok || !canonical.r.ok) return;
+    expect(natural.r.value.data.collisions).toEqual(canonical.r.value.data.collisions);
+    expect(natural.r.value.data.cycles).toEqual(canonical.r.value.data.cycles);
+    expect(natural.r.value.data.appliedScope).toEqual({
+      componentId: 'CustomObject:Collide__c',
+      object: 'Collide__c',
+    });
+  });
+
+  it('CustomObject componentId ≡ canonical object', async () => {
+    const byComponent = await run({ componentId: 'CustomObject:Collide__c' });
+    const canonical = await run({ object: 'Collide__c' });
+    expect(byComponent.schemaOk && canonical.schemaOk).toBe(true);
+    if (!byComponent.schemaOk || !canonical.schemaOk) return;
+    if (!byComponent.r.ok || !canonical.r.ok) return;
+    expect(byComponent.r.value.data.collisions).toEqual(canonical.r.value.data.collisions);
+    expect(byComponent.r.value.data.appliedScope.object).toBe('Collide__c');
+  });
+
+  it('disagreeing aliases → invalid-query (never a silent pick)', async () => {
+    const parsed = automationCollisionsInputSchema.safeParse({
+      object: 'Collide__c',
+      objectApiName: 'Clean__c',
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    const r = await automationCollisionsHandler(ctx, parsed.data);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe('invalid-query');
   });
 });
 
@@ -411,6 +535,74 @@ describe('automationCollisionsHandler — save-recursion cycles', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.cycles).toEqual([]);
+  });
+});
+
+describe('automationCollisionsHandler — before-delete path separation (RM-loop twin fix)', () => {
+  it('(h) an after-save Flow and a before-delete Flow writing the SAME field are NOT a save collision', async () => {
+    // Pre-fix, the before-delete Flow was mislabeled timing `after` and folded
+    // into the save bucket, faking a 2-writer collision on Status__c. The two
+    // Flows run on disjoint paths (save vs delete), so neither (field, path)
+    // bucket has 2 writers -> zero collisions.
+    const r = await automationCollisionsHandler(ctx, { object: 'MixedDelete__c' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // Both firers ARE scanned (never silently dropped) ...
+    expect(d.summary.automationsScanned).toBe(2);
+    // ... but they do NOT collide: a delete-path write never races a save write.
+    expect(d.collisions).toEqual([]);
+    expect(d.summary.fieldsWithMultipleWriters).toBe(0);
+  });
+
+  it('(i) two before-delete Flows writing one field ARE a delete-path collision, never a save collision', async () => {
+    const r = await automationCollisionsHandler(ctx, { object: 'DeleteCollide__c' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.collisions).toHaveLength(1);
+    const c = d.collisions[0]!;
+    expect(c.fieldApiName).toBe('Flag__c');
+    // Labeled a DELETE-path collision — NEVER a save collision.
+    expect(c.collisionPath).toBe('delete');
+    expect(c.writers.map((w) => w.componentId).sort()).toEqual([
+      'Flow:DeleteFlowA',
+      'Flow:DeleteFlowB',
+    ]);
+    // Every contributing writer's timing is before-delete (delete path).
+    expect(c.writers.every((w) => w.timing === 'before-delete')).toBe(true);
+    expect(c.activeWriterCount).toBe(2);
+    expect(c.weakestConfidence).toBe('parsed');
+    expect(c.severity).toBe('high');
+  });
+
+  it('(i) no collision or boundary text ever labels a before-delete collision a "save" collision', async () => {
+    const r = await automationCollisionsHandler(ctx, { object: 'DeleteCollide__c' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // The delete-path finding is never tagged as a save-path collision.
+    expect(d.collisions.every((c) => c.collisionPath !== 'save')).toBe(true);
+    // The boundaries disclose the delete-vs-save partition explicitly.
+    const text = d.boundaries.join(' ');
+    expect(text).toMatch(/delete[- ]path/i);
+    expect(text).toMatch(/never a save collision|DELETE path/i);
+  });
+
+  it('(j) a before-delete Flow self-write does NOT produce a save-recursion cycle, but a normal after-trigger self-write still does', async () => {
+    const r = await automationCollisionsHandler(ctx, { object: 'DeleteSelfLoop__c' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // The before-delete Flow is on the DELETE path -> never a save-recursion hop.
+    const deleteHop = d.cycles.find((c) =>
+      c.path.some((h) => h.automationId === 'Flow:DeleteSelfFlow'),
+    );
+    expect(deleteHop).toBeUndefined();
+    // Save-recursion detection still works for the after-trigger self-write.
+    const selfWrites = d.cycles.filter((c) => c.kind === 'self-write');
+    expect(selfWrites).toHaveLength(1);
+    expect(selfWrites[0]!.path[0]!.automationId).toBe('ApexTrigger:DeleteSelfTrigger');
   });
 });
 

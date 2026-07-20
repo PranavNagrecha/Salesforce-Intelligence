@@ -180,6 +180,58 @@ describe('coverageReportHandler', () => {
     }
   });
 
+  // WORKFLOWRULE-RETRIEVED-ZERO — RM-A14 depends on the WorkflowRule plane.
+  // Pre-CR-P3-3 vaults (and describe-blind / --no-pull rebuilds) carry the
+  // byte-identical {requested:true, retrieved:0} row WITHOUT retrieveConfirmed;
+  // coverage_report must classify that as partial so hosts never read "0 rules"
+  // as proven absence. A post-refresh confirmed-empty org (Flow-only, no legacy
+  // workflow) lands in covered instead — honest silence, not a false caveat.
+  describe('WORKFLOWRULE-RETRIEVED-ZERO — WorkflowRule plane tri-state', () => {
+    it('un-confirmed retrieved:0 WorkflowRule is partial (not checked, not proven none)', async () => {
+      const unconfirmedCtx: Context = {
+        ...ctx,
+        manifest: {
+          ...manifest,
+          coverage: [
+            { type: 'CustomObject', requested: true, retrieved: 2, errored: false, neverModeled: false, retrieveConfirmed: true },
+            { type: 'WorkflowRule', requested: true, retrieved: 0, errored: false, neverModeled: false },
+          ],
+        },
+      };
+      const result = await coverageReportHandler(unconfirmedCtx, { type: 'WorkflowRule' });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const data = result.value.data;
+      expect(data.partial.map((e) => e.type)).toContain('WorkflowRule');
+      expect(data.covered.map((e) => e.type)).not.toContain('WorkflowRule');
+      expect(data.summary.status).toBe('partial');
+      expect(data.summary.missingCoverage).toContain('WorkflowRule');
+      expect(data.trust.completeness.status).toBe('partial');
+    });
+
+    it('retrieveConfirmed-empty WorkflowRule is covered (confirmed org has none)', async () => {
+      const confirmedEmptyCtx: Context = {
+        ...ctx,
+        manifest: {
+          ...manifest,
+          coverage: [
+            { type: 'CustomObject', requested: true, retrieved: 2, errored: false, neverModeled: false, retrieveConfirmed: true },
+            { type: 'WorkflowRule', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
+          ],
+        },
+      };
+      const result = await coverageReportHandler(confirmedEmptyCtx, { type: 'WorkflowRule' });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const data = result.value.data;
+      expect(data.covered.map((e) => e.type)).toContain('WorkflowRule');
+      expect(data.partial.map((e) => e.type)).not.toContain('WorkflowRule');
+      expect(data.summary.status).toBe('complete');
+      expect(data.summary.missingCoverage).not.toContain('WorkflowRule');
+      expect(data.trust.completeness.status).toBe('complete');
+    });
+  });
+
   describe('CR-CAP-20 — topUncoveredFamilies ranking', () => {
     it('ranks skipped families desc, caps at 10, labels modeled vs raw, and extends the disclosure', async () => {
       // Build a manifest with >10 skipped dirs to exercise the cap, plus a

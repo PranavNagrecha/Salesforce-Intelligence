@@ -1,0 +1,1128 @@
+# Concept model — reasoning seed concepts (RM-2 DATA track).
+#
+# CURATOR-OWNED source of truth. General Salesforce truth ONLY: save-order
+# phase names, source-of-truth classes, and plain-English summaries distilled
+# from the shipped tools' prose. NO org identifiers, NO canonical-id
+# (Type:Name) strings — org specificity enters the reasoning engine ONLY
+# through the caller-supplied grounded slice, never through a Concept.
+#
+# Compiled to TypeScript by packages/mcp/scripts/build-concept-model.mjs
+#   ->  packages/mcp/src/knowledge/generated/concept-model.ts  (DO NOT hand-edit).
+# Regenerate:  pnpm regen:concept-model      Parity gate:  pnpm check:concept-model
+#
+# The map KEY is the ConceptId (kebab-case, `concept:` prefixed — never a
+# canonical component id). Each entry carries:
+#   kind    - the ConceptKind category (a small closed union; see contracts)
+#   label   - short human title
+#   summary - plain-English generic Salesforce truth (no org data)
+#   docs    - OPTIONAL list of { label, url } pointers to official docs
+#
+# Key ORDER is significant and preserved verbatim into the generated artifact.
+
+concepts:
+  concept:status-code:
+    kind: status-code
+    label: DML status code names a failure class, not a cause
+    summary: A DML/save status code names the FAILURE CLASS, not the specific automation that produced it. On a save-time failure the real cause is whatever ran on save — a trigger, a record-triggered flow, or a validation rule — so resolve it by cross-referencing the object's save automation rather than trusting the code to name the culprit.
+  concept:save-order:
+    kind: save-order-phase
+    label: Order of execution (save-order phases)
+    summary: 'Salesforce runs save-time automation in a fixed, documented order of execution. The automation phases, in order, are: before-save-flows, pre-save-triggers, pre-save-validation, duplicate-rules, after-triggers, post-save-assignment, post-save-workflows, post-save-flows, post-save-approval, post-save-rollup-recalc, post-save-async. A phase''s writes are visible to every later phase but never to an earlier one, so ordering — not just presence — decides which automation sees which change.'
+    docs:
+      - label: Apex Developer Guide — Triggers and Order of Execution
+        url: https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_triggers_order_of_execution.htm
+  concept:field-provenance:
+    kind: field-provenance
+    label: Field source-of-truth provenance
+    summary: 'A field''s value has a source of truth: manual, derived, integration-synced, manual-and-coded, or unknown. Rule of thumb: a derived (formula) field is read-only, so nothing should write it; an integration-synced field is owned by an external system of record, so a local write races that system. Treat derived and integration-synced fields as write-hostile targets.'
+  concept:relationship:
+    kind: relationship
+    label: Master-detail vs lookup relationship
+    summary: 'A relationship field links a child record to a parent, and its type decides what happens when the parent is deleted. A lookup is a loose reference: deleting the parent leaves the child in place (the reference is cleared, or the delete is blocked), and the child keeps its own owner and sharing. A master-detail relationship is tight ownership: the child cannot exist without its parent, so deleting the parent cascade-deletes every child record, and the child has no owner or sharing of its own — it inherits both from the parent; a roll-up summary field on the parent aggregates its child records and recalculates automatically, and is read-only. This concept deliberately does NOT assert three things the offline vault cannot ground: whether a master-detail child is reparentable (the reparentableMasterDetail attribute is not extracted), which parent of a two-master junction object is the primary one (relationshipOrder is not extracted), or how many child records actually exist under a given parent (a live-plane, record-level question). Those need the live plane or metadata the refresh does not retrieve. Two further boundaries on this concept: the roll-up rule detects roll-up summary fields captured from source metadata, but a roll-up on a standard or parent object seen only through the org describe snapshot carries its RESULT type (Number, Currency, and so on) rather than a Summary marker, so it may not be classified and is not asserted rather than guessed; and the delete behavior of a lookup (its deleteConstraint — SetNull, Restrict, or Cascade) is not extracted, so which action a lookup takes when its target record is deleted is not asserted.'
+    docs:
+      - label: Salesforce Help — Object Relationships Overview
+        url: https://help.salesforce.com/s/articleView?id=sf.overview_of_custom_object_relationships.htm
+  concept:junction-object:
+    kind: relationship
+    label: Junction (join) object — a two-master many-to-many link
+    summary: 'A junction (join) object is a custom object that carries exactly two master-detail relationships, one to each parent — the structural signature of a many-to-many link between them. This is a structural pattern only: such an object may still be a first-class business entity with its own fields, automation, and data (it is not necessarily a pure connector). Because both relationships are master-detail, deleting a record of EITHER parent cascade-deletes the junction records, and the object is necessarily Controlled by Parent (a master-detail invariant, inferred from the relationship type, not read from its own sharingModel); record access is gated by both masters. This concept names the structural pattern, not a proven design intent, and Controlled by Parent is derived from the two master-detail edges rather than read from the object''s sharingModel. It deliberately does NOT assert which of the two parents is the primary one (relationshipOrder is not extracted) or whether the junction is reparentable (reparentableMasterDetail is not extracted). How many junction records exist under any given parent is a live-plane, record-level question the offline vault cannot answer.'
+    docs:
+      - label: Salesforce Help — Create a Many-to-Many Relationship
+        url: https://help.salesforce.com/s/articleView?id=sf.relationships_manytomany.htm
+  # C9 / EC-13 — name the SPECIFIC child relationship + op a Summary rollup recomputes on.
+  concept:rollup-recalc-source-coupling:
+    kind: field-provenance
+    label: Roll-up summary names its child relationship and aggregate operation
+    summary: 'A roll-up summary field aggregates child records across a master-detail relationship. The offline snapshot grounds WHICH child relationship field it rolls up from (`summaryForeignKey`) and WHICH aggregate it applies (`summaryOperation`: COUNT, SUM, MIN, or MAX). Child inserts, updates, deletes, and undeletes on that relationship recalculate the summary automatically; the field is read-only to flows, Apex, and integrations. Naming the concrete relationship and operation is stronger than only saying "this is a Summary field" — it tells an admin which child object''s DML will recompute the parent and what kind of aggregate they will see. This does NOT assert when the next recalc will run, whether filters on the rollup exclude some children, or the numeric result of any particular save.'
+  # D5 — ≤20 tracked fields per object; at the cap no more can be enabled.
+  concept:field-history-tracking-20-field-limit:
+    kind: field-provenance
+    severity: medium
+    label: Object at the 20-field history-tracking cap
+    summary: 'Salesforce allows at most 20 fields with field history tracking enabled per object. When an object already has 20 fields with `trackHistory` true, administrators cannot enable tracking on another field without first turning it off somewhere else. The offline snapshot grounds the COUNT of tracked fields from each field''s declared `trackHistory` flag; it does NOT assert which historical values exist, retention windows, or whether tracking is valuable for any particular field. A count at or above 20 is a hard platform ceiling signal — not a recommendation to disable tracking.'
+
+  # C13 / EC-4 — queueable dispatches another queueable = strictly linear async chain.
+  concept:queueable-chain-depth:
+    kind: async-boundary
+    severity: medium
+    label: Queueable dispatching another queueable forms a linear async chain
+    summary: 'When one Queueable Apex class dispatches another Queueable, each hop runs in its OWN separate transaction — the chain is strictly linear, not parallel, and governor limits reset at every boundary. Child DML on the save that enqueued the first job is NOT visible to downstream queueables until each prior transaction commits. The offline claim is STRUCTURAL: both the dispatcher and the dispatched class carry `isQueueable`, grounded from a `dispatchesAsync` edge between two ApexClass endpoints. It does NOT assert how deep the chain runs in production, whether every hop succeeds, or Salesforce queueable chaining limits at runtime.'
+  # D1 / EC-4 — @future invoked from Batch or @future context is illegal at runtime.
+  concept:future-invoked-from-async-illegal:
+    kind: async-boundary
+    severity: high
+    label: Calling @future from Batch or @future Apex throws at runtime
+    summary: 'Salesforce forbids invoking an @future method from another asynchronous context — a Batchable class or any class that itself has @future methods. At runtime this throws "Future method cannot be called from a future or batch method". The offline claim is STRUCTURAL: a `dispatchesAsync` edge whose `dispatchMechanism` is `future` originates from an ApexClass that is `isBatchable` or carries `hasFutureMethod`. The heuristic @future dispatch edge is CLASS-granular (the target has SOME @future method, not necessarily the one called), and static analysis may miss reflective dispatch — confirm call paths before treating absence as safety.'
+  # D2 / EC-4 — validation rule referencing a rollup sees pre-save aggregate.
+  concept:validation-gates-on-rollup-recalculated-later:
+    kind: automation-collision
+    severity: medium
+    label: Validation on a roll-up summary sees the pre-recalc value
+    summary: 'Roll-up summary fields recalculate in the post-save-rollup-recalc phase — AFTER pre-save validation. A validation rule whose error-condition formula REFERENCES a Summary field therefore tests the PRE-SAVE aggregate (the value before child DML on this save is rolled up), not the post-recalc value. The offline claim is grounded from a ValidationRule `references` edge to a CustomField with `dataType: Summary`. This names the phase-order consequence for the validation gate; it does NOT assert the numeric value on any particular save, whether child DML occurred, or whether the rule actually fires (entry criteria may be false). Flow / WorkflowRule firers whose conditions reference roll-ups via `firesWhen` ConditionalContext are NOT covered by this rule — the JOIN path cannot yet filter through-key field properties.'
+  # C8 / EC-4 — formula (or rollup) that references another formula/rollup = 2nd-order derivation.
+  concept:formula-on-derived:
+    kind: field-provenance
+    severity: medium
+    label: Formula referencing another derived field is second-order
+    summary: 'A formula field that REFERENCES another formula or roll-up summary field is a SECOND-ORDER derivation: its value depends on a value that is itself computed, so a change deep in the dependency chain can ripple through multiple recalculations. The offline snapshot grounds this from a `references` edge whose target field carries `isFormula` or `dataType: Summary`. This names the structural dependency, not the compiled formula size, the order Salesforce recalculates in on a given save, or whether the formula will hit the compiled-size limit.'
+
+  # C12 / EC-7 — DML targeting a Salesforce setup object can MIXED_DML with non-setup DML.
+  concept:mixed-dml-setup-vs-nonsetup:
+    kind: automation-collision
+    severity: high
+    label: Writing a setup object risks MIXED_DML with non-setup DML
+    summary: 'Salesforce forbids mixing DML on setup objects (User, Group, PermissionSet, UserRole, Profile, and similar) with DML on non-setup (business) objects in the SAME synchronous transaction — the runtime throws MIXED_DML_OPERATION. An Apex class or trigger that writes a setup object is therefore a MIXED_DML risk surface whenever it (or a caller in the same transaction) also writes a business object. The offline claim is STRUCTURAL: it is grounded only in a `writesTo` edge whose target object is in a curated, org-agnostic setup-object name set. It does NOT prove that a particular transaction actually mixes both kinds of DML, nor that every call path hits the setup write.'
+
+  concept:automation-collision:
+
+    kind: automation-collision
+    label: Multiple active record-triggered flows in one trigger context
+    summary: 'Salesforce best practice is ONE record-triggered flow per object per TRIGGER CONTEXT — at most one before-save flow, one after-save flow, and one before-delete flow. These three contexts are DISJOINT execution paths: before-save and after-save run during a record save, while before-delete runs only when a record is deleted, so a before-delete flow can never co-execute with a save-timing flow (bucketing them together would falsely report a save-phase collision between an after-save flow and a before-delete flow). When two or more ACTIVE record-triggered flows fire on the same object in the SAME context (all before-save, all after-save, or all before-delete), Salesforce does not guarantee the order they run in: their execution order is undefined and can change between releases, so one flow can silently depend on or be undone by another, and the stack becomes hard to reason about and maintain. The honest signal is a COUNT of ACTIVE flows in one context bucket — an obsolete, draft, or invalid-draft flow version is a dead metadata row that never runs, so it is never counted (counting dead versions would cry wolf about a problem that cannot fire). The count is disclosed verbatim so the reader judges severity for themselves: two flows in one context is a mild note, sixteen is a serious one. The stacked FLOWS are named as the thing to consolidate; the object is context, not a culprit. This does not assert the flows actually conflict at runtime — their entry conditions may be mutually exclusive — and a managed-package object may not permit changing its automation.'
+  concept:cross-phase-computed-gate:
+    kind: automation-collision
+    label: A firing condition can test a field another automation writes
+    summary: 'An automation''s firing condition — entry criteria, a validation formula, or a record-trigger filter — tests a field that a DIFFERENT automation writes on the same object during the same save. When that happens the firer may be reacting to a value the other automation computed rather than to what a user typed, so the outcome depends on which automation runs first in the order of execution. The base claim asserts only the COUPLING (one automation gates on a field another writes). It is UPGRADED to a strict cross-phase computed gate — the writer runs in an earlier save-order phase, so the firer is reacting to the computed value, not a direct edit — only when BOTH automations'' save-order phases can be confidently derived from grounded properties (component type, plus a record-triggered flow''s before/after-save timing or an apex trigger''s before/after handlers) AND the writer''s phase is strictly earlier than the firer''s. When either side''s phase cannot be placed (for example an apex-class writer with no phase of its own, a flow whose record-trigger timing was not extracted, or an apex trigger with both before- and after-handlers whose write cannot be attributed to one phase), or the phases are equal or reversed, the coupling claim stands and the phase order is NOT asserted — confirm the real save order with the order-of-execution tools before concluding the gate saw a computed value rather than a direct edit.'
+  # C11 / EC-6 — recursive self-write: one automation both triggersOn an object
+  # AND writesTo a field (or the object) on that SAME object, which can re-enter
+  # the save order. Heuristic confidence: re-entry is possible, not proven.
+  # C10 / EC-5 — gate tests a field written only in a strictly LATER save phase.
+  concept:cross-phase-write-invisibility:
+    kind: automation-collision
+    severity: high
+    label: A firing condition can never observe a field written in a later phase
+    summary: 'When an automation''s firing condition tests a field that a DIFFERENT automation writes in a STRICTLY LATER save-order phase on the same object, the gate can NEVER observe that write on the same save: phases only see writes from earlier phases. So the firer is testing the pre-write (user/direct) value, not the later automation''s computed value — a common source of "why didn''t my flow''s update satisfy the validation rule?" confusion. This claim fires ONLY when both phases are confidently derived and the writer''s phase ordinal is strictly greater than the firer''s (both synchronous). When either phase cannot be placed, the generic coupling claim may still apply; this invisibility conclusion is NOT asserted without a proven later ordering.'
+
+  concept:recursive-automation-self-write:
+    kind: automation-collision
+    severity: high
+    label: Automation that writes the same object it fires on can re-enter
+    summary: 'An automation that BOTH fires on an object (triggersOn) and writes a field or record on that SAME object (writesTo) can re-enter the save order: its own write can cause another pass through validation, workflows, and flows on the same object. Salesforce does not always prevent this; recursive depth and governor limits decide whether it fails loudly or loops silently. The claim is STRUCTURAL — grounded only in the pair of edges from one automation node — and does NOT assert that re-entry actually occurs on every save (entry conditions, before vs after timing, and static recursion guards may prevent it). Confirm with order_of_execution and the automation''s entry criteria before treating it as a live loop.'
+  # D9 / property-equals-endpoint — flow-self-dml-reentry. A record-triggered Flow
+  # whose DECLARED triggerObject equals the object scope of a writesTo DML
+  # endpoint (recordCreate / recordUpdate / recordDelete) can re-enter the save
+  # order. Narrower and more honest than C11 recursive-automation-self-write: it
+  # is Flow-scoped and gates on a real DML statement, EXCLUDING the before-save
+  # in-place $Record field assignment that C11 also matches but that never
+  # re-enters. Heuristic confidence: re-entry is possible, not proven.
+  concept:flow-self-dml-reentry:
+    kind: automation-collision
+    severity: high
+    label: A flow's DML on its own trigger object can re-enter the save
+    summary: 'A record-triggered Flow that performs an actual DML statement — Create / Update / Delete Records — on records of its OWN trigger object can RE-ENTER the save order: the DML starts a fresh save on the same object, which re-invokes the object''s record-triggered automation (including this flow), a recursion path Salesforce bounds only by its recursion / governor limits, not by preventing it. The claim is grounded STRUCTURALLY: the Flow node''s DECLARED `triggerObject` matches the object scope of a `writesTo` endpoint whose `operation` is a DML statement (recordCreate / recordUpdate / recordDelete). It DELIBERATELY EXCLUDES an in-place before-save `$Record` field assignment (`operation: beforeSaveFieldAssignment`), which mutates the triggering record in memory before it is committed and does NOT re-enter — the key distinction from the broader `concept:recursive-automation-self-write` (C11), which fires on ANY automation whose `triggersOn` and `writesTo` edges share an object, including that non-reentrant in-place case. This does NOT prove re-entry happens on every save: entry criteria, update-field / isChanged filters, and static recursion guards may bound or prevent it. Confirm with order_of_execution and the flow''s run/entry conditions before treating it as a live loop.'
+  # D10 / EC-14 — assignment rule first-match top-down; broad catch-all starves later entries.
+  concept:assignment-escalation-first-match-ordering:
+    kind: automation-collision
+    severity: medium
+    label: Assignment rule catch-all entry starves later specific entries
+    summary: 'Assignment rules evaluate their rule entries top-down in XML order — the first entry whose criteria match wins, and later entries are never considered. A catch-all entry with NO criteria and NO formula filter (zero criteria items, no formula) matches EVERY record, so if it appears before more specific entries those later entries are structurally unreachable — a common cause of "why did this Case land in the wrong queue?" confusion. The offline claim is grounded from AssignmentRule `references` edges carrying `entryIndex` (evaluation order), `criteriaItemCount`, and `hasFormula`: a broad entry is one with `criteriaItemCount === 0` and `hasFormula === false` that precedes at least one later entry with criteria or a formula. HONEST BOUNDARIES: this names the STRUCTURAL ordering risk from metadata, NOT whether a specific record would match a specific entry at runtime (live criteria evaluation is out of scope). User assignee targets (`User:{username}`) have no `User` ComponentType in the vault and are not counted by this rule — only Queue and Role targets are grounded. Escalation rules use the same first-match top-down semantics at the entry level, but entry criteria live on ConditionalContext nodes rather than on `references` edge properties — this rule does NOT scan escalation entry criteria and will not fire on EscalationRule until that grounding ships. If any `references` edge lacks `entryIndex` or the criteria metadata the broad test needs, the rule fails closed rather than guessing.'
+  concept:owd-sharing-posture:
+    kind: access-mechanism
+    label: Organization-wide default (OWD) sets an object's baseline record access
+    summary: 'An object''s organization-wide default (OWD), grounded as its `sharingModel` property, sets the BASELINE record-level access every user has to records they do not own, before any widening. It is an OBJECT-level setting the offline snapshot grounds directly. A RESTRICTED baseline — Private, or Controlled by Parent — means a user sees only their own records (plus records owned by users below them in the role hierarchy) by default; access is then widened only by RECORD-LEVEL mechanisms: sharing rules, the role hierarchy, manual shares, teams, territories, or Apex managed sharing. A PUBLIC baseline — Public Read Only (the `Read` value), Public Read/Write (`ReadWrite`), or Public Read/Write/Transfer — means every user can at least VIEW every record, and sharing rules can only ADD access, never restrict below the default. Controlled by Parent has no sharing model of its own: each record''s visibility is inherited from its CONTROLLING parent record — a master-detail parent for a detail object, or a platform-defined owning record for standard Controlled-by-Parent objects (Activity/Task/Event, Asset, Contact, Order) that have no master-detail relationship at all. The HONEST boundary: which specific users can see a specific record is RECORD-LEVEL state (the record''s owner, and any manual shares, teams, or Apex shares on it) that the offline vault does not hold, so only the object''s baseline POSTURE can be determined offline, never per-record visibility. `sharingModel` is null for entity variants that have no OWD (custom settings, custom metadata types, platform events); those carry no posture. This posture reasoning is object-level and independent of who the user is; the full per-user access cascade (object CRUD, permission sets, View/Modify All, restriction rules) is answered by the dedicated why-can-a-user-see-a-record tool.'
+    docs:
+      - label: Salesforce Help — Organization-Wide Sharing Defaults
+        url: https://help.salesforce.com/s/articleView?id=sf.security_owd_about.htm
+  concept:async-boundary:
+    kind: async-boundary
+    severity: high
+    label: Asynchronous execution runs outside the triggering transaction
+    summary: 'Queueable, Batch Apex, Scheduled Apex, and @future methods run in a SEPARATE transaction from the save that enqueues them. Their writes are not visible to the rest of that save, the async work commits (or fails) LATER, and governor limits reset at the boundary — so enqueuing async work has a DEFERRED effect, and downstream automation in the same save does not see it. This names the async boundary STRUCTURALLY, from a class''s own interface / annotation and its async-dispatch call sites; it does NOT assert WHEN the job runs, whether it succeeds, or the order of multiple async jobs relative to each other. The class-level markers (Queueable, Batch, Schedulable) mean the whole entry point is async; @future is METHOD-level — only the annotated method runs async, not the rest of the class.'
+    docs:
+      - label: Apex Developer Guide — Asynchronous Apex
+        url: https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_async.htm
+  concept:external-api-surface:
+    kind: external-api-surface
+    label: The class exposes an entry point reachable OUTSIDE the record UI
+    summary: 'An Apex class carries an annotation that exposes an EXTERNAL API surface — a REST endpoint (@RestResource), a method callable from Lightning components / LWC (@AuraEnabled), or a Flow/automation building block (@InvocableMethod). These entry points are reachable OUTSIDE the standard record page and its automation, so they are an integration and security surface: Apex does NOT automatically enforce field-level security or object CRUD on these paths — the class must enforce them in code; record-level sharing instead DEPENDS on the class''s `with sharing` / `without sharing` / inherited declaration (see below), not on the annotation. The claim is grounded STRUCTURALLY from the class''s own always-present annotation markers; it names the surface, not a vulnerability. HONEST BOUNDARIES — it does NOT assert: (a) that the endpoint is insecure (whether access is properly checked is a code question this cannot see); (b) WHO calls it — callers may be off-platform or otherwise invisible to the offline vault; or (c) WHICH method carries the annotation — the marker is per-CLASS, not per-method, so some method on the class is exposed, not necessarily every method. The class''s `with sharing` / `without sharing` / inherited declaration governs record access on these entry points; that specific sharing posture is a SEPARATE concept and is NOT asserted here.'
+    docs:
+      - label: Apex Developer Guide — Apex Security and Sharing
+        url: https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_classes_keywords_sharing.htm
+  concept:apex-sharing-mode:
+    kind: access-mechanism
+    label: An Apex class's sharing declaration governs record-level access enforcement
+    summary: 'An Apex class''s SHARING DECLARATION — `with sharing`, `without sharing`, `inherited sharing`, or none (unspecified) — governs whether the class enforces the RUNNING USER''s record-level sharing when its own SOQL and DML execute. `with sharing` enforces the user''s sharing; `without sharing` runs in SYSTEM context and does NOT enforce it, so the class can read and write records the user could not otherwise access (OFTEN INTENTIONAL — e.g. a service that must see all records — not by itself a vulnerability); `inherited sharing` takes the caller''s sharing mode and enforces sharing when the class is the entry point (the safe default); an UNSPECIFIED class (no keyword) is a legacy ambiguity whose behavior depends on the entry-point class in the call chain, which is why Salesforce recommends always declaring a mode. Two boundaries: sharing is a SEPARATE concern from field-level security (FLS) and object CRUD — Apex does not auto-enforce those either and this concept does not assert them; and the declaration is CLASS-level, not per-method, so inner classes can declare their own mode and the effective sharing at runtime still depends on which class is the entry point. Grounded from the class''s own declared `sharingModel`; it names the DECLARED posture, never a proven runtime access outcome for a specific user or record (record-level state the offline vault does not hold).'
+    docs:
+      - label: Apex Developer Guide — Using the with sharing, without sharing, and inherited sharing Keywords
+        url: https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_classes_keywords_sharing.htm
+  # RM-reason — unique-field-constraint (roadmap A2). A NODE concept, kind
+  # `field-provenance` REUSED from the closed ConceptKind union (the field-shaped
+  # concept kind that already houses the CustomField `isFormula` provenance
+  # concept — A2 does NOT invent a kind). Grounded on the CustomField extractor's
+  # always-present `unique` boolean (custom-field.ts `buildProperties`:
+  # `unique: toBooleanWithDefault(rootObj['unique'])`, in the FIXED-KEYS block,
+  # default false), so a `whereProperty {key: unique, equals: true}` node rule is
+  # pure-YAML expressible with no extractor / engine change. ORG-INDEPENDENT
+  # general Salesforce truth only — NO vault counts baked into the summary.
+  # Case-sensitivity is deliberately NOT asserted: the extractor does not expose a
+  # `caseSensitive` property, so the offline snapshot cannot ground it.
+  concept:unique-field-constraint:
+    kind: field-provenance
+    label: A field marked unique enforces a uniqueness constraint across the object
+    summary: 'A field marked UNIQUE enforces a uniqueness constraint across every record of its object: no two records may hold the same value in that field. Inserting or updating a record with a value that already exists on another record FAILS at save time with a StatusCode.DUPLICATE_VALUE error, and the constraint holds on EVERY write path — the UI, the API, data import, and the upsert operation — not just the UI. This is grounded from the field''s own declared `unique` metadata; it names the DECLARED constraint, not a proven outcome for any particular save. HONEST BOUNDARIES: the constraint governs WHETHER a duplicate is rejected, never WHICH specific existing record a given value would collide with — that is record-level data the offline vault does not hold. Whether the uniqueness match is case-sensitive is a separate declared setting the offline snapshot does not capture, so it is deliberately not asserted here. A blank value is not compared, so multiple records may leave a unique field empty.'
+    docs:
+      - label: Salesforce Help — Custom Field Attributes (Unique)
+        url: https://help.salesforce.com/s/articleView?id=sf.custom_field_attributes.htm
+  # RM-reason — external-id-field (roadmap A2). A NODE concept, kind
+  # `field-provenance` REUSED from the closed ConceptKind union (same field-shaped
+  # kind as unique-field-constraint / the CustomField `isFormula` concept — A2 does
+  # NOT invent a kind). Grounded on the CustomField extractor's always-present
+  # `externalId` boolean (custom-field.ts `buildProperties`:
+  # `externalId: toBooleanWithDefault(rootObj['externalId'])`, FIXED-KEYS block,
+  # default false), so a `whereProperty {key: externalId, equals: true}` node rule
+  # is pure-YAML expressible with no extractor / engine change. ORG-INDEPENDENT
+  # general Salesforce truth only — NO vault counts baked into the summary.
+  concept:external-id-field:
+    kind: field-provenance
+    label: An external-id field is indexed and eligible as an upsert key
+    summary: 'A field marked as an EXTERNAL ID is indexed and is eligible to serve as an UPSERT KEY: an upsert operation (the SOQL/API `upsert` or Apex `Database.upsert`, and API / data-import upserts) can key on it to match an incoming record to an existing one — updating the matched record when the value is found and inserting a new record when it is not — so records can be correlated by an external system''s own identifier without first storing Salesforce record ids. Being indexed also makes filtering on the field efficient. An external-id field does NOT by itself enforce uniqueness: if it is ALSO marked unique it additionally rejects duplicate values (a DUPLICATE_VALUE error), and an upsert keyed on it then matches at most one record; if it is not unique, an upsert whose key value matches more than one existing record fails because the key is ambiguous. This is grounded from the field''s own declared `externalId` metadata; it names the DECLARED capability, not a proven outcome for any particular upsert. Whether the field is also unique is a separate declared attribute (the unique-field-constraint concept), read independently.'
+    docs:
+      - label: Salesforce Help — Custom Field Attributes (External ID)
+        url: https://help.salesforce.com/s/articleView?id=sf.custom_field_attributes.htm
+  concept:system-context-external-surface:
+    kind: access-mechanism
+    label: A without-sharing class that is also externally reachable is a security-review priority
+    summary: 'An Apex class that is declared `without sharing` AND ALSO exposes an entry point reachable OUTSIDE the record UI — a REST endpoint (@RestResource), a member exposed to Lightning components (@AuraEnabled), or a Flow/automation building block (@InvocableMethod) — is the INTERSECTION of two separately-grounded facts, and that combination is a security-REVIEW priority: an external caller can reach code that runs in SYSTEM context and does NOT enforce the running user''s record-level sharing, so it can read or write records the user could not otherwise access. This names the COMBINATION structurally from the class''s own always-present markers; the combination MAY still be intentional (a deliberate service endpoint that must see all records) and is NOT by itself asserted to be a vulnerability. Field-level security and object CRUD are a SEPARATE concern Apex also does not auto-enforce — verify FLS/CRUD/sharing enforcement in the code (e.g. WITH SECURITY_ENFORCED / Security.stripInaccessible / user-mode). Three boundaries carry over from the inputs: the `without sharing` declaration is CLASS-level, not per-method, and effective runtime sharing still depends on the ENTRY-POINT class in the call chain; the external marker is per-CLASS, not per-method, so SOME method on the class is exposed, not necessarily every method; and the `@AuraEnabled` marker in particular is MEMBER-level and member-agnostic — it fires on ANY `@AuraEnabled` member, so a property-only DTO (no callable method) is NOT a callable endpoint, and a callable `@AuraEnabled` METHOD must be confirmed present before the reach-into-system-context consequence holds (@RestResource requires a URL mapping and @InvocableMethod cannot sit on a property, so both of those are genuinely callable). This is the DECLARED posture, not a proven access outcome for a specific user or record (record-level state the offline vault does not hold).'
+    docs:
+      - label: Apex Developer Guide — Apex Security and Sharing
+        url: https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_classes_keywords_sharing.htm
+  concept:view-modify-all:
+    kind: access-mechanism
+    severity: critical
+    label: An object-level View All / Modify All grant overrides sharing for that one object
+    summary: 'A permission set or profile can grant OBJECT-LEVEL "View All Records" or "Modify All Records" on a specific object, and that grant OVERRIDES the object''s record-level sharing for whoever holds it: a holder can READ (View All) — or read, edit, AND delete (Modify All) — EVERY record of that object regardless of the org-wide default, sharing rules, the role hierarchy, manual shares, teams, or Apex sharing. This closes the gap the OWD sharing-posture concept explicitly leaves open: an object can read "OWD Private" and still be effectively open, because a permission set or profile grants View/Modify All on it. Modify All is the STRONGER form of the SAME grant — it INCLUDES View All (Modify All implies View All), so the two are one escalating grant, not two independent ones; every Modify All grant is also a View All grant. HONEST BOUNDARIES: this is OBJECT-LEVEL only and does NOT bypass FIELD-LEVEL SECURITY — a field the holder cannot see stays hidden even under Modify All. It is NOT the org-wide "View All Data" / "Modify All Data" SYSTEM permission, which is broader and separate (those span every object; this applies to ONE object and says nothing about any other). It is the DECLARED grant read from the permission set / profile metadata, NOT a proof that any specific user actually HOLDS that permission set or profile — who holds it is an assignment (live-plane) question the offline vault cannot answer — and NOT a proven per-user access outcome for a specific record. A dedicated why-can-a-user-see-a-record tool already computes the full per-user cascade including this override; this concept''s value is surfacing the grant DETERMINISTICALLY, with citations, through the reasoning engine — and closing the OWD concept''s acknowledged gap. When one object is granted View/Modify All by many permission sets or profiles, the claim is an ENUMERATED SET of those grantors, not a per-grant alarm.'
+    docs:
+      - label: Salesforce Help — View All and Modify All Permissions Overview
+        url: https://help.salesforce.com/s/articleView?id=sf.users_profiles_view_modify_all.htm
+  # ARC-2 A5 — field-fls-independent-of-crud (Wave 2). An EDGE concept, kind
+  # `access-mechanism` REUSED from the closed union. Grounded on the
+  # PermissionSet/Profile extractor's `grantedBy` edge to CustomField carrying
+  # always-present boolean edge properties `readable` / `editable`
+  # (permission-set.ts:160-163, profile.ts:183-186). TWO equals-only edge rules
+  # (edgeWhereProperty is equals-only), same shape as view-modify-all object-grant
+  # EDGE rules but on CustomField endpoints. Distinct from view-modify-all
+  # (object-level record-scope bypass) and from future object-crud-grant (table-level
+  # CRUD): FLS gates the COLUMN and is ANDed with object CRUD and record sharing —
+  # View/Modify All on the object does NOT bypass it. ORG-INDEPENDENT — NO vault
+  # counts in the summary.
+  concept:field-fls-independent-of-crud:
+    kind: access-mechanism
+    label: Field-level security gates column access and is not bypassed by object View/Modify All
+    summary: 'Field-level security (FLS) gates access to individual COLUMNS — which fields a user can READ or EDIT — separately from object-level CRUD and record-level sharing. A permission set or profile declares FLS on each field via a `grantedBy` grant carrying `readable` and/or `editable`; reaching a field value requires ALL of these layers to pass: the user must have object-level access to the record (object CRUD plus sharing, including any View All / Modify All override on that object), AND a field-level grant that permits reading or editing that specific column. View All Records and Modify All Records override RECORD sharing for an object but do NOT bypass FLS — a field the holder cannot read stays hidden even under Modify All. This is the DECLARED FLS grant read from permission-set / profile metadata, NOT a proof that any specific user actually holds that permission set or profile (an assignment question the offline vault cannot answer), NOT a proof of object-level CRUD on the field''s parent object (a separate grant), and NOT a proven per-user access outcome for a specific record or field value. The dedicated why-can-a-user-see-record and user-ability tools compute the full per-user cascade including FLS; this concept surfaces the field grant deterministically with citations through the reasoning engine.'
+    docs:
+      - label: Salesforce Help — Field-Level Security
+        url: https://help.salesforce.com/s/articleView?id=sf.admin_fls.htm
+  # C15 / EC-8 — field EDIT without object EDIT (or vice-versa) is inert.
+  concept:crud-fls-consistency-anti-join:
+    kind: access-mechanism
+    severity: high
+    label: Field EDIT without object EDIT (or vice-versa) is inert
+    summary: 'Object CRUD and field-level security are ANDed: a permission set or profile that grants EDIT on a field but does NOT also grant EDIT on the field''s parent object cannot actually edit that field (the holder never reaches the record to change the column). Symmetrically, object-level EDIT without a matching field-level EDIT grant on a specific field cannot modify that column. This claim fires only when ONE side of that pair is present and the OTHER is absent for the SAME grantor — an anti-join over declared `grantedBy` edges. It is STRUCTURAL (declared grants only), not a proof that any user holds the grantor, and under incomplete PermissionSet/Profile/CustomObject/CustomField coverage the absence side is NOT asserted (downgraded to not-checked).'
+  concept:firing-condition:
+    kind: firing-condition
+    label: A declared firing condition is listed in metadata, not evaluated against a live record
+    summary: 'A declarative automation''s FIRING CONDITION — the entry criteria or error-condition formula that decides whether it runs (for example a validation rule''s error-condition formula, an approval process''s entry criteria, a workflow rule''s criteria or formula, or a record-triggered flow''s start filter) — is recorded in metadata as a boolean expression over fields. An offline metadata reader can extract that expression and the fields it references, but it CANNOT evaluate the condition against a live record, because it holds no record-level field values. So the condition being LISTED tells you what may gate the automation and which fields it tests — never whether it is actually TRUE for any specific record, and therefore never whether the automation fires (or blocks the save) on that record; determining that needs runtime, record-level data. Two honest boundaries: when the condition is read from a formula surface its referenced fields are resolved by a formula tokenizer, so dynamically-built or reflective references can be missed; and this describes the condition as DECLARED — distinct from a mid-flow decision branch, which routes a flow AFTER it has already been triggered, and from a proven runtime firing outcome.'
+  concept:flow-run-mode:
+    kind: access-mechanism
+    label: A Flow's run mode (runInMode) decides whether it enforces the running user's sharing, CRUD, and FLS
+    summary: 'A Flow''s RUN MODE — its declared `runInMode` — sets the execution context its record reads and writes run in, which decides whether it enforces the running user''s record-level SHARING, object CRUD, and field-level security (FLS). `SystemModeWithoutSharing` runs the flow in SYSTEM context and does NOT enforce the running user''s record-level sharing; and it ALSO does NOT enforce object CRUD or FLS (run mode is a SEPARATE concern from CRUD/FLS: as with an Apex class in system context, neither is auto-enforced — the `with`/`without sharing` keyword governs record-level sharing only), so it can read and write ANY object and field regardless of the running user''s permissions (OFTEN INTENTIONAL for an automation that must operate on all records, and NOT by itself a vulnerability). `SystemModeWithSharing` also runs in system context and likewise does NOT enforce object CRUD or FLS, but it DOES respect record-level sharing (organization-wide defaults, the role hierarchy, sharing rules, and manual / Apex shares) — so record VISIBILITY is enforced while object and field permissions are not. `DefaultMode`, and a flow that declares no run mode at all, is CONTEXT-DEPENDENT: the effective context depends on how the flow is launched (a screen flow run by a user runs in that user''s context, while an autolaunched or record-triggered flow''s default differs), so the default posture is deliberately NOT asserted here. This is the DECLARED posture read from the flow''s own `runInMode`; it names general Salesforce run-mode behavior, never a proven runtime access outcome for a specific user or record (record-level state the offline vault does not hold). Two boundaries: run mode is FLOW-level — a subflow this flow calls runs under its OWN run mode, not this one''s — and any Apex the flow invokes enforces sharing / FLS on its OWN declaration, independent of the flow''s run mode.'
+  concept:required-field-no-default:
+    kind: field-provenance
+    label: A universally required field with no default value must be supplied on every insert
+    summary: 'A field that is UNIVERSALLY REQUIRED at the field-definition level (so every record must carry a value) and has NO DEFAULT VALUE must be supplied explicitly on EVERY path that inserts a record — a UI create, an Apex DML insert, an API create call, a data import, or an upsert that resolves to an insert. When an insert omits such a field the whole insert HARD-FAILS with a required-value error (REQUIRED_FIELD_MISSING) and no record is created; in a bulk insert the offending rows fail. The gap exists ONLY when there is no default: a required field that DOES declare a default value is populated by that default whenever the caller leaves it blank, so it does not fail the insert — which is why this names only required fields whose default value is absent. This is grounded from the field''s own declared metadata (its required flag and the presence or absence of a default value) and describes general Salesforce behavior, not a claim about any specific record or a runtime failure that was actually observed. Two boundaries: a field can ALSO be made effectively required by a validation rule, a required page-layout placement, or automation rather than by the field definition, and those record- or layout-level requirements are a SEPARATE concern this does not cover; and a default that is a formula versus a static value is not distinguished — either kind supplies a value, so either kind closes the gap.'
+  # C17 / EC-8 — required+no-default is a hard blocker only when NO before-save writer supplies it.
+  concept:deep-creation-gap:
+    kind: field-provenance
+    severity: high
+    label: Required field with no default and no before-save writer is a hard creation blocker
+    summary: 'A field that is UNIVERSALLY REQUIRED with NO default value is a creation gap on every insert path — UNLESS a before-save automation (a RecordBeforeSave flow or a before-only Apex trigger) writes the field and supplies the value before validation completes. This claim fires only on the ANTI-JOIN: the field matches required+no-default AND no before-save writer `writesTo` it. An after-save writer does NOT close the gap (validation already ran). Under incomplete Flow/ApexTrigger/CustomField coverage the absence of a before-save writer is NOT asserted (downgraded to not-checked). This does NOT prove a specific insert path will fail at runtime — UI defaults, Apex that always sets the field, or layout-required-only fields are out of scope.'
+  # RM-c1 #1 — external-sharing-model-posture. A NODE concept, kind
+  # `access-mechanism` REUSED from the closed ConceptKind union (the same kind
+  # the shipped owd-sharing-posture / apex-sharing-mode / view-modify-all
+  # concepts use — this does NOT invent a kind). Grounded on the CustomObject
+  # extractor's `externalSharingModel` property (custom-object.ts:532-534 — a
+  # NULLABLE scalar, distinct from the internal `sharingModel` OWD; null when the
+  # object exposes no external records), so one `whereProperty {key:
+  # externalSharingModel, equals: <value>}` node rule per value is pure-YAML
+  # expressible with no extractor / engine change. ORG-INDEPENDENT general
+  # Salesforce truth only — NO vault counts baked into the summary. Keys a
+  # DIFFERENT grounded property than owd-sharing-posture (external vs internal),
+  # so the two never double-claim on one object.
+  concept:external-sharing-model-posture:
+    kind: access-mechanism
+    label: An object's external sharing model sets the baseline record access for external users
+    summary: 'An object''s EXTERNAL sharing model — grounded as its `externalSharingModel` property — sets the BASELINE record-level access that EXTERNAL users (Experience Cloud / community / portal users) have to records they do not own, a SEPARATE setting from the internal organization-wide default (`sharingModel`). A RESTRICTED external baseline — Private, or Controlled by Parent — means an external user sees only records they own or that are explicitly shared to them; a PUBLIC one — Public Read Only (the `Read` value) or Public Read/Write (`ReadWrite`) — lets them at least VIEW every record. By Salesforce''s rule the external baseline can NEVER be more permissive than the internal one, so it is a floor-relative-to-internal, not an independent widening. Controlled by Parent has no external model of its own: each record''s external visibility is inherited from its controlling parent record. This is an OBJECT-level declared posture the offline snapshot grounds directly; it never determines which SPECIFIC external user can see a specific record (record-level state — the record''s owner and any shares on it — the offline vault does not hold). `externalSharingModel` is null on entity variants that expose no external records; those carry no external posture. This is DISTINCT from the internal org-wide default (the owd-sharing-posture concept, keyed on `sharingModel`), which governs internal users.'
+  # RM-c1 #6 — criteria-based-sharing-widens. A NODE concept, kind
+  # `access-mechanism` REUSED from the closed union. Grounded on the SharingRule
+  # extractor's always-present `ruleType` scalar (sharing-rules.ts:585 —
+  # 'criteria' for a `<sharingCriteriaRules>` rule). This is the FIRST concept to
+  # bind SharingRule nodes. Pure-YAML: a single scalar-equals node rule, no
+  # extractor / engine change. ORG-INDEPENDENT — NO vault counts in the summary.
+  concept:criteria-based-sharing-widens:
+    kind: access-mechanism
+    label: A criteria-based sharing rule adds Read/Edit access to records whose field values match
+    summary: 'A CRITERIA-BASED sharing rule WIDENS record access: it grants a named group or role a stated access level (Read, or Read/Write) to every record whose field values MATCH the rule''s criteria. Sharing rules are ADD-ONLY — they can only ADD access above the organization-wide default, never restrict below it — so a criteria rule can open a Private object''s records up to the matching audience but can never take access away. The rule''s existence, its criteria, and its access level are grounded declaratively from the rule''s own metadata; but WHETHER it currently grants access to any particular record depends on that record''s live field values, which the offline vault cannot evaluate. So it names a WIDENING PATH — who could gain access, and at what level — not a proven per-record grant. The only declarative mechanism that NARROWS access below the sharing model is a restriction rule; a criteria sharing rule is not that.'
+  # RM-c1 #8 — shared-to-all-internal-users-effective-public. A NODE concept, kind
+  # `access-mechanism` REUSED. Grounded on the SharingRule node's always-present
+  # `sharedToType` scalar (sharing-rules.ts:587 — the `<sharedTo>` XML element key;
+  # value 'allInternalUsers' distinguishes the built-in All Internal Users group
+  # from allPartnerUsers / guestUser / allCustomerPortalUsers with NO extractor
+  # change). The original candidate wrongly diagnosed this as an EDGE rule; the
+  # node scalar makes it buildable today. Claim tightened so 'effectively public'
+  # is CONDITIONAL on a restrictive OWD (not an unconditional assertion).
+  # ORG-INDEPENDENT — NO vault counts in the summary.
+  concept:shared-to-all-internal-users-effective-public:
+    kind: access-mechanism
+    label: A sharing rule shared to All Internal Users can make a Private object effectively internally public
+    summary: 'A sharing rule that shares records to the built-in ALL INTERNAL USERS group grants the stated access to EVERY internal user. WHEN the object''s organization-wide default is RESTRICTIVE (Private, or Controlled by Parent), this NEUTRALIZES the OWD''s intent for the whole internal population — the records are "Private on paper, internally public in practice"; on an already-PUBLIC OWD the rule adds nothing new. The grant is declared from the rule''s own shared-to target (the built-in group, distinct from a named group, role, partner, or guest audience). Two honest boundaries: the object may still be private to EXTERNAL users (this group is internal-only), and WHICH records are exposed still depends on the rule''s live criteria the offline vault cannot evaluate. So it names an effective-internally-public POSTURE conditional on a restrictive OWD, not a proven per-record grant.'
+  # RM-c1 #10 — guest-user-sharing-exposure. A NODE concept, kind `access-mechanism`
+  # REUSED. Grounded on the SharingRule node's always-present `ruleType` scalar
+  # (sharing-rules.ts:551-572 — 'guest' for a `<sharingGuestRules>` rule; the guest
+  # branch also surfaces `siteName`). Distinct `ruleType` value from criteria / owner.
+  # Fires only where guest rules exist (org-independent — fires nowhere in a
+  # guest-ruleless vault, like the shipped isRestResource rule). ORG-INDEPENDENT —
+  # NO vault counts in the summary.
+  concept:guest-user-sharing-exposure:
+    kind: access-mechanism
+    severity: critical
+    label: A guest sharing rule grants unauthenticated site-visitor access — a top exposure vector
+    summary: 'A GUEST sharing rule grants record access to the UNAUTHENTICATED guest user of an Experience Cloud site (a community / portal Site) — i.e. any anonymous internet visitor to that site, with no login. Because the audience is unauthenticated, it is one of the HIGHEST-exposure access paths an org can declare, and Salesforce restricts guest sharing rules to READ-ONLY for exactly this reason. The rule and its Site are grounded declaratively from the rule''s own metadata; but WHICH records it exposes depends on the rule''s live criteria field values the offline vault cannot evaluate. So it names an anonymous-exposure SURFACE — the fact that an unauthenticated audience is granted a read path — not a proven per-record leak.'
+  # RM-c1 #17 — owner-based-sharing-redistribution. A NODE + EDGE concept, kind
+  # `access-mechanism` REUSED. Grounded on the SharingRule node's `ruleType`
+  # ('owner') plus its TWO `sharedWith` edges carrying `direction` = 'to'
+  # (recipient) / 'from' (source) (sharing-rules.ts:613-637). Owner rules are the
+  # ONLY family that emits a 'from' sharedWith edge; `accessLevel` grounds the "at
+  # the stated level" clause. Three rules bind this concept: one node rule
+  # (ruleType) + two equals-only EDGE rules on the sharing edge's `direction`
+  # (edgeWhereProperty is equals-only). ORG-INDEPENDENT — NO vault counts.
+  concept:owner-based-sharing-redistribution:
+    kind: access-mechanism
+    label: An owner-based sharing rule redistributes one group's records to another group/role
+    summary: 'An OWNER-BASED sharing rule takes records OWNED by members of one group or role (the SOURCE) and grants them to another group or role (the RECIPIENT) at a stated access level (Read, or Read/Write). Like every sharing rule it is ADD-ONLY — it widens access for the recipient, never restricts. The rule carries a "from" source and a "to" recipient on its two sharing edges; both endpoints are declared, but the ACTUAL set of records redistributed depends on live record OWNERSHIP the offline vault does not hold. So it names the REDISTRIBUTION PATH — whose records flow to whom, and at what level — not a proven per-record share. This is distinct from a criteria-based sharing rule, which selects records by their field values rather than by owner.'
+  # RM-c1 #11 — role-and-subordinates-cascade. An EDGE concept, kind
+  # `access-mechanism` REUSED. Grounded on the `sharedWith` edge's `inheritance`
+  # property, set to 'subordinates' / 'subordinatesInternal' by the
+  # roleAndSubordinates / roleAndSubordinatesInternal `<sharedTo>` variants
+  # (sharing-rules.ts VARIANT_TABLE:57-66, idPrefix 'Role'). TWO equals-only edge
+  # rules (edgeWhereProperty is equals-only), same shape as the shipped
+  # master-detail-cascade EDGE rule. ORG-INDEPENDENT — NO vault counts.
+  concept:role-and-subordinates-cascade:
+    kind: access-mechanism
+    label: A sharing rule shared to roleAndSubordinates reaches the entire role subtree
+    summary: 'When a sharing rule is shared to a ROLE AND SUBORDINATES, the grant reaches not just the named role but EVERY role BENEATH it in the role hierarchy — the whole SUBTREE inherits the shared access. This is a structural cascade declared on the sharing edge itself. The "internal" variant (role and INTERNAL subordinates) scopes the cascade to internal (non-portal) subordinate roles only, excluding portal / community roles beneath the named one. It names the TARGET SET the rule addresses — the roles in the subtree — not the individual users who currently occupy those roles (an assignment question the offline vault does not answer). This is about which ROLES a single sharing edge reaches; it is not the role-hierarchy''s own upward access inheritance.'
+  # RM-cluster-c3 — workflow-field-update-partial-resave (backlog #4). A NODE
+  # concept, kind `save-order-phase` REUSED from the closed ConceptKind union (the
+  # same kind concept:save-order carries — c3 does NOT invent a kind). Grounded on
+  # the WorkflowRule extractor's always-present `fieldUpdateCount` int
+  # (workflow-rule.ts:936 → `fieldUpdateCount: actions.filter((a) => a.type ===
+  # 'FieldUpdate').length`, a declared-tier per-rule count emitted in the node's
+  # fixed properties block), so a `whereProperty {key: fieldUpdateCount, neq: 0}`
+  # node rule (neq:0 == count>=1 on an always-present int) is pure-YAML expressible
+  # with no extractor / engine change. ORG-INDEPENDENT general Salesforce truth
+  # only — NO vault counts baked into the summary.
+  concept:workflow-field-update-partial-resave:
+    kind: save-order-phase
+    label: A workflow field update forces a partial re-run of the save order
+    summary: 'A workflow rule that performs one or more FIELD UPDATES forces a PARTIAL re-run of the order of execution on the same save. Per Salesforce''s documented order of execution, when a workflow field update changes a value it RE-RUNS the record''s before-update and after-update Apex triggers and the STANDARD (system) validation rules ONE additional time on that save — but it does NOT re-run custom validation rules, duplicate rules, assignment rules, auto-response rules, or escalation rules. So a value the workflow sets can be re-seen (and re-vetoed) by update triggers or standard validation that already ran earlier in the same save, and automation downstream of the update reacts to the workflow-computed value rather than to what the user typed. This is grounded from the rule''s own declared count of immediate field-update actions; it names the structural re-save, not a proven runtime outcome. HONEST BOUNDARIES: TIME-DEPENDENT field updates are NOT counted here (only immediate field-update actions are), so this UNDER-fires on time-triggered updates and never over-claims; and it does not assert that any specific record''s value actually changed on a given save (whether the rule''s criteria match a record is record-level data the offline vault does not hold).'
+    docs:
+      - label: Apex Developer Guide — Triggers and Order of Execution
+        url: https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_triggers_order_of_execution.htm
+  # RM-cluster-c3 — workflow-time-dependent-action-deferred (backlog #14). A NODE
+  # concept, kind `async-boundary` REUSED from the closed ConceptKind union (the
+  # same kind concept:async-boundary carries — c3 does NOT invent a kind). Grounded
+  # on the WorkflowRule extractor's always-present `timeTriggerCount` int
+  # (workflow-rule.ts:946 → `timeTriggerCount: timeTriggers.length`, a declared-tier
+  # count in the node's fixed properties block), so a `whereProperty {key:
+  # timeTriggerCount, neq: 0}` node rule (neq:0 == count>=1 on an always-present
+  # int) is pure-YAML expressible with no extractor / engine change. The node
+  # whereProperty has no `gte` operator, so `neq: 0` — not `gte: 1` — is the
+  # authorable shape for count>=1. ORG-INDEPENDENT general Salesforce truth only —
+  # NO vault counts baked into the summary. A time-dependent workflow action is an
+  # async boundary in the genuine sense: it is enqueued and fires LATER in a
+  # SEPARATE transaction, decoupled from the triggering save.
+  concept:workflow-time-dependent-action-deferred:
+    kind: async-boundary
+    label: A workflow rule's time-dependent actions are queued and fire later in a separate transaction
+    summary: 'A workflow rule that declares TIME-DEPENDENT actions does NOT execute them during the record save. They are ENQUEUED to the time-based workflow queue and fire LATER, in a SEPARATE transaction, at a declared offset (measured from a record field value, or from the rule''s trigger date when no field is named). So their effect is DEFERRED and decoupled from the triggering save: the queued action can fire long after the edit that scheduled it, its writes are not part of the original save''s transaction and cannot roll it back, and Salesforce silently REMOVES a queued action if the rule''s criteria stop matching the record before the scheduled time arrives. This is grounded from the rule''s own declared count of time triggers; it names the deferred-action STRUCTURE, not a proven runtime outcome. HONEST BOUNDARIES: it does NOT evaluate the offset or assert WHEN the queued action runs, whether it still qualifies when the time arrives, or whether it succeeds; and reactivating or editing a workflow rule can drop or re-queue its pending time-based actions, which the offline snapshot cannot observe.'
+    docs:
+      - label: Salesforce Help — Time-Dependent Workflow Actions
+        url: https://help.salesforce.com/s/articleView?id=sf.workflow_time_action_considerations.htm
+  # RM-cluster-c3 — flow-scheduled-path-post-commit-fault (backlog #7). A NODE
+  # concept, kind `async-boundary` REUSED from the closed ConceptKind union (the
+  # same kind concept:async-boundary carries — c3 does NOT invent a kind, and this
+  # is a Flow-shaped async boundary distinct from the Apex-only async-boundary
+  # class markers). Grounded on the Flow extractor's always-present
+  # `runAsyncAfterCommit` boolean (flow.ts:272 → `runAsyncAfterCommit:
+  # scheduledPathTypes.includes(ASYNC_AFTER_COMMIT_PATH)`, emitted onto the Flow
+  # node at flow.ts:1968; default false at flow.ts:245), so a `whereProperty {key:
+  # runAsyncAfterCommit, equals: true}` node rule (mirroring flow-run-mode''s
+  # boolean-equals shape) is pure-YAML expressible with no extractor / engine
+  # change. ORG-INDEPENDENT general Salesforce truth only — NO vault counts baked
+  # into the summary. The fault-cannot-roll-back-the-committed-save consequence is
+  # what distinguishes an immediately-after-commit ASYNC path from the synchronous
+  # scheduled path.
+  concept:flow-scheduled-path-post-commit-fault:
+    kind: async-boundary
+    label: A record-triggered flow's async post-commit scheduled path cannot roll back the save
+    summary: 'A record-triggered flow that declares an immediately-after-commit ASYNCHRONOUS scheduled path runs that path in a SEPARATE transaction AFTER the triggering save has already committed. So its work is DEFERRED and decoupled from the save: its writes are not visible to the original save transaction, governor limits reset at the boundary, and — critically — a FAULT on the async path CANNOT roll back the already-committed save (unlike a fault on the synchronous run path, which can). This names the async boundary STRUCTURALLY from the flow''s own declared path type; it is grounded from an always-present boolean the extractor derives from the flow''s scheduled-path definitions. HONEST BOUNDARIES: it does NOT assert WHEN the async path runs, whether it succeeds, or the order of multiple async paths relative to each other; and it names the path a fault cannot roll back the save from, not a proven runtime failure on any specific record save.'
+    docs:
+      - label: Salesforce Help — Add Scheduled Paths to Your Flow
+        url: https://help.salesforce.com/s/articleView?id=sf.flow_concepts_trigger_scheduledpaths.htm
+  # RM-cluster-c3 — flow-platform-event-triggered-async (backlog #16). A NODE
+  # concept, kind `async-boundary` REUSED from the closed ConceptKind union (the
+  # same kind concept:async-boundary carries — c3 does NOT invent a kind). Grounded
+  # on the Flow extractor's always-key-present `triggerType` scalar (flow.ts:1954,
+  # `triggerType: startProps.triggerType`, from `toNullableString(startObj[
+  # 'triggerType'])` at flow.ts:263; the platform-event value is emitted VERBATIM as
+  # `PlatformEvent`, confirmed at flow.ts:386 `triggerType !== 'PlatformEvent'`), so
+  # a `whereProperty {key: triggerType, equals: PlatformEvent}` node rule (identical
+  # shape to flow-run-mode) is pure-YAML expressible with no extractor / engine
+  # change. ORG-INDEPENDENT general Salesforce truth only — NO vault counts baked
+  # into the summary.
+  concept:flow-platform-event-triggered-async:
+    kind: async-boundary
+    label: A platform-event-triggered flow runs asynchronously as the Automated Process user
+    summary: 'A flow triggered by a PLATFORM EVENT runs ASYNCHRONOUSLY in its own transaction, in system context, as the Automated Process user, AFTER the event is published — decoupled from the transaction that published the event. So its work is DEFERRED and cannot roll back the publisher''s save, the running user is NOT the person who caused the publish (it is the Automated Process user), and governor limits reset at the boundary. Platform-event delivery itself is not exactly-once, gap-free, or globally ordered, so ordering and delivery are not guaranteed. This names the async boundary STRUCTURALLY from the flow''s own declared trigger type; it is grounded from an always-key-present scalar the extractor emits verbatim. HONEST BOUNDARIES: it does NOT assert delivery success, WHEN the flow runs, or the order of events relative to each other; and it describes the platform-event trigger type, distinct from a record-triggered or scheduled flow.'
+    docs:
+      - label: Salesforce Help — Platform Event–Triggered Flows
+        url: https://help.salesforce.com/s/articleView?id=sf.flow_concepts_trigger_platformevent.htm
+  # RM-cluster-c3 — apex-trigger-platform-event-async (backlog #15). A NODE concept,
+  # kind `async-boundary` REUSED from the closed ConceptKind union (the same kind
+  # concept:async-boundary carries — c3 does NOT invent a kind; the shipped
+  # async-boundary rules key ApexClass markers, this keys an ApexTrigger property, a
+  # different always-present ground). Grounded on the ApexTrigger extractor's
+  # always-present `isPlatformEventSubscriber` boolean (apex-trigger.ts:279 =
+  # `header.objectApiName.endsWith('__e')`, emitted onto the trigger node at
+  # apex-trigger.ts:330, default false — "always present" per the extractor comment
+  # at apex-trigger.ts:322), so a `whereProperty {key: isPlatformEventSubscriber,
+  # equals: true}` node rule (mirroring the async-boundary boolean-node shape) is
+  # pure-YAML expressible with no extractor / engine change. ORG-INDEPENDENT general
+  # Salesforce truth only — NO vault counts baked into the summary.
+  concept:apex-trigger-platform-event-async:
+    kind: async-boundary
+    label: An Apex trigger on a platform event fires asynchronously as the Automated Process user
+    summary: 'An Apex trigger that subscribes to a PLATFORM EVENT (its target object is an `__e` event) does NOT run in the publisher''s transaction — it fires ASYNCHRONOUSLY in a SEPARATE transaction, in system context, as the Automated Process user, AFTER the event is published. So its writes cannot roll back the publisher''s save, the running user is NOT the person who caused the publish (it is the Automated Process user), governor limits reset at the boundary, and platform-event delivery is not exactly-once, gap-free, or globally ordered. This names the async boundary STRUCTURALLY from the trigger''s event-object suffix; it is grounded from an always-present boolean the extractor derives from the target object''s api name. HONEST BOUNDARIES: it does NOT assert delivery success, WHEN the trigger runs, or the order of events relative to each other; and it describes the platform-event subscription structurally, distinct from a trigger on a standard or custom SObject.'
+    docs:
+      - label: Platform Events Developer Guide — Subscribe with Apex Triggers
+        url: https://developer.salesforce.com/docs/atlas.en-us.platform_events.meta/platform_events/platform_events_subscribe_apex.htm
+  # RM-cluster-c3 — apex-trigger-per-object-multiplicity (backlog #5). An AGGREGATE
+  # group-count concept, kind `automation-collision` REUSED from the closed
+  # ConceptKind union (the same kind concept:automation-collision / the shipped
+  # stacked-flows rule carries — c3 does NOT invent a kind). This is the missing
+  # Apex-trigger analog of the shipped Flow-only stacked-flows count. Grounded on the
+  # ApexTrigger extractor's always-emitted declared `triggersOn` edge
+  # (apex-trigger.ts:264-268, "always emitted", confidence declared) + the
+  # always-present node `status` scalar (apex-trigger.ts:327). It rides the shipped
+  # AGGREGATE engine feature with the DEFAULT knobs (edgeSource root-incident,
+  # countDistinctEndpoint from, SINGLE_GROUP — no groupByEdgeProperty), so it counts
+  # DISTINCT active ApexTrigger firers incident to a root CustomObject, exactly like
+  # stacked-flows counts Flow firers, MINUS the trigger-context bucketing (an Apex
+  # trigger can span multiple events, so we deliberately do NOT hardcode a save
+  # phase). ORG-INDEPENDENT general Salesforce truth only — NO vault counts baked
+  # into the summary.
+  concept:apex-trigger-per-object-multiplicity:
+    kind: automation-collision
+    label: Multiple active Apex triggers on one object run in an undefined order
+    summary: 'When an object has TWO OR MORE ACTIVE Apex triggers, Salesforce does NOT guarantee the order in which they run: their relative execution order is undefined and can change between releases, so one trigger can silently depend on — or undo — the work of another, and the automation on that object becomes hard to reason about and maintain. The widely-recommended pattern is ONE trigger per object that delegates to a handler class, precisely so ordering is explicit and controlled. The honest signal is a COUNT of ACTIVE trigger definitions on the object — an inactive trigger is a dead metadata row that never runs, so it is never counted. This names the multiplicity STRUCTURALLY from the object''s own active trigger definitions. HONEST BOUNDARIES: it does NOT assert the triggers actually CONFLICT at runtime — they may fire on disjoint events or touch disjoint fields — only that their relative order is undefined; and a trigger belonging to a managed package may not be changeable, so consolidation is not always possible.'
+    docs:
+      - label: Apex Developer Guide — Triggers and Order of Execution
+        url: https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_triggers_order_of_execution.htm
+  # ARC-2 #2 — role-associated-object-access-level (kind `access-mechanism`,
+  # REUSED from the closed ConceptKind union — the same kind that houses the OWD /
+  # apex-sharing / view-modify-all access concepts; no new kind invented).
+  # Grounded on the Role extractor's three always-key-present nullable-string
+  # properties `caseAccessLevel` / `contactAccessLevel` / `opportunityAccessLevel`
+  # (each via `optionalString` — extractors/src/role.ts:188-190), so per-value node
+  # rules are pure-YAML expressible with no extractor / engine change. This concept
+  # is DISTINCT from owd-sharing-posture (which keys a CustomObject's own
+  # `sharingModel`) and from view-modify-all (a permission-set/profile object grant):
+  # it keys a ROLE's own associated-object grant, a different property on a different
+  # node type. ORG-INDEPENDENT general Salesforce truth only — NO vault counts in the
+  # summary. `docs` omitted deliberately rather than guess a help-article URL.
+  concept:role-associated-object-access-level:
+    kind: access-mechanism
+    label: A role's associated-object access level grants child (Contact / Case / Opportunity) access independent of the child OWD
+    summary: 'Each role in the role hierarchy carries three ASSOCIATED-OBJECT access levels — for Contacts, Cases, and Opportunities — that decide whether users assigned that role can reach the CHILD records (contacts, cases, opportunities) associated with an Account they can already access, SEPARATELY from those child objects'' own organization-wide default. A role surfaces one of these settings only when the relevant object''s OWD is more restrictive than Public Read/Write. The values: `Read` grants read-only access and `Edit` grants read/write access to those associated records regardless of a restrictive child OWD; `ControlledByParent` makes the child''s access simply follow the parent Account (available for Contact ONLY — Contact OWD can itself be Controlled by Parent; `caseAccessLevel` and `opportunityAccessLevel` admit only Read / Edit / None, so Case and Opportunity have no Controlled-by-Parent role option); `None` (or an absent setting) grants nothing and is not asserted. This is the role-level DECLARED grant read from the role''s own metadata; it names the access a role confers on an associated object, NOT which specific records a specific user actually sees — record-level state (record ownership, manual shares, teams, and the role hierarchy itself) is not held by the offline vault, so per-record visibility cannot be determined offline. The full per-user access cascade is answered by the dedicated why-can-a-user-see-a-record tool.'
+  # ARC-2 #9 — restriction-rule-narrows-below-sharing (kind `access-mechanism`,
+  # REUSED from the closed union). The SUBTRACTIVE counterpart to every WIDENING
+  # sharing concept, and the case owd-sharing-posture explicitly defers.
+  # GROUNDING CONFIRMED: the candidate proposal's "not grounded" self-claim was
+  # FALSE — `extractRestrictionRule` (enterprise-metadata.ts:1625, registered in
+  # index.ts) DOES emit a RestrictionRule node carrying an `active` extra-property
+  # (a STRING `'true'`/`'false'`, omitted when absent — extractEnterpriseMetadata's
+  # `extraPropertiesBlock` is Record<string,string>) plus a declared
+  # `CustomObject --parentOf--> RestrictionRule` edge (parentEdge:true) that anchors
+  # the rule to its restricted object. ORG-INDEPENDENT general Salesforce truth only.
+  concept:restriction-rule-narrows-below-sharing:
+    kind: access-mechanism
+    label: An active restriction rule is the only declarative way to NARROW access below the sharing model
+    summary: 'A RESTRICTION RULE is the one declarative Salesforce mechanism that NARROWS record access BELOW what the organization-wide default, sharing rules, the role hierarchy, and manual / Apex shares would otherwise grant. When active, it filters the set of records the users it targets can see on the restricted object down to ONLY the records matching its criteria — so records that broader sharing would otherwise expose become invisible. Every OTHER declarative sharing mechanism (the OWD baseline, sharing rules, the role hierarchy, teams) only ever WIDENS access; a restriction rule is the SOLE subtractive one. Its presence therefore changes how every other sharing conclusion on that object must be read: an object that looks broadly readable from its OWD and sharing rules may still be narrowed by an active restriction rule to a much smaller record set. This is grounded from the rule''s own declared `active` flag on the RestrictionRule metadata; it names the DECLARED narrowing mechanism, not which specific records a specific user ends up seeing — the record filter is evaluated against live record and user-context values the offline vault does not hold, so per-record visibility cannot be determined offline. An INACTIVE restriction rule narrows nothing and is deliberately not asserted.'
+  # ARC-2 #12 — role-hierarchy-grant-inheritance (kind `access-mechanism`, REUSED).
+  # Grounded on the Role extractor's `inheritsFrom` EDGE (Role --inheritsFrom-->
+  # parentRole, `declared`, emitted only when `<parentRole>` is present —
+  # extractors/src/role.ts:201-213). No shipped concept uses `inheritsFrom`. The
+  # TRANSITIVE up-the-chain mechanism lives in THIS summary; each grounded rule row
+  # names only the IMMEDIATE parent/child hop (a single `inheritsFrom` link).
+  # ORG-INDEPENDENT general Salesforce truth only.
+  concept:role-hierarchy-grant-inheritance:
+    kind: access-mechanism
+    label: A parent role inherits record access from the roles below it in the hierarchy
+    summary: 'The Salesforce ROLE HIERARCHY grants record access UPWARD: a user in a PARENT role automatically gains access to the records owned by (or shared with) users in the roles BELOW them in the hierarchy. This is a standing, declarative access path that is active for a given object only when that object''s organization-wide default is more restrictive than Public Read/Write AND its "Grant Access Using Hierarchies" setting is on (on by default for standard objects; optional for custom objects). The grant is TRANSITIVE up the whole chain — a role near the top inherits access from every role beneath it, not just its immediate children — but it is GROUNDED one hop at a time from each role''s own declared parent link (`inheritsFrom`, a role to its immediate parent role). So a single grounded link names only the IMMEDIATE parent/child relationship; the full transitive reach is this hierarchy mechanism as described here, not a per-link claim. Whether the hierarchy actually confers access on a specific object still depends on that object''s OWD and its Grant-Access-Using-Hierarchies setting, and which specific records a specific user sees is record-level state the offline vault does not hold — so this names the inheritance STRUCTURE, not a proven object-specific or per-record grant.'
+  # ARC-2 #13 — network-guest-and-selfreg-exposure-posture (kind `access-mechanism`,
+  # REUSED). Grounded on the Network extractor's four always-key-present nullable
+  # booleans `selfRegistration` / `enableGuestFileAccess` / `enableGuestChatter` /
+  # `enableGuestMemberVisibility` (each via `optionalBoolean` — extractors/src/
+  # network.ts:190-194), so per-switch node rules are pure-YAML expressible with no
+  # extractor / engine change. `allowInternalUserLogin` is DROPPED — it governs
+  # INTERNAL user login, not unauthenticated guest exposure. ORG-INDEPENDENT general
+  # Salesforce truth only.
+  concept:network-guest-and-selfreg-exposure-posture:
+    kind: access-mechanism
+    label: Community self-registration and guest switches set an unauthenticated-exposure posture
+    summary: 'An Experience Cloud site''s SELF-REGISTRATION and GUEST-ACCESS switches define its UNAUTHENTICATED-EXPOSURE posture — how open the community is before any record-level sharing applies. `selfRegistration` ON lets anyone on the internet create an authenticated account for the site (a self-service login), turning anonymous visitors into authenticated users. The GUEST switches each widen what an ANONYMOUS (unauthenticated) visitor can reach: `enableGuestFileAccess` lets the guest user reach files / assets, `enableGuestChatter` exposes Chatter to the guest user, and `enableGuestMemberVisibility` lets the guest user see other members of the community. Each is a DECLARED site-level toggle read from the Network metadata; together they establish HOW open the site is, NOT the specific records or data any guest can actually see — guest record access is governed separately by the guest user''s profile, guest sharing rules, and object / field permissions, all record-level state the offline vault does not hold. This posture is asserted only for a switch that is ON; an OFF or absent switch conveys no exposure and is not asserted. The separate `allowInternalUserLogin` switch concerns INTERNAL user login, not guest exposure, and is deliberately not part of this concept.'
+  # ARC-2 A12 — flow-fault-path-rollback-gap (roadmap A12 / backlog CAP-D). A NODE
+  # concept, kind `save-order-phase` REUSED from the closed ConceptKind union (the
+  # same kind concept:save-order / workflow-field-update-partial-resave carries — A12
+  # does NOT invent a kind). This names the SYNCHRONOUS-save-transaction rollback
+  # semantics of an unhandled fault, so it belongs to the save-order/transaction
+  # domain, NOT `async-boundary` (its async twin
+  # concept:flow-scheduled-path-post-commit-fault carries async-boundary precisely
+  # because THAT concept is about the async path; A12 is the SYNCHRONOUS,
+  # in-transaction side and is gated to non-async flows). Grounded on THREE
+  # always-present Flow node properties, so the multi-clause AND-array node rule is
+  # pure-YAML expressible with no extractor / engine change (VERIFIED: the engine's
+  # `matchesWhere` ANDs each clause via `clauseHolds`, which handles an `in` operator
+  # mixed with `equals` clauses — reason.ts:415-453; the compiler's `assertBind`
+  # validates each AND-array element via `assertWhereClause`, which accepts `in` —
+  # build-concept-model.mjs:832-847):
+  #   - `hasUnhandledFaults` (boolean, flow.ts:1985 ← analyzeFaultCoverage flow.ts
+  #     :1744-1764 → `elementsWithoutFault > 0`) gates to flows with >=1 faultable
+  #     element (DML / actionCall) carrying NO `<faultConnector>`;
+  #   - `triggerType` (nullable scalar, flow.ts:1954) `in [RecordBeforeSave,
+  #     RecordAfterSave]` gates to the two SYNCHRONOUS save timings (before/after-
+  #     save), EXCLUDING RecordBeforeDelete (a delete-path trigger — a different
+  #     transaction than "the save") and every non-record trigger;
+  #   - `runAsyncAfterCommit` (always-present boolean, flow.ts:1968, default false at
+  #     flow.ts:245) `equals false` EXCLUDES any flow carrying an immediately-after-
+  #     commit async scheduled path, so a matched flow is PURELY synchronous and any
+  #     unhandled fault is necessarily on a sync path that rolls back the save.
+  # The three clauses TOGETHER make the "rolls back the entire triggering save"
+  # claim TRUE by construction. ORG-INDEPENDENT general Salesforce truth only — NO
+  # vault counts baked into the summary.
+  concept:flow-fault-path-rollback-gap:
+    kind: save-order-phase
+    label: A synchronous record-triggered flow's unhandled fault rolls back the entire save
+    summary: 'A SYNCHRONOUS record-triggered flow — one that runs on the before-save or after-save path INSIDE the triggering save transaction, NOT on an immediately-after-commit asynchronous scheduled path — that has one or more UNHANDLED fault paths will, on a fault, ROLL BACK THE ENTIRE triggering save. An unhandled fault path is a faultable element (a record create / update / delete / lookup, or an action / Apex call) that carries no fault connector, so a runtime error on it has nowhere to go. Because the flow runs within the save transaction, that error is NOT isolated: it propagates up and the whole all-or-nothing save transaction — the user''s own DML plus every other synchronous automation running on that save — is rolled back, and the user is shown an unhandled-exception error. This is UNLIKE an ASYNC path (an immediately-after-commit scheduled path, a platform-event-triggered flow, or a scheduled flow), whose fault fires in a SEPARATE transaction AFTER the save has already committed and therefore CANNOT roll the save back. Adding a fault connector that catches the error (or routes it down a handled fault path) is what keeps a recoverable failure from taking down the entire save. This is grounded from the flow''s own declared trigger timing and the extractor''s fault-coverage analysis of its faultable elements; it names the STRUCTURAL rollback exposure, not a proven runtime failure on any specific record. HONEST BOUNDARIES: it does NOT assert that any element actually faults on a given save — whether a specific DML or callout errors is record- and runtime-dependent state the offline vault does not hold — only that IF one does, the save is rolled back; "unhandled" means a faultable element carries no fault connector as the extractor reads the flow structure, so an error otherwise contained by a construct the parser does not model could be missed; and it deliberately scopes to the synchronous SAVE timings, so a before-delete flow (a different transaction) and any async path are not asserted here.'
+    docs:
+      - label: Salesforce Help — Flow Fault Paths and Error Handling
+        url: https://help.salesforce.com/s/articleView?id=sf.flow_ref_elements_faultconnectors.htm
+      - label: Apex Developer Guide — Triggers and Order of Execution
+        url: https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_triggers_order_of_execution.htm
+  # APEX CODE-QUALITY BATCH #2 — apex-soql-injection-surface (kind
+  # `code-quality-defect`, a NEW ConceptKind added in this batch's commit 1). The
+  # FIRST concept to consume the `anyElement` existential array-element operator:
+  # it reads the ApexClass extractor's always-present `qualityIssues` array
+  # (apex-class.ts:326,357 — an array of `{rule, severity, location,
+  # confidence:'heuristic'}` produced by detectCodeQualityIssues; the element shape
+  # is code-quality-patterns.ts:102-106) and HOLDS iff SOME element's
+  # `rule === 'soql-injection'` (rule name grounded at code-quality-patterns.ts:1303).
+  # HEURISTIC by construction — the recognizer pattern-matches TOKENIZED Apex, NOT a
+  # compiler AST, so a custom sanitization utility, a cross-method/dynamic query, or
+  # reflective access is invisible (it can both miss real injection and flag a safe
+  # query). ApexTrigger is in the rule's componentTypes for forward-compat, but the
+  # extractor does NOT emit qualityIssues onto ApexTrigger nodes today
+  # (apex-trigger.ts:270 emits only `events`), so the clause fires on ApexClass in
+  # practice. ORG-INDEPENDENT general Salesforce truth only — NO vault counts.
+  concept:apex-soql-injection-surface:
+    kind: code-quality-defect
+    severity: high
+    label: A recognized SOQL-injection risk pattern in Apex (an unsanitized dynamic query)
+    summary: 'A component carries a RECOGNIZED SOQL-injection risk pattern — the code-quality recognizer saw an unsanitized value appear to reach a DYNAMIC SOQL query (query text assembled by string concatenation rather than a bound bind variable or an escaped value). Untrusted input concatenated into a dynamic query can let a caller alter the query''s meaning and reach records the query never intended. This is a HEURISTIC recognition from TOKENIZED Apex source — NOT a compiler AST, and NOT a proven vulnerability: whether the concatenated value is actually caller-controllable, and whether it is bound or escaped, is a code question a human must confirm (string-concatenated SOQL versus a bind variable or String.escapeSingleQuotes). Because the recognizer matches tokens, a custom sanitization helper, a query assembled across methods or classes, and reflective access are all invisible to it — so it can both MISS a real injection and FLAG a query that is actually safe. It names a review candidate, not an exploit.'
+    docs:
+      - label: Apex Developer Guide — SOQL Injection
+        url: https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/pages_security_tips_soql_injection.htm
+  # APEX CODE-QUALITY BATCH #3 — apex-bulkification-gap (kind
+  # `code-quality-defect`). anyElement over the ApexClass `qualityIssues` array,
+  # `in: [soql-in-loop, dml-in-loop]` (rule names grounded code-quality-patterns.ts:
+  # 438 / 473). Same HEURISTIC recognizer family as #2 — one existential clause with
+  # an `in` set covers BOTH loop-anti-pattern rules in a single rule. ORG-INDEPENDENT
+  # general Salesforce truth only — NO vault counts in the summary.
+  concept:apex-bulkification-gap:
+    kind: code-quality-defect
+    label: A SOQL query or DML statement inside a loop — a governor-limit (bulkification) risk
+    summary: 'A component runs a SOQL query or a DML statement INSIDE a loop — the classic Salesforce bulkification anti-pattern. Apex enforces per-transaction governor limits (SOQL queries and DML statements are each capped per transaction), so a query or DML placed inside a loop scales its consumption with the number of iterations: under a bulk load — a data import, an API batch, or a trigger processing many records at once — the loop can exceed the per-transaction limit and throw a LimitException that fails the whole operation. The bulkification fix is to pull the query or DML OUT of the loop: query once into a collection before the loop, and collect records into a list to insert or update once after it. This is a HEURISTIC recognition from TOKENIZED Apex source — NOT a compiler AST: the recognizer sees a query or DML token lexically inside a loop construct, so it can MISS a query hidden behind a helper method it cannot follow, and can FLAG a loop that in practice runs a bounded, tiny number of times. It names a governor-risk review candidate, not a proven runtime limit failure.'
+    docs:
+      - label: Apex Developer Guide — Running Apex within Governor Execution Limits
+        url: https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_gov_limits.htm
+  # APEX CODE-QUALITY BATCH #4 — apex-hardcoded-org-specific-literal (kind
+  # `code-quality-defect`). anyElement over the ApexClass `qualityIssues` array,
+  # `in: [hardcoded-id, hardcoded-username, hardcoded-url]` (rule names grounded
+  # code-quality-patterns.ts:543 / 600 / 661). HEURISTIC recognizer family; one
+  # existential clause covers all three org-portability literals. ORG-INDEPENDENT
+  # general Salesforce truth only — NO vault counts in the summary.
+  concept:apex-hardcoded-org-specific-literal:
+    kind: code-quality-defect
+    label: A hardcoded org-specific literal in Apex (record Id / username / endpoint URL)
+    summary: 'A component hardcodes an ORG-SPECIFIC literal — a Salesforce record Id, a username, or an endpoint URL — directly in Apex source. Such literals are org- and environment-specific: a record Id, a user''s username, and a service endpoint URL all differ between production and each sandbox (and between one customer org and another), so code that embeds one works only in the org it was written against and silently BREAKS — or, worse, points at the wrong record or system — when deployed elsewhere or when the referenced record is deleted and recreated. The durable fix is to externalize the value so it moves with configuration rather than code: a Custom Metadata Type or Custom Setting record for ids and usernames, and a Named Credential (or a Custom Metadata record) for endpoint URLs. This is a HEURISTIC recognition from TOKENIZED Apex source — NOT a compiler AST: the recognizer matches literals that LOOK like an id, a username, or a URL, so it can FLAG a benign constant or a value that is deliberately environment-agnostic, and can MISS a value assembled at runtime. It names a portability review candidate, not a proven defect.'
+    docs:
+      - label: Salesforce Help — Custom Metadata Types
+        url: https://help.salesforce.com/s/articleView?id=sf.custommetadatatypes_about.htm
+  # APEX CODE-QUALITY BATCH #5 — apex-crud-fls-unenforced (kind `access-mechanism` —
+  # the EXISTING ConceptKind, REUSED from the closed union; NOT a code-quality-defect,
+  # because this concept fills the object-CRUD / field-level-security PLANE that the
+  # shipped apex-sharing-mode and external-api-surface concepts EXPLICITLY disclaim
+  # ["Field-level security and object CRUD are a SEPARATE concern"]). anyElement over
+  # the ApexClass `qualityIssues` array, `in: [missing-crud-check, missing-fls-check]`
+  # (rule names grounded code-quality-patterns.ts:1012 / 1100). Still a HEURISTIC
+  # recognizer signal — a custom security-utility helper is invisible to the tokenized
+  # recognizer, so the claim keeps the heuristic caveat verbatim. ORG-INDEPENDENT
+  # general Salesforce truth only — NO vault counts in the summary.
+  concept:apex-crud-fls-unenforced:
+    kind: access-mechanism
+    label: An Apex path performs a database operation without enforcing object CRUD or field-level security
+    summary: 'An Apex class has a recognized path that performs a database operation WITHOUT first enforcing the running user''s object CRUD (create / read / update / delete) permission or field-level security (FLS). Apex runs in system context and does NOT automatically enforce object CRUD or field-level security on its SOQL and DML — a class must enforce them itself (a WITH SECURITY_ENFORCED clause on a query, Security.stripInaccessible, user-mode database operations, or explicit describe-based permission checks). Where that enforcement is absent, the class can read or write objects and fields regardless of whether the running user is permitted to — surfacing data the user has no right to see, or writing fields they cannot edit. This is the object- and field-permission PLANE that the apex sharing-declaration and external-API-surface concepts explicitly leave to code: record-level SHARING governs which records are visible, whereas object CRUD and FLS govern which objects and fields the user may touch at all — a class can enforce one and not the other. This is a HEURISTIC recognition from TOKENIZED Apex source — NOT a compiler AST: a custom security-utility helper, an enforcement performed in a method the recognizer cannot follow, or a check written in a form it does not model are all INVISIBLE to it, so it can FLAG a class that is actually enforcing CRUD/FLS through a helper and can MISS a genuine gap. It names an access-control review candidate, not a proven authorization bypass.'
+    docs:
+      - label: Apex Developer Guide — Enforcing Object and Field Permissions
+        url: https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_classes_perms_enforcing.htm
+  # APEX CODE-QUALITY BATCH #6 — apex-async-amplified-governor-risk (kind
+  # `async-boundary`, REUSED from the closed union — the same kind the shipped
+  # async-boundary class-marker rules carry). A COMPOUND concept: it fires only where
+  # an async ENTRY POINT (Queueable OR Batch) COMPOSES with a loop-based SOQL/DML gap,
+  # making the interaction explicit. Bound by TWO rules (the isBatchable / isQueueable
+  # OR — whereProperty AND-arrays cannot express OR across two different keys, so the
+  # OR is two rules on the same concept, exactly as apex-sharing-mode uses two rules).
+  # Each rule AND-arrays three clauses: [{isBatchable|isQueueable equals true},
+  # {isTest equals false}, {qualityIssues anyElement {rule in [soql-in-loop,
+  # dml-in-loop]}}]. GROUNDING CONFIRMED: isBatchable (apex-class.ts:276,350),
+  # isQueueable (apex-class.ts:271,348), isTest (apex-class.ts:347, always-present from
+  # header.isTest) are all unconditionally-present ApexClass booleans; the loop rule
+  # names are code-quality-patterns.ts:438 / 473. HEURISTIC composite — the async
+  # structure is declared, but the loop gap is a tokenized-recognizer signal, so the
+  # combined claim is heuristic. ORG-INDEPENDENT general Salesforce truth only — NO
+  # vault counts in the summary.
+  concept:apex-async-amplified-governor-risk:
+    kind: async-boundary
+    label: An async (Queueable / Batch) class with an in-loop SOQL/DML gap — governor risk amplified at async scale
+    summary: 'An asynchronous Apex entry point — a Queueable or Batch Apex class — ALSO carries a loop-based SOQL/DML governor-limit gap (a query or DML statement inside a loop). Async Apex runs in a SEPARATE transaction with a FRESH set of governor limits, and it is the mechanism organizations reach for precisely to process HIGH VOLUMES of records, so the in-loop query/DML anti-pattern is AMPLIFIED here: Batch Apex hands each execute a large record scope, and a Queueable is often chained to grind through big data sets, so a query or DML inside a loop that might survive a small synchronous save can exceed the fresh per-transaction limit at async scale and fail the job — often outside the user''s own transaction, where the failure is easy to miss. The two facts COMPOSE: the class is structurally async (its own Queueable / Batch interface, a declared-tier fact) AND its tokenized source shows a loop-based SOQL/DML pattern. Because the loop gap is a HEURISTIC recognition from TOKENIZED source — NOT a compiler AST — the composite claim is HEURISTIC: the recognizer can MISS a query behind a helper method and can FLAG a loop that is bounded in practice. Test classes are excluded, because a test''s async work is not a production execution path. It names an amplified-governor-risk review candidate, not a proven runtime limit failure.'
+    docs:
+      - label: Apex Developer Guide — Asynchronous Apex
+        url: https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_async.htm
+  # APEX CODE-QUALITY BATCH #7 — test-class-without-assertions (kind `test-quality`, a
+  # NEW ConceptKind added in this batch's commit 1). A SCALAR AND-array (NO anyElement
+  # — both clauses read scalar properties): [{isTest equals true}, {assertionCount
+  # equals 0}]. GROUNDING CONFIRMED: `isTest` is the unconditionally-present ApexClass
+  # boolean (apex-class.ts:347); `assertionCount` is an int the extractor sets ON TEST
+  # CLASSES (apex-class.ts:368 → countAssertions(source), a `number` per
+  # code-quality-patterns.ts:170) — present whenever isTest, so the two clauses are
+  # consistent (both gate to a test class). `maxConfidence: parsed` — assertionCount is
+  # a PARSED count of assert call-sites (not the heuristic tokenized-recognizer tier),
+  # and isTest is declared; a node match carries no edge, so weakest() keeps the parsed
+  # ceiling. Real-vault probe (read-only, no refresh — test classes with
+  # `assertionCount: 0`): fires on 34 of 86 test ApexClasses in this org. ORG-INDEPENDENT
+  # general Salesforce truth only — NO vault counts in the summary.
+  concept:test-class-without-assertions:
+    kind: test-quality
+    label: A test class with zero assertion call-sites inflates coverage without verifying anything
+    summary: 'A test class (annotated @IsTest) contains ZERO assertion call-sites in its own body — no System.assert / System.assertEquals / System.assertNotEquals, and no Assert-class method (Assert.areEqual and its siblings). A test with no assertions still EXECUTES the code under test, so it still counts toward the org''s Apex code-coverage percentage — but it verifies NOTHING: it can only fail if the code under test throws an uncaught exception, never because a computed value was wrong. So it inflates the coverage number while providing no real regression protection, and it can mask a genuine defect behind a green run. This is grounded from the class''s own @IsTest marker and a PARSED count of assertion call-sites in its source. HONEST BOUNDARY: the count is of assertions IN THIS CLASS''S OWN BODY — an assertion made inside a shared helper method or a common test-utility class the test calls is INVISIBLE to this count, so a zero here is a STRONG SMELL, not proof the test verifies nothing; a class that delegates all its checks to a shared assertion helper would show zero yet still assert. Read the test before concluding it is assertion-free.'
+    docs:
+      - label: Apex Developer Guide — Testing Best Practices
+        url: https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_testing_best_practices.htm
+  # ARC-2 — apex-trigger-before/after-phases (orchestrator-dispatched Arc-2 concept,
+  # BUILDER-TICK.md; pure-YAML `anyElement` scalar-array over `events`). A NODE
+  # concept, kind `save-order-phase` REUSED from the closed ConceptKind union (the
+  # same kind `concept:save-order` and `concept:workflow-field-update-partial-resave`
+  # carry — a before/after trigger IS a phase of the Salesforce order of execution,
+  # so this does NOT invent a kind). Grounded on the ApexTrigger extractor's
+  # always-present `events` string-array node property (apex-trigger.ts:329 —
+  # `events: header.events`, the DECLARED trigger events parsed from the trigger
+  # header; the header-parser validates each against the seven canonical Apex events
+  # so the array holds ONLY `before insert|update|delete` and `after
+  # insert|update|delete|undelete`, and a trigger whose header cannot parse emits NO
+  # node at all — apex-trigger.ts:240-244 — so there is no empty-events node to
+  # mis-fire on). The `anyElement` existential scalar-array operator (CAP-A/CAP-B,
+  # already shipped — the code-quality qualityIssues rules use its object-element
+  # mode) makes two pure-YAML node rules expressible with NO extractor / engine
+  # change. ORG-INDEPENDENT general Salesforce truth only — NO vault counts baked into
+  # the summary. Platform-event triggers (`__e` targets, isPlatformEventSubscriber
+  # true) are EXCLUDED by a scalar AND-clause: they run async in a separate
+  # transaction and do NOT participate in a record's before/after save order, so the
+  # save-order-phase framing does not fit them; they are covered by
+  # `concept:apex-trigger-platform-event-async` (disjoint concern, no double-claim).
+  concept:apex-trigger-before-after-phases:
+    kind: save-order-phase
+    label: An Apex trigger's declared events place its handler logic in the before-save and/or after-save phase
+    summary: 'An Apex trigger declares the DML EVENTS it runs on, and each event names one of two phases of the Salesforce order of execution: a BEFORE-phase event (before insert, before update, before delete) runs the trigger BEFORE the record is committed in that save, and an AFTER-phase event (after insert, after update, after delete, after undelete) runs it AFTER the record has been written to the database in that save. The phase decides what the handler can do. In a BEFORE trigger the records in Trigger.new are still MUTABLE: the handler can change their field values in place — directly, with no additional DML — and those changes are saved as part of the same transaction; the record does not yet carry its final system-populated state (on a before-insert it has no Id yet, and formula and auto-number values are not yet final). In an AFTER trigger the records are READ-ONLY: assigning to a field on an after-context record throws, so changing that record or any related record requires an EXPLICIT DML statement, and the system-populated fields — the Id on insert, audit fields, roll-up and formula recalculations — ARE available to read. A single trigger can declare BOTH before- and after-phase events, in which case it genuinely runs logic in both phases, and each phase is asserted separately rather than as one exclusive label. This names the DECLARED phase from the trigger''s own event list — general Salesforce order-of-execution behavior — NOT what the handler code actually does inside that phase (whether it in fact modifies a field or issues DML is a code question this does not read), and NOT the trigger''s order relative to OTHER automation on the object (multiple triggers on one object run in an undefined relative order — a separate concern); confirm the full save order with the order-of-execution tools. Platform-event triggers (whose target object is an event) are outside this scope: they run asynchronously in a separate transaction and do not participate in a record''s before/after save order.'
+    docs:
+      - label: Apex Developer Guide — Triggers and Order of Execution
+        url: https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_triggers_order_of_execution.htm
+  # FLEET-CONCEPTS6 C2 — connected-app-oauth-scope-exposure. A NODE concept, kind
+  # `access-mechanism` REUSED from the closed ConceptKind union (the same kind the
+  # shipped owd-sharing-posture / apex-sharing-mode / view-modify-all access
+  # concepts use — this does NOT invent a kind). Grounded on the ConnectedApp
+  # extractor's always-present `scopes` string array (connected-app.ts:219 —
+  # `scopes: oauth?.scopes ?? []`, an EMPTY array when the app exposes no OAuth
+  # surface), so a scalar-array `anyElement {in: [...]}` node rule (the SAME shape
+  # the shipped apex-trigger before/after-phase rules use over `events`) is
+  # pure-YAML expressible with no extractor / engine change. The scope enum tokens
+  # are read VERBATIM from the `<scopes>` metadata (Full / Api / RefreshToken are
+  # canonical Salesforce OAuth-scope values). ORG-INDEPENDENT general Salesforce
+  # truth only — NO vault counts baked into the summary. Names only the DECLARED
+  # broad-scope grant, never a proven misuse.
+  concept:connected-app-oauth-scope-exposure:
+    kind: access-mechanism
+    label: A connected app granted a broad OAuth scope can act widely on an authorizing user's behalf
+    summary: 'A connected app''s OAuth SCOPES declare what an authorized integration may do with the access token a user grants it. A BROAD scope widens that reach: `Full` (full access) allows access to ALL data the authorizing user can access and encompasses every other scope except the offline/refresh-token scope; `Api` lets the integration read and write the user''s data through the Salesforce APIs (REST / SOAP / Bulk); and `RefreshToken` (offline access) issues a long-lived refresh token so the integration can mint new access tokens and keep acting WITHOUT the user being present. So an app carrying one of these scopes is an integration and security surface worth reviewing — a compromised or over-privileged client can reach broadly, and a refresh token extends that reach over time. This is grounded from the app''s own DECLARED `scopes` metadata; it names the DECLARED scope grant, NOT a proven misuse. HONEST BOUNDARIES: a scope can never exceed what the authorizing user is themselves permitted to do (the token acts within that user''s own object CRUD, field-level security, and record sharing); WHO authorized the app, how the token is stored, and whether the app is actively used are runtime facts the offline vault does not hold; and a broad scope may be entirely intentional for a trusted backend integration.'
+    docs:
+      - label: Salesforce Help — OAuth Tokens and Scopes
+        url: https://help.salesforce.com/s/articleView?id=sf.remoteaccess_oauth_tokens_scopes.htm
+  # FLEET-CONCEPTS6 L2 — apex-swallowed-exception. kind `code-quality-defect`
+  # (existing closed-union kind — the same kind the shipped soql-injection-surface
+  # / bulkification-gap / hardcoded-literal concepts use). Byte-identical rule
+  # shape to soql-injection-surface: an `anyElement {key: rule, equals:
+  # swallowed-exception}` existential over the ApexClass always-present
+  # `qualityIssues` array (recognizer detectSwallowedException, rule name grounded
+  # code-quality-patterns.ts:1575, run in detectCodeQualityIssues:1628). The
+  # recognizer flags a `catch (...)` block that is EMPTY or ONLY logs
+  # (System.debug / Logger.*). HEURISTIC by construction — it pattern-matches
+  # TOKENIZED Apex, not a compiler AST. ORG-INDEPENDENT — NO vault counts.
+  concept:apex-swallowed-exception:
+    kind: code-quality-defect
+    label: A recognized swallowed-exception pattern in Apex (a catch block that discards the error)
+    summary: 'A component carries a RECOGNIZED swallowed-exception pattern — the code-quality recognizer saw a `catch` block that is EMPTY, or that ONLY writes a debug log, and otherwise discards the caught exception without re-throwing it or taking a recovery action. Swallowing an exception hides a failure: the code continues as if nothing went wrong, so a genuine error — a failed DML, a callout timeout, a null dereference — passes silently, leaving records in an inconsistent state and (when the only trace is a transient debug log) nothing durable for whoever debugs it later. The durable fix is to re-throw as a user-facing exception, log to a persistent custom object, or take a meaningful recovery action so a failure surfaces rather than vanishing. This is a HEURISTIC recognition from TOKENIZED Apex source — NOT a compiler AST: because the recognizer only sees the SHAPE of the catch block, it can FLAG a catch that deliberately and correctly ignores an expected, benign exception, and can MISS a catch that handles the error through a custom logging or recovery utility it cannot follow. It names a review candidate, not a proven defect.'
+    docs:
+      - label: Apex Developer Guide — Exception Handling
+        url: https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_exceptions.htm
+  # FLEET-CONCEPTS6 L3 — apex-database-dml-no-partial-success. kind
+  # `code-quality-defect` (existing closed-union kind). Byte-identical shape to L2
+  # / soql-injection-surface: `anyElement {key: rule, equals:
+  # database-upsert-no-options}` over the ApexClass `qualityIssues` array
+  # (recognizer detectDatabaseUpsertNoOptions, rule name grounded
+  # code-quality-patterns.ts:1415 — flags a `Database.upsert(x)` call with a SINGLE
+  # argument, no allOrNone flag and no UpsertOptions). HEURISTIC — tokenized-source
+  # recognition. ORG-INDEPENDENT — NO vault counts.
+  concept:apex-database-dml-no-partial-success:
+    kind: code-quality-defect
+    label: A single-argument Database.upsert in Apex runs all-or-nothing with no partial-success handling
+    summary: 'A component calls `Database.upsert` with a SINGLE argument — no `allOrNone` flag and no `UpsertOptions`. The `Database.*` DML methods exist precisely to opt INTO partial success (passing `false` lets the good rows commit while the bad rows fail, and the returned `Database.SaveResult`/`UpsertResult` array reports each row''s outcome), but with no option argument the call DEFAULTS to all-or-nothing: a SINGLE bad row throws a DmlException and rolls back the ENTIRE batch, and because the result array is not inspected there is no per-row error handling. Under a bulk load that means one malformed record can fail the whole operation with no graceful degradation. The fix is to pass the `allOrNone=false` argument and inspect the returned SaveResult/UpsertResult to handle partial failures explicitly (or to keep all-or-nothing deliberately, with the exception handled). This is a HEURISTIC recognition from TOKENIZED Apex source — NOT a compiler AST: it can FLAG a call where all-or-nothing is the intended, correct behavior, and it recognizes only the `Database.upsert` shape, so a single-argument `Database.insert`/`update` or a bare DML statement is not what this particular signal names. It names a partial-failure-handling review candidate, not a proven defect.'
+    docs:
+      - label: Apex Developer Guide — Bulk DML Exception Handling
+        url: https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/langCon_apex_dml_bulk_exceptions.htm
+  # FLEET-CONCEPTS6 L6 — apex-outdated-api-version. kind `code-quality-defect`
+  # (existing closed-union kind). Byte-identical shape to L2/L3: `anyElement {key:
+  # rule, equals: old-api-version}` over the ApexClass `qualityIssues` array
+  # (recognizer detectOldApiVersion, rule name grounded code-quality-patterns.ts:
+  # 1373 — flags an ApexClass whose apiVersion is below 50.0). HEURISTIC / low
+  # severity — an upgrade-readiness signal, NOT a runtime bug (the recognizer's own
+  # explanation says so). ORG-INDEPENDENT — NO vault counts.
+  concept:apex-outdated-api-version:
+    kind: code-quality-defect
+    label: An Apex class pinned to an old API version is an upgrade-readiness signal, not a runtime bug
+    summary: 'A component is pinned to an OUTDATED Salesforce API version (the recognizer flags an apiVersion below 50.0). Every Apex class and trigger declares the API/metadata version it was saved against, and that version pins its runtime behavior to that release''s semantics — so a class left on an old version does not automatically pick up newer platform behavior, and the further it drifts behind the current release the more an eventual upgrade must be reviewed and re-tested. This is an UPGRADE-READINESS signal, not a runtime defect: the class still runs correctly under its pinned version, so nothing is broken today; it simply flags technical debt — a component to bump to a current API version (and re-test) as part of routine maintenance. This is grounded from the class''s own DECLARED api version. HONEST BOUNDARY: an old api version alone says nothing about whether the code uses any version-specific behavior — bumping the version is usually safe but must still be tested, and being on an old version is not by itself evidence of any bug.'
+    docs:
+      - label: Apex Developer Guide — Understanding the API Version
+        url: https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_classes_version_settings.htm
+  # FLEET-CONCEPTS6 C14 — dependent-picklist-dependency-base. A NODE concept, kind
+  # `field-provenance` REUSED from the closed ConceptKind union — the same
+  # field-shaped kind that houses the shipped unique-field-constraint /
+  # external-id-field / isFormula concepts, which likewise reuse field-provenance
+  # for a field-level CONSTRAINT rather than strict value-provenance (so this does
+  # NOT invent a kind, and matches the established precedent). Grounded on the
+  # CustomField extractor's `controllingField` property (custom-field.ts:311,433 —
+  # a `string | null`; the KEY is emitted ONLY when the field is a dependent
+  # picklist carrying a `<controllingField>`, and OMITTED on every non-dependent
+  # field), so a `whereProperty {key: controllingField, isNull: false}` node rule
+  # is pure-YAML expressible with no extractor / engine change. `isNull: false`
+  # holds only for a PRESENT (non-null) value and REJECTS an absent key
+  # (reason.ts scalarOpHolds treats undefined as nullish — verified in
+  # reason.test.ts: `matchesWhere({}, {isNull:false})` is false), so the rule fires
+  # on a dependent picklist and stays silent on every other field. ORG-INDEPENDENT
+  # general Salesforce truth only — NO vault counts baked into the summary.
+  concept:dependent-picklist-dependency-base:
+    kind: field-provenance
+    label: A dependent picklist's available values are constrained by its controlling field
+    summary: 'A DEPENDENT PICKLIST is a picklist whose available values are constrained by a CONTROLLING field (another picklist, or a checkbox, on the same object): for each value of the controlling field, only a mapped subset of this field''s values is selectable. So this field cannot be reasoned about in isolation — its valid values depend on what the controlling field holds. That has two practical implications. On EDIT, changing the controlling field can leave this field holding a value no longer valid for the new controlling value, and the UI hides values that are not mapped. On any WRITE path — a Flow, an integration, an Apex assignment, or a data import — setting this field to a value that is not mapped to the current controlling-field value can be rejected (the dependency is validated on the standard UI and API save paths), so a writer must set a value consistent with the controlling field. This is grounded from the field''s own declared `controllingField` metadata; it names the DECLARED dependency (that this field HAS a controlling field), not the specific value-to-value mapping and not a proven outcome for any particular save. The exact allowed-value mapping and whether a given value is currently valid for a given controlling value are declared-metadata and record-level details this base concept does not assert.'
+    docs:
+      - label: Salesforce Help — Define Dependent Picklists
+        url: https://help.salesforce.com/s/articleView?id=sf.fields_defining_field_dependencies.htm
+  # FLEET-CONCEPTS6 B9 — flow-field-writer-collision. An AGGREGATE group-count
+  # concept, kind `automation-collision` REUSED from the closed ConceptKind union
+  # (the same kind the shipped stacked-flows / apex-trigger-per-object-multiplicity
+  # aggregates carry — this does NOT invent a kind). Rooted on a CustomField and
+  # counting the ACTIVE Flow firers that WRITE it. GROUNDING: the Flow extractor
+  # emits FIELD-level `writesTo` edges (Flow --writesTo--> CustomField, confidence
+  # `parsed` — flow.ts:1398-1405 and the recordCreate/recordUpdate inputAssignments
+  # edges, per flow.ts:609-625) and Flow nodes carry the always-present `status`
+  # scalar (the SAME `status==Active` filter stacked-flows uses on its firers).
+  # ENGINE CHECK (required): CustomField as an aggregate ROOT is ALREADY supported
+  # with NO engine change — interpret.ts assembles the slice by pulling every
+  # bound-type edge INCIDENT to the queried componentId in BOTH directions
+  # (interpret.ts:239-262) regardless of root type, and interpretAggregate's
+  # DEFAULT `edgeSource: root-incident` counts edges whose `toId === rootId`
+  # (reason.ts:957-958); since a field-level `writesTo` is Flow(from)->CustomField
+  # (to), the CustomField IS the edge target, so `root-incident` counts the Flow
+  # firers with no change to the engine or to any existing CustomObject-rooted
+  # aggregate. So B9 is PURE-YAML: `edgeType: writesTo`, `componentTypes: [Flow]`,
+  # `aggregate {endpointWhereProperty status==Active, countDistinctEndpoint from,
+  # op gte, threshold 2}`. `maxConfidence: parsed` — field-level writesTo edges are
+  # `parsed`, so weakest() keeps the parsed ceiling. ORG-INDEPENDENT general
+  # Salesforce truth only — NO vault counts baked into the summary.
+  concept:flow-field-writer-collision:
+    kind: automation-collision
+    label: A field written by two or more active flows is a last-writer-wins race
+    summary: 'When TWO OR MORE ACTIVE flows write the SAME field on an object, and they can run on the same save, the field is subject to a last-writer-wins race: Salesforce does not guarantee the order in which multiple record-triggered flows on one object run, so which flow''s value ends up in the field is undefined and can change between releases — one flow can silently overwrite what another just set. That makes the field''s final value hard to reason about and the automation hard to maintain, and it is a classic source of "the value keeps flipping" bugs. The honest signal is a COUNT of DISTINCT ACTIVE flows that write the field — an obsolete, draft, or inactive flow version is a dead metadata row that never runs, so it is never counted. The WRITING FLOWS are named as the thing to reconcile; the field is context, not a culprit. HONEST BOUNDARIES: this does NOT assert the flows actually collide at runtime — they may fire in different trigger contexts (before-save vs after-save), on different DML operations (insert vs update), or under mutually-exclusive entry conditions, so co-writing the field is a necessary but not sufficient condition for a real race; confirm the flows'' timings and entry criteria before concluding they contend. A managed-package flow may not be changeable. The write is grounded from the flow''s own parsed field assignments; a field written through a dynamically-built or reflective reference the parser cannot resolve is invisible to this count, so it can under-count, never cry wolf.'
+    docs:
+      - label: Salesforce Help — Flows and the Order of Execution
+        url: https://help.salesforce.com/s/articleView?id=sf.flow_concepts_trigger.htm
+  # ARC-2 A15 — object-crud-grant-layer (Wave 2). An EDGE concept, kind
+  # `access-mechanism` REUSED from the closed union. Grounded on the
+  # PermissionSet/Profile extractor's `grantedBy` edge to CustomObject carrying
+  # always-present boolean edge properties `allowCreate` / `allowRead` /
+  # `allowEdit` / `allowDelete` (permission-set.ts:126-129, profile.ts). FOUR
+  # equals-only edge rules (edgeWhereProperty is equals-only), same shape as
+  # view-modify-all object-grant rules but keyed on TABLE-level CRUD bits.
+  # Distinct from view-modify-all (record-scope bypass) and field-fls (column):
+  # object CRUD gates whether a user may create/read/edit/delete records of the
+  # object AT ALL — it does NOT override sharing (except View/Modify All, a
+  # separate grant) and does NOT bypass FLS. ORG-INDEPENDENT — NO vault counts.
+  concept:object-crud-grant-layer:
+    kind: access-mechanism
+    label: Object-level CRUD grants table access, not record scope or field columns
+    summary: 'Object-level CRUD — Create, Read, Edit, and Delete — is a TABLE-level permission: a permission set or profile declares, per object, whether a holder may create records, read records, edit records, or delete records of that object AT ALL. Each bit is a separate grant on the `grantedBy` edge to the object. This layer is ANDed with record-level sharing (org-wide default, sharing rules, role hierarchy, manual shares) and with field-level security — object Read does NOT mean every record is visible when sharing is Private, and object Edit does NOT mean every column is writable when FLS hides a field. View All Records and Modify All Records are a SEPARATE object-level grant that overrides record sharing; they are NOT asserted here. This is the DECLARED CRUD grant read from permission-set / profile metadata, NOT a proof that any specific user holds that permission set or profile (an assignment question the offline vault cannot answer) and NOT a proven per-user access outcome for a specific record. The dedicated user-ability and why-can-a-user-see-record tools compute the full per-user cascade including CRUD; this concept surfaces the table-level grant deterministically with citations through the reasoning engine.'
+    docs:
+      - label: Salesforce Help — Object Permissions
+        url: https://help.salesforce.com/s/articleView?id=sf.users_profiles_object_perms.htm
+  # ARC-2 A16 — apex-class-access-grant (Wave 2). An EDGE concept, kind
+  # `access-mechanism` REUSED. Grounded on PermissionSet/Profile
+  # --grantedBy--> ApexClass edges with `enabled: true` (permission-set.ts:168-178,
+  # profile.ts). ONE edge rule. Invoking an Apex entry point (@AuraEnabled,
+  # @RestResource, @InvocableMethod, or direct Apex execution) requires the
+  # running user to hold a permission set or profile that grants class access.
+  # ORG-INDEPENDENT — NO vault counts.
+  concept:apex-class-access-grant:
+    kind: access-mechanism
+    label: Apex class access must be granted before a user can invoke the class
+    summary: 'Apex CLASS ACCESS is a separate permission layer: a permission set or profile must explicitly grant access to an Apex class (`enabled: true` on the `grantedBy` edge) before a user who holds that permission set or profile can invoke that class — whether through a Lightning component (@AuraEnabled), a REST endpoint (@RestResource), a Flow action (@InvocableMethod), or scheduled/batch execution assigned to that user. Without the grant, the class is unreachable even if the user has broader object or system permissions. This is the DECLARED class-access grant read from permission-set / profile metadata, NOT a proof that any specific user holds that permission set or profile (an assignment question the offline vault cannot answer), NOT a proof that a particular method is the one exposed (the grant is CLASS-level), and NOT a substitute for sharing / FLS enforcement inside the class (those are separate concerns the class must enforce in code).'
+    docs:
+      - label: Salesforce Help — Set Apex Class Access from Permission Sets
+        url: https://help.salesforce.com/s/articleView?id=sf.perm_sets_apex_access.htm
+  # ARC-2 A17 — custom-permission-gating (Wave 2). An EDGE concept, kind
+  # `access-mechanism` REUSED. TWO rule shapes: (1) PermissionSet/Profile
+  # --grantedBy--> CustomPermission with `enabled: true` (permission-set.ts:211-222);
+  # (2) `references` edges to CustomPermission from formula gates ($Permission.X
+  # pattern — formula-references.ts). Custom permissions gate BEHAVIOR at runtime
+  # only when code or declarative conditions CHECK them; holding the grant and being
+  # referenced by a gate are separate grounded facts. ORG-INDEPENDENT.
+  concept:custom-permission-gating:
+    kind: access-mechanism
+    label: A custom permission gates behavior only when a checker tests for it
+    summary: 'A CUSTOM PERMISSION is a named boolean switch a permission set or profile can grant (`enabled: true` on a `grantedBy` edge) and that declarative conditions or Apex can TEST at runtime — typically via the `$Permission.{ApiName}` formula global in validation rules, flows, approval entry criteria, or Lightning page visibility rules (surfaced as a `references` edge to the CustomPermission definition). Granting the permission does NOT by itself change data access, object CRUD, or sharing — it only makes the named switch TRUE for users who hold a grantor that confers it. A `$Permission` reference in a condition means that automation or UI element BRANCHES on the custom permission — its behavior differs for holders versus non-holders — but the reference alone does NOT ground the DIRECTION: a positive `$Permission` in a validation-rule error formula BLOCKS holders, while `NOT($Permission…)` or `= false` exempts or hides the element from holders. Read the formula to see which side the gate favors (and the condition''s other criteria still apply). This is the DECLARED grant and/or reference read from metadata, NOT a proof that any specific user holds the permission (an assignment question), NOT an evaluation of whether the condition is currently true for a record, and NOT a claim about what business behavior the permission controls (that is org-specific naming only).'
+    docs:
+      - label: Salesforce Help — Custom Permissions
+        url: https://help.salesforce.com/s/articleView?id=sf.custom_perms_overview.htm
+  # ARC-2 A18 — external-service-requires-named-credential (Wave 2). An EDGE
+  # concept, kind `external-api-surface` REUSED (integration reachability surface).
+  # Grounded on ExternalService --references--> NamedCredential when
+  # `<namedCredential>` is set (external-service.ts:207-223). ONE edge rule.
+  # ORG-INDEPENDENT.
+  concept:external-service-requires-named-credential:
+    kind: external-api-surface
+    label: An external service reaches its endpoint only through its named credential
+    summary: 'An EXTERNAL SERVICE registration binds to exactly one NAMED CREDENTIAL when `<namedCredential>` is declared in metadata — surfaced as a `references` edge from the ExternalService to that NamedCredential. Every call the external service makes to its upstream API transits that named credential''s authentication and endpoint configuration; the service does NOT carry its own independent auth — it delegates to the named credential. This is the DECLARED binding read from the external-service metadata, NOT a proof that the named credential exists in the vault (a dangling reference is disclosed, not fabricated), NOT a claim about which operations or schemas the service exposes, and NOT runtime proof that callouts succeed.'
+    docs:
+      - label: Salesforce Help — Named Credentials for External Services
+        url: https://help.salesforce.com/s/articleView?id=sf.external_services.htm
+  # ARC-2 A19 — external-data-source-auth-dependency (Wave 2). An EDGE + NODE
+  # concept, kind `external-api-surface` REUSED. Grounded on ExternalDataSource
+  # --references--> AuthProvider when `<authProvider>` is set (external-data-source.ts:203-219)
+  # plus the node property `principalType` (external-data-source.ts:197). TWO rules:
+  # a references edge rule and a node rule where `principalType` is present. The
+  # auth provider and principal type together define HOW the org authenticates to
+  # the external system of record. ORG-INDEPENDENT.
+  concept:external-data-source-auth-dependency:
+    kind: external-api-surface
+    label: An external data source depends on its auth provider and principal type
+    summary: 'An EXTERNAL DATA SOURCE that declares an `<authProvider>` binds to that AuthProvider for authentication — surfaced as a `references` edge — and carries a `principalType` property that declares HOW Salesforce acts when accessing the external system (for example per-user versus named-principal / integration-user context). Together the auth provider and principal type define the authentication dependency for every query and sync against that external adapter; changing either changes who the external system sees as the caller. This is the DECLARED auth binding and principal-type posture read from external-data-source metadata, NOT a proof that the auth provider exists in the vault (a dangling reference is disclosed, not fabricated), NOT a claim about live connectivity or credential validity, and NOT runtime proof that OData/SQL queries succeed.'
+    docs:
+      - label: Salesforce Help — Define External Data Sources
+        url: https://help.salesforce.com/s/articleView?id=sf.external_data_sources.htm
+  # ARC-2 Wave 3 A10 — object-widened-by-sharing-rule-count. An AGGREGATE
+  # group-count concept, kind `access-mechanism` REUSED. Counts DISTINCT
+  # SharingRule children of a CustomObject via `parentOf` edges
+  # (`edgeSource: root-outgoing`, `countDistinctEndpoint: to`, `op: gte`,
+  # `threshold: 2`). ORG-INDEPENDENT — NO vault counts.
+  concept:object-widened-by-sharing-rule-count:
+    kind: access-mechanism
+    label: Many sharing rules on one object widen its access surface
+    summary: 'When an object carries TWO OR MORE sharing rules, its record-access surface is structurally WIDE: each rule is an add-only widening path (criteria, owner, territory, or guest) layered on top of the organization-wide default, so reasoning about who can see which records requires evaluating every rule plus the OWD, role hierarchy, manual shares, and restriction rules. The honest signal is a COUNT of DISTINCT SharingRule definitions parented on the object — restriction rules (a separate RestrictionRule type) are NOT included because they narrow rather than widen. HONEST BOUNDARIES: this counts declared metadata rows only — it does NOT assert every rule currently grants access to any live record (criteria and ownership are record-level), and it does NOT rank rule overlap or effective exposure for a specific user. A high count is a maintenance and audit-complexity signal, not by itself a vulnerability.'
+    docs:
+      - label: Salesforce Help — Sharing Rules
+        url: https://help.salesforce.com/s/articleView?id=sf.security_sharing_rules_about.htm
+  # ARC-2 Wave 3 A20 — duplicate-rule-blocks-save. A NODE concept, kind
+  # `automation-collision` REUSED. Grounded on DuplicateRule
+  # `operationsOnInsert` / `operationsOnUpdate` arrays (anyElement Block) and
+  # legacy `actionOnInsert` / `actionOnUpdate` Block scalars. Runs in the
+  # duplicate-rules save-order phase BEFORE after-triggers. ORG-INDEPENDENT.
+  concept:duplicate-rule-blocks-save:
+    kind: automation-collision
+    label: A duplicate rule configured to Block can hard-fail the save
+    summary: 'A DUPLICATE RULE whose insert or update operation includes BLOCK (or whose legacy actionOnInsert / actionOnUpdate is Block) can HARD-FAIL a save when the rule''s matching criteria find duplicate records — the save aborts with a duplicate error and no row is inserted or updated. Duplicate rules run in the duplicate-rules phase of the order of execution, AFTER before-save flows and pre-save validation but BEFORE after-triggers and post-save automation, so a before-save writer that changes the fields the matcher compares can alter what the duplicate rule sees on that save. This is grounded from the rule''s own declared operations / actions in metadata; it does NOT assert the rule is active (`isActive`), that matching records exist in the org, or that a particular save would hit the block — those need runtime data. It names a declared BLOCK posture on the rule, not a proven failure on a specific transaction.'
+    docs:
+      - label: Salesforce Help — Duplicate Management
+        url: https://help.salesforce.com/s/articleView?id=sf.duplicate_management.htm
+  # ARC-2 Wave 3 A21 — redundant-sharing-rule-on-public-object. An AGGREGATE
+  # concept, kind `access-mechanism` REUSED. Conjoins public OWD on the root
+  # CustomObject (`sharingModel` in Read / ReadWrite / ReadWriteTransfer) with
+  # `root-outgoing` count of parentOf SharingRule children (gte 1). The engine
+  # cannot evaluate live rule effect, so the claim is structural cleanup signal.
+  # ORG-INDEPENDENT.
+  concept:redundant-sharing-rule-on-public-object:
+    kind: access-mechanism
+    label: Sharing rules on a public OWD object add little or no new access
+    summary: 'When an object''s organization-wide default is already PUBLIC (Public Read Only, Public Read/Write, or Public Read/Write/Transfer), every internal user can at least VIEW every record by default — sharing rules can only ADD access above the OWD, never restrict below it — so a sharing rule on such an object often grants nothing users do not already have from the OWD alone (except edge cases such as widening edit on a Read-only public object, or guest / external audiences this concept does not evaluate). The honest combined signal requires BOTH a public OWD AND at least one SharingRule on the object; querying the object with a public sharingModel and counting its sharing-rule children surfaces that structural redundancy. HONEST BOUNDARIES: this does NOT prove a specific rule is useless for every user (territory, owner redistribution, or guest rules may still matter on non-public external baselines), does NOT evaluate live criteria, and does NOT recommend deletion without reviewing each rule''s audience and access level.'
+    docs:
+      - label: Salesforce Help — Organization-Wide Sharing Defaults
+        url: https://help.salesforce.com/s/articleView?id=sf.security_owd_about.htm
+  # ARC-2 Wave 3 B10 — flow-subflow-inactive-target. An AGGREGATE concept, kind
+  # `automation-collision` REUSED. Active parent Flow (`whereProperty status
+  # Active`) with outgoing `references` subflow edge to a target Flow whose
+  # `status notIn [Active]` (Draft / Obsolete / InvalidDraft). ORG-INDEPENDENT.
+  concept:flow-subflow-inactive-target:
+    kind: automation-collision
+    severity: high
+    label: An active flow that calls an inactive subflow is a latent runtime break
+    summary: 'When an ACTIVE flow declares a subflow call (`references` edge with `referenceKind: subflow`) to a target flow whose status is NOT Active (Draft, Obsolete, or InvalidDraft), the parent can fail at runtime when execution reaches that subflow element — a latent break invisible until the path is exercised. Subflow calls are declared in metadata regardless of target liveness; deactivating or obsoleting a subflow without updating every caller leaves active parents pointing at dead targets. HONEST BOUNDARIES: this asserts the declared reference and target status from metadata only — it does NOT prove the parent''s path is reachable on every run (entry criteria may skip the subflow), does NOT cover subflow targets missing from the vault (an unresolved `Flow:{name}` reference is a separate dangling-dependency concern), and a Draft parent calling a Draft subflow is intentionally out of scope (neither runs in production).'
+    docs:
+      - label: Salesforce Help — Subflow Element
+        url: https://help.salesforce.com/s/articleView?id=sf.flow_ref_elements_subflow.htm
+  # ARC-2 Wave 4 B2 — territory-sharing-rule. A NODE concept, kind
+  # `access-mechanism` REUSED. Grounded on the SharingRule extractor's always-present
+  # `ruleType` scalar ('territory' for `<sharingTerritoryRules>` —
+  # sharing-rules.ts:731). Distinct from criteria / owner / guest families.
+  # ORG-INDEPENDENT — NO vault counts.
+  concept:territory-sharing-rule:
+    kind: access-mechanism
+    label: A territory sharing rule grants access by territory assignment, not owner or criteria
+    summary: 'A TERRITORY sharing rule WIDENS record access by TERRITORY ASSIGNMENT: it grants a named group or role the stated access level (Read, or Read/Write) to records assigned to the territories named in the rule — a different selection path from criteria-based rules (field values) or owner-based rules (record ownership). Like every sharing rule it is ADD-ONLY above the organization-wide default. The rule, its territories, and its access level are grounded declaratively from the rule''s own metadata; but WHICH records it currently exposes depends on live territory assignments and record territory membership the offline vault cannot evaluate. So it names a territory-assignment WIDENING PATH, not a proven per-record grant.'
+  # ARC-2 Wave 4 B4 — scoping-rule-not-security. A NODE concept, kind
+  # `access-mechanism` REUSED. Grounded on ScopingRule nodes carrying the
+  # extractor's `active` extra-property (enterprise-metadata.ts:1692 — same schema
+  # as RestrictionRule). The claim is the INVERSE of restriction-rule-narrows:
+  # scoping sets a DEFAULT list/lookup scope, NOT a security boundary.
+  concept:scoping-rule-not-security:
+    kind: access-mechanism
+    label: An active scoping rule sets default record scope, not a security boundary
+    summary: 'A SCOPING RULE is NOT a security boundary — it sets the DEFAULT scope users see in list views, lookups, and related lists on the targeted object (a UX filter applied before the user runs a query), while record-level SECURITY is still governed by the organization-wide default, sharing rules, the role hierarchy, manual shares, restriction rules, and permission sets. An ACTIVE scoping rule therefore changes which records appear BY DEFAULT in scoped UI surfaces for the users it targets, but it does NOT by itself grant or deny create/read/edit/delete rights the way sharing or CRUD does, and it is NOT the subtractive narrow-below-sharing mechanism (that is a restriction rule). This is grounded from the rule''s own declared active flag on ScopingRule metadata; it names the DEFAULT-SCOPE posture, not which specific records a specific user ends up seeing — the record filter is evaluated against live record and user-context values the offline vault does not hold. An INACTIVE scoping rule applies no default scope and is deliberately not asserted.'
+  # ARC-2 Wave 4 B14 — list-view-sharing-not-record-access. An EDGE concept, kind
+  # `access-mechanism` REUSED. Grounded on ListView `visibleTo` edges emitted by
+  # enterprise-metadata.ts (saved-view visibility, explicitly NOT record access).
+  concept:list-view-sharing-not-record-access:
+    kind: access-mechanism
+    label: Sharing a list view controls who sees the saved view, never record access
+    summary: 'Sharing a LIST VIEW controls who can SEE and USE that saved view (its columns, filters, and sort order) — it is a UI visibility grant over a named view definition, NOT record-level access. A user who can open a shared list view still sees ONLY the records their sharing, CRUD, and field-level permissions allow; conversely, a user blocked from the list view can still reach the same underlying records through other list views, reports, or direct record access if their security permits. The `visibleTo` edges and `filterScope` property ground WHO the view is shared with declaratively; they never widen or narrow which records exist or which rows a user may read or edit. This is DISTINCT from sharing rules, manual shares, and teams, all of which operate on RECORD access.'
+  # ARC-2 Wave 4 B7 — session-security-posture. A NODE concept, kind
+  # `access-mechanism` REUSED. Grounded on SessionSettings booleans
+  # `mfaRequired` / `requiresStrongAuth` (session-settings.ts:172-174).
+  concept:session-security-posture:
+    kind: access-mechanism
+    label: Org-wide session settings set MFA, strong-auth, and idle-timeout posture
+    summary: 'The org-wide SESSION SETTINGS node declares baseline LOGIN and SESSION posture for UI users: whether multi-factor authentication is required (`mfaRequired`), whether high-assurance / strong authentication is required for UI logins (`requiresStrongAuth`), and (when present) the idle session timeout in minutes. These are ORG-LEVEL toggles read from the single SessionSettings metadata file — they apply broadly, not per profile (profile login hours and IP ranges are separate concepts). Each switch is asserted only when its value is explicitly ON or declared; an absent or null property means that policy was not retrieved or not set and is not asserted. This names the DECLARED org-wide session-security posture, NOT whether any specific user''s current session satisfies it at runtime.'
+  # ARC-2 Wave 4 B8 — transaction-security-policy-posture. A NODE + EDGE concept,
+  # kind `access-mechanism` REUSED. Grounded on TransactionSecurityPolicy `active`
+  # plus optional `references` to an ApexClass condition implementation
+  # (enterprise-metadata.ts:1415-1426).
+  concept:transaction-security-policy-posture:
+    kind: access-mechanism
+    label: An active transaction security policy enforces real-time event checks, optionally via Apex
+    summary: 'A TRANSACTION SECURITY POLICY (TSP) evaluates Salesforce events in REAL TIME (login, report export, API call patterns, etc.) and can block, freeze, end the session, or require step-up authentication when its conditions match. An ACTIVE policy is a live enforcement posture; an inactive one is inert metadata. When the policy names an Apex class on its condition, the enforcement decision DELEGATES to that class implementing the platform condition interface — the cited Apex is the custom evaluator, not necessarily every automation that touches the monitored event. This is grounded from the policy''s own declared `active` flag and its declared Apex reference; it names the ENFORCEMENT POSTURE structurally, NOT whether the policy fired on any specific user action (a runtime audit question). Notification recipients and custom email content are out of scope for this base concept.'
+  # ARC-2 Wave 4 B16 — guest-record-default-owner. A NODE concept, kind
+  # `access-mechanism` REUSED. Grounded on CustomSite `guestRecordDefaultOwner`
+  # (custom-site.ts:205 — `<siteGuestRecordDefaultOwner>`).
+  concept:guest-record-default-owner:
+    kind: access-mechanism
+    label: A site's guest record default owner sets who owns records guests create
+    summary: 'An Experience Cloud SITE can declare a GUEST RECORD DEFAULT OWNER — the user who OWNS records created by the unauthenticated guest user on that site. Because record visibility in a Private org flows from ownership and sharing, that default owner is a first-order visibility anchor: guest-created records inherit the default owner''s role / sharing context rather than belonging to the guest user (who typically has minimal access). This is grounded from the site''s own declared `guestRecordDefaultOwner` property; it names the DECLARED ownership default, NOT which records any guest actually created (a live-plane question) and NOT the guest user''s profile or permission set (separate metadata). When the property is absent, no default owner is asserted.'
+  # ARC-2 Wave 4 B18 — login-hours-restriction. A NODE concept, kind
+  # `access-mechanism` REUSED. Grounded on Profile `loginHoursDefined` /
+  # `loginHours` (profile.ts:305-323).
+  concept:login-hours-restriction:
+    kind: access-mechanism
+    label: Profile login hours restrict authentication to declared weekday windows
+    summary: 'A PROFILE can declare LOGIN HOURS — per-weekday allowed time windows outside which users assigned that profile CANNOT log in (Salesforce rejects authentication). Permission sets do NOT carry login hours; this restriction applies only through the profile assignment. The windows are read from the profile''s own `<loginHours>` metadata as `{day, startTime, endTime}` entries; `loginHoursDefined` signals that at least one window exists. This is the DECLARED restriction read from profile metadata, NOT proof that any specific user is assigned this profile (an assignment question) and NOT runtime proof that a login attempt was blocked (an audit question). When no login-hours windows are defined, no restriction is asserted.'
+  # ARC-2 Wave 4 B21 — flow-scheduled-trigger-batch-context. A NODE concept, kind
+  # `async-boundary` REUSED. Grounded on Flow `triggerType === Scheduled`
+  # (flow.ts — always-key-present scalar).
+  concept:flow-scheduled-trigger-batch-context:
+    kind: async-boundary
+    label: A schedule-triggered flow runs asynchronously in batch context without a running user
+    summary: 'A flow whose trigger type is SCHEDULED runs ASYNCHRONOUSLY on the scheduler in BATCH context — in system context, without an interactive running user, decoupled from any record save. Its interview executes later in its own transaction(s), governor limits reset at the boundary, and its writes cannot roll back a user save because none triggered it. This names the async boundary STRUCTURALLY from the flow''s own declared trigger type; it is DISTINCT from a record-triggered flow (before/after save) and from a platform-event-triggered flow. HONEST BOUNDARIES: it does NOT assert WHEN the schedule fires, whether it succeeds, or the order of multiple scheduled jobs relative to each other.'
+    docs:
+      - label: Salesforce Help — Schedule-Triggered Flows
+        url: https://help.salesforce.com/s/articleView?id=sf.flow_concepts_trigger_schedule.htm
+  # ARC-2 Wave 4 B22 — flow-inactive-dead-automation. A NODE concept, kind
+  # `firing-condition` REUSED. Grounded on Flow `status !== Active`
+  # (flow.ts ALLOWED_STATUS). Distinct from stacked-flows / field-writer collision
+  # aggregates that filter `status==Active` — this concept's claim is EXCLUSION
+  # from save-order and runtime execution.
+  concept:flow-inactive-dead-automation:
+    kind: firing-condition
+    label: A draft or obsolete flow never runs and must be excluded from save-order analysis
+    summary: 'A flow whose STATUS is anything other than Active — Draft, Obsolete, or InvalidDraft — is DEAD automation: Salesforce never executes it on a save or schedule until it is activated, so it must be EXCLUDED from save-order-of-execution analysis, collision counts, and runtime impact reasoning (counting it would cry wolf about automation that cannot fire). An obsolete version is retained metadata history, not a live firer. This is grounded from the flow''s own always-present `status` scalar; it names the non-running STRUCTURAL fact, NOT whether an older active version also exists (version lineage is org-specific) and NOT whether the flow WOULD fire if activated (entry criteria remain unevaluated offline). Only Active flows belong in save-order and collision surfaces.'
+  # ARC-2 Wave 4 tail B12 — cdc-event-retention-replay-ordering. NODE on
+  # PlatformEventChannel (channelType + label grounded). Claim hedges that
+  # platform events and CDC are NOT exactly-once, gap-free, or globally ordered.
+  concept:cdc-event-retention-replay-ordering:
+    kind: async-boundary
+    label: Platform event and CDC channels are asynchronous with replay and retention limits
+    summary: 'A PLATFORM EVENT CHANNEL (including CDC change-event channels) models an ASYNCHRONOUS delivery path — subscribers consume events in separate transactions, NOT in the same atomic save as the publisher. Salesforce does NOT guarantee exactly-once delivery, gap-free replay, or global ordering across subscribers: events may be retained for a bounded window, replay can skip or duplicate under failure modes, and multiple subscribers each see their own cursor. This is grounded from the channel''s own declared metadata when a PlatformEventChannel node is present; it names the ASYNC BOUNDARY and honest delivery limits structurally, NOT runtime lag, current backlog depth, or whether any specific subscriber processed a specific event (live-plane questions). When no channel metadata is retrieved, no delivery claim is asserted.'
+  # ARC-2 Wave 4 tail B13 — external-object-odata-live-callout. NODE on
+  # ExternalDataSource (endpoint, dataSourceType, isWritable — external-data-source.ts).
+  concept:external-object-odata-live-callout:
+    kind: external-api-surface
+    label: External objects live off-platform and every query is a live callout
+    summary: 'An EXTERNAL DATA SOURCE adapter (Salesforce Connect / OData or similar) exposes EXTERNAL OBJECT rows (`__x` suffix) whose data lives OFF-PLATFORM. Every query or DML against those rows is a LIVE CALLOUT to the external system at read time — there is no local copy, no standard triggers, rollups, or flows on the external row itself unless explicitly supported for that adapter type. Writable adapters can push changes outward; read-only adapters surface external data for lookup only. This is grounded from the ExternalDataSource node''s declared `endpoint`, `dataSourceType`, and `isWritable` properties; it names the OFF-PLATFORM LIVE-CALLOUT posture, NOT latency, availability, or whether any specific external object is mapped (object mappings are separate metadata).'
+  # ARC-2 Wave 4 tail B15 — muting-permission-set-scope. EDGE on PermissionSetGroup
+  # `references` with `referenceKind: mutingPermissionSet` (enterprise-metadata.ts).
+  concept:muting-permission-set-scope:
+    kind: access-mechanism
+    label: A muting permission set applies only inside its permission set group
+    summary: 'A MUTING PERMISSION SET subtracts permissions from the UNION of a PERMISSION SET GROUP''s member permission sets — it is INERT outside that group context. Assigning the muting set directly to a user (without the enclosing group) does NOT apply the mute; only when the user receives the group does the member union minus muting denials take effect. This is grounded from the group''s declared `references` edge with `referenceKind: mutingPermissionSet`; it names the GROUP-SCOPED mute binding, NOT the effective permission matrix for any specific user (use user-ability / effective-permissions tools).'
+  # C16 / EC-9 — permission-set-group-muting-calculation. STRUCTURAL set-difference
+  # JOIN: PSG effective = member UNION − muting denials. Fires when the group has
+  # BOTH member references AND muting references. Does NOT expand the grant matrix
+  # (that remains sfi.effective_permissions); this names the calculation shape.
+  concept:permission-set-group-muting-calculation:
+    kind: access-mechanism
+    severity: high
+    label: A permission set group's effective grants are member UNION minus muting denials
+    summary: 'A PERMISSION SET GROUP''s EFFECTIVE permissions are the UNION of its MEMBER permission sets'' grants, MINUS the permissions DENIED by any MUTING permission set bound to that group. Muting is GROUP-SCOPED: it subtracts only from that group''s member union, never org-wide, and a muting set assigned directly to a user (outside the group) is inert. This claim fires on the STRUCTURAL set-difference JOIN — declared `references` edges with `referenceKind: permissionSetGroupMember` (include) and `referenceKind: mutingPermissionSet` (subtract) — when BOTH sides are present. It names the CALCULATION SHAPE from graph edges only; it does NOT enumerate the resulting effective permission matrix, prove which flags survive, or assert that any user holds the group (use sfi.effective_permissions / user-ability for the composed matrix).'
+  # D3 / EC-11 — cross-object-cascade-save. crossObjectCascade: automation on A
+  # writesTo B≠A AND target object B carries its own incoming automation
+  # (triggersOn / firesWhen) — writing B cascades B's full save order inside the
+  # same transaction, sharing the governor budget.
+  concept:cross-object-cascade-save:
+    kind: save-order-phase
+    severity: high
+    label: Cross-object write cascades the target object's save order
+    summary: 'When automation on object A performs a cross-object write to object B (B ≠ A) and object B ITSELF has incoming record automation (a declared triggersOn or firesWhen edge from another component), Salesforce runs B''s FULL save order for that write inside the SAME transaction — before-save flows, triggers, validation, after-triggers, assignment, workflows, after-save flows, and approvals on B all participate, and the governor limit budget is SHARED across both objects'' automation stacks. This fires on the STRUCTURAL crossObjectCascade JOIN: writer triggersOn A + writesTo B≠A + B has incoming automation from a node other than the writer. It names the DECLARED cascade shape from graph edges only; it does NOT prove the cross-object DML executes at runtime, enumerate every automation that would actually fire on B, or assert that any specific governor limit is breached.'
+  # D4 / EC-11 — before-save-flow-cross-record-write. dualEdge sameObject:false:
+  # RecordBeforeSave Flow that triggersOn A and writesTo a field/object on B≠A.
+  # Before-save flows may only mutate $Record; a cross-object writesTo is a
+  # silent no-op / invalid shape on the before-save path.
+  concept:before-save-flow-cross-record-write:
+    kind: automation-collision
+    severity: high
+    label: A before-save flow writing another object silently no-ops
+    summary: 'A RECORD-BEFORE-SAVE Flow runs in the before-save window and may mutate only the triggering record in memory. When that Flow also carries a writesTo edge whose target object differs from its triggersOn object, the cross-object write is outside before-save capabilities — Salesforce rejects or silently no-ops that DML on the before-save path. This fires on the STRUCTURAL dual-edge JOIN (triggersOn + writesTo requiring different object scopes) for Flows whose triggerType is RecordBeforeSave. It names the DECLARED cross-object write shape from graph edges, NOT whether a specific element would throw at runtime, whether an after-save redesign would succeed, or the full element inventory of the flow.'
+  # D7 / EC-11 — profile-ip-restriction-absence. Empty loginIpRanges[] on a
+  # Profile = no declared IP allowlist (weak login-IP posture). isEmpty requires
+  # a PRESENT empty array; an absent key fails closed (never equate missing with empty).
+  concept:profile-ip-restriction-absence:
+    kind: access-mechanism
+    severity: medium
+    label: A profile with empty login IP ranges has no IP allowlist
+    summary: 'A PROFILE whose declared `loginIpRanges` array is EMPTY has NO login-IP allowlist — users assigned that profile may authenticate from any IP the org otherwise permits. This is a WEAK LOGIN-IP POSTURE signal grounded from the Profile node''s own `loginIpRanges` property (the extractor always emits the array, possibly empty). It names the DECLARED empty allowlist on this profile only; it does NOT prove the profile is high-privilege, does NOT inspect org-wide Trusted IP Ranges / Login IP ranges outside the profile, and does NOT assert who is assigned the profile at runtime.'
+  # D8 / EC-12 — external-owd-exceeds-internal. Compare externalSharingModel vs
+  # sharingModel on a ranked OWD permissiveness scale; fire when external is
+  # STRICTLY more permissive than internal (Salesforce forbids this posture).
+  concept:external-owd-exceeds-internal:
+    kind: access-mechanism
+    severity: high
+    label: External OWD must not be more permissive than internal OWD
+    summary: 'An object''s EXTERNAL sharing model (`externalSharingModel`) sets the baseline access for Experience Cloud / portal / guest users and must NEVER be more permissive than the INTERNAL organization-wide default (`sharingModel`). When the declared external token ranks STRICTLY ABOVE the internal token on Salesforce''s permissiveness scale (Private < Read < ReadWrite < ReadWriteTransfer < FullAccess; ControlledByParent shares Private''s floor), the object is in an INVALID external-OWD-exceeds-internal posture. This fires on the STRUCTURAL property-vs-property comparison of the two declared scalars on the CustomObject node. It names the DECLARED invalid pair only; it does NOT evaluate live external-user access, guest sharing rules, or which Experience Cloud sites assign users to the object.'
+  # C18 / EC-10 — dependent-picklist-orphaned-value. A dependent picklist's
+  # valueSettings can reference a controlling-field value that was later removed
+  # or deactivated — that mapping is unreachable. Join by controllingField name
+  # to the same-object sibling, then set-diff controllingFieldValues against
+  # the sibling's ACTIVE picklistValues.
+  concept:dependent-picklist-orphaned-value:
+    kind: field-provenance
+    severity: high
+    label: A dependent picklist value gated by a removed controlling value is unreachable
+    summary: 'A DEPENDENT PICKLIST maps each of its selectable values to one or more CONTROLLING FIELD values via `valueSettings`. When a referenced controlling value is ABSENT or INACTIVE on the controlling field''s declared picklist, that dependency gate is ORPHANED — the dependent value can never become available under a live controlling selection. This fires on the STRUCTURAL intra-object field join (`controllingField` API name → same-object sibling CustomField) plus set-difference of `controllingFieldValues[].controllingFieldValue` against the sibling''s ACTIVE `picklistValues[].value`. It names the DECLARED unreachable mapping from metadata; it does NOT follow GlobalValueSet-backed controlling fields (ungrounded right array fails closed rather than inventing orphans), and does NOT prove a specific UI/API save would reject a row.'
+  # ARC-2 Wave 4 tail B17 — permission-provenance-profile-vs-permset. grantedBy
+  # edges whose grantor endpoint is Profile (componentTypes citation scope).
+  concept:permission-provenance-profile-vs-permset:
+    kind: access-mechanism
+    label: Permissions granted directly on a profile are migration candidates
+    summary: 'When a permission (object CRUD, field FLS, Apex class access, or custom permission) is granted DIRECTLY on a PROFILE rather than through a permission set, that grant is a PROFILE-PROVENANCE permission — a common migration candidate because permission sets compose more cleanly across users and deployments. Permission-set grants are the preferred pattern for additive access; profile grants are baseline and harder to diff per user. This fires on `grantedBy` edges whose grantor is a Profile node; it names the DECLARED grantor type from metadata, NOT whether migrating to a permission set is correct for this org (a design judgment).'
+  # ARC-2 Wave 4 tail B19 — outbound-message-soap-callout-posture. NODE on
+  # OutboundMessage `includeSessionId` / `endpointUrl` (workflow-rule.ts v2.8).
+  concept:outbound-message-soap-callout-posture:
+    kind: external-api-surface
+    severity: high
+    label: Workflow outbound messages are SOAP callouts that may include the session id
+    summary: 'A WORKFLOW OUTBOUND MESSAGE sends an UNAUTHENTICATED SOAP callout to a configured endpoint URL when its workflow rule fires — a legacy integration surface predating Named Credentials. When `includeSessionId` is true, the payload can carry the running user''s session id to the endpoint, which is a sensitive exposure vector if the endpoint is not fully trusted. This is grounded from the OutboundMessage node''s own declared `endpointUrl` and `includeSessionId` properties; it names the SOAP CALLOUT POSTURE structurally, NOT whether the endpoint is reachable, whether TLS validates, or whether any rule currently fires (runtime questions).'
+  # EPIC-1 — async-soql-injection-amplification. DEMO chained concept: fires only
+  # from the second-pass ChainedRule substrate when BOTH concept:async-boundary
+  # AND concept:apex-soql-injection-surface already emitted interpretations
+  # (concept-output → concept-input). NOT a graph AND-bind (contrast hand-coded
+  # concept:apex-async-amplified-governor-risk / system-context-external-surface).
+  # Kind `code-quality-defect` REUSED — the composite is still a review-candidate
+  # surface, not a proven exploit. Severity high: async execution amplifies the
+  # injection review priority (separate transaction, fault does not roll back
+  # the enqueueing save). ORG-INDEPENDENT — NO vault counts.
+  concept:async-soql-injection-amplification:
+    kind: code-quality-defect
+    severity: high
+    label: Async Apex that also carries a SOQL-injection surface
+    summary: 'An Apex class that is STRUCTURALLY ASYNC (Queueable / Batch / Schedulable / @future / async dispatch) AND ALSO carries a recognized SOQL-injection risk pattern composes two separately-grounded facts: the injection-shaped dynamic query can run in a SEPARATE transaction from the save that enqueued the work, with fresh governor limits, and a fault on that async path cannot roll back the original save. This names the COMBINATION from prior concept interpretations (async-boundary ∩ soql-injection-surface), not a fresh graph predicate. Because the injection signal is HEURISTIC (tokenized Apex, not a compiler AST), the composite claim is HEURISTIC: confirm whether caller-controllable input reaches the dynamic query and whether the async path runs in production. It is a review priority, not a proven exploit.'
+    docs:
+      - label: Apex Developer Guide — SOQL Injection
+        url: https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/pages_security_tips_soql_injection.htm
+      - label: Apex Developer Guide — Asynchronous Apex
+        url: https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_async.htm
+  # EPIC-2 — net-access-intersection. DEMO compound concept: fires only from the
+  # cross-concept CompoundRule substrate when BOTH concept:owd-sharing-posture AND
+  # concept:object-widened-by-sharing-rule-count already emitted interpretations
+  # that CO-FIRE ON ONE object anchor (the OWD baseline node rule and the
+  # sharing-rule-count aggregate both cite the same CustomObject). Generalizes the
+  # hand-coded same-anchor AND-binds (system-context-external-surface) into a
+  # declarative shape. Kind access-mechanism REUSED from the closed union — the
+  # composite names a reconciled record-access posture. Severity medium: a
+  # restrictive baseline widened by add-only sharing rules is a review-worthy
+  # posture, not a proven exposure. ORG-INDEPENDENT — NO vault counts.
+  concept:net-access-intersection:
+    kind: access-mechanism
+    severity: medium
+    label: A restrictive OWD baseline reconciled with its add-only sharing-rule widening surface
+    summary: 'One object carries a RESTRICTIVE org-wide default baseline (the narrow side) AND an add-only sharing-rule widening surface (the widen side) at the same time, and this concept reconciles the two separately-grounded facts into ONE net per-object access posture. Sharing rules can only ADD access above the org-wide default, never restrict below it, so the NET effective access is broader than the restrictive baseline alone implies. This names the COMBINATION from prior concept interpretations (owd-sharing-posture, the narrow baseline, intersected with object-widened-by-sharing-rule-count, the widen-union) that co-fire on the same object — not a fresh graph predicate. HONEST BOUNDARY — it does NOT assert a per-record or per-user reach: which records each rule actually widens, and to whom, depends on live field values and role or group membership the offline vault cannot evaluate. It is a structural reconciliation and review signal, not a proven access outcome.'
+    docs:
+      - label: Salesforce Help — Organization-Wide Sharing Defaults
+        url: https://help.salesforce.com/s/articleView?id=sf.security_owd_about.htm
+      - label: Salesforce Help — Sharing Rules
+        url: https://help.salesforce.com/s/articleView?id=sf.security_about_sharing_rules.htm
+  # C19 / EC-4 — bulkification-gap-in-trigger-reachable. ApexTrigger -callsApex→
+  # ApexClass with qualityIssues loop gap — governor risk amplified to trigger scale
+  # (up to 200 records per invocation). EDGE join reuses anyElement on the joined
+  # class endpoint (no new engine primitive). HEURISTIC composite: callsApex edge is
+  # scanner-granularity heuristic; loop gap is tokenized-recognizer heuristic.
+  # ORG-INDEPENDENT — NO vault counts in the summary.
+  concept:bulkification-gap-in-trigger-reachable:
+    kind: code-quality-defect
+    severity: high
+    label: In-loop SOQL/DML in a class reachable from a trigger — governor risk amplified to trigger row count
+    summary: 'An Apex trigger reaches (via a callsApex edge) an Apex class that carries a loop-based SOQL/DML governor-limit gap (a soql-in-loop / dml-in-loop pattern in the called class''s tokenized source). Triggers run in the SAVE transaction and can receive up to 200 records in a single before/after invocation, so an in-loop query or DML in a handler class is AMPLIFIED relative to the class-local bulkification-gap concept: the loop''s per-iteration governor consumption multiplies across the trigger''s record batch, and a bulk data load can throw a LimitException that fails the entire save. The two facts COMPOSE structurally: the trigger CALLS the class (a callsApex edge from the trigger extractor/scanner) AND the called class shows a loop-based SOQL/DML pattern. Both signals are HEURISTIC — the callsApex edge is class-granularity scanner output (not method-level), and the loop gap is TOKENIZED recognition, NOT a compiler AST — so the composite can MISS a query behind a helper or a dynamically invoked class and can FLAG a bounded loop. It names an amplified governor-risk review candidate on the trigger-reachable path, not a proven runtime limit failure.'
+    docs:
+      - label: Apex Developer Guide — Triggers and Bulk Request Triggers
+        url: https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_triggers_bulk_requests.htm
+      - label: Apex Developer Guide — Running Apex within Governor Execution Limits
+        url: https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_gov_limits.htm

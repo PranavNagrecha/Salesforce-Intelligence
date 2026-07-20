@@ -61,6 +61,7 @@ export {
   extractScopingRule,
   extractServiceChannel,
   extractTransactionSecurityPolicy,
+  UNRESOLVED_PROFILE_PREFIX,
 } from './enterprise-metadata.js';
 export { extractDuplicateRule } from './duplicate-rule.js';
 export { extractEmailTemplate } from './email-template.js';
@@ -83,6 +84,24 @@ export type {
   FlowDataflowIndex,
   TracedSourceField,
 } from './flow-dataflow.js';
+export { parseFlowGraph, parseFlowGraphSource } from './flow-graph.js';
+export type {
+  ActionCall,
+  Assignment,
+  Condition,
+  Connector,
+  ConnectorTarget,
+  Decision,
+  FlowElement,
+  FlowGraphProjection,
+  FlowStart,
+  Formula,
+  Loop,
+  RecordOp,
+  ScheduledPath,
+  Subflow,
+  Variable,
+} from './flow-graph.js';
 export {
   extractGenAiFunction,
   extractGenAiPlannerBundle,

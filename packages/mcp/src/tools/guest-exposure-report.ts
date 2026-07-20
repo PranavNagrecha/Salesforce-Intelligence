@@ -57,6 +57,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { coercePrefix } from './coerce-id.js';
 import { offlineTrust } from './coverage-trust.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { collectPiiInventoryFields, type PiiField } from './pii-inventory.js';
@@ -68,6 +69,7 @@ const PROFILE_PREFIX = 'Profile:';
 const OBJECT_PREFIX = 'CustomObject:';
 const FIELD_PREFIX = 'CustomField:';
 const APEX_PREFIX = 'ApexClass:';
+const SHARING_RULE_PREFIX = 'SharingRule:';
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -83,6 +85,38 @@ export const guestExposureReportInputSchema = z.object({
    * community; omit to audit every modeled Experience Cloud / Site surface.
    */
   communityId: z.string().min(1).optional(),
+  /**
+   * Optional COMMUNITY-scope aliases — the natural keys a host / router sends
+   * for "guest exposure on {community}?". `networkApiName` / `networkName` are
+   * the bare Network api name (coerced to `Network:{name}`); `siteApiName` is
+   * the bare CustomSite api name (coerced to `CustomSite:{name}`). All resolve
+   * to the same community scope as `communityId`; several that disagree are
+   * `invalid-query`. Previously these were silently stripped and every call ran
+   * org-wide over all communities.
+   */
+  networkApiName: z.string().min(1).optional(),
+  networkName: z.string().min(1).optional(),
+  siteApiName: z.string().min(1).optional(),
+  /**
+   * Optional canonical-id alias dispatched BY PREFIX: `Network:` / `CustomSite:`
+   * scopes to that community (like `communityId`); `CustomObject:` scopes to
+   * that object (like `objectId`). Any other prefix is `invalid-query`. This is
+   * the router's shape — it used to be stripped and fall through to an org-wide
+   * audit.
+   */
+  componentId: z.string().min(1).optional(),
+  /**
+   * Optional OBJECT scope — the dominant question shape is object-specific
+   * ("guest exposure for Contact"). Filters `findings` (and the per-community
+   * `findingCount`) to that object's guest CRUD, its fields' FLS, and its
+   * guest sharing rules; object-independent Apex-class findings drop out.
+   * `objectApiName` is the bare api name (`Contact`); `objectId` is the
+   * canonical `CustomObject:Contact` id; `componentId: CustomObject:Contact`
+   * also resolves here. All resolve to the same scope — pass one. The applied
+   * scope is always echoed back as `appliedScope`.
+   */
+  objectApiName: z.string().min(1).optional(),
+  objectId: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
   cursor: z.string().min(1).optional(),
@@ -184,6 +218,18 @@ export interface GuestExposureReportOutput {
     readonly medium: number;
     readonly low: number;
   };
+  /**
+   * Echoes the scope ACTUALLY applied so a host never assumes a filter it
+   * passed took effect (an unsupported/silently-stripped arg was the bug this
+   * closes). `community` is the resolved `communityId` or null; `object` is the
+   * resolved object api name (from `objectApiName`/`objectId`) or null; `mode`
+   * names the axes in force.
+   */
+  readonly appliedScope: {
+    readonly community: string | null;
+    readonly object: string | null;
+    readonly mode: 'all' | 'community' | 'object' | 'community+object';
+  };
   readonly limit: number;
   readonly offset: number;
   readonly hasMore: boolean;
@@ -222,6 +268,26 @@ const objectOfFieldId = (fieldId: string): string | null => {
   return dot === -1 ? null : rest.slice(0, dot);
 };
 
+/**
+ * The object api-name a finding pertains to — the axis the optional
+ * `objectApiName`/`objectId` scope filters on. Object-CRUD findings carry the
+ * object in their `CustomObject:` node id; PII-FLS findings in their field's
+ * `CustomField:{Object}.{Field}` parent; guest sharing-rule findings in their
+ * `SharingRule:{Object}.{Rule}` id (rules are filed under their object).
+ * Object-INDEPENDENT findings (apex-enabled — a guest-invocable class is not
+ * tied to one object) return null and therefore drop out of an object scope.
+ */
+const findingObjectApiName = (f: ExposureFinding): string | null => {
+  if (f.nodeId.startsWith(OBJECT_PREFIX)) return f.nodeId.slice(OBJECT_PREFIX.length);
+  if (f.nodeId.startsWith(FIELD_PREFIX)) return objectOfFieldId(f.nodeId);
+  if (f.kind === 'guest-sharing-rule' && f.nodeId.startsWith(SHARING_RULE_PREFIX)) {
+    const rest = f.nodeId.slice(SHARING_RULE_PREFIX.length);
+    const dot = rest.indexOf('.');
+    return dot === -1 ? null : rest.slice(0, dot);
+  }
+  return null;
+};
+
 /** Drain every node of a type (paginating past the graph's 500-row cap). */
 const drainType = async (
   ctx: Context,
@@ -256,17 +322,106 @@ export const guestExposureReportHandler = async (
   ctx: Context,
   input: GuestExposureReportInput,
 ): Promise<Result<McpResponse<GuestExposureReportOutput>, McpError>> => {
+  // `componentId` is dispatched BY PREFIX: Network:/CustomSite: → community
+  // scope; CustomObject: → object scope; any other prefix is invalid-query (an
+  // unsupported arg is never silently stripped and fallen back to org-wide).
   if (
-    input.communityId !== undefined &&
-    !input.communityId.startsWith(CUSTOM_SITE_PREFIX) &&
-    !input.communityId.startsWith(NETWORK_PREFIX)
+    input.componentId !== undefined &&
+    !input.componentId.startsWith(NETWORK_PREFIX) &&
+    !input.componentId.startsWith(CUSTOM_SITE_PREFIX) &&
+    !input.componentId.startsWith(OBJECT_PREFIX)
   ) {
     return err({
       kind: 'invalid-query',
-      message: `communityId must start with '${CUSTOM_SITE_PREFIX}' or '${NETWORK_PREFIX}'; got '${input.communityId}'`,
+      message: `componentId must be a '${NETWORK_PREFIX}' / '${CUSTOM_SITE_PREFIX}' (community) or '${OBJECT_PREFIX}' (object) id; got '${input.componentId}'`,
+      path: 'componentId',
+    });
+  }
+  const componentIsCommunity =
+    input.componentId !== undefined &&
+    (input.componentId.startsWith(NETWORK_PREFIX) ||
+      input.componentId.startsWith(CUSTOM_SITE_PREFIX));
+  const componentIsObject =
+    input.componentId !== undefined && input.componentId.startsWith(OBJECT_PREFIX);
+
+  // Resolve the optional COMMUNITY scope from every alias (communityId, the
+  // Network:/CustomSite: componentId, and the bare networkApiName / networkName
+  // / siteApiName keys). Several that disagree → invalid-query.
+  const communityIds = new Set<string>();
+  if (input.communityId !== undefined) communityIds.add(input.communityId);
+  if (componentIsCommunity) communityIds.add(input.componentId as string);
+  if (input.networkApiName !== undefined) {
+    communityIds.add(coercePrefix(input.networkApiName, [NETWORK_PREFIX]));
+  }
+  if (input.networkName !== undefined) {
+    communityIds.add(coercePrefix(input.networkName, [NETWORK_PREFIX]));
+  }
+  if (input.siteApiName !== undefined) {
+    communityIds.add(coercePrefix(input.siteApiName, [CUSTOM_SITE_PREFIX]));
+  }
+  if (communityIds.size > 1) {
+    return err({
+      kind: 'invalid-query',
+      message: `community selectors name different communities (${[...communityIds].join(', ')}); pass one`,
       path: 'communityId',
     });
   }
+  const communityId: string | undefined =
+    communityIds.size === 1 ? [...communityIds][0] : undefined;
+  if (
+    communityId !== undefined &&
+    !communityId.startsWith(CUSTOM_SITE_PREFIX) &&
+    !communityId.startsWith(NETWORK_PREFIX)
+  ) {
+    return err({
+      kind: 'invalid-query',
+      message: `communityId must start with '${CUSTOM_SITE_PREFIX}' or '${NETWORK_PREFIX}'; got '${communityId}'`,
+      path: 'communityId',
+    });
+  }
+
+  // Resolve the optional OBJECT scope from every alias. `objectId` /
+  // `componentId: CustomObject:X` are canonical ids; `objectApiName` is the bare
+  // alias. All narrow to ONE object (bare api names compared); disagreement is
+  // invalid-query. An unsupported arg is never silently stripped.
+  const objectNames = new Set<string>();
+  if (input.objectId !== undefined) {
+    if (!input.objectId.startsWith(OBJECT_PREFIX)) {
+      return err({
+        kind: 'invalid-query',
+        message: `objectId must start with '${OBJECT_PREFIX}' (e.g. '${OBJECT_PREFIX}Contact'); got '${input.objectId}'. Use objectApiName for a bare api name.`,
+        path: 'objectId',
+      });
+    }
+    objectNames.add(input.objectId.slice(OBJECT_PREFIX.length));
+  }
+  if (componentIsObject) {
+    objectNames.add((input.componentId as string).slice(OBJECT_PREFIX.length));
+  }
+  if (input.objectApiName !== undefined) objectNames.add(input.objectApiName);
+  if (objectNames.size > 1) {
+    return err({
+      kind: 'invalid-query',
+      message: `object selectors name different objects (${[...objectNames].join(', ')}); pass one`,
+      path: 'objectApiName',
+    });
+  }
+  const objectScope: string | null =
+    objectNames.size === 1 ? ([...objectNames][0] as string) : null;
+
+  const scopeMode: GuestExposureReportOutput['appliedScope']['mode'] =
+    communityId !== undefined && objectScope !== null
+      ? 'community+object'
+      : communityId !== undefined
+        ? 'community'
+        : objectScope !== null
+          ? 'object'
+          : 'all';
+  const appliedScope: GuestExposureReportOutput['appliedScope'] = {
+    community: communityId ?? null,
+    object: objectScope,
+    mode: scopeMode,
+  };
 
   const sitesResult = await drainType(ctx, 'CustomSite');
   if (!sitesResult.ok) {
@@ -300,6 +455,7 @@ export const guestExposureReportHandler = async (
           medium: 0,
           low: 0,
         },
+        appliedScope,
         limit: input.limit ?? DEFAULT_LIMIT,
         offset: 0,
         hasMore: false,
@@ -330,11 +486,11 @@ export const guestExposureReportHandler = async (
   // Scope: a CustomSite id keeps that site; a Network id keeps the site it
   // references (so `Network:X` and `CustomSite:X` both resolve to one surface).
   let scopedSites = allSites;
-  if (input.communityId !== undefined) {
-    if (input.communityId.startsWith(CUSTOM_SITE_PREFIX)) {
-      scopedSites = allSites.filter((s) => s.id === input.communityId);
+  if (communityId !== undefined) {
+    if (communityId.startsWith(CUSTOM_SITE_PREFIX)) {
+      scopedSites = allSites.filter((s) => s.id === communityId);
     } else {
-      const net = allNetworks.find((n) => n.id === input.communityId);
+      const net = allNetworks.find((n) => n.id === communityId);
       const siteName = net !== undefined ? stringProp(net.properties, 'site') : null;
       scopedSites =
         siteName !== null
@@ -344,8 +500,8 @@ export const guestExposureReportHandler = async (
     if (scopedSites.length === 0) {
       return err({
         kind: 'component-not-found',
-        message: `no modeled CustomSite matches \`${input.communityId}\` in this vault (a Network id resolves through its <site>; the site may not be retrieved)`,
-        path: input.communityId,
+        message: `no modeled CustomSite matches \`${communityId}\` in this vault (a Network id resolves through its <site>; the site may not be retrieved)`,
+        path: communityId,
       });
     }
   }
@@ -558,11 +714,19 @@ export const guestExposureReportHandler = async (
       }
     }
 
-    if (network === null && input.communityId === undefined) {
+    if (network === null && communityId === undefined) {
       // A site with no correlated Network is either a Force.com site or a
       // community whose Network wasn't retrieved — noted, not dropped.
     }
-    const criticalCount = communityFindings.filter((f) => f.severity === 'critical').length;
+    // Apply the optional OBJECT scope: keep only findings on that object (its
+    // CRUD, its fields' FLS, its guest sharing rules). Object-independent
+    // findings (apex-enabled) drop out. Filtering HERE keeps per-community
+    // `findingCount`/`criticalCount` and the global `findings` list consistent.
+    const scopedFindings =
+      objectScope === null
+        ? communityFindings
+        : communityFindings.filter((f) => findingObjectApiName(f) === objectScope);
+    const criticalCount = scopedFindings.filter((f) => f.severity === 'critical').length;
     communities.push({
       communityId: site.id,
       label: siteLabel,
@@ -577,14 +741,14 @@ export const guestExposureReportHandler = async (
       guestProfileId,
       guestProfileConfidence: 'heuristic',
       guestProfileResolved,
-      findingCount: communityFindings.length,
+      findingCount: scopedFindings.length,
       criticalCount,
     });
-    findings.push(...communityFindings);
+    findings.push(...scopedFindings);
   }
 
   // Networks referencing a CustomSite that is not modeled (only for a full run).
-  if (input.communityId === undefined) {
+  if (communityId === undefined) {
     const modeledSiteApiNames = new Set(allSites.map((s) => s.apiName));
     for (const net of allNetworks) {
       const siteName = stringProp(net.properties, 'site');
@@ -604,9 +768,13 @@ export const guestExposureReportHandler = async (
   for (const f of findings) bySeverity[f.severity] += 1;
 
   const limit = input.limit ?? DEFAULT_LIMIT;
-  const fingerprint = argsFingerprint(
-    input.communityId !== undefined ? { communityId: input.communityId } : {},
-  );
+  // Bind the pagination cursor to BOTH scope axes — a cursor minted for a bare
+  // (or differently-scoped) call must not resume against an object-scoped call,
+  // whose findings set differs (else a resume could skip or duplicate rows).
+  const fingerprint = argsFingerprint({
+    ...(communityId !== undefined ? { communityId } : {}),
+    ...(objectScope !== null ? { objectApiName: objectScope } : {}),
+  });
   let offset = input.offset ?? 0;
   if (input.cursor !== undefined) {
     const decoded = decodeCursor(input.cursor, {
@@ -635,6 +803,11 @@ export const guestExposureReportHandler = async (
     'Object CRUD + FLS are the DECLARED static grant. Actual record visibility to a guest also depends on OWD + guest/criteria sharing rules (record level) — guest sharing rules are surfaced as their own findings, but whether a specific record matches is not modeled here.',
     'Visualforce-page guest access (`<pageAccesses>`) is NOT in the offline metadata model — only Apex-class access is enumerated. A guest-exposed VF page will not appear as a finding.',
   ];
+  if (objectScope !== null) {
+    disclosures.push(
+      `Scoped to object '${objectScope}': only guest exposure ON ${objectScope} (its object CRUD, its fields' FLS, and its guest sharing rules) is reported — other objects' guest grants and object-independent guest Apex access are filtered OUT. \`summary\`, \`findings\`, and each community's \`findingCount\`/\`criticalCount\` reflect this object scope (see \`appliedScope\`).`,
+    );
+  }
   const unresolved = communities.filter((c) => !c.guestProfileResolved).map((c) => c.communityId);
   if (unresolved.length > 0) {
     disclosures.push(
@@ -673,6 +846,7 @@ export const guestExposureReportHandler = async (
         medium: bySeverity.medium,
         low: bySeverity.low,
       },
+      appliedScope,
       limit,
       offset,
       hasMore: paged.hasMore,
@@ -680,7 +854,7 @@ export const guestExposureReportHandler = async (
       scanTruncated,
       confidence: 'heuristic',
       disclosures,
-      boundaryNote: `Ranked guest-exposure audit across ${communities.length} modeled community surface(s); ${bySeverity.critical} critical (public write on a PII object), ${bySeverity.high} high. Findings page with offset/limit; \`communities\` and \`summary\` hold complete counts. Confidence is heuristic — the guest-profile linkage is a naming convention.`,
+      boundaryNote: `Ranked guest-exposure audit across ${communities.length} modeled community surface(s)${objectScope !== null ? `, scoped to object '${objectScope}'` : ''}; ${bySeverity.critical} critical (public write on a PII object), ${bySeverity.high} high. Findings page with offset/limit; \`communities\` and \`summary\` hold complete counts. \`appliedScope\` echoes the scope actually applied. Confidence is heuristic — the guest-profile linkage is a naming convention.`,
       trust: offlineTrust(ctx, {
         status: coverage.status,
         ...(coverage.missingCoverage.length > 0 ? { missingCoverage: coverage.missingCoverage } : {}),

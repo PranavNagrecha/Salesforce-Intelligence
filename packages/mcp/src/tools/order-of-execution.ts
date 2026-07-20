@@ -61,6 +61,7 @@ import {
   isUnresolvedApexCallTarget,
   isUnresolvedFieldReceiver,
 } from './apex-receiver.js';
+import { resolveObjectAlias } from './input-aliases.js';
 import {
   type InactiveConfiguredFirer,
   skipInactiveSoeFirer,
@@ -76,15 +77,30 @@ import {
   DUPLICATE_RULE_TYPES,
 } from './soe-duplicate-rules.js';
 import {
+  AUTOMATION_PHASES,
   type BoundableStep,
+  computePhasesOmitted,
   enforceSoeByteBudget,
+  SOE_MAX_PAYLOAD_BYTES,
+  type SoeBudgetResult,
+  type SoePhase,
+  type SoePhaseCounts,
+  type SoePhaseOmission,
   soeTruncationNote,
+  tallyPhaseCounts,
 } from './soe-payload-bounds.js';
 import {
   findRollupRecalcSteps,
   rollupScanTruncationNote,
   type RollupRecalcStep,
 } from './soe-rollup-recalc.js';
+
+// Re-export the shared phase-omission contract so this module's public surface
+// is unchanged after the definitions moved to soe-payload-bounds. `AUTOMATION_PHASES`
+// is consumed by the save-order-phase lockstep test
+// (ORDER-OF-EXECUTION-OVERSIZE-HARD-FAIL).
+export { AUTOMATION_PHASES, computePhasesOmitted, tallyPhaseCounts };
+export type { SoePhase, SoePhaseCounts, SoePhaseOmission };
 
 /**
  * The verbatim honesty-axis disclosure surfaced in every response.
@@ -103,70 +119,6 @@ const DISCLOSURE =
  */
 const SOE_EVENTS = ['insert', 'update', 'delete', 'undelete'] as const;
 type SoeEvent = (typeof SOE_EVENTS)[number];
-
-/** Same SoePhase union as `what_happens_on_save`. */
-export type SoePhase =
-  | 'before-save-flows'
-  | 'pre-save-triggers'
-  | 'pre-save-validation'
-  | 'duplicate-rules'
-  | 'save'
-  | 'after-triggers'
-  | 'post-save-assignment'
-  | 'post-save-workflows'
-  | 'post-save-flows'
-  | 'post-save-approval'
-  | 'post-save-rollup-recalc'
-  | 'post-save-async';
-
-/**
- * The automation phases (every {@link SoePhase} except the `save`
- * placeholder), frozen in documented SOE order. Mirrors the
- * what_happens_on_save list so the two save-order views agree on which
- * phases are counted as org automation.
- */
-const AUTOMATION_PHASES: readonly Exclude<SoePhase, 'save'>[] = [
-  'before-save-flows',
-  'pre-save-triggers',
-  'pre-save-validation',
-  'duplicate-rules',
-  'after-triggers',
-  'post-save-assignment',
-  'post-save-workflows',
-  'post-save-flows',
-  'post-save-approval',
-  'post-save-rollup-recalc',
-  'post-save-async',
-];
-
-/**
- * Grounded per-phase active-component counts. Same shape and semantics
- * as the what_happens_on_save `SoePhaseCounts` — one count per
- * automation phase (the `save` placeholder excluded), so the count of
- * triggers / record-triggered flows / workflow rules per event is
- * answerable directly from the per-event summary.
- */
-export type SoePhaseCounts = Readonly<
-  Record<Exclude<SoePhase, 'save'>, number>
->;
-
-/**
- * Tally the active components emitted into each automation phase for one
- * event's composed SOE. The `save` placeholder is never counted; every
- * phase is present (zero when empty) for a stable, indexable map.
- */
-const tallyPhaseCounts = (
-  soe: readonly { readonly phase: SoePhase }[],
-): SoePhaseCounts => {
-  const counts = Object.fromEntries(
-    AUTOMATION_PHASES.map((p) => [p, 0]),
-  ) as Record<Exclude<SoePhase, 'save'>, number>;
-  for (const step of soe) {
-    if (step.phase === 'save') continue;
-    counts[step.phase] += 1;
-  }
-  return counts;
-};
 
 /** Same SoeStepCondition shape as `what_happens_on_save`. */
 export interface SoeStepCondition {
@@ -228,6 +180,12 @@ export interface SoeStep {
 /** One per-event entry inside the response's `byEvent` map. */
 export interface SoePerEvent {
   readonly soe: readonly SoeStep[];
+  /**
+   * Phases this event's `soe` no longer fully represents because byte-budget
+   * enforcement dropped trailing steps (`declared` vs `present`). Present ONLY
+   * when a phase was truncated out. Omitted when the sequence is complete.
+   */
+  readonly phasesOmitted?: readonly SoePhaseOmission[];
   readonly summary: {
     readonly totalSteps: number;
     /**
@@ -252,6 +210,17 @@ export interface SoePerEvent {
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface OrderOfExecutionOutput {
   readonly objectApiName: string;
+  /**
+   * Echoes the object scope ACTUALLY resolved so a host never assumes an alias
+   * it passed (`object` / `objectId` / `componentId`) was honored — the silent
+   * Zod-strip that surfaced as `objectApiName: Required` was the bug this
+   * closes. `componentId` is the canonical `CustomObject:` id; `object` is its
+   * bare api name (== `objectApiName`).
+   */
+  readonly appliedScope: {
+    readonly componentId: string;
+    readonly object: string;
+  };
   readonly objectModeled: boolean;
   readonly byEvent: Readonly<Record<SoeEvent, SoePerEvent>>;
   readonly disclosure: string;
@@ -267,17 +236,48 @@ export interface OrderOfExecutionOutput {
    * Absent when the full response fit.
    */
   readonly truncated?: boolean;
+  /**
+   * Echo of the `phase` input when a single-phase filter was applied — each
+   * event's `soe` then holds only that phase's steps (`summary` stays
+   * whole-composition). Absent on an un-filtered call.
+   */
+  readonly appliedPhaseFilter?: Exclude<SoePhase, 'save'>;
 }
 
 /**
  * Zod schema for the `sfi.order_of_execution` tool input.
  *
- *   - `objectApiName`: required, non-empty. The CustomObject API
- *     name. Unknown objects surface as `component-not-found`.
+ *   - object identity (required): name the object ANY way the router / a
+ *     sibling tool would (L2 Alias OS) — the canonical `objectApiName`, the
+ *     `object` / `objectId` aliases, or a `CustomObject:` `componentId`.
+ *     Exactly one target must survive resolution — disagreeing aliases are an
+ *     `invalid-query`, and the resolved scope is echoed as `appliedScope`.
+ *     Unknown objects surface as `component-not-found`.
+ *   - `phase`: optional. When set, each event's `soe` returns ONLY that phase's
+ *     steps — the recovery path for a phase truncated out of the full
+ *     four-event view (see `SoePerEvent.phasesOmitted`). Per-event `summary`
+ *     still reflects the whole composition. Echoed as `appliedPhaseFilter`.
  */
-export const orderOfExecutionInputSchema = z.object({
-  objectApiName: z.string().min(1),
-});
+export const orderOfExecutionInputSchema = z
+  .object({
+    objectApiName: z.string().min(1).optional(),
+    object: z.string().min(1).optional(),
+    objectId: z.string().min(1).optional(),
+    componentId: z.string().min(1).optional(),
+    phase: z.enum(AUTOMATION_PHASES).optional(),
+  })
+  .refine(
+    (i) =>
+      i.objectApiName !== undefined ||
+      i.object !== undefined ||
+      i.objectId !== undefined ||
+      i.componentId !== undefined,
+    {
+      message:
+        'name the object — pass `objectApiName` (e.g. "Account"), `object`, `objectId`, or a `CustomObject:` `componentId`',
+      path: ['objectApiName'],
+    },
+  );
 
 /** Parsed input shape, inferred from `orderOfExecutionInputSchema`. */
 export type OrderOfExecutionInput = z.infer<typeof orderOfExecutionInputSchema>;
@@ -908,6 +908,24 @@ const composeForEvent = async (
   });
 };
 
+/** Serialized byte size of any value — used to keep the honesty additions within budget. */
+const sizeOfBytes = (value: unknown): number =>
+  Buffer.byteLength(JSON.stringify(value), 'utf8');
+
+/**
+ * Headroom reserved below {@link SOE_MAX_PAYLOAD_BYTES} for the honesty
+ * scaffolding the four-event view appends AFTER byte-budget enforcement — the
+ * per-event `phasesOmitted` arrays and the phases-dropped disclosure note. Those
+ * additions are measured by `enforceSoeByteBudget` only if they are reserved
+ * for; otherwise they push `data` back over budget and the global dispatch guard
+ * mangles the (load-bearing) disclosure or, since the nested per-event `soe`
+ * arrays are not reducible by that guard, rejects the whole answer — the exact
+ * ORDER-OF-EXECUTION-OVERSIZE-HARD-FAIL / re-inflation bug. Sized to cover the
+ * common tail-drop (a few phases per event); a pathological object that exceeds
+ * it triggers a second, precisely-reserved enforcement pass in the handler.
+ */
+const OOE_HONESTY_RESERVE_BYTES = 3_000;
+
 /**
  * The `sfi.order_of_execution` MCP tool. Returns a per-event SOE
  * tree for the given object. See the module JSDoc for the output
@@ -923,8 +941,27 @@ const composeForEvent = async (
  */
 export const orderOfExecutionHandler = async (
   ctx: Context,
-  input: OrderOfExecutionInput,
+  rawInput: OrderOfExecutionInput,
 ): Promise<Result<McpResponse<OrderOfExecutionOutput>, McpError>> => {
+  // L2 Alias OS: resolve the object from any of objectApiName / object /
+  // objectId / CustomObject: componentId. Disagreeing aliases -> invalid-query.
+  const scopeResult = resolveObjectAlias(rawInput);
+  if (!scopeResult.ok) return err(scopeResult.error);
+  if (scopeResult.value === null) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        'name the object — pass `objectApiName`, `object`, `objectId`, or a `CustomObject:` `componentId`',
+      path: 'objectApiName',
+    });
+  }
+  const appliedScope = {
+    componentId: scopeResult.value.componentId,
+    object: scopeResult.value.object,
+  };
+  // Normalize the object identity into `objectApiName` so every downstream
+  // read below stays byte-identical to the canonical-arg path.
+  const input = { ...rawInput, objectApiName: scopeResult.value.object };
   const objectId: ComponentId = `CustomObject:${input.objectApiName}`;
   const admission = await evaluateSoeAdmission(ctx, objectId);
   if (!admission.ok) {
@@ -987,20 +1024,35 @@ export const orderOfExecutionHandler = async (
     if (!perEventResult.ok) {
       return err({ kind: 'internal', message: perEventResult.error });
     }
-    byEvent[event] = perEventResult.value;
+    // Optional single-phase filter (recovery path for a phase truncated out of
+    // the full four-event view). Each event's `soe` returns only the requested
+    // phase; `summary` is left whole (still the full phase distribution) so the
+    // caller keeps the complete counts. Filtering here — before enforcement —
+    // means the small per-phase slice never blows the byte budget, so a phase
+    // the full view dropped is recoverable in one call.
+    byEvent[event] =
+      input.phase !== undefined
+        ? {
+            ...perEventResult.value,
+            soe: perEventResult.value.soe.filter((s) => s.phase === input.phase),
+          }
+        : perEventResult.value;
   }
 
   const inactiveConfigured = sortedInactiveConfigured(inactiveCollector);
 
   const data: {
     objectApiName: string;
+    appliedScope: { componentId: string; object: string };
     objectModeled: boolean;
     byEvent: Record<SoeEvent, SoePerEvent>;
     disclosure: string;
     inactiveConfigured?: readonly InactiveConfiguredFirer[];
     truncated?: boolean;
+    appliedPhaseFilter?: Exclude<SoePhase, 'save'>;
   } = {
     objectApiName: input.objectApiName,
+    appliedScope,
     objectModeled,
     ...(inactiveConfigured.length > 0 ? { inactiveConfigured } : {}),
     ...(inactiveConfigured.length > 0
@@ -1008,6 +1060,7 @@ export const orderOfExecutionHandler = async (
           inactiveHeadline: `Excluded inactive: ${inactiveConfigured.map((i) => i.apiName).join(', ')}`,
         }
       : {}),
+    ...(input.phase !== undefined ? { appliedPhaseFilter: input.phase } : {}),
     byEvent,
     disclosure: composeSoeDisclosure(DISCLOSURE, objectModeled),
   };
@@ -1027,10 +1080,93 @@ export const orderOfExecutionHandler = async (
   const containers = SOE_EVENTS.map(
     (event) => byEvent[event].soe,
   ) as unknown as BoundableStep[][];
-  const budget = enforceSoeByteBudget(data, containers);
-  if (budget.truncated) {
-    data.truncated = true;
-    data.disclosure = `${data.disclosure} ${soeTruncationNote(budget)}`;
+
+  // Base disclosure (rollup note included, honesty scaffolding NOT) — captured
+  // so `attachEnvelopeHonesty` rebuilds the disclosure from a clean base each
+  // time it runs, never doubling a note across the two enforcement passes below.
+  const baseDisclosure = data.disclosure;
+  // Stable references to each event's composed payload (its `soe` array is the
+  // one the enforcer trims in place; its `summary.phaseCounts` are the true
+  // pre-enforcement counts). `attachEnvelopeHonesty` derives `byEvent[event]`
+  // from these each pass so a re-enforcement never compounds a prior pass's
+  // `phasesOmitted`.
+  const perEventBase = { ...byEvent };
+
+  /**
+   * Rebuild `data`'s truncation disclosure + per-event `phasesOmitted` for the
+   * CURRENT survivor state (WHAT-HAPPENS-ON-SAVE-TRUNCATION-DROPS-LATER-PHASES):
+   * the last-resort step-drop can shed whole phases from the tail of an event's
+   * `soe` while `summary.phaseCounts` still reports their true count, so name the
+   * shortfall in `phasesOmitted` — the counts can never silently contradict the
+   * sequence. Rebuilds from `baseDisclosure`, so it is idempotent and safe to
+   * call again after a re-enforcement pass. Skipped (phasesOmitted-wise) on a
+   * phase-filtered call — the caller narrowed on purpose. Byte-neutral when
+   * nothing was dropped.
+   */
+  const attachEnvelopeHonesty = (result: SoeBudgetResult): void => {
+    let disclosure = baseDisclosure;
+    if (result.truncated) {
+      data.truncated = true;
+      disclosure = `${disclosure} ${soeTruncationNote(result)}`;
+    } else {
+      delete data.truncated;
+    }
+    if (input.phase === undefined) {
+      const omittedByEvent: string[] = [];
+      for (const event of SOE_EVENTS) {
+        const base = perEventBase[event];
+        const phasesOmitted = computePhasesOmitted(
+          base.summary.phaseCounts,
+          base.soe,
+        );
+        byEvent[event] =
+          phasesOmitted.length > 0 ? { ...base, phasesOmitted } : base;
+        if (phasesOmitted.length > 0) {
+          omittedByEvent.push(
+            `${event}: ${phasesOmitted.map((p) => `${p.phase} (${p.present}/${p.declared})`).join(', ')}`,
+          );
+        }
+      }
+      if (omittedByEvent.length > 0) {
+        data.truncated = true;
+        disclosure =
+          `${disclosure} Note: byte-budget truncation dropped whole phases from the returned sequence though \`phaseCounts\` still reports them — ${omittedByEvent.join('; ')}. Re-query with the \`phase\` filter (or \`what_happens_on_save\` for one event) to see the full roster.`;
+      }
+    }
+    data.disclosure = disclosure;
+  };
+
+  // Pass 1 — enforce with modest headroom reserved for the honesty scaffolding
+  // attached below, then attach it. Reserving here is what makes the FINAL
+  // `data` (scaffolding included) obey the same envelope law as
+  // `what_happens_on_save`: it stays within budget instead of re-inflating past
+  // it and forcing the global guard to mangle the disclosure.
+  let budget = enforceSoeByteBudget(data, containers, {
+    budgetBytes: SOE_MAX_PAYLOAD_BYTES - OOE_HONESTY_RESERVE_BYTES,
+  });
+  const soeOnlyBytes = sizeOfBytes(data);
+  attachEnvelopeHonesty(budget);
+
+  // Pass 2 (rare) — on a pathologically dense object the honesty scaffolding
+  // exceeded the reserve and pushed `data` back over the hard SOE ceiling.
+  // Re-enforce reserving the MEASURED scaffolding size (plus the same headroom
+  // for its growth as more steps drop), then re-attach against the new
+  // survivors. `phasesOmitted` is bounded by phase-count, so this converges and
+  // guarantees the final `data` is within budget without the global guard.
+  if (sizeOfBytes(data) > SOE_MAX_PAYLOAD_BYTES) {
+    const honestyBytes = sizeOfBytes(data) - soeOnlyBytes;
+    const budget2 = enforceSoeByteBudget(data, containers, {
+      budgetBytes:
+        SOE_MAX_PAYLOAD_BYTES - honestyBytes - OOE_HONESTY_RESERVE_BYTES,
+    });
+    budget = {
+      truncated: budget.truncated || budget2.truncated,
+      actionsOmitted: budget.actionsOmitted + budget2.actionsOmitted,
+      conditionalsTrimmed:
+        budget.conditionalsTrimmed + budget2.conditionalsTrimmed,
+      stepsOmitted: budget.stepsOmitted + budget2.stepsOmitted,
+    };
+    attachEnvelopeHonesty(budget);
   }
 
   return ok({

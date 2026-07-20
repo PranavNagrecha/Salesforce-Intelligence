@@ -54,6 +54,7 @@ import {
   emptyQueuesAndGroupsHandler,
 } from './empty-queues-and-groups.js';
 import { findHardcodedValuesAnywhereHandler } from './find-hardcoded-values-anywhere.js';
+import { firstNonEmpty } from './input-aliases.js';
 import {
   processBuilderMigrationCandidatesHandler,
 } from './process-builder-migration-candidates.js';
@@ -224,6 +225,15 @@ export const techDebtScoreInputSchema = z.object({
     })
     .passthrough()
     .optional(),
+  // TECH-DEBT-SCORE-IGNORES-OBJECT-SCOPE: object / domain scope keys a host
+  // reaches for on "tech debt for the {object} domain". Accepted here ONLY so the
+  // handler can REFUSE with the org-wide-only pointer instead of silently
+  // returning the fleet-wide score (which was byte-identical scoped vs bare).
+  // NEVER a valid scope — this composite is org-wide.
+  objectApiName: z.string().min(1).optional(),
+  object: z.string().min(1).optional(),
+  objectId: z.string().min(1).optional(),
+  componentId: z.string().min(1).optional(),
 });
 
 export type TechDebtScoreInput = z.infer<typeof techDebtScoreInputSchema>;
@@ -244,6 +254,17 @@ export interface ExcludedCategory {
 }
 
 export interface TechDebtScoreOutput {
+  /**
+   * Echoes the scope ACTUALLY applied so a host never assumes an object /
+   * domain key it passed was honored — this composite is ORG-WIDE, so `object`
+   * is always `null` and `mode` is always `'all'`. A call that DID pass an
+   * object / component scope is rejected upstream with `invalid-query`
+   * (TECH-DEBT-SCORE-IGNORES-OBJECT-SCOPE), never silently answered org-wide.
+   */
+  readonly appliedScope: {
+    readonly object: string | null;
+    readonly mode: 'all';
+  };
   readonly overallScore: number;
   /**
    * Signed change vs the prior refresh's logged score (P9-risk-delta) —
@@ -528,6 +549,28 @@ export const techDebtScoreHandler = async (
   ctx: Context,
   input: TechDebtScoreInput,
 ): Promise<Result<McpResponse<TechDebtScoreOutput>, McpError>> => {
+  // TECH-DEBT-SCORE-IGNORES-OBJECT-SCOPE: refuse an object / domain scope rather
+  // than silently returning the fleet-wide score (byte-identical scoped vs bare,
+  // so a host invents a domain binding). The score composes org-wide extractors;
+  // there is no honest per-object subset to return — point at the object-scoped
+  // hygiene tools instead.
+  const scopeKey = firstNonEmpty(
+    input.objectApiName,
+    input.object,
+    input.objectId,
+    input.componentId,
+  );
+  if (scopeKey !== undefined) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        `tech_debt_score is an ORG-WIDE weighted composite; it cannot scope to a single object or domain (\`${scopeKey}\`). ` +
+        'Its categories (deadWeight / legacyAutomation / codeQuality / freshness / apiVersions / unassignedGrants) roll up whole-org extractors that are not partitioned by object. ' +
+        'For per-object debt signals run the object-scoped tools on that object — `object_access_audit`, `safe_to_delete_field`, `find_component_usages` — or `code_quality_audit` for code. Call tech_debt_score with only `weights` / `excludeCategories` for the whole-org score.',
+      path: 'objectApiName',
+    });
+  }
+
   // Refuse unknown weight keys explicitly. The Zod schema uses
   // `.passthrough()` on `weights` precisely so we can see typos here;
   // without this check, a typo (e.g. `{ weight: 0.5 }`) would produce a
@@ -887,6 +930,7 @@ export const techDebtScoreHandler = async (
 
   return ok({
     data: {
+      appliedScope: { object: null, mode: 'all' },
       overallScore: roundedScore,
       ...deltaFields,
       scoreBand,

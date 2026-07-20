@@ -49,9 +49,24 @@
  *      `field_lineage` / `field_360` concern.
  *   6. **Decisions** — the v2.0a `properties.conditions[]` mirror,
  *      surfaced as `{ decisionName, conditions }` pairs. The
- *      `decisionName` reuses the synthetic ConditionalContext apiName
- *      (e.g., `Flow:Account_Notify.condition-2`); the `conditions`
- *      array is the rendered expression text.
+ *      `decisionName` is the firer's real element name (a Flow decision's
+ *      `<name>` + rule `<name>`, from the mirror's `sourceName`), falling
+ *      back to the synthetic ConditionalContext apiName
+ *      (e.g., `Flow:Account_Notify.condition-2`) when none was captured;
+ *      the `conditions` array is the rendered expression text.
+ *
+ * Cross-reference to `sfi.flow_graph` (spec §9 Q2 — KEEP + cross-ref,
+ * decided non-destructively): this tool is deliberately a SUMMARY over
+ * six narrative axes (identity, trigger info, action/subflow calls,
+ * record lookups/writes, decisions) — it does NOT enumerate every
+ * element or the element-to-element connector graph. `sfi.flow_graph`
+ * is the lossless structural projection (every element by its real
+ * name, the full connector graph from→to→kind, loop next-value/no-
+ * more-values edges, formula expressions, variable declarations). The
+ * `seeAlso` field on the output makes this explicit so a caller asking
+ * "what's the full structure" / "what are the branches" / "show me the
+ * connectors" is routed to `flow_graph` instead of over-trusting this
+ * narrative as exhaustive.
  *
  * Implementation notes:
  *   - One `getNodeById(flowId)` resolves the Flow. `Flow:` prefix is
@@ -66,10 +81,11 @@
  *   - The Flow's `properties.conditions` mirror (the v2.0a synthetic
  *     ConditionalContext metadata stamped onto the Flow node) is the
  *     source of truth for the `decisions` axis. The mirror entries
- *     carry `kind`, `expression`, and `conditionContextId`; we surface
- *     `expression` directly and use the synthetic apiName as the
- *     decisionName so callers can cross-reference back to the
- *     ConditionalContext nodes.
+ *     carry `kind`, `expression`, `conditionContextId`, and (for Flow
+ *     decisions) `sourceName`; we surface `expression` directly and use
+ *     `sourceName` as the decisionName — falling back to the synthetic
+ *     apiName — so callers see the real decision name yet can still
+ *     cross-reference back to the ConditionalContext nodes via the id.
  *   - Sparse-graph misses (an outgoing edge whose target was dropped
  *     between extractions) are silently skipped — matches every other
  *     composition tool's tolerance pattern. Missing edges do NOT
@@ -94,6 +110,7 @@ import type { Context } from '../server.js';
 
 import { annotationsBlockFor, type AnnotationsBlock } from './annotations.js';
 import { coercePrefix } from './coerce-id.js';
+import { firstNonEmpty } from './input-aliases.js';
 
 /** Canonical id prefix for the Flow node type. */
 const FLOW_PREFIX = 'Flow:';
@@ -109,19 +126,69 @@ const FLOW_PREFIX = 'Flow:';
 const DISCLOSURE = 'Structured narrative; Claude composes prose';
 
 /**
+ * Cross-reference note (spec §9 Q2) surfaced verbatim on every response.
+ * Points structure/connector questions at `sfi.flow_graph` — this tool's
+ * six narrative axes are a SUMMARY, not the complete element/connector
+ * graph, and this note says so explicitly rather than leaving a caller to
+ * assume the narrative is exhaustive. Frozen here for the same reason as
+ * {@link DISCLOSURE}: a caller-facing rephrasing is a code-review concern,
+ * not a silent drift between what the tool claims and what it returns.
+ */
+const SEE_ALSO_FLOW_GRAPH =
+  'This is a SUMMARY narrative (trigger info, action/subflow calls, record lookups/writes, decisions) — it does NOT enumerate every element or the element-to-element connector graph. For the full structure (every element by real name, the complete from→to→kind connector graph, decision rule branches, loops, formulas, and variables), call sfi.flow_graph(flowRef) instead.';
+
+/**
  * Zod schema for the `sfi.explain_flow` tool input.
  *
- *   - `flowId`: required, non-empty string. The canonical Flow id
- *     (`Flow:{ApiName}`). Non-`Flow:` prefixes surface as
- *     `invalid-query` from the handler; unknown but well-formed ids
- *     surface as `component-not-found`.
+ *   - `flowId`: the canonical Flow id (`Flow:{ApiName}`) or a bare flow name.
+ *     Non-`Flow:` prefixes surface as `invalid-query` from the handler; unknown
+ *     but well-formed ids surface as `component-not-found`.
+ *   - `componentId` / `apiName`: interchangeable aliases a host naturally
+ *     forwards from `sfi.resolve` (EXPLAIN-FLOW-REJECTS-COMPONENTID). Resolved to
+ *     the single Flow through {@link resolveFlowRef}; the canonical `flowId`
+ *     wins, disagreeing selectors → `invalid-query`, at least one is required.
  */
 export const explainFlowInputSchema = z.object({
-  flowId: z.string().min(1),
+  flowId: z.string().min(1).optional(),
+  componentId: z.string().min(1).optional(),
+  apiName: z.string().min(1).optional(),
 });
 
 /** Parsed input shape, inferred from `explainFlowInputSchema`. */
 export type ExplainFlowInput = z.infer<typeof explainFlowInputSchema>;
+
+/**
+ * Reconcile the interchangeable Flow selectors a host reaches for — `flowId`
+ * (canonical), `componentId` (`Flow:{name}`), and `apiName`
+ * (EXPLAIN-FLOW-REJECTS-COMPONENTID, mirroring the Track-B what_if tools). Each
+ * is coerced to a `Flow:` id for the distinctness check; the canonical `flowId`
+ * wins when several agree. Disagreeing selectors → `invalid-query` (never a
+ * silent pick); none → `invalid-query`. The RAW winning value is returned so the
+ * handler's existing coercion + wrong-type message stay byte-identical for a
+ * bare `{ flowId }` call.
+ */
+const resolveFlowRef = (input: ExplainFlowInput): Result<string, McpError> => {
+  const candidates = [input.flowId, input.componentId, input.apiName]
+    .map((v) => firstNonEmpty(v))
+    .filter((v): v is string => v !== undefined);
+  if (candidates.length === 0) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        'name the flow — pass `flowId` (e.g. "My_Flow"), `componentId` (`Flow:My_Flow`), or `apiName`',
+      path: 'flowId',
+    });
+  }
+  const distinct = [...new Set(candidates.map((v) => coercePrefix(v, [FLOW_PREFIX])))];
+  if (distinct.length > 1) {
+    return err({
+      kind: 'invalid-query',
+      message: `flow selectors name different targets (${distinct.join(', ')}); pass exactly one of flowId / componentId / apiName`,
+      path: 'flowId',
+    });
+  }
+  return ok(candidates[0] as string);
+};
 
 /**
  * One condition gating the Flow. Mirrors the v2.0a synthetic
@@ -240,14 +307,17 @@ export interface ExplainFlowRecordWrite {
 }
 
 /**
- * One decision in the Flow body. The `decisionName` is the synthetic
- * ConditionalContext apiName (e.g., `Flow:Account_Notify.condition-2`)
- * so the renderer can cross-reference back to the gating node;
- * `conditions` carries the rendered expression text from the mirror
- * entry. Multi-condition decisions surface every expression in the
- * array. `fieldReferences` carries the fields the decision actually
- * evaluates — without them the row is just the bare connector (`"and"`),
- * which says nothing about WHAT the flow branches on.
+ * One decision in the Flow body. The `decisionName` is the firer's REAL
+ * element name when the extractor captured one — for a Flow decision, the
+ * `<decisions><name>` + matched `<rules><name>` (e.g.
+ * `My_Decision (My_Outcome)`), surfaced verbatim from the mirror
+ * entry's `sourceName`. It falls back to the synthetic ConditionalContext
+ * apiName (e.g., `Flow:Account_Notify.condition-2`) only when no name was
+ * captured (an older vault, or a nameless firer surface). `conditions`
+ * carries the rendered expression text from the mirror entry.
+ * Multi-condition decisions surface every expression in the array.
+ * `fieldReferences` carries the fields the decision actually evaluates —
+ * without them the row would say nothing about WHAT the flow branches on.
  */
 export interface ExplainFlowDecision {
   readonly decisionName: string;
@@ -369,7 +439,15 @@ export interface ExplainFlowOutput {
    * data-dependent at runtime and is not evaluated here. Always present so a
    * host never reads a declared condition as "this path runs".
    */
-  readonly conditionsRuntimeNote: string;  /** P13-ANNOT-tools: curated annotations (provenance `annotation`); absent when none. */
+  readonly conditionsRuntimeNote: string;
+  /**
+   * Cross-reference to `sfi.flow_graph` (spec §9 Q2). Always present, verbatim
+   * — see {@link SEE_ALSO_FLOW_GRAPH}. States plainly that this narrative is a
+   * SUMMARY over six axes, not the complete element/connector graph, and names
+   * the tool that returns the lossless structural projection.
+   */
+  readonly seeAlso: string;
+  /** P13-ANNOT-tools: curated annotations (provenance `annotation`); absent when none. */
   readonly annotations?: AnnotationsBlock;
 }
 
@@ -1087,7 +1165,16 @@ const collectDecisions = (node: Node): readonly ExplainFlowDecision[] => {
     const conditionContextId = obj['conditionContextId'];
     const expression = obj['expression'];
     if (typeof conditionContextId !== 'string') continue;
-    const decisionName = decisionNameOf(conditionContextId);
+    // Prefer the firer's REAL element name (a Flow decision's `<name>` + rule
+    // `<name>`, captured into the mirror as `sourceName`) over the synthetic
+    // `condition-N` handle. Fall back to the synthetic apiName when the source
+    // never captured a name (a criteria / formula / record-trigger firer, or
+    // an older vault built before this fix).
+    const sourceName = obj['sourceName'];
+    const decisionName =
+      typeof sourceName === 'string' && sourceName.length > 0
+        ? sourceName
+        : decisionNameOf(conditionContextId);
     const expressionText = typeof expression === 'string' ? expression : '';
     // Surface the fields the decision evaluates (mirror entry `fieldRefs`).
     // Dropping them left every decision row as a bare connector ("and").
@@ -1110,6 +1197,10 @@ const collectDecisions = (node: Node): readonly ExplainFlowDecision[] => {
  * (action calls, record lookups, record writes), and the v2.0a
  * decision conditions. See the module JSDoc for the cascade and the
  * honesty-axis design.
+ *
+ * DEFERS to `sfi.flow_graph` for full structure: this is a SUMMARY over
+ * six narrative axes, not every element or the connector graph. The
+ * `seeAlso` field on the output says so explicitly (spec §9 Q2).
  *
  * @example
  *   const r = await explainFlowHandler(ctx, { flowId: 'Flow:Account_Notify' });
@@ -1150,11 +1241,14 @@ export const explainFlowHandler = async (
   ctx: Context,
   input: ExplainFlowInput,
 ): Promise<Result<McpResponse<ExplainFlowOutput>, McpError>> => {
-  const coercedFlowId = coercePrefix(input.flowId, [FLOW_PREFIX]);
+  const flowRefResult = resolveFlowRef(input);
+  if (!flowRefResult.ok) return flowRefResult;
+  const flowRef = flowRefResult.value;
+  const coercedFlowId = coercePrefix(flowRef, [FLOW_PREFIX]);
   if (!coercedFlowId.startsWith(FLOW_PREFIX)) {
     return err({
       kind: 'invalid-query',
-      message: `flowId must be a Flow id (e.g. '${FLOW_PREFIX}My_Flow') or a bare flow name (e.g. 'My_Flow'); got '${input.flowId}'`,
+      message: `flowId must be a Flow id (e.g. '${FLOW_PREFIX}My_Flow') or a bare flow name (e.g. 'My_Flow'); got '${flowRef}'`,
       path: 'flowId',
     });
   }
@@ -1238,6 +1332,7 @@ export const explainFlowHandler = async (
     decisions: collectDecisions(node),
     disclosure: DISCLOSURE,
     conditionsRuntimeNote: CONDITIONS_RUNTIME_NOTE,
+    seeAlso: SEE_ALSO_FLOW_GRAPH,
   };
   const annotations = await annotationsBlockFor(ctx, node.id);
 

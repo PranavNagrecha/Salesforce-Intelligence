@@ -138,6 +138,7 @@ import {
   isUnresolvedApexCallTarget,
   isUnresolvedFieldReceiver,
 } from './apex-receiver.js';
+import { resolveObjectAlias } from './input-aliases.js';
 import {
   type InactiveConfiguredFirer,
   skipInactiveSoeFirer,
@@ -153,14 +154,26 @@ import {
   DUPLICATE_RULE_TYPES,
 } from './soe-duplicate-rules.js';
 import {
+  AUTOMATION_PHASES,
   type BoundableStep,
+  computePhasesOmitted,
   enforceSoeByteBudget,
+  type SoePhase,
+  type SoePhaseCounts,
+  type SoePhaseOmission,
   soeTruncationNote,
+  tallyPhaseCounts,
 } from './soe-payload-bounds.js';
 import {
   findRollupRecalcSteps,
   rollupScanTruncationNote,
 } from './soe-rollup-recalc.js';
+
+// Re-export the shared phase-omission contract so this module's public type +
+// value surface is unchanged after the definitions moved to soe-payload-bounds
+// (WHAT-HAPPENS-ON-SAVE-TRUNCATION-DROPS-LATER-PHASES).
+export { computePhasesOmitted, tallyPhaseCounts };
+export type { SoePhase, SoePhaseCounts, SoePhaseOmission };
 
 /**
  * The verbatim honesty-axis disclosure surfaced in every response.
@@ -192,9 +205,13 @@ type DmlEvent = (typeof ALLOWED_EVENTS)[number];
 /**
  * Zod schema for the `sfi.what_happens_on_save` tool input.
  *
- *   - `objectApiName`: required, non-empty. The CustomObject API name
- *     (e.g., `'Account'`, `'Opportunity__c'`). Unknown objects surface
- *     as `component-not-found`.
+ *   - object identity (required): name the object ANY way the router / a
+ *     sibling tool would (L2 Alias OS) — the canonical `objectApiName`
+ *     (`'Account'`, `'My_Object__c'`), the `object` / `objectId` aliases,
+ *     or a `CustomObject:` `componentId`. Exactly one target must survive
+ *     resolution — disagreeing aliases are an `invalid-query`, and the
+ *     resolved scope is echoed as `appliedScope`. Unknown objects surface as
+ *     `component-not-found`.
  *   - `event`: required, one of the five DML events. Trigger-style
  *     phrasings ("after update", "before insert") and any casing are
  *     accepted — the timing prefix is stripped to the bare DML event.
@@ -202,20 +219,44 @@ type DmlEvent = (typeof ALLOWED_EVENTS)[number];
  *     verbatim; v2.0e does NOT narrow automation by record type
  *     (deferred to v2.0e.1).
  */
-export const whatHappensOnSaveInputSchema = z.object({
-  objectApiName: z.string().min(1),
-  // Accept "after update" / "Before Insert" etc.: lower-case and drop the
-  // before/after timing prefix so the bare DML event matches the enum. The
-  // SOE walker models both timings internally; the event arg selects the row.
-  event: z.preprocess(
-    (v) =>
-      typeof v === 'string'
-        ? v.trim().toLowerCase().replace(/^(?:before|after)\s+/, '')
-        : v,
-    z.enum(ALLOWED_EVENTS),
-  ),
-  recordTypeId: z.string().min(1).optional(),
-});
+export const whatHappensOnSaveInputSchema = z
+  .object({
+    objectApiName: z.string().min(1).optional(),
+    object: z.string().min(1).optional(),
+    objectId: z.string().min(1).optional(),
+    componentId: z.string().min(1).optional(),
+    // Accept "after update" / "Before Insert" etc.: lower-case and drop the
+    // before/after timing prefix so the bare DML event matches the enum. The
+    // SOE walker models both timings internally; the event arg selects the row.
+    event: z.preprocess(
+      (v) =>
+        typeof v === 'string'
+          ? v.trim().toLowerCase().replace(/^(?:before|after)\s+/, '')
+          : v,
+      z.enum(ALLOWED_EVENTS),
+    ),
+    recordTypeId: z.string().min(1).optional(),
+    /**
+     * Optional single-phase filter. When set, `soe` returns ONLY that phase's
+     * steps (recovery path for a phase truncated out of the full view — see
+     * `phasesOmitted`); `summary` still reflects the FULL composition so the
+     * caller keeps the whole phase distribution. Echoed back as
+     * `appliedPhaseFilter`.
+     */
+    phase: z.enum(AUTOMATION_PHASES).optional(),
+  })
+  .refine(
+    (i) =>
+      i.objectApiName !== undefined ||
+      i.object !== undefined ||
+      i.objectId !== undefined ||
+      i.componentId !== undefined,
+    {
+      message:
+        'name the object — pass `objectApiName` (e.g. "Account"), `object`, `objectId`, or a `CustomObject:` `componentId`',
+      path: ['objectApiName'],
+    },
+  );
 
 /** Parsed input shape, inferred from `whatHappensOnSaveInputSchema`. */
 export type WhatHappensOnSaveInput = z.infer<typeof whatHappensOnSaveInputSchema>;
@@ -251,83 +292,6 @@ export interface SoeStepAction {
   readonly targetId?: ComponentId;
   readonly description: string;
 }
-
-/**
- * Which phase of the documented Salesforce order of execution a step
- * comes from. The order matches the platform's evaluation sequence
- * (per the vendored SOE docs); the `save` phase is a placeholder
- * representing the database write itself.
- */
-export type SoePhase =
-  | 'before-save-flows'
-  | 'pre-save-triggers'
-  | 'pre-save-validation'
-  | 'duplicate-rules'
-  | 'save'
-  | 'after-triggers'
-  | 'post-save-assignment'
-  | 'post-save-workflows'
-  | 'post-save-flows'
-  | 'post-save-approval'
-  | 'post-save-rollup-recalc'
-  | 'post-save-async';
-
-/**
- * The automation phases (every {@link SoePhase} except the `save`
- * placeholder, which is the platform's own database write, not an
- * org-configured automation component). Frozen in documented SOE
- * order so a per-phase count map iterates in firing sequence.
- */
-const AUTOMATION_PHASES: readonly Exclude<SoePhase, 'save'>[] = [
-  'before-save-flows',
-  'pre-save-triggers',
-  'pre-save-validation',
-  'duplicate-rules',
-  'after-triggers',
-  'post-save-assignment',
-  'post-save-workflows',
-  'post-save-flows',
-  'post-save-approval',
-  'post-save-rollup-recalc',
-  'post-save-async',
-];
-
-/**
- * Grounded per-phase active-component counts for a composed SOE.
- *
- * Each key is an automation phase (the `save` placeholder is excluded —
- * it is the platform's own write, not org automation); each value is
- * the number of ACTIVE components emitted into that phase for this
- * object + event. This is the count that answers "how many distinct
- * automation components fire across triggers, record-triggered flows,
- * and workflow rules, and in what order" directly from the response,
- * rather than forcing the caller to re-bucket the flat `soe` array and
- * subtract the placeholder. Inactive automation is NOT counted here —
- * it is disclosed separately in `inactiveConfigured`, so a deactivation
- * delta is `phaseCounts` before vs after a component is turned off.
- */
-export type SoePhaseCounts = Readonly<
-  Record<Exclude<SoePhase, 'save'>, number>
->;
-
-/**
- * Tally the active components emitted into each automation phase. The
- * `save` placeholder is never counted (it is not org automation). Phases
- * with zero emitted steps are present with a `0` so the count map is a
- * complete, stable shape every caller can index.
- */
-export const tallyPhaseCounts = (
-  soe: readonly { readonly phase: SoePhase }[],
-): SoePhaseCounts => {
-  const counts = Object.fromEntries(
-    AUTOMATION_PHASES.map((p) => [p, 0]),
-  ) as Record<Exclude<SoePhase, 'save'>, number>;
-  for (const step of soe) {
-    if (step.phase === 'save') continue;
-    counts[step.phase] += 1;
-  }
-  return counts;
-};
 
 /**
  * One step in the SOE chain. `stepIndex` is the 0-based position
@@ -411,6 +375,17 @@ export interface EntitlementProcessNote {
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface WhatHappensOnSaveOutput {
   readonly objectApiName: string;
+  /**
+   * Echoes the object scope ACTUALLY resolved so a host never assumes an alias
+   * it passed (`object` / `objectId` / `componentId`) was honored — the silent
+   * Zod-strip that surfaced as `objectApiName: Required` was the bug this
+   * closes. `componentId` is the canonical `CustomObject:` id; `object` is its
+   * bare api name (== `objectApiName`).
+   */
+  readonly appliedScope: {
+    readonly componentId: string;
+    readonly object: string;
+  };
   readonly event: DmlEvent;
   readonly recordTypeId: ComponentId | null;
   readonly objectModeled: boolean;
@@ -441,6 +416,24 @@ export interface WhatHappensOnSaveOutput {
    * active:false rule/process). Omitted when empty.
    */
   readonly inactiveConfigured?: readonly InactiveConfiguredFirer[];
+  /**
+   * Phases the returned `soe` does NOT fully represent because byte-budget
+   * enforcement dropped trailing steps — each names the phase, its true
+   * `declared` count (still in `summary.phaseCounts`), and how many `present`
+   * survived. Present ONLY on the full (un-filtered) view when a phase was
+   * partially/fully truncated out. `what_happens_on_save` never drops steps
+   * (its byte guard keeps every firing step and trims only per-step
+   * actions/conditions), so this is normally absent; it exists so a truncated
+   * payload can never silently contradict `phaseCounts`. Recover a named phase
+   * with the `phase` filter. Omitted when empty.
+   */
+  readonly phasesOmitted?: readonly SoePhaseOmission[];
+  /**
+   * Echo of the `phase` input when a single-phase filter was applied — `soe`
+   * then holds only that phase's steps (`summary` stays whole-composition).
+   * Absent on an un-filtered call.
+   */
+  readonly appliedPhaseFilter?: Exclude<SoePhase, 'save'>;
   /**
    * True when per-step action lists were trimmed to fit the MCP response
    * budget. Every step is still present and in order — only the heaviest
@@ -892,8 +885,27 @@ const WORKFLOW_TYPES: ReadonlySet<ComponentType> = new Set(['WorkflowRule']);
  */
 export const whatHappensOnSaveHandler = async (
   ctx: Context,
-  input: WhatHappensOnSaveInput,
+  rawInput: WhatHappensOnSaveInput,
 ): Promise<Result<McpResponse<WhatHappensOnSaveOutput>, McpError>> => {
+  // L2 Alias OS: resolve the object from any of objectApiName / object /
+  // objectId / CustomObject: componentId. Disagreeing aliases -> invalid-query.
+  const scopeResult = resolveObjectAlias(rawInput);
+  if (!scopeResult.ok) return err(scopeResult.error);
+  if (scopeResult.value === null) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        'name the object — pass `objectApiName`, `object`, `objectId`, or a `CustomObject:` `componentId`',
+      path: 'objectApiName',
+    });
+  }
+  const appliedScope = {
+    componentId: scopeResult.value.componentId,
+    object: scopeResult.value.object,
+  };
+  // Normalize the object identity into `objectApiName` so every downstream
+  // read below stays byte-identical to the canonical-arg path.
+  const input = { ...rawInput, objectApiName: scopeResult.value.object };
   const objectId: ComponentId = `CustomObject:${input.objectApiName}`;
   const admission = await evaluateSoeAdmission(ctx, objectId);
   if (!admission.ok) {
@@ -1278,10 +1290,19 @@ export const whatHappensOnSaveHandler = async (
 
   const conditionalCount = soe.filter((s) => s.conditional !== undefined).length;
   const inactiveConfigured = sortedInactiveConfigured(inactiveCollector);
+  // `phaseCounts` / `activeComponents` are computed from the FULL composition so
+  // the summary keeps the whole phase distribution even when the caller narrows
+  // `soe` with a `phase` filter.
   const phaseCounts = tallyPhaseCounts(soe);
   // The save placeholder is the only non-automation step; everything else is an
   // active org-configured component that fires.
   const activeComponents = soe.filter((s) => s.phase !== 'save').length;
+
+  // Optional single-phase filter (recovery path for a phase truncated out of a
+  // fuller view). `soe` returns only the requested phase; `summary` is unchanged
+  // (still the whole composition). Un-filtered calls emit the full sequence.
+  const visibleSoe: readonly SoeStep[] =
+    input.phase !== undefined ? soe.filter((s) => s.phase === input.phase) : soe;
 
   // R6-23: informational rider — active EntitlementProcess(es) targeting
   // this object. Disclosure-PLUS-pointer only: milestone evaluation itself
@@ -1312,6 +1333,7 @@ export const whatHappensOnSaveHandler = async (
 
   const data: {
     objectApiName: string;
+    appliedScope: { componentId: string; object: string };
     event: DmlEvent;
     recordTypeId: ComponentId | null;
     objectModeled: boolean;
@@ -1325,11 +1347,14 @@ export const whatHappensOnSaveHandler = async (
     };
     disclosure: string;
     inactiveConfigured?: readonly InactiveConfiguredFirer[];
+    phasesOmitted?: readonly SoePhaseOmission[];
+    appliedPhaseFilter?: Exclude<SoePhase, 'save'>;
     truncated?: boolean;
     entitlementProcessNotes?: readonly EntitlementProcessNote[];
     entitlementProcessNotesTruncated?: boolean;
   } = {
     objectApiName: input.objectApiName,
+    appliedScope,
     event: input.event,
     recordTypeId: input.recordTypeId ?? null,
     objectModeled,
@@ -1339,6 +1364,7 @@ export const whatHappensOnSaveHandler = async (
           inactiveHeadline: `Excluded inactive: ${inactiveConfigured.map((i) => i.apiName).join(', ')}`,
         }
       : {}),
+    ...(input.phase !== undefined ? { appliedPhaseFilter: input.phase } : {}),
     ...(entitlementProcessNotes.length > 0 ? { entitlementProcessNotes } : {}),
     ...(entitlementProcessNotesTruncated ? { entitlementProcessNotesTruncated } : {}),
     summary: {
@@ -1348,7 +1374,7 @@ export const whatHappensOnSaveHandler = async (
       asyncFanOut,
       phaseCounts,
     },
-    soe,
+    soe: visibleSoe,
     disclosure: composeSoeDisclosure(DISCLOSURE, objectModeled),
   };
 
@@ -1373,12 +1399,30 @@ export const whatHappensOnSaveHandler = async (
   // last-resort step-drop pass is neither needed nor allowed here.
   const budget = enforceSoeByteBudget(
     data,
-    [soe] as unknown as BoundableStep[][],
+    [visibleSoe] as unknown as BoundableStep[][],
     { allowStepDrop: false },
   );
   if (budget.truncated) {
     data.truncated = true;
     data.disclosure = `${data.disclosure} ${soeTruncationNote(budget)}`;
+  }
+
+  // Honesty invariant (WHAT-HAPPENS-ON-SAVE-TRUNCATION-DROPS-LATER-PHASES): on
+  // the FULL (un-filtered) view, `soe` must fully represent every phase
+  // `phaseCounts` claims. `allowStepDrop: false` above guarantees this here
+  // (no firing step is ever dropped), but we compute the delta anyway so a
+  // truncated payload can never SILENTLY contradict `phaseCounts` — any shortfall
+  // is named in `phasesOmitted` with a pointer to the `phase` filter. On a
+  // phase-filtered call the caller narrowed on purpose, so this is skipped.
+  if (input.phase === undefined) {
+    const phasesOmitted = computePhasesOmitted(phaseCounts, data.soe);
+    if (phasesOmitted.length > 0) {
+      data.phasesOmitted = phasesOmitted;
+      data.disclosure =
+        `${data.disclosure} Note: ${phasesOmitted
+          .map((p) => `${p.phase} (${p.present}/${p.declared} shown)`)
+          .join(', ')} truncated out of the returned sequence — re-query with the \`phase\` filter to see the full roster.`;
+    }
   }
 
   return ok({

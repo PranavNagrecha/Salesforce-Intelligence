@@ -64,6 +64,68 @@ export const mdTable = (
   return `${head}\n${sep}\n${body}`;
 };
 
+// --- interpret (reasoning engine) ------------------------------------------
+
+/** One interpretation row to render (structurally a `contracts.Interpretation`). */
+interface InterpretationLike {
+  readonly ruleId: string;
+  readonly concept: string;
+  readonly claim: string;
+  readonly groundedIn: readonly string[];
+  readonly confidence: 'declared' | 'parsed' | 'heuristic' | 'unknown';
+  readonly coverageCaveat: string | null;
+}
+
+/** The `sfi.interpret` payload the renderer needs (a subset of `InterpretOutput`). */
+interface InterpretationsRenderLike {
+  readonly componentId: string;
+  readonly componentType: string;
+  readonly interpretations: readonly InterpretationLike[];
+  readonly sliceTruncated: boolean;
+  readonly coverageCaveat?: string;
+  readonly trust: TrustLike;
+}
+
+/**
+ * Render the reasoning engine's grounded interpretations: one bullet per fired
+ * concept rule (claim + confidence badge + cited component ids), closing with
+ * the provenance footer. HONESTY: an EMPTY interpretation list renders the
+ * verbatim "no rule fired — NOT a claim that nothing depends on it" message, so
+ * an absence of matched rules is never read as an absence of dependencies.
+ */
+export const renderInterpretationsMarkdown = (
+  data: InterpretationsRenderLike,
+): string => {
+  const header = `## Interpretations for \`${data.componentId}\` (${data.componentType})`;
+  if (data.interpretations.length === 0) {
+    return (
+      `${header}\n\n` +
+      `No concept rule fired for this component. This is **NOT** a claim that nothing ` +
+      `depends on it — only that no curated reasoning rule matched the deterministic, ` +
+      `offline graph slice assembled for it.\n\n` +
+      renderTrustFooter(data.trust)
+    );
+  }
+  const items = data.interpretations.map((i) => {
+    const cited =
+      i.groundedIn.length > 0
+        ? `\n  Grounded in: ${i.groundedIn.map((id) => `\`${id}\``).join(', ')}`
+        : '';
+    const caveat = i.coverageCaveat ? `\n  Coverage caveat: ${i.coverageCaveat}` : '';
+    return `- **${i.claim}** _(${i.confidence} · \`${i.ruleId}\`)_${cited}${caveat}`;
+  });
+  const caveatLine = data.coverageCaveat
+    ? `\n\n_Coverage: ${data.coverageCaveat}_`
+    : '';
+  const truncation = data.sliceTruncated
+    ? `\n\n_Graph slice truncated at the hub cap — absence-based conclusions held to at most partial coverage._`
+    : '';
+  return (
+    `${header}\n\n${items.join('\n')}${caveatLine}${truncation}\n\n` +
+    renderTrustFooter(data.trust)
+  );
+};
+
 // --- resolve ---------------------------------------------------------------
 
 interface ResolveCandidateLike {

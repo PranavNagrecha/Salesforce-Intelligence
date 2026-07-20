@@ -20,12 +20,33 @@
  * counters separate "unknown" from "confirmed empty" — the v2.4
  * constitutional rule.
  *
+ * **Live-drift honesty (EMPTY-QUEUES-AND-GROUPS-FALSE-EMPTY-LIVE-DRIFT)** —
+ * emptiness here is DECLARED (metadata XML direct-user membership) only, and
+ * Setup-UI-managed membership routinely drifts from it, so a `memberCount: 0`
+ * public group can still hold live users. Every listed row therefore carries a
+ * `cleanupVerdict` of `review-not-delete` (or `unknown-membership`) — never a
+ * bare "safe to delete". Confirm the live roster with `sfi.live_group_members`
+ * (which reports vault-vs-live `drift`) before any delete / retire. Actually
+ * annotating a `liveMemberCount` inline requires registering this tool on the
+ * opt-in live plane (roster follow-up); today it stays vault-only and defers
+ * the confirmation to `live_group_members`.
+ *
  * Member-count extraction:
  *   - Queue: reads `properties.memberCount` (the v0.1 extractor
  *     convention) OR walks `properties.queueMembers` array length.
  *     When neither is populated, returns 'unknown'.
  *   - Group: same shape, reading `properties.memberCount` or
  *     `properties.groupMembers`.
+ *
+ * **Name filter (EMPTY-QUEUES-AND-GROUPS-IGNORES-NAMECONTAINS)** — the optional
+ * `nameContains` input narrows BOTH the queue and group lists to entries whose
+ * apiName OR label contains the substring (case-insensitive). When present the
+ * response echoes `appliedScope` so a host never mistakes the bare inventory
+ * for a scoped answer; a no-filter call omits it and stays byte-identical. A
+ * filter that matches nothing returns an honest empty result ("no empty
+ * queues/groups named X"), NOT the full inventory. `nameContains` also enters
+ * the pagination fingerprint so a scoped cursor cannot replay against the bare
+ * list.
  */
 
 import type {
@@ -75,11 +96,17 @@ const STALE_AGE_MS = 180 * 24 * 60 * 60 * 1000;
 const BOUNDARIES: readonly string[] = Object.freeze([
   'queue and group member resolution depends on direct user references in metadata XML; runtime membership changes (via Setup UI) since the last vault refresh are not reflected.',
   'member counts of "unknown" indicate the vault did not extract enough data to resolve membership — these are NOT counted toward emptiness.',
+  'EMPTY-QUEUES-AND-GROUPS-FALSE-EMPTY-LIVE-DRIFT: a `memberCount: 0` row is DECLARED-empty from metadata only — Setup-UI-managed membership routinely drifts, so an "empty" public group can still hold live users. Every listed row therefore carries `cleanupVerdict: "review-not-delete"` (or `"unknown-membership"`): confirm the live roster with `sfi.live_group_members` (it reports vault-vs-live `drift`) BEFORE deleting or retiring anything. This is a cleanup SHORTLIST to review, never a delete list.',
 ]);
 
 /** Zod schema for the input. */
 export const emptyQueuesAndGroupsInputSchema = z.object({
   type: z.enum(['Queue', 'Group', 'both']).optional(),
+  // EMPTY-QUEUES-AND-GROUPS-IGNORES-NAMECONTAINS: honor a caller name filter
+  // instead of silently returning the full inventory. Keeps only queues/groups
+  // whose apiName OR label contains the substring (case-insensitive). Echoed
+  // back as `appliedScope`; a bare no-filter call omits it (byte-identical).
+  nameContains: z.string().min(1).optional(),
   includeManagedPackage: z.boolean().optional(),
   limit: z
     .number()
@@ -99,6 +126,21 @@ export type EmptyQueuesAndGroupsInput = z.infer<
 
 export type MemberSource = 'user-direct' | 'group-resolved' | 'role-resolved' | 'unknown';
 
+/**
+ * The delete-safety verdict for an offline "empty" row (EMPTY-QUEUES-AND-GROUPS-
+ * FALSE-EMPTY-LIVE-DRIFT). Vault emptiness is computed from DECLARED membership
+ * only (direct-user XML); Setup-UI-managed membership routinely drifts from that
+ * (a vault `memberCount: 0` group can hold live users), so a zero declared count
+ * is NEVER a confirmed-safe delete offline. Surfacing this per row keeps the
+ * "empty" inventory from being read as a delete list.
+ *   - `review-not-delete`: zero DECLARED members — confirm the live roster with
+ *     `sfi.live_group_members` (which reports vault-vs-live `drift`) before any
+ *     delete / retire; live membership may be non-zero.
+ *   - `unknown-membership`: the vault could not resolve membership at all
+ *     (already excluded from emptiness counts) — not a delete candidate either.
+ */
+export type CleanupVerdict = 'review-not-delete' | 'unknown-membership';
+
 /** One Queue entry. */
 export interface EmptyQueueEntry {
   readonly id: ComponentId;
@@ -109,6 +151,12 @@ export interface EmptyQueueEntry {
   readonly memberSource: MemberSource;
   readonly incomingAssignmentRuleCount: number;
   readonly isLikelyStale: boolean;
+  /**
+   * EMPTY-QUEUES-AND-GROUPS-FALSE-EMPTY-LIVE-DRIFT: never a bare "delete me".
+   * Offline declared emptiness can drift from the live roster, so this is
+   * `review-not-delete` (or `unknown-membership`) — confirm live before cleanup.
+   */
+  readonly cleanupVerdict: CleanupVerdict;
 }
 
 /** One Group entry. */
@@ -121,6 +169,12 @@ export interface EmptyGroupEntry {
   readonly memberSource: MemberSource;
   readonly incomingReferenceCount: number;
   readonly isLikelyStale: boolean;
+  /**
+   * EMPTY-QUEUES-AND-GROUPS-FALSE-EMPTY-LIVE-DRIFT: see {@link EmptyQueueEntry}.
+   * A vault `memberCount: 0` public group can still hold live members
+   * (Setup-UI drift), so this is never a bare "safe to delete".
+   */
+  readonly cleanupVerdict: CleanupVerdict;
 }
 
 /** Output payload. */
@@ -133,6 +187,17 @@ export interface EmptyQueuesAndGroupsOutput {
   readonly unknownMemberCountGroups: number;
   readonly boundaries: readonly string[];
   readonly truncated: boolean;
+  /**
+   * EMPTY-QUEUES-AND-GROUPS-IGNORES-NAMECONTAINS: the scope ACTUALLY applied.
+   * Present ONLY when the caller passed a `nameContains` filter — a bare call
+   * omits it so its response stays byte-identical to the pre-filter shape. A
+   * host that sees no `appliedScope` MUST treat the lists as the full
+   * inventory, not a scoped answer.
+   */
+  readonly appliedScope?: {
+    readonly nameContains: string;
+    readonly mode: 'nameContains';
+  };
   /**
    * coverage-aware-zero (CR): present when the manifest reports an included
    * family (Queue / Group) was NOT retrieved. An empty list / zero total under
@@ -178,6 +243,19 @@ const namespacePrefixOf = (apiName: string): string | null => {
   if (idx === -1) return null;
   if (idx === 0) return null;
   return apiName.slice(0, idx);
+};
+
+/**
+ * EMPTY-QUEUES-AND-GROUPS-IGNORES-NAMECONTAINS: does this Queue/Group match the
+ * caller name filter? Matches when the (lowercased) needle is a substring of
+ * either the apiName (developer name) or the label (display name). A null
+ * needle means "no filter" and matches everything.
+ */
+const nameMatches = (node: Node, needle: string | null): boolean => {
+  if (needle === null) return true;
+  if (node.apiName.toLowerCase().includes(needle)) return true;
+  const label = node.label;
+  return typeof label === 'string' && label.toLowerCase().includes(needle);
 };
 
 const propertyString = (node: Node, key: string): string => {
@@ -305,6 +383,10 @@ export const emptyQueuesAndGroupsHandler = async (
   const limit = input.limit ?? EMPTY_QUEUES_DEFAULT_LIMIT;
   const includeManaged = input.includeManagedPackage ?? false;
   const typeFilter = input.type ?? 'both';
+  // EMPTY-QUEUES-AND-GROUPS-IGNORES-NAMECONTAINS: case-insensitive substring
+  // needle over apiName / label. null = no filter.
+  const nameNeedle =
+    input.nameContains !== undefined ? input.nameContains.toLowerCase() : null;
 
   const queues: EmptyQueueEntry[] = [];
   let unknownMemberCountQueues = 0;
@@ -322,6 +404,7 @@ export const emptyQueuesAndGroupsHandler = async (
     for (const queue of qRes.value) {
       const ns = namespacePrefixOf(queue.apiName);
       if (!includeManaged && ns !== null) continue;
+      if (!nameMatches(queue, nameNeedle)) continue;
       const { count, source } = resolveMemberCount(queue, 'queueMembers');
       const arCountRes = await countAssignmentRuleReferences(ctx, queue.id);
       if (!arCountRes.ok) {
@@ -343,6 +426,7 @@ export const emptyQueuesAndGroupsHandler = async (
           memberSource: 'unknown',
           incomingAssignmentRuleCount: arCountRes.value,
           isLikelyStale: false,
+          cleanupVerdict: 'unknown-membership',
         });
         continue;
       }
@@ -356,6 +440,8 @@ export const emptyQueuesAndGroupsHandler = async (
           memberSource: source,
           incomingAssignmentRuleCount: arCountRes.value,
           isLikelyStale: isLikelyStale(0, arCountRes.value, queue.lastModifiedDate),
+          // Declared emptiness only — confirm live before deleting (drift).
+          cleanupVerdict: 'review-not-delete',
         });
       }
     }
@@ -377,6 +463,7 @@ export const emptyQueuesAndGroupsHandler = async (
     for (const group of gRes.value) {
       const ns = namespacePrefixOf(group.apiName);
       if (!includeManaged && ns !== null) continue;
+      if (!nameMatches(group, nameNeedle)) continue;
       const { count, source } = resolveMemberCount(group, 'groupMembers');
       const refCountRes = await countGroupReferences(ctx, group.id);
       if (!refCountRes.ok) {
@@ -394,6 +481,7 @@ export const emptyQueuesAndGroupsHandler = async (
           memberSource: 'unknown',
           incomingReferenceCount: refCountRes.value,
           isLikelyStale: false,
+          cleanupVerdict: 'unknown-membership',
         });
         continue;
       }
@@ -407,6 +495,9 @@ export const emptyQueuesAndGroupsHandler = async (
           memberSource: source,
           incomingReferenceCount: refCountRes.value,
           isLikelyStale: isLikelyStale(0, refCountRes.value, group.lastModifiedDate),
+          // Declared emptiness only — a memberCount:0 group can hold live users
+          // (Setup-UI drift); confirm with live_group_members before deleting.
+          cleanupVerdict: 'review-not-delete',
         });
       }
     }
@@ -451,6 +542,10 @@ export const emptyQueuesAndGroupsHandler = async (
   const fingerprint = argsFingerprint({
     type: typeFilter,
     includeManagedPackage: includeManaged,
+    // Bind the name filter into the cursor so a scoped cursor cannot replay
+    // against the bare list. `argsFingerprint` drops undefined, so a bare call's
+    // fingerprint is unchanged (byte-identical cursor behavior preserved).
+    nameContains: input.nameContains,
   });
   let designatedListId = typeFilter === 'Group' ? 'groups' : 'queues';
   let offset = 0;
@@ -512,6 +607,16 @@ export const emptyQueuesAndGroupsHandler = async (
       unknownMemberCountGroups,
       boundaries: BOUNDARIES,
       truncated,
+      // Present ONLY when a name filter was passed, so a bare call stays
+      // byte-identical to the pre-filter golden.
+      ...(input.nameContains !== undefined
+        ? {
+            appliedScope: {
+              nameContains: input.nameContains,
+              mode: 'nameContains' as const,
+            },
+          }
+        : {}),
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       ...(scanTruncated
         ? {

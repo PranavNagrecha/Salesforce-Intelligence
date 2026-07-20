@@ -161,6 +161,16 @@ const description = "Configure sf-intelligence: live plane, HTTP serving, staged
         </table>
         <p>Set it alongside <code>command</code> in your MCP client config: <code>"env": {'{'} "SFI_TOOL_PROFILE": "core" {'}'}</code>. See the <a href="/getting-started#install">install guide</a> for the full config block.</p>
 
+        <h2 id="input-scope">Input scope &amp; selectors</h2>
+        <p>Around 40 analysis tools accept a <strong>scope selector</strong> so an answer can be narrowed to one component, object, profile, or namespace. It is built to fail loudly rather than answer the wrong question.</p>
+        <ul>
+          <li><strong>Natural selectors.</strong> A tool accepts whatever the host already holds - a canonical <code>componentId</code>, a bare <code>apiName</code> / <code>objectApiName</code> / <code>fieldId</code> / <code>profileApiName</code> (and interchangeable spellings), a fuzzy <code>nameContains</code>, or a <code>namespacePrefix</code>. You never have to pre-resolve. Pass exactly one - the keys are interchangeable, not additive.</li>
+          <li><strong><code>appliedScope</code>.</strong> When a selector resolves, the response echoes the scope it actually applied, in canonical form, so you can confirm it narrowed to the component you meant - not a same-named neighbour.</li>
+          <li><strong><code>invalid-query</code>.</strong> If selectors disagree or none resolves, the tool refuses at the handler boundary with a named <code>invalid-query</code> instead of silently answering org-wide against the wrong target. A wrong-scope answer that looks right is worse than an honest refusal.</li>
+          <li><strong>Byte-identical when unscoped.</strong> The selector is purely additive: omit it and the tool answers its full, org-wide default exactly as before. You opt into narrowing; you never inherit a different answer by leaving scope off.</li>
+        </ul>
+        <p class="muted" style="font-size:.9rem;">Recorded as ADR-009 (selector-scope honesty) in the repo's decision records, extending the canonical <code>componentId</code> key of ADR-007.</p>
+
         <h2 id="mcp">MCP server registration</h2>
         <p>The full register-once steps live in the <a href="/getting-started#install">install guide</a>. The MCP server resolves the vault as <code>org-kb/</code> relative to the <strong>current working directory</strong> (your Salesforce DX repo), not the install path.</p>
 

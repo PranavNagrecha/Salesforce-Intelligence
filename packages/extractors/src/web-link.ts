@@ -20,6 +20,19 @@ const DIR_NAME = 'webLinks';
 /** Merge-field token: `{!Object.Field}` (relationship traversal tolerated). */
 const MERGE_FIELD_RE = /\{!\s*([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_.]*?)\s*\}/g;
 
+/**
+ * Flow-launch route inside a button/link URL: `/flow/{ApiName}` (classic) or
+ * `/lightning/flow/{ApiName}` (the Lightning variant, whose substring also
+ * matches this pattern). A Flow API name starts with a letter and contains
+ * only letters, digits, and underscores, so the capture stops at the first
+ * `?`, `/`, or other delimiter — leaving the query string out.
+ */
+const FLOW_URL_RE = /\/flow\/([A-Za-z][A-Za-z0-9_]*)/g;
+
+/** Escape a literal string for safe interpolation into a `RegExp` source. */
+const escapeRegExp = (literal: string): string =>
+  literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 const unwrapSingle = (value: unknown): unknown =>
   Array.isArray(value) ? value[0] : value;
 
@@ -30,9 +43,16 @@ const toNullableString = (value: unknown): string | null => {
 
 /**
  * Heuristically pull field references off the OWNING object out of merge-field
- * tokens in the link's URL/content. Only `{!{objectApiName}.<field>}` tokens
- * count (cross-object and global tokens like `{!User.Manager}` / `{!$User.Id}`
- * are ignored); a relationship path keeps only its first segment.
+ * tokens in the link's URL/content. Two classic merge-field shapes are read,
+ * both restricted to the owning object so cross-object / global tokens
+ * (`{!User.Manager}`, `{!$User.Id}`) can never produce a wrong-object edge:
+ *
+ *   1. **Dotted** — `{!{objectApiName}.<field>}` (a relationship path keeps
+ *      only its first segment). e.g. Conga's `{!Account.Id}`.
+ *   2. **Underscore** — `{!{objectApiName}_<field>}`, the legacy S-control /
+ *      classic-button form. e.g. `{!Account_BillingStreet}` on Account. The
+ *      capture is anchored on the literal `{objectApiName}_` prefix, so
+ *      everything after that prefix (including a trailing `__c`) is the field.
  */
 const ownObjectFieldRefs = (
   content: string,
@@ -46,6 +66,33 @@ const ownObjectFieldRefs = (
       const field = fieldPath.split('.')[0];
       if (field !== undefined && field.length > 0) out.add(field);
     }
+  }
+  // Underscore form: anchor on `{!{objectApiName}_` and take the remaining
+  // field token. A field API name starts with a letter and continues with
+  // letters/digits/underscores (covering the `__c` custom suffix).
+  const underscoreRe = new RegExp(
+    `\\{!\\s*${escapeRegExp(objectApiName)}_([A-Za-z][A-Za-z0-9_]*)\\s*\\}`,
+    'g',
+  );
+  for (const m of content.matchAll(underscoreRe)) {
+    const field = m[1];
+    if (field !== undefined && field.length > 0) out.add(field);
+  }
+  return [...out];
+};
+
+/**
+ * Heuristically pull the API names of screen flows launched from a button/link
+ * URL. Custom buttons whose URL is `/flow/{ApiName}?...` (or the Lightning
+ * `/lightning/flow/{ApiName}` form) are the primary business entry point to a
+ * screen flow; the launched flow is named in the route path. Distinct names,
+ * in first-seen order; the caller re-sorts for deterministic output.
+ */
+const flowUrlRefs = (content: string): string[] => {
+  const out = new Set<string>();
+  for (const m of content.matchAll(FLOW_URL_RE)) {
+    const apiName = m[1];
+    if (apiName !== undefined && apiName.length > 0) out.add(apiName);
   }
   return [...out];
 };
@@ -99,10 +146,16 @@ const derivePathParts = (
  * button/link).
  *
  * Emits one `WebLink` Node, one `parentOf` edge from the enclosing
- * CustomObject, and zero or more HEURISTIC `references` edges — one per distinct
- * own-object field named in a `{!Object.Field}` merge token in the URL (sorted
- * by `toId`). Cross-object and global merge tokens are ignored to avoid false
- * positives; the references are heuristic confidence (regex over button URL).
+ * CustomObject, and zero or more HEURISTIC `references` edges (sorted by
+ * `toId`):
+ *   - one per distinct own-object field named in a `{!Object.Field}` merge
+ *     token in the URL. Cross-object and global merge tokens are ignored to
+ *     avoid false positives.
+ *   - one per distinct screen flow launched by a `/flow/{ApiName}` (or
+ *     `/lightning/flow/{ApiName}`) route in the URL, targeting `Flow:{ApiName}`
+ *     with `properties.targetKind: 'flow'`.
+ *
+ * All references are heuristic confidence (regex over the button URL).
  *
  * @example
  *   const r = await extractWebLink('.../objects/Opportunity/webLinks/SAP_Approval.webLink-meta.xml');
@@ -197,5 +250,16 @@ export const extractWebLink = async (
     }))
     .sort((a, b) => (a.toId < b.toId ? -1 : a.toId > b.toId ? 1 : 0));
 
-  return ok({ nodes: [node], edges: [parentEdge, ...fieldEdges] });
+  const flowEdges: Edge[] = flowUrlRefs(url ?? '')
+    .map((flowApiName) => ({
+      fromId: nodeId,
+      toId: `Flow:${flowApiName}`,
+      edgeType: 'references' as const,
+      confidence: 'heuristic' as const,
+      source: 'web-link-extractor',
+      properties: { targetKind: 'flow' },
+    }))
+    .sort((a, b) => (a.toId < b.toId ? -1 : a.toId > b.toId ? 1 : 0));
+
+  return ok({ nodes: [node], edges: [parentEdge, ...fieldEdges, ...flowEdges] });
 };

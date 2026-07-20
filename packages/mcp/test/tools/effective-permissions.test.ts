@@ -567,6 +567,121 @@ describe('effectivePermissionsHandler — R6-06 muting subtraction', () => {
   });
 });
 
+// =============================================================================
+// GUARD (EFFECTIVE-PERMISSIONS-IGNORES-OBJECT-AND-PROFILEAPINAME, P1): a natural
+// "effective permissions for {profile} ON {object}?" passes an OBJECT key
+// (`objectApiName`) alongside a natural `profileApiName`. Pre-fix profileApiName
+// was rejected (profileId required) and the object was Zod-stripped, so the tool
+// returned the whole org-wide multi-object union presented as if it were scoped.
+// Post-fix the profile resolves, the object narrows the object-keyed surfaces,
+// `appliedScope` is echoed, and an unresolvable object is invalid-query — never
+// a silent org-wide dump. A bare call stays byte-identical.
+// =============================================================================
+describe('effectivePermissionsHandler — object + profileApiName scope (guard)', () => {
+  it('profileApiName resolves the container (was profileId-required)', async () => {
+    const viaAlias = await effectivePermissionsHandler(
+      ctx,
+      effectivePermissionsInputSchema.parse({ profileApiName: 'Sales' }),
+    );
+    const viaCanonical = await effectivePermissionsHandler(ctx, { profileId: 'Profile:Sales' });
+    expect(viaAlias.ok && viaCanonical.ok).toBe(true);
+    if (!viaAlias.ok || !viaCanonical.ok) return;
+    // The alias path is byte-identical to the canonical profileId path.
+    expect(JSON.stringify(viaAlias.value.data)).toBe(JSON.stringify(viaCanonical.value.data));
+    // And no appliedScope on a no-object call.
+    expect('appliedScope' in viaAlias.value.data).toBe(false);
+  });
+
+  it('objectApiName narrows objectPermissions + FLS count + record types to it, echoes appliedScope', async () => {
+    const scoped = await effectivePermissionsHandler(
+      ctx,
+      effectivePermissionsInputSchema.parse({
+        profileApiName: 'Sales',
+        permissionSetIds: ['PermissionSet:DealEditor'],
+        objectApiName: 'Account',
+      }),
+    );
+    expect(scoped.ok).toBe(true);
+    if (!scoped.ok) return;
+    const d = scoped.value.data;
+    expect(d.appliedScope).toEqual({ object: 'Account' });
+    // Only the Account object row — NOT a multi-object dump.
+    expect(d.objectPermissions.map((o) => o.object)).toEqual(['Account']);
+    expect(d.summary.objects).toBe(1);
+    // FLS field count narrowed to Account's field.
+    expect(d.summary.fieldsWithFls).toBe(1);
+    // Account has no record types in the fixture → narrowed RT list is empty.
+    expect(d.recordTypeVisibilities).toEqual([]);
+    // systemPermissions stay container-wide (not object-specific).
+    expect(d.systemPermissions.map((s) => s.permission).sort()).toEqual(['ApiEnabled', 'ViewAllData']);
+    expect(d.disclosures.some((x) => x.includes('Scoped to object `Account`'))).toBe(true);
+  });
+
+  it('an edge-only object (record types but no object node) is real → honest scoped answer, not invalid-query', async () => {
+    // Deal__c has record-type visibilities on both containers but NO CustomObject
+    // node in the fixture — the containers still "touch" it, so it resolves.
+    const scoped = await effectivePermissionsHandler(
+      ctx,
+      effectivePermissionsInputSchema.parse({
+        profileId: 'Profile:Sales',
+        permissionSetIds: ['PermissionSet:DealEditor'],
+        objectApiName: 'Deal__c',
+      }),
+    );
+    expect(scoped.ok).toBe(true);
+    if (!scoped.ok) return;
+    const d = scoped.value.data;
+    expect(d.appliedScope).toEqual({ object: 'Deal__c' });
+    // Object CRUD empty (no object grant on Deal__c) but record types present.
+    expect(d.objectPermissions).toEqual([]);
+    expect(d.recordTypeVisibilities.map((rt) => rt.recordType).sort()).toEqual([
+      'Deal__c.Archived_Deal',
+      'Deal__c.Enterprise_Deal',
+      'Deal__c.Legacy_Deal',
+      'Deal__c.Standard_Deal',
+    ]);
+  });
+
+  it('an object that resolves to nothing real → invalid-query, NEVER a silent org-wide dump', async () => {
+    const scoped = await effectivePermissionsHandler(
+      ctx,
+      effectivePermissionsInputSchema.parse({
+        profileId: 'Profile:Sales',
+        permissionSetIds: ['PermissionSet:DealEditor'],
+        objectApiName: 'Ghost__c',
+      }),
+    );
+    expect(scoped.ok).toBe(false);
+    if (scoped.ok) return;
+    expect(scoped.error.kind).toBe('invalid-query');
+    expect(scoped.error.message).toContain('Ghost__c');
+  });
+
+  it('a bare (no-object) call is byte-identical to before — no appliedScope key', async () => {
+    const bare = await effectivePermissionsHandler(ctx, {
+      profileId: 'Profile:Sales',
+      permissionSetIds: ['PermissionSet:DealEditor'],
+    });
+    expect(bare.ok).toBe(true);
+    if (!bare.ok) return;
+    expect('appliedScope' in bare.value.data).toBe(false);
+    // Unscoped union still shows both objects' worth of surfaces intact.
+    expect(bare.value.data.summary.objects).toBe(1); // Account (the only granted object)
+    expect(bare.value.data.recordTypeVisibilities.length).toBeGreaterThan(0);
+  });
+
+  it('conflicting object aliases → invalid-query (never a silent pick)', async () => {
+    const scoped = await effectivePermissionsHandler(ctx, {
+      profileId: 'Profile:Sales',
+      object: 'Account',
+      objectApiName: 'Contact',
+    });
+    expect(scoped.ok).toBe(false);
+    if (scoped.ok) return;
+    expect(scoped.error.kind).toBe('invalid-query');
+  });
+});
+
 /** Assert the at-least-one-container refine without pulling zod in directly. */
 function effectivePermissionsInputSchemaSafe(input: unknown): boolean {
   return effectivePermissionsInputSchema.safeParse(input).success;

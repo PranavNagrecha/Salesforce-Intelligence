@@ -94,6 +94,109 @@ describe('extractLetterhead', () => {
     });
   });
 
+  describe('logo Document edges (LETTERHEAD-LOGO-UNGRAPHED)', () => {
+    // A letterhead's <header><logo> / <footer><logo> names the classic Document
+    // holding its brand image. Before the fix the extractor emitted no edge, so
+    // a Document referenced ONLY as a letterhead logo read as orphaned and
+    // delete-safe. Emit a declared Letterhead -> Document references edge; the
+    // folder path is canonicalised slash -> dot like the EmailTemplate id.
+    it('emits a declared references edge Letterhead -> Document per logo (folder path canonicalised)', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Letterhead xmlns="http://soap.sforce.com/2006/04/metadata">
+  <name>Widget Letterhead</name>
+  <available>true</available>
+  <topLineColor>#000</topLineColor>
+  <bodyColor>#FFF</bodyColor>
+  <header>
+    <logo>My_Doc_Folder/My_Header_Logo.jpg</logo>
+  </header>
+  <footer>
+    <logo>My_Bare_Logo</logo>
+  </footer>
+</Letterhead>`;
+      const { dir, path } = await writeTempLetterhead(
+        'My_Letterhead.letter-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractLetterhead(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const headerEdge = result.value.edges.find(
+          (e) => e.toId === 'Document:My_Doc_Folder.My_Header_Logo.jpg',
+        );
+        // RED pre-fix: no logo edges exist (Letterhead was a zero-edge leaf).
+        expect(headerEdge).toBeDefined();
+        if (!headerEdge) return;
+        expect(headerEdge.fromId).toBe('Letterhead:My_Letterhead');
+        expect(headerEdge.edgeType).toBe('references');
+        expect(headerEdge.confidence).toBe('declared');
+        expect(headerEdge.source).toBe('letterhead-extractor');
+        expect(headerEdge.properties).toEqual({ via: 'header.logo' });
+        // Bare (unfoldered) footer logo -> Document:{name} verbatim.
+        const footerEdge = result.value.edges.find(
+          (e) => e.toId === 'Document:My_Bare_Logo',
+        );
+        expect(footerEdge).toBeDefined();
+        expect(footerEdge?.properties).toEqual({ via: 'footer.logo' });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits no edges for a letterhead without a logo (still a leaf)', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Letterhead xmlns="http://soap.sforce.com/2006/04/metadata">
+  <name>No Logo</name>
+  <available>true</available>
+  <topLineColor>#000</topLineColor>
+  <bodyColor>#FFF</bodyColor>
+</Letterhead>`;
+      const { dir, path } = await writeTempLetterhead(
+        'My_Letterhead.letter-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractLetterhead(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.edges).toEqual([]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('dedupes when header and footer name the same logo Document', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Letterhead xmlns="http://soap.sforce.com/2006/04/metadata">
+  <name>Shared Logo</name>
+  <available>true</available>
+  <topLineColor>#000</topLineColor>
+  <bodyColor>#FFF</bodyColor>
+  <header>
+    <logo>My_Doc_Folder/My_Shared_Logo.jpg</logo>
+  </header>
+  <footer>
+    <logo>My_Doc_Folder/My_Shared_Logo.jpg</logo>
+  </footer>
+</Letterhead>`;
+      const { dir, path } = await writeTempLetterhead(
+        'My_Letterhead.letter-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractLetterhead(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(
+          result.value.edges.filter((e) => e.toId.startsWith('Document:')),
+        ).toHaveLength(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('structured sub-object overrides', () => {
     it('uses <topLine><color> when both <topLineColor> and <topLine><color> are present', async () => {
       // Per Letterhead.md: "structured sub-objects override the

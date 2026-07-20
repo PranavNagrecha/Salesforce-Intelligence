@@ -84,6 +84,7 @@ import { annotationsBlockFor, type AnnotationsBlock } from './annotations.js';
 import { readFactBlock, type FactsBlock } from './facts-block.js';
 import { fieldNotFoundError } from './field-not-found-suggest.js';
 import { scanSupplementalFlowFieldWriters } from './flow-field-writers-scan.js';
+import { resolveFieldAlias } from './input-aliases.js';
 import {
   argsFingerprint,
   decodeCursor,
@@ -168,21 +169,29 @@ const GROUP_BY_VALUES = ['source', 'edge-type', 'confidence'] as const;
  *   - `maxRowsPerSection`: optional integer in `[1, 200]`. Defaults
  *     to 50 inside the handler.
  */
-export const field360InputSchema = z.object({
-  fieldId: z.string().min(1),
-  includeSections: z.array(z.enum(SECTION_NAMES)).optional(),
-  groupBy: z.enum(GROUP_BY_VALUES).optional(),
-  maxRowsPerSection: z
-    .number()
-    .int()
-    .min(1)
-    .max(HARD_CAP_MAX_ROWS_PER_SECTION)
-    .optional(),
-  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
-  // truncated page's `nextCursor`; carries the resume offset + which section
-  // (validates | formulas | writers | …) it advances. Omit = today's behavior.
-  cursor: z.string().min(1).optional(),
-});
+export const field360InputSchema = z
+  .object({
+    // Field identity: `fieldId` (canonical `CustomField:…` or `<Object>.<Field>`
+    // short form) or the `componentId` alias a host reaches for (L2 Alias OS).
+    fieldId: z.string().min(1).optional(),
+    componentId: z.string().min(1).optional(),
+    includeSections: z.array(z.enum(SECTION_NAMES)).optional(),
+    groupBy: z.enum(GROUP_BY_VALUES).optional(),
+    maxRowsPerSection: z
+      .number()
+      .int()
+      .min(1)
+      .max(HARD_CAP_MAX_ROWS_PER_SECTION)
+      .optional(),
+    // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+    // truncated page's `nextCursor`; carries the resume offset + which section
+    // (validates | formulas | writers | …) it advances. Omit = today's behavior.
+    cursor: z.string().min(1).optional(),
+  })
+  .refine((i) => i.fieldId !== undefined || i.componentId !== undefined, {
+    message: 'name the field — pass `fieldId` or `componentId` (e.g. "CustomField:Account.My_Field__c")',
+    path: ['fieldId'],
+  });
 
 /** Parsed input shape, inferred from `field360InputSchema`. */
 export type Field360Input = z.infer<typeof field360InputSchema>;
@@ -739,8 +748,13 @@ const classifyIncomingEdge = (
  */
 export const field360Handler = async (
   ctx: Context,
-  input: Field360Input,
+  rawInput: Field360Input,
 ): Promise<Result<McpResponse<Field360Output>, McpError>> => {
+  // L2 Alias OS: accept the `componentId` alias for `fieldId`. Disagreeing
+  // values -> invalid-query (never a silent pick). Normalize into `fieldId`.
+  const fieldAlias = resolveFieldAlias(rawInput);
+  if (!fieldAlias.ok) return err(fieldAlias.error);
+  const input = { ...rawInput, fieldId: fieldAlias.value.fieldId };
   // FLD-02: graceful object→field routing.
   const suggestionResult = await resolveToFieldOrSuggest(ctx, input.fieldId);
   if (!suggestionResult.ok) return suggestionResult;

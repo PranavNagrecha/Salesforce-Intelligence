@@ -13,7 +13,10 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
-import { lifecycleProcessHandler } from '../../src/tools/lifecycle-process.js';
+import {
+  classifyRecordTypeScope,
+  lifecycleProcessHandler,
+} from '../../src/tools/lifecycle-process.js';
 
 const MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -90,6 +93,68 @@ const seed: ExtractionResult = {
   ],
 };
 
+// Ticket__c: record types + update validation rules gated by
+// RecordType.DeveloperName, to exercise the RecordType/BusinessProcess scope
+// (LIFECYCLE-PROCESS-SILENTLY-IGNORES-RECORDTYPE-SCOPE). Two record types share
+// a business process so the BP scope resolves to a SET.
+const TICKET = 'CustomObject:Ticket__c';
+const TICKET_RT_STD = 'RecordType:Ticket__c.Standard_Ticket';
+const TICKET_RT_VIP = 'RecordType:Ticket__c.Vip_Ticket';
+const TICKET_RT_LEGACY = 'RecordType:Ticket__c.Legacy_Ticket';
+const VR_STD_ONLY = 'ValidationRule:Ticket__c.Standard_Only';
+const VR_VIP_ONLY = 'ValidationRule:Ticket__c.Vip_Only';
+const VR_ALWAYS = 'ValidationRule:Ticket__c.Always';
+const VR_NOT_VIP = 'ValidationRule:Ticket__c.Not_Vip';
+
+const vrWithCondition = (
+  vrId: string,
+  apiName: string,
+  expression: string,
+): { nodes: Node[]; edges: Edge[] } => {
+  const condId = `ConditionalContext:${vrId}.condition-0`;
+  return {
+    nodes: [
+      node({ id: vrId, type: 'ValidationRule', apiName, parentId: TICKET, properties: { active: true, errorMessage: `${apiName} failed`, errorDisplayField: null } }),
+      node({
+        id: condId,
+        type: 'ConditionalContext',
+        apiName: `${vrId}.condition-0`,
+        parentId: vrId,
+        properties: { kind: 'formula', expression, fieldRefs: ['CustomField:RecordType.DeveloperName'], synthesized: false },
+      }),
+    ],
+    edges: [
+      edge({ fromId: TICKET, toId: vrId, edgeType: 'parentOf' }),
+      edge({ fromId: vrId, toId: condId, edgeType: 'firesWhen', confidence: 'parsed' }),
+    ],
+  };
+};
+
+const ticketVrs = [
+  vrWithCondition(VR_STD_ONLY, 'Ticket__c.Standard_Only', "RecordType.DeveloperName ='Standard_Ticket' && ISBLANK(Subject)"),
+  vrWithCondition(VR_VIP_ONLY, 'Ticket__c.Vip_Only', "RecordType.DeveloperName ='Vip_Ticket' && ISBLANK(Owner)"),
+  vrWithCondition(VR_NOT_VIP, 'Ticket__c.Not_Vip', "RecordType.DeveloperName <>'Vip_Ticket' && ISBLANK(Notes__c)"),
+];
+
+const ticketSeed: ExtractionResult = {
+  nodes: [
+    node({ id: TICKET, type: 'CustomObject', apiName: 'Ticket__c', properties: { sharingModel: 'Private' } }),
+    node({ id: TICKET_RT_STD, type: 'RecordType', apiName: 'Ticket__c.Standard_Ticket', parentId: TICKET, properties: { developerName: 'Standard_Ticket', businessProcess: 'Standard Process' } }),
+    node({ id: TICKET_RT_VIP, type: 'RecordType', apiName: 'Ticket__c.Vip_Ticket', parentId: TICKET, properties: { developerName: 'Vip_Ticket', businessProcess: 'Vip Process' } }),
+    node({ id: TICKET_RT_LEGACY, type: 'RecordType', apiName: 'Ticket__c.Legacy_Ticket', parentId: TICKET, properties: { developerName: 'Legacy_Ticket', businessProcess: 'Standard Process' } }),
+    // An unconditional VR (no RecordType gate) — retained under every scope.
+    node({ id: VR_ALWAYS, type: 'ValidationRule', apiName: 'Ticket__c.Always', parentId: TICKET, properties: { active: true, errorMessage: 'Always failed', errorDisplayField: null } }),
+    ...ticketVrs.flatMap((v) => v.nodes),
+  ],
+  edges: [
+    edge({ fromId: TICKET, toId: TICKET_RT_STD, edgeType: 'parentOf' }),
+    edge({ fromId: TICKET, toId: TICKET_RT_VIP, edgeType: 'parentOf' }),
+    edge({ fromId: TICKET, toId: TICKET_RT_LEGACY, edgeType: 'parentOf' }),
+    edge({ fromId: TICKET, toId: VR_ALWAYS, edgeType: 'parentOf' }),
+    ...ticketVrs.flatMap((v) => v.edges),
+  ],
+};
+
 let tempDir: string;
 let store: GraphStore;
 let ctx: Context;
@@ -99,7 +164,7 @@ beforeAll(async () => {
   const opened = await openGraph(join(tempDir, 'g.db'));
   if (!opened.ok) throw new Error(opened.error.message);
   store = opened.value;
-  const imported = await importExtractionResults(store, [seed]);
+  const imported = await importExtractionResults(store, [seed, ticketSeed]);
   if (!imported.ok) throw new Error(imported.error.message);
   ctx = { vaultRoot: tempDir, manifest: MANIFEST, graph: store };
 });
@@ -183,6 +248,124 @@ describe('lifecycleProcessHandler', () => {
     const r = await lifecycleProcessHandler(ctx, { objectApiName: 'NoSuchObj__c' });
     // order_of_execution surfaces component-not-found for an unknown object.
     expect(r.ok).toBe(false);
+  });
+});
+
+describe('classifyRecordTypeScope (LIFECYCLE-PROCESS-SILENTLY-IGNORES-RECORDTYPE-SCOPE)', () => {
+  const std = new Set(['Standard_Ticket']);
+  const vip = new Set(['Vip_Ticket']);
+  it('positive gate to an in-scope record type → in-scope', () => {
+    expect(classifyRecordTypeScope("RecordType.DeveloperName ='Standard_Ticket'", std)).toBe('in-scope');
+  });
+  it('positive gate to an out-of-scope record type → out-of-scope', () => {
+    expect(classifyRecordTypeScope("RecordType.DeveloperName ='Standard_Ticket'", vip)).toBe('out-of-scope');
+  });
+  it('a negated gate is conservatively retained (unconditional), never dropped', () => {
+    // `<> 'Vip_Ticket'` fires for everything except Vip — retained even under Vip scope.
+    expect(classifyRecordTypeScope("RecordType.DeveloperName <>'Vip_Ticket'", vip)).toBe('unconditional');
+  });
+  it('no record-type gate / absent expression → unconditional', () => {
+    expect(classifyRecordTypeScope('ISBLANK(Subject)', std)).toBe('unconditional');
+    expect(classifyRecordTypeScope(undefined, std)).toBe('unconditional');
+  });
+  it('$RecordType.DeveloperName and == are recognized; hard-coded RecordTypeId is NOT filtered', () => {
+    expect(classifyRecordTypeScope("$RecordType.DeveloperName == 'Standard_Ticket'", std)).toBe('in-scope');
+    // A raw RecordTypeId literal is not resolvable offline → treated as unconditional (retained).
+    expect(classifyRecordTypeScope("RecordTypeId = '0121234567890ABC'", vip)).toBe('unconditional');
+  });
+});
+
+describe('lifecycleProcessHandler — RecordType/BusinessProcess scope', () => {
+  it('FAIL-BEFORE/PASS-AFTER: an unscoped call lists every VR; recordType scope drops out-of-scope-gated VRs', async () => {
+    const bare = await lifecycleProcessHandler(ctx, { objectApiName: 'Ticket__c', event: 'update' });
+    const scoped = await lifecycleProcessHandler(ctx, {
+      objectApiName: 'Ticket__c',
+      event: 'update',
+      recordType: 'Standard_Ticket',
+    });
+    expect(bare.ok && scoped.ok).toBe(true);
+    if (!bare.ok || !scoped.ok) return;
+
+    const bareIds = bare.value.data.process.map((s) => s.componentId);
+    // Unscoped: no appliedScope, and every VR (incl. the Vip-only one) is present.
+    expect(bare.value.data.appliedScope).toBeUndefined();
+    expect(bareIds).toContain(VR_VIP_ONLY);
+    expect(bareIds).toContain(VR_STD_ONLY);
+
+    const scopedIds = scoped.value.data.process.map((s) => s.componentId);
+    // FAIL-BEFORE: scope was Zod-stripped so scoped === bare. Now:
+    // - Vip_Only positively gates a DIFFERENT record type → excluded.
+    expect(scopedIds).not.toContain(VR_VIP_ONLY);
+    // - Standard_Only positively gates the requested RT → retained, in-scope.
+    expect(scopedIds).toContain(VR_STD_ONLY);
+    // - Always (unconditional) and Not_Vip (negation) → retained.
+    expect(scopedIds).toContain(VR_ALWAYS);
+    expect(scopedIds).toContain(VR_NOT_VIP);
+    // The proof the scope did something: fewer steps than the unscoped call.
+    expect(scopedIds.length).toBeLessThan(bareIds.length);
+
+    // appliedScope echoes the resolution + exclusion (never silently identical).
+    const s = scoped.value.data.appliedScope;
+    expect(s?.kind).toBe('recordType');
+    expect(s?.requested).toBe('Standard_Ticket');
+    expect(s?.resolvedRecordTypes).toEqual(['Standard_Ticket']);
+    expect(s?.excludedComponentIds).toContain(VR_VIP_ONLY);
+    expect(s?.excludedStepCount).toBeGreaterThanOrEqual(1);
+
+    // Per-step scope tags are surfaced on retained steps.
+    const stdStep = scoped.value.data.process.find((p) => p.componentId === VR_STD_ONLY);
+    expect(stdStep?.recordTypeScope).toBe('in-scope');
+    const alwaysStep = scoped.value.data.process.find((p) => p.componentId === VR_ALWAYS);
+    expect(alwaysStep?.recordTypeScope).toBe('unconditional');
+  });
+
+  it('recordTypeId (canonical id) resolves to the same scope as recordType', async () => {
+    const r = await lifecycleProcessHandler(ctx, {
+      objectApiName: 'Ticket__c',
+      event: 'update',
+      recordTypeId: 'RecordType:Ticket__c.Standard_Ticket',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedScope?.resolvedRecordTypes).toEqual(['Standard_Ticket']);
+    expect(r.value.data.process.map((s) => s.componentId)).not.toContain(VR_VIP_ONLY);
+  });
+
+  it('businessProcess scope resolves to the SET of record types that use it', async () => {
+    const r = await lifecycleProcessHandler(ctx, {
+      objectApiName: 'Ticket__c',
+      event: 'update',
+      businessProcess: 'Standard Process',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const s = r.value.data.appliedScope;
+    expect(s?.kind).toBe('businessProcess');
+    // Two record types share "Standard Process".
+    expect([...(s?.resolvedRecordTypes ?? [])].sort()).toEqual(['Legacy_Ticket', 'Standard_Ticket']);
+    // The Vip-only VR is still out of scope.
+    expect(r.value.data.process.map((x) => x.componentId)).not.toContain(VR_VIP_ONLY);
+  });
+
+  it('an unknown record type is rejected with invalid-query (never silently ignored)', async () => {
+    const r = await lifecycleProcessHandler(ctx, {
+      objectApiName: 'Ticket__c',
+      recordType: 'Nope_Ticket',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toMatch(/Standard_Ticket/);
+  });
+
+  it('an unknown business process is rejected with invalid-query', async () => {
+    const r = await lifecycleProcessHandler(ctx, {
+      objectApiName: 'Ticket__c',
+      businessProcess: 'No Such Process',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
   });
 });
 

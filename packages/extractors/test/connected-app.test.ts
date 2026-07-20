@@ -68,6 +68,10 @@ describe('extractConnectedApp', () => {
           consumerKey: '3MVG9abc123',
           callbackUrl: 'https://example.com/callback',
           scopes: ['Api', 'RefreshToken', 'Web'],
+          // CONNECTED-APP-DROPS-SAML-CONFIG: protocol discriminant + SAML flag
+          // are always present; no `saml` block on an OAuth-only app.
+          authProtocol: 'oauth',
+          hasSamlConfig: false,
         });
       } finally {
         await rm(dir, { recursive: true, force: true });
@@ -105,6 +109,8 @@ describe('extractConnectedApp', () => {
           consumerKey: 'key',
           callbackUrl: 'https://example.com/cb',
           scopes: ['Api'],
+          authProtocol: 'oauth',
+          hasSamlConfig: false,
         });
       } finally {
         await rm(dir, { recursive: true, force: true });
@@ -180,6 +186,103 @@ describe('extractConnectedApp', () => {
         expect(node).toBeDefined();
         if (!node) return;
         expect(node.properties['scopes']).toEqual(['Api']);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  // CONNECTED-APP-DROPS-SAML-CONFIG: a SAML-only Connected App must not project
+  // as an empty OAuth shell — its ACS / entity / issuer / subject must surface
+  // and `authProtocol` must say `saml`. Secrets (certificates) are never read.
+  describe('SAML config (CONNECTED-APP-DROPS-SAML-CONFIG)', () => {
+    it('surfaces SAML ACS/entity/issuer/subject on a SAML-only app (not an empty OAuth shell)', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<ConnectedApp xmlns="http://soap.sforce.com/2006/04/metadata">
+  <label>SSO Login App</label>
+  <contactEmail>admin@example.com</contactEmail>
+  <samlConfig>
+    <acsUrl>https://idp.example.com/acs</acsUrl>
+    <certificate>MIIBogIBADANBgkq_REDACTED_KEY_MATERIAL</certificate>
+    <encryptionType>None</encryptionType>
+    <entityUrl>https://sp.example.com/entity</entityUrl>
+    <issuer>https://idp.example.com/issuer</issuer>
+    <samlNameIdFormat>urn:oasis:names:tc:SAML:2.0:nameid-format:persistent</samlNameIdFormat>
+    <samlSubjectType>federationId</samlSubjectType>
+  </samlConfig>
+</ConnectedApp>`;
+      const { dir, path } = await writeTempConnectedApp('SSO_Login_App.connectedApp-meta.xml', xml);
+      try {
+        const result = await extractConnectedApp(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const props = result.value.nodes[0]?.properties;
+        // NOT an empty OAuth shell.
+        expect(props?.['hasOauthConfig']).toBe(false);
+        expect(props?.['authProtocol']).toBe('saml');
+        expect(props?.['hasSamlConfig']).toBe(true);
+        expect(props?.['saml']).toEqual({
+          acsUrl: 'https://idp.example.com/acs',
+          entityUrl: 'https://sp.example.com/entity',
+          issuer: 'https://idp.example.com/issuer',
+          subjectType: 'federationId',
+          nameIdFormat: 'urn:oasis:names:tc:SAML:2.0:nameid-format:persistent',
+          encryptionType: 'None',
+        });
+        // Secrets are never vaulted: the certificate must NOT appear anywhere
+        // in the serialized node.
+        expect(JSON.stringify(result.value.nodes[0])).not.toContain('REDACTED_KEY_MATERIAL');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('reports authProtocol "both" when an app carries OAuth AND SAML', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<ConnectedApp xmlns="http://soap.sforce.com/2006/04/metadata">
+  <label>Dual</label>
+  <contactEmail>a@b.c</contactEmail>
+  <oauthConfig>
+    <consumerKey>k</consumerKey>
+    <callbackUrl>https://x</callbackUrl>
+    <scopes>Api</scopes>
+  </oauthConfig>
+  <samlConfig>
+    <acsUrl>https://idp/acs</acsUrl>
+    <entityUrl>https://sp/entity</entityUrl>
+    <issuer>https://idp/issuer</issuer>
+    <samlSubjectType>username</samlSubjectType>
+  </samlConfig>
+</ConnectedApp>`;
+      const { dir, path } = await writeTempConnectedApp('Dual.connectedApp-meta.xml', xml);
+      try {
+        const result = await extractConnectedApp(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const props = result.value.nodes[0]?.properties;
+        expect(props?.['authProtocol']).toBe('both');
+        expect(props?.['hasOauthConfig']).toBe(true);
+        expect(props?.['hasSamlConfig']).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('reports authProtocol "none" and no saml block on a Canvas/session app', async () => {
+      const xml = `<?xml version="1.0"?>
+<ConnectedApp xmlns="http://soap.sforce.com/2006/04/metadata">
+  <label>Canvas</label>
+  <contactEmail>a@b.c</contactEmail>
+</ConnectedApp>`;
+      const { dir, path } = await writeTempConnectedApp('Canvas.connectedApp-meta.xml', xml);
+      try {
+        const result = await extractConnectedApp(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const props = result.value.nodes[0]?.properties;
+        expect(props?.['authProtocol']).toBe('none');
+        expect(props?.['hasSamlConfig']).toBe(false);
+        expect('saml' in (props ?? {})).toBe(false);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

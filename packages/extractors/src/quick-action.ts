@@ -45,6 +45,64 @@ type ActionType = (typeof ALLOWED_ACTION_TYPES)[number];
 const unwrapSingle = (value: unknown): unknown =>
   Array.isArray(value) ? value[0] : value;
 
+/**
+ * Normalize a fast-xml-parser child into an array. Returns `[]` for
+ * undefined/null, the value itself when already an array, or a single-element
+ * array otherwise. Used for elements that may repeat (quickActionLayoutColumns,
+ * quickActionLayoutItems).
+ */
+const toArray = (value: unknown): unknown[] => {
+  if (value === undefined || value === null) return [];
+  return Array.isArray(value) ? value : [value];
+};
+
+/** One editable field placed on an Update/Create action's quickActionLayout. */
+interface QuickActionField {
+  readonly apiName: string;
+  readonly uiBehavior: string | null;
+}
+
+/**
+ * Collect the ordered, distinct editable fields declared in a QuickAction's
+ * `<quickActionLayout>` (Update / Create actions). The nesting is
+ * `quickActionLayout > quickActionLayoutColumns > quickActionLayoutItems`,
+ * where each item carries an optional `<field>` and `<uiBehavior>`
+ * (`Required` / `Edit` / `Readonly`). Empty-space items (no `<field>`) are
+ * skipped. Deduplication by field API name preserves first-seen order.
+ */
+const collectQuickActionFields = (
+  rootObj: Record<string, unknown>,
+): QuickActionField[] => {
+  const layout = unwrapSingle(rootObj['quickActionLayout']);
+  if (typeof layout !== 'object' || layout === null) return [];
+  const seen = new Set<string>();
+  const fields: QuickActionField[] = [];
+  for (const column of toArray(
+    (layout as Record<string, unknown>)['quickActionLayoutColumns'],
+  )) {
+    if (typeof column !== 'object' || column === null) continue;
+    for (const item of toArray(
+      (column as Record<string, unknown>)['quickActionLayoutItems'],
+    )) {
+      if (typeof item !== 'object' || item === null) continue;
+      const itemObj = item as Record<string, unknown>;
+      const rawField = unwrapSingle(itemObj['field']);
+      if (rawField === undefined || rawField === null) continue;
+      const apiName = String(rawField);
+      if (apiName.length === 0 || seen.has(apiName)) continue;
+      seen.add(apiName);
+      const rawBehavior = unwrapSingle(itemObj['uiBehavior']);
+      fields.push({
+        apiName,
+        uiBehavior: rawBehavior === undefined || rawBehavior === null
+          ? null
+          : String(rawBehavior),
+      });
+    }
+  }
+  return fields;
+};
+
 /** Return `<element>` value as a string, or `null` when absent. */
 const optionalString = (rootObj: Record<string, unknown>, key: string): string | null => {
   const raw = unwrapSingle(rootObj[key]);
@@ -289,7 +347,7 @@ const buildReferencesEdge = (
  * Reads the file, parses it as XML, validates the `<QuickAction>` root
  * per the vendored `QuickAction.md` spec, and returns an
  * `ExtractionResult` containing one `Node` of type `'QuickAction'` and
- * up to two edges:
+ * these edges:
  *
  *   1. `parentOf` from the parent CustomObject — emitted only when
  *      the action is object-scoped (i.e., the resolved object name is
@@ -305,6 +363,15 @@ const buildReferencesEdge = (
  *      exist (the AuraDefinitionBundle / LightningComponentBundle /
  *      ApexPage / Flow node can be outside the retrieve scope);
  *      dangling edges are tolerated.
+ *
+ *   3. `references` (one per distinct `<quickActionLayout>` field) to
+ *      `CustomField:{object}.{field}`, carrying `properties.uiBehavior`
+ *      (`Required` / `Edit` / `Readonly`) — the fields an Update / Create
+ *      action edits. The field object is the parent object for
+ *      object-scoped actions, or `<targetObject>` for global actions; a
+ *      global action with no `targetObject` emits no field edges. The
+ *      same list is mirrored on `properties.fields` as
+ *      `{ apiName, uiBehavior }[]`.
  *
  * The canonical ID is `QuickAction:{ObjectApiName}.{ActionName}` where
  * the two parts come from the path — either the grandparent
@@ -392,6 +459,18 @@ export const extractQuickAction = async (
         : actionName;
   const parentObjectId =
     objectApiName === 'Global' ? null : `CustomObject:${objectApiName}`;
+  const targetObject = optionalString(rootObj, 'targetObject');
+  const fields = collectQuickActionFields(rootObj);
+  // The layout fields belong to the object the action acts on: the parent
+  // object for object-scoped actions, or the <targetObject> for a global
+  // action. When neither resolves (a global action with no targetObject) the
+  // field object is unknown, so no CustomField edges are emitted.
+  const fieldObjectApiName =
+    objectApiName !== 'Global'
+      ? objectApiName
+      : targetObject !== null && targetObject.length > 0
+        ? targetObject
+        : null;
 
   const node: Node = {
     id: nodeId,
@@ -407,7 +486,7 @@ export const extractQuickAction = async (
       label,
       actionType,
       description: optionalString(rootObj, 'description'),
-      targetObject: optionalString(rootObj, 'targetObject'),
+      targetObject,
       lightningComponent: optionalString(rootObj, 'lightningComponent'),
       lightningWebComponent: optionalString(rootObj, 'lightningWebComponent'),
       page: optionalString(rootObj, 'page'),
@@ -415,6 +494,7 @@ export const extractQuickAction = async (
       icon: optionalString(rootObj, 'icon'),
       height: optionalInteger(rootObj, 'height'),
       width: optionalString(rootObj, 'width'),
+      fields,
     },
   };
 
@@ -438,6 +518,24 @@ export const extractQuickAction = async (
   const referencesEdge = buildReferencesEdge(nodeId, actionType, rootObj);
   if (referencesEdge !== null) {
     edges.push(referencesEdge);
+  }
+  // Update / Create actions carry a `<quickActionLayout>` field list — the
+  // fields the button edits. Emit one declared `references` edge per field to
+  // `CustomField:{object}.{field}` (carrying `uiBehavior`) so "what does this
+  // button update?" and field impact/review can see the action as a
+  // dependent. Sorted by `toId` for deterministic output.
+  if (fieldObjectApiName !== null) {
+    const fieldEdges = fields
+      .map((f) => ({
+        fromId: nodeId,
+        toId: `CustomField:${fieldObjectApiName}.${f.apiName}`,
+        edgeType: 'references' as const,
+        confidence: 'declared' as const,
+        source: EXTRACTOR_SOURCE,
+        properties: { uiBehavior: f.uiBehavior },
+      }))
+      .sort((a, b) => (a.toId < b.toId ? -1 : a.toId > b.toId ? 1 : 0));
+    edges.push(...fieldEdges);
   }
 
   return ok({ nodes: [node], edges });

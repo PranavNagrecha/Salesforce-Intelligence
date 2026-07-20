@@ -25,11 +25,12 @@
 
 import type {
   ComponentId,
+  ComponentType,
   McpError,
   McpResponse,
 } from '@sf-intelligence/contracts';
-import { ok, type Result } from '@sf-intelligence/core';
-import { listEdges } from '@sf-intelligence/graph';
+import { err, ok, type Result } from '@sf-intelligence/core';
+import { getNodeById, listEdges } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -37,14 +38,34 @@ import type { Context } from '../server.js';
 import { apexTestCoverageHandler } from './apex-test-coverage.js';
 import { crudFlsAuditHandler } from './crud-fls-audit.js';
 import { governorLimitRisksHandler } from './governor-limit-risks.js';
+import { firstNonEmpty, resolveApexClassAlias } from './input-aliases.js';
 
 export const apexBuildAdvisorInputSchema = z.object({
+  // Optional CLASS SCOPE (APEX-BUILD-ADVISOR-IGNORES-CLASS-SCOPE): narrow the
+  // briefing to ONE ApexClass / ApexTrigger — its governor pitfalls, its test
+  // coverage, its CRUD/FLS posture — instead of the org-wide advisor template.
+  // Pass a bare class api name via `classApiName` / `apiName`, or an
+  // `ApexClass:{name}` / `ApexTrigger:{name}` `componentId`. Omit for org-wide.
+  componentId: z.string().min(1).optional(),
+  classApiName: z.string().min(1).optional(),
+  apiName: z.string().min(1).optional(),
   objectApiName: z.string().min(1).optional(),
 });
 
 export type ApexBuildAdvisorInput = z.infer<typeof apexBuildAdvisorInputSchema>;
 
 export interface ApexBuildAdvisorOutput {
+  /**
+   * The CLASS SCOPE actually applied. Present ONLY when the caller passed a
+   * `componentId` / `classApiName` / `apiName` scope — an unscoped org-wide call
+   * omits it entirely so its response stays byte-identical to the pre-scope
+   * shape. `component` is the resolved `ApexClass:`/`ApexTrigger:` id; a host
+   * that sees no `appliedScope` MUST treat the briefing as org-wide.
+   */
+  readonly appliedScope?: {
+    readonly component: string | null;
+    readonly mode: 'component';
+  };
   readonly governorPitfalls: {
     readonly totalRisks: number;
     readonly byRule: Readonly<Record<string, number>>;
@@ -78,15 +99,106 @@ const BOUNDARIES: readonly string[] = Object.freeze([
 /** Apex node-id prefixes used to find code that touches an object. */
 const APEX_PREFIXES = ['ApexClass:', 'ApexTrigger:'];
 
+const APEX_CLASS_PREFIX = 'ApexClass:';
+const APEX_TRIGGER_PREFIX = 'ApexTrigger:';
+
+/** The Apex ComponentTypes a CLASS SCOPE may resolve to. */
+const CLASS_SCOPE_TYPES: readonly ComponentType[] = [
+  'ApexClass',
+  'ApexTrigger',
+];
+
+/**
+ * Resolve the optional CLASS SCOPE from `componentId` / `classApiName` /
+ * `apiName`. No selector → org-wide (`null`). A selector routes through the
+ * shared `resolveApexClassAlias` normalizer so the three keys are
+ * interchangeable, conflict-detected, and NEVER silently stripped. A
+ * `componentId` with a non-Apex type prefix (e.g. `CustomObject:`) is a category
+ * error → `invalid-query` (mirrors `governor_limit_risks` / `crud_fls_audit`)
+ * rather than coerced into a bogus `ApexClass:` id. An `ApexTrigger:`
+ * `componentId` is a valid scope and passes through verbatim.
+ */
+const resolveClassScope = (
+  input: ApexBuildAdvisorInput,
+): Result<ComponentId | null, McpError> => {
+  const selector = firstNonEmpty(
+    input.componentId,
+    input.classApiName,
+    input.apiName,
+  );
+  if (selector === undefined) return ok(null);
+  const cid = firstNonEmpty(input.componentId);
+  if (
+    cid !== undefined &&
+    cid.includes(':') &&
+    !cid.startsWith(APEX_CLASS_PREFIX) &&
+    !cid.startsWith(APEX_TRIGGER_PREFIX)
+  ) {
+    return err({
+      kind: 'invalid-query',
+      message: `\`${cid}\` is not an ApexClass / ApexTrigger — pass a bare class api name or an 'ApexClass:{name}' / 'ApexTrigger:{name}' id`,
+      path: 'componentId',
+    });
+  }
+  if (
+    cid?.startsWith(APEX_TRIGGER_PREFIX) === true &&
+    firstNonEmpty(input.classApiName, input.apiName) === undefined
+  ) {
+    return ok(cid as ComponentId);
+  }
+  const resolved = resolveApexClassAlias(input);
+  if (!resolved.ok) return resolved;
+  return ok(resolved.value.componentId as ComponentId);
+};
+
 export const apexBuildAdvisorHandler = async (
   ctx: Context,
   input: ApexBuildAdvisorInput,
 ): Promise<Result<McpResponse<ApexBuildAdvisorOutput>, McpError>> => {
   const recommendations: string[] = [];
 
+  // Optional CLASS SCOPE (APEX-BUILD-ADVISOR-IGNORES-CLASS-SCOPE). Resolve +
+  // validate it UP FRONT so an unresolvable / non-Apex scope surfaces a named
+  // error here rather than being swallowed into a null sub-section (the
+  // composed sub-scans "degrade to null" on failure — that graceful path would
+  // otherwise hide a silently-ignored scope). Each sub-scan is then narrowed to
+  // this one class; the bare (no-scope) call stays byte-identical.
+  const scopeResult = resolveClassScope(input);
+  if (!scopeResult.ok) return scopeResult;
+  const scopeId = scopeResult.value;
+  if (scopeId !== null) {
+    const nodeRes = await getNodeById(ctx.graph, scopeId);
+    if (!nodeRes.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${nodeRes.error.message}` });
+    }
+    if (nodeRes.value === null) {
+      return err({
+        kind: 'component-not-found',
+        message: `no ApexClass / ApexTrigger matches \`${scopeId}\` in this vault`,
+        path: scopeId,
+      });
+    }
+    if (!CLASS_SCOPE_TYPES.includes(nodeRes.value.type)) {
+      return err({
+        kind: 'invalid-query',
+        message: `\`${scopeId}\` is a ${nodeRes.value.type}, not an ApexClass / ApexTrigger — the apex_build_advisor class scope is Apex-only`,
+        path: 'componentId',
+      });
+    }
+  }
+  // The scope argument the composed sub-scans receive: `{}` (org-wide) or the
+  // resolved class id. `subject` gives the prose an honest antecedent — the
+  // class name when scoped, "the org's Apex" org-wide.
+  const scopeArg: { componentId?: ComponentId } =
+    scopeId !== null ? { componentId: scopeId } : {};
+  const subject =
+    scopeId !== null
+      ? `\`${scopeId.slice(scopeId.indexOf(':') + 1)}\``
+      : "the org's Apex";
+
   // --- governor pitfalls ---
   let governorPitfalls: ApexBuildAdvisorOutput['governorPitfalls'] = null;
-  const gov = await governorLimitRisksHandler(ctx, {});
+  const gov = await governorLimitRisksHandler(ctx, scopeArg);
   if (gov.ok) {
     const total = gov.value.data.totalRiskCount;
     governorPitfalls = {
@@ -94,36 +206,54 @@ export const apexBuildAdvisorHandler = async (
       byRule: gov.value.data.byRule,
       note:
         total > 0
-          ? `The org's Apex already has ${total} governor-limit risk(s). These are the patterns to avoid in new code.`
-          : 'No governor-limit risks detected in the existing Apex — keep it that way (no SOQL/DML in loops).',
+          ? scopeId !== null
+            ? `${subject} already has ${total.toString()} governor-limit risk(s). These are the patterns to avoid in new code.`
+            : `The org's Apex already has ${total} governor-limit risk(s). These are the patterns to avoid in new code.`
+          : scopeId !== null
+            ? `No governor-limit risks detected in ${subject} — keep it that way (no SOQL/DML in loops).`
+            : 'No governor-limit risks detected in the existing Apex — keep it that way (no SOQL/DML in loops).',
     };
     if (total > 0) {
       const top = Object.entries(gov.value.data.byRule).sort((a, b) => b[1] - a[1])[0];
       recommendations.push(
-        `Bulkify everything: the org already has ${total} governor risk(s)${top ? ` (top: ${top[0]} ×${top[1]})` : ''}. Never put SOQL or DML inside a loop.`,
+        scopeId !== null
+          ? `Bulkify everything: ${subject} already has ${total.toString()} governor risk(s)${top ? ` (top: ${top[0]} ×${top[1].toString()})` : ''}. Never put SOQL or DML inside a loop.`
+          : `Bulkify everything: the org already has ${total} governor risk(s)${top ? ` (top: ${top[0]} ×${top[1]})` : ''}. Never put SOQL or DML inside a loop.`,
       );
     }
   }
 
   // --- test expectations ---
   let testExpectations: ApexBuildAdvisorOutput['testExpectations'] = null;
-  const cov = await apexTestCoverageHandler(ctx, {});
+  const cov = await apexTestCoverageHandler(ctx, scopeArg);
   if (cov.ok) {
     const s = cov.value.data.summary;
+    const target = cov.value.data.target;
+    const scopedCov = scopeId !== null && target !== undefined;
     testExpectations = {
       deployGate: '75% org-wide Apex coverage required to deploy to production',
       testClasses: s.testClasses,
       untestedClasses: s.classesWithoutTestReferences,
-      note: `${s.classesWithoutTestReferences}/${s.nonTestClasses} classes have no static test reference today.`,
+      note: scopedCov
+        ? `${subject} ${
+            target.status === 'has-test-references'
+              ? `has ${target.coveringTests.length.toString()} static test reference(s)`
+              : 'has NO static test reference'
+          } today.`
+        : `${s.classesWithoutTestReferences}/${s.nonTestClasses} classes have no static test reference today.`,
     };
     recommendations.push(
-      `Plan the test class up front: production deploys need 75% coverage and ${s.classesWithoutTestReferences} classes already lack a test reference. Mirror an existing *Test class's setup pattern.`,
+      scopedCov
+        ? target.status === 'has-test-references'
+          ? `${subject} already has a covering test — extend it for the new logic and keep production coverage ≥ 75%.`
+          : `${subject} has no covering test yet — write one before deploying (production deploys need 75% coverage). Mirror an existing *Test class's setup pattern.`
+        : `Plan the test class up front: production deploys need 75% coverage and ${s.classesWithoutTestReferences} classes already lack a test reference. Mirror an existing *Test class's setup pattern.`,
     );
   }
 
   // --- FLS/CRUD norms ---
   let flsCrudNorms: ApexBuildAdvisorOutput['flsCrudNorms'] = null;
-  const fls = await crudFlsAuditHandler(ctx, {});
+  const fls = await crudFlsAuditHandler(ctx, scopeArg);
   if (fls.ok) {
     const total = fls.value.data.totalFindingCount;
     flsCrudNorms = {
@@ -132,12 +262,18 @@ export const apexBuildAdvisorHandler = async (
       enforcesConsistently: total === 0,
       note:
         total > 0
-          ? `${total} CRUD/FLS gap(s) exist in current Apex — the org does NOT enforce consistently, so set the bar higher in new code.`
-          : 'Existing Apex enforces CRUD/FLS — match that bar.',
+          ? scopeId !== null
+            ? `${total.toString()} CRUD/FLS gap(s) exist in ${subject} — set the bar higher in new code.`
+            : `${total} CRUD/FLS gap(s) exist in current Apex — the org does NOT enforce consistently, so set the bar higher in new code.`
+          : scopeId !== null
+            ? `${subject} enforces CRUD/FLS — match that bar.`
+            : 'Existing Apex enforces CRUD/FLS — match that bar.',
     };
     if (total > 0) {
       recommendations.push(
-        `Enforce CRUD/FLS in new code (Security.stripInaccessible / WITH SECURITY_ENFORCED / isAccessible()): the org already has ${total} unguarded access finding(s).`,
+        scopeId !== null
+          ? `Enforce CRUD/FLS in new code (Security.stripInaccessible / WITH SECURITY_ENFORCED / isAccessible()): ${subject} already has ${total.toString()} unguarded access finding(s).`
+          : `Enforce CRUD/FLS in new code (Security.stripInaccessible / WITH SECURITY_ENFORCED / isAccessible()): the org already has ${total} unguarded access finding(s).`,
       );
     }
   }
@@ -170,6 +306,11 @@ export const apexBuildAdvisorHandler = async (
 
   return ok({
     data: {
+      // Emit appliedScope ONLY when a class scope was passed, so a bare org-wide
+      // call stays byte-identical to the pre-scope golden.
+      ...(scopeId !== null
+        ? { appliedScope: { component: scopeId, mode: 'component' as const } }
+        : {}),
       governorPitfalls,
       testExpectations,
       flsCrudNorms,

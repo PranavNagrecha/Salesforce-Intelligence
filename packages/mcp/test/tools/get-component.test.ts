@@ -188,6 +188,21 @@ const seed: ExtractionResult = {
       sourcePath: 'profiles/HugeProfile.profile-meta.xml',
       properties: HUGE_PROFILE_PROPERTIES,
     }),
+    // CONDITIONAL-CONTEXT-PHANTOM-COMPONENT: a synthetic, file-less node type.
+    // Appended LAST so it never shifts the index-based `writeMarkdown` calls in
+    // beforeAll; intentionally gets no file (like CustomObject:Orphan), so
+    // get_component must render it on the fly instead of `vault-file-missing`.
+    makeNode({
+      id: 'ConditionalContext:ValidationRule:TestObj__c.EndAfterStart.condition-0',
+      type: 'ConditionalContext',
+      apiName: 'ValidationRule:TestObj__c.EndAfterStart.condition-0',
+      label: 'EndAfterStart condition-0',
+      parentId: 'ValidationRule:TestObj__c.EndAfterStart',
+      properties: {
+        expression: 'End_Time__c < Start_Time__c',
+        kind: 'formula',
+      },
+    }),
   ],
   edges: [
     ...HUGE_PROFILE_EDGES,
@@ -573,6 +588,153 @@ describe('getComponentHandler', () => {
     rmSync(localDir, { recursive: true, force: true });
   });
 
+  // UNRESOLVED-PROFILE-GET-MISFRAMED-AS-RETRIEVE-GAP: an `UnresolvedProfile:{id}`
+  // target minted by a RestrictionRule `<userCriteria>` Profile-Id edge is a
+  // DELIBERATE stub — a Profile Id the vault could not resolve to an api name.
+  // It must NOT be framed as a manifest blindspot ("widen the retrieve
+  // manifest"); its honest remedy is a Profile Id→apiName index / live Tooling.
+  // A DIFFERENT referenced-but-missing id still gets the generic
+  // widen-manifest remedy, byte-identical — proving the change is scoped.
+  it('classifies an UnresolvedProfile-from-RestrictionRule id as unresolved-profile-id and does NOT recommend widening the manifest', async () => {
+    const localDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-getcomp-unresprof-'));
+    const opened = await openGraph(join(localDir, 'phantom.db'));
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const localStore = opened.value;
+    // SYNTHETIC Profile-shaped Id — never a real org Id.
+    const synProfileId = '00e000000000000AAA';
+    const imp = await importExtractionResults(localStore, [
+      {
+        nodes: [
+          makeNode({
+            id: 'RestrictionRule:Gate_Access',
+            type: 'RestrictionRule',
+            apiName: 'Gate_Access',
+          }),
+        ],
+        edges: [
+          // The exact shape enterprise-metadata.ts mints for a userCriteria
+          // Profile Id: heuristic `references` edge to the UnresolvedProfile
+          // stub, provenance carried in properties.referenceKind.
+          {
+            fromId: 'RestrictionRule:Gate_Access',
+            toId: `UnresolvedProfile:${synProfileId}`,
+            edgeType: 'references',
+            confidence: 'heuristic',
+            source: 'unit-test',
+            properties: {
+              referenceKind: 'restrictionUserProfileUnresolved',
+              unresolvedProfileId: synProfileId,
+              idBasedTarget: true,
+            },
+          },
+        ],
+      },
+    ]);
+    expect(imp.ok).toBe(true);
+    if (!imp.ok) return;
+    const localCtx: Context = {
+      vaultRoot: localDir,
+      manifest: FIXTURE_MANIFEST,
+      graph: localStore,
+    };
+
+    const r = await getComponentHandler(localCtx, {
+      id: `UnresolvedProfile:${synProfileId}`,
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+    const stub = r.error.stub;
+    expect(stub).toBeDefined();
+    if (stub === undefined) return;
+    // Classified as an unresolved Profile Id — NOT blindspot-manifest.
+    expect(stub.classification).toBe('unresolved-profile-id');
+    expect(stub.demandRetrievable).toBe(false);
+    // Honest remedy: points at the Id→apiName enrichment path.
+    expect(stub.remedy).toMatch(/Id→apiName/);
+    expect(stub.remedy).toMatch(/Tooling API/);
+    // Must NOT emit the generic blindspot "Widen the retrieve manifest" remedy.
+    expect(stub.remedy).not.toMatch(/Widen the retrieve manifest/);
+    // UNRESOLVED-PROFILE-GET-MISFRAMED-AS-RETRIEVE-GAP (real-vault gap): the
+    // PRIMARY human-facing `message` — the field a host reads first — must ALSO
+    // avoid the generic retrieve-widen / managed-package framing, not just the
+    // structured `stub.remedy`. On the real vault the stub was correct while the
+    // message still said "typically a managed-package component … Run `sfi
+    // refresh`". Lock the message to the Id-enrichment framing here.
+    expect(r.error.message).toMatch(/Profile Id/);
+    expect(r.error.message).toMatch(/could not resolve to a Profile api name/);
+    expect(r.error.message).toMatch(/Id→apiName/);
+    expect(r.error.message).not.toMatch(/managed-package component or one outside the retrieve scope/);
+    expect(r.error.message).not.toMatch(/if it should be retrievable/);
+
+    await closeGraph(localStore);
+    rmSync(localDir, { recursive: true, force: true });
+  });
+
+  it('keeps the generic widen-manifest remedy byte-identical for a different referenced-but-missing id', async () => {
+    const localDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-getcomp-blindspot-'));
+    const opened = await openGraph(join(localDir, 'phantom.db'));
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const localStore = opened.value;
+    // A genuinely retrievable-but-not-retrieved component (its ComponentType
+    // has no manifest coverage entry → 'absent' → blindspot-manifest).
+    const imp = await importExtractionResults(localStore, [
+      {
+        nodes: [
+          makeNode({
+            id: 'Flow:Order_Router',
+            type: 'Flow',
+            apiName: 'Order_Router',
+          }),
+        ],
+        edges: [
+          {
+            fromId: 'Flow:Order_Router',
+            toId: 'CustomObject:PlainMissing__c',
+            edgeType: 'references',
+            confidence: 'declared',
+            source: 'unit-test',
+            properties: { targetMissing: true },
+          },
+        ],
+      },
+    ]);
+    expect(imp.ok).toBe(true);
+    if (!imp.ok) return;
+    const localCtx: Context = {
+      vaultRoot: localDir,
+      manifest: FIXTURE_MANIFEST,
+      graph: localStore,
+    };
+
+    const r = await getComponentHandler(localCtx, {
+      id: 'CustomObject:PlainMissing__c',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    const stub = r.error.stub;
+    expect(stub).toBeDefined();
+    if (stub === undefined) return;
+    expect(stub.classification).toBe('blindspot-manifest');
+    // Byte-identical to the pre-change generic remedy.
+    expect(stub.remedy).toBe(
+      'Its ComponentType was never retrieved (a manifest gap). Widen the retrieve manifest and run /sfi-refresh; see sfi.retrieve_blindspot_report.',
+    );
+    // The message override is scoped ONLY to `unresolved-profile-id`: every
+    // other referenced-but-missing id keeps the generic phantom message
+    // verbatim (the retrieve-widen framing is correct for a genuine manifest
+    // gap like this one).
+    expect(r.error.message).toMatch(
+      /typically a managed-package component or one outside the retrieve scope/,
+    );
+    expect(r.error.message).toMatch(/Run `sfi refresh` if it should/);
+
+    await closeGraph(localStore);
+    rmSync(localDir, { recursive: true, force: true });
+  });
+
   it('returns component-not-found with vault-file-missing when the markdown is absent', async () => {
     const result = await getComponentHandler(ctx, {
       id: 'CustomObject:Orphan',
@@ -582,6 +744,26 @@ describe('getComponentHandler', () => {
     expect(result.error.kind).toBe('component-not-found');
     expect(result.error.message).toBe('vault file missing');
     expect(result.error.path).toBe('components/CustomObject/Orphan.md');
+  });
+
+  it('renders a file-less ConditionalContext node on the fly instead of vault-file-missing (CONDITIONAL-CONTEXT-PHANTOM-COMPONENT)', async () => {
+    // The graph has this synthetic node but renderVault never wrote it a file.
+    // Pre-fix the read ENOENTs and the handler returns component-not-found /
+    // 'vault file missing'; post-fix it is served from the graph via an
+    // on-the-fly render. A file-backed type with a missing file (Orphan, above)
+    // still returns vault-file-missing — the fallback is scoped to synthetic
+    // file-less types only.
+    const result = await getComponentHandler(ctx, {
+      id: 'ConditionalContext:ValidationRule:TestObj__c.EndAfterStart.condition-0',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.type).toBe('ConditionalContext');
+    expect(result.value.data.id).toBe(
+      'ConditionalContext:ValidationRule:TestObj__c.EndAfterStart.condition-0',
+    );
+    expect(result.value.data.frontmatter).toContain('ConditionalContext');
+    expect(result.value.data.body.length).toBeGreaterThan(0);
   });
 
   it('returns internal when the markdown lacks frontmatter delimiters', async () => {

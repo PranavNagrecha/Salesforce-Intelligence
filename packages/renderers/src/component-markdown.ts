@@ -15,6 +15,7 @@ import {
   escapeMarkdownInline,
   renderValueAsBacktickedString,
 } from './markdown-table.js';
+import { serializeFrontmatter } from './yaml-frontmatter.js';
 
 // `label` is already rendered in the top heading and `description` in its
 // own paragraph; including either in the Properties table would duplicate
@@ -136,6 +137,115 @@ const buildFrontmatter = (node: Node): Readonly<Record<string, unknown>> => ({
   type: node.type,
 });
 
+const isFrontmatterScalar = (value: unknown): boolean =>
+  value === null ||
+  typeof value === 'string' ||
+  typeof value === 'number' ||
+  typeof value === 'boolean';
+
+const isFrontmatterPlainObject = (
+  value: unknown,
+): value is Readonly<Record<string, unknown>> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * JSON-encode a value into a single frontmatter-safe scalar string. Used only
+ * for sub-values too deep for the YAML frontmatter serializer (see
+ * {@link toFrontmatterSafeMapValue}); the encoded string preserves the full
+ * structure, so no data is dropped. Falls back to `String()` for the rare
+ * value `JSON.stringify` cannot encode (e.g. a bare `undefined`).
+ */
+const toFrontmatterScalar = (value: unknown): string => {
+  const encoded = JSON.stringify(value);
+  return typeof encoded === 'string' ? encoded : String(value);
+};
+
+/**
+ * Sanitize a value sitting in a MAP position (a frontmatter key's value, or a
+ * nested-map field): scalars pass through untouched, nested maps recurse, and
+ * arrays are handed to {@link toFrontmatterSafeArray}. Nested maps may nest to
+ * any depth — the serializer handles map recursion — so only the array branch
+ * enforces the depth ceiling.
+ */
+const toFrontmatterSafeMapValue = (value: unknown): unknown => {
+  if (isFrontmatterScalar(value)) return value;
+  if (Array.isArray(value)) return toFrontmatterSafeArray(value);
+  if (isFrontmatterPlainObject(value)) {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value)) {
+      out[key] = toFrontmatterSafeMapValue(value[key]);
+    }
+    return out;
+  }
+  // Functions / symbols / bigint / undefined are not YAML scalars.
+  return toFrontmatterScalar(value);
+};
+
+/**
+ * Sanitize a value sitting in an ARRAY position, mirroring exactly the array
+ * shapes {@link serializeFrontmatter} accepts. An all-scalar array is kept
+ * verbatim; an all-object array keeps each field that is a scalar or an inner
+ * array of scalars, and JSON-encodes any field that is a nested object or an
+ * array holding objects/arrays (the depth-4 ceiling — e.g. an ApprovalProcess
+ * `steps[].approvers` list of `{ name, type }` objects). A mixed or
+ * nested-array shape is JSON-encoded whole. This is a serialize-identical
+ * transform for every shape the serializer already accepts, so it only ever
+ * changes output that would otherwise have thrown.
+ */
+const toFrontmatterSafeArray = (items: readonly unknown[]): unknown => {
+  if (items.length === 0) return items;
+  if (items.every(isFrontmatterScalar)) return items;
+  if (items.every(isFrontmatterPlainObject)) {
+    return items.map((item) => {
+      const out: Record<string, unknown> = {};
+      for (const key of Object.keys(item)) {
+        const fieldValue = item[key];
+        if (isFrontmatterScalar(fieldValue)) {
+          out[key] = fieldValue;
+        } else if (Array.isArray(fieldValue) && fieldValue.every(isFrontmatterScalar)) {
+          out[key] = fieldValue;
+        } else {
+          out[key] = toFrontmatterScalar(fieldValue);
+        }
+      }
+      return out;
+    });
+  }
+  // Mixed scalars+objects, nested arrays, or class instances: encode whole.
+  return toFrontmatterScalar(items);
+};
+
+/**
+ * Guarantee the frontmatter serializes under the YAML frontmatter depth ceiling
+ * (APPROVAL-PROCESS-STEPS-BREAK-VAULT-RENDER). The generic frontmatter mirrors
+ * `node.properties` verbatim, but an extractor can legitimately emit a property
+ * shape deeper than the serializer's depth-4 array-of-objects ceiling — e.g. an
+ * ApprovalProcess `steps[]` whose `approvers` / `approvalActions` are themselves
+ * arrays of `{ name, type }` objects. Serializing that shape throws and
+ * hard-fails the WHOLE vault render (a refresh abort), leaving every component's
+ * markdown stale relative to the graph.
+ *
+ * Fast path is byte-identical: if the frontmatter already serializes, it is
+ * returned untouched, so every currently-rendering component's bytes are
+ * unchanged. Only when serialization throws is the frontmatter projected into a
+ * frontmatter-safe shape, JSON-encoding any sub-value past the ceiling into a
+ * scalar string. No data is dropped — the encoded string carries the full
+ * structure, and the graph node (what `get_component` returns) keeps the
+ * original typed `properties` object untouched.
+ */
+const ensureSerializableFrontmatter = (
+  frontmatter: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> => {
+  try {
+    serializeFrontmatter(frontmatter);
+    return frontmatter;
+  } catch {
+    return toFrontmatterSafeMapValue(frontmatter) as Readonly<
+      Record<string, unknown>
+    >;
+  }
+};
+
 const buildOutputPath = (node: Node): string => {
   const parentSegment = node.parentId === null ? '' : node.parentId.replace(':', '/');
   // When the node has no parent the parent segment is empty and we want
@@ -171,7 +281,7 @@ export const renderComponentMarkdown = (
   try {
     return ok({
       path: buildOutputPath(node),
-      frontmatter: buildFrontmatter(node),
+      frontmatter: ensureSerializableFrontmatter(buildFrontmatter(node)),
       body: buildBody(node, edges),
     });
   } catch (cause) {

@@ -222,15 +222,84 @@ const collectFieldReferences = (
 };
 
 /**
+ * Collect the ordered, distinct list of custom button / link API names a
+ * layout places in its `<customButtons>` elements. These are WebLink
+ * components defined on THIS layout's object (their canonical id is
+ * `WebLink:{objectApiName}.{name}`); the element carries the bare API name.
+ * Standard buttons live in `<excludeButtons>` and are deliberately NOT
+ * collected here. Deduplication preserves first-seen order; the caller
+ * re-sorts edges for deterministic output.
+ */
+const collectCustomButtons = (
+  rootObj: Record<string, unknown>,
+): string[] => {
+  const seen = new Set<string>();
+  const buttons: string[] = [];
+  for (const raw of toArray(rootObj['customButtons'])) {
+    if (raw === undefined || raw === null) continue;
+    const name = String(raw);
+    if (name.length === 0 || seen.has(name)) continue;
+    seen.add(name);
+    buttons.push(name);
+  }
+  return buttons;
+};
+
+/**
+ * Collect the ordered, distinct list of QuickAction API names a layout places
+ * via `<platformActionList><platformActionListItems>` entries whose
+ * `<actionType>` is `QuickAction`. The `<actionName>` for a QuickAction is
+ * already in `{Object}.{Action}` form (e.g. `Case.Change_Status`,
+ * `FeedItem.TextPost`), so the canonical id is `QuickAction:{actionName}`.
+ *
+ * A layout may declare several `<platformActionList>` blocks (Record /
+ * ListView / RelatedList contexts) and the same action can appear in more than
+ * one; deduplication preserves first-seen order. Non-`QuickAction` action
+ * types (`StandardButton`, `CustomButton`, `ProductivityAction`) are skipped
+ * here — standard buttons have no vault node, and detail-page custom buttons
+ * are graphed from `<customButtons>` (see `collectCustomButtons`).
+ */
+const collectPlatformQuickActions = (
+  rootObj: Record<string, unknown>,
+): string[] => {
+  const seen = new Set<string>();
+  const actions: string[] = [];
+  for (const list of toArray(rootObj['platformActionList'])) {
+    if (typeof list !== 'object' || list === null) continue;
+    for (const item of toArray(
+      (list as Record<string, unknown>)['platformActionListItems'],
+    )) {
+      if (typeof item !== 'object' || item === null) continue;
+      const itemObj = item as Record<string, unknown>;
+      const actionType = unwrapSingle(itemObj['actionType']);
+      if (actionType !== 'QuickAction') continue;
+      const actionName = unwrapSingle(itemObj['actionName']);
+      if (actionName === undefined || actionName === null) continue;
+      const name = String(actionName);
+      if (name.length === 0 || seen.has(name)) continue;
+      seen.add(name);
+      actions.push(name);
+    }
+  }
+  return actions;
+};
+
+/**
  * Build the full edge set for a layout: one `parentOf` edge from the
- * parent CustomObject, plus one `usedInLayout` edge per distinct field
- * reference. Field edges are sorted by `toId` for deterministic output.
+ * parent CustomObject, one `usedInLayout` edge per distinct field
+ * reference, one `references` edge per distinct custom button
+ * (`<customButtons>`) to its `WebLink:{object}.{name}`, and one `references`
+ * edge per distinct placed QuickAction (`platformActionListItems`) to its
+ * `QuickAction:{Object}.{Action}`. Field, button, and action edges are each
+ * sorted by `toId` for deterministic output.
  */
 const buildEdges = (
   nodeId: string,
   parentId: string,
   objectApiName: string,
   fieldReferences: readonly string[],
+  customButtons: readonly string[],
+  platformQuickActions: readonly string[],
 ): Edge[] => {
   const parentEdge: Edge = {
     fromId: parentId,
@@ -250,7 +319,27 @@ const buildEdges = (
       properties: {},
     }))
     .sort((a, b) => (a.toId < b.toId ? -1 : a.toId > b.toId ? 1 : 0));
-  return [parentEdge, ...fieldEdges];
+  const buttonEdges: Edge[] = customButtons
+    .map((buttonName) => ({
+      fromId: nodeId,
+      toId: `WebLink:${objectApiName}.${buttonName}`,
+      edgeType: 'references' as const,
+      confidence: 'declared' as const,
+      source: EXTRACTOR_SOURCE,
+      properties: { targetKind: 'customButton' },
+    }))
+    .sort((a, b) => (a.toId < b.toId ? -1 : a.toId > b.toId ? 1 : 0));
+  const quickActionEdges: Edge[] = platformQuickActions
+    .map((actionName) => ({
+      fromId: nodeId,
+      toId: `QuickAction:${actionName}`,
+      edgeType: 'references' as const,
+      confidence: 'declared' as const,
+      source: EXTRACTOR_SOURCE,
+      properties: { targetKind: 'quickAction' },
+    }))
+    .sort((a, b) => (a.toId < b.toId ? -1 : a.toId > b.toId ? 1 : 0));
+  return [parentEdge, ...fieldEdges, ...buttonEdges, ...quickActionEdges];
 };
 
 /**
@@ -260,10 +349,15 @@ const buildEdges = (
  * Reads the file, parses it as XML, validates the `<Layout>` root per the
  * vendored `Layout.md` spec, and returns an `ExtractionResult` containing
  * one `Node` of type `'Layout'`, one `parentOf` edge from the parent
- * `CustomObject`, and one `usedInLayout` edge per distinct field
+ * `CustomObject`, one `usedInLayout` edge per distinct field
  * reference — collected across the detail body, the Highlights Panel
  * (`summaryLayout`), and the mini layout (`miniLayout`), deduplicated and
- * sorted by `toId` for stable output (see `collectFieldReferences`).
+ * sorted by `toId` for stable output (see `collectFieldReferences`) — and
+ * one `references` edge (`properties.targetKind: 'customButton'`) per
+ * distinct `<customButtons>` entry to its `WebLink:{object}.{name}`, with
+ * the same names mirrored on `properties.customButtons`, and one
+ * `references` edge (`properties.targetKind: 'quickAction'`) per distinct
+ * `platformActionListItems` QuickAction to its `QuickAction:{Object}.{Action}`.
  *
  * `<layoutSections>` is optional. When absent or empty, the Layout node
  * still emits, the `parentOf` edge still emits, zero `usedInLayout`
@@ -328,6 +422,8 @@ export const extractLayout = async (
   const nodeId = `Layout:${objectApiName}.${layoutName}`;
   const sections = getSections(rootObj);
   const fieldReferences = collectFieldReferences(rootObj);
+  const customButtons = collectCustomButtons(rootObj);
+  const platformQuickActions = collectPlatformQuickActions(rootObj);
 
   const node: Node = {
     id: nodeId,
@@ -344,11 +440,19 @@ export const extractLayout = async (
       showSubmitAndAttach: coerceBoolean(unwrapSingle(rootObj['showSubmitAndAttach'])),
       fieldCount: fieldReferences.length,
       sectionCount: sections.length,
+      customButtons,
     },
   };
 
   return ok({
     nodes: [node],
-    edges: buildEdges(nodeId, parentId, objectApiName, fieldReferences),
+    edges: buildEdges(
+      nodeId,
+      parentId,
+      objectApiName,
+      fieldReferences,
+      customButtons,
+      platformQuickActions,
+    ),
   });
 };

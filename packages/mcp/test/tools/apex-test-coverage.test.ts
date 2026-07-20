@@ -473,3 +473,52 @@ describe('apexTestCoverageInputSchema', () => {
     ).toBe(true);
   });
 });
+
+// =============================================================================
+// GUARD (APEX-TEST-COVERAGE-IGNORES-CLASS-SCOPE): the RM routes "coverage for
+// {class}?" here, but componentId / classId / apexClassId / apiName / className
+// were Zod-stripped and EVERY call silently returned the org-wide inventory. Any
+// selector must now reach single-class mode with the same verdict as the
+// classApiName path. Pre-fix each scoped call reads `mode: 'org-wide'`, so the
+// mode assertions are RED before the fix.
+describe('apexTestCoverageHandler — class-selector aliases (guard)', () => {
+  const expectSingleClassScvA = async (
+    input: Record<string, unknown>,
+  ): Promise<void> => {
+    const r = await apexTestCoverageHandler(ctx, input);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.mode).toBe('single-class');
+    expect(r.value.data.target?.classApiName).toBe('SvcA');
+    expect(r.value.data.target?.coveringTests).toEqual(['ApexClass:SvcATest']);
+    expect(r.value.data.appliedScope).toEqual({ class: 'SvcA', mode: 'single-class' });
+  };
+
+  it('componentId (ApexClass: id) → single-class, not org-wide', async () => {
+    await expectSingleClassScvA({ componentId: 'ApexClass:SvcA' });
+  });
+
+  it('className / apiName / classId / apexClassId all reach single-class mode', async () => {
+    await expectSingleClassScvA({ className: 'SvcA' });
+    await expectSingleClassScvA({ apiName: 'SvcA' });
+    await expectSingleClassScvA({ classId: 'ApexClass:SvcA' });
+    await expectSingleClassScvA({ apexClassId: 'ApexClass:SvcA' });
+  });
+
+  it('a scoped call genuinely differs from the bare org-wide call', async () => {
+    const scoped = await apexTestCoverageHandler(ctx, { componentId: 'ApexClass:SvcA' });
+    const bare = await apexTestCoverageHandler(ctx, {});
+    expect(scoped.ok && bare.ok).toBe(true);
+    if (!scoped.ok || !bare.ok) return;
+    expect(scoped.value.data.mode).toBe('single-class');
+    expect(bare.value.data.mode).toBe('org-wide');
+    expect(bare.value.data.appliedScope).toEqual({ class: null, mode: 'org-wide' });
+  });
+
+  it('rejects a non-ApexClass type prefix with invalid-query', async () => {
+    const r = await apexTestCoverageHandler(ctx, { componentId: 'CustomObject:SvcA' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+});

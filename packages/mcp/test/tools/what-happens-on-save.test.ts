@@ -18,7 +18,10 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
+import { runTool } from '../../src/tools/index.js';
 import {
+  computePhasesOmitted,
+  tallyPhaseCounts,
   whatHappensOnSaveHandler,
   whatHappensOnSaveInputSchema,
 } from '../../src/tools/what-happens-on-save.js';
@@ -838,6 +841,241 @@ const entitlementNoteSeed: ExtractionResult = {
   edges: [],
 };
 
+// =============================================================================
+// Seed (WHAT-HAPPENS-ON-SAVE-TRUNCATION-DROPS-LATER-PHASES): a single object
+// whose ONE-event insert payload blows the ~40 KB SOE byte budget, forcing the
+// enforcer to trim per-step actions and set `truncated: true`. The byte bulk is
+// one before-insert ApexTrigger carrying a very long `writesTo` action list; the
+// witness's LATER phases — duplicate-rules, after-triggers, post-save-flows,
+// post-save-async — each fire on insert and must STAY disclosed under
+// truncation (a host must never be able to read a trimmed `soe` and conclude
+// "no duplicate rules / no after-triggers / no post-save flows / no async").
+// =============================================================================
+
+const TRUNC_SAVE_OBJ = 'CustomObject:TruncSaveObj';
+const TRUNC_SAVE_BEFORE_TRIGGER = 'ApexTrigger:TruncSaveBeforeTrigger';
+const TRUNC_SAVE_AFTER_TRIGGER = 'ApexTrigger:TruncSaveAfterTrigger';
+const TRUNC_SAVE_DUP = 'DuplicateRule:TruncSaveObj.LaterDupRule';
+const TRUNC_SAVE_AFTER_FLOW = 'Flow:TruncSaveAfterFlow';
+const TRUNC_SAVE_ASYNC_JOB = 'ApexClass:TruncSaveAsyncJob';
+
+const truncSaveSeed: ExtractionResult = (() => {
+  const nodes: Node[] = [makeNode({ id: TRUNC_SAVE_OBJ, apiName: 'TruncSaveObj' })];
+  const edges: Edge[] = [];
+  // Byte bulk — one active before-insert ApexTrigger (absent status ⇒ active)
+  // with a long `writesTo` action list (~130 serialized bytes per edge). A
+  // single insert event's payload then exceeds SOE_MAX_PAYLOAD_BYTES, so the
+  // enforcer trims actions and flags `truncated`. `allowStepDrop: false` (the
+  // what_happens_on_save default) means it NEVER drops the STEP itself.
+  nodes.push(
+    makeNode({
+      id: TRUNC_SAVE_BEFORE_TRIGGER,
+      type: 'ApexTrigger',
+      apiName: 'TruncSaveBeforeTrigger',
+      properties: { triggerObject: 'TruncSaveObj', events: ['before insert'] },
+    }),
+  );
+  edges.push(
+    makeEdge({
+      fromId: TRUNC_SAVE_BEFORE_TRIGGER,
+      toId: TRUNC_SAVE_OBJ,
+      edgeType: 'triggersOn',
+      properties: { events: ['before insert'] },
+    }),
+  );
+  for (let i = 0; i < 1000; i += 1) {
+    // PascalCase receiver (`TruncSaveObj`) ⇒ a resolved field ref, so
+    // buildActions KEEPS it (not an unresolved apex-receiver parse artifact).
+    const fieldId = `CustomField:TruncSaveObj.Field_${String(i).padStart(4, '0')}__c`;
+    edges.push(
+      makeEdge({ fromId: TRUNC_SAVE_BEFORE_TRIGGER, toId: fieldId, edgeType: 'writesTo' }),
+    );
+  }
+  // Async target the before-trigger dispatches ⇒ a post-save-async step (and one
+  // more action on the trigger). PascalCase class token ⇒ kept, not filtered.
+  nodes.push(
+    makeNode({ id: TRUNC_SAVE_ASYNC_JOB, type: 'ApexClass', apiName: 'TruncSaveAsyncJob' }),
+  );
+  edges.push(
+    makeEdge({
+      fromId: TRUNC_SAVE_BEFORE_TRIGGER,
+      toId: TRUNC_SAVE_ASYNC_JOB,
+      edgeType: 'dispatchesAsync',
+    }),
+  );
+  // duplicate-rules phase — active, blocks on insert.
+  nodes.push(
+    makeNode({
+      id: TRUNC_SAVE_DUP,
+      type: 'DuplicateRule',
+      apiName: 'TruncSaveObj.LaterDupRule',
+      parentId: TRUNC_SAVE_OBJ,
+      properties: {
+        isActive: true,
+        operationsOnInsert: ['Block'],
+        operationsOnUpdate: ['Block'],
+      },
+    }),
+  );
+  edges.push(makeEdge({ fromId: TRUNC_SAVE_OBJ, toId: TRUNC_SAVE_DUP, edgeType: 'parentOf' }));
+  // after-triggers phase — an after-insert ApexTrigger.
+  nodes.push(
+    makeNode({
+      id: TRUNC_SAVE_AFTER_TRIGGER,
+      type: 'ApexTrigger',
+      apiName: 'TruncSaveAfterTrigger',
+      properties: { triggerObject: 'TruncSaveObj', events: ['after insert'] },
+    }),
+  );
+  edges.push(
+    makeEdge({
+      fromId: TRUNC_SAVE_AFTER_TRIGGER,
+      toId: TRUNC_SAVE_OBJ,
+      edgeType: 'triggersOn',
+      properties: { events: ['after insert'] },
+    }),
+  );
+  // post-save-flows phase — an after-save record-triggered Flow on Create.
+  nodes.push(
+    makeNode({
+      id: TRUNC_SAVE_AFTER_FLOW,
+      type: 'Flow',
+      apiName: 'TruncSaveAfterFlow',
+      properties: { status: 'Active' },
+    }),
+  );
+  edges.push(
+    makeEdge({
+      fromId: TRUNC_SAVE_AFTER_FLOW,
+      toId: TRUNC_SAVE_OBJ,
+      edgeType: 'triggersOn',
+      properties: { triggerType: 'RecordAfterSave', recordTriggerType: 'Create' },
+    }),
+  );
+  return { nodes, edges };
+})();
+
+// Seed (WHAT-HAPPENS-ON-SAVE-TRUNCATION-DROPS-LATER-PHASES — GLOBAL budget): an
+// object whose insert SOE has so MANY firing steps that the payload SURVIVES the
+// tool-local `allowStepDrop:false` trim (every step's action list is already ≤ the
+// keep-all floor, so `enforceSoeByteBudget` has nothing to shed and never drops a
+// step) yet is STILL well over the ~40 KB budget. The GLOBAL `jsonResult`
+// responseBudget guard then tail-truncates `data.soe`, shedding the LATER phases
+// first (SOE runs pre-save → save → post-save → async). The byte bulk is a large
+// roster of pre-save-validation rules (the early head that survives); the
+// duplicate-rules / after-triggers / post-save-flows / post-save-async firers sit
+// at the tail and get dropped. This is the path the tool-local W5.1 guard cannot
+// reach — the residual GLOBAL-budget honesty hole. All names synthetic.
+// =============================================================================
+
+const SAVE_HEAVY_OBJ = 'CustomObject:SaveHeavyObj';
+// Enough validation rules that even with zero-action steps the composed SOE
+// blows the 40 KB budget — so the GLOBAL guard (not the tool-local one) trims.
+const SAVE_HEAVY_VR_COUNT = 160;
+const SAVE_HEAVY_DUP_A = 'DuplicateRule:SaveHeavyObj.LaterDupA';
+const SAVE_HEAVY_DUP_B = 'DuplicateRule:SaveHeavyObj.LaterDupB';
+const SAVE_HEAVY_DUP_C = 'DuplicateRule:SaveHeavyObj.LaterDupC';
+const SAVE_HEAVY_AFTER_TRIGGER = 'ApexTrigger:SaveHeavyAfterTrigger';
+const SAVE_HEAVY_ASYNC_JOB = 'ApexClass:SaveHeavyAsyncJob';
+const SAVE_HEAVY_AFTER_FLOW = 'Flow:SaveHeavyAfterFlow';
+
+const saveHeavySeed: ExtractionResult = (() => {
+  const nodes: Node[] = [makeNode({ id: SAVE_HEAVY_OBJ, apiName: 'SaveHeavyObj' })];
+  const edges: Edge[] = [];
+  // Byte bulk — a roster of active ValidationRules (pre-save-validation, an
+  // EARLY phase). Each carries a ~120-char errorMessage so the per-step byte
+  // cost pushes the whole SOE well past 40 KB, and each has ZERO action edges so
+  // the tool-local action-trim has nothing to shed (allowStepDrop:false ⇒ steps
+  // stay). These form the head that survives the global tail-truncation.
+  for (let i = 0; i < SAVE_HEAVY_VR_COUNT; i += 1) {
+    const suffix = String(i).padStart(4, '0');
+    const vrId = `ValidationRule:SaveHeavyObj.SaveHeavyVR_${suffix}`;
+    nodes.push(
+      makeNode({
+        id: vrId,
+        type: 'ValidationRule',
+        apiName: `SaveHeavyVR_${suffix}`,
+        parentId: SAVE_HEAVY_OBJ,
+        properties: {
+          active: true,
+          errorMessage: `Save-heavy validation rule ${suffix} blocks the save when its guarded field roster is inconsistent — synthetic message for byte bulk.`,
+          errorDisplayField: null,
+        },
+      }),
+    );
+    edges.push(
+      makeEdge({ fromId: SAVE_HEAVY_OBJ, toId: vrId, edgeType: 'parentOf' }),
+    );
+  }
+  // LATER phases at the tail — each fires on insert and must be NAMED in
+  // `phasesOmitted` once the global trim sheds them.
+  //   duplicate-rules — three active, blocking on insert.
+  for (const dupId of [SAVE_HEAVY_DUP_A, SAVE_HEAVY_DUP_B, SAVE_HEAVY_DUP_C]) {
+    nodes.push(
+      makeNode({
+        id: dupId,
+        type: 'DuplicateRule',
+        apiName: dupId.slice('DuplicateRule:'.length),
+        parentId: SAVE_HEAVY_OBJ,
+        properties: {
+          isActive: true,
+          operationsOnInsert: ['Block'],
+          operationsOnUpdate: ['Block'],
+        },
+      }),
+    );
+    edges.push(
+      makeEdge({ fromId: SAVE_HEAVY_OBJ, toId: dupId, edgeType: 'parentOf' }),
+    );
+  }
+  //   after-triggers — one after-insert ApexTrigger, which dispatches async.
+  nodes.push(
+    makeNode({
+      id: SAVE_HEAVY_AFTER_TRIGGER,
+      type: 'ApexTrigger',
+      apiName: 'SaveHeavyAfterTrigger',
+      properties: { triggerObject: 'SaveHeavyObj', events: ['after insert'] },
+    }),
+  );
+  edges.push(
+    makeEdge({
+      fromId: SAVE_HEAVY_AFTER_TRIGGER,
+      toId: SAVE_HEAVY_OBJ,
+      edgeType: 'triggersOn',
+      properties: { events: ['after insert'] },
+    }),
+  );
+  //   post-save-async — the after-trigger dispatches to this ApexClass job.
+  nodes.push(
+    makeNode({ id: SAVE_HEAVY_ASYNC_JOB, type: 'ApexClass', apiName: 'SaveHeavyAsyncJob' }),
+  );
+  edges.push(
+    makeEdge({
+      fromId: SAVE_HEAVY_AFTER_TRIGGER,
+      toId: SAVE_HEAVY_ASYNC_JOB,
+      edgeType: 'dispatchesAsync',
+    }),
+  );
+  //   post-save-flows — one active after-save record-triggered Flow on Create.
+  nodes.push(
+    makeNode({
+      id: SAVE_HEAVY_AFTER_FLOW,
+      type: 'Flow',
+      apiName: 'SaveHeavyAfterFlow',
+      properties: { status: 'Active' },
+    }),
+  );
+  edges.push(
+    makeEdge({
+      fromId: SAVE_HEAVY_AFTER_FLOW,
+      toId: SAVE_HEAVY_OBJ,
+      edgeType: 'triggersOn',
+      properties: { triggerType: 'RecordAfterSave', recordTriggerType: 'Create' },
+    }),
+  );
+  return { nodes, edges };
+})();
+
 beforeAll(async () => {
   tempDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-whos-'));
   const dbPath = join(tempDir, 'whos.db');
@@ -858,6 +1096,8 @@ beforeAll(async () => {
     rollupRecalcSeed,
     r607OrderSeed,
     entitlementNoteSeed,
+    truncSaveSeed,
+    saveHeavySeed,
   ]);
   if (!imported.ok) {
     throw new Error(`seed import failed: ${imported.error.message}`);
@@ -884,6 +1124,50 @@ describe('whatHappensOnSaveHandler', () => {
     if (result.ok) return;
     expect(result.error.kind).toBe('component-not-found');
     expect(result.error.path).toBe('CustomObject:NoSuchObject');
+  });
+
+  // GUARD (L2 alias OS / ADMIN-SURFACE-ALIAS-SKEW-CLUSTER): pre-fix the schema
+  // required `objectApiName` and Zod-STRIPPED `object` / `objectId` / a
+  // `CustomObject:` `componentId` -> `objectApiName: Required`. Post-fix each
+  // alias resolves to the SAME composition, with `appliedScope` echoed.
+  it('natural object aliases ≡ canonical objectApiName (byte-equal soe + appliedScope)', async () => {
+    const run = async (raw: unknown) => {
+      const parsed = whatHappensOnSaveInputSchema.safeParse(raw);
+      if (!parsed.success) return null;
+      return whatHappensOnSaveHandler(ctx, parsed.data);
+    };
+    const canonical = await run({ objectApiName: 'FullObj', event: 'insert' });
+    const byObject = await run({ object: 'FullObj', event: 'insert' });
+    const byObjectId = await run({ objectId: 'CustomObject:FullObj', event: 'insert' });
+    const byComponent = await run({ componentId: 'CustomObject:FullObj', event: 'insert' });
+    for (const r of [canonical, byObject, byObjectId, byComponent]) {
+      expect(r).not.toBeNull();
+      expect(r?.ok).toBe(true);
+    }
+    if (!canonical?.ok || !byObject?.ok || !byObjectId?.ok || !byComponent?.ok) return;
+    expect(canonical.value.data.appliedScope).toEqual({
+      componentId: 'CustomObject:FullObj',
+      object: 'FullObj',
+    });
+    for (const r of [byObject, byObjectId, byComponent]) {
+      expect(r.value.data.soe).toEqual(canonical.value.data.soe);
+      expect(r.value.data.summary).toEqual(canonical.value.data.summary);
+      expect(r.value.data.appliedScope).toEqual(canonical.value.data.appliedScope);
+      expect(r.value.data.objectApiName).toBe('FullObj');
+    }
+  });
+
+  it('disagreeing object aliases → invalid-query', async () => {
+    const parsed = whatHappensOnSaveInputSchema.safeParse({
+      objectApiName: 'FullObj',
+      object: 'EmptyObj',
+      event: 'insert',
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    const r = await whatHappensOnSaveHandler(ctx, parsed.data);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe('invalid-query');
   });
 
   it('composes SOE when object node is absent but triggersOn automation exists', async () => {
@@ -1643,6 +1927,239 @@ describe('whatHappensOnSaveHandler', () => {
       );
       expect(result.value.data.disclosure).toContain('EntitlementProcess');
     });
+  });
+});
+
+describe('whatHappensOnSaveHandler — phase filter + phase-omission honesty (WHAT-HAPPENS-ON-SAVE-TRUNCATION-DROPS-LATER-PHASES)', () => {
+  it('computePhasesOmitted names phases whose surviving soe fell below phaseCounts', () => {
+    // Pure-function guard (the helper did not exist pre-fix). Declared counts
+    // claim two duplicate-rules + one after-trigger; the survivors show none.
+    const declared = tallyPhaseCounts([
+      { phase: 'duplicate-rules' },
+      { phase: 'duplicate-rules' },
+      { phase: 'after-triggers' },
+      { phase: 'pre-save-validation' },
+    ]);
+    const survivors = [{ phase: 'pre-save-validation' as const }];
+    const omitted = computePhasesOmitted(declared, survivors);
+    const byPhase = new Map(omitted.map((o) => [o.phase, o]));
+    expect(byPhase.get('duplicate-rules')).toEqual({
+      phase: 'duplicate-rules',
+      declared: 2,
+      present: 0,
+    });
+    expect(byPhase.get('after-triggers')).toEqual({
+      phase: 'after-triggers',
+      declared: 1,
+      present: 0,
+    });
+    // A fully-represented phase is NOT reported.
+    expect(byPhase.has('pre-save-validation')).toBe(false);
+  });
+
+  it('full (un-filtered) view on a small object keeps every phase — no phasesOmitted, no appliedPhaseFilter', async () => {
+    const r = await whatHappensOnSaveHandler(ctx, { objectApiName: 'FullObj', event: 'insert' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // The single-event view never drops steps: every phase phaseCounts claims is
+    // present in soe, so the honesty invariant holds and phasesOmitted is absent.
+    const soePhases = new Set(d.soe.map((s) => s.phase));
+    for (const [phase, count] of Object.entries(d.summary.phaseCounts)) {
+      if (count > 0) expect(soePhases.has(phase as never)).toBe(true);
+    }
+    expect(d.phasesOmitted).toBeUndefined();
+    expect(d.appliedPhaseFilter).toBeUndefined();
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: the `phase` filter narrows soe to one phase while summary stays whole', async () => {
+    const r = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'FullObj',
+      event: 'insert',
+      phase: 'pre-save-validation',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // FAIL-BEFORE: `phase` was not a schema field and was Zod-stripped, so soe
+    // held every phase and appliedPhaseFilter was undefined.
+    expect(d.appliedPhaseFilter).toBe('pre-save-validation');
+    expect(d.soe.length).toBeGreaterThan(0);
+    expect(d.soe.every((s) => s.phase === 'pre-save-validation')).toBe(true);
+    // summary reflects the WHOLE composition, not the narrowed slice.
+    expect(d.summary.phaseCounts['pre-save-validation']).toBe(1);
+    expect(d.summary.totalSteps).toBeGreaterThan(d.soe.length);
+  });
+
+  it('input schema accepts the phase filter and rejects an unknown phase', () => {
+    expect(
+      whatHappensOnSaveInputSchema.safeParse({
+        objectApiName: 'FullObj',
+        event: 'insert',
+        phase: 'duplicate-rules',
+      }).success,
+    ).toBe(true);
+    expect(
+      whatHappensOnSaveInputSchema.safeParse({
+        objectApiName: 'FullObj',
+        event: 'insert',
+        phase: 'not-a-phase',
+      }).success,
+    ).toBe(false);
+  });
+
+  it('a byte-budget-truncated insert never silently drops a later phase — duplicate-rules stays disclosed', async () => {
+    const r = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'TruncSaveObj',
+      event: 'insert',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    // Precondition — the payload REALLY truncated (per-step action lists trimmed
+    // to fit the ~40 KB SOE budget). Without a real trim this proves nothing.
+    expect(d.truncated).toBe(true);
+
+    const pc = d.summary.phaseCounts;
+    // The witness shape: LATER phases the counts claim are non-zero. A host that
+    // trusted a truncated `soe` alone could wrongly report "no duplicate rules /
+    // no after-triggers / no post-save flows / no async fires on save".
+    expect(pc['duplicate-rules']).toBeGreaterThan(0);
+    expect(pc['after-triggers']).toBeGreaterThan(0);
+    expect(pc['post-save-flows']).toBeGreaterThan(0);
+    expect(pc['post-save-async']).toBeGreaterThan(0);
+
+    // Honesty invariant (WHAT-HAPPENS-ON-SAVE-TRUNCATION-DROPS-LATER-PHASES): for
+    // EVERY non-zero phase, its steps are either fully present in `soe` OR the
+    // shortfall is named in `phasesOmitted` with the true declared/present
+    // counts — so a truncated payload can NEVER silently contradict
+    // `phaseCounts`. Today what_happens_on_save uses allowStepDrop:false, so
+    // every phase stays fully present and `phasesOmitted` is absent; this
+    // assertion still holds AND would catch a regression that started dropping
+    // steps without disclosing them.
+    const present = tallyPhaseCounts(d.soe) as Record<string, number>;
+    const omittedByPhase = new Map((d.phasesOmitted ?? []).map((o) => [o.phase, o]));
+    for (const [phase, declared] of Object.entries(pc)) {
+      if (declared === 0) continue;
+      if (present[phase]! >= declared) {
+        expect(present[phase]).toBe(declared);
+      } else {
+        const omission = omittedByPhase.get(phase as never);
+        expect(omission).toBeDefined();
+        expect(omission?.declared).toBe(declared);
+        expect(omission?.present).toBe(present[phase]);
+      }
+    }
+
+    // Concretely for duplicate-rules: it is disclosed structurally — present in
+    // `soe` OR named in `phasesOmitted`. Either way a host cannot conclude "no
+    // duplicate rules fire on save" from a truncated payload.
+    const dupPresent = present['duplicate-rules']! > 0;
+    const dupDisclosed = omittedByPhase.has('duplicate-rules');
+    expect(dupPresent || dupDisclosed).toBe(true);
+    // Today (allowStepDrop:false) the stronger guarantee holds: nothing dropped.
+    expect(d.phasesOmitted).toBeUndefined();
+    expect(dupPresent).toBe(true);
+  });
+
+  it('GLOBAL responseBudget trim of a large SOE attaches phasesOmitted naming every dropped non-zero phase (incl duplicate-rules)', async () => {
+    // W5.1 GLOBAL residual (WHAT-HAPPENS-ON-SAVE-TRUNCATION-DROPS-LATER-PHASES).
+    // The tool-local `enforceSoeByteBudget` runs with `allowStepDrop:false`, so
+    // on a many-step object it drops NOTHING (every step's action list is under
+    // the keep-all floor) and hands back a payload STILL over budget. The global
+    // `jsonResult` responseBudget guard then tail-truncates `data.soe`, shedding
+    // the LATER phases — the honesty hole the tool-local guard cannot reach.
+
+    // Precondition — the handler alone SURVIVES the tool-local trim: it never
+    // drops a STEP (allowStepDrop:false), so every phase phaseCounts claims is
+    // fully present in `soe` and `phasesOmitted` is absent. (It may set
+    // `truncated` because the tool-local pass trims per-step ACTION edges — that
+    // is orthogonal; what matters is no step, hence no PHASE, was shed here.)
+    // So whatever phase-omission the wire shows below was done by the GLOBAL
+    // budget path, not the tool-local one.
+    const handlerOnly = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'SaveHeavyObj',
+      event: 'insert',
+    });
+    expect(handlerOnly.ok).toBe(true);
+    if (!handlerOnly.ok) return;
+    expect(handlerOnly.value.data.soe.length).toBe(
+      handlerOnly.value.data.summary.totalSteps,
+    );
+    expect(handlerOnly.value.data.phasesOmitted).toBeUndefined();
+    const declared = handlerOnly.value.data.summary.phaseCounts;
+    // The witness shape: later phases the counts claim are non-zero.
+    expect(declared['pre-save-validation']).toBe(SAVE_HEAVY_VR_COUNT);
+    expect(declared['duplicate-rules']).toBe(3);
+    expect(declared['after-triggers']).toBe(1);
+    expect(declared['post-save-flows']).toBe(1);
+    expect(declared['post-save-async']).toBe(1);
+    // The handler payload really is over the global budget (so the guard bites).
+    const handlerBytes = Buffer.byteLength(
+      JSON.stringify(handlerOnly.value.data),
+      'utf8',
+    );
+    expect(handlerBytes).toBeGreaterThan(40_000);
+
+    // Drive the PRODUCTION dispatch path (parse → handle → stamp → jsonResult).
+    const wire = await runTool(
+      ctx,
+      { objectApiName: 'SaveHeavyObj', event: 'insert' },
+      whatHappensOnSaveInputSchema,
+      whatHappensOnSaveHandler,
+    );
+    const text = (wire.content[0] as { readonly text: string }).text;
+    const parsed = JSON.parse(text) as {
+      readonly data: {
+        readonly soe: readonly { readonly phase: string }[];
+        readonly summary: { readonly phaseCounts: Record<string, number> };
+        readonly phasesOmitted?: readonly {
+          readonly phase: string;
+          readonly declared: number;
+          readonly present: number;
+        }[];
+      };
+      readonly responseBudget?: {
+        readonly truncated?: boolean;
+        readonly droppedCount?: number;
+      };
+    };
+
+    // The GLOBAL guard truncated `data.soe` (this is the path under test).
+    expect(parsed.responseBudget?.truncated).toBe(true);
+    expect(parsed.responseBudget?.droppedCount ?? 0).toBeGreaterThan(0);
+    expect(parsed.data.soe.length).toBeLessThan(
+      parsed.data.summary.phaseCounts['pre-save-validation']! +
+        parsed.data.summary.phaseCounts['duplicate-rules']!,
+    );
+
+    // Acceptance — the truncated-on-the-wire payload names EVERY dropped
+    // non-zero phase in `phasesOmitted`; a host can NEVER read it as "no
+    // duplicate rules / no after-triggers / no post-save flows / no async".
+    const pc = parsed.data.summary.phaseCounts;
+    const present = tallyPhaseCounts(
+      parsed.data.soe as readonly { readonly phase: never }[],
+    ) as Record<string, number>;
+    const omittedByPhase = new Map(
+      (parsed.data.phasesOmitted ?? []).map((o) => [o.phase, o]),
+    );
+    for (const [phase, count] of Object.entries(pc)) {
+      if (count === 0) continue;
+      if (present[phase]! >= count) continue; // fully present ⇒ no omission needed
+      const omission = omittedByPhase.get(phase);
+      expect(omission).toBeDefined();
+      expect(omission?.declared).toBe(count);
+      expect(omission?.present).toBe(present[phase]);
+    }
+    // Concretely: duplicate-rules was shed and is NAMED, not silently dropped.
+    expect(present['duplicate-rules'] ?? 0).toBe(0);
+    expect(omittedByPhase.get('duplicate-rules')).toEqual({
+      phase: 'duplicate-rules',
+      declared: 3,
+      present: 0,
+    });
+    // …and the envelope stayed under the wire budget (no opaque rejection).
+    expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(45_000);
   });
 });
 

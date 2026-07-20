@@ -1286,3 +1286,43 @@ describe('safeToDeleteFieldHandler — format: proposal (Finding #35)', () => {
     expect(result.value.data.proposal).toBeUndefined();
   });
 });
+
+// GUARD (L2 alias OS / ADMIN-SURFACE-ALIAS-SKEW-CLUSTER): pre-fix the schema
+// required `fieldId` and Zod-STRIPPED `componentId: CustomField:…` -> `fieldId:
+// Required`. Post-fix the componentId alias resolves to the SAME verdict as the
+// canonical fieldId; disagreeing values -> invalid-query. Built on the current
+// L1-gated file (does not revert the trust-gate change).
+describe('safeToDeleteFieldHandler — componentId ↔ fieldId alias', () => {
+  const run = async (raw: unknown) => {
+    const parsed = safeToDeleteFieldInputSchema.safeParse(raw);
+    if (!parsed.success) return null;
+    return safeToDeleteFieldHandler(ctx, parsed.data);
+  };
+
+  it('natural componentId ≡ canonical fieldId (byte-equal verdict + data)', async () => {
+    const byField = await run({ fieldId: SAFE_FIELD });
+    const byComponent = await run({ componentId: SAFE_FIELD });
+    expect(byField).not.toBeNull();
+    expect(byComponent).not.toBeNull();
+    if (!byField?.ok || !byComponent?.ok) return;
+    expect(byComponent.value.data.fieldId).toBe(SAFE_FIELD);
+    expect(byComponent.value.data.verdict).toBe(byField.value.data.verdict);
+    expect(byComponent.value.data).toEqual(byField.value.data);
+  });
+
+  it('disagreeing fieldId / componentId → invalid-query', async () => {
+    const parsed = safeToDeleteFieldInputSchema.safeParse({
+      fieldId: SAFE_FIELD,
+      componentId: 'CustomField:Account.Other_Field__c',
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    const r = await safeToDeleteFieldHandler(ctx, parsed.data);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('neither fieldId nor componentId → schema rejects', () => {
+    expect(safeToDeleteFieldInputSchema.safeParse({}).success).toBe(false);
+  });
+});

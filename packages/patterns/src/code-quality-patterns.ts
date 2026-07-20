@@ -52,9 +52,17 @@
  *   (`Schema.sObjectType.X.is{Createable|Updateable|Deletable}()`),
  *   user-mode DML (`insert x as user`, `Database.insert(x,
  *   AccessLevel.USER_MODE)`), or a write-FLS strip
- *   (`Security.stripInaccessible(AccessType.CREATABLE|UPDATABLE, …)`)
- *   gates a write. `isAccessible()` is a READ check and never clears a
- *   write.
+ *   (`Security.stripInaccessible(AccessType.CREATABLE|UPDATABLE|UPSERTABLE,
+ *   …)`) gates a write. `isAccessible()` is a READ check and never clears
+ *   a write. Explicit `Database.insert(x, AccessLevel.SYSTEM_MODE)` is a
+ *   DELIBERATE opt-out (system mode) — NOT a `missing-crud-check` omission:
+ *   it is reclassified as an `intentional-system-mode-dml` review finding
+ *   (`info`), surfaced with the honest "switch to USER_MODE to enforce"
+ *   remediation rather than a high-severity "add a Schema check" alarm (W7.3).
+ *   Symmetrically, the `missing-fls-check` READ recognizer clears a query
+ *   whose result is sanitized with a READ-path strip
+ *   (`Security.stripInaccessible(AccessType.READABLE, <resultVar>)`) — the
+ *   modern read-FLS pattern, equivalent to `WITH SECURITY_ENFORCED`.
  * - **Custom security utility helpers invisible.** Only the standard
  *   constructs above are recognized; org-specific
  *   `SecurityUtils.canCreate(...)` helpers trigger false positives.
@@ -742,10 +750,12 @@ const DML_DATABASE_CALL_PATTERN =
 //     and is deliberately EXCLUDED — it never authorizes a write.
 //   - `Schema.X.SObjectType.getDescribe()` — loose existing describe hint.
 //   - `Database.SObjectAccessDecision` / `Security.stripInaccessible(
-//     AccessType.CREATABLE|UPDATABLE, …)` — field-FLS WRITE stripping. These
-//     enforce field FLS but NOT object CRUD by themselves; accepted as a write
-//     gate consistent with the recognizer's heuristic leniency (see comment on
-//     the delete carve-out in `detectMissingCrudCheck`).
+//     AccessType.CREATABLE|UPDATABLE|UPSERTABLE, …)` — field-FLS WRITE
+//     stripping. These enforce field FLS but NOT object CRUD by themselves;
+//     accepted as a write gate consistent with the recognizer's heuristic
+//     leniency (see comment on the delete carve-out in `detectMissingCrudCheck`).
+//     `UPSERTABLE` is the upsert-specific AccessType (Winter '20+); READABLE is
+//     excluded — a READ strip never authorizes a write.
 //
 // Deliberately NOT hints (they were the conflation bug):
 //   - `WITH SECURITY_ENFORCED` / `WITH USER_MODE` — SOQL clauses that enforce
@@ -762,7 +772,12 @@ const CRUD_HINT_PATTERNS = [
   /\bSchema\.sObjectType\.([A-Za-z_][A-Za-z_0-9]*)\.(?:isCreateable|isUpdateable|isDeletable)\s*\(/g,
   /\bSchema\.[A-Za-z_][A-Za-z_0-9]*\.SObjectType\.getDescribe\s*\(/g,
   /\bDatabase\.SObjectAccessDecision\b/g,
-  /\bSecurity\.stripInaccessible\s*\(\s*AccessType\.(?:CREATABLE|UPDATABLE)\b/g,
+  // Write-FLS strip. `AccessType.UPSERTABLE` is a first-class enum value used
+  // before an `upsert` (Winter '20+); omitting it made every
+  // `stripInaccessible(AccessType.UPSERTABLE, …)` before an upsert a false
+  // positive. READABLE is deliberately excluded — it is a READ strip and never
+  // authorizes a write.
+  /\bSecurity\.stripInaccessible\s*\(\s*AccessType\.(?:CREATABLE|UPDATABLE|UPSERTABLE)\b/g,
 ];
 
 /**
@@ -885,6 +900,34 @@ const detectMissingCrudCheck = (
           if (closeParen !== -1) {
             const args = stripped.slice(openParen, closeParen + 1);
             if (/\bAccessLevel\.USER_MODE\b/.test(args)) continue;
+            // `Database.insert(x, [allOrNone,] AccessLevel.SYSTEM_MODE)` is an
+            // EXPLICIT, DELIBERATE opt-out: the developer consciously runs the
+            // write in system context, so object/field security is intentionally
+            // NOT enforced. That is NOT a `missing-crud-check` omission — a
+            // developer who consciously chose SYSTEM_MODE has not "forgotten" a
+            // CRUD check, and flagging it `high` produces a false alarm hosts
+            // remediate by adding an isUpdateable() guard the SYSTEM_MODE write
+            // deliberately bypasses (W7.3). Reclassify it as an intentional
+            // system-context bypass surfaced for REVIEW (`info`), with the honest
+            // "switch to USER_MODE if the running user's CRUD/FLS should apply"
+            // remediation. Bound to THIS call site (like USER_MODE) so an
+            // unrelated system-mode call cannot mislabel a different DML.
+            if (/\bAccessLevel\.SYSTEM_MODE\b/.test(args)) {
+              issues.push({
+                rule: 'intentional-system-mode-dml',
+                severity: 'info',
+                location: `line ${offsetToLine(source, m.index)}`,
+                explanation:
+                  `DML '${opKind} ${varName}' runs in explicit AccessLevel.SYSTEM_MODE — object- and ` +
+                  `field-level security are intentionally NOT enforced for this write. This is a ` +
+                  `DELIBERATE system-context bypass, not a missing CRUD check: review that the ` +
+                  `trusted context is intended (no fix required if so). If the running user's CRUD/FLS ` +
+                  `SHOULD apply, switch to AccessLevel.USER_MODE ` +
+                  `(\`Database.${opKind}(x, AccessLevel.USER_MODE)\`).`,
+                confidence: 'heuristic',
+              });
+              continue;
+            }
           }
         }
       } else if ((m[3] ?? '').length > 0) {
@@ -990,7 +1033,36 @@ const detectMissingCrudCheck = (
 // clause. The naive heuristic flags every inline `[SELECT ... FROM ...]`
 // that doesn't carry the FLS clause; the caller's skill is responsible
 // for surfacing the Q80 disclosure (custom helpers are invisible).
+//
+// A query is NOT an unenforced read, however, when its result is sanitized
+// with a READ-path field-FLS strip
+// (`Security.stripInaccessible(AccessType.READABLE, <resultVar>)`) — the
+// modern Salesforce-recommended read pattern (GA API 55+) that enforces
+// field-level security exactly as `WITH SECURITY_ENFORCED` does. Flagging
+// such a query as missing-FLS is a false positive
+// (CRUD-FLS-IGNORES-ACCESSLEVEL-AND-STRIPINACCESSIBLE), so a query whose
+// result variable is passed to that strip in the enclosing method is cleared.
 const INLINE_SOQL_PATTERN = /\[\s*SELECT\b([\s\S]*?)\]/gi;
+
+// The variable a query is assigned to, read from the text immediately BEFORE
+// the `[SELECT` — `List<Contact> cs = [SELECT …]` / `cs = [SELECT …]` (optional
+// leading cast). `null` when the query is not bound to a plain variable (a
+// `for (X c : [SELECT …])` header or an inline call argument): those cannot be
+// strip-sanitized, so they still flag.
+const QUERY_ASSIGN_LHS = /([A-Za-z_][A-Za-z_0-9]*)\s*=\s*(?:\([^()]*\)\s*)?$/;
+
+/**
+ * Regex matching a READ-path field-FLS strip of `varName`:
+ * `Security.stripInaccessible(AccessType.READABLE, <varName>)`. READABLE is the
+ * read AccessType — CREATABLE/UPDATABLE/UPSERTABLE are write strips handled by
+ * the `missing-crud-check` recognizer, never this read recognizer.
+ */
+const readStripFor = (varName: string): RegExp =>
+  new RegExp(
+    `\\bSecurity\\.stripInaccessible\\s*\\(\\s*AccessType\\.READABLE\\s*,\\s*${escapeForRegex(
+      varName,
+    )}\\b`,
+  );
 
 const detectMissingFlsCheck = (
   source: string,
@@ -1005,13 +1077,33 @@ const detectMissingFlsCheck = (
     const queryBody = m[1] ?? '';
     if (/\bWITH\s+SECURITY_ENFORCED\b/i.test(queryBody)) continue;
     if (/\bWITH\s+USER_MODE\b/i.test(queryBody)) continue;
+
+    // Read-path field-FLS strip: when this query's result variable is passed to
+    // `Security.stripInaccessible(AccessType.READABLE, <var>)` in the enclosing
+    // method, field security IS enforced on the read — clear the finding. Bound
+    // to the resolved result variable (not a loose whole-file token) so a strip
+    // of a DIFFERENT query in the same method cannot clear an unguarded read.
+    const lhs = QUERY_ASSIGN_LHS.exec(stripped.slice(0, m.index));
+    const lhsVar = lhs?.[1];
+    if (lhsVar !== undefined) {
+      const { bodyStart } = enclosingMethodStart(stripped, m.index);
+      const methodEnd =
+        stripped[bodyStart] === '{' ? findMatchingBrace(stripped, bodyStart) : -1;
+      const methodWindow = stripped.slice(
+        bodyStart,
+        methodEnd === -1 ? stripped.length : methodEnd + 1,
+      );
+      if (readStripFor(lhsVar).test(methodWindow)) continue;
+    }
+
     issues.push({
       rule: 'missing-fls-check',
       severity: 'high',
       location: `line ${offsetToLine(source, m.index)}`,
       explanation:
         'SOQL query without WITH SECURITY_ENFORCED / USER_MODE — field-level security not enforced on the result. ' +
-        'Add the clause or check Schema.sObjectType.X.fields.Y.isAccessible() before reading.',
+        'Add the clause, sanitize the result with Security.stripInaccessible(AccessType.READABLE, …), ' +
+        'or check Schema.sObjectType.X.fields.Y.isAccessible() before reading.',
       confidence: 'heuristic',
     });
   }

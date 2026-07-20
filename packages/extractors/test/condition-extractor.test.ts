@@ -361,6 +361,7 @@ describe('extractConditions', () => {
             },
           ],
           conditionLogic: 'and',
+          sourceName: null,
         },
       ];
       const result = extractConditions({
@@ -381,6 +382,157 @@ describe('extractConditions', () => {
       expect(result.conditionNodes[0]!.properties.fieldRefs).toEqual([
         'CustomField:Opportunity.Status__c',
       ]);
+    });
+
+    // BUG 6 — a bare `and` / `or` conditionLogic (the DEFAULT for every
+    // Flow decision) carries no index tokens, so the old index-substitution
+    // pass returned the keyword verbatim, rendering the predicate as the
+    // literal word "and". The expression must be the real `field op value`.
+    it('renders a bare `and` decision as the actual predicate, not the word "and" (BUG 6)', () => {
+      const sources: ConditionSource[] = [
+        {
+          kind: 'flow-decision',
+          conditions: [
+            { field: '$Record.Status__c', operation: 'EqualTo', value: 'Approved' },
+          ],
+          conditionLogic: 'and',
+          sourceName: null,
+        },
+      ];
+      const result = extractConditions({
+        parentId: 'Flow:Set_Status',
+        sources,
+        parentSourcePath: '/abs/Set_Status.flow-meta.xml',
+        parentObjectApiName: 'Opportunity',
+      });
+      expect(result.conditionNodes[0]!.properties.expression).toBe(
+        '$Record.Status__c EqualTo Approved',
+      );
+      expect(result.conditionNodes[0]!.properties.expression).not.toBe('and');
+    });
+
+    it('joins multi-condition bare-`and` decisions with AND (BUG 6)', () => {
+      const sources: ConditionSource[] = [
+        {
+          kind: 'flow-decision',
+          conditions: [
+            { field: '$Record.Amount', operation: 'GreaterThan', value: '1000000' },
+            { field: '$Record.Stage', operation: 'EqualTo', value: 'Negotiation' },
+          ],
+          conditionLogic: 'and',
+          sourceName: null,
+        },
+      ];
+      const result = extractConditions({
+        parentId: 'Flow:Watch_Deal',
+        sources,
+        parentSourcePath: '/abs/Watch_Deal.flow-meta.xml',
+        parentObjectApiName: 'Opportunity',
+      });
+      expect(result.conditionNodes[0]!.properties.expression).toBe(
+        '$Record.Amount GreaterThan 1000000 AND $Record.Stage EqualTo Negotiation',
+      );
+    });
+
+    it('joins multi-condition bare-`or` decisions with OR, case-insensitively (BUG 6)', () => {
+      const sources: ConditionSource[] = [
+        {
+          kind: 'flow-decision',
+          conditions: [
+            { field: '$Record.Type', operation: 'EqualTo', value: 'A' },
+            { field: '$Record.Type', operation: 'EqualTo', value: 'B' },
+          ],
+          // Uppercase keyword must still take the join path (case-insensitive).
+          conditionLogic: 'OR',
+          sourceName: null,
+        },
+      ];
+      const result = extractConditions({
+        parentId: 'Flow:Type_Branch',
+        sources,
+        parentSourcePath: '/abs/Type_Branch.flow-meta.xml',
+        parentObjectApiName: 'Opportunity',
+      });
+      expect(result.conditionNodes[0]!.properties.expression).toBe(
+        '$Record.Type EqualTo A OR $Record.Type EqualTo B',
+      );
+    });
+
+    it('still index-substitutes real custom conditionLogic (BUG 6 guard)', () => {
+      const sources: ConditionSource[] = [
+        {
+          kind: 'flow-decision',
+          conditions: [
+            { field: '$Record.A', operation: 'EqualTo', value: 'x' },
+            { field: '$Record.B', operation: 'EqualTo', value: 'y' },
+          ],
+          conditionLogic: '1 OR 2',
+          sourceName: null,
+        },
+      ];
+      const result = extractConditions({
+        parentId: 'Flow:Custom_Logic',
+        sources,
+        parentSourcePath: '/abs/Custom_Logic.flow-meta.xml',
+        parentObjectApiName: 'Opportunity',
+      });
+      expect(result.conditionNodes[0]!.properties.expression).toBe(
+        '($Record.A EqualTo x) OR ($Record.B EqualTo y)',
+      );
+    });
+
+    // BUG 7 — the decision's real name must survive onto the node + mirror as
+    // `sourceName`, so explain_flow can label the row with it instead of the
+    // synthetic `condition-N` handle.
+    it('threads the flow-decision sourceName onto the node properties and mirror (BUG 7)', () => {
+      const sources: ConditionSource[] = [
+        {
+          kind: 'flow-decision',
+          conditions: [
+            { field: '$Record.Status__c', operation: 'EqualTo', value: 'Approved' },
+          ],
+          conditionLogic: 'and',
+          sourceName: 'My_Decision (My_Outcome)',
+        },
+      ];
+      const result = extractConditions({
+        parentId: 'Flow:Set_Status',
+        sources,
+        parentSourcePath: '/abs/Set_Status.flow-meta.xml',
+        parentObjectApiName: 'Opportunity',
+      });
+      expect(result.conditionNodes[0]!.properties.sourceName).toBe(
+        'My_Decision (My_Outcome)',
+      );
+      expect(result.conditionsMirror[0]!.sourceName).toBe(
+        'My_Decision (My_Outcome)',
+      );
+      // The synthetic id is UNCHANGED — firesWhen edges + downstream ids still
+      // resolve; only a NEW property was added.
+      expect(result.conditionNodes[0]!.id).toBe(
+        'ConditionalContext:Flow:Set_Status.condition-0',
+      );
+    });
+
+    it('omits sourceName entirely when the flow-decision has no name (BUG 7)', () => {
+      const sources: ConditionSource[] = [
+        {
+          kind: 'flow-decision',
+          conditions: [
+            { field: '$Record.Status__c', operation: 'EqualTo', value: 'Approved' },
+          ],
+          conditionLogic: 'and',
+          sourceName: null,
+        },
+      ];
+      const result = extractConditions({
+        parentId: 'Flow:Set_Status',
+        sources,
+        parentSourcePath: '/abs/Set_Status.flow-meta.xml',
+        parentObjectApiName: 'Opportunity',
+      });
+      expect('sourceName' in result.conditionNodes[0]!.properties).toBe(false);
+      expect('sourceName' in result.conditionsMirror[0]!).toBe(false);
     });
   });
 
@@ -428,6 +580,116 @@ describe('extractConditions', () => {
       });
       expect(result.conditionNodes[0]!.properties.mode).toBe('criteria');
       expect(result.firesWhenEdges[0]!.confidence).toBe('declared');
+    });
+  });
+
+  describe('flow-recordtrigger filterFormula — $Record merge-field refs', () => {
+    // A record-triggered Flow entry condition uses the MERGE dialect
+    // (`{!$Record.Field__c}`). Before this fix the shared formula tokenizer
+    // bucketed the `$Record.*` path onto its `globalReferences` channel
+    // (never `references`), so the filterFormula path resolved EMPTY
+    // fieldRefs despite clearly referencing the trigger object's fields —
+    // starving the coupled-field-write JOIN of Flow firers. These tests
+    // assert the merge refs now resolve against the trigger object.
+    const refsFor = (
+      filterFormula: string,
+      triggerObject: string | null,
+    ): readonly string[] => {
+      const result = extractConditions({
+        parentId: 'Flow:Entry_Cond',
+        sources: [
+          {
+            kind: 'flow-recordtrigger',
+            filters: [],
+            filterLogic: null,
+            filterFormula,
+          },
+        ],
+        parentSourcePath: '/abs/Entry_Cond.flow-meta.xml',
+        parentObjectApiName: triggerObject,
+      });
+      return result.conditionNodes[0]!.properties.fieldRefs as readonly string[];
+    };
+
+    it('resolves a wrapped {!$Record.Field} merge ref to a trigger-object field', () => {
+      // Was [] before the fix (tokenizer put $Record on globalReferences).
+      expect(
+        refsFor('NOT(ISBLANK({!$Record.SomeField__c}))', 'Ns__Obj__c'),
+      ).toEqual(['CustomField:Ns__Obj__c.SomeField__c']);
+    });
+
+    it('resolves the $Record field inside ISPICKVAL with a string arg', () => {
+      expect(
+        refsFor("ISPICKVAL({!$Record.Status__c},'Submitted')", 'Ns__Obj__c'),
+      ).toEqual(['CustomField:Ns__Obj__c.Status__c']);
+    });
+
+    it('resolves a bare (unwrapped) $Record.Field merge ref too', () => {
+      // Some entry formulas appear bare (e.g. inside ISCHANGED); handle both.
+      expect(refsFor('ISCHANGED($Record.Amount__c)', 'Ns__Obj__c')).toEqual([
+        'CustomField:Ns__Obj__c.Amount__c',
+      ]);
+    });
+
+    it('resolves $Record__Prior.<field> (the before-image) to the same object', () => {
+      expect(
+        refsFor('{!$Record__Prior.Stage__c} <> {!$Record.Stage__c}', 'Ns__Obj__c'),
+      ).toEqual(['CustomField:Ns__Obj__c.Stage__c']);
+    });
+
+    it('dedups multiple references to the same field, preserving first order', () => {
+      expect(
+        refsFor(
+          'AND(NOT(ISBLANK({!$Record.A__c})), {!$Record.B__c} > 0, {!$Record.A__c} <> "x")',
+          'Ns__Obj__c',
+        ),
+      ).toEqual(['CustomField:Ns__Obj__c.A__c', 'CustomField:Ns__Obj__c.B__c']);
+    });
+
+    it('anchors a cross-object {!$Record.Rel__r.Field} path on the trigger object (not dropped)', () => {
+      // resolveRecordGlobalField supports the dotted path, so we resolve it
+      // rather than preserving verbatim — the cross-object nav is kept.
+      expect(
+        refsFor('NOT(ISBLANK({!$Record.Account__r.Name}))', 'Ns__Obj__c'),
+      ).toEqual(['CustomField:Ns__Obj__c.Account__r.Name']);
+    });
+
+    it('preserves $Record verbatim when the flow has no trigger-object context', () => {
+      // Null object context can\'t resolve $Record — keep it, do NOT drop.
+      expect(
+        refsFor('NOT(ISBLANK({!$Record.SomeField__c}))', null),
+      ).toEqual(['CustomField:$Record.SomeField__c']);
+    });
+
+    it('returns [] for a filterFormula with no $Record reference', () => {
+      // A global-only formula ($User is not the trigger record) resolves to
+      // no trigger-object fields.
+      expect(refsFor('NOT(ISBLANK({!$User.Email}))', 'Ns__Obj__c')).toEqual([]);
+    });
+
+    it('returns [] (no throw) for a malformed formula with no $Record ref', () => {
+      // Regex extraction cannot throw the way tokenizing can — a broken
+      // formula with no $Record ref simply yields no refs.
+      expect(refsFor('NOT(ISBLANK(', 'Ns__Obj__c')).toEqual([]);
+      expect(refsFor('', 'Ns__Obj__c')).toEqual([]);
+    });
+
+    it('sets parsed confidence and formula mode on the filterFormula path', () => {
+      const result = extractConditions({
+        parentId: 'Flow:Entry_Cond',
+        sources: [
+          {
+            kind: 'flow-recordtrigger',
+            filters: [],
+            filterLogic: null,
+            filterFormula: 'NOT(ISBLANK({!$Record.SomeField__c}))',
+          },
+        ],
+        parentSourcePath: '/abs/Entry_Cond.flow-meta.xml',
+        parentObjectApiName: 'Ns__Obj__c',
+      });
+      expect(result.conditionNodes[0]!.properties.mode).toBe('formula');
+      expect(result.firesWhenEdges[0]!.confidence).toBe('parsed');
     });
   });
 

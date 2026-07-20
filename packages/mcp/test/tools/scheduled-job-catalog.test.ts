@@ -493,6 +493,70 @@ describe('scheduledJobCatalogHandler', () => {
   });
 });
 
+describe('scheduledJobCatalogHandler — nameContains scope (SCHEDULED-JOB-CATALOG-IGNORES-NAMECONTAINS)', () => {
+  it('a bare no-filter call omits appliedScope (byte-identical to the pre-filter golden)', async () => {
+    const result = await scheduledJobCatalogHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // The ONLY additive field is appliedScope, spread in only when the filter
+    // was passed — a bare call's data shape is unchanged from before the fix.
+    expect('appliedScope' in result.value.data).toBe(false);
+  });
+
+  it('a matching nameContains returns the SUBSET (case-insensitive) with appliedScope echoed', async () => {
+    const bare = await scheduledJobCatalogHandler(ctx, {});
+    const scoped = await scheduledJobCatalogHandler(ctx, { nameContains: 'nightly' });
+    expect(bare.ok).toBe(true);
+    expect(scoped.ok).toBe(true);
+    if (!bare.ok || !scoped.ok) return;
+    const d = scoped.value.data;
+    // Case-insensitive: 'nightly' matches ONLY NightlyJob among the 4
+    // Schedulable classes — a strict subset of the bare catalog.
+    expect(d.jobs.map((j) => j.classId)).toEqual([NIGHTLY_JOB]);
+    expect(d.jobs.length).toBeLessThan(bare.value.data.jobs.length);
+    expect(d.scheduledFlows).toEqual([]);
+    expect(d.summary.totalSchedulableClasses).toBe(1);
+    expect(d.summary.totalScheduledFlows).toBe(0);
+    expect(d.appliedScope).toEqual({
+      nameContains: 'nightly',
+      mode: 'nameContains',
+    });
+  });
+
+  it('nameContains also narrows the scheduledFlows section', async () => {
+    const result = await scheduledJobCatalogHandler(ctx, {
+      nameContains: 'ScheduledPayment',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    // 'ScheduledPayment' matches the scheduled Flow but none of the classes.
+    expect(d.jobs).toEqual([]);
+    expect(d.scheduledFlows.map((f) => f.flowId)).toEqual([SCHEDULED_FLOW]);
+    expect(d.summary.totalScheduledFlows).toBe(1);
+    expect(d.appliedScope?.nameContains).toBe('ScheduledPayment');
+  });
+
+  it('a non-matching nameContains returns an honest empty catalog, never the full list', async () => {
+    const result = await scheduledJobCatalogHandler(ctx, {
+      nameContains: 'NoSuchJobXYZ',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    expect(d.jobs).toEqual([]);
+    expect(d.scheduledFlows).toEqual([]);
+    expect(d.summary.totalSchedulableClasses).toBe(0);
+    expect(d.summary.totalScheduledFlows).toBe(0);
+    expect(d.summary.classesWithKnownCallers).toBe(0);
+    expect(d.summary.classesScheduledFromProduction).toBe(0);
+    expect(d.appliedScope).toEqual({
+      nameContains: 'NoSuchJobXYZ',
+      mode: 'nameContains',
+    });
+  });
+});
+
 describe('scheduledJobCatalogInputSchema', () => {
   it('accepts an empty input', () => {
     expect(scheduledJobCatalogInputSchema.safeParse({}).success).toBe(true);
@@ -502,5 +566,18 @@ describe('scheduledJobCatalogInputSchema', () => {
     expect(
       scheduledJobCatalogInputSchema.safeParse({ ignored: 'value' }).success,
     ).toBe(true);
+  });
+
+  it('accepts a nameContains filter', () => {
+    expect(
+      scheduledJobCatalogInputSchema.safeParse({ nameContains: 'Nightly' })
+        .success,
+    ).toBe(true);
+  });
+
+  it('rejects an empty nameContains (min length 1)', () => {
+    expect(
+      scheduledJobCatalogInputSchema.safeParse({ nameContains: '' }).success,
+    ).toBe(false);
   });
 });

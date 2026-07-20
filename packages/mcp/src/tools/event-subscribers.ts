@@ -144,6 +144,12 @@ export const eventSubscribersInputSchema = z.object({
   // their subscriber counts — answers "what platform events does this org
   // publish?". Supply it for the subscriber list of one specific event.
   eventId: z.string().min(1).optional(),
+  // Natural host alias after resolve: the bare Platform Event API name
+  // (`Application_Event__e`), resolved to `CustomObject:{apiName}` internally.
+  // Previously an unknown key Zod stripped, so an apiName-shaped call silently
+  // fell through to CATALOG mode (empty top-level publishers/channels) instead
+  // of the single-event detail. When both are supplied, `eventId` wins.
+  eventApiName: z.string().min(1).optional(),
   limit: z
     .number()
     .int()
@@ -307,6 +313,27 @@ const validateEventId = (eventId: ComponentId): string | null => {
   if (apiName.length === 0) return null;
   if (!apiName.endsWith(EVENT_API_NAME_SUFFIX)) return null;
   return apiName;
+};
+
+/**
+ * Resolve the caller-supplied event scope into a canonical event id.
+ * Precedence: an explicit `eventId` wins; otherwise a bare `eventApiName`
+ * (the host alias) is lifted to `CustomObject:{apiName}`. A value already
+ * carrying the `CustomObject:` prefix is passed through so a host that
+ * mistakenly sends the full id under `eventApiName` still resolves (defends
+ * against `CustomObject:CustomObject:…`). Returns `undefined` when neither is
+ * supplied — the catalog-mode signal. Syntactic validity (the `__e` suffix) is
+ * still enforced downstream by {@link validateEventId}, so a non-event apiName
+ * surfaces as `invalid-query`, not a silent empty.
+ */
+const resolveRequestedEventId = (
+  input: EventSubscribersInput,
+): ComponentId | undefined => {
+  if (input.eventId !== undefined) return input.eventId;
+  if (input.eventApiName === undefined) return undefined;
+  return input.eventApiName.startsWith(EVENT_ID_PREFIX)
+    ? input.eventApiName
+    : `${EVENT_ID_PREFIX}${input.eventApiName}`;
 };
 
 /**
@@ -508,10 +535,15 @@ export const eventSubscribersHandler = async (
 ): Promise<Result<McpResponse<EventSubscribersOutput>, McpError>> => {
   const limit = input.limit ?? EVENT_SUBSCRIBERS_DEFAULT_LIMIT;
 
-  // Catalog mode (R0791): no eventId → enumerate every Platform Event
+  // Resolve the requested event scope up front so the apiName alias
+  // (`eventApiName: 'Application_Event__e'`) enters DETAIL mode instead of
+  // silently falling through to the catalog.
+  const requestedEventId = resolveRequestedEventId(input);
+
+  // Catalog mode (R0791): no event scope → enumerate every Platform Event
   // (CustomObject ending in `__e`) with its subscriber count, so
   // "what platform events does this org publish?" is answerable in one call.
-  if (input.eventId === undefined) {
+  if (requestedEventId === undefined) {
     const nodesResult = await listNodesByType(ctx.graph, 'CustomObject', {
       limit: EVENT_SUBSCRIBERS_MAX_LIMIT,
     });
@@ -596,16 +628,16 @@ export const eventSubscribersHandler = async (
     });
   }
 
-  const apiName = validateEventId(input.eventId);
+  const apiName = validateEventId(requestedEventId);
   if (apiName === null) {
     return err({
       kind: 'invalid-query',
-      message: `eventId must be a Platform Event canonical id (CustomObject:{ApiName}__e); got '${input.eventId}'`,
-      path: 'eventId',
+      message: `event scope must resolve to a Platform Event canonical id (CustomObject:{ApiName}__e); got '${requestedEventId}' (from ${input.eventId !== undefined ? 'eventId' : 'eventApiName'})`,
+      path: input.eventId !== undefined ? 'eventId' : 'eventApiName',
     });
   }
 
-  const edgesResult = await listEdges(ctx.graph, input.eventId, {
+  const edgesResult = await listEdges(ctx.graph, requestedEventId, {
     direction: 'in',
     edgeType: 'listensTo',
   });
@@ -654,7 +686,7 @@ export const eventSubscribersHandler = async (
   const sorted = [...byId.values()].sort(compareSubscribers).slice(0, limit);
 
   // CR-CAP-18: resolve the publish-side channel routing for this event.
-  const channelsResult = await resolveChannelBindings(ctx, input.eventId);
+  const channelsResult = await resolveChannelBindings(ctx, requestedEventId);
   if (!channelsResult.ok) {
     return err({
       kind: 'internal',
@@ -664,7 +696,7 @@ export const eventSubscribersHandler = async (
   const channels = channelsResult.value;
 
   // GROUP C: resolve the publish-side CODE (Flow/Apex emitting `writesTo`).
-  const publishersResult = await resolvePublishers(ctx, input.eventId);
+  const publishersResult = await resolvePublishers(ctx, requestedEventId);
   if (!publishersResult.ok) {
     return err({
       kind: 'internal',

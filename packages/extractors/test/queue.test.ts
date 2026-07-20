@@ -352,14 +352,14 @@ describe('extractQueue', () => {
       }
     });
 
-    it('reads memberCount=2 and emits hasMember edges for Clinical_Instruction_Payment_Approval real-org XML shape', async () => {
+    it('reads memberCount=2 and emits hasMember edges for Sample_Payment_Approval real-org XML shape', async () => {
       // Verifies v1.2 member resolution: memberEmails array on node properties
       // and hasMember edges emitted for each <user> element.
       const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Queue xmlns="http://soap.sforce.com/2006/04/metadata">
     <doesIncludeBosses>true</doesIncludeBosses>
     <doesSendEmailToMembers>false</doesSendEmailToMembers>
-    <name>Clinical Instruction Payment Approval</name>
+    <name>Sample Payment Approval</name>
     <queueMembers>
         <users>
             <user>jsherman@neutral-org.example</user>
@@ -370,7 +370,7 @@ describe('extractQueue', () => {
         <sobjectType>Payment__c</sobjectType>
     </queueSobject>
 </Queue>`;
-      const { dir, path } = await writeTempQueueXml('Clinical_Instruction_Payment_Approval.queue-meta.xml', xml);
+      const { dir, path } = await writeTempQueueXml('Sample_Payment_Approval.queue-meta.xml', xml);
       try {
         const result = await extractQueue(path);
         expect(result.ok).toBe(true);
@@ -378,7 +378,7 @@ describe('extractQueue', () => {
         const node = result.value.nodes[0];
         expect(node).toBeDefined();
         if (!node) return;
-        expect(node.id).toBe('Queue:Clinical_Instruction_Payment_Approval');
+        expect(node.id).toBe('Queue:Sample_Payment_Approval');
         expect(node.properties['memberCount']).toBe(2);
         const memberEmails = node.properties['memberEmails'] as string[];
         expect(memberEmails).toContain('jsherman@neutral-org.example');

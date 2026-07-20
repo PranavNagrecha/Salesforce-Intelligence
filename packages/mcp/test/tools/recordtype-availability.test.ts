@@ -13,7 +13,10 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
-import { recordtypeAvailabilityHandler } from '../../src/tools/recordtype-availability.js';
+import {
+  recordtypeAvailabilityHandler,
+  recordtypeAvailabilityInputSchema,
+} from '../../src/tools/recordtype-availability.js';
 
 const MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -112,6 +115,51 @@ describe('recordtypeAvailabilityHandler', () => {
     expect(r.error.kind).toBe('invalid-query');
   });
 
+  // GUARD (W3.3 misbind fix / ADMIN-SURFACE-ALIAS-SKEW-CLUSTER): pre-fix a
+  // `CustomObject:` componentId was coerced into a phantom
+  // `Profile:CustomObject:Case` (component-NOT-found, not invalid-query), and
+  // `objectApiName` / `object` / `objectId` were Zod-STRIPPED (componentId
+  // Required). Post-fix an object-shaped input binds to the OBJECT and is
+  // rejected HONESTLY as a CustomObject — never a phantom Profile.
+  it('a CustomObject componentId is rejected as an object, not a phantom Profile', async () => {
+    const parsed = recordtypeAvailabilityInputSchema.safeParse({ componentId: 'CustomObject:Case' });
+    // The preprocess must NOT have prepended Profile:.
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(parsed.data.componentId).toBe('CustomObject:Case');
+    const r = await recordtypeAvailabilityHandler(ctx, parsed.data);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    // Names the CustomObject + the tool's real contract; never a Profile not-found.
+    expect(r.error.message).toContain('CustomObject');
+    expect(r.error.message).not.toContain('Profile:CustomObject');
+  });
+
+  it.each(['objectApiName', 'object', 'objectId'] as const)(
+    'the %s object alias binds to the object (not stripped, not Profile) → invalid-query',
+    async (key) => {
+      const value = key === 'objectId' ? 'CustomObject:Case' : 'Case';
+      const parsed = recordtypeAvailabilityInputSchema.safeParse({ [key]: value });
+      expect(parsed.success).toBe(true);
+      if (!parsed.success) return;
+      expect(parsed.data.componentId).toBe('CustomObject:Case');
+      const r = await recordtypeAvailabilityHandler(ctx, parsed.data);
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.error.kind).toBe('invalid-query');
+    },
+  );
+
+  it('a real Profile still resolves (container path unaffected by the fix)', async () => {
+    const parsed = recordtypeAvailabilityInputSchema.safeParse({ profileId: 'Sales' });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(parsed.data.componentId).toBe('Profile:Sales');
+    const r = await recordtypeAvailabilityHandler(ctx, parsed.data);
+    expect(r.ok).toBe(true);
+  });
+
   it('returns component-not-found for an unknown profile', async () => {
     const r = await recordtypeAvailabilityHandler(ctx, { componentId: 'Profile:Ghost' });
     expect(r.ok).toBe(false);
@@ -135,5 +183,103 @@ describe('recordtypeAvailabilityHandler', () => {
     if (!r.ok) return;
     expect(r.value.data.boundaryNote).not.toMatch(/not modeled/);
     expect(r.value.data.boundaryNote).toMatch(/recordTypeVisibilities/);
+  });
+});
+
+// =============================================================================
+// GUARD (RECORDTYPE-AVAILABILITY-REJECTS-PROFILEAPINAME, W3.5 residual): a
+// natural "record types on Case for {profile}?" passes an OBJECT key alongside a
+// PROFILE key. Pre-fix the object was consumed into the container slot and
+// `profileApiName` was stripped entirely, so the call hard-failed as a
+// CustomObject. Post-fix the profile is the SUBJECT, the object is a FILTER, and
+// both are echoed in appliedScope; the profile is never stripped by the object.
+// =============================================================================
+describe('recordtypeAvailabilityHandler — profile subject + object filter (guard)', () => {
+  it('objectApiName + profileApiName resolves the PROFILE and narrows to the object', async () => {
+    // The dispatch layer parses natural args through the schema, then hands the
+    // resolved shape to the handler — mirror that here.
+    const parsed = recordtypeAvailabilityInputSchema.safeParse({
+      objectApiName: 'Case',
+      profileApiName: 'Sales',
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    // The profile is the SUBJECT (never stripped by the object); the object is a
+    // filter — pre-fix this resolved to CustomObject:Case and hard-failed.
+    expect(parsed.data.componentId).toBe('Profile:Sales');
+    expect(parsed.data.object).toBe('Case');
+    const res = await recordtypeAvailabilityHandler(ctx, parsed.data);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.value.data.appliedScope).toEqual({
+      componentId: 'Profile:Sales',
+      object: 'Case',
+    });
+    // Narrowed to Case only (Case.Support, which is not visible).
+    expect(res.value.data.objects.map((o) => o.object)).toEqual(['Case']);
+    expect(res.value.data.summary.objects).toBe(1);
+    expect(res.value.data.summary.visibleRecordTypes).toBe(0);
+  });
+
+  it('profileApiName alone (no object) resolves the profile across every object', async () => {
+    const parsed = recordtypeAvailabilityInputSchema.safeParse({
+      profileApiName: 'Sales',
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(parsed.data.componentId).toBe('Profile:Sales');
+    const res = await recordtypeAvailabilityHandler(ctx, parsed.data);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.value.data.objects.map((o) => o.object)).toEqual([
+      'Account',
+      'Case',
+      'Lead',
+    ]);
+    expect(res.value.data.appliedScope).toEqual({
+      componentId: 'Profile:Sales',
+      object: null,
+    });
+  });
+
+  it('natural profileApiName+object ≡ canonical componentId+object (byte-equal data)', async () => {
+    const natural = recordtypeAvailabilityInputSchema.safeParse({
+      objectApiName: 'Account',
+      profileApiName: 'Sales',
+    });
+    const canonical = recordtypeAvailabilityInputSchema.safeParse({
+      componentId: 'Profile:Sales',
+      objectApiName: 'Account',
+    });
+    expect(natural.success && canonical.success).toBe(true);
+    if (!natural.success || !canonical.success) return;
+    const a = await recordtypeAvailabilityHandler(ctx, natural.data);
+    const b = await recordtypeAvailabilityHandler(ctx, canonical.data);
+    expect(a.ok && b.ok).toBe(true);
+    if (!a.ok || !b.ok) return;
+    expect(JSON.stringify(a.value.data)).toBe(JSON.stringify(b.value.data));
+    expect(a.value.data.appliedScope).toEqual({
+      componentId: 'Profile:Sales',
+      object: 'Account',
+    });
+    // Narrowed to just Account (differs from the unscoped 3-object result).
+    expect(a.value.data.objects.map((o) => o.object)).toEqual(['Account']);
+  });
+
+  it('an object the profile has no record types for is an honest empty (still declared, not the whole map)', async () => {
+    const parsed = recordtypeAvailabilityInputSchema.safeParse({
+      profileApiName: 'Sales',
+      objectApiName: 'Opportunity',
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    const res = await recordtypeAvailabilityHandler(ctx, parsed.data);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.value.data.objects).toEqual([]);
+    expect(res.value.data.summary.objects).toBe(0);
+    expect(res.value.data.appliedScope.object).toBe('Opportunity');
+    // The property WAS extracted — so it is not the "not modeled" disclosure.
+    expect(res.value.data.boundaryNote).not.toMatch(/not modeled/);
   });
 });

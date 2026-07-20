@@ -13,7 +13,10 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
-import { layoutAssignmentsHandler } from '../../src/tools/layout-assignments.js';
+import {
+  layoutAssignmentsHandler,
+  layoutAssignmentsInputSchema,
+} from '../../src/tools/layout-assignments.js';
 
 const MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -41,6 +44,7 @@ const LAYOUT = 'Layout:Account.Account Layout';
 // type); Sales assigns a different layout; NoData carries no layoutAssignments.
 const seed: ExtractionResult = {
   nodes: [
+    node({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' }),
     node({ id: LAYOUT, type: 'Layout', apiName: 'Account.Account Layout', label: 'Account Layout' }),
     node({
       id: 'Profile:Admin',
@@ -87,11 +91,109 @@ afterAll(async () => {
 });
 
 describe('layoutAssignmentsHandler', () => {
-  it('rejects a non-Layout componentId with invalid-query', async () => {
-    const r = await layoutAssignmentsHandler(ctx, { componentId: 'CustomObject:Account' });
+  it('rejects a componentId that is neither Layout: nor CustomObject: with invalid-query', async () => {
+    const r = await layoutAssignmentsHandler(ctx, { componentId: 'Flow:Some_Flow' });
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.error.kind).toBe('invalid-query');
+  });
+
+  // GUARD (L2 alias OS / ADMIN-SURFACE-ALIAS-SKEW-CLUSTER): pre-fix the schema
+  // required `componentId` and Zod-STRIPPED `objectApiName` -> `componentId:
+  // Required`. Post-fix a natural object alias resolves to the SAME object-mode
+  // result as the canonical CustomObject: componentId, with appliedScope echoed.
+  it('natural objectApiName ≡ canonical CustomObject componentId (byte-equal + appliedScope)', async () => {
+    const run = async (raw: unknown) => {
+      const parsed = layoutAssignmentsInputSchema.safeParse(raw);
+      if (!parsed.success) return null;
+      return layoutAssignmentsHandler(ctx, parsed.data);
+    };
+    const canonical = await run({ componentId: 'CustomObject:Account' });
+    const byObjectApiName = await run({ objectApiName: 'Account' });
+    const byObject = await run({ object: 'Account' });
+    const byObjectId = await run({ objectId: 'CustomObject:Account' });
+    for (const r of [canonical, byObjectApiName, byObject, byObjectId]) {
+      expect(r).not.toBeNull();
+      expect(r?.ok).toBe(true);
+    }
+    if (!canonical?.ok || !byObjectApiName?.ok || !byObject?.ok || !byObjectId?.ok) return;
+    expect(canonical.value.data.appliedScope).toEqual({
+      componentId: 'CustomObject:Account',
+      object: 'Account',
+    });
+    for (const r of [byObjectApiName, byObject, byObjectId]) {
+      expect(r.value.data.assignments).toEqual(canonical.value.data.assignments);
+      expect(r.value.data.summary).toEqual(canonical.value.data.summary);
+      expect(r.value.data.appliedScope).toEqual(canonical.value.data.appliedScope);
+    }
+  });
+
+  it('layout mode still echoes appliedScope (Layout: componentId + its object)', async () => {
+    const r = await layoutAssignmentsHandler(ctx, { componentId: 'Layout:Account.Account Layout' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.mode).toBe('layout');
+    expect(r.value.data.appliedScope).toEqual({
+      componentId: 'Layout:Account.Account Layout',
+      object: 'Account',
+    });
+  });
+
+  it('disagreeing object aliases → invalid-query', async () => {
+    const parsed = layoutAssignmentsInputSchema.safeParse({
+      objectApiName: 'Account',
+      object: 'Contact',
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    const r = await layoutAssignmentsHandler(ctx, parsed.data);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('a Layout: componentId + an object alias is ambiguous → invalid-query', async () => {
+    const parsed = layoutAssignmentsInputSchema.safeParse({
+      componentId: 'Layout:Account.Account Layout',
+      objectApiName: 'Account',
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    const r = await layoutAssignmentsHandler(ctx, parsed.data);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe('invalid-query');
+  });
+
+  // LAYOUT-ASSIGNMENTS-MANGLES-CUSTOMOBJECT-ID: a `CustomObject:` id (the same
+  // id `lightning_pages` accepts) must enter OBJECT mode and list assignments
+  // across every layout of the object — NOT be mangled into
+  // `Layout:CustomObject:Account` (component-not-found). FAILS pre-fix.
+  it('accepts a CustomObject: id in object mode and lists the object layout assignments', async () => {
+    const r = await layoutAssignmentsHandler(ctx, { componentId: 'CustomObject:Account' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.mode).toBe('object');
+    expect(d.object).toBe('Account');
+    expect(d.layoutId).toBe(null);
+    // Two distinct Account layouts carry assignments (Account Layout ×2 + Partner ×1).
+    expect(d.layouts).toEqual([
+      'Layout:Account.Account Layout',
+      'Layout:Account.Partner Account Layout',
+    ]);
+    expect(d.summary.layouts).toBe(2);
+    expect(d.summary.assignments).toBe(3);
+    // Every row carries the layout it targets.
+    expect(d.assignments.every((a) => typeof a.layoutId === 'string')).toBe(true);
+    expect(
+      d.assignments.some((a) => a.layoutId === 'Layout:Account.Account Layout'),
+    ).toBe(true);
+  });
+
+  it('returns component-not-found for an unknown CustomObject id (no bogus Layout:CustomObject mangle)', async () => {
+    const r = await layoutAssignmentsHandler(ctx, { componentId: 'CustomObject:Nope__c' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
   });
 
   it('returns component-not-found for an unknown layout', async () => {

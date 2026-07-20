@@ -10,7 +10,13 @@
  * **Three verdicts:**
  *
  *   - `definitely_dead`: an ApexClass / ApexTrigger with ZERO incoming
- *     USAGE edges (no callers, no triggers, no listeners). For
+ *     USAGE edges (no callers, no triggers, no listeners). For an
+ *     ApexClass, this verdict additionally survives a static-type-usage
+ *     grep re-check: a class referenced only via a static-field or
+ *     type-name usage (`Other.CONST`, `List<Other>`,
+ *     `JSON.deserialize(.., List<Other>.class)`) — which the parser does
+ *     not model as an inbound edge — is downgraded to `uncertain` rather
+ *     than reported dead. For
  *     CustomField, no incoming references at all (no formula refs, no
  *     Apex reads/writes, no Flow record-ops, no layout placements).
  *     For a Flow, ONLY when its status is `Obsolete` / `InvalidDraft`
@@ -82,19 +88,22 @@ import type {
   PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import type { GraphStore } from '@sf-intelligence/graph';
+import { getNodeById, type GraphStore } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
 import { buildCoverageCaveat, type CoverageCaveat } from './coverage-trust.js';
 import {
+  firstNonEmpty,
   mergeInputAliases,
   resolveObjectScopeParentId,
+  toApexClassId,
   toCustomObjectId,
 } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { REPORT_DASHBOARD_USAGE_CAVEAT } from './report-dashboard-usage.js';
+import { grepVaultSource } from './search-apex-source.js';
 import { soundnessFromIds, type Soundness } from './soundness.js';
 
 const MAX_LIMIT = 500;
@@ -114,6 +123,8 @@ const ASYNC_DISPATCH_DISCLOSURE =
   'async-dispatch dead-code (Queueable/Batchable/Schedulable): a class that "implements Queueable" is NOT automatically live — it must be enqueued/executed/scheduled by user Apex. A class with a PRODUCTION dispatch site (`System.enqueueJob` / `Database.executeBatch` / `System.schedule` from a non-@isTest class) is treated as live; a class dispatched ONLY from @isTest code surfaces as likely_dead (test dispatch is rolled back at runtime) and one never dispatched as definitely_dead. A production enqueue guarded only by `!Test.isRunningTest()` STILL counts as a live production path. Blind spots: helper-wrapper dispatch (`MyHelper.enqueue(new MyJob())`), reflective dispatch (`Type.forName`), and managed-package dispatchers are invisible — verify before deleting.';
 const CUSTOM_FIELD_DISCLOSURE =
   'CustomField dead-detection: Apex field reads/writes (incl. field-level SOQL in constant strings) are PARSED graph edges on vaults refreshed at 0.1.9+, and Flow assignments, formula references, and layout placements are modeled — so a field referenced only in Apex/Flow no longer reads dead (permission grants stay EXCLUDED: access is not usage). REMAINING blind spots an absence verdict cannot rule out: Flow formula-TEXT references, report columns beyond the usage-ranked pull, list-view filters, DYNAMIC SOQL built at runtime, and reflective access. Cross-check with `sfi.field_360` or `sfi.find_field_anywhere` before deleting any field.';
+const STATIC_TYPE_USAGE_DISCLOSURE =
+  'static-type-usage re-check: before an ApexClass is reported definitely_dead its api name is grep-searched (whole-word) across non-test production .cls/.trigger source. A class referenced only via a static-field or type-name usage (`Other.CONST`, `List<Other>`, `JSON.deserialize(.., List<Other>.class)`) — which the parser does NOT model as an inbound graph edge — is downgraded to `uncertain` (suppressed unless includeUncertain) instead of reported dead. Residual blind spots: the grep is line-literal (a class name in a comment or string could over-suppress), and dynamic `Type.forName(\'Other\')` references stay invisible.';
 
 /** Verdict cascade. */
 export type DeadCodeVerdict =
@@ -122,6 +133,24 @@ export type DeadCodeVerdict =
   | 'uncertain';
 
 const findDeadCodeInputBaseSchema = z.object({
+  /**
+   * Optional COMPONENT scope — narrows the scan to ONE component's dead/live
+   * verdict. `ApexClass:` / `ApexTrigger:` / `Flow:` / `CustomField:` id. When
+   * supplied, `uncertain` is not suppressed (a scoped question wants the actual
+   * verdict), an unresolved id is `component-not-found`, and a non-dead-code
+   * type prefix is `invalid-query` — never a silent org-wide top-N. Cannot be
+   * combined with the `objectId` / `objectApiName` object scope.
+   *
+   * FIND-DEAD-CODE-IGNORES-CLASSAPINAME: `classApiName` / `apiName` are bare
+   * ApexClass-name aliases for this scope — a host asking "is CourseEmailController
+   * dead?" passes a bare name, not an `ApexClass:` id. The preprocess coerces
+   * them (and a prefix-less `componentId`) to `ApexClass:{name}` so a class-name
+   * scope resolves identically to the canonical `componentId`, never falling
+   * through to the org-wide list.
+   */
+  componentId: z.string().min(1).optional(),
+  classApiName: z.string().min(1).optional(),
+  apiName: z.string().min(1).optional(),
   objectId: z.string().min(1).optional(),
   objectApiName: z.string().min(1).optional(),
   types: z
@@ -145,12 +174,25 @@ const findDeadCodeInputBaseSchema = z.object({
 export const findDeadCodeInputSchema = z.preprocess((raw) => {
   const merged = mergeInputAliases(raw, [
     { canonical: 'objectId', aliases: ['objectApiName'] },
+    // FIND-DEAD-CODE-IGNORES-CLASSAPINAME: fold the bare-class-name aliases into
+    // the canonical componentId (only when componentId is absent) so a host that
+    // asks by class name reaches the same component scope as `ApexClass:{name}`.
+    { canonical: 'componentId', aliases: ['classApiName', 'apiName'] },
   ]);
   if (merged !== null && typeof merged === 'object' && !Array.isArray(merged)) {
     const o = merged as Record<string, unknown>;
     const id = typeof o.objectId === 'string' ? o.objectId : '';
     if (id.length > 0 && !id.startsWith('CustomObject:')) {
       o.objectId = toCustomObjectId(id);
+    }
+    // A prefix-less componentId (from a bare classApiName/apiName alias, or a
+    // bare componentId) is an ApexClass name — coerce to `ApexClass:{name}` so
+    // it resolves to a real component scope instead of being rejected /
+    // silently org-wide. An explicit `Type:` prefix (ApexTrigger:/Flow:/
+    // CustomField:/Profile:…) is left untouched for its own resolver branch.
+    const cid = typeof o.componentId === 'string' ? o.componentId : '';
+    if (cid.length > 0 && !cid.includes(':')) {
+      o.componentId = toApexClassId(cid);
     }
   }
   return merged;
@@ -174,6 +216,17 @@ export interface DeadCodeCandidate {
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface FindDeadCodeOutput {
+  /**
+   * Echoes the scope ACTUALLY applied so a host never assumes a `componentId`
+   * it passed was silently stripped (the always-org-wide-top-N bug this closes).
+   * `component` is the resolved id in component scope (null otherwise); `object`
+   * is the resolved object scope parent id; `mode` names the axis in force.
+   */
+  readonly appliedScope: {
+    readonly component: string | null;
+    readonly object: string | null;
+    readonly mode: 'all' | 'component' | 'object';
+  };
   readonly candidates: readonly DeadCodeCandidate[];
   readonly totalCount: number;
   readonly byVerdict: Readonly<{
@@ -238,6 +291,36 @@ const DEFAULT_TYPES: readonly ComponentType[] = [
   'Flow',
   'CustomField',
 ];
+
+/** Map a component-scope id's canonical `Type:` prefix to its dead-code type. */
+const DEAD_CODE_PREFIX_TO_TYPE: Readonly<Record<string, ComponentType>> = {
+  'ApexClass:': 'ApexClass',
+  'ApexTrigger:': 'ApexTrigger',
+  'Flow:': 'Flow',
+  'CustomField:': 'CustomField',
+};
+
+/**
+ * Resolve the optional COMPONENT scope from `componentId`. Returns `null` for
+ * org-wide (no scope), the resolved `{ id, type }` for a dead-code component, or
+ * an `invalid-query` error for a non-dead-code type prefix. Existence is checked
+ * by the caller (a resolvable-but-absent id is `component-not-found`).
+ */
+const resolveComponentScope = (
+  componentId: string | undefined,
+): Result<{ id: ComponentId; type: ComponentType } | null, McpError> => {
+  if (componentId === undefined) return ok(null);
+  for (const [prefix, type] of Object.entries(DEAD_CODE_PREFIX_TO_TYPE)) {
+    if (componentId.startsWith(prefix)) {
+      return ok({ id: componentId as ComponentId, type });
+    }
+  }
+  return err({
+    kind: 'invalid-query',
+    message: `componentId must be an ApexClass: / ApexTrigger: / Flow: / CustomField: id; got '${componentId}'`,
+    path: 'componentId',
+  });
+};
 
 /**
  * One row returned by the dead-code CTE — a candidate plus the
@@ -318,12 +401,15 @@ const fetchDeadCodeRows = async (
   store: GraphStore,
   types: readonly ComponentType[],
   objectScopeParentId?: string,
+  componentScopeId?: string,
 ): Promise<Result<readonly DeadCodeRow[], string>> => {
   const placeholders = types.map(() => '?').join(', ');
   const objectScopeClause =
     objectScopeParentId !== undefined
       ? `AND (type <> 'CustomField' OR parent_id = ?)`
       : '';
+  // Component scope: narrow the candidate set to the single requested node id.
+  const componentScopeClause = componentScopeId !== undefined ? `AND id = ?` : '';
   const sql = `
     WITH candidates AS (
       SELECT id, type, api_name,
@@ -389,6 +475,7 @@ const fetchDeadCodeRows = async (
         -- (NI-6: stops IsPartner/IsCustomerPortal/etc. being flagged dead).
         AND NOT (type = 'CustomField' AND api_name NOT LIKE '%\\_\\_c' ESCAPE '\\')
         ${objectScopeClause}
+        ${componentScopeClause}
     ),
     incoming AS (
       SELECT e.to_id AS cid,
@@ -444,10 +531,11 @@ const fetchDeadCodeRows = async (
     GROUP BY c.id, c.type, c.api_name, c.is_test, c.is_own_entry_point, c.is_async_dispatch_entry, c.is_active_entry_point, c.used_in_analytics
   `;
   try {
-    const params =
-      objectScopeParentId !== undefined
-        ? [...types, objectScopeParentId]
-        : [...types];
+    const params = [
+      ...types,
+      ...(objectScopeParentId !== undefined ? [objectScopeParentId] : []),
+      ...(componentScopeId !== undefined ? [componentScopeId] : []),
+    ];
     const reader = await store.connection.runAndReadAll(sql, params);
     const rows = reader.getRowObjectsJS() as unknown as readonly DeadCodeRow[];
     return ok(rows);
@@ -480,6 +568,50 @@ const compareCandidates = (
   return a.componentId < b.componentId ? -1 : 1;
 };
 
+/** Escape a string for literal use inside a `new RegExp(...)`. */
+const escapeForRegex = (s: string): string =>
+  s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * Derive the ApexClass / ApexTrigger api name from a vault source path.
+ * Source files are named `{ApiName}.cls` / `{ApiName}.trigger` (flat or
+ * DX-nested), so the basename minus the suffix is the referencing component's
+ * api name — used to attribute a grep hit to its file and to skip test /
+ * self references.
+ */
+const sourceFileApiName = (vaultRelativePath: string): string => {
+  const base = vaultRelativePath.split('/').pop() ?? vaultRelativePath;
+  return base.replace(/\.(cls|trigger)$/i, '');
+};
+
+/**
+ * Lower-cased api names of every ApexClass whose `isTest` property is true.
+ * Used to exclude test classes from the static-type-usage re-check: a class
+ * referenced only from @isTest code is NOT kept alive (test references do not
+ * count as production usage — the same posture the graph cascade takes). Apex
+ * identifiers are case-insensitive, so the set is lower-cased for comparison.
+ */
+const fetchTestClassApiNames = async (
+  store: GraphStore,
+): Promise<Set<string>> => {
+  try {
+    const reader = await store.connection.runAndReadAll(
+      `SELECT api_name FROM nodes
+       WHERE type = 'ApexClass'
+         AND json_extract_string(properties_json, '$.isTest') = 'true'`,
+    );
+    const rows = reader.getRowObjectsJS() as unknown as ReadonlyArray<{
+      api_name: string;
+    }>;
+    return new Set(rows.map((r) => String(r.api_name).toLowerCase()));
+  } catch {
+    // A query failure must not fake death — fall back to "no known test
+    // classes" so a reference in a test file is (conservatively) counted as
+    // usage rather than silently dropped.
+    return new Set<string>();
+  }
+};
+
 /**
  * The `sfi.find_dead_code` MCP tool. Scans the requested ComponentTypes
  * for components with zero non-parentOf incoming edges (definitely
@@ -496,17 +628,74 @@ export const findDeadCodeHandler = async (
   input: FindDeadCodeInput,
 ): Promise<Result<McpResponse<FindDeadCodeOutput>, McpError>> => {
   const limit = input.limit ?? DEFAULT_LIMIT;
-  const includeUncertain = input.includeUncertain ?? false;
-  const types =
-    input.types !== undefined && input.types.length > 0
-      ? input.types
-      : DEFAULT_TYPES;
   const objectScopeParentId = resolveObjectScopeParentId(input);
+
+  // Optional COMPONENT scope. When supplied, narrow the scan to that ONE node,
+  // pin `types` to its type, and surface its verdict even when `uncertain` (a
+  // scoped question wants the actual answer, not a suppressed row). An
+  // unresolved id is `component-not-found`; a non-dead-code prefix is
+  // `invalid-query` — never a silent org-wide top-N. It cannot be combined with
+  // the object scope (contradictory narrowings).
+  //
+  // FIND-DEAD-CODE-IGNORES-CLASSAPINAME: resolve the class-name aliases here as
+  // well as in the Zod preprocess, so a bare `classApiName` / `apiName` scopes
+  // correctly whether the caller pre-parsed the input or handed the handler a
+  // raw object (mirrors how `resolveObjectScopeParentId` reads objectApiName
+  // directly). A bare alias is an ApexClass name → `ApexClass:{name}`.
+  const classAlias = firstNonEmpty(input.classApiName, input.apiName);
+  const effectiveComponentId =
+    firstNonEmpty(input.componentId) ??
+    (classAlias !== undefined ? toApexClassId(classAlias) : undefined);
+  const componentScopeResult = resolveComponentScope(effectiveComponentId);
+  if (!componentScopeResult.ok) return componentScopeResult;
+  const componentScope = componentScopeResult.value;
+  if (componentScope !== null && objectScopeParentId !== undefined) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        'componentId and objectId/objectApiName are mutually exclusive scopes; pass one',
+      path: 'componentId',
+    });
+  }
+  if (componentScope !== null) {
+    const nodeRes = await getNodeById(ctx.graph, componentScope.id);
+    if (!nodeRes.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${nodeRes.error.message}` });
+    }
+    if (nodeRes.value === null) {
+      return err({
+        kind: 'component-not-found',
+        message: `no component matches \`${componentScope.id}\` in this vault`,
+        path: componentScope.id,
+      });
+    }
+  }
+
+  // A scoped component surfaces its verdict regardless of the uncertain filter.
+  const includeUncertain =
+    componentScope !== null ? true : (input.includeUncertain ?? false);
+  const types =
+    componentScope !== null
+      ? [componentScope.type]
+      : input.types !== undefined && input.types.length > 0
+        ? input.types
+        : DEFAULT_TYPES;
+  const appliedScope: FindDeadCodeOutput['appliedScope'] = {
+    component: componentScope?.id ?? null,
+    object: objectScopeParentId ?? null,
+    mode:
+      componentScope !== null
+        ? 'component'
+        : objectScopeParentId !== undefined
+          ? 'object'
+          : 'all',
+  };
 
   const rowsResult = await fetchDeadCodeRows(
     ctx.graph,
     types,
     objectScopeParentId,
+    componentScope?.id,
   );
   if (!rowsResult.ok) {
     return err({
@@ -515,7 +704,7 @@ export const findDeadCodeHandler = async (
     });
   }
 
-  const candidates: DeadCodeCandidate[] = [];
+  let candidates: DeadCodeCandidate[] = [];
   for (const row of rowsResult.value) {
     // Tests are NEVER flagged as dead.
     if (row.is_test) continue;
@@ -617,6 +806,69 @@ export const findDeadCodeHandler = async (
     });
   }
 
+  // ---- STATIC-TYPE-USAGE re-check (definitely_dead ApexClass only) --------
+  // A class used ONLY via a static-field or type-name reference
+  // (`Other.CONST`, `List<Other>`, `JSON.deserialize(.., List<Other>.class)`)
+  // never becomes an inbound `callsApex` / `references` graph edge, so the CTE
+  // sees zero in-degree and wrongly calls it definitely_dead. Grep the vault
+  // Apex source for a whole-word reference from a NON-TEST, non-self file; if
+  // one exists the class is live-at-compile-time — downgrade to `uncertain`
+  // (suppressed unless includeUncertain) and disclose. Scoped to
+  // definitely_dead ApexClass candidates so live/entry-point classes and the
+  // (already-hedged) likely_dead set cost nothing.
+  let staticUsageDowngrades = 0;
+  const deadApexClasses = candidates.filter(
+    (c) =>
+      c.componentType === 'ApexClass' && c.verdict === 'definitely_dead',
+  );
+  if (deadApexClasses.length > 0) {
+    const testClassApiNames = await fetchTestClassApiNames(ctx.graph);
+    const staticallyUsed = new Set<ComponentId>();
+    for (const candidate of deadApexClasses) {
+      const selfLower = candidate.apiName.toLowerCase();
+      // limit:1 — existence is all that matters. The pathFilter drops the
+      // class's own file (a class references its own name) and every test
+      // file, so any surviving match is a production static reference.
+      const grep = await grepVaultSource(ctx, {
+        query: `\\b${escapeForRegex(candidate.apiName)}\\b`,
+        regex: true,
+        limit: 1,
+        suffixes: ['.cls', '.trigger'],
+        pathFilter: (vaultRelativePath) => {
+          const refName = sourceFileApiName(vaultRelativePath).toLowerCase();
+          if (refName === selfLower) return false; // self-reference
+          if (testClassApiNames.has(refName)) return false; // test class
+          return true;
+        },
+      });
+      if (grep.ok && grep.value.matches.length > 0) {
+        staticallyUsed.add(candidate.componentId);
+      }
+    }
+    if (staticallyUsed.size > 0) {
+      candidates = candidates.map((c) =>
+        staticallyUsed.has(c.componentId)
+          ? {
+              ...c,
+              verdict: 'uncertain' as const,
+              reasoning:
+                'referenced by non-test production Apex via a static-field or type-name usage ' +
+                '(`Other.CONST`, `List<Other>`, `JSON.deserialize(.., List<Other>.class)`) that the ' +
+                'parser does not model as an inbound edge; not dead — delete the referencing code first',
+            }
+          : c,
+      );
+      staticUsageDowngrades = staticallyUsed.size;
+      // Uncertain is suppressed unless includeUncertain, so a class with real
+      // static usage never reads as dead. Mirror the in-loop suppression.
+      if (!includeUncertain) {
+        candidates = candidates.filter(
+          (c) => !staticallyUsed.has(c.componentId),
+        );
+      }
+    }
+  }
+
   candidates.sort(compareCandidates);
 
   // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
@@ -625,6 +877,7 @@ export const findDeadCodeHandler = async (
   // canonical objectId scope, and types — so a token minted for one narrowing
   // set can't be replayed against another.
   const fingerprint = argsFingerprint({
+    ...(componentScope !== null ? { componentId: componentScope.id } : {}),
     ...(objectScopeParentId !== undefined
       ? { objectId: objectScopeParentId }
       : {}),
@@ -694,6 +947,18 @@ export const findDeadCodeHandler = async (
   ) {
     boundaries.push(ASYNC_DISPATCH_DISCLOSURE);
   }
+  // Disclose the static-type-usage re-check whenever it downgraded a class OR a
+  // definitely_dead ApexClass survived it — so a surviving verdict is understood
+  // to have passed the grep, and any suppression is transparent.
+  if (
+    staticUsageDowngrades > 0 ||
+    candidates.some(
+      (c) =>
+        c.componentType === 'ApexClass' && c.verdict === 'definitely_dead',
+    )
+  ) {
+    boundaries.push(STATIC_TYPE_USAGE_DISCLOSURE);
+  }
   // A CustomField flagged dead is the weakest verdict: Apex/Flow/SOQL field
   // reads are not graph edges, so an in-use field can surface as dead.
   if (
@@ -725,6 +990,7 @@ export const findDeadCodeHandler = async (
 
   return ok({
     data: {
+      appliedScope,
       candidates: slice,
       totalCount: candidates.length,
       byVerdict,

@@ -122,12 +122,17 @@ A few of the foundational edge types (every edge carries a confidence —
 | `callsApex`   | `Flow`                      | `ApexClass`                 |
 | `readsFrom` / `writesTo` | Apex / Flow      | `CustomField`               |
 
-The graph models 23 edge types in total across 77 component types —
+The graph models 23 edge types in total across 102 component types —
 including Apex call edges, Flow-to-Apex invocations, and formula field
-references. The honesty boundary is **static analysis, not runtime**:
-dynamic SOQL, reflective field access, and runtime metadata lookups leave
-no static trace, so an empty edge set means "no static evidence", not
-"definitely unused". Full edge table in
+references. (That 102 is the count of org-metadata *component* types in the
+graph; it is unrelated to the 94 curated reasoning *concepts* in the Concept
+Model — see §2b.) The confidence word on an edge (`declared` / `parsed` /
+`heuristic`) is **edge confidence** — it grades that one relationship. A
+reasoning *claim* from `sfi.interpret` (§2b) carries a **separate** claim
+confidence; don't conflate them. The honesty boundary is **static analysis,
+not runtime**: dynamic SOQL, reflective field access, and runtime metadata
+lookups leave no static trace, so an empty edge set means "no static evidence",
+not "definitely unused". Full edge table in
 [`../architecture.md`](../architecture.md) §6.
 
 ### Permission questions
@@ -222,6 +227,73 @@ a Flow to the Apex it invokes.
 
 **Boundary — same static-not-runtime caveat.** Flow analysis reads the
 declared XML; it does not execute the Flow against live records.
+
+## 2b. Structural-implication ("what does this imply?") questions
+
+The categories above **retrieve** — they tell you what exists and what
+references what. A second class of question asks what a structure
+**implies**: does deleting this parent cascade-delete its children? Do these
+two flows run in a defined order? Is this class an entry point where
+field-level security isn't auto-enforced? Those are answered by
+`sfi.interpret`, which joins a curated, org-independent **Concept Model** (94
+concepts / 143 rules of general Salesforce truth) against the org's grounded
+vault slice and returns **cited, confidence-tiered structural claims**. It is
+deterministic and offline — no LLM, no live org read.
+
+Examples of what fires today:
+
+- "If I delete an `Invoice__c`, does anything cascade?" — the master-detail
+  cascade-delete + read-only roll-up concepts.
+- "Is there anything risky about the automation on `Account`?" — multiple
+  active record-triggered flows in one trigger context (undefined order); a
+  firing condition that reads a field another automation writes in the same
+  save.
+- "Is `PaymentApi` safe to expose?" — an external API surface
+  (`@RestResource` / `@AuraEnabled` / `@InvocableMethod`) where Apex does not
+  auto-enforce FLS/CRUD; `without sharing` system-context.
+- "Is `Enrollment__c` a junction object?" — the two-master many-to-many
+  pattern (deleting *either* parent cascade-deletes the link records).
+
+The pattern is **resolve → interpret → synthesize**: resolve the component,
+interpret its structural implications, then let `sfi.synthesize_answer` fold
+the cited claims into the answer (hedged and attributed). A worked session:
+
+```
+User: Is there anything risky about the automation on Account?
+
+Claude (silently): sfi.resolve({ query: 'Account' })
+                   → exact: CustomObject:Account
+Claude (silently): sfi.interpret({ componentId: 'CustomObject:Account' })
+
+Claude: Two active before-save record-triggered flows fire on
+        `CustomObject:Account` in the same trigger context, so Salesforce
+        does not guarantee the order they run in — one can silently depend on
+        or undo the other. The flows to consolidate:
+        - `Flow:Account_Set_Defaults`
+        - `Flow:Account_Enrich_Billing`
+        (grounded in those two ids; claim confidence `declared` — read from
+        the flows' record-trigger metadata.)
+
+        This is a structural signal, not a proof they conflict at runtime —
+        their entry conditions may be mutually exclusive. It reasons about the
+        offline snapshot, not a live run.
+```
+
+Two honesty properties to render every time:
+
+1. **No citation, no claim.** Each interpretation lists the exact component
+   ids it matched (`groundedIn`). A claim the engine can't ground is never
+   made. Surface the cited ids so the reader can check the reasoning.
+2. **Empty is not "none".** An empty interpretation list means "no concept
+   rule fired for this component" — **never** "nothing depends on it." And
+   governor/security concepts name a **static code shape**, not a proven
+   runtime limit breach or vulnerability.
+
+**Claim confidence is a distinct axis** from the per-edge `declared` /
+`parsed` / `heuristic` in §1–§2. A claim's confidence is *computed* — the
+weakest of the concept rule's ceiling and its grounding edges — so it can
+never exceed the confidence of the edges it rests on. An absence-shaped claim
+under non-complete coverage reads `unknown`.
 
 ## 3. What SfIntelligence CANNOT answer
 
@@ -403,6 +475,23 @@ The canonical-ID format is `Type:Id`. Examples:
 
 Claude can recover from a casual phrasing — `sfi.search_components`
 does fuzzy matching. But canonical names cut a round-trip.
+
+### A natural selector scopes the question — a bad one is refused, not guessed
+
+Many tools accept a **natural selector** instead of forcing a canonical id: a
+bare API name, a `Type:Name` id, or one of several field-name aliases (e.g.
+`profile` / `profileApiName` / `profileName` for a profile). When a tool
+resolves such a selector, it echoes what it actually scoped to as
+`appliedScope`, so you can confirm the answer is about the component you meant —
+not a silent near-miss.
+
+The scope is **fail-closed**. If the selectors you pass disagree with each
+other, or none resolves to a real component, the tool **refuses with a named
+`error.kind: 'invalid-query'`** rather than quietly widening to an org-wide
+answer. A typo earns a refusal you can see and correct, never an empty list
+dressed up as "nothing found" or a whole-org sweep you didn't ask for. If a
+tool refuses this way, fix the selector (or resolve it first with
+`sfi.resolve`) — don't read the refusal as "no such thing exists."
 
 ### Use the actual identifier for Apex/Flow text search
 

@@ -16,6 +16,7 @@ import type { Context } from '../../src/server.js';
 import {
   detectStatusCode,
   explainErrorHandler,
+  explainErrorInputSchema,
   extractValidationMessage,
   looksLikeDuplicate,
   parseApexStackFrame,
@@ -360,5 +361,52 @@ describe('explain_error — ambiguous', () => {
     expect(r.ok).toBe(true); if (!r.ok) return;
     expect(r.value.data.disposition).toBe('ambiguous');
     expect(r.value.data.candidates.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Natural input aliases (EXPLAIN-ERROR-REJECTS-NATURAL-ALIASES): a host that
+// pasted the banner under `error` / `message` / `errorMessage` / `text` is
+// resolved to the same answer as canonical `errorText`; canonical wins on a
+// collision; a genuinely-empty input fails closed with a named invalid-query.
+// ---------------------------------------------------------------------------
+
+describe('explain_error — natural input aliases', () => {
+  const CANON =
+    'FIELD_CUSTOM_VALIDATION_EXCEPTION, You must enter a close date before saving.: [CloseDate]';
+
+  const runVia = async (raw: Record<string, unknown>) => {
+    const parsed = explainErrorInputSchema.safeParse(raw);
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) throw new Error('schema rejected a valid alias input');
+    const r = await explainErrorHandler(ctx, parsed.data);
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error('handler failed');
+    return r.value.data;
+  };
+
+  it('error / message / errorMessage / text resolve byte-identically to canonical errorText', async () => {
+    const canonical = await runVia({ errorText: CANON });
+    for (const key of ['error', 'message', 'errorMessage', 'text']) {
+      const viaAlias = await runVia({ [key]: CANON });
+      expect(viaAlias).toEqual(canonical);
+    }
+  });
+
+  it('canonical errorText wins when both errorText and an alias are present', () => {
+    const parsed = explainErrorInputSchema.safeParse({
+      errorText: CANON,
+      error: 'unrelated banner zzz',
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(parsed.data.errorText).toBe(CANON);
+  });
+
+  it('empty input (no canonical, no alias) fails closed with a named errorText invalid-query', () => {
+    const parsed = explainErrorInputSchema.safeParse({ object: 'Opportunity' });
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return;
+    expect(parsed.error.issues.some((i) => i.path.join('.') === 'errorText')).toBe(true);
   });
 });

@@ -97,6 +97,39 @@ interface EnterpriseExtractorConfig {
    */
   readonly parentFromXmlElement?: string;
   /**
+   * RESTRICTION-RULE-MISSING-OBJECT-GRAPH: emit a `parentOf` edge from the
+   * resolved parent `CustomObject` to this node. `makeNode` already stamps the
+   * parent on `node.parentId`, but WITHOUT this edge the graph carries no
+   * traversable object→rule link, so `get_edges` on a RestrictionRule /
+   * ScopingRule returns `[]` and object-level impact/sharing surfaces never see
+   * it. Set for RestrictionRule / ScopingRule (top-level files whose parent
+   * comes from `<targetEntity>`); no-op when `parentObjectApiName` is null. The
+   * nested-parent types (ListView, etc.) already carry an object relationship
+   * through their nesting and do NOT opt in, so their edge sets do not move.
+   */
+  readonly parentEdge?: boolean;
+  /**
+   * RESTRICTION-RULE-OMITS-PROFILE-USERCRITERIA-EDGE: parse `<userCriteria>`
+   * for `$User.ProfileId='00e...'` comparisons and emit an explicit UNRESOLVED
+   * stub edge `{node} -> UnresolvedProfile:{ProfileId}` per gated id (heuristic,
+   * `referenceKind: 'restrictionUserProfileUnresolved'` — see
+   * {@link extractUserCriteriaProfileIds}). A single-file extractor CANNOT
+   * resolve the opaque 15/18-char Id to the name-keyed `Profile:{apiName}`
+   * node (the mapping is org-wide, not in this file — and real Profile
+   * metadata carries no Id at all), so it deliberately does NOT mint a
+   * `Profile:{Id}` node that would masquerade as a real Profile in
+   * profile-scoped queries. The cross-file resolution runs downstream over
+   * the full node set (`resolveRestrictionRuleProfileEdges` in the refresh
+   * pipeline): when an Id->apiName index resolves a gated id, that pass
+   * rewrites the stub into a real `Profile:{apiName}` edge; unresolved ids
+   * stay explicit `UnresolvedProfile:` stubs. Set for RestrictionRule /
+   * ScopingRule (whose active rules gate on a hardcoded Profile Id); the
+   * parsed ids are also mirrored onto `properties.userCriteriaProfileIds`
+   * (all gated ids) and `properties.unresolvedProfileIds` (the disclosure —
+   * at extract time every gated id is unresolved). Omitted when none.
+   */
+  readonly userCriteriaProfileRefs?: boolean;
+  /**
    * XML element name whose first text value should be used as the node's
    * `label`. When set, `extractEnterpriseMetadata` reads the element from the
    * raw XML and passes it to `makeNode` instead of the hardcoded `null`.
@@ -122,6 +155,21 @@ interface EnterpriseExtractorConfig {
    * {@link extractReportDetail} for the honesty rationale on value omission.
    */
   readonly reportDetail?: boolean;
+  /**
+   * REPORT-TYPE-OMITS-BASE-OBJECT-JOIN-AND-COLUMNS: parse a ReportType's
+   * `<baseObject>` (the primary SObject the report type is built on),
+   * `<join><relationship>` tree (the joined relationships — Contacts,
+   * `pkg__Related_Items__r`, …), and a COUNT of `<sections><columns>` entries.
+   * Set ONLY for `ReportType`. Without this the node was description-only:
+   * "what objects does this report type cover?" and join/affiliation report
+   * types read as empty. HONEST MINIMUM by design — surfaces the base object
+   * (with an edge), the join relationships, and a column COUNT with a
+   * `columnsModeled: false` caveat; the full per-column identity graph
+   * (potentially hundreds of `<field>`/`<table>` pairs) is a deferred
+   * follow-up, disclosed via the caveat rather than silently implied complete.
+   * See {@link extractReportTypeDetail}.
+   */
+  readonly reportTypeDetail?: boolean;
   /**
    * R6-22: parse a TransactionSecurityPolicy's nested `<action>` block into
    * a boolean-flag summary (`block`/`endSession`/`freezeUser`/
@@ -175,6 +223,53 @@ const extractXmlValues = (xml: string, elementName: string): readonly string[] =
 };
 
 /**
+ * RESTRICTION-RULE-OMITS-PROFILE-USERCRITERIA-EDGE: match a Salesforce Profile
+ * Id (`00e` + 12 or 15 more base-62 chars = a 15- or 18-char id) inside a
+ * `$User.ProfileId=...` comparison. The `<userCriteria>` text is read verbatim
+ * by {@link extractXmlValues} (no XML entity decoding), so the quote delimiter
+ * may be `&apos;`, `&#39;`, a literal `'`/`"`, or absent — all tolerated.
+ */
+const USER_CRITERIA_PROFILE_ID_RE =
+  /ProfileId\s*=\s*(?:&(?:apos|#39);|['"])?\s*(00e[A-Za-z0-9]{12}(?:[A-Za-z0-9]{3})?)/g;
+
+/**
+ * RESTRICTION-RULE-OMITS-PROFILE-USERCRITERIA-EDGE: the node-id prefix for an
+ * UNRESOLVED userCriteria Profile-Id stub. A distinct namespace from the real
+ * name-keyed `Profile:{apiName}` node so an unresolved opaque Id can NEVER be
+ * mistaken for (or collide with) a real Profile in profile-scoped queries. The
+ * downstream `resolveRestrictionRuleProfileEdges` pass rewrites a stub into a
+ * real `Profile:{apiName}` edge when an Id->apiName index resolves the id.
+ */
+export const UNRESOLVED_PROFILE_PREFIX = 'UnresolvedProfile:';
+
+/**
+ * RESTRICTION-RULE-OMITS-PROFILE-USERCRITERIA-EDGE: parse the Profile Ids a
+ * RestrictionRule / ScopingRule gates on in its `<userCriteria>` expression.
+ * Returns the deduplicated, sorted 15/18-char Profile Ids.
+ *
+ * A single-file extractor CANNOT resolve an opaque Id to the name-keyed
+ * `Profile:{DeveloperName}` node (the mapping is org-wide, not in this file —
+ * and real Profile metadata carries no Id at all), so the caller emits an
+ * explicit `UnresolvedProfile:{id}` stub at `heuristic` confidence with
+ * disclosure props — an honest unresolved-id edge that never masquerades as a
+ * real Profile node. The cross-file resolution to `Profile:{apiName}` happens
+ * downstream in {@link resolveRestrictionRuleProfileEdges} once the full node
+ * set (and any Id->apiName index) is available. Without ANY edge the profile
+ * looked unused and "which profiles does this restriction rule constrain?"
+ * could not be answered from the graph.
+ */
+const extractUserCriteriaProfileIds = (xml: string): readonly string[] => {
+  const ids = new Set<string>();
+  for (const criteria of extractXmlValues(xml, 'userCriteria')) {
+    for (const match of criteria.matchAll(USER_CRITERIA_PROFILE_ID_RE)) {
+      const id = match[1];
+      if (id !== undefined) ids.add(id);
+    }
+  }
+  return [...ids].sort();
+};
+
+/**
  * Infer the primary SObject for report/dashboard metadata when the file
  * path does not carry a nested parent (reports live flat under `reports/`).
  * Standard report types use `{Object}List`; custom report types use the
@@ -196,6 +291,33 @@ interface FieldRefSweepResult {
   /** Count of tokens rejected as {@link isLegacyDottedAddress} — see that doc. */
   readonly skippedLegacyDotted: number;
 }
+
+/**
+ * FLEXIPAGE-FIELDREFS-RECORD-PREFIX-PHANTOM: a FlexiPage `<fieldItem>` names a
+ * field on the page's record context with the literal pseudo-object head
+ * `Record.` (e.g. `Record.Flag_Resolution__c`). `Record` is not an SObject, so a
+ * raw `CustomField:Record.Field` id is a phantom that never resolves and hides
+ * the real object-qualified field's reverse usage (`find_component_usages` on
+ * the field misses the Lightning page). Rewrite the `Record.` head to the
+ * page's `sobjectType` (`scopeObject`) so the edge points at the real field.
+ *
+ * Only a DIRECT field on the record (a single remaining segment) is rescoped —
+ * a relationship traversal (`Record.Rel__r.Field__c`) is left untouched because
+ * its object is the RELATED object, not the page's sobjectType. `Record.` is a
+ * FlexiPage-only construct, so this is inert for the Report / Dashboard /
+ * ReportType / ListView paths that share this sweep.
+ */
+const RECORD_CONTEXT_PREFIX = 'Record.';
+const rescopeRecordContextField = (
+  token: string,
+  scopeObject: string | null,
+): string => {
+  if (scopeObject === null) return token;
+  if (!token.startsWith(RECORD_CONTEXT_PREFIX)) return token;
+  const remainder = token.slice(RECORD_CONTEXT_PREFIX.length);
+  if (remainder.length === 0 || remainder.includes('.')) return token;
+  return `${scopeObject}.${remainder}`;
+};
 
 const extractFieldRefs = (
   xml: string,
@@ -237,7 +359,7 @@ const extractFieldRefs = (
     }
     if (!isWellFormedColumnField(value)) continue;
     if (value.includes('.')) {
-      refs.add(`CustomField:${value}`);
+      refs.add(`CustomField:${rescopeRecordContextField(value, scopeObject)}`);
     } else if (scopeObject !== null) {
       refs.add(`CustomField:${scopeObject}.${value}`);
     }
@@ -252,7 +374,9 @@ const extractFieldRefs = (
     const dottedFieldRe = /\b([A-Za-z][A-Za-z0-9_]*__?(?:c|pc|pr|r|e|b|kav)?\.[A-Za-z][A-Za-z0-9_]*__?[a-zA-Z0-9]*)\b/g;
     for (const match of xml.matchAll(dottedFieldRe)) {
       const value = match[1];
-      if (value !== undefined) refs.add(`CustomField:${value}`);
+      if (value !== undefined) {
+        refs.add(`CustomField:${rescopeRecordContextField(value, scopeObject)}`);
+      }
     }
   }
 
@@ -688,6 +812,67 @@ const extractReportDetail = (
   return { properties, edges };
 };
 
+/** Result of parsing a ReportType's structural shape — see {@link extractReportTypeDetail}. */
+interface ReportTypeDetailResult {
+  readonly properties: Readonly<Record<string, unknown>>;
+  readonly edges: readonly Edge[];
+}
+
+/**
+ * REPORT-TYPE-OMITS-BASE-OBJECT-JOIN-AND-COLUMNS: parse a ReportType's
+ * structural coverage beyond its description. Reads:
+ *
+ *   - `<baseObject>` — the primary SObject the report type is built on.
+ *     Emitted BOTH as `properties.baseObject` AND as a DECLARED `references`
+ *     edge to `CustomObject:{baseObject}` (`referenceKind:
+ *     'reportTypeBaseObject'`), so "what objects does this report type cover?"
+ *     and object-blast-radius walks see it. Skipped when the element is empty
+ *     or absent (real report-type XML can carry an empty `<baseObject/>`).
+ *
+ *   - every `<relationship>` under the (possibly nested) `<join>` tree —
+ *     surfaced as `properties.joinRelationships` (deduped + sorted). These are
+ *     relationship API NAMES (e.g. `Contacts`, `pkg__Related_Items__r`), NOT
+ *     resolvable object ids, so NO edge is minted — minting
+ *     `CustomObject:Contacts` would be a phantom, mirroring this file's
+ *     discipline for pseudo/relationship tokens elsewhere.
+ *
+ *   - a COUNT of `<sections><columns>` blocks — `properties.columnCount`, with
+ *     `properties.columnsModeled: false` disclosing that the per-column
+ *     `<field>`/`<table>` identity graph (potentially hundreds of entries) is a
+ *     deferred follow-up. This is the HONEST MINIMUM: the count answers "how
+ *     big is this report type" without falsely implying the sparse generic
+ *     fieldRefs sweep is the complete column model.
+ */
+const extractReportTypeDetail = (xml: string, nodeId: string): ReportTypeDetailResult => {
+  const edges: Edge[] = [];
+  const properties: Record<string, unknown> = {};
+
+  const baseObject = extractXmlValues(xml, 'baseObject')[0];
+  if (baseObject !== undefined && baseObject.length > 0) {
+    properties['baseObject'] = baseObject;
+    edges.push({
+      fromId: nodeId,
+      toId: `CustomObject:${baseObject}`,
+      edgeType: 'references',
+      confidence: 'declared',
+      source: EXTRACTOR_SOURCE,
+      properties: { referenceKind: 'reportTypeBaseObject' },
+    });
+  }
+
+  // All `<relationship>` values across the join tree. In ReportType XML
+  // `<relationship>` occurs ONLY inside `<join>` blocks, so a global sweep is
+  // safe (no other element shares the name).
+  const joinRelationships = [...new Set(extractXmlValues(xml, 'relationship'))].sort();
+  if (joinRelationships.length > 0) properties['joinRelationships'] = joinRelationships;
+
+  const columnCount = [...xml.matchAll(/<columns>/g)].length;
+  properties['columnCount'] = columnCount;
+  properties['columnsModeled'] = false;
+
+  return { properties, edges };
+};
+
 /**
  * R6-22: a TransactionSecurityPolicy's `<action>` block, boolean-flag
  * summarized. The Metadata API's `TransactionSecurityAction` shape is
@@ -906,6 +1091,13 @@ const extractEnterpriseMetadata = async (
       )
     : null;
 
+  // REPORT-TYPE-OMITS-BASE-OBJECT-JOIN-AND-COLUMNS: ReportType base object +
+  // join relationships + column count — see {@link extractReportTypeDetail}.
+  // ReportType-only (config.reportTypeDetail).
+  const reportTypeDetail = config.reportTypeDetail === true
+    ? extractReportTypeDetail(text.value, nodeId)
+    : null;
+
   // R6-22: TransactionSecurityPolicy `<action>` block summary — see
   // {@link extractTransactionSecurityAction}. TSP-only (config.transactionSecurityAction).
   const transactionSecurityAction = config.transactionSecurityAction === true
@@ -937,6 +1129,32 @@ const extractEnterpriseMetadata = async (
       });
     }
   }
+
+  // RESTRICTION-RULE-OMITS-PROFILE-USERCRITERIA-EDGE: Profile Ids gated in the
+  // rule's `<userCriteria>`. Emitted as HEURISTIC `references` edges to an
+  // explicit `UnresolvedProfile:{id}` stub — NOT a `Profile:{id}` node, which
+  // would masquerade as a real Profile (a single-file extractor cannot resolve
+  // the opaque id to the name-keyed Profile node; that happens downstream in
+  // `resolveRestrictionRuleProfileEdges` over the full node set). Mirrored onto
+  // `properties.userCriteriaProfileIds` (all gated ids) and
+  // `properties.unresolvedProfileIds` (the disclosure — every gated id is
+  // unresolved at extract time). Empty for every other type.
+  const userCriteriaProfileIds =
+    config.userCriteriaProfileRefs === true
+      ? extractUserCriteriaProfileIds(text.value)
+      : [];
+  const userCriteriaProfileEdges: Edge[] = userCriteriaProfileIds.map((profileId) => ({
+    fromId: nodeId,
+    toId: `${UNRESOLVED_PROFILE_PREFIX}${profileId}`,
+    edgeType: 'references',
+    confidence: 'heuristic',
+    source: EXTRACTOR_SOURCE,
+    properties: {
+      referenceKind: 'restrictionUserProfileUnresolved',
+      unresolvedProfileId: profileId,
+      idBasedTarget: true,
+    },
+  }));
 
   // R7-C7: plain property-array elements (no edge; e.g. PresenceUserConfig's
   // assigned usernames — no User ComponentType to target). Deduplicated +
@@ -998,6 +1216,9 @@ const extractEnterpriseMetadata = async (
       // extraProperties convention elsewhere.
       ...(legacyAddressingRefsSkipped > 0 ? { legacyAddressingRefsSkipped } : {}),
       ...childRefSummary,
+      ...(userCriteriaProfileIds.length > 0
+        ? { userCriteriaProfileIds, unresolvedProfileIds: userCriteriaProfileIds }
+        : {}),
       ...arrayPropertyBlock,
       ...(config.captureSharedTo
         ? {
@@ -1012,6 +1233,7 @@ const extractEnterpriseMetadata = async (
         : {}),
       ...extraPropertiesBlock,
       ...(reportDetail !== null ? reportDetail.properties : {}),
+      ...(reportTypeDetail !== null ? reportTypeDetail.properties : {}),
       ...(transactionSecurityAction !== null ? { action: transactionSecurityAction } : {}),
       ...(milestoneDetails !== null && milestoneDetails.length > 0
         ? { milestones: milestoneDetails }
@@ -1046,13 +1268,34 @@ const extractEnterpriseMetadata = async (
     };
   });
 
+  // RESTRICTION-RULE-MISSING-OBJECT-GRAPH: emit the object→rule `parentOf` edge
+  // when opted in AND a parent object resolved. Without it the rule node carries
+  // `parentId` but no traversable edge, so `get_edges` / object-scoped impact /
+  // sharing surfaces never reach it.
+  const parentEdges: Edge[] =
+    config.parentEdge === true && parentObjectApiName !== null
+      ? [
+          {
+            fromId: `CustomObject:${parentObjectApiName}`,
+            toId: node.id,
+            edgeType: 'parentOf',
+            confidence: 'declared',
+            source: EXTRACTOR_SOURCE,
+            properties: {},
+          },
+        ]
+      : [];
+
   return ok({
     nodes: [node],
     edges: [
+      ...parentEdges,
       ...fieldRefEdges,
       ...childRefEdges,
+      ...userCriteriaProfileEdges,
       ...visibleToEdges,
       ...(reportDetail !== null ? reportDetail.edges : []),
+      ...(reportTypeDetail !== null ? reportTypeDetail.edges : []),
     ],
   });
 };
@@ -1101,7 +1344,14 @@ export const extractReportType = (path: string): Promise<Result<ExtractionResult
     // ReportType XML carries a top-level <description> (nearly universal in
     // source). Capture it so custom report types disclose their purpose and
     // are queryable via missingDescription. Omitted when absent.
-    extraProperties: ['description'],
+    //
+    // REPORT-TYPE-OMITS-BASE-OBJECT-JOIN-AND-COLUMNS: also surface the
+    // top-level <category> (accounts | opportunities | …) and <deployed>
+    // (true | false) scalars so the report type's catalog placement and
+    // deploy state are queryable; base object / join tree / column count come
+    // from `reportTypeDetail` below.
+    extraProperties: ['description', 'category', 'deployed'],
+    reportTypeDetail: true,
   });
 
 /**
@@ -1217,6 +1467,51 @@ const extractFlexiPagePermissionRefs = (xml: string): readonly string[] => {
 };
 
 /**
+ * FLEXIPAGE-EMBEDDED-FLOW-UNGRAPHED: a Lightning record page embeds a Screen
+ * Flow through a `<componentInstance>` whose `<componentName>` is the platform
+ * `flowruntime:interview` component, naming the Flow via a `flowName` property:
+ *
+ *   <componentInstance>
+ *     <componentInstanceProperties>
+ *       <name>flowName</name><value>My_Screen_Flow</value>
+ *     </componentInstanceProperties>
+ *     <componentName>flowruntime:interview</componentName>
+ *   </componentInstance>
+ *
+ * The field / permission sweeps never looked at these components, so an active
+ * embedded Flow showed 0 usages and `review_change` delete read `safe`. Emit the
+ * FlexiPage -> `Flow:{flowName}` edge so the Lightning page counts as a Flow
+ * dependent.
+ *
+ * Precise scoping: only a `flowName` property that sits inside a
+ * `flowruntime:interview` component instance is treated as an embedded-Flow
+ * pointer (a bespoke LWC could carry an unrelated `flowName` property). The
+ * componentInstance regex is non-greedy to the first `</componentInstance>`,
+ * which is correct for the leaf interview components (they nest no child
+ * component instances). Returns deduplicated Flow api names, sorted for stable
+ * output.
+ */
+const extractFlexiPageEmbeddedFlows = (xml: string): readonly string[] => {
+  const instanceRe = /<componentInstance\b[\s\S]*?<\/componentInstance>/g;
+  const propRe =
+    /<componentInstanceProperties>([\s\S]*?)<\/componentInstanceProperties>/g;
+  const seen = new Set<string>();
+  for (const inst of xml.matchAll(instanceRe)) {
+    const block = inst[0];
+    if (!/<componentName>\s*flowruntime:interview\s*<\/componentName>/.test(block)) {
+      continue;
+    }
+    for (const prop of block.matchAll(propRe)) {
+      const inner = prop[1] ?? '';
+      if (!/<name>\s*flowName\s*<\/name>/.test(inner)) continue;
+      const value = /<value>([^<]+)<\/value>/.exec(inner)?.[1]?.trim();
+      if (value !== undefined && value.length > 0) seen.add(value);
+    }
+  }
+  return [...seen].sort();
+};
+
+/**
  * Extract a FlexiPage (Lightning page). Beyond the bare node, captures
  * `sobjectType` (which object the page is for), `pageType` (RecordPage /
  * AppPage / HomePage — picked from the page-type set, since `<type>` is also
@@ -1230,6 +1525,11 @@ const extractFlexiPagePermissionRefs = (xml: string): readonly string[] => {
  * `referenceKind: 'visibilityRulePermission'` for each match. This makes
  * custom-permission gates in Lightning page visibility rules discoverable via
  * `sfi.find_component_usages`, `sfi.get_edges`, and `sfi.blast_radius_live`.
+ *
+ * FLEXIPAGE-EMBEDDED-FLOW-UNGRAPHED: also scans for Screen Flows embedded via
+ * `flowruntime:interview` components and emits a declared `references` edge
+ * FlexiPage -> `Flow:{flowName}` (plus a `embeddedFlows` node property) for each,
+ * so an active embedded Flow no longer reads as 0-usage / safe-to-delete.
  *
  * HONESTY: the profile/recordType/app/form-factor ACTIVATION (which user sees
  * which page) is NOT in the retrieved FlexiPage metadata — it is a separate
@@ -1250,6 +1550,9 @@ export const extractFlexiPage = async (
   const fieldRefs = extractFieldRefs(text.value, sobjectType).refs;
   // v2.9: visibility-rule custom-permission references.
   const permissionRefs = extractFlexiPagePermissionRefs(text.value);
+  // FLEXIPAGE-EMBEDDED-FLOW-UNGRAPHED: Screen Flows embedded via
+  // `flowruntime:interview` components (previously invisible → false safe-to-delete).
+  const embeddedFlows = extractFlexiPageEmbeddedFlows(text.value);
 
   const edges: Edge[] = fieldRefs.map((fieldId) => ({
     fromId: nodeId,
@@ -1259,6 +1562,19 @@ export const extractFlexiPage = async (
     source: EXTRACTOR_SOURCE,
     properties: { referenceKind: 'fieldRef' },
   }));
+  // FLEXIPAGE-EMBEDDED-FLOW-UNGRAPHED: one declared `references` edge per
+  // embedded Screen Flow. `flowName` is a declared metadata pointer, so the
+  // Flow api name resolves directly to the `Flow:{name}` node.
+  for (const flowName of embeddedFlows) {
+    edges.push({
+      fromId: nodeId,
+      toId: `Flow:${flowName}`,
+      edgeType: 'references',
+      confidence: 'declared',
+      source: EXTRACTOR_SOURCE,
+      properties: { referenceKind: 'embeddedFlow' },
+    });
+  }
   if (sobjectType !== null) {
     edges.push({
       fromId: nodeId,
@@ -1289,6 +1605,7 @@ export const extractFlexiPage = async (
     fieldRefs,
     rawReferenceCount: fieldRefs.length,
     permissionRefs,
+    embeddedFlows,
   });
   return ok({ nodes: [node], edges });
 };
@@ -1300,7 +1617,17 @@ export const extractPermissionSetGroup = (path: string): Promise<Result<Extracti
     // PSGs carry a top-level <description>. Capture it so the group's stated
     // purpose is surfaced and queryable via missingDescription. Omitted when
     // absent.
-    extraProperties: ['description'],
+    //
+    // PERMISSIONSETGROUP-OMITS-STATUS-AND-ACTIVATION: a PSG also carries a
+    // top-level <status> (Updated | Outdated | Updating | Failed — is the
+    // group's recalculated grant set current?) and <hasActivationRequired>
+    // (whether the group is a session-activated / just-in-time bundle). Both
+    // were dropped, so an admin's "is this PSG ready / session-activated?"
+    // could not be answered from structured facts. Captured verbatim as raw
+    // XML strings (matching this file's extraProperties convention for the
+    // sibling `deployed` / `active` flags); omitted when the element is absent
+    // ("extracted, none present" reads differently from "not checked").
+    extraProperties: ['description', 'status', 'hasActivationRequired'],
     // A PSG's effective permissions are the UNION of its member permission
     // sets' grants, minus the muting permission set's. Capture both so the
     // permission analysis can flow god-mode / object grants through the group.
@@ -1338,6 +1665,14 @@ export const extractRestrictionRule = (path: string): Promise<Result<ExtractionR
     // Top-level layout carries no object in the path; `<targetEntity>` names
     // the restricted object (why_cant / who_can_access_object key on parentId).
     parentFromXmlElement: 'targetEntity',
+    // RESTRICTION-RULE-MISSING-OBJECT-GRAPH: also emit the object→rule parentOf
+    // edge so the security graph is traversable, not just parentId-tagged.
+    parentEdge: true,
+    // RESTRICTION-RULE-OMITS-PROFILE-USERCRITERIA-EDGE: resolve the
+    // `$User.ProfileId='00e...'` gate in <userCriteria> to a Profile edge
+    // (id-based stub) so profile-retirement / sharing reviews see the rule and
+    // the constrained profile is not read as unused.
+    userCriteriaProfileRefs: true,
     // Surface enforcement semantics directly so get_component can explain
     // Restrict vs Scoping, show the SOQL filter, user-criteria profile, and
     // active state without requiring a live query.
@@ -1349,6 +1684,9 @@ export const extractScopingRule = (path: string): Promise<Result<ExtractionResul
     type: 'ScopingRule',
     suffix: '.rule-meta.xml',
     parentFromXmlElement: 'targetEntity',
+    // Same object→rule parentOf edge as RestrictionRule (both are top-level
+    // rules whose parent object comes from `<targetEntity>`).
+    parentEdge: true,
     // Same set as RestrictionRule — both rule types share the same XML schema
     // and the same consumer questions (what filter / who does it apply to).
     extraProperties: ['enforcementType', 'recordFilter', 'userCriteria', 'active'],
@@ -1480,6 +1818,12 @@ export const extractMilestoneType = (
  * PER-ROUTING-CONFIG capacity weighting (`capacityWeight`/`capacityType`)
  * lives on `QueueRoutingConfig`, not here, and is not duplicated onto this
  * node.
+ *
+ * SERVICE-CHANNEL-RELATED-ENTITY-UNGRAPHED: `relatedEntityType` ALSO emits a
+ * DECLARED `references` edge to `CustomObject:{relatedEntityType}`
+ * (`referenceKind: 'serviceChannelEntity'`) so the channel's served object is
+ * traversable and appears in that object's usages. The scalar property is
+ * preserved unchanged (see the config comment on the extraProperties override).
  */
 export const extractServiceChannel = (
   path: string,
@@ -1488,6 +1832,11 @@ export const extractServiceChannel = (
     type: 'ServiceChannel',
     suffix: '.serviceChannel-meta.xml',
     labelXmlElement: 'label',
+    // `relatedEntityType` stays in extraProperties so the SCALAR string
+    // (`MessagingSession`, `VoiceCall`, `Case`, …) is preserved for direct
+    // reads. The extraProperties block is spread AFTER childRefSummary in
+    // `makeNode`, so it overrides the array mirror childRefs would otherwise
+    // leave on `properties.relatedEntityType` — the property stays a scalar.
     extraProperties: [
       'relatedEntityType',
       'capacityModel',
@@ -1495,6 +1844,14 @@ export const extractServiceChannel = (
       'hasAutoAcceptEnabled',
       'doesMinimizeWidgetOnAccept',
       'hasAfterConvoWorkTimer',
+    ],
+    // SERVICE-CHANNEL-RELATED-ENTITY-UNGRAPHED: emit the ServiceChannel ->
+    // CustomObject:{relatedEntityType} declared edge so Omni channel ownership
+    // ("which channel owns MessagingSession / VoiceCall?") is traversable and
+    // the object's usages include the channel. Declared — the element names
+    // the entity directly; dangling-tolerated for standard objects not vaulted.
+    childRefs: [
+      { element: 'relatedEntityType', toType: 'CustomObject', referenceKind: 'serviceChannelEntity' },
     ],
   });
 

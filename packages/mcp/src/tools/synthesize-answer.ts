@@ -21,6 +21,8 @@
 
 import type {
   ComponentId,
+  ConfidenceLevel,
+  Interpretation,
   McpError,
   McpResponse,
 } from '@sf-intelligence/contracts';
@@ -178,6 +180,35 @@ const FALSE_PREMISE_CAVEAT =
   'that the component was not found and (if the cascade carried a redirect ' +
   'hint) point to the real component instead.';
 
+/**
+ * RM-3 absence-honesty guardrail. Composed when the source carried an interpret
+ * PAYLOAD whose interpretations array was EMPTY — the reasoning engine ran and
+ * NO concept rule fired. This is silence, not a finding: it must NEVER be
+ * laundered into "nothing depends on this" / "safe to change / delete". The
+ * caveat states the honest framing so the empty array cannot read as a verdict.
+ */
+const EMPTY_INTERPRETATION_CAVEAT =
+  'REASONING: the interpret engine ran but NO concept rule fired for this ' +
+  'component. This is NOT a finding that nothing depends on it or that a ' +
+  'change/delete is safe — it means no curated reasoning concept matched the ' +
+  'grounded structure. Draw no absence conclusion from the empty result.';
+
+/**
+ * FIX-F3 shape-drift disclosure. Composed when the source carried an interpret
+ * PAYLOAD whose `interpretations` array was NON-EMPTY but whose elements did NOT
+ * match the typed `Interpretation` shape (cross-package/version drift — a
+ * renamed or missing key, a non-array `groundedIn`, etc.). The collector lifts
+ * zero valid claims from it, so WITHOUT this caveat the reasoning result would
+ * resolve silently to nothing. Disclosed — never swallowed — and explicitly NOT
+ * the "no concept rule fired" framing (a rule DID produce output; we just could
+ * not parse it).
+ */
+const SHAPE_DRIFT_INTERPRETATION_CAVEAT =
+  'REASONING: a reasoning (interpret) result was present in the input but could ' +
+  'NOT be parsed — its interpretation entries did not match the expected shape ' +
+  '(a cross-version/shape drift). No reasoning claim was surfaced from it; this ' +
+  'is NOT the same as "no concept rule fired", and no absence conclusion follows.';
+
 // P12-UX-synth-next-action — keys whose string values populate the grounded
 // Finding → Evidence → Cause → Fix → Risk → Next-action template. Each field is
 // lifted VERBATIM from the source tool output (never invented), so the
@@ -313,6 +344,24 @@ export interface EvidenceTemplate {
   readonly risk: string | null;
   readonly nextAction: string | null;
   readonly orphanComponentIds: readonly string[];
+  /**
+   * RM-3 (step 3a): typed reasoning claims from `sfi.interpret` when the source
+   * carried them. The shape-gated collector + non-clobbering fold POPULATE this.
+   * An EMPTY array means "no concept rule fired" — NEVER a claim that nothing
+   * depends on the component. Per-item `confidence`/`coverageCaveat` are kept
+   * intact here so the flat template fields can never out-claim the reasoning.
+   */
+  readonly interpretations: readonly Interpretation[];
+  /**
+   * FIX-F1/F2: interpretation claim(s) surfaced as grounded, HEDGED supplementary
+   * notes — populated ONLY when an on-topic SCRAPED cause already holds
+   * `likelyCause`, so the reasoning is surfaced without clobbering the scraped
+   * evidence. Each note carries its own inline hedge (a `heuristic`/`unknown`
+   * confidence marker and/or the `coverageCaveat`) so it never reads as a bare
+   * hard fact. Empty when the claim already IS `likelyCause` (no double-surface)
+   * or when the source carried no interpretation — byte-identical to today.
+   */
+  readonly interpretationNotes: readonly string[];
 }
 
 /** Push `s` onto `arr` (deduped) while it is under the cap. */
@@ -618,6 +667,180 @@ const collectAnnotationEntries = (value: unknown): Map<string, Set<string>> => {
 };
 
 /**
+ * RM-3 (step 3b) — the SHAPE gate for a typed `sfi.interpret` claim. An element
+ * qualifies only when it carries the FULL Interpretation key-set — `ruleId` +
+ * `concept` + `claim` + `groundedIn` + `provenance` — so the collector cannot
+ * misfire on an unrelated `interpretations`/`items` array whose elements happen
+ * to share one or two of these key names. A bare `claim` key (too generic) is
+ * deliberately NOT sufficient on its own.
+ */
+const isInterpretationShaped = (v: unknown): boolean => {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) return false;
+  const o = v as Record<string, unknown>;
+  return (
+    typeof o['ruleId'] === 'string' &&
+    typeof o['concept'] === 'string' &&
+    typeof o['claim'] === 'string' &&
+    Array.isArray(o['groundedIn']) &&
+    typeof o['provenance'] === 'string'
+  );
+};
+
+/**
+ * FIX-F6: the confidence tiers a lifted interpretation may carry. This MUST stay
+ * in lockstep with the contracts source of truth — `ConfidenceLevel` (`declared`
+ * | `parsed` | `heuristic`) plus the `Interpretation.confidence` `| 'unknown'`
+ * widening. The `satisfies` clause fails the build if any listed value stops
+ * being a valid tier; if a NEW tier is added to `ConfidenceLevel`, add it here
+ * too (an unknown value falls back to `'unknown'`, never an over-claim).
+ */
+const INTERPRETATION_CONFIDENCE_TIERS = [
+  'declared',
+  'parsed',
+  'heuristic',
+  'unknown',
+] as const satisfies readonly (ConfidenceLevel | 'unknown')[];
+
+/**
+ * Normalize a shape-matched object into a typed `Interpretation`. The source is
+ * untrusted JSON (a host may reshape the interpret payload), so every field is
+ * defensively narrowed: `groundedIn` is filtered to string ids, `confidence`
+ * falls back to `'unknown'` when it is not one of the known tiers, and
+ * `coverageCaveat`/`modelVersion` default to `null`/`''`. Nothing is invented —
+ * only the values the source literally carried are lifted.
+ */
+const toInterpretation = (o: Record<string, unknown>): Interpretation => {
+  // FIX-F5: `groundedIn` arrives as an array of ids, but a reshaping host may
+  // pack multiple ids into a single comma-joined element ("A,B"). Split each
+  // element on commas so those reshaped citations still land. Byte-neutral for
+  // normal single-id elements (a canonical id carries no comma).
+  const groundedIn = Array.isArray(o['groundedIn'])
+    ? o['groundedIn']
+        .filter((x): x is string => typeof x === 'string')
+        .flatMap((s) => s.split(',').map((part) => part.trim()))
+        .filter((part) => part.length > 0)
+    : [];
+  const confidence = o['confidence'];
+  return {
+    ruleId: String(o['ruleId']),
+    concept: String(o['concept']),
+    claim: String(o['claim']),
+    groundedIn: groundedIn as ComponentId[],
+    confidence: (INTERPRETATION_CONFIDENCE_TIERS as readonly string[]).includes(
+      confidence as string,
+    )
+      ? (confidence as ConfidenceLevel | 'unknown')
+      : 'unknown',
+    coverageCaveat:
+      typeof o['coverageCaveat'] === 'string' ? o['coverageCaveat'] : null,
+    modelVersion: typeof o['modelVersion'] === 'string' ? o['modelVersion'] : '',
+    provenance: 'offline_snapshot',
+  };
+};
+
+/** What the shape-gated interpret collector returns. */
+interface CollectedInterpretations {
+  /** Every typed interpretation lifted from the source (deduped). */
+  readonly list: readonly Interpretation[];
+  /**
+   * RM-3 absence-honesty guardrail: `true` when the source carried an interpret
+   * PAYLOAD (an `interpretations` array beside the engine's `rulesFired`/
+   * `rulesConsidered` counters) whose interpretations array was EMPTY — the
+   * engine ran and fired nothing. An empty result is "no concept rule fired",
+   * NEVER "nothing depends on this".
+   */
+  readonly emptyPayloadSeen: boolean;
+  /**
+   * FIX-F3: `true` when an interpret PAYLOAD carried a NON-EMPTY `interpretations`
+   * array whose elements ALL failed the shape gate (cross-package/version drift),
+   * so the collector lifted zero valid claims from it. Distinct from
+   * `emptyPayloadSeen` (the engine fired nothing): here a result WAS produced but
+   * could not be parsed. Drives the shape-drift disclosure so the reasoning
+   * result is never swallowed silently.
+   */
+  readonly shapeDriftSeen: boolean;
+  /**
+   * Payload-level `coverageCaveat` string(s) (InterpretOutput.coverageCaveat).
+   * The anchored `CAVEAT_KEY` does not match `coverageCaveat`, so this key would
+   * otherwise be dropped; captured here (scoped to the interpret payload shape,
+   * never a generic `coverageCaveat` elsewhere) for the caller to surface.
+   */
+  readonly payloadCaveats: readonly string[];
+}
+
+/**
+ * RM-3 (steps 3b/3d) — the shape-gated interpret collector. Walk `source` for
+ * (a) arrays whose EVERY element is `isInterpretationShaped` (robust to host
+ * re-shaping — the interpret payload nests them under `data.interpretations`,
+ * but a host may lift them elsewhere) and (b) the interpret PAYLOAD object
+ * itself, to detect a fired-nothing EMPTY result and capture its top-level
+ * `coverageCaveat`. Deduped by (ruleId, concept, claim, groundedIn) so a
+ * doubly-nested payload cannot double-count a claim.
+ */
+const collectInterpretations = (value: unknown): CollectedInterpretations => {
+  const byKey = new Map<string, Interpretation>();
+  const payloadCaveats: string[] = [];
+  let emptyPayloadSeen = false;
+  let shapeDriftSeen = false;
+  const walk = (v: unknown): void => {
+    if (Array.isArray(v)) {
+      // An array of interpretation-shaped elements IS the fold input. Vacuous
+      // match on an empty array collects nothing (the empty-payload signal
+      // below carries the fired-nothing case instead).
+      if (v.length > 0 && v.every(isInterpretationShaped)) {
+        for (const el of v) {
+          const it = toInterpretation(el as Record<string, unknown>);
+          const key = JSON.stringify([
+            it.ruleId,
+            it.concept,
+            it.claim,
+            it.groundedIn,
+          ]);
+          if (!byKey.has(key)) byKey.set(key, it);
+        }
+      }
+      v.forEach(walk);
+      return;
+    }
+    if (v === null || typeof v !== 'object') return;
+    const o = v as Record<string, unknown>;
+    // Interpret PAYLOAD (InterpretOutput) shape: an `interpretations` array
+    // beside the engine's counters. FIX-F4: require BOTH `rulesFired` AND
+    // `rulesConsidered` (every real InterpretOutput carries both) so a non-
+    // interpret payload that coincidentally has `interpretations: []` beside a
+    // single numeric counter does NOT trip the empty/drift disclosures — the
+    // "interpretation-free inputs stay byte-identical" claim holds strictly.
+    // Used ONLY to (a) flag an EMPTY fired-nothing result, (b) flag a NON-EMPTY-
+    // but-unparseable (shape-drift) result, and (c) surface the payload's top-
+    // level coverageCaveat — never to collect (the array branch does that).
+    if (
+      Array.isArray(o['interpretations']) &&
+      typeof o['rulesFired'] === 'number' &&
+      typeof o['rulesConsidered'] === 'number'
+    ) {
+      const arr = o['interpretations'] as readonly unknown[];
+      if (arr.length === 0) {
+        emptyPayloadSeen = true;
+      } else if (!arr.some(isInterpretationShaped)) {
+        // FIX-F3: a result WAS produced but no element matched the typed shape —
+        // the collector lifts zero valid claims. Disclose it; never swallow.
+        shapeDriftSeen = true;
+      }
+      const cav = o['coverageCaveat'];
+      if (typeof cav === 'string' && cav.trim().length > 0) payloadCaveats.push(cav);
+    }
+    Object.values(o).forEach(walk);
+  };
+  walk(value);
+  return {
+    list: [...byKey.values()],
+    emptyPayloadSeen,
+    shapeDriftSeen,
+    payloadCaveats,
+  };
+};
+
+/**
  * Flag "X is deprecated"-class draft claims with no backing annotation. A
  * claim is grounded when the source carries an annotation entry for that id
  * whose value mentions deprecation (any key — `status: deprecated` is the
@@ -712,6 +935,105 @@ export const synthesizeAnswerHandler = async (
   // emitted by the scalar walk.
   applyStructuralCaveats(source, out);
 
+  // RM-3 (step 3b): shape-gated fold of typed Interpretation[] from the source.
+  // The `groundedIn` ids are already in `out.ids` (they are canonical-id strings
+  // the recursive `collect` pass captured), so they flow into `citations` below
+  // with no extra work. Populating `evidence.interpretations` is byte-neutral
+  // for interpretation-free inputs (the collector returns an empty list).
+  const interp = collectInterpretations(source);
+
+  // RM-3 (step 3d): surface the interpret coverageCaveat(s) as caveats. The
+  // anchored CAVEAT_KEY does NOT match `coverageCaveat`, so both the per-
+  // interpretation `coverageCaveat` and the payload-level one would otherwise be
+  // dropped. Surface them ONLY through the shape-gated collector (scoped to the
+  // interpret shape) rather than broadening CAVEAT_KEY generically — a generic
+  // widening would pull `coverageCaveat` from unrelated payloads. Byte-neutral
+  // for interpretation-free inputs (both lists are empty).
+  for (const it of interp.list) {
+    if (it.coverageCaveat !== null && it.coverageCaveat.trim().length > 0) {
+      pushCapped(out.caveats, it.coverageCaveat, MAX_CAVEATS);
+    }
+  }
+  for (const cav of interp.payloadCaveats) pushCapped(out.caveats, cav, MAX_CAVEATS);
+
+  // RM-3 (step 3e / absence-honesty guardrail): an interpret payload that fired
+  // NOTHING is disclosed as "no concept rule fired", so the empty result can
+  // never be read as a "safe"/"no-dependency" verdict. Only when the collector
+  // saw a real interpret payload AND lifted zero interpretations.
+  if (interp.list.length === 0 && interp.emptyPayloadSeen) {
+    pushCapped(out.caveats, EMPTY_INTERPRETATION_CAVEAT, MAX_CAVEATS);
+  }
+  // FIX-F3: a reasoning payload whose interpretations could NOT be parsed
+  // (shape drift) is DISCLOSED, never swallowed — so the reasoning result never
+  // resolves silently to nothing. Distinct from the fired-nothing caveat above.
+  // Byte-neutral for interpretation-free inputs (`shapeDriftSeen` is false).
+  if (interp.shapeDriftSeen) {
+    pushCapped(out.caveats, SHAPE_DRIFT_INTERPRETATION_CAVEAT, MAX_CAVEATS);
+  }
+  // The interpret-EXPLICIT incompleteness signal for the I3c absence guard
+  // below. Preferred over the heuristic coverage scan, but LAYERED as an
+  // override that FALLS BACK to it (never replaces it): a `confidence: unknown`
+  // or a non-null `coverageCaveat` is grounded-by-construction incomplete, and
+  // a fired-nothing empty result cannot certify an absence claim either. Zero
+  // for interpretation-free inputs, so the heuristic scan stands alone (the
+  // dense I3c block stays byte-identical).
+  const reasoningIncomplete =
+    (interp.list.length === 0 && interp.emptyPayloadSeen) ||
+    interp.list.some(
+      (i) =>
+        i.confidence === 'unknown' ||
+        (i.coverageCaveat !== null && i.coverageCaveat.trim().length > 0),
+    );
+
+  // SYNTHESIZE-BURIES-INTERPRET-CLAIMS (Graph-B product honesty). The shipped
+  // reasoning model fires correctly (e.g. `concept:flow-run-mode` →
+  // `SystemModeWithoutSharing`), but the HOST answer path renders `summary` +
+  // `bullets`, and the generic scalar `collect` walk lifts only the bare
+  // `confidence: <tier>` / `status: <state>` COUNTERS from the interpret payload
+  // (the FACT_KEY match on `confidence`/`status`) — never the interpretation's
+  // CLAIM text (the `claim` key matches no FACT_KEY). The reasoning conclusion
+  // therefore survives only inside `evidence.*` and never reaches a host that
+  // shows summary/bullets. PROMOTE each fired claim into the host-facing bullets,
+  // tagged with its concept, rule id, and confidence tier (with any
+  // coverageCaveat inline), so the claim is surfaced — never replaced by a
+  // counter alone. The disclosures added above (coverageCaveat/empty/shape-drift
+  // caveats) are UNTOUCHED — this ADDS the claim, it does not drop a hedge.
+  //
+  // Compound-concept fold mirrors the `likelyCause` presentation below: a fired
+  // `concept:system-context-external-surface` subsumes its two constituents, so
+  // the bullet set is not padded with pieces the conjunction already states.
+  // `firedConcepts`/`presentationInterpretations` are computed ONCE here and
+  // reused for the `likelyCause`/note rendering later. Byte-neutral for
+  // interpretation-free inputs: `interp.list` is empty ⇒
+  // `presentationInterpretations` is empty ⇒ the loop pushes nothing ⇒ every
+  // downstream count/field (including the summary) is byte-identical.
+  const firedConcepts = new Set(interp.list.map((i) => i.concept));
+  const presentationInterpretations = firedConcepts.has(
+    'concept:system-context-external-surface',
+  )
+    ? interp.list.filter(
+        (i) =>
+          i.concept !== 'concept:external-api-surface' &&
+          i.concept !== 'concept:apex-sharing-mode',
+      )
+    : interp.list;
+  let promotedClaimCount = 0;
+  for (const i of presentationInterpretations) {
+    const claim = i.claim.trim();
+    if (claim.length === 0) continue;
+    const coverage =
+      i.coverageCaveat !== null && i.coverageCaveat.trim().length > 0
+        ? ` (coverage caveat: ${i.coverageCaveat.trim()})`
+        : '';
+    const before = out.bullets.length;
+    pushCapped(
+      out.bullets,
+      `REASONING [${i.concept} · ${i.ruleId} · confidence: ${i.confidence}]: ${claim}${coverage}`,
+      MAX_BULLETS,
+    );
+    if (out.bullets.length > before) promotedClaimCount += 1;
+  }
+
   const citations = [...out.ids].sort().map(parseCitation);
 
   // Roll the source output's trust provenance up for the host to stamp.
@@ -762,14 +1084,19 @@ export const synthesizeAnswerHandler = async (
     );
 
     // I3c ABSENCE-AS-FACT GUARD. Scan the draft for absence assertions. An
-    // absence claim is UNGROUNDED only when the source's coverage is incomplete
-    // (`out.coverageIncomplete`) — "no X references this" over PARTIAL coverage
-    // is "not checked", not proven "none". Over COMPLETE coverage the same
-    // claim is grounded, so `grounded` stays true and the list is empty. Always
-    // computed when a draft is present (structural, not opt-in).
+    // absence claim is UNGROUNDED when the source's coverage is incomplete —
+    // "no X references this" over PARTIAL coverage is "not checked", not proven
+    // "none". Coverage is incomplete when EITHER the heuristic key/phrase scan
+    // trips (`out.coverageIncomplete`) OR the interpret-EXPLICIT signal fires
+    // (`reasoningIncomplete`, RM-3 step 3e): a `confidence: unknown` / non-null
+    // coverageCaveat / fired-nothing empty interpret result. The explicit signal
+    // is an OVERRIDE layered ON TOP of the heuristic (never a replacement), and
+    // it is zero for interpretation-free inputs so the heuristic stands alone.
+    // Over COMPLETE coverage the same claim is grounded, so `grounded` stays
+    // true and the list is empty. Always computed when a draft is present.
     const absenceClaims = findAbsenceClaims(input.draft);
     ungroundedAbsenceClaims =
-      out.coverageIncomplete ? absenceClaims : [];
+      out.coverageIncomplete || reasoningIncomplete ? absenceClaims : [];
     grounded = ungroundedAbsenceClaims.length === 0;
 
     // FAIL-CLOSED: a draft handed in with no evidence to ground against must
@@ -794,6 +1121,13 @@ export const synthesizeAnswerHandler = async (
     `${qPrefix}Grounded in the supplied tool output: ` +
     `${citations.length} component(s) cited, ${out.bullets.length} key fact(s), ` +
     `${out.caveats.length} caveat(s)` +
+    // SYNTHESIZE-BURIES-INTERPRET-CLAIMS: acknowledge the promoted reasoning
+    // claim(s) in the summary so a host that reads only the summary knows the
+    // answer carries curated reasoning (the claim TEXT itself lives in the
+    // bullets above). Empty — and thus byte-identical — when no claim fired.
+    (promotedClaimCount > 0
+      ? `, ${promotedClaimCount} reasoning claim(s)`
+      : '') +
     (hallucinatedIds !== undefined
       ? `, ${hallucinatedIds.length} ungrounded id(s) in the draft`
       : '') +
@@ -808,16 +1142,77 @@ export const synthesizeAnswerHandler = async (
   // first matching value lifted from the source; nextAction falls back to the
   // recommended fix (also from the source) — nothing is invented.
   const firstOrNull = (arr: readonly string[]): string | null => (arr.length > 0 ? (arr[0] ?? null) : null);
-  const likelyCause = firstOrNull(out.causeHints);
+  // RM-3 (step 3c) — the interpret fold, CALIBRATED for honest presentation
+  // (FIX-F1/F2, a deliberate design correction toward calibrated honesty):
+  //   * A `claim` is a STRUCTURAL description ("X is a formula field; its value
+  //     is computed and cannot be written by Flow/Apex"). That is a plausible
+  //     CAUSE, never an ACTION — so it can feed `likelyCause` but NEVER
+  //     `nextAction`, which reverts to the scrape.
+  //   * Precedence is NON-CLOBBERING: an on-topic SCRAPED cause always keeps
+  //     `likelyCause`; the claim fills that slot ONLY when the scrape carried no
+  //     cause (`out.causeHints` empty — exactly the pure reasoning flow, where
+  //     the interpret payload carries no scrape fields). When a scraped cause
+  //     exists, the claim is surfaced as a hedged SUPPLEMENTARY note instead of
+  //     overwriting on-topic scraped evidence.
+  //   * The HEDGE travels WITH the claim (FIX-F2): a `heuristic`/`unknown`
+  //     confidence and/or a non-null `coverageCaveat` is appended inline so a
+  //     surfaced claim never reads as a bare hard fact, and each claim keeps its
+  //     OWN marker (never flattened into one undifferentiated blob).
+  // Interpretation-free inputs produce no claim, so every field below stays
+  // BYTE-IDENTICAL to the pre-interpret output (P12 / I3c stay green).
+  const hedgeSuffix = (i: Interpretation): string => {
+    const marks: string[] = [];
+    if (i.confidence === 'heuristic' || i.confidence === 'unknown') {
+      marks.push(`confidence: ${i.confidence}`);
+    }
+    if (i.coverageCaveat !== null && i.coverageCaveat.trim().length > 0) {
+      marks.push(i.coverageCaveat.trim());
+    }
+    return marks.length > 0 ? ` [${marks.join('; ')}]` : '';
+  };
+  // Compound-concept presentation precedence. Keep EVERY typed interpretation
+  // in `evidence.interpretations` for audit, but do not concatenate a compound
+  // conclusion beside the two constituent conclusions it already subsumes.
+  // Without this fold, the system-context/external-surface hot-spot produces
+  // ~3 KB of repetitive likelyCause prose (external surface + sharing mode +
+  // their conjunction), even though the conjunction is the user-facing finding.
+  // `presentationInterpretations` is computed once above (shared with the bullet
+  // promotion) so the note rendering and the bullets stay in lockstep.
+  const renderedClaims = presentationInterpretations
+    .filter((i) => i.claim.trim().length > 0)
+    .map((i) => `${i.claim.trim()}${hedgeSuffix(i)}`);
+  const interpClaim = renderedClaims.length > 0 ? renderedClaims.join(' ') : null;
+  const scrapedCause = firstOrNull(out.causeHints);
+  // Non-clobber: the on-topic scraped cause wins; the claim only FILLS an empty
+  // cause slot (the pure reasoning flow, where no scrape cause exists).
+  const likelyCause = scrapedCause ?? interpClaim;
   const recommendedFix = firstOrNull(out.fixHints);
+  // A structural claim is a CAUSE, not an ACTION — nextAction stays the scrape.
   const nextAction = firstOrNull(out.nextHints) ?? recommendedFix;
-  const risk = firstOrNull(out.caveats);
-  // An id mentioned INSIDE a cause/fix/next string but not independently cited
-  // (the whole-id grounding) is an ungrounded reference — flag it.
+  // The interpret coverageCaveat is a genuine hedge, so it fronts the risk slot
+  // when present (it is also surfaced in `out.caveats` and inline on the claim).
+  // Byte-identical for interpretation-free inputs (`interpRisk` is null).
+  const interpRisk =
+    interp.list
+      .map((i) => i.coverageCaveat)
+      .find((c) => c !== null && c.trim().length > 0) ?? null;
+  const risk = interpRisk ?? firstOrNull(out.caveats);
+  // FIX-F1/F2: when an on-topic scraped cause held `likelyCause`, the claim(s)
+  // are surfaced as grounded, hedged supplementary notes so the reasoning is not
+  // buried — but the scraped evidence is never overwritten. Empty when the claim
+  // already IS `likelyCause` (no double-surface) or there is no claim.
+  const interpretationNotes = scrapedCause !== null ? renderedClaims : [];
+  // An id mentioned INSIDE a cause/fix/next string (or a supplementary note) but
+  // not independently cited (the whole-id grounding) is an ungrounded reference.
   const idsInText = (text: string | null): string[] =>
     text === null ? [] : [...new Set(text.match(CANONICAL_ID_INLINE) ?? [])].filter((id) => !out.ids.has(id));
   const orphanComponentIds = [
-    ...new Set([...idsInText(likelyCause), ...idsInText(recommendedFix), ...idsInText(nextAction)]),
+    ...new Set([
+      ...idsInText(likelyCause),
+      ...idsInText(recommendedFix),
+      ...idsInText(nextAction),
+      ...interpretationNotes.flatMap(idsInText),
+    ]),
   ].sort();
   const evidence: EvidenceTemplate = {
     finding: out.bullets[0] ?? null,
@@ -827,6 +1222,12 @@ export const synthesizeAnswerHandler = async (
     risk,
     nextAction,
     orphanComponentIds,
+    // RM-3 (step 3b): the typed interpretations lifted by the shape-gated
+    // collector, with per-item confidence intact. Empty for interpretation-free
+    // inputs (byte-identical output); an EMPTY array is "no concept rule fired",
+    // never a no-dependency verdict.
+    interpretations: interp.list,
+    interpretationNotes,
   };
 
   return ok({

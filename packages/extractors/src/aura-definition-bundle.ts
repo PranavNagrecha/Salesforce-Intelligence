@@ -27,6 +27,49 @@ const EDGE_SOURCE = 'aura-extractor';
 type MarkupSuffix = (typeof MARKUP_SUFFIXES)[number];
 
 /**
+ * Match the opening `<aura:component ...>` / `<aura:application ...>`
+ * root tag (the only two Aura definition types that bind a server-side
+ * Apex controller; events / interfaces / tokens never do). The `[^>]*`
+ * body tolerates any attribute order AND newlines (`[^>]` includes
+ * `\n`), so a DX-retrieved multi-line opening tag is captured whole.
+ * The first such tag wins — the Apex `controller` attribute always
+ * lives on the root definition element.
+ */
+const AURA_ROOT_TAG = /<aura:(?:component|application)\b([^>]*)>/;
+
+/**
+ * Match a `name="value"` (or `name='value'`) attribute pair anywhere in
+ * a tag body. Anchored on the attribute name's identifier boundary so a
+ * substring match inside another attribute value can't yield a spurious
+ * capture. Mirrors the helper in `visualforce-page.ts`.
+ */
+const ATTR_PATTERN = (name: string): RegExp =>
+  new RegExp(`\\b${name}\\s*=\\s*"([^"]*)"|\\b${name}\\s*=\\s*'([^']*)'`);
+
+/**
+ * Pull the server-side Apex controller class named on the root markup
+ * tag's `controller="..."` attribute, or `null` when the bundle declares
+ * no Apex controller (a markup-only / JS-only bundle). Returns the bare
+ * Apex class name — real orgs write `controller="MyApexClass"` without a
+ * namespace prefix (the `c:` namespace addresses other Aura *components*,
+ * never Apex controllers), so the value maps straight to the canonical
+ * `ApexClass:{name}` id.
+ *
+ * NOTE: this is the *Apex* (server) controller, distinct from the client
+ * `*Controller.js` file tracked by `hasController`.
+ */
+const parseApexController = (markup: string): string | null => {
+  const tagMatch = AURA_ROOT_TAG.exec(markup);
+  if (tagMatch === null) return null;
+  const tagBody = tagMatch[1] ?? '';
+  const match = ATTR_PATTERN('controller').exec(tagBody);
+  const raw = match?.[1] ?? match?.[2] ?? null;
+  if (raw === null) return null;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : null;
+};
+
+/**
  * Unwrap fast-xml-parser's array-or-scalar shape for single-occurrence
  * children. Mirrors the helper used in the file-based extractors.
  */
@@ -280,6 +323,14 @@ const scanOne = (source: string, label: string): AuraScanResult => {
  *     `AuraDefinitionBundle:{Name}` at `confidence: 'heuristic'`. (The
  *     v1.4 Aura scanner does not emit field accesses or apex calls;
  *     those patterns will land in a later milestone.)
+ *   - One `references` edge to `ApexClass:{controller}` with
+ *     `properties: { role: 'controller' }` at `confidence: 'declared'`
+ *     when the root markup tag declares `controller="ApexClass"` — the
+ *     server-side Apex controller the component binds
+ *     (AURA-OMITS-APEX-CONTROLLER-ATTRIBUTE). The class name is also
+ *     surfaced on `node.properties.apexController` (present only when a
+ *     controller is declared). This is the *Apex* controller, distinct
+ *     from the client `*Controller.js` file tracked by `hasController`.
  *
  * Edges are deduped + sorted by `(toId asc, edgeType asc)` to match
  * the precedent set by the Apex extractors.
@@ -397,6 +448,21 @@ export const extractAuraDefinitionBundle = async (
     source: EDGE_SOURCE,
     properties: { detectedIn: ref.source },
   }));
+  // Root markup `controller="ApexClass"` → declared references edge to the
+  // server-side Apex controller (AURA-OMITS-APEX-CONTROLLER-ATTRIBUTE).
+  // The `controller` attribute is a first-class declaration in the markup,
+  // so `confidence: 'declared'` (unlike the heuristic cmp→cmp refs).
+  const apexController = parseApexController(markup.source);
+  if (apexController !== null) {
+    rawEdges.push({
+      fromId: ownerId,
+      toId: `ApexClass:${apexController}`,
+      edgeType: 'references',
+      confidence: 'declared',
+      source: EDGE_SOURCE,
+      properties: { role: 'controller' },
+    });
+  }
   // $Label.c.X / $Resource.X value-provider tokens → references edges
   // (heuristic: regex tokens, not declarative imports).
   rawEdges.push(...buildResourceRefEdges(ownerId, resourceRefs, EDGE_SOURCE, 'heuristic'));
@@ -411,6 +477,9 @@ export const extractAuraDefinitionBundle = async (
     markupBytes: Buffer.byteLength(markup.source, 'utf-8'),
     definitionType: markup.suffix.slice(1),
     componentRefCount: refs.length,
+    // Only present when the markup declares a server-side Apex controller,
+    // so JS-only / markup-only bundles keep their existing property shape.
+    ...(apexController !== null ? { apexController } : {}),
   };
   const properties =
     warnings.length === 0

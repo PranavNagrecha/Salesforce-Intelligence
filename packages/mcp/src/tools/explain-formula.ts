@@ -22,7 +22,7 @@
  *      formula-references extractor applies). Cross-object dotted
  *      paths (`Owner.Email`, `Account.Industry__c`) resolve
  *      verbatim. Relationship-traversal paths (a first segment ending
- *      in `__r`, e.g. `Faculty_Contact__r.Faculty_ID__c`) surface with
+ *      in `__r`, e.g. `Widget_Contact__r.Widget_ID__c`) surface with
  *      `toId: null` and `kind: 'relationship'` — the `__r` segment is a
  *      relationship name, not an object API name, so no resolving
  *      CustomField id can be minted. When `parentObjectApiName` is
@@ -167,7 +167,7 @@ export interface ExplainFormulaFunction {
  * relationship (a first segment ending in `__r`) whose target object
  * the tokenizer can't name. When `toId` is null because the path
  * traverses a relationship, `kind` is `'relationship'` so a renderer
- * can say "traverses relationship Faculty_Contact__r"; otherwise `kind`
+ * can say "traverses relationship Widget_Contact__r"; otherwise `kind`
  * is `'field'`.
  */
 export interface ExplainFormulaFieldReference {
@@ -320,7 +320,7 @@ const CONDITIONAL_FUNCTIONS = new Set<string>(['IF', 'CASE', 'AND', 'OR', 'NOT']
  *
  *   - ANY dotted path is a cross-object relationship traversal →
  *     `{ toId: null, kind: 'relationship' }`. The leading segment is a
- *     RELATIONSHIP name (`Owner`, `CreatedBy`, `Faculty_Contact__r`, …),
+ *     RELATIONSHIP name (`Owner`, `CreatedBy`, `Widget_Contact__r`, …),
  *     not an object API name, and it routinely differs from the target
  *     object (`Owner` / `CreatedBy` / `LastModifiedBy` / `Manager` →
  *     `User`); a multi-hop path (`CreatedBy.Manager.LastName`) cannot form
@@ -344,7 +344,7 @@ const resolveFieldRef = (
 ): { toId: ComponentId | null; kind: 'field' | 'relationship' } => {
   if (path.includes('.')) {
     // ANY dotted path is a cross-object relationship traversal: the leading
-    // segment is a RELATIONSHIP name (Owner, CreatedBy, Faculty_Contact__r,
+    // segment is a RELATIONSHIP name (Owner, CreatedBy, Widget_Contact__r,
     // …), not an object API name, and it frequently differs from the target
     // object (Owner / CreatedBy / LastModifiedBy / Manager → User). We cannot
     // resolve the relationship→object mapping offline, and a multi-hop path

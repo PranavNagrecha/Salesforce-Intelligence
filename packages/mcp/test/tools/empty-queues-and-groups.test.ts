@@ -238,6 +238,36 @@ describe('emptyQueuesAndGroupsHandler', () => {
     expect(g?.memberSource).toBe('unknown');
   });
 
+  // EMPTY-QUEUES-AND-GROUPS-FALSE-EMPTY-LIVE-DRIFT: a declared-empty group is
+  // NOT cleanup-ready — vault direct-user emptiness drifts from the live roster
+  // (a declared-empty group can show 0 vault members yet a non-empty live roster). Every
+  // listed row must carry a non-delete verdict, and the boundary must point at
+  // live_group_members for confirmation.
+  it('marks a declared-empty group review-not-delete (never a bare delete)', async () => {
+    const r = await emptyQueuesAndGroupsHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const g = r.value.data.groups.find((g) => g.id === G_EMPTY);
+    expect(g?.memberCount).toBe(0);
+    expect(g?.memberSource).not.toBe('unknown');
+    expect(g?.cleanupVerdict).toBe('review-not-delete');
+    // every emitted queue/group row carries a non-delete verdict
+    for (const row of [...r.value.data.queues, ...r.value.data.groups]) {
+      expect(['review-not-delete', 'unknown-membership']).toContain(
+        row.cleanupVerdict,
+      );
+    }
+    // unknown-membership rows get their own verdict
+    const gUnknown = r.value.data.groups.find((g) => g.id === G_UNKNOWN);
+    expect(gUnknown?.cleanupVerdict).toBe('unknown-membership');
+    // the drift boundary points the reader at the live confirmation tool
+    expect(
+      r.value.data.boundaries.some(
+        (b) => b.includes('live_group_members') && b.includes('review-not-delete'),
+      ),
+    ).toBe(true);
+  });
+
   it('respects the type filter (Queue only)', async () => {
     const r = await emptyQueuesAndGroupsHandler(ctx, { type: 'Queue' });
     expect(r.ok).toBe(true);
@@ -318,9 +348,160 @@ describe('emptyQueuesAndGroupsHandler — CR-22 cursor', () => {
   });
 });
 
+describe('emptyQueuesAndGroupsHandler — nameContains scope (EMPTY-QUEUES-AND-GROUPS-IGNORES-NAMECONTAINS)', () => {
+  it('a bare no-filter call omits appliedScope (byte-identical to the pre-filter golden)', async () => {
+    const r = await emptyQueuesAndGroupsHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect('appliedScope' in r.value.data).toBe(false);
+  });
+
+  it('a matching nameContains returns the SUBSET (case-insensitive) with appliedScope echoed', async () => {
+    const bare = await emptyQueuesAndGroupsHandler(ctx, {});
+    const scoped = await emptyQueuesAndGroupsHandler(ctx, {
+      nameContains: 'legacy',
+    });
+    expect(bare.ok).toBe(true);
+    expect(scoped.ok).toBe(true);
+    if (!bare.ok || !scoped.ok) return;
+    const d = scoped.value.data;
+    // 'legacy' matches only LegacyRouting among the listed queues, and no group.
+    expect(d.queues.map((q) => q.id)).toEqual([Q_LEGACY]);
+    expect(d.queues.length).toBeLessThan(bare.value.data.queues.length);
+    expect(d.groups).toEqual([]);
+    expect(d.totalQueues).toBe(1);
+    expect(d.totalGroups).toBe(0);
+    expect(d.appliedScope).toEqual({
+      nameContains: 'legacy',
+      mode: 'nameContains',
+    });
+  });
+
+  it('a non-matching nameContains returns an honest empty result, never the bare inventory', async () => {
+    const r = await emptyQueuesAndGroupsHandler(ctx, {
+      nameContains: 'NoSuchName_ZZZ',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.queues).toEqual([]);
+    expect(d.groups).toEqual([]);
+    expect(d.totalQueues).toBe(0);
+    expect(d.totalGroups).toBe(0);
+    expect(d.appliedScope?.nameContains).toBe('NoSuchName_ZZZ');
+  });
+
+  it('binds nameContains into the cursor fingerprint (a scoped cursor cannot replay against the bare list)', async () => {
+    // 'n' matches LegacyRouting + UnknownMembership (2 listed queues); limit 1
+    // forces a page and mints a nextCursor bound to the scoped fingerprint.
+    const scoped = await emptyQueuesAndGroupsHandler(ctx, {
+      nameContains: 'n',
+      limit: 1,
+    });
+    expect(scoped.ok).toBe(true);
+    if (!scoped.ok) return;
+    const cursor = scoped.value.data.nextCursor;
+    expect(cursor).toBeDefined();
+    if (cursor === undefined) return;
+    // Replaying that cursor WITHOUT the filter must be rejected — the
+    // fingerprint differs, so a scoped cursor can't pull the bare inventory.
+    const replay = await emptyQueuesAndGroupsHandler(ctx, { limit: 1, cursor });
+    expect(replay.ok).toBe(false);
+    if (replay.ok) return;
+    expect(replay.error.kind).toBe('invalid-query');
+  });
+});
+
+describe('emptyQueuesAndGroupsHandler — nameContains matches label + is case-insensitive', () => {
+  let dir: string;
+  let s: GraphStore;
+  const M: VaultManifest = {
+    ...FIXTURE_MANIFEST,
+    sourceTreeHash: 'sha256:fixture-name',
+  };
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-eqg-name-'));
+    const o = await openGraph(join(dir, 'g.db'));
+    if (!o.ok) throw new Error(o.error.message);
+    s = o.value;
+    await importExtractionResults(s, [
+      {
+        nodes: [
+          makeNode({
+            id: 'Queue:Alpha_Queue',
+            apiName: 'Alpha_Queue',
+            label: 'Alpha Support',
+            properties: { memberCount: 0, objectTypes: [] },
+          }),
+          makeNode({
+            id: 'Queue:Beta_Queue',
+            apiName: 'Beta_Queue',
+            label: 'Beta Team',
+            properties: { memberCount: 0, objectTypes: [] },
+          }),
+          makeNode({
+            id: 'Group:Alpha_Group',
+            type: 'Group',
+            apiName: 'Alpha_Group',
+            label: 'Alpha Group',
+            properties: { memberCount: 0, type: 'Regular' },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+  });
+
+  afterAll(async () => {
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('matches on apiName across queues and groups, case-insensitively', async () => {
+    const r = await emptyQueuesAndGroupsHandler(
+      { vaultRoot: dir, manifest: M, graph: s },
+      { nameContains: 'alpha' },
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.queues.map((q) => q.id)).toEqual(['Queue:Alpha_Queue']);
+    expect(r.value.data.groups.map((g) => g.id)).toEqual(['Group:Alpha_Group']);
+    expect(r.value.data.appliedScope).toEqual({
+      nameContains: 'alpha',
+      mode: 'nameContains',
+    });
+  });
+
+  it('matches on the display label when the apiName does not contain the needle', async () => {
+    const r = await emptyQueuesAndGroupsHandler(
+      { vaultRoot: dir, manifest: M, graph: s },
+      { nameContains: 'support' },
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // 'support' appears only in Alpha_Queue's LABEL ('Alpha Support').
+    expect(r.value.data.queues.map((q) => q.id)).toEqual(['Queue:Alpha_Queue']);
+    expect(r.value.data.groups).toEqual([]);
+  });
+});
+
 describe('emptyQueuesAndGroupsInputSchema', () => {
   it('accepts empty input', () => {
     expect(emptyQueuesAndGroupsInputSchema.safeParse({}).success).toBe(true);
+  });
+
+  it('accepts a nameContains filter', () => {
+    expect(
+      emptyQueuesAndGroupsInputSchema.safeParse({ nameContains: 'Routing' })
+        .success,
+    ).toBe(true);
+  });
+
+  it('rejects an empty nameContains (min length 1)', () => {
+    expect(
+      emptyQueuesAndGroupsInputSchema.safeParse({ nameContains: '' }).success,
+    ).toBe(false);
   });
 
   it('rejects invalid type', () => {

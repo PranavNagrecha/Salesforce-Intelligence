@@ -15,6 +15,9 @@
  * object, never which one a given user is served.
  *
  * Input: `{ componentId: 'CustomObject:X' | 'FlexiPage:X', limit?, offset? }`.
+ * OBJECT mode also accepts the natural object aliases (L2 Alias OS):
+ * `objectApiName` / `object` / `objectId`. The resolved scope is echoed as
+ * `appliedScope`; disagreeing object aliases are an `invalid-query`.
  */
 
 import type {
@@ -29,6 +32,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { firstNonEmpty, resolveObjectAlias } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 
 const OBJECT_PREFIX = 'CustomObject:';
@@ -39,16 +43,44 @@ const MAX_LIMIT = 250;
 const ACTIVATION_DISCLOSURE =
   'Which profile / record type / app / form factor ACTIVATES (is served) a Lightning page is NOT in the retrieved FlexiPage metadata — it is a separate Lightning App Builder assignment. This lists the pages that EXIST for the object (and `layout_for_user` covers CLASSIC layouts); it does not resolve which page a specific user sees.';
 
-export const lightningPagesInputSchema = z.object({
-  componentId: z.string().min(1),
-  limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
-  offset: z.number().int().min(0).optional(),
-  // CR-22 continuation cursor (object mode only): an OPAQUE token echoed back
-  // from a prior truncated page's `nextCursor`. When present it supplies the
-  // resume offset; omitting it = today's behavior (offset 0 / explicit
-  // `offset`). The flexipage branch is a single-node fast path with no list.
-  cursor: z.string().min(1).optional(),
-});
+export const lightningPagesInputSchema = z
+  .object({
+    // OBJECT mode: a `CustomObject:` id, or any object alias below (L2 Alias
+    // OS). FLEXIPAGE mode (reverse): a `FlexiPage:` componentId. At least one
+    // identifier is required.
+    componentId: z.string().min(1).optional(),
+    object: z.string().min(1).optional(),
+    objectApiName: z.string().min(1).optional(),
+    objectId: z.string().min(1).optional(),
+    // Profile ACTIVATION keys a host reaches for on a "which page does {profile}
+    // see for {object}?" question. Accepted here ONLY so the handler can REFUSE
+    // with the activation-gap pointer instead of silently stripping them (which
+    // returned a bare object inventory reading as "{profile} is served these
+    // pages") — LIGHTNING-PAGES-SILENTLY-DROPS-PROFILE-ARGS. NEVER a valid scope.
+    profileId: z.string().min(1).optional(),
+    profileApiName: z.string().min(1).optional(),
+    profileName: z.string().min(1).optional(),
+    profile: z.string().min(1).optional(),
+    limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
+    offset: z.number().int().min(0).optional(),
+    // CR-22 continuation cursor (object mode only): an OPAQUE token echoed back
+    // from a prior truncated page's `nextCursor`. When present it supplies the
+    // resume offset; omitting it = today's behavior (offset 0 / explicit
+    // `offset`). The flexipage branch is a single-node fast path with no list.
+    cursor: z.string().min(1).optional(),
+  })
+  .refine(
+    (i) =>
+      i.componentId !== undefined ||
+      i.object !== undefined ||
+      i.objectApiName !== undefined ||
+      i.objectId !== undefined,
+    {
+      message:
+        'name the object or page — pass a `componentId` (`CustomObject:` for an object, `FlexiPage:` for a page) or an object alias (`objectApiName` / `object` / `objectId`)',
+      path: ['componentId'],
+    },
+  );
 
 export type LightningPagesInput = z.infer<typeof lightningPagesInputSchema>;
 
@@ -62,6 +94,18 @@ export interface LightningPageRef {
 
 export interface LightningPagesOutput {
   readonly componentId: string;
+  /**
+   * Echoes the id ACTUALLY resolved so a host never assumes an alias it passed
+   * (`objectApiName` / `object` / `objectId`) was silently stripped — the
+   * `componentId: Required` bug this closes. `componentId` is the resolved
+   * `CustomObject:` id (object mode) or `FlexiPage:` id (reverse mode);
+   * `object` is the object api name (object mode; the page's object or `null`
+   * in reverse mode).
+   */
+  readonly appliedScope: {
+    readonly componentId: string;
+    readonly object: string | null;
+  };
   readonly mode: 'object' | 'flexipage';
   /** object mode: the object the pages are for. */
   readonly object?: string;
@@ -98,16 +142,70 @@ export const lightningPagesHandler = async (
   ctx: Context,
   input: LightningPagesInput,
 ): Promise<Result<McpResponse<LightningPagesOutput>, McpError>> => {
-  const isObject = input.componentId.startsWith(OBJECT_PREFIX);
-  const isFlexiPage = input.componentId.startsWith(FLEXIPAGE_PREFIX);
-  if (!isObject && !isFlexiPage) {
+  // LIGHTNING-PAGES-SILENTLY-DROPS-PROFILE-ARGS: profile ACTIVATION (which user
+  // is SERVED which page) is NOT in the retrieved FlexiPage metadata — it is a
+  // separate Lightning App Builder assignment. A profile* key can therefore never
+  // scope this tool. Rather than silently strip it (returning the bare object
+  // inventory that reads as "{profile} is served these pages"), REFUSE with a
+  // pointer at the activation gap and the tools that DO model per-profile routing.
+  const profileKey = firstNonEmpty(
+    input.profileApiName,
+    input.profileId,
+    input.profileName,
+    input.profile,
+  );
+  if (profileKey !== undefined) {
     return err({
       kind: 'invalid-query',
-      message: `componentId must be a CustomObject: or FlexiPage: id; got '${input.componentId}'`,
+      message:
+        `lightning_pages lists the Lightning pages that EXIST for an object; it cannot scope by profile (\`${profileKey}\`). ` +
+        'Which profile / record type / app / form factor ACTIVATES (is served) a page is NOT in the retrieved FlexiPage metadata — it is a separate Lightning App Builder assignment. ' +
+        'Drop the profile argument and pass just the object, then use `layout_for_user` (Classic layout routing) or Lightning App Builder for the per-profile page a user actually sees.',
+      path: 'profileApiName',
+    });
+  }
+
+  // L2 Alias OS: resolve an OBJECT scope from object / objectApiName / objectId
+  // or a CustomObject: componentId (a reverse-mode FlexiPage: componentId is
+  // NOT an object alias). Disagreeing object aliases -> invalid-query.
+  const objScope = resolveObjectAlias(input, {
+    bareComponentIdIsObject: false,
+    required: false,
+  });
+  if (!objScope.ok) return err(objScope.error);
+  const rawComponentId = input.componentId;
+  let resolvedId: string;
+  if (objScope.value !== null) {
+    // OBJECT mode. A FlexiPage: componentId alongside an object is ambiguous.
+    if (rawComponentId !== undefined && rawComponentId.startsWith(FLEXIPAGE_PREFIX)) {
+      return err({
+        kind: 'invalid-query',
+        message:
+          'pass either a FlexiPage: componentId (reverse mode) or an object (object mode), not both',
+        path: 'componentId',
+      });
+    }
+    resolvedId = objScope.value.componentId;
+  } else if (rawComponentId !== undefined) {
+    resolvedId = rawComponentId;
+  } else {
+    return err({
+      kind: 'invalid-query',
+      message:
+        'name the object or page — pass a `componentId` (CustomObject: or FlexiPage:) or an object alias (objectApiName / object / objectId)',
       path: 'componentId',
     });
   }
-  const componentId = input.componentId as ComponentId;
+  const isObject = resolvedId.startsWith(OBJECT_PREFIX);
+  const isFlexiPage = resolvedId.startsWith(FLEXIPAGE_PREFIX);
+  if (!isObject && !isFlexiPage) {
+    return err({
+      kind: 'invalid-query',
+      message: `componentId must be a CustomObject: or FlexiPage: id; got '${resolvedId}'`,
+      path: 'componentId',
+    });
+  }
+  const componentId = resolvedId as ComponentId;
   const limit = input.limit ?? DEFAULT_LIMIT;
   const offset = input.offset ?? 0;
   const vaultState = {
@@ -124,11 +222,13 @@ export const lightningPagesHandler = async (
       return err({ kind: 'component-not-found', message: `no FlexiPage matches \`${componentId}\``, path: componentId });
     }
     const p = nodeResult.value.properties;
+    const forObject = strProp(p, 'sobjectType');
     return ok({
       data: {
         componentId,
+        appliedScope: { componentId, object: forObject },
         mode: 'flexipage',
-        forObject: strProp(p, 'sobjectType'),
+        forObject,
         pageType: strProp(p, 'pageType'),
         masterLabel: strProp(p, 'masterLabel'),
         summary: { pages: 1 },
@@ -183,7 +283,7 @@ export const lightningPagesHandler = async (
   // different tool, or refreshed vault) is rejected with `invalid-query`. The
   // input.componentId being an OBJECT id is part of the fingerprint, so a cursor
   // minted on CustomObject:A is auto-rejected if replayed against CustomObject:B.
-  const fingerprint = argsFingerprint({ componentId: input.componentId });
+  const fingerprint = argsFingerprint({ componentId });
   let objOffset = input.offset ?? 0;
   if (input.cursor !== undefined) {
     const decoded = decodeCursor(input.cursor, {
@@ -214,11 +314,13 @@ export const lightningPagesHandler = async (
   const total = paged.totalCount;
   const hasMore = paged.hasMore;
   const emitCursor = paged.nextCursor !== null;
+  const objectApiName = componentId.slice(OBJECT_PREFIX.length);
   return ok({
     data: {
       componentId,
+      appliedScope: { componentId, object: objectApiName },
       mode: 'object',
-      object: componentId.slice(OBJECT_PREFIX.length),
+      object: objectApiName,
       pages: page,
       summary: { pages: total },
       limit,

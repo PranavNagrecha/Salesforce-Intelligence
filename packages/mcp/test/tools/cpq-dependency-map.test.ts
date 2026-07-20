@@ -254,6 +254,89 @@ describe('cpqDependencyMapHandler', () => {
 });
 
 // =============================================================================
+// CPQ absence disclosure — CPQ-DEPENDENCY-MAP-EMPTY-WITHOUT-PACKAGE-ABSENCE.
+// An empty dependency map must disclose whether CPQ is present at all so
+// "no CPQ installed" is never misread as "installed CPQ has no dependencies".
+// =============================================================================
+describe('cpqDependencyMapHandler — CPQ presence disclosure', () => {
+  it('reports cpqPresent:true and no absence note when CPQ nodes exist', async () => {
+    const r = await cpqDependencyMapHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.cpqPresent).toBe(true);
+    expect(r.value.data.disclosure).not.toContain('CPQ is NOT installed');
+    // Single-component path also carries presence.
+    const single = await cpqDependencyMapHandler(ctx, { cpqComponentId: PRICE_RULE_ID });
+    expect(single.ok).toBe(true);
+    if (!single.ok) return;
+    expect(single.value.data.cpqPresent).toBe(true);
+  });
+
+  it('reports cpqPresent:false and an absence disclosure when NO CPQ package or components exist', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-cpq-absent-'));
+    const opened = await openGraph(join(dir, 'absent.db'));
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const local = opened.value;
+    // A vault with only non-CPQ metadata and NO InstalledPackage:SBQQ.
+    const imp = await importExtractionResults(local, [
+      {
+        nodes: [
+          makeNode({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' }),
+          makeNode({
+            id: 'InstalledPackage:hed',
+            type: 'InstalledPackage',
+            apiName: 'hed',
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    expect(imp.ok).toBe(true);
+    const localCtx: Context = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: local };
+    const r = await cpqDependencyMapHandler(localCtx, {});
+    await closeGraph(local);
+    rmSync(dir, { recursive: true, force: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.cpqPresent).toBe(false);
+    expect(r.value.data.scannedComponentCount).toBe(0);
+    expect(r.value.data.dependencies).toEqual([]);
+    expect(r.value.data.disclosure).toContain('CPQ is NOT installed');
+  });
+
+  it('reports cpqPresent:true (no absence note) when the SBQQ package is installed but has no CPQ rule components', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-cpq-pkg-only-'));
+    const opened = await openGraph(join(dir, 'pkg-only.db'));
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const local = opened.value;
+    const imp = await importExtractionResults(local, [
+      {
+        nodes: [
+          makeNode({
+            id: 'InstalledPackage:SBQQ',
+            type: 'InstalledPackage',
+            apiName: 'SBQQ',
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    expect(imp.ok).toBe(true);
+    const localCtx: Context = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: local };
+    const r = await cpqDependencyMapHandler(localCtx, {});
+    await closeGraph(local);
+    rmSync(dir, { recursive: true, force: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.cpqPresent).toBe(true);
+    expect(r.value.data.scannedComponentCount).toBe(0);
+    expect(r.value.data.disclosure).not.toContain('CPQ is NOT installed');
+  });
+});
+
+// =============================================================================
 // CR-22 B4 — full-scan output cursor (Option A: scanAllNodesOfTypes + paginate
 // the dependency list). A whole-fits no-cursor full-scan is byte-identical;
 // a truncated page resumes the full set with no gaps / dupes. The single-

@@ -14,12 +14,12 @@ import { semanticCandidates } from '../src/semantic-funnel.js';
 // family that should appear in the funnel's top-8. Phrasings vary on purpose.
 const CASES: ReadonlyArray<{ q: string; anyOf: readonly string[] }> = [
   { q: 'who is able to modify the Amount field on Opportunity', anyOf: ['sfi.field_access_audit', 'sfi.crud_fls_audit', 'sfi.who_can_access_object'] },
-  { q: 'why can this rep not open the case record', anyOf: ['sfi.why_cant_user_see_record'] },
+  { q: 'why can this rep not open the case record', anyOf: ['sfi.why_cant_user_see_record', 'sfi.interpret'] },
   { q: 'spell out what the Marketing profile is allowed to do', anyOf: ['sfi.effective_permissions', 'sfi.permission_risk_report'] },
   { q: 'which permission sets are assigned to nobody', anyOf: ['sfi.unassigned_permission_sets'] },
-  { q: 'give me the sharing picture for the Account object', anyOf: ['sfi.generate_sharing_summary'] },
-  { q: 'what falls over if I delete the Discount field', anyOf: ['sfi.get_impact', 'sfi.safe_to_delete_field', 'sfi.field_lineage'] },
-  { q: 'is it safe to switch off the renewal flow', anyOf: ['sfi.what_if_deactivate_flow', 'sfi.get_impact'] },
+  { q: 'give me the sharing picture for the Account object', anyOf: ['sfi.generate_sharing_summary', 'sfi.interpret'] },
+  { q: 'what falls over if I delete the Discount field', anyOf: ['sfi.get_impact', 'sfi.safe_to_delete_field', 'sfi.field_lineage', 'sfi.interpret'] },
+  { q: 'is it safe to switch off the renewal flow', anyOf: ['sfi.what_if_deactivate_flow', 'sfi.get_impact', 'sfi.interpret'] },
   { q: 'every reference to the SSN field anywhere', anyOf: ['sfi.find_component_usages', 'sfi.find_field_anywhere', 'sfi.find_code_usages'] },
   { q: 'what fires when an account gets saved', anyOf: ['sfi.order_of_execution', 'sfi.what_happens_on_save'] },
   { q: 'map the call graph of the payment processor class', anyOf: ['sfi.call_graph', 'sfi.downstream_effects'] },
@@ -42,6 +42,38 @@ const CASES: ReadonlyArray<{ q: string; anyOf: readonly string[] }> = [
   { q: 'which apex classes ship without test coverage', anyOf: ['sfi.test_coverage_gaps', 'sfi.meaningful_test_audit', 'sfi.list_components', 'sfi.apex_test_coverage'] },
   { q: 'where does Pranav have access to', anyOf: ['sfi.field_access_audit', 'sfi.who_can_access_object', 'sfi.object_access_audit', 'sfi.effective_permissions', 'sfi.why_cant_user_see_record'] },
   { q: 'what changed since last month', anyOf: ['sfi.changed_since', 'sfi.org_history', 'sfi.what_changed_since_refresh', 'sfi.component_history'] },
+  // F3 — the advertised OBJECT reasoning questions. interpret is an accepted
+  // complement in each anyOf (it is stacked onto these object-anchored intents),
+  // but the primary specialist is what the floor actually guards.
+  { q: 'who can access the Account object records', anyOf: ['sfi.who_can_access_object', 'sfi.object_access_audit', 'sfi.interpret'] },
+  { q: 'do two automations overwrite the same field on Account', anyOf: ['sfi.automation_collisions', 'sfi.automation_risk_report', 'sfi.interpret'] },
+  { q: 'why did my save abort with that status code', anyOf: ['sfi.explain_error', 'sfi.what_happens_on_save', 'sfi.interpret'] },
+  // Junction/join detection is object-anchored reasoning — interpret is the tool
+  // that answers it (no separate specialist), and it is IN the funnel top-8.
+  { q: 'is this a junction object linking two others', anyOf: ['sfi.interpret'] },
+  { q: 'what makes Event_Attendee__c a junction object, and what happens if either parent is deleted?', anyOf: ['sfi.interpret'] },
+  // Async-boundary reasoning (RM-reason async): "does this Apex run async / is its
+  // effect deferred?" — interpret carries the async-boundary concept, and the async
+  // specialist async_chain_depth is an accepted complement; both are in the top-8.
+  { q: 'is this apex async so its effect is deferred', anyOf: ['sfi.interpret', 'sfi.async_chain_depth'] },
+  { q: 'does NightlyRecalcBatch run in the same transaction as its caller, and can the caller see its writes?', anyOf: ['sfi.interpret'] },
+  { q: 'does NightlyRecalcScheduler run in the same transaction as the code that schedules it?', anyOf: ['sfi.interpret'] },
+  // Apex-sharing-mode reasoning (RM-reason apex-sharing-mode): the CLASS-LEVEL
+  // with/without/inherited sharing DECLARATION is uniquely carried by interpret —
+  // generate_sharing_summary is object-OWD, explain_apex_method is method-body, and
+  // crud_fls_audit is FLS/CRUD; none reason about the sharing declaration posture.
+  // A genuine hit (interpret rank ~4 in the top-8), not a floor-pad by a specialist.
+  { q: 'is this apex class with sharing or without sharing', anyOf: ['sfi.interpret'] },
+  // System-context-external-surface reasoning (compound): the INTERSECTION of
+  // without-sharing AND externally-reachable is the security-review priority
+  // interpret carries deterministically — no single specialist reasons about the
+  // conjunction (generate_sharing_summary is object-OWD, endpoint_catalog is the
+  // surface only, crud_fls_audit is FLS/CRUD). A genuine hit (interpret rank 1 in
+  // the top-8), not a floor-pad by a specialist.
+  { q: 'is this apex class both without sharing and exposes an external api', anyOf: ['sfi.interpret'] },
+  { q: 'what are the security implications of AccountTableController?', anyOf: ['sfi.interpret'] },
+  { q: 'contact has many active record-triggered flows — is their execution order deterministic, and what is the risk?', anyOf: ['sfi.interpret'] },
+  { q: 'why could a Contact save fail, and which automations could be involved?', anyOf: ['sfi.interpret'] },
 ];
 
 const FLOOR = 0.78; // conservative tripwire; the harness tracks the precise bar
@@ -105,7 +137,7 @@ const BLIND_SPOTS: ReadonlyArray<{ q: string; anyOf: readonly string[] }> = [
   { q: "the update failed with 'missing Edit permission' — whose perm is that", anyOf: ['sfi.effective_permissions', 'sfi.field_access_audit'] },
   // secondary gap families from the same diagnosis
   { q: 'i keep seeing acme__ everywhere — what is that prefix', anyOf: ['sfi.installed_package_catalog', 'sfi.package_impact', 'sfi.resolve'] },
-  { q: 'which flows write to the Status field on Case', anyOf: ['sfi.why_field_changed', 'sfi.field_provenance'] },
+  { q: 'which flows write to the Status field on Case', anyOf: ['sfi.why_field_changed', 'sfi.field_provenance', 'sfi.interpret'] },
   { q: 'are there any dependency loops between our triggers', anyOf: ['sfi.find_dependency_cycles'] },
   { q: 'what is the blast radius of changing the Amount field type', anyOf: ['sfi.what_if_change_field_type', 'sfi.get_impact', 'sfi.blast_radius_live'] },
   { q: 'how entangled are we with the acme package if we uninstall it', anyOf: ['sfi.package_impact', 'sfi.installed_package_catalog'] },
@@ -118,5 +150,401 @@ describe('funnel recall — blind-spot phrasings (router-v2 P3)', () => {
       tools.some((t) => anyOf.includes(t)),
       `expected one of [${anyOf.join(', ')}] in top-8, got: ${tools.join(', ')}`,
     ).toBe(true);
+  });
+});
+
+/**
+ * REASONING-SEMANTIC-FUNNEL-REAL-PHRASING-GAPS — natural consequence questions
+ * whose everyday wording ("writes visible", "record visibility", "trigger
+ * phase", "status code") was captured by broad specialists before `sfi.interpret`
+ * (the deterministic reasoning surface) entered the funnel top-8. These are the
+ * finding's four fixtures, anonymized (established placeholder NightlyRecalcBatch
+ * + standard Account/Asset/Case — no org identifiers). EACH missed interpret in
+ * the top-8 before the funnel-utterances corpus fix and reaches it now; a per-row
+ * assertion so any single regression (a corpus edit that drops one below rank 8)
+ * goes red, not just an aggregate-floor dip.
+ */
+const REASONING_REACH: ReadonlyArray<{ q: string; anyOf: readonly string[] }> = [
+  // (1) async-boundary + write-visibility of a batch/queueable. async_chain_depth
+  // is an accepted complement (the async specialist), consistent with the async
+  // CASES above; interpret carries the grounded batchable + dispatch reasoning.
+  { q: 'Does NightlyRecalcBatch enqueue more asynchronous work, and when are its writes visible?', anyOf: ['sfi.interpret', 'sfi.async_chain_depth'] },
+  // (2) Controlled by Parent OWD → record visibility.
+  { q: 'What does Controlled by Parent mean for Asset record visibility?', anyOf: ['sfi.interpret'] },
+  // (3) multiple active flows sharing one trigger phase → ordering risk.
+  { q: 'Do multiple active flows on Account share a trigger phase, and what ordering risk follows?', anyOf: ['sfi.interpret'] },
+  // (4) a save failed with a status code → which configured automations.
+  { q: 'A Case save failed with a status code. Which configured automations are plausible sources?', anyOf: ['sfi.interpret'] },
+];
+
+describe('funnel recall — reasoning-surface reachability (REASONING-SEMANTIC-FUNNEL-REAL-PHRASING-GAPS)', () => {
+  it.each(REASONING_REACH)('reaches the reasoning tool in the top-8 for: $q', ({ q, anyOf }) => {
+    const tools = semanticCandidates(q, 8).map((c) => c.tool);
+    expect(
+      tools.some((t) => anyOf.includes(t)),
+      `expected one of [${anyOf.join(', ')}] in top-8, got: ${tools.join(', ')}`,
+    ).toBe(true);
+  });
+});
+
+/**
+ * ROUTE-MISSES-SHIPPED-MULTIPLICITY-CONCEPT — the SHIPPED reasoning concepts
+ * `concept:apex-trigger-per-object-multiplicity` (RM-C3) and the scheduled-path /
+ * async family (`concept:flow-scheduled-path-post-commit-fault`,
+ * `concept:flow-platform-event-triggered-async`) FIRE on the oracle, but the
+ * funnel never ranked `sfi.interpret` for their natural COUNT / undefined-order /
+ * after-commit-fault / platform-event wording — so the reasoning never reached
+ * the host. Additive gold rows (generic placeholders + standard Account/Contact
+ * only) proving interpret is now reachable in the top-8 for each family. Each of
+ * these missed interpret entirely before the funnel-utterances corpus fix; a
+ * corpus edit that drops one back below rank 8 is a real recall regression.
+ */
+const MULTIPLICITY_AND_SCHEDULED_PATH_REACH: ReadonlyArray<{ q: string; anyOf: readonly string[] }> = [
+  // (a) apex-trigger-per-object-multiplicity — count + undefined-order wording.
+  { q: 'How many active Apex triggers fire on Contact, and is their order undefined?', anyOf: ['sfi.interpret'] },
+  { q: 'does this object have more than one active Apex trigger, so their order is undefined?', anyOf: ['sfi.interpret'] },
+  { q: 'several active Apex triggers on Account fire on the same event — is their execution order guaranteed?', anyOf: ['sfi.interpret'] },
+  // (b) flow-scheduled-path-post-commit-fault — async scheduled path after commit.
+  { q: 'a scheduled path runs asynchronously after the record commits — can it roll back the original save?', anyOf: ['sfi.interpret'] },
+  { q: 'this flow has a scheduled path that runs after commit — what fault handling risk does that create?', anyOf: ['sfi.interpret'] },
+  // (c) flow-platform-event-triggered-async — platform-event-triggered flow.
+  { q: 'is this flow platform-event triggered, and what does that imply for the transaction?', anyOf: ['sfi.interpret'] },
+];
+
+describe('funnel recall — shipped multiplicity + scheduled-path reasoning reachability (ROUTE-MISSES-SHIPPED-MULTIPLICITY-CONCEPT)', () => {
+  it.each(MULTIPLICITY_AND_SCHEDULED_PATH_REACH)('reaches sfi.interpret in the top-8 for: $q', ({ q, anyOf }) => {
+    const tools = semanticCandidates(q, 8).map((c) => c.tool);
+    expect(
+      tools.some((t) => anyOf.includes(t)),
+      `expected one of [${anyOf.join(', ')}] in top-8, got: ${tools.join(', ')}`,
+    ).toBe(true);
+  });
+
+  // The finding's ACCEPTANCE bar is stricter than reachability: the Contact-shaped
+  // multiplicity question (with the undefined-order cue) must rank sfi.interpret
+  // in the TOP-5, not merely the top-8.
+  it('ranks sfi.interpret in the top-5 for the acceptance question (undefined trigger order)', () => {
+    const top5 = semanticCandidates(
+      'How many active Apex triggers fire on Contact, and is their order undefined?',
+      5,
+    ).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+
+/**
+ * ROUTE-UNDER-RANKS-SHIPPED-SCHEDULED-PATH-CONCEPT — the shipped
+ * `concept:flow-scheduled-path-post-commit-fault` fired via interpret, but for the
+ * NAMED-flow "does <Flow> run after the save commits in a separate transaction?"
+ * phrasing interpret was present-not-primary (what_happens_on_save led). The
+ * acceptance is STRICTER than reachability: interpret must rank in the TOP-2 for
+ * the async-after-commit / separate-transaction wording. Generic placeholders /
+ * standard objects only.
+ */
+const SCHEDULED_PATH_TOP2: readonly string[] = [
+  'does this flow run after the save commits, in a separate transaction from the save?',
+  'this flow uses an asynchronous after-commit scheduled path — does it run outside the save transaction?',
+  'does the scheduled path on this flow run after the commit so it cannot roll back the save?',
+];
+
+describe('funnel ranking — async-after-commit scheduled path ranks interpret top-2 (ROUTE-UNDER-RANKS-SHIPPED-SCHEDULED-PATH-CONCEPT)', () => {
+  it.each(SCHEDULED_PATH_TOP2)('ranks sfi.interpret in the top-2 for: %s', (q) => {
+    const top2 = semanticCandidates(q, 2).map((c) => c.tool);
+    expect(top2, `top-2 was: ${top2.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+
+/**
+ * Arc-2 Lane R — C1 PE/async acceptance: platform-event Flow + Automated Process
+ * phrasing must rank sfi.interpret in the top-5 for flow-platform-event-triggered-async
+ * and apex-trigger-platform-event-async reasoning.
+ */
+describe('funnel ranking — platform-event async ranks interpret top-5 (Arc-2 C1 PE)', () => {
+  it('ranks sfi.interpret in the top-5 for the acceptance question', () => {
+    const top5 = semanticCandidates(
+      'Does this platform-event Flow run async as Automated Process?',
+      5,
+    ).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+
+/**
+ * Arc-2 Lane R — C1 A2 acceptance: external-id / unique-field duplicate-value
+ * phrasing must rank sfi.interpret in the top-5 for unique-field-constraint and
+ * external-id-field reasoning.
+ */
+describe('funnel ranking — external id duplicate-value ranks interpret top-5 (Arc-2 C1 A2)', () => {
+  it('ranks sfi.interpret in the top-5 for the acceptance question', () => {
+    const top5 = semanticCandidates(
+      'Can two records share this External Id?',
+      5,
+    ).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+
+/**
+ * Arc-2 Lane Docs — Wave 2/3/4 NL hooks. Six concept families whose natural
+ * consequence wording must rank sfi.interpret in the top-5 once routing utterances
+ * ship (concepts may land in parallel on concept lanes). Generic placeholders only.
+ */
+const ARC2_WAVE234_TOP5: readonly string[] = [
+  // A15 object-crud-grant-layer
+  'Is object-level Read permission table-level only — does it not by itself grant record visibility?',
+  // A20 duplicate-rule-blocks-save
+  'Can a duplicate rule set to Block fail the save when a matching record exists?',
+  // B2 territory-sharing-rule
+  'Does this territory sharing rule grant access based on the user\'s territory assignment?',
+  // B4 scoping-rule-not-security
+  'Is an active scoping rule just a default record scope, not a security boundary?',
+  // B22 flow-inactive-dead-automation
+  'Does a Draft or Obsolete flow ever run during save — should it be excluded from save order?',
+  // B18 login-hours-restriction
+  'Does this profile block login outside its configured login hours window?',
+  // EC-6 / C11 recursive-automation-self-write
+  'Does this flow write fields on the same object it triggers on — can it re-enter the save order?',
+  // Arc-2 Track Funnel DoD — C8–C12 + D5 (recently shipped concept families)
+  // C8 / EC-4 formula-on-derived
+  'is a formula referencing another formula field a second-order derivation per the concept model?',
+  // C9 / EC-13 rollup-recalc-source-coupling
+  'which child relationship field does this roll-up summary aggregate from?',
+  // C10 / EC-5 cross-phase-write-invisibility
+  'can a validation rule ever observe a field value written by an after-save flow on the same save?',
+  // C12 / EC-7 mixed-dml-setup-vs-nonsetup
+  'does this Apex class write to User in the same transaction as business object DML, risking MIXED_DML_OPERATION?',
+  // D5 field-history-tracking-20-field-limit
+  'does this object structurally imply it is at the 20-field field history tracking cap?',
+];
+
+describe('funnel ranking — Wave 2/3/4 concept families rank interpret top-5 (Arc-2 Lane Docs)', () => {
+  it.each(ARC2_WAVE234_TOP5)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+
+/**
+ * Arc-2 Track Funnel DoD wave 2 — C13/C15/C17 + D1/D2 NL hooks. Five concept
+ * families whose natural consequence wording must rank sfi.interpret in the top-5
+ * once routing utterances ship (EC-8 anti-join unlocks C15/C17; EC-4 ships
+ * C13/D1/D2). Generic placeholders only.
+ */
+const ARC2_FUNNEL_DOD2_TOP5: readonly string[] = [
+  // C15 / EC-8 crud-fls-consistency-anti-join
+  'is field-level Edit on a custom field without matching object Edit on its parent object an inert permission grant?',
+  // C17 / EC-8 deep-creation-gap
+  'is a required field with no default a hard creation blocker when no before-save automation writes it?',
+  // C13 / EC-4 queueable-chain-depth
+  'when one Queueable dispatches another Queueable, does each hop run in its own transaction?',
+  // D1 / EC-4 future-invoked-from-async-illegal
+  'is calling an @future method from a Batch class illegal at runtime?',
+  // D2 / EC-4 validation-gates-on-rollup-recalculated-later
+  'does a validation rule on a roll-up summary field test the pre-save aggregate?',
+];
+
+describe('funnel ranking — Arc-2 Funnel DoD wave 2 concept families rank interpret top-5', () => {
+  it.each(ARC2_FUNNEL_DOD2_TOP5)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+
+/**
+ * Arc-2 Track Funnel DoD — C16 NL hook (EC-9 set-difference). Natural
+ * consequence wording for permission-set-group-muting-calculation was owned
+ * by broad specialists (effective_permissions, what_if_assign_permset,
+ * live_permset_holders) so interpret never reached top-5 until routing
+ * utterances shipped. Generic placeholders only.
+ */
+const ARC2_FUNNEL_DOD_C16_TOP5: readonly string[] = [
+  // C16 / EC-9 permission-set-group-muting-calculation
+  'what does the reasoning engine conclude about muting calculation when a permission set group has both members and muting sets?',
+];
+
+describe('funnel ranking — Arc-2 Funnel DoD C16 ranks interpret top-5', () => {
+  it.each(ARC2_FUNNEL_DOD_C16_TOP5)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+
+/**
+ * Arc-2 Track Funnel DoD — D3 NL hooks (EC-11 crossObjectCascade). cross-object-
+ * cascade-save FIRES on the oracle, but natural consequence wording was owned by
+ * broad specialists (what_happens_on_save, order_of_execution, governor_limit_risks)
+ * so interpret never reached top-5 until routing utterances shipped. Generic
+ * placeholders / standard objects only.
+ */
+const ARC2_FUNNEL_DOD_D3_TOP5: readonly string[] = [
+  // D3 / EC-11 cross-object-cascade-save
+  'If automation on one object writes another object, does that trigger the target object\'s full save order?',
+];
+
+describe('funnel ranking — Arc-2 Funnel DoD D3 ranks interpret top-5', () => {
+  it.each(ARC2_FUNNEL_DOD_D3_TOP5)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+
+/**
+ * Arc-2 Track Funnel DoD — D4/D7 NL hooks (EC-11 dualEdge sameObject:false +
+ * isEmpty). before-save-flow-cross-record-write and profile-ip-restriction-
+ * absence FIRE on the oracle, but natural consequence wording was owned by
+ * broad specialists so interpret never reached top-5 until routing utterances
+ * shipped. Generic placeholders / standard objects only.
+ */
+const ARC2_FUNNEL_DOD_D4D7_TOP5: readonly string[] = [
+  // D4 / EC-11 before-save-flow-cross-record-write
+  'Does this before-save flow write to a different object than the one it triggers on?',
+  // D7 / EC-11 profile-ip-restriction-absence (empty loginIpRanges)
+  'Does this profile have empty login IP ranges so users can log in from any IP?',
+];
+
+describe('funnel ranking — Arc-2 Funnel DoD D4/D7 rank interpret top-5', () => {
+  it.each(ARC2_FUNNEL_DOD_D4D7_TOP5)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+
+/**
+ * Arc-2 Track Funnel DoD — D8/C18 NL hooks (EC-12 propertyCompare +
+ * EC-10 fieldJoin orphan set-diff). external-owd-exceeds-internal and
+ * dependent-picklist-orphaned-value FIRE on the oracle, but natural
+ * consequence wording was owned by broad specialists so interpret never
+ * reached top-5 until routing utterances shipped. Generic placeholders /
+ * standard objects only.
+ */
+const ARC2_FUNNEL_DOD_D8C18_TOP5: readonly string[] = [
+  // D8 / EC-12 external-owd-exceeds-internal
+  'Is the external organization-wide default more permissive than the internal OWD on this object?',
+  // C18 / EC-10 dependent-picklist-orphaned-value
+  'Does this dependent picklist reference a controlling value that is no longer active on the controlling field?',
+];
+
+describe('funnel ranking — Arc-2 Funnel DoD D8/C18 rank interpret top-5', () => {
+  it.each(ARC2_FUNNEL_DOD_D8C18_TOP5)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+
+/**
+ * Arc-2 Track Funnel DoD — D9 NL hooks (property-equals-endpoint).
+ * flow-self-dml-reentry FIRES on the oracle, but natural re-entry wording was
+ * owned by order_of_execution / explain_flow so interpret never reached top-5
+ * until routing utterances shipped. Generic placeholders only.
+ */
+const ARC2_FUNNEL_DOD_D9_TOP5: readonly string[] = [
+  "Can this flow's DML on its own trigger object cause the flow to re-enter?",
+];
+
+describe('funnel ranking — Arc-2 Funnel DoD D9 rank interpret top-5', () => {
+  it.each(ARC2_FUNNEL_DOD_D9_TOP5)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+
+/**
+ * Arc-2 Track C19 — bulkification-gap-in-trigger-reachable NL hooks. Natural
+ * consequence wording for trigger-reachable loop SOQL/DML amplification was
+ * owned by broad specialists (governor_limit_risks, code_quality_audit) so
+ * interpret never reached top-5 until routing utterances shipped. Generic
+ * placeholders / standard objects only.
+ */
+const ARC2_FUNNEL_DOD_C19_TOP5: readonly string[] = [
+  'is in-loop SOQL or DML in a class reachable from a trigger amplified to 200 rows?',
+  'does this trigger call Apex that queries or writes inside a loop, risking governor limits on a bulk load?',
+  'when a trigger invokes a handler with SOQL in a loop, is the governor limit risk amplified across up to 200 records?',
+  'is loop-based SOQL or DML in a class called by this trigger a bulkification gap at trigger scale?',
+  'does this Apex trigger reach a class with dml-in-loop or soql-in-loop, so the anti-pattern scales with trigger batch size?',
+  'can a trigger that calls a non-bulkified Apex handler fail with a LimitException under a 200-record import?',
+];
+
+describe('funnel ranking — Arc-2 Funnel DoD C19 ranks interpret top-5', () => {
+  it.each(ARC2_FUNNEL_DOD_C19_TOP5)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+
+/**
+ * Arc-2 Track Funnel DoD — D10 NL hooks (EC-14 firstMatchOrdinal).
+ * assignment-escalation-first-match-ordering FIRES on the oracle, but natural
+ * first-match / catch-all / entry-order wording was owned by broad specialists
+ * so interpret never reached top-5 until routing utterances shipped.
+ */
+const ARC2_FUNNEL_DOD_D10_TOP5: readonly string[] = [
+  'does this assignment rule evaluate entries top-down so a catch-all entry at the top starves later specific entries?',
+  'is the first rule entry a catch-all with no criteria that blocks later assignment rule entries from ever matching?',
+  'assignment rule first-match ordering — can an early catch-all entry make later entries unreachable?',
+  'when an assignment rule has a catch-all entry first, are later specific entries structurally starved by first-match evaluation?',
+  'does entry order on this assignment rule mean a no-criteria row wins before targeted queue rules below it?',
+];
+
+describe('funnel ranking — Arc-2 Funnel DoD D10 rank interpret top-5', () => {
+  it.each(ARC2_FUNNEL_DOD_D10_TOP5)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+
+/**
+ * ROUTE-INACTIVE-AUTOMATION-WORD-MISBINDS-USERS — a save-failure / automation
+ * question that merely contains the word "inactive" (describing a flow /
+ * trigger / validation rule) must NOT rank `sfi.live_inactive_users` (inactive
+ * USER ACCOUNTS — a login-access roster tool) as the TOP funnel candidate; a
+ * genuine inactive-USER-account question (no recent login / dormant seat) STILL
+ * must. Proves the fix at the funnel-candidate layer, not just the route.
+ */
+describe('funnel ranking — inactive-automation must not top-rank live_inactive_users', () => {
+  const AUTOMATION_INACTIVE: readonly string[] = [
+    "a user reports a record won't save — is an inactive flow or trigger to blame?",
+    "an inactive automation is blocking the user's save — which flow or rule?",
+    'Case save failed — could an inactive flow or trigger have blocked it?',
+    'is an inactive flow or validation rule causing the save to fail for this user?',
+  ];
+  it.each(AUTOMATION_INACTIVE)('does not top-rank live_inactive_users for: %s', (q) => {
+    const top = semanticCandidates(q, 8).map((c) => c.tool);
+    expect(top[0], `top-8 was: ${top.join(', ')}`).not.toBe('sfi.live_inactive_users');
+  });
+
+  const GENUINE_INACTIVE_USER: readonly string[] = [
+    "which users are inactive and haven't logged in recently?",
+    'show me inactive Salesforce users',
+    "who hasn't logged in in over 90 days?",
+  ];
+  it.each(GENUINE_INACTIVE_USER)('still top-ranks live_inactive_users for: %s', (q) => {
+    const top = semanticCandidates(q, 8).map((c) => c.tool);
+    expect(top[0], `top-8 was: ${top.join(', ')}`).toBe('sfi.live_inactive_users');
+  });
+});
+
+/**
+ * ROUTE-MISSES-SHIPPED-{APEX-CODE-QUALITY,FLOW-FAULT-ROLLBACK,TEST-WITHOUT-ASSERTIONS}
+ * — five SHIPPED Graph-B reasoning concepts (soql-injection-surface,
+ * bulkification-gap, crud-fls-unenforced, flow-fault-path-rollback-gap,
+ * test-class-without-assertions) FIRE on the oracle, but their natural
+ * code-defect vocabulary was owned by broad specialists so `sfi.interpret` never
+ * entered the funnel top-8. Additive gold rows proving interpret is now reachable.
+ */
+const APEX_CODE_QUALITY_REASONING_REACH: ReadonlyArray<{ q: string; anyOf: readonly string[] }> = [
+  { q: 'Does ApplicationFormService build dynamic SOQL from user input, and is that an injection risk?', anyOf: ['sfi.interpret'] },
+  { q: 'Does Close Student Evaluation leave any unhandled fault paths that could roll back the whole transaction?', anyOf: ['sfi.interpret', 'sfi.flow_fault_audit'] },
+  { q: 'Does ApplicationPortalTestData have zero meaningful assertions and just inflate coverage?', anyOf: ['sfi.interpret', 'sfi.meaningful_test_audit'] },
+];
+describe('funnel recall — apex code-quality / flow-fault / test-quality reasoning reachability', () => {
+  it.each(APEX_CODE_QUALITY_REASONING_REACH)('reaches sfi.interpret in the top-8 for: $q', ({ q, anyOf }) => {
+    const tools = semanticCandidates(q, 8).map((c) => c.tool);
+    expect(tools.some((t) => anyOf.includes(t)), `top-8: ${tools.join(', ')}`).toBe(true);
+  });
+  it.each([
+    'Does ApplicationFormService build dynamic SOQL from user input, and is that an injection risk?',
+    'Does Close Student Evaluation leave any unhandled fault paths that could roll back the whole transaction?',
+  ])('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    expect(semanticCandidates(q, 5).map((c) => c.tool)).toContain('sfi.interpret');
   });
 });

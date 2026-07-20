@@ -34,6 +34,12 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import {
+  firstNonEmpty,
+  parseFieldParentObjectApiName,
+  resolveObjectAlias,
+  toCustomObjectId,
+} from './input-aliases.js';
+import {
   argsFingerprint,
   decodeCursor,
   paginateLegacy,
@@ -107,7 +113,25 @@ const GLOBAL_DISCLOSURES: readonly string[] = [
 ];
 
 export const valueChangeAuditInputSchema = z.object({
-  object: z.string().min(1),
+  /**
+   * Canonical object api name. Optional at the SCHEMA level because a host /
+   * router may instead name the object through the interchangeable selectors
+   * below (VALUE-CHANGE-AUDIT-REJECTS-NATURAL-FIELD-ARGS): `objectApiName`, or a
+   * `fieldId` (`CustomField:Object.Field`) whose PARENT is the object. The
+   * handler returns a named `invalid-query` when none names an object.
+   */
+  object: z.string().min(1).optional(),
+  /** Alias for `object` — the object api name a host naturally reaches for. */
+  objectApiName: z.string().min(1).optional(),
+  /**
+   * A single `CustomField:Object.Field` selector: its parent seeds `object` and
+   * the field itself seeds a one-field `fields` list. Disagreeing with an
+   * explicit `object`/`objectApiName` → named `invalid-query` (never silently
+   * stripped).
+   */
+  fieldId: z.string().min(1).optional(),
+  /** A single bare field api name — seeds a one-field `fields` list. */
+  fieldApiName: z.string().min(1).optional(),
   fields: z.array(z.string()).optional(),
   verbosity: z.enum(['summary', 'detail']).optional(),
   // CR-22: page size for the risk-ranked `rows` list. Capped at MAX_ROWS so the
@@ -195,19 +219,53 @@ export const valueChangeAuditHandler = async (
   ctx: Context,
   input: ValueChangeAuditInput,
 ): Promise<Result<McpResponse<ValueChangeAuditOutput>, McpError>> => {
-  const object = input.object;
+  // Resolve the object + field(s) from the natural selectors a host / router may
+  // pass (VALUE-CHANGE-AUDIT-REJECTS-NATURAL-FIELD-ARGS). Byte-identical when the
+  // canonical `{object}` / `{object, fields}` is passed.
+  //
+  // Reuse the shared `resolveObjectAlias`: a `CustomField:Object.Field` `fieldId`
+  // names BOTH the object (its parent) and a field, so we feed the derived
+  // parent into the resolver as `objectId` — an explicit `object`/`objectApiName`
+  // that DISAGREES then surfaces as the resolver's conflict `invalid-query`
+  // (never a silent strip); agreeing selectors de-dupe to one target.
+  const rawForObject: Record<string, unknown> = { ...input };
+  if (input.fieldId !== undefined && rawForObject['objectId'] === undefined) {
+    const parent = parseFieldParentObjectApiName(input.fieldId);
+    if (parent !== null) rawForObject['objectId'] = toCustomObjectId(parent);
+  }
+  const objScope = resolveObjectAlias(rawForObject);
+  if (!objScope.ok) return err(objScope.error);
+  if (objScope.value === null) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        'name the object — pass `object` / `objectApiName`, or a `fieldId` (`CustomField:Object.Field`) whose parent is the object',
+      path: 'object',
+    });
+  }
+  const object = objScope.value.object;
   const objectId = `CustomObject:${object}` as ComponentId;
   const verbosity = input.verbosity ?? 'summary';
+
+  // Explicit `fields` wins; else a single-field selector (`fieldId` /
+  // `fieldApiName`) seeds a one-field list. `undefined` → auto-detect (unchanged).
+  const singleField = firstNonEmpty(input.fieldId, input.fieldApiName);
+  const resolvedFields: readonly string[] | undefined =
+    input.fields !== undefined
+      ? input.fields
+      : singleField !== undefined
+        ? [singleField]
+        : undefined;
 
   let candidates: Node[] = [];
   let autoDetected: boolean;
   let scannedFieldCount: number;
   const notFound: string[] = [];
 
-  if (input.fields !== undefined && input.fields.length > 0) {
+  if (resolvedFields !== undefined && resolvedFields.length > 0) {
     autoDetected = false;
-    scannedFieldCount = input.fields.length;
-    for (const f of input.fields) {
+    scannedFieldCount = resolvedFields.length;
+    for (const f of resolvedFields) {
       const id = (f.startsWith('CustomField:') ? f : `CustomField:${object}.${f}`) as ComponentId;
       const nodeResult = await getNodeById(ctx.graph, id);
       if (!nodeResult.ok) return err({ kind: 'internal', message: `graph query failed: ${nodeResult.error.message}` });
@@ -245,7 +303,7 @@ export const valueChangeAuditHandler = async (
   const TOOL = 'sfi.value_change_audit';
   const fingerprint = argsFingerprint({
     object,
-    ...(input.fields !== undefined ? { fields: input.fields } : {}),
+    ...(resolvedFields !== undefined ? { fields: resolvedFields } : {}),
     verbosity,
   });
   let offset = 0;

@@ -149,6 +149,11 @@ const jsonld = [
           <h3>Private by design</h3>
           <p>The vault lives on your machine. Answering makes no network calls. Live org reads are opt-in, read-only, capped - and never backfill stale claims.</p>
         </article>
+        <article class="card">
+          <div class="tagn">reasons</div>
+          <h3>Reasons over structure</h3>
+          <p>Beyond retrieval, a curated, org-independent concept model - <strong>94 concepts / 143 rules</strong> that hold no org data - joins against your graph to match structural patterns like master-detail cascade, junction objects, read-only roll-up fields, and stacked record-triggered flows, returning cited, confidence-tiered claims via <span class="mono amber">sfi.interpret</span>. Deterministic rule matching, no LLM inference, no live call.</p>
+        </article>
       </div>
     </div>
   </section>
@@ -310,6 +315,7 @@ const jsonld = [
           <div class="tag-row"><span class="badge mid">unknown</span><span class="desc">Coverage couldn't be determined.</span></div>
         </div>
       </div>
+      <p class="muted" style="margin-top:18px; font-size:.9rem;">Those three tiers grade a single <em>edge</em> - how one relationship was derived. An interpreted claim from <span class="mono amber">sfi.interpret</span> carries a second, separate <em>claim confidence</em>: the weakest of the firing rule's ceiling and the grounding edges it cites, so a claim is never asserted above the evidence beneath it - and with no citation there is no claim. <a href="/glossary#claim-confidence">glossary →</a></p>
       <article class="card" style="margin-top:30px;">
         <div class="tagn">fail-closed</div>
         <h3>It tells you no.</h3>

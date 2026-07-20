@@ -8,8 +8,13 @@
  * that can OPEN it and that DEFAULT to it (from the `applicationVisibilities`
  * the profile/permset extractor now emits — P11-UI-app-tab-visibility-extract).
  *
- * Input: `{ componentId: 'CustomApplication:X', limit?, offset? }`.
- * `declared` confidence — app metadata + applicationVisibilities are declared.
+ * Input: a `componentId` (`CustomApplication:` / `Profile:` / `PermissionSet:`)
+ * OR a natural app-name selector — `apiName` / `app` / `application` (bare app
+ * name) or a fuzzy `nameContains` — resolved to the app in the handler
+ * (APP-ACCESS-REJECTS-NATURAL-ARGS); the canonical `CustomApplication:` path is
+ * byte-identical, the alias/search path echoes `appliedScope`. Plus `limit?` /
+ * `offset?`. `declared` confidence — app metadata + applicationVisibilities are
+ * declared.
  */
 
 import type {
@@ -24,6 +29,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { firstNonEmpty, toCustomApplicationId } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { clampedNodeScanLimit, scanTruncationNote } from './scan-cap.js';
@@ -34,7 +40,22 @@ const MAX_LIMIT = 250;
 const APP_ACCESS_TOOL = 'sfi.app_access';
 
 export const appAccessInputSchema = z.object({
-  componentId: z.string().min(1),
+  /**
+   * Canonical selector: a `CustomApplication:` / `Profile:` / `PermissionSet:`
+   * id (or a bare app api name). Optional at the schema layer so the natural
+   * app-name aliases below satisfy the router/host shape ("who can use the
+   * Sales app?") instead of hard-failing `componentId: Required`
+   * (APP-ACCESS-REJECTS-NATURAL-ARGS); the handler still REQUIRES a resolvable
+   * selector and refuses with a named `invalid-query` when none is given.
+   */
+  componentId: z.string().min(1).optional(),
+  /** Natural app-name aliases → a `CustomApplication:` id (see {@link resolveAppSelector}). */
+  apiName: z.string().min(1).optional(),
+  appApiName: z.string().min(1).optional(),
+  app: z.string().min(1).optional(),
+  application: z.string().min(1).optional(),
+  /** Fuzzy app label / api-name substring, resolved by the handler's label search. */
+  nameContains: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
   // CR-22 continuation cursor from a prior truncated page's nextCursor.
@@ -42,6 +63,20 @@ export const appAccessInputSchema = z.object({
 });
 
 export type AppAccessInput = z.infer<typeof appAccessInputSchema>;
+
+/**
+ * How a natural selector resolved to the app `componentId` (APP-ACCESS-REJECTS-
+ * NATURAL-ARGS) — echoed as `appliedScope` on the alias/search path only, so a
+ * canonical `CustomApplication:`/`Profile:`/`PermissionSet:` `componentId` call
+ * stays byte-identical.
+ */
+export interface AppAccessAppliedScope {
+  readonly componentId: string;
+  /** Which input the app was resolved from. */
+  readonly resolvedFrom: 'apiName' | 'nameContains';
+  /** The matched app label (or api name), for the host to confirm. */
+  readonly matched: string;
+}
 
 /** One profile/permission set that grants access to the app. */
 export interface AppGranter {
@@ -88,6 +123,13 @@ export interface AppAccessOutput {
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
   readonly pageInfo?: PageInfo;
+  /**
+   * How a NATURAL selector (`apiName` / `app` / `nameContains`) resolved to this
+   * app (APP-ACCESS-REJECTS-NATURAL-ARGS). Present ONLY on the alias/search
+   * path; absent for a canonical `CustomApplication:` `componentId` call so that
+   * path is byte-identical.
+   */
+  readonly appliedScope?: AppAccessAppliedScope;
 }
 
 /**
@@ -114,16 +156,144 @@ interface RawAppVis {
   readonly default?: unknown;
 }
 
+/** Normalize an app name/label for case-/separator-insensitive matching. */
+const normApp = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+
+/** The resolved app selector: the id to dispatch on, plus how it was reached. */
+interface ResolvedAppSelector {
+  readonly componentId: string;
+  /** Set ONLY on the alias/search path; drives the optional output `appliedScope`. */
+  readonly appliedScope?: AppAccessAppliedScope;
+}
+
+/**
+ * Resolve the app the caller named from the canonical `componentId` OR the
+ * natural aliases (APP-ACCESS-REJECTS-NATURAL-ARGS). Precedence via
+ * `firstNonEmpty`:
+ *   1. An explicit `componentId` (`CustomApplication:`/`Profile:`/`PermissionSet:`)
+ *      wins untouched → canonical path, no `appliedScope` (byte-identical).
+ *   2. A bare `componentId` or `apiName`/`appApiName`/`app`/`application` name →
+ *      an exact `CustomApplication:<name>` node when one exists, else a
+ *      label/api-name search.
+ *   3. `nameContains` → a label/api-name substring search.
+ * A search yields exactly one → resolved; several → `invalid-query` pick list
+ * (never a silent pick); none → `component-not-found`. No selector at all →
+ * a named `invalid-query` (not a bare "componentId Required").
+ */
+const resolveAppSelector = async (
+  ctx: Context,
+  input: AppAccessInput,
+): Promise<Result<ResolvedAppSelector, McpError>> => {
+  const cid = firstNonEmpty(input.componentId);
+  if (cid !== undefined) {
+    // Canonical granter/app ids and other-prefix ids pass through untouched —
+    // the handler's own branch validates/rejects them (byte-identical).
+    if (
+      cid.startsWith('CustomApplication:') ||
+      cid.startsWith('Profile:') ||
+      cid.startsWith('PermissionSet:') ||
+      cid.includes(':')
+    ) {
+      return ok({ componentId: cid });
+    }
+    // A bare `componentId` (no prefix) is an app name — resolve like `apiName`.
+    return resolveAppByName(ctx, cid, 'apiName');
+  }
+  const named = firstNonEmpty(input.apiName, input.appApiName, input.app, input.application);
+  if (named !== undefined) return resolveAppByName(ctx, named, 'apiName');
+  const contains = firstNonEmpty(input.nameContains);
+  if (contains !== undefined) return resolveAppByName(ctx, contains, 'nameContains');
+  return err({
+    kind: 'invalid-query',
+    message:
+      'name the app — pass `componentId` (a `CustomApplication:`/`Profile:`/`PermissionSet:` id), an app `apiName` (e.g. "Sales"), or `nameContains`',
+    path: 'componentId',
+  });
+};
+
+/**
+ * Resolve an app by name: an exact `CustomApplication:<name>` node when one
+ * exists (apiName path only), else a normalized exact-then-substring search over
+ * CustomApplication api names/labels. One match → resolved with `appliedScope`;
+ * multiple → `invalid-query` naming the candidates (host disambiguates); none →
+ * `component-not-found`.
+ */
+const resolveAppByName = async (
+  ctx: Context,
+  name: string,
+  resolvedFrom: 'apiName' | 'nameContains',
+): Promise<Result<ResolvedAppSelector, McpError>> => {
+  // Exact-id fast path (apiName only): a `CustomApplication:<name>` that exists
+  // is byte-identical to the explicit-id call save for `appliedScope`.
+  if (resolvedFrom === 'apiName') {
+    const exactId = toCustomApplicationId(name);
+    const exact = await getNodeById(ctx.graph, exactId as ComponentId);
+    if (!exact.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${exact.error.message}` });
+    }
+    if (exact.value !== null) {
+      return ok({
+        componentId: exactId,
+        appliedScope: { componentId: exactId, resolvedFrom, matched: exact.value.label ?? name },
+      });
+    }
+  }
+  const scan = await scanAllNodesOfTypes(ctx.graph, ['CustomApplication']);
+  if (!scan.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${scan.error.message}` });
+  }
+  const target = normApp(name);
+  const withMatch = scan.value.nodes.map((n) => ({ n, label: n.label ?? n.apiName }));
+  const exactHits = withMatch.filter(
+    ({ n, label }) => normApp(n.apiName) === target || normApp(label) === target,
+  );
+  const hits = exactHits.length > 0
+    ? exactHits
+    : withMatch.filter(
+        ({ n, label }) => normApp(n.apiName).includes(target) || normApp(label).includes(target),
+      );
+  if (hits.length === 0) {
+    return err({
+      kind: 'component-not-found',
+      message: `no CustomApplication matches '${name}' in this vault (searched app api names and labels)`,
+      path: 'componentId',
+    });
+  }
+  if (hits.length > 1) {
+    const shown = hits
+      .slice(0, 8)
+      .map(({ n, label }) => `${n.id} (${label})`)
+      .join(', ');
+    return err({
+      kind: 'invalid-query',
+      message:
+        `'${name}' matches ${hits.length} apps — pass one \`componentId\`: ${shown}` +
+        (hits.length > 8 ? ', …' : ''),
+      path: 'componentId',
+    });
+  }
+  const only = hits[0]!;
+  return ok({
+    componentId: only.n.id,
+    appliedScope: { componentId: only.n.id, resolvedFrom, matched: only.label },
+  });
+};
+
 export const appAccessHandler = async (
   ctx: Context,
   input: AppAccessInput,
 ): Promise<Result<McpResponse<AppAccessOutput | AppAccessGranterOutput>, McpError>> => {
+  const selector = await resolveAppSelector(ctx, input);
+  if (!selector.ok) return err(selector.error);
+  const componentIdInput = selector.value.componentId;
+  const appliedScope = selector.value.appliedScope;
+
   // INVERSE direction (P14-APP-default-reverse): a Profile/PermissionSet id
   // answers from the granter's OWN applicationVisibilities — one node read.
-  if (input.componentId.startsWith('Profile:') || input.componentId.startsWith('PermissionSet:')) {
-    return appAccessForGranter(ctx, input.componentId as ComponentId);
+  if (componentIdInput.startsWith('Profile:') || componentIdInput.startsWith('PermissionSet:')) {
+    return appAccessForGranter(ctx, componentIdInput as ComponentId);
   }
-  if (input.componentId.startsWith('PermissionSetGroup:')) {
+  if (componentIdInput.startsWith('PermissionSetGroup:')) {
     return err({
       kind: 'invalid-query',
       message:
@@ -131,14 +301,14 @@ export const appAccessHandler = async (
       path: 'componentId',
     });
   }
-  if (!input.componentId.startsWith(APP_PREFIX)) {
+  if (!componentIdInput.startsWith(APP_PREFIX)) {
     return err({
       kind: 'invalid-query',
-      message: `componentId must be a CustomApplication:, Profile:, or PermissionSet: id; got '${input.componentId}'`,
+      message: `componentId must be a CustomApplication:, Profile:, or PermissionSet: id; got '${componentIdInput}'`,
       path: 'componentId',
     });
   }
-  const componentId = input.componentId as ComponentId;
+  const componentId = componentIdInput as ComponentId;
   const appApiName = componentId.slice(APP_PREFIX.length);
 
   const appResult = await getNodeById(ctx.graph, componentId);
@@ -266,6 +436,9 @@ export const appAccessHandler = async (
       ...(emitCursor
         ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo }
         : {}),
+      // Present ONLY on the natural alias/search path — a canonical
+      // `CustomApplication:` `componentId` call stays byte-identical.
+      ...(appliedScope !== undefined ? { appliedScope } : {}),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

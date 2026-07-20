@@ -95,18 +95,24 @@ const readAndValidateXml = async (
  *   - `urlPathPrefix` (the community's public URL segment) and the counts
  *     of declared `<networkMemberGroups>` member profiles / permission sets.
  *
- * Two DECLARED `references` edges wire the family together when the source
- * names them: `<site>` → `CustomSite:{name}` (the Force.com/community site
- * container) and `<picassoSite>` → `ExperienceBundle:{name}` (the Builder
- * page tree). Both are dangling-by-design when the referenced component was
- * not retrieved into the vault (impact tools surface that gap).
+ * DECLARED `references` edges wire the family together when the source names
+ * them: `<site>` → `CustomSite:{name}` (the Force.com/community site container)
+ * and `<picassoSite>` → `ExperienceBundle:{name}` (the Builder page tree), plus
+ * one edge per `<networkMemberGroups>` member `<profile>` → `Profile:{name}` and
+ * `<permissionSet>` → `PermissionSet:{name}`. All are dangling-by-design when the
+ * referenced component was not retrieved into the vault (impact tools surface
+ * that gap).
  *
- * The guest USER PROFILE is NOT referenced from here — that linkage is a
- * naming convention keyed off the `CustomSite` label, emitted (heuristic)
- * by the CustomSite extractor. `<networkMemberGroups>` names are the
- * community's MEMBER (authenticated) profiles, a different population from
- * the guest user, so they are captured only as counts, not edges (the
- * lowercase display-name form is not a reliable Profile api-name to resolve).
+ * The guest USER PROFILE is NOT referenced from here — that linkage is a naming
+ * convention keyed off the `CustomSite` label, emitted (heuristic) by the
+ * CustomSite extractor. `<networkMemberGroups>` names are the community's MEMBER
+ * (authenticated) profiles / permission sets, a different population from the
+ * guest user. Each `<profile>` / `<permissionSet>` value is the component's
+ * api-name (the profile fullName — which may contain spaces, e.g.
+ * `Partner Community User` — and the permission-set developerName), i.e. the
+ * exact stem used to form the `Profile:` / `PermissionSet:` node id, so it is
+ * wired as a declared edge (and still counted). Answering "who can access this
+ * community?" and Profile/PermissionSet usages now reach the Network.
  *
  * Error cases mirror the other declarative extractors: `file-not-found`,
  * `parse-error`, `malformed-input` (root not `<Network>`).
@@ -149,20 +155,25 @@ export const extractNetwork = async (
   const site = optionalString(rootObj, 'site');
   const picassoSite = optionalString(rootObj, 'picassoSite');
 
-  // Count declared member profiles / permission sets (the community's
-  // AUTHENTICATED member population, distinct from the guest user). Captured
-  // as counts, not edges — the display-name form is not a resolvable api-name.
+  // Collect declared member profiles / permission sets (the community's
+  // AUTHENTICATED member population, distinct from the guest user). Each value
+  // is the component's api-name (profile fullName / permission-set
+  // developerName) — the exact stem of its `Profile:` / `PermissionSet:` node
+  // id — so it is both counted AND wired as a declared edge below.
   const memberGroups = unwrapSingle(rootObj['networkMemberGroups']);
   const memberGroupsObj =
     typeof memberGroups === 'object' && memberGroups !== null
       ? (memberGroups as Record<string, unknown>)
       : {};
-  const memberProfileCount = toArray(memberGroupsObj['profile']).filter(
-    (v) => v !== undefined && v !== null && v !== '',
-  ).length;
-  const memberPermissionSetCount = toArray(memberGroupsObj['permissionSet']).filter(
-    (v) => v !== undefined && v !== null && v !== '',
-  ).length;
+  const asMemberNames = (raw: unknown): string[] =>
+    toArray(raw)
+      .filter((v) => v !== undefined && v !== null && v !== '')
+      .map((v) => String(v).trim())
+      .filter((v) => v.length > 0);
+  const memberProfiles = asMemberNames(memberGroupsObj['profile']);
+  const memberPermissionSets = asMemberNames(memberGroupsObj['permissionSet']);
+  const memberProfileCount = memberProfiles.length;
+  const memberPermissionSetCount = memberPermissionSets.length;
 
   const node: Node = {
     id: `${ROOT_ELEMENT}:${apiName}`,
@@ -186,6 +197,8 @@ export const extractNetwork = async (
       picassoSite,
       memberProfileCount,
       memberPermissionSetCount,
+      memberProfiles,
+      memberPermissionSets,
     },
   };
 
@@ -208,6 +221,39 @@ export const extractNetwork = async (
       confidence: 'declared',
       source: EXTRACTOR_SOURCE,
       properties: { via: 'picassoSite' },
+    });
+  }
+
+  // Wire each `<networkMemberGroups>` member profile / permission set as a
+  // DECLARED reference. These are the community's authenticated members, so
+  // "who can access this community?" and Profile / PermissionSet usages resolve
+  // to the Network. De-duplicated per target id (a group can repeat a name).
+  // Dangling-by-design when the profile / permission set was not retrieved.
+  const seenMemberTargets = new Set<string>();
+  for (const profileName of memberProfiles) {
+    const toId = `Profile:${profileName}`;
+    if (seenMemberTargets.has(toId)) continue;
+    seenMemberTargets.add(toId);
+    edges.push({
+      fromId: node.id,
+      toId,
+      edgeType: 'references',
+      confidence: 'declared',
+      source: EXTRACTOR_SOURCE,
+      properties: { via: 'memberProfile' },
+    });
+  }
+  for (const permSetName of memberPermissionSets) {
+    const toId = `PermissionSet:${permSetName}`;
+    if (seenMemberTargets.has(toId)) continue;
+    seenMemberTargets.add(toId);
+    edges.push({
+      fromId: node.id,
+      toId,
+      edgeType: 'references',
+      confidence: 'declared',
+      source: EXTRACTOR_SOURCE,
+      properties: { via: 'memberPermissionSet' },
     });
   }
 

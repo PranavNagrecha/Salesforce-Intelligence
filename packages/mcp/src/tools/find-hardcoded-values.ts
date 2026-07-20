@@ -127,6 +127,14 @@ const HEURISTIC_CONFIDENCE_DISCLOSURE =
  */
 export const findHardcodedValuesInputSchema = z.object({
   category: z.enum(['id', 'email', 'username', 'url', 'sandbox-data']).optional(),
+  // FIND-HARDCODED-VALUES-IGNORES-SCOPE: honor a caller scope instead of
+  // silently stripping it. `componentId` scopes to ONE `ApexClass:{name}` /
+  // `ApexTrigger:{name}`; `nameContains` narrows the scanned roster to
+  // components whose api name contains the substring (case-insensitive). The
+  // two are mutually exclusive. The response echoes `appliedScope` so a host
+  // never mistakes an unfiltered org-wide roster for a scoped answer.
+  componentId: z.string().min(1).optional(),
+  nameContains: z.string().min(1).optional(),
   limit: z
     .number()
     .int()
@@ -169,6 +177,20 @@ export interface HardcodedValueMatch {
 export interface FindHardcodedValuesOutput {
   readonly matches: readonly HardcodedValueMatch[];
   readonly totalCount: number;
+  /**
+   * The scope ACTUALLY applied to this scan. Present ONLY when the caller
+   * passed a `componentId` or `nameContains` scope — an unscoped org-wide call
+   * omits it entirely so its response stays byte-identical to the pre-scope
+   * shape (mirrors the paging-field convention below). `mode` is `component`
+   * (single-id scope), `nameContains` (substring roster filter), or — never
+   * emitted — `all`; a host that sees no `appliedScope` MUST treat the result
+   * as the full org-wide roster, not a scoped answer.
+   */
+  readonly appliedScope?: {
+    readonly component: string | null;
+    readonly nameContains: string | null;
+    readonly mode: 'component' | 'nameContains';
+  };
   /** Per-category counter across the FULL matched set. */
   readonly byCategory: Readonly<{
     readonly id: number;
@@ -297,6 +319,21 @@ export const findHardcodedValuesHandler = async (
   ctx: Context,
   input: FindHardcodedValuesInput,
 ): Promise<Result<McpResponse<FindHardcodedValuesOutput>, McpError>> => {
+  // FIND-HARDCODED-VALUES-IGNORES-SCOPE: a caller may scope by exactly ONE of
+  // componentId / nameContains — never both (a single id can't be further
+  // narrowed by a substring, and honoring one while dropping the other would be
+  // the same silent-strip this fixes).
+  if (input.componentId !== undefined && input.nameContains !== undefined) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        'pass `componentId` OR `nameContains`, not both — a component id already identifies a single component',
+      path: 'nameContains',
+    });
+  }
+  const nameNeedle =
+    input.nameContains !== undefined ? input.nameContains.toLowerCase() : null;
+
   const limit = input.limit ?? FIND_HARDCODED_DEFAULT_LIMIT;
   const ruleSet: ReadonlySet<string> =
     input.category === undefined
@@ -318,7 +355,18 @@ export const findHardcodedValuesHandler = async (
       message: `graph query failed: ${scan.error.message}`,
     });
   }
+  let componentIdMatched = false;
   for (const node of scan.value.nodes) {
+    // Apply the caller scope BEFORE reading findings so a scoped call reports
+    // only its target's matches (and an empty result honestly means "no
+    // hardcoded values in this scope", not "unscanned").
+    if (input.componentId !== undefined) {
+      if (node.id !== input.componentId) continue;
+      componentIdMatched = true;
+    }
+    if (nameNeedle !== null && !node.apiName.toLowerCase().includes(nameNeedle)) {
+      continue;
+    }
     const raw = (node as Node).properties['qualityIssues'];
     if (!Array.isArray(raw)) continue;
     const inTest = isTestClass(node);
@@ -340,6 +388,17 @@ export const findHardcodedValuesHandler = async (
     }
   }
 
+  // A componentId scope that matched no scanned node is "not found", NOT "no
+  // hardcoded values" — surface it rather than returning an empty payload a
+  // host could mistake for a clean class.
+  if (input.componentId !== undefined && !componentIdMatched) {
+    return err({
+      kind: 'invalid-query',
+      message: `no ApexClass / ApexTrigger matches \`${input.componentId}\` in this vault — find_hardcoded_values scans Apex only`,
+      path: 'componentId',
+    });
+  }
+
   const sorted = [...collected].sort(compareMatches);
 
   const byCategory = {
@@ -357,9 +416,15 @@ export const findHardcodedValuesHandler = async (
   // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
   // The fingerprint covers the one narrowing arg `category` so a token minted
   // for one category can't be replayed against another.
-  const fingerprint = argsFingerprint(
-    input.category !== undefined ? { category: input.category } : {},
-  );
+  const fingerprint = argsFingerprint({
+    ...(input.category !== undefined ? { category: input.category } : {}),
+    ...(input.componentId !== undefined
+      ? { componentId: input.componentId }
+      : {}),
+    ...(input.nameContains !== undefined
+      ? { nameContains: input.nameContains }
+      : {}),
+  });
   let offset = input.offset ?? 0;
   if (input.cursor !== undefined) {
     const decoded = decodeCursor(input.cursor, {
@@ -416,6 +481,18 @@ export const findHardcodedValuesHandler = async (
       byCategory,
       boundaries,
       truncated,
+      ...(input.componentId !== undefined || input.nameContains !== undefined
+        ? {
+            appliedScope: {
+              component: input.componentId ?? null,
+              nameContains: input.nameContains ?? null,
+              mode:
+                input.componentId !== undefined
+                  ? ('component' as const)
+                  : ('nameContains' as const),
+            },
+          }
+        : {}),
       ...(isPaged ? { limit, offset } : {}),
       ...(truncated ? { nextOffset: offset + slice.length } : {}),
       ...(emitCursor

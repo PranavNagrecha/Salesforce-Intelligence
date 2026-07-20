@@ -64,6 +64,30 @@ const optionalString = (rootObj: Record<string, unknown>, key: string): string |
 };
 
 /**
+ * Max length of a step's plain-text guidance snippet. A Path step's `<info>` is
+ * free-form rich text (often a large HTML block); keep the ordered Status value
+ * as the load-bearing fact and cap the guidance so a node stays a lean summary,
+ * not a document store. `guidanceTruncated` flags when the cap was hit.
+ */
+const GUIDANCE_SNIPPET_MAX = 280;
+
+/** Strip HTML tags, collapse whitespace, and cap. Returns `null` when empty. */
+const guidanceSnippet = (
+  raw: unknown,
+): { text: string; truncated: boolean } | null => {
+  if (typeof raw !== 'string') return null;
+  const plain = raw
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (plain.length === 0) return null;
+  return plain.length > GUIDANCE_SNIPPET_MAX
+    ? { text: plain.slice(0, GUIDANCE_SNIPPET_MAX), truncated: true }
+    : { text: plain, truncated: false };
+};
+
+/**
  * Read and strictly-validate a file as XML. fast-xml-parser's `parse()`
  * is permissive (it silently truncates on mismatched tags), so we
  * validate first to surface malformed input as `parse-error` rather than
@@ -220,7 +244,29 @@ export const extractPathAssistant = async (
     rawRecordType === MASTER_RECORD_TYPE_SENTINEL
       ? null
       : rawRecordType;
-  const stepCount = toArray(rootObj['pathAssistantSteps']).length;
+  // Each `<pathAssistantSteps>` binds guidance to one picklist value of the
+  // path's `<fieldName>` (typically Status). v1 counted them into `stepCount`
+  // but dropped the value names, so "what are the ordered steps of this path?"
+  // could not be answered from the node (PATH-ASSISTANT-OMITS-STEPS). Emit the
+  // ordered `steps: [{ picklistValueName, guidance?, guidanceTruncated? }]` in
+  // declared XML order — the Status values a record moves through, with a capped
+  // plain-text guidance snippet when the step declares `<info>`.
+  const rawSteps = toArray(rootObj['pathAssistantSteps']);
+  const steps = rawSteps.flatMap((rawStep) => {
+    if (typeof rawStep !== 'object' || rawStep === null) return [];
+    const stepObj = rawStep as Record<string, unknown>;
+    const picklistValueName = optionalString(stepObj, 'picklistValueName');
+    if (picklistValueName === null) return [];
+    const snippet = guidanceSnippet(unwrapSingle(stepObj['info']));
+    return [
+      {
+        picklistValueName,
+        ...(snippet !== null ? { guidance: snippet.text } : {}),
+        ...(snippet !== null && snippet.truncated ? { guidanceTruncated: true } : {}),
+      },
+    ];
+  });
+  const stepCount = rawSteps.length;
 
   const nodeId = `${ROOT_ELEMENT}:${entityName}.${pathDevName}`;
   const compositeApiName = `${entityName}.${pathDevName}`;
@@ -248,6 +294,7 @@ export const extractPathAssistant = async (
       recordTypeName,
       fieldName: optionalString(rootObj, 'fieldName'),
       stepCount,
+      steps,
     },
   };
 

@@ -60,6 +60,10 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import {
+  renderComponentMarkdown,
+  serializeFrontmatter,
+} from '@sf-intelligence/renderers';
 import { appendDemandHit, componentPath } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
@@ -70,6 +74,24 @@ import { tryReadComponentDoc } from './component-doc-fallback.js';
 import { mergeInputAliases } from './input-aliases.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import { buildReferenceStub } from './phantom-taxonomy.js';
+
+/**
+ * Synthetic, file-less graph node types. `ConditionalContext` (a `firesWhen`
+ * condition on a validation/approval/flow/rule) and `WorkflowAlert` (an
+ * approval/workflow email alert) are emitted into the graph as byproducts of
+ * the declarative extractors, but they have no source directory and no
+ * file-based extractor, so `renderVault` — which walks only the file-backed
+ * supported types — never writes them a markdown file. The graph node is
+ * nonetheless real (`getNodeById` succeeds), so `get_component` serves them by
+ * rendering the node on the fly rather than returning a misleading
+ * `vault-file-missing`. Scoped to exactly these synthetic types so a genuinely
+ * drifted/absent file for a normal, file-backed type still surfaces honestly.
+ * (CONDITIONAL-CONTEXT-PHANTOM-COMPONENT / WORKFLOW-ALERT-PHANTOM-COMPONENT)
+ */
+const FILELESS_SYNTHETIC_TYPES: ReadonlySet<ComponentType> = new Set([
+  'ConditionalContext',
+  'WorkflowAlert',
+]);
 
 /**
  * Zod schema for the `sfi.get_component` tool input. `id` is a non-empty
@@ -319,9 +341,27 @@ export const getComponentHandler = async (
     if (stub !== null && stub.classification === 'automation-critical') {
       await appendDemandHit(ctx.vaultRoot, id, stub.classification, 'get_component');
     }
+    // UNRESOLVED-PROFILE-GET-MISFRAMED-AS-RETRIEVE-GAP (fixture-vs-real gap): the
+    // prior fix classified the `stub` correctly (`unresolved-profile-id`) but the
+    // PRIMARY human-facing `message` still flowed through the generic
+    // `phantomAwareNotFoundMessage`, which frames every phantom as "typically a
+    // managed-package component or one outside the retrieve scope. Run `sfi
+    // refresh`…" — the exact retrieve-widen misframing this finding is about, and
+    // the field a host LLM reads first. Override the message for THIS
+    // classification only (itself keyed on the `UnresolvedProfile:` namespace AND
+    // the RestrictionRule/DuplicateRule Profile-Id-unresolved provenance, so it
+    // cannot capture any other kind) and reuse `stub.remedy` verbatim so the
+    // message and the structured stub can never contradict. Every other missing
+    // id keeps the byte-identical generic message.
+    const message =
+      stub !== null && stub.classification === 'unresolved-profile-id'
+        ? `\`${id}\` is a Profile Id referenced by ${stub.referenceCount} RestrictionRule/DuplicateRule ` +
+          `component(s) that this vault could not resolve to a Profile api name — it is NOT a missing ` +
+          `retrievable component. ${stub.remedy}`
+        : await phantomAwareNotFoundMessage(ctx, id, kindLabel);
     return err({
       kind: 'component-not-found',
-      message: await phantomAwareNotFoundMessage(ctx, id, kindLabel),
+      message,
       path: input.id,
       ...(stub !== null ? { stub } : {}),
     });
@@ -341,14 +381,40 @@ export const getComponentHandler = async (
   try {
     raw = await readFile(fullPath, 'utf-8');
   } catch {
-    // ENOENT and any other read failure surface the same way to the
-    // caller: the rendered artifact is not present. We tag the path so
-    // operators can inspect the vault directly.
-    return err({
-      kind: 'component-not-found',
-      message: 'vault file missing',
-      path: relPath,
-    });
+    // Synthetic, file-less node types (ConditionalContext / WorkflowAlert) have
+    // a real graph node but never a rendered vault file, so the read always
+    // ENOENTs. Serve them by rendering the node on the fly. For every other
+    // (file-backed) type a missing file is genuine vault drift and still
+    // surfaces as `vault-file-missing`, tagged with the path operators can
+    // inspect.
+    if (!FILELESS_SYNTHETIC_TYPES.has(node.type)) {
+      return err({
+        kind: 'component-not-found',
+        message: 'vault file missing',
+        path: relPath,
+      });
+    }
+    try {
+      const outEdgesForRender = await listEdges(ctx.graph, node.id, {
+        direction: 'out',
+      });
+      const rendered = renderComponentMarkdown(
+        node,
+        outEdgesForRender.ok ? outEdgesForRender.value : [],
+      );
+      if (!rendered.ok) {
+        throw new Error(rendered.error.message);
+      }
+      raw = `---\n${serializeFrontmatter(rendered.value.frontmatter)}\n---\n\n${rendered.value.body}\n`;
+    } catch {
+      // On-the-fly render failed unexpectedly: fall back to the honest
+      // not-present signal rather than throwing out of the handler.
+      return err({
+        kind: 'component-not-found',
+        message: 'vault file missing',
+        path: relPath,
+      });
+    }
   }
 
   const split = splitFrontmatter(raw);

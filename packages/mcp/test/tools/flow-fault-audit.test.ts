@@ -199,4 +199,162 @@ describe('flowFaultAuditHandler — fault surfacing honesty (Bug batch 6)', () =
     expect(r.value.data.scanTruncated).toBe(false);
     expect(r.value.data.rendered).not.toMatch(/truncated/i);
   });
+
+  // Bare-call byte-identity guard for the object-scope fix: an unscoped call
+  // must NOT carry an `appliedScope` block (its shape is unchanged).
+  it('BARE CALL: no appliedScope on an unscoped org-wide call', async () => {
+    const r = await flowFaultAuditHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect('appliedScope' in r.value.data).toBe(false);
+  });
+});
+
+// FLOW-FAULT-AUDIT-IGNORES-OBJECT-SCOPE: an object scope narrows the sweep to
+// record-triggered flows on that object and echoes appliedScope; an object
+// absent from the vault is refused with invalid-query.
+const makeObjectNode = (id: string): Node => ({
+  id,
+  type: 'CustomObject',
+  apiName: id.slice('CustomObject:'.length),
+  label: null,
+  parentId: null,
+  sourcePath: 'unused.object-meta.xml',
+  lastModifiedDate: null,
+  lastModifiedBy: null,
+  apiVersion: null,
+  properties: {},
+});
+
+const scopeSeed: ExtractionResult = {
+  nodes: [
+    makeObjectNode('CustomObject:Contact'),
+    makeObjectNode('CustomObject:Opportunity'),
+    // A record-triggered flow ON Contact with unhandled faults.
+    makeFlow({
+      id: 'Flow:ContactBeforeSave',
+      apiName: 'ContactBeforeSave',
+      properties: {
+        processType: 'AutoLaunchedFlow',
+        triggerType: 'RecordBeforeSave',
+        triggerObject: 'Contact',
+        faultableElementCount: 2,
+        elementsWithoutFault: 2,
+        hasUnhandledFaults: true,
+      },
+    }),
+    // A record-triggered flow ON Opportunity with unhandled faults.
+    makeFlow({
+      id: 'Flow:OpportunityAfterSave',
+      apiName: 'OpportunityAfterSave',
+      properties: {
+        processType: 'AutoLaunchedFlow',
+        triggerType: 'RecordAfterSave',
+        triggerObject: 'Opportunity',
+        faultableElementCount: 1,
+        elementsWithoutFault: 1,
+        hasUnhandledFaults: true,
+      },
+    }),
+    // A screen flow with unhandled faults but no single object — excluded under
+    // any object scope, included org-wide.
+    makeFlow({
+      id: 'Flow:ScreenNoObject',
+      apiName: 'ScreenNoObject',
+      properties: {
+        processType: 'Flow',
+        triggerType: null,
+        faultableElementCount: 1,
+        elementsWithoutFault: 1,
+        hasUnhandledFaults: true,
+      },
+    }),
+  ],
+  edges: [],
+};
+
+describe('flowFaultAuditHandler — object scope (FLOW-FAULT-AUDIT-IGNORES-OBJECT-SCOPE)', () => {
+  let scopeDir: string;
+  let scopeStore: GraphStore;
+  let scopeCtx: Context;
+
+  beforeAll(async () => {
+    scopeDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-ffa-scope-'));
+    const opened = await openGraph(join(scopeDir, 'ffa-scope.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    scopeStore = opened.value;
+    const imp = await importExtractionResults(scopeStore, [scopeSeed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    scopeCtx = { vaultRoot: scopeDir, manifest: FIXTURE_MANIFEST, graph: scopeStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(scopeStore);
+    rmSync(scopeDir, { recursive: true, force: true });
+  });
+
+  it('HONOR: objectApiName narrows to record-triggered flows on that object + emits appliedScope', async () => {
+    const r = await flowFaultAuditHandler(scopeCtx, { objectApiName: 'Contact' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedScope).toEqual({
+      object: 'CustomObject:Contact',
+      mode: 'component',
+    });
+    expect(r.value.data.flows.map((f) => f.id)).toEqual(['Flow:ContactBeforeSave']);
+    expect(r.value.data.totalFlows).toBe(1);
+  });
+
+  it('NARROWS DIFFERENTLY per object — Contact ≠ Opportunity ≠ bare', async () => {
+    const [contact, opp, bare] = await Promise.all([
+      flowFaultAuditHandler(scopeCtx, { objectApiName: 'Contact' }),
+      flowFaultAuditHandler(scopeCtx, { objectApiName: 'Opportunity' }),
+      flowFaultAuditHandler(scopeCtx, {}),
+    ]);
+    expect(contact.ok && opp.ok && bare.ok).toBe(true);
+    if (!contact.ok || !opp.ok || !bare.ok) return;
+    expect(contact.value.data.flows.map((f) => f.id)).toEqual(['Flow:ContactBeforeSave']);
+    expect(opp.value.data.flows.map((f) => f.id)).toEqual(['Flow:OpportunityAfterSave']);
+    // Bare is org-wide: all three faulted flows, and NO appliedScope.
+    expect(bare.value.data.flowsWithUnhandledFaults).toBe(3);
+    expect('appliedScope' in bare.value.data).toBe(false);
+    // The scoped pages differ from each other and from bare.
+    expect(JSON.stringify(contact.value.data.flows)).not.toBe(
+      JSON.stringify(opp.value.data.flows),
+    );
+  });
+
+  it('accepts a CustomObject: componentId alias equivalently to objectApiName', async () => {
+    const [byApi, byComponent] = await Promise.all([
+      flowFaultAuditHandler(scopeCtx, { objectApiName: 'Opportunity' }),
+      flowFaultAuditHandler(scopeCtx, { componentId: 'CustomObject:Opportunity' }),
+    ]);
+    expect(byApi.ok && byComponent.ok).toBe(true);
+    if (!byApi.ok || !byComponent.ok) return;
+    expect(byComponent.value.data.appliedScope).toEqual({
+      object: 'CustomObject:Opportunity',
+      mode: 'component',
+    });
+    expect(byComponent.value.data.flows.map((f) => f.id)).toEqual(
+      byApi.value.data.flows.map((f) => f.id),
+    );
+  });
+
+  it('REFUSE: an object absent from the vault → named invalid-query (never org-wide)', async () => {
+    const r = await flowFaultAuditHandler(scopeCtx, { objectApiName: 'NoSuchObject__c' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toMatch(/no object named 'NoSuchObject__c'/i);
+  });
+
+  it('REFUSE: disagreeing object aliases → invalid-query', async () => {
+    const r = await flowFaultAuditHandler(scopeCtx, {
+      objectApiName: 'Contact',
+      object: 'Opportunity',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
 });

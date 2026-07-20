@@ -41,8 +41,12 @@ import {
   type CoverageCaveat,
   FORMULA_REFERENCE_REQUIRED_COVERAGE,
 } from './coverage-trust.js';
+import { firstNonEmpty } from './input-aliases.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { resolveToFieldOrSuggest } from './resolve-field-or-suggest.js';
+
+const CUSTOM_FIELD_PREFIX = 'CustomField:';
+const CUSTOM_OBJECT_PREFIX = 'CustomObject:';
 
 /**
  * Inclusive upper bound on `limit`. Mirrors the `LIST_MAX_LIMIT`
@@ -62,13 +66,22 @@ const FORMULA_REFS_DEFAULT_LIMIT = 50;
 /**
  * Zod schema for the `sfi.find_formula_references` tool input.
  *
- *   - `fieldId`: required, non-empty string. Unknown ids surface as
- *     an empty referencers list, not a Zod-level rejection.
+ *   - `fieldId`: the canonical `CustomField:{Object}.{Field}` id. Unknown ids
+ *     surface as an empty referencers list, not a Zod-level rejection.
+ *   - `componentId` / `fieldApiName`: interchangeable field selectors a host
+ *     naturally forwards from `sfi.resolve`
+ *     (FIND-FORMULA-REFERENCES-REJECTS-COMPONENTID). `componentId` is the
+ *     `CustomField:` id; `fieldApiName` also accepts a dotted `<Object>.<Field>`
+ *     (coerced). Resolved to the SAME field through {@link resolveFieldRef}; the
+ *     canonical `fieldId` wins, disagreeing selectors or a non-field id →
+ *     `invalid-query`, at least one is required.
  *   - `limit`: optional integer in `[1, 500]`. Defaults to 50 inside
  *     the handler when omitted.
  */
 export const findFormulaReferencesInputSchema = z.object({
-  fieldId: z.string().min(1),
+  fieldId: z.string().min(1).optional(),
+  componentId: z.string().min(1).optional(),
+  fieldApiName: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(FORMULA_REFS_MAX_LIMIT).optional(),
   /**
    * Zero-based page offset (CR-13). Defaults to 0. Paired with `limit` so the
@@ -87,6 +100,66 @@ export const findFormulaReferencesInputSchema = z.object({
 export type FindFormulaReferencesInput = z.infer<
   typeof findFormulaReferencesInputSchema
 >;
+
+/**
+ * Coerce a dotted `<Object>.<Field>` selector to the canonical CustomField id;
+ * leave an already-prefixed id (`CustomField:` / any other `Type:`) or a bare
+ * token unchanged — the latter reaches `resolveToFieldOrSuggest`'s object-name
+ * probe just as a bare `fieldId` does today.
+ */
+const toFieldRef = (raw: string): string =>
+  !raw.includes(':') && raw.includes('.') ? `${CUSTOM_FIELD_PREFIX}${raw}` : raw;
+
+/**
+ * Reconcile the interchangeable field selectors a host reaches for — `fieldId`
+ * (canonical), `componentId` (`CustomField:{Object}.{Field}`), and
+ * `fieldApiName` (a `CustomField:` id or a dotted `<Object>.<Field>`) —
+ * FIND-FORMULA-REFERENCES-REJECTS-COMPONENTID. All coerce to the same
+ * `CustomField:` id, so `sfi.resolve`'s CustomField id works without renaming.
+ * Disagreeing selectors → `invalid-query` (never a silent pick); none →
+ * `invalid-query`. A wrong-type id (an `ApexClass:` / `Flow:` / … selector) is
+ * NAMED rather than silently returning an empty referencer list; a
+ * `CustomObject:` id is allowed through so the handler's object→field suggestion
+ * still fires. The resolved value is byte-identical to a bare `{ fieldId }` call
+ * for a canonical `CustomField:` id (coercion is a no-op on it).
+ */
+const resolveFieldRef = (
+  input: FindFormulaReferencesInput,
+): Result<string, McpError> => {
+  const candidates = [input.fieldId, input.componentId, input.fieldApiName]
+    .map((v) => firstNonEmpty(v))
+    .filter((v): v is string => v !== undefined)
+    .map(toFieldRef);
+  const distinct = [...new Set(candidates)];
+  if (distinct.length === 0) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        'name the field — pass `fieldId` or `componentId` (e.g. "CustomField:Account.Industry__c"), or a dotted `fieldApiName` (`Object.Field`)',
+      path: 'fieldId',
+    });
+  }
+  if (distinct.length > 1) {
+    return err({
+      kind: 'invalid-query',
+      message: `field selectors name different targets (${distinct.join(', ')}); pass exactly one of fieldId / componentId / fieldApiName`,
+      path: 'fieldId',
+    });
+  }
+  const ref = distinct[0] as string;
+  if (
+    ref.includes(':') &&
+    !ref.startsWith(CUSTOM_FIELD_PREFIX) &&
+    !ref.startsWith(CUSTOM_OBJECT_PREFIX)
+  ) {
+    return err({
+      kind: 'invalid-query',
+      message: `'${ref}' is not a CustomField — find_formula_references lists references to ONE field; pass a 'CustomField:{Object}.{Field}' id (or a dotted 'Object.Field')`,
+      path: 'fieldId',
+    });
+  }
+  return ok(ref);
+};
 
 /**
  * One referencer in the output list. Combines the source node's
@@ -199,8 +272,14 @@ export const findFormulaReferencesHandler = async (
   ctx: Context,
   input: FindFormulaReferencesInput,
 ): Promise<Result<McpResponse<FindFormulaReferencesOutput>, McpError>> => {
+  // FIND-FORMULA-REFERENCES-REJECTS-COMPONENTID: accept componentId /
+  // fieldApiName as aliases for fieldId, resolved to the same CustomField id.
+  const fieldRefResult = resolveFieldRef(input);
+  if (!fieldRefResult.ok) return fieldRefResult;
+  const fieldId = fieldRefResult.value;
+
   // FLD-02: graceful object→field routing.
-  const suggestionResult = await resolveToFieldOrSuggest(ctx, input.fieldId);
+  const suggestionResult = await resolveToFieldOrSuggest(ctx, fieldId);
   if (!suggestionResult.ok) return suggestionResult;
   if (suggestionResult.value !== null) {
     return ok(
@@ -210,7 +289,7 @@ export const findFormulaReferencesHandler = async (
 
   const limit = input.limit ?? FORMULA_REFS_DEFAULT_LIMIT;
 
-  const edgesResult = await listEdges(ctx.graph, input.fieldId, {
+  const edgesResult = await listEdges(ctx.graph, fieldId, {
     direction: 'in',
     edgeType: 'references',
   });
@@ -251,7 +330,7 @@ export const findFormulaReferencesHandler = async (
   // CR-22: resolve the resume offset (echoed cursor wins over explicit offset);
   // a stale/forged cursor (changed fieldId, different tool, refreshed vault) is
   // rejected with invalid-query.
-  const fingerprint = argsFingerprint({ fieldId: input.fieldId });
+  const fingerprint = argsFingerprint({ fieldId });
   let offset = input.offset ?? 0;
   if (input.cursor !== undefined) {
     const decoded = decodeCursor(input.cursor, {

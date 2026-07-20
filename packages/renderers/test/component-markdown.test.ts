@@ -331,7 +331,7 @@ describe('renderComponentMarkdown', () => {
     };
     const psIds = [
       'PermissionSet:Advisor_Access',
-      'PermissionSet:Faculty_Access',
+      'PermissionSet:Auditor_Access',
       'PermissionSet:Registrar_Access',
       'PermissionSet:Student_Read',
       'Profile:Standard_User',
@@ -743,5 +743,114 @@ describe('renderComponentMarkdown — markdown injection / escaping (CR-16c)', (
       .find((l) => l.includes('Tracks projects'));
     expect(descLine).toBeDefined();
     expect(descLine).not.toContain('\\');
+  });
+});
+
+// APPROVAL-PROCESS-STEPS-BREAK-VAULT-RENDER guard: the approval-process
+// extractor emits `properties.steps[]` whose `approvers` / `approvalActions` are
+// themselves arrays of `{ name, type }` objects — a shape one level deeper than
+// the YAML frontmatter serializer's depth-4 array-of-objects ceiling. Before the
+// fix, `renderComponentMarkdown` returned that deep shape verbatim and
+// `serializeFrontmatter(frontmatter)` THREW ("nested objects inside inner arrays
+// … depth limit 4"), hard-failing the WHOLE vault render (a refresh abort). The
+// renderer now projects the frontmatter into a serializer-safe shape (deep
+// sub-values JSON-encoded) WITHOUT dropping the approver data. The synthetic
+// node below mirrors the real `ApprovalStepSummary` shape; a real-vault probe is
+// DEFERRED (owner must run `sfi refresh --no-pull` to re-render approval-process
+// markdown against the live vault).
+describe('renderComponentMarkdown — deep ApprovalProcess steps frontmatter', () => {
+  const deepApprovalNode = (): Node => ({
+    id: 'ApprovalProcess:Widget__c.Discount_Approval',
+    type: 'ApprovalProcess',
+    apiName: 'Widget__c.Discount_Approval',
+    label: 'Discount Approval',
+    parentId: 'CustomObject:Widget__c',
+    sourcePath:
+      'approvalProcesses/Widget__c.Discount_Approval.approvalProcess-meta.xml',
+    lastModifiedDate: null,
+    lastModifiedBy: null,
+    apiVersion: null,
+    properties: {
+      active: true,
+      stepCount: 1,
+      // The deep shape: an array of step objects whose `approvers` /
+      // `approvalActions` are arrays of `{ name, type }` objects (depth 5).
+      steps: [
+        {
+          stepIndex: 0,
+          name: 'Step_One',
+          label: 'First Step',
+          approvers: [
+            { name: 'Manager_Field__c', type: 'relatedUserField' },
+            { name: 'Region_Queue', type: 'queue' },
+          ],
+          entryCriteriaFormula: null,
+          entryCriteriaItemCount: 0,
+          ifCriteriaNotMet: null,
+          rejectBehaviorType: 'RejectRequest',
+          approvalActions: [{ name: 'Set_Approved_Flag', type: 'FieldUpdate' }],
+          rejectionActions: [],
+        },
+      ],
+      // A sibling depth-3 array-of-objects that ALREADY serialized fine — it
+      // must stay structured (not JSON-encoded) after the sanitize pass.
+      finalApprovalActions: [{ name: 'Notify_Owner', type: 'Alert' }],
+    },
+  });
+
+  it('renders without throwing at serialization time (was a fatal renderVault abort)', () => {
+    const result = renderComponentMarkdown(deepApprovalNode(), []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Pre-fix this line THREW inside serializeFrontmatter (depth limit 4),
+    // which is exactly how the CLI's composeDocument aborted the whole refresh.
+    expect(() => serializeFrontmatter(result.value.frontmatter)).not.toThrow();
+  });
+
+  it('preserves the approver + action data (name and type) in the serialized frontmatter', () => {
+    const result = renderComponentMarkdown(deepApprovalNode(), []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const yaml = serializeFrontmatter(result.value.frontmatter);
+    // No approver data is dropped — the JSON-encoded scalar still carries every
+    // name and type verbatim.
+    expect(yaml).toContain('Manager_Field__c');
+    expect(yaml).toContain('relatedUserField');
+    expect(yaml).toContain('Region_Queue');
+    expect(yaml).toContain('queue');
+    expect(yaml).toContain('Set_Approved_Flag');
+    expect(yaml).toContain('FieldUpdate');
+    // The structured step scaffolding (name / label / reject behavior) survives
+    // as real frontmatter, not JSON — only the deep leaf arrays are encoded.
+    expect(yaml).toContain('Step_One');
+    expect(yaml).toContain('RejectRequest');
+    // The already-shallow sibling array stays structured (Alert type appears as
+    // a plain frontmatter value, not only inside a JSON blob).
+    expect(yaml).toContain('Notify_Owner');
+  });
+
+  it('leaves a serializer-safe node byte-identical (fast path untouched)', () => {
+    // A node whose properties already serialize must not be reshaped at all.
+    const safeNode: Node = {
+      id: 'CustomObject:Safe__c',
+      type: 'CustomObject',
+      apiName: 'Safe__c',
+      label: 'Safe',
+      parentId: null,
+      sourcePath: 'objects/Safe__c/Safe__c.object-meta.xml',
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: {
+        sharingModel: 'Private',
+        picklistValues: ['A', 'B', 'C'],
+        conditions: [{ field: 'Status', fieldRefs: ['CustomField:Safe__c.Status'] }],
+      },
+    };
+    const result = renderComponentMarkdown(safeNode, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Same object identity round-tripped through the fast path (no sanitize).
+    expect(result.value.frontmatter['properties']).toBe(safeNode.properties);
   });
 });

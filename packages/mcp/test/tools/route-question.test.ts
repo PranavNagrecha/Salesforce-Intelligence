@@ -13,10 +13,11 @@ import {
 } from '@sf-intelligence/graph';
 import { appendAnnotationEvent } from '@sf-intelligence/vault';
 
-import { classifyQuestion } from '../../src/intent-router.js';
+import { classifyQuestion, type RouteResult } from '../../src/intent-router.js';
 import type { Context } from '../../src/server.js';
 import {
   buildFunnelCandidates,
+  buildRouteToolArgsMap,
   FUNNEL_PRIMARY_MIN_SCORE,
   looksLikeComponentName,
   routeQuestionHandler,
@@ -350,6 +351,28 @@ describe('routeQuestionHandler — enterprise routing evidence', () => {
     expect(r.value.data.route.plan.every((step) => step.dependsOn.length === 0)).toBe(true);
     expect(r.value.data.route.clarification).toBeNull();
     expect(r.value.data.executionBlocked).toBe(false);
+  });
+
+  // ROUTE-COMPOUND-DROPS-GUEST-CLAUSE — a compound "which layout … and can guest
+  // users see X too?" must STACK the guest-exposure tool in the executable plan,
+  // not silent-drop the second clause (the funnel already surfaced it, but the
+  // deterministic plan dropped it because the guest clause routed to `unknown`).
+  it('stacks guest_exposure_report alongside layout_for_user for a compound layout+guest question', async () => {
+    const r = await routeQuestionHandler(ctx, {
+      question:
+        'A Faculty user cannot see a Case, which layout do they get, and can guest users see Cases too?',
+      logGap: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const planIntents = r.value.data.route.plan.map((step) => step.intent);
+    expect(planIntents).toContain('layout-access');
+    expect(planIntents).toContain('guest-exposure');
+    const planTools = r.value.data.route.plan.flatMap((step) => step.tools);
+    expect(planTools).toContain('sfi.layout_for_user');
+    expect(planTools).toContain('sfi.guest_exposure_report');
+    expect(r.value.data.executionBlocked).toBe(false);
+    expect(r.value.data.route.clarification).toBeNull();
   });
 
   it('marks then-linked compound steps as dependent', async () => {
@@ -1180,6 +1203,89 @@ describe('routeQuestionHandler — funnel-primary advisory fallback (P2 §3)', (
   });
 });
 
+// ROUTE-MISSES-SHIPPED-MULTIPLICITY-CONCEPT — end-to-end proof through the SAME
+// candidate pipeline the host sees (regex-hint fusion included, not just the
+// pure funnel). A "how many active triggers … order undefined" question routes
+// to intent `metadata-count` (whose route tools are list_components/get_component
+// — interpret is NOT in the route), so the ONLY way sfi.interpret can reach the
+// host candidates is the funnel-utterances corpus fix. buildFunnelCandidates is
+// exactly what routeQuestionHandler emits as `toolCandidates`, so this pins the
+// host-visible reachability, not an internal funnel detail.
+describe('routeQuestionHandler candidates — shipped multiplicity reasoning reaches the host (ROUTE-MISSES-SHIPPED-MULTIPLICITY-CONCEPT)', () => {
+  const emptyArgs = new Map<string, Readonly<Record<string, unknown>>>();
+
+  it('surfaces sfi.interpret in the top-5 host candidates for the undefined-trigger-order question (metadata-count route)', () => {
+    const route = classifyQuestion(
+      'How many active Apex triggers fire on Contact, and is their order undefined?',
+    );
+    // Confirm the fix does NOT re-map the intent — it stays metadata-count and
+    // its route tools never include interpret; the funnel alone surfaces it.
+    expect(route.intent).toBe('metadata-count');
+    expect(route.tools).not.toContain('sfi.interpret');
+    const top5 = buildFunnelCandidates(route, route.question, emptyArgs, undefined)
+      .slice(0, 5)
+      .map((c) => c.tool);
+    expect(top5, `top-5 host candidates were: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+
+  it('surfaces sfi.interpret in the host candidates for a scheduled-path async-fault question', () => {
+    const route = classifyQuestion(
+      'a scheduled path runs asynchronously after the record commits — can it roll back the original save?',
+    );
+    const tools = buildFunnelCandidates(route, route.question, emptyArgs, undefined).map((c) => c.tool);
+    expect(tools, `host candidates were: ${tools.join(', ')}`).toContain('sfi.interpret');
+  });
+
+  it('surfaces sfi.interpret in the top-5 host candidates for the loop-governor Apex question (governor-risks route)', () => {
+    const route = classifyQuestion('Which Apex classes on Contact do SOQL or DML inside loops and risk governor limits?');
+    expect(route.intent).toBe('governor-risks');
+    const args: Map<string, Readonly<Record<string, unknown>>> = new Map([
+      ['sfi.governor_limit_risks', {}],
+      ['sfi.interpret', {}],
+    ]);
+    const top5 = buildFunnelCandidates(route, route.question, args, undefined).slice(0, 5).map((c) => c.tool);
+    expect(top5, `top-5: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+
+// ROUTE-DEPLOY-PACKAGE-WORD-MISBINDS-PACKAGE-IMPACT — "is it safe to remove this
+// Flow from the package?" is a change-risk deploy-artifact question, not a
+// managed-package uninstall footprint. Through the SAME candidate pipeline the
+// host sees (regex-hint fusion included), review_change must now rank ABOVE
+// package_impact. A managed-package retire ("uninstall the acme package") still
+// leads with package_impact.
+describe('routeQuestionHandler candidates — deploy/change-risk beats package_impact (ROUTE-DEPLOY-PACKAGE-WORD-MISBINDS-PACKAGE-IMPACT)', () => {
+  const emptyArgs = new Map<string, Readonly<Record<string, unknown>>>();
+
+  it('routes "remove this Flow from the package" to review-change, not package-impact', () => {
+    const route = classifyQuestion('is it safe to remove this Flow from the package');
+    expect(route.intent).toBe('review-change');
+    expect(route.tools[0]).toBe('sfi.review_change');
+  });
+
+  it('ranks review_change above package_impact in the host candidates for the deploy-artifact question', () => {
+    const route = classifyQuestion(
+      'I am deleting the after-save Flow, is it safe to remove from the package?',
+    );
+    const tools = buildFunnelCandidates(route, route.question, emptyArgs, undefined).map((c) => c.tool);
+    const reviewIdx = tools.indexOf('sfi.review_change');
+    const pkgIdx = tools.indexOf('sfi.package_impact');
+    expect(reviewIdx, `host candidates were: ${tools.join(', ')}`).toBeGreaterThanOrEqual(0);
+    expect(pkgIdx === -1 || reviewIdx < pkgIdx, `host candidates were: ${tools.join(', ')}`).toBe(true);
+  });
+
+  it('still routes a genuine managed-package uninstall to package-impact', () => {
+    // No component-noun + "from the package" container framing, keeps
+    // "uninstall" — the new review-change rule must NOT steal it.
+    expect(classifyQuestion('what breaks if we uninstall the acme managed package').intent).toBe(
+      'package-impact',
+    );
+    expect(classifyQuestion('how entangled are we with the vendor package if we uninstall it').intent).toBe(
+      'package-impact',
+    );
+  });
+});
+
 // R3 forensics — the funnel-primary FIRING bug: 6 of the 8 eligible 0.1.22
 // misses that met every visible stage-7 condition were killed by a PREMISE
 // flag raised on a PROSE fragment the typed-phrase extractor scraped ("I want
@@ -1414,5 +1520,96 @@ describe('classifyQuestion — PSG expansion vs the R2 PSG gaps (R3)', () => {
     expect(r.intent).toBe('permset-user-roster');
     expect(r.tools).toEqual(['sfi.live_permset_holders']);
     expect(r.gap).toBeNull();
+  });
+});
+
+describe('buildRouteToolArgsMap — sfi.interpret arg-binding (RM-wire step 2)', () => {
+  // A reasoning-shaped route that stacks sfi.interpret after its specialist.
+  // Only the fields buildRouteToolArgsMap reads matter (tools, suggestedArgs,
+  // intent); the rest are minimal valid RouteResult scaffolding.
+  const reasoningRoute = (
+    intent: string,
+    tools: readonly string[],
+    suggestedArgs: Readonly<Record<string, unknown>>,
+  ): RouteResult => ({
+    question: 'q',
+    plane: 'vault',
+    intent,
+    tools,
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'test scaffold',
+    gap: null,
+    confidence: 'high',
+    risk: 'informational',
+    alternatives: [],
+    clarification: null,
+    plan: [],
+    suggestedArgs,
+  });
+
+  it('binds the resolved fieldId as interpret.componentId on a field-anchored reasoning route', async () => {
+    const route = reasoningRoute(
+      'field-provenance',
+      ['sfi.resolve', 'sfi.field_provenance', 'sfi.interpret'],
+      { fieldId: 'CustomField:Account.Status__c' },
+    );
+    const map = await buildRouteToolArgsMap(route, ctx);
+    // interpret surfaces with a NON-EMPTY componentId, reusing the specialist's id.
+    expect(map.get('sfi.interpret')).toEqual({
+      componentId: 'CustomField:Account.Status__c',
+    });
+    // The specialist keeps its own key; the resolve preamble stays empty.
+    expect(map.get('sfi.field_provenance')).toEqual({
+      fieldId: 'CustomField:Account.Status__c',
+    });
+    expect(map.get('sfi.resolve')).toEqual({});
+  });
+
+  it('reuses a componentId-keyed anchor (impact-analysis) verbatim for interpret', async () => {
+    const route = reasoningRoute(
+      'impact-analysis',
+      ['sfi.resolve', 'sfi.get_impact', 'sfi.interpret'],
+      { componentId: 'CustomObject:Payment__c' },
+    );
+    const map = await buildRouteToolArgsMap(route, ctx);
+    expect(map.get('sfi.interpret')).toEqual({
+      componentId: 'CustomObject:Payment__c',
+    });
+  });
+
+  it('lifts a bare objectApiName anchor to a CustomObject canonical id for interpret', async () => {
+    const route = reasoningRoute(
+      'automation-on-object',
+      ['sfi.automation_collisions', 'sfi.interpret'],
+      { objectApiName: 'Account' },
+    );
+    const map = await buildRouteToolArgsMap(route, ctx);
+    expect(map.get('sfi.interpret')).toEqual({ componentId: 'CustomObject:Account' });
+  });
+
+  it('lifts the automation_collisions `object` key to a CustomObject id for interpret (F3)', async () => {
+    // automation_collisions binds its object under `object`, not `objectApiName`;
+    // interpret must still receive the CustomObject anchor so the collision /
+    // owd / status-code concepts fire on the object.
+    const route = reasoningRoute(
+      'automation-collisions',
+      ['sfi.automation_collisions', 'sfi.interpret'],
+      { object: 'Account' },
+    );
+    const map = await buildRouteToolArgsMap(route, ctx);
+    expect(map.get('sfi.interpret')).toEqual({ componentId: 'CustomObject:Account' });
+    // The specialist keeps its own `object` key untouched.
+    expect(map.get('sfi.automation_collisions')).toEqual({ object: 'Account' });
+  });
+
+  it('surfaces interpret with EMPTY args (never a guessed id) when nothing was resolved', async () => {
+    const route = reasoningRoute(
+      'field-provenance',
+      ['sfi.resolve', 'sfi.field_provenance', 'sfi.interpret'],
+      {},
+    );
+    const map = await buildRouteToolArgsMap(route, ctx);
+    expect(map.get('sfi.interpret')).toEqual({});
   });
 });

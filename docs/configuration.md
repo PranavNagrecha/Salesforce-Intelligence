@@ -246,7 +246,7 @@ field.
 
 ## Tool profile (advertised roster)
 
-The full roster's 196 advertised tool schemas (200 registered; 4 back-compat
+The full roster's 199 advertised tool schemas (203 registered; 4 back-compat
 aliases stay hidden) cost tens of thousands of context tokens in MCP clients
 that do not defer tool definitions. `SFI_TOOL_PROFILE=core` advertises only
 the 18-schema core roster (orientation, resolve/route, the universal graph
@@ -259,6 +259,58 @@ called directly still works.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `SFI_TOOL_PROFILE` | `full` | `core` advertises the 18-schema roster; anything else (or unset) advertises everything. Zero behavior change under the default. |
+
+## Input scope & selectors
+
+Many analysis tools accept a **scope selector** so an answer can be narrowed to
+one component, object, profile, or namespace instead of scanning the whole org.
+This is not a hidden env var — it is a per-call input contract worth
+understanding, because it is deliberately built to fail loudly rather than
+answer the wrong question. Around 40 tools carry it today.
+
+### Natural selectors (the alias contract)
+
+A host rarely holds a canonical id at the moment it wants to ask. So a
+scope-aware tool accepts whatever the host already has and resolves it itself —
+you never have to pre-resolve. Depending on the tool, the accepted keys include:
+
+- a **canonical `componentId`** (`CustomField:Account.Industry__c`,
+  `ApexClass:PaymentProcessor`, `Profile:Admin`, …);
+- a bare **`apiName`** / **`objectApiName`** / **`fieldId`** /
+  **`profileApiName`** (and interchangeable spellings like `profile`,
+  `profileName`, `app`, `application`);
+- a fuzzy **`nameContains`** substring;
+- a **`namespacePrefix`** to scope to one managed package;
+- natural tokens a question already contains (e.g. an error-log
+  `lastRefresh` marker).
+
+The keys are **interchangeable, not additive**: pass exactly one. The handler
+resolves it to a canonical scope and proceeds.
+
+### `appliedScope` — the resolved scope is echoed back
+
+When a selector resolves, the tool echoes the scope it actually applied as an
+`appliedScope` field on the response. The answer states *what it narrowed to*,
+in canonical form, so a host (or a human) can confirm the tool scoped to the
+component they meant — not a same-named neighbour.
+
+### `invalid-query` — it refuses rather than guess
+
+If the selectors **disagree** (two given that resolve to different components),
+or a selector **cannot be resolved** to anything real, the tool does **not**
+fall back to a silent org-wide answer against the wrong target. It refuses at
+the handler boundary with a named `error.kind: 'invalid-query'` that says which
+selector failed. A wrong-scope answer that looks right is worse than an honest
+refusal, so scope conflicts fail closed. (`invalid-query` is also the refusal a
+tool returns for a genuinely inapplicable argument — e.g. a `componentId` of the
+wrong kind; the message names the reason either way.)
+
+### Byte-identical when unscoped
+
+The selector is **purely additive**. Omit it and the tool answers its full,
+org-wide default exactly as it did before the selector existed — the unscoped
+response is byte-identical. You opt into narrowing; you never inherit a
+different answer by leaving scope off.
 
 ## Router mode
 

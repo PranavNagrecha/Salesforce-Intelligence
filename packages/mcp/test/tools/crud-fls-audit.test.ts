@@ -519,3 +519,125 @@ describe('crudFlsAuditHandler — full multi-window scan (CR-22 B3)', () => {
     }
   });
 });
+
+// =============================================================================
+// GUARD (CRUD-FLS-AUDIT-IGNORES-CLASS-SCOPE): a dev "CRUD/FLS audit for {class}?"
+// passes componentId / classApiName / apiName, but the schema stripped them and
+// every call returned the same org-wide first class. A class scope must now
+// return ONLY that class + appliedScope; the bare call stays org-wide. Pre-fix
+// each scoped call equals the bare org-wide payload, so the "differs" and
+// per-class-count assertions are RED before the fix.
+describe('crudFlsAuditHandler — class scope (guard)', () => {
+  it('bare call is org-wide (both risky components, appliedScope mode: all)', async () => {
+    const r = await crudFlsAuditHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.classes.map((c) => c.componentId).sort()).toEqual([
+      'ApexClass:UnsafeSvc',
+      'ApexTrigger:AccountTrigger',
+    ]);
+    expect(r.value.data.totalClassCount).toBe(2);
+    expect(r.value.data.totalFindingCount).toBe(3);
+    expect(r.value.data.appliedScope).toEqual({ component: null, mode: 'all' });
+  });
+
+  it('componentId scope returns ONLY that class (differs from bare)', async () => {
+    const r = await crudFlsAuditHandler(ctx, {
+      componentId: 'ApexClass:UnsafeSvc',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.classes.map((c) => c.componentId)).toEqual([
+      'ApexClass:UnsafeSvc',
+    ]);
+    expect(r.value.data.totalClassCount).toBe(1);
+    expect(r.value.data.totalFindingCount).toBe(2);
+    expect(r.value.data.appliedScope).toEqual({
+      component: 'ApexClass:UnsafeSvc',
+      mode: 'component',
+    });
+  });
+
+  it('natural componentId ≡ canonical classApiName ≡ apiName (byte-equal data)', async () => {
+    const byComponentId = await crudFlsAuditHandler(ctx, {
+      componentId: 'ApexClass:UnsafeSvc',
+    });
+    const byClassApiName = await crudFlsAuditHandler(ctx, {
+      classApiName: 'UnsafeSvc',
+    });
+    const byApiName = await crudFlsAuditHandler(ctx, { apiName: 'UnsafeSvc' });
+    expect(byComponentId.ok && byClassApiName.ok && byApiName.ok).toBe(true);
+    if (!byComponentId.ok || !byClassApiName.ok || !byApiName.ok) return;
+    // All three natural arg shapes resolve to the SAME canonical scope, so the
+    // entire data payload is byte-identical.
+    expect(JSON.stringify(byClassApiName.value.data)).toBe(
+      JSON.stringify(byComponentId.value.data),
+    );
+    expect(JSON.stringify(byApiName.value.data)).toBe(
+      JSON.stringify(byComponentId.value.data),
+    );
+    expect(byComponentId.value.data.appliedScope.component).toBe(
+      'ApexClass:UnsafeSvc',
+    );
+  });
+
+  it('an ApexTrigger componentId scope works too', async () => {
+    const r = await crudFlsAuditHandler(ctx, {
+      componentId: 'ApexTrigger:AccountTrigger',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.classes.map((c) => c.componentId)).toEqual([
+      'ApexTrigger:AccountTrigger',
+    ]);
+    expect(r.value.data.totalFindingCount).toBe(1);
+    expect(r.value.data.appliedScope).toEqual({
+      component: 'ApexTrigger:AccountTrigger',
+      mode: 'component',
+    });
+  });
+
+  it('a scoped class with no CRUD/FLS finding returns zero (differs from bare org list)', async () => {
+    // GovOnly carries only a dml-in-loop rule (not a CRUD/FLS rule) — a scoped
+    // audit of it is an HONEST empty, not the bare org-wide first class.
+    const r = await crudFlsAuditHandler(ctx, {
+      classApiName: 'GovOnly',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.classes).toEqual([]);
+    expect(r.value.data.totalFindingCount).toBe(0);
+    expect(r.value.data.appliedScope).toEqual({
+      component: 'ApexClass:GovOnly',
+      mode: 'component',
+    });
+  });
+
+  it('an unresolved class id is component-not-found (not a silent org-wide answer)', async () => {
+    const r = await crudFlsAuditHandler(ctx, {
+      componentId: 'ApexClass:GhostCls',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+  });
+
+  it('a non-Apex type prefix is invalid-query', async () => {
+    const r = await crudFlsAuditHandler(ctx, {
+      componentId: 'CustomObject:UnsafeSvc',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('conflicting componentId / classApiName is invalid-query (never a silent pick)', async () => {
+    const r = await crudFlsAuditHandler(ctx, {
+      componentId: 'ApexClass:UnsafeSvc',
+      classApiName: 'GovOnly',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+});

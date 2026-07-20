@@ -25,6 +25,31 @@ export interface FrontendScannerError {
 }
 
 /**
+ * Where a {@link FrontendFieldAccess} was recognised — the SHAPE that
+ * produced it, which is the only signal an extractor has for whether
+ * `object` is a resolvable SObject API name or an unresolved JS/markup
+ * receiver:
+ *
+ *   - `schema-import` — an LWC `@salesforce/schema/Object.Field` import.
+ *     `object` is unambiguously a real SObject API name.
+ *   - `wire-fields` — an LWC `getRecord({ fields: ['Object.Field'] })`
+ *     wire array literal. `object` is a real SObject API name.
+ *   - `js-member` — an LWC in-body `receiver.Field` read/write. `object`
+ *     is whatever JS identifier preceded the dot (a local, loop var,
+ *     event-detail alias, `this`-chained property, …). It is NOT
+ *     resolvable to an SObject without symbol resolution the scanner
+ *     does not perform — treating it as a field path mints phantom
+ *     `CustomField:{local}.{prop}` edges (LWC-JS-RECEIVER-FIELD-PHANTOMS).
+ *   - `vf-merge` — a Visualforce `{!Object.Field}` merge token. `object`
+ *     is the controller-context object (kept as-is by the VF extractor).
+ */
+export type FrontendFieldAccessOrigin =
+  | 'schema-import'
+  | 'wire-fields'
+  | 'js-member'
+  | 'vf-merge';
+
+/**
  * One field access detected by the heuristic frontend scanner.
  *
  * `object` is the literal text on the left side of the dotted path
@@ -40,6 +65,11 @@ export interface FrontendScannerError {
  * imports use the literal `Obj` as `object` — these are unambiguously
  * resolvable but the scanner still preserves the literal text and
  * leaves resolution to the extractor.
+ *
+ * `origin` records the recognised SHAPE so the extractor can decide
+ * whether `object` is a resolvable SObject (`schema-import` /
+ * `wire-fields` / `vf-merge`) or an unresolved JS receiver
+ * (`js-member`) — see {@link FrontendFieldAccessOrigin}.
  */
 export interface FrontendFieldAccess {
   readonly type: 'read' | 'write';
@@ -47,6 +77,7 @@ export interface FrontendFieldAccess {
   readonly field: string;
   readonly offset: number;
   readonly length: number;
+  readonly origin: FrontendFieldAccessOrigin;
 }
 
 /**
@@ -367,11 +398,12 @@ const emitFieldAccess = (
   field: string,
   offset: number,
   length: number,
+  origin: FrontendFieldAccessOrigin,
 ): number => {
   const key = `${type}:${object}.${field}`;
   if (ctx.seen.has(key)) return offset;
   ctx.seen.add(key);
-  ctx.accesses.push({ type, object, field, offset, length });
+  ctx.accesses.push({ type, object, field, offset, length, origin });
   return offset;
 };
 
@@ -489,7 +521,7 @@ const scanLwc = (source: string): ScannerLists => {
     const object = m[1];
     const field = m[2];
     if (object === undefined || field === undefined) continue;
-    emitFieldAccess(fieldCtx, 'read', object, field, m.index, m[0].length);
+    emitFieldAccess(fieldCtx, 'read', object, field, m.index, m[0].length, 'schema-import');
   }
 
   // Label / static-resource imports (P14-USAGE-label-static-graph) — same
@@ -514,6 +546,7 @@ const scanLwc = (source: string): ScannerLists => {
         field,
         arrayBaseOffset + inner.index,
         inner[0].length,
+        'wire-fields',
       );
     }
   }
@@ -530,7 +563,7 @@ const scanLwc = (source: string): ScannerLists => {
     const field = m[2];
     if (object === undefined || field === undefined) continue;
     writeOffsets.add(
-      emitFieldAccess(fieldCtx, 'write', object, field, m.index, m[0].length),
+      emitFieldAccess(fieldCtx, 'write', object, field, m.index, m[0].length, 'js-member'),
     );
   }
 
@@ -540,7 +573,7 @@ const scanLwc = (source: string): ScannerLists => {
     const object = m[1];
     const field = m[2];
     if (object === undefined || field === undefined) continue;
-    emitFieldAccess(fieldCtx, 'read', object, field, m.index, m[0].length);
+    emitFieldAccess(fieldCtx, 'read', object, field, m.index, m[0].length, 'js-member');
   }
 
   return {
@@ -616,7 +649,7 @@ const scanVf = (stripped: string): ScannerLists => {
     const object = m[1];
     const field = m[2];
     if (object === undefined || field === undefined) continue;
-    emitFieldAccess(fieldCtx, 'read', object, field, m.index, m[0].length);
+    emitFieldAccess(fieldCtx, 'read', object, field, m.index, m[0].length, 'vf-merge');
   }
 
   VF_APEX_INCLUDE.lastIndex = 0;

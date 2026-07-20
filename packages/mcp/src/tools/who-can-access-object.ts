@@ -202,6 +202,25 @@ const flag = (p: Readonly<Record<string, unknown>>, k: string): boolean => p[k] 
 const stringProp = (p: Readonly<Record<string, unknown>>, k: string): string =>
   typeof p[k] === 'string' ? (p[k] as string) : '';
 
+/**
+ * The parent CustomObject api name a SharingRule applies to. The v1.1 sharing
+ * extractor sets the rule's `parentId` to `CustomObject:{Object}` and its
+ * `apiName` to `{Object}.{RuleName}`; it does NOT emit a `properties.sObjectType`.
+ * Keying on that non-existent property silently dropped EVERY sharing rule (the
+ * filter `sObjectType !== objectApiName` was always true), so this surface
+ * invented "no sharing rules gain access" under a Private OWD. Derive from
+ * `parentId` first, then the `apiName` head, then the legacy `sObjectType`.
+ */
+const sharingRuleObjectApiName = (rule: Node): string => {
+  const parentId = rule.parentId;
+  if (typeof parentId === 'string' && parentId.startsWith('CustomObject:')) {
+    return parentId.slice('CustomObject:'.length);
+  }
+  const dot = rule.apiName.indexOf('.');
+  if (dot > 0) return rule.apiName.slice(0, dot);
+  return stringProp(rule.properties, 'sObjectType');
+};
+
 /** A sharing rule's access level maps to the operation it grants. */
 const ruleAccessToOp = (accessLevel: string): 'read' | 'edit' =>
   accessLevel === 'Edit' || accessLevel === 'ReadWrite' ? 'edit' : 'read';
@@ -364,7 +383,7 @@ export const whoCanAccessObjectHandler = async (
   }
   if (scanHitCap(rulesResult.value.length, scanLimit)) truncatedTypes.push('SharingRule');
   for (const rule of rulesResult.value) {
-    if (stringProp(rule.properties, 'sObjectType') !== objectApiName) continue;
+    if (sharingRuleObjectApiName(rule) !== objectApiName) continue;
     const ruleType = stringProp(rule.properties, 'ruleType');
     const accessLevel = stringProp(rule.properties, 'accessLevel') || 'Read';
     // CR-CAP-16: map each family to its own `via` so guest / territory rules are

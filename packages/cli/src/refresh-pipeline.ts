@@ -3,6 +3,7 @@ import { basename, dirname, join, sep } from 'node:path';
 
 import type {
   ComponentType,
+  Edge,
   EdgeType,
   ExtractionResult,
   ExtractorError,
@@ -102,6 +103,7 @@ import {
   extractWaveXmd,
   extractWebLink,
   extractWorkflowRule,
+  UNRESOLVED_PROFILE_PREFIX,
 } from '@sf-intelligence/extractors';
 import {
   listEdgesForNodes,
@@ -1109,6 +1111,167 @@ export const foldReportDashboardUsageIntoFields = (
       (e) => !foldedNodeApiNames.has(e.fromId) && !foldedNodeApiNames.has(e.toId),
     ),
   }));
+};
+
+/**
+ * RESTRICTION-RULE-OMITS-PROFILE-USERCRITERIA-EDGE: the Profile-Id key pair for
+ * 15-vs-18-char resolution. A 15-char Salesforce Id is the exact case-sensitive
+ * prefix of its 18-char form (the trailing 3 chars are a case-insensitivity
+ * checksum), so a rule that hardcodes one width still matches a profile index
+ * keyed on the other. Returns the distinct lookup keys for an id — its verbatim
+ * form plus its 15-char truncation.
+ */
+const profileIdKeys = (id: string): readonly string[] =>
+  id.length > 15 ? [id, id.slice(0, 15)] : [id];
+
+/**
+ * RESTRICTION-RULE-OMITS-PROFILE-USERCRITERIA-EDGE: build an Id->apiName index
+ * from every Profile node that carries its Salesforce Id
+ * (`properties.salesforceId`), keyed by BOTH the 15- and 18-char forms (see
+ * {@link profileIdKeys}).
+ *
+ * **Honesty**: real offline Profile metadata carries NO Salesforce Id — the
+ * node's apiName is the file name — so this index is EMPTY on a normal vault
+ * and every gated userCriteria id stays an honest `UnresolvedProfile:` stub.
+ * The index lights up only when a Profile node is enriched with its Id (e.g. a
+ * future Tooling-API pass keyed on the same salesforceId slot) or a caller
+ * supplies the map directly. First-writer-wins on the (never-expected) case of
+ * two profiles claiming one id, for a deterministic result.
+ */
+export const buildProfileIdIndex = (
+  results: readonly ExtractionResult[],
+): ReadonlyMap<string, string> => {
+  const index = new Map<string, string>();
+  for (const r of results) {
+    for (const n of r.nodes) {
+      if (n.type !== 'Profile') continue;
+      const rawId = n.properties['salesforceId'];
+      if (typeof rawId !== 'string' || rawId.length === 0) continue;
+      for (const key of profileIdKeys(rawId)) {
+        if (!index.has(key)) index.set(key, n.apiName);
+      }
+    }
+  }
+  return index;
+};
+
+/**
+ * The `referenceKind` an `UnresolvedProfile:{id}` stub edge carries, mapped to
+ * the `referenceKind` its RESOLVED `Profile:{apiName}` edge should carry. Two
+ * stub sources feed {@link resolveRestrictionRuleProfileEdges}: RestrictionRule
+ * / ScopingRule `<userCriteria>` gates
+ * (`restrictionUserProfileUnresolved` → `restrictionUserProfile`) and
+ * DuplicateRule `<duplicateRuleFilter>` `ProfileId` items
+ * (`duplicateRuleProfileUnresolved` → `duplicateFilterProfile`, matching a
+ * name-based duplicate profile edge). Membership in this map is also what marks
+ * an edge as a resolvable profile-id stub, so a future stub source is opted in
+ * by ADDING its pair here — no other change to the pass.
+ */
+const RESOLVED_PROFILE_REFERENCE_KIND: Readonly<Record<string, string>> = {
+  restrictionUserProfileUnresolved: 'restrictionUserProfile',
+  duplicateRuleProfileUnresolved: 'duplicateFilterProfile',
+};
+
+/**
+ * RESTRICTION-RULE-OMITS-PROFILE-USERCRITERIA-EDGE (+ DuplicateRule sibling
+ * DUPLICATE-RULE-FILTER-PROFILE-UNGRAPHED): resolve each `UnresolvedProfile:{id}`
+ * profile-id stub against an Id->apiName index, rewriting the resolvable ones
+ * into real `Profile:{apiName}` `references` edges — so the rule appears in that
+ * profile's usages and profile-retirement / sharing reviews see the constraint.
+ * Covers BOTH stub sources (see {@link RESOLVED_PROFILE_REFERENCE_KIND}):
+ * RestrictionRule / ScopingRule `<userCriteria>` gates and DuplicateRule
+ * `<duplicateRuleFilter>` `ProfileId` items — the resolved edge takes the
+ * source's mapped `referenceKind` and, for the duplicate case, preserves the
+ * stub's `filterField` / `operation` so a resolved id-based edge reads exactly
+ * like a name-based `duplicateFilterProfile` edge. Unresolvable ids stay
+ * explicit `UnresolvedProfile:` stubs with their disclosure props; a
+ * `Profile:{id}` node is NEVER minted from an opaque id.
+ *
+ * Node props are updated in lockstep with the edges ONLY for the
+ * restriction/scoping disclosure shape (nodes carrying `unresolvedProfileIds`):
+ * resolved ids move out of `unresolvedProfileIds` into a
+ * `userCriteriaResolvedProfiles` {id: apiName} map (and `unresolvedProfileIds`
+ * is dropped once every gated id resolves); `userCriteriaProfileIds` (the full
+ * gated list) is left intact. DuplicateRule nodes carry no such disclosure
+ * array, so only their edge is rewritten — their properties are untouched.
+ *
+ * Pure transform. Identity no-op (`=== results`) when there is nothing to
+ * resolve — no profile-id stub present, or an empty index (the real offline
+ * vault, where Profile metadata carries no Id). The index is built from Profile
+ * nodes when not supplied.
+ */
+export const resolveRestrictionRuleProfileEdges = (
+  results: readonly ExtractionResult[],
+  profileIdIndex?: ReadonlyMap<string, string>,
+): readonly ExtractionResult[] => {
+  const index = profileIdIndex ?? buildProfileIdIndex(results);
+  const isStubEdge = (e: Edge): boolean => {
+    if (e.edgeType !== 'references' || !e.toId.startsWith(UNRESOLVED_PROFILE_PREFIX)) {
+      return false;
+    }
+    const kind = e.properties['referenceKind'];
+    return typeof kind === 'string' && RESOLVED_PROFILE_REFERENCE_KIND[kind] !== undefined;
+  };
+  // Nothing to resolve against, or no stub to rewrite — return the SAME array
+  // ref so a no-op is observably free (mirrors foldReportDashboardUsageIntoFields).
+  if (index.size === 0 || !results.some((r) => r.edges.some(isStubEdge))) return results;
+
+  const resolveApiName = (profileId: string): string | undefined => {
+    for (const key of profileIdKeys(profileId)) {
+      const apiName = index.get(key);
+      if (apiName !== undefined) return apiName;
+    }
+    return undefined;
+  };
+
+  return results.map((r) => {
+    // id->apiName resolutions discovered on THIS result's edges, per rule node,
+    // so node properties can be trimmed in lockstep with the edge rewrite.
+    const resolvedByNode = new Map<string, Map<string, string>>();
+    const edges = r.edges.map((e): Edge => {
+      if (!isStubEdge(e)) return e;
+      const profileId = e.toId.slice(UNRESOLVED_PROFILE_PREFIX.length);
+      const apiName = resolveApiName(profileId);
+      if (apiName === undefined) return e;
+      const perNode = resolvedByNode.get(e.fromId) ?? new Map<string, string>();
+      perNode.set(profileId, apiName);
+      resolvedByNode.set(e.fromId, perNode);
+      const stubKind = e.properties['referenceKind'] as string;
+      const props: Record<string, unknown> = {
+        referenceKind: RESOLVED_PROFILE_REFERENCE_KIND[stubKind] ?? stubKind,
+        profileId,
+        resolvedFromProfileId: true,
+      };
+      // Preserve the DuplicateRule filter context (`filterField` / `operation`).
+      // Restriction/scoping stubs carry neither, so their resolved-edge shape is
+      // byte-identical to before this generalization.
+      const filterField = e.properties['filterField'];
+      if (typeof filterField === 'string') props['filterField'] = filterField;
+      if (e.properties['operation'] !== undefined) props['operation'] = e.properties['operation'];
+      return { ...e, toId: `Profile:${apiName}`, properties: props };
+    });
+    if (resolvedByNode.size === 0) return r;
+    const nodes = r.nodes.map((n): Node => {
+      const resolved = resolvedByNode.get(n.id);
+      if (resolved === undefined) return n;
+      // Node-level disclosure trimming is restriction/scoping-specific — those
+      // nodes carry an `unresolvedProfileIds` array. DuplicateRule nodes do NOT,
+      // so leave their properties untouched (only the edge is rewritten).
+      if (!Array.isArray(n.properties['unresolvedProfileIds'])) return n;
+      const gated = n.properties['unresolvedProfileIds'];
+      const stillUnresolved = Array.isArray(gated)
+        ? (gated as readonly string[]).filter((id) => !resolved.has(id))
+        : [];
+      const resolvedMap: Record<string, string> = {};
+      for (const id of [...resolved.keys()].sort()) resolvedMap[id] = resolved.get(id)!;
+      const props: Record<string, unknown> = { ...n.properties };
+      delete props['unresolvedProfileIds'];
+      props['userCriteriaResolvedProfiles'] = resolvedMap;
+      if (stillUnresolved.length > 0) props['unresolvedProfileIds'] = stillUnresolved;
+      return { ...n, properties: props };
+    });
+    return { ...r, nodes, edges };
+  });
 };
 
 /**

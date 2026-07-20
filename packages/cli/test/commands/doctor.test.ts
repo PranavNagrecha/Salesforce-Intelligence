@@ -326,6 +326,47 @@ describe('runDoctor', () => {
     }
   });
 
+  it('nudges single-vault installs toward register-vault when no registry exists (VAULT-REGISTRY-DISCOVERY)', async () => {
+    const cwd = await makeTempCwd();
+    // Point the registry env at a path that does NOT exist so `findRegistryFile`
+    // returns it, `existsSync` is false, and the no-registry `else` branch fires
+    // — hermetic against CI's global SF_INTELLIGENCE_REGISTRY_PATH (which points
+    // at an existing eval registry that would otherwise take the `if` branch).
+    const priorRegistryEnv = process.env['SF_INTELLIGENCE_REGISTRY_PATH'];
+    process.env['SF_INTELLIGENCE_REGISTRY_PATH'] = join(cwd, 'does-not-exist.json');
+    try {
+      const metaDir = join(cwd, 'org-kb', 'meta');
+      await mkdir(metaDir, { recursive: true });
+      await writeFile(join(metaDir, 'config.json'), JSON.stringify({ targetOrg: 'MyOrg' }), 'utf8');
+      await writeFile(
+        join(metaDir, 'manifest.json'),
+        JSON.stringify({
+          version: '0.1.0',
+          refreshedAt: new Date().toISOString(),
+          sourceOrg: 'me@org',
+          sourceTreeHash: 'sha256:x',
+          components: { CustomObject: 1 },
+          edges: {},
+        }),
+        'utf8',
+      );
+      const report = await runDoctor({ cwd, exec: connectedStub });
+      const reg = find(report, 'Multi-vault registry');
+      expect(reg?.status).toBe('info');
+      expect(reg?.detail).toContain('single vault');
+      expect(reg?.fix).toContain('sfi register-vault');
+      // INFO only — a single vault is a healthy setup.
+      expect(report.healthy).toBe(true);
+    } finally {
+      if (priorRegistryEnv === undefined) {
+        delete process.env['SF_INTELLIGENCE_REGISTRY_PATH'];
+      } else {
+        process.env['SF_INTELLIGENCE_REGISTRY_PATH'] = priorRegistryEnv;
+      }
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('does NOT reach `sf org display` for a poisoned targetOrg in config (CR-01 / C1 defense in depth)', async () => {
     const cwd = await makeTempCwd();
     try {

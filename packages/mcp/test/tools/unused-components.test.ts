@@ -623,10 +623,10 @@ describe('unusedComponentsHandler — coverage caveat (P13-STAGED-absence-batter
     ...FIXTURE_MANIFEST,
     coverage: [
       'ApexClass', 'ApexTrigger', 'AuraDefinitionBundle', 'CompactLayout',
-      'Dashboard', 'EmailTemplate', 'FieldSet', 'FlexiPage', 'Flow', 'Layout',
-      'LightningComponentBundle', 'ListView', 'QuickAction', 'Report',
-      'SharingRule', 'ValidationRule', 'VisualforceComponent',
-      'VisualforcePage', 'WorkflowRule',
+      'CustomSite', 'CustomTab', 'Dashboard', 'EmailTemplate', 'FieldSet',
+      'FlexiPage', 'Flow', 'Layout', 'LightningComponentBundle', 'ListView',
+      'QuickAction', 'RecordType', 'Report', 'SharingRule', 'ValidationRule',
+      'VisualforceComponent', 'VisualforcePage', 'WebLink', 'WorkflowRule',
     ].map((type) => ({
       type, requested: true, retrieved: 1, errored: false, neverModeled: false,
     })),
@@ -730,5 +730,145 @@ describe('unusedComponentsHandler — batched incoming-edge lookups (no N+1)', (
     expect(result.value.data.byType['CustomField']).toBe(FIELD_COUNT);
     // ONE batched listEdgesForNodes for the whole type — not one per field.
     expect(edgeQueries).toBeLessThanOrEqual(2);
+  });
+});
+
+// =============================================================================
+// GUARD (UNUSED-COMPONENTS-SILENTLY-IGNORES-TYPE-AND-OBJECT): an admin "unused
+// WebLinks on Widget__c" passes a SINGULAR `type` (WebLink) and an `object`
+// filter, but both were Zod-stripped and the tool returned the org-wide Apex/…
+// default leaderboard with no appliedScope. A type scope must now return ONLY
+// that family, an object scope must narrow to that object's children, and an
+// unknown type must be a reasoned invalid-query — never a wrong-family answer.
+// =============================================================================
+describe('unusedComponentsHandler — type + object scope (guard)', () => {
+  const WIDGET = 'CustomObject:Widget__c';
+  const GADGET = 'CustomObject:Gadget__c';
+  const UNUSED_WEBLINK = 'WebLink:Widget__c.OldPrintButton';
+  const USED_WEBLINK = 'WebLink:Widget__c.LiveDetailButton';
+  const GADGET_WEBLINK = 'WebLink:Gadget__c.StrayLink';
+  const LONELY_APEX = 'ApexClass:LonelyHelper';
+  const LAYOUT = 'Layout:WidgetPage';
+
+  let dir: string;
+  let s: GraphStore;
+  let scopeCtx: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-uc-scope-'));
+    const opened = await openGraph(join(dir, 'scope.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    s = opened.value;
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: WIDGET, type: 'CustomObject', apiName: 'Widget__c' }),
+        makeNode({ id: GADGET, type: 'CustomObject', apiName: 'Gadget__c' }),
+        makeNode({ id: UNUSED_WEBLINK, type: 'WebLink', apiName: 'OldPrintButton', parentId: WIDGET }),
+        makeNode({ id: USED_WEBLINK, type: 'WebLink', apiName: 'LiveDetailButton', parentId: WIDGET }),
+        makeNode({ id: GADGET_WEBLINK, type: 'WebLink', apiName: 'StrayLink', parentId: GADGET }),
+        makeNode({ id: LONELY_APEX, apiName: 'LonelyHelper' }),
+        makeNode({ id: LAYOUT, type: 'Layout', apiName: 'WidgetPage' }),
+      ],
+      edges: [
+        makeEdge({ fromId: WIDGET, toId: UNUSED_WEBLINK, edgeType: 'parentOf' }),
+        makeEdge({ fromId: WIDGET, toId: USED_WEBLINK, edgeType: 'parentOf' }),
+        makeEdge({ fromId: GADGET, toId: GADGET_WEBLINK, edgeType: 'parentOf' }),
+        // A layout placing the button — a real incoming USAGE edge → NOT unused.
+        makeEdge({ fromId: LAYOUT, toId: USED_WEBLINK, edgeType: 'references' }),
+      ],
+    };
+    const imp = await importExtractionResults(s, [seed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    scopeCtx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s };
+  });
+
+  afterAll(async () => {
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('singular type: "WebLink" returns ONLY WebLinks (not the Apex/default leaderboard)', async () => {
+    const r = await unusedComponentsHandler(scopeCtx, { type: 'WebLink' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ids = r.value.data.components.map((c) => c.id);
+    expect(ids).toContain(UNUSED_WEBLINK);
+    expect(ids).toContain(GADGET_WEBLINK);
+    // The placed (referenced) button is in use — excluded.
+    expect(ids).not.toContain(USED_WEBLINK);
+    // Wrong-family answer is gone: the org-wide Apex list must NOT appear.
+    expect(ids).not.toContain(LONELY_APEX);
+    expect(r.value.data.byType['WebLink']).toBe(2);
+    expect(r.value.data.appliedScope).toEqual({
+      types: ['WebLink'],
+      object: null,
+      mode: 'scoped',
+    });
+  });
+
+  it('natural type ≡ componentType ≡ typeFilter ≡ canonical types:["WebLink"] (byte-equal data)', async () => {
+    const byType = await unusedComponentsHandler(scopeCtx, { type: 'WebLink' });
+    const byComponentType = await unusedComponentsHandler(scopeCtx, { componentType: 'WebLink' });
+    const byTypeFilter = await unusedComponentsHandler(scopeCtx, { typeFilter: 'WebLink' });
+    const byArray = await unusedComponentsHandler(scopeCtx, { types: ['WebLink'] });
+    expect(byType.ok && byComponentType.ok && byTypeFilter.ok && byArray.ok).toBe(true);
+    if (!byType.ok || !byComponentType.ok || !byTypeFilter.ok || !byArray.ok) return;
+    const canonical = JSON.stringify(byArray.value.data);
+    expect(JSON.stringify(byType.value.data)).toBe(canonical);
+    expect(JSON.stringify(byComponentType.value.data)).toBe(canonical);
+    expect(JSON.stringify(byTypeFilter.value.data)).toBe(canonical);
+  });
+
+  it('object scope narrows the WebLink scan to that object (differs from unscoped)', async () => {
+    const r = await unusedComponentsHandler(scopeCtx, {
+      type: 'WebLink',
+      object: 'Widget__c',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ids = r.value.data.components.map((c) => c.id);
+    expect(ids).toEqual([UNUSED_WEBLINK]);
+    // Gadget's WebLink is out of scope.
+    expect(ids).not.toContain(GADGET_WEBLINK);
+    expect(r.value.data.byType['WebLink']).toBe(1);
+    expect(r.value.data.appliedScope).toEqual({
+      types: ['WebLink'],
+      object: 'Widget__c',
+      mode: 'scoped',
+    });
+  });
+
+  it('object scope alone narrows to that object (honest empty, NOT the Apex leaderboard)', async () => {
+    // Widget__c has no default-type children (its WebLinks are not in the default
+    // set), so the object-scoped default scan is an HONEST empty — never the
+    // org-wide Apex list the pre-fix code returned when `object` was stripped.
+    const r = await unusedComponentsHandler(scopeCtx, { objectApiName: 'Widget__c' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ids = r.value.data.components.map((c) => c.id);
+    expect(ids).not.toContain(LONELY_APEX);
+    expect(ids).toEqual([]);
+    expect(r.value.data.appliedScope.object).toBe('Widget__c');
+    expect(r.value.data.appliedScope.mode).toBe('scoped');
+  });
+
+  it('an unknown singular type is invalid-query (not a silent default-family answer)', async () => {
+    const r = await unusedComponentsHandler(scopeCtx, { type: 'Frobnicate' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('a bare call stays org-wide over the default set with appliedScope mode: default', async () => {
+    const r = await unusedComponentsHandler(scopeCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ids = r.value.data.components.map((c) => c.id);
+    // Apex IS in the default set → the lonely class appears on a bare call.
+    expect(ids).toContain(LONELY_APEX);
+    // WebLink is NOT in the default set → bare call omits it (unchanged behavior).
+    expect(ids).not.toContain(UNUSED_WEBLINK);
+    expect(r.value.data.appliedScope.mode).toBe('default');
+    expect(r.value.data.appliedScope.object).toBeNull();
   });
 });

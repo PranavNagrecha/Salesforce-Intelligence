@@ -364,6 +364,212 @@ describe('extractDuplicateRule', () => {
     });
   });
 
+  describe('DUPLICATE-RULE-FILTER-PROFILE-UNGRAPHED', () => {
+    it('edges a Profile notEqual filter to Profile:{name} (declared) with the exclusion operation', async () => {
+      // Red pre-fix: the User/Profile filter stayed an opaque `filterExpression`
+      // JSON string; the excluded Profile never became a graph edge, so
+      // "does Integration bypass portal duplicate matching?" had no answer and
+      // Profile usages looked clean. Green post-fix: a `references` edge.
+      const xml = `<?xml version="1.0"?>
+<DuplicateRule xmlns="http://soap.sforce.com/2006/04/metadata" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <masterLabel>Portal Duplicates</masterLabel>
+  <isActive>true</isActive>
+  <operationsOnInsert>Allow</operationsOnInsert>
+  <operationsOnInsert>Report</operationsOnInsert>
+  <duplicateRuleFilter>
+    <booleanFilter xsi:nil="true"/>
+    <duplicateRuleFilterItems>
+      <field>Profile</field>
+      <operation>notEqual</operation>
+      <value>Integration</value>
+      <table>User</table>
+    </duplicateRuleFilterItems>
+  </duplicateRuleFilter>
+  <duplicateRuleMatchRules>
+    <matchingRule>Contact_Email</matchingRule>
+  </duplicateRuleMatchRules>
+</DuplicateRule>`;
+      const { dir, path } = await writeTempDuplicateRuleXml(
+        'Contact.Portal_Duplicates',
+        xml,
+      );
+      try {
+        const result = await extractDuplicateRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const ruleId = 'DuplicateRule:Contact.Portal_Duplicates';
+        const profileEdge = result.value.edges.find(
+          (e) =>
+            e.edgeType === 'references' &&
+            e.fromId === ruleId &&
+            e.toId === 'Profile:Integration',
+        );
+        expect(profileEdge).toBeDefined();
+        expect(profileEdge!.confidence).toBe('declared');
+        expect(profileEdge!.properties).toMatchObject({
+          referenceKind: 'duplicateFilterProfile',
+          filterField: 'Profile',
+          operation: 'notEqual',
+        });
+        // Mirrored onto the node property (scalar array, render-safe).
+        expect(result.value.nodes[0]!.properties['filterProfiles']).toEqual([
+          'Integration',
+        ]);
+        // The matcher reference edge still resolves (unaffected by ordering).
+        expect(
+          result.value.edges.some(
+            (e) => e.toId === 'MatchingRule:Contact.Contact_Email',
+          ),
+        ).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('splits a comma-separated multi-value Profile filter into one edge per profile', async () => {
+      const xml = `<?xml version="1.0"?>
+<DuplicateRule xmlns="http://soap.sforce.com/2006/04/metadata">
+  <masterLabel>Multi Profile</masterLabel>
+  <isActive>true</isActive>
+  <operationsOnInsert>Alert</operationsOnInsert>
+  <duplicateRuleFilter>
+    <duplicateRuleFilterItems>
+      <field>Profile</field>
+      <operation>equals</operation>
+      <value>Integration, System Administrator</value>
+      <table>User</table>
+    </duplicateRuleFilterItems>
+  </duplicateRuleFilter>
+  <duplicateRuleMatchRules>
+    <matchingRule>Contact_Email</matchingRule>
+  </duplicateRuleMatchRules>
+</DuplicateRule>`;
+      const { dir, path } = await writeTempDuplicateRuleXml(
+        'Contact.Multi_Profile',
+        xml,
+      );
+      try {
+        const result = await extractDuplicateRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const profileTargets = result.value.edges
+          .filter(
+            (e) =>
+              e.edgeType === 'references' &&
+              e.properties['referenceKind'] === 'duplicateFilterProfile',
+          )
+          .map((e) => e.toId);
+        expect(profileTargets).toEqual([
+          'Profile:Integration',
+          'Profile:System Administrator',
+        ]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits an UnresolvedProfile:{id} stub for a ProfileId filter — never a Profile:{id} phantom', async () => {
+      // RESTRICTION-RULE-OMITS-PROFILE-USERCRITERIA-EDGE sibling: a `ProfileId`
+      // filter carries an opaque id a single-file extractor cannot resolve to
+      // the name-keyed Profile node, so it must NOT mint a `Profile:{id}` node
+      // that masquerades as a real Profile. It emits an honest UnresolvedProfile
+      // stub instead. Synthetic id, verified absent from org-kb.
+      const SYN_PROFILE_ID = '00eSYNTHETICDUP001';
+      const xml = `<?xml version="1.0"?>
+<DuplicateRule xmlns="http://soap.sforce.com/2006/04/metadata">
+  <masterLabel>Portal Id Filter</masterLabel>
+  <isActive>true</isActive>
+  <operationsOnInsert>Alert</operationsOnInsert>
+  <duplicateRuleFilter>
+    <duplicateRuleFilterItems>
+      <field>ProfileId</field>
+      <operation>notEqual</operation>
+      <value>${SYN_PROFILE_ID}</value>
+      <table>User</table>
+    </duplicateRuleFilterItems>
+  </duplicateRuleFilter>
+  <duplicateRuleMatchRules>
+    <matchingRule>Contact_Email</matchingRule>
+  </duplicateRuleMatchRules>
+</DuplicateRule>`;
+      const { dir, path } = await writeTempDuplicateRuleXml(
+        'User.Portal_Id_Filter',
+        xml,
+      );
+      try {
+        const result = await extractDuplicateRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const ruleId = 'DuplicateRule:User.Portal_Id_Filter';
+        // NO `Profile:{id}` phantom in the real Profile namespace.
+        expect(
+          result.value.edges.some((e) => e.toId === `Profile:${SYN_PROFILE_ID}`),
+        ).toBe(false);
+        // An honest `UnresolvedProfile:{id}` stub in the distinct namespace.
+        const stub = result.value.edges.find(
+          (e) =>
+            e.edgeType === 'references' &&
+            e.fromId === ruleId &&
+            e.toId === `UnresolvedProfile:${SYN_PROFILE_ID}`,
+        );
+        expect(stub).toBeDefined();
+        expect(stub!.confidence).toBe('heuristic');
+        expect(stub!.properties).toMatchObject({
+          referenceKind: 'duplicateRuleProfileUnresolved',
+          filterField: 'ProfileId',
+          operation: 'notEqual',
+          unresolvedProfileId: SYN_PROFILE_ID,
+          idBasedTarget: true,
+        });
+        // The matcher reference edge is unaffected.
+        expect(
+          result.value.edges.some(
+            (e) => e.toId === 'MatchingRule:User.Contact_Email',
+          ),
+        ).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('does NOT mint a Profile edge for a non-User-table field named Profile', async () => {
+      // A RecordType filter on Account (the sibling filter shape) must not be
+      // mistaken for a Profile reference.
+      const xml = `<?xml version="1.0"?>
+<DuplicateRule xmlns="http://soap.sforce.com/2006/04/metadata">
+  <masterLabel>RT Filter</masterLabel>
+  <isActive>true</isActive>
+  <operationsOnInsert>Alert</operationsOnInsert>
+  <duplicateRuleFilter>
+    <duplicateRuleFilterItems>
+      <field>RecordType</field>
+      <operation>equals</operation>
+      <value>Partner Account</value>
+      <table>Account</table>
+    </duplicateRuleFilterItems>
+  </duplicateRuleFilter>
+  <duplicateRuleMatchRules>
+    <matchingRule>Account_Match</matchingRule>
+  </duplicateRuleMatchRules>
+</DuplicateRule>`;
+      const { dir, path } = await writeTempDuplicateRuleXml(
+        'Account.RT_Filter',
+        xml,
+      );
+      try {
+        const result = await extractDuplicateRule(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(
+          result.value.edges.some((e) => e.toId.startsWith('Profile:')),
+        ).toBe(false);
+        expect(result.value.nodes[0]!.properties['filterProfiles']).toBeUndefined();
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('error cases', () => {
     it('returns file-not-found when the path does not exist', async () => {
       const path = '/nonexistent/Lead.Missing.duplicateRule-meta.xml';

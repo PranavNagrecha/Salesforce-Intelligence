@@ -683,7 +683,7 @@ const RULES: readonly Rule[] = [
   {
     intent: 'automation-on-object',
     plane: 'vault',
-    tools: ['sfi.resolve', 'sfi.automation_build_advisor', 'sfi.get_edges'],
+    tools: ['sfi.resolve', 'sfi.automation_build_advisor', 'sfi.get_edges', 'sfi.interpret'],
     liveRequired: false,
     needsResolve: true,
     reason: 'Explicit automation_build_advisor invocation.',
@@ -705,6 +705,102 @@ const RULES: readonly Rule[] = [
       return objectApiName !== undefined ? { objectApiName } : undefined;
     },
     patterns: [/\bapex_build_advisor\b/],
+  },
+  {
+    // OWNER DIRECTIVE (offline deterministic fallback for the new flow tools):
+    // sfi.flow_trace gets its own 'flow-trace' intent, placed EARLY — and BEFORE
+    // its 'flow-structure' sibling — so a RECORD-STATE simulation ask ("what
+    // happens to this record in <Flow> if Status is Active", "trace <Flow> with
+    // these field values", "which branch runs when …", "simulate <Flow> for a
+    // record where …") wins first-match. Precision-tuned to trace/simulate +
+    // record-value vocabulary so it does NOT steal flow_graph's STRUCTURE asks
+    // (structure / connector-graph / branches — none carry record-value tokens),
+    // explain_flow's "what does <Flow> DO / explain / walk me through" narration,
+    // nor what_happens_on_save's "what happens ON SAVE for a <Object>" save-order
+    // (the record-scoped "to (this|a) record" shape never matches "on save").
+    intent: 'flow-trace',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.flow_trace'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'Honest projection of a Flow over a caller-supplied record state — which path executes and what it writes, evaluating the tractable subset (decisions / assignments / formulas / loops over supplied collections) and marking Apex/subflow/unknown-data branches unevaluated. flow_trace simulates over your values; flow_graph exposes the raw structure; explain_flow gives the plain-business summary.',
+    patterns: [
+      // "what happens to (this|a|the) record …" — the record-state debugger. The
+      // "to <det> record" shape never matches what_happens_on_save's "on save".
+      /\bwhat\s+happens\s+to\s+(?:this|that|a|the|my)\s+record\b/,
+      // "trace … with (these) (field) values" / "trace … record state|values".
+      /\btrace\b[^.?!]{0,80}\b(?:with\s+(?:these\s+)?(?:field\s+)?values|record\s+state|record\s+values|these\s+(?:field\s+)?values|field\s+values)\b/,
+      // "simulate … (record|values|for a record|where)".
+      /\bsimulate\b[^.?!]{0,90}\b(?:record\b|values\b|field\s+values\b|for\s+a\s+record\b|a\s+record\s+where\b|record\s+where\b)/,
+      // "which (branch|path|rule|decision branch) runs|fires|executes|is taken|does … (when|if)".
+      /\bwhich\s+(?:branch|path|rule|decision\s+branch)\b[^.?!]{0,80}\b(?:runs?|fires?|executes?|is\s+taken|does)\b[^.?!]{0,60}\b(?:when|if)\b/,
+      // "what does <flow> write … (when|if|for a record)".
+      /\bwhat\s+(?:does|will|would)\b[^.?!]{0,70}\bwrite\b[^.?!]{0,70}\b(?:when|if|for\s+(?:a|this|the)\s+record)\b/,
+      // A concrete record-STATE assertion — a <Field>__c with a specific value
+      // ("is 'High'", "= 25", "set to 'Escalated'") next to a trace/simulate/run
+      // verb — is the record-state debugger regardless of the flow-name shape.
+      // Distinct from schema (a field with no value) and what_if (no trace verb).
+      /\b(?:trace|simulate|run|walk\s+through)\b[^.?!]{0,90}\b\w+__c\b[^.?!]{0,30}\b(?:is\b|=|equals?\b|set\s+to\b)/,
+      // "feed a record (with …) into <flow>" — feeding a record IN is a trace.
+      /\bfeed\b[^.?!]{0,40}\ba\s+record\b/,
+      // "which (branch|path) does it take | is taken" — the executed path over a record.
+      /\bwhich\s+(?:branch|path)\b[^.?!]{0,40}\b(?:does\s+.{0,15}?take|is\s+taken)\b/,
+      // NAMED-flow record-state asks (>=2-underscore api-name anchor, either order).
+      new RegExp(
+        `\\b(?:trace|simulate)\\b[^.?!]{0,60}\\b${NAMED_COMPONENT_ID}\\b[^.?!]{0,60}\\b(?:record|values|field\\s+values|where|if|when)\\b`,
+      ),
+      new RegExp(
+        `\\b(?:record\\s+state|these\\s+(?:field\\s+)?values|field\\s+values)\\b[^.?!]{0,60}\\b(?:trace|simulate|run|walk)\\b[^.?!]{0,50}\\b${NAMED_COMPONENT_ID}\\b`,
+      ),
+    ],
+  },
+  {
+    // OWNER DIRECTIVE (the offline deterministic fallback must route the new flow
+    // tools, not leave them funnel-only): sfi.flow_graph gets its own
+    // 'flow-structure' intent, placed EARLY (before trigger-order / scheduled-jobs
+    // / schema / onboarding-doc) so a STRUCTURAL flow ask wins first-match over
+    // those siblings — a flow named "Onboarding" must not be stolen by
+    // generate_onboarding_doc, "scheduled paths" not by scheduled_job_catalog,
+    // "what runs next" not by what_happens_on_save. Precision-tuned to
+    // structure / connector-graph / branches / element-graph vocabulary so it does
+    // NOT steal explain_flow's "what does <Flow> DO / explain / walk me through"
+    // narration (which carries none of those tokens), nor flow_fault_audit's
+    // "missing fault connector". A narration ask falls through to explain_flow.
+    intent: 'flow-structure',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.flow_graph'],
+    liveRequired: false,
+    needsResolve: true,
+    reason:
+      'The faithful, lossless structural graph of a Flow — every element by its real name, the full element-to-element connector graph (what runs next), decision rule branches, loops, formulas, and variables. flow_graph exposes the RAW graph; explain_flow gives the plain-business summary.',
+    patterns: [
+      // "structure / element graph / connector graph OF a flow" (either order).
+      /\b(?:structure|element\s+graph|connector\s+graph)\b[^.?!]{0,50}\bflows?\b/,
+      /\bflows?\b[^.?!]{0,50}\b(?:structure|element\s+graph|connector\s+graph)\b/,
+      // "decision / rule branches" (or bare "branches") of a flow.
+      /\b(?:decision\s+branches|rule\s+branches|branches)\b[^.?!]{0,50}\bflows?\b/,
+      /\bflows?\b[^.?!]{0,50}\b(?:decision\s+branches|rule\s+branches)\b/,
+      // "map out / trace / show / walk me through THE connector graph|connectors"
+      // — but NOT "missing/no/without fault connector" (that is flow_fault_audit).
+      /\b(?:map\s+out|trace|show(?:\s+me)?|walk\s+me\s+through)\b[^.?!]{0,40}\b(?:the\s+)?(?:connector\s+graph|connectors)\b(?![^.?!]{0,30}\b(?:fault|missing|without|no)\b)/,
+      // "every / all the / the full elements|connectors ... flow".
+      /\b(?:every|all\s+the|the\s+full)\s+(?:elements?|connectors?)\b[^.?!]{0,40}\bflows?\b/,
+      // "what are the branches / connectors / elements in <a flow>".
+      /\bwhat\s+(?:are|is)\b[^.?!]{0,30}\b(?:branches|connectors?|elements?)\b[^.?!]{0,30}\bflows?\b/,
+      // "what runs next / after <an element> in <a flow>" — an intra-flow walk.
+      /\bwhat\s+runs\s+(?:next|after)\b[^.?!]{0,80}\b(?:flow|assignment|decision|screen|element|step|loop)\b/,
+      // "scheduled paths ... <a flow>" — a flow's scheduled-path branches (NOT
+      // scheduled_job_catalog, which lists cron jobs org-wide).
+      /\bscheduled\s+paths?\b[^.?!]{0,60}\bflows?\b/,
+      // NAMED-flow structural asks (>=2-underscore api-name anchor, either order).
+      new RegExp(
+        `\\b(?:structure|connector\\s+graph|element\\s+graph|decision\\s+branches|rule\\s+branches)\\b[^.?!]{0,60}\\b${NAMED_COMPONENT_ID}\\b`,
+      ),
+      new RegExp(
+        `\\b${NAMED_COMPONENT_ID}\\b[^.?!]{0,60}\\b(?:structure|connector\\s+graph|element\\s+graph|decision\\s+branches|rule\\s+branches)\\b`,
+      ),
+    ],
   },
   {
     intent: 'trigger-order',
@@ -743,7 +839,7 @@ const RULES: readonly Rule[] = [
   {
     intent: 'impact-analysis',
     plane: 'vault',
-    tools: ['sfi.resolve', 'sfi.get_impact', 'sfi.field_change_advisor'],
+    tools: ['sfi.resolve', 'sfi.get_impact', 'sfi.field_change_advisor', 'sfi.interpret'],
     liveRequired: false,
     needsResolve: true,
     reason: 'Explicit get_impact invocation.',
@@ -756,7 +852,7 @@ const RULES: readonly Rule[] = [
   {
     intent: 'field-change-advisor',
     plane: 'vault',
-    tools: ['sfi.resolve', 'sfi.field_change_advisor', 'sfi.get_impact'],
+    tools: ['sfi.resolve', 'sfi.field_change_advisor', 'sfi.get_impact', 'sfi.interpret'],
     liveRequired: false,
     needsResolve: true,
     reason: 'Explicit field_change_advisor invocation.',
@@ -774,7 +870,7 @@ const RULES: readonly Rule[] = [
   {
     intent: 'field-provenance',
     plane: 'vault',
-    tools: ['sfi.resolve', 'sfi.field_provenance'],
+    tools: ['sfi.resolve', 'sfi.field_provenance', 'sfi.interpret'],
     liveRequired: false,
     needsResolve: true,
     reason: 'Explicit field_provenance invocation — who/what sets a field value.',
@@ -826,6 +922,19 @@ const RULES: readonly Rule[] = [
     patterns: [/\bcall_graph\b/, /\bmethod_reachability\b/],
   },
   {
+    // M23 — is <Method> REACHABLE from an entry point (flow / trigger / active
+    // automation). Both call-graph rules carry [resolve, call_graph,
+    // method_reachability] with call_graph first, so method_reachability can
+    // never lead there. This narrow reachable+entry-point rule leads with it.
+    intent: 'method-reachability',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.method_reachability'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Whether a method is reachable from an entry point (flow / trigger / active automation) — method_reachability leads, not call_graph.',
+    patterns: [/\breachab\w*\b[^?!]{0,40}\b(flows?|triggers?|automations?|active)\b/],
+  },
+  {
     intent: 'tests-for-change',
     plane: 'vault',
     tools: ['sfi.tests_for_change'],
@@ -837,7 +946,7 @@ const RULES: readonly Rule[] = [
   {
     intent: 'downstream-effects',
     plane: 'vault',
-    tools: ['sfi.resolve', 'sfi.downstream_effects'],
+    tools: ['sfi.resolve', 'sfi.downstream_effects', 'sfi.interpret'],
     liveRequired: false,
     needsResolve: true,
     reason: 'Explicit downstream_effects invocation.',
@@ -879,7 +988,7 @@ const RULES: readonly Rule[] = [
   {
     intent: 'safe-to-delete',
     plane: 'vault',
-    tools: ['sfi.resolve', 'sfi.safe_to_delete_field'],
+    tools: ['sfi.resolve', 'sfi.safe_to_delete_field', 'sfi.interpret'],
     liveRequired: false,
     needsResolve: true,
     reason: 'Explicit safe_to_delete_field invocation.',
@@ -888,7 +997,7 @@ const RULES: readonly Rule[] = [
   {
     intent: 'what-if-field',
     plane: 'vault',
-    tools: ['sfi.resolve', 'sfi.what_if_make_field_required', 'sfi.what_if_change_field_type', 'sfi.what_if_remove_picklist_value'],
+    tools: ['sfi.resolve', 'sfi.what_if_make_field_required', 'sfi.what_if_change_field_type', 'sfi.what_if_remove_picklist_value', 'sfi.interpret'],
     liveRequired: false,
     needsResolve: true,
     reason: 'Explicit what-if field schema simulators.',
@@ -1355,6 +1464,40 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // ROUTE-INACTIVE-AUTOMATION-WORD-MISBINDS-USERS — a save-failure incident
+    // that asks whether an INACTIVE *automation* (a Draft/Obsolete flow, a
+    // deactivated trigger/workflow/process, an inactive validation/duplicate
+    // rule) blocked the save is a metadata/save-order question — NOT a
+    // login-activity roster lookup. The bare word "user" (the person hitting the
+    // error) sitting next to "inactive" (describing the automation) used to bind
+    // the `inactive-users` rule below and divert the incident to
+    // live_inactive_users (inactive USER ACCOUNTS). This high-precision rule
+    // sits FIRST — it requires ALL THREE signals together: a save-failure /
+    // blocked-save frame, an automation NOUN, and an inactive/draft/off token —
+    // so it never steals a genuine "which users are inactive / haven't logged
+    // in" question (no automation noun, no save frame) nor a plain "list
+    // inactive flows" inventory ask (no save frame). Save-behavior (VR
+    // whitelist) and inactive-validation-rules rules precede it and still win
+    // their shapes; this catches the flow/trigger/automation residue that would
+    // otherwise leak to inactive-users. Routes to the save-order + reasoning
+    // path the finding's oracle prefers.
+    intent: 'inactive-automation-save',
+    plane: 'vault',
+    tools: ['sfi.what_happens_on_save', 'sfi.interpret', 'sfi.list_components'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      "Whether an INACTIVE automation blocked a save is offline metadata: what_happens_on_save reconstructs the save-order (inactive Flows are excluded as abort suspects), interpret reasons over the status-code / inactiveConfigured evidence, and list_components enumerates the Draft/Obsolete/inactive automations. Not a live inactive-USER-account roster lookup.",
+    suggestArgs: (q) => ({ event: deriveSaveEvent(q) }),
+    patterns: [
+      // inactive/off token → automation noun (either near each other), with a
+      // save-failure / blocked-save frame present anywhere in the question.
+      /(?=.*\b(?:save|saving|saved|won'?t\s+save|can'?t\s+save|cannot\s+save|record\s+won'?t|blocks?|blocked|blocking|fail|failed|abort|aborted)\b).*\b(?:inactive|draft|obsolete|disabled|deactivated|not\s+active|turned\s+off|switched\s+off)\b[^.?!]{0,50}\b(?:flows?|triggers?|workflow(?:\s+rules?)?|process\s+builder|approval\s+process(?:es)?|automations?|duplicate\s+rules?|validation\s+rules?)\b/,
+      // automation noun → inactive/off token, same save-failure frame guard.
+      /(?=.*\b(?:save|saving|saved|won'?t\s+save|can'?t\s+save|cannot\s+save|record\s+won'?t|blocks?|blocked|blocking|fail|failed|abort|aborted)\b).*\b(?:flows?|triggers?|workflow(?:\s+rules?)?|process\s+builder|approval\s+process(?:es)?|automations?|duplicate\s+rules?|validation\s+rules?)\b[^.?!]{0,50}\b(?:inactive|draft|obsolete|disabled|deactivated|not\s+active|turned\s+off|switched\s+off)\b/,
+    ],
+  },
+  {
     intent: 'inactive-users',
     plane: 'live',
     tools: ['sfi.live_inactive_users'],
@@ -1420,7 +1563,12 @@ const RULES: readonly Rule[] = [
       // "governor limits" → live runtime headroom, BUT not when the question is
       // about static Apex risk ("governor limit risks in our Apex", "SOQL in
       // loops") — that's the vault governor-risks scan (NI-7 misroute fix).
-      /\b(org|governor)\s+limits?\b(?!.*\b(risks?|apex|loop|soql|dml|static|trigger|class|queries?|large\s+data\s+volumes?)\b)/,
+      // Guard scans the WHOLE question (not just forward): any static Apex / code
+      // token anywhere means the vault governor-risks scan owns it, never live
+      // org-limits (fixes ROUTE-GOVERNOR-APEX-MISBINDS-LIVE-ORG-LIMITS, where the
+      // code tokens preceded "governor limits" and slipped past the forward-only
+      // lookahead).
+      /^(?!.*\b(?:risks?|apex|loops?|soql|dml|static|trigger|class(?:es)?|quer(?:y|ies)|bulkif\w*|injection|large\s+data\s+volumes?)\b).*\b(?:org|governor)\s+limits?\b/,
       /\b(api|daily)\s+(usage|calls?|limit)\b/,
       /\b(data|file)\s+storage\b/,
       /\bhow\s+much\s+(storage|api|data)\b/,
@@ -1804,6 +1952,21 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // M25 — a QUICK health snapshot = org_pulse. The org-health rule below owns
+    // "health snapshot" and leads with live_org_health; the ONLY distinguisher
+    // between the two goldset siblings is the word "quick".
+    intent: 'org-pulse',
+    plane: 'live',
+    tools: ['sfi.org_pulse'],
+    liveRequired: true,
+    needsResolve: false,
+    reason: 'A quick org pulse / health snapshot (org_pulse), distinct from the fuller live_org_health.',
+    patterns: [
+      /\bquick\b[^?!]{0,30}\b(health|pulse)\b/,
+      /\borg[_\s]?pulse\b/,
+    ],
+  },
+  {
     intent: 'org-health',
     plane: 'live',
     tools: ['sfi.live_org_health'],
@@ -2000,6 +2163,10 @@ const RULES: readonly Rule[] = [
       // "exposed to <profile>" is the natural phrasing the existing
       // "what flows can X run" templates missed.
       /\bwhich\s+(?:screen\s+)?flows?\b[^.?!]{0,40}\b(?:exposed|available|visible|assigned)\s+to\b[^.?!]{0,30}\b(?:profile|perm\s*sets?|permission\s+sets?|user)\b/,
+      // M43 — "what the <X> user can do" (a named USER, not profile/permset, and
+      // no "run" verb) is the granter's own ability roster; the templates above
+      // missed this phrasing so it fell through to unrouted/capabilities.
+      /\bwhat\b[^.?!]{0,30}\buser\s+can\s+do\b/,
     ],
   },
   {
@@ -2202,6 +2369,9 @@ const RULES: readonly Rule[] = [
       /\bactually\s+(?:read|see|access|edit)\b[^.?!]{0,40}\brecord\b/,
       /\brecord[-\s]level\s+access\b/,
       /\blive_record_access\b/,
+      // M40 — "who can access this/that/the record" is single-record effective
+      // access (runtime UserRecordAccess), not the OBJECT-level who_can_access_object.
+      /\bwho\s+can\s+access\s+(?:this|that|the)\s+record\b/,
     ],
   },
   {
@@ -2369,7 +2539,7 @@ const RULES: readonly Rule[] = [
     // question (P12-ROUTER-disambiguation: forward vs reverse).
     intent: 'who-can-access-object',
     plane: 'vault',
-    tools: ['sfi.resolve', 'sfi.who_can_access_object'],
+    tools: ['sfi.resolve', 'sfi.who_can_access_object', 'sfi.interpret'],
     liveRequired: false,
     needsResolve: true,
     reason:
@@ -2409,7 +2579,15 @@ const RULES: readonly Rule[] = [
     reason:
       "What UNAUTHENTICATED guest users can see across the org's Experience Cloud / Site communities — each site's guest profile object CRUD, PII FLS, Apex, and guest sharing rules, ranked (guest_exposure_report).",
     patterns: [
-      /\bguest\s+(user|profile|access|exposure)\b/,
+      // Plural "guest users"/"guest profiles" matches too — a compound clause
+      // ("…and can guest users see Cases too?") must route here so the compound
+      // planner stacks guest_exposure_report alongside the layout tool rather
+      // than silent-dropping the guest sub-intent (ROUTE-COMPOUND-DROPS-GUEST-
+      // CLAUSE). `users?` keeps the singular behaviour byte-identical.
+      /\bguest\s+(users?|profiles?|access|exposure)\b/,
+      // Bare interrogative "can/could/do guest users see/access Cases" (no
+      // leading "what") — the natural second-clause phrasing.
+      /\b(can|could|do|does|will)\b[^.?!]{0,20}\bguest\s+users?\b[^.?!]{0,20}\b(see|access|read|view|reach|get)\b/,
       /\bwhat\s+can\s+(the\s+)?guest\s+users?\s+(see|access|read|do)\b/,
       /\bunauthenticated\b.*\b(access|user|audit|expos)/,
       /\b(experience\s+cloud|community|communities|portal|public\s+site)\b.*\b(leak|expos|guest|secur)/,
@@ -2419,7 +2597,7 @@ const RULES: readonly Rule[] = [
   {
     intent: 'why-cant-see',
     plane: 'vault',
-    tools: ['sfi.resolve', 'sfi.why_cant_user_see_record'],
+    tools: ['sfi.resolve', 'sfi.why_cant_user_see_record', 'sfi.interpret'],
     liveRequired: false,
     needsResolve: true,
     reason: 'Walks the sharing cascade (OWD → permission → role hierarchy → sharing rules) from the vault.',
@@ -2742,7 +2920,7 @@ const RULES: readonly Rule[] = [
     // safe-to-delete rule (same intent + tools).
     intent: 'safe-to-delete',
     plane: 'vault',
-    tools: ['sfi.resolve', 'sfi.safe_to_delete_field'],
+    tools: ['sfi.resolve', 'sfi.safe_to_delete_field', 'sfi.interpret'],
     liveRequired: false,
     needsResolve: true,
     reason: 'Whether a specific field is safe to delete — coverage-aware dependency check.',
@@ -2954,7 +3132,7 @@ const RULES: readonly Rule[] = [
   {
     intent: 'sharing-model',
     plane: 'vault',
-    tools: ['sfi.generate_sharing_summary'],
+    tools: ['sfi.generate_sharing_summary', 'sfi.interpret'],
     liveRequired: false,
     needsResolve: false,
     reason: 'OWD, sharing rules, role hierarchy, groups — the sharing model from the vault.',
@@ -2970,6 +3148,37 @@ const RULES: readonly Rule[] = [
       /\brole\s+of\b.*\buser\b/,
       /\bwhat\s+is\s+the\s+role\b.*\buser\b/,
       /\bpublic\s+groups?\b.*\b(broad|overly)\b.*\bmembership/,
+    ],
+  },
+  {
+    // M4 — profile MERGE what-if. The profile-migration rule below is a COMBINED
+    // rule whose graded top-1 is always permission_risk_report, so merge can never
+    // win there. Distinct verb "merge" keeps it off the permission_risk_report golds.
+    intent: 'what-if-merge-profiles',
+    plane: 'vault',
+    tools: ['sfi.what_if_merge_profiles', 'sfi.permission_risk_report'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Simulated profile MERGE blast radius (what_if_merge_profiles leads; the combined migration rule grades permission_risk_report first).',
+    patterns: [
+      /\bmerg\w*\b[^.?!]{0,40}\bprofiles?\b/,
+      /\bprofiles?\b[^.?!]{0,40}\b(are|were)\s+merg\w*/,
+    ],
+  },
+  {
+    // M5 — profile SPLIT what-if. what_if_split_profile is NOT in the
+    // profile-migration tools array, so every split ask currently routes to
+    // permission_risk_report. The target also matches profile-migration's
+    // /profiles.*into.*permission sets/, so this MUST sit earlier.
+    intent: 'what-if-split-profile',
+    plane: 'vault',
+    tools: ['sfi.what_if_split_profile', 'sfi.permission_risk_report'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Simulated profile SPLIT into permission sets (what_if_split_profile leads; otherwise unreachable via the migration rule).',
+    patterns: [
+      /\bsplit\w*\b[^.?!]{0,50}\bprofiles?\b/,
+      /\bprofiles?\b[^.?!]{0,40}\b(are|were)\s+split/,
     ],
   },
   {
@@ -3362,6 +3571,10 @@ const RULES: readonly Rule[] = [
       /\bwhy\s+(did|didn'?t|does|doesn'?t)\b.*\b(field|value)\b.*\b(change|update|set)\b/,
       /\bwhat\s+(writes?|updates?|sets?)\b.*\bfield\b/,
       /\bwhat\s+changed\b.*\bfield\b.*\bon\s+save\b/,
+      // M34 — "which flows write to <field>" = the writers-fabric of a field.
+      // (Intentionally pre-empts the universal component-usage dispatcher, which
+      // sits later in RULES and would otherwise claim this on find_component_usages.)
+      /\bwhich\s+flows?\b[^?!]{0,25}\bwrite(?:s)?\s+to\b/,
     ],
   },
   {
@@ -3418,7 +3631,7 @@ const RULES: readonly Rule[] = [
   {
     intent: 'automation-on-object',
     plane: 'vault',
-    tools: ['sfi.resolve', 'sfi.automation_build_advisor', 'sfi.get_edges'],
+    tools: ['sfi.resolve', 'sfi.automation_build_advisor', 'sfi.get_edges', 'sfi.interpret'],
     liveRequired: false,
     needsResolve: true,
     reason: 'What automation already exists on an object — the pre-build briefing.',
@@ -3561,6 +3774,10 @@ const RULES: readonly Rule[] = [
       new RegExp(
         `\\bdoes\\s+${NAMED_COMPONENT_ID}\\b[^.?!]{0,40}\\b(active\\s+version|any\\s+active)\\b`,
       ),
+      // M36 — "(pull up / show me) an explanation of the <Flow> flow". The
+      // \bexplain\b anchors miss "explanation", and NAMED_COMPONENT_ID needs a
+      // >=2-underscore token so a no-underscore CamelCase flow name is invisible.
+      new RegExp('\\bexplanation\\s+of\\b[^.?!]{0,60}\\bflow\\b'),
     ],
   },
   {
@@ -3577,7 +3794,7 @@ const RULES: readonly Rule[] = [
     // falls through untouched.
     intent: 'automation-collisions',
     plane: 'vault',
-    tools: ['sfi.automation_collisions'],
+    tools: ['sfi.automation_collisions', 'sfi.interpret'],
     liveRequired: false,
     needsResolve: false,
     reason:
@@ -3626,6 +3843,44 @@ const RULES: readonly Rule[] = [
       /\bautomation\s+tools?\b.*\bfiring\b.*\bsame\s+object/,
       /\bobjects?\b.*\bmost\s+validation\s+rules/,
       /\bstacked\s+automation\b/,
+    ],
+  },
+  {
+    // M16 — browse the org's Decision Tables. The omnistudio rule below lists
+    // "decision tables?" but leads with list_components; decision_table_browse
+    // is not in its tools.
+    intent: 'decision-table-browse',
+    plane: 'vault',
+    tools: ['sfi.decision_table_browse', 'sfi.list_components'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Browse the OmniStudio Decision Tables in the org (decision_table_browse).',
+    patterns: [/\bdecision\s+tables?\b/],
+  },
+  {
+    // M22 — the OmniStudio Integration Procedure CHAIN for a named IP. The
+    // omnistudio rule lists "integration procedures?" but leads with
+    // list_components (integration_procedure_chain is tools[2], never top-1).
+    intent: 'integration-procedure-chain',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.integration_procedure_chain'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Per-IP Integration Procedure chain traversal (integration_procedure_chain), not the org-wide list.',
+    patterns: [/\bintegration\s+procedures?\b[^.?!]{0,25}\bchain\b/],
+  },
+  {
+    // M24 — walk the OmniScript FLOW for a named OmniScript. The generic
+    // omnistudio rule leads with list_components for any "omniscript" mention.
+    intent: 'omniscript-flow',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.omniscript_flow'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Named OmniScript flow breakdown (omniscript_flow), not the org-wide OmniScript list.',
+    patterns: [
+      /\bomni\s?scripts?\b[^?!]{0,40}\bflow\b/,
+      /\bwalk\s+me\s+through\b[^?!]{0,30}\bomni\s?script\b/,
     ],
   },
   {
@@ -3759,7 +4014,7 @@ const RULES: readonly Rule[] = [
     // pasted error string), so this is a low-collision addition.
     intent: 'explain-error',
     plane: 'vault',
-    tools: ['sfi.explain_error'],
+    tools: ['sfi.explain_error', 'sfi.interpret'],
     liveRequired: false,
     needsResolve: false,
     reason:
@@ -3866,7 +4121,7 @@ const RULES: readonly Rule[] = [
   {
     intent: 'governor-risks',
     plane: 'vault',
-    tools: ['sfi.governor_limit_risks'],
+    tools: ['sfi.governor_limit_risks', 'sfi.interpret'],
     liveRequired: false,
     needsResolve: false,
     reason: 'Static governor-limit risks (SOQL/DML in loops, unbounded queries) from Apex source.',
@@ -3911,6 +4166,37 @@ const RULES: readonly Rule[] = [
       /\b(circular|cyclic|cycle|recursion|recursive)\b.*\b(dependenc(y|ies)|apex|class|call)\b/,
       /\b(dependenc(y|ies))\b.*\b(circular|cyclic)\b/,
       /\bdependency\s+cycles?\b/,
+    ],
+  },
+  {
+    // ROUTE-DEPLOY-PACKAGE-WORD-MISBINDS-PACKAGE-IMPACT — "is it safe to remove
+    // this Flow FROM the package/changeset?" is a CHANGE-RISK question about a
+    // deploy artifact (an unlocked/deploy package or change set you are pulling
+    // a component OUT of), NOT a managed-package uninstall blast-radius question.
+    // The bare word "package" next to "remove" used to bind the package-impact
+    // rule below (namespace/InstalledPackage inventory). Cousin of the closed
+    // ROUTE-INACTIVE-AUTOMATION-WORD-MISBINDS-USERS. This high-precision rule
+    // sits FIRST and requires BOTH a metadata COMPONENT noun AND either (a) an
+    // unambiguous deploy artifact (changeset / change set / deployment) with a
+    // remove/promote/deploy verb, or (b) the "<verb> … FROM … package" container
+    // framing — pulling a component out of a package. A managed-package retire
+    // ("uninstall the acme package", "which classes does the package touch if we
+    // remove it") never says "from the package" and keeps "uninstall"/"upgrade"
+    // (absent here) so it still falls through to package-impact below.
+    intent: 'review-change',
+    plane: 'vault',
+    tools: ['sfi.review_change'],
+    liveRequired: false,
+    needsResolve: false,
+    reason:
+      'Removing/promoting a specific component (Flow, Trigger, class, field) from a deploy package or change set is a per-component change-risk review (review_change: blocking/risky/review/safe + dependents + tests-to-run), not a managed-package uninstall footprint.',
+    patterns: [
+      // (a) unambiguous deploy artifact (changeset / deployment) + a remove/
+      //     promote/deploy verb + a component noun — order-independent.
+      /(?=.*\b(remov\w*|delet\w*|drop\w*|promot\w*|deploy\w*|ship\w*|revert\w*|back\s*out|exclud\w*|pull\w*)\b)(?=.*\b(flows?|triggers?|apex|class(?:es)?|component|field|validation\s+rule|layout|permission\s+set)\b).*\b(changeset|change\s+set|deployment)\b/,
+      // (b) "<verb> … FROM … (the) package/changeset" container framing, with a
+      //     component noun present — pulling a component OUT of a deploy package.
+      /(?=.*\b(flows?|triggers?|apex|class(?:es)?|component|field|validation\s+rule|layout|permission\s+set)\b)\b(remov\w*|delet\w*|drop\w*|pull\w*|exclud\w*)\b[^.?!]{0,50}\bfrom\b[^.?!]{0,30}\b(the\s+)?(deploy(?:ment)?\s+|unlocked\s+)?(package|changeset|change\s+set)\b/,
     ],
   },
   {
@@ -3985,6 +4271,22 @@ const RULES: readonly Rule[] = [
     patterns: [/\bsubgraph\b/],
   },
   {
+    // M14 — a CPQ price/product/discount RULE CHAIN for a specific product.
+    // The vault call-graph rule below catches "rule chain" via /\w+\s+chain/ and
+    // leads with call_graph. Require pric*/product/discount immediately before
+    // "rule chain" so the org-wide "whole CPQ rule chain" (cpq_dependency_map)
+    // stays put.
+    intent: 'cpq-rule-chain',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.cpq_rule_chain'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'The CPQ price/product/discount rule chain for a specific product (cpq_rule_chain).',
+    patterns: [
+      new RegExp('\\bcpq\\b[^.?!]{0,30}\\b(pric\\w+|product|discount)\\s+rules?\\s+chain\\b'),
+    ],
+  },
+  {
     intent: 'call-graph',
     plane: 'vault',
     tools: ['sfi.resolve', 'sfi.call_graph', 'sfi.method_reachability'],
@@ -4035,6 +4337,10 @@ const RULES: readonly Rule[] = [
       // Named triggers like OpportunityTrigger — \btrigger\b misses the suffix token.
       /\bwhat\s+does\b.*\b\w+Trigger\b.*\bdo\b/i,
       /\bwhat\s+does\b.*\bthe\b.*\b(lwc|component)\b.*\bdo\b/i,
+      // M37 — "what the <method> method does" is "what ... method ... does", not
+      // the "what does ... do" the patterns above require. Ends-with-"?" golds
+      // ("what tests cover the <M> method?") can't cross the "?" to a trailing do/does.
+      /\bwhat\b[^.?!]{0,40}\bmethod\b[^.?!]{0,15}\bdo(?:es)?\b/,
     ],
   },
   {
@@ -4085,6 +4391,21 @@ const RULES: readonly Rule[] = [
       /\bwhich\s+of\s+(?:my|these)\s+changes\s+are\s+(?:blocking|risky|safe)\b/,
       /\breview\s+(?:the\s+)?components?\s+in\s+(?:this\s+|my\s+)?package\.xml\b/,
       /\breview_change\b/,
+    ],
+  },
+  {
+    // M27 — sandbox → production PROMOTION readiness. The release-readiness rule
+    // below leads with org_risk_report and its (ready|readiness).*production
+    // pattern swallows this; key on the specific promote-to-prod verb instead.
+    intent: 'promotion-readiness',
+    plane: 'vault',
+    tools: ['sfi.promotion_readiness'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Sandbox-to-production promotion readiness (promotion_readiness), distinct from the generic release-readiness synthesis.',
+    patterns: [
+      /\b(promote|promotion)\b[^?!]{0,30}\b(prod|production)\b/,
+      /\bsandbox\b[^?!]{0,30}\bpromote\b/,
     ],
   },
   {
@@ -4140,6 +4461,21 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // M21 — multi-org fleet search ("which orgs across the fleet have <package>").
+    // package-inventory below claims "package installed" for the single-org
+    // catalog; require an orgs+fleet frame AND a package/component token so the
+    // fleet-drift-ranking gold ("which orgs in our fleet have drifted") is untouched.
+    intent: 'fleet-find',
+    plane: 'vault',
+    tools: ['sfi.fleet_find'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Search the org fleet for those matching a criterion (fleet_find), not the single-org package catalog.',
+    patterns: [
+      new RegExp('\\borgs?\\b[^.?!]{0,20}\\bfleet\\b[^.?!]{0,50}\\b(installed|package|component|using|use)\\b'),
+    ],
+  },
+  {
     intent: 'package-inventory',
     plane: 'vault',
     tools: ['sfi.installed_package_catalog', 'sfi.coverage_report', 'sfi.org_overview'],
@@ -4173,6 +4509,10 @@ const RULES: readonly Rule[] = [
       /\b(what|which)\b.*\b(refresh|retrieve|manifest)\b.*\b(miss(ed|ing)?|skip(ped)?|never\s+(pulled|retrieved))\b/,
       /\bretrieve[-\s]?manifest\s+gaps?\b/,
       /\bnot\s+being\s+pulled\b/,
+      // M30 — "what metadata types are we NOT tracking/deploying/retrieving" is a
+      // retrieve blind-spot; the existing anchors ("blind spot", "referenced but
+      // not retrieved", "not being pulled") missed this framing.
+      new RegExp('\\b(what|which)\\s+metadata\\s+types?\\b[^?!]{0,40}\\b(not|aren.?t|never)\\b[^?!]{0,20}\\b(track|deploy|retriev|pull)'),
     ],
   },
   {
@@ -4327,6 +4667,22 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // M3 — "is it safe to change <field> VALUES — what integrations would desync".
+    // integration-map fires first on the bare "integrations" token; key on the
+    // value/desync framing to the RIGHT of the dotted field name (the period in
+    // Contact.Email blocks any left-spanning anchor).
+    intent: 'what-if-change-field-value',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.what_if_change_field_value', 'sfi.value_change_audit'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Blast radius of changing a field VALUE (what_if_change_field_value) — which integrations/automations desync.',
+    patterns: [
+      /\bvalues?\b[^.?!]{0,45}\bde-?sync\w*/,
+      /\bvalues?\b[^.?!]{0,45}\bintegrations?\s+would\b/,
+    ],
+  },
+  {
     intent: 'integration-map',
     plane: 'vault',
     tools: ['sfi.integration_map'],
@@ -4343,6 +4699,21 @@ const RULES: readonly Rule[] = [
       /^(?!.*\b(?:what\s+if|blast\s+radius|what\s+breaks|blows?\s+up|field\s+type|data\s+type|written\s+(?:only\s+)?by|only\s+ever\s+written|ip\s+relax\w*|disabl\w+)\b).*\b(integrations?|named\s+credentials?|connected\s+apps?|remote\s+sites?|external\s+services?|auth\s+providers?)\b/,
       /^(?!.*\b(?:what\s+if|blast\s+radius|what\s+breaks|blows?\s+up|field\s+type|data\s+type|written\s+(?:only\s+)?by|only\s+ever\s+written|ip\s+relax\w*|disabl\w+)\b).*\bwhat\b.*\bintegrat/,
       /\bapi\b.*\b(connections?|surfaces?)\b/,
+    ],
+  },
+  {
+    // M9 — who subscribes to CHANGE DATA CAPTURE specifically. The
+    // event-subscribers rule below leads with event_subscribers; anchor CDC + a
+    // subscriber verb so cdc_subscribers leads and a bare CDC catalog ask is safe.
+    intent: 'cdc-subscribers',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.cdc_subscribers', 'sfi.event_subscribers'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Who subscribes to Change Data Capture events on an object (cdc_subscribers), distinct from platform-event subscribers.',
+    patterns: [
+      /\b(change\s+data\s+capture|cdc)\b[^.?!]{0,40}\b(subscrib\w*|listen\w*|consum\w*)\b/,
+      /\b(subscrib\w*|listen\w*|consum\w*)\b[^.?!]{0,30}\b(change\s+data\s+capture|cdc)\b/,
     ],
   },
   {
@@ -4410,6 +4781,18 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // M26 — the OUTBOUND MESSAGE catalog. The endpoints rule below leads with
+    // endpoint_catalog and its pattern matches "outbound messages"; key on the
+    // distinct outbound-message noun so outbound_message_catalog leads.
+    intent: 'outbound-messages',
+    plane: 'vault',
+    tools: ['sfi.outbound_message_catalog'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Configured Outbound Messages (outbound_message_catalog), distinct from the broader endpoint catalog.',
+    patterns: [/\boutbound\s+messages?\b/],
+  },
+  {
     intent: 'endpoints',
     plane: 'vault',
     tools: ['sfi.endpoint_catalog', 'sfi.outbound_message_catalog'],
@@ -4424,6 +4807,19 @@ const RULES: readonly Rule[] = [
   },
 
   // === Cleanup / impact / what-if (vault, hybrid) ===========================
+  {
+    // M17 — "which fields can we SAFELY DELETE" = ranked cleanup roster
+    // (field_cleanup_candidates). Currently unrouted: unused-fields needs
+    // unused/dead/cleanup; unused-components needs "can we delete"; safe-to-delete
+    // needs "safe to delete"/"can i delete" — none match "which fields ... safely delete".
+    intent: 'field-cleanup-candidates',
+    plane: 'vault',
+    tools: ['sfi.field_cleanup_candidates', 'sfi.unused_fields_deep'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Ranked field cleanup candidates safe to delete (field_cleanup_candidates).',
+    patterns: [/\b(which|what)\s+fields?\b[^.?!]{0,25}\bsafely\s+delete\b/],
+  },
   {
     intent: 'unused-fields',
     plane: 'hybrid',
@@ -4440,6 +4836,9 @@ const RULES: readonly Rule[] = [
       /\bhow\s+many\b.*\bfields?\b.*\b(used|populated|actually)\b/,
       /\bexcessive\b.*\b(custom\s+)?fields?\b/,
       /\b(same\s+information|duplicate\s+information)\b.*\b(fields?|objects?)\b/,
+      // M33 — "which fields on <obj> have ZERO DATA and aren't referenced" =
+      // unused_fields_deep; the unused/dead/never-used anchors missed "zero data".
+      /\bfields?\b[^?!]{0,60}\bzero\s+data\b/,
     ],
   },
   {
@@ -4457,12 +4856,15 @@ const RULES: readonly Rule[] = [
       /\b(unused|orphan|dead)\b.*\b(components?|metadata|objects?|flows?)\b/,
       /\b(components?|metadata|objects?|flows?)\b.*\b(unused|orphan|dead|never\s+used)\b/,
       /\bwhat\b.*\b(can\s+(i|we)\s+delete|safe\s+to\s+remove)\b/,
+      // M32 — bare "not used / used nowhere" phrasing the unused/orphan/dead
+      // anchors above missed (dead-code needs "not referenced"+"anywhere").
+      /\b(components?|metadata|objects?|flows?)\b[^?!]{0,30}\b(not\s+used|used\s+nowhere)\b/,
     ],
   },
   {
     intent: 'safe-to-delete',
     plane: 'vault',
-    tools: ['sfi.resolve', 'sfi.safe_to_delete_field'],
+    tools: ['sfi.resolve', 'sfi.safe_to_delete_field', 'sfi.interpret'],
     liveRequired: false,
     needsResolve: true,
     reason: 'Whether a specific field is safe to delete — coverage-aware dependency check.',
@@ -4519,9 +4921,24 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // M8 — an explicit "LIVE blast radius" is the live tool blast_radius_live,
+    // which no rule currently routes to; impact-analysis' /blast radius/ takes it
+    // to the vault get_impact. Lead with blast_radius_live, get_impact as fallback.
+    intent: 'blast-radius-live',
+    plane: 'hybrid',
+    tools: ['sfi.resolve', 'sfi.blast_radius_live', 'sfi.get_impact'],
+    liveRequired: true,
+    needsResolve: true,
+    reason: 'A LIVE blast radius (blast_radius_live) — runtime impact, with the vault get_impact as fallback.',
+    patterns: [
+      /\blive\s+blast\s+radius\b/,
+      /\bblast\s+radius\b[^.?!]{0,40}\blive\b/,
+    ],
+  },
+  {
     intent: 'impact-analysis',
     plane: 'vault',
-    tools: ['sfi.resolve', 'sfi.get_impact', 'sfi.field_change_advisor'],
+    tools: ['sfi.resolve', 'sfi.get_impact', 'sfi.field_change_advisor', 'sfi.interpret'],
     liveRequired: false,
     needsResolve: true,
     reason: 'Blast radius is whole-graph dependency traversal over the vault.',
@@ -4551,9 +4968,40 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // M1 — field-TYPE change what-if. The combined what-if-field rule below grades
+    // top-1 = what_if_make_field_required, so change-field-type can never win there.
+    // Key on the field-type framing (from-picklist-to-<type> / "field type" / "data type").
+    intent: 'what-if-change-field-type',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.what_if_change_field_type', 'sfi.what_if_make_field_required'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Simulated field-TYPE change with blast radius (what_if_change_field_type).',
+    patterns: [
+      /\bfrom\s+(?:a\s+)?picklist\s+to\s+(?:a\s+)?(?:text|number|formula|lookup|date|currency|checkbox|multi[-\s]?select)\b/,
+      /\bchang\w*\b[^.?!]{0,40}\bfield\s+type\b/,
+      /\bfield\s+type\b[^.?!]{0,40}\bchang\w*/,
+      /\bchang\w*\b[^.?!]{0,40}\bdata\s+type\b/,
+    ],
+  },
+  {
+    // M2 — remove-picklist-VALUE what-if. Same combined-rule top-1 problem as M1.
+    // Key on a remove/delete verb + "picklist value".
+    intent: 'what-if-remove-picklist-value',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.what_if_remove_picklist_value', 'sfi.what_if_make_field_required'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Simulated removal of a picklist VALUE with blast radius (what_if_remove_picklist_value).',
+    patterns: [
+      /\b(remov\w*|delet\w*|drop\w*|retir\w*)\b[^.?!]{0,40}\bpicklist\s+value\b/,
+      /\bpicklist\s+value\b[^.?!]{0,40}\b(remov\w*|delet\w*|drop\w*|retir\w*)\b/,
+    ],
+  },
+  {
     intent: 'what-if-field',
     plane: 'vault',
-    tools: ['sfi.resolve', 'sfi.what_if_make_field_required', 'sfi.what_if_change_field_type', 'sfi.what_if_remove_picklist_value'],
+    tools: ['sfi.resolve', 'sfi.what_if_make_field_required', 'sfi.what_if_change_field_type', 'sfi.what_if_remove_picklist_value', 'sfi.interpret'],
     liveRequired: false,
     needsResolve: true,
     reason: 'Simulated field change (required / type / picklist value) with blast radius.',
@@ -4783,6 +5231,10 @@ const RULES: readonly Rule[] = [
       /\bwho\s+granted\b[^.?!]{0,40}\bmodify[-\s]?all\b/,
       /\bflip(?:ped)?\b[^.?!]{0,40}\bfield[-\s]level\s+security\b/,
       /\blive_setup_audit_trail\b/,
+      // M41 — a display-verb-anchored "show me the setup audit trail". SetupAuditTrail
+      // is inherently runtime; the leading display verb keeps this off the
+      // component-change-attribution gold ("...according to the persisted setup audit trail").
+      /\b(?:show|display|pull\s+up|bring\s+up|open|give\s+me)\b[^.?!]{0,15}\bsetup\s+audit\s+trail\b/,
     ],
   },
   {
@@ -4804,6 +5256,11 @@ const RULES: readonly Rule[] = [
       /\bcomponent_change_attribution\b/,
       /\boffline\s+(?:setup\s+)?change\s+attribution\b/,
       /\bwho\s+changed\b[^.?!]{0,60}\baccording\s+to\s+(?:the\s+)?(?:persisted|vault)\s+(?:setup\s+)?audit\b/,
+      // M42 — "(show me) who changed the <Component>" where the component is a
+      // metadata token ending in flow/trigger/class/layout/component/process. The
+      // query is lowercased so CamelCase is unusable; require "the <token+suffix>"
+      // so "who changed this record" / a field / sharing settings are not stolen.
+      /\bwho\s+(?:changed|modified|edited|last\s+(?:changed|modified|edited))\s+the\s+[a-z][a-z0-9_]*(?:flow|trigger|class|layout|component|process)\b/,
     ],
   },
   // Runtime audit trail — placed BEFORE `history-change` so its broad
@@ -4877,6 +5334,22 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // M10 — a TIME-WINDOW delta ("what changed since last week") is changed_since;
+    // history-change below leads with org_history and its /changed since/ pattern
+    // catches this. org_history's own gold ("since the last refresh") has no
+    // week/month timeframe, so it is excluded.
+    intent: 'changed-since-timeframe',
+    plane: 'vault',
+    tools: ['sfi.changed_since', 'sfi.org_history'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Components changed within a time window (changed_since), not the whole org_history digest.',
+    patterns: [
+      /\bsince\s+last\s+(week|month|day|quarter|year|sprint|release)\b/,
+      /\bchang\w*\s+since\b[^.?!]{0,30}\b(yesterday|last\s+(week|month|day|quarter|year|sprint|release)|\d+\s+(day|week|month)s?\s+ago)\b/,
+    ],
+  },
+  {
     intent: 'history-change',
     plane: 'vault',
     tools: ['sfi.org_history', 'sfi.changed_since'],
@@ -4902,6 +5375,48 @@ const RULES: readonly Rule[] = [
     patterns: [
       /\bwhen\s+was\b.*\b(last\s+(modified|changed|updated|edited))\b/,
       /\blast\s+modified\b/,
+    ],
+  },
+  {
+    // M6 — OBJECT-scoped cross-vault compare. The cross-org-diff rule below always
+    // grades top-1 = compare_vaults; the noun "object" scopes this to
+    // compare_object_across_vaults.
+    intent: 'cross-org-diff-object',
+    plane: 'vault',
+    tools: ['sfi.compare_object_across_vaults', 'sfi.compare_vaults'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Compare a specific OBJECT across two vaults (compare_object_across_vaults).',
+    // Same second-registered-vault prerequisite as the org-wide cross-org-diff
+    // rule below: compare_object_across_vaults diffs two offline snapshots and
+    // returns vault-not-found on a single-vault install. DISCLOSURE, not a block.
+    gap: {
+      category: 'cross-vault-registry',
+      note: 'Cross-vault comparison needs a SECOND registered vault (a multi-vault registry). If only this vault is registered, the compare_* call will return vault-not-found — register the other org first (sfi vault register) or name the two vault aliases to compare.',
+    },
+    patterns: [
+      /\bcompare\b[^.?!]{0,30}\bobject\b[^.?!]{0,40}\bacross\b/,
+      /\bcompare\b[^.?!]{0,40}\bobject\b[^.?!]{0,50}\b(sandbox(es)?|uat|staging|prod\w*|vaults?|orgs?|environments?)\b/,
+    ],
+  },
+  {
+    // M7 — PROFILE-scoped cross-vault compare. Same combined-rule top-1 issue as M6.
+    intent: 'cross-org-diff-profile',
+    plane: 'vault',
+    tools: ['sfi.compare_profile_across_vaults', 'sfi.compare_vaults'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'Compare a specific PROFILE across two vaults (compare_profile_across_vaults).',
+    // Same second-registered-vault prerequisite as cross-org-diff:
+    // compare_profile_across_vaults returns vault-not-found on a single-vault
+    // install. DISCLOSURE, not a block.
+    gap: {
+      category: 'cross-vault-registry',
+      note: 'Cross-vault comparison needs a SECOND registered vault (a multi-vault registry). If only this vault is registered, the compare_* call will return vault-not-found — register the other org first (sfi vault register) or name the two vault aliases to compare.',
+    },
+    patterns: [
+      /\bcompare\b[^.?!]{0,30}\bprofiles?\b[^.?!]{0,40}\bacross\b/,
+      /\bcompare\b[^.?!]{0,40}\bprofiles?\b[^.?!]{0,50}\b(sandbox(es)?|uat|staging|prod\w*|vaults?|orgs?|environments?)\b/,
     ],
   },
   {
@@ -4975,6 +5490,50 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
+    // M31 — a TREND across snapshots is sfi.trend. snapshot-diff below has
+    // tools [diff_snapshots, trend] with pattern /(churn|trend|snapshot)/, so a
+    // "trend" ask yields diff_snapshots. Placed after security-posture-trend.
+    intent: 'snapshot-trend',
+    plane: 'vault',
+    tools: ['sfi.trend'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'A metric trend across captured snapshots (trend), not a two-snapshot diff.',
+    patterns: [
+      /\btrends?\b[^?!]{0,40}\b(snapshots?|over\s+time|across|vault)\b/,
+      /\b(snapshots?|over\s+time)\b[^?!]{0,20}\btrends?\b/,
+    ],
+  },
+  {
+    // M11 — metadata CHURN digest is sfi.churn. snapshot-diff below routes churn
+    // phrasings to diff_snapshots; the "churn since last vault refresh" ask is a
+    // different tool (matched earlier) so exclude "churn since".
+    intent: 'metadata-churn',
+    plane: 'vault',
+    tools: ['sfi.churn', 'sfi.diff_snapshots'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'A metadata churn digest for the vault (churn).',
+    patterns: [
+      /\bmetadata\s+churn\b/,
+      /\bchurn\b(?!\s+since\b)/,
+    ],
+  },
+  {
+    // M12 — a point-in-time "show <component> AS OF the last snapshot" is
+    // component_as_of, which is not in snapshot-diff's tools; key on the distinct
+    // "as of ... snapshot" vocabulary.
+    intent: 'snapshot-component-as-of',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.component_as_of'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'A component as of a past snapshot (component_as_of), a point-in-time read.',
+    patterns: [
+      /\bas\s+of\b[^.?!]{0,40}\bsnapshot\b/,
+    ],
+  },
+  {
     intent: 'snapshot-diff',
     plane: 'vault',
     // STEP-2: churn retired to a hidden alias of diff_snapshots (summary: true) —
@@ -4990,6 +5549,21 @@ const RULES: readonly Rule[] = [
   },
 
   // === CPQ / OmniStudio (vault) =============================================
+  {
+    // M13 — break down a CPQ quote-template's structure. The cpq rule below leads
+    // with cpq_dependency_map on any "quote template" mention; key on the per-template
+    // breakdown verb (break down / structure).
+    intent: 'cpq-quote-template-breakdown',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.cpq_quote_template_breakdown'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Break down a specific CPQ quote template (cpq_quote_template_breakdown).',
+    patterns: [
+      /\b(break\s*down|breakdown)\b[^.?!]{0,30}\bquote\s+templates?\b/,
+      /\bquote\s+templates?\b[^.?!]{0,15}\bstructure\b/,
+    ],
+  },
   {
     intent: 'cpq',
     plane: 'vault',
@@ -5007,6 +5581,18 @@ const RULES: readonly Rule[] = [
 
   // === Field mapping / meaning (vault) ======================================
   {
+    // M15 — OmniStudio DataTransform field mappings (datatransform_field_map). The
+    // NL field-mapping rule below misses plural "field mappings" and would route to
+    // field_mapping_between_objects anyway; key on the distinct DataTransform vocab.
+    intent: 'datatransform-field-map',
+    plane: 'vault',
+    tools: ['sfi.datatransform_field_map', 'sfi.field_mapping_between_objects'],
+    liveRequired: false,
+    needsResolve: false,
+    reason: 'DataTransform / DataRaptor field mappings (datatransform_field_map).',
+    patterns: [/\bdata\s?transform\b/],
+  },
+  {
     intent: 'field-mapping',
     plane: 'vault',
     tools: ['sfi.field_mapping_between_objects', 'sfi.datatransform_field_map'],
@@ -5018,6 +5604,43 @@ const RULES: readonly Rule[] = [
       /\bfield\s+mapping\b/,
       /\bhow\s+(do|does)\b.*\bfields?\b.*\bmap\b/,
       /\bmap(ping|ped)?\b.*\b(between|from)\b.*\b(object|to)\b/,
+      // M18 — object-to-object mapping without the literal word "fields" or
+      // "between": "how does the Contact object map to Account?".
+      /\bhow\s+do(es)?\b[^.?!]{0,30}\bobjects?\b[^.?!]{0,20}\bmaps?\s+to\b/,
+    ],
+  },
+  {
+    // M39 — the real sfi.field_meaning tool (semantic/business meaning) has no
+    // rule; "meaning of <field>" matches nothing and goes unrouted. Carve the
+    // "meaning of" / "mean ... business context" vocabulary to field_meaning.
+    intent: 'field-meaning-semantic',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.field_meaning'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'The semantic / business meaning of a field (field_meaning), not explain_field.',
+    patterns: [
+      // "meaning of <Field>" — SCOPED to a field reference. A bare
+      // "what is the meaning of life" must stay UNROUTED (life is not a field),
+      // so the object of "meaning of" has to be a named field (custom `__x`
+      // suffix or an `Object.Field` path) or carry the literal word "field".
+      /\bmeaning\s+of\b[^.?!]{0,40}\bfield\b/,
+      /\bmeaning\s+of\s+(?:the\s+|a\s+|an\s+|this\s+|that\s+|our\s+|your\s+)*[A-Za-z][A-Za-z0-9]*(?:__[a-z0-9]+\b|\.[A-Za-z])/,
+      /\bmean\b[^.?!]{0,40}\bbusiness\s+context\b/,
+    ],
+  },
+  {
+    // M19 — "what does <field> mean in our BUSINESS CONTEXT" is the business
+    // semantics of a field (field_meaning), a close sibling of explain_field
+    // (technical values/help-text/type).
+    intent: 'field-business-meaning',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.field_meaning', 'sfi.field_360'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'The business meaning/purpose of a field (field_meaning).',
+    patterns: [
+      /\bbusiness\s+(context|meaning|purpose|sense)\b/,
     ],
   },
   {
@@ -5031,6 +5654,9 @@ const RULES: readonly Rule[] = [
       /\bwhat\s+(does|is)\b.*\bfield\b.*\b(mean|for|do)\b/,
       /\bexplain\b.*\bfield\b/,
       /\btell\s+me\s+about\b.*\bfield\b/,
+      // M35 — "(show me) an explanation of the <Field> field". \bexplain\b
+      // word-boundary-misses "explanation", so this fell to the generic schema rule.
+      /\bexplanation\s+of\b[^.?!]{0,40}\bfield\b/,
       // "what does Status__c mean on Evaluation" — the field is NAMED (e.g. an
       // __c api name) rather than the literal word "field". Battery gap.
       /\bwhat\s+(does|is)\b.*\w+__c\b.*\b(mean|for)\b/,
@@ -5195,7 +5821,7 @@ const RULES: readonly Rule[] = [
     // is the subject: "what writes X"). Requires the named field id.
     intent: 'field-provenance',
     plane: 'vault',
-    tools: ['sfi.resolve', 'sfi.field_provenance'],
+    tools: ['sfi.resolve', 'sfi.field_provenance', 'sfi.interpret'],
     liveRequired: false,
     needsResolve: true,
     reason:
@@ -5207,6 +5833,21 @@ const RULES: readonly Rule[] = [
       new RegExp(
         `\\bwhat\\s+(?:sets|populates?|fills?)\\b[^.?!]{0,60}\\b${NAMED_FIELD_ID}\\b[^.?!]{0,40}\\bis\\s+it\\s+(?:a\\s+)?(?:flow|manual|automated|integration)`,
       ),
+    ],
+  },
+  {
+    // M20 — "where is <ApexClass> used in OTHER APEX CODE" is Apex-to-Apex usage
+    // scoping (find_apex_usages), narrower than the universal usage dispatcher
+    // below which would otherwise claim it on find_component_usages.
+    intent: 'apex-usages',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.find_apex_usages'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Where a class/method is used in other Apex code (find_apex_usages), an Apex-to-Apex usage scope.',
+    patterns: [
+      /\bused\b[^?!]{0,25}\bapex\s+code\b/,
+      /\b(in|other)\s+apex\s+code\b/,
     ],
   },
   {
@@ -5644,6 +6285,21 @@ const RULES: readonly Rule[] = [
       // "and", trailing "record types". The two "and"-joins are the tell that
       // this is a multi-type enumeration, not a pairwise compare.
       /\b(?:difference|differ|distinguish|compare)\b[^.?!]{0,120}\band\b[^.?!]{0,60}\band\b[^.?!]{0,60}\brecord\s+types?\b/,
+    ],
+  },
+  {
+    // M38 — "what does this formula (field) do/calculate" is explain_formula, which
+    // no rule emits top-1 (it is only a tail tool elsewhere). Currently unrouted.
+    // Patterns avoid formula-references ("which formulas reference X").
+    intent: 'explain-formula',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.explain_formula'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Plain-English narration of what a formula field computes (explain_formula).',
+    patterns: [
+      /\bwhat\b[^.?!]{0,30}\bformula\b[^.?!]{0,20}\b(?:do(?:es)?|calculat\w*|comput\w*|return)\b/,
+      /\bexplain\b[^.?!]{0,20}\bformula\b/,
     ],
   },
   {

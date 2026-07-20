@@ -494,6 +494,57 @@ describe('endpointCatalogHandler (orphaned named credential)', () => {
   });
 });
 
+// =============================================================================
+// Object-scope refusal (ENDPOINT-CATALOG-IGNORES-OBJECT-SCOPE). The catalog is
+// ORG-WIDE — endpoints carry no endpoint→object association in the graph — so an
+// object / component scope is REFUSED with a named `invalid-query` rather than
+// silently returning the whole-org catalog (which was byte-identical for Contact
+// vs Account vs bare). Mirrors the closed `integration_map` refusal.
+// =============================================================================
+
+describe('endpointCatalogHandler (object scope — ENDPOINT-CATALOG-IGNORES-OBJECT-SCOPE)', () => {
+  it('REFUSES an objectApiName scope with a named invalid-query (not a silent org-wide answer)', async () => {
+    const r = await endpointCatalogHandler(ctx, { objectApiName: 'Contact' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toContain('cannot scope by object');
+    expect(r.error.message).toContain('Contact');
+    expect(r.error.path).toBe('objectApiName');
+  });
+
+  it('refuses object / objectId / componentId scopes the same way', async () => {
+    for (const scoped of [
+      { object: 'Account' },
+      { objectId: 'CustomObject:Account' },
+      { componentId: 'CustomObject:Account' },
+    ]) {
+      const r = await endpointCatalogHandler(ctx, scoped);
+      expect(r.ok).toBe(false);
+      if (r.ok) continue;
+      expect(r.error.kind).toBe('invalid-query');
+    }
+  });
+
+  it('Contact-scoped and Account-scoped both refuse — no longer byte-identical org-wide dumps', async () => {
+    const contact = await endpointCatalogHandler(ctx, { objectApiName: 'Contact' });
+    const account = await endpointCatalogHandler(ctx, { objectApiName: 'Account' });
+    expect(contact.ok).toBe(false);
+    expect(account.ok).toBe(false);
+  });
+
+  it('the bare no-scope call is unchanged (byte-identical golden — 8 endpoints, no appliedScope)', async () => {
+    const r = await endpointCatalogHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.summary.totalEndpoints).toBe(8);
+    // No new field leaks onto the bare-call payload.
+    expect('appliedScope' in d).toBe(false);
+    expect(JSON.stringify(d)).not.toContain('appliedScope');
+  });
+});
+
 describe('endpointCatalogInputSchema', () => {
   it('accepts an empty input', () => {
     expect(endpointCatalogInputSchema.safeParse({}).success).toBe(true);
@@ -502,6 +553,16 @@ describe('endpointCatalogInputSchema', () => {
   it('accepts (and ignores) extra properties', () => {
     expect(
       endpointCatalogInputSchema.safeParse({ ignored: true }).success,
+    ).toBe(true);
+  });
+
+  it('accepts the object-scope keys at the schema level (the handler refuses them)', () => {
+    expect(
+      endpointCatalogInputSchema.safeParse({ objectApiName: 'Contact' }).success,
+    ).toBe(true);
+    expect(
+      endpointCatalogInputSchema.safeParse({ componentId: 'CustomObject:Account' })
+        .success,
     ).toBe(true);
   });
 });

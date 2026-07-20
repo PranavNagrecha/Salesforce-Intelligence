@@ -1104,3 +1104,516 @@ describe('nameCoverage (router-v2 P4 option hygiene input)', () => {
     expect(field?.nameCoverage).toBe(1);
   });
 });
+
+// --- RESOLVE-PHRASE-SYNONYM-LOSES-EXACTNESS ----------------------------------
+// A confirmed multi-word business phrase ("social security number") collapses
+// to its canonical token (`ssn`) via the expandPhrases pass. The ABBREVIATION
+// form ("SSN") whole-name-matches a field literally named `SSN__c` and resolves
+// `exact`; the PHRASE form must too. Isolated store with a UNIQUE bare `SSN__c`
+// target so the whole-name-exact path has a single winner.
+describe('resolveComponents — phrase-synonym whole-name exactness (RESOLVE-PHRASE-SYNONYM-LOSES-EXACTNESS)', () => {
+  let synDir: string;
+  let synStore: GraphStore;
+  const SSN_FIELD = 'CustomField:Employee__c.SSN__c';
+
+  beforeAll(async () => {
+    synDir = mkdtempSync(join(tmpdir(), 'sfi-resolve-syn-'));
+    const instance = await DuckDBInstance.create(join(synDir, 'syn.db'));
+    const connection = await instance.connect();
+    const init = await initSchema(connection);
+    if (!init.ok) throw new Error(init.error.message);
+    synStore = { connection, instance };
+    const synSeed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: 'CustomObject:Employee__c', apiName: 'Employee__c', label: 'Employee' }),
+        // The UNIQUE whole-name target: api-name normalizes to `ssn`.
+        makeNode({ id: SSN_FIELD, type: 'CustomField', apiName: 'SSN__c', label: 'SSN', parentId: 'CustomObject:Employee__c' }),
+        // Sibling fields that share the `ssn` TOKEN (base 1.0) but are NOT a
+        // whole-name match — these are the co-contenders that dragged the phrase
+        // form to `ambiguous` before the fix. They must not do so now.
+        makeNode({ id: 'CustomField:Employee__c.Student_SSN__c', type: 'CustomField', apiName: 'Student_SSN__c', label: 'Student SSN', parentId: 'CustomObject:Employee__c' }),
+        makeNode({ id: 'ValidationRule:Employee__c.SSN_Format_Check', type: 'ValidationRule', apiName: 'SSN_Format_Check', label: 'SSN Format Check', parentId: 'CustomObject:Employee__c' }),
+      ],
+      edges: [
+        makeEdge({ fromId: 'CustomObject:Employee__c', toId: SSN_FIELD, edgeType: 'parentOf' }),
+        makeEdge({ fromId: 'CustomObject:Employee__c', toId: 'CustomField:Employee__c.Student_SSN__c', edgeType: 'parentOf' }),
+      ],
+    };
+    const imp = await importExtractionResults(synStore, [synSeed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+  });
+
+  afterAll(() => {
+    synStore.connection.disconnectSync();
+    synStore.instance.closeSync();
+    rmSync(synDir, { recursive: true, force: true });
+  });
+
+  it('the ABBREVIATION "SSN" resolves exact to the unique SSN__c field (baseline)', async () => {
+    const r = await resolveComponents(synStore, 'SSN');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.candidates[0]?.id).toBe(SSN_FIELD);
+    expect(r.value.disposition).toBe('exact');
+  });
+
+  it('the PHRASE synonym "social security number" resolves exact like the abbreviation (the fix)', async () => {
+    const r = await resolveComponents(synStore, 'social security number');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Confirms the phrase collapsed to the `ssn` token.
+    expect(r.value.queryTokens).toEqual(['ssn']);
+    expect(r.value.candidates[0]?.id).toBe(SSN_FIELD);
+    // Pre-fix this was `ambiguous` (sibling `ssn`-token fields tied on score);
+    // the whole-name-exact pass now owns the unique target.
+    expect(r.value.disposition).toBe('exact');
+  });
+
+  it('the PHRASE synonym with a trailing type hint ("social security number field") still resolves exact', async () => {
+    const r = await resolveComponents(synStore, 'social security number field');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.candidates[0]?.id).toBe(SSN_FIELD);
+    expect(r.value.disposition).toBe('exact');
+  });
+});
+
+// =============================================================================
+// RESOLVE-OMNISCRIPT-TOKEN-DROPPED-FALSE-EXACT — an OmniStudio family word is a
+// TYPE-CONSTRAINING token, not filler. When the named family is uncovered, that
+// word anchors to nothing and is dropped from the coverage denominator, letting
+// the remaining noun ("application") fake a confident `exact` on an unrelated
+// object. A family-vocab query may only resolve `exact` when the top match is
+// actually of that family (or a literal whole-name hit); otherwise `ambiguous`.
+// =============================================================================
+describe('resolveComponents — OmniStudio family words type-constrain (never a false exact on the bare noun)', () => {
+  // Uncovered vault: an `Application`-flavoured object/field surface, but NO
+  // OmniStudio component of any kind.
+  let uncoveredDir: string;
+  let uncoveredStore: GraphStore;
+  // Covered vault: identical, plus one OmniScript so the family exists.
+  let coveredDir: string;
+  let coveredStore: GraphStore;
+
+  const APP_OBJ = 'CustomObject:Loan_Application__c';
+  const APP_FIELD = 'CustomField:Form_Response__c.Application__c';
+  const OMNI = 'OmniScript:Application_Intake';
+  // A dominant `*_Application__c` object (heavily referenced) so the bare noun
+  // "application" resolves to a SINGLE clear winner — this reproduces the real
+  // vault's false `exact` (one popular Application component out-scores the
+  // rest and is the sole contender). Without a dominant candidate the query is
+  // ambiguous anyway and the false-exact never occurs.
+  const baseNodes = [
+    makeNode({ id: APP_OBJ, apiName: 'Loan_Application__c', label: 'Loan Application' }),
+    makeNode({ id: 'CustomObject:Form_Response__c', apiName: 'Form_Response__c', label: 'Form Response' }),
+    // A field literally named `Application__c` — the whole-name-exact target for
+    // a bare "application" query, so the guard is proven not to over-fire.
+    makeNode({ id: APP_FIELD, type: 'CustomField', apiName: 'Application__c', label: 'Application', parentId: 'CustomObject:Form_Response__c' }),
+    // Referrers that make the object dominate on score (sole contender).
+    makeNode({ id: 'ApexClass:Ref1', type: 'ApexClass', apiName: 'Ref1' }),
+    makeNode({ id: 'ApexClass:Ref2', type: 'ApexClass', apiName: 'Ref2' }),
+    makeNode({ id: 'ApexClass:Ref3', type: 'ApexClass', apiName: 'Ref3' }),
+  ];
+  const baseEdges = [
+    makeEdge({ fromId: 'CustomObject:Form_Response__c', toId: APP_FIELD, edgeType: 'parentOf' }),
+    makeEdge({ fromId: 'ApexClass:Ref1', toId: APP_OBJ }),
+    makeEdge({ fromId: 'ApexClass:Ref2', toId: APP_OBJ }),
+    makeEdge({ fromId: 'ApexClass:Ref3', toId: APP_OBJ }),
+  ];
+
+  beforeAll(async () => {
+    uncoveredDir = mkdtempSync(join(tmpdir(), 'sfi-resolve-omni-uncov-'));
+    {
+      const instance = await DuckDBInstance.create(join(uncoveredDir, 'g.db'));
+      const connection = await instance.connect();
+      const init = await initSchema(connection);
+      if (!init.ok) throw new Error(init.error.message);
+      uncoveredStore = { connection, instance };
+      const imp = await importExtractionResults(uncoveredStore, [{ nodes: baseNodes, edges: baseEdges }]);
+      if (!imp.ok) throw new Error(imp.error.message);
+    }
+    coveredDir = mkdtempSync(join(tmpdir(), 'sfi-resolve-omni-cov-'));
+    {
+      const instance = await DuckDBInstance.create(join(coveredDir, 'g.db'));
+      const connection = await instance.connect();
+      const init = await initSchema(connection);
+      if (!init.ok) throw new Error(init.error.message);
+      coveredStore = { connection, instance };
+      const imp = await importExtractionResults(coveredStore, [{
+        nodes: [
+          ...baseNodes,
+          makeNode({ id: OMNI, type: 'OmniScript', apiName: 'Application_Intake', label: 'Application Intake' }),
+        ],
+        edges: baseEdges,
+      }]);
+      if (!imp.ok) throw new Error(imp.error.message);
+    }
+  });
+
+  afterAll(() => {
+    uncoveredStore.connection.disconnectSync();
+    uncoveredStore.instance.closeSync();
+    rmSync(uncoveredDir, { recursive: true, force: true });
+    coveredStore.connection.disconnectSync();
+    coveredStore.instance.closeSync();
+    rmSync(coveredDir, { recursive: true, force: true });
+  });
+
+  it('"omniscript application" is NOT a confident exact on the Application object when the Omni family is uncovered', async () => {
+    const r = await resolveComponents(uncoveredStore, 'omniscript application');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Pre-fix: `exact` on an Application object with evidence "exact match on
+    // application" — the `omniscript` token was silently dropped.
+    expect(r.value.disposition).not.toBe('exact');
+    expect(r.value.disposition).toBe('ambiguous');
+    // Recall preserved: the Application object(s) are still surfaced for the
+    // host to disambiguate — the fix demotes confidence, it does not hide them.
+    expect(
+      r.value.candidates.some((c) => c.apiName.toLowerCase().includes('application')),
+    ).toBe(true);
+  });
+
+  it('"flexcard application" (sibling family word) is likewise never a bare-noun exact when uncovered', async () => {
+    const r = await resolveComponents(uncoveredStore, 'flexcard application');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.disposition).not.toBe('exact');
+  });
+
+  it('a bare "application" query still resolves exact to the field literally named Application__c (no over-fire)', async () => {
+    const r = await resolveComponents(uncoveredStore, 'application');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.candidates[0]?.id).toBe(APP_FIELD);
+    expect(r.value.disposition).toBe('exact');
+  });
+
+  it('when the Omni family IS covered, a family-word query resolves exact to the matching OmniScript (guard exempts its own family)', async () => {
+    const r = await resolveComponents(coveredStore, 'omniscript application intake');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.candidates[0]?.id).toBe(OMNI);
+    expect(r.value.disposition).toBe('exact');
+  });
+});
+
+// =============================================================================
+// RESOLVE-STUDENT-APPLICATION-DROPS-OBJECT — a business phrase that NAMES an
+// object ("<qualifier> <object>") must surface the OBJECT as a candidate, not
+// only its qualifier fields. The object's own qualifier fields borrow its name
+// via parent-credit to reach full coverage and rank above it; the object's
+// partial coverage sinks it below the `limit` cut, leaving a fields-only result
+// the host can't turn into an object-level answer. Synthetic vault (no
+// real-org / education-schema names).
+// =============================================================================
+describe('resolveComponents — a named object is never sliced to a fields-only set (RESOLVE-STUDENT-APPLICATION-DROPS-OBJECT)', () => {
+  let objDir: string;
+  let objStore: GraphStore;
+  const OBJ = 'CustomObject:Widget__c';
+
+  beforeAll(async () => {
+    objDir = mkdtempSync(join(tmpdir(), 'sfi-resolve-named-object-'));
+    const instance = await DuckDBInstance.create(join(objDir, 'g.db'));
+    const connection = await instance.connect();
+    const init = await initSchema(connection);
+    if (!init.ok) throw new Error(init.error.message);
+    objStore = { connection, instance };
+    // The object plus THREE qualifier fields on it. For a "broken widget" query
+    // each field matches `broken` by name and `widget` via parent-credit (base
+    // 1.0, parent-matched, tier 0), while the object matches only `widget`
+    // (base ≈0.71, tier 1) and sorts below all three — so with a limit of 3 it
+    // is sliced out entirely, reproducing the fields-only bug.
+    const objSeed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: OBJ, apiName: 'Widget__c', label: 'Widget' }),
+        makeNode({ id: 'CustomField:Widget__c.Broken_Reason__c', type: 'CustomField', apiName: 'Broken_Reason__c', label: 'Broken Reason', parentId: OBJ }),
+        makeNode({ id: 'CustomField:Widget__c.Broken_Owner__c', type: 'CustomField', apiName: 'Broken_Owner__c', label: 'Broken Owner', parentId: OBJ }),
+        makeNode({ id: 'CustomField:Widget__c.Broken_Date__c', type: 'CustomField', apiName: 'Broken_Date__c', label: 'Broken Date', parentId: OBJ }),
+      ],
+      edges: [
+        makeEdge({ fromId: OBJ, toId: 'CustomField:Widget__c.Broken_Reason__c', edgeType: 'parentOf' }),
+        makeEdge({ fromId: OBJ, toId: 'CustomField:Widget__c.Broken_Owner__c', edgeType: 'parentOf' }),
+        makeEdge({ fromId: OBJ, toId: 'CustomField:Widget__c.Broken_Date__c', edgeType: 'parentOf' }),
+      ],
+    };
+    const imp = await importExtractionResults(objStore, [objSeed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+  });
+
+  afterAll(() => {
+    objStore.connection.disconnectSync();
+    objStore.instance.closeSync();
+    rmSync(objDir, { recursive: true, force: true });
+  });
+
+  it('surfaces the named object as a candidate even when qualifier fields fill the limit (never fields-only)', async () => {
+    // limit 3: the three qualifier fields would otherwise consume every slot and
+    // slice the object out. The object must still appear.
+    const r = await resolveComponents(objStore, 'broken widget', { limit: 3 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const candidateIds = r.value.candidates.map((c) => c.id);
+    expect(candidateIds).toContain(OBJ);
+    // The result is not fields-only — at least one CustomObject is present.
+    expect(r.value.candidates.some((c) => c.type === 'CustomObject')).toBe(true);
+    // A phrase naming an object + a qualifier is not a single confident hit.
+    expect(r.value.disposition).toBe('ambiguous');
+  });
+
+  it('surfaces the named object naturally when the limit is not a bottleneck (no over-fire)', async () => {
+    const r = await resolveComponents(objStore, 'broken widget');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.candidates.map((c) => c.id)).toContain(OBJ);
+  });
+
+  it('a bare object query still resolves the object confidently (single-token path untouched)', async () => {
+    const r = await resolveComponents(objStore, 'Widget__c');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.candidates[0]?.id).toBe(OBJ);
+    expect(r.value.disposition).toBe('exact');
+  });
+
+  // Hardened case: TWO objects are directly named by the phrase — the record
+  // business object AND a same-named platform-event look-alike (`*_Event__e`).
+  // The look-alike ties the object on score and sorts first by id, so it took
+  // the single rescue slot and MASKED the base object (the real-vault witness:
+  // "student application" surfaced only `Application_Event__e`, never the base
+  // Application object). The rescue must prefer the record object.
+  it('prefers the record business object over a same-named platform-event look-alike (never object-masked)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-resolve-object-lookalike-'));
+    const instance = await DuckDBInstance.create(join(dir, 'g.db'));
+    const connection = await instance.connect();
+    const init = await initSchema(connection);
+    if (!init.ok) throw new Error(init.error.message);
+    const store: GraphStore = { connection, instance };
+    const REC = 'CustomObject:Gadget__c';
+    const EVT = 'CustomObject:Gadget_Event__e';
+    const nodes: Node[] = [
+      makeNode({ id: REC, apiName: 'Gadget__c', label: 'Gadget' }),
+      makeNode({ id: EVT, apiName: 'Gadget_Event__e', label: 'Gadget Event' }),
+    ];
+    const edges: Edge[] = [];
+    // A flood of qualifier fields on the record object — parent-credit floats
+    // them to full coverage (tier 0), filling the limit and slicing BOTH objects
+    // to the tail where only one rescue slot exists.
+    for (const f of ['Broken_Reason__c', 'Broken_Owner__c', 'Broken_Date__c', 'Broken_Notes__c', 'Broken_Code__c']) {
+      const fid = `CustomField:Gadget__c.${f}`;
+      nodes.push(makeNode({ id: fid, type: 'CustomField', apiName: f, label: f.replace(/__c$/, ''), parentId: REC }));
+      edges.push(makeEdge({ fromId: REC, toId: fid, edgeType: 'parentOf' }));
+    }
+    const imp = await importExtractionResults(store, [{ nodes, edges }]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    try {
+      const r = await resolveComponents(store, 'broken gadget', { limit: 6 });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const ids = r.value.candidates.map((c) => c.id);
+      // The RECORD object must surface — a `*_Event__e` look-alike must not mask it.
+      expect(ids).toContain(REC);
+      expect(r.value.disposition).toBe('ambiguous');
+    } finally {
+      connection.disconnectSync();
+      instance.closeSync();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The gap the earlier tail-rescue missed (reconfirmed RED on a real vault): a
+  // second RECORD object that ALSO carries the phrase noun but whose name is
+  // MOSTLY OTHER words (`<noun>_Template_Item__c`, or here a broader `Student
+  // Enrollment Batch`) covers BOTH phrase tokens and so out-SCORES the base
+  // object and lands in the top-N. A score-only rescue then picked THAT
+  // look-alike (already present) and did nothing, leaving the base object — whose
+  // whole name IS the noun — omitted. The rescue must prefer the object the
+  // phrase most CENTRALLY names (its name is the noun) over an incidental
+  // same-noun object with extra qualifier words. Synthetic names only.
+  it('prefers the object the phrase most centrally names over a higher-scoring same-noun object with extra words', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-resolve-object-centrality-'));
+    const instance = await DuckDBInstance.create(join(dir, 'g.db'));
+    const connection = await instance.connect();
+    const init = await initSchema(connection);
+    if (!init.ok) throw new Error(init.error.message);
+    const store: GraphStore = { connection, instance };
+    // The base object: its ENTIRE name is the noun ("Enrollment"), so the phrase
+    // names it maximally — but it cannot contain the qualifier "student", so its
+    // anchor coverage (and base) is penalized and it sinks below the limit.
+    const BASE = 'CustomObject:Enrollment__c';
+    // A same-noun object whose name is mostly OTHER words. It covers BOTH phrase
+    // tokens (base 1.0) so it out-scores the base object and fills a top slot —
+    // the decoy that a score-only rescue wrongly preferred.
+    const DECOY = 'CustomObject:Student_Enrollment_Batch__c';
+    // A same-noun platform event (the earlier rescue already de-prioritized `__e`).
+    const EVT = 'CustomObject:Enrollment_Event__e';
+    const nodes: Node[] = [
+      makeNode({ id: BASE, apiName: 'Enrollment__c', label: 'Enrollment' }),
+      makeNode({ id: DECOY, apiName: 'Student_Enrollment_Batch__c', label: 'Student Enrollment Batch' }),
+      makeNode({ id: EVT, apiName: 'Enrollment_Event__e', label: 'Enrollment Event' }),
+    ];
+    const edges: Edge[] = [];
+    // Qualifier fields on the base object — each covers `student` by name and
+    // `enrollment` via parent-credit (base 1.0, tier 0), filling the limit and
+    // slicing the base object to the tail.
+    for (const f of ['Student_Status__c', 'Student_Region__c', 'Student_Cohort__c', 'Student_Advisor__c', 'Student_Campus__c']) {
+      const fid = `CustomField:Enrollment__c.${f}`;
+      nodes.push(makeNode({ id: fid, type: 'CustomField', apiName: f, label: f.replace(/__c$/, '').replace(/_/g, ' '), parentId: BASE }));
+      edges.push(makeEdge({ fromId: BASE, toId: fid, edgeType: 'parentOf' }));
+    }
+    const imp = await importExtractionResults(store, [{ nodes, edges }]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    try {
+      // limit 6: five base-1.0 qualifier fields + the base-1.0 decoy consume every
+      // slot; the base object (base ≈0.71) is sliced out. Pre-fix, the score-only
+      // rescue preferred the already-present decoy and left the base object absent.
+      const r = await resolveComponents(store, 'student enrollment', { limit: 6 });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const ids = r.value.candidates.map((c) => c.id);
+      // The base object — whose whole name IS the noun — must surface.
+      expect(ids).toContain(BASE);
+      // And it must not be a fields-only set that omits the noun's own object.
+      expect(r.value.candidates.some((c) => c.type === 'CustomObject')).toBe(true);
+      expect(r.value.disposition).toBe('ambiguous');
+    } finally {
+      connection.disconnectSync();
+      instance.closeSync();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// =============================================================================
+// RESOLVE-NETWORK-TOKEN-MISBINDS-CMDT — a bare query that IS a metadata TYPE
+// name ("Network" = the Experience Cloud community type) must not silently
+// exact-bind a merely SAME-NAMED schema component (a `Network_*__mdt` CMDT)
+// when real components of the named type exist. Synthetic vault (no real-org
+// names).
+// =============================================================================
+describe('resolveComponents — a type-name token does not silently bind a same-named CMDT (RESOLVE-NETWORK-TOKEN-MISBINDS-CMDT)', () => {
+  let netDir: string;
+  let netStore: GraphStore;
+  const CMDT = 'CustomObject:Network_Config__mdt';
+  const NETWORK = 'Network:Community_Network';
+
+  beforeAll(async () => {
+    netDir = mkdtempSync(join(tmpdir(), 'sfi-resolve-network-'));
+    const instance = await DuckDBInstance.create(join(netDir, 'g.db'));
+    const connection = await instance.connect();
+    const init = await initSchema(connection);
+    if (!init.ok) throw new Error(init.error.message);
+    netStore = { connection, instance };
+    const netSeed: ExtractionResult = {
+      nodes: [
+        // A CustomMetadataType whose name TOKEN-matches "network" (the false
+        // exact). CMDTs import as CustomObject with a `__mdt` api name.
+        makeNode({ id: CMDT, apiName: 'Network_Config__mdt', label: 'Network Config' }),
+        // A real Experience Cloud Network (community) — the type the token names.
+        makeNode({ id: NETWORK, type: 'Network', apiName: 'Community_Network', label: 'Community Network' }),
+      ],
+      edges: [],
+    };
+    const imp = await importExtractionResults(netStore, [netSeed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+  });
+
+  afterAll(() => {
+    netStore.connection.disconnectSync();
+    netStore.instance.closeSync();
+    rmSync(netDir, { recursive: true, force: true });
+  });
+
+  it('bare "Network" disambiguates across the Network type and the same-named CMDT (no silent CMDT bind)', async () => {
+    const r = await resolveComponents(netStore, 'Network');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Pre-fix: `exact` on the CMDT (higher type-weight than Network) — the
+    // Experience Cloud Network never surfaced as the confident answer.
+    expect(r.value.disposition).toBe('ambiguous');
+    const candidateIds = r.value.candidates.map((c) => c.id);
+    // Both families are offered so the host can pick the right one.
+    expect(candidateIds).toContain(NETWORK);
+    expect(candidateIds).toContain(CMDT);
+  });
+
+  it('the literal CMDT api name still resolves exact (guard exempts whole-name-exact hits)', async () => {
+    const r = await resolveComponents(netStore, 'Network_Config__mdt');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.candidates[0]?.id).toBe(CMDT);
+    expect(r.value.disposition).toBe('exact');
+  });
+
+  it('the literal Network api name still resolves exact to the Network component', async () => {
+    const r = await resolveComponents(netStore, 'Community_Network');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.candidates[0]?.id).toBe(NETWORK);
+    expect(r.value.disposition).toBe('exact');
+  });
+
+  it('when NO Network components exist, a bare "Network" query keeps its exact (guard is member-gated, not blanket)', async () => {
+    const soloDir = mkdtempSync(join(tmpdir(), 'sfi-resolve-network-solo-'));
+    const instance = await DuckDBInstance.create(join(soloDir, 'g.db'));
+    const connection = await instance.connect();
+    const init = await initSchema(connection);
+    if (!init.ok) throw new Error(init.error.message);
+    const soloStore: GraphStore = { connection, instance };
+    await importExtractionResults(soloStore, [{
+      nodes: [makeNode({ id: CMDT, apiName: 'Network_Config__mdt', label: 'Network Config' })],
+      edges: [],
+    }]);
+    try {
+      const r = await resolveComponents(soloStore, 'Network');
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      // No Network type members → the token is not confusable → exact stands.
+      expect(r.value.disposition).toBe('exact');
+      expect(r.value.candidates[0]?.id).toBe(CMDT);
+    } finally {
+      connection.disconnectSync();
+      instance.closeSync();
+      rmSync(soloDir, { recursive: true, force: true });
+    }
+  });
+
+  // Hardened recall case: real Experience Cloud Networks are named after the
+  // COMMUNITY (e.g. "Help Center", "Buyer Hub") — names that carry no "network"
+  // token and share no char-bigram with it, so the candidate prefilter never
+  // gathers them and the disposition demotion has nothing of the named type to
+  // offer (the real-vault witness: a bare "Network" surfaced only the same-named
+  // CMDT, zero `Network:` candidates). The named type's members must be surfaced
+  // even when their names never token-match the type word.
+  it('surfaces Network members named after the community (no "network" token) — not a CMDT-only set', async () => {
+    const commDir = mkdtempSync(join(tmpdir(), 'sfi-resolve-network-community-'));
+    const instance = await DuckDBInstance.create(join(commDir, 'g.db'));
+    const connection = await instance.connect();
+    const init = await initSchema(connection);
+    if (!init.ok) throw new Error(init.error.message);
+    const commStore: GraphStore = { connection, instance };
+    await importExtractionResults(commStore, [{
+      nodes: [
+        makeNode({ id: CMDT, apiName: 'Network_Config__mdt', label: 'Network Config' }),
+        makeNode({ id: 'Network:Help_Center', type: 'Network', apiName: 'Help_Center', label: 'Help Center' }),
+        makeNode({ id: 'Network:Buyer_Hub', type: 'Network', apiName: 'Buyer_Hub', label: 'Buyer Hub' }),
+      ],
+      edges: [],
+    }]);
+    try {
+      const r = await resolveComponents(commStore, 'Network');
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      // Not a confident CMDT bind, and at least one Network component is present.
+      expect(r.value.disposition).toBe('ambiguous');
+      const ids = r.value.candidates.map((c) => c.id);
+      expect(ids.some((i) => i.startsWith('Network:'))).toBe(true);
+      // The same-named CMDT is still offered so the host can pick either family.
+      expect(ids).toContain(CMDT);
+    } finally {
+      connection.disconnectSync();
+      instance.closeSync();
+      rmSync(commDir, { recursive: true, force: true });
+    }
+  });
+});

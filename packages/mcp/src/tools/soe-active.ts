@@ -37,7 +37,18 @@ export const isActiveSoeFirer = (node: Node): boolean => {
   if (
     node.type === 'WorkflowRule' ||
     node.type === 'ApprovalProcess' ||
-    node.type === 'ValidationRule'
+    node.type === 'ValidationRule' ||
+    // AssignmentRule / AutoResponseRule / EscalationRule each emit a required
+    // `active` boolean from their own `<active>` XML element (see the extractors),
+    // exactly like the workflow/validation/approval trio. Including them here lets
+    // the shared predicate mark a provably-inactive one of these as inactive — the
+    // reasoning engine's coupled-field-write liveness gate relies on it. The SOE
+    // composition tools do not currently route these three types through this
+    // predicate (their post-save-assignment phase does not call
+    // `skipInactiveSoeFirer`), so this is additive there — no SOE behavior change.
+    node.type === 'AssignmentRule' ||
+    node.type === 'AutoResponseRule' ||
+    node.type === 'EscalationRule'
   ) {
     const active = props['active'];
     if (typeof active === 'boolean') return active;
@@ -65,7 +76,10 @@ const inactiveReasonFor = (node: Node): string => {
   if (
     node.type === 'WorkflowRule' ||
     node.type === 'ApprovalProcess' ||
-    node.type === 'ValidationRule'
+    node.type === 'ValidationRule' ||
+    node.type === 'AssignmentRule' ||
+    node.type === 'AutoResponseRule' ||
+    node.type === 'EscalationRule'
   ) {
     return 'active: false';
   }

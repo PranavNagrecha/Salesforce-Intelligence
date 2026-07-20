@@ -16,7 +16,7 @@ import { extractCustomField } from '../src/custom-field.js';
  *   - a `count` rollup (no `<summarizedField>` — counting needs no source
  *     field), mirrors Contact.Number_of_Upcoming_Courses__c.
  *   - a `max` rollup with `<summarizedField>`, mirrors
- *     Contact.Last_FERPA_Training_Date__c.
+ *     Contact.Last_Sample_Training_Date__c.
  */
 
 const writeFieldXml = async (
@@ -38,34 +38,34 @@ const COUNT_ROLLUP_XML = `<?xml version="1.0" encoding="UTF-8"?>
     <fullName>Number_of_Upcoming_Courses__c</fullName>
     <label>Number of Upcoming Courses</label>
     <summaryFilterItems>
-        <field>Registered_Courses_Exam__c.Course_ID__c</field>
+        <field>Sample_Exam__c.Course_ID__c</field>
         <operation>notEqual</operation>
         <value></value>
     </summaryFilterItems>
     <summaryFilterItems>
-        <field>Registered_Courses_Exam__c.Course_Start_Date__c</field>
+        <field>Sample_Exam__c.Course_Start_Date__c</field>
         <operation>greaterOrEqual</operation>
         <value>1/1/2015</value>
     </summaryFilterItems>
-    <summaryForeignKey>Registered_Courses_Exam__c.Student_Name__c</summaryForeignKey>
+    <summaryForeignKey>Sample_Exam__c.Student_Name__c</summaryForeignKey>
     <summaryOperation>count</summaryOperation>
     <trackHistory>false</trackHistory>
     <type>Summary</type>
 </CustomField>
 `;
 
-/** Mirrors Contact/fields/Last_FERPA_Training_Date__c.field-meta.xml (real org shape). */
+/** Mirrors Contact/fields/Last_Sample_Training_Date__c.field-meta.xml (real org shape). */
 const MAX_ROLLUP_XML = `<?xml version="1.0" encoding="UTF-8"?>
 <CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
-    <fullName>Last_FERPA_Training_Date__c</fullName>
-    <label>Last FERPA Training Date</label>
-    <summarizedField>Training_Assignments__c.Completed_Date__c</summarizedField>
+    <fullName>Last_Sample_Training_Date__c</fullName>
+    <label>Last Sample Training Date</label>
+    <summarizedField>Widget_Assignments__c.Completed_Date__c</summarizedField>
     <summaryFilterItems>
-        <field>Training_Assignments__c.Status__c</field>
+        <field>Widget_Assignments__c.Status__c</field>
         <operation>equals</operation>
         <value>Completed</value>
     </summaryFilterItems>
-    <summaryForeignKey>Training_Assignments__c.Faculty_Contact__c</summaryForeignKey>
+    <summaryForeignKey>Widget_Assignments__c.Widget_Contact__c</summaryForeignKey>
     <summaryOperation>max</summaryOperation>
     <trackHistory>false</trackHistory>
     <type>Summary</type>
@@ -87,7 +87,7 @@ describe('CustomField roll-up-summary extraction', () => {
       const props = result.value.nodes[0]?.properties ?? {};
       expect(props['dataType']).toBe('Summary');
       expect(props['summaryForeignKey']).toBe(
-        'Registered_Courses_Exam__c.Student_Name__c',
+        'Sample_Exam__c.Student_Name__c',
       );
       expect(props['summaryOperation']).toBe('count');
       // OMIT-when-null: a count rollup has no source field to summarize.
@@ -100,7 +100,7 @@ describe('CustomField roll-up-summary extraction', () => {
   it('extracts summarizedField + summaryForeignKey + summaryOperation for a max rollup', async () => {
     const { dir, path } = await writeFieldXml(
       'Contact',
-      'Last_FERPA_Training_Date__c',
+      'Last_Sample_Training_Date__c',
       MAX_ROLLUP_XML,
     );
     try {
@@ -111,10 +111,10 @@ describe('CustomField roll-up-summary extraction', () => {
       const props = result.value.nodes[0]?.properties ?? {};
       expect(props['dataType']).toBe('Summary');
       expect(props['summarizedField']).toBe(
-        'Training_Assignments__c.Completed_Date__c',
+        'Widget_Assignments__c.Completed_Date__c',
       );
       expect(props['summaryForeignKey']).toBe(
-        'Training_Assignments__c.Faculty_Contact__c',
+        'Widget_Assignments__c.Widget_Contact__c',
       );
       expect(props['summaryOperation']).toBe('max');
     } finally {

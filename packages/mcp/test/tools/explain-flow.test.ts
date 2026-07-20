@@ -852,6 +852,46 @@ describe('explainFlowHandler', () => {
     expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
   });
 
+  // ---------------------------------------------------------------------------
+  // sfi.flow_graph cross-reference (spec §9 Q2 — KEEP + cross-ref, non-
+  // destructive). explain_flow is a SUMMARY over six axes; it must defer to
+  // flow_graph for the full element/connector structure and must never claim
+  // (via any field) to be that complete structural projection.
+  // ---------------------------------------------------------------------------
+  it('surfaces a seeAlso cross-reference pointing structure/connector questions at sfi.flow_graph', async () => {
+    const result = await explainFlowHandler(ctx, { flowId: FULL_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    expect(data.seeAlso).toContain('sfi.flow_graph');
+    // Names what THIS tool is (a summary) and what it does NOT enumerate —
+    // never implies the narrative is the complete element/connector graph.
+    expect(data.seeAlso).toMatch(/SUMMARY/);
+    expect(data.seeAlso).toMatch(/does NOT enumerate every element/);
+    expect(data.seeAlso).toMatch(/connector graph/);
+  });
+
+  it('surfaces the same seeAlso cross-reference for a minimal Flow (present regardless of body content)', async () => {
+    const result = await explainFlowHandler(ctx, { flowId: MINIMAL_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.seeAlso).toContain('sfi.flow_graph');
+  });
+
+  it('never claims completeness anywhere in the output (no "complete"/"entire"/"full structure" claim)', async () => {
+    // Non-destructive guard: explain_flow must not regress into re-adding a
+    // false-completeness claim now that flow_graph exists to defer to.
+    const result = await explainFlowHandler(ctx, { flowId: FULL_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    expect(data.disclosure).not.toMatch(/complete|entire structure|full structure/i);
+    expect(data.conditionsRuntimeNote).not.toMatch(/complete|entire structure/i);
+    // seeAlso is exempt: it explicitly negates completeness ("does NOT
+    // enumerate every element") rather than claiming it.
+    expect(data.seeAlso).toMatch(/does NOT enumerate/);
+  });
+
   it('surfaces the declared run mode, unhandled-fault flag, and a correct run-mode note', async () => {
     const result = await explainFlowHandler(ctx, { flowId: FULL_FLOW_ID });
     expect(result.ok).toBe(true);
@@ -1230,6 +1270,57 @@ describe('explainFlowHandler', () => {
   });
 });
 
+// EXPLAIN-FLOW-REJECTS-COMPONENTID: a host forwarding sfi.resolve's Flow id (as
+// `componentId` / `apiName`) must reach the SAME answer as the canonical `flowId`.
+describe('explainFlowHandler — componentId / apiName selectors', () => {
+  it('resolves a componentId selector to the SAME result as the canonical flowId', async () => {
+    const canonical = await explainFlowHandler(ctx, { flowId: FULL_FLOW_ID });
+    const viaComponentId = await explainFlowHandler(ctx, { componentId: FULL_FLOW_ID });
+    expect(canonical.ok).toBe(true);
+    expect(viaComponentId.ok).toBe(true);
+    if (!canonical.ok || !viaComponentId.ok) return;
+    // Byte-identical payload whichever selector the host supplied.
+    expect(viaComponentId.value.data).toEqual(canonical.value.data);
+    expect(viaComponentId.value.data.flowId).toBe(FULL_FLOW_ID);
+  });
+
+  it('resolves a bare apiName selector to the same Flow', async () => {
+    const canonical = await explainFlowHandler(ctx, { flowId: FULL_FLOW_ID });
+    const viaApiName = await explainFlowHandler(ctx, { apiName: 'Account_FullBody' });
+    expect(canonical.ok).toBe(true);
+    expect(viaApiName.ok).toBe(true);
+    if (!canonical.ok || !viaApiName.ok) return;
+    expect(viaApiName.value.data).toEqual(canonical.value.data);
+  });
+
+  it('rejects a wrong-type componentId with invalid-query (never a silent dead end)', async () => {
+    const result = await explainFlowHandler(ctx, { componentId: 'CustomObject:Account' });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+    expect(result.error.message).toContain('Flow:');
+  });
+
+  it('rejects disagreeing selectors with invalid-query', async () => {
+    const result = await explainFlowHandler(ctx, {
+      flowId: FULL_FLOW_ID,
+      componentId: 'Flow:Minimal',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+    expect(result.error.message).toContain('different targets');
+  });
+
+  it('rejects a call with no selector at all', async () => {
+    const result = await explainFlowHandler(ctx, {});
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+    expect(result.error.path).toBe('flowId');
+  });
+});
+
 describe('explainFlowInputSchema', () => {
   it('accepts a minimal well-formed input', () => {
     const parsed = explainFlowInputSchema.safeParse({
@@ -1243,9 +1334,16 @@ describe('explainFlowInputSchema', () => {
     expect(parsed.success).toBe(false);
   });
 
-  it('rejects a missing flowId', () => {
+  it('accepts a componentId / apiName alias in place of flowId', () => {
+    expect(explainFlowInputSchema.safeParse({ componentId: 'Flow:MyFlow' }).success).toBe(true);
+    expect(explainFlowInputSchema.safeParse({ apiName: 'MyFlow' }).success).toBe(true);
+  });
+
+  it('parses an empty object at the schema layer (the no-selector refusal is a handler-level invalid-query)', () => {
+    // All selectors are optional so an alias can stand in for flowId; the
+    // handler (not Zod) returns invalid-query when none is supplied.
     const parsed = explainFlowInputSchema.safeParse({});
-    expect(parsed.success).toBe(false);
+    expect(parsed.success).toBe(true);
   });
 });
 
@@ -1299,5 +1397,84 @@ describe('explainFlowHandler — bounded graph queries', () => {
     // A per-edge getNodeById across the three collectors would be >=180 node
     // queries at fanOut=200; batched, each collector is one node fetch.
     expect(large.nodeQueries).toBeLessThan(60);
+  });
+});
+
+// =============================================================================
+// BUG 7 — the decision row must surface the firer's REAL name (the Flow
+// decision `<name>` + rule `<name>`, captured onto the mirror as `sourceName`)
+// instead of the synthetic `condition-N` handle. When no name was captured,
+// it falls back to the synthetic apiName (unchanged behaviour / older vaults).
+// =============================================================================
+describe('explainFlowHandler — decision names (BUG 7)', () => {
+  const runWith = async (
+    mirrorEntry: Record<string, unknown>,
+  ): Promise<readonly { decisionName: string }[]> => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-explainflow-bug7-'));
+    const opened = await openGraph(join(dir, 'ef.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const s = opened.value;
+    const flowId = 'Flow:Decide';
+    const condId = 'ConditionalContext:Flow:Decide.condition-0';
+    const nodes: Node[] = [
+      makeNode({
+        id: flowId,
+        apiName: 'Decide',
+        properties: { conditions: [mirrorEntry] },
+      }),
+      makeNode({
+        id: condId,
+        type: 'ConditionalContext',
+        apiName: 'Flow:Decide.condition-0',
+        properties: {
+          kind: 'flow-decision',
+          expression: 'Ns__Obj__c.Status__c EqualTo Approved',
+          fieldRefs: ['CustomField:Ns__Obj__c.Status__c'],
+          synthesized: false,
+        },
+      }),
+    ];
+    const edges: Edge[] = [
+      makeEdge({
+        fromId: flowId,
+        toId: condId,
+        edgeType: 'firesWhen',
+        source: 'condition-extractor',
+        properties: { kind: 'flow-decision', conditionIndex: 0 },
+      }),
+    ];
+    const imported = await importExtractionResults(s, [{ nodes, edges }]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const c = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: s } as Context;
+    const result = await explainFlowHandler(c, { flowId });
+    await closeGraph(s);
+    rmSync(dir, { recursive: true, force: true });
+    if (!result.ok) throw new Error('explainFlowHandler failed');
+    return result.value.data.decisions;
+  };
+
+  it('renders the mirror `sourceName` as the decision row name', async () => {
+    const decisions = await runWith({
+      kind: 'flow-decision',
+      conditionContextId: 'ConditionalContext:Flow:Decide.condition-0',
+      expression: 'Ns__Obj__c.Status__c EqualTo Approved',
+      fieldRefs: ['CustomField:Ns__Obj__c.Status__c'],
+      sourceName: 'My_Decision (My_Outcome)',
+    });
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]?.decisionName).toBe('My_Decision (My_Outcome)');
+    // Not the synthetic handle.
+    expect(decisions[0]?.decisionName).not.toBe('Flow:Decide.condition-0');
+  });
+
+  it('falls back to the synthetic condition-N name when no sourceName captured', async () => {
+    const decisions = await runWith({
+      kind: 'flow-decision',
+      conditionContextId: 'ConditionalContext:Flow:Decide.condition-0',
+      expression: 'Ns__Obj__c.Status__c EqualTo Approved',
+      fieldRefs: ['CustomField:Ns__Obj__c.Status__c'],
+    });
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]?.decisionName).toBe('Flow:Decide.condition-0');
   });
 });

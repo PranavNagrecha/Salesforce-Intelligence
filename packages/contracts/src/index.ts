@@ -984,6 +984,25 @@ export interface McpResponse<T> {
     readonly sourceTreeHash: string;
     /** Manifest refresh timestamp. */
     readonly refreshedAt: string;
+    /**
+     * The Salesforce org alias/username this vault was built from
+     * (`manifest.sourceOrg`). Surfaced so a reader can tell — on the FIRST
+     * tool call — WHICH org an answer describes, instead of silently trusting
+     * whatever vault the server happened to bind to. Optional in the type
+     * (handlers omit it; it is stamped centrally at dispatch) but present on
+     * every real success response.
+     */
+    readonly targetOrg?: string;
+    /** Absolute path to the on-disk `org-kb` vault this answer came from. */
+    readonly vaultPath?: string;
+    /**
+     * The sf-intelligence version that BUILT this vault (`manifest.version`).
+     * When older than the running tool, the vault predates newer extraction —
+     * answers reflect the OLD analysis until re-refreshed. Makes a
+     * stale-vault wrong answer self-evident rather than indistinguishable
+     * from a code bug.
+     */
+    readonly builderVersion?: string;
   }>;
 }
 
@@ -1002,6 +1021,7 @@ export type PhantomClassification =
   | 'managed-extension' //     managed-package member (namespaced) — stub forever
   | 'standard-field-phantom' // standard object or a field on one — stub forever
   | 'grant-only' //            only permission grants reference it — stub forever
+  | 'unresolved-profile-id' // a Profile *Id* an extractor could not resolve to an api name (`UnresolvedProfile:{id}`) — enrich via an Id→apiName index / live Tooling, NEVER a wider retrieve manifest
   | 'unknown' //              referenced, but not by automation and not a pure grant target
 
 /** The knowledge tier the vault holds for a component: absent / L2 stub / L3 full. */
@@ -1146,4 +1166,1199 @@ export interface PageInfo {
    * input. A caller MUST NOT parse or construct it.
    */
   readonly nextCursor: string | null;
+}
+
+// ============================================================================
+// Reasoning model (RM-1a) — Concept / ConceptRule / Interpretation
+// ============================================================================
+
+/**
+ * A pointer to external (official Salesforce) documentation for a {@link Concept}.
+ *
+ * Mirrors the local `DocLink` in `packages/mcp/src/knowledge-topics.ts`; declared
+ * here so the reasoning-model contract is self-contained (the base `contracts`
+ * package must not import from `mcp`).
+ */
+export interface DocLink {
+  readonly label: string;
+  readonly url: string;
+}
+
+/**
+ * A stable identifier for a {@link Concept} (e.g. `field-custom-validation`).
+ * Kebab-case, curator-owned, category-level — NEVER a canonical component id
+ * (`Type:Name`). Org specificity enters the reasoning engine ONLY through the
+ * caller-supplied grounded slice, never through a Concept or ConceptRule.
+ */
+export type ConceptId = string;
+
+/**
+ * The category a {@link Concept} belongs to. A small closed union — the
+ * reasoning model is deliberately narrow. Every kind is generic Salesforce
+ * knowledge (a phase of the save order, a provenance class, an access
+ * mechanism), never anything org-specific.
+ */
+export type ConceptKind =
+  | 'status-code' //          a DML/save status code and what produces it.
+  | 'save-order-phase' //     a phase of the Salesforce order of execution.
+  | 'field-provenance' //     how a field's value is produced (formula / default / automation).
+  | 'relationship' //         a lookup / master-detail relationship between objects.
+  | 'automation-collision' // two automations that can contend on the same save.
+  | 'access-mechanism' //     a way access is granted or denied (CRUD / sharing / FLS).
+  | 'firing-condition' //     the condition under which a declarative firer runs.
+  | 'async-boundary' //       a transaction / async boundary (future / queueable / platform event).
+  | 'external-api-surface' //  an entry point exposed OUTSIDE the record UI (REST / Aura-LWC / Flow-invocable).
+  | 'code-quality-defect' //   a heuristic Apex code-quality defect recognized from tokenized source (injection / governor / hardcoded literal).
+  | 'test-quality'; //         a test-class quality signal (e.g. an assertion-less test that inflates coverage without verifying).
+
+/**
+ * A unit of generic Salesforce reasoning knowledge. Concepts are curator-owned,
+ * org-agnostic, and carry NO canonical component ids. A {@link ConceptRule} binds
+ * a concept to a structural shape in a grounded slice.
+ */
+/** Curated proactive-risk severity (EPIC-5). Optional on each concept. */
+export type ConceptSeverity = 'critical' | 'high' | 'medium' | 'low';
+
+export interface Concept {
+  readonly id: ConceptId;
+  readonly kind: ConceptKind;
+  readonly label: string;
+  readonly summary: string;
+  /** EPIC-5: drives proactive risk ranking in `sfi.interpret` output. */
+  readonly severity?: ConceptSeverity;
+  readonly docs?: readonly DocLink[];
+}
+
+/**
+ * The `properties.kind` discriminant a `ConditionalContext` node carries — the
+ * shape of the firing condition the node captures. Mirrors the extractor's
+ * `ConditionMirror['kind']`.
+ */
+export type ConditionKind = 'criteria' | 'formula' | 'flow-decision' | 'flow-recordtrigger';
+
+/**
+ * A SECOND-ground JOIN over a grounded slice (RM-loop) — the multi-edge
+ * reasoning primitive the scalar `RulePredicate` cannot express. It reaches
+ * from a firer F (selected by the enclosing predicate's `edgeType` /
+ * `componentTypes`) along that `edgeType` edge (e.g. `firesWhen`) to an
+ * intermediary node (`throughType`, e.g. `ConditionalContext`), EXPANDS that
+ * node's `throughKeyArray` array property to the shared keys X (an
+ * array-membership capability the scalar scalar-`===` matchers lack), then
+ * intersects with the OTHER endpoints W selected by a second edge
+ * `W --writeEdgeType--> X`. The engine emits one interpretation per grounded
+ * (F, X, W) triple. This carries NO component ids — org specificity still enters
+ * only through the caller-assembled slice. Only the engine's dedicated join
+ * path reads it; the scalar `runBind` ignores it entirely, so single-predicate
+ * rules are unaffected.
+ */
+export interface RuleJoin {
+  /**
+   * The node type reached at the `to` endpoint of the enclosing predicate's
+   * `edgeType` edge (the intermediary carrying the shared-key array), e.g.
+   * `ConditionalContext`. A reached node of any other type is skipped.
+   */
+  readonly throughType: ComponentType;
+  /**
+   * Optional filter on the intermediary node's `properties.kind`. When set, only
+   * a node whose `kind` is in this list is expanded — used to keep the join to
+   * genuine firing/entry-condition shapes (e.g. `criteria` / `formula` /
+   * `flow-recordtrigger`) and exclude mid-flow branch decisions.
+   */
+  readonly throughConditionKinds?: readonly ConditionKind[];
+  /**
+   * The ARRAY node-property on the intermediary whose members are the shared
+   * keys X (e.g. `fieldRefs`, an array of gated `CustomField` ids). Non-array or
+   * non-string members are skipped.
+   */
+  readonly throughKeyArray: string;
+  /**
+   * The edge type carrying the SECOND ground: an edge `W --writeEdgeType--> X`
+   * whose `to` is a shared key X and whose `from` is the coupled endpoint W
+   * (e.g. `writesTo`).
+   */
+  readonly writeEdgeType: EdgeType;
+  /** Optional: constrain the W endpoint (writer) to these component types. */
+  readonly writerTypes?: readonly ComponentType[];
+  /**
+   * Same-object scope: emit a coupling only when the shared key X lives on the
+   * SAME object as the firer F. X's object is parsed from its canonical
+   * `Type:Object.…` id; F's object is parsed the same way OR, when F's id carries
+   * no object segment (a record-triggered `Flow`), derived from F's `triggersOn`
+   * edge target (`Flow --triggersOn--> CustomObject:{Object}`). Excludes
+   * cross-object condition references; a firer with neither an object-bearing id
+   * nor a resolvable `triggersOn` object is conservatively excluded rather than
+   * assumed same-object.
+   */
+  readonly sameObject: boolean;
+  /**
+   * Exclude the self endpoint: never emit a coupling where the writer W IS the
+   * firer F (F both gates on and writes X). Part of the contract so the W≠F
+   * invariant is explicit and testable.
+   */
+  readonly excludeSelf: boolean;
+  /**
+   * P1-A REASONING-COUPLED-FIELD-WRITE-DEAD-PLANE — active-firer liveness gate.
+   * When true, a coupling is NOT emitted when its FIRER F is PROVABLY INACTIVE
+   * under the shared SOE `isActiveSoeFirer` predicate (a Draft/Obsolete Flow, an
+   * inactive ValidationRule/WorkflowRule/ApprovalProcess/Assignment/AutoResponse/
+   * Escalation rule, an Inactive ApexTrigger). An inactive gate does not run, so
+   * citing it as a live coupling is a dead-plane false positive. A status-less /
+   * always-live firer (e.g. an ApexClass) is KEPT (conservative prior — only a
+   * PROVABLY-inactive firer is dropped). Omitted ⇒ no liveness gate (every firer
+   * eligible), byte-identical to before.
+   */
+  readonly excludeInactiveFirer?: boolean;
+  /**
+   * P1-A REASONING-COUPLED-FIELD-WRITE-DEAD-PLANE — test-writer plane gate.
+   * When true, a writer W whose node is a TEST class (`isTest === true`, the
+   * unconditionally-present ApexClass boolean) is EXCLUDED from the coupling: a
+   * test-only Apex writer runs only while a test executes and never establishes a
+   * production write path, so it must never be conflated into a production
+   * coupling. A production (non-test / non-ApexClass) writer is unaffected.
+   * Omitted ⇒ every writer eligible, byte-identical to before.
+   */
+  readonly excludeTestWriter?: boolean;
+  /**
+   * REASONING-COUPLED-FIELD-WRITE-DEAD-PLANE — inactive-writer plane gate.
+   * When true, a writer W whose node is PROVABLY INACTIVE under the shared SOE
+   * `isActiveSoeFirer` predicate (a Draft/Obsolete/Inactive Flow, an Inactive
+   * ApexTrigger, an inactive WorkflowRule/ApprovalProcess) is EXCLUDED from the
+   * coupling: a non-runnable writer cannot establish a live "also writes" path,
+   * so citing it is a dead-plane false positive. This is the WRITER-side twin of
+   * {@link excludeInactiveFirer} — it closes the residual where an Obsolete Flow
+   * writer (which no `excludeTestWriter` isTest check catches) was still cited as
+   * a live coupling. A status-less / always-live writer (e.g. a production
+   * ApexClass) is KEPT (conservative prior — only a PROVABLY-inactive writer is
+   * dropped). Omitted ⇒ every writer eligible, byte-identical to before.
+   */
+  readonly excludeInactiveWriter?: boolean;
+  /**
+   * EC-5 — when set, only emit couplings whose proven cross-phase direction
+   * matches. `writer-earlier` = W runs strictly before F (computed-gate upgrade);
+   * `writer-later` = W runs strictly after F (C10: the gate can never observe the
+   * write). Omitted ⇒ every grounded coupling is emitted (byte-identical to the
+   * pre-filter path); the earlier upgrade template still applies only when the
+   * direction is writer-earlier.
+   */
+  readonly phaseFilter?: 'writer-earlier' | 'writer-later';
+}
+
+
+/**
+ * An AGGREGATE group-count predicate over a grounded slice (RM-loop) — the
+ * cardinality primitive the scalar per-edge / per-node matchers cannot express.
+ * The enclosing predicate's `edgeType` (+ `componentTypes`) selects the edges
+ * INCOMING to the ROOT node (e.g. `triggersOn` edges from `Flow` firers into the
+ * queried `CustomObject`); this `aggregate` then GROUPS those surviving edges by
+ * one of their own properties, COUNTS the distinct qualifying endpoints per
+ * group, and fires once per group whose count satisfies `op threshold`. Carries
+ * NO component ids — org specificity still enters only through the slice.
+ *
+ * The canonical use is "how many ACTIVE record-triggered Flows fire on this
+ * object in the same TRIGGER CONTEXT?": `edgeType: triggersOn`, `componentTypes:
+ * [Flow]`, `groupByEdgeProperty: triggerType` (mapped by the engine to one of
+ * three DISJOINT contexts — before-save / after-save / before-delete),
+ * `endpointWhereProperty: { key: status, equals: Active }` (the LOAD-BEARING
+ * active filter — an obsolete / draft / invalid-draft Flow VERSION is never
+ * counted), `op: gte`, `threshold: 2` (the Salesforce
+ * one-record-triggered-flow-per-object-per-context best practice). A
+ * before-delete flow runs on the DELETE path and never co-executes with a
+ * save-timing flow, so it is bucketed apart — never mislabeled a save collision.
+ * Only the engine's dedicated aggregate path reads it; the scalar `runBind`
+ * never does.
+ */
+export interface RuleAggregate {
+  /**
+   * The counted `edgeType` edge's OWN property to GROUP by (e.g. `triggerType`,
+   * which the engine maps to a before-save / after-save / before-delete trigger
+   * context). Omitted ⇒ one undifferentiated group over every surviving edge
+   * (the junction-object count: no bucketing, one exactly-N test).
+   */
+  readonly groupByEdgeProperty?: string;
+  /**
+   * The counted edge's OWN property carrying the DML-event discriminator
+   * (`recordTriggerType`) that further SPLITS each `groupByEdgeProperty` bucket by
+   * the concrete DML operation the flow fires on
+   * (REASONING-STACKED-FLOWS-IGNORES-RECORD-TRIGGER-TYPE). Only meaningful WITH
+   * `groupByEdgeProperty` (event-split refines a timing context into its insert /
+   * update / delete sub-buckets); a `CreateAndUpdate` flow lands in BOTH the insert
+   * and update buckets, a `Create`-only flow ONLY in insert, an `Update`-only flow
+   * ONLY in update — so two mutually-exclusive flows never share a bucket and can
+   * never fabricate a same-save collision. Sub-buckets with IDENTICAL membership
+   * (an all-`CreateAndUpdate` stack) are merged into one claim ("insert or update").
+   * Omitted ⇒ each timing context is one bucket (byte-identical to the pre-split
+   * path). The engine derives the event set from this property's value; the mapping
+   * is record-trigger-specific (mirrors `groupByEdgeProperty`'s trigger-context
+   * mapping).
+   */
+  readonly eventSplitByProperty?: string;
+  /**
+   * WHICH edges the count ranges over, relative to the ROOT node. Defaults to
+   * `root-incident` — the shipped stacked-flows path: the counted `edgeType`
+   * edges INCOMING to the root (`edge.toId === rootId`). `root-children-outgoing`
+   * counts the `edgeType` edges whose FROM node is a `CustomField` whose
+   * `parentId === rootId` — i.e. edges hanging off the root OBJECT's own fields,
+   * never off the object node. That is the junction shape: a master-detail
+   * `lookupTo` edge lives on the child's FIELD, so counting an object's distinct
+   * master-detail parents is a 2-hop (object → its fields → their parents), not
+   * an incident-edge count. Omitted ⇒ `root-incident` (byte-identical to the
+   * shipped path). `root-outgoing` counts edges whose FROM is the root
+   * (`edge.fromId === rootId`) — parentOf SharingRule children, subflow
+   * references, and similar direct outgoing structural edges.
+   */
+  readonly edgeSource?: 'root-incident' | 'root-children-outgoing' | 'root-outgoing';
+  /**
+   * Count an endpoint only when the ENDPOINT NODE satisfies this
+   * {@link WhereClause} (e.g. `status === 'Active'`, or `status notIn
+   * ['Active']` for inactive subflow targets). A non-matching or status-less
+   * endpoint is NEVER counted, so the rule cannot cry wolf over dead metadata.
+   */
+  readonly endpointWhereProperty?: WhereClause;
+  /**
+   * Count an edge only when the EDGE's OWN `properties[key]` strictly equals
+   * `equals` (e.g. a `lookupTo` edge with `relationshipType === 'MasterDetail'`,
+   * so a plain lookup never counts toward a junction). Mirrors
+   * {@link RulePredicate.edgeWhereProperty} but for the aggregate's counted edge.
+   * Omitted ⇒ the counted edge is unconstrained by its own properties.
+   */
+  readonly countedEdgeWhereProperty?: { readonly key: string; readonly equals: unknown };
+  /**
+   * WHICH endpoint of the counted edge is deduped, cited, and DISTINCT-counted.
+   * Defaults to `from` — the shipped path dedups the firer (`edge.fromId`).
+   * `to` dedups the TARGET (`edge.toId`): for the junction count that is the
+   * distinct PARENT object, so two master-detail fields pointing at the same
+   * parent count as ONE parent, never two.
+   */
+  readonly countDistinctEndpoint?: 'from' | 'to';
+  /**
+   * The comparison. `gte` (count >= threshold) is the stacked-flows collision
+   * test; `eq` (count === threshold) is the exact-cardinality test a junction
+   * object needs (EXACTLY two master-detail parents — three is not a junction).
+   * Omitted when `firstMatchOrdinal` is set (the first-match path ignores them).
+   */
+  readonly op?: 'gte' | 'eq';
+  /** The count threshold a group must satisfy under `op` to fire. Omitted with `firstMatchOrdinal`. */
+  readonly threshold?: number;
+  /**
+   * EC-14 — ordinal/first-match aggregate (D10 assignment/escalation ordering).
+   * When set, `op` / `threshold` are IGNORED and the engine evaluates counted
+   * edges in ascending order of `ordinalEdgeProperty` on each edge's OWN
+   * properties. A "broad" entry (matching `broadEntryWhere`) that appears
+   * BEFORE a "specific" entry (NOT matching `broadEntryWhere`) starves every
+   * later entry — Salesforce first-match top-down evaluation means the
+   * catch-all wins on every record. FAIL CLOSED: if ANY counted edge lacks
+   * `ordinalEdgeProperty` as a number, or lacks a property key referenced in
+   * `broadEntryWhere`, the rule yields `[]` (ordering cannot be grounded).
+   * Mutually exclusive with `groupByEdgeProperty`, `eventSplitByProperty`,
+   * and the count path — only the first-match path runs.
+   */
+  readonly firstMatchOrdinal?: RuleFirstMatchOrdinal;
+}
+
+/**
+ * EC-14 — the ordinal/first-match slice of {@link RuleAggregate}. Carries NO
+ * component ids; org specificity enters only through the grounded slice.
+ */
+export interface RuleFirstMatchOrdinal {
+  /**
+   * The counted edge's OWN property carrying the top-down evaluation ordinal
+   * (e.g. `entryIndex` on AssignmentRule `references` edges). MUST be a
+   * number on every counted edge or the rule fails closed.
+   */
+  readonly ordinalEdgeProperty: string;
+  /**
+   * An edge is "broad" (a catch-all) when its OWN `properties` satisfy this
+   * {@link WhereClause} (ANDed). D10: `criteriaItemCount === 0` AND
+   * `hasFormula === false` — no criteria and no formula filter.
+   */
+  readonly broadEntryWhere: WhereClause | readonly WhereClause[];
+}
+
+/**
+ * ONE `whereProperty` clause — a property `key` plus EXACTLY ONE comparison
+ * operator. The scalar-equals form (`{ key, equals }`) is the original and stays
+ * byte-identical; the operator-class forms (`in` / `notIn` / `neq` / `isNull`) are
+ * a STRICTLY ADDITIVE extension for concepts that need set / inequality membership
+ * or a nullish (no-value) test a bare equals cannot express (e.g. "kind ∈
+ * {criteria, formula, flow-recordtrigger}", or "defaultValue has no value"). Each
+ * clause carries `key` and exactly one operator key; the validator
+ * ({@link https://…/build-concept-model.mjs} `assertWhereClause`) rejects zero or
+ * more-than-one operator, so the runtime discriminates on which operator key is
+ * present. Semantics against `properties[key]` (call it `actual`, `undefined` when
+ * the property is absent), all STRICT (no coercion):
+ *   - `equals`  → `actual === equals` (unchanged — the byte-identical path);
+ *   - `in`      → `in.includes(actual)`   (membership; an absent property, i.e.
+ *                 `undefined`, is not a member unless `undefined` is listed);
+ *   - `notIn`   → `!notIn.includes(actual)` (the complement — an absent property
+ *                 SATISFIES `notIn`, mirroring `!==`);
+ *   - `neq`     → `actual !== neq` (an absent property SATISFIES `neq`);
+ *   - `isNull`  → NULLISH test: `isNull: true` matches when `actual` is `null`
+ *                 OR `undefined` (present-as-null OR absent — both mean "no value
+ *                 here"); `isNull: false` matches a PRESENT value, which INCLUDES
+ *                 the falsy-but-present `false` / `0` / `''` (it is NOT a truthy
+ *                 test — only `null` / `undefined` fail it).
+ *   - `isEmpty` → EMPTY-ARRAY test (EC-11): `isEmpty: true` matches when
+ *                 `actual` is a PRESENT array with `length === 0`; `isEmpty:
+ *                 false` matches a PRESENT array with `length > 0`. A
+ *                 non-array, `null`, or ABSENT property NEVER matches either
+ *                 polarity (fail closed — do not equate missing with empty).
+ * `in` / `notIn` take a NON-EMPTY array of scalars; `equals` / `neq` a single
+ * scalar; `isNull` / `isEmpty` a boolean. All non-boolean-operator values are
+ * org-agnostic scalars — the no-canonical-id gate scans every operand. The
+ * positive operators (`equals`, `in`) require the property PRESENT to match (a
+ * missing property yields `undefined`, which no non-`undefined` operand equals /
+ * contains); the negative operators (`neq`, `notIn`) MATCH on absence — a rule
+ * needing "present AND ≠ X" must AND a positive presence clause. `isNull`
+ * explicitly discriminates present from absent/null; `isEmpty` requires a
+ * present array and never treats absence as empty.
+ *
+ * The `anyElement` operator is the EXISTENTIAL array-element matcher (CAP-A /
+ * CAP-B) — the one form above that reads an ARRAY-valued property rather than a
+ * scalar. `properties[key]` must be an array; the clause HOLDS iff SOME element
+ * satisfies the inner {@link ArrayElementClause} (`Array.some`). A non-array,
+ * absent, or EMPTY array ⇒ does NOT hold (a `some` over `[]` is `false`, and a
+ * non-array short-circuits to `false`) — the existential never fires on "no
+ * elements". The inner clause is ONE scalar comparison (`equals` | `in` | `notIn`
+ * | `neq`) applied to each element, in two modes selected by whether the inner
+ * carries a `key`:
+ *   - OBJECT-element mode (`anyElement.key` PRESENT): each element must be an
+ *     object; the operator matches against `element[anyElement.key]` (a non-object
+ *     element does NOT match). This is the `ApexClass.qualityIssues[].rule ∈ {…}`
+ *     shape — `{ key: 'qualityIssues', anyElement: { key: 'rule', in: [...] } }`.
+ *   - SCALAR-array mode (`anyElement.key` ABSENT): the element IS the value; the
+ *     operator matches against the element directly. This is the
+ *     `ApexTrigger.events` `string[]` membership shape —
+ *     `{ key: 'events', anyElement: { in: [...] } }`.
+ * `anyElement` is the clause's SINGLE operator (the exactly-one-operator gate
+ * counts it), so it never mixes with a sibling scalar operator on the same clause;
+ * an outer AND-array composes it with scalar clauses (e.g. `isTest === false` AND
+ * `qualityIssues[]` has a soql-injection). The inner clause deliberately does NOT
+ * support `isNull` or nested `anyElement` — it is a flat scalar comparison over
+ * one array's elements. Every inner operand is an org-agnostic scalar; the
+ * no-canonical-id gate scans the inner `key` and operand(s) too.
+ */
+export type WhereClause =
+  | { readonly key: string; readonly equals: unknown }
+  | { readonly key: string; readonly in: readonly unknown[] }
+  | { readonly key: string; readonly notIn: readonly unknown[] }
+  | { readonly key: string; readonly neq: unknown }
+  | { readonly key: string; readonly isNull: boolean }
+  | { readonly key: string; readonly isEmpty: boolean }
+  | { readonly key: string; readonly anyElement: ArrayElementClause };
+
+/**
+ * The inner comparison an {@link WhereClause} `anyElement` existential applies to
+ * EACH element of the outer array-valued property (see the `anyElement` operator
+ * note on {@link WhereClause}). Exactly ONE scalar comparison operator per clause
+ * (`equals` | `in` | `notIn` | `neq` — a strict subset of the outer operators:
+ * NO `isNull`, NO nested `anyElement`). The OPTIONAL `key` selects the mode:
+ *   - PRESENT ⇒ object-element mode: match `element[key]` (a non-object element
+ *     never matches);
+ *   - ABSENT ⇒ scalar-array mode: the element IS the value, matched directly.
+ * Semantics of each operator against the resolved element value mirror the
+ * scalar {@link WhereClause} exactly (strict `===` / `!==`, `Array.includes`
+ * membership). `in` / `notIn` take a NON-EMPTY scalar array; `equals` / `neq` a
+ * single scalar. Every operand is an org-agnostic scalar scanned by the
+ * no-canonical-id gate.
+ */
+export type ArrayElementClause =
+  | { readonly key?: string; readonly equals: unknown }
+  | { readonly key?: string; readonly in: readonly unknown[] }
+  | { readonly key?: string; readonly notIn: readonly unknown[] }
+  | { readonly key?: string; readonly neq: unknown };
+
+/**
+ * A STRUCTURAL matcher over a grounded slice. Predicates match by type and
+ * category ONLY — they contain NO component ids, so a rule can never smuggle in
+ * org specificity. Every supplied field is a conjunctive constraint; an omitted
+ * field is unconstrained. When `edgeType` is set the predicate matches edges;
+ * otherwise it matches nodes.
+ */
+export interface RulePredicate {
+  /** Match edges of this type (and, when set, constrains this to an edge predicate). */
+  readonly edgeType?: EdgeType;
+  /** Match nodes of these types (edge predicate: an endpoint must be one of these). */
+  readonly componentTypes?: readonly ComponentType[];
+  /** Match a `ConditionalContext`-style node by its `properties.kind`. */
+  readonly conditionKind?: ConditionKind;
+  /**
+   * Match elements by a {@link WhereClause} on their `properties`. A single
+   * clause is one constraint; a NON-EMPTY ARRAY of them is the AND of every
+   * element — each clause must hold — an all-conjunctive multi-property match on
+   * ONE element (e.g. an ApexClass that is BOTH `without sharing` AND externally
+   * reachable). The array is AND-only; it cannot express OR at the clause level,
+   * so an "A OR B" match across two DIFFERENT keys still needs separate rules —
+   * but the `in` operator expresses "one key ∈ a set of values" in a single
+   * clause (e.g. `{ key: kind, in: [criteria, formula, flow-recordtrigger] }`).
+   * Each clause carries `key` + exactly one operator (`equals` | `in` | `notIn` |
+   * `neq` | `isNull` | `isEmpty` | `anyElement`); the scalar-`equals` form is
+   * byte-identical to before. The scalar operators read a SCALAR property; the
+   * `isEmpty` operator reads an ARRAY-valued property (empty vs non-empty);
+   * the `anyElement` operator reads an ARRAY-valued property and holds iff SOME
+   * element satisfies its inner {@link ArrayElementClause} (e.g. `{ key:
+   * qualityIssues, anyElement: { key: rule, in: [...] } }`). The scalar and array
+   * forms behave identically on the node branch and, for an edge predicate, on
+   * the edge's own properties.
+   */
+  readonly whereProperty?: WhereClause | readonly WhereClause[];
+  /**
+   * Match EDGES whose OWN `properties[key]` strictly equals `equals` (edge
+   * predicate only — additive to the node-oriented `whereProperty`). Lets a rule
+   * bind an edge by one of its own properties, e.g. a `lookupTo` edge with
+   * `relationshipType === 'MasterDetail'`. Ignored by the node-shaped branch.
+   */
+  readonly edgeWhereProperty?: { readonly key: string; readonly equals: unknown };
+  /**
+   * EC-4 — match EDGES only when the `to` endpoint NODE satisfies this
+   * {@link WhereClause} (e.g. a `references` edge whose target is `isFormula`).
+   * A missing / non-matching endpoint node fails closed (edge does not match).
+   * Ignored by the node-shaped branch. Mutually compatible with
+   * {@link fromWhereProperty}.
+   */
+  readonly toWhereProperty?: WhereClause | readonly WhereClause[];
+  /**
+   * EC-4 — match EDGES only when the `from` endpoint NODE satisfies this
+   * {@link WhereClause}. Missing / non-matching endpoint ⇒ fail closed.
+   */
+  readonly fromWhereProperty?: WhereClause | readonly WhereClause[];
+  /**
+   * EC-7 — match EDGES only when the object scope of the `to` endpoint is in
+   * this curated, org-agnostic name set (e.g. Salesforce setup objects:
+   * `User`, `Group`, `PermissionSet`). Object scope is parsed from
+   * `CustomObject:X` or `Type:Object.…` ids. Missing / unparseable ⇒ fail closed.
+   */
+  readonly toObjectIn?: readonly string[];
+  /**
+   * EC-16 — match EDGES only when the `to` endpoint NODE's component TYPE is in
+   * this set (e.g. a `references` edge whose target must be a `CustomPermission`,
+   * not any node the source happens to reference). Distinct from
+   * {@link toObjectIn} (object-scope) and {@link toWhereProperty} (node
+   * properties): this gates on the endpoint's component TYPE. A missing endpoint
+   * node fails closed (edge does not match). Ignored by the node-shaped branch.
+   */
+  readonly toTypeIn?: readonly string[];
+  /** EC-16 — as {@link toTypeIn} but on the `from` endpoint. Missing ⇒ fail closed. */
+  readonly fromTypeIn?: readonly string[];
+  /** Match elements whose `properties.order` equals this value. */
+  readonly order?: number;
+  /**
+   * A multi-edge JOIN over a SECOND ground (RM-loop). When set, the enclosing
+   * predicate's scalar fields select the firer side (the `edgeType` via-edge +
+   * `componentTypes` firer types) and this `join` carries the writer side, the
+   * shared key, and the scope. The engine's dedicated join path handles it; the
+   * scalar node/edge matchers ignore it, so a predicate WITHOUT `join` behaves
+   * exactly as before.
+   */
+  readonly join?: RuleJoin;
+  /**
+   * An AGGREGATE group-count over the ROOT node's incoming `edgeType` edges
+   * (RM-loop). When set, the enclosing predicate's `edgeType` / `componentTypes`
+   * select the counted edges and their endpoint types, and this `aggregate`
+   * carries the grouping, the endpoint active-filter, and the count comparison
+   * (see {@link RuleAggregate}). The engine's dedicated aggregate path handles
+   * it; the scalar node / edge matchers and the join path ignore it, so a
+   * predicate WITHOUT `aggregate` behaves exactly as before. Mutually exclusive
+   * with `join`, `dualEdge`, `antiJoin`, `setDifference`, `propertyCompare`,
+   * and `fieldJoin`.
+   */
+  readonly aggregate?: RuleAggregate;
+  /**
+   * EC-6 / EC-11 — single-node dual-edge object-scope. When set, the engine
+   * requires ONE node (the root) to be the `from` endpoint of BOTH `edgeTypeA`
+   * and `edgeTypeB` edges in the slice. `sameObject: true` requires matching
+   * object scopes (C11); `sameObject: false` requires DIFFERENT object scopes
+   * (D4). Mutually exclusive with `join`, `aggregate`, `antiJoin`,
+   * `setDifference`, `propertyCompare`, and `fieldJoin`. The enclosing
+   * predicate's `componentTypes` / `whereProperty` still filter the root node;
+   * `edgeType` on the outer predicate is unused.
+   */
+  readonly dualEdge?: RuleDualEdge;
+  /**
+   * EC-8 — present-A / absent-B anti-join. The enclosing predicate selects the
+   * PRESENT side (edge or node); this `antiJoin` describes the ABSENT side and
+   * how the two correlate. The rule fires only when a present match has NO
+   * correlating absent edge. Because the fire condition is absence of B, the
+   * engine ALWAYS applies absence-shaped coverage honesty (incomplete coverage
+   * ⇒ "not checked", never a confident "absent/inert/safe" claim). Mutually
+   * exclusive with `join`, `aggregate`, `dualEdge`, `setDifference`,
+   * `propertyCompare`, and `fieldJoin`.
+   */
+  readonly antiJoin?: RuleAntiJoin;
+  /**
+   * EC-9 — set-difference JOIN. The enclosing predicate's `componentTypes` /
+   * `whereProperty` select the ROOT (e.g. a PermissionSetGroup); this
+   * `setDifference` collects two OUTGOING edge sets from that root — INCLUDE
+   * (union side) and SUBTRACT (denial side) — and fires when the include set is
+   * non-empty and (by default) the subtract set is also non-empty. Citations
+   * name the root plus both endpoint sets. STRUCTURAL only: the engine does NOT
+   * expand member grants or mute-property matrices into an effective permission
+   * table. Mutually exclusive with `join`, `aggregate`, `dualEdge`,
+   * `antiJoin`, `propertyCompare`, and `fieldJoin`.
+   */
+  readonly setDifference?: RuleSetDifference;
+  /**
+   * EC-12 — property-vs-property comparison on ONE root node. Compares two
+   * properties of the same node after mapping both through a named ordinal
+   * rank table (e.g. OWD permissiveness for D8). Mutually exclusive with
+   * `join`, `aggregate`, `dualEdge`, `antiJoin`, `setDifference`, `fieldJoin`,
+   * and `propertyEqualsEndpoint`. The enclosing predicate's `componentTypes` /
+   * `whereProperty` still filter the root; `edgeType` on the outer predicate is
+   * unused.
+   */
+  readonly propertyCompare?: RulePropertyCompare;
+  /**
+   * EC-10 — intra-object name-based field join. Resolves a sibling CustomField
+   * on the SAME object by matching `nameProperty` (an API-name string on the
+   * root) to the sibling's field API name, then optionally computes a
+   * set-difference of array-element values (C18 orphaned dependent-picklist
+   * controlling values). Mutually exclusive with `join`, `aggregate`,
+   * `dualEdge`, `antiJoin`, `setDifference`, `propertyCompare`,
+   * `propertyEqualsEndpoint`, and `crossObjectCascade`.
+   */
+  readonly fieldJoin?: RuleFieldJoin;
+  /**
+   * D9 / property-equals-endpoint — compare a NODE PROPERTY on the root (an
+   * object API name, e.g. a Flow's declared `triggerObject`) to the OBJECT
+   * SCOPE of one of the root's OUTGOING `endpointEdgeType` edges (e.g. a
+   * `writesTo` DML target), optionally gated by the endpoint edge's own
+   * properties (`endpointEdgeWhereProperty`, e.g. `operation ∈ DML`). Fires on
+   * the first endpoint whose object `equal`s (or, with `notEqual`, differs
+   * from) the node-property value. Unlike EC-6 `dualEdge` — which reads the
+   * trigger object from a `triggersOn` EDGE and matches ANY writesTo, including
+   * a non-reentrant before-save in-place `$Record` field assignment — this
+   * grounds the trigger object on the DECLARED node property and can gate the
+   * write to an actual DML statement, isolating genuine self-DML re-entry.
+   * Mutually exclusive with `join`, `aggregate`, `dualEdge`, `antiJoin`,
+   * `setDifference`, `propertyCompare`, `fieldJoin`, and `crossObjectCascade`.
+   * The enclosing predicate's `componentTypes` / `whereProperty` still filter
+   * the root; `edgeType` on the outer predicate is unused.
+   */
+  readonly propertyEqualsEndpoint?: RulePropertyEqualsEndpoint;
+  /**
+   * EC-11 — cross-object cascade-save 2-edge join (D3). Distinct from
+   * {@link dualEdge} (single-node, both edges leave the root): here the writer
+   * root emits a `writerTriggerEdge` (its OWN trigger object A) and a
+   * `writeEdge` to a DIFFERENT object B, AND that TARGET object B carries its
+   * OWN incoming automation edge (one of `targetIncomingEdgeTypes`, from some
+   * node other than the writer) — so a save on B triggered by the cross-object
+   * write runs B's full save order inside the SAME transaction, sharing the
+   * governor budget. The second edge is INCOMING to the first edge's target,
+   * which the single-node dual-edge cannot express. Mutually exclusive with
+   * `join`, `aggregate`, `dualEdge`, `antiJoin`, `setDifference`,
+   * `propertyCompare`, `fieldJoin`, and `propertyEqualsEndpoint`. The enclosing
+   * predicate's `componentTypes` / `whereProperty` still filter the writer root.
+   */
+  readonly crossObjectCascade?: RuleCrossObjectCascade;
+}
+
+/**
+ * EC-12 — compare two properties on the SAME root node via a named ordinal
+ * rank table. Used when a bare equals/whereProperty cannot express "left is
+ * more permissive than right" (D8: externalSharingModel vs sharingModel).
+ * Unknown / unranked / absent values fail closed (no fire).
+ */
+export interface RulePropertyCompare {
+  /** Left-hand property key on the root (e.g. `externalSharingModel`). */
+  readonly leftKey: string;
+  /** Right-hand property key on the same root (e.g. `sharingModel`). */
+  readonly rightKey: string;
+  /**
+   * Comparison after ranking both values:
+   *   - `gt` / `gte` / `lt` / `lte` / `eq` / `neq` on the numeric ranks.
+   * D8 uses `gt` (external more permissive than internal).
+   */
+  readonly op: 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'neq';
+  /**
+   * Named ordinal rank table. Currently only `owdPermissiveness` (Salesforce
+   * organization-wide default / external sharing model tokens). Values not in
+   * the table ⇒ fail closed.
+   */
+  readonly rankTable: 'owdPermissiveness';
+}
+
+/**
+ * EC-10 — join a CustomField root to a same-object sibling by API name, then
+ * (optionally) set-diff array element values. Carries NO component ids.
+ *
+ * C18 uses `orphanSetDiff` to find controlling-field values referenced by a
+ * dependent picklist's `controllingFieldValues[]` that are absent from the
+ * controlling field's ACTIVE `picklistValues[]`. Missing sibling / missing
+ * right array ⇒ fail closed (never invent an orphan when the controlling
+ * value set is ungrounded, e.g. GlobalValueSet-only).
+ */
+export interface RuleFieldJoin {
+  /**
+   * Property on the root whose string value is the sibling field's API name
+   * (e.g. `controllingField` → `Type`).
+   */
+  readonly nameProperty: string;
+  /**
+   * When set, fire only when the left-array element values minus the
+   * (optionally filtered) right-array element values is NON-EMPTY.
+   */
+  readonly orphanSetDiff?: RuleFieldJoinOrphanSetDiff;
+}
+
+/**
+ * Set-difference arm of {@link RuleFieldJoin}: left array elements on the root
+ * minus right array elements on the resolved sibling.
+ */
+export interface RuleFieldJoinOrphanSetDiff {
+  /** Array property on the root (e.g. `controllingFieldValues`). */
+  readonly leftArrayKey: string;
+  /** Key within each left object element (e.g. `controllingFieldValue`). */
+  readonly leftElementKey: string;
+  /** Array property on the sibling (e.g. `picklistValues`). */
+  readonly rightArrayKey: string;
+  /** Key within each right object element (e.g. `value`). */
+  readonly rightElementKey: string;
+  /**
+   * Optional equals-only filter on right elements (e.g. `{ key: isActive,
+   * equals: true }` so deactivated controlling values count as removed).
+   */
+  readonly rightElementWhere?: { readonly key: string; readonly equals: unknown };
+}
+
+/**
+ * EC-6 / EC-11 — single-node dual-edge object-scope matcher. Fires when one
+ * automation (or other root) is the `from` of BOTH `edgeTypeA` and `edgeTypeB`.
+ * `sameObject: true` requires matching object scopes (C11 recursive self-write);
+ * `sameObject: false` requires DIFFERENT object scopes (EC-11 D3/D4 cross-object
+ * write). Unparseable endpoint scopes fail closed (no fire).
+ */
+export interface RuleDualEdge {
+  /** First edge type the root must emit (e.g. `triggersOn`). */
+  readonly edgeTypeA: EdgeType;
+  /** Second edge type the root must emit (e.g. `writesTo`). */
+  readonly edgeTypeB: EdgeType;
+  /**
+   * Object-scope gate between the two `to` endpoints (parsed from
+   * `CustomObject:X` or `Type:Object.…` ids; a Flow's trigger object comes from
+   * the `triggersOn` target itself):
+   *   - `true`  → require SAME object (EC-6 / C11)
+   *   - `false` → require DIFFERENT objects (EC-11 / D4) — never unconstrained
+   */
+  readonly sameObject: boolean;
+  /**
+   * When true, drop a root that is PROVABLY INACTIVE under `isActiveSoeFirer`
+   * (Draft/Obsolete Flow, Inactive trigger/rule). Omitted ⇒ every root eligible.
+   */
+  readonly excludeInactive?: boolean;
+}
+
+/**
+ * D9 / property-equals-endpoint — compare a root NODE PROPERTY (an object API
+ * name) to the OBJECT SCOPE of one of the root's outgoing edges. The canonical
+ * use is `concept:flow-self-dml-reentry`: a record-triggered Flow whose declared
+ * `triggerObject` equals the object a `writesTo` DML endpoint targets can
+ * re-enter the save order. Distinct from {@link RuleDualEdge} `sameObject:true`,
+ * which derives the trigger object from a `triggersOn` EDGE and matches ANY
+ * writesTo (including a before-save in-place `$Record` field assignment that
+ * never re-enters); this reads the DECLARED node property and can gate the write
+ * to a DML `operation`. An absent/blank node property or an endpoint whose scope
+ * cannot be parsed fails closed (no fire).
+ */
+export interface RulePropertyEqualsEndpoint {
+  /**
+   * The root node property holding an object API name to compare (e.g.
+   * `triggerObject`). Must resolve to a non-empty string or the rule fails
+   * closed.
+   */
+  readonly nodeProperty: string;
+  /** Outgoing edge type from the root whose endpoint object scope is compared (e.g. `writesTo`). */
+  readonly endpointEdgeType: EdgeType;
+  /**
+   * Object-scope relation between the root's `nodeProperty` value and the
+   * endpoint's parsed object scope:
+   *   - `equal`    → require the SAME object (D9 self-DML re-entry)
+   *   - `notEqual` → require DIFFERENT objects
+   */
+  readonly relation: 'equal' | 'notEqual';
+  /**
+   * Optional filter on the ENDPOINT EDGE's own `properties` (a {@link WhereClause}
+   * or AND-array). D9 uses `{ key: operation, in: [recordCreate, recordUpdate,
+   * recordDelete] }` so an in-place `beforeSaveFieldAssignment` write is excluded
+   * — only an actual DML statement counts as re-entry.
+   */
+  readonly endpointEdgeWhereProperty?: WhereClause | readonly WhereClause[];
+  /**
+   * When true, drop a root that is PROVABLY INACTIVE under `isActiveSoeFirer`
+   * (Draft/Obsolete Flow). Omitted ⇒ every root eligible.
+   */
+  readonly excludeInactive?: boolean;
+}
+
+/**
+ * EC-11 — cross-object cascade-save 2-edge join (D3). The writer root W is the
+ * `from` of a `writerTriggerEdge` (giving its OWN trigger object A) and a
+ * `writeEdge` to a target on a DIFFERENT object B (B ≠ A), AND object B is
+ * itself the `to` of at least one INCOMING automation edge (one of
+ * `targetIncomingEdgeTypes`) from a node OTHER than W. That incoming automation
+ * is what makes the cross-object write cascade: writing B fires B's own save
+ * order in the same transaction, sharing the governor budget. The engine cites
+ * `[W, writeTargetOnB, automationOnB]`. Unparseable object scopes fail closed
+ * (no fire). This is a DECLARED structural shape — it does NOT prove the write
+ * executes at runtime or that any governor limit is actually breached.
+ */
+export interface RuleCrossObjectCascade {
+  /** Edge from the writer root to its OWN trigger object A (e.g. `triggersOn`). */
+  readonly writerTriggerEdge: EdgeType;
+  /** Edge from the writer root to the cross-object write target on B (e.g. `writesTo`). */
+  readonly writeEdge: EdgeType;
+  /**
+   * Incoming automation edge types on the TARGET object B (e.g. `triggersOn`,
+   * `firesWhen`). B must be the `to` of at least one such edge from a node other
+   * than the writer root for the cascade to fire. Non-empty.
+   */
+  readonly targetIncomingEdgeTypes: readonly EdgeType[];
+  /**
+   * When true, drop a writer root that is PROVABLY INACTIVE under
+   * `isActiveSoeFirer`, AND require the target-side automation to come from a
+   * node that is present and NOT provably inactive (a dead firer on B cannot
+   * cascade). Omitted ⇒ liveness is not gated.
+   */
+  readonly excludeInactive?: boolean;
+  /**
+   * When true, drop a writer root that is a RecordBeforeSave Flow — a before-save
+   * flow's cross-object DML is itself invalid / a silent no-op (that is D4's
+   * claim), so it does not actually cascade B's save order. Omitted ⇒ before-save
+   * Flow writers are eligible.
+   */
+  readonly excludeBeforeSaveFlowWriter?: boolean;
+}
+
+/**
+ * How a present-side match correlates to the absent-side edge lookup (EC-8).
+ *   - `sameFrom` — absent.from === present.from (same grantor / writer).
+ *   - `sameTo` — absent.to === present.to (or, for a node-shaped present, the
+ *     root id). Used when the present side IS the shared key (C17 field).
+ *   - `sameFromToPresentObject` — absent.from === present.from AND
+ *     absent.to === `CustomObject:{objectOf(present.to)}` (C15 arm1: field FLS
+ *     grant without matching object CRUD on the field's parent object).
+ *   - `sameFromToRoot` — absent.from === present.from AND absent.to === rootId;
+ *     present.to must be the root's parent object (C15 arm2: object EDIT without
+ *     field EDIT on the queried field).
+ */
+export type AntiJoinCorrelate =
+  | 'sameFrom'
+  | 'sameTo'
+  | 'sameFromToPresentObject'
+  | 'sameFromToRoot';
+
+/**
+ * Save-order phase names an anti-join may filter the absent FROM endpoint by.
+ * Mirrors {@link SaveOrderPhase} in the engine without coupling contracts to
+ * the MCP package — the validator pins the closed set.
+ */
+export type AntiJoinPhase =
+  | 'before-save-flows'
+  | 'pre-save-triggers'
+  | 'pre-save-validation'
+  | 'after-triggers'
+  | 'post-save-assignment'
+  | 'post-save-workflows'
+  | 'post-save-flows'
+  | 'post-save-approval';
+
+/**
+ * EC-8 — present-A / absent-B anti-join. Fires when the enclosing predicate's
+ * PRESENT match has no correlating ABSENT-side edge (C15 CRUD/FLS consistency,
+ * C17 deep creation gap). Carries NO component ids.
+ */
+export interface RuleAntiJoin {
+  /** Edge type that must be ABSENT for the rule to fire. */
+  readonly absentEdgeType: EdgeType;
+  /** Optional: constrain the absent edge's FROM endpoint types. */
+  readonly absentFromTypes?: readonly ComponentType[];
+  /** Optional: constrain the absent edge's TO endpoint types. */
+  readonly absentToTypes?: readonly ComponentType[];
+  /**
+   * Optional: absent edge's OWN property filter (equals-only, same shape as
+   * {@link RulePredicate.edgeWhereProperty}).
+   */
+  readonly absentEdgeWhereProperty?: { readonly key: string; readonly equals: unknown };
+  /** Optional: absent FROM node must satisfy this {@link WhereClause}. */
+  readonly absentFromWhereProperty?: WhereClause | readonly WhereClause[];
+  /** Optional: absent TO node must satisfy this {@link WhereClause}. */
+  readonly absentToWhereProperty?: WhereClause | readonly WhereClause[];
+  /** How the present match correlates to the absent-side lookup. */
+  readonly correlate: AntiJoinCorrelate;
+  /**
+   * When set, an absent-side edge only CANCELS the anti-join when the FROM
+   * node's save-order phase is in this set (C17: before-save writers only).
+   * An unplaceable FROM does NOT cancel (it does not prove a before-save
+   * supply). Omitted ⇒ every matching absent edge cancels.
+   */
+  readonly absentFromPhaseIn?: readonly AntiJoinPhase[];
+}
+
+/**
+ * EC-9 — set-difference JOIN. Collects two outgoing edge sets from one root
+ * (INCLUDE − SUBTRACT) and fires when the calculation shape is present (C16:
+ * PermissionSetGroup member UNION minus muting denials). Carries NO component
+ * ids — org specificity enters only through the caller-assembled slice.
+ *
+ * This is NOT a grant-matrix calculator: it names the STRUCTURAL set-difference
+ * posture from declared edges. Expanding member `grantedBy` edges against
+ * MutingPermissionSet `muted*` node properties into per-permission net grants
+ * is a separate, deferred arm.
+ */
+export interface RuleSetDifference {
+  /** Edge type for the INCLUDE (union) side — e.g. `references` to members. */
+  readonly includeEdgeType: EdgeType;
+  /**
+   * Optional: include edge's OWN property filter (equals-only, same shape as
+   * {@link RulePredicate.edgeWhereProperty}).
+   */
+  readonly includeEdgeWhereProperty?: { readonly key: string; readonly equals: unknown };
+  /** Optional: constrain the include edge's TO endpoint types. */
+  readonly includeToTypes?: readonly ComponentType[];
+  /** Edge type for the SUBTRACT (denial) side — e.g. `references` to muting sets. */
+  readonly subtractEdgeType: EdgeType;
+  /**
+   * Optional: subtract edge's OWN property filter (equals-only, same shape as
+   * {@link RulePredicate.edgeWhereProperty}).
+   */
+  readonly subtractEdgeWhereProperty?: { readonly key: string; readonly equals: unknown };
+  /** Optional: constrain the subtract edge's TO endpoint types. */
+  readonly subtractToTypes?: readonly ComponentType[];
+  /**
+   * When true (the default when omitted), fire only when BOTH the include set
+   * and the subtract set are non-empty — i.e. there is a real set-difference
+   * calculation to name. When false, fire on a non-empty include set alone
+   * (subtract may be empty).
+   */
+  readonly requireBothNonEmpty?: boolean;
+}
+
+/**
+ * OPTIONAL witness partition for an EDGE rule. Splits each matched edge into a
+ * PRIMARY plane (kept in the claim) and a WITNESS plane (excluded + disclosed) by
+ * classifying ONE of its endpoints (the "role" endpoint), so a non-live / non-
+ * production endpoint is never presented as if it were live. Two classification
+ * modes ({@link RuleWitnessPartition.witnessKind}):
+ *   - `property` (REASONING-ASYNC-TEST-CALLER-BLEED, the default): a witness is an
+ *     edge whose role-endpoint node's `properties[witnessProperty] === true`
+ *     (e.g. `isTest` on the DISPATCHER `from` side of a `dispatchesAsync` edge).
+ *   - `inactive-firer` (P1-B REASONING-STATUS-CODE-CITES-INACTIVE-AUTOMATION): a
+ *     witness is an edge whose role-endpoint node is PROVABLY INACTIVE under the
+ *     shared SOE `isActiveSoeFirer` predicate (the FIRER `from` side of a
+ *     `triggersOn` edge — a Draft/Obsolete Flow, an Inactive ApexTrigger).
+ *   - `system-perm-holder` (REASONING-VIEW-MODIFY-ALL-MIXES-SYSTEM-PERMS): a
+ *     witness is an edge whose role-endpoint node's `witnessArrayProperty` array
+ *     CONTAINS `witnessArrayMember` — e.g. the granting PermissionSet/Profile
+ *     (`from` of a `grantedBy` edge) whose `userPermissions` includes `ViewAllData`
+ *     / `ModifyAllData`. When a grantor holds the org-wide system permission, its
+ *     object-level `viewAllRecords` / `modifyAllRecords` grant cannot be
+ *     distinguished from (nor is it narrower than) that broader system grant, so
+ *     presenting it as a clean object-level grant would over-claim; it is excluded
+ *     and disclosed instead.
+ * In EVERY mode anything else — the marker false/absent, the array missing/without
+ * the member, the endpoint status-less/always-live, or dangling/unretrieved — is a
+ * PRIMARY edge; the classification only ever fires on a node KNOWN to be a witness,
+ * so a non-witness rule (or an all-primary match) stays byte-identical to the
+ * un-partitioned path.
+ *
+ * The engine then chooses among three honest renderings:
+ *   - PRIMARY-ONLY (no witness edges) → the base {@link ConceptRule.interpretation}
+ *     over the matched endpoints (unchanged behavior).
+ *   - MIXED (some primary + some witness edges) → the base interpretation over the
+ *     PRIMARY endpoints ONLY, with {@link interpretationMixedWitnessSuffix}
+ *     appended to DISCLOSE the excluded witness role-endpoints (`{witnessIds}`);
+ *     the witness sites never enter the primary citation.
+ *   - WITNESS-ONLY (no primary edges) → {@link interpretationWitnessOnly}
+ *     (`{ids}` = the witness endpoints), a disclosure that refuses the primary
+ *     claim (no production dispatch path / no active save-abort automation).
+ */
+export interface RuleWitnessPartition {
+  /**
+   * Which endpoint of the matched edge classifies it — `from` (the dispatcher on
+   * a `dispatchesAsync` edge, or the firer on a `triggersOn` edge) or `to`. The
+   * node at this endpoint is looked up in the slice and classified.
+   */
+  readonly roleEndpoint: 'from' | 'to';
+  /**
+   * HOW a matched edge is classified as a WITNESS to EXCLUDE from the primary
+   * claim (the excluded/disclosed plane):
+   *   - `property` (the DEFAULT — absent ⇒ this; the async test-caller guard):
+   *     a witness is an edge whose role-endpoint node has
+   *     `properties[witnessProperty] === true` (e.g. `isTest`).
+   *   - `inactive-firer` (P1-B REASONING-STATUS-CODE-CITES-INACTIVE-AUTOMATION):
+   *     a witness is an edge whose role-endpoint node is PROVABLY INACTIVE under
+   *     the shared SOE `isActiveSoeFirer` predicate — a Draft/Obsolete Flow, an
+   *     Inactive ApexTrigger, or an inactive rule. A status-less / always-live
+   *     endpoint (e.g. an ApexClass, which has no status) is NEVER a witness, so
+   *     an active + status-less firer set stays byte-identical to the pre-guard
+   *     claim. In this mode `witnessProperty` is unused and omitted.
+   *   - `system-perm-holder`: a witness is an edge whose role-endpoint node's
+   *     `witnessArrayProperty` string-array property CONTAINS `witnessArrayMember`
+   *     (e.g. `userPermissions` includes `ViewAllData`). A grantor without the
+   *     array, or with an array lacking the member, is NOT a witness. In this mode
+   *     `witnessProperty` is unused and omitted; `witnessArrayProperty` +
+   *     `witnessArrayMember` are required.
+   */
+  readonly witnessKind?: 'property' | 'inactive-firer' | 'system-perm-holder';
+  /**
+   * The boolean node property that marks the role endpoint as a witness in
+   * `property` mode (e.g. `isTest`, the unconditionally-present ApexClass
+   * boolean). REQUIRED for `property` mode; OMITTED for `inactive-firer` and
+   * `system-perm-holder` modes (their predicates need no single boolean property).
+   * Only a strict `=== true` counts; false / absent / dangling ⇒ non-witness
+   * (production/active plane).
+   */
+  readonly witnessProperty?: string;
+  /**
+   * The role-endpoint node's string-ARRAY property tested in `system-perm-holder`
+   * mode (e.g. `userPermissions`). REQUIRED in that mode, OMITTED otherwise. A
+   * witness is an edge whose role node's `properties[witnessArrayProperty]` is an
+   * array that includes {@link witnessArrayMember}; a missing/non-array property is
+   * never a witness.
+   */
+  readonly witnessArrayProperty?: string;
+  /**
+   * The member string(s) — a NON-EMPTY array, ANY of which present in
+   * {@link witnessArrayProperty} makes the role endpoint a witness in
+   * `system-perm-holder` mode. REQUIRED in that mode, OMITTED otherwise. The array
+   * is an OR: the view-all rule witnesses on `[ViewAllData, ModifyAllData]` because
+   * BOTH system permissions confer read-all-data, while the modify-all rule
+   * witnesses on `[ModifyAllData]` alone because View All Data does NOT confer
+   * modify.
+   */
+  readonly witnessArrayMember?: readonly string[];
+  /**
+   * Template rendered when EVERY matched edge is a test witness (no production
+   * role endpoint). `{ids}` fills with the witness endpoints. Must NOT assert a
+   * production dispatch path.
+   */
+  readonly interpretationWitnessOnly: string;
+  /**
+   * Suffix appended to the production {@link ConceptRule.interpretation} in the
+   * MIXED case to disclose the excluded witnesses. `{witnessIds}` fills with the
+   * test role-endpoint ids that were EXCLUDED from the production citation.
+   */
+  readonly interpretationMixedWitnessSuffix: string;
+}
+
+/**
+ * Binds a {@link Concept} to a structural {@link RulePredicate} and the
+ * interpretation to emit when the predicate matches. `maxConfidence` is a
+ * ceiling — the emitted confidence is the WEAKEST of it and every matched
+ * edge's confidence, never higher. `absenceShaped` marks a rule whose claim is
+ * about ABSENCE ("nothing references X"); such a claim is only as strong as the
+ * coverage behind it. `dependsOnCoverage` names the families the rule's honesty
+ * hinges on.
+ */
+export interface ConceptRule {
+  readonly id: string;
+  readonly concept: ConceptId;
+  readonly bind: RulePredicate;
+  /** Template with `{ids}` / positional `{0}` tokens filled from matched ids. */
+  readonly interpretation: string;
+  /**
+   * OPTIONAL upgraded template for a JOIN rule (RM-loop PASS 2) that the engine
+   * selects INSTEAD of {@link interpretation} for a coupling it can PROVE is
+   * cross-phase — i.e. the writer W's save-order phase is strictly earlier than
+   * the firer F's, both phases derived from grounded properties (node type + the
+   * `triggersOn` edge's record-trigger timing / an ApexTrigger's `events`). It
+   * may carry the same positional `{0}`/`{1}`/`{2}` tokens as `interpretation`
+   * PLUS the named phase tokens `{writerPhase}` and `{firerPhase}`. When absent,
+   * or when a coupling's phase order cannot be proven, the engine keeps the
+   * honest {@link interpretation} coupling claim — never an unprovable ordering.
+   */
+  readonly interpretationCrossPhase?: string;
+  /**
+   * OPTIONAL witness partition for an EDGE rule (REASONING-ASYNC-TEST-CALLER-BLEED).
+   * When present, the engine classifies each matched edge as production vs test
+   * witness (see {@link RuleWitnessPartition}) and never lets a test-only edge
+   * establish production reachability. Absent ⇒ the un-partitioned scalar edge
+   * path (every other edge rule) is byte-identical.
+   */
+  readonly witnessPartition?: RuleWitnessPartition;
+  readonly maxConfidence: ConfidenceLevel;
+  readonly absenceShaped: boolean;
+  readonly dependsOnCoverage: readonly ComponentType[];
+}
+
+/**
+ * One grounded, cited interpretation produced by the reasoning engine. Its
+ * `confidence` is COMPUTED (never asserted) and can never exceed the weakest
+ * matched edge. `groundedIn` cites the matched component ids verbatim — no
+ * citation, no claim. Provenance is always `offline_snapshot`: the engine reads
+ * only the offline grounded slice, never the live org.
+ */
+export interface Interpretation {
+  readonly ruleId: string;
+  readonly concept: ConceptId;
+  readonly claim: string;
+  readonly groundedIn: readonly ComponentId[];
+  readonly confidence: ConfidenceLevel | 'unknown';
+  readonly coverageCaveat: string | null;
+  readonly modelVersion: string;
+  readonly provenance: 'offline_snapshot';
+  /**
+   * EPIC-3 — set by the reconciliation pass when a STRONGER / more-specific
+   * co-firing claim SUPERSEDED this one over a shared anchor (or curated topic).
+   * Carries the superseding {@link SupersedesRule} id. The interpretation is
+   * KEPT and its `groundedIn` / `confidence` / `claim` are left BYTE-IDENTICAL
+   * (grounding-by-citation is never rewritten); the marker only lets ranking /
+   * rendering DEMOTE the redundant broader claim in favor of the sharper one.
+   * A `drop`-mode rule removes the interpretation entirely instead of marking
+   * it. Absent ⇒ not superseded (byte-identical to pre-EPIC-3 output).
+   */
+  readonly supersededBy?: string;
+}
+
+/**
+ * EPIC-3 — a curated CONFLICT-RESOLUTION edge over emitted
+ * {@link Interpretation}[]. It declares that a `strongerConcept` (a more
+ * specific / composed claim) SUPERSEDES a `supersededConcept` (a broader,
+ * overlapping claim) when both co-fire and their `overlap` requirement holds —
+ * so the reconciliation pass does not surface the weaker claim redundantly
+ * beside the sharper one. It is org-agnostic (concept ids only, no component
+ * ids) and post-hoc: it NEVER invents, rewrites, or re-grounds a claim — it only
+ * marks (`demote`) or removes (`drop`) an already-grounded weaker interpretation.
+ *
+ * Start simple: a single stronger→weaker pair with a presence + overlap check.
+ * The full composed confidence/coverage calculus (path-aware `min`,
+ * coverage-union keyed to composition shape) and YAML codegen are DEFERRED.
+ */
+export interface SupersedesRule {
+  readonly id: string;
+  /** The stronger / more-specific concept whose presence supersedes the weaker. */
+  readonly strongerConcept: ConceptId;
+  /** The broader concept demoted / dropped when the stronger co-fires with overlap. */
+  readonly supersededConcept: ConceptId;
+  /**
+   * How the two interpretations must OVERLAP for supersession to apply:
+   *   - `anchor`: they must share ≥1 `groundedIn` component id (same subject) —
+   *     the honest default; a coincidental co-fire on unrelated components is NOT
+   *     reconciled;
+   *   - `topic`: the curator asserts the two concepts refine the SAME
+   *     {@link refinesTopic}, so co-presence alone (no shared citation) suffices;
+   *   - `either`: anchor overlap OR the shared topic.
+   * `topic` / `either` require {@link refinesTopic}; without it they fail closed.
+   */
+  readonly overlap: 'anchor' | 'topic' | 'either';
+  /**
+   * Optional curated topic both concepts refine (e.g. `apex-external-access-posture`).
+   * Documentation for `anchor` rules; REQUIRED for `topic` / `either` overlap.
+   */
+  readonly refinesTopic?: string;
+  /**
+   * `demote` (honest default): KEEP the weaker interpretation but stamp its
+   * {@link Interpretation.supersededBy}; `drop`: remove it from the output.
+   * Curated edges prefer `demote` so no grounded citation is ever discarded.
+   */
+  readonly mode: 'demote' | 'drop';
+  /** Why the stronger claim subsumes the weaker — surfaced for auditability. */
+  readonly rationale: string;
+}
+
+/**
+ * EPIC-1 — a second-pass rule that binds a predicate over emitted
+ * {@link Interpretation}[] (concept-output → concept-input), not over the
+ * grounded graph slice. Matches when every `requiredConcepts` id appears at
+ * least once among prior interpretations, then emits ONE additional
+ * Interpretation whose `groundedIn` is the union of the matched priors'
+ * citations and whose confidence is
+ * `weakest(rule.maxConfidence, …matchedPriorConfidences)` (or `'unknown'` if
+ * any matched prior is unknown). Preserves grounding-by-citation: no prior
+ * citation ⇒ no chain claim.
+ *
+ * Start simple: `requiredConcepts` is an ALL-of presence check. EPIC-2
+ * generalizes this into full {@link CompoundRule}-style co-fire composition
+ * (same-anchor, severity/precedence, net-access-intersection).
+ */
+export interface ChainedRule {
+  readonly id: string;
+  readonly concept: ConceptId;
+  /**
+   * Every listed concept must appear ≥1 times among prior interpretations for
+   * this chain to fire. Empty / missing ⇒ never matches (fail closed).
+   */
+  readonly requiredConcepts: readonly ConceptId[];
+  /** Template with `{ids}` / positional `{0}` filled from the citation union. */
+  readonly interpretation: string;
+  readonly maxConfidence: ConfidenceLevel;
+  readonly absenceShaped: boolean;
+  readonly dependsOnCoverage: readonly ComponentType[];
+}
+
+/**
+ * EPIC-2 — a declarative CROSS-CONCEPT COMPOSITION rule. Where a
+ * {@link ChainedRule} fires on the GLOBAL presence of its required concepts
+ * (concept-output → concept-input, anchor-agnostic), a `CompoundRule` fires only
+ * when ≥2 of those concepts CO-FIRE ON ONE ANCHOR — a component id present in
+ * the `groundedIn` of at least one prior interpretation of EVERY required
+ * concept. It then emits ONE reconciled compound Interpretation per shared
+ * anchor, citing the UNION of the participating priors' `groundedIn` at
+ * `weakest(rule.maxConfidence, …participatingPriorConfidences)` (or `'unknown'`
+ * if any participating prior is unknown).
+ *
+ * This generalizes the hand-coded same-anchor AND-binds (e.g.
+ * `system-context-external-surface`) into a declarative shape, and delivers the
+ * NET-ACCESS-INTERSECTION sharing headline: a widen-union of sharing signals ∩ a
+ * narrow OWD baseline, reconciled to ONE per-object posture.
+ *
+ * Honesty is preserved by citation: no shared anchor ⇒ no compound claim, and
+ * the compound never invents citations — it only unions the priors that actually
+ * cite the anchor. The optional `severity` / `precedence` are curated HINTS for
+ * downstream ranking / supersession (EPIC-3); the engine does not read them.
+ *
+ * DEFERRED (EPIC-2 minimum viable): full YAML `CompoundRule` codegen (the
+ * catalog is a hand-authored frozen TS list today, like the EPIC-1
+ * `ChainedRule`s), a full severity/precedence matrix, and EPIC-3 supersession
+ * (a compound superseding the priors it composes).
+ */
+export interface CompoundRule {
+  readonly id: string;
+  readonly concept: ConceptId;
+  /**
+   * Every listed concept must co-fire for this compound to fire. With
+   * `sameAnchor: true` each must contribute ≥1 prior citing the SHARED anchor;
+   * with `sameAnchor: false` global presence (chain-style) is enough. Empty /
+   * missing ⇒ never matches (fail closed).
+   */
+  readonly requiredConcepts: readonly ConceptId[];
+  /**
+   * When true (the EPIC-2 headline shape), the required concepts must co-fire on
+   * ONE shared anchor id and the compound fires ONCE PER shared anchor. When
+   * false it degrades to a chain-style global-presence union (one claim over the
+   * union of all matched priors).
+   */
+  readonly sameAnchor: boolean;
+  /**
+   * Template. `{anchor}` → the shared anchor id (empty in `sameAnchor: false`
+   * mode); `{ids}` → the union citation list; positional `{0}` also supported.
+   */
+  readonly interpretation: string;
+  readonly maxConfidence: ConfidenceLevel;
+  readonly absenceShaped: boolean;
+  readonly dependsOnCoverage: readonly ComponentType[];
+  /** OPTIONAL curated severity HINT (EPIC-3 ranking); the engine ignores it. */
+  readonly severity?: ConceptSeverity;
+  /** OPTIONAL curated precedence HINT (EPIC-3 supersession); the engine ignores it. */
+  readonly precedence?: number;
+}
+
+/**
+ * The curated reasoning model: a version, the concept dictionary, and the rules
+ * that bind concepts to structural shapes. Org-agnostic and frozen — the org
+ * enters only through the grounded slice passed to the engine at query time.
+ * Optional `chainedRules` are the EPIC-1 second-pass substrate (concept-output →
+ * concept-input); optional `compoundRules` are the EPIC-2 cross-concept
+ * same-anchor composition substrate; absent ⇒ that pass is skipped.
+ */
+export interface ConceptModel {
+  readonly modelVersion: string;
+  readonly concepts: Readonly<Record<ConceptId, Concept>>;
+  readonly rules: readonly ConceptRule[];
+  readonly chainedRules?: readonly ChainedRule[];
+  /** EPIC-2 — cross-concept same-anchor composition; absent ⇒ that pass is skipped. */
+  readonly compoundRules?: readonly CompoundRule[];
+  /**
+   * EPIC-3 — curated conflict-resolution edges applied AFTER the first pass,
+   * {@link chainedRules}, and {@link compoundRules}; absent ⇒ no reconciliation.
+   */
+  readonly supersedesRules?: readonly SupersedesRule[];
 }

@@ -112,6 +112,86 @@ describe('CR-CAP-18 platform-event-channel extractors', () => {
     }
   });
 
+  // PLATFORM-EVENT-CHANNEL-CHANGEEVENTS-PHANTOM: a standard-CDC member declares
+  // <eventChannel>ChangeEvents</eventChannel> — the platform built-in channel
+  // has NO metadata file / node, so a parentOf edge or parentId pointing at
+  // PlatformEventChannel:ChangeEvents is a dead-end phantom. The member must
+  // omit that phantom parent while keeping its member→ChangeEvent references
+  // edge. RED PRE-FIX: parentId === 'PlatformEventChannel:ChangeEvents' and a
+  // parentOf edge to it exists.
+  it('standard ChangeEvents CDC channel: omits the phantom parentOf edge + nulls parentId (PLATFORM-EVENT-CHANNEL-CHANGEEVENTS-PHANTOM)', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(
+        dir,
+        'ChangeEvents_WidgetChangeEvent.platformEventChannelMember-meta.xml',
+      );
+      await writeFile(
+        path,
+        '<PlatformEventChannelMember xmlns="http://soap.sforce.com/2006/04/metadata"><eventChannel>ChangeEvents</eventChannel><selectedEntity>WidgetChangeEvent</selectedEntity></PlatformEventChannelMember>',
+        'utf8',
+      );
+      const result = await extractPlatformEventChannelMember(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+
+      const node = result.value.nodes[0];
+      // No phantom parent: parentId is null and the standard-channel disclosure
+      // flag is set, but the channel name is still recorded as a fact.
+      expect(node?.parentId).toBeNull();
+      expect(node?.properties.standardChannel).toBe(true);
+      expect(node?.properties.eventChannel).toBe('ChangeEvents');
+
+      // No parentOf edge dead-ending at PlatformEventChannel:ChangeEvents.
+      const parentOf = result.value.edges.filter(
+        (e) => e.edgeType === 'parentOf',
+      );
+      expect(parentOf).toEqual([]);
+      expect(
+        result.value.edges.some(
+          (e) => e.toId === 'PlatformEventChannel:ChangeEvents',
+        ),
+      ).toBe(false);
+      expect(
+        result.value.edges.some(
+          (e) => e.fromId === 'PlatformEventChannel:ChangeEvents',
+        ),
+      ).toBe(false);
+
+      // The load-bearing member→ChangeEvent references edge is untouched, so
+      // cdc_subscribers still reports CDC enablement for this entity.
+      const ref = result.value.edges.find((e) => e.edgeType === 'references');
+      expect(ref?.toId).toBe('CustomObject:WidgetChangeEvent');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('custom __chn channel keeps its parentOf edge + parentId (no regression from the standard-channel guard)', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(
+        dir,
+        'Custom_Member__chn.platformEventChannelMember-meta.xml',
+      );
+      await writeFile(
+        path,
+        '<PlatformEventChannelMember xmlns="http://soap.sforce.com/2006/04/metadata"><eventChannel>Custom_Channel__chn</eventChannel><selectedEntity>Widget__e</selectedEntity></PlatformEventChannelMember>',
+        'utf8',
+      );
+      const result = await extractPlatformEventChannelMember(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const node = result.value.nodes[0];
+      expect(node?.parentId).toBe('PlatformEventChannel:Custom_Channel__chn');
+      expect(node?.properties.standardChannel).toBeUndefined();
+      const parentOf = result.value.edges.find((e) => e.edgeType === 'parentOf');
+      expect(parentOf?.fromId).toBe('PlatformEventChannel:Custom_Channel__chn');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('data-channel member: bare CDC entity name is prefixed CustomObject: (targetMissing is import-stamped, not extractor-set)', async () => {
     const dir = await makeTemp();
     try {

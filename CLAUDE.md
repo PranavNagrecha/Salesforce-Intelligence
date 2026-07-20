@@ -11,8 +11,11 @@ topology, OmniStudio, code quality, or generated org documentation.
 Load `.claude/skills/using-sf-intelligence/SKILL.md`. It is the entry
 skill. It teaches the cascade of `sfi.*` MCP tools, the canonical
 component-ID format, and the rules for citing edge confidence
-(`declared`, `parsed`, `heuristic`). Do not answer org questions
-without it.
+(`declared`, `parsed`, `heuristic`) — the per-edge tier on a relationship.
+A reasoning **claim** from `sfi.interpret` carries a *separate* claim
+confidence (the weakest of the concept rule's ceiling and its grounding
+edges); keep the two axes distinct (see Capability boundary). Do not
+answer org questions without it.
 
 ## Where the metadata lives
 
@@ -71,6 +74,47 @@ providers), and OmniStudio (OmniScripts, Integration Procedures,
 DataRaptors, FlexCards, Decision Tables) — plus composed analyses:
 impact / what-if change analysis, heuristic code-quality recognizers,
 documentation generators, and cross-org / sandbox-vs-prod comparison.
+
+### Reasoning about structural implications (`sfi.interpret`)
+
+For "what does this **imply**" questions — does deleting this parent
+cascade-delete children, do these two flows run in a defined order, is
+this class an unenforced entry point — go one step past retrieval:
+**resolve → interpret → synthesize**. `sfi.resolve` fixes the component;
+`sfi.interpret` joins the org's grounded vault slice against a curated,
+org-independent **Concept Model** (94 concepts / 143 rules of general
+Salesforce truth) and returns **cited, confidence-tiered structural
+claims**; `sfi.synthesize_answer` folds those claims into the answer,
+hedged and attributed. It is **deterministic and offline** — no LLM, no
+live org read.
+
+Honesty is load-bearing here:
+
+- **No citation, no claim.** Each interpretation carries a `groundedIn`
+  list of the exact component ids it matched; a claim the engine cannot
+  ground is never emitted.
+- **Claim confidence is a second axis.** It reuses the
+  `declared | parsed | heuristic` words but is **computed, not read off a
+  single edge**: the weakest of the concept rule's ceiling and the
+  grounding edges the claim matched (`unknown` for an absence-shaped claim
+  under non-complete coverage). Never present claim confidence as if it
+  were the edge confidence of one relationship.
+- **Empty is not "none".** An empty interpretation list means "no concept
+  rule fired for this component" — never "nothing depends on it."
+- **Static shape, not proof.** Governor and security concepts name a code
+  or metadata *shape* (a cascade, an undefined order, an unenforced
+  surface), not a proven runtime limit breach or vulnerability. Say so.
+
+### Scope honesty on natural selectors
+
+Many tools accept a **natural selector** (a bare API name, a `Type:Name`
+id, or one of several field-name aliases like `profile` / `profileApiName`)
+instead of forcing a canonical id. When a tool resolves such a selector it
+echoes what it actually scoped to as `appliedScope`, so the answer is
+never silently about the wrong thing. When the selectors disagree, or none
+resolves, the tool **refuses with a named `invalid-query`** rather than
+falling back to a silent org-wide answer. Surface the refusal; do not
+invent a scope the caller did not ask for.
 
 When a question hits a genuine boundary (live data, business record
 values, Apex semantics, or a metadata type the refresh didn't retrieve),

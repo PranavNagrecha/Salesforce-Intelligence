@@ -468,6 +468,46 @@ describe('whatIfChangeMethodSignatureHandler', () => {
     expect(result.error.kind).toBe('component-not-found');
   });
 
+  // GUARD (WHAT-IF-CHANGE-METHOD-SIGNATURE-REJECTS-COMPONENTID): pre-fix a
+  // `componentId` / `apiName` alias was Zod-stripped → `classApiName: Required`.
+  // Post-fix all three selectors resolve to the same target, echo `appliedScope`,
+  // and produce BYTE-IDENTICAL callers/tests/verdict.
+  it('componentId ≡ apiName ≡ classApiName (byte-equal callers + appliedScope)', async () => {
+    const viaClassApiName = await whatIfChangeMethodSignatureHandler(ctx, {
+      classApiName: TARGET_CLASS,
+      methodName: 'processOpp',
+    });
+    const viaComponentId = await whatIfChangeMethodSignatureHandler(ctx, {
+      componentId: TARGET_CLASS,
+      methodName: 'processOpp',
+    });
+    // `apiName` as a bare name (coerced to ApexClass:OpportunityService).
+    const viaApiName = await whatIfChangeMethodSignatureHandler(ctx, {
+      apiName: 'OpportunityService',
+      methodName: 'processOpp',
+    });
+    expect(viaClassApiName.ok && viaComponentId.ok && viaApiName.ok).toBe(true);
+    if (!viaClassApiName.ok || !viaComponentId.ok || !viaApiName.ok) return;
+    expect(viaClassApiName.value.data.appliedScope).toEqual({
+      component: TARGET_CLASS,
+      mode: 'component',
+    });
+    for (const alt of [viaComponentId, viaApiName]) {
+      expect(alt.value.data).toEqual(viaClassApiName.value.data);
+    }
+  });
+
+  it('disagreeing class selectors → invalid-query (never a silent pick)', async () => {
+    const result = await whatIfChangeMethodSignatureHandler(ctx, {
+      classApiName: TARGET_CLASS,
+      componentId: 'ApexClass:OpportunityHandler',
+      methodName: 'processOpp',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+  });
+
   it('emits the verbatim honesty-axis disclosure including the dynamic-Apex caveat', async () => {
     const result = await whatIfChangeMethodSignatureHandler(ctx, {
       classApiName: TARGET_CLASS,
@@ -551,11 +591,12 @@ describe('whatIfChangeMethodSignatureInputSchema', () => {
     expect(parsed.success).toBe(false);
   });
 
-  it('rejects missing classApiName', () => {
+  it('accepts componentId in place of classApiName (interchangeable selector; at-least-one target enforced in the handler)', () => {
     const parsed = whatIfChangeMethodSignatureInputSchema.safeParse({
       methodName: 'foo',
+      componentId: TARGET_CLASS,
     });
-    expect(parsed.success).toBe(false);
+    expect(parsed.success).toBe(true);
   });
 });
 

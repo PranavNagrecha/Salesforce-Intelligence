@@ -264,6 +264,134 @@ describe('testsForChangeHandler', () => {
   });
 });
 
+// =============================================================================
+// TESTS-FOR-CHANGE-REJECTS-NATURAL-COMPONENT-ARGS — the router ranks this tool
+// #1 for change-impact NL but produced the natural single-component shape
+// (`componentId` / `{ type, apiName }`) or a `review_change`-shaped object array,
+// which the string[]-only schema hard-failed. The tool now accepts those and
+// normalizes to the canonical string ids; the all-strings path is byte-identical
+// and an object naming no component is a NAMED invalid-query.
+// =============================================================================
+describe('testsForChangeHandler — natural component selectors', () => {
+  // Golden: the canonical string-array call — every alternate shape must produce
+  // byte-identical `data` to this.
+  const canonicalData = async () => {
+    const parsed = testsForChangeInputSchema.parse({
+      changedComponents: ['ApexClass:OrderService'],
+    });
+    const r = await testsForChangeHandler(ctx, parsed);
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error('canonical call failed');
+    return r.value.data;
+  };
+
+  it('accepts a TOP-LEVEL componentId (folded into a one-item set), byte-identical to the array call', async () => {
+    const parsed = testsForChangeInputSchema.parse({
+      componentId: 'ApexClass:OrderService',
+    });
+    const r = await testsForChangeHandler(ctx, parsed);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data).toEqual(await canonicalData());
+  });
+
+  it('accepts a TOP-LEVEL { type, apiName } selector', async () => {
+    const parsed = testsForChangeInputSchema.parse({
+      type: 'ApexClass',
+      apiName: 'OrderService',
+    });
+    const r = await testsForChangeHandler(ctx, parsed);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data).toEqual(await canonicalData());
+  });
+
+  it('accepts a review_change-shaped object array item ({ componentId, changeKind })', async () => {
+    const parsed = testsForChangeInputSchema.parse({
+      changedComponents: [
+        { componentId: 'ApexClass:OrderService', changeKind: 'modified' },
+      ],
+    });
+    const r = await testsForChangeHandler(ctx, parsed);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data).toEqual(await canonicalData());
+  });
+
+  it('accepts a { type, apiName, changeKind } object array item (changeKind ignored)', async () => {
+    const parsed = testsForChangeInputSchema.parse({
+      changedComponents: [
+        { type: 'ApexClass', apiName: 'OrderService', changeKind: 'deleted' },
+      ],
+    });
+    const r = await testsForChangeHandler(ctx, parsed);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data).toEqual(await canonicalData());
+  });
+
+  it('mixes string and object entries in one change set', async () => {
+    const parsed = testsForChangeInputSchema.parse({
+      changedComponents: [
+        'ApexClass:OrderService',
+        { componentId: 'ApexClass:PricingEngine' },
+      ],
+    });
+    const r = await testsForChangeHandler(ctx, parsed);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.summary.apexAnalyzed).toBe(2);
+  });
+});
+
+describe('testsForChangeInputSchema — natural selector normalization', () => {
+  it('leaves an all-strings change set byte-identical (canonical path)', () => {
+    const parsed = testsForChangeInputSchema.parse({
+      changedComponents: ['ApexClass:OrderService', 'PricingEngine'],
+    });
+    expect(parsed).toEqual({
+      changedComponents: ['ApexClass:OrderService', 'PricingEngine'],
+    });
+  });
+
+  it('normalizes an object array item to its Type:ApiName string id', () => {
+    const parsed = testsForChangeInputSchema.parse({
+      changedComponents: [{ type: 'ApexClass', apiName: 'OrderService' }],
+    });
+    expect(parsed).toEqual({ changedComponents: ['ApexClass:OrderService'] });
+  });
+
+  it('componentId wins over { type, apiName } in a single object entry', () => {
+    const parsed = testsForChangeInputSchema.parse({
+      changedComponents: [
+        { componentId: 'ApexClass:Winner', type: 'ApexClass', apiName: 'Loser' },
+      ],
+    });
+    expect(parsed).toEqual({ changedComponents: ['ApexClass:Winner'] });
+  });
+
+  it('folds a top-level componentId into a one-item change set', () => {
+    const parsed = testsForChangeInputSchema.parse({
+      componentId: 'ApexTrigger:AccountTrigger',
+    });
+    expect(parsed).toEqual({ changedComponents: ['ApexTrigger:AccountTrigger'] });
+  });
+
+  it('rejects an object entry that names no component with a NAMED message', () => {
+    const parsed = testsForChangeInputSchema.safeParse({
+      changedComponents: [{ changeKind: 'modified' }],
+    });
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return;
+    const joined = parsed.error.issues.map((i) => i.message).join(' ');
+    expect(joined).toMatch(/componentId|type.*apiName/);
+  });
+
+  it('rejects a call with neither changedComponents nor a top-level selector', () => {
+    expect(testsForChangeInputSchema.safeParse({}).success).toBe(false);
+  });
+});
+
 describe('testsForChangeInputSchema', () => {
   it('accepts a well-formed change set', () => {
     expect(

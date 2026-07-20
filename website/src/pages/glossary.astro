@@ -15,6 +15,10 @@ const jsonld = [
       { "@type": "DefinedTerm", name: "Metadata vault", description: "The local org-kb/ directory built by sfi refresh: Markdown component docs, a DuckDB dependency graph, and manifest files. Answers are served from here offline." },
       { "@type": "DefinedTerm", name: "Provenance", description: "Where an answer came from: offline_snapshot (vault), live_org (opt-in SOQL), hybrid (both), or annotation (human-curated overlay)." },
       { "@type": "DefinedTerm", name: "Impact analysis", description: "Tracing what depends on a Salesforce component before you change or delete it - fields, objects, Flows, Apex classes." },
+      { "@type": "DefinedTerm", name: "Reasoning / concept model", description: "A curated, org-independent library of structural patterns (94 concepts / 143 rules) joined to the grounded org graph. sfi.interpret runs it as a deterministic rule engine over an offline graph slice - no LLM, no live call - to turn structure into cited claims via the resolve -> interpret -> synthesize_answer path." },
+      { "@type": "DefinedTerm", name: "Interpretation (cited claim)", description: "A single grounded claim from sfi.interpret when a concept rule fires on a component, carrying the component ids it is groundedIn as citations. No citation, no claim." },
+      { "@type": "DefinedTerm", name: "Claim confidence", description: "The confidence on an interpreted claim - a second axis distinct from edge confidence. A claim is held at the weakest of the firing rule's ceiling and the grounding edges it cites, never asserted above the evidence." },
+      { "@type": "DefinedTerm", name: "Applied scope", description: "Scope-aware tools echo the resolved scope back as appliedScope, or refuse with a named invalid-query when selectors disagree or none resolves - never a silent wrong-scope answer." },
     ],
   },
 ];
@@ -49,11 +53,23 @@ const jsonld = [
         <h2 id="provenance">Provenance</h2>
         <p>Where an answer's data came from: <code>offline_snapshot</code>, <code>live_org</code>, <code>hybrid</code>, or <code>annotation</code> (human-curated overlay). Every sf-intelligence answer carries a provenance stamp.</p>
 
-        <h2 id="confidence">Confidence tier</h2>
-        <p>How a dependency or finding was derived: <code>declared</code> (Salesforce metadata), <code>parsed</code> (AST/XML analysis), or <code>heuristic</code> (regex - verify before acting).</p>
+        <h2 id="confidence">Confidence tier (edge confidence)</h2>
+        <p>How a single dependency <em>edge</em> was derived: <code>declared</code> (Salesforce metadata), <code>parsed</code> (AST/XML analysis), or <code>heuristic</code> (regex - verify before acting). This is the <strong>edge</strong> axis - one relationship's evidence. An interpreted claim carries a separate <a href="#claim-confidence">claim confidence</a>; don't conflate the two.</p>
 
         <h2 id="completeness">Completeness</h2>
         <p>Whether all needed metadata families were retrieved: <code>complete</code>, <code>partial</code> (some types pending or not checked), or <code>unknown</code>.</p>
+
+        <h2 id="concept-model">Reasoning / concept model</h2>
+        <p>A curated, org-independent library of structural patterns - <strong>94 concepts / 143 rules</strong> of general Salesforce truth (master-detail cascade, junction objects, read-only formula/roll-up fields, stacked record-triggered flows, OWD sharing posture, and more) that carry <em>no</em> org data. <code>sfi.interpret</code> joins this concept model against your grounded org graph and runs it as a <strong>deterministic</strong> rule engine over an offline graph slice - no LLM inference, no live call - to turn structure into cited claims. The full path is <code>resolve → interpret → synthesize_answer</code>. It matches known patterns; it does not "understand" your org or hunt for vulnerabilities.</p>
+
+        <h2 id="interpretation">Interpretation (cited claim)</h2>
+        <p>A single grounded claim emitted by <code>sfi.interpret</code> when a concept rule fires on a component - e.g. "deleting this master-detail parent deletes its child records," or "this roll-up field is read-only." Each claim carries the component ids it is <code>groundedIn</code> as citations: no citation, no claim. When no rule fires, that is stated plainly and is <em>not</em> a claim that nothing depends on the component.</p>
+
+        <h2 id="claim-confidence">Claim confidence</h2>
+        <p>The confidence on an <a href="#interpretation">interpreted claim</a> - a second axis distinct from <a href="#confidence">edge confidence</a>. A claim is held at the <strong>weakest</strong> of the firing rule's ceiling and the grounding edges it cites, so it is never asserted above the evidence beneath it. Static-shape claims describe structure, not live runtime behaviour.</p>
+
+        <h2 id="applied-scope">Applied scope / scope refusal</h2>
+        <p>Scope-aware tools accept a natural selector (a canonical <code>componentId</code>, a bare <code>apiName</code>/<code>objectApiName</code>/<code>profileApiName</code>, a <code>nameContains</code> substring, a <code>namespacePrefix</code>) and echo the resolved scope back as <code>appliedScope</code>. If selectors disagree or none resolves, the tool refuses with a named <code>invalid-query</code> rather than silently answering org-wide against the wrong target; omitting scope returns the full, byte-identical default. See <a href="/configuration#input-scope">configuration</a>.</p>
 
         <h2 id="impact">Impact analysis / blast radius</h2>
         <p>Tracing components that depend on a field, object, Flow, or Apex class before you change or delete it. Core use case - see <a href="/use-cases/impact-analysis">impact analysis</a>.</p>

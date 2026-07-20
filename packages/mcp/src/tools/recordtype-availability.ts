@@ -28,34 +28,105 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-import { mergeInputAliases, toProfileOrPermSetId } from './input-aliases.js';
+import {
+  firstNonEmpty,
+  toCustomObjectId,
+  toObjectApiName,
+  toProfileOrPermSetId,
+} from './input-aliases.js';
 
 const recordtypeAvailabilityInputBaseSchema = z.object({
+  /** The Profile / PermissionSet visibility SUBJECT (resolved to its prefix). */
   componentId: z.string().min(1),
+  /** Optional OBJECT filter (bare api name), resolved by the preprocess. */
+  object: z.string().min(1).optional(),
 });
 
-/** Zod schema for the `sfi.recordtype_availability` tool input. */
+/** Coerce an unknown to its string form (else undefined). */
+const asStr = (v: unknown): string | undefined =>
+  typeof v === 'string' ? v : undefined;
+
+/**
+ * Zod schema for the `sfi.recordtype_availability` tool input.
+ *
+ * The tool answers record-type VISIBILITY for a **Profile / PermissionSet**
+ * (`recordTypeVisibilities`), so its `componentId` is a `Profile:` /
+ * `PermissionSet:` id — a bare name / `profileId` / `profileApiName` /
+ * `permissionSetId` / `permissionSetApiName` alias is coerced to that container
+ * prefix. This is the visibility SUBJECT and is resolved SEPARATELY from any
+ * object mentioned in the same call.
+ *
+ * W3.5 residual fix (RECORDTYPE-AVAILABILITY-REJECTS-PROFILEAPINAME): a natural
+ * "record types on Case for {profile}?" passes an object key (`objectApiName` /
+ * `object` / `objectId`) ALONGSIDE a profile key (`profileApiName` / `profileId`
+ * / …). Pre-fix the object was consumed into the container slot and the profile
+ * key was stripped, so the call hard-failed. Now the profile is bound as the
+ * container SUBJECT and the object becomes an OPTIONAL FILTER (`object`) the
+ * handler narrows to, echoed in `appliedScope`.
+ *
+ * W3.3 misbind fix (ADMIN-SURFACE-ALIAS-SKEW-CLUSTER, preserved): an OBJECT-only
+ * input — a `CustomObject:` `componentId`, or an object alias with NO container
+ * key — must NOT be coerced into a phantom `Profile:CustomObject:Case`. It is
+ * bound to the object (`CustomObject:X`) so the handler rejects it HONESTLY as a
+ * CustomObject (this tool needs a Profile/PermissionSet), never a Profile
+ * not-found.
+ */
 export const recordtypeAvailabilityInputSchema = z.preprocess((raw) => {
-  const merged = mergeInputAliases(raw, [
-    {
-      canonical: 'componentId',
-      aliases: ['profileId', 'permissionSetId'],
-    },
-  ]);
-  if (merged !== null && typeof merged === 'object' && !Array.isArray(merged)) {
-    const o = merged as Record<string, unknown>;
-    const id = typeof o.componentId === 'string' ? o.componentId : '';
-    if (
-      id.length > 0 &&
-      !id.startsWith('Profile:') &&
-      !id.startsWith('PermissionSet:')
-    ) {
-      const fromPs =
-        typeof (raw as Record<string, unknown>).permissionSetId === 'string';
-      o.componentId = fromPs ? `PermissionSet:${id}` : toProfileOrPermSetId(id);
-    }
+  const src =
+    raw !== null && typeof raw === 'object' && !Array.isArray(raw)
+      ? (raw as Record<string, unknown>)
+      : {};
+  const out: Record<string, unknown> = { ...src };
+  // Strip the raw `object` alias; it is re-added canonically only with a container.
+  delete out['object'];
+
+  // OBJECT filter (optional) — the SObject mentioned in "record types on X for Y?".
+  const objectRaw = firstNonEmpty(
+    asStr(src['objectApiName']),
+    asStr(src['object']),
+    asStr(src['objectId']),
+  );
+  const objectFilter = objectRaw === undefined ? undefined : toObjectApiName(objectRaw);
+
+  // CONTAINER (Profile / PermissionSet) — the visibility SUBJECT, resolved
+  // independently of the object so a profile key is never stripped by an object.
+  const cid = asStr(src['componentId']);
+  const cidIsContainer =
+    cid !== undefined &&
+    (cid.startsWith('Profile:') || cid.startsWith('PermissionSet:'));
+  const profileSel = firstNonEmpty(
+    asStr(src['profileApiName']),
+    asStr(src['profileId']),
+    asStr(src['profileName']),
+  );
+  const permsetSel = firstNonEmpty(
+    asStr(src['permissionSetApiName']),
+    asStr(src['permissionSetId']),
+  );
+
+  let container: string | undefined;
+  if (cidIsContainer) container = cid;
+  else if (profileSel !== undefined) container = toProfileOrPermSetId(profileSel);
+  else if (permsetSel !== undefined)
+    container = permsetSel.startsWith('PermissionSet:')
+      ? permsetSel
+      : `PermissionSet:${permsetSel}`;
+  else if (cid !== undefined && cid.length > 0 && !cid.startsWith('CustomObject:'))
+    // A bare componentId that is not object-shaped → a Profile container.
+    container = toProfileOrPermSetId(cid);
+
+  if (container !== undefined) {
+    out['componentId'] = container;
+    if (objectFilter !== undefined) out['object'] = objectFilter;
+  } else if (objectFilter !== undefined || (cid !== undefined && cid.startsWith('CustomObject:'))) {
+    // Object given but NO container: bind to the OBJECT so the handler rejects it
+    // HONESTLY as a CustomObject (W3.3), never a phantom `Profile:CustomObject:X`.
+    out['componentId'] =
+      cid !== undefined && cid.startsWith('CustomObject:')
+        ? cid
+        : toCustomObjectId(objectFilter as string);
   }
-  return merged;
+  return out;
 }, recordtypeAvailabilityInputBaseSchema);
 
 /** Parsed input shape. */
@@ -83,6 +154,16 @@ export interface ObjectRecordTypes {
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface RecordtypeAvailabilityOutput {
+  /**
+   * Echoes the scope ACTUALLY applied so a host never assumes a `profileApiName`
+   * / `object` it passed was silently stripped (the W3.5 residual this closes).
+   * `componentId` is the resolved Profile / PermissionSet subject; `object` is
+   * the object filter that narrowed the result (or null when unscoped).
+   */
+  readonly appliedScope: {
+    readonly componentId: string;
+    readonly object: string | null;
+  };
   readonly componentId: string;
   readonly granterType: 'Profile' | 'PermissionSet';
   readonly granterLabel: string;
@@ -117,9 +198,15 @@ export const recordtypeAvailabilityHandler = async (
   input: RecordtypeAvailabilityInput,
 ): Promise<Result<McpResponse<RecordtypeAvailabilityOutput>, McpError>> => {
   if (!GRANTER_PREFIXES.some((p) => input.componentId.startsWith(p))) {
+    // W3.3: a CustomObject-shaped id is a common misroute ("record types on
+    // <object> for <profile>?") — name it as such rather than the generic
+    // message, and never a phantom `Profile:CustomObject:X` not-found.
+    const isObject = input.componentId.startsWith('CustomObject:');
     return err({
       kind: 'invalid-query',
-      message: `componentId must be a Profile: or PermissionSet: id; got '${input.componentId}'`,
+      message: isObject
+        ? `recordtype_availability answers record-type visibility for a Profile / PermissionSet — it needs a Profile: or PermissionSet: id, but got the CustomObject '${input.componentId}'. Pass the Profile / PermissionSet whose record-type access you want (a \`Profile:\` or \`PermissionSet:\` id).`
+        : `componentId must be a Profile: or PermissionSet: id; got '${input.componentId}'`,
       path: 'componentId',
     });
   }
@@ -168,13 +255,24 @@ export const recordtypeAvailabilityHandler = async (
     byObject.set(object, list);
   }
 
-  const objects: ObjectRecordTypes[] = [...byObject.entries()]
+  const allObjects: ObjectRecordTypes[] = [...byObject.entries()]
     .map(([object, recordTypes]) => {
       recordTypes.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
       const def = recordTypes.find((r) => r.default);
       return { object, recordTypes, defaultRecordType: def ? def.name : null };
     })
     .sort((a, b) => (a.object < b.object ? -1 : a.object > b.object ? 1 : 0));
+
+  // Optional OBJECT filter: narrow the per-object record types to the object the
+  // caller named (case-insensitive on the object api name). An unmatched object
+  // yields an HONEST empty for that profile, not the profile's whole RT map.
+  const objectFilter = input.object;
+  const objects =
+    objectFilter === undefined
+      ? allObjects
+      : allObjects.filter(
+          (o) => o.object.toLowerCase() === objectFilter.toLowerCase(),
+        );
 
   const visibleRecordTypes = objects.reduce(
     (n, o) => n + o.recordTypes.filter((r) => r.visible).length,
@@ -187,6 +285,7 @@ export const recordtypeAvailabilityHandler = async (
 
   return ok({
     data: {
+      appliedScope: { componentId, object: objectFilter ?? null },
       componentId,
       granterType: node.type === 'PermissionSet' ? 'PermissionSet' : 'Profile',
       granterLabel: node.label ?? node.apiName,

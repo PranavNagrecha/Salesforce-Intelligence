@@ -1,8 +1,10 @@
 /**
  * Handler for the `sfi.review_change` MCP tool (R6-16).
  *
- * The daily deploy gate: given a CHANGE SET — a list of `{ type, apiName,
- * changeKind }` a host assembled from a PR / package.xml / `git diff` — it
+ * The daily deploy gate: given a CHANGE SET — a list of change entries a host
+ * assembled from a PR / package.xml / `git diff`, each selecting its component
+ * with either `{ type, apiName }` or a single `componentId` (`Type:ApiName`) —
+ * it
  * turns the offline engine into a pre-deploy review. For each component it
  * composes THREE existing signals (it does not reimplement any of them):
  *
@@ -12,7 +14,11 @@
  *       PermissionSet FLS grant is ACCESS, not a breakage dependency) and
  *       `parentOf` (a field's parent object is structural, not a dependent) —
  *       the "access ≠ usage" honesty rule the destructive suite already
- *       enforces. The surviving distinct dependents are the blast radius.
+ *       enforces. The surviving distinct dependents are the blast radius. ONE
+ *       exception to the grantedBy exclusion: for a CustomPermission the
+ *       inbound `grantedBy` granters (Profile / PermissionSet) reference it BY
+ *       NAME, so they ARE breakage dependents and are counted
+ *       (REVIEW-CHANGE-SAFE-ON-DELETE-CUSTOM-PERMISSION).
  *   (b) TESTS-TO-RUN — the minimal covering test set, from
  *       `sfi.tests_for_change`'s handler (composed, not duplicated). Only
  *       ApexClass / ApexTrigger components map to tests; everything else is
@@ -30,9 +36,11 @@
  *
  * `inVault` = a node exists at `{type}:{apiName}`; `deps` = distinct dependents
  * after the grantedBy/parentOf filter; `allHeuristic` = every surviving
- * incoming edge carries `confidence: 'heuristic'`; `familyCovered` = the
- * vault's coverage for `type` is complete (or unknowable → treated as covered,
- * never false-flagged).
+ * incoming edge carries `confidence: 'heuristic'`; `familyCovered` = for a
+ * delete/modify with 0 deps, the vault covers every family that could REFERENCE
+ * this component (its usage-source families — GATE-HONESTY-EMPTY-GRAPH-EQUALS-SAFE);
+ * for an added component, the component's own family is covered (or unknowable →
+ * treated as covered, never false-flagged).
  *
  * | changeKind | condition                                   | verdict  |
  * |------------|---------------------------------------------|----------|
@@ -56,8 +64,14 @@
  *   - A MODIFIED component with FIRM (declared/parsed) dependents is `risky`
  *     (real callers/automation may break); with HEURISTIC-ONLY readers it is
  *     `review` (the scanner's inference may be a false positive — verify).
- *   - A zero-dependent DELETE/MODIFY is `safe` only when the vault actually
- *     covers the family; otherwise the absence is "not checked" → `review`.
+ *   - A zero-dependent DELETE/MODIFY is `safe` only when the vault covers every
+ *     family that COULD reference this component (its usage-source families —
+ *     GATE-HONESTY-EMPTY-GRAPH-EQUALS-SAFE); otherwise the absence of dependents
+ *     is "not checked" (a family that could hold the reference was never
+ *     retrieved / modeled), not proven "none" → `review`, with a `coverageCaveat`
+ *     naming the un-retrieved planes. A well-modeled component of a coverage-gap
+ *     org is NOT enough — absence of edges is only as strong as the coverage of
+ *     the families that produce them.
  *   - An ADDED component absent from the vault is `safe` for the graph — nothing
  *     in the current vault can depend on something new — but its OWN forward
  *     references are NOT analysed (the new source was never extracted); that
@@ -66,6 +80,44 @@
  *   - A component the vault does not contain under a `modified`/`deleted` label
  *     is `review`: either its family is not modeled, or the vault has drifted
  *     from the target org — never fabricate a verdict for a node we cannot see.
+ *
+ * Frontend-bundle OUTBOUND adjustment (applied AFTER the table above, so the
+ * table itself — pinned by `classify`'s unit test — is unchanged): a modified/
+ * added LightningComponentBundle / Aura / Visualforce bundle has (almost) no
+ * INCOMING dependents, so the table calls it `safe`; but its promotion risk is
+ * OUTBOUND — the Apex controller it `callsApex` and the CustomPermission /
+ * FlexiPage it `references`. Such a bundle is floored at `review` (never a bare
+ * `safe`), `outboundApex` / `outboundWires` name the wiring, and `selectedTests`
+ * carries the covering tests of the called controllers (the bundle has no Apex
+ * tests of its own). REVIEW-CHANGE-LWC-SAFE-IGNORES-CONTROLLER-AND-PAGE-WIRE.
+ *
+ * Active-rule adjustment (also AFTER the table, same rationale — leaves
+ * `classify`'s table intact): an Active DuplicateRule / MatchingRule fires on
+ * record save regardless of who references it — its only inbound edge is the
+ * excluded structural `parentOf`, and any MatchingRule link is OUTBOUND — so
+ * the inbound gate sees 0 dependents and the table calls a delete/modify
+ * `safe`. Removing or deactivating a LIVE rule changes runtime dedup/matching
+ * behaviour, so a live rule is floored at `review` (never bare `safe`). The
+ * floor is STATE-driven: an inactive rule keeps its table verdict.
+ * REVIEW-CHANGE-SAFE-ON-DELETE-DUPLICATE-RULE.
+ *
+ * Firing-binding adjustment (also AFTER the table, same rationale): an ACTIVE
+ * record-triggered (before/after-save) Flow, an ACTIVE ApexTrigger, or an
+ * ACTIVE ValidationRule PARTICIPATES in its object's save transaction — but its
+ * binding to that object is INVISIBLE to the inbound-dependent gate. A Flow /
+ * ApexTrigger binds OUTBOUND via `triggersOn` → CustomObject, and a
+ * ValidationRule binds via the object's structural `parentOf` (excluded as a
+ * dependent), so the inbound gate sees 0 dependents and the table calls a
+ * delete/modify bare `safe` — a false-safe destructive verdict on a live save
+ * participant, the highest blast radius. Deleting such a node removes live
+ * save-time automation (floored at `blocking`); modifying it changes save-time
+ * behaviour (floored at `review`). Liveness reuses the shared `isActiveSoeFirer`
+ * predicate (Flow status Active/absent, ApexTrigger status not Inactive,
+ * ValidationRule active:true/absent) — an Inactive / Obsolete automation does
+ * NOT fire, so it keeps its table verdict (mirrors the dead-plane honesty). The
+ * floor only RAISES severity; a real inbound dependent (already `blocking` /
+ * `risky`) is left unchanged.
+ * REVIEW-CHANGE-RECORD-TRIGGERED-AUTOMATION-FALSE-SAFE.
  *
  * ## Honesty boundaries (verbatim in `disclosure`)
  *   - Analysis is against the LAST VAULT REFRESH of the target org — which may
@@ -131,11 +183,13 @@ import type { Context } from '../server.js';
 
 import {
   buildEnumerationCoverageCaveatFor,
+  buildUsageSourceCoverageCaveat,
   offlineTrust,
   type CoverageCaveat,
   type Verdict,
 } from './coverage-trust.js';
 import { openVaultReadOnly } from './cross-vault-open.js';
+import { isActiveSoeFirer } from './soe-active.js';
 import {
   testsForChangeHandler,
   type PerChangeCoverage,
@@ -159,26 +213,224 @@ const TEST_SAMPLE_CAP = 10;
 const SELECTED_TESTS_CAP = 200;
 
 /**
- * Incoming edge types that are NOT breakage dependents and are excluded from
- * the dependent set (the "access ≠ usage" honesty rule the destructive suite
- * enforces): `grantedBy` is a Profile/PermissionSet access grant; `parentOf` is
- * the structural object→field parent. Counting either would inflate the blast
- * radius (a field with 40 FLS grants is NOT "depended on by 40 components").
+ * Types for which an inbound `grantedBy` edge IS a breakage dependency rather
+ * than mere access. A Profile / PermissionSet that grants a CustomPermission
+ * references it BY NAME (`<customPermissions>`), so deleting the permission
+ * breaks those granters (a coordinated deploy fails, or the grant is silently
+ * dropped) — the granters are genuine dependents. For a CustomField, by
+ * contrast, a `grantedBy` FLS grant is access, not usage (a field with 40
+ * grants is NOT "depended on by 40 components"), so it stays excluded.
+ * REVIEW-CHANGE-SAFE-ON-DELETE-CUSTOM-PERMISSION.
  */
-const NON_DEPENDENCY_EDGE_TYPES: ReadonlySet<string> = new Set(['grantedBy', 'parentOf']);
+const GRANTED_BY_IS_DEPENDENCY_TYPES: ReadonlySet<string> = new Set(['CustomPermission']);
+
+/**
+ * Whether an inbound edge of `edgeType` counts as a breakage dependent of a
+ * changed component of type `changedType` (the "access ≠ usage" honesty rule
+ * the destructive suite enforces).
+ *   - `parentOf` is ALWAYS excluded (the structural object→field / object→rule
+ *     parent is not a dependent).
+ *   - `grantedBy` is excluded EXCEPT for {@link GRANTED_BY_IS_DEPENDENCY_TYPES}
+ *     (CustomPermission), where the granter references the target by name and a
+ *     delete genuinely breaks it.
+ *   - every other inbound edge counts.
+ */
+const isDependencyEdge = (edgeType: string, changedType: string): boolean => {
+  if (edgeType === 'parentOf') return false;
+  if (edgeType === 'grantedBy') return GRANTED_BY_IS_DEPENDENCY_TYPES.has(changedType);
+  return true;
+};
 
 /** Apex component types `tests_for_change` can map to a covering test set. */
 const APEX_TYPES: ReadonlySet<string> = new Set(['ApexClass', 'ApexTrigger']);
 
+/**
+ * Frontend bundle types whose promotion risk is OUTBOUND, not inbound. A
+ * modified LWC/Aura/VF rarely has incoming dependents (nothing edges TO the
+ * bundle id), so the incoming-only gate calls it `safe`; its real risk is the
+ * Apex controller it `callsApex`, plus the CustomPermission / FlexiPage wiring
+ * it references (REVIEW-CHANGE-LWC-SAFE-IGNORES-CONTROLLER-AND-PAGE-WIRE).
+ */
+const FRONTEND_BUNDLE_TYPES: ReadonlySet<string> = new Set([
+  'LightningComponentBundle',
+  'AuraDefinitionBundle',
+  'VisualforcePage',
+  'VisualforceComponent',
+]);
+
+/** Outbound `references` targets treated as UI/permission wiring for a bundle. */
+const WIRE_REF_PREFIXES = ['CustomPermission:', 'FlexiPage:'] as const;
+
+/**
+ * Save-time behavioral rules whose runtime effect is INVISIBLE to the
+ * inbound-dependent scan. An Active DuplicateRule / MatchingRule fires on
+ * insert/update regardless of who "references" it: the rule's only inbound
+ * edge is the structural `parentOf` from its object (excluded), and its
+ * MatchingRule link is OUTBOUND — so the inbound gate sees 0 dependents and
+ * calls a delete/deactivate of a LIVE rule `safe`. Removing or deactivating a
+ * live rule changes runtime dedup/matching behaviour, a real dependency the
+ * graph cannot express as an inbound edge. REVIEW-CHANGE-SAFE-ON-DELETE-DUPLICATE-RULE.
+ */
+const ACTIVE_BEHAVIORAL_RULE_TYPES: ReadonlySet<string> = new Set([
+  'DuplicateRule',
+  'MatchingRule',
+]);
+
+/**
+ * Integration / callout-trust anchors whose zero-dependent DELETE/MODIFY must
+ * fail HARDER than the default gate (W11 — INTEGRATION-ORPHAN-UNDER-THE-GATE).
+ *
+ * A NamedCredential / ExternalDataSource / AuthProvider is only ever referenced
+ * on the callout plane (an Apex `callout:{alias}`, a declared ExternalService
+ * binding, an OmniStudio Integration Procedure alias, or an `authProvider`
+ * naming), which is the plane most prone to under-extraction — dynamic
+ * `callout:` strings and managed-package Apex are invisible to the graph.
+ * Deleting a live callout credential is an availability / security risk, so for
+ * these types alone the completeness gate uses the fail-harder
+ * `fireOnUnknownCoverage` stance (the same stance `safe_to_delete_field` /
+ * `unused_components` take): an unused credential on a vault whose callout-usage
+ * coverage is UNKNOWN (a pre-coverage / legacy vault) is `review`, never bare
+ * `safe`. The precise callout-site families live in `USAGE_SOURCE_FAMILIES`
+ * (coverage-trust.ts) so a KNOWN-complete callout plane still reads `safe`.
+ */
+const INTEGRATION_GATE_TYPES: ReadonlySet<string> = new Set([
+  'NamedCredential',
+  'ExternalDataSource',
+  'AuthProvider',
+]);
+
+/**
+ * True when the changed component is a save-time behavioral rule that is LIVE.
+ * DuplicateRule liveness is `properties.isActive === true`; MatchingRule
+ * liveness is `properties.ruleStatus` (`Active` / `Activating` are live; the
+ * transient activation states and `Inactive` / `Draft` are not).
+ */
+const isActiveBehavioralRule = (type: string, node: Node | null): boolean => {
+  if (node === null || !ACTIVE_BEHAVIORAL_RULE_TYPES.has(type)) return false;
+  if (type === 'DuplicateRule') return node.properties['isActive'] === true;
+  const status = node.properties['ruleStatus'];
+  return status === 'Active' || status === 'Activating';
+};
+
+/**
+ * Save-time automation types whose runtime binding to their object is OUTBOUND
+ * (`triggersOn` → CustomObject, for a record-triggered Flow / ApexTrigger) or
+ * STRUCTURAL (`parentOf` from the object, for a ValidationRule) — NEVER an
+ * inbound usage edge. An ACTIVE such node PARTICIPATES in its object's save
+ * transaction (a before/after-save Flow, an Apex before/after trigger, or a
+ * ValidationRule that gates every save), so the inbound-dependent gate sees 0
+ * dependents and the classification table calls a delete/modify bare `safe` —
+ * a false-safe destructive verdict. Its firing is a real dependency the graph
+ * cannot express as an inbound edge (the same shape as an Active DuplicateRule,
+ * but the binding is on the OUTBOUND / structural side). Liveness reuses the
+ * shared {@link isActiveSoeFirer} predicate (Flow status Active/absent,
+ * ApexTrigger status not Inactive, ValidationRule active:true/absent), so an
+ * Inactive / Obsolete automation is NOT a firing binding — it does not run, and
+ * keeps its table verdict (mirrors the dead-plane honesty).
+ * REVIEW-CHANGE-RECORD-TRIGGERED-AUTOMATION-FALSE-SAFE.
+ */
+const FIRING_BINDING_TYPES: ReadonlySet<string> = new Set([
+  'Flow',
+  'ApexTrigger',
+  'ValidationRule',
+]);
+
+/** The save-time firing binding a changed node participates in, if any. */
+interface FiringBinding {
+  readonly kind: 'record-triggered-flow' | 'apex-trigger' | 'validation-rule';
+  /** The CustomObject id the automation fires on, when resolvable; else null. */
+  readonly objectId: ComponentId | null;
+}
+
+/**
+ * Detect whether `node` is an ACTIVE automation that FIRES on its object's save
+ * — a runtime binding the inbound-dependent gate is blind to. Returns the
+ * binding (with the bound object id when resolvable) or `null`. See
+ * {@link FIRING_BINDING_TYPES}. Only called for delete/modify of a
+ * firing-binding type on an in-vault node; an `added` node has no live binding
+ * yet.
+ *
+ *   - Flow — an ACTIVE record-SAVE Flow (`triggerType` RecordBeforeSave /
+ *     RecordAfterSave) with an OUTBOUND `triggersOn` edge to a CustomObject.
+ *     A scheduled / platform-event / screen Flow (no save triggerType) is NOT
+ *     floored — it does not participate in a record's save transaction.
+ *   - ApexTrigger — an ACTIVE trigger with an OUTBOUND `triggersOn` edge to a
+ *     CustomObject (Apex triggers are inherently DML/save-time).
+ *   - ValidationRule — an ACTIVE rule parented by a CustomObject (inbound
+ *     `parentOf`, the edge the dependent filter excludes as structural). A live
+ *     VR gates every save of its object.
+ */
+const detectFiringBinding = async (
+  ctx: Context,
+  type: string,
+  node: Node,
+  id: ComponentId,
+  inboundEdges: readonly Edge[],
+): Promise<Result<FiringBinding | null, McpError>> => {
+  if (!FIRING_BINDING_TYPES.has(type) || !isActiveSoeFirer(node)) return ok(null);
+
+  if (type === 'ValidationRule') {
+    // A VR fires on save for the CustomObject that PARENTS it — inbound
+    // `parentOf` from a CustomObject (excluded from dependents as structural).
+    const parent = inboundEdges.find(
+      (e) => e.edgeType === 'parentOf' && e.fromId.startsWith('CustomObject:'),
+    );
+    return ok(parent !== undefined ? { kind: 'validation-rule', objectId: parent.fromId } : null);
+  }
+
+  // Flow / ApexTrigger bind OUTBOUND via `triggersOn` → CustomObject.
+  if (type === 'Flow') {
+    const triggerType = node.properties['triggerType'];
+    if (triggerType !== 'RecordBeforeSave' && triggerType !== 'RecordAfterSave') {
+      return ok(null);
+    }
+  }
+  const outRes = await listEdges(ctx.graph, id, { direction: 'out', edgeType: 'triggersOn' });
+  if (!outRes.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${outRes.error.message}` });
+  }
+  const bind = outRes.value.find((e) => e.toId.startsWith('CustomObject:'));
+  if (bind === undefined) return ok(null);
+  return ok({
+    kind: type === 'Flow' ? 'record-triggered-flow' : 'apex-trigger',
+    objectId: bind.toId,
+  });
+};
+
+/** Build the verdict reason for a floored active firing binding. */
+const buildFiringBindingReason = (
+  type: string,
+  changeKind: ChangeKind,
+  binding: FiringBinding,
+): string => {
+  const on = binding.objectId !== null ? ` for ${binding.objectId}` : '';
+  const verb = changeKind === 'deleted' ? 'Deleting' : 'Modifying';
+  const descriptor =
+    binding.kind === 'record-triggered-flow'
+      ? `Active record-triggered (before/after-save) Flow that fires on save${on}`
+      : binding.kind === 'apex-trigger'
+        ? `Active ApexTrigger that fires on save${on}`
+        : `Active ValidationRule that gates every save${on}`;
+  return (
+    `${descriptor} — it PARTICIPATES in that object's save transaction via a firing binding the inbound-dependent gate is blind to ` +
+    `(the binding is OUTBOUND \`triggersOn\` for a Flow/Trigger, or the structural \`parentOf\` from the object for a ValidationRule, so the gate shows 0 inbound dependents), NOT an inbound usage edge. ` +
+    `${verb} or deactivating a live save participant changes production save-time behaviour — review the firing binding before deploying.`
+  );
+};
+
 /** Verbatim honesty disclosure surfaced on every response. */
 export const REVIEW_CHANGE_DISCLOSURE =
-  'review_change is a pre-deploy gate over the LAST VAULT REFRESH of the target org — the vault can have DRIFTED from what is actually deployed, so a `safe` verdict is only as fresh as the last `sfi refresh`; re-refresh before trusting it. Dependents are DIRECT (single-hop) INCOMING edges, EXCLUDING grantedBy (a Profile/PermissionSet FLS grant is ACCESS, not a breakage dependency) and parentOf (a structural object→field parent) per the access≠usage rule — the full transitive blast radius is sfi.get_impact. A DELETED component with ANY dependent is `blocking` (removing it breaks its dependents; a heuristic-only dependent still blocks — a false positive fails CLOSED, the safe direction for a gate). A MODIFIED component with firm (declared/parsed) dependents is `risky`; with heuristic-only readers it is `review` (verify the scanner inference). ADDED components are NOT analysed for their own contents — only name-collision (id already in the vault) + tests mapping; their forward references were never extracted. A component the vault does not contain under a modified/deleted label is `review`, never fabricated. Test selection composes sfi.tests_for_change: CLASS granularity, dynamic dispatch / reflection / managed-package tests invisible, depth-3 capped — SELECTION ≠ VALIDATION (a selected test that merely runs the changed code does not prove correctness). A zero-dependent result for a family the vault does not fully cover is "not checked", not "none" — surfaced as coverageCaveat and it nudges an otherwise-safe verdict to `review`.';
+  'review_change is a pre-deploy gate over the LAST VAULT REFRESH of the target org — the vault can have DRIFTED from what is actually deployed, so a `safe` verdict is only as fresh as the last `sfi refresh`; re-refresh before trusting it. Dependents are DIRECT (single-hop) INCOMING edges, EXCLUDING grantedBy (a Profile/PermissionSet FLS grant is ACCESS, not a breakage dependency) and parentOf (a structural object→field parent) per the access≠usage rule — the full transitive blast radius is sfi.get_impact. ONE exception to the grantedBy exclusion: for a CustomPermission the inbound grantedBy granters (Profile/PermissionSet) reference it BY NAME, so they ARE counted as dependents (deleting the permission breaks those granters). A DELETED component with ANY dependent is `blocking` (removing it breaks its dependents; a heuristic-only dependent still blocks — a false positive fails CLOSED, the safe direction for a gate). An Active DuplicateRule / MatchingRule fires on record save regardless of inbound references (parentOf is structural; any MatchingRule link is outbound), so a delete/modify the inbound gate would call `safe` is floored at `review` (never bare `safe`) when the rule is LIVE — an inactive rule keeps its table verdict. Likewise an ACTIVE record-triggered (before/after-save) Flow, an ACTIVE ApexTrigger, or an ACTIVE ValidationRule PARTICIPATES in the save transaction of its object via a binding the inbound-dependent gate is blind to — the Flow/Trigger binds OUTBOUND (`triggersOn` → object) and the ValidationRule binds via the excluded structural `parentOf` — so the gate shows 0 dependents; deleting such a live save participant is floored at `blocking` and modifying one at `review` (never bare `safe`), while an inactive/Obsolete automation keeps its table verdict (it does not fire). A MODIFIED component with firm (declared/parsed) dependents is `risky`; with heuristic-only readers it is `review` (verify the scanner inference). ADDED components are NOT analysed for their own contents — only name-collision (id already in the vault) + tests mapping; their forward references were never extracted. A component the vault does not contain under a modified/deleted label is `review`, never fabricated. Test selection composes sfi.tests_for_change: CLASS granularity, dynamic dispatch / reflection / managed-package tests invisible, depth-3 capped — SELECTION ≠ VALIDATION (a selected test that merely runs the changed code does not prove correctness). A zero-dependent DELETE/MODIFY is "not checked", not "none", unless the vault covers every family that COULD reference the component (its usage-source families — a VisualforcePage is placed by a CustomSite, a CompactLayout is assigned by a CustomObject, a Screen Flow is embedded on a FlexiPage); a gap in any of those planes is surfaced as coverageCaveat and downgrades an otherwise-safe verdict to `review`, because absence of inbound edges is only as strong as the coverage of the families that produce them. FRONTEND BUNDLES (LightningComponentBundle / Aura / Visualforce) carry OUTBOUND risk the inbound-dependent model misses: a modified/added bundle with (almost) no incoming dependents is floored at `review` (never a bare `safe`) when it `callsApex` a controller or `references` a CustomPermission / FlexiPage — `outboundApex` / `outboundWires` name them, and `selectedTests` carries the covering tests of the Apex controllers it calls (its own bundle has no Apex tests).';
 
 /**
  * Zod schema for the `sfi.review_change` tool input.
  *
- *   - `components`: 1..500 change entries. Each is `{ type, apiName,
- *     changeKind }`; the canonical id analysed is `${type}:${apiName}`.
+ *   - `components`: 1..500 change entries. Each carries `changeKind` plus its
+ *     selector — EITHER the explicit `{ type, apiName }` pair OR a single
+ *     `componentId` (`Type:ApiName`, the canonical id a host gets back from
+ *     `sfi.resolve`). Both are normalised at the schema layer to the same
+ *     `{ type, apiName, changeKind }`; the canonical id analysed is
+ *     `${type}:${apiName}`. The pair wins when both are supplied.
  *   - `limit`: optional cap on the DETAILED `reviewed[]` rows (1..500,
  *     default 100). Summary tallies always cover the full set, and the
  *     most-dangerous components sort first, so the deploy-gate verdict is never
@@ -192,11 +444,49 @@ export const REVIEW_CHANGE_DISCLOSURE =
 export const reviewChangeInputSchema = z.object({
   components: z
     .array(
-      z.object({
-        type: z.string().min(1),
-        apiName: z.string().min(1),
-        changeKind: z.enum(CHANGE_KINDS),
-      }),
+      z
+        .object({
+          type: z.string().min(1).optional(),
+          apiName: z.string().min(1).optional(),
+          componentId: z.string().min(1).optional(),
+          changeKind: z.enum(CHANGE_KINDS),
+        })
+        .superRefine((val, ctx) => {
+          // Accept EITHER the explicit { type, apiName } pair OR a single
+          // `componentId` (`Type:ApiName`) — hosts naturally forward the
+          // canonical id from `sfi.resolve`. The pair wins when both are given.
+          const hasPair = val.type !== undefined && val.apiName !== undefined;
+          if (hasPair) return;
+          if (val.componentId === undefined) {
+            ctx.addIssue({
+              code: 'custom',
+              path: ['type'],
+              message:
+                'each change entry needs `{ type, apiName }` OR `componentId` (`Type:ApiName`)',
+            });
+            return;
+          }
+          const idx = val.componentId.indexOf(':');
+          if (idx <= 0 || idx >= val.componentId.length - 1) {
+            ctx.addIssue({
+              code: 'custom',
+              path: ['componentId'],
+              message:
+                'componentId must be `Type:ApiName` (a colon that is neither the first nor last character)',
+            });
+          }
+        })
+        .transform((val) => {
+          // Normalise to the canonical { type, apiName, changeKind } shape so
+          // ALL downstream code (canonicalId, reviewed[] output) is byte-
+          // unchanged whichever selector the host supplied.
+          if (val.type !== undefined && val.apiName !== undefined) {
+            return { type: val.type, apiName: val.apiName, changeKind: val.changeKind };
+          }
+          const id = val.componentId as string;
+          const idx = id.indexOf(':');
+          return { type: id.slice(0, idx), apiName: id.slice(idx + 1), changeKind: val.changeKind };
+        }),
     )
     .min(1)
     .max(MAX_CHANGE_SET),
@@ -228,9 +518,23 @@ export interface ReviewedComponent {
   readonly dependents: readonly ComponentId[];
   /** Weakest edge confidence among the surviving dependents; null when none. */
   readonly weakestDependentConfidence: Edge['confidence'] | null;
-  /** Covering tests to run for this component (Apex only; sample-capped). */
+  /**
+   * Covering tests to run for this component. For Apex, the component's own
+   * covering tests; for a frontend bundle (LWC/Aura/VF), the covering tests of
+   * the Apex controllers it `callsApex` (its outbound risk).
+   */
   readonly selectedTests: readonly ComponentId[];
   readonly testCoverage: TestCoverageStatus;
+  /**
+   * Frontend bundles only: the Apex classes this bundle `callsApex` (outbound
+   * risk the inbound-dependent gate misses). Sample-capped. Absent otherwise.
+   */
+  readonly outboundApex?: readonly ComponentId[];
+  /**
+   * Frontend bundles only: CustomPermission / FlexiPage wiring the bundle
+   * `references` (placement / visibility gates). Sample-capped. Absent otherwise.
+   */
+  readonly outboundWires?: readonly ComponentId[];
   /** Present when this component's family is not fully covered by the vault. */
   readonly coverageCaveat?: CoverageCaveat;
 }
@@ -372,79 +676,202 @@ const runReviewCore = async (
 ): Promise<Result<CoreReview, McpError>> => {
   const limit = limitInput ?? DEFAULT_LIMIT;
 
-  // Compose tests_for_change ONCE for every Apex component in the set — it
-  // dedupes, buckets non-Apex/absent ids, and applies the depth-3 covering
-  // walk we must not reimplement. Map its per-change output back by id.
-  const apexIds = components
-    .filter((c) => APEX_TYPES.has(c.type))
-    .map((c) => canonicalId(c.type, c.apiName));
-  const perChangeById = new Map<ComponentId, PerChangeCoverage>();
-  const selectedTestsUnion = new Set<ComponentId>();
-  let uncoveredApex = 0;
-  if (apexIds.length > 0) {
-    const tfc = await testsForChangeHandler(ctx, { changedComponents: apexIds });
-    if (!tfc.ok) return tfc;
-    for (const pc of tfc.value.data.perChange) perChangeById.set(pc.id, pc);
-    for (const t of tfc.value.data.selectedTests) selectedTestsUnion.add(t.id);
-    uncoveredApex = tfc.value.data.summary.uncoveredCount;
+  // Pre-pass: resolve every component's node ONCE, and for FRONTEND bundles
+  // (LWC/Aura/VF) also read the OUTBOUND wiring the inbound-dependent gate is
+  // blind to — the Apex controllers the bundle `callsApex`, and the
+  // CustomPermission / FlexiPage placement it `references`. The Apex callees
+  // are folded into the tests_for_change scoring below so a bundle's verdict can
+  // select the controller's covering tests
+  // (REVIEW-CHANGE-LWC-SAFE-IGNORES-CONTROLLER-AND-PAGE-WIRE).
+  interface Prepared {
+    readonly change: ReviewChangeInput['components'][number];
+    readonly id: ComponentId;
+    readonly node: Node | null;
+    readonly outboundApex: readonly ComponentId[];
+    readonly outboundWires: readonly ComponentId[];
   }
-
-  // Per-family coverage caveat cache — consulted only for a zero-dependent
-  // result, to distinguish a proven "none" from an un-retrieved family.
-  const familyCaveatCache = new Map<string, CoverageCaveat | undefined>();
-  const familyCaveat = (type: string): CoverageCaveat | undefined => {
-    if (!familyCaveatCache.has(type)) {
-      familyCaveatCache.set(
-        type,
-        buildEnumerationCoverageCaveatFor(
-          ctx,
-          [type],
-          `The \`${type}\` family a change targets`,
-        ),
-      );
-    }
-    return familyCaveatCache.get(type);
-  };
-
-  const reviewed: ReviewedComponent[] = [];
+  const prepared: Prepared[] = [];
+  const frontendCalleeApexIds = new Set<ComponentId>();
   for (const change of components) {
     const id = canonicalId(change.type, change.apiName);
-
     const nodeRes = await getNodeById(ctx.graph, id);
     if (!nodeRes.ok) {
       return { ok: false, error: { kind: 'internal', message: `graph query failed: ${nodeRes.error.message}` } };
     }
-    const node: Node | null = nodeRes.value;
+    const node = nodeRes.value;
+    let outboundApex: readonly ComponentId[] = [];
+    let outboundWires: readonly ComponentId[] = [];
+    if (
+      node !== null &&
+      FRONTEND_BUNDLE_TYPES.has(change.type) &&
+      change.changeKind !== 'deleted'
+    ) {
+      const outRes = await listEdges(ctx.graph, id, { direction: 'out' });
+      if (!outRes.ok) {
+        return { ok: false, error: { kind: 'internal', message: `graph query failed: ${outRes.error.message}` } };
+      }
+      const apexSet = new Set<ComponentId>();
+      const wireSet = new Set<ComponentId>();
+      for (const e of outRes.value) {
+        if (e.edgeType === 'callsApex' && e.toId.startsWith('ApexClass:')) {
+          apexSet.add(e.toId);
+          frontendCalleeApexIds.add(e.toId);
+        } else if (
+          e.edgeType === 'references' &&
+          WIRE_REF_PREFIXES.some((p) => e.toId.startsWith(p))
+        ) {
+          wireSet.add(e.toId);
+        }
+      }
+      outboundApex = sortIds(apexSet);
+      outboundWires = sortIds(wireSet);
+    }
+    prepared.push({ change, id, node, outboundApex, outboundWires });
+  }
+
+  // Compose tests_for_change ONCE for every Apex component in the set PLUS the
+  // Apex controllers frontend bundles call — it dedupes, buckets non-Apex/absent
+  // ids, and applies the depth-3 covering walk we must not reimplement. Map its
+  // per-change output back by id.
+  const changesetApexIds = components
+    .filter((c) => APEX_TYPES.has(c.type))
+    .map((c) => canonicalId(c.type, c.apiName));
+  const changesetApexSet = new Set<ComponentId>(changesetApexIds);
+  const apexIdsToScore = [
+    ...new Set<ComponentId>([...changesetApexIds, ...frontendCalleeApexIds]),
+  ];
+  const perChangeById = new Map<ComponentId, PerChangeCoverage>();
+  const selectedTestsUnion = new Set<ComponentId>();
+  let uncoveredApex = 0;
+  if (apexIdsToScore.length > 0) {
+    const tfc = await testsForChangeHandler(ctx, { changedComponents: apexIdsToScore });
+    if (!tfc.ok) return tfc;
+    for (const pc of tfc.value.data.perChange) perChangeById.set(pc.id, pc);
+    for (const t of tfc.value.data.selectedTests) selectedTestsUnion.add(t.id);
+    // `uncoveredApex` counts only the changeset's OWN unguarded Apex — a callee
+    // pulled in for a frontend bundle is a dependency, not a changed component.
+    // (When there are no bundle callees this equals `summary.uncoveredCount`.)
+    for (const uid of tfc.value.data.uncoveredChanges) {
+      if (changesetApexSet.has(uid)) uncoveredApex += 1;
+    }
+  }
+
+  // Per-type coverage caveat cache — consulted ONLY for a zero-dependent result,
+  // to distinguish a proven "none" from an absence the vault could never have
+  // shown.
+  //
+  // GATE-HONESTY-EMPTY-GRAPH-EQUALS-SAFE: for a delete/modify the honest question
+  // is NOT "is the component's OWN family covered?" (a fully-modeled node says
+  // nothing about who might reference it — the false-safe the extractor-gap
+  // cluster kept regenerating) but "are the families that could REFERENCE this
+  // component all covered?". A zero-dependent delete/modify whose usage-source
+  // families are not all retrieved is "not checked", not proven "none", so the
+  // caveat downgrades it to `review` (fixtures A/F/G). Absence of edges is only
+  // as strong as the coverage behind the families that produce them. An ADDED
+  // component's own forward references are never analysed anyway, so it keeps the
+  // prior own-family staleness check (its verdict is name-collision-driven).
+  const usageCaveatCache = new Map<string, CoverageCaveat | undefined>();
+  const zeroDependentCaveat = (
+    type: string,
+    changeKind: ChangeKind,
+  ): CoverageCaveat | undefined => {
+    if (changeKind === 'added') {
+      return buildEnumerationCoverageCaveatFor(
+        ctx,
+        [type],
+        `The \`${type}\` family a change targets`,
+      );
+    }
+    if (!usageCaveatCache.has(type)) {
+      usageCaveatCache.set(
+        type,
+        buildUsageSourceCoverageCaveat(
+          ctx,
+          type,
+          `Whether \`${type}\` is still referenced (the families that could reference it)`,
+          // W11: integration / callout-trust anchors fail harder — an unused
+          // credential on an UNKNOWN-coverage vault is `review`, never bare
+          // `safe`, because its only referrers live on the under-extracted
+          // callout plane. All other types keep the legacy-vault-tolerant stance.
+          INTEGRATION_GATE_TYPES.has(type)
+            ? { fireOnUnknownCoverage: true }
+            : undefined,
+        ),
+      );
+    }
+    return usageCaveatCache.get(type);
+  };
+
+  const reviewed: ReviewedComponent[] = [];
+  for (const { change, id, node, outboundApex, outboundWires } of prepared) {
     const inVault = node !== null;
 
     // (a) IMPACT — direct incoming edges minus access/structural edges.
     let dependentEdges: readonly Edge[] = [];
+    let inboundEdges: readonly Edge[] = [];
     if (inVault) {
       const edgesRes = await listEdges(ctx.graph, id, { direction: 'in' });
       if (!edgesRes.ok) {
         return { ok: false, error: { kind: 'internal', message: `graph query failed: ${edgesRes.error.message}` } };
       }
-      dependentEdges = edgesRes.value.filter((e) => !NON_DEPENDENCY_EDGE_TYPES.has(e.edgeType));
+      inboundEdges = edgesRes.value;
+      dependentEdges = edgesRes.value.filter((e) => isDependencyEdge(e.edgeType, change.type));
     }
     const dependentIds = new Set<ComponentId>(dependentEdges.map((e) => e.fromId));
     const dependentCount = dependentIds.size;
     const weakest = weakestConfidence(dependentEdges);
     const allHeuristic = weakest === 'heuristic';
 
-    // (b) TESTS — from the composed tests_for_change output.
+    // (a') FIRING BINDING — is this an ACTIVE save-time automation whose object
+    // binding is OUTBOUND (`triggersOn`) or structural (`parentOf`), invisible
+    // to the inbound-dependent gate? Only queried for delete/modify of an
+    // in-vault firing-binding type (Flow / ApexTrigger / ValidationRule); the
+    // outbound `triggersOn` walk is skipped for every other component.
+    // REVIEW-CHANGE-RECORD-TRIGGERED-AUTOMATION-FALSE-SAFE.
+    let firing: FiringBinding | null = null;
+    if (node !== null && change.changeKind !== 'added' && FIRING_BINDING_TYPES.has(change.type)) {
+      const firingRes = await detectFiringBinding(ctx, change.type, node, id, inboundEdges);
+      if (!firingRes.ok) return firingRes;
+      firing = firingRes.value;
+    }
+
+    const isFrontendBundle = FRONTEND_BUNDLE_TYPES.has(change.type);
+    const hasOutbound = outboundApex.length > 0 || outboundWires.length > 0;
+
+    // (b) TESTS — from the composed tests_for_change output. A frontend bundle
+    // has no Apex tests of its OWN; its covering tests are the covering tests of
+    // the Apex controllers it calls (outbound), so a `safe`-looking LWC promotion
+    // still surfaces the controller's test set to run.
     const pc = perChangeById.get(id);
     const isApex = APEX_TYPES.has(change.type);
-    const selectedTests = pc !== undefined ? pc.coveringTests.map((t) => t.id) : [];
+    let selectedTests: readonly ComponentId[];
+    if (isFrontendBundle && outboundApex.length > 0) {
+      const s = new Set<ComponentId>();
+      for (const calleeId of outboundApex) {
+        const cpc = perChangeById.get(calleeId);
+        if (cpc !== undefined) for (const t of cpc.coveringTests) s.add(t.id);
+      }
+      selectedTests = [...s];
+    } else {
+      selectedTests = pc !== undefined ? pc.coveringTests.map((t) => t.id) : [];
+    }
     const testCoverage: TestCoverageStatus = !isApex
       ? 'not-applicable'
       : pc !== undefined && pc.covered
         ? 'covered'
         : 'uncovered';
 
-    // (c) VERDICT — the classification table above.
-    const caveat = dependentCount === 0 ? familyCaveat(change.type) : undefined;
+    // (c) VERDICT — the classification table, then a frontend-bundle OUTBOUND
+    // adjustment. A modified LWC/Aura/VF has (almost) no INCOMING dependents, so
+    // the inbound gate calls it `safe`; but calling a production controller or
+    // wiring a permission/page is real promotion risk. Floor such a bundle at
+    // `review` and name the callees + selected tests.
+    const caveat =
+      dependentCount === 0
+        ? zeroDependentCaveat(change.type, change.changeKind)
+        : undefined;
     const familyCovered = caveat === undefined;
-    const { verdict, reason } = classify({
+    const classified = classify({
       changeKind: change.changeKind,
       inVault,
       dependentCount,
@@ -452,6 +879,65 @@ const runReviewCore = async (
       weakest,
       familyCovered,
     });
+    let verdict = classified.verdict;
+    let reason = classified.reason;
+    if (isFrontendBundle && change.changeKind !== 'deleted' && hasOutbound) {
+      const parts: string[] = [];
+      if (outboundApex.length > 0) {
+        parts.push(`${outboundApex.length} Apex controller callee(s) (${outboundApex.join(', ')})`);
+      }
+      if (outboundWires.length > 0) {
+        parts.push(`${outboundWires.length} permission/page wire(s) (${outboundWires.join(', ')})`);
+      }
+      const outboundPhrase = parts.join(' and ');
+      if (VERDICT_RANK[verdict] > VERDICT_RANK.review) {
+        verdict = 'review';
+        reason = `Frontend bundle change with OUTBOUND wiring the inbound-dependent gate misses: ${outboundPhrase}. Review the callee(s)/wiring and run the selected covering test(s) — SELECTION ≠ VALIDATION.`;
+      } else {
+        reason = `${reason} Also carries outbound wiring: ${outboundPhrase}; run the selected covering test(s).`;
+      }
+    }
+
+    // (c') ACTIVE-RULE adjustment (after the table, like the frontend-bundle
+    // floor): an Active DuplicateRule / MatchingRule fires on save regardless of
+    // inbound references, so a delete/modify the inbound gate calls `safe` (0
+    // dependents) actually changes runtime behaviour. Floor a live rule at
+    // `review` (never bare `safe`); inactive rules keep their table verdict, so
+    // the floor is state-driven, not a blanket type floor.
+    // REVIEW-CHANGE-SAFE-ON-DELETE-DUPLICATE-RULE.
+    if (
+      change.changeKind !== 'added' &&
+      verdict === 'safe' &&
+      isActiveBehavioralRule(change.type, node)
+    ) {
+      const behaviour = change.type === 'DuplicateRule' ? 'duplicate-detection' : 'matching';
+      const verb = change.changeKind === 'deleted' ? 'Deleting' : 'Modifying';
+      verdict = 'review';
+      reason =
+        `Active ${change.type} — it fires on record save regardless of inbound references (the inbound-dependent gate shows 0 dependents, but its runtime effect is real; parentOf is structural and any MatchingRule link is outbound). ` +
+        `${verb} or deactivating a live rule changes runtime ${behaviour} behaviour — review before deploying.`;
+    }
+
+    // (c'') FIRING-BINDING floor (after the table + prior floors, same
+    // rationale — leaves `classify`'s table intact for its unit test): an
+    // ACTIVE record-triggered (before/after-save) Flow, an ACTIVE ApexTrigger,
+    // or an ACTIVE ValidationRule PARTICIPATES in its object's save transaction
+    // via a binding the inbound-dependent gate is blind to (OUTBOUND
+    // `triggersOn` for the Flow/Trigger; the excluded structural `parentOf` for
+    // the VR), so the table under-calls its delete/modify a bare `safe`.
+    // Deleting a live save participant removes production behaviour (floor to
+    // `blocking`); modifying one changes it (floor to at least `review`). The
+    // floor only raises severity (never downgrades a real-dependent verdict) and
+    // is STATE-driven — an Inactive/Obsolete automation is not a firing binding,
+    // so it keeps its table verdict (mirrors the dead-plane / DuplicateRule
+    // honesty). REVIEW-CHANGE-RECORD-TRIGGERED-AUTOMATION-FALSE-SAFE.
+    if (change.changeKind !== 'added' && firing !== null) {
+      const target: Verdict = change.changeKind === 'deleted' ? 'blocking' : 'review';
+      if (VERDICT_RANK[target] < VERDICT_RANK[verdict]) {
+        verdict = target;
+        reason = buildFiringBindingReason(change.type, change.changeKind, firing);
+      }
+    }
 
     reviewed.push({
       id,
@@ -466,6 +952,12 @@ const runReviewCore = async (
       weakestDependentConfidence: weakest,
       selectedTests: sortIds(selectedTests).slice(0, TEST_SAMPLE_CAP),
       testCoverage,
+      ...(isFrontendBundle && outboundApex.length > 0
+        ? { outboundApex: outboundApex.slice(0, DEPENDENT_SAMPLE_CAP) }
+        : {}),
+      ...(isFrontendBundle && outboundWires.length > 0
+        ? { outboundWires: outboundWires.slice(0, DEPENDENT_SAMPLE_CAP) }
+        : {}),
       ...(caveat !== undefined ? { coverageCaveat: caveat } : {}),
     });
   }
@@ -636,7 +1128,9 @@ const buildExtractorVersionCaveat = (
  *   const r = await reviewChangeHandler(ctx, {
  *     components: [
  *       { type: 'ApexClass', apiName: 'OrderService', changeKind: 'deleted' },
- *       { type: 'CustomField', apiName: 'Account.Industry__c', changeKind: 'modified' },
+ *       // `componentId` selector is equivalent to the { type, apiName } pair —
+ *       // the canonical id a host forwards straight from `sfi.resolve`.
+ *       { componentId: 'CustomField:Account.Industry__c', changeKind: 'modified' },
  *     ],
  *     againstVault: 'prod',
  *   });
@@ -713,9 +1207,12 @@ export const reviewChangeHandler = async (
 /** Verbatim boundary lines (also folded into `trust.limitations`-style hosting). */
 const REVIEW_CHANGE_BOUNDARIES: readonly string[] = [
   'Analysis is against the LAST VAULT REFRESH of the target org, which may drift from what is actually deployed. Re-run `sfi refresh` and re-review before trusting a `safe` verdict.',
-  'Dependents are DIRECT (single-hop) incoming edges, excluding grantedBy (access, not a breakage dependency) and parentOf (structural). Use `sfi.get_impact` for the full transitive blast radius.',
+  'Dependents are DIRECT (single-hop) incoming edges, excluding grantedBy (access, not a breakage dependency) and parentOf (structural). Use `sfi.get_impact` for the full transitive blast radius. Exception: for a CustomPermission the grantedBy granters (Profile / PermissionSet) reference it by name and ARE counted as dependents.',
+  'Active DuplicateRule / MatchingRule are floored at `review` (never bare `safe`) on delete/modify: they fire on record save regardless of inbound references, so the inbound-dependent model alone would under-call them. An INACTIVE rule keeps its table verdict.',
+  'Active save-time automation binds to its object OUTSIDE the inbound-dependent model: a record-triggered (before/after-save) Flow and an ApexTrigger bind OUTBOUND via `triggersOn`, and a ValidationRule binds via the structural `parentOf` from its object (excluded as a dependent). Such a live save participant shows 0 inbound dependents, so its delete is floored at `blocking` and its modify at `review` (never bare `safe`). An INACTIVE / Obsolete automation does not fire and keeps its table verdict.',
   'ADDED components are not analysed for their own contents — only name-collision (id already present) and test mapping. Their forward references were never extracted offline.',
   'Test selection composes `sfi.tests_for_change`: CLASS-granular, blind to dynamic dispatch / reflection / managed-package tests, depth-3 capped. SELECTION ≠ VALIDATION.',
+  'Frontend bundles (LightningComponentBundle / Aura / Visualforce) are reviewed on OUTBOUND wiring too: a modified/added bundle that calls an Apex controller or references a CustomPermission / FlexiPage is floored at `review` (never bare `safe`), with `outboundApex` / `outboundWires` naming them and the controllers’ covering tests selected. Only `callsApex` and `references`→CustomPermission/FlexiPage wiring are composed; other outbound edges (e.g. a bundle’s own field reads) are not turned into verdicts.',
 ];
 
 /** Inputs to the per-component classification. */
@@ -752,7 +1249,7 @@ export const classify = (i: ClassifyInput): { verdict: Verdict; reason: string }
       : {
           verdict: 'review',
           reason:
-            'No dependents found, but the vault does not fully cover this family — absence of dependents is "not checked", not proven "none". Verify before deleting.',
+            'No dependents found, but the vault does not fully cover every family that COULD reference this component — absence of dependents is "not checked", not proven "none" (see coverageCaveat). Verify the un-retrieved planes before deleting.',
         };
   }
 
@@ -780,7 +1277,7 @@ export const classify = (i: ClassifyInput): { verdict: Verdict; reason: string }
       : {
           verdict: 'review',
           reason:
-            'No dependents found, but the vault does not fully cover this family — absence is "not checked". Verify before deploying.',
+            'No dependents found, but the vault does not fully cover every family that COULD reference this component — absence is "not checked" (see coverageCaveat). Verify the un-retrieved planes before deploying.',
         };
   }
 

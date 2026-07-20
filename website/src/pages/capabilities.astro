@@ -52,17 +52,17 @@ const jsonld = [
       <article class="card" id="understand" style="margin-bottom:18px;">
         <div class="tagn">02 · understand</div>
         <h2 style="font-family:var(--mono); font-size:1.25rem; color:var(--fg-strong); margin-bottom:8px;">Understand what something does</h2>
-        <p>Explain a single component in plain terms - a field's meaning, a Flow's logic, an Apex method, a formula, or everything that fires when a record is saved.</p>
-        <p class="roster">explain_field · explain_flow · explain_apex_method · explain_formula · field_meaning · what_happens_on_save</p>
-        <ul class="examples"><li>What does the Payment_Status__c field mean?</li><li>Explain what this flow does.</li><li>What happens when an Account is saved?</li><li>Walk me through this formula.</li></ul>
+        <p>Explain a single component in plain terms - a field's meaning, a Flow's logic, an Apex method, a formula, or everything that fires when a record is saved. For what a component structurally <em>implies</em>, <span class="mono amber">interpret</span> joins a curated, org-independent concept model (94 concepts / 143 rules) against your grounded graph and runs it as a deterministic rule engine over an offline slice, returning cited, confidence-tiered claims - never an LLM guess, never a live read.</p>
+        <p class="roster">explain_field · explain_flow · explain_apex_method · explain_formula · field_meaning · what_happens_on_save · interpret</p>
+        <ul class="examples"><li>What does the Payment_Status__c field mean?</li><li>Explain what this flow does.</li><li>Is this field a formula or a roll-up - is it read-only?</li><li>Do I have stacked record-triggered flows on this object?</li></ul>
       </article>
 
       <article class="card" id="impact" style="margin-bottom:18px;">
         <div class="tagn">03 · impact</div>
         <h2 style="font-family:var(--mono); font-size:1.25rem; color:var(--fg-strong); margin-bottom:8px;">Impact &amp; dependencies</h2>
-        <p>See what depends on a component and what would break before you change or delete it - the dependency graph plus what-if simulations.</p>
-        <p class="roster">get_impact · downstream_effects · get_edges · field_lineage · safe_to_delete_field · what_if_deactivate_flow · package_impact</p>
-        <ul class="examples"><li>What breaks if I delete this field?</li><li>What depends on this Apex class?</li><li>Is it safe to deactivate this flow?</li><li>What if I make this field required?</li><li>What of mine breaks if I uninstall the SBQQ package?</li></ul>
+        <p>See what depends on a component and what would break before you change or delete it - the dependency graph plus what-if simulations. <span class="mono amber">interpret</span> adds the structural consequence: what happens to child records when a master-detail parent is deleted, why a roll-up field is read-only, or that an object's two master-detail parents make it a junction - each a cited claim, held no higher than the evidence beneath it.</p>
+        <p class="roster">get_impact · downstream_effects · get_edges · field_lineage · safe_to_delete_field · what_if_deactivate_flow · package_impact · interpret</p>
+        <ul class="examples"><li>What breaks if I delete this field?</li><li>What happens to child records if I delete this parent?</li><li>Is it safe to deactivate this flow?</li><li>What if I make this field required?</li><li>What of mine breaks if I uninstall the SBQQ package?</li></ul>
       </article>
 
       <article class="card" id="access" style="margin-bottom:18px;">

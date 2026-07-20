@@ -599,7 +599,7 @@ const inferEntityTypes = (
   if (/(?:^report\s|\sreport$)/i.test(query)) return ['Report'];
   if (/(?:^dashboard\s|\sdashboard$)/i.test(query)) return ['Dashboard'];
   // QUESTION-level type qualifier RIGHT AFTER the extracted name — "does the
-  // faculty profile have access to the Registered_Courses_Exam__c OBJECT". The
+  // sample profile have access to the Sample_Exam__c OBJECT". The
   // user told us the type; scoping resolution to it keeps same-named
   // components of other types (the CustomTab twin, sibling fields) from
   // manufacturing a fake ambiguity (router-v2 P4 qualified-entity shape).
@@ -1233,11 +1233,42 @@ const resolveActiveVaultAlias = async (ctx: Context): Promise<string | undefined
 };
 
 /**
+ * Derive `sfi.interpret`'s `componentId` from the args already resolved for the
+ * route's SPECIALIST tool — never a fresh guess. Reuses the canonical id under
+ * whichever intent-specific key the specialist bound it to (`componentId` for
+ * impact/object intents, `fieldId`/`targetId` for field intents), or lifts a
+ * bare object api name — under `objectApiName` (automation_build_advisor /
+ * order_of_execution) or `object` (automation_collisions) — to its
+ * `CustomObject:` canonical id, since interpret's owd / status-code / collision
+ * rules anchor on a CustomObject. Returns null when no resolved id is bound (the
+ * host resolves the component itself) — interpret then surfaces with empty args,
+ * exactly like the specialist, rather than a guess. interpret's ONLY input key
+ * is `componentId` (any canonical id), so re-keying the specialist's resolved id
+ * is always valid.
+ */
+const interpretComponentIdFromArgs = (
+  base: Readonly<Record<string, unknown>>,
+): string | null => {
+  const canonical = base['componentId'] ?? base['fieldId'] ?? base['targetId'];
+  if (typeof canonical === 'string' && canonical.length > 0) return canonical;
+  const objectApiName = base['objectApiName'] ?? base['object'];
+  if (typeof objectApiName === 'string' && objectApiName.length > 0) {
+    return objectApiName.startsWith('CustomObject:')
+      ? objectApiName
+      : `CustomObject:${objectApiName}`;
+  }
+  return null;
+};
+
+/**
  * Per-tool args for every tool in `route.tools` — not just the primary answering
  * tool. Keeps `list_components` filters, field-mapping pairs, and live tools
  * separated when the route stacks multiple calls.
+ *
+ * Exported for the interpret-binding unit test (`sfi.interpret` stacked onto a
+ * reasoning-shaped route must surface with a bound `componentId`).
  */
-const buildRouteToolArgsMap = async (
+export const buildRouteToolArgsMap = async (
   route: RouteResult,
   ctx: Context,
 ): Promise<Map<string, Readonly<Record<string, unknown>>>> => {
@@ -1270,6 +1301,15 @@ const buildRouteToolArgsMap = async (
     }
     if (tool === 'sfi.pii_inventory' && Object.keys(base).length > 0) {
       out.set(tool, base);
+      continue;
+    }
+    if (tool === 'sfi.interpret') {
+      // RM-wire (step 2): interpret is stacked as a reasoning COMPLEMENT after
+      // the specialist. Bind the same resolved component id the specialist got,
+      // re-keyed to interpret's sole `componentId` input. Empty when nothing was
+      // resolved (host resolves) — never a guessed id.
+      const interpretId = interpretComponentIdFromArgs(base);
+      out.set(tool, interpretId !== null ? { componentId: interpretId } : {});
       continue;
     }
     if (tool === primaryTool) {

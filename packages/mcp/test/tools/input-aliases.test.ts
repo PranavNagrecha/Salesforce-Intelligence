@@ -5,7 +5,11 @@ import {
   formatSfCliFailure,
   mergeInputAliases,
   parseFieldParentObjectApiName,
+  resolveApexClassAlias,
+  resolveFieldAlias,
+  resolveObjectAlias,
   resolveObjectScopeParentId,
+  toApexClassId,
   toCustomObjectId,
   toLayoutId,
   toObjectApiName,
@@ -67,6 +71,165 @@ describe('id helpers', () => {
 
   it('toLayoutId adds prefix', () => {
     expect(toLayoutId('Account-Account Layout')).toBe('Layout:Account-Account Layout');
+  });
+
+  it('toApexClassId adds prefix and is idempotent', () => {
+    expect(toApexClassId('My_Class')).toBe('ApexClass:My_Class');
+    expect(toApexClassId('ApexClass:My_Class')).toBe('ApexClass:My_Class');
+  });
+});
+
+describe('resolveObjectAlias — L2 object normalizer', () => {
+  const unwrap = (r: ReturnType<typeof resolveObjectAlias>) => {
+    if (!r.ok) throw new Error(`expected ok, got ${r.error.kind}: ${r.error.message}`);
+    return r.value;
+  };
+  /** Unwrap and assert a non-null resolved scope. */
+  const scope = (r: ReturnType<typeof resolveObjectAlias>) => {
+    const v = unwrap(r);
+    if (v === null) throw new Error('expected a resolved object scope, got null');
+    return v;
+  };
+
+  it('natural objectApiName ≡ canonical CustomObject componentId', () => {
+    const natural = scope(resolveObjectAlias({ objectApiName: 'Widget__c' }));
+    const canonical = scope(resolveObjectAlias({ componentId: 'CustomObject:Widget__c' }));
+    expect(natural).toEqual({ componentId: 'CustomObject:Widget__c', object: 'Widget__c' });
+    expect(natural).toEqual(canonical);
+  });
+
+  it('accepts the `object` and `objectId` aliases identically', () => {
+    const byObject = scope(resolveObjectAlias({ object: 'Widget__c' }));
+    const byObjectId = scope(resolveObjectAlias({ objectId: 'CustomObject:Widget__c' }));
+    expect(byObject).toEqual(byObjectId);
+    expect(byObject.componentId).toBe('CustomObject:Widget__c');
+  });
+
+  it('treats a bare componentId as an object only when bareComponentIdIsObject', () => {
+    expect(scope(resolveObjectAlias({ componentId: 'Widget__c' })).componentId).toBe(
+      'CustomObject:Widget__c',
+    );
+    // Polymorphic tool: a bare componentId is its OWN reverse mode, not an object.
+    expect(
+      unwrap(
+        resolveObjectAlias(
+          { componentId: 'Widget__c' },
+          { bareComponentIdIsObject: false, required: false },
+        ),
+      ),
+    ).toBeNull();
+  });
+
+  it('ignores reverse-mode componentId prefixes (Layout:/FlexiPage:/ListView:)', () => {
+    for (const cid of ['Layout:Widget__c.My Layout', 'FlexiPage:My_Page', 'ListView:Widget__c.My_View']) {
+      const r = resolveObjectAlias(
+        { componentId: cid },
+        { bareComponentIdIsObject: false, required: false },
+      );
+      expect(unwrap(r)).toBeNull();
+    }
+  });
+
+  it('folds an object alias alongside a reverse-mode componentId', () => {
+    // Polymorphic tool in OBJECT mode: reverse-prefix componentId is ignored,
+    // the objectApiName resolves the scope.
+    const r = resolveObjectAlias(
+      { componentId: 'FlexiPage:My_Page', objectApiName: 'Widget__c' },
+      { bareComponentIdIsObject: false },
+    );
+    expect(scope(r)).toEqual({ componentId: 'CustomObject:Widget__c', object: 'Widget__c' });
+  });
+
+  it('agreeing aliases collapse to one target (no false conflict)', () => {
+    const r = resolveObjectAlias({
+      objectApiName: 'Widget__c',
+      componentId: 'CustomObject:Widget__c',
+    });
+    expect(scope(r).object).toBe('Widget__c');
+  });
+
+  it('disagreeing aliases → invalid-query', () => {
+    const r = resolveObjectAlias({ objectApiName: 'Widget__c', object: 'Gadget__c' });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.kind).toBe('invalid-query');
+      expect(r.error.message).toContain('different targets');
+    }
+  });
+
+  it('no object named → invalid-query when required', () => {
+    const r = resolveObjectAlias({});
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('no object named → ok(null) when not required (reverse mode)', () => {
+    expect(unwrap(resolveObjectAlias({}, { required: false }))).toBeNull();
+  });
+});
+
+describe('resolveFieldAlias — L2 field normalizer', () => {
+  const unwrap = (r: ReturnType<typeof resolveFieldAlias>) => {
+    if (!r.ok) throw new Error(`expected ok, got ${r.error.kind}: ${r.error.message}`);
+    return r.value;
+  };
+
+  it('natural componentId ≡ canonical fieldId', () => {
+    const byField = unwrap(resolveFieldAlias({ fieldId: 'CustomField:Widget__c.My_Field__c' }));
+    const byComponent = unwrap(
+      resolveFieldAlias({ componentId: 'CustomField:Widget__c.My_Field__c' }),
+    );
+    expect(byField).toEqual(byComponent);
+    expect(byField.fieldId).toBe('CustomField:Widget__c.My_Field__c');
+  });
+
+  it('preserves the short-form value for the tool to normalize', () => {
+    expect(unwrap(resolveFieldAlias({ fieldId: 'Widget__c.My_Field__c' })).fieldId).toBe(
+      'Widget__c.My_Field__c',
+    );
+  });
+
+  it('disagreeing fieldId / componentId → invalid-query', () => {
+    const r = resolveFieldAlias({
+      fieldId: 'CustomField:Widget__c.My_Field__c',
+      componentId: 'CustomField:Widget__c.Other_Field__c',
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('neither → invalid-query', () => {
+    const r = resolveFieldAlias({});
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe('invalid-query');
+  });
+});
+
+describe('resolveApexClassAlias — L2 class normalizer', () => {
+  const unwrap = (r: ReturnType<typeof resolveApexClassAlias>) => {
+    if (!r.ok) throw new Error(`expected ok, got ${r.error.kind}: ${r.error.message}`);
+    return r.value;
+  };
+
+  it('componentId ≡ classApiName ≡ apiName', () => {
+    const byComponent = unwrap(resolveApexClassAlias({ componentId: 'ApexClass:My_Class' }));
+    const byClassApi = unwrap(resolveApexClassAlias({ classApiName: 'My_Class' }));
+    const byApiName = unwrap(resolveApexClassAlias({ apiName: 'My_Class' }));
+    expect(byComponent).toEqual({ componentId: 'ApexClass:My_Class', apexClass: 'My_Class' });
+    expect(byClassApi).toEqual(byComponent);
+    expect(byApiName).toEqual(byComponent);
+  });
+
+  it('disagreeing aliases → invalid-query', () => {
+    const r = resolveApexClassAlias({ classApiName: 'My_Class', apiName: 'Other_Class' });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('none → invalid-query', () => {
+    const r = resolveApexClassAlias({});
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe('invalid-query');
   });
 });
 

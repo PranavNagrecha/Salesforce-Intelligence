@@ -59,8 +59,8 @@ const jsonld = [
           </tbody>
         </table>
 
-        <h2 id="why-ai">Why AI agents need a metadata layer</h2>
-        <p>A general model can explain Salesforce concepts, but it cannot know your org's custom fields, naming conventions, automations, package boundaries, and security model unless those facts are supplied. sf-intelligence supplies those facts as structured, read-only tools, so Claude, Cursor, Codex, or another MCP client can answer from the vault instead of guessing.</p>
+        <h2 id="why-ai">Why AI agents need a grounded metadata layer</h2>
+        <p>A general model can explain Salesforce concepts, but it cannot know your org's custom fields, naming conventions, automations, package boundaries, and security model. sf-intelligence does more than dump those facts into the prompt for the model to guess with: every answer is grounded in the metadata you actually retrieved and cited to a canonical component id. And beyond retrieval, a deterministic, org-independent concept model - <strong>94 concepts / 143 rules</strong> of general Salesforce truth - reasons over the structure: <code>sfi.interpret</code> joins that model against the graph to match curated structural patterns (master-detail cascade, junction objects, read-only roll-up fields, stacked record-triggered flows) and returns cited, confidence-tiered claims, with no LLM inference and no live call. So Claude, Cursor, Codex, or another MCP client answers from grounded evidence instead of training-data guesses.</p>
 
         <h2 id="next">Related searches</h2>
         <p>For blast-radius work, see <a href="/use-cases/salesforce-dependency-analysis">Salesforce dependency analysis</a>. For client setup, see <a href="/use-cases/claude-salesforce-mcp">Claude Salesforce MCP setup</a>. For the complete tool surface, browse <a href="/tools">all {siteData.toolCount} Salesforce MCP tools</a>.</p>

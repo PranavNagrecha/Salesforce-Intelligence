@@ -13,7 +13,10 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
-import { objectAccessAuditHandler } from '../../src/tools/object-access-audit.js';
+import {
+  objectAccessAuditHandler,
+  objectAccessAuditInputSchema,
+} from '../../src/tools/object-access-audit.js';
 
 import { measureGraphQueries } from './_graph-query-budget.js';
 
@@ -168,6 +171,48 @@ describe('objectAccessAuditHandler', () => {
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.error.kind).toBe('component-not-found');
+  });
+});
+
+// =============================================================================
+// GUARD (OBJECT-ACCESS-AUDIT-REJECTS-OBJECTAPINAME): the router sends admins here
+// with the natural object key, but `objectApiName` used to be Zod-stripped and
+// the tool hard-failed with `componentId: Required`. The alias must now (a) pass
+// the input schema and (b) produce the SAME audit as the canonical CustomObject
+// id. Pre-fix the schema rejects `{ objectApiName }` (componentId required), so
+// the first assertion is RED before the fix.
+describe('objectAccessAuditHandler — objectApiName / objectId aliases (guard)', () => {
+  it('accepts objectApiName at the schema layer (was stripped → componentId Required)', () => {
+    const parsed = objectAccessAuditInputSchema.safeParse({ objectApiName: 'Widget__c' });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('objectApiName audit ≡ CustomObject componentId audit', async () => {
+    const byName = await objectAccessAuditHandler(ctx, { objectApiName: 'Widget__c' });
+    const byId = await objectAccessAuditHandler(ctx, { componentId: OBJ });
+    expect(byName.ok && byId.ok).toBe(true);
+    if (!byName.ok || !byId.ok) return;
+    expect(byName.value.data.summary).toEqual(byId.value.data.summary);
+    expect(byName.value.data.grants).toEqual(byId.value.data.grants);
+    expect(byName.value.data.appliedScope).toEqual({ componentId: OBJ, object: 'Widget__c' });
+  });
+
+  it('objectId (canonical) alias resolves identically', async () => {
+    const r = await objectAccessAuditHandler(ctx, { objectId: OBJ });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedScope.componentId).toBe(OBJ);
+    expect(r.value.data.grants).toHaveLength(2);
+  });
+
+  it('rejects disagreeing aliases with invalid-query (never a silent pick)', async () => {
+    const r = await objectAccessAuditHandler(ctx, {
+      componentId: OBJ,
+      objectApiName: 'Other__c',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
   });
 });
 

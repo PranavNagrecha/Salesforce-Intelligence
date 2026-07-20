@@ -53,7 +53,9 @@
     "changelog:assemble": "node scripts/assemble-changelog.mjs",
     "changelog:check": "node scripts/check-changelog-fragments.mjs",
     "check:embedding-index": "node packages/mcp/scripts/check-embedding-index.mjs",
-    "regen:embedding-index": "node scripts/regen-embedding-index.mjs"
+    "regen:embedding-index": "node scripts/regen-embedding-index.mjs",
+    "check:concept-model": "node packages/mcp/scripts/check-concept-model.mjs",
+    "regen:concept-model": "node packages/mcp/scripts/build-concept-model.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.12.7",

@@ -164,6 +164,79 @@ describe('extractRecordType', () => {
     });
   });
 
+  describe('picklist values payload (RECORD-TYPE-OMITS-PICKLIST-VALUES)', () => {
+    // The record type counted <picklistValues> blocks (picklistFieldCount) but
+    // dropped every value. Support "which values can users pick on this record
+    // type?" could not be answered from the node. Emit a `picklists` payload —
+    // per field: the values, and which one is default. The shape is depth-4
+    // frontmatter-safe (scalar fields + one inner scalar array), so it renders
+    // in the component markdown without tripping the yaml-frontmatter limit.
+    it('emits a picklists payload with per-field values and the default value', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<RecordType xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Partner</fullName>
+    <active>true</active>
+    <label>Partner</label>
+    <picklistValues>
+        <picklist>Region__c</picklist>
+        <values>
+            <fullName>North</fullName>
+            <default>false</default>
+        </values>
+        <values>
+            <fullName>South</fullName>
+            <default>true</default>
+        </values>
+    </picklistValues>
+    <picklistValues>
+        <picklist>Tier__c</picklist>
+        <values>
+            <fullName>Gold</fullName>
+            <default>false</default>
+        </values>
+    </picklistValues>
+</RecordType>`;
+      const { dir, path } = await writeNestedRecordTypeXml(
+        'Account',
+        'Partner',
+        xml,
+      );
+      try {
+        const result = await extractRecordType(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0]!;
+        // Count semantics unchanged.
+        expect(node.properties['picklistFieldCount']).toBe(2);
+        // New payload: the values every field can take, plus the default.
+        expect(node.properties['picklists']).toEqual([
+          { field: 'Region__c', defaultValue: 'South', values: ['North', 'South'] },
+          { field: 'Tier__c', defaultValue: null, values: ['Gold'] },
+        ]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits picklists: [] when there are no <picklistValues> blocks', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<RecordType xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Plain</fullName>
+    <active>true</active>
+    <label>Plain</label>
+</RecordType>`;
+      const { dir, path } = await writeNestedRecordTypeXml('Account', 'Plain', xml);
+      try {
+        const result = await extractRecordType(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.nodes[0]!.properties['picklists']).toEqual([]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('properties defaults', () => {
     it('defaults missing optionals to null and picklistFieldCount=0 when <picklistValues> absent', async () => {
       // Per RecordType.md, a minimal valid file has no description, no
@@ -197,6 +270,7 @@ describe('extractRecordType', () => {
           description: null,
           businessProcess: null,
           picklistFieldCount: 0,
+          picklists: [],
         });
       } finally {
         await rm(dir, { recursive: true, force: true });

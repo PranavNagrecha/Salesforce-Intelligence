@@ -125,8 +125,11 @@ describe('seam 1 — runtime-analytics gap arms fire on the unmodeled families',
     ['list dormant users', 'inactive-users'],
     // login IP ranges are PROFILE metadata (q806/q56 lessons)
     ['show me the login IP ranges and trusted IP settings per profile', 'profile-security'],
-    // static governor analysis, not runtime profiling
-    ['which apex classes are at risk of hitting governor limits or CPU timeouts', 'org-limits'],
+    // static governor analysis (vault Apex scan), not runtime org-limits — an
+    // "apex classes … governor limits" question is static-code analysis, so it
+    // routes to the vault governor-risks scan, never the live org-limits roster
+    // (ROUTE-GOVERNOR-APEX-MISBINDS-LIVE-ORG-LIMITS). Matches this row's own note.
+    ['which apex classes are at risk of hitting governor limits or CPU timeouts', 'governor-risks'],
     // System.debug CODE artifacts, not debug-log retrieval (q522 lesson)
     ['does anything call System.debug all over the place, like leftover debug logs in apex', 'apex-search'],
     // static reference count, not a run count

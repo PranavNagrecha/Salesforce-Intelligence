@@ -153,6 +153,18 @@ const unwrapSingle = (value: unknown): unknown =>
   Array.isArray(value) ? value[0] : value;
 
 /**
+ * Normalize a fast-xml-parser child into an array. Returns `[]` for
+ * undefined/null, the value itself when already an array, or a
+ * single-element array otherwise. Mirrors the sibling declarative
+ * extractors (workflow-rule, layout) so a single-occurrence child and a
+ * repeated one are read the same way.
+ */
+const toArray = (value: unknown): unknown[] => {
+  if (value === undefined || value === null) return [];
+  return Array.isArray(value) ? value : [value];
+};
+
+/**
  * Coerce an XML scalar to a boolean. The Salesforce default for unset
  * boolean elements is `false`, so anything that isn't the literal `true`
  * (or its string form) collapses to `false`.
@@ -161,6 +173,98 @@ const coerceBoolean = (value: unknown): boolean => {
   if (typeof value === 'boolean') return value;
   if (typeof value === 'string') return value.toLowerCase() === 'true';
   return false;
+};
+
+/**
+ * OBJECT-SEARCHLAYOUT-LISTVIEWBUTTONS-UNGRAPHED — an object's
+ * `<searchLayouts><listViewButtons>` names the custom List Button (a
+ * `WebLink`) placed on the object's list views. The button is DECLARED here,
+ * on the object, but nowhere else — so before this edge a `WebLink` referenced
+ * ONLY as a list-view button carried no inbound usage edge, read as orphaned,
+ * and `unused_components` / `review_change` flagged it deletable. Deleting it
+ * removes a live list-view button.
+ *
+ * Emit one `references` edge `CustomObject:{object}` -> `WebLink:{object}.{name}`
+ * per distinct `<listViewButtons>` entry (declared confidence — the element
+ * names the button verbatim), mirroring the layout extractor's `<customButtons>`
+ * -> WebLink precedent (`properties.targetKind`). List Buttons in searchLayouts
+ * are classic WebLinks, so the target prefix is always `WebLink`.
+ *
+ * Salesforce also lists ENABLED STANDARD list buttons (`New`, `Accept`,
+ * `ChangeOwner`, …) here by their standard name; those resolve to no `WebLink`
+ * component and dangle by design (the same dangling-tolerance the layout
+ * extractor's custom-button edges carry). Duplicate names within the block are
+ * deduped, first-seen order preserved.
+ */
+const collectListViewButtonEdges = (
+  rootObj: Record<string, unknown>,
+  objectApiName: string,
+): Edge[] => {
+  const searchLayouts = unwrapSingle(rootObj['searchLayouts']);
+  if (typeof searchLayouts !== 'object' || searchLayouts === null) return [];
+  const parentId = `${ROOT_ELEMENT}:${objectApiName}`;
+  const seen = new Set<string>();
+  const edges: Edge[] = [];
+  for (const raw of toArray((searchLayouts as Record<string, unknown>)['listViewButtons'])) {
+    if (raw === undefined || raw === null || raw === '') continue;
+    const name = String(raw);
+    if (seen.has(name)) continue;
+    seen.add(name);
+    edges.push({
+      fromId: parentId,
+      toId: `WebLink:${objectApiName}.${name}`,
+      edgeType: 'references',
+      confidence: 'declared',
+      source: 'custom-object-extractor',
+      properties: { via: 'listViewButtons', targetKind: 'listViewButton' },
+    });
+  }
+  return edges;
+};
+
+/**
+ * The reserved `<compactLayoutAssignment>` value naming the Salesforce
+ * system-managed default compact layout (NOT a `CompactLayout` component).
+ * It must never mint a `CompactLayout:{object}.SYSTEM` phantom. Every other
+ * value — including a user layout literally named `Custom` — is a real
+ * CompactLayout developer name and DOES resolve.
+ */
+const SYSTEM_COMPACT_LAYOUT = 'SYSTEM';
+
+/**
+ * COMPACT-LAYOUT-ASSIGNMENT-UNGRAPHED — an object's
+ * `<compactLayoutAssignment>` names the CompactLayout that is the object's
+ * PRIMARY (default) compact layout — the one users see in the Lightning
+ * highlights panel. It is DECLARED here, on the object, but the compact
+ * layout's only other edges are its own `parentOf` (structural, excluded from
+ * usage) and its outbound field references — so before this edge an assigned
+ * compact layout carried no inbound usage edge, read as orphaned, and
+ * `unused_components` / `review_change` flagged it deletable.
+ *
+ * Emit one `references` edge `CustomObject:{object}` ->
+ * `CompactLayout:{object}.{name}` when the assignment names a real layout
+ * (declared confidence — the element names it verbatim; dangling-tolerated
+ * when the layout was not retrieved). The reserved `SYSTEM` default is skipped
+ * (it is not a CompactLayout component).
+ */
+const collectCompactLayoutAssignmentEdge = (
+  rootObj: Record<string, unknown>,
+  objectApiName: string,
+): Edge[] => {
+  const raw = unwrapSingle(rootObj['compactLayoutAssignment']);
+  if (raw === undefined || raw === null || raw === '') return [];
+  const name = String(raw);
+  if (name === SYSTEM_COMPACT_LAYOUT) return [];
+  return [
+    {
+      fromId: `${ROOT_ELEMENT}:${objectApiName}`,
+      toId: `CompactLayout:${objectApiName}.${name}`,
+      edgeType: 'references',
+      confidence: 'declared',
+      source: 'custom-object-extractor',
+      properties: { via: 'compactLayoutAssignment' },
+    },
+  ];
 };
 
 /**
@@ -466,5 +570,15 @@ export const extractCustomObject = async (
     nameFieldObj !== null ? { type: nameFieldType, label: nameFieldLabel } : null,
   );
 
-  return ok({ nodes: [node, ...system.nodes], edges: system.edges });
+  // OBJECT-SEARCHLAYOUT-LISTVIEWBUTTONS-UNGRAPHED: emit the declared
+  // Object -> WebLink usage edges for `<searchLayouts><listViewButtons>`.
+  const listViewButtonEdges = collectListViewButtonEdges(rootObj, apiName);
+  // COMPACT-LAYOUT-ASSIGNMENT-UNGRAPHED: emit the declared Object ->
+  // CompactLayout usage edge for `<compactLayoutAssignment>`.
+  const compactLayoutEdges = collectCompactLayoutAssignmentEdge(rootObj, apiName);
+
+  return ok({
+    nodes: [node, ...system.nodes],
+    edges: [...system.edges, ...listViewButtonEdges, ...compactLayoutEdges],
+  });
 };

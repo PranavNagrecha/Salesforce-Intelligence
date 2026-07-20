@@ -446,6 +446,80 @@ describe('eventSubscribersHandler', () => {
     expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
   });
 
+  // ===========================================================================
+  // EVENT-SUBSCRIBERS-SILENTLY-IGNORES-EVENTAPINAME guards. Pre-fix these FAIL:
+  // an apiName-shaped call was Zod-stripped and fell through to CATALOG mode
+  // (empty top-level publishers/channels, eventApiName null), so publishers only
+  // appeared when the host already knew the canonical CustomObject id.
+  // ===========================================================================
+
+  it('resolves eventApiName to the same DETAIL payload as the canonical eventId', async () => {
+    const viaApiName = await eventSubscribersHandler(ctx, {
+      eventApiName: 'Account_Change__e',
+    });
+    const viaEventId = await eventSubscribersHandler(ctx, {
+      eventId: ACCOUNT_CHANGE_EVENT,
+    });
+    expect(viaApiName.ok && viaEventId.ok).toBe(true);
+    if (!viaApiName.ok || !viaEventId.ok) return;
+    const a = viaApiName.value.data;
+    const b = viaEventId.value.data;
+    // DETAIL mode, not catalog: eventApiName echoed, events absent.
+    expect(a.eventApiName).toBe('Account_Change__e');
+    expect(a.events).toBeUndefined();
+    // Same subscribers, publishers, and channels as the canonical id call.
+    expect(a.subscribers.map((s) => s.id)).toEqual(
+      b.subscribers.map((s) => s.id),
+    );
+    expect((a.publishers ?? []).map((p) => p.id)).toEqual(
+      (b.publishers ?? []).map((p) => p.id),
+    );
+    expect(a.publishers?.length).toBe(2);
+    expect((a.channels ?? []).map((c) => c.memberId)).toEqual(
+      (b.channels ?? []).map((c) => c.memberId),
+    );
+  });
+
+  it('does NOT fall through to catalog mode when only eventApiName is supplied', async () => {
+    const result = await eventSubscribersHandler(ctx, {
+      eventApiName: 'Account_Change__e',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Catalog mode would set eventApiName:null + a populated events[].
+    expect(result.value.data.eventApiName).not.toBeNull();
+    expect(result.value.data.events).toBeUndefined();
+  });
+
+  it('accepts eventApiName already carrying the CustomObject: prefix', async () => {
+    const result = await eventSubscribersHandler(ctx, {
+      eventApiName: ACCOUNT_CHANGE_EVENT,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.eventApiName).toBe('Account_Change__e');
+  });
+
+  it('invalid-query on a non-event eventApiName (not a silent empty)', async () => {
+    const result = await eventSubscribersHandler(ctx, {
+      eventApiName: 'Account.Industry__c',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe('invalid-query');
+    expect(result.error.path).toBe('eventApiName');
+  });
+
+  it('eventId wins when both eventId and eventApiName are supplied', async () => {
+    const result = await eventSubscribersHandler(ctx, {
+      eventId: ACCOUNT_CHANGE_EVENT,
+      eventApiName: 'Order_Placed__e',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.eventApiName).toBe('Account_Change__e');
+  });
+
   it('CR-CAP-18: surfaces publish-side channels with the declared per-member filter (fail-before: no channels field)', async () => {
     const result = await eventSubscribersHandler(ctx, {
       eventId: ACCOUNT_CHANGE_EVENT,

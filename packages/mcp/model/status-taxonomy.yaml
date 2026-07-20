@@ -1,0 +1,116 @@
+# Concept model — Salesforce status-code taxonomy (RM-0 DATA track).
+#
+# CURATOR-OWNED source of truth. General Salesforce truth only: REST/API
+# status codes, bare Salesforce ComponentType names, and plain-English
+# explanations. NO org identifiers, NO canonical-id (Type:Name) strings.
+#
+# Compiled to TypeScript by packages/mcp/scripts/build-concept-model.mjs
+#   ->  packages/mcp/src/knowledge/generated/concept-model.ts  (DO NOT hand-edit).
+# Regenerate:  pnpm regen:concept-model      Parity gate:  pnpm check:concept-model
+#
+# Each entry under statusCodes:
+#   category                 - short category slug for the status code
+#   explanation              - plain-English cause (general Salesforce guidance)
+#   producedByTypes          - ComponentTypes that can produce this code
+#   crossRefObjectAutomation - true when the usual producer is object automation
+#
+# Key ORDER is significant and preserved verbatim into the generated artifact.
+
+statusCodes:
+  FIELD_CUSTOM_VALIDATION_EXCEPTION:
+    category: validation-rule
+    explanation: A validation rule (or a flow/Apex addError with a field) rejected the save because a field failed a declared condition.
+    producedByTypes:
+      - ValidationRule
+      - Flow
+      - ApexTrigger
+      - ApexClass
+    crossRefObjectAutomation: false
+  REQUIRED_FIELD_MISSING:
+    category: required-field
+    explanation: 'A field required at the API/layout/schema level was left empty. Sources: a universally-required custom field, a required field on the page layout, a master-detail relationship field, or a flow/Apex that sets a field required.'
+    producedByTypes:
+      - CustomField
+      - Layout
+      - Flow
+      - ApexTrigger
+    crossRefObjectAutomation: false
+  CANNOT_INSERT_UPDATE_ACTIVATE_ENTITY:
+    category: automation-abort
+    explanation: An Apex trigger or a record-triggered flow on this object threw/aborted the DML (an addError, a thrown exception, or a flow fault). The status code is the DML's generic wrapper — the real cause is the automation that ran on save.
+    producedByTypes:
+      - ApexTrigger
+      - Flow
+      - ApexClass
+    crossRefObjectAutomation: true
+  UNABLE_TO_LOCK_ROW:
+    category: lock-contention
+    explanation: A row-lock could not be obtained — two transactions contended for the same record (often parent record contention from triggers/flows updating a shared parent, or a bulk load racing itself). This is runtime contention, not a single component defect.
+    producedByTypes:
+      - ApexTrigger
+      - Flow
+      - ApexClass
+    crossRefObjectAutomation: true
+  INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:
+    category: access
+    explanation: The running user lacks access to a RELATED record referenced by this save (a lookup/master-detail target), not necessarily this object. Sharing/OWD/CRUD on the referenced object is the constraint.
+    producedByTypes:
+      - Profile
+      - PermissionSet
+      - SharingRule
+    crossRefObjectAutomation: false
+  INSUFFICIENT_ACCESS_OR_READONLY:
+    category: access
+    explanation: The running user lacks object/field CRUD or record-level edit access, or the record is read-only (locked by an approval process or a validation on a closed record).
+    producedByTypes:
+      - Profile
+      - PermissionSet
+      - ApprovalProcess
+    crossRefObjectAutomation: false
+  DUPLICATES_DETECTED:
+    category: duplicate
+    explanation: A duplicate rule blocked (or alerted on) the save because a matching rule found an existing similar record.
+    producedByTypes:
+      - DuplicateRule
+      - MatchingRule
+    crossRefObjectAutomation: false
+  DUPLICATE_VALUE:
+    category: duplicate
+    explanation: A unique/External-Id field already holds this value on another record (a schema uniqueness constraint), distinct from a DuplicateRule alert.
+    producedByTypes:
+      - CustomField
+    crossRefObjectAutomation: false
+  STRING_TOO_LONG:
+    category: field-integrity
+    explanation: A text value exceeded the field length declared on the schema (often a formula/flow/Apex writing more characters than the target field allows).
+    producedByTypes:
+      - CustomField
+      - Flow
+      - ApexClass
+    crossRefObjectAutomation: false
+  FIELD_INTEGRITY_EXCEPTION:
+    category: field-integrity
+    explanation: A value violated a field-integrity constraint (bad picklist value, incompatible field-dependency, or a malformed compound field).
+    producedByTypes:
+      - CustomField
+    crossRefObjectAutomation: false
+  INVALID_CROSS_REFERENCE_KEY:
+    category: field-integrity
+    explanation: A lookup/master-detail field was set to an id that is invalid, wrong object type, or inaccessible — the referenced record could not be resolved.
+    producedByTypes:
+      - CustomField
+      - Flow
+      - ApexClass
+    crossRefObjectAutomation: false
+  ENTITY_IS_DELETED:
+    category: field-integrity
+    explanation: The record being updated/deleted is already in the Recycle Bin — a concurrent delete, or automation acting on a stale id.
+    producedByTypes:
+      - ApexClass
+      - Flow
+    crossRefObjectAutomation: false
+  STORAGE_LIMIT_EXCEEDED:
+    category: org-limit
+    explanation: The org's data storage allocation is exhausted — an org-wide limit, not a component defect.
+    producedByTypes: []
+    crossRefObjectAutomation: false

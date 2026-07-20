@@ -40,4 +40,17 @@ if [ "$?" -ne 0 ]; then
   echo "  If — and only if — it is a genuine false positive: git commit --no-verify"
   exit 1
 fi
+
+# Concept-model parity gate (RM-0 / RM-2): the curator-owned YAML model and its
+# generated TypeScript artifact must stay byte-identical, and NO canonical org id
+# may leak into a curated string (incl. mid-prose). Deterministic + fast, so it
+# runs on every commit — a two-track drift or an id leak can never ship.
+node packages/mcp/scripts/check-concept-model.mjs
+if [ "$?" -ne 0 ]; then
+  echo ""
+  echo "✖ pre-commit: concept-model parity/guard failed (see above)."
+  echo "  Regenerate with: pnpm regen:concept-model  (then re-stage the generated artifact)."
+  echo "  If — and only if — it is a genuine false positive: git commit --no-verify"
+  exit 1
+fi
 exit 0

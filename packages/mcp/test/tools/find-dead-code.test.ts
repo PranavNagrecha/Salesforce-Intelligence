@@ -1,6 +1,6 @@
 /// <reference types="vitest/globals" />
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -1061,5 +1061,357 @@ describe('findDeadCodeHandler — dead async-dispatch (Queueable) detection', ()
     const joined = r.value.data.boundaries.join(' ');
     expect(joined).toContain('async-dispatch dead-code');
     expect(joined).toContain('!Test.isRunningTest()');
+  });
+});
+
+// A class used ONLY via a static-field / type-name reference (`Other.CONST`,
+// `List<Other>`, `JSON.deserialize(.., List<Other>.class)`) never becomes an
+// inbound graph edge, so the CTE sees zero in-degree and would wrongly call it
+// definitely_dead. The tool grep-re-checks non-test production source before
+// reporting an ApexClass dead. GENERIC synthetic fixtures — no org identifiers.
+describe('findDeadCodeHandler — static-type-usage re-check (DEAD-CODE-MISSES-STATIC-TYPE-USAGE)', () => {
+  let sDir: string;
+  let sStore: GraphStore;
+  let sCtx: Context;
+
+  const writeCls = (dir: string, apiName: string, body: string): void =>
+    writeFileSync(join(dir, `${apiName}.cls`), body, 'utf8');
+
+  beforeAll(async () => {
+    sDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-fdc-static-'));
+    const opened = await openGraph(join(sDir, 'fdc-static.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    sStore = opened.value;
+
+    const sSeed: ExtractionResult = {
+      nodes: [
+        // Zero inbound edges, but referenced by production OrderService via a
+        // static field + type name → NOT dead.
+        makeNode({
+          id: 'ApexClass:PricingCalculator',
+          type: 'ApexClass',
+          apiName: 'PricingCalculator',
+          properties: { isTest: false },
+        }),
+        // Zero inbound edges, referenced by production IntegrationGateway only
+        // through `JSON.deserialize(.., List<PayloadShape>.class)` → NOT dead.
+        makeNode({
+          id: 'ApexClass:PayloadShape',
+          type: 'ApexClass',
+          apiName: 'PayloadShape',
+          properties: { isTest: false },
+        }),
+        // Zero inbound edges AND referenced nowhere in source → definitely_dead
+        // (control: the grep must find nothing and leave the verdict alone).
+        makeNode({
+          id: 'ApexClass:TrulyDeadHelper',
+          type: 'ApexClass',
+          apiName: 'TrulyDeadHelper',
+          properties: { isTest: false },
+        }),
+        // Zero inbound edges, referenced ONLY from an @isTest class →
+        // definitely_dead (a test reference is not production usage).
+        makeNode({
+          id: 'ApexClass:TestReferencedOnly',
+          type: 'ApexClass',
+          apiName: 'TestReferencedOnly',
+          properties: { isTest: false },
+        }),
+        // Production referrers — kept live by an entry-point trigger so they do
+        // not themselves clutter the dead set.
+        makeNode({
+          id: 'ApexClass:OrderService',
+          type: 'ApexClass',
+          apiName: 'OrderService',
+          properties: { isTest: false },
+        }),
+        makeNode({
+          id: 'ApexClass:IntegrationGateway',
+          type: 'ApexClass',
+          apiName: 'IntegrationGateway',
+          properties: { isTest: false },
+        }),
+        makeNode({
+          id: 'ApexTrigger:AppTrigger',
+          type: 'ApexTrigger',
+          apiName: 'AppTrigger',
+          properties: { isTest: false },
+        }),
+        // The test class that references TestReferencedOnly. Test classes are
+        // never dead themselves and must be EXCLUDED as production referrers.
+        makeNode({
+          id: 'ApexClass:LegacyScenarioTest',
+          type: 'ApexClass',
+          apiName: 'LegacyScenarioTest',
+          properties: { isTest: true },
+        }),
+      ],
+      edges: [
+        makeEdge({
+          fromId: 'ApexTrigger:AppTrigger',
+          toId: 'ApexClass:OrderService',
+          edgeType: 'callsApex',
+        }),
+        makeEdge({
+          fromId: 'ApexTrigger:AppTrigger',
+          toId: 'ApexClass:IntegrationGateway',
+          edgeType: 'callsApex',
+        }),
+      ],
+    };
+    const imp = await importExtractionResults(sStore, [sSeed]);
+    if (!imp.ok) throw new Error(imp.error.message);
+
+    // Vault source tree: `{vaultRoot}/source/classes/*.cls`.
+    const classesDir = join(sDir, 'source', 'classes');
+    mkdirSync(classesDir, { recursive: true });
+    writeCls(
+      classesDir,
+      'OrderService',
+      `public class OrderService {\n` +
+        `  public static Decimal total() {\n` +
+        `    Decimal rate = PricingCalculator.STANDARD_RATE;\n` +
+        `    List<PricingCalculator> tiers = new List<PricingCalculator>();\n` +
+        `    return rate;\n` +
+        `  }\n}`,
+    );
+    writeCls(
+      classesDir,
+      'IntegrationGateway',
+      `public class IntegrationGateway {\n` +
+        `  public void handle(String payload) {\n` +
+        `    List<PayloadShape> rows =\n` +
+        `      (List<PayloadShape>) JSON.deserialize(payload, List<PayloadShape>.class);\n` +
+        `  }\n}`,
+    );
+    // Self-only file — the class references its own name in the declaration; the
+    // re-check must exclude the candidate's own source file.
+    writeCls(
+      classesDir,
+      'TrulyDeadHelper',
+      `public class TrulyDeadHelper {\n  public void noop() {}\n}`,
+    );
+    writeCls(
+      classesDir,
+      'TestReferencedOnly',
+      `public class TestReferencedOnly {\n  public static Integer x() { return 1; }\n}`,
+    );
+    writeCls(
+      classesDir,
+      'PricingCalculator',
+      `public class PricingCalculator {\n  public static Decimal STANDARD_RATE = 1.0;\n}`,
+    );
+    writeCls(
+      classesDir,
+      'PayloadShape',
+      `public class PayloadShape {\n  public Id recordId;\n}`,
+    );
+    // Only reference to TestReferencedOnly lives in a TEST class → excluded.
+    writeCls(
+      classesDir,
+      'LegacyScenarioTest',
+      `@isTest\npublic class LegacyScenarioTest {\n` +
+        `  @isTest static void t() { Integer n = TestReferencedOnly.x(); }\n}`,
+    );
+
+    sCtx = { vaultRoot: sDir, manifest: MANIFEST, graph: sStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(sStore);
+    rmSync(sDir, { recursive: true, force: true });
+  });
+
+  it('does NOT flag a class used only via a static-field/type-name reference as definitely_dead', async () => {
+    const r = await findDeadCodeHandler(sCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Suppressed (downgraded to uncertain) → absent from the default result set.
+    expect(
+      r.value.data.candidates.find(
+        (c) => c.componentId === 'ApexClass:PricingCalculator',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('does NOT flag a class referenced only via JSON.deserialize(.., List<X>.class) as dead', async () => {
+    const r = await findDeadCodeHandler(sCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(
+      r.value.data.candidates.find(
+        (c) => c.componentId === 'ApexClass:PayloadShape',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('STILL flags a class referenced nowhere in source as definitely_dead (control)', async () => {
+    const r = await findDeadCodeHandler(sCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const dead = r.value.data.candidates.find(
+      (c) => c.componentId === 'ApexClass:TrulyDeadHelper',
+    );
+    expect(dead?.verdict).toBe('definitely_dead');
+  });
+
+  it('STILL flags a class referenced ONLY from a test class as definitely_dead (test refs are not production usage)', async () => {
+    const r = await findDeadCodeHandler(sCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const dead = r.value.data.candidates.find(
+      (c) => c.componentId === 'ApexClass:TestReferencedOnly',
+    );
+    expect(dead?.verdict).toBe('definitely_dead');
+  });
+
+  it('surfaces the downgraded class as `uncertain` with static-usage reasoning under includeUncertain', async () => {
+    const r = await findDeadCodeHandler(sCtx, { includeUncertain: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.candidates.find(
+      (x) => x.componentId === 'ApexClass:PricingCalculator',
+    );
+    expect(c?.verdict).toBe('uncertain');
+    expect(c?.reasoning).toContain('static-field or type-name');
+  });
+
+  it('discloses the static-type-usage re-check in boundaries', async () => {
+    const r = await findDeadCodeHandler(sCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.boundaries.join(' ')).toContain(
+      'static-type-usage re-check',
+    );
+  });
+});
+
+// =============================================================================
+// GUARD (FIND-DEAD-CODE-IGNORES-COMPONENT-SCOPE): "is {class} dead?" passes a
+// componentId, but it was Zod-stripped and every call returned the same org-wide
+// top-N candidate list. A component scope must now return ONLY that node's
+// verdict (surfacing `uncertain` too, which the org-wide view suppresses) plus
+// appliedScope; the bare call stays org-wide. Pre-fix a scoped call equals the
+// org-wide payload, so the per-node-count / verdict assertions are RED.
+describe('findDeadCodeHandler — component scope (guard)', () => {
+  it('bare call is org-wide with appliedScope mode: all', async () => {
+    const r = await findDeadCodeHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedScope).toEqual({ component: null, object: null, mode: 'all' });
+    expect(r.value.data.totalCount).toBeGreaterThan(1);
+  });
+
+  it('componentId scope returns ONLY that class (differs from bare org list)', async () => {
+    const r = await findDeadCodeHandler(ctx, { componentId: 'ApexClass:OrphanedHelper' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.totalCount).toBe(1);
+    expect(r.value.data.candidates[0]?.componentId).toBe('ApexClass:OrphanedHelper');
+    expect(r.value.data.candidates[0]?.verdict).toBe('definitely_dead');
+    expect(r.value.data.appliedScope).toEqual({
+      component: 'ApexClass:OrphanedHelper',
+      object: null,
+      mode: 'component',
+    });
+  });
+
+  it('a scoped uncertain (entry-point) class surfaces its verdict (org-wide suppresses it)', async () => {
+    const bare = await findDeadCodeHandler(ctx, {});
+    const scoped = await findDeadCodeHandler(ctx, { componentId: 'ApexClass:PublicRestApi' });
+    expect(bare.ok && scoped.ok).toBe(true);
+    if (!bare.ok || !scoped.ok) return;
+    // Org-wide default suppresses uncertain — PublicRestApi is NOT in the bare list...
+    expect(bare.value.data.candidates.map((c) => c.componentId)).not.toContain(
+      'ApexClass:PublicRestApi',
+    );
+    // ...but the scoped question returns it (verdict uncertain).
+    expect(scoped.value.data.totalCount).toBe(1);
+    expect(scoped.value.data.candidates[0]?.componentId).toBe('ApexClass:PublicRestApi');
+    expect(scoped.value.data.candidates[0]?.verdict).toBe('uncertain');
+  });
+
+  it('CustomField component scope works', async () => {
+    const r = await findDeadCodeHandler(ctx, { componentId: 'CustomField:Account.Stale__c' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.candidates.map((c) => c.componentId)).toEqual([
+      'CustomField:Account.Stale__c',
+    ]);
+    expect(r.value.data.appliedScope.mode).toBe('component');
+  });
+
+  it('an unresolved component id is component-not-found (not a silent org-wide list)', async () => {
+    const r = await findDeadCodeHandler(ctx, { componentId: 'ApexClass:GhostClass' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
+  });
+
+  it('a non-dead-code type prefix is invalid-query', async () => {
+    const r = await findDeadCodeHandler(ctx, { componentId: 'Profile:Admin' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+
+  it('componentId + object scope together is invalid-query (mutually exclusive)', async () => {
+    const r = await findDeadCodeHandler(ctx, {
+      componentId: 'ApexClass:OrphanedHelper',
+      objectApiName: 'Account',
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+  });
+});
+
+// =============================================================================
+// GUARD (FIND-DEAD-CODE-IGNORES-CLASSAPINAME): the `componentId` scope path was
+// closed earlier, but a bare `classApiName` / `apiName` (a dev asking "is
+// CourseEmailController dead?" by NAME) was Zod-stripped and fell through to the
+// org-wide list. The bare class-name aliases must now coerce to `ApexClass:{name}`
+// and resolve to the SAME component scope as the canonical componentId.
+describe('findDeadCodeHandler — classApiName / apiName alias (guard)', () => {
+  it('classApiName resolves to the same component scope as componentId', async () => {
+    const byComponentId = await findDeadCodeHandler(ctx, {
+      componentId: 'ApexClass:OrphanedHelper',
+    });
+    const byClassApiName = await findDeadCodeHandler(ctx, {
+      classApiName: 'OrphanedHelper',
+    });
+    expect(byComponentId.ok && byClassApiName.ok).toBe(true);
+    if (!byComponentId.ok || !byClassApiName.ok) return;
+    // NOT the org-wide list — one candidate, that class, mode component.
+    expect(byClassApiName.value.data.totalCount).toBe(1);
+    expect(byClassApiName.value.data.candidates[0]?.componentId).toBe(
+      'ApexClass:OrphanedHelper',
+    );
+    expect(byClassApiName.value.data.candidates[0]?.verdict).toBe('definitely_dead');
+    expect(byClassApiName.value.data.appliedScope).toEqual({
+      component: 'ApexClass:OrphanedHelper',
+      object: null,
+      mode: 'component',
+    });
+    expect(byClassApiName.value.data.appliedScope).toEqual(
+      byComponentId.value.data.appliedScope,
+    );
+  });
+
+  it('apiName resolves identically to classApiName', async () => {
+    const byApiName = await findDeadCodeHandler(ctx, { apiName: 'OrphanedHelper' });
+    expect(byApiName.ok).toBe(true);
+    if (!byApiName.ok) return;
+    expect(byApiName.value.data.candidates.map((c) => c.componentId)).toEqual([
+      'ApexClass:OrphanedHelper',
+    ]);
+    expect(byApiName.value.data.appliedScope.mode).toBe('component');
+  });
+
+  it('an unresolved classApiName is component-not-found (not a silent org-wide list)', async () => {
+    const r = await findDeadCodeHandler(ctx, { classApiName: 'GhostClass' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('component-not-found');
   });
 });

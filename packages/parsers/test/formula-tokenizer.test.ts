@@ -208,22 +208,22 @@ describe('tokenizeFormula references — happy paths', () => {
 });
 
 describe('tokenizeFormula real-world fixture', () => {
-  it('handles the edu-org Block_nulling_Advisor_on_EN_students rule', () => {
+  it('handles a real-org validation-rule formula (multi-ref, no dedup)', () => {
     const errorConditionFormula =
       "AND(\n" +
       "TEXT( Student_Status__c )='Enrolled-Active',\n" +
-      ' ISCHANGED(Academic_Advisor__c),\n' +
-      '  ISBLANK(Academic_Advisor__c)\n' +
+      ' ISCHANGED(Widget_Advisor__c),\n' +
+      '  ISBLANK(Widget_Advisor__c)\n' +
       ')';
     const result = tokenizeFormula(errorConditionFormula);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const paths = result.value.references.map((r) => r.path);
     expect(paths).toContain('Student_Status__c');
-    expect(paths).toContain('Academic_Advisor__c');
-    // Two occurrences of Academic_Advisor__c — tokenizer does NOT
+    expect(paths).toContain('Widget_Advisor__c');
+    // Two occurrences of Widget_Advisor__c — tokenizer does NOT
     // deduplicate; the caller does that when forming edges.
-    expect(paths.filter((p) => p === 'Academic_Advisor__c')).toHaveLength(2);
+    expect(paths.filter((p) => p === 'Widget_Advisor__c')).toHaveLength(2);
     expect(result.value.functionCalls).toEqual([
       'AND',
       'ISBLANK',

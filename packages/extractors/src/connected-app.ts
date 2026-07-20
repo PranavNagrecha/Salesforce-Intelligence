@@ -96,6 +96,55 @@ const parseOauthConfig = (
   };
 };
 
+/**
+ * CONNECTED-APP-DROPS-SAML-CONFIG: the SSO-federation half of a Connected
+ * App's trust surface. A SAML-only Connected App (a DevOps SSO / sandbox-login
+ * app) carries a `<samlConfig>` block and NO `<oauthConfig>`; reading only the
+ * OAuth block projected it as `hasOauthConfig: false` / `scopes: []` /
+ * `callbackUrl: null` — an "empty shell" that made SAML apps read as
+ * configuration-free and hid the ACS / entity / issuer federation targets an
+ * architect needs to map "who can call in?".
+ */
+interface SamlConfig {
+  /** Assertion Consumer Service URL — where the IdP posts the SAML response. */
+  readonly acsUrl: string | null;
+  /** SP entity id / audience the assertion is scoped to. */
+  readonly entityUrl: string | null;
+  /** IdP issuer the SP expects. */
+  readonly issuer: string | null;
+  /** Which User field the subject asserts (username | federationId | userId | customAttribute). */
+  readonly subjectType: string | null;
+  /** SAML NameID format the SP requests. */
+  readonly nameIdFormat: string | null;
+  /** Assertion encryption type (`None` when unencrypted). */
+  readonly encryptionType: string | null;
+}
+
+/**
+ * Unpack the optional `<samlConfig>` block. Returns `null` when the app has no
+ * SAML config (OAuth-only / Canvas / session apps). SECRETS ARE NEVER READ:
+ * the `<certificate>` / `<encryptionCertificate>` key material is deliberately
+ * skipped (this product never vaults secrets — same rule the Certificate
+ * extractor applies to `.crt` content), so only the trust-boundary URLs and
+ * subject/format flags are surfaced. Every field is read leniently (a missing
+ * element becomes null rather than rejecting the app).
+ */
+const parseSamlConfig = (
+  rootObj: Record<string, unknown>,
+): SamlConfig | null => {
+  const samlRaw = unwrapSingle(rootObj['samlConfig']);
+  if (typeof samlRaw !== 'object' || samlRaw === null) return null;
+  const saml = samlRaw as Record<string, unknown>;
+  return {
+    acsUrl: optionalString(saml, 'acsUrl'),
+    entityUrl: optionalString(saml, 'entityUrl'),
+    issuer: optionalString(saml, 'issuer'),
+    subjectType: optionalString(saml, 'samlSubjectType'),
+    nameIdFormat: optionalString(saml, 'samlNameIdFormat'),
+    encryptionType: optionalString(saml, 'encryptionType'),
+  };
+};
+
 /** Locate the `<ConnectedApp>` root and verify required top-level children. */
 const validateRoot = (
   parsed: Record<string, unknown>,
@@ -134,14 +183,22 @@ const validateRoot = (
  * top-level `<description>`, `<iconUrl>`, and `<infoUrl>` are surfaced
  * on the node's `properties` map.
  *
+ * CONNECTED-APP-DROPS-SAML-CONFIG: also reads a nested `<samlConfig>` (the
+ * SSO-federation half of the trust surface) into `properties.authProtocol`
+ * (`oauth` | `saml` | `both` | `none`), `properties.hasSamlConfig`, and — when
+ * present — a `properties.saml` block (`acsUrl`, `entityUrl`, `issuer`,
+ * `subjectType`, `nameIdFormat`, `encryptionType`). The `<certificate>` /
+ * `<encryptionCertificate>` key material is NEVER read (secrets are not
+ * vaulted). Before this, a SAML-only app projected as an empty OAuth shell.
+ *
  * `scopes` is an array of strings preserving XML element order, ready
  * for downstream YAML-frontmatter array serialization (per journal
  * 0060). The extractor does not validate scope strings against
  * Salesforce's allowed set; it surfaces them verbatim.
  *
  * Returns one `Node` of type `'ConnectedApp'` and zero edges. The
- * callback URL and OAuth scopes are strings, not graph nodes; linking
- * to managed-package namespaces is deferred to v0.3.
+ * callback URL, OAuth scopes, and SAML URLs are strings, not graph nodes;
+ * linking to managed-package namespaces is deferred to v0.3.
  *
  * Error cases (per vendored `ConnectedApp.md`):
  *   - `file-not-found` if the file is missing
@@ -194,6 +251,19 @@ export const extractConnectedApp = async (
   const rootObj = rootResult.value;
 
   const oauth = parseOauthConfig(rootObj);
+  const saml = parseSamlConfig(rootObj);
+  // CONNECTED-APP-DROPS-SAML-CONFIG: the app's authentication protocol(s).
+  // `oauth` = classic OAuth client; `saml` = SSO federation target; `both` =
+  // an app with both blocks; `none` = neither (Canvas / session-only). This is
+  // the discriminant that stops a SAML app from reading as "no auth config".
+  const authProtocol: 'oauth' | 'saml' | 'both' | 'none' =
+    oauth !== null && saml !== null
+      ? 'both'
+      : oauth !== null
+        ? 'oauth'
+        : saml !== null
+          ? 'saml'
+          : 'none';
 
   const apiName = deriveComponentApiName(path, CONNECTED_APP_FILE_SUFFIX);
 
@@ -217,6 +287,25 @@ export const extractConnectedApp = async (
       consumerKey: oauth?.consumerKey ?? null,
       callbackUrl: oauth?.callbackUrl ?? null,
       scopes: oauth?.scopes ?? [],
+      // CONNECTED-APP-DROPS-SAML-CONFIG: SAML SSO federation surface. The
+      // protocol discriminant + a boolean flag are ALWAYS present (symmetric
+      // with `hasOauthConfig`); the detailed `saml` block (secrets redacted)
+      // is present ONLY when a `<samlConfig>` exists, so an OAuth-only app is
+      // not padded with null SAML fields.
+      authProtocol,
+      hasSamlConfig: saml !== null,
+      ...(saml !== null
+        ? {
+            saml: {
+              acsUrl: saml.acsUrl,
+              entityUrl: saml.entityUrl,
+              issuer: saml.issuer,
+              subjectType: saml.subjectType,
+              nameIdFormat: saml.nameIdFormat,
+              encryptionType: saml.encryptionType,
+            },
+          }
+        : {}),
     },
   };
 

@@ -72,6 +72,7 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { coercePrefix } from './coerce-id.js';
+import { mergeInputAliases, resolveObjectAlias } from './input-aliases.js';
 import {
   argsFingerprint,
   decodeCursor,
@@ -103,11 +104,19 @@ export const OBJECT_FLAGS = [
 ] as const;
 export type ObjectFlag = (typeof OBJECT_FLAGS)[number];
 
-/** Zod schema for the `sfi.effective_permissions` tool input. */
-export const effectivePermissionsInputSchema = z
+const effectivePermissionsInputBaseSchema = z
   .object({
     profileId: z.string().min(1).optional(),
     permissionSetIds: z.array(z.string().min(1)).optional(),
+    // EFFECTIVE-PERMISSIONS-IGNORES-OBJECT-AND-PROFILEAPINAME: optional OBJECT
+    // scope — "effective permissions for {profile} ON {object}?". Any one of
+    // these selectors; the handler narrows objectPermissions / FLS field count /
+    // recordTypeVisibilities to it and echoes `appliedScope`. An object that
+    // resolves to nothing real in this vault is `invalid-query`, NEVER a silent
+    // org-wide multi-object dump (the P1 honesty core).
+    object: z.string().min(1).optional(),
+    objectApiName: z.string().min(1).optional(),
+    objectId: z.string().min(1).optional(),
     limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
     offset: z.number().int().min(0).optional(),
     // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
@@ -117,8 +126,24 @@ export const effectivePermissionsInputSchema = z
   })
   .refine(
     (i) => i.profileId !== undefined || (i.permissionSetIds !== undefined && i.permissionSetIds.length > 0),
-    { message: 'supply at least one of: profileId, permissionSetIds' },
+    { message: 'supply at least one of: profileId / profileApiName, permissionSetIds' },
   );
+
+/**
+ * Zod schema for the `sfi.effective_permissions` tool input. A `profileApiName`
+ * / `profileName` alias is merged into `profileId` BEFORE the "at least one
+ * container" refine (the canonical `profileId` wins when both are present), so a
+ * natural "effective permissions for {profile}" call resolves instead of
+ * hard-failing on `profileId` required. The optional object selector is
+ * validated by the handler.
+ */
+export const effectivePermissionsInputSchema = z.preprocess(
+  (raw) =>
+    mergeInputAliases(raw, [
+      { canonical: 'profileId', aliases: ['profileApiName', 'profileName'] },
+    ]),
+  effectivePermissionsInputBaseSchema,
+);
 
 export type EffectivePermissionsInput = z.infer<typeof effectivePermissionsInputSchema>;
 
@@ -208,6 +233,17 @@ export interface EffectivePermissionsOutput {
   readonly truncated: boolean;
   readonly confidence: 'declared';
   readonly disclosures: readonly string[];
+  /**
+   * Echoes the OBJECT scope ACTUALLY applied. Present ONLY when the caller
+   * passed an `object` / `objectApiName` / `objectId` selector — a bare
+   * profile/permission-set call omits it so the response stays byte-identical to
+   * the pre-scope shape. When present, `objectPermissions`, `summary.objects` /
+   * `summary.fieldsWithFls` / `summary.recordTypeVisibilities`, and
+   * `recordTypeVisibilities` are narrowed to `object`; `systemPermissions` /
+   * `customPermissions` / `apexClasses` are container-wide (not object-specific)
+   * and are unchanged.
+   */
+  readonly appliedScope?: { readonly object: string };
   /**
    * CR-22 opaque continuation token, present ONLY on a truncated page (the
    * designated list overflowed `limit` or the byte budget). Echo it back as
@@ -705,6 +741,13 @@ export const effectivePermissionsHandler = async (
     });
   }
 
+  // EFFECTIVE-PERMISSIONS-IGNORES-OBJECT-AND-PROFILEAPINAME: resolve the optional
+  // OBJECT scope (conflicting object aliases → invalid-query here). Existence is
+  // proven below, once the grant set is materialised.
+  const objScopeResult = resolveObjectAlias(input, { required: false });
+  if (!objScopeResult.ok) return err(objScopeResult.error);
+  const scopedObject = objScopeResult.value; // ResolvedObjectScope | null
+
   // Emit only objects with ≥1 surviving flag; a fully-muted object confers no
   // access and is not listed (its mute is counted in the disclosure).
   const objectPermissions: EffectiveObjectPerm[] = [...g.objectMap.entries()]
@@ -767,18 +810,67 @@ export const effectivePermissionsHandler = async (
     }))
     .sort((x, y) => (x.recordType < y.recordType ? -1 : x.recordType > y.recordType ? 1 : 0));
 
-  const totalObjects = objectPermissions.length;
+  // Apply the optional OBJECT scope: narrow the object-keyed surfaces
+  // (objectPermissions, record-type visibilities, the FLS field count) to it and
+  // PROVE the object is real — otherwise `invalid-query`, never a silent
+  // org-wide dump. `object.` prefixes the field / record-type keys, so a
+  // first-dot split names their owning object. system / custom permissions and
+  // apex-class access are container-wide (not object-specific) and stay whole.
+  const objectOf = (key: string): string => {
+    const d = key.indexOf('.');
+    return d > 0 ? key.slice(0, d) : key;
+  };
+  let finalObjectPermissions = objectPermissions;
+  let finalRecordTypeVisibilities = recordTypeVisibilities;
+  let fieldsWithFls = g.fieldMap.size;
+  if (scopedObject !== null) {
+    const objLc = scopedObject.object.toLowerCase();
+    finalObjectPermissions = objectPermissions.filter(
+      (o) => o.object.toLowerCase() === objLc,
+    );
+    finalRecordTypeVisibilities = recordTypeVisibilities.filter(
+      (rt) => objectOf(rt.recordType).toLowerCase() === objLc,
+    );
+    fieldsWithFls = [...g.fieldMap.keys()].filter(
+      (f) => objectOf(f).toLowerCase() === objLc,
+    ).length;
+    const objNode = await getNodeById(ctx.graph, scopedObject.componentId as ComponentId);
+    if (!objNode.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${objNode.error.message}` });
+    }
+    // "Real" = the object node exists OR the containers touch it (a granted /
+    // record-type / FLS reference, even an all-false object row) — a name that
+    // is neither is a typo, and a scoped answer for it must fail, never fall
+    // back to the full org-wide grant set.
+    const objectIsReal =
+      objNode.value !== null ||
+      finalObjectPermissions.length > 0 ||
+      finalRecordTypeVisibilities.length > 0 ||
+      fieldsWithFls > 0 ||
+      [...g.objectMap.keys()].some((o) => o.toLowerCase() === objLc);
+    if (!objectIsReal) {
+      return err({
+        kind: 'invalid-query',
+        message: `no object matches \`${scopedObject.componentId}\` in this vault — name an object these containers could grant on (or omit the object for the org-wide union)`,
+        path: 'objectApiName',
+      });
+    }
+  }
+
+  const totalObjects = finalObjectPermissions.length;
   const limit = input.limit ?? DEFAULT_LIMIT;
 
   // CR-22 section cursor: page ONE designated list (object | system) and
   // disclose the other honestly. objectPermissions is the largest + already
   // paged list, so it is the default designated list; a resumed cursor's
   // token.listId is fed back as designatedListId (paginateSection does NOT
-  // cross-check — the handler owns that binding, B0 note).
+  // cross-check — the handler owns that binding, B0 note). The object scope is
+  // part of the fingerprint so a scoped cursor cannot resume the unscoped list.
   const TOOL = 'sfi.effective_permissions';
   const fingerprint = argsFingerprint({
     ...(input.profileId !== undefined ? { profileId: input.profileId } : {}),
     ...(input.permissionSetIds !== undefined ? { permissionSetIds: input.permissionSetIds } : {}),
+    ...(scopedObject !== null ? { object: scopedObject.object } : {}),
   });
   let designatedListId = 'object';
   let offset = input.offset ?? 0;
@@ -794,7 +886,7 @@ export const effectivePermissionsHandler = async (
   }
 
   const sections: readonly PageableSection<EffectiveObjectPerm | EffectiveSystemPerm>[] = [
-    { listId: 'object', items: objectPermissions },
+    { listId: 'object', items: finalObjectPermissions },
     { listId: 'system', items: systemPermissions },
   ];
   const pagedResult = paginateSection(sections, designatedListId, {
@@ -815,7 +907,7 @@ export const effectivePermissionsHandler = async (
   const objectPage =
     designatedListId === 'object'
       ? (paged.items as readonly EffectiveObjectPerm[])
-      : objectPermissions;
+      : finalObjectPermissions;
   const systemPage =
     designatedListId === 'system'
       ? (paged.items as readonly EffectiveSystemPerm[])
@@ -830,6 +922,11 @@ export const effectivePermissionsHandler = async (
   const emitCursor = paged.pageInfo.nextCursor !== null;
 
   const disclosures = [...BASE_DISCLOSURES];
+  if (scopedObject !== null) {
+    disclosures.push(
+      `Scoped to object \`${scopedObject.object}\`: objectPermissions, the fieldsWithFls count, and recordTypeVisibilities are narrowed to it (an empty list is this profile/permission set holding nothing on that object). systemPermissions, customPermissions, and apexClasses are container-wide (not object-specific) and are NOT narrowed.`,
+    );
+  }
   if (truncated) {
     disclosures.push(
       `Object permissions paginated: showing ${offset}–${offset + objectPage.length} of ${totalObjects}. summary holds the complete counts; page with offset/limit.`,
@@ -888,15 +985,16 @@ export const effectivePermissionsHandler = async (
       objectPermissions: objectPage,
       systemPermissions: systemPage,
       customPermissions,
-      recordTypeVisibilities,
+      recordTypeVisibilities: finalRecordTypeVisibilities,
       summary: {
         objects: totalObjects,
-        fieldsWithFls: g.fieldMap.size,
+        fieldsWithFls,
         apexClasses: g.apexClasses.size,
         systemPermissions: systemPermissions.length,
         customPermissions: customPermissions.length,
-        recordTypeVisibilities: recordTypeVisibilities.length,
+        recordTypeVisibilities: finalRecordTypeVisibilities.length,
       },
+      ...(scopedObject !== null ? { appliedScope: { object: scopedObject.object } } : {}),
       limit,
       offset,
       hasMore,

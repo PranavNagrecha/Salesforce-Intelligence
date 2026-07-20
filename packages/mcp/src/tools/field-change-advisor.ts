@@ -29,14 +29,33 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { firstNonEmpty } from './input-aliases.js';
 import { safeToDeleteFieldHandler } from './safe-to-delete-field.js';
 import { whatIfChangeFieldTypeHandler } from './what-if-change-field-type.js';
 import { whatIfMakeFieldRequiredHandler } from './what-if-make-field-required.js';
 
 type ChangeTypeArgs = Parameters<typeof whatIfChangeFieldTypeHandler>[1];
 
+const CUSTOM_FIELD_PREFIX = 'CustomField:';
+
 export const fieldChangeAdvisorInputSchema = z.object({
-  fieldId: z.string().min(1),
+  /**
+   * Canonical field selector. Optional at the SCHEMA level because a host /
+   * router may instead pass one of the interchangeable field selectors below
+   * (FIELD-CHANGE-ADVISOR-REJECTS-NATURAL-FIELD-ARGS). At least one selector is
+   * required — the handler returns a named `invalid-query` when none is given.
+   */
+  fieldId: z.string().min(1).optional(),
+  /**
+   * Interchangeable field selectors a host naturally reaches for. Resolved to
+   * the single canonical `CustomField:{Object}.{Field}` id via
+   * `resolveFieldSelector`, precedence `fieldId > componentId > fieldApiName >
+   * apiName`. A bare `Object.Field` and a `CustomField:Object.Field` id both
+   * resolve.
+   */
+  componentId: z.string().min(1).optional(),
+  fieldApiName: z.string().min(1).optional(),
+  apiName: z.string().min(1).optional(),
   /** Optional target type to additionally analyse a type change. */
   newType: z.string().min(1).optional(),
   /** Opt-in live plane: cite the field's production null-rate (P6-live-advisor-wire). */
@@ -45,6 +64,50 @@ export const fieldChangeAdvisorInputSchema = z.object({
 });
 
 export type FieldChangeAdvisorInput = z.infer<typeof fieldChangeAdvisorInputSchema>;
+
+/**
+ * Bare `Object.Field` → canonical `CustomField:Object.Field`. A value already
+ * carrying the `CustomField:` prefix passes through unchanged; a WRONG-type
+ * prefix (`ApexClass:` …) or a bare non-dotted token also passes through so the
+ * handler's own `component-not-found` names it precisely rather than this
+ * resolver guessing.
+ */
+const normalizeFieldSelector = (raw: string): string => {
+  if (raw.startsWith(CUSTOM_FIELD_PREFIX)) return raw;
+  if (raw.includes(':')) return raw;
+  if (raw.includes('.')) return `${CUSTOM_FIELD_PREFIX}${raw}`;
+  return raw;
+};
+
+/**
+ * Resolve the single field selector a host / router may pass —
+ * `fieldId` (canonical) plus the `componentId` / `fieldApiName` / `apiName`
+ * aliases — with precedence `fieldId > componentId > fieldApiName > apiName`
+ * (FIELD-CHANGE-ADVISOR-REJECTS-NATURAL-FIELD-ARGS). Reuses the shared
+ * `firstNonEmpty` primitive for the precedence pick (mirroring
+ * `governor-limit-risks` `resolveScopeId` / `what_if_change_method_signature`),
+ * then normalizes so a bare `Object.Field` and a `CustomField:Object.Field` id
+ * both resolve. NONE → a named `invalid-query` (never a silent empty answer).
+ */
+const resolveFieldSelector = (
+  input: FieldChangeAdvisorInput,
+): Result<string, McpError> => {
+  const raw = firstNonEmpty(
+    input.fieldId,
+    input.componentId,
+    input.fieldApiName,
+    input.apiName,
+  );
+  if (raw === undefined) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        'name the field — pass `fieldId` (e.g. "CustomField:Account.Industry__c"), `componentId`, `fieldApiName`, or `apiName` (a bare "Object.Field" also resolves)',
+      path: 'fieldId',
+    });
+  }
+  return ok(normalizeFieldSelector(raw));
+};
 
 export interface FieldChangeAdvisorOutput {
   readonly fieldId: ComponentId;
@@ -84,7 +147,13 @@ export const fieldChangeAdvisorHandler = async (
   input: FieldChangeAdvisorInput,
   exec?: ExecCommand,
 ): Promise<Result<McpResponse<FieldChangeAdvisorOutput>, McpError>> => {
-  const fieldId = input.fieldId as ComponentId;
+  // Resolve the natural field selectors a host/router may pass into the single
+  // canonical `CustomField:` id the composed tools need
+  // (FIELD-CHANGE-ADVISOR-REJECTS-NATURAL-FIELD-ARGS). Byte-identical when the
+  // canonical `fieldId` is passed.
+  const selector = resolveFieldSelector(input);
+  if (!selector.ok) return err(selector.error);
+  const fieldId = selector.value as ComponentId;
 
   // Validate the field exists once, up front, with a clear error.
   const node = await getNodeById(ctx.graph, fieldId);

@@ -118,6 +118,7 @@ import {
   FLOW_DEACTIVATION_REQUIRED_COVERAGE,
   type Verdict,
 } from './coverage-trust.js';
+import { firstNonEmpty } from './input-aliases.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 
 /** Canonical id prefix for the Flow node type. */
@@ -177,6 +178,15 @@ export interface WhatIfDeactivateFlowFiringCondition {
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface WhatIfDeactivateFlowOutput {
+  /**
+   * Echoes the Flow scope ACTUALLY resolved so a host that passed a
+   * `componentId` / `flowApiName` / `apiName` alias sees it was honored, not
+   * silently stripped. Always `component` mode — the tool is single-Flow.
+   */
+  readonly appliedScope: {
+    readonly component: ComponentId;
+    readonly mode: 'component';
+  };
   readonly flowId: ComponentId;
   readonly apiName: string;
   readonly status: string;
@@ -201,7 +211,11 @@ const DISCLOSURE =
 /**
  * Zod schema for the `sfi.what_if_deactivate_flow` tool input.
  *
- *   - `flowId`: required, non-empty string. Accepts three forms:
+ *   - `flowId` / `componentId` / `flowApiName` / `apiName`: the Flow to analyse,
+ *     interchangeable (a host naturally reaches for `componentId: Flow:…` as on
+ *     `get_impact` and most tools). At least one is required; disagreeing
+ *     selectors are `invalid-query` (never a silent pick). Each accepts three
+ *     forms:
  *       1. Canonical Flow id (`Flow:{ApiName}`) — looked up directly.
  *       2. Bare API name (`{ApiName}`) — coerced to `Flow:{ApiName}`.
  *       3. Flow label or partial name (e.g. `"Consent Flow"`) — when the
@@ -211,13 +225,51 @@ const DISCLOSURE =
  *          no-match error as appropriate.
  */
 export const whatIfDeactivateFlowInputSchema = z.object({
-  flowId: z.string().min(1),
+  flowId: z.string().min(1).optional(),
+  componentId: z.string().min(1).optional(),
+  flowApiName: z.string().min(1).optional(),
+  apiName: z.string().min(1).optional(),
 });
 
 /** Parsed input shape, inferred from the Zod schema. */
 export type WhatIfDeactivateFlowInput = z.infer<
   typeof whatIfDeactivateFlowInputSchema
 >;
+
+/**
+ * Resolve the single RAW flow selector from the interchangeable `flowId` /
+ * `componentId` / `flowApiName` / `apiName` args — the alias residual this
+ * closes (a host naturally passes `componentId: Flow:…`). Conflict detection is
+ * over the `Flow:`-coerced forms (so `flowId: "My_Flow"` and `componentId:
+ * "Flow:My_Flow"` agree), but the returned value is the RAW selector by
+ * precedence so the handler's downstream fuzzy label/partial resolution still
+ * sees the caller's original string. Disagreeing selectors → `invalid-query`
+ * (never a silent pick); none → `invalid-query`.
+ */
+const resolveFlowSelector = (
+  input: WhatIfDeactivateFlowInput,
+): Result<string, McpError> => {
+  const raws = [input.flowId, input.componentId, input.flowApiName, input.apiName]
+    .map((v) => firstNonEmpty(v))
+    .filter((v): v is string => v !== undefined);
+  if (raws.length === 0) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        'name the Flow — pass `flowId` (e.g. "Flow:My_Flow"), `componentId`, `flowApiName`, or `apiName` (a bare api name or flow label also works)',
+      path: 'flowId',
+    });
+  }
+  const distinct = [...new Set(raws.map((v) => coercePrefix(v, [FLOW_PREFIX])))];
+  if (distinct.length > 1) {
+    return err({
+      kind: 'invalid-query',
+      message: `flow selectors name different targets (${distinct.join(', ')}); pass exactly one of flowId / componentId / flowApiName / apiName`,
+      path: 'flowId',
+    });
+  }
+  return ok(raws[0] as string);
+};
 
 /**
  * Strip the canonical-id prefix to surface the bare ApiName the
@@ -667,6 +719,7 @@ const whatIfDeactivateFlowFromNode = async (
 
   return ok({
     data: {
+      appliedScope: { component: flowId, mode: 'component' },
       flowId,
       apiName,
       status: readFlowStatus(flowNode),
@@ -707,11 +760,17 @@ export const whatIfDeactivateFlowHandler = async (
   ctx: Context,
   input: WhatIfDeactivateFlowInput,
 ): Promise<Result<McpResponse<WhatIfDeactivateFlowOutput>, McpError>> => {
-  const coercedFlowId = coercePrefix(input.flowId, [FLOW_PREFIX]);
+  // Resolve the single RAW flow selector from the interchangeable flowId /
+  // componentId / flowApiName / apiName args (never silently stripping one).
+  const selectorRes = resolveFlowSelector(input);
+  if (!selectorRes.ok) return selectorRes;
+  const rawFlow = selectorRes.value;
+
+  const coercedFlowId = coercePrefix(rawFlow, [FLOW_PREFIX]);
   if (!coercedFlowId.startsWith(FLOW_PREFIX)) {
     return err({
       kind: 'invalid-query',
-      message: `flowId must be a Flow id (e.g. '${FLOW_PREFIX}My_Flow'), a bare flow api name, or a flow label; got '${input.flowId}'`,
+      message: `flowId must be a Flow id (e.g. '${FLOW_PREFIX}My_Flow'), a bare flow api name, or a flow label; got '${rawFlow}'`,
       path: 'flowId',
     });
   }
@@ -728,7 +787,7 @@ export const whatIfDeactivateFlowHandler = async (
   if (nodeResult.value === null) {
     // Canonical `Flow:ApiName` that misses is a hard not-found — do NOT fuzzy
     // retry on the full id string (would false-positive match unrelated flows).
-    if (input.flowId.startsWith(FLOW_PREFIX)) {
+    if (rawFlow.startsWith(FLOW_PREFIX)) {
       return err({
         kind: 'component-not-found',
         message: `No flow found with id '${flowId}'. Use sfi.list_components with type Flow to see available flows.`,
@@ -736,7 +795,7 @@ export const whatIfDeactivateFlowHandler = async (
       });
     }
     // Bare api name / label / partial name: fuzzy resolve via resolveComponents.
-    const fuzzyResult = await resolveComponents(ctx.graph, input.flowId, {
+    const fuzzyResult = await resolveComponents(ctx.graph, rawFlow, {
       types: ['Flow'],
       limit: 5,
     });
@@ -750,7 +809,7 @@ export const whatIfDeactivateFlowHandler = async (
     if (disposition === 'none' || candidates.length === 0) {
       return err({
         kind: 'component-not-found',
-        message: `No flow found matching '${input.flowId}'. Use sfi.list_components with type Flow to see available flows.`,
+        message: `No flow found matching '${rawFlow}'. Use sfi.list_components with type Flow to see available flows.`,
         path: 'flowId',
       });
     }
@@ -760,7 +819,7 @@ export const whatIfDeactivateFlowHandler = async (
         .join('\n');
       return err({
         kind: 'invalid-query',
-        message: `Multiple flows match '${input.flowId}'. Specify one of:\n${list}`,
+        message: `Multiple flows match '${rawFlow}'. Specify one of:\n${list}`,
         path: 'flowId',
       });
     }

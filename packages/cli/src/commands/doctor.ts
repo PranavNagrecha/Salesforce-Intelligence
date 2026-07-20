@@ -468,6 +468,18 @@ export const runDoctor = async (opts: RunDoctorOptions): Promise<DoctorReport> =
           fix: 'Run `sfi register-vault <alias> <path>` (see docs/configuration.md § Multi-vault / fleet).',
         });
       }
+    } else {
+      // VAULT-REGISTRY-DISCOVERY: single-vault install, no registry.json — the
+      // common default. The cross-org tooling (fleet_find / compare_vaults /
+      // fleet_drift_ranking) is otherwise power-user-only knowledge, so surface
+      // the guided path here. INFO, never blocking — a single vault is healthy.
+      checks.push({
+        name: 'Multi-vault registry',
+        status: 'info',
+        detail:
+          'single vault — register more orgs to compare schema / permissions / drift across them (fleet_find, compare_vaults, fleet_drift_ranking)',
+        fix: 'Run `sfi register-vault <alias> <path>` to add another org (see docs/configuration.md § Multi-vault / fleet).',
+      });
     }
   }
 

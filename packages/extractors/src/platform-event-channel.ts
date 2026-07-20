@@ -165,6 +165,28 @@ const toEntityNodeId = (selectedEntity: string): string =>
     : `CustomObject:${selectedEntity}`;
 
 /**
+ * PLATFORM-EVENT-CHANNEL-CHANGEEVENTS-PHANTOM: a CUSTOM Platform Event / CDC
+ * channel is a retrieved metadata component whose fullName always ends in
+ * `__chn` (`Widget_Event__chn`), so `PlatformEventChannel:{name}` names
+ * a real node (or a targetMissing-by-design one when the channel file was not
+ * retrieved). The STANDARD Change Data Capture channel is the platform built-in
+ * `ChangeEvents` stream: every standard-CDC `PlatformEventChannelMember`
+ * (`ChangeEvents_ContactChangeEvent`, …) declares `<eventChannel>ChangeEvents`,
+ * but that channel has NO metadata file and therefore NO node — a `parentOf`
+ * edge / `parentId` pointing at `PlatformEventChannel:ChangeEvents` is a phantom
+ * endpoint `get_component` cannot resolve (a dead end one hop from the member).
+ *
+ * Recognise the standard channel by the ABSENCE of the `__chn` custom suffix and
+ * omit the phantom parent (no `parentOf` edge, `parentId: null`). The membership
+ * fact is preserved verbatim on `properties.eventChannel`, and the load-bearing
+ * member→ChangeEvent `references` edge is untouched, so `cdc_subscribers` still
+ * reports enablement.
+ */
+const CUSTOM_CHANNEL_SUFFIX = '__chn';
+const isCustomChannel = (eventChannel: string): boolean =>
+  eventChannel.endsWith(CUSTOM_CHANNEL_SUFFIX);
+
+/**
  * CR-CAP-18: extract a PlatformEventChannelMember from a flat
  * `platformEventChannelMembers/{MemberName}__chn.platformEventChannelMember-meta.xml`
  * file. A member binds ONE entity (`<selectedEntity>`) onto one channel
@@ -173,9 +195,14 @@ const toEntityNodeId = (selectedEntity: string): string =>
  * Emits (a DEDICATED extractor is required — the generic `childRefs` path
  * cannot carry `filterExpression`, cannot emit a `parentOf` edge, and cannot
  * set the channel parentId):
- *   - the member node, with `parentId` = `PlatformEventChannel:{eventChannel}`.
+ *   - the member node, with `parentId` = `PlatformEventChannel:{eventChannel}`
+ *     for a CUSTOM `__chn` channel; `parentId: null` for the platform's standard
+ *     `ChangeEvents` CDC channel, which has no metadata component / node (see
+ *     PLATFORM-EVENT-CHANNEL-CHANGEEVENTS-PHANTOM / {@link isCustomChannel}).
  *   - a `parentOf` edge FROM the channel TO the member (parent→child, mirroring
- *     `buildOutboundMessageNodes` and CustomField→CustomObject).
+ *     `buildOutboundMessageNodes` and CustomField→CustomObject) — emitted ONLY
+ *     for a custom `__chn` channel; SKIPPED for the standard channel so no edge
+ *     dead-ends at a non-existent `PlatformEventChannel:ChangeEvents`.
  *   - a `references` edge FROM the member TO `CustomObject:{selectedEntity}`,
  *     the load-bearing publish-topology edge, carrying
  *     `properties.referenceKind = 'platformEventChannelMember'` and the verbatim
@@ -207,8 +234,16 @@ export const extractPlatformEventChannelMember = async (
   const selectedEntity = optionalString(rootObj, 'selectedEntity');
   const filterExpression = optionalString(rootObj, 'filterExpression');
 
+  // PLATFORM-EVENT-CHANNEL-CHANGEEVENTS-PHANTOM: only a CUSTOM `__chn` channel
+  // names a real (or targetMissing-by-design) channel node. The standard
+  // `ChangeEvents` CDC stream has no metadata file, so binding to it via
+  // `parentOf` / `parentId` would mint a dead-end phantom endpoint.
+  const isStandardChannel =
+    eventChannel !== null && !isCustomChannel(eventChannel);
   const channelId =
-    eventChannel === null ? null : `PlatformEventChannel:${eventChannel}`;
+    eventChannel === null || isStandardChannel
+      ? null
+      : `PlatformEventChannel:${eventChannel}`;
 
   const node: Node = {
     id: nodeId,
@@ -224,6 +259,10 @@ export const extractPlatformEventChannelMember = async (
       eventChannel,
       selectedEntity,
       ...(filterExpression !== null ? { filterExpression } : {}),
+      // Honest disclosure: this member subscribes an entity to the platform's
+      // standard CDC channel, which is not a retrievable metadata component —
+      // so there is deliberately no channel node to hop to.
+      ...(isStandardChannel ? { standardChannel: true } : {}),
     },
   };
 

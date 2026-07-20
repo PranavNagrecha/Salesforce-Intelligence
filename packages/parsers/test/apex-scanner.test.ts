@@ -193,6 +193,44 @@ describe('scanApexSource — method calls', () => {
   });
 });
 
+describe('scanApexSource — Schema describe member phantom guard (CALL-GRAPH-PHANTOM-SCHEMA-FIELDS)', () => {
+  it('never mints a phantom callsApex against `.fields.getMap()`', () => {
+    // `describeResult.fields.getMap()` is the Schema describe idiom — `fields`
+    // is a `Map<String, Schema.SObjectField>` accessor, NOT a user Apex class.
+    // Before the fix the `IDENT.IDENT(` sweep saw `fields.getMap(` and minted
+    // `callsApex ApexClass:fields`, which call_graph rendered as a real callee
+    // and get_component mis-classified as a missing / managed-package class.
+    const result = scanApexSource(
+      'public class Foo {\n  void run() {\n' +
+        '    Schema.DescribeSObjectResult d = describeIt();\n' +
+        '    Map<String, Schema.SObjectField> fieldMap = d.fields.getMap();\n' +
+        '    TriggerHandler.process(fieldMap);\n' +
+        '  }\n}',
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const callees = result.value.methodCalls.map((c) => c.className);
+    // The phantom is gone…
+    expect(callees).not.toContain('fields');
+    // …but a genuine user call in the same body is still surfaced.
+    expect(callees).toContain('TriggerHandler');
+  });
+
+  it('never mints a phantom callsApex against `.fieldSets.getMap()`', () => {
+    const result = scanApexSource(
+      'public class Foo {\n  void run() {\n' +
+        '    Schema.DescribeSObjectResult d = describeIt();\n' +
+        '    Map<String, Schema.FieldSet> fs = d.fieldSets.getMap();\n' +
+        '  }\n}',
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.methodCalls.map((c) => c.className)).not.toContain(
+      'fieldSets',
+    );
+  });
+});
+
 describe('scanApexSource — declared-local call filtering (phantom-node guard)', () => {
   it('never mints a phantom call edge against a local variable NAME', () => {
     // `acc` / `oldMap` / `helper` are local NAMES, never classes — they must
@@ -682,5 +720,38 @@ describe('scanApexSource — determinism and real fixture', () => {
     // The fixture references mainMarketoSetting.<field> several times.
     const reads = result.value.fieldAccesses.filter((a) => a.type === 'read');
     expect(reads.some((r) => r.object === 'mainMarketoSetting')).toBe(true);
+  });
+});
+
+describe('scanApexSource — managed-package namespaced local types (LOCAL_DECL_PATTERN)', () => {
+  it('resolves a lowercase-namespaced for-each loop variable to its api name, not the alias', () => {
+    // `ns__Obj__c` is a managed-package namespaced api name: it starts
+    // LOWERCASE and contains `__`. Before the namespace branch, LOCAL_DECL_PATTERN
+    // learned only PascalCase types, so `rec` stayed untyped and
+    // `rec.My_Field__c = …` fell back to the literal-receiver phantom
+    // (`CustomField:rec.My_Field__c`). Now the loop var resolves to the object.
+    const result = scanApexSource(
+      'public class W {\n  void run(List<ns__Obj__c> items) {\n' +
+        '    for (ns__Obj__c rec : items) {\n' +
+        '      rec.My_Field__c = 1;\n' +
+        '    }\n  }\n}',
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const write = result.value.fieldAccesses.find((a) => a.field === 'My_Field__c');
+    expect(write?.type).toBe('write');
+    expect(write?.object).toBe('ns__Obj__c');
+    // the alias receiver is gone — no phantom keyed on the loop variable name.
+    expect(result.value.fieldAccesses.map((a) => a.object)).not.toContain('rec');
+  });
+
+  it('the __-less guard: a primitive local and a bare keyword mint no phantom access', () => {
+    // The lowercase-type branch REQUIRES `__`, so `Integer i` (a primitive,
+    // no `__`) and `return foo` (a bare lowercase keyword, no `__`) can never
+    // be misread as a namespaced declaration → no field access at all.
+    const result = scanApexSource(wrapClass('Integer i = 0; return foo;'));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.fieldAccesses).toEqual([]);
   });
 });

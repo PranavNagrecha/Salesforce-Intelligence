@@ -219,6 +219,195 @@ describe('extractLayout', () => {
     });
   });
 
+  describe('custom buttons / WebLinks (LAYOUT-OMITS-CUSTOM-BUTTONS-WEBLINKS)', () => {
+    it('emits customButtons[] prop and Layout→WebLink references edges', async () => {
+      // Page Layout XML lists custom buttons/links in <customButtons>. Pre-fix
+      // the Layout node kept only field/section counts — no customButtons prop
+      // and no Layout→WebLink edges — so those WebLinks reported 0 referrers
+      // despite live layout placement. Synthetic fixture mirrors the SHAPE of
+      // the real Campaign layout (generic names, no org identifiers).
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Layout xmlns="http://soap.sforce.com/2006/04/metadata">
+  <customButtons>Create_Source_and_Budget</customButtons>
+  <customButtons>Create_Budget</customButtons>
+  <excludeButtons>Share</excludeButtons>
+  <layoutSections>
+    <layoutColumns>
+      <layoutItems>
+        <field>Name</field>
+      </layoutItems>
+    </layoutColumns>
+  </layoutSections>
+</Layout>`;
+      const { dir, path } = await writeLayoutXml(
+        'Campaign-Campaign Layout.layout-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractLayout(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0]!;
+        // Prop preserves source order, deduped.
+        expect(node.properties.customButtons).toEqual([
+          'Create_Source_and_Budget',
+          'Create_Budget',
+        ]);
+        // Edges: Layout→WebLink references (sorted by toId), NOT usedInLayout.
+        const buttonEdges = result.value.edges.filter(
+          (e) => e.edgeType === 'references' && e.toId.startsWith('WebLink:'),
+        );
+        expect(buttonEdges.map((e) => e.toId)).toEqual([
+          'WebLink:Campaign.Create_Budget',
+          'WebLink:Campaign.Create_Source_and_Budget',
+        ]);
+        for (const e of buttonEdges) {
+          expect(e.fromId).toBe('Layout:Campaign.Campaign Layout');
+          expect(e.confidence).toBe('declared');
+          expect(e.source).toBe('layout-extractor');
+          expect(e.properties).toEqual({ targetKind: 'customButton' });
+        }
+        // The <excludeButtons> standard button must NOT be graphed.
+        expect(
+          result.value.edges.some((e) => e.toId.includes('Share')),
+        ).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits an empty customButtons[] and no WebLink edges when none are present', async () => {
+      const xml = `<?xml version="1.0"?>
+<Layout xmlns="http://soap.sforce.com/2006/04/metadata">
+  <layoutSections>
+    <layoutColumns>
+      <layoutItems>
+        <field>Name</field>
+      </layoutItems>
+    </layoutColumns>
+  </layoutSections>
+</Layout>`;
+      const { dir, path } = await writeLayoutXml(
+        'Account-No Buttons.layout-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractLayout(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.nodes[0]!.properties.customButtons).toEqual([]);
+        expect(
+          result.value.edges.some((e) => e.toId.startsWith('WebLink:')),
+        ).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('platform-action QuickActions (LAYOUT-OMITS-PLATFORM-ACTION-QUICKACTIONS)', () => {
+    it('emits Layout→QuickAction references edges from platformActionListItems', async () => {
+      // Layout <platformActionListItems> with actionType QuickAction were not
+      // graphed, so find_component_usages returned 0 referrers for placed
+      // actions. The extractor now emits Layout→QuickAction edges. Synthetic
+      // fixture mirrors the SHAPE of a real Case layout action bar (generic
+      // names, no org identifiers). StandardButton items must NOT be graphed.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Layout xmlns="http://soap.sforce.com/2006/04/metadata">
+  <platformActionList>
+    <actionListContext>Record</actionListContext>
+    <platformActionListItems>
+      <actionName>Case.New_Comment</actionName>
+      <actionType>QuickAction</actionType>
+      <sortOrder>0</sortOrder>
+    </platformActionListItems>
+    <platformActionListItems>
+      <actionName>Case.Change_Status</actionName>
+      <actionType>QuickAction</actionType>
+      <sortOrder>1</sortOrder>
+    </platformActionListItems>
+    <platformActionListItems>
+      <actionName>Edit</actionName>
+      <actionType>StandardButton</actionType>
+      <sortOrder>2</sortOrder>
+    </platformActionListItems>
+  </platformActionList>
+  <layoutSections>
+    <layoutColumns>
+      <layoutItems>
+        <field>Status</field>
+      </layoutItems>
+    </layoutColumns>
+  </layoutSections>
+</Layout>`;
+      const { dir, path } = await writeLayoutXml(
+        'Case-ADM Case Layout.layout-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractLayout(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const actionEdges = result.value.edges.filter(
+          (e) => e.edgeType === 'references' && e.toId.startsWith('QuickAction:'),
+        );
+        // Pre-fix: NO QuickAction edges at all. Sorted by toId.
+        expect(actionEdges.map((e) => e.toId)).toEqual([
+          'QuickAction:Case.Change_Status',
+          'QuickAction:Case.New_Comment',
+        ]);
+        for (const e of actionEdges) {
+          expect(e.fromId).toBe('Layout:Case.ADM Case Layout');
+          expect(e.confidence).toBe('declared');
+          expect(e.source).toBe('layout-extractor');
+          expect(e.properties).toEqual({ targetKind: 'quickAction' });
+        }
+        // The StandardButton item must NOT produce an edge (no vault node).
+        expect(
+          result.value.edges.some((e) => e.toId.includes('Edit')),
+        ).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('dedupes a QuickAction placed in multiple platformActionList contexts', async () => {
+      const xml = `<?xml version="1.0"?>
+<Layout xmlns="http://soap.sforce.com/2006/04/metadata">
+  <platformActionList>
+    <actionListContext>Record</actionListContext>
+    <platformActionListItems>
+      <actionName>Case.Change_Status</actionName>
+      <actionType>QuickAction</actionType>
+    </platformActionListItems>
+  </platformActionList>
+  <platformActionList>
+    <actionListContext>ListView</actionListContext>
+    <platformActionListItems>
+      <actionName>Case.Change_Status</actionName>
+      <actionType>QuickAction</actionType>
+    </platformActionListItems>
+  </platformActionList>
+</Layout>`;
+      const { dir, path } = await writeLayoutXml(
+        'Case-Dup Layout.layout-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractLayout(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const actionEdges = result.value.edges.filter((e) =>
+          e.toId.startsWith('QuickAction:'),
+        );
+        expect(actionEdges).toHaveLength(1);
+        expect(actionEdges[0]!.toId).toBe('QuickAction:Case.Change_Status');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('error cases', () => {
     it('returns file-not-found when the path does not exist', async () => {
       // Filename has a hyphen so parseFilename succeeds; the read attempt

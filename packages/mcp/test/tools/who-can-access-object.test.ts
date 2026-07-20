@@ -57,7 +57,11 @@ const seed: ExtractionResult = {
     // dropped by the old exclusive else-if chain (Delete was NEVER read).
     node({ id: 'Profile:Deleter', type: 'Profile', apiName: 'Deleter' }),
     node({ id: 'PermissionSet:Creator', type: 'PermissionSet', apiName: 'Creator' }),
-    node({ id: 'SharingRule:Deal__c.Share_To_Sales', type: 'SharingRule', apiName: 'Deal__c.Share_To_Sales', properties: { ruleType: 'owner', accessLevel: 'Edit', sObjectType: 'Deal__c' } }),
+    // REALISTIC shape: the sharing extractor carries the parent object on
+    // `parentId` (`CustomObject:Deal__c`) — it does NOT emit
+    // `properties.sObjectType`. Keying on that phantom silently dropped every
+    // sharing-rule granter (sibling of the false-empty sharing-summary bug).
+    node({ id: 'SharingRule:Deal__c.Share_To_Sales', type: 'SharingRule', apiName: 'Deal__c.Share_To_Sales', parentId: OBJ, properties: { ruleType: 'owner', accessLevel: 'Edit' } }),
     node({ id: 'Group:Sales_Public', type: 'Group', apiName: 'Sales_Public' }),
     // CR-CAP-12: Sales_Public contains a User, a nested Group, and a dangling
     // Territory; the nested group contains a Role. who_can must list each as its
@@ -73,8 +77,8 @@ const seed: ExtractionResult = {
     node({ id: 'Role:Sales_Rep_R', type: 'Role', apiName: 'Sales_Rep_R' }),
     node({ id: 'Role:Parent_VP', type: 'Role', apiName: 'Parent_VP' }),
     node({ id: 'Role:Audit', type: 'Role', apiName: 'Audit' }),
-    node({ id: 'SharingRule:Deal__c.Share_Subs', type: 'SharingRule', apiName: 'Deal__c.Share_Subs', properties: { ruleType: 'owner', accessLevel: 'Read', sObjectType: 'Deal__c' } }),
-    node({ id: 'SharingRule:Deal__c.Share_Audit', type: 'SharingRule', apiName: 'Deal__c.Share_Audit', properties: { ruleType: 'owner', accessLevel: 'Read', sObjectType: 'Deal__c' } }),
+    node({ id: 'SharingRule:Deal__c.Share_Subs', type: 'SharingRule', apiName: 'Deal__c.Share_Subs', parentId: OBJ, properties: { ruleType: 'owner', accessLevel: 'Read' } }),
+    node({ id: 'SharingRule:Deal__c.Share_Audit', type: 'SharingRule', apiName: 'Deal__c.Share_Audit', parentId: OBJ, properties: { ruleType: 'owner', accessLevel: 'Read' } }),
   ],
   edges: [
     edge({ fromId: 'Profile:Admin', toId: OBJ, edgeType: 'grantedBy', properties: { allowRead: true, allowEdit: true, modifyAllRecords: true } }),
@@ -124,7 +128,7 @@ const incompleteSeed: ExtractionResult = {
   nodes: [
     node({ id: INCOMPLETE_OBJ, type: 'CustomObject', apiName: 'Inc__c', properties: { sharingModel: 'Private' } }),
     node({ id: 'Role:Top', type: 'Role', apiName: 'Top' }),
-    node({ id: 'SharingRule:Inc__c.Share_Top', type: 'SharingRule', apiName: 'Inc__c.Share_Top', properties: { ruleType: 'owner', accessLevel: 'Read', sObjectType: 'Inc__c' } }),
+    node({ id: 'SharingRule:Inc__c.Share_Top', type: 'SharingRule', apiName: 'Inc__c.Share_Top', parentId: INCOMPLETE_OBJ, properties: { ruleType: 'owner', accessLevel: 'Read' } }),
   ],
   edges: [
     edge({ fromId: 'SharingRule:Inc__c.Share_Top', toId: 'Role:Top', edgeType: 'sharedWith', properties: { inheritance: 'subordinates' } }),
@@ -141,7 +145,7 @@ const internalSeed: ExtractionResult = {
     node({ id: INTERNAL_OBJ, type: 'CustomObject', apiName: 'Intl__c', properties: { sharingModel: 'Private' } }),
     node({ id: 'Role:IntTop', type: 'Role', apiName: 'IntTop' }),
     node({ id: 'Role:IntChild', type: 'Role', apiName: 'IntChild' }),
-    node({ id: 'SharingRule:Intl__c.Share_Int', type: 'SharingRule', apiName: 'Intl__c.Share_Int', properties: { ruleType: 'owner', accessLevel: 'Read', sObjectType: 'Intl__c' } }),
+    node({ id: 'SharingRule:Intl__c.Share_Int', type: 'SharingRule', apiName: 'Intl__c.Share_Int', parentId: INTERNAL_OBJ, properties: { ruleType: 'owner', accessLevel: 'Read' } }),
   ],
   edges: [
     edge({ fromId: 'SharingRule:Intl__c.Share_Int', toId: 'Role:IntTop', edgeType: 'sharedWith', properties: { inheritance: 'subordinatesInternal' } }),
@@ -157,7 +161,7 @@ const cycleSeed: ExtractionResult = {
     node({ id: CYCLE_OBJ, type: 'CustomObject', apiName: 'Cyc__c', properties: { sharingModel: 'Private' } }),
     node({ id: 'Role:CycA', type: 'Role', apiName: 'CycA' }),
     node({ id: 'Role:CycB', type: 'Role', apiName: 'CycB' }),
-    node({ id: 'SharingRule:Cyc__c.Share_Cyc', type: 'SharingRule', apiName: 'Cyc__c.Share_Cyc', properties: { ruleType: 'owner', accessLevel: 'Read', sObjectType: 'Cyc__c' } }),
+    node({ id: 'SharingRule:Cyc__c.Share_Cyc', type: 'SharingRule', apiName: 'Cyc__c.Share_Cyc', parentId: CYCLE_OBJ, properties: { ruleType: 'owner', accessLevel: 'Read' } }),
   ],
   edges: [
     edge({ fromId: 'SharingRule:Cyc__c.Share_Cyc', toId: 'Role:CycA', edgeType: 'sharedWith', properties: { inheritance: 'subordinates' } }),

@@ -48,7 +48,7 @@ const seed: ExtractionResult = {
   nodes: [
     makeNode({ id: USER, apiName: 'User' }),
     fld('Username', { dataType: 'Text' }),                                  // idLookup -> critical
-    fld('Faculty_ID__c', { dataType: 'Text', externalId: true }),          // ext-id -> high
+    fld('Member_ID__c', { dataType: 'Text', externalId: true }),          // ext-id -> high
     fld('Code__c', { dataType: 'Text', unique: true }),                    // unique -> medium
     fld('Alias', { dataType: 'Text' }),                                    // catalog low -> candidate via catalog
     fld('Doubled__c', { dataType: 'Number', formula: 'X * 2' }),           // derived -> NOT candidate
@@ -56,7 +56,7 @@ const seed: ExtractionResult = {
   ],
   edges: [
     makeEdge({ fromId: USER, toId: 'CustomField:User.Username', edgeType: 'parentOf' }),
-    makeEdge({ fromId: USER, toId: 'CustomField:User.Faculty_ID__c', edgeType: 'parentOf' }),
+    makeEdge({ fromId: USER, toId: 'CustomField:User.Member_ID__c', edgeType: 'parentOf' }),
     makeEdge({ fromId: USER, toId: 'CustomField:User.Code__c', edgeType: 'parentOf' }),
     makeEdge({ fromId: USER, toId: 'CustomField:User.Alias', edgeType: 'parentOf' }),
     makeEdge({ fromId: USER, toId: 'CustomField:User.Doubled__c', edgeType: 'parentOf' }),
@@ -88,7 +88,7 @@ describe('valueChangeAuditHandler', () => {
     expect(d.autoDetected).toBe(true);
     expect(d.scannedFieldCount).toBe(6);
     const fields = d.rows.map((x) => x.field).sort();
-    expect(fields).toEqual(['Alias', 'Code__c', 'Faculty_ID__c', 'Username']);
+    expect(fields).toEqual(['Alias', 'Code__c', 'Member_ID__c', 'Username']);
     expect(fields).not.toContain('Doubled__c');
     expect(fields).not.toContain('Notes__c');
   });
@@ -113,8 +113,8 @@ describe('valueChangeAuditHandler', () => {
   });
 
   it('inlines buckets only in detail verbosity', async () => {
-    const summary = await valueChangeAuditHandler(ctx, { object: 'User', fields: ['Faculty_ID__c'] });
-    const detail = await valueChangeAuditHandler(ctx, { object: 'User', fields: ['Faculty_ID__c'], verbosity: 'detail' });
+    const summary = await valueChangeAuditHandler(ctx, { object: 'User', fields: ['Member_ID__c'] });
+    const detail = await valueChangeAuditHandler(ctx, { object: 'User', fields: ['Member_ID__c'], verbosity: 'detail' });
     expect(summary.ok && detail.ok).toBe(true);
     if (!summary.ok || !detail.ok) return;
     expect(summary.value.data.rows[0]!.buckets).toBeUndefined();
@@ -155,7 +155,7 @@ describe('valueChangeAuditHandler', () => {
     expect(page2.ok).toBe(true);
     if (!page2.ok) return;
     const all = [...page1.value.data.rows, ...page2.value.data.rows].map((x) => x.field).sort();
-    expect(all).toEqual(['Alias', 'Code__c', 'Faculty_ID__c', 'Username']);
+    expect(all).toEqual(['Alias', 'Code__c', 'Member_ID__c', 'Username']);
     expect(page2.value.data.pageInfo?.hasMore ?? false).toBe(false);
   });
 
@@ -169,5 +169,57 @@ describe('valueChangeAuditHandler', () => {
     expect(stale.ok).toBe(false);
     if (stale.ok) return;
     expect(stale.error.kind).toBe('invalid-query');
+  });
+
+  // VALUE-CHANGE-AUDIT-REJECTS-NATURAL-FIELD-ARGS: accept a `fieldId`
+  // (CustomField:Object.Field → object+field) and the objectApiName/fieldApiName
+  // aliases instead of hard-failing on `object Required`.
+  describe('natural field/object selectors', () => {
+    it('fieldId (CustomField:Object.Field) resolves object+field to the SAME result as {object, fields}', async () => {
+      const canonical = await valueChangeAuditHandler(ctx, { object: 'User', fields: ['Username'] });
+      const viaFieldId = await valueChangeAuditHandler(ctx, { fieldId: 'CustomField:User.Username' });
+      expect(canonical.ok && viaFieldId.ok).toBe(true);
+      if (!canonical.ok || !viaFieldId.ok) return;
+      expect(viaFieldId.value.data).toEqual(canonical.value.data);
+    });
+
+    it('objectApiName + fieldApiName resolve to the SAME result as {object, fields}', async () => {
+      const canonical = await valueChangeAuditHandler(ctx, { object: 'User', fields: ['Username'] });
+      const viaAliases = await valueChangeAuditHandler(ctx, { objectApiName: 'User', fieldApiName: 'Username' });
+      expect(canonical.ok && viaAliases.ok).toBe(true);
+      if (!canonical.ok || !viaAliases.ok) return;
+      expect(viaAliases.value.data).toEqual(canonical.value.data);
+    });
+
+    it('objectApiName alone auto-detects, byte-identical to {object}', async () => {
+      const canonical = await valueChangeAuditHandler(ctx, { object: 'User' });
+      const viaAlias = await valueChangeAuditHandler(ctx, { objectApiName: 'User' });
+      expect(canonical.ok && viaAlias.ok).toBe(true);
+      if (!canonical.ok || !viaAlias.ok) return;
+      expect(viaAlias.value.data).toEqual(canonical.value.data);
+    });
+
+    it('naming no object returns a named invalid-query (never a silent/empty answer)', async () => {
+      const r = await valueChangeAuditHandler(ctx, { fieldApiName: 'Username' });
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.error.kind).toBe('invalid-query');
+    });
+
+    it('a fieldId whose parent disagrees with an explicit object is a named invalid-query (never a silent mismatch)', async () => {
+      const r = await valueChangeAuditHandler(ctx, { object: 'Account', fieldId: 'CustomField:User.Username' });
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.error.kind).toBe('invalid-query');
+    });
+
+    it('the canonical {object, fields} call output is unchanged (byte-identical)', async () => {
+      const r = await valueChangeAuditHandler(ctx, { object: 'User', fields: ['Username'] });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.data.object).toBe('User');
+      expect(r.value.data.autoDetected).toBe(false);
+      expect(r.value.data.rows.map((x) => x.field)).toEqual(['Username']);
+    });
   });
 });

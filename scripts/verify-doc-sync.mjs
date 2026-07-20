@@ -54,16 +54,17 @@ for (const tool of V01_TOOLS) {
   }
 }
 
-const websiteDataPath = join(root, 'website/site-data.json');
+// recalibrate.mjs writes the calibrated snapshot here (post-Astro location).
+const websiteDataPath = join(root, 'website/src/data/site-data.json');
 if (existsSync(websiteDataPath)) {
   const siteData = JSON.parse(read(websiteDataPath));
   if (siteData.toolCount !== V01_TOOLS.length) {
     fail(
-      `website/site-data.json toolCount=${siteData.toolCount} but V01_TOOLS has ${V01_TOOLS.length}. Run website/recalibrate.mjs before release.`,
+      `website/src/data/site-data.json toolCount=${siteData.toolCount} but V01_TOOLS has ${V01_TOOLS.length}. Run website/recalibrate.mjs before release.`,
     );
   }
 } else {
-  warn('website/site-data.json not found; skipping website count check.');
+  warn('website/src/data/site-data.json not found; skipping website count check.');
 }
 
 // Instructional docs Claude reads to decide boundary disclosures — these must

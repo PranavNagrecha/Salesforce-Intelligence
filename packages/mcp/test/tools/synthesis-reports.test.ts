@@ -14,6 +14,7 @@ import {
 
 import type { Context } from '../../src/server.js';
 import {
+  automationRiskReportHandler,
   fieldCleanupCandidatesHandler,
   orgRiskReportHandler,
   permissionRiskReportHandler,
@@ -649,5 +650,123 @@ describe('permissionRiskReportHandler — batched grantedBy scan (no N+1)', () =
     // ONE batched listEdgesForNodes for the whole grantedBy scan — not one per
     // container. An N+1 would be ~PROFILE_COUNT edge queries.
     expect(edgeQueries).toBeLessThanOrEqual(2);
+  });
+});
+
+// AUTOMATION-RISK-REPORT-IGNORES-OBJECT-SCOPE: an object scope narrows the
+// legacy-automation half to Process Builders parented to that object, excludes
+// the org-wide Apex governor-limit half (disclosed), and echoes appliedScope;
+// an object absent from the vault is refused with invalid-query.
+describe('automationRiskReportHandler — object scope (AUTOMATION-RISK-REPORT-IGNORES-OBJECT-SCOPE)', () => {
+  let arDir: string;
+  let arStore: GraphStore;
+  let arCtx: Context;
+
+  const makeNode = (o: Partial<Node> & Pick<Node, 'id'>): Node => ({
+    type: 'Flow',
+    apiName: 'Anon',
+    label: null,
+    parentId: null,
+    sourcePath: 'x',
+    lastModifiedDate: null,
+    lastModifiedBy: null,
+    apiVersion: null,
+    properties: {},
+    ...o,
+  });
+
+  beforeAll(async () => {
+    arDir = mkdtempSync(join(tmpdir(), 'sfi-synth-ar-'));
+    const opened = await openGraph(join(arDir, 'ar.duckdb'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    arStore = opened.value;
+    const nodes: Node[] = [
+      makeNode({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' }),
+      makeNode({ id: 'CustomObject:Contact', type: 'CustomObject', apiName: 'Contact' }),
+      // A Process Builder (Flow processType Workflow) parented to Account — the
+      // object-attributable legacy-automation finding.
+      makeNode({
+        id: 'Flow:Account_PB',
+        type: 'Flow',
+        apiName: 'Account_PB',
+        parentId: 'CustomObject:Account',
+        properties: { processType: 'Workflow', active: true, decisionCount: 1, actionCount: 1 },
+      }),
+      // A governor-limit Apex class — NOT attributable to a single object; it
+      // fuels the org-wide bare report and is excluded under any object scope.
+      makeNode({
+        id: 'ApexClass:GovHeavy',
+        type: 'ApexClass',
+        apiName: 'GovHeavy',
+        properties: {
+          qualityIssues: [
+            {
+              rule: 'soql-in-loop',
+              severity: 'high',
+              location: 'GovHeavy.cls:10',
+              explanation: 'SOQL inside a loop risks the 100-query governor limit.',
+            },
+          ],
+        },
+      }),
+    ];
+    const imp = await importExtractionResults(arStore, [{ nodes, edges: [] }]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    arCtx = { vaultRoot: arDir, manifest: MANIFEST, graph: arStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(arStore);
+    rmSync(arDir, { recursive: true, force: true });
+  });
+
+  it('BARE CALL: org-wide report has governor findings and NO appliedScope', async () => {
+    const r = await automationRiskReportHandler(arCtx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect('appliedScope' in r.value.data).toBe(false);
+    expect(r.value.data.governorClasses).not.toBeNull();
+    const categories = r.value.data.findings.map((f) => f.category);
+    expect(categories).toContain('governor-limit');
+    expect(categories).toContain('legacy-automation');
+  });
+
+  it('HONOR: object scope narrows to legacy automation on that object, drops governor, emits appliedScope + disclosure', async () => {
+    const r = await automationRiskReportHandler(arCtx, { objectApiName: 'Account' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.appliedScope).toEqual({ object: 'CustomObject:Account', mode: 'component' });
+    // Governor (Apex) half excluded under scope.
+    expect(r.value.data.governorClasses).toBeNull();
+    const categories = r.value.data.findings.map((f) => f.category);
+    expect(categories).not.toContain('governor-limit');
+    // The Account Process Builder survives as a legacy-automation finding.
+    expect(r.value.data.findings.some((f) => f.summary.includes('Flow:Account_PB'))).toBe(true);
+    expect(r.value.data.disclosure).toMatch(/governor-limit findings live in apex classes/i);
+    expect(r.value.data.disclosure).toMatch(/excluded/i);
+  });
+
+  it('NARROWS DIFFERENTLY per object — Account (has PB) ≠ Contact (none) ≠ bare', async () => {
+    const [acct, contact, bare] = await Promise.all([
+      automationRiskReportHandler(arCtx, { objectApiName: 'Account' }),
+      automationRiskReportHandler(arCtx, { objectApiName: 'Contact' }),
+      automationRiskReportHandler(arCtx, {}),
+    ]);
+    expect(acct.ok && contact.ok && bare.ok).toBe(true);
+    if (!acct.ok || !contact.ok || !bare.ok) return;
+    // Contact has no automation — scoped findings empty; Account has the PB.
+    expect(contact.value.data.findings).toEqual([]);
+    expect(acct.value.data.findings.length).toBeGreaterThan(0);
+    expect(JSON.stringify(acct.value.data.findings)).not.toBe(
+      JSON.stringify(bare.value.data.findings),
+    );
+  });
+
+  it('REFUSE: an object absent from the vault → named invalid-query (never org-wide)', async () => {
+    const r = await automationRiskReportHandler(arCtx, { objectApiName: 'NoSuchObject__c' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('invalid-query');
+    expect(r.error.message).toMatch(/no object named 'NoSuchObject__c'/i);
   });
 });

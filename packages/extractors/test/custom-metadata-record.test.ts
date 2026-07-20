@@ -193,6 +193,100 @@ describe('extractCustomMetadataRecord', () => {
     });
   });
 
+  describe('value object/field references (CUSTOM-METADATA-VALUE-FIELD-REFS-UNGRAPHED)', () => {
+    // A field-copy / mapping CMDT stores object + field API names in value
+    // cells (Source_Object__c / Source_Field__c / Target_Object__c /
+    // Target_Field__c) but emitted no edges — so "what copies onto Contact?"
+    // and Contact.Email usages invented no CMDT dependents. Emit `references`
+    // edges: an *Object__c cell -> CustomObject:{value}; an *Field__c cell ->
+    // CustomField:{pairedObjectValue}.{value} (paired by the shared prefix).
+    it('emits references edges to CustomObject / CustomField for object/field-shaped value cells', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<CustomMetadata xmlns="http://soap.sforce.com/2006/04/metadata" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <label>Widget Copy</label>
+    <protected>false</protected>
+    <values>
+        <field>Source_Object__c</field>
+        <value xsi:type="xsd:string">Widget__c</value>
+    </values>
+    <values>
+        <field>Source_Field__c</field>
+        <value xsi:type="xsd:string">Gadget_Name__c</value>
+    </values>
+    <values>
+        <field>Target_Object__c</field>
+        <value xsi:type="xsd:string">Contact</value>
+    </values>
+    <values>
+        <field>Target_Field__c</field>
+        <value xsi:type="xsd:string">Email</value>
+    </values>
+    <values>
+        <field>Notes__c</field>
+        <value xsi:type="xsd:string">free text, not an api name</value>
+    </values>
+</CustomMetadata>`;
+      const { dir, path } = await writeTempCmdXml('Field_Copy_Config__mdt.Widget_Copy', xml);
+      try {
+        const result = await extractCustomMetadataRecord(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const refEdges = result.value.edges.filter((e) => e.edgeType === 'references');
+        const byTo = new Map(refEdges.map((e) => [e.toId, e]));
+        // Object refs from *_Object__c cells.
+        expect(byTo.has('CustomObject:Widget__c')).toBe(true);
+        expect(byTo.has('CustomObject:Contact')).toBe(true);
+        // Field refs from *_Field__c cells, paired with the sibling object cell.
+        expect(byTo.has('CustomField:Widget__c.Gadget_Name__c')).toBe(true);
+        expect(byTo.has('CustomField:Contact.Email')).toBe(true);
+        // A non-api-name-shaped free-text cell mints no edge.
+        expect(
+          refEdges.some((e) => /free text/.test(e.toId)),
+        ).toBe(false);
+        // Edge shape / confidence.
+        const objEdge = byTo.get('CustomObject:Contact')!;
+        expect(objEdge.fromId).toBe('CustomMetadataRecord:Field_Copy_Config__mdt.Widget_Copy');
+        expect(objEdge.confidence).toBe('heuristic');
+        expect(objEdge.source).toBe('custom-metadata-record-extractor');
+        expect(objEdge.properties).toEqual({
+          referenceKind: 'cmdtValueObject',
+          valueField: 'Target_Object__c',
+        });
+        const fieldEdge = byTo.get('CustomField:Contact.Email')!;
+        expect(fieldEdge.confidence).toBe('heuristic');
+        expect(fieldEdge.properties).toEqual({
+          referenceKind: 'cmdtValueField',
+          valueField: 'Target_Field__c',
+          object: 'Contact',
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits no value-ref edge when a *_Field__c cell has no sibling *_Object__c to resolve the object', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<CustomMetadata xmlns="http://soap.sforce.com/2006/04/metadata" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <label>Lonely Field</label>
+    <protected>false</protected>
+    <values>
+        <field>Orphan_Field__c</field>
+        <value xsi:type="xsd:string">Some_Field__c</value>
+    </values>
+</CustomMetadata>`;
+      const { dir, path } = await writeTempCmdXml('Cfg__mdt.Lonely', xml);
+      try {
+        const result = await extractCustomMetadataRecord(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        // Only the parentOf edge — no unresolvable CustomField guess.
+        expect(result.value.edges.every((e) => e.edgeType === 'parentOf')).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('error cases', () => {
     it('returns file-not-found when the path does not exist', async () => {
       const path =

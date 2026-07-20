@@ -632,3 +632,38 @@ describe('fieldAccessAuditInputSchema', () => {
     expect(parsed.success).toBe(false);
   });
 });
+
+// GUARD (L2 alias OS / ADMIN-SURFACE-ALIAS-SKEW-CLUSTER): pre-fix the schema
+// required `fieldId` and Zod-STRIPPED `componentId: CustomField:…` -> `fieldId:
+// Required`. Post-fix the componentId alias resolves to the SAME result as the
+// canonical fieldId; disagreeing values -> invalid-query.
+describe('fieldAccessAuditHandler — componentId ↔ fieldId alias', () => {
+  const run = async (raw: unknown) => {
+    const parsed = fieldAccessAuditInputSchema.safeParse(raw);
+    if (!parsed.success) return null;
+    return fieldAccessAuditHandler(ctx, parsed.data);
+  };
+
+  it('natural componentId ≡ canonical fieldId (byte-equal grants + summary)', async () => {
+    const byField = await run({ fieldId: SSN_FIELD });
+    const byComponent = await run({ componentId: SSN_FIELD });
+    expect(byField).not.toBeNull();
+    expect(byComponent).not.toBeNull();
+    if (!byField?.ok || !byComponent?.ok) return;
+    expect(byComponent.value.data.fieldId).toBe(SSN_FIELD);
+    expect(byComponent.value.data.grants).toEqual(byField.value.data.grants);
+    expect(byComponent.value.data.summary).toEqual(byField.value.data.summary);
+  });
+
+  it('disagreeing fieldId / componentId → invalid-query', async () => {
+    const parsed = fieldAccessAuditInputSchema.safeParse({
+      fieldId: SSN_FIELD,
+      componentId: 'CustomField:Contact.Email',
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    const r = await fieldAccessAuditHandler(ctx, parsed.data);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe('invalid-query');
+  });
+});
