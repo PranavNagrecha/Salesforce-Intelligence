@@ -158,20 +158,21 @@ h2.head { font-family: var(--screen-font); font-size: clamp(2rem, 5vw, 3.2rem); 
   backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
   border-bottom: 1px solid var(--line);
 }
-.nav { display: flex; align-items: center; justify-content: space-between; height: 56px; }
-.brand { display: flex; align-items: center; gap: 9px; color: var(--fg-strong); font-family: var(--mono); font-weight: 700; font-size: 1rem; }
+.nav { display: flex; align-items: center; justify-content: space-between; gap: 20px; height: 56px; }
+.brand { display: flex; align-items: center; gap: 9px; white-space: nowrap; color: var(--fg-strong); font-family: var(--mono); font-weight: 700; font-size: 1rem; }
 .brand:hover { text-decoration: none; }
 .brand .mk { color: var(--green); text-shadow: var(--glow); }
 .brand .blink { color: var(--green); animation: blink 1.05s steps(1) infinite; }
-.nav-links { display: flex; align-items: center; gap: 22px; list-style: none; margin: 0; padding: 0; }
-.nav-links a { color: var(--fg-dim); font-size: .88rem; }
+.nav-links { display: flex; align-items: center; gap: 16px; list-style: none; margin: 0; padding: 0; }
+.nav-links a { color: var(--fg-dim); font-size: .84rem; white-space: nowrap; }
 .nav-links a::before { content: ""; color: var(--green); }
 .nav-links a:hover { color: var(--green); text-decoration: none; }
 .nav-links a:hover::before { content: "> "; }
-.nav-cta { display: flex; align-items: center; gap: 10px; }
+.nav-cta { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.nav-cta .btn { padding: 8px 13px; font-size: .82rem; }
 .nav-toggle { display: none; background: none; border: 1px solid var(--line); color: var(--green); cursor: pointer; padding: 5px 8px; border-radius: 3px; font-family: var(--mono); }
 
-@media (max-width: 880px) {
+@media (max-width: 1024px) {
   .nav-links, .nav-cta .btn-ghost { display: none; }
   .nav-toggle { display: inline-flex; }
   .mobile-menu { display: none; border-top: 1px solid var(--line); padding: 12px 0 20px; }
@@ -180,7 +181,7 @@ h2.head { font-family: var(--screen-font); font-size: clamp(2rem, 5vw, 3.2rem); 
   .mobile-menu a { display: block; padding: 11px 4px; color: var(--fg); border-bottom: 1px solid var(--line-soft); }
   .mobile-menu a::before { content: "› "; color: var(--green); }
 }
-@media (min-width: 881px) { .mobile-menu { display: none; } }
+@media (min-width: 1025px) { .mobile-menu { display: none; } }
 
 /* ---- hero --------------------------------------------------------------- */
 .hero { padding-top: clamp(34px, 5vw, 60px); }
