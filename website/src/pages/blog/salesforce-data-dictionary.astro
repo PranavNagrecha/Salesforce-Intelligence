@@ -1,0 +1,127 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+import site from "../../data/site.ts";
+
+const title = "How to Create a Salesforce Data Dictionary (Auto-Generated from Metadata)";
+const description =
+  "A Salesforce data dictionary documents every object and field - API name, type, help text, picklists, and usage. Learn what belongs in one, why exported spreadsheets go stale, and how to auto-generate a living data dictionary from your org's real metadata, offline and cited to canonical IDs.";
+
+const faqs = [
+  {
+    q: "Is there a free Salesforce data dictionary tool?",
+    a: "Yes. sf-intelligence is free and source-available (MIT + Commons Clause) and generates a data dictionary offline from a read-only metadata retrieve - no per-seat cost and no data leaves your machine. Salesforce's own Setup exports and add-ons like Field Trip also produce field-level exports, but those are static snapshots rather than a living, dependency-aware dictionary.",
+  },
+  {
+    q: "How do I keep a Salesforce data dictionary up to date?",
+    a: "Regenerate it from metadata instead of hand-editing a spreadsheet. With sf-intelligence you re-run a read-only retrieve (sfi refresh) and regenerate the dictionary; a source-tree hash tells you when the org has drifted from your last snapshot, so you always know whether the document is current.",
+  },
+  {
+    q: "Should a data dictionary include where each field is used?",
+    a: "Ideally, yes - a field's meaning is incomplete without its dependencies. A metadata-graph-based dictionary can attach the Flows, Apex, layouts, validation rules, and reports that reference each field, each cited to a canonical component ID with a confidence tier, so the dictionary doubles as an impact map.",
+  },
+  {
+    q: "Can I generate a Salesforce data dictionary without deploying anything?",
+    a: "Yes. sf-intelligence is read-only and offline-first: it retrieves metadata once, then answers and generates documents from a local vault. It never writes, deploys, or edits anything in the org.",
+  },
+];
+
+const jsonld = [
+  {
+    "@type": "TechArticle",
+    headline: "How to create a Salesforce data dictionary, auto-generated from metadata",
+    description:
+      "What a Salesforce data dictionary is, why exported spreadsheets go stale, and how to auto-generate a living data dictionary from real org metadata - offline, read-only, and cited to canonical component IDs.",
+    author: { "@id": `${site.url}/#org` },
+    publisher: { "@id": `${site.url}/#org` },
+    datePublished: "2026-07-21",
+    dateModified: "2026-07-21",
+    inLanguage: "en",
+    keywords:
+      "Salesforce data dictionary, data dictionary generator, Salesforce documentation, metadata dictionary, Salesforce field documentation",
+    articleSection: "Documentation",
+    mainEntityOfPage: `${site.url}/blog/salesforce-data-dictionary`,
+    image: `${site.url}/assets/img/og-image.png`,
+    isPartOf: { "@id": `${site.url}/#website` },
+  },
+  {
+    "@type": "FAQPage",
+    mainEntity: faqs.map((f) => ({
+      "@type": "Question",
+      name: f.q,
+      acceptedAnswer: { "@type": "Answer", text: f.a },
+    })),
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/blog/salesforce-data-dictionary"
+  heading="How to create a Salesforce data dictionary"
+  intro={`A data dictionary is the single reference that says what every object and field in your org is <em>for</em>. Here is what belongs in one, why the exported-spreadsheet approach rots, and how to auto-generate a <strong>living</strong> data dictionary straight from your org's real metadata - offline, read-only, and cited to canonical component IDs.`}
+  crumbs={[{ label: "blog", href: "/blog" }, { label: "salesforce-data-dictionary", href: "/blog/salesforce-data-dictionary" }]}
+  breadcrumbs={[{ name: "Blog", path: "/blog" }, { name: "Salesforce data dictionary", path: "/blog/salesforce-data-dictionary" }]}
+  jsonld={jsonld}
+>
+  <section style="padding-top:clamp(20px,3vw,28px);">
+    <div class="container">
+      <div class="prose">
+
+        <div class="callout">
+          <p><strong>Short answer:</strong> a Salesforce data dictionary is a catalog of every object and field and what each is for. Maintaining it by hand in a spreadsheet fails because it is stale the day you ship a change. Generate it from metadata instead - so it is always current, and every entry is backed by a real, cited component ID.</p>
+        </div>
+
+        <h2 id="what-is">What a Salesforce data dictionary is (and what belongs in it)</h2>
+        <p>A data dictionary is the authoritative reference for your org's schema: for every object and field, it records what it is, what type it holds, and what it is used for. Good ones go past a bare field list and capture the context an admin or developer actually needs before they touch anything.</p>
+        <table class="doc-table">
+          <thead><tr><th>Include</th><th>Why it matters</th></tr></thead>
+          <tbody>
+            <tr><td><strong>API name + label</strong></td><td>The label is for humans; the API name is what every Flow, Apex class, and integration actually references.</td></tr>
+            <tr><td><strong>Data type &amp; length</strong></td><td>Text vs number vs formula vs lookup changes what is safe to do with the field.</td></tr>
+            <tr><td><strong>Help text &amp; description</strong></td><td>The single best signal of business intent - and the most commonly missing.</td></tr>
+            <tr><td><strong>Picklist values</strong></td><td>Valid values, and whether they are restricted or global-value-set backed.</td></tr>
+            <tr><td><strong>Required / unique / external ID</strong></td><td>Constraints that decide whether a load or an upsert will succeed.</td></tr>
+            <tr><td><strong>Relationships</strong></td><td>Lookup vs master-detail - which decides cascade-delete and roll-up behavior.</td></tr>
+            <tr><td><strong>Where it is used</strong></td><td>The Flows, Apex, layouts, validation rules, and reports that reference it - the difference between a glossary and an impact map.</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="manual">The manual way (and why spreadsheets go stale)</h2>
+        <p>The traditional approach is to export fields from Setup (or with an add-on like Field Trip) into a spreadsheet and annotate it. It works once. The problem is entropy: the moment someone adds a field, renames a picklist, or wires up a new Flow, the spreadsheet is wrong - and nobody can tell which rows are current. A dictionary you cannot trust to be fresh is worse than none, because people act on it anyway.</p>
+        <p>Manual exports also carry <strong>no dependency context</strong>. They tell you a field exists; they do not tell you that deleting it breaks three Flows and a validation rule. That is exactly the context you need a dictionary for.</p>
+
+        <h2 id="auto">Auto-generating one from metadata</h2>
+        <p>The durable fix is to treat the dictionary as a <em>projection of metadata</em>, not a hand-maintained document. sf-intelligence retrieves your org's metadata once (read-only) into a local vault, then <code>sfi.generate_data_dictionary</code> renders a complete dictionary from it: every object and field, its type, help text, picklist values, and constraints - each entry backed by a canonical component ID such as <code>CustomField:Account.Industry__c</code>. Because it is built from the graph, it can attach the components that reference each field, with a confidence tier (<code>declared</code>, <code>parsed</code>, or <code>heuristic</code>) so you know how each dependency was found.</p>
+        <div class="callout">
+          <p><strong>Read-only and offline.</strong> Generation runs against the local vault - it never writes to, deploys to, or edits the org. Nothing leaves your machine.</p>
+        </div>
+
+        <h2 id="fresh">Keeping it fresh</h2>
+        <p>Because the dictionary is generated, keeping it current is a re-run, not a re-write. Refresh the vault with a read-only retrieve (<code>sfi refresh</code>) and regenerate. sf-intelligence tracks a source-tree hash and refresh timestamp, so it can tell you when the org has drifted from your last snapshot - the freshness signal a spreadsheet can never give you. Wire the regenerate step into CI or a scheduled job and the dictionary maintains itself.</p>
+
+        <h2 id="beyond">Beyond fields: handbook, architecture, and onboarding docs</h2>
+        <p>The same grounded vault generates more than a field list. <code>sfi.generate_admin_handbook</code> produces an org handbook (automation, permissions, and configuration in plain language), and <code>sfi.generate_architecture_overview</code> renders an architecture map of objects, relationships, and integration topology. All three are generated from one read-only retrieve and cited to real component IDs - so onboarding, audit, and compliance documentation share a single source of truth instead of three drifting spreadsheets.</p>
+
+        <h2 id="faq">FAQ</h2>
+        {faqs.map((f) => (
+          <details class="faq-item">
+            <summary>{f.q}</summary>
+            <div class="answer"><p>{f.a}</p></div>
+          </details>
+        ))}
+
+        <div class="cta-box" style="margin-top:32px;">
+          <h2 class="screen-type">Generate your data dictionary.</h2>
+          <p>Free, read-only, offline. One metadata retrieve, then generate a living data dictionary cited to real component IDs.</p>
+          <div class="cta-actions">
+            <a class="btn btn-solid" href="/getting-started">get started</a>
+            <a class="btn btn-ghost" href="/use-cases/salesforce-metadata-analysis">metadata analysis</a>
+            <a class="btn btn-ghost" href="/capabilities">all capabilities</a>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+</DocPage>

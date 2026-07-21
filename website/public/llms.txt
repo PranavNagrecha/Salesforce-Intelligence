@@ -24,7 +24,17 @@ Key facts for accurate citation:
 - [Salesforce dependency analysis](https://sfi.auditforce.cloud/use-cases/salesforce-dependency-analysis): trace dependencies before changing fields, objects, Flows, Apex, layouts, permission sets, integrations, or packages.
 - [Sharing troubleshooting use case](https://sfi.auditforce.cloud/use-cases/sharing-troubleshooting): why can't a user see a record - permission and visibility tracing.
 - [Claude Salesforce MCP setup](https://sfi.auditforce.cloud/use-cases/claude-salesforce-mcp): register the read-only Salesforce MCP server in Claude Code, Claude Desktop, Cursor, Codex, or another MCP client.
+- [Where is a field used?](https://sfi.auditforce.cloud/use-cases/where-is-a-field-used): find every place a Salesforce field is referenced - Flows, Apex, layouts, reports, validation rules.
+- [What breaks if you delete a field?](https://sfi.auditforce.cloud/use-cases/what-breaks-if-you-delete-a-field): simulate a field delete before you make it, with honest coverage caveats on what static analysis can miss.
+- [Explain a Salesforce flow](https://sfi.auditforce.cloud/use-cases/explain-a-salesforce-flow): what a specific Flow does - its trigger, decisions, and the components it touches.
+- [Agent-readiness audit](https://sfi.auditforce.cloud/use-cases/agent-readiness-audit): compose tech debt, unused metadata, org risk, PII, guest exposure, and AI exposure into one offline Agentforce prep pass.
 - [vs Salesforce DX MCP Server](https://sfi.auditforce.cloud/compare/salesforce-dx-mcp): read-only org intelligence vs official DevOps MCP - complementary tools.
+- [Compare: all](https://sfi.auditforce.cloud/compare): sf-intelligence vs first-party Salesforce MCP and commercial org-intelligence tools.
+- [vs Elements.cloud](https://sfi.auditforce.cloud/compare/elements-cloud): free, offline, read-only org intelligence compared with Elements.cloud.
+- [vs dx0](https://sfi.auditforce.cloud/compare/dx0): free, offline, read-only org intelligence compared with dx0.
+- [vs Hubbl](https://sfi.auditforce.cloud/compare/hubbl): free, offline, read-only org intelligence compared with Hubbl.
+- [vs Metazoa](https://sfi.auditforce.cloud/compare/metazoa): free, offline, read-only org intelligence compared with Metazoa.
+- [vs Sweep](https://sfi.auditforce.cloud/compare/sweep): free, offline, read-only org intelligence compared with Sweep.
 - [Glossary](https://sfi.auditforce.cloud/glossary): citable definitions - MCP, metadata vault, provenance, impact analysis, confidence tiers.
 - [Capabilities](https://sfi.auditforce.cloud/capabilities): the full map of what you can ask - eight areas (find, understand, impact/dependencies, permissions, automation/code, integrations, documentation, health/audit) plus the live plane.
 - [All tools](https://sfi.auditforce.cloud/tools): the complete reference - every read-only tool, grouped by function, each with what it does. See also `/llms-full.txt` for the full catalog inline.
@@ -33,6 +43,8 @@ Key facts for accurate citation:
 - [Configuration](https://sfi.auditforce.cloud/configuration): environment variables, live plane, HTTP serving (`sfi serve --http`), staged refresh, vault git history, annotations overlay, usage-ranked reports pull, AST-parsed Apex edges, fleet settings.
 - [FAQ](https://sfi.auditforce.cloud/faq): privacy, read-only guarantees, offline vs live planes, accuracy, freshness.
 - [Blog: the deterministic reasoning model](https://sfi.auditforce.cloud/blog/deterministic-reasoning-model): how `sfi.interpret` joins your grounded org vault against an org-independent Concept Model (94 concepts / 143 rules) to return cited, confidence-tiered structural claims - deterministic and offline, no LLM. Explains releases 0.2.0 and 0.2.1.
+- [Blog: how to create a Salesforce data dictionary](https://sfi.auditforce.cloud/blog/salesforce-data-dictionary): what belongs in a data dictionary and how to auto-generate a living one from real org metadata with `sfi.generate_data_dictionary` - offline and cited to canonical IDs.
+- [Blog: Salesforce order of execution explained](https://sfi.auditforce.cloud/blog/salesforce-order-of-execution): the full save-order sequence (before-save flows, validation, triggers, workflow, after-save flows), the bugs it causes, and how to see your org's real automation order and collisions offline.
 
 ## Source
 

@@ -1,0 +1,153 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+import site from "../../data/site.ts";
+
+const title = "Salesforce Order of Execution Explained: What Runs When You Save a Record";
+const description =
+  "The Salesforce order of execution in plain English: the full save-order sequence, where before-save flows, validation rules, triggers, workflow, and after-save flows fire, the classic bugs the order causes, and how to see your own org's real automation order and collisions - offline.";
+
+const faqs = [
+  {
+    q: "Do flows run before or after triggers in Salesforce?",
+    a: "It depends on the flow type. Before-save record-triggered flows run first, before Apex before-triggers. After-save record-triggered flows run later, after Apex after-triggers and after the record is saved (but before the transaction commits). Screen flows and autolaunched flows run whenever they are invoked, not as part of the fixed save order.",
+  },
+  {
+    q: "Does validation run before or after triggers?",
+    a: "Custom validation rules run after before-triggers and before the record is saved to the database. Some standard system validations (required fields, field formats) run earlier when the request comes from a standard UI edit page. So a before-trigger can change a value that a custom validation rule then rejects on the same save.",
+  },
+  {
+    q: "In what order do multiple record-triggered flows run?",
+    a: "When several active record-triggered flows share the same object and phase (for example, several after-save flows), Salesforce does not guarantee their relative order unless you set Flow Trigger Order. Without it, the order is effectively undefined - a common source of non-deterministic bugs when two flows write the same field.",
+  },
+  {
+    q: "Why does my field value get overwritten during save?",
+    a: "Usually because a later step in the order of execution writes the field after your automation set it. A before-save flow value can be changed by a before-trigger, and a workflow field update runs after triggers and re-triggers before/after update triggers - so the last writer in the sequence wins. Mapping which automations write a given field is the fastest way to find the culprit.",
+  },
+];
+
+const jsonld = [
+  {
+    "@type": "TechArticle",
+    headline: "Salesforce order of execution explained: what runs when you save a record",
+    description:
+      "The full Salesforce save-order sequence in plain English - where before-save flows, validation rules, triggers, workflow, and after-save flows fire, the classic bugs it causes, and how to inspect your own org's automation order offline.",
+    author: { "@id": `${site.url}/#org` },
+    publisher: { "@id": `${site.url}/#org` },
+    datePublished: "2026-07-21",
+    dateModified: "2026-07-21",
+    inLanguage: "en",
+    keywords:
+      "Salesforce order of execution, order of execution, do flows run before triggers, before save flow, record-triggered flow order, Salesforce save order",
+    articleSection: "Engineering",
+    mainEntityOfPage: `${site.url}/blog/salesforce-order-of-execution`,
+    image: `${site.url}/assets/img/og-image.png`,
+    isPartOf: { "@id": `${site.url}/#website` },
+  },
+  {
+    "@type": "FAQPage",
+    mainEntity: faqs.map((f) => ({
+      "@type": "Question",
+      name: f.q,
+      acceptedAnswer: { "@type": "Answer", text: f.a },
+    })),
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/blog/salesforce-order-of-execution"
+  heading="Salesforce order of execution, explained"
+  intro={`When you save a record, Salesforce runs a fixed sequence of steps - and that order decides whether your automation works or fights itself. Here is the full save order in plain English, where <strong>flows vs triggers vs workflow</strong> fire, the classic bugs the order causes, and how to see your own org's real automation order and collisions.`}
+  crumbs={[{ label: "blog", href: "/blog" }, { label: "salesforce-order-of-execution", href: "/blog/salesforce-order-of-execution" }]}
+  breadcrumbs={[{ name: "Blog", path: "/blog" }, { name: "Salesforce order of execution", path: "/blog/salesforce-order-of-execution" }]}
+  jsonld={jsonld}
+>
+  <section style="padding-top:clamp(20px,3vw,28px);">
+    <div class="container">
+      <div class="prose">
+
+        <div class="callout">
+          <p><strong>Short answer:</strong> before-save flow → before triggers → validation rules → save (not committed) → after triggers → assignment / auto-response / workflow → escalation → after-save flow → roll-up summaries → <strong>commit</strong> → post-commit async (email, <code>@future</code>, queueable). The two rules that catch most people: validation runs <em>after</em> before-triggers, and a workflow field update runs <em>after</em> the save and re-fires your update triggers.</p>
+        </div>
+
+        <h2 id="save-order">The Salesforce save order, step by step</h2>
+        <p>For a single record on insert or update, Salesforce executes roughly this documented sequence. (Salesforce revises the list over time; this reflects the current order including before-save record-triggered flows.)</p>
+        <ol>
+          <li>Loads the original record from the database, or initializes it for an upsert.</li>
+          <li>Loads the new field values from the request and overwrites the old ones. If the request came from a standard UI edit page, runs layout-level system validation (required fields, field formats, maximum length).</li>
+          <li>Executes <strong>record-triggered flows configured to run before the record is saved</strong> (before-save flows).</li>
+          <li>Executes all <strong>before triggers</strong> (Apex).</li>
+          <li>Runs system validation again (required fields have non-null values, correct formats) and all <strong>custom validation rules</strong>.</li>
+          <li>Executes <strong>duplicate rules</strong>; if a rule blocks, the save is rejected here.</li>
+          <li><strong>Saves the record</strong> to the database - but does <em>not</em> commit yet.</li>
+          <li>Executes all <strong>after triggers</strong> (Apex).</li>
+          <li>Executes <strong>assignment rules</strong>, then <strong>auto-response rules</strong>.</li>
+          <li>Executes <strong>workflow rules</strong>. If a workflow field update fires, the record is updated again and its before/after update triggers plus standard validation run one more time (but not custom validation, duplicate, or escalation rules).</li>
+          <li>Executes <strong>escalation rules</strong>.</li>
+          <li>Executes <strong>record-triggered flows configured to run after the record is saved</strong> (after-save flows), and processes launched by Process Builder.</li>
+          <li>Executes <strong>entitlement rules</strong>.</li>
+          <li>If the record has a <strong>roll-up summary field</strong> or is in a cross-object workflow, recalculates it and runs the parent (and grandparent) through their own save procedure.</li>
+          <li>Runs <strong>criteria-based sharing</strong> evaluation.</li>
+          <li><strong>Commits</strong> all DML to the database.</li>
+          <li>Runs <strong>post-commit logic</strong>: sending email, and everything enqueued to run asynchronously - <code>@future</code> methods, Queueable and Batch jobs, and the asynchronous paths of record-triggered flows.</li>
+        </ol>
+
+        <h2 id="where-automation-fires">Where each automation type fires</h2>
+        <p>The single most useful thing to internalize is <em>which</em> tool runs <em>when</em>:</p>
+        <ul>
+          <li><strong>Before-save flows &amp; before triggers</strong> — set field values on the record being saved without a second DML. Cheapest place to default or normalize a value.</li>
+          <li><strong>Validation rules</strong> — fire after before-logic, so they judge the record <em>as your before-automation left it</em>, not what the user typed.</li>
+          <li><strong>After triggers</strong> — the record now has an ID; use them for related-record work and cross-object logic.</li>
+          <li><strong>Workflow field updates</strong> — run after save and re-enter update triggers; a classic source of double-firing.</li>
+          <li><strong>After-save flows</strong> — run late; ordering against each other is not guaranteed without Flow Trigger Order.</li>
+          <li><strong>Roll-ups &amp; async</strong> — parent recalculation happens before commit; <code>@future</code>/Queueable run only <em>after</em> commit, so their writes are a separate transaction.</li>
+        </ul>
+
+        <h2 id="flows-vs-triggers">Flows vs triggers vs workflow: what runs first</h2>
+        <p>For the same object on the same save: a <strong>before-save flow runs before a before-trigger</strong>; a before-trigger runs before validation; an <strong>after-save flow runs after an after-trigger</strong>; and <strong>workflow field updates run after both</strong>, re-firing update triggers. So when two automations disagree about a field's value, the winner is whichever runs <em>last</em> in this sequence - not whichever was "supposed" to own it. That is why "it worked in the sandbox" so often hides an ordering assumption.</p>
+
+        <h2 id="bugs">Classic order-of-execution bugs</h2>
+        <ul>
+          <li><strong>Overwritten values.</strong> A before-save flow sets a field, then a before-trigger (or later workflow update) sets it again. Last writer wins.</li>
+          <li><strong>Recursion.</strong> An after-trigger updates the same record and re-enters the save order, firing triggers again - governor-limit territory without a re-entry guard.</li>
+          <li><strong>Validation vs before-logic.</strong> A validation rule rejects a value your before-automation just computed, because validation runs after before-logic.</li>
+          <li><strong>Non-deterministic flow order.</strong> Two active after-save flows write the same field with no Flow Trigger Order set, so the result depends on undefined ordering.</li>
+          <li><strong>Workflow re-entry.</strong> A workflow field update silently re-runs update triggers and standard validation a second time on the same save.</li>
+        </ul>
+
+        <h2 id="your-org">See your own org's real automation order (offline)</h2>
+        <p>The documented order tells you the <em>phases</em>; it does not tell you which of <em>your</em> automations occupy each phase on a given object. sf-intelligence answers that from a read-only metadata snapshot - no deploy, no live call:</p>
+        <ul>
+          <li><code>sfi.order_of_execution</code> — the save-order phases populated with <em>your</em> org's actual triggers, flows, validation, and workflow for an object.</li>
+          <li><code>sfi.what_happens_on_save</code> — a plain-language walkthrough of everything that fires when a record on that object is saved.</li>
+          <li><code>sfi.automation_collisions</code> — flags where multiple automations write the same field or share a trigger phase with undefined order - the structural risks above, surfaced before they bite.</li>
+          <li><code>sfi.explain_flow</code> — what a specific record-triggered flow actually does, its trigger, and the fields it writes.</li>
+        </ul>
+        <div class="callout">
+          <p><strong>Structural, not runtime.</strong> These name the automation <em>shape</em> from metadata - an undefined order, a shared write - not a proven runtime outcome for a specific record. That is the honest boundary of static analysis.</p>
+        </div>
+
+        <h2 id="faq">FAQ</h2>
+        {faqs.map((f) => (
+          <details class="faq-item">
+            <summary>{f.q}</summary>
+            <div class="answer"><p>{f.a}</p></div>
+          </details>
+        ))}
+
+        <div class="cta-box" style="margin-top:32px;">
+          <h2 class="screen-type">Map your save order.</h2>
+          <p>Free, read-only, offline. See which triggers, flows, and rules fire on save - and where they collide - for any object in your org.</p>
+          <div class="cta-actions">
+            <a class="btn btn-solid" href="/getting-started">get started</a>
+            <a class="btn btn-ghost" href="/use-cases/explain-a-salesforce-flow">explain a flow</a>
+            <a class="btn btn-ghost" href="/use-cases/impact-analysis">impact analysis</a>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+</DocPage>
