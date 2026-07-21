@@ -4876,6 +4876,77 @@ describe('concept:flow-self-dml-reentry (D9 / property-equals-endpoint)', () => 
   });
 });
 
+// ---------------------------------------------------------------------------
+// ARC-2 concept-expansion — three new pure-YAML NODE concepts:
+//   validation-rule-inactive, workflow-rule-inactive-dead,
+//   picklist-backed-by-global-value-set.
+// Each grounds on an already-extracted node property (active / valueSetName)
+// with an already-supported bind predicate — no new engine primitive.
+// ---------------------------------------------------------------------------
+
+describe('concept:validation-rule-inactive — rule:validation-rule/inactive-dead', () => {
+  const rule = ruleById('rule:validation-rule/inactive-dead');
+  const INACTIVE = 'ValidationRule:Ns__Deal__c.Ns__Require_Amount';
+  const ACTIVE = 'ValidationRule:Ns__Deal__c.Ns__Require_Close_Reason';
+
+  it('ships the concept with the firing-condition kind and active===false bind', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('firing-condition');
+    expect(rule.bind.whereProperty).toEqual({ key: 'active', equals: false });
+  });
+
+  it('fires on active===false with an excluded-from-save-failure claim, declared', () => {
+    const out = interpret(
+      rule,
+      { nodes: [node(INACTIVE, 'ValidationRule', { active: false })], edges: [] },
+      COMPLETE,
+      INACTIVE,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.groundedIn).toContain(INACTIVE);
+    expect(out[0]!.confidence).toBe('declared');
+    const claim = out[0]!.claim.toLowerCase();
+    expect(claim).toContain('inactive');
+    expect(claim).toContain('excluded');
+  });
+
+  it('does NOT fire on an active validation rule', () => {
+    expect(
+      interpret(rule, { nodes: [node(ACTIVE, 'ValidationRule', { active: true })], edges: [] }, COMPLETE, ACTIVE),
+    ).toEqual([]);
+  });
+});
+
+describe('concept:workflow-rule-inactive-dead — rule:workflow/inactive-dead', () => {
+  const rule = ruleById('rule:workflow/inactive-dead');
+  const INACTIVE = 'WorkflowRule:Ns__Deal__c.Ns__Stale_Alert';
+  const ACTIVE = 'WorkflowRule:Ns__Deal__c.Ns__Live_Alert';
+
+  it('ships the concept with the firing-condition kind and active===false bind', () => {
+    expect(CONCEPTS[rule.concept]!.kind).toBe('firing-condition');
+    expect(rule.bind.whereProperty).toEqual({ key: 'active', equals: false });
+  });
+
+  it('fires on active===false with a dead-legacy-automation claim, declared', () => {
+    const out = interpret(
+      rule,
+      { nodes: [node(INACTIVE, 'WorkflowRule', { active: false })], edges: [] },
+      COMPLETE,
+      INACTIVE,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.groundedIn).toContain(INACTIVE);
+    expect(out[0]!.confidence).toBe('declared');
+    expect(out[0]!.claim.toLowerCase()).toContain('dead legacy automation');
+  });
+
+  it('does NOT fire on an active workflow rule', () => {
+    expect(
+      interpret(rule, { nodes: [node(ACTIVE, 'WorkflowRule', { active: true })], edges: [] }, COMPLETE, ACTIVE),
+    ).toEqual([]);
+  });
+});
+
 
 describe('concept:rollup-recalc-source-coupling (EC-13 / C9)', () => {
   const rule = ruleById('rule:relationship/rollup-recalc-source');

@@ -1047,6 +1047,26 @@ export const CONCEPTS: Readonly<Record<ConceptId, Concept>> =
         { label: 'Apex Developer Guide — Running Apex within Governor Execution Limits', url: 'https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_gov_limits.htm' },
       ],
     },
+    'concept:validation-rule-inactive': {
+      id: 'concept:validation-rule-inactive',
+      kind: 'firing-condition',
+      label: 'An inactive validation rule never enforces its constraint and must be excluded from save-failure analysis',
+      summary:
+        'A VALIDATION RULE whose `active` flag is FALSE is DEAD enforcement: Salesforce never evaluates its error-condition formula on insert or update, so it can neither block a save nor surface its error message until an admin re-activates it. It must be EXCLUDED from save-order-of-execution analysis (validation runs in the system-validation phase), from "what could reject this write" reasoning, and from required-field / collision gate counts — treating a deactivated rule as a live guard would cry wolf about a constraint that cannot fire, while treating it as protection would falsely assure that bad data is blocked. This is grounded from the rule\'s own always-present `active` boolean; it names the non-enforcing STRUCTURAL fact, NOT whether the rule WOULD reject a specific record if activated (the error-condition formula is not evaluated offline) and NOT why it was deactivated. Only active validation rules belong in save-failure and enforcement surfaces.',
+      docs: [
+        { label: 'Salesforce Help — Define Validation Rules', url: 'https://help.salesforce.com/s/articleView?id=sf.fields_defining_field_validation_rules.htm' },
+      ],
+    },
+    'concept:workflow-rule-inactive-dead': {
+      id: 'concept:workflow-rule-inactive-dead',
+      kind: 'firing-condition',
+      label: 'An inactive workflow rule never runs its actions and is dead legacy automation',
+      summary:
+        'A WORKFLOW RULE whose `active` flag is FALSE is DEAD legacy automation: Salesforce never evaluates its criteria and never runs its associated actions — field updates, email alerts, outbound messages, or time-dependent actions — until it is re-activated. It must be EXCLUDED from save-order-of-execution analysis (an active workflow field update runs in its own save-order phase and can re-trigger automation), from field-writer-collision reasoning, and from "what fires on save" impact counts; counting a deactivated rule would overstate the automation load, while assuming its field updates still run would misattribute a value change. This is grounded from the rule\'s own always-present `active` boolean; it names the non-running STRUCTURAL fact, NOT whether an equivalent Flow has replaced it (migration lineage is org-specific) and NOT whether the rule WOULD match a given record if activated (criteria remain unevaluated offline). Only active workflow rules belong in save-order and automation-impact surfaces.',
+      docs: [
+        { label: 'Salesforce Help — Activate Workflow Rules', url: 'https://help.salesforce.com/s/articleView?id=sf.workflow_rules_activating.htm' },
+      ],
+    },
   });
 
 /**
@@ -2523,5 +2543,25 @@ export const CONCEPT_RULES: readonly ConceptRule[] = Object.freeze<ConceptRule[]
     maxConfidence: 'declared',
     absenceShaped: false,
     dependsOnCoverage: ['AssignmentRule', 'Queue', 'Role'],
+  },
+  {
+    id: 'rule:validation-rule/inactive-dead',
+    concept: 'concept:validation-rule-inactive',
+    bind: { componentTypes: ['ValidationRule'], whereProperty: { key: 'active', equals: false } },
+    interpretation:
+      '{ids} is INACTIVE — Salesforce never evaluates its error-condition formula on insert or update, so it can neither block a save nor surface its error message until an admin re-activates it. It must be EXCLUDED from save-order-of-execution analysis, from "what could reject this write" reasoning, and from required-field / collision gate counts: treating a deactivated rule as a live guard would cry wolf about a constraint that cannot fire, while treating it as protection would falsely assure that bad data is blocked. This names the non-enforcing structural fact from the rule\'s own active flag, NOT whether it WOULD reject a specific record if activated (the formula is not evaluated offline).',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['ValidationRule'],
+  },
+  {
+    id: 'rule:workflow/inactive-dead',
+    concept: 'concept:workflow-rule-inactive-dead',
+    bind: { componentTypes: ['WorkflowRule'], whereProperty: { key: 'active', equals: false } },
+    interpretation:
+      '{ids} is INACTIVE — DEAD legacy automation that Salesforce never evaluates, whose actions (field updates, email alerts, outbound messages, time-dependent actions) never run until it is re-activated. It must be EXCLUDED from save-order-of-execution analysis, from field-writer-collision reasoning, and from "what fires on save" impact counts: counting a deactivated rule overstates the automation load, while assuming its field updates still run would misattribute a value change. This names the non-running structural fact from the rule\'s own active flag, NOT whether a Flow has replaced it and NOT whether it WOULD match a given record if activated (criteria remain unevaluated offline).',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['WorkflowRule'],
   },
 ]);

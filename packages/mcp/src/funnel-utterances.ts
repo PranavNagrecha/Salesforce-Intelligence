@@ -2330,6 +2330,20 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'assignment rule first-match ordering — can an early catch-all entry make later entries unreachable?',
     'when an assignment rule has a catch-all entry first, are later specific entries structurally starved by first-match evaluation?',
     'does entry order on this assignment rule mean a no-criteria row wins before targeted queue rules below it?',
+    // ARC-2 concept-expansion — validation-rule-inactive. A deactivated validation
+    // rule never enforces its constraint and must be excluded from save-failure
+    // reasoning. Anchored on the rule-type noun so it does not misbind to
+    // inactive-USER tools. Generic placeholders / standard objects only.
+    'is this validation rule inactive, so it never blocks a save or shows its error message?',
+    'this validation rule is deactivated — does it still enforce its constraint or is it dead?',
+    'does an inactive validation rule still run in the save order, or can it never fire?',
+    'which validation rules are turned off and therefore never enforce their error condition?',
+    // ARC-2 concept-expansion — workflow-rule-inactive-dead. An inactive workflow
+    // rule never runs its field updates / alerts — dead legacy automation.
+    'is this workflow rule inactive, so its field updates and email alerts never fire?',
+    'this workflow rule is deactivated — is it dead legacy automation that no longer runs on save?',
+    'does an inactive workflow rule still perform field updates, or has it stopped firing entirely?',
+    'which workflow rules are inactive and therefore never run their actions?',
   ],
   'sfi.find_field_anywhere': [
     'find all objects that have a field called External_Id__c',

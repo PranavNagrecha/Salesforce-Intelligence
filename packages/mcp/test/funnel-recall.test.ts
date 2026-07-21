@@ -493,6 +493,40 @@ describe('funnel ranking — Arc-2 Funnel DoD D10 rank interpret top-5', () => {
 });
 
 /**
+ * ARC-2 concept-expansion — NL hooks for the three new pure-YAML NODE concepts
+ * (validation-rule-inactive, workflow-rule-inactive-dead,
+ * picklist-backed-by-global-value-set). Their natural "is this rule inactive /
+ * is this picklist global" wording was owned by broad audit / field specialists
+ * so interpret never reached top-5 until routing utterances shipped. Generic
+ * placeholders / standard objects only.
+ */
+const ARC2_CONCEPT_EXP_VALIDATION_INACTIVE_TOP5: readonly string[] = [
+  'is this validation rule inactive, so it never blocks a save or shows its error message?',
+  'this validation rule is deactivated — does it still enforce its constraint or is it dead?',
+  'does an inactive validation rule still run in the save order, or can it never fire?',
+  'which validation rules are turned off and therefore never enforce their error condition?',
+];
+describe('funnel ranking — Arc-2 concept-expansion validation-rule-inactive ranks interpret top-5', () => {
+  it.each(ARC2_CONCEPT_EXP_VALIDATION_INACTIVE_TOP5)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+
+const ARC2_CONCEPT_EXP_WORKFLOW_INACTIVE_TOP5: readonly string[] = [
+  'is this workflow rule inactive, so its field updates and email alerts never fire?',
+  'this workflow rule is deactivated — is it dead legacy automation that no longer runs on save?',
+  'does an inactive workflow rule still perform field updates, or has it stopped firing entirely?',
+  'which workflow rules are inactive and therefore never run their actions?',
+];
+describe('funnel ranking — Arc-2 concept-expansion workflow-rule-inactive-dead ranks interpret top-5', () => {
+  it.each(ARC2_CONCEPT_EXP_WORKFLOW_INACTIVE_TOP5)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+
+/**
  * ROUTE-INACTIVE-AUTOMATION-WORD-MISBINDS-USERS — a save-failure / automation
  * question that merely contains the word "inactive" (describing a flow /
  * trigger / validation rule) must NOT rank `sfi.live_inactive_users` (inactive
