@@ -4014,3 +4014,85 @@ conceptRules:
     absenceShaped: false
     dependsOnCoverage:
       - OmniDataTransform
+
+  # ARC-2 concepts-batch3 — field-classic-encrypted-text. NODE rule. declared.
+  - id: rule:field/classic-encrypted-text
+    concept: concept:field-classic-encrypted-text
+    bind:
+      componentTypes:
+        - CustomField
+      whereProperty:
+        key: dataType
+        equals: EncryptedText
+    interpretation: '{ids} is a CLASSIC ENCRYPTED TEXT field — stored encrypted and MASKED in the UI, API, and reports for any user without the "View Encrypted Data" permission (most users see asterisks). Its type class is not filterable, sortable, or groupable, so it cannot appear in a SOQL WHERE / ORDER BY / GROUP BY, a list-view or report filter, and it cannot be an external id, a unique field, a default-value source, or a formula input. This is the LEGACY per-field protection, distinct from Shield Platform Encryption (not observable offline). Grounded from the field''s declared data type; it names the masking and restriction posture, NOT which users can currently view the value and NOT whether the field holds sensitive data.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - CustomField
+
+  # ARC-2 concepts-batch3 — field-autonumber-system-assigned-readonly. NODE rule.
+  - id: rule:field/autonumber-system-assigned-readonly
+    concept: concept:field-autonumber-system-assigned-readonly
+    bind:
+      componentTypes:
+        - CustomField
+      whereProperty:
+        key: dataType
+        equals: AutoNumber
+    interpretation: '{ids} is an AUTO NUMBER field — system-assigned from a display format and sequence at insert, so it is READ-ONLY on every write path (UI, API, Apex, Flow, and data import cannot set it). It is null / unavailable in a before-save context (assigned during insert), is stored as a formatted STRING rather than a number, and changing its format renumbers only new records — existing values and any sequence gaps from failed inserts persist. Grounded from the field''s declared data type; it names the system-assigned read-only provenance, NOT the current or next sequence value and NOT whether an integration tries to write it.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - CustomField
+
+  # ARC-2 concepts-batch3 — field-multiselect-picklist-storage-semantics. NODE rule.
+  - id: rule:field/multiselect-picklist-storage
+    concept: concept:field-multiselect-picklist-storage-semantics
+    bind:
+      componentTypes:
+        - CustomField
+      whereProperty:
+        key: dataType
+        equals: MultiselectPicklist
+    interpretation: '{ids} is a MULTI-SELECT PICKLIST — every selected value is stored in a SINGLE semicolon-delimited string, not as separate rows. In SOQL and reports it must be filtered with INCLUDES / EXCLUDES rather than = / != / IN (an equality filter matches only the exact full delimited combination), and formulas must use INCLUDES() to test membership; sorting or grouping orders by the raw delimited string. It cannot be the controlling field of a dependent picklist, nor an external id or unique field. Grounded from the field''s declared data type; it names the storage and query semantics that follow from the type, NOT which values a record holds and NOT whether a specific query filters it incorrectly.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - CustomField
+
+  # ARC-2 concept-expansion — permission-set-license-scoped. ONE NODE rule on
+  # PermissionSet `license` isNull:false. The extractor keeps the key always
+  # present (permission-set.ts:347), non-null only when <license> is serialized,
+  # so isNull:false fires exactly on the license-bound subset. maxConfidence
+  # declared (node match, no edge). ORG-INDEPENDENT.
+  - id: rule:access/permission-set-license-scoped
+    concept: concept:permission-set-license-scoped
+    bind:
+      componentTypes:
+        - PermissionSet
+      whereProperty:
+        key: license
+        isNull: false
+    interpretation: '{ids} is a LICENSE-SCOPED permission set — its `license` element binds it to a specific user license, so Salesforce only lets it be assigned to users who ALREADY hold that license. Every grant it carries (object CRUD, field-level security, Apex access, system permissions) is therefore UNREACHABLE by any user lacking the license, which NARROWS the eligible population before any individual grant even applies: no matter how strong its grants look, it cannot widen access for a user on the wrong license. This names the DECLARED assignability constraint of the container from the permission set''s own `license` binding, NOT whether any specific user holds that license or is assigned this permission set (a live-plane assignment question the offline vault cannot answer), and NOT the strength or correctness of the grants inside it.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - PermissionSet
+
+  # ARC-2 concept-expansion — session-based-permission-set-dormant. ONE NODE rule on
+  # PermissionSet `hasActivationRequired == true`. maxConfidence declared (read
+  # verbatim from the set's own always-present activation-required flag; a node match
+  # carries no edge). ORG-INDEPENDENT.
+  - id: rule:permission-set/session-based-dormant
+    concept: concept:session-based-permission-set-dormant
+    bind:
+      componentTypes:
+        - PermissionSet
+      whereProperty:
+        key: hasActivationRequired
+        equals: true
+    interpretation: '{ids} is a SESSION-BASED permission set — its activation-required flag is TRUE — so it grants NONE of its permissions passively. Every grant it confers (object CRUD, field-level security, View All / Modify All, Apex-class access, custom-permission grants) stays DORMANT until the permission set is ACTIVATED for the current session, via Auth.SessionManagement or a launching flow, making all of them conditional-on-activation rather than standing. When reasoning about what a holder can do at rest, treat these grants as INACTIVE by default: assignment alone does not confer the access until a session activation occurs. This names the activation-gate structural fact from the set''s own activation-required flag, NOT whether any given session actually activates it (session activation is a runtime event not observable offline) and NOT which users hold the set.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - PermissionSet

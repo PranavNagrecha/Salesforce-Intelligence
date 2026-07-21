@@ -6326,3 +6326,107 @@ describe('concept:dataraptor-field-security-unenforced — rule:omnistudio/datar
     ).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// ARC-2 concepts-batch3 — 3 CustomField dataType concepts + 2 revived permset concepts.
+// ---------------------------------------------------------------------------
+
+describe('concept:field-classic-encrypted-text — rule:field/classic-encrypted-text', () => {
+  const rule = ruleById('rule:field/classic-encrypted-text');
+  const F = 'CustomField:Ns__Deal__c.Ns__X__c';
+  const O = 'CustomField:Ns__Deal__c.Ns__Y__c';
+  it('ships field-provenance kind + dataType bind', () => {
+    expect(CONCEPTS[rule.concept]!.kind).toBe('field-provenance');
+    expect(rule.bind.whereProperty).toEqual({ key: 'dataType', equals: 'EncryptedText' });
+  });
+  it('fires on the data type with a declared claim', () => {
+    const out = interpret(rule, { nodes: [node(F, 'CustomField', { dataType: 'EncryptedText' })], edges: [] }, COMPLETE, F);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.groundedIn).toContain(F);
+    expect(out[0]!.confidence).toBe('declared');
+    expect(out[0]!.claim.toLowerCase()).toContain('masked');
+  });
+  it('does NOT fire on a different data type', () => {
+    expect(interpret(rule, { nodes: [node(O, 'CustomField', { dataType: 'Text' })], edges: [] }, COMPLETE, O)).toEqual([]);
+  });
+});
+
+describe('concept:field-autonumber-system-assigned-readonly — rule:field/autonumber-system-assigned-readonly', () => {
+  const rule = ruleById('rule:field/autonumber-system-assigned-readonly');
+  const F = 'CustomField:Ns__Deal__c.Ns__X__c';
+  const O = 'CustomField:Ns__Deal__c.Ns__Y__c';
+  it('ships field-provenance kind + dataType bind', () => {
+    expect(CONCEPTS[rule.concept]!.kind).toBe('field-provenance');
+    expect(rule.bind.whereProperty).toEqual({ key: 'dataType', equals: 'AutoNumber' });
+  });
+  it('fires on the data type with a declared claim', () => {
+    const out = interpret(rule, { nodes: [node(F, 'CustomField', { dataType: 'AutoNumber' })], edges: [] }, COMPLETE, F);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.groundedIn).toContain(F);
+    expect(out[0]!.confidence).toBe('declared');
+    expect(out[0]!.claim.toLowerCase()).toContain('read-only');
+  });
+  it('does NOT fire on a different data type', () => {
+    expect(interpret(rule, { nodes: [node(O, 'CustomField', { dataType: 'Text' })], edges: [] }, COMPLETE, O)).toEqual([]);
+  });
+});
+
+describe('concept:field-multiselect-picklist-storage-semantics — rule:field/multiselect-picklist-storage', () => {
+  const rule = ruleById('rule:field/multiselect-picklist-storage');
+  const F = 'CustomField:Ns__Deal__c.Ns__X__c';
+  const O = 'CustomField:Ns__Deal__c.Ns__Y__c';
+  it('ships field-provenance kind + dataType bind', () => {
+    expect(CONCEPTS[rule.concept]!.kind).toBe('field-provenance');
+    expect(rule.bind.whereProperty).toEqual({ key: 'dataType', equals: 'MultiselectPicklist' });
+  });
+  it('fires on the data type with a declared claim', () => {
+    const out = interpret(rule, { nodes: [node(F, 'CustomField', { dataType: 'MultiselectPicklist' })], edges: [] }, COMPLETE, F);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.groundedIn).toContain(F);
+    expect(out[0]!.confidence).toBe('declared');
+    expect(out[0]!.claim.toLowerCase()).toContain('delimited');
+  });
+  it('does NOT fire on a different data type', () => {
+    expect(interpret(rule, { nodes: [node(O, 'CustomField', { dataType: 'Picklist' })], edges: [] }, COMPLETE, O)).toEqual([]);
+  });
+});
+
+describe('concept:permission-set-license-scoped — rule:access/permission-set-license-scoped', () => {
+  const rule = ruleById('rule:access/permission-set-license-scoped');
+  const A = 'PermissionSet:Ns__Alpha';
+  const B = 'PermissionSet:Ns__Beta';
+  it('ships access-mechanism kind + expected bind', () => {
+    expect(CONCEPTS[rule.concept]!.kind).toBe('access-mechanism');
+    expect(rule.bind.whereProperty).toEqual({ key: 'license', isNull: false });
+  });
+  it('fires with a declared claim', () => {
+    const out = interpret(rule, { nodes: [node(A, 'PermissionSet', { license: 'Ns__SalesLicense' })], edges: [] }, COMPLETE, A);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.groundedIn).toContain(A);
+    expect(out[0]!.confidence).toBe('declared');
+    expect(out[0]!.claim.toLowerCase()).toContain('license');
+  });
+  it('does NOT fire on the negative case', () => {
+    expect(interpret(rule, { nodes: [node(B, 'PermissionSet', {})], edges: [] }, COMPLETE, B)).toEqual([]);
+  });
+});
+
+describe('concept:session-based-permission-set-dormant — rule:permission-set/session-based-dormant', () => {
+  const rule = ruleById('rule:permission-set/session-based-dormant');
+  const A = 'PermissionSet:Ns__Alpha';
+  const B = 'PermissionSet:Ns__Beta';
+  it('ships access-mechanism kind + expected bind', () => {
+    expect(CONCEPTS[rule.concept]!.kind).toBe('access-mechanism');
+    expect(rule.bind.whereProperty).toEqual({ key: 'hasActivationRequired', equals: true });
+  });
+  it('fires with a declared claim', () => {
+    const out = interpret(rule, { nodes: [node(A, 'PermissionSet', { hasActivationRequired: true })], edges: [] }, COMPLETE, A);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.groundedIn).toContain(A);
+    expect(out[0]!.confidence).toBe('declared');
+    expect(out[0]!.claim.toLowerCase()).toContain('session');
+  });
+  it('does NOT fire on the negative case', () => {
+    expect(interpret(rule, { nodes: [node(B, 'PermissionSet', { hasActivationRequired: false })], edges: [] }, COMPLETE, B)).toEqual([]);
+  });
+});

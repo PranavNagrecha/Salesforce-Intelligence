@@ -700,3 +700,75 @@ describe('funnel recall — apex code-quality / flow-fault / test-quality reason
     expect(semanticCandidates(q, 5).map((c) => c.tool)).toContain('sfi.interpret');
   });
 });
+
+
+/**
+ * ARC-2 concepts-batch3 — 5 more concepts (3 dataType + 2 revived permset),
+ * NL-reachable via grow-forever per-concept cards.
+ */
+const ARC2_B3_FIELD_CLASSIC_ENCRYPTED_TEXT: readonly string[] = [
+  "Is this an encrypted text field, and who can actually see its value?",
+  "why is this field showing asterisks to most users?",
+  "can I filter or report on a classic encrypted text field?",
+  "is this encrypted field usable as an external id or in a formula?",
+  "does this masked field hide its value unless you have View Encrypted Data?",
+];
+describe('funnel ranking — Arc-2 batch3 field-classic-encrypted-text ranks interpret top-5', () => {
+  it.each(ARC2_B3_FIELD_CLASSIC_ENCRYPTED_TEXT)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_B3_FIELD_AUTONUMBER_SYSTEM_ASSIGNED_READONLY: readonly string[] = [
+  "Can I set this auto number field from the API or Apex?",
+  "why can't my integration write to this auto-number field?",
+  "is this auto number field available in a before-save trigger?",
+  "what does it mean that this field is an Auto Number?",
+  "does reformatting an auto number field renumber existing records?",
+];
+describe('funnel ranking — Arc-2 batch3 field-autonumber-system-assigned-readonly ranks interpret top-5', () => {
+  it.each(ARC2_B3_FIELD_AUTONUMBER_SYSTEM_ASSIGNED_READONLY)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_B3_FIELD_MULTISELECT_PICKLIST_STORAGE_SEMANTICS: readonly string[] = [
+  "how is a multi-select picklist stored, and how do I query it?",
+  "why does my equals filter not match this multi-select picklist?",
+  "can a multi-select picklist be the controlling field of a dependent picklist?",
+  "do I need INCLUDES to filter a multiselect picklist in SOQL?",
+  "what are the reporting limitations of a multi-select picklist field?",
+];
+describe('funnel ranking — Arc-2 batch3 field-multiselect-picklist-storage-semantics ranks interpret top-5', () => {
+  it.each(ARC2_B3_FIELD_MULTISELECT_PICKLIST_STORAGE_SEMANTICS)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_B3_PERMISSION_SET_LICENSE_SCOPED: readonly string[] = [
+  "Which permission sets are bound to a specific user license?",
+  "Is this permission set restricted to users who hold a particular license?",
+  "What does it mean that a permission set has a license set on it?",
+  "Can a permission set that is tied to a license be assigned to any user?",
+  "Which permission sets can only be assigned to users on a matching license?",
+  "Does binding a permission set to a user license limit who can receive its grants?",
+];
+describe('funnel ranking — Arc-2 batch3 permission-set-license-scoped ranks interpret top-5', () => {
+  it.each(ARC2_B3_PERMISSION_SET_LICENSE_SCOPED)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_B3_SESSION_BASED_PERMISSION_SET_DORMANT: readonly string[] = [
+  "Which permission sets require session activation before their grants apply?",
+  "Is this permission set session-based, so its access stays dormant until activated?",
+  "Does this permission set grant its object and field access passively or only after session activation?",
+  "What permission sets confer no standing access because they are activation-gated?",
+  "Are the CRUD and Apex-class grants on this permission set conditional on session activation?",
+];
+describe('funnel ranking — Arc-2 batch3 session-based-permission-set-dormant ranks interpret top-5', () => {
+  it.each(ARC2_B3_SESSION_BASED_PERMISSION_SET_DORMANT)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});

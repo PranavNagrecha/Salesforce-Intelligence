@@ -1151,6 +1151,58 @@ export const CONCEPTS: Readonly<Record<ConceptId, Concept>> =
         { label: 'Salesforce Help — Enforce Field-Level Security in DataRaptors', url: 'https://help.salesforce.com/s/articleView?id=sf.os_secure_dataraptors.htm' },
       ],
     },
+    'concept:field-classic-encrypted-text': {
+      id: 'concept:field-classic-encrypted-text',
+      kind: 'field-provenance',
+      label: 'A classic Encrypted Text field is masked and cannot be filtered, sorted, or used as an external id',
+      summary:
+        'A CLASSIC ENCRYPTED TEXT field stores its value encrypted at rest and MASKS it in the UI, API, and reports for any user who lacks the "View Encrypted Data" permission — most users see only asterisks. Its type class is NOT filterable, sortable, or groupable: it cannot appear in a SOQL WHERE / ORDER BY / GROUP BY, a list-view or report filter, and it cannot be an external id, a unique field, a default-value source, or a formula input. This is the DISTINCT LEGACY protection (a per-field type), NOT Shield Platform Encryption (a separate field-level encryption strategy not observable from offline metadata). Grounded from the field\'s own declared data type; it names the masking and restriction POSTURE that follow from the type, NOT which specific users can currently view the value (a permission-assignment question) and NOT whether the field actually holds sensitive data.',
+      docs: [
+        { label: 'Salesforce Help — Encrypted Custom Fields (Classic Encryption)', url: 'https://help.salesforce.com/s/articleView?id=sf.fields_about_encrypted_fields.htm' },
+      ],
+    },
+    'concept:field-autonumber-system-assigned-readonly': {
+      id: 'concept:field-autonumber-system-assigned-readonly',
+      kind: 'field-provenance',
+      label: 'An Auto Number field is system-assigned and read-only on every write path',
+      summary:
+        'An AUTO NUMBER field is SYSTEM-ASSIGNED: Salesforce generates its value from a display format and a sequence when the record is inserted, so it is READ-ONLY on every write path — the UI, API, Apex, Flow, and data imports cannot set or change it (attempts are ignored). Because it is assigned DURING insert, it is null / unavailable in a before-save context (a before-insert trigger or before-save flow cannot read the final value). It is stored and displayed as a formatted STRING, not a number, so it cannot be used in arithmetic; and changing the display format renumbers only NEW records — existing values are not rewritten, so sequence gaps from failed inserts or rollbacks persist. Grounded from the field\'s own declared data type; it names the system-assigned, read-only provenance, NOT the current sequence value or next number (record data) and NOT whether any specific integration attempts to write it.',
+      docs: [
+        { label: 'Salesforce Help — Auto-Number Fields', url: 'https://help.salesforce.com/s/articleView?id=sf.custom_field_types.htm' },
+      ],
+    },
+    'concept:field-multiselect-picklist-storage-semantics': {
+      id: 'concept:field-multiselect-picklist-storage-semantics',
+      kind: 'field-provenance',
+      label: 'A multi-select picklist stores selections as one delimited string with special query semantics',
+      summary:
+        'A MULTI-SELECT PICKLIST stores every selected value in a SINGLE semicolon-delimited string, not as separate rows — so it behaves unlike a normal picklist. In SOQL and reports it must be filtered with INCLUDES / EXCLUDES rather than = / != / IN (an equality filter matches only the exact full delimited combination), and formulas must test membership with INCLUDES(); sorting or grouping orders by the raw delimited string, not by individual values. It CANNOT serve as the controlling field of a dependent picklist, and it cannot be an external id or unique field. Grounded from the field\'s own declared data type; it names the storage and query SEMANTICS that follow from the type, NOT which values a given record holds and NOT whether any specific query currently filters it incorrectly.',
+      docs: [
+        { label: 'Salesforce Help — Multi-Select Picklists', url: 'https://help.salesforce.com/s/articleView?id=sf.fields_about_multiselect_picklists.htm' },
+      ],
+    },
+    'concept:permission-set-license-scoped': {
+      id: 'concept:permission-set-license-scoped',
+      kind: 'access-mechanism',
+      label: 'A license-scoped permission set can only be assigned to users who hold that user license',
+      summary:
+        'A PERMISSION SET whose `license` element is SET is bound to a specific USER LICENSE, and Salesforce only lets it be assigned to users who ALREADY HOLD that license — so every grant it carries (object CRUD, field-level security, Apex class access, system permissions) is UNREACHABLE by any user lacking the license, narrowing the ELIGIBLE POPULATION before any individual grant even applies. A license-scoped permission set therefore cannot widen access for a user on the wrong license no matter how strong its grants look, whereas an UNSCOPED permission set (no `license` element) carries no such assignability constraint and can be assigned to any user. This is grounded from the permission set\'s own declared `license` binding; it names the ASSIGNABILITY CONSTRAINT of the container, NOT whether any specific user holds that license or is actually assigned this permission set (an assignment question the offline vault cannot answer — the live plane resolves who holds a license or a permission set), and NOT the strength or correctness of the grants inside it. Only users on the bound license can ever receive its grants.',
+      docs: [
+        { label: 'Salesforce Help — Permission Set Licenses', url: 'https://help.salesforce.com/s/articleView?id=sf.users_permissionset_licenses.htm' },
+        { label: 'Salesforce Help — Permission Sets', url: 'https://help.salesforce.com/s/articleView?id=sf.perm_sets_overview.htm' },
+      ],
+    },
+    'concept:session-based-permission-set-dormant': {
+      id: 'concept:session-based-permission-set-dormant',
+      kind: 'access-mechanism',
+      label: 'A session-based permission set grants nothing passively — every grant is dormant until session activation',
+      summary:
+        'A SESSION-BASED permission set — one whose activation-required flag is TRUE — grants NONE of its permissions passively. Every grant it confers (object CRUD, field-level security, View All / Modify All, Apex-class access, and custom-permission grants) stays DORMANT until the permission set is ACTIVATED for the current session, via Auth.SessionManagement or a launching flow, so all of them are conditional-on-activation rather than standing. When reasoning about what a holder of this set can do at rest, its grants must be treated as INACTIVE by default: assignment alone does not confer the access. This is grounded from the set\'s own always-present activation-required boolean; it names the activation-gate STRUCTURAL fact, NOT whether any given session actually activates the set (session activation is a runtime event the offline vault cannot observe), NOT which users hold the set, and NOT what the individual grants are when it IS active. Only the activation-gate posture is asserted here.',
+      docs: [
+        { label: 'Salesforce Help — Session-based Permission Sets', url: 'https://help.salesforce.com/s/articleView?id=sf.perm_sets_session_map.htm' },
+        { label: 'Apex Developer Guide — Auth.SessionManagement Class', url: 'https://developer.salesforce.com/docs/atlas.en-us.apexref.meta/apexref/apex_class_Auth_SessionManagement.htm' },
+      ],
+    },
   });
 
 /**
@@ -2737,5 +2789,55 @@ export const CONCEPT_RULES: readonly ConceptRule[] = Object.freeze<ConceptRule[]
     maxConfidence: 'declared',
     absenceShaped: false,
     dependsOnCoverage: ['OmniDataTransform'],
+  },
+  {
+    id: 'rule:field/classic-encrypted-text',
+    concept: 'concept:field-classic-encrypted-text',
+    bind: { componentTypes: ['CustomField'], whereProperty: { key: 'dataType', equals: 'EncryptedText' } },
+    interpretation:
+      '{ids} is a CLASSIC ENCRYPTED TEXT field — stored encrypted and MASKED in the UI, API, and reports for any user without the "View Encrypted Data" permission (most users see asterisks). Its type class is not filterable, sortable, or groupable, so it cannot appear in a SOQL WHERE / ORDER BY / GROUP BY, a list-view or report filter, and it cannot be an external id, a unique field, a default-value source, or a formula input. This is the LEGACY per-field protection, distinct from Shield Platform Encryption (not observable offline). Grounded from the field\'s declared data type; it names the masking and restriction posture, NOT which users can currently view the value and NOT whether the field holds sensitive data.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['CustomField'],
+  },
+  {
+    id: 'rule:field/autonumber-system-assigned-readonly',
+    concept: 'concept:field-autonumber-system-assigned-readonly',
+    bind: { componentTypes: ['CustomField'], whereProperty: { key: 'dataType', equals: 'AutoNumber' } },
+    interpretation:
+      '{ids} is an AUTO NUMBER field — system-assigned from a display format and sequence at insert, so it is READ-ONLY on every write path (UI, API, Apex, Flow, and data import cannot set it). It is null / unavailable in a before-save context (assigned during insert), is stored as a formatted STRING rather than a number, and changing its format renumbers only new records — existing values and any sequence gaps from failed inserts persist. Grounded from the field\'s declared data type; it names the system-assigned read-only provenance, NOT the current or next sequence value and NOT whether an integration tries to write it.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['CustomField'],
+  },
+  {
+    id: 'rule:field/multiselect-picklist-storage',
+    concept: 'concept:field-multiselect-picklist-storage-semantics',
+    bind: { componentTypes: ['CustomField'], whereProperty: { key: 'dataType', equals: 'MultiselectPicklist' } },
+    interpretation:
+      '{ids} is a MULTI-SELECT PICKLIST — every selected value is stored in a SINGLE semicolon-delimited string, not as separate rows. In SOQL and reports it must be filtered with INCLUDES / EXCLUDES rather than = / != / IN (an equality filter matches only the exact full delimited combination), and formulas must use INCLUDES() to test membership; sorting or grouping orders by the raw delimited string. It cannot be the controlling field of a dependent picklist, nor an external id or unique field. Grounded from the field\'s declared data type; it names the storage and query semantics that follow from the type, NOT which values a record holds and NOT whether a specific query filters it incorrectly.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['CustomField'],
+  },
+  {
+    id: 'rule:access/permission-set-license-scoped',
+    concept: 'concept:permission-set-license-scoped',
+    bind: { componentTypes: ['PermissionSet'], whereProperty: { key: 'license', isNull: false } },
+    interpretation:
+      '{ids} is a LICENSE-SCOPED permission set — its `license` element binds it to a specific user license, so Salesforce only lets it be assigned to users who ALREADY hold that license. Every grant it carries (object CRUD, field-level security, Apex access, system permissions) is therefore UNREACHABLE by any user lacking the license, which NARROWS the eligible population before any individual grant even applies: no matter how strong its grants look, it cannot widen access for a user on the wrong license. This names the DECLARED assignability constraint of the container from the permission set\'s own `license` binding, NOT whether any specific user holds that license or is assigned this permission set (a live-plane assignment question the offline vault cannot answer), and NOT the strength or correctness of the grants inside it.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['PermissionSet'],
+  },
+  {
+    id: 'rule:permission-set/session-based-dormant',
+    concept: 'concept:session-based-permission-set-dormant',
+    bind: { componentTypes: ['PermissionSet'], whereProperty: { key: 'hasActivationRequired', equals: true } },
+    interpretation:
+      '{ids} is a SESSION-BASED permission set — its activation-required flag is TRUE — so it grants NONE of its permissions passively. Every grant it confers (object CRUD, field-level security, View All / Modify All, Apex-class access, custom-permission grants) stays DORMANT until the permission set is ACTIVATED for the current session, via Auth.SessionManagement or a launching flow, making all of them conditional-on-activation rather than standing. When reasoning about what a holder can do at rest, treat these grants as INACTIVE by default: assignment alone does not confer the access until a session activation occurs. This names the activation-gate structural fact from the set\'s own activation-required flag, NOT whether any given session actually activates it (session activation is a runtime event not observable offline) and NOT which users hold the set.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['PermissionSet'],
   },
 ]);

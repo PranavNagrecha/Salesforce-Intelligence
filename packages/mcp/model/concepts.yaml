@@ -1313,3 +1313,73 @@ concepts:
         url: https://help.salesforce.com/s/articleView?id=sf.os_dataraptor_loads.htm
       - label: Salesforce Help — Enforce Field-Level Security in DataRaptors
         url: https://help.salesforce.com/s/articleView?id=sf.os_secure_dataraptors.htm
+
+  # ARC-2 concepts-batch3 — field-classic-encrypted-text. NODE rule on CustomField
+  # dataType == EncryptedText (classic encryption; custom-field.ts dataType
+  # passthrough). NOT Shield Platform Encryption (a separate field strategy not
+  # observable offline). ORG-INDEPENDENT — NO vault counts.
+  concept:field-classic-encrypted-text:
+    kind: field-provenance
+    label: A classic Encrypted Text field is masked and cannot be filtered, sorted, or used as an external id
+    summary: 'A CLASSIC ENCRYPTED TEXT field stores its value encrypted at rest and MASKS it in the UI, API, and reports for any user who lacks the "View Encrypted Data" permission — most users see only asterisks. Its type class is NOT filterable, sortable, or groupable: it cannot appear in a SOQL WHERE / ORDER BY / GROUP BY, a list-view or report filter, and it cannot be an external id, a unique field, a default-value source, or a formula input. This is the DISTINCT LEGACY protection (a per-field type), NOT Shield Platform Encryption (a separate field-level encryption strategy not observable from offline metadata). Grounded from the field''s own declared data type; it names the masking and restriction POSTURE that follow from the type, NOT which specific users can currently view the value (a permission-assignment question) and NOT whether the field actually holds sensitive data.'
+    docs:
+      - label: Salesforce Help — Encrypted Custom Fields (Classic Encryption)
+        url: https://help.salesforce.com/s/articleView?id=sf.fields_about_encrypted_fields.htm
+
+  # ARC-2 concepts-batch3 — field-autonumber-system-assigned-readonly. NODE rule
+  # on CustomField dataType == AutoNumber. ORG-INDEPENDENT — NO vault counts.
+  concept:field-autonumber-system-assigned-readonly:
+    kind: field-provenance
+    label: An Auto Number field is system-assigned and read-only on every write path
+    summary: 'An AUTO NUMBER field is SYSTEM-ASSIGNED: Salesforce generates its value from a display format and a sequence when the record is inserted, so it is READ-ONLY on every write path — the UI, API, Apex, Flow, and data imports cannot set or change it (attempts are ignored). Because it is assigned DURING insert, it is null / unavailable in a before-save context (a before-insert trigger or before-save flow cannot read the final value). It is stored and displayed as a formatted STRING, not a number, so it cannot be used in arithmetic; and changing the display format renumbers only NEW records — existing values are not rewritten, so sequence gaps from failed inserts or rollbacks persist. Grounded from the field''s own declared data type; it names the system-assigned, read-only provenance, NOT the current sequence value or next number (record data) and NOT whether any specific integration attempts to write it.'
+    docs:
+      - label: Salesforce Help — Auto-Number Fields
+        url: https://help.salesforce.com/s/articleView?id=sf.custom_field_types.htm
+
+  # ARC-2 concepts-batch3 — field-multiselect-picklist-storage-semantics. NODE rule
+  # on CustomField dataType == MultiselectPicklist. ORG-INDEPENDENT — NO vault counts.
+  concept:field-multiselect-picklist-storage-semantics:
+    kind: field-provenance
+    label: A multi-select picklist stores selections as one delimited string with special query semantics
+    summary: 'A MULTI-SELECT PICKLIST stores every selected value in a SINGLE semicolon-delimited string, not as separate rows — so it behaves unlike a normal picklist. In SOQL and reports it must be filtered with INCLUDES / EXCLUDES rather than = / != / IN (an equality filter matches only the exact full delimited combination), and formulas must test membership with INCLUDES(); sorting or grouping orders by the raw delimited string, not by individual values. It CANNOT serve as the controlling field of a dependent picklist, and it cannot be an external id or unique field. Grounded from the field''s own declared data type; it names the storage and query SEMANTICS that follow from the type, NOT which values a given record holds and NOT whether any specific query currently filters it incorrectly.'
+    docs:
+      - label: Salesforce Help — Multi-Select Picklists
+        url: https://help.salesforce.com/s/articleView?id=sf.fields_about_multiselect_picklists.htm
+
+  # ARC-2 concept-expansion — permission-set-license-scoped. ONE NODE rule on
+  # PermissionSet `license` non-null. `license` is ALWAYS a key on a PermissionSet
+  # node (permission-set.ts:347 sets it to the serialized <license> value, or null
+  # when the element is omitted), so the isNull:false predicate fires ONLY on a
+  # license-bound permission set and rejects both an unscoped one (license===null)
+  # and an absent key. Kind access-mechanism REUSED from the closed union — names
+  # the CONTAINER's assignability constraint, distinct from view-modify-all (grant
+  # strength) and permission-provenance-profile-vs-permset (grantor type); neither
+  # binds `license`. maxConfidence declared (a node match carries no edge, so
+  # weakest() keeps the declared ceiling). ORG-INDEPENDENT — NO vault counts.
+  concept:permission-set-license-scoped:
+    kind: access-mechanism
+    label: A license-scoped permission set can only be assigned to users who hold that user license
+    summary: 'A PERMISSION SET whose `license` element is SET is bound to a specific USER LICENSE, and Salesforce only lets it be assigned to users who ALREADY HOLD that license — so every grant it carries (object CRUD, field-level security, Apex class access, system permissions) is UNREACHABLE by any user lacking the license, narrowing the ELIGIBLE POPULATION before any individual grant even applies. A license-scoped permission set therefore cannot widen access for a user on the wrong license no matter how strong its grants look, whereas an UNSCOPED permission set (no `license` element) carries no such assignability constraint and can be assigned to any user. This is grounded from the permission set''s own declared `license` binding; it names the ASSIGNABILITY CONSTRAINT of the container, NOT whether any specific user holds that license or is actually assigned this permission set (an assignment question the offline vault cannot answer — the live plane resolves who holds a license or a permission set), and NOT the strength or correctness of the grants inside it. Only users on the bound license can ever receive its grants.'
+    docs:
+      - label: Salesforce Help — Permission Set Licenses
+        url: https://help.salesforce.com/s/articleView?id=sf.users_permissionset_licenses.htm
+      - label: Salesforce Help — Permission Sets
+        url: https://help.salesforce.com/s/articleView?id=sf.perm_sets_overview.htm
+
+  # ARC-2 concept-expansion — session-based-permission-set-dormant. ONE NODE rule
+  # on PermissionSet `hasActivationRequired == true`. `hasActivationRequired` is an
+  # always-present boolean on every PermissionSet node (permission-set.ts:348,
+  # buildProperties, coerceBoolean default false). A node match carries no edge, so
+  # weakest() keeps the declared ceiling. Orthogonal to the object-crud / view-modify
+  # -all / apex-class / custom-permission GRANT concepts: those name WHAT a set grants;
+  # this names WHEN the whole set is even active (the session-activation gate).
+  # ORG-INDEPENDENT — NO vault counts in the summary.
+  concept:session-based-permission-set-dormant:
+    kind: access-mechanism
+    label: A session-based permission set grants nothing passively — every grant is dormant until session activation
+    summary: 'A SESSION-BASED permission set — one whose activation-required flag is TRUE — grants NONE of its permissions passively. Every grant it confers (object CRUD, field-level security, View All / Modify All, Apex-class access, and custom-permission grants) stays DORMANT until the permission set is ACTIVATED for the current session, via Auth.SessionManagement or a launching flow, so all of them are conditional-on-activation rather than standing. When reasoning about what a holder of this set can do at rest, its grants must be treated as INACTIVE by default: assignment alone does not confer the access. This is grounded from the set''s own always-present activation-required boolean; it names the activation-gate STRUCTURAL fact, NOT whether any given session actually activates the set (session activation is a runtime event the offline vault cannot observe), NOT which users hold the set, and NOT what the individual grants are when it IS active. Only the activation-gate posture is asserted here.'
+    docs:
+      - label: Salesforce Help — Session-based Permission Sets
+        url: https://help.salesforce.com/s/articleView?id=sf.perm_sets_session_map.htm
+      - label: Apex Developer Guide — Auth.SessionManagement Class
+        url: https://developer.salesforce.com/docs/atlas.en-us.apexref.meta/apexref/apex_class_Auth_SessionManagement.htm
