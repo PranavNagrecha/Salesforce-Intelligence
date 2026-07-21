@@ -1,5 +1,6 @@
 /// <reference types="vitest/globals" />
 
+import { INTERPRET_CONCEPT_CARDS } from '../src/funnel-utterances.js';
 import { resetFunnelIndex, semanticCandidates, tokenize } from '../src/semantic-funnel.js';
 
 beforeEach(() => resetFunnelIndex());
@@ -231,5 +232,45 @@ describe('R4 corpus bands — show-me families + custom-permission verify-first'
     anyOfTop('Does the Skip_Zorp_Validation custom permission get granted by the Zorp_Access perm set or a different one?', CP_GOLD, 3);
     anyOfTop('Does the Zorp_Manager permission set group grant any custom permission related to billing codes or approval leads?', CP_GOLD, 3);
     anyOfTop('For AssignApprovalLead, tell me both the granting permission set and the exact objects/fields that perm set touches, so I can assess least-privilege.', CP_GOLD, 3);
+  });
+});
+
+describe('grow-forever funnel — per-concept cards (INTERPRET_CONCEPT_CARDS)', () => {
+  const cards = Object.entries(INTERPRET_CONCEPT_CARDS);
+
+  it('ships at least one concept card', () => {
+    expect(cards.length).toBeGreaterThan(0);
+  });
+
+  // GROWTH GUARANTEE: every concept card is INDEPENDENTLY reachable — each of its
+  // own utterances ranks sfi.interpret in the top-5 — no matter how many other
+  // cards exist. Cards are scored as a max over independent vectors, so adding a
+  // concept never dilutes another. If a future change re-collapses cards into one
+  // shared document (the old saturating design), a card would drop out and fail.
+  it.each(cards)('card %s: every utterance ranks interpret top-5', (_concept, utterances) => {
+    for (const q of utterances) {
+      const top = names(q, 5);
+      expect(top, `"${q}" -> ${top.join(', ')}`).toContain('sfi.interpret');
+    }
+  });
+
+  // BASE PRESERVED: pre-card reasoning queries are unchanged by the card layer —
+  // interpret still reaches them via its base card. A regression here means the
+  // card path perturbed base scoring instead of only lifting via a max.
+  it('preserves base-card reachability for existing reasoning queries', () => {
+    for (const q of [
+      'is this a junction object linking two others',
+      'is this apex class with sharing or without sharing',
+      'why could a Contact save fail, and which automations could be involved?',
+    ]) {
+      expect(names(q, 8), q).toContain('sfi.interpret');
+    }
+  });
+
+  // NO GLOBAL LIFT: cards raise interpret ONLY on the concept questions, never on
+  // unrelated specialist queries — those still route to their specialist tool.
+  it('does not displace specialists on non-reasoning queries', () => {
+    expect(names('how many open opportunities do we have', 5)[0]).not.toBe('sfi.interpret');
+    expect(names('which paid licenses sit unused', 5)[0]).not.toBe('sfi.interpret');
   });
 });

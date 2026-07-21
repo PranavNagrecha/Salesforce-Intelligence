@@ -34,16 +34,14 @@
   LLM, no live org read. Each ships with a firing `interpret()` seed proof.
 
 ### Notes
-- **Funnel NL-hooks intentionally omitted for this batch (honest capacity boundary).**
-  These eight concepts ship *model-integrated*: they fire in the
-  resolve → interpret → synthesize cascade on any matching component. They are **not**
-  wired into the `sfi.interpret` semantic funnel, because empirical measurement showed the
-  interpret funnel document is saturated — adding new natural-language utterances regressed
-  existing borderline concepts (permission-set-group muting, dependent-picklist orphaned
-  value, trigger-reachable bulkification) out of the funnel top-5. Rather than degrade
-  existing routing or weaken existing tests, NL-routing for reasoning concepts is deferred
-  to a future funnel-engine change (per-concept sub-documents / a reasoning routing table).
-  Two earlier concepts this cycle (`validation-rule-inactive`, `workflow-rule-inactive-dead`)
-  did fit under the funnel top-5 and retain their NL-hooks. Two discovery candidates
-  (`permission-set-license-scoped`, `session-based-permission-set-dormant`) were dropped
-  entirely: their query space is fully owned by permission-set specialist tools.
+- **All eight concepts are NL-reachable via the grow-forever funnel** (see the
+  companion `sfi.interpret` per-concept-card change). These concepts were first shipped
+  *model-integrated only*, because the `sfi.interpret` funnel document was saturated —
+  adding natural-language utterances the old way regressed existing borderline concepts
+  (permission-set-group muting, dependent-picklist orphaned value, trigger-reachable
+  bulkification) out of the funnel top-5. The funnel engine change removes that ceiling:
+  each concept is now scored as its own independent card, so all eight rank `sfi.interpret`
+  in the top-5 for their natural questions **without** moving any existing concept.
+  Two discovery candidates (`permission-set-license-scoped`,
+  `session-based-permission-set-dormant`) remain dropped: their query space is fully owned
+  by permission-set specialist tools.

@@ -527,6 +527,124 @@ describe('funnel ranking — Arc-2 concept-expansion workflow-rule-inactive-dead
 });
 
 /**
+ * ARC-2 grow-forever funnel — the 8 concept-discovery concepts are now
+ * NL-reachable via per-concept CARDS (INTERPRET_CONCEPT_CARDS + semantic-funnel
+ * max-over-cards scoring). Each concept card is scored independently, so every
+ * utterance ranks sfi.interpret top-5 WITHOUT diluting existing concepts
+ * (C16/C18/C19 unchanged — see the grow-forever invariant in semantic-funnel.test.ts).
+ */
+const ARC2_CARD_FIELD_LONGTEXT_RICHTEXT_NOT_FILTERABLE: readonly string[] = [
+  "Can I filter a report on the long text area field on Account?",
+  "Why can't I sort a list view by a rich text field?",
+  "Is this long text area field usable in a SOQL WHERE clause?",
+  "Can I make a long text area field an external id or unique?",
+  "Why won't Salesforce let me group by a description field?",
+];
+describe('funnel ranking — Arc-2 grow-forever card field-longtext-richtext-not-filterable ranks interpret top-5', () => {
+  it.each(ARC2_CARD_FIELD_LONGTEXT_RICHTEXT_NOT_FILTERABLE)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_CARD_DUPLICATE_RULE_BYPASS_SHARING_MATCH: readonly string[] = [
+  "Do any of our duplicate rules match against records the running user can't see?",
+  "Which duplicate rules bypass sharing when they check for duplicates?",
+  "Is there a duplicate rule that runs its duplicate matching in system context?",
+  "Could a duplicate rule block my save because of a duplicate I don't have access to?",
+  "What does bypass sharing rules mean for duplicate matching on Account?",
+  "Show me duplicate rules that ignore the sharing model during matching",
+];
+describe('funnel ranking — Arc-2 grow-forever card duplicate-rule-bypass-sharing-match ranks interpret top-5', () => {
+  it.each(ARC2_CARD_DUPLICATE_RULE_BYPASS_SHARING_MATCH)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_CARD_DUPLICATE_RULE_REFERENCES_INACTIVE_MATCHING_RULE: readonly string[] = [
+  "Why is my duplicate rule not catching duplicates on Account?",
+  "Why do duplicate records still save even though I have a duplicate rule enabled?",
+  "Is my duplicate rule actually doing anything if its matching rule is inactive?",
+  "What happens when a duplicate rule points at a matching rule that isn't active?",
+  "Does deactivating a matching rule silently break duplicate detection?",
+  "My duplicate rule looks active but duplicates keep getting created \u2014 why?",
+];
+describe('funnel ranking — Arc-2 grow-forever card duplicate-rule-references-inactive-matching-rule ranks interpret top-5', () => {
+  it.each(ARC2_CARD_DUPLICATE_RULE_REFERENCES_INACTIVE_MATCHING_RULE)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_CARD_APPROVAL_PROCESS_FINAL_LOCK_RECORD_READONLY: readonly string[] = [
+  "Which approval processes lock the record after final approval?",
+  "Does getting this record approved make it read-only?",
+  "Why does automation fail to update a record after it's been approved?",
+  "What leaves a record locked once an approval process finishes?",
+  "Will a rejected record stay locked from further edits until someone unlocks it?",
+  "Does this approval process leave the record read-only after it completes?",
+];
+describe('funnel ranking — Arc-2 grow-forever card approval-process-final-lock-record-readonly ranks interpret top-5', () => {
+  it.each(ARC2_CARD_APPROVAL_PROCESS_FINAL_LOCK_RECORD_READONLY)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_CARD_RECORD_TYPE_INACTIVE: readonly string[] = [
+  "What does it mean that this record type is inactive?",
+  "If a record type is deactivated, can new records still be assigned to it?",
+  "Does an inactive record type still route a page layout or business process to new records?",
+  "This record type has its active flag set to false \u2014 what are the implications?",
+  "Can users pick a deactivated record type when creating a record?",
+  "What happens to a business process when its record type is inactive?",
+];
+describe('funnel ranking — Arc-2 grow-forever card record-type-inactive ranks interpret top-5', () => {
+  it.each(ARC2_CARD_RECORD_TYPE_INACTIVE)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_CARD_REMOTE_SITE_SETTING_PROTOCOL_SECURITY_DISABLED: readonly string[] = [
+  "does this remote site setting allow insecure http callouts?",
+  "which remote site settings have protocol security disabled?",
+  "is this remote site setting insecure?",
+  "can this org make cleartext http callouts to an allowlisted host?",
+  "why would a remote site setting drop the https-only guard on outbound callouts?",
+  "are any of our outbound allowlist entries not requiring https?",
+];
+describe('funnel ranking — Arc-2 grow-forever card remote-site-setting-protocol-security-disabled ranks interpret top-5', () => {
+  it.each(ARC2_CARD_REMOTE_SITE_SETTING_PROTOCOL_SECURITY_DISABLED)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_CARD_APEX_INTENTIONAL_SYSTEM_MODE_DML: readonly string[] = [
+  "Which Apex classes deliberately run DML in system mode and skip the running user's CRUD and field-level security?",
+  "What does it imply when a class writes records with an explicit AccessLevel.SYSTEM_MODE argument?",
+  "Is there Apex that intentionally opts out of object and field security for a write?",
+  "Which classes do a conscious system-context DML bypass rather than an accidental missing check?",
+  "Does running DML in SYSTEM_MODE mean field-level security is not enforced for that write?",
+];
+describe('funnel ranking — Arc-2 grow-forever card apex-intentional-system-mode-dml ranks interpret top-5', () => {
+  it.each(ARC2_CARD_APEX_INTENTIONAL_SYSTEM_MODE_DML)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_CARD_DATARAPTOR_FIELD_SECURITY_UNENFORCED: readonly string[] = [
+  "Does this DataRaptor bypass field-level security when it reads Account fields?",
+  "Which DataRaptors have Check Field Level Security turned off?",
+  "Is this OmniStudio data transform a data-exposure risk for fields the user cannot see?",
+  "Can this DataRaptor overwrite fields the running user has no edit access to?",
+  "Show me DataRaptors that read or write SObject fields without enforcing FLS",
+  "Does turning off field-level security on this DataRaptor over-expose Contact data?",
+];
+describe('funnel ranking — Arc-2 grow-forever card dataraptor-field-security-unenforced ranks interpret top-5', () => {
+  it.each(ARC2_CARD_DATARAPTOR_FIELD_SECURITY_UNENFORCED)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+
+/**
  * ROUTE-INACTIVE-AUTOMATION-WORD-MISBINDS-USERS — a save-failure / automation
  * question that merely contains the word "inactive" (describing a flow /
  * trigger / validation rule) must NOT rank `sfi.live_inactive_users` (inactive

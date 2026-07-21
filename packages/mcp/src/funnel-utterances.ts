@@ -2679,3 +2679,80 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'interpret this CODE_UNIT_STARTED / LIMIT_USAGE debug log',
   ],
 };
+
+/**
+ * ARC-2 grow-forever funnel — per-concept CARDS for sfi.interpret.
+ *
+ * Each key is a reasoning concept; each value is a small, self-contained set of
+ * natural-language utterances scored as its OWN funnel document (see
+ * semantic-funnel.ts buildIndex/semanticCandidates: interpret's score = MAX over
+ * its base card + these concept cards). Because every card is scored
+ * independently, ADDING a concept here never dilutes the others — the model can
+ * grow without bound. To surface a new reasoning concept in the NL funnel, add a
+ * key here; do NOT append to the flat sfi.interpret utterances (that is the
+ * saturated single doc this structure replaces for growth).
+ */
+export const INTERPRET_CONCEPT_CARDS: Readonly<Record<string, readonly string[]>> = {
+  'concept:field-longtext-richtext-not-filterable': [
+    "Can I filter a report on the long text area field on Account?",
+    "Why can't I sort a list view by a rich text field?",
+    "Is this long text area field usable in a SOQL WHERE clause?",
+    "Can I make a long text area field an external id or unique?",
+    "Why won't Salesforce let me group by a description field?",
+  ],
+  'concept:duplicate-rule-bypass-sharing-match': [
+    "Do any of our duplicate rules match against records the running user can't see?",
+    "Which duplicate rules bypass sharing when they check for duplicates?",
+    "Is there a duplicate rule that runs its duplicate matching in system context?",
+    "Could a duplicate rule block my save because of a duplicate I don't have access to?",
+    "What does bypass sharing rules mean for duplicate matching on Account?",
+    "Show me duplicate rules that ignore the sharing model during matching",
+  ],
+  'concept:duplicate-rule-references-inactive-matching-rule': [
+    "Why is my duplicate rule not catching duplicates on Account?",
+    "Why do duplicate records still save even though I have a duplicate rule enabled?",
+    "Is my duplicate rule actually doing anything if its matching rule is inactive?",
+    "What happens when a duplicate rule points at a matching rule that isn't active?",
+    "Does deactivating a matching rule silently break duplicate detection?",
+    "My duplicate rule looks active but duplicates keep getting created \u2014 why?",
+  ],
+  'concept:approval-process-final-lock-record-readonly': [
+    "Which approval processes lock the record after final approval?",
+    "Does getting this record approved make it read-only?",
+    "Why does automation fail to update a record after it's been approved?",
+    "What leaves a record locked once an approval process finishes?",
+    "Will a rejected record stay locked from further edits until someone unlocks it?",
+    "Does this approval process leave the record read-only after it completes?",
+  ],
+  'concept:record-type-inactive': [
+    "What does it mean that this record type is inactive?",
+    "If a record type is deactivated, can new records still be assigned to it?",
+    "Does an inactive record type still route a page layout or business process to new records?",
+    "This record type has its active flag set to false \u2014 what are the implications?",
+    "Can users pick a deactivated record type when creating a record?",
+    "What happens to a business process when its record type is inactive?",
+  ],
+  'concept:remote-site-setting-protocol-security-disabled': [
+    "does this remote site setting allow insecure http callouts?",
+    "which remote site settings have protocol security disabled?",
+    "is this remote site setting insecure?",
+    "can this org make cleartext http callouts to an allowlisted host?",
+    "why would a remote site setting drop the https-only guard on outbound callouts?",
+    "are any of our outbound allowlist entries not requiring https?",
+  ],
+  'concept:apex-intentional-system-mode-dml': [
+    "Which Apex classes deliberately run DML in system mode and skip the running user's CRUD and field-level security?",
+    "What does it imply when a class writes records with an explicit AccessLevel.SYSTEM_MODE argument?",
+    "Is there Apex that intentionally opts out of object and field security for a write?",
+    "Which classes do a conscious system-context DML bypass rather than an accidental missing check?",
+    "Does running DML in SYSTEM_MODE mean field-level security is not enforced for that write?",
+  ],
+  'concept:dataraptor-field-security-unenforced': [
+    "Does this DataRaptor bypass field-level security when it reads Account fields?",
+    "Which DataRaptors have Check Field Level Security turned off?",
+    "Is this OmniStudio data transform a data-exposure risk for fields the user cannot see?",
+    "Can this DataRaptor overwrite fields the running user has no edit access to?",
+    "Show me DataRaptors that read or write SObject fields without enforcing FLS",
+    "Does turning off field-level security on this DataRaptor over-expose Contact data?",
+  ],
+};

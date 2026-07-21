@@ -23,7 +23,7 @@
 // even though intent-router.ts and this module both read the tool roster. (And
 // intent-router.ts does not import this funnel, so no cycle exists in either
 // direction — verified at build time by the I1 contract test + tsc.)
-import { FUNNEL_UTTERANCES } from './funnel-utterances.js';
+import { FUNNEL_UTTERANCES, INTERPRET_CONCEPT_CARDS } from './funnel-utterances.js';
 import type { Plane } from './intent-router.js';
 import { fuseScoresRrf, staticEmbedRanking, staticIndexAvailable } from './static-embed.js';
 import { CATEGORIES } from './tools/capabilities.js';
@@ -667,6 +667,48 @@ export const buildToolDocs = (): Map<string, string> => {
   return docs;
 };
 
+/**
+ * ARC-2 grow-forever funnel — tools whose funnel score is a MAX over a base card
+ * (their normal document) plus independent per-concept CARDS, instead of one
+ * saturating document. Each concept card (INTERPRET_CONCEPT_CARDS) is a short,
+ * self-contained utterance set vectorized on its OWN length, so ADDING a concept
+ * never dilutes the others and the base card keeps every existing query's score
+ * unchanged (a max only lifts). Only sfi.interpret needs this today — its document
+ * grows with the reasoning Concept Model — but the mechanism is general: any tool
+ * listed here is scored with cards.
+ */
+const TOOL_CONCEPT_CARDS: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  'sfi.interpret': INTERPRET_CONCEPT_CARDS,
+};
+
+/**
+ * Build an L2-normalized TF-IDF vector from a token list. `idfFallback` is the
+ * weight for a term with no corpus IDF entry: `0` for base tool docs (every doc
+ * term is a corpus term, so this never fires — keeps base vectors byte-identical
+ * to the pre-card funnel), and the `df=1` IDF for concept cards (a card may carry
+ * a distinctive term absent from every tool doc; treating it as rare/informative
+ * rather than zero-weight is what lets a card out-rank a broad specialist).
+ */
+const buildVector = (
+  toks: readonly string[],
+  idf: ReadonlyMap<string, number>,
+  idfFallback: number,
+): Map<string, number> => {
+  const vec = new Map<string, number>();
+  if (toks.length === 0) return vec;
+  const tf = new Map<string, number>();
+  for (const t of toks) tf.set(t, (tf.get(t) ?? 0) + 1);
+  let norm = 0;
+  for (const [term, f] of tf) {
+    const w = (f / toks.length) * (idf.get(term) ?? idfFallback);
+    vec.set(term, w);
+    norm += w * w;
+  }
+  norm = Math.sqrt(norm) || 1;
+  for (const [term, w] of vec) vec.set(term, w / norm);
+  return vec;
+};
+
 interface FunnelIndex {
   /** tool name → L2-normalized TF-IDF vector (term → weight). */
   readonly vectors: ReadonlyMap<string, ReadonlyMap<string, number>>;
@@ -674,6 +716,13 @@ interface FunnelIndex {
   readonly idf: ReadonlyMap<string, number>;
   /** tool name → first capability category id that lists it. */
   readonly toolCategory: ReadonlyMap<string, string>;
+  /**
+   * tool name → independent per-concept card vectors. A card-scored tool's funnel
+   * score is `max(cosine(q, baseVector), …cosine(q, cardVector))`, so growth in
+   * the reasoning Concept Model never dilutes existing concepts. Empty for every
+   * tool not in TOOL_CONCEPT_CARDS.
+   */
+  readonly conceptCardVectors: ReadonlyMap<string, readonly ReadonlyMap<string, number>[]>;
 }
 
 let cached: FunnelIndex | null = null;
@@ -698,26 +747,25 @@ const buildIndex = (): FunnelIndex => {
   for (const [term, d] of df) idf.set(term, Math.log((n + 1) / (d + 1)) + 1);
 
   const vectors = new Map<string, Map<string, number>>();
-  for (const [tool, toks] of docTokens) {
-    if (toks.length === 0) {
-      vectors.set(tool, new Map());
-      continue;
+  for (const [tool, toks] of docTokens) vectors.set(tool, buildVector(toks, idf, 0));
+
+  // ARC-2 grow-forever funnel — per-concept card vectors. A term that appears in
+  // NO tool document gets the IDF a df=1 term would (rare ⇒ informative); base docs
+  // never trigger this fallback, cards may. Each card is vectorized on its OWN
+  // length, so adding a concept card cannot dilute any other card or the base.
+  const idfDefault = Math.log((n + 1) / (1 + 1)) + 1;
+  const conceptCardVectors = new Map<string, ReadonlyMap<string, number>[]>();
+  for (const [tool, cards] of Object.entries(TOOL_CONCEPT_CARDS)) {
+    if (!vectors.has(tool)) continue; // tool not in the advertised corpus — skip
+    const vecs: Map<string, number>[] = [];
+    for (const utterances of Object.values(cards)) {
+      const vec = buildVector(tokenize(utterances.join(' ')), idf, idfDefault);
+      if (vec.size > 0) vecs.push(vec);
     }
-    const tf = new Map<string, number>();
-    for (const t of toks) tf.set(t, (tf.get(t) ?? 0) + 1);
-    const vec = new Map<string, number>();
-    let norm = 0;
-    for (const [term, f] of tf) {
-      const w = (f / toks.length) * (idf.get(term) ?? 0);
-      vec.set(term, w);
-      norm += w * w;
-    }
-    norm = Math.sqrt(norm) || 1;
-    for (const [term, w] of vec) vec.set(term, w / norm);
-    vectors.set(tool, vec);
+    if (vecs.length > 0) conceptCardVectors.set(tool, vecs);
   }
 
-  return { vectors, idf, toolCategory };
+  return { vectors, idf, toolCategory, conceptCardVectors };
 };
 
 /** Build-once, memoized. Exposed for tests that need a clean rebuild. */
@@ -930,16 +978,34 @@ export const semanticCandidates = (question: string, k = 8): ToolCandidate[] => 
   qnorm = Math.sqrt(qnorm) || 1;
   if (qvec.size === 0) return [];
 
-  // Score rows WITHOUT confidence first — confidence needs the ranked head
-  // (top1 / top2), known only after the sort below.
-  const scored: ScoredRow[] = [];
-  for (const [tool, vec] of idx.vectors) {
+  // Sparse dot product of the (unnormalized) query vector with a unit-normalized
+  // doc/card vector; dividing by qnorm below turns it into cosine similarity.
+  const dotWith = (vec: ReadonlyMap<string, number>): number => {
     let dot = 0;
     // Iterate the smaller map for the sparse dot product.
     const [small, large] = qvec.size <= vec.size ? [qvec, vec] : [vec, qvec];
     for (const [term, w] of small) {
       const o = large.get(term);
       if (o !== undefined) dot += w * o;
+    }
+    return dot;
+  };
+
+  // Score rows WITHOUT confidence first — confidence needs the ranked head
+  // (top1 / top2), known only after the sort below.
+  const scored: ScoredRow[] = [];
+  for (const [tool, vec] of idx.vectors) {
+    let dot = dotWith(vec);
+    // ARC-2 grow-forever funnel: a card-scored tool (sfi.interpret) takes the MAX
+    // of its base card and each independent per-concept card. Each card is scored
+    // on its own short length, so a new concept never dilutes existing ones, and
+    // the base card preserves every pre-card query's score exactly (max only lifts).
+    const cards = idx.conceptCardVectors.get(tool);
+    if (cards !== undefined) {
+      for (const cardVec of cards) {
+        const d = dotWith(cardVec);
+        if (d > dot) dot = d;
+      }
     }
     if (dot <= 0) continue;
     const score = dot / qnorm; // doc vectors are unit-normalized → cosine
