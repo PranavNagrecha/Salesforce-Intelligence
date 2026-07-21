@@ -7244,3 +7244,854 @@ describe('concept:dataraptor-errors-ignored — rule:omnistudio/dataraptor-error
     ).toEqual([]);
   });
 });
+
+// ARC-2 build-all batch 2 — 19 grounded concepts (unused-property mining; grounding verified).
+
+describe('concept:object-deployment-status-in-development — rule:object/deployment-status-in-development', () => {
+  const rule = ruleById('rule:object/deployment-status-in-development');
+  const DEV_OBJ = 'CustomObject:Ns__Draft__c';
+  const LIVE_OBJ = 'CustomObject:Ns__Deal__c';
+
+  it('ships the concept with the access-mechanism kind', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('access-mechanism');
+  });
+
+  it('is a node-shaped CustomObject rule (deploymentStatus === InDevelopment, no edge, declared)', () => {
+    expect(rule.bind.componentTypes).toEqual(['CustomObject']);
+    expect(rule.bind.whereProperty).toEqual({ key: 'deploymentStatus', equals: 'InDevelopment' });
+    expect(rule.bind.edgeType).toBeUndefined();
+    expect(rule.absenceShaped).toBe(false);
+    expect(rule.maxConfidence).toBe('declared');
+    expect(rule.dependsOnCoverage).toEqual(['CustomObject']);
+  });
+
+  it('fires ONLY on the In Development object, cites it, claim names In Development + Customize Application, declared', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(DEV_OBJ, 'CustomObject', { deploymentStatus: 'InDevelopment' }),
+        node(LIVE_OBJ, 'CustomObject', { deploymentStatus: 'Deployed' }),
+      ],
+      edges: [],
+    };
+    const out = interpret(rule, slice, COMPLETE);
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.concept).toBe('concept:object-deployment-status-in-development');
+    expect(only.groundedIn).toEqual([DEV_OBJ]);
+    expect(only.claim).toContain(DEV_OBJ);
+    expect(only.claim.toLowerCase()).toContain('in development');
+    expect(only.claim.toLowerCase()).toContain('customize application');
+    expect(only.confidence).toBe('declared');
+    expect(only.coverageCaveat).toBeNull();
+    expect(only.provenance).toBe('offline_snapshot');
+    expect(only.modelVersion).toBe(MODEL_VERSION);
+  });
+
+  it('does NOT fire on a Deployed object or a null deploymentStatus (CustomSetting / __mdt)', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(LIVE_OBJ, 'CustomObject', { deploymentStatus: 'Deployed' }),
+        node('CustomObject:Ns__Config__mdt', 'CustomObject', { deploymentStatus: null }),
+      ],
+      edges: [],
+    };
+    expect(interpret(rule, slice, COMPLETE)).toEqual([]);
+  });
+});
+
+describe('concept:object-autonumber-name-field — rule:object/autonumber-name-field', () => {
+  const rule = ruleById('rule:object/autonumber-name-field');
+  const AUTONUM_OBJ = 'CustomObject:Ns__Invoice__c';
+  const TEXT_NAME_OBJ = 'CustomObject:Ns__Deal__c';
+
+  it('ships the concept with the field-provenance kind', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('field-provenance');
+  });
+
+  it('is a node-shaped CustomObject rule (nameFieldType === AutoNumber, no edge, declared)', () => {
+    expect(rule.bind.componentTypes).toEqual(['CustomObject']);
+    expect(rule.bind.whereProperty).toEqual({ key: 'nameFieldType', equals: 'AutoNumber' });
+    expect(rule.bind.edgeType).toBeUndefined();
+    expect(rule.absenceShaped).toBe(false);
+    expect(rule.maxConfidence).toBe('declared');
+    expect(rule.dependsOnCoverage).toEqual(['CustomObject']);
+  });
+
+  it('fires ONLY on the Auto Number name object, cites it, claim names system-assigned + auto number, declared', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(AUTONUM_OBJ, 'CustomObject', { nameFieldType: 'AutoNumber', nameFieldLabel: 'Invoice Number' }),
+        node(TEXT_NAME_OBJ, 'CustomObject', { nameFieldType: 'Text', nameFieldLabel: 'Deal Name' }),
+      ],
+      edges: [],
+    };
+    const out = interpret(rule, slice, COMPLETE);
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.concept).toBe('concept:object-autonumber-name-field');
+    expect(only.groundedIn).toEqual([AUTONUM_OBJ]);
+    expect(only.claim).toContain(AUTONUM_OBJ);
+    expect(only.claim.toLowerCase()).toContain('system-assigned');
+    expect(only.claim.toLowerCase()).toContain('auto number');
+    expect(only.confidence).toBe('declared');
+    expect(only.coverageCaveat).toBeNull();
+    expect(only.provenance).toBe('offline_snapshot');
+  });
+
+  it('does NOT fire on a Text name field or a null nameFieldType (standard / __mdt)', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(TEXT_NAME_OBJ, 'CustomObject', { nameFieldType: 'Text' }),
+        node('CustomObject:Ns__Config__mdt', 'CustomObject', { nameFieldType: null }),
+      ],
+      edges: [],
+    };
+    expect(interpret(rule, slice, COMPLETE)).toEqual([]);
+  });
+});
+
+describe('concept:global-value-set-has-inactive-value — rule:global-value-set/has-inactive-value', () => {
+  const rule = ruleById('rule:global-value-set/has-inactive-value');
+  const RETIRED_GVS = 'GlobalValueSet:Ns__DealStages';
+  const CLEAN_GVS = 'GlobalValueSet:Ns__DealSources';
+
+  it('ships the concept with the field-provenance kind', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('field-provenance');
+  });
+
+  it('is a node-shaped GlobalValueSet rule (anyElement over values[].isActive === false, no edge, declared)', () => {
+    expect(rule.bind.componentTypes).toEqual(['GlobalValueSet']);
+    expect(rule.bind.whereProperty).toEqual({ key: 'values', anyElement: { key: 'isActive', equals: false } });
+    expect(rule.bind.edgeType).toBeUndefined();
+    expect(rule.absenceShaped).toBe(false);
+    expect(rule.maxConfidence).toBe('declared');
+    expect(rule.dependsOnCoverage).toEqual(['GlobalValueSet']);
+  });
+
+  it('fires ONLY on the value set with a deactivated value, cites it, claim says shared value set + no longer selectable, declared', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(RETIRED_GVS, 'GlobalValueSet', {
+          restricted: false,
+          values: [
+            { value: 'New', isActive: true },
+            { value: 'Legacy', isActive: false },
+          ],
+        }),
+        node(CLEAN_GVS, 'GlobalValueSet', {
+          restricted: false,
+          values: [
+            { value: 'Web', isActive: true },
+            { value: 'Phone', isActive: true },
+          ],
+        }),
+      ],
+      edges: [],
+    };
+    const out = interpret(rule, slice, COMPLETE);
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.concept).toBe('concept:global-value-set-has-inactive-value');
+    expect(only.groundedIn).toEqual([RETIRED_GVS]);
+    expect(only.claim).toContain(RETIRED_GVS);
+    expect(only.claim.toLowerCase()).toContain('shared value set');
+    expect(only.claim.toLowerCase()).toContain('no longer selectable');
+    expect(only.confidence).toBe('declared');
+    expect(only.coverageCaveat).toBeNull();
+    expect(only.provenance).toBe('offline_snapshot');
+  });
+
+  it('does NOT fire on a value set whose values are all active', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(CLEAN_GVS, 'GlobalValueSet', { values: [{ value: 'Web', isActive: true }] }),
+      ],
+      edges: [],
+    };
+    expect(interpret(rule, slice, COMPLETE)).toEqual([]);
+  });
+});
+
+describe('concept:standard-value-set-has-inactive-value — rule:standard-value-set/has-inactive-value', () => {
+  const rule = ruleById('rule:standard-value-set/has-inactive-value');
+  const RETIRED_SVS = 'StandardValueSet:LeadSource';
+  const CLEAN_SVS = 'StandardValueSet:Industry';
+
+  it('ships the concept with the field-provenance kind', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('field-provenance');
+  });
+
+  it('is a node-shaped StandardValueSet rule (anyElement over values[].active === false, no edge, declared)', () => {
+    expect(rule.bind.componentTypes).toEqual(['StandardValueSet']);
+    expect(rule.bind.whereProperty).toEqual({ key: 'values', anyElement: { key: 'active', equals: false } });
+    expect(rule.bind.edgeType).toBeUndefined();
+    expect(rule.absenceShaped).toBe(false);
+    expect(rule.maxConfidence).toBe('declared');
+    expect(rule.dependsOnCoverage).toEqual(['StandardValueSet']);
+  });
+
+  it('fires ONLY on the standard value set with a deactivated value, cites it, claim says standard picklist + no longer selectable, declared', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(RETIRED_SVS, 'StandardValueSet', {
+          values: [
+            { apiName: 'Web', active: true },
+            { apiName: 'Partner Referral', active: false },
+          ],
+        }),
+        node(CLEAN_SVS, 'StandardValueSet', {
+          values: [
+            { apiName: 'Banking', active: true },
+            { apiName: 'Retail', active: true },
+          ],
+        }),
+      ],
+      edges: [],
+    };
+    const out = interpret(rule, slice, COMPLETE);
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.concept).toBe('concept:standard-value-set-has-inactive-value');
+    expect(only.groundedIn).toEqual([RETIRED_SVS]);
+    expect(only.claim).toContain(RETIRED_SVS);
+    expect(only.claim.toLowerCase()).toContain('standard picklist');
+    expect(only.claim.toLowerCase()).toContain('no longer selectable');
+    expect(only.confidence).toBe('declared');
+    expect(only.coverageCaveat).toBeNull();
+    expect(only.provenance).toBe('offline_snapshot');
+  });
+
+  it('does NOT fire on a standard value set whose values are all active', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(CLEAN_SVS, 'StandardValueSet', { values: [{ apiName: 'Banking', active: true }] }),
+      ],
+      edges: [],
+    };
+    expect(interpret(rule, slice, COMPLETE)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// concept:apex-test-hardcoded-sandbox-data — an @IsTest class carries a
+//   hardcoded SANDBOX-SPECIFIC literal. Grounded on the ApexClass
+//   `qualityIssues` array (always emitted, apex-class.ts:357) holding an
+//   element whose `rule === 'hardcoded-sandbox-test-data'`
+//   (code-quality-patterns.ts:1595, isTest-gated at :1587). A NODE-only
+//   anyElement match: confidence stays at the heuristic ceiling. Must NOT
+//   fire on a test class whose qualityIssues are clean, nor on a non-test
+//   class (the recognizer never emits the element there).
+// ---------------------------------------------------------------------------
+describe('concept:apex-test-hardcoded-sandbox-data — rule:apex-test-quality/hardcoded-sandbox-data', () => {
+  const rule = ruleById('rule:apex-test-quality/hardcoded-sandbox-data');
+  const SANDBOX_TEST_CLASS = 'ApexClass:Ns__SandboxCoupledTest';
+  const CLEAN_TEST_CLASS = 'ApexClass:Ns__PortableTest';
+
+  it('ships the concept with the test-quality kind', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('test-quality');
+  });
+
+  it('fires on a test class carrying a hardcoded-sandbox-test-data qualityIssue, confidence heuristic', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(SANDBOX_TEST_CLASS, 'ApexClass', {
+          isTest: true,
+          qualityIssues: [
+            {
+              rule: 'hardcoded-sandbox-test-data',
+              severity: 'medium',
+              location: 'line 20',
+              confidence: 'heuristic',
+            },
+          ],
+        }),
+        // Portable test: clean qualityIssues → excluded.
+        node(CLEAN_TEST_CLASS, 'ApexClass', { isTest: true, qualityIssues: [] }),
+      ],
+      edges: [],
+    };
+
+    const out = interpret(rule, slice, COMPLETE);
+
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.concept).toBe('concept:apex-test-hardcoded-sandbox-data');
+    expect(only.groundedIn).toContain(SANDBOX_TEST_CLASS);
+    expect(only.groundedIn).not.toContain(CLEAN_TEST_CLASS);
+    expect(only.claim.toLowerCase()).toContain('sandbox-specific');
+    // Node-only anyElement match carries no edge → the heuristic ceiling holds.
+    expect(only.confidence).toBe('heuristic');
+  });
+
+  it('does NOT fire on a test class whose qualityIssues are clean', () => {
+    const slice: GroundedSlice = {
+      nodes: [node(CLEAN_TEST_CLASS, 'ApexClass', { isTest: true, qualityIssues: [] })],
+      edges: [],
+    };
+    expect(interpret(rule, slice, COMPLETE)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ARC-2 concept-expansion — concept:restriction-rule-inactive. ONE NODE rule on
+// RestrictionRule `active == 'false'` (the INACTIVE twin of
+// restriction-rule-narrows-below-sharing). String-equals semantics: fires on an
+// explicit active:'false', NOT on active:'true', an absent active, a boolean
+// false (wrong shape), or a non-RestrictionRule node.
+// ---------------------------------------------------------------------------
+
+describe('concept:restriction-rule-inactive — rule:restriction-rule/inactive', () => {
+  const rule = ruleById('rule:restriction-rule/inactive');
+  const INACTIVE_RR = 'RestrictionRule:Ns__Case.Disabled_Rule';
+  const ACTIVE_RR = 'RestrictionRule:Ns__Case.Limit_To_Owner';
+
+  it('ships the concept with the firing-condition kind and the non-enforcing summary', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('firing-condition');
+    expect(CONCEPTS[rule.concept]!.summary.toLowerCase()).toContain('dead access control');
+  });
+
+  it('is a node-shaped RestrictionRule rule keying the STRING active equals "false"', () => {
+    expect(rule.concept).toBe('concept:restriction-rule-inactive');
+    expect(rule.bind.componentTypes).toEqual(['RestrictionRule']);
+    expect(rule.bind.whereProperty).toEqual({ key: 'active', equals: 'false' });
+    expect(rule.bind.edgeType).toBeUndefined();
+    expect(rule.absenceShaped).toBe(false);
+    expect(rule.maxConfidence).toBe('declared');
+    expect(rule.dependsOnCoverage).toEqual(['RestrictionRule']);
+  });
+
+  it('fires on an INACTIVE restriction rule (active==="false"), cites the rule, claims no narrowing, confidence declared', () => {
+    const slice: GroundedSlice = {
+      nodes: [node(INACTIVE_RR, 'RestrictionRule', { active: 'false', enforcementType: 'Restriction' })],
+      edges: [],
+    };
+    const out = interpret(rule, slice, COMPLETE, INACTIVE_RR);
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.concept).toBe('concept:restriction-rule-inactive');
+    expect(only.groundedIn).toEqual([INACTIVE_RR]);
+    expect(only.claim).toContain(INACTIVE_RR);
+    expect(only.claim).toContain('INACTIVE restriction rule');
+    expect(only.claim.toLowerCase()).toContain('enforces no narrowing');
+    expect(only.confidence).toBe('declared');
+    expect(only.confidence).toBe(weakest('declared', 'declared'));
+    expect(only.coverageCaveat).toBeNull();
+    expect(only.provenance).toBe('offline_snapshot');
+    expect(only.modelVersion).toBe(MODEL_VERSION);
+  });
+
+  it('does NOT fire on an active rule (active==="true"), an absent active, or a boolean false (string-equals semantics)', () => {
+    const active: GroundedSlice = { nodes: [node(ACTIVE_RR, 'RestrictionRule', { active: 'true' })], edges: [] };
+    const absent: GroundedSlice = { nodes: [node(ACTIVE_RR, 'RestrictionRule', {})], edges: [] };
+    const boolFalse: GroundedSlice = { nodes: [node(ACTIVE_RR, 'RestrictionRule', { active: false })], edges: [] };
+    expect(interpret(rule, active, COMPLETE, ACTIVE_RR)).toEqual([]);
+    expect(interpret(rule, absent, COMPLETE, ACTIVE_RR)).toEqual([]);
+    expect(interpret(rule, boolFalse, COMPLETE, ACTIVE_RR)).toEqual([]);
+  });
+
+  it('[type guard] a non-RestrictionRule node carrying active==="false" does NOT fire', () => {
+    const slice: GroundedSlice = {
+      nodes: [node('CustomObject:Ns__Case', 'CustomObject', { active: 'false' })],
+      edges: [],
+    };
+    expect(interpret(rule, slice, COMPLETE, 'CustomObject:Ns__Case')).toEqual([]);
+  });
+});
+
+describe('concept:approval-process-pending-lock-editability — rule:approval-process/pending-lock-editable-by-approver', () => {
+  const rule = ruleById('rule:approval-process/pending-lock-editable-by-approver');
+
+  it('ships the concept with the access-mechanism kind and a pending-lock summary', () => {
+    const concept = CONCEPTS['concept:approval-process-pending-lock-editability'];
+    expect(concept).toBeDefined();
+    expect(concept!.kind).toBe('access-mechanism');
+    const summary = concept!.summary.toLowerCase();
+    expect(summary).toContain('recordeditability');
+    expect(summary).toContain('adminorcurrentapprover');
+    expect(summary).toContain('pending');
+    expect(summary).toContain('does not hold');
+  });
+
+  it('is a node-shaped ApprovalProcess rule keyed on recordEditability, declared ceiling', () => {
+    expect(rule.concept).toBe('concept:approval-process-pending-lock-editability');
+    expect(rule.bind.componentTypes).toEqual(['ApprovalProcess']);
+    expect(rule.bind.whereProperty).toEqual({ key: 'recordEditability', equals: 'AdminOrCurrentApprover' });
+    expect(rule.bind.edgeType).toBeUndefined();
+    expect(rule.absenceShaped).toBe(false);
+    expect(rule.maxConfidence).toBe('declared');
+  });
+
+  it('fires on AdminOrCurrentApprover, cites ONLY the process, confidence declared', () => {
+    const apId = 'ApprovalProcess:Ns__Opportunity.Discount_Approval';
+    const slice: GroundedSlice = {
+      nodes: [node(apId, 'ApprovalProcess', { recordEditability: 'AdminOrCurrentApprover', allowRecall: false })],
+      edges: [],
+    };
+    const out = interpret(rule, slice, COMPLETE, apId);
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.concept).toBe('concept:approval-process-pending-lock-editability');
+    expect(only.groundedIn).toEqual([apId]);
+    expect(only.confidence).toBe('declared');
+    expect(only.confidence).toBe(weakest('declared', 'declared'));
+    expect(only.coverageCaveat).toBeNull();
+    expect(only.provenance).toBe('offline_snapshot');
+    expect(only.claim).toContain(apId);
+    expect(only.claim).toContain('AdminOrCurrentApprover');
+    expect(only.claim.toLowerCase()).toContain('currently-assigned approver');
+  });
+
+  it('does NOT fire on AdminOnly, null, or an absent recordEditability', () => {
+    const apId = 'ApprovalProcess:Ns__Case.Refund_Approval';
+    for (const props of [{ recordEditability: 'AdminOnly' }, { recordEditability: null }, {}]) {
+      const slice: GroundedSlice = { nodes: [node(apId, 'ApprovalProcess', props)], edges: [] };
+      expect(interpret(rule, slice, COMPLETE, apId)).toEqual([]);
+    }
+  });
+});
+
+describe('concept:approval-process-recall-unlocks-record — rule:approval-process/recall-enabled', () => {
+  const rule = ruleById('rule:approval-process/recall-enabled');
+
+  it('ships the concept with the firing-condition kind and a recall summary', () => {
+    const concept = CONCEPTS['concept:approval-process-recall-unlocks-record'];
+    expect(concept).toBeDefined();
+    expect(concept!.kind).toBe('firing-condition');
+    const summary = concept!.summary.toLowerCase();
+    expect(summary).toContain('allowrecall');
+    expect(summary).toContain('recall');
+    expect(summary).toContain('unlocks the record');
+    expect(summary).toContain('does not hold');
+  });
+
+  it('is a node-shaped ApprovalProcess rule keyed on allowRecall, declared ceiling', () => {
+    expect(rule.concept).toBe('concept:approval-process-recall-unlocks-record');
+    expect(rule.bind.componentTypes).toEqual(['ApprovalProcess']);
+    expect(rule.bind.whereProperty).toEqual({ key: 'allowRecall', equals: true });
+    expect(rule.bind.edgeType).toBeUndefined();
+    expect(rule.absenceShaped).toBe(false);
+    expect(rule.maxConfidence).toBe('declared');
+  });
+
+  it('fires on allowRecall true, cites ONLY the process, confidence declared', () => {
+    const apId = 'ApprovalProcess:Ns__Opportunity.Discount_Approval';
+    const slice: GroundedSlice = {
+      nodes: [node(apId, 'ApprovalProcess', { allowRecall: true, recordEditability: 'AdminOnly' })],
+      edges: [],
+    };
+    const out = interpret(rule, slice, COMPLETE, apId);
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.concept).toBe('concept:approval-process-recall-unlocks-record');
+    expect(only.groundedIn).toEqual([apId]);
+    expect(only.confidence).toBe('declared');
+    expect(only.confidence).toBe(weakest('declared', 'declared'));
+    expect(only.coverageCaveat).toBeNull();
+    expect(only.provenance).toBe('offline_snapshot');
+    expect(only.claim).toContain(apId);
+    expect(only.claim).toContain('allowRecall');
+    expect(only.claim.toLowerCase()).toContain('recall actions');
+  });
+
+  it('does NOT fire on allowRecall false or an absent allowRecall', () => {
+    const apId = 'ApprovalProcess:Ns__Case.Refund_Approval';
+    for (const props of [{ allowRecall: false }, {}]) {
+      const slice: GroundedSlice = { nodes: [node(apId, 'ApprovalProcess', props)], edges: [] };
+      expect(interpret(rule, slice, COMPLETE, apId)).toEqual([]);
+    }
+  });
+});
+
+describe('concept:auth-provider-registration-handler-apex-hook — rule:integration/auth-provider-registration-handler', () => {
+  const rule = ruleById('rule:integration/auth-provider-registration-handler');
+  const AP = 'AuthProvider:Ns__CorporateSSO';
+
+  it('fires when registrationHandler is present, silent when absent', () => {
+    const out = interpret(
+      rule,
+      { nodes: [node(AP, 'AuthProvider', { providerType: 'OpenIdConnect', registrationHandler: 'Ns__JitHandler', executionUser: 'integration@example.com' })], edges: [] },
+      COMPLETE,
+      AP,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.claim.toLowerCase()).toContain('just-in-time');
+    expect(
+      interpret(rule, { nodes: [node(AP, 'AuthProvider', { providerType: 'OpenIdConnect', registrationHandler: null })], edges: [] }, COMPLETE, AP),
+    ).toEqual([]);
+  });
+});
+
+describe('concept:platform-event-channel-member-filtered-stream — rule:integration/platform-event-channel-member-filter', () => {
+  const rule = ruleById('rule:integration/platform-event-channel-member-filter');
+  const MEM = 'PlatformEventChannelMember:Ns__AcctChange__chn';
+
+  it('fires when filterExpression is present, silent when absent', () => {
+    const out = interpret(
+      rule,
+      { nodes: [node(MEM, 'PlatformEventChannelMember', { eventChannel: 'Ns__AppChannel__chn', selectedEntity: 'AccountChangeEvent', filterExpression: "City__c='SF'" })], edges: [] },
+      COMPLETE,
+      MEM,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.claim.toLowerCase()).toContain('narrows');
+    expect(
+      interpret(rule, { nodes: [node(MEM, 'PlatformEventChannelMember', { eventChannel: 'Ns__AppChannel__chn', selectedEntity: 'AccountChangeEvent' })], edges: [] }, COMPLETE, MEM),
+    ).toEqual([]);
+  });
+});
+
+describe('concept:external-service-registration-incomplete — rule:integration/external-service-registration-incomplete', () => {
+  const rule = ruleById('rule:integration/external-service-registration-incomplete');
+  const ES = 'ExternalService:Ns__WeatherApi';
+
+  it('fires when status !== Complete, silent when Complete', () => {
+    const out = interpret(
+      rule,
+      { nodes: [node(ES, 'ExternalService', { schemaType: 'OpenApi3', status: 'InProgress' })], edges: [] },
+      COMPLETE,
+      ES,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.claim.toLowerCase()).toContain('unavailable');
+    expect(
+      interpret(rule, { nodes: [node(ES, 'ExternalService', { schemaType: 'OpenApi3', status: 'Complete' })], edges: [] }, COMPLETE, ES),
+    ).toEqual([]);
+  });
+});
+
+describe('concept:named-credential-per-user-principal — rule:integration/named-credential-per-user-principal', () => {
+  const rule = ruleById('rule:integration/named-credential-per-user-principal');
+  const NC = 'NamedCredential:Ns__ErpApi';
+
+  it('fires on principalType PerUser, silent on NamedUser', () => {
+    const out = interpret(
+      rule,
+      { nodes: [node(NC, 'NamedCredential', { endpoint: 'https://erp.example.com', principalType: 'PerUser' })], edges: [] },
+      COMPLETE,
+      NC,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.claim.toLowerCase()).toContain('per-user');
+    expect(
+      interpret(rule, { nodes: [node(NC, 'NamedCredential', { endpoint: 'https://erp.example.com', principalType: 'NamedUser' })], edges: [] }, COMPLETE, NC),
+    ).toEqual([]);
+  });
+});
+
+describe('concept:omnistudio-test-procedure-scope — rule:omnistudio/test-procedure-scope', () => {
+  const rule = ruleById('rule:omnistudio/test-procedure-scope');
+  const TEST_OS = 'OmniScript:Ns__Deal_Intake_Test_1';
+  const TEST_IP = 'OmniIntegrationProcedure:Ns__Deal_Provision_Test_1';
+  const PROD_OS = 'OmniScript:Ns__Deal_Intake_English_1';
+
+  it('ships the concept with the firing-condition kind', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('firing-condition');
+  });
+
+  it('is a two-type node rule on isTestProcedure == true, no edge, declared', () => {
+    expect(rule.concept).toBe('concept:omnistudio-test-procedure-scope');
+    expect(rule.bind.componentTypes).toEqual(['OmniScript', 'OmniIntegrationProcedure']);
+    expect(rule.bind.whereProperty).toEqual({ key: 'isTestProcedure', equals: true });
+    expect(rule.bind.edgeType).toBeUndefined();
+    expect(rule.absenceShaped).toBe(false);
+    expect(rule.maxConfidence).toBe('declared');
+    expect(rule.dependsOnCoverage).toEqual(['OmniScript', 'OmniIntegrationProcedure']);
+  });
+
+  it('fires on a test-procedure OmniScript, excludes a production OmniScript', () => {
+    const out = interpret(
+      rule,
+      { nodes: [node(TEST_OS, 'OmniScript', { isTestProcedure: true, isActive: true })], edges: [] },
+      COMPLETE,
+      TEST_OS,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.groundedIn).toContain(TEST_OS);
+    expect(out[0]!.claim.toLowerCase()).toContain('test procedure');
+    expect(out[0]!.confidence).toBe('declared');
+    expect(
+      interpret(
+        rule,
+        { nodes: [node(PROD_OS, 'OmniScript', { isTestProcedure: false, isActive: true })], edges: [] },
+        COMPLETE,
+        PROD_OS,
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe('concept:dataraptor-load-fires-assignment-rules — rule:omnistudio/dataraptor-load-fires-assignment-rules', () => {
+  const rule = ruleById('rule:omnistudio/dataraptor-load-fires-assignment-rules');
+  const ASSIGN_DR = 'OmniDataTransform:Ns__DRLoadCase_1';
+  const PLAIN_DR = 'OmniDataTransform:Ns__DRLoadAccount_1';
+
+  it('ships the concept with the firing-condition kind', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('firing-condition');
+  });
+
+  it('is a node-shaped OmniDataTransform rule on assignmentRulesUsed == true, no edge, declared', () => {
+    expect(rule.concept).toBe('concept:dataraptor-load-fires-assignment-rules');
+    expect(rule.bind.componentTypes).toEqual(['OmniDataTransform']);
+    expect(rule.bind.whereProperty).toEqual({ key: 'assignmentRulesUsed', equals: true });
+    expect(rule.bind.edgeType).toBeUndefined();
+    expect(rule.absenceShaped).toBe(false);
+    expect(rule.maxConfidence).toBe('declared');
+    expect(rule.dependsOnCoverage).toEqual(['OmniDataTransform']);
+  });
+
+  it('fires when assignment rules are used, excludes a transform without them', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(ASSIGN_DR, 'OmniDataTransform', { assignmentRulesUsed: true, errorIgnored: false }),
+        node(PLAIN_DR, 'OmniDataTransform', { assignmentRulesUsed: false, errorIgnored: false }),
+      ],
+      edges: [],
+    };
+    const out = interpret(rule, slice, COMPLETE);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.groundedIn).toEqual([ASSIGN_DR]);
+    expect(out[0]!.claim.toLowerCase()).toContain('assignment rules');
+    expect(out[0]!.confidence).toBe('declared');
+    expect(out[0]!.coverageCaveat).toBeNull();
+  });
+});
+
+describe('concept:omnistudio-metadata-cache-disabled — rule:omnistudio/metadata-cache-disabled', () => {
+  const rule = ruleById('rule:omnistudio/metadata-cache-disabled');
+  const NOCACHE_OS = 'OmniScript:Ns__Deal_Intake_English_2';
+  const NOCACHE_IP = 'OmniIntegrationProcedure:Ns__Deal_Provision_2';
+  const CACHED_OS = 'OmniScript:Ns__Deal_Intake_English_1';
+
+  it('ships the concept with the code-quality-defect kind', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('code-quality-defect');
+  });
+
+  it('is a two-type node rule on isMetadataCacheDisabled == true, no edge, declared', () => {
+    expect(rule.concept).toBe('concept:omnistudio-metadata-cache-disabled');
+    expect(rule.bind.componentTypes).toEqual(['OmniScript', 'OmniIntegrationProcedure']);
+    expect(rule.bind.whereProperty).toEqual({ key: 'isMetadataCacheDisabled', equals: true });
+    expect(rule.bind.edgeType).toBeUndefined();
+    expect(rule.absenceShaped).toBe(false);
+    expect(rule.maxConfidence).toBe('declared');
+    expect(rule.dependsOnCoverage).toEqual(['OmniScript', 'OmniIntegrationProcedure']);
+  });
+
+  it('fires on a cache-disabled OmniScript, excludes a cached OmniScript', () => {
+    const out = interpret(
+      rule,
+      { nodes: [node(NOCACHE_OS, 'OmniScript', { isMetadataCacheDisabled: true, isActive: true })], edges: [] },
+      COMPLETE,
+      NOCACHE_OS,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.groundedIn).toContain(NOCACHE_OS);
+    expect(out[0]!.claim.toLowerCase()).toContain('metadata caching disabled');
+    expect(out[0]!.confidence).toBe('declared');
+    expect(
+      interpret(
+        rule,
+        { nodes: [node(CACHED_OS, 'OmniScript', { isMetadataCacheDisabled: false, isActive: true })], edges: [] },
+        COMPLETE,
+        CACHED_OS,
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe('concept:static-resource-public-cache-control-exposure — rule:static-resource/public-cache-control', () => {
+  const rule = ruleById('rule:static-resource/public-cache-control');
+  const PUBLIC_RES = 'StaticResource:Ns__PortalAssets'; // cacheControl: Public
+  const PRIVATE_RES = 'StaticResource:Ns__SessionOnly'; // cacheControl: Private → excluded
+
+  it('ships the concept with the access-mechanism kind', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('access-mechanism');
+  });
+
+  it('is a node-shaped StaticResource rule (componentTypes + whereProperty cacheControl equals Public, no edge, declared)', () => {
+    expect(rule.concept).toBe('concept:static-resource-public-cache-control-exposure');
+    expect(rule.bind.componentTypes).toEqual(['StaticResource']);
+    expect(rule.bind.whereProperty).toEqual({ key: 'cacheControl', equals: 'Public' });
+    expect(rule.bind.edgeType).toBeUndefined();
+    expect(rule.absenceShaped).toBe(false);
+    expect(rule.maxConfidence).toBe('declared');
+    expect(rule.dependsOnCoverage).toEqual(['StaticResource']);
+  });
+
+  it('matches a Public static resource, cites it, claims cross-user / guest exposure, confidence declared', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(PUBLIC_RES, 'StaticResource', { cacheControl: 'Public' }),
+        node(PRIVATE_RES, 'StaticResource', { cacheControl: 'Private' }),
+      ],
+      edges: [],
+    };
+    const out = interpret(rule, slice, COMPLETE);
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.concept).toBe('concept:static-resource-public-cache-control-exposure');
+    expect(only.groundedIn).toEqual([PUBLIC_RES]);
+    expect(only.claim.toLowerCase()).toContain('cross-user');
+    expect(only.claim.toLowerCase()).toContain('guest');
+    expect(only.confidence).toBe('declared');
+    expect(only.coverageCaveat).toBeNull();
+  });
+
+  it('does NOT fire on a Private static resource — no citation ⇒ no claim', () => {
+    const slice: GroundedSlice = {
+      nodes: [node(PRIVATE_RES, 'StaticResource', { cacheControl: 'Private' })],
+      edges: [],
+    };
+    expect(interpret(rule, slice, COMPLETE)).toEqual([]);
+  });
+});
+
+describe('concept:custom-metadata-record-protected-namespace-scoped — rule:custom-metadata-record/protected-namespace-scoped', () => {
+  const rule = ruleById('rule:custom-metadata-record/protected-namespace-scoped');
+  const PROT = 'CustomMetadataRecord:Ns__Api_Setting__mdt.Default'; // protected: true
+  const OPEN = 'CustomMetadataRecord:Ns__Api_Setting__mdt.Open'; // protected: false → excluded
+
+  it('ships the concept with the access-mechanism kind', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('access-mechanism');
+  });
+
+  it('is a node-shaped CustomMetadataRecord rule (componentTypes + whereProperty protected equals true, no edge, declared)', () => {
+    expect(rule.concept).toBe('concept:custom-metadata-record-protected-namespace-scoped');
+    expect(rule.bind.componentTypes).toEqual(['CustomMetadataRecord']);
+    expect(rule.bind.whereProperty).toEqual({ key: 'protected', equals: true });
+    expect(rule.bind.edgeType).toBeUndefined();
+    expect(rule.absenceShaped).toBe(false);
+    expect(rule.maxConfidence).toBe('declared');
+    expect(rule.dependsOnCoverage).toEqual(['CustomMetadataRecord']);
+  });
+
+  it('matches a protected record, cites it, claims same-namespace access boundary, confidence declared', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(PROT, 'CustomMetadataRecord', { protected: true }),
+        node(OPEN, 'CustomMetadataRecord', { protected: false }),
+      ],
+      edges: [],
+    };
+    const out = interpret(rule, slice, COMPLETE);
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.groundedIn).toEqual([PROT]);
+    expect(only.claim.toLowerCase()).toContain('same namespace');
+    expect(only.confidence).toBe('declared');
+    expect(only.coverageCaveat).toBeNull();
+  });
+
+  it('does NOT fire on an unprotected record — no citation ⇒ no claim', () => {
+    const slice: GroundedSlice = {
+      nodes: [node(OPEN, 'CustomMetadataRecord', { protected: false })],
+      edges: [],
+    };
+    expect(interpret(rule, slice, COMPLETE)).toEqual([]);
+  });
+});
+
+describe('concept:email-template-unavailable-hidden — rule:email-template/unavailable-hidden', () => {
+  const rule = ruleById('rule:email-template/unavailable-hidden');
+  const HIDDEN = 'EmailTemplate:Ns__Sales.RetiredWelcome'; // available: false
+  const LIVE = 'EmailTemplate:Ns__Sales.ActiveWelcome'; // available: true → excluded
+
+  it('ships the concept with the status-code kind', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('status-code');
+  });
+
+  it('is a node-shaped EmailTemplate rule (componentTypes + whereProperty available equals false, no edge, declared)', () => {
+    expect(rule.concept).toBe('concept:email-template-unavailable-hidden');
+    expect(rule.bind.componentTypes).toEqual(['EmailTemplate']);
+    expect(rule.bind.whereProperty).toEqual({ key: 'available', equals: false });
+    expect(rule.bind.edgeType).toBeUndefined();
+    expect(rule.absenceShaped).toBe(false);
+    expect(rule.maxConfidence).toBe('declared');
+    expect(rule.dependsOnCoverage).toEqual(['EmailTemplate']);
+  });
+
+  it('matches an unavailable template, cites it, claims hidden from picker, confidence declared', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(HIDDEN, 'EmailTemplate', { available: false }),
+        node(LIVE, 'EmailTemplate', { available: true }),
+      ],
+      edges: [],
+    };
+    const out = interpret(rule, slice, COMPLETE);
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.groundedIn).toEqual([HIDDEN]);
+    expect(only.claim.toLowerCase()).toContain('available for use');
+    expect(only.claim.toLowerCase()).toContain('picker');
+    expect(only.confidence).toBe('declared');
+    expect(only.coverageCaveat).toBeNull();
+  });
+
+  it('does NOT fire on an available template — no citation ⇒ no claim', () => {
+    const slice: GroundedSlice = {
+      nodes: [node(LIVE, 'EmailTemplate', { available: true })],
+      edges: [],
+    };
+    expect(interpret(rule, slice, COMPLETE)).toEqual([]);
+  });
+});
+
+describe('concept:group-role-subordinates-transitive-membership — rule:group/role-subordinates-transitive-membership', () => {
+  const rule = ruleById('rule:group/role-subordinates-transitive-membership');
+  const GRP = 'Group:Ns__EscalationPool';
+  const ROLE = 'Role:Ns__SupportManager';
+
+  it('ships the concept with the access-mechanism kind', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('access-mechanism');
+  });
+
+  it('is an edge-shaped hasMember rule (edgeType + componentTypes [Group, Role] + edgeWhereProperty inheritance equals subordinates, declared)', () => {
+    expect(rule.concept).toBe('concept:group-role-subordinates-transitive-membership');
+    expect(rule.bind.edgeType).toBe('hasMember');
+    expect(rule.bind.componentTypes).toEqual(['Group', 'Role']);
+    expect(rule.bind.edgeWhereProperty).toEqual({ key: 'inheritance', equals: 'subordinates' });
+    expect(rule.absenceShaped).toBe(false);
+    expect(rule.maxConfidence).toBe('declared');
+    expect(rule.dependsOnCoverage).toEqual(['Group', 'Role']);
+  });
+
+  it('matches a group→role-and-subordinates membership edge, cites both endpoints, claims subtree cascade, confidence declared', () => {
+    const slice: GroundedSlice = {
+      nodes: [node(GRP, 'Group'), node(ROLE, 'Role')],
+      edges: [
+        edge(GRP, ROLE, 'hasMember', 'declared', { memberType: 'RoleAndSubordinates', inheritance: 'subordinates' }),
+      ],
+    };
+    const out = interpret(rule, slice, COMPLETE);
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.groundedIn).toEqual([GRP, ROLE]);
+    expect(only.claim).toContain(GRP);
+    expect(only.claim).toContain(ROLE);
+    expect(only.claim.toLowerCase()).toContain('subtree');
+    expect(only.claim.toLowerCase()).toContain('granted to this group');
+    expect(only.confidence).toBe('declared');
+    expect(only.coverageCaveat).toBeNull();
+  });
+
+  it('does NOT fire on a plain Role member (no subordinates inheritance) — no citation ⇒ no claim', () => {
+    const slice: GroundedSlice = {
+      nodes: [node(GRP, 'Group'), node(ROLE, 'Role')],
+      edges: [edge(GRP, ROLE, 'hasMember', 'declared', { memberType: 'Role' })],
+    };
+    expect(interpret(rule, slice, COMPLETE)).toEqual([]);
+  });
+});

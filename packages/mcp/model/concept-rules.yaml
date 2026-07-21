@@ -4449,3 +4449,373 @@ conceptRules:
     absenceShaped: false
     dependsOnCoverage:
       - OmniDataTransform
+
+  - id: rule:object/deployment-status-in-development
+    concept: concept:object-deployment-status-in-development
+    bind:
+      componentTypes:
+        - CustomObject
+      whereProperty:
+        key: deploymentStatus
+        equals: InDevelopment
+    interpretation: '{ids} has deployment status IN DEVELOPMENT (not Deployed) — so the object, its tab, its list views, and its fields are HIDDEN from every user who lacks the "Customize Application" administrative permission (in practice, all non-admin users), and the object is effectively unusable in production until an admin sets it to Deployed. It must be EXCLUDED from reasoning about which ordinary users can see or work with this object and its records. This names the DECLARED deployment-status posture from the object''s own metadata; it does NOT prove whether any specific user holds Customize Application (an assignment question the offline vault cannot answer) and does NOT establish whether the object was intentionally left in development. Only Deployed objects belong in ordinary-user reachability surfaces.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - CustomObject
+
+  - id: rule:object/autonumber-name-field
+    concept: concept:object-autonumber-name-field
+    bind:
+      componentTypes:
+        - CustomObject
+      whereProperty:
+        key: nameFieldType
+        equals: AutoNumber
+    interpretation: '{ids} is a custom object whose NAME field is an AUTO NUMBER — every record''s Name is SYSTEM-ASSIGNED from a display format and a sequence at insert, so the record name is READ-ONLY on every write path (UI, API, Apex, Flow, and data import cannot set it), is unavailable in a before-insert context (assigned during insert), and is stored and displayed as a formatted STRING rather than a number. Changing the display format renumbers only new records; existing names and any sequence gaps from failed inserts persist. This is grounded from the object''s own declared name-field type; it names the system-assigned read-only provenance of the record NAME (DISTINCT from a custom field of type Auto Number), NOT the current or next sequence value (record-level data the offline vault cannot answer) and NOT whether any integration tries to set the name.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - CustomObject
+
+  - id: rule:global-value-set/has-inactive-value
+    concept: concept:global-value-set-has-inactive-value
+    bind:
+      componentTypes:
+        - GlobalValueSet
+      whereProperty:
+        key: values
+        anyElement:
+          key: isActive
+          equals: false
+    interpretation: '{ids} is a GLOBAL (shared) value set that retains at least one INACTIVE (deactivated) value. Because this value set is SHARED, the retired value is removed from the picker on EVERY picklist field bound to the set at once — it is NO LONGER SELECTABLE for new records anywhere — yet existing records that already hold it keep displaying and reporting it (the value stays readable). Reactivating or removing the value ripples to every field bound to the set. This names the DECLARED presence of a deactivated entry in the shared value set''s own metadata; it does NOT prove any record currently holds the value (a record-level count the offline vault cannot answer) and does NOT enumerate which fields bind this set (that is the fields'' own usesValueSet edges).'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - GlobalValueSet
+
+  - id: rule:standard-value-set/has-inactive-value
+    concept: concept:standard-value-set-has-inactive-value
+    bind:
+      componentTypes:
+        - StandardValueSet
+      whereProperty:
+        key: values
+        anyElement:
+          key: active
+          equals: false
+    interpretation: '{ids} is a STANDARD value set (the org-wide value list behind a standard picklist such as Industry, Lead Source, or Opportunity Stage) that retains at least one INACTIVE (deactivated) value. The retired value is NO LONGER SELECTABLE for new records on the standard field(s) that draw from this set, yet existing records that already hold it keep displaying and reporting it (the value stays readable). This names the DECLARED presence of a deactivated entry in the standard value set''s own metadata; a standard field''s binding to its value set is IMPLICIT (Salesforce wires it internally, so there is no edge and this does NOT name which fields are affected), it does NOT prove any record currently holds the value (record-level data the offline vault cannot answer), and it is DISTINCT from a custom field''s own local retired value and from a shared global value set.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - StandardValueSet
+
+  # apex-test-hardcoded-sandbox-data. anyElement over the ApexClass `qualityIssues`
+  # array with `equals: hardcoded-sandbox-test-data` (rule name grounded
+  # code-quality-patterns.ts:1595; the recognizer detectHardcodedSandboxData is
+  # isTest-gated at :1587 and only matches sandbox-marked literals at :1581, so a
+  # non-test class or a portable test carries no such element). Byte-identical shape
+  # to the shipped rule:apex-fake-assertion/tautology-assertion. `maxConfidence:
+  # heuristic` — every qualityIssues element carries confidence 'heuristic' and the
+  # node match carries no edge, so weakest() keeps the heuristic ceiling.
+  # componentTypes [ApexClass] only (qualityIssues lives on ApexClass; apex-trigger.ts
+  # does not emit it). absenceShaped:false (presence rule). Purely additive; NO
+  # extractor / engine change. ORG-INDEPENDENT general Salesforce truth — NO vault
+  # counts in the interpretation.
+  - id: rule:apex-test-quality/hardcoded-sandbox-data
+    concept: concept:apex-test-hardcoded-sandbox-data
+    bind:
+      componentTypes:
+        - ApexClass
+      whereProperty:
+        key: qualityIssues
+        anyElement:
+          key: rule
+          equals: hardcoded-sandbox-test-data
+    interpretation: '{ids} is an @IsTest class that hardcodes a SANDBOX-SPECIFIC literal — a username or URL carrying a sandbox marker (a `.sandbox` / `.dev` / `.uat` / `.fullcopy` suffix, a `--sandbox` My Domain segment, or a `sandbox.salesforce.com` host). An Apex test is expected to be org-agnostic and self-contained, building its own fixtures in @TestSetup or a test-data factory; a sandbox-specific literal breaks that, so the test may pass in the sandbox it was written against and then FAIL, or exercise the wrong data, when the code is promoted to production or run in another org — and because it is a test that failure surfaces only at deploy or run time. Move the value into a Custom Metadata Type or Custom Setting record, or generate it in @TestSetup. This is HEURISTIC recognition from TOKENIZED Apex source — NOT a compiler AST: it flags the sandbox-marked literal itself and can FLAG a deliberately inert string or MISS a value assembled at runtime. It names a test-portability review candidate, not a proven test failure.'
+    maxConfidence: heuristic
+    absenceShaped: false
+    dependsOnCoverage:
+      - ApexClass
+
+  # ARC-2 concept-expansion — restriction-rule-inactive. ONE additive NODE rule,
+  # `concept:restriction-rule-inactive` (kind `firing-condition`). Node-shaped:
+  # `componentTypes: [RestrictionRule]` + a single scalar-equals `whereProperty`
+  # on the grounded STRING `active` property, `maxConfidence: declared`,
+  # `absenceShaped: false`, no edge. The operand is the QUOTED string `'false'`
+  # (extractEnterpriseMetadata's extraPropertiesBlock is Record<string,string>);
+  # the omit-when-absent shape means `equals:'false'` selects ONLY rules whose
+  # `<active>` element is explicitly false — an active rule carries `active:'true'`
+  # (no match) and an element-absent rule carries no `active` key (no match). No
+  # extractor change, no refresh, no engine change. TIER `declared`: `active` is
+  # read verbatim from the rule's own metadata (zero resolution risk); a node match
+  # carries no edge, so weakest() keeps the declared ceiling. Complement of
+  # rule:restriction-rule/narrows-below-sharing (equals:'true') over the SAME
+  # property. Real-vault probe (read-only, no refresh; counts stay in this comment
+  # ONLY): fires on the INACTIVE restriction rules, citing each rule node at
+  # `declared`; an active or element-absent rule fires nothing.
+  - id: rule:restriction-rule/inactive
+    concept: concept:restriction-rule-inactive
+    bind:
+      componentTypes:
+        - RestrictionRule
+      whereProperty:
+        key: active
+        equals: 'false'
+    interpretation: '{ids} is an INACTIVE restriction rule (its `active` flag is false) — while inactive it enforces NO narrowing, so the records it would otherwise HIDE stay fully visible to the users it targets under the org-wide default, sharing rules, the role hierarchy, and manual / Apex shares. It must be EXCLUDED from "what can this user NOT see" reasoning and from any conclusion that an object is narrowed on its account: a restriction rule is the sole subtractive sharing mechanism, and a deactivated one subtracts nothing until an admin re-activates it. This is grounded from the rule''s own `active` flag; it names the non-enforcing STRUCTURAL fact, NOT whether the rule WOULD narrow a specific record if activated (its recordFilter / userCriteria remain unevaluated offline) and NOT why it was deactivated. Only active restriction rules narrow record access.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - RestrictionRule
+
+  # ARC-2 concept-expansion — approval-process-pending-lock-editability. ONE NODE
+  # rule on ApprovalProcess keyed to `recordEditability == AdminOrCurrentApprover`
+  # (approval-process.ts:938, optionalString). Fires ONLY on the WIDENED posture —
+  # the default AdminOnly and a null value are inert (low noise). maxConfidence
+  # declared (read verbatim from the process's own metadata; a node match carries
+  # no edge). Disjoint from the finalApprovalRecordLock / finalRejectionRecordLock
+  # keys of approval-process/final-*-lock. ORG-INDEPENDENT — NO vault counts.
+  - id: rule:approval-process/pending-lock-editable-by-approver
+    concept: concept:approval-process-pending-lock-editability
+    bind:
+      componentTypes:
+        - ApprovalProcess
+      whereProperty:
+        key: recordEditability
+        equals: AdminOrCurrentApprover
+    interpretation: '{ids} declares `recordEditability` = AdminOrCurrentApprover — while a record is PENDING in this approval process it is AUTOMATICALLY LOCKED, and this setting WIDENS who may edit that locked record to include the CURRENTLY-ASSIGNED APPROVER, not only administrators and "Modify All"/"Modify All Data" holders. So the approver evaluating the request can also modify the very record awaiting their decision (an access and audit surface), whereas the default AdminOnly posture bars even the approver from editing while it is pending. This is the DECLARED pending-lock editability from the process''s own recordEditability flag; it does NOT assert whether any specific record is currently pending or locked (record-level runtime state the offline vault does not hold), WHO the assigned approver is on a given record, or the separate final-approval / final-rejection lock behavior. An approval process set to AdminOnly, or that declares no recordEditability, contributes no approver-edit widening.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - ApprovalProcess
+
+  # ARC-2 concept-expansion — approval-process-recall-unlocks-record. ONE NODE
+  # rule on ApprovalProcess keyed to `allowRecall == true` (approval-process.ts:930
+  # via coerceBoolean, always present). Fires ONLY on the opt-in true posture; the
+  # default false is inert (low noise). maxConfidence declared (read verbatim from
+  # the process's own boolean; a node match carries no edge). Disjoint from the
+  # `active` key of approval-process/inactive-dead and the final-lock keys.
+  # ORG-INDEPENDENT — NO vault counts.
+  - id: rule:approval-process/recall-enabled
+    concept: concept:approval-process-recall-unlocks-record
+    bind:
+      componentTypes:
+        - ApprovalProcess
+      whereProperty:
+        key: allowRecall
+        equals: true
+    interpretation: '{ids} declares `allowRecall` = true — this approval process lets the ORIGINAL SUBMITTER RECALL (withdraw) a still-pending approval request. A recall UNLOCKS the record (it leaves the locked/pending state) and fires the process''s recall actions — the field updates, email alerts, tasks, or outbound messages configured on the recall hook — so a record can exit the pending approval WITHOUT any approver''s decision, purely by submitter action, and that exit runs its own automation. This matters for "why did this record unlock, or why did this field change while it was in approval?" reasoning. This names the DECLARED recall capability from the process''s own allowRecall flag; it does NOT assert that any specific record was recalled, WHO may submit or recall it, or whether the recall actions succeed. An approval process with allowRecall false permits no submitter recall — only an approver''s action moves a pending record forward.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - ApprovalProcess
+
+  - id: rule:integration/auth-provider-registration-handler
+    concept: concept:auth-provider-registration-handler-apex-hook
+    bind:
+      componentTypes:
+        - AuthProvider
+      whereProperty:
+        key: registrationHandler
+        isNull: false
+    interpretation: '{ids} is an auth provider with a REGISTRATION HANDLER — an Apex class Salesforce invokes in SYSTEM context on every SSO / social login through this provider to CREATE or UPDATE the authenticating user''s User record (just-in-time provisioning), running under the declared executionUser identity rather than the logging-in person. It is a privileged, hidden entry point that can insert Users, assign profiles, and set fields outside the normal permission path. This names the DECLARED handler binding only — NOT proof that anyone has logged in through this provider, NOT what the handler code does (a separate ApexClass the offline vault does not execute), and NOT that the class still compiles.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - AuthProvider
+
+  - id: rule:integration/platform-event-channel-member-filter
+    concept: concept:platform-event-channel-member-filtered-stream
+    bind:
+      componentTypes:
+        - PlatformEventChannelMember
+      whereProperty:
+        key: filterExpression
+        isNull: false
+    interpretation: '{ids} is a platform event / CDC channel member with a declared FILTER EXPRESSION — it narrows the channel to only the change events whose fields satisfy that expression, so subscribers see a NARROWED subset of the object''s changes and every non-matching change is withheld from this stream. Integrations that assume the full change feed arrives can miss filtered-out records. This is the DECLARED filter text only — NOT runtime evaluation of which records actually pass (that needs record-level data the offline vault lacks), and NOT the channel''s retention / replay / ordering guarantees, which are a separate async concern.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - PlatformEventChannelMember
+
+  - id: rule:integration/external-service-registration-incomplete
+    concept: concept:external-service-registration-incomplete
+    bind:
+      componentTypes:
+        - ExternalService
+      whereProperty:
+        key: status
+        notIn:
+          - Complete
+    interpretation: '{ids} is an external service registration whose status is NOT Complete — its OpenAPI schema did not finish importing into invocable operations, so its generated actions are UNAVAILABLE and any Flow, Apex, or OmniStudio step that invokes an operation from this registration cannot resolve it and fails. This names the DECLARED status only — NOT why the import stalled (fetch / auth / parse errors are not captured offline) and NOT whether any component actually calls an operation from this service. Only a Complete registration exposes callable operations.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - ExternalService
+
+  - id: rule:integration/named-credential-per-user-principal
+    concept: concept:named-credential-per-user-principal
+    bind:
+      componentTypes:
+        - NamedCredential
+      whereProperty:
+        key: principalType
+        equals: PerUser
+    interpretation: '{ids} is a named credential with a PER-USER principal type — it carries no shared org-wide identity; each callout authenticates under the running user''s own per-user external credential, which every user must configure individually. The same callout authenticates as a different identity per user and FAILS for any user who has not set up their personal credential, and the external system attributes calls to distinct per-user identities rather than one service account. This names the DECLARED per-user posture only — NOT which users have configured their credential (per-user runtime state the offline vault does not hold) and NOT whether any Apex actually calls through this credential.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - NamedCredential
+
+  # ARC-2 concept-expansion — omnistudio-test-procedure-scope. ONE NODE rule over
+  # OmniScript + OmniIntegrationProcedure `isTestProcedure == true`. Always-present
+  # coerced boolean on both node types (omniscript.ts:563,
+  # omni-integration-procedure.ts:782). A node match carries no edge, so weakest()
+  # keeps the declared ceiling. absenceShaped false — a PRESENCE claim about the
+  # declared test-harness flag; the risky value (true) is the non-default (absent →
+  # false via coerceBoolean), so it fires only when explicitly set. DISTINCT key
+  # from rule:omnistudio/inactive-component-version (isActive) — no cross-firing.
+  - id: rule:omnistudio/test-procedure-scope
+    concept: concept:omnistudio-test-procedure-scope
+    bind:
+      componentTypes:
+        - OmniScript
+        - OmniIntegrationProcedure
+      whereProperty:
+        key: isTestProcedure
+        equals: true
+    interpretation: '{ids} is flagged as an OmniStudio TEST PROCEDURE (isTestProcedure = true) — a development test harness whose purpose is to exercise and validate another OmniScript or Integration Procedure, NOT a production user-facing flow. It is not part of the normal production runtime surface: it is invoked to test a target component, not served to end users or dispatched as production automation. EXCLUDE it from ''what actually runs in production'', runtime-reachability, and invocation-impact reasoning, and treat it as a likely cleanup candidate in a production org. This names the declared test-procedure flag from the component''s own metadata, NOT whether the test currently passes, which component it targets, whether it has ever been run, or whether it is also active (liveness is the separate isActive axis).'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - OmniScript
+      - OmniIntegrationProcedure
+
+  # ARC-2 concept-expansion — dataraptor-load-fires-assignment-rules. ONE NODE rule
+  # on OmniDataTransform `assignmentRulesUsed == true`. Always-present coerced
+  # boolean (omni-data-transform.ts:412-414). A node match carries no edge, so
+  # weakest() keeps the declared ceiling. absenceShaped false — a PRESENCE claim;
+  # the risky value (true) is the non-default (absent → false via coerceBoolean),
+  # so it fires only when explicitly enabled. DISJOINT key from
+  # rule:omnistudio/dataraptor-errors-ignored (errorIgnored) and
+  # rule:omnistudio/dataraptor-field-security-unenforced (fieldLevelSecurityEnabled).
+  - id: rule:omnistudio/dataraptor-load-fires-assignment-rules
+    concept: concept:dataraptor-load-fires-assignment-rules
+    bind:
+      componentTypes:
+        - OmniDataTransform
+      whereProperty:
+        key: assignmentRulesUsed
+        equals: true
+    interpretation: '{ids} is a DataRaptor with ''Assignment Rules Used'' turned ON — when it writes Lead or Case records (a DataRaptor Load), the insert or update runs with the assignment-rule header set, so the object''s ACTIVE assignment rules evaluate on the written records and can reassign record ownership and send assignment email notifications as a SIDE EFFECT of the transform''s save. A reader tracing what this transform does must account for that downstream assignment automation, not just the mapped field writes. This names the declared assignment-rules toggle from the transform''s own metadata; it does NOT prove the target object has any active assignment rule, that any record is actually reassigned or notified, or that the transform writes Lead / Case at all (only Lead and Case support assignment rules) — the runtime outcome depends on org data the offline vault does not hold.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - OmniDataTransform
+
+  # ARC-2 concept-expansion — omnistudio-metadata-cache-disabled. ONE NODE rule over
+  # OmniScript + OmniIntegrationProcedure `isMetadataCacheDisabled == true`. Always-
+  # present coerced boolean on both node types (omniscript.ts:559,
+  # omni-integration-procedure.ts:776-778). A node match carries no edge, so
+  # weakest() keeps the declared ceiling. absenceShaped false — a PRESENCE claim;
+  # the risky value (true) is the non-default (absent → false via coerceBoolean),
+  # so it fires only when the cache is explicitly disabled. DISJOINT key from every
+  # other OmniStudio rule (isActive / isTestProcedure / errorIgnored /
+  # fieldLevelSecurityEnabled / assignmentRulesUsed) — no cross-firing.
+  - id: rule:omnistudio/metadata-cache-disabled
+    concept: concept:omnistudio-metadata-cache-disabled
+    bind:
+      componentTypes:
+        - OmniScript
+        - OmniIntegrationProcedure
+      whereProperty:
+        key: isMetadataCacheDisabled
+        equals: true
+    interpretation: '{ids} has metadata caching DISABLED (isMetadataCacheDisabled = true) — the OmniStudio runtime does not cache this component''s compiled definition, so it re-reads and recompiles the definition metadata on every load or invocation instead of serving a cached copy. That adds per-request latency, and for an Integration Procedure invoked at volume it repeats that compile work on each call, increasing CPU and metadata-query pressure. Disabling the metadata cache is a documented development / debugging aid that is not meant to ship to a production org. This names the declared cache-disabled configuration flag from the component''s own metadata, NOT a measured regression: it does NOT prove any specific slowdown, timeout, or limit breach at runtime, only the disabled-cache posture.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - OmniScript
+      - OmniIntegrationProcedure
+
+  # misc-metadata family — static-resource-public-cache-control-exposure. ONE NODE
+  # rule: componentTypes [StaticResource] + whereProperty on the always-present,
+  # validated `cacheControl` scalar (static-resource.ts:183; required + gated to
+  # {Private, Public} at 16/161-168) matched with equals:Public. A node match
+  # carries no edge, so weakest() keeps the declared ceiling. NOT absence-shaped:
+  # fires on a PRESENT Public resource, never concludes 'none'. NO canonical ids.
+  - id: rule:static-resource/public-cache-control
+    concept: concept:static-resource-public-cache-control-exposure
+    bind:
+      componentTypes:
+        - StaticResource
+      whereProperty:
+        key: cacheControl
+        equals: Public
+    interpretation: '{ids} is a static resource whose cacheControl is Public — the platform caches it in a SHARED, cross-user cache and it can be served to UNAUTHENTICATED guest users through a Site or Experience Cloud resource URL, so its bytes are effectively world-readable to anyone who can reach that URL and must never hold secrets (API keys, tokens, credentials). A Private cacheControl instead scopes caching to the requesting user own session. This names the DECLARED cache-control posture from the resource own metadata; it does NOT prove the resource actually contains sensitive data, that any public page currently references it, or that its URL has been shared — only that the Public setting makes shared caching and guest exposure possible.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - StaticResource
+
+  # misc-metadata family — custom-metadata-record-protected-namespace-scoped. ONE
+  # NODE rule: componentTypes [CustomMetadataRecord] + whereProperty on the required,
+  # validated boolean `protected` (custom-metadata-record.ts:499) matched equals:true.
+  # A node match carries no edge, so weakest() keeps the declared ceiling. NOT
+  # absence-shaped: fires on a PRESENT protected record, never concludes 'none'.
+  - id: rule:custom-metadata-record/protected-namespace-scoped
+    concept: concept:custom-metadata-record-protected-namespace-scoped
+    bind:
+      componentTypes:
+        - CustomMetadataRecord
+      whereProperty:
+        key: protected
+        equals: true
+    interpretation: '{ids} is a PROTECTED custom metadata record — protected metadata is accessible ONLY to Apex, Flow, and formula code that runs in the SAME namespace that owns it. When this type is packaged and installed in a subscriber org, the subscriber own Apex and SOQL CANNOT read the record, and its protected field values come back masked rather than as real content (which is why protected records are the standard home for package secrets); an unprotected record is readable by any code in the org. This names the DECLARED protection flag from the record own metadata — a packaging-scoped ACCESS boundary — NOT the record actual field values (which may be masked and unreadable offline) and NOT whether this org is the owning namespace or a subscriber.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - CustomMetadataRecord
+
+  # misc-metadata family — email-template-unavailable-hidden. ONE NODE rule:
+  # componentTypes [EmailTemplate] + whereProperty on the required, always-present
+  # boolean `available` (email-template.ts:314) matched equals:false. A node match
+  # carries no edge, so weakest() keeps the declared ceiling. NOT absence-shaped:
+  # fires on a PRESENT unavailable template, never concludes 'none'. Same status
+  # shape as flow-inactive-dead-automation but scoped to a new type. NO ids.
+  - id: rule:email-template/unavailable-hidden
+    concept: concept:email-template-unavailable-hidden
+    bind:
+      componentTypes:
+        - EmailTemplate
+      whereProperty:
+        key: available
+        equals: false
+    interpretation: '{ids} has its Available For Use flag set to false — the template is NOT offered in the email-template picker, so users cannot select it when composing or sending an email through the UI. It is effectively hidden and dormant for manual use and should be EXCLUDED from which-templates-can-a-user-choose surfaces. This names the DECLARED availability flag from the template own metadata; it does NOT prove the template is unused — automation, email alerts, or Apex that reference it directly by id can still send it — and it says nothing about the template body or merge fields.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - EmailTemplate
+
+  # misc-metadata family — group-role-subordinates-transitive-membership. ONE EDGE
+  # rule: edgeType hasMember + componentTypes [Group, Role] (citation scope, drops a
+  # non-retrieved role endpoint) + edgeWhereProperty inheritance equals subordinates
+  # (group.ts:150 via MEMBER_VARIANT_TABLE:99-102). A hasMember edge is declared, so
+  # weakest() keeps the ceiling. absenceShaped false: a PRESENCE claim about a
+  # cascade that IS declared. DISJOINT from role-and-subordinates-cascade (sharedWith).
+  - id: rule:group/role-subordinates-transitive-membership
+    concept: concept:group-role-subordinates-transitive-membership
+    bind:
+      edgeType: hasMember
+      componentTypes:
+        - Group
+        - Role
+      edgeWhereProperty:
+        key: inheritance
+        equals: subordinates
+    interpretation: 'Transitive group membership among {ids}: this public group membership includes a role AND its SUBORDINATES, so the group transitively contains the named role plus EVERY role beneath it in the role hierarchy — the whole subtree is a member. Any access granted to this group — an owner- or criteria-based sharing rule shared to it, queue ownership, folder access, or list-view sharing — therefore reaches the entire role subtree, not just a single role. This is the DECLARED membership cascade on the group own member row; it names the ROLES the group pulls in, NOT the individual users occupying them (an assignment question the offline vault does not answer) and NOT any specific record grant.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - Group
+      - Role

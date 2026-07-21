@@ -972,3 +972,254 @@ describe('funnel ranking — Arc-2 build-all concept:dataraptor-errors-ignored r
     expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
   });
 });
+
+
+/**
+ * ARC-2 build-all batch 2 — 19 more concepts, NL-reachable via grow-forever cards.
+ */
+const ARC2_BB_OBJECT_DEPLOYMENT_STATUS_IN_DEVELOPMENT: readonly string[] = [
+  "Which custom objects are still In Development instead of Deployed?",
+  "Is this object's deployment status hiding it from users without Customize Application?",
+  "What does an In Development deployment status mean for who can use the object?",
+  "Show me objects whose deployment status is not Deployed yet.",
+];
+describe('funnel ranking — Arc-2 build-all concept:object-deployment-status-in-development ranks interpret top-5', () => {
+  it.each(ARC2_BB_OBJECT_DEPLOYMENT_STATUS_IN_DEVELOPMENT)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BB_OBJECT_AUTONUMBER_NAME_FIELD: readonly string[] = [
+  "Which custom objects use an Auto Number for their Name field?",
+  "Is this object's record Name auto-generated or entered by users?",
+  "Can I set the Name on insert for this object, or is it auto-numbered?",
+  "Does this object's name field auto-assign a formatted sequence?",
+  "What objects have a system-assigned Auto Number record name?",
+];
+describe('funnel ranking — Arc-2 build-all concept:object-autonumber-name-field ranks interpret top-5', () => {
+  it.each(ARC2_BB_OBJECT_AUTONUMBER_NAME_FIELD)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BB_GLOBAL_VALUE_SET_HAS_INACTIVE_VALUE: readonly string[] = [
+  "Does this global value set have any deactivated values?",
+  "Which shared value sets retain retired values across every field that uses them?",
+  "Is there an inactive value in this global picklist value set?",
+  "What global value sets carry values that are no longer selectable?",
+  "Are any entries in this shared value set deactivated but still on records?",
+];
+describe('funnel ranking — Arc-2 build-all concept:global-value-set-has-inactive-value ranks interpret top-5', () => {
+  it.each(ARC2_BB_GLOBAL_VALUE_SET_HAS_INACTIVE_VALUE)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BB_STANDARD_VALUE_SET_HAS_INACTIVE_VALUE: readonly string[] = [
+  "Does the Lead Source standard value set have retired values?",
+  "Which standard picklists have deactivated values org-wide?",
+  "Are any Opportunity Stage standard values inactive but still on records?",
+  "Show me standard value sets that retain deactivated entries.",
+  "Is there an inactive value in this standard picklist value set?",
+];
+describe('funnel ranking — Arc-2 build-all concept:standard-value-set-has-inactive-value ranks interpret top-5', () => {
+  it.each(ARC2_BB_STANDARD_VALUE_SET_HAS_INACTIVE_VALUE)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BB_APEX_TEST_HARDCODED_SANDBOX_DATA: readonly string[] = [
+  "Which test classes have sandbox-specific data baked into them?",
+  "Do any of my Apex tests hardcode a sandbox URL or org suffix?",
+  "Show me tests that won't run in production because of hardcoded sandbox values",
+  "Are there test classes coupled to a specific sandbox environment?",
+  "Which tests reference .sandbox or --sandbox literals instead of using @TestSetup?",
+];
+describe('funnel ranking — Arc-2 build-all concept:apex-test-hardcoded-sandbox-data ranks interpret top-5', () => {
+  it.each(ARC2_BB_APEX_TEST_HARDCODED_SANDBOX_DATA)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BB_RESTRICTION_RULE_INACTIVE: readonly string[] = [
+  "Is this restriction rule inactive \u2014 does it still hide any records or is its narrowing switched off?",
+  "does a deactivated restriction rule leave records fully visible under normal sharing?",
+  "this restriction rule has active false \u2014 does it enforce any narrowing until it is reactivated?",
+  "should an inactive restriction rule be excluded from what a user cannot see on Case?",
+  "if a restriction rule is turned off, do the records it would hide become visible again?",
+];
+describe('funnel ranking — Arc-2 build-all concept:restriction-rule-inactive ranks interpret top-5', () => {
+  it.each(ARC2_BB_RESTRICTION_RULE_INACTIVE)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BB_APPROVAL_PROCESS_PENDING_LOCK_EDITABILITY: readonly string[] = [
+  "Can the approver edit a record while it's pending their approval?",
+  "Which approval processes let the assigned approver modify the locked record during approval?",
+  "Is a submitted record editable by the current approver, or admin-only, while it awaits approval?",
+  "Does this approval process widen pending-record editability to the approver?",
+  "Who can change a record that's locked in an approval process before a decision is made?",
+];
+describe('funnel ranking — Arc-2 build-all concept:approval-process-pending-lock-editability ranks interpret top-5', () => {
+  it.each(ARC2_BB_APPROVAL_PROCESS_PENDING_LOCK_EDITABILITY)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BB_APPROVAL_PROCESS_RECALL_UNLOCKS_RECORD: readonly string[] = [
+  "Can a submitter recall a pending approval request on this process?",
+  "Which approval processes allow recall, and what actions fire when a request is recalled?",
+  "What happens when someone recalls an approval \u2014 does the record unlock?",
+  "Does recalling an approval trigger field updates or email alerts?",
+  "Can a record leave an approval process without an approver's decision?",
+];
+describe('funnel ranking — Arc-2 build-all concept:approval-process-recall-unlocks-record ranks interpret top-5', () => {
+  it.each(ARC2_BB_APPROVAL_PROCESS_RECALL_UNLOCKS_RECORD)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BB_AUTH_PROVIDER_REGISTRATION_HANDLER_APEX_HOOK: readonly string[] = [
+  "Which auth providers run a registration handler during SSO login?",
+  "Does the Corporate SSO auth provider provision users just-in-time?",
+  "What Apex runs when someone signs in through our SAML provider?",
+  "Which SSO providers can create User records automatically?",
+  "Show me auth providers with a JIT user-provisioning handler.",
+];
+describe('funnel ranking — Arc-2 build-all concept:auth-provider-registration-handler-apex-hook ranks interpret top-5', () => {
+  it.each(ARC2_BB_AUTH_PROVIDER_REGISTRATION_HANDLER_APEX_HOOK)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BB_PLATFORM_EVENT_CHANNEL_MEMBER_FILTERED_STREAM: readonly string[] = [
+  "Which platform event channel members have a filter expression?",
+  "Is the Account CDC channel filtered or does it publish every change?",
+  "What filter narrows the change events on this channel member?",
+  "Do any change data capture subscribers only get a subset of records?",
+  "Which channel members withhold non-matching changes from subscribers?",
+];
+describe('funnel ranking — Arc-2 build-all concept:platform-event-channel-member-filtered-stream ranks interpret top-5', () => {
+  it.each(ARC2_BB_PLATFORM_EVENT_CHANNEL_MEMBER_FILTERED_STREAM)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BB_EXTERNAL_SERVICE_REGISTRATION_INCOMPLETE: readonly string[] = [
+  "Which external service registrations are not fully imported?",
+  "Is the Weather API external service registration complete?",
+  "Which registered external services have unavailable generated actions?",
+  "Do any external service registrations have a broken OpenAPI schema import?",
+  "Show me external services whose status isn't Complete.",
+];
+describe('funnel ranking — Arc-2 build-all concept:external-service-registration-incomplete ranks interpret top-5', () => {
+  it.each(ARC2_BB_EXTERNAL_SERVICE_REGISTRATION_INCOMPLETE)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BB_NAMED_CREDENTIAL_PER_USER_PRINCIPAL: readonly string[] = [
+  "Which named credentials use per-user authentication?",
+  "Does the ERP named credential require each user to set up their own login?",
+  "Which callouts authenticate as the running user instead of a service account?",
+  "Are any named credentials per-user rather than a shared named principal?",
+  "Which named credentials will fail for users who haven't configured credentials?",
+];
+describe('funnel ranking — Arc-2 build-all concept:named-credential-per-user-principal ranks interpret top-5', () => {
+  it.each(ARC2_BB_NAMED_CREDENTIAL_PER_USER_PRINCIPAL)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BB_OMNISTUDIO_TEST_PROCEDURE_SCOPE: readonly string[] = [
+  "Which OmniScripts are flagged as test procedures?",
+  "Do we have any Integration Procedure test harnesses left in production?",
+  "Is this OmniScript a test procedure or a real user-facing flow?",
+  "List the OmniStudio components marked isTestProcedure.",
+  "Which OmniStudio test procedures are cleanup candidates in this org?",
+];
+describe('funnel ranking — Arc-2 build-all concept:omnistudio-test-procedure-scope ranks interpret top-5', () => {
+  it.each(ARC2_BB_OMNISTUDIO_TEST_PROCEDURE_SCOPE)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BB_DATARAPTOR_LOAD_FIRES_ASSIGNMENT_RULES: readonly string[] = [
+  "Which DataRaptors run assignment rules when they write?",
+  "Does this DataRaptor Load trigger Case assignment rules?",
+  "What OmniStudio transforms reassign record owners on save?",
+  "Which DataRaptors have 'Assignment Rules Used' turned on?",
+  "Will loading Leads through this DataRaptor fire assignment rules?",
+];
+describe('funnel ranking — Arc-2 build-all concept:dataraptor-load-fires-assignment-rules ranks interpret top-5', () => {
+  it.each(ARC2_BB_DATARAPTOR_LOAD_FIRES_ASSIGNMENT_RULES)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BB_OMNISTUDIO_METADATA_CACHE_DISABLED: readonly string[] = [
+  "Which OmniScripts have metadata caching disabled?",
+  "Are any Integration Procedures running with the metadata cache turned off?",
+  "Does this OmniScript recompile its definition on every load?",
+  "List the OmniStudio components with isMetadataCacheDisabled set.",
+  "Which Integration Procedures skip metadata caching in production?",
+];
+describe('funnel ranking — Arc-2 build-all concept:omnistudio-metadata-cache-disabled ranks interpret top-5', () => {
+  it.each(ARC2_BB_OMNISTUDIO_METADATA_CACHE_DISABLED)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BB_STATIC_RESOURCE_PUBLIC_CACHE_CONTROL_EXPOSURE: readonly string[] = [
+  "Is this static resource safe to store an API key in?",
+  "Which static resources are cached publicly and reachable by guest users?",
+  "Does a Public cache-control static resource leak to unauthenticated Site visitors?",
+  "What is the difference between Private and Public cache-control on my static resources?",
+  "Can a guest user download this static resource without logging in?",
+];
+describe('funnel ranking — Arc-2 build-all concept:static-resource-public-cache-control-exposure ranks interpret top-5', () => {
+  it.each(ARC2_BB_STATIC_RESOURCE_PUBLIC_CACHE_CONTROL_EXPOSURE)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BB_CUSTOM_METADATA_RECORD_PROTECTED_NAMESPACE_SCOPED: readonly string[] = [
+  "Can subscriber code read this protected custom metadata record?",
+  "Why are the values on this custom metadata record masked?",
+  "Is this protected custom metadata type readable outside its managed package?",
+  "Which custom metadata records are namespace-locked to the owning package?",
+  "Does marking a custom metadata record protected hide it from other Apex?",
+];
+describe('funnel ranking — Arc-2 build-all concept:custom-metadata-record-protected-namespace-scoped ranks interpret top-5', () => {
+  it.each(ARC2_BB_CUSTOM_METADATA_RECORD_PROTECTED_NAMESPACE_SCOPED)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BB_EMAIL_TEMPLATE_UNAVAILABLE_HIDDEN: readonly string[] = [
+  "Why can't agents pick this email template when composing?",
+  "Which email templates are marked not Available For Use?",
+  "Is this email template hidden from the template picker?",
+  "Does an unavailable email template still get sent by automation?",
+  "What does the Available For Use flag on an email template do?",
+];
+describe('funnel ranking — Arc-2 build-all concept:email-template-unavailable-hidden ranks interpret top-5', () => {
+  it.each(ARC2_BB_EMAIL_TEMPLATE_UNAVAILABLE_HIDDEN)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BB_GROUP_ROLE_SUBORDINATES_TRANSITIVE_MEMBERSHIP: readonly string[] = [
+  "Which public groups pull in an entire role subtree?",
+  "Does this group membership cascade down the role hierarchy?",
+  "If I share to this group, does the whole role-and-subordinates tree get access?",
+  "What roles does this public group transitively include?",
+  "Does a role-and-subordinates group member reach every role beneath it?",
+];
+describe('funnel ranking — Arc-2 build-all concept:group-role-subordinates-transitive-membership ranks interpret top-5', () => {
+  it.each(ARC2_BB_GROUP_ROLE_SUBORDINATES_TRANSITIVE_MEMBERSHIP)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});

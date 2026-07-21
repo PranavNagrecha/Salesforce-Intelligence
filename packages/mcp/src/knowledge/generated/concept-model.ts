@@ -1342,6 +1342,197 @@ export const CONCEPTS: Readonly<Record<ConceptId, Concept>> =
         { label: 'Salesforce Help — Design DataRaptor Loads', url: 'https://help.salesforce.com/s/articleView?id=sf.os_design_dataraptor_loads.htm' },
       ],
     },
+    'concept:object-deployment-status-in-development': {
+      id: 'concept:object-deployment-status-in-development',
+      kind: 'access-mechanism',
+      label: 'An In Development object is hidden from every user who lacks Customize Application',
+      summary:
+        'A CUSTOM OBJECT whose deployment status is IN DEVELOPMENT (not Deployed) is hidden from every user who lacks the "Customize Application" administrative permission: its tab, list views, and fields do not appear in the app for ordinary users, and it is effectively unusable in production until an admin flips it to Deployed. It must be EXCLUDED from "which users can work with this object" reasoning about non-admin users, because assuming an In Development object is generally reachable would overstate who can see or edit its records. This is grounded from the object\'s own declared deployment-status value; it names the DECLARED visibility posture, NOT whether any specific user holds Customize Application (an assignment question the offline vault cannot answer), NOT whether the object was intentionally left in development, and NOT record-level access once it IS deployed. Only Deployed objects belong in ordinary-user reachability surfaces.',
+      docs: [
+        { label: 'Salesforce Help — Object Deployment Status (In Development vs Deployed)', url: 'https://help.salesforce.com/s/articleView?id=sf.dev_object_deployment.htm' },
+      ],
+    },
+    'concept:object-autonumber-name-field': {
+      id: 'concept:object-autonumber-name-field',
+      kind: 'field-provenance',
+      label: 'A custom object with an Auto Number Name field has system-assigned, read-only record names',
+      summary:
+        'A CUSTOM OBJECT whose NAME field is an AUTO NUMBER gives every record a SYSTEM-ASSIGNED name generated from a display format and a sequence at insert — so the record Name is READ-ONLY on every write path (the UI, API, Apex, Flow, and data imports cannot set or change it) and is unavailable in a before-insert context (it is assigned during insert). The name is stored and displayed as a formatted STRING, not a number, so it cannot be used in arithmetic; changing the display format renumbers only NEW records, so existing names and any sequence gaps from failed inserts persist. This is grounded from the object\'s own declared name-field type; it names the record-name PROVENANCE (system-assigned, read-only), it is DISTINCT from a custom field of type Auto Number (here it is the record NAME itself that is auto-assigned), and it does NOT name the current or next sequence value (record-level data the offline vault cannot answer) or prove any integration attempts to set the name.',
+      docs: [
+        { label: 'Salesforce Help — Auto-Number Fields', url: 'https://help.salesforce.com/s/articleView?id=sf.custom_field_types.htm' },
+      ],
+    },
+    'concept:global-value-set-has-inactive-value': {
+      id: 'concept:global-value-set-has-inactive-value',
+      kind: 'field-provenance',
+      label: 'A shared global value set retaining a deactivated value retires it across every bound field at once',
+      summary:
+        'A GLOBAL (shared) value set retains INACTIVE (deactivated) values in its own definition rather than deleting them. Because the set is SHARED, deactivating a value removes it from the picker on EVERY picklist field bound to the set at once — it is NO LONGER SELECTABLE for new records anywhere — while existing records that already hold it keep displaying and reporting it (the value stays readable). Reactivating or removing the value ripples to every field bound to the set, so a retired value here is an org-wide data-hygiene and migration signal, not a per-field one. This is grounded from the shared value set\'s OWN declared entries (each value\'s active flag); it names the DECLARED presence of a retired value, NOT whether any record currently holds it (a record-level count the offline vault cannot answer) and NOT which specific fields bind this set (that is the fields\' own usesValueSet edges, resolved separately).',
+      docs: [
+        { label: 'Salesforce Help — Manage Global Picklist Value Sets', url: 'https://help.salesforce.com/s/articleView?id=sf.fields_creating_global_picklist.htm' },
+      ],
+    },
+    'concept:standard-value-set-has-inactive-value': {
+      id: 'concept:standard-value-set-has-inactive-value',
+      kind: 'field-provenance',
+      label: 'A standard value set retaining a deactivated value retires it org-wide on the standard field that uses it',
+      summary:
+        'A STANDARD value set — the org-wide value list behind a standard picklist such as Industry, Lead Source, or Opportunity Stage — retains INACTIVE (deactivated) values rather than deleting them. A deactivated standard value is NO LONGER SELECTABLE for new records on the standard field(s) that draw from the set, yet existing records that already hold it keep displaying and reporting it (the value stays readable). This is grounded from the standard value set\'s OWN declared entries (each value\'s active flag); it names the DECLARED presence of a retired value. A standard field\'s binding to its value set is IMPLICIT — Salesforce wires it internally by the field\'s type, with no declared metadata pointer — so this does NOT name which specific fields are affected (there is no edge to follow), does NOT prove any record currently holds the value (a record-level count the offline vault cannot answer), and is DISTINCT from a custom field\'s own local retired value and from a custom shared global value set.',
+      docs: [
+        { label: 'Salesforce Help — Update Picklists with a Custom or Standard Value Set', url: 'https://help.salesforce.com/s/articleView?id=sf.fields_managing_picklists.htm' },
+      ],
+    },
+    'concept:apex-test-hardcoded-sandbox-data': {
+      id: 'concept:apex-test-hardcoded-sandbox-data',
+      kind: 'test-quality',
+      label: 'A test class hardcodes sandbox-specific literals, so it will not run against production or another org',
+      summary:
+        'An Apex class annotated @IsTest contains a HARDCODED SANDBOX-SPECIFIC literal — a username or URL carrying a sandbox marker such as a `.sandbox` / `.dev` / `.uat` / `.fullcopy` suffix, a `--sandbox` My Domain segment, or a `sandbox.salesforce.com` host. Apex tests are expected to be SELF-CONTAINED and org-agnostic: they should build their own fixtures (a @TestSetup method or a test-data factory) and read environment-specific values from configuration, so the same test passes in every org it is deployed to. A test that embeds a value tied to one specific sandbox breaks that contract — it may pass in the sandbox it was written against and then FAIL, or silently exercise the wrong data, when the code is promoted to production or run in a different sandbox, and because it is a test the failure surfaces only at deploy or run time. Externalize the value into a Custom Metadata Type or Custom Setting record, or generate it in @TestSetup, instead. HONEST BOUNDARY: this is HEURISTIC recognition from TOKENIZED Apex source — NOT a compiler AST. It matches string literals that CARRY a sandbox marker, so it can FLAG a value that is deliberately inert or only descriptive, and can MISS a sandbox value assembled at runtime or held in a helper the recognizer cannot follow. It names a test-portability review candidate, not a proven test failure.',
+      docs: [
+        { label: 'Apex Developer Guide — Testing Best Practices', url: 'https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_testing_best_practices.htm' },
+      ],
+    },
+    'concept:restriction-rule-inactive': {
+      id: 'concept:restriction-rule-inactive',
+      kind: 'firing-condition',
+      label: 'An inactive restriction rule enforces no narrowing and leaves records fully visible per normal sharing',
+      summary:
+        'A RESTRICTION RULE whose `active` flag is FALSE is DEAD access control: while inactive it filters NOTHING, so the records it would otherwise HIDE stay fully visible to the users it targets under the org-wide default, sharing rules, the role hierarchy, and manual / Apex shares. A restriction rule is the ONE declarative mechanism that NARROWS record access BELOW what every other sharing feature grants — every other mechanism only widens — so a deactivated one subtracts nothing until an admin re-activates it. It must be EXCLUDED from "what can this user NOT see" reasoning and from any conclusion that an object\'s records are narrowed on its account: treating a disabled rule as a live boundary would falsely imply records are hidden that are in fact exposed, while treating it as gone would miss that re-activation instantly narrows them again. This is grounded from the rule\'s own always-present `active` flag; it names the non-enforcing STRUCTURAL fact, NOT whether the rule WOULD narrow a specific record if activated (its recordFilter / userCriteria remain unevaluated offline) and NOT why it was deactivated. Only active restriction rules narrow record access.',
+      docs: [
+        { label: 'Salesforce Help — Restriction Rules', url: 'https://help.salesforce.com/s/articleView?id=sf.security_restriction_rule.htm' },
+      ],
+    },
+    'concept:approval-process-pending-lock-editability': {
+      id: 'concept:approval-process-pending-lock-editability',
+      kind: 'access-mechanism',
+      label: 'An approval process can widen the pending record\'s lock so the assigned approver may edit it',
+      summary:
+        'When a record is SUBMITTED into an approval process it is AUTOMATICALLY LOCKED while it is PENDING — read-only to everyone except administrators and "Modify All"/"Modify All Data" holders. The process\'s `recordEditability` setting decides whether that pending lock is WIDENED: `AdminOrCurrentApprover` additionally lets the CURRENTLY-ASSIGNED APPROVER edit the very record awaiting their decision, whereas the default `AdminOnly` bars even the approver from editing it until the process completes. This is an access and audit surface — under the widened posture the person evaluating the request can also modify the record they are approving, and any field the approver changes while it is pending is a real edit path a save-order or data-integrity analysis must account for. This is grounded from the approval process\'s own declared `recordEditability` value; it names the DECLARED pending-lock editability, NOT whether any specific record is currently pending or locked (record-level runtime state the offline vault does not hold), NOT WHO the assigned approver is on a given record (approver routing is per-record and per-step), and NOT the separate final-approval / final-rejection lock behavior. An approval process set to `AdminOnly` (or that declares no recordEditability) contributes no approver-edit widening.',
+      docs: [
+        { label: 'Salesforce Help — Considerations for Approvals (record locking)', url: 'https://help.salesforce.com/s/articleView?id=sf.approvals_considerations.htm' },
+      ],
+    },
+    'concept:approval-process-recall-unlocks-record': {
+      id: 'concept:approval-process-recall-unlocks-record',
+      kind: 'firing-condition',
+      label: 'An approval process that allows recall lets the submitter withdraw a request, unlocking the record and firing recall actions',
+      summary:
+        'An APPROVAL PROCESS whose `allowRecall` flag is true lets the ORIGINAL SUBMITTER RECALL (withdraw) a still-pending approval request. A recall UNLOCKS the record — it leaves the locked/pending state without any approver\'s decision — and FIRES the process\'s recall actions: the field updates, email alerts, tasks, or outbound messages configured on the recall hook. So the record can exit approval purely by submitter action, and that exit runs its own automation, which matters for "why did this record unlock, or why did this field change, while it was in approval?" reasoning and for automation-impact counts. This is grounded from the process\'s own always-present `allowRecall` boolean; it names the DECLARED recall CAPABILITY, NOT whether any specific record was ever recalled (record-level runtime state the offline vault does not hold), WHO may submit or recall (submitter membership is per-record / per-config), or whether the recall actions succeed. An approval process with `allowRecall` false permits no submitter recall — a pending record moves forward only by an approver\'s action (or an admin), so no submitter-driven unlock or recall-action firing applies.',
+      docs: [
+        { label: 'Salesforce Help — Considerations for Approvals', url: 'https://help.salesforce.com/s/articleView?id=sf.approvals_considerations.htm' },
+      ],
+    },
+    'concept:auth-provider-registration-handler-apex-hook': {
+      id: 'concept:auth-provider-registration-handler-apex-hook',
+      kind: 'access-mechanism',
+      label: 'An auth provider\'s registration handler runs Apex in system context during SSO just-in-time provisioning',
+      summary:
+        'An AUTH PROVIDER whose `registrationHandler` names an Apex class binds a hidden identity entry point: on every social-sign-on / SSO login through this provider, Salesforce invokes that class (an implementation of `Auth.RegistrationHandler`) in SYSTEM context to CREATE or UPDATE the User record for the authenticating identity — just-in-time (JIT) user provisioning. The handler runs OUTSIDE the normal UI / permission path and under the provider\'s declared `executionUser` identity, so it can insert or modify Users, assign profiles, and set fields with the platform\'s trust rather than the logging-in person\'s. This is grounded from the provider\'s own declared `registrationHandler` binding; it names the STRUCTURAL entry-point fact, NOT whether any user has actually logged in through this provider, NOT what the handler code does (its logic is a separate ApexClass the offline vault does not execute), and NOT whether the class still exists or compiles. Review the handler as a privileged provisioning surface.',
+      severity: 'high',
+      docs: [
+        { label: 'Salesforce Help — Add an Apex Registration Handler to an Auth. Provider', url: 'https://help.salesforce.com/s/articleView?id=sf.sso_provider_addl_apex.htm' },
+      ],
+    },
+    'concept:platform-event-channel-member-filtered-stream': {
+      id: 'concept:platform-event-channel-member-filtered-stream',
+      kind: 'firing-condition',
+      label: 'A channel member\'s filter expression narrows which events publish to the platform event or CDC channel',
+      summary:
+        'A PLATFORM EVENT CHANNEL MEMBER that declares a `filterExpression` binds its entity onto the channel with a FILTER: only the change events (or platform events) whose fields satisfy that declared expression are published to the channel and delivered to its subscribers — every other change is silently withheld from this stream. So a subscriber reading this channel sees a NARROWED subset, not the object\'s full change feed; automation or integrations that assume every change arrives can miss records that fail the filter. This is grounded from the member\'s own declared `filterExpression`; it names the STRUCTURAL filtered-stream fact, NOT runtime EVALUATION of which specific records pass the filter (that needs record-level data the offline vault does not have) and NOT the delivery guarantees of the channel itself (retention, replay, and ordering are separate async limits covered elsewhere).',
+      docs: [
+        { label: 'Salesforce Help — Filter Your Stream of Change Events', url: 'https://help.salesforce.com/s/articleView?id=sf.cdc_filter_change_events.htm' },
+      ],
+    },
+    'concept:external-service-registration-incomplete': {
+      id: 'concept:external-service-registration-incomplete',
+      kind: 'status-code',
+      label: 'An external service registration whose status is not Complete has unavailable generated actions',
+      summary:
+        'An EXTERNAL SERVICE REGISTRATION whose `status` is anything other than `Complete` (for example `InProgress` or `NotComplete`) did not finish importing its OpenAPI schema into invocable operations: its generated actions are UNAVAILABLE, so any Flow, Apex, or OmniStudio step that invokes an operation from this registration cannot resolve it and fails at build or run time. A non-Complete registration is a half-built integration binding, not a live one. This is grounded from the registration\'s own always-present `status` scalar; it names the STRUCTURAL availability fact, NOT why the import stalled (schema fetch, auth, or parse errors are not captured offline) and NOT whether any component actually calls an operation from this service (that is a separate usage question). Only a Complete registration exposes callable operations.',
+      docs: [
+        { label: 'Salesforce Help — Generate an External Service', url: 'https://help.salesforce.com/s/articleView?id=sf.external_services.htm' },
+      ],
+    },
+    'concept:named-credential-per-user-principal': {
+      id: 'concept:named-credential-per-user-principal',
+      kind: 'access-mechanism',
+      label: 'A per-user named credential authenticates each callout under the running user\'s own external credential',
+      summary:
+        'A NAMED CREDENTIAL whose `principalType` is `PerUser` does NOT carry one shared org-wide identity: each callout that authenticates through it uses the RUNNING USER\'s own per-user external credential, which every user must configure individually before their callouts can succeed. So the same Apex or flow callout behaves differently per user — it authenticates as that user against the external system, and it FAILS for any user who has not set up their personal credential — and the external system\'s audit log attributes each call to a distinct per-user identity rather than a single service account. This is grounded from the credential\'s own declared `principalType`; it names the STRUCTURAL per-user authentication posture, NOT which users have configured their credential (that is per-user runtime state the offline vault does not hold) and NOT whether any Apex actually issues a callout through this credential.',
+      docs: [
+        { label: 'Salesforce Help — Define a Named Credential', url: 'https://help.salesforce.com/s/articleView?id=sf.named_credentials_define.htm' },
+      ],
+    },
+    'concept:omnistudio-test-procedure-scope': {
+      id: 'concept:omnistudio-test-procedure-scope',
+      kind: 'firing-condition',
+      label: 'An OmniStudio component flagged as a test procedure is a development test harness, not production runtime, and must be excluded from what-actually-runs analysis',
+      summary:
+        'An OmniStudio component — an OmniScript or Integration Procedure — whose `isTestProcedure` flag is TRUE is a DEVELOPMENT TEST HARNESS: its declared purpose is to exercise and validate ANOTHER OmniScript or Integration Procedure during development, NOT to serve end users as a production flow. It is not part of the normal production runtime surface — it is invoked to test a target component, not rendered to users, embedded on a page, or dispatched as production automation. It must therefore be EXCLUDED from \'what actually runs in production\', runtime-reachability, and invocation-impact reasoning about OmniStudio, and it is a likely cleanup candidate when found in a production org. This is grounded from the component\'s own always-present `isTestProcedure` boolean; it names the declared test-harness scope, NOT whether the test currently passes, NOT which component it targets, NOT whether it has ever been run, and NOT whether it is also active (liveness is the separate `isActive` axis). Test procedures do not belong in production runtime-execution surfaces.',
+      docs: [
+        { label: 'Salesforce Help — Test OmniScripts and Integration Procedures', url: 'https://help.salesforce.com/s/articleView?id=sf.os_test_omniscripts.htm' },
+      ],
+    },
+    'concept:dataraptor-load-fires-assignment-rules': {
+      id: 'concept:dataraptor-load-fires-assignment-rules',
+      kind: 'firing-condition',
+      label: 'A DataRaptor with \'Assignment Rules Used\' on fires the object\'s assignment rules as a side effect of the records it writes',
+      summary:
+        'A DataRaptor (an OmniStudio OmniDataTransform) whose \'Assignment Rules Used\' toggle is ON writes its Lead or Case records with the assignment-rule header set, so when it inserts or updates those records the object\'s ACTIVE assignment rules EVALUATE as a side effect of the transform\'s save: record ownership can be reassigned and assignment email notifications can be sent, even though nothing in the DataRaptor\'s own field mappings says so. A reader tracing what this transform does must account for that downstream assignment automation, not just the mapped field writes — the write path fans out into the object\'s routing rules. This is grounded from the transform\'s own declared `assignmentRulesUsed` toggle; it names the declared intent to run assignment rules on write, NOT a proof of any outcome: it does NOT establish that the target object has any ACTIVE assignment rule, that any specific record is actually reassigned or notified, or that the transform writes Lead / Case at all (only Lead and Case support assignment rules — the toggle is inert on any other object). It names the save-time side-effect surface, not a confirmed reassignment.',
+      docs: [
+        { label: 'Salesforce Help — DataRaptor Load Options', url: 'https://help.salesforce.com/s/articleView?id=sf.os_design_dataraptor_loads.htm' },
+      ],
+    },
+    'concept:omnistudio-metadata-cache-disabled': {
+      id: 'concept:omnistudio-metadata-cache-disabled',
+      kind: 'code-quality-defect',
+      label: 'An OmniStudio component with metadata caching disabled recompiles its definition on every invocation, adding per-request latency',
+      summary:
+        'An OmniStudio component — an OmniScript or Integration Procedure — whose `isMetadataCacheDisabled` flag is TRUE runs WITHOUT metadata caching: the OmniStudio runtime does not cache the component\'s compiled definition, so it re-reads and recompiles the definition metadata on EVERY load or invocation instead of serving a cached copy. That adds per-request latency, and for an Integration Procedure invoked at volume it repeats that compile work on each call, adding CPU and metadata-query pressure to every transaction that touches the component. Disabling the metadata cache is a documented DEVELOPMENT / debugging aid (so a designer sees definition edits immediately) that is not meant to ship to a production org, where it becomes a standing performance drag. This is grounded from the component\'s own always-present `isMetadataCacheDisabled` boolean; it names the declared cache-disabled configuration posture, NOT a measured regression: it does NOT prove any specific slowdown, timeout, page-load delay, or governor-limit breach at runtime — those depend on invocation volume and org load the offline vault does not hold. It names the disabled-cache structural signal, not a confirmed performance incident.',
+      docs: [
+        { label: 'Salesforce Help — OmniStudio Metadata Caching', url: 'https://help.salesforce.com/s/articleView?id=sf.os_omnistudio_metadata_caching.htm' },
+      ],
+    },
+    'concept:static-resource-public-cache-control-exposure': {
+      id: 'concept:static-resource-public-cache-control-exposure',
+      kind: 'access-mechanism',
+      label: 'A static resource with Public cache-control is shared-cached and reachable by unauthenticated guest users',
+      summary:
+        'A STATIC RESOURCE whose cacheControl is set to Public is cached in a SHARED, cross-user cache (the browser and the Salesforce CDN keep one copy served to all users) and is eligible to be delivered to UNAUTHENTICATED guest users through a Salesforce Site or Experience Cloud resource URL — so its bytes are effectively world-readable to anyone who can reach that URL and must never hold secrets such as API keys, tokens, or credentials. The alternative, Private, scopes caching to the requesting user own session and is not shared across users. This is grounded from the resource own always-present cacheControl scalar; it names the DECLARED cache-control posture and the shared-cache / guest-exposure it enables, NOT proof that the resource actually contains sensitive data, NOT whether any public page currently references it, and NOT whether its URL has in fact been shared. Only the Public posture is asserted, never a proven leak of a specific secret.',
+      docs: [
+        { label: 'Metadata API Developer Guide — StaticResource', url: 'https://developer.salesforce.com/docs/atlas.en-us.api_meta.meta/api_meta/meta_staticresource.htm' },
+      ],
+    },
+    'concept:custom-metadata-record-protected-namespace-scoped': {
+      id: 'concept:custom-metadata-record-protected-namespace-scoped',
+      kind: 'access-mechanism',
+      label: 'A protected custom metadata record is accessible only to code in its own namespace',
+      summary:
+        'A PROTECTED custom metadata record is accessible ONLY to Apex, Flow, and formula code that runs in the SAME namespace that owns the record. When the owning type is packaged and installed into a subscriber org, the subscriber own Apex and SOQL CANNOT read the record, and its protected field values are returned masked (the three-asterisk literal) rather than as real content — which is exactly why protected custom metadata is the standard place to store package secrets. An UNPROTECTED record, by contrast, is readable by any code in the org. This is grounded from the record own required, declared protected flag; it names a PACKAGING-SCOPED access boundary only. It does NOT assert the record actual field values (which may be masked and unreadable from this offline snapshot), NOT whether this org is the owning namespace or a downstream subscriber, and NOT that any specific query is currently blocked — those depend on install context the offline vault does not hold.',
+      docs: [
+        { label: 'Metadata API Developer Guide — CustomMetadata', url: 'https://developer.salesforce.com/docs/atlas.en-us.api_meta.meta/api_meta/meta_custommetadata.htm' },
+      ],
+    },
+    'concept:email-template-unavailable-hidden': {
+      id: 'concept:email-template-unavailable-hidden',
+      kind: 'status-code',
+      label: 'An email template marked not Available For Use is hidden from the template picker',
+      summary:
+        'An EMAIL TEMPLATE whose Available For Use flag is false is NOT offered to users when they compose or send an email through the UI — it is hidden from the email-template picker and cannot be selected for a manual send, so it is effectively dormant for interactive use and should be EXCLUDED from any which-templates-can-a-user-choose surface. This is grounded from the template own required, declared available flag; it names the DECLARED availability status only. It does NOT prove the template is unused — automation, workflow / flow email alerts, or Apex that reference the template DIRECTLY by id or developer name can still send it regardless of this flag — and it says nothing about the template body, subject, or merge fields. Only the not-offered-in-the-picker status is asserted, never a proven absence of every sender.',
+      docs: [
+        { label: 'Metadata API Developer Guide — EmailTemplate', url: 'https://developer.salesforce.com/docs/atlas.en-us.api_meta.meta/api_meta/meta_emailtemplate.htm' },
+      ],
+    },
+    'concept:group-role-subordinates-transitive-membership': {
+      id: 'concept:group-role-subordinates-transitive-membership',
+      kind: 'access-mechanism',
+      label: 'A public group whose member is a role-and-subordinates transitively contains the whole role subtree',
+      summary:
+        'A PUBLIC GROUP whose declared membership includes a role AND its SUBORDINATES transitively contains the named role plus EVERY role beneath it in the role hierarchy — the whole subtree is a member of the group. Because groups are the reusable principal that many access mechanisms grant to, ANY access conferred on this group — an owner-based or criteria-based sharing rule shared to the group, queue ownership, report / dashboard / document folder access, or list-view sharing — therefore reaches the entire role subtree, not just a single role. This is grounded from the group own declared member row (the role-and-subordinates membership marker); it names the DECLARED membership cascade — the ROLES the group pulls in — NOT the individual users occupying those roles (an assignment question the offline vault does not answer) and NOT any specific record grant, which additionally depends on each object org-wide default and record-level state the offline snapshot does not hold.',
+      docs: [
+        { label: 'Metadata API Developer Guide — Group', url: 'https://developer.salesforce.com/docs/atlas.en-us.api_meta.meta/api_meta/meta_group.htm' },
+      ],
+    },
   });
 
 /**
@@ -3128,5 +3319,195 @@ export const CONCEPT_RULES: readonly ConceptRule[] = Object.freeze<ConceptRule[]
     maxConfidence: 'declared',
     absenceShaped: false,
     dependsOnCoverage: ['OmniDataTransform'],
+  },
+  {
+    id: 'rule:object/deployment-status-in-development',
+    concept: 'concept:object-deployment-status-in-development',
+    bind: { componentTypes: ['CustomObject'], whereProperty: { key: 'deploymentStatus', equals: 'InDevelopment' } },
+    interpretation:
+      '{ids} has deployment status IN DEVELOPMENT (not Deployed) — so the object, its tab, its list views, and its fields are HIDDEN from every user who lacks the "Customize Application" administrative permission (in practice, all non-admin users), and the object is effectively unusable in production until an admin sets it to Deployed. It must be EXCLUDED from reasoning about which ordinary users can see or work with this object and its records. This names the DECLARED deployment-status posture from the object\'s own metadata; it does NOT prove whether any specific user holds Customize Application (an assignment question the offline vault cannot answer) and does NOT establish whether the object was intentionally left in development. Only Deployed objects belong in ordinary-user reachability surfaces.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['CustomObject'],
+  },
+  {
+    id: 'rule:object/autonumber-name-field',
+    concept: 'concept:object-autonumber-name-field',
+    bind: { componentTypes: ['CustomObject'], whereProperty: { key: 'nameFieldType', equals: 'AutoNumber' } },
+    interpretation:
+      '{ids} is a custom object whose NAME field is an AUTO NUMBER — every record\'s Name is SYSTEM-ASSIGNED from a display format and a sequence at insert, so the record name is READ-ONLY on every write path (UI, API, Apex, Flow, and data import cannot set it), is unavailable in a before-insert context (assigned during insert), and is stored and displayed as a formatted STRING rather than a number. Changing the display format renumbers only new records; existing names and any sequence gaps from failed inserts persist. This is grounded from the object\'s own declared name-field type; it names the system-assigned read-only provenance of the record NAME (DISTINCT from a custom field of type Auto Number), NOT the current or next sequence value (record-level data the offline vault cannot answer) and NOT whether any integration tries to set the name.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['CustomObject'],
+  },
+  {
+    id: 'rule:global-value-set/has-inactive-value',
+    concept: 'concept:global-value-set-has-inactive-value',
+    bind: { componentTypes: ['GlobalValueSet'], whereProperty: { key: 'values', anyElement: { key: 'isActive', equals: false } } },
+    interpretation:
+      '{ids} is a GLOBAL (shared) value set that retains at least one INACTIVE (deactivated) value. Because this value set is SHARED, the retired value is removed from the picker on EVERY picklist field bound to the set at once — it is NO LONGER SELECTABLE for new records anywhere — yet existing records that already hold it keep displaying and reporting it (the value stays readable). Reactivating or removing the value ripples to every field bound to the set. This names the DECLARED presence of a deactivated entry in the shared value set\'s own metadata; it does NOT prove any record currently holds the value (a record-level count the offline vault cannot answer) and does NOT enumerate which fields bind this set (that is the fields\' own usesValueSet edges).',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['GlobalValueSet'],
+  },
+  {
+    id: 'rule:standard-value-set/has-inactive-value',
+    concept: 'concept:standard-value-set-has-inactive-value',
+    bind: { componentTypes: ['StandardValueSet'], whereProperty: { key: 'values', anyElement: { key: 'active', equals: false } } },
+    interpretation:
+      '{ids} is a STANDARD value set (the org-wide value list behind a standard picklist such as Industry, Lead Source, or Opportunity Stage) that retains at least one INACTIVE (deactivated) value. The retired value is NO LONGER SELECTABLE for new records on the standard field(s) that draw from this set, yet existing records that already hold it keep displaying and reporting it (the value stays readable). This names the DECLARED presence of a deactivated entry in the standard value set\'s own metadata; a standard field\'s binding to its value set is IMPLICIT (Salesforce wires it internally, so there is no edge and this does NOT name which fields are affected), it does NOT prove any record currently holds the value (record-level data the offline vault cannot answer), and it is DISTINCT from a custom field\'s own local retired value and from a shared global value set.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['StandardValueSet'],
+  },
+  {
+    id: 'rule:apex-test-quality/hardcoded-sandbox-data',
+    concept: 'concept:apex-test-hardcoded-sandbox-data',
+    bind: { componentTypes: ['ApexClass'], whereProperty: { key: 'qualityIssues', anyElement: { key: 'rule', equals: 'hardcoded-sandbox-test-data' } } },
+    interpretation:
+      '{ids} is an @IsTest class that hardcodes a SANDBOX-SPECIFIC literal — a username or URL carrying a sandbox marker (a `.sandbox` / `.dev` / `.uat` / `.fullcopy` suffix, a `--sandbox` My Domain segment, or a `sandbox.salesforce.com` host). An Apex test is expected to be org-agnostic and self-contained, building its own fixtures in @TestSetup or a test-data factory; a sandbox-specific literal breaks that, so the test may pass in the sandbox it was written against and then FAIL, or exercise the wrong data, when the code is promoted to production or run in another org — and because it is a test that failure surfaces only at deploy or run time. Move the value into a Custom Metadata Type or Custom Setting record, or generate it in @TestSetup. This is HEURISTIC recognition from TOKENIZED Apex source — NOT a compiler AST: it flags the sandbox-marked literal itself and can FLAG a deliberately inert string or MISS a value assembled at runtime. It names a test-portability review candidate, not a proven test failure.',
+    maxConfidence: 'heuristic',
+    absenceShaped: false,
+    dependsOnCoverage: ['ApexClass'],
+  },
+  {
+    id: 'rule:restriction-rule/inactive',
+    concept: 'concept:restriction-rule-inactive',
+    bind: { componentTypes: ['RestrictionRule'], whereProperty: { key: 'active', equals: 'false' } },
+    interpretation:
+      '{ids} is an INACTIVE restriction rule (its `active` flag is false) — while inactive it enforces NO narrowing, so the records it would otherwise HIDE stay fully visible to the users it targets under the org-wide default, sharing rules, the role hierarchy, and manual / Apex shares. It must be EXCLUDED from "what can this user NOT see" reasoning and from any conclusion that an object is narrowed on its account: a restriction rule is the sole subtractive sharing mechanism, and a deactivated one subtracts nothing until an admin re-activates it. This is grounded from the rule\'s own `active` flag; it names the non-enforcing STRUCTURAL fact, NOT whether the rule WOULD narrow a specific record if activated (its recordFilter / userCriteria remain unevaluated offline) and NOT why it was deactivated. Only active restriction rules narrow record access.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['RestrictionRule'],
+  },
+  {
+    id: 'rule:approval-process/pending-lock-editable-by-approver',
+    concept: 'concept:approval-process-pending-lock-editability',
+    bind: { componentTypes: ['ApprovalProcess'], whereProperty: { key: 'recordEditability', equals: 'AdminOrCurrentApprover' } },
+    interpretation:
+      '{ids} declares `recordEditability` = AdminOrCurrentApprover — while a record is PENDING in this approval process it is AUTOMATICALLY LOCKED, and this setting WIDENS who may edit that locked record to include the CURRENTLY-ASSIGNED APPROVER, not only administrators and "Modify All"/"Modify All Data" holders. So the approver evaluating the request can also modify the very record awaiting their decision (an access and audit surface), whereas the default AdminOnly posture bars even the approver from editing while it is pending. This is the DECLARED pending-lock editability from the process\'s own recordEditability flag; it does NOT assert whether any specific record is currently pending or locked (record-level runtime state the offline vault does not hold), WHO the assigned approver is on a given record, or the separate final-approval / final-rejection lock behavior. An approval process set to AdminOnly, or that declares no recordEditability, contributes no approver-edit widening.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['ApprovalProcess'],
+  },
+  {
+    id: 'rule:approval-process/recall-enabled',
+    concept: 'concept:approval-process-recall-unlocks-record',
+    bind: { componentTypes: ['ApprovalProcess'], whereProperty: { key: 'allowRecall', equals: true } },
+    interpretation:
+      '{ids} declares `allowRecall` = true — this approval process lets the ORIGINAL SUBMITTER RECALL (withdraw) a still-pending approval request. A recall UNLOCKS the record (it leaves the locked/pending state) and fires the process\'s recall actions — the field updates, email alerts, tasks, or outbound messages configured on the recall hook — so a record can exit the pending approval WITHOUT any approver\'s decision, purely by submitter action, and that exit runs its own automation. This matters for "why did this record unlock, or why did this field change while it was in approval?" reasoning. This names the DECLARED recall capability from the process\'s own allowRecall flag; it does NOT assert that any specific record was recalled, WHO may submit or recall it, or whether the recall actions succeed. An approval process with allowRecall false permits no submitter recall — only an approver\'s action moves a pending record forward.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['ApprovalProcess'],
+  },
+  {
+    id: 'rule:integration/auth-provider-registration-handler',
+    concept: 'concept:auth-provider-registration-handler-apex-hook',
+    bind: { componentTypes: ['AuthProvider'], whereProperty: { key: 'registrationHandler', isNull: false } },
+    interpretation:
+      '{ids} is an auth provider with a REGISTRATION HANDLER — an Apex class Salesforce invokes in SYSTEM context on every SSO / social login through this provider to CREATE or UPDATE the authenticating user\'s User record (just-in-time provisioning), running under the declared executionUser identity rather than the logging-in person. It is a privileged, hidden entry point that can insert Users, assign profiles, and set fields outside the normal permission path. This names the DECLARED handler binding only — NOT proof that anyone has logged in through this provider, NOT what the handler code does (a separate ApexClass the offline vault does not execute), and NOT that the class still compiles.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['AuthProvider'],
+  },
+  {
+    id: 'rule:integration/platform-event-channel-member-filter',
+    concept: 'concept:platform-event-channel-member-filtered-stream',
+    bind: { componentTypes: ['PlatformEventChannelMember'], whereProperty: { key: 'filterExpression', isNull: false } },
+    interpretation:
+      '{ids} is a platform event / CDC channel member with a declared FILTER EXPRESSION — it narrows the channel to only the change events whose fields satisfy that expression, so subscribers see a NARROWED subset of the object\'s changes and every non-matching change is withheld from this stream. Integrations that assume the full change feed arrives can miss filtered-out records. This is the DECLARED filter text only — NOT runtime evaluation of which records actually pass (that needs record-level data the offline vault lacks), and NOT the channel\'s retention / replay / ordering guarantees, which are a separate async concern.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['PlatformEventChannelMember'],
+  },
+  {
+    id: 'rule:integration/external-service-registration-incomplete',
+    concept: 'concept:external-service-registration-incomplete',
+    bind: { componentTypes: ['ExternalService'], whereProperty: { key: 'status', notIn: ['Complete'] } },
+    interpretation:
+      '{ids} is an external service registration whose status is NOT Complete — its OpenAPI schema did not finish importing into invocable operations, so its generated actions are UNAVAILABLE and any Flow, Apex, or OmniStudio step that invokes an operation from this registration cannot resolve it and fails. This names the DECLARED status only — NOT why the import stalled (fetch / auth / parse errors are not captured offline) and NOT whether any component actually calls an operation from this service. Only a Complete registration exposes callable operations.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['ExternalService'],
+  },
+  {
+    id: 'rule:integration/named-credential-per-user-principal',
+    concept: 'concept:named-credential-per-user-principal',
+    bind: { componentTypes: ['NamedCredential'], whereProperty: { key: 'principalType', equals: 'PerUser' } },
+    interpretation:
+      '{ids} is a named credential with a PER-USER principal type — it carries no shared org-wide identity; each callout authenticates under the running user\'s own per-user external credential, which every user must configure individually. The same callout authenticates as a different identity per user and FAILS for any user who has not set up their personal credential, and the external system attributes calls to distinct per-user identities rather than one service account. This names the DECLARED per-user posture only — NOT which users have configured their credential (per-user runtime state the offline vault does not hold) and NOT whether any Apex actually calls through this credential.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['NamedCredential'],
+  },
+  {
+    id: 'rule:omnistudio/test-procedure-scope',
+    concept: 'concept:omnistudio-test-procedure-scope',
+    bind: { componentTypes: ['OmniScript', 'OmniIntegrationProcedure'], whereProperty: { key: 'isTestProcedure', equals: true } },
+    interpretation:
+      '{ids} is flagged as an OmniStudio TEST PROCEDURE (isTestProcedure = true) — a development test harness whose purpose is to exercise and validate another OmniScript or Integration Procedure, NOT a production user-facing flow. It is not part of the normal production runtime surface: it is invoked to test a target component, not served to end users or dispatched as production automation. EXCLUDE it from \'what actually runs in production\', runtime-reachability, and invocation-impact reasoning, and treat it as a likely cleanup candidate in a production org. This names the declared test-procedure flag from the component\'s own metadata, NOT whether the test currently passes, which component it targets, whether it has ever been run, or whether it is also active (liveness is the separate isActive axis).',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['OmniScript', 'OmniIntegrationProcedure'],
+  },
+  {
+    id: 'rule:omnistudio/dataraptor-load-fires-assignment-rules',
+    concept: 'concept:dataraptor-load-fires-assignment-rules',
+    bind: { componentTypes: ['OmniDataTransform'], whereProperty: { key: 'assignmentRulesUsed', equals: true } },
+    interpretation:
+      '{ids} is a DataRaptor with \'Assignment Rules Used\' turned ON — when it writes Lead or Case records (a DataRaptor Load), the insert or update runs with the assignment-rule header set, so the object\'s ACTIVE assignment rules evaluate on the written records and can reassign record ownership and send assignment email notifications as a SIDE EFFECT of the transform\'s save. A reader tracing what this transform does must account for that downstream assignment automation, not just the mapped field writes. This names the declared assignment-rules toggle from the transform\'s own metadata; it does NOT prove the target object has any active assignment rule, that any record is actually reassigned or notified, or that the transform writes Lead / Case at all (only Lead and Case support assignment rules) — the runtime outcome depends on org data the offline vault does not hold.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['OmniDataTransform'],
+  },
+  {
+    id: 'rule:omnistudio/metadata-cache-disabled',
+    concept: 'concept:omnistudio-metadata-cache-disabled',
+    bind: { componentTypes: ['OmniScript', 'OmniIntegrationProcedure'], whereProperty: { key: 'isMetadataCacheDisabled', equals: true } },
+    interpretation:
+      '{ids} has metadata caching DISABLED (isMetadataCacheDisabled = true) — the OmniStudio runtime does not cache this component\'s compiled definition, so it re-reads and recompiles the definition metadata on every load or invocation instead of serving a cached copy. That adds per-request latency, and for an Integration Procedure invoked at volume it repeats that compile work on each call, increasing CPU and metadata-query pressure. Disabling the metadata cache is a documented development / debugging aid that is not meant to ship to a production org. This names the declared cache-disabled configuration flag from the component\'s own metadata, NOT a measured regression: it does NOT prove any specific slowdown, timeout, or limit breach at runtime, only the disabled-cache posture.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['OmniScript', 'OmniIntegrationProcedure'],
+  },
+  {
+    id: 'rule:static-resource/public-cache-control',
+    concept: 'concept:static-resource-public-cache-control-exposure',
+    bind: { componentTypes: ['StaticResource'], whereProperty: { key: 'cacheControl', equals: 'Public' } },
+    interpretation:
+      '{ids} is a static resource whose cacheControl is Public — the platform caches it in a SHARED, cross-user cache and it can be served to UNAUTHENTICATED guest users through a Site or Experience Cloud resource URL, so its bytes are effectively world-readable to anyone who can reach that URL and must never hold secrets (API keys, tokens, credentials). A Private cacheControl instead scopes caching to the requesting user own session. This names the DECLARED cache-control posture from the resource own metadata; it does NOT prove the resource actually contains sensitive data, that any public page currently references it, or that its URL has been shared — only that the Public setting makes shared caching and guest exposure possible.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['StaticResource'],
+  },
+  {
+    id: 'rule:custom-metadata-record/protected-namespace-scoped',
+    concept: 'concept:custom-metadata-record-protected-namespace-scoped',
+    bind: { componentTypes: ['CustomMetadataRecord'], whereProperty: { key: 'protected', equals: true } },
+    interpretation:
+      '{ids} is a PROTECTED custom metadata record — protected metadata is accessible ONLY to Apex, Flow, and formula code that runs in the SAME namespace that owns it. When this type is packaged and installed in a subscriber org, the subscriber own Apex and SOQL CANNOT read the record, and its protected field values come back masked rather than as real content (which is why protected records are the standard home for package secrets); an unprotected record is readable by any code in the org. This names the DECLARED protection flag from the record own metadata — a packaging-scoped ACCESS boundary — NOT the record actual field values (which may be masked and unreadable offline) and NOT whether this org is the owning namespace or a subscriber.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['CustomMetadataRecord'],
+  },
+  {
+    id: 'rule:email-template/unavailable-hidden',
+    concept: 'concept:email-template-unavailable-hidden',
+    bind: { componentTypes: ['EmailTemplate'], whereProperty: { key: 'available', equals: false } },
+    interpretation:
+      '{ids} has its Available For Use flag set to false — the template is NOT offered in the email-template picker, so users cannot select it when composing or sending an email through the UI. It is effectively hidden and dormant for manual use and should be EXCLUDED from which-templates-can-a-user-choose surfaces. This names the DECLARED availability flag from the template own metadata; it does NOT prove the template is unused — automation, email alerts, or Apex that reference it directly by id can still send it — and it says nothing about the template body or merge fields.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['EmailTemplate'],
+  },
+  {
+    id: 'rule:group/role-subordinates-transitive-membership',
+    concept: 'concept:group-role-subordinates-transitive-membership',
+    bind: { edgeType: 'hasMember', componentTypes: ['Group', 'Role'], edgeWhereProperty: { key: 'inheritance', equals: 'subordinates' } },
+    interpretation:
+      'Transitive group membership among {ids}: this public group membership includes a role AND its SUBORDINATES, so the group transitively contains the named role plus EVERY role beneath it in the role hierarchy — the whole subtree is a member. Any access granted to this group — an owner- or criteria-based sharing rule shared to it, queue ownership, folder access, or list-view sharing — therefore reaches the entire role subtree, not just a single role. This is the DECLARED membership cascade on the group own member row; it names the ROLES the group pulls in, NOT the individual users occupying them (an assignment question the offline vault does not answer) and NOT any specific record grant.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['Group', 'Role'],
   },
 ]);
