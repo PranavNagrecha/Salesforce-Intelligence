@@ -772,3 +772,203 @@ describe('funnel ranking — Arc-2 batch3 session-based-permission-set-dormant r
     expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
   });
 });
+
+
+/**
+ * ARC-2 build-all batch — 14 more concepts, NL-reachable via grow-forever cards.
+ */
+const ARC2_BA_FIELD_RESTRICTED_GLOBAL_VALUE_SET: readonly string[] = [
+  "Is this picklist field restricted to a fixed set of values?",
+  "Can an admin add new values to this picklist directly on the field?",
+  "Does the Status picklist on Case use a locked-down global value set?",
+  "Will an API write be rejected if it sends a value not in this picklist?",
+  "Which fields share this global value set and can their values drift?",
+  "Is this picklist a closed vocabulary or can users enter free-form values?",
+];
+describe('funnel ranking — Arc-2 build-all concept:field-restricted-global-value-set ranks interpret top-5', () => {
+  it.each(ARC2_BA_FIELD_RESTRICTED_GLOBAL_VALUE_SET)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BA_FIELD_PICKLIST_HAS_RETIRED_VALUES: readonly string[] = [
+  "Which picklist fields still have inactive values?",
+  "Does the Account Industry picklist have any retired values?",
+  "Show me picklists with old values that are no longer selectable",
+  "Are there deactivated picklist values left on Opportunity fields?",
+  "Find fields that kept legacy picklist entries after cleanup",
+  "List picklists carrying retired values from a past migration",
+];
+describe('funnel ranking — Arc-2 build-all concept:field-picklist-has-retired-values ranks interpret top-5', () => {
+  it.each(ARC2_BA_FIELD_PICKLIST_HAS_RETIRED_VALUES)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BA_APPROVAL_PROCESS_INACTIVE_DEAD: readonly string[] = [
+  "Is this approval process still active?",
+  "Which approval processes on Account are inactive?",
+  "If this approval process is deactivated, does submitting a record for approval do anything?",
+  "Show me the dead approval processes in this org",
+  "Does this inactive approval process still lock records on approval?",
+  "Will its final-approval field update run while the process is off?",
+];
+describe('funnel ranking — Arc-2 build-all concept:approval-process-inactive-dead ranks interpret top-5', () => {
+  it.each(ARC2_BA_APPROVAL_PROCESS_INACTIVE_DEAD)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BA_ESCALATION_RULE_TIME_DEFERRED: readonly string[] = [
+  "Do my escalation rules run during the save or later?",
+  "When does a case escalation actually fire?",
+  "Are escalation actions synchronous with the record update?",
+  "Does this escalation rule reassign the case immediately or on a timer?",
+  "Is case escalation part of the save transaction?",
+  "What happens after a record ages past its escalation threshold?",
+];
+describe('funnel ranking — Arc-2 build-all concept:escalation-rule-time-deferred ranks interpret top-5', () => {
+  it.each(ARC2_BA_ESCALATION_RULE_TIME_DEFERRED)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BA_AUTO_RESPONSE_RULE_FIRST_MATCH_STARVATION: readonly string[] = [
+  "Show me the auto-response rules for Lead",
+  "Why did this case get the wrong auto-response email?",
+  "Do any auto-response rule entries never fire?",
+  "Is there a catch-all auto-response entry starving later ones?",
+  "Which auto-response rule entries are unreachable on Case?",
+  "Are my auto-response rule entries in the right order?",
+];
+describe('funnel ranking — Arc-2 build-all concept:auto-response-rule-first-match-starvation ranks interpret top-5', () => {
+  it.each(ARC2_BA_AUTO_RESPONSE_RULE_FIRST_MATCH_STARVATION)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BA_RECORD_TYPE_BUSINESS_PROCESS_BINDING: readonly string[] = [
+  "Which record types are tied to a specific sales process?",
+  "Does this record type limit which stages are available on an opportunity?",
+  "What business process is bound to the Enterprise record type?",
+  "Why can't I pick this status value on a case with this record type?",
+  "Show me record types that restrict the status picklist to a business process",
+  "Which record types scope the stage picklist to a subset of values?",
+];
+describe('funnel ranking — Arc-2 build-all concept:record-type-business-process-binding ranks interpret top-5', () => {
+  it.each(ARC2_BA_RECORD_TYPE_BUSINESS_PROCESS_BINDING)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BA_APEX_DYNAMIC_REFLECTIVE_SURFACE: readonly string[] = [
+  "Does this Apex class use dynamic SOQL or reflection that static analysis can't see?",
+  "Which classes build queries or field references at runtime?",
+  "Is the impact analysis for this class complete, or are there reflective blind spots?",
+  "Show me Apex that uses dynamic queries, describes, or type reflection",
+  "What classes could have hidden dependencies my usage results miss?",
+  "Are there dynamic-Apex constructs that make dead-code findings unreliable here?",
+];
+describe('funnel ranking — Arc-2 build-all concept:apex-dynamic-reflective-surface ranks interpret top-5', () => {
+  it.each(ARC2_BA_APEX_DYNAMIC_REFLECTIVE_SURFACE)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BA_NAMED_CREDENTIAL_MERGE_FIELDS_INJECTABLE: readonly string[] = [
+  "which named credentials allow merge fields in the HTTP header or body",
+  "are any of our named credentials an injection surface for outbound callouts",
+  "show me named credentials that lifted the default merge-field guard",
+  "list named credentials configured with allowMergeFieldsInHeader or allowMergeFieldsInBody",
+  "which outbound credentials let Apex substitute merge fields into the request",
+];
+describe('funnel ranking — Arc-2 build-all concept:named-credential-merge-fields-injectable ranks interpret top-5', () => {
+  it.each(ARC2_BA_NAMED_CREDENTIAL_MERGE_FIELDS_INJECTABLE)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BA_CONNECTED_APP_SAML_SSO_FEDERATION: readonly string[] = [
+  "Which connected apps are set up as SAML single sign-on service providers?",
+  "Is this connected app a SAML SSO federation target with Salesforce as the identity provider?",
+  "Which connected apps will Salesforce mint SAML assertions for?",
+  "Does this connected app federate a user's identity out to a third party over SAML?",
+  "What connected apps declare a SAML config instead of, or alongside, OAuth?",
+  "Which connected apps act as SAML service providers we should review as an identity surface?",
+];
+describe('funnel ranking — Arc-2 build-all concept:connected-app-saml-sso-federation ranks interpret top-5', () => {
+  it.each(ARC2_BA_CONNECTED_APP_SAML_SSO_FEDERATION)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BA_APEX_FAKE_ASSERTION_TEST: readonly string[] = [
+  "Which test classes have fake or tautological assertions?",
+  "Show me tests that assert true or assert a value against itself",
+  "Find Apex tests that pass no matter what the code does",
+  "Are any of my test classes inflating coverage without verifying anything?",
+  "Which tests use System.assertEquals with identical operands?",
+  "List test classes flagged for fake-assertion smells",
+];
+describe('funnel ranking — Arc-2 build-all concept:apex-fake-assertion-test ranks interpret top-5', () => {
+  it.each(ARC2_BA_APEX_FAKE_ASSERTION_TEST)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BA_ENTITLEMENT_PROCESS_INACTIVE: readonly string[] = [
+  "Which entitlement processes are inactive?",
+  "Is this SLA / entitlement process actually live or disabled?",
+  "Does this entitlement process still start its milestone timers?",
+  "Are any of our SLA processes dead or deactivated?",
+  "Should I count this entitlement process when reasoning about milestones on Cases?",
+  "Why aren't milestones tracking on my Cases?",
+];
+describe('funnel ranking — Arc-2 build-all concept:entitlement-process-inactive ranks interpret top-5', () => {
+  it.each(ARC2_BA_ENTITLEMENT_PROCESS_INACTIVE)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BA_OMNISTUDIO_INACTIVE_COMPONENT_VERSION: readonly string[] = [
+  "Which OmniScripts are inactive?",
+  "Do we have any FlexCards that aren't active?",
+  "Is this Integration Procedure live or just a saved draft?",
+  "Which OmniStudio components won't run at runtime?",
+  "Show me the dormant OmniScript versions in this org",
+  "Are any of our OmniStudio components deactivated?",
+];
+describe('funnel ranking — Arc-2 build-all concept:omnistudio-inactive-component-version ranks interpret top-5', () => {
+  it.each(ARC2_BA_OMNISTUDIO_INACTIVE_COMPONENT_VERSION)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BA_REQUIRED_FIELD_ABSENT_FROM_ALL_LAYOUTS: readonly string[] = [
+  "Which required fields aren't on any page layout?",
+  "Is this required field missing from every layout?",
+  "Do we have required fields with no UI data-entry surface?",
+  "Which required Account fields can't be entered through the UI?",
+  "Show me required fields absent from all page layouts",
+  "Are there any universally required fields not placed on a layout?",
+];
+describe('funnel ranking — Arc-2 build-all concept:required-field-absent-from-all-layouts ranks interpret top-5', () => {
+  it.each(ARC2_BA_REQUIRED_FIELD_ABSENT_FROM_ALL_LAYOUTS)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+const ARC2_BA_DATARAPTOR_ERRORS_IGNORED: readonly string[] = [
+  "Which DataRaptors ignore errors instead of failing?",
+  "Are any of our DataRaptor loads swallowing record failures silently?",
+  "Show me OmniStudio data transforms configured to continue on error",
+  "Which DataRaptors could be losing data without reporting it?",
+  "Do any DataRaptors have 'Ignore Error' turned on?",
+  "Find data transforms that don't surface their write failures",
+];
+describe('funnel ranking — Arc-2 build-all concept:dataraptor-errors-ignored ranks interpret top-5', () => {
+  it.each(ARC2_BA_DATARAPTOR_ERRORS_IGNORED)('ranks sfi.interpret in the top-5 for: %s', (q) => {
+    const top5 = semanticCandidates(q, 5).map((c) => c.tool);
+    expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});

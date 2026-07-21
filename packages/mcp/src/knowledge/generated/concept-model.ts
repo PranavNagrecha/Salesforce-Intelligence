@@ -1203,6 +1203,145 @@ export const CONCEPTS: Readonly<Record<ConceptId, Concept>> =
         { label: 'Apex Developer Guide — Auth.SessionManagement Class', url: 'https://developer.salesforce.com/docs/atlas.en-us.apexref.meta/apexref/apex_class_Auth_SessionManagement.htm' },
       ],
     },
+    'concept:field-restricted-global-value-set': {
+      id: 'concept:field-restricted-global-value-set',
+      kind: 'field-provenance',
+      label: 'Picklist bound to a restricted global value set',
+      summary:
+        'A picklist field can draw its values from a shared global value set instead of an inline list. When that global value set is marked restricted, the field becomes a closed vocabulary: only the values defined in the shared set are valid, admins cannot add ad-hoc values on the field, and an integration or API write of a value outside the set is rejected. Changing the field\'s allowed values means editing the shared set, which ripples to every other field bound to it. The offline snapshot grounds this from the field\'s declared usesValueSet edge to a global value set whose metadata carries restricted=true. It does NOT prove runtime enforcement, does NOT assert that no existing record already holds an out-of-set value (a live, record-level question), and when the restricted flag is absent it does NOT fire — a global-value-set-backed picklist may still constrain values without the flag being declared in metadata.',
+      docs: [
+        { label: 'Salesforce Help — Create Global Picklist Value Sets', url: 'https://help.salesforce.com/s/articleView?id=sf.fields_creating_global_picklist.htm' },
+      ],
+    },
+    'concept:field-picklist-has-retired-values': {
+      id: 'concept:field-picklist-has-retired-values',
+      kind: 'field-provenance',
+      label: 'A picklist retaining an inactive value keeps old data readable but no longer selectable',
+      summary:
+        'A PICKLIST field retains INACTIVE (retired) values in its OWN local value set: when an admin deactivates a value, Salesforce does NOT delete it — it stays in the field definition, so existing records that already hold it keep displaying and reporting it (the value remains readable), while the value is removed from the picker and can NO LONGER be newly selected in the UI. A retired value is therefore a data-hygiene and migration signal — it usually means old data still carries a value the org has moved away from. This is grounded from the field\'s OWN declared value-set entries (each value\'s active flag); it names the DECLARED presence of a retired value, NOT whether any record currently holds it (a record-level count the offline vault cannot answer), NOT GlobalValueSet-backed picklists (whose values live on the shared value set, not the field, and are not evaluated here), and NOT whether any report, formula, default value, or automation still references the retired value.',
+      docs: [
+        { label: 'Salesforce Help — Manage Picklist Values', url: 'https://help.salesforce.com/s/articleView?id=sf.fields_managing_picklists.htm' },
+      ],
+    },
+    'concept:approval-process-inactive-dead': {
+      id: 'concept:approval-process-inactive-dead',
+      kind: 'firing-condition',
+      label: 'An inactive approval process never routes a record for approval and is dead automation',
+      summary:
+        'An APPROVAL PROCESS whose `active` flag is FALSE is DEAD approval automation: Salesforce lets NO record be submitted into it for approval, never evaluates its entry criteria, and never runs any of its initial-submission actions, per-step approver routing, final-approval / final-rejection actions, or record locks until an admin re-activates it. It must be EXCLUDED from "what happens when this record is submitted for approval" reasoning, from record-lock and read-only-freeze analysis (its finalApprovalRecordLock / finalRejectionRecordLock never take effect while inactive), and from automation-impact counts: counting a deactivated process overstates the automation load, while assuming its field-update actions or locks still run would misattribute a value change or a read-only freeze. This is grounded from the process\'s own always-present `active` boolean; it names the non-running STRUCTURAL fact, NOT whether a Flow-based (record-triggered) approval has replaced it (migration lineage is org-specific) and NOT whether the process WOULD admit a given record if activated (entry criteria remain unevaluated offline). Only active approval processes belong in submit-for-approval and automation-impact surfaces.',
+      docs: [
+        { label: 'Salesforce Help — Considerations for Approvals', url: 'https://help.salesforce.com/s/articleView?id=sf.approvals_considerations.htm' },
+      ],
+    },
+    'concept:escalation-rule-time-deferred': {
+      id: 'concept:escalation-rule-time-deferred',
+      kind: 'async-boundary',
+      label: 'An active escalation rule\'s actions are queued and fire later in a separate context',
+      summary:
+        'An ACTIVE escalation rule does NOT run its escalation actions during the record save. When a record (typically a Case) has aged past the rule entry\'s declared minute offset (`minutesToEscalation`) without meeting the rule\'s exit criteria, Salesforce\'s background escalation process fires the queued actions — reassigning ownership to a queue or user and/or sending a notification email — LATER, in a SEPARATE context decoupled from the save that first matched the record. So the effect is DEFERRED: the reassignment/notification lands minutes to hours after the triggering edit, its writes are not part of that save and cannot roll it back, and Salesforce re-checks the record at escalation time and silently drops the queued escalation if the record no longer qualifies (for example it was closed or edited to stop matching). Configured business hours on the entry can shift the fire time further. This names the deferred-action STRUCTURE from the rule\'s own active state; it does NOT evaluate the `minutesToEscalation` offset (which lives on the rule\'s per-action reference/notification edges, not on the rule node), assert WHEN the escalation fires, whether the record still qualifies when the timer elapses, or whether the action succeeds.',
+      docs: [
+        { label: 'Salesforce Help — Set Up Escalation Rules', url: 'https://help.salesforce.com/s/articleView?id=sf.customize_escrules.htm' },
+      ],
+    },
+    'concept:auto-response-rule-first-match-starvation': {
+      id: 'concept:auto-response-rule-first-match-starvation',
+      kind: 'automation-collision',
+      label: 'Auto-response rule catch-all entry starves later specific entries',
+      summary:
+        'Auto-response rules evaluate their rule entries top-down in XML order — the first entry whose criteria match wins and sends its email template, and later entries are never considered. A catch-all entry with NO criteria and NO formula filter (zero criteria items, no formula) matches EVERY record, so if it appears before more specific entries those later entries are structurally unreachable — a common cause of "why did this record get the wrong auto-response email?" confusion. The offline claim is grounded from the AutoResponseRule `sendsEmail` edges carrying `entryIndex` (evaluation order), `criteriaItemCount`, and `hasFormula`: a broad entry is one with `criteriaItemCount === 0` and `hasFormula === false` that precedes at least one later entry with criteria or a formula. HONEST BOUNDARIES: this names the STRUCTURAL ordering risk from metadata, NOT whether a specific record would match a specific entry at runtime (live criteria evaluation is out of scope). Only ONE auto-response rule per object is active at a time, so this reasons about entry ordering WITHIN a rule, not across rules. A `sendsEmail` edge whose target email template was not retrieved does not resolve in the slice, and the rule fails closed — yielding nothing rather than guessing — when `entryIndex` or the criteria metadata a counted edge needs is absent.',
+      severity: 'medium',
+    },
+    'concept:record-type-business-process-binding': {
+      id: 'concept:record-type-business-process-binding',
+      kind: 'access-mechanism',
+      label: 'A record type bound to a business process scopes the master status picklist to that process\'\'s stages',
+      summary:
+        'A RECORD TYPE that declares a BUSINESS PROCESS binds records of that type to a specific ordered subset of the object\'s master status picklist — the Stage, Status, or Solution-status values that process defines — so records created with this record type are scoped to the stages the bound process exposes, NOT the object\'s full set of master-picklist values. This scopes what a user or an automation may set the status / stage field to on such a record: a Flow, an Apex assignment, an API create, or a data import that sets a stage value the bound process does not include can be rejected. This is grounded from the record type\'s own declared businessProcess reference; it names the DECLARED binding (that this record type IS scoped to a business process), NOT the specific stage values that process exposes (those live on the BusinessProcess metadata and are org-specific), NOT which records currently carry this record type or their current stage (record-level runtime state the offline vault does not hold), and NOT whether the bound business process is itself active. A record type WITHOUT a business process uses the object\'s full master picklist and has no such scoping. Only a record type that declares a business process contributes this constraint.',
+      docs: [
+        { label: 'Salesforce Help — Create Business Processes', url: 'https://help.salesforce.com/s/articleView?id=sf.customize_busprocess.htm' },
+      ],
+    },
+    'concept:apex-dynamic-reflective-surface': {
+      id: 'concept:apex-dynamic-reflective-surface',
+      kind: 'code-quality-defect',
+      label: 'A dynamic or reflective Apex construct that static dependency analysis cannot see',
+      summary:
+        'A component uses DYNAMIC or REFLECTIVE Apex — object, field, or type references assembled at RUNTIME rather than written as static literals: a dynamic query built as a string (the dynamic-query API, Database.query), a runtime schema describe (Schema.getGlobalDescribe), reflective type instantiation by name (Type.forName), or untyped deserialization (JSON.deserializeUntyped). These constructs are INVISIBLE to static dependency analysis: the scanner resolves reads, writes, calls, and references from tokens it can see in the source, so a query, field, or class named by a runtime-built string is never captured as an edge. The honest consequence is a COMPLETENESS gap, not a proven defect — impact analysis, usage / where-used results, and dead-code findings for this class MAY BE INCOMPLETE, because a real dependency can be hidden behind the runtime construction. HONEST BOUNDARIES: this is a HEURISTIC token recognition, NOT a compiler AST — it can FLAG a dynamic construct whose reference is actually a safe constant, and can MISS one assembled in a way the tokenizer does not match. It does NOT prove the class is buggy, does NOT identify WHICH objects or fields the dynamic code touches, and does NOT assert any specific hidden dependency exists; it flags the class as one whose static analysis is blind in spots and warrants reading the source to confirm.',
+      docs: [
+        { label: 'Apex Developer Guide — Dynamic SOQL', url: 'https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_dynamic_soql.htm' },
+      ],
+    },
+    'concept:named-credential-merge-fields-injectable': {
+      id: 'concept:named-credential-merge-fields-injectable',
+      kind: 'external-api-surface',
+      label: 'A named credential that allows merge fields in its HTTP header or body is an outbound injection surface',
+      summary:
+        'By DEFAULT Salesforce BLOCKS merge-field syntax in the HTTP header and body of a callout that authenticates through a named credential — a deliberate guard against injecting caller-influenced values into an authenticated outbound request. Setting `allowMergeFieldsInHeader` or `allowMergeFieldsInBody` to true LIFTS that guard for this credential: Apex may then substitute merge fields (including values drawn from record or user data) into the outbound HTTP header or body of any callout that uses it. That makes the credential an outbound INJECTION SURFACE — if a substituted value is attacker-influenced it can alter the request\'s headers or payload (header injection, request smuggling, or forging fields the upstream API trusts). This is grounded from the credential\'s own declared `allowMergeFieldsInHeader` / `allowMergeFieldsInBody` metadata; it names the DECLARED configuration that ENABLES substitution, not a proven exploit. HONEST BOUNDARIES — it does NOT prove: (a) that any Apex callout actually uses this credential (callers are a separate code-level question the offline vault may not resolve); (b) that any merge field carries UNTRUSTED input — the substituted values may all be static or trusted, in which case the setting is harmless and often intentional; or (c) that an injection actually occurs at runtime. It names the surface ENABLED by configuration, never a vulnerability. The header flag and the body flag are read independently, so a claim fires per flag that is set.',
+      docs: [
+        { label: 'Metadata API Developer Guide — NamedCredential (allowMergeFieldsInHeader / allowMergeFieldsInBody)', url: 'https://developer.salesforce.com/docs/atlas.en-us.api_meta.meta/api_meta/meta_namedcredential.htm' },
+      ],
+    },
+    'concept:connected-app-saml-sso-federation': {
+      id: 'concept:connected-app-saml-sso-federation',
+      kind: 'access-mechanism',
+      label: 'A connected app carrying a SAML config is a SAML SSO federation target with Salesforce as the identity provider',
+      summary:
+        'A connected app that carries a `<samlConfig>` block is a SAML SSO federation target: it declares Salesforce as the SAML Identity Provider (IdP) and the app as an external Service Provider (SP) that Salesforce will mint SIGNED SAML assertions for, asserting an authenticated user\'s identity so they can single-sign-on into that external relying party. The app\'s `authProtocol` reads `saml` (SAML only) or `both` (SAML alongside an OAuth client), and the surfaced trust boundary — the Assertion Consumer Service (ACS) URL the assertion is posted to, the SP entity/audience it is scoped to, the expected issuer, and the subject / NameID format — defines WHO Salesforce federates identities out to. So it is an identity and trust surface worth reviewing: an outbound authentication relationship that hands a user\'s asserted identity to a third party. This is grounded from the app\'s own DECLARED SAML metadata; it names the DECLARED federation configuration, NOT a proven active login flow. HONEST BOUNDARIES: the presence of the config is a STATIC shape, not evidence that anyone authenticates through it, that the signing certificate / trust is currently valid (the key material is deliberately never vaulted), or that the relying party is live; WHO may launch or use the app is a separate access layer (profile / permission-set assignment) the config does not encode; and a SAML federation may be entirely intentional for a trusted downstream app.',
+      docs: [
+        { label: 'Salesforce Help — Enable SAML SSO for Connected Apps (Salesforce as Identity Provider)', url: 'https://help.salesforce.com/s/articleView?id=sf.connected_app_create_web_app_sso.htm' },
+      ],
+    },
+    'concept:apex-fake-assertion-test': {
+      id: 'concept:apex-fake-assertion-test',
+      kind: 'test-quality',
+      label: 'A test class asserts a tautology that passes regardless of behavior, so it verifies nothing',
+      summary:
+        'An Apex class annotated @IsTest contains a TAUTOLOGICAL or self-referential assertion — a System.assert(true, ...), a System.assertEquals(x, x) on the same expression, or a System.assertEquals(literal, sameLiteral) — an assertion whose two operands are identical (or always true) so it PASSES no matter how the code under test behaves. Such an assertion verifies nothing: it can never fail because a computed value was wrong, only if the code under test throws an uncaught exception, yet it still EXECUTES the code under test and so counts toward the org\'s Apex code-coverage percentage. It therefore inflates the coverage number while providing no real regression protection, and it can mask a genuine defect behind a green run. HONEST BOUNDARY: this is HEURISTIC recognition from TOKENIZED Apex source — NOT a compiler AST. It flags the tautological call-site itself; it does NOT prove the whole class is worthless, because the same class may carry other, meaningful assertions alongside the fake one, and it can MISS a value-free assertion assembled through a variable or a shared helper. It names a test-quality review candidate, not proven coverage fraud. Read the test before concluding it verifies nothing.',
+      docs: [
+        { label: 'Apex Developer Guide — Testing Best Practices', url: 'https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_testing_best_practices.htm' },
+      ],
+    },
+    'concept:entitlement-process-inactive': {
+      id: 'concept:entitlement-process-inactive',
+      kind: 'firing-condition',
+      label: 'An inactive entitlement process never starts its milestone SLA timers and is dead SLA automation',
+      summary:
+        'An ENTITLEMENT PROCESS whose `active` flag is FALSE is DEAD SLA automation: Salesforce never applies it to a case and never starts any of its milestone timers — no SLA countdown begins, no business-hours clock runs, and no milestone-driven escalation can fire from this version until an admin re-activates it. It must be EXCLUDED from SLA / entitlement reasoning and from "what milestones apply on save" impact counts; treating a deactivated process as a live SLA guard would cry wolf about timers that cannot start, while assuming its milestones still run would falsely imply cases are being tracked. This is grounded from the process\'s own `active` flag; it names the non-running STRUCTURAL fact, NOT whether any specific case is currently on-track or breached (that is live per-record timer data this offline vault does not hold), NOT whether this version WOULD apply if activated (entry criteria remain unevaluated offline), and NOT whether another active version of the same process exists (version lineage is org-specific). Only active entitlement processes belong in SLA and entitlement-impact surfaces.',
+      docs: [
+        { label: 'Metadata API Developer Guide — EntitlementProcess', url: 'https://developer.salesforce.com/docs/atlas.en-us.api_meta.meta/api_meta/meta_entitlementprocess.htm' },
+      ],
+    },
+    'concept:omnistudio-inactive-component-version': {
+      id: 'concept:omnistudio-inactive-component-version',
+      kind: 'firing-condition',
+      label: 'An inactive OmniStudio component version does not execute at runtime and must be excluded from what-actually-runs analysis',
+      summary:
+        'An OmniStudio component version — an OmniScript, Integration Procedure, or FlexCard — whose `isActive` flag is FALSE is a SAVED-BUT-DORMANT version: Salesforce serves and dispatches only the ACTIVE version of an OmniStudio component, so an inactive version does not execute at runtime — it is not rendered, invoked as an action, or embedded on a page until an admin activates it. It must be EXCLUDED from runtime-reachability, invocation-impact, and \'what actually runs\' reasoning about OmniStudio; treating a deactivated version as live would overstate the runtime surface, while assuming it still runs would misattribute behavior to a dormant draft. This is grounded from the component\'s own always-present `isActive` boolean; it names the non-running STRUCTURAL fact, NOT whether ANOTHER version of the same bundle is active and serving in its place (version lineage is org-specific and not resolved offline), NOT whether anything still references this version by name, NOT what the version WOULD do if activated, and NOT why it was deactivated. Only active OmniStudio component versions belong in runtime-execution surfaces.',
+      docs: [
+        { label: 'Salesforce Help — Activate an OmniScript', url: 'https://help.salesforce.com/s/articleView?id=sf.os_activate_an_omniscript.htm' },
+      ],
+    },
+    'concept:required-field-absent-from-all-layouts': {
+      id: 'concept:required-field-absent-from-all-layouts',
+      kind: 'field-provenance',
+      label: 'A universally required field placed on no page layout has no declared UI data-entry surface',
+      summary:
+        'A field that is UNIVERSALLY REQUIRED at the field-definition level (every record must carry a value) but is placed on NO page layout has no declared UI data-entry surface: a user creating or editing a record through a layout that omits the field sees no input for it, so its required value must be supplied some other way — a default value, a before-save automation, an Apex / API / data-import insert that sets it, or the platform\'s own runtime rendering of universally-required fields on the create / edit form. This is grounded from the field\'s own declared required flag together with the ABSENCE of any layout that places the field in a field-bearing region (the detail body, the Highlights Panel, or the mini layout); it is an ABSENCE claim, so under incomplete Layout coverage the on-no-layout conclusion is NOT asserted (downgraded to not-checked). HONEST BOUNDARIES: it does NOT prove any specific save fails — a default, automation, or API path may supply the value, and the platform itself forces universally-required fields onto edit forms — and it does NOT see Lightning DYNAMIC FORM (FlexiPage) field placement, which lives OUTSIDE classic page-layout metadata, so a field surfaced only through a Dynamic Form still matches this shape. It names the DECLARED layout-placement gap, not a proven runtime data-entry failure.',
+      docs: [
+        { label: 'Metadata API Developer Guide — Layout', url: 'https://developer.salesforce.com/docs/atlas.en-us.api_meta.meta/api_meta/meta_layouts.htm' },
+      ],
+    },
+    'concept:dataraptor-errors-ignored': {
+      id: 'concept:dataraptor-errors-ignored',
+      kind: 'code-quality-defect',
+      label: 'A DataRaptor with \'Ignore Error\' on swallows per-record failures and continues instead of surfacing them',
+      summary:
+        'A DataRaptor (an OmniStudio OmniDataTransform) whose \'Ignore Error\' toggle is ON does NOT halt or raise when an individual record operation inside the transform fails: the failing item is skipped and the transform CONTINUES, returning a success-shaped result to its caller even though some reads or writes did not complete. This is an ERROR-SWALLOWING reliability shape — a failure that would normally abort the operation is suppressed, so a partial or silent data-integrity gap (records not written, values not loaded) can pass undetected unless the caller explicitly inspects the returned error collection. It is DISTINCT from the \'Rollback on Error\' toggle (a separate setting that controls whether already-completed writes are undone on failure); ignoring errors while not rolling back can leave partially applied data. It is also DISTINCT from an Apex swallowed-exception pattern — this is a DECLARED OmniStudio configuration flag, not a heuristic read of catch-block source. HONEST BOUNDARY — this is a declared configuration shape read from the transform\'s own toggle, NOT a proven failure: it does NOT establish that any record actually fails at runtime, NOT that data was actually lost or left partial, and NOT whether the invoking OmniScript, Integration Procedure, or Apex caller checks the error output and compensates. It names the error-suppression structural signal, not a confirmed data-loss incident.',
+      docs: [
+        { label: 'Salesforce Help — DataRaptor Loads', url: 'https://help.salesforce.com/s/articleView?id=sf.os_dataraptor_loads.htm' },
+        { label: 'Salesforce Help — Design DataRaptor Loads', url: 'https://help.salesforce.com/s/articleView?id=sf.os_design_dataraptor_loads.htm' },
+      ],
+    },
   });
 
 /**
@@ -2839,5 +2978,155 @@ export const CONCEPT_RULES: readonly ConceptRule[] = Object.freeze<ConceptRule[]
     maxConfidence: 'declared',
     absenceShaped: false,
     dependsOnCoverage: ['PermissionSet'],
+  },
+  {
+    id: 'rule:field/restricted-global-value-set',
+    concept: 'concept:field-restricted-global-value-set',
+    bind: { edgeType: 'usesValueSet', componentTypes: ['CustomField', 'GlobalValueSet'], toWhereProperty: { key: 'restricted', equals: true } },
+    interpretation:
+      '{0} draws its values from restricted global value set {1} — a closed vocabulary. Only values defined in the shared set are valid, so admins cannot add ad-hoc values on this field and an integration or API write of an out-of-set value is rejected; changing the allowed values means editing the shared set, which ripples to every other field bound to it. This is the metadata-declared restriction, not proof of runtime enforcement or that no existing record already holds an out-of-set value.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['CustomField', 'GlobalValueSet'],
+  },
+  {
+    id: 'rule:field/picklist-has-retired-values',
+    concept: 'concept:field-picklist-has-retired-values',
+    bind: { componentTypes: ['CustomField'], whereProperty: { key: 'picklistValues', anyElement: { key: 'isActive', equals: false } } },
+    interpretation:
+      '{ids} is a picklist whose OWN local value set retains at least one INACTIVE (retired) value — a value kept in the field definition after an admin deactivated it. Existing records that already hold a retired value keep displaying and reporting it (the value stays readable), but it is NO LONGER offered in the picker and cannot be newly selected in the UI, so a retired value is a data-hygiene and migration signal, not a live option. This names the DECLARED presence of a retired value in the field\'s own value-set entries from metadata; it does NOT prove any record currently holds that value (a record-level count the offline vault cannot answer), does NOT cover GlobalValueSet-backed picklists (whose values live on the shared value set, not the field, and fail closed here because picklistValues is null), and does NOT prove any report, formula, default value, or automation still references the retired value.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['CustomField'],
+  },
+  {
+    id: 'rule:approval-process/inactive-dead',
+    concept: 'concept:approval-process-inactive-dead',
+    bind: { componentTypes: ['ApprovalProcess'], whereProperty: { key: 'active', equals: false } },
+    interpretation:
+      '{ids} is INACTIVE — DEAD approval automation that Salesforce never runs: no record can be submitted into it for approval, its entry criteria are never evaluated, and none of its initial-submission actions, per-step approver routing, final-approval / final-rejection actions, or record locks ever fire until an admin re-activates it. It must be EXCLUDED from "what happens when this record is submitted for approval" reasoning, from record-lock analysis (its finalApprovalRecordLock / finalRejectionRecordLock never take effect while inactive), and from automation-impact counts: counting a deactivated process overstates the automation load, while assuming its field-update actions or locks still run would misattribute a value change or a read-only freeze. This names the non-running structural fact from the process\'s own active flag, NOT whether a Flow-based approval has replaced it and NOT whether it WOULD admit a given record if activated (entry criteria remain unevaluated offline).',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['ApprovalProcess'],
+  },
+  {
+    id: 'rule:escalation/time-deferred',
+    concept: 'concept:escalation-rule-time-deferred',
+    bind: { componentTypes: ['EscalationRule'], whereProperty: { key: 'active', equals: true } },
+    interpretation:
+      '{ids} is an ACTIVE escalation rule → its escalation actions (reassign the record to a queue or user, and/or send a notification email) are NOT run during the record save. They are QUEUED to Salesforce\'s background escalation process and fire later, in a separate context, once the record has aged past the entry\'s declared minute offset without meeting the rule\'s exit criteria. The effect is DEFERRED and decoupled from the triggering edit: the reassignment/notification is not part of that save and cannot roll it back, and Salesforce silently drops the queued escalation if the record stops qualifying before the timer elapses. This names the deferred-action structure from the rule\'s active state; it does NOT evaluate the `minutesToEscalation` offset (carried on the rule\'s per-action edges, not the node), assert WHEN the escalation fires, whether the record still qualifies, or whether it succeeds.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['EscalationRule'],
+  },
+  {
+    id: 'rule:automation/auto-response-rule-first-match-starvation',
+    concept: 'concept:auto-response-rule-first-match-starvation',
+    bind: { edgeType: 'sendsEmail', componentTypes: ['EmailTemplate'], aggregate: { edgeSource: 'root-outgoing', countDistinctEndpoint: 'to', firstMatchOrdinal: { ordinalEdgeProperty: 'entryIndex', broadEntryWhere: [{ key: 'criteriaItemCount', equals: 0 }, { key: 'hasFormula', equals: false }] } } },
+    interpretation:
+      '{0} is an auto-response rule evaluated top-down by entry order: entry {broadOrdinal} is a catch-all with no criteria or formula filter, so it matches every record and its auto-response email {1} is sent before any later, more specific entry is considered — {starvedCount} later entries are structurally unreachable because the first matching entry wins. This names the metadata ordering risk only; it does NOT prove which email a specific record would trigger at runtime, and only one auto-response rule per object is active at a time.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['AutoResponseRule', 'EmailTemplate'],
+  },
+  {
+    id: 'rule:record-type/business-process-binding',
+    concept: 'concept:record-type-business-process-binding',
+    bind: { componentTypes: ['RecordType'], whereProperty: { key: 'businessProcess', isNull: false } },
+    interpretation:
+      '{ids} declares a BUSINESS PROCESS binding, so records created with this record type are scoped to that process\'s ordered subset of the master status picklist — it constrains the available stage picklist values to those the bound business process exposes (the Stage / Status / Solution-status values), NOT the object\'s full master picklist. On any write path — a Flow, an Apex assignment, an API create, or a data import — setting the stage / status field to a value the bound process does not include can be rejected. This names the DECLARED binding from the record type\'s own businessProcess reference, NOT the specific stage values the process exposes (those live on the BusinessProcess metadata and are org-specific), NOT which records currently carry this record type or their current stage (record-level, not modeled offline), and NOT whether the bound business process is itself active. A record type without a business process uses the object\'s full master picklist and has no such scoping.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['RecordType'],
+  },
+  {
+    id: 'rule:code-quality/dynamic-reflective-surface',
+    concept: 'concept:apex-dynamic-reflective-surface',
+    bind: { componentTypes: ['ApexClass'], whereProperty: { key: 'qualityIssues', anyElement: { key: 'rule', equals: 'dynamic-apex' } } },
+    interpretation:
+      '{ids} uses DYNAMIC or REFLECTIVE Apex — object, field, or type references built at RUNTIME (a dynamic-query string, a runtime schema describe, reflective type instantiation by name, or untyped deserialization) rather than as static literals. Such runtime-built references are INVISIBLE to static dependency analysis, so impact, usage / where-used, and dead-code results for this class MAY BE INCOMPLETE — a real dependency can be hidden behind the runtime construction. This is HEURISTIC token recognition, NOT a compiler AST: it can FLAG a dynamic construct whose reference is actually a safe constant, and can MISS one the tokenizer does not match. It does NOT prove the class is buggy, does NOT name WHICH objects or fields the dynamic code touches, and does NOT assert any specific hidden dependency — it flags the class as one whose static analysis is blind in spots; read the source to confirm.',
+    maxConfidence: 'heuristic',
+    absenceShaped: false,
+    dependsOnCoverage: ['ApexClass'],
+  },
+  {
+    id: 'rule:named-credential-merge-fields-injectable/header',
+    concept: 'concept:named-credential-merge-fields-injectable',
+    bind: { componentTypes: ['NamedCredential'], whereProperty: [{ key: 'allowMergeFieldsInHeader', equals: true }] },
+    interpretation:
+      '{ids} is a named credential with `allowMergeFieldsInHeader` = true — the default guard against merge-field substitution in the outbound HTTP HEADER is LIFTED, so Apex callouts authenticating through this credential may substitute merge fields (including record- or user-derived values) into request headers. That makes it an outbound injection surface: if a substituted value is attacker-influenced it can alter or forge headers the upstream API trusts (header injection). This names the DECLARED configuration that ENABLES substitution; it does NOT prove that any Apex actually uses this credential, that any merge field carries UNTRUSTED input (the values may be static/trusted and the setting intentional), or that an injection occurs at runtime.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['NamedCredential'],
+  },
+  {
+    id: 'rule:named-credential-merge-fields-injectable/body',
+    concept: 'concept:named-credential-merge-fields-injectable',
+    bind: { componentTypes: ['NamedCredential'], whereProperty: [{ key: 'allowMergeFieldsInBody', equals: true }] },
+    interpretation:
+      '{ids} is a named credential with `allowMergeFieldsInBody` = true — the default guard against merge-field substitution in the outbound HTTP BODY is LIFTED, so Apex callouts authenticating through this credential may substitute merge fields (including record- or user-derived values) into the request payload. That makes it an outbound injection surface: if a substituted value is attacker-influenced it can forge or tamper with body fields the upstream API trusts (payload injection). This names the DECLARED configuration that ENABLES substitution; it does NOT prove that any Apex actually uses this credential, that any merge field carries UNTRUSTED input (the values may be static/trusted and the setting intentional), or that an injection occurs at runtime.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['NamedCredential'],
+  },
+  {
+    id: 'rule:access-mechanism/connected-app-saml-sso-federation',
+    concept: 'concept:connected-app-saml-sso-federation',
+    bind: { componentTypes: ['ConnectedApp'], whereProperty: { key: 'authProtocol', in: ['saml', 'both'] } },
+    interpretation:
+      '{ids} is a connected app carrying a SAML config — a SAML SSO federation target that declares Salesforce as the SAML identity provider (IdP) and the app as an external service provider (SP) Salesforce will mint signed SAML assertions for, federating an authenticated user\'s identity into that third party for single sign-on. Its authProtocol is saml (SAML only) or both (SAML alongside an OAuth client), and the declared trust boundary — the Assertion Consumer Service (ACS) URL, the SP entity / audience, the expected issuer, and the NameID / subject format — defines who Salesforce federates identities out to. So it is an identity and trust surface worth reviewing. This names the DECLARED SAML SSO federation configuration, not a proven active login: the config is a static shape, not evidence that anyone authenticates through it or that the signing certificate is valid (the key material is never vaulted), WHO may use the app is a separate profile / permission-set access layer the config does not encode, and the federation may be intentional for a trusted downstream app.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['ConnectedApp'],
+  },
+  {
+    id: 'rule:apex-fake-assertion/tautology-assertion',
+    concept: 'concept:apex-fake-assertion-test',
+    bind: { componentTypes: ['ApexClass'], whereProperty: { key: 'qualityIssues', anyElement: { key: 'rule', equals: 'fake-assertion' } } },
+    interpretation:
+      '{ids} is an @IsTest class that contains a TAUTOLOGICAL or self-referential assertion — a System.assert(true, ...), a System.assertEquals(x, x), or a System.assertEquals(literal, sameLiteral) — whose operands are identical or always true, so it passes no matter how the code under test behaves. That assertion verifies nothing: it cannot fail on a wrong computed value, only on an uncaught exception, yet it still executes the code under test and so inflates the org code-coverage number while providing no real regression protection, and it can mask a genuine defect behind a green run. Assert on real field values, record counts, or thrown exceptions instead. This is HEURISTIC recognition from TOKENIZED Apex source — NOT a compiler AST: it flags the tautological call-site itself and does NOT prove the whole class is worthless (the class may carry other, meaningful assertions alongside the fake one). It names a test-quality review candidate, not proven coverage fraud.',
+    maxConfidence: 'heuristic',
+    absenceShaped: false,
+    dependsOnCoverage: ['ApexClass'],
+  },
+  {
+    id: 'rule:entitlement-process/inactive',
+    concept: 'concept:entitlement-process-inactive',
+    bind: { componentTypes: ['EntitlementProcess'], whereProperty: { key: 'active', equals: 'false' } },
+    interpretation:
+      '{ids} is an INACTIVE entitlement process — its `active` flag is FALSE, so Salesforce never applies it to a case and never starts any of its milestone timers until an admin re-activates it. It is DEAD SLA automation: no milestone clock runs, no business-hours SLA countdown begins, and no entitlement-driven escalation can fire from this version while it is inactive. It must be EXCLUDED from SLA / entitlement reasoning and from "what milestones apply on save" impact counts — treating a deactivated process as a live SLA guard would cry wolf about timers that cannot start, while assuming its milestones still run would falsely imply cases are being tracked. This is the DECLARED non-running fact read from the process\'s own active flag; it does NOT prove whether any specific case is currently on-track or breached (that is live per-record timer data the offline vault does not hold), NOT whether this version WOULD apply if activated (entry criteria remain unevaluated offline), and NOT whether another active version of the same process exists (version lineage is org-specific).',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['EntitlementProcess'],
+  },
+  {
+    id: 'rule:omnistudio/inactive-component-version',
+    concept: 'concept:omnistudio-inactive-component-version',
+    bind: { componentTypes: ['OmniScript', 'OmniIntegrationProcedure', 'OmniUiCard'], whereProperty: { key: 'isActive', equals: false } },
+    interpretation:
+      '{ids} is an INACTIVE OmniStudio component version (an OmniScript, Integration Procedure, or FlexCard whose isActive flag is FALSE). Salesforce serves and dispatches only the ACTIVE version of an OmniStudio component, so this saved version does not execute at runtime: it is not rendered, invoked as an action, or embedded on a page until an admin activates it. It must be EXCLUDED from runtime-reachability, invocation-impact, and \'what actually runs\' reasoning about OmniStudio — treating a deactivated version as live would overstate the runtime surface. This names the non-running structural fact from the component\'s own isActive flag, NOT whether another version of the same bundle is active and serving in its place (version lineage is org-specific), NOT whether anything still references this version by name, NOT what it would do if activated, and NOT why it was deactivated.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['OmniScript', 'OmniIntegrationProcedure', 'OmniUiCard'],
+  },
+  {
+    id: 'rule:field/required-absent-from-all-layouts',
+    concept: 'concept:required-field-absent-from-all-layouts',
+    bind: { componentTypes: ['CustomField'], whereProperty: [{ key: 'required', equals: true }], antiJoin: { absentEdgeType: 'usedInLayout', correlate: 'sameTo', absentFromTypes: ['Layout'] } },
+    interpretation:
+      '{ids} is UNIVERSALLY REQUIRED yet NO extracted page layout places it in any field-bearing region (the detail body, the Highlights Panel, or the mini layout) — so a user creating or editing a record through those layouts has no declared input for its value, which must instead come from a default value, a before-save automation, an Apex / API / data-import insert, or the platform\'s own runtime rendering of required fields on the create / edit form. Grounded from the field\'s declared required flag plus the ABSENCE of any usedInLayout edge from a Layout; under incomplete Layout coverage this absence is NOT asserted. This does NOT prove any save fails, and it does NOT see Lightning Dynamic Form (FlexiPage) placement — a field surfaced only through a Dynamic Form still matches here.',
+    maxConfidence: 'declared',
+    absenceShaped: true,
+    dependsOnCoverage: ['CustomField', 'Layout'],
+  },
+  {
+    id: 'rule:omnistudio/dataraptor-errors-ignored',
+    concept: 'concept:dataraptor-errors-ignored',
+    bind: { componentTypes: ['OmniDataTransform'], whereProperty: { key: 'errorIgnored', equals: true } },
+    interpretation:
+      '{ids} has \'Ignore Error\' turned ON — when an individual record operation inside the transform fails, the failing item is skipped and the transform CONTINUES, returning a success-shaped result even though some reads or writes did not complete. This is an error-swallowing reliability shape: a partial or silent data-integrity gap can pass undetected unless the caller explicitly inspects the returned error collection. Treat it as a review candidate for silent data loss, NOT as a transform that surfaces its failures. It is distinct from the \'Rollback on Error\' toggle — ignoring errors while not rolling back can leave partially applied data. This names the declared configuration shape from the transform\'s own toggle, NOT a proven failure: it does NOT establish that any record actually fails at runtime, that data was actually lost or left partial, or whether the invoking OmniScript, Integration Procedure, or Apex caller checks the error output and compensates.',
+    maxConfidence: 'declared',
+    absenceShaped: false,
+    dependsOnCoverage: ['OmniDataTransform'],
   },
 ]);

@@ -4096,3 +4096,356 @@ conceptRules:
     absenceShaped: false
     dependsOnCoverage:
       - PermissionSet
+
+  # Arc2 — CustomField --usesValueSet--> GlobalValueSet whose restricted flag is true.
+  - id: rule:field/restricted-global-value-set
+    concept: concept:field-restricted-global-value-set
+    bind:
+      edgeType: usesValueSet
+      componentTypes:
+        - CustomField
+        - GlobalValueSet
+      toWhereProperty:
+        key: restricted
+        equals: true
+    interpretation: '{0} draws its values from restricted global value set {1} — a closed vocabulary. Only values defined in the shared set are valid, so admins cannot add ad-hoc values on this field and an integration or API write of an out-of-set value is rejected; changing the allowed values means editing the shared set, which ripples to every other field bound to it. This is the metadata-declared restriction, not proof of runtime enforcement or that no existing record already holds an out-of-set value.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - CustomField
+      - GlobalValueSet
+
+  # ARC-2 concept-expansion — field-picklist-has-retired-values. NODE rule on
+  # CustomField picklistValues (an array on every local-value-set picklist,
+  # custom-field.ts:429; each element carries isActive, custom-field.ts:281,283,
+  # emitted false ONLY for a deactivated value). The anyElement existential holds
+  # iff SOME element isActive === false. GVS-backed picklists carry
+  # picklistValues:null, so anyElement short-circuits to false (reason.ts:493-494).
+  # maxConfidence declared: isActive is read verbatim from the field''s declared
+  # value-set metadata and a node match carries no edge, so weakest() keeps the
+  # declared ceiling. Additive — no extractor, engine, or refresh change.
+  - id: rule:field/picklist-has-retired-values
+    concept: concept:field-picklist-has-retired-values
+    bind:
+      componentTypes:
+        - CustomField
+      whereProperty:
+        key: picklistValues
+        anyElement:
+          key: isActive
+          equals: false
+    interpretation: '{ids} is a picklist whose OWN local value set retains at least one INACTIVE (retired) value — a value kept in the field definition after an admin deactivated it. Existing records that already hold a retired value keep displaying and reporting it (the value stays readable), but it is NO LONGER offered in the picker and cannot be newly selected in the UI, so a retired value is a data-hygiene and migration signal, not a live option. This names the DECLARED presence of a retired value in the field''s own value-set entries from metadata; it does NOT prove any record currently holds that value (a record-level count the offline vault cannot answer), does NOT cover GlobalValueSet-backed picklists (whose values live on the shared value set, not the field, and fail closed here because picklistValues is null), and does NOT prove any report, formula, default value, or automation still references the retired value.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - CustomField
+
+  # ARC-2 concept-expansion — approval-process-inactive-dead. ONE NODE rule on
+  # ApprovalProcess `active == false`. maxConfidence declared (read verbatim from
+  # the process's own metadata; a node match carries no edge, so weakest() keeps the
+  # declared ceiling). absenceShaped false: fires on a PRESENT inactive process,
+  # never concludes "none". The ApprovalProcess analogue of rule:workflow/inactive-dead.
+  # ORG-INDEPENDENT — NO canonical ids in the interpretation.
+  - id: rule:approval-process/inactive-dead
+    concept: concept:approval-process-inactive-dead
+    bind:
+      componentTypes:
+        - ApprovalProcess
+      whereProperty:
+        key: active
+        equals: false
+    interpretation: '{ids} is INACTIVE — DEAD approval automation that Salesforce never runs: no record can be submitted into it for approval, its entry criteria are never evaluated, and none of its initial-submission actions, per-step approver routing, final-approval / final-rejection actions, or record locks ever fire until an admin re-activates it. It must be EXCLUDED from "what happens when this record is submitted for approval" reasoning, from record-lock analysis (its finalApprovalRecordLock / finalRejectionRecordLock never take effect while inactive), and from automation-impact counts: counting a deactivated process overstates the automation load, while assuming its field-update actions or locks still run would misattribute a value change or a read-only freeze. This names the non-running structural fact from the process''s own active flag, NOT whether a Flow-based approval has replaced it and NOT whether it WOULD admit a given record if activated (entry criteria remain unevaluated offline).'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - ApprovalProcess
+
+  # RM — escalation-rule-time-deferred. ONE additive NODE rule,
+  # `concept:escalation-rule-time-deferred`, mirroring the async-boundary /
+  # flow-scheduled boolean-node pattern: componentTypes + node `whereProperty`
+  # equals-true on the always-present, required `active` boolean
+  # (escalation-rule.ts:389-398, emitted at :444). No extractor change, no refresh,
+  # no engine change; the runtime matcher (`properties[key] === equals`) matches the
+  # boolean exactly. TIER `declared`: `active` is derived VERBATIM from the rule's
+  # own required `<active>` element; a node match carries no edge, so weakest()
+  # keeps the declared ceiling. DISJOINT from rule:workflow/time-dependent-action-
+  # deferred (componentTypes [WorkflowRule], key `timeTriggerCount`), the Apex
+  # async-boundary rules (componentTypes [ApexClass]), and rule:automation/
+  # assignment-escalation-first-match-ordering (kind automation-collision, edge-
+  # bound). An inactive escalation rule (active false) does NOT fire.
+  - id: rule:escalation/time-deferred
+    concept: concept:escalation-rule-time-deferred
+    bind:
+      componentTypes:
+        - EscalationRule
+      whereProperty:
+        key: active
+        equals: true
+    interpretation: '{ids} is an ACTIVE escalation rule → its escalation actions (reassign the record to a queue or user, and/or send a notification email) are NOT run during the record save. They are QUEUED to Salesforce''s background escalation process and fire later, in a separate context, once the record has aged past the entry''s declared minute offset without meeting the rule''s exit criteria. The effect is DEFERRED and decoupled from the triggering edit: the reassignment/notification is not part of that save and cannot roll it back, and Salesforce silently drops the queued escalation if the record stops qualifying before the timer elapses. This names the deferred-action structure from the rule''s active state; it does NOT evaluate the `minutesToEscalation` offset (carried on the rule''s per-action edges, not the node), assert WHEN the escalation fires, whether the record still qualifies, or whether it succeeds.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - EscalationRule
+
+  # ARC-2 concept-expansion — auto-response-rule-first-match-starvation. ONE
+  # additive firstMatchOrdinal AGGREGATE rule on AutoResponseRule: counts
+  # outgoing `sendsEmail` edges (EmailTemplate targets) in `entryIndex` order.
+  # A catch-all entry (`criteriaItemCount === 0`, `hasFormula === false`) that
+  # precedes a later specific entry starves it. FAIL CLOSED when `entryIndex`
+  # or criteria metadata is absent on any counted edge. `edgeSource:
+  # root-outgoing` — edges leave the rule node; `countDistinctEndpoint: to`
+  # picks the EmailTemplate endpoint. maxConfidence declared: auto-response
+  # extractor edges are `confidence: declared`.
+  - id: rule:automation/auto-response-rule-first-match-starvation
+    concept: concept:auto-response-rule-first-match-starvation
+    bind:
+      edgeType: sendsEmail
+      componentTypes:
+        - EmailTemplate
+      aggregate:
+        edgeSource: root-outgoing
+        countDistinctEndpoint: to
+        firstMatchOrdinal:
+          ordinalEdgeProperty: entryIndex
+          broadEntryWhere:
+            - key: criteriaItemCount
+              equals: 0
+            - key: hasFormula
+              equals: false
+    interpretation: '{0} is an auto-response rule evaluated top-down by entry order: entry {broadOrdinal} is a catch-all with no criteria or formula filter, so it matches every record and its auto-response email {1} is sent before any later, more specific entry is considered — {starvedCount} later entries are structurally unreachable because the first matching entry wins. This names the metadata ordering risk only; it does NOT prove which email a specific record would trigger at runtime, and only one auto-response rule per object is active at a time.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - AutoResponseRule
+      - EmailTemplate
+
+  # ARC-2 concept-expansion — record-type-business-process-binding. ONE NODE
+  # rule on RecordType with `businessProcess isNull: false` (record-type.ts:212
+  # reads <businessProcess>, :264 emits it into node.properties — a populated
+  # string only when the record type declares a process). Same isNull operator /
+  # node-presence shape as rule:field/dependent-picklist-base. maxConfidence
+  # declared (read verbatim from the record type''s own metadata; a node match
+  # carries no edge, so weakest() keeps the declared ceiling). ORG-INDEPENDENT.
+  - id: rule:record-type/business-process-binding
+    concept: concept:record-type-business-process-binding
+    bind:
+      componentTypes:
+        - RecordType
+      whereProperty:
+        key: businessProcess
+        isNull: false
+    interpretation: '{ids} declares a BUSINESS PROCESS binding, so records created with this record type are scoped to that process''s ordered subset of the master status picklist — it constrains the available stage picklist values to those the bound business process exposes (the Stage / Status / Solution-status values), NOT the object''s full master picklist. On any write path — a Flow, an Apex assignment, an API create, or a data import — setting the stage / status field to a value the bound process does not include can be rejected. This names the DECLARED binding from the record type''s own businessProcess reference, NOT the specific stage values the process exposes (those live on the BusinessProcess metadata and are org-specific), NOT which records currently carry this record type or their current stage (record-level, not modeled offline), and NOT whether the bound business process is itself active. A record type without a business process uses the object''s full master picklist and has no such scoping.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - RecordType
+
+  # APEX CODE-QUALITY BATCH — apex-dynamic-reflective-surface. anyElement over the
+  # ApexClass `qualityIssues` array with `equals: dynamic-apex` (rule name grounded
+  # code-quality-patterns.ts:715; detector wired at code-quality-patterns.ts:1710;
+  # property written at apex-class.ts:357). `maxConfidence: heuristic` — every
+  # qualityIssues element carries `confidence:'heuristic'`, and a node match carries
+  # no edge, so weakest() keeps the heuristic ceiling. componentTypes [ApexClass]
+  # only (qualityIssues lives on ApexClass). absenceShaped:false (presence rule).
+  # Purely additive — no existing rule affected.
+  - id: rule:code-quality/dynamic-reflective-surface
+    concept: concept:apex-dynamic-reflective-surface
+    bind:
+      componentTypes:
+        - ApexClass
+      whereProperty:
+        key: qualityIssues
+        anyElement:
+          key: rule
+          equals: dynamic-apex
+    interpretation: '{ids} uses DYNAMIC or REFLECTIVE Apex — object, field, or type references built at RUNTIME (a dynamic-query string, a runtime schema describe, reflective type instantiation by name, or untyped deserialization) rather than as static literals. Such runtime-built references are INVISIBLE to static dependency analysis, so impact, usage / where-used, and dead-code results for this class MAY BE INCOMPLETE — a real dependency can be hidden behind the runtime construction. This is HEURISTIC token recognition, NOT a compiler AST: it can FLAG a dynamic construct whose reference is actually a safe constant, and can MISS one the tokenizer does not match. It does NOT prove the class is buggy, does NOT name WHICH objects or fields the dynamic code touches, and does NOT assert any specific hidden dependency — it flags the class as one whose static analysis is blind in spots; read the source to confirm.'
+    maxConfidence: heuristic
+    absenceShaped: false
+    dependsOnCoverage:
+      - ApexClass
+
+  # ARC-2 — named-credential-merge-fields-injectable. TWO additive NODE rules,
+  # both `concept:named-credential-merge-fields-injectable`, mirroring the
+  # external-api-surface class-marker NODE pattern EXACTLY. The markers are
+  # ALREADY in the graph (no extractor change, no refresh, no engine change): the
+  # named-credential extractor emits two unconditionally-present NamedCredential
+  # boolean properties — `allowMergeFieldsInHeader` and `allowMergeFieldsInBody`
+  # (named-credential.ts:207-212, default false). Each rule is a PRESENCE claim
+  # (`absenceShaped: false`) at `maxConfidence: declared` — a node match carries no
+  # edge, so weakest() keeps the declared ceiling. The two flags are read
+  # independently, so a credential with both set surfaces both claims. HONEST
+  # BOUNDARIES kept verbatim in each claim: it names the DECLARED configuration
+  # that ENABLES substitution, and does NOT prove a callout uses the credential,
+  # that any merge field carries UNTRUSTED input, or that an injection occurs.
+  - id: rule:named-credential-merge-fields-injectable/header
+    concept: concept:named-credential-merge-fields-injectable
+    bind:
+      componentTypes:
+        - NamedCredential
+      whereProperty:
+        - key: allowMergeFieldsInHeader
+          equals: true
+    interpretation: '{ids} is a named credential with `allowMergeFieldsInHeader` = true — the default guard against merge-field substitution in the outbound HTTP HEADER is LIFTED, so Apex callouts authenticating through this credential may substitute merge fields (including record- or user-derived values) into request headers. That makes it an outbound injection surface: if a substituted value is attacker-influenced it can alter or forge headers the upstream API trusts (header injection). This names the DECLARED configuration that ENABLES substitution; it does NOT prove that any Apex actually uses this credential, that any merge field carries UNTRUSTED input (the values may be static/trusted and the setting intentional), or that an injection occurs at runtime.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - NamedCredential
+  - id: rule:named-credential-merge-fields-injectable/body
+    concept: concept:named-credential-merge-fields-injectable
+    bind:
+      componentTypes:
+        - NamedCredential
+      whereProperty:
+        - key: allowMergeFieldsInBody
+          equals: true
+    interpretation: '{ids} is a named credential with `allowMergeFieldsInBody` = true — the default guard against merge-field substitution in the outbound HTTP BODY is LIFTED, so Apex callouts authenticating through this credential may substitute merge fields (including record- or user-derived values) into the request payload. That makes it an outbound injection surface: if a substituted value is attacker-influenced it can forge or tamper with body fields the upstream API trusts (payload injection). This names the DECLARED configuration that ENABLES substitution; it does NOT prove that any Apex actually uses this credential, that any merge field carries UNTRUSTED input (the values may be static/trusted and the setting intentional), or that an injection occurs at runtime.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - NamedCredential
+
+  # ARC-2 — connected-app-saml-sso-federation. A NODE rule, componentTypes
+  # [ConnectedApp] + a scalar whereProperty {key: authProtocol, in: [saml, both]}
+  # over the ALWAYS-present `authProtocol` discriminant (connected-app.ts:295,
+  # computed :259-266) — the SAME node shape as
+  # rule:access-mechanism/connected-app-oauth-scope. `maxConfidence: declared`
+  # (authProtocol is read verbatim from the app''s own metadata; a node match
+  # carries no edge, so weakest() keeps the declared ceiling). An `oauth` or `none`
+  # app short-circuits the `in` test to false and never fires. ORG-INDEPENDENT — NO
+  # vault counts in the interpretation.
+  - id: rule:access-mechanism/connected-app-saml-sso-federation
+    concept: concept:connected-app-saml-sso-federation
+    bind:
+      componentTypes:
+        - ConnectedApp
+      whereProperty:
+        key: authProtocol
+        in:
+          - saml
+          - both
+    interpretation: '{ids} is a connected app carrying a SAML config — a SAML SSO federation target that declares Salesforce as the SAML identity provider (IdP) and the app as an external service provider (SP) Salesforce will mint signed SAML assertions for, federating an authenticated user''s identity into that third party for single sign-on. Its authProtocol is saml (SAML only) or both (SAML alongside an OAuth client), and the declared trust boundary — the Assertion Consumer Service (ACS) URL, the SP entity / audience, the expected issuer, and the NameID / subject format — defines who Salesforce federates identities out to. So it is an identity and trust surface worth reviewing. This names the DECLARED SAML SSO federation configuration, not a proven active login: the config is a static shape, not evidence that anyone authenticates through it or that the signing certificate is valid (the key material is never vaulted), WHO may use the app is a separate profile / permission-set access layer the config does not encode, and the federation may be intentional for a trusted downstream app.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - ConnectedApp
+
+  # apex-fake-assertion-test. anyElement over the ApexClass `qualityIssues` array with
+  # `equals: fake-assertion` (rule name grounded code-quality-patterns.ts:1546; the
+  # recognizer is isTest-gated at :1542 and only fires on tautology shapes at :1531-1535,
+  # so a non-test or genuinely-asserting class carries no such element). Mirrors the
+  # shipped rule:code-quality/hardcoded-org-specific-literal anyElement shape.
+  # `maxConfidence: heuristic` — qualityIssues elements are heuristic and the node match
+  # carries no edge, so weakest() keeps the heuristic ceiling. componentTypes [ApexClass]
+  # only (qualityIssues lives on ApexClass). Purely additive; NO extractor/engine change.
+  - id: rule:apex-fake-assertion/tautology-assertion
+    concept: concept:apex-fake-assertion-test
+    bind:
+      componentTypes:
+        - ApexClass
+      whereProperty:
+        key: qualityIssues
+        anyElement:
+          key: rule
+          equals: fake-assertion
+    interpretation: '{ids} is an @IsTest class that contains a TAUTOLOGICAL or self-referential assertion — a System.assert(true, ...), a System.assertEquals(x, x), or a System.assertEquals(literal, sameLiteral) — whose operands are identical or always true, so it passes no matter how the code under test behaves. That assertion verifies nothing: it cannot fail on a wrong computed value, only on an uncaught exception, yet it still executes the code under test and so inflates the org code-coverage number while providing no real regression protection, and it can mask a genuine defect behind a green run. Assert on real field values, record counts, or thrown exceptions instead. This is HEURISTIC recognition from TOKENIZED Apex source — NOT a compiler AST: it flags the tautological call-site itself and does NOT prove the whole class is worthless (the class may carry other, meaningful assertions alongside the fake one). It names a test-quality review candidate, not proven coverage fraud.'
+    maxConfidence: heuristic
+    absenceShaped: false
+    dependsOnCoverage:
+      - ApexClass
+
+  # ARC-2 concept-expansion — entitlement-process-inactive. ONE additive NODE rule
+  # over an EntitlementProcess's grounded `active` STRING property
+  # (enterprise-metadata.ts:1762, extraProperties -> Record<string,string>). Fires on
+  # `active === 'false'` (a STRING equals, NOT a boolean — an unquoted `false` would be
+  # a YAML boolean and never === 'false'), cites the process, confidence declared.
+  # The omit-when-absent shape means an <active>-absent process carries no `active` key
+  # and does NOT match (we do not guess liveness). No extractor / engine / refresh change:
+  # `equals` on a scalar whereProperty is already live. TIER `declared`: `active` is read
+  # verbatim from the process's own metadata (zero resolution risk); a node match carries
+  # no edge, so weakest() keeps the declared ceiling.
+  - id: rule:entitlement-process/inactive
+    concept: concept:entitlement-process-inactive
+    bind:
+      componentTypes:
+        - EntitlementProcess
+      whereProperty:
+        key: active
+        equals: 'false'
+    interpretation: '{ids} is an INACTIVE entitlement process — its `active` flag is FALSE, so Salesforce never applies it to a case and never starts any of its milestone timers until an admin re-activates it. It is DEAD SLA automation: no milestone clock runs, no business-hours SLA countdown begins, and no entitlement-driven escalation can fire from this version while it is inactive. It must be EXCLUDED from SLA / entitlement reasoning and from "what milestones apply on save" impact counts — treating a deactivated process as a live SLA guard would cry wolf about timers that cannot start, while assuming its milestones still run would falsely imply cases are being tracked. This is the DECLARED non-running fact read from the process''s own active flag; it does NOT prove whether any specific case is currently on-track or breached (that is live per-record timer data the offline vault does not hold), NOT whether this version WOULD apply if activated (entry criteria remain unevaluated offline), and NOT whether another active version of the same process exists (version lineage is org-specific).'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - EntitlementProcess
+
+  # ARC-2 concept-expansion — omnistudio-inactive-component-version. ONE NODE
+  # rule on the three OmniStudio version types that share an always-present
+  # `isActive` boolean (omniscript.ts:556, omni-integration-procedure.ts:765,
+  # omni-ui-card.ts:794). A node match carries no edge, so weakest() keeps the
+  # declared ceiling. ORG-INDEPENDENT — NO vault counts in the interpretation.
+  - id: rule:omnistudio/inactive-component-version
+    concept: concept:omnistudio-inactive-component-version
+    bind:
+      componentTypes:
+        - OmniScript
+        - OmniIntegrationProcedure
+        - OmniUiCard
+      whereProperty:
+        key: isActive
+        equals: false
+    interpretation: '{ids} is an INACTIVE OmniStudio component version (an OmniScript, Integration Procedure, or FlexCard whose isActive flag is FALSE). Salesforce serves and dispatches only the ACTIVE version of an OmniStudio component, so this saved version does not execute at runtime: it is not rendered, invoked as an action, or embedded on a page until an admin activates it. It must be EXCLUDED from runtime-reachability, invocation-impact, and ''what actually runs'' reasoning about OmniStudio — treating a deactivated version as live would overstate the runtime surface. This names the non-running structural fact from the component''s own isActive flag, NOT whether another version of the same bundle is active and serving in its place (version lineage is org-specific), NOT whether anything still references this version by name, NOT what it would do if activated, and NOT why it was deactivated.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - OmniScript
+      - OmniIntegrationProcedure
+      - OmniUiCard
+
+  # ARC-2 concept-expansion — rule:field/required-absent-from-all-layouts. A
+  # NODE-present ANTI-JOIN (C17 shape, mirroring rule:field/deep-creation-gap-no-
+  # before-save-writer): CustomField `required == true` with NO `usedInLayout` edge
+  # from any Layout (correlate sameTo → absent.to === the field root, reason.ts:
+  # 974-975). `required` is read verbatim from the field's declared metadata
+  # (custom-field.ts:420, fixed key); `usedInLayout` edges are declared-confidence
+  # (layout.ts:317). maxConfidence declared: the present side is a declared node
+  # match and the absent side reasons over declared edges, so weakest() keeps the
+  # declared ceiling. absenceShaped true: it concludes an absence-of-placement, so
+  # under incomplete Layout coverage the absence is NOT asserted. Orthogonal to the
+  # no-default / deep-creation-gap rules (default-value axis) — never double-claims.
+  - id: rule:field/required-absent-from-all-layouts
+    concept: concept:required-field-absent-from-all-layouts
+    bind:
+      componentTypes:
+        - CustomField
+      whereProperty:
+        - key: required
+          equals: true
+      antiJoin:
+        absentEdgeType: usedInLayout
+        absentFromTypes:
+          - Layout
+        correlate: sameTo
+    interpretation: '{ids} is UNIVERSALLY REQUIRED yet NO extracted page layout places it in any field-bearing region (the detail body, the Highlights Panel, or the mini layout) — so a user creating or editing a record through those layouts has no declared input for its value, which must instead come from a default value, a before-save automation, an Apex / API / data-import insert, or the platform''s own runtime rendering of required fields on the create / edit form. Grounded from the field''s declared required flag plus the ABSENCE of any usedInLayout edge from a Layout; under incomplete Layout coverage this absence is NOT asserted. This does NOT prove any save fails, and it does NOT see Lightning Dynamic Form (FlexiPage) placement — a field surfaced only through a Dynamic Form still matches here.'
+    maxConfidence: declared
+    absenceShaped: true
+    dependsOnCoverage:
+      - CustomField
+      - Layout
+
+  # ARC-2 concept-expansion — dataraptor-errors-ignored. ONE NODE rule on
+  # OmniDataTransform `errorIgnored == true`. `errorIgnored` is an always-present
+  # coerced boolean on every OmniDataTransform node (omni-data-transform.ts:421).
+  # maxConfidence declared (declared config toggle, node match carries no edge, so
+  # weakest() keeps the ceiling). ORG-INDEPENDENT.
+  - id: rule:omnistudio/dataraptor-errors-ignored
+    concept: concept:dataraptor-errors-ignored
+    bind:
+      componentTypes:
+        - OmniDataTransform
+      whereProperty:
+        key: errorIgnored
+        equals: true
+    interpretation: '{ids} has ''Ignore Error'' turned ON — when an individual record operation inside the transform fails, the failing item is skipped and the transform CONTINUES, returning a success-shaped result even though some reads or writes did not complete. This is an error-swallowing reliability shape: a partial or silent data-integrity gap can pass undetected unless the caller explicitly inspects the returned error collection. Treat it as a review candidate for silent data loss, NOT as a transform that surfaces its failures. It is distinct from the ''Rollback on Error'' toggle — ignoring errors while not rolling back can leave partially applied data. This names the declared configuration shape from the transform''s own toggle, NOT a proven failure: it does NOT establish that any record actually fails at runtime, that data was actually lost or left partial, or whether the invoking OmniScript, Integration Procedure, or Apex caller checks the error output and compensates.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - OmniDataTransform

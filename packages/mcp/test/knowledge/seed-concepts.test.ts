@@ -6430,3 +6430,817 @@ describe('concept:session-based-permission-set-dormant — rule:permission-set/s
     expect(interpret(rule, { nodes: [node(B, 'PermissionSet', { hasActivationRequired: false })], edges: [] }, COMPLETE, B)).toEqual([]);
   });
 });
+
+// ARC-2 build-all batch — 14 grounded concepts (grounding independently verified).
+
+describe('concept:field-restricted-global-value-set — rule:field/restricted-global-value-set', () => {
+  const rule = ruleById('rule:field/restricted-global-value-set');
+  const STAGE_FIELD = 'CustomField:Ns__Deal__c.Stage__c';
+  const RESTRICTED_GVS = 'GlobalValueSet:Ns__DealStages';
+  const OPEN_GVS = 'GlobalValueSet:Ns__DealSources';
+
+  it('fires when a picklist usesValueSet a GlobalValueSet marked restricted, citing both grounded endpoints', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(STAGE_FIELD, 'CustomField'),
+        node(RESTRICTED_GVS, 'GlobalValueSet', { restricted: true }),
+      ],
+      // The usesValueSet edge is emitted declared by the custom-field extractor.
+      edges: [edge(STAGE_FIELD, RESTRICTED_GVS, 'usesValueSet', 'declared')],
+    };
+
+    const out = interpret(rule, slice, COMPLETE, STAGE_FIELD);
+
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.concept).toBe('concept:field-restricted-global-value-set');
+    // Both grounded endpoints are cited: the field AND the restricted value set.
+    expect(only.groundedIn).toContain(STAGE_FIELD);
+    expect(only.groundedIn).toContain(RESTRICTED_GVS);
+    // maxConfidence declared for a metadata edge + node-property match — computed, not asserted.
+    expect(only.confidence).toBe('declared');
+    // Distinctive claim substring, lowercase — present in the interpretation.
+    expect(only.claim.toLowerCase()).toContain('closed vocabulary');
+    expect(only.claim).toContain(STAGE_FIELD);
+    expect(only.claim).toContain(RESTRICTED_GVS);
+    expect(only.provenance).toBe('offline_snapshot');
+  });
+
+  it('does NOT fire when the referenced global value set is not restricted', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(STAGE_FIELD, 'CustomField'),
+        node(OPEN_GVS, 'GlobalValueSet', { restricted: false }),
+      ],
+      edges: [edge(STAGE_FIELD, OPEN_GVS, 'usesValueSet', 'declared')],
+    };
+
+    expect(interpret(rule, slice, COMPLETE, STAGE_FIELD)).toEqual([]);
+  });
+});
+
+describe('concept:field-picklist-has-retired-values — rule:field/picklist-has-retired-values', () => {
+  const rule = ruleById('rule:field/picklist-has-retired-values');
+  const STAGE_FIELD = 'CustomField:Ns__Deal__c.Stage__c'; // local picklist WITH a retired value
+  const TYPE_FIELD = 'CustomField:Ns__Deal__c.Type__c'; // local picklist, all values active
+  const REGION_FIELD = 'CustomField:Ns__Deal__c.Region__c'; // GVS-backed → picklistValues:null
+
+  it('ships the concept with the field-provenance kind', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('field-provenance');
+  });
+
+  it('is a node-shaped CustomField rule (anyElement over picklistValues[].isActive === false, no edge, declared)', () => {
+    expect(rule.concept).toBe('concept:field-picklist-has-retired-values');
+    expect(rule.bind.componentTypes).toEqual(['CustomField']);
+    expect(rule.bind.whereProperty).toEqual({
+      key: 'picklistValues',
+      anyElement: { key: 'isActive', equals: false },
+    });
+    expect(rule.bind.edgeType).toBeUndefined();
+    expect(rule.absenceShaped).toBe(false);
+    expect(rule.maxConfidence).toBe('declared');
+    expect(rule.dependsOnCoverage).toEqual(['CustomField']);
+  });
+
+  it('fires ONLY on the picklist with a retired value, cites it, claim says retired / no longer, confidence declared', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(STAGE_FIELD, 'CustomField', {
+          dataType: 'Picklist',
+          picklistValues: [
+            { value: 'New', isActive: true },
+            { value: 'Legacy', isActive: false }, // retired value
+          ],
+        }),
+        node(TYPE_FIELD, 'CustomField', {
+          dataType: 'Picklist',
+          picklistValues: [
+            { value: 'A', isActive: true },
+            { value: 'B', isActive: true },
+          ],
+        }),
+        node(REGION_FIELD, 'CustomField', {
+          dataType: 'Picklist',
+          picklistValues: null, // GVS-backed → fails closed
+          valueSetName: 'Ns__Regions',
+        }),
+      ],
+      edges: [],
+    };
+
+    const out = interpret(rule, slice, COMPLETE);
+
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.concept).toBe('concept:field-picklist-has-retired-values');
+    // EXACTLY the field with a retired value — not the all-active or GVS-backed siblings.
+    expect(only.groundedIn).toEqual([STAGE_FIELD]);
+    expect(only.groundedIn).not.toContain(TYPE_FIELD);
+    expect(only.groundedIn).not.toContain(REGION_FIELD);
+    expect(only.claim).toContain(STAGE_FIELD);
+    expect(only.claim.toLowerCase()).toContain('retired');
+    expect(only.claim.toLowerCase()).toContain('no longer');
+    // A node match carries no edge confidence → the declared ceiling holds.
+    expect(only.confidence).toBe('declared');
+    expect(only.coverageCaveat).toBeNull();
+    expect(only.provenance).toBe('offline_snapshot');
+    expect(only.modelVersion).toBe(MODEL_VERSION);
+  });
+
+  it('does NOT fire on an all-active picklist or a GVS-backed picklist (picklistValues:null)', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(TYPE_FIELD, 'CustomField', {
+          dataType: 'Picklist',
+          picklistValues: [{ value: 'A', isActive: true }],
+        }),
+        node(REGION_FIELD, 'CustomField', { dataType: 'Picklist', picklistValues: null }),
+      ],
+      edges: [],
+    };
+    expect(interpret(rule, slice, COMPLETE)).toEqual([]);
+  });
+});
+
+describe('concept:approval-process-inactive-dead — rule:approval-process/inactive-dead', () => {
+  const rule = ruleById('rule:approval-process/inactive-dead');
+  const INACTIVE = 'ApprovalProcess:Ns__Deal__c.Ns__Stale_Approval';
+  const ACTIVE = 'ApprovalProcess:Ns__Deal__c.Ns__Live_Approval';
+
+  it('ships the concept with the firing-condition kind and active===false bind', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('firing-condition');
+    expect(rule.bind.whereProperty).toEqual({ key: 'active', equals: false });
+  });
+
+  it('fires on active===false with a dead-approval-automation claim, declared', () => {
+    const out = interpret(
+      rule,
+      { nodes: [node(INACTIVE, 'ApprovalProcess', { active: false })], edges: [] },
+      COMPLETE,
+      INACTIVE,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.groundedIn).toContain(INACTIVE);
+    expect(out[0]!.confidence).toBe('declared');
+    const claim = out[0]!.claim.toLowerCase();
+    expect(claim).toContain('inactive');
+    expect(claim).toContain('dead approval automation');
+  });
+
+  it('does NOT fire on an active approval process', () => {
+    expect(
+      interpret(
+        rule,
+        { nodes: [node(ACTIVE, 'ApprovalProcess', { active: true })], edges: [] },
+        COMPLETE,
+        ACTIVE,
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe('concept:escalation-rule-time-deferred — rule:escalation/time-deferred', () => {
+  const rule = ruleById('rule:escalation/time-deferred');
+
+  const CASE_P1_ESC = 'EscalationRule:Ns__Case.Ns__P1_Escalation';
+  const CASE_OLD_ESC = 'EscalationRule:Ns__Case.Ns__Legacy_Escalation';
+  const CASE_ASSIGN_RULE = 'AssignmentRule:Ns__Case.Ns__Router';
+
+  it('matches ONLY the active EscalationRule, claims deferred fire, confidence declared', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(CASE_P1_ESC, 'EscalationRule', {
+          active: true,
+          ruleEntryCount: 1,
+          actionCount: 1,
+        }),
+        node(CASE_OLD_ESC, 'EscalationRule', { active: false }), // inactive → excluded
+        node(CASE_ASSIGN_RULE, 'AssignmentRule', { active: true }), // wrong type → excluded
+      ],
+      edges: [],
+    };
+
+    const out = interpret(rule, slice, COMPLETE);
+
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.concept).toBe('concept:escalation-rule-time-deferred');
+    // EXACTLY the active escalation rule — not the inactive sibling or the
+    // wrong-typed assignment rule.
+    expect(only.groundedIn).toContain(CASE_P1_ESC);
+    expect(only.groundedIn).not.toContain(CASE_OLD_ESC);
+    expect(only.groundedIn).not.toContain(CASE_ASSIGN_RULE);
+    expect(only.claim.toLowerCase()).toContain('fire later, in a separate context');
+    // Node match carries no edge confidence → the declared ceiling holds.
+    expect(only.confidence).toBe('declared');
+  });
+
+  it('yields no claim when the escalation rule is inactive (no citation ⇒ no claim)', () => {
+    const slice: GroundedSlice = {
+      nodes: [node(CASE_OLD_ESC, 'EscalationRule', { active: false })],
+      edges: [],
+    };
+    expect(interpret(rule, slice, COMPLETE)).toEqual([]);
+  });
+});
+
+describe('concept:auto-response-rule-first-match-starvation — AutoResponseRule sendsEmail firstMatchOrdinal', () => {
+  const RULE = 'AutoResponseRule:Ns__Case.Ns__Web';
+  const CATCH_ALL_TPL = 'EmailTemplate:Ns__Support.Ns__Ack';
+  const SPECIFIC_TPL = 'EmailTemplate:Ns__Support.Ns__Vip';
+  const rule = ruleById('rule:automation/auto-response-rule-first-match-starvation');
+
+  const sendsEmailEdge = (
+    toId: string,
+    entryIndex: number,
+    criteriaItemCount: number,
+    hasFormula = false,
+  ): Edge =>
+    edge(RULE, toId, 'sendsEmail', 'declared', {
+      entryIndex,
+      criteriaItemCount,
+      hasFormula,
+      senderName: 'Support',
+    });
+
+  it('fires when a catch-all entry precedes a specific entry — cites [rule, catch-all, starved]', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(RULE, 'AutoResponseRule', { active: true, ruleEntryCount: 2 }),
+        node(CATCH_ALL_TPL, 'EmailTemplate'),
+        node(SPECIFIC_TPL, 'EmailTemplate'),
+      ],
+      edges: [
+        sendsEmailEdge(CATCH_ALL_TPL, 0, 0, false),
+        sendsEmailEdge(SPECIFIC_TPL, 1, 2, false),
+      ],
+    };
+    const out = interpret(rule, slice, COMPLETE, RULE);
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.concept).toBe('concept:auto-response-rule-first-match-starvation');
+    expect(only.groundedIn).toContain(RULE);
+    expect(only.groundedIn).toEqual([RULE, CATCH_ALL_TPL, SPECIFIC_TPL]);
+    expect(only.claim).toContain('catch-all');
+    expect(only.claim).toContain('structurally unreachable');
+    expect(only.claim).toContain('entry 0');
+    expect(only.confidence).toBe('declared');
+  });
+
+  it('does NOT fire when every entry has criteria (no catch-all)', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(RULE, 'AutoResponseRule', { active: true }),
+        node(CATCH_ALL_TPL, 'EmailTemplate'),
+        node(SPECIFIC_TPL, 'EmailTemplate'),
+      ],
+      edges: [
+        sendsEmailEdge(CATCH_ALL_TPL, 0, 1, false),
+        sendsEmailEdge(SPECIFIC_TPL, 1, 2, false),
+      ],
+    };
+    expect(interpret(rule, slice, COMPLETE, RULE)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// concept:record-type-business-process-binding —
+// rule:record-type/business-process-binding
+//
+// A NODE presence rule on RecordType with a non-null `businessProcess`. Fires
+// only on a record type that declares a business process; a record type with a
+// null OR absent businessProcess uses the object's full master picklist and is
+// never cited. record-type.ts:212 reads <businessProcess>, :264 emits it into
+// node.properties (string when declared, null otherwise).
+// ---------------------------------------------------------------------------
+
+describe('concept:record-type-business-process-binding — rule:record-type/business-process-binding', () => {
+  const rule = ruleById('rule:record-type/business-process-binding');
+
+  const RT_WITH_BP = 'RecordType:Ns__Deal__c.Enterprise'; // businessProcess set → fires
+  const RT_NULL_BP = 'RecordType:Ns__Deal__c.Basic'; // businessProcess: null → excluded
+  const RT_ABSENT_BP = 'RecordType:Ns__Deal__c.Legacy'; // businessProcess key absent → excluded
+
+  it('reuses the access-mechanism ConceptKind — no new kind invented', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('access-mechanism');
+  });
+
+  it('binds RecordType with businessProcess isNull:false (declared, node-only)', () => {
+    expect(rule.bind.componentTypes).toEqual(['RecordType']);
+    expect(rule.bind.whereProperty).toEqual({ key: 'businessProcess', isNull: false });
+    expect(rule.maxConfidence).toBe('declared');
+    expect(rule.absenceShaped).toBe(false);
+    expect(rule.dependsOnCoverage).toEqual(['RecordType']);
+  });
+
+  it('fires on a record type bound to a business process, claim pinned, confidence declared', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(RT_WITH_BP, 'RecordType', { active: true, businessProcess: 'Ns__Enterprise_Process' }),
+      ],
+      edges: [],
+    };
+
+    const out = interpret(rule, slice, COMPLETE);
+
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.concept).toBe('concept:record-type-business-process-binding');
+    expect(only.groundedIn).toContain(RT_WITH_BP);
+    // Node match carries no edge → the declared ceiling holds.
+    expect(only.confidence).toBe('declared');
+    expect(only.coverageCaveat).toBeNull();
+    // Distinctive lowercase claim substring (appears verbatim in the interpretation).
+    expect(only.claim).toContain('constrains the available stage picklist values');
+  });
+
+  it('does NOT fire on a record type with a null or absent businessProcess', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(RT_NULL_BP, 'RecordType', { active: true, businessProcess: null }),
+        node(RT_ABSENT_BP, 'RecordType', { active: true }),
+      ],
+      edges: [],
+    };
+
+    const out = interpret(rule, slice, COMPLETE);
+    expect(out).toHaveLength(0);
+  });
+});
+
+// N) concept:apex-dynamic-reflective-surface — anyElement over qualityIssues[].rule === dynamic-apex.
+describe('concept:apex-dynamic-reflective-surface — rule:code-quality/dynamic-reflective-surface', () => {
+  const rule = ruleById('rule:code-quality/dynamic-reflective-surface');
+  const DYN_CLASS = 'ApexClass:Ns__DynamicSoqlRepo';
+  const CLEAN_CLASS = 'ApexClass:Ns__StaticRepo';
+
+  it('ships the concept with the code-quality-defect kind', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('code-quality-defect');
+  });
+
+  it('is a node-shaped anyElement rule over qualityIssues[].rule === dynamic-apex, heuristic ceiling', () => {
+    expect(rule.concept).toBe('concept:apex-dynamic-reflective-surface');
+    expect(rule.bind.componentTypes).toEqual(['ApexClass']);
+    // The load-bearing proof: the anyElement existential survives the compile
+    // round-trip verbatim (object-element mode — inner `key` present).
+    expect(rule.bind.whereProperty).toEqual({
+      key: 'qualityIssues',
+      anyElement: { key: 'rule', equals: 'dynamic-apex' },
+    });
+    expect(rule.bind.edgeType).toBeUndefined();
+    expect(rule.absenceShaped).toBe(false);
+    expect(rule.maxConfidence).toBe('heuristic');
+    expect(rule.dependsOnCoverage).toEqual(['ApexClass']);
+  });
+
+  it('fires on an ApexClass whose qualityIssues has a dynamic-apex element, cites only it, heuristic, carries the blind-spot caveat', () => {
+    const slice: GroundedSlice = { nodes: [withQualityIssues(DYN_CLASS, 'dynamic-apex')], edges: [] };
+    const out = interpret(rule, slice, COMPLETE, DYN_CLASS);
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.concept).toBe('concept:apex-dynamic-reflective-surface');
+    expect(only.groundedIn).toEqual([DYN_CLASS]);
+    expect(only.claim).toContain(DYN_CLASS);
+    const lower = only.claim.toLowerCase();
+    expect(lower).toContain('reflective');
+    expect(lower).toContain('invisible');
+    expect(lower).toContain('may be incomplete');
+    expect(lower).toContain('heuristic');
+    expect(only.confidence).toBe('heuristic');
+    // A node match carries no edge, so weakest() keeps the heuristic ceiling.
+    expect(only.confidence).toBe(weakest('heuristic'));
+    expect(only.coverageCaveat).toBeNull();
+    expect(only.provenance).toBe('offline_snapshot');
+    expect(only.modelVersion).toBe(MODEL_VERSION);
+  });
+
+  it('[existential] fires when dynamic-apex is ONE element among several issues (not required to be the only one)', () => {
+    const slice: GroundedSlice = {
+      nodes: [withQualityIssues(DYN_CLASS, 'soql-in-loop', 'dynamic-apex', 'hardcoded-id')],
+      edges: [],
+    };
+    const out = interpret(rule, slice, COMPLETE, DYN_CLASS);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.groundedIn).toEqual([DYN_CLASS]);
+  });
+
+  it('does NOT fire on a clean class (empty qualityIssues), a bare node (absent array), or a class with only OTHER issues', () => {
+    const cleanEmpty: GroundedSlice = { nodes: [node(CLEAN_CLASS, 'ApexClass', { qualityIssues: [] })], edges: [] };
+    const bare: GroundedSlice = { nodes: [node(CLEAN_CLASS, 'ApexClass', {})], edges: [] };
+    const other: GroundedSlice = { nodes: [withQualityIssues(CLEAN_CLASS, 'soql-in-loop', 'hardcoded-url')], edges: [] };
+    expect(interpret(rule, cleanEmpty, COMPLETE, CLEAN_CLASS)).toEqual([]);
+    expect(interpret(rule, bare, COMPLETE, CLEAN_CLASS)).toEqual([]);
+    expect(interpret(rule, other, COMPLETE, CLEAN_CLASS)).toEqual([]);
+  });
+});
+
+describe('concept:named-credential-merge-fields-injectable — header + body node rules', () => {
+  const NC_MERGE_HEADER = 'NamedCredential:Ns__Payments_Api'; // allowMergeFieldsInHeader
+  const NC_MERGE_BODY = 'NamedCredential:Ns__Billing_Api'; // allowMergeFieldsInBody
+  const NC_SAFE = 'NamedCredential:Ns__Static_Api'; // both false → excluded
+
+  const headerRule = ruleById('rule:named-credential-merge-fields-injectable/header');
+  const bodyRule = ruleById('rule:named-credential-merge-fields-injectable/body');
+
+  it('ships both rules bound to the external-api-surface concept', () => {
+    expect(CONCEPTS[headerRule.concept]).toBeDefined();
+    expect(CONCEPTS[headerRule.concept]!.kind).toBe('external-api-surface');
+    expect(bodyRule.concept).toBe('concept:named-credential-merge-fields-injectable');
+  });
+
+  it('is a node-shaped NamedCredential rule (componentTypes + whereProperty equals true, no edge, declared)', () => {
+    expect(headerRule.bind.componentTypes).toEqual(['NamedCredential']);
+    expect(headerRule.bind.whereProperty).toEqual([
+      { key: 'allowMergeFieldsInHeader', equals: true },
+    ]);
+    expect(bodyRule.bind.whereProperty).toEqual([
+      { key: 'allowMergeFieldsInBody', equals: true },
+    ]);
+    expect(headerRule.bind.edgeType).toBeUndefined();
+    expect(headerRule.absenceShaped).toBe(false);
+    expect(headerRule.maxConfidence).toBe('declared');
+    expect(headerRule.dependsOnCoverage).toEqual(['NamedCredential']);
+  });
+
+  const slice: GroundedSlice = {
+    nodes: [
+      node(NC_MERGE_HEADER, 'NamedCredential', {
+        allowMergeFieldsInHeader: true,
+        allowMergeFieldsInBody: false,
+      }),
+      node(NC_MERGE_BODY, 'NamedCredential', {
+        allowMergeFieldsInHeader: false,
+        allowMergeFieldsInBody: true,
+      }),
+      node(NC_SAFE, 'NamedCredential', {
+        allowMergeFieldsInHeader: false,
+        allowMergeFieldsInBody: false,
+      }),
+    ],
+    edges: [],
+  };
+
+  it('header rule fires ONLY on the header-flag credential, claims an injection surface, cites it, declared', () => {
+    const out = interpret(headerRule, slice, COMPLETE);
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.concept).toBe('concept:named-credential-merge-fields-injectable');
+    expect(only.groundedIn).toEqual([NC_MERGE_HEADER]);
+    expect(only.claim).toContain(NC_MERGE_HEADER);
+    expect(only.claim.toLowerCase()).toContain('injection surface');
+    // Distinct flag: the header rule does NOT fire on the body-only or safe credential.
+    expect(only.claim).not.toContain(NC_MERGE_BODY);
+    expect(only.claim).not.toContain(NC_SAFE);
+    // A node match carries no edge confidence → the declared ceiling holds.
+    expect(only.confidence).toBe('declared');
+    expect(only.confidence).toBe(weakest('declared', 'declared'));
+    expect(only.coverageCaveat).toBeNull();
+  });
+
+  it('body rule fires ONLY on the body-flag credential and names an injection surface', () => {
+    const out = interpret(bodyRule, slice, COMPLETE);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.groundedIn).toEqual([NC_MERGE_BODY]);
+    expect(out[0]!.claim.toLowerCase()).toContain('injection surface');
+  });
+
+  it('neither rule fires on the both-false credential (negative case)', () => {
+    const safeOnly: GroundedSlice = {
+      nodes: [
+        node(NC_SAFE, 'NamedCredential', {
+          allowMergeFieldsInHeader: false,
+          allowMergeFieldsInBody: false,
+        }),
+      ],
+      edges: [],
+    };
+    expect(interpret(headerRule, safeOnly, COMPLETE)).toEqual([]);
+    expect(interpret(bodyRule, safeOnly, COMPLETE)).toEqual([]);
+  });
+});
+
+describe('concept:connected-app-saml-sso-federation — rule:access-mechanism/connected-app-saml-sso-federation', () => {
+  const rule = ruleById('rule:access-mechanism/connected-app-saml-sso-federation');
+  const APP = 'ConnectedApp:Ns__SsoFederation';
+
+  it('ships the concept with the access-mechanism kind', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('access-mechanism');
+  });
+
+  it('is a node-shaped ConnectedApp rule (componentTypes + scalar authProtocol in [saml, both], no edge, declared)', () => {
+    expect(rule.bind.componentTypes).toEqual(['ConnectedApp']);
+    expect(rule.bind.edgeType).toBeUndefined();
+    expect(rule.bind.whereProperty).toEqual({
+      key: 'authProtocol',
+      in: ['saml', 'both'],
+    });
+    expect(rule.maxConfidence).toBe('declared');
+    expect(rule.absenceShaped).toBe(false);
+  });
+
+  it('fires on a SAML-only ConnectedApp, cites the app, names the SAML SSO federation target, confidence declared', () => {
+    const slice: GroundedSlice = {
+      nodes: [node(APP, 'ConnectedApp', { authProtocol: 'saml', hasSamlConfig: true, scopes: [] })],
+      edges: [],
+    };
+    const out = interpret(rule, slice, COMPLETE);
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.concept).toBe('concept:connected-app-saml-sso-federation');
+    expect(only.groundedIn).toEqual([APP]);
+    expect(only.claim).toContain(APP);
+    expect(only.claim.toLowerCase()).toContain('saml sso federation target');
+    // Honest: names the declared config, not a proven active login.
+    expect(only.claim.toLowerCase()).toContain('not a proven active login');
+    expect(only.confidence).toBe('declared');
+    expect(only.provenance).toBe('offline_snapshot');
+    expect(only.modelVersion).toBe(MODEL_VERSION);
+  });
+
+  it('fires on an app carrying BOTH SAML and OAuth (authProtocol both)', () => {
+    const slice: GroundedSlice = {
+      nodes: [node(APP, 'ConnectedApp', { authProtocol: 'both', hasSamlConfig: true, scopes: ['Api'] })],
+      edges: [],
+    };
+    expect(interpret(rule, slice, COMPLETE)).toHaveLength(1);
+  });
+
+  it('does NOT fire on an OAuth-only app (authProtocol oauth, no SAML config)', () => {
+    const slice: GroundedSlice = {
+      nodes: [node(APP, 'ConnectedApp', { authProtocol: 'oauth', hasSamlConfig: false, scopes: ['Api'] })],
+      edges: [],
+    };
+    expect(interpret(rule, slice, COMPLETE)).toEqual([]);
+  });
+
+  it('does NOT fire on a Canvas / session app with no auth protocol (authProtocol none)', () => {
+    const slice: GroundedSlice = {
+      nodes: [node(APP, 'ConnectedApp', { authProtocol: 'none', hasSamlConfig: false, scopes: [] })],
+      edges: [],
+    };
+    expect(interpret(rule, slice, COMPLETE)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// concept:apex-fake-assertion-test — an @IsTest class carries a TAUTOLOGICAL
+//   assertion (System.assert(true), assertEquals(x,x), assertEquals(lit,lit)).
+//   Grounded on the ApexClass `qualityIssues` array (always emitted,
+//   apex-class.ts:357) holding an element whose `rule === 'fake-assertion'`
+//   (code-quality-patterns.ts:1546, isTest-gated at :1542). A NODE-only
+//   anyElement match: confidence stays at the heuristic ceiling. Must NOT fire
+//   on a test class whose only assertions are real (empty qualityIssues).
+// ---------------------------------------------------------------------------
+describe('concept:apex-fake-assertion-test — rule:apex-fake-assertion/tautology-assertion', () => {
+  const rule = ruleById('rule:apex-fake-assertion/tautology-assertion');
+  const FAKE_TEST_CLASS = 'ApexClass:Ns__FakeAssertTest';
+  const REAL_TEST_CLASS = 'ApexClass:Ns__RealAssertTest';
+
+  it('fires on a test class carrying a fake-assertion qualityIssue, confidence heuristic', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(FAKE_TEST_CLASS, 'ApexClass', {
+          isTest: true,
+          qualityIssues: [
+            {
+              rule: 'fake-assertion',
+              severity: 'high',
+              location: 'line 12',
+              confidence: 'heuristic',
+            },
+          ],
+        }),
+        // Real test: asserts genuinely → clean qualityIssues → excluded.
+        node(REAL_TEST_CLASS, 'ApexClass', { isTest: true, qualityIssues: [] }),
+      ],
+      edges: [],
+    };
+
+    const out = interpret(rule, slice, COMPLETE);
+
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.concept).toBe('concept:apex-fake-assertion-test');
+    expect(only.groundedIn).toContain(FAKE_TEST_CLASS);
+    expect(only.groundedIn).not.toContain(REAL_TEST_CLASS);
+    expect(only.claim.toLowerCase()).toContain('verifies nothing');
+    // Node-only anyElement match carries no edge → the heuristic ceiling holds.
+    expect(only.confidence).toBe('heuristic');
+  });
+
+  it('does NOT fire on a test class whose only assertions are real (empty qualityIssues)', () => {
+    const slice: GroundedSlice = {
+      nodes: [node(REAL_TEST_CLASS, 'ApexClass', { isTest: true, qualityIssues: [] })],
+      edges: [],
+    };
+    expect(interpret(rule, slice, COMPLETE)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ARC-2 concept-expansion — concept:entitlement-process-inactive. ONE NODE rule
+// over an EntitlementProcess's grounded `active` STRING property
+// (enterprise-metadata.ts:1762, extraProperties -> Record<string,string>). It
+// fires on `active === 'false'` (a STRING equals, NOT a boolean), cites the
+// process, confidence declared. It must NOT fire on an active process, an absent
+// `active`, a boolean `false` (wrong shape), or a non-EntitlementProcess node.
+// ---------------------------------------------------------------------------
+
+describe('concept:entitlement-process-inactive — rule:entitlement-process/inactive', () => {
+  const rule = ruleById('rule:entitlement-process/inactive');
+  const INACTIVE_EP = 'EntitlementProcess:Ns__Standard_Case_SLA';
+  const ACTIVE_EP = 'EntitlementProcess:Ns__Live_Case_SLA';
+
+  it('ships the concept with the firing-condition kind and the dead-SLA summary', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('firing-condition');
+    expect(CONCEPTS[rule.concept]!.summary.toLowerCase()).toContain('dead sla automation');
+  });
+
+  it('is a node-shaped EntitlementProcess rule keying the STRING active equals "false"', () => {
+    expect(rule.concept).toBe('concept:entitlement-process-inactive');
+    expect(rule.bind.componentTypes).toEqual(['EntitlementProcess']);
+    // A STRING 'false' — the extractor emits `active` as a string extra-property.
+    expect(rule.bind.whereProperty).toEqual({ key: 'active', equals: 'false' });
+    expect(rule.bind.edgeType).toBeUndefined();
+    expect(rule.absenceShaped).toBe(false);
+    expect(rule.maxConfidence).toBe('declared');
+    expect(rule.dependsOnCoverage).toEqual(['EntitlementProcess']);
+  });
+
+  it('fires on an INACTIVE entitlement process (active==="false"), cites it, claims dead SLA automation, confidence declared', () => {
+    const slice: GroundedSlice = {
+      nodes: [node(INACTIVE_EP, 'EntitlementProcess', { active: 'false', SObjectType: 'Case' })],
+      edges: [],
+    };
+    const out = interpret(rule, slice, COMPLETE, INACTIVE_EP);
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.concept).toBe('concept:entitlement-process-inactive');
+    expect(only.groundedIn).toContain(INACTIVE_EP);
+    expect(only.claim).toContain(INACTIVE_EP);
+    expect(only.claim.toLowerCase()).toContain('dead sla automation');
+    expect(only.confidence).toBe('declared');
+    expect(only.confidence).toBe(weakest('declared', 'declared'));
+    expect(only.coverageCaveat).toBeNull();
+    expect(only.provenance).toBe('offline_snapshot');
+    expect(only.modelVersion).toBe(MODEL_VERSION);
+  });
+
+  it('does NOT fire on an active process (active==="true"), an absent active, or a boolean false (string-equals semantics)', () => {
+    const active: GroundedSlice = { nodes: [node(ACTIVE_EP, 'EntitlementProcess', { active: 'true' })], edges: [] };
+    const absent: GroundedSlice = { nodes: [node(ACTIVE_EP, 'EntitlementProcess', {})], edges: [] };
+    // A boolean `false` is the WRONG shape (extractor emits a string) — strict === must reject it.
+    const boolFalse: GroundedSlice = { nodes: [node(ACTIVE_EP, 'EntitlementProcess', { active: false })], edges: [] };
+    expect(interpret(rule, active, COMPLETE, ACTIVE_EP)).toEqual([]);
+    expect(interpret(rule, absent, COMPLETE, ACTIVE_EP)).toEqual([]);
+    expect(interpret(rule, boolFalse, COMPLETE, ACTIVE_EP)).toEqual([]);
+  });
+
+  it('[type guard] a non-EntitlementProcess node carrying active==="false" does NOT fire', () => {
+    const slice: GroundedSlice = {
+      nodes: [node('CustomObject:Ns__Case', 'CustomObject', { active: 'false' })],
+      edges: [],
+    };
+    expect(interpret(rule, slice, COMPLETE, 'CustomObject:Ns__Case')).toEqual([]);
+  });
+});
+
+describe('concept:omnistudio-inactive-component-version — rule:omnistudio/inactive-component-version', () => {
+  const rule = ruleById('rule:omnistudio/inactive-component-version');
+
+  const INACTIVE_OS = 'OmniScript:Ns__QuoteEnrollment_1';
+  const INACTIVE_IP = 'OmniIntegrationProcedure:Ns__GetQuote_Fetch_2';
+  const INACTIVE_CARD = 'OmniUiCard:Ns__QuoteSummary_1';
+  const ACTIVE_OS = 'OmniScript:Ns__QuoteEnrollment_2';
+
+  it('ships the concept with the firing-condition kind and isActive===false bind', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('firing-condition');
+    expect(rule.bind.whereProperty).toEqual({ key: 'isActive', equals: false });
+  });
+
+  it('fires on an inactive OmniScript version with a does-not-execute claim, declared', () => {
+    // Grounded on the always-present isActive boolean the OmniScript extractor
+    // emits (omniscript.ts:556). A node match carries no edge → declared ceiling.
+    const out = interpret(
+      rule,
+      { nodes: [node(INACTIVE_OS, 'OmniScript', { isActive: false })], edges: [] },
+      COMPLETE,
+      INACTIVE_OS,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.groundedIn).toContain(INACTIVE_OS);
+    expect(out[0]!.confidence).toBe('declared');
+    const claim = out[0]!.claim.toLowerCase();
+    expect(claim).toContain('inactive');
+    expect(claim).toContain('does not execute at runtime');
+  });
+
+  it('also fires on inactive Integration Procedure and FlexCard versions', () => {
+    // Same isActive key on omni-integration-procedure.ts:765 and omni-ui-card.ts:794.
+    expect(
+      interpret(rule, { nodes: [node(INACTIVE_IP, 'OmniIntegrationProcedure', { isActive: false })], edges: [] }, COMPLETE, INACTIVE_IP),
+    ).toHaveLength(1);
+    expect(
+      interpret(rule, { nodes: [node(INACTIVE_CARD, 'OmniUiCard', { isActive: false })], edges: [] }, COMPLETE, INACTIVE_CARD),
+    ).toHaveLength(1);
+  });
+
+  it('does NOT fire on an active OmniStudio component version', () => {
+    expect(
+      interpret(rule, { nodes: [node(ACTIVE_OS, 'OmniScript', { isActive: true })], edges: [] }, COMPLETE, ACTIVE_OS),
+    ).toEqual([]);
+  });
+});
+
+describe('concept:required-field-absent-from-all-layouts (field-provenance anti-join)', () => {
+  const rule = ruleById('rule:field/required-absent-from-all-layouts');
+  const FIELD = 'CustomField:Ns__Deal__c.Region__c';
+  const LAYOUT = 'Layout:Ns__Deal__c.Deal Layout';
+
+  it('fires on a required field with no usedInLayout edge from any layout', () => {
+    const out = interpret(
+      rule,
+      { nodes: [node(FIELD, 'CustomField', { required: true })], edges: [] },
+      COMPLETE,
+      FIELD,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.groundedIn).toContain(FIELD);
+    expect(out[0]!.confidence).toBe('declared');
+    expect(out[0]!.claim.toLowerCase()).toContain('required');
+    expect(out[0]!.claim.toLowerCase()).toContain('page layout');
+  });
+
+  it('stays silent when a layout places the field (usedInLayout edge present)', () => {
+    expect(
+      interpret(
+        rule,
+        {
+          nodes: [
+            node(FIELD, 'CustomField', { required: true }),
+            node(LAYOUT, 'Layout'),
+          ],
+          edges: [edge(LAYOUT, FIELD, 'usedInLayout', 'declared')],
+        },
+        COMPLETE,
+        FIELD,
+      ),
+    ).toEqual([]);
+  });
+
+  it('stays silent on a non-required field', () => {
+    expect(
+      interpret(
+        rule,
+        { nodes: [node(FIELD, 'CustomField', { required: false })], edges: [] },
+        COMPLETE,
+        FIELD,
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe('concept:dataraptor-errors-ignored — rule:omnistudio/dataraptor-errors-ignored', () => {
+  const rule = ruleById('rule:omnistudio/dataraptor-errors-ignored');
+  const IGNORED = 'OmniDataTransform:Ns__LoadOrders';
+  const SURFACED = 'OmniDataTransform:Ns__SafeLoadOrders';
+
+  it('ships the concept with the code-quality-defect kind and errorIgnored===true bind', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('code-quality-defect');
+    expect(rule.bind.whereProperty).toEqual({ key: 'errorIgnored', equals: true });
+  });
+
+  it('fires on errorIgnored===true with an error-swallowing claim, declared', () => {
+    const out = interpret(
+      rule,
+      { nodes: [node(IGNORED, 'OmniDataTransform', { errorIgnored: true })], edges: [] },
+      COMPLETE,
+      IGNORED,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.groundedIn).toContain(IGNORED);
+    expect(out[0]!.confidence).toBe('declared');
+    const claim = out[0]!.claim.toLowerCase();
+    expect(claim).toContain('ignore error');
+    expect(claim).toContain('error-swallowing reliability shape');
+  });
+
+  it('does NOT fire on a DataRaptor that surfaces its errors', () => {
+    expect(
+      interpret(
+        rule,
+        { nodes: [node(SURFACED, 'OmniDataTransform', { errorIgnored: false })], edges: [] },
+        COMPLETE,
+        SURFACED,
+      ),
+    ).toEqual([]);
+  });
+});
