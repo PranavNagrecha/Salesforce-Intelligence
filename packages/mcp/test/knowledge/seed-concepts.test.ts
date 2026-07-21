@@ -7787,7 +7787,6 @@ describe('concept:named-credential-per-user-principal — rule:integration/named
 describe('concept:omnistudio-test-procedure-scope — rule:omnistudio/test-procedure-scope', () => {
   const rule = ruleById('rule:omnistudio/test-procedure-scope');
   const TEST_OS = 'OmniScript:Ns__Deal_Intake_Test_1';
-  const TEST_IP = 'OmniIntegrationProcedure:Ns__Deal_Provision_Test_1';
   const PROD_OS = 'OmniScript:Ns__Deal_Intake_English_1';
 
   it('ships the concept with the firing-condition kind', () => {
@@ -7867,7 +7866,6 @@ describe('concept:dataraptor-load-fires-assignment-rules — rule:omnistudio/dat
 describe('concept:omnistudio-metadata-cache-disabled — rule:omnistudio/metadata-cache-disabled', () => {
   const rule = ruleById('rule:omnistudio/metadata-cache-disabled');
   const NOCACHE_OS = 'OmniScript:Ns__Deal_Intake_English_2';
-  const NOCACHE_IP = 'OmniIntegrationProcedure:Ns__Deal_Provision_2';
   const CACHED_OS = 'OmniScript:Ns__Deal_Intake_English_1';
 
   it('ships the concept with the code-quality-defect kind', () => {
