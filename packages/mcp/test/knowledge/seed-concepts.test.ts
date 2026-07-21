@@ -5807,3 +5807,522 @@ describe('concept:assignment-escalation-first-match-ordering (D10 / EC-14)', () 
     ).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// ARC-2 concept-discovery batch — 10 new grounded NODE/EDGE concepts.
+// ---------------------------------------------------------------------------
+
+
+// ---------------------------------------------------------------------------
+// 2c) concept:field-longtext-richtext-not-filterable — a Long Text Area or
+//     Rich Text (Html) field's dataType CLASS is not filterable / sortable /
+//     groupable / indexable, so it cannot appear in a SOQL WHERE / ORDER BY /
+//     GROUP BY, a list-view filter, or a report filter, and cannot be an
+//     external id or unique. A NODE-shaped rule mirroring
+//     rule:field-provenance/derived-read-only: it fires off a CustomField node
+//     whose OWN `dataType` is in [LongTextArea, Html] (an always-present
+//     extractor scalar — custom-field.ts:415), cites the field, claims the
+//     query-restriction, confidence declared. It must NOT fire on a filterable
+//     type (Text / Number), and componentTypes scopes it to CustomField.
+// ---------------------------------------------------------------------------
+
+describe('concept:field-longtext-richtext-not-filterable — rule:field/longtext-richtext-not-filterable', () => {
+  const rule = ruleById('rule:field/longtext-richtext-not-filterable');
+  const NOTES_FIELD = 'CustomField:Ns__Deal__c.Notes__c'; // dataType: LongTextArea
+  const BODY_FIELD = 'CustomField:Ns__Deal__c.Body__c'; // dataType: Html (rich text)
+  const NAME_TEXT_FIELD = 'CustomField:Ns__Deal__c.Name__c'; // dataType: Text → excluded
+
+  it('ships the concept with the field-provenance kind', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('field-provenance');
+  });
+
+  it('is a node-shaped CustomField rule (componentTypes + whereProperty dataType in [LongTextArea, Html], no edge, declared)', () => {
+    expect(rule.concept).toBe('concept:field-longtext-richtext-not-filterable');
+    expect(rule.bind.componentTypes).toEqual(['CustomField']);
+    expect(rule.bind.whereProperty).toEqual({ key: 'dataType', in: ['LongTextArea', 'Html'] });
+    expect(rule.bind.edgeType).toBeUndefined();
+    expect(rule.absenceShaped).toBe(false);
+    expect(rule.maxConfidence).toBe('declared');
+    expect(rule.dependsOnCoverage).toEqual(['CustomField']);
+  });
+
+  it('matches a LongTextArea field, cites it, claims not-filterable, confidence declared', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(NOTES_FIELD, 'CustomField', { dataType: 'LongTextArea' }),
+        node(NAME_TEXT_FIELD, 'CustomField', { dataType: 'Text' }), // filterable text → excluded
+        node(AMOUNT_FIELD, 'CustomField', { dataType: 'Number' }), // filterable number → excluded
+      ],
+      edges: [],
+    };
+
+    const out = interpret(rule, slice, COMPLETE);
+
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.concept).toBe('concept:field-longtext-richtext-not-filterable');
+    // EXACTLY the long-text field — not the filterable Text / Number siblings.
+    expect(only.groundedIn).toEqual([NOTES_FIELD]);
+    expect(only.groundedIn).toContain(NOTES_FIELD);
+    expect(only.claim.toLowerCase()).toContain('not filterable, sortable, groupable');
+    // A node match carries no edge confidence → the declared ceiling holds.
+    expect(only.confidence).toBe('declared');
+    expect(only.coverageCaveat).toBeNull();
+  });
+
+  it('also matches a Rich Text (Html) field — the `in` operator covers both query-hostile classes', () => {
+    const slice: GroundedSlice = {
+      nodes: [node(BODY_FIELD, 'CustomField', { dataType: 'Html' })],
+      edges: [],
+    };
+
+    const out = interpret(rule, slice, COMPLETE);
+
+    expect(out).toHaveLength(1);
+    expect(out[0]!.groundedIn).toEqual([BODY_FIELD]);
+    expect(out[0]!.confidence).toBe('declared');
+  });
+
+  it('does NOT fire on filterable field types (Text / Number) — no citation ⇒ no claim', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(NAME_TEXT_FIELD, 'CustomField', { dataType: 'Text' }),
+        node(AMOUNT_FIELD, 'CustomField', { dataType: 'Number' }),
+      ],
+      edges: [],
+    };
+    expect(interpret(rule, slice, COMPLETE)).toEqual([]);
+  });
+});
+
+describe('concept:duplicate-rule-bypass-sharing-match — DuplicateRule securityOption==BypassSharingRules NODE rule', () => {
+  const rule = ruleById('rule:duplicate-rule/bypass-sharing-match');
+  const DUP = 'DuplicateRule:Ns__Account.Ns__BypassMatch';
+
+  it('ships the concept with the access-mechanism kind and a system-context / bypass summary', () => {
+    const concept = CONCEPTS['concept:duplicate-rule-bypass-sharing-match'];
+    expect(concept).toBeDefined();
+    expect(concept!.kind).toBe('access-mechanism');
+    const summary = concept!.summary.toLowerCase();
+    expect(summary).toContain('system context');
+    expect(summary).toContain('bypass sharing rules');
+  });
+
+  it('is a node-shaped DuplicateRule rule (componentTypes + SINGLE whereProperty securityOption===BypassSharingRules, no edge, declared)', () => {
+    expect(rule.concept).toBe('concept:duplicate-rule-bypass-sharing-match');
+    expect(rule.bind.componentTypes).toEqual(['DuplicateRule']);
+    expect(Array.isArray(rule.bind.whereProperty)).toBe(false);
+    expect(rule.bind.whereProperty).toEqual({ key: 'securityOption', equals: 'BypassSharingRules' });
+    expect(rule.bind.edgeType).toBeUndefined();
+    expect(rule.absenceShaped).toBe(false);
+    expect(rule.maxConfidence).toBe('declared');
+  });
+
+  it('fires on securityOption===BypassSharingRules, cites ONLY that rule, claim system context, confidence declared', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(DUP, 'DuplicateRule', {
+          isActive: true,
+          securityOption: 'BypassSharingRules',
+          operationsOnInsert: ['Alert'],
+        }),
+      ],
+      edges: [],
+    };
+    const out = interpret(rule, slice, COMPLETE, DUP);
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.concept).toBe('concept:duplicate-rule-bypass-sharing-match');
+    expect(only.groundedIn).toContain(DUP);
+    expect(only.confidence).toBe('declared');
+    expect(only.claim).toContain(DUP);
+    expect(only.claim.toLowerCase()).toContain('system context');
+    expect(only.coverageCaveat).toBeNull();
+  });
+
+  it('does NOT fire on EnforceSharingRules', () => {
+    const slice: GroundedSlice = {
+      nodes: [node(DUP, 'DuplicateRule', { securityOption: 'EnforceSharingRules' })],
+      edges: [],
+    };
+    expect(interpret(rule, slice, COMPLETE, DUP)).toEqual([]);
+  });
+
+  it('[type guard] a non-DuplicateRule node carrying securityOption===BypassSharingRules does NOT fire', () => {
+    const oddId = 'CustomObject:Ns__Odd__c';
+    const slice: GroundedSlice = {
+      nodes: [node(oddId, 'CustomObject', { securityOption: 'BypassSharingRules' })],
+      edges: [],
+    };
+    expect(interpret(rule, slice, COMPLETE, oddId)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// concept:duplicate-rule-references-inactive-matching-rule — an ACTIVE duplicate
+// rule with a `references` edge to a MatchingRule endpoint whose ruleStatus is
+// NOT Active. componentTypes:[MatchingRule] scopes the counted endpoint so a
+// co-parented filter-Profile reference (no ruleStatus) is never miscounted.
+// ---------------------------------------------------------------------------
+
+describe('concept:duplicate-rule-references-inactive-matching-rule — rule:duplicate-rule/references-inactive-matching-rule', () => {
+  const rule = ruleById('rule:duplicate-rule/references-inactive-matching-rule');
+  const DUP = 'DuplicateRule:Ns__Deal__c.Ns__BlockDupes';
+  const MATCH_INACTIVE = 'MatchingRule:Ns__Deal__c.Ns__StaleMatcher';
+  const MATCH_ACTIVE = 'MatchingRule:Ns__Deal__c.Ns__LiveMatcher';
+  const FILTER_PROFILE = 'Profile:Ns__Integration';
+
+  const matcherRef = (target: string): Edge =>
+    edge(DUP, target, 'references', 'declared', { matcherIndex: 0, objectMappingCount: 0 });
+
+  it('is a root-outgoing references aggregate scoped to MatchingRule endpoints with ruleStatus notIn Active', () => {
+    expect(rule.bind.whereProperty).toEqual({ key: 'isActive', equals: true });
+    expect(rule.bind.componentTypes).toEqual(['MatchingRule']);
+    expect(rule.bind.aggregate!.edgeSource).toBe('root-outgoing');
+    expect(rule.bind.aggregate!.countDistinctEndpoint).toBe('to');
+    expect(rule.bind.aggregate!.endpointWhereProperty).toEqual({ key: 'ruleStatus', notIn: ['Active'] });
+    expect(rule.maxConfidence).toBe('declared');
+  });
+
+  it('fires when an active duplicate rule references an inactive matching rule', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(DUP, 'DuplicateRule', { isActive: true }),
+        node(MATCH_INACTIVE, 'MatchingRule', { ruleStatus: 'Inactive' }),
+        // A filter-Profile endpoint on the SAME references edge type has NO
+        // ruleStatus; componentTypes:[MatchingRule] excludes it, so a bare
+        // notIn:[Active] endpoint clause can never miscount it.
+        node(FILTER_PROFILE, 'Profile', {}),
+      ],
+      edges: [
+        matcherRef(MATCH_INACTIVE),
+        edge(DUP, FILTER_PROFILE, 'references', 'declared', { referenceKind: 'duplicateFilterProfile' }),
+      ],
+    };
+    const out = interpret(rule, slice, COMPLETE, DUP);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.concept).toBe('concept:duplicate-rule-references-inactive-matching-rule');
+    expect(out[0]!.groundedIn).toEqual([MATCH_INACTIVE, DUP]);
+    expect(out[0]!.confidence).toBe('declared');
+    expect(out[0]!.claim.toLowerCase()).toContain('inactive matching rule');
+  });
+
+  it('does NOT fire when the matcher is Active or the duplicate rule is inactive', () => {
+    const activeMatcher: GroundedSlice = {
+      nodes: [
+        node(DUP, 'DuplicateRule', { isActive: true }),
+        node(MATCH_ACTIVE, 'MatchingRule', { ruleStatus: 'Active' }),
+      ],
+      edges: [matcherRef(MATCH_ACTIVE)],
+    };
+    expect(interpret(rule, activeMatcher, COMPLETE, DUP)).toEqual([]);
+    const inactiveRule: GroundedSlice = {
+      nodes: [
+        node(DUP, 'DuplicateRule', { isActive: false }),
+        node(MATCH_INACTIVE, 'MatchingRule', { ruleStatus: 'Inactive' }),
+      ],
+      edges: [matcherRef(MATCH_INACTIVE)],
+    };
+    expect(interpret(rule, inactiveRule, COMPLETE, DUP)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ARC-2 concept-expansion — concept:approval-process-final-lock-record-readonly.
+// TWO NODE rules on ONE concept (final-approval-lock + final-rejection-lock),
+// each keying an always-present ApprovalProcess boolean (finalApprovalRecordLock
+// / finalRejectionRecordLock). Fires on a lock-on-final process, cites ONLY that
+// process, claims the record goes read-only until unlocked, declared confidence.
+// A non-locking process fires neither; the two rules key DISJOINT booleans;
+// componentTypes scopes the match to ApprovalProcess.
+// ---------------------------------------------------------------------------
+
+describe('concept:approval-process-final-lock-record-readonly — final-approval/rejection lock NODE rules', () => {
+  const approvalRule = ruleById('rule:approval-process/final-approval-lock');
+  const rejectionRule = ruleById('rule:approval-process/final-rejection-lock');
+  const LOCK_APPROVAL = 'ApprovalProcess:Ns__Deal__c.Ns__Discount_Approval';
+  const LOCK_REJECTION = 'ApprovalProcess:Ns__Deal__c.Ns__Reject_Lock_Approval';
+  const NO_LOCK = 'ApprovalProcess:Ns__Deal__c.Ns__No_Lock_Approval';
+
+  it('ships ONE concept (access-mechanism) bound by BOTH rules', () => {
+    expect(approvalRule.concept).toBe('concept:approval-process-final-lock-record-readonly');
+    expect(rejectionRule.concept).toBe('concept:approval-process-final-lock-record-readonly');
+    expect(CONCEPTS[approvalRule.concept]).toBeDefined();
+    expect(CONCEPTS[approvalRule.concept]!.kind).toBe('access-mechanism');
+  });
+
+  it('both are node-shaped ApprovalProcess rules (boolean-equals, no edge, declared)', () => {
+    expect(approvalRule.bind.componentTypes).toEqual(['ApprovalProcess']);
+    expect(approvalRule.bind.whereProperty).toEqual({ key: 'finalApprovalRecordLock', equals: true });
+    expect(approvalRule.bind.edgeType).toBeUndefined();
+    expect(approvalRule.maxConfidence).toBe('declared');
+    expect(approvalRule.absenceShaped).toBe(false);
+    expect(approvalRule.dependsOnCoverage).toEqual(['ApprovalProcess']);
+    expect(rejectionRule.bind.componentTypes).toEqual(['ApprovalProcess']);
+    expect(rejectionRule.bind.whereProperty).toEqual({ key: 'finalRejectionRecordLock', equals: true });
+  });
+
+  it('fires on a final-approval-lock process, cites ONLY it, claims a read-only lock until unlocked, declared', () => {
+    const slice: GroundedSlice = {
+      nodes: [node(LOCK_APPROVAL, 'ApprovalProcess', { finalApprovalRecordLock: true, finalRejectionRecordLock: false })],
+      edges: [],
+    };
+    const out = interpret(approvalRule, slice, COMPLETE, LOCK_APPROVAL);
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.concept).toBe('concept:approval-process-final-lock-record-readonly');
+    expect(only.groundedIn).toEqual([LOCK_APPROVAL]);
+    expect(only.claim).toContain(LOCK_APPROVAL);
+    const lower = only.claim.toLowerCase();
+    expect(lower).toContain('locks the record');
+    expect(lower).toContain('read-only');
+    expect(lower).toContain('entity-is-locked');
+    expect(lower).toContain('does not assert whether any specific record is currently locked');
+    expect(only.confidence).toBe('declared');
+    expect(only.confidence).toBe(weakest('declared', 'declared'));
+    expect(only.coverageCaveat).toBeNull();
+    expect(only.provenance).toBe('offline_snapshot');
+    expect(only.modelVersion).toBe(MODEL_VERSION);
+  });
+
+  it('the sibling rule fires on a final-rejection-lock process and claims the rejection lock', () => {
+    const slice: GroundedSlice = {
+      nodes: [node(LOCK_REJECTION, 'ApprovalProcess', { finalApprovalRecordLock: false, finalRejectionRecordLock: true })],
+      edges: [],
+    };
+    const out = interpret(rejectionRule, slice, COMPLETE, LOCK_REJECTION);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.groundedIn).toEqual([LOCK_REJECTION]);
+    expect(out[0]!.claim.toLowerCase()).toContain('final rejection');
+  });
+
+  it('does NOT fire on an approval process that locks on neither (both false), nor on a bare node', () => {
+    const falseSlice: GroundedSlice = {
+      nodes: [node(NO_LOCK, 'ApprovalProcess', { finalApprovalRecordLock: false, finalRejectionRecordLock: false })],
+      edges: [],
+    };
+    const bareSlice: GroundedSlice = { nodes: [node(NO_LOCK, 'ApprovalProcess', {})], edges: [] };
+    expect(interpret(approvalRule, falseSlice, COMPLETE, NO_LOCK)).toEqual([]);
+    expect(interpret(rejectionRule, falseSlice, COMPLETE, NO_LOCK)).toEqual([]);
+    expect(interpret(approvalRule, bareSlice, COMPLETE, NO_LOCK)).toEqual([]);
+  });
+
+  it('[no cross-contamination] the two rules key DISJOINT booleans — approval-lock rule ignores a rejection-only lock and vice-versa', () => {
+    const rejectionOnly: GroundedSlice = {
+      nodes: [node(LOCK_REJECTION, 'ApprovalProcess', { finalApprovalRecordLock: false, finalRejectionRecordLock: true })],
+      edges: [],
+    };
+    expect(interpret(approvalRule, rejectionOnly, COMPLETE, LOCK_REJECTION)).toEqual([]);
+    const approvalOnly: GroundedSlice = {
+      nodes: [node(LOCK_APPROVAL, 'ApprovalProcess', { finalApprovalRecordLock: true, finalRejectionRecordLock: false })],
+      edges: [],
+    };
+    expect(interpret(rejectionRule, approvalOnly, COMPLETE, LOCK_APPROVAL)).toEqual([]);
+  });
+
+  it('componentTypes scopes the match: a non-ApprovalProcess node carrying finalApprovalRecordLock===true does NOT fire', () => {
+    const slice: GroundedSlice = {
+      nodes: [node('Flow:Ns__Odd', 'Flow', { finalApprovalRecordLock: true })],
+      edges: [],
+    };
+    expect(interpret(approvalRule, slice, COMPLETE, 'Flow:Ns__Odd')).toEqual([]);
+  });
+});
+
+describe('concept:record-type-inactive — rule:record-type/inactive', () => {
+  const rule = ruleById('rule:record-type/inactive');
+  const INACTIVE = 'RecordType:Ns__Deal__c.Ns__Enterprise';
+  const ACTIVE = 'RecordType:Ns__Deal__c.Ns__SMB';
+
+  it('ships the concept with the access-mechanism kind and active===false bind', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('access-mechanism');
+    expect(rule.bind.whereProperty).toEqual({ key: 'active', equals: false });
+  });
+
+  it('fires on active===false with a not-assignable claim, declared', () => {
+    const out = interpret(
+      rule,
+      { nodes: [node(INACTIVE, 'RecordType', { active: false })], edges: [] },
+      COMPLETE,
+      INACTIVE,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.groundedIn).toContain(INACTIVE);
+    expect(out[0]!.confidence).toBe('declared');
+    const claim = out[0]!.claim.toLowerCase();
+    expect(claim).toContain('inactive');
+    expect(claim).toContain('cannot be assigned to new records');
+    expect(claim).toContain('hidden');
+  });
+
+  it('does NOT fire on an active record type', () => {
+    expect(
+      interpret(rule, { nodes: [node(ACTIVE, 'RecordType', { active: true })], edges: [] }, COMPLETE, ACTIVE),
+    ).toEqual([]);
+  });
+});
+
+
+describe('concept:remote-site-setting-protocol-security-disabled — rule:integration/remote-site-protocol-security-disabled', () => {
+  const rule = ruleById('rule:integration/remote-site-protocol-security-disabled');
+
+  const INSECURE_RSS = 'RemoteSiteSetting:Ns__Legacy_Billing_API';
+  const SECURE_RSS = 'RemoteSiteSetting:Ns__Stripe_API';
+  const INACTIVE_INSECURE_RSS = 'RemoteSiteSetting:Ns__Retired_Endpoint';
+
+  it('fires on an ACTIVE remote site setting with protocol security disabled, cites it, confidence declared', () => {
+    // Grounded on the always-present disableProtocolSecurity + isActive booleans
+    // the RemoteSiteSetting extractor emits (remote-site-setting.ts). Only the
+    // active + insecure entry matches; the HTTPS entry and the inactive entry
+    // are excluded.
+    const slice: GroundedSlice = {
+      nodes: [
+        node(INSECURE_RSS, 'RemoteSiteSetting', {
+          disableProtocolSecurity: true,
+          isActive: true,
+        }),
+        node(SECURE_RSS, 'RemoteSiteSetting', {
+          disableProtocolSecurity: false,
+          isActive: true,
+        }), // HTTPS-guarded → excluded
+        node(INACTIVE_INSECURE_RSS, 'RemoteSiteSetting', {
+          disableProtocolSecurity: true,
+          isActive: false,
+        }), // disabled entry permits no callout → excluded by the isActive guard
+      ],
+      edges: [],
+    };
+
+    const out = interpret(rule, slice, COMPLETE);
+
+    expect(out).toHaveLength(1);
+    const only = out[0]!;
+    expect(only.concept).toBe('concept:remote-site-setting-protocol-security-disabled');
+    // EXACTLY the active + insecure entry — not the HTTPS or inactive siblings.
+    expect(only.groundedIn).toEqual([INSECURE_RSS]);
+    expect(only.claim).toContain(INSECURE_RSS);
+    // The distinctive answer class: cleartext HTTP allowed to the allowlisted host.
+    expect(only.claim.toLowerCase()).toContain('cleartext http callouts');
+    // Node match carries no edge confidence → the declared ceiling holds.
+    expect(only.confidence).toBe('declared');
+    expect(only.coverageCaveat).toBeNull();
+  });
+
+  it('does NOT fire when protocol security is enabled (disableProtocolSecurity===false)', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(SECURE_RSS, 'RemoteSiteSetting', {
+          disableProtocolSecurity: false,
+          isActive: true,
+        }),
+      ],
+      edges: [],
+    };
+    expect(interpret(rule, slice, COMPLETE)).toEqual([]);
+  });
+
+  it('does NOT fire on an INACTIVE setting even when protocol security is disabled (the isActive guard)', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(INACTIVE_INSECURE_RSS, 'RemoteSiteSetting', {
+          disableProtocolSecurity: true,
+          isActive: false,
+        }),
+      ],
+      edges: [],
+    };
+    expect(interpret(rule, slice, COMPLETE)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ARC-2 — concept:apex-intentional-system-mode-dml. A NODE anyElement rule over
+// the ApexClass `qualityIssues` array (byte-identical shape to the shipped
+// swallowed-exception rule). Binds the DELIBERATE AccessLevel.SYSTEM_MODE opt-out
+// (recognizer rule `intentional-system-mode-dml`), NOT the accidental
+// missing-crud-check omission — so it fires on its own qualityIssue and stays
+// silent on the accidental sibling / an empty array.
+// ---------------------------------------------------------------------------
+
+describe('concept:apex-intentional-system-mode-dml — rule:code-quality/intentional-system-mode-dml', () => {
+  const rule = ruleById('rule:code-quality/intentional-system-mode-dml');
+  const CLS = 'ApexClass:Ns__SystemModeSvc';
+
+  it('ships the concept with the access-mechanism kind and a heuristic ceiling', () => {
+    expect(CONCEPTS[rule.concept]!.kind).toBe('access-mechanism');
+    expect(rule.maxConfidence).toBe('heuristic');
+    expect(rule.bind.whereProperty).toEqual({
+      key: 'qualityIssues',
+      anyElement: { key: 'rule', equals: 'intentional-system-mode-dml' },
+    });
+  });
+
+  it('fires on an ApexClass carrying an intentional-system-mode-dml qualityIssue, confidence heuristic', () => {
+    const slice: GroundedSlice = {
+      nodes: [node(CLS, 'ApexClass', { qualityIssues: [{ rule: 'intentional-system-mode-dml', severity: 'info' }] })],
+      edges: [],
+    };
+    const out = interpret(rule, slice, COMPLETE);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.concept).toBe('concept:apex-intentional-system-mode-dml');
+    expect(out[0]!.groundedIn).toEqual([CLS]);
+    expect(out[0]!.claim.toLowerCase()).toContain('system_mode');
+    expect(out[0]!.confidence).toBe('heuristic');
+  });
+
+  it('does NOT fire on a class carrying only the ACCIDENTAL missing-crud-check qualityIssue', () => {
+    const slice: GroundedSlice = {
+      nodes: [node(CLS, 'ApexClass', { qualityIssues: [{ rule: 'missing-crud-check', severity: 'high' }] })],
+      edges: [],
+    };
+    expect(interpret(rule, slice, COMPLETE)).toEqual([]);
+  });
+
+  it('does NOT fire on a class with an empty qualityIssues array', () => {
+    const slice: GroundedSlice = {
+      nodes: [node(CLS, 'ApexClass', { qualityIssues: [] })],
+      edges: [],
+    };
+    expect(interpret(rule, slice, COMPLETE)).toEqual([]);
+  });
+});
+
+describe('concept:dataraptor-field-security-unenforced — rule:omnistudio/dataraptor-field-security-unenforced', () => {
+  const rule = ruleById('rule:omnistudio/dataraptor-field-security-unenforced');
+  const UNENFORCED = 'OmniDataTransform:Ns__LoadAccount';
+  const ENFORCED = 'OmniDataTransform:Ns__SafeLoadContact';
+
+  it('ships the concept with the access-mechanism kind and fieldLevelSecurityEnabled===false bind', () => {
+    expect(CONCEPTS[rule.concept]).toBeDefined();
+    expect(CONCEPTS[rule.concept]!.kind).toBe('access-mechanism');
+    expect(rule.bind.whereProperty).toEqual({ key: 'fieldLevelSecurityEnabled', equals: false });
+  });
+
+  it('fires on fieldLevelSecurityEnabled===false with an FLS-bypass claim, declared', () => {
+    const out = interpret(
+      rule,
+      { nodes: [node(UNENFORCED, 'OmniDataTransform', { fieldLevelSecurityEnabled: false })], edges: [] },
+      COMPLETE,
+      UNENFORCED,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.groundedIn).toContain(UNENFORCED);
+    expect(out[0]!.confidence).toBe('declared');
+    const claim = out[0]!.claim.toLowerCase();
+    expect(claim).toContain('field-level security');
+    expect(claim).toContain('over-permissive data-access surface');
+  });
+
+  it('does NOT fire on a DataRaptor that enforces field-level security', () => {
+    expect(
+      interpret(
+        rule,
+        { nodes: [node(ENFORCED, 'OmniDataTransform', { fieldLevelSecurityEnabled: true })], edges: [] },
+        COMPLETE,
+        ENFORCED,
+      ),
+    ).toEqual([]);
+  });
+});

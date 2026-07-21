@@ -3811,3 +3811,206 @@ conceptRules:
     absenceShaped: false
     dependsOnCoverage:
       - WorkflowRule
+
+
+  # ARC-2 concept-expansion — rule:field/longtext-richtext-not-filterable. ONE
+  # NODE rule mirroring rule:field-provenance/derived-read-only and
+  # rule:field/unique-constraint: componentTypes [CustomField] + a whereProperty
+  # on the field's OWN always-present `dataType` (custom-field.ts:415, fixed key),
+  # matched with the `in` operator (reason.ts:441) against the two query-hostile
+  # type classes. A node match carries no edge, so weakest() keeps the declared
+  # ceiling. NOT absence-shaped: it fires on a PRESENT long-text / rich-text
+  # field and never concludes "none". ORG-INDEPENDENT — NO canonical ids.
+  - id: rule:field/longtext-richtext-not-filterable
+    concept: concept:field-longtext-richtext-not-filterable
+    bind:
+      componentTypes:
+        - CustomField
+      whereProperty:
+        key: dataType
+        in:
+          - LongTextArea
+          - Html
+    interpretation: '{ids} is a Long Text Area or Rich Text (Html) field — this data-type class is not filterable, sortable, groupable, or indexed, so it cannot appear in a SOQL WHERE / ORDER BY / GROUP BY, a list-view filter, or a report filter, and it cannot be marked as an external id or unique. Reference it only in SELECT clauses and body content. This is the platform restriction that follows from the field''s type class; it does NOT assert that any specific query, list view, or report currently references the field (a usage question), only that such a filter, sort, or group-by would be rejected.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - CustomField
+
+  # ARC-2 concept-expansion — duplicate-rule-bypass-sharing-match. ONE NODE rule on
+  # DuplicateRule `securityOption == BypassSharingRules`. `securityOption` is emitted
+  # verbatim by duplicate-rule.ts:601 (derived 540-556, validated against
+  # ALLOWED_SECURITY_OPTIONS at 20-23); nullable, so equals:BypassSharingRules is
+  # fail-closed / presence-shaped. Same node-scalar-equals shape as
+  # rule:sharing/criteria-based-widens (ruleType). maxConfidence declared: the scalar
+  # is read verbatim and a node match carries no edge, so weakest() keeps the declared
+  # ceiling. absenceShaped false: a PRESENCE claim about a declared bypass posture.
+  # Disjoint from the duplicate-rule/blocks-* rules (they key the Block ACTION).
+  - id: rule:duplicate-rule/bypass-sharing-match
+    concept: concept:duplicate-rule-bypass-sharing-match
+    bind:
+      componentTypes:
+        - DuplicateRule
+      whereProperty:
+        key: securityOption
+        equals: BypassSharingRules
+    interpretation: '{ids} sets securityOption to BypassSharingRules — its duplicate matching runs in SYSTEM CONTEXT, comparing an incoming record against records the running user cannot see under the sharing model. A save can therefore be blocked or alerted by a hidden duplicate the user has no visibility into and cannot open to resolve; the alternative, EnforceSharingRules, would limit matching to records the user can already access. This is the declared sharing-context posture only — not a proof that the rule is active, that matching records exist, or that a specific save would surface a hidden duplicate.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - DuplicateRule
+
+  # ARC-2 concept-expansion — duplicate-rule-references-inactive-matching-rule. ONE
+  # AGGREGATE rule: Active DuplicateRule (`isActive == true`) with a `references`
+  # edge to a MatchingRule endpoint whose `ruleStatus notIn [Active]`.
+  # componentTypes:[MatchingRule] scopes the counted endpoint (reason.ts:1961) so the
+  # co-parented filter-Profile references — which carry no ruleStatus — are excluded
+  # and the single notIn clause cannot miscount them. Parallel to
+  # rule:flow/subflow-inactive-target and rule:sharing/redundant-rule-on-public-object.
+  - id: rule:duplicate-rule/references-inactive-matching-rule
+    concept: concept:duplicate-rule-references-inactive-matching-rule
+    bind:
+      whereProperty:
+        key: isActive
+        equals: true
+      edgeType: references
+      componentTypes:
+        - MatchingRule
+      aggregate:
+        edgeSource: root-outgoing
+        countDistinctEndpoint: to
+        endpointWhereProperty:
+          key: ruleStatus
+          notIn:
+            - Active
+        op: gte
+        threshold: 1
+    interpretation: '{object} is an ACTIVE duplicate rule that references {count} matching rule(s) ({ids}) whose ruleStatus is NOT Active — an inactive matching rule performs NO duplicate detection, so on that matcher duplicate records save SILENTLY with no alert and no block, even though the duplicate rule itself is enabled. Reactivate the matching rule, or repoint the duplicate rule at a live matcher, to restore protection. This asserts the declared active flag and the matcher''s declared ruleStatus from metadata only — it does NOT prove duplicate records exist, that a specific save would have been caught, or that another active matcher on the same rule still covers the object.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - DuplicateRule
+      - MatchingRule
+
+  # ARC-2 concept-expansion — approval-process-final-lock-record-readonly. TWO NODE
+  # rules on ONE concept (same two-rule shape as apex-sharing-mode), keying the two
+  # always-present ApprovalProcess booleans finalApprovalRecordLock /
+  # finalRejectionRecordLock (approval-process.ts:931-936 via coerceBoolean, default
+  # false). Both maxConfidence declared (node match carries no edge). DISJOINT keys —
+  # no cross-firing. ORG-INDEPENDENT — NO vault counts in the interpretations.
+  - id: rule:approval-process/final-approval-lock
+    concept: concept:approval-process-final-lock-record-readonly
+    bind:
+      componentTypes:
+        - ApprovalProcess
+      whereProperty:
+        key: finalApprovalRecordLock
+        equals: true
+    interpretation: '{ids} declares `finalApprovalRecordLock` = true → when this approval process reaches FINAL APPROVAL it LOCKS the record, making it READ-ONLY to everyone except administrators and "Modify All"/"Modify All Data" holders (plus the process''s own unlock step). After final approval, later user edits AND automation updates — flow, workflow, trigger, or API field writes — FAIL with an entity-is-locked error unless the record is unlocked first, so a downstream automation that updates a just-approved record can silently fail on the lock. This is the DECLARED lock behavior from the process''s own final-approval-lock flag; it does NOT assert whether any specific record is currently locked (record-level runtime state the offline vault does not hold), which specific users can still edit it, or whether any automation actually attempts a post-lock update.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - ApprovalProcess
+  - id: rule:approval-process/final-rejection-lock
+    concept: concept:approval-process-final-lock-record-readonly
+    bind:
+      componentTypes:
+        - ApprovalProcess
+      whereProperty:
+        key: finalRejectionRecordLock
+        equals: true
+    interpretation: '{ids} declares `finalRejectionRecordLock` = true → when this approval process reaches FINAL REJECTION it LOCKS the record, making it READ-ONLY to everyone except administrators and "Modify All"/"Modify All Data" holders (plus the process''s own unlock step). After final rejection, later user edits AND automation updates — flow, workflow, trigger, or API field writes — FAIL with an entity-is-locked error unless the record is unlocked first, so a downstream automation that updates a just-rejected record can silently fail on the lock. This is the DECLARED lock behavior from the process''s own final-rejection-lock flag; it does NOT assert whether any specific record is currently locked (record-level runtime state the offline vault does not hold), which specific users can still edit it, or whether any automation actually attempts a post-lock update.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - ApprovalProcess
+
+  # ARC-2 concept-expansion — record-type-inactive. ONE NODE rule on
+  # RecordType `active == false` — the RecordType analogue of
+  # validation-rule/inactive-dead. maxConfidence declared (read verbatim from
+  # the record type's own metadata; a node match carries no edge). Kind
+  # access-mechanism — routing, not a save-order firer. ORG-INDEPENDENT.
+  - id: rule:record-type/inactive
+    concept: concept:record-type-inactive
+    bind:
+      componentTypes:
+        - RecordType
+      whereProperty:
+        key: active
+        equals: false
+    interpretation: '{ids} is INACTIVE — it cannot be assigned to new records and is hidden from users'' record-type selection, so it routes NONE of its page layout, picklist value set, or business process to new work until an admin re-activates it; only pre-existing records keep it. It must be EXCLUDED from "which record type will new records get", default-routing, and layout / picklist-scope reasoning about new work: treating a deactivated record type as a live routing option would misattribute a layout, restricted picklist, or business process that new records can never receive. This names the non-assignable structural fact from the record type''s own active flag, NOT whether any existing records still carry it (record-level, not modeled offline), NOT which profiles once defaulted to or were granted it, and NOT why it was deactivated.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - RecordType
+
+
+  # ARC-2 concept-expansion — remote-site-protocol-security-disabled. ONE NODE
+  # rule on RemoteSiteSetting: disableProtocolSecurity == true AND isActive ==
+  # true (AND-array whereProperty; both are required always-present booleans per
+  # remote-site-setting.ts). The isActive guard avoids crying wolf about a
+  # disabled entry that permits no callouts. maxConfidence declared (read
+  # verbatim from the setting's own flags; a node match carries no edge).
+  # ORG-INDEPENDENT.
+  - id: rule:integration/remote-site-protocol-security-disabled
+    concept: concept:remote-site-setting-protocol-security-disabled
+    bind:
+      componentTypes:
+        - RemoteSiteSetting
+      whereProperty:
+        - key: disableProtocolSecurity
+          equals: true
+        - key: isActive
+          equals: true
+    interpretation: '{ids} is an ACTIVE remote site setting with protocol security DISABLED, so the platform''s HTTPS-only guard is dropped for outbound callouts to its allowlisted host: it permits cleartext http callouts to that endpoint, and request URLs, headers, and bodies — potentially including session ids, tokens, or credentials in the request — can travel unencrypted, exposing them to network interception and tampering. This names the declared configuration posture from the setting''s own flags, NOT whether any Apex, Flow, or LWC actually issues an insecure callout to this host at runtime (the offline vault does not correlate outbound-callout code to allowlist entries) and NOT a confirmed interception. Prefer a Named Credential over HTTPS; re-enable protocol security unless a cleartext endpoint is deliberately required.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - RemoteSiteSetting
+
+  # ARC-2 — apex-intentional-system-mode-dml. Byte-identical shape to
+  # rule:code-quality/swallowed-exception: an `anyElement {key: rule, equals:
+  # intentional-system-mode-dml}` existential over the ApexClass `qualityIssues`
+  # array (recognizer emits the rule at code-quality-patterns.ts:915-930 when
+  # `AccessLevel.SYSTEM_MODE` appears in a Database.* DML arg list, run in
+  # detectCodeQualityIssues via apex-class.ts:326). Binds the DELIBERATE opt-out —
+  # NOT the accidental missing-crud-check / missing-fls-check omission
+  # apex-crud-fls-unenforced binds — so the two concepts do NOT double-claim.
+  # `maxConfidence: heuristic` — every qualityIssues element carries
+  # `confidence:'heuristic'`; a node match carries no edge, so weakest() keeps the
+  # heuristic ceiling. componentTypes [ApexClass] only (qualityIssues lives on
+  # ApexClass). ORG-INDEPENDENT — NO vault counts in the interpretation.
+  - id: rule:code-quality/intentional-system-mode-dml
+    concept: concept:apex-intentional-system-mode-dml
+    bind:
+      componentTypes:
+        - ApexClass
+      whereProperty:
+        key: qualityIssues
+        anyElement:
+          key: rule
+          equals: intentional-system-mode-dml
+    interpretation: '{ids} runs a DML operation with an EXPLICIT AccessLevel.SYSTEM_MODE argument (an intentional-system-mode-dml pattern) — so for that write it DELIBERATELY opts OUT of the running user''s object CRUD and field-level security. Apex runs in system context and does NOT auto-enforce object CRUD or FLS on its DML; the AccessLevel.SYSTEM_MODE argument makes that non-enforcement a CONSCIOUS choice, so the write can create or change objects and fields regardless of the running user''s object and field permissions. This is the DELIBERATE counterpart to an accidental missing-crud-check / missing-fls-check omission — the recognizer surfaces it for REVIEW, not as a defect, because a system-context write is often correct (a trusted service writing fields the running user cannot edit); if the running user''s permissions SHOULD apply to this write, switch the argument to AccessLevel.USER_MODE. Record-level sharing is a SEPARATE access plane this does not read. This is HEURISTIC recognition from TOKENIZED Apex source — NOT a compiler AST — bound to the DML call site where the token appears; it names the DECLARED system-context bypass, not a proven authorization defect.'
+    maxConfidence: heuristic
+    absenceShaped: false
+    dependsOnCoverage:
+      - ApexClass
+
+  # ARC-2 concept-expansion — dataraptor-field-security-unenforced. ONE NODE rule
+  # on OmniDataTransform `fieldLevelSecurityEnabled == false`. `fieldLevelSecurity
+  # Enabled` is an always-present coerced boolean on every OmniDataTransform node
+  # (omni-data-transform.ts:422-424). maxConfidence declared (declared config
+  # toggle, node match carries no edge). ORG-INDEPENDENT.
+  - id: rule:omnistudio/dataraptor-field-security-unenforced
+    concept: concept:dataraptor-field-security-unenforced
+    bind:
+      componentTypes:
+        - OmniDataTransform
+      whereProperty:
+        key: fieldLevelSecurityEnabled
+        equals: false
+    interpretation: '{ids} has ''Check Field Level Security'' turned OFF — it reads and writes SObject fields WITHOUT enforcing the running user''s field-level security, so it can load a field the user cannot Read into its output or overwrite a field the user cannot Edit. This is an over-permissive data-access surface (an FLS-bypass shape) that must be treated as a review candidate for data-exposure, NOT as an FLS-respecting transform. This names the declared configuration shape from the transform''s own field-security toggle, NOT a proven leak: it does NOT establish which specific fields are over-exposed (depends on the field mappings and each user''s actual FLS), who invokes it, or whether a wrapping Apex guard or restricted entry point neutralizes the gap at runtime.'
+    maxConfidence: declared
+    absenceShaped: false
+    dependsOnCoverage:
+      - OmniDataTransform

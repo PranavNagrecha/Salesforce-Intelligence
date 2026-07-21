@@ -1151,3 +1151,165 @@ concepts:
     docs:
       - label: Salesforce Help — Activate Workflow Rules
         url: https://help.salesforce.com/s/articleView?id=sf.workflow_rules_activating.htm
+
+
+  # ARC-2 concept-expansion — field-longtext-richtext-not-filterable. ONE NODE
+  # rule on a CustomField whose `dataType` is LongTextArea or Html (rich text).
+  # `dataType` is a FIXED key in the CustomField extractor's buildProperties
+  # (custom-field.ts:415 — always present, NOT omit-when-null), derived at :539
+  # `const dataType = String(unwrapSingle(rootObj['type']))` and guaranteed
+  # non-undefined by validateRoot (:189-206), so a `whereProperty {key: dataType,
+  # in: [LongTextArea, Html]}` node rule is pure-YAML with no extractor / engine
+  # change (the `in` operator is live at reason.ts:441). `field-provenance`
+  # REUSED from the closed ConceptKind union — the same field-shaped kind housing
+  # the shipped unique-field-constraint / external-id-field / isFormula concepts
+  # (a field-level CONSTRAINT, not strict value-provenance), so this does NOT
+  # invent a kind. Distinct trigger property (dataType) and distinct consequence
+  # (queryability, not writability) vs those siblings. A node match carries no
+  # edge, so weakest() keeps the declared ceiling. ORG-INDEPENDENT general
+  # Salesforce truth only — NO vault counts baked into the summary.
+  concept:field-longtext-richtext-not-filterable:
+    kind: field-provenance
+    label: Long Text Area and Rich Text (Html) fields cannot be filtered, sorted, grouped, or indexed
+    summary: 'A LONG TEXT AREA or RICH TEXT (Html) field belongs to a data-type class that Salesforce does NOT index — such a field is not filterable, not sortable, and not groupable, so it cannot appear in a SOQL WHERE / ORDER BY / GROUP BY clause, a list-view filter, or a report filter, and it cannot be marked as an external id or as unique. It can be referenced in a SELECT clause and rendered as body content, but any attempt to filter, sort, group, or index on it is rejected by the platform. This is grounded from the field''s own always-present `dataType` (LongTextArea or Html); it names the STRUCTURAL platform restriction that follows from the field''s type class, NOT whether any specific SOQL query, list view, or report currently references the field (that is a usage question the offline snapshot does not answer here) and NOT the field''s length or stored content. Only the queryability class is asserted, never a proven failure of a particular query.'
+    docs:
+      - label: Salesforce Help — Custom Field Types
+        url: https://help.salesforce.com/s/articleView?id=sf.custom_field_types.htm
+
+  # ARC-2 concept-expansion — duplicate-rule-bypass-sharing-match. ONE NODE rule on
+  # DuplicateRule `securityOption == BypassSharingRules`. `securityOption` is emitted
+  # verbatim by duplicate-rule.ts:601 (derived 540-556, validated against
+  # ALLOWED_SECURITY_OPTIONS = ['EnforceSharingRules','BypassSharingRules'] at 20-23).
+  # Nullable — set only when <securityOption> is present — so equals:BypassSharingRules
+  # is fail-closed / presence-shaped. Same node-scalar-equals shape as
+  # criteria-based-sharing-widens (ruleType). ORTHOGONAL to duplicate-rule-blocks-save
+  # (that keys the Block ACTION on operationsOn*/actionOn*; this keys the sharing-context
+  # bit). ORG-INDEPENDENT — NO vault counts in the summary.
+  concept:duplicate-rule-bypass-sharing-match:
+    kind: access-mechanism
+    label: A duplicate rule set to bypass sharing matches against records the running user cannot see
+    summary: 'A DUPLICATE RULE whose `securityOption` is BYPASS SHARING RULES runs its duplicate-matching query in SYSTEM CONTEXT: it compares an incoming record against records the RUNNING USER cannot see under the org''s sharing model, so a save can be blocked or alerted by a duplicate the user has no visibility into and cannot open to resolve. The alternative, ENFORCE SHARING RULES, restricts matching to records the running user can already access. This is grounded from the rule''s own declared `securityOption` scalar; it names the DECLARED sharing-context posture only. It does NOT assert the rule is active (`isActive`), that any matching records exist, that a particular save would actually surface a hidden duplicate, or which specific records lie outside the user''s visibility — those depend on runtime record data and per-user sharing the offline vault cannot evaluate.'
+    docs:
+      - label: Metadata API Developer Guide — DuplicateRule
+        url: https://developer.salesforce.com/docs/atlas.en-us.api_meta.meta/api_meta/meta_duplicaterule.htm
+
+  # ARC-2 concept-expansion — duplicate-rule-references-inactive-matching-rule. An
+  # AGGREGATE concept, kind `automation-collision` REUSED. Active DuplicateRule
+  # (`isActive == true`) with an outgoing `references` edge to a MatchingRule
+  # endpoint whose `ruleStatus` is NOT Active. componentTypes:[MatchingRule] scopes
+  # the COUNTED endpoint (reason.ts:1961), excluding the co-parented filter-Profile
+  # references that carry no ruleStatus — so a single notIn:[Active] endpoint clause
+  # is safe. Byte-parallel to flow-subflow-inactive-target and structurally to
+  # redundant-sharing-rule-on-public-object (root type differs from endpoint type).
+  # ORG-INDEPENDENT — NO vault counts in the summary.
+  concept:duplicate-rule-references-inactive-matching-rule:
+    kind: automation-collision
+    label: An active duplicate rule that points at an inactive matching rule does no duplicate detection
+    summary: 'A DUPLICATE RULE reuses a MATCHING RULE to decide which records count as duplicates. When an ACTIVE duplicate rule references a matching rule whose ruleStatus is NOT Active (Inactive, Draft, Deactivating, ActivationFailed, and the like), that matcher runs NO comparison — so on that path the duplicate rule detects nothing and duplicate records save SILENTLY, with no alert and no block, even though the duplicate rule itself looks enabled. The honest signal conjoins the duplicate rule''s own `isActive` flag with the `ruleStatus` of each matching rule it references. HONEST BOUNDARIES: this is grounded from declared metadata flags only — it does NOT prove any duplicate records currently exist in the org, does NOT prove a specific save would have been caught had the matcher been active, and does NOT check whether another ACTIVE matching rule on the same duplicate rule still covers the object. It names a silently-disabled detection SHAPE, not a proven missed duplicate.'
+    docs:
+      - label: Salesforce Help — Duplicate Management
+        url: https://help.salesforce.com/s/articleView?id=sf.duplicate_management.htm
+
+  # ARC-2 concept-expansion — approval-process-final-lock-record-readonly. TWO
+  # NODE rules on ONE concept (same two-rule shape as concept:apex-sharing-mode):
+  # componentTypes [ApprovalProcess] + a boolean-equals whereProperty on
+  # `finalApprovalRecordLock` (one rule) and `finalRejectionRecordLock` (the
+  # sibling). Both are UNCONDITIONAL always-present booleans on every
+  # ApprovalProcess node (approval-process.ts:931-936, `coerceBoolean(unwrapSingle(
+  # rootObj['finalApprovalRecordLock']))` / `finalRejectionRecordLock`, entered
+  # unconditionally into node.properties; coerceBoolean defaults false at :167-171)
+  # — the same always-present-boolean-equals shape as
+  # flow-scheduled-path-post-commit-fault (runAsyncAfterCommit). Kind
+  # access-mechanism REUSED from the closed union: this names a record-EDITABILITY
+  # freeze (a lock), DISTINCT from the record-VISIBILITY grant/OWD mechanisms
+  # (view-modify-all, owd-sharing-posture). A node match carries no edge, so
+  # weakest() keeps the declared ceiling. ORG-INDEPENDENT — NO vault counts.
+  concept:approval-process-final-lock-record-readonly:
+    kind: access-mechanism
+    label: An approval process that locks the record on final approval or rejection leaves it read-only until unlocked
+    summary: 'An APPROVAL PROCESS that declares `finalApprovalRecordLock` (or `finalRejectionRecordLock`) as true LOCKS the record when the process reaches final approval (or final rejection): a locked record becomes READ-ONLY to everyone except administrators and users with the "Modify All Data" / "Modify All" permission (plus the approval process''s own unlock step), so once the process completes, later user edits AND automation updates — field writes from a flow, workflow, trigger, or the API — FAIL with an entity-is-locked error unless the record is unlocked first. This matters for save-order and automation reasoning: a downstream flow or trigger that tries to update a just-approved (or just-rejected) record can silently fail on the lock. This is grounded from the approval process''s own always-present `finalApprovalRecordLock` / `finalRejectionRecordLock` booleans; it names the DECLARED lock behavior, NOT whether any specific record is currently locked (which records have entered or completed the process is record-level runtime state the offline vault does not hold), NOT which specific users can still edit it (permission-holder membership is not evaluated here), and NOT whether any automation actually attempts a post-lock update. Only an approval process whose final-approval or final-rejection step locks the record contributes this freeze.'
+    docs:
+      - label: Salesforce Help — Considerations for Approvals (record locking)
+        url: https://help.salesforce.com/s/articleView?id=sf.approvals_considerations.htm
+
+  # ARC-2 concept-expansion — record-type-inactive. ONE NODE rule on
+  # RecordType `active == false` — the RecordType analogue of
+  # validation-rule-inactive. `active` is a required boolean on every
+  # RecordType node (record-type.ts REQUIRED_ELEMENTS line 19, coerced at
+  # line 211, emitted in node.properties line 264 — always populated). A node
+  # match carries no edge, so weakest() keeps the declared ceiling. Kind is
+  # access-mechanism: a record type is a layout / picklist / business-process
+  # ROUTING mechanism, not a save-order firer.
+  # ORG-INDEPENDENT — NO vault counts in the summary.
+  concept:record-type-inactive:
+    kind: access-mechanism
+    label: An inactive record type cannot be assigned to new records and is hidden from record-type selection
+    summary: 'A RECORD TYPE whose `active` flag is FALSE is a DEAD routing mechanism: it cannot be assigned to new records and is hidden from users'' record-type selection, so it routes NONE of its page layout, picklist value set, or business process to new work until an admin re-activates it. Only pre-existing records keep it. It must be EXCLUDED from "which record type will new records get", default-routing, and layout / picklist-scope reasoning about new work — treating a deactivated record type as a live routing option would misattribute a layout, restricted picklist, or business process that new records can never receive, while assuming it still governs selection would overstate the choices a user is offered. This is grounded from the record type''s own always-present `active` boolean; it names the non-assignable STRUCTURAL fact, NOT whether any existing records still carry this record type (that is record-level data, not modeled offline), NOT which profiles or permission sets once defaulted to or were granted it (assignment is separate metadata), and NOT why it was deactivated. Only active record types belong in new-record routing surfaces.'
+    docs:
+      - label: Salesforce Help — Create Record Types
+        url: https://help.salesforce.com/s/articleView?id=sf.customize_recordtype.htm
+
+
+  # ARC-2 concept-expansion — remote-site-setting-protocol-security-disabled. ONE
+  # NODE rule on RemoteSiteSetting with disableProtocolSecurity == true AND
+  # isActive == true. Both flags are required, always-present booleans on every
+  # RemoteSiteSetting node (remote-site-setting.ts REQUIRED_ELEMENTS ['url',
+  # 'isActive', 'disableProtocolSecurity']; :177-180 populate them via
+  # coerceBoolean, default false). A node match carries no edge, so weakest()
+  # keeps the declared ceiling. ORG-INDEPENDENT — NO vault counts in the summary.
+  concept:remote-site-setting-protocol-security-disabled:
+    kind: external-api-surface
+    severity: high
+    label: A remote site setting that disables protocol security allows cleartext HTTP callouts to its allowlisted host
+    summary: 'An ACTIVE remote site setting whose disableProtocolSecurity flag is TRUE drops the platform''s HTTPS-only guard on outbound callouts to its allowlisted host: it permits cleartext HTTP requests to that endpoint, so request URLs, headers, and bodies — potentially including session ids, tokens, or credentials carried in the request — travel unencrypted and are exposed to network interception and tampering. This is grounded from the setting''s own always-present disableProtocolSecurity and isActive booleans; it names the declared configuration POSTURE, NOT whether any Apex, Flow, or LWC actually issues an insecure callout to this host at runtime (the offline vault does not correlate outbound-callout code to allowlist entries), NOT a confirmed interception or breach, and NOT whether a plaintext endpoint is a deliberate, accepted design choice. The modern replacement is a Named Credential over HTTPS; re-enabling protocol security restores the encrypted-only guard unless a cleartext endpoint is genuinely required.'
+    docs:
+      - label: Salesforce Help — Configure Remote Site Settings
+        url: https://help.salesforce.com/s/articleView?id=sf.configuring_remoteproxy.htm
+      - label: Apex Developer Guide — Invoking Callouts Using Apex
+        url: https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_callouts.htm
+
+  # ARC-2 — apex-intentional-system-mode-dml. kind `access-mechanism` (existing
+  # closed-union kind, REUSED — the same kind concept:apex-crud-fls-unenforced
+  # carries; this is the object-CRUD / field-level-security PLANE, an access
+  # mechanism, NOT a code-quality-defect). Byte-identical rule shape to
+  # swallowed-exception: an `anyElement {key: rule, equals:
+  # intentional-system-mode-dml}` existential over the ApexClass always-present
+  # `qualityIssues` array. GROUNDING CONFIRMED: the recognizer emits
+  # `rule: 'intentional-system-mode-dml'` (severity `info`, confidence `heuristic`)
+  # when `AccessLevel.SYSTEM_MODE` appears in a Database.* DML arg list
+  # (code-quality-patterns.ts:915-930 — reclassified AWAY from missing-crud-check
+  # at that call site); qualityIssues is unconditionally present on ApexClass
+  # (apex-class.ts:326 detectCodeQualityIssues + :357 in baseProperties, empty
+  # array on the clean path). This binds the DELIBERATE opt-out — the intentional
+  # counterpart to the ACCIDENTAL omission apex-crud-fls-unenforced binds
+  # (missing-crud-check / missing-fls-check) — so the two do NOT double-claim.
+  # `maxConfidence: heuristic` (qualityIssues elements are heuristic; a node match
+  # carries no edge, so weakest() keeps the heuristic ceiling). ORG-INDEPENDENT
+  # general Salesforce truth only — NO vault counts in the summary.
+  concept:apex-intentional-system-mode-dml:
+    kind: access-mechanism
+    label: An Apex class runs DML with an explicit AccessLevel.SYSTEM_MODE argument — a deliberate object-CRUD / field-level-security bypass for that write
+    summary: 'An Apex class runs a DML operation (a Database.insert / update / upsert / delete and its siblings) with an EXPLICIT AccessLevel.SYSTEM_MODE argument. Apex runs in system context and does NOT automatically enforce the running user''s object CRUD or field-level security on its DML; passing AccessLevel.SYSTEM_MODE makes that non-enforcement DELIBERATE and explicit for this write — the developer consciously chose to run the write in system context, so object- and field-level security are intentionally NOT applied and the write can create or change objects and fields regardless of whether the running user is permitted to. This is the CONSCIOUS counterpart to an accidental missing CRUD/FLS check: the recognizer surfaces it as a REVIEW finding rather than a defect, because a deliberate SYSTEM_MODE bypass is often exactly correct (a trusted service that must write fields the running user cannot edit), and adding an isUpdateable()-style guard the write deliberately bypasses would be the wrong fix. The remediation, IF the running user''s permissions SHOULD apply to this write, is to switch the argument to AccessLevel.USER_MODE. HONEST BOUNDARIES: this is a HEURISTIC recognition from TOKENIZED Apex source — NOT a compiler AST — bound to the DML call site where the SYSTEM_MODE token appears; it names the DECLARED system-context bypass, NOT a proof that the bypass is unsafe or unintended (a deliberate SYSTEM_MODE write may be entirely right), and record-level SHARING is a SEPARATE access plane this does not read. It marks a write to REVIEW, not a proven authorization defect.'
+    docs:
+      - label: Apex Developer Guide — Enforce User-Mode Database Operations (AccessLevel)
+        url: https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_classes_perms_enforcing.htm
+
+  # ARC-2 concept-expansion — dataraptor-field-security-unenforced. ONE NODE rule
+  # on OmniDataTransform `fieldLevelSecurityEnabled == false`. The DataRaptor
+  # analogue of apex-crud-fls-unenforced, but DECLARED (a designer config toggle),
+  # not tokenized-Apex heuristic. `fieldLevelSecurityEnabled` is an always-present
+  # coerced boolean on every OmniDataTransform node
+  # (omni-data-transform.ts:422-424, inside the unconditional properties block).
+  # A node match carries no edge, so weakest() keeps the declared ceiling.
+  # Kind access-mechanism — it names an over-permissive data-access surface.
+  # ORG-INDEPENDENT — NO vault counts, NO canonical ids in the summary.
+  concept:dataraptor-field-security-unenforced:
+    kind: access-mechanism
+    severity: high
+    label: A DataRaptor with Check Field Level Security off reads or writes SObject fields without enforcing the running user's FLS
+    summary: 'A DataRaptor (an OmniStudio OmniDataTransform) whose ''Check Field Level Security'' toggle is OFF reads and writes SObject fields WITHOUT enforcing the running user''s field-level security: the transform can load a field the user has no Read access to into an output payload, or overwrite a field the user has no Edit access to, because FLS is not consulted on the fields it touches. This is an OVER-PERMISSIVE data-access surface — an FLS-bypass shape that widens what data can flow through the transform beyond what the invoking user could reach through a normal UI or FLS-respecting API. HONEST BOUNDARY — this is a DECLARED configuration shape read from the transform''s own toggle, NOT a proven exploit: it does NOT establish that any specific field is actually over-exposed (that depends on which fields the transform maps and each running user''s actual FLS), NOT who invokes the transform or in what user context, and NOT whether a compensating guard (a wrapping Apex class enforcing security, a restricted entry point, or a guest-user profile with no access) neutralizes the gap at runtime. It names the field-security-unenforced structural signal, not a confirmed data leak.'
+    docs:
+      - label: Salesforce Help — DataRaptor Loads and Field-Level Security
+        url: https://help.salesforce.com/s/articleView?id=sf.os_dataraptor_loads.htm
+      - label: Salesforce Help — Enforce Field-Level Security in DataRaptors
+        url: https://help.salesforce.com/s/articleView?id=sf.os_secure_dataraptors.htm
