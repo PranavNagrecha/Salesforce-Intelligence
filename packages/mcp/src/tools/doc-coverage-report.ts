@@ -27,12 +27,19 @@
  * builds the honesty spine.
  *
  * HONESTY SPINE (this is the load-bearing part — "not measurable" ≠ "undocumented"):
- *   - **A node type whose description the extractor does NOT capture is NOT
- *     MEASURABLE and is EXCLUDED from the undocumented count** — never counted
- *     as a gap. This tool measures ONLY the families whose extractor captures a
- *     source `<description>` (CustomObject, CustomField) / `<inlineHelpText>`
- *     (CustomField). An un-retrieved or un-modeled type reads as NOT MEASURABLE,
- *     never "undocumented". The measurable-vs-not-measurable scope is disclosed.
+ *   - **This version deliberately SCOPES the gap to two families** —
+ *     CustomObject `<description>` and CustomField `<description>` /
+ *     `<inlineHelpText>`. Other description-bearing families (Flow,
+ *     ValidationRule, PermissionSet, RecordType, ReportType, Role, …) DO carry
+ *     captured descriptions in the vault but are OUT OF SCOPE for this version —
+ *     a deliberate scope choice, NOT a claim that their description is
+ *     uncaptured — so their real doc gaps are simply not measured here
+ *     (extending the scanned set to them is a future enhancement).
+ *   - **SEPARATELY and genuinely, a family the extractor does NOT capture a
+ *     description for, or that the refresh did not retrieve, is NOT MEASURABLE**
+ *     and is excluded (the coverage floor). Either way a not-measurable node is
+ *     NEVER counted as a gap, never read as "undocumented"; the scope is
+ *     disclosed.
  *   - **Scoped to what the ORG owns.** The undocumented count covers CUSTOM,
  *     non-managed components (`__c`/`__mdt`/… fields + custom objects the org
  *     authored). Standard fields (Salesforce-provided help / no extractable
@@ -71,11 +78,14 @@ import { clampedNodeScanLimit, scanTruncationNote } from './scan-cap.js';
 // ---------------------------------------------------------------------------
 
 /**
- * The metadata families this report can MEASURE for documentation, because
- * their extractor captures a source `<description>` into `node.properties`
- * (CustomObject, CustomField) and `<inlineHelpText>` (CustomField). ANY other
- * family is NOT MEASURABLE — excluded from the undocumented count, never
- * counted as a gap.
+ * The metadata families this version SCOPES the documentation gap to. Both
+ * carry a captured source `<description>` in `node.properties` (and CustomField
+ * also `<inlineHelpText>`). This is a deliberate SCOPE choice, NOT the full set
+ * of description-bearing families: Flow / ValidationRule / PermissionSet /
+ * RecordType / ReportType / Role also carry captured descriptions in the vault
+ * but are OUT OF SCOPE for this version (extending this list to them is a future
+ * enhancement — see the disclosure). A family this tool does not scan is simply
+ * NOT MEASURED here, never counted as a gap.
  */
 const MEASURED_TYPES: readonly ComponentType[] = ['CustomObject', 'CustomField'];
 
@@ -106,7 +116,7 @@ const DOC_COVERAGE_PAGE_NOTE =
 // ---------------------------------------------------------------------------
 
 const MEASURABLE_SCOPE_DISCLOSURE =
-  '"Not measurable" ≠ "undocumented". This report measures ONLY the families whose extractor captures a source `<description>` (CustomObject, CustomField) or `<inlineHelpText>` (CustomField). A metadata type whose description is not captured — or a family the refresh did not retrieve — is NOT MEASURABLE and is EXCLUDED from the undocumented count, never counted as a gap. Objects carry no inline help text, so they are NOT MEASURABLE on the help-text axis.';
+  '"Not measurable" ≠ "undocumented". SCOPE (a deliberate choice this version makes): the documentation gap is measured for TWO families only — CustomObject `<description>` and CustomField `<description>` / `<inlineHelpText>`. Other description-bearing families — Flow, ValidationRule, PermissionSet, RecordType, ReportType, Role — DO carry captured descriptions in the vault, but are OUT OF SCOPE for this version; their real doc gaps are simply not measured here (this is a scope decision, NOT a claim that their description is uncaptured — extending the scanned set to them is a future enhancement). SEPARATELY and genuinely: a family whose description the extractor does NOT capture, or that the refresh did not retrieve, is NOT MEASURABLE and is excluded (see the coverage-floor disclosure). Either way a not-measurable node is never counted as a gap. Objects carry no inline help text, so they are not measurable on the help-text axis.';
 
 const CUSTOM_VS_STANDARD_DISCLOSURE =
   'Scoped to what the ORG owns. The undocumented count covers CUSTOM, non-managed components the org authored: custom fields (`__c`) and custom objects (`__c`/`__mdt`/`__e`/`__b`/`__x`). Standard fields (which often carry Salesforce-provided help or no extractable description the org controls) and managed-package (`ns__…`) components are reported SEPARATELY as out-of-scope (`outOfScopeCount`) and are never counted against the org.';
