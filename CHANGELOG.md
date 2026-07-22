@@ -5,7 +5,7 @@ adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
-## [0.3.0] — 2026-07-22
+## [0.2.2] — 2026-07-22
 
 > **Concept-model expansion + grow-forever funnel routing.** The org-independent
 > Concept Model behind `sfi.interpret` grows from **94 concepts / 143 rules** to

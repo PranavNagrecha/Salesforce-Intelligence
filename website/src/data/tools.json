@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-07-18T18:25:06.079Z",
+  "generatedAt": "2026-07-22T15:47:21.325Z",
   "toolCount": 203,
   "sections": [
     {
@@ -137,7 +137,7 @@
         },
         {
           "name": "sfi.interpret",
-          "description": "Deterministic, offline reasoning: joins your grounded org graph against a curated, org-independent Concept Model (94 concepts / 143 rules) to answer what a component structurally IMPLIES - cascade deletes, junction objects, undefined flow order - as cited, confidence-tiered claims. No LLM, no live call."
+          "description": "WHEN to reach for this: the user asks what a component structurally IMPLIES, or the CONSEQUENCES of a design - 'what happens to child records if I delete this par..."
         },
         {
           "name": "sfi.explain_error",

@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-07-18T18:25:06.079Z",
-  "version": "0.2.1",
+  "generatedAt": "2026-07-22T15:47:21.325Z",
+  "version": "0.2.2",
   "toolCount": 203,
   "skillCount": 25,
   "commandCount": 4,
@@ -10,8 +10,8 @@
     "packages": [
       {
         "name": "mcp",
-        "files": 257,
-        "cases": 4902
+        "files": 262,
+        "cases": 5296
       },
       {
         "name": "extractors",
@@ -21,12 +21,12 @@
       {
         "name": "cli",
         "files": 44,
-        "cases": 443
+        "cases": 445
       },
       {
         "name": "graph",
         "files": 25,
-        "cases": 304
+        "cases": 306
       },
       {
         "name": "parsers",
@@ -59,10 +59,10 @@
         "cases": 40
       }
     ],
-    "totalCases": 7396,
-    "totalFiles": 441,
+    "totalCases": 7794,
+    "totalFiles": 446,
     "packageCount": 10,
-    "approx": 7300
+    "approx": 7700
   },
   "integrationSuiteCount": 3,
   "gates": [
@@ -87,8 +87,8 @@
   "packageDescriptions": [
     {
       "name": "mcp",
-      "files": 257,
-      "cases": 4902,
+      "files": 262,
+      "cases": 5296,
       "description": "The 203 read-only tools + router + grounding layer"
     },
     {
@@ -100,13 +100,13 @@
     {
       "name": "cli",
       "files": 44,
-      "cases": 443,
+      "cases": 445,
       "description": "The sfi command-line tool"
     },
     {
       "name": "graph",
       "files": 25,
-      "cases": 304,
+      "cases": 306,
       "description": "The DuckDB dependency-graph engine"
     },
     {
