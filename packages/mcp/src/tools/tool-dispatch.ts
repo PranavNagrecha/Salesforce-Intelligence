@@ -302,6 +302,10 @@ import {
   generateFleetReportInputSchema,
 } from './fleet-report.js';
 import {
+  flowBulkificationAuditHandler,
+  flowBulkificationAuditInputSchema,
+} from './flow-bulkification-audit.js';
+import {
   flowFaultAuditHandler,
   flowFaultAuditInputSchema,
 } from './flow-fault-audit.js';
@@ -1391,6 +1395,13 @@ export const dispatchTool = async (
         args,
         flowFaultAuditInputSchema,
         flowFaultAuditHandler,
+      );
+    case 'sfi.flow_bulkification_audit':
+      return runTool(
+        ctx,
+        args,
+        flowBulkificationAuditInputSchema,
+        flowBulkificationAuditHandler,
       );
     case 'sfi.flow_graph':
       return runTool(ctx, args, flowGraphInputSchema, flowGraphHandler);
