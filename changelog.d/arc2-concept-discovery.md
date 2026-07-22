@@ -32,16 +32,3 @@
     fields without enforcing the running user's FLS.
   Deterministic and offline throughout — cited `groundedIn`, confidence-tiered claims, no
   LLM, no live org read. Each ships with a firing `interpret()` seed proof.
-
-### Notes
-- **All eight concepts are NL-reachable via the grow-forever funnel** (see the
-  companion `sfi.interpret` per-concept-card change). These concepts were first shipped
-  *model-integrated only*, because the `sfi.interpret` funnel document was saturated —
-  adding natural-language utterances the old way regressed existing borderline concepts
-  (permission-set-group muting, dependent-picklist orphaned value, trigger-reachable
-  bulkification) out of the funnel top-5. The funnel engine change removes that ceiling:
-  each concept is now scored as its own independent card, so all eight rank `sfi.interpret`
-  in the top-5 for their natural questions **without** moving any existing concept.
-  Two discovery candidates (`permission-set-license-scoped`,
-  `session-based-permission-set-dormant`) remain dropped: their query space is fully owned
-  by permission-set specialist tools.

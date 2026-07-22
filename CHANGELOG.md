@@ -5,6 +5,182 @@ adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-22
+
+> **Concept-model expansion + grow-forever funnel routing.** The org-independent
+> Concept Model behind `sfi.interpret` grows from **94 concepts / 143 rules** to
+> **142 concepts / 193 rules** (+48 concepts / +50 rules) — every addition grounded
+> against an already-extracted metadata property or edge, each with a firing
+> `interpret()` seed proof, all curated general-Salesforce truth joined at query time
+> against the grounded vault slice (no org data in the model). The semantic funnel is
+> reworked so `sfi.interpret` is scored as the **maximum over a base card plus one
+> independent per-concept card**, removing the single-document saturation ceiling:
+> adding a reasoning concept no longer dilutes existing ones, so the model can grow
+> without bound while every prior query keeps its exact rank. Deterministic and offline
+> throughout — no LLM, no live org read, no new dependency, no package-weight change.
+
+### Added
+- **Reasoning model — eight new offline concepts (96 → 104 concepts, 145 → 154 rules).**
+  A parallel discovery pass surfaced, and this change ships, eight additional
+  org-independent structural-implication concepts behind `sfi.interpret`, each grounded
+  on an already-extracted node/edge property with no new engine primitive and no
+  extraction change:
+  - **`concept:duplicate-rule-bypass-sharing-match`** — a duplicate rule whose
+    `securityOption` is `BypassSharingRules` runs its matching in system context,
+    comparing an incoming record against records the running user cannot see.
+  - **`concept:duplicate-rule-references-inactive-matching-rule`** — an active duplicate
+    rule that references a matching rule whose `ruleStatus` is not `Active` performs no
+    detection on that matcher: dead duplicate protection that silently lets duplicates save.
+  - **`concept:approval-process-final-lock-record-readonly`** — an approval process with
+    `finalApprovalRecordLock` / `finalRejectionRecordLock` leaves the record locked
+    read-only after it completes, so later user edits and automation updates fail until
+    it is unlocked.
+  - **`concept:record-type-inactive`** — a record type with `active=false` is not
+    assignable to new records; excluded from layout / business-process routing reasoning.
+  - **`concept:remote-site-setting-protocol-security-disabled`** — a remote site setting
+    with `disableProtocolSecurity=true` permits non-HTTPS outbound callouts to its host
+    (`isActive` gates whether it applies at all).
+  - **`concept:apex-intentional-system-mode-dml`** — Apex DML issued with an explicit
+    `AccessLevel.SYSTEM_MODE` argument *deliberately* opts out of the running user's object
+    CRUD and field-level security for that write. Surfaced as a review surface, honestly
+    NOT a proven defect (a system-context write is often correct); heuristic, from
+    tokenized source.
+  - **`concept:field-longtext-richtext-not-filterable`** — Long Text Area and Rich Text
+    (`Html`) fields cannot appear in a SOQL `WHERE` / `ORDER BY` / `GROUP BY`, a list-view
+    or report filter, and cannot be an external id or unique field.
+  - **`concept:dataraptor-field-security-unenforced`** — a DataRaptor
+    (`OmniDataTransform`) with `fieldLevelSecurityEnabled=false` reads/writes SObject
+    fields without enforcing the running user's FLS.
+  Deterministic and offline throughout — cited `groundedIn`, confidence-tiered claims, no
+  LLM, no live org read. Each ships with a firing `interpret()` seed proof.
+- **Reasoning model — two new offline concepts (94 → 96 concepts, 143 → 145 rules).**
+  `sfi.interpret` now recognizes two additional org-independent structural-implication
+  concepts, each grounded against already-extracted metadata with no new engine primitive:
+  - **`concept:validation-rule-inactive`** — a validation rule whose `active` flag is false
+    never evaluates its error-condition formula, so it can neither block a save nor surface
+    its message; it is excluded from save-order / save-failure reasoning and required-field
+    gate counts. Names the non-enforcing structural fact only (the formula is not evaluated
+    offline).
+  - **`concept:workflow-rule-inactive-dead`** — an inactive workflow rule is dead legacy
+    automation whose field updates, alerts, outbound messages, and time-dependent actions
+    never run; it is excluded from save-order and automation-impact counts. Does not claim a
+    Flow has replaced it (migration lineage is org-specific).
+  Deterministic and offline throughout — cited `groundedIn`, confidence-tiered claims (all
+  `declared`), no LLM, no live org read. Each ships with a firing `interpret()` proof and
+  natural-language funnel hooks so the concepts are reachable from `sfi.interpret`'s top-5.
+- **Reasoning model — five more offline concepts (104 → 109 concepts, 154 → 159 rules),
+  all NL-reachable via the grow-forever funnel.** Each grounds on an already-extracted
+  property with no new engine primitive, ships a firing `interpret()` seed proof, and gets
+  its own funnel card so it ranks `sfi.interpret` top-5 for its natural questions without
+  diluting any existing concept:
+  - **`concept:field-classic-encrypted-text`** — a classic Encrypted Text field is masked
+    for users without "View Encrypted Data" and is not filterable/sortable/groupable, nor an
+    external id / unique / formula input (distinct from Shield Platform Encryption).
+  - **`concept:field-autonumber-system-assigned-readonly`** — an Auto Number field is
+    system-assigned at insert, read-only on every write path, null in before-save context,
+    and stored as a formatted string.
+  - **`concept:field-multiselect-picklist-storage-semantics`** — a multi-select picklist
+    stores selections as one semicolon-delimited string, so SOQL/reports must use
+    INCLUDES/EXCLUDES (not `=`/`IN`) and it cannot be a dependency controlling field.
+  - **`concept:permission-set-license-scoped`** — a permission set bound to a specific user
+    license is only assignable to users who hold that license.
+  - **`concept:session-based-permission-set-dormant`** — a session-based permission set
+    grants none of its permissions until it is session-activated; its grants are dormant
+    otherwise.
+  The last two were shipped-then-dropped earlier this cycle as funnel-losers (their query
+  space is shared with permission-set specialist tools); the grow-forever per-concept-card
+  funnel makes them independently reachable, so they are revived. Deterministic and offline
+  throughout — cited `groundedIn`, confidence-tiered claims, no LLM, no live org read.
+- **Reasoning model — fourteen more offline concepts (109 → 123 concepts, 159 → 174
+  rules), all NL-reachable via the grow-forever funnel.** A parallel design pass (one
+  grounding-verifier agent per candidate) produced these; each grounds on an
+  already-extracted property/edge with no new engine primitive, ships a firing
+  `interpret()` seed proof, and gets its own funnel card:
+  - **`field-restricted-global-value-set`** — a picklist bound to a global value set marked
+    `restricted` is a closed vocabulary (out-of-set writes rejected; edits ripple to every
+    consumer).
+  - **`field-picklist-has-retired-values`** — a picklist retaining deactivated
+    (`isActive=false`) values keeps them on existing records though they are no longer
+    selectable.
+  - **`approval-process-inactive-dead`** — an inactive approval process cannot be submitted to.
+  - **`escalation-rule-time-deferred`** — an active escalation rule's actions fire from a
+    background time-based process, not synchronously on save.
+  - **`auto-response-rule-first-match-starvation`** — a catch-all auto-response entry ordered
+    before specific entries starves them (first-match).
+  - **`record-type-business-process-binding`** — a record type naming a business process
+    constrains the stage/status picklist for its records.
+  - **`apex-dynamic-reflective-surface`** — dynamic/reflective Apex (dynamic SOQL, describe
+    reflection) is an analysis blind spot and injection surface (heuristic).
+  - **`named-credential-merge-fields-injectable`** — a named credential allowing merge fields
+    in header/body can interpolate record/user data into outbound requests.
+  - **`connected-app-saml-sso-federation`** — a SAML-protocol connected app is an inbound SSO
+    federation trust surface.
+  - **`apex-fake-assertion-test`** — a test with tautological assertions inflates coverage
+    without verifying behavior (heuristic).
+  - **`entitlement-process-inactive`** — an inactive entitlement process applies no SLA
+    milestones to new entitlements.
+  - **`omnistudio-inactive-component-version`** — only the active version of a versioned
+    OmniStudio component is invoked at runtime.
+  - **`required-field-absent-from-all-layouts`** — a required field on no page layout cannot
+    be supplied through the UI, so UI inserts fail (absence-shaped).
+  - **`dataraptor-errors-ignored`** — a DataRaptor with Ignore Errors continues past
+    row-level failures rather than aborting.
+  Grounding for every concept was independently verified against the extractor source before
+  integration. Deterministic and offline — cited `groundedIn`, confidence-tiered claims, no
+  LLM, no live org read.
+- **Reasoning model — nineteen more offline concepts (123 → 142 concepts, 174 → 193
+  rules), completing the concept-model build-out.** A parallel mining pass (one agent per
+  extractor family) surfaced these by finding EMITTED node/edge properties that no concept
+  bound yet; each grounds on a verified-emitted property, ships a firing `interpret()` seed
+  proof, and is NL-reachable via its grow-forever funnel card. By family:
+  - **Fields / objects** — `object-deployment-status-in-development` (In Development objects
+    hidden without Customize Application), `object-autonumber-name-field` (auto-numbered
+    record Name), `global-value-set-has-inactive-value` / `standard-value-set-has-inactive-value`
+    (deactivated values retained on records).
+  - **Apex** — `apex-test-hardcoded-sandbox-data` (tests bound to sandbox-specific data).
+  - **Sharing** — `restriction-rule-inactive` (inactive restriction rule enforces nothing).
+  - **Automation** — `approval-process-pending-lock-editability` (who can edit a
+    pending-approval record), `approval-process-recall-unlocks-record`.
+  - **Integration / async** — `auth-provider-registration-handler-apex-hook` (SSO JIT
+    provisioning runs Apex), `platform-event-channel-member-filtered-stream` (channel
+    filter narrows the delivered stream), `external-service-registration-incomplete`,
+    `named-credential-per-user-principal` (per-user external identity).
+  - **OmniStudio** — `omnistudio-test-procedure-scope`, `dataraptor-load-fires-assignment-rules`,
+    `omnistudio-metadata-cache-disabled`.
+  - **Misc metadata** — `static-resource-public-cache-control-exposure` (public cache =
+    session-less readable), `custom-metadata-record-protected-namespace-scoped`,
+    `email-template-unavailable-hidden`, `group-role-subordinates-transitive-membership`.
+  Grounding for every concept was independently verified against the extractor source; one
+  mined candidate (`permission-set-group-recalculation-stale`) was **rejected** because its
+  recalculation status is a runtime property no extractor emits offline — not shipped rather
+  than phantom-grounded. Deterministic and offline throughout.
+
+### Changed
+- **Grow-forever funnel routing for `sfi.interpret` (per-concept cards).** The semantic
+  funnel scored each tool as one TF-IDF document, so every reasoning concept's utterances
+  piled onto a single `sfi.interpret` document. Under length normalization that document
+  saturated: adding utterances for a new concept diluted every term and pushed existing
+  borderline concepts out of the funnel top-5, capping how many reasoning concepts could be
+  natural-language-reachable. `sfi.interpret` is now scored as the **maximum** over its
+  base document plus one small, independent **card per concept**
+  (`INTERPRET_CONCEPT_CARDS` in `funnel-utterances.ts`). Each card is vectorized on its own
+  length, so:
+  - **Adding a concept never dilutes another** — the model can grow without bound. A new
+    reasoning concept becomes NL-reachable by adding one key to `INTERPRET_CONCEPT_CARDS`;
+    the flat `sfi.interpret` utterance list is no longer the growth surface.
+  - **Existing routing is unchanged** — the base card is byte-identical to the prior
+    `sfi.interpret` document and the IDF corpus is untouched, so every other tool's ranking
+    and every previously-passing `sfi.interpret` query score exactly as before (a max only
+    lifts). Verified: the three borderline concepts that used to regress
+    (permission-set-group muting, dependent-picklist orphaned value, trigger-reachable
+    bulkification) hold their exact top-5 rank.
+  - The eight `arc2-concept-discovery` concepts, previously model-only, now rank
+    `sfi.interpret` in the top-5 for their natural questions. Guarded by a new grow-forever
+    invariant test (`semantic-funnel.test.ts`) that asserts every concept card is
+    independently reachable and that cards do not displace specialist tools on unrelated
+    queries. Deterministic and offline throughout — no new dependency, no package-weight
+    change.
+
 ## [0.2.1] — 2026-07-20
 
 > **Reasoning-model deepening + two lossless Flow tools.** The org-independent
